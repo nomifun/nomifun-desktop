@@ -1,6 +1,6 @@
 {
   "title": "Agent 工作台",
-  "subtitle": "设计 Agent 的身份、模型与能力边界，并在保存前试用。",
+  "subtitle": "配置和管理你的 Agent，让能力更贴合工作。",
   "loading": "正在加载 Agent 工作台…",
   "loadingEditor": "正在加载所选 Agent…",
   "freshStart": {
@@ -10,13 +10,13 @@
   "actions": {
     "create": "新建",
     "delete": "删除",
-    "fork": "Fork",
+    "fork": "自定义预设",
     "remove": "移除",
     "retry": "重试",
-    "preview": "Preview",
-    "test": "Test",
+    "preview": "检查配置",
+    "test": "试用 Agent",
     "startConversation": "使用 Agent",
-    "saveRevision": "保存 Revision"
+    "saveRevision": "保存配置"
   },
   "defaults": {
     "untitledName": "未命名 Agent",
@@ -38,67 +38,67 @@
     "deleteAria": "删除 Agent“{{name}}”"
   },
   "template": {
-    "readOnly": "官方只读模板",
-    "capabilityHint": "模板明确列出启动即用和可按需申请的能力。Fork 后可调整能力边界。",
+    "readOnly": "官方预设",
+    "capabilityHint": "按你的需要增减能力。保存后会成为你的 Agent，官方预设保持可随时使用。",
     "hostUnavailable": "该模板包含当前 Nomi-core 主机不可用的能力。真实 owner 可用前不会允许 Fork。",
     "zeroToolTitle": "精确零工具 Profile",
     "zeroToolBody": "不会构造 Capability、Skill、MCP、Workspace、Coding Context 或隐藏的能力搜索。",
     "chat": {
       "minimal": {
         "name": "最简问答",
-        "description": "没有工具或隐藏能力初始化的最轻普通会话 Profile。"
+        "description": "适合简短交流，可以随时添加所需能力。"
       }
     },
     "assistant": {
       "general": {
         "name": "通用助理",
-        "description": "覆盖附件、Knowledge、项目记忆、文件和 Web 调研的通用助理。"
+        "description": "查阅资料、整理信息，协助处理日常事务。"
       }
     },
     "coding": {
       "codex": {
         "name": "Codex Coding",
-        "description": "完整 Codex-native Workspace、文件、Shell、进程、VCS、Skills、MCP、Review 和多 Agent 能力面。"
+        "description": "适合代码阅读、项目修改和开发任务，工具范围由你决定。"
       }
     },
     "companion": {
       "default": {
         "name": "伙伴",
-        "description": "覆盖 Persona、伙伴记忆、Knowledge、学习演进与 IM 连接工作流。"
+        "description": "为日常陪伴配置角色、记忆与沟通能力。"
       }
     },
     "robot": {
       "default": {
         "name": "机器人",
-        "description": "覆盖设备连接、音频、显示、感知、运动、伙伴 Context 与 Knowledge。"
+        "description": "为设备交互选择感知、沟通与动作能力。"
       }
     },
     "customerService": {
       "default": {
         "name": "客户服务",
-        "description": "覆盖客户对话、笔记、Knowledge、Channel 收发回复与转接。"
+        "description": "整合知识查询、沟通和客户记录，适配服务工作。"
       }
     },
     "creativeStudio": {
       "default": {
         "name": "创意工坊",
-        "description": "覆盖 Canvas、素材、模板、Director、生成模型和 MiniApp 工作流。"
+        "description": "按创作需求组合素材、内容生成与小程序相关能力。"
       }
     }
   },
   "sections": {
-    "basic": "身份与模型",
-    "basicHint": "命名 Agent，选择 Chat 模型，并编写稳定的 Persona 与 Instructions。",
-    "capabilities": "能力",
-    "capabilitiesHint": "为每项能力选择关闭、启动即用或可按需申请。这里声明能力边界，不绑定具体资源。",
-    "skillsMcp": "Skills 与 MCP",
+    "basic": "基本设置",
+    "basicHint": "定义身份、模型和工作方式",
+    "capabilities": "能力配置",
+    "capabilitiesHint": "只展示当前已配置的能力",
+    "skillsMcp": "技能与扩展",
     "skillsMcpHint": "Skill 只贡献 Instructions；MCP Tool 通过可用的能力进入这个 Agent。",
     "skills": "Skills",
     "mcp": "MCP 物化",
-    "previewInspector": "Preview 与 Inspector",
-    "previewInspectorHint": "解析 exact initial/on-demand ceiling、Tool/Context 投影、资源、RuntimeProfile 与 Revision diff。",
-    "test": "使用真实 Session 测试",
-    "testHint": "Dirty draft 先保存普通不可变 Revision；clean draft 复用当前 Revision。"
+    "previewInspector": "配置诊断",
+    "previewInspectorHint": "配置诊断与版本信息",
+    "test": "试用与检查",
+    "testHint": "试用会先保存当前配置，再开启真实会话。"
   },
   "fields": {
     "name": "名称",
@@ -107,25 +107,25 @@
     "chatModelRoutePlaceholder": "Exact model route ID",
     "chatModelRouteRecord": "Chat 路由记录",
     "chatModelRouteRecordPlaceholder": "Canonical Chat 路由 JSON",
-    "chatModelRouteUnavailable": "当前主机没有提供可用的 Chat 模型。选择模型后才能保存或测试。",
-    "persona": "Persona",
-    "instructions": "Instructions"
+    "chatModelRouteUnavailable": "先配置一个可用的聊天模型，再保存或试用 Agent。",
+    "persona": "角色定位",
+    "instructions": "工作要求"
   },
   "status": {
-    "dirty": "未保存 Draft",
-    "saved": "已保存 Revision",
+    "dirty": "未保存",
+    "saved": "已保存",
     "currentRevision": "当前不可变 Revision {{revision}}",
     "noRevision": "该 Draft 尚无已保存 Revision。",
     "boundTargets": "{{count}} 个已绑定目标",
-    "unsavedChanges": "该 Draft 已变化，保存或测试前会重新 Preview。",
+    "unsavedChanges": "有未保存的修改。保存后会应用到新会话。",
     "revisionImmutable": "已保存 Revision 不可变；继续编辑会创建下一个 Revision。"
   },
   "capabilities": {
     "search": "搜索能力和来源 Package",
     "initial": "启动即用",
-    "onDemand": "可按需申请",
+    "onDemand": "按需启用",
     "initialShort": "启动即用",
-    "onDemandShort": "按需申请",
+    "onDemandShort": "按需启用",
     "notSelected": "关闭",
     "emptySelection": "该集合暂无能力。",
     "emptyCatalog": "没有匹配的能力。",
@@ -256,5 +256,101 @@
       "user": "你",
       "assistant": "Agent"
     }
+  },
+  "workbench": {
+    "categories": {
+      "knowledge": "知识与记忆",
+      "development": "文件与开发",
+      "web": "网页与电脑",
+      "collaboration": "协作与设备",
+      "creation": "创作与内容",
+      "automation": "业务与自动化",
+      "models": "模型能力",
+      "integrations": "技能与扩展"
+    },
+    "configured": "已配置",
+    "needsAttention": "待处理",
+    "allCategories": "全部分类",
+    "category": "能力分类",
+    "allModes": "全部状态",
+    "filterStatus": "筛选启用方式",
+    "allSources": "全部来源",
+    "filterSource": "筛选能力来源",
+    "builtin": "官方内置",
+    "plugin": "插件与连接",
+    "notReady": "待接入",
+    "sourceUnavailable": "暂不可用",
+    "missingSource": "来源缺失",
+    "missingReason": "这项能力的来源已不存在。可以将它移除，或恢复对应的插件后再使用。",
+    "builtinReason": "当前版本尚未接入这项能力。可先移除它，再保存其他已就绪的能力。",
+    "pluginReason": "请检查对应插件或连接是否已启用、配置完整，并具备可用的运行环境。",
+    "unavailableSummary": "有 {{count}} 项能力需要处理。移除后即可继续保存可用的配置。",
+    "removeUnavailable": "移除待处理项",
+    "searchConfigured": "搜索已配置的能力",
+    "searchLibrary": "搜索名称、用途或来源",
+    "addCapabilities": "添加能力",
+    "libraryTitle": "找到 Agent 需要的能力",
+    "libraryHint": "按任务分类浏览，选择后统一添加。新增能力默认按需启用，你可以随时调整。",
+    "libraryCategories": "能力库分类",
+    "showUnavailable": "显示暂不可用",
+    "selectedCount": "已选 {{count}} 项",
+    "results": "共 {{count}} 项",
+    "selectPage": "选择当前页",
+    "clearSelection": "取消选择",
+    "removeSelected": "移除所选",
+    "disable": "禁用并移除",
+    "selectCapability": "选择 {{name}}",
+    "removeCapability": "移除 {{name}}",
+    "addCapability": "添加 {{name}}",
+    "additionCount": "待添加 {{count}} 项",
+    "addSelected": "添加所选（{{count}}）",
+    "alreadyAdded": "已配置",
+    "viewDetails": "查看详情",
+    "contributions": "提供内容",
+    "version": "版本",
+    "emptyTitle": "给这个 Agent 添加能力",
+    "emptyHint": "从知识、开发、网页或其他分类中选择所需能力，让它更适合你的工作。",
+    "noResults": "没有找到匹配的能力",
+    "noResultsHint": "试试其他关键词，或调整分类与状态筛选。",
+    "clearFilters": "清除筛选",
+    "removalHint": "移除即不再授予这项能力，保存后生效。具体的工作区、知识库等资源，在使用 Agent 时选择。",
+    "librarySearch": "搜索 Agent",
+    "mine": "我的 Agent",
+    "official": "官方预设",
+    "noAgents": "暂无匹配的 Agent",
+    "officialHint": "从预设开始，也可以自由调整",
+    "myHint": "为你的工作准备好合适的 Agent",
+    "capabilityTab": "能力配置",
+    "settingsTab": "基本设置",
+    "skillsTab": "技能与扩展",
+    "testTab": "试用与检查",
+    "saveAsMine": "保存为我的 Agent",
+    "customizeTitle": "自定义这份预设",
+    "customizeHint": "自由调整能力，保存为你的 Agent。官方预设仍可随时使用。",
+    "customName": "Agent 名称",
+    "readyToSave": "配置已就绪",
+    "pendingChanges": "有未保存的修改",
+    "savedHint": "所有修改已保存",
+    "saveHint": "保存后，新会话将使用这份配置。",
+    "resetChanges": "还原修改",
+    "resetTemplate": "恢复预设能力",
+    "leaveTitle": "还有未保存的修改",
+    "leaveBody": "切换后，这些修改会被放弃。",
+    "keepEditing": "继续编辑",
+    "discardAndLeave": "放弃并切换",
+    "resetTitle": "还原本次修改？",
+    "resetBody": "将恢复到上次保存的配置。",
+    "saveSuccess": "Agent 配置已保存",
+    "selectedHint": "只展示当前已配置的能力",
+    "settingsHint": "定义身份、模型和工作方式",
+    "technicalHint": "配置诊断与版本信息",
+    "manageModels": "前往模型管理",
+    "modelNeeded": "先配置一个可用的聊天模型，再保存或试用 Agent。",
+    "disabledSave": "请先处理不可用的能力",
+    "presetBadge": "可自定义预设",
+    "personalBadge": "个人 Agent",
+    "createHint": "从空白开始",
+    "createTitle": "新建 Agent",
+    "removeHint": "只会移出这个 Agent，能力来源不会被卸载。"
   }
 }

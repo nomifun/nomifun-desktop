@@ -382,6 +382,7 @@ export interface CreateAgentPresetRequest {
   display_name: string;
   description?: string;
   fork_from_revision?: PresetRevisionRef;
+  document?: AgentPresetDocument;
 }
 
 export interface CreateAgentPresetFromTemplateRequest {

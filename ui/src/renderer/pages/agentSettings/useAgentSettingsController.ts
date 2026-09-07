@@ -2,6 +2,7 @@ import { agentPlatform } from '@/common/adapter/ipcBridge';
 import type {
   AgentCatalogResponse,
   AgentPresetDraft,
+  AgentPresetDocument,
   AgentPresetEditorResponse,
   AgentPresetLibraryResponse,
   AgentPresetSummary,
@@ -25,6 +26,7 @@ import {
 import { AGENT_PRESET_LIBRARY_SWR_KEY } from '@/renderer/hooks/agent/useAgentPresets';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { mutate } from 'swr';
+import { useTranslation } from 'react-i18next';
 
 type Selection =
   | { kind: 'template'; template: OfficialPresetTemplate }
@@ -51,6 +53,7 @@ const idempotencyKey = (): string =>
   `agent-settings-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
 export function useAgentSettingsController() {
+  const { t } = useTranslation();
   const [library, setLibrary] = useState<AgentPresetLibraryResponse | null>(null);
   const [catalog, setCatalog] = useState<AgentCatalogResponse>(emptyCatalog);
   const [selection, setSelection] = useState<Selection>(null);
@@ -103,7 +106,7 @@ export function useAgentSettingsController() {
           );
           if (currentPreset) return { kind: 'preset', preset: currentPreset };
         }
-        const firstTemplate = nextLibrary.official_templates[0];
+        const firstTemplate = nextLibrary.official_templates.find((template) => template.template_key === 'assistant.general') ?? nextLibrary.official_templates[0];
         return firstTemplate ? { kind: 'template', template: firstTemplate } : null;
       });
     } catch (loadError) {
@@ -212,6 +215,31 @@ export function useAgentSettingsController() {
     },
     [applyEditor, refreshPresetLibraries]
   );
+
+  const createConfiguredPreset = useCallback(async (displayName: string, document: AgentPresetDocument, description?: string) => {
+    setBusyAction('create');
+    setError(null);
+    try {
+      const response = await agentPlatform.createPreset.invoke({ display_name: displayName, description, document });
+      applyEditor(response);
+      await refreshPresetLibraries();
+      setSelection({ kind: 'preset', preset: response.preset });
+      return response;
+    } catch (createError) {
+      const missingModel = createError && typeof createError === 'object' && 'code' in createError && createError.code === 'MODEL_ROUTE_NOT_CONFIGURED';
+      setError(missingModel ? t('agentSettings.workbench.modelNeeded') : agentUiErrorMessage(createError, 'create'));
+      return null;
+    } finally {
+      setBusyAction(null);
+    }
+  }, [applyEditor, refreshPresetLibraries, t]);
+
+  const discardChanges = useCallback(() => {
+    if (savedDraft) setDraftState(cloneDraft(savedDraft));
+    else if (editor) setDraftState(cloneDraft(editor.draft));
+    setPreview(null);
+    setTestResult(null);
+  }, [savedDraft, editor]);
 
   const deletePreset = useCallback(
     async (preset: AgentPresetSummary) => {
@@ -396,6 +424,8 @@ export function useAgentSettingsController() {
     openTemplate,
     openPreset,
     createPreset,
+    createConfiguredPreset,
+    discardChanges,
     forkTemplate,
     deletePreset,
     setDraft,

@@ -35,14 +35,14 @@ describe('Agent Workbench capability and resource boundary', () => {
   test('uses one shared capability list for templates and editable presets', () => {
     const editor = sourceFile('AgentPresetEditor.tsx');
     const overview = sourceFile('OfficialTemplateOverview.tsx');
-    const capabilityList = sourceFile('AgentCapabilityList.tsx');
+    const capabilityList = sourceFile('AgentCapabilityWorkspace.tsx');
 
-    expect(editor.includes('<AgentCapabilityList')).toBe(true);
-    expect(overview.match(/<AgentCapabilityList/g)?.length).toBe(2);
-    expect(capabilityList.includes("<Radio.Group")).toBe(true);
-    expect(capabilityList.includes("value='none'")).toBe(true);
-    expect(capabilityList.includes("value='initial'")).toBe(true);
-    expect(capabilityList.includes("value='on_demand'")).toBe(true);
+    expect(editor.includes('<AgentCapabilityWorkspace')).toBe(true);
+    expect(overview.match(/<AgentCapabilityWorkspace/g)?.length).toBe(1);
+    expect(capabilityList.includes("<Select")).toBe(true);
+    expect(capabilityList.includes("value: 'none'")).toBe(true);
+    expect(capabilityList.includes("value: 'initial'")).toBe(true);
+    expect(capabilityList.includes("value: 'on_demand'")).toBe(true);
     expect(capabilityList.includes('required_resource_kinds')).toBe(true);
   });
 

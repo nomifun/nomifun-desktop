@@ -7,7 +7,7 @@ const sourceFile = (name: string) =>
 describe('Agent Workbench user preset deletion', () => {
   test('renders a confirmed delete action only in the user preset list', () => {
     const library = sourceFile('AgentPresetLibrary.tsx');
-    const userListStart = library.indexOf('library.user_presets.map');
+    const userListStart = library.indexOf('presets.map');
     const deleteAction = library.indexOf('<Popconfirm', userListStart);
 
     expect(userListStart).toBeGreaterThanOrEqual(0);

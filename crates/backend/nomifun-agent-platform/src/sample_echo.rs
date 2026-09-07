@@ -814,6 +814,7 @@ async fn build_revisions(
                 display_name: "Sample Echo".to_owned(),
                 description: Some("C6 compiled plugin gate".to_owned()),
                 fork_from_revision: None,
+                    document: None,
             },
         )
         .await?;

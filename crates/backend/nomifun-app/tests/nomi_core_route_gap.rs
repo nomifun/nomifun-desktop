@@ -406,6 +406,53 @@ async fn nomi_core_accepts_on_demand_placement_without_widening_initial_tools() 
 }
 
 #[tokio::test]
+async fn configured_agent_creation_persists_adjusted_capabilities_and_keeps_official_seeds() {
+    const TRUST: &str = "configured-agent-workbench-test";
+    async fn call(router: axum::Router, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
+        let response = router.oneshot(Request::builder().method(method).uri(path)
+            .header("x-nomi-local-trust", TRUST).header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+    let (router, services) = common::build_local_trust_app(TRUST).await;
+    let (_, before) = call(router.clone(), "GET", "/api/agent-preset-templates?source=official", json!({})).await;
+    let before_count = before["data"]["user_presets"].as_array().unwrap().len();
+    let official_before = before["data"]["official_templates"].clone();
+    let document = json!({
+        "schema_version":"1.0.0", "model_route_refs":{}, "chat_route_records":{},
+        "initial_capabilities":[{"capability":{"id":"fs.read","version":"1.0.0"}}],
+        "on_demand_capabilities":[{"capability":{"id":"web.fetch","version":"1.0.0"}},{"capability":{"id":"agent.execution.plan","version":"1.0.0"}}],
+        "skill_bindings":[], "system_role_provider_overrides":{}, "persona":"Research helper",
+        "instructions":"Use only the selected capabilities.", "starter_prompts":[]
+    });
+    let (status, created) = call(router.clone(), "POST", "/api/agent-presets", json!({
+        "display_name":"My adjusted assistant", "description":"Custom capability scope", "document":document,
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    assert_eq!(created["data"]["preset"]["source"], "user");
+    assert_eq!(created["data"]["revision"]["reference"]["revision"], 1);
+    assert!(created["data"]["draft"]["source_template_key"].is_null());
+    let id = created["data"]["preset"]["preset_id"].as_str().unwrap();
+    let (status, reloaded) = call(router.clone(), "GET", &format!("/api/agent-presets/{id}/editor"), json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(reloaded["data"]["draft"]["document"]["initial_capabilities"], created["data"]["revision"]["document"]["initial_capabilities"]);
+    assert_eq!(reloaded["data"]["draft"]["document"]["on_demand_capabilities"], created["data"]["revision"]["document"]["on_demand_capabilities"]);
+    assert_eq!(reloaded["data"]["draft"]["document"]["initial_capabilities"].as_array().unwrap().len(), 1);
+    assert_eq!(reloaded["data"]["draft"]["document"]["on_demand_capabilities"].as_array().unwrap().len(), 2);
+    let mut invalid = document;
+    invalid["initial_capabilities"] = json!([{"capability":{"id":"missing.capability","version":"1.0.0"}}]);
+    let (status, _) = call(router.clone(), "POST", "/api/agent-presets", json!({"display_name":"Must not persist", "document":invalid})).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (_, after) = call(router, "GET", "/api/agent-preset-templates?source=official", json!({})).await;
+    assert_eq!(after["data"]["user_presets"].as_array().unwrap().len(), before_count + 1);
+    assert_eq!(after["data"]["official_templates"], official_before);
+    services.shutdown_browser_platform().await.unwrap();
+    services.database.close().await;
+}
+
+#[tokio::test]
 async fn nomi_core_agent_settings_template_and_binding_surface_is_persistent() {
     let (router, services) = common::build_local_trust_app("agent-settings-local-trust").await;
     let response = router

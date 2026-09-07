@@ -1,8 +1,8 @@
 import HubPageShell from '@/renderer/components/layout/HubPageShell';
 import type { AgentPresetSummary } from '@/common/types/agentPlatform';
-import { Alert, Button, Spin } from '@arco-design/web-react';
+import { Alert, Button, Modal, Spin } from '@arco-design/web-react';
 import { Refresh } from '@icon-park/react';
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import AgentPresetEditor from './AgentPresetEditor';
@@ -16,6 +16,19 @@ const AgentSettingsPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const controller = useAgentSettingsController();
+  const [templateDirty, setTemplateDirty] = useState(false);
+  const [pendingSwitch, setPendingSwitch] = useState<(() => void) | null>(null);
+  const hasUnsavedChanges = controller.dirty || templateDirty;
+  useEffect(() => {
+    if (!hasUnsavedChanges) return;
+    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ''; };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [hasUnsavedChanges]);
+  const beforeSwitch = (action: () => void) => {
+    if (!hasUnsavedChanges) { action(); return; }
+    setPendingSwitch(() => action);
+  };
   useAgentWorkbenchEntry(controller);
   const sourceTemplate =
     controller.draft?.source_template_key == null
@@ -36,9 +49,23 @@ const AgentSettingsPage: React.FC = () => {
   return (
     <HubPageShell
       title={t('agentSettings.title')}
+      hideHeading
+      subtitle={t('agentSettings.subtitle')}
       maxWidthClass='md:max-w-1440px'
       className={styles.pageShell}
     >
+      <Modal
+        visible={pendingSwitch !== null}
+        title={t('agentSettings.workbench.leaveTitle')}
+        okText={t('agentSettings.workbench.discardAndLeave')}
+        cancelText={t('agentSettings.workbench.keepEditing')}
+        onCancel={() => setPendingSwitch(null)}
+        onOk={() => { pendingSwitch?.(); setPendingSwitch(null); }}
+        autoFocus
+        focusLock
+      >
+        {t('agentSettings.workbench.leaveBody')}
+      </Modal>
       {controller.error && (
         <Alert
           type='error'
@@ -75,28 +102,30 @@ const AgentSettingsPage: React.FC = () => {
             creating={controller.busyAction === 'create'}
             openingPresetId={controller.openingPresetId}
             deletingPresetId={controller.deletingPresetId}
-            onSelectTemplate={controller.openTemplate}
-            onSelectPreset={(preset) => void controller.openPreset(preset)}
-            onCreatePreset={(displayName) => void controller.createPreset(displayName)}
+            onSelectTemplate={(template) => {
+              if (controller.selection?.kind === 'template' && controller.selection.template.template_key === template.template_key) return;
+              beforeSwitch(() => controller.openTemplate(template));
+            }}
+            onSelectPreset={(preset) => {
+              if (controller.selection?.kind === 'preset' && controller.selection.preset.preset_id === preset.preset_id) return;
+              beforeSwitch(() => { void controller.openPreset(preset); });
+            }}
+            onCreatePreset={(displayName) => beforeSwitch(() => { void controller.createPreset(displayName); })}
             onDeletePreset={(preset) => controller.deletePreset(preset)}
           />
 
           {selectedTemplate ? (
             <OfficialTemplateOverview
+              key={selectedTemplate.template_key}
               template={selectedTemplate}
-              busy={controller.busyAction === 'fork'}
+              busy={controller.busyAction !== null}
               catalog={controller.catalog}
-              onFork={(displayName, modelRoutes, routeRecords) =>
-                void controller.forkTemplate(
-                  selectedTemplate.template_key,
-                  displayName,
-                  modelRoutes,
-                  routeRecords
-                )
-              }
+              onDirtyChange={setTemplateDirty}
+              onSave={(displayName, document, description) => { void controller.createConfiguredPreset(displayName, document, description); }}
             />
           ) : controller.editor && controller.draft ? (
             <AgentPresetEditor
+              key={controller.editor.preset.preset_id}
               editor={controller.editor}
               draft={controller.draft}
               catalog={controller.catalog}
@@ -109,6 +138,8 @@ const AgentSettingsPage: React.FC = () => {
               onDraftChange={controller.setDraft}
               onPreview={() => void controller.runPreview()}
               onSave={() => void controller.saveRevision()}
+              onDiscard={controller.discardChanges}
+              onOpenModels={() => beforeSwitch(() => { void navigate('/models'); })}
               onTest={(input) => void controller.runTest(input)}
               onStartConversation={startConversation}
             />

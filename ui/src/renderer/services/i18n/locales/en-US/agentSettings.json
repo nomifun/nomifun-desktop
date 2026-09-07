@@ -1,6 +1,6 @@
 {
   "title": "Agent Workbench",
-  "subtitle": "Design an Agent's identity, model, and capability boundary, then test it before saving.",
+  "subtitle": "Configure your Agents around the work you want to do.",
   "loading": "Loading Agent Workbench…",
   "loadingEditor": "Loading the selected Agent…",
   "freshStart": {
@@ -10,13 +10,13 @@
   "actions": {
     "create": "Create",
     "delete": "Delete",
-    "fork": "Fork",
+    "fork": "Customize preset",
     "remove": "Remove",
     "retry": "Retry",
-    "preview": "Preview",
-    "test": "Test",
+    "preview": "Check configuration",
+    "test": "Try Agent",
     "startConversation": "Start conversation",
-    "saveRevision": "Save Revision"
+    "saveRevision": "Save configuration"
   },
   "defaults": {
     "untitledName": "Untitled Agent",
@@ -38,67 +38,67 @@
     "deleteAria": "Delete Agent “{{name}}”"
   },
   "template": {
-    "readOnly": "Official read-only template",
-    "capabilityHint": "The template explicitly lists capabilities available at startup and capabilities the Agent may request. Fork it to change that boundary.",
+    "readOnly": "Official preset",
+    "capabilityHint": "Add or remove capabilities for your work. Saving creates your own Agent and keeps the official preset available.",
     "hostUnavailable": "This template includes capabilities that are unavailable on the current Nomi-core host. Forking stays blocked until a real owner is available.",
     "zeroToolTitle": "Exact zero-tool profile",
     "zeroToolBody": "No capability, Skill, MCP, workspace, Coding context, or hidden capability search is constructed.",
     "chat": {
       "minimal": {
         "name": "Minimal Chat",
-        "description": "The smallest ordinary Chat profile with no tools or hidden capability initialization."
+        "description": "For simple conversations. Add capabilities whenever you need them."
       }
     },
     "assistant": {
       "general": {
         "name": "General Assistant",
-        "description": "General-purpose attachments, Knowledge, project memory, files, and web research."
+        "description": "Find information, organize knowledge and handle everyday tasks."
       }
     },
     "coding": {
       "codex": {
         "name": "Codex Coding",
-        "description": "Complete Codex-native workspace, file, shell, process, VCS, Skills, MCP, review, and multi-agent surface."
+        "description": "For reading code, changing projects and development tasks. You choose its tools."
       }
     },
     "companion": {
       "default": {
         "name": "Companion",
-        "description": "Persona, companion memory, Knowledge, learning, and IM connection workflows."
+        "description": "Choose the role, memory and communication abilities for a companion."
       }
     },
     "robot": {
       "default": {
         "name": "Robot",
-        "description": "Robot link, audio, display, perception, motion, companion context, and Knowledge."
+        "description": "Choose perception, communication and action capabilities for device interactions."
       }
     },
     "customerService": {
       "default": {
         "name": "Customer Service",
-        "description": "Customer dialogue, notes, Knowledge, Channel receive/reply/send, and handoff."
+        "description": "Combine knowledge, communication and customer records for service work."
       }
     },
     "creativeStudio": {
       "default": {
         "name": "Creative Studio",
-        "description": "Canvas, assets, templates, director, generation models, and MiniApp workflows."
+        "description": "Combine assets, content creation and MiniApp capabilities for creative work."
       }
     }
   },
   "sections": {
-    "basic": "Identity and model",
-    "basicHint": "Name the Agent, select a Chat model, and write its stable persona and instructions.",
+    "basic": "Basic settings",
+    "basicHint": "Define its identity, model and working style",
     "capabilities": "Capabilities",
-    "capabilitiesHint": "Set each capability to Off, Available at startup, or May request. This declares the capability boundary without binding resource instances.",
-    "skillsMcp": "Skills and MCP",
+    "capabilitiesHint": "Only capabilities configured for this Agent",
+    "skillsMcp": "Skills & extensions",
     "skillsMcpHint": "Skills contribute instructions only. MCP tools enter this Agent through their available capability.",
     "skills": "Skills",
     "mcp": "MCP materializations",
-    "previewInspector": "Preview and Inspector",
-    "previewInspectorHint": "Resolve the exact initial/on-demand ceiling, Tool/Context projection, resources, RuntimeProfile, and revision diff.",
-    "test": "Test with a real Session",
-    "testHint": "Dirty drafts save an ordinary immutable Revision first. Clean drafts reuse the current Revision."
+    "previewInspector": "Configuration diagnostics",
+    "previewInspectorHint": "Configuration diagnostics and version details",
+    "test": "Try & inspect",
+    "testHint": "Trying this Agent saves its configuration before opening a real session."
   },
   "fields": {
     "name": "Name",
@@ -107,25 +107,25 @@
     "chatModelRoutePlaceholder": "Exact model route ID",
     "chatModelRouteRecord": "Chat route record",
     "chatModelRouteRecordPlaceholder": "Canonical Chat route JSON",
-    "chatModelRouteUnavailable": "This host has no available Chat model. Choose one before saving or testing.",
-    "persona": "Persona",
+    "chatModelRouteUnavailable": "Configure an available chat model before saving or trying this Agent.",
+    "persona": "Role",
     "instructions": "Instructions"
   },
   "status": {
-    "dirty": "Unsaved draft",
-    "saved": "Saved revision",
+    "dirty": "Unsaved",
+    "saved": "Saved",
     "currentRevision": "Current immutable Revision {{revision}}",
     "noRevision": "This draft has no saved Revision yet.",
     "boundTargets": "{{count}} bound targets",
-    "unsavedChanges": "Preview again before saving or testing this changed draft.",
+    "unsavedChanges": "You have unsaved changes. Saving applies them to new conversations.",
     "revisionImmutable": "Saved revisions are immutable; edits create the next Revision."
   },
   "capabilities": {
     "search": "Search capabilities and source Packages",
     "initial": "Available at startup",
-    "onDemand": "May request",
+    "onDemand": "On demand",
     "initialShort": "At startup",
-    "onDemandShort": "May request",
+    "onDemandShort": "On demand",
     "notSelected": "Off",
     "emptySelection": "No capabilities in this set.",
     "emptyCatalog": "No matching capabilities.",
@@ -256,5 +256,101 @@
       "user": "You",
       "assistant": "Agent"
     }
+  },
+  "workbench": {
+    "categories": {
+      "knowledge": "Knowledge & memory",
+      "development": "Files & development",
+      "web": "Web & computer",
+      "collaboration": "Collaboration & devices",
+      "creation": "Creative tools",
+      "automation": "Work & automation",
+      "models": "Model capabilities",
+      "integrations": "Skills & extensions"
+    },
+    "configured": "Configured",
+    "needsAttention": "Needs attention",
+    "allCategories": "All categories",
+    "category": "Capability category",
+    "allModes": "All modes",
+    "filterStatus": "Filter activation mode",
+    "allSources": "All sources",
+    "filterSource": "Filter capability source",
+    "builtin": "Built-in",
+    "plugin": "Plugins & connections",
+    "notReady": "Not yet provided",
+    "sourceUnavailable": "Unavailable",
+    "missingSource": "Missing source",
+    "missingReason": "The source of this capability is missing. Remove it, or restore the corresponding plugin before using it.",
+    "builtinReason": "This version has not connected this capability yet. Remove it to save the rest of your ready configuration.",
+    "pluginReason": "Check that the plugin or connection is enabled, fully configured, and has an available runtime.",
+    "unavailableSummary": "{{count}} capabilities need attention. Remove them to continue with the available configuration.",
+    "removeUnavailable": "Remove unavailable",
+    "searchConfigured": "Search configured capabilities",
+    "searchLibrary": "Search names, purposes or sources",
+    "addCapabilities": "Add capabilities",
+    "libraryTitle": "Find what your Agent needs",
+    "libraryHint": "Browse by task, then add your selections together. New capabilities activate on demand; you can change this anytime.",
+    "libraryCategories": "Capability library categories",
+    "showUnavailable": "Show unavailable",
+    "selectedCount": "Selected: {{count}}",
+    "results": "Results: {{count}}",
+    "selectPage": "Select this page",
+    "clearSelection": "Clear selection",
+    "removeSelected": "Remove selected",
+    "disable": "Disable and remove",
+    "selectCapability": "Select {{name}}",
+    "removeCapability": "Remove {{name}}",
+    "addCapability": "Add {{name}}",
+    "additionCount": "Ready to add: {{count}}",
+    "addSelected": "Add selected ({{count}})",
+    "alreadyAdded": "Configured",
+    "viewDetails": "View details",
+    "contributions": "Contributions",
+    "version": "Version",
+    "emptyTitle": "Give this Agent useful capabilities",
+    "emptyHint": "Choose knowledge, development, web or other capabilities to fit the work you want it to do.",
+    "noResults": "No matching capabilities",
+    "noResultsHint": "Try another keyword, category or status filter.",
+    "clearFilters": "Clear filters",
+    "removalHint": "Removing a capability withdraws it from this Agent after saving. Choose specific workspaces, knowledge bases and other resources when using the Agent.",
+    "librarySearch": "Search Agents",
+    "mine": "My Agents",
+    "official": "Official presets",
+    "noAgents": "No matching Agents",
+    "officialHint": "Start with a preset and make it yours",
+    "myHint": "Prepare the right Agent for your work",
+    "capabilityTab": "Capabilities",
+    "settingsTab": "Basic settings",
+    "skillsTab": "Skills & extensions",
+    "testTab": "Try & inspect",
+    "saveAsMine": "Save as my Agent",
+    "customizeTitle": "Make this preset yours",
+    "customizeHint": "Adjust capabilities and save your own Agent. The official preset stays available.",
+    "customName": "Agent name",
+    "readyToSave": "Ready to save",
+    "pendingChanges": "Unsaved changes",
+    "savedHint": "All changes saved",
+    "saveHint": "New conversations will use this configuration after saving.",
+    "resetChanges": "Discard changes",
+    "resetTemplate": "Restore preset capabilities",
+    "leaveTitle": "You have unsaved changes",
+    "leaveBody": "Switching will discard these changes.",
+    "keepEditing": "Keep editing",
+    "discardAndLeave": "Discard and switch",
+    "resetTitle": "Discard your changes?",
+    "resetBody": "Restore the last saved configuration.",
+    "saveSuccess": "Agent configuration saved",
+    "selectedHint": "Only capabilities configured for this Agent",
+    "settingsHint": "Define its identity, model and working style",
+    "technicalHint": "Configuration diagnostics and version details",
+    "manageModels": "Manage models",
+    "modelNeeded": "Configure an available chat model before saving or trying this Agent.",
+    "disabledSave": "Resolve unavailable capabilities first",
+    "presetBadge": "Customizable preset",
+    "personalBadge": "Personal Agent",
+    "createHint": "Start from a blank Agent",
+    "createTitle": "New Agent",
+    "removeHint": "This only removes it from this Agent; its source stays installed."
   }
 }
