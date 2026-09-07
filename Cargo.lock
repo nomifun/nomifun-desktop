@@ -6928,6 +6928,8 @@ dependencies = [
  "async-trait",
  "nomifun-agent-contracts",
  "nomifun-api-types",
+ "nomifun-common",
+ "nomifun-db",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
