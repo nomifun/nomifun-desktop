@@ -1169,6 +1169,9 @@ impl NomiAgentManager {
             .map_err(|e| AppError::Internal(format!("Agent bootstrap failed: {e}")))?;
 
         let mut engine = result.engine;
+        // The registry retains the exact Preset ceiling and deferred placement
+        // established by bootstrap, including deny-all for zero-tool Agents.
+        engine.registry_mut().register(Box::new(crate::web_fetch::WebFetchTool::default()));
         if let Some(session) = plugin_tool_session {
             session.register_into(engine.registry_mut()).map_err(|error| {
                 AppError::Internal(format!(
@@ -6916,6 +6919,67 @@ mod tests {
             !names.iter().any(|name| name == "nomi_delegate"),
             "manager must preserve the backend host-composition decision"
         );
+    }
+
+    struct RepairedBuiltinCronSink(std::sync::atomic::AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl CronSink for RepairedBuiltinCronSink {
+        async fn create(&self, _name: &str, _cron: &str, _prompt: &str) -> Result<String, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok("created-job".into())
+        }
+        async fn list(&self) -> Result<Vec<nomi_agent::cron_tools::CronJobSummary>, String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+        async fn delete(&self, _job_id: &str) -> Result<(), String> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn repaired_builtins_register_and_execute_without_widening_preset_scope() {
+        let names = ["web_fetch", "nomi_delegate", "cron_create", "cron_list", "cron_delete"];
+        for (selected, deferred) in [(false, false), (true, false), (true, true)] {
+            let root = tempfile::tempdir().unwrap();
+            let mut config = make_test_config();
+            config.session_directory = root.path().join("sessions");
+            config.enforce_tool_allowlist = true;
+            config.allowed_tools = if selected { names.iter().map(|name| (*name).to_owned()).collect() } else { Vec::new() };
+            config.deferred_tools = if deferred { config.allowed_tools.clone() } else { Vec::new() };
+            let agent = NomiAgentManager::new(
+                "builtin-capability-test".into(), root.path().to_string_lossy().into_owned(), config,
+                None, None, None, None, Vec::new(), None, None, Vec::new(), None,
+            ).await.unwrap();
+            let sink = Arc::new(RepairedBuiltinCronSink(std::sync::atomic::AtomicUsize::new(0)));
+            agent.register_cron_sink(sink.clone()).await;
+            {
+                let mut engine = agent.engine.lock().await;
+                let registry = engine.registry_mut();
+                assert!(registry.get("Bash").is_none());
+                assert!(registry.get("Write").is_none());
+                for name in names {
+                    assert_eq!(registry.get(name).is_some(), selected, "{name}");
+                    if selected {
+                        assert_eq!(registry.provider_deferred_tool_names().contains(name), deferred, "{name}");
+                    }
+                }
+                if selected {
+                    for (name, input) in [
+                        ("cron_create", serde_json::json!({"name":"test", "cron":"0 9 * * *", "prompt":"test"})),
+                        ("cron_list", serde_json::json!({})),
+                        ("cron_delete", serde_json::json!({"job_id":"created-job"})),
+                    ] {
+                        let result = registry.get(name).unwrap().execute(input).await;
+                        assert!(!result.is_error, "{}", result.content);
+                    }
+                    assert_eq!(sink.0.load(Ordering::SeqCst), 3);
+                }
+            }
+            agent.kill_and_wait(None).await.unwrap();
+        }
     }
 
     // -- distillation eligibility gates (construction-time) -------------------

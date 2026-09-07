@@ -49,6 +49,7 @@ fn local_delegate_json_schema() -> JsonSchema {
 /// scheduler, but uses the same request, receipt and lifecycle vocabulary.
 pub(crate) struct LocalDelegateTool {
     runner: Arc<LocalAgentInvocationRunner>,
+    deferred: bool,
     /// Exact-operation sidecar for parent-visible effects completed by direct
     /// child Agents. Isolated worktree results are scrubbed by the runner
     /// before they reach this boundary, because returning a patch is not the
@@ -60,8 +61,14 @@ impl LocalDelegateTool {
     pub(crate) fn new(runner: Arc<LocalAgentInvocationRunner>) -> Self {
         Self {
             runner,
+            deferred: true,
             delegated_effects: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub(crate) fn with_deferred(mut self, deferred: bool) -> Self {
+        self.deferred = deferred;
+        self
     }
 
     async fn execute_inner(
@@ -135,7 +142,7 @@ impl Tool for LocalDelegateTool {
     }
 
     fn is_deferred(&self) -> bool {
-        true
+        self.deferred
     }
 
     async fn execute(&self, input: Value) -> ToolResult {

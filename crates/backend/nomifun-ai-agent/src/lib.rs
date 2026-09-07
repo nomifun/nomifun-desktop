@@ -26,6 +26,7 @@ pub(crate) mod services;
 pub mod runtime_registry;
 pub mod terminal_title_completer;
 pub mod types;
+pub mod web_fetch;
 
 // ── Agent-layer re-exports (the seam) ──────────────────────────────────────
 // Backend crates reach the agent (nomi-*) layer ONLY through nomifun-ai-agent.
