@@ -64,6 +64,51 @@ impl LlmProvider for CapturingProvider {
 }
 
 #[tokio::test]
+async fn preset_delegate_placement_and_ceiling_are_preserved() {
+    struct DelegateProvider;
+    #[async_trait]
+    impl LlmProvider for DelegateProvider {
+        async fn stream(&self, request: &LlmRequest) -> Result<mpsc::Receiver<LlmEvent>, ProviderError> {
+            assert!(!request.tools.iter().any(|tool| tool.name == "Bash" || tool.name == "Write"));
+            let (tx, rx) = mpsc::channel(2);
+            tx.send(LlmEvent::TextDelta("Delegated task completed".into())).await.unwrap();
+            tx.send(LlmEvent::Done { stop_reason: StopReason::EndTurn, usage: TokenUsage::default() }).await.unwrap();
+            Ok(rx)
+        }
+    }
+    let workspace = tempfile::tempdir().unwrap();
+    for deferred in [false, true] {
+        let mut config = minimal_config();
+        config.tools.builtin_allowlist = vec!["nomi_delegate".into()];
+        config.tools.enforce_builtin_allowlist = true;
+        if deferred { config.tools.deferred_allowlist = vec!["nomi_delegate".into()]; }
+        let mut result = AgentBootstrap::new(config, workspace.path().to_str().unwrap(), null_output())
+            .install_embedded_agent_execution(true)
+            .provider(Arc::new(DelegateProvider))
+            .build().await.unwrap();
+        let registry = result.engine.registry_mut();
+        assert!(registry.get("nomi_delegate").is_some());
+        assert!(registry.get("Bash").is_none());
+        assert!(registry.get("Write").is_none());
+        assert_eq!(registry.provider_deferred_tool_names().contains("nomi_delegate"), deferred);
+        let receipt = registry.get("nomi_delegate").unwrap().execute(serde_json::json!({
+            "strategy":"parallel",
+            "tasks":[{"name":"inspect", "prompt":"Return a short completion", "tool_policy":"read_only"}]
+        })).await;
+        assert!(!receipt.is_error, "{}", receipt.content);
+        let payload: serde_json::Value = serde_json::from_str(&receipt.content).unwrap();
+        assert_eq!(payload["result"]["status"], "completed", "{}", receipt.content);
+        assert!(receipt.content.contains("Delegated task completed"));
+    }
+    let mut config = minimal_config();
+    config.tools.enforce_builtin_allowlist = true;
+    let mut result = AgentBootstrap::new(config, workspace.path().to_str().unwrap(), null_output())
+        .install_embedded_agent_execution(true)
+        .build().await.unwrap();
+    assert!(result.engine.registry_mut().get("nomi_delegate").is_none());
+}
+
+#[tokio::test]
 async fn bootstrap_builds_engine_with_model_in_prompt() {
     let config = minimal_config();
     let result = AgentBootstrap::new(config, "/tmp/test-workspace", null_output())

@@ -72,7 +72,7 @@ pub struct CronServiceSink {
 
 impl CronServiceSink {
     /// Build the sink as a trait object ready to inject into the agent factory.
-    fn into_arc(
+    pub fn into_arc(
         service: Arc<CronService>,
         user_id: String,
         conversation_id: String,
@@ -141,6 +141,11 @@ impl CronSink for CronServiceSink {
     }
 
     async fn delete(&self, job_id: &str) -> Result<(), String> {
+        let job = self.service.get_job(&self.user_id, job_id)
+            .await.map_err(|error| error.to_string())?;
+        if job.conversation_id.as_deref() != Some(self.conversation_id.as_str()) {
+            return Err("cron job is not bound to this conversation".to_owned());
+        }
         self.service
             .remove_job(&self.user_id, job_id)
             .await

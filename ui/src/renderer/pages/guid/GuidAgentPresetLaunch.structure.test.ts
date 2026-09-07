@@ -76,36 +76,6 @@ describe('Guid default Nomi and AgentPreset launch behavior', () => {
     expect(selection.includes('presets[0]')).toBe(false);
   });
 
-  test('always renders the exact AgentPillBar API with default Nomi plus executable presets', () => {
-    const page = readSource(new URL('./GuidPage.tsx', import.meta.url));
-    const selection = readSource(
-      new URL('./hooks/useGuidAgentSelection.ts', import.meta.url)
-    );
-    const pillBar = readSource(
-      new URL('./components/AgentPillBar.tsx', import.meta.url)
-    );
-
-    expect(selection.includes('useAgentPresets()')).toBe(true);
-    expect(
-      selection.includes('savedPresets.filter(isExecutableAgentPreset)')
-    ).toBe(true);
-    expect(pillBar.includes('selection: GuidAgentSelection;')).toBe(true);
-    expect(pillBar.includes('onSelectDefault: () => void;')).toBe(true);
-    expect(
-      pillBar.includes('onSelectPreset: (presetId: AgentPresetId) => void;')
-    ).toBe(true);
-    expect(pillBar.includes("data-testid='agent-pill-default'")).toBe(true);
-    expect(pillBar.includes("defaultValue: 'Nomi Agent'")).toBe(true);
-    expect(pillBar.includes('{presets.map((preset) => {')).toBe(true);
-
-    expect(page.includes('<AgentPillBarSkeleton')).toBe(false);
-    expect(page.match(/<AgentPillBar\b/g)).toHaveLength(1);
-    expect(page.includes('presets={agentSelection.presets}')).toBe(true);
-    expect(page.includes('selection={agentSelection.selection}')).toBe(true);
-    expect(page.includes('onSelectDefault={() =>')).toBe(true);
-    expect(page.includes('onSelectPreset={(presetId) =>')).toBe(true);
-  });
-
   test('exposes the model selector only in default Nomi mode', () => {
     const page = readSource(new URL('./GuidPage.tsx', import.meta.url));
     const actionRow = readSource(

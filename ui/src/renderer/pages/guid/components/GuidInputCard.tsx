@@ -40,6 +40,9 @@ type GuidInputCardProps = {
   files: string[];
   onRemoveFile: (path: string) => void;
 
+  // Current Agent selector rendered as the first composer control.
+  agentSelector: React.ReactNode;
+
   // Action row
   actionRow: React.ReactNode;
 
@@ -69,6 +72,7 @@ const GuidInputCard: React.FC<GuidInputCardProps> = ({
   mentionDropdown,
   files,
   onRemoveFile,
+  agentSelector,
   actionRow,
   showWorkspace = false,
   workspaceDir,
@@ -121,6 +125,7 @@ const GuidInputCard: React.FC<GuidInputCardProps> = ({
           boxShadow: isInputActive && !isFileDragging ? activeShadow : 'none',
         }}
       >
+        <div className={styles.guidAgentSelectorRow}>{agentSelector}</div>
         {mentionSelectorBadge}
         <Input.TextArea
           autoSize={textareaAutoSize}

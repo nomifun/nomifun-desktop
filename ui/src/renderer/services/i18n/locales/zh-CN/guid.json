@@ -1,5 +1,18 @@
 {
   "defaultAgent": "Nomi Agent",
+  "agentEntries": {
+    "needsSetup": "待配置",
+    "choose": "选择 Agent",
+    "search": "搜索 Agent",
+    "defaultDescription": "日常问答与任务处理",
+    "fromTemplate": "从官方模板创建",
+    "browseTemplates": "浏览全部模板",
+    "fewerTemplates": "收起模板",
+    "manage": "管理 Agent",
+    "empty": "没有找到匹配的 Agent 或模板",
+    "loading": "正在加载 Agent…",
+    "loadFailed": "Agent 列表加载失败"
+  },
   "noAgentAvailable": "没有可用的 Main Agent。请登录 Google 或安装 Claude/Codex CLI。是否前往设置？",
   "noAgentAvailableShort": "没有可用的 Main Agent。点击配置。",
   "agentTabAutoSwitch": "模型不兼容 Gemini，已自动切换到 {{fallback}}",
