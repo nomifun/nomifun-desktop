@@ -3,20 +3,22 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use nomifun_agent_contracts::{
-    ArtifactId, DigestHex, JavaScriptBuildProfile, LocalizedMetadata, MiniAppDatabaseHandleId,
+    ArtifactId, CredentialSlotDeclaration, CredentialSlotKey, CredentialSlotKind, DigestHex,
+    JavaScriptBuildProfile, LocalizedMetadata, MiniAppDatabaseHandleId,
     MiniAppFilesDirDescriptor, MiniAppFilesHandleId, MiniAppId, MiniAppKvHandleDescriptor,
     MiniAppKvHandleId, MiniAppNonUiReleaseFingerprint, MiniAppPointerExpectation,
     MiniAppPrivateDatabaseDescriptor, MiniAppProductLifecycleState, MiniAppProjectId,
     MiniAppPublishAuthorization, MiniAppPublishRequest, MiniAppReadyOrigin, MiniAppReadyRelease,
     MiniAppReleaseArtifactV1, MiniAppReleaseFile, MiniAppReleaseId, MiniAppReleaseRef,
-    MiniAppReleaseV1Manifest, MiniAppRollbackRequest, MiniAppServiceLifecycle,
-    MiniAppServiceReleaseDescriptor, MiniAppServiceRuntimeFingerprint,
+    MiniAppReleaseV1Manifest, MiniAppResourceContract, MiniAppRollbackRequest,
+    MiniAppServiceLifecycle, MiniAppServiceReleaseDescriptor, MiniAppServiceRuntimeFingerprint,
     MiniAppServiceStorageDescriptor, MiniAppSourceLineage, MiniAppUiOnlyAutoPublishAuthorization,
     MiniAppUiOnlyAutoPublishProof, MiniAppUserAuthorizationId, OperationId, PackageContributions,
     PackageId, PackageRef, ResolvedMiniAppServiceSpec, ResolvedMiniAppServiceSpecInputs,
-    RuntimeInstallationId, RuntimeTarget, VersionString, MINIAPP_M1_SCHEMA_VERSION,
-    MINIAPP_RELEASE_PROFILE_VERSION, MINIAPP_SERVICE_HOST_PROTOCOL_VERSION,
-    MINIAPP_SERVICE_SDK_CONTRACT_VERSION, canonical_ui_tree_digest, digest_bytes,
+    ResourceKind, RuntimeInstallationId, RuntimeTarget, StrictJsonValue, VersionString,
+    MINIAPP_M1_SCHEMA_VERSION, MINIAPP_RELEASE_PROFILE_VERSION,
+    MINIAPP_SERVICE_HOST_PROTOCOL_VERSION, MINIAPP_SERVICE_SDK_CONTRACT_VERSION,
+    canonical_ui_tree_digest, digest_bytes, digest_payload,
 };
 
 use crate::*;
@@ -846,6 +848,28 @@ fn artifact(seed: &str, with_service: bool) -> MiniAppReleaseArtifactV1 {
             runtime_requirements_digest: digest("runtime-requirements"),
         }
     });
+    let config_schema = StrictJsonValue(serde_json::json!({
+        "additionalProperties": false,
+        "properties": {
+            "workspace": {"type": "string"}
+        },
+        "type": "object"
+    }));
+    let credential_slots = with_service
+        .then(|| CredentialSlotDeclaration {
+            slot_key: CredentialSlotKey::from("api_key"),
+            kind: CredentialSlotKind::SecretText,
+            display_name: "API key".into(),
+            required: true,
+        })
+        .into_iter()
+        .collect::<Vec<_>>();
+    let resource_contract = MiniAppResourceContract {
+        required_resource_kinds: with_service
+            .then(|| ResourceKind::from("knowledge.base"))
+            .into_iter()
+            .collect(),
+    };
     let manifest = MiniAppReleaseV1Manifest {
         schema_version: MINIAPP_M1_SCHEMA_VERSION.into(),
         build_profile: JavaScriptBuildProfile::MiniAppReleaseV1,
@@ -864,9 +888,13 @@ fn artifact(seed: &str, with_service: bool) -> MiniAppReleaseArtifactV1 {
         service,
         dependency_lock_digest: digest("dependency-lock"),
         dependency_graph_digest: digest("dependency-graph"),
-        config_schema_digest: digest("config-schema"),
-        credential_slots_digest: digest("credential-slots"),
-        resource_contract_digest: digest("resource-contract"),
+        config_schema_digest: digest_payload(&config_schema.0).unwrap(),
+        config_schema,
+        credential_slots_digest: digest_payload(&credential_slots).unwrap(),
+        credential_slots,
+        resource_contract_digest: digest_payload(&resource_contract).unwrap(),
+        resource_contract,
+        schemas: BTreeMap::new(),
         bridge_contract_digest: digest("bridge-contract"),
         contribution_package: PackageRef {
             id: PackageId::from("miniapp.example.release"),

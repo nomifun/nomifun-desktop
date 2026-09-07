@@ -15,7 +15,6 @@ mod fsname;
 mod hooks;
 mod id;
 mod idempotency;
-pub mod miniapp_workspace;
 mod scoped_auth;
 mod pagination;
 pub mod paths;
