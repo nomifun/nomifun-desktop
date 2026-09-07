@@ -34,6 +34,8 @@ use crate::JavaScriptHostError;
 
 const HOST_FAILURE_CODE: &str = "JAVASCRIPT_HOST_UNAVAILABLE";
 const HOST_SERVICE_UNAVAILABLE: &str = "HOST_SERVICE_UNAVAILABLE";
+const BUNDLED_EXTENSION_HOST: &[u8] =
+    include_bytes!("../assets/extension-host.mjs");
 
 #[derive(Clone, Debug)]
 pub struct JavaScriptHostLimits {
@@ -81,16 +83,15 @@ pub struct JavaScriptHostConfig {
 }
 
 impl JavaScriptHostConfig {
-    pub fn bundled(
+    pub fn for_host_module(
         node_executable: PathBuf,
         runtime: NodeRuntimeFingerprint,
+        host_module: PathBuf,
     ) -> Self {
         Self {
             node_executable,
             runtime,
-            host_module: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("assets")
-                .join("extension-host.mjs"),
+            host_module,
             limits: JavaScriptHostLimits::default(),
         }
     }
@@ -118,6 +119,93 @@ impl JavaScriptHostConfig {
         }
         Ok(())
     }
+}
+
+pub fn materialize_bundled_extension_host(
+    directory: impl AsRef<Path>,
+) -> Result<PathBuf, JavaScriptHostError> {
+    let directory = directory.as_ref();
+    fs_create_dir_all(directory)?;
+    let directory = std::fs::canonicalize(directory).map_err(|error| {
+        JavaScriptHostError::InvalidConfiguration(format!(
+            "cannot canonicalize JavaScript Host directory {}: {error}",
+            directory.display()
+        ))
+    })?;
+    let digest = hex::encode(Sha256::digest(BUNDLED_EXTENSION_HOST));
+    let path = directory.join(format!("extension-host-{digest}.mjs"));
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(JavaScriptHostError::InvalidConfiguration(
+                    "bundled JavaScript Host path is not a regular file".into(),
+                ));
+            }
+            let observed = std::fs::read(&path).map_err(|error| {
+                JavaScriptHostError::InvalidConfiguration(format!(
+                    "cannot read bundled JavaScript Host {}: {error}",
+                    path.display()
+                ))
+            })?;
+            if observed != BUNDLED_EXTENSION_HOST {
+                return Err(JavaScriptHostError::InvalidConfiguration(
+                    "bundled JavaScript Host content differs from its digest path".into(),
+                ));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .map_err(|error| {
+                    JavaScriptHostError::InvalidConfiguration(format!(
+                        "cannot create bundled JavaScript Host {}: {error}",
+                        path.display()
+                    ))
+                })?;
+            file.write_all(BUNDLED_EXTENSION_HOST).map_err(|error| {
+                JavaScriptHostError::InvalidConfiguration(format!(
+                    "cannot write bundled JavaScript Host {}: {error}",
+                    path.display()
+                ))
+            })?;
+            file.sync_all().map_err(|error| {
+                JavaScriptHostError::InvalidConfiguration(format!(
+                    "cannot sync bundled JavaScript Host {}: {error}",
+                    path.display()
+                ))
+            })?;
+        }
+        Err(error) => {
+            return Err(JavaScriptHostError::InvalidConfiguration(format!(
+                "cannot inspect bundled JavaScript Host {}: {error}",
+                path.display()
+            )));
+        }
+    }
+    let canonical = std::fs::canonicalize(&path).map_err(|error| {
+        JavaScriptHostError::InvalidConfiguration(format!(
+            "cannot canonicalize bundled JavaScript Host {}: {error}",
+            path.display()
+        ))
+    })?;
+    if !canonical.starts_with(&directory) {
+        return Err(JavaScriptHostError::InvalidConfiguration(
+            "bundled JavaScript Host escaped its managed directory".into(),
+        ));
+    }
+    Ok(canonical)
+}
+
+fn fs_create_dir_all(path: &Path) -> Result<(), JavaScriptHostError> {
+    std::fs::create_dir_all(path).map_err(|error| {
+        JavaScriptHostError::InvalidConfiguration(format!(
+            "cannot create JavaScript Host directory {}: {error}",
+            path.display()
+        ))
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

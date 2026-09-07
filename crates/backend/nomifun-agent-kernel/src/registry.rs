@@ -1124,6 +1124,27 @@ impl KernelRegistry {
         Ok(())
     }
 
+    pub async fn release_resources_for_mount(
+        &self,
+        mount_id: &PluginMountId,
+    ) -> Result<(), KernelError> {
+        let handles = {
+            let mut guard = self.resource_handles.lock().await;
+            let keys = guard
+                .keys()
+                .filter(|key| &key.mount_id == mount_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            keys.into_iter()
+                .filter_map(|key| guard.remove(&key))
+                .collect::<Vec<_>>()
+        };
+        for handle in handles {
+            handle.release().await?;
+        }
+        Ok(())
+    }
+
     pub async fn release_all_resources(&self) -> Result<(), KernelError> {
         let handles = {
             let mut guard = self.resource_handles.lock().await;

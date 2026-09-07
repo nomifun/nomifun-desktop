@@ -56,17 +56,28 @@
     Credential reference、Candidate/Release、Operation 与明确命令。Managed Node 下载
     只接受服务端 official-LTS offer digest 的确认，客户端不能自报版本、target 或 release
     digest；Bridge、process、generation、ledger 和 secret 不进入 HTTP wire。
-13. 普通 Plugin 的 Kernel↔Node Adapter 已按 canonical `CapabilityKind` 接通 Tool、
+## 2026-09-07 实施进展修订
+
+1. 普通 Plugin 的 Kernel↔Node Adapter 已按 canonical `CapabilityKind` 接通 Tool、
     Context Contributor 和 Resource Provider；完整 `ResolvedCapability`、Mount 与 Artifact
     digest 参与每次执行和资源句柄缓存。`plugin-package-v1` 不发布 Role Contract、
     Role Provider 或 Package-authored Plugin Service，也不以 synthetic Role 包装普通能力。
-14. Config/Credential/KV exact CAS、stable `dataDir` 与 owner mutation 已进入 migration
+2. Config/Credential/KV exact CAS、stable `dataDir` 与 owner mutation 已进入 migration
     069 和真实 SQLite repository；`nomifun-plugin-service` 正在接通 Artifact、Candidate、
     Apply/Restore/Uninstall/Delete-data、Host fence 与 Operation application service。
     该 service 不暴露直接 Host invoke，正式能力调用只允许进入 Kernel consumer 主链。
-15. `nomifun-miniapp-platform` 当前只冻结新的 M1 domain/application port 与内存合同测试；
+3. `nomifun-miniapp-platform` 当前只冻结新的 M1 domain/application port 与内存合同测试；
     在 migration 070+、SQLite adapter、dedicated Service Host、Bridge 和产品入口完成前，
     不计作 M1 实施完成，也不读取或迁移旧 MiniApp 数据。
+4. NomiCore 当前 Desktop 组合根已接入 Plugin application service、Artifact Store、
+    Shared Host fence 与唯一 Kernel Registry publisher；enabled Mount 会在启动时按
+    exact Artifact/Config/Credential/dataDir 恢复，卸载或停用会撤销 publication。
+    Plugin 管理路由统一要求 installation owner 与 local-trust。Nomi consumer adapter
+    完成前，Plugin capability 虽进入统一 Catalog，但对 Agent 明确 unavailable。
+5. bundled JavaScript Host 资产按内容 digest 物化到应用数据目录，安装版不读取
+    `CARGO_MANIFEST_DIR`。`nomifun-js-authoring` 已建立统一 ID/digest 的 Source Store、
+    JS/TS scaffold、source snapshot、dependency exact-lock 与 staging cleanup；npm
+    resolver/cache、fixed packer 和 Build Host 继续作为 N1-4 未完成项。
 
 ## 0. 怎样阅读这份文档
 

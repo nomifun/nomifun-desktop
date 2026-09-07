@@ -843,6 +843,13 @@ fn create_nomi_core_router_with_all_state(
         &instance_owner_state,
     );
 
+    let plugin_authenticated = protect_instance_owner(
+        super::plugin_platform::plugin_routes(states.plugin)
+            .route_layer(middleware::from_fn(require_local_trust_middleware)),
+        &auth_mw_state,
+        &instance_owner_state,
+    );
+
     // Unified agent listing/refresh/test routes protected by auth middleware
     let agent_authenticated = protect_instance_owner(
         agent_routes(states.agent),
@@ -1179,6 +1186,7 @@ fn create_nomi_core_router_with_all_state(
         .merge(conversation_ops_authenticated)
         .merge(ssh_host_authenticated)
         .merge(miniapp_authenticated)
+        .merge(plugin_authenticated)
         .merge(agent_authenticated)
         .merge(nomi_core_agent_authenticated)
         .merge(nomi_core_remote_authenticated)

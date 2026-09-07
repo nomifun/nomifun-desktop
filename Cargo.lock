@@ -6241,12 +6241,17 @@ dependencies = [
  "nomifun-file",
  "nomifun-gateway",
  "nomifun-idmm",
+ "nomifun-js-host",
+ "nomifun-js-kernel-adapter",
+ "nomifun-js-runtime",
  "nomifun-knowledge",
  "nomifun-mcp",
  "nomifun-miniapp",
  "nomifun-model-invoke",
  "nomifun-net",
  "nomifun-office",
+ "nomifun-plugin-platform",
+ "nomifun-plugin-service",
  "nomifun-public",
  "nomifun-realtime",
  "nomifun-requirement",
@@ -6747,6 +6752,23 @@ dependencies = [
  "sqlx",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "nomifun-js-authoring"
+version = "0.7.4"
+dependencies = [
+ "hex",
+ "nomifun-agent-contracts",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.19",
+ "unicode-normalization",
+ "uuid",
+ "walkdir",
 ]
 
 [[package]]

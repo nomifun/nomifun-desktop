@@ -13,7 +13,7 @@ use nomifun_agent_contracts::{
 use nomifun_js_host::{
     ExtensionHostSupervisor, ImmutablePluginModule, JavaScriptHostConfig,
     JavaScriptHostError, JavaScriptHostLimits, JavaScriptHostState,
-    MountLoadDemand,
+    MountLoadDemand, materialize_bundled_extension_host,
 };
 use nomifun_js_runtime::{NodeProbeCandidate, NodeRuntimeResolver};
 use serde_json::json;
@@ -190,6 +190,27 @@ async fn wait_until_stopped(supervisor: &ExtensionHostSupervisor) {
     })
     .await
     .expect("Host generation should stop");
+}
+
+#[test]
+fn bundled_host_is_materialized_as_an_immutable_digest_named_file() {
+    let temp = TempDir::new().unwrap();
+    let first = materialize_bundled_extension_host(temp.path()).unwrap();
+    let second = materialize_bundled_extension_host(temp.path()).unwrap();
+    assert_eq!(first, second);
+    assert!(
+        first
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| {
+                value.starts_with("extension-host-")
+                    && value.ends_with(".mjs")
+            })
+    );
+    assert_eq!(
+        std::fs::read(first).unwrap(),
+        include_bytes!("../assets/extension-host.mjs")
+    );
 }
 
 #[tokio::test]
