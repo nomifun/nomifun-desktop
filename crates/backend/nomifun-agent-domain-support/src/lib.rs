@@ -28,7 +28,11 @@ use nomifun_agent_contracts::{
     capability_surface_declarations, digest_payload,
 };
 use nomifun_agent_kernel::{
-    CapabilityHandler, CapabilityInvocationContext, KernelError, PluginRegistration,
+    CapabilityContextContributionFactory, CapabilityContextContributionRequest,
+    CapabilityHandler, CapabilityInvocationContext,
+    CapabilityResourceProviderFactory, CapabilityResourceProviderRequest,
+    ContextContributionResult, KernelError, PluginRegistration,
+    ResourceProviderResult,
 };
 use serde_json::json;
 use thiserror::Error;
@@ -212,6 +216,46 @@ struct DeclarativeCapabilityHandler {
     action_id: ActionId,
 }
 
+#[derive(Clone)]
+struct UnavailableContextFactory {
+    capability_id: CapabilityId,
+}
+
+#[async_trait]
+impl CapabilityContextContributionFactory for UnavailableContextFactory {
+    async fn contribute(
+        &self,
+        _request: CapabilityContextContributionRequest,
+    ) -> Result<ContextContributionResult, KernelError> {
+        Err(KernelError::CapabilityExecution {
+            reason: format!(
+                "bundled Context capability {} has no configured owner",
+                self.capability_id.as_ref()
+            ),
+        })
+    }
+}
+
+#[derive(Clone)]
+struct UnavailableResourceFactory {
+    capability_id: CapabilityId,
+}
+
+#[async_trait]
+impl CapabilityResourceProviderFactory for UnavailableResourceFactory {
+    async fn acquire(
+        &self,
+        _request: CapabilityResourceProviderRequest,
+    ) -> Result<ResourceProviderResult, KernelError> {
+        Err(KernelError::CapabilityExecution {
+            reason: format!(
+                "bundled Resource capability {} has no configured owner",
+                self.capability_id.as_ref()
+            ),
+        })
+    }
+}
+
 #[async_trait]
 impl CapabilityHandler for DeclarativeCapabilityHandler {
     async fn invoke(
@@ -265,6 +309,8 @@ pub fn registration(spec: PackageSpec) -> Result<PluginRegistration, DomainRegis
     let mut seen = BTreeSet::new();
     let mut capability_manifests = Vec::with_capacity(spec.capabilities.len());
     let mut handler_specs = Vec::new();
+    let mut context_factory_specs = Vec::new();
+    let mut resource_factory_specs = Vec::new();
 
     for capability in spec.capabilities {
         let capability_id = CapabilityId::from(capability.id);
@@ -307,6 +353,27 @@ pub fn registration(spec: PackageSpec) -> Result<PluginRegistration, DomainRegis
                     ),
                 });
             }
+        };
+        let context_schema_refs = if capability.kind == CapabilityKind::ContextContributor {
+            context_factory_specs.push(capability_id.clone());
+            vec![schema_ref(
+                capability.id,
+                "context",
+                &output_digest,
+            )]
+        } else {
+            Vec::new()
+        };
+        if capability.kind == CapabilityKind::ResourceProvider {
+            resource_factory_specs.push(capability_id.clone());
+        }
+        let event_schema_refs = if matches!(
+            capability.kind,
+            CapabilityKind::EventSource | CapabilityKind::EventConsumer
+        ) {
+            vec![schema_ref(capability.id, "event", &output_digest)]
+        } else {
+            Vec::new()
         };
 
         let supported_surfaces: Vec<String> = if capability.host_surfaces.is_empty() {
@@ -367,8 +434,8 @@ pub fn registration(spec: PackageSpec) -> Result<PluginRegistration, DomainRegis
             })),
             contributions: CapabilityContributions {
                 actions,
-                context_schema_refs: Vec::new(),
-                event_schema_refs: Vec::new(),
+                context_schema_refs,
+                event_schema_refs,
                 resource_kinds,
                 host_ports: Vec::new(),
             },
@@ -466,6 +533,18 @@ pub fn registration(spec: PackageSpec) -> Result<PluginRegistration, DomainRegis
                 capability_id,
                 action_id,
             }),
+        )?;
+    }
+    for capability_id in context_factory_specs {
+        registration.add_capability_context_factory(
+            capability_id.clone(),
+            Arc::new(UnavailableContextFactory { capability_id }),
+        )?;
+    }
+    for capability_id in resource_factory_specs {
+        registration.add_capability_resource_factory(
+            capability_id.clone(),
+            Arc::new(UnavailableResourceFactory { capability_id }),
         )?;
     }
     Ok(registration)

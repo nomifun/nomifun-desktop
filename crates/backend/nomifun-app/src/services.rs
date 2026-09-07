@@ -1963,12 +1963,10 @@ pub struct AppServices {
     /// `{data_dir}/workshop/`; project documents live in SQLite. Shared by the
     /// `/api/creative-studio/*` routes and Gateway capabilities.
     pub workshop_service: Arc<nomifun_workshop::WorkshopService>,
-    /// Singleton 小程序 (mini-app) service — owner-scoped CRUD over the
-    /// `miniapps` table, the document read the auth-exempt serve route uses, and
-    /// the per-app working copy under `{work_dir}/miniapps/{miniapp_id}/`.
-    /// Shared so the serve route and the publish route cannot disagree about
-    /// which document a given id names.
-    pub miniapp_service: Arc<nomifun_miniapp::MiniAppService>,
+    /// Phase M1 MiniApp application facade over the clean-start, owner-scoped
+    /// Product/Project/Release data root.
+    pub miniapp_application:
+        Arc<nomifun_miniapp_platform::MiniAppM1ApplicationService>,
     /// Singleton generation service — the Creative Studio media task queue.
     /// Shared by the `/api/creative-studio/tasks*` routes and Gateway tools.
     pub creation_service: Arc<nomifun_creation::CreationService>,
@@ -3443,21 +3441,18 @@ impl AppServices {
         let browser_lane_provider_slot =
             nomifun_ai_agent::BrowserLaneClientProviderSlot::new();
 
-        // 小程序 (mini-apps): the published snapshot lives in SQLite (that is what
-        // the serve route streams into an iframe), while each app's working copy
-        // lives on disk under `{work_dir}/miniapps/{miniapp_id}/`. `work_dir` is
-        // the SAME resolved value `ConversationService` uses as its workspace
-        // root — passed in, never re-resolved, or the absolute path this service
-        // hands 「继续迭代」 and the directory it materializes into could name
-        // different places. No background task: the working copy is materialized
-        // lazily on first provision/publish, so a user who never iterates pays
-        // nothing.
-        let miniapp_service = Arc::new(nomifun_miniapp::MiniAppService::new(
-            work_dir.clone(),
-            Arc::new(nomifun_db::SqliteMiniAppRepository::new(
+        // MiniApp M1 starts from its own owner-scoped Product/Project/Release
+        // data root. Legacy HTML snapshots and conversation workspaces are not
+        // migrated, read, or dual-written.
+        let miniapp_repository: Arc<dyn nomifun_db::IMiniAppM1Repository> =
+            Arc::new(nomifun_db::SqliteMiniAppM1Repository::new(
                 database.pool().clone(),
-            )),
-        ));
+            ));
+        let miniapp_application = Arc::new(
+            nomifun_miniapp_platform::MiniAppM1ApplicationService::new(
+                miniapp_repository,
+            ),
+        );
 
         // SSH remote sessions: ONE process-level connection pool, built here
         // because the agent factory below is its first consumer and the host-book
@@ -3640,7 +3635,7 @@ impl AppServices {
             customer_service_service,
             cs_dialogue_engine,
             workshop_service,
-            miniapp_service,
+            miniapp_application,
             creation_service,
             model_invoke_service,
             knowledge_service,

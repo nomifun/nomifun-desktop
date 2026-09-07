@@ -20,10 +20,11 @@ use nomifun_agent_control_plane::{
     AgentControlPlane, CompilerReleaseInputs, OfficialTemplateCatalog, PresetPreviewCompiler,
 };
 use nomifun_agent_kernel::{
-    CompilerEnvironment, KernelRegistry, MaterializationPolicy,
+    CompilerEnvironment, InMemoryPluginStatePersistence, KernelRegistry,
+    MaterializationPolicy,
 };
 use nomifun_agent_platform::{
-    KernelCatalogProvider, SqlitePluginStatePersistence,
+    KernelCatalogProvider,
 };
 use nomifun_api_types::{AgentResolvedSnapshot, TerminalExitEvent};
 use nomifun_auth::extract_token_from_ws_headers;
@@ -113,8 +114,8 @@ pub struct ModuleStates {
     pub customer_service: nomifun_customer_service::CustomerServiceRouterState,
     /// Creative Studio project, asset, template, and archive domain.
     pub workshop: WorkshopRouterState,
-    /// 小程序 (mini-app) library: metadata CRUD + the document serve channel.
-    pub miniapp: nomifun_miniapp::MiniAppRouterState,
+    /// Phase M1 MiniApp Library and Workshop.
+    pub miniapp: super::miniapp_m1::MiniAppM1RouterState,
     /// Phase N1 Plugin Library and lifecycle product state. Capability
     /// execution remains owned by the shared Kernel registry.
     pub plugin: nomifun_plugin_service::PluginRouterState,
@@ -716,12 +717,11 @@ async fn build_nomi_core_agent_api_state(
     // features; coding-native previews therefore remain explicitly blocked
     // until that runtime is separately commissioned.
     policy.available_runtime_features = Default::default();
-    let state_persistence = Arc::new(
-        SqlitePluginStatePersistence::from_pool(
-            services.database.pool().clone(),
-        )
-        .await?,
-    );
+    // Kernel PluginState is an in-process capability-state cache. Durable
+    // owner data belongs to the Plugin repository/KV and MiniApp data roots;
+    // this NomiCore composition does not own the Fresh-v4 `plugin_states`
+    // table and must not open it from the legacy application database.
+    let state_persistence = Arc::new(InMemoryPluginStatePersistence::new());
     let kernel = Arc::new(KernelRegistry::new(
         policy,
         state_persistence,
@@ -1704,12 +1704,14 @@ pub fn build_workshop_state(services: &AppServices) -> WorkshopRouterState {
     )
 }
 
-/// Build the 小程序 (mini-app) router state, reusing the singleton
-/// `miniapp_service`. The authenticated CRUD router and the auth-exempt serve
-/// router are both built from this one state, so the document a runner iframe
-/// loads is the document the last solidify wrote.
-pub fn build_miniapp_state(services: &AppServices) -> nomifun_miniapp::MiniAppRouterState {
-    nomifun_miniapp::MiniAppRouterState::new((*services.miniapp_service).clone())
+/// Build the Phase M1 MiniApp router state from the clean-start application
+/// facade composed by `AppServices`.
+pub fn build_miniapp_state(
+    services: &AppServices,
+) -> super::miniapp_m1::MiniAppM1RouterState {
+    super::miniapp_m1::MiniAppM1RouterState::new(
+        services.miniapp_application.clone(),
+    )
 }
 
 /// Build the 生成引擎 (creation) router state, reusing the singleton

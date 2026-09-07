@@ -200,10 +200,8 @@ define_entity_id!(
 define_entity_id!(
     /// Globally unique mini-app identifier.
     ///
-    /// Identifies a solidified single-file web tool in the `miniapps` table. It
-    /// is also the capability in the auth-exempt
-    /// `GET /api/miniapps/{miniapp_id}/serve` URL, so it must stay unguessable —
-    /// which a bare UUIDv7 is.
+    /// Identifies an owner-scoped MiniApp Product in the M1 data root. It must
+    /// stay unguessable at API boundaries, which a bare UUIDv7 provides.
     MiniAppId
 );
 define_entity_id!(

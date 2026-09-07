@@ -670,12 +670,10 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     text_ref!("terminal_sessions", "user_id" => "users", "user_id", false, "idx_terminal_sessions_user_id", Cascade),
     text_ref!("ssh_hosts", "user_id" => "users", "user_id", false, "idx_ssh_hosts_user_id", Cascade),
     text_ref!("miniapps", "user_id" => "users", "user_id", false, "idx_miniapps_user_id", Cascade),
-    // Provenance, not ownership: the app is a finished artifact that outlives the
-    // conversation it was solidified from, so deleting that conversation walks
-    // this column back to NULL (as `channel_sessions.conversation_id` does) and
-    // leaves the app runnable. Cascade would delete a working tool because its
-    // build log was tidied up.
-    text_ref!("miniapps", "source_conversation_id" => "conversations", "conversation_id", true, "idx_miniapps_source_conversation_id", SetNull),
+    // The retired store is immutable historical data. Its provenance token
+    // remains verbatim after Conversation deletion and is never resolved by a
+    // production repository.
+    text_ref!("miniapps", "source_conversation_id" => "conversations", "conversation_id", true, "idx_miniapps_source_conversation_id", KeepHistory),
     text_ref!("miniapp_library_state", "owner_user_id" => "users", "user_id", false, "idx_miniapp_library_state_owner_user_id", Cascade),
     text_ref!("miniapp_products", "owner_user_id" => "users", "user_id", false, "idx_miniapp_products_owner_user_id", Cascade),
     text_ref!("miniapp_products", "icon_asset_id" => "workshop_assets", "asset_id", true, "idx_miniapp_products_icon_asset_id", SetNull),
