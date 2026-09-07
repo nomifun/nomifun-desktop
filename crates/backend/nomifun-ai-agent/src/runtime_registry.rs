@@ -6,7 +6,7 @@
 //! `AgentTurnHandle`.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, OnceLock, Weak};
 
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -63,6 +63,19 @@ pub type AgentRuntimeModelConfigResolver = Arc<
 /// The trait is object-safe for dependency injection.
 #[async_trait]
 pub trait AgentRuntimeRegistry: Send + Sync {
+    /// Install the single host-owned resolver for exact Nomi Plugin Tool
+    /// sessions. Registries that do not own the in-process Nomi factory reject
+    /// this composition operation.
+    fn install_nomi_plugin_tool_session_provider(
+        &self,
+        _provider: Arc<dyn crate::NomiPluginToolSessionProvider>,
+    ) -> Result<(), AppError> {
+        Err(AppError::Conflict(
+            "Agent runtime registry cannot host a Nomi Plugin Tool session provider"
+                .to_owned(),
+        ))
+    }
+
     /// Get an existing runtime by conversation ID.
     fn get_runtime(&self, conversation_id: &str) -> Option<AgentRuntimeHandle>;
 
@@ -503,6 +516,10 @@ pub struct InMemoryAgentRuntimeRegistry {
     /// `terminate_runtime_until_confirmed`'s retry loop over a stuck
     /// quarantined runtime) must consume exactly one unit of restart budget.
     counted_crash_slots: Arc<DashMap<String, Weak<OnceCell<AgentRuntimeHandle>>>>,
+    /// One process-owned resolver installed by the app composition root before
+    /// any Nomi runtime is admitted.
+    plugin_tool_session_provider:
+        Arc<OnceLock<Arc<dyn crate::NomiPluginToolSessionProvider>>>,
 }
 
 impl InMemoryAgentRuntimeRegistry {
@@ -519,6 +536,7 @@ impl InMemoryAgentRuntimeRegistry {
             nomi_session_persistence: None,
             governor: Arc::new(RestartGovernor::default()),
             counted_crash_slots: Arc::new(DashMap::new()),
+            plugin_tool_session_provider: Arc::new(OnceLock::new()),
         }
     }
 
@@ -1250,6 +1268,8 @@ impl InMemoryAgentRuntimeRegistry {
         }
 
         let factory = self.factory.clone();
+        let plugin_tool_session_provider =
+            self.plugin_tool_session_provider.get().cloned();
         // Build-failure streak accounting lives INSIDE the init closure so it
         // is exact under single-flight: when a failed init lets the next
         // queued waiter run its own attempt, each real factory run is counted
@@ -1274,7 +1294,24 @@ impl InMemoryAgentRuntimeRegistry {
                      error for the underlying cause)."
                 )));
             }
-            match factory(options).await {
+            let plugin_tool_session = match plugin_tool_session_provider {
+                Some(provider) => {
+                    provider
+                        .resolve(crate::NomiPluginToolSessionRequest {
+                            owner_id: options.user_id.clone(),
+                            conversation_id: options.conversation_id.clone(),
+                        })
+                        .await?
+                }
+                None => None,
+            };
+            let factory_result =
+                crate::plugin_tools::with_nomi_plugin_tool_session(
+                    plugin_tool_session,
+                    factory(options),
+                )
+                .await;
+            match factory_result {
                 Ok(runtime) => {
                     governor.record_build_success(&gated_conversation_id);
                     Ok(runtime)
@@ -1422,6 +1459,20 @@ impl InMemoryAgentRuntimeRegistry {
 
 #[async_trait]
 impl AgentRuntimeRegistry for InMemoryAgentRuntimeRegistry {
+    fn install_nomi_plugin_tool_session_provider(
+        &self,
+        provider: Arc<dyn crate::NomiPluginToolSessionProvider>,
+    ) -> Result<(), AppError> {
+        self.plugin_tool_session_provider
+            .set(provider)
+            .map_err(|_| {
+                AppError::Conflict(
+                    "the Nomi Plugin Tool session provider is already installed"
+                        .to_owned(),
+                )
+            })
+    }
+
     fn get_runtime(&self, conversation_id: &str) -> Option<AgentRuntimeHandle> {
         self.initialized_runtime(conversation_id)
     }
@@ -1759,8 +1810,55 @@ mod tests {
     use futures_util::FutureExt;
     use nomi_types::message::{ContentBlock, Message, Role};
     use nomifun_common::{AgentKillReason, AgentType, ConversationStatus, TimestampMs};
+    use nomifun_agent_contracts::{
+        DigestHex, ResolvedSnapshotId, ResolvedSnapshotRef, StrictJsonValue,
+    };
     use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
     use tokio::sync::{Semaphore, broadcast};
+
+    struct EmptyPluginToolInvoker;
+
+    #[async_trait::async_trait]
+    impl crate::NomiPluginToolInvoker for EmptyPluginToolInvoker {
+        async fn invoke(
+            &self,
+            _request: crate::NomiPluginToolInvocation,
+        ) -> Result<StrictJsonValue, crate::NomiPluginToolError> {
+            unreachable!("empty Plugin Tool session has no invocable action")
+        }
+    }
+
+    struct CountingPluginToolProvider {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::NomiPluginToolSessionProvider for CountingPluginToolProvider {
+        async fn resolve(
+            &self,
+            request: crate::NomiPluginToolSessionRequest,
+        ) -> Result<Option<crate::NomiPluginToolSession>, AppError> {
+            assert_eq!(
+                request.owner_id,
+                "0190f5fe-7c00-7a00-8000-000000000001"
+            );
+            assert_eq!(request.conversation_id, "conv-plugin-provider");
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(
+                crate::NomiPluginToolSession::new(
+                    ResolvedSnapshotRef {
+                        snapshot_id: ResolvedSnapshotId::from(
+                            "snapshot-plugin-provider",
+                        ),
+                        snapshot_digest: DigestHex::from("a".repeat(64)),
+                    },
+                    Vec::new(),
+                    Arc::new(EmptyPluginToolInvoker),
+                )
+                .unwrap(),
+            ))
+        }
+    }
 
     /// A minimal mock Agent for testing runtime-registry logic. Lives behind
     /// the `AgentRuntimeHandle::Mock` trait-object variant so we don't have to
@@ -2433,6 +2531,59 @@ mod tests {
         let runtime = registry.get_or_create_runtime("conv-1", make_runtime_options("conv-1")).await.unwrap();
         assert_eq!(runtime.conversation_id(), "conv-1");
         assert_eq!(registry.active_runtime_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn plugin_tool_provider_is_single_flight_and_factory_scoped() {
+        let provider_calls = Arc::new(AtomicUsize::new(0));
+        let factory_calls = Arc::new(AtomicUsize::new(0));
+        let factory_observed_session = Arc::new(AtomicBool::new(false));
+        let factory_calls_capture = Arc::clone(&factory_calls);
+        let observed_capture = Arc::clone(&factory_observed_session);
+        let factory: AgentRuntimeFactory = Arc::new(move |options| {
+            factory_calls_capture.fetch_add(1, Ordering::SeqCst);
+            let observed_capture = Arc::clone(&observed_capture);
+            async move {
+                observed_capture.store(
+                    crate::plugin_tools::current_nomi_plugin_tool_session()
+                        .is_some(),
+                    Ordering::SeqCst,
+                );
+                Ok(mock_runtime(MockAgent::new(
+                    &options.conversation_id,
+                    None,
+                )))
+            }
+            .boxed()
+        });
+        let registry = Arc::new(InMemoryAgentRuntimeRegistry::new(factory));
+        registry
+            .install_nomi_plugin_tool_session_provider(Arc::new(
+                CountingPluginToolProvider {
+                    calls: Arc::clone(&provider_calls),
+                },
+            ))
+            .unwrap();
+
+        let (left, right) = tokio::join!(
+            registry.get_or_create_runtime(
+                "conv-plugin-provider",
+                make_runtime_options("conv-plugin-provider"),
+            ),
+            registry.get_or_create_runtime(
+                "conv-plugin-provider",
+                make_runtime_options("conv-plugin-provider"),
+            ),
+        );
+        assert!(left.is_ok());
+        assert!(right.is_ok());
+        assert_eq!(provider_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(factory_calls.load(Ordering::SeqCst), 1);
+        assert!(factory_observed_session.load(Ordering::SeqCst));
+        assert!(
+            crate::plugin_tools::current_nomi_plugin_tool_session().is_none(),
+            "the exact session must not escape the factory task scope"
+        );
     }
 
     #[tokio::test]

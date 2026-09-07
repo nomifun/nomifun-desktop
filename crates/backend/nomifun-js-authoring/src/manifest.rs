@@ -1,9 +1,9 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use nomifun_agent_contracts::{
-    CredentialSlotDeclaration, JavaScriptBuildProfile, LocalizedMetadata,
-    PackageContributions, PackageId, RuntimeFeatureRef, StrictJsonValue,
-    VersionString,
+    CanonicalSchemaRef, CredentialSlotDeclaration, JavaScriptBuildProfile,
+    LocalizedMetadata, PackageContributions, PackageId, RuntimeFeatureRef,
+    StrictJsonValue, VersionString, validate_plugin_schema_registry,
 };
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -37,6 +37,7 @@ pub struct PluginSourceManifest {
     requires_runtime_features: Vec<RuntimeFeatureRef>,
     config_schema: StrictJsonValue,
     contributions: PackageContributions,
+    schemas: BTreeMap<CanonicalSchemaRef, StrictJsonValue>,
     credential_slots: Vec<CredentialSlotDeclaration>,
 }
 
@@ -62,6 +63,7 @@ impl PluginSourceManifest {
                 "type": "object"
             })),
             contributions: PackageContributions::default(),
+            schemas: BTreeMap::new(),
             credential_slots: Vec::new(),
         };
         manifest.validate()?;
@@ -130,6 +132,8 @@ impl PluginSourceManifest {
                 "plugin-package-v1 does not allow role contracts or role providers",
             ));
         }
+        validate_plugin_schema_registry(&self.contributions, &self.schemas)
+            .map_err(|error| invalid(error.to_string()))?;
         let package_ref = (
             self.package_id.as_ref(),
             self.package_version.as_ref(),
@@ -222,6 +226,10 @@ impl PluginSourceManifest {
         &self.contributions
     }
 
+    pub fn schemas(&self) -> &BTreeMap<CanonicalSchemaRef, StrictJsonValue> {
+        &self.schemas
+    }
+
     pub fn credential_slots(&self) -> &[CredentialSlotDeclaration] {
         &self.credential_slots
     }
@@ -231,6 +239,17 @@ impl PluginSourceManifest {
         contributions: PackageContributions,
     ) -> Result<Self, AuthoringError> {
         self.contributions = contributions;
+        self.validate()?;
+        Ok(self)
+    }
+
+    pub fn with_contributions_and_schemas(
+        mut self,
+        contributions: PackageContributions,
+        schemas: BTreeMap<CanonicalSchemaRef, StrictJsonValue>,
+    ) -> Result<Self, AuthoringError> {
+        self.contributions = contributions;
+        self.schemas = schemas;
         self.validate()?;
         Ok(self)
     }

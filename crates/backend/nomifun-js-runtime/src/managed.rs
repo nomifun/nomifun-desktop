@@ -1,12 +1,14 @@
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
-use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use async_trait::async_trait;
 use nomifun_agent_contracts::{
-    NodeProbeDisposition, NodeRuntimeFingerprint, NodeRuntimeSourceKind,
-    RECOMMENDED_NODE_LTS_MAJOR, RuntimeTarget,
+    DigestHex, NodeProbeDisposition, NodeRuntimeFingerprint,
+    NodeRuntimeSourceKind, RECOMMENDED_NODE_LTS_MAJOR, RuntimeTarget,
+    digest_payload,
 };
 use semver::Version;
 use serde::Deserialize;
@@ -58,6 +60,85 @@ pub struct ManagedNodeRelease {
     pub archive_sha256: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct ManagedRuntimeOffer {
+    pub offer_digest: DigestHex,
+    pub node_version: String,
+    pub runtime_target: RuntimeTarget,
+    pub archive_file_name: String,
+    pub archive_sha256: String,
+    pub archive_size_bytes: Option<u64>,
+}
+
+#[derive(serde::Serialize)]
+struct ManagedRuntimeOfferDigestInput<'a> {
+    node_version: &'a str,
+    runtime_target: &'a RuntimeTarget,
+    archive_file_name: &'a str,
+    archive_sha256: &'a str,
+}
+
+impl ManagedRuntimeOffer {
+    fn new(
+        runtime_target: RuntimeTarget,
+        release: ManagedNodeRelease,
+    ) -> Result<Self, JavaScriptRuntimeError> {
+        let node_version = release.version.to_string();
+        let offer_digest = digest_payload(&ManagedRuntimeOfferDigestInput {
+            node_version: &node_version,
+            runtime_target: &runtime_target,
+            archive_file_name: &release.archive_file_name,
+            archive_sha256: &release.archive_sha256,
+        })
+        .map_err(|error| JavaScriptRuntimeError::Contract(error.to_string()))?;
+        Ok(Self {
+            offer_digest,
+            node_version,
+            runtime_target,
+            archive_file_name: release.archive_file_name,
+            archive_sha256: release.archive_sha256,
+            archive_size_bytes: None,
+        })
+    }
+
+    fn release(&self) -> Result<ManagedNodeRelease, JavaScriptRuntimeError> {
+        let version = Version::parse(&self.node_version)
+            .map_err(|error| JavaScriptRuntimeError::Contract(error.to_string()))?;
+        let expected = Self::new(
+            self.runtime_target.clone(),
+            ManagedNodeRelease {
+                version: version.clone(),
+                archive_file_name: self.archive_file_name.clone(),
+                archive_sha256: self.archive_sha256.clone(),
+            },
+        )?;
+        if expected.offer_digest != self.offer_digest {
+            return Err(JavaScriptRuntimeError::DownloadOfferStale);
+        }
+        Ok(ManagedNodeRelease {
+            version,
+            archive_file_name: self.archive_file_name.clone(),
+            archive_sha256: self.archive_sha256.clone(),
+        })
+    }
+}
+
+#[async_trait]
+pub trait ManagedRuntimeProvider: Send + Sync {
+    async fn resolve_offer(
+        &self,
+    ) -> Result<ManagedRuntimeOffer, JavaScriptRuntimeError>;
+
+    async fn install_offer(
+        &self,
+        offer: &ManagedRuntimeOffer,
+    ) -> Result<NodeRuntimeFingerprint, JavaScriptRuntimeError>;
+
+    async fn installed_executables(
+        &self,
+    ) -> Result<Vec<PathBuf>, JavaScriptRuntimeError>;
+}
+
 #[derive(Clone)]
 pub struct ManagedNodeProvisioner {
     managed_root: PathBuf,
@@ -92,11 +173,23 @@ impl ManagedNodeProvisioner {
         approval: &ManagedNodeDownloadApproval,
     ) -> Result<NodeRuntimeFingerprint, JavaScriptRuntimeError> {
         approval.validate()?;
-        let target = approval.runtime_target.as_ref();
+        let offer = self.resolve_offer().await?;
+        self.install_offer(&offer).await
+    }
+
+    async fn provision_exact(
+        &self,
+        offer: &ManagedRuntimeOffer,
+    ) -> Result<NodeRuntimeFingerprint, JavaScriptRuntimeError> {
+        if offer.runtime_target.as_ref() != current_runtime_target() {
+            return Err(JavaScriptRuntimeError::DownloadOfferStale);
+        }
+        let release = offer.release()?;
+        if release.version.major != u64::from(RECOMMENDED_NODE_LTS_MAJOR) {
+            return Err(JavaScriptRuntimeError::DownloadOfferStale);
+        }
+        let target = offer.runtime_target.as_ref();
         let archive_profile = archive_profile(target)?;
-        let release = self
-            .resolve_release(approval.recommended_major, archive_profile)
-            .await?;
         let final_dir = self.managed_root.join(format!(
             "node-v{}-{}",
             release.version,
@@ -255,6 +348,66 @@ impl ManagedNodeProvisioner {
                 "compatible managed probe omitted its fingerprint".into(),
             )
         })
+    }
+}
+
+#[async_trait]
+impl ManagedRuntimeProvider for ManagedNodeProvisioner {
+    async fn resolve_offer(
+        &self,
+    ) -> Result<ManagedRuntimeOffer, JavaScriptRuntimeError> {
+        let runtime_target = RuntimeTarget::from(current_runtime_target());
+        let profile = archive_profile(runtime_target.as_ref())?;
+        let release = self
+            .resolve_release(RECOMMENDED_NODE_LTS_MAJOR, profile)
+            .await?;
+        ManagedRuntimeOffer::new(runtime_target, release)
+    }
+
+    async fn install_offer(
+        &self,
+        offer: &ManagedRuntimeOffer,
+    ) -> Result<NodeRuntimeFingerprint, JavaScriptRuntimeError> {
+        self.provision_exact(offer).await
+    }
+
+    async fn installed_executables(
+        &self,
+    ) -> Result<Vec<PathBuf>, JavaScriptRuntimeError> {
+        let mut executables = Vec::new();
+        let mut entries = match tokio::fs::read_dir(&self.managed_root).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(executables);
+            }
+            Err(error) => return Err(fs_error(&self.managed_root, error)),
+        };
+        let canonical_root = dunce::canonicalize(&self.managed_root)
+            .map_err(|error| fs_error(&self.managed_root, error))?;
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|error| fs_error(&self.managed_root, error))?
+        {
+            let file_type = entry
+                .file_type()
+                .await
+                .map_err(|error| fs_error(&entry.path(), error))?;
+            if !file_type.is_dir() || file_type.is_symlink() {
+                continue;
+            }
+            let executable = entry.path().join(managed_executable_name());
+            if !executable.is_file() {
+                continue;
+            }
+            let canonical = dunce::canonicalize(&executable)
+                .map_err(|error| fs_error(&executable, error))?;
+            if canonical.starts_with(&canonical_root) {
+                executables.push(canonical);
+            }
+        }
+        executables.sort();
+        Ok(executables)
     }
 }
 
@@ -496,7 +649,7 @@ fn fs_error(path: &Path, error: std::io::Error) -> JavaScriptRuntimeError {
     }
 }
 
-fn current_runtime_target() -> &'static str {
+pub fn current_runtime_target() -> &'static str {
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     {
         "x86_64-pc-windows-msvc"
@@ -531,6 +684,17 @@ fn current_runtime_target() -> &'static str {
     )))]
     {
         "unsupported"
+    }
+}
+
+fn managed_executable_name() -> &'static str {
+    #[cfg(windows)]
+    {
+        "node.exe"
+    }
+    #[cfg(not(windows))]
+    {
+        "bin/node"
     }
 }
 

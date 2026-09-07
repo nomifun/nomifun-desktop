@@ -57,6 +57,34 @@ fn sha256(bytes: &[u8]) -> DigestHex {
     DigestHex::from(hex::encode(Sha256::digest(bytes)))
 }
 
+fn fixture_schema() -> StrictJsonValue {
+    StrictJsonValue(json!({
+        "additionalProperties": true,
+        "type": "object"
+    }))
+}
+
+fn fixture_schema_ref(name: &str) -> CanonicalSchemaRef {
+    let schema = fixture_schema();
+    CanonicalSchemaRef::from(format!(
+        "schema://fixture/{name}@1#{}",
+        digest_payload(&schema.0).unwrap().as_ref()
+    ))
+}
+
+fn fixture_schemas() -> BTreeMap<CanonicalSchemaRef, StrictJsonValue> {
+    [
+        "tool-input",
+        "tool-output",
+        "release-count-input",
+        "release-count-output",
+        "context",
+    ]
+    .into_iter()
+    .map(|name| (fixture_schema_ref(name), fixture_schema()))
+    .collect()
+}
+
 fn display(name: &str, description: &str) -> LocalizedMetadata {
     LocalizedMetadata {
         name: name.to_owned(),
@@ -81,23 +109,15 @@ fn capability(
                     } else {
                         TOOL_ACTION
                     }),
-                    input_schema: CanonicalSchemaRef::from(
-                        "schema://fixture/tool-input@1",
-                    ),
-                    output_schema: CanonicalSchemaRef::from(
-                        "schema://fixture/tool-output@1",
-                    ),
+                    input_schema: fixture_schema_ref("tool-input"),
+                    output_schema: fixture_schema_ref("tool-output"),
                     effect_class: EffectClass::Pure,
                     presentation: ToolPresentationKind::FunctionTool,
                 },
                 CapabilityActionDescriptor {
                     action_id: ActionId::from(RELEASE_COUNT_ACTION),
-                    input_schema: CanonicalSchemaRef::from(
-                        "schema://fixture/release-count-input@1",
-                    ),
-                    output_schema: CanonicalSchemaRef::from(
-                        "schema://fixture/release-count-output@1",
-                    ),
+                    input_schema: fixture_schema_ref("release-count-input"),
+                    output_schema: fixture_schema_ref("release-count-output"),
                     effect_class: EffectClass::Pure,
                     presentation: ToolPresentationKind::Hidden,
                 },
@@ -110,9 +130,7 @@ fn capability(
             ..Default::default()
         },
         CapabilityKind::ContextContributor => CapabilityContributions {
-            context_schema_refs: vec![CanonicalSchemaRef::from(
-                "schema://fixture/context@1",
-            )],
+            context_schema_refs: vec![fixture_schema_ref("context")],
             ..Default::default()
         },
         CapabilityKind::ResourceProvider => CapabilityContributions {
@@ -214,6 +232,7 @@ fn artifact_with_variant(
                 ..Default::default()
             },
         },
+        schemas: fixture_schemas(),
         supported_targets: BTreeSet::from([RuntimeTarget::from(
             "x86_64-pc-windows-msvc",
         )]),
@@ -505,7 +524,10 @@ async fn one_kernel_registry_dispatches_javascript_tool_context_and_resource() {
         .unwrap()
         .value
         .unwrap();
-    assert_eq!(context.0["schemaRef"], "schema://fixture/context@1");
+    assert_eq!(
+        context.0["schemaRef"],
+        fixture_schema_ref("context").as_ref()
+    );
     assert_eq!(
         context.0["contributionId"],
         "fixture.context.contribution"

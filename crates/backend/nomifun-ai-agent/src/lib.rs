@@ -18,6 +18,7 @@ pub mod knowledge_writeback;
 pub mod manager;
 pub mod nomi_session_persistence;
 pub mod one_shot;
+pub mod plugin_tools;
 pub mod protocol;
 pub mod registry;
 pub mod routes;
@@ -56,6 +57,12 @@ pub use factory::provider_config::{
     streaming_completion, streaming_completion_text_or_reasoning, user_message, DeltaKind,
 };
 pub use one_shot::{OneShotDeps, OneShotTool, OneShotTurnRequest, one_shot_handler, run_one_shot_turn};
+pub use plugin_tools::{
+    KernelNomiPluginToolSession, NomiPluginToolAction, NomiPluginToolError,
+    NomiPluginToolInvocation, NomiPluginToolInvoker, NomiPluginToolSchemaResolver,
+    NomiPluginToolSession, NomiPluginToolSessionProvider,
+    NomiPluginToolSessionRequest,
+};
 pub use factory::{
     AgentFactoryDeps, CompanionPromptProvider, CompanionSummonProvider,
     build_agent_factory, build_agent_model_config_resolver,

@@ -10,6 +10,7 @@ async-trait.workspace = true
 dunce.workspace = true
 hex.workspace = true
 nomifun-agent-contracts.workspace = true
+nomifun-api-types.workspace = true
 nomifun-net.workspace = true
 reqwest.workspace = true
 semver.workspace = true

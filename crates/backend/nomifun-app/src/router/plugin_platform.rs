@@ -12,10 +12,12 @@ use axum::{Extension, Json, Router};
 use nomifun_agent_contracts::{
     CANDIDATE_TEST_CONTRACT_VERSION, CandidateTestCredentialMode, CandidateTestOutcome,
     CandidateTestReceipt, CandidateTestReceiptId, CanonicalErrorCode, CapabilityConsumer,
-    CredentialId, CredentialSlotBinding, DigestHex, JAVASCRIPT_HOST_PROTOCOL_VERSION,
-    JAVASCRIPT_SDK_CONTRACT_VERSION, PLUGIN_PACKAGE_PROFILE_VERSION, PluginHostCommitFence,
-    PluginMountId, PluginSourceLineage, StrictJsonValue, ValidatedPluginConfig,
+    CanonicalSchemaRef, CredentialId, CredentialSlotBinding, DigestHex,
+    JAVASCRIPT_HOST_PROTOCOL_VERSION, JAVASCRIPT_SDK_CONTRACT_VERSION,
+    PLUGIN_PACKAGE_PROFILE_VERSION, PluginHostCommitFence, PluginMountId,
+    PluginSourceLineage, ResolvedCapability, StrictJsonValue, ValidatedPluginConfig,
 };
+use nomifun_ai_agent::NomiPluginToolSchemaResolver;
 use nomifun_agent_kernel::{KernelRegistry, PluginRegistration};
 use nomifun_agent_platform::KernelCatalogProvider;
 use nomifun_api_types::{
@@ -76,6 +78,11 @@ struct DiscoveredPluginHosts {
     candidate_test_config: JavaScriptHostConfig,
 }
 
+pub(crate) struct NomiCorePluginComposition {
+    pub router: PluginRouterState,
+    pub schema_resolver: Arc<dyn NomiPluginToolSchemaResolver>,
+}
+
 pub(crate) async fn build_nomi_core_plugin_state(
     pool: SqlitePool,
     data_root: PathBuf,
@@ -83,7 +90,7 @@ pub(crate) async fn build_nomi_core_plugin_state(
     kernel: Arc<KernelRegistry>,
     catalog: Arc<KernelCatalogProvider>,
     base_registrations: Vec<PluginRegistration>,
-) -> anyhow::Result<PluginRouterState> {
+) -> anyhow::Result<NomiCorePluginComposition> {
     let data_root = std::fs::canonicalize(&data_root)?;
     let platform_root = data_root.join(PLUGIN_PLATFORM_DIRECTORY);
     tokio::fs::create_dir_all(&platform_root).await?;
@@ -158,7 +165,7 @@ pub(crate) async fn build_nomi_core_plugin_state(
     let service = Arc::new(PluginApplicationService::new(
         PluginServiceDependencies {
             repository: repository as Arc<dyn PluginRepository>,
-            artifacts: artifacts as Arc<dyn PluginArtifactStorePort>,
+            artifacts: Arc::clone(&artifacts) as Arc<dyn PluginArtifactStorePort>,
             host: host_coordinator,
             registry: publisher as Arc<dyn PluginRegistryPublisher>,
             mutation_coordinator: Arc::new(OwnerMutationCoordinator::new()),
@@ -173,7 +180,80 @@ pub(crate) async fn build_nomi_core_plugin_state(
             },
         },
     ));
-    Ok(PluginRouterState::new(service))
+    Ok(NomiCorePluginComposition {
+        router: PluginRouterState::new(service),
+        schema_resolver: Arc::new(NomiCorePluginSchemaResolver { artifacts }),
+    })
+}
+
+struct NomiCorePluginSchemaResolver {
+    artifacts: Arc<FsPluginArtifactStore>,
+}
+
+#[async_trait]
+impl NomiPluginToolSchemaResolver for NomiCorePluginSchemaResolver {
+    async fn resolve(
+        &self,
+        capability: &ResolvedCapability,
+        reference: &CanonicalSchemaRef,
+    ) -> Result<StrictJsonValue, String> {
+        if capability.contribution_lock.source_kind
+            != nomifun_agent_contracts::ContributionSourceKind::PluginMount
+            || capability.contribution_lock.mount_id.as_ref()
+                != Some(&capability.resolved_mount_id)
+        {
+            return Err(
+                "ordinary Plugin Tool schema requires an exact Plugin Mount lock".into(),
+            );
+        }
+        let stored = self
+            .artifacts
+            .store()
+            .load(&capability.target_artifact_digest)
+            .map_err(|error| error.to_string())?;
+        let manifest = &stored.artifact.manifest.payload;
+        if stored.artifact.artifact_digest != capability.target_artifact_digest
+            || manifest.package_ref() != capability.source_package
+        {
+            return Err(
+                "Plugin Tool schema Artifact differs from the frozen Snapshot target".into(),
+            );
+        }
+        let materialized = manifest
+            .package
+            .contributions
+            .capabilities
+            .iter()
+            .find(|candidate| {
+                candidate.id == capability.capability.id
+                    && candidate.version == capability.capability.version
+                    && candidate.contribution_id == capability.contribution_id
+            })
+            .ok_or_else(|| {
+                "Plugin Tool schema Artifact has no matching Capability contribution".to_owned()
+            })?;
+        let materialized_digest = nomifun_agent_contracts::digest_payload(materialized)
+            .map_err(|error| error.to_string())?;
+        if materialized_digest != capability.schema_digest
+            || !materialized.contributions.actions.iter().any(|action| {
+                &action.input_schema == reference || &action.output_schema == reference
+            })
+        {
+            return Err(
+                "Plugin Tool schema ref is not owned by the frozen Capability contract".into(),
+            );
+        }
+        manifest
+            .schemas
+            .get(reference)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "Plugin Tool Artifact is missing canonical schema {}",
+                    reference.as_ref()
+                )
+            })
+    }
 }
 
 pub(crate) fn plugin_routes(state: PluginRouterState) -> Router {
@@ -1011,11 +1091,27 @@ impl NomiCorePluginRegistryPublisher {
                     .supports_consumer(CapabilityConsumer::Agent)
             })
             .filter_map(|capability| {
-                super::nomi_core_agent_projection::nomi_capability_projection(
-                    capability.manifest.id.as_ref(),
-                )
-                .err()
-                .map(|_| {
+                let native =
+                    super::nomi_core_agent_projection::nomi_capability_projection(
+                        capability.manifest.id.as_ref(),
+                    )
+                    .is_ok();
+                let dynamic = capability.source.source_kind
+                    == nomifun_agent_contracts::PluginSourceKind::ManagedLocal
+                    && capability.contribution_lock.source_kind
+                        == nomifun_agent_contracts::ContributionSourceKind::PluginMount
+                    && capability.manifest.kind
+                        == nomifun_agent_contracts::CapabilityKind::Tool
+                    && capability
+                        .manifest
+                        .contributions
+                        .actions
+                        .iter()
+                        .any(|action| {
+                            action.presentation
+                                == nomifun_agent_contracts::ToolPresentationKind::FunctionTool
+                        });
+                (!native && !dynamic).then(|| {
                     (
                         capability.manifest.id.clone(),
                         CanonicalErrorCode::from(AGENT_EXECUTOR_UNAVAILABLE),
@@ -1188,6 +1284,28 @@ mod tests {
             id: PackageId::from("test.nomicore.plugin"),
             version: VersionString::from("1.0.0"),
         };
+        let input_schema = StrictJsonValue(serde_json::json!({
+            "additionalProperties": false,
+            "properties": {"message": {"type": "string"}},
+            "required": ["message"],
+            "type": "object"
+        }));
+        let output_schema = StrictJsonValue(serde_json::json!({
+            "additionalProperties": true,
+            "type": "object"
+        }));
+        let input_ref = CanonicalSchemaRef::from(format!(
+            "schema://test.nomicore.plugin/echo-input@1#{}",
+            nomifun_agent_contracts::digest_payload(&input_schema.0)
+                .unwrap()
+                .as_ref()
+        ));
+        let output_ref = CanonicalSchemaRef::from(format!(
+            "schema://test.nomicore.plugin/echo-output@1#{}",
+            nomifun_agent_contracts::digest_payload(&output_schema.0)
+                .unwrap()
+                .as_ref()
+        ));
         let capability = CapabilityManifest {
             id: CapabilityId::from("test.nomicore.plugin.echo"),
             contribution_id: "test.nomicore.plugin.echo.contribution".into(),
@@ -1212,12 +1330,8 @@ mod tests {
                     action_id: ActionId::from(
                         "test.nomicore.plugin.echo.invoke",
                     ),
-                    input_schema: CanonicalSchemaRef::from(
-                        "schema://test.nomicore.plugin/echo-input@1",
-                    ),
-                    output_schema: CanonicalSchemaRef::from(
-                        "schema://test.nomicore.plugin/echo-output@1",
-                    ),
+                    input_schema: input_ref.clone(),
+                    output_schema: output_ref.clone(),
                     effect_class: EffectClass::Pure,
                     presentation: ToolPresentationKind::FunctionTool,
                 }],
@@ -1262,6 +1376,10 @@ mod tests {
                         ..Default::default()
                     },
                 },
+                schemas: BTreeMap::from([
+                    (input_ref, input_schema),
+                    (output_ref, output_schema),
+                ]),
                 supported_targets: BTreeSet::from([RuntimeTarget::from(
                     "x86_64-pc-windows-msvc",
                 )]),
@@ -1317,7 +1435,7 @@ mod tests {
         let catalog = Arc::new(KernelCatalogProvider::new(Arc::clone(
             &kernel,
         )));
-        let state = build_nomi_core_plugin_state(
+        let composition = build_nomi_core_plugin_state(
             database.pool().clone(),
             data_root.path().to_path_buf(),
             &owner_user_id,
@@ -1327,6 +1445,8 @@ mod tests {
         )
         .await
         .unwrap();
+        let schema_resolver = Arc::clone(&composition.schema_resolver);
+        let state = composition.router;
         assert_eq!(state.service.list_library(&owner_user_id).await.unwrap().library_revision, 0);
         let response = plugin_routes(state.clone())
             .layer(Extension(CurrentUser {
@@ -1505,16 +1625,34 @@ mod tests {
                 .capability(&capability_id)
                 .is_some()
         );
+        let materialized_registry = kernel.snapshot().unwrap();
+        let materialized = materialized_registry.capability(&capability_id).unwrap();
+        let resolved = ResolvedCapability {
+            capability: CapabilityRef {
+                id: materialized.manifest.id.clone(),
+                version: materialized.manifest.version.clone(),
+            },
+            source_package: materialized.manifest.package.clone(),
+            contribution_id: materialized.contribution_id.clone(),
+            contribution_lock: materialized.contribution_lock.clone(),
+            resolved_mount_id: materialized.mount_id.clone(),
+            resolved_source: materialized.source.clone(),
+            target_artifact_digest: materialized.target_artifact_digest.clone(),
+            schema_digest: materialized.schema_digest.clone(),
+            dependency_path: vec![capability_id.clone()],
+            required_runtime_features: BTreeSet::new(),
+        };
+        let action_schema = &materialized.manifest.contributions.actions[0].input_schema;
+        let resolved_schema = schema_resolver
+            .resolve(&resolved, action_schema)
+            .await
+            .unwrap();
+        assert_eq!(resolved_schema.0["type"], "object");
         let CatalogSnapshot {
             unavailable_capabilities,
             ..
         } = catalog.snapshot().unwrap().as_ref().clone();
-        assert_eq!(
-            unavailable_capabilities
-                .get(&capability_id)
-                .map(AsRef::as_ref),
-            Some(AGENT_EXECUTOR_UNAVAILABLE)
-        );
+        assert!(!unavailable_capabilities.contains_key(&capability_id));
         let catalog_snapshot = catalog.snapshot().unwrap();
         let capability_ref = CapabilityRef {
             id: capability_id.clone(),
@@ -1551,8 +1689,7 @@ mod tests {
         let api_catalog = catalog_snapshot.as_api().unwrap();
         assert!(api_catalog.capabilities.iter().any(|capability| {
             capability.capability.id == capability_id.as_ref()
-                && capability.unavailable_code.as_deref()
-                    == Some(AGENT_EXECUTOR_UNAVAILABLE)
+                && capability.unavailable_code.is_none()
         }));
 
         drop(state);
@@ -1580,7 +1717,8 @@ mod tests {
             Vec::new(),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .router;
         assert!(
             restarted_kernel
                 .snapshot()

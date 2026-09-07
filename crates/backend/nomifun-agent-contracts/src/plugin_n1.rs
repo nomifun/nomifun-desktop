@@ -1111,6 +1111,7 @@ pub struct PluginPackageV1Manifest {
     pub build_profile: JavaScriptBuildProfile,
     pub build_profile_version: VersionString,
     pub package: PackageManifest,
+    pub schemas: BTreeMap<CanonicalSchemaRef, StrictJsonValue>,
     pub supported_targets: BTreeSet<RuntimeTarget>,
     pub minimum_node_major: u16,
     pub dependency_lock_digest: DigestHex,
@@ -1229,6 +1230,7 @@ impl PluginPackageV1Manifest {
             },
             &self.package.contributions,
         )?;
+        validate_plugin_schema_registry(&self.package.contributions, &self.schemas)?;
         Ok(())
     }
 
@@ -1250,6 +1252,85 @@ impl PluginPackageV1Manifest {
         }
     }
 }
+
+pub fn validate_plugin_schema_registry(
+    contributions: &PackageContributions,
+    schemas: &BTreeMap<CanonicalSchemaRef, StrictJsonValue>,
+) -> Result<(), PluginN1ContractError> {
+    let referenced = contributions
+        .capabilities
+        .iter()
+        .flat_map(|capability| {
+            capability
+                .contributions
+                .actions
+                .iter()
+                .flat_map(|action| [&action.input_schema, &action.output_schema])
+                .chain(capability.contributions.context_schema_refs.iter())
+                .chain(capability.contributions.event_schema_refs.iter())
+        })
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let provided = schemas.keys().cloned().collect::<BTreeSet<_>>();
+    if referenced != provided {
+        let missing = referenced
+            .difference(&provided)
+            .map(|reference| reference.as_ref())
+            .collect::<Vec<_>>();
+        let extra = provided
+            .difference(&referenced)
+            .map(|reference| reference.as_ref())
+            .collect::<Vec<_>>();
+        return Err(PluginN1ContractError::InvalidField {
+            field: "schemas",
+            reason: format!(
+                "schema registry must exactly match contribution refs; missing={missing:?}, extra={extra:?}"
+            ),
+        });
+    }
+    for (reference, schema) in schemas {
+        if !reference.as_ref().starts_with("schema://") {
+            return Err(PluginN1ContractError::InvalidField {
+                field: "schemas.key",
+                reason: format!(
+                    "schema {} must use the canonical schema:// namespace",
+                    reference.as_ref()
+                ),
+            });
+        }
+        if !schema.0.is_object() {
+            return Err(PluginN1ContractError::InvalidField {
+                field: "schemas.value",
+                reason: format!(
+                    "schema {} must contain a JSON object",
+                    reference.as_ref()
+                ),
+            });
+        }
+        let (_, expected_digest) =
+            reference.as_ref().rsplit_once('#').ok_or_else(|| {
+                PluginN1ContractError::InvalidField {
+                    field: "schemas.key",
+                    reason: format!(
+                        "schema {} must end in a content digest fragment",
+                        reference.as_ref()
+                    ),
+                }
+            })?;
+        validate_digest(
+            &DigestHex::from(expected_digest.to_owned()),
+            "schemas.key.digest",
+        )?;
+        let observed = digest_payload(&schema.0)?;
+        if observed.as_ref() != expected_digest {
+            return Err(PluginN1ContractError::DigestMismatch {
+                field: "schemas.value",
+            });
+        }
+    }
+    Ok(())
+}
+
 
 #[derive(Serialize)]
 struct PluginPackageArtifactDigestInput<'a> {
@@ -3301,6 +3382,24 @@ mod tests {
             id: PackageId::from("example.csv"),
             version: VersionString::from("1.0.0"),
         };
+        let input_schema = StrictJsonValue(json!({
+            "additionalProperties": false,
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+            "type": "object"
+        }));
+        let output_schema = StrictJsonValue(json!({
+            "additionalProperties": true,
+            "type": "object"
+        }));
+        let input_ref = CanonicalSchemaRef::from(format!(
+            "schema://example.csv/read-input@1#{}",
+            digest_payload(&input_schema.0).unwrap().as_ref()
+        ));
+        let output_ref = CanonicalSchemaRef::from(format!(
+            "schema://example.csv/read-output@1#{}",
+            digest_payload(&output_schema.0).unwrap().as_ref()
+        ));
         let capability = CapabilityManifest {
             id: "example.csv.read".into(),
             contribution_id: ContributionId::from("capability:example.csv.read"),
@@ -3321,12 +3420,8 @@ mod tests {
             contributions: CapabilityContributions {
                 actions: vec![crate::CapabilityActionDescriptor {
                     action_id: ActionId::from("example.csv.read.invoke"),
-                    input_schema: CanonicalSchemaRef::from(
-                        "schema://example.csv/read-input@1",
-                    ),
-                    output_schema: CanonicalSchemaRef::from(
-                        "schema://example.csv/read-output@1",
-                    ),
+                    input_schema: input_ref.clone(),
+                    output_schema: output_ref.clone(),
                     effect_class: crate::EffectClass::ReadLocal,
                     presentation: crate::ToolPresentationKind::FunctionTool,
                 }],
@@ -3369,6 +3464,10 @@ mod tests {
                     ..Default::default()
                 },
             },
+            schemas: BTreeMap::from([
+                (input_ref, input_schema),
+                (output_ref, output_schema),
+            ]),
             supported_targets: BTreeSet::from([RuntimeTarget::from(
                 "x86_64-pc-windows-msvc",
             )]),
@@ -3478,6 +3577,48 @@ mod tests {
             tampered.validate(),
             Err(PluginN1ContractError::DigestMismatch {
                 field: "entrypoint.digest"
+            })
+        ));
+    }
+
+    #[test]
+    fn plugin_schema_registry_is_exact_and_content_addressed() {
+        let valid = manifest();
+        valid.validate().unwrap();
+
+        let mut missing = valid.clone();
+        let removed = missing.schemas.keys().next().cloned().unwrap();
+        missing.schemas.remove(&removed);
+        assert!(matches!(
+            missing.validate(),
+            Err(PluginN1ContractError::InvalidField {
+                field: "schemas",
+                ..
+            })
+        ));
+
+        let extra_schema = StrictJsonValue(json!({"type": "string"}));
+        let extra_ref = CanonicalSchemaRef::from(format!(
+            "schema://example.csv/unused@1#{}",
+            digest_payload(&extra_schema.0).unwrap().as_ref()
+        ));
+        let mut extra = valid.clone();
+        extra.schemas.insert(extra_ref, extra_schema);
+        assert!(matches!(
+            extra.validate(),
+            Err(PluginN1ContractError::InvalidField {
+                field: "schemas",
+                ..
+            })
+        ));
+
+        let mut tampered = valid;
+        *tampered.schemas.get_mut(&removed).unwrap() =
+            StrictJsonValue(json!({"type": "null"}));
+        assert!(matches!(
+            tampered.validate(),
+            Err(PluginN1ContractError::DigestMismatch {
+                field: "schemas.value"
             })
         ));
     }

@@ -9,8 +9,10 @@ mod error;
 mod managed;
 mod manager;
 mod probe;
+mod service;
 
 pub use error::*;
 pub use managed::*;
 pub use manager::*;
 pub use probe::*;
+pub use service::*;

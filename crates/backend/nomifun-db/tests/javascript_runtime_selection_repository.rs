@@ -35,7 +35,11 @@ async fn empty_selection_saves_with_revision_cas_and_survives_restart() {
         .save_cas(&SaveJavaScriptRuntimeSelectionParams {
             expected_revision: 0,
             selected_runtime: Some(selected.clone()),
+            selected_executable_path: Some(r"C:\node\selected.exe".into()),
             pending_candidate: Some(pending.clone()),
+            pending_candidate_executable_path: Some(
+                r"C:\node\candidate.exe".into(),
+            ),
             validation_result: Some(validation.clone()),
             last_error_code: None,
             non_recommended_warning_acknowledged: BTreeSet::from([
@@ -57,7 +61,9 @@ async fn empty_selection_saves_with_revision_cas_and_survives_restart() {
         .save_cas(&SaveJavaScriptRuntimeSelectionParams {
             expected_revision: 0,
             selected_runtime: Some(selected),
+            selected_executable_path: Some(r"C:\node\selected.exe".into()),
             pending_candidate: None,
+            pending_candidate_executable_path: None,
             validation_result: None,
             last_error_code: Some("runtime_probe_failed".into()),
             non_recommended_warning_acknowledged: BTreeSet::new(),
@@ -87,7 +93,11 @@ async fn validation_must_bind_exact_pending_candidate_and_singleton_rejects_seco
         .save_cas(&SaveJavaScriptRuntimeSelectionParams {
             expected_revision: 0,
             selected_runtime: None,
+            selected_executable_path: None,
             pending_candidate: Some(pending),
+            pending_candidate_executable_path: Some(
+                r"C:\node\candidate.exe".into(),
+            ),
             validation_result: Some(json!({
                 "candidate": runtime("another-runtime", &"c".repeat(64))
             })),
@@ -103,7 +113,9 @@ async fn validation_must_bind_exact_pending_candidate_and_singleton_rejects_seco
         .save_cas(&SaveJavaScriptRuntimeSelectionParams {
             expected_revision: 0,
             selected_runtime: None,
+            selected_executable_path: None,
             pending_candidate: None,
+            pending_candidate_executable_path: None,
             validation_result: None,
             last_error_code: None,
             non_recommended_warning_acknowledged: BTreeSet::new(),

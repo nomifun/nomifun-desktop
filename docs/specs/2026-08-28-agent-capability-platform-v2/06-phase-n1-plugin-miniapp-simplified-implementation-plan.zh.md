@@ -127,6 +127,25 @@
     App crate check 通过。production npm registry client、dependency lock mutation、
     Chat Dev Source 编辑、MiniApp build profile、Share/CLI 与安装版闭环仍属于未完成项，
     因此当前不关闭 `N1-4-01` 或 `N1-2-03`。
+12. `plugin-package-v1` 已把 contribution schema registry 冻结为 Artifact 的正式组成：
+    Tool input/output、Context 和 Event schema ref 必须精确出现在 registry 中，并以
+    `schema://...#<sha256>` 绑定 canonical 内容；missing、extra、digest tamper 均拒绝。
+    Packer、Artifact Store、Kernel Adapter 与 App schema resolver 使用同一 registry，
+    Nomi 不从 capability ID、请求参数或最新 Catalog 猜测 schema。
+13. Nomi Agent consumer 已改为 Snapshot-bound 动态 Plugin Tool Session。App 从持久化
+    Conversation/Binding/Revision/Snapshot 链解析 exact Mount/Artifact，在 Runtime
+    single-flight factory scope 内注册 FunctionTool action，并复用现有 deferred
+    ToolSearch；UI-only、non-Agent 和 Hidden action 不注册。调用始终进入唯一 Kernel，
+    provenance 或 Artifact 漂移在 Host 前 fail closed。`N1-3-02` 的实现目标已完成，
+    最终真实模型/安装版 smoke 仍统一属于 `N1-V-01`。
+14. Runtime Manager 后端已提供 installation-owner/local-trust 保护的 status、probe、
+    official LTS download、switch begin/decision 五个产品动作，并通过 migration 071
+    持久化 Runtime fingerprint、absolute executable path、validation 与 revision CAS。
+    当前只完成 Foundation Host Hello/cleanup；Plugin Shared Host、Candidate Test、
+    Build Foundation 与 MiniApp Service 尚未由同一个 committed Runtime authority
+    协调，所以生产试切换明确返回 `JAVASCRIPT_RUNTIME_NOT_COVERED`。在统一
+    drain/stop/validate/commit-or-restore coordinator 与 Desktop Runtime Manager UI
+    完成前，不得把该 foundation 记作 Runtime 产品闭环。
 
 ## 0. 怎样阅读这份文档
 

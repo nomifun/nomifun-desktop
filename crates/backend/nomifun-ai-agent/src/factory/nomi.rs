@@ -796,6 +796,8 @@ pub(super) async fn build(
         image_generation_entitled: platform_gateway_entitled,
         image_generation_discovery_failed,
         image_generation_response_in_chinese: app_language == "zh-CN",
+        plugin_tool_session:
+            crate::plugin_tools::current_nomi_plugin_tool_session(),
     };
     let agent = NomiAgentManager::new_with_host_wiring(
         ctx.conversation_id,

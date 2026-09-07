@@ -33,6 +33,28 @@ fn manifest(main: &[u8]) -> ArtifactEnvelope<PluginPackageV1Manifest> {
         id: PackageId::from("example.csv"),
         version: VersionString::from("1.0.0"),
     };
+    let input_schema = StrictJsonValue(json!({
+        "additionalProperties": false,
+        "properties": {"path": {"type": "string"}},
+        "required": ["path"],
+        "type": "object"
+    }));
+    let output_schema = StrictJsonValue(json!({
+        "additionalProperties": true,
+        "type": "object"
+    }));
+    let input_ref = CanonicalSchemaRef::from(format!(
+        "schema://example/input@1#{}",
+        nomifun_agent_contracts::digest_payload(&input_schema.0)
+            .unwrap()
+            .as_ref()
+    ));
+    let output_ref = CanonicalSchemaRef::from(format!(
+        "schema://example/output@1#{}",
+        nomifun_agent_contracts::digest_payload(&output_schema.0)
+            .unwrap()
+            .as_ref()
+    ));
     let capability = CapabilityManifest {
         id: CapabilityId::from("example.csv.read"),
         contribution_id: "capability:example.csv.read".into(),
@@ -57,8 +79,8 @@ fn manifest(main: &[u8]) -> ArtifactEnvelope<PluginPackageV1Manifest> {
         contributions: CapabilityContributions {
             actions: vec![CapabilityActionDescriptor {
                 action_id: ActionId::from("example.csv.read.invoke"),
-                input_schema: CanonicalSchemaRef::from("schema://example/input@1"),
-                output_schema: CanonicalSchemaRef::from("schema://example/output@1"),
+                input_schema: input_ref.clone(),
+                output_schema: output_ref.clone(),
                 effect_class: EffectClass::ReadLocal,
                 presentation: ToolPresentationKind::FunctionTool,
             }],
@@ -97,6 +119,10 @@ fn manifest(main: &[u8]) -> ArtifactEnvelope<PluginPackageV1Manifest> {
                 ..Default::default()
             },
         },
+        schemas: BTreeMap::from([
+            (input_ref, input_schema),
+            (output_ref, output_schema),
+        ]),
         supported_targets: BTreeSet::from([RuntimeTarget::from(
             "x86_64-pc-windows-msvc",
         )]),

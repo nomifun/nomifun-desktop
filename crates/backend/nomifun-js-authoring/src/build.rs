@@ -279,6 +279,7 @@ impl FixedPluginPacker {
                 ),
                 contributions: source_manifest.contributions().clone(),
             },
+            schemas: source_manifest.schemas().clone(),
             supported_targets: options.supported_targets.clone(),
             minimum_node_major: MINIMUM_NODE_MAJOR.max(24),
             dependency_lock_digest: dependency_lock.digest()?,
