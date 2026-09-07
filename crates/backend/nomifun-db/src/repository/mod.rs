@@ -20,6 +20,7 @@ pub mod knowledge_source;
 pub mod knowledge_tree_operation;
 pub mod mcp_server;
 pub mod miniapp;
+pub mod miniapp_m1;
 pub mod oauth_token;
 pub mod plugin_n1;
 pub mod provider;
@@ -56,6 +57,7 @@ mod sqlite_provider_connection;
 mod sqlite_provider_model;
 mod sqlite_provider_model_capability;
 mod sqlite_miniapp;
+mod sqlite_miniapp_m1;
 mod sqlite_requirement;
 mod sqlite_remote_binding;
 mod sqlite_settings;
@@ -104,6 +106,11 @@ pub use idmm_intervention::{
 pub use instance_token::IInstanceTokenRepository;
 pub use javascript_runtime_selection::{
     IJavaScriptRuntimeSelectionRepository, SaveJavaScriptRuntimeSelectionParams,
+};
+pub use miniapp_m1::{
+    CommitMiniAppM1PointerStateParams, CreateMiniAppM1Params,
+    IMiniAppM1Repository, RecordMiniAppM1ReadyReleaseParams,
+    UpdateMiniAppM1ProjectSourceParams,
 };
 pub use knowledge::IKnowledgeRepository;
 pub use knowledge_entry::{
@@ -166,6 +173,7 @@ pub use sqlite_customer_service::SqliteCustomerServiceRepository;
 pub use sqlite_idmm_intervention::SqliteIdmmInterventionRepository;
 pub use sqlite_instance_token::SqliteInstanceTokenRepository;
 pub use sqlite_javascript_runtime_selection::SqliteJavaScriptRuntimeSelectionRepository;
+pub use sqlite_miniapp_m1::SqliteMiniAppM1Repository;
 pub use sqlite_knowledge::SqliteKnowledgeRepository;
 pub use sqlite_knowledge_tree_operation::SqliteKnowledgeTreeOperationRepository;
 pub use sqlite_mcp_server::SqliteMcpServerRepository;

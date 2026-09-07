@@ -18,6 +18,7 @@ mod knowledge_tree_operation;
 mod mcp_server;
 mod message;
 mod miniapp;
+mod miniapp_m1;
 mod oauth_token;
 mod plugin_n1;
 mod provider;
@@ -91,6 +92,12 @@ pub use knowledge_tree_operation::{
 pub use mcp_server::McpServerRow;
 pub use message::MessageRow;
 pub use miniapp::{MiniAppDocumentRow, MiniAppRow};
+pub use miniapp_m1::{
+    MiniAppCredentialBindingRow, MiniAppLibraryStateRow, MiniAppM1LibrarySnapshot,
+    MiniAppM1Kind, MiniAppM1ProjectSourceState, MiniAppM1ReleaseOrigin,
+    MiniAppM1ReleaseSourceKind, MiniAppM1Snapshot, MiniAppProductRow,
+    MiniAppProjectRow, MiniAppReleaseArtifactRow, MiniAppReleaseRow,
+};
 pub use oauth_token::OAuthTokenRow;
 pub use plugin_n1::{
     PluginArtifactRow, PluginCandidateTestReceiptRow, PluginCredentialBindingInput,

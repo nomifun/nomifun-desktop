@@ -293,6 +293,15 @@
     - `28ee78526` 的 bridge/model/交互测试通过，四组定向 UI 测试共 11 项通过；
       全量 UI typecheck 仍受仓库既有 Arco/React 类型错误阻断，尚未作为 N1-U-01
       关闭证据；Desktop accessibility/视觉验收也未完成。
+20. M1-0-01 已开始 clean-start 数据根实施，但不改变 M1 条目当前 blocked 状态：
+    - migration 072 新增 owner-scoped `miniapp_library_state`、Product、Project、
+      immutable Artifact/Release 与 Credential reference 表，完全不读取或复制旧
+      `miniapps`，并遵守 Fresh-v4 的无物理 FK/trigger logical-reference 合同；
+    - `nomifun-db` 已有对应 row model 与 owner-scoped repository，支持 Library revision、
+      Product+Project create、Project source CAS、Ready Release exact lineage/CAS 和
+      Ready/Active/Previous pointer CAS；
+    - DB contract 20、M1 schema 2、M1 repository 3 项定向测试通过。生产 App routes、
+      MiniApp Service/Bridge/Storage adapter、旧链删除和 UI 尚未接入，不能计入 M1 完成度。
 
 ## W0：一期交接
 

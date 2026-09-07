@@ -166,6 +166,11 @@
     installed-app Build→Test→Apply/Restore、Windows fault injection、Desktop
     accessibility/视觉验收和全量 UI typecheck 尚未完成。当前实现可以安全地继续开发，
     但不能把 `N1-1-01`、`N1-2-03` 或 `N1-U-01` 标为 `closed`。
+18. M1-0-01 已形成一批不读取旧链的 SQLite foundation：migration 072 和
+    `nomifun-db` repository 只负责 owner-scoped Product/Project/Artifact/Release
+    持久化及 CAS。它使用当前数据库的 logical-reference/无物理 FK/trigger 合同，
+    不迁移、双写或 alias 旧 `miniapps`；生产路由、MiniApp runtime、Bridge、Storage
+    与 UI 仍按 §6 依赖顺序后续实施。
 
 ## 0. 怎样阅读这份文档
 
