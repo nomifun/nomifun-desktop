@@ -125,7 +125,7 @@ const taskKindForReference = (
   }
   throw new Error(
     t('creativeStudio.canvas.runtime.image.missingConfig', {
-      defaultValue: '图片任务缺少受支持的 canonical 配置节点。',
+      defaultValue: '图片任务缺少受支持的任务记录。',
     })
   );
 };
@@ -225,10 +225,10 @@ const CanvasImageTaskRuntimeBridge = forwardRef<
             : task.status === 'failed'
               ? (task.error?.message ??
                 t('creativeStudio.canvas.runtime.image.composeFailed', {
-                  defaultValue: '图片创作失败，配置节点已保留。',
+                  defaultValue: '图片创作失败。',
                 }))
               : t('creativeStudio.canvas.runtime.image.composeCancelled', {
-                  defaultValue: '图片创作已取消，配置节点已保留。',
+                  defaultValue: '图片创作已取消。',
                 })
           : task.status === 'succeeded'
             ? t('creativeStudio.canvas.runtime.image.maskSucceeded', {
@@ -237,10 +237,10 @@ const CanvasImageTaskRuntimeBridge = forwardRef<
             : task.status === 'failed'
               ? (task.error?.message ??
                 t('creativeStudio.canvas.runtime.image.maskFailed', {
-                  defaultValue: '局部编辑失败，配置节点已保留。',
+                  defaultValue: '局部编辑失败。',
                 }))
               : t('creativeStudio.canvas.runtime.image.maskCancelled', {
-                  defaultValue: '局部编辑已取消，配置节点已保留。',
+                  defaultValue: '局部编辑已取消。',
                 })
       );
     },

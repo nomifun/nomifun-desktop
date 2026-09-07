@@ -20,6 +20,7 @@ import {
   createCreativeCanvasProductNode,
   creativeCanvasProductInsertionViewport,
   creativeNodeFromAsset,
+  creativeNodeFromHistoricalAsset,
   creativeTextNodeFromPrompt,
 } from './nodeFactory';
 
@@ -116,6 +117,19 @@ const asset = (overrides: Partial<CreativeAsset> = {}): CreativeAsset => ({
 });
 
 describe('createCreativeCanvasProductNode', () => {
+  test('rejects deleted assets for new insertion but retains completed historical result identities', () => {
+    const state = createInitialCanvasState();
+    const deleted = asset({ deletedAt: 10, inLibrary: false, originalUrl: '', thumbnailUrl: null });
+    let rejected = false;
+    try { creativeNodeFromAsset(deleted, state, VIEWPORT_SIZE); }
+    catch (error) { rejected = error instanceof Error; }
+    expect(rejected).toBe(true);
+    const historical = creativeNodeFromHistoricalAsset(deleted, state, VIEWPORT_SIZE);
+    expect(historical.type).toBe('image');
+    expect(historical.data).toMatchObject({ assetId: deleted.id });
+    expect(JSON.stringify(historical).includes('originalUrl')).toBe(false);
+  });
+
   test('builds all eight canonical payloads with independent bare UUIDv7 ids', () => {
     const state = createInitialCanvasState();
     const kinds: CreativeCanvasNodeKind[] = [
@@ -185,6 +199,21 @@ describe('createCreativeCanvasProductNode', () => {
       y: 80 + CREATIVE_CANVAS_PRODUCT_CASCADE_STEP,
     });
     expect(cascaded.zIndex).toBe(8);
+
+    const taskRecord = createCreativeCanvasProductNode(
+      'config',
+      populated,
+      VIEWPORT_SIZE,
+      { cascadeIndex: 0 }
+    );
+    const withTaskRecord = createInitialCanvasState({
+      document: { nodes: [high, low, taskRecord], connections: [] },
+      viewport: empty.viewport,
+    });
+    expect(
+      createCreativeCanvasProductNode('text', withTaskRecord, VIEWPORT_SIZE)
+        .position
+    ).toEqual(cascaded.position);
   });
 
   test('centers only the pristine server viewport before the first insertion', () => {

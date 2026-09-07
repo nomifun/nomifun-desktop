@@ -64,6 +64,7 @@ describe("creative image tool surfaces", () => {
         onInfo={() => undefined}
         onDelete={() => undefined}
         onUpload={() => undefined}
+        onPreview={() => undefined}
         onCrop={() => undefined}
         onDownload={() => undefined}
         onMaskEdit={() => undefined}
@@ -111,6 +112,7 @@ describe("creative image tool surfaces", () => {
       html.includes("creativeStudio.canvas.imageTools.toolbar.maskEdit"),
     ).toBe(true);
     expect(html.includes("AI 超分")).toBe(false);
+    expect(html.includes("creativeStudio.canvas.imageTools.toolbar.previewLabel")).toBe(true);
   });
 
   test("shows the source information, delete, and upload actions for an empty image", () => {
@@ -122,6 +124,7 @@ describe("creative image tool surfaces", () => {
         onInfo={() => undefined}
         onDelete={() => undefined}
         onUpload={() => undefined}
+        onPreview={() => undefined}
         onCrop={() => undefined}
         onDownload={() => undefined}
         onMaskEdit={() => undefined}
@@ -155,6 +158,7 @@ describe("creative image tool surfaces", () => {
         "creativeStudio.canvas.imageTools.toolbar.cropLabel",
       ),
     ).toBe(false);
+    expect(html.includes("creativeStudio.canvas.imageTools.toolbar.previewLabel")).toBe(false);
   });
 
   test("keeps the node toolbar focused and viewport-safe", () => {

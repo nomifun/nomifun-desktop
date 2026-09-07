@@ -25,6 +25,21 @@ pub enum DbError {
     SafetyBackup(String),
 }
 
+impl DbError {
+    /// Preserve the business conflict when SQLite wins a race against a
+    /// caller's earlier availability check.
+    pub(crate) fn from_asset_reference_guard(error: sqlx::Error) -> Self {
+        if let Some(error) = error.as_database_error()
+            && matches!(error.message(),
+                "creation task references a deleted workshop asset"
+                | "template run references a deleted workshop asset")
+        {
+            return Self::Conflict(error.message().into());
+        }
+        Self::Query(error)
+    }
+}
+
 impl From<DbError> for AppError {
     fn from(err: DbError) -> Self {
         match err {

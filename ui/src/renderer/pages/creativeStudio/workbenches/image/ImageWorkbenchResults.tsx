@@ -20,6 +20,8 @@ import { Button, Checkbox, Progress, Tag } from '@arco-design/web-react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import CopyIconButton from '@/renderer/components/base/CopyIconButton';
+import { CreativeAssetUnavailable } from '../../assets/components/CreativeAssetUnavailable';
+import CreativeMediaPreview from '../../assets/components/CreativeMediaPreview';
 import {
   nextImageWorkbenchSelection,
   type ImageWorkbenchResult,
@@ -75,6 +77,7 @@ const TaskMeta: React.FC<{
   const { t } = useTranslation();
   return (
     <div className={styles.resultMeta}>
+      {result.hasDeletedInputs ? <p role='status'>{t('creativeStudio.assets.deletedReference', { defaultValue: '引用素材已删除，请重新选择后再生成。' })}</p> : null}
       <div className={styles.resultPromptRow}>
         <p className={styles.resultPrompt} title={result.prompt}>{result.prompt}</p>
         {result.prompt ? (
@@ -110,7 +113,15 @@ const ResultVisual: React.FC<{
       <div className={styles.successVisual}>
         <div className={styles.successGallery} data-image-output-count={result.outputs.length}>
           {result.outputs.map((output) => (
-            <img key={output.assetId} src={output.imageUrl} alt={output.alt} />
+            output.availability && output.availability !== 'available'
+              ? <CreativeAssetUnavailable key={output.assetId} status={output.availability} />
+              : <CreativeMediaPreview
+                  key={output.assetId}
+                  kind='image'
+                  src={output.imageUrl}
+                  alt={output.alt}
+                  className={styles.resultMedia}
+                />
           ))}
         </div>
         <span className={styles.resultBadge} data-tone='success'>
@@ -263,15 +274,19 @@ const ImageWorkbenchResults: React.FC<ImageWorkbenchResultsProps> = ({
     <section className={styles.resultsPanel} data-image-workbench-results data-result-count={results.length}>
       <header className={styles.resultsHeader}>
         <div className={styles.resultsTitle}>
-          <History />
+          <History size={15} />
           <h2>{t('creativeStudio.image.results.title', { defaultValue: '全部结果' })}</h2>
-          <Tag>
+          <Tag size='small' bordered={false}>
             {t('creativeStudio.image.results.loadedCount', {
               defaultValue: '已加载 {{resultCount}}',
               resultCount: results.length,
             })}
           </Tag>
-          {stateLabel ? <Tag color={stateTone}>{stateLabel}</Tag> : null}
+          {stateLabel ? (
+            <Tag size='small' bordered={false} color={stateTone}>
+              {stateLabel}
+            </Tag>
+          ) : null}
         </div>
         {deletionEnabled ? <div className={styles.resultsActions}>
           <Button

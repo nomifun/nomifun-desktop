@@ -21,11 +21,17 @@ import { Button, Input, InputNumber, Radio, Select, Tag, Tooltip } from '@arco-d
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import NomiSelect from '@/renderer/components/base/NomiSelect';
+import CreativeMediaPreview from '../../assets/components/CreativeMediaPreview';
 import {
   DEFAULT_IMAGE_WORKBENCH_ASPECT_RATIOS,
   IMAGE_WORKBENCH_QUALITY_OPTIONS,
+  imageWorkbenchAspectRatioChoices,
+  imageWorkbenchAspectRatioValue,
   imageWorkbenchModelKey,
-  imageWorkbenchSizeDimensionsLabel,
+  imageWorkbenchResolutionOptionLabel,
+  imageWorkbenchResolutionOptions,
+  imageWorkbenchSizeOptionForAspectRatio,
+  imageWorkbenchSizeOptionForSettings,
   parseImageWorkbenchModelKey,
   type ImageWorkbenchAspectRatioOption,
   type ImageWorkbenchInterfaceMode,
@@ -37,6 +43,7 @@ import {
   type ImageWorkbenchSettings,
   type ImageWorkbenchTaskSummary,
 } from './types';
+import ImageSizePicker from './ImageSizePicker';
 import styles from './ImageWorkbench.module.css';
 
 interface ImageWorkbenchComposerProps {
@@ -168,7 +175,13 @@ const ReferenceStrip: React.FC<{
     >
       {references.map((reference) => (
         <div key={reference.id} className={styles.referenceItem}>
-          <img src={reference.previewUrl} alt={reference.name} />
+          <CreativeMediaPreview
+            kind='image'
+            src={reference.originalUrl ?? reference.previewUrl}
+            posterSrc={reference.previewUrl}
+            alt={reference.name}
+            className={styles.referenceMedia}
+          />
           <button
             type='button'
             className={styles.referenceRemove}
@@ -234,6 +247,23 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
 }) => {
   const { t } = useTranslation();
   const modelValue = settings.model ? imageWorkbenchModelKey(settings.model) : undefined;
+  const selectedSizeOption = imageWorkbenchSizeOptionForSettings(aspectRatioOptions, settings);
+  const aspectRatioChoices = imageWorkbenchAspectRatioChoices(aspectRatioOptions);
+  const selectedAspectRatio = selectedSizeOption
+    ? imageWorkbenchAspectRatioValue(selectedSizeOption)
+    : '';
+  const resolutionOptions = imageWorkbenchResolutionOptions(
+    aspectRatioOptions,
+    selectedAspectRatio
+  );
+  const changeAspectRatio = (value: string): void => {
+    const option = imageWorkbenchSizeOptionForAspectRatio(
+      aspectRatioOptions,
+      selectedSizeOption,
+      value
+    );
+    if (option) onAspectRatioChange(option);
+  };
   return (
     <div className={compact ? styles.compactSettings : styles.settingsStack}>
       {modelSlot ? (
@@ -310,32 +340,45 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
           <label className={`${styles.field} ${styles.compactAspectField}`}>
             <span>{t('creativeStudio.image.settings.aspectRatio', { defaultValue: '宽高比' })}</span>
             <Select
-              value={settings.aspectRatio}
-              disabled={disabled}
+              value={selectedAspectRatio}
+              aria-label={t('creativeStudio.image.settings.aspectRatio', { defaultValue: '宽高比' })}
+              disabled={disabled || !selectedSizeOption}
+              onChange={changeAspectRatio}
+            >
+              {aspectRatioChoices.map((choice) => (
+                <Select.Option key={choice.value} value={choice.value} disabled={choice.disabled}>
+                  <span className={styles.sizeOptionIdentity}>
+                    <span
+                      className={styles.aspectShape}
+                      style={
+                        choice.width && choice.height
+                          ? { aspectRatio: `${choice.width} / ${choice.height}` }
+                          : undefined
+                      }
+                      aria-hidden='true'
+                    />
+                    <span>{choice.label}</span>
+                  </span>
+                </Select.Option>
+              ))}
+            </Select>
+          </label>
+          <label className={`${styles.field} ${styles.compactResolutionField}`}>
+            <span>{t('creativeStudio.image.settings.resolution', { defaultValue: '分辨率' })}</span>
+            <Select
+              value={selectedSizeOption?.value}
+              aria-label={t('creativeStudio.image.settings.resolution', { defaultValue: '分辨率' })}
+              disabled={disabled || resolutionOptions.length === 0}
               onChange={(value) => {
-                const option = aspectRatioOptions.find(
-                  (candidate) => candidate.value === value
+                const option = resolutionOptions.find(
+                  (candidate) => candidate.value === value && !candidate.disabled
                 );
                 if (option) onAspectRatioChange(option);
               }}
             >
-              {aspectRatioOptions.map((option) => (
+              {resolutionOptions.map((option) => (
                 <Select.Option key={option.value} value={option.value} disabled={option.disabled}>
-                  <span className={styles.sizeOption}>
-                    <span className={styles.sizeOptionIdentity}>
-                      <span
-                        className={styles.aspectShape}
-                        style={
-                          option.width && option.height
-                            ? { aspectRatio: `${option.width} / ${option.height}` }
-                            : undefined
-                        }
-                        aria-hidden='true'
-                      />
-                      <span>{option.label}</span>
-                    </span>
-                    <small>{imageWorkbenchSizeDimensionsLabel(option) ?? option.label}</small>
-                  </span>
+                  {imageWorkbenchResolutionOptionLabel(option)}
                 </Select.Option>
               ))}
             </Select>
@@ -387,35 +430,12 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
             </div>
           </div>
 
-          <div className={styles.settingGroup}>
-            <span className={styles.settingLabel}>
-              {t('creativeStudio.image.settings.aspectRatio', { defaultValue: '宽高比' })}
-            </span>
-            <div className={styles.aspectGrid}>
-              {aspectRatioOptions.map((option) => (
-                <button
-                  key={option.value}
-                  type='button'
-                  className={styles.aspectOption}
-                  data-selected={settings.aspectRatio === option.value}
-                  disabled={disabled || option.disabled}
-                  onClick={() => onAspectRatioChange(option)}
-                >
-                  <span
-                    className={styles.aspectShape}
-                    style={
-                      option.width && option.height
-                        ? { aspectRatio: `${option.width} / ${option.height}` }
-                        : undefined
-                    }
-                    aria-hidden='true'
-                  />
-                  <span>{option.label}</span>
-                  <small>{imageWorkbenchSizeDimensionsLabel(option) ?? option.label}</small>
-                </button>
-              ))}
-            </div>
-          </div>
+          <ImageSizePicker
+            options={aspectRatioOptions}
+            value={settings.aspectRatio}
+            disabled={disabled}
+            onChange={onAspectRatioChange}
+          />
 
           <div className={styles.settingGroup}>
             <span className={styles.settingLabel}>

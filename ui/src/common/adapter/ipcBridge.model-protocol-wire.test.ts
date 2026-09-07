@@ -45,7 +45,7 @@ describe('model protocol manifest wire contract', () => {
       model: 'vendor/model latest:free',
     });
 
-    const query = new URL(requestedUrl).searchParams;
+    const query = new URL(requestedUrl, 'http://127.0.0.1:13400').searchParams;
     expect(query.get('preset')).toBe('custom');
     expect(query.get('task')).toBe('chat');
     expect(query.get('base_url')).toBe('https://gateway.example/api/v1');
@@ -78,6 +78,6 @@ describe('model protocol manifest wire contract', () => {
 
     await modelProtocol.list.invoke({ preset: 'custom', task: 'chat' });
 
-    expect(new URL(requestedUrl).searchParams.has('model')).toBe(false);
+    expect(new URL(requestedUrl, 'http://127.0.0.1:13400').searchParams.has('model')).toBe(false);
   });
 });

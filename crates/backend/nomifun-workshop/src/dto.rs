@@ -21,6 +21,9 @@ pub struct WorkshopAsset {
     pub height: Option<i64>,
     pub bytes: Option<i64>,
     pub in_library: bool,
+    /// The original content was permanently deleted by the user. The asset
+    /// identity remains available solely to explain historical references.
+    pub deleted_at: Option<TimestampMs>,
     pub text_content: Option<String>,
     pub origin: Option<Value>,
     pub url: String,
@@ -64,6 +67,7 @@ impl TryFrom<WorkshopAssetRow> for WorkshopAsset {
             height: row.height,
             bytes: row.bytes,
             in_library: row.in_library,
+            deleted_at: row.deleted_at,
             text_content: row.text_content,
             origin,
             url,
@@ -96,6 +100,8 @@ mod tests {
             text_content: None,
             in_library: true,
             origin: Some(r#"{"prompt":"cat"}"#.into()),
+            deleted_at: None,
+            content_deleted_at: None,
             created_at: 1,
             updated_at: 2,
         }

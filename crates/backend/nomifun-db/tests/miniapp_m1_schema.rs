@@ -45,7 +45,7 @@ async fn migrated_pool(maximum_version: i64) -> nomifun_db::SqlitePool {
 
 #[tokio::test]
 async fn migration_072_is_additive_and_starts_with_an_empty_new_root() {
-    let pool = migrated_pool(73).await;
+    let pool = migrated_pool(75).await;
 
     let old_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM miniapps")
@@ -78,7 +78,7 @@ async fn migration_072_is_additive_and_starts_with_an_empty_new_root() {
 
 #[tokio::test]
 async fn new_root_preserves_owner_and_pointer_shape_checks() {
-    let database = migrated_pool(73).await;
+    let database = migrated_pool(75).await;
     let owner = installation_owner_id(&database).await.unwrap();
     let miniapp_id = "0190f5fe-7c00-7000-8000-000000000001";
     let invalid_miniapp_id = "not-a-uuid";
@@ -187,9 +187,9 @@ async fn migration_072_preserves_existing_legacy_miniapp_rows_byte_for_byte() {
 }
 
 #[tokio::test]
-async fn migration_073_adds_only_owner_scoped_host_kv_without_runtime_sidecars() {
-    let database = migrated_pool(73).await;
-    let migration = include_str!("../migrations/073_miniapp_m1_runtime_state.sql");
+async fn migration_075_adds_only_owner_scoped_host_kv_without_runtime_sidecars() {
+    let database = migrated_pool(75).await;
+    let migration = include_str!("../migrations/075_miniapp_m1_runtime_state.sql");
     for forbidden in [
         "FROM miniapps",
         "INSERT INTO miniapps",
@@ -204,7 +204,7 @@ async fn migration_073_adds_only_owner_scoped_host_kv_without_runtime_sidecars()
     ] {
         assert!(
             !migration.contains(forbidden),
-            "migration 073 must not contain {forbidden}"
+            "migration 075 must not contain {forbidden}"
         );
     }
 
@@ -248,11 +248,11 @@ async fn migration_073_adds_only_owner_scoped_host_kv_without_runtime_sidecars()
 }
 
 #[tokio::test]
-async fn migration_073_preserves_existing_072_and_legacy_rows_byte_for_byte() {
+async fn migration_075_preserves_existing_072_and_legacy_rows_byte_for_byte() {
     let database = nomifun_db::SqlitePool::connect("sqlite::memory:")
         .await
         .unwrap();
-    migrate_through(&database, 72).await;
+    migrate_through(&database, 74).await;
     let owner = "0190f5fe-7c00-7000-8000-000000000201";
     let miniapp_id = "0190f5fe-7c00-7000-8000-000000000202";
     let project_id = "0190f5fe-7c00-7000-8000-000000000203";
@@ -352,7 +352,7 @@ async fn migration_073_preserves_existing_072_and_legacy_rows_byte_for_byte() {
 
     let mut connection = database.acquire().await.unwrap();
     connection
-        .apply(MIGRATOR.iter().find(|migration| migration.version == 73).unwrap())
+        .apply(MIGRATOR.iter().find(|migration| migration.version == 75).unwrap())
         .await
         .unwrap();
     drop(connection);

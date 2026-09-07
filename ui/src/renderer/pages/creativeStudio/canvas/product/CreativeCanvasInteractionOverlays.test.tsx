@@ -70,11 +70,12 @@ describe('CreativeCanvasInteractionOverlays', () => {
     expect(edge.includes('创建副本')).toBe(false);
   });
 
-  test('reuses the canonical eight-kind node menu and renders nothing when closed', () => {
+  test('reuses the seven-kind user node menu and renders nothing when closed', () => {
     const menu = renderOverlay({
       createNodeMenu: { clientPosition: { x: 100, y: 120 } },
     });
-    expect((menu.match(/data-node-kind=/g) ?? []).length).toBe(8);
+    expect((menu.match(/data-node-kind=/g) ?? []).length).toBe(7);
+    expect(menu.includes('data-node-kind="config"')).toBe(false);
     expect(renderOverlay({})).toBe('');
   });
 });

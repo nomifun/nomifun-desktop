@@ -91,11 +91,13 @@ fixed-palette confirmation, then reloads the first page. Runtime entries are
 dismissed only after the backend commits. Live cards retain cancel and never
 expose delete.
 
-Retirement never deletes media. Task inputs and results both restrict asset
-deletion, including after retirement; succeeded manifests cannot be shortened
-into an invalid empty result. Generated results remain in the global asset
-library. Canvas deletion is blocked only by live CanvasNode tasks for that
-Canvas; standalone live tasks do not participate.
+History retirement never deletes media. Permanent deletion from My Assets
+removes originals and thumbnails while retaining explicit asset tombstones.
+Task inputs and results retain their IDs, including after retirement; succeeded
+manifests cannot be shortened into an invalid empty result. History renders
+deleted assets as unavailable and new generation cannot reuse them. Only live
+task/run uses prevent content deletion. Canvas deletion is blocked only by live
+CanvasNode tasks for that Canvas; standalone live tasks do not participate.
 
 The product does not delete result assets or keep `hiddenIds` to impersonate a
 deleted history row. Earlier CanvasNode tasks remain auditable Canvas tasks and
