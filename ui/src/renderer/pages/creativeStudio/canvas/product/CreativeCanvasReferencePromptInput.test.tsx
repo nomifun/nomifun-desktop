@@ -6,19 +6,25 @@
 
 import '../../../../../../test/setup-dom.ts';
 
-import { cleanup, fireEvent, render, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'bun:test';
 import React, { useState } from 'react';
 
-import CreativeCanvasReferencePromptInput, {
+import type {
+  CreativeCanvasPromptMentionBinding,
+  CreativeCanvasPromptReferenceOption,
+  CreativeCanvasReferencePromptChange,
+} from './CreativeCanvasReferencePromptInput';
+
+// Load ReactDOM after setup-dom so its native input/composition feature probes
+// run with a DOM, including when this test file is run on its own.
+const { act, cleanup, fireEvent, render, within } = await import('@testing-library/react');
+const {
+  default: CreativeCanvasReferencePromptInput,
   collectCreativeCanvasPromptMentionIssues,
   findCreativeCanvasMentionTrigger,
   rebaseCreativeCanvasPromptMentions,
   relabelCreativeCanvasPromptMentions,
-  type CreativeCanvasPromptMentionBinding,
-  type CreativeCanvasPromptReferenceOption,
-  type CreativeCanvasReferencePromptChange,
-} from './CreativeCanvasReferencePromptInput';
+} = await import('./CreativeCanvasReferencePromptInput');
 
 afterEach(() => cleanup());
 
@@ -77,7 +83,131 @@ const typeAtCaret = (
   fireEvent.select(textarea);
 };
 
+const finishComposition = async (): Promise<void> => {
+  await act(async () => {
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+  });
+};
+
 describe('CreativeCanvasReferencePromptInput', () => {
+  test('keeps IME preedit local and commits Chinese once at the middle caret', async () => {
+    const changes: CreativeCanvasReferencePromptChange[] = [];
+    const submissions: CreativeCanvasReferencePromptChange[] = [];
+    const { getByRole, queryByRole } = render(<Harness
+      initial={{ value: '人物戴着，保持背景', mentions: [] }}
+      onState={(change) => changes.push(change)}
+      onSubmit={(change) => submissions.push(change)}
+    />);
+    const input = getByRole('combobox') as HTMLTextAreaElement;
+    input.focus();
+    input.setSelectionRange(4, 4);
+    fireEvent.compositionStart(input);
+    fireEvent.input(input, { target: { value: '人物戴着fa zhan，保持背景', selectionStart: 11, selectionEnd: 11 }, isComposing: true });
+    expect(input.value).toBe('人物戴着fa zhan，保持背景');
+    expect(changes).toEqual([]);
+    expect(queryByRole('listbox')).toBeNull();
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: true });
+    fireEvent.compositionEnd(input, { data: '发簪', target: { value: '人物戴着发簪，保持背景', selectionStart: 6, selectionEnd: 6 } });
+    fireEvent.input(input, { target: { value: '人物戴着发簪，保持背景', selectionStart: 6, selectionEnd: 6 } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await finishComposition();
+    expect(changes).toEqual([{ value: '人物戴着发簪，保持背景', mentions: [] }]);
+    expect(input.selectionStart).toBe(6);
+    expect(input.selectionEnd).toBe(6);
+    expect(submissions).toEqual([]);
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(submissions).toEqual(changes);
+  });
+
+  test('does not rewrite a bound mention while the IME is replacing its text', async () => {
+    const changes: CreativeCanvasReferencePromptChange[] = [];
+    const mention: CreativeCanvasPromptMentionBinding = {
+      id: 'mention-person', sourceNodeId: 'person-node', fallbackLabel: '图片1', start: 0, end: 4,
+    };
+    const { getByRole } = render(<Harness
+      initial={{ value: '@图片1 的发型', mentions: [mention] }}
+      onState={(change) => changes.push(change)}
+    />);
+    const input = getByRole('combobox') as HTMLTextAreaElement;
+    input.focus();
+    input.setSelectionRange(1, 3);
+    fireEvent.compositionStart(input);
+    fireEvent.input(input, { target: { value: '@ren1 的发型', selectionStart: 4, selectionEnd: 4 }, isComposing: true });
+    expect(input.value).toBe('@ren1 的发型');
+    expect(input.selectionStart).toBe(4);
+    expect(changes).toEqual([]);
+    // Also cover engines whose final input precedes compositionend.
+    fireEvent.input(input, { target: { value: '@人物1 的发型', selectionStart: 3, selectionEnd: 3 }, isComposing: true });
+    fireEvent.compositionEnd(input, { data: '人物' });
+    await finishComposition();
+    expect(changes).toEqual([{ value: '人物1 的发型', mentions: [] }]);
+    expect(input.value).toBe('人物1 的发型');
+    expect(input.selectionStart).toBe(2);
+  });
+
+  test('cancels preedit without losing reference bindings or persisting pinyin', async () => {
+    const changes: CreativeCanvasReferencePromptChange[] = [];
+    const value = '前文🙂，保持 @图片1 的背景';
+    const start = value.indexOf('@图片1');
+    const mention: CreativeCanvasPromptMentionBinding = {
+      id: 'mention-person', sourceNodeId: 'person-node', fallbackLabel: '图片1', start, end: start + 4,
+    };
+    const { getByRole, rerender } = render(<Harness initial={{ value, mentions: [mention] }} onState={(change) => changes.push(change)} />);
+    const input = getByRole('combobox') as HTMLTextAreaElement;
+    input.focus();
+    input.setSelectionRange(4, 4);
+    fireEvent.compositionStart(input);
+    fireEvent.input(input, { target: { value: '前文🙂fa，保持 @图片1 的背景', selectionStart: 6, selectionEnd: 6 }, isComposing: true });
+    rerender(<Harness initial={{ value, mentions: [mention] }} referenceOptions={structuredClone(references)} onState={(change) => changes.push(change)} />);
+    expect(input.value).toBe('前文🙂fa，保持 @图片1 的背景');
+    expect(input.selectionStart).toBe(6);
+    fireEvent.input(input, { target: { value, selectionStart: 4, selectionEnd: 4 }, isComposing: true });
+    fireEvent.compositionEnd(input, { data: '' });
+    await finishComposition();
+    expect(changes).toEqual([]);
+    expect(input.value).toBe(value);
+
+    // The next composition rebases from the committed draft, using UTF-16 offsets.
+    fireEvent.compositionStart(input);
+    fireEvent.input(input, { target: { value: '前文🙂发簪，保持 @图片1 的背景', selectionStart: 6, selectionEnd: 6 }, isComposing: true });
+    fireEvent.compositionEnd(input, { data: '发簪' });
+    await finishComposition();
+    expect(changes).toEqual([{
+      value: '前文🙂发簪，保持 @图片1 的背景',
+      mentions: [{ ...mention, start: start + 2, end: start + 6 }],
+    }]);
+    expect(input.selectionStart).toBe(6);
+  });
+
+  test('flushes a completed composition on blur without taking focus back', async () => {
+    const changes: CreativeCanvasReferencePromptChange[] = [];
+    const { getByRole } = render(<><Harness onState={(change) => changes.push(change)} /><button>另一个控件</button></>);
+    const input = getByRole('combobox') as HTMLTextAreaElement;
+    input.focus();
+    fireEvent.compositionStart(input);
+    fireEvent.input(input, { target: { value: '发簪' }, isComposing: true });
+    fireEvent.compositionEnd(input, { data: '发簪' });
+    act(() => getByRole('button', { name: '另一个控件' }).focus());
+    expect(changes).toEqual([{ value: '发簪', mentions: [] }]);
+    await finishComposition();
+    expect(changes.length).toBe(1);
+    expect(document.activeElement).toBe(getByRole('button', { name: '另一个控件' }));
+  });
+
+  test('does not replay a mention insertion caret after the user moves it', async () => {
+    const { getByRole } = render(<Harness />);
+    const input = getByRole('combobox') as HTMLTextAreaElement;
+    input.focus();
+    typeAtCaret(input, '前文 @ 后文', 4);
+    fireEvent.click(getByRole('option', { name: /@图片1/ }));
+    expect(input.selectionStart).toBe(7);
+    input.setSelectionRange(0, 2, 'backward');
+    await act(async () => { await Promise.resolve(); });
+    expect(input.selectionStart).toBe(0);
+    expect(input.selectionEnd).toBe(2);
+    expect(input.selectionDirection).toBe('backward');
+  });
+
   test('keeps a reference selectable when its thumbnail falls back to the original', () => {
     const reference = {
       ...references[0]!,
@@ -129,6 +259,7 @@ describe('CreativeCanvasReferencePromptInput', () => {
     fireEvent.select(input);
     expect(queryByRole('listbox')).toBeNull();
 
+    typeAtCaret(input, '让');
     typeAtCaret(input, '让@');
     expect(getByRole('listbox')).toBeDefined();
   });

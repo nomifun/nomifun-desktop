@@ -368,9 +368,16 @@ const CreativeCanvasReferencePromptInput: React.FC<
   const rootRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const compositionRef = useRef(false);
+  const compositionBaseRef = useRef<CreativeCanvasReferencePromptChange | null>(null);
+  const [compositionValue, setCompositionValue] = useState<string | null>(null);
   const justComposedRef = useRef(false);
   const compositionFrameRef = useRef<number | null>(null);
-  const pendingSelectionRef = useRef<number | null>(null);
+  const pendingSelectionRef = useRef<{
+    start: number;
+    end: number;
+    direction: 'forward' | 'backward' | 'none';
+    value: string;
+  } | null>(null);
   const [trigger, setTrigger] =
     useState<CreativeCanvasPromptMentionTrigger | null>(null);
   const [activeNodeId, setActiveNodeId] = useState<string | null>(null);
@@ -448,24 +455,23 @@ const CreativeCanvasReferencePromptInput: React.FC<
   );
 
   useLayoutEffect(() => {
-    const caret = pendingSelectionRef.current;
-    if (caret === null) return;
-    const textarea = textareaRef.current;
-    if (!textarea || textarea.value !== value) return;
-    textarea.focus();
-    textarea.setSelectionRange(caret, caret);
+    const selection = pendingSelectionRef.current;
+    if (!selection || compositionRef.current) return;
     pendingSelectionRef.current = null;
-  }, [value]);
+    const textarea = textareaRef.current;
+    if (!textarea || value !== selection.value || textarea.value !== selection.value) return;
+    textarea.focus();
+    textarea.setSelectionRange(selection.start, selection.end, selection.direction);
+  });
 
-  const queueSelection = (caret: number, nextValue: string): void => {
-    pendingSelectionRef.current = caret;
-    queueMicrotask(() => {
-      const textarea = textareaRef.current;
-      if (!textarea || textarea.value !== nextValue) return;
-      textarea.focus();
-      textarea.setSelectionRange(caret, caret);
-      pendingSelectionRef.current = null;
-    });
+  const queueSelection = (
+    start: number,
+    nextValue: string,
+    end = start,
+    direction: 'forward' | 'backward' | 'none' = 'none'
+  ): void => {
+    // Only this exact edit may restore selection, once, in its layout commit.
+    pendingSelectionRef.current = { start, end, direction, value: nextValue };
   };
 
   const emitChange = (
@@ -497,10 +503,51 @@ const CreativeCanvasReferencePromptInput: React.FC<
     setTrigger(insideBoundMention ? null : nextTrigger);
   };
 
+  const commitInput = (
+    textarea: HTMLTextAreaElement,
+    previous: CreativeCanvasReferencePromptChange = { value, mentions: [...mentions] }
+  ): CreativeCanvasReferencePromptChange => {
+    let nextValue = textarea.value;
+    let start = textarea.selectionStart;
+    let end = textarea.selectionEnd;
+    let nextMentions = rebaseCreativeCanvasPromptMentions(previous.value, nextValue, previous.mentions);
+    const retainedIds = new Set(nextMentions.map((mention) => mention.id));
+    const editedMentions = previous.mentions
+      .filter((mention) => !retainedIds.has(mention.id))
+      .sort((left, right) => right.start - left.start);
+    // Transform references only after the native edit (including the entire
+    // IME transaction) has finished. Rewriting preedit text cancels composition.
+    for (const mention of editedMentions) {
+      if (nextValue[mention.start] !== '@') continue;
+      const before = nextValue;
+      nextValue = nextValue.slice(0, mention.start) + nextValue.slice(mention.start + 1);
+      if (mention.start < start) start -= 1;
+      if (mention.start < end) end -= 1;
+      nextMentions = rebaseCreativeCanvasPromptMentions(before, nextValue, nextMentions);
+    }
+    if (nextValue !== textarea.value && document.activeElement === textarea) {
+      queueSelection(start, nextValue, end, textarea.selectionDirection);
+    }
+    if (nextValue !== previous.value || nextMentions.length !== previous.mentions.length) {
+      emitChange(nextValue, nextMentions);
+    }
+    syncTriggerAt(nextValue, start);
+    return { value: nextValue, mentions: nextMentions };
+  };
+
+  const finishComposition = (): CreativeCanvasReferencePromptChange | undefined => {
+    const previous = compositionBaseRef.current;
+    compositionBaseRef.current = null;
+    compositionRef.current = false;
+    setCompositionValue(null);
+    const textarea = textareaRef.current;
+    if (textarea && previous) return commitInput(textarea, previous);
+  };
+
   const chooseReference = (
     reference: NormalizedCreativeCanvasPromptReference
   ): void => {
-    if (!trigger || reference.disabledReason || disabled) return;
+    if (!trigger || reference.disabledReason || disabled || compositionRef.current) return;
     const token = `@${reference.mentionLabel}`;
     const suffix = value.slice(trigger.end);
     const trailingSpace = followsTokenWithoutSpace(suffix) ? ' ' : '';
@@ -538,7 +585,7 @@ const CreativeCanvasReferencePromptInput: React.FC<
   };
 
   const openFromTouchButton = (): void => {
-    if (disabled) return;
+    if (disabled || compositionRef.current) return;
     const textarea = textareaRef.current;
     const selectionStart = textarea?.selectionStart ?? value.length;
     const selectionEnd = textarea?.selectionEnd ?? selectionStart;
@@ -643,45 +690,28 @@ const CreativeCanvasReferencePromptInput: React.FC<
           aria-multiline='true'
           aria-invalid={issues.length > 0 || undefined}
           aria-describedby={issues.length > 0 ? statusId : undefined}
-          value={value}
+          value={compositionValue ?? value}
           placeholder={placeholder}
           disabled={disabled}
           maxLength={maxLength}
           autoFocus={autoFocus}
           rows={rows}
+          onInputCapture={(event) => {
+            if ((event.nativeEvent as InputEvent).isComposing && !compositionRef.current) {
+              compositionBaseRef.current = { value, mentions: [...mentions] };
+              compositionRef.current = true;
+              pendingSelectionRef.current = null;
+              setTrigger(null);
+            }
+            if (compositionRef.current) setCompositionValue(event.currentTarget.value);
+          }}
           onChange={(event) => {
-            let nextValue = event.currentTarget.value;
-            let caret = event.currentTarget.selectionStart;
-            let nextMentions = rebaseCreativeCanvasPromptMentions(
-              value,
-              nextValue,
-              mentions
-            );
-            const retainedIds = new Set(nextMentions.map((mention) => mention.id));
-            const editedMentions = mentions
-              .filter((mention) => !retainedIds.has(mention.id))
-              .sort((left, right) => right.start - left.start);
-            // A partially edited token becomes ordinary text. Remove its @
-            // sigil so it cannot continue looking like a live reference after
-            // the stable binding has been intentionally dropped.
-            for (const mention of editedMentions) {
-              if (nextValue[mention.start] !== '@') continue;
-              const before = nextValue;
-              nextValue =
-                nextValue.slice(0, mention.start) +
-                nextValue.slice(mention.start + 1);
-              if (mention.start < caret) caret -= 1;
-              nextMentions = rebaseCreativeCanvasPromptMentions(
-                before,
-                nextValue,
-                nextMentions
-              );
+            pendingSelectionRef.current = null;
+            if (compositionRef.current) {
+              setCompositionValue(event.currentTarget.value);
+              return;
             }
-            emitChange(nextValue, nextMentions);
-            if (nextValue !== event.currentTarget.value) {
-              queueSelection(caret, nextValue);
-            }
-            if (!compositionRef.current) syncTriggerAt(nextValue, caret);
+            commitInput(event.currentTarget);
           }}
           onSelect={(event) => {
             if (!compositionRef.current) {
@@ -691,22 +721,43 @@ const CreativeCanvasReferencePromptInput: React.FC<
               );
             }
           }}
-          onCompositionStartCapture={() => {
+          onCompositionStartCapture={(event) => {
+            let previous: CreativeCanvasReferencePromptChange | undefined;
+            if (compositionFrameRef.current !== null) {
+              cancelAnimationFrame(compositionFrameRef.current);
+              compositionFrameRef.current = null;
+              previous = finishComposition();
+            }
+            pendingSelectionRef.current = null;
+            compositionBaseRef.current = previous ?? { value, mentions: [...mentions] };
             compositionRef.current = true;
+            setCompositionValue(event.currentTarget.value);
             justComposedRef.current = false;
             setTrigger(null);
           }}
           onCompositionEndCapture={(event) => {
-            compositionRef.current = false;
+            // Some engines dispatch the final input after compositionend.
+            // Keep the raw buffer until that event has passed, then rebase once.
+            setCompositionValue(event.currentTarget.value);
             justComposedRef.current = true;
             if (compositionFrameRef.current !== null) {
               cancelAnimationFrame(compositionFrameRef.current);
             }
             compositionFrameRef.current = requestAnimationFrame(() => {
+              finishComposition();
               justComposedRef.current = false;
               compositionFrameRef.current = null;
             });
-            syncTriggerAt(event.currentTarget.value, event.currentTarget.selectionStart);
+          }}
+          onBlur={() => {
+            pendingSelectionRef.current = null;
+            if (compositionFrameRef.current !== null) {
+              cancelAnimationFrame(compositionFrameRef.current);
+              compositionFrameRef.current = null;
+              finishComposition();
+              justComposedRef.current = false;
+            }
+            setTrigger(null);
           }}
           onKeyDown={(event) => {
             if (

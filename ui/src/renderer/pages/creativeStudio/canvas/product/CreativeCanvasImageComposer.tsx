@@ -144,6 +144,12 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [initialMentions, initialPrompt, referenceAliasSignature, referenceMentionLabel]
   );
+  // The route clones mention arrays on every canvas render. Object identity is
+  // not a new draft: hydrating it again can overwrite a newer native edit.
+  const hydratedDraftRef = useRef<{
+    nodeId: string;
+    draft: CreativeCanvasReferencePromptChange;
+  } | null>(null);
   const [prompt, setPrompt] = useState(normalizedInitialDraft.value);
   const [mentions, setMentions] = useState<CreativeCanvasPromptMentionBinding[]>(
     () => structuredClone(normalizedInitialDraft.mentions)
@@ -192,6 +198,19 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
     .filter(Boolean).join(' · ');
 
   useEffect(() => {
+    const previous = hydratedDraftRef.current;
+    if (
+      previous?.nodeId === nodeId &&
+      previous.draft.value === normalizedInitialDraft.value &&
+      previous.draft.mentions.length === normalizedInitialDraft.mentions.length &&
+      previous.draft.mentions.every((mention, index) => {
+        const next = normalizedInitialDraft.mentions[index]!;
+        return mention.id === next.id && mention.sourceNodeId === next.sourceNodeId &&
+          mention.fallbackLabel === next.fallbackLabel &&
+          mention.start === next.start && mention.end === next.end;
+      })
+    ) return;
+    hydratedDraftRef.current = { nodeId, draft: normalizedInitialDraft };
     setPrompt(normalizedInitialDraft.value);
     setMentions(structuredClone(normalizedInitialDraft.mentions));
     if (normalizedInitialDraft.value !== initialPrompt) {
@@ -265,6 +284,7 @@ const CreativeCanvasImageComposer: React.FC<CreativeCanvasImageComposerProps> = 
         />
 
         <CreativeCanvasReferencePromptInput
+          key={`prompt:${nodeId}`}
           value={prompt}
           mentions={mentions}
           references={references}

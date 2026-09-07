@@ -6,16 +6,16 @@
 
 import '../../../../../../test/setup-dom.ts';
 
-import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 import { withCanvasTestI18n } from '../components/canvasI18nTestUtils';
-import CreativeCanvasImageComposer, {
-  type CreativeCanvasImageComposerProps,
-} from './CreativeCanvasImageComposer';
+import type { CreativeCanvasImageComposerProps } from './CreativeCanvasImageComposer';
 import type { CreativeCanvasReferencePromptChange } from './CreativeCanvasReferencePromptInput';
+
+const { act, cleanup, fireEvent, render, waitFor, within } = await import('@testing-library/react');
+const { default: CreativeCanvasImageComposer } = await import('./CreativeCanvasImageComposer');
 
 const noop = () => undefined;
 
@@ -97,6 +97,75 @@ const props = (
 });
 
 describe('CreativeCanvasImageComposer', () => {
+  test('keeps canvas refreshes out of preedit and generates the committed text on click', () => {
+    const promptChanges: CreativeCanvasReferencePromptChange[] = [];
+    const generated: string[] = [];
+    const componentProps = props({
+      initialPrompt: '人物戴着，保持背景',
+      initialMentions: [],
+      onPromptChange: (change) => promptChanges.push(change),
+      onGenerate: (prompt) => generated.push(prompt),
+    });
+    const { getByRole, rerender } = render(withCanvasTestI18n(<CreativeCanvasImageComposer {...componentProps} />));
+    const input = getByRole('combobox', { name: '图片创作提示词' }) as HTMLTextAreaElement;
+    input.focus();
+    input.setSelectionRange(4, 4);
+    fireEvent.compositionStart(input);
+    fireEvent.input(input, { target: { value: '人物戴着fa zhan，保持背景', selectionStart: 11, selectionEnd: 11 }, isComposing: true });
+    rerender(withCanvasTestI18n(<CreativeCanvasImageComposer {...componentProps} initialMentions={[]} />));
+    expect(input.value).toBe('人物戴着fa zhan，保持背景');
+    expect(input.selectionStart).toBe(11);
+    expect(promptChanges).toEqual([]);
+    fireEvent.input(input, { target: { value: '人物戴着发簪，保持背景', selectionStart: 6, selectionEnd: 6 }, isComposing: true });
+    fireEvent.compositionEnd(input, { data: '发簪' });
+    const generate = getByRole('button', { name: '生成图片' });
+    act(() => generate.focus());
+    fireEvent.click(generate);
+    expect(promptChanges).toEqual([{ value: '人物戴着发簪，保持背景', mentions: [] }]);
+    expect(generated).toEqual(['人物戴着发簪，保持背景']);
+  });
+
+  test('does not carry pending composition into another canvas node', async () => {
+    const changes: CreativeCanvasReferencePromptChange[] = [];
+    const componentProps = props({ initialPrompt: '第一个节点', onPromptChange: (change) => changes.push(change) });
+    const { getByRole, rerender } = render(withCanvasTestI18n(<CreativeCanvasImageComposer {...componentProps} />));
+    const input = getByRole('combobox', { name: '图片创作提示词' }) as HTMLTextAreaElement;
+    input.focus();
+    fireEvent.compositionStart(input);
+    fireEvent.input(input, { target: { value: '第一个节点fa' }, isComposing: true });
+    fireEvent.compositionEnd(input, { target: { value: '第一个节点发簪' }, data: '发簪' });
+    rerender(withCanvasTestI18n(<CreativeCanvasImageComposer {...componentProps} nodeId='second-node' initialPrompt='第二个节点' />));
+    await act(async () => { await new Promise<void>((resolve) => requestAnimationFrame(() => resolve())); });
+    const nextInput = getByRole('combobox', { name: '图片创作提示词' }) as HTMLTextAreaElement;
+    expect(nextInput).not.toBe(input);
+    expect(nextInput.value).toBe('第二个节点');
+    expect(changes).toEqual([]);
+  });
+
+  test('does not restore an unchanged canvas snapshot over an edit in the middle', () => {
+    const componentProps = props({ initialPrompt: '人物戴着，保持背景和构图', initialMentions: [] });
+    const { getByRole, rerender } = render(withCanvasTestI18n(
+      <CreativeCanvasImageComposer {...componentProps} />
+    ));
+    const input = getByRole('combobox', { name: '图片创作提示词' }) as HTMLTextAreaElement;
+    input.focus();
+    fireEvent.change(input, { target: { value: '人物戴着发簪，保持背景和构图', selectionStart: 6, selectionEnd: 6 } });
+
+    // The route clones mentions whenever the canvas or its assets rerender.
+    rerender(withCanvasTestI18n(
+      <CreativeCanvasImageComposer {...componentProps} initialMentions={[]} />
+    ));
+    expect(input.value).toBe('人物戴着发簪，保持背景和构图');
+    expect(input.selectionStart).toBe(6);
+    expect(document.activeElement).toBe(input);
+
+    // A real external replacement (e.g. the prompt library) must still hydrate.
+    rerender(withCanvasTestI18n(
+      <CreativeCanvasImageComposer {...componentProps} initialPrompt='提示词库内容' initialMentions={[]} />
+    ));
+    expect(input.value).toBe('提示词库内容');
+  });
+
   test('previews text as text, inserts a text alias and permits text-only input', () => {
     const submitted: string[] = [];
     const disconnected: string[] = [];
