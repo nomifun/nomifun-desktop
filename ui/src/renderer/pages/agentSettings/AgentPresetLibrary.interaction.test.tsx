@@ -112,7 +112,7 @@ describe('AgentPreset library deletion', () => {
       <I18nextProvider i18n={testI18n}>
         <AgentPresetLibrary
           library={library}
-          selection={null}
+          selection={{ kind: 'preset', preset }}
           busy={false}
           creating={false}
           openingPresetId={null}

@@ -250,6 +250,20 @@ const CAPABILITY_ACTION_LABELS: Readonly<
 const CAPABILITY_COPY_OVERRIDES: Readonly<
   Record<string, { en: [string, string]; zh: [string, string] }>
 > = {
+  'web.search': { en: ['Search the web', 'Find relevant information from web sources.'], zh: ['搜索网页', '查找相关网页，收集任务所需的信息。'] },
+  'web.fetch': { en: ['Read a webpage', 'Fetch a public webpage and read its main content.'], zh: ['读取网页', '抓取公开网页，读取标题和正文内容。'] },
+  'citation.render': { en: ['Organize citations', 'Include source references with the information used by the Agent.'], zh: ['整理引用', '为使用到的信息整理来源，方便核对与追溯。'] },
+  'fs.read': { en: ['Read files', 'Read file contents to understand a project or work with documents.'], zh: ['读取文件', '读取文件内容，理解项目或处理文档。'] },
+  'fs.search': { en: ['Search files', 'Find files and search their contents.'], zh: ['搜索文件', '按名称或内容查找相关文件。'] },
+  'fs.write': { en: ['Write files', 'Create files or write updated content.'], zh: ['写入文件', '创建文件，或写入更新后的内容。'] },
+  'fs.patch': { en: ['Edit files', 'Make targeted changes to existing file contents.'], zh: ['编辑文件', '对已有文件内容进行局部修改。'] },
+  'fs.delete': { en: ['Delete files', 'Remove files selected for a task.'], zh: ['删除文件', '删除任务中指定的文件。'] },
+  'process.exec': { en: ['Run commands', 'Run commands in the conversation working environment.'], zh: ['执行命令', '在会话的工作环境中运行命令。'] },
+  'agent.execution.plan': { en: ['Plan a task', 'Break work into steps and track progress.'], zh: ['规划任务', '将工作拆分为步骤，并跟踪完成进度。'] },
+  'agent.delegate': { en: ['Delegate subtasks', 'Delegate bounded parts of a task to helper Agents.'], zh: ['委派子任务', '把任务的一部分交给辅助 Agent 处理。'] },
+  'vcs.status': { en: ['View Git status', 'Check changed, staged and untracked files.'], zh: ['查看 Git 状态', '检查已修改、已暂存和未跟踪的文件。'] },
+  'vcs.diff': { en: ['Review code changes', 'Inspect the differences before recording a change.'], zh: ['查看代码差异', '检查文件改动，了解修改了哪些内容。'] },
+  'schedule.store': { en: ['Manage scheduled tasks', 'Create, view and remove recurring work for the conversation.'], zh: ['管理定时任务', '为当前会话创建、查看和移除定期任务。'] },
   'channel.group_policy': {
     en: ['Channel group policy', 'Manage group policy for the selected channel.'],
     zh: ['管理渠道群组策略', '管理当前使用目标所选渠道的群组策略。'],

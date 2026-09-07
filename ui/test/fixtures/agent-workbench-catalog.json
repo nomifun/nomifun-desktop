@@ -1,0 +1,3520 @@
+[
+  {
+    "capability": {
+      "id": "llm.realtime",
+      "version": "1.0.0"
+    },
+    "kind": "transport",
+    "display_name": "llm.realtime",
+    "description": "llm.realtime",
+    "source_package": {
+      "id": "nomifun.model-media",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "llm.embedding",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "llm.embedding",
+    "description": "llm.embedding",
+    "source_package": {
+      "id": "nomifun.model-media",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "llm.rerank",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "llm.rerank",
+    "description": "llm.rerank",
+    "source_package": {
+      "id": "nomifun.model-media",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "llm.image.generate",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "llm.image.generate",
+    "description": "llm.image.generate",
+    "source_package": {
+      "id": "nomifun.model-media",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "llm.image.edit",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "llm.image.edit",
+    "description": "llm.image.edit",
+    "source_package": {
+      "id": "nomifun.model-media",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "llm.video.generate",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "llm.video.generate",
+    "description": "llm.video.generate",
+    "source_package": {
+      "id": "nomifun.model-media",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "llm.audio.tts",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "llm.audio.tts",
+    "description": "llm.audio.tts",
+    "source_package": {
+      "id": "nomifun.model-media",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "llm.audio.asr",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "llm.audio.asr",
+    "description": "llm.audio.asr",
+    "source_package": {
+      "id": "nomifun.model-media",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "llm.vision",
+      "version": "1.0.0"
+    },
+    "kind": "context_contributor",
+    "display_name": "llm.vision",
+    "description": "llm.vision",
+    "source_package": {
+      "id": "nomifun.model-media",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 1
+  },
+  {
+    "capability": {
+      "id": "web.search",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "web.search",
+    "description": "web.search",
+    "source_package": {
+      "id": "nomifun.web-research",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "web.fetch",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "web.fetch",
+    "description": "web.fetch",
+    "source_package": {
+      "id": "nomifun.web-research",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "citation.render",
+      "version": "1.0.0"
+    },
+    "kind": "context_contributor",
+    "display_name": "citation.render",
+    "description": "citation.render",
+    "source_package": {
+      "id": "nomifun.web-research",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 1
+  },
+  {
+    "capability": {
+      "id": "session.attachments.read",
+      "version": "1.0.0"
+    },
+    "kind": "context_contributor",
+    "display_name": "session.attachments.read",
+    "description": "session.attachments.read",
+    "source_package": {
+      "id": "nomifun.chat",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 1
+  },
+  {
+    "capability": {
+      "id": "agent.delegate",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "agent.delegate",
+    "description": "agent.delegate",
+    "source_package": {
+      "id": "nomifun.agent-execution",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "process_session"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "agent.fork",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "agent.fork",
+    "description": "agent.fork",
+    "source_package": {
+      "id": "nomifun.agent-execution",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "agent.execution.plan",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "agent.execution.plan",
+    "description": "agent.execution.plan",
+    "source_package": {
+      "id": "nomifun.agent-execution",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "agent.execution.steer",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "agent.execution.steer",
+    "description": "agent.execution.steer",
+    "source_package": {
+      "id": "nomifun.agent-execution",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "process_session"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "agent.execution.observe",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "agent.execution.observe",
+    "description": "agent.execution.observe",
+    "source_package": {
+      "id": "nomifun.agent-execution",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "process_session"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "fs.read",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "fs.read",
+    "description": "fs.read",
+    "source_package": {
+      "id": "nomifun.workspace-execution",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "workspace"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "fs.search",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "fs.search",
+    "description": "fs.search",
+    "source_package": {
+      "id": "nomifun.workspace-execution",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "workspace"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "fs.write",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "fs.write",
+    "description": "fs.write",
+    "source_package": {
+      "id": "nomifun.workspace-execution",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "workspace"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "fs.patch",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "fs.patch",
+    "description": "fs.patch",
+    "source_package": {
+      "id": "nomifun.workspace-execution",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "workspace"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "fs.delete",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "fs.delete",
+    "description": "fs.delete",
+    "source_package": {
+      "id": "nomifun.workspace-execution",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "workspace"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "fs.watch",
+      "version": "1.0.0"
+    },
+    "kind": "event_source",
+    "display_name": "fs.watch",
+    "description": "fs.watch",
+    "source_package": {
+      "id": "nomifun.workspace-execution",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "fs.snapshot",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "fs.snapshot",
+    "description": "fs.snapshot",
+    "source_package": {
+      "id": "nomifun.workspace-execution",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "workspace"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "workspace.bind",
+      "version": "1.0.0"
+    },
+    "kind": "resource_provider",
+    "display_name": "workspace.bind",
+    "description": "workspace.bind",
+    "source_package": {
+      "id": "nomifun.workspace-execution",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "workspace"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "workspace.artifacts",
+      "version": "1.0.0"
+    },
+    "kind": "resource_provider",
+    "display_name": "workspace.artifacts",
+    "description": "workspace.artifacts",
+    "source_package": {
+      "id": "nomifun.workspace-execution",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "workspace"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "vcs.status",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "vcs.status",
+    "description": "vcs.status",
+    "source_package": {
+      "id": "nomifun.workspace-execution",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "workspace"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "vcs.diff",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "vcs.diff",
+    "description": "vcs.diff",
+    "source_package": {
+      "id": "nomifun.workspace-execution",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "workspace"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "vcs.stage",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "vcs.stage",
+    "description": "vcs.stage",
+    "source_package": {
+      "id": "nomifun.workspace-execution",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "workspace"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "vcs.commit",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "vcs.commit",
+    "description": "vcs.commit",
+    "source_package": {
+      "id": "nomifun.workspace-execution",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "workspace"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "vcs.push",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "vcs.push",
+    "description": "vcs.push",
+    "source_package": {
+      "id": "nomifun.workspace-execution",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "workspace"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "process.exec",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "process.exec",
+    "description": "process.exec",
+    "source_package": {
+      "id": "nomifun.workspace-execution",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "process_session"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "process.session",
+      "version": "1.0.0"
+    },
+    "kind": "resource_provider",
+    "display_name": "process.session",
+    "description": "process.session",
+    "source_package": {
+      "id": "nomifun.workspace-execution",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "process_session"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "terminal.pty",
+      "version": "1.0.0"
+    },
+    "kind": "resource_provider",
+    "display_name": "terminal.pty",
+    "description": "terminal.pty",
+    "source_package": {
+      "id": "nomifun.workspace-execution",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "terminal"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "ssh.connect",
+      "version": "1.0.0"
+    },
+    "kind": "resource_provider",
+    "display_name": "ssh.connect",
+    "description": "ssh.connect",
+    "source_package": {
+      "id": "nomifun.ssh",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "ssh_host"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "ssh.fs.read",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "ssh.fs.read",
+    "description": "ssh.fs.read",
+    "source_package": {
+      "id": "nomifun.ssh",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "ssh_host"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "ssh.fs.write",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "ssh.fs.write",
+    "description": "ssh.fs.write",
+    "source_package": {
+      "id": "nomifun.ssh",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "ssh_host"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "ssh.exec",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "ssh.exec",
+    "description": "ssh.exec",
+    "source_package": {
+      "id": "nomifun.ssh",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "ssh_host"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "ssh.sudo",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "ssh.sudo",
+    "description": "ssh.sudo",
+    "source_package": {
+      "id": "nomifun.ssh",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "ssh_host"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "knowledge.search",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "knowledge.search",
+    "description": "knowledge.search",
+    "source_package": {
+      "id": "nomifun.knowledge",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "knowledge_base"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "knowledge.read",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "knowledge.read",
+    "description": "knowledge.read",
+    "source_package": {
+      "id": "nomifun.knowledge",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "knowledge_base"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "knowledge.write",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "knowledge.write",
+    "description": "knowledge.write",
+    "source_package": {
+      "id": "nomifun.knowledge",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "knowledge_base"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "knowledge.mount",
+      "version": "1.0.0"
+    },
+    "kind": "resource_provider",
+    "display_name": "knowledge.mount",
+    "description": "knowledge.mount",
+    "source_package": {
+      "id": "nomifun.knowledge",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "knowledge_base"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "knowledge.source.sync",
+      "version": "1.0.0"
+    },
+    "kind": "background_service",
+    "display_name": "knowledge.source.sync",
+    "description": "knowledge.source.sync",
+    "source_package": {
+      "id": "nomifun.knowledge",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "knowledge.autogen",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "knowledge.autogen",
+    "description": "knowledge.autogen",
+    "source_package": {
+      "id": "nomifun.knowledge",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "knowledge_base"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "knowledge.embedding",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "knowledge.embedding",
+    "description": "knowledge.embedding",
+    "source_package": {
+      "id": "nomifun.knowledge",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "knowledge_base"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "knowledge.rerank",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "knowledge.rerank",
+    "description": "knowledge.rerank",
+    "source_package": {
+      "id": "nomifun.knowledge",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "knowledge_base"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "memory.project.read",
+      "version": "1.0.0"
+    },
+    "kind": "context_contributor",
+    "display_name": "memory.project.read",
+    "description": "memory.project.read",
+    "source_package": {
+      "id": "nomifun.project-memory",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 1
+  },
+  {
+    "capability": {
+      "id": "memory.project.write",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "memory.project.write",
+    "description": "memory.project.write",
+    "source_package": {
+      "id": "nomifun.project-memory",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "project_memory"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "memory.project.distill",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "memory.project.distill",
+    "description": "memory.project.distill",
+    "source_package": {
+      "id": "nomifun.project-memory",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "project_memory"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "memory.project.citation",
+      "version": "1.0.0"
+    },
+    "kind": "context_contributor",
+    "display_name": "memory.project.citation",
+    "description": "memory.project.citation",
+    "source_package": {
+      "id": "nomifun.project-memory",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 1
+  },
+  {
+    "capability": {
+      "id": "memory.session.scratch",
+      "version": "1.0.0"
+    },
+    "kind": "resource_provider",
+    "display_name": "memory.session.scratch",
+    "description": "memory.session.scratch",
+    "source_package": {
+      "id": "nomifun.project-memory",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "project_memory"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "memory.companion.recall",
+      "version": "1.0.0"
+    },
+    "kind": "context_contributor",
+    "display_name": "memory.companion.recall",
+    "description": "memory.companion.recall",
+    "source_package": {
+      "id": "nomifun.companion-memory",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 1
+  },
+  {
+    "capability": {
+      "id": "memory.companion.write",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "memory.companion.write",
+    "description": "memory.companion.write",
+    "source_package": {
+      "id": "nomifun.companion-memory",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "companion_memory"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "memory.companion.merge",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "memory.companion.merge",
+    "description": "memory.companion.merge",
+    "source_package": {
+      "id": "nomifun.companion-memory",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "companion_memory"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "memory.companion.evolve",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "memory.companion.evolve",
+    "description": "memory.companion.evolve",
+    "source_package": {
+      "id": "nomifun.companion-memory",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "companion_memory"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "skill.catalog",
+      "version": "1.0.0"
+    },
+    "kind": "context_contributor",
+    "display_name": "skill.catalog",
+    "description": "skill.catalog",
+    "source_package": {
+      "id": "nomifun.skills",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 1
+  },
+  {
+    "capability": {
+      "id": "skill.describe",
+      "version": "1.0.0"
+    },
+    "kind": "context_contributor",
+    "display_name": "skill.describe",
+    "description": "skill.describe",
+    "source_package": {
+      "id": "nomifun.skills",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 1
+  },
+  {
+    "capability": {
+      "id": "skill.invoke",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "skill.invoke",
+    "description": "skill.invoke",
+    "source_package": {
+      "id": "nomifun.skills",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "skill.hooks",
+      "version": "1.0.0"
+    },
+    "kind": "turn_middleware",
+    "display_name": "skill.hooks",
+    "description": "skill.hooks",
+    "source_package": {
+      "id": "nomifun.skills",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "mcp.connect",
+      "version": "1.0.0"
+    },
+    "kind": "transport",
+    "display_name": "mcp.connect",
+    "description": "mcp.connect",
+    "source_package": {
+      "id": "nomifun.mcp-connectors",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "mcp.tool_proxy",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "mcp.tool_proxy",
+    "description": "mcp.tool_proxy",
+    "source_package": {
+      "id": "nomifun.mcp-connectors",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "mcp_server"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "mcp.resource",
+      "version": "1.0.0"
+    },
+    "kind": "resource_provider",
+    "display_name": "mcp.resource",
+    "description": "mcp.resource",
+    "source_package": {
+      "id": "nomifun.mcp-connectors",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "mcp_server"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "mcp.oauth",
+      "version": "1.0.0"
+    },
+    "kind": "transport",
+    "display_name": "mcp.oauth",
+    "description": "mcp.oauth",
+    "source_package": {
+      "id": "nomifun.mcp-connectors",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "connector.data.read",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "connector.data.read",
+    "description": "connector.data.read",
+    "source_package": {
+      "id": "nomifun.mcp-connectors",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "mcp_server"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "connector.data.write",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "connector.data.write",
+    "description": "connector.data.write",
+    "source_package": {
+      "id": "nomifun.mcp-connectors",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "mcp_server"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "browser.identity",
+      "version": "1.0.0"
+    },
+    "kind": "resource_provider",
+    "display_name": "browser.identity",
+    "description": "browser.identity",
+    "source_package": {
+      "id": "nomifun.browser",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "browser"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "browser.observe",
+      "version": "1.0.0"
+    },
+    "kind": "context_contributor",
+    "display_name": "browser.observe",
+    "description": "browser.observe",
+    "source_package": {
+      "id": "nomifun.browser",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 1
+  },
+  {
+    "capability": {
+      "id": "browser.navigate",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "browser.navigate",
+    "description": "browser.navigate",
+    "source_package": {
+      "id": "nomifun.browser",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "browser"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "browser.act",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "browser.act",
+    "description": "browser.act",
+    "source_package": {
+      "id": "nomifun.browser",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "browser"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "browser.download",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "browser.download",
+    "description": "browser.download",
+    "source_package": {
+      "id": "nomifun.browser",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "browser"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "browser.upload",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "browser.upload",
+    "description": "browser.upload",
+    "source_package": {
+      "id": "nomifun.browser",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "browser"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "browser.evaluate",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "browser.evaluate",
+    "description": "browser.evaluate",
+    "source_package": {
+      "id": "nomifun.browser",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "browser"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "browser.site_memory",
+      "version": "1.0.0"
+    },
+    "kind": "context_contributor",
+    "display_name": "browser.site_memory",
+    "description": "browser.site_memory",
+    "source_package": {
+      "id": "nomifun.browser",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 1
+  },
+  {
+    "capability": {
+      "id": "browser.takeover",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "browser.takeover",
+    "description": "browser.takeover",
+    "source_package": {
+      "id": "nomifun.browser",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "browser"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "computer.observe",
+      "version": "1.0.0"
+    },
+    "kind": "context_contributor",
+    "display_name": "computer.observe",
+    "description": "computer.observe",
+    "source_package": {
+      "id": "nomifun.computer-a11y",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 1
+  },
+  {
+    "capability": {
+      "id": "computer.input",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "computer.input",
+    "description": "computer.input",
+    "source_package": {
+      "id": "nomifun.computer-a11y",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "computer"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "computer.launch",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "computer.launch",
+    "description": "computer.launch",
+    "source_package": {
+      "id": "nomifun.computer-a11y",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "computer"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "a11y.observe",
+      "version": "1.0.0"
+    },
+    "kind": "context_contributor",
+    "display_name": "a11y.observe",
+    "description": "a11y.observe",
+    "source_package": {
+      "id": "nomifun.computer-a11y",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 1
+  },
+  {
+    "capability": {
+      "id": "requirements.read",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "requirements.read",
+    "description": "requirements.read",
+    "source_package": {
+      "id": "nomifun.requirements",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "requirements.write",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "requirements.write",
+    "description": "requirements.write",
+    "source_package": {
+      "id": "nomifun.requirements",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "requirements.status",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "requirements.status",
+    "description": "requirements.status",
+    "source_package": {
+      "id": "nomifun.requirements",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "requirements.claim",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "requirements.claim",
+    "description": "requirements.claim",
+    "source_package": {
+      "id": "nomifun.requirements",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "autowork.runner",
+      "version": "1.0.0"
+    },
+    "kind": "scheduler",
+    "display_name": "autowork.runner",
+    "description": "autowork.runner",
+    "source_package": {
+      "id": "nomifun.autowork-scheduler",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "schedule.store",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "schedule.store",
+    "description": "schedule.store",
+    "source_package": {
+      "id": "nomifun.autowork-scheduler",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "materialized",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "schedule.timer",
+      "version": "1.0.0"
+    },
+    "kind": "scheduler",
+    "display_name": "schedule.timer",
+    "description": "schedule.timer",
+    "source_package": {
+      "id": "nomifun.autowork-scheduler",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "schedule.agent_trigger",
+      "version": "1.0.0"
+    },
+    "kind": "scheduler",
+    "display_name": "schedule.agent_trigger",
+    "description": "schedule.agent_trigger",
+    "source_package": {
+      "id": "nomifun.autowork-scheduler",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "idmm.observe",
+      "version": "1.0.0"
+    },
+    "kind": "turn_middleware",
+    "display_name": "idmm.observe",
+    "description": "idmm.observe",
+    "source_package": {
+      "id": "nomifun.idmm",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "idmm.intervene",
+      "version": "1.0.0"
+    },
+    "kind": "turn_middleware",
+    "display_name": "idmm.intervene",
+    "description": "idmm.intervene",
+    "source_package": {
+      "id": "nomifun.idmm",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "idmm.fallback_policy",
+      "version": "1.0.0"
+    },
+    "kind": "turn_middleware",
+    "display_name": "idmm.fallback_policy",
+    "description": "idmm.fallback_policy",
+    "source_package": {
+      "id": "nomifun.idmm",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "companion.persona",
+      "version": "1.0.0"
+    },
+    "kind": "context_contributor",
+    "display_name": "companion.persona",
+    "description": "companion.persona",
+    "source_package": {
+      "id": "nomifun.companion",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 1
+  },
+  {
+    "capability": {
+      "id": "companion.roster",
+      "version": "1.0.0"
+    },
+    "kind": "context_contributor",
+    "display_name": "companion.roster",
+    "description": "companion.roster",
+    "source_package": {
+      "id": "nomifun.companion",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 1
+  },
+  {
+    "capability": {
+      "id": "companion.learn",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "companion.learn",
+    "description": "companion.learn",
+    "source_package": {
+      "id": "nomifun.companion",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "companion_memory"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "companion.evolve",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "companion.evolve",
+    "description": "companion.evolve",
+    "source_package": {
+      "id": "nomifun.companion",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "companion_memory"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "channel.receive",
+      "version": "1.0.0"
+    },
+    "kind": "event_source",
+    "display_name": "channel.receive",
+    "description": "channel.receive",
+    "source_package": {
+      "id": "nomifun.channel",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "channel.reply",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "channel.reply",
+    "description": "channel.reply",
+    "source_package": {
+      "id": "nomifun.channel",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "channel"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "channel.send",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "channel.send",
+    "description": "channel.send",
+    "source_package": {
+      "id": "nomifun.channel",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "channel"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "channel.pairing",
+      "version": "1.0.0"
+    },
+    "kind": "transport",
+    "display_name": "channel.pairing",
+    "description": "channel.pairing",
+    "source_package": {
+      "id": "nomifun.channel",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "channel.group_policy",
+      "version": "1.0.0"
+    },
+    "kind": "turn_middleware",
+    "display_name": "channel.group_policy",
+    "description": "channel.group_policy",
+    "source_package": {
+      "id": "nomifun.channel",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "customer_service.dialogue",
+      "version": "1.0.0"
+    },
+    "kind": "turn_middleware",
+    "display_name": "customer_service.dialogue",
+    "description": "customer_service.dialogue",
+    "source_package": {
+      "id": "nomifun.customer-service",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "customer_service.notes.read",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "customer_service.notes.read",
+    "description": "customer_service.notes.read",
+    "source_package": {
+      "id": "nomifun.customer-service",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "customer"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "customer_service.notes.write",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "customer_service.notes.write",
+    "description": "customer_service.notes.write",
+    "source_package": {
+      "id": "nomifun.customer-service",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "customer"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "customer_service.handoff",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "customer_service.handoff",
+    "description": "customer_service.handoff",
+    "source_package": {
+      "id": "nomifun.customer-service",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "customer"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "robot.link",
+      "version": "1.0.0"
+    },
+    "kind": "resource_provider",
+    "display_name": "robot.link",
+    "description": "robot.link",
+    "source_package": {
+      "id": "nomifun.robot",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "robot"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "robot.audio",
+      "version": "1.0.0"
+    },
+    "kind": "background_service",
+    "display_name": "robot.audio",
+    "description": "robot.audio",
+    "source_package": {
+      "id": "nomifun.robot",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "robot.vision",
+      "version": "1.0.0"
+    },
+    "kind": "context_contributor",
+    "display_name": "robot.vision",
+    "description": "robot.vision",
+    "source_package": {
+      "id": "nomifun.robot",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 1
+  },
+  {
+    "capability": {
+      "id": "robot.display",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "robot.display",
+    "description": "robot.display",
+    "source_package": {
+      "id": "nomifun.robot",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "robot"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "robot.motion",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "robot.motion",
+    "description": "robot.motion",
+    "source_package": {
+      "id": "nomifun.robot",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "robot"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "robot.device_tools",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "robot.device_tools",
+    "description": "robot.device_tools",
+    "source_package": {
+      "id": "nomifun.robot",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "robot"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "creation.text",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "creation.text",
+    "description": "creation.text",
+    "source_package": {
+      "id": "nomifun.creation",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "generation_provider"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "creation.image",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "creation.image",
+    "description": "creation.image",
+    "source_package": {
+      "id": "nomifun.creation",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "generation_provider"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "creation.image_edit",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "creation.image_edit",
+    "description": "creation.image_edit",
+    "source_package": {
+      "id": "nomifun.creation",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "generation_provider"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "creation.video",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "creation.video",
+    "description": "creation.video",
+    "source_package": {
+      "id": "nomifun.creation",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "generation_provider"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "creation.audio",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "creation.audio",
+    "description": "creation.audio",
+    "source_package": {
+      "id": "nomifun.creation",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "generation_provider"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "workshop.canvas.read",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "workshop.canvas.read",
+    "description": "workshop.canvas.read",
+    "source_package": {
+      "id": "nomifun.workshop",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "canvas"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "workshop.canvas.edit",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "workshop.canvas.edit",
+    "description": "workshop.canvas.edit",
+    "source_package": {
+      "id": "nomifun.workshop",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "canvas"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "workshop.asset.read",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "workshop.asset.read",
+    "description": "workshop.asset.read",
+    "source_package": {
+      "id": "nomifun.workshop",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "asset_library"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "workshop.asset.write",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "workshop.asset.write",
+    "description": "workshop.asset.write",
+    "source_package": {
+      "id": "nomifun.workshop",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "asset_library"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "workshop.template.run",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "workshop.template.run",
+    "description": "workshop.template.run",
+    "source_package": {
+      "id": "nomifun.workshop",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "canvas"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "workshop.director",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "workshop.director",
+    "description": "workshop.director",
+    "source_package": {
+      "id": "nomifun.workshop",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "canvas"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "office.preview",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "office.preview",
+    "description": "office.preview",
+    "source_package": {
+      "id": "nomifun.office",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "asset_library"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "office.document.edit",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "office.document.edit",
+    "description": "office.document.edit",
+    "source_package": {
+      "id": "nomifun.office",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "asset_library"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "office.sheet.edit",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "office.sheet.edit",
+    "description": "office.sheet.edit",
+    "source_package": {
+      "id": "nomifun.office",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "asset_library"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "office.slides.edit",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "office.slides.edit",
+    "description": "office.slides.edit",
+    "source_package": {
+      "id": "nomifun.office",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "asset_library"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "miniapp.read",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "miniapp.read",
+    "description": "miniapp.read",
+    "source_package": {
+      "id": "nomifun.miniapp",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "miniapp"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "miniapp.edit",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "miniapp.edit",
+    "description": "miniapp.edit",
+    "source_package": {
+      "id": "nomifun.miniapp",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "miniapp"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "miniapp.publish",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "miniapp.publish",
+    "description": "miniapp.publish",
+    "source_package": {
+      "id": "nomifun.miniapp",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "miniapp"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "miniapp.serve",
+      "version": "1.0.0"
+    },
+    "kind": "tool",
+    "display_name": "miniapp.serve",
+    "description": "miniapp.serve",
+    "source_package": {
+      "id": "nomifun.miniapp",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [
+      "miniapp"
+    ],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 1,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "notification.webhook",
+      "version": "1.0.0"
+    },
+    "kind": "event_consumer",
+    "display_name": "notification.webhook",
+    "description": "notification.webhook",
+    "source_package": {
+      "id": "nomifun.notification",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "notification.desktop",
+      "version": "1.0.0"
+    },
+    "kind": "event_consumer",
+    "display_name": "notification.desktop",
+    "description": "notification.desktop",
+    "source_package": {
+      "id": "nomifun.notification",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "remote.mcp",
+      "version": "1.0.0"
+    },
+    "kind": "transport",
+    "display_name": "remote.mcp",
+    "description": "remote.mcp",
+    "source_package": {
+      "id": "nomifun.remote-ingress",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "remote.rest",
+      "version": "1.0.0"
+    },
+    "kind": "transport",
+    "display_name": "remote.rest",
+    "description": "remote.rest",
+    "source_package": {
+      "id": "nomifun.remote-ingress",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "ingress.web",
+      "version": "1.0.0"
+    },
+    "kind": "transport",
+    "display_name": "ingress.web",
+    "description": "ingress.web",
+    "source_package": {
+      "id": "nomifun.remote-ingress",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "ingress.mobile",
+      "version": "1.0.0"
+    },
+    "kind": "transport",
+    "display_name": "ingress.mobile",
+    "description": "ingress.mobile",
+    "source_package": {
+      "id": "nomifun.remote-ingress",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 0
+  },
+  {
+    "capability": {
+      "id": "ingress.channel",
+      "version": "1.0.0"
+    },
+    "kind": "transport",
+    "display_name": "ingress.channel",
+    "description": "ingress.channel",
+    "source_package": {
+      "id": "nomifun.remote-ingress",
+      "version": "1.0.0"
+    },
+    "source_kind": "bundled",
+    "materialization_state": "unavailable",
+    "unavailable_code": "CAPABILITY_UNAVAILABLE",
+    "supported_surfaces": [
+      "desktop"
+    ],
+    "required_runtime_features": [],
+    "required_resource_kinds": [],
+    "required_capabilities": [],
+    "conflicting_capabilities": [],
+    "action_count": 0,
+    "context_contributor_count": 0
+  }
+]

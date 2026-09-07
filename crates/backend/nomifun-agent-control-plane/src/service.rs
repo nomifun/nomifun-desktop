@@ -201,6 +201,13 @@ impl AgentControlPlane {
     ) -> Result<AgentPresetEditorResponse, ControlPlaneError> {
         let display_name = nonempty_name(request.display_name)?;
         let preset_id = AgentPresetId::from(Uuid::now_v7().to_string());
+        if request.document.is_some() && request.fork_from_revision.is_some() {
+            return Err(ControlPlaneError::canonical(
+                "PRESET_CREATE_INVALID",
+                axum::http::StatusCode::BAD_REQUEST,
+                "choose either an edited configuration or a saved revision to copy",
+            ));
+        }
         if let Some(reference) = request.fork_from_revision {
             let reference: PresetRevisionRef = wire_cast(&reference)?;
             let revision = self
@@ -227,10 +234,18 @@ impl AgentControlPlane {
                 )
                 .await;
         }
+        let has_configuration = request.document.is_some();
         let document = self
-            .materialize_default_chat_route(owner, empty_document())
+            .materialize_default_chat_route(owner, request.document.unwrap_or_else(empty_document))
             .await?;
         if document.model_route_refs.is_empty() {
+            if has_configuration {
+                return Err(ControlPlaneError::canonical(
+                    "MODEL_ROUTE_NOT_CONFIGURED",
+                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                    "configure an available chat model before saving this Agent",
+                ));
+            }
             let stored = StoredPreset {
                 preset: AgentPreset {
                     preset_id,
@@ -1450,6 +1465,35 @@ mod tests {
         AgentControlPlane::new(store, catalog, templates, compiler)
     }
 
+    #[tokio::test]
+    async fn configured_creation_without_a_model_does_not_leave_an_empty_preset() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let control_plane = test_control_plane(store.clone());
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let error = control_plane.create_preset(&owner, CreateAgentPresetRequest {
+            display_name: "Edited official preset".into(), description: None,
+            fork_from_revision: None, document: Some(empty_document()),
+        }).await.unwrap_err();
+        assert_eq!(error.code().as_ref(), "MODEL_ROUTE_NOT_CONFIGURED");
+        assert!(store.list_presets(&owner).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn configured_creation_rejects_an_ambiguous_revision_source() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let control_plane = test_control_plane(store.clone());
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let error = control_plane.create_preset(&owner, CreateAgentPresetRequest {
+            display_name: "Ambiguous".into(), description: None,
+            fork_from_revision: Some(nomifun_api_types::PresetRevisionRefDto {
+                preset_id: "0190f5fe-7c00-7a00-8000-000000000002".into(),
+                revision: 1, revision_digest: "a".repeat(64),
+            }), document: Some(empty_document()),
+        }).await.unwrap_err();
+        assert_eq!(error.code().as_ref(), "PRESET_CREATE_INVALID");
+        assert!(store.list_presets(&owner).await.unwrap().is_empty());
+    }
+
     fn catalog_capability(
         id: &str,
         consumers: impl IntoIterator<Item = CapabilityConsumer>,
@@ -1948,6 +1992,7 @@ mod tests {
                     display_name: "No stable Revision".into(),
                     description: None,
                     fork_from_revision: None,
+                    document: None,
                 },
             )
             .await

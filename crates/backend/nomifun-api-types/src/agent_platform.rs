@@ -476,6 +476,10 @@ pub struct CreateAgentPresetRequest {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fork_from_revision: Option<PresetRevisionRefDto>,
+    /// User-edited configuration, including an adjusted official template.
+    /// Compiled before the initial Preset/Revision is committed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document: Option<AgentPresetDocumentDto>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
