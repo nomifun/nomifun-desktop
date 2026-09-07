@@ -246,6 +246,14 @@ async fn nomi_core_catalog_exposes_native_nomi_capabilities() {
             "{capability_id} must retain its target resource-kind requirement"
         );
     }
+    for capability_id in ["web.fetch", "agent.delegate", "schedule.store"] {
+        let capability = capabilities.iter()
+            .find(|item| item["capability"]["id"] == capability_id)
+            .unwrap_or_else(|| panic!("missing repaired builtin {capability_id}"));
+        assert_eq!(capability["materialization_state"], "materialized", "{capability_id}");
+        assert!(capability["unavailable_code"].is_null(), "{capability_id}");
+        assert_eq!(capability["source_kind"], "bundled");
+    }
     let browser = capabilities
         .iter()
         .find(|item| item["capability"]["id"] == "browser.navigate")
@@ -333,10 +341,13 @@ async fn nomi_core_accepts_on_demand_placement_without_widening_initial_tools() 
         .expect("placement preset id")
         .to_owned();
     let revision = created_value["data"]["revision"]["reference"].clone();
-    created_value["data"]["draft"]["document"]["on_demand_capabilities"] = json!([{
-        "capability": {"id": "vcs.stage", "version": "1.0.0"},
-        "action_allowlist": []
-    }]);
+    let deferred_ids = ["vcs.stage", "web.fetch", "agent.delegate", "schedule.store"];
+    created_value["data"]["draft"]["document"]["on_demand_capabilities"] = json!(
+        deferred_ids.iter().map(|id| json!({
+            "capability": {"id": id, "version": "1.0.0"},
+            "action_allowlist": []
+        })).collect::<Vec<_>>()
+    );
     let preview = router
         .clone()
         .oneshot(
@@ -378,15 +389,17 @@ async fn nomi_core_accepts_on_demand_placement_without_widening_initial_tools() 
     );
     assert_eq!(
         preview_value["data"]["summary"]["on_demand_count"],
-        1,
+        deferred_ids.len(),
         "the preview must retain the on-demand placement"
     );
-    assert!(
-        preview_value["data"]["inspector"]["on_demand_capabilities"]
-            .as_array()
-            .is_some_and(|items| items.iter().any(|item| item["capability"]["id"] == "vcs.stage")),
-        "the immutable preview must expose the deferred capability"
-    );
+    for id in deferred_ids {
+        assert!(
+            preview_value["data"]["inspector"]["on_demand_capabilities"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item["capability"]["id"] == id)),
+            "the immutable preview must expose deferred capability {id}"
+        );
+    }
 
     services.shutdown_browser_platform().await.expect("browser cleanup");
     services.database.close().await;

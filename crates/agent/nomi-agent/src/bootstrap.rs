@@ -752,7 +752,13 @@ impl AgentBootstrap {
             .with_process_supervisor(Arc::clone(&process_supervisor)),
         ));
         if let Some(runner) = local_invocation_runner {
-            registry.register(Box::new(crate::local_delegate_tool::LocalDelegateTool::new(runner)));
+            // A saved Preset owns initial/on-demand placement. Standalone
+            // sessions retain the usual deferred delegation tool.
+            let deferred = !self.config.tools.enforce_builtin_allowlist
+                || self.config.tools.deferred_allowlist.iter().any(|name| name == "nomi_delegate");
+            registry.register(Box::new(
+                crate::local_delegate_tool::LocalDelegateTool::new(runner).with_deferred(deferred),
+            ));
         }
 
         let plan_active_flag = Arc::new(AtomicBool::new(false));

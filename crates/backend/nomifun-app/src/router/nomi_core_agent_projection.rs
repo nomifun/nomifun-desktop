@@ -393,6 +393,16 @@ pub(crate) fn nomi_capability_projection(
         // The plan checklist is always registered by the Nomi bootstrap. Its
         // deferred placement is applied by the host registry when requested.
         "agent.execution.plan" => NomiCapabilityProjection::Tools(&["update_plan"]),
+        "agent.delegate" => NomiCapabilityProjection::Tools(&["nomi_delegate"]),
+
+        // Bundled native adapters reuse the application's existing HTTP and
+        // owner-scoped Cron services. No dynamic Plugin runtime is required.
+        "web.fetch" => NomiCapabilityProjection::Tools(&[
+            nomifun_ai_agent::web_fetch::WEB_FETCH_TOOL_NAME,
+        ]),
+        "schedule.store" => NomiCapabilityProjection::Tools(&[
+            "cron_create", "cron_list", "cron_delete",
+        ]),
 
         // Knowledge and Skill tools are registered by the manager after the
         // target-scoped resource/sink wiring has been resolved.
@@ -537,6 +547,9 @@ fn is_native_nomi_capability(capability_id: &str) -> bool {
             | "vcs.stage"
             | "vcs.commit"
             | "agent.execution.plan"
+            | "agent.delegate"
+            | "web.fetch"
+            | "schedule.store"
             | "knowledge.search"
             | "knowledge.read"
             | "knowledge.write"
@@ -1109,6 +1122,34 @@ mod tests {
     }
 
     #[test]
+    fn repaired_builtins_project_only_their_native_tools_in_both_placements() {
+        for (id, names) in [
+            ("web.fetch", vec!["web_fetch"]),
+            ("agent.delegate", vec!["nomi_delegate"]),
+            ("schedule.store", vec!["cron_create", "cron_delete", "cron_list"]),
+        ] {
+            for deferred in [false, true] {
+                let mut fixture = fixture();
+                fixture.2.payload.initial_capabilities.clear();
+                fixture.2.payload.on_demand_capabilities.clear();
+                if deferred {
+                    fixture.2.payload.on_demand_capabilities.push(capability(id, false));
+                } else {
+                    fixture.2.payload.initial_capabilities.push(capability(id, true));
+                }
+                refresh_fixture_identity(&mut fixture);
+                let result = project(input(&fixture)).expect("repaired builtin projection");
+                let mut allowed = names.clone();
+                if deferred { allowed.push("ToolSearch"); }
+                allowed.sort();
+                assert_eq!(result.request.extra["allowed_tools"], json!(allowed), "{id}");
+                assert_eq!(result.request.extra["deferred_tools"], if deferred { json!(names) } else { json!([]) }, "{id}");
+                assert_eq!(result.request.extra["enforce_tool_allowlist"], true);
+            }
+        }
+    }
+
+    #[test]
     fn projection_table_rejects_capabilities_without_a_nomi_owner() {
         for capability_id in [
             "fs.delete",
@@ -1116,7 +1157,6 @@ mod tests {
             "fs.snapshot",
             "vcs.push",
             "web.search",
-            "web.fetch",
             "agent.execution.observe",
             "agent.execution.steer",
             "llm.vision",
