@@ -5,7 +5,7 @@
  */
 
 import { ipcBridge } from '@/common';
-import type { ConversationId, KnowledgeBaseId } from '@/common/types/ids';
+import type { KnowledgeBaseId } from '@/common/types/ids';
 import type { PreviewContentType } from '@/common/types/office/preview';
 import { emitter } from '@/renderer/utils/emitter';
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
@@ -36,14 +36,6 @@ export interface PreviewMetadata {
   /** Managed knowledge snapshots must be exported, not opened in an external editor. */
   allow_open_in_system?: boolean;
   truncated?: boolean; // 预览内容是否被截断 / Whether preview content was truncated
-  /**
-   * 打开该预览的会话。预览面板挂在 ConversationProvider 之外，因此需要打开方
-   * （`usePreviewLauncher` / 自动预览钩子）把会话身份随元数据带进来。
-   * Owning conversation. The panel is mounted OUTSIDE `ConversationProvider`,
-   * so openers stamp the identity here for viewers that need it (the mini-app
-   * publish action looks up prior publishes by `source_conversation_id`).
-   */
-  conversation_id?: ConversationId;
   /** Stable knowledge identity plus its current mutable filesystem locator. */
   knowledge_resource?: KnowledgePreviewResource & {
     knowledge_base_id: KnowledgeBaseId;
@@ -329,7 +321,6 @@ export const PreviewProvider: React.FC<{
           if (type === 'diff') return 'Diff';
           if (type === 'code') return `${meta?.language || 'Code'}`;
           if (type === 'image') return 'Image'; // 图片预览默认标题 / Default title for image preview
-          if (type === 'miniapp') return 'MiniApp'; // 小程序预览默认标题 / Default title for mini-app preview
           return 'Preview';
         })();
 

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::error::DbError;
@@ -6,6 +7,19 @@ use crate::models::{
     MiniAppM1ReleaseOrigin, MiniAppM1ReleaseSourceKind, MiniAppM1Snapshot,
     MiniAppProjectRow, MiniAppReleaseArtifactRow, MiniAppReleaseRow,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, sqlx::FromRow)]
+pub struct MiniAppKvRow {
+    pub id: i64,
+    pub miniapp_id: String,
+    pub owner_user_id: String,
+    pub namespace: String,
+    pub key: String,
+    pub value_json: String,
+    pub revision: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CreateMiniAppM1Params {
@@ -102,6 +116,62 @@ pub trait IMiniAppM1Repository: Send + Sync {
         &self,
         params: &CommitMiniAppM1PointerStateParams,
     ) -> Result<MiniAppM1Snapshot, DbError>;
+
+    #[allow(clippy::too_many_arguments)]
+    async fn update_config_cas(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &str,
+        expected_product_revision: i64,
+        expected_pointer_revision: i64,
+        expected_config_revision: i64,
+        expected_config_schema_json: &str,
+        config_json: &str,
+        updated_at: i64,
+    ) -> Result<MiniAppM1Snapshot, DbError>;
+
+    #[allow(clippy::too_many_arguments)]
+    async fn replace_credential_bindings_cas(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &str,
+        expected_product_revision: i64,
+        expected_pointer_revision: i64,
+        expected_bindings_revision: i64,
+        bindings: &BTreeMap<String, String>,
+        updated_at: i64,
+    ) -> Result<MiniAppM1Snapshot, DbError>;
+
+    async fn get_kv(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &str,
+        namespace: &str,
+        key: &str,
+    ) -> Result<Option<MiniAppKvRow>, DbError>;
+
+    #[allow(clippy::too_many_arguments)]
+    async fn put_kv_cas(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &str,
+        namespace: &str,
+        key: &str,
+        value: &serde_json::Value,
+        expected_revision: Option<i64>,
+        updated_at: i64,
+    ) -> Result<MiniAppKvRow, DbError>;
+
+    #[allow(clippy::too_many_arguments)]
+    async fn delete_kv_cas(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &str,
+        namespace: &str,
+        key: &str,
+        expected_revision: i64,
+        updated_at: i64,
+    ) -> Result<bool, DbError>;
 }
 
 pub(crate) fn conflict(message: impl Into<String>) -> DbError {
@@ -138,6 +208,22 @@ pub(crate) fn validate_json_object(value: &str, label: &str) -> Result<(), DbErr
         .map_err(|error| conflict(format!("{label} is invalid JSON: {error}")))?;
     if !parsed.is_object() {
         return Err(conflict(format!("{label} must be a JSON object")));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_visible_ascii_key(
+    value: &str,
+    label: &str,
+    maximum_bytes: usize,
+) -> Result<(), DbError> {
+    if value.is_empty()
+        || value.len() > maximum_bytes
+        || !value.bytes().all(|byte| byte.is_ascii_graphic())
+    {
+        return Err(conflict(format!(
+            "{label} must contain 1 to {maximum_bytes} visible ASCII bytes"
+        )));
     }
     Ok(())
 }

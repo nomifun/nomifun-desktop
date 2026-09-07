@@ -40,8 +40,8 @@ type GuidInputCardProps = {
   files: string[];
   onRemoveFile: (path: string) => void;
 
-  // Entry strip (slot rendered at top of inner card)
-  entryStrip?: React.ReactNode;
+  // Current Agent selector rendered as the first composer control.
+  agentSelector: React.ReactNode;
 
   // Action row
   actionRow: React.ReactNode;
@@ -72,7 +72,7 @@ const GuidInputCard: React.FC<GuidInputCardProps> = ({
   mentionDropdown,
   files,
   onRemoveFile,
-  entryStrip,
+  agentSelector,
   actionRow,
   showWorkspace = false,
   workspaceDir,
@@ -125,7 +125,7 @@ const GuidInputCard: React.FC<GuidInputCardProps> = ({
           boxShadow: isInputActive && !isFileDragging ? activeShadow : 'none',
         }}
       >
-        {entryStrip}
+        <div className={styles.guidAgentSelectorRow}>{agentSelector}</div>
         {mentionSelectorBadge}
         <Input.TextArea
           autoSize={textareaAutoSize}
