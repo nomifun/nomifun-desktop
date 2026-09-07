@@ -32,7 +32,7 @@ use nomifun_agent_kernel::{
     ResourceHandle, ResourceHandleIdentity, ResourceProviderResult,
 };
 use nomifun_js_host::{
-    ExtensionHostSupervisor, ImmutablePluginModule, JavaScriptHostError,
+    ExtensionHostDemandPort, ImmutablePluginModule, JavaScriptHostError,
     JavaScriptResourceHandle, MountLoadDemand,
 };
 use thiserror::Error;
@@ -189,7 +189,7 @@ impl JsKernelPluginAdapter {
 
     pub fn registration(
         &self,
-        host: Arc<ExtensionHostSupervisor>,
+        host: Arc<dyn ExtensionHostDemandPort>,
     ) -> Result<PluginRegistration, JsKernelAdapterError> {
         let manifest = self.manifest();
         let package = manifest.package_ref();
@@ -349,7 +349,7 @@ impl JsKernelPluginAdapter {
 
     pub fn context_proxy(
         &self,
-        host: Arc<ExtensionHostSupervisor>,
+        host: Arc<dyn ExtensionHostDemandPort>,
         capability: CapabilityId,
     ) -> Result<Arc<dyn CapabilityContextContributionFactory>, JsKernelAdapterError> {
         let capability_manifest = self.capability(&capability)?;
@@ -373,7 +373,7 @@ impl JsKernelPluginAdapter {
 
     pub fn resource_proxy(
         &self,
-        host: Arc<ExtensionHostSupervisor>,
+        host: Arc<dyn ExtensionHostDemandPort>,
         capability: CapabilityId,
     ) -> Result<Arc<dyn CapabilityResourceProviderFactory>, JsKernelAdapterError> {
         let capability_manifest = self.capability(&capability)?;
@@ -538,7 +538,7 @@ fn validate_resolved_target(
 }
 
 struct NodeToolHandler {
-    host: Arc<ExtensionHostSupervisor>,
+    host: Arc<dyn ExtensionHostDemandPort>,
     mount: MountLoadDemand,
     contribution: PluginHostContributionRef,
 }
@@ -589,7 +589,7 @@ impl CapabilityOperationHandler for NodeToolHandler {
 }
 
 struct NodeContextProxy {
-    host: Arc<ExtensionHostSupervisor>,
+    host: Arc<dyn ExtensionHostDemandPort>,
     mount: MountLoadDemand,
     contribution: PluginHostContributionRef,
 }
@@ -619,7 +619,7 @@ impl CapabilityContextContributionFactory for NodeContextProxy {
 }
 
 struct NodeResourceProxy {
-    host: Arc<ExtensionHostSupervisor>,
+    host: Arc<dyn ExtensionHostDemandPort>,
     mount: MountLoadDemand,
     contribution: PluginHostContributionRef,
 }
@@ -676,7 +676,7 @@ impl CapabilityResourceProviderFactory for NodeResourceProxy {
 #[derive(Clone)]
 struct NodeResourceHandle {
     identity: ResourceHandleIdentity,
-    host: Arc<ExtensionHostSupervisor>,
+    host: Arc<dyn ExtensionHostDemandPort>,
     handle: JavaScriptResourceHandle,
 }
 

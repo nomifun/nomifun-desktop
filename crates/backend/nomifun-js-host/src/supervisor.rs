@@ -331,11 +331,54 @@ impl HostRequestHandle {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JavaScriptResourceHandle {
+    pub host_instance_id: JavaScriptHostInstanceId,
     pub host_generation: u64,
     pub handle_id: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct JavaScriptHostInstanceId(Uuid);
+
+impl JavaScriptHostInstanceId {
+    fn new() -> Self {
+        Self(Uuid::now_v7())
+    }
+}
+
+#[async_trait]
+pub trait ExtensionHostDemandPort: Send + Sync {
+    async fn invoke_demand(
+        &self,
+        mount: MountLoadDemand,
+        contribution: PluginHostContributionRef,
+        action_id: ActionId,
+        input: StrictJsonValue,
+    ) -> Result<StrictJsonValue, JavaScriptHostError>;
+
+    async fn contribute_context_demand(
+        &self,
+        mount: MountLoadDemand,
+        contribution: PluginHostContributionRef,
+        schema_ref: CanonicalSchemaRef,
+    ) -> Result<StrictJsonValue, JavaScriptHostError>;
+
+    async fn acquire_resource_demand(
+        &self,
+        mount: MountLoadDemand,
+        contribution: PluginHostContributionRef,
+        binding_id: ResourceBindingId,
+        resource_kind: ResourceKind,
+        parameters: StrictJsonValue,
+    ) -> Result<JavaScriptResourceHandle, JavaScriptHostError>;
+
+    async fn release_resource(
+        &self,
+        resource: &JavaScriptResourceHandle,
+    ) -> Result<(), JavaScriptHostError>;
+}
+
 pub struct ExtensionHostSupervisor {
+    instance_id: JavaScriptHostInstanceId,
     config: JavaScriptHostConfig,
     contract: PluginN1ContractManifest,
     host_kind: JavaScriptHostKind,
@@ -406,6 +449,7 @@ impl ExtensionHostSupervisor {
             .map_err(|error| JavaScriptHostError::Contract(error.to_string()))?;
         let (public_state, _) = watch::channel(JavaScriptHostState::Stopped);
         Ok(Self {
+            instance_id: JavaScriptHostInstanceId::new(),
             config,
             contract,
             host_kind,
@@ -602,6 +646,7 @@ impl ExtensionHostSupervisor {
         let handle = self
             .resident_generation_for(&contribution)
             .await?;
+        let host_instance_id = self.instance_id;
         let host_generation = handle.generation;
         match handle
             .request(
@@ -621,6 +666,7 @@ impl ExtensionHostSupervisor {
         {
             PluginHostSuccess::ResourceAcquired { handle_id } => {
                 Ok(JavaScriptResourceHandle {
+                    host_instance_id,
                     host_generation,
                     handle_id,
                 })
@@ -661,7 +707,8 @@ impl ExtensionHostSupervisor {
             let Some(current) = &state.current else {
                 return Ok(());
             };
-            if current.generation != resource.host_generation
+            if self.instance_id != resource.host_instance_id
+                || current.generation != resource.host_generation
                 || !matches!(
                     current.state.borrow().clone(),
                     JavaScriptHostState::Running { .. }
@@ -846,6 +893,67 @@ impl ExtensionHostSupervisor {
         .await?;
         state.current = Some(handle.clone());
         Ok(handle)
+    }
+}
+
+#[async_trait]
+impl ExtensionHostDemandPort for ExtensionHostSupervisor {
+    async fn invoke_demand(
+        &self,
+        mount: MountLoadDemand,
+        contribution: PluginHostContributionRef,
+        action_id: ActionId,
+        input: StrictJsonValue,
+    ) -> Result<StrictJsonValue, JavaScriptHostError> {
+        ExtensionHostSupervisor::invoke_demand(
+            self,
+            mount,
+            contribution,
+            action_id,
+            input,
+        )
+        .await
+    }
+
+    async fn contribute_context_demand(
+        &self,
+        mount: MountLoadDemand,
+        contribution: PluginHostContributionRef,
+        schema_ref: CanonicalSchemaRef,
+    ) -> Result<StrictJsonValue, JavaScriptHostError> {
+        ExtensionHostSupervisor::contribute_context_demand(
+            self,
+            mount,
+            contribution,
+            schema_ref,
+        )
+        .await
+    }
+
+    async fn acquire_resource_demand(
+        &self,
+        mount: MountLoadDemand,
+        contribution: PluginHostContributionRef,
+        binding_id: ResourceBindingId,
+        resource_kind: ResourceKind,
+        parameters: StrictJsonValue,
+    ) -> Result<JavaScriptResourceHandle, JavaScriptHostError> {
+        ExtensionHostSupervisor::acquire_resource_demand(
+            self,
+            mount,
+            contribution,
+            binding_id,
+            resource_kind,
+            parameters,
+        )
+        .await
+    }
+
+    async fn release_resource(
+        &self,
+        resource: &JavaScriptResourceHandle,
+    ) -> Result<(), JavaScriptHostError> {
+        ExtensionHostSupervisor::release_resource(self, resource).await
     }
 }
 

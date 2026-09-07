@@ -481,7 +481,7 @@ async fn one_kernel_registry_dispatches_javascript_tool_context_and_resource() {
     )
     .unwrap();
     let materialized = registry
-        .replace_all(vec![adapter.registration(Arc::clone(&host)).unwrap()])
+        .replace_all(vec![adapter.registration(host.clone()).unwrap()])
         .unwrap();
     assert_eq!(host.process_count(), 0);
     for capability_id in [TOOL_ID, CONTEXT_ID, RESOURCE_ID] {
@@ -747,7 +747,7 @@ async fn compatible_replace_does_not_reuse_an_old_artifact_resource_handle() {
     let first_materialized = registry
         .replace_all(vec![
             make_adapter(first_artifact)
-                .registration(Arc::clone(&host))
+                .registration(host.clone())
                 .unwrap(),
         ])
         .unwrap();
@@ -780,7 +780,7 @@ async fn compatible_replace_does_not_reuse_an_old_artifact_resource_handle() {
     let second_materialized = registry
         .replace_all(vec![
             make_adapter(second_artifact)
-                .registration(Arc::clone(&host))
+                .registration(host.clone())
                 .unwrap(),
         ])
         .unwrap();

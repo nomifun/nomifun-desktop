@@ -487,6 +487,66 @@ async fn stale_resource_release_does_not_start_or_touch_a_new_generation() {
 }
 
 #[tokio::test]
+async fn resource_handle_cannot_release_the_same_generation_on_a_new_supervisor() {
+    let first = supervisor(Duration::from_secs(2)).await;
+    let second = supervisor(Duration::from_secs(2)).await;
+    let temp = TempDir::new().unwrap();
+    let first_generation = load(&first, &temp, "mount-a", 'a').await;
+    let second_generation = load(&second, &temp, "mount-a", 'a').await;
+    assert_eq!(first_generation, second_generation);
+
+    let first_resource = first
+        .acquire_resource(
+            contribution(target("mount-a", 'a')),
+            ResourceBindingId::from("binding-a"),
+            ResourceKind::from("fixture.resource"),
+            StrictJsonValue(json!({})),
+        )
+        .await
+        .unwrap();
+    let second_resource = second
+        .acquire_resource(
+            contribution(target("mount-a", 'a')),
+            ResourceBindingId::from("binding-a"),
+            ResourceKind::from("fixture.resource"),
+            StrictJsonValue(json!({})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first_resource.host_generation, second_resource.host_generation);
+    assert_eq!(first_resource.handle_id, second_resource.handle_id);
+    assert_ne!(
+        first_resource.host_instance_id,
+        second_resource.host_instance_id
+    );
+
+    second.release_resource(&first_resource).await.unwrap();
+    let release_count = second
+        .invoke(
+            contribution(target("mount-a", 'a')),
+            ActionId::from("resource_release_count"),
+            StrictJsonValue(json!({})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(release_count.0["count"], 0);
+
+    second.release_resource(&second_resource).await.unwrap();
+    let release_count = second
+        .invoke(
+            contribution(target("mount-a", 'a')),
+            ActionId::from("resource_release_count"),
+            StrictJsonValue(json!({})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(release_count.0["count"], 1);
+
+    first.stop_generation(first_generation).await.unwrap();
+    second.stop_generation(second_generation).await.unwrap();
+}
+
+#[tokio::test]
 async fn cancellation_is_request_scoped_and_generation_stays_running() {
     let supervisor = supervisor(Duration::from_secs(2)).await;
     let temp = TempDir::new().unwrap();
