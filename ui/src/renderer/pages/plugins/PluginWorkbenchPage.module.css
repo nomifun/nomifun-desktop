@@ -667,6 +667,190 @@
   gap: 6px;
 }
 
+.configurationModal :global(.arco-modal-content) {
+  max-height: calc(100vh - 132px);
+  overflow-y: auto;
+}
+
+.configurationDialogBody {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.configurationSection {
+  border-top: 1px solid var(--plugin-border);
+  padding-top: 14px;
+}
+
+.configurationSectionHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 10px;
+}
+
+.configurationSectionHeader h3 {
+  margin: 0;
+  color: var(--color-text-1);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 19px;
+}
+
+.configurationSectionHeader p {
+  margin: 2px 0 0;
+  color: var(--plugin-muted);
+  font-size: 10px;
+  line-height: 16px;
+}
+
+.configurationRevision {
+  flex: 0 0 auto;
+  border: 1px solid var(--plugin-border);
+  border-radius: 6px;
+  padding: 2px 6px;
+  color: var(--plugin-muted);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 9px;
+  line-height: 14px;
+}
+
+.configurationFieldList {
+  display: flex;
+  flex-direction: column;
+  margin-top: 10px;
+}
+
+.configurationField {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--plugin-border);
+}
+
+.configurationField:last-child {
+  border-bottom: 0;
+}
+
+.configurationFieldHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.configurationFieldCopy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.configurationFieldLabel {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  color: var(--color-text-1);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 17px;
+}
+
+.configurationRequirement {
+  color: var(--plugin-muted);
+  font-size: 9px;
+  font-weight: 500;
+}
+
+.configurationFieldKey {
+  color: var(--plugin-muted);
+}
+
+.configurationFieldDescription {
+  color: var(--plugin-muted);
+  font-size: 10px;
+  line-height: 16px;
+}
+
+.configurationControl {
+  min-width: 0;
+}
+
+.configurationControl > :global(.arco-select),
+.configurationControl > :global(.arco-input-number),
+.configurationControl > :global(.arco-input-wrapper) {
+  width: 100%;
+}
+
+.configurationHint,
+.configurationCurrentBinding {
+  color: var(--plugin-muted);
+  font-size: 10px;
+  line-height: 16px;
+}
+
+.configurationCurrentBinding {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-wrap: anywhere;
+}
+
+.configurationFieldError {
+  color: rgb(var(--danger-6));
+  font-size: 10px;
+  line-height: 16px;
+}
+
+.configurationEmpty {
+  padding: 12px 0 2px;
+  color: var(--plugin-muted);
+  font-size: 10px;
+  line-height: 16px;
+}
+
+.configurationIssueList {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.configurationIssueList li + li {
+  margin-top: 3px;
+}
+
+.credentialStatus {
+  flex: 0 0 auto;
+  border-radius: 6px;
+  padding: 2px 7px;
+  font-size: 9px;
+  font-weight: 650;
+  line-height: 15px;
+}
+
+.credentialStatus_bound {
+  background: rgba(var(--success-6), 0.12);
+  color: rgb(var(--success-6));
+}
+
+.credentialStatus_unbound {
+  background: var(--color-fill-2);
+  color: var(--color-text-3);
+}
+
+.credentialStatus_missing {
+  background: rgba(var(--warning-6), 0.13);
+  color: rgb(var(--warning-6));
+}
+
+.credentialStatus_invalid {
+  background: rgba(var(--danger-6), 0.11);
+  color: rgb(var(--danger-6));
+}
+
 @media (max-width: 1120px) {
   .toolbar {
     align-items: flex-start;

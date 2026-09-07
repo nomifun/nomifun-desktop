@@ -193,6 +193,17 @@
     - JS adapter fixture 同时覆盖 Agent+Gateway 共享 Tool 与 UI-only Tool；UI-only
       contribution 不进入 Agent consumer，旧 Artifact lock 在 Host 前 fail closed。
       Kernel 23、Control Plane 16、JS adapter 4 与 App publisher E2E 均通过。
+12. Plugin Library 已接入真实 Config/Credential 编辑：
+    - 按当前 exact JSON Schema 渲染 string/number/integer/boolean/enum，unsupported、
+      nested、dynamic 或 read-only schema 明确只读并阻止全量替换；
+    - `password/writeOnly/secret` 标记和疑似 secret 配置键不进入 draft、DOM 或请求，
+      必须由 Package 改为 owner-scoped Credential slot；
+    - Credential 按 §4.1B 只支持 `credential_id` reference 的 keep/bind/unbind，不新增
+      Credential 枚举或 secret 回显；
+    - 提交复用 Mount/current/config/schema/credential 全部 exact CAS，失败保留表单。
+      Plugin UI 定向 28 tests、i18n、icons 与 production build 通过；真实 Desktop
+      accessibility/视觉走查和 Runtime Manager 尚未完成，因此 `N1-U-01` 保持
+      `in-progress`。
 
 ## W0：一期交接
 
@@ -249,7 +260,7 @@
 | --- | --- | --- | --- | --- | --- |
 | `N1-X-01` | closed | Skill lane；新 `nomifun-skill-library/**` | 把 `skill_service`、builtin skills、Skill market 从 `nomifun-extension` 抽为独立 owner | `W0-01` | `610b59007`；Skill Library 150 passed/2 ignored；Extension/消费者 checks passed |
 | `N1-X-02` | blocked | demolition lane；`nomifun-extension/**` 及消费者 | 删除旧 Extension loader/registry/hub/hot reload/permissions/settings/webui/agent/theme 路径 | `N1-X-01`,`N1-3-03`,`N1-4-03` | `/api/extensions/*`、Hub、`nomi-extension.json` 生产可达性为 0 |
-| `N1-U-01` | in-progress | UI lane；新 `pages/plugins/**`、Runtime Manager | Plugin Library/Workshop/配置/诊断、Node Runtime Manager；MCP 页面只保留 MCP | `N1-2-03`,`N1-4-02` | Library/Workshop/authoring actions、14 tests、i18n、production build 已通过；仍需 Runtime Manager、Config/Credential 编辑及 Desktop product/a11y 走查 |
+| `N1-U-01` | in-progress | UI lane；新 `pages/plugins/**`、Runtime Manager | Plugin Library/Workshop/配置/诊断、Node Runtime Manager；MCP 页面只保留 MCP | `N1-2-03`,`N1-4-02` | Library/Workshop/authoring/config/Credential reference、28 targeted tests、i18n/icons/production build 已通过；仍需 Runtime Manager 与 Desktop product/a11y/视觉走查 |
 | `N1-V-01` | blocked | 集成 Owner | Windows N1 contract/integration/fault/product/NSIS candidate | 所有 N1 项 | authored JS/TS → Test → Apply → invoke → Restore |
 
 ## M1：Full-stack MiniApp

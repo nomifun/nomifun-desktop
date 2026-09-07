@@ -43,4 +43,22 @@ describe('Plugin Workbench locale contract', () => {
     expect(en.workflow.apply).toBe('Apply');
     expect(en.confirm.deleteProjectBody.includes('installed Plugin')).toBe(true);
   });
+
+  test('states the typed configuration and Credential reference boundary', () => {
+    expect(zh.actions.configure).toBe('配置与凭据');
+    expect(zh.dialogs.configure.schemaUnsupported.includes('只读')).toBe(true);
+    expect(
+      zh.dialogs.configure.schemaIssues.secretConfig.includes('Credential 槽位')
+    ).toBe(true);
+    expect(
+      zh.dialogs.configure.credentialListBoundary.includes('Credential 产品入口')
+    ).toBe(true);
+    expect(en.actions.saveConfiguration).toBe('Save configuration');
+    expect(
+      en.dialogs.configure.credentialListBoundary.includes('enumeration')
+    ).toBe(true);
+    expect(
+      Object.keys(en.dialogs.configure).some((key) => key.startsWith('secret'))
+    ).toBe(false);
+  });
 });
