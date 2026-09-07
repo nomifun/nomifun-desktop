@@ -4966,6 +4966,36 @@
         ],
         "type": "object"
       },
+      "CredentialSlotDeclaration": {
+        "additionalProperties": false,
+        "properties": {
+          "display_name": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/CredentialSlotKind"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "slot_key": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "slot_key",
+          "kind",
+          "display_name",
+          "required"
+        ],
+        "type": "object"
+      },
+      "CredentialSlotKind": {
+        "enum": [
+          "secret_text"
+        ],
+        "type": "string"
+      },
       "EffectClass": {
         "enum": [
           "pure",
@@ -5271,6 +5301,7 @@
           "build_profile_version": {
             "type": "string"
           },
+          "config_schema": true,
           "config_schema_digest": {
             "type": "string"
           },
@@ -5279,6 +5310,12 @@
           },
           "contributions": {
             "$ref": "#/$defs/PackageContributions"
+          },
+          "credential_slots": {
+            "items": {
+              "$ref": "#/$defs/CredentialSlotDeclaration"
+            },
+            "type": "array"
           },
           "credential_slots_digest": {
             "type": "string"
@@ -5298,11 +5335,18 @@
             },
             "type": "array"
           },
+          "resource_contract": {
+            "$ref": "#/$defs/MiniAppResourceContract"
+          },
           "resource_contract_digest": {
             "type": "string"
           },
           "schema_version": {
             "type": "string"
+          },
+          "schemas": {
+            "additionalProperties": true,
+            "type": "object"
           },
           "service": {
             "anyOf": [
@@ -5326,13 +5370,33 @@
           "ui",
           "dependency_lock_digest",
           "dependency_graph_digest",
+          "config_schema",
           "config_schema_digest",
+          "credential_slots",
           "credential_slots_digest",
+          "resource_contract",
           "resource_contract_digest",
+          "schemas",
           "bridge_contract_digest",
           "contribution_package",
           "contributions",
           "migrations"
+        ],
+        "type": "object"
+      },
+      "MiniAppResourceContract": {
+        "additionalProperties": false,
+        "properties": {
+          "required_resource_kinds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "required_resource_kinds"
         ],
         "type": "object"
       },
@@ -6003,6 +6067,36 @@
         ],
         "type": "object"
       },
+      "CredentialSlotDeclaration": {
+        "additionalProperties": false,
+        "properties": {
+          "display_name": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/CredentialSlotKind"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "slot_key": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "slot_key",
+          "kind",
+          "display_name",
+          "required"
+        ],
+        "type": "object"
+      },
+      "CredentialSlotKind": {
+        "enum": [
+          "secret_text"
+        ],
+        "type": "string"
+      },
       "EffectClass": {
         "enum": [
           "pure",
@@ -6271,6 +6365,22 @@
           "name",
           "declared_type",
           "nullable"
+        ],
+        "type": "object"
+      },
+      "MiniAppResourceContract": {
+        "additionalProperties": false,
+        "properties": {
+          "required_resource_kinds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "required_resource_kinds"
         ],
         "type": "object"
       },
@@ -6643,6 +6753,7 @@
       "build_profile_version": {
         "type": "string"
       },
+      "config_schema": true,
       "config_schema_digest": {
         "type": "string"
       },
@@ -6651,6 +6762,12 @@
       },
       "contributions": {
         "$ref": "#/$defs/PackageContributions"
+      },
+      "credential_slots": {
+        "items": {
+          "$ref": "#/$defs/CredentialSlotDeclaration"
+        },
+        "type": "array"
       },
       "credential_slots_digest": {
         "type": "string"
@@ -6670,11 +6787,18 @@
         },
         "type": "array"
       },
+      "resource_contract": {
+        "$ref": "#/$defs/MiniAppResourceContract"
+      },
       "resource_contract_digest": {
         "type": "string"
       },
       "schema_version": {
         "type": "string"
+      },
+      "schemas": {
+        "additionalProperties": true,
+        "type": "object"
       },
       "service": {
         "anyOf": [
@@ -6698,9 +6822,13 @@
       "ui",
       "dependency_lock_digest",
       "dependency_graph_digest",
+      "config_schema",
       "config_schema_digest",
+      "credential_slots",
       "credential_slots_digest",
+      "resource_contract",
       "resource_contract_digest",
+      "schemas",
       "bridge_contract_digest",
       "contribution_package",
       "contributions",
@@ -7432,6 +7560,36 @@
         ],
         "type": "object"
       },
+      "CredentialSlotDeclaration": {
+        "additionalProperties": false,
+        "properties": {
+          "display_name": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/CredentialSlotKind"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "slot_key": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "slot_key",
+          "kind",
+          "display_name",
+          "required"
+        ],
+        "type": "object"
+      },
+      "CredentialSlotKind": {
+        "enum": [
+          "secret_text"
+        ],
+        "type": "string"
+      },
       "EffectClass": {
         "enum": [
           "pure",
@@ -7803,6 +7961,7 @@
           "build_profile_version": {
             "type": "string"
           },
+          "config_schema": true,
           "config_schema_digest": {
             "type": "string"
           },
@@ -7811,6 +7970,12 @@
           },
           "contributions": {
             "$ref": "#/$defs/PackageContributions"
+          },
+          "credential_slots": {
+            "items": {
+              "$ref": "#/$defs/CredentialSlotDeclaration"
+            },
+            "type": "array"
           },
           "credential_slots_digest": {
             "type": "string"
@@ -7830,11 +7995,18 @@
             },
             "type": "array"
           },
+          "resource_contract": {
+            "$ref": "#/$defs/MiniAppResourceContract"
+          },
           "resource_contract_digest": {
             "type": "string"
           },
           "schema_version": {
             "type": "string"
+          },
+          "schemas": {
+            "additionalProperties": true,
+            "type": "object"
           },
           "service": {
             "anyOf": [
@@ -7858,13 +8030,33 @@
           "ui",
           "dependency_lock_digest",
           "dependency_graph_digest",
+          "config_schema",
           "config_schema_digest",
+          "credential_slots",
           "credential_slots_digest",
+          "resource_contract",
           "resource_contract_digest",
+          "schemas",
           "bridge_contract_digest",
           "contribution_package",
           "contributions",
           "migrations"
+        ],
+        "type": "object"
+      },
+      "MiniAppResourceContract": {
+        "additionalProperties": false,
+        "properties": {
+          "required_resource_kinds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "required_resource_kinds"
         ],
         "type": "object"
       },

@@ -4,17 +4,19 @@
 //! sharing, backup, and deletion shapes. It intentionally contains no runtime,
 //! database, filesystem, or product-service implementation.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::plugin_n1::CredentialSlotDeclaration;
 use crate::{
-    ArtifactEnvelope, ArtifactId, CanonicalErrorCode, DigestHex,
-    JavaScriptBuildProfile, LocalizedMetadata, MiniAppId, MiniAppReleaseId,
-    OperationId, PackageContributions, PackageRef, RuntimeInstallationId,
-    RuntimeTarget, StrictJsonValue, VersionString, digest_payload,
+    ArtifactEnvelope, ArtifactId, CanonicalErrorCode, CanonicalSchemaRef,
+    DigestHex, JavaScriptBuildProfile, LocalizedMetadata, MiniAppId,
+    MiniAppReleaseId, OperationId, PackageContributions, PackageRef,
+    ResourceKind, RuntimeInstallationId, RuntimeTarget, StrictJsonValue,
+    VersionString, digest_payload,
 };
 
 pub const MINIAPP_M1_SCHEMA_VERSION: &str = "1.0.0";
@@ -387,6 +389,24 @@ impl MiniAppMigration {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MiniAppResourceContract {
+    pub required_resource_kinds: BTreeSet<ResourceKind>,
+}
+
+impl MiniAppResourceContract {
+    pub fn validate(&self) -> Result<(), MiniAppM1ContractError> {
+        for resource_kind in &self.required_resource_kinds {
+            validate_machine_key(
+                resource_kind.as_ref(),
+                "resource_contract.required_resource_kinds",
+            )?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MiniAppReleaseV1Manifest {
@@ -399,9 +419,13 @@ pub struct MiniAppReleaseV1Manifest {
     pub service: Option<MiniAppServiceReleaseDescriptor>,
     pub dependency_lock_digest: DigestHex,
     pub dependency_graph_digest: DigestHex,
+    pub config_schema: StrictJsonValue,
     pub config_schema_digest: DigestHex,
+    pub credential_slots: Vec<CredentialSlotDeclaration>,
     pub credential_slots_digest: DigestHex,
+    pub resource_contract: MiniAppResourceContract,
     pub resource_contract_digest: DigestHex,
+    pub schemas: BTreeMap<CanonicalSchemaRef, StrictJsonValue>,
     pub bridge_contract_digest: DigestHex,
     pub contribution_package: PackageRef,
     pub contributions: PackageContributions,
@@ -441,17 +465,40 @@ impl MiniAppReleaseV1Manifest {
             || !self.contributions.mcp_tools.is_empty()
             || !self.contributions.role_contracts.is_empty()
             || !self.contributions.role_providers.is_empty()
+            || !self.credential_slots.is_empty()
+            || !self.resource_contract.required_resource_kinds.is_empty()
         {
             return Err(invalid(
                 "service",
-                "UI-only MiniApps cannot declare Service migrations or executable contributions",
+                "UI-only MiniApps cannot declare Service migrations, executable contributions, Credential slots, or typed Resource requirements",
             ));
         }
         validate_digest(&self.dependency_lock_digest, "dependency_lock_digest")?;
         validate_digest(&self.dependency_graph_digest, "dependency_graph_digest")?;
+        validate_config_schema(&self.config_schema)?;
         validate_digest(&self.config_schema_digest, "config_schema_digest")?;
+        let expected_config_schema_digest = digest_payload(&self.config_schema.0)?;
+        if expected_config_schema_digest != self.config_schema_digest {
+            return Err(MiniAppM1ContractError::DigestMismatch {
+                field: "config_schema_digest",
+            });
+        }
+        validate_credential_slots(&self.credential_slots)?;
         validate_digest(&self.credential_slots_digest, "credential_slots_digest")?;
+        let expected_credential_slots_digest = digest_payload(&self.credential_slots)?;
+        if expected_credential_slots_digest != self.credential_slots_digest {
+            return Err(MiniAppM1ContractError::DigestMismatch {
+                field: "credential_slots_digest",
+            });
+        }
+        self.resource_contract.validate()?;
         validate_digest(&self.resource_contract_digest, "resource_contract_digest")?;
+        let expected_resource_contract_digest = digest_payload(&self.resource_contract)?;
+        if expected_resource_contract_digest != self.resource_contract_digest {
+            return Err(MiniAppM1ContractError::DigestMismatch {
+                field: "resource_contract_digest",
+            });
+        }
         validate_digest(&self.bridge_contract_digest, "bridge_contract_digest")?;
         validate_nonempty(
             self.contribution_package.id.as_ref(),
@@ -465,6 +512,33 @@ impl MiniAppReleaseV1Manifest {
             &self.contribution_package,
             &self.contributions,
         )?;
+        validate_release_schema_registry(&self.contributions, &self.schemas)?;
+        let contribution_resource_kinds = self
+            .contributions
+            .capabilities
+            .iter()
+            .flat_map(|capability| {
+                capability
+                    .contributions
+                    .resource_kinds
+                    .iter()
+                    .cloned()
+            })
+            .collect::<BTreeSet<_>>();
+        if !contribution_resource_kinds
+            .is_subset(&self.resource_contract.required_resource_kinds)
+        {
+            let missing = contribution_resource_kinds
+                .difference(&self.resource_contract.required_resource_kinds)
+                .map(AsRef::as_ref)
+                .collect::<Vec<_>>();
+            return Err(invalid(
+                "resource_contract.required_resource_kinds",
+                format!(
+                    "Resource contract is missing contribution requirements {missing:?}"
+                ),
+            ));
+        }
         let mut migration_ids = BTreeSet::new();
         for migration in &self.migrations {
             migration.validate()?;
@@ -2773,6 +2847,124 @@ fn reject_sql_control_tokens(
     }
 }
 
+fn validate_config_schema(
+    config_schema: &StrictJsonValue,
+) -> Result<(), MiniAppM1ContractError> {
+    if config_schema.0.is_object() {
+        Ok(())
+    } else {
+        Err(invalid(
+            "config_schema",
+            "MiniApp config schema must be a JSON object",
+        ))
+    }
+}
+
+fn validate_credential_slots(
+    credential_slots: &[CredentialSlotDeclaration],
+) -> Result<(), MiniAppM1ContractError> {
+    let mut previous: Option<&str> = None;
+    for slot in credential_slots {
+        validate_machine_key(
+            slot.slot_key.as_ref(),
+            "credential_slots.slot_key",
+        )?;
+        validate_nonempty(&slot.display_name, "credential_slots.display_name")?;
+        if previous.is_some_and(|previous| previous >= slot.slot_key.as_ref()) {
+            return Err(invalid(
+                "credential_slots",
+                "Credential slots must be sorted by slot_key and unique",
+            ));
+        }
+        previous = Some(slot.slot_key.as_ref());
+    }
+    Ok(())
+}
+
+pub fn validate_release_schema_registry(
+    contributions: &PackageContributions,
+    schemas: &BTreeMap<CanonicalSchemaRef, StrictJsonValue>,
+) -> Result<(), MiniAppM1ContractError> {
+    let referenced = contributions
+        .capabilities
+        .iter()
+        .flat_map(|capability| {
+            capability
+                .contributions
+                .actions
+                .iter()
+                .flat_map(|action| [&action.input_schema, &action.output_schema])
+                .chain(capability.contributions.context_schema_refs.iter())
+                .chain(capability.contributions.event_schema_refs.iter())
+        })
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let provided = schemas.keys().cloned().collect::<BTreeSet<_>>();
+    if referenced != provided {
+        let missing = referenced
+            .difference(&provided)
+            .map(AsRef::as_ref)
+            .collect::<Vec<_>>();
+        let extra = provided
+            .difference(&referenced)
+            .map(AsRef::as_ref)
+            .collect::<Vec<_>>();
+        return Err(invalid(
+            "schemas",
+            format!(
+                "schema registry must exactly match contribution refs; missing={missing:?}, extra={extra:?}"
+            ),
+        ));
+    }
+    for (reference, schema) in schemas {
+        if !reference.as_ref().starts_with("schema://") {
+            return Err(invalid(
+                "schemas.key",
+                format!(
+                    "schema {} must use the canonical schema:// namespace",
+                    reference.as_ref()
+                ),
+            ));
+        }
+        if !schema.0.is_object() {
+            return Err(invalid(
+                "schemas.value",
+                format!(
+                    "schema {} must contain a JSON object",
+                    reference.as_ref()
+                ),
+            ));
+        }
+        let (logical_ref, expected_digest) =
+            reference.as_ref().rsplit_once('#').ok_or_else(|| {
+                invalid(
+                    "schemas.key",
+                    format!(
+                        "schema {} must end in a content digest fragment",
+                        reference.as_ref()
+                    ),
+                )
+            })?;
+        if logical_ref.contains('#') || logical_ref == "schema://" {
+            return Err(invalid(
+                "schemas.key",
+                format!("schema {} is not a canonical reference", reference.as_ref()),
+            ));
+        }
+        validate_digest(
+            &DigestHex::from(expected_digest.to_owned()),
+            "schemas.key.digest",
+        )?;
+        let observed = digest_payload(&schema.0)?;
+        if observed.as_ref() != expected_digest {
+            return Err(MiniAppM1ContractError::DigestMismatch {
+                field: "schemas.value",
+            });
+        }
+    }
+    Ok(())
+}
+
 fn validate_contributions(
     package: &PackageRef,
     contributions: &PackageContributions,
@@ -2838,7 +3030,13 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::{PackageId, digest_bytes};
+    use crate::{
+        ActionId, CapabilityActionDescriptor, CapabilityConsumer,
+        CapabilityContributions, CapabilityId, CapabilityKind,
+        CapabilityManifest, CredentialSlotKey, CredentialSlotKind,
+        EffectClass, PackageId, PlatformConstraint, ToolPresentationKind,
+        capability_surface_declarations, digest_bytes,
+    };
 
     fn digest(seed: &str) -> DigestHex {
         digest_bytes(seed.as_bytes())
@@ -2849,6 +3047,37 @@ mod tests {
             normalized_relative_path: path.into(),
             digest: digest(seed),
             size_bytes: seed.len() as u64,
+        }
+    }
+
+    fn config_schema() -> StrictJsonValue {
+        StrictJsonValue(json!({
+            "additionalProperties": false,
+            "properties": {
+                "workspace": {"type": "string"}
+            },
+            "type": "object"
+        }))
+    }
+
+    fn credential_slots(with_service: bool) -> Vec<CredentialSlotDeclaration> {
+        with_service
+            .then(|| CredentialSlotDeclaration {
+                slot_key: CredentialSlotKey::from("api_key"),
+                kind: CredentialSlotKind::SecretText,
+                display_name: "API key".into(),
+                required: true,
+            })
+            .into_iter()
+            .collect()
+    }
+
+    fn resource_contract(with_service: bool) -> MiniAppResourceContract {
+        MiniAppResourceContract {
+            required_resource_kinds: with_service
+                .then(|| ResourceKind::from("knowledge.base"))
+                .into_iter()
+                .collect(),
         }
     }
 
@@ -2874,6 +3103,9 @@ mod tests {
                 runtime_requirements_digest: digest("runtime-requirements"),
             }
         });
+        let config_schema = config_schema();
+        let credential_slots = credential_slots(with_service);
+        let resource_contract = resource_contract(with_service);
         MiniAppReleaseV1Manifest {
             schema_version: MINIAPP_M1_SCHEMA_VERSION.into(),
             build_profile: JavaScriptBuildProfile::MiniAppReleaseV1,
@@ -2892,9 +3124,13 @@ mod tests {
             service,
             dependency_lock_digest: digest("lock"),
             dependency_graph_digest: digest("graph"),
-            config_schema_digest: digest("config"),
-            credential_slots_digest: digest("credentials"),
-            resource_contract_digest: digest("resources"),
+            config_schema_digest: digest_payload(&config_schema.0).unwrap(),
+            config_schema,
+            credential_slots_digest: digest_payload(&credential_slots).unwrap(),
+            credential_slots,
+            resource_contract_digest: digest_payload(&resource_contract).unwrap(),
+            resource_contract,
+            schemas: BTreeMap::new(),
             bridge_contract_digest: digest("bridge"),
             contribution_package: PackageRef {
                 id: PackageId::from("miniapp.example.release"),
@@ -2903,6 +3139,74 @@ mod tests {
             contributions: PackageContributions::default(),
             migrations: Vec::new(),
         }
+    }
+
+    fn manifest_with_tool(
+        files: &[MiniAppReleaseFile],
+    ) -> MiniAppReleaseV1Manifest {
+        let mut manifest = manifest(files, true);
+        let input_schema = StrictJsonValue(json!({
+            "additionalProperties": false,
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+            "type": "object"
+        }));
+        let output_schema = StrictJsonValue(json!({
+            "additionalProperties": false,
+            "properties": {"matches": {"type": "array"}},
+            "required": ["matches"],
+            "type": "object"
+        }));
+        let input_ref = CanonicalSchemaRef::from(format!(
+            "schema://miniapp.example/search-input@1#{}",
+            digest_payload(&input_schema.0).unwrap().as_ref()
+        ));
+        let output_ref = CanonicalSchemaRef::from(format!(
+            "schema://miniapp.example/search-output@1#{}",
+            digest_payload(&output_schema.0).unwrap().as_ref()
+        ));
+        let capability = CapabilityManifest {
+            id: CapabilityId::from("miniapp.example.search"),
+            contribution_id: "capability:miniapp.example.search".into(),
+            version: "1.0.0".into(),
+            kind: CapabilityKind::Tool,
+            package: manifest.contribution_package.clone(),
+            display: LocalizedMetadata {
+                name: "Search".into(),
+                description: "Search the selected knowledge base.".into(),
+                localized_names: BTreeMap::new(),
+                localized_descriptions: BTreeMap::new(),
+            },
+            requires: Vec::new(),
+            conflicts: Vec::new(),
+            supported_surfaces: capability_surface_declarations(
+                ["desktop"],
+                [CapabilityConsumer::Agent, CapabilityConsumer::MiniAppService],
+            ),
+            requires_runtime_features: Vec::new(),
+            supported_platforms: vec![PlatformConstraint::Any],
+            config_schema: StrictJsonValue(json!({"type": "object"})),
+            contributions: CapabilityContributions {
+                actions: vec![CapabilityActionDescriptor {
+                    action_id: ActionId::from("miniapp.example.search.invoke"),
+                    input_schema: input_ref.clone(),
+                    output_schema: output_ref.clone(),
+                    effect_class: EffectClass::ReadSensitive,
+                    presentation: ToolPresentationKind::FunctionTool,
+                }],
+                resource_kinds: BTreeSet::from([ResourceKind::from(
+                    "knowledge.base",
+                )]),
+                ..Default::default()
+            },
+        };
+        manifest.contributions = PackageContributions {
+            capabilities: vec![capability],
+            ..Default::default()
+        };
+        manifest.schemas =
+            BTreeMap::from([(input_ref, input_schema), (output_ref, output_schema)]);
+        manifest
     }
 
     fn artifact(with_service: bool) -> MiniAppReleaseArtifactV1 {
@@ -2916,6 +3220,20 @@ mod tests {
         MiniAppReleaseArtifactV1::new(
             ArtifactId::from("artifact-1"),
             manifest(&files, with_service),
+            files,
+        )
+        .unwrap()
+    }
+
+    fn artifact_with_tool() -> MiniAppReleaseArtifactV1 {
+        let files = vec![
+            release_file("ui/index.html", "index"),
+            release_file("ui/app.js", "app"),
+            release_file("service/main.mjs", "service"),
+        ];
+        MiniAppReleaseArtifactV1::new(
+            ArtifactId::from("artifact-tool"),
+            manifest_with_tool(&files),
             files,
         )
         .unwrap()
@@ -3039,6 +3357,144 @@ mod tests {
             .iter()
             .all(|file| file.normalized_relative_path.starts_with("ui/")
                 || file.normalized_relative_path == "service/main.mjs"));
+    }
+
+    #[test]
+    fn source_less_release_restores_workshop_and_runtime_contracts() {
+        let artifact = artifact_with_tool();
+        let encoded = serde_json::to_value(&artifact).unwrap();
+        assert!(encoded.pointer("/manifest/payload/config_schema").is_some());
+        assert!(encoded
+            .pointer("/manifest/payload/credential_slots")
+            .is_some());
+        assert!(encoded
+            .pointer("/manifest/payload/resource_contract")
+            .is_some());
+        assert!(encoded.pointer("/manifest/payload/schemas").is_some());
+        assert!(encoded.get("source").is_none());
+
+        let restored: MiniAppReleaseArtifactV1 =
+            serde_json::from_value(encoded).unwrap();
+        restored.validate().unwrap();
+        let manifest = &restored.manifest.payload;
+        assert_eq!(manifest.credential_slots.len(), 1);
+        assert_eq!(
+            manifest.resource_contract.required_resource_kinds,
+            BTreeSet::from([ResourceKind::from("knowledge.base")])
+        );
+        assert_eq!(manifest.schemas.len(), 2);
+    }
+
+    #[test]
+    fn release_contract_content_and_digests_are_exact() {
+        let valid = artifact_with_tool().manifest.payload;
+        valid.validate().unwrap();
+
+        let mut config_tamper = valid.clone();
+        config_tamper.config_schema =
+            StrictJsonValue(json!({"type": "object", "properties": {}}));
+        assert!(matches!(
+            config_tamper.validate(),
+            Err(MiniAppM1ContractError::DigestMismatch {
+                field: "config_schema_digest"
+            })
+        ));
+
+        let mut credential_tamper = valid.clone();
+        credential_tamper.credential_slots[0].display_name =
+            "Changed credential".into();
+        assert!(matches!(
+            credential_tamper.validate(),
+            Err(MiniAppM1ContractError::DigestMismatch {
+                field: "credential_slots_digest"
+            })
+        ));
+
+        let mut resource_tamper = valid;
+        resource_tamper
+            .resource_contract
+            .required_resource_kinds
+            .insert(ResourceKind::from("workspace"));
+        assert!(matches!(
+            resource_tamper.validate(),
+            Err(MiniAppM1ContractError::DigestMismatch {
+                field: "resource_contract_digest"
+            })
+        ));
+    }
+
+    #[test]
+    fn release_schema_registry_is_exact_and_content_addressed() {
+        let valid = artifact_with_tool().manifest.payload;
+        valid.validate().unwrap();
+
+        let mut missing = valid.clone();
+        let removed = missing.schemas.keys().next().cloned().unwrap();
+        missing.schemas.remove(&removed);
+        assert!(matches!(
+            missing.validate(),
+            Err(MiniAppM1ContractError::InvalidField {
+                field: "schemas",
+                ..
+            })
+        ));
+
+        let extra_schema = StrictJsonValue(json!({"type": "string"}));
+        let extra_ref = CanonicalSchemaRef::from(format!(
+            "schema://miniapp.example/unused@1#{}",
+            digest_payload(&extra_schema.0).unwrap().as_ref()
+        ));
+        let mut extra = valid.clone();
+        extra.schemas.insert(extra_ref, extra_schema);
+        assert!(matches!(
+            extra.validate(),
+            Err(MiniAppM1ContractError::InvalidField {
+                field: "schemas",
+                ..
+            })
+        ));
+
+        let mut tampered = valid;
+        *tampered.schemas.get_mut(&removed).unwrap() =
+            StrictJsonValue(json!({"type": "null"}));
+        assert!(matches!(
+            tampered.validate(),
+            Err(MiniAppM1ContractError::DigestMismatch {
+                field: "schemas.value"
+            })
+        ));
+    }
+
+    #[test]
+    fn release_contract_deserialization_rejects_missing_and_extra_content() {
+        let encoded = serde_json::to_value(
+            artifact_with_tool().manifest.payload,
+        )
+        .unwrap();
+
+        for field in [
+            "config_schema",
+            "credential_slots",
+            "resource_contract",
+            "schemas",
+        ] {
+            let mut missing = encoded.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<MiniAppReleaseV1Manifest>(missing)
+                    .is_err(),
+                "missing {field} must fail closed"
+            );
+        }
+
+        let mut extra = encoded;
+        extra
+            .as_object_mut()
+            .unwrap()
+            .insert("source_contracts".into(), json!({}));
+        assert!(
+            serde_json::from_value::<MiniAppReleaseV1Manifest>(extra).is_err()
+        );
     }
 
     #[test]
