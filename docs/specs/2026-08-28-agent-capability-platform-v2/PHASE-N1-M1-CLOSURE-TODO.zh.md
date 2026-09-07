@@ -217,6 +217,27 @@
     - duplicate Skill/MCP、missing target、cross-package mapping 在 Registry swap 前失败，
       旧 generation/digest 原样保留。Kernel 26、Control Plane 17、Agent Platform 23、
       JS Kernel Adapter 4 项测试通过。
+14. JavaScript Authoring 与真实 Plugin Build 主链已完成一轮可运行收口：
+    - `nomifun-js-authoring` 已交付 canonical Source Manifest、JS/TS scaffold、Source
+      snapshot、exact dependency lock、content-addressed pure-JS npm cache/resolver、
+      static local/npm module graph bundler、Node 24 Build Host、resources copy、immutable
+      `plugin-package-v1` packer 和 cancellation/staging cleanup；
+    - fixed bundler 允许受控 `node:*` public API（拒绝 `node:module`）、拒绝 dynamic
+      import/require、native addon、lifecycle script、未锁定依赖、路径逃逸、环和未知语法；
+      diamond graph 复用 exact exports，多声明 export 等未支持语法 fail closed；
+    - App 组合根使用同一 committed Node fingerprint，将 `authoring`、`npm-cache` 和
+      `artifact-store` 放在互不包含的受管根；Build 输出必须再次经过 Artifact Store
+      containment/digest admission 后才进入数据库；
+    - `FsPluginBuildExecutor` 与 operation cancellation 共用 exact operation flag；
+      cancel 等待 Node process/staging 清理，跨过取消边界后返回 conflict，不把成功
+      Candidate 事后改写为 canceled；
+    - Build 的 base target 与 contract diff 由 application service 从 exact linked
+      Mount/current 和 canonical Manifest 计算，Builder 无权自报 compatibility。
+      Authoring 27、Plugin Service 22、真实 Node Build/Artifact E2E 2、App crate check
+      均通过。
+    生产 npm registry client、Project dependency lock 更新、Chat Dev Source 编辑、
+    Share/CLI 和 installed-app Build→Test→Apply 仍未完成，因此 `N1-4-01`、
+    `N1-2-03` 均保持 `in-progress`。
 
 ## W0：一期交接
 
@@ -249,7 +270,7 @@
 | `N1-2-00` | closed | Artifact lane；`nomifun-plugin-platform/**` | directory/zip containment、canonical digest、immutable CAS staging/publish | `N1-0-02` | 9 tests；tamper/traversal/collision/cancel/idempotency |
 | `N1-2-01` | closed | DB lane；migration 067/068/070、新 repository | Artifact/Project/Candidate/current/previous/Mount/Operation/retained data、Project display metadata 与 Runtime selection schema | `N1-0-02` | `6debcb628` + 当前 070；Plugin repository 13、ID schema 20；fresh/restart/direct-SQL guards |
 | `N1-2-02` | closed | Plugin platform lane；migration 069、DB repository、owner mutation coordinator | Config、Credential slot binding、KV/CAS、stable `dataDir`、owner mutation lock | `N1-2-01`,`N1-1-02` | `a275ddd97`,`a16cfbeff`；repository 12 + ID/schema 20 + lifecycle 31 |
-| `N1-2-03` | in-progress | Plugin application-service/App lane；`nomifun-plugin-service/**`、`nomifun-app/src/router/plugin_platform.rs` | staging/containment/digest/install/replace/restore/uninstall/delete-data/project-delete 与真实 App/Kernel 组合 | `N1-2-01`,`N1-2-02` | service 12 + SQLite adapter 6 + App publisher E2E 1；真实 metadata/TestReceipt/Operation、Candidate Test Host 已接；仍需真实 Build、Build cancellation、N1-3 consumer 与安装版验证 |
+| `N1-2-03` | in-progress | Plugin application-service/App lane；`nomifun-plugin-service/**`、`nomifun-app/src/router/plugin_platform.rs` | staging/containment/digest/install/replace/restore/uninstall/delete-data/project-delete 与真实 App/Kernel 组合 | `N1-2-01`,`N1-2-02` | service 22 + App publisher E2E 1；真实 Build/cancel、metadata/TestReceipt/Operation、Candidate Test Host 已接；仍需 N1-3 Agent consumer、统一 Runtime switch 与安装版验证 |
 
 ## N1-3：Catalog 与消费者
 
@@ -263,7 +284,7 @@
 
 | ID | 状态 | Owner/写集 | 目标 | 依赖 | 最小验证 |
 | --- | --- | --- | --- | --- | --- |
-| `N1-4-01` | in-progress | Authoring lane；`nomifun-js-authoring/**` | Source Store、JS/TS scaffold、pure-JS dependency exact lock、fixed packer/Build Host | `N1-0-02`,`N1-1-02`,`N1-2-01` | authoring 17；Source/host lock/DB create 接线通过；仍需 npm resolver/cache、packer、Build Host 与真实 cancellation |
+| `N1-4-01` | in-progress | Authoring lane；`nomifun-js-authoring/**` | Source Store、JS/TS scaffold、pure-JS dependency exact lock、fixed packer/Build Host | `N1-0-02`,`N1-1-02`,`N1-2-01` | authoring 27 + real Build Executor E2E 2；resolver/cache/static local+npm bundler/Node Host/Artifact admission/cancel 已接；仍需 production registry/lock mutation、MiniApp profile 和 Chat Dev Source edit |
 | `N1-4-02` | blocked | Plugin project lane | single Ready、Candidate Test、impact、manual/compatible-idle Apply、Retry/Restore | `N1-2-03`,`N1-3-01`,`N1-4-01` | stale base/busy/breaking/no auto rollback |
 | `N1-4-03` | blocked | SDK/CLI lane | Plugin SDK、Share Bundle/prebuilt import/export、本地 CLI | `N1-4-02` | same application service；secret-free bundle |
 

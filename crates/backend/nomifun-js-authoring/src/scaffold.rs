@@ -1,20 +1,15 @@
 use std::collections::BTreeMap;
 
+use nomifun_agent_contracts::{LocalizedMetadata, PackageId, VersionString};
 use semver::Version;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::canonical::canonical_json_bytes;
 use crate::error::AuthoringError;
+use crate::manifest::{
+    PLUGIN_SOURCE_MANIFEST_FILE, PluginLanguage, PluginSourceManifest,
+};
 use crate::path::NormalizedSourcePath;
-
-pub const PLUGIN_SOURCE_MANIFEST_VERSION: &str = "1.0.0";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PluginLanguage {
-    JavaScript,
-    TypeScript,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PluginScaffoldRequest {
@@ -64,19 +59,22 @@ pub(crate) fn render_plugin_scaffold(
         PluginLanguage::JavaScript => "src/main.js",
         PluginLanguage::TypeScript => "src/main.ts",
     };
-    let manifest = PluginSourceManifest {
-        schema_version: PLUGIN_SOURCE_MANIFEST_VERSION,
-        build_profile: "plugin-package-v1",
-        package_id: &request.package_id,
-        package_version: &request.package_version,
-        display: PluginSourceDisplay {
-            name: &request.display_name,
-            description: &request.description,
+    let manifest = PluginSourceManifest::new(
+        PackageId::from(request.package_id.clone()),
+        VersionString::from(request.package_version.clone()),
+        LocalizedMetadata {
+            name: request.display_name.clone(),
+            description: request.description.clone(),
+            localized_names: BTreeMap::new(),
+            localized_descriptions: BTreeMap::new(),
         },
-        entrypoint,
-        capabilities: Vec::new(),
-    };
+        request.language,
+        NormalizedSourcePath::parse(entrypoint)?,
+    )?;
     let package_json = FixedPackageJson {
+        name: &request.package_id,
+        version: &request.package_version,
+        description: &request.description,
         private: true,
         module_type: "module",
         dependencies: BTreeMap::new(),
@@ -88,8 +86,8 @@ pub(crate) fn render_plugin_scaffold(
 
     Ok(vec![
         (
-            NormalizedSourcePath::parse("nomifun.plugin.json")?,
-            canonical_json_bytes(&manifest)?,
+            NormalizedSourcePath::parse(PLUGIN_SOURCE_MANIFEST_FILE)?,
+            manifest.canonical_bytes()?,
         ),
         (
             NormalizedSourcePath::parse("package.json")?,
@@ -103,24 +101,10 @@ pub(crate) fn render_plugin_scaffold(
 }
 
 #[derive(Serialize)]
-struct PluginSourceManifest<'a> {
-    schema_version: &'static str,
-    build_profile: &'static str,
-    package_id: &'a str,
-    package_version: &'a str,
-    display: PluginSourceDisplay<'a>,
-    entrypoint: &'a str,
-    capabilities: Vec<serde_json::Value>,
-}
-
-#[derive(Serialize)]
-struct PluginSourceDisplay<'a> {
+struct FixedPackageJson<'a> {
     name: &'a str,
+    version: &'a str,
     description: &'a str,
-}
-
-#[derive(Serialize)]
-struct FixedPackageJson {
     private: bool,
     #[serde(rename = "type")]
     module_type: &'static str,

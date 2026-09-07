@@ -116,6 +116,17 @@
     operation handler/context，Gateway/UI/Automation 等 consumer 不需要伪造
     AgentSession；Agent consumer 仍必须走 Snapshot-bound 路径。当前 Kernel 26、
     Control Plane 17、Agent Platform 23、JS Adapter 4 项定向验证通过。
+11. JavaScript Authoring foundation 已接入真实 Plugin Build：canonical Source
+    Manifest、JS/TS/local module、exact pure-JS npm lock/cache、static bundler、受控
+    `node:*` imports、Node 24 Build Host、resources、cancellation 和 immutable
+    `plugin-package-v1` 均已形成可运行主链。Build 输出从与 Source/npm cache 分离的
+    staging 再次进入 Artifact Store admission；Build Executor 和 operation cancel 共用
+    exact operation flag，取消返回前证明 worker/process/staging 已退出。base current 和
+    compatibility diff 由 application service 从 linked Mount 与 canonical Manifest
+    计算，不接受 Builder 自报。Authoring 27、Plugin Service 22、真实 Build E2E 2 和
+    App crate check 通过。production npm registry client、dependency lock mutation、
+    Chat Dev Source 编辑、MiniApp build profile、Share/CLI 与安装版闭环仍属于未完成项，
+    因此当前不关闭 `N1-4-01` 或 `N1-2-03`。
 
 ## 0. 怎样阅读这份文档
 

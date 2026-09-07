@@ -956,6 +956,26 @@ impl PluginOperationCancellation for FakeOperationCancellation {
     }
 }
 
+struct TerminalizingOperationCancellation {
+    repo: Arc<FakeRepository>,
+    owner_user_id: String,
+}
+
+#[async_trait]
+impl PluginOperationCancellation for TerminalizingOperationCancellation {
+    async fn cancel(&self, operation: &ProductOperationRow) -> Result<(), PluginServiceError> {
+        self.repo
+            .cancel_operation(
+                &self.owner_user_id,
+                &operation.operation_id,
+                1,
+                operation.started_at_ms + 1,
+            )
+            .await?;
+        Ok(())
+    }
+}
+
 #[derive(Default)]
 struct FakeRegistryPublisher;
 
@@ -990,6 +1010,7 @@ struct FakeBuilder {
 impl PluginBuildExecutor for FakeBuilder {
     async fn build(
         &self,
+        _operation_id: &str,
         _project: &PluginProjectRow,
         _request: &BuildPluginProjectRequest,
     ) -> Result<BuildOutput, PluginServiceError> {
@@ -1065,6 +1086,22 @@ fn service_with_source_store(
     builder: Arc<dyn PluginBuildExecutor>,
     source_store: Arc<dyn PluginSourceStorePort>,
 ) -> PluginApplicationService {
+    service_with_operation_cancellation(
+        repo,
+        store,
+        builder,
+        source_store,
+        Arc::new(FakeOperationCancellation),
+    )
+}
+
+fn service_with_operation_cancellation(
+    repo: Arc<FakeRepository>,
+    store: Arc<QueueArtifactStore>,
+    builder: Arc<dyn PluginBuildExecutor>,
+    source_store: Arc<dyn PluginSourceStorePort>,
+    operation_cancellation: Arc<dyn PluginOperationCancellation>,
+) -> PluginApplicationService {
     PluginApplicationService::new(PluginServiceDependencies {
         repository: repo,
         artifacts: store,
@@ -1073,7 +1110,7 @@ fn service_with_source_store(
         mutation_coordinator: Arc::new(OwnerMutationCoordinator::new()),
         builder,
         tester: Arc::new(FakeTester),
-        operation_cancellation: Arc::new(FakeOperationCancellation),
+        operation_cancellation,
         source_store,
         data_store: Arc::new(FakeDataStore::default()),
         paths: PluginServicePaths {
@@ -1087,6 +1124,18 @@ fn sha256(bytes: &[u8]) -> DigestHex {
 }
 
 fn artifact(main: &[u8], version: &str) -> PluginPackageArtifactV1 {
+    artifact_with_config_schema(
+        main,
+        version,
+        StrictJsonValue(json!({"type":"object"})),
+    )
+}
+
+fn artifact_with_config_schema(
+    main: &[u8],
+    version: &str,
+    config_schema: StrictJsonValue,
+) -> PluginPackageArtifactV1 {
     let package = ExactVersionRef {
         id: PackageId::from("example.csv"),
         version: VersionString::from(version),
@@ -1142,7 +1191,7 @@ fn artifact(main: &[u8], version: &str) -> PluginPackageArtifactV1 {
                 },
                 package_dependencies: Vec::new(),
                 requires_runtime_features: Vec::new(),
-                config_schema: StrictJsonValue(json!({"type":"object"})),
+                config_schema,
                 provides_services: Vec::new(),
                 requires_services: Vec::new(),
                 entrypoint: JavaScriptEntrypointMetadata {
@@ -1777,8 +1826,6 @@ async fn build_and_candidate_test_bind_exact_generation_and_inputs() {
             managed_relative_path: "plugin-artifacts/built".into(),
             source_snapshot_digest: "c".repeat(64),
             dependency_lock_digest: "d".repeat(64),
-            base_target_digest: None,
-            contract_diff: contract_diff(),
         })),
     });
     let service = service(
@@ -1838,6 +1885,84 @@ async fn build_and_candidate_test_bind_exact_generation_and_inputs() {
 }
 
 #[tokio::test]
+async fn build_diff_is_derived_from_the_exact_linked_mount_contract() {
+    for (built, expected_compatibility, expected_change) in [
+        (
+            artifact(b"export const built = 2;\n", "1.0.0"),
+            nomifun_api_types::PluginCompatibilityDto::Compatible,
+            None,
+        ),
+        (
+            artifact_with_config_schema(
+                b"export const built = 3;\n",
+                "1.0.0",
+                StrictJsonValue(json!({
+                    "type": "object",
+                    "properties": {"mode": {"type": "string"}}
+                })),
+            ),
+            nomifun_api_types::PluginCompatibilityDto::Breaking,
+            Some("configschema"),
+        ),
+    ] {
+        let repo = Arc::new(FakeRepository::default());
+        let current = artifact(b"export const built = 1;\n", "1.0.0");
+        let current_digest = current.artifact_digest.as_ref().to_owned();
+        repo.insert_project(project_row(
+            "project-1",
+            "user-1",
+            Some("C:\\source"),
+            Some("mount-1"),
+        ))
+        .await;
+        repo.insert_artifact(artifact_row(&current, "current")).await;
+        repo.insert_mount(mount_row(
+            "mount-1",
+            "example.csv",
+            Some(current_digest.clone()),
+            1,
+        ))
+        .await;
+        let builder = Arc::new(FakeBuilder {
+            output: Mutex::new(Some(BuildOutput {
+                artifact: built,
+                managed_relative_path: "plugin-artifacts/built".into(),
+                source_snapshot_digest: "c".repeat(64),
+                dependency_lock_digest: "d".repeat(64),
+            })),
+        });
+        let service = service(
+            Arc::clone(&repo),
+            Arc::new(QueueArtifactStore::new(Vec::new())),
+            builder,
+            &tempfile::tempdir().unwrap(),
+        );
+
+        let detail = service
+            .build(
+                "user-1",
+                BuildPluginProjectRequest {
+                    project_id: "project-1".into(),
+                    expected_project_revision: 7,
+                    expected_build_generation: 1,
+                    expected_source_snapshot_digest: "c".repeat(64),
+                    expected_dependency_lock_digest: "d".repeat(64),
+                },
+            )
+            .await
+            .unwrap();
+        let ready = detail.ready.expect("Build publishes one Ready Candidate");
+        assert_eq!(ready.base_target_digest.as_deref(), Some(current_digest.as_str()));
+        assert_eq!(ready.impact.compatibility, expected_compatibility);
+        if let Some(change) = expected_change {
+            assert!(ready.impact.changed_contracts.iter().any(|value| value == change));
+        } else {
+            assert_eq!(ready.impact.changed_contracts, vec!["artifactbytes"]);
+        }
+    }
+}
+
+#[tokio::test]
 async fn operation_cancel_uses_the_product_boundary() {
     let temp = tempfile::tempdir().unwrap();
     let repo = Arc::new(FakeRepository::default());
@@ -1889,6 +2014,45 @@ async fn operation_cancel_uses_the_product_boundary() {
         canceled.state,
         nomifun_api_types::DurableOperationStateDto::Canceled
     );
+}
+
+#[tokio::test]
+async fn operation_cancel_accepts_a_builder_that_already_persisted_canceled() {
+    let repo = Arc::new(FakeRepository::default());
+    repo.insert_project(project_row("project-1", "user-1", None, None))
+        .await;
+    let operation = repo
+        .start_operation(&StartProductOperationParams {
+            operation_id: "operation-cancel-race".into(),
+            kind: nomifun_db::ProductOperationKind::Build,
+            owner_kind: "plugin_project".into(),
+            owner_id: "project-1".into(),
+            progress_percent: Some(1),
+            bounded_log_tail: Vec::new(),
+            started_at_ms: 1,
+        })
+        .await
+        .unwrap();
+    let service = service_with_operation_cancellation(
+        Arc::clone(&repo),
+        Arc::new(QueueArtifactStore::new(Vec::new())),
+        no_builder(),
+        Arc::new(FakeSourceStore::default()),
+        Arc::new(TerminalizingOperationCancellation {
+            repo,
+            owner_user_id: "user-1".into(),
+        }),
+    );
+
+    let canceled = service
+        .cancel_operation("user-1", &operation.operation_id, 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        canceled.state,
+        nomifun_api_types::DurableOperationStateDto::Canceled
+    );
+    assert_eq!(canceled.operation_revision, 2);
 }
 
 #[tokio::test]

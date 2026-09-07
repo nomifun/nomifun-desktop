@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use nomifun_agent_contracts::{
-    CandidateTestReceipt, PluginAutoApplyEligibility, PluginContractDiff, PluginPackageArtifactV1,
+    CandidateTestReceipt, PluginAutoApplyEligibility, PluginPackageArtifactV1,
 };
 use nomifun_api_types::{
     BuildPluginProjectRequest, ConfigurePluginRequest, CreatePluginProjectRequest,
@@ -83,8 +83,6 @@ pub struct BuildOutput {
     pub managed_relative_path: String,
     pub source_snapshot_digest: String,
     pub dependency_lock_digest: String,
-    pub base_target_digest: Option<String>,
-    pub contract_diff: PluginContractDiff,
 }
 
 #[derive(Clone, Debug, PartialEq)]

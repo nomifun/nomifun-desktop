@@ -1,11 +1,20 @@
+use std::collections::BTreeMap;
 use std::path::{Component, Path};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::Duration;
 
 use async_trait::async_trait;
-use nomifun_agent_contracts::{DigestHex, PluginMountId, PluginProjectId, UserId};
+use nomifun_agent_contracts::{
+    DigestHex, PluginMountId, PluginProjectId, RuntimeTarget, UserId,
+};
 use nomifun_js_authoring::{
-    ExactDependencyLock, NeverCancel, NpmResolverIdentity, PluginLanguage,
-    PluginScaffoldRequest, SourceScope, SourceStore, SourceStoreLimits,
+    AuthoringError, ExactDependencyLock, FixedPluginPacker, NeverCancel,
+    NpmResolverIdentity, OperationCancellation, PluginLanguage,
+    PluginPackageBuildOptions, PluginScaffoldRequest, SourceScope, SourceStore,
+    SourceStoreLimits,
 };
 use nomifun_db::{
     ApplyPluginCandidateParams, CreatePluginArtifactParams, CreatePluginProjectParams,
@@ -19,8 +28,12 @@ use nomifun_db::{
     UpdatePluginMountConfigParams,
 };
 use nomifun_js_host::{ExtensionHostSupervisor, JavaScriptHostError};
-use nomifun_plugin_platform::{ArtifactStoreLimits, PluginArtifactStore};
+use nomifun_plugin_platform::{
+    ArtifactStoreLimits, ImportCancellation, PluginArtifactStore,
+    PluginArtifactStoreError,
+};
 use sha2::{Digest, Sha256};
+use tokio::sync::{Mutex, Notify};
 
 use crate::error::PluginServiceError;
 use crate::types::{
@@ -204,6 +217,75 @@ pub struct FsPluginSourceStore {
     resolver: NpmResolverIdentity,
 }
 
+pub struct FsPluginBuildExecutor {
+    source_store: SourceStore,
+    artifact_store: PluginArtifactStore,
+    packer: FixedPluginPacker,
+    options: PluginPackageBuildOptions,
+    active: Mutex<BTreeMap<String, Arc<BuildCancellation>>>,
+}
+
+struct BuildCancellation {
+    project_id: String,
+    canceled: AtomicBool,
+    completed: AtomicBool,
+    completion: Notify,
+}
+
+impl BuildCancellation {
+    fn new(project_id: String) -> Self {
+        Self {
+            project_id,
+            canceled: AtomicBool::new(false),
+            completed: AtomicBool::new(false),
+            completion: Notify::new(),
+        }
+    }
+
+    fn cancel(&self) {
+        self.canceled.store(true, Ordering::Release);
+    }
+
+    fn is_canceled(&self) -> bool {
+        self.canceled.load(Ordering::Acquire)
+    }
+
+    fn complete(&self) {
+        self.completed.store(true, Ordering::Release);
+        self.completion.notify_waiters();
+    }
+
+    async fn wait_for_completion(&self) -> Result<(), PluginServiceError> {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while !self.completed.load(Ordering::Acquire) {
+                let notified = self.completion.notified();
+                if self.completed.load(Ordering::Acquire) {
+                    break;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .map_err(|_| {
+            PluginServiceError::integration(
+                "Plugin Build cancellation could not prove process and staging cleanup",
+            )
+        })
+    }
+}
+
+impl OperationCancellation for BuildCancellation {
+    fn is_cancelled(&self) -> bool {
+        self.canceled.load(Ordering::Acquire)
+    }
+}
+
+impl ImportCancellation for BuildCancellation {
+    fn is_cancelled(&self) -> bool {
+        self.canceled.load(Ordering::Acquire)
+    }
+}
+
 impl FsPluginSourceStore {
     pub fn new(
         root: impl AsRef<Path>,
@@ -224,6 +306,205 @@ impl FsPluginSourceStore {
 
     pub fn store(&self) -> &SourceStore {
         &self.store
+    }
+}
+
+impl FsPluginBuildExecutor {
+    pub fn new(
+        source_store: &FsPluginSourceStore,
+        artifact_store: &FsPluginArtifactStore,
+        packer: FixedPluginPacker,
+        runtime_target: RuntimeTarget,
+    ) -> Result<Self, PluginServiceError> {
+        let source_root = source_store.store.managed_root();
+        let artifact_root = artifact_store.store.managed_root();
+        if source_root.starts_with(artifact_root) || artifact_root.starts_with(source_root) {
+            return Err(PluginServiceError::integration(
+                "Plugin Source and Artifact stores must use disjoint managed roots",
+            ));
+        }
+        Ok(Self {
+            source_store: source_store.store.clone(),
+            artifact_store: artifact_store.store.clone(),
+            packer,
+            options: PluginPackageBuildOptions::for_target(runtime_target),
+            active: Mutex::new(BTreeMap::new()),
+        })
+    }
+}
+
+#[async_trait]
+impl PluginBuildExecutor for FsPluginBuildExecutor {
+    async fn build(
+        &self,
+        operation_id: &str,
+        project: &PluginProjectRow,
+        request: &nomifun_api_types::BuildPluginProjectRequest,
+    ) -> Result<BuildOutput, PluginServiceError> {
+        if operation_id.trim().is_empty() {
+            return Err(PluginServiceError::invalid(
+                "Build operation identity must be non-empty",
+            ));
+        }
+        let cancellation = Arc::new(BuildCancellation::new(project.project_id.clone()));
+        {
+            let mut active = self.active.lock().await;
+            if active.contains_key(operation_id) {
+                return Err(PluginServiceError::conflict(
+                    "Build operation identity is already active",
+                ));
+            }
+            active.insert(operation_id.to_owned(), Arc::clone(&cancellation));
+        }
+
+        let source_store = self.source_store.clone();
+        let artifact_store = self.artifact_store.clone();
+        let packer = self.packer.clone();
+        let options = self.options.clone();
+        let project = project.clone();
+        let request = request.clone();
+        let worker_cancellation = Arc::clone(&cancellation);
+        let result = tokio::task::spawn_blocking(move || {
+            execute_plugin_build(
+                &source_store,
+                &artifact_store,
+                &packer,
+                &options,
+                &project,
+                &request,
+                worker_cancellation.as_ref(),
+            )
+        })
+        .await
+        .map_err(|error| {
+            PluginServiceError::integration(format!(
+                "Plugin Build worker terminated unexpectedly: {error}"
+            ))
+        });
+        let canceled = {
+            let mut active = self.active.lock().await;
+            let Some(active_build) = active.remove(operation_id) else {
+                cancellation.complete();
+                return Err(PluginServiceError::integration(
+                    "Plugin Build cancellation registry lost the active operation",
+                ));
+            };
+            Arc::ptr_eq(&active_build, &cancellation) && cancellation.is_canceled()
+        };
+        cancellation.complete();
+        match result? {
+            Ok(_) if canceled => Err(PluginServiceError::operation_canceled(
+                "Plugin Build was canceled",
+            )),
+            output => output,
+        }
+    }
+}
+
+#[async_trait]
+impl PluginOperationCancellation for FsPluginBuildExecutor {
+    async fn cancel(&self, operation: &ProductOperationRow) -> Result<(), PluginServiceError> {
+        if operation.kind != "build" || operation.owner_kind != "plugin_project" {
+            return Err(PluginServiceError::invalid(
+                "only active Plugin Project Build operations are cancelable here",
+            ));
+        }
+        let cancellation = {
+            let active = self.active.lock().await;
+            let cancellation = active.get(&operation.operation_id).ok_or_else(|| {
+                PluginServiceError::conflict(
+                    "Plugin Build has already crossed its cancellation boundary",
+                )
+            })?;
+            if cancellation.project_id != operation.owner_id {
+                return Err(PluginServiceError::stale(
+                    "Plugin Build operation owner changed",
+                ));
+            }
+            cancellation.cancel();
+            Arc::clone(cancellation)
+        };
+        cancellation.wait_for_completion().await
+    }
+}
+
+fn execute_plugin_build(
+    source_store: &SourceStore,
+    artifact_store: &PluginArtifactStore,
+    packer: &FixedPluginPacker,
+    options: &PluginPackageBuildOptions,
+    project: &PluginProjectRow,
+    request: &nomifun_api_types::BuildPluginProjectRequest,
+    cancellation: &BuildCancellation,
+) -> Result<BuildOutput, PluginServiceError> {
+    let scope = SourceScope::new(
+        UserId::from(project.owner_user_id.clone()),
+        PluginProjectId::from(project.project_id.clone()),
+    )
+    .map_err(|error| PluginServiceError::invalid(error.to_string()))?;
+    let source = source_store
+        .snapshot(&scope, cancellation)
+        .map_err(map_authoring_build_error)?;
+    if source.snapshot().digest().as_ref() != request.expected_source_snapshot_digest {
+        return Err(PluginServiceError::stale(
+            "Build source snapshot differs from the requested Project head",
+        ));
+    }
+    let dependency_lock = source_store
+        .load_dependency_lock(&scope, cancellation)
+        .map_err(map_authoring_build_error)?;
+    let dependency_lock_digest = dependency_lock
+        .digest()
+        .map_err(map_authoring_build_error)?;
+    if dependency_lock_digest.as_ref() != request.expected_dependency_lock_digest {
+        return Err(PluginServiceError::stale(
+            "Build dependency lock differs from the requested Project lock",
+        ));
+    }
+    let staged = source_store
+        .stage_snapshot(&scope, source.snapshot(), cancellation)
+        .map_err(map_authoring_build_error)?;
+    let packed = packer
+        .pack(staged, &dependency_lock, options, cancellation)
+        .map_err(map_authoring_build_error)?;
+    let imported = artifact_store
+        .import_directory(packed.package_root(), cancellation)
+        .map_err(map_artifact_build_error)?;
+    Ok(BuildOutput {
+        artifact: imported.stored.artifact,
+        managed_relative_path: imported.stored.managed_relative_path,
+        source_snapshot_digest: source.snapshot().digest().as_ref().to_owned(),
+        dependency_lock_digest: dependency_lock_digest.as_ref().to_owned(),
+    })
+}
+
+fn map_authoring_build_error(error: AuthoringError) -> PluginServiceError {
+    match error {
+        AuthoringError::Canceled => {
+            PluginServiceError::operation_canceled("Plugin Build was canceled")
+        }
+        AuthoringError::SourceChanged { .. }
+        | AuthoringError::ProjectNotFound
+        | AuthoringError::ScopeMismatch => PluginServiceError::stale(error.to_string()),
+        AuthoringError::BuildHostUnavailable(_)
+        | AuthoringError::BuildHostTimeout(_)
+        | AuthoringError::BuildHostFailed { .. } => PluginServiceError::Coded {
+            code: crate::ERR_RUNTIME,
+            message: error.to_string(),
+        },
+        _ => PluginServiceError::Coded {
+            code: crate::ERR_OPERATION,
+            message: error.to_string(),
+        },
+    }
+}
+
+fn map_artifact_build_error(error: PluginArtifactStoreError) -> PluginServiceError {
+    match error {
+        PluginArtifactStoreError::Canceled => {
+            PluginServiceError::operation_canceled("Plugin Build was canceled")
+        }
+        other => other.into(),
     }
 }
 
@@ -500,6 +781,7 @@ pub trait PluginRegistryPublisher: Send + Sync {
 pub trait PluginBuildExecutor: Send + Sync {
     async fn build(
         &self,
+        operation_id: &str,
         project: &PluginProjectRow,
         request: &nomifun_api_types::BuildPluginProjectRequest,
     ) -> Result<BuildOutput, PluginServiceError>;
@@ -527,6 +809,7 @@ pub struct UnconfiguredPluginBuildExecutor;
 impl PluginBuildExecutor for UnconfiguredPluginBuildExecutor {
     async fn build(
         &self,
+        _operation_id: &str,
         _project: &PluginProjectRow,
         _request: &nomifun_api_types::BuildPluginProjectRequest,
     ) -> Result<BuildOutput, PluginServiceError> {

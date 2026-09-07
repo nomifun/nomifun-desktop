@@ -6,6 +6,7 @@ pub const ERR_FORBIDDEN: &str = "PLUGIN_FORBIDDEN";
 pub const ERR_INVALID_INPUT: &str = "PLUGIN_INVALID_INPUT";
 pub const ERR_STALE: &str = "PLUGIN_STALE";
 pub const ERR_OPERATION: &str = "PLUGIN_OPERATION_FAILED";
+pub const ERR_OPERATION_CANCELED: &str = "PLUGIN_OPERATION_CANCELED";
 pub const ERR_INTEGRATION: &str = "PLUGIN_INTEGRATION_REQUIRED";
 pub const ERR_SECRET_LEAK: &str = "PLUGIN_SECRET_LEAK";
 pub const ERR_ARTIFACT: &str = "PLUGIN_ARTIFACT_INVALID";
@@ -55,6 +56,13 @@ impl PluginServiceError {
     pub fn not_found(message: impl Into<String>) -> Self {
         Self::Coded {
             code: ERR_NOT_FOUND,
+            message: message.into(),
+        }
+    }
+
+    pub fn operation_canceled(message: impl Into<String>) -> Self {
+        Self::Coded {
+            code: ERR_OPERATION_CANCELED,
             message: message.into(),
         }
     }
