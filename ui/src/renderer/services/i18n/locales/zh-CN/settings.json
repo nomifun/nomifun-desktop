@@ -1253,18 +1253,74 @@
     "agentDesc": "用于企业微信对话"
   },
   "extensionPresetReadonly": "扩展设定为只读，你可以复制它并编辑副本。",
-  "executionEngineHub": {
-    "title": "执行引擎",
-    "subtitle": "管理 NomiFun 处理会话和任务所使用的本机与远程执行引擎。",
-    "railTitle": "执行引擎",
-    "runtimeTab": "运行参数"
-  },
-  "agentManagement": {
-    "localAgentsDescription": "Nomi 已随 NomiFun 内置；Claude Code、Codex 等执行引擎需要先安装对应命令行工具，NomiFun 会自动检测。",
-    "discoverMoreAgents": "发现更多执行引擎",
-    "refreshDetection": "重新检测本机",
-    "localAgentsEmpty": "未发现可用的本机执行引擎",
-    "installed": "已就绪"
+  "runtimeManager": {
+    "title": "JavaScript 运行时",
+    "subtitle": "管理 NomiFun Plugin 和 MiniApp 使用的 Node.js 运行时。",
+    "railTitle": "JavaScript 运行时",
+    "desktopOnlyTitle": "仅支持桌面端",
+    "desktopOnlyBody": "Node.js 运行时路径和本机进程只在 NomiFun 桌面端可管理。",
+    "loading": "正在读取运行时状态…",
+    "currentTitle": "当前运行时",
+    "currentDescription": "所有 JavaScript Host 共用一个已提交的 Node.js 运行时。",
+    "noSelection": "尚未选择兼容的 Node.js 运行时",
+    "noSelectionBody": "请选择本机 Node.js，或确认下载官方 Node.js LTS。",
+    "candidatesTitle": "可用运行时",
+    "candidatesDescription": "可扫描 PATH、选择绝对路径，或使用已下载的受管运行时。",
+    "candidatesEmpty": "尚未发现 Node.js 运行时。",
+    "unknownVersion": "未知版本",
+    "diagnostics": "查看诊断信息",
+    "statusError": "运行时状态包含错误：{{code}}",
+    "source": {
+      "manualPath": "手动路径",
+      "processPath": "当前 PATH",
+      "managed": "NomiFun 受管"
+    },
+    "compatibility": {
+      "recommended": "推荐",
+      "compatible": "兼容",
+      "incompatible": "不兼容"
+    },
+    "candidate": {
+      "current": "当前使用",
+      "pending": "待裁决",
+      "selected": "当前运行时",
+      "use": "使用此运行时"
+    },
+    "downloadTitle": "官方 Node.js LTS",
+    "downloadDescription": "下载前需要确认官方发行物和当前平台目标。",
+    "download": {
+      "downloading": "正在下载并校验官方 Node.js…",
+      "ready": "下载和校验完成，可选择使用。",
+      "failed": "下载失败。",
+      "unavailable": "当前无法获取官方 Node.js LTS 信息。"
+    },
+    "switch": {
+      "title": "运行时切换待裁决",
+      "description": "候选运行时验证存在局部结果，请选择继续使用新运行时或恢复原运行时。",
+      "noParticipants": "没有可展示的参与者结果。",
+      "participantPlugin": "Plugin",
+      "participantMiniApp": "MiniApp Service",
+      "participantBuild": "构建基础",
+      "passed": "通过",
+      "failed": "失败",
+      "notCovered": "未覆盖"
+    },
+    "confirm": {
+      "downloadTitle": "下载并使用官方 Node.js？",
+      "downloadBody": "NomiFun 将下载并校验 Node.js {{version}} 官方发行物（{{target}}），随后尝试将其设为全局 JavaScript 运行时。",
+      "nonRecommendedTitle": "使用非推荐 Node.js 版本？",
+      "nonRecommendedBody": "Node.js {{version}} 满足最低兼容条件，但不是当前测试基线。是否继续？"
+    },
+    "actions": {
+      "refresh": "刷新",
+      "choosePath": "选择 node.exe",
+      "scan": "重新扫描",
+      "download": "下载并使用",
+      "useDownloaded": "使用已下载版本",
+      "continue": "继续使用新版本",
+      "restore": "恢复原版本",
+      "cancel": "取消"
+    }
   },
   "taskModel": {
     "providerPlaceholder": "选择服务商",

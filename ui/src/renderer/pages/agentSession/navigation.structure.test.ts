@@ -55,7 +55,8 @@ describe('Agent navigation', () => {
 
     expect(settingsPage.includes('AgentModalContent')).toBe(false);
     expect(settingsPage.includes('ExecutionEnginesSettingsContent')).toBe(true);
-    expect(settingsContent.includes('<LocalAgents />')).toBe(true);
+    expect(settingsContent.includes('<RuntimeManager />')).toBe(true);
+    expect(settingsContent.includes('<LocalAgents />')).toBe(false);
     expect(settingsContent.includes('SettingsModal')).toBe(false);
     expect(settingsContent.includes('agentSettings.navigation')).toBe(false);
   });
