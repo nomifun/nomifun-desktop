@@ -230,6 +230,7 @@ mod tests {
         };
         let snapshot = CatalogSnapshot {
             capabilities: vec![capability],
+            formal_capability_entries: BTreeMap::new(),
             skills: vec![skill],
             mcp_tools: Vec::new(),
             package_sources: BTreeMap::from([(

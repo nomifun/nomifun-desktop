@@ -26,9 +26,10 @@ use nomifun_agent_contracts::{
 use nomifun_agent_kernel::{
     CapabilityContextContributionFactory, CapabilityContextContributionRequest,
     CapabilityHandler, CapabilityInvocationContext, CapabilityResourceProviderFactory,
+    CapabilityOperationHandler, CapabilityOperationInvocationContext,
     CapabilityResourceProviderRequest, ContextContributionResult, KernelError,
-    PluginRegistration, ResolvedCapabilityContext, ResourceHandle, ResourceHandleIdentity,
-    ResourceProviderResult,
+    PluginRegistration, ResolvedCapabilityContext, ResolvedCapabilityOperationContext,
+    ResourceHandle, ResourceHandleIdentity, ResourceProviderResult,
 };
 use nomifun_js_host::{
     ExtensionHostSupervisor, ImmutablePluginModule, JavaScriptHostError,
@@ -267,26 +268,35 @@ impl JsKernelPluginAdapter {
         let mut registration = PluginRegistration::new(metadata);
         for capability in &manifest.package.contributions.capabilities {
             match capability.kind {
-                CapabilityKind::Tool => registration
-                    .add_capability_handler(
-                        capability.id.clone(),
-                        Arc::new(NodeToolHandler {
-                            host: Arc::clone(&host),
-                            mount: MountLoadDemand {
-                                context: self.context.clone(),
-                                module: self.module.clone(),
-                            },
-                            contribution: contribution_ref(
-                                self.target(),
+                CapabilityKind::Tool => {
+                    let handler = Arc::new(NodeToolHandler {
+                        host: Arc::clone(&host),
+                        mount: MountLoadDemand {
+                            context: self.context.clone(),
+                            module: self.module.clone(),
+                        },
+                        contribution: contribution_ref(
+                            self.target(),
+                            capability.id.clone(),
+                            capability.contribution_id.clone(),
+                            capability,
+                        )?,
+                    });
+                    registration
+                        .add_capability_handler(
+                            capability.id.clone(),
+                            handler.clone(),
+                        )
+                        .and_then(|()| {
+                            registration.add_capability_operation_handler(
                                 capability.id.clone(),
-                                capability.contribution_id.clone(),
-                                capability,
-                            )?,
-                        }),
-                    )
-                    .map_err(|error| {
-                        JsKernelAdapterError::InvalidPackage(error.to_string())
-                    })?,
+                                handler,
+                            )
+                        })
+                        .map_err(|error| {
+                            JsKernelAdapterError::InvalidPackage(error.to_string())
+                        })?;
+                }
                 CapabilityKind::ContextContributor => registration
                     .add_capability_context_factory(
                         capability.id.clone(),
@@ -487,6 +497,27 @@ fn validate_capability_context(
     Ok(())
 }
 
+fn validate_operation_context(
+    context: &ResolvedCapabilityOperationContext,
+    expected: &PluginHostContributionRef,
+) -> Result<(), KernelError> {
+    let lock = &context.operation_lock;
+    if lock.capability != expected.capability
+        || lock.contribution.contribution_id != expected.contribution_id
+        || lock.contribution.contract_digest != expected.contract_digest
+        || lock.contribution.mount_id.as_ref() != Some(&expected.target.mount_id)
+        || lock.target_artifact_digest.as_ref() != Some(&expected.target.artifact_digest)
+        || context.mount.identity.package != expected.target.package
+        || context.mount.identity.mount_id != expected.target.mount_id
+    {
+        return Err(drift(
+            &expected.capability.id,
+            "non-Agent operation context differs from the immutable JavaScript Package lock",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_resolved_target(
     resolved: &nomifun_agent_contracts::ResolvedCapability,
     expected: &PluginHostContributionRef,
@@ -526,6 +557,28 @@ impl CapabilityHandler for NodeToolHandler {
                 self.mount.clone(),
                 self.contribution.clone(),
                 action,
+                input,
+            )
+            .await
+            .map_err(|error| KernelError::CapabilityExecution {
+                reason: error.to_string(),
+            })
+    }
+}
+
+#[async_trait]
+impl CapabilityOperationHandler for NodeToolHandler {
+    async fn invoke(
+        &self,
+        context: CapabilityOperationInvocationContext,
+        input: StrictJsonValue,
+    ) -> Result<StrictJsonValue, KernelError> {
+        validate_operation_context(&context.context, &self.contribution)?;
+        self.host
+            .invoke_demand(
+                self.mount.clone(),
+                self.contribution.clone(),
+                context.action_id,
                 input,
             )
             .await

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use nomifun_agent_contracts::{
     ActionId, AgentSessionId, CanonicalSchemaRef, CapabilityId, CorrelationId, DigestHex,
-    ExecutionRoleId, HostPortId, IdempotencyKey, OperationId, PackageRef,
+    CapabilityOperationLock, ExecutionRoleId, HostPortId, IdempotencyKey, OperationId, PackageRef,
     PluginContextDescriptor, PluginIdentityDescriptor, PluginRegistrarDescriptor,
     PluginRegistrarOperation, PluginRegistrationMetadata, PrincipalRef,
     ResolvedCapability, ResolvedMcpToolLock, ResolvedRoleProviderLock,
@@ -44,6 +44,24 @@ pub struct CapabilityAccessRequest {
     pub capability_id: CapabilityId,
     pub resource_binding_ids: BTreeSet<ResourceBindingId>,
     pub state_scope_key: ScopeKey,
+}
+
+/// Exact non-Agent invocation of one ordinary Capability contribution.
+///
+/// The caller must obtain `operation_lock` from the shared Catalog for its
+/// concrete consumer. No AgentSession, Preset, or Snapshot identity is
+/// synthesized for this path.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CapabilityOperationRequest {
+    pub principal: PrincipalRef,
+    pub operation_id: OperationId,
+    pub idempotency_key: IdempotencyKey,
+    pub correlation_id: CorrelationId,
+    pub operation_lock: CapabilityOperationLock,
+    pub action_id: ActionId,
+    pub resource_bindings: TypedResourceBindings,
+    pub state_scope_key: ScopeKey,
+    pub input: StrictJsonValue,
 }
 
 #[derive(Clone)]
@@ -146,6 +164,20 @@ pub struct ResolvedCapabilityContext {
     pub mount: ProviderMountContext,
 }
 
+/// Ordinary Capability context resolved from a non-Agent operation lock.
+#[derive(Clone)]
+pub struct ResolvedCapabilityOperationContext {
+    pub operation_lock: CapabilityOperationLock,
+    pub principal: PrincipalRef,
+    pub operation_id: OperationId,
+    pub correlation_id: CorrelationId,
+    pub registry_generation: u64,
+    pub registry_digest: DigestHex,
+    pub resource_bindings: TypedResourceBindings,
+    pub state_scope_key: ScopeKey,
+    pub mount: ProviderMountContext,
+}
+
 /// Provider-Mount context projected by the Kernel after exact role dispatch.
 #[derive(Clone)]
 pub struct ResolvedRoleMemberContext {
@@ -172,6 +204,22 @@ pub trait CapabilityHandler: Send + Sync {
         context: CapabilityInvocationContext,
         input: StrictJsonValue,
     ) -> Result<StrictJsonValue, KernelError>;
+}
+
+#[async_trait]
+pub trait CapabilityOperationHandler: Send + Sync {
+    async fn invoke(
+        &self,
+        context: CapabilityOperationInvocationContext,
+        input: StrictJsonValue,
+    ) -> Result<StrictJsonValue, KernelError>;
+}
+
+#[derive(Clone)]
+pub struct CapabilityOperationInvocationContext {
+    pub context: ResolvedCapabilityOperationContext,
+    pub action_id: ActionId,
+    pub idempotency_key: IdempotencyKey,
 }
 
 #[derive(Clone)]
@@ -280,6 +328,7 @@ pub trait ResourceProviderFactory: Send + Sync {
 pub struct PluginRegistration {
     pub metadata: PluginRegistrationMetadata,
     handlers: BTreeMap<CapabilityId, Arc<dyn CapabilityHandler>>,
+    operation_handlers: BTreeMap<CapabilityId, Arc<dyn CapabilityOperationHandler>>,
     context_factories:
         BTreeMap<CapabilityId, Arc<dyn CapabilityContextContributionFactory>>,
     resource_factories:
@@ -300,6 +349,7 @@ impl PluginRegistration {
         Self {
             metadata,
             handlers: BTreeMap::new(),
+            operation_handlers: BTreeMap::new(),
             context_factories: BTreeMap::new(),
             resource_factories: BTreeMap::new(),
             role_action_handlers: BTreeMap::new(),
@@ -317,6 +367,21 @@ impl PluginRegistration {
     ) -> Result<(), KernelError> {
         if self
             .handlers
+            .insert(capability_id.clone(), handler)
+            .is_some()
+        {
+            return Err(KernelError::DuplicateCapability { capability_id });
+        }
+        Ok(())
+    }
+
+    pub fn add_capability_operation_handler(
+        &mut self,
+        capability_id: CapabilityId,
+        handler: Arc<dyn CapabilityOperationHandler>,
+    ) -> Result<(), KernelError> {
+        if self
+            .operation_handlers
             .insert(capability_id.clone(), handler)
             .is_some()
         {
@@ -452,6 +517,10 @@ impl PluginRegistration {
         self.handlers.keys().cloned().collect()
     }
 
+    pub fn operation_handler_ids(&self) -> BTreeSet<CapabilityId> {
+        self.operation_handlers.keys().cloned().collect()
+    }
+
     pub fn context_factory_ids(&self) -> BTreeSet<CapabilityId> {
         self.context_factories.keys().cloned().collect()
     }
@@ -492,6 +561,12 @@ impl PluginRegistration {
         &self,
     ) -> impl Iterator<Item = (&CapabilityId, &Arc<dyn CapabilityHandler>)> {
         self.handlers.iter()
+    }
+
+    pub(crate) fn operation_handlers(
+        &self,
+    ) -> impl Iterator<Item = (&CapabilityId, &Arc<dyn CapabilityOperationHandler>)> {
+        self.operation_handlers.iter()
     }
 
     pub(crate) fn context_factories(
@@ -673,6 +748,19 @@ impl PluginRegistration {
             return Err(KernelError::UndeclaredCapabilityHandler {
                 mount_id: metadata.mount_id.clone(),
                 capability_id: capability_id.clone(),
+            });
+        }
+        let actual_operation_handlers = self.operation_handler_ids();
+        if let Some(capability_id) = actual_operation_handlers
+            .difference(&expected_handlers)
+            .next()
+        {
+            return Err(KernelError::InvalidRegistration {
+                mount_id: metadata.mount_id.clone(),
+                reason: format!(
+                    "operation handler {} is not a declared direct Tool capability",
+                    capability_id.as_ref()
+                ),
             });
         }
         let role_members = manifest

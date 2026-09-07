@@ -22,8 +22,8 @@ use nomifun_agent_contracts::{
 };
 use nomifun_agent_kernel::{
     AgentPresetCompiler, CapabilityAccessRequest, CapabilityInvocationRequest,
-    CompileRequest, CompilerEnvironment, InMemoryPluginStatePersistence,
-    KernelRegistry, MaterializationPolicy, PluginStatePersistence,
+    CapabilityOperationRequest, CompileRequest, CompilerEnvironment,
+    InMemoryPluginStatePersistence, KernelRegistry, MaterializationPolicy, PluginStatePersistence,
     SessionCapabilityState,
 };
 use nomifun_js_host::{
@@ -39,6 +39,8 @@ use tempfile::TempDir;
 const VERSION: &str = "1.0.0";
 const TOOL_ID: &str = "fixture.tool";
 const TOOL_ACTION: &str = "fixture.tool.invoke";
+const UI_TOOL_ID: &str = "fixture.ui";
+const UI_TOOL_ACTION: &str = "fixture.ui.invoke";
 const RELEASE_COUNT_ACTION: &str = "fixture.release_count";
 const CONTEXT_ID: &str = "fixture.context";
 const RESOURCE_ID: &str = "fixture.resource";
@@ -74,7 +76,11 @@ fn capability(
         CapabilityKind::Tool => CapabilityContributions {
             actions: vec![
                 CapabilityActionDescriptor {
-                    action_id: ActionId::from(TOOL_ACTION),
+                    action_id: ActionId::from(if id == UI_TOOL_ID {
+                        UI_TOOL_ACTION
+                    } else {
+                        TOOL_ACTION
+                    }),
                     input_schema: CanonicalSchemaRef::from(
                         "schema://fixture/tool-input@1",
                     ),
@@ -95,7 +101,12 @@ fn capability(
                     effect_class: EffectClass::Pure,
                     presentation: ToolPresentationKind::Hidden,
                 },
-            ],
+            ]
+            .into_iter()
+            .filter(|action| {
+                id != UI_TOOL_ID || action.action_id.as_ref() == UI_TOOL_ACTION
+            })
+            .collect(),
             ..Default::default()
         },
         CapabilityKind::ContextContributor => CapabilityContributions {
@@ -121,7 +132,13 @@ fn capability(
         conflicts: Vec::new(),
         supported_surfaces: capability_surface_declarations(
             ["desktop"],
-            [CapabilityConsumer::Agent],
+            if id == UI_TOOL_ID {
+                vec![CapabilityConsumer::Ui]
+            } else if id == TOOL_ID {
+                vec![CapabilityConsumer::Agent, CapabilityConsumer::Gateway]
+            } else {
+                vec![CapabilityConsumer::Agent]
+            },
         ),
         requires_runtime_features: Vec::new(),
         supported_platforms: vec![PlatformConstraint::Any],
@@ -173,6 +190,12 @@ fn artifact_with_variant(
                         &package,
                         TOOL_ID,
                         "fixture.tool.contribution",
+                        CapabilityKind::Tool,
+                    ),
+                    capability(
+                        &package,
+                        UI_TOOL_ID,
+                        "fixture.ui.contribution",
                         CapabilityKind::Tool,
                     ),
                     capability(
@@ -490,6 +513,86 @@ async fn one_kernel_registry_dispatches_javascript_tool_context_and_resource() {
         .unwrap();
     assert_eq!(invoked.0["input"]["value"], 7);
     assert_eq!(invoked.0["contributionId"], "fixture.tool.contribution");
+
+    let gateway_lock = materialized
+        .capability(&CapabilityId::from(TOOL_ID))
+        .unwrap()
+        .operation_lock(CapabilityConsumer::Gateway);
+    let gateway_invoked = registry
+        .invoke_operation(CapabilityOperationRequest {
+            principal: owner.clone(),
+            operation_id: OperationId::from("fixture-gateway-operation"),
+            idempotency_key: IdempotencyKey::from("fixture-gateway-key"),
+            correlation_id: CorrelationId::from("fixture-gateway-correlation"),
+            operation_lock: gateway_lock.clone(),
+            action_id: ActionId::from(TOOL_ACTION),
+            resource_bindings: Vec::new(),
+            state_scope_key: ScopeKey::from("gateway:fixture"),
+            input: StrictJsonValue(json!({"surface": "gateway"})),
+        })
+        .await
+        .unwrap();
+    assert_eq!(gateway_invoked.0["input"]["surface"], "gateway");
+    assert!(
+        registry
+            .invoke_operation(CapabilityOperationRequest {
+                principal: owner.clone(),
+                operation_id: OperationId::from("fixture-agent-bypass-operation"),
+                idempotency_key: IdempotencyKey::from("fixture-agent-bypass-key"),
+                correlation_id: CorrelationId::from(
+                    "fixture-agent-bypass-correlation",
+                ),
+                operation_lock: materialized
+                    .capability(&CapabilityId::from(TOOL_ID))
+                    .unwrap()
+                    .operation_lock(CapabilityConsumer::Agent),
+                action_id: ActionId::from(TOOL_ACTION),
+                resource_bindings: Vec::new(),
+                state_scope_key: ScopeKey::from("agent:bypass"),
+                input: StrictJsonValue(json!({})),
+            })
+            .await
+            .is_err()
+    );
+
+    let ui_capability = materialized
+        .capability(&CapabilityId::from(UI_TOOL_ID))
+        .unwrap();
+    assert!(!ui_capability.manifest.supports_consumer(CapabilityConsumer::Agent));
+    let ui_invoked = registry
+        .invoke_operation(CapabilityOperationRequest {
+            principal: owner.clone(),
+            operation_id: OperationId::from("fixture-ui-operation"),
+            idempotency_key: IdempotencyKey::from("fixture-ui-key"),
+            correlation_id: CorrelationId::from("fixture-ui-correlation"),
+            operation_lock: ui_capability.operation_lock(CapabilityConsumer::Ui),
+            action_id: ActionId::from(UI_TOOL_ACTION),
+            resource_bindings: Vec::new(),
+            state_scope_key: ScopeKey::from("ui:fixture"),
+            input: StrictJsonValue(json!({"surface": "ui"})),
+        })
+        .await
+        .unwrap();
+    assert_eq!(ui_invoked.0["contributionId"], "fixture.ui.contribution");
+
+    let mut stale_lock = gateway_lock;
+    stale_lock.target_artifact_digest = Some(DigestHex::from("f".repeat(64)));
+    assert!(
+        registry
+            .invoke_operation(CapabilityOperationRequest {
+                principal: owner.clone(),
+                operation_id: OperationId::from("fixture-stale-operation"),
+                idempotency_key: IdempotencyKey::from("fixture-stale-key"),
+                correlation_id: CorrelationId::from("fixture-stale-correlation"),
+                operation_lock: stale_lock,
+                action_id: ActionId::from(TOOL_ACTION),
+                resource_bindings: Vec::new(),
+                state_scope_key: ScopeKey::from("gateway:fixture"),
+                input: StrictJsonValue(json!({})),
+            })
+            .await
+            .is_err()
+    );
 
     let first = registry
         .acquire_resource(

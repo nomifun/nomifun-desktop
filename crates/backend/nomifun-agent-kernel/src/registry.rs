@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
 use nomifun_agent_contracts::{
-    ActionId, CanonicalSchemaRef, CapabilityId, CapabilityKind, DigestHex, ExecutionRoleId,
-    PackageRef, PluginMountId, ResolvedRoleProviderLock, ResourceBindingId, ScopeKey,
-    TypedResourceBinding,
+    ActionId, CanonicalSchemaRef, CapabilityConsumer, CapabilityId, CapabilityKind, DigestHex,
+    ExecutionRoleId, PackageRef, PluginMountId, ResolvedRoleProviderLock, ResourceBindingId,
+    ScopeKey, TypedResourceBinding,
 };
 
 use crate::service::build_service_bindings;
@@ -12,12 +12,13 @@ use crate::{
     ActiveCapabilitySetSnapshot, CapabilityAccessRequest,
     CapabilityContextContributionFactory, CapabilityContextContributionRequest,
     CapabilityHandler, CapabilityInvocationContext, CapabilityInvocationRequest,
+    CapabilityOperationHandler, CapabilityOperationInvocationContext, CapabilityOperationRequest,
     CapabilityResourceProviderFactory, CapabilityResourceProviderRequest,
     CompiledSnapshot, ContextContributionFactory, ContextContributionRequest,
     ContextContributionResult, DeclaredServiceView, KernelError, MaterializationPolicy,
     MaterializedRegistry, Materializer, PluginRegistration, PluginStateError,
     PluginStateHandle, PluginStatePersistence, PluginStateStore, ProviderMountContext,
-    ResolvedCapabilityContext, ResolvedRoleMemberContext, ResourceHandle,
+    ResolvedCapabilityContext, ResolvedCapabilityOperationContext, ResolvedRoleMemberContext, ResourceHandle,
     ResourceProviderFactory, ResourceProviderRequest, ResourceProviderResult,
     RoleMemberAdmission, RoleMemberInvocationRequest, RoleToolHandler,
     RoleToolInvocationContext, RoleToolOperationRequest, ThinAuthority,
@@ -27,6 +28,12 @@ use crate::{
 struct HandlerBinding {
     mount_id: PluginMountId,
     handler: Arc<dyn CapabilityHandler>,
+}
+
+#[derive(Clone)]
+struct OperationHandlerBinding {
+    mount_id: PluginMountId,
+    handler: Arc<dyn CapabilityOperationHandler>,
 }
 
 #[derive(Clone)]
@@ -45,6 +52,7 @@ struct ResourceFactoryBinding {
 struct PublishedRegistry {
     materialized: Arc<MaterializedRegistry>,
     handlers: BTreeMap<CapabilityId, HandlerBinding>,
+    operation_handlers: BTreeMap<CapabilityId, OperationHandlerBinding>,
     context_factories: BTreeMap<CapabilityId, ContextFactoryBinding>,
     resource_factories: BTreeMap<CapabilityId, ResourceFactoryBinding>,
     role_handlers:
@@ -73,6 +81,7 @@ impl PublishedRegistry {
         Self {
             materialized: Arc::new(MaterializedRegistry::empty()),
             handlers: BTreeMap::new(),
+            operation_handlers: BTreeMap::new(),
             context_factories: BTreeMap::new(),
             resource_factories: BTreeMap::new(),
             role_handlers: BTreeMap::new(),
@@ -175,6 +184,7 @@ impl KernelRegistry {
         )?;
 
         let mut handlers = BTreeMap::new();
+        let mut operation_handlers = BTreeMap::new();
         let mut context_factories = BTreeMap::new();
         let mut resource_factories = BTreeMap::new();
         let mut role_handlers = BTreeMap::new();
@@ -190,6 +200,22 @@ impl KernelRegistry {
                     .insert(
                         capability_id.clone(),
                         HandlerBinding {
+                            mount_id: registration.metadata.mount_id.clone(),
+                            handler: Arc::clone(handler),
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err(KernelError::DuplicateCapability {
+                        capability_id: capability_id.clone(),
+                    });
+                }
+            }
+            for (capability_id, handler) in registration.operation_handlers() {
+                if operation_handlers
+                    .insert(
+                        capability_id.clone(),
+                        OperationHandlerBinding {
                             mount_id: registration.metadata.mount_id.clone(),
                             handler: Arc::clone(handler),
                         },
@@ -357,6 +383,7 @@ impl KernelRegistry {
         let next = Arc::new(PublishedRegistry {
             materialized: Arc::clone(&materialized),
             handlers,
+            operation_handlers,
             context_factories,
             resource_factories,
             role_handlers,
@@ -522,6 +549,105 @@ impl KernelRegistry {
             )
         };
         handler.invoke(context, request.input).await
+    }
+
+    /// Invoke one ordinary Tool contribution from a non-Agent consumer.
+    ///
+    /// The operation lock is source-exact and remains valid across unrelated
+    /// Registry publications. Any change to the selected contribution, Mount,
+    /// contract, or target Artifact fails before the handler is called.
+    pub async fn invoke_operation(
+        &self,
+        request: CapabilityOperationRequest,
+    ) -> Result<nomifun_agent_contracts::StrictJsonValue, KernelError> {
+        request
+            .operation_lock
+            .validate()
+            .map_err(|error| KernelError::InvalidRegistration {
+                mount_id: request
+                    .operation_lock
+                    .contribution
+                    .mount_id
+                    .clone()
+                    .unwrap_or_else(|| PluginMountId::from("missing")),
+                reason: error.to_string(),
+            })?;
+        if request.operation_lock.consumer == CapabilityConsumer::Agent {
+            return Err(KernelError::CapabilityExecution {
+                reason: "Agent consumer must use Snapshot-bound invocation".to_owned(),
+            });
+        }
+        let (handler, context) = {
+            let published = self
+                .published
+                .read()
+                .map_err(|_| KernelError::RegistryPoisoned)?;
+            let materialized = published
+                .materialized
+                .capability(&request.operation_lock.capability.id)
+                .ok_or_else(|| KernelError::CapabilityNotMaterialized {
+                    capability_id: request.operation_lock.capability.id.clone(),
+                    version: request.operation_lock.capability.version.clone(),
+                })?;
+            validate_operation_lock(materialized, &request)?;
+            let binding = published
+                .operation_handlers
+                .get(&materialized.manifest.id)
+                .ok_or_else(|| KernelError::MissingCapabilityHandler {
+                    mount_id: materialized.mount_id.clone(),
+                    capability_id: materialized.manifest.id.clone(),
+                })?;
+            if binding.mount_id != materialized.mount_id {
+                return capability_provenance_drift(
+                    &materialized.manifest.id,
+                    "operation handler binding does not match the exact Mount",
+                );
+            }
+            let state = published
+                .state_handles
+                .get(&binding.mount_id)
+                .cloned()
+                .ok_or(KernelError::RegistryPoisoned)?;
+            let services = published
+                .service_views
+                .get(&binding.mount_id)
+                .cloned()
+                .unwrap_or_default();
+            let metadata = published
+                .materialized
+                .plugins
+                .get(&binding.mount_id)
+                .ok_or(KernelError::RegistryPoisoned)?;
+            (
+                Arc::clone(&binding.handler),
+                ResolvedCapabilityOperationContext {
+                    operation_lock: request.operation_lock.clone(),
+                    principal: request.principal.clone(),
+                    operation_id: request.operation_id.clone(),
+                    correlation_id: request.correlation_id.clone(),
+                    registry_generation: published.materialized.generation,
+                    registry_digest: published.materialized.registry_digest.clone(),
+                    resource_bindings: request.resource_bindings.clone(),
+                    state_scope_key: request.state_scope_key.clone(),
+                    mount: ProviderMountContext {
+                        identity: metadata.context.identity.clone(),
+                        config: metadata.context.validated_config.clone(),
+                        state,
+                        services,
+                    },
+                },
+            )
+        };
+        handler
+            .invoke(
+                CapabilityOperationInvocationContext {
+                    context,
+                    action_id: request.action_id,
+                    idempotency_key: request.idempotency_key,
+                },
+                request.input,
+            )
+            .await
     }
 
     /// Assemble a ContextContributor selected by an Agent Snapshot.
@@ -1278,6 +1404,116 @@ fn resolve_direct_capability_context(
             services,
         },
     })
+}
+
+fn validate_operation_lock(
+    materialized: &crate::MaterializedCapability,
+    request: &CapabilityOperationRequest,
+) -> Result<(), KernelError> {
+    let capability_id = &materialized.manifest.id;
+    if materialized.manifest.kind != CapabilityKind::Tool {
+        return Err(KernelError::CapabilityExecution {
+            reason: format!(
+                "capability {} is not a Tool",
+                capability_id.as_ref()
+            ),
+        });
+    }
+    if request.operation_lock.capability.id != *capability_id
+        || request.operation_lock.capability.version != materialized.manifest.version
+        || request.operation_lock.contribution != materialized.contribution_lock
+        || request.operation_lock.target_artifact_digest.as_ref()
+            != Some(&materialized.target_artifact_digest)
+    {
+        return capability_provenance_drift(
+            capability_id,
+            "operation lock differs from the current exact contribution target",
+        );
+    }
+    if !materialized
+        .manifest
+        .supports_consumer(request.operation_lock.consumer)
+    {
+        return Err(KernelError::CapabilityExecution {
+            reason: format!(
+                "capability {} does not support consumer {:?}",
+                capability_id.as_ref(),
+                request.operation_lock.consumer
+            ),
+        });
+    }
+    if !materialized
+        .manifest
+        .contributions
+        .actions
+        .iter()
+        .any(|action| action.action_id == request.action_id)
+    {
+        return Err(KernelError::ActionNotDeclared {
+            capability_id: capability_id.clone(),
+            action_id: request.action_id.clone(),
+        });
+    }
+    if request.principal.principal_kind.trim().is_empty()
+        || request.principal.principal_id.trim().is_empty()
+        || request.operation_id.as_ref().trim().is_empty()
+        || request.idempotency_key.as_ref().trim().is_empty()
+        || request.correlation_id.as_ref().trim().is_empty()
+        || request.state_scope_key.as_ref().trim().is_empty()
+    {
+        return Err(KernelError::CapabilityExecution {
+            reason: "operation identity, principal, correlation, and state scope are required"
+                .to_owned(),
+        });
+    }
+    let mut binding_ids = std::collections::BTreeSet::new();
+    let mut resource_kinds = std::collections::BTreeSet::new();
+    for binding in &request.resource_bindings {
+        if !binding_ids.insert(binding.binding_id.clone()) {
+            return Err(KernelError::UnexpectedResourceBinding {
+                capability_id: capability_id.clone(),
+                binding_id: binding.binding_id.clone(),
+                resource_kind: binding.resource_kind.as_ref().to_owned(),
+            });
+        }
+        if binding.owner_id != request.principal.principal_id {
+            return Err(KernelError::ResourceOwnerMismatch {
+                binding_id: binding.binding_id.clone(),
+            });
+        }
+        resource_kinds.insert(binding.resource_kind.clone());
+    }
+    if resource_kinds != materialized.manifest.contributions.resource_kinds {
+        if let Some(missing) = materialized
+            .manifest
+            .contributions
+            .resource_kinds
+            .difference(&resource_kinds)
+            .next()
+        {
+            return Err(KernelError::CapabilityResourceNotBound {
+                capability_id: capability_id.clone(),
+                resource_kind: missing.as_ref().to_owned(),
+            });
+        }
+        let unexpected = request
+            .resource_bindings
+            .iter()
+            .find(|binding| {
+                !materialized
+                    .manifest
+                    .contributions
+                    .resource_kinds
+                    .contains(&binding.resource_kind)
+            })
+            .ok_or(KernelError::RegistryPoisoned)?;
+        return Err(KernelError::UnexpectedResourceBinding {
+            capability_id: capability_id.clone(),
+            binding_id: unexpected.binding_id.clone(),
+            resource_kind: unexpected.resource_kind.as_ref().to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn capability_provenance_drift<T>(
