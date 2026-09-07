@@ -7,7 +7,7 @@ use nomifun_agent_contracts::{
     CredentialSlotBinding, DigestHex, PackageId, PackageRef, PluginHostCommitFence,
     PluginHostContributionRef, PluginHostTargetLock, PluginMountId,
     PluginMountRuntimeContext, PluginStateHandleDescriptor, PluginStateMethod,
-    ResourceBindingId, ResourceKind, StrictJsonValue, ValidatedPluginConfig,
+    JavaScriptHostKind, ResourceBindingId, ResourceKind, StrictJsonValue, ValidatedPluginConfig,
     VersionString,
 };
 use nomifun_js_host::{
@@ -89,6 +89,27 @@ async fn supervisor_with_host(
         },
     })
     .expect("Host configuration is valid")
+}
+
+async fn candidate_test_supervisor(
+    request_timeout: Duration,
+) -> ExtensionHostSupervisor {
+    let (node_executable, runtime) = runtime().await;
+    ExtensionHostSupervisor::candidate_test(JavaScriptHostConfig {
+        node_executable,
+        runtime,
+        host_module: fixture("../../assets/extension-host.mjs")
+            .canonicalize()
+            .expect("bundled Host asset exists"),
+        limits: JavaScriptHostLimits {
+            hello_timeout: Duration::from_secs(5),
+            request_timeout,
+            shutdown_timeout: Duration::from_secs(5),
+            max_frame_bytes: 1024 * 1024,
+            command_queue_capacity: 32,
+        },
+    })
+    .expect("Candidate Test Host configuration is valid")
 }
 
 async fn module(target: PluginHostTargetLock) -> ImmutablePluginModule {
@@ -261,6 +282,48 @@ async fn demand_zero_then_first_mount_starts_and_two_mounts_join_lazily() {
         }
     ));
     assert_eq!(supervisor.process_count(), 0);
+}
+
+#[tokio::test]
+async fn candidate_test_role_uses_an_isolated_generation_and_exact_protocol() {
+    let shared = supervisor(Duration::from_secs(2)).await;
+    let candidate = candidate_test_supervisor(Duration::from_secs(2)).await;
+    let temp = TempDir::new().unwrap();
+
+    assert_eq!(shared.host_kind(), JavaScriptHostKind::SharedExtension);
+    assert_eq!(candidate.host_kind(), JavaScriptHostKind::CandidateTest);
+    let shared_generation = load(&shared, &temp, "mount-shared", 'a').await;
+    let candidate_generation = load(&candidate, &temp, "mount-candidate", 'b').await;
+    let JavaScriptHostState::Running {
+        process_id: shared_process,
+        ..
+    } = shared.state()
+    else {
+        panic!("shared Host must be running");
+    };
+    let JavaScriptHostState::Running {
+        process_id: candidate_process,
+        ..
+    } = candidate.state()
+    else {
+        panic!("Candidate Test Host must be running");
+    };
+    assert_ne!(shared_process, candidate_process);
+
+    let value = candidate
+        .invoke(
+            contribution(target("mount-candidate", 'b')),
+            ActionId::from("echo"),
+            StrictJsonValue(json!({"candidate": true})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(value.0["input"]["candidate"], true);
+
+    candidate.stop_generation(candidate_generation).await.unwrap();
+    assert_eq!(candidate.process_count(), 0);
+    assert_eq!(shared.process_count(), 1);
+    shared.stop_generation(shared_generation).await.unwrap();
 }
 
 #[tokio::test]

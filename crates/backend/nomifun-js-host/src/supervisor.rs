@@ -338,6 +338,7 @@ pub struct JavaScriptResourceHandle {
 pub struct ExtensionHostSupervisor {
     config: JavaScriptHostConfig,
     contract: PluginN1ContractManifest,
+    host_kind: JavaScriptHostKind,
     services: Arc<dyn ExtensionHostServices>,
     state: Mutex<SupervisorState>,
     public_state: watch::Sender<JavaScriptHostState>,
@@ -350,6 +351,7 @@ struct SupervisorState {
 
 #[derive(Clone)]
 struct GenerationHandle {
+    host_kind: JavaScriptHostKind,
     generation: u64,
     commands: mpsc::Sender<ActorCommand>,
     state: watch::Receiver<JavaScriptHostState>,
@@ -359,13 +361,44 @@ struct GenerationHandle {
 
 impl ExtensionHostSupervisor {
     pub fn new(config: JavaScriptHostConfig) -> Result<Self, JavaScriptHostError> {
-        Self::with_services(config, Arc::new(DenyExtensionHostServices))
+        Self::with_role_and_services(
+            config,
+            JavaScriptHostKind::SharedExtension,
+            Arc::new(DenyExtensionHostServices),
+        )
+    }
+
+    pub fn candidate_test(
+        config: JavaScriptHostConfig,
+    ) -> Result<Self, JavaScriptHostError> {
+        Self::with_role_and_services(
+            config,
+            JavaScriptHostKind::CandidateTest,
+            Arc::new(DenyExtensionHostServices),
+        )
     }
 
     pub fn with_services(
         config: JavaScriptHostConfig,
         services: Arc<dyn ExtensionHostServices>,
     ) -> Result<Self, JavaScriptHostError> {
+        Self::with_role_and_services(
+            config,
+            JavaScriptHostKind::SharedExtension,
+            services,
+        )
+    }
+
+    pub fn with_role_and_services(
+        config: JavaScriptHostConfig,
+        host_kind: JavaScriptHostKind,
+        services: Arc<dyn ExtensionHostServices>,
+    ) -> Result<Self, JavaScriptHostError> {
+        if host_kind == JavaScriptHostKind::Build {
+            return Err(JavaScriptHostError::InvalidConfiguration(
+                "Build Host uses the dedicated authoring supervisor".into(),
+            ));
+        }
         config.validate_paths()?;
         let contract = PluginN1ContractManifest::canonical();
         contract
@@ -375,6 +408,7 @@ impl ExtensionHostSupervisor {
         Ok(Self {
             config,
             contract,
+            host_kind,
             services,
             state: Mutex::new(SupervisorState {
                 next_generation: 0,
@@ -382,6 +416,10 @@ impl ExtensionHostSupervisor {
             }),
             public_state,
         })
+    }
+
+    pub fn host_kind(&self) -> JavaScriptHostKind {
+        self.host_kind
     }
 
     pub fn subscribe_state(&self) -> watch::Receiver<JavaScriptHostState> {
@@ -801,6 +839,7 @@ impl ExtensionHostSupervisor {
             generation,
             &self.config,
             &self.contract,
+            self.host_kind,
             Arc::clone(&self.services),
             self.public_state.clone(),
         )
@@ -833,7 +872,7 @@ impl GenerationHandle {
             protocol_version: VersionString::from(
                 JAVASCRIPT_HOST_PROTOCOL_VERSION,
             ),
-            host_kind: JavaScriptHostKind::SharedExtension,
+            host_kind: self.host_kind,
             host_generation: self.generation,
             request_id: request_id.clone(),
             direction: request.direction(),
@@ -945,6 +984,7 @@ enum PendingReply {
 }
 
 struct GenerationActor {
+    host_kind: JavaScriptHostKind,
     generation: u64,
     process_id: u32,
     process: ManagedChildProcess,
@@ -978,15 +1018,22 @@ async fn spawn_generation(
     generation: u64,
     config: &JavaScriptHostConfig,
     contract: &PluginN1ContractManifest,
+    host_kind: JavaScriptHostKind,
     services: Arc<dyn ExtensionHostServices>,
     public_state: watch::Sender<JavaScriptHostState>,
 ) -> Result<GenerationHandle, JavaScriptHostError> {
     verify_runtime(config).await?;
-    let supported_methods = contract.host_method_sets
-        [&JavaScriptHostKind::SharedExtension]
-        .clone();
+    let supported_methods = contract
+        .host_method_sets
+        .get(&host_kind)
+        .cloned()
+        .ok_or_else(|| {
+            JavaScriptHostError::InvalidConfiguration(
+                "selected JavaScript Host role is not in the N1 contract".into(),
+            )
+        })?;
     let bootstrap = serde_json::to_vec(&HostBootstrap {
-        host_kind: JavaScriptHostKind::SharedExtension,
+        host_kind,
         host_generation: generation,
         runtime: &config.runtime,
         supported_methods,
@@ -1054,7 +1101,7 @@ async fn spawn_generation(
             "{error}{detail}"
         )));
     }
-    if hello.host_kind != JavaScriptHostKind::SharedExtension
+    if hello.host_kind != host_kind
         || hello.host_generation != generation
         || hello.process_id != process_id
         || hello.runtime != config.runtime
@@ -1089,6 +1136,7 @@ async fn spawn_generation(
     let admission = Arc::new(RwLock::new(()));
 
     let actor = GenerationActor {
+        host_kind,
         generation,
         process_id,
         process,
@@ -1111,6 +1159,7 @@ async fn spawn_generation(
     tokio::spawn(actor.run());
 
     Ok(GenerationHandle {
+        host_kind,
         generation,
         commands: command_sender,
         state: state_rx,
@@ -1379,7 +1428,7 @@ impl GenerationActor {
                     protocol_version: VersionString::from(
                         JAVASCRIPT_HOST_PROTOCOL_VERSION,
                     ),
-                    host_kind: JavaScriptHostKind::SharedExtension,
+                    host_kind: self.host_kind,
                     host_generation: self.generation,
                     request_id: request_id.clone(),
                     direction: JavaScriptHostMessageDirection::HostToJavaScript,
@@ -1535,7 +1584,7 @@ impl GenerationActor {
                     protocol_version: VersionString::from(
                         JAVASCRIPT_HOST_PROTOCOL_VERSION,
                     ),
-                    host_kind: JavaScriptHostKind::SharedExtension,
+                    host_kind: self.host_kind,
                     host_generation: self.generation,
                     request_id: request.request_id.clone(),
                     response,

@@ -9,8 +9,11 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Extension, Json, Router};
 use nomifun_agent_contracts::{
-    CanonicalErrorCode, CapabilityConsumer, CredentialId, CredentialSlotBinding, DigestHex,
-    PluginHostCommitFence, PluginMountId, StrictJsonValue, ValidatedPluginConfig,
+    CANDIDATE_TEST_CONTRACT_VERSION, CandidateTestCredentialMode, CandidateTestOutcome,
+    CandidateTestReceipt, CandidateTestReceiptId, CanonicalErrorCode, CapabilityConsumer,
+    CredentialId, CredentialSlotBinding, DigestHex, JAVASCRIPT_HOST_PROTOCOL_VERSION,
+    JAVASCRIPT_SDK_CONTRACT_VERSION, PLUGIN_PACKAGE_PROFILE_VERSION, PluginHostCommitFence,
+    PluginMountId, PluginSourceLineage, StrictJsonValue, ValidatedPluginConfig,
 };
 use nomifun_agent_kernel::{KernelRegistry, PluginRegistration};
 use nomifun_agent_platform::KernelCatalogProvider;
@@ -26,7 +29,8 @@ use nomifun_api_types::{
 };
 use nomifun_auth::CurrentUser;
 use nomifun_db::{
-    ListPluginCredentialBindingsParams, PluginMountRow, SqlitePool,
+    ListPluginCredentialBindingsParams, PluginMountRow, PluginProjectRow,
+    PluginReadyCandidateRow, SqlitePool,
 };
 use nomifun_js_host::{
     ExtensionHostSupervisor, JavaScriptHostConfig,
@@ -46,10 +50,10 @@ use nomifun_plugin_service::{
     DbPluginRepositoryAdapter, FsPluginArtifactStore, FsPluginMountDataStore,
     FsPluginSourceStore,
     PluginApplicationService, PluginArtifactStorePort, PluginHostCoordinator,
-    PluginRegistryPublisher, PluginRepository, PluginRouterState,
+    CandidateTestOutput, PluginCandidateTestExecutor, PluginRegistryPublisher,
+    PluginRepository, PluginRouterState,
     PluginServiceDependencies, PluginServiceError, PluginServicePaths,
     SharedJsHostCoordinator, UnconfiguredPluginBuildExecutor,
-    UnconfiguredPluginCandidateTestExecutor,
     UnconfiguredPluginOperationCancellation,
 };
 use tokio::sync::{Mutex, RwLock};
@@ -59,6 +63,12 @@ const AGENT_EXECUTOR_UNAVAILABLE: &str = "CAPABILITY_UNAVAILABLE";
 const PLUGIN_PLATFORM_DIRECTORY: &str = "plugin-platform";
 const PLUGIN_AUTHORING_DIRECTORY: &str = "authoring";
 const PLUGIN_MOUNT_DATA_DIRECTORY: &str = "plugin-mount-data";
+const PLUGIN_CANDIDATE_TEST_DIRECTORY: &str = "candidate-tests";
+
+struct DiscoveredPluginHosts {
+    shared: Arc<ExtensionHostSupervisor>,
+    candidate_test_config: JavaScriptHostConfig,
+}
 
 pub(crate) async fn build_nomi_core_plugin_state(
     pool: SqlitePool,
@@ -78,7 +88,8 @@ pub(crate) async fn build_nomi_core_plugin_state(
         &platform_root,
         ArtifactStoreLimits::default(),
     )?);
-    let host = discover_shared_host(&platform_root).await;
+    let hosts = discover_plugin_hosts(&platform_root).await;
+    let host = hosts.as_ref().map(|hosts| Arc::clone(&hosts.shared));
     let publisher = Arc::new(NomiCorePluginRegistryPublisher {
         kernel,
         catalog,
@@ -96,6 +107,17 @@ pub(crate) async fn build_nomi_core_plugin_state(
         Some(host) => Arc::new(SharedJsHostCoordinator::new(host)),
         None => Arc::new(UnavailablePluginHostCoordinator),
     };
+    let tester: Arc<dyn PluginCandidateTestExecutor> = match hosts {
+        Some(hosts) => Arc::new(NomiCorePluginCandidateTestExecutor {
+            repository: Arc::clone(&repository),
+            artifacts: Arc::clone(&artifacts),
+            host_config: hosts.candidate_test_config,
+            candidate_test_root: platform_root.join(PLUGIN_CANDIDATE_TEST_DIRECTORY),
+        }),
+        None => Arc::new(
+            nomifun_plugin_service::UnconfiguredPluginCandidateTestExecutor,
+        ),
+    };
     let service = Arc::new(PluginApplicationService::new(
         PluginServiceDependencies {
             repository: repository as Arc<dyn PluginRepository>,
@@ -104,7 +126,7 @@ pub(crate) async fn build_nomi_core_plugin_state(
             registry: publisher as Arc<dyn PluginRegistryPublisher>,
             mutation_coordinator: Arc::new(OwnerMutationCoordinator::new()),
             builder: Arc::new(UnconfiguredPluginBuildExecutor),
-            tester: Arc::new(UnconfiguredPluginCandidateTestExecutor),
+            tester,
             operation_cancellation: Arc::new(
                 UnconfiguredPluginOperationCancellation,
             ),
@@ -490,9 +512,9 @@ fn require_route_id(
     }
 }
 
-async fn discover_shared_host(
+async fn discover_plugin_hosts(
     platform_root: &Path,
-) -> Option<Arc<ExtensionHostSupervisor>> {
+) -> Option<DiscoveredPluginHosts> {
     let resolution = match NodeRuntimeResolver::default()
         .resolve(NodeDiscoveryRequest::default())
         .await
@@ -528,12 +550,16 @@ async fn discover_shared_host(
             return None;
         }
     };
-    match ExtensionHostSupervisor::new(JavaScriptHostConfig::for_host_module(
+    let config = JavaScriptHostConfig::for_host_module(
         executable_path,
         runtime,
         host_module,
-    )) {
-        Ok(host) => Some(Arc::new(host)),
+    );
+    match ExtensionHostSupervisor::new(config.clone()) {
+        Ok(host) => Some(DiscoveredPluginHosts {
+            shared: Arc::new(host),
+            candidate_test_config: config,
+        }),
         Err(error) => {
             tracing::warn!(%error, "Plugin shared JavaScript Host is unavailable");
             None
@@ -550,6 +576,208 @@ impl PluginHostCoordinator for UnavailablePluginHostCoordinator {
         _mount_id: &str,
     ) -> Result<PluginHostCommitFence, PluginServiceError> {
         Ok(PluginHostCommitFence::NotResident)
+    }
+}
+
+struct CandidateTestDataGuard {
+    path: PathBuf,
+}
+
+impl CandidateTestDataGuard {
+    fn allocate(root: &Path, candidate_id: &str) -> Result<Self, PluginServiceError> {
+        std::fs::create_dir_all(root).map_err(|error| {
+            PluginServiceError::integration(format!(
+                "cannot create Candidate Test data root {}: {error}",
+                root.display()
+            ))
+        })?;
+        let root = std::fs::canonicalize(root).map_err(|error| {
+            PluginServiceError::integration(format!(
+                "cannot canonicalize Candidate Test data root {}: {error}",
+                root.display()
+            ))
+        })?;
+        let path = root.join(format!("{candidate_id}-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir(&path).map_err(|error| {
+            PluginServiceError::integration(format!(
+                "cannot allocate Candidate Test data directory {}: {error}",
+                path.display()
+            ))
+        })?;
+        let path = std::fs::canonicalize(&path).map_err(|error| {
+            PluginServiceError::integration(format!(
+                "cannot canonicalize Candidate Test data directory {}: {error}",
+                path.display()
+            ))
+        })?;
+        if path.parent() != Some(root.as_path()) {
+            return Err(PluginServiceError::conflict(
+                "Candidate Test data directory escaped its managed root",
+            ));
+        }
+        Ok(Self { path })
+    }
+}
+
+impl Drop for CandidateTestDataGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+struct NomiCorePluginCandidateTestExecutor {
+    repository: Arc<DbPluginRepositoryAdapter>,
+    artifacts: Arc<FsPluginArtifactStore>,
+    host_config: JavaScriptHostConfig,
+    candidate_test_root: PathBuf,
+}
+
+#[async_trait]
+impl PluginCandidateTestExecutor for NomiCorePluginCandidateTestExecutor {
+    async fn test(
+        &self,
+        project: &PluginProjectRow,
+        candidate: &PluginReadyCandidateRow,
+        request: &TestPluginCandidateRequest,
+    ) -> Result<CandidateTestOutput, PluginServiceError> {
+        let artifact_row = self
+            .repository
+            .get_artifact(&candidate.artifact_digest)
+            .await?
+            .ok_or_else(|| PluginServiceError::not_found("Candidate Test Artifact"))?;
+        self.artifacts.verify(&artifact_row).await?;
+        let stored = self
+            .artifacts
+            .store()
+            .load(&DigestHex::from(candidate.artifact_digest.clone()))?;
+        if stored.artifact.artifact_id.as_ref() != candidate.artifact_id
+            || stored.artifact.artifact_digest.as_ref() != candidate.artifact_digest
+            || stored.artifact.manifest.payload.package.package_id.as_ref()
+                != project.package_id
+        {
+            return Err(PluginServiceError::stale(
+                "Candidate Test Artifact differs from the exact Project Candidate",
+            ));
+        }
+        let manifest = &stored.artifact.manifest.payload;
+        let (mount_id, config_revision, config_value) =
+            match project.linked_mount_id.as_deref() {
+                Some(mount_id) => {
+                    let mount = self
+                        .repository
+                        .get_mount(mount_id)
+                        .await?
+                        .ok_or_else(|| {
+                            PluginServiceError::not_found(
+                                "Candidate Test linked Mount",
+                            )
+                        })?;
+                    if u64::try_from(mount.config_revision).ok()
+                        != Some(request.expected_config_revision)
+                    {
+                        return Err(PluginServiceError::stale(
+                            "Candidate Test config revision changed",
+                        ));
+                    }
+                    let value = serde_json::from_str(&mount.config_json).map_err(|error| {
+                        PluginServiceError::integration(format!(
+                            "persisted Candidate Test config is invalid JSON: {error}"
+                        ))
+                    })?;
+                    (
+                        PluginMountId::from(mount.mount_id),
+                        request.expected_config_revision,
+                        value,
+                    )
+                }
+                None => (
+                    PluginMountId::from(uuid::Uuid::now_v7().to_string()),
+                    0,
+                    serde_json::json!({}),
+                ),
+            };
+        let data = CandidateTestDataGuard::allocate(
+            &self.candidate_test_root,
+            &candidate.candidate_id,
+        )?;
+        let config_schema_digest = nomifun_agent_contracts::digest_payload(
+            &manifest.package.config_schema,
+        )
+        .map_err(|error| PluginServiceError::invalid(error.to_string()))?;
+        let adapter = JsKernelPluginAdapter::new(PluginPackageInput {
+            artifact: stored.artifact,
+            mount_id,
+            package_root: stored.package_root,
+            config: ValidatedPluginConfig {
+                schema_digest: config_schema_digest,
+                config_revision,
+                value: StrictJsonValue(config_value),
+            },
+            credential_bindings: Vec::new(),
+            data_dir: data.path.clone(),
+        })
+        .map_err(|error| {
+            PluginServiceError::integration(format!(
+                "Candidate Test adapter rejected the Artifact: {error}"
+            ))
+        })?;
+        let host = ExtensionHostSupervisor::candidate_test(self.host_config.clone())
+            .map_err(|error| {
+                PluginServiceError::integration(format!(
+                    "Candidate Test Host configuration failed: {error}"
+                ))
+            })?;
+        let generation = host.load_mount(adapter.mount_demand()).await?;
+        let requires_managed_input = {
+            let contributions = &adapter.manifest().package.contributions;
+            !contributions.capabilities.is_empty()
+                || !contributions.skills.is_empty()
+                || !contributions.mcp_tools.is_empty()
+        };
+        host.stop_generation(generation).await?;
+        let source_lineage = match (
+            candidate.source_snapshot_digest.as_deref(),
+            candidate.dependency_lock_digest.as_deref(),
+        ) {
+            (Some(source), Some(lock)) => PluginSourceLineage::Managed {
+                source_snapshot_digest: source.to_owned().into(),
+                dependency_lock_digest: lock.to_owned().into(),
+                build_profile_version: PLUGIN_PACKAGE_PROFILE_VERSION.into(),
+            },
+            (None, None) => PluginSourceLineage::RuntimeOnly,
+            _ => {
+                return Err(PluginServiceError::integration(
+                    "Candidate Test source lineage is incomplete",
+                ));
+            }
+        };
+        Ok(CandidateTestOutput {
+            receipt: CandidateTestReceipt {
+                receipt_id: CandidateTestReceiptId::from(
+                    uuid::Uuid::now_v7().to_string(),
+                ),
+                candidate_id: candidate.candidate_id.clone().into(),
+                candidate_digest: candidate.candidate_digest.clone().into(),
+                outcome: if requires_managed_input {
+                    CandidateTestOutcome::NeedsTestInput
+                } else {
+                    CandidateTestOutcome::Passed
+                },
+                runtime: self.host_config.runtime.clone(),
+                host_target: self.host_config.runtime.runtime_target.clone(),
+                host_contract_version: JAVASCRIPT_HOST_PROTOCOL_VERSION.into(),
+                javascript_sdk_contract_version: JAVASCRIPT_SDK_CONTRACT_VERSION.into(),
+                test_contract_version: CANDIDATE_TEST_CONTRACT_VERSION.into(),
+                source_lineage,
+                credential_mode: CandidateTestCredentialMode::None,
+                resolved_test_input_digest: request
+                    .resolved_test_input_digest
+                    .clone()
+                    .into(),
+                host_generation: generation,
+                issued_at_ms: nomifun_common::now_ms(),
+            },
+        })
     }
 }
 
@@ -1167,6 +1395,43 @@ mod tests {
             .await
             .unwrap();
         let candidate = project.ready.clone().unwrap();
+        let tested = state
+            .service
+            .test_candidate(
+                &owner_user_id,
+                TestPluginCandidateRequest {
+                    project_id: project.summary.project_id.clone(),
+                    expected_project_revision: project.summary.project_revision,
+                    expected_build_generation: project.summary.build_generation,
+                    candidate_id: candidate.candidate.candidate_id.clone(),
+                    expected_candidate_digest: candidate
+                        .candidate
+                        .candidate_digest
+                        .clone(),
+                    expected_config_revision: 0,
+                    expected_credential_bindings_revision: 0,
+                    resolved_test_input_digest: "9".repeat(64),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            tested.ready.as_ref().unwrap().test.status,
+            nomifun_api_types::PluginCandidateTestStatusDto::NeedsTestInput
+        );
+        assert!(
+            tested
+                .ready
+                .as_ref()
+                .unwrap()
+                .test
+                .runtime
+                .as_ref()
+                .is_some_and(|runtime| {
+                    !runtime.node_version.is_empty()
+                        && !runtime.runtime_target.is_empty()
+                })
+        );
         let library = state
             .service
             .list_library(&owner_user_id)

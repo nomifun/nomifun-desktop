@@ -6,7 +6,7 @@ const bootstrap = JSON.parse(
 );
 if (
   !bootstrap ||
-  bootstrap.host_kind !== "shared_extension" ||
+  !["shared_extension", "candidate_test"].includes(bootstrap.host_kind) ||
   !Number.isSafeInteger(bootstrap.host_generation) ||
   bootstrap.host_generation <= 0 ||
   !bootstrap.runtime ||

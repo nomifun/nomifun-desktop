@@ -167,6 +167,13 @@
    定向 14 tests、i18n Gate 与 production UI build 通过；Node Runtime Manager、
    Config/Credential 编辑、真实 Build/Test 可用态和 Desktop accessibility/视觉走查
    仍未完成，因此不得关闭。
+10. Candidate Test Host 已从 Shared Extension Host 物理分离：同一 Supervisor 基础设施
+    按 `shared_extension | candidate_test` 严格绑定 Hello role、request envelope 和
+    generation，但两者始终使用不同 Node 进程。NomiCore 的真实 Candidate Test executor
+    为每次测试分配一次性 dataDir、不注入生产 Credential、加载并激活 exact Artifact，
+    随后停止并证明测试进程树归零；有可调用 contribution 但尚无受管测试输入时记录
+    `needs_test_input`，不伪造 `passed`。JavaScript Host 14、Adapter 4 和 App publisher
+    E2E 均通过。
 
 ## W0：一期交接
 
@@ -189,7 +196,7 @@
 | ID | 状态 | Owner/写集 | 目标 | 依赖 | 最小验证 |
 | --- | --- | --- | --- | --- | --- |
 | `N1-1-01` | closed | Runtime lane；新 `nomifun-js-runtime/**` | Node PATH/手工/managed LTS probe、下载确认、fingerprint 与全局试切换 | `N1-0-02` | 12 tests；真实 PATH Node；official index/SHASUMS/zip containment；candidate validation |
-| `N1-1-02` | closed | Runtime lane；新 `nomifun-js-host/**` | lazy shared Extension Host、private IPC/Hello、watchdog、whole-tree cleanup、late-result fence | `N1-1-01` | Host 13；demand=0、crash/restart、child cleanup、quiescent fence、installed-path materialization |
+| `N1-1-02` | closed | Runtime lane；新 `nomifun-js-host/**` | lazy shared Extension Host、独立 Candidate Test Host、private IPC/Hello、watchdog、whole-tree cleanup、late-result fence | `N1-1-01` | Host 14；role-isolated process、demand=0、crash/restart、child cleanup、quiescent fence、installed-path materialization |
 | `N1-1-03` | closed | Kernel+Runtime 边界；`nomifun-js-kernel-adapter/**`、Kernel typed exports、Shared Host API | 普通 Plugin Tool/Context/Resource 的 Node proxy；N1 明确拒绝 Role Provider/Plugin Service | `N1-0-03`,`N1-1-02` | Host 13、Adapter 4、Kernel 23、Agent Platform 16；exact Artifact handle fence；无 Rust/Node 双 Registry |
 
 ## N1-2：Package 与数据生命周期
@@ -199,7 +206,7 @@
 | `N1-2-00` | closed | Artifact lane；`nomifun-plugin-platform/**` | directory/zip containment、canonical digest、immutable CAS staging/publish | `N1-0-02` | 9 tests；tamper/traversal/collision/cancel/idempotency |
 | `N1-2-01` | closed | DB lane；migration 067/068/070、新 repository | Artifact/Project/Candidate/current/previous/Mount/Operation/retained data、Project display metadata 与 Runtime selection schema | `N1-0-02` | `6debcb628` + 当前 070；Plugin repository 13、ID schema 20；fresh/restart/direct-SQL guards |
 | `N1-2-02` | closed | Plugin platform lane；migration 069、DB repository、owner mutation coordinator | Config、Credential slot binding、KV/CAS、stable `dataDir`、owner mutation lock | `N1-2-01`,`N1-1-02` | `a275ddd97`,`a16cfbeff`；repository 12 + ID/schema 20 + lifecycle 31 |
-| `N1-2-03` | in-progress | Plugin application-service/App lane；`nomifun-plugin-service/**`、`nomifun-app/src/router/plugin_platform.rs` | staging/containment/digest/install/replace/restore/uninstall/delete-data/project-delete 与真实 App/Kernel 组合 | `N1-2-01`,`N1-2-02` | service 12 + SQLite adapter 6 + App publisher E2E 1；真实 metadata/TestReceipt/Operation 投影已接；仍需真实 Build/Test、cancellation、N1-3 consumer 与安装版验证 |
+| `N1-2-03` | in-progress | Plugin application-service/App lane；`nomifun-plugin-service/**`、`nomifun-app/src/router/plugin_platform.rs` | staging/containment/digest/install/replace/restore/uninstall/delete-data/project-delete 与真实 App/Kernel 组合 | `N1-2-01`,`N1-2-02` | service 12 + SQLite adapter 6 + App publisher E2E 1；真实 metadata/TestReceipt/Operation、Candidate Test Host 已接；仍需真实 Build、Build cancellation、N1-3 consumer 与安装版验证 |
 
 ## N1-3：Catalog 与消费者
 

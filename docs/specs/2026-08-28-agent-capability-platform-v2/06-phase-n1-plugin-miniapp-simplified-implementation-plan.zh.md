@@ -92,6 +92,11 @@
 8. Windows 执行顺序保持不变：先关闭 N1 Plugin，再完成 M1 MiniApp，之后冻结唯一
    `RC-WIN-01` cohort；只有该 cohort 关闭后才交接 macOS arm64 与 Linux Desktop x64。
    本阶段不领取跨平台开发结论，也不运行手机视口。
+9. Candidate Test 已接入独立的真实 Node Host role。它复用同一受管 Runtime、私有
+   NDJSON transport、watchdog、generation fence 与整进程树回收实现，但不与生产
+   Shared Extension Host 共进程。每次测试使用一次性 dataDir，默认不注入生产
+   Credential；只完成真实 Artifact load/activate 而没有受管测试输入时，对带可调用
+   contribution 的 Candidate 记录 `needs_test_input`，不得把“可加载”冒充“行为测试通过”。
 
 ## 0. 怎样阅读这份文档
 
