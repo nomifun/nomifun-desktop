@@ -17,7 +17,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -632,6 +632,8 @@ function inspectAppComposition(root = REPO_ROOT) {
 export function collectAutomationDependencyInventory(root = REPO_ROOT) {
   const paths = workspaceRustPaths()
     .filter((path) => DOMAIN_SPECS.some((spec) => inCrate(path, spec.crate)))
+    // The Git index still lists tracked files deleted in the working tree.
+    .filter((path) => existsSync(resolve(root, path)))
     .sort();
   const files = paths.map((path) => fileRecord(path, root));
   const domains = DOMAIN_SPECS.map((spec) => summarizeDomain(spec, files));

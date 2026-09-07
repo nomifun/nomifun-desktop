@@ -13,7 +13,6 @@ import { useTranslation } from 'react-i18next';
 import type { AutoWorkDraftValue } from '@/renderer/pages/conversation/components/AutoWorkControl';
 import { defaultIdmmConfig } from '@/renderer/pages/conversation/components/IdmmControl';
 import { defaultKnowledgeBinding } from '@/renderer/pages/conversation/components/KnowledgeControl';
-import type { SummonDraft } from '@/renderer/pages/conversation/components/SummonPanel';
 
 export type GuidAdvancedConfig = {
   knowledge: IKnowledgeBinding;
@@ -22,8 +21,6 @@ export type GuidAdvancedConfig = {
   setAutoWork: (next: AutoWorkDraftValue) => void;
   idmm: IIdmmConfig;
   setIdmm: (next: IIdmmConfig) => void;
-  summon: SummonDraft | null;
-  setSummon: (next: SummonDraft | null) => void;
   applyToConversation: (
     conversationId: ConversationId,
     options?: { allowKnowledgeBinding?: boolean }
@@ -44,22 +41,16 @@ export const useGuidAdvancedConfig = (): GuidAdvancedConfig => {
     enabled: false,
   });
   const [idmm, setIdmm] = useState<IIdmmConfig>(defaultIdmmConfig);
-  const [summon, setSummon] = useState<SummonDraft | null>(null);
 
-  const draftsRef = useRef({ knowledge, autoWork, idmm, summon });
-  draftsRef.current = { knowledge, autoWork, idmm, summon };
+  const draftsRef = useRef({ knowledge, autoWork, idmm });
+  draftsRef.current = { knowledge, autoWork, idmm };
 
   const applyToConversation = useCallback(
     async (
       conversationId: ConversationId,
       options?: { allowKnowledgeBinding?: boolean }
     ) => {
-      const {
-        knowledge: kb,
-        autoWork: aw,
-        idmm: idm,
-        summon: sm,
-      } = draftsRef.current;
+      const { knowledge: kb, autoWork: aw, idmm: idm } = draftsRef.current;
       const tasks: Array<{ label: string; run: () => Promise<unknown> }> = [];
 
       if (
@@ -87,18 +78,6 @@ export const useGuidAdvancedConfig = (): GuidAdvancedConfig => {
               kind: 'conversation',
               target_id: conversationId,
               ...idm,
-            }),
-        });
-      }
-      if (sm) {
-        tasks.push({
-          label: t('conversation.summon.button'),
-          run: () =>
-            ipcBridge.conversation.setSummon.invoke({
-              conversation_id: conversationId,
-              companion_id: sm.companion_id,
-              memory_ids: sm.memory_ids,
-              skill_exclusions: sm.skill_exclusions,
             }),
         });
       }
@@ -149,7 +128,6 @@ export const useGuidAdvancedConfig = (): GuidAdvancedConfig => {
     setKnowledge(defaultKnowledgeBinding());
     setAutoWork({ enabled: false });
     setIdmm(defaultIdmmConfig());
-    setSummon(null);
   }, []);
 
   return {
@@ -159,8 +137,6 @@ export const useGuidAdvancedConfig = (): GuidAdvancedConfig => {
     setAutoWork,
     idmm,
     setIdmm,
-    summon,
-    setSummon,
     applyToConversation,
     reset,
   };

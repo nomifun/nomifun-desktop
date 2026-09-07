@@ -67,7 +67,6 @@ pub const COMPANION_EVOLVE: &str = "companion.evolve";
 pub const COMPANION_LEARN: &str = "companion.learn";
 pub const COMPANION_PERSONA: &str = "companion.persona";
 pub const COMPANION_ROSTER: &str = "companion.roster";
-pub const COMPANION_SUMMON: &str = "companion.summon";
 pub const CUSTOMER_SERVICE_DIALOGUE: &str = "customer_service.dialogue";
 pub const CUSTOMER_SERVICE_NOTES_READ: &str = "customer_service.notes.read";
 pub const CUSTOMER_SERVICE_NOTES_WRITE: &str = "customer_service.notes.write";
@@ -81,7 +80,6 @@ pub const ROBOT_DISPLAY: &str = "robot.display";
 pub const ROBOT_MOTION: &str = "robot.motion";
 pub const ROBOT_VISION: &str = "robot.vision";
 
-pub const COMPANION_SUMMON_ACTION: &str = "companion.summon.invoke";
 pub const CHANNEL_REPLY_ACTION: &str = "channel.reply.invoke";
 pub const CHANNEL_SEND_ACTION: &str = "channel.send.invoke";
 pub const COMPANION_EVOLVE_ACTION: &str = "companion.evolve.invoke";
@@ -128,7 +126,7 @@ pub const TARGET_CAPABILITY_FAMILIES: [&str; 14] = [
 ///
 /// This is intentionally the full checked-in target-package inventory, not
 /// only the deletion-contract family subset.
-pub const TARGET_CAPABILITY_IDS: [&str; 22] = [
+pub const TARGET_CAPABILITY_IDS: [&str; 21] = [
     CHANNEL_RECEIVE,
     CHANNEL_REPLY,
     CHANNEL_SEND,
@@ -136,7 +134,6 @@ pub const TARGET_CAPABILITY_IDS: [&str; 22] = [
     CHANNEL_GROUP_POLICY,
     COMPANION_PERSONA,
     COMPANION_ROSTER,
-    COMPANION_SUMMON,
     COMPANION_LEARN,
     COMPANION_EVOLVE,
     CUSTOMER_SERVICE_DIALOGUE,
@@ -152,8 +149,8 @@ pub const TARGET_CAPABILITY_IDS: [&str; 22] = [
     NOTIFICATION_WEBHOOK,
     NOTIFICATION_DESKTOP,
 ];
-pub const CAPABILITY_IDS: [&str; 22] = TARGET_CAPABILITY_IDS;
-pub const ALL_CAPABILITY_IDS: [&str; 22] = TARGET_CAPABILITY_IDS;
+pub const CAPABILITY_IDS: [&str; 21] = TARGET_CAPABILITY_IDS;
+pub const ALL_CAPABILITY_IDS: [&str; 21] = TARGET_CAPABILITY_IDS;
 
 const AGENT_SURFACES: &[&str] = &["desktop", "headless", "remote", "web"];
 const CHANNEL_RESOURCE: &[&str] = &[CHANNEL_RESOURCE_KIND];
@@ -246,7 +243,6 @@ pub struct Wave4HostContext {
 pub enum Wave4CapabilityOperation {
     ChannelReply { input: StrictJsonValue },
     ChannelSend { input: StrictJsonValue },
-    CompanionSummon { input: StrictJsonValue },
     CompanionLearn { input: StrictJsonValue },
     CompanionEvolve { input: StrictJsonValue },
     CustomerServiceNotesRead { input: StrictJsonValue },
@@ -263,7 +259,6 @@ impl Wave4CapabilityOperation {
         CapabilityId::from(match self {
             Self::ChannelReply { .. } => CHANNEL_REPLY,
             Self::ChannelSend { .. } => CHANNEL_SEND,
-            Self::CompanionSummon { .. } => COMPANION_SUMMON,
             Self::CompanionLearn { .. } => COMPANION_LEARN,
             Self::CompanionEvolve { .. } => COMPANION_EVOLVE,
             Self::CustomerServiceNotesRead { .. } => CUSTOMER_SERVICE_NOTES_READ,
@@ -284,9 +279,7 @@ impl Wave4CapabilityOperation {
     pub fn owner_domain(&self) -> Wave4OwnerDomain {
         match self {
             Self::ChannelReply { .. } | Self::ChannelSend { .. } => Wave4OwnerDomain::Channel,
-            Self::CompanionSummon { .. }
-            | Self::CompanionLearn { .. }
-            | Self::CompanionEvolve { .. } => Wave4OwnerDomain::Companion,
+            Self::CompanionLearn { .. } | Self::CompanionEvolve { .. } => Wave4OwnerDomain::Companion,
             Self::CustomerServiceNotesRead { .. }
             | Self::CustomerServiceNotesWrite { .. }
             | Self::CustomerServiceHandoff { .. } => Wave4OwnerDomain::CustomerService,
@@ -300,7 +293,6 @@ impl Wave4CapabilityOperation {
         match self {
             Self::ChannelReply { input }
             | Self::ChannelSend { input }
-            | Self::CompanionSummon { input }
             | Self::CompanionLearn { input }
             | Self::CompanionEvolve { input }
             | Self::CustomerServiceNotesRead { input }
@@ -584,7 +576,7 @@ const CHANNEL_CAPABILITIES: [CapabilitySpec; 5] = [
     },
 ];
 
-const COMPANION_CAPABILITIES: [CapabilitySpec; 5] = [
+const COMPANION_CAPABILITIES: [CapabilitySpec; 4] = [
     CapabilitySpec {
         id: COMPANION_PERSONA,
         kind: CapabilityKind::ContextContributor,
@@ -608,18 +600,6 @@ const COMPANION_CAPABILITIES: [CapabilitySpec; 5] = [
             operation: "read",
         }],
         effect_class: None,
-    },
-    CapabilitySpec {
-        id: COMPANION_SUMMON,
-        kind: CapabilityKind::Tool,
-        display_name: "Companion summon",
-        description: "Select an owned Companion for the current AgentSession.",
-        resource_kinds: COMPANION_RESOURCE,
-        requirements: &[ResourceRequirement {
-            resource_kind: COMPANION_RESOURCE_KIND,
-            operation: "read",
-        }],
-        effect_class: Some(EffectClass::ReadSensitive),
     },
     CapabilitySpec {
         id: COMPANION_LEARN,
@@ -1545,7 +1525,6 @@ pub fn operation_from_input(
     let operation = match capability_id.as_ref() {
         CHANNEL_REPLY => Wave4CapabilityOperation::ChannelReply { input },
         CHANNEL_SEND => Wave4CapabilityOperation::ChannelSend { input },
-        COMPANION_SUMMON => Wave4CapabilityOperation::CompanionSummon { input },
         COMPANION_LEARN => Wave4CapabilityOperation::CompanionLearn { input },
         COMPANION_EVOLVE => Wave4CapabilityOperation::CompanionEvolve { input },
         CUSTOMER_SERVICE_NOTES_READ => {
@@ -1828,7 +1807,6 @@ mod tests {
                     COMPANION_LEARN.to_owned(),
                     COMPANION_PERSONA.to_owned(),
                     COMPANION_ROSTER.to_owned(),
-                    COMPANION_SUMMON.to_owned(),
                 ]),
             ),
             (
@@ -1869,7 +1847,6 @@ mod tests {
             (CHANNEL_GROUP_POLICY, CapabilityKind::TurnMiddleware),
             (COMPANION_PERSONA, CapabilityKind::ContextContributor),
             (COMPANION_ROSTER, CapabilityKind::ContextContributor),
-            (COMPANION_SUMMON, CapabilityKind::Tool),
             (COMPANION_LEARN, CapabilityKind::Tool),
             (COMPANION_EVOLVE, CapabilityKind::Tool),
             (CUSTOMER_SERVICE_DIALOGUE, CapabilityKind::TurnMiddleware),
@@ -2113,11 +2090,6 @@ mod tests {
             (CHANNEL_REPLY, CHANNEL_REPLY_ACTION, Wave4OwnerDomain::Channel),
             (CHANNEL_SEND, CHANNEL_SEND_ACTION, Wave4OwnerDomain::Channel),
             (
-                COMPANION_SUMMON,
-                COMPANION_SUMMON_ACTION,
-                Wave4OwnerDomain::Companion,
-            ),
-            (
                 COMPANION_LEARN,
                 COMPANION_LEARN_ACTION,
                 Wave4OwnerDomain::Companion,
@@ -2170,10 +2142,6 @@ mod tests {
                 CHANNEL_SEND => assert!(matches!(
                     operation,
                     Wave4CapabilityOperation::ChannelSend { .. }
-                )),
-                COMPANION_SUMMON => assert!(matches!(
-                    operation,
-                    Wave4CapabilityOperation::CompanionSummon { .. }
                 )),
                 COMPANION_LEARN => assert!(matches!(
                     operation,

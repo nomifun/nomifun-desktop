@@ -14,10 +14,6 @@ import AutoWorkControl from '@/renderer/pages/conversation/components/AutoWorkCo
 import IdmmControl from '@/renderer/pages/conversation/components/IdmmControl';
 import KnowledgeControl from '@/renderer/pages/conversation/components/KnowledgeControl';
 import { usePendingConversation } from '@/renderer/pages/conversation/components/ConversationShell/PendingConversationContext';
-import {
-  SummonDrawer,
-  useCompanionRoster,
-} from '@/renderer/pages/conversation/components/SummonPanel';
 import { Alert, ConfigProvider } from '@arco-design/web-react';
 import React, {
   useCallback,
@@ -29,7 +25,6 @@ import React, {
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
 import AgentPillBar from './components/AgentPillBar';
-import ComposerEntryStrip from './components/ComposerEntryStrip';
 import GuidActionRow from './components/GuidActionRow';
 import GuidCompanionPosterPreview from './components/GuidCompanionPosterPreview';
 import GuidInputCard from './components/GuidInputCard';
@@ -113,15 +108,6 @@ const GuidPage: React.FC = () => {
         agentSelection.selectedPreset?.current_stable_revision &&
           presetResourceResolutionReady
       );
-
-  const [summonDrawerOpen, setSummonDrawerOpen] = useState(false);
-  const companionRoster = useCompanionRoster();
-  const summonedCompanionName = advancedConfig.summon
-    ? companionRoster.find(
-        (companion) =>
-          companion.companion_id === advancedConfig.summon?.companion_id
-      )?.name ?? null
-    : null;
 
   const mention = useGuidMention({
     presets: agentSelection.presets,
@@ -522,29 +508,9 @@ const GuidPage: React.FC = () => {
               workspaceDir={guidInput.dir}
               onSelectWorkspace={guidInput.setDir}
               onClearWorkspace={() => guidInput.setDir('')}
-              entryStrip={
-                <ComposerEntryStrip
-                  onSummonCompanion={() => setSummonDrawerOpen(true)}
-                  summonedCompanionName={summonedCompanionName}
-                />
-              }
             />
 
             <GuidResourceCards />
-
-            <SummonDrawer
-              visible={summonDrawerOpen}
-              onCancel={() => setSummonDrawerOpen(false)}
-              initial={advancedConfig.summon}
-              onApply={(draft) => {
-                advancedConfig.setSummon(draft);
-                setSummonDrawerOpen(false);
-              }}
-              onRelease={() => {
-                advancedConfig.setSummon(null);
-                setSummonDrawerOpen(false);
-              }}
-            />
           </div>
         </div>
 
