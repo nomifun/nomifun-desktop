@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -881,56 +881,66 @@ impl PluginApplicationService {
                 started_at_ms: now_ms(),
             })
             .await?;
-        let output = match self.builder.build(&project, &request).await {
+        let output = match self
+            .builder
+            .build(&operation_id, &project, &request)
+            .await
+        {
             Ok(output) => output,
             Err(error) => {
-                let _ = self
-                    .repository
-                    .finish_operation(&FinishProductOperationParams {
-                        operation_id,
-                        state: ProductOperationState::Failed,
-                        progress_percent: None,
-                        last_error_code: Some(error.code().into()),
-                        bounded_log_tail: vec!["build failed".into()],
-                        finished_at_ms: now_ms(),
-                    })
-                    .await;
+                self.finish_build_error(owner_user_id, &operation_id, &error)
+                    .await?;
                 return Err(error);
             }
         };
-        output
-            .artifact
-            .validate()
-            .map_err(|error| PluginServiceError::invalid(error.to_string()))?;
-        let artifact = self
-            .repository
-            .put_artifact(&CreatePluginArtifactParams {
-                artifact_id: output.artifact.artifact_id.as_ref().to_owned(),
-                artifact_digest: output.artifact.artifact_digest.as_ref().to_owned(),
-                package_id: output
-                    .artifact
-                    .manifest
-                    .payload
-                    .package
-                    .package_id
-                    .as_ref()
-                    .to_owned(),
-                package_version: output
-                    .artifact
-                    .manifest
-                    .payload
-                    .package
-                    .package_version
-                    .as_ref()
-                    .to_owned(),
-                manifest_digest: output.artifact.manifest.payload_digest.as_ref().to_owned(),
-                manifest: serde_json::to_value(&output.artifact.manifest.payload)
-                    .map_err(|error| PluginServiceError::invalid(error.to_string()))?,
-                managed_path: output.managed_relative_path,
-                created_at: now_ms(),
-            })
-            .await?;
-        self.artifacts.verify(&artifact).await?;
+        let prepared = async {
+            output
+                .artifact
+                .validate()
+                .map_err(|error| PluginServiceError::invalid(error.to_string()))?;
+            let (base_target_digest, contract_diff) = self
+                .build_contract_diff(owner_user_id, &project, &output.artifact.manifest.payload)
+                .await?;
+            let artifact = self
+                .repository
+                .put_artifact(&CreatePluginArtifactParams {
+                    artifact_id: output.artifact.artifact_id.as_ref().to_owned(),
+                    artifact_digest: output.artifact.artifact_digest.as_ref().to_owned(),
+                    package_id: output
+                        .artifact
+                        .manifest
+                        .payload
+                        .package
+                        .package_id
+                        .as_ref()
+                        .to_owned(),
+                    package_version: output
+                        .artifact
+                        .manifest
+                        .payload
+                        .package
+                        .package_version
+                        .as_ref()
+                        .to_owned(),
+                    manifest_digest: output.artifact.manifest.payload_digest.as_ref().to_owned(),
+                    manifest: serde_json::to_value(&output.artifact.manifest.payload)
+                        .map_err(|error| PluginServiceError::invalid(error.to_string()))?,
+                    managed_path: output.managed_relative_path.clone(),
+                    created_at: now_ms(),
+                })
+                .await?;
+            self.artifacts.verify(&artifact).await?;
+            Ok::<_, PluginServiceError>((base_target_digest, contract_diff))
+        }
+        .await;
+        let (base_target_digest, contract_diff) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.finish_build_error(owner_user_id, &operation_id, &error)
+                    .await?;
+                return Err(error);
+            }
+        };
         self.repository
             .finish_operation(&FinishProductOperationParams {
                 operation_id: operation_id.clone(),
@@ -945,8 +955,8 @@ impl PluginApplicationService {
             "project_id": project.project_id,
             "generation": project.build_generation,
             "artifact_digest": output.artifact.artifact_digest,
-            "base_target_digest": output.base_target_digest,
-            "contract_diff": output.contract_diff,
+            "base_target_digest": base_target_digest,
+            "contract_diff": contract_diff,
         }));
         self.repository
             .record_candidate(&RecordPluginReadyCandidateParams {
@@ -956,10 +966,10 @@ impl PluginApplicationService {
                 origin: DbCandidateOrigin::Build,
                 artifact_id: output.artifact.artifact_id.as_ref().to_owned(),
                 artifact_digest: output.artifact.artifact_digest.as_ref().to_owned(),
-                base_target_digest: output.base_target_digest,
+                base_target_digest,
                 source_snapshot_digest: Some(output.source_snapshot_digest),
                 dependency_lock_digest: Some(output.dependency_lock_digest),
-                contract_diff: serde_json::to_value(output.contract_diff)
+                contract_diff: serde_json::to_value(contract_diff)
                     .map_err(|error| PluginServiceError::invalid(error.to_string()))?,
                 origin_operation_id: operation_id,
                 expected_generation: project.build_generation,
@@ -967,6 +977,78 @@ impl PluginApplicationService {
             })
             .await?;
         self.get_project(owner_user_id, &project.project_id).await
+    }
+
+    async fn finish_build_error(
+        &self,
+        owner_user_id: &str,
+        operation_id: &str,
+        error: &PluginServiceError,
+    ) -> Result<(), PluginServiceError> {
+        let canceled = error.code() == crate::ERR_OPERATION_CANCELED;
+        let terminal = FinishProductOperationParams {
+            operation_id: operation_id.to_owned(),
+            state: if canceled {
+                ProductOperationState::Canceled
+            } else {
+                ProductOperationState::Failed
+            },
+            progress_percent: None,
+            last_error_code: (!canceled).then(|| error.code().into()),
+            bounded_log_tail: vec![if canceled {
+                "build canceled".into()
+            } else {
+                "build failed".into()
+            }],
+            finished_at_ms: now_ms(),
+        };
+        if let Err(finish_error) = self.repository.finish_operation(&terminal).await {
+            let already_canceled = canceled
+                && self
+                    .repository
+                    .get_operation(owner_user_id, operation_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|operation| {
+                        operation.state == ProductOperationState::Canceled.as_str()
+                    });
+            if !already_canceled {
+                return Err(finish_error);
+            }
+        }
+        Ok(())
+    }
+
+    async fn build_contract_diff(
+        &self,
+        owner_user_id: &str,
+        project: &PluginProjectRow,
+        candidate: &PluginPackageV1Manifest,
+    ) -> Result<(Option<String>, PluginContractDiff), PluginServiceError> {
+        let Some(mount_id) = project.linked_mount_id.as_deref() else {
+            return Ok((None, plugin_contract_diff(None, candidate)?));
+        };
+        let (mount, _) = self.owned_mount(owner_user_id, mount_id).await?;
+        if mount.package_id != project.package_id
+            || candidate.package.package_id.as_ref() != project.package_id
+        {
+            return Err(PluginServiceError::conflict(
+                "linked Project, Mount, and built Package identities differ",
+            ));
+        }
+        let base_target_digest = mount.current_artifact_digest.clone().ok_or_else(|| {
+            PluginServiceError::stale("linked Mount has no current Artifact")
+        })?;
+        let current = self
+            .verified_artifact(&base_target_digest)
+            .await?
+            .ok_or_else(|| PluginServiceError::not_found("linked Mount current Artifact"))?;
+        let current = artifact_manifest(&current)?;
+        Ok((
+            Some(base_target_digest),
+            plugin_contract_diff(Some(&current), candidate)?,
+        ))
     }
 
     pub async fn test_candidate(
@@ -1321,6 +1403,21 @@ impl PluginApplicationService {
             ));
         }
         self.operation_cancellation.cancel(&operation).await?;
+        let current = self
+            .repository
+            .get_operation(owner_user_id, operation_id)
+            .await?
+            .ok_or_else(|| PluginServiceError::not_found(format!("operation {operation_id}")))?;
+        if current.state == ProductOperationState::Canceled.as_str() {
+            return Ok(operation_summary(&current));
+        }
+        if current.state != ProductOperationState::Running.as_str()
+            || terminal_revision(&current) != expected_revision
+        {
+            return Err(PluginServiceError::stale(
+                "operation completed while cancellation was being applied",
+            ));
+        }
         self.repository
             .cancel_operation(owner_user_id, operation_id, expected_revision, now_ms())
             .await
@@ -1423,6 +1520,132 @@ fn artifact_manifest(
 ) -> Result<PluginPackageV1Manifest, PluginServiceError> {
     serde_json::from_str(&artifact.manifest_json)
         .map_err(|error| PluginServiceError::invalid(format!("stored manifest: {error}")))
+}
+
+fn plugin_contract_diff(
+    current: Option<&PluginPackageV1Manifest>,
+    candidate: &PluginPackageV1Manifest,
+) -> Result<PluginContractDiff, PluginServiceError> {
+    let mut changes = BTreeSet::from([PluginContractChangeKind::ArtifactBytes]);
+    let Some(current) = current else {
+        return Ok(PluginContractDiff {
+            compatibility: PluginCompatibility::Compatible,
+            changes,
+            affected_consumer_locks: Vec::new(),
+        });
+    };
+
+    if current.dependency_lock_digest != candidate.dependency_lock_digest {
+        changes.insert(PluginContractChangeKind::DependencyLock);
+    }
+    if contribution_identity_digest(current)? != contribution_identity_digest(candidate)? {
+        changes.insert(PluginContractChangeKind::ContributionSet);
+    }
+    if current.package.contributions != candidate.package.contributions {
+        changes.insert(PluginContractChangeKind::ContractDigest);
+    }
+    if resource_effect_digest(current)? != resource_effect_digest(candidate)? {
+        changes.insert(PluginContractChangeKind::ResourceOrEffectContract);
+    }
+    if current.package.config_schema != candidate.package.config_schema {
+        changes.insert(PluginContractChangeKind::ConfigSchema);
+    }
+    if current.credential_slots != candidate.credential_slots {
+        changes.insert(PluginContractChangeKind::CredentialSlots);
+    }
+    if current.minimum_node_major != candidate.minimum_node_major
+        || current.package.requires_runtime_features != candidate.package.requires_runtime_features
+        || current.package.package_dependencies != candidate.package.package_dependencies
+    {
+        changes.insert(PluginContractChangeKind::RuntimeRequirement);
+    }
+    if current.supported_targets != candidate.supported_targets {
+        changes.insert(PluginContractChangeKind::SupportedTargets);
+    }
+    if host_sdk_contract_digest(current)? != host_sdk_contract_digest(candidate)? {
+        changes.insert(PluginContractChangeKind::HostSdkContract);
+    }
+
+    let compatibility = if changes.iter().all(|change| {
+        matches!(
+            change,
+            PluginContractChangeKind::ArtifactBytes
+                | PluginContractChangeKind::DependencyLock
+        )
+    }) {
+        PluginCompatibility::Compatible
+    } else {
+        PluginCompatibility::Breaking
+    };
+    Ok(PluginContractDiff {
+        compatibility,
+        changes,
+        affected_consumer_locks: Vec::new(),
+    })
+}
+
+fn contribution_identity_digest(
+    manifest: &PluginPackageV1Manifest,
+) -> Result<nomifun_agent_contracts::DigestHex, PluginServiceError> {
+    let contributions = &manifest.package.contributions;
+    digest_payload(&json!({
+        "capabilities": contributions.capabilities.iter().map(|capability| json!({
+            "id": capability.id,
+            "contribution_id": capability.contribution_id,
+            "version": capability.version,
+            "kind": capability.kind,
+        })).collect::<Vec<_>>(),
+        "skills": contributions.skills.iter().map(|skill| json!({
+            "id": skill.id,
+            "version": skill.version,
+        })).collect::<Vec<_>>(),
+        "mcp_tools": contributions.mcp_tools.iter().map(|mapping| json!({
+            "server_id": mapping.server_id,
+            "canonical_tool_key": mapping.canonical_tool_key,
+            "capability": mapping.capability,
+        })).collect::<Vec<_>>(),
+    }))
+    .map_err(|error| PluginServiceError::invalid(error.to_string()))
+}
+
+fn resource_effect_digest(
+    manifest: &PluginPackageV1Manifest,
+) -> Result<nomifun_agent_contracts::DigestHex, PluginServiceError> {
+    digest_payload(
+        &manifest
+            .package
+            .contributions
+            .capabilities
+            .iter()
+            .map(|capability| {
+                json!({
+                    "id": capability.id,
+                    "kind": capability.kind,
+                    "contributions": capability.contributions,
+                })
+            })
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| PluginServiceError::invalid(error.to_string()))
+}
+
+fn host_sdk_contract_digest(
+    manifest: &PluginPackageV1Manifest,
+) -> Result<nomifun_agent_contracts::DigestHex, PluginServiceError> {
+    let entrypoint = manifest.package.entrypoint.as_javascript().ok_or_else(|| {
+        PluginServiceError::invalid("Plugin Package build requires a JavaScript entrypoint")
+    })?;
+    digest_payload(&json!({
+        "schema_version": manifest.schema_version,
+        "build_profile": manifest.build_profile,
+        "build_profile_version": manifest.build_profile_version,
+        "package_schema_version": manifest.package.schema_version,
+        "host_contract_version": manifest.package.host_contract_version,
+        "entrypoint_path": entrypoint.normalized_relative_path,
+        "entrypoint_host_protocol_version": entrypoint.host_protocol_version,
+        "entrypoint_sdk_contract_version": entrypoint.sdk_contract_version,
+    }))
+    .map_err(|error| PluginServiceError::invalid(error.to_string()))
 }
 
 fn candidate_compatibility(

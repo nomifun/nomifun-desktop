@@ -1,5 +1,6 @@
 use std::io;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use thiserror::Error;
 
@@ -47,6 +48,22 @@ pub enum AuthoringError {
     InvalidDependency(String),
     #[error("exact dependency lock is invalid: {0}")]
     InvalidDependencyLock(String),
+    #[error("plugin source manifest is invalid: {0}")]
+    InvalidSourceManifest(String),
+    #[error("plugin package cannot be packed: {0}")]
+    PackRejected(String),
+    #[error("local module boundary is unsupported: {path} ({reason})")]
+    LocalModuleUnsupported { path: String, reason: String },
+    #[error("Node Build Host is unavailable: {0}")]
+    BuildHostUnavailable(String),
+    #[error("Node Build Host timed out after {0:?}")]
+    BuildHostTimeout(Duration),
+    #[error("Node Build Host failed with exit code {code:?}: {stderr}")]
+    BuildHostFailed { code: Option<i32>, stderr: String },
+    #[error("npm registry operation failed: {0}")]
+    Registry(String),
+    #[error("content-addressed cache rejected object: {0}")]
+    Cache(String),
     #[error("canonical serialization failed: {0}")]
     CanonicalSerialization(String),
     #[error("filesystem operation failed for {path}: {source}")]

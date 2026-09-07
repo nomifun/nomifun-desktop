@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::extract::{Path as AxumPath, State};
@@ -36,7 +37,9 @@ use nomifun_js_host::{
     ExtensionHostSupervisor, JavaScriptHostConfig,
     materialize_bundled_extension_host,
 };
-use nomifun_js_authoring::SourceStoreLimits;
+use nomifun_js_authoring::{
+    ContentAddressedNpmCache, FixedPluginPacker, NodeBuildHost, SourceStoreLimits,
+};
 use nomifun_js_kernel_adapter::{
     JsKernelPluginAdapter, PluginPackageInput,
 };
@@ -49,8 +52,9 @@ use nomifun_plugin_platform::{
 use nomifun_plugin_service::{
     DbPluginRepositoryAdapter, FsPluginArtifactStore, FsPluginMountDataStore,
     FsPluginSourceStore,
-    PluginApplicationService, PluginArtifactStorePort, PluginHostCoordinator,
-    CandidateTestOutput, PluginCandidateTestExecutor, PluginRegistryPublisher,
+    CandidateTestOutput, FsPluginBuildExecutor, PluginApplicationService,
+    PluginArtifactStorePort, PluginBuildExecutor, PluginCandidateTestExecutor,
+    PluginHostCoordinator, PluginOperationCancellation, PluginRegistryPublisher,
     PluginRepository, PluginRouterState,
     PluginServiceDependencies, PluginServiceError, PluginServicePaths,
     SharedJsHostCoordinator, UnconfiguredPluginBuildExecutor,
@@ -61,7 +65,9 @@ use serde::Deserialize;
 
 const AGENT_EXECUTOR_UNAVAILABLE: &str = "CAPABILITY_UNAVAILABLE";
 const PLUGIN_PLATFORM_DIRECTORY: &str = "plugin-platform";
+const PLUGIN_ARTIFACT_DIRECTORY: &str = "artifact-store";
 const PLUGIN_AUTHORING_DIRECTORY: &str = "authoring";
+const PLUGIN_NPM_CACHE_DIRECTORY: &str = "npm-cache";
 const PLUGIN_MOUNT_DATA_DIRECTORY: &str = "plugin-mount-data";
 const PLUGIN_CANDIDATE_TEST_DIRECTORY: &str = "candidate-tests";
 
@@ -85,8 +91,12 @@ pub(crate) async fn build_nomi_core_plugin_state(
 
     let repository = Arc::new(DbPluginRepositoryAdapter::new(pool));
     let artifacts = Arc::new(FsPluginArtifactStore::new(
-        &platform_root,
+        platform_root.join(PLUGIN_ARTIFACT_DIRECTORY),
         ArtifactStoreLimits::default(),
+    )?);
+    let source_store = Arc::new(FsPluginSourceStore::new(
+        platform_root.join(PLUGIN_AUTHORING_DIRECTORY),
+        SourceStoreLimits::default(),
     )?);
     let hosts = discover_plugin_hosts(&platform_root).await;
     let host = hosts.as_ref().map(|hosts| Arc::clone(&hosts.shared));
@@ -107,15 +117,42 @@ pub(crate) async fn build_nomi_core_plugin_state(
         Some(host) => Arc::new(SharedJsHostCoordinator::new(host)),
         None => Arc::new(UnavailablePluginHostCoordinator),
     };
-    let tester: Arc<dyn PluginCandidateTestExecutor> = match hosts {
+    let tester: Arc<dyn PluginCandidateTestExecutor> = match hosts.as_ref() {
         Some(hosts) => Arc::new(NomiCorePluginCandidateTestExecutor {
             repository: Arc::clone(&repository),
             artifacts: Arc::clone(&artifacts),
-            host_config: hosts.candidate_test_config,
+            host_config: hosts.candidate_test_config.clone(),
             candidate_test_root: platform_root.join(PLUGIN_CANDIDATE_TEST_DIRECTORY),
         }),
         None => Arc::new(
             nomifun_plugin_service::UnconfiguredPluginCandidateTestExecutor,
+        ),
+    };
+    let (builder, operation_cancellation): (
+        Arc<dyn PluginBuildExecutor>,
+        Arc<dyn PluginOperationCancellation>,
+    ) = match hosts.as_ref() {
+        Some(hosts) => {
+            let build = Arc::new(FsPluginBuildExecutor::new(
+                &source_store,
+                &artifacts,
+                FixedPluginPacker::new(NodeBuildHost::new(
+                    &hosts.candidate_test_config.node_executable,
+                    Duration::from_secs(120),
+                )?)
+                .with_npm_cache(ContentAddressedNpmCache::new(
+                    platform_root.join(PLUGIN_NPM_CACHE_DIRECTORY),
+                )?),
+                hosts.candidate_test_config.runtime.runtime_target.clone(),
+            )?);
+            (
+                Arc::clone(&build) as Arc<dyn PluginBuildExecutor>,
+                build as Arc<dyn PluginOperationCancellation>,
+            )
+        }
+        None => (
+            Arc::new(UnconfiguredPluginBuildExecutor),
+            Arc::new(UnconfiguredPluginOperationCancellation),
         ),
     };
     let service = Arc::new(PluginApplicationService::new(
@@ -125,15 +162,10 @@ pub(crate) async fn build_nomi_core_plugin_state(
             host: host_coordinator,
             registry: publisher as Arc<dyn PluginRegistryPublisher>,
             mutation_coordinator: Arc::new(OwnerMutationCoordinator::new()),
-            builder: Arc::new(UnconfiguredPluginBuildExecutor),
+            builder,
             tester,
-            operation_cancellation: Arc::new(
-                UnconfiguredPluginOperationCancellation,
-            ),
-            source_store: Arc::new(FsPluginSourceStore::new(
-                platform_root.join(PLUGIN_AUTHORING_DIRECTORY),
-                SourceStoreLimits::default(),
-            )?),
+            operation_cancellation,
+            source_store,
             data_store: Arc::new(FsPluginMountDataStore::new(&data_root)?),
             paths: PluginServicePaths {
                 mount_data_relative_root:
@@ -222,7 +254,8 @@ impl IntoResponse for PluginHttpError {
             nomifun_plugin_service::ERR_FORBIDDEN => StatusCode::FORBIDDEN,
             nomifun_plugin_service::ERR_NOT_FOUND => StatusCode::NOT_FOUND,
             nomifun_plugin_service::ERR_STALE
-            | nomifun_plugin_service::ERR_CONFLICT => StatusCode::CONFLICT,
+            | nomifun_plugin_service::ERR_CONFLICT
+            | nomifun_plugin_service::ERR_OPERATION_CANCELED => StatusCode::CONFLICT,
             nomifun_plugin_service::ERR_ARTIFACT => {
                 StatusCode::UNPROCESSABLE_ENTITY
             }
