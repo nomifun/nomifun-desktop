@@ -9,18 +9,26 @@
 
 mod dto;
 mod error;
+mod bridge;
 mod model;
 mod operation;
 mod repository;
 mod runtime;
 mod service;
+mod service_host;
+mod storage;
+#[cfg(test)]
+mod foundation_tests;
 #[cfg(test)]
 mod tests;
 
 pub use dto::*;
 pub use error::*;
+pub use bridge::*;
 pub use model::*;
 pub use operation::*;
 pub use repository::*;
 pub use runtime::*;
 pub use service::*;
+pub use service_host::*;
+pub use storage::*;

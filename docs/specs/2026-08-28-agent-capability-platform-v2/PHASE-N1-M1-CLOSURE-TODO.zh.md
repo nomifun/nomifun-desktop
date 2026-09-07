@@ -130,11 +130,19 @@
     不提供绕过 Kernel 的直接 invoke。12 项 application tests 和 6 项真实 SQLite
     adapter tests 已通过；App composition、Kernel publication/invalidation、
     Build/Test cancellation 与完整 E2E 尚未完成，因此不关闭。
-4. `nomifun-miniapp-platform` 已形成不读取旧 `miniapps` 的 M1 domain/application
-    foundation，并以 5 项内存合同测试固定 Product/Project、Ready/Active/Previous、
-    Catalog 原子语义、生命周期、auto-publish authorization 和 resumable delete。
-    该预研不含 migration 070+、SQLite adapter、Service Host、Bridge、UI 或旧链删除，
-    不改变 `M1-0-01` 的 blocked 状态，也不计入 M1 完成度。
+4. `nomifun-miniapp-platform` 已形成不读取旧 `miniapps` 的 M1
+    domain/application/runtime/data foundation，并以 15 项内存合同测试固定：
+    - Product/Project、Ready/Active/Previous、Catalog 原子语义、生命周期、
+      auto-publish authorization 和 resumable delete；
+    - Host-owned MessageChannel port 的 exact Active pointer/Release/epoch/Surface fence，
+      UI-only 只允许 Host KV，旧 port/旧 generation 迟到结果 fail closed；
+    - dedicated Service Host 的 on-demand/continuous、全局动态容量、有限 crash backoff、
+      用户 Retry、idle reap 和单 App 故障隔离；
+    - owner-scoped KV checked revision/CAS、Files handle、Private DB 窄 SQL、
+      additive migration ledger，以及“取消只在提交前生效”的副作用边界。
+    该提前 foundation 不含 migration 071+、真实 SQLite/Node process adapter、生产
+    composition/routes、MiniApp UI 或旧链删除，不改变任何 M1 条目的 blocked 状态，
+    也不计入 M1 功能完成度。
 5. `N1-2-03` 已接入 NomiCore 当前组合根：
     - `PluginApplicationService` 通过真实 SQLite/Artifact Store/Shared Host fence 与
       Kernel Registry publisher 组合；
@@ -153,7 +161,7 @@
     npm resolver/
     cache、fixed packer、Build Host、DB/App 接线仍未完成。
 7. 当前定向验证：JavaScript Host 13、JS Kernel Adapter 4、Plugin Service 16、
-   JavaScript Authoring 16、MiniApp Platform 5、App Plugin publisher E2E 1 均通过；
+   JavaScript Authoring 16、MiniApp Platform 15、App Plugin publisher E2E 1 均通过；
    App check、contract generator `write/check` 与 Plugin N1 Gate self-test 通过。bundled
    Host 脚本按内容 digest 物化到受管数据目录，安装版不依赖编译机源码路径。
 8. migration 070 已把 Plugin Project 的 `display_name/description` 从 Package ID 中
@@ -256,9 +264,11 @@
 | `M1-U-01` | blocked | UI lane；整体重写 `pages/miniApps/**` | Library/Workshop/Surface，删除 Guid/Conversation 旧 MiniApp 模式 | `M1-0-02`,`M1-1-01` | real Desktop workflow/build/a11y |
 | `M1-V-01` | blocked | 集成 Owner | Windows M1 contract/integration/fault/product/NSIS candidate | 所有 M1 项 | UI-only + Service representative lifecycle |
 
-`nomifun-miniapp-platform` 当前只作为上述 M1 工作的提前 domain foundation 保存；在
-`N1-V-01` 关闭并交付 migration/SQLite/Host/Bridge 前，不领取任何 M1 `in-progress`
-状态，不接生产路由，也不替代旧 MiniApp 主链。
+`nomifun-miniapp-platform` 当前只作为上述 M1 工作的提前
+domain/application/runtime/data foundation 保存。内存 Service Host、Bridge 和 Storage
+合同不等于 production adapter；在 `N1-V-01` 关闭并开始交付 migration 071+、SQLite、
+Node process、composition/routes 和产品 UI 前，不领取任何 M1 `in-progress` 状态，
+不接生产路由，也不替代旧 MiniApp 主链。
 
 ## 最终候选与外部验证
 

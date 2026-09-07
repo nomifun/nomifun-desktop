@@ -21,6 +21,31 @@ pub enum MiniAppPlatformError {
     MissingCredential(String),
     #[error("MiniApp runtime port failed: {0}")]
     Runtime(String),
+    #[error("MiniApp MessageChannel port is closed, stale, or foreign")]
+    StaleBridgePort,
+    #[error("MiniApp Bridge call {0} is already in flight")]
+    DuplicateBridgeCall(String),
+    #[error("MiniApp call was canceled")]
+    Canceled,
+    #[error("MiniApp Service is unavailable: {0}")]
+    ServiceUnavailable(String),
+    #[error("MiniApp Service callback belongs to a stale Host generation")]
+    StaleServiceGeneration,
+    #[error("MiniApp Service Host crashed: {0}")]
+    ServiceCrashed(String),
+    #[error(
+        "MiniApp Service Host capacity exhausted: max_active={max_active}, active={active_miniapps:?}"
+    )]
+    ServiceCapacityExhausted {
+        max_active: usize,
+        active_miniapps: Vec<String>,
+    },
+    #[error("MiniApp KV revision overflow")]
+    KvRevisionOverflow,
+    #[error("MiniApp managed storage compare-and-swap conflict")]
+    StorageConflict,
+    #[error("MiniApp managed database request is invalid: {0}")]
+    InvalidDatabaseRequest(String),
     #[error("MiniApp repository failed: {0}")]
     Repository(String),
     #[error("MiniApp commit is authoritative but runtime reconciliation is required: {0}")]
