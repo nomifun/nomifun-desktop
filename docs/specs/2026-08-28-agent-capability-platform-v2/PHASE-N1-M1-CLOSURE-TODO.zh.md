@@ -42,9 +42,9 @@
 | 分类 | 数量 | 项目 |
 | --- | ---: | --- |
 | 已关闭 | 15 | `W0-01`、`N1-0-01`～`N1-0-05`、`N1-1-02`～`N1-1-03`、`N1-2-00`～`N1-2-02`、`N1-3-01`～`N1-3-03`、`N1-X-01` |
-| 正在实施 | 4 | `N1-1-01`、`N1-2-03`、`N1-4-01`、`N1-U-01` |
+| 正在实施 | 6 | `N1-1-01`、`N1-2-03`、`N1-4-01`、`N1-U-01`、`M1-0-01`、`M1-0-02-A` |
 | 已解锁待领取 | 0 | 无 |
-| 依赖阻塞 | 13 | 其余 N1/M1 Windows 项与最终合流 |
+| 依赖阻塞 | 11 | 其余 N1/M1 Windows 项与最终合流 |
 | 外部原生 | 2 | `RC-MA-01`、`RC-LD-01` |
 | 明确延后 | 2 | Marketplace/远程分发、第二 Runtime |
 
@@ -303,6 +303,29 @@
     - DB contract 20、M1 schema 2、M1 repository 3 项定向测试通过。生产 App routes、
       MiniApp Service/Bridge/Storage adapter、旧链删除和 UI 尚未接入，不能计入 M1 完成度。
 
+## 2026-09-08 实施记录
+
+1. 远端分支已核对与当前 `HEAD=d2180373a` 对齐；本轮不处理未跟踪的 `.githooks/`，
+   也不重写历史提交。
+2. `M1-0-01` 进入生产实现阶段：继续沿用 migration 072 与 owner-scoped
+   `nomifun-db` repository，生产代码只读写新的 Product/Project/Artifact/Release
+   数据根，不读取、迁移、双写或 alias 旧 `miniapps`。
+3. 新增实施切片 `M1-0-02-A：UI-only Source → Build → Ready`，写集固定为：
+   - MiniApp 专用 owner/project Source Store，保存 `index.html`、`ui/**` 与 canonical
+     source snapshot；不复用 Plugin Source Store，也不伪造 Service Source；
+   - 固定 `miniapp-release-v1` 的 UI-only Build application service、Build Operation
+     start/finish/cancel 与 staging cleanup；
+   - immutable Release Store，保存 manifest、文件 bytes、逐文件 digest 和完整 Release
+     digest，并在写入 Ready 前再次执行 containment/digest admission；
+   - Project source CAS、Ready Release lineage/CAS 与 Build generation 串行绑定；
+   - owner + local-trust 保护的 Build 路由及 Library/Workshop 的最小 Build 交互。
+4. `M1-0-02-A` 明确不包含 Service Host、MessageChannel Bridge、Files/Private SQLite、
+   Publish、Rollback、Share/Import、旧 MiniApp 链删除或跨平台验证。UI-only Build 的
+   成功和失败都必须证明 Node process 为 0；失败不得改变既有 Ready、Active 或 Previous。
+5. 该切片完成后才进入 `M1-0-02-B：Ready → Manual Publish → Surface → Rollback`；
+   在 `RC-WIN-01` 关闭前继续只做 Windows Desktop x64，不运行手机视口，也不交接
+   macOS/Linux 原生验证。
+
 ## W0：一期交接
 
 | ID | 状态 | 目标 | 完成定义 | Evidence |
@@ -365,19 +388,20 @@
 
 | ID | 状态 | Owner/写集 | 目标 | 依赖 | 最小验证 |
 | --- | --- | --- | --- | --- | --- |
-| `M1-0-01` | blocked | MiniApp DB/domain lane | 全新 Product/Project/Ready/Active/Previous 数据根，不读旧 `miniapps` | `N1-V-01` | fresh schema；旧表无生产读 |
-| `M1-0-02` | blocked | MiniApp release lane | UI-only `miniapp-release-v1`、manual/pure-UI auto Publish、Rollback、Host KV | `M1-0-01`,`N1-4-01` | UI-only 全程 Node process=0 |
+| `M1-0-01` | in-progress | MiniApp DB/domain lane；`nomifun-db/migrations/072*`、`repository/miniapp_m1*` | 全新 Product/Project/Ready/Active/Previous 数据根，不读旧 `miniapps` | `N1-V-01` | migration 072、schema/repository 定向验证通过；生产 owner 路由接入与 M1 完整 Gate 尚未完成 |
+| `M1-0-02-A` | in-progress | MiniApp release lane；`nomifun-miniapp-platform/**`、MiniApp application/App Build adapter | UI-only `miniapp-release-v1` 的 Source→Build→Ready、Build Operation、immutable Release Store | `M1-0-01`,`N1-4-01` | Source owner 隔离、成功/失败/cancel、文件 bytes/digest、Ready lineage/CAS、全程 Node process=0 |
+| `M1-0-02-B` | blocked | MiniApp release lane | Ready→Manual Publish→Surface→Rollback、纯 UI auto Publish、Host KV | `M1-0-02-A`,`M1-1-01` | Release/Catalog 原子切换、旧 epoch/port 拒绝 |
 | `M1-1-01` | blocked | Service/Bridge lane | 单 `main.mjs`、dedicated Host、on-demand/continuous、MessageChannel epoch fence | `M1-0-02`,`N1-1-02` | old port callback rejected；one App crash isolation |
 | `M1-1-02` | blocked | Managed data lane | UI/Service KV、Files、Private SQLite、additive migration ledger | `M1-1-01` | owner namespace/SQL boundary/migration |
 | `M1-2-01` | blocked | Lifecycle lane | Enable/Disable/Trash/Restore/Permanent Delete、Share/Backup Import-as-new | `M1-1-02` | resumable delete；no plaintext credential |
 | `M1-U-01` | blocked | UI lane；整体重写 `pages/miniApps/**` | Library/Workshop/Surface，删除 Guid/Conversation 旧 MiniApp 模式 | `M1-0-02`,`M1-1-01` | real Desktop workflow/build/a11y |
 | `M1-V-01` | blocked | 集成 Owner | Windows M1 contract/integration/fault/product/NSIS candidate | 所有 M1 项 | UI-only + Service representative lifecycle |
 
-`nomifun-miniapp-platform` 当前只作为上述 M1 工作的提前
-domain/application/runtime/data foundation 保存。内存 Service Host、Bridge 和 Storage
-合同不等于 production adapter；在 `N1-V-01` 关闭并开始交付 migration 071+、SQLite、
-Node process、composition/routes 和产品 UI 前，不领取任何 M1 `in-progress` 状态，
-不接生产路由，也不替代旧 MiniApp 主链。
+`nomifun-miniapp-platform` 的内存 Service Host、Bridge 和 Storage 合同不等于
+production adapter。当前仅领取 `M1-0-01` 的生产数据根和 `M1-0-02-A` 的 UI-only
+Source→Build→Ready 写集；这两项不接 Service/Bridge/旧 MiniApp 主链，也不把 foundation
+测试冒充完整 M1 完成。`M1-0-02-B` 及后续 Service、生命周期和产品 Surface 仍按依赖
+顺序等待。
 
 ## 最终候选与外部验证
 
