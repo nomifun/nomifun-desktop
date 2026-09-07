@@ -172,6 +172,71 @@
     不迁移、双写或 alias 旧 `miniapps`；生产路由、MiniApp runtime、Bridge、Storage
     与 UI 仍按 §6 依赖顺序后续实施。
 
+## 2026-09-08 实施切片冻结
+
+本节只冻结本轮 `M1-0-02-A：UI-only Source → Build → Ready` 的实现填充，不扩大
+§4.4～§4.5 已确认的产品合同，也不提前实现 Service、Bridge、Publish 或 Rollback。
+
+### A. Source Store
+
+- MiniApp 使用独立于 `nomifun-js-authoring` Plugin Source Store 的
+  owner/project Source Store；顶层身份必须保持 `miniapp_id + project_id`，不能通过
+  Package ID 或旧 `miniapps` 表推导。
+- UI-only Source 的受管文件集合只允许 `index.html`、`ui/**`、固定的项目元数据和
+  exact dependency lock；实现层将入口规范化为 `ui/index.html`，并以 canonical
+  snapshot digest 标识整棵 Source。
+- Source 写入先进入 owner/project 隔离的 staging，再以原子替换更新 Source head；
+  路径 containment、Windows 大小写/NFC 冲突、空文件、特殊文件和取消清理必须在
+  Store 边界拒绝。Source Store 不接受 `service/main.mjs`，也不从 Plugin Store 复制
+  文件。
+- Project source revision、source digest、dependency lock digest、build profile version
+  与 build generation 在同一 owner CAS 语义下更新；Source 改变不会隐式修改 Ready、
+  Active 或 Previous。
+
+### B. UI-only Build 与 Operation
+
+- Build application service 只接受当前 owner/project 的 exact Source head，并在开始时
+  捕获不可变 source/lock snapshot；同一 MiniApp 同时最多一个 active Build。
+- Build 使用固定 `miniapp-release-v1` UI-only profile。它可以复用既有 canonical
+  manifest、路径校验和 digest 规则，但不能把 Plugin `plugin-package-v1` 顶层身份、
+  Source Store 或 Package lifecycle 当作 MiniApp 实现。
+- UI-only Build 不启动 Node；它只把已验证的静态 UI bytes 送入固定 builder 和
+  Release Store。任何自定义 build/install/postinstall script、Service source、native
+  addon、dynamic import 或未锁定依赖都 fail closed。
+- Build 持久化一个最小 `Build` Operation：开始时写 `running`，在成功写入 Ready
+  后写 `succeeded`；失败写 `failed`；取消只在 Ready 提交前生效，跨过提交边界后返回
+  conflict，不事后把成功 Ready 改成 canceled。Operation 不扩展成通用 phase engine。
+- staging、Build log 尾部和 Operation 都以 owner/project/build generation 关联；App
+  crash 或取消后必须能清理 staging，不能留下可被下一次 Build 误认的半成品。
+
+### C. Immutable Release 与 Ready CAS
+
+- Release Store 保存完整 manifest、每个规范化文件的 bytes、逐文件 digest、manifest
+  digest 和 canonical Release digest；文件 bytes 与 manifest 不一致时不得创建 Release
+  row。
+- Release artifact 使用独立于 Plugin Artifact Store 的 MiniApp 端口，但可以复用同一
+  content-addressed CAS、containment 和 published inventory 原则；不能让 MiniApp
+  Release 伪装成 Plugin Mount 或 Capability Package。
+- Build 成功时按 `project source digest + dependency lock digest + build profile
+  version + build generation` 写入一条 managed Release，并通过 exact Product/Project/
+  pointer CAS 原子替换旧 Ready。既有 Active/Previous 不在该切片中被切换。
+- Build 失败、取消或 digest admission 失败时，旧 Ready、Active、Previous 和 Catalog
+  保持不变；成功但后续 DTO 组装失败也必须返回明确错误，不允许返回一个看似 Ready
+  的半状态。
+
+### D. App/UI 边界
+
+- 新增的 MiniApp Build 路由只接受 installation owner 与 local-trust 请求，并把
+  revision、source digest、build generation 和 operation identity 交给 application
+  service 做最终校验；UI 不得自报 Ready、Release、owner 或 digest。
+- Library/Workshop 本轮只展示 Source 状态、Build 状态、Ready digest/时间和可操作的
+  Build/Cancel；不显示不存在的 Publish/Surface/Service 控件，也不恢复旧 Guid/
+  Conversation MiniApp 入口。
+- 本轮的最小验收必须同时覆盖 fresh owner 隔离、Source CAS、Build success/failure/
+  cancel、file/manifest digest、一致的 Ready lineage、staging cleanup 以及
+  UI-only Node process=0。Windows Desktop x64 是唯一当前执行环境；跨平台验证在
+  Windows cohort 冻结后统一交接。
+
 ## 0. 怎样阅读这份文档
 
 这份计划先回答产品问题，再给出足够实施的技术边界。它不尝试提前设计所有异常、权限、兼容和远期扩展。
