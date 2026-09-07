@@ -233,7 +233,6 @@ const CAPABILITY_ACTION_LABELS: Readonly<
   steer: { en: 'steering', zh: '调整执行' },
   store: { en: 'storage', zh: '存储' },
   sudo: { en: 'privileged execution', zh: '管理员执行' },
-  summon: { en: 'summoning', zh: '召唤' },
   sync: { en: 'synchronization', zh: '同步' },
   takeover: { en: 'takeover', zh: '接管' },
   template: { en: 'templates', zh: '模板' },
@@ -286,10 +285,6 @@ const CAPABILITY_COPY_OVERRIDES: Readonly<
   'companion.roster': {
     en: ['Companion list', 'Show the Companions available to the current usage target.'],
     zh: ['伙伴列表', '显示当前使用目标可用的伙伴列表。'],
-  },
-  'companion.summon': {
-    en: ['Summon a Companion', 'Select a Companion for the current Agent Session.'],
-    zh: ['召唤伙伴', '为当前 Agent 会话选择一个伙伴。'],
   },
   'knowledge.autogen': {
     en: ['Generate knowledge', 'Generate bounded material for the selected knowledge base.'],

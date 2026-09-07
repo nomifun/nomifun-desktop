@@ -1331,13 +1331,6 @@
           },
           {
             "capability": {
-              "id": "companion.summon",
-              "version": "1.0.0"
-            },
-            "kind": "tool"
-          },
-          {
-            "capability": {
               "id": "companion.learn",
               "version": "1.0.0"
             },
@@ -1769,5 +1762,5 @@
       }
     ]
   },
-  "payload_digest": "0f4605524f780eb8584862aa93f7dee34a246c537f1983baca7a5f4a03dbe58f"
+  "payload_digest": "69e12b0445e1697eed7f303f90b4e320dd47504e083af81ba3e6aa662dc8be92"
 }

@@ -386,7 +386,7 @@ describe('httpRequest client deadline + network-failure diagnosis', () => {
     try {
       let caught: unknown;
       try {
-        await httpRequest('PUT', '/api/nomi/summon', { enabled: false });
+        await httpRequest('PUT', '/api/settings/preferences', { enabled: false });
       } catch (e) {
         caught = e;
       }

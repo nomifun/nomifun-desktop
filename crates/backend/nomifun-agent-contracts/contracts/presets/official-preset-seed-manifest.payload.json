@@ -1,6 +1,6 @@
 {
   "manifest_version": "1.0.0",
-  "target_first_party_contribution_digest": "0f4605524f780eb8584862aa93f7dee34a246c537f1983baca7a5f4a03dbe58f",
+  "target_first_party_contribution_digest": "69e12b0445e1697eed7f303f90b4e320dd47504e083af81ba3e6aa662dc8be92",
   "target_runtime_feature_inventory_digest": "bc01fffa050a721debc7740405a05f53b966d4e2dc2d8b4392e321d944fca2ee",
   "templates": {
     "chat.minimal": {
@@ -269,10 +269,6 @@
       "on_demand_capabilities": [
         {
           "id": "companion.roster",
-          "version": "1.0.0"
-        },
-        {
-          "id": "companion.summon",
           "version": "1.0.0"
         },
         {
@@ -643,7 +639,6 @@
         "companion.learn",
         "companion.persona",
         "companion.roster",
-        "companion.summon",
         "knowledge.read",
         "knowledge.search",
         "memory.companion.evolve",

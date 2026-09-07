@@ -1285,7 +1285,6 @@ const BROWSER: &[&str] = &["browser"];
 const COMPUTER: &[&str] = &["computer"];
 const KNOWLEDGE_BASE: &[&str] = &["knowledge_base"];
 const PROJECT_MEMORY: &[&str] = &["project_memory"];
-const COMPANION: &[&str] = &["companion"];
 const COMPANION_MEMORY: &[&str] = &["companion_memory"];
 const CHANNEL: &[&str] = &["channel"];
 const CUSTOMER: &[&str] = &["customer"];
@@ -1424,10 +1423,9 @@ const IDMM_CAPABILITIES: [CapabilitySpec; 3] = [
     CapabilitySpec::middleware("idmm.intervene"),
     CapabilitySpec::middleware("idmm.fallback_policy"),
 ];
-const COMPANION_CAPABILITIES: [CapabilitySpec; 5] = [
+const COMPANION_CAPABILITIES: [CapabilitySpec; 4] = [
     CapabilitySpec::context("companion.persona"),
     CapabilitySpec::context("companion.roster"),
-    CapabilitySpec::tool("companion.summon", EffectClass::ReadSensitive, COMPANION),
     CapabilitySpec::tool("companion.learn", EffectClass::WriteDurable, COMPANION_MEMORY),
     CapabilitySpec::tool("companion.evolve", EffectClass::WriteDurable, COMPANION_MEMORY),
 ];

@@ -107,7 +107,7 @@
       ],
       "responsibility_groups": [
         "Browser lane provider",
-        "Companion memory, prompt, skill and summon sinks",
+        "Companion memory, prompt and skill sinks",
         "Cron and Requirement sinks",
         "Gateway MCP injection",
         "Knowledge retrieval and writeback",

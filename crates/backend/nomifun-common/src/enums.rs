@@ -126,7 +126,7 @@ pub enum AgentKillReason {
     /// A deliberate administrative recycle so a conversation-level
     /// configuration change takes effect on the next build: a model /
     /// workspace / delegation update, a companion skill-snapshot refresh, a
-    /// summon change, a failover model switch, or a failed-edit session
+    /// failover model switch, or a failed-edit session
     /// rollback. Like [`Self::KnowledgeBindingChanged`] this recycles a
     /// healthy runtime on purpose, so the restart governor must never count
     /// it as a crash.

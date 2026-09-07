@@ -131,7 +131,6 @@ describe('Nomi sendbox control layout', () => {
     const modelSource = readSource(new URL('./NomiModelSelector.tsx', import.meta.url));
     const sendBoxCss = readSource(new URL('../../../../components/chat/SendBox/sendbox.css', import.meta.url));
     const collaboratorSource = readSource(new URL('../../../guid/components/GuidCollaboratorSelector.tsx', import.meta.url));
-    const summonSource = readSource(new URL('../../components/SummonPanel/index.tsx', import.meta.url));
 
     expect(sendBoxSource.includes('sendbox-responsive-config-group')).toBe(true);
     expect(sendBoxCss.includes('container-name: sendbox-config')).toBe(true);
@@ -148,9 +147,5 @@ describe('Nomi sendbox control layout', () => {
       expect(source.includes('sendbox-responsive-label')).toBe(true);
       expect(source.includes('aria-label=')).toBe(true);
     }
-    const summonControlSource = summonSource.slice(summonSource.indexOf('const SummonControl'));
-    expect(summonControlSource.includes('<Tooltip')).toBe(false);
-    expect(summonSource.includes('sendbox-responsive-label')).toBe(true);
-    expect(summonSource.includes("className='nomi-sendbox-summon-btn'")).toBe(true);
   });
 });

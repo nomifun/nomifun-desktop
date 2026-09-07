@@ -40,9 +40,6 @@ type GuidInputCardProps = {
   files: string[];
   onRemoveFile: (path: string) => void;
 
-  // Entry strip (slot rendered at top of inner card)
-  entryStrip?: React.ReactNode;
-
   // Action row
   actionRow: React.ReactNode;
 
@@ -72,7 +69,6 @@ const GuidInputCard: React.FC<GuidInputCardProps> = ({
   mentionDropdown,
   files,
   onRemoveFile,
-  entryStrip,
   actionRow,
   showWorkspace = false,
   workspaceDir,
@@ -125,7 +121,6 @@ const GuidInputCard: React.FC<GuidInputCardProps> = ({
           boxShadow: isInputActive && !isFileDragging ? activeShadow : 'none',
         }}
       >
-        {entryStrip}
         {mentionSelectorBadge}
         <Input.TextArea
           autoSize={textareaAutoSize}

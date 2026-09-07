@@ -1,7 +1,6 @@
 //! Unified full-text memory search over the `companion_memories_fts` FTS5
 //! index — the single retrieval interface behind the `recall_memories` tool,
-//! the REST list endpoint (q → relevance) and the second-wave in-session
-//! summon track. Interface names (`MemorySearchQuery` / `MemorySearchHit` /
+//! the REST list endpoint (q → relevance). Interface names (`MemorySearchQuery` / `MemorySearchHit` /
 //! `CompanionStore::search_memories`) are a cross-track contract; do not
 //! rename.
 //!

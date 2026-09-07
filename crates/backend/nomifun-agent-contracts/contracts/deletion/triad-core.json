@@ -425,12 +425,6 @@
           ]
         },
         {
-          "path": "crates/backend/nomifun-conversation/src/summon.rs",
-          "symbols": [
-            "ConversationService"
-          ]
-        },
-        {
           "path": "crates/backend/nomifun-cron/src/service.rs",
           "symbols": [
             "AgentType::Nomi"

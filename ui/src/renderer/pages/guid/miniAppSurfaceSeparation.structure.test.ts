@@ -11,8 +11,9 @@ const readSource = (url: URL): string =>
   readFileSync(url, 'utf8').replace(/\r\n/g, '\n');
 
 const guidPage = readSource(new URL('./GuidPage.tsx', import.meta.url));
-const composer = readSource(
-  new URL('./components/ComposerEntryStrip.tsx', import.meta.url)
+const composerPath = new URL(
+  './components/ComposerEntryStrip.tsx',
+  import.meta.url
 );
 const quickStartPath = new URL(
   '../../hooks/agent/useMiniAppQuickStart.ts',
@@ -23,8 +24,17 @@ const autoPreviewPath = new URL(
   import.meta.url
 );
 
+const sourceIsMissing = (url: URL): boolean => {
+  try {
+    readFileSync(url);
+    return false;
+  } catch {
+    return true;
+  }
+};
+
 describe('Guid and MiniApp surface separation', () => {
-  test('Guid has one ordinary send path and no MiniApp mode', () => {
+  test('Guid has one ordinary send path and no retired session entry strip', () => {
     expect(guidPage.includes('send.sendMessageHandler')).toBe(true);
     expect(guidPage.includes('miniAppMode')).toBe(false);
     expect(guidPage.includes('miniAppQuickStart')).toBe(false);
@@ -32,23 +42,13 @@ describe('Guid and MiniApp surface separation', () => {
     expect(guidPage.includes('new URLSearchParams(location.search)')).toBe(
       false
     );
-    expect(composer.includes('onCreateMiniApp')).toBe(false);
+    expect(guidPage.includes('ComposerEntryStrip')).toBe(false);
+    expect(guidPage.includes('SummonDrawer')).toBe(false);
+    expect(sourceIsMissing(composerPath)).toBe(true);
   });
 
   test('retired conversation launch hooks are physically absent', () => {
-    let quickStartMissing = false;
-    try {
-      readFileSync(quickStartPath);
-    } catch {
-      quickStartMissing = true;
-    }
-    let autoPreviewMissing = false;
-    try {
-      readFileSync(autoPreviewPath);
-    } catch {
-      autoPreviewMissing = true;
-    }
-    expect(quickStartMissing).toBe(true);
-    expect(autoPreviewMissing).toBe(true);
+    expect(sourceIsMissing(quickStartPath)).toBe(true);
+    expect(sourceIsMissing(autoPreviewPath)).toBe(true);
   });
 });
