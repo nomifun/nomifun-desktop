@@ -9,11 +9,11 @@ import { Popover, Select } from '@arco-design/web-react';
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import CreativeMediaPreview from '../../assets/components/CreativeMediaPreview';
 import type {
   CreativeModelOption,
   CreativeModelSelectionRef,
 } from '../../models';
-import { videoWorkbenchSizeOptionLabel } from '../../workbenches/video';
 import type {
   CanvasVideoComposeSettings,
   CanvasVideoComposeTaskSummary,
@@ -30,6 +30,7 @@ export type CanvasVideoSeconds = 5 | 10;
 export interface CanvasVideoReferenceSummary {
   name: string;
   previewUrl?: string | null;
+  originalUrl?: string | null;
 }
 
 export interface CreativeCanvasVideoComposerProps {
@@ -155,18 +156,11 @@ const CreativeCanvasVideoComposer: React.FC<
       !busy &&
       prompt.trim().length > 0 &&
       selectedModel !== null;
-  const modeLabel =
-    mode === 't2v'
-      ? t('creativeStudio.canvas.video.textToVideo', {
-          defaultValue: '文生视频',
-        })
-      : mode === 'i2v'
-        ? t('creativeStudio.canvas.video.imageToVideo', {
-            defaultValue: '图生视频·1张参考图',
-          })
-        : t('creativeStudio.canvas.video.unsupportedMode', {
-            defaultValue: '当前节点不支持视频生成',
-          });
+  const unsupportedModeLabel = unsupported
+    ? t('creativeStudio.canvas.video.unsupportedMode', {
+        defaultValue: '当前节点不支持视频生成',
+      })
+    : null;
 
   useEffect(() => setPrompt(initialPrompt), [initialPrompt, nodeId]);
 
@@ -201,21 +195,28 @@ const CreativeCanvasVideoComposer: React.FC<
       nodeId={nodeId}
       mode={mode}
     >
-        <div className={styles.contextRow}>
-          <span className={styles.modePill}>{modeLabel}</span>
-          {mode === 'i2v' && reference ? (
-            <span className={styles.reference} title={reference.name}>
-              {reference.previewUrl ? (
-                <img
-                  className={styles.referencePreview}
-                  src={reference.previewUrl}
-                  alt=''
-                />
-              ) : null}
-              <span className={styles.referenceName}>{reference.name}</span>
-            </span>
-          ) : null}
-        </div>
+        {unsupportedModeLabel || (mode === 'i2v' && reference) ? (
+          <div className={styles.contextRow}>
+            {unsupportedModeLabel ? (
+              <span className={styles.modePill}>{unsupportedModeLabel}</span>
+            ) : null}
+            {mode === 'i2v' && reference ? (
+              <span className={styles.reference} title={reference.name}>
+                {reference.previewUrl || reference.originalUrl ? (
+                  <span className={styles.referencePreview}>
+                    <CreativeMediaPreview
+                      kind='image'
+                      src={reference.originalUrl ?? reference.previewUrl}
+                      posterSrc={reference.previewUrl}
+                      alt=''
+                    />
+                  </span>
+                ) : null}
+                <span className={styles.referenceName}>{reference.name}</span>
+              </span>
+            ) : null}
+          </div>
+        ) : null}
 
         <textarea
           className={composerStyles.prompt}
@@ -330,14 +331,14 @@ const CreativeCanvasVideoComposer: React.FC<
                   <label className={composerStyles.field}>
                     <span>
                       {t('creativeStudio.canvas.video.aspectRatioLabel', {
-                        defaultValue: '画幅',
+                        defaultValue: '宽高比',
                       })}
                     </span>
                     <select
                       className={composerStyles.settingsControl}
                       value={settings.aspectRatio}
                       aria-label={t('creativeStudio.canvas.video.aspectRatioAriaLabel', {
-                        defaultValue: '视频画幅',
+                        defaultValue: '视频宽高比',
                       })}
                       disabled={interactionDisabled}
                       onChange={(event) =>
@@ -346,10 +347,7 @@ const CreativeCanvasVideoComposer: React.FC<
                     >
                       {ASPECT_RATIO_OPTIONS.map((option) => (
                         <option key={option} value={option}>
-                          {videoWorkbenchSizeOptionLabel(
-                            settings.resolution,
-                            option
-                          )}
+                          {option}
                         </option>
                       ))}
                     </select>

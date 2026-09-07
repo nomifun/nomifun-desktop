@@ -56,6 +56,47 @@ function apiStub(overrides: Partial<WorkshopAssetApi> = {}): WorkshopAssetApi {
 }
 
 describe('CreativeAssetClient', () => {
+  test('keeps tombstone metadata readable without exposing deleted media or text', async () => {
+    const client = new CreativeAssetClient(apiStub({ get: async () => assetDto({ deleted_at: 300, text_content: 'old content' }) }));
+    const deleted = await client.get(ASSET_ID);
+    expect(deleted.deletedAt).toBe(300);
+    expect(deleted.originalUrl).toBe('');
+    expect(deleted.thumbnailUrl).toBe(null);
+    expect(deleted.textContent).toBe(null);
+    expect(deleted.inLibrary).toBe(false);
+  });
+
+  test('late read and list responses cannot resurrect an asset after successful deletion', async () => {
+    let finishRead!: (value: WorkshopAssetDto) => void;
+    const response = new Promise<WorkshopAssetDto>((resolve) => { finishRead = resolve; });
+    const client = new CreativeAssetClient(apiStub({ get: () => response }));
+    const staleRead = client.get(ASSET_ID);
+    await client.remove(ASSET_ID);
+    finishRead(assetDto());
+    const asset = await staleRead;
+    expect(typeof asset.deletedAt).toBe('number');
+    expect(asset.originalUrl).toBe('');
+    expect((await client.list()).items).toEqual([]);
+  });
+
+  test('confirms partial cleanup deletion via metadata but preserves the retryable error', async () => {
+    const failure = new Error('File cleanup failed');
+    let deleted = true;
+    const client = new CreativeAssetClient(apiStub({
+      remove: async () => { throw failure; },
+      get: async () => assetDto({ deleted_at: deleted ? 300 : null }),
+    }));
+    expect(await client.remove(ASSET_ID).catch((error) => error)).toBe(failure);
+    deleted = false; // A pre-deletion GET snapshot arriving later is still stale.
+    expect((await client.get(ASSET_ID)).deletedAt).toBe(300);
+  });
+
+  test('never infers deletion from an error when metadata does not confirm it', async () => {
+    const failure = new Error('Network unavailable');
+    const client = new CreativeAssetClient(apiStub({ remove: async () => { throw failure; } }));
+    expect(await client.remove(ASSET_ID).catch((error) => error)).toBe(failure);
+    expect((await client.get(ASSET_ID)).deletedAt).toBe(null);
+  });
   test('maps the Workshop wire shape into the Creative Studio domain shape', () => {
     const asset = mapWorkshopAsset(assetDto());
 

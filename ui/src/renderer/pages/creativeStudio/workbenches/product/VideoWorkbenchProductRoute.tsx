@@ -14,7 +14,10 @@ import { useNavigate } from 'react-router-dom';
 import {
   CreativeAssetPickerModal,
   creativeAssetClient,
+  CreativeAssetDeletedError,
+  isCreativeAssetDeleted,
   useCreativeAssets,
+  useCreativeAssetAvailability,
   type CreativeAsset,
 } from '../../assets';
 import {
@@ -54,7 +57,6 @@ import {
 import {
   VideoWorkbench,
   videoWorkbenchDimensions as resolveVideoWorkbenchDimensions,
-  videoWorkbenchSizeOptionLabel,
   type VideoWorkbenchLayout,
 } from '../video';
 import {
@@ -234,9 +236,13 @@ const OwnedVideoWorkbenchReady: React.FC<{
     onRecoveryFailure,
     onRuntimeError: (reason) => setError(formatError(reason)),
   });
+  const outputAvailability = useCreativeAssetAvailability([
+    ...durableTasks.flatMap((task) => [...task.resultAssetIds, ...(task.inputs?.map((input) => input.assetId) ?? [])]),
+    ...runtime.entries.flatMap((entry) => [...entry.task.resultAssetIds, ...(entry.task.inputs?.map((input) => input.assetId) ?? [])]),
+  ]);
   const presentationRuntime = useMemo(
-    () => standaloneHistoryRuntimeSnapshot(historyScope, durableTasks, runtime, creativeAssetClient),
-    [durableTasks, historyScope, runtime]
+    () => standaloneHistoryRuntimeSnapshot(historyScope, durableTasks, runtime, creativeAssetClient, outputAvailability),
+    [durableTasks, historyScope, runtime, outputAvailability]
   );
   const referenceById = useMemo(
     () => new Map([...assets.assets, ...hydratedReferences].map((asset) => [asset.id, asset])),
@@ -540,10 +546,7 @@ const OwnedVideoWorkbenchReady: React.FC<{
     resolutionOptions: RESOLUTIONS,
     onResolutionChange: setResolution,
     size: aspect,
-    sizeOptions: ASPECTS.map((option) => ({
-      ...option,
-      label: videoWorkbenchSizeOptionLabel(resolution, option.value, option.label),
-    })),
+    sizeOptions: ASPECTS,
     onSizeChange: setAspect,
     duration,
     durationOptions,
@@ -605,7 +608,7 @@ const OwnedVideoWorkbenchReady: React.FC<{
         setError(formatError(reason))
       );
     },
-    onDownloadTask: (taskId: string) => {
+    onDownloadTask: async (taskId: string) => {
       try {
         const task = taskById(taskId);
         const assetId = task.resultAssetIds[0];
@@ -617,8 +620,10 @@ const OwnedVideoWorkbenchReady: React.FC<{
           );
           return;
         }
+        const asset = await creativeAssetClient.get(assetId);
+        if (isCreativeAssetDeleted(asset)) throw new CreativeAssetDeletedError(asset.id);
         const link = document.createElement('a');
-        link.href = creativeAssetClient.url(assetId, 'original');
+        link.href = asset.originalUrl;
         link.download = `${assetId}.mp4`;
         link.click();
       } catch (reason) {

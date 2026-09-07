@@ -39,7 +39,8 @@
 }
 
 .option {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   min-width: 0;
   align-items: center;
   gap: 8px;
@@ -49,12 +50,31 @@
   min-width: 0;
   overflow: hidden;
   color: inherit;
+  font-size: 12px;
+  line-height: 1.5;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.option:has(.optionRawModel) {
+  grid-template-columns: auto minmax(20px, 1fr) auto;
+}
+
+.menuOption .option {
+  box-sizing: border-box;
+  min-height: 36px;
+  padding: 6px 0;
+  line-height: 18px;
+}
+
+.menuOption .optionModel {
+  overflow: visible;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
 .optionProtocol {
-  flex: 0 0 auto;
+  grid-column: 3;
   overflow: hidden;
   max-width: 140px;
   color: var(--color-text-4);
@@ -64,7 +84,7 @@
 }
 
 .optionRawModel {
-  flex: 0 1 180px;
+  min-width: 0;
   overflow: hidden;
   color: var(--color-text-4);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
