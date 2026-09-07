@@ -10,6 +10,8 @@ import { useTranslation } from 'react-i18next';
 import styles from '../index.module.css';
 
 export interface ComposerEntryStripProps {
+  /** The current Agent and its selection menu. */
+  agentSelector?: React.ReactNode;
   /** Mini-app entry. Omit to hide this capability on a surface. */
   onCreateMiniApp?: () => void;
   miniAppActive?: boolean;
@@ -21,6 +23,7 @@ export interface ComposerEntryStripProps {
  * authoring is intentionally not embedded in the quick-start surface.
  */
 const ComposerEntryStrip: React.FC<ComposerEntryStripProps> = ({
+  agentSelector,
   onCreateMiniApp,
   miniAppActive = false,
   onDismissMiniApp,
@@ -57,10 +60,11 @@ const ComposerEntryStrip: React.FC<ComposerEntryStripProps> = ({
     </button>
   );
 
-  if (!miniAppEntry) return null;
+  if (!miniAppEntry && !agentSelector) return null;
 
   return (
     <div className={styles.entryStrip}>
+      {agentSelector && <div className={styles.entryAgentSelector}>{agentSelector}</div>}
       {miniAppEntry}
     </div>
   );

@@ -9,12 +9,14 @@ import AgentPresetEditor from './AgentPresetEditor';
 import AgentPresetLibrary from './AgentPresetLibrary';
 import OfficialTemplateOverview from './OfficialTemplateOverview';
 import { useAgentSettingsController } from './useAgentSettingsController';
+import { useAgentWorkbenchEntry } from './useAgentWorkbenchEntry';
 import styles from './AgentSettingsPage.module.css';
 
 const AgentSettingsPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const controller = useAgentSettingsController();
+  useAgentWorkbenchEntry(controller);
   const sourceTemplate =
     controller.draft?.source_template_key == null
       ? undefined

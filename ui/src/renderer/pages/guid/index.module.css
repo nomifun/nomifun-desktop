@@ -349,6 +349,11 @@ button.guidResourceCard:focus-visible {
   overflow: hidden;
 }
 
+.entryAgentSelector {
+  flex: 1;
+  min-width: 0;
+}
+
 @container guid-entry-strip (max-width: 560px) {
   .entryStrip .entryButton,
   .entryStrip .entryBackButton,
@@ -1014,27 +1019,6 @@ button.guidResourceCard:focus-visible {
   .guidAdvancedControls {
     display: none;
   }
-}
-
-/* Agent 选中时：先放大再回落至略大（pop 动效） */
-@keyframes agentSelectPop {
-  0% {
-    transform: scale(1);
-  }
-  35% {
-    transform: scale(1.12);
-  }
-  100% {
-    transform: scale(1.02);
-  }
-}
-
-.agentItemSelected {
-  background-color: var(--fill-0);
-  transition:
-    opacity 0.5s cubic-bezier(0.2, 0.8, 0.3, 1),
-    background-color 0.25s ease-out;
-  animation: agentSelectPop 0.4s ease-out forwards;
 }
 
 /* 底部快捷按钮：基础间距 + 安全区 */

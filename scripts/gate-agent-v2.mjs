@@ -5692,7 +5692,7 @@ function ap7RunCommand(command, commandArgs) {
 function ap7AgentPresetLaunchContract() {
   const paths = {
     page: 'ui/src/renderer/pages/guid/GuidPage.tsx',
-    pill: 'ui/src/renderer/pages/guid/components/AgentPillBar.tsx',
+    selector: 'ui/src/renderer/pages/guid/components/GuidAgentSelector.tsx',
     actionRow:
       'ui/src/renderer/pages/guid/components/GuidActionRow.tsx',
     send: 'ui/src/renderer/pages/guid/hooks/useGuidSend.ts',
@@ -5743,8 +5743,8 @@ function ap7AgentPresetLaunchContract() {
     'Guid must render the default-or-preset selector and honor Workbench preselection'
   );
   require(
-    source.pill.includes("data-testid='agent-pill-default'") &&
-      source.pill.includes("defaultValue: 'Nomi Agent'") &&
+    source.selector.includes('onSelectDefault') &&
+      source.selector.includes("defaultValue: 'Nomi Agent'") &&
       source.selection.includes(
         "const DEFAULT_AGENT_SELECTION: GuidAgentSelection = { kind: 'default' };"
       ) &&
@@ -5791,10 +5791,10 @@ function ap7AgentPresetLaunchContract() {
     'Guid and conversation headers may expose Knowledge only as a target-scoped control for declared capability resources'
   );
   require(
-    source.pill.includes('{preset.display_name}') &&
-      source.pill.includes('onSelectPreset(presetId)') &&
-      source.pill.includes("navigate('/agent')"),
-    'the home pill bar must visibly list presets and link + to /agent'
+    source.selector.includes('name={preset.display_name}') &&
+      source.selector.includes('onSelectPreset(preset.preset_id)') &&
+      source.selector.includes("to='/agent'"),
+    'the home Agent selector must expose saved presets and link management to /agent'
   );
   require(
     source.send.includes("if (selection.kind === 'default')") &&
