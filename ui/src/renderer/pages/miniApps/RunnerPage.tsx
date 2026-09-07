@@ -4,88 +4,766 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/**
- * MiniAppRunnerPage (`/mini-apps/:id`) — the full-page mini-app runtime.
- *
- * ONE column (spec D18): {@link MiniAppFrame} fills the body, and the toolbar
- * carries everything else. The frame is shared with the right-rail quick panel so
- * the two runtimes cannot drift (serve URL + sandbox + load watchdog).
- *
- * What the frame shows is always the PUBLISHED snapshot, while a conversation
- * edits the working copy on disk — so "the AI changed it" and "the app changed"
- * are two events, and this page has to make the gap legible: while a working copy
- * is newer than the snapshot the toolbar carries 「发布」 and one sentence saying
- * why. Without that users report 改了不生效.
- *
- * 「继续迭代」 leaves for an ORDINARY conversation ({@link useMiniAppIterate}):
- * this page hosts no chat of its own, which is exactly why it is a single column
- * again.
- *
- * Design spec: docs/specs/2026-08-10-miniapps-v3-unified-conversations.zh.md
- */
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
-import { useTranslation } from 'react-i18next';
-import { Button, Result, Spin } from '@arco-design/web-react';
-import { ApplicationOne, ArrowLeft, Browser, Delete, EditTwo, MagicWand, Refresh, Upload } from '@icon-park/react';
 import { ipcBridge } from '@/common';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
-import type { IApiMiniApp } from '@/common/adapter/ipcBridge';
 import { parseMiniAppId } from '@/common/types/ids';
-import type { MiniAppId } from '@/common/types/ids';
-import { useArcoMessage } from '@renderer/utils/ui/useArcoMessage';
-import MiniAppFrame from './MiniAppFrame';
-import { resolveMiniAppServeUrl } from './contract';
-import { useMiniAppIterate } from './useMiniAppIterate';
-import { useMiniAppMutations } from './useMiniAppMutations';
+import type {
+  MiniAppCapabilityContribution,
+  MiniAppConsumerSurface,
+  MiniAppOperationState,
+  MiniAppReleaseRef,
+  MiniAppWorkshop,
+} from '@/common/types/miniAppPlatform';
+import HubPageShell from '@/renderer/components/layout/HubPageShell';
+import { Button } from '@arco-design/web-react';
+import {
+  ArrowLeft,
+  CheckOne,
+  CloseOne,
+  Refresh,
+} from '@icon-park/react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { useNavigate, useParams } from 'react-router-dom';
+import {
+  formatMiniAppTimestamp,
+  miniAppPublishBlockingReasons,
+  miniAppWorkflowState,
+  shortMiniAppIdentity,
+} from './model';
+import {
+  MiniAppHealthBadge,
+  MiniAppKindBadge,
+  MiniAppLifecycleBadge,
+  MiniAppSourceBadge,
+  MiniAppStatePanel,
+  MiniAppTestBadge,
+  StatusBadge,
+  WorkflowIcon,
+} from './MiniAppM1State';
+import styles from './MiniAppWorkbench.module.css';
 
-const TOOLBAR_ACTION_CLASS = [
-  'grid h-32px w-32px place-items-center rounded-8px shrink-0 cursor-pointer',
-  'text-[var(--color-text-2)] hover:bg-[var(--color-fill-2)] hover:text-[var(--color-text-1)]',
-  'transition-colors',
-].join(' ');
-
-const TOOLBAR_DANGER_ACTION_CLASS = [
-  'grid h-32px w-32px place-items-center rounded-8px shrink-0 cursor-pointer',
-  'text-[var(--color-text-2)] hover:!text-danger-6 hover:!bg-[rgba(var(--danger-6),0.08)]',
-  'transition-colors',
-].join(' ');
-
-interface ToolbarActionProps {
-  label: string;
-  danger?: boolean;
-  onRun: () => void;
-  children: React.ReactNode;
+function formatError(error: unknown): string {
+  if (isBackendHttpError(error)) {
+    const detail = error.backendMessage || error.message;
+    return error.code ? `${error.code}: ${detail}` : detail;
+  }
+  return error instanceof Error ? error.message : String(error);
 }
 
-const ToolbarAction: React.FC<ToolbarActionProps> = ({ label, danger, onRun, children }) => (
-  <div
-    role='button'
-    tabIndex={0}
-    title={label}
-    aria-label={label}
-    onClick={onRun}
-    onKeyDown={(e) => {
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        onRun();
-      }
-    }}
-    className={danger ? TOOLBAR_DANGER_ACTION_CLASS : TOOLBAR_ACTION_CLASS}
-  >
-    {children}
-  </div>
-);
+const ReleaseSlot: React.FC<{
+  label: string;
+  release?: MiniAppReleaseRef;
+  tone: 'active' | 'ready' | 'previous';
+}> = ({ label, release, tone }) => {
+  const { t } = useTranslation();
+  return (
+    <div
+      className={`${styles.releaseItem} ${
+        tone === 'active'
+          ? styles.releaseItemActive
+          : tone === 'ready'
+            ? styles.releaseItemReady
+            : styles.releaseItemPrevious
+      }`}
+    >
+      <div className={styles.releaseName}>{label}</div>
+      {release ? (
+        <>
+          <div className={styles.releaseValue} title={release.release_id}>
+            {shortMiniAppIdentity(release.release_id)}
+          </div>
+          <div className={styles.releaseDigest} title={release.release_digest}>
+            {shortMiniAppIdentity(release.release_digest, 10)}
+          </div>
+        </>
+      ) : (
+        <div className={styles.releaseValue}>{t('miniApps.common.none')}</div>
+      )}
+    </div>
+  );
+};
+
+const OperationBadge: React.FC<{ state: MiniAppOperationState }> = ({
+  state,
+}) => {
+  const { t } = useTranslation();
+  const labels: Record<MiniAppOperationState, string> = {
+    running: t('miniApps.workshop.operation.state.running'),
+    succeeded: t('miniApps.workshop.operation.state.succeeded'),
+    failed: t('miniApps.workshop.operation.state.failed'),
+    canceled: t('miniApps.workshop.operation.state.canceled'),
+  };
+  const tones: Record<
+    MiniAppOperationState,
+    'success' | 'info' | 'danger' | 'muted'
+  > = {
+    running: 'info',
+    succeeded: 'success',
+    failed: 'danger',
+    canceled: 'muted',
+  };
+  return <StatusBadge label={labels[state]} tone={tones[state]} />;
+};
+
+const surfaceLabel = (
+  surface: MiniAppConsumerSurface,
+  t: ReturnType<typeof useTranslation>['t']
+): string =>
+  t(
+    {
+      agent: 'miniApps.workshop.capabilities.surface.agent',
+      gateway: 'miniApps.workshop.capabilities.surface.gateway',
+      knowledge: 'miniApps.workshop.capabilities.surface.knowledge',
+      remote: 'miniApps.workshop.capabilities.surface.remote',
+      automation: 'miniApps.workshop.capabilities.surface.automation',
+      ui: 'miniApps.workshop.capabilities.surface.ui',
+      miniapp_service: 'miniApps.workshop.capabilities.surface.miniappService',
+    }[surface]
+  );
+
+const CapabilityRow: React.FC<{
+  capability: MiniAppCapabilityContribution;
+}> = ({ capability }) => {
+  const { t } = useTranslation();
+  return (
+    <div className={styles.rowItem}>
+      <div>
+        <div className={styles.rowPrimary}>{capability.display_name}</div>
+        <div
+          className={`${styles.rowSecondary} ${styles.mono}`}
+          title={capability.capability_id}
+        >
+          {capability.capability_id}
+        </div>
+      </div>
+      <div className={styles.rowSecondary}>
+        {capability.description ||
+          t('miniApps.workshop.capabilities.noDescription')}
+        <div className={styles.chipRow}>
+          {capability.consumer_availability.map((availability) => (
+            <span
+              key={`${availability.surface}:${availability.status}`}
+              className={styles.chip}
+              title={availability.reason_code}
+            >
+              {surfaceLabel(availability.surface, t)}
+              {' · '}
+              {t(
+                `miniApps.workshop.capabilities.availability.${availability.status}` as const
+              )}
+            </span>
+          ))}
+        </div>
+      </div>
+      <StatusBadge
+        label={`v${capability.capability_version}`}
+        tone='info'
+      />
+    </div>
+  );
+};
+
+const MiniAppWorkshopDetail: React.FC<{
+  workshop: MiniAppWorkshop;
+  locale: string;
+  onBack: () => void;
+  onRefresh: () => void;
+  refreshing: boolean;
+}> = ({ workshop, locale, onBack, onRefresh, refreshing }) => {
+  const { t } = useTranslation();
+  const { miniapp, ready, active_operation: operation } = workshop;
+  const workflow = miniAppWorkflowState(workshop);
+  const blockingReasons = miniAppPublishBlockingReasons(workshop);
+  const workflowSteps = [
+    {
+      key: 'source',
+      label: t('miniApps.workshop.workflow.source'),
+      state: workflow.source,
+    },
+    {
+      key: 'build',
+      label: t('miniApps.workshop.workflow.build'),
+      state: workflow.build,
+    },
+    {
+      key: 'ready',
+      label: t('miniApps.workshop.workflow.ready'),
+      state: workflow.ready,
+    },
+    {
+      key: 'publish',
+      label: t('miniApps.workshop.workflow.publish'),
+      state: workflow.publish,
+    },
+    {
+      key: 'surface',
+      label: t('miniApps.workshop.workflow.surface'),
+      state: workflow.surface,
+    },
+  ] as const;
+
+  return (
+    <main className={styles.detail}>
+      <header className={styles.detailHeader}>
+        <div className={styles.detailHeaderCopy}>
+          <span className={styles.eyebrow}>
+            {t('miniApps.workshop.detailEyebrow')}
+          </span>
+          <div className={styles.detailTitleRow}>
+            <h2 className={styles.detailTitle}>{miniapp.display_name}</h2>
+            <MiniAppKindBadge kind={miniapp.kind} />
+            <MiniAppLifecycleBadge lifecycle={miniapp.lifecycle} />
+            <MiniAppSourceBadge source={workshop.source_state} />
+          </div>
+          <p className={styles.detailDescription}>
+            {miniapp.description || t('miniApps.library.noDescription')}
+          </p>
+        </div>
+      </header>
+
+      <div className={styles.actionBar}>
+        <Button
+          icon={<ArrowLeft theme='outline' size='14' />}
+          onClick={onBack}
+        >
+          {t('miniApps.actions.backToLibrary')}
+        </Button>
+        <Button
+          icon={<Refresh theme='outline' size='14' />}
+          loading={refreshing}
+          onClick={onRefresh}
+        >
+          {t('miniApps.actions.refresh')}
+        </Button>
+      </div>
+
+      <ol
+        className={styles.workflow}
+        aria-label={t('miniApps.workshop.workflow.ariaLabel')}
+      >
+        {workflowSteps.map((step, index) => (
+          <li
+            key={step.key}
+            className={`${styles.workflowStep} ${
+              styles[`workflowStep_${step.state}`]
+            }`}
+          >
+            <span className={styles.workflowIndex}>
+              {step.state === 'done' ? (
+                <CheckOne theme='outline' size='13' />
+              ) : (
+                <WorkflowIcon state={step.state} />
+              )}
+            </span>
+            <span>
+              {index + 1}. {step.label}
+            </span>
+          </li>
+        ))}
+      </ol>
+
+      <section className={styles.section}>
+        <div className={styles.sectionHeader}>
+          <div>
+            <h3 className={styles.sectionTitle}>
+              {t('miniApps.workshop.identity.title')}
+            </h3>
+            <p className={styles.sectionHint}>
+              {t('miniApps.workshop.identity.hint')}
+            </p>
+          </div>
+        </div>
+        <div className={styles.factGrid}>
+          <div className={styles.fact}>
+            <span className={styles.factLabel}>
+              {t('miniApps.workshop.identity.miniappId')}
+            </span>
+            <span
+              className={`${styles.factValue} ${styles.mono}`}
+              title={miniapp.miniapp_id}
+            >
+              {shortMiniAppIdentity(miniapp.miniapp_id)}
+            </span>
+          </div>
+          <div className={styles.fact}>
+            <span className={styles.factLabel}>
+              {t('miniApps.workshop.identity.projectId')}
+            </span>
+            <span
+              className={`${styles.factValue} ${styles.mono}`}
+              title={workshop.project_id}
+            >
+              {shortMiniAppIdentity(workshop.project_id)}
+            </span>
+          </div>
+          <div className={styles.fact}>
+            <span className={styles.factLabel}>
+              {t('miniApps.workshop.identity.productRevision')}
+            </span>
+            <span className={styles.factValue}>{miniapp.product_revision}</span>
+          </div>
+          <div className={styles.fact}>
+            <span className={styles.factLabel}>
+              {t('miniApps.workshop.identity.projectRevision')}
+            </span>
+            <span className={styles.factValue}>{workshop.project_revision}</span>
+          </div>
+          <div className={styles.fact}>
+            <span className={styles.factLabel}>
+              {t('miniApps.workshop.identity.buildGeneration')}
+            </span>
+            <span className={styles.factValue}>{workshop.build_generation}</span>
+          </div>
+          <div className={styles.fact}>
+            <span className={styles.factLabel}>
+              {t('miniApps.workshop.identity.updatedAt')}
+            </span>
+            <span className={styles.factValue}>
+              {formatMiniAppTimestamp(miniapp.updated_at_ms, locale)}
+            </span>
+          </div>
+          <div className={styles.fact}>
+            <span className={styles.factLabel}>
+              {t('miniApps.workshop.identity.sourceDigest')}
+            </span>
+            <span
+              className={`${styles.factValue} ${styles.mono}`}
+              title={workshop.source_snapshot_digest}
+            >
+              {shortMiniAppIdentity(workshop.source_snapshot_digest)}
+            </span>
+          </div>
+          <div className={styles.fact}>
+            <span className={styles.factLabel}>
+              {t('miniApps.workshop.identity.lockDigest')}
+            </span>
+            <span
+              className={`${styles.factValue} ${styles.mono}`}
+              title={workshop.dependency_lock_digest}
+            >
+              {shortMiniAppIdentity(workshop.dependency_lock_digest)}
+            </span>
+          </div>
+          <div className={styles.fact}>
+            <span className={styles.factLabel}>
+              {t('miniApps.workshop.identity.pointerRevision')}
+            </span>
+            <span className={styles.factValue}>
+              {miniapp.releases.pointer_revision}
+            </span>
+          </div>
+          <div className={styles.fact}>
+            <span className={styles.factLabel}>
+              {t('miniApps.workshop.identity.activeEpoch')}
+            </span>
+            <span className={styles.factValue}>
+              {miniapp.releases.active_release_epoch}
+            </span>
+          </div>
+        </div>
+        {workshop.source_state === 'empty' && (
+          <div className={`${styles.notice} ${styles.noticeWarning}`}>
+            {t('miniApps.workshop.source.emptyNotice')}
+          </div>
+        )}
+        {workshop.source_state === 'runtime_only' && (
+          <div className={`${styles.notice} ${styles.noticeWarning}`}>
+            {t('miniApps.workshop.source.runtimeOnlyNotice')}
+          </div>
+        )}
+      </section>
+
+      <section className={styles.section}>
+        <div className={styles.sectionHeader}>
+          <div>
+            <h3 className={styles.sectionTitle}>
+              {t('miniApps.workshop.releases.title')}
+            </h3>
+            <p className={styles.sectionHint}>
+              {t('miniApps.workshop.releases.hint')}
+            </p>
+          </div>
+        </div>
+        <div className={styles.releaseGrid}>
+          <ReleaseSlot
+            label={t('miniApps.workshop.releases.active')}
+            release={miniapp.releases.active}
+            tone='active'
+          />
+          <ReleaseSlot
+            label={t('miniApps.workshop.releases.ready')}
+            release={miniapp.releases.ready}
+            tone='ready'
+          />
+          <ReleaseSlot
+            label={t('miniApps.workshop.releases.previous')}
+            release={miniapp.releases.previous}
+            tone='previous'
+          />
+        </div>
+      </section>
+
+      <section className={styles.section}>
+        <div className={styles.sectionHeader}>
+          <div>
+            <h3 className={styles.sectionTitle}>
+              {t('miniApps.workshop.ready.title')}
+            </h3>
+            <p className={styles.sectionHint}>
+              {t('miniApps.workshop.ready.hint')}
+            </p>
+          </div>
+        </div>
+        {ready ? (
+          <>
+            <div className={styles.factGrid}>
+              <div className={styles.fact}>
+                <span className={styles.factLabel}>
+                  {t('miniApps.workshop.ready.releaseId')}
+                </span>
+                <span
+                  className={`${styles.factValue} ${styles.mono}`}
+                  title={ready.release.release_id}
+                >
+                  {shortMiniAppIdentity(ready.release.release_id)}
+                </span>
+              </div>
+              <div className={styles.fact}>
+                <span className={styles.factLabel}>
+                  {t('miniApps.workshop.ready.buildGeneration')}
+                </span>
+                <span className={styles.factValue}>
+                  {ready.project_build_generation}
+                </span>
+              </div>
+              <div className={styles.fact}>
+                <span className={styles.factLabel}>
+                  {t('miniApps.workshop.ready.test')}
+                </span>
+                <span className={styles.factValue}>
+                  <MiniAppTestBadge status={ready.test.status} />
+                </span>
+              </div>
+              <div className={styles.fact}>
+                <span className={styles.factLabel}>
+                  {t('miniApps.workshop.ready.publishEligibility')}
+                </span>
+                <span className={styles.factValue}>
+                  <StatusBadge
+                    label={
+                      ready.can_publish
+                        ? t('miniApps.workshop.ready.canPublish')
+                        : t('miniApps.workshop.ready.blocked')
+                    }
+                    tone={ready.can_publish ? 'success' : 'warning'}
+                  />
+                </span>
+              </div>
+              <div className={styles.fact}>
+                <span className={styles.factLabel}>
+                  {t('miniApps.workshop.ready.autoPublish')}
+                </span>
+                <span className={styles.factValue}>
+                  {ready.can_auto_publish
+                    ? t('miniApps.common.yes')
+                    : t('miniApps.common.no')}
+                </span>
+              </div>
+              <div className={styles.fact}>
+                <span className={styles.factLabel}>
+                  {t('miniApps.workshop.ready.migrations')}
+                </span>
+                <span className={styles.factValue}>
+                  {ready.migration_count}
+                </span>
+              </div>
+            </div>
+            {blockingReasons.length > 0 && (
+              <ul className={styles.blockingList}>
+                {blockingReasons.map((reason) => (
+                  <li key={reason} className={styles.blockingItem}>
+                    <CloseOne theme='outline' size='13' />
+                    <code>{reason}</code>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </>
+        ) : (
+          <MiniAppStatePanel
+            title={t('miniApps.workshop.ready.emptyTitle')}
+            body={t('miniApps.workshop.ready.emptyBody')}
+          />
+        )}
+      </section>
+
+      <section className={styles.section}>
+        <div className={styles.sectionHeader}>
+          <div>
+            <h3 className={styles.sectionTitle}>
+              {t('miniApps.workshop.configuration.title')}
+            </h3>
+            <p className={styles.sectionHint}>
+              {t('miniApps.workshop.configuration.hint')}
+            </p>
+          </div>
+        </div>
+        <div className={styles.factGrid}>
+          <div className={styles.fact}>
+            <span className={styles.factLabel}>
+              {t('miniApps.workshop.configuration.configRevision')}
+            </span>
+            <span className={styles.factValue}>
+              {workshop.config.config_revision}
+            </span>
+          </div>
+          <div className={styles.fact}>
+            <span className={styles.factLabel}>
+              {t('miniApps.workshop.configuration.schemaDigest')}
+            </span>
+            <span
+              className={`${styles.factValue} ${styles.mono}`}
+              title={workshop.config_schema.schema_digest}
+            >
+              {shortMiniAppIdentity(workshop.config_schema.schema_digest, 10)}
+            </span>
+          </div>
+          <div className={styles.fact}>
+            <span className={styles.factLabel}>
+              {t('miniApps.workshop.configuration.validity')}
+            </span>
+            <span className={styles.factValue}>
+              <StatusBadge
+                label={
+                  workshop.config.valid
+                    ? t('miniApps.workshop.configuration.valid')
+                    : t('miniApps.workshop.configuration.invalid')
+                }
+                tone={workshop.config.valid ? 'success' : 'danger'}
+              />
+            </span>
+          </div>
+          <div className={styles.fact}>
+            <span className={styles.factLabel}>
+              {t('miniApps.workshop.configuration.credentialRevision')}
+            </span>
+            <span className={styles.factValue}>
+              {workshop.credential_bindings_revision}
+            </span>
+          </div>
+          <div className={styles.fact}>
+            <span className={styles.factLabel}>
+              {t('miniApps.workshop.configuration.credentialCount')}
+            </span>
+            <span className={styles.factValue}>
+              {workshop.credential_slots.length}
+            </span>
+          </div>
+        </div>
+        <div className={styles.jsonGrid}>
+          <div>
+            <div className={styles.subsectionTitle}>
+              {t('miniApps.workshop.configuration.schema')}
+            </div>
+            <pre className={styles.jsonBlock}>
+              {JSON.stringify(workshop.config_schema.schema, null, 2)}
+            </pre>
+          </div>
+          <div>
+            <div className={styles.subsectionTitle}>
+              {t('miniApps.workshop.configuration.values')}
+            </div>
+            <pre className={styles.jsonBlock}>
+              {JSON.stringify(workshop.config.values, null, 2)}
+            </pre>
+          </div>
+        </div>
+        {workshop.config.validation_errors.length > 0 && (
+          <ul className={styles.blockingList}>
+            {workshop.config.validation_errors.map((error) => (
+              <li key={error} className={styles.blockingItem}>
+                <CloseOne theme='outline' size='13' />
+                <code>{error}</code>
+              </li>
+            ))}
+          </ul>
+        )}
+        {workshop.credential_slots.length > 0 && (
+          <div className={styles.rowList}>
+            {workshop.credential_slots.map((slot) => (
+              <div key={slot.slot_key} className={styles.rowItem}>
+                <div>
+                  <div className={styles.rowPrimary}>{slot.display_name}</div>
+                  <div className={`${styles.rowSecondary} ${styles.mono}`}>
+                    {slot.slot_key}
+                  </div>
+                </div>
+                <div className={`${styles.rowSecondary} ${styles.mono}`}>
+                  {slot.credential_id ||
+                    t('miniApps.workshop.configuration.unbound')}
+                </div>
+                <StatusBadge
+                  label={t(
+                    `miniApps.workshop.configuration.credentialStatus.${slot.status}` as const
+                  )}
+                  tone={
+                    slot.status === 'bound'
+                      ? 'success'
+                      : slot.status === 'unbound'
+                        ? 'muted'
+                        : 'warning'
+                  }
+                />
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className={styles.section}>
+        <div className={styles.sectionHeader}>
+          <div>
+            <h3 className={styles.sectionTitle}>
+              {t('miniApps.workshop.capabilities.title')}
+            </h3>
+            <p className={styles.sectionHint}>
+              {t('miniApps.workshop.capabilities.hint', {
+                count: workshop.capabilities.length,
+              })}
+            </p>
+          </div>
+        </div>
+        {workshop.capabilities.length > 0 ? (
+          <div className={styles.rowList}>
+            {workshop.capabilities.map((capability) => (
+              <CapabilityRow
+                key={capability.provenance.contribution_id}
+                capability={capability}
+              />
+            ))}
+          </div>
+        ) : (
+          <MiniAppStatePanel
+            title={t('miniApps.workshop.capabilities.emptyTitle')}
+            body={t('miniApps.workshop.capabilities.emptyBody')}
+          />
+        )}
+      </section>
+
+      <section className={styles.section}>
+        <div className={styles.sectionHeader}>
+          <div>
+            <h3 className={styles.sectionTitle}>
+              {t('miniApps.workshop.service.title')}
+            </h3>
+            <p className={styles.sectionHint}>
+              {t('miniApps.workshop.service.hint')}
+            </p>
+          </div>
+          <MiniAppHealthBadge health={miniapp.service_health} />
+        </div>
+        {ready?.service ? (
+          <div className={styles.serviceGrid}>
+            <div className={styles.serviceItem}>
+              <div className={styles.releaseName}>
+                {t('miniApps.workshop.service.lifecycle')}
+              </div>
+              <div className={styles.releaseValue}>
+                {t(
+                  `miniApps.workshop.service.lifecycleValue.${
+                    ready.service.lifecycle === 'on_demand'
+                      ? 'onDemand'
+                      : 'continuous'
+                  }` as const
+                )}
+              </div>
+            </div>
+            <div className={styles.serviceItem}>
+              <div className={styles.releaseName}>
+                {t('miniApps.workshop.service.files')}
+              </div>
+              <div className={styles.releaseValue}>
+                {ready.service.uses_files
+                  ? t('miniApps.common.yes')
+                  : t('miniApps.common.no')}
+              </div>
+            </div>
+            <div className={styles.serviceItem}>
+              <div className={styles.releaseName}>
+                {t('miniApps.workshop.service.privateDatabase')}
+              </div>
+              <div className={styles.releaseValue}>
+                {ready.service.uses_private_database
+                  ? t('miniApps.common.yes')
+                  : t('miniApps.common.no')}
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className={styles.notice}>
+            {miniapp.kind === 'ui_only'
+              ? t('miniApps.workshop.service.uiOnly')
+              : t('miniApps.workshop.service.noDescriptor')}
+          </div>
+        )}
+      </section>
+
+      <section className={styles.section}>
+        <div className={styles.sectionHeader}>
+          <div>
+            <h3 className={styles.sectionTitle}>
+              {t('miniApps.workshop.operation.title')}
+            </h3>
+            <p className={styles.sectionHint}>
+              {t('miniApps.workshop.operation.hint')}
+            </p>
+          </div>
+        </div>
+        {operation ? (
+          <div className={styles.operationGrid}>
+            <div className={styles.operationItem}>
+              <div className={styles.releaseName}>
+                {t('miniApps.workshop.operation.kind')}
+              </div>
+              <div className={styles.releaseValue}>{operation.kind}</div>
+            </div>
+            <div className={styles.operationItem}>
+              <div className={styles.releaseName}>
+                {t('miniApps.workshop.operation.status')}
+              </div>
+              <div className={styles.releaseValue}>
+                <OperationBadge state={operation.state} />
+              </div>
+            </div>
+            <div className={styles.operationItem}>
+              <div className={styles.releaseName}>
+                {t('miniApps.workshop.operation.progress')}
+              </div>
+              <div className={styles.releaseValue}>
+                {operation.progress_percent == null
+                  ? t('miniApps.common.unknown')
+                  : `${operation.progress_percent}%`}
+              </div>
+            </div>
+          </div>
+        ) : (
+          <MiniAppStatePanel
+            title={t('miniApps.workshop.operation.emptyTitle')}
+            body={t('miniApps.workshop.operation.emptyBody')}
+          />
+        )}
+      </section>
+    </main>
+  );
+};
 
 const MiniAppRunnerPage: React.FC = () => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const navigate = useNavigate();
   const { id: rawId } = useParams<{ id: string }>();
-  const [message, messageHolder] = useArcoMessage();
-
-  // A malformed path segment is a not-found, not a crash.
-  const miniAppId = useMemo<MiniAppId | null>(() => {
-    if (rawId == null) return null;
+  const miniappId = useMemo(() => {
+    if (!rawId) return null;
     try {
       return parseMiniAppId(rawId);
     } catch {
@@ -93,39 +771,46 @@ const MiniAppRunnerPage: React.FC = () => {
     }
   }, [rawId]);
 
-  const [app, setApp] = useState<IApiMiniApp | null>(null);
+  const [workshop, setWorkshop] = useState<MiniAppWorkshop | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  /** Bumping this remounts the iframe, which is the only honest "reload". */
-  const [reloadToken, setReloadToken] = useState(0);
-  const [publishing, setPublishing] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [notFound, setNotFound] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    if (!miniAppId) {
-      setApp(null);
-      setLoading(false);
-      return;
-    }
-    setLoading(true);
-    try {
-      setApp(await ipcBridge.miniapps.get.invoke({ miniapp_id: miniAppId }));
-      setError(null);
-    } catch (e) {
-      // A deleted mini-app is a 404 from the detail route, and `httpBridge`
-      // surfaces every non-2xx as a throw — it never resolves to null. Without
-      // this branch a gone mini-app would show the retryable "load failed" card
-      // instead of the honest "does not exist" one.
-      if (isBackendHttpError(e) && e.status === 404) {
-        setApp(null);
-        setError(null);
+  const load = useCallback(
+    async (mode: 'initial' | 'refresh' = 'initial') => {
+      if (!miniappId) {
+        setWorkshop(null);
+        setNotFound(true);
+        setFailure(null);
+        setLoading(false);
         return;
       }
-      console.error('[miniapps] failed to load the mini-app', e);
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, [miniAppId]);
+      if (mode === 'initial') setLoading(true);
+      else setRefreshing(true);
+      try {
+        const next = await ipcBridge.miniapps.getWorkshop.invoke({
+          miniapp_id: miniappId,
+        });
+        setWorkshop(next);
+        setNotFound(false);
+        setFailure(null);
+      } catch (error) {
+        if (isBackendHttpError(error) && error.status === 404) {
+          setWorkshop(null);
+          setNotFound(true);
+          setFailure(null);
+        } else {
+          console.error('[miniapps] failed to load M1 Workshop', error);
+          setFailure(formatError(error));
+        }
+      } finally {
+        setLoading(false);
+        setRefreshing(false);
+      }
+    },
+    [miniappId]
+  );
 
   useEffect(() => {
     void load();
@@ -133,194 +818,48 @@ const MiniAppRunnerPage: React.FC = () => {
 
   const goBack = useCallback(() => navigate('/mini-apps'), [navigate]);
 
-  /**
-   * 「刷新」 — remount the iframe AND re-read the record.
-   *
-   * Reloading the frame alone was the trap: the user iterated in another
-   * conversation, came back, and the one control they reached for reloaded an
-   * iframe that still serves the old snapshot — reinforcing 改了不生效. Refresh has
-   * to be able to surface the publish state, not just repaint.
-   */
-  const refresh = useCallback(() => {
-    setReloadToken((token) => token + 1);
-    void load();
-  }, [load]);
-
-  const openInBrowser = useCallback(() => {
-    if (!miniAppId) return;
-    void ipcBridge.shell.openExternal.invoke(resolveMiniAppServeUrl(miniAppId));
-  }, [miniAppId]);
-
-  // ─── Iterate + publish ──────────────────────────────────────────────────────
-
-  const { iterate, starting: iterating } = useMiniAppIterate();
-  const startIterating = useCallback(() => {
-    if (app) void iterate(app);
-  }, [app, iterate]);
-
-  const publishingRef = useRef(false);
-  const publish = useCallback(async () => {
-    if (!miniAppId || publishingRef.current) return;
-    publishingRef.current = true;
-    setPublishing(true);
-    try {
-      const published = await ipcBridge.miniapps.publish.invoke({ miniapp_id: miniAppId });
-      setApp(published);
-      // The served document just changed underneath a live iframe, so the frame
-      // has to remount or the user would still be looking at the old app.
-      setReloadToken((token) => token + 1);
-      message.success(t('miniApps.publish.success'));
-    } catch (e) {
-      const detail = e instanceof Error ? e.message : String(e);
-      message.error(t('miniApps.publish.failed', { message: detail }));
-    } finally {
-      publishingRef.current = false;
-      setPublishing(false);
-    }
-  }, [miniAppId, message, t]);
-
-  // ─── Rename + delete (shared with the library grid) ─────────────────────────
-
-  const {
-    node: mutationsNode,
-    openRename: renameMiniApp,
-    confirmDelete: deleteMiniApp,
-  } = useMiniAppMutations({ onRenamed: setApp, onDeleted: goBack });
-  const openRename = useCallback(() => {
-    if (app) renameMiniApp(app);
-  }, [app, renameMiniApp]);
-  const handleDelete = useCallback(() => {
-    if (app) deleteMiniApp(app);
-  }, [app, deleteMiniApp]);
-
-  // ─── Render ─────────────────────────────────────────────────────────────────
-
-  if (loading) {
-    return (
-      <div className='size-full flex items-center justify-center'>
-        <Spin />
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className='size-full flex items-center justify-center px-16px'>
-        {mutationsNode}
-        <Result
-          status='error'
-          title={t('miniApps.runner.loadError')}
-          subTitle={error}
-          extra={
-            <div className='flex items-center justify-center gap-10px'>
-              <Button onClick={goBack}>{t('miniApps.actions.back')}</Button>
-              <Button type='primary' onClick={() => void load()}>
-                {t('miniApps.actions.refresh')}
-              </Button>
-            </div>
-          }
-        />
-      </div>
-    );
-  }
-
-  if (!app || !miniAppId) {
-    return (
-      <div className='size-full flex items-center justify-center px-16px'>
-        {mutationsNode}
-        <Result
-          status='warning'
-          title={t('miniApps.runner.notFound')}
-          extra={<Button onClick={goBack}>{t('miniApps.actions.back')}</Button>}
-        />
-      </div>
-    );
-  }
-
-  const icon = app.icon?.trim();
-
   return (
-    <div className='size-full flex flex-col overflow-hidden bg-[var(--color-bg-1)]'>
-      {mutationsNode}
-      {messageHolder}
-
-      {/* Toolbar */}
-      <div className='shrink-0 flex items-center gap-10px px-16px h-52px bg-[var(--color-bg-2)] border-b border-b-solid border-b-[var(--color-border-2)]'>
-        <ToolbarAction label={t('miniApps.actions.back')} onRun={goBack}>
-          <ArrowLeft theme='outline' size={18} strokeWidth={3} />
-        </ToolbarAction>
-
-        <span
-          className='flex items-center justify-center w-28px h-28px rd-8px shrink-0 text-16px leading-none text-primary-6 bg-[rgba(var(--primary-6),0.12)]'
-          aria-hidden='true'
-        >
-          {icon ? (
-            icon
-          ) : (
-            <ApplicationOne theme='outline' size={16} fill='currentColor' className='block' style={{ lineHeight: 0 }} />
+    <HubPageShell
+      title={t('miniApps.workshop.pageTitle')}
+      subtitle={t('miniApps.workshop.pageSubtitle')}
+      className={styles.page}
+      maxWidthClass='md:max-w-1200px'
+    >
+      {loading && !workshop ? (
+        <MiniAppStatePanel
+          loading
+          title=''
+          body={t('miniApps.states.loadingWorkshop')}
+        />
+      ) : notFound ? (
+        <MiniAppStatePanel
+          title={t('miniApps.errors.notFoundTitle')}
+          body={t('miniApps.errors.notFoundBody')}
+          onRetry={goBack}
+        />
+      ) : failure && !workshop ? (
+        <MiniAppStatePanel
+          title={t('miniApps.errors.loadWorkshopTitle')}
+          body={failure}
+          onRetry={() => void load('initial')}
+        />
+      ) : workshop ? (
+        <>
+          {failure && (
+            <div className={`${styles.notice} ${styles.noticeError}`}>
+              {failure}
+            </div>
           )}
-        </span>
-
-        <span className='min-w-0 truncate text-15px font-700 text-[var(--color-text-1)]'>{app.name}</span>
-
-        <div className='ml-auto flex items-center gap-6px'>
-          {app.has_unpublished_changes && (
-            <Button
-              size='mini'
-              type='primary'
-              loading={publishing}
-              icon={<Upload theme='outline' size='14' strokeWidth={3} />}
-              onClick={() => void publish()}
-            >
-              {t('miniApps.publish.action')}
-            </Button>
-          )}
-          {/* Labelled, not another 32px glyph: it is the only control here that
-              leaves the page, and the only non-obvious one. */}
-          <Button
-            size='mini'
-            loading={iterating}
-            icon={<MagicWand theme='outline' size='14' strokeWidth={3} />}
-            onClick={startIterating}
-          >
-            {t('miniApps.iterate.toggle')}
-          </Button>
-          <ToolbarAction label={t('miniApps.actions.refresh')} onRun={refresh}>
-            <Refresh theme='outline' size={16} strokeWidth={3} />
-          </ToolbarAction>
-          <ToolbarAction label={t('miniApps.actions.openInBrowser')} onRun={openInBrowser}>
-            <Browser theme='outline' size={16} strokeWidth={3} />
-          </ToolbarAction>
-          <ToolbarAction label={t('miniApps.actions.rename')} onRun={openRename}>
-            <EditTwo theme='outline' size={16} strokeWidth={3} />
-          </ToolbarAction>
-          <ToolbarAction label={t('miniApps.actions.delete')} danger onRun={handleDelete}>
-            <Delete theme='outline' size={16} strokeWidth={3} />
-          </ToolbarAction>
-        </div>
-      </div>
-
-      {/* One line about where the user's change is, or is not, yet. */}
-      {app.has_unpublished_changes && (
-        <div
-          role='status'
-          className='shrink-0 flex items-center gap-8px px-16px py-6px bg-[rgba(var(--warning-6),0.08)] border-b border-b-solid border-b-[var(--color-border-2)]'
-        >
-          <span className='shrink-0 text-12px font-600 text-warning-6'>{t('miniApps.publish.pending')}</span>
-          <span className='min-w-0 text-12px leading-18px text-[var(--color-text-2)]'>
-            {t('miniApps.publish.explain')}
-          </span>
-        </div>
-      )}
-
-      {/* Body — the published snapshot, filling the page. A flex child that may
-          shrink AND has a resolved height: a percentage-height iframe under an
-          auto-height ancestor collapses to 0px, which looks exactly like the
-          blank render this layout exists to avoid. */}
-      <div className='relative flex-1 min-h-0 w-full overflow-hidden bg-[var(--color-bg-1)]'>
-        <MiniAppFrame miniAppId={miniAppId} name={app.name} reloadToken={reloadToken} />
-      </div>
-    </div>
+          <MiniAppWorkshopDetail
+            workshop={workshop}
+            locale={i18n.language}
+            onBack={goBack}
+            onRefresh={() => void load('refresh')}
+            refreshing={refreshing}
+          />
+        </>
+      ) : null}
+    </HubPageShell>
   );
 };
 

@@ -8,7 +8,6 @@ import { useConfig } from '@/renderer/hooks/config/useConfig';
 import { useInputFocusRing } from '@/renderer/hooks/chat/useInputFocusRing';
 import { isSubmitGesture } from '@/renderer/hooks/chat/useCompositionInput';
 import { appendSpeechTranscript } from '@/renderer/hooks/system/useSpeechInput';
-import { useMiniAppQuickStart } from '@/renderer/hooks/agent/useMiniAppQuickStart';
 import SpeechInputButton from '@/renderer/components/chat/SpeechInputButton';
 import FeedbackReportModal from '@/renderer/components/settings/SettingsModal/contents/FeedbackReportModal';
 import AutoWorkControl from '@/renderer/pages/conversation/components/AutoWorkControl';
@@ -24,7 +23,6 @@ import React, {
   useCallback,
   useEffect,
   useLayoutEffect,
-  useMemo,
   useRef,
   useState,
 } from 'react';
@@ -97,10 +95,6 @@ const GuidPage: React.FC = () => {
       : undefined
   );
 
-  const [miniAppMode, setMiniAppMode] = useState(false);
-  const miniAppQuickStart = useMiniAppQuickStart();
-  const miniAppSendingRef = useRef(false);
-
   const isAutoWorkMode = isAutoWorkEntry(advancedConfig.autoWork);
   const isDefaultAgent = agentSelection.selection.kind === 'default';
   const presetResourceResolutionReady =
@@ -119,14 +113,6 @@ const GuidPage: React.FC = () => {
         agentSelection.selectedPreset?.current_stable_revision &&
           presetResourceResolutionReady
       );
-
-  useEffect(() => {
-    if (isAutoWorkMode) setMiniAppMode(false);
-  }, [isAutoWorkMode]);
-
-  useEffect(() => {
-    if (!isDefaultAgent) setMiniAppMode(false);
-  }, [isDefaultAgent]);
 
   const [summonDrawerOpen, setSummonDrawerOpen] = useState(false);
   const companionRoster = useCompanionRoster();
@@ -176,67 +162,6 @@ const GuidPage: React.FC = () => {
     beginPending: pendingConversation.begin,
     endPending: pendingConversation.end,
   });
-
-  const handleComposerSend = useCallback(() => {
-    if (!miniAppMode || isAutoWorkMode) {
-      send.sendMessageHandler();
-      return;
-    }
-
-    const prompt = guidInput.input.trim();
-    if (!prompt || guidInput.loading || miniAppSendingRef.current) return;
-
-    miniAppSendingRef.current = true;
-    guidInput.setLoading(true);
-    pendingConversation.begin({
-      input: guidInput.input,
-      files: guidInput.files.length > 0 ? guidInput.files : undefined,
-      sendsInitialMessage: true,
-    });
-
-    void miniAppQuickStart
-      .start({
-        prompt,
-        model: modelSelection.current_model,
-        dir: guidInput.dir,
-        files: guidInput.files,
-      })
-      .then((started) => {
-        if (!started) return;
-        guidInput.setInput('');
-        guidInput.setFiles([]);
-        guidInput.setDir('');
-        mention.setMentionOpen(false);
-        mention.setMentionQuery(null);
-        mention.setMentionSelectorOpen(false);
-        mention.setMentionActiveIndex(0);
-        setMiniAppMode(false);
-      })
-      .finally(() => {
-        miniAppSendingRef.current = false;
-        guidInput.setLoading(false);
-        pendingConversation.end();
-      });
-  }, [
-    guidInput.dir,
-    guidInput.files,
-    guidInput.input,
-    guidInput.loading,
-    guidInput.setDir,
-    guidInput.setFiles,
-    guidInput.setInput,
-    guidInput.setLoading,
-    isAutoWorkMode,
-    mention.setMentionActiveIndex,
-    mention.setMentionOpen,
-    mention.setMentionQuery,
-    mention.setMentionSelectorOpen,
-    miniAppMode,
-    miniAppQuickStart.start,
-    modelSelection.current_model,
-    pendingConversation,
-    send.sendMessageHandler,
-  ]);
 
   const handleInputChange = useCallback(
     (value: string) => {
@@ -353,15 +278,15 @@ const GuidPage: React.FC = () => {
       if (isSubmitGesture(event, sendKey)) {
         event.preventDefault();
         if (!guidInput.input.trim() && !isAutoWorkMode) return;
-        handleComposerSend();
+        send.sendMessageHandler();
       }
     },
     [
       guidInput.input,
-      handleComposerSend,
       isAutoWorkMode,
       mention,
       sendKey,
+      send.sendMessageHandler,
     ]
   );
 
@@ -381,11 +306,6 @@ const GuidPage: React.FC = () => {
       mention.setMentionSelectorOpen,
     ]
   );
-
-  const activateMiniAppMode = useCallback(() => {
-    agentSelection.selectDefaultAgent();
-    setMiniAppMode(true);
-  }, [agentSelection.selectDefaultAgent]);
 
   const typewriterPlaceholder = useTypewriterPlaceholder(
     t('conversation.welcome.placeholder')
@@ -447,25 +367,6 @@ const GuidPage: React.FC = () => {
     resetAgentRequested,
   ]);
 
-  const miniAppQueryRequested = useMemo(
-    () => new URLSearchParams(location.search).get('miniapp') === '1',
-    [location.search]
-  );
-  useEffect(() => {
-    if (!miniAppQueryRequested) return;
-    activateMiniAppMode();
-    navigate(`${location.pathname}${location.hash}`, {
-      replace: true,
-      state: null,
-    });
-  }, [
-    activateMiniAppMode,
-    location.hash,
-    location.pathname,
-    miniAppQueryRequested,
-    navigate,
-  ]);
-
   const mentionDropdownNode = (
     <MentionDropdown
       menuRef={mention.mentionMenuRef}
@@ -518,10 +419,6 @@ const GuidPage: React.FC = () => {
   const autoWorkButtonDisabled =
     !hasLaunchTarget ||
     autoWorkStartDisabled(guidInput.loading, advancedConfig.autoWork);
-  const miniAppButtonDisabled =
-    guidInput.loading ||
-    !guidInput.input.trim() ||
-    !modelSelection.current_model;
   const actionRowNode = (
     <GuidActionRow
       files={guidInput.files}
@@ -541,13 +438,9 @@ const GuidPage: React.FC = () => {
       }
       autoWorkMode={isAutoWorkMode}
       isButtonDisabled={
-        miniAppMode
-          ? miniAppButtonDisabled
-          : isAutoWorkMode
-            ? autoWorkButtonDisabled
-            : send.isButtonDisabled
+        isAutoWorkMode ? autoWorkButtonDisabled : send.isButtonDisabled
       }
-      onSend={handleComposerSend}
+      onSend={send.sendMessageHandler}
     />
   );
 
@@ -603,11 +496,7 @@ const GuidPage: React.FC = () => {
               onPaste={guidInput.onPaste}
               onFocus={guidInput.handleTextareaFocus}
               onBlur={guidInput.handleTextareaBlur}
-              placeholder={
-                miniAppMode
-                  ? t('miniApps.composer.placeholder')
-                  : normalPlaceholder
-              }
+              placeholder={normalPlaceholder}
               isInputActive={guidInput.isInputFocused}
               isFileDragging={guidInput.isFileDragging}
               activeBorderColor={activeBorderColor}
@@ -637,11 +526,6 @@ const GuidPage: React.FC = () => {
                 <ComposerEntryStrip
                   onSummonCompanion={() => setSummonDrawerOpen(true)}
                   summonedCompanionName={summonedCompanionName}
-                  onCreateMiniApp={
-                    isAutoWorkMode ? undefined : activateMiniAppMode
-                  }
-                  miniAppActive={miniAppMode}
-                  onDismissMiniApp={() => setMiniAppMode(false)}
                 />
               }
             />
