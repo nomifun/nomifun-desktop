@@ -41,10 +41,10 @@
 
 | 分类 | 数量 | 项目 |
 | --- | ---: | --- |
-| 已关闭 | 13 | `W0-01`、`N1-0-01`～`N1-0-05`、`N1-1-01`～`N1-1-03`、`N1-2-00`～`N1-2-02`、`N1-X-01` |
-| 正在实施 | 3 | `N1-2-03`、`N1-4-01`、`N1-U-01` |
+| 已关闭 | 14 | `W0-01`、`N1-0-01`～`N1-0-05`、`N1-1-01`～`N1-1-03`、`N1-2-00`～`N1-2-02`、`N1-3-03`、`N1-X-01` |
+| 正在实施 | 4 | `N1-2-03`、`N1-3-01`、`N1-4-01`、`N1-U-01` |
 | 已解锁待领取 | 0 | 无 |
-| 依赖阻塞 | 16 | 其余 N1/M1 Windows 项与最终合流 |
+| 依赖阻塞 | 14 | 其余 N1/M1 Windows 项与最终合流 |
 | 外部原生 | 2 | `RC-MA-01`、`RC-LD-01` |
 | 明确延后 | 2 | Marketplace/远程分发、第二 Runtime |
 
@@ -174,6 +174,17 @@
     随后停止并证明测试进程树归零；有可调用 contribution 但尚无受管测试输入时记录
     `needs_test_input`，不伪造 `passed`。JavaScript Host 14、Adapter 4 和 App publisher
     E2E 均通过。
+11. `N1-3-01` 已进入正式 Catalog 合流，`N1-3-03` 已关闭：
+    - `KernelCatalogProvider` 直接把 Kernel 已物化的 ManagedLocal Catalog entry 交给
+      Control Plane，保留 exact Mount、contribution、contract 与 Artifact provenance；
+      Agent catalog、operation lock 和 consumer filtering 不再从 raw manifest 重建或猜测；
+    - 普通 Plugin Tool 新增 source-neutral non-Agent operation context/handler，不创建
+      AgentSession/Preset/Snapshot，也不复用 Role Provider operation 类型；
+    - App E2E 证明同一 Plugin contribution 对 Agent 因 Nomi adapter 尚未完成而明确
+      unavailable，但 Gateway exact lock 可实际调用成功；
+    - JS adapter fixture 同时覆盖 Agent+Gateway 共享 Tool 与 UI-only Tool；UI-only
+      contribution 不进入 Agent consumer，旧 Artifact lock 在 Host 前 fail closed。
+      Kernel 23、Control Plane 16、JS adapter 4 与 App publisher E2E 均通过。
 
 ## W0：一期交接
 
@@ -212,9 +223,9 @@
 
 | ID | 状态 | Owner/写集 | 目标 | 依赖 | 最小验证 |
 | --- | --- | --- | --- | --- | --- |
-| `N1-3-01` | blocked | Catalog lane | ManagedLocal Package/Mount materialization、五类 Contribution、provenance/availability | `N1-0-03`,`N1-1-03`,`N1-2-03` | duplicate hard-fail；consumer filtering |
+| `N1-3-01` | in-progress | Catalog lane | ManagedLocal Package/Mount materialization、五类 Contribution、provenance/availability | `N1-0-03`,`N1-1-03`,`N1-2-03` | 正式 ManagedLocal entry 与 Tool/Context/Resource provenance 已接；仍需 Skill、MCP-backed 完整物化与 duplicate/fault closing |
 | `N1-3-02` | blocked | Nomi consumer lane | 用动态 action schema/Kernel invoke 替换 Nomi 硬编码 Capability→Tool 表 | `N1-3-01` | AgentPreset compile/invoke/impact |
-| `N1-3-03` | blocked | 非 Agent consumer lane | 一个共享 Capability 与一个 non-Agent-only reference contribution | `N1-3-01` | Agent+非 Agent exact lock；picker filter |
+| `N1-3-03` | closed | 非 Agent consumer lane | 一个共享 Capability 与一个 non-Agent-only reference contribution | `N1-3-01` | source-neutral operation handler；Agent+Gateway shared Tool、UI-only Tool、exact lock/Artifact drift 与 Agent filtering 均通过 |
 
 ## N1-4：Authoring 与 Self-Evolution
 

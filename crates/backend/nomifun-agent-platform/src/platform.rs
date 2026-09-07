@@ -2196,6 +2196,24 @@ impl CatalogProvider for KernelCatalogProvider {
             .registry
             .snapshot()
             .map_err(|error| ControlPlaneError::Wire(error.to_string()))?;
+        let unavailable_capabilities = self
+            .unavailable_capabilities
+            .read()
+            .map_err(|_| {
+                ControlPlaneError::Wire(
+                    "Kernel Catalog availability registry is poisoned".to_owned(),
+                )
+            })?
+            .clone();
+        let formal_capability_entries =
+            materialize_capability_catalog_entries(
+                &registry,
+                &unavailable_capabilities,
+            )
+            .map_err(|error| ControlPlaneError::Wire(error.to_string()))?
+            .into_iter()
+            .map(|entry| (entry.capability.clone(), entry))
+            .collect();
         let capabilities = registry
             .capabilities
             .values()
@@ -2226,18 +2244,11 @@ impl CatalogProvider for KernelCatalogProvider {
             .collect();
         Ok(Arc::new(CatalogSnapshot {
             capabilities,
+            formal_capability_entries,
             skills,
             mcp_tools,
             package_sources,
-            unavailable_capabilities: self
-                .unavailable_capabilities
-                .read()
-                .map_err(|_| {
-                    ControlPlaneError::Wire(
-                        "Kernel Catalog availability registry is poisoned".to_owned(),
-                    )
-                })?
-                .clone(),
+            unavailable_capabilities,
             service_key_diagnostics: Vec::new(),
         }))
     }

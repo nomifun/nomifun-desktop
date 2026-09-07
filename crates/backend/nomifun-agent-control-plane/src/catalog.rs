@@ -24,6 +24,7 @@ use crate::wire::{wire_cast, wire_name};
 #[derive(Clone, Debug, Default)]
 pub struct CatalogSnapshot {
     pub capabilities: Vec<CapabilityManifest>,
+    pub formal_capability_entries: BTreeMap<CapabilityRef, CapabilityCatalogEntry>,
     pub skills: Vec<SkillDefinition>,
     pub mcp_tools: Vec<McpToolCapabilityMapping>,
     pub package_sources: BTreeMap<PackageRef, PluginSourceKind>,
@@ -43,6 +44,16 @@ impl CatalogSnapshot {
         &self,
         reference: &CapabilityRef,
     ) -> Result<Option<CapabilityCatalogEntry>, ControlPlaneError> {
+        if let Some(entry) = self.formal_capability_entries.get(reference) {
+            entry.validate().map_err(|error| {
+                ControlPlaneError::canonical(
+                    "CAPABILITY_CATALOG_INVALID",
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    error.to_string(),
+                )
+            })?;
+            return Ok(Some(entry.clone()));
+        }
         let Some(manifest) = self.capabilities.iter().find(|capability| {
             capability.id == reference.id && capability.version == reference.version
         }) else {
@@ -74,7 +85,23 @@ impl CatalogSnapshot {
                         != PluginSourceKind::TestFixture
             })
             .map(|capability| {
-                let entry = self.materialize_capability_entry(capability)?;
+                let reference = CapabilityRef {
+                    id: capability.id.clone(),
+                    version: capability.version.clone(),
+                };
+                let entry = self
+                    .capability_catalog_entry(&reference)?
+                    .ok_or_else(|| {
+                        ControlPlaneError::canonical(
+                            "CAPABILITY_NOT_MATERIALIZED",
+                            axum::http::StatusCode::NOT_FOUND,
+                            format!(
+                                "capability {}@{} is not materialized",
+                                capability.id.as_ref(),
+                                capability.version.as_ref()
+                            ),
+                        )
+                    })?;
                 let unavailable_code = match entry
                     .availability_for(CapabilityConsumer::Agent)
                 {

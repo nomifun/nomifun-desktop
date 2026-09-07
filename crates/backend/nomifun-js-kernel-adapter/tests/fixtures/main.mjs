@@ -18,6 +18,15 @@ export async function activate() {
           };
         },
       },
+      "fixture.ui.contribution": {
+        async invoke({ actionId, input, contribution }) {
+          return {
+            actionId,
+            input,
+            contributionId: contribution.contribution_id,
+          };
+        },
+      },
       "fixture.context.contribution": {
         async contributeContext({ schemaRef, contribution }) {
           return {

@@ -1106,7 +1106,9 @@ mod tests {
     use nomifun_agent_contracts::{
         ActionId, ArtifactEnvelope, ArtifactFileDigest, ArtifactId,
         CapabilityActionDescriptor, CapabilityContributions, CapabilityId,
-        CapabilityKind, CapabilityManifest, CanonicalSchemaRef, EffectClass,
+        CapabilityKind, CapabilityManifest, CapabilityRef, CanonicalSchemaRef,
+        CorrelationId, EffectClass, IdempotencyKey, OperationId, PrincipalRef,
+        ScopeKey,
         ExactVersionRef, JAVASCRIPT_HOST_PROTOCOL_VERSION,
         JAVASCRIPT_SDK_CONTRACT_VERSION, JavaScriptBuildProfile,
         JavaScriptEntrypointMetadata, LocalizedMetadata, MINIMUM_NODE_MAJOR,
@@ -1119,8 +1121,8 @@ mod tests {
     };
     use nomifun_agent_control_plane::{CatalogProvider, CatalogSnapshot};
     use nomifun_agent_kernel::{
-        InMemoryPluginStatePersistence, MaterializationPolicy,
-        PluginStatePersistence,
+        CapabilityOperationRequest, InMemoryPluginStatePersistence,
+        MaterializationPolicy, PluginStatePersistence,
     };
     use nomifun_api_types::{
         ApplyPluginCandidateRequest, ApplyPluginTargetDto,
@@ -1164,7 +1166,7 @@ mod tests {
             conflicts: Vec::new(),
             supported_surfaces: capability_surface_declarations(
                 ["desktop"],
-                [CapabilityConsumer::Agent],
+                [CapabilityConsumer::Agent, CapabilityConsumer::Gateway],
             ),
             requires_runtime_features: Vec::new(),
             supported_platforms: vec![PlatformConstraint::Any],
@@ -1480,6 +1482,45 @@ mod tests {
                 .map(AsRef::as_ref),
             Some(AGENT_EXECUTOR_UNAVAILABLE)
         );
+        let catalog_snapshot = catalog.snapshot().unwrap();
+        let capability_ref = CapabilityRef {
+            id: capability_id.clone(),
+            version: VersionString::from("1.0.0"),
+        };
+        let operation_lock = catalog_snapshot
+            .capability_catalog_entry(&capability_ref)
+            .unwrap()
+            .unwrap()
+            .operation_lock(CapabilityConsumer::Gateway)
+            .unwrap();
+        let invoked = kernel
+            .invoke_operation(CapabilityOperationRequest {
+                principal: PrincipalRef {
+                    principal_kind: "installation".into(),
+                    principal_id: owner_user_id.clone(),
+                },
+                operation_id: OperationId::from("plugin-gateway-operation"),
+                idempotency_key: IdempotencyKey::from("plugin-gateway-key"),
+                correlation_id: CorrelationId::from("plugin-gateway-correlation"),
+                operation_lock,
+                action_id: ActionId::from(
+                    "test.nomicore.plugin.echo.invoke",
+                ),
+                resource_bindings: Vec::new(),
+                state_scope_key: ScopeKey::from("gateway:plugin-e2e"),
+                input: StrictJsonValue(serde_json::json!({
+                    "surface": "gateway"
+                })),
+            })
+            .await
+            .unwrap();
+        assert_eq!(invoked.0["surface"], "gateway");
+        let api_catalog = catalog_snapshot.as_api().unwrap();
+        assert!(api_catalog.capabilities.iter().any(|capability| {
+            capability.capability.id == capability_id.as_ref()
+                && capability.unavailable_code.as_deref()
+                    == Some(AGENT_EXECUTOR_UNAVAILABLE)
+        }));
 
         drop(state);
         let mut restarted_policy = MaterializationPolicy::stable("1.0.0");
