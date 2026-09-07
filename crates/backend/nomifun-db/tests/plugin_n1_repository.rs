@@ -2,7 +2,8 @@ use std::path::Path;
 
 use nomifun_db::{
     ApplyPluginCandidateParams, CreatePluginArtifactParams, CreatePluginProjectParams, DbError,
-    DeletePluginKvParams, FinishProductOperationParams, GetPluginKvParams,
+    DeletePluginKvParams, DeletePluginProjectParams, FinishProductOperationParams,
+    GetPluginKvParams,
     IPluginN1Repository, ListPluginCredentialBindingsParams, PluginCandidateOrigin,
     PluginCredentialBindingInput, ProductOperationKind, ProductOperationState, PutPluginKvParams,
     RecordPluginCandidateTestReceiptParams, RecordPluginReadyCandidateParams,
@@ -88,9 +89,12 @@ async fn managed_fixture() -> ManagedFixture {
         project_id: project_id.clone(),
         owner_user_id,
         package_id: "dev.nomifun.fixture".into(),
+        display_name: "Fixture Plugin".into(),
+        description: "Managed Plugin repository fixture.".into(),
         managed_source_path: Some("plugin-projects/fixture".into()),
         source_head_digest: None,
         dependency_lock_digest: None,
+        initial_build_generation: 0,
         created_at: 1,
     })
     .await
@@ -229,7 +233,7 @@ async fn add_managed_candidate(
 }
 
 #[tokio::test]
-async fn migrations_are_clean_start_preserve_legacy_miniapps_and_restart_through_069() {
+async fn migrations_are_clean_start_preserve_legacy_miniapps_and_restart_through_070() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("plugin-n1.db");
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
@@ -241,7 +245,7 @@ async fn migrations_are_clean_start_preserve_legacy_miniapps_and_restart_through
         )
         .await
         .unwrap();
-    migrate_through(&pool, 66).await;
+    migrate_through(&pool, 69).await;
     let owner_id = id();
     sqlx::query(
         "INSERT INTO users (user_id, username, password_hash, jwt_secret, created_at, updated_at)
@@ -259,6 +263,19 @@ async fn migrations_are_clean_start_preserve_legacy_miniapps_and_restart_through
          ) VALUES (?, ?, 'legacy', '', '<p/>', 4, 1, 1)",
     )
     .bind(&miniapp_id)
+    .bind(&owner_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let legacy_project_id = id();
+    sqlx::query(
+        "INSERT INTO plugin_projects (
+            project_id, owner_user_id, package_id, managed_source_path,
+            source_head_digest, dependency_lock_digest, build_generation,
+            created_at, updated_at
+         ) VALUES (?, ?, 'dev.nomifun.legacy-project', NULL, NULL, NULL, 0, 1, 1)",
+    )
+    .bind(&legacy_project_id)
     .bind(&owner_id)
     .execute(&pool)
     .await
@@ -293,13 +310,16 @@ async fn migrations_are_clean_start_preserve_legacy_miniapps_and_restart_through
             .await
             .unwrap();
     assert_eq!(legacy_html, "<p/>");
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM plugin_projects")
-            .fetch_one(database.pool())
-            .await
-            .unwrap(),
-        0
-    );
+    let legacy_project: (String, String) = sqlx::query_as(
+        "SELECT display_name, description
+         FROM plugin_projects WHERE project_id = ?",
+    )
+    .bind(&legacy_project_id)
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(legacy_project.0, "dev.nomifun.legacy-project");
+    assert!(legacy_project.1.is_empty());
     database.close().await;
 
     let restarted = init_database(Path::new(&path)).await.unwrap();
@@ -307,7 +327,7 @@ async fn migrations_are_clean_start_preserve_legacy_miniapps_and_restart_through
         .fetch_one(restarted.pool())
         .await
         .unwrap();
-    assert_eq!(version, 69);
+    assert_eq!(version, 70);
 }
 
 #[tokio::test]
@@ -322,9 +342,12 @@ async fn runtime_only_read_only_project_imports_generation_zero_candidate_with_e
         project_id: project_id.clone(),
         owner_user_id,
         package_id: "dev.nomifun.runtime-only".into(),
+        display_name: "Runtime-only Plugin".into(),
+        description: "Imported prebuilt Plugin.".into(),
         managed_source_path: None,
         source_head_digest: None,
         dependency_lock_digest: None,
+        initial_build_generation: 0,
         created_at: 1,
     })
     .await
@@ -459,9 +482,12 @@ async fn managed_build_requires_real_source_lock_and_positive_generation() {
         project_id: project_id.clone(),
         owner_user_id,
         package_id: "dev.nomifun.managed".into(),
+        display_name: "Managed Plugin".into(),
+        description: "Managed build fixture.".into(),
         managed_source_path: Some("plugin-projects/managed".into()),
         source_head_digest: Some(digest('1')),
         dependency_lock_digest: Some(digest('2')),
+        initial_build_generation: 1,
         created_at: 1,
     })
     .await
@@ -480,23 +506,9 @@ async fn managed_build_requires_real_source_lock_and_positive_generation() {
     })
     .await
     .unwrap();
-    let invalid_generation = repo
-        .start_operation(&StartProductOperationParams {
-            operation_id: id(),
-            kind: ProductOperationKind::Build,
-            owner_kind: "plugin_project".into(),
-            owner_id: project_id.clone(),
-            progress_percent: Some(0),
-            bounded_log_tail: vec![],
-            started_at_ms: 2,
-        })
-        .await
-        .unwrap_err();
-    assert!(matches!(invalid_generation, DbError::Conflict(message) if message.contains("positive generation")));
-
     repo.update_project_source_cas(&UpdatePluginProjectSourceParams {
         project_id: project_id.clone(),
-        expected_generation: 0,
+        expected_generation: 1,
         source_head_digest: digest('3'),
         dependency_lock_digest: Some(digest('4')),
         updated_at: 5,
@@ -524,7 +536,7 @@ async fn managed_build_requires_real_source_lock_and_positive_generation() {
             dependency_lock_digest: None,
             contract_diff: json!({}),
             origin_operation_id: valid_build,
-            expected_generation: 1,
+            expected_generation: 2,
             created_at: 8,
         })
         .await
@@ -768,6 +780,78 @@ async fn direct_current_pointer_sql_bypass_is_rejected() {
     assert_eq!(
         unchanged.current_artifact_digest.as_deref(),
         Some(fixture.artifact_digest.as_str())
+    );
+}
+
+#[tokio::test]
+async fn project_delete_requires_exact_ready_candidate_and_preserves_artifact_history() {
+    let fixture = managed_fixture().await;
+    let project = fixture
+        .repo
+        .get_project(&fixture.project_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let candidate = fixture
+        .repo
+        .get_ready_candidate(&fixture.project_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let stale = fixture
+        .repo
+        .delete_project_cas(&DeletePluginProjectParams {
+            project_id: project.project_id.clone(),
+            owner_user_id: project.owner_user_id.clone(),
+            expected_updated_at: project.updated_at,
+            expected_generation: project.build_generation,
+            expected_ready_candidate_id: Some(candidate.candidate_id.clone()),
+            expected_ready_candidate_digest: Some(digest('f')),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(stale, DbError::Conflict(message) if message.contains("Ready Candidate")));
+
+    assert!(
+        fixture
+            .repo
+            .delete_project_cas(&DeletePluginProjectParams {
+                project_id: project.project_id.clone(),
+                owner_user_id: project.owner_user_id,
+                expected_updated_at: project.updated_at,
+                expected_generation: project.build_generation,
+                expected_ready_candidate_id: Some(candidate.candidate_id.clone()),
+                expected_ready_candidate_digest: Some(candidate.candidate_digest),
+            })
+            .await
+            .unwrap()
+    );
+    assert!(
+        fixture
+            .repo
+            .get_project(&fixture.project_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        fixture
+            .repo
+            .get_ready_candidate(&fixture.project_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM plugin_artifacts WHERE artifact_id = ?",
+        )
+        .bind(&fixture.artifact_id)
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap(),
+        1,
+        "Project deletion preserves immutable Artifact history"
     );
 }
 

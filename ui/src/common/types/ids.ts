@@ -73,6 +73,11 @@ export type EntityKind =
   | 'creative-studio-project'
   | 'creative-studio-node'
   | 'creative-studio-connection'
+  | 'plugin-project'
+  | 'plugin-mount'
+  | 'plugin-artifact'
+  | 'plugin-candidate'
+  | 'plugin-operation'
   | 'miniapp';
 
 export type ConversationId = EntityId<'conversation'>;
@@ -128,6 +133,11 @@ export type CreationTaskId = EntityId<'creation-task'>;
 export type CreativeStudioProjectId = EntityId<'creative-studio-project'>;
 export type CreativeStudioNodeId = EntityId<'creative-studio-node'>;
 export type CreativeStudioConnectionId = EntityId<'creative-studio-connection'>;
+export type PluginProjectId = EntityId<'plugin-project'>;
+export type PluginMountId = EntityId<'plugin-mount'>;
+export type PluginArtifactId = EntityId<'plugin-artifact'>;
+export type PluginCandidateId = EntityId<'plugin-candidate'>;
+export type PluginOperationId = EntityId<'plugin-operation'>;
 export type MiniAppId = EntityId<'miniapp'>;
 
 export class InvalidEntityIdError extends TypeError {
@@ -274,6 +284,16 @@ export const parseCreativeStudioNodeId = (value: unknown): CreativeStudioNodeId 
   parseEntityId('creative-studio-node', value);
 export const parseCreativeStudioConnectionId = (value: unknown): CreativeStudioConnectionId =>
   parseEntityId('creative-studio-connection', value);
+export const parsePluginProjectId = (value: unknown): PluginProjectId =>
+  parseEntityId('plugin-project', value);
+export const parsePluginMountId = (value: unknown): PluginMountId =>
+  parseEntityId('plugin-mount', value);
+export const parsePluginArtifactId = (value: unknown): PluginArtifactId =>
+  parseEntityId('plugin-artifact', value);
+export const parsePluginCandidateId = (value: unknown): PluginCandidateId =>
+  parseEntityId('plugin-candidate', value);
+export const parsePluginOperationId = (value: unknown): PluginOperationId =>
+  parseEntityId('plugin-operation', value);
 export const parseMiniAppId = (value: unknown): MiniAppId => parseEntityId('miniapp', value);
 
 export type SessionTarget =

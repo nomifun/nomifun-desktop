@@ -196,6 +196,7 @@ nomifun-agent-domain-wave3.workspace = true
 nomifun-agent-domain-wave4.workspace = true
 nomifun-agent-domain-wave5.workspace = true
 nomifun-agent-kernel.workspace = true
+nomifun-js-authoring.workspace = true
 nomifun-js-host.workspace = true
 nomifun-js-kernel-adapter.workspace = true
 nomifun-js-runtime.workspace = true

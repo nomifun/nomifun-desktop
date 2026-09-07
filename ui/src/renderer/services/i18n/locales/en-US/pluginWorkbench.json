@@ -1,0 +1,262 @@
+{
+  "title": "Plugin Workbench",
+  "subtitle": "Manage installed Plugin lifecycle and capabilities, and inspect authoring projects, Ready Candidates, and build state.",
+  "navigation": {
+    "railTitle": "Plugin Workbench"
+  },
+  "tabs": {
+    "library": "Library",
+    "workshop": "Workshop"
+  },
+  "actions": {
+    "refresh": "Refresh",
+    "retry": "Retry",
+    "search": "Search Plugins or projects",
+    "enable": "Enable",
+    "disable": "Disable",
+    "retryRuntime": "Retry runtime",
+    "restore": "Roll back",
+    "uninstall": "Uninstall",
+    "deleteData": "Delete runtime data",
+    "deleteProject": "Delete project",
+    "createProject": "Create project",
+    "importArtifact": "Import runtime package",
+    "build": "Build",
+    "testCandidate": "Test candidate",
+    "applyCandidate": "Apply candidate",
+    "cancelOperation": "Cancel operation",
+    "openInstalled": "View installed Plugin",
+    "confirm": "Confirm",
+    "cancel": "Cancel"
+  },
+  "common": {
+    "count": "{{count}}",
+    "none": "None",
+    "unknown": "Unknown"
+  },
+  "states": {
+    "loadingLibrary": "Loading the Plugin Library…",
+    "loadingDetail": "Loading details…",
+    "loadingMount": "Loading Plugin Mount details…",
+    "loadingProject": "Loading Plugin Project details…",
+    "desktopOnlyTitle": "Plugin Workbench is available on Desktop only",
+    "desktopOnlyBody": "This surface depends on the managed Runtime, filesystem, and local Plugin Host on this computer.",
+    "unavailableTitle": "Plugin Platform is unavailable",
+    "unavailableBody": "The local Plugin service or required Runtime is not ready. Check the Desktop backend and retry.",
+    "errorTitle": "Plugin data could not be loaded",
+    "errorBody": "The request did not complete. Retry it.",
+    "mutationErrorTitle": "The operation did not complete:"
+  },
+  "lifecycle": {
+    "enabled": "Enabled",
+    "disabled": "Disabled",
+    "uninstalledDataRetained": "Uninstalled, data retained",
+    "deletePending": "Deleting",
+    "error": "Error"
+  },
+  "sourceState": {
+    "empty": "Empty project",
+    "editable": "Editable source",
+    "runtimeOnly": "Runtime only"
+  },
+  "compatibility": {
+    "compatible": "Compatible",
+    "breaking": "Breaking",
+    "unknown": "Unknown"
+  },
+  "testStatus": {
+    "notRun": "Not tested",
+    "passed": "Passed",
+    "failed": "Failed",
+    "needsInput": "Needs test input",
+    "stale": "Test is stale"
+  },
+  "operation": {
+    "running": "Running",
+    "succeeded": "Succeeded",
+    "failed": "Failed",
+    "canceled": "Canceled"
+  },
+  "consumer": {
+    "agent": "Agent",
+    "gateway": "Gateway",
+    "knowledge": "Knowledge",
+    "remote": "Remote",
+    "automation": "Automation",
+    "ui": "UI",
+    "miniappService": "MiniApp Service"
+  },
+  "applyMode": {
+    "ask": "Ask before applying",
+    "autoCompatible": "Auto-apply compatible versions when idle"
+  },
+  "origin": {
+    "build": "Local build",
+    "import": "Import"
+  },
+  "messages": {
+    "enabled": "Plugin enabled",
+    "disabled": "Plugin disabled",
+    "retried": "Plugin retry requested",
+    "restored": "Rolled back to the previous version",
+    "uninstalled": "Plugin uninstalled; runtime data was retained",
+    "dataDeleted": "Plugin runtime data deleted",
+    "projectCreated": "Plugin Project created",
+    "artifactImported": "Runtime package imported as a Ready Candidate",
+    "buildCompleted": "Build completed with a Ready Candidate",
+    "candidateTested": "Candidate Test completed",
+    "candidateApplied": "Ready Candidate applied",
+    "operationCanceled": "Operation canceled",
+    "projectDeleted": "Plugin Project deleted; the installed Plugin and runtime data were preserved"
+  },
+  "confirm": {
+    "uninstallTitle": "Uninstall this Plugin?",
+    "uninstallBody": "The executable target is withdrawn, while the Mount, config, credential bindings, and runtime data remain available for an explicit restore.",
+    "deleteDataTitle": "Permanently delete retained runtime data?",
+    "deleteDataBody": "This removes the Mount, config, KV, credential bindings, and dataDir. The linked authoring project is not deleted.",
+    "deleteProjectTitle": "Permanently delete this Plugin Project?",
+    "deleteProjectBody": "This deletes only Project Source, the dependency lock, and the Ready Candidate. The installed Plugin, Mount, config, credential bindings, and runtime data remain."
+  },
+  "library": {
+    "ariaLabel": "Plugin Library",
+    "title": "Installed Plugins",
+    "contributionCount": "{{count}} capabilities",
+    "emptyTitle": "No Plugins installed",
+    "emptyBody": "A Plugin appears here after importing or applying a Ready Candidate.",
+    "selectTitle": "Select a Plugin",
+    "selectBody": "Choose a Plugin from the list to inspect capabilities, versions, and lifecycle actions.",
+    "detailEyebrow": "Installed Mount",
+    "retainedDataNotice": "This Plugin is uninstalled and cannot execute. Config, KV, credential bindings, and dataDir remain retained; deleting runtime data is a separate irreversible action."
+  },
+  "workshop": {
+    "ariaLabel": "Plugin Workshop",
+    "title": "Authoring projects",
+    "generation": "Build {{generation}}",
+    "ready": "Ready",
+    "emptyTitle": "No Plugin Projects",
+    "emptyBody": "Projects created or imported through the authoring flow appear here with Source, Candidate, and Operation state.",
+    "selectTitle": "Select an authoring project",
+    "selectBody": "Choose a project to inspect its source state, Ready Candidate, and build operation.",
+    "detailEyebrow": "Authoring Project",
+    "projectDescription": "Project Source, dependency lock, Ready Candidate, and installed Mount are managed independently.",
+    "runtimeOnlyBuild": "A runtime-only project has no editable Source and cannot be built locally.",
+    "buildUnavailable": "The project needs a complete Source snapshot and dependency lock, with no running operation.",
+    "runtimeOnlyNotice": "This is a runtime-only project. You can test and apply its Candidate, but the original JavaScript or TypeScript Source is not reconstructed.",
+    "noMatchesTitle": "No matching projects",
+    "noMatchesBody": "Search by project name, description, or Project ID.",
+    "linked": "Linked Mount",
+    "unlinkedDraft": "Uninstalled draft",
+    "identityHint": "Project identity and build generation use exact CAS.",
+    "readyCandidate": "Ready Candidate",
+    "readyCandidateHint": "A Candidate can be applied only after compatibility and test constraints pass.",
+    "canApply": "Can apply",
+    "blocked": "Blocked",
+    "noCandidate": "No Ready Candidate",
+    "noCandidateBody": "A candidate appears here after a Build or read-only Artifact Import completes.",
+    "operation": "Current Operation",
+    "operationHint": "Build and Import are durable, observable operations.",
+    "noOperation": "No active Operation",
+    "noOperationBody": "The project is currently stable."
+  },
+  "workflow": {
+    "ariaLabel": "Plugin Project delivery workflow",
+    "source": "Source",
+    "candidate": "Build Candidate",
+    "test": "Candidate Test",
+    "apply": "Apply"
+  },
+  "dialogs": {
+    "create": {
+      "title": "Create Plugin Project",
+      "body": "Create managed JavaScript or TypeScript Source. Package ID is the stable machine identity; the display name is used in product surfaces.",
+      "displayName": "Display name",
+      "displayNameRequired": "Enter a display name",
+      "packageId": "Package ID",
+      "packageIdRequired": "Enter a stable Package ID",
+      "packageVersion": "Initial version",
+      "packageVersionRequired": "Enter an exact SemVer",
+      "language": "Source language",
+      "typeScript": "TypeScript",
+      "javaScript": "JavaScript",
+      "description": "Purpose"
+    },
+    "import": {
+      "title": "Import prebuilt Plugin",
+      "body": "Choose a plugin-package-v1 directory or ZIP. Import creates a read-only Candidate and never installs or enables it automatically.",
+      "sourceType": "Source type",
+      "directory": "Directory",
+      "archive": "ZIP",
+      "archiveFilter": "Plugin ZIP",
+      "sourcePath": "Source path",
+      "sourcePlaceholder": "Choose a local directory or ZIP",
+      "chooseSource": "Choose",
+      "sourceRequired": "Choose an import source",
+      "digest": "Approved Artifact digest",
+      "digestPlaceholder": "64-character SHA-256",
+      "digestHint": "This must exactly match the imported bytes; unknown content is never auto-approved.",
+      "digestInvalid": "Enter a valid 64-character SHA-256 digest"
+    },
+    "test": {
+      "title": "Run Candidate Test",
+      "body": "The test binds the current Candidate, Runtime, config, and credential revisions. A test never applies code automatically.",
+      "inputDigest": "Test input digest",
+      "inputDigestHint": "The managed test flow holds the input content; this request submits only its exact SHA-256.",
+      "useEmptyInput": "Use empty input",
+      "sideEffectWarning": "Plugins are trusted local code; raw network, filesystem, and child-process side effects cannot be fully isolated.",
+      "acknowledgeRisk": "I understand that this test can create local or external side effects",
+      "acknowledgementRequired": "Acknowledge the test side-effect boundary first",
+      "digestInvalid": "The test input digest must be a 64-character SHA-256"
+    },
+    "apply": {
+      "title": "Apply Ready Candidate",
+      "body": "Apply switches the exact current Artifact. First install, breaking changes, and untested Candidates require explicit confirmation.",
+      "target": "Target",
+      "initialInstall": "Install as a new stable Mount",
+      "existingMount": "Replace the linked Mount",
+      "existingMountNamed": "Replace {{name}}",
+      "targetUnavailable": "The linked Mount has no verifiable Current target.",
+      "noCandidate": "This project has no Ready Candidate.",
+      "allowBreaking": "I accept this breaking change and that affected consumers may become contract-mismatched",
+      "acknowledgeTestWarning": "I understand this Candidate has not passed the current local test and still want to apply it manually",
+      "changedContracts": "Changed contracts",
+      "affectedConsumers": "Affected consumers"
+    }
+  },
+  "detail": {
+    "identity": "Identity and state",
+    "identityHint": "The product surface exposes stable identities, versions, and revisions, not Host processes or generations.",
+    "mountId": "Mount ID",
+    "projectId": "Project ID",
+    "revision": "Revision",
+    "updatedAt": "Updated",
+    "linkedProject": "Linked Project",
+    "linkedMount": "Linked Mount",
+    "config": "Config",
+    "configValid": "Valid",
+    "configInvalid": "Invalid",
+    "credentials": "Credential slots",
+    "credentialCount": "{{count}}",
+    "lastError": "Last error: {{code}}",
+    "targets": "Version pointers",
+    "targetsHint": "Current and Previous pin exact Artifact digests.",
+    "currentTarget": "Current",
+    "previousTarget": "Previous",
+    "capabilities": "Capability contributions",
+    "capabilityCount": "{{count}} canonical capabilities",
+    "noCapabilities": "No capability contributions",
+    "noCapabilitiesBody": "The current version declares no Capability for platform consumers.",
+    "buildGeneration": "Build generation",
+    "applyMode": "Apply policy",
+    "sourceDigest": "Source digest",
+    "lockDigest": "Dependency lock",
+    "targetVersion": "Candidate version",
+    "compatibility": "Compatibility",
+    "test": "Candidate Test",
+    "origin": "Origin",
+    "candidateId": "Candidate ID",
+    "applyEligibility": "Apply state",
+    "operationState": "State",
+    "operationKind": "Kind",
+    "progress": "Progress"
+  }
+}

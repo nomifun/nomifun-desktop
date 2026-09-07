@@ -42,9 +42,9 @@
 | 分类 | 数量 | 项目 |
 | --- | ---: | --- |
 | 已关闭 | 13 | `W0-01`、`N1-0-01`～`N1-0-05`、`N1-1-01`～`N1-1-03`、`N1-2-00`～`N1-2-02`、`N1-X-01` |
-| 正在实施 | 2 | `N1-2-03`、`N1-4-01` |
+| 正在实施 | 3 | `N1-2-03`、`N1-4-01`、`N1-U-01` |
 | 已解锁待领取 | 0 | 无 |
-| 依赖阻塞 | 17 | 其余 N1/M1 Windows 项与最终合流 |
+| 依赖阻塞 | 16 | 其余 N1/M1 Windows 项与最终合流 |
 | 外部原生 | 2 | `RC-MA-01`、`RC-LD-01` |
 | 明确延后 | 2 | Marketplace/远程分发、第二 Runtime |
 
@@ -127,7 +127,7 @@
 3. `N1-2-03` 已进入 application-service 实施：`nomifun-plugin-service` 已接真实
     `SqlitePluginN1Repository`、Artifact Store、owner mutation、Host commit fence、
     Candidate/Apply/Restore/Uninstall/Delete-data 与 Operation CAS；application service
-    不提供绕过 Kernel 的直接 invoke。10 项 application tests 和 6 项真实 SQLite
+    不提供绕过 Kernel 的直接 invoke。12 项 application tests 和 6 项真实 SQLite
     adapter tests 已通过；App composition、Kernel publication/invalidation、
     Build/Test cancellation 与完整 E2E 尚未完成，因此不关闭。
 4. `nomifun-miniapp-platform` 已形成不读取旧 `miniapps` 的 M1 domain/application
@@ -148,12 +148,25 @@
 6. `N1-4-01` 已开始实施：新增 `nomifun-js-authoring`，复用平台统一
     `DigestHex/UserId/PluginProjectId`，完成 owner/project Source Store、JS/TS
     scaffold、canonical source snapshot、exact dependency request/lock 合同及
-    staging/cancel cleanup。16 项 authoring tests 与 `-D warnings` 通过；npm resolver/
+    staging/cancel cleanup。Source Store 现在持有 canonical `dependency-lock.json`，
+    Project 创建会把真实 Source/lock digest 写入数据库；17 项 authoring tests 通过。
+    npm resolver/
     cache、fixed packer、Build Host、DB/App 接线仍未完成。
 7. 当前定向验证：JavaScript Host 13、JS Kernel Adapter 4、Plugin Service 16、
    JavaScript Authoring 16、MiniApp Platform 5、App Plugin publisher E2E 1 均通过；
    App check、contract generator `write/check` 与 Plugin N1 Gate self-test 通过。bundled
    Host 脚本按内容 digest 物化到受管数据目录，安装版不依赖编译机源码路径。
+8. migration 070 已把 Plugin Project 的 `display_name/description` 从 Package ID 中
+   物理拆出并为既有行一次性回填；Library/Workshop 返回真实产品元数据。Project 删除
+   使用 owner/revision/build generation/Ready Candidate identity+digest 精确 CAS，
+   只删除 Project/Source/lock/Ready，保留已安装 Mount 与运行数据；提交后的 Source
+   清理失败明确返回 `PLUGIN_RECONCILE_REQUIRED`。
+9. `N1-U-01` 已进入实施：主导航 `/plugins`、Plugin Library、Project Workshop、
+   创建、预构建导入、Build/Test/Apply、Operation cancel、Project 删除和 Mount
+   生命周期动作已接真实 HTTP bridge；MCP 页面不再重复承载 Plugin 设置。Plugin UI
+   定向 14 tests、i18n Gate 与 production UI build 通过；Node Runtime Manager、
+   Config/Credential 编辑、真实 Build/Test 可用态和 Desktop accessibility/视觉走查
+   仍未完成，因此不得关闭。
 
 ## W0：一期交接
 
@@ -184,9 +197,9 @@
 | ID | 状态 | Owner/写集 | 目标 | 依赖 | 最小验证 |
 | --- | --- | --- | --- | --- | --- |
 | `N1-2-00` | closed | Artifact lane；`nomifun-plugin-platform/**` | directory/zip containment、canonical digest、immutable CAS staging/publish | `N1-0-02` | 9 tests；tamper/traversal/collision/cancel/idempotency |
-| `N1-2-01` | closed | DB lane；migration 067/068、新 repository | Artifact/Project/Candidate/current/previous/Mount/Operation/retained data 与 Runtime selection schema | `N1-0-02` | `6debcb628`；11+2+20+31 tests；fresh/restart/direct-SQL guards |
+| `N1-2-01` | closed | DB lane；migration 067/068/070、新 repository | Artifact/Project/Candidate/current/previous/Mount/Operation/retained data、Project display metadata 与 Runtime selection schema | `N1-0-02` | `6debcb628` + 当前 070；Plugin repository 13、ID schema 20；fresh/restart/direct-SQL guards |
 | `N1-2-02` | closed | Plugin platform lane；migration 069、DB repository、owner mutation coordinator | Config、Credential slot binding、KV/CAS、stable `dataDir`、owner mutation lock | `N1-2-01`,`N1-1-02` | `a275ddd97`,`a16cfbeff`；repository 12 + ID/schema 20 + lifecycle 31 |
-| `N1-2-03` | in-progress | Plugin application-service/App lane；`nomifun-plugin-service/**`、`nomifun-app/src/router/plugin_platform.rs` | staging/containment/digest/install/replace/restore/uninstall/delete-data 与真实 App/Kernel 组合 | `N1-2-01`,`N1-2-02` | service 10 + SQLite adapter 6 + App publisher E2E 1；仍需真实 Build/Test、cancellation、N1-3 consumer 与安装版验证 |
+| `N1-2-03` | in-progress | Plugin application-service/App lane；`nomifun-plugin-service/**`、`nomifun-app/src/router/plugin_platform.rs` | staging/containment/digest/install/replace/restore/uninstall/delete-data/project-delete 与真实 App/Kernel 组合 | `N1-2-01`,`N1-2-02` | service 12 + SQLite adapter 6 + App publisher E2E 1；真实 metadata/TestReceipt/Operation 投影已接；仍需真实 Build/Test、cancellation、N1-3 consumer 与安装版验证 |
 
 ## N1-3：Catalog 与消费者
 
@@ -200,7 +213,7 @@
 
 | ID | 状态 | Owner/写集 | 目标 | 依赖 | 最小验证 |
 | --- | --- | --- | --- | --- | --- |
-| `N1-4-01` | in-progress | Authoring lane；`nomifun-js-authoring/**` | Source Store、JS/TS scaffold、pure-JS dependency exact lock、fixed packer/Build Host | `N1-0-02`,`N1-1-02`,`N1-2-01` | authoring 16；reproducible artifact foundation；仍需 npm resolver/cache、packer、Build Host、DB/App 接线 |
+| `N1-4-01` | in-progress | Authoring lane；`nomifun-js-authoring/**` | Source Store、JS/TS scaffold、pure-JS dependency exact lock、fixed packer/Build Host | `N1-0-02`,`N1-1-02`,`N1-2-01` | authoring 17；Source/host lock/DB create 接线通过；仍需 npm resolver/cache、packer、Build Host 与真实 cancellation |
 | `N1-4-02` | blocked | Plugin project lane | single Ready、Candidate Test、impact、manual/compatible-idle Apply、Retry/Restore | `N1-2-03`,`N1-3-01`,`N1-4-01` | stale base/busy/breaking/no auto rollback |
 | `N1-4-03` | blocked | SDK/CLI lane | Plugin SDK、Share Bundle/prebuilt import/export、本地 CLI | `N1-4-02` | same application service；secret-free bundle |
 
@@ -210,7 +223,7 @@
 | --- | --- | --- | --- | --- | --- |
 | `N1-X-01` | closed | Skill lane；新 `nomifun-skill-library/**` | 把 `skill_service`、builtin skills、Skill market 从 `nomifun-extension` 抽为独立 owner | `W0-01` | `610b59007`；Skill Library 150 passed/2 ignored；Extension/消费者 checks passed |
 | `N1-X-02` | blocked | demolition lane；`nomifun-extension/**` 及消费者 | 删除旧 Extension loader/registry/hub/hot reload/permissions/settings/webui/agent/theme 路径 | `N1-X-01`,`N1-3-03`,`N1-4-03` | `/api/extensions/*`、Hub、`nomi-extension.json` 生产可达性为 0 |
-| `N1-U-01` | blocked | UI lane；新 `pages/plugins/**`、Runtime Manager | Plugin Library/Workshop/配置/诊断、Node Runtime Manager；MCP 页面只保留 MCP | `N1-2-03`,`N1-4-02` | Desktop product tests/build/a11y |
+| `N1-U-01` | in-progress | UI lane；新 `pages/plugins/**`、Runtime Manager | Plugin Library/Workshop/配置/诊断、Node Runtime Manager；MCP 页面只保留 MCP | `N1-2-03`,`N1-4-02` | Library/Workshop/authoring actions、14 tests、i18n、production build 已通过；仍需 Runtime Manager、Config/Credential 编辑及 Desktop product/a11y 走查 |
 | `N1-V-01` | blocked | 集成 Owner | Windows N1 contract/integration/fault/product/NSIS candidate | 所有 N1 项 | authored JS/TS → Test → Apply → invoke → Restore |
 
 ## M1：Full-stack MiniApp

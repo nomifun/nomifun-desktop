@@ -250,6 +250,8 @@ pub struct PluginProjectSummaryDto {
     pub project_revision: u64,
     pub display_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linked_mount_id: Option<String>,
     pub source_state: PluginProjectSourceStateDto,
     pub build_generation: u64,
@@ -471,13 +473,24 @@ pub struct PluginProjectDetailDto {
 #[serde(deny_unknown_fields)]
 pub struct CreatePluginProjectRequest {
     pub expected_library_revision: u64,
+    pub package_id: String,
+    pub package_version: String,
     pub display_name: String,
+    pub description: String,
+    pub language: PluginProjectLanguageDto,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linked_mount_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_linked_mount_revision: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_linked_target_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginProjectLanguageDto {
+    JavaScript,
+    TypeScript,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -778,6 +791,25 @@ mod tests {
             Value::String("credential-1".into())
         );
         assert_no_secret_keys(&value);
+    }
+
+    #[test]
+    fn project_creation_keeps_package_identity_separate_from_display_metadata() {
+        let value = serde_json::to_value(CreatePluginProjectRequest {
+            expected_library_revision: 4,
+            package_id: "dev.nomifun.csv-tools".into(),
+            package_version: "0.1.0".into(),
+            display_name: "CSV Tools".into(),
+            description: "Read and transform CSV files.".into(),
+            language: PluginProjectLanguageDto::TypeScript,
+            linked_mount_id: None,
+            expected_linked_mount_revision: None,
+            expected_linked_target_digest: None,
+        })
+        .unwrap();
+        assert_eq!(value["package_id"], "dev.nomifun.csv-tools");
+        assert_eq!(value["display_name"], "CSV Tools");
+        assert_eq!(value["language"], "type_script");
     }
 
     #[test]

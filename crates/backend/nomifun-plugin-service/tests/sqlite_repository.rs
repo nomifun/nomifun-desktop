@@ -11,10 +11,11 @@ use nomifun_db::{
 };
 use nomifun_plugin_platform::OwnerMutationCoordinator;
 use nomifun_plugin_service::{
-    DbPluginRepositoryAdapter, ImportedPluginArtifact, PluginApplicationService,
-    PluginArtifactStorePort, PluginHostCoordinator, PluginMountDataStore,
-    PluginOperationCancellation, PluginRegistryPublisher, PluginRepository,
-    PluginServiceDependencies, PluginServiceError, PluginServicePaths,
+    CreatedPluginSource, DbPluginRepositoryAdapter, ImportedPluginArtifact,
+    PluginApplicationService, PluginArtifactStorePort, PluginHostCoordinator,
+    PluginMountDataStore, PluginOperationCancellation, PluginRegistryPublisher,
+    PluginRepository, PluginServiceDependencies, PluginServiceError,
+    PluginServicePaths, PluginSourceStorePort,
     UnconfiguredPluginBuildExecutor, UnconfiguredPluginCandidateTestExecutor, ERR_FORBIDDEN,
     ERR_INTEGRATION, ERR_NOT_FOUND, ERR_RECONCILE_REQUIRED, ERR_STALE,
 };
@@ -51,9 +52,12 @@ async fn active_fixture() -> Fixture {
             project_id: project_id.clone(),
             owner_user_id: owner_user_id.clone(),
             package_id: "dev.nomifun.sqlite-fixture".into(),
+            display_name: "SQLite Fixture".into(),
+            description: "SQLite repository test Plugin.".into(),
             managed_source_path: None,
             source_head_digest: None,
             dependency_lock_digest: None,
+            initial_build_generation: 0,
             created_at: 10,
         })
         .await
@@ -204,6 +208,31 @@ impl PluginMountDataStore for NoopMountDataStore {
 }
 
 #[derive(Default)]
+struct UnavailableSourceStore;
+
+#[async_trait]
+impl PluginSourceStorePort for UnavailableSourceStore {
+    async fn create_project(
+        &self,
+        _owner_user_id: &str,
+        _project_id: &str,
+        _request: &nomifun_api_types::CreatePluginProjectRequest,
+    ) -> Result<CreatedPluginSource, PluginServiceError> {
+        Err(PluginServiceError::integration(
+            "Source authoring is outside this test",
+        ))
+    }
+
+    async fn delete_project(
+        &self,
+        _owner_user_id: &str,
+        _project_id: &str,
+    ) -> Result<(), PluginServiceError> {
+        Ok(())
+    }
+}
+
+#[derive(Default)]
 struct NoopOperationCancellation;
 
 #[async_trait]
@@ -251,9 +280,9 @@ fn application_service_with_cancellation(
         builder: Arc::new(UnconfiguredPluginBuildExecutor),
         tester: Arc::new(UnconfiguredPluginCandidateTestExecutor),
         operation_cancellation,
+        source_store: Arc::new(UnavailableSourceStore),
         data_store: Arc::new(NoopMountDataStore),
         paths: PluginServicePaths {
-            project_relative_root: "plugin-projects".into(),
             mount_data_relative_root: "plugin-mount-data".into(),
         },
     })
