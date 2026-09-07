@@ -92,6 +92,7 @@ pub async fn run_server(env: ServerEnvironment, services: AppServices) -> Result
     // process signal. Always broadcast shutdown explicitly in that path.
     let _ = shutdown_tx.send(true);
 
+    services.shutdown_computer_history().await;
     let browser_shutdown_result = services.shutdown_browser_platform().await;
     match &browser_shutdown_result {
         Ok(()) => info!("managed browser platform shut down"),

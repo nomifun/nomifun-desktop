@@ -866,6 +866,13 @@ pub(super) async fn build(
         } else {
             None
         },
+        // Computer-history tools observe the local user, so they are gated to
+        // the installation owner and dropped for any restricted principal.
+        if is_instance_owner {
+            deps.computer_history_sink.clone()
+        } else {
+            None
+        },
         summon_wiring,
         host_wiring,
     )

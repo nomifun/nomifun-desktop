@@ -130,6 +130,10 @@ export type ConfigKeyMap = {
     | undefined;
   'channels.wecom.companion_id': CompanionId | undefined;
   'skillsMarket.enabled': boolean | undefined;
+  // Computer-history master switch. Gates the native observer + the
+  // `computer_history_*` agent tools; read by the backend per session. The
+  // settings page writes it via the shared client-preference channel.
+  'feature.computerHistory': boolean | undefined;
 };
 
 export type ConfigKey = keyof ConfigKeyMap;

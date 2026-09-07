@@ -276,6 +276,10 @@ pub async fn create_router(services: &AppServices) -> Router {
         cron_service: states.cron.cron_service.clone(),
         requirement_service: states.requirement.requirement_service.clone(),
         companion_service: services.companion_service.clone(),
+        // Computer-history: the SAME singleton the agent's computer_history_*
+        // tools wrap, so gateway status and the settings page read one
+        // recorder. `None` (store failed to open) degrades every capability.
+        computer_history: services.computer_history.clone(),
         terminal_service: services.terminal_service.clone(),
         provider_repo: Arc::new(nomifun_db::SqliteProviderRepository::new(
             services.database.pool().clone(),
@@ -946,6 +950,22 @@ pub fn create_router_with_all_state(
     // other diagnostic endpoints. Registered on every build (handlers degrade to
     // null/no-op off macOS / non-computer-use), so the shared settings UI can
     // always query without a 404.
+    // Computer history settings page (activity capture status, timeline,
+    // toggle, purge). Same face pattern as the computer-permissions group:
+    // stateless handlers over the ONE service the gateway domain and the
+    // agent sink share, auth-gated like the other settings endpoints.
+    // Registered on every build (handlers degrade to empty when the
+    // feature-local store failed to open), so the UI never 404s.
+    let computer_history_authenticated = protect_instance_owner(
+        crate::router::computer_history::computer_history_routes(
+            crate::router::computer_history::ComputerHistoryState::new(
+                services.computer_history.clone(),
+            ),
+        ),
+        &auth_mw_state,
+        &instance_owner_state,
+    );
+
     let computer_permissions_authenticated = protect_instance_owner(
         Router::new()
             .route("/api/computer/permissions", get(computer_permission_status))
@@ -1098,6 +1118,7 @@ pub fn create_router_with_all_state(
         .merge(crate::router::instance_token_routes::instance_token_routes(instance_token_state))
         .merge(system_authenticated)
         .merge(computer_permissions_authenticated)
+        .merge(computer_history_authenticated)
         .merge(knowledge_registration_read_authenticated)
         .merge(knowledge_registration_write_local)
         .merge(conversation_authenticated)

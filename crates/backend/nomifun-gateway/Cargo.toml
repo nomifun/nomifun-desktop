@@ -26,6 +26,9 @@ nomifun-conversation.workspace = true
 nomifun-cron.workspace = true
 nomifun-requirement.workspace = true
 nomifun-companion.workspace = true
+# Computer-history capability domain (status / list / app_usage / urls /
+# set_enabled / purge + observation settings).
+nomifun-computer-history.workspace = true
 nomifun-ai-agent.workspace = true
 nomifun-db.workspace = true
 nomifun-terminal.workspace = true
@@ -60,6 +63,8 @@ nomi-tools = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 axum.workspace = true
 tokio.workspace = true
+# RFC3339 rendering of the paused-until timestamp in computer_history_status.
+chrono.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
