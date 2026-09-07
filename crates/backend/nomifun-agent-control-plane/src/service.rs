@@ -286,20 +286,17 @@ impl AgentControlPlane {
         let mut chat_route_records = request.chat_route_records;
         if !model_route_refs.contains_key(CHAT_MODEL_TASK)
             && !chat_route_records.contains_key(CHAT_MODEL_TASK)
+            && let Some(record) =
+                self.resolve_default_chat_route(owner).await?
         {
-            if let Some(record) = self
-                .resolve_default_chat_route(owner)
-                .await?
-            {
-                model_route_refs.insert(
-                    CHAT_MODEL_TASK.to_owned(),
-                    record.primary.model_route_id.as_ref().to_owned(),
-                );
-                chat_route_records.insert(
-                    CHAT_MODEL_TASK.to_owned(),
-                    serde_json::to_value(record)?,
-                );
-            }
+            model_route_refs.insert(
+                CHAT_MODEL_TASK.to_owned(),
+                record.primary.model_route_id.as_ref().to_owned(),
+            );
+            chat_route_records.insert(
+                CHAT_MODEL_TASK.to_owned(),
+                serde_json::to_value(record)?,
+            );
         }
         let document = nomifun_api_types::AgentPresetDocumentDto {
             schema_version: "1.0.0".into(),
@@ -1394,12 +1391,21 @@ mod tests {
         StaticRevisionImpactCatalogProvider,
     };
     use nomifun_agent_contracts::{
-        CapabilityContributions, CapabilityConsumer, CapabilityId, CapabilityKind,
-        CapabilityManifest, CapabilityRef, DigestHex, LocalizedMetadata, PackageId, PackageRef,
-        PlatformConstraint, RuntimeProfileKind, RuntimeTarget, StrictJsonValue, VersionString,
-        capability_surface_declarations,
+        CapabilityCatalogEntry, CapabilityCatalogMaterialization,
+        CapabilityCatalogMaterializer, CapabilityContributions,
+        CapabilityConsumer, CapabilityId, CapabilityKind,
+        CapabilityManifest, CapabilityOwner, CapabilityProvenance,
+        CapabilityRef, CapabilityReleaseState, CatalogAvailability,
+        ContributionId, ContributionLock, ContributionSourceKind, DigestHex,
+        LocalizedMetadata, PackageId, PackageRef, PlatformConstraint,
+        PluginMountId, PluginSourceKind, PluginSourceMetadata,
+        RuntimeProfileKind, RuntimeTarget, StableSourceIdentity,
+        StrictJsonValue, VersionString, capability_surface_declarations,
+        digest_payload,
     };
-    use nomifun_agent_kernel::{CompilerEnvironment, MaterializedRegistry};
+    use nomifun_agent_kernel::{
+        CompilerEnvironment, MaterializedCapability, MaterializedRegistry,
+    };
     use serde_json::json;
 
     fn test_compiler(templates: &OfficialTemplateCatalog) -> PresetPreviewCompiler {
@@ -1444,22 +1450,20 @@ mod tests {
         AgentControlPlane::new(store, catalog, templates, compiler)
     }
 
-    fn catalog_manifest(
+    fn catalog_capability(
         id: &str,
         consumers: impl IntoIterator<Item = CapabilityConsumer>,
-    ) -> CapabilityManifest {
+    ) -> (MaterializedCapability, CapabilityCatalogEntry) {
         let package = PackageRef {
             id: PackageId::from(format!("test.{id}")),
             version: VersionString::from("1.0.0"),
         };
-        CapabilityManifest {
+        let manifest = CapabilityManifest {
             id: CapabilityId::from(id),
-            contribution_id: nomifun_agent_contracts::ContributionId::from(format!(
-                "capability:{id}"
-            )),
+            contribution_id: ContributionId::from(format!("capability:{id}")),
             version: VersionString::from("1.0.0"),
             kind: CapabilityKind::Tool,
-            package,
+            package: package.clone(),
             display: LocalizedMetadata {
                 name: id.to_owned(),
                 description: format!("test {id}"),
@@ -1476,7 +1480,58 @@ mod tests {
                 "additionalProperties": false
             })),
             contributions: CapabilityContributions::default(),
-        }
+        };
+        let contract_digest = digest_payload(&manifest).unwrap();
+        let artifact_digest = DigestHex::from("a".repeat(64));
+        let source = PluginSourceMetadata {
+            source_kind: PluginSourceKind::Bundled,
+            source_identity: package.id.as_ref().to_owned(),
+            source_digest: Some(artifact_digest.clone()),
+        };
+        let contribution_lock = ContributionLock {
+            source_kind: ContributionSourceKind::PlatformBuiltin,
+            source_identity: StableSourceIdentity::from(
+                source.source_identity.clone(),
+            ),
+            mount_id: None,
+            miniapp_id: None,
+            mcp_binding_id: None,
+            contribution_id: manifest.contribution_id.clone(),
+            contract_digest: contract_digest.clone(),
+        };
+        let materialized = MaterializedCapability {
+            manifest: manifest.clone(),
+            schema_digest: contract_digest,
+            contribution_id: manifest.contribution_id.clone(),
+            contribution_lock: contribution_lock.clone(),
+            target_artifact_digest: artifact_digest.clone(),
+            mount_id: PluginMountId::from(format!("mount.{id}")),
+            source,
+        };
+        let availability = manifest
+            .supported_consumers()
+            .unwrap()
+            .into_iter()
+            .map(|consumer| (consumer, CatalogAvailability::Active))
+            .collect();
+        let entry = CapabilityCatalogMaterializer::materialize(
+            CapabilityCatalogMaterialization {
+                manifest,
+                provenance: CapabilityProvenance {
+                    owner: CapabilityOwner::Package { package },
+                    source_kind: contribution_lock.source_kind,
+                    source_identity: contribution_lock.source_identity,
+                    mount_id: None,
+                    miniapp_id: None,
+                    mcp_binding_id: None,
+                    artifact_digest: Some(artifact_digest),
+                },
+                release_state: CapabilityReleaseState::PublishedActive,
+                availability,
+            },
+        )
+        .unwrap();
+        (materialized, entry)
     }
 
     #[test]
@@ -1491,15 +1546,23 @@ mod tests {
 
     #[test]
     fn shared_catalog_resolves_agent_and_gateway_and_filters_agent_only_view() {
-        let shared = catalog_manifest(
+        let (shared, shared_entry) = catalog_capability(
             "knowledge.search",
             [CapabilityConsumer::Agent, CapabilityConsumer::Gateway],
         );
-        let knowledge_only =
-            catalog_manifest("browser.render_content", [CapabilityConsumer::Knowledge]);
+        let (knowledge_only, knowledge_only_entry) = catalog_capability(
+            "browser.render_content",
+            [CapabilityConsumer::Knowledge],
+        );
         let snapshot = CatalogSnapshot {
             capabilities: vec![shared, knowledge_only],
-            package_sources: BTreeMap::new(),
+            formal_capability_entries: BTreeMap::from([
+                (shared_entry.capability.clone(), shared_entry),
+                (
+                    knowledge_only_entry.capability.clone(),
+                    knowledge_only_entry,
+                ),
+            ]),
             ..CatalogSnapshot::default()
         };
         let catalog = Arc::new(StaticCatalogProvider::new(snapshot));

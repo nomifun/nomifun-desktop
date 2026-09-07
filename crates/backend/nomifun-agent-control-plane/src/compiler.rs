@@ -135,6 +135,7 @@ impl PresetPreviewCompiler {
         transient_template_key: Option<OfficialPresetKey>,
         catalog: &CatalogSnapshot,
     ) -> Result<PreviewCompilation, ControlPlaneError> {
+        catalog.validate()?;
         let payload: AgentPresetRevisionPayload = wire_cast(&request.draft.document)?;
         let draft_digest = digest_payload(&payload)
             .map_err(|error| ControlPlaneError::Wire(error.to_string()))?;
@@ -379,9 +380,17 @@ fn validate_direct_catalog_availability(
             ));
             continue;
         }
-        if let Some(code) = catalog.unavailable_capabilities.get(&reference.id) {
+        let unavailable_code = catalog
+            .formal_capability_entries
+            .get(reference)
+            .and_then(|entry| {
+                entry
+                    .availability_for(CapabilityConsumer::Agent)
+                    .and_then(catalog_unavailable_code)
+            });
+        if let Some(code) = unavailable_code {
             diagnostics.push(error_diagnostic(
-                code.clone(),
+                code,
                 format!("capability {} is unavailable on this host", reference.id.as_ref()),
                 Some(reference.id.as_ref().to_owned()),
             ));
@@ -416,17 +425,32 @@ fn contribution_locks_for_payload(
         .iter()
         .chain(payload.on_demand_capabilities.iter())
     {
-        let Some(capability) = catalog.find_capability(&selection.capability) else {
+        let Some(catalog_capability) =
+            catalog.materialized_capability(&selection.capability)
+        else {
             continue;
         };
-        if catalog.source_kind(&capability.package)
+        if catalog_capability.source.source_kind
             == nomifun_agent_contracts::PluginSourceKind::TestFixture
         {
             // TestHost registrations may drive deterministic Kernel fixtures,
             // but never mint formal Catalog provenance or Revision locks.
             continue;
         }
-        let materialized = registry
+        catalog
+            .capability_catalog_entry(&selection.capability)?
+            .ok_or_else(|| {
+                ControlPlaneError::canonical(
+                    "CAPABILITY_NOT_MATERIALIZED",
+                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                    format!(
+                        "capability {}@{} has no formal Catalog entry",
+                        selection.capability.id.as_ref(),
+                        selection.capability.version.as_ref()
+                    ),
+                )
+            })?;
+        let kernel_capability = registry
             .capability(&selection.capability.id)
             .filter(|materialized| {
                 materialized.manifest.version == selection.capability.version
@@ -442,8 +466,25 @@ fn contribution_locks_for_payload(
                     ),
                 )
             })?;
+        if catalog_capability.contribution_lock
+            != kernel_capability.contribution_lock
+            || catalog_capability.target_artifact_digest
+                != kernel_capability.target_artifact_digest
+            || catalog_capability.schema_digest
+                != kernel_capability.schema_digest
+        {
+            return Err(ControlPlaneError::canonical(
+                "CAPABILITY_CATALOG_INVALID",
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                format!(
+                    "capability {}@{} differs between the Catalog and canonical Kernel registry",
+                    selection.capability.id.as_ref(),
+                    selection.capability.version.as_ref()
+                ),
+            ));
+        }
         let operation_lock =
-            materialized.operation_lock(CapabilityConsumer::Agent);
+            kernel_capability.operation_lock(CapabilityConsumer::Agent);
         operation_lock.validate().map_err(|error| {
             ControlPlaneError::canonical(
                 "CAPABILITY_CATALOG_INVALID",
@@ -458,50 +499,83 @@ fn contribution_locks_for_payload(
     }
 
     for skill in &payload.skill_bindings {
-        let Some(definition) = catalog.find_skill(skill) else {
+        let Some(catalog_skill) = catalog.materialized_skill(skill) else {
             continue;
         };
-        let contribution_id = format!("skill:{}", definition.id.as_ref());
-        if !seen.insert(contribution_id.clone()) {
+        if catalog_skill.source.source_kind
+            == nomifun_agent_contracts::PluginSourceKind::TestFixture
+        {
             continue;
         }
-        let (source_kind, source_identity, mount_id) =
-            contribution_source_for_package(catalog, &definition.package);
-        locks.push(ContributionLock {
-            source_kind,
-            source_identity,
-            mount_id,
-            miniapp_id: None,
-            mcp_binding_id: None,
-            contribution_id: contribution_id.into(),
-            contract_digest: definition.body_ref.digest.clone(),
-        });
+        let kernel_skill = registry
+            .skill(&skill.id)
+            .filter(|materialized| {
+                materialized.definition.version == skill.version
+            })
+            .ok_or_else(|| {
+                ControlPlaneError::canonical(
+                    "CAPABILITY_NOT_MATERIALIZED",
+                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                    format!(
+                        "skill {}@{} is not present in the canonical Kernel registry",
+                        skill.id.as_ref(),
+                        skill.version.as_ref()
+                    ),
+                )
+            })?;
+        if catalog_skill.contribution_lock != kernel_skill.contribution_lock
+            || catalog_skill.target_artifact_digest
+                != kernel_skill.target_artifact_digest
+            || catalog_skill.contract_digest != kernel_skill.contract_digest
+        {
+            return Err(ControlPlaneError::canonical(
+                "CAPABILITY_CATALOG_INVALID",
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                format!(
+                    "skill {}@{} differs between the Catalog and canonical Kernel registry",
+                    skill.id.as_ref(),
+                    skill.version.as_ref()
+                ),
+            ));
+        }
+        kernel_skill
+            .contribution_lock
+            .validate()
+            .map_err(|error| {
+                ControlPlaneError::canonical(
+                    "CAPABILITY_CATALOG_INVALID",
+                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                    error.message,
+                )
+            })?;
+        let contribution_id =
+            kernel_skill.contribution_lock.contribution_id.clone();
+        if seen.insert(contribution_id.as_ref().to_owned()) {
+            locks.push(kernel_skill.contribution_lock.clone());
+        }
     }
 
     locks.sort();
     Ok(locks)
 }
 
-fn contribution_source_for_package(
-    catalog: &CatalogSnapshot,
-    package: &nomifun_agent_contracts::PackageRef,
-) -> (ContributionSourceKind, StableSourceIdentity, Option<PluginMountId>) {
-    let source_identity = StableSourceIdentity::from(format!(
-        "{}@{}",
-        package.id.as_ref(),
-        package.version.as_ref()
-    ));
-    match catalog.source_kind(package) {
-        nomifun_agent_contracts::PluginSourceKind::ManagedLocal => (
-            ContributionSourceKind::PluginMount,
-            source_identity,
-            Some(PluginMountId::from(format!(
-                "package:{}@{}",
-                package.id.as_ref(),
-                package.version.as_ref()
-            ))),
-        ),
-        _ => (ContributionSourceKind::PlatformBuiltin, source_identity, None),
+fn catalog_unavailable_code(
+    availability: &nomifun_agent_contracts::CatalogAvailability,
+) -> Option<CanonicalErrorCode> {
+    match availability {
+        nomifun_agent_contracts::CatalogAvailability::Active => None,
+        nomifun_agent_contracts::CatalogAvailability::Unavailable { reason }
+        | nomifun_agent_contracts::CatalogAvailability::Disabled { reason } => {
+            Some(CanonicalErrorCode::from(reason.clone()))
+        }
+        nomifun_agent_contracts::CatalogAvailability::NeedsRuntime { .. } => {
+            Some(CanonicalErrorCode::from("CAPABILITY_NEEDS_RUNTIME"))
+        }
+        nomifun_agent_contracts::CatalogAvailability::ContractMismatch { .. } => {
+            Some(CanonicalErrorCode::from(
+                "CAPABILITY_CONTRACT_MISMATCH",
+            ))
+        }
     }
 }
 
@@ -533,9 +607,11 @@ fn validate_template_baseline(
             catalog
                 .capabilities
                 .iter()
-                .find(|capability| &capability.id == id)
+                .find(|capability| &capability.manifest.id == id)
         })
-        .flat_map(|capability| capability.requires_runtime_features.iter())
+        .flat_map(|capability| {
+            capability.manifest.requires_runtime_features.iter()
+        })
         .map(|feature| feature.id.clone())
         .collect::<BTreeSet<_>>();
     let missing_features = templates
@@ -600,13 +676,23 @@ fn preview_summary(
     let initial_manifests = catalog
         .capabilities
         .iter()
-        .filter(|capability| initial_ids.contains(&capability.id))
+        .filter(|capability| {
+            initial_ids.contains(&capability.manifest.id)
+        })
         .collect::<Vec<_>>();
     let required_resource_kinds = catalog
         .capabilities
         .iter()
-        .filter(|capability| selected_ids.contains(&capability.id))
-        .flat_map(|capability| capability.contributions.resource_kinds.iter())
+        .filter(|capability| {
+            selected_ids.contains(&capability.manifest.id)
+        })
+        .flat_map(|capability| {
+            capability
+                .manifest
+                .contributions
+                .resource_kinds
+                .iter()
+        })
         .collect::<BTreeSet<_>>();
     PreviewSummaryDto {
         initial_count: payload.initial_capabilities.len() as u32,
@@ -614,11 +700,19 @@ fn preview_summary(
         active_at_start_count: initial_manifests.len() as u32,
         model_tool_count: initial_manifests
             .iter()
-            .map(|manifest| manifest.contributions.actions.len() as u32)
+            .map(|capability| {
+                capability.manifest.contributions.actions.len() as u32
+            })
             .sum(),
         context_contributor_count: initial_manifests
             .iter()
-            .map(|manifest| manifest.contributions.context_schema_refs.len() as u32)
+            .map(|capability| {
+                capability
+                    .manifest
+                    .contributions
+                    .context_schema_refs
+                    .len() as u32
+            })
             .sum(),
         on_demand_index_count: snapshot
             .map(|snapshot| snapshot.content.compact_on_demand_index.len() as u32)
@@ -627,7 +721,9 @@ fn preview_summary(
         mcp_count: catalog
             .mcp_tools
             .iter()
-            .filter(|mapping| selected_ids.contains(&mapping.capability.id))
+            .filter(|mcp| {
+                selected_ids.contains(&mcp.mapping.capability.id)
+            })
             .count() as u32,
         required_resource_kind_count: required_resource_kinds.len() as u32,
         provider_initialization_count: payload.model_route_refs.len() as u32,
@@ -742,15 +838,20 @@ fn preview_inspector(
     let mcp_materializations = catalog
         .mcp_tools
         .iter()
-        .filter(|mapping| selected_ids.contains(&mapping.capability.id))
-        .map(mcp_mapping_api)
+        .filter(|mcp| {
+            selected_ids.contains(&mcp.mapping.capability.id)
+        })
+        .map(|mcp| mcp_mapping_api(&mcp.mapping))
         .collect();
     let required_resource_kinds = catalog
         .capabilities
         .iter()
-        .filter(|capability| selected_ids.contains(&capability.id))
+        .filter(|capability| {
+            selected_ids.contains(&capability.manifest.id)
+        })
         .flat_map(|capability| {
             capability
+                .manifest
                 .contributions
                 .resource_kinds
                 .iter()
@@ -936,10 +1037,57 @@ fn now_ms() -> i64 {
         .min(i64::MAX as u128) as i64
 }
 
+pub fn revision_api(
+    revision: &AgentPresetRevision,
+) -> Result<AgentPresetRevisionDto, ControlPlaneError> {
+    Ok(AgentPresetRevisionDto {
+        reference: wire_cast(&revision.reference)?,
+        document: wire_cast(&revision.payload)?,
+        contribution_locks: revision
+            .contribution_locks
+            .iter()
+            .map(|lock| {
+                Ok(ContributionLockDto {
+                    source_kind: wire_name(&lock.source_kind)?,
+                    source_identity: lock.source_identity.as_ref().to_owned(),
+                    mount_id: lock.mount_id.as_ref().map(|value| value.as_ref().to_owned()),
+                    miniapp_id: lock
+                        .miniapp_id
+                        .as_ref()
+                        .map(|value| value.as_ref().to_owned()),
+                    mcp_binding_id: lock
+                        .mcp_binding_id
+                        .as_ref()
+                        .map(|value| value.as_ref().to_owned()),
+                    contribution_id: lock.contribution_id.as_ref().to_owned(),
+                    contract_digest: lock.contract_digest.as_ref().to_owned(),
+                })
+            })
+            .collect::<Result<Vec<_>, ControlPlaneError>>()?,
+        created_by: revision.created_by.as_ref().to_owned(),
+        created_at_ms: revision.created_at_ms,
+        reason: revision.reason.clone(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nomifun_agent_contracts::{CapabilityId, RuntimeProfileKind};
+    use nomifun_agent_contracts::{
+        CapabilityCatalogMaterialization, CapabilityCatalogMaterializer,
+        CapabilityContributions, CapabilityId, CapabilityKind,
+        CapabilityManifest, CapabilityOwner, CapabilityProvenance,
+        CapabilityRef, CapabilityReleaseState, CapabilitySelection,
+        CatalogAvailability, LocalizedMetadata, LogicalArtifactRef,
+        McpBindingId, McpServerId, McpToolCapabilityMapping, McpToolKey,
+        PackageId, PackageRef, PluginSourceMetadata, RuntimeProfileKind,
+        SkillDefinition, SkillId, StrictJsonValue,
+        capability_surface_declarations,
+    };
+    use nomifun_agent_kernel::{
+        MaterializedCapability, MaterializedMcpTool, MaterializedSkill,
+    };
+    use std::collections::BTreeMap;
 
     #[test]
     fn coding_profile_survives_template_provenance_and_saved_snapshot_reloads() {
@@ -987,37 +1135,222 @@ mod tests {
             RuntimeProfileKind::ManagedMinimal
         );
     }
-}
 
-pub fn revision_api(
-    revision: &AgentPresetRevision,
-) -> Result<AgentPresetRevisionDto, ControlPlaneError> {
-    Ok(AgentPresetRevisionDto {
-        reference: wire_cast(&revision.reference)?,
-        document: wire_cast(&revision.payload)?,
-        contribution_locks: revision
-            .contribution_locks
-            .iter()
-            .map(|lock| {
-                Ok(ContributionLockDto {
-                    source_kind: wire_name(&lock.source_kind)?,
-                    source_identity: lock.source_identity.as_ref().to_owned(),
-                    mount_id: lock.mount_id.as_ref().map(|value| value.as_ref().to_owned()),
-                    miniapp_id: lock
-                        .miniapp_id
-                        .as_ref()
-                        .map(|value| value.as_ref().to_owned()),
-                    mcp_binding_id: lock
-                        .mcp_binding_id
-                        .as_ref()
-                        .map(|value| value.as_ref().to_owned()),
-                    contribution_id: lock.contribution_id.as_ref().to_owned(),
-                    contract_digest: lock.contract_digest.as_ref().to_owned(),
-                })
-            })
-            .collect::<Result<Vec<_>, ControlPlaneError>>()?,
-        created_by: revision.created_by.as_ref().to_owned(),
-        created_at_ms: revision.created_at_ms,
-        reason: revision.reason.clone(),
-    })
+    #[test]
+    fn contribution_locks_preserve_exact_managed_skill_and_mcp_facts() {
+        let package = PackageRef {
+            id: PackageId::from("managed.example"),
+            version: VersionString::from("1.0.0"),
+        };
+        let mount_id = PluginMountId::from("managed-example-mount");
+        let artifact_digest = DigestHex::from("a".repeat(64));
+        let source = PluginSourceMetadata {
+            source_kind: PluginSourceKind::ManagedLocal,
+            source_identity: mount_id.as_ref().to_owned(),
+            source_digest: Some(artifact_digest.clone()),
+        };
+        let capability_ref = CapabilityRef {
+            id: CapabilityId::from("managed.example.run"),
+            version: VersionString::from("1.0.0"),
+        };
+        let capability_manifest = CapabilityManifest {
+            id: capability_ref.id.clone(),
+            contribution_id: ContributionId::from(
+                "capability:managed.example.run",
+            ),
+            version: capability_ref.version.clone(),
+            kind: CapabilityKind::Tool,
+            package: package.clone(),
+            display: LocalizedMetadata {
+                name: "Managed example".to_owned(),
+                description: "Managed MCP-backed fixture".to_owned(),
+                localized_names: BTreeMap::new(),
+                localized_descriptions: BTreeMap::new(),
+            },
+            requires: Vec::new(),
+            conflicts: Vec::new(),
+            supported_surfaces: capability_surface_declarations(
+                ["desktop"],
+                [CapabilityConsumer::Agent],
+            ),
+            requires_runtime_features: Vec::new(),
+            supported_platforms: Vec::new(),
+            config_schema: StrictJsonValue(json!({"type": "object"})),
+            contributions: CapabilityContributions::default(),
+        };
+        let capability_digest =
+            digest_payload(&capability_manifest).unwrap();
+        let binding_id =
+            McpBindingId::from("managed.server:managed.server.run");
+        let capability_lock = ContributionLock {
+            source_kind: ContributionSourceKind::McpBinding,
+            source_identity: StableSourceIdentity::from(
+                "mcp:managed.server",
+            ),
+            mount_id: Some(mount_id.clone()),
+            miniapp_id: None,
+            mcp_binding_id: Some(binding_id.clone()),
+            contribution_id: capability_manifest.contribution_id.clone(),
+            contract_digest: capability_digest.clone(),
+        };
+        let materialized_capability = MaterializedCapability {
+            manifest: capability_manifest.clone(),
+            schema_digest: capability_digest.clone(),
+            contribution_id: capability_manifest.contribution_id.clone(),
+            contribution_lock: capability_lock.clone(),
+            target_artifact_digest: artifact_digest.clone(),
+            mount_id: mount_id.clone(),
+            source: source.clone(),
+        };
+        let catalog_entry =
+            CapabilityCatalogMaterializer::materialize(
+                CapabilityCatalogMaterialization {
+                    manifest: capability_manifest,
+                    provenance: CapabilityProvenance {
+                        owner: CapabilityOwner::Package {
+                            package: package.clone(),
+                        },
+                        source_kind: capability_lock.source_kind,
+                        source_identity: capability_lock
+                            .source_identity
+                            .clone(),
+                        mount_id: capability_lock.mount_id.clone(),
+                        miniapp_id: None,
+                        mcp_binding_id: Some(binding_id.clone()),
+                        artifact_digest: Some(artifact_digest.clone()),
+                    },
+                    release_state:
+                        CapabilityReleaseState::PublishedActive,
+                    availability: BTreeMap::from([(
+                        CapabilityConsumer::Agent,
+                        CatalogAvailability::Active,
+                    )]),
+                },
+            )
+            .unwrap();
+        let skill_definition = SkillDefinition {
+            id: SkillId::from("managed.example.skill"),
+            version: VersionString::from("1.0.0"),
+            package: package.clone(),
+            display: LocalizedMetadata {
+                name: "Managed skill".to_owned(),
+                description: "Managed skill fixture".to_owned(),
+                localized_names: BTreeMap::new(),
+                localized_descriptions: BTreeMap::new(),
+            },
+            body_ref: LogicalArtifactRef {
+                artifact_id: "managed.example.skill.body".into(),
+                normalized_relative_path: "skills/example/SKILL.md"
+                    .to_owned(),
+                digest: DigestHex::from("b".repeat(64)),
+            },
+            resources: Vec::new(),
+            requires_capabilities: vec![capability_ref.clone()],
+            supported_surfaces: BTreeSet::from(["desktop".to_owned()]),
+        };
+        let skill_digest = digest_payload(&skill_definition).unwrap();
+        let skill_lock = ContributionLock {
+            source_kind: ContributionSourceKind::PluginMount,
+            source_identity: StableSourceIdentity::from(
+                source.source_identity.clone(),
+            ),
+            mount_id: Some(mount_id.clone()),
+            miniapp_id: None,
+            mcp_binding_id: None,
+            contribution_id: ContributionId::from(
+                "skill:managed.example.skill",
+            ),
+            contract_digest: skill_digest.clone(),
+        };
+        let materialized_skill = MaterializedSkill {
+            definition: skill_definition.clone(),
+            contribution_id: skill_lock.contribution_id.clone(),
+            contract_digest: skill_digest,
+            contribution_lock: skill_lock.clone(),
+            target_artifact_digest: artifact_digest.clone(),
+            mount_id: mount_id.clone(),
+            source: source.clone(),
+        };
+        let mapping = McpToolCapabilityMapping {
+            package,
+            server_id: McpServerId::from("managed.server"),
+            canonical_tool_key: McpToolKey::from("managed.server.run"),
+            schema_digest: DigestHex::from("c".repeat(64)),
+            capability: capability_ref.clone(),
+            materialization_version: VersionString::from("1.0.0"),
+        };
+        let materialized_mcp = MaterializedMcpTool {
+            mapping: mapping.clone(),
+            binding_id,
+            contribution_lock: capability_lock.clone(),
+            target_artifact_digest: artifact_digest,
+            mount_id,
+            source,
+        };
+        let catalog = CatalogSnapshot {
+            capabilities: vec![materialized_capability.clone()],
+            formal_capability_entries: BTreeMap::from([(
+                catalog_entry.capability.clone(),
+                catalog_entry,
+            )]),
+            skills: vec![materialized_skill.clone()],
+            mcp_tools: vec![materialized_mcp.clone()],
+            unavailable_capabilities: BTreeMap::new(),
+            service_key_diagnostics: Vec::new(),
+        };
+        let mut registry = MaterializedRegistry::empty();
+        registry.capabilities.insert(
+            capability_ref.id.clone(),
+            materialized_capability,
+        );
+        registry.skills.insert(
+            skill_definition.id.clone(),
+            materialized_skill,
+        );
+        let mcp_key = (
+            mapping.server_id.clone(),
+            mapping.canonical_tool_key.clone(),
+        );
+        registry
+            .mcp_by_capability
+            .insert(capability_ref.id.clone(), mcp_key.clone());
+        registry.mcp_tools.insert(mcp_key, materialized_mcp);
+        let payload = AgentPresetRevisionPayload {
+            schema_version: VersionString::from("1.0.0"),
+            model_route_refs: BTreeMap::new(),
+            chat_route_records: BTreeMap::new(),
+            initial_capabilities: vec![CapabilitySelection {
+                capability: capability_ref,
+                action_allowlist: BTreeSet::new(),
+            }],
+            on_demand_capabilities: Vec::new(),
+            skill_bindings: vec![SkillRef {
+                id: skill_definition.id,
+                version: skill_definition.version,
+            }],
+            system_role_provider_overrides: BTreeMap::new(),
+            persona: "Managed fixture".to_owned(),
+            instructions: "Use exact managed contributions.".to_owned(),
+            starter_prompts: Vec::new(),
+        };
+
+        catalog.validate().unwrap();
+        let locks =
+            contribution_locks_for_payload(&payload, &catalog, &registry)
+                .unwrap();
+        assert_eq!(locks.len(), 2);
+        assert!(locks.contains(&capability_lock));
+        assert!(locks.contains(&skill_lock));
+
+        registry
+            .skills
+            .get_mut(&SkillId::from("managed.example.skill"))
+            .unwrap()
+            .contribution_lock
+            .mount_id = Some(PluginMountId::from("drifted-mount"));
+        let error =
+            contribution_locks_for_payload(&payload, &catalog, &registry)
+                .unwrap_err();
+        assert_eq!(error.code().as_ref(), "CAPABILITY_CATALOG_INVALID");
+    }
 }

@@ -465,6 +465,28 @@ async fn one_kernel_registry_dispatches_javascript_tool_context_and_resource() {
         .replace_all(vec![adapter.registration(Arc::clone(&host)).unwrap()])
         .unwrap();
     assert_eq!(host.process_count(), 0);
+    for capability_id in [TOOL_ID, CONTEXT_ID, RESOURCE_ID] {
+        let capability = materialized
+            .capability(&CapabilityId::from(capability_id))
+            .unwrap();
+        assert_eq!(
+            capability.contribution_lock.source_kind,
+            nomifun_agent_contracts::ContributionSourceKind::PluginMount
+        );
+        assert_eq!(
+            capability.contribution_lock.mount_id.as_ref(),
+            Some(&PluginMountId::from("fixture-javascript-mount"))
+        );
+        assert_eq!(
+            capability.target_artifact_digest,
+            adapter.artifact().artifact_digest
+        );
+        assert_eq!(
+            capability.contribution_lock.contract_digest,
+            capability.schema_digest
+        );
+        assert_eq!(capability.manifest.package, adapter.manifest().package_ref());
+    }
 
     let owner = PrincipalRef {
         principal_kind: "user".into(),
