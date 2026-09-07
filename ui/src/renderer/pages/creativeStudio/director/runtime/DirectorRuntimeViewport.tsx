@@ -25,6 +25,7 @@ import type {
 export interface DirectorRuntimeViewportProps {
   state: DirectorState;
   resolveAssetUrl: DirectorAssetUrlResolver;
+  assetResolutionRevision?: string;
   timeSeconds?: number;
   maxPixelRatio?: number;
   showAxes?: boolean;
@@ -45,6 +46,7 @@ export const DirectorRuntimeViewport = forwardRef<
   {
     state,
     resolveAssetUrl,
+    assetResolutionRevision,
     timeSeconds,
     maxPixelRatio,
     showAxes,
@@ -90,6 +92,12 @@ export const DirectorRuntimeViewport = forwardRef<
   useLayoutEffect(() => {
     runtimeRef.current?.update(state, timeSeconds);
   }, [state, timeSeconds]);
+
+  useLayoutEffect(() => {
+    // Metadata tombstones invalidate already-decoded GPU textures and models,
+    // even when the durable scene deliberately retains the same asset ids.
+    runtimeRef.current?.setAssetUrlResolver((assetId, signal) => resolverRef.current(assetId, signal));
+  }, [assetResolutionRevision]);
 
   useImperativeHandle(
     ref,

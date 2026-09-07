@@ -6,6 +6,7 @@
 
 export { default as CreativeCanvasImageToolbar } from "./CreativeCanvasImageToolbar";
 export type { CreativeCanvasImageToolbarProps } from "./CreativeCanvasImageToolbar";
+export { default as CreativeImagePreviewDialog } from "./CreativeImagePreviewDialog";
 export { default as CreativeImageCropDialog } from "./CreativeImageCropDialog";
 export type { CreativeImageCropDialogProps } from "./CreativeImageCropDialog";
 export { default as CreativeImageMaskEditDialog } from "./CreativeImageMaskEditDialog";

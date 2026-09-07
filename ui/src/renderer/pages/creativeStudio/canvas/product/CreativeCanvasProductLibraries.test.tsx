@@ -89,4 +89,33 @@ describe('CreativeCanvasProductAssetLibrary', () => {
     expect(markup.includes('backend unavailable')).toBe(true);
     expect(markup.includes('素材库加载失败')).toBe(true);
   });
+
+  test('uses the video preview when an asset has no thumbnail', () => {
+    const video: CreativeAsset = {
+      ...asset,
+      id: 'asset-video-without-thumbnail',
+      kind: 'video',
+      title: '视频参考',
+      mimeType: 'video/mp4',
+      originalUrl: '/assets/video-without-thumbnail.mp4',
+      thumbnailUrl: null,
+    };
+    const markup = renderToStaticMarkup(
+      <CreativeCanvasProductAssetLibrary
+        state={state({ assets: [video] })}
+        search=''
+        kind='video'
+        selectedIds={new Set()}
+        onSearchChange={() => undefined}
+        onKindChange={() => undefined}
+        onToggleAsset={() => undefined}
+        onInsert={() => undefined}
+      />
+    );
+
+    expect(markup.includes('<video')).toBe(true);
+    expect(markup.includes(`src="${video.originalUrl}"`)).toBe(true);
+    expect(markup.includes('data-creative-media-preview="video"')).toBe(true);
+    expect(markup.includes('<img')).toBe(false);
+  });
 });

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { CreativeAsset } from '../../assets';
+import { isCreativeAssetDeleted, type CreativeAsset } from '../../assets';
 import type {
   CreativeBottomPanelView,
   CreativeCanvasNode,
@@ -220,19 +220,31 @@ export function resolveCreativeNodeAssetPresentation(
   const assetId = referencedAssetId(node);
   if (!assetId) return null;
   const asset = assetsById.get(assetId);
+  if (asset && isCreativeAssetDeleted(asset)) {
+    return { src: '', label: asset.title, deleted: true };
+  }
   if (!asset || !assetKindMatchesNode(node, asset) || !asset.originalUrl) return null;
+
+  const posterAsset = node.type === 'video' && node.data.posterAssetId
+    ? assetsById.get(node.data.posterAssetId)
+    : undefined;
+  const posterSrc = node.type === 'video'
+    ? posterAsset?.kind === 'image' && !isCreativeAssetDeleted(posterAsset) && posterAsset.originalUrl.trim()
+      ? posterAsset.originalUrl
+      : asset.thumbnailUrl
+    : null;
 
   return {
     src:
       node.type === 'image' || node.type === 'panorama'
         ? asset.thumbnailUrl ?? asset.originalUrl
         : asset.originalUrl,
-    ...(node.type === 'video' && asset.thumbnailUrl
-      ? { posterSrc: asset.thumbnailUrl }
+    ...(posterSrc
+      ? { posterSrc }
       : {}),
     label: asset.title,
     ...(node.type === 'image' || node.type === 'panorama'
-      ? { alt: asset.title }
+      ? { originalSrc: asset.originalUrl, alt: asset.title }
       : {}),
   };
 }

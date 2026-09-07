@@ -10,7 +10,6 @@ import {
   Close,
   Delete,
   Download,
-  EditTwo,
   Error,
   GridNine,
   Inbox,
@@ -32,6 +31,7 @@ import { useTranslation } from 'react-i18next';
 
 import type { CreativeAsset, CreativeAssetKind } from '../types';
 import CreativeAssetMedia, { creativeAssetKindIcon } from './CreativeAssetMedia';
+import CreativeAssetActionsMenu from './CreativeAssetActionsMenu';
 import CreativeAssetUploadQueue from './CreativeAssetUploadQueue';
 import type {
   CreativeAssetAction,
@@ -142,7 +142,6 @@ const formatUpdatedAt = (timestamp: number, locale?: string): { label: string; d
 interface AssetItemProps {
   asset: CreativeAsset;
   view: CreativeAssetViewMode;
-  showActionLabels: boolean;
   selected: boolean;
   selectable: boolean;
   disabled: boolean;
@@ -158,7 +157,6 @@ interface AssetItemProps {
 const AssetItem: React.FC<AssetItemProps> = ({
   asset,
   view,
-  showActionLabels,
   selected,
   selectable,
   disabled,
@@ -188,32 +186,31 @@ const AssetItem: React.FC<AssetItemProps> = ({
         </label>
       ) : null}
 
-      <button
-        type='button'
-        className={styles.assetPreviewButton}
-        disabled={!onOpen || disabled}
-        aria-label={`${labels.open}: ${asset.title}`}
-        onClick={() => onOpen?.(asset)}
-      >
-        <CreativeAssetMedia asset={asset} unavailableLabel={labels.mediaUnavailable} compact={view === 'list'} />
-      </button>
+      <div className={styles.assetCover}>
+        <button
+          type='button'
+          className={styles.assetPreviewButton}
+          disabled={!onOpen || disabled}
+          aria-label={`${labels.open}: ${asset.title}`}
+          onClick={() => onOpen?.(asset)}
+        >
+          <CreativeAssetMedia asset={asset} unavailableLabel={labels.mediaUnavailable} compact={view === 'list'} />
+        </button>
+        <span className={styles.kindBadge} data-kind={asset.kind}>
+          <span aria-hidden='true'>{creativeAssetKindIcon(asset.kind, 13)}</span>
+          {kindLabel(asset.kind, labels)}
+        </span>
+      </div>
 
       <div className={styles.assetContent}>
-        <div className={styles.assetHeading}>
-          <div className={styles.assetTitleBlock}>
-            <strong title={asset.title}>{asset.title}</strong>
-            <span>{asset.collection || labels.noCollection}</span>
-          </div>
-          <span className={styles.kindBadge} data-kind={asset.kind}>
-            <span aria-hidden='true'>{creativeAssetKindIcon(asset.kind, 13)}</span>
-            {kindLabel(asset.kind, labels)}
-          </span>
+        <div className={styles.assetTitleBlock}>
+          <strong title={asset.title}>{asset.title}</strong>
+          <span title={asset.collection || labels.noCollection}>{asset.collection || labels.noCollection}</span>
         </div>
 
-        <p className={styles.assetDetails}>{assetDetails(asset)}</p>
         <div className={styles.assetTags} aria-label={asset.tags.length ? asset.tags.join(', ') : labels.noTags}>
           {asset.tags.length ? (
-            asset.tags.slice(0, view === 'list' ? 4 : 3).map((tag) => <span key={tag}>{tag}</span>)
+            asset.tags.slice(0, view === 'list' ? 4 : 3).map((tag) => <span key={tag} title={tag}>{tag}</span>)
           ) : (
             <span>{labels.noTags}</span>
           )}
@@ -221,44 +218,18 @@ const AssetItem: React.FC<AssetItemProps> = ({
         {view === 'list' ? <time dateTime={updatedAt.dateTime}>{updatedAt.label}</time> : null}
       </div>
 
-      <div className={styles.assetActions} data-action-labels={showActionLabels || undefined}>
-        {showActionLabels && onOpen ? (
-          <button type='button' disabled={disabled} aria-label={labels.open} onClick={() => onOpen(asset)}>
-            {labels.open}
-          </button>
-        ) : null}
-        {onEdit ? (
-          <button type='button' disabled={disabled} title={labels.edit} aria-label={labels.edit} onClick={() => onEdit(asset)}>
-            <EditTwo theme='outline' size={15} fill='currentColor' strokeWidth={3} />
-            {showActionLabels ? <span>{labels.edit}</span> : null}
-          </button>
-        ) : null}
-        {onDownload && asset.kind !== 'text' ? (
-          <button
-            type='button'
-            disabled={disabled}
-            title={labels.download}
-            aria-label={labels.download}
-            onClick={() => onDownload(asset)}
-          >
-            <Download theme='outline' size={15} fill='currentColor' strokeWidth={3} />
-            {showActionLabels ? <span>{labels.download}</span> : null}
-          </button>
-        ) : null}
-        {onRemove ? (
-          <button
-            type='button'
-            disabled={disabled}
-            title={labels.remove}
-            aria-label={labels.remove}
-            data-danger
-            onClick={() => onRemove(asset)}
-          >
-            <Delete theme='outline' size={15} fill='currentColor' strokeWidth={3} />
-            {showActionLabels ? <span>{labels.remove}</span> : null}
-          </button>
-        ) : null}
-      </div>
+      <footer className={styles.assetFooter}>
+        <p className={styles.assetDetails} title={assetDetails(asset)}>{assetDetails(asset)}</p>
+        <CreativeAssetActionsMenu
+          asset={asset}
+          disabled={disabled}
+          labels={labels}
+          onOpen={onOpen}
+          onEdit={onEdit}
+          onDownload={onDownload}
+          onRemove={onRemove}
+        />
+      </footer>
     </article>
   );
 };
@@ -643,7 +614,6 @@ const CreativeAssetLibrary: React.FC<CreativeAssetLibraryProps> = ({
                 key={asset.id}
                 asset={asset}
                 view={view}
-                showActionLabels={sourceAppearance}
                 selected={selectable && selectedIds.has(asset.id)}
                 selectable={selectable}
                 disabled={busy}

@@ -12,6 +12,8 @@ use tracing::{info, warn};
 
 use crate::error::DbError;
 
+mod published_main_migrations;
+
 /// Maximum number of connections in the pool.
 const MAX_CONNECTIONS: u32 = 5;
 
@@ -31,7 +33,9 @@ const V3_BASELINE_MIGRATION_VERSION: i64 = 1;
 /// Compatibility result for a persisted sqlx migration lineage.
 ///
 /// A strict prefix is safe to hand to the embedded migrator for an incremental
-/// upgrade. Anything else (a gap, unknown version, failed row, or checksum
+/// upgrade. The exact published main 059/060 asset prefix is also supported
+/// through an atomic migration-number reconciliation. Anything else (a gap,
+/// unknown version, failed row, or checksum
 /// mismatch) is unsupported and must fail closed before writable startup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MigrationLineageStatus {
@@ -240,6 +244,10 @@ pub async fn inspect_supported_migration_lineage(
             rows.len(),
             expected.len(),
         )));
+    }
+
+    if published_main_migrations::is_published_main_prefix(&rows, &DB_MIGRATOR)? {
+        return Ok(MigrationLineageStatus::UpgradeRequired);
     }
 
     for (row, expected) in rows.iter().zip(expected.iter()) {
@@ -531,6 +539,9 @@ fn require_quick_check_ok(rows: Vec<String>) -> Result<(), DbError> {
 /// pass sees the row that the winner committed, checksum matches (same
 /// shipped binary), and the migration is treated as already applied.
 async fn run_migrations_with_retry(conn: &mut sqlx::SqliteConnection) -> Result<(), DbError> {
+    if published_main_migrations::adopt_and_migrate(conn, &DB_MIGRATOR).await? {
+        return Ok(());
+    }
     let mut retried_unique_conflict = false;
 
     loop {

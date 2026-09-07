@@ -48,8 +48,8 @@ describe('CreativeCanvasComposerShell', () => {
     expect(source.includes('new ResizeObserver(updatePlacement)')).toBe(true);
     expect(source.includes('observer?.disconnect()')).toBe(true);
     expect(source.includes('createPortal(content, document.body)')).toBe(true);
-    expect(css.includes('width: 580px')).toBe(true);
-    expect(css.includes('height: 104px')).toBe(true);
+    expect(css.includes('width: 540px')).toBe(true);
+    expect(css.includes('height: 92px')).toBe(true);
     expect(css.includes('font-size: 12px')).toBe(true);
     expect(css.includes('line-height: 18px')).toBe(true);
     expect(css.includes('height: 30px')).toBe(true);

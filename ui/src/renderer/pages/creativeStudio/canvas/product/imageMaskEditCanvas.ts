@@ -34,7 +34,10 @@ import {
   CREATIVE_CANVAS_PRODUCT_NODE_SIZES,
 } from './nodeFactory';
 import { creativeStudioProductText } from './i18n';
-import { nextCanvasImageTaskPosition } from './imageTaskCanvasLayout';
+import {
+  canvasTaskResultPosition,
+  nextCanvasImageTaskPosition,
+} from './imageTaskCanvasLayout';
 
 export const CREATIVE_IMAGE_MASK_EDIT_OPERATION = 'image-mask-edit';
 
@@ -208,7 +211,7 @@ export function prepareCanvasImageMaskEdit(input: {
     throw new Error(
       creativeStudioProductText(
         'creativeStudio.canvas.errors.mask.connectConfigFailed',
-        '无法连接局部编辑配置节点：{{code}}。',
+        '无法保存局部编辑任务关联：{{code}}。',
         { code: validation.code }
       )
     );
@@ -254,7 +257,7 @@ export function canvasImageMaskEditConfigForReference(
     throw new Error(
       creativeStudioProductText(
         'creativeStudio.canvas.errors.mask.missingConfig',
-        '局部编辑任务缺少 canonical 配置节点。'
+        '局部编辑任务缺少必要任务记录。'
       )
     );
   }
@@ -268,7 +271,7 @@ export function canvasImageMaskEditConfigForReference(
     throw new Error(
       creativeStudioProductText(
         'creativeStudio.canvas.errors.mask.identityMismatch',
-        '局部编辑任务与配置节点身份不一致。'
+        '局部编辑任务与其任务记录身份不一致。'
       )
     );
   }
@@ -327,7 +330,7 @@ export function canvasImageMaskEditResultPosition(
   nodes: readonly CreativeCanvasNode[],
   config: ConfigNode
 ): { x: number; y: number } {
-  return nextCanvasImageTaskPosition(
+  return canvasTaskResultPosition(
     nodes,
     config,
     CREATIVE_CANVAS_PRODUCT_NODE_SIZES.image

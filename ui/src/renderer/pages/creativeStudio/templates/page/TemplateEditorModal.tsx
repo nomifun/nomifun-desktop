@@ -22,11 +22,10 @@ import { parseProviderId } from '@/common/types/ids';
 import NomiCreativeModelSelect from '../../models/NomiCreativeModelSelect';
 import type { CreativeModelCatalogSnapshot } from '../../models';
 import {
-  imageWorkbenchSizeDimensionsLabel,
   imageWorkbenchFixedSizeOptions,
-  imageWorkbenchSizeOptionLabel,
   imageWorkbenchSizePolicyForModel,
 } from '../../workbenches/image';
+import ImageSizePicker from '../../workbenches/image/ImageSizePicker';
 import { exactWorkbenchModelOptions } from '../../workbenches/runtime';
 import {
   cloneTemplateDefinition,
@@ -693,42 +692,14 @@ const TemplateEditorModal: React.FC<TemplateEditorModalProps> = ({
               onChange={(quality) => onChange(patchGeneration(template, { quality }))}
             />
           </label>
-          <label className={styles.fieldLabel}>
-            <span>
-              {t('creativeStudio.templates.editor.size', { defaultValue: 'Size' })}
-            </span>
-            <Select
-              value={imageSizeContext?.selectedSize?.value}
-              onChange={(value) => {
-                const size = imageSizeContext?.sizeOptions.find(
-                  (option) => option.value === value && !option.disabled
-                );
-                if (!size || size.width === null || size.height === null) return;
-                onChange(
-                  patchGeneration(template, {
-                    width: size.width,
-                    height: size.height,
-                  })
-                );
-              }}
-            >
-              {imageSizeContext?.sizeOptions.map((option) => (
-                <Select.Option
-                  key={option.value}
-                  value={option.value}
-                  disabled={option.disabled || option.width === null || option.height === null}
-                >
-                  <span className={styles.sizeOptionRow}>
-                    <span>{option.label}</span>
-                    <small>
-                      {imageWorkbenchSizeDimensionsLabel(option) ??
-                        imageWorkbenchSizeOptionLabel(option)}
-                    </small>
-                  </span>
-                </Select.Option>
-              ))}
-            </Select>
-          </label>
+          <ImageSizePicker
+            options={imageSizeContext?.sizeOptions ?? []}
+            value={imageSizeContext?.selectedSize?.value ?? ''}
+            onChange={(size) => {
+              if (size.width === null || size.height === null) return;
+              onChange(patchGeneration(template, { width: size.width, height: size.height }));
+            }}
+          />
           <label className={styles.fieldLabel}>
             <span>
               {t('creativeStudio.templates.editor.imagesPerPrompt', {

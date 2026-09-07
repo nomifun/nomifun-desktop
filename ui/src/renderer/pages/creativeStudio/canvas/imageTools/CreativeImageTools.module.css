@@ -82,6 +82,36 @@
   transform-origin: center top;
 }
 
+.previewModal {
+  width: min(1120px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  overflow: hidden;
+}
+
+.previewModal :global(.arco-modal-content) {
+  padding: 0;
+}
+
+.previewStage {
+  position: relative;
+  /* Leave room for the header and viewport gutters, even in a short window. */
+  height: min(72dvh, 800px, calc(100dvh - 80px));
+  overflow: hidden;
+  background: #181818;
+  color: #f3f3f3;
+}
+
+.previewStatus {
+  display: flex;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px;
+  text-align: center;
+}
+
 .cropModal :global(.arco-modal-content) {
   padding: 18px 24px 20px;
 }

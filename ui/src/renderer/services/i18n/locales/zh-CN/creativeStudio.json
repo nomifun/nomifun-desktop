@@ -102,11 +102,15 @@
       "renameTitle": "重命名合集"
     },
     "delete": {
+      "activeTask": "素材仍被正在执行的生成任务使用，请等待任务结束或取消任务后再删除。",
       "cancel": "取消",
-      "confirm": "删除",
-      "description": "确定删除“{{title}}”吗？原始文件也会被永久删除，且无法恢复。",
+      "confirm": "永久删除",
+      "retryCleanup": "删除或文件清理尚未完成，请重试删除。",
+      "description": "确定永久删除“{{title}}”吗？原始文件及缩略图将被删除，且无法恢复。使用此素材的画布和生成历史会保留记录，并显示“素材已删除”。",
       "title": "删除素材"
     },
+    "deleted": "素材已删除",
+    "deletedReference": "引用素材已删除，请重新选择后再生成。",
     "edit": {
       "cancel": "取消",
       "collectionLabel": "合集",
@@ -433,15 +437,17 @@
     },
     "confirmTaskStatus": "确认任务状态",
     "connection": {
+      "selectionHint": "按住 Shift、Ctrl 或 ⌘ 点击可多选连线，按 Delete 删除",
+      "deleteSelected": "删除所选 {{count}} 条连接",
       "createFailed": "无法创建连接：{{reason}}。",
       "edgeLabel": "连接 {{source}} 至 {{target}}",
       "errors": {
-        "configToConfig": "两个配置节点不能直接连接",
+        "configToConfig": "两个生成任务记录不能直接连接",
         "directorImageOnly": "导演节点只接受图片或全景图输入",
         "directorInputOnly": "导演节点只能接收输入",
         "duplicate": "这两个节点已经连接",
         "groupUnsupported": "节点组不能参与生成连接",
-        "invalidDropTarget": "请将连接拖到对端节点的有效连接点",
+        "invalidDropTarget": "请将连接拖到目标节点卡片上",
         "missingEndpoint": "连接端点已经不存在",
         "selfConnection": "节点不能连接到自身"
       }
@@ -467,6 +473,7 @@
       "collapse": "折叠",
       "connectionInput": "连接输入",
       "connectionOutput": "连接输出",
+      "connectionOutputHint": "拖到目标卡片即可连接；多选节点后可批量连接",
       "currentTimeMs": "当前时间 (ms)",
       "durationMs": "时长 (ms)",
       "fitContain": "完整显示",
@@ -493,15 +500,15 @@
       "assetInsertUnavailable": "画布尚未载入，无法插入素材。",
       "audio": {
         "cancelled": "音频创作已取消。",
-        "connectConfigFailed": "无法连接音频创作配置节点：{{code}}。",
+        "connectConfigFailed": "无法保存音频创作任务关联：{{code}}。",
         "emptyNodeOnly": "当前首批音频创作只支持空音频节点上的 TTS。",
         "failed": "音频创作失败。",
         "formatUnsupported": "当前音频创作只支持 mp3 或 wav 格式。",
-        "identityMismatch": "音频创作任务与配置节点身份不一致。",
+        "identityMismatch": "音频创作任务与其任务记录身份不一致。",
         "inputAssetsUnsupported": "当前 TTS 音频创作不允许输入素材。",
         "invalidSourceAssetId": "音频创作配置包含无效的 sourceAssetId。",
         "mediaReferencesUnsupported": "当前 TTS 音频创作不接受图片、视频或音频参考素材。",
-        "missingConfig": "音频创作任务缺少 canonical 配置节点。",
+        "missingConfig": "音频创作任务缺少必要任务记录。",
         "missingSourceNodeId": "音频创作配置缺少 sourceNodeId。",
         "nodeMissing": "音频节点已不存在。",
         "nonTerminalRemovalRejected": "拒绝将非终态音频创作任务移出 pending 列表。",
@@ -531,15 +538,15 @@
       "image": {
         "baseReferenceOrderMismatch": "当前图片必须作为第一张参考图发送。",
         "cancelled": "图片创作已取消。",
-        "configRemoved": "图片创作配置节点在结果写入前被移除。",
-        "connectConfigFailed": "无法连接图片创作配置节点：{{code}}。",
+        "configRemoved": "图片创作任务记录在结果写入前丢失。",
+        "connectConfigFailed": "无法保存图片创作任务关联：{{code}}。",
         "connectResultFailed": "无法连接图片创作结果：{{code}}。",
         "duplicateResults": "图片创作任务返回了重复的结果素材。",
         "failed": "图片创作失败。",
-        "identityMismatch": "图片创作任务与配置节点身份不一致。",
+        "identityMismatch": "图片创作任务与其任务记录身份不一致。",
         "inputSnapshotMismatch": "图片任务输入与画布配置快照不一致，已停止恢复。",
         "invalidSourceAssetId": "图片创作配置的 sourceAssetId 非法。",
-        "missingConfig": "图片创作任务缺少 canonical 配置节点。",
+        "missingConfig": "图片创作任务缺少必要任务记录。",
         "missingResult": "图片创作任务成功但没有返回真实图片素材。",
         "missingSourceNodeId": "图片创作配置缺少 sourceNodeId。",
         "nodeConstructionFailed": "图片创作结果未能构造成图片节点。",
@@ -565,14 +572,14 @@
       "imageTaskBusy": "已有图片任务正在处理，请等待完成。",
       "mask": {
         "cancelled": "图片编辑已取消。",
-        "configRemoved": "局部编辑配置节点在结果写入前被移除。",
-        "connectConfigFailed": "无法连接局部编辑配置节点：{{code}}。",
+        "configRemoved": "局部编辑任务记录在结果写入前丢失。",
+        "connectConfigFailed": "无法保存局部编辑任务关联：{{code}}。",
         "connectResultFailed": "无法连接局部编辑结果：{{code}}。",
         "duplicateResults": "局部编辑任务返回了重复的结果素材。",
         "endedBeforeAdmission": "局部编辑任务在后端确认接收前结束。",
         "failed": "图片编辑失败。",
-        "identityMismatch": "局部编辑任务与配置节点身份不一致。",
-        "missingConfig": "局部编辑任务缺少 canonical 配置节点。",
+        "identityMismatch": "局部编辑任务与其任务记录身份不一致。",
+        "missingConfig": "局部编辑任务缺少必要任务记录。",
         "missingOperation": "局部编辑配置缺少 canonical operation。",
         "missingResult": "局部编辑任务成功但没有返回真实图片素材。",
         "nodeConstructionFailed": "局部编辑结果未能构造成图片节点。",
@@ -590,7 +597,7 @@
       "noImageModel": "没有可用且明确选择的真实图片模型，未发起生成。",
       "noVideoModel": "没有可用且明确选择的真实视频模型，未发起生成。",
       "notLoaded": "画布尚未完成载入。",
-      "pendingTaskProtected": "运行中的生成任务必须保留配置节点；请等待任务结束后再删除或撤销。",
+      "pendingTaskProtected": "运行中的生成任务受保护；请等待任务结束后再删除或撤销。",
       "promptCopyFailed": "提示词复制失败，请检查剪贴板权限。",
       "splitNodeConstructionFailed": "切图结果未能构造成图片节点。",
       "splitSaveFailed": "切图素材已上传，但画布保存失败：{{message}}",
@@ -601,16 +608,16 @@
       "video": {
         "aspectRatioUnsupported": "当前视频创作不支持画幅 {{aspectRatio}}。",
         "cancelled": "视频创作已取消。",
-        "configRemoved": "视频创作配置节点在结果写入前被移除。",
-        "connectConfigFailed": "无法连接视频创作配置节点：{{code}}。",
+        "configRemoved": "视频创作任务记录在结果写入前丢失。",
+        "connectConfigFailed": "无法保存视频创作任务关联：{{code}}。",
         "connectResultFailed": "无法连接视频创作结果：{{code}}。",
         "duplicateResults": "视频创作任务返回了重复的结果素材。",
         "emptyNodeOnly": "当前视频创作只能使用空视频源节点。",
         "failed": "视频创作失败。",
-        "identityMismatch": "视频创作任务与配置节点身份不一致。",
+        "identityMismatch": "视频创作任务与其任务记录身份不一致。",
         "invalidSourceAssetId": "视频创作配置包含无效的 sourceAssetId。",
         "mediaReferencesUnsupported": "当前视频创作不支持视频或音频参考。",
-        "missingConfig": "视频创作任务缺少 canonical 配置节点。",
+        "missingConfig": "视频创作任务缺少必要任务记录。",
         "missingResult": "视频创作任务成功但没有返回真实视频素材。",
         "missingSourceNodeId": "视频创作配置缺少 sourceNodeId。",
         "nodeConstructionFailed": "视频创作结果未能构造成视频节点。",
@@ -650,7 +657,15 @@
       "autoQuality": "自动",
       "connectedReferences": "已连接参考",
       "countLabel": "生成张数",
-      "disconnectReference": "断开参考图 {{name}}",
+      "disconnectReference": "断开参考 {{name}}",
+      "manageReferences": "批量管理",
+      "cancelBatch": "取消",
+      "selectReference": "选择参考 {{name}}",
+      "selectAllReferences": "全选连接",
+      "deselectReferences": "取消全选",
+      "selectedReferenceCount": "已选 {{count}} 项",
+      "disconnectSelectedReferences": "断开所选",
+      "baseReferencePinned": "当前图片没有引用连线，无需断开",
       "duplicateReferenceAsset": "同一图片通过多个节点重复接入，请断开重复连线。",
       "editModelLabel": "图片编辑模型",
       "editPromptPlaceholder": "请输入你想要把这张图修改成什么",
@@ -660,7 +675,7 @@
       "heightLabel": "高度",
       "interfaceModeLabel": "接口模式",
       "insertReference": "引用已连接素材",
-      "locateReference": "定位参考图 {{name}}",
+      "locateReference": "定位参考 {{name}}",
       "noEditModels": "没有可用图片编辑模型",
       "noGenerateModels": "没有可用图片生成模型",
       "noMatchingReferences": "没有匹配的已连接素材",
@@ -674,12 +689,14 @@
       "referenceLimitExceeded": "当前模型最多支持 {{max}} 张参考图，已连接 {{count}} 张。",
       "referenceLimitUnknown": "当前模型未声明多图上限，无法安全发送 {{count}} 张参考图。",
       "referenceMentionLabel": "图片{{index}}",
+      "textReferenceLabel": "文本{{index}}",
+      "textReferenceEmpty": "已连接的文本节点内容为空，请填写文本或断开连接。",
       "referenceNodeMissing": "参考节点已经不存在。",
       "referenceTextChanged": "Prompt 中的素材引用已被部分修改，请删除后重新使用 @ 选择。",
       "selectEditModel": "选择图片编辑模型",
       "selectGenerateModel": "选择图片生成模型",
       "settingsLabel": "图片生成设置",
-      "settingsSummary": "{{quality}} · {{aspectRatio}} · {{count}} 张",
+      "settingsSummary": "{{size}} · {{count}} 张",
       "unavailableReference": "不可用参考",
       "widthLabel": "宽度"
     },
@@ -799,6 +816,9 @@
         "title": "切分图片",
         "uploadProgress": "切图结果上传进度"
       },
+      "preview": {
+        "loadFailed": "图片加载失败，请重试。"
+      },
       "toolbar": {
         "crop": "裁剪",
         "cropLabel": "裁剪并生成新节点",
@@ -811,6 +831,8 @@
         "label": "图片工具",
         "maskEdit": "局部编辑",
         "maskEditLabel": "对图片进行局部修改",
+        "preview": "预览",
+        "previewLabel": "预览图片",
         "split": "切图",
         "splitLabel": "切分并生成图片子节点",
         "upload": "上传图片",
@@ -832,7 +854,6 @@
     },
     "nodeKinds": {
       "audio": "音频",
-      "config": "生成配置",
       "director": "导演台",
       "group": "分组",
       "image": "图片",
@@ -843,12 +864,6 @@
     "nodes": {
       "audio": {
         "empty": "空音频节点"
-      },
-      "config": {
-        "modelFallback": "未选择模型",
-        "promptFallback": "尚未填写提示词",
-        "providerFallback": "未选择服务商",
-        "summary": "{{parameters}} 个参数 · {{inputs}} 个输入"
       },
       "connectedPanorama": "已连接全景素材",
       "connectedVideo": "已连接视频素材",
@@ -890,7 +905,15 @@
       "unlock": "解锁节点",
       "unnamedGroup": "未命名分组",
       "video": {
-        "empty": "空视频节点"
+        "drag": "拖动视频节点",
+        "empty": "空视频节点",
+        "exitFullscreen": "退出全屏",
+        "fullscreen": "全屏播放",
+        "mute": "静音",
+        "pause": "暂停视频",
+        "play": "播放视频",
+        "seek": "视频进度",
+        "unmute": "取消静音"
       }
     },
     "notices": {
@@ -909,10 +932,11 @@
       "assetsPartiallyInserted": "{{inserted}} 项已插入；{{failed}} 项未插入：{{error}}",
       "audioTaskMissing": "服务器确认未创建该音频任务，已清理恢复标记，可以重新生成。",
       "audioTaskRecovered": "服务器已存在该音频任务，已安全恢复而未重复创建。",
-      "audioTaskSubmitted": "音频创作任务已安全提交；配置节点会持续显示真实后端状态。",
+      "audioTaskSubmitted": "音频创作任务已安全提交；对应输入节点会持续显示真实后端状态。",
       "clipboardEmpty": "系统剪贴板中没有可插入的真实文本、图片或视频。",
       "clipboardTextInserted": "已从真实系统剪贴板插入文本。",
       "connectionCreated": "已创建连接。",
+      "connectionsCreated": "已创建 {{count}} 条连接，跳过 {{skipped}} 条已有或不兼容连接。",
       "cropRecovered": "上传响应中断后已找回真实裁剪素材，并将派生节点保存到画布。",
       "cropSucceeded": "已裁剪真实原图，创建派生图片节点并保存连线。",
       "directorConflict": "画布存在多个导演节点，请在时间线面板中处理冲突。",
@@ -922,11 +946,11 @@
       "directorReusedAndConnected": "已复用画布唯一的导演节点并完成连接。",
       "directorSelected": "画布已有唯一导演节点，已为你选中。",
       "imageOperationBusy": "已有图片或素材操作正在进行，请等待完成。",
-      "imageTaskSubmitted": "图片创作任务已安全提交；配置节点会持续显示真实后端状态。",
+      "imageTaskSubmitted": "图片创作任务已安全提交；对应输入节点会持续显示真实后端状态。",
       "imageToolBusyLeave": "图片工具仍在处理，请等待完成后再离开。",
       "maskReferenceRecovered": "上传响应中断后已找回标记参考图，并安全提交局部编辑任务。",
       "maskTaskBusy": "已有局部编辑任务正在运行、恢复或等待确认，请先处理该任务。",
-      "maskTaskSubmitted": "局部编辑任务已安全提交；配置节点会持续显示真实后端状态。",
+      "maskTaskSubmitted": "局部编辑任务已安全提交；对应输入节点会持续显示真实后端状态。",
       "nodeCreatedAndConnected": "已创建节点并完成连接。",
       "nodeCreatedAtPosition": "已在指定位置创建节点。",
       "panoramaDetected": "检测到真实 2:1 图片，请选择普通图片或全景图节点。",
@@ -939,7 +963,7 @@
       "saveCompleted": "保存已完成。",
       "splitRecovered": "上传响应中断后已找回切图素材，创建并保存 {{count}} 个图片子节点。",
       "splitSucceeded": "已切分真实原图，创建并保存 {{count}} 个图片子节点及连线。",
-      "taskConfirmedMissing": "已确认服务器不存在该任务；配置节点记录为失败并清理恢复标记。",
+      "taskConfirmedMissing": "已确认服务器不存在该任务；任务状态已记录为失败并清理恢复标记。",
       "taskRecovered": "服务器已存在该任务，已安全恢复而未重复创建。",
       "uploadBusy": "已有素材正在上传，请等待完成。",
       "uploadFilledNode": "已将“{{title}}”填入原图片节点。",
@@ -948,7 +972,7 @@
       "uploading": "正在上传“{{name}}”…",
       "videoTaskMissing": "服务器确认未创建该视频任务，已清理恢复标记，可以重新生成。",
       "videoTaskRecovered": "服务器已存在该视频任务，已安全恢复而未重复创建。",
-      "videoTaskSubmitted": "视频创作任务已安全提交；配置节点会持续显示真实后端状态。"
+      "videoTaskSubmitted": "视频创作任务已安全提交；对应输入节点会持续显示真实后端状态。"
     },
     "openPromptLibrary": "打开提示词库",
     "outline": {
@@ -1046,29 +1070,29 @@
     },
     "runtime": {
       "audio": {
-        "cancelled": "音频创作已取消，配置节点已保留。",
+        "cancelled": "音频创作已取消。",
         "editorUnavailable": "画布尚未载入，无法同步音频任务。",
-        "failed": "音频创作失败，配置节点已保留。",
+        "failed": "音频创作失败。",
         "orphaned": "服务器未找到遗留的音频创作任务，已只清理该任务的恢复标记。",
         "succeeded": "音频创作已完成，真实结果已原位保存到画布。"
       },
       "image": {
-        "composeCancelled": "图片创作已取消，配置节点已保留。",
-        "composeFailed": "图片创作失败，配置节点已保留。",
+        "composeCancelled": "图片创作已取消。",
+        "composeFailed": "图片创作失败。",
         "composeOrphaned": "服务器未找到遗留的图片创作任务，已只清理该任务的恢复标记。",
         "composeSucceeded": "图片创作已完成，真实结果及连线已保存到画布。",
         "editorUnavailable": "画布尚未载入，无法同步图片任务。",
-        "maskCancelled": "局部编辑已取消，配置节点已保留。",
-        "maskFailed": "局部编辑失败，配置节点已保留。",
+        "maskCancelled": "局部编辑已取消。",
+        "maskFailed": "局部编辑失败。",
         "maskOrphaned": "服务器未找到遗留的局部编辑任务，已只清理该任务的恢复标记。",
         "maskSucceeded": "局部编辑已完成，真实结果图片及连线已保存到画布。",
-        "missingConfig": "图片任务缺少受支持的 canonical 配置节点。",
+        "missingConfig": "图片任务缺少受支持的任务记录。",
         "wrongCanvas": "图片任务不属于当前画布。"
       },
       "video": {
-        "cancelled": "视频创作已取消，配置节点已保留。",
+        "cancelled": "视频创作已取消。",
         "editorUnavailable": "画布尚未载入，无法同步视频任务。",
-        "failed": "视频创作失败，配置节点已保留。",
+        "failed": "视频创作失败。",
         "orphaned": "服务器未找到遗留的视频创作任务，已只清理该任务的恢复标记。",
         "succeeded": "视频创作已完成，真实结果及连线已保存到画布。"
       }
@@ -1160,8 +1184,8 @@
       "yes": "是"
     },
     "video": {
-      "aspectRatioAriaLabel": "视频画幅",
-      "aspectRatioLabel": "画幅",
+      "aspectRatioAriaLabel": "视频宽高比",
+      "aspectRatioLabel": "宽高比",
       "connectedImage": "已连接图片",
       "durationAriaLabel": "视频时长",
       "durationLabel": "时长",
@@ -1655,6 +1679,8 @@
       "noModel": "没有可用生图模型",
       "outputCount": "生成张数",
       "quality": "质量",
+      "resolution": "分辨率",
+      "standardResolution": "标准",
       "width": "宽度",
       "widthShort": "W"
     },
@@ -1918,10 +1944,10 @@
       "waitingForModel": "等待模型开始处理"
     },
     "settings": {
+      "aspectRatio": "宽高比",
       "duration": "时长",
       "model": "模型",
-      "resolution": "清晰度",
-      "size": "尺寸",
+      "resolution": "分辨率",
       "taskCount": "任务数量"
     },
     "task": {

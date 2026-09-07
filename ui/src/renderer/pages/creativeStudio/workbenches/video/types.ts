@@ -21,6 +21,8 @@ export interface VideoWorkbenchReference {
   name: string;
   /** Optional real thumbnail supplied by the asset layer. */
   previewUrl?: string;
+  /** Original media is kept separate so a video or audio file never becomes an image source. */
+  originalUrl?: string;
 }
 
 export interface VideoWorkbenchChoice {
@@ -29,6 +31,7 @@ export interface VideoWorkbenchChoice {
 }
 
 interface VideoWorkbenchTaskBase {
+  hasDeletedInputs?: boolean;
   id: string;
   /** Runtime task identity remains distinct from the generated asset identity. */
   taskId: string;
@@ -58,6 +61,7 @@ export interface RunningVideoWorkbenchTask extends VideoWorkbenchTaskBase {
 }
 
 export interface SucceededVideoWorkbenchTask extends VideoWorkbenchTaskBase {
+  availability?: import('../../assets').CreativeAssetAvailability;
   status: 'succeeded';
   /** Stable generated asset identity; the URL is a caller-resolved presentation detail. */
   assetId: string;

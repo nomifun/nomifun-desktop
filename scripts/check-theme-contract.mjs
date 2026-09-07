@@ -58,6 +58,7 @@ const APP_VARS = [
   'danger',
   'info',
   'message-tips-bg',
+  'feedback-bubble-bg',
   'color-guid-agent-bar',
   'terminal-surface-bg',
   'terminal-border',
@@ -131,6 +132,7 @@ const MESSAGE_ITEM_FORBIDDEN_PROPS = new Set([
 ]);
 const CONTENT_POPOVER_SELECTORS = ['.arco-popover-content', '.arco-dropdown-menu', '.arco-select-popup'];
 const MIN_CONTENT_SURFACE_ALPHA = 0.86;
+const OPAQUE_BUBBLE_VARS = ['feedback-bubble-bg', 'color-tooltip-bg'];
 
 const stripComments = (css) => css.replace(/\/\*[\s\S]*?\*\//g, '');
 
@@ -185,6 +187,16 @@ const rgbaAlphaValues = (value) => {
   return alphas.filter((n) => Number.isFinite(n));
 };
 
+const isOpaqueLiteralColor = (value) => {
+  const normalized = value.replace(/\s*!important\s*/gi, '').trim();
+  return (
+    /^#[0-9a-f]{3}$/i.test(normalized) ||
+    /^#[0-9a-f]{6}$/i.test(normalized) ||
+    /^rgb\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*\)$/i.test(normalized) ||
+    /^rgb\(\s*\d{1,3}\s+\d{1,3}\s+\d{1,3}\s*\)$/i.test(normalized)
+  );
+};
+
 const checkTheme = (file, css) => {
   const problems = [];
   const cleaned = stripComments(css);
@@ -218,6 +230,17 @@ const checkTheme = (file, css) => {
   for (const v of REQUIRED) {
     if (!lightVars.has(v)) problems.push(`亮色块缺变量 --${v}`);
     if (!darkVars.has(v)) problems.push(`暗色块缺变量 --${v}`);
+  }
+
+  for (const variable of OPAQUE_BUBBLE_VARS) {
+    const lightValue = lightVars.get(variable);
+    const darkValue = darkVars.get(variable);
+    if (lightValue && !isOpaqueLiteralColor(lightValue)) {
+      problems.push(`亮色块 --${variable} 必须是完全不透明的字面量颜色`);
+    }
+    if (darkValue && !isOpaqueLiteralColor(darkValue)) {
+      problems.push(`暗色块 --${variable} 必须是完全不透明的字面量颜色`);
+    }
   }
   // 对称性（除契约清单外的自定义变量也要求对称，--sider-section-title-color 例外）
   const symmetricExempt = new Set(['sider-section-title-color']);

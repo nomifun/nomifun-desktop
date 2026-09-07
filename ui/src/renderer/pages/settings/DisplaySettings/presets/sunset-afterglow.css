@@ -131,6 +131,7 @@ body {
   /* ---- A. 组件 Components（暖金气泡 + 浅霞提示） ---- */
   --message-user-bg: #fde4c8;
   --message-tips-bg: #fdf0df;
+  --feedback-bubble-bg: #fff8f0;
   --workspace-btn-bg: #fbeed9;
   --color-guid-agent-bar: #fdebd5;
   --sider-section-title-color: #946238;
@@ -272,6 +273,7 @@ body {
   /* ---- A. 组件 Components（深暖金气泡 + 深褐提示） ---- */
   --message-user-bg: #33200c;
   --message-tips-bg: #241809;
+  --feedback-bubble-bg: #241809;
   --workspace-btn-bg: rgba(255, 255, 255, 0.05);
   --color-guid-agent-bar: rgba(243, 178, 64, 0.12);
   --sider-section-title-color: #b39468;
@@ -453,7 +455,6 @@ body {
 
 /* 点缀 6：Toast 消息条 —— 实底 + 暖金细边 + 暖调投影 */
 .arco-message {
-  background: #fff8f0;
   border: 1px solid rgba(214, 120, 40, 0.16);
   border-radius: 12px;
   box-shadow:
@@ -462,7 +463,6 @@ body {
 }
 
 [data-theme='dark'] .arco-message {
-  background: #241809;
   border: 1px solid rgba(245, 178, 64, 0.16);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.07),

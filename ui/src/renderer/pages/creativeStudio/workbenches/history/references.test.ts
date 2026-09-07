@@ -55,6 +55,12 @@ const asset = (id: string, kind: CreativeAsset['kind'] = 'image'): CreativeAsset
 });
 
 describe('standalone history reference hydration', () => {
+  test('rejects deleted historical inputs before retry or reuse', async () => {
+    const error = await hydrateStandaloneTaskReferences(baseTask, {
+      get: async (id) => ({ ...asset(id), deletedAt: 100 }),
+    }).catch((reason) => reason);
+    expect(error.name).toBe('CreativeAssetDeletedError');
+  });
   test('reads every input by exact id and preserves binding order and roles', async () => {
     const result = await hydrateStandaloneTaskReferences(baseTask, {
       get: async (id) => asset(id),

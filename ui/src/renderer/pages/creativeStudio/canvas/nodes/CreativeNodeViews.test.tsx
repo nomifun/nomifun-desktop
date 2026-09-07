@@ -11,7 +11,11 @@ import { renderToStaticMarkup } from 'react-dom/server';
 
 import type { CreativeCanvasNode, CreativeCanvasNodeKind } from '../../domain/schema';
 import { withCanvasTestI18n } from '../components/canvasI18nTestUtils';
-import { CREATIVE_NODE_VIEW_KINDS, CreativeNodeView } from './CreativeNodeViews';
+import {
+  CREATIVE_NODE_VIEW_KINDS,
+  CreativeImageNode,
+  CreativeNodeView,
+} from './CreativeNodeViews';
 
 const base = {
   position: { x: 48, y: -24 },
@@ -91,22 +95,34 @@ const renderCanvas = (content: React.ReactNode) =>
   renderToStaticMarkup(withCanvasTestI18n(content));
 
 describe('Creative Studio canonical node views', () => {
-  test('renders all eight canonical kinds through the discriminated-union dispatcher', () => {
+  test('renders deleted media nodes without their original image, video, or audio URLs', () => {
+    for (const node of nodes.filter((node) => ['image', 'panorama', 'video', 'audio'].includes(node.type))) {
+      const html = renderToStaticMarkup(withCanvasTestI18n(
+        <CreativeNodeView node={node} asset={{ src: '', label: 'Deleted original', deleted: true }} />
+      ));
+      expect(html.includes('素材已删除')).toBe(true);
+      expect(html.includes('<img')).toBe(false);
+      expect(html.includes('<video')).toBe(false);
+      expect(html.includes('<audio')).toBe(false);
+    }
+  });
+  test('renders the seven user-facing kinds and keeps config task records headless', () => {
     const html = renderCanvas(
       <>{nodes.map((node) => <CreativeNodeView key={node.id} node={node} selected={node.id === 'text-1'} />)}</>
     );
 
-    expect(CREATIVE_NODE_VIEW_KINDS.length).toBe(8);
+    expect(CREATIVE_NODE_VIEW_KINDS.length).toBe(7);
     for (const kind of CREATIVE_NODE_VIEW_KINDS) {
       expect(html.includes(`data-node-type="${kind}"`)).toBe(true);
     }
+    expect(html.includes('data-node-type="config"')).toBe(false);
     expect(html.includes('left:48px')).toBe(true);
     expect(html.includes('top:-24px')).toBe(true);
     expect(html.includes('data-node-selected="true"')).toBe(true);
     expect(html.includes('data-node-locked="true"')).toBe(true);
   });
 
-  test('shows honest empty media states and canonical failed-generation state', () => {
+  test('shows honest empty media states without exposing task-record status', () => {
     const html = renderCanvas(<>{nodes.map((node) => <CreativeNodeView key={node.id} node={node} />)}</>);
 
     expect(html.includes('data-node-empty-media="true"')).toBe(true);
@@ -117,9 +133,8 @@ describe('Creative Studio canonical node views', () => {
       html.includes('creativeStudio.canvas.nodes.audio.empty')
     ).toBe(true);
     expect(html.includes('0:00 – ∞ · 80%')).toBe(false);
-    expect(html.includes('data-node-status="failed"')).toBe(true);
-    expect(html.includes('role="alert"')).toBe(true);
-    expect(html.includes('服务暂时不可用')).toBe(true);
+    expect(html.includes('data-node-status="failed"')).toBe(false);
+    expect(html.includes('服务暂时不可用')).toBe(false);
     expect(html.includes('<img')).toBe(false);
     expect(html.includes('<video')).toBe(false);
   });
@@ -140,6 +155,42 @@ describe('Creative Studio canonical node views', () => {
     expect(html.includes('data-node-status="running"')).toBe(true);
     expect(html.includes('aria-valuenow="42"')).toBe(true);
     expect(html.includes('width:42%')).toBe(true);
+  });
+
+  test('shows video playback without the obsolete trim-range badge', () => {
+    const videoNode = nodes.find((node): node is Extract<CreativeCanvasNode, { type: 'video' }> => node.type === 'video');
+    if (!videoNode) throw new Error('video fixture is missing');
+    for (const trimEndMs of [null, 12_000]) {
+      const html = renderCanvas(
+        <CreativeNodeView
+          node={{ ...videoNode, data: { ...videoNode.data, assetId: 'video-asset', trimEndMs } }}
+          asset={{ src: '/clip.mp4', posterSrc: '/poster.jpg' }}
+        />
+      );
+
+      expect(html.includes('<video')).toBe(true);
+      expect(html.includes('data-creative-video-player')).toBe(true);
+      expect(html.includes('0:00 – ∞')).toBe(false);
+      expect(html.includes('0:00 – 0:12')).toBe(false);
+      expect(html.includes('controls=""')).toBe(false);
+      expect(html.toLowerCase().includes('disablepictureinpicture=""')).toBe(true);
+    }
+  });
+
+  test('keeps node names accessible without rendering descriptions above cards', () => {
+    const imageNode = nodes.find((node): node is Extract<CreativeCanvasNode, { type: 'image' }> => node.type === 'image');
+    if (!imageNode) throw new Error('image fixture is missing');
+    const accessibleName = 'Image node accessible name';
+    const html = renderCanvas(
+      <CreativeImageNode
+        node={imageNode}
+        title={accessibleName}
+        runtime={{ status: 'running', progress: 42 }}
+      />
+    );
+
+    expect(html.includes(`aria-label="${accessibleName}"`)).toBe(true);
+    expect(html.includes(`>${accessibleName}<`)).toBe(false);
   });
 
   test('stays headless and imports the canonical schema instead of defining document fields', () => {

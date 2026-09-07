@@ -70,10 +70,6 @@ await canvasTestI18n.use(initReactI18next).init({
                 orientation:
                   "creativeStudio.canvas.nodes.panorama.orientation {{yaw}} {{pitch}}",
               },
-              config: {
-                summary:
-                  "creativeStudio.canvas.nodes.config.summary {{parameters}} {{inputs}}",
-              },
             },
           },
         },

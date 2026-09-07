@@ -319,6 +319,9 @@ pub struct WorkshopService {
     data_dir: PathBuf,
     provider_lifecycle: Option<SharedProviderLifecycleBarrier>,
     prompt_catalog: PromptCatalogService,
+    /// Serialize deletion with lazy thumbnail writes so a completed delete
+    /// cannot be followed by an older file request recreating the thumbnail.
+    asset_content_lifecycle: tokio::sync::RwLock<()>,
 }
 
 impl WorkshopService {
@@ -346,6 +349,7 @@ impl WorkshopService {
             data_dir: data_dir.to_path_buf(),
             provider_lifecycle,
             prompt_catalog: PromptCatalogService::start(data_dir),
+            asset_content_lifecycle: tokio::sync::RwLock::new(()),
         })
     }
 
@@ -560,6 +564,9 @@ impl WorkshopService {
                     "creative project {} Director sidecar {scene_id} is not a text asset",
                     document.project_id
                 )));
+            }
+            if row.deleted_at.is_some() {
+                continue;
             }
             let bytes = self.read_original(&row).await.map_err(|error| {
                 AppError::Conflict(format!(
@@ -1434,10 +1441,17 @@ impl WorkshopService {
         &self,
         aggregate: &CreativeTemplateRunAggregateV1,
     ) -> Result<(), AppError> {
-        for asset_id in aggregate.referenced_input_asset_ids() {
+        let mut inputs = aggregate.template_snapshot.collect_asset_ids();
+        inputs.extend(aggregate.referenced_input_asset_ids());
+        for asset_id in inputs {
             let asset = self.repo.get_asset(asset_id).await?.ok_or_else(|| {
                 AppError::Conflict(format!("template run references missing asset {asset_id}"))
             })?;
+            if asset.deleted_at.is_some() {
+                return Err(AppError::Conflict(format!(
+                    "template run input asset {asset_id} has been permanently deleted"
+                )));
+            }
             if asset.kind != "image" {
                 return Err(AppError::Conflict(format!(
                     "template run reference {asset_id} must identify an image asset"
@@ -1558,6 +1572,7 @@ impl WorkshopService {
         &self,
         project_id: &str,
     ) -> Result<CreativeProjectArchive, AppError> {
+        let _guard = self.asset_content_lifecycle.read().await;
         let detail = self.get_creative_project(project_id).await?;
         let asset_ids = self
             .collect_creative_project_asset_closure(&detail.document)
@@ -1573,8 +1588,10 @@ impl WorkshopService {
                         "creative project {project_id} references missing asset {asset_id}"
                     ))
                 })?;
-            let bytes = self
-                .read_original(&row)
+            let bytes = if row.deleted_at.is_some() {
+                Vec::new()
+            } else {
+                self.read_original(&row)
                 .await
                 .map_err(|error| match error {
                     AppError::NotFound(message) => AppError::Conflict(format!(
@@ -1582,13 +1599,18 @@ impl WorkshopService {
                     )),
                     other => other,
                 })?
-                .0;
+                .0
+            };
             assets.push(CreativeArchiveAssetSnapshot { row, bytes });
         }
         let title = detail.project.title;
         let document = detail.document;
         let archive_bytes = tokio::task::spawn_blocking(move || {
-            build_creative_project_archive(&title, &document, assets, now_ms())
+            if assets.iter().any(|asset| asset.row.deleted_at.is_some()) {
+                build_creative_canvas_archive(&title, &document, assets, now_ms())
+            } else {
+                build_creative_project_archive(&title, &document, assets, now_ms())
+            }
         })
         .await
         .map_err(|error| {
@@ -1605,6 +1627,7 @@ impl WorkshopService {
         &self,
         canvas_id: &str,
     ) -> Result<CreativeCanvasArchive, AppError> {
+        let _guard = self.asset_content_lifecycle.read().await;
         let detail = self
             .get_creative_project(canvas_id)
             .await
@@ -1624,8 +1647,10 @@ impl WorkshopService {
                         "creative canvas {canvas_id} references missing asset {asset_id}"
                     ))
                 })?;
-            let bytes = self
-                .read_original(&row)
+            let bytes = if row.deleted_at.is_some() {
+                Vec::new()
+            } else {
+                self.read_original(&row)
                 .await
                 .map_err(|error| match error {
                     AppError::NotFound(message) => AppError::Conflict(format!(
@@ -1633,7 +1658,8 @@ impl WorkshopService {
                     )),
                     other => other,
                 })?
-                .0;
+                .0
+            };
             assets.push(CreativeArchiveAssetSnapshot { row, bytes });
         }
         let title = detail.project.title;
@@ -1683,7 +1709,10 @@ impl WorkshopService {
                 AppError::Internal(format!("encode imported creative asset tags: {error}"))
             })?;
             let origin = sanitized_archive_origin(metadata.origin)?;
-            let (rel_path, mime, bytes, text_content) = if metadata.kind == "text" {
+            let deleted_at = metadata.deleted_at.map(|_| now);
+            let (rel_path, mime, bytes, text_content) = if deleted_at.is_some() {
+                (None, (metadata.kind != "text").then_some(metadata.mime), Some(0), None)
+            } else if metadata.kind == "text" {
                 let text = String::from_utf8(asset.bytes).map_err(|_| {
                     AppError::BadRequest(format!(
                         "creative archive text asset {} is not valid UTF-8",
@@ -1733,6 +1762,8 @@ impl WorkshopService {
                 text_content,
                 in_library: metadata.in_library,
                 origin,
+                deleted_at,
+                content_deleted_at: deleted_at,
                 created_at: now,
                 updated_at: now,
             });
@@ -1766,10 +1797,10 @@ impl WorkshopService {
             .map(Into::into)
     }
 
-    /// Read-only startup audit for canonical Creative Studio projects and the
-    /// shared asset store. It validates every managed reference without
-    /// rewriting or deleting user content.
+    /// Finish previously authorized content deletions, then audit every
+    /// managed reference. Only explicit tombstones may lack their content.
     pub async fn audit_managed_data_on_boot(&self) -> Result<(), AppError> {
+        self.retry_pending_asset_content_deletions().await?;
         let mut referenced_assets = BTreeSet::new();
         for project in self.repo.list_creative_projects().await? {
             let document = parse_stored_creative_project_row(&project)?;
@@ -1812,6 +1843,10 @@ impl WorkshopService {
                     "managed workshop asset {} tags must be a JSON array",
                     asset.asset_id
                 )));
+            }
+
+            if asset.deleted_at.is_some() {
+                continue;
             }
 
             match asset.rel_path.as_deref() {
@@ -2192,10 +2227,11 @@ impl WorkshopService {
         })
     }
 
-    /// Read an asset's original binary + its resolved mime. Errors when the
-    /// asset is unknown, is a text asset (no file), or its file is missing. The
+    /// Read an asset's original content + its resolved MIME. Errors when the
+    /// asset is unknown, permanently deleted, or its file is missing. The
     /// programmatic counterpart to [`Self::serve_file`] (no thumbnail path).
     pub async fn read_asset_bytes(&self, asset_id: &str) -> Result<(Vec<u8>, String), AppError> {
+        let _guard = self.asset_content_lifecycle.read().await;
         let row = self
             .repo
             .get_asset(asset_id)
@@ -2257,6 +2293,8 @@ impl WorkshopService {
             text_content: None,
             in_library: input.in_library,
             origin: input.origin.map(|v| v.to_string()),
+            deleted_at: None,
+            content_deleted_at: None,
             created_at: now,
             updated_at: now,
         };
@@ -2296,6 +2334,9 @@ impl WorkshopService {
     /// present, else (for images) one generated + persisted on the fly. `None`
     /// for non-images or when generation fails.
     async fn thumb_bytes(&self, row: &WorkshopAssetRow) -> Option<Vec<u8>> {
+        if row.deleted_at.is_some() {
+            return None;
+        }
         if let Some(rel) = row.thumb_rel_path.as_deref()
             && let Ok(abs) = self.resolve_within_workshop(rel)
             && let Ok(bytes) = tokio::fs::read(&abs).await
@@ -2310,16 +2351,26 @@ impl WorkshopService {
         let original = tokio::fs::read(&abs).await.ok()?;
         let thumb_rel = self.generate_and_store_thumb(&row.asset_id, &original).await?;
         // Persist the freshly minted thumb path (best-effort).
-        let _ = self
+        if self
             .repo
             .set_asset_thumb(&row.asset_id, &thumb_rel, now_ms())
-            .await;
+            .await
+            .is_err()
+        {
+            let _ = tokio::fs::remove_file(self.data_dir.join(&thumb_rel)).await;
+            return None;
+        }
         let thumb_abs = self.resolve_within_workshop(&thumb_rel).ok()?;
         tokio::fs::read(&thumb_abs).await.ok()
     }
 
     /// Read an asset's original bytes + mime (used by serve + programmatic read).
     async fn read_original(&self, row: &WorkshopAssetRow) -> Result<(Vec<u8>, String), AppError> {
+        if row.deleted_at.is_some() {
+            return Err(AppError::NotFound(format!(
+                "asset {} has been permanently deleted", row.asset_id
+            )));
+        }
         let Some(rel) = row.rel_path.as_deref() else {
             // Text assets keep their body inline in the row instead of on disk.
             if let Some(text) = row.text_content.as_deref() {
@@ -2363,6 +2414,8 @@ impl WorkshopService {
             text_content: Some(input.text_content),
             in_library,
             origin: encoded,
+            deleted_at: None,
+            content_deleted_at: None,
             created_at: now,
             updated_at: now,
         };
@@ -2465,12 +2518,98 @@ impl WorkshopService {
         Ok(self.repo.rename_collection(from, to_opt, now_ms()).await?)
     }
 
+    /// User-authorized permanent content deletion. Keep the identity as an
+    /// explicit tombstone so every historical use can display a missing asset
+    /// without corrupting immutable task or template records.
+    pub async fn delete_asset_content(&self, id: &str) -> Result<(), AppError> {
+        let _guard = self.asset_content_lifecycle.write().await;
+        let row = self.repo.mark_asset_content_deleted(id, now_ms()).await?;
+        self.finish_asset_content_deletion(&row).await
+    }
+
+    async fn finish_asset_content_deletion(&self, row: &WorkshopAssetRow) -> Result<(), AppError> {
+        if row.content_deleted_at.is_some() {
+            return Ok(());
+        }
+        // Include the deterministic lazy-thumbnail location even when its DB
+        // pointer had not yet been saved when the process stopped.
+        let mut paths = [row.rel_path.clone(), row.thumb_rel_path.clone()]
+            .into_iter()
+            .flatten()
+            .collect::<BTreeSet<_>>();
+        if row.kind == "image" {
+            paths.insert(format!(
+                "{WORKSHOP_REL_DIR}/assets/thumbs/{}.{}",
+                row.asset_id,
+                thumbnail::THUMB_EXT
+            ));
+        }
+        for rel in paths {
+            if rel.contains('\0')
+                || Path::new(&rel).is_absolute()
+                || Path::new(&rel)
+                    .components()
+                    .any(|part| matches!(part, Component::ParentDir))
+                || !Path::new(&rel).starts_with(Path::new(WORKSHOP_REL_DIR).join("assets"))
+            {
+                return Err(AppError::Forbidden(
+                    "asset deletion path escapes the asset store".into(),
+                ));
+            }
+            let abs = self.data_dir.join(&rel);
+            match tokio::fs::symlink_metadata(&abs).await {
+                Ok(_) => {
+                    self.resolve_within_workshop(&rel)?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(AppError::Internal(format!(
+                        "asset {} file cleanup is pending; retry deletion: {error}",
+                        row.asset_id
+                    )));
+                }
+            }
+            if let Err(error) = tokio::fs::remove_file(&abs).await
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                // The durable tombstone retains both paths for a retry. Never
+                // report successful permanent deletion while bytes remain.
+                return Err(AppError::Internal(format!(
+                    "asset {} file cleanup is pending; retry deletion: {error}",
+                    row.asset_id
+                )));
+            }
+        }
+        self.repo
+            .finish_asset_content_deletion(&row.asset_id, now_ms())
+            .await?;
+        Ok(())
+    }
+
+    async fn retry_pending_asset_content_deletions(&self) -> Result<(), AppError> {
+        let _guard = self.asset_content_lifecycle.write().await;
+        for row in self.repo.list_pending_asset_content_deletions().await? {
+            if let Err(error) = self.finish_asset_content_deletion(&row).await {
+                tracing::warn!(asset_id = %row.asset_id, %error, "authorized asset deletion still needs file cleanup");
+            }
+        }
+        Ok(())
+    }
+
+    /// Internal collection of unreferenced assets. User deletion uses the
+    /// content-tombstone path above; GC must still protect other owners.
     pub async fn delete_asset(&self, id: &str) -> Result<(), AppError> {
+        let _guard = self.asset_content_lifecycle.write().await;
         let row = self
             .repo
             .get_asset(id)
             .await?
             .ok_or_else(|| AppError::NotFound(format!("workshop asset {id} not found")))?;
+        if row.deleted_at.is_some() {
+            // GC must never discard the only durable retry paths after an
+            // interrupted user deletion. Keep the marker if cleanup fails.
+            self.finish_asset_content_deletion(&row).await?;
+        }
         for project_row in self.repo.list_creative_projects().await? {
             let document = parse_stored_creative_project_row(&project_row)?;
             if self
@@ -2525,11 +2664,16 @@ impl WorkshopService {
     /// demand for images that lack one, else falling back to the original per
     /// contract §3.2). Traversal-safe. Missing file → NotFound.
     pub async fn serve_file(&self, asset_id: &str, thumb: bool) -> Result<ServedFile, AppError> {
+        let _guard = self.asset_content_lifecycle.read().await;
         let row = self
             .repo
             .get_asset(asset_id)
             .await?
             .ok_or_else(|| AppError::NotFound(format!("workshop asset {asset_id} not found")))?;
+
+        if row.deleted_at.is_some() {
+            return Err(AppError::NotFound(format!("asset {asset_id} has been permanently deleted")));
+        }
 
         if thumb
             && let Some(bytes) = self.thumb_bytes(&row).await
@@ -4290,6 +4434,411 @@ mod tests {
             svc.serve_file(&asset.asset_id, false).await,
             Err(AppError::NotFound(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn deleted_generation_source_nodes_preserve_asset_lifecycle() {
+        let (svc, dir) = service().await;
+        let project = svc
+            .create_creative_project(Some("Generation history".into()))
+            .await
+            .unwrap();
+        let input = svc
+            .ingest_asset_bytes(real_png(4, 4), "image/png", "Input", false, None)
+            .await
+            .unwrap();
+        let marked = svc
+            .ingest_asset_bytes(real_png(4, 4), "image/png", "Marked reference", false, None)
+            .await
+            .unwrap();
+        let mut referenced_assets = vec![input.clone(), marked.clone()];
+        let mut document = CreativeProjectDocument::empty(project.project_id.clone());
+        let mut delete_ops = Vec::new();
+        let cases = [
+            (
+                "image-node-compose",
+                "image",
+                "image_generation",
+                "text-to-image",
+                false,
+            ),
+            (
+                "image-node-compose",
+                "image",
+                "image_generation",
+                "image-to-image",
+                true,
+            ),
+            (
+                "image-mask-edit",
+                "image",
+                "image_edit",
+                "image-to-image",
+                true,
+            ),
+            (
+                "video-node-compose",
+                "video",
+                "video_generation",
+                "image-to-video",
+                true,
+            ),
+            (
+                "audio-node-compose",
+                "audio",
+                "speech_synthesis",
+                "text-to-speech",
+                true,
+            ),
+        ];
+        for (kind, node_type, task, capability, has_source_asset) in cases {
+            let (mime, bytes) = match node_type {
+                "video" => ("video/mp4", b"video fixture".to_vec()),
+                "audio" => ("audio/mpeg", b"audio fixture".to_vec()),
+                _ => ("image/png", real_png(4, 4)),
+            };
+            let source_asset_id = if has_source_asset {
+                let asset = svc
+                    .ingest_asset_bytes(bytes.clone(), mime, "Source", false, None)
+                    .await
+                    .unwrap();
+                let id = asset.asset_id.clone();
+                referenced_assets.push(asset);
+                Some(id)
+            } else {
+                None
+            };
+            let result = svc
+                .ingest_asset_bytes(bytes, mime, "Result", false, None)
+                .await
+                .unwrap();
+            let source_node_id = CreativeStudioNodeId::new().into_string();
+            let config_node_id = CreativeStudioNodeId::new().into_string();
+            let source_data = match node_type {
+                "video" => serde_json::json!({
+                    "assetId": source_asset_id, "posterAssetId": null,
+                    "autoplay": false, "loop": false, "muted": true,
+                    "trimStartMs": 0, "trimEndMs": null
+                }),
+                "audio" => serde_json::json!({
+                    "assetId": source_asset_id, "title": "Source",
+                    "loop": false, "volume": 1, "trimStartMs": 0, "trimEndMs": null
+                }),
+                _ => serde_json::json!({
+                    "assetId": source_asset_id, "caption": "", "alt": "",
+                    "fit": "cover", "naturalSize": { "width": 4, "height": 4 }
+                }),
+            };
+            let mut operation = serde_json::json!({
+                "kind": kind, "sourceNodeId": source_node_id, "sourceAssetId": source_asset_id
+            });
+            if kind == "image-mask-edit" {
+                operation["markedReferenceAssetId"] = serde_json::json!(marked.asset_id);
+            }
+            for (id, node_type, data) in [
+                (source_node_id.clone(), node_type, source_data),
+                (
+                    config_node_id.clone(),
+                    "config",
+                    serde_json::json!({
+                        "task": task, "capability": capability, "providerId": null, "model": null,
+                        "prompt": "Completed generation", "negativePrompt": "", "operation": operation,
+                        "parameters": {}, "inputAssetIds": [input.asset_id], "taskId": null,
+                        "resultAssetIds": [result.asset_id], "status": "succeeded", "errorMessage": null
+                    }),
+                ),
+            ] {
+                document.nodes.push(
+                    serde_json::from_value(serde_json::json!({
+                        "id": id, "type": node_type, "position": { "x": 0, "y": 0 },
+                        "size": { "width": 320, "height": 240 }, "groupId": null,
+                        "zIndex": 0, "locked": false, "data": data
+                    }))
+                    .unwrap(),
+                );
+            }
+            document
+                .connections
+                .push(crate::creative_studio::CreativeConnection {
+                    id: nomifun_common::CreativeStudioConnectionId::new().into_string(),
+                    source_node_id: source_node_id.clone(),
+                    target_node_id: config_node_id,
+                    source_handle: None,
+                    target_handle: None,
+                });
+            referenced_assets.push(result);
+            delete_ops.push(CreativeAgentOp::DeleteNode {
+                node_id: source_node_id,
+            });
+        }
+        svc.save_creative_project(&project.project_id, "1", &document)
+            .await
+            .unwrap();
+
+        // A supported editor/Agent action leaves generation provenance after
+        // removing the source nodes and their actual graph connections.
+        let applied = svc
+            .apply_creative_agent_ops(
+                &project.project_id,
+                "2",
+                delete_ops,
+                "test:remove-generation-sources",
+            )
+            .await
+            .unwrap();
+        assert_eq!(applied.project.node_count, cases.len() as i64);
+        let stored = svc.get_creative_project(&project.project_id).await.unwrap();
+        assert!(stored.document.connections.is_empty());
+        for node in &stored.document.nodes {
+            assert_eq!(
+                document
+                    .nodes
+                    .iter()
+                    .find(|original| original.id == node.id),
+                Some(node)
+            );
+        }
+
+        let unrelated_a = upload_png(&svc, true).await;
+        let unrelated_b = upload_png(&svc, true).await;
+        let mut unrelated_rows = Vec::new();
+        for asset in [&unrelated_a, &unrelated_b] {
+            let row = svc.repo.get_asset(&asset.asset_id).await.unwrap().unwrap();
+            assert!(row.rel_path.is_some());
+            assert!(row.thumb_rel_path.is_some());
+            for rel in [row.rel_path.as_ref(), row.thumb_rel_path.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                assert!(dir.path().join(rel).is_file());
+            }
+            unrelated_rows.push(row);
+        }
+        let (first, second) = tokio::join!(
+            svc.delete_asset(&unrelated_a.asset_id),
+            svc.delete_asset(&unrelated_b.asset_id),
+        );
+        first.unwrap();
+        second.unwrap();
+        for row in &unrelated_rows {
+            assert!(svc.repo.get_asset(&row.asset_id).await.unwrap().is_none());
+            for rel in [row.rel_path.as_ref(), row.thumb_rel_path.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                assert!(!dir.path().join(rel).exists());
+            }
+        }
+
+        // Provenance asset IDs are hard references, including operation-only
+        // source and mask assets that are absent from inputAssetIds.
+        for row in &referenced_assets {
+            let error = svc.delete_asset(&row.asset_id).await.unwrap_err();
+            assert!(matches!(error, AppError::Conflict(_)), "{error:?}");
+            assert!(svc.repo.get_asset(&row.asset_id).await.unwrap().is_some());
+            for rel in [row.rel_path.as_ref(), row.thumb_rel_path.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                assert!(dir.path().join(rel).is_file());
+            }
+        }
+        svc.audit_managed_data_on_boot().await.unwrap();
+        let archive = svc
+            .export_creative_project_archive(&project.project_id)
+            .await
+            .unwrap();
+        let (imported_service, _imported_dir) = service().await;
+        let imported = imported_service
+            .import_creative_project_archive(archive.bytes)
+            .await
+            .unwrap();
+        imported_service.audit_managed_data_on_boot().await.unwrap();
+        let imported_document = imported_service
+            .get_creative_project(&imported.project_id)
+            .await
+            .unwrap();
+        assert_eq!(imported_document.document.nodes.len(), cases.len());
+        let imported_assets = imported_service
+            .collect_creative_project_asset_closure(&imported_document.document)
+            .await
+            .unwrap();
+        assert_eq!(imported_assets.len(), referenced_assets.len());
+        for id in imported_assets {
+            assert!(referenced_assets.iter().all(|asset| asset.asset_id != id));
+            imported_service.read_asset_bytes(&id).await.unwrap();
+        }
+
+        // Permanent user deletion keeps explicit identities while removing
+        // every original and thumbnail, even when history still references it.
+        for row in &referenced_assets {
+            svc.delete_asset_content(&row.asset_id).await.unwrap();
+            svc.delete_asset_content(&row.asset_id).await.unwrap();
+            let tombstone = svc.repo.get_asset(&row.asset_id).await.unwrap().unwrap();
+            assert!(tombstone.deleted_at.is_some());
+            assert!(tombstone.content_deleted_at.is_some());
+            assert!(tombstone.rel_path.is_none());
+            assert!(tombstone.thumb_rel_path.is_none());
+            assert!(!tombstone.in_library);
+            for rel in [row.rel_path.as_ref(), row.thumb_rel_path.as_ref()].into_iter().flatten() {
+                assert!(!dir.path().join(rel).exists());
+            }
+            assert!(matches!(svc.read_asset_bytes(&row.asset_id).await, Err(AppError::NotFound(_))));
+        }
+        assert_eq!(svc.get_creative_project(&project.project_id).await.unwrap().document, stored.document);
+        assert_eq!(svc.list_assets(AssetQuery::default()).await.unwrap().total, 0);
+        svc.audit_managed_data_on_boot().await.unwrap();
+        let archive = svc.export_creative_canvas_archive(&project.project_id).await.unwrap();
+        let (restored, _restored_dir) = service().await;
+        let imported = restored.import_creative_canvas_archive(archive.bytes).await.unwrap();
+        restored.audit_managed_data_on_boot().await.unwrap();
+        let detail = restored.get_creative_project(&imported.canvas_id).await.unwrap();
+        let ids = restored.collect_creative_project_asset_closure(&detail.document).await.unwrap();
+        assert_eq!(ids.len(), referenced_assets.len());
+        for id in ids {
+            assert!(restored.get_asset(&id).await.unwrap().deleted_at.is_some());
+            assert!(matches!(restored.serve_file(&id, false).await, Err(AppError::NotFound(_))));
+        }
+        restored.export_creative_canvas_archive(&imported.canvas_id).await.unwrap();
+
+        svc.delete_creative_project(&project.project_id)
+            .await
+            .unwrap();
+        assert!(matches!(
+            svc.get_creative_project(&project.project_id).await,
+            Err(AppError::NotFound(_))
+        ));
+        for row in &referenced_assets {
+            assert!(svc.repo.get_asset(&row.asset_id).await.unwrap().is_none());
+            for rel in [row.rel_path.as_ref(), row.thumb_rel_path.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                assert!(!dir.path().join(rel).exists());
+            }
+        }
+        svc.audit_managed_data_on_boot().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn asset_content_deletion_recovers_partial_cleanup_and_blocks_content_reads() {
+        let (svc, dir) = service().await;
+        let asset = upload_png(&svc, true).await;
+        let original = svc.repo.get_asset(&asset.asset_id).await.unwrap().unwrap();
+        let path = dir.path().join(original.rel_path.as_ref().unwrap());
+        let project = svc
+            .create_creative_project(Some("cleanup owner".into()))
+            .await
+            .unwrap();
+        let mut document = CreativeProjectDocument::empty(project.project_id.clone());
+        document.nodes.push(serde_json::from_value(serde_json::json!({
+            "id": CreativeStudioNodeId::new().into_string(), "type": "image",
+            "position": { "x": 0, "y": 0 }, "size": { "width": 100, "height": 100 },
+            "groupId": null, "zIndex": 0, "locked": false,
+            "data": { "assetId": asset.asset_id, "caption": "", "alt": "", "fit": "contain", "naturalSize": null }
+        })).unwrap());
+        svc.save_creative_project(&project.project_id, "1", &document)
+            .await
+            .unwrap();
+        // Deterministic filesystem failure without relying on Unix permissions
+        // (which a privileged test process could bypass).
+        tokio::fs::remove_file(&path).await.unwrap();
+        tokio::fs::create_dir(&path).await.unwrap();
+        tokio::fs::write(path.join("blocked"), b"block deletion")
+            .await
+            .unwrap();
+        assert!(matches!(svc.delete_asset_content(&asset.asset_id).await,
+            Err(AppError::Internal(message)) if message.contains("cleanup is pending")));
+        let pending = svc.repo.get_asset(&asset.asset_id).await.unwrap().unwrap();
+        assert!(pending.deleted_at.is_some());
+        assert!(pending.content_deleted_at.is_none());
+        assert_eq!(pending.rel_path, original.rel_path);
+        assert!(matches!(
+            svc.serve_file(&asset.asset_id, false).await,
+            Err(AppError::NotFound(_))
+        ));
+        assert!(matches!(
+            svc.serve_file(&asset.asset_id, true).await,
+            Err(AppError::NotFound(_))
+        ));
+
+        // Removing the last Canvas owner must not let its GC erase a pending
+        // deletion marker and strand the file without recovery information.
+        svc.delete_creative_project(&project.project_id)
+            .await
+            .unwrap();
+        assert!(
+            svc.repo
+                .get_asset(&asset.asset_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .content_deleted_at
+                .is_none()
+        );
+
+        tokio::fs::remove_file(path.join("blocked")).await.unwrap();
+        tokio::fs::remove_dir(&path).await.unwrap();
+        tokio::fs::write(&path, b"remaining original")
+            .await
+            .unwrap();
+        // A new service instance finishes previously authorized deletion on
+        // startup, then validates the tombstone as deliberate missing content.
+        let restarted = WorkshopService::start(dir.path(), svc.repo.clone());
+        restarted.audit_managed_data_on_boot().await.unwrap();
+        let finished = svc.repo.get_asset(&asset.asset_id).await.unwrap().unwrap();
+        assert_eq!(finished.deleted_at, pending.deleted_at);
+        assert!(finished.content_deleted_at.is_some());
+        assert!(finished.rel_path.is_none());
+        assert!(finished.thumb_rel_path.is_none());
+        assert!(!path.exists());
+        assert!(!dir.path().join(original.thumb_rel_path.unwrap()).exists());
+        assert!(
+            svc.repo
+                .list_pending_asset_content_deletions()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        restarted
+            .delete_asset_content(&asset.asset_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            svc.repo
+                .get_asset(&asset.asset_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .updated_at,
+            finished.updated_at
+        );
+    }
+
+    #[tokio::test]
+    async fn text_content_deletion_leaves_only_an_unreadable_history_marker() {
+        let (svc, _dir) = service().await;
+        let asset = svc
+            .create_text_asset(NewTextAsset {
+                title: "Deleted note".into(),
+                text_content: "private body".into(),
+                collection: None,
+                tags: None,
+                in_library: Some(true),
+                origin: None,
+            })
+            .await
+            .unwrap();
+        svc.delete_asset_content(&asset.asset_id).await.unwrap();
+        let marker = svc.get_asset(&asset.asset_id).await.unwrap();
+        assert!(marker.deleted_at.is_some());
+        assert!(marker.text_content.is_none());
+        assert!(!marker.in_library);
+        assert!(matches!(
+            svc.read_asset_bytes(&asset.asset_id).await,
+            Err(AppError::NotFound(_))
+        ));
+        svc.audit_managed_data_on_boot().await.unwrap();
     }
 
     #[tokio::test]

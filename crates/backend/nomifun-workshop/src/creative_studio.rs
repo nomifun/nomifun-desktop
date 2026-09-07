@@ -804,6 +804,9 @@ impl CreativeConfigNodeData {
     }
 }
 
+/// Persisted generation provenance. A source node may have been deleted after
+/// generation; its identity still groups related history. Asset identities
+/// remain owned references even when the source node is no longer on the canvas.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(
     tag = "kind",
@@ -832,6 +835,15 @@ pub enum CreativeConfigOperation {
 }
 
 impl CreativeConfigOperation {
+    pub(crate) fn source_node_id(&self) -> &str {
+        match self {
+            Self::ImageNodeCompose { source_node_id, .. }
+            | Self::ImageMaskEdit { source_node_id, .. }
+            | Self::VideoNodeCompose { source_node_id, .. }
+            | Self::AudioNodeCompose { source_node_id, .. } => source_node_id,
+        }
+    }
+
     fn validate(&self, path: &str) -> Result<(), String> {
         match self {
             Self::ImageNodeCompose {

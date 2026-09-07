@@ -7,6 +7,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { creativeAssetClient } from './client';
+import { subscribeCreativeAssetDeletion } from './assetDeletion';
+import { isCreativeAssetDeleted } from './types';
 import {
   getCreativeAssetQueryCacheGeneration,
   invalidateCreativeAssetQueryCache,
@@ -64,6 +66,7 @@ export function creativeAssetMatchesQuery(
   asset: CreativeAsset,
   query: Omit<CreativeAssetQuery, 'page' | 'pageSize'>
 ): boolean {
+  if (isCreativeAssetDeleted(asset)) return false;
   if (query.kind && asset.kind !== query.kind) return false;
   if (query.inLibrary !== undefined && asset.inLibrary !== query.inLibrary) return false;
   if (query.ungrouped && asset.collection) return false;
@@ -190,6 +193,20 @@ export function useCreativeAssets(options: UseCreativeAssetsOptions = {}): UseCr
   }, [enabled, port, buildQuery]);
 
   const reload = useCallback(() => loadFirstPage(true), [loadFirstPage]);
+
+  useEffect(() => {
+    const unsubscribe = subscribeCreativeAssetDeletion(port, (assetId) => {
+      if (!assetsRef.current.some((asset) => asset.id === assetId)) return;
+      const remaining = assetsRef.current.filter((asset) => asset.id !== assetId);
+      assetsRef.current = remaining;
+      totalRef.current = Math.max(0, totalRef.current - 1);
+      setAssets(remaining);
+      setTotal(totalRef.current);
+    });
+    const refresh = () => { if (enabled) void reload(); };
+    window.addEventListener('focus', refresh);
+    return () => { unsubscribe(); window.removeEventListener('focus', refresh); };
+  }, [enabled, port, reload]);
 
   useEffect(() => {
     if (!enabled) {

@@ -6,11 +6,14 @@
 
 import type { ReactNode } from 'react';
 
-import type { CreativeCanvasBackground, CreativeCanvasNode } from '../../domain';
+import type {
+  CreativeCanvasBackground,
+  CreativeCanvasUserNodeKind,
+} from '../../domain';
 import type { CanvasInteractionTool } from '../components';
 import type { CanvasCasSaveStatus } from '../editor';
 
-export type CreativeCanvasChromeNodeKind = CreativeCanvasNode['type'];
+export type CreativeCanvasChromeNodeKind = CreativeCanvasUserNodeKind;
 export type CreativeCanvasChromeBackground = CreativeCanvasBackground;
 export type CreativeCanvasChromeTool = CanvasInteractionTool;
 export type CreativeCanvasChromeSaveStatus = CanvasCasSaveStatus;
@@ -72,7 +75,6 @@ export const CREATIVE_CANVAS_CHROME_NODE_KINDS = [
   'panorama',
   'video',
   'audio',
-  'config',
   'director',
   'group',
 ] as const satisfies readonly CreativeCanvasChromeNodeKind[];
@@ -84,7 +86,6 @@ export const CREATIVE_CANVAS_CHROME_TOOLBAR_NODE_KINDS = [
   'audio',
   'panorama',
   'director',
-  'config',
 ] as const satisfies readonly CreativeCanvasChromeNodeKind[];
 
 export const CREATIVE_CANVAS_CHROME_BACKGROUNDS = [

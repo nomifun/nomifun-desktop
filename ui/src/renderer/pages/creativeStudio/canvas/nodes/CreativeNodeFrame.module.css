@@ -72,40 +72,11 @@
   display: flex;
   min-height: 24px;
   align-items: center;
+  justify-content: flex-end;
   gap: 8px;
   padding: 0;
   border: 0;
   pointer-events: none;
-}
-
-.kindIcon {
-  display: none;
-}
-
-.titleBlock {
-  display: flex;
-  min-width: 0;
-  flex: 1;
-  flex-direction: row;
-  align-items: center;
-}
-
-.title,
-.subtitle {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.title {
-  font-size: 12px;
-  font-weight: 500;
-  line-height: 1.3;
-  color: var(--creative-canvas-node-label, var(--color-text-2));
-}
-
-.subtitle {
-  display: none;
 }
 
 .status {

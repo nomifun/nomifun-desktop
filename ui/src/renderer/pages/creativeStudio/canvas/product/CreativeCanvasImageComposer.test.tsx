@@ -6,16 +6,16 @@
 
 import '../../../../../../test/setup-dom.ts';
 
-import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 import { withCanvasTestI18n } from '../components/canvasI18nTestUtils';
-import CreativeCanvasImageComposer, {
-  type CreativeCanvasImageComposerProps,
-} from './CreativeCanvasImageComposer';
+import type { CreativeCanvasImageComposerProps } from './CreativeCanvasImageComposer';
 import type { CreativeCanvasReferencePromptChange } from './CreativeCanvasReferencePromptInput';
+
+const { act, cleanup, fireEvent, render, waitFor, within } = await import('@testing-library/react');
+const { default: CreativeCanvasImageComposer } = await import('./CreativeCanvasImageComposer');
 
 const noop = () => undefined;
 
@@ -60,6 +60,24 @@ const props = (
       requestSize: '1920x1080',
     },
     {
+      value: '2048x2048',
+      label: '1:1 · 2K',
+      aspectRatio: '1:1',
+      resolution: '2K',
+      width: 2048,
+      height: 2048,
+      requestSize: '2048x2048',
+    },
+    {
+      value: '2048x1152',
+      label: '16:9 · 2K',
+      aspectRatio: '16:9',
+      resolution: '2K',
+      width: 2048,
+      height: 1152,
+      requestSize: '2048x1152',
+    },
+    {
       value: 'auto',
       label: '自动',
       width: null,
@@ -79,6 +97,106 @@ const props = (
 });
 
 describe('CreativeCanvasImageComposer', () => {
+  test('keeps canvas refreshes out of preedit and generates the committed text on click', () => {
+    const promptChanges: CreativeCanvasReferencePromptChange[] = [];
+    const generated: string[] = [];
+    const componentProps = props({
+      initialPrompt: '人物戴着，保持背景',
+      initialMentions: [],
+      onPromptChange: (change) => promptChanges.push(change),
+      onGenerate: (prompt) => generated.push(prompt),
+    });
+    const { getByRole, rerender } = render(withCanvasTestI18n(<CreativeCanvasImageComposer {...componentProps} />));
+    const input = getByRole('combobox', { name: '图片创作提示词' }) as HTMLTextAreaElement;
+    input.focus();
+    input.setSelectionRange(4, 4);
+    fireEvent.compositionStart(input);
+    fireEvent.input(input, { target: { value: '人物戴着fa zhan，保持背景', selectionStart: 11, selectionEnd: 11 }, isComposing: true });
+    rerender(withCanvasTestI18n(<CreativeCanvasImageComposer {...componentProps} initialMentions={[]} />));
+    expect(input.value).toBe('人物戴着fa zhan，保持背景');
+    expect(input.selectionStart).toBe(11);
+    expect(promptChanges).toEqual([]);
+    fireEvent.input(input, { target: { value: '人物戴着发簪，保持背景', selectionStart: 6, selectionEnd: 6 }, isComposing: true });
+    fireEvent.compositionEnd(input, { data: '发簪' });
+    const generate = getByRole('button', { name: '生成图片' });
+    act(() => generate.focus());
+    fireEvent.click(generate);
+    expect(promptChanges).toEqual([{ value: '人物戴着发簪，保持背景', mentions: [] }]);
+    expect(generated).toEqual(['人物戴着发簪，保持背景']);
+  });
+
+  test('does not carry pending composition into another canvas node', async () => {
+    const changes: CreativeCanvasReferencePromptChange[] = [];
+    const componentProps = props({ initialPrompt: '第一个节点', onPromptChange: (change) => changes.push(change) });
+    const { getByRole, rerender } = render(withCanvasTestI18n(<CreativeCanvasImageComposer {...componentProps} />));
+    const input = getByRole('combobox', { name: '图片创作提示词' }) as HTMLTextAreaElement;
+    input.focus();
+    fireEvent.compositionStart(input);
+    fireEvent.input(input, { target: { value: '第一个节点fa' }, isComposing: true });
+    fireEvent.compositionEnd(input, { target: { value: '第一个节点发簪' }, data: '发簪' });
+    rerender(withCanvasTestI18n(<CreativeCanvasImageComposer {...componentProps} nodeId='second-node' initialPrompt='第二个节点' />));
+    await act(async () => { await new Promise<void>((resolve) => requestAnimationFrame(() => resolve())); });
+    const nextInput = getByRole('combobox', { name: '图片创作提示词' }) as HTMLTextAreaElement;
+    expect(nextInput).not.toBe(input);
+    expect(nextInput.value).toBe('第二个节点');
+    expect(changes).toEqual([]);
+  });
+
+  test('does not restore an unchanged canvas snapshot over an edit in the middle', () => {
+    const componentProps = props({ initialPrompt: '人物戴着，保持背景和构图', initialMentions: [] });
+    const { getByRole, rerender } = render(withCanvasTestI18n(
+      <CreativeCanvasImageComposer {...componentProps} />
+    ));
+    const input = getByRole('combobox', { name: '图片创作提示词' }) as HTMLTextAreaElement;
+    input.focus();
+    fireEvent.change(input, { target: { value: '人物戴着发簪，保持背景和构图', selectionStart: 6, selectionEnd: 6 } });
+
+    // The route clones mentions whenever the canvas or its assets rerender.
+    rerender(withCanvasTestI18n(
+      <CreativeCanvasImageComposer {...componentProps} initialMentions={[]} />
+    ));
+    expect(input.value).toBe('人物戴着发簪，保持背景和构图');
+    expect(input.selectionStart).toBe(6);
+    expect(document.activeElement).toBe(input);
+
+    // A real external replacement (e.g. the prompt library) must still hydrate.
+    rerender(withCanvasTestI18n(
+      <CreativeCanvasImageComposer {...componentProps} initialPrompt='提示词库内容' initialMentions={[]} />
+    ));
+    expect(input.value).toBe('提示词库内容');
+  });
+
+  test('previews text as text, inserts a text alias and permits text-only input', () => {
+    const submitted: string[] = [];
+    const disconnected: string[] = [];
+    const text = '一只猫，水彩风格';
+    const componentProps = props({
+      hasImageContent: false,
+      initialPrompt: '',
+      references: [{
+        nodeId: 'text-node', assetId: null, connectionId: 'text-edge', base: false,
+        kind: 'text', textContent: text, label: text, mentionLabel: '文本1', ordinal: 1,
+      }],
+      onGenerate: (prompt) => submitted.push(prompt),
+      onReferenceDisconnect: (edgeId) => disconnected.push(edgeId),
+    });
+    const { getByRole } = render(withCanvasTestI18n(<CreativeCanvasImageComposer {...componentProps} />));
+    const list = getByRole('list', { name: '已连接参考' });
+    expect(list.textContent?.includes(text)).toBe(true);
+    expect(list.textContent?.includes('文本1')).toBe(true);
+    expect(list.querySelector('img')).toBeNull();
+    fireEvent.click(getByRole('button', { name: '生成图片' }));
+    expect(submitted).toEqual(['']);
+    fireEvent.click(getByRole('button', { name: '引用已连接素材' }));
+    const option = getByRole('option', { name: /@文本1/ });
+    expect(option.textContent?.includes(text)).toBe(true);
+    expect(option.textContent?.includes('图 1')).toBe(false);
+    fireEvent.click(option);
+    expect((getByRole('combobox', { name: '图片创作提示词' }) as HTMLTextAreaElement).value).toBe('@文本1 ');
+    fireEvent.click(getByRole('button', { name: `断开参考 ${text}` }));
+    expect(disconnected).toEqual(['text-edge']);
+  });
+
   test('renders the focused reference-style node composer', () => {
     const html = renderToStaticMarkup(
       <CreativeCanvasImageComposer {...props({ initialPrompt: '改成清晨' })} />
@@ -91,20 +209,19 @@ describe('CreativeCanvasImageComposer', () => {
     expect(html.includes('arco-select-size-mini')).toBe(true);
     expect(html.includes('图片生成设置')).toBe(true);
     expect(html.includes('生成图片')).toBe(true);
-    expect(html.includes('自动 · 1:1 · 1 张')).toBe(true);
+    expect(html.includes('1:1 · 标准 · 1 张')).toBe(true);
   });
 
-  test('opens stable in-flow quality and aspect-ratio selectors', async () => {
+  test('opens separate quality, aspect-ratio and resolution selectors', async () => {
     const qualityChanges: string[] = [];
     const aspectRatioChanges: string[] = [];
-    const { getByRole } = render(
+    const componentProps = props({
+      onQualityChange: (quality) => qualityChanges.push(quality),
+      onAspectRatioChange: (option) => aspectRatioChanges.push(option.value),
+    });
+    const { getByRole, rerender } = render(
       withCanvasTestI18n(
-        <CreativeCanvasImageComposer
-          {...props({
-            onQualityChange: (quality) => qualityChanges.push(quality),
-            onAspectRatioChange: (option) => aspectRatioChanges.push(option.value),
-          })}
-        />
+        <CreativeCanvasImageComposer {...componentProps} />
       )
     );
 
@@ -114,22 +231,23 @@ describe('CreativeCanvasImageComposer', () => {
     await waitFor(() => {
       expect(document.querySelectorAll('select').length).toBe(1);
     });
-    const [qualitySelect] = Array.from(
-      document.querySelectorAll<HTMLSelectElement>('select')
-    );
+    const qualitySelect = getByRole('combobox', { name: '质量' });
+    const aspectRatioSelect = getByRole('group', { name: '宽高比' });
+    const resolutionSelect = getByRole('group', { name: '分辨率' });
 
     expect(qualitySelect.closest('[data-canvas-image-composer]')).not.toBeNull();
     fireEvent.change(qualitySelect, { target: { value: 'high' } });
-    fireEvent.click(getByRole('button', { name: '宽高比' }));
-    const sizeListbox = getByRole('listbox', { name: '宽高比' });
-    const sizeOption = getByRole('option', {
-      name: /16:9.*1920 × 1080/,
-    });
-    expect(within(sizeListbox).getByRole('option', { name: '自动' })).not.toBeNull();
-    expect(sizeOption.lastElementChild?.textContent).toBe('1920 × 1080');
-    fireEvent.click(sizeOption);
+    expect(within(aspectRatioSelect).getByRole('button', { name: '16:9' })).not.toBeNull();
+    fireEvent.click(within(resolutionSelect).getByRole('button', { name: '2K' }));
+    rerender(withCanvasTestI18n(
+      <CreativeCanvasImageComposer {...componentProps} settings={{
+        ...componentProps.settings, aspectRatio: '2048x2048', width: 2048, height: 2048,
+      }} />
+    ));
+    expect(within(resolutionSelect).getByRole('button', { name: '2K' }).getAttribute('aria-pressed')).toBe('true');
+    fireEvent.click(within(aspectRatioSelect).getByRole('button', { name: '16:9' }));
     expect(qualityChanges).toEqual(['high']);
-    expect(aspectRatioChanges).toEqual(['16:9']);
+    expect(aspectRatioChanges).toEqual(['2048x2048', '2048x1152']);
     expect(settingsButton.getAttribute('aria-expanded')).toBe('true');
 
     fireEvent.keyDown(document, { key: 'Escape' });
@@ -192,7 +310,6 @@ describe('CreativeCanvasImageComposer', () => {
                 ordinal: 2,
               },
             ],
-            referenceCapacityLabel: '2/3',
             onReferenceDisconnect: (connectionId) => disconnected.push(connectionId),
             onPromptChange: (change) => promptChanges.push(change),
           })}
@@ -200,9 +317,11 @@ describe('CreativeCanvasImageComposer', () => {
       )
     );
 
-    expect(getByRole('list').textContent?.includes('人物图')).toBe(true);
-    expect(getByRole('list').textContent?.includes('服装图')).toBe(true);
-    fireEvent.click(getByRole('button', { name: '断开参考图 服装图' }));
+    const referenceList = getByRole('list', { name: '已连接参考' });
+    expect(referenceList.textContent?.includes('人物图')).toBe(true);
+    expect(referenceList.textContent?.includes('服装图')).toBe(true);
+    expect(document.body.textContent?.includes('已连接参考')).toBe(false);
+    fireEvent.click(getByRole('button', { name: '断开参考 服装图' }));
     expect(disconnected).toEqual(['edge-clothes']);
 
     fireEvent.click(getByRole('button', { name: '引用已连接素材' }));
@@ -291,6 +410,36 @@ describe('CreativeCanvasImageComposer', () => {
     expect(html.includes('请输入你想要把这张图修改成什么')).toBe(false);
   });
 
+  test('shows a configured alias first and keeps the exact model id available', () => {
+    const html = renderToStaticMarkup(
+      <CreativeCanvasImageComposer
+        {...props({
+          modelOptions: [
+            {
+              providerId: 'provider-a',
+              model: 'ep-20260826130358-long-model-id',
+              label: '人像精修',
+              rawModelId: 'ep-20260826130358-long-model-id',
+              providerLabel: 'Provider A',
+            },
+          ],
+          settings: {
+            ...props().settings,
+            model: {
+              providerId: 'provider-a',
+              model: 'ep-20260826130358-long-model-id',
+            },
+          },
+        })}
+      />
+    );
+
+    expect(html.includes('人像精修')).toBe(true);
+    expect(html.includes('ep-20260826130358-long-model-id')).toBe(true);
+    expect(html.includes('Provider A')).toBe(true);
+    expect(html.includes('arco-select-show-search')).toBe(true);
+  });
+
   test('uses the shared compact shell while keeping image-specific controls', () => {
     const css = readFileSync(
       new URL('./CreativeCanvasImageComposer.module.css', import.meta.url),
@@ -312,11 +461,15 @@ describe('CreativeCanvasImageComposer', () => {
     expect(shellCss.includes('background: color-mix(in srgb, var(--color-bg-2)')).toBe(true);
     expect(shellCss.includes('background: rgb(var(--primary-6))')).toBe(true);
     expect(shellCss.includes('@media (prefers-color-scheme: dark)')).toBe(false);
-    expect(shellCss.includes('width: 580px')).toBe(true);
-    expect(promptCss.includes('min-height: 104px')).toBe(true);
+    expect(shellCss.includes('width: 540px')).toBe(true);
+    expect(promptCss.includes('min-height: 92px')).toBe(true);
+    expect(css.includes('padding: 0 4px 4px')).toBe(true);
     expect(css.includes('height: 160px')).toBe(false);
     expect(shellCss.includes('flex: 0 1 156px')).toBe(true);
-    expect(shellCss.includes('min-width: 124px')).toBe(true);
+    expect(
+      /\.selectedModelLabel\s*\{[\s\S]*?display:\s*inline-flex;/.test(shellCss)
+    ).toBe(true);
+    expect(shellCss.includes('flex: 0 1 144px')).toBe(true);
     expect(shellCss.includes('min-width: 48px')).toBe(true);
     expect(shellCss.includes('.footer :global(.i-icon)')).toBe(true);
     expect(shellCss.includes(".positioner[data-placement='above']")).toBe(true);
@@ -324,9 +477,9 @@ describe('CreativeCanvasImageComposer', () => {
     expect(shellCss.includes(".positioner[data-overlay='true']")).toBe(true);
     expect(css.includes('.settingsPopover')).toBe(true);
     expect(css.includes('.settingsSelect select')).toBe(true);
-    expect(
-      /\.sizeMenuOption\s*\{[\s\S]*?justify-content:\s*space-between;/.test(css)
-    ).toBe(true);
+    expect(css.includes('.sizeMenuOption')).toBe(false);
+    expect(css.includes('--creative-image-settings-available-height')).toBe(true);
+    expect(css.includes(".settingsPopover[data-placement^='bottom']::after")).toBe(true);
     expect(css.includes('appearance: none')).toBe(true);
     expect(css.includes('pointer-events: none')).toBe(true);
   });
