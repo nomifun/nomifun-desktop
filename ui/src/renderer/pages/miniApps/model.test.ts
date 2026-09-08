@@ -7,7 +7,7 @@
 import { describe, expect, test } from 'bun:test';
 import type { MiniAppWorkshop } from '@/common/types/miniAppPlatform';
 import {
-  miniAppPublishBlockingReasons,
+  miniAppBuildRequest,
   miniAppReleaseStage,
   miniAppWorkflowState,
   shortMiniAppIdentity,
@@ -70,39 +70,41 @@ describe('MiniApp M1 view model', () => {
     expect(miniAppReleaseStage(ready.miniapp)).toBe('active');
   });
 
-  test('does not claim Build or Publish completion without durable facts', () => {
+  test('does not claim Build or Ready completion without durable facts', () => {
     expect(miniAppWorkflowState(workshop())).toEqual({
       source: 'pending',
       build: 'blocked',
       ready: 'pending',
-      publish: 'pending',
-      surface: 'pending',
     });
   });
 
-  test('deduplicates publish blocking reasons and shortens opaque identities', () => {
+  test('build request binds the exact editable Source and CAS revisions', () => {
     const value = workshop({
-      ready: {
-        release: {
-          release_id: 'ready',
-          artifact_id: 'artifact',
-          release_digest: 'a'.repeat(64),
-          manifest_digest: 'b'.repeat(64),
-        },
-        project_build_generation: 1,
-        kind: 'ui_only',
-        test: {
-          status: 'not_required',
-          release_id: 'ready',
-          expected_release_digest: 'a'.repeat(64),
-        },
-        migration_count: 0,
-        can_publish: false,
-        can_auto_publish: false,
-        blocking_reasons: [' NEEDS_SOURCE ', 'NEEDS_SOURCE', ''],
-      },
+      source_state: 'editable',
+      build_generation: 3,
+      project_revision: 4,
+      source_snapshot_digest: 'b'.repeat(64),
+      dependency_lock_digest: 'c'.repeat(64),
     });
-    expect(miniAppPublishBlockingReasons(value)).toEqual(['NEEDS_SOURCE']);
+    expect(miniAppBuildRequest(value)).toEqual({
+      miniapp_id: value.miniapp.miniapp_id,
+      expected_product_revision: 1,
+      project_id: value.project_id,
+      expected_project_revision: 4,
+      expected_build_generation: 3,
+      expected_source_snapshot_digest: 'b'.repeat(64),
+      expected_dependency_lock_digest: 'c'.repeat(64),
+    });
+    value.active_operation = {
+      operation_id: 'operation',
+      operation_revision: 1,
+      kind: 'build',
+      owner: { owner: 'miniapp', miniapp_id: value.miniapp.miniapp_id },
+      state: 'running',
+      cancelable: true,
+      started_at_ms: 1,
+    };
+    expect(miniAppBuildRequest(value)).toBeNull();
     expect(shortMiniAppIdentity('1234567890abcdefghij', 4)).toBe(
       '1234…ghij'
     );

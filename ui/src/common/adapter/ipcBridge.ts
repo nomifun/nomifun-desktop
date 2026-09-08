@@ -326,6 +326,8 @@ import {
   type RawWorkspaceFlatFile,
 } from './workspaceMapper';
 import type {
+  BuildMiniAppRequest,
+  CancelMiniAppBuildRequest,
   CreateMiniAppProjectRequest,
   MiniAppLibraryResponse,
   MiniAppOperationSummary,
@@ -2206,8 +2208,8 @@ export const ssh = {
 // MiniApp M1 - owner-scoped Product/Project/Release state.
 //
 // This is a clean cut from the retired single-HTML and conversation workspace
-// API. Build, Publish and Surface commands will be added only when their M1
-// backend contracts are available.
+// API. The first executable slice is UI-only Source → Build → Ready. Publish,
+// Surface, and Service commands remain outside this slice.
 // ---------------------------------------------------------------------------
 
 const fromApiMiniAppSummary = (value: MiniAppSummary): MiniAppSummary => ({
@@ -2262,6 +2264,22 @@ export const miniapps = {
         `/api/miniapps/${encodeURIComponent(miniapp_id)}/workshop`
     ),
     fromApiMiniAppWorkshop
+  ),
+  build: withResponseMap(
+    httpPost<MiniAppWorkshop, BuildMiniAppRequest>(
+      ({ miniapp_id }) =>
+        `/api/miniapps/${encodeURIComponent(miniapp_id)}/build`
+    ),
+    fromApiMiniAppWorkshop
+  ),
+  cancelBuild: withResponseMap(
+    httpPost<MiniAppOperationSummary, CancelMiniAppBuildRequest>(
+      ({ miniapp_id, operation_id }) =>
+        `/api/miniapps/${encodeURIComponent(miniapp_id)}/operations/${encodeURIComponent(operation_id)}/cancel`,
+      ({ operation_id: _operationId, miniapp_id: _miniappId, ...request }) =>
+        request
+    ),
+    fromApiMiniAppOperation
   ),
 };
 

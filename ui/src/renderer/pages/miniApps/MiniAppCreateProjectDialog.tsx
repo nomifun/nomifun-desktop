@@ -6,7 +6,6 @@
 
 import { ipcBridge } from '@/common';
 import type {
-  MiniAppKind,
   MiniAppWorkshop,
 } from '@/common/types/miniAppPlatform';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
@@ -14,7 +13,6 @@ import {
   Form,
   Input,
   Modal,
-  Radio,
   type ModalProps,
 } from '@arco-design/web-react';
 import React, { useEffect, useState } from 'react';
@@ -50,7 +48,6 @@ const MiniAppCreateProjectDialog: React.FC<MiniAppCreateProjectDialogProps> = ({
   const { t } = useTranslation();
   const [displayName, setDisplayName] = useState('');
   const [description, setDescription] = useState('');
-  const [kind, setKind] = useState<MiniAppKind>('ui_only');
   const [validationError, setValidationError] = useState('');
   const [requestError, setRequestError] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -59,7 +56,6 @@ const MiniAppCreateProjectDialog: React.FC<MiniAppCreateProjectDialogProps> = ({
     if (!visible) return;
     setDisplayName('');
     setDescription('');
-    setKind('ui_only');
     setValidationError('');
     setRequestError('');
     setSubmitting(false);
@@ -80,7 +76,7 @@ const MiniAppCreateProjectDialog: React.FC<MiniAppCreateProjectDialogProps> = ({
         expected_library_revision: libraryRevision,
         display_name: name,
         ...(description.trim() ? { description: description.trim() } : {}),
-        kind,
+        kind: 'ui_only',
       });
       onCreated(workshop);
     } catch (error) {
@@ -129,31 +125,9 @@ const MiniAppCreateProjectDialog: React.FC<MiniAppCreateProjectDialogProps> = ({
             onChange={setDescription}
           />
         </Form.Item>
-        <Form.Item label={t('miniApps.create.kind')}>
-          <Radio.Group
-            value={kind}
-            onChange={(value: string | number) =>
-              setKind(value as MiniAppKind)
-            }
-          >
-            <div className={styles.kindOption}>
-              <Radio value='ui_only'>
-                {t('miniApps.library.kind.uiOnly')}
-              </Radio>
-              <span className={styles.kindOptionHint}>
-                {t('miniApps.create.uiOnlyHint')}
-              </span>
-            </div>
-            <div className={styles.kindOption}>
-              <Radio value='service'>
-                {t('miniApps.library.kind.service')}
-              </Radio>
-              <span className={styles.kindOptionHint}>
-                {t('miniApps.create.serviceHint')}
-              </span>
-            </div>
-          </Radio.Group>
-        </Form.Item>
+        <div className={styles.notice}>
+          {t('miniApps.create.uiOnlyHint')}
+        </div>
       </Form>
       {requestError && (
         <div className={`${styles.notice} ${styles.noticeError}`}>

@@ -9,6 +9,8 @@
 > 当前结论：AP-0～AP-7 与一期 Windows C8 已通过。用户已授权在 Windows 主机继续
 > 完成 Plugin N1 和 MiniApp M1；macOS arm64、Linux Desktop x64 统一延后到全部
 > Windows 开发与候选验证完成后交接。手机模式不属于 `nomifun-desktop` 范围。
+> 2026-09-08 已同步远端 AgentPreset/会话模型选择修正；M1-0-02-A 已完成实现与
+> 定向回归，下一步进入 M1-0-02-B，不提前关闭 Service/Bridge 或外部平台验证。
 
 本文是 06 的唯一实时执行台账。06 保存产品与架构合同，GLOBAL TODO 保存一期 S0-S5；
 二期状态不得回填成一期完成度，也不得用旧 Extension/MiniApp 的代码量冒充 N1/M1 进度。
@@ -41,10 +43,10 @@
 
 | 分类 | 数量 | 项目 |
 | --- | ---: | --- |
-| 已关闭 | 15 | `W0-01`、`N1-0-01`～`N1-0-05`、`N1-1-02`～`N1-1-03`、`N1-2-00`～`N1-2-02`、`N1-3-01`～`N1-3-03`、`N1-X-01` |
-| 正在实施 | 6 | `N1-1-01`、`N1-2-03`、`N1-4-01`、`N1-U-01`、`M1-0-01`、`M1-0-02-A` |
-| 已解锁待领取 | 0 | 无 |
-| 依赖阻塞 | 11 | 其余 N1/M1 Windows 项与最终合流 |
+| 已关闭 | 16 | 在原有 15 项基础上关闭 `M1-0-02-A` |
+| 正在实施 | 5 | `N1-1-01`、`N1-2-03`、`N1-4-01`、`N1-U-01`、`M1-0-01` |
+| 已解锁待领取 | 1 | `M1-0-02-B` |
+| 依赖阻塞 | 10 | 其余 N1/M1 Windows 项与最终合流 |
 | 外部原生 | 2 | `RC-MA-01`、`RC-LD-01` |
 | 明确延后 | 2 | Marketplace/远程分发、第二 Runtime |
 
@@ -326,6 +328,42 @@
    在 `RC-WIN-01` 关闭前继续只做 Windows Desktop x64，不运行手机视口，也不交接
    macOS/Linux 原生验证。
 
+## 2026-09-08 M1-0-02-A 收口与远端设计同步
+
+1. 已快进同步远端 `rf/agent-capability-platform-v2` 的 AgentPreset/会话模型选择修正
+   （当前远端提交包含 official Agent 选择、会话级模型覆盖、模型 alias 编辑及对应
+   API/SQLite/UI 测试）；这些改动已通过本轮定向回归，不与 MiniApp 数据根混写。
+2. 远端新增 `076_agent_session_model_configurations.sql` 后，本地 MiniApp Build
+   lineage migration 顺延为 `077_miniapp_build_operation_lineage.sql`，数据库生命周期
+   的正式 head 常量同步为 `77`；迁移链、ID/schema 契约和升级回归均已重新通过。
+3. `M1-0-02-A` 已完成实现定义并关闭：
+   - 新增独立 MiniApp owner/project Source Store 与 immutable Release Store；
+   - UI-only `Source → Build → Ready` application service、Build Operation start/
+     finish/failure/cancel、staging cleanup 和单 MiniApp single-flight 已接入真实
+     SQLite repository；
+   - Artifact/Release/Ready pointer/library revision/Operation 成功状态在一个 SQLite
+     transaction 内提交；任何 CAS、digest、lineage 或 timestamp 失败均回滚；
+   - App 已提供 owner/local-trust 保护的 create/workshop/build/cancel 路由，Desktop
+     Workshop 只暴露 Source、Build、Ready、Cancel、Refresh，不伪造 Publish/Surface/
+     Service 操作；
+   - UI-only Build 固定不启动 Node，Source/Release Store 对路径 containment、Windows
+     collision、特殊文件、digest tamper 和 owner/project 越界 fail closed。
+4. 本轮定向证据：
+   - `nomifun-db`：ID/schema 20、MiniApp schema 6、MiniApp repository 8、数据库生命周期
+     31；
+   - `nomifun-miniapp-platform`：Source/Release Store 3、M1 application 3；
+   - `nomifun-app`：MiniApp route/application 3；
+   - API types 535、Agent control plane 22、Agent session model route 1；
+   - Desktop MiniApp UI 9、Agent/模型选择 UI 32、i18n check 与 UI production build
+     通过；
+   - `cargo check -p nomifun-db -p nomifun-miniapp-platform -p nomifun-app` 通过。
+5. `cargo fmt --all -- --check` 在 Windows 仍命中仓库既有文件名长度限制；受影响 crate
+   的定向格式检查与 `git diff --check` 通过。未跟踪 `.githooks/` 和测试运行时目录
+   不进入提交。
+6. 当前只领取 `M1-0-02-B`：Ready → Manual Publish → Surface → Rollback。该切片仍不
+   包含 dedicated Service Host、真实 MessageChannel adapter、Files/Private SQLite、
+   Share/Import、永久删除或 macOS/Linux 验证；这些项目继续按依赖保持 blocked。
+
 ## W0：一期交接
 
 | ID | 状态 | 目标 | 完成定义 | Evidence |
@@ -389,8 +427,8 @@
 | ID | 状态 | Owner/写集 | 目标 | 依赖 | 最小验证 |
 | --- | --- | --- | --- | --- | --- |
 | `M1-0-01` | in-progress | MiniApp DB/domain lane；`nomifun-db/migrations/072*`、`repository/miniapp_m1*` | 全新 Product/Project/Ready/Active/Previous 数据根，不读旧 `miniapps` | `N1-V-01` | migration 072、schema/repository 定向验证通过；生产 owner 路由接入与 M1 完整 Gate 尚未完成 |
-| `M1-0-02-A` | in-progress | MiniApp release lane；`nomifun-miniapp-platform/**`、MiniApp application/App Build adapter | UI-only `miniapp-release-v1` 的 Source→Build→Ready、Build Operation、immutable Release Store | `M1-0-01`,`N1-4-01` | Source owner 隔离、成功/失败/cancel、文件 bytes/digest、Ready lineage/CAS、全程 Node process=0 |
-| `M1-0-02-B` | blocked | MiniApp release lane | Ready→Manual Publish→Surface→Rollback、纯 UI auto Publish、Host KV | `M1-0-02-A`,`M1-1-01` | Release/Catalog 原子切换、旧 epoch/port 拒绝 |
+| `M1-0-02-A` | closed | MiniApp release lane；`nomifun-miniapp-platform/**`、MiniApp application/App Build adapter | UI-only `miniapp-release-v1` 的 Source→Build→Ready、Build Operation、immutable Release Store | `M1-0-01`,`N1-4-01` | Source owner 隔离、成功/失败/cancel、文件 bytes/digest、Ready lineage/CAS、全程 Node process=0；DB 20+6+8+31、Store 3、Application 3、App route 3、UI 9 |
+| `M1-0-02-B` | in-progress | MiniApp release lane；Publish/Catalog/Surface adapter 与 Desktop Workshop | Ready→Manual Publish→Surface→Rollback、纯 UI auto Publish、Host KV | `M1-0-02-A`,`M1-1-01` | 先实现 UI-only Release/Catalog 原子切换、Active/Previous pointer CAS、Surface epoch fence；真实 Service/Bridge 继续留在 `M1-1-01` |
 | `M1-1-01` | blocked | Service/Bridge lane | 单 `main.mjs`、dedicated Host、on-demand/continuous、MessageChannel epoch fence | `M1-0-02`,`N1-1-02` | old port callback rejected；one App crash isolation |
 | `M1-1-02` | blocked | Managed data lane | UI/Service KV、Files、Private SQLite、additive migration ledger | `M1-1-01` | owner namespace/SQL boundary/migration |
 | `M1-2-01` | blocked | Lifecycle lane | Enable/Disable/Trash/Restore/Permanent Delete、Share/Backup Import-as-new | `M1-1-02` | resumable delete；no plaintext credential |

@@ -5,6 +5,7 @@
  */
 
 import type {
+  BuildMiniAppRequest,
   MiniAppSummary,
   MiniAppWorkshop,
 } from '@/common/types/miniAppPlatform';
@@ -20,8 +21,6 @@ export interface MiniAppWorkflowState {
   source: MiniAppWorkflowStepState;
   build: MiniAppWorkflowStepState;
   ready: MiniAppWorkflowStepState;
-  publish: MiniAppWorkflowStepState;
-  surface: MiniAppWorkflowStepState;
 }
 
 export function miniAppReleaseStage(
@@ -40,32 +39,42 @@ export function miniAppWorkflowState(
     workshop.active_operation.state === 'running';
   const sourceReady = workshop.source_state !== 'empty';
   const hasReady = Boolean(workshop.ready);
-  const hasActive = Boolean(workshop.miniapp.releases.active);
 
   return {
     source: sourceReady ? 'done' : 'pending',
-    build: buildRunning ? 'active' : hasReady ? 'done' : 'blocked',
+    build: buildRunning
+      ? 'active'
+      : hasReady
+        ? 'done'
+        : sourceReady
+          ? 'active'
+          : 'blocked',
     ready: hasReady ? 'done' : 'pending',
-    publish: hasActive
-      ? 'done'
-      : workshop.ready?.can_publish
-        ? 'active'
-        : hasReady
-          ? 'blocked'
-          : 'pending',
-    surface: workshop.miniapp.surface_available
-      ? 'done'
-      : hasActive
-        ? 'blocked'
-        : 'pending',
   };
 }
 
-export function miniAppPublishBlockingReasons(
+export function miniAppBuildRequest(
   workshop: MiniAppWorkshop
-): string[] {
-  const reasons = workshop.ready?.blocking_reasons ?? [];
-  return [...new Set(reasons.map((reason) => reason.trim()).filter(Boolean))];
+): BuildMiniAppRequest | null {
+  if (
+    workshop.miniapp.kind !== 'ui_only' ||
+    workshop.source_state !== 'editable' ||
+    workshop.active_operation?.state === 'running' ||
+    !workshop.source_snapshot_digest ||
+    !workshop.dependency_lock_digest ||
+    workshop.build_generation < 1
+  ) {
+    return null;
+  }
+  return {
+    miniapp_id: workshop.miniapp.miniapp_id,
+    expected_product_revision: workshop.miniapp.product_revision,
+    project_id: workshop.project_id,
+    expected_project_revision: workshop.project_revision,
+    expected_build_generation: workshop.build_generation,
+    expected_source_snapshot_digest: workshop.source_snapshot_digest,
+    expected_dependency_lock_digest: workshop.dependency_lock_digest,
+  };
 }
 
 export function shortMiniAppIdentity(

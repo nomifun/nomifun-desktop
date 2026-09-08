@@ -1,11 +1,17 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use nomifun_agent_contracts::MINIAPP_RELEASE_PROFILE_VERSION;
+
 use crate::error::DbError;
 use crate::models::{
     MiniAppM1Kind, MiniAppM1LibrarySnapshot, MiniAppM1ProjectSourceState,
     MiniAppM1ReleaseOrigin, MiniAppM1ReleaseSourceKind, MiniAppM1Snapshot,
-    MiniAppProjectRow, MiniAppReleaseArtifactRow, MiniAppReleaseRow,
+    MiniAppProjectRow, MiniAppReleaseArtifactRow, MiniAppReleaseRow, ProductOperationRow,
+    ProductOperationState,
+};
+use crate::repository::plugin_n1::{
+    MAX_PRODUCT_OPERATION_LOG_LINE_CHARS, MAX_PRODUCT_OPERATION_LOG_LINES,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, sqlx::FromRow)]
@@ -38,6 +44,21 @@ pub struct CreateMiniAppM1Params {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MiniAppM1ManagedSourceLineage {
+    pub managed_source_path: String,
+    pub source_head_digest: String,
+    pub dependency_lock_digest: String,
+    pub build_profile_version: String,
+    pub build_generation: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CreateMiniAppM1WithSourceParams {
+    pub create: CreateMiniAppM1Params,
+    pub source: MiniAppM1ManagedSourceLineage,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UpdateMiniAppM1ProjectSourceParams {
     pub owner_user_id: String,
     pub miniapp_id: String,
@@ -50,6 +71,55 @@ pub struct UpdateMiniAppM1ProjectSourceParams {
     pub build_profile_version: Option<String>,
     pub build_generation: i64,
     pub updated_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StartMiniAppM1BuildOperationParams {
+    pub owner_user_id: String,
+    pub miniapp_id: String,
+    pub project_id: String,
+    pub operation_id: String,
+    pub expected_project_revision: i64,
+    pub expected_source: MiniAppM1ManagedSourceLineage,
+    pub bounded_log_tail: Vec<String>,
+    pub started_at_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FinishMiniAppM1BuildOperationParams {
+    pub owner_user_id: String,
+    pub miniapp_id: String,
+    pub operation_id: String,
+    pub state: ProductOperationState,
+    pub progress_percent: u8,
+    pub last_error_code: Option<String>,
+    pub bounded_log_tail: Vec<String>,
+    pub finished_at_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CancelMiniAppM1BuildOperationParams {
+    pub owner_user_id: String,
+    pub miniapp_id: String,
+    pub operation_id: String,
+    pub bounded_log_tail: Vec<String>,
+    pub finished_at_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FinishMiniAppM1BuildAndRecordReadyParams {
+    pub owner_user_id: String,
+    pub miniapp_id: String,
+    pub project_id: String,
+    pub operation_id: String,
+    pub expected_product_revision: i64,
+    pub expected_pointer_revision: i64,
+    pub expected_project_revision: i64,
+    pub expected_build_generation: i64,
+    pub artifact: MiniAppReleaseArtifactRow,
+    pub release: MiniAppReleaseRow,
+    pub bounded_log_tail: Vec<String>,
+    pub finished_at_ms: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,10 +172,48 @@ pub trait IMiniAppM1Repository: Send + Sync {
         params: &CreateMiniAppM1Params,
     ) -> Result<MiniAppM1Snapshot, DbError>;
 
+    async fn create_with_source(
+        &self,
+        params: &CreateMiniAppM1WithSourceParams,
+    ) -> Result<MiniAppM1Snapshot, DbError>;
+
     async fn update_project_source_cas(
         &self,
         params: &UpdateMiniAppM1ProjectSourceParams,
     ) -> Result<MiniAppProjectRow, DbError>;
+
+    async fn start_build_operation(
+        &self,
+        params: &StartMiniAppM1BuildOperationParams,
+    ) -> Result<ProductOperationRow, DbError>;
+
+    async fn finish_build_operation(
+        &self,
+        params: &FinishMiniAppM1BuildOperationParams,
+    ) -> Result<ProductOperationRow, DbError>;
+
+    async fn get_build_operation(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &str,
+        operation_id: &str,
+    ) -> Result<Option<ProductOperationRow>, DbError>;
+
+    async fn list_build_operations(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &str,
+    ) -> Result<Vec<ProductOperationRow>, DbError>;
+
+    async fn cancel_build_operation(
+        &self,
+        params: &CancelMiniAppM1BuildOperationParams,
+    ) -> Result<ProductOperationRow, DbError>;
+
+    async fn finish_build_and_record_ready(
+        &self,
+        params: &FinishMiniAppM1BuildAndRecordReadyParams,
+    ) -> Result<MiniAppM1Snapshot, DbError>;
 
     async fn record_ready_release(
         &self,
@@ -228,6 +336,53 @@ pub(crate) fn validate_visible_ascii_key(
     Ok(())
 }
 
+pub(crate) fn validate_managed_source_lineage(
+    source: &MiniAppM1ManagedSourceLineage,
+) -> Result<(), DbError> {
+    validate_project_source(
+        MiniAppM1ProjectSourceState::Editable,
+        Some(&source.managed_source_path),
+        Some(&source.source_head_digest),
+        Some(&source.dependency_lock_digest),
+        Some(&source.build_profile_version),
+        source.build_generation,
+    )
+}
+
+pub(crate) fn serialize_product_operation_log_tail(
+    lines: &[String],
+) -> Result<String, DbError> {
+    if lines.len() > MAX_PRODUCT_OPERATION_LOG_LINES {
+        return Err(conflict(format!(
+            "product operation log tail exceeds {MAX_PRODUCT_OPERATION_LOG_LINES} lines"
+        )));
+    }
+    if lines.iter().any(|line| {
+        line.chars().count() > MAX_PRODUCT_OPERATION_LOG_LINE_CHARS || line.contains('\0')
+    }) {
+        return Err(conflict(format!(
+            "product operation log line exceeds {MAX_PRODUCT_OPERATION_LOG_LINE_CHARS} characters or contains NUL"
+        )));
+    }
+    serde_json::to_string(lines)
+        .map_err(|error| conflict(format!("product operation log cannot be serialized: {error}")))
+}
+
+pub(crate) fn validate_product_operation_error_code(
+    value: Option<&str>,
+) -> Result<(), DbError> {
+    if value.is_some_and(|code| {
+        code.is_empty()
+            || code.chars().count() > 256
+            || !code.bytes().all(|byte| byte.is_ascii_graphic())
+    }) {
+        return Err(conflict(
+            "product operation last_error_code must contain 1 to 256 visible ASCII characters",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_relative_path(value: Option<&str>, label: &str) -> Result<(), DbError> {
     let Some(value) = value else {
         return Ok(());
@@ -293,6 +448,11 @@ pub(crate) fn validate_project_source(
             "build_profile_version must be visible ASCII with at most 64 bytes",
         ));
     }
+    if build_profile_version.is_some_and(|value| value != MINIAPP_RELEASE_PROFILE_VERSION) {
+        return Err(conflict(
+            "MiniApp Project must use the canonical release profile version",
+        ));
+    }
     Ok(())
 }
 
@@ -353,6 +513,13 @@ pub(crate) fn validate_release(release: &MiniAppReleaseRow) -> Result<(), DbErro
             {
                 return Err(conflict(
                     "managed Release requires complete source lineage",
+                ));
+            }
+            if release.build_profile_version.as_deref()
+                != Some(MINIAPP_RELEASE_PROFILE_VERSION)
+            {
+                return Err(conflict(
+                    "managed Release must use the canonical release profile version",
                 ));
             }
         }

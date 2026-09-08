@@ -287,10 +287,10 @@ async fn fetch_bindings(
 
 fn validate_operation_owner(kind: ProductOperationKind, owner_kind: &str) -> Result<(), DbError> {
     let valid = match kind {
-        ProductOperationKind::MiniappPermanentDelete => owner_kind == "miniapp",
-        ProductOperationKind::Build => matches!(owner_kind, "plugin_project" | "miniapp"),
+        ProductOperationKind::MiniappPermanentDelete => false,
+        ProductOperationKind::Build => owner_kind == "plugin_project",
         ProductOperationKind::Import | ProductOperationKind::Export => {
-            matches!(owner_kind, "plugin_project" | "plugin_mount" | "miniapp")
+            matches!(owner_kind, "plugin_project" | "plugin_mount")
         }
     };
     if valid {
@@ -630,7 +630,6 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
                 .fetch_one(&mut *tx)
                 .await?
             }
-            "miniapp" => true,
             _ => false,
         };
         if !owner_exists {
@@ -690,6 +689,11 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
                 .fetch_optional(&mut *tx)
                 .await?
                 .ok_or_else(|| DbError::NotFound(format!("operation {}", params.operation_id)))?;
+        if current.owner_kind == "miniapp" {
+            return Err(conflict(
+                "MiniApp operations must use the MiniApp repository",
+            ));
+        }
         if current.state != ProductOperationState::Running.as_str() {
             return Err(conflict(format!(
                 "operation {} is already terminal",

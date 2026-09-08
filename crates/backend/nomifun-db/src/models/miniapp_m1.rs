@@ -155,6 +155,21 @@ pub struct MiniAppReleaseRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct MiniAppBuildOperationLineageRow {
+    pub id: i64,
+    pub operation_id: String,
+    pub owner_user_id: String,
+    pub miniapp_id: String,
+    pub project_id: String,
+    pub project_revision: i64,
+    pub source_snapshot_digest: String,
+    pub dependency_lock_digest: String,
+    pub build_profile_version: String,
+    pub build_generation: i64,
+    pub started_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct MiniAppCredentialBindingRow {
     pub id: i64,
     pub miniapp_id: String,

@@ -6588,6 +6588,7 @@ dependencies = [
  "fs2",
  "hex",
  "libc",
+ "nomifun-agent-contracts",
  "nomifun-common",
  "serde",
  "serde_json",

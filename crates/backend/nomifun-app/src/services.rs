@@ -3448,10 +3448,35 @@ impl AppServices {
             Arc::new(nomifun_db::SqliteMiniAppM1Repository::new(
                 database.pool().clone(),
             ));
+        let miniapp_store_root = data_dir.join("miniapp-m1");
+        let miniapp_source_store = Arc::new(
+            nomifun_miniapp_platform::MiniAppSourceStore::new(
+                miniapp_store_root.join("source"),
+            )
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "failed to initialize MiniApp Source Store under {}: {error}",
+                    miniapp_store_root.display()
+                )
+            })?,
+        );
+        let miniapp_release_store = Arc::new(
+            nomifun_miniapp_platform::MiniAppReleaseStore::new(
+                miniapp_store_root.join("release"),
+            )
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "failed to initialize MiniApp Release Store under {}: {error}",
+                    miniapp_store_root.display()
+                )
+            })?,
+        );
         let miniapp_application = Arc::new(
-            nomifun_miniapp_platform::MiniAppM1ApplicationService::new(
+            nomifun_miniapp_platform::MiniAppM1ApplicationService::new_with_stores(
                 miniapp_repository,
-            ),
+                miniapp_source_store,
+                miniapp_release_store,
+            )?,
         );
 
         // SSH remote sessions: ONE process-level connection pool, built here
@@ -5627,6 +5652,8 @@ mod tests {
         let services = AppServices::from_config(db, &config).await.unwrap();
 
         assert!(!tmp.path().join("local-ai").exists());
+        assert!(tmp.path().join("miniapp-m1/source").is_dir());
+        assert!(tmp.path().join("miniapp-m1/release").is_dir());
         assert_eq!(
             services
                 .agent_runtime_registry

@@ -85,6 +85,7 @@ pub fn workshop_dto(
                     } => *build_generation,
                     nomifun_agent_contracts::MiniAppSourceLineage::RuntimeOnly => 0,
                 },
+                created_at_ms: ready.created_at_ms,
                 kind: kind_dto(root.product.kind),
                 service: service.map(|service| MiniAppServiceDescriptorDto {
                     lifecycle: match service.lifecycle {

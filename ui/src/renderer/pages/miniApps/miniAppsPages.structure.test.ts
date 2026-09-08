@@ -32,9 +32,8 @@ describe('MiniApp M1 product surfaces', () => {
     expect(dialogSource.includes('expected_library_revision: libraryRevision')).toBe(
       true
     );
-    expect(
-      dialogSource.includes("useState<MiniAppKind>('ui_only')")
-    ).toBe(true);
+    expect(dialogSource.includes("kind: 'ui_only'")).toBe(true);
+    expect(dialogSource.includes("<Radio value='service'>")).toBe(false);
     expect(listSource.includes('navigate(`/mini-apps/${app.miniapp_id}`)')).toBe(
       true
     );
@@ -54,8 +53,8 @@ describe('MiniApp M1 product surfaces', () => {
     expect(runnerSource.includes("navigate('/mini-apps')")).toBe(true);
   });
 
-  test('Workshop exposes the M1 workflow and product facts without faking commands', () => {
-    for (const step of ['source', 'build', 'ready', 'publish', 'surface']) {
+  test('Workshop exposes the delivered Source, Build, and Ready workflow', () => {
+    for (const step of ['source', 'build', 'ready']) {
       expect(
         runnerSource.includes(`miniApps.workshop.workflow.${step}`)
       ).toBe(true);
@@ -65,17 +64,15 @@ describe('MiniApp M1 product surfaces', () => {
       'dependency_lock_digest',
       'project_revision',
       'build_generation',
-      'pointer_revision',
-      'active_release_epoch',
-      'credential_bindings_revision',
-      'capabilities',
-      'service_health',
       'active_operation',
     ]) {
       expect(runnerSource.includes(fact)).toBe(true);
     }
     expect(runnerSource.includes('ipcBridge.miniapps.publish')).toBe(false);
-    expect(runnerSource.includes('ipcBridge.miniapps.build')).toBe(false);
+    expect(runnerSource.includes('ipcBridge.miniapps.build.invoke(')).toBe(true);
+    expect(
+      runnerSource.includes('ipcBridge.miniapps.cancelBuild.invoke({')
+    ).toBe(true);
     expect(runnerSource.includes('ipcBridge.miniapps.delete')).toBe(false);
   });
 

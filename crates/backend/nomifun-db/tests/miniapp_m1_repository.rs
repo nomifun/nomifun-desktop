@@ -1,9 +1,15 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
+use nomifun_agent_contracts::MINIAPP_RELEASE_PROFILE_VERSION;
 use nomifun_db::{
-    CommitMiniAppM1PointerStateParams, CreateMiniAppM1Params, IMiniAppM1Repository,
-    MiniAppM1Kind, MiniAppM1ProjectSourceState, MiniAppM1Snapshot, MiniAppReleaseArtifactRow,
-    MiniAppReleaseRow, RecordMiniAppM1ReadyReleaseParams, SqliteMiniAppM1Repository,
+    CancelMiniAppM1BuildOperationParams, CommitMiniAppM1PointerStateParams,
+    CreateMiniAppM1Params, CreateMiniAppM1WithSourceParams,
+    FinishMiniAppM1BuildAndRecordReadyParams, FinishMiniAppM1BuildOperationParams,
+    IMiniAppM1Repository, MiniAppM1Kind, MiniAppM1ManagedSourceLineage,
+    MiniAppM1ProjectSourceState, MiniAppM1Snapshot, MiniAppReleaseArtifactRow,
+    MiniAppReleaseRow, ProductOperationState, SqliteMiniAppM1Repository,
+    StartMiniAppM1BuildOperationParams,
     UpdateMiniAppM1ProjectSourceParams, installation_owner_id,
 };
 use serde_json::json;
@@ -73,6 +79,70 @@ async fn insert_other_owner(pool: &nomifun_db::SqlitePool) -> String {
     owner
 }
 
+fn managed_source(
+    path: &str,
+    source_digest_char: char,
+    lock_digest_char: char,
+    build_generation: i64,
+) -> MiniAppM1ManagedSourceLineage {
+    MiniAppM1ManagedSourceLineage {
+        managed_source_path: path.to_owned(),
+        source_head_digest: source_digest_char.to_string().repeat(64),
+        dependency_lock_digest: lock_digest_char.to_string().repeat(64),
+        build_profile_version: MINIAPP_RELEASE_PROFILE_VERSION.to_owned(),
+        build_generation,
+    }
+}
+
+fn create_params(
+    owner: &str,
+    miniapp_id: &str,
+    project_id: &str,
+    expected_library_revision: i64,
+    kind: MiniAppM1Kind,
+    created_at: i64,
+) -> CreateMiniAppM1Params {
+    CreateMiniAppM1Params {
+        owner_user_id: owner.to_owned(),
+        miniapp_id: miniapp_id.to_owned(),
+        project_id: project_id.to_owned(),
+        expected_library_revision,
+        display_name: format!("MiniApp {miniapp_id}"),
+        description: None,
+        icon_asset_id: None,
+        kind,
+        materialized_catalog_digest: "a".repeat(64),
+        config_schema_json: r#"{"type":"object"}"#.to_owned(),
+        config_json: "{}".to_owned(),
+        created_at,
+    }
+}
+
+async fn start_build(
+    repository: &SqliteMiniAppM1Repository,
+    owner: &str,
+    miniapp_id: &str,
+    project_id: &str,
+    project_revision: i64,
+    source: &MiniAppM1ManagedSourceLineage,
+    operation_id: &str,
+    started_at_ms: i64,
+) -> nomifun_db::ProductOperationRow {
+    repository
+        .start_build_operation(&StartMiniAppM1BuildOperationParams {
+            owner_user_id: owner.to_owned(),
+            miniapp_id: miniapp_id.to_owned(),
+            project_id: project_id.to_owned(),
+            operation_id: operation_id.to_owned(),
+            expected_project_revision: project_revision,
+            expected_source: source.clone(),
+            bounded_log_tail: vec!["build started".to_owned()],
+            started_at_ms,
+        })
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
 async fn owner_scoped_library_create_and_project_source_cas_are_exact() {
     let database = init_miniapp_test_database().await;
@@ -114,7 +184,7 @@ async fn owner_scoped_library_create_and_project_source_cas_are_exact() {
             managed_source_path: Some("sources/owner/projects/project/source".into()),
             source_head_digest: Some("b".repeat(64)),
             dependency_lock_digest: Some("c".repeat(64)),
-            build_profile_version: Some("miniapp-release-v1".into()),
+            build_profile_version: Some(MINIAPP_RELEASE_PROFILE_VERSION.into()),
             build_generation: 1,
             updated_at: 20,
         })
@@ -133,7 +203,7 @@ async fn owner_scoped_library_create_and_project_source_cas_are_exact() {
             managed_source_path: Some("sources/owner/projects/project/source".into()),
             source_head_digest: Some("d".repeat(64)),
             dependency_lock_digest: Some("e".repeat(64)),
-            build_profile_version: Some("miniapp-release-v1".into()),
+            build_profile_version: Some(MINIAPP_RELEASE_PROFILE_VERSION.into()),
             build_generation: 2,
             updated_at: 21,
         })
@@ -210,7 +280,7 @@ fn release(
         project_id: Some(project_id.to_owned()),
         source_snapshot_digest: Some(source_digest.to_owned()),
         dependency_lock_digest: Some(lock_digest.to_owned()),
-        build_profile_version: Some("miniapp-release-v1".to_owned()),
+        build_profile_version: Some(MINIAPP_RELEASE_PROFILE_VERSION.to_owned()),
         build_generation: Some(1),
         release_record_json: json!({
             "release_id": release_id,
@@ -221,66 +291,24 @@ fn release(
     }
 }
 
-async fn insert_successful_build_operation(
-    pool: &nomifun_db::SqlitePool,
-    operation_id: &str,
-    miniapp_id: &str,
-    started_at: i64,
-) {
-    sqlx::query(
-        "INSERT INTO product_operations (
-            operation_id, kind, owner_kind, owner_id, state,
-            progress_percent, bounded_log_tail_json,
-            started_at_ms, finished_at_ms
-         ) VALUES (?, 'build', 'miniapp', ?, 'succeeded', 100, '[]', ?, ?)",
-    )
-    .bind(operation_id)
-    .bind(miniapp_id)
-    .bind(started_at)
-    .bind(started_at + 1)
-    .execute(pool)
-    .await
-    .unwrap();
-}
-
 async fn create_editable_app(
     repository: &SqliteMiniAppM1Repository,
     owner: &str,
 ) -> MiniAppM1Snapshot {
-    let created = repository
-        .create(&CreateMiniAppM1Params {
-            owner_user_id: owner.to_owned(),
-            miniapp_id: MINIAPP_ID.to_owned(),
-            project_id: PROJECT_ID.to_owned(),
-            expected_library_revision: 0,
-            display_name: "Release test app".to_owned(),
-            description: None,
-            icon_asset_id: None,
-            kind: MiniAppM1Kind::UiOnly,
-            materialized_catalog_digest: "a".repeat(64),
-            config_schema_json: r#"{"type":"object"}"#.to_owned(),
-            config_json: "{}".to_owned(),
-            created_at: 10,
-        })
-        .await
-        .unwrap();
     repository
-        .update_project_source_cas(&UpdateMiniAppM1ProjectSourceParams {
-            owner_user_id: owner.to_owned(),
-            miniapp_id: MINIAPP_ID.to_owned(),
-            project_id: PROJECT_ID.to_owned(),
-            expected_project_revision: 1,
-            source_state: MiniAppM1ProjectSourceState::Editable,
-            managed_source_path: Some("sources/owner/project/source".into()),
-            source_head_digest: Some("b".repeat(64)),
-            dependency_lock_digest: Some("c".repeat(64)),
-            build_profile_version: Some("miniapp-release-v1".into()),
-            build_generation: 1,
-            updated_at: 20,
+        .create_with_source(&CreateMiniAppM1WithSourceParams {
+            create: create_params(
+                owner,
+                MINIAPP_ID,
+                PROJECT_ID,
+                0,
+                MiniAppM1Kind::UiOnly,
+                10,
+            ),
+            source: managed_source("sources/owner/project/source", 'b', 'c', 1),
         })
         .await
-        .unwrap();
-    created
+        .unwrap()
 }
 
 #[tokio::test]
@@ -288,12 +316,27 @@ async fn ready_release_and_pointer_cas_bind_exact_lineage_and_owner() {
     let database = init_miniapp_test_database().await;
     let owner = installation_owner_id(database.pool()).await.unwrap();
     let repository = SqliteMiniAppM1Repository::new(database.pool().clone());
-    let _created = create_editable_app(&repository, &owner).await;
+    let created = create_editable_app(&repository, &owner).await;
+    let source = managed_source("sources/owner/project/source", 'b', 'c', 1);
+    assert_eq!(
+        created.project.build_profile_version.as_deref(),
+        Some(MINIAPP_RELEASE_PROFILE_VERSION)
+    );
 
     let op_one = Uuid::now_v7().to_string();
     let artifact_one_id = Uuid::now_v7().to_string();
     let release_one_id = Uuid::now_v7().to_string();
-    insert_successful_build_operation(database.pool(), &op_one, MINIAPP_ID, 30).await;
+    start_build(
+        &repository,
+        &owner,
+        MINIAPP_ID,
+        PROJECT_ID,
+        1,
+        &source,
+        &op_one,
+        30,
+    )
+    .await;
     let artifact_one = artifact(
         &owner,
         &artifact_one_id,
@@ -307,24 +350,26 @@ async fn ready_release_and_pointer_cas_bind_exact_lineage_and_owner() {
         PROJECT_ID,
         &artifact_one,
         &release_one_id,
-        &"f".repeat(64),
+        &"d".repeat(64),
         &op_one,
         &"b".repeat(64),
         &"c".repeat(64),
         32,
     );
     let ready_one = repository
-        .record_ready_release(&RecordMiniAppM1ReadyReleaseParams {
+        .finish_build_and_record_ready(&FinishMiniAppM1BuildAndRecordReadyParams {
             owner_user_id: owner.clone(),
             miniapp_id: MINIAPP_ID.to_owned(),
             project_id: PROJECT_ID.to_owned(),
+            operation_id: op_one.clone(),
             expected_product_revision: 1,
             expected_pointer_revision: 1,
-            expected_project_revision: 2,
+            expected_project_revision: 1,
             expected_build_generation: 1,
             artifact: artifact_one.clone(),
             release: release_one.clone(),
-            updated_at: 33,
+            bounded_log_tail: vec!["build started".into(), "build succeeded".into()],
+            finished_at_ms: 33,
         })
         .await
         .unwrap();
@@ -332,12 +377,29 @@ async fn ready_release_and_pointer_cas_bind_exact_lineage_and_owner() {
         ready_one.product.ready_release_id.as_deref(),
         Some(release_one_id.as_str())
     );
-    assert_eq!(ready_one.library_revision, 3);
+    assert_eq!(ready_one.library_revision, 2);
+    let succeeded = repository
+        .get_build_operation(&owner, MINIAPP_ID, &op_one)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(succeeded.state, "succeeded");
+    assert_eq!(succeeded.progress_percent, Some(100));
 
     let op_two = Uuid::now_v7().to_string();
     let artifact_two_id = Uuid::now_v7().to_string();
     let release_two_id = Uuid::now_v7().to_string();
-    insert_successful_build_operation(database.pool(), &op_two, MINIAPP_ID, 40).await;
+    start_build(
+        &repository,
+        &owner,
+        MINIAPP_ID,
+        PROJECT_ID,
+        1,
+        &source,
+        &op_two,
+        40,
+    )
+    .await;
     let artifact_two = artifact(
         &owner,
         &artifact_two_id,
@@ -351,24 +413,26 @@ async fn ready_release_and_pointer_cas_bind_exact_lineage_and_owner() {
         PROJECT_ID,
         &artifact_two,
         &release_two_id,
-        &"3".repeat(64),
+        &"1".repeat(64),
         &op_two,
         &"b".repeat(64),
         &"c".repeat(64),
         42,
     );
     let ready_two = repository
-        .record_ready_release(&RecordMiniAppM1ReadyReleaseParams {
+        .finish_build_and_record_ready(&FinishMiniAppM1BuildAndRecordReadyParams {
             owner_user_id: owner.clone(),
             miniapp_id: MINIAPP_ID.to_owned(),
             project_id: PROJECT_ID.to_owned(),
+            operation_id: op_two,
             expected_product_revision: 2,
             expected_pointer_revision: 2,
-            expected_project_revision: 2,
+            expected_project_revision: 1,
             expected_build_generation: 1,
             artifact: artifact_two,
             release: release_two,
-            updated_at: 43,
+            bounded_log_tail: vec!["build started".into(), "build succeeded".into()],
+            finished_at_ms: 43,
         })
         .await
         .unwrap();
@@ -381,9 +445,9 @@ async fn ready_release_and_pointer_cas_bind_exact_lineage_and_owner() {
             expected_pointer_revision: 3,
             expected_active_release_epoch: 0,
             ready_release_id: Some(release_two_id.clone()),
-            ready_release_digest: Some("3".repeat(64)),
+            ready_release_digest: Some("1".repeat(64)),
             active_release_id: Some(release_one_id.clone()),
-            active_release_digest: Some("f".repeat(64)),
+            active_release_digest: Some("d".repeat(64)),
             previous_release_id: None,
             previous_release_digest: None,
             active_release_epoch: 1,
@@ -418,6 +482,335 @@ async fn ready_release_and_pointer_cas_bind_exact_lineage_and_owner() {
         .await
         .unwrap_err();
     assert!(stale.to_string().contains("CAS"));
+}
+
+#[tokio::test]
+async fn build_failure_cancel_and_owner_isolation_keep_release_pointers_unchanged() {
+    let database = init_miniapp_test_database().await;
+    let owner = installation_owner_id(database.pool()).await.unwrap();
+    let other_owner = insert_other_owner(database.pool()).await;
+    let repository = SqliteMiniAppM1Repository::new(database.pool().clone());
+    create_editable_app(&repository, &owner).await;
+    let source = managed_source("sources/owner/project/source", 'b', 'c', 1);
+
+    let failed_operation_id = Uuid::now_v7().to_string();
+    start_build(
+        &repository,
+        &owner,
+        MINIAPP_ID,
+        PROJECT_ID,
+        1,
+        &source,
+        &failed_operation_id,
+        20,
+    )
+    .await;
+    let failed = repository
+        .finish_build_operation(&FinishMiniAppM1BuildOperationParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            operation_id: failed_operation_id.clone(),
+            state: ProductOperationState::Failed,
+            progress_percent: 40,
+            last_error_code: Some("miniapp_build_failed".to_owned()),
+            bounded_log_tail: vec!["build failed".to_owned()],
+            finished_at_ms: 21,
+        })
+        .await
+        .unwrap();
+    assert_eq!(failed.state, "failed");
+    assert_eq!(failed.last_error_code.as_deref(), Some("miniapp_build_failed"));
+    let late_finish = repository
+        .cancel_build_operation(&CancelMiniAppM1BuildOperationParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            operation_id: failed_operation_id,
+            bounded_log_tail: vec![],
+            finished_at_ms: 22,
+        })
+        .await
+        .unwrap_err();
+    assert!(late_finish.to_string().contains("terminal"));
+
+    let canceled_operation_id = Uuid::now_v7().to_string();
+    start_build(
+        &repository,
+        &owner,
+        MINIAPP_ID,
+        PROJECT_ID,
+        1,
+        &source,
+        &canceled_operation_id,
+        30,
+    )
+    .await;
+    assert!(repository
+        .get_build_operation(&other_owner, MINIAPP_ID, &canceled_operation_id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(repository
+        .list_build_operations(&other_owner, MINIAPP_ID)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(repository
+        .cancel_build_operation(&CancelMiniAppM1BuildOperationParams {
+            owner_user_id: other_owner,
+            miniapp_id: MINIAPP_ID.to_owned(),
+            operation_id: canceled_operation_id.clone(),
+            bounded_log_tail: vec!["foreign cancel".to_owned()],
+            finished_at_ms: 31,
+        })
+        .await
+        .is_err());
+    assert_eq!(
+        repository
+            .get_build_operation(&owner, MINIAPP_ID, &canceled_operation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        "running"
+    );
+
+    let canceled = repository
+        .cancel_build_operation(&CancelMiniAppM1BuildOperationParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            operation_id: canceled_operation_id.clone(),
+            bounded_log_tail: vec!["build canceled".to_owned()],
+            finished_at_ms: 32,
+        })
+        .await
+        .unwrap();
+    assert_eq!(canceled.state, "canceled");
+    let late_failure = repository
+        .finish_build_operation(&FinishMiniAppM1BuildOperationParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            operation_id: canceled_operation_id,
+            state: ProductOperationState::Failed,
+            progress_percent: 0,
+            last_error_code: Some("late_failure".to_owned()),
+            bounded_log_tail: vec![],
+            finished_at_ms: 33,
+        })
+        .await
+        .unwrap_err();
+    assert!(late_failure.to_string().contains("terminal"));
+
+    let snapshot = repository.get(&owner, MINIAPP_ID).await.unwrap().unwrap();
+    assert_eq!(snapshot.product.product_revision, 1);
+    assert_eq!(snapshot.product.pointer_revision, 1);
+    assert_eq!(snapshot.library_revision, 1);
+    assert!(snapshot.ready_release.is_none());
+    assert!(snapshot.active_release.is_none());
+    assert!(snapshot.previous_release.is_none());
+    let operations = repository
+        .list_build_operations(&owner, MINIAPP_ID)
+        .await
+        .unwrap();
+    assert_eq!(operations.len(), 2);
+    assert_eq!(operations[0].state, "canceled");
+    assert_eq!(operations[1].state, "failed");
+}
+
+#[tokio::test]
+async fn concurrent_build_start_is_single_flight_per_miniapp() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = nomifun_db::init_database(&directory.path().join("miniapp-build-race.db"))
+        .await
+        .unwrap();
+    let owner = installation_owner_id(database.pool()).await.unwrap();
+    let repository = SqliteMiniAppM1Repository::new(database.pool().clone());
+    let source = managed_source("sources/owner/project/source", 'b', 'c', 1);
+    repository
+        .create_with_source(&CreateMiniAppM1WithSourceParams {
+            create: create_params(
+                &owner,
+                MINIAPP_ID,
+                PROJECT_ID,
+                0,
+                MiniAppM1Kind::UiOnly,
+                10,
+            ),
+            source: source.clone(),
+        })
+        .await
+        .unwrap();
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(3));
+    let first_id = Uuid::now_v7().to_string();
+    let second_id = Uuid::now_v7().to_string();
+    let first = {
+        let barrier = Arc::clone(&barrier);
+        let repository = repository.clone();
+        let owner = owner.clone();
+        let source = source.clone();
+        let operation_id = first_id.clone();
+        tokio::spawn(async move {
+            barrier.wait().await;
+            repository
+                .start_build_operation(&StartMiniAppM1BuildOperationParams {
+                    owner_user_id: owner,
+                    miniapp_id: MINIAPP_ID.to_owned(),
+                    project_id: PROJECT_ID.to_owned(),
+                    operation_id,
+                    expected_project_revision: 1,
+                    expected_source: source,
+                    bounded_log_tail: vec![],
+                    started_at_ms: 20,
+                })
+                .await
+        })
+    };
+    let second = {
+        let barrier = Arc::clone(&barrier);
+        let repository = repository.clone();
+        let owner = owner.clone();
+        let source = source.clone();
+        let operation_id = second_id.clone();
+        tokio::spawn(async move {
+            barrier.wait().await;
+            repository
+                .start_build_operation(&StartMiniAppM1BuildOperationParams {
+                    owner_user_id: owner,
+                    miniapp_id: MINIAPP_ID.to_owned(),
+                    project_id: PROJECT_ID.to_owned(),
+                    operation_id,
+                    expected_project_revision: 1,
+                    expected_source: source,
+                    bounded_log_tail: vec![],
+                    started_at_ms: 20,
+                })
+                .await
+        })
+    };
+    barrier.wait().await;
+    let first = first.await.unwrap();
+    let second = second.await.unwrap();
+    let winner = match (first, second) {
+        (Ok(operation), Err(error)) | (Err(error), Ok(operation)) => {
+            assert!(error.to_string().contains("running Build"));
+            operation
+        }
+        (first, second) => panic!("expected one Build winner, got {first:?} and {second:?}"),
+    };
+    assert_eq!(winner.owner_kind, "miniapp");
+    assert_eq!(winner.kind, "build");
+    assert_eq!(winner.state, "running");
+    assert_eq!(
+        repository
+            .list_build_operations(&owner, MINIAPP_ID)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let canceled = repository
+        .cancel_build_operation(&CancelMiniAppM1BuildOperationParams {
+            owner_user_id: owner,
+            miniapp_id: MINIAPP_ID.to_owned(),
+            operation_id: winner.operation_id,
+            bounded_log_tail: vec!["cleanup".to_owned()],
+            finished_at_ms: 21,
+        })
+        .await
+        .unwrap();
+    assert_eq!(canceled.state, "canceled");
+}
+
+#[tokio::test]
+async fn atomic_build_ready_timestamp_cas_rolls_back_all_writes() {
+    let database = init_miniapp_test_database().await;
+    let owner = installation_owner_id(database.pool()).await.unwrap();
+    let repository = SqliteMiniAppM1Repository::new(database.pool().clone());
+    create_editable_app(&repository, &owner).await;
+    let source = managed_source("sources/owner/project/source", 'b', 'c', 1);
+    let operation_id = Uuid::now_v7().to_string();
+    start_build(
+        &repository,
+        &owner,
+        MINIAPP_ID,
+        PROJECT_ID,
+        1,
+        &source,
+        &operation_id,
+        20,
+    )
+    .await;
+
+    sqlx::query(
+        "UPDATE miniapp_library_state
+         SET updated_at = 1000
+         WHERE owner_user_id = ?",
+    )
+    .bind(&owner)
+    .execute(database.pool())
+    .await
+    .unwrap();
+    let artifact = artifact(
+        &owner,
+        &Uuid::now_v7().to_string(),
+        &"d".repeat(64),
+        &"e".repeat(64),
+        21,
+    );
+    let release = release(
+        &owner,
+        MINIAPP_ID,
+        PROJECT_ID,
+        &artifact,
+        &Uuid::now_v7().to_string(),
+        &"d".repeat(64),
+        &operation_id,
+        &source.source_head_digest,
+        &source.dependency_lock_digest,
+        22,
+    );
+    let error = repository
+        .finish_build_and_record_ready(&FinishMiniAppM1BuildAndRecordReadyParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            project_id: PROJECT_ID.to_owned(),
+            operation_id: operation_id.clone(),
+            expected_product_revision: 1,
+            expected_pointer_revision: 1,
+            expected_project_revision: 1,
+            expected_build_generation: 1,
+            artifact,
+            release,
+            bounded_log_tail: vec!["ready commit".to_owned()],
+            finished_at_ms: 30,
+        })
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("library state"));
+
+    let operation = repository
+        .get_build_operation(&owner, MINIAPP_ID, &operation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(operation.state, "running");
+    assert!(operation.finished_at_ms.is_none());
+    let snapshot = repository.get(&owner, MINIAPP_ID).await.unwrap().unwrap();
+    assert_eq!(snapshot.product.product_revision, 1);
+    assert_eq!(snapshot.product.pointer_revision, 1);
+    assert!(snapshot.ready_release.is_none());
+    assert_eq!(snapshot.library_revision, 1);
+    let artifact_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM miniapp_release_artifacts")
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+    let release_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM miniapp_releases")
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+    assert_eq!(artifact_count, 0);
+    assert_eq!(release_count, 0);
 }
 
 #[tokio::test]

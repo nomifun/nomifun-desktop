@@ -151,6 +151,7 @@ pub struct MiniAppReleaseTestDto {
 pub struct MiniAppReadyReleaseDto {
     pub release: MiniAppReleaseRefDto,
     pub project_build_generation: u64,
+    pub created_at_ms: i64,
     pub kind: MiniAppKindDto,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service: Option<MiniAppServiceDescriptorDto>,
@@ -218,6 +219,12 @@ pub struct BuildMiniAppRequest {
     pub expected_build_generation: u64,
     pub expected_source_snapshot_digest: String,
     pub expected_dependency_lock_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CancelMiniAppBuildRequest {
+    pub expected_operation_revision: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
