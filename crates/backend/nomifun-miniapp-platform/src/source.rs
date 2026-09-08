@@ -32,6 +32,12 @@ const MAX_NORMALIZED_PATH_BYTES: usize = 1024;
 const MAX_PATH_COMPONENT_BYTES: usize = 255;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MiniAppSourceContentKind {
+    UiOnly,
+    Service,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MiniAppSourceStoreLimits {
     pub max_file_count: usize,
     pub max_single_file_bytes: u64,
@@ -274,6 +280,16 @@ impl MiniAppSourceSnapshot {
             .find(|file| file.normalized_relative_path == path)
             .map(|file| file.bytes.as_slice())
     }
+
+    pub fn content_kind(&self) -> MiniAppSourceContentKind {
+        source_content_kind(self.files.iter().map(|file| {
+            file.normalized_relative_path.as_str()
+        }))
+    }
+
+    pub fn service_main_mjs(&self) -> Option<&[u8]> {
+        self.file("service/main.mjs")
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -327,6 +343,40 @@ impl MiniAppSourceStore {
         project_id: impl AsRef<str>,
         display_name: impl Into<String>,
     ) -> Result<MiniAppSourceProject, MiniAppSourceStoreError> {
+        self.create_project_with_service(
+            owner,
+            miniapp_id,
+            project_id,
+            display_name,
+            None,
+        )
+    }
+
+    pub fn create_service_project(
+        &self,
+        owner: impl AsRef<str>,
+        miniapp_id: impl AsRef<str>,
+        project_id: impl AsRef<str>,
+        display_name: impl Into<String>,
+        service_main_mjs: impl Into<Vec<u8>>,
+    ) -> Result<MiniAppSourceProject, MiniAppSourceStoreError> {
+        self.create_project_with_service(
+            owner,
+            miniapp_id,
+            project_id,
+            display_name,
+            Some(service_main_mjs.into()),
+        )
+    }
+
+    fn create_project_with_service(
+        &self,
+        owner: impl AsRef<str>,
+        miniapp_id: impl AsRef<str>,
+        project_id: impl AsRef<str>,
+        display_name: impl Into<String>,
+        service_main_mjs: Option<Vec<u8>>,
+    ) -> Result<MiniAppSourceProject, MiniAppSourceStoreError> {
         let scope = MiniAppSourceScope::new(owner, miniapp_id, project_id)?;
         let display_name = validate_display_name(display_name.into())?;
         let _guard = self.lock_mutation()?;
@@ -365,11 +415,20 @@ impl MiniAppSourceStore {
             &lock_bytes,
         )?;
 
-        let files = vec![MiniAppSourceFileInput::new(
+        let mut files = vec![MiniAppSourceFileInput::new(
             "ui/index.html",
             default_index_html(&project_record.display_name),
         )];
-        let prepared = prepare_source_files(files, self.limits)?;
+        let content_kind = if let Some(service_main_mjs) = service_main_mjs {
+            files.push(MiniAppSourceFileInput::new(
+                "service/main.mjs",
+                service_main_mjs,
+            ));
+            MiniAppSourceContentKind::Service
+        } else {
+            MiniAppSourceContentKind::UiOnly
+        };
+        let prepared = prepare_source_files(files, content_kind, self.limits)?;
         let snapshot = snapshot_record(&prepared)?;
         let revision_root = staged_source_root
             .join(REVISIONS_DIRECTORY)
@@ -458,9 +517,46 @@ impl MiniAppSourceStore {
         expected_digest: impl AsRef<str>,
         files: Vec<MiniAppSourceFileInput>,
     ) -> Result<MiniAppSourceProject, MiniAppSourceStoreError> {
+        self.replace_source_with_kind(
+            owner,
+            miniapp_id,
+            project_id,
+            expected_digest,
+            files,
+            MiniAppSourceContentKind::UiOnly,
+        )
+    }
+
+    pub fn replace_service_source(
+        &self,
+        owner: impl AsRef<str>,
+        miniapp_id: impl AsRef<str>,
+        project_id: impl AsRef<str>,
+        expected_digest: impl AsRef<str>,
+        files: Vec<MiniAppSourceFileInput>,
+    ) -> Result<MiniAppSourceProject, MiniAppSourceStoreError> {
+        self.replace_source_with_kind(
+            owner,
+            miniapp_id,
+            project_id,
+            expected_digest,
+            files,
+            MiniAppSourceContentKind::Service,
+        )
+    }
+
+    fn replace_source_with_kind(
+        &self,
+        owner: impl AsRef<str>,
+        miniapp_id: impl AsRef<str>,
+        project_id: impl AsRef<str>,
+        expected_digest: impl AsRef<str>,
+        files: Vec<MiniAppSourceFileInput>,
+        content_kind: MiniAppSourceContentKind,
+    ) -> Result<MiniAppSourceProject, MiniAppSourceStoreError> {
         let scope = MiniAppSourceScope::new(owner, miniapp_id, project_id)?;
         let expected_digest = validate_digest_value(expected_digest.as_ref())?;
-        let prepared = prepare_source_files(files, self.limits)?;
+        let prepared = prepare_source_files(files, content_kind, self.limits)?;
         let next_snapshot = snapshot_record(&prepared)?;
         let _guard = self.lock_mutation()?;
         let current = self.read_snapshot_unlocked(&scope)?;
@@ -871,6 +967,7 @@ impl SnapshotRecord {
 
 fn prepare_source_files(
     files: Vec<MiniAppSourceFileInput>,
+    content_kind: MiniAppSourceContentKind,
     limits: MiniAppSourceStoreLimits,
 ) -> Result<Vec<MiniAppSourceFile>, MiniAppSourceStoreError> {
     if files.len() > limits.max_file_count {
@@ -883,7 +980,7 @@ fn prepare_source_files(
     let mut by_path = BTreeMap::new();
     let mut total_size = 0u64;
     for input in files {
-        validate_ui_source_path(&input.normalized_relative_path)?;
+        validate_source_path(&input.normalized_relative_path, content_kind)?;
         let collision_key = windows_collision_key(&input.normalized_relative_path)?;
         if !collision_keys.insert(collision_key) {
             return Err(MiniAppSourceStoreError::PathCollision {
@@ -928,11 +1025,7 @@ fn prepare_source_files(
             });
         }
     }
-    if !by_path.contains_key("ui/index.html") {
-        return Err(MiniAppSourceStoreError::InvalidRecord(
-            "UI-only MiniApp Source requires ui/index.html".into(),
-        ));
-    }
+    validate_required_source_entrypoints(by_path.keys().map(String::as_str), content_kind)?;
     Ok(by_path.into_values().collect())
 }
 
@@ -951,7 +1044,7 @@ fn build_snapshot_record(
     });
     let mut collisions = BTreeSet::new();
     for file in &files {
-        validate_ui_source_path(&file.normalized_relative_path)?;
+        validate_stored_source_path(&file.normalized_relative_path)?;
         validate_digest_value(file.digest.as_ref())?;
         if file.size_bytes == 0 {
             return Err(MiniAppSourceStoreError::EmptyFile {
@@ -964,14 +1057,17 @@ fn build_snapshot_record(
             });
         }
     }
-    if !files
-        .iter()
-        .any(|file| file.normalized_relative_path == "ui/index.html")
-    {
-        return Err(MiniAppSourceStoreError::InvalidRecord(
-            "UI-only MiniApp Source requires ui/index.html".into(),
-        ));
-    }
+    let content_kind = source_content_kind(
+        files
+            .iter()
+            .map(|file| file.normalized_relative_path.as_str()),
+    );
+    validate_required_source_entrypoints(
+        files
+            .iter()
+            .map(|file| file.normalized_relative_path.as_str()),
+        content_kind,
+    )?;
     let payload = SnapshotPayload {
         format_version: MINIAPP_SOURCE_STORE_FORMAT_VERSION,
         files: &files,
@@ -1097,7 +1193,7 @@ fn collect_source_files(
         if normalized == SNAPSHOT_FILE {
             continue;
         }
-        validate_ui_source_path(&normalized)?;
+        validate_stored_source_path(&normalized)?;
         if metadata.len() == 0 {
             return Err(MiniAppSourceStoreError::EmptyFile { path: normalized });
         }
@@ -1147,20 +1243,83 @@ fn collect_source_files(
     Ok(())
 }
 
-fn validate_ui_source_path(path: &str) -> Result<(), MiniAppSourceStoreError> {
+fn validate_source_path(
+    path: &str,
+    content_kind: MiniAppSourceContentKind,
+) -> Result<(), MiniAppSourceStoreError> {
     validate_relative_path(path)?;
-    if path == "service/main.mjs" || path.starts_with("service/") {
+    if content_kind == MiniAppSourceContentKind::UiOnly
+        && (path == "service/main.mjs" || path.starts_with("service/"))
+    {
         return Err(MiniAppSourceStoreError::ServiceSourceForbidden {
             path: path.to_owned(),
         });
     }
-    if path == "ui/index.html" || path.starts_with("ui/") {
+    if path == "ui/index.html"
+        || path.starts_with("ui/")
+        || (content_kind == MiniAppSourceContentKind::Service
+            && path == "service/main.mjs")
+    {
         Ok(())
     } else {
         Err(MiniAppSourceStoreError::InvalidPath {
             path: path.to_owned(),
-            reason: "UI-only MiniApp Source permits ui/index.html and ui/** only".into(),
+            reason: match content_kind {
+                MiniAppSourceContentKind::UiOnly => {
+                    "UI-only MiniApp Source permits ui/index.html and ui/** only"
+                }
+                MiniAppSourceContentKind::Service => {
+                    "Service MiniApp Source permits ui/index.html, ui/**, and service/main.mjs only"
+                }
+            }
+            .into(),
         })
+    }
+}
+
+fn validate_stored_source_path(path: &str) -> Result<(), MiniAppSourceStoreError> {
+    validate_relative_path(path)?;
+    if path == "ui/index.html" || path.starts_with("ui/") || path == "service/main.mjs" {
+        Ok(())
+    } else {
+        Err(MiniAppSourceStoreError::InvalidPath {
+            path: path.to_owned(),
+            reason: "MiniApp Source permits ui/index.html, ui/**, and optional service/main.mjs only"
+                .into(),
+        })
+    }
+}
+
+fn validate_required_source_entrypoints<'a>(
+    paths: impl IntoIterator<Item = &'a str>,
+    content_kind: MiniAppSourceContentKind,
+) -> Result<(), MiniAppSourceStoreError> {
+    let paths = paths.into_iter().collect::<BTreeSet<_>>();
+    if !paths.contains("ui/index.html") {
+        return Err(MiniAppSourceStoreError::InvalidRecord(
+            "MiniApp Source requires ui/index.html".into(),
+        ));
+    }
+    if content_kind == MiniAppSourceContentKind::Service
+        && !paths.contains("service/main.mjs")
+    {
+        return Err(MiniAppSourceStoreError::InvalidRecord(
+            "Service MiniApp Source requires service/main.mjs".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn source_content_kind<'a>(
+    paths: impl IntoIterator<Item = &'a str>,
+) -> MiniAppSourceContentKind {
+    if paths
+        .into_iter()
+        .any(|path| path == "service/main.mjs")
+    {
+        MiniAppSourceContentKind::Service
+    } else {
+        MiniAppSourceContentKind::UiOnly
     }
 }
 
