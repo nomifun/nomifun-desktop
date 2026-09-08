@@ -47,6 +47,7 @@ use crate::{
 const SERVICE_HOST_ROLE: &str = "miniapp_service";
 const SERVICE_PROTOCOL_VERSION: &str = MINIAPP_SERVICE_HOST_PROTOCOL_VERSION;
 const SERVICE_HOST_SCRIPT: &str = r#"
+import { AsyncLocalStorage } from "node:async_hooks";
 import readline from "node:readline";
 import { pathToFileURL } from "node:url";
 
@@ -70,8 +71,10 @@ const protocolVersion = bootstrap.protocol_version;
 const activeRequests = new Map();
 const storageRequests = new Map();
 let storageRequestSequence = 0;
+const invocationContext = new AsyncLocalStorage();
 let shuttingDown = false;
 let writeChain = Promise.resolve();
+let service = null;
 
 function writeFrame(frame) {
   const line = `${JSON.stringify(frame)}\n`;
@@ -133,19 +136,35 @@ function storageError(code, message) {
 
 function requestStorage(operation, payload) {
   const requestId = `${generation}-storage-${++storageRequestSequence}`;
+  const context = invocationContext.getStore();
+  const parentRequestId = context?.requestId;
+  const signal = context?.signal;
   return new Promise((resolve, reject) => {
-    storageRequests.set(requestId, { resolve, reject });
+    const abort = () => {
+      const pending = storageRequests.get(requestId);
+      if (!pending) return;
+      storageRequests.delete(requestId);
+      pending.reject(storageError("storage_call_canceled", "Service call was canceled"));
+    };
+    if (signal?.aborted) {
+      abort();
+      return;
+    }
+    signal?.addEventListener("abort", abort, { once: true });
+    storageRequests.set(requestId, { resolve, reject, signal, abort });
     void writeFrame({
       kind: "storage_request",
       protocol_version: protocolVersion,
       host_generation: generation,
       request_id: requestId,
+      parent_request_id: parentRequestId,
       operation,
       payload,
     }).catch((error) => {
       const pending = storageRequests.get(requestId);
       if (!pending) return;
       storageRequests.delete(requestId);
+      pending.signal?.removeEventListener("abort", pending.abort);
       pending.reject(storageError("storage_ipc_failed", error));
     });
   });
@@ -155,6 +174,7 @@ function resolveStorageResponse(frame) {
   const pending = storageRequests.get(frame.request_id);
   if (!pending) return;
   storageRequests.delete(frame.request_id);
+  pending.signal?.removeEventListener("abort", pending.abort);
   if (frame.outcome === "success") {
     pending.resolve(frame.value ?? null);
   } else {
@@ -194,6 +214,42 @@ function createStorageContext(storage) {
   });
 }
 
+const lines = readline.createInterface({
+  input: process.stdin,
+  crlfDelay: Infinity,
+  terminal: false,
+});
+
+lines.on("line", (line) => {
+  let frame;
+  try {
+    frame = JSON.parse(line);
+  } catch (error) {
+    throw new Error(`invalid MiniApp Service NDJSON frame: ${String(error)}`);
+  }
+  void dispatch(frame).catch((error) => {
+    const requestId =
+      typeof frame?.request_id === "string"
+        ? frame.request_id
+        : "invalid-request";
+    const callId =
+      typeof frame?.call_id === "string" ? frame.call_id : undefined;
+    void writeFrame(
+      failure(
+        requestId,
+        callId,
+        "service_protocol_error",
+        error?.message ?? String(error),
+        false,
+      ),
+    );
+  });
+});
+
+lines.on("close", () => {
+  if (!shuttingDown) process.exitCode = 72;
+});
+
 const moduleUrl = pathToFileURL(bootstrap.module_path);
 moduleUrl.searchParams.set("service_run_key", bootstrap.service_run_key);
 const imported = await import(moduleUrl.href);
@@ -201,7 +257,7 @@ if (typeof imported.start !== "function") {
   throw new Error("service/main.mjs must export start(context)");
 }
 
-const service = await imported.start(
+service = await imported.start(
   Object.freeze({
     miniappId: bootstrap.miniapp_id,
     release: structuredClone(bootstrap.release),
@@ -273,13 +329,17 @@ async function dispatch(frame) {
   const controller = new AbortController();
   activeRequests.set(frame.request_id, controller);
   try {
-    const value = await service.invoke(
-      Object.freeze({
-        callId: frame.call_id,
-        method: frame.method,
-        payload: structuredClone(frame.payload ?? {}),
-        signal: controller.signal,
-      }),
+    const value = await invocationContext.run(
+      { requestId: frame.request_id, signal: controller.signal },
+      () =>
+        service.invoke(
+          Object.freeze({
+            callId: frame.call_id,
+            method: frame.method,
+            payload: structuredClone(frame.payload ?? {}),
+            signal: controller.signal,
+          }),
+        ),
     );
     await writeFrame(success(frame.request_id, frame.call_id, value));
   } catch (error) {
@@ -298,42 +358,6 @@ async function dispatch(frame) {
     activeRequests.delete(frame.request_id);
   }
 }
-
-const lines = readline.createInterface({
-  input: process.stdin,
-  crlfDelay: Infinity,
-  terminal: false,
-});
-
-lines.on("line", (line) => {
-  let frame;
-  try {
-    frame = JSON.parse(line);
-  } catch (error) {
-    throw new Error(`invalid MiniApp Service NDJSON frame: ${String(error)}`);
-  }
-  void dispatch(frame).catch((error) => {
-    const requestId =
-      typeof frame?.request_id === "string"
-        ? frame.request_id
-        : "invalid-request";
-    const callId =
-      typeof frame?.call_id === "string" ? frame.call_id : undefined;
-    void writeFrame(
-      failure(
-        requestId,
-        callId,
-        "service_protocol_error",
-        error?.message ?? String(error),
-        false,
-      ),
-    );
-  });
-});
-
-lines.on("close", () => {
-  if (!shuttingDown) process.exitCode = 72;
-});
 
 process.on("uncaughtException", (error) => {
   process.stderr.write(`uncaught exception: ${String(error)}\n`);
@@ -736,7 +760,7 @@ impl MiniAppServiceProcessFactory for NodeMiniAppServiceProcessFactory {
                 "MiniApp Service Node process did not expose a process id".into(),
             )
         })?;
-        let stdin = process.stdin.take().ok_or_else(|| {
+        let mut stdin = process.stdin.take().ok_or_else(|| {
             MiniAppPlatformError::Runtime(
                 "MiniApp Service Node stdin was not captured".into(),
             )
@@ -754,7 +778,14 @@ impl MiniAppServiceProcessFactory for NodeMiniAppServiceProcessFactory {
         let mut reader = BufReader::new(stdout);
         let hello = match tokio::time::timeout(
             self.limits.hello_timeout,
-            read_json_line::<ServiceHello>(&mut reader, self.limits.max_frame_bytes),
+            read_service_hello(
+                &mut reader,
+                &mut stdin,
+                &launch.spec,
+                launch.host_generation,
+                self.storage.clone(),
+                &self.limits,
+            ),
         )
         .await
         {
@@ -790,9 +821,11 @@ impl MiniAppServiceProcessFactory for NodeMiniAppServiceProcessFactory {
             stdin,
             reader_events,
             commands,
+            command_sender: command_sender.clone(),
             pending: BTreeMap::new(),
             call_to_request: BTreeMap::new(),
             retired_requests: BTreeMap::new(),
+            storage_pending: BTreeMap::new(),
             reader_task,
             stderr_task,
             fence: fence.clone(),
@@ -897,6 +930,8 @@ struct ServiceStorageRequestFrame {
     protocol_version: String,
     host_generation: u64,
     request_id: String,
+    #[serde(default)]
+    parent_request_id: Option<String>,
     operation: String,
     payload: StrictJsonValue,
 }
@@ -987,13 +1022,23 @@ enum ActorCommand {
     CancelCall {
         call_id: String,
     },
+    StorageCompleted {
+        request_id: String,
+        result: Result<StrictJsonValue, String>,
+    },
     Stop,
 }
 
 struct PendingRequest {
     call_id: Option<String>,
+    cancellation: Option<MiniAppCallCancellation>,
     deadline: Instant,
     reply: PendingReply,
+}
+
+struct PendingStorageRequest {
+    cancellation: MiniAppCallCancellation,
+    deadline: Instant,
 }
 
 enum PendingReply {
@@ -1012,9 +1057,11 @@ struct ServiceProcessActor {
     stdin: ChildStdin,
     reader_events: mpsc::Receiver<ReaderEvent>,
     commands: mpsc::Receiver<ActorCommand>,
+    command_sender: mpsc::Sender<ActorCommand>,
     pending: BTreeMap<String, PendingRequest>,
     call_to_request: BTreeMap<String, String>,
     retired_requests: BTreeMap<String, Instant>,
+    storage_pending: BTreeMap<String, PendingStorageRequest>,
     reader_task: JoinHandle<()>,
     stderr_task: JoinHandle<StderrSummary>,
     fence: MiniAppServiceGenerationFence,
@@ -1113,6 +1160,9 @@ impl ServiceProcessActor {
                     {
                         return ActorExit::Failed("MiniApp Service request watchdog timed out".into());
                     }
+                    if let Some(exit) = self.expire_storage_requests(now).await {
+                        return exit;
+                    }
                 }
             }
         }
@@ -1173,11 +1223,15 @@ impl ServiceProcessActor {
                     request_id,
                     PendingRequest {
                         call_id: Some(call_id),
+                        cancellation: Some(cancellation),
                         deadline: Instant::now() + self.limits.request_timeout,
                         reply: PendingReply::Invoke(reply),
                     },
                 );
                 None
+            }
+            ActorCommand::StorageCompleted { request_id, result } => {
+                self.finish_storage_request(request_id, result).await
             }
             ActorCommand::CancelCall { call_id } => {
                 let Some(request_id) = self.call_to_request.remove(&call_id) else {
@@ -1210,6 +1264,7 @@ impl ServiceProcessActor {
                     cancel_id,
                     PendingRequest {
                         call_id: None,
+                        cancellation: None,
                         deadline: Instant::now() + self.limits.request_timeout,
                         reply: PendingReply::Cancel,
                     },
@@ -1239,6 +1294,7 @@ impl ServiceProcessActor {
                     request_id,
                     PendingRequest {
                         call_id: None,
+                        cancellation: None,
                         deadline: Instant::now() + self.limits.shutdown_timeout,
                         reply: PendingReply::Stop,
                     },
@@ -1345,46 +1401,144 @@ impl ServiceProcessActor {
                 return None;
             }
         };
-        let result = match &self.storage {
-            Some(storage) => {
-                storage
-                    .handle_service_request(
-                        &self.fence.miniapp_id,
-                        &self.storage_descriptor,
-                        request,
-                        MiniAppCallCancellation::default(),
-                    )
-                    .await
+        if self.storage_pending.contains_key(&frame.request_id) {
+            return Some(ActorExit::Failed(
+                "MiniApp Service storage request id was duplicated".into(),
+            ));
+        }
+        if self.storage_pending.len() >= self.limits.command_queue_capacity {
+            let response = storage_failure_response(
+                self.fence.host_generation,
+                frame.request_id,
+                "storage_queue_full",
+                "MiniApp Service storage request queue is full",
+            );
+            if let Err(error) = write_json_line(&mut self.stdin, &response).await {
+                return Some(ActorExit::Failed(error));
             }
-            None => Err(MiniAppPlatformError::ServiceUnavailable(
-                "MiniApp managed Service storage is not configured".into(),
-            )),
+            return None;
+        }
+        let cancellation = match frame.parent_request_id.as_ref() {
+            Some(request_id) => match self
+                .pending
+                .get(request_id)
+                .and_then(|pending| pending.cancellation.clone())
+            {
+                Some(cancellation) => cancellation,
+                None => {
+                    let response = storage_failure_response(
+                        self.fence.host_generation,
+                        frame.request_id,
+                        "storage_parent_request_stale",
+                        "MiniApp Service storage parent request is stale",
+                    );
+                    if let Err(error) = write_json_line(&mut self.stdin, &response).await {
+                        return Some(ActorExit::Failed(error));
+                    }
+                    return None;
+                }
+            },
+            None => MiniAppCallCancellation::default(),
+        };
+        let request_id = frame.request_id;
+        let storage = self.storage.clone();
+        let miniapp_id = self.fence.miniapp_id.clone();
+        let storage_descriptor = self.storage_descriptor.clone();
+        let command_sender = self.command_sender.clone();
+        let request_timeout = self.limits.request_timeout;
+        self.storage_pending.insert(
+            request_id.clone(),
+            PendingStorageRequest {
+                cancellation: cancellation.clone(),
+                deadline: Instant::now() + request_timeout,
+            },
+        );
+        tokio::spawn(async move {
+            let operation_cancellation = cancellation.clone();
+            let result = match storage {
+                Some(storage) => match tokio::time::timeout(
+                    request_timeout,
+                    storage.handle_service_request(
+                        &miniapp_id,
+                        &storage_descriptor,
+                        request,
+                        operation_cancellation.clone(),
+                    ),
+                )
+                .await
+                {
+                    Ok(Ok(value)) => Ok(value),
+                    Ok(Err(error)) => Err(error.to_string()),
+                    Err(_) => {
+                        operation_cancellation.cancel();
+                        Err("MiniApp Service storage request timed out".into())
+                    }
+                },
+                None => Err("MiniApp managed Service storage is not configured".into()),
+            };
+            let _ = command_sender
+                .send(ActorCommand::StorageCompleted { request_id, result })
+                .await;
+        });
+        None
+    }
+
+    async fn finish_storage_request(
+        &mut self,
+        request_id: String,
+        result: Result<StrictJsonValue, String>,
+    ) -> Option<ActorExit> {
+        let Some(pending) = self.storage_pending.remove(&request_id) else {
+            return None;
         };
         let response = match result {
             Ok(value) => ServiceStorageResponseFrame {
                 kind: "storage_response",
                 protocol_version: SERVICE_PROTOCOL_VERSION,
                 host_generation: self.fence.host_generation,
-                request_id: frame.request_id,
+                request_id,
                 outcome: "success",
                 value: Some(value),
                 error: None,
             },
-            Err(error) => ServiceStorageResponseFrame {
-                kind: "storage_response",
-                protocol_version: SERVICE_PROTOCOL_VERSION,
-                host_generation: self.fence.host_generation,
-                request_id: frame.request_id,
-                outcome: "failure",
-                value: None,
-                error: Some(ServiceStorageWireError {
-                    code: "storage_request_failed".into(),
-                    message: error.to_string(),
-                }),
-            },
+            Err(message) => storage_failure_response(
+                self.fence.host_generation,
+                request_id,
+                if pending.cancellation.is_canceled() {
+                    "storage_call_canceled"
+                } else {
+                    "storage_request_failed"
+                },
+                &message,
+            ),
         };
         if let Err(error) = write_json_line(&mut self.stdin, &response).await {
             return Some(ActorExit::Failed(error));
+        }
+        None
+    }
+
+    async fn expire_storage_requests(&mut self, now: Instant) -> Option<ActorExit> {
+        let expired = self
+            .storage_pending
+            .iter()
+            .filter(|(_, pending)| pending.deadline <= now)
+            .map(|(request_id, _)| request_id.clone())
+            .collect::<Vec<_>>();
+        for request_id in expired {
+            let Some(pending) = self.storage_pending.remove(&request_id) else {
+                continue;
+            };
+            pending.cancellation.cancel();
+            let response = storage_failure_response(
+                self.fence.host_generation,
+                request_id,
+                "storage_request_timeout",
+                "MiniApp Service storage request timed out",
+            );
+            if let Err(error) = write_json_line(&mut self.stdin, &response).await {
+                return Some(ActorExit::Failed(error));
+            }
         }
         None
     }
@@ -1400,12 +1554,18 @@ impl ServiceProcessActor {
         }
         self.call_to_request.clear();
         self.retired_requests.clear();
+        for pending in self.storage_pending.values() {
+            pending.cancellation.cancel();
+        }
+        self.storage_pending.clear();
         while let Ok(command) = self.commands.try_recv() {
             match command {
                 ActorCommand::Invoke { reply, .. } => {
                     let _ = reply.send(Err(clone_process_error(&error)));
                 }
-                ActorCommand::CancelCall { .. } | ActorCommand::Stop => {}
+                ActorCommand::CancelCall { .. }
+                | ActorCommand::StorageCompleted { .. }
+                | ActorCommand::Stop => {}
             }
         }
     }
@@ -1419,6 +1579,26 @@ fn clone_process_error(error: &MiniAppServiceProcessError) -> MiniAppServiceProc
         MiniAppServiceProcessError::Crashed(message) => {
             MiniAppServiceProcessError::Crashed(message.clone())
         }
+    }
+}
+
+fn storage_failure_response(
+    host_generation: u64,
+    request_id: String,
+    code: &str,
+    message: &str,
+) -> ServiceStorageResponseFrame {
+    ServiceStorageResponseFrame {
+        kind: "storage_response",
+        protocol_version: SERVICE_PROTOCOL_VERSION,
+        host_generation,
+        request_id,
+        outcome: "failure",
+        value: None,
+        error: Some(ServiceStorageWireError {
+            code: code.to_owned(),
+            message: message.to_owned(),
+        }),
     }
 }
 
@@ -1558,6 +1738,76 @@ async fn read_service_frames(
         let terminal = matches!(event, ReaderEvent::Eof | ReaderEvent::Failed(_));
         if sender.send(event).await.is_err() || terminal {
             return;
+        }
+    }
+}
+
+async fn read_service_hello(
+    reader: &mut BufReader<ChildStdout>,
+    stdin: &mut ChildStdin,
+    spec: &ResolvedMiniAppServiceSpec,
+    host_generation: u64,
+    storage: Option<Arc<dyn MiniAppServiceStoragePort>>,
+    limits: &MiniAppServiceProcessLimits,
+) -> Result<ServiceHello, String> {
+    loop {
+        let frame = read_json_line::<serde_json::Value>(reader, limits.max_frame_bytes).await?;
+        match frame.get("kind").and_then(serde_json::Value::as_str) {
+            Some("hello") => {
+                return serde_json::from_value(frame).map_err(|error| error.to_string());
+            }
+            Some("storage_request") => {
+                let frame: ServiceStorageRequestFrame =
+                    serde_json::from_value(frame).map_err(|error| error.to_string())?;
+                if frame.protocol_version != SERVICE_PROTOCOL_VERSION
+                    || frame.host_generation == 0
+                    || frame.host_generation != host_generation
+                {
+                    return Err(
+                        "MiniApp Service startup storage request identity is invalid".into(),
+                    );
+                }
+                let request = decode_storage_request(&frame.operation, frame.payload)
+                    .map_err(|error| format!("invalid startup storage request: {error}"))?;
+                let result = match storage.as_ref() {
+                    Some(storage) => storage
+                        .handle_service_request(
+                            &spec.miniapp_id,
+                            &spec.storage,
+                            request,
+                            MiniAppCallCancellation::default(),
+                        )
+                        .await
+                        .map_err(|error| error.to_string()),
+                    None => Err("MiniApp managed Service storage is not configured".into()),
+                };
+                let response = match result {
+                    Ok(value) => ServiceStorageResponseFrame {
+                        kind: "storage_response",
+                        protocol_version: SERVICE_PROTOCOL_VERSION,
+                        host_generation: frame.host_generation,
+                        request_id: frame.request_id,
+                        outcome: "success",
+                        value: Some(value),
+                        error: None,
+                    },
+                    Err(message) => storage_failure_response(
+                        frame.host_generation,
+                        frame.request_id,
+                        "storage_request_failed",
+                        &message,
+                    ),
+                };
+                write_json_line(stdin, &response).await?;
+            }
+            Some(kind) => {
+                return Err(format!(
+                    "MiniApp Service emitted {kind} before its Hello frame"
+                ));
+            }
+            None => {
+                return Err("MiniApp Service startup frame has no kind".into());
+            }
         }
     }
 }

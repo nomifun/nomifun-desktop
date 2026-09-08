@@ -160,6 +160,61 @@ async fn production_storage_is_owner_scoped_and_persists_private_db() {
         serde_json::from_value(inserted.0).unwrap();
     assert_eq!(inserted.affected_rows, 1);
 
+    let protected_batch = storage
+        .handle_service_request(
+            &miniapp,
+            &resolved_after_migration.descriptor,
+            MiniAppServiceStorageRequest::DatabaseBatch {
+                statements: vec![MiniAppDatabaseStatement {
+                    sql: "UPDATE __NOMIFUN_STORAGE_META SET value = ?".into(),
+                    parameters: StrictJsonValue(json!(["999"])),
+                }],
+            },
+            MiniAppCallCancellation::default(),
+        )
+        .await;
+    assert!(
+        protected_batch.is_err(),
+        "Service DML must not reach Host migration metadata"
+    );
+
+    let rolled_back_batch = storage
+        .handle_service_request(
+            &miniapp,
+            &resolved_after_migration.descriptor,
+            MiniAppServiceStorageRequest::DatabaseBatch {
+                statements: vec![
+                    MiniAppDatabaseStatement {
+                        sql: "INSERT INTO state (id, value) VALUES (?, ?)".into(),
+                        parameters: StrictJsonValue(json!(["rolled-back", 9])),
+                    },
+                    MiniAppDatabaseStatement {
+                        sql: "INSERT INTO missing_table (id) VALUES (?)".into(),
+                        parameters: StrictJsonValue(json!(["never-written"])),
+                    },
+                ],
+            },
+            MiniAppCallCancellation::default(),
+        )
+        .await;
+    assert!(rolled_back_batch.is_err());
+    let absent = storage
+        .handle_service_request(
+            &miniapp,
+            &resolved_after_migration.descriptor,
+            MiniAppServiceStorageRequest::DatabaseQuery {
+                statement: MiniAppDatabaseStatement {
+                    sql: "SELECT id FROM state WHERE id = ?".into(),
+                    parameters: StrictJsonValue(json!(["rolled-back"])),
+                },
+            },
+            MiniAppCallCancellation::default(),
+        )
+        .await
+        .unwrap();
+    let absent: MiniAppDatabaseQueryResult = serde_json::from_value(absent.0).unwrap();
+    assert!(absent.rows.is_empty(), "failed batch must roll back all DML");
+
     let queried = storage
         .handle_service_request(
             &miniapp,
@@ -205,8 +260,37 @@ async fn production_storage_is_owner_scoped_and_persists_private_db() {
         resolved_again
             .descriptor
             .private_database
+            .as_ref()
             .unwrap()
             .migration_ledger_digest,
         ledger.ledger_digest
     );
+
+    let unsafe_migration = MiniAppMigration::new(
+        MiniAppMigrationId::from("002_unsafe_type"),
+        vec![MiniAppAdditiveMigrationAction::AddColumn {
+            table_name: "state".into(),
+            column: MiniAppMigrationColumn {
+                name: "unsafe".into(),
+                declared_type: "TEXT CHECK(1)".into(),
+                nullable: true,
+                default_literal: None,
+            },
+        }],
+    )
+    .unwrap();
+    let descriptor_again = resolved_again.descriptor.clone();
+    let db_again = descriptor_again.private_database.as_ref().unwrap();
+    let rejected = storage
+        .apply_additive_migrations(
+            &owner,
+            &miniapp,
+            &descriptor_again,
+            &db_again.migration_ledger_digest,
+            &release,
+            std::slice::from_ref(&unsafe_migration),
+            3,
+        )
+        .await;
+    assert!(rejected.is_err(), "unsafe type fragments must be rejected");
 }
