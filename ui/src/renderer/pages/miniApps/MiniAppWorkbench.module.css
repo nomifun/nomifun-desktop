@@ -395,6 +395,10 @@
   list-style: none;
 }
 
+.workflowCompact {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .workflowStep {
   min-width: 0;
   display: flex;

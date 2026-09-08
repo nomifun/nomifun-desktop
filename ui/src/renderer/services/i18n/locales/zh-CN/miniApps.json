@@ -1,6 +1,6 @@
 {
   "title": "小程序",
-  "subtitle": "在独立工作台中创建、构建、发布并运行全栈小程序",
+  "subtitle": "在独立工作台中创建纯 UI 小程序并构建不可变 Ready Release",
   "nav": {
     "entry": "小程序",
     "siderEntry": "小程序"
@@ -14,7 +14,9 @@
   "actions": {
     "refresh": "刷新",
     "retry": "重试",
-    "backToLibrary": "返回小程序库"
+    "backToLibrary": "返回小程序库",
+    "build": "构建 Ready Release",
+    "cancelBuild": "取消构建"
   },
   "states": {
     "loadingLibrary": "正在读取小程序库…",
@@ -24,19 +26,20 @@
     "loadLibraryTitle": "小程序库加载失败",
     "loadWorkshopTitle": "小程序工作台加载失败",
     "notFoundTitle": "找不到这个小程序",
-    "notFoundBody": "它可能已被删除，或者不属于当前用户。"
+    "notFoundBody": "它可能已被删除，或者不属于当前用户。",
+    "buildUnavailable": "当前 Project 没有可构建的 exact Source，或已有构建正在运行。"
   },
   "create": {
     "action": "创建小程序",
     "title": "创建小程序项目",
-    "intro": "先建立全新的 Project 与 Product。源码、构建、测试和发布都将在独立的小程序工作台中继续。",
+    "intro": "建立全新的纯 UI Project 与 Product，并立即生成受管 Source。当前版本支持构建不可变 Ready Release。",
     "displayName": "名称",
     "displayNamePlaceholder": "例如：项目进度看板",
     "displayNameRequired": "请输入小程序名称",
     "description": "说明",
     "descriptionPlaceholder": "说明它解决什么问题（可选）",
     "kind": "运行形态",
-    "uiOnlyHint": "只有静态 UI 与 Host KV；整个生命周期不会启动 Node。",
+    "uiOnlyHint": "当前切片只创建纯 UI Source；Build 不启动 Node，Service 将在后续阶段接入。",
     "serviceHint": "包含一个受管 main.mjs Service，可使用 Host KV、Files 与 Private DB。",
     "submit": "创建",
     "cancel": "取消",
@@ -50,7 +53,7 @@
     "hint": "这里只展示全新的 M1 Product；不会读取或迁移历史单 HTML 小程序。",
     "searchPlaceholder": "按名称、说明或状态搜索",
     "emptyTitle": "还没有 M1 小程序",
-    "emptyBody": "创建一个独立 Project，从 Source → Build → Ready → Publish 开始。",
+    "emptyBody": "创建一个独立纯 UI Project，从 Source → Build → Ready 开始。",
     "noMatchTitle": "没有匹配的小程序",
     "noMatchBody": "调整搜索条件后重试。",
     "noDescription": "尚未填写说明",
@@ -84,7 +87,7 @@
   },
   "workshop": {
     "pageTitle": "小程序工作台",
-    "pageSubtitle": "管理 Source、Build、Ready Release、Publish、Capability、配置与 Service 状态",
+    "pageSubtitle": "构建当前 exact Source，并生成一个不可变 Ready Release",
     "detailEyebrow": "MiniApp Project",
     "workflow": {
       "ariaLabel": "小程序交付流程",
@@ -115,7 +118,12 @@
         "runtimeOnly": "仅运行产物"
       },
       "emptyNotice": "这个 Project 还没有 Source。后续应从 Chat Dev 或受管 Source 导入开始，不会回退到历史单文件工作区。",
-      "runtimeOnlyNotice": "这是 source-less 运行产物。可以测试和发布；继续开发前必须显式导入 Source 或创建 fork。"
+      "runtimeOnlyNotice": "这是 source-less 运行产物。继续开发前必须显式导入 Source 或创建 fork。",
+      "serviceDeferred": "Service MiniApp 尚未进入当前交付切片，不能使用纯 UI Build 冒充 Service Release。"
+    },
+    "sourceBuild": {
+      "title": "Source 与 Build",
+      "hint": "Build 绑定当前 Project revision、Source snapshot、dependency lock 和 build generation；并发变化会显式拒绝。"
     },
     "releases": {
       "title": "Release 指针",
@@ -129,6 +137,10 @@
       "hint": "Build 成功只生成冻结 Ready；Publish 必须使用 exact pointer 与 Release digest。",
       "releaseId": "Release ID",
       "buildGeneration": "来源 Build generation",
+      "createdAt": "构建完成时间",
+      "artifact": "Artifact",
+      "manifest": "Manifest",
+      "available": "Ready 可用",
       "test": "测试状态",
       "publishEligibility": "发布资格",
       "canPublish": "可以发布",
@@ -215,6 +227,7 @@
       "kind": "种类",
       "status": "状态",
       "progress": "进度",
+      "started": "开始时间",
       "emptyTitle": "没有进行中的 Operation",
       "emptyBody": "短事务动作不会伪装成长任务。",
       "state": {
@@ -224,5 +237,9 @@
         "canceled": "已取消"
       }
     }
+  },
+  "messages": {
+    "buildSucceeded": "Ready Release 已构建",
+    "buildCanceled": "构建已取消"
   }
 }

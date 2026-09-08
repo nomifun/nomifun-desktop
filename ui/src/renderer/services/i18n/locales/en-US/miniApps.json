@@ -1,6 +1,6 @@
 {
   "title": "Mini-Apps",
-  "subtitle": "Create, build, publish, and run full-stack mini-apps in a dedicated workbench",
+  "subtitle": "Create UI-only mini-apps and build immutable Ready Releases in a dedicated workbench",
   "nav": {
     "entry": "Mini-Apps",
     "siderEntry": "Mini-Apps"
@@ -14,7 +14,9 @@
   "actions": {
     "refresh": "Refresh",
     "retry": "Retry",
-    "backToLibrary": "Back to library"
+    "backToLibrary": "Back to library",
+    "build": "Build Ready Release",
+    "cancelBuild": "Cancel build"
   },
   "states": {
     "loadingLibrary": "Loading the mini-app library…",
@@ -24,19 +26,20 @@
     "loadLibraryTitle": "Failed to load the mini-app library",
     "loadWorkshopTitle": "Failed to load the mini-app workbench",
     "notFoundTitle": "Mini-app not found",
-    "notFoundBody": "It may have been deleted or belong to another user."
+    "notFoundBody": "It may have been deleted or belong to another user.",
+    "buildUnavailable": "This Project has no exact buildable Source, or a build is already running."
   },
   "create": {
     "action": "Create mini-app",
     "title": "Create a mini-app project",
-    "intro": "Start with a new Project and Product. Source, build, test, and publish stay in the dedicated mini-app workbench.",
+    "intro": "Create a new UI-only Project and Product with managed Source. This version builds one immutable Ready Release.",
     "displayName": "Name",
     "displayNamePlaceholder": "For example: Project status board",
     "displayNameRequired": "Enter a mini-app name",
     "description": "Description",
     "descriptionPlaceholder": "What problem does it solve? (optional)",
     "kind": "Runtime shape",
-    "uiOnlyHint": "Static UI plus Host KV only; no Node process is started at any point.",
+    "uiOnlyHint": "This slice creates UI-only Source. Build never starts Node; Service support arrives in a later phase.",
     "serviceHint": "Includes one managed main.mjs Service with Host KV, Files, and Private DB.",
     "submit": "Create",
     "cancel": "Cancel",
@@ -50,7 +53,7 @@
     "hint": "Only clean-start M1 Products appear here; legacy single-HTML mini-apps are never read or migrated.",
     "searchPlaceholder": "Search by name, description, or state",
     "emptyTitle": "No M1 mini-apps yet",
-    "emptyBody": "Create an independent Project and begin with Source → Build → Ready → Publish.",
+    "emptyBody": "Create an independent UI-only Project and begin with Source → Build → Ready.",
     "noMatchTitle": "No matching mini-apps",
     "noMatchBody": "Adjust the search and try again.",
     "noDescription": "No description yet",
@@ -84,7 +87,7 @@
   },
   "workshop": {
     "pageTitle": "Mini-App Workbench",
-    "pageSubtitle": "Manage Source, Build, Ready Release, Publish, capabilities, configuration, and Service state",
+    "pageSubtitle": "Build the current exact Source into one immutable Ready Release",
     "detailEyebrow": "MiniApp Project",
     "workflow": {
       "ariaLabel": "Mini-app delivery workflow",
@@ -115,7 +118,12 @@
         "runtimeOnly": "Runtime-only artifact"
       },
       "emptyNotice": "This Project has no Source yet. Chat Dev or a managed Source import must create it; the product never falls back to the legacy single-file workspace.",
-      "runtimeOnlyNotice": "This is a source-less runtime artifact. It can be tested and published; continued development requires an explicit Source import or fork."
+      "runtimeOnlyNotice": "This is a source-less runtime artifact. Continued development requires an explicit Source import or fork.",
+      "serviceDeferred": "Service mini-apps are outside the current delivery slice and cannot use the UI-only Build path."
+    },
+    "sourceBuild": {
+      "title": "Source and Build",
+      "hint": "Build binds the current Project revision, Source snapshot, dependency lock, and build generation. Concurrent changes fail explicitly."
     },
     "releases": {
       "title": "Release pointers",
@@ -129,6 +137,10 @@
       "hint": "A successful Build creates one frozen Ready release; Publish binds exact pointer and Release digests.",
       "releaseId": "Release ID",
       "buildGeneration": "Source build generation",
+      "createdAt": "Built",
+      "artifact": "Artifact",
+      "manifest": "Manifest",
+      "available": "Ready available",
       "test": "Test status",
       "publishEligibility": "Publish eligibility",
       "canPublish": "Can publish",
@@ -215,6 +227,7 @@
       "kind": "Kind",
       "status": "State",
       "progress": "Progress",
+      "started": "Started",
       "emptyTitle": "No active Operation",
       "emptyBody": "Short transactional commands are not disguised as long-running jobs.",
       "state": {
@@ -224,5 +237,9 @@
         "canceled": "Canceled"
       }
     }
+  },
+  "messages": {
+    "buildSucceeded": "Ready Release built",
+    "buildCanceled": "Build canceled"
   }
 }

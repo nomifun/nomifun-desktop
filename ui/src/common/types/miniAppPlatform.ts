@@ -95,6 +95,7 @@ export interface MiniAppReleaseTest {
 export interface MiniAppReadyRelease {
   release: MiniAppReleaseRef;
   project_build_generation: number;
+  created_at_ms: number;
   kind: MiniAppKind;
   service?: MiniAppServiceDescriptor;
   test: MiniAppReleaseTest;
@@ -218,4 +219,20 @@ export interface CreateMiniAppProjectRequest {
   display_name: string;
   description?: string;
   kind: MiniAppKind;
+}
+
+export interface BuildMiniAppRequest {
+  miniapp_id: MiniAppId;
+  expected_product_revision: number;
+  project_id: string;
+  expected_project_revision: number;
+  expected_build_generation: number;
+  expected_source_snapshot_digest: string;
+  expected_dependency_lock_digest: string;
+}
+
+export interface CancelMiniAppBuildRequest {
+  miniapp_id: MiniAppId;
+  operation_id: string;
+  expected_operation_revision: number;
 }

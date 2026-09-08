@@ -56,6 +56,43 @@
     Credential reference、Candidate/Release、Operation 与明确命令。Managed Node 下载
     只接受服务端 official-LTS offer digest 的确认，客户端不能自报版本、target 或 release
     digest；Bridge、process、generation、ledger 和 secret 不进入 HTTP wire。
+
+## 2026-09-08 M1-0-02-A 实现收口与 M1-0-02-B 进入条件
+
+`M1-0-02-A` 已在 Windows Desktop 主机完成实现与定向回归，产品边界仍严格停留在
+UI-only `Source → Build → Ready`。远端 AgentPreset/会话模型选择修正已先同步到当前
+分支，MiniApp 的 Build lineage migration 因远端新增 `076_agent_session_model_configurations`
+顺延为 `077_miniapp_build_operation_lineage`；正式 migration head 为 `77`。
+
+本轮实际交付：
+
+- MiniApp 专用 owner/project Source Store 和 immutable Release Store，不复用 Plugin
+  Source/Package lifecycle，也不读取旧 `miniapps`；
+- 固定 `miniapp-release-v1` UI-only builder、Build Operation、single-flight、取消/
+  失败终态和 staging cleanup；
+- Artifact、Release、Ready pointer、library revision 与 Operation succeeded 的 SQLite
+  原子提交，以及 exact source/lock/build-generation/CAS lineage；
+- App owner/local-trust 路由和 Desktop Workshop 的 Source、Build、Ready、Cancel、Refresh
+  工作流；UI-only Build 不启动 Node；
+- Source/Release Store 的 Windows 路径冲突、特殊文件、containment、digest tamper 和
+  owner/project 隔离校验。
+
+最小证据已形成：DB ID/schema 20、MiniApp schema 6、repository 8、lifecycle 31，
+Source/Release Store 3、M1 application 3、App route 3、API types 535、Agent control
+plane 22、MiniApp UI 9、Agent/模型选择 UI 32，i18n、UI production build 和受影响
+Rust crate check 通过。Windows 全量 `cargo fmt --all --check` 仍受文件名长度限制，
+不改变定向格式检查结果。
+
+因此下一执行切片是 `M1-0-02-B`，只先实现 UI-only 的：
+
+1. Ready → Manual Publish 的 owner/pointer/release/catalog 原子切换；
+2. Active/Previous 指针和 `active_release_epoch` 的 exact CAS；
+3. Surface launch descriptor 与 Host-owned epoch/release fence 的 Desktop 入口；
+4. 已授权且严格 UI-only 的 auto Publish 判定。
+
+该切片不提前实现 dedicated Service Host、真实 MessageChannel process adapter、
+Files/Private SQLite、Share/Import、永久删除或跨平台原生验证。M1-1 Service/Bridge
+仍由后续切片领取，不能用现有内存 foundation 测试代替生产完成度。
 ## 2026-09-07 实施进展修订
 
 1. 普通 Plugin 的 Kernel↔Node Adapter 已按 canonical `CapabilityKind` 接通 Tool、

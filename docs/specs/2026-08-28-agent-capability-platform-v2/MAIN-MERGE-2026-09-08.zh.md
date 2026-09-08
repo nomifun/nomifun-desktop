@@ -18,7 +18,7 @@
 ## 冲突与架构处理
 
 1. `Cargo.lock` 的旧 MiniApp/Preset 包冲突保留 `nomifun-miniapp-platform` 与 `nomifun-plugin-platform`，不恢复已退役的 `nomifun-miniapp` / `nomifun-preset` 包。锁文件仅有 76 个工作区包从 0.7.4 升至 0.7.6，第三方锁定版本不变。
-2. 数据库生命周期断言继续使用重构分支的统一迁移头常量，并更新到 75。
+2. 数据库生命周期断言继续使用重构分支的统一迁移头常量；远端新增 Agent 会话模型迁移 `076`，本地 MiniApp Build lineage 顺延为 `077`，当前统一迁移头为 77。
 3. Windows 文件身份读取继续使用重构分支的 `CreateFileW`、`FILE_READ_ATTRIBUTES`、路径处理与句柄关闭方式，补入 main 的 `FILE_FLAG_OPEN_REPARSE_POINT`，保留“不跟随重解析点”的保护。
 4. 保留 NomiCore、AgentPreset/Revision/Snapshot、Plugin N1、MiniApp M1、逻辑引用和既有三项内置能力修复；合并没有改回旧执行/存储聚合根。
 
@@ -32,6 +32,17 @@ main 与重构分支在 058 后分别使用了 059/060。简单接受 Git 自动
 - 只在可写迁移阶段、一个外层事务内，把这两条 ledger 记录的版本号映射到 073/074，然后补齐重构分支 059–072 与 M1 的 075；原校验和、描述和安装时间保留。升级失败时连同版本号移动一起回滚。正常启动后即为唯一的 001–075 正式链，不保留第二套运行时 schema。
 - 只读启动探测只报告 `UpgradeRequired`；不改 ledger、不退役目录。未知版本、失败记录和校验和篡改继续拒绝。
 - 已验证 main 059、main 060、refactor 072/075、重复打开、失败回滚、篡改拒绝，以及素材历史/待删除内容保留。
+
+## 2026-09-08 后续同步与 M1-0-02-A 归档
+
+- 已快进同步远端 AgentPreset/会话模型选择、官方 Agent 启动和模型 alias 编辑修正；
+  对应 API/SQLite/UI 定向验证通过，未恢复旧 `/api/presets` 或 Package-owned Preset
+  分支。
+- M1-0-02-A 的 Source→Build→Ready 实现已完成并准备提交归档；其新增 migration 为
+  `077_miniapp_build_operation_lineage.sql`，不与远端 `076_agent_session_model_configurations.sql`
+  冲突。
+- 当前 Windows 主机下一切片为 UI-only Ready→Manual Publish→Surface→Rollback；
+  Service Host/真实 Bridge、跨平台原生验证仍不在本次归档范围。
 
 SQL 原文字节核对（与远程 main blob 相同）：
 

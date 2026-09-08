@@ -4,8 +4,9 @@ use axum::extract::{Path, State};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use nomifun_api_types::{
-    ApiResponse, CreateMiniAppProjectRequest, MiniAppLibraryResponseDto,
-    MiniAppWorkshopDto,
+    ApiResponse, BuildMiniAppRequest, CancelMiniAppBuildRequest,
+    CreateMiniAppProjectRequest, DurableOperationSummaryDto,
+    MiniAppLibraryResponseDto, MiniAppWorkshopDto,
 };
 use nomifun_auth::CurrentUser;
 use nomifun_common::AppError;
@@ -19,9 +20,7 @@ pub struct MiniAppM1RouterState {
 }
 
 impl MiniAppM1RouterState {
-    pub(crate) fn new(
-        application: Arc<MiniAppM1ApplicationService>,
-    ) -> Self {
+    pub(crate) fn new(application: Arc<MiniAppM1ApplicationService>) -> Self {
         Self { application }
     }
 }
@@ -43,6 +42,14 @@ pub(crate) fn miniapp_m1_write_routes(
 ) -> Router {
     Router::new()
         .route("/api/miniapps/projects", post(create_project))
+        .route(
+            "/api/miniapps/{miniapp_id}/build",
+            post(build_miniapp),
+        )
+        .route(
+            "/api/miniapps/{miniapp_id}/operations/{operation_id}/cancel",
+            post(cancel_miniapp_build),
+        )
         .with_state(state)
 }
 
@@ -82,6 +89,50 @@ async fn get_workshop(
         .await
         .map_err(application_error)?;
     Ok(Json(ApiResponse::ok(workshop)))
+}
+
+async fn build_miniapp(
+    State(state): State<MiniAppM1RouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(miniapp_id): Path<String>,
+    Json(request): Json<BuildMiniAppRequest>,
+) -> Result<Json<ApiResponse<MiniAppWorkshopDto>>, AppError> {
+    require_route_id("miniapp_id", &miniapp_id, &request.miniapp_id)?;
+    let workshop = state
+        .application
+        .build(user.id.as_str(), request)
+        .await
+        .map_err(application_error)?;
+    Ok(Json(ApiResponse::ok(workshop)))
+}
+
+async fn cancel_miniapp_build(
+    State(state): State<MiniAppM1RouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path((miniapp_id, operation_id)): Path<(String, String)>,
+    Json(request): Json<CancelMiniAppBuildRequest>,
+) -> Result<Json<ApiResponse<DurableOperationSummaryDto>>, AppError> {
+    let operation = state
+        .application
+        .cancel_build(
+            user.id.as_str(),
+            &miniapp_id,
+            &operation_id,
+            request.expected_operation_revision,
+        )
+        .await
+        .map_err(application_error)?;
+    Ok(Json(ApiResponse::ok(operation)))
+}
+
+fn require_route_id(field: &'static str, route: &str, body: &str) -> Result<(), AppError> {
+    if route == body {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest(format!(
+            "{field} must match the route identity"
+        )))
+    }
 }
 
 fn application_error(error: MiniAppM1ApplicationError) -> AppError {

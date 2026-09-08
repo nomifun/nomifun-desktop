@@ -19,6 +19,8 @@ mod m1_application;
 mod service;
 mod service_host;
 mod storage;
+mod source;
+mod release;
 #[cfg(test)]
 mod foundation_tests;
 #[cfg(test)]
@@ -36,3 +38,5 @@ pub use m1_application::*;
 pub use service::*;
 pub use service_host::*;
 pub use storage::*;
+pub use source::*;
+pub use release::*;

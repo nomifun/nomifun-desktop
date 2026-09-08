@@ -391,3 +391,57 @@ async fn migration_075_preserves_existing_072_and_legacy_rows_byte_for_byte() {
         .unwrap();
     assert_eq!(kv_count, 0);
 }
+
+#[tokio::test]
+async fn migration_077_adds_only_immutable_miniapp_build_lineage() {
+    let database = migrated_pool(77).await;
+    let migration = include_str!("../migrations/077_miniapp_build_operation_lineage.sql");
+    for forbidden in [
+        "FROM miniapps",
+        "INSERT INTO miniapps",
+        "UPDATE miniapps",
+        "DELETE FROM miniapps",
+        "FOREIGN KEY",
+        "REFERENCES",
+        "CREATE TRIGGER",
+        "service_host",
+        "private_database",
+    ] {
+        assert!(
+            !migration.contains(forbidden),
+            "migration 077 must not contain {forbidden}"
+        );
+    }
+
+    let columns = sqlx::query("PRAGMA table_info('miniapp_build_operation_lineage')")
+        .fetch_all(&database)
+        .await
+        .unwrap();
+    let names = columns
+        .iter()
+        .map(|column| column.get::<String, _>("name"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        [
+            "id",
+            "operation_id",
+            "owner_user_id",
+            "miniapp_id",
+            "project_id",
+            "project_revision",
+            "source_snapshot_digest",
+            "dependency_lock_digest",
+            "build_profile_version",
+            "build_generation",
+            "started_at_ms",
+        ]
+    );
+    let foreign_keys: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_foreign_key_list('miniapp_build_operation_lineage')",
+    )
+    .fetch_one(&database)
+    .await
+    .unwrap();
+    assert_eq!(foreign_keys, 0);
+}

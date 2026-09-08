@@ -106,8 +106,11 @@ pub use javascript_runtime_selection::{
     IJavaScriptRuntimeSelectionRepository, SaveJavaScriptRuntimeSelectionParams,
 };
 pub use miniapp_m1::{
-    CommitMiniAppM1PointerStateParams, CreateMiniAppM1Params,
-    IMiniAppM1Repository, RecordMiniAppM1ReadyReleaseParams,
+    CancelMiniAppM1BuildOperationParams, CommitMiniAppM1PointerStateParams,
+    CreateMiniAppM1Params, CreateMiniAppM1WithSourceParams,
+    FinishMiniAppM1BuildAndRecordReadyParams, FinishMiniAppM1BuildOperationParams,
+    IMiniAppM1Repository, MiniAppM1ManagedSourceLineage,
+    RecordMiniAppM1ReadyReleaseParams, StartMiniAppM1BuildOperationParams,
     UpdateMiniAppM1ProjectSourceParams,
 };
 pub use knowledge::IKnowledgeRepository;
