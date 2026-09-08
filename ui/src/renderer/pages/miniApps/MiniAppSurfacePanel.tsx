@@ -97,14 +97,26 @@ function parseBridgeRequest(value: unknown): MiniAppBridgeRequest | null {
   const request = asObject(value);
   const callId = request?.call_id;
   const target = asObject(request?.target);
-  if (
-    typeof callId !== 'string' ||
-    !callId.trim() ||
-    callId.length > 256 ||
-    target?.target !== 'host_kv'
-  ) {
+  if (typeof callId !== 'string' || !callId.trim() || callId.length > 256) {
     return null;
   }
+  if (target?.target === 'service') {
+    const method = target.method;
+    const payload = asObject(target.payload);
+    if (
+      typeof method !== 'string' ||
+      !method.trim() ||
+      method.length > 256 ||
+      !payload
+    ) {
+      return null;
+    }
+    return {
+      call_id: callId,
+      target: { target: 'service', method, payload },
+    };
+  }
+  if (target?.target !== 'host_kv') return null;
   const kv = parseKvRequest(target.request);
   return kv
     ? {

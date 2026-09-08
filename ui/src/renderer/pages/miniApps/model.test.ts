@@ -10,9 +10,11 @@ import {
   miniAppBuildRequest,
   miniAppCanOpenSurface,
   miniAppPublishRequest,
+  miniAppRetryServiceRequest,
   miniAppReleaseStage,
   miniAppRollbackRequest,
   miniAppSetEnabledRequest,
+  miniAppSetServiceRunningRequest,
   miniAppSetPublishModeRequest,
   miniAppSurfaceAssetPath,
   miniAppWorkflowState,
@@ -117,6 +119,43 @@ describe('MiniApp M1 view model', () => {
     expect(shortMiniAppIdentity('1234567890abcdefghij', 4)).toBe(
       '1234…ghij'
     );
+  });
+
+  test('build and service lifecycle requests bind the selected Service lifecycle and Active fence', () => {
+    const value = workshop({
+      source_state: 'editable',
+      build_generation: 3,
+      source_snapshot_digest: 'b'.repeat(64),
+      dependency_lock_digest: 'c'.repeat(64),
+    });
+    value.miniapp.kind = 'service';
+    value.miniapp.releases.active = {
+      release_id: 'active-service',
+      artifact_id: 'service-artifact',
+      release_digest: 'd'.repeat(64),
+      manifest_digest: 'e'.repeat(64),
+    };
+    value.miniapp.releases.active_release_epoch = 4;
+    value.miniapp.service_health = { state: 'stopped' };
+
+    expect(miniAppBuildRequest(value, 'continuous')?.service_lifecycle).toBe(
+      'continuous'
+    );
+    expect(miniAppSetServiceRunningRequest(value, true)).toEqual({
+      miniapp_id: value.miniapp.miniapp_id,
+      expected_product_revision: 1,
+      expected_pointer_revision: 1,
+      expected_active_release_epoch: 4,
+      expected_active_release_digest: 'd'.repeat(64),
+      running: true,
+    });
+    expect(miniAppRetryServiceRequest(value)).toEqual({
+      miniapp_id: value.miniapp.miniapp_id,
+      expected_product_revision: 1,
+      expected_pointer_revision: 1,
+      expected_active_release_epoch: 4,
+      expected_active_release_digest: 'd'.repeat(64),
+    });
   });
 
   test('builds exact Publish, Rollback, lifecycle, and publish-mode CAS requests', () => {

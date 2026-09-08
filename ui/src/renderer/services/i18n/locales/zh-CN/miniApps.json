@@ -1,6 +1,6 @@
 {
   "title": "小程序",
-  "subtitle": "在独立工作台中构建、发布、启用并运行纯 UI 小程序",
+  "subtitle": "在独立工作台中构建、发布、启用并运行小程序",
   "nav": {
     "entry": "小程序",
     "siderEntry": "小程序"
@@ -24,7 +24,10 @@
     "disable": "停用",
     "openSurface": "打开 Surface",
     "reloadSurface": "重新加载 Surface",
-    "closeSurface": "关闭 Surface"
+    "closeSurface": "关闭 Surface",
+    "startService": "启动 Service",
+    "stopService": "停止 Service",
+    "retryService": "重试 Service"
   },
   "states": {
     "loadingLibrary": "正在读取小程序库…",
@@ -42,8 +45,9 @@
     "enableUnavailable": "小程序必须先有 Active Release 才能启用。",
     "disableUnavailable": "小程序已经停用，或当前不能变更生命周期。",
     "autoPublishRequiresActive": "只有纯 UI 小程序已经存在 Active Release 后才能开启自动发布。",
-    "surfaceUnavailable": "只有已启用且存在 Active Release 的纯 UI 小程序才能打开 Surface。",
+    "surfaceUnavailable": "只有已启用且存在 Active Release 的小程序才能打开 Surface。",
     "surfaceDescriptorMismatch": "Surface descriptor 已不再匹配当前 Active Release。",
+    "serviceUnavailable": "当前 Service 还不具备这个生命周期操作的条件。",
     "loadSurfaceTitle": "Surface descriptor 加载失败",
     "surfaceFrameTitle": "Surface 无法加载",
     "surfaceFrameBody": "Publish、Rollback 或生命周期变化后 capability 可能已失效，请重新加载 Surface。"
@@ -51,6 +55,7 @@
   "confirm": {
     "publishTitle": "发布 Ready Release？",
     "publishFirstBody": "这会创建第一个 Active Release。Publish 不会自动启用小程序，Enable 仍是独立动作。",
+    "publishServiceBody": "这个 Service Ready Release 尚未完成正式运行测试。继续表示你接受在未测试状态下发布 Service；Publish 不会自动启动它。",
     "publishUpdateBody": "这会让 Ready Release 成为 Active，并将当前 Active 移到 Previous。小程序生命周期不会改变。",
     "rollbackTitle": "回滚到 Previous Release？",
     "rollbackBody": "当前 Active {{current}} 将与 Previous {{target}} 交换。受管数据不会回滚。",
@@ -60,15 +65,15 @@
   "create": {
     "action": "创建小程序",
     "title": "创建小程序项目",
-    "intro": "建立全新的纯 UI Project 与 Product，并立即生成受管 Source。当前版本支持构建不可变 Ready Release。",
+    "intro": "建立全新的 Project 与 Product，并生成受管 Source。Build 会产生一个不可变 Ready Release。",
     "displayName": "名称",
     "displayNamePlaceholder": "例如：项目进度看板",
     "displayNameRequired": "请输入小程序名称",
     "description": "说明",
     "descriptionPlaceholder": "说明它解决什么问题（可选）",
     "kind": "运行形态",
-    "uiOnlyHint": "当前切片只创建纯 UI Source；Build 不启动 Node，Service 将在后续阶段接入。",
-    "serviceHint": "包含一个受管 main.mjs Service，可使用 Host KV、Files 与 Private DB。",
+    "uiOnlyHint": "纯 UI Build 在 Host 内完成，不会启动 Node。",
+    "serviceHint": "Service Build 包含一个受管 main.mjs 和 Host KV；本切片尚未启用 Files 与 Private DB。",
     "submit": "创建",
     "cancel": "取消",
     "success": "小程序项目已创建",
@@ -146,8 +151,7 @@
         "runtimeOnly": "仅运行产物"
       },
       "emptyNotice": "这个 Project 还没有 Source。后续应从 Chat Dev 或受管 Source 导入开始，不会回退到历史单文件工作区。",
-      "runtimeOnlyNotice": "这是 source-less 运行产物。继续开发前必须显式导入 Source 或创建 fork。",
-      "serviceDeferred": "Service MiniApp 尚未进入当前交付切片，不能使用纯 UI Build 冒充 Service Release。"
+      "runtimeOnlyNotice": "这是 source-less 运行产物。继续开发前必须显式导入 Source 或创建 fork。"
     },
     "sourceBuild": {
       "title": "Source 与 Build",
@@ -289,6 +293,9 @@
     "enabled": "小程序已启用",
     "disabled": "小程序已停用",
     "autoPublishEnabled": "已开启纯 UI 自动发布",
-    "manualPublishEnabled": "已切换为人工发布"
+    "manualPublishEnabled": "已切换为人工发布",
+    "serviceStarted": "已发起 Service 启动",
+    "serviceStopped": "Service 已停止",
+    "serviceRetried": "已发起 Service 重试"
   }
 }

@@ -36,8 +36,8 @@ describe('MiniApp M1 product surfaces', () => {
     expect(dialogSource.includes('expected_library_revision: libraryRevision')).toBe(
       true
     );
-    expect(dialogSource.includes("kind: 'ui_only'")).toBe(true);
-    expect(dialogSource.includes("<Radio value='service'>")).toBe(false);
+    expect(dialogSource.includes('setKind')).toBe(true);
+    expect(dialogSource.includes("value: 'service'")).toBe(true);
     expect(listSource.includes('navigate(`/mini-apps/${app.miniapp_id}`)')).toBe(
       true
     );
@@ -77,11 +77,18 @@ describe('MiniApp M1 product surfaces', () => {
       'ipcBridge.miniapps.rollback.invoke(',
       'ipcBridge.miniapps.setEnabled.invoke(',
       'ipcBridge.miniapps.setPublishMode.invoke(',
+      'ipcBridge.miniapps.setServiceRunning.invoke(',
+      'ipcBridge.miniapps.retryService.invoke(',
       'ipcBridge.miniapps.openSurface.invoke(',
     ]) {
       expect(runnerSource.includes(route)).toBe(true);
     }
     expect(runnerSource.includes('ipcBridge.miniapps.build.invoke(')).toBe(true);
+    expect(runnerSource.includes('serviceLifecycle')).toBe(true);
+    expect(runnerSource.includes('publishServiceBody')).toBe(true);
+    expect(runnerSource.includes('startService')).toBe(true);
+    expect(runnerSource.includes('stopService')).toBe(true);
+    expect(runnerSource.includes('retryService')).toBe(true);
     expect(
       runnerSource.includes('ipcBridge.miniapps.cancelBuild.invoke({')
     ).toBe(true);
@@ -115,6 +122,9 @@ describe('MiniApp M1 product surfaces', () => {
     expect(
       surfaceSource.includes('ipcBridge.miniapps.bridge')
     ).toBe(true);
+    expect(surfaceSource.includes("target: 'service'")).toBe(true);
+    expect(surfaceSource.includes('target.method')).toBe(true);
+    expect(surfaceSource.includes('target.payload')).toBe(true);
     expect(runnerSource.includes('ipcBridge.miniapps.closeSurface')).toBe(true);
     expect(surfaceSource.includes('key={bridgeDescriptorKey}')).toBe(true);
     expect(surfaceSource.includes('key={source}')).toBe(false);
