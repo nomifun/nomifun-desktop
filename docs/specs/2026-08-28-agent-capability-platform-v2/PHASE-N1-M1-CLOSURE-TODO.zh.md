@@ -9,10 +9,13 @@
 > 当前结论：AP-0～AP-7 与一期 Windows C8 已通过。用户已授权在 Windows 主机继续
 > 完成 Plugin N1 和 MiniApp M1；macOS arm64、Linux Desktop x64 统一延后到全部
 > Windows 开发与候选验证完成后交接。手机模式不属于 `nomifun-desktop` 范围。
-> 2026-09-08 已同步远端 AgentPreset/会话模型选择修正；M1-0-02-A 与 M1-0-02-B
-> 已完成实现和定向回归。M1-0-02-B 已关闭 Ready → Manual Publish → Surface →
-> Rollback、UI-only auto Publish、Host KV 与 Surface 生命周期边界；下一步进入
-> M1-1-01 dedicated Service Host，不把本轮 UI-only Bridge 误报为 Service Host 完成。
+> 2026-09-08 已同步远端 AgentPreset/会话模型选择修正；M1-0-02-A、M1-0-02-B、
+> M1-1-01 与 M1-1-02 已完成实现和 Windows 定向回归。M1-1-01 已交付 dedicated
+> Service Host、真实 Node process adapter、on-demand/continuous、candidate Runtime
+> 验证和 Service Bridge；M1-1-02 已交付 owner-scoped Files、Host-managed Private
+> SQLite、authorizer、参数化 query/execute/batch、additive Migration ledger 与
+> Publish migration fence。下一步进入 M1-2 生命周期/导入导出；Windows Candidate、
+> NSIS、产品验收和 macOS/Linux 外部验证仍未关闭。
 
 本文是 06 的唯一实时执行台账。06 保存产品与架构合同，GLOBAL TODO 保存一期 S0-S5；
 二期状态不得回填成一期完成度，也不得用旧 Extension/MiniApp 的代码量冒充 N1/M1 进度。
@@ -45,10 +48,10 @@
 
 | 分类 | 数量 | 项目 |
 | --- | ---: | --- |
-| 已关闭 | 17 | 在原有 15 项基础上关闭 `M1-0-02-A`、`M1-0-02-B` |
-| 正在实施 | 5 | `N1-1-01`、`N1-2-03`、`N1-4-01`、`N1-U-01`、`M1-0-01` |
-| 已解锁待领取 | 1 | `M1-1-01` dedicated Service Host |
-| 依赖阻塞 | 10 | 其余 N1/M1 Windows 项与最终合流 |
+| 已关闭 | 20 | 当前表内已关闭的 W0/N1/M1 项，包含 `M1-0-01`、`M1-0-02-A`、`M1-0-02-B`、`M1-1-01`、`M1-1-02` |
+| 正在实施 | 5 | `N1-1-01`、`N1-2-03`、`N1-4-01`、`N1-U-01`、M1-2 生命周期 lane |
+| 已解锁待领取 | 0 | 当前 Windows 主线无未领取的前置切片 |
+| 依赖阻塞 | 8 | 其余 N1/M1 Windows 项与最终合流 |
 | 外部原生 | 2 | `RC-MA-01`、`RC-LD-01` |
 | 明确延后 | 2 | Marketplace/远程分发、第二 Runtime |
 
@@ -428,21 +431,22 @@
 
 | ID | 状态 | Owner/写集 | 目标 | 依赖 | 最小验证 |
 | --- | --- | --- | --- | --- | --- |
-| `M1-0-01` | in-progress | MiniApp DB/domain lane；`nomifun-db/migrations/072*`、`repository/miniapp_m1*` | 全新 Product/Project/Ready/Active/Previous 数据根，不读旧 `miniapps` | `N1-V-01` | migration 072、schema/repository 定向验证通过；生产 owner 路由接入与 M1 完整 Gate 尚未完成 |
+| `M1-0-01` | closed | MiniApp DB/domain lane；`nomifun-db/migrations/072*`、`repository/miniapp_m1*` | 全新 Product/Project/Ready/Active/Previous 数据根，不读旧 `miniapps` | `N1-V-01` | migration 072、schema/repository、生产 owner 路由与 clean-start 数据根定向验证通过 |
 | `M1-0-02-A` | closed | MiniApp release lane；`nomifun-miniapp-platform/**`、MiniApp application/App Build adapter | UI-only `miniapp-release-v1` 的 Source→Build→Ready、Build Operation、immutable Release Store | `M1-0-01`,`N1-4-01` | Source owner 隔离、成功/失败/cancel、文件 bytes/digest、Ready lineage/CAS、全程 Node process=0；DB 20+6+8+31、Store 3、Application 3、App route 3、UI 9 |
-| `M1-0-02-B` | in-progress | MiniApp release lane；Publish/Catalog/Surface adapter 与 Desktop Workshop | Ready→Manual Publish→Surface→Rollback、纯 UI auto Publish、Host KV | `M1-0-02-A`,`M1-1-01` | 先实现 UI-only Release/Catalog 原子切换、Active/Previous pointer CAS、Surface epoch fence；真实 Service/Bridge 继续留在 `M1-1-01` |
-| `M1-1-01` | blocked | Service/Bridge lane | 单 `main.mjs`、dedicated Host、on-demand/continuous、MessageChannel epoch fence | `M1-0-02`,`N1-1-02` | old port callback rejected；one App crash isolation |
-| `M1-1-02` | blocked | Managed data lane | UI/Service KV、Files、Private SQLite、additive migration ledger | `M1-1-01` | owner namespace/SQL boundary/migration |
-| `M1-2-01` | blocked | Lifecycle lane | Enable/Disable/Trash/Restore/Permanent Delete、Share/Backup Import-as-new | `M1-1-02` | resumable delete；no plaintext credential |
+| `M1-0-02-B` | closed | MiniApp release lane；Publish/Catalog/Surface adapter 与 Desktop Workshop | Ready→Manual Publish→Surface→Rollback、纯 UI auto Publish、Host KV | `M1-0-02-A`,`M1-1-01` | UI-only Release/Catalog 原子切换、Active/Previous pointer CAS、Surface epoch fence、UI 定向验证通过 |
+| `M1-1-01` | closed | Service/Bridge lane；`nomifun-miniapp-platform/src/{service_host,service_process,service_runtime}.rs` | 单 `main.mjs`、dedicated Host、on-demand/continuous、MessageChannel epoch fence | `M1-0-02`,`N1-1-02` | 真实 Node NDJSON 3、Service application 1、Runtime candidate 3、旧 generation/崩溃隔离/容量/backoff 通过 |
+| `M1-1-02` | closed | Managed data lane；`managed_storage.rs`、Service IPC、M1 cutover | UI/Service KV、Files、Private SQLite、authorizer、参数化 SQL、additive migration ledger | `M1-1-01` | production SQLite Storage 1、真实 Node Storage IPC 3、authorizer/批量回滚/启动与取消边界通过 |
+| `M1-2-01` | in-progress | Lifecycle lane；MiniApp lifecycle/application/data cleanup | Enable/Disable/Trash/Restore/Permanent Delete、Share/Backup Import-as-new | `M1-1-02` | 下一切片；当前尚未实现 durable delete、数据导出/导入与恢复 Reconciler |
 | `M1-U-01` | blocked | UI lane；整体重写 `pages/miniApps/**` | Library/Workshop/Surface，删除 Guid/Conversation 旧 MiniApp 模式 | `M1-0-02`,`M1-1-01` | real Desktop workflow/build/a11y |
 | `M1-V-01` | blocked | 集成 Owner | Windows M1 contract/integration/fault/product/NSIS candidate | 所有 M1 项 | UI-only + Service representative lifecycle |
 
-`nomifun-miniapp-platform` 的内存 Service Host、Bridge 和 Storage 合同不等于
-production adapter。`M1-0-02-A` 与 `M1-0-02-B` 现在已经完成 UI-only 的生产
-Source→Build→Ready→Publish→Surface→Rollback 写集；本轮 Surface Bridge 只处理
-Host KV，且由固定 Build bootstrap 完成 nonce handshake，不代表 dedicated Service Host、
-Files、Private SQLite 或 Service consumer 已交付。下一执行切片为 `M1-1-01`，继续按
-依赖顺序实现真实 Service Host/Bridge。
+`nomifun-miniapp-platform` 的内存实现仍保留作为合同测试，但不再承担生产事实。当前
+生产组合已接入 dedicated Node Service Host、candidate Runtime 验证、Host-owned
+Surface/Service Bridge、owner-scoped Files、Host-managed Private SQLite 和持久
+Migration ledger。Node Service 的 Storage 请求使用同一私有 NDJSON 通道，数据库路径
+不进入 Service SDK/HTTP/renderer wire；Publish 在旧 Host 停止后执行 pending additive
+Migration，再启动目标 Host，失败时保留旧 Active 并重建旧 Service。下一执行切片为
+`M1-2-01`，不把本轮实现误报为 Windows Candidate 或跨平台完成。
 
 ## 最终候选与外部验证
 
@@ -488,3 +492,44 @@ Files、Private SQLite 或 Service consumer 已交付。下一执行切片为 `M
    macOS/Linux 或手机模式验证。M1-1-01 的下一步是把 Service Host、真实 process
    adapter、Service Bridge、Files/Private SQLite 生产接入；Windows 完成前不交接外部
    原生环境。
+
+## 2026-09-09 M1-1-01 / M1-1-02 实现收口
+
+1. `M1-1-01` 已完成 Windows 主机实现：
+   - 一个 MiniApp 一个 dedicated Node Service Host，固定 `on_demand` /
+     `continuous` 生命周期、全局容量、idle reap、有限 crash backoff 和用户 Retry；
+   - Node process 使用私有 NDJSON IPC，Hello、release、runtime、module digest、
+     host generation 和 service run key 精确绑定；EOF、crash、timeout、迟到响应和
+     process tree cleanup 均 fail closed；
+   - Surface Service Bridge 保持 Host-owned scope，旧 Active epoch / generation 的
+     callback 和 port 不可继续调用；
+   - Runtime switch participant 已从生产 `NotCovered` 改为对 enabled Service 逐项使用
+     candidate Node 启动验证，返回精确 MiniApp identity。
+2. `M1-1-02` 已完成生产接线：
+   - `SqliteMiniAppManagedStorage` 使用 owner + MiniApp 路径边界，Files 目录逐级拒绝
+     symlink/reparse/junction 越界；Private SQLite 路径不进入 renderer、HTTP 或 Service
+     database API；
+   - Service KV 复用 M1 `miniapp_kv` 的 owner-scoped revision/tombstone/CAS；
+   - Private SQLite 只接受参数化单语句 `query` / `execute` 和最多 64 条 DML `batch`；
+     authorizer 拒绝 Attach、Detach、任意 PRAGMA、DDL、trigger/view、Host metadata
+     和非主数据库访问；batch 事务权限与 Host migration schema 权限分离；
+   - Migration 使用 immutable ID + digest ledger，在一个 SQLite transaction 中只执行
+     CREATE TABLE/INDEX 与 ADD COLUMN；ledger digest/schema epoch 在重启后重算并校验；
+   - Publish 在旧 Service 停止后执行 pending Migration、重新解析 Storage descriptor、
+     启动目标 Service，再进入 pointer/Catalog transaction；目标失败时恢复当前 Active，
+     不执行反向 Migration；
+   - Node Service `context.storage` 通过同一私有 IPC 提供 KV、Files `filesDir` 和隐藏
+     Private DB API；Storage callback 异步化并携带 parent invocation cancellation。
+3. 定向证据：
+   - `cargo check --locked -p nomifun-app -p nomifun-miniapp-platform -p nomifun-db`；
+   - `cargo test --locked -p nomifun-miniapp-platform --lib --test service_process
+     --test service_application --test managed_storage --test service_storage_ipc`；
+   - 真实 Node Service process 3、生产 SQLite Storage 1、Node Storage IPC 3、Runtime
+     candidate validation 3、App runtime participant 1 均通过；
+   - `cargo fmt -p nomifun-miniapp-platform -- --check`、`cargo fmt -p nomifun-app
+     -- --check`、`git diff --check` 通过。
+   - 代码 checkpoint：`2520904e9`（生产 Storage 初接入）、
+     `da2ce11a8`（Storage lifecycle/IPC hardening）。
+4. 当前边界：本收口不关闭 `M1-2-01` 的 Trash/Restore/Permanent Delete、Share/
+   Backup Import-as-new、Service Test 临时 namespace/receipt、Windows NSIS Candidate
+   或 macOS/Linux 原生验证；这些继续按依赖推进。
