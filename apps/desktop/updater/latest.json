@@ -1,7 +1,7 @@
 {
   "version": "0.7.6",
   "notes": "# NomiFun v0.7.6\n\n## 中文\n\n- **macOS 首发产物。** 本次先发布 Apple Silicon 与 Intel macOS DMG、Tauri updater 签名包和自动更新清单；Windows / Linux 可按同一版本后续补充。\n- **创意工坊画布体验优化。** 画布节点连接、节点面板、图片预览、尺寸选择、模型选择和 IME 输入组合状态得到优化，编辑与拖拽交互更稳定。\n- **创意素材与视频工作流增强。** 素材库增加更完整的媒体预览、视频播放、不可用素材提示和操作菜单，图片/视频工作台与 Director 相关界面完成多处对齐与布局优化。\n- **素材删除与历史保护更稳。** 删除创意素材时保留历史可追溯信息，并增加数据库迁移与删除保护，降低误删内容影响既有任务、画布或历史记录的风险。\n- **社群联系方式更新。** 更新 README 与文档中的企业微信 / 微信群二维码资源。\n\n## English\n\n- **macOS-first artifacts.** This release starts with Apple Silicon and Intel macOS DMGs, signed Tauri updater packages, and the automatic-update manifest; Windows and Linux artifacts can be appended under the same version later.\n- **Creative Studio canvas polish.** Canvas node linking, node panels, image preview, size selection, model selection, and IME composition handling have been improved for steadier editing and drag interactions.\n- **Richer creative asset and video workflows.** The asset library now has more complete media previews, video playback, unavailable-asset states, and action menus, with layout and alignment refinements across image/video workbenches and Director surfaces.\n- **Safer asset deletion and history retention.** Creative asset deletion now preserves traceable history and adds database migrations plus deletion guards, reducing the chance that deleted content disrupts existing tasks, canvases, or history.\n- **Community contact updates.** README and documentation QR code assets for WeCom / WeChat groups have been refreshed.",
-  "pub_date": "2026-09-07T15:13:04.269Z",
+  "pub_date": "2026-09-08T07:14:50.318Z",
   "platforms": {
     "darwin-aarch64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODRWZGRFak9MbjJpSHVmWkRSMmw5L1JsVjlncjBnbjJCT2ZHU0hHczYyTlFYYXhBSEYzVmp6QnlaWG9BMVk1c2c0VEJaeGtrb1M3M2hQRVBST0UzblE0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4NzkzMTIxCWZpbGU6Tm9taUZ1bi5hcHAudGFyLmd6Cmt2ZGxoa0JoSFpUQXhhN2c0aDd5SUtYU1JTbTVCTk96NFR5cnRCa0l2TlhXN0RJUkpHbjJCb0h4NmZMandBeDhtS2hEQ0ZGMjJxY3pMTkovWmV2SEJ3PT0K",
@@ -10,6 +10,10 @@
     "darwin-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxOHlKQTZyOHFuR2EyRkZNMG9ERTFaVjYvckFpOEc5TW4zSnp4NUVmTnpHWG5ycHYxR2xOb2xjdmpGR01vYm1Lczc1bysxWlN1d3NvL2R6REIyZ2sxOUE0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4NzkzOTI2CWZpbGU6Tm9taUZ1bl8wLjcuNl94NjQuYXBwLnRhci5negpsbFBiUU1lWVR5ZXRubU00akFONlZ0R3BSSEJKUFZNdmNoYzR1bTNzL1BNZmJuQ1VkdEJHU3VQdDdhY2tST29EOGlhVTl3Z3BkWEFBK2tmMVk4MEtEQT09Cg==",
       "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.7.6/NomiFun_0.7.6_x64.app.tar.gz"
+    },
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSU2VhcGdMaWVxODVuSTArQ2pqcTVMMG5sNjZQdmRJdkptSzRVeG9kQ0ovYlJxTDhVcFQzWERyYlE3UGRmVWtGQjRHa0Yzd0FaTVNFSlgyNVBYZFA0R0h5Nm8yNWl0YmdvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4ODUxNjkwCWZpbGU6Tm9taUZ1bl8wLjcuNl94NjQtc2V0dXAuZXhlCnpweGNwbk44UENqcStHOGlQWHNuM3haMG84U0xuOHY1aHJLWThtZjVIU3Z5TlJLbWd3Z2NyMkc5YWM3eG9YcEdLeGxWRGQ5SW9uTXRkNzlUS0N2SEFnPT0K",
+      "url": "https://github.com/nomifun/nomifun-desktop/releases/download/v0.7.6/NomiFun_0.7.6_x64-setup.exe"
     }
   }
 }
