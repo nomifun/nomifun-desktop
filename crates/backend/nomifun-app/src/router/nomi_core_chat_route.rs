@@ -48,6 +48,23 @@ impl DefaultChatRouteResolver for NomiCoreDefaultChatRouteResolver {
         &self,
         _owner: &UserId,
     ) -> Result<Option<ChatRouteRecord>, ControlPlaneError> {
+        self.resolve_route(None).await
+    }
+
+    async fn resolve_selected_chat_route(
+        &self,
+        _owner: &UserId,
+        model: &nomifun_api_types::AgentChatModelSelectionDto,
+    ) -> Result<Option<ChatRouteRecord>, ControlPlaneError> {
+        self.resolve_route(Some(model)).await
+    }
+}
+
+impl NomiCoreDefaultChatRouteResolver {
+    async fn resolve_route(
+        &self,
+        selected: Option<&nomifun_api_types::AgentChatModelSelectionDto>,
+    ) -> Result<Option<ChatRouteRecord>, ControlPlaneError> {
         let providers = SqliteProviderRepository::new(self.pool.clone())
             .list()
             .await
@@ -103,6 +120,8 @@ impl DefaultChatRouteResolver for NomiCoreDefaultChatRouteResolver {
         let mut rows = capabilities
             .into_iter()
             .filter(|capability| capability.task == "chat")
+            .filter(|capability| selected.is_none_or(|model|
+                capability.provider_id == model.provider_id && capability.model == model.model))
             .filter_map(|capability| {
                 let provider_key = provider_order.get(&capability.provider_id)?;
                 let model_key = (

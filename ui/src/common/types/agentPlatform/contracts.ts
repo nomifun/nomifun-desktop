@@ -386,6 +386,7 @@ export interface CreateAgentPresetRequest {
 }
 
 export interface CreateAgentPresetFromTemplateRequest {
+  model?: { provider_id: string; model: string };
   reuse_existing?: boolean;
   display_name: string;
   description?: string;
@@ -496,6 +497,7 @@ export interface SessionCursor {
 }
 
 export interface CreateAgentSessionRequest {
+  model?: { provider_id: string; model: string };
   preset_id: AgentPresetId;
   title?: string;
 }

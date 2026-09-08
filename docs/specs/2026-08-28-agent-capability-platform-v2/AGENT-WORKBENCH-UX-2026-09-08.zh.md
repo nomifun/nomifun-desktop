@@ -68,3 +68,15 @@
 本次前端全量测试 3274 项通过，后端控制面 22 项通过，类型检查、i18n 检查与生产构建通过。新增测试覆盖原地选择与勾选、首次发送才准备配置、通过冻结会话传递首条消息、失败不导航、并发复用、用户隔离、模型配置比较及个人修改保留。
 
 真实隔离 Router 测试 `official_agent_direct_launch_reuses_configuration_and_creates_sessions` 通过：重复准备返回同一个 Preset/Revision，创建两个不同会话并绑定同一份 Snapshot，数据库仅持久化一份 Revision。本次不调用真实模型服务。
+
+## 会话模型选择修正
+
+移除首页 `isDefaultAgent` 对模型选择器的显示限制。默认、官方和个人 Agent 都保留模型入口，切换 Agent 不清空模型或输入；所有发送方式在发起请求前检查是否已选模型。
+
+模板准备请求和 AgentSession 创建请求接受可选的 `{ provider_id, model }` 产品选择。服务端从当前已启用的 Chat 目录精确解析对应服务商和模型，生成协议、路由和凭据引用；前端不构造这些内部事实。所选模型必须精确匹配，未知或不可用模型返回错误，不退回默认模型。明确选择模型时，冻结的路由不额外附带其他模型作为候选。
+
+个人 Agent 的模型覆盖只影响新会话：服务端保留能力、技能、角色、工作要求和运行配置，编译一份独立的会话配置并按相同配置复用。原 Preset 的稳定版本及已有会话保持不变。内部配置在存储中显式标记 `session_only`，不进入“我的 Agent”列表。Nomi-core 使用追加迁移 `076_agent_session_model_configurations.sql`，原有数据默认标记为非内部配置；独立平台存储在现有显示元数据中保存同一标记。客户端/API 契约升至 26。
+
+新增真实隔离接口测试 `agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_unchanged` 检查 Conversation 模型、冻结路由、原 Agent 不变、内部配置复用与列表隔离，以及未知模型拒绝。前端发送测试验证官方模板与个人 Agent 均发送当前模型身份，原先“只有默认 Agent 显示模型选择器”的断言已改为三类 Agent 均保留入口。
+
+浏览器测试使用实际 Agent/模型选择器组件与独立测试模型目录，已操作官方 Agent → 模型 B → 个人 Agent，并确认模型 B 和输入内容保留。预览路径仍为 `#/selector`；不连接用户模型服务，不把预览视为真实 Tauri 或模型请求验收。

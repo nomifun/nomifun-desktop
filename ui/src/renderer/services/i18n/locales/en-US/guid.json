@@ -12,7 +12,7 @@
     "empty": "No matching Agents or templates",
     "loading": "Loading Agents…",
     "loadFailed": "Couldn't load the Agent list",
-    "modelNeeded": "Configure an available default chat model in model settings, then send again. Your message and Agent selection have been kept.",
+    "modelNeeded": "The selected model is unavailable for chat. Choose an available model or check its configuration, then retry. Your message and Agent selection have been kept.",
     "capabilitiesNeeded": "Some capabilities required by this official Agent are not implemented in this build. Your message and selection have been kept. Choose another Agent or adjust capabilities in Manage Agents.",
     "launchFailed": "This official Agent could not start. Check the service and retry. Your message and selection have been kept."
   },

@@ -149,8 +149,8 @@ async fn load_preset(
     pool: &SqlitePool,
     preset_id: &AgentPresetId,
 ) -> Result<Option<StoredPreset>, ControlPlaneError> {
-    let row: Option<(String, String, String, String, Option<String>, Option<i64>)> = sqlx::query_as(
-        "SELECT preset_id, owner_user_id, source_kind, display_name, description, current_revision \
+    let row: Option<(String, String, String, String, Option<String>, Option<i64>, bool)> = sqlx::query_as(
+        "SELECT preset_id, owner_user_id, source_kind, display_name, description, current_revision, session_only \
          FROM nomi_agent_presets \
          WHERE preset_id = ? AND retired_at_ms IS NULL",
     )
@@ -158,7 +158,7 @@ async fn load_preset(
     .fetch_optional(pool)
     .await
     .map_err(sql)?;
-    let Some((id, owner, source, display_name, description, current_revision)) = row else {
+    let Some((id, owner, source, display_name, description, current_revision, session_only)) = row else {
         return Ok(None);
     };
     let preset_id = AgentPresetId::from(id);
@@ -182,6 +182,7 @@ async fn load_preset(
         None => None,
     };
     Ok(Some(StoredPreset {
+        session_only,
         preset: AgentPreset {
             preset_id,
             owner_user_id: Some(parse_owner(&owner)?),
@@ -344,8 +345,8 @@ async fn insert_preset_tx(
     }
     sqlx::query(
         "INSERT INTO nomi_agent_presets \
-         (preset_id, owner_user_id, source_kind, display_name, description, current_revision, created_at) \
-         VALUES (?, ?, 'user', ?, ?, ?, ?)",
+         (preset_id, owner_user_id, source_kind, display_name, description, current_revision, created_at, session_only) \
+         VALUES (?, ?, 'user', ?, ?, ?, ?, ?)",
     )
     .bind(preset.preset.preset_id.as_ref())
     .bind(owner.as_ref())
@@ -360,6 +361,7 @@ async fn insert_preset_tx(
             .transpose()?,
     )
     .bind(created_at.max(0))
+    .bind(preset.session_only)
     .execute(&mut **tx)
     .await
     .map_err(sql)?;
@@ -939,6 +941,7 @@ mod tests {
 
     fn user_preset(id: &str, owner: &UserId) -> StoredPreset {
         StoredPreset {
+            session_only: false,
             preset: AgentPreset {
                 preset_id: AgentPresetId::from(id),
                 owner_user_id: Some(owner.clone()),

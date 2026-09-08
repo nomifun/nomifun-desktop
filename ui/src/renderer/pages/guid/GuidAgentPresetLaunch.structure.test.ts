@@ -76,7 +76,7 @@ describe('Guid default Nomi and AgentPreset launch behavior', () => {
     expect(selection.includes('presets[0]')).toBe(false);
   });
 
-  test('exposes the model selector only in default Nomi mode', () => {
+  test('keeps the model selector available for default, official and personal Agents', () => {
     const page = readSource(new URL('./GuidPage.tsx', import.meta.url));
     const actionRow = readSource(
       new URL('./components/GuidActionRow.tsx', import.meta.url)
@@ -88,8 +88,9 @@ describe('Guid default Nomi and AgentPreset launch behavior', () => {
       )
     ).toBe(true);
     expect(
-      page.includes('const modelSelectorNode = isDefaultAgent ? (')
+      page.includes('const modelSelectorNode = (')
     ).toBe(true);
+    expect(page.includes('const modelSelectorNode = isDefaultAgent ? (')).toBe(false);
     expect(page.includes('<GuidModelSelector')).toBe(true);
     expect(page.includes('modelSelectorNode={modelSelectorNode}')).toBe(true);
     expect(actionRow.includes('modelSelectorNode?: React.ReactNode;')).toBe(
@@ -119,19 +120,19 @@ describe('Guid default Nomi and AgentPreset launch behavior', () => {
     expect(payload.includes('preset_id')).toBe(false);
     expect(
       send.includes(
-        "selection.kind === 'default'\n      ? Boolean(current_model)"
+        'const hasLaunchTarget = Boolean(current_model)'
       )
     ).toBe(true);
   });
 
-  test('preset mode submits only preset_id and title to the high-level session API', () => {
+  test('Agent launch submits a model identity without client-owned route or binding facts', () => {
     const send = readSource(new URL('./hooks/useGuidSend.ts', import.meta.url));
     const payload = extractObjectArgument(
       send,
       'ipcBridge.agentPlatform.sessions.create.invoke'
     );
 
-    expect(topLevelKeys(payload)).toEqual(['preset_id', 'title']);
+    expect(topLevelKeys(payload)).toEqual(['preset_id', 'title', 'model']);
     expect(payload.includes('preset_id: launchPreset.preset_id')).toBe(true);
     expect(payload.includes('title: entryPlan.conversationName')).toBe(true);
 
@@ -140,9 +141,8 @@ describe('Guid default Nomi and AgentPreset launch behavior', () => {
       'AgentBindingValue',
       'snapshot',
       'revision',
-      'current_model',
-      'model',
-      'provider',
+      'credential',
+      'base_url',
       'skill',
       'mcp',
     ]) {

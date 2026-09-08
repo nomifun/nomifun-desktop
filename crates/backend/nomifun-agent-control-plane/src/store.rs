@@ -12,6 +12,7 @@ use crate::ControlPlaneError;
 
 #[derive(Clone, Debug)]
 pub struct StoredPreset {
+    pub session_only: bool,
     pub preset: AgentPreset,
 }
 
@@ -547,6 +548,7 @@ mod tests {
 
     fn preset(id: &str, owner: Option<&UserId>, source: AgentPresetSource) -> StoredPreset {
         StoredPreset {
+            session_only: false,
             preset: AgentPreset {
                 preset_id: AgentPresetId::from(id),
                 owner_user_id: owner.cloned(),

@@ -393,6 +393,7 @@ mod tests {
         let preset_id = AgentPresetId::from("preset-1");
         store
             .insert_preset(StoredPreset {
+                session_only: false,
                 preset: AgentPreset {
                     preset_id: preset_id.clone(),
                     owner_user_id: Some(owner.clone()),

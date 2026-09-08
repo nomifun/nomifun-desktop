@@ -4112,7 +4112,7 @@ async fn create_nomi_core_agent_session(
 ) -> Result<Json<ApiResponse<CreateAgentSessionResponseDto>>, NomiCoreApiError> {
     let binding = state
         .control_plane
-        .resolve_agent_session_binding(&owner.0, &request.preset_id)
+        .resolve_agent_session_binding_with_model(&owner.0, &request.preset_id, request.model.as_ref())
         .await?;
     let projection =
         resolve_saved_binding_projection(&state, &owner, &binding, request.title.as_deref())
