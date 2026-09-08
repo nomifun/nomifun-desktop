@@ -9,6 +9,7 @@ import { useAgentPresets } from '@/renderer/hooks/agent/useAgentPresets';
 import type { AgentPresetSummary, OfficialPresetTemplate } from '@/common/types/agentPlatform';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { isExecutableAgentPreset } from './agentSelectionUtils';
+import { TEMPLATE_I18N_PATH } from '../../agentSettings/model';
 import type {
   ExecutableAgentPreset,
   GuidAgentSelection,
@@ -17,6 +18,7 @@ import type {
 export type GuidAgentSelectionResult = {
   selection: GuidAgentSelection;
   selectedPreset: ExecutableAgentPreset | undefined;
+  selectedTemplate: OfficialPresetTemplate | undefined;
   presets: ExecutableAgentPreset[];
   draftPresets: AgentPresetSummary[];
   officialTemplates: OfficialPresetTemplate[];
@@ -45,7 +47,9 @@ const isGuidAgentSelection = (
   const candidate = value as Record<string, unknown>;
   return (
     candidate.kind === 'default' ||
-    (candidate.kind === 'preset' && typeof candidate.presetId === 'string')
+    (candidate.kind === 'preset' && typeof candidate.presetId === 'string') ||
+    (candidate.kind === 'template' && typeof candidate.templateKey === 'string' &&
+      Object.hasOwn(TEMPLATE_I18N_PATH, candidate.templateKey))
   );
 };
 
@@ -62,7 +66,7 @@ const saveSelection = (selection: GuidAgentSelection): void => {
     });
 };
 
-/** Selects plain Nomi or an executable user AgentPreset from the Workbench. */
+/** Selects Nomi, an official Agent, or a saved personal Agent in place. */
 export const useGuidAgentSelection = ({
   resetAgentSelection = false,
   selectedAgentPresetId,
@@ -115,6 +119,9 @@ export const useGuidAgentSelection = ({
     selection.kind === 'preset' && !selectedPreset && loadError
       ? DEFAULT_AGENT_SELECTION
       : selection;
+  const selectedTemplate = selection.kind === 'template'
+    ? library?.official_templates.find((template) => template.template_key === selection.templateKey)
+    : undefined;
 
   const navigationRequestHandledRef = useRef(false);
   const previousLocationKeyRef = useRef(locationKey);
@@ -165,7 +172,8 @@ export const useGuidAgentSelection = ({
       resetAgentSelection ||
       selectedAgentPresetId ||
       selection.kind === 'default' ||
-      selectedPreset
+      selectedPreset ||
+      selectedTemplate
     ) {
       return;
     }
@@ -177,6 +185,7 @@ export const useGuidAgentSelection = ({
     resetAgentSelection,
     selectedAgentPresetId,
     selectedPreset,
+    selectedTemplate,
     selectDefaultAgent,
     selection.kind,
   ]);
@@ -184,6 +193,7 @@ export const useGuidAgentSelection = ({
   return {
     selection: effectiveSelection,
     selectedPreset,
+    selectedTemplate,
     presets,
     draftPresets,
     officialTemplates: library?.official_templates ?? [],

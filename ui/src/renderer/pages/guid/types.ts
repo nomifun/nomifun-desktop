@@ -7,7 +7,7 @@
 import type { GuidAgentSelectionPreference } from '@/common/config/configKeys';
 import type { AgentPresetSummary } from '@/common/types/agentPlatform';
 
-/** The quick-start surface either uses plain Nomi or one frozen AgentPreset. */
+/** Quick start selects Nomi, an official template, or a saved personal Agent. */
 export type GuidAgentSelection = GuidAgentSelectionPreference;
 
 /** A saved AgentPreset that can be launched because it has a stable revision. */

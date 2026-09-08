@@ -1518,6 +1518,7 @@ mod tests {
                 &owner,
                 "chat.minimal",
                 CreateAgentPresetFromTemplateRequest {
+                    reuse_existing: false,
                     display_name: "Remote smoke preset".to_owned(),
                     description: None,
                     model_route_refs: std::collections::BTreeMap::new(),

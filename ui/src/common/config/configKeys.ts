@@ -1,10 +1,12 @@
 import type { SpeechToTextConfig, TextToSpeechConfig } from '@/common/types/provider/speech';
 import type { ICssTheme } from '@/common/config/storage';
 import type { AgentPresetId, CompanionId, ProviderId } from '@/common/types/ids';
+import type { OfficialPresetKey } from '@/common/types/agentPlatform';
 import type { LanguageMode } from './i18n';
 
 export type GuidAgentSelectionPreference =
   | { kind: 'default' }
+  | { kind: 'template'; templateKey: OfficialPresetKey }
   | { kind: 'preset'; presetId: AgentPresetId };
 
 // `auto` (default), `headless` and `external` are the three supported user

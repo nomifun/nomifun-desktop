@@ -132,7 +132,7 @@ describe('Guid default Nomi and AgentPreset launch behavior', () => {
     );
 
     expect(topLevelKeys(payload)).toEqual(['preset_id', 'title']);
-    expect(payload.includes('preset_id: selectedPreset.preset_id')).toBe(true);
+    expect(payload.includes('preset_id: launchPreset.preset_id')).toBe(true);
     expect(payload.includes('title: entryPlan.conversationName')).toBe(true);
 
     for (const forbidden of [

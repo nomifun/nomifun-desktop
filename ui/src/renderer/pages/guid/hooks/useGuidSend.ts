@@ -28,6 +28,9 @@ import type {
   GuidAgentSelection,
 } from '../types';
 import { isAutoWorkEntry, planGuidEntry } from './autoWorkEntry';
+import type { OfficialPresetTemplate } from '@/common/types/agentPlatform';
+import { TEMPLATE_I18N_PATH } from '../../agentSettings/model';
+import { officialAgentLaunchError, prepareOfficialAgent } from './officialAgentLaunch';
 
 export type GuidSendDeps = {
   input: string;
@@ -40,6 +43,7 @@ export type GuidSendDeps = {
   loading: boolean;
   selection: GuidAgentSelection;
   selectedPreset: ExecutableAgentPreset | undefined;
+  selectedTemplate?: OfficialPresetTemplate;
   current_model: TProviderWithModel | undefined;
   applyAdvancedConfig?: (conversationId: ConversationId) => Promise<void>;
   autoWork: AutoWorkDraftValue;
@@ -76,6 +80,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     loading,
     selection,
     selectedPreset,
+    selectedTemplate,
     current_model,
     applyAdvancedConfig,
     autoWork,
@@ -115,14 +120,28 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
       }
       conversationId = conversation.id;
     } else {
+      let launchPreset = selectedPreset;
+      if (selection.kind === 'template') {
+        if (!selectedTemplate || selectedTemplate.template_key !== selection.templateKey) {
+          throw new Error('AGENT_PRESET_REQUIRED');
+        }
+        try {
+          launchPreset = await prepareOfficialAgent(
+            selectedTemplate,
+            t(`agentSettings.template.${TEMPLATE_I18N_PATH[selection.templateKey]}.name`),
+          );
+        } catch (error) {
+          throw new Error(officialAgentLaunchError(error, t));
+        }
+      }
       if (
-        !selectedPreset?.current_stable_revision ||
-        selectedPreset.preset_id !== selection.presetId
+        !launchPreset?.current_stable_revision ||
+        (selection.kind === 'preset' && launchPreset.preset_id !== selection.presetId)
       ) {
         throw new Error('AGENT_PRESET_REQUIRED');
       }
       const session = await ipcBridge.agentPlatform.sessions.create.invoke({
-        preset_id: selectedPreset.preset_id,
+        preset_id: launchPreset.preset_id,
         title: entryPlan.conversationName,
       });
       conversationId = parseConversationId(session.agent_session_id);
@@ -184,6 +203,8 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     selectedWorkspace,
     selection,
     selectedPreset,
+    selectedTemplate,
+    t,
   ]);
 
   const sendMessageHandler = useCallback(() => {
@@ -193,6 +214,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
       Message.warning(t('conversation.noModelConfigured'));
       return;
     }
+    if (selection.kind === 'template' && selectedTemplate?.template_key !== selection.templateKey) return;
     if (
       selection.kind === 'preset' &&
       (!selectedPreset?.current_stable_revision ||
@@ -245,6 +267,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     resourceResolutionReady,
     selection,
     selectedPreset,
+    selectedTemplate,
     setDir,
     setFiles,
     setInput,
@@ -259,7 +282,9 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
   const hasLaunchTarget =
     selection.kind === 'default'
       ? Boolean(current_model)
-      : Boolean(
+      : selection.kind === 'template'
+        ? Boolean(selectedTemplate?.template_key === selection.templateKey && resourceResolutionReady)
+        : Boolean(
           selectedPreset?.current_stable_revision &&
             selectedPreset.preset_id === selection.presetId &&
             resourceResolutionReady

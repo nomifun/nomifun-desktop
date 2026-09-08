@@ -61,6 +61,7 @@ pub struct AgentControlPlane {
     templates: OfficialTemplateCatalog,
     compiler: PresetPreviewCompiler,
     default_chat_route_resolver: Option<Arc<dyn DefaultChatRouteResolver>>,
+    template_launch_lock: tokio::sync::Mutex<()>,
 }
 
 impl AgentControlPlane {
@@ -80,6 +81,7 @@ impl AgentControlPlane {
             templates,
             compiler,
             default_chat_route_resolver: None,
+            template_launch_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -290,6 +292,13 @@ impl AgentControlPlane {
         template_id: &str,
         request: CreateAgentPresetFromTemplateRequest,
     ) -> Result<AgentPresetEditorResponse, ControlPlaneError> {
+        // Serialize on-demand preparation, so concurrent sends do not each
+        // create another identical personal configuration.
+        let _launch_guard = if request.reuse_existing {
+            Some(self.template_launch_lock.lock().await)
+        } else {
+            None
+        };
         let template_key = parse_official_key(template_id)
             .ok_or_else(|| not_found("OfficialPresetTemplate"))?;
         let seed = self
@@ -299,8 +308,9 @@ impl AgentControlPlane {
         let display_name = nonempty_name(request.display_name)?;
         let mut model_route_refs = request.model_route_refs;
         let mut chat_route_records = request.chat_route_records;
-        if !model_route_refs.contains_key(CHAT_MODEL_TASK)
-            && !chat_route_records.contains_key(CHAT_MODEL_TASK)
+        let uses_default_route = !model_route_refs.contains_key(CHAT_MODEL_TASK)
+            && !chat_route_records.contains_key(CHAT_MODEL_TASK);
+        if uses_default_route
             && let Some(record) =
                 self.resolve_default_chat_route(owner).await?
         {
@@ -337,6 +347,23 @@ impl AgentControlPlane {
             instructions: String::new(),
             starter_prompts: Vec::new(),
         };
+        if request.reuse_existing {
+            let requested_payload: nomifun_agent_contracts::AgentPresetRevisionPayload = wire_cast(&document)?;
+            for preset in self.store.list_presets(owner).await? {
+                if preset.preset.source != AgentPresetSource::User {
+                    continue;
+                }
+                let Some(revision) = self.current_revision(&preset).await? else {
+                    continue;
+                };
+                if template_launch_payload_matches(&revision.payload, &requested_payload, uses_default_route)
+                    && self.current_snapshot(Some(&revision)).await?.is_some()
+                {
+                    let existing = wire_cast(&revision.payload)?;
+                    return editor_response(preset, Some(revision), existing, None);
+                }
+            }
+        }
         self.create_with_initial_revision(
             owner,
             AgentPresetId::from(Uuid::now_v7().to_string()),
@@ -1369,6 +1396,30 @@ fn nonempty_name(value: String) -> Result<String, ControlPlaneError> {
     Ok(value)
 }
 
+fn template_launch_payload_matches(
+    saved: &nomifun_agent_contracts::AgentPresetRevisionPayload,
+    requested: &nomifun_agent_contracts::AgentPresetRevisionPayload,
+    uses_default_route: bool,
+) -> bool {
+    let mut requested = requested.clone();
+    if uses_default_route
+        && let Some(saved_route) = saved.chat_route_records.get(CHAT_MODEL_TASK)
+        && let Some(requested_route) = requested.chat_route_records.get_mut(CHAT_MODEL_TASK)
+    {
+        // The host allocates fresh opaque aliases whenever it resolves the
+        // default model. Compare all provider/model/config/feature facts while
+        // retaining the saved aliases. Explicit caller routes remain exact.
+        requested_route.primary.model_route_id = saved_route.primary.model_route_id.clone();
+        requested_route.primary.credential_ref = saved_route.primary.credential_ref.clone();
+        for (candidate, saved_candidate) in requested_route.failovers.iter_mut().zip(&saved_route.failovers) {
+            candidate.model_route_id = saved_candidate.model_route_id.clone();
+            candidate.credential_ref = saved_candidate.credential_ref.clone();
+        }
+        requested.model_route_refs.insert(CHAT_MODEL_TASK.into(), saved_route.primary.model_route_id.clone());
+    }
+    saved == &requested
+}
+
 fn parse_official_key(value: &str) -> Option<OfficialPresetKey> {
     OfficialPresetKey::ALL
         .into_iter()
@@ -1673,6 +1724,7 @@ mod tests {
                 &owner,
                 "chat.minimal",
                 CreateAgentPresetFromTemplateRequest {
+                    reuse_existing: false,
                     display_name: "Minimal".into(),
                     description: None,
                     model_route_refs: BTreeMap::new(),
@@ -1722,6 +1774,96 @@ mod tests {
         assert!(reloaded.draft.source_template_key.is_none());
     }
 
+    fn official_launch_request(reuse_existing: bool) -> CreateAgentPresetFromTemplateRequest {
+        CreateAgentPresetFromTemplateRequest {
+            reuse_existing,
+            display_name: "Minimal".into(),
+            description: None,
+            model_route_refs: BTreeMap::new(),
+            chat_route_records: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn official_launch_matches_default_route_facts_without_ignoring_configuration_changes() {
+        let mut document = empty_document();
+        document.model_route_refs.insert(CHAT_MODEL_TASK.into(), "0190f5fe-7c00-7a00-8000-000000000010".into());
+        document.chat_route_records.insert(CHAT_MODEL_TASK.into(), json!({
+            "schema": "nomifun.chat-route-record.v1", "task": "agent_chat",
+            "primary": {
+                "model_route_id": "0190f5fe-7c00-7a00-8000-000000000010", "model_route_revision": 1,
+                "provider_id": "0190f5fe-7c00-7a00-8000-000000000011", "model": "test-model",
+                "protocol": "openai_chat", "connection_config_ref": "default",
+                "config_revision_digest": "a".repeat(64), "credential_ref": "opaque-alias-1",
+                "features": ["text_input", "text_output"]
+            }, "failovers": []
+        }));
+        let saved: nomifun_agent_contracts::AgentPresetRevisionPayload = wire_cast(&document).unwrap();
+        let mut current = saved.clone();
+        current.model_route_refs.insert(CHAT_MODEL_TASK.into(), "0190f5fe-7c00-7a00-8000-000000000012".into());
+        let primary = &mut current.chat_route_records.get_mut(CHAT_MODEL_TASK).unwrap().primary;
+        primary.model_route_id = "0190f5fe-7c00-7a00-8000-000000000012".into();
+        primary.credential_ref = "opaque-alias-2".into();
+        assert!(template_launch_payload_matches(&saved, &current, true));
+        assert!(!template_launch_payload_matches(&saved, &current, false));
+        for field in ["provider_id", "model", "config_revision_digest", "connection_config_ref"] {
+            let mut value = serde_json::to_value(&current).unwrap();
+            value["chat_route_records"][CHAT_MODEL_TASK]["primary"][field] = if field == "config_revision_digest" {
+                json!("b".repeat(64))
+            } else {
+                json!("changed")
+            };
+            let changed = serde_json::from_value(value).unwrap();
+            assert!(!template_launch_payload_matches(&saved, &changed, true), "must compare {field}");
+        }
+    }
+
+    #[tokio::test]
+    async fn official_launch_reuses_one_owned_configuration_for_concurrent_requests() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let control_plane = test_control_plane(store.clone());
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let other = UserId::from("0190f5fe-7c00-7a00-8000-000000000002");
+        let (first, second) = tokio::join!(
+            control_plane.create_from_template(&owner, "chat.minimal", official_launch_request(true)),
+            control_plane.create_from_template(&owner, "chat.minimal", official_launch_request(true)),
+        );
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert_eq!(first.preset.preset_id, second.preset.preset_id);
+        assert_eq!(first.preset.current_stable_revision, second.preset.current_stable_revision);
+        assert_eq!(store.list_presets(&owner).await.unwrap().len(), 1);
+        let other_copy = control_plane.create_from_template(&other, "chat.minimal", official_launch_request(true)).await.unwrap();
+        assert_ne!(first.preset.preset_id, other_copy.preset.preset_id);
+        let explicit_copy = control_plane.create_from_template(&owner, "chat.minimal", official_launch_request(false)).await.unwrap();
+        assert_ne!(first.preset.preset_id, explicit_copy.preset.preset_id);
+    }
+
+    #[tokio::test]
+    async fn official_launch_does_not_reuse_an_adjusted_personal_configuration() {
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let control_plane = test_control_plane(store.clone());
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
+        let original = control_plane.create_from_template(&owner, "chat.minimal", official_launch_request(true)).await.unwrap();
+        let mut draft = original.draft.clone();
+        draft.document.instructions = "User-specific behavior".into();
+        let preview = control_plane.preview(&owner, &original.preset.preset_id, ResolveAgentPresetPreviewRequest {
+            expected_current_revision: draft.current_revision.clone(),
+            draft: draft.clone(), scene: SETTINGS_SCENE.into(),
+            surface: SETTINGS_SURFACE.into(), audience: SETTINGS_AUDIENCE.into(),
+        }).await.unwrap();
+        control_plane.save_revision(&owner, &original.preset.preset_id, SaveAgentPresetRevisionRequest {
+            expected_current_revision: draft.current_revision.clone(),
+            preview_digest: preview.preview_digest,
+            draft, reason: None,
+        }).await.unwrap();
+        let fresh = control_plane.create_from_template(&owner, "chat.minimal", official_launch_request(true)).await.unwrap();
+        assert_ne!(fresh.preset.preset_id, original.preset.preset_id);
+        assert!(fresh.draft.document.instructions.is_empty());
+        let preserved = control_plane.editor(&owner, &original.preset.preset_id, None).await.unwrap();
+        assert_eq!(preserved.draft.document.instructions, "User-specific behavior");
+    }
+
     #[tokio::test]
     async fn retire_preset_closes_product_admission_but_preserves_immutable_artifacts() {
         let store = Arc::new(InMemoryControlPlaneStore::new());
@@ -1733,6 +1875,7 @@ mod tests {
                 &owner,
                 "chat.minimal",
                 CreateAgentPresetFromTemplateRequest {
+                    reuse_existing: false,
                     display_name: "Retire me".into(),
                     description: None,
                     model_route_refs: BTreeMap::new(),
@@ -1897,6 +2040,7 @@ mod tests {
                 &owner,
                 "chat.minimal",
                 CreateAgentPresetFromTemplateRequest {
+                    reuse_existing: false,
                     display_name: "Minimal".into(),
                     description: None,
                     model_route_refs: BTreeMap::new(),
@@ -2112,6 +2256,7 @@ mod tests {
                 &owner,
                 "chat.minimal",
                 CreateAgentPresetFromTemplateRequest {
+                    reuse_existing: false,
                     display_name: "Minimal".into(),
                     description: None,
                     model_route_refs: BTreeMap::new(),

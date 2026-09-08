@@ -453,6 +453,38 @@ async fn configured_agent_creation_persists_adjusted_capabilities_and_keeps_offi
 }
 
 #[tokio::test]
+async fn official_agent_direct_launch_reuses_configuration_and_creates_sessions() {
+    const TRUST: &str = "official-agent-direct-launch";
+    async fn call(router: axum::Router, path: &str, body: Value) -> Value {
+        let response = router.oneshot(Request::builder().method("POST").uri(path)
+            .header("x-nomi-local-trust", TRUST).header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024).await.unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(status, StatusCode::OK, "{path}: {value}");
+        value["data"].clone()
+    }
+    let (router, services) = common::build_local_trust_app(TRUST).await;
+    let create = json!({ "display_name": "Minimal", "model_route_refs": {}, "chat_route_records": {}, "reuse_existing": true });
+    let first = call(router.clone(), "/api/agent-presets/from-template/chat.minimal", create.clone()).await;
+    let second = call(router.clone(), "/api/agent-presets/from-template/chat.minimal", create).await;
+    assert_eq!(first["preset"]["preset_id"], second["preset"]["preset_id"]);
+    assert_eq!(first["revision"]["reference"], second["revision"]["reference"]);
+    let preset_id = first["preset"]["preset_id"].as_str().unwrap();
+    let session_a = call(router.clone(), "/api/agent-sessions", json!({ "preset_id": preset_id, "title": "First conversation" })).await;
+    let session_b = call(router, "/api/agent-sessions", json!({ "preset_id": preset_id, "title": "Second conversation" })).await;
+    assert_ne!(session_a["agent_session_id"], session_b["agent_session_id"]);
+    assert_eq!(session_a["agent_binding"], session_b["agent_binding"]);
+    assert_eq!(session_a["agent_binding"]["preset_revision_ref"], first["revision"]["reference"]);
+    let persisted: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nomi_agent_preset_revisions WHERE preset_id = ?")
+        .bind(preset_id).fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(persisted, 1);
+    services.shutdown_browser_platform().await.unwrap();
+    services.database.close().await;
+}
+
+#[tokio::test]
 async fn nomi_core_agent_settings_template_and_binding_surface_is_persistent() {
     let (router, services) = common::build_local_trust_app("agent-settings-local-trust").await;
     let response = router

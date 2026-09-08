@@ -410,6 +410,7 @@ async fn chat_minimal_runs_the_formal_final_stack() -> TestResult<()> {
             &owner,
             "chat.minimal",
             CreateAgentPresetFromTemplateRequest {
+                reuse_existing: false,
                 display_name: "Minimal Chat".to_owned(),
                 description: None,
                 model_route_refs: BTreeMap::from([(

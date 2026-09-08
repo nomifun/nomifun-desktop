@@ -101,7 +101,7 @@ describe('Guid Agent selection contract', () => {
 
     expect(
       configKeys.includes(
-        "export type GuidAgentSelectionPreference =\n  | { kind: 'default' }\n  | { kind: 'preset'; presetId: AgentPresetId };"
+        "| { kind: 'template'; templateKey: OfficialPresetKey }"
       )
     ).toBe(true);
     expect(

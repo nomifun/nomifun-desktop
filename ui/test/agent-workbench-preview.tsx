@@ -15,6 +15,8 @@ import '../src/renderer/styles/feedback-bubble-contract.css';
 import '../src/renderer/styles/modal-contract.css';
 import agentSettings from '../src/renderer/services/i18n/locales/zh-CN/agentSettings.json';
 import common from '../src/renderer/services/i18n/locales/zh-CN/common.json';
+import guid from '../src/renderer/services/i18n/locales/zh-CN/guid.json';
+import GuidAgentSelectorPreview from './GuidAgentSelectorPreview';
 import catalog from './fixtures/agent-workbench-catalog.json';
 import seed from '../../crates/backend/nomifun-agent-contracts/contracts/presets/official-preset-seed-manifest.payload.json';
 
@@ -90,11 +92,11 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 }) as typeof fetch;
 
 const i18n = createInstance();
-await i18n.use(initReactI18next).init({ lng: 'zh-CN', fallbackLng: 'zh-CN', resources: { 'zh-CN': { translation: { agentSettings, common } } }, interpolation: { escapeValue: false } });
+await i18n.use(initReactI18next).init({ lng: 'zh-CN', fallbackLng: 'zh-CN', resources: { 'zh-CN': { translation: { agentSettings, common, guid } } }, interpolation: { escapeValue: false } });
 const { default: AgentSettingsPage } = await import('../src/renderer/pages/agentSettings/AgentSettingsPage');
 document.body.setAttribute('data-theme', 'light');
 if (!location.hash) location.hash = '/agent';
 const style = document.createElement('style');
 style.textContent = 'html,body,#root{margin:0;min-height:100%;font-family:Inter,"Microsoft YaHei",system-ui,sans-serif}body{background:var(--color-bg-1)}.preview-note{height:30px;display:flex;align-items:center;justify-content:center;background:var(--color-fill-2);color:var(--color-text-3);font-size:11px}.preview-frame{max-width:1220px;margin:auto}.preview-destination{padding:50px;font-size:16px}';
 document.head.appendChild(style);
-createRoot(document.getElementById('root')!).render(<I18nextProvider i18n={i18n}><ConfigProvider locale={zhCN} theme={{ primaryColor: '#ef2355' }}><HashRouter><div className='preview-note'>交互预览 · 仅使用测试数据，不连接后台或执行 Agent</div><div className='preview-frame'><Routes><Route path='/agent' element={<AgentSettingsPage />} /><Route path='*' element={<div className='preview-destination'>此预览只验证工作台交互。<br /><Link to='/agent'>返回 Agent 工作台</Link></div>} /></Routes></div></HashRouter></ConfigProvider></I18nextProvider>);
+createRoot(document.getElementById('root')!).render(<I18nextProvider i18n={i18n}><ConfigProvider locale={zhCN} theme={{ primaryColor: '#ef2355' }}><HashRouter><div className='preview-note'>交互预览 · 仅使用测试数据，不连接后台或执行 Agent</div><div className='preview-frame'><Routes><Route path='/selector' element={<GuidAgentSelectorPreview templates={library().official_templates as any} />} /><Route path='/agent' element={<AgentSettingsPage />} /><Route path='*' element={<div className='preview-destination'>此预览只验证工作台交互。<br /><Link to='/agent'>返回 Agent 工作台</Link></div>} /></Routes></div></HashRouter></ConfigProvider></I18nextProvider>);

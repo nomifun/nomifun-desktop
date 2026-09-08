@@ -20,8 +20,8 @@ export const fetchAgentPresetLibrary = async (): Promise<AgentPresetLibraryRespo
 /**
  * The only renderer-side AgentPreset catalog hook.
  *
- * Official entries are creation seeds. Only user-owned AgentPreset summaries
- * are launchable by Conversation/Cron selectors.
+ * Official entries remain separate seeds. Conversation can select a seed and
+ * prepare its stable configuration on send; saved selectors consume user presets.
  */
 export const useAgentPresets = (): {
   library: AgentPresetLibraryResponse | undefined;

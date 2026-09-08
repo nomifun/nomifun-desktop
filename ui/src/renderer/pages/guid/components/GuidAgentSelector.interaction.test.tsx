@@ -33,7 +33,7 @@ const renderSelector = (props: Partial<GuidAgentSelectorProps> = {}) => {
   const Harness = () => {
     const [selection, setSelection] = useState<GuidAgentSelection>(props.selection ?? { kind: 'default' });
     const choose = (next: GuidAgentSelection) => { selections.push(next); setSelection(next); };
-    return <GuidAgentSelector presets={[saved]} officialTemplates={templates} draftPresets={[draft]} {...props} selection={selection} onSelectDefault={() => choose({ kind: 'default' })} onSelectPreset={(presetId) => choose({ kind: 'preset', presetId })} />;
+    return <GuidAgentSelector presets={[saved]} officialTemplates={templates} draftPresets={[draft]} {...props} selection={selection} onSelectDefault={() => choose({ kind: 'default' })} onSelectTemplate={(templateKey) => choose({ kind: 'template', templateKey })} onSelectPreset={(presetId) => choose({ kind: 'preset', presetId })} />;
   };
   const page = render(<I18nextProvider i18n={i18n}><MemoryRouter initialEntries={['/guid']}><Harness /><LocationProbe /></MemoryRouter></I18nextProvider>);
   const open = async () => { await act(async () => { fireEvent.click(page.getByTestId('guid-agent-selector')); }); };
@@ -100,12 +100,16 @@ describe('Guid Agent selector', () => {
     expect(page.queryByRole('dialog')).toBeNull();
   });
 
-  test('official templates open their own workbench entry without selecting a launch target', async () => {
+  test('official Agents select in place, update the label and checkmark, and close the menu', async () => {
     const { page, open, selections } = renderSelector();
     await open();
     await act(async () => { fireEvent.click(page.getByRole('button', { name: agentSettings.template.coding.codex.name })); });
-    expect(page.getByTestId('location').textContent).toBe('/agent?template=coding.codex');
-    expect(selections).toEqual([]);
+    expect(page.getByTestId('location').textContent).toBe('/guid');
+    expect(selections).toEqual([{ kind: 'template', templateKey: 'coding.codex' }]);
+    expect(page.getByTestId('guid-agent-selector').textContent).toBe(agentSettings.template.coding.codex.name);
+    expect(page.queryByRole('dialog')).toBeNull();
+    await open();
+    expect(within(page.getByRole('dialog')).getByRole('button', { name: agentSettings.template.coding.codex.name }).getAttribute('aria-pressed')).toBe('true');
   });
 
   test('drafts stay discoverable and open the exact editor', async () => {

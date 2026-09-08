@@ -94,8 +94,12 @@ const GuidPage: React.FC = () => {
   const isDefaultAgent = agentSelection.selection.kind === 'default';
   const presetResourceResolutionReady =
     isDefaultAgent ||
-    (!presetCapabilities.isLoading && !presetCapabilities.error);
-  const presetResourceKinds = presetCapabilities.requiredResourceKinds;
+    (agentSelection.selection.kind === 'template'
+      ? Boolean(agentSelection.selectedTemplate)
+      : !presetCapabilities.isLoading && !presetCapabilities.error);
+  const presetResourceKinds = agentSelection.selectedTemplate
+    ? new Set(agentSelection.selectedTemplate.seed.required_resource_kinds)
+    : presetCapabilities.requiredResourceKinds;
   const knowledgeEnabled =
     isDefaultAgent ||
     (presetResourceResolutionReady && presetResourceKinds.has('knowledge_base'));
@@ -104,13 +108,16 @@ const GuidPage: React.FC = () => {
     (presetResourceResolutionReady && presetResourceKinds.has('workspace'));
   const hasLaunchTarget = isDefaultAgent
     ? Boolean(modelSelection.current_model)
-    : Boolean(
+    : agentSelection.selection.kind === 'template'
+      ? Boolean(agentSelection.selectedTemplate)
+      : Boolean(
         agentSelection.selectedPreset?.current_stable_revision &&
           presetResourceResolutionReady
       );
 
   const mention = useGuidMention({
     presets: agentSelection.presets,
+    officialTemplates: agentSelection.officialTemplates,
     selection: agentSelection.selection,
     setSelection: agentSelection.setSelection,
     selectedPreset: agentSelection.selectedPreset,
@@ -131,6 +138,7 @@ const GuidPage: React.FC = () => {
     loading: guidInput.loading,
     selection: agentSelection.selection,
     selectedPreset: agentSelection.selectedPreset,
+    selectedTemplate: agentSelection.selectedTemplate,
     current_model: modelSelection.current_model,
     applyAdvancedConfig: (conversationId) =>
       advancedConfig.applyToConversation(conversationId, {
@@ -503,6 +511,9 @@ const GuidPage: React.FC = () => {
                   }
                   onSelectPreset={(presetId) =>
                     handleSelectAgent({ kind: 'preset', presetId })
+                  }
+                  onSelectTemplate={(templateKey) =>
+                    handleSelectAgent({ kind: 'template', templateKey })
                   }
                 />
               }
