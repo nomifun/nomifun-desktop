@@ -9,10 +9,12 @@ use nomifun_agent_contracts::{
 };
 use nomifun_miniapp_platform::{
     build_miniapp_static_bundle, validate_no_custom_scripts,
-    validate_static_bundle_path, MiniAppStaticBundleBuildError,
+    validate_service_source, validate_static_bundle_path,
+    materialize_service_release, MiniAppStaticBundleBuildError,
     MiniAppStaticBundleBuilder, MiniAppStaticBundleFile,
     MiniAppStaticBundleInput, MiniAppStaticServiceInput,
-    materialize_surface_entrypoint, MINIAPP_SURFACE_BRIDGE_BOOTSTRAP_MARKER,
+    materialize_surface_entrypoint, MINIAPP_SERVICE_ENTRYPOINT,
+    MINIAPP_SURFACE_BRIDGE_BOOTSTRAP_MARKER,
 };
 use serde_json::json;
 
@@ -153,7 +155,58 @@ fn service_bytes_are_packaged_as_a_declared_module_without_starting_runtime() {
     assert!(artifact
         .files
         .iter()
-        .any(|file| file.normalized_relative_path == "service/main.mjs"));
+        .any(|file| file.normalized_relative_path == MINIAPP_SERVICE_ENTRYPOINT));
+}
+
+#[test]
+fn service_materialization_binds_descriptor_and_file_to_the_same_bytes() {
+    let service_bytes = b"export async function start() {}\n".to_vec();
+    let materialized = materialize_service_release(MiniAppStaticServiceInput {
+        main_mjs: service_bytes.clone(),
+        lifecycle: MiniAppServiceLifecycle::Continuous,
+        uses_files: true,
+        uses_private_database: true,
+        service_contract_digest: digest(b"service-contract"),
+        runtime_requirements_digest: digest(b"runtime-requirements"),
+    })
+    .unwrap();
+
+    assert_eq!(
+        materialized.file.normalized_relative_path,
+        MINIAPP_SERVICE_ENTRYPOINT
+    );
+    assert_eq!(materialized.file.bytes, service_bytes);
+    assert_eq!(
+        materialized.descriptor.entrypoint,
+        MINIAPP_SERVICE_ENTRYPOINT
+    );
+    assert_eq!(
+        materialized.descriptor.module_digest,
+        digest(materialized.file.bytes.as_slice())
+    );
+    assert_eq!(
+        materialized.descriptor.lifecycle,
+        MiniAppServiceLifecycle::Continuous
+    );
+    assert!(materialized.descriptor.uses_files);
+    assert!(materialized.descriptor.uses_private_database);
+}
+
+#[test]
+fn service_source_validation_rejects_empty_invalid_utf8_and_nul() {
+    assert!(matches!(
+        validate_service_source(&[]),
+        Err(MiniAppStaticBundleBuildError::EmptyFile { path })
+            if path == MINIAPP_SERVICE_ENTRYPOINT
+    ));
+    assert!(matches!(
+        validate_service_source(&[0xff, 0xfe]),
+        Err(MiniAppStaticBundleBuildError::InvalidServiceSourceEncoding)
+    ));
+    assert!(matches!(
+        validate_service_source(b"export const value = '\0';"),
+        Err(MiniAppStaticBundleBuildError::InvalidServiceSourceContent)
+    ));
 }
 
 #[test]

@@ -16,6 +16,7 @@ use thiserror::Error;
 
 pub const MINIAPP_SURFACE_BRIDGE_BOOTSTRAP_MARKER: &str =
     "nomifun-miniapp-bridge-bootstrap-v1";
+pub const MINIAPP_SERVICE_ENTRYPOINT: &str = "service/main.mjs";
 
 const MINIAPP_SURFACE_BRIDGE_BOOTSTRAP: &str =
     r#"<script data-nomifun-miniapp-bridge="nomifun-miniapp-bridge-bootstrap-v1">
@@ -92,6 +93,12 @@ pub struct MiniAppStaticServiceInput {
     pub runtime_requirements_digest: DigestHex,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MiniAppStaticServiceMaterialization {
+    pub descriptor: MiniAppServiceReleaseDescriptor,
+    pub file: MiniAppStaticBundleFile,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct MiniAppStaticBundleInput {
     pub artifact_id: ArtifactId,
@@ -128,6 +135,10 @@ pub enum MiniAppStaticBundleBuildError {
     CustomScriptsForbidden,
     #[error("UI-only MiniApp cannot include Service source")]
     UiOnlyServiceSource,
+    #[error("MiniApp Service source must be valid UTF-8")]
+    InvalidServiceSourceEncoding,
+    #[error("MiniApp Service source contains a NUL byte")]
+    InvalidServiceSourceContent,
     #[error("UI entrypoint must be valid UTF-8 for the Host Bridge bootstrap")]
     InvalidUiEntrypointEncoding,
     #[error(transparent)]
@@ -216,32 +227,19 @@ pub fn build_miniapp_static_bundle(
         )?;
     }
 
-    let service_descriptor = service.as_ref().map(|service| {
-        MiniAppServiceReleaseDescriptor {
-            entrypoint: "service/main.mjs".to_owned(),
-            module_digest: digest_bytes(&service.main_mjs),
-            lifecycle: service.lifecycle,
-            uses_files: service.uses_files,
-            uses_private_database: service.uses_private_database,
-            service_contract_digest: service.service_contract_digest.clone(),
-            host_protocol_version: VersionString::from(
-                MINIAPP_SERVICE_HOST_PROTOCOL_VERSION,
-            ),
-            sdk_contract_version: VersionString::from(
-                MINIAPP_SERVICE_SDK_CONTRACT_VERSION,
-            ),
-            runtime_requirements_digest: service
-                .runtime_requirements_digest
-                .clone(),
-        }
-    });
+    let service = service
+        .map(materialize_service_release)
+        .transpose()?;
+    let service_descriptor = service
+        .as_ref()
+        .map(|materialized| materialized.descriptor.clone());
 
     if let Some(service) = service {
         push_file(
             &mut files,
             &mut collision_keys,
-            "service/main.mjs".to_owned(),
-            service.main_mjs,
+            service.file.normalized_relative_path,
+            service.file.bytes,
         )?;
     }
 
@@ -316,6 +314,63 @@ pub fn materialize_surface_entrypoint(
     materialized.extend_from_slice(MINIAPP_SURFACE_BRIDGE_BOOTSTRAP.as_bytes());
     materialized.extend_from_slice(source.as_bytes());
     Ok(materialized)
+}
+
+/// Validate Service source framing without executing or statically interpreting
+/// JavaScript. The Service Host validates the required `start(context)` export
+/// during its startup handshake.
+pub fn validate_service_source(
+    source: &[u8],
+) -> Result<(), MiniAppStaticBundleBuildError> {
+    if source.is_empty() {
+        return Err(MiniAppStaticBundleBuildError::EmptyFile {
+            path: MINIAPP_SERVICE_ENTRYPOINT.to_owned(),
+        });
+    }
+    std::str::from_utf8(source)
+        .map_err(|_| MiniAppStaticBundleBuildError::InvalidServiceSourceEncoding)?;
+    if source.contains(&0) {
+        return Err(MiniAppStaticBundleBuildError::InvalidServiceSourceContent);
+    }
+    Ok(())
+}
+
+/// Materialize the one Service file and its manifest descriptor from the same
+/// input bytes so the Release cannot carry a digest/file mismatch.
+pub fn materialize_service_release(
+    input: MiniAppStaticServiceInput,
+) -> Result<MiniAppStaticServiceMaterialization, MiniAppStaticBundleBuildError> {
+    validate_service_source(&input.main_mjs)?;
+    let MiniAppStaticServiceInput {
+        main_mjs,
+        lifecycle,
+        uses_files,
+        uses_private_database,
+        service_contract_digest,
+        runtime_requirements_digest,
+    } = input;
+    let module_digest = digest_bytes(&main_mjs);
+    Ok(MiniAppStaticServiceMaterialization {
+        descriptor: MiniAppServiceReleaseDescriptor {
+            entrypoint: MINIAPP_SERVICE_ENTRYPOINT.to_owned(),
+            module_digest,
+            lifecycle,
+            uses_files,
+            uses_private_database,
+            service_contract_digest,
+            host_protocol_version: VersionString::from(
+                MINIAPP_SERVICE_HOST_PROTOCOL_VERSION,
+            ),
+            sdk_contract_version: VersionString::from(
+                MINIAPP_SERVICE_SDK_CONTRACT_VERSION,
+            ),
+            runtime_requirements_digest,
+        },
+        file: MiniAppStaticBundleFile::new(
+            MINIAPP_SERVICE_ENTRYPOINT,
+            main_mjs,
+        ),
+    })
 }
 
 pub fn validate_static_bundle_path(
