@@ -24,6 +24,9 @@ use nomifun_agent_contracts::{
     MINIAPP_SERVICE_HOST_PROTOCOL_VERSION, ResolvedMiniAppServiceSpec, StrictJsonValue,
     digest_bytes,
 };
+use nomifun_js_runtime::{
+    CommittedRuntimeProvider, JavaScriptWorkKind, RuntimeUseLease,
+};
 use serde::{Deserialize, Serialize};
 use tokio::io::{
     AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader,
@@ -338,6 +341,100 @@ pub struct NodeMiniAppServiceProcessFactory {
     node_executable: PathBuf,
     resolver: Arc<dyn MiniAppServiceModuleResolver>,
     limits: MiniAppServiceProcessLimits,
+}
+
+/// Factory that acquires the committed Runtime admission lease for the full
+/// lifetime of every resident Service process.
+pub struct RuntimeAwareMiniAppServiceProcessFactory {
+    authority: Arc<dyn CommittedRuntimeProvider>,
+    resolver: Arc<dyn MiniAppServiceModuleResolver>,
+    limits: MiniAppServiceProcessLimits,
+}
+
+impl std::fmt::Debug for RuntimeAwareMiniAppServiceProcessFactory {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RuntimeAwareMiniAppServiceProcessFactory")
+            .field("limits", &self.limits)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RuntimeAwareMiniAppServiceProcessFactory {
+    pub fn new(
+        authority: Arc<dyn CommittedRuntimeProvider>,
+        resolver: Arc<dyn MiniAppServiceModuleResolver>,
+    ) -> Self {
+        Self {
+            authority,
+            resolver,
+            limits: MiniAppServiceProcessLimits::default(),
+        }
+    }
+
+    pub fn with_limits(
+        mut self,
+        limits: MiniAppServiceProcessLimits,
+    ) -> Result<Self, MiniAppPlatformError> {
+        limits.validate()?;
+        self.limits = limits;
+        Ok(self)
+    }
+}
+
+struct RuntimeLeasedMiniAppServiceProcess {
+    inner: Arc<dyn MiniAppServiceProcess>,
+    _lease: RuntimeUseLease,
+}
+
+#[async_trait]
+impl MiniAppServiceProcess for RuntimeLeasedMiniAppServiceProcess {
+    async fn invoke(
+        &self,
+        invocation: MiniAppServiceInvocation,
+        cancellation: MiniAppCallCancellation,
+    ) -> Result<StrictJsonValue, MiniAppServiceProcessError> {
+        self.inner.invoke(invocation, cancellation).await
+    }
+
+    async fn stop(&self) {
+        self.inner.stop().await;
+    }
+}
+
+#[async_trait]
+impl MiniAppServiceProcessFactory for RuntimeAwareMiniAppServiceProcessFactory {
+    async fn start(
+        &self,
+        launch: MiniAppServiceLaunch,
+    ) -> MiniAppPlatformResult<Arc<dyn MiniAppServiceProcess>> {
+        self.limits.validate()?;
+        let lease = self
+            .authority
+            .acquire_use(JavaScriptWorkKind::MiniappServiceHost)
+            .await
+            .map_err(|error| MiniAppPlatformError::Runtime(error.to_string()))?;
+        let runtime = lease.runtime();
+        let expected_runtime = MiniAppServiceRuntimeFingerprint {
+            runtime_installation_id: runtime.fingerprint.runtime_installation_id.clone(),
+            runtime_target: runtime.fingerprint.runtime_target.clone(),
+            runtime_executable_digest: runtime.fingerprint.executable_digest.clone(),
+            node_version: runtime.fingerprint.node_version.clone(),
+        };
+        if launch.spec.runtime != expected_runtime {
+            return Err(MiniAppPlatformError::StaleServiceGeneration);
+        }
+        let factory = NodeMiniAppServiceProcessFactory::new(
+            runtime.executable_path.clone(),
+            Arc::clone(&self.resolver),
+        )?
+        .with_limits(self.limits.clone())?;
+        let process = factory.start(launch).await?;
+        Ok(Arc::new(RuntimeLeasedMiniAppServiceProcess {
+            inner: process,
+            _lease: lease,
+        }))
+    }
 }
 
 impl std::fmt::Debug for NodeMiniAppServiceProcessFactory {

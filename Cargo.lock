@@ -6916,6 +6916,7 @@ dependencies = [
  "nomifun-api-types",
  "nomifun-common",
  "nomifun-db",
+ "nomifun-js-runtime",
  "serde",
  "serde_json",
  "tempfile",
