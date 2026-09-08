@@ -20,6 +20,7 @@ import {
 } from '@/common/types/ids';
 import { setBrowserStorageGeneration } from '@/common/utils/browserStorageKey';
 import type { ExecutableAgentPreset, GuidAgentSelection } from '../types';
+import type { OfficialPresetTemplate } from '@/common/types/agentPlatform';
 import {
   useGuidSend,
   type GuidSendDeps,
@@ -63,6 +64,7 @@ const PRESET = {
     revision_digest: 'a'.repeat(64),
   },
 } as ExecutableAgentPreset;
+const TEMPLATE = { template_key: 'chat.minimal' } as OfficialPresetTemplate;
 
 type FetchCall = {
   method: string;
@@ -105,6 +107,10 @@ const installFetchRecorder = (): FetchCall[] => {
     const body =
       typeof init?.body === 'string' ? JSON.parse(init.body) : undefined;
     calls.push({ method, url, body });
+
+    if (method === 'POST' && url.endsWith('/api/agent-presets/from-template/chat.minimal')) {
+      return jsonResponse({ preset: PRESET });
+    }
 
     if (method === 'POST' && url.endsWith('/api/conversations')) {
       return jsonResponse(conversationProjection(DEFAULT_CONVERSATION_ID));
@@ -204,6 +210,47 @@ afterEach(() => {
 });
 
 describe('useGuidSend HTTP behavior', () => {
+  test('official selection prepares its configuration only on send and launches a normal frozen session', async () => {
+    resetBrowserStorage();
+    const calls = installFetchRecorder();
+    const navigations: string[] = [];
+    const hook = renderHook(() => useGuidSend({
+      ...createDeps({ selection: { kind: 'template', templateKey: 'chat.minimal' }, navigations, workspaceEnabled: false }),
+      selectedTemplate: TEMPLATE,
+    }));
+    expect(calls).toHaveLength(0);
+    expect(hook.result.current.isButtonDisabled).toBe(false);
+    await act(async () => { await hook.result.current.handleSend(); });
+    expect(calls[0]).toMatchObject({
+      method: 'POST', url: '/api/agent-presets/from-template/chat.minimal',
+      body: { reuse_existing: true, model_route_refs: {}, chat_route_records: {} },
+    });
+    expect(calls[1]).toEqual({ method: 'POST', url: '/api/agent-sessions', body: { preset_id: PRESET_ID, title: INPUT } });
+    expect(calls).toHaveLength(3);
+    expect(readOnlyHandoff()).toMatchObject({ input: INPUT, files: FILES });
+    expect(navigations).toEqual([`/conversation/${PRESET_CONVERSATION_ID}`]);
+  });
+
+  test('failed official preparation does not create a session or navigate away', async () => {
+    resetBrowserStorage();
+    const navigations: string[] = [];
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls++;
+      return new Response(JSON.stringify({ success: false, error: { code: 'CAPABILITY_NOT_MATERIALIZED', message: 'Missing capability' } }), { status: 422, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    const hook = renderHook(() => useGuidSend({
+      ...createDeps({ selection: { kind: 'template', templateKey: 'chat.minimal' }, navigations }),
+      selectedTemplate: TEMPLATE,
+    }));
+    let failure: unknown;
+    await act(async () => { try { await hook.result.current.handleSend(); } catch (error) { failure = error; } });
+    expect(failure instanceof Error).toBe(true);
+    expect(calls).toBe(1);
+    expect(navigations).toEqual([]);
+    expect(sessionStorage.length).toBe(0);
+  });
+
   test('default mode POSTs the selected model, workspace and files, stages one handoff, and navigates', async () => {
     resetBrowserStorage();
     const calls = installFetchRecorder();

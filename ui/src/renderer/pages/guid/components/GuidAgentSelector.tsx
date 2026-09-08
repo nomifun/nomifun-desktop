@@ -24,6 +24,7 @@ export type GuidAgentSelectorProps = {
   loadError?: Error;
   onRetry?: () => Promise<void>;
   onSelectDefault: () => void;
+  onSelectTemplate: (templateKey: OfficialPresetKey) => void;
   onSelectPreset: (presetId: AgentPresetId) => void;
 };
 
@@ -45,6 +46,7 @@ const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
   loadError,
   onRetry,
   onSelectDefault,
+  onSelectTemplate,
   onSelectPreset,
 }) => {
   const { t } = useTranslation();
@@ -62,7 +64,9 @@ const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
     : undefined;
   const selectedLabel = selection.kind === 'default'
     ? defaultLabel
-    : selectedPreset?.display_name ?? t('guid.agentEntries.choose');
+    : selection.kind === 'template'
+      ? t(`agentSettings.template.${TEMPLATE_I18N_PATH[selection.templateKey]}.name`)
+      : selectedPreset?.display_name ?? t('guid.agentEntries.choose');
 
   const changeOpen = (next: boolean) => {
     setOpen(next);
@@ -196,7 +200,7 @@ const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
                   <section role='group' aria-labelledby={templateHeading} className={hasMine ? styles.templateSection : undefined}>
                     <h3 id={templateHeading} className={styles.heading}>{t('guid.agentEntries.fromTemplate')}</h3>
                     {visibleTemplates.map((template) => (
-                      <AgentRow key={template.template_key} name={template.name} icon={templateIcon(template.template_key)} onClick={() => choose(() => navigate(`/agent?template=${encodeURIComponent(template.template_key)}`))} />
+                      <AgentRow key={template.template_key} name={template.name} icon={templateIcon(template.template_key)} selected={selection.kind === 'template' && selection.templateKey === template.template_key} onClick={() => choose(() => onSelectTemplate(template.template_key))} />
                     ))}
                   </section>
                 )}

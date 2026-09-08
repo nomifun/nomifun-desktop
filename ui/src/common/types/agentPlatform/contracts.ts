@@ -386,6 +386,7 @@ export interface CreateAgentPresetRequest {
 }
 
 export interface CreateAgentPresetFromTemplateRequest {
+  reuse_existing?: boolean;
   display_name: string;
   description?: string;
   model_route_refs: Record<string, string>;

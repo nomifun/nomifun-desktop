@@ -10,6 +10,9 @@ import type {
   MentionOption,
 } from '../types';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import type { OfficialPresetTemplate } from '@/common/types/agentPlatform';
+import { TEMPLATE_I18N_PATH } from '../../agentSettings/model';
 
 export type GuidMentionResult = {
   mentionQuery: string | null;
@@ -33,6 +36,7 @@ export type GuidMentionResult = {
 
 type UseGuidMentionOptions = {
   presets: ExecutableAgentPreset[];
+  officialTemplates?: OfficialPresetTemplate[];
   selection: GuidAgentSelection;
   setSelection: (selection: GuidAgentSelection) => void;
   selectedPreset: ExecutableAgentPreset | undefined;
@@ -43,17 +47,21 @@ type UseGuidMentionOptions = {
 const selectionKey = (selection: GuidAgentSelection): string =>
   selection.kind === 'default'
     ? 'guid-agent-default'
-    : `guid-agent-preset:${selection.presetId}`;
+    : selection.kind === 'template'
+      ? `guid-agent-template:${selection.templateKey}`
+      : `guid-agent-preset:${selection.presetId}`;
 
 /** Manages plain Nomi and AgentPreset selection through the Guid @ mention UI. */
 export const useGuidMention = ({
   presets,
+  officialTemplates = [],
   selection,
   setSelection,
   selectedPreset,
   defaultAgentLabel,
   setInput,
 }: UseGuidMentionOptions): GuidMentionResult => {
+  const { t } = useTranslation();
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [mentionOpen, setMentionOpen] = useState(false);
   const [mentionSelectorVisible, setMentionSelectorVisible] = useState(false);
@@ -77,6 +85,16 @@ export const useGuidMention = ({
         avatarImage: undefined,
         logo: undefined,
       },
+      ...officialTemplates.map((template) => {
+        const label = t(`agentSettings.template.${TEMPLATE_I18N_PATH[template.template_key]}.name`);
+        const templateSelection: GuidAgentSelection = { kind: 'template', templateKey: template.template_key };
+        return {
+          key: selectionKey(templateSelection), label,
+          tokens: new Set([label.toLowerCase(), template.template_key]),
+          selection: templateSelection,
+          avatarEmoji: undefined, avatarImage: undefined, logo: undefined,
+        };
+      }),
       ...presets.map((preset) => {
         const label = preset.display_name;
         const normalizedLabel = label.toLowerCase();
@@ -100,7 +118,7 @@ export const useGuidMention = ({
         };
       }),
     ],
-    [defaultAgentLabel, presets]
+    [defaultAgentLabel, presets, officialTemplates, t]
   );
 
   const filteredMentionOptions = useMemo(() => {
@@ -137,7 +155,9 @@ export const useGuidMention = ({
   const selectedAgentLabel =
     selection.kind === 'default'
       ? defaultAgentLabel
-      : selectedPreset?.display_name ?? defaultAgentLabel;
+      : selection.kind === 'template'
+        ? t(`agentSettings.template.${TEMPLATE_I18N_PATH[selection.templateKey]}.name`)
+        : selectedPreset?.display_name ?? defaultAgentLabel;
   const selectedKey = selectionKey(selection);
   const mentionMenuActiveOption =
     filteredMentionOptions[mentionActiveIndex] || filteredMentionOptions[0];

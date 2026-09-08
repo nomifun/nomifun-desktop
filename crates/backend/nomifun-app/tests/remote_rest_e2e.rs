@@ -159,6 +159,7 @@ async fn create_owner_binding(
             &owner,
             "chat.minimal",
             CreateAgentPresetFromTemplateRequest {
+                reuse_existing: false,
                 display_name: "Remote REST integration preset".to_owned(),
                 description: None,
                 model_route_refs: BTreeMap::new(),
