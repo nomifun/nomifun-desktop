@@ -6,8 +6,8 @@
 
 import type { IProvider, TProviderWithModel } from '@/common/config/storage';
 import { compositeKey } from '@/common/utils/compositeKey';
+import { modelDisplayLabel } from '@/common/utils/modelPresentation';
 import { iconColors } from '@/renderer/styles/colors';
-import { getModelDisplayLabel } from '@/renderer/utils/model/agentLogo';
 import { Button, Dropdown, Menu } from '@arco-design/web-react';
 import { Brain, Down, Plus } from '@icon-park/react';
 import React from 'react';
@@ -50,19 +50,13 @@ const GuidModelSelector: React.FC<GuidModelSelectorProps> = ({
     return chatGroups.filter((group) => allowedIds.has(group.provider.id));
   }, [chatGroups, modelList]);
 
-  const providerSelectedLabel = React.useMemo(() => {
-    if (!current_model?.use_model) return '';
-    return current_model.use_model;
-  }, [current_model?.use_model]);
-
   const providerButtonLabel = React.useMemo(() => {
-    return getModelDisplayLabel({
-      selected_value: current_model?.use_model,
-      selectedLabel: providerSelectedLabel,
-      defaultModelLabel,
-      fallbackLabel: defaultModelLabel,
-    });
-  }, [current_model?.use_model, defaultModelLabel, providerSelectedLabel]);
+    if (!current_model?.use_model) return defaultModelLabel;
+    const provider = modelConfig?.find((entry) => entry.id === current_model.id)
+      ?? modelList.find((entry) => entry.id === current_model.id);
+    const model = provider?.models.find((entry) => entry.model === current_model.use_model);
+    return modelDisplayLabel(current_model.use_model, model?.display_name);
+  }, [current_model?.id, current_model?.use_model, modelConfig, modelList, defaultModelLabel]);
 
   if (isProviderModelMode) {
     const hasModels = enabledGroups.length > 0;
@@ -99,6 +93,7 @@ const GuidModelSelector: React.FC<GuidModelSelectorProps> = ({
                       <Menu.ItemGroup title={providerLabel(provider)} key={provider.id}>
                         {models.map((modelName) => {
                           const dot = healthDotColor(provider.id, modelName);
+                          const model = provider.models.find((entry) => entry.model === modelName);
                           return (
                             <Menu.Item
                               key={compositeKey(provider.id, modelName)}
@@ -115,7 +110,7 @@ const GuidModelSelector: React.FC<GuidModelSelectorProps> = ({
                             >
                               <div className='flex items-center gap-8px w-full'>
                                 {dot && <div className={`w-6px h-6px rounded-full shrink-0 ${dot}`} />}
-                                <span>{modelName}</span>
+                                <span>{modelDisplayLabel(modelName, model?.display_name)}</span>
                               </div>
                             </Menu.Item>
                           );
