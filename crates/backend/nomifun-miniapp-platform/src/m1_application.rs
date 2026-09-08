@@ -6,15 +6,14 @@ use nomifun_agent_contracts::{
     canonical_json_bytes, digest_bytes, digest_payload, ArtifactId, DigestHex,
     JavaScriptBuildProfile, LocalizedMetadata, MiniAppBridgeKvRequest,
     MiniAppBridgeRequest, MiniAppBridgeSession, MiniAppBridgeSessionId,
-    MiniAppBridgeTarget, MiniAppId, MiniAppKvHandleDescriptor, MiniAppKvHandleId,
-    MiniAppKvResponse,
+    MiniAppBridgeTarget, MiniAppId, MiniAppKvResponse,
     MiniAppNonUiReleaseFingerprint, MiniAppProjectId,
     MiniAppPublishAuthorization,
     MiniAppPublishRequest as MiniAppPublishContract,
     MiniAppPointerExpectation, MiniAppReadyOrigin, MiniAppReadyRelease,
     MiniAppReadyReleaseRef, MiniAppReleaseId, MiniAppReleasePointerState,
     MiniAppReleaseRef, MiniAppResourceContract, MiniAppSourceLineage, OperationId,
-    MiniAppServiceLifecycle, MiniAppServiceStorageDescriptor,
+    MiniAppServiceLifecycle,
     PackageContributions, PackageId, PackageRef, StrictJsonValue,
     MiniAppSurfaceSessionId, MiniAppUiOnlyAutoPublishAuthorization,
     MiniAppUiOnlyAutoPublishProof, MiniAppUserAuthorizationId, VersionString,
@@ -51,6 +50,7 @@ use nomifun_db::{
     SetMiniAppM1AutoPublishParams,
     CommitMiniAppM1LifecycleParams, StartMiniAppM1BuildOperationParams,
 };
+use nomifun_js_runtime::ResolvedNodeRuntime;
 use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
@@ -167,6 +167,15 @@ impl MiniAppM1ApplicationService {
         let config: Value = serde_json::from_str(&snapshot.product.config_json)
             .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
         let runtime = self.service_runtime().await;
+        let storage = runtime
+            .resolve_storage(
+                owner_user_id,
+                &MiniAppId::from(snapshot.product.miniapp_id.clone()),
+                descriptor.uses_files,
+                descriptor.uses_private_database,
+            )
+            .await
+            .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
         runtime
             .register_module(
                 MiniAppId::from(snapshot.product.miniapp_id.clone()),
@@ -213,19 +222,8 @@ impl MiniAppM1ApplicationService {
                     .manifest
                     .payload
                     .contribution_set_digest()
-                    .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?,
-                storage: MiniAppServiceStorageDescriptor {
-                    kv: MiniAppKvHandleDescriptor {
-                        handle_id: MiniAppKvHandleId::from(format!(
-                            "miniapp-kv-{}",
-                            snapshot.product.miniapp_id
-                        )),
-                        miniapp_id: MiniAppId::from(snapshot.product.miniapp_id.clone()),
-                        namespace_revision: 1,
-                    },
-                    files_dir: None,
-                    private_database: None,
-                },
+                .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?,
+                storage: storage.descriptor,
             })
             .await
             .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
@@ -280,6 +278,7 @@ impl MiniAppM1ApplicationService {
         snapshot: &MiniAppM1Snapshot,
         target_release: &MiniAppReleaseRow,
         target_active_release_epoch: u64,
+        apply_migrations: bool,
     ) -> Result<
         (
             Option<nomifun_agent_contracts::ResolvedMiniAppServiceSpec>,
@@ -292,7 +291,7 @@ impl MiniAppM1ApplicationService {
         }
         let runtime = self.service_runtime().await;
         let miniapp_id = MiniAppId::from(snapshot.product.miniapp_id.clone());
-        let current = if snapshot.product.lifecycle == "enabled" {
+        let mut current = if snapshot.product.lifecycle == "enabled" {
             let active = snapshot.active_release.as_ref().ok_or_else(|| {
                 MiniAppM1ApplicationError::Invalid(
                     "enabled Service MiniApp has no Active Release".into(),
@@ -319,7 +318,28 @@ impl MiniAppM1ApplicationService {
         } else {
             None
         };
-        let target = if snapshot.product.lifecycle == "enabled" {
+        let target_stored = self.load_verified_release(owner_user_id, target_release)?;
+        let target_descriptor = target_stored
+            .artifact
+            .manifest
+            .payload
+            .service
+            .clone()
+            .ok_or_else(|| {
+                MiniAppM1ApplicationError::Invalid(
+                    "target Service Release has no Service descriptor".into(),
+                )
+            })?;
+        let target_storage = runtime
+            .resolve_storage(
+                owner_user_id,
+                &miniapp_id,
+                target_descriptor.uses_files,
+                target_descriptor.uses_private_database,
+            )
+            .await
+            .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+        let mut target = if snapshot.product.lifecycle == "enabled" {
             Some(
                 self.resolve_service_spec(
                     snapshot,
@@ -341,6 +361,105 @@ impl MiniAppM1ApplicationService {
             .stop(&miniapp_id)
             .await
             .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+        let migrations = target_stored.artifact.manifest.payload.migrations.clone();
+        if apply_migrations && !migrations.is_empty() {
+            let database = target_storage
+                .descriptor
+                .private_database
+                .as_ref()
+                .ok_or_else(|| {
+                    MiniAppM1ApplicationError::Invalid(
+                        "Service migrations require the target Private Database".into(),
+                    )
+                })?;
+            if let Err(error) = runtime
+                .apply_storage_migrations(
+                    owner_user_id,
+                    &miniapp_id,
+                    &target_storage.descriptor,
+                    &database.migration_ledger_digest,
+                    &release_contract_ref(target_release),
+                    &migrations,
+                    positive_now_ms(),
+                )
+                .await
+            {
+                if let Some(current) = current.clone() {
+                    runtime
+                        .bind_active(current, true)
+                        .await
+                        .map_err(|restore_error| {
+                            MiniAppM1ApplicationError::Invalid(format!(
+                                "Service migration failed ({error}); restoring the previous Service failed: {restore_error}"
+                            ))
+                        })?;
+                }
+                return Err(MiniAppM1ApplicationError::Invalid(format!(
+                    "Service migration failed before Publish commit: {error}"
+                )));
+            }
+            if target.is_some() {
+                target = Some(
+                    self.resolve_service_spec(
+                        snapshot,
+                        target_release,
+                        target_active_release_epoch,
+                        owner_user_id,
+                    )
+                    .await?
+                    .ok_or_else(|| {
+                        MiniAppM1ApplicationError::Invalid(
+                            "target Service Release has no Service descriptor after migration"
+                                .into(),
+                        )
+                    })?,
+                );
+            }
+            if current.is_some() {
+                let active = snapshot.active_release.as_ref().ok_or_else(|| {
+                    MiniAppM1ApplicationError::Invalid(
+                        "enabled Service has no Active Release while restoring its storage"
+                            .into(),
+                    )
+                })?;
+                current = Some(
+                    self.resolve_service_spec(
+                        snapshot,
+                        active,
+                        u64::try_from(snapshot.product.active_release_epoch).map_err(|_| {
+                            MiniAppM1ApplicationError::Invalid(
+                                "MiniApp active release epoch is negative".into(),
+                            )
+                        })?,
+                        owner_user_id,
+                    )
+                    .await?
+                    .ok_or_else(|| {
+                        MiniAppM1ApplicationError::Invalid(
+                            "current Service Release has no Service descriptor after migration"
+                                .into(),
+                        )
+                    })?,
+                );
+            }
+        }
+        if let Some(target_spec) = target.as_ref() {
+            if let Err(error) = runtime.start(target_spec.clone()).await {
+                if let Some(current) = current.clone() {
+                    runtime
+                        .bind_active(current, true)
+                        .await
+                        .map_err(|restore_error| {
+                            MiniAppM1ApplicationError::Invalid(format!(
+                                "target Service start failed ({error}); restoring the previous Service failed: {restore_error}"
+                            ))
+                        })?;
+                }
+                return Err(MiniAppM1ApplicationError::Invalid(format!(
+                    "target Service failed readiness before Release commit: {error}"
+                )));
+            }
+        }
         Ok((current, target))
     }
 
@@ -886,7 +1005,7 @@ impl MiniAppM1ApplicationService {
                 )
             })?;
         let (current_service, target_service) = self
-            .prepare_service_cutover(owner_user_id, &snapshot, ready, target_epoch)
+            .prepare_service_cutover(owner_user_id, &snapshot, ready, target_epoch, true)
             .await?;
         let committed = self
             .repository
@@ -977,7 +1096,7 @@ impl MiniAppM1ApplicationService {
                 )
             })?;
         let (current_service, target_service) = self
-            .prepare_service_cutover(owner_user_id, &snapshot, previous, target_epoch)
+            .prepare_service_cutover(owner_user_id, &snapshot, previous, target_epoch, false)
             .await?;
         let committed = self
             .repository
@@ -1200,6 +1319,40 @@ impl MiniAppM1ApplicationService {
                     .await
                     .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
             }
+        }
+        Ok(())
+    }
+
+    pub async fn validate_service_runtime_candidate(
+        &self,
+        owner_user_id: &str,
+        candidate: &ResolvedNodeRuntime,
+    ) -> Result<(), MiniAppM1ApplicationError> {
+        let library = self.repository.library(owner_user_id).await?;
+        let mut expected = library
+            .products
+            .iter()
+            .filter(|product| {
+                product.kind == MiniAppM1Kind::Service.as_str()
+                    && product.lifecycle == "enabled"
+            })
+            .map(|product| MiniAppId::from(product.miniapp_id.clone()))
+            .collect::<Vec<_>>();
+        expected.sort();
+        if expected.is_empty() {
+            return Ok(());
+        }
+        let mut observed = self
+            .service_runtime()
+            .await
+            .validate_candidate(candidate)
+            .await
+            .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+        observed.sort();
+        if observed != expected {
+            return Err(MiniAppM1ApplicationError::Invalid(format!(
+                "MiniApp Service Runtime candidate identities {observed:?} do not match enabled Services {expected:?}"
+            )));
         }
         Ok(())
     }

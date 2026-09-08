@@ -570,10 +570,20 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
             panic!("MiniApp Service module registry composition failed: {error}")
         }),
     );
+    let service_storage = Arc::new(
+        nomifun_miniapp_platform::SqliteMiniAppManagedStorage::new(
+            services.data_dir.join("miniapp-m1").join("managed"),
+            services.database.pool().clone(),
+        )
+        .unwrap_or_else(|error| {
+            panic!("MiniApp Service managed storage composition failed: {error}")
+        }),
+    );
     let service_runtime = Arc::new(
-        nomifun_miniapp_platform::ProductionMiniAppServiceRuntimeBinding::new(
+        nomifun_miniapp_platform::ProductionMiniAppServiceRuntimeBinding::new_with_storage(
             runtime_authority,
             service_registry,
+            Some(service_storage),
             nomifun_miniapp_platform::DEFAULT_MAX_ACTIVE_SERVICE_HOSTS,
         )
         .unwrap_or_else(|error| {

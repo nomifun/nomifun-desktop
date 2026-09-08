@@ -41,6 +41,7 @@ use crate::{
     MiniAppCallCancellation, MiniAppPlatformError, MiniAppPlatformResult,
     MiniAppServiceGenerationFence, MiniAppServiceInvocation, MiniAppServiceLaunch,
     MiniAppServiceProcess, MiniAppServiceProcessError, MiniAppServiceProcessFactory,
+    MiniAppServiceStoragePort, MiniAppServiceStorageRequest,
 };
 
 const SERVICE_HOST_ROLE: &str = "miniapp_service";
@@ -67,6 +68,8 @@ if (
 const generation = bootstrap.host_generation;
 const protocolVersion = bootstrap.protocol_version;
 const activeRequests = new Map();
+const storageRequests = new Map();
+let storageRequestSequence = 0;
 let shuttingDown = false;
 let writeChain = Promise.resolve();
 
@@ -122,6 +125,75 @@ function controlAck(requestId) {
   };
 }
 
+function storageError(code, message) {
+  const error = new Error(String(message));
+  error.name = String(code || "storage_error");
+  return error;
+}
+
+function requestStorage(operation, payload) {
+  const requestId = `${generation}-storage-${++storageRequestSequence}`;
+  return new Promise((resolve, reject) => {
+    storageRequests.set(requestId, { resolve, reject });
+    void writeFrame({
+      kind: "storage_request",
+      protocol_version: protocolVersion,
+      host_generation: generation,
+      request_id: requestId,
+      operation,
+      payload,
+    }).catch((error) => {
+      const pending = storageRequests.get(requestId);
+      if (!pending) return;
+      storageRequests.delete(requestId);
+      pending.reject(storageError("storage_ipc_failed", error));
+    });
+  });
+}
+
+function resolveStorageResponse(frame) {
+  const pending = storageRequests.get(frame.request_id);
+  if (!pending) return;
+  storageRequests.delete(frame.request_id);
+  if (frame.outcome === "success") {
+    pending.resolve(frame.value ?? null);
+  } else {
+    const error = frame.error || {};
+    pending.reject(storageError(error.code, error.message));
+  }
+}
+
+function createStorageContext(storage) {
+  const filesDir = storage?.files_dir?.absolute_path ?? null;
+  const database = storage?.private_database
+    ? Object.freeze({
+        query: (sql, parameters = []) =>
+          requestStorage("database_query", { sql, parameters }),
+        execute: (sql, parameters = []) =>
+          requestStorage("database_execute", { sql, parameters }),
+        batch: (statements) =>
+          requestStorage("database_batch", { statements }),
+      })
+    : null;
+  return Object.freeze({
+    filesDir,
+    kv: Object.freeze({
+      get: (key) => requestStorage("kv", { operation: "get", key }),
+      set: (key, value) =>
+        requestStorage("kv", { operation: "set", key, value }),
+      delete: (key) => requestStorage("kv", { operation: "delete", key }),
+      compareAndSwap: (key, expectedRevision, value) =>
+        requestStorage("kv", {
+          operation: "compare_and_swap",
+          key,
+          expected_revision: expectedRevision,
+          value,
+        }),
+    }),
+    database,
+  });
+}
+
 const moduleUrl = pathToFileURL(bootstrap.module_path);
 moduleUrl.searchParams.set("service_run_key", bootstrap.service_run_key);
 const imported = await import(moduleUrl.href);
@@ -137,6 +209,7 @@ const service = await imported.start(
     serviceRunKey: bootstrap.service_run_key,
     hostGeneration: generation,
     runtime: structuredClone(bootstrap.runtime),
+    storage: createStorageContext(bootstrap.storage),
   }),
 );
 if (!service || typeof service !== "object" || typeof service.invoke !== "function") {
@@ -164,6 +237,11 @@ async function dispatch(frame) {
     frame.host_generation !== generation
   ) {
     throw new Error("Service request does not bind the active generation");
+  }
+
+  if (frame.kind === "storage_response") {
+    resolveStorageResponse(frame);
+    return;
   }
 
   if (frame.kind === "control" && frame.operation === "cancel") {
@@ -341,6 +419,7 @@ pub struct NodeMiniAppServiceProcessFactory {
     node_executable: PathBuf,
     resolver: Arc<dyn MiniAppServiceModuleResolver>,
     limits: MiniAppServiceProcessLimits,
+    storage: Option<Arc<dyn MiniAppServiceStoragePort>>,
 }
 
 /// Factory that acquires the committed Runtime admission lease for the full
@@ -349,6 +428,7 @@ pub struct RuntimeAwareMiniAppServiceProcessFactory {
     authority: Arc<dyn CommittedRuntimeProvider>,
     resolver: Arc<dyn MiniAppServiceModuleResolver>,
     limits: MiniAppServiceProcessLimits,
+    storage: Option<Arc<dyn MiniAppServiceStoragePort>>,
 }
 
 impl std::fmt::Debug for RuntimeAwareMiniAppServiceProcessFactory {
@@ -369,6 +449,7 @@ impl RuntimeAwareMiniAppServiceProcessFactory {
             authority,
             resolver,
             limits: MiniAppServiceProcessLimits::default(),
+            storage: None,
         }
     }
 
@@ -379,6 +460,14 @@ impl RuntimeAwareMiniAppServiceProcessFactory {
         limits.validate()?;
         self.limits = limits;
         Ok(self)
+    }
+
+    pub fn with_storage(
+        mut self,
+        storage: Arc<dyn MiniAppServiceStoragePort>,
+    ) -> Self {
+        self.storage = Some(storage);
+        self
     }
 }
 
@@ -429,6 +518,10 @@ impl MiniAppServiceProcessFactory for RuntimeAwareMiniAppServiceProcessFactory {
             Arc::clone(&self.resolver),
         )?
         .with_limits(self.limits.clone())?;
+        let factory = match &self.storage {
+            Some(storage) => factory.with_storage(Arc::clone(storage)),
+            None => factory,
+        };
         let process = factory.start(launch).await?;
         Ok(Arc::new(RuntimeLeasedMiniAppServiceProcess {
             inner: process,
@@ -456,6 +549,7 @@ impl NodeMiniAppServiceProcessFactory {
             node_executable: node_executable.into(),
             resolver,
             limits: MiniAppServiceProcessLimits::default(),
+            storage: None,
         };
         factory.validate_node_executable()?;
         Ok(factory)
@@ -468,6 +562,14 @@ impl NodeMiniAppServiceProcessFactory {
         limits.validate()?;
         self.limits = limits;
         Ok(self)
+    }
+
+    pub fn with_storage(
+        mut self,
+        storage: Arc<dyn MiniAppServiceStoragePort>,
+    ) -> Self {
+        self.storage = Some(storage);
+        self
     }
 
     fn validate_node_executable(&self) -> Result<(), MiniAppPlatformError> {
@@ -603,6 +705,7 @@ impl MiniAppServiceProcessFactory for NodeMiniAppServiceProcessFactory {
             module_path: module.display().to_string(),
             module_digest: launch.spec.service_module_digest.clone(),
             runtime: launch.spec.runtime.clone(),
+            storage: launch.spec.storage.clone(),
         };
         let bootstrap_json = serde_json::to_vec(&bootstrap).map_err(|error| {
             MiniAppPlatformError::Runtime(format!(
@@ -693,6 +796,8 @@ impl MiniAppServiceProcessFactory for NodeMiniAppServiceProcessFactory {
             reader_task,
             stderr_task,
             fence: fence.clone(),
+            storage_descriptor: launch.spec.storage.clone(),
+            storage: self.storage.clone(),
             limits: self.limits.clone(),
             accepting: true,
             completion,
@@ -724,6 +829,7 @@ struct ServiceBootstrap {
     module_path: String,
     module_digest: DigestHex,
     runtime: MiniAppServiceRuntimeFingerprint,
+    storage: nomifun_agent_contracts::MiniAppServiceStorageDescriptor,
 }
 
 #[derive(Debug, Deserialize)]
@@ -786,6 +892,45 @@ struct ServiceResponseFrame {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ServiceStorageRequestFrame {
+    kind: String,
+    protocol_version: String,
+    host_generation: u64,
+    request_id: String,
+    operation: String,
+    payload: StrictJsonValue,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ServiceStorageResponseFrame {
+    kind: &'static str,
+    protocol_version: &'static str,
+    host_generation: u64,
+    request_id: String,
+    outcome: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    value: Option<StrictJsonValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<ServiceStorageWireError>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ServiceStorageWireError {
+    code: String,
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ServiceInboundFrame {
+    Storage(ServiceStorageRequestFrame),
+    Response(ServiceResponseFrame),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ServiceWireError {
     code: String,
     message: String,
@@ -828,7 +973,7 @@ struct ShutdownFrame<'a> {
 }
 
 enum ReaderEvent {
-    Frame(ServiceResponseFrame),
+    Frame(ServiceInboundFrame),
     Eof,
     Failed(String),
 }
@@ -873,6 +1018,8 @@ struct ServiceProcessActor {
     reader_task: JoinHandle<()>,
     stderr_task: JoinHandle<StderrSummary>,
     fence: MiniAppServiceGenerationFence,
+    storage_descriptor: nomifun_agent_contracts::MiniAppServiceStorageDescriptor,
+    storage: Option<Arc<dyn MiniAppServiceStoragePort>>,
     limits: MiniAppServiceProcessLimits,
     accepting: bool,
     completion: tokio::sync::watch::Sender<Option<Result<(), String>>>,
@@ -936,8 +1083,13 @@ impl ServiceProcessActor {
                 }
                 event = self.reader_events.recv() => {
                     match event {
-                        Some(ReaderEvent::Frame(frame)) => {
+                        Some(ReaderEvent::Frame(ServiceInboundFrame::Response(frame))) => {
                             if let Some(exit) = self.handle_frame(frame) {
+                                return exit;
+                            }
+                        }
+                        Some(ReaderEvent::Frame(ServiceInboundFrame::Storage(frame))) => {
+                            if let Some(exit) = self.handle_storage_request(frame).await {
                                 return exit;
                             }
                         }
@@ -1159,6 +1311,84 @@ impl ServiceProcessActor {
         }
     }
 
+    async fn handle_storage_request(
+        &mut self,
+        frame: ServiceStorageRequestFrame,
+    ) -> Option<ActorExit> {
+        if frame.kind != "storage_request"
+            || frame.protocol_version != SERVICE_PROTOCOL_VERSION
+            || frame.host_generation != self.fence.host_generation
+            || frame.request_id.trim().is_empty()
+        {
+            return Some(ActorExit::Failed(
+                "MiniApp Service storage request identity mismatch".into(),
+            ));
+        }
+        let request = match decode_storage_request(&frame.operation, frame.payload) {
+            Ok(request) => request,
+            Err(error) => {
+                let response = ServiceStorageResponseFrame {
+                    kind: "storage_response",
+                    protocol_version: SERVICE_PROTOCOL_VERSION,
+                    host_generation: self.fence.host_generation,
+                    request_id: frame.request_id,
+                    outcome: "failure",
+                    value: None,
+                    error: Some(ServiceStorageWireError {
+                        code: "storage_request_invalid".into(),
+                        message: error,
+                    }),
+                };
+                if let Err(error) = write_json_line(&mut self.stdin, &response).await {
+                    return Some(ActorExit::Failed(error));
+                }
+                return None;
+            }
+        };
+        let result = match &self.storage {
+            Some(storage) => {
+                storage
+                    .handle_service_request(
+                        &self.fence.miniapp_id,
+                        &self.storage_descriptor,
+                        request,
+                        MiniAppCallCancellation::default(),
+                    )
+                    .await
+            }
+            None => Err(MiniAppPlatformError::ServiceUnavailable(
+                "MiniApp managed Service storage is not configured".into(),
+            )),
+        };
+        let response = match result {
+            Ok(value) => ServiceStorageResponseFrame {
+                kind: "storage_response",
+                protocol_version: SERVICE_PROTOCOL_VERSION,
+                host_generation: self.fence.host_generation,
+                request_id: frame.request_id,
+                outcome: "success",
+                value: Some(value),
+                error: None,
+            },
+            Err(error) => ServiceStorageResponseFrame {
+                kind: "storage_response",
+                protocol_version: SERVICE_PROTOCOL_VERSION,
+                host_generation: self.fence.host_generation,
+                request_id: frame.request_id,
+                outcome: "failure",
+                value: None,
+                error: Some(ServiceStorageWireError {
+                    code: "storage_request_failed".into(),
+                    message: error.to_string(),
+                }),
+            },
+        };
+        if let Err(error) = write_json_line(&mut self.stdin, &response).await {
+            return Some(ActorExit::Failed(error));
+        }
+        None
+    }
+
     fn fail_pending(&mut self, error: MiniAppServiceProcessError) {
         for (_, pending) in std::mem::take(&mut self.pending) {
             match pending.reply {
@@ -1304,9 +1534,24 @@ async fn read_service_frames(
     max_frame_bytes: usize,
 ) {
     loop {
-        let frame = read_json_line::<ServiceResponseFrame>(&mut reader, max_frame_bytes).await;
+        let frame = read_json_line::<serde_json::Value>(&mut reader, max_frame_bytes).await;
         let event = match frame {
-            Ok(frame) => ReaderEvent::Frame(frame),
+            Ok(frame) => match frame.get("kind").and_then(serde_json::Value::as_str) {
+                Some("response") => serde_json::from_value::<ServiceResponseFrame>(frame)
+                    .map(|frame| ReaderEvent::Frame(ServiceInboundFrame::Response(frame)))
+                    .unwrap_or_else(|error| ReaderEvent::Failed(error.to_string())),
+                Some("storage_request") => {
+                    serde_json::from_value::<ServiceStorageRequestFrame>(frame)
+                        .map(|frame| ReaderEvent::Frame(ServiceInboundFrame::Storage(frame)))
+                        .unwrap_or_else(|error| ReaderEvent::Failed(error.to_string()))
+                }
+                Some(kind) => ReaderEvent::Failed(format!(
+                    "MiniApp Service emitted unsupported frame kind {kind}"
+                )),
+                None => ReaderEvent::Failed(
+                    "MiniApp Service emitted a frame without kind".into(),
+                ),
+            },
             Err(error) if error == "MiniApp Service IPC reached EOF" => ReaderEvent::Eof,
             Err(error) => ReaderEvent::Failed(error),
         };
@@ -1314,6 +1559,39 @@ async fn read_service_frames(
         if sender.send(event).await.is_err() || terminal {
             return;
         }
+    }
+}
+
+fn decode_storage_request(
+    operation: &str,
+    payload: StrictJsonValue,
+) -> Result<MiniAppServiceStorageRequest, String> {
+    match operation {
+        "kv" => serde_json::from_value(payload.0)
+            .map(|request| MiniAppServiceStorageRequest::Kv { request })
+            .map_err(|error| error.to_string()),
+        "database_query" => serde_json::from_value(payload.0)
+            .map(|statement| MiniAppServiceStorageRequest::DatabaseQuery { statement })
+            .map_err(|error| error.to_string()),
+        "database_execute" => serde_json::from_value(payload.0)
+            .map(|statement| MiniAppServiceStorageRequest::DatabaseExecute { statement })
+            .map_err(|error| error.to_string()),
+        "database_batch" => {
+            let object = payload
+                .0
+                .as_object()
+                .ok_or_else(|| "database batch payload must be an object".to_owned())?;
+            let statements = object
+                .get("statements")
+                .cloned()
+                .ok_or_else(|| "database batch payload is missing statements".to_owned())?;
+            serde_json::from_value(statements)
+                .map(|statements| MiniAppServiceStorageRequest::DatabaseBatch { statements })
+                .map_err(|error| error.to_string())
+        }
+        _ => Err(format!(
+            "unsupported MiniApp Service storage operation {operation}"
+        )),
     }
 }
 

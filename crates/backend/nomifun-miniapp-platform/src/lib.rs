@@ -23,6 +23,7 @@ mod service_module_registry;
 mod service_runtime;
 mod surface;
 mod storage;
+mod managed_storage;
 mod source;
 mod release;
 #[cfg(test)]
@@ -46,5 +47,6 @@ pub use service_module_registry::*;
 pub use service_runtime::*;
 pub use surface::*;
 pub use storage::*;
+pub use managed_storage::*;
 pub use source::*;
 pub use release::*;
