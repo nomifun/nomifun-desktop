@@ -994,25 +994,25 @@ impl MiniAppReleasePointerState {
         if self.active_release.as_ref().is_some_and(|active| {
             self.previous_release
                 .as_ref()
-                .is_some_and(|previous| previous.release_digest == active.release_digest)
+                .is_some_and(|previous| previous.release_id == active.release_id)
                 || self
                     .ready_release
                     .as_ref()
-                    .is_some_and(|ready| ready.release_digest == active.release_digest)
+                    .is_some_and(|ready| ready.release_id == active.release_id)
         }) {
             return Err(invalid(
                 "release_pointers",
-                "Ready, Active, and Previous must not point to the same Release digest",
+                "Ready, Active, and Previous must not point to the same Release identity",
             ));
         }
         if self.previous_release.as_ref().is_some_and(|previous| {
             self.ready_release
                 .as_ref()
-                .is_some_and(|ready| ready.release_digest == previous.release_digest)
+                .is_some_and(|ready| ready.release_id == previous.release_id)
         }) {
             return Err(invalid(
                 "release_pointers",
-                "Ready, Active, and Previous must not point to the same Release digest",
+                "Ready, Active, and Previous must not point to the same Release identity",
             ));
         }
         validate_digest(
@@ -1061,6 +1061,7 @@ impl MiniAppPointerExpectation {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MiniAppNonUiReleaseFingerprint {
+    pub manifest_without_ui_digest: DigestHex,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_run_key: Option<DigestHex>,
     pub migration_set_digest: DigestHex,
@@ -1079,6 +1080,10 @@ impl MiniAppNonUiReleaseFingerprint {
             validate_digest(service_run_key, "service_run_key")?;
         }
         for (field, digest) in [
+            (
+                "manifest_without_ui_digest",
+                &self.manifest_without_ui_digest,
+            ),
             ("migration_set_digest", &self.migration_set_digest),
             ("contribution_set_digest", &self.contribution_set_digest),
             ("bridge_contract_digest", &self.bridge_contract_digest),
@@ -1150,7 +1155,7 @@ impl MiniAppUiOnlyAutoPublishProof {
         validate_digest(&self.target_ui_tree_digest, "target_ui_tree_digest")?;
         self.current_non_ui.validate()?;
         self.target_non_ui.validate()?;
-        if self.current_release.release_digest == self.target_release.release_digest
+        if self.current_release.release_id == self.target_release.release_id
             || self.current_ui_tree_digest == self.target_ui_tree_digest
         {
             return Err(invalid(
@@ -3318,6 +3323,7 @@ mod tests {
 
     fn non_ui_fingerprint() -> MiniAppNonUiReleaseFingerprint {
         MiniAppNonUiReleaseFingerprint {
+            manifest_without_ui_digest: digest("manifest-without-ui"),
             service_run_key: Some(digest("run-key")),
             migration_set_digest: digest("migrations"),
             contribution_set_digest: digest("contributions"),

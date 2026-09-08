@@ -839,6 +839,8 @@ fn create_nomi_core_router_with_all_state(
         &auth_mw_state,
         &instance_owner_state,
     );
+    let miniapp_surface =
+        super::miniapp_m1::miniapp_m1_surface_routes(states.miniapp.clone());
     let miniapp_write_local = protect_instance_owner(
         super::miniapp_m1::miniapp_m1_write_routes(states.miniapp)
             .route_layer(middleware::from_fn(require_local_trust_middleware)),
@@ -1256,6 +1258,7 @@ fn create_nomi_core_router_with_all_state(
     let router = router
     .merge(ws_routes)
     .merge(office_proxy)
+    .merge(miniapp_surface)
     .merge(public_assets)
     .merge(companion_public)
     .merge(workshop_public);

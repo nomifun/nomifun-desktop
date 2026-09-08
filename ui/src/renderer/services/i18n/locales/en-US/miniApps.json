@@ -1,6 +1,6 @@
 {
   "title": "Mini-Apps",
-  "subtitle": "Create UI-only mini-apps and build immutable Ready Releases in a dedicated workbench",
+  "subtitle": "Build, publish, enable, and run UI-only mini-apps in a dedicated workbench",
   "nav": {
     "entry": "Mini-Apps",
     "siderEntry": "Mini-Apps"
@@ -16,18 +16,46 @@
     "retry": "Retry",
     "backToLibrary": "Back to library",
     "build": "Build Ready Release",
-    "cancelBuild": "Cancel build"
+    "cancelBuild": "Cancel build",
+    "cancel": "Cancel",
+    "publish": "Publish",
+    "rollback": "Rollback",
+    "enable": "Enable",
+    "disable": "Disable",
+    "openSurface": "Open Surface",
+    "reloadSurface": "Reload Surface",
+    "closeSurface": "Close Surface"
   },
   "states": {
     "loadingLibrary": "Loading the mini-app library…",
-    "loadingWorkshop": "Loading the mini-app workbench…"
+    "loadingWorkshop": "Loading the mini-app workbench…",
+    "loadingSurface": "Loading the active Surface…"
   },
   "errors": {
     "loadLibraryTitle": "Failed to load the mini-app library",
     "loadWorkshopTitle": "Failed to load the mini-app workbench",
     "notFoundTitle": "Mini-app not found",
     "notFoundBody": "It may have been deleted or belong to another user.",
-    "buildUnavailable": "This Project has no exact buildable Source, or a build is already running."
+    "buildUnavailable": "This Project has no exact buildable Source, or a build is already running.",
+    "publishUnavailable": "The current Ready Release is not eligible for manual Publish.",
+    "rollbackUnavailable": "There is no exact Active/Previous pair available for Rollback.",
+    "enableUnavailable": "The MiniApp needs an Active Release before it can be enabled.",
+    "disableUnavailable": "The MiniApp is already disabled or cannot change lifecycle now.",
+    "autoPublishRequiresActive": "Auto Publish is available only after a UI-only MiniApp has an Active Release.",
+    "surfaceUnavailable": "Surface requires an enabled UI-only MiniApp with an Active Release.",
+    "surfaceDescriptorMismatch": "The Surface descriptor no longer matches the current Active Release.",
+    "loadSurfaceTitle": "Failed to load the Surface descriptor",
+    "surfaceFrameTitle": "Surface could not be loaded",
+    "surfaceFrameBody": "The capability may have expired after a Publish, Rollback, or lifecycle change. Reload the Surface."
+  },
+  "confirm": {
+    "publishTitle": "Publish Ready Release?",
+    "publishFirstBody": "This creates the first Active Release. Publish does not enable the MiniApp; Enable remains a separate action.",
+    "publishUpdateBody": "This makes the Ready Release Active and moves the current Active Release to Previous. The MiniApp lifecycle is unchanged.",
+    "rollbackTitle": "Rollback to Previous Release?",
+    "rollbackBody": "Active {{current}} will be exchanged with Previous {{target}}. Stored data is not rolled back.",
+    "disableTitle": "Disable this MiniApp?",
+    "disableBody": "The Active Release remains retained, but Surface becomes unavailable until you enable the MiniApp again."
   },
   "create": {
     "action": "Create mini-app",
@@ -53,7 +81,7 @@
     "hint": "Only clean-start M1 Products appear here; legacy single-HTML mini-apps are never read or migrated.",
     "searchPlaceholder": "Search by name, description, or state",
     "emptyTitle": "No M1 mini-apps yet",
-    "emptyBody": "Create an independent UI-only Project and begin with Source → Build → Ready.",
+    "emptyBody": "Create an independent UI-only Project and move from Source → Build → Ready → Publish → Surface.",
     "noMatchTitle": "No matching mini-apps",
     "noMatchBody": "Adjust the search and try again.",
     "noDescription": "No description yet",
@@ -87,7 +115,7 @@
   },
   "workshop": {
     "pageTitle": "Mini-App Workbench",
-    "pageSubtitle": "Build the current exact Source into one immutable Ready Release",
+    "pageSubtitle": "Build exact Source, publish Active Releases, and open the enabled Surface",
     "detailEyebrow": "MiniApp Project",
     "workflow": {
       "ariaLabel": "Mini-app delivery workflow",
@@ -130,7 +158,17 @@
       "hint": "At most one Ready, one Active, and one Previous release are retained; there is no arbitrary version history.",
       "active": "Active",
       "ready": "Ready",
-      "previous": "Previous"
+      "previous": "Previous",
+      "rollbackUnavailable": "Rollback requires both an Active Release and a Previous Release.",
+      "publishDoesNotEnable": "Publish changes the Active Release only; it never changes lifecycle. A disabled MiniApp still requires an explicit Enable action."
+    },
+    "publishMode": {
+      "title": "Publish mode",
+      "hint": "Manual Publish is the default. Auto UI-only Publish can be enabled only after an Active Release exists.",
+      "manual": "Manual",
+      "auto": "Auto UI-only",
+      "autoScope": "Auto mode applies only to proven UI-only changes. Service, data, or contract changes still require manual Publish.",
+      "autoDisabled": "Auto mode is disabled until this UI-only MiniApp has an Active Release."
     },
     "ready": {
       "title": "Ready Release",
@@ -238,8 +276,19 @@
       }
     }
   },
+  "surface": {
+    "title": "MiniApp Surface",
+    "fence": "Active epoch {{epoch}} · release {{digest}}",
+    "frameTitle": "{{name}} Surface"
+  },
   "messages": {
     "buildSucceeded": "Ready Release built",
-    "buildCanceled": "Build canceled"
+    "buildCanceled": "Build canceled",
+    "published": "Ready Release published; lifecycle unchanged",
+    "rolledBack": "MiniApp rolled back to Previous Release",
+    "enabled": "MiniApp enabled",
+    "disabled": "MiniApp disabled",
+    "autoPublishEnabled": "Auto UI-only Publish enabled",
+    "manualPublishEnabled": "Manual Publish enabled"
   }
 }

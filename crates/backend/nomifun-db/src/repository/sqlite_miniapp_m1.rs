@@ -1,26 +1,38 @@
 use std::collections::BTreeMap;
 
-use nomifun_agent_contracts::MINIAPP_RELEASE_PROFILE_VERSION;
+use nomifun_agent_contracts::{
+    ArtifactId, MiniAppReadyRelease, MINIAPP_RELEASE_PROFILE_VERSION, canonical_json_bytes,
+};
 use sqlx::{Sqlite, SqlitePool, Transaction};
 
 use crate::error::DbError;
 use crate::models::{
-    MiniAppBuildOperationLineageRow, MiniAppCredentialBindingRow, MiniAppLibraryStateRow,
-    MiniAppM1Kind, MiniAppM1LibrarySnapshot, MiniAppM1ProjectSourceState, MiniAppM1Snapshot,
-    MiniAppProductRow, MiniAppProjectRow, MiniAppReleaseRow, ProductOperationRow,
+    MiniAppBuildOperationLineageRow, MiniAppCatalogPublicationRow,
+    MiniAppCredentialBindingRow, MiniAppLibraryStateRow, MiniAppM1Kind,
+    MiniAppM1LibrarySnapshot, MiniAppM1ProjectSourceState, MiniAppM1Snapshot,
+    MiniAppKvRow, MiniAppProductRow, MiniAppProjectRow, MiniAppPublishAuthorizationRow,
+    MiniAppReleaseArtifactRow,
+    MiniAppReleaseRow, MiniAppSurfaceSessionRow, ProductOperationRow,
     ProductOperationState,
 };
 use crate::repository::miniapp_m1::{
-    CancelMiniAppM1BuildOperationParams, CommitMiniAppM1PointerStateParams,
+    CancelMiniAppM1BuildOperationParams, CloseMiniAppM1SurfaceSessionParams,
+    CommitMiniAppM1LifecycleParams,
     CreateMiniAppM1Params, CreateMiniAppM1WithSourceParams,
+    ExecuteMiniAppM1SurfaceKvParams,
     FinishMiniAppM1BuildAndRecordReadyParams, FinishMiniAppM1BuildOperationParams,
-    IMiniAppM1Repository, MiniAppKvRow, MiniAppM1ManagedSourceLineage,
-    RecordMiniAppM1ReadyReleaseParams, StartMiniAppM1BuildOperationParams,
-    UpdateMiniAppM1ProjectSourceParams, conflict, query_error,
-    serialize_product_operation_log_tail, validate_artifact, validate_digest, validate_json_object,
-    validate_managed_source_lineage, validate_pointer_state,
-    validate_product_operation_error_code, validate_project_source, validate_release, validate_uuid,
-    validate_visible_ascii_key,
+    IMiniAppM1Repository, MiniAppM1AutoPublishGuard,
+    MiniAppM1ManagedSourceLineage,
+    MiniAppM1SurfaceKvOperation, MiniAppM1SurfaceKvResult,
+    OpenMiniAppM1SurfaceSessionParams, PublishMiniAppM1ReadyParams,
+    RecordMiniAppM1ReadyReleaseParams, ResolveMiniAppM1SurfaceSessionParams,
+    RollbackMiniAppM1PreviousParams, SetMiniAppM1AutoPublishParams,
+    StartMiniAppM1BuildOperationParams, UpdateMiniAppM1ProjectSourceParams, conflict, query_error,
+    normalize_incoming_artifact, serialize_product_operation_log_tail, validate_artifact,
+    validate_digest, validate_json_object, validate_kv_row, validate_managed_source_lineage,
+    validate_optional_digest,
+    validate_product_operation_error_code, validate_project_source, validate_release,
+    validate_uuid, validate_visible_ascii_key,
 };
 
 #[derive(Clone, Debug)]
@@ -180,10 +192,15 @@ impl SqliteMiniAppM1Repository {
         .execute(&mut *tx)
         .await
         .map_err(query_error)?;
-        tx.commit().await?;
-        fetch_snapshot(&self.pool, &params.owner_user_id, &params.miniapp_id)
+        let snapshot = fetch_snapshot_in_tx(
+            &mut tx,
+            &params.owner_user_id,
+            &params.miniapp_id,
+        )
             .await?
-            .ok_or_else(|| DbError::Init("MiniApp create lost its Product".into()))
+            .ok_or_else(|| DbError::Init("MiniApp create lost its Product".into()))?;
+        tx.commit().await?;
+        Ok(snapshot)
     }
 }
 
@@ -202,30 +219,19 @@ async fn ensure_owner(pool: &SqlitePool, owner_user_id: &str) -> Result<(), DbEr
     Ok(())
 }
 
-async fn library_row(
-    pool: &SqlitePool,
-    owner_user_id: &str,
-) -> Result<MiniAppLibraryStateRow, DbError> {
-    if let Some(row) = sqlx::query_as::<_, MiniAppLibraryStateRow>(
-        "SELECT * FROM miniapp_library_state WHERE owner_user_id = ?",
-    )
-    .bind(owner_user_id)
-    .fetch_optional(pool)
-    .await?
-    {
-        return Ok(row);
-    }
-    Ok(MiniAppLibraryStateRow {
-        id: 0,
-        singleton_key: "miniapp_m1".to_owned(),
-        owner_user_id: owner_user_id.to_owned(),
-        revision: 0,
-        updated_at: 0,
-    })
-}
-
 async fn fetch_snapshot(
     pool: &SqlitePool,
+    owner_user_id: &str,
+    miniapp_id: &str,
+) -> Result<Option<MiniAppM1Snapshot>, DbError> {
+    let mut tx = pool.begin().await?;
+    let snapshot = fetch_snapshot_in_tx(&mut tx, owner_user_id, miniapp_id).await?;
+    tx.commit().await?;
+    Ok(snapshot)
+}
+
+async fn fetch_snapshot_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
     owner_user_id: &str,
     miniapp_id: &str,
 ) -> Result<Option<MiniAppM1Snapshot>, DbError> {
@@ -235,7 +241,7 @@ async fn fetch_snapshot(
     )
     .bind(owner_user_id)
     .bind(miniapp_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut **tx)
     .await?
     else {
         return Ok(None);
@@ -246,7 +252,7 @@ async fn fetch_snapshot(
     )
     .bind(owner_user_id)
     .bind(miniapp_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut **tx)
     .await?
     .ok_or_else(|| {
         DbError::Init(format!(
@@ -271,14 +277,108 @@ async fn fetch_snapshot(
         )
         .bind(owner_user_id)
         .bind(release_id)
-        .fetch_optional(pool)
+        .fetch_optional(&mut **tx)
         .await?
         .ok_or_else(|| {
             DbError::Init(format!(
                 "MiniApp pointer references missing Release {release_id}"
             ))
         })?;
+        let artifact = sqlx::query_as::<_, MiniAppReleaseArtifactRow>(
+            "SELECT * FROM miniapp_release_artifacts
+             WHERE owner_user_id = ? AND artifact_id = ?",
+        )
+        .bind(owner_user_id)
+        .bind(&release.artifact_id)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or_else(|| {
+            DbError::Init(format!(
+                "MiniApp Release {} references missing Artifact {}",
+                release.release_id, release.artifact_id
+            ))
+        })?;
+        let artifact_payload = validate_artifact(&artifact).map_err(|error| {
+            DbError::Init(format!(
+                "MiniApp Artifact {} failed persisted row validation: {error}",
+                artifact.artifact_id
+            ))
+        })?;
+        validate_release(&release, &artifact_payload).map_err(|error| {
+            DbError::Init(format!(
+                "MiniApp Release {release_id} failed persisted row validation: {error}"
+            ))
+        })?;
+        validate_persisted_release_lineage(tx, &release).await?;
         releases.insert(release_id.to_owned(), release);
+    }
+    for (release_id, release_digest, label) in [
+        (
+            product.ready_release_id.as_deref(),
+            product.ready_release_digest.as_deref(),
+            "Ready",
+        ),
+        (
+            product.active_release_id.as_deref(),
+            product.active_release_digest.as_deref(),
+            "Active",
+        ),
+        (
+            product.previous_release_id.as_deref(),
+            product.previous_release_digest.as_deref(),
+            "Previous",
+        ),
+    ] {
+        if let (Some(release_id), Some(release_digest)) = (release_id, release_digest) {
+            let release = releases.get(release_id).ok_or_else(|| {
+                DbError::Init(format!("MiniApp {label} pointer lost Release {release_id}"))
+            })?;
+            if release.miniapp_id != miniapp_id
+                || release.owner_user_id != owner_user_id
+                || release.release_digest != release_digest
+            {
+                return Err(DbError::Init(format!(
+                    "MiniApp {label} pointer does not bind its exact owner Release"
+                )));
+            }
+        }
+    }
+    let auto_publish_authorization =
+        sqlx::query_as::<_, MiniAppPublishAuthorizationRow>(
+            "SELECT * FROM miniapp_publish_authorizations
+             WHERE owner_user_id = ? AND miniapp_id = ?",
+        )
+        .bind(owner_user_id)
+        .bind(miniapp_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+    let catalog_publication =
+        sqlx::query_as::<_, MiniAppCatalogPublicationRow>(
+            "SELECT * FROM miniapp_catalog_publications
+             WHERE owner_user_id = ? AND miniapp_id = ?",
+        )
+        .bind(owner_user_id)
+        .bind(miniapp_id)
+        .fetch_optional(&mut **tx)
+        .await?;
+    match (product.lifecycle.as_str(), catalog_publication.as_ref()) {
+        ("enabled", Some(catalog))
+            if product.active_release_id.as_deref() == Some(&catalog.active_release_id)
+                && product.active_release_digest.as_deref()
+                    == Some(&catalog.active_release_digest)
+                && product.active_release_epoch == catalog.active_release_epoch
+                && product.materialized_catalog_digest == catalog.catalog_digest => {}
+        ("enabled", _) => {
+            return Err(DbError::Init(
+                "enabled MiniApp has no exact Active Catalog publication".to_owned(),
+            ));
+        }
+        (_, Some(_)) => {
+            return Err(DbError::Init(
+                "disabled MiniApp retains a Catalog publication".to_owned(),
+            ));
+        }
+        (_, None) => {}
     }
     let credentials = sqlx::query_as::<_, MiniAppCredentialBindingRow>(
         "SELECT * FROM miniapp_credential_bindings
@@ -286,10 +386,18 @@ async fn fetch_snapshot(
     )
     .bind(owner_user_id)
     .bind(miniapp_id)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await?;
+    let library_revision = sqlx::query_scalar::<_, i64>(
+        "SELECT revision FROM miniapp_library_state
+         WHERE owner_user_id = ?",
+    )
+    .bind(owner_user_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .unwrap_or(0);
     Ok(Some(MiniAppM1Snapshot {
-        library_revision: library_row(pool, owner_user_id).await?.revision,
+        library_revision,
         ready_release: product
             .ready_release_id
             .as_deref()
@@ -302,6 +410,8 @@ async fn fetch_snapshot(
             .previous_release_id
             .as_deref()
             .and_then(|id| releases.get(id).cloned()),
+        auto_publish_authorization,
+        catalog_publication,
         product,
         project,
         credential_bindings: credentials,
@@ -420,6 +530,63 @@ async fn fetch_build_lineage(
     .map_err(DbError::Query)
 }
 
+async fn validate_persisted_release_lineage(
+    tx: &mut Transaction<'_, Sqlite>,
+    release: &MiniAppReleaseRow,
+) -> Result<(), DbError> {
+    if release.origin_kind != "build" {
+        return Ok(());
+    }
+    let operation = fetch_build_operation(
+        tx,
+        &release.owner_user_id,
+        &release.miniapp_id,
+        &release.origin_operation_id,
+    )
+    .await?
+    .ok_or_else(|| {
+        DbError::Init(format!(
+            "built MiniApp Release {} lost its Build operation",
+            release.release_id
+        ))
+    })?;
+    if operation.state != ProductOperationState::Succeeded.as_str() {
+        return Err(DbError::Init(format!(
+            "built MiniApp Release {} references a non-successful Build",
+            release.release_id
+        )));
+    }
+    let lineage = fetch_build_lineage(
+        tx,
+        &release.owner_user_id,
+        &release.miniapp_id,
+        &release.origin_operation_id,
+    )
+    .await?
+    .ok_or_else(|| {
+        DbError::Init(format!(
+            "built MiniApp Release {} lost its source lineage",
+            release.release_id
+        ))
+    })?;
+    if release.project_id.as_deref() != Some(lineage.project_id.as_str())
+        || release.source_snapshot_digest.as_deref()
+            != Some(lineage.source_snapshot_digest.as_str())
+        || release.dependency_lock_digest.as_deref()
+            != Some(lineage.dependency_lock_digest.as_str())
+        || release.build_profile_version.as_deref()
+            != Some(lineage.build_profile_version.as_str())
+        || release.build_generation != Some(lineage.build_generation)
+        || release.created_at < lineage.started_at_ms
+    {
+        return Err(DbError::Init(format!(
+            "built MiniApp Release {} does not match its immutable source lineage",
+            release.release_id
+        )));
+    }
+    Ok(())
+}
+
 fn validate_build_source(source: &MiniAppM1ManagedSourceLineage) -> Result<(), DbError> {
     validate_managed_source_lineage(source)?;
     if source.build_profile_version != MINIAPP_RELEASE_PROFILE_VERSION {
@@ -443,6 +610,27 @@ fn project_matches_source(
             == Some(source.dependency_lock_digest.as_str())
         && project.build_profile_version.as_deref() == Some(source.build_profile_version.as_str())
         && project.build_generation == source.build_generation
+}
+
+fn validate_auto_publish_guard(guard: &MiniAppM1AutoPublishGuard) -> Result<(), DbError> {
+    validate_uuid(&guard.authorization_id, "auto_publish.authorization_id")?;
+    validate_uuid(&guard.project_id, "auto_publish.project_id")?;
+    validate_digest(
+        &guard.source_head_digest,
+        "auto_publish.source_head_digest",
+    )?;
+    validate_digest(
+        &guard.dependency_lock_digest,
+        "auto_publish.dependency_lock_digest",
+    )?;
+    if guard.authorization_revision < 1
+        || guard.project_revision < 1
+        || guard.build_generation < 1
+        || guard.build_profile_version != MINIAPP_RELEASE_PROFILE_VERSION
+    {
+        return Err(conflict("MiniApp auto Publish guard is invalid"));
+    }
+    Ok(())
 }
 
 fn validate_build_finish_shape(
@@ -484,8 +672,8 @@ fn validate_ready_binding(
             "MiniApp Build Ready CAS expectations are invalid",
         ));
     }
-    validate_artifact(&params.artifact)?;
-    validate_release(&params.release)?;
+    let artifact_payload = validate_artifact(&params.artifact)?;
+    validate_release(&params.release, &artifact_payload)?;
     if params.artifact.owner_user_id != params.owner_user_id
         || params.release.owner_user_id != params.owner_user_id
         || params.release.miniapp_id != params.miniapp_id
@@ -569,6 +757,325 @@ async fn require_pointer_release(
     Ok(())
 }
 
+async fn ensure_no_running_build(
+    tx: &mut Transaction<'_, Sqlite>,
+    miniapp_id: &str,
+) -> Result<(), DbError> {
+    let running: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM product_operations
+         WHERE owner_kind = 'miniapp' AND owner_id = ?
+           AND kind = 'build' AND state = 'running'",
+    )
+    .bind(miniapp_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    if running != 0 {
+        return Err(conflict(
+            "MiniApp Release/lifecycle mutation is blocked by a running Build",
+        ));
+    }
+    Ok(())
+}
+
+fn rewrite_release_record_artifact_id(
+    value: &str,
+    artifact_id: &str,
+) -> Result<String, DbError> {
+    let mut record: MiniAppReadyRelease = serde_json::from_str(value)
+        .map_err(|error| conflict(format!("release_record_json is invalid: {error}")))?;
+    record.release.artifact_id = ArtifactId::from(artifact_id);
+    let bytes = canonical_json_bytes(&record)
+        .map_err(|error| conflict(format!("release_record_json cannot be serialized: {error}")))?;
+    String::from_utf8(bytes)
+        .map_err(|error| conflict(format!("release_record_json is not UTF-8: {error}")))
+}
+
+async fn persist_or_reuse_artifact(
+    tx: &mut Transaction<'_, Sqlite>,
+    incoming: &MiniAppReleaseArtifactRow,
+) -> Result<MiniAppReleaseArtifactRow, DbError> {
+    let (incoming, incoming_payload) = normalize_incoming_artifact(incoming)?;
+    sqlx::query(
+        "INSERT INTO miniapp_release_artifacts
+         (artifact_id, owner_user_id, artifact_digest, manifest_digest,
+          artifact_record_json, managed_path, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (artifact_digest) DO NOTHING",
+    )
+    .bind(&incoming.artifact_id)
+    .bind(&incoming.owner_user_id)
+    .bind(&incoming.artifact_digest)
+    .bind(&incoming.manifest_digest)
+    .bind(&incoming.artifact_record_json)
+    .bind(&incoming.managed_path)
+    .bind(incoming.created_at)
+    .execute(&mut **tx)
+    .await
+    .map_err(query_error)?;
+
+    let stored = sqlx::query_as::<_, MiniAppReleaseArtifactRow>(
+        "SELECT * FROM miniapp_release_artifacts
+         WHERE owner_user_id = ? AND artifact_digest = ?",
+    )
+    .bind(&incoming.owner_user_id)
+    .bind(&incoming.artifact_digest)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| {
+        conflict("MiniApp Artifact digest is owned by another owner")
+    })?;
+    let stored_payload = validate_artifact(&stored)?;
+    let mut comparable_incoming = incoming_payload;
+    comparable_incoming.artifact_id = stored_payload.artifact_id.clone();
+    if stored.manifest_digest != incoming.manifest_digest
+        || stored.managed_path != incoming.managed_path
+        || comparable_incoming != stored_payload
+    {
+        return Err(conflict(
+            "MiniApp Artifact digest is already bound to different immutable metadata",
+        ));
+    }
+    Ok(stored)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn synchronize_catalog_publication(
+    tx: &mut Transaction<'_, Sqlite>,
+    owner_user_id: &str,
+    miniapp_id: &str,
+    lifecycle: &str,
+    active_release_id: Option<&str>,
+    active_release_digest: Option<&str>,
+    active_release_epoch: i64,
+    catalog_digest: &str,
+) -> Result<(), DbError> {
+    if lifecycle == "enabled" {
+        let (Some(active_release_id), Some(active_release_digest)) =
+            (active_release_id, active_release_digest)
+        else {
+            return Err(conflict(
+                "enabled MiniApp Catalog publication requires an Active Release",
+            ));
+        };
+        sqlx::query(
+            "INSERT INTO miniapp_catalog_publications (
+                miniapp_id, owner_user_id, active_release_id,
+                active_release_digest, active_release_epoch, catalog_digest
+             ) VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(miniapp_id) DO UPDATE SET
+                owner_user_id = excluded.owner_user_id,
+                active_release_id = excluded.active_release_id,
+                active_release_digest = excluded.active_release_digest,
+                active_release_epoch = excluded.active_release_epoch,
+                catalog_digest = excluded.catalog_digest",
+        )
+        .bind(miniapp_id)
+        .bind(owner_user_id)
+        .bind(active_release_id)
+        .bind(active_release_digest)
+        .bind(active_release_epoch)
+        .bind(catalog_digest)
+        .execute(&mut **tx)
+        .await
+        .map_err(query_error)?;
+    } else {
+        sqlx::query(
+            "DELETE FROM miniapp_catalog_publications
+             WHERE owner_user_id = ? AND miniapp_id = ?",
+        )
+        .bind(owner_user_id)
+        .bind(miniapp_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(query_error)?;
+    }
+    Ok(())
+}
+
+async fn revoke_surface_session(
+    tx: &mut Transaction<'_, Sqlite>,
+    owner_user_id: &str,
+    miniapp_id: &str,
+) -> Result<(), DbError> {
+    sqlx::query(
+        "DELETE FROM miniapp_surface_sessions
+         WHERE owner_user_id = ? AND miniapp_id = ?",
+    )
+    .bind(owner_user_id)
+    .bind(miniapp_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(query_error)?;
+    Ok(())
+}
+
+async fn fetch_kv_row(
+    tx: &mut Transaction<'_, Sqlite>,
+    owner_user_id: &str,
+    miniapp_id: &str,
+    namespace: &str,
+    key: &str,
+) -> Result<Option<MiniAppKvRow>, DbError> {
+    let row = sqlx::query_as::<_, MiniAppKvRow>(
+        "SELECT * FROM miniapp_kv
+         WHERE owner_user_id = ? AND miniapp_id = ?
+           AND namespace = ? AND key = ?",
+    )
+    .bind(owner_user_id)
+    .bind(miniapp_id)
+    .bind(namespace)
+    .bind(key)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if let Some(row) = &row {
+        validate_kv_row(row)?;
+    }
+    Ok(row)
+}
+
+fn next_kv_revision(revision: i64) -> Result<i64, DbError> {
+    revision
+        .checked_add(1)
+        .ok_or_else(|| conflict("MiniApp KV revision overflow"))
+}
+
+fn next_kv_generation(generation: i64) -> Result<i64, DbError> {
+    generation
+        .checked_add(1)
+        .ok_or_else(|| conflict("MiniApp KV key generation overflow"))
+}
+
+async fn insert_live_kv(
+    tx: &mut Transaction<'_, Sqlite>,
+    owner_user_id: &str,
+    miniapp_id: &str,
+    namespace: &str,
+    key: &str,
+    value_json: &str,
+    updated_at: i64,
+) -> Result<MiniAppKvRow, DbError> {
+    let inserted = sqlx::query(
+        "INSERT INTO miniapp_kv (
+            miniapp_id, owner_user_id, namespace, key, value_json,
+            revision, key_generation, is_tombstone, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, 1, 1, 0, ?, ?)",
+    )
+    .bind(miniapp_id)
+    .bind(owner_user_id)
+    .bind(namespace)
+    .bind(key)
+    .bind(value_json)
+    .bind(updated_at)
+    .bind(updated_at)
+    .execute(&mut **tx)
+    .await
+    .map_err(query_error)?;
+    if inserted.rows_affected() != 1 {
+        return Err(conflict(
+            "MiniApp KV key creation CAS found an existing logical key",
+        ));
+    }
+    fetch_kv_row(tx, owner_user_id, miniapp_id, namespace, key)
+        .await?
+        .ok_or_else(|| DbError::Init("MiniApp KV insert lost its key".into()))
+}
+
+async fn write_live_kv(
+    tx: &mut Transaction<'_, Sqlite>,
+    row: &MiniAppKvRow,
+    value_json: &str,
+    updated_at: i64,
+) -> Result<MiniAppKvRow, DbError> {
+    if updated_at < row.updated_at {
+        return Err(conflict(
+            "MiniApp KV write timestamp predates the existing key",
+        ));
+    }
+    let next_revision = next_kv_revision(row.revision)?;
+    let changed = sqlx::query(
+        "UPDATE miniapp_kv
+         SET value_json = ?, revision = ?, is_tombstone = 0, updated_at = ?
+         WHERE owner_user_id = ? AND miniapp_id = ?
+           AND namespace = ? AND key = ? AND revision = ?
+           AND key_generation = ? AND updated_at <= ?",
+    )
+    .bind(value_json)
+    .bind(next_revision)
+    .bind(updated_at)
+    .bind(&row.owner_user_id)
+    .bind(&row.miniapp_id)
+    .bind(&row.namespace)
+    .bind(&row.key)
+    .bind(row.revision)
+    .bind(row.key_generation)
+    .bind(updated_at)
+    .execute(&mut **tx)
+    .await
+    .map_err(query_error)?;
+    if changed.rows_affected() != 1 {
+        return Err(conflict("MiniApp KV live write lost its revision CAS"));
+    }
+    fetch_kv_row(
+        tx,
+        &row.owner_user_id,
+        &row.miniapp_id,
+        &row.namespace,
+        &row.key,
+    )
+    .await?
+    .ok_or_else(|| DbError::Init("MiniApp KV live write lost its key".into()))
+}
+
+async fn tombstone_kv(
+    tx: &mut Transaction<'_, Sqlite>,
+    row: &MiniAppKvRow,
+    updated_at: i64,
+) -> Result<Option<MiniAppKvRow>, DbError> {
+    if row.is_tombstone {
+        return Ok(Some(row.clone()));
+    }
+    if updated_at < row.updated_at {
+        return Err(conflict(
+            "MiniApp KV delete timestamp predates the existing key",
+        ));
+    }
+    let next_revision = next_kv_revision(row.revision)?;
+    let next_generation = next_kv_generation(row.key_generation)?;
+    let changed = sqlx::query(
+        "UPDATE miniapp_kv
+         SET value_json = 'null', revision = ?, key_generation = ?,
+             is_tombstone = 1, updated_at = ?
+         WHERE owner_user_id = ? AND miniapp_id = ?
+           AND namespace = ? AND key = ? AND revision = ?
+           AND key_generation = ? AND is_tombstone = 0
+           AND updated_at <= ?",
+    )
+    .bind(next_revision)
+    .bind(next_generation)
+    .bind(updated_at)
+    .bind(&row.owner_user_id)
+    .bind(&row.miniapp_id)
+    .bind(&row.namespace)
+    .bind(&row.key)
+    .bind(row.revision)
+    .bind(row.key_generation)
+    .bind(updated_at)
+    .execute(&mut **tx)
+    .await
+    .map_err(query_error)?;
+    if changed.rows_affected() != 1 {
+        return Err(conflict("MiniApp KV delete lost its revision CAS"));
+    }
+    fetch_kv_row(
+        tx,
+        &row.owner_user_id,
+        &row.miniapp_id,
+        &row.namespace,
+        &row.key,
+    )
+    .await
+}
+
 #[async_trait::async_trait]
 impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
     async fn library(
@@ -578,14 +1085,28 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
         nomifun_common::validate_uuidv7(owner_user_id)
             .map_err(|error| DbError::Conflict(error.to_string()))?;
         ensure_owner(&self.pool, owner_user_id).await?;
-        let library = library_row(&self.pool, owner_user_id).await?;
+        let mut tx = self.pool.begin().await?;
+        let library = sqlx::query_as::<_, MiniAppLibraryStateRow>(
+            "SELECT * FROM miniapp_library_state WHERE owner_user_id = ?",
+        )
+        .bind(owner_user_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .unwrap_or_else(|| MiniAppLibraryStateRow {
+            id: 0,
+            singleton_key: "miniapp_m1".to_owned(),
+            owner_user_id: owner_user_id.to_owned(),
+            revision: 0,
+            updated_at: 0,
+        });
         let products = sqlx::query_as::<_, MiniAppProductRow>(
             "SELECT * FROM miniapp_products
              WHERE owner_user_id = ? ORDER BY updated_at DESC, id DESC",
         )
         .bind(owner_user_id)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(MiniAppM1LibrarySnapshot { library, products })
     }
 
@@ -943,7 +1464,7 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
                 "MiniApp Build Ready requires a non-trashed UI-only product",
             ));
         }
-        if product.product_revision != params.expected_product_revision
+        if product.product_revision < params.expected_product_revision
             || product.pointer_revision != params.expected_pointer_revision
         {
             return Err(conflict(
@@ -975,11 +1496,25 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
                 "MiniApp Build Ready release lineage differs from the exact Project head",
             ));
         }
-        if params.finished_at_ms < project.updated_at || params.finished_at_ms < product.updated_at {
+        if [
+            product.ready_release_id.as_deref(),
+            product.active_release_id.as_deref(),
+            product.previous_release_id.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|release_id| release_id == params.release.release_id)
+        {
             return Err(conflict(
-                "MiniApp Build Ready timestamp predates the Project/Product state",
+                "MiniApp Build Ready must use a distinct Release identity",
             ));
         }
+        if params.finished_at_ms < project.updated_at {
+            return Err(conflict(
+                "MiniApp Build Ready timestamp predates the Project state",
+            ));
+        }
+        let committed_at_ms = params.finished_at_ms.max(product.updated_at);
         let operation = fetch_build_operation(
             &mut tx,
             &params.owner_user_id,
@@ -1050,44 +1585,19 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
             ));
         }
 
-        sqlx::query(
-            "INSERT INTO miniapp_release_artifacts
-             (artifact_id, owner_user_id, artifact_digest, manifest_digest,
-              artifact_record_json, managed_path, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT (artifact_digest) DO NOTHING",
-        )
-        .bind(&params.artifact.artifact_id)
-        .bind(&params.artifact.owner_user_id)
-        .bind(&params.artifact.artifact_digest)
-        .bind(&params.artifact.manifest_digest)
-        .bind(&params.artifact.artifact_record_json)
-        .bind(&params.artifact.managed_path)
-        .bind(params.artifact.created_at)
-        .execute(&mut *tx)
-        .await
-        .map_err(query_error)?;
-        let artifact_match: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*)
-             FROM miniapp_release_artifacts
-             WHERE owner_user_id = ? AND artifact_id = ?
-               AND artifact_digest = ? AND manifest_digest = ?
-               AND artifact_record_json = ? AND managed_path = ? AND created_at = ?",
-        )
-        .bind(&params.owner_user_id)
-        .bind(&params.artifact.artifact_id)
-        .bind(&params.artifact.artifact_digest)
-        .bind(&params.artifact.manifest_digest)
-        .bind(&params.artifact.artifact_record_json)
-        .bind(&params.artifact.managed_path)
-        .bind(params.artifact.created_at)
-        .fetch_one(&mut *tx)
-        .await?;
-        if artifact_match != 1 {
-            return Err(conflict(
-                "MiniApp Artifact digest is already bound to different immutable metadata",
-            ));
+        let persisted_artifact =
+            persist_or_reuse_artifact(&mut tx, &params.artifact).await?;
+        let mut release = params.release.clone();
+        release.artifact_id = persisted_artifact.artifact_id.clone();
+        release.manifest_digest = persisted_artifact.manifest_digest.clone();
+        if params.release.artifact_id != persisted_artifact.artifact_id {
+            release.release_record_json = rewrite_release_record_artifact_id(
+                &release.release_record_json,
+                &persisted_artifact.artifact_id,
+            )?;
         }
+        let persisted_artifact_payload = validate_artifact(&persisted_artifact)?;
+        validate_release(&release, &persisted_artifact_payload)?;
         sqlx::query(
             "INSERT INTO miniapp_releases
              (release_id, miniapp_id, owner_user_id, artifact_id,
@@ -1097,23 +1607,23 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
               release_record_json, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(&params.release.release_id)
-        .bind(&params.release.miniapp_id)
-        .bind(&params.release.owner_user_id)
-        .bind(&params.release.artifact_id)
-        .bind(&params.release.artifact_digest)
-        .bind(&params.release.manifest_digest)
-        .bind(&params.release.release_digest)
-        .bind(&params.release.origin_kind)
-        .bind(&params.release.origin_operation_id)
-        .bind(&params.release.source_kind)
-        .bind(&params.release.project_id)
-        .bind(&params.release.source_snapshot_digest)
-        .bind(&params.release.dependency_lock_digest)
-        .bind(&params.release.build_profile_version)
-        .bind(params.release.build_generation)
-        .bind(&params.release.release_record_json)
-        .bind(params.release.created_at)
+        .bind(&release.release_id)
+        .bind(&release.miniapp_id)
+        .bind(&release.owner_user_id)
+        .bind(&release.artifact_id)
+        .bind(&release.artifact_digest)
+        .bind(&release.manifest_digest)
+        .bind(&release.release_digest)
+        .bind(&release.origin_kind)
+        .bind(&release.origin_operation_id)
+        .bind(&release.source_kind)
+        .bind(&release.project_id)
+        .bind(&release.source_snapshot_digest)
+        .bind(&release.dependency_lock_digest)
+        .bind(&release.build_profile_version)
+        .bind(release.build_generation)
+        .bind(&release.release_record_json)
+        .bind(release.created_at)
         .execute(&mut *tx)
         .await
         .map_err(query_error)?;
@@ -1127,14 +1637,14 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
                AND product_revision = ? AND pointer_revision = ?
                AND updated_at <= ?",
         )
-        .bind(&params.release.release_id)
-        .bind(&params.release.release_digest)
-        .bind(params.finished_at_ms)
+        .bind(&release.release_id)
+        .bind(&release.release_digest)
+        .bind(committed_at_ms)
         .bind(&params.owner_user_id)
         .bind(&params.miniapp_id)
-        .bind(params.expected_product_revision)
+        .bind(product.product_revision)
         .bind(params.expected_pointer_revision)
-        .bind(params.finished_at_ms)
+        .bind(committed_at_ms)
         .execute(&mut *tx)
         .await
         .map_err(query_error)?;
@@ -1146,7 +1656,7 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
         bump_library_revision(
             &mut tx,
             &params.owner_user_id,
-            params.finished_at_ms,
+            committed_at_ms,
         )
         .await?;
         let operation_updated = sqlx::query(
@@ -1158,7 +1668,7 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
                AND owner_kind = 'miniapp' AND owner_id = ? AND state = 'running'",
         )
         .bind(bounded_log_tail_json)
-        .bind(params.finished_at_ms)
+        .bind(committed_at_ms)
         .bind(&params.operation_id)
         .bind(&params.miniapp_id)
         .execute(&mut *tx)
@@ -1169,10 +1679,15 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
                 "MiniApp Build success lost its running-operation CAS",
             ));
         }
-        tx.commit().await?;
-        fetch_snapshot(&self.pool, &params.owner_user_id, &params.miniapp_id)
+        let snapshot = fetch_snapshot_in_tx(
+            &mut tx,
+            &params.owner_user_id,
+            &params.miniapp_id,
+        )
             .await?
-            .ok_or_else(|| DbError::Init("MiniApp Build Ready commit lost Product".into()))
+            .ok_or_else(|| DbError::Init("MiniApp Build Ready commit lost Product".into()))?;
+        tx.commit().await?;
+        Ok(snapshot)
     }
 
     async fn update_project_source_cas(
@@ -1290,8 +1805,8 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
         &self,
         params: &RecordMiniAppM1ReadyReleaseParams,
     ) -> Result<MiniAppM1Snapshot, DbError> {
-        validate_artifact(&params.artifact)?;
-        validate_release(&params.release)?;
+        let artifact_payload = validate_artifact(&params.artifact)?;
+        validate_release(&params.release, &artifact_payload)?;
         if params.release.origin_kind == "build" {
             return Err(conflict(
                 "built MiniApp Ready Releases must use finish_build_and_record_ready",
@@ -1371,39 +1886,19 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
                     .to_owned(),
             ));
         }
-        sqlx::query(
-            "INSERT INTO miniapp_release_artifacts
-             (artifact_id, owner_user_id, artifact_digest, manifest_digest,
-              artifact_record_json, managed_path, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT (artifact_digest) DO NOTHING",
-        )
-        .bind(&params.artifact.artifact_id)
-        .bind(&params.artifact.owner_user_id)
-        .bind(&params.artifact.artifact_digest)
-        .bind(&params.artifact.manifest_digest)
-        .bind(&params.artifact.artifact_record_json)
-        .bind(&params.artifact.managed_path)
-        .bind(params.artifact.created_at)
-        .execute(&mut *tx)
-        .await
-        .map_err(query_error)?;
-        let artifact_match: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM miniapp_release_artifacts
-             WHERE owner_user_id = ? AND artifact_id = ?
-               AND artifact_digest = ? AND manifest_digest = ?",
-        )
-        .bind(&params.owner_user_id)
-        .bind(&params.artifact.artifact_id)
-        .bind(&params.artifact.artifact_digest)
-        .bind(&params.artifact.manifest_digest)
-        .fetch_one(&mut *tx)
-        .await?;
-        if artifact_match != 1 {
-            return Err(DbError::Conflict(
-                "MiniApp Artifact digest is already bound to different metadata".into(),
-            ));
+        let persisted_artifact =
+            persist_or_reuse_artifact(&mut tx, &params.artifact).await?;
+        let mut release = params.release.clone();
+        release.artifact_id = persisted_artifact.artifact_id.clone();
+        release.manifest_digest = persisted_artifact.manifest_digest.clone();
+        if params.release.artifact_id != persisted_artifact.artifact_id {
+            release.release_record_json = rewrite_release_record_artifact_id(
+                &release.release_record_json,
+                &persisted_artifact.artifact_id,
+            )?;
         }
+        let persisted_artifact_payload = validate_artifact(&persisted_artifact)?;
+        validate_release(&release, &persisted_artifact_payload)?;
         sqlx::query(
             "INSERT INTO miniapp_releases
              (release_id, miniapp_id, owner_user_id, artifact_id,
@@ -1413,23 +1908,23 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
               release_record_json, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(&params.release.release_id)
-        .bind(&params.release.miniapp_id)
-        .bind(&params.release.owner_user_id)
-        .bind(&params.release.artifact_id)
-        .bind(&params.release.artifact_digest)
-        .bind(&params.release.manifest_digest)
-        .bind(&params.release.release_digest)
-        .bind(&params.release.origin_kind)
-        .bind(&params.release.origin_operation_id)
-        .bind(&params.release.source_kind)
-        .bind(&params.release.project_id)
-        .bind(&params.release.source_snapshot_digest)
-        .bind(&params.release.dependency_lock_digest)
-        .bind(&params.release.build_profile_version)
-        .bind(params.release.build_generation)
-        .bind(&params.release.release_record_json)
-        .bind(params.release.created_at)
+        .bind(&release.release_id)
+        .bind(&release.miniapp_id)
+        .bind(&release.owner_user_id)
+        .bind(&release.artifact_id)
+        .bind(&release.artifact_digest)
+        .bind(&release.manifest_digest)
+        .bind(&release.release_digest)
+        .bind(&release.origin_kind)
+        .bind(&release.origin_operation_id)
+        .bind(&release.source_kind)
+        .bind(&release.project_id)
+        .bind(&release.source_snapshot_digest)
+        .bind(&release.dependency_lock_digest)
+        .bind(&release.build_profile_version)
+        .bind(release.build_generation)
+        .bind(&release.release_record_json)
+        .bind(release.created_at)
         .execute(&mut *tx)
         .await
         .map_err(query_error)?;
@@ -1465,103 +1960,778 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
             params.updated_at,
         )
         .await?;
-        tx.commit().await?;
-        fetch_snapshot(&self.pool, &params.owner_user_id, &params.miniapp_id)
+        let snapshot = fetch_snapshot_in_tx(
+            &mut tx,
+            &params.owner_user_id,
+            &params.miniapp_id,
+        )
             .await?
-            .ok_or_else(|| DbError::Init("MiniApp Ready commit lost Product".into()))
+            .ok_or_else(|| DbError::Init("MiniApp Ready commit lost Product".into()))?;
+        tx.commit().await?;
+        Ok(snapshot)
     }
 
-    async fn commit_pointer_state_cas(
+    async fn publish_ready_cas(
         &self,
-        params: &CommitMiniAppM1PointerStateParams,
+        params: &PublishMiniAppM1ReadyParams,
     ) -> Result<MiniAppM1Snapshot, DbError> {
-        validate_pointer_state(params)?;
+        validate_uuid(&params.owner_user_id, "owner_user_id")?;
+        validate_uuid(&params.miniapp_id, "miniapp_id")?;
+        validate_uuid(
+            &params.expected_ready_release_id,
+            "expected_ready_release_id",
+        )?;
+        validate_digest(
+            &params.expected_ready_release_digest,
+            "expected_ready_release_digest",
+        )?;
+        validate_optional_digest(
+            params.expected_active_release_digest.as_deref(),
+            "expected_active_release_digest",
+        )?;
+        validate_digest(&params.target_catalog_digest, "target_catalog_digest")?;
+        if let Some(guard) = &params.auto_publish_guard {
+            validate_auto_publish_guard(guard)?;
+        }
+        if params.expected_product_revision < 1
+            || params.expected_pointer_revision < 1
+            || params.expected_active_release_epoch < 0
+            || params.updated_at <= 0
+        {
+            return Err(conflict("MiniApp Publish CAS expectations are invalid"));
+        }
+
         let mut tx = self.pool.begin().await?;
         let current =
-            lock_product(&mut tx, &params.owner_user_id, &params.miniapp_id)
-                .await?;
-        if current.product_revision != params.expected_product_revision
-            || current.pointer_revision != params.expected_pointer_revision
-            || current.active_release_epoch
-                != params.expected_active_release_epoch
+            lock_product_for_update(&mut tx, &params.owner_user_id, &params.miniapp_id).await?;
+        if current.kind != MiniAppM1Kind::UiOnly.as_str()
+            || matches!(current.lifecycle.as_str(), "trashed" | "deleting")
         {
-            return Err(DbError::Conflict(
-                "MiniApp pointer CAS failed".to_owned(),
+            return Err(conflict(
+                "MiniApp Publish requires a non-trashed UI-only product",
             ));
         }
-        for (id, digest, label) in [
-            (
-                params.ready_release_id.as_deref(),
-                params.ready_release_digest.as_deref(),
-                "Ready Release",
-            ),
-            (
-                params.active_release_id.as_deref(),
-                params.active_release_digest.as_deref(),
-                "Active Release",
-            ),
-            (
-                params.previous_release_id.as_deref(),
-                params.previous_release_digest.as_deref(),
-                "Previous Release",
-            ),
-        ] {
-            require_pointer_release(
+        if current.product_revision != params.expected_product_revision
+            || current.pointer_revision != params.expected_pointer_revision
+            || current.active_release_epoch != params.expected_active_release_epoch
+            || current.ready_release_id.as_deref()
+                != Some(params.expected_ready_release_id.as_str())
+            || current.ready_release_digest.as_deref()
+                != Some(params.expected_ready_release_digest.as_str())
+            || current.active_release_digest.as_deref()
+                != params.expected_active_release_digest.as_deref()
+        {
+            return Err(conflict(
+                "MiniApp Publish lost its exact Ready/Active pointer CAS",
+            ));
+        }
+        if current.active_release_id.as_deref()
+            == Some(params.expected_ready_release_id.as_str())
+            || current.previous_release_id.as_deref()
+                == Some(params.expected_ready_release_id.as_str())
+        {
+            return Err(conflict(
+                "MiniApp Publish target must use a distinct Release identity",
+            ));
+        }
+        if params.updated_at < current.updated_at {
+            return Err(conflict("MiniApp Publish timestamp predates Product state"));
+        }
+        ensure_no_running_build(&mut tx, &params.miniapp_id).await?;
+        require_pointer_release(
+            &mut tx,
+            &params.owner_user_id,
+            &params.miniapp_id,
+            Some(&params.expected_ready_release_id),
+            Some(&params.expected_ready_release_digest),
+            "Ready Release",
+        )
+        .await?;
+        if let Some(guard) = &params.auto_publish_guard {
+            let authorization =
+                sqlx::query_as::<_, MiniAppPublishAuthorizationRow>(
+                    "SELECT * FROM miniapp_publish_authorizations
+                     WHERE owner_user_id = ? AND miniapp_id = ?",
+                )
+                .bind(&params.owner_user_id)
+                .bind(&params.miniapp_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or_else(|| {
+                    conflict("MiniApp auto Publish authorization was revoked")
+                })?;
+            if !authorization.enabled
+                || authorization.authorization_id != guard.authorization_id
+                || authorization.revision != guard.authorization_revision
+            {
+                return Err(conflict(
+                    "MiniApp auto Publish authorization revision changed",
+                ));
+            }
+            let project = fetch_project(
                 &mut tx,
                 &params.owner_user_id,
                 &params.miniapp_id,
-                id,
-                digest,
-                label,
+                &guard.project_id,
             )
             .await?;
+            if project.project_revision != guard.project_revision
+                || project.source_state != "editable"
+                || project.source_head_digest.as_deref()
+                    != Some(guard.source_head_digest.as_str())
+                || project.dependency_lock_digest.as_deref()
+                    != Some(guard.dependency_lock_digest.as_str())
+                || project.build_profile_version.as_deref()
+                    != Some(guard.build_profile_version.as_str())
+                || project.build_generation != guard.build_generation
+            {
+                return Err(conflict(
+                    "MiniApp auto Publish Project head advanced after proof",
+                ));
+            }
+            let ready = sqlx::query_as::<_, MiniAppReleaseRow>(
+                "SELECT * FROM miniapp_releases
+                 WHERE owner_user_id = ? AND miniapp_id = ? AND release_id = ?",
+            )
+            .bind(&params.owner_user_id)
+            .bind(&params.miniapp_id)
+            .bind(&params.expected_ready_release_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if ready.project_id.as_deref() != Some(guard.project_id.as_str())
+                || ready.source_snapshot_digest.as_deref()
+                    != Some(guard.source_head_digest.as_str())
+                || ready.dependency_lock_digest.as_deref()
+                    != Some(guard.dependency_lock_digest.as_str())
+                || ready.build_profile_version.as_deref()
+                    != Some(guard.build_profile_version.as_str())
+                || ready.build_generation != Some(guard.build_generation)
+            {
+                return Err(conflict(
+                    "MiniApp auto Publish Ready lineage differs from its proof",
+                ));
+            }
         }
+        let next_epoch = current
+            .active_release_epoch
+            .checked_add(1)
+            .ok_or_else(|| conflict("MiniApp Active Release epoch overflow"))?;
         let updated = sqlx::query(
             "UPDATE miniapp_products
              SET product_revision = product_revision + 1,
                  pointer_revision = pointer_revision + 1,
                  active_release_epoch = ?,
-                 ready_release_id = ?, ready_release_digest = ?,
+                 ready_release_id = NULL, ready_release_digest = NULL,
                  active_release_id = ?, active_release_digest = ?,
                  previous_release_id = ?, previous_release_digest = ?,
                  materialized_catalog_digest = ?, updated_at = ?
              WHERE owner_user_id = ? AND miniapp_id = ?
                AND product_revision = ? AND pointer_revision = ?
-               AND active_release_epoch = ? AND updated_at <= ?",
+               AND active_release_epoch = ? AND ready_release_id = ?
+               AND ready_release_digest = ? AND updated_at <= ?",
         )
-        .bind(params.active_release_epoch)
-        .bind(&params.ready_release_id)
-        .bind(&params.ready_release_digest)
-        .bind(&params.active_release_id)
-        .bind(&params.active_release_digest)
-        .bind(&params.previous_release_id)
-        .bind(&params.previous_release_digest)
-        .bind(&params.materialized_catalog_digest)
+        .bind(next_epoch)
+        .bind(&params.expected_ready_release_id)
+        .bind(&params.expected_ready_release_digest)
+        .bind(&current.active_release_id)
+        .bind(&current.active_release_digest)
+        .bind(&params.target_catalog_digest)
         .bind(params.updated_at)
         .bind(&params.owner_user_id)
         .bind(&params.miniapp_id)
         .bind(params.expected_product_revision)
         .bind(params.expected_pointer_revision)
         .bind(params.expected_active_release_epoch)
+        .bind(&params.expected_ready_release_id)
+        .bind(&params.expected_ready_release_digest)
         .bind(params.updated_at)
         .execute(&mut *tx)
         .await
         .map_err(query_error)?;
         if updated.rows_affected() != 1 {
-            return Err(DbError::Conflict(
-                "MiniApp pointer CAS failed".to_owned(),
-            ));
+            return Err(conflict("MiniApp Publish pointer CAS failed"));
         }
-        bump_library_revision(
+        synchronize_catalog_publication(
             &mut tx,
             &params.owner_user_id,
-            params.updated_at,
+            &params.miniapp_id,
+            &current.lifecycle,
+            Some(&params.expected_ready_release_id),
+            Some(&params.expected_ready_release_digest),
+            next_epoch,
+            &params.target_catalog_digest,
         )
         .await?;
-        tx.commit().await?;
-        fetch_snapshot(&self.pool, &params.owner_user_id, &params.miniapp_id)
+        revoke_surface_session(
+            &mut tx,
+            &params.owner_user_id,
+            &params.miniapp_id,
+        )
+        .await?;
+        bump_library_revision(&mut tx, &params.owner_user_id, params.updated_at).await?;
+        let snapshot = fetch_snapshot_in_tx(
+            &mut tx,
+            &params.owner_user_id,
+            &params.miniapp_id,
+        )
             .await?
-            .ok_or_else(|| DbError::Init("MiniApp pointer commit lost Product".into()))
+            .ok_or_else(|| DbError::Init("MiniApp Publish lost Product".into()))?;
+        tx.commit().await?;
+        Ok(snapshot)
+    }
+
+    async fn rollback_previous_cas(
+        &self,
+        params: &RollbackMiniAppM1PreviousParams,
+    ) -> Result<MiniAppM1Snapshot, DbError> {
+        validate_uuid(&params.owner_user_id, "owner_user_id")?;
+        validate_uuid(&params.miniapp_id, "miniapp_id")?;
+        validate_uuid(
+            &params.expected_current_release_id,
+            "expected_current_release_id",
+        )?;
+        validate_uuid(
+            &params.expected_previous_release_id,
+            "expected_previous_release_id",
+        )?;
+        validate_digest(
+            &params.expected_current_release_digest,
+            "expected_current_release_digest",
+        )?;
+        validate_digest(
+            &params.expected_previous_release_digest,
+            "expected_previous_release_digest",
+        )?;
+        validate_digest(&params.target_catalog_digest, "target_catalog_digest")?;
+        if params.expected_product_revision < 1
+            || params.expected_pointer_revision < 1
+            || params.expected_active_release_epoch < 1
+            || params.updated_at <= 0
+        {
+            return Err(conflict("MiniApp Rollback CAS expectations are invalid"));
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let current =
+            lock_product_for_update(&mut tx, &params.owner_user_id, &params.miniapp_id).await?;
+        if current.kind != MiniAppM1Kind::UiOnly.as_str()
+            || matches!(current.lifecycle.as_str(), "trashed" | "deleting")
+        {
+            return Err(conflict(
+                "MiniApp Rollback requires a non-trashed UI-only product",
+            ));
+        }
+        if current.product_revision != params.expected_product_revision
+            || current.pointer_revision != params.expected_pointer_revision
+            || current.active_release_epoch != params.expected_active_release_epoch
+            || current.active_release_id.as_deref()
+                != Some(params.expected_current_release_id.as_str())
+            || current.active_release_digest.as_deref()
+                != Some(params.expected_current_release_digest.as_str())
+            || current.previous_release_id.as_deref()
+                != Some(params.expected_previous_release_id.as_str())
+            || current.previous_release_digest.as_deref()
+                != Some(params.expected_previous_release_digest.as_str())
+        {
+            return Err(conflict(
+                "MiniApp Rollback lost its exact Active/Previous pointer CAS",
+            ));
+        }
+        if params.updated_at < current.updated_at {
+            return Err(conflict("MiniApp Rollback timestamp predates Product state"));
+        }
+        ensure_no_running_build(&mut tx, &params.miniapp_id).await?;
+        require_pointer_release(
+            &mut tx,
+            &params.owner_user_id,
+            &params.miniapp_id,
+            Some(&params.expected_previous_release_id),
+            Some(&params.expected_previous_release_digest),
+            "Previous Release",
+        )
+        .await?;
+        let next_epoch = current
+            .active_release_epoch
+            .checked_add(1)
+            .ok_or_else(|| conflict("MiniApp Active Release epoch overflow"))?;
+        let updated = sqlx::query(
+            "UPDATE miniapp_products
+             SET product_revision = product_revision + 1,
+                 pointer_revision = pointer_revision + 1,
+                 active_release_epoch = ?,
+                 active_release_id = ?, active_release_digest = ?,
+                 previous_release_id = ?, previous_release_digest = ?,
+                 materialized_catalog_digest = ?, updated_at = ?
+             WHERE owner_user_id = ? AND miniapp_id = ?
+               AND product_revision = ? AND pointer_revision = ?
+               AND active_release_epoch = ? AND active_release_id = ?
+               AND active_release_digest = ? AND previous_release_id = ?
+               AND previous_release_digest = ? AND updated_at <= ?",
+        )
+        .bind(next_epoch)
+        .bind(&params.expected_previous_release_id)
+        .bind(&params.expected_previous_release_digest)
+        .bind(&params.expected_current_release_id)
+        .bind(&params.expected_current_release_digest)
+        .bind(&params.target_catalog_digest)
+        .bind(params.updated_at)
+        .bind(&params.owner_user_id)
+        .bind(&params.miniapp_id)
+        .bind(params.expected_product_revision)
+        .bind(params.expected_pointer_revision)
+        .bind(params.expected_active_release_epoch)
+        .bind(&params.expected_current_release_id)
+        .bind(&params.expected_current_release_digest)
+        .bind(&params.expected_previous_release_id)
+        .bind(&params.expected_previous_release_digest)
+        .bind(params.updated_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        if updated.rows_affected() != 1 {
+            return Err(conflict("MiniApp Rollback pointer CAS failed"));
+        }
+        synchronize_catalog_publication(
+            &mut tx,
+            &params.owner_user_id,
+            &params.miniapp_id,
+            &current.lifecycle,
+            Some(&params.expected_previous_release_id),
+            Some(&params.expected_previous_release_digest),
+            next_epoch,
+            &params.target_catalog_digest,
+        )
+        .await?;
+        revoke_surface_session(
+            &mut tx,
+            &params.owner_user_id,
+            &params.miniapp_id,
+        )
+        .await?;
+        bump_library_revision(&mut tx, &params.owner_user_id, params.updated_at).await?;
+        let snapshot = fetch_snapshot_in_tx(
+            &mut tx,
+            &params.owner_user_id,
+            &params.miniapp_id,
+        )
+            .await?
+            .ok_or_else(|| DbError::Init("MiniApp Rollback lost Product".into()))?;
+        tx.commit().await?;
+        Ok(snapshot)
+    }
+
+    async fn commit_lifecycle_cas(
+        &self,
+        params: &CommitMiniAppM1LifecycleParams,
+    ) -> Result<MiniAppM1Snapshot, DbError> {
+        validate_uuid(&params.owner_user_id, "owner_user_id")?;
+        validate_uuid(&params.miniapp_id, "miniapp_id")?;
+        validate_optional_digest(
+            params.expected_active_release_digest.as_deref(),
+            "expected_active_release_digest",
+        )?;
+        if params.expected_product_revision < 1
+            || params.expected_pointer_revision < 1
+            || params.updated_at <= 0
+        {
+            return Err(conflict("MiniApp lifecycle CAS expectations are invalid"));
+        }
+        let mut tx = self.pool.begin().await?;
+        let current =
+            lock_product_for_update(&mut tx, &params.owner_user_id, &params.miniapp_id).await?;
+        if current.kind != MiniAppM1Kind::UiOnly.as_str()
+            || matches!(current.lifecycle.as_str(), "trashed" | "deleting")
+            || current.product_revision != params.expected_product_revision
+            || current.pointer_revision != params.expected_pointer_revision
+            || current.active_release_digest.as_deref()
+                != params.expected_active_release_digest.as_deref()
+        {
+            return Err(conflict("MiniApp lifecycle exact CAS failed"));
+        }
+        let (expected_lifecycle, target_lifecycle) = if params.enabled {
+            ("disabled", "enabled")
+        } else {
+            ("enabled", "disabled")
+        };
+        if current.lifecycle != expected_lifecycle {
+            return Err(conflict("MiniApp lifecycle transition is not applicable"));
+        }
+        if params.enabled
+            && (current.active_release_id.is_none()
+                || current.active_release_digest.is_none()
+                || current.active_release_epoch < 1)
+        {
+            return Err(conflict("MiniApp Enable requires an Active Release"));
+        }
+        if params.updated_at < current.updated_at {
+            return Err(conflict("MiniApp lifecycle timestamp predates Product state"));
+        }
+        ensure_no_running_build(&mut tx, &params.miniapp_id).await?;
+        let updated = sqlx::query(
+            "UPDATE miniapp_products
+             SET product_revision = product_revision + 1,
+                 lifecycle = ?, updated_at = ?
+             WHERE owner_user_id = ? AND miniapp_id = ?
+               AND product_revision = ? AND pointer_revision = ?
+               AND lifecycle = ? AND updated_at <= ?",
+        )
+        .bind(target_lifecycle)
+        .bind(params.updated_at)
+        .bind(&params.owner_user_id)
+        .bind(&params.miniapp_id)
+        .bind(params.expected_product_revision)
+        .bind(params.expected_pointer_revision)
+        .bind(expected_lifecycle)
+        .bind(params.updated_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        if updated.rows_affected() != 1 {
+            return Err(conflict("MiniApp lifecycle CAS failed"));
+        }
+        synchronize_catalog_publication(
+            &mut tx,
+            &params.owner_user_id,
+            &params.miniapp_id,
+            target_lifecycle,
+            current.active_release_id.as_deref(),
+            current.active_release_digest.as_deref(),
+            current.active_release_epoch,
+            &current.materialized_catalog_digest,
+        )
+        .await?;
+        revoke_surface_session(
+            &mut tx,
+            &params.owner_user_id,
+            &params.miniapp_id,
+        )
+        .await?;
+        bump_library_revision(&mut tx, &params.owner_user_id, params.updated_at).await?;
+        let snapshot = fetch_snapshot_in_tx(
+            &mut tx,
+            &params.owner_user_id,
+            &params.miniapp_id,
+        )
+            .await?
+            .ok_or_else(|| DbError::Init("MiniApp lifecycle commit lost Product".into()))?;
+        tx.commit().await?;
+        Ok(snapshot)
+    }
+
+    async fn set_auto_publish_cas(
+        &self,
+        params: &SetMiniAppM1AutoPublishParams,
+    ) -> Result<MiniAppM1Snapshot, DbError> {
+        validate_uuid(&params.owner_user_id, "owner_user_id")?;
+        validate_uuid(&params.miniapp_id, "miniapp_id")?;
+        validate_uuid(&params.authorization_id, "authorization_id")?;
+        if params.expected_product_revision < 1
+            || params.expected_pointer_revision < 1
+            || params.expected_authorization_revision.is_some_and(|value| value < 1)
+            || params.user_authorized_at_ms <= 0
+            || params.updated_at <= 0
+        {
+            return Err(conflict(
+                "MiniApp auto Publish authorization CAS expectations are invalid",
+            ));
+        }
+        let mut tx = self.pool.begin().await?;
+        let current =
+            lock_product_for_update(&mut tx, &params.owner_user_id, &params.miniapp_id).await?;
+        if current.kind != MiniAppM1Kind::UiOnly.as_str()
+            || matches!(current.lifecycle.as_str(), "trashed" | "deleting")
+            || current.product_revision != params.expected_product_revision
+            || current.pointer_revision != params.expected_pointer_revision
+        {
+            return Err(conflict(
+                "MiniApp auto Publish authorization Product/pointer CAS failed",
+            ));
+        }
+        if params.enabled && current.active_release_id.is_none() {
+            return Err(conflict(
+                "auto Publish can be enabled only after the first manual Publish",
+            ));
+        }
+        if params.updated_at < current.updated_at
+            || params.user_authorized_at_ms > params.updated_at
+        {
+            return Err(conflict(
+                "MiniApp auto Publish authorization timestamp is invalid",
+            ));
+        }
+        if params.enabled {
+            ensure_no_running_build(&mut tx, &params.miniapp_id).await?;
+        }
+        let existing = sqlx::query_as::<_, MiniAppPublishAuthorizationRow>(
+            "SELECT * FROM miniapp_publish_authorizations
+             WHERE owner_user_id = ? AND miniapp_id = ?",
+        )
+        .bind(&params.owner_user_id)
+        .bind(&params.miniapp_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        match existing {
+            Some(existing) => {
+                if params.expected_authorization_revision != Some(existing.revision)
+                    || params.authorization_id != existing.authorization_id
+                {
+                    return Err(conflict(
+                        "MiniApp auto Publish authorization revision CAS failed",
+                    ));
+                }
+                let changed = sqlx::query(
+                    "UPDATE miniapp_publish_authorizations
+                     SET revision = revision + 1, enabled = ?,
+                         user_authorized_at_ms = ?
+                     WHERE owner_user_id = ? AND miniapp_id = ?
+                       AND authorization_id = ? AND revision = ?",
+                )
+                .bind(params.enabled)
+                .bind(params.user_authorized_at_ms)
+                .bind(&params.owner_user_id)
+                .bind(&params.miniapp_id)
+                .bind(&params.authorization_id)
+                .bind(existing.revision)
+                .execute(&mut *tx)
+                .await
+                .map_err(query_error)?;
+                if changed.rows_affected() != 1 {
+                    return Err(conflict(
+                        "MiniApp auto Publish authorization update CAS failed",
+                    ));
+                }
+            }
+            None => {
+                if params.expected_authorization_revision.is_some() || !params.enabled {
+                    return Err(conflict(
+                        "MiniApp auto Publish authorization creation CAS failed",
+                    ));
+                }
+                sqlx::query(
+                    "INSERT INTO miniapp_publish_authorizations (
+                        authorization_id, miniapp_id, owner_user_id,
+                        revision, enabled, user_authorized_at_ms
+                     ) VALUES (?, ?, ?, 1, 1, ?)",
+                )
+                .bind(&params.authorization_id)
+                .bind(&params.miniapp_id)
+                .bind(&params.owner_user_id)
+                .bind(params.user_authorized_at_ms)
+                .execute(&mut *tx)
+                .await
+                .map_err(query_error)?;
+            }
+        }
+        let updated = sqlx::query(
+            "UPDATE miniapp_products
+             SET product_revision = product_revision + 1, updated_at = ?
+             WHERE owner_user_id = ? AND miniapp_id = ?
+               AND product_revision = ? AND pointer_revision = ?
+               AND updated_at <= ?",
+        )
+        .bind(params.updated_at)
+        .bind(&params.owner_user_id)
+        .bind(&params.miniapp_id)
+        .bind(params.expected_product_revision)
+        .bind(params.expected_pointer_revision)
+        .bind(params.updated_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        if updated.rows_affected() != 1 {
+            return Err(conflict(
+                "MiniApp auto Publish authorization Product CAS failed",
+            ));
+        }
+        bump_library_revision(&mut tx, &params.owner_user_id, params.updated_at).await?;
+        let snapshot = fetch_snapshot_in_tx(
+            &mut tx,
+            &params.owner_user_id,
+            &params.miniapp_id,
+        )
+            .await?
+            .ok_or_else(|| {
+                DbError::Init("MiniApp auto Publish authorization lost Product".into())
+            })?;
+        tx.commit().await?;
+        Ok(snapshot)
+    }
+
+    async fn open_surface_session_cas(
+        &self,
+        params: &OpenMiniAppM1SurfaceSessionParams,
+    ) -> Result<MiniAppSurfaceSessionRow, DbError> {
+        validate_uuid(&params.owner_user_id, "owner_user_id")?;
+        validate_uuid(&params.miniapp_id, "miniapp_id")?;
+        validate_uuid(&params.surface_session_id, "surface_session_id")?;
+        validate_uuid(
+            &params.expected_active_release_id,
+            "expected_active_release_id",
+        )?;
+        validate_digest(&params.capability_digest, "capability_digest")?;
+        validate_digest(
+            &params.expected_active_release_digest,
+            "expected_active_release_digest",
+        )?;
+        if params.expected_product_revision < 1
+            || params.expected_pointer_revision < 1
+            || params.expected_active_release_epoch < 1
+            || params.issued_at_ms <= 0
+        {
+            return Err(conflict("MiniApp Surface session guard is invalid"));
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let product =
+            lock_product_for_update(&mut tx, &params.owner_user_id, &params.miniapp_id).await?;
+        if product.kind != MiniAppM1Kind::UiOnly.as_str()
+            || product.lifecycle != "enabled"
+            || product.product_revision != params.expected_product_revision
+            || product.pointer_revision != params.expected_pointer_revision
+            || product.active_release_id.as_deref()
+                != Some(params.expected_active_release_id.as_str())
+            || product.active_release_digest.as_deref()
+                != Some(params.expected_active_release_digest.as_str())
+            || product.active_release_epoch != params.expected_active_release_epoch
+        {
+            return Err(conflict(
+                "MiniApp Surface open lost its exact enabled Active Release",
+            ));
+        }
+        if params.issued_at_ms < product.updated_at {
+            return Err(conflict(
+                "MiniApp Surface session timestamp predates Product state",
+            ));
+        }
+        require_pointer_release(
+            &mut tx,
+            &params.owner_user_id,
+            &params.miniapp_id,
+            Some(&params.expected_active_release_id),
+            Some(&params.expected_active_release_digest),
+            "Surface Active Release",
+        )
+        .await?;
+        let changed = sqlx::query(
+            "INSERT INTO miniapp_surface_sessions (
+                surface_session_id, miniapp_id, owner_user_id, generation,
+                capability_digest, active_release_id, active_release_digest,
+                active_release_epoch, issued_at_ms
+             ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)
+             ON CONFLICT(miniapp_id) DO UPDATE SET
+                surface_session_id = excluded.surface_session_id,
+                owner_user_id = excluded.owner_user_id,
+                generation = miniapp_surface_sessions.generation + 1,
+                capability_digest = excluded.capability_digest,
+                active_release_id = excluded.active_release_id,
+                active_release_digest = excluded.active_release_digest,
+                active_release_epoch = excluded.active_release_epoch,
+                issued_at_ms = excluded.issued_at_ms
+             WHERE miniapp_surface_sessions.owner_user_id = excluded.owner_user_id
+               AND miniapp_surface_sessions.generation < 9223372036854775807",
+        )
+        .bind(&params.surface_session_id)
+        .bind(&params.miniapp_id)
+        .bind(&params.owner_user_id)
+        .bind(&params.capability_digest)
+        .bind(&params.expected_active_release_id)
+        .bind(&params.expected_active_release_digest)
+        .bind(params.expected_active_release_epoch)
+        .bind(params.issued_at_ms)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        if changed.rows_affected() != 1 {
+            return Err(conflict("MiniApp Surface session generation overflow"));
+        }
+        let session = sqlx::query_as::<_, MiniAppSurfaceSessionRow>(
+            "SELECT * FROM miniapp_surface_sessions
+             WHERE owner_user_id = ? AND miniapp_id = ?
+               AND surface_session_id = ? AND capability_digest = ?",
+        )
+        .bind(&params.owner_user_id)
+        .bind(&params.miniapp_id)
+        .bind(&params.surface_session_id)
+        .bind(&params.capability_digest)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(session)
+    }
+
+    async fn resolve_surface_session(
+        &self,
+        params: &ResolveMiniAppM1SurfaceSessionParams,
+    ) -> Result<Option<MiniAppSurfaceSessionRow>, DbError> {
+        validate_uuid(&params.miniapp_id, "miniapp_id")?;
+        validate_digest(&params.capability_digest, "capability_digest")?;
+        validate_digest(
+            &params.expected_active_release_digest,
+            "expected_active_release_digest",
+        )?;
+        if params.expected_active_release_epoch < 1 {
+            return Err(conflict(
+                "MiniApp Surface session epoch must be positive",
+            ));
+        }
+        sqlx::query_as::<_, MiniAppSurfaceSessionRow>(
+            "SELECT session.*
+             FROM miniapp_surface_sessions session
+             JOIN miniapp_products product
+               ON product.owner_user_id = session.owner_user_id
+              AND product.miniapp_id = session.miniapp_id
+             WHERE session.miniapp_id = ?
+               AND session.capability_digest = ?
+               AND session.active_release_digest = ?
+               AND session.active_release_epoch = ?
+               AND product.kind = 'ui_only'
+               AND product.lifecycle = 'enabled'
+               AND product.active_release_id = session.active_release_id
+               AND product.active_release_digest = session.active_release_digest
+               AND product.active_release_epoch = session.active_release_epoch",
+        )
+        .bind(&params.miniapp_id)
+        .bind(&params.capability_digest)
+        .bind(&params.expected_active_release_digest)
+        .bind(params.expected_active_release_epoch)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(DbError::Query)
+    }
+
+    async fn close_surface_session_cas(
+        &self,
+        params: &CloseMiniAppM1SurfaceSessionParams,
+    ) -> Result<bool, DbError> {
+        validate_uuid(&params.owner_user_id, "owner_user_id")?;
+        validate_uuid(&params.miniapp_id, "miniapp_id")?;
+        validate_uuid(&params.surface_session_id, "surface_session_id")?;
+        validate_digest(&params.capability_digest, "capability_digest")?;
+        let mut tx = self.pool.begin().await?;
+        lock_product_for_update(&mut tx, &params.owner_user_id, &params.miniapp_id).await?;
+        let deleted = sqlx::query(
+            "DELETE FROM miniapp_surface_sessions
+             WHERE owner_user_id = ? AND miniapp_id = ?
+               AND surface_session_id = ? AND capability_digest = ?",
+        )
+        .bind(&params.owner_user_id)
+        .bind(&params.miniapp_id)
+        .bind(&params.surface_session_id)
+        .bind(&params.capability_digest)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?
+        .rows_affected();
+        tx.commit().await?;
+        Ok(deleted == 1)
+    }
+
+    async fn revoke_all_surface_sessions_on_startup(&self) -> Result<u64, DbError> {
+        sqlx::query("DELETE FROM miniapp_surface_sessions")
+            .execute(&self.pool)
+            .await
+            .map(|result| result.rows_affected())
+            .map_err(query_error)
     }
 
     async fn update_config_cas(
@@ -1598,16 +2768,18 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
                 "MiniApp config Product/pointer/revision/schema exact CAS failed",
             ));
         }
+        ensure_no_running_build(&mut tx, miniapp_id).await?;
         if updated_at < product.updated_at {
             return Err(conflict(
                 "MiniApp config timestamp predates the Product state",
             ));
         }
         if product.config_json == config_json {
-            tx.commit().await?;
-            return fetch_snapshot(&self.pool, owner_user_id, miniapp_id)
+            let snapshot = fetch_snapshot_in_tx(&mut tx, owner_user_id, miniapp_id)
                 .await?
-                .ok_or_else(|| DbError::Init("MiniApp config read lost Product".into()));
+                .ok_or_else(|| DbError::Init("MiniApp config read lost Product".into()))?;
+            tx.commit().await?;
+            return Ok(snapshot);
         }
         let next_product_revision = product
             .product_revision
@@ -1644,10 +2816,11 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
             return Err(conflict("MiniApp config exact CAS failed"));
         }
         bump_library_revision(&mut tx, owner_user_id, updated_at).await?;
-        tx.commit().await?;
-        fetch_snapshot(&self.pool, owner_user_id, miniapp_id)
+        let snapshot = fetch_snapshot_in_tx(&mut tx, owner_user_id, miniapp_id)
             .await?
-            .ok_or_else(|| DbError::Init("MiniApp config commit lost Product".into()))
+            .ok_or_else(|| DbError::Init("MiniApp config commit lost Product".into()))?;
+        tx.commit().await?;
+        Ok(snapshot)
     }
 
     async fn replace_credential_bindings_cas(
@@ -1686,6 +2859,7 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
                 "MiniApp Credential binding Product/pointer/revision exact CAS failed",
             ));
         }
+        ensure_no_running_build(&mut tx, miniapp_id).await?;
         if updated_at < product.updated_at {
             return Err(conflict(
                 "MiniApp Credential binding timestamp predates the Product state",
@@ -1704,12 +2878,13 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
             .map(|row| (row.slot_key.clone(), row.credential_id.clone()))
             .collect::<BTreeMap<_, _>>();
         if &current == bindings {
-            tx.commit().await?;
-            return fetch_snapshot(&self.pool, owner_user_id, miniapp_id)
+            let snapshot = fetch_snapshot_in_tx(&mut tx, owner_user_id, miniapp_id)
                 .await?
                 .ok_or_else(|| {
                     DbError::Init("MiniApp Credential binding read lost Product".into())
-                });
+                })?;
+            tx.commit().await?;
+            return Ok(snapshot);
         }
         let next_product_revision = product
             .product_revision
@@ -1772,12 +2947,13 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
             ));
         }
         bump_library_revision(&mut tx, owner_user_id, updated_at).await?;
-        tx.commit().await?;
-        fetch_snapshot(&self.pool, owner_user_id, miniapp_id)
+        let snapshot = fetch_snapshot_in_tx(&mut tx, owner_user_id, miniapp_id)
             .await?
             .ok_or_else(|| {
                 DbError::Init("MiniApp Credential binding commit lost Product".into())
-            })
+            })?;
+        tx.commit().await?;
+        Ok(snapshot)
     }
 
     async fn get_kv(
@@ -1793,7 +2969,7 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
         validate_visible_ascii_key(key, "MiniApp KV key", 256)?;
         let mut tx = self.pool.begin().await?;
         lock_product(&mut tx, owner_user_id, miniapp_id).await?;
-        let row = sqlx::query_as(
+        let row = sqlx::query_as::<_, MiniAppKvRow>(
             "SELECT * FROM miniapp_kv
              WHERE owner_user_id = ? AND miniapp_id = ?
                AND namespace = ? AND key = ?",
@@ -1804,8 +2980,300 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
         .bind(key)
         .fetch_optional(&mut *tx)
         .await?;
+        if let Some(row) = &row {
+            validate_kv_row(row)?;
+        }
         tx.commit().await?;
-        Ok(row)
+        Ok(row.filter(|row| !row.is_tombstone))
+    }
+
+    async fn execute_surface_kv(
+        &self,
+        params: &ExecuteMiniAppM1SurfaceKvParams,
+    ) -> Result<MiniAppM1SurfaceKvResult, DbError> {
+        validate_uuid(&params.owner_user_id, "owner_user_id")?;
+        validate_uuid(&params.miniapp_id, "miniapp_id")?;
+        validate_uuid(&params.surface_session_id, "surface_session_id")?;
+        validate_digest(
+            &params.expected_capability_digest,
+            "expected_capability_digest",
+        )?;
+        validate_digest(
+            &params.expected_active_release_digest,
+            "expected_active_release_digest",
+        )?;
+        validate_visible_ascii_key(&params.namespace, "MiniApp KV namespace", 128)?;
+        validate_visible_ascii_key(&params.key, "MiniApp KV key", 256)?;
+        if params.expected_surface_generation < 1
+            || params.expected_active_release_epoch < 1
+            || params.updated_at <= 0
+        {
+            return Err(conflict(
+                "MiniApp Surface KV epoch/timestamp is invalid",
+            ));
+        }
+        let mut tx = self.pool.begin().await?;
+        let product = lock_product_for_update(
+            &mut tx,
+            &params.owner_user_id,
+            &params.miniapp_id,
+        )
+        .await?;
+        if product.lifecycle != "enabled"
+            || product.active_release_epoch != params.expected_active_release_epoch
+            || product.active_release_digest.as_deref()
+                != Some(params.expected_active_release_digest.as_str())
+        {
+            return Err(conflict(
+                "MiniApp Surface KV session is stale for the Active Release",
+            ));
+        }
+        if params.updated_at < product.updated_at {
+            return Err(conflict(
+                "MiniApp Surface KV timestamp predates Product state",
+            ));
+        }
+        let session = sqlx::query_as::<_, MiniAppSurfaceSessionRow>(
+            "SELECT * FROM miniapp_surface_sessions
+             WHERE owner_user_id = ? AND miniapp_id = ?
+               AND surface_session_id = ? AND generation = ?
+               AND capability_digest = ?
+               AND active_release_digest = ? AND active_release_epoch = ?",
+        )
+        .bind(&params.owner_user_id)
+        .bind(&params.miniapp_id)
+        .bind(&params.surface_session_id)
+        .bind(params.expected_surface_generation)
+        .bind(&params.expected_capability_digest)
+        .bind(&params.expected_active_release_digest)
+        .bind(params.expected_active_release_epoch)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| {
+            conflict("MiniApp Surface KV session capability was revoked")
+        })?;
+        if product.active_release_id.as_deref()
+            != Some(session.active_release_id.as_str())
+        {
+            return Err(conflict(
+                "MiniApp Surface KV session no longer binds the Active Release",
+            ));
+        }
+        let current = sqlx::query_as::<_, MiniAppKvRow>(
+            "SELECT * FROM miniapp_kv
+             WHERE owner_user_id = ? AND miniapp_id = ?
+               AND namespace = ? AND key = ?",
+        )
+        .bind(&params.owner_user_id)
+        .bind(&params.miniapp_id)
+        .bind(&params.namespace)
+        .bind(&params.key)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(row) = &current {
+            validate_kv_row(row)?;
+        }
+
+        let result = match &params.operation {
+            MiniAppM1SurfaceKvOperation::Get => {
+                let (value, revision) = match current.as_ref() {
+                    Some(row) if !row.is_tombstone => (
+                        Some(serde_json::from_str(&row.value_json).map_err(|error| {
+                            DbError::Init(format!("MiniApp KV contains invalid JSON: {error}"))
+                        })?),
+                        Some(row.revision),
+                    ),
+                    Some(row) => (None, Some(row.revision)),
+                    None => (None, None),
+                };
+                MiniAppM1SurfaceKvResult::Value { value, revision }
+            }
+            MiniAppM1SurfaceKvOperation::Set { value } => {
+                let value_json = serde_json::to_string(value)
+                    .map_err(|error| conflict(format!("MiniApp KV value is invalid: {error}")))?;
+                let revision = if let Some(row) = current.as_ref() {
+                    if params.updated_at < row.updated_at {
+                        return Err(conflict(
+                            "MiniApp Surface KV Set timestamp predates the existing key",
+                        ));
+                    }
+                    let next_revision = row
+                        .revision
+                        .checked_add(1)
+                        .ok_or_else(|| conflict("MiniApp KV revision overflow"))?;
+                    let changed = sqlx::query(
+                        "UPDATE miniapp_kv
+                         SET value_json = ?, revision = ?, is_tombstone = 0,
+                             updated_at = ?
+                         WHERE owner_user_id = ? AND miniapp_id = ?
+                           AND namespace = ? AND key = ? AND revision = ?
+                           AND updated_at <= ?",
+                    )
+                    .bind(value_json)
+                    .bind(next_revision)
+                    .bind(params.updated_at)
+                    .bind(&params.owner_user_id)
+                    .bind(&params.miniapp_id)
+                    .bind(&params.namespace)
+                    .bind(&params.key)
+                    .bind(row.revision)
+                    .bind(params.updated_at)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(query_error)?
+                    .rows_affected();
+                    if changed != 1 {
+                        return Err(conflict("MiniApp Surface KV Set lost its revision CAS"));
+                    }
+                    next_revision
+                } else {
+                    let changed = sqlx::query(
+                        "INSERT INTO miniapp_kv (
+                            miniapp_id, owner_user_id, namespace, key, value_json,
+                            revision, key_generation, is_tombstone,
+                            created_at, updated_at
+                         ) VALUES (?, ?, ?, ?, ?, 1, 1, 0, ?, ?)",
+                    )
+                    .bind(&params.miniapp_id)
+                    .bind(&params.owner_user_id)
+                    .bind(&params.namespace)
+                    .bind(&params.key)
+                    .bind(value_json)
+                    .bind(params.updated_at)
+                    .bind(params.updated_at)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(query_error)?
+                    .rows_affected();
+                    if changed != 1 {
+                        return Err(conflict("MiniApp Surface KV Set failed"));
+                    }
+                    1
+                };
+                MiniAppM1SurfaceKvResult::Written { revision }
+            }
+            MiniAppM1SurfaceKvOperation::Delete => {
+                match current.as_ref() {
+                    None => MiniAppM1SurfaceKvResult::Deleted { existed: false },
+                    Some(row) if row.is_tombstone => {
+                        MiniAppM1SurfaceKvResult::Deleted { existed: false }
+                    }
+                    Some(row) => {
+                        if params.updated_at < row.updated_at {
+                            return Err(conflict(
+                                "MiniApp Surface KV delete timestamp predates the existing key",
+                            ));
+                        }
+                        let next_revision = row
+                            .revision
+                            .checked_add(1)
+                            .ok_or_else(|| conflict("MiniApp KV revision overflow"))?;
+                        let next_generation = row
+                            .key_generation
+                            .checked_add(1)
+                            .ok_or_else(|| conflict("MiniApp KV key generation overflow"))?;
+                        let deleted = sqlx::query(
+                            "UPDATE miniapp_kv
+                             SET value_json = 'null', revision = ?, key_generation = ?,
+                                 is_tombstone = 1, updated_at = ?
+                             WHERE owner_user_id = ? AND miniapp_id = ?
+                               AND namespace = ? AND key = ? AND revision = ?
+                               AND key_generation = ? AND is_tombstone = 0
+                               AND updated_at <= ?",
+                        )
+                        .bind(next_revision)
+                        .bind(next_generation)
+                        .bind(params.updated_at)
+                        .bind(&params.owner_user_id)
+                        .bind(&params.miniapp_id)
+                        .bind(&params.namespace)
+                        .bind(&params.key)
+                        .bind(row.revision)
+                        .bind(row.key_generation)
+                        .bind(params.updated_at)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(query_error)?
+                        .rows_affected();
+                        if deleted != 1 {
+                            return Err(conflict(
+                                "MiniApp Surface KV delete lost its revision CAS",
+                            ));
+                        }
+                        MiniAppM1SurfaceKvResult::Deleted { existed: true }
+                    }
+                }
+            }
+            MiniAppM1SurfaceKvOperation::CompareAndSwap {
+                expected_revision,
+                value,
+            } => {
+                let observed = current.as_ref().map(|row| row.revision);
+                if observed != *expected_revision {
+                    MiniAppM1SurfaceKvResult::CompareAndSwap {
+                        applied: false,
+                        current_revision: observed,
+                    }
+                } else {
+                    match value {
+                        Some(value) => {
+                            let value_json = serde_json::to_string(value).map_err(|error| {
+                                conflict(format!("MiniApp KV value is invalid: {error}"))
+                            })?;
+                            let written = match current.as_ref() {
+                                Some(row) => {
+                                    write_live_kv(&mut tx, row, &value_json, params.updated_at)
+                                        .await?
+                                }
+                                None => {
+                                    insert_live_kv(
+                                        &mut tx,
+                                        &params.owner_user_id,
+                                        &params.miniapp_id,
+                                        &params.namespace,
+                                        &params.key,
+                                        &value_json,
+                                        params.updated_at,
+                                    )
+                                    .await?
+                                }
+                            };
+                            MiniAppM1SurfaceKvResult::CompareAndSwap {
+                                applied: true,
+                                current_revision: Some(written.revision),
+                            }
+                        }
+                        None => match current.as_ref() {
+                            None => MiniAppM1SurfaceKvResult::CompareAndSwap {
+                                applied: true,
+                                current_revision: None,
+                            },
+                            Some(row) if row.is_tombstone => {
+                                MiniAppM1SurfaceKvResult::CompareAndSwap {
+                                    applied: true,
+                                    current_revision: Some(row.revision),
+                                }
+                            }
+                            Some(row) => {
+                                let tombstone = tombstone_kv(&mut tx, row, params.updated_at)
+                                    .await?
+                                    .ok_or_else(|| {
+                                        DbError::Init(
+                                            "MiniApp KV tombstone write lost its key".into(),
+                                        )
+                                    })?;
+                                MiniAppM1SurfaceKvResult::CompareAndSwap {
+                                    applied: true,
+                                    current_revision: Some(tombstone.revision),
+                                }
+                            }
+                        },
+                    }
+                }
+            }
+        };
+        tx.commit().await?;
+        Ok(result)
     }
 
     async fn put_kv_cas(
@@ -1828,67 +3296,41 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
         let value_json = serde_json::to_string(value)
             .map_err(|error| conflict(format!("MiniApp KV value is invalid: {error}")))?;
         let mut tx = self.pool.begin().await?;
-        let product = lock_product(&mut tx, owner_user_id, miniapp_id).await?;
+        let product = lock_product_for_update(&mut tx, owner_user_id, miniapp_id).await?;
         if updated_at < product.created_at {
             return Err(conflict(
                 "MiniApp KV timestamp predates the Product creation",
             ));
         }
-        let changed = if let Some(expected_revision) = expected_revision {
-            sqlx::query(
-                "UPDATE miniapp_kv
-                 SET value_json = ?, revision = revision + 1, updated_at = ?
-                 WHERE owner_user_id = ? AND miniapp_id = ?
-                   AND namespace = ? AND key = ? AND revision = ?
-                   AND revision < 9223372036854775807 AND updated_at <= ?",
-            )
-            .bind(&value_json)
-            .bind(updated_at)
-            .bind(owner_user_id)
-            .bind(miniapp_id)
-            .bind(namespace)
-            .bind(key)
-            .bind(expected_revision)
-            .bind(updated_at)
-            .execute(&mut *tx)
-            .await
-            .map_err(query_error)?
-            .rows_affected()
-        } else {
-            sqlx::query(
-                "INSERT INTO miniapp_kv
-                 (miniapp_id, owner_user_id, namespace, key, value_json,
-                  revision, created_at, updated_at)
-                 VALUES (?, ?, ?, ?, ?, 1, ?, ?)
-                 ON CONFLICT(owner_user_id, miniapp_id, namespace, key)
-                 DO NOTHING",
-            )
-            .bind(miniapp_id)
-            .bind(owner_user_id)
-            .bind(namespace)
-            .bind(key)
-            .bind(&value_json)
-            .bind(updated_at)
-            .bind(updated_at)
-            .execute(&mut *tx)
-            .await
-            .map_err(query_error)?
-            .rows_affected()
+        let current = fetch_kv_row(&mut tx, owner_user_id, miniapp_id, namespace, key).await?;
+        let row = match (current, expected_revision) {
+            (None, None) => {
+                insert_live_kv(
+                    &mut tx,
+                    owner_user_id,
+                    miniapp_id,
+                    namespace,
+                    key,
+                    &value_json,
+                    updated_at,
+                )
+                .await?
+            }
+            (None, Some(_)) => {
+                return Err(conflict("MiniApp KV revision CAS found no logical key"));
+            }
+            (Some(_), None) => {
+                return Err(conflict(
+                    "MiniApp KV expected_revision is required for an existing logical key",
+                ));
+            }
+            (Some(row), Some(expected_revision)) => {
+                if row.revision != expected_revision {
+                    return Err(conflict("MiniApp KV revision CAS failed"));
+                }
+                write_live_kv(&mut tx, &row, &value_json, updated_at).await?
+            }
         };
-        if changed != 1 {
-            return Err(conflict("MiniApp KV revision CAS failed"));
-        }
-        let row = sqlx::query_as(
-            "SELECT * FROM miniapp_kv
-             WHERE owner_user_id = ? AND miniapp_id = ?
-               AND namespace = ? AND key = ?",
-        )
-        .bind(owner_user_id)
-        .bind(miniapp_id)
-        .bind(namespace)
-        .bind(key)
-        .fetch_one(&mut *tx)
-        .await?;
         tx.commit().await?;
         Ok(row)
     }
@@ -1912,45 +3354,28 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
             ));
         }
         let mut tx = self.pool.begin().await?;
-        let product = lock_product(&mut tx, owner_user_id, miniapp_id).await?;
+        let product = lock_product_for_update(&mut tx, owner_user_id, miniapp_id).await?;
         if updated_at < product.created_at {
             return Err(conflict(
                 "MiniApp KV timestamp predates the Product creation",
             ));
         }
-        let deleted = sqlx::query(
-            "DELETE FROM miniapp_kv
-             WHERE owner_user_id = ? AND miniapp_id = ?
-               AND namespace = ? AND key = ?
-               AND revision = ? AND updated_at <= ?",
-        )
-        .bind(owner_user_id)
-        .bind(miniapp_id)
-        .bind(namespace)
-        .bind(key)
-        .bind(expected_revision)
-        .bind(updated_at)
-        .execute(&mut *tx)
-        .await
-        .map_err(query_error)?
-        .rows_affected();
-        if deleted == 0 {
-            let current: Option<i64> = sqlx::query_scalar(
-                "SELECT revision FROM miniapp_kv
-                 WHERE owner_user_id = ? AND miniapp_id = ?
-                   AND namespace = ? AND key = ?",
-            )
-            .bind(owner_user_id)
-            .bind(miniapp_id)
-            .bind(namespace)
-            .bind(key)
-            .fetch_optional(&mut *tx)
-            .await?;
-            if current.is_some() {
-                return Err(conflict("MiniApp KV delete revision CAS failed"));
+        let current = fetch_kv_row(&mut tx, owner_user_id, miniapp_id, namespace, key).await?;
+        let deleted = match current {
+            None => false,
+            Some(row) => {
+                if row.revision != expected_revision {
+                    return Err(conflict("MiniApp KV delete revision CAS failed"));
+                }
+                if row.is_tombstone {
+                    false
+                } else {
+                    tombstone_kv(&mut tx, &row, updated_at).await?;
+                    true
+                }
             }
-        }
+        };
         tx.commit().await?;
-        Ok(deleted == 1)
+        Ok(deleted)
     }
 }

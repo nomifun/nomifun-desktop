@@ -72,6 +72,15 @@ fn is_office_preview_capability_path(path: &str) -> bool {
     )
 }
 
+fn is_miniapp_surface_capability_path(path: &str) -> bool {
+    let segments = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
+    matches!(
+        segments.as_slice(),
+        ["api", "miniapps", _miniapp_id, "surface", "assets", capability, _epoch, _digest, ..]
+            if is_preview_capability(capability)
+    )
+}
+
 fn replace_frame_ancestors(policy: &str) -> String {
     let mut directives: Vec<&str> = policy
         .split(';')
@@ -147,7 +156,9 @@ pub async fn security_headers_middleware(request: Request, next: Next) -> Respon
         headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
     }
 
-    if is_office_preview_capability_path(&path) {
+    if is_office_preview_capability_path(&path)
+        || is_miniapp_surface_capability_path(&path)
+    {
         apply_office_frame_policy(headers);
     } else if !allows_embedding(&path) {
         headers.insert(X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
@@ -256,6 +267,39 @@ mod tests {
             response.headers().get(CACHE_CONTROL).unwrap(),
             "public, max-age=31536000, immutable"
         );
+    }
+
+    #[tokio::test]
+    async fn miniapp_surface_capability_can_be_framed_by_the_app() {
+        let capability =
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let digest =
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        let path = format!(
+            "/api/miniapps/miniapp-1/surface/assets/{capability}/3/{digest}/ui/index.html"
+        );
+        let app = Router::new()
+            .route(&path, get(|| async { "ok" }))
+            .layer(middleware::from_fn(security_headers_middleware));
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(response.headers().get(X_FRAME_OPTIONS).is_none());
+        let policy = response
+            .headers()
+            .get(&CONTENT_SECURITY_POLICY)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(policy.contains("frame-ancestors 'self'"));
     }
 
     #[tokio::test]

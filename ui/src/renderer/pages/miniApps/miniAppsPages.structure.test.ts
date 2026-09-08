@@ -12,6 +12,10 @@ const runnerSource = readFileSync(
   new URL('./RunnerPage.tsx', import.meta.url),
   'utf8'
 );
+const surfaceSource = readFileSync(
+  new URL('./MiniAppSurfacePanel.tsx', import.meta.url),
+  'utf8'
+);
 const dialogSource = readFileSync(
   new URL('./MiniAppCreateProjectDialog.tsx', import.meta.url),
   'utf8'
@@ -53,8 +57,8 @@ describe('MiniApp M1 product surfaces', () => {
     expect(runnerSource.includes("navigate('/mini-apps')")).toBe(true);
   });
 
-  test('Workshop exposes the delivered Source, Build, and Ready workflow', () => {
-    for (const step of ['source', 'build', 'ready']) {
+  test('Workshop exposes the delivered Source, Build, Publish, and Surface workflow', () => {
+    for (const step of ['source', 'build', 'ready', 'publish', 'surface']) {
       expect(
         runnerSource.includes(`miniApps.workshop.workflow.${step}`)
       ).toBe(true);
@@ -68,12 +72,89 @@ describe('MiniApp M1 product surfaces', () => {
     ]) {
       expect(runnerSource.includes(fact)).toBe(true);
     }
-    expect(runnerSource.includes('ipcBridge.miniapps.publish')).toBe(false);
+    for (const route of [
+      'ipcBridge.miniapps.publish.invoke(',
+      'ipcBridge.miniapps.rollback.invoke(',
+      'ipcBridge.miniapps.setEnabled.invoke(',
+      'ipcBridge.miniapps.setPublishMode.invoke(',
+      'ipcBridge.miniapps.openSurface.invoke(',
+    ]) {
+      expect(runnerSource.includes(route)).toBe(true);
+    }
     expect(runnerSource.includes('ipcBridge.miniapps.build.invoke(')).toBe(true);
     expect(
       runnerSource.includes('ipcBridge.miniapps.cancelBuild.invoke({')
     ).toBe(true);
     expect(runnerSource.includes('ipcBridge.miniapps.delete')).toBe(false);
+  });
+
+  test('Surface uses only a capability/epoch/digest-fenced strict iframe', () => {
+    const sandboxValue = surfaceSource.match(
+      /sandbox=['"]([^'"]+)['"]/
+    )?.[1];
+    expect(sandboxValue).toBe('allow-scripts allow-forms');
+    expect(sandboxValue).not.toContain('allow-same-origin');
+    expect(sandboxValue).not.toContain('allow-popups');
+    expect(sandboxValue).not.toContain('allow-top-navigation');
+    expect(surfaceSource.includes('miniAppSurfaceAssetPath(descriptor)')).toBe(
+      true
+    );
+    expect(surfaceSource.includes("miniApps.surface.frameTitle")).toBe(true);
+    expect(surfaceSource.includes('new MessageChannel()')).toBe(true);
+    expect(surfaceSource.includes('[channel.port2]')).toBe(true);
+    expect(
+      surfaceSource.includes('nomifun-miniapp-bridge-challenge-v1')
+    ).toBe(true);
+    expect(
+      surfaceSource.includes('nomifun-miniapp-bridge-handshake-v1')
+    ).toBe(true);
+    expect(
+      surfaceSource.includes("event.origin !== 'null'")
+    ).toBe(true);
+    expect(surfaceSource.includes('createBridgeNonce()')).toBe(true);
+    expect(
+      surfaceSource.includes('ipcBridge.miniapps.bridge')
+    ).toBe(true);
+    expect(runnerSource.includes('ipcBridge.miniapps.closeSurface')).toBe(true);
+    expect(surfaceSource.includes('key={bridgeDescriptorKey}')).toBe(true);
+    expect(surfaceSource.includes('key={source}')).toBe(false);
+    expect(surfaceSource.includes('onLoad={handleFrameLoad}')).toBe(true);
+    expect(
+      /if \(bridgeLoadRef\.current\.portTransferred\) \{\s*closeBridge\(\);\s*return;\s*\}/.test(
+        surfaceSource
+      )
+    ).toBe(true);
+    const handshakeAcceptAt = surfaceSource.indexOf(
+      'data?.type !== BRIDGE_HANDSHAKE_EVENT'
+    );
+    const transferPortAt = surfaceSource.indexOf('openBridge(frame, nonce);');
+    expect(handshakeAcceptAt).toBeGreaterThan(-1);
+    expect(transferPortAt).toBeGreaterThan(handshakeAcceptAt);
+    expect(surfaceSource.match(/openBridge\(frame, nonce\);/g)?.length).toBe(1);
+    expect(
+      /const revokeBridge = useCallback\(\(\) => \{\s*bridgeLoadRef\.current\.portTransferred = true;\s*bridgeLoadRef\.current\.handshakeNonce = null;\s*closeBridge\(\);/.test(
+        surfaceSource
+      )
+    ).toBe(true);
+    expect(surfaceSource.includes('if (bridgePortRef.current !== hostPort) return;')).toBe(
+      true
+    );
+    expect(surfaceSource.includes('window.__nomiLocalTrust')).toBe(false);
+    expect(surfaceSource.includes('window.fetch')).toBe(false);
+    const closeHandlerAt = runnerSource.indexOf(
+      'const handleCloseSurface = useCallback'
+    );
+    const closeRequestAt = runnerSource.indexOf(
+      'await ipcBridge.miniapps.closeSurface.invoke({',
+      closeHandlerAt
+    );
+    const closeDescriptorAt = runnerSource.indexOf(
+      'setSurfaceDescriptor(null);',
+      closeRequestAt
+    );
+    expect(closeHandlerAt).toBeGreaterThan(-1);
+    expect(closeRequestAt).toBeGreaterThan(closeHandlerAt);
+    expect(closeDescriptorAt).toBeGreaterThan(closeRequestAt);
   });
 
   test('legacy single-HTML runtime and conversation authoring are absent', () => {

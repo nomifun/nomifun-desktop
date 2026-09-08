@@ -1417,3 +1417,30 @@ Plugin Self-Evolution 新增 N1 的 Chat Dev、Project Source、Build、Candidat
 Schema、IPC、默认常量和 Windows Gate；macOS/Linux required 原生验证统一延后到
 Windows N1/M1 全部完成并冻结最终 cohort 之后。macOS x64 与 Linux x64 Headless
 只保留 optional backlog，不进入首发关键路径。
+
+## 2026-09-08 M1-0-02-B 实现收口与 M1-1-01 进入条件
+
+M1-0-02-B 已在 Windows Desktop 主机完成 UI-only 生产写集，且没有把内存 Service
+foundation 冒充真实 Service Host：
+
+- Ready → Manual Publish → Active/Previous → Surface → Rollback 的 owner/pointer/Catalog
+  原子切换已接入 SQLite transaction 和 exact CAS；Release identity 使用 release_id，
+  content-addressed Artifact digest 可被多个 Release lineage 复用；
+- auto Publish 只接受用户授权、同一 Project/source/build generation、非 UI manifest
+  完全一致且已完成静态验证的严格 UI 变化；running Build、Config/Credential 变更和
+  任何未知差异都会阻断；
+- Surface signer 收敛为 local-trust POST /surface/open；Host 只持有 capability digest，
+  iframe 先完成 nonce challenge/handshake 再接收一次性 MessagePort；Release epoch、
+  session generation、active digest 和 owner 均由 Host 绑定；
+- Close 是可恢复动作：后端确认成功后才卸载 descriptor，失败保留当前 descriptor 以便
+  重试；KV Delete 保留 tombstone，key generation/revision 单调递增，旧 CAS 不能复活；
+- Artifact/Release record 在 SQLite 和文件 Store 两侧都执行 typed validation、字段一致性、
+  canonical JSON 与 expected identity 检查；固定 bootstrap 在 Build 阶段注入，Source 原始
+  内容仍可继续编辑。
+
+已通过 DB、Platform、App 和 UI 定向验证；完整命令与结果记录在本台账的 B 收口记录中。
+
+下一切片正式转为 M1-1-01：在复用 N1-1-02/N1-1-03 的 Node supervisor、private IPC、
+watchdog 和 generation fence 基础上，接入一个 MiniApp 一个 dedicated Service Host，
+实现 on-demand/continuous、Service run key、真实 MessageChannel Service target 和
+单 App crash isolation；随后由 M1-1-02 接管 Files/Private SQLite/迁移 ledger。

@@ -4327,6 +4327,9 @@
           "dependency_lock_digest": {
             "type": "string"
           },
+          "manifest_without_ui_digest": {
+            "type": "string"
+          },
           "migration_set_digest": {
             "type": "string"
           },
@@ -4344,6 +4347,7 @@
           }
         },
         "required": [
+          "manifest_without_ui_digest",
           "migration_set_digest",
           "contribution_set_digest",
           "bridge_contract_digest",

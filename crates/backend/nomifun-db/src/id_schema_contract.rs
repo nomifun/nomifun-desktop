@@ -95,14 +95,17 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "mcp_servers",
     "message_correlations",
     "messages",
-    "miniapp_credential_bindings",
     "miniapp_build_operation_lineage",
-    "miniapp_library_state",
+    "miniapp_catalog_publications",
+    "miniapp_credential_bindings",
     "miniapp_kv",
+    "miniapp_library_state",
     "miniapp_products",
     "miniapp_projects",
+    "miniapp_publish_authorizations",
     "miniapp_release_artifacts",
     "miniapp_releases",
+    "miniapp_surface_sessions",
     "miniapps",
     "nomi_remote_events",
     "nomi_remote_sessions",
@@ -182,11 +185,13 @@ const UUIDV7_BUSINESS_COLUMNS: &[(&str, &str)] = &[
     ("knowledge_tree_operations", "operation_id"),
     ("mcp_servers", "mcp_server_id"),
     ("messages", "message_id"),
-    ("miniapp_products", "miniapp_id"),
     ("miniapp_build_operation_lineage", "operation_id"),
+    ("miniapp_products", "miniapp_id"),
     ("miniapp_projects", "project_id"),
+    ("miniapp_publish_authorizations", "authorization_id"),
     ("miniapp_release_artifacts", "artifact_id"),
     ("miniapp_releases", "release_id"),
+    ("miniapp_surface_sessions", "surface_session_id"),
     ("miniapps", "miniapp_id"),
     ("nomi_remote_events", "event_id"),
     ("nomi_remote_sessions", "agent_session_id"),
@@ -282,11 +287,13 @@ const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
     ("knowledge_tree_operations", "request_id"),
     ("mcp_servers", "mcp_server_id"),
     ("messages", "message_id"),
-    ("miniapp_products", "miniapp_id"),
     ("miniapp_build_operation_lineage", "operation_id"),
+    ("miniapp_products", "miniapp_id"),
     ("miniapp_projects", "project_id"),
+    ("miniapp_publish_authorizations", "authorization_id"),
     ("miniapp_release_artifacts", "artifact_id"),
     ("miniapp_releases", "release_id"),
+    ("miniapp_surface_sessions", "surface_session_id"),
     ("miniapps", "miniapp_id"),
     ("nomi_agent_bindings", "target_id"),
     ("nomi_remote_events", "event_id"),
@@ -685,7 +692,8 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     text_ref!("miniapp_products", "active_release_id" => "miniapp_releases", "release_id", true, "idx_miniapp_products_active_release_id", Restrict),
     text_ref!("miniapp_products", "previous_release_id" => "miniapp_releases", "release_id", true, "idx_miniapp_products_previous_release_id", Restrict),
     text_ref!("miniapp_projects", "owner_user_id" => "users", "user_id", false, "idx_miniapp_projects_owner_user_id", Cascade),
-    text_ref!("miniapp_projects", "miniapp_id" => "miniapp_products", "miniapp_id", false, "idx_miniapp_projects_miniapp_id", Cascade),
+    text_ref!("miniapp_projects", "miniapp_id" => "miniapp_products", "miniapp_id", false, "idx_miniapp_projects_miniapp_id", Cascade)
+        .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
     text_ref!("miniapp_release_artifacts", "owner_user_id" => "users", "user_id", false, "idx_miniapp_release_artifacts_owner_user_id", Cascade),
     text_ref!("miniapp_releases", "owner_user_id" => "users", "user_id", false, "idx_miniapp_releases_owner_user_id", Cascade),
     text_ref!("miniapp_releases", "miniapp_id" => "miniapp_products", "miniapp_id", false, "idx_miniapp_releases_miniapp_id", Restrict),
@@ -696,11 +704,31 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     text_ref!("miniapp_credential_bindings", "miniapp_id" => "miniapp_products", "miniapp_id", false, "idx_miniapp_credential_bindings_miniapp_id", Cascade),
     external_ref!("miniapp_credential_bindings", "credential_id", Text, false, Opaque, "idx_miniapp_credential_bindings_credential_id", KeepHistory),
     text_ref!("miniapp_kv", "owner_user_id" => "users", "user_id", false, "idx_miniapp_kv_owner_user_id", Cascade),
-    text_ref!("miniapp_kv", "miniapp_id" => "miniapp_products", "miniapp_id", false, "idx_miniapp_kv_miniapp_id", Cascade),
+    text_ref!("miniapp_kv", "miniapp_id" => "miniapp_products", "miniapp_id", false, "idx_miniapp_kv_miniapp_id", Cascade)
+        .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
     text_ref!("miniapp_build_operation_lineage", "owner_user_id" => "users", "user_id", false, "idx_miniapp_build_operation_lineage_owner", KeepHistory),
     text_ref!("miniapp_build_operation_lineage", "miniapp_id" => "miniapp_products", "miniapp_id", false, "idx_miniapp_build_operation_lineage_miniapp_id", KeepHistory),
     text_ref!("miniapp_build_operation_lineage", "project_id" => "miniapp_projects", "project_id", false, "idx_miniapp_build_operation_lineage_project", KeepHistory),
     text_ref!("miniapp_build_operation_lineage", "operation_id" => "product_operations", "operation_id", false, "idx_miniapp_build_operation_lineage_operation_id", KeepHistory),
+    text_ref!("miniapp_publish_authorizations", "owner_user_id" => "users", "user_id", false, "idx_miniapp_publish_authorizations_owner_user_id", Cascade),
+    text_ref!("miniapp_publish_authorizations", "miniapp_id" => "miniapp_products", "miniapp_id", false, "idx_miniapp_publish_authorizations_miniapp_id", Cascade)
+        .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
+    text_ref!("miniapp_catalog_publications", "owner_user_id" => "users", "user_id", false, "idx_miniapp_catalog_publications_owner_user_id", Cascade),
+    text_ref!("miniapp_catalog_publications", "miniapp_id" => "miniapp_products", "miniapp_id", false, "idx_miniapp_catalog_publications_miniapp_id", Cascade)
+        .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
+    text_ref!("miniapp_catalog_publications", "active_release_id" => "miniapp_releases", "release_id", false, "idx_miniapp_catalog_publications_active_release_id", Restrict)
+        .with_aggregate_scope(
+            "parent.owner_user_id = child.owner_user_id \
+             AND parent.miniapp_id = child.miniapp_id",
+        ),
+    text_ref!("miniapp_surface_sessions", "owner_user_id" => "users", "user_id", false, "idx_miniapp_surface_sessions_owner_user_id", Cascade),
+    text_ref!("miniapp_surface_sessions", "miniapp_id" => "miniapp_products", "miniapp_id", false, "idx_miniapp_surface_sessions_miniapp_id", Cascade)
+        .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
+    text_ref!("miniapp_surface_sessions", "active_release_id" => "miniapp_releases", "release_id", false, "idx_miniapp_surface_sessions_active_release_id", Restrict)
+        .with_aggregate_scope(
+            "parent.owner_user_id = child.owner_user_id \
+             AND parent.miniapp_id = child.miniapp_id",
+        ),
     // Delivery receipts intentionally survive Terminal/Requirement deletion so
     // a replay can never regain PTY write authority.
     text_ref!("terminal_turn_admissions", "terminal_id" => "terminal_sessions", "terminal_id", false, "idx_terminal_turn_admissions_terminal_epoch", KeepHistory),
@@ -1254,6 +1282,7 @@ pub async fn validate_id_schema_contract(pool: &SqlitePool) -> Result<(), DbErro
     validate_logical_reference_registry(pool).await?;
     validate_logical_reference_coverage(pool).await?;
     validate_json_logical_reference_registry(pool).await?;
+    require_miniapp_kv_tombstone_schema(pool).await?;
     require_workshop_asset_origin_id_contract(pool).await?;
     require_prompt_library_asset_identity_contract(pool).await?;
     require_column(pool, "workshop_assets", "deleted_at", "INTEGER", false).await?;
@@ -1300,6 +1329,7 @@ pub(crate) async fn validate_id_value_contract(pool: &SqlitePool) -> Result<(), 
 /// the dataset rather than rewrite IDs.
 pub async fn validate_id_data_contract(pool: &SqlitePool) -> Result<(), DbError> {
     validate_id_value_contract(pool).await?;
+    validate_miniapp_kv_tombstone_values(pool).await?;
     validate_workshop_asset_origin_values(pool).await?;
     validate_creation_task_result_asset_ids(pool).await?;
     let findings = audit_logical_reference_orphans(pool).await?;
@@ -1323,6 +1353,47 @@ pub async fn validate_id_data_contract(pool: &SqlitePool) -> Result<(), DbError>
     Err(DbError::Init(format!(
         "v3 ID data contract audit failed: {details}"
     )))
+}
+
+async fn require_miniapp_kv_tombstone_schema(pool: &SqlitePool) -> Result<(), DbError> {
+    for (column, expected_default) in [
+        ("key_generation", "1"),
+        ("is_tombstone", "0"),
+    ] {
+        require_column(pool, "miniapp_kv", column, "INTEGER", true).await?;
+        let actual_default: Option<String> = sqlx::query_scalar(&format!(
+            "SELECT dflt_value FROM pragma_table_info('miniapp_kv') WHERE name = ?"
+        ))
+        .bind(column)
+        .fetch_optional(pool)
+        .await?
+        .flatten();
+        if actual_default.as_deref() != Some(expected_default) {
+            return Err(DbError::Init(format!(
+                "v3 schema miniapp_kv.{column} must default to {expected_default}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+async fn validate_miniapp_kv_tombstone_values(pool: &SqlitePool) -> Result<(), DbError> {
+    let invalid: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM miniapp_kv
+         WHERE key_generation < 1
+            OR revision < 1
+            OR key_generation > revision
+            OR is_tombstone NOT IN (0, 1)
+            OR (is_tombstone = 1 AND value_json <> 'null')",
+    )
+    .fetch_one(pool)
+    .await?;
+    if invalid != 0 {
+        return Err(DbError::Init(format!(
+            "MiniApp KV tombstone contract rejected {invalid} row(s)"
+        )));
+    }
+    Ok(())
 }
 
 /// Read-only database orphan audit. Cross-store registry entries are skipped;

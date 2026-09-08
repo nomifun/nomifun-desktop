@@ -14,6 +14,56 @@ use nomifun_agent_contracts::{
 use serde_json::Value;
 use thiserror::Error;
 
+pub const MINIAPP_SURFACE_BRIDGE_BOOTSTRAP_MARKER: &str =
+    "nomifun-miniapp-bridge-bootstrap-v1";
+
+const MINIAPP_SURFACE_BRIDGE_BOOTSTRAP: &str =
+    r#"<script data-nomifun-miniapp-bridge="nomifun-miniapp-bridge-bootstrap-v1">
+(() => {
+  const VERSION = '1.0.0';
+  const CHALLENGE = 'nomifun-miniapp-bridge-challenge-v1';
+  const HANDSHAKE = 'nomifun-miniapp-bridge-handshake-v1';
+  const CONNECT = 'nomifun-miniapp-bridge-connect-v1';
+  let pendingNonce = null;
+  window.addEventListener('message', (event) => {
+    if (event.source !== window.parent) return;
+    const data = event.data;
+    if (!data || data.version !== VERSION) return;
+    if (
+      data.type === CHALLENGE &&
+      typeof data.nonce === 'string' &&
+      /^[a-f0-9]{64}$/.test(data.nonce)
+    ) {
+      pendingNonce = data.nonce;
+      window.parent.postMessage(
+        { type: HANDSHAKE, version: VERSION, nonce: pendingNonce },
+        event.origin
+      );
+      return;
+    }
+    if (
+      data.type !== CONNECT ||
+      data.nonce !== pendingNonce ||
+      !event.ports ||
+      event.ports.length !== 1
+    ) return;
+    const port = event.ports[0];
+    pendingNonce = null;
+    if (!Object.prototype.hasOwnProperty.call(window, '__nomifunMiniAppBridge')) {
+      Object.defineProperty(window, '__nomifunMiniAppBridge', {
+        value: port,
+        configurable: false,
+        enumerable: false,
+        writable: false,
+      });
+    }
+    port.start();
+    window.dispatchEvent(new Event('nomifun-miniapp-bridge-ready'));
+  });
+})();
+</script>
+"#;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MiniAppStaticBundleFile {
     pub normalized_relative_path: String,
@@ -78,6 +128,8 @@ pub enum MiniAppStaticBundleBuildError {
     CustomScriptsForbidden,
     #[error("UI-only MiniApp cannot include Service source")]
     UiOnlyServiceSource,
+    #[error("UI entrypoint must be valid UTF-8 for the Host Bridge bootstrap")]
+    InvalidUiEntrypointEncoding,
     #[error(transparent)]
     CanonicalDigest(#[from] CanonicalDigestError),
     #[error(transparent)]
@@ -146,6 +198,7 @@ pub fn build_miniapp_static_bundle(
     let mut files = Vec::with_capacity(
         1 + ui_assets.len() + usize::from(service.is_some()),
     );
+    let ui_index_html = materialize_surface_entrypoint(&ui_index_html)?;
     push_file(
         &mut files,
         &mut collision_keys,
@@ -241,6 +294,28 @@ pub fn build_miniapp_static_bundle(
         manifest,
         files,
     )?)
+}
+
+/// Add the Host-owned Surface Bridge bootstrap to every immutable Release
+/// entrypoint. Source Store bytes stay untouched; the deterministic Build
+/// transform ensures custom authored HTML has the same nonce handshake as the
+/// default scaffold.
+pub fn materialize_surface_entrypoint(
+    source: &[u8],
+) -> Result<Vec<u8>, MiniAppStaticBundleBuildError> {
+    if source.is_empty() {
+        return Ok(Vec::new());
+    }
+    let source = std::str::from_utf8(source)
+        .map_err(|_| MiniAppStaticBundleBuildError::InvalidUiEntrypointEncoding)?;
+    if source.contains(MINIAPP_SURFACE_BRIDGE_BOOTSTRAP_MARKER) {
+        return Ok(source.as_bytes().to_vec());
+    }
+    let mut materialized =
+        Vec::with_capacity(MINIAPP_SURFACE_BRIDGE_BOOTSTRAP.len() + source.len());
+    materialized.extend_from_slice(MINIAPP_SURFACE_BRIDGE_BOOTSTRAP.as_bytes());
+    materialized.extend_from_slice(source.as_bytes());
+    Ok(materialized)
 }
 
 pub fn validate_static_bundle_path(

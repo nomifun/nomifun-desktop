@@ -4,7 +4,8 @@ use nomifun_api_types::{
     MiniAppLibraryResponseDto, MiniAppLifecycleDto, MiniAppProjectSourceStateDto,
     MiniAppReadyReleaseDto, MiniAppReleasePointersDto, MiniAppReleaseRefDto,
     MiniAppReleaseTestDto, MiniAppServiceDescriptorDto, MiniAppServiceHealthDto,
-    MiniAppServiceLifecycleDto, MiniAppSummaryDto, MiniAppTestStatusDto, MiniAppWorkshopDto,
+    MiniAppServiceLifecycleDto, MiniAppSummaryDto, MiniAppTestStatusDto,
+    MiniAppPublishModeDto, MiniAppWorkshopDto,
     PluginConfigSchemaDto, PluginConfigStateDto,
 };
 
@@ -139,6 +140,11 @@ pub fn workshop_dto(
 
     Ok(MiniAppWorkshopDto {
         miniapp: summary_dto(snapshot, service),
+        publish_mode: if root.product.auto_publish.as_ref().is_some_and(|value| value.enabled) {
+            MiniAppPublishModeDto::AutoUiOnly
+        } else {
+            MiniAppPublishModeDto::Manual
+        },
         project_id: root.project.project_id.0.clone(),
         project_revision: root.project.project_revision,
         source_state: match root.project.source_state {

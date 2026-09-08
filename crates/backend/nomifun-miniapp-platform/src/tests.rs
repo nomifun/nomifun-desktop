@@ -985,6 +985,7 @@ fn non_ui_fingerprint(
 ) -> MiniAppNonUiReleaseFingerprint {
     let manifest = &release.artifact.manifest.payload;
     MiniAppNonUiReleaseFingerprint {
+        manifest_without_ui_digest: digest("manifest-without-ui"),
         service_run_key: Some(spec.service_run_key.clone()),
         migration_set_digest: manifest.migration_set_digest().unwrap(),
         contribution_set_digest: manifest.contribution_set_digest().unwrap(),

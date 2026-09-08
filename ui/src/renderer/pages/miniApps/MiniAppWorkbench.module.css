@@ -384,6 +384,18 @@
   background: color-mix(in srgb, var(--miniapp-surface) 74%, transparent);
 }
 
+.publishModeControl {
+  display: inline-flex;
+  max-width: 100%;
+}
+
+.publishModeNote {
+  margin: 8px 0 0;
+  color: var(--miniapp-muted);
+  font-size: 10px;
+  line-height: 15px;
+}
+
 .workflow {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -393,10 +405,6 @@
   border-bottom: 1px solid var(--miniapp-border);
   background: var(--miniapp-inset);
   list-style: none;
-}
-
-.workflowCompact {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .workflowStep {
@@ -498,6 +506,12 @@
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px 18px;
+}
+
+.readyFacts,
+.releaseGrid + .notice,
+.factGrid + .notice {
+  margin-top: 12px;
 }
 
 .fact {
@@ -639,6 +653,12 @@
   border-color: rgba(var(--warning-6), 0.28);
   background: rgba(var(--warning-1), 0.56);
   color: rgb(var(--warning-6));
+}
+
+.noticeInfo {
+  border-color: rgba(var(--primary-6), 0.24);
+  background: rgba(var(--primary-1), 0.54);
+  color: rgb(var(--primary-6));
 }
 
 .noticeError {
@@ -804,6 +824,75 @@
   font-size: 11px;
   line-height: 17px;
   overflow-wrap: anywhere;
+}
+
+.surfaceSection {
+  border-top: 1px solid var(--miniapp-border);
+  background: var(--color-bg-1);
+}
+
+.surfaceHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 17px 20px 11px;
+}
+
+.surfaceHeading {
+  min-width: 0;
+}
+
+.surfaceActions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.surfaceViewport {
+  position: relative;
+  min-height: 520px;
+  margin: 0 20px 20px;
+  overflow: hidden;
+  border: 1px solid var(--miniapp-border);
+  border-radius: 7px;
+  background: var(--color-bg-2);
+}
+
+.surfaceFrame {
+  display: block;
+  width: 100%;
+  min-height: 520px;
+  height: min(720px, 68vh);
+  border: 0;
+  background: #fff;
+}
+
+.surfaceLoading,
+.surfaceState {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 9px;
+  padding: 28px;
+  color: var(--miniapp-muted);
+  text-align: center;
+  pointer-events: none;
+}
+
+.surfaceLoading {
+  background: color-mix(in srgb, var(--color-bg-2) 86%, transparent);
+  pointer-events: auto;
+}
+
+.surfaceState {
+  position: relative;
+  min-height: 520px;
 }
 
 .dialogIntro {

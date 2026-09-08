@@ -1,31 +1,22 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use nomifun_agent_contracts::MINIAPP_RELEASE_PROFILE_VERSION;
+use nomifun_agent_contracts::{
+    MiniAppReadyOrigin, MiniAppReadyRelease, MiniAppReleaseArtifactV1, MiniAppSourceLineage,
+    MINIAPP_RELEASE_PROFILE_VERSION, canonical_json_bytes,
+};
 
 use crate::error::DbError;
+pub use crate::models::MiniAppKvRow;
 use crate::models::{
     MiniAppM1Kind, MiniAppM1LibrarySnapshot, MiniAppM1ProjectSourceState,
     MiniAppM1ReleaseOrigin, MiniAppM1ReleaseSourceKind, MiniAppM1Snapshot,
     MiniAppProjectRow, MiniAppReleaseArtifactRow, MiniAppReleaseRow, ProductOperationRow,
-    ProductOperationState,
+    ProductOperationState, MiniAppSurfaceSessionRow,
 };
 use crate::repository::plugin_n1::{
     MAX_PRODUCT_OPERATION_LOG_LINE_CHARS, MAX_PRODUCT_OPERATION_LOG_LINES,
 };
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, sqlx::FromRow)]
-pub struct MiniAppKvRow {
-    pub id: i64,
-    pub miniapp_id: String,
-    pub owner_user_id: String,
-    pub namespace: String,
-    pub key: String,
-    pub value_json: String,
-    pub revision: i64,
-    pub created_at: i64,
-    pub updated_at: i64,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CreateMiniAppM1Params {
@@ -137,21 +128,143 @@ pub struct RecordMiniAppM1ReadyReleaseParams {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CommitMiniAppM1PointerStateParams {
+pub struct MiniAppM1AutoPublishGuard {
+    pub authorization_id: String,
+    pub authorization_revision: i64,
+    pub project_id: String,
+    pub project_revision: i64,
+    pub source_head_digest: String,
+    pub dependency_lock_digest: String,
+    pub build_profile_version: String,
+    pub build_generation: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublishMiniAppM1ReadyParams {
     pub owner_user_id: String,
     pub miniapp_id: String,
     pub expected_product_revision: i64,
     pub expected_pointer_revision: i64,
     pub expected_active_release_epoch: i64,
-    pub ready_release_id: Option<String>,
-    pub ready_release_digest: Option<String>,
-    pub active_release_id: Option<String>,
-    pub active_release_digest: Option<String>,
-    pub previous_release_id: Option<String>,
-    pub previous_release_digest: Option<String>,
-    pub active_release_epoch: i64,
-    pub materialized_catalog_digest: String,
+    pub expected_ready_release_id: String,
+    pub expected_ready_release_digest: String,
+    pub expected_active_release_digest: Option<String>,
+    pub target_catalog_digest: String,
+    pub auto_publish_guard: Option<MiniAppM1AutoPublishGuard>,
     pub updated_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RollbackMiniAppM1PreviousParams {
+    pub owner_user_id: String,
+    pub miniapp_id: String,
+    pub expected_product_revision: i64,
+    pub expected_pointer_revision: i64,
+    pub expected_active_release_epoch: i64,
+    pub expected_current_release_id: String,
+    pub expected_current_release_digest: String,
+    pub expected_previous_release_id: String,
+    pub expected_previous_release_digest: String,
+    pub target_catalog_digest: String,
+    pub updated_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitMiniAppM1LifecycleParams {
+    pub owner_user_id: String,
+    pub miniapp_id: String,
+    pub expected_product_revision: i64,
+    pub expected_pointer_revision: i64,
+    pub expected_active_release_digest: Option<String>,
+    pub enabled: bool,
+    pub updated_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SetMiniAppM1AutoPublishParams {
+    pub owner_user_id: String,
+    pub miniapp_id: String,
+    pub expected_product_revision: i64,
+    pub expected_pointer_revision: i64,
+    pub expected_authorization_revision: Option<i64>,
+    pub authorization_id: String,
+    pub enabled: bool,
+    pub user_authorized_at_ms: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpenMiniAppM1SurfaceSessionParams {
+    pub owner_user_id: String,
+    pub miniapp_id: String,
+    pub surface_session_id: String,
+    pub capability_digest: String,
+    pub expected_product_revision: i64,
+    pub expected_pointer_revision: i64,
+    pub expected_active_release_id: String,
+    pub expected_active_release_digest: String,
+    pub expected_active_release_epoch: i64,
+    pub issued_at_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolveMiniAppM1SurfaceSessionParams {
+    pub miniapp_id: String,
+    pub capability_digest: String,
+    pub expected_active_release_digest: String,
+    pub expected_active_release_epoch: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloseMiniAppM1SurfaceSessionParams {
+    pub owner_user_id: String,
+    pub miniapp_id: String,
+    pub surface_session_id: String,
+    pub capability_digest: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum MiniAppM1SurfaceKvOperation {
+    Get,
+    Set { value: serde_json::Value },
+    Delete,
+    CompareAndSwap {
+        expected_revision: Option<i64>,
+        value: Option<serde_json::Value>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExecuteMiniAppM1SurfaceKvParams {
+    pub owner_user_id: String,
+    pub miniapp_id: String,
+    pub surface_session_id: String,
+    pub expected_surface_generation: i64,
+    pub expected_capability_digest: String,
+    pub expected_active_release_epoch: i64,
+    pub expected_active_release_digest: String,
+    pub namespace: String,
+    pub key: String,
+    pub operation: MiniAppM1SurfaceKvOperation,
+    pub updated_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum MiniAppM1SurfaceKvResult {
+    Value {
+        value: Option<serde_json::Value>,
+        revision: Option<i64>,
+    },
+    Written {
+        revision: i64,
+    },
+    Deleted {
+        existed: bool,
+    },
+    CompareAndSwap {
+        applied: bool,
+        current_revision: Option<i64>,
+    },
 }
 
 #[async_trait::async_trait]
@@ -220,10 +333,42 @@ pub trait IMiniAppM1Repository: Send + Sync {
         params: &RecordMiniAppM1ReadyReleaseParams,
     ) -> Result<MiniAppM1Snapshot, DbError>;
 
-    async fn commit_pointer_state_cas(
+    async fn publish_ready_cas(
         &self,
-        params: &CommitMiniAppM1PointerStateParams,
+        params: &PublishMiniAppM1ReadyParams,
     ) -> Result<MiniAppM1Snapshot, DbError>;
+
+    async fn rollback_previous_cas(
+        &self,
+        params: &RollbackMiniAppM1PreviousParams,
+    ) -> Result<MiniAppM1Snapshot, DbError>;
+
+    async fn commit_lifecycle_cas(
+        &self,
+        params: &CommitMiniAppM1LifecycleParams,
+    ) -> Result<MiniAppM1Snapshot, DbError>;
+
+    async fn set_auto_publish_cas(
+        &self,
+        params: &SetMiniAppM1AutoPublishParams,
+    ) -> Result<MiniAppM1Snapshot, DbError>;
+
+    async fn open_surface_session_cas(
+        &self,
+        params: &OpenMiniAppM1SurfaceSessionParams,
+    ) -> Result<MiniAppSurfaceSessionRow, DbError>;
+
+    async fn resolve_surface_session(
+        &self,
+        params: &ResolveMiniAppM1SurfaceSessionParams,
+    ) -> Result<Option<MiniAppSurfaceSessionRow>, DbError>;
+
+    async fn close_surface_session_cas(
+        &self,
+        params: &CloseMiniAppM1SurfaceSessionParams,
+    ) -> Result<bool, DbError>;
+
+    async fn revoke_all_surface_sessions_on_startup(&self) -> Result<u64, DbError>;
 
     #[allow(clippy::too_many_arguments)]
     async fn update_config_cas(
@@ -257,6 +402,11 @@ pub trait IMiniAppM1Repository: Send + Sync {
         namespace: &str,
         key: &str,
     ) -> Result<Option<MiniAppKvRow>, DbError>;
+
+    async fn execute_surface_kv(
+        &self,
+        params: &ExecuteMiniAppM1SurfaceKvParams,
+    ) -> Result<MiniAppM1SurfaceKvResult, DbError>;
 
     #[allow(clippy::too_many_arguments)]
     async fn put_kv_cas(
@@ -333,6 +483,21 @@ pub(crate) fn validate_visible_ascii_key(
             "{label} must contain 1 to {maximum_bytes} visible ASCII bytes"
         )));
     }
+    Ok(())
+}
+
+pub(crate) fn validate_kv_row(row: &MiniAppKvRow) -> Result<(), DbError> {
+    if row.revision < 1
+        || row.key_generation < 1
+        || row.key_generation > row.revision
+        || (row.is_tombstone && row.value_json != "null")
+    {
+        return Err(conflict(
+            "MiniApp KV row violates the monotonic tombstone contract",
+        ));
+    }
+    serde_json::from_str::<serde_json::Value>(&row.value_json)
+        .map_err(|error| conflict(format!("MiniApp KV value is invalid JSON: {error}")))?;
     Ok(())
 }
 
@@ -456,12 +621,33 @@ pub(crate) fn validate_project_source(
     Ok(())
 }
 
-pub(crate) fn validate_artifact(artifact: &MiniAppReleaseArtifactRow) -> Result<(), DbError> {
+fn canonical_json_string<T: serde::Serialize>(
+    value: &T,
+    label: &str,
+) -> Result<String, DbError> {
+    let bytes = canonical_json_bytes(value)
+        .map_err(|error| conflict(format!("{label} cannot be canonicalized: {error}")))?;
+    String::from_utf8(bytes)
+        .map_err(|error| conflict(format!("{label} canonical JSON is not UTF-8: {error}")))
+}
+
+fn parse_canonical_json<T>(value: &str, label: &str) -> Result<T, DbError>
+where
+    T: serde::de::DeserializeOwned + serde::Serialize,
+{
+    let parsed: T = serde_json::from_str(value)
+        .map_err(|error| conflict(format!("{label} is invalid: {error}")))?;
+    if canonical_json_string(&parsed, label)? != value {
+        return Err(conflict(format!("{label} must use canonical JSON")));
+    }
+    Ok(parsed)
+}
+
+fn validate_artifact_row_shape(artifact: &MiniAppReleaseArtifactRow) -> Result<(), DbError> {
     validate_uuid(&artifact.artifact_id, "artifact.artifact_id")?;
     validate_uuid(&artifact.owner_user_id, "artifact.owner_user_id")?;
     validate_digest(&artifact.artifact_digest, "artifact.artifact_digest")?;
     validate_digest(&artifact.manifest_digest, "artifact.manifest_digest")?;
-    validate_json_object(&artifact.artifact_record_json, "artifact.artifact_record_json")?;
     validate_relative_path(Some(&artifact.managed_path), "artifact.managed_path")?;
     if artifact.created_at < 0 {
         return Err(conflict("artifact.created_at must be non-negative"));
@@ -469,7 +655,42 @@ pub(crate) fn validate_artifact(artifact: &MiniAppReleaseArtifactRow) -> Result<
     Ok(())
 }
 
-pub(crate) fn validate_release(release: &MiniAppReleaseRow) -> Result<(), DbError> {
+pub(crate) fn normalize_incoming_artifact(
+    artifact: &MiniAppReleaseArtifactRow,
+) -> Result<(MiniAppReleaseArtifactRow, MiniAppReleaseArtifactV1), DbError> {
+    let payload = validate_artifact(artifact)?;
+    let mut normalized = artifact.clone();
+    normalized.artifact_record_json = canonical_json_string(
+        &payload,
+        "artifact.artifact_record_json",
+    )?;
+    Ok((normalized, payload))
+}
+
+pub(crate) fn validate_artifact(
+    artifact: &MiniAppReleaseArtifactRow,
+) -> Result<MiniAppReleaseArtifactV1, DbError> {
+    validate_artifact_row_shape(artifact)?;
+    let payload: MiniAppReleaseArtifactV1 =
+        parse_canonical_json(&artifact.artifact_record_json, "artifact.artifact_record_json")?;
+    payload
+        .validate()
+        .map_err(|error| conflict(format!("artifact contract is invalid: {error}")))?;
+    if payload.artifact_id.as_ref() != artifact.artifact_id
+        || payload.artifact_digest.as_ref() != artifact.artifact_digest
+        || payload.manifest.payload_digest.as_ref() != artifact.manifest_digest
+    {
+        return Err(conflict(
+            "artifact row does not match its typed Artifact payload",
+        ));
+    }
+    Ok(payload)
+}
+
+pub(crate) fn validate_release(
+    release: &MiniAppReleaseRow,
+    artifact: &MiniAppReleaseArtifactV1,
+) -> Result<MiniAppReadyRelease, DbError> {
     validate_uuid(&release.release_id, "release.release_id")?;
     validate_uuid(&release.miniapp_id, "release.miniapp_id")?;
     validate_uuid(&release.owner_user_id, "release.owner_user_id")?;
@@ -541,83 +762,66 @@ pub(crate) fn validate_release(release: &MiniAppReleaseRow) -> Result<(), DbErro
     {
         return Err(conflict("built Release must use managed source lineage"));
     }
-    validate_json_object(&release.release_record_json, "release.release_record_json")?;
     if release.created_at < 0 {
         return Err(conflict("release.created_at must be non-negative"));
     }
-    Ok(())
-}
-
-pub(crate) fn validate_pointer_pair(
-    id: Option<&str>,
-    digest: Option<&str>,
-    label: &str,
-) -> Result<(), DbError> {
-    if id.is_some() != digest.is_some() {
-        return Err(conflict(format!(
-            "{label} ID and digest must be written together"
-        )));
-    }
-    if let Some(id) = id {
-        validate_uuid(id, &format!("{label}.id"))?;
-    }
-    validate_optional_digest(digest, &format!("{label}.digest"))
-}
-
-pub(crate) fn validate_pointer_state(
-    params: &CommitMiniAppM1PointerStateParams,
-) -> Result<(), DbError> {
-    validate_uuid(&params.owner_user_id, "owner_user_id")?;
-    validate_uuid(&params.miniapp_id, "miniapp_id")?;
-    validate_digest(
-        &params.materialized_catalog_digest,
-        "materialized_catalog_digest",
-    )?;
-    validate_pointer_pair(
-        params.ready_release_id.as_deref(),
-        params.ready_release_digest.as_deref(),
-        "ready_release",
-    )?;
-    validate_pointer_pair(
-        params.active_release_id.as_deref(),
-        params.active_release_digest.as_deref(),
-        "active_release",
-    )?;
-    validate_pointer_pair(
-        params.previous_release_id.as_deref(),
-        params.previous_release_digest.as_deref(),
-        "previous_release",
-    )?;
-    let ids = [
-        params.ready_release_id.as_deref(),
-        params.active_release_id.as_deref(),
-        params.previous_release_id.as_deref(),
-    ];
-    let populated = ids.iter().flatten().collect::<Vec<_>>();
-    let mut unique = populated.clone();
-    unique.sort_unstable();
-    unique.dedup();
-    if unique.len() != populated.len() {
-        return Err(conflict("Ready/Active/Previous Release pointers must be distinct"));
-    }
-    if params.active_release_id.is_none() && params.active_release_epoch != 0 {
-        return Err(conflict(
-            "active_release_epoch must be zero without an Active Release",
-        ));
-    }
-    if params.active_release_id.is_some() && params.active_release_epoch == 0 {
-        return Err(conflict(
-            "Active Release requires a positive active_release_epoch",
-        ));
-    }
-    if params.expected_active_release_epoch < 0
-        || params.expected_product_revision < 1
-        || params.expected_pointer_revision < 1
-        || params.updated_at < 0
+    let record: MiniAppReadyRelease =
+        parse_canonical_json(&release.release_record_json, "release.release_record_json")?;
+    record
+        .validate_for_artifact(artifact)
+        .map_err(|error| conflict(format!("Release record contract is invalid: {error}")))?;
+    let expected_origin = match origin {
+        MiniAppM1ReleaseOrigin::Build => MiniAppReadyOrigin::Build,
+        MiniAppM1ReleaseOrigin::Import => MiniAppReadyOrigin::Import,
+    };
+    if record.miniapp_id.as_ref() != release.miniapp_id
+        || record.release.release_id.as_ref() != release.release_id
+        || record.release.artifact_id.as_ref() != release.artifact_id
+        || record.release.release_digest.as_ref() != release.release_digest
+        || record.release.manifest_digest.as_ref() != release.manifest_digest
+        || record.origin_operation_id.as_ref() != release.origin_operation_id
+        || record.origin != expected_origin
+        || record.created_at_ms != release.created_at
     {
-        return Err(conflict("pointer CAS expectations are invalid"));
+        return Err(conflict(
+            "Release row identity does not match its typed Release record",
+        ));
     }
-    Ok(())
+    match (&record.source_lineage, source_kind) {
+        (
+            MiniAppSourceLineage::Managed {
+                project_id,
+                source_snapshot_digest,
+                dependency_lock_digest,
+                build_profile_version,
+                build_generation,
+            },
+            MiniAppM1ReleaseSourceKind::Managed,
+        ) if project_id.as_ref() == release.project_id.as_deref().unwrap_or_default()
+            && source_snapshot_digest.as_ref()
+                == release
+                    .source_snapshot_digest
+                    .as_deref()
+                    .unwrap_or_default()
+            && dependency_lock_digest.as_ref()
+                == release
+                    .dependency_lock_digest
+                    .as_deref()
+                    .unwrap_or_default()
+            && build_profile_version.as_ref()
+                == release
+                    .build_profile_version
+                    .as_deref()
+                    .unwrap_or_default()
+            && i64::try_from(*build_generation).ok() == release.build_generation => {}
+        (MiniAppSourceLineage::RuntimeOnly, MiniAppM1ReleaseSourceKind::RuntimeOnly) => {}
+        _ => {
+            return Err(conflict(
+                "Release row lineage does not match its typed Release record",
+            ));
+        }
+    }
+    Ok(record)
 }
 
 pub(crate) fn query_error(error: sqlx::Error) -> DbError {

@@ -13,6 +13,17 @@ const REDACTED_CAPABILITY: &str = "[REDACTED]";
 /// span. Similar prefixes, legacy numeric ports, and malformed tokens are not
 /// treated as capability routes.
 fn access_log_path(path: &str) -> Cow<'_, str> {
+    let miniapp_segments = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
+    if matches!(
+        miniapp_segments.as_slice(),
+        ["api", "miniapps", _miniapp_id, "surface", "assets", capability, _epoch, _digest, ..]
+            if is_preview_capability(capability)
+    ) {
+        let mut redacted = miniapp_segments;
+        redacted[5] = REDACTED_CAPABILITY;
+        return Cow::Owned(format!("/{}", redacted.join("/")));
+    }
+
     let Some(path_without_root) = path.strip_prefix('/') else {
         return Cow::Borrowed(path);
     };
@@ -117,6 +128,24 @@ mod tests {
         assert_eq!(
             access_log_path(&format!("/api/office-watch-proxy/{CAPABILITY}/")),
             "/api/office-watch-proxy/[REDACTED]/"
+        );
+    }
+
+    #[test]
+    fn redacts_only_structural_miniapp_surface_capabilities() {
+        assert_eq!(
+            access_log_path(&format!(
+                "/api/miniapps/miniapp-1/surface/assets/{CAPABILITY}/4/{CAPABILITY}/ui/index.html"
+            )),
+            format!(
+                "/api/miniapps/miniapp-1/surface/assets/[REDACTED]/4/{CAPABILITY}/ui/index.html"
+            )
+        );
+        assert_eq!(
+            access_log_path(
+                "/api/miniapps/miniapp-1/surface/assets/not-a-capability/4/digest/ui/index.html"
+            ),
+            "/api/miniapps/miniapp-1/surface/assets/not-a-capability/4/digest/ui/index.html"
         );
     }
 

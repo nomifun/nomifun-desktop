@@ -1,12 +1,22 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
 use nomifun_agent_contracts::{
-    canonical_json_bytes, digest_payload, ArtifactId, JavaScriptBuildProfile, LocalizedMetadata,
-    MiniAppId, MiniAppProjectId, MiniAppReadyOrigin, MiniAppReadyRelease, MiniAppReleaseId,
-    MiniAppReleaseRef, MiniAppResourceContract, MiniAppSourceLineage, OperationId, PackageId,
-    PackageRef, StrictJsonValue, VersionString, MINIAPP_BRIDGE_CONTRACT_VERSION,
+    canonical_json_bytes, digest_bytes, digest_payload, ArtifactId, DigestHex,
+    JavaScriptBuildProfile, LocalizedMetadata, MiniAppBridgeKvRequest,
+    MiniAppBridgeRequest, MiniAppBridgeSession, MiniAppBridgeSessionId,
+    MiniAppBridgeTarget, MiniAppId, MiniAppKvResponse,
+    MiniAppNonUiReleaseFingerprint, MiniAppProjectId,
+    MiniAppPublishAuthorization,
+    MiniAppPublishRequest as MiniAppPublishContract,
+    MiniAppPointerExpectation, MiniAppReadyOrigin, MiniAppReadyRelease,
+    MiniAppReadyReleaseRef, MiniAppReleaseId, MiniAppReleasePointerState,
+    MiniAppReleaseRef, MiniAppResourceContract, MiniAppSourceLineage, OperationId,
+    PackageContributions, PackageId, PackageRef, StrictJsonValue,
+    MiniAppSurfaceSessionId, MiniAppUiOnlyAutoPublishAuthorization,
+    MiniAppUiOnlyAutoPublishProof, MiniAppUserAuthorizationId, VersionString,
+    MiniAppBridgeTransport, MINIAPP_BRIDGE_CONTRACT_VERSION,
     MINIAPP_RELEASE_PROFILE_VERSION,
 };
 use nomifun_api_types::{
@@ -14,16 +24,28 @@ use nomifun_api_types::{
     CreateMiniAppProjectRequest, DurableOperationKindDto, DurableOperationOwnerDto,
     DurableOperationStateDto, DurableOperationSummaryDto, MiniAppKindDto,
     MiniAppLibraryResponseDto, MiniAppLifecycleDto, MiniAppProjectSourceStateDto,
-    MiniAppReadyReleaseDto, MiniAppReleasePointersDto, MiniAppReleaseRefDto,
-    MiniAppReleaseTestDto, MiniAppServiceHealthDto, MiniAppSummaryDto, MiniAppTestStatusDto,
+    MiniAppPublishModeDto, MiniAppReadyReleaseDto, MiniAppReleasePointersDto,
+    MiniAppReleaseRefDto, MiniAppReleaseTestDto, MiniAppServiceHealthDto,
+    MiniAppSummaryDto, MiniAppSurfaceLaunchDescriptorDto, MiniAppTestStatusDto,
     MiniAppWorkshopDto, PluginConfigSchemaDto, PluginConfigStateDto,
+    PublishMiniAppRequest as PublishMiniAppRequestDto,
+    RollbackMiniAppRequest as RollbackMiniAppRequestDto, SetMiniAppEnabledRequest,
+    SetMiniAppPublishModeRequest,
 };
 use nomifun_db::{
-    CancelMiniAppM1BuildOperationParams, CreateMiniAppM1Params, CreateMiniAppM1WithSourceParams,
+    CancelMiniAppM1BuildOperationParams, CloseMiniAppM1SurfaceSessionParams,
+    CreateMiniAppM1Params, CreateMiniAppM1WithSourceParams,
+    ExecuteMiniAppM1SurfaceKvParams,
     FinishMiniAppM1BuildAndRecordReadyParams, FinishMiniAppM1BuildOperationParams,
-    IMiniAppM1Repository, MiniAppM1Kind, MiniAppM1ManagedSourceLineage, MiniAppM1Snapshot,
-    MiniAppProductRow, MiniAppReleaseArtifactRow, MiniAppReleaseRow, ProductOperationRow,
-    ProductOperationState, StartMiniAppM1BuildOperationParams,
+    IMiniAppM1Repository, MiniAppM1AutoPublishGuard, MiniAppM1Kind,
+    MiniAppM1ManagedSourceLineage, MiniAppM1Snapshot, MiniAppM1SurfaceKvOperation,
+    MiniAppM1SurfaceKvResult, MiniAppProductRow,
+    MiniAppReleaseArtifactRow, MiniAppReleaseRow, MiniAppSurfaceSessionRow,
+    OpenMiniAppM1SurfaceSessionParams,
+    ProductOperationRow, ProductOperationState, PublishMiniAppM1ReadyParams,
+    ResolveMiniAppM1SurfaceSessionParams, RollbackMiniAppM1PreviousParams,
+    SetMiniAppM1AutoPublishParams,
+    CommitMiniAppM1LifecycleParams, StartMiniAppM1BuildOperationParams,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -32,8 +54,11 @@ use uuid::Uuid;
 
 use crate::{
     MiniAppDependencyLockV1, MiniAppReleaseFileBytes, MiniAppReleasePublishRequest,
-    MiniAppReleaseStore, MiniAppSourceSnapshot, MiniAppSourceStore, MiniAppStaticBundleBuilder,
-    MiniAppStaticBundleFile, MiniAppStaticBundleInput,
+    issue_surface_capability, surface_capability_digest, MiniAppReleaseArtifactIdentity,
+    MiniAppReleaseStore,
+    MiniAppSourceFile, MiniAppSourceScope, MiniAppSourceSnapshot, MiniAppSourceStore,
+    MiniAppStaticBundleBuilder, MiniAppStaticBundleFile, MiniAppStaticBundleInput,
+    MiniAppStoredRelease, materialize_surface_entrypoint,
 };
 
 #[derive(Debug, Error)]
@@ -44,6 +69,12 @@ pub enum MiniAppM1ApplicationError {
     NotFound,
     #[error("MiniApp database failed: {0}")]
     Database(#[from] nomifun_db::DbError),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MiniAppSurfaceAsset {
+    pub normalized_relative_path: String,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Clone)]
@@ -259,7 +290,6 @@ impl MiniAppM1ApplicationService {
                     .await);
             }
         };
-
         let operation = self
             .repository
             .get_build_operation(owner_user_id, &request.miniapp_id, &operation_id)
@@ -306,7 +336,34 @@ impl MiniAppM1ApplicationService {
             })
             .await;
         match completed {
-            Ok(snapshot) => workshop_from_snapshot(&snapshot, None),
+            Ok(snapshot) => {
+                if snapshot
+                    .auto_publish_authorization
+                    .as_ref()
+                    .is_some_and(|authorization| authorization.enabled)
+                    && snapshot.active_release.is_some()
+                {
+                    match self.auto_publish_ready(owner_user_id, snapshot.clone()).await {
+                        Ok(snapshot) => return workshop_from_snapshot(&snapshot, None),
+                        Err(error) => {
+                            let observed = self
+                                .repository
+                                .get(owner_user_id, &request.miniapp_id)
+                                .await?
+                                .ok_or(MiniAppM1ApplicationError::NotFound)?;
+                            tracing::warn!(
+                                miniapp_id = %request.miniapp_id,
+                                error = %error,
+                                ready_release_id = ?observed.product.ready_release_id,
+                                active_release_id = ?observed.product.active_release_id,
+                                "strict UI-only auto Publish returned an error; reconciled persisted state"
+                            );
+                            return workshop_from_snapshot(&observed, None);
+                        }
+                    }
+                }
+                workshop_from_snapshot(&snapshot, None)
+            }
             Err(database_error) => {
                 let original = MiniAppM1ApplicationError::Database(database_error);
                 Err(self
@@ -370,6 +427,699 @@ impl MiniAppM1ApplicationService {
         }
     }
 
+    pub async fn publish(
+        &self,
+        owner_user_id: &str,
+        request: PublishMiniAppRequestDto,
+    ) -> Result<MiniAppWorkshopDto, MiniAppM1ApplicationError> {
+        let snapshot = self
+            .repository
+            .get(owner_user_id, &request.miniapp_id)
+            .await?
+            .ok_or(MiniAppM1ApplicationError::NotFound)?;
+        require_ui_only_release_mutation(&snapshot)?;
+        require_no_running_build(&*self.repository, owner_user_id, &request.miniapp_id).await?;
+        validate_publish_request(&snapshot, &request)?;
+
+        let ready = snapshot
+            .ready_release
+            .as_ref()
+            .ok_or_else(|| MiniAppM1ApplicationError::Invalid("no Ready Release".to_owned()))?;
+        let stored = self.load_verified_release(owner_user_id, ready)?;
+        if !stored.artifact.manifest.payload.is_ui_only() {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "M1-0-02-B only publishes UI-only Releases".to_owned(),
+            ));
+        }
+
+        let target = release_contract_ref(ready);
+        let target_catalog_digest = materialized_catalog_digest(
+            &request.miniapp_id,
+            &target,
+            &stored.artifact.manifest.payload.contributions,
+        )?;
+        let committed = self
+            .repository
+            .publish_ready_cas(&PublishMiniAppM1ReadyParams {
+                owner_user_id: owner_user_id.to_owned(),
+                miniapp_id: request.miniapp_id.clone(),
+                expected_product_revision: to_i64(
+                    request.expected_product_revision,
+                    "product revision",
+                )?,
+                expected_pointer_revision: to_i64(
+                    request.expected_pointer_revision,
+                    "pointer revision",
+                )?,
+                expected_active_release_epoch: to_i64(
+                    request.expected_active_release_epoch,
+                    "active release epoch",
+                )?,
+                expected_ready_release_id: request.ready_release_id,
+                expected_ready_release_digest: request.expected_ready_release_digest,
+                expected_active_release_digest: request.expected_active_release_digest,
+                target_catalog_digest: target_catalog_digest.as_ref().to_owned(),
+                auto_publish_guard: None,
+                updated_at: positive_now_ms(),
+            })
+            .await?;
+        workshop_from_snapshot(&committed, None)
+    }
+
+    pub async fn rollback(
+        &self,
+        owner_user_id: &str,
+        request: RollbackMiniAppRequestDto,
+    ) -> Result<MiniAppWorkshopDto, MiniAppM1ApplicationError> {
+        let snapshot = self
+            .repository
+            .get(owner_user_id, &request.miniapp_id)
+            .await?
+            .ok_or(MiniAppM1ApplicationError::NotFound)?;
+        require_ui_only_release_mutation(&snapshot)?;
+        require_no_running_build(&*self.repository, owner_user_id, &request.miniapp_id).await?;
+        validate_rollback_request(&snapshot, &request)?;
+
+        let active = snapshot
+            .active_release
+            .as_ref()
+            .ok_or_else(|| MiniAppM1ApplicationError::Invalid("no Active Release".to_owned()))?;
+        let previous = snapshot
+            .previous_release
+            .as_ref()
+            .ok_or_else(|| MiniAppM1ApplicationError::Invalid("no Previous Release".to_owned()))?;
+        self.load_verified_release(owner_user_id, active)?;
+        let target = self.load_verified_release(owner_user_id, previous)?;
+        if !target.artifact.manifest.payload.is_ui_only() {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "M1-0-02-B only rolls back UI-only Releases".to_owned(),
+            ));
+        }
+
+        let rollback_target = release_contract_ref(previous);
+        let target_catalog_digest = materialized_catalog_digest(
+            &request.miniapp_id,
+            &rollback_target,
+            &target.artifact.manifest.payload.contributions,
+        )?;
+        let committed = self
+            .repository
+            .rollback_previous_cas(&RollbackMiniAppM1PreviousParams {
+                owner_user_id: owner_user_id.to_owned(),
+                miniapp_id: request.miniapp_id,
+                expected_product_revision: to_i64(
+                    request.expected_product_revision,
+                    "product revision",
+                )?,
+                expected_pointer_revision: to_i64(
+                    request.expected_pointer_revision,
+                    "pointer revision",
+                )?,
+                expected_active_release_epoch: to_i64(
+                    request.expected_active_release_epoch,
+                    "active release epoch",
+                )?,
+                expected_current_release_id: active.release_id.clone(),
+                expected_current_release_digest: request.expected_current_release_digest,
+                expected_previous_release_id: previous.release_id.clone(),
+                expected_previous_release_digest: request.expected_previous_release_digest,
+                target_catalog_digest: target_catalog_digest.as_ref().to_owned(),
+                updated_at: positive_now_ms(),
+            })
+            .await?;
+        workshop_from_snapshot(&committed, None)
+    }
+
+    pub async fn set_enabled(
+        &self,
+        owner_user_id: &str,
+        request: SetMiniAppEnabledRequest,
+    ) -> Result<MiniAppWorkshopDto, MiniAppM1ApplicationError> {
+        validate_request_identity(&request.miniapp_id, "miniapp_id")?;
+        let snapshot = self
+            .repository
+            .get(owner_user_id, &request.miniapp_id)
+            .await?
+            .ok_or(MiniAppM1ApplicationError::NotFound)?;
+        require_ui_only_release_mutation(&snapshot)?;
+        if snapshot.product.product_revision
+            != to_i64(request.expected_product_revision, "product revision")?
+            || snapshot.product.pointer_revision
+                != to_i64(request.expected_pointer_revision, "pointer revision")?
+            || snapshot.product.active_release_digest.as_deref()
+                != request.expected_active_release_digest.as_deref()
+        {
+            return Err(MiniAppM1ApplicationError::Database(
+                nomifun_db::DbError::Conflict(
+                    "MiniApp lifecycle request is stale against the exact Product pointers"
+                        .to_owned(),
+                ),
+            ));
+        }
+        if request.enabled && snapshot.product.active_release_id.is_none() {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "MiniApp Enable requires an Active Release".to_owned(),
+            ));
+        }
+        let expected_lifecycle = if request.enabled {
+            "disabled"
+        } else {
+            "enabled"
+        };
+        if snapshot.product.lifecycle != expected_lifecycle {
+            return Err(MiniAppM1ApplicationError::Invalid(format!(
+                "MiniApp is already {}",
+                snapshot.product.lifecycle
+            )));
+        }
+        let committed = self
+            .repository
+            .commit_lifecycle_cas(&CommitMiniAppM1LifecycleParams {
+                owner_user_id: owner_user_id.to_owned(),
+                miniapp_id: request.miniapp_id,
+                expected_product_revision: to_i64(
+                    request.expected_product_revision,
+                    "product revision",
+                )?,
+                expected_pointer_revision: to_i64(
+                    request.expected_pointer_revision,
+                    "pointer revision",
+                )?,
+                expected_active_release_digest: request.expected_active_release_digest,
+                enabled: request.enabled,
+                updated_at: positive_now_ms(),
+            })
+            .await?;
+        workshop_from_snapshot(&committed, None)
+    }
+
+    pub async fn set_publish_mode(
+        &self,
+        owner_user_id: &str,
+        request: SetMiniAppPublishModeRequest,
+    ) -> Result<MiniAppWorkshopDto, MiniAppM1ApplicationError> {
+        validate_request_identity(&request.miniapp_id, "miniapp_id")?;
+        let snapshot = self
+            .repository
+            .get(owner_user_id, &request.miniapp_id)
+            .await?
+            .ok_or(MiniAppM1ApplicationError::NotFound)?;
+        require_ui_only_release_mutation(&snapshot)?;
+        if snapshot.product.product_revision
+            != to_i64(request.expected_product_revision, "product revision")?
+            || snapshot.product.pointer_revision
+                != to_i64(request.expected_pointer_revision, "pointer revision")?
+        {
+            return Err(MiniAppM1ApplicationError::Database(
+                nomifun_db::DbError::Conflict(
+                    "MiniApp Publish mode request is stale against the exact Product pointers"
+                        .to_owned(),
+                ),
+            ));
+        }
+        let enabled = request.mode == MiniAppPublishModeDto::AutoUiOnly;
+        if enabled && snapshot.active_release.is_none() {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "auto Publish can be enabled only after the first manual Publish".to_owned(),
+            ));
+        }
+        let now = positive_now_ms();
+        let (authorization_id, expected_authorization_revision, authorized_at) =
+            match snapshot.auto_publish_authorization.as_ref() {
+                Some(existing) => (
+                    existing.authorization_id.clone(),
+                    Some(existing.revision),
+                    if enabled {
+                        now
+                    } else {
+                        existing.user_authorized_at_ms
+                    },
+                ),
+                None => (Uuid::now_v7().to_string(), None, now),
+            };
+        let committed = self
+            .repository
+            .set_auto_publish_cas(&SetMiniAppM1AutoPublishParams {
+                owner_user_id: owner_user_id.to_owned(),
+                miniapp_id: request.miniapp_id,
+                expected_product_revision: to_i64(
+                    request.expected_product_revision,
+                    "product revision",
+                )?,
+                expected_pointer_revision: to_i64(
+                    request.expected_pointer_revision,
+                    "pointer revision",
+                )?,
+                expected_authorization_revision,
+                authorization_id,
+                enabled,
+                user_authorized_at_ms: authorized_at,
+                updated_at: now,
+            })
+            .await?;
+        let active_operation = latest_running_build(
+            self.repository
+                .list_build_operations(owner_user_id, &committed.product.miniapp_id)
+                .await?,
+        )?;
+        workshop_from_snapshot(&committed, active_operation)
+    }
+
+    async fn auto_publish_ready(
+        &self,
+        owner_user_id: &str,
+        snapshot: MiniAppM1Snapshot,
+    ) -> Result<MiniAppM1Snapshot, MiniAppM1ApplicationError> {
+        let authorization = snapshot
+            .auto_publish_authorization
+            .as_ref()
+            .ok_or_else(|| {
+                MiniAppM1ApplicationError::Invalid(
+                    "auto Publish authorization disappeared before Build completion".to_owned(),
+                )
+            })?;
+        if !authorization.enabled {
+            return Ok(snapshot);
+        }
+        let active = snapshot
+            .active_release
+            .as_ref()
+            .ok_or_else(|| {
+                MiniAppM1ApplicationError::Invalid(
+                    "first Publish must remain manual".to_owned(),
+                )
+            })?;
+        let ready = snapshot
+            .ready_release
+            .as_ref()
+            .ok_or_else(|| MiniAppM1ApplicationError::Invalid("no Ready Release".to_owned()))?;
+        let current_stored = self.load_verified_release(owner_user_id, active)?;
+        let target_stored = self.load_verified_release(owner_user_id, ready)?;
+        let current_ref = release_contract_ref(active);
+        let target_ref = release_contract_ref(ready);
+        let current_non_ui = ui_only_non_ui_fingerprint(&current_stored)?;
+        let target_non_ui = ui_only_non_ui_fingerprint(&target_stored)?;
+        let current_project_id = active.project_id.as_deref();
+        let target_project_id = ready.project_id.as_deref();
+        if current_project_id.is_none() || current_project_id != target_project_id {
+            return Ok(snapshot);
+        }
+        let project_id = current_project_id.unwrap_or_default();
+        let current_source_digest = active.source_snapshot_digest.as_deref();
+        let target_source_digest = ready.source_snapshot_digest.as_deref();
+        if current_source_digest.is_none() || target_source_digest.is_none() {
+            return Ok(snapshot);
+        }
+        let current_source = self
+            .stores
+            .source
+            .read_revision_files(
+                owner_user_id,
+                &snapshot.product.miniapp_id,
+                project_id,
+                current_source_digest.unwrap_or_default(),
+            )
+            .map_err(|error| store_error("Active Source revision", error))?;
+        let target_source = self
+            .stores
+            .source
+            .read_revision_files(
+                owner_user_id,
+                &snapshot.product.miniapp_id,
+                project_id,
+                target_source_digest.unwrap_or_default(),
+            )
+            .map_err(|error| store_error("Ready Source revision", error))?;
+        let changed_source_paths =
+            changed_source_paths(&current_source, &target_source);
+        let changed_output_paths =
+            changed_output_paths(&current_stored, &target_stored);
+        let no_unknown_changes =
+            source_matches_artifact(&current_source, &current_stored)
+                && source_matches_artifact(&target_source, &target_stored)
+                && changed_source_paths == changed_output_paths;
+        let project_head_matches_ready_source = snapshot
+            .project
+            .source_head_digest
+            .as_deref()
+            == ready.source_snapshot_digest.as_deref();
+        if current_stored.artifact.manifest.payload.ui.ui_tree_digest
+            == target_stored.artifact.manifest.payload.ui.ui_tree_digest
+            || current_non_ui != target_non_ui
+            || changed_source_paths.is_empty()
+            || changed_output_paths.is_empty()
+            || !project_head_matches_ready_source
+            || !no_unknown_changes
+        {
+            return Ok(snapshot);
+        }
+        let proof = MiniAppUiOnlyAutoPublishProof {
+            current_release: current_ref.clone(),
+            target_release: target_ref.clone(),
+            current_ui_tree_digest: current_stored
+                .artifact
+                .manifest
+                .payload
+                .ui
+                .ui_tree_digest
+                .clone(),
+            target_ui_tree_digest: target_stored
+                .artifact
+                .manifest
+                .payload
+                .ui
+                .ui_tree_digest
+                .clone(),
+            current_non_ui,
+            target_non_ui,
+            changed_source_paths,
+            changed_output_paths,
+            project_head_matches_ready_source,
+            static_validation_passed: true,
+            no_unknown_changes,
+        };
+        let contract_authorization = MiniAppUiOnlyAutoPublishAuthorization {
+            authorization_id: MiniAppUserAuthorizationId::from(
+                authorization.authorization_id.clone(),
+            ),
+            miniapp_id: MiniAppId::from(snapshot.product.miniapp_id.clone()),
+            enabled: authorization.enabled,
+            authorization_revision: u64::try_from(authorization.revision).map_err(|_| {
+                MiniAppM1ApplicationError::Invalid(
+                    "auto Publish authorization revision is negative".to_owned(),
+                )
+            })?,
+            user_authorized_at_ms: authorization.user_authorized_at_ms,
+        };
+        let catalog_digest = materialized_catalog_digest(
+            &snapshot.product.miniapp_id,
+            &target_ref,
+            &target_stored.artifact.manifest.payload.contributions,
+        )?;
+        let contract = MiniAppPublishContract {
+            miniapp_id: MiniAppId::from(snapshot.product.miniapp_id.clone()),
+            expected: pointer_expectation_from_snapshot(&snapshot)?,
+            target_ready_release: target_ref,
+            target_catalog_digest: catalog_digest.clone(),
+            authorization: MiniAppPublishAuthorization::AutoUiOnly {
+                authorization: contract_authorization,
+                proof: Box::new(proof),
+            },
+        };
+        let current_pointer = pointer_state_from_snapshot(&snapshot)?;
+        if contract.next_state(&current_pointer).is_err() {
+            return Ok(snapshot);
+        }
+        self.repository
+            .publish_ready_cas(&PublishMiniAppM1ReadyParams {
+                owner_user_id: owner_user_id.to_owned(),
+                miniapp_id: snapshot.product.miniapp_id.clone(),
+                expected_product_revision: snapshot.product.product_revision,
+                expected_pointer_revision: snapshot.product.pointer_revision,
+                expected_active_release_epoch: snapshot.product.active_release_epoch,
+                expected_ready_release_id: ready.release_id.clone(),
+                expected_ready_release_digest: ready.release_digest.clone(),
+                expected_active_release_digest: snapshot.product.active_release_digest.clone(),
+                target_catalog_digest: catalog_digest.as_ref().to_owned(),
+                auto_publish_guard: Some(MiniAppM1AutoPublishGuard {
+                    authorization_id: authorization.authorization_id.clone(),
+                    authorization_revision: authorization.revision,
+                    project_id: snapshot.project.project_id.clone(),
+                    project_revision: snapshot.project.project_revision,
+                    source_head_digest: snapshot
+                        .project
+                        .source_head_digest
+                        .clone()
+                        .ok_or_else(|| {
+                            MiniAppM1ApplicationError::Invalid(
+                                "auto Publish requires an exact Project Source head".to_owned(),
+                            )
+                        })?,
+                    dependency_lock_digest: snapshot
+                        .project
+                        .dependency_lock_digest
+                        .clone()
+                        .ok_or_else(|| {
+                            MiniAppM1ApplicationError::Invalid(
+                                "auto Publish requires an exact dependency lock".to_owned(),
+                            )
+                        })?,
+                    build_profile_version: snapshot
+                        .project
+                        .build_profile_version
+                        .clone()
+                        .ok_or_else(|| {
+                            MiniAppM1ApplicationError::Invalid(
+                                "auto Publish requires an exact Build profile".to_owned(),
+                            )
+                        })?,
+                    build_generation: snapshot.project.build_generation,
+                }),
+                updated_at: positive_now_ms(),
+            })
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn open_surface(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &str,
+    ) -> Result<MiniAppSurfaceLaunchDescriptorDto, MiniAppM1ApplicationError> {
+        validate_request_identity(miniapp_id, "miniapp_id")?;
+        let snapshot = self
+            .repository
+            .get(owner_user_id, miniapp_id)
+            .await?
+            .ok_or(MiniAppM1ApplicationError::NotFound)?;
+        if snapshot.product.lifecycle != "enabled" {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "MiniApp Surface is available only while enabled".to_owned(),
+            ));
+        }
+        if snapshot.product.kind != MiniAppM1Kind::UiOnly.as_str() {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "MiniApp Service Surface is deferred to M1-1".to_owned(),
+            ));
+        }
+        let active = snapshot
+            .active_release
+            .as_ref()
+            .ok_or_else(|| MiniAppM1ApplicationError::Invalid("no Active Release".to_owned()))?;
+        let stored = self.load_verified_release(owner_user_id, active)?;
+        let entrypoint = stored.artifact.manifest.payload.ui.entrypoint.clone();
+        if stored
+            .files
+            .iter()
+            .all(|file| file.normalized_relative_path != entrypoint)
+        {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "Active Release is missing its UI entrypoint bytes".to_owned(),
+            ));
+        }
+        let capability = issue_surface_capability()?;
+        let capability_digest = surface_capability_digest(&capability)?;
+        let session = self
+            .repository
+            .open_surface_session_cas(&OpenMiniAppM1SurfaceSessionParams {
+                owner_user_id: owner_user_id.to_owned(),
+                miniapp_id: miniapp_id.to_owned(),
+                surface_session_id: Uuid::now_v7().to_string(),
+                capability_digest,
+                expected_product_revision: snapshot.product.product_revision,
+                expected_pointer_revision: snapshot.product.pointer_revision,
+                expected_active_release_id: active.release_id.clone(),
+                expected_active_release_digest: active.release_digest.clone(),
+                expected_active_release_epoch: snapshot.product.active_release_epoch,
+                issued_at_ms: positive_now_ms().max(snapshot.product.updated_at),
+            })
+            .await?;
+        Ok(MiniAppSurfaceLaunchDescriptorDto {
+            miniapp_id: miniapp_id.to_owned(),
+            product_revision: positive_u64(
+                snapshot.product.product_revision,
+                "MiniApp product revision",
+            )?,
+            release_id: active.release_id.clone(),
+            expected_release_digest: active.release_digest.clone(),
+            active_release_epoch: positive_u64(
+                snapshot.product.active_release_epoch,
+                "MiniApp active release epoch",
+            )?,
+            surface_session_id: session.surface_session_id,
+            surface_generation: positive_u64(
+                session.generation,
+                "MiniApp Surface generation",
+            )?,
+            surface_capability: capability,
+            ui_entrypoint: entrypoint,
+            kind: MiniAppKindDto::UiOnly,
+        })
+    }
+
+    pub async fn close_surface(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &str,
+        surface_session_id: &str,
+        capability: &str,
+    ) -> Result<bool, MiniAppM1ApplicationError> {
+        validate_request_identity(miniapp_id, "miniapp_id")?;
+        validate_request_identity(surface_session_id, "surface_session_id")?;
+        let capability_digest = surface_capability_digest(capability)?;
+        self.repository
+            .close_surface_session_cas(&CloseMiniAppM1SurfaceSessionParams {
+                owner_user_id: owner_user_id.to_owned(),
+                miniapp_id: miniapp_id.to_owned(),
+                surface_session_id: surface_session_id.to_owned(),
+                capability_digest,
+            })
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn surface_asset(
+        &self,
+        miniapp_id: &str,
+        capability: &str,
+        active_release_epoch: u64,
+        expected_release_digest: &str,
+        asset_path: &str,
+    ) -> Result<MiniAppSurfaceAsset, MiniAppM1ApplicationError> {
+        let session = self
+            .resolve_surface_session(
+                miniapp_id,
+                capability,
+                active_release_epoch,
+                expected_release_digest,
+            )
+            .await?;
+        let snapshot = self
+            .repository
+            .get(&session.owner_user_id, miniapp_id)
+            .await?
+            .ok_or(MiniAppM1ApplicationError::NotFound)?;
+        if snapshot.product.lifecycle != "enabled"
+            || snapshot.product.kind != MiniAppM1Kind::UiOnly.as_str()
+            || nonnegative_u64(
+                snapshot.product.active_release_epoch,
+                "MiniApp active release epoch",
+            )? != active_release_epoch
+            || snapshot.product.active_release_digest.as_deref()
+                != Some(expected_release_digest)
+        {
+            return Err(MiniAppM1ApplicationError::NotFound);
+        }
+        let active = snapshot
+            .active_release
+            .as_ref()
+            .ok_or(MiniAppM1ApplicationError::NotFound)?;
+        if active.release_id != session.active_release_id {
+            return Err(MiniAppM1ApplicationError::NotFound);
+        }
+        let stored = self.load_verified_release(&session.owner_user_id, active)?;
+        let file = stored
+            .files
+            .into_iter()
+            .find(|file| file.normalized_relative_path == asset_path)
+            .ok_or(MiniAppM1ApplicationError::NotFound)?;
+        let observed = self
+            .resolve_surface_session(
+                miniapp_id,
+                capability,
+                active_release_epoch,
+                expected_release_digest,
+            )
+            .await?;
+        if observed.surface_session_id != session.surface_session_id
+            || observed.generation != session.generation
+        {
+            return Err(MiniAppM1ApplicationError::NotFound);
+        }
+        Ok(MiniAppSurfaceAsset {
+            normalized_relative_path: file.normalized_relative_path,
+            bytes: file.bytes,
+        })
+    }
+
+    pub async fn surface_bridge_request(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &str,
+        capability: &str,
+        active_release_epoch: u64,
+        expected_release_digest: &str,
+        request: MiniAppBridgeRequest,
+    ) -> Result<StrictJsonValue, MiniAppM1ApplicationError> {
+        let surface_session = self
+            .resolve_surface_session(
+                miniapp_id,
+                capability,
+                active_release_epoch,
+                expected_release_digest,
+            )
+            .await?;
+        if surface_session.owner_user_id != owner_user_id {
+            return Err(MiniAppM1ApplicationError::NotFound);
+        }
+        let snapshot = self
+            .repository
+            .get(owner_user_id, miniapp_id)
+            .await?
+            .ok_or(MiniAppM1ApplicationError::NotFound)?;
+        if snapshot.product.lifecycle != "enabled"
+            || snapshot.product.kind != MiniAppM1Kind::UiOnly.as_str()
+            || positive_u64(
+                snapshot.product.active_release_epoch,
+                "MiniApp active release epoch",
+            )? != active_release_epoch
+            || snapshot.product.active_release_digest.as_deref()
+                != Some(expected_release_digest)
+        {
+            return Err(MiniAppM1ApplicationError::NotFound);
+        }
+        let active = snapshot
+            .active_release
+            .as_ref()
+            .ok_or(MiniAppM1ApplicationError::NotFound)?;
+        if active.release_id != surface_session.active_release_id {
+            return Err(MiniAppM1ApplicationError::NotFound);
+        }
+        self.load_verified_release(owner_user_id, active)?;
+        let pointer = pointer_state_from_snapshot(&snapshot)?;
+        let session = MiniAppBridgeSession {
+            bridge_contract_version: MINIAPP_BRIDGE_CONTRACT_VERSION.into(),
+            bridge_session_id: MiniAppBridgeSessionId::from(
+                surface_session.surface_session_id.clone(),
+            ),
+            surface_session_id: MiniAppSurfaceSessionId::from(
+                surface_session.surface_session_id.clone(),
+            ),
+            miniapp_id: MiniAppId::from(miniapp_id),
+            active_release: release_contract_ref(active),
+            active_release_epoch,
+            transport: MiniAppBridgeTransport::MessageChannelV1,
+            service_run_key: None,
+        };
+        request
+            .validate_for(&session, &pointer)
+            .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+        match request.target {
+            MiniAppBridgeTarget::HostKv { request } => {
+                self.execute_surface_kv(
+                    owner_user_id,
+                    miniapp_id,
+                    &surface_session,
+                    request,
+                )
+                .await
+            }
+            MiniAppBridgeTarget::Service { .. } => Err(MiniAppM1ApplicationError::Invalid(
+                "UI-only MiniApp Bridge cannot invoke a Service".to_owned(),
+            )),
+        }
+    }
+
     pub async fn workshop(
         &self,
         owner_user_id: &str,
@@ -386,6 +1136,187 @@ impl MiniAppM1ApplicationService {
                 .await?,
         )?;
         workshop_from_snapshot(&snapshot, active_operation)
+    }
+
+    fn load_verified_release(
+        &self,
+        owner_user_id: &str,
+        release: &MiniAppReleaseRow,
+    ) -> Result<MiniAppStoredRelease, MiniAppM1ApplicationError> {
+        let project_id = release.project_id.as_deref().ok_or_else(|| {
+            MiniAppM1ApplicationError::Invalid(
+                "M1-0-02-B requires a managed Release with Project lineage".to_owned(),
+            )
+        })?;
+        let scope = MiniAppSourceScope::new(owner_user_id, &release.miniapp_id, project_id)
+            .map_err(|error| store_error("Release scope", error))?;
+        let expected_artifact_identity = MiniAppReleaseArtifactIdentity {
+            artifact_id: ArtifactId::from(release.artifact_id.clone()),
+            artifact_digest: DigestHex::from(release.artifact_digest.clone()),
+            manifest_digest: DigestHex::from(release.manifest_digest.clone()),
+        };
+        let stored = self
+            .stores
+            .release
+            .load_exact(scope, &expected_artifact_identity)
+            .map_err(|error| store_error("Release Store", error))?;
+        if stored.artifact.artifact_id.as_ref() != release.artifact_id
+            || stored.artifact.artifact_digest.as_ref() != release.artifact_digest
+            || stored.artifact.manifest.payload_digest.as_ref() != release.manifest_digest
+            || release.release_digest != release.artifact_digest
+        {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "Release Store bytes do not match the exact database Release".to_owned(),
+            ));
+        }
+        let record: MiniAppReadyRelease =
+            serde_json::from_str(&release.release_record_json).map_err(|error| {
+                MiniAppM1ApplicationError::Invalid(format!(
+                    "database Release record cannot be decoded: {error}"
+                ))
+            })?;
+        record
+            .validate_for_artifact(&stored.artifact)
+            .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+        let MiniAppSourceLineage::Managed {
+            project_id: record_project_id,
+            source_snapshot_digest,
+            dependency_lock_digest,
+            build_profile_version,
+            build_generation,
+        } = &record.source_lineage
+        else {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "managed database Release has a runtime-only Release record".to_owned(),
+            ));
+        };
+        if record.miniapp_id.as_ref() != release.miniapp_id
+            || record.release.release_id.as_ref() != release.release_id
+            || record.release.artifact_id.as_ref() != release.artifact_id
+            || record.release.release_digest.as_ref() != release.release_digest
+            || record.release.manifest_digest.as_ref() != release.manifest_digest
+            || record.origin != MiniAppReadyOrigin::Build
+            || record.origin_operation_id.as_ref() != release.origin_operation_id
+            || record_project_id.as_ref() != project_id
+            || source_snapshot_digest.as_ref()
+                != release.source_snapshot_digest.as_deref().unwrap_or_default()
+            || dependency_lock_digest.as_ref()
+                != release.dependency_lock_digest.as_deref().unwrap_or_default()
+            || build_profile_version.as_ref()
+                != release.build_profile_version.as_deref().unwrap_or_default()
+            || i64::try_from(*build_generation).ok() != release.build_generation
+            || record.created_at_ms != release.created_at
+        {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "database Release row does not match its canonical Release record".to_owned(),
+            ));
+        }
+        Ok(stored)
+    }
+
+    async fn resolve_surface_session(
+        &self,
+        miniapp_id: &str,
+        capability: &str,
+        active_release_epoch: u64,
+        expected_release_digest: &str,
+    ) -> Result<MiniAppSurfaceSessionRow, MiniAppM1ApplicationError> {
+        validate_request_identity(miniapp_id, "miniapp_id")?;
+        validate_digest_string(expected_release_digest, "expected Release digest")?;
+        let capability_digest = surface_capability_digest(capability)?;
+        self.repository
+            .resolve_surface_session(&ResolveMiniAppM1SurfaceSessionParams {
+                miniapp_id: miniapp_id.to_owned(),
+                capability_digest,
+                expected_active_release_digest: expected_release_digest.to_owned(),
+                expected_active_release_epoch: to_i64(
+                    active_release_epoch,
+                    "active release epoch",
+                )?,
+            })
+            .await?
+            .ok_or(MiniAppM1ApplicationError::NotFound)
+    }
+
+    async fn execute_surface_kv(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &str,
+        session: &MiniAppSurfaceSessionRow,
+        request: MiniAppBridgeKvRequest,
+    ) -> Result<StrictJsonValue, MiniAppM1ApplicationError> {
+        const NAMESPACE: &str = "surface";
+        let (key, operation) = match request {
+            MiniAppBridgeKvRequest::Get { key } => (key, MiniAppM1SurfaceKvOperation::Get),
+            MiniAppBridgeKvRequest::Set { key, value } => (
+                key,
+                MiniAppM1SurfaceKvOperation::Set { value: value.0 },
+            ),
+            MiniAppBridgeKvRequest::Delete { key } => {
+                (key, MiniAppM1SurfaceKvOperation::Delete)
+            }
+            MiniAppBridgeKvRequest::CompareAndSwap {
+                key,
+                expected_revision,
+                value,
+            } => (
+                key,
+                MiniAppM1SurfaceKvOperation::CompareAndSwap {
+                    expected_revision: expected_revision
+                        .map(|revision| to_i64(revision, "MiniApp KV revision"))
+                        .transpose()?,
+                    value: value.map(|value| value.0),
+                },
+            ),
+        };
+        let response = match self
+            .repository
+            .execute_surface_kv(&ExecuteMiniAppM1SurfaceKvParams {
+                owner_user_id: owner_user_id.to_owned(),
+                miniapp_id: miniapp_id.to_owned(),
+                surface_session_id: session.surface_session_id.clone(),
+                expected_surface_generation: session.generation,
+                expected_capability_digest: session.capability_digest.clone(),
+                expected_active_release_epoch: session.active_release_epoch,
+                expected_active_release_digest: session.active_release_digest.clone(),
+                namespace: NAMESPACE.to_owned(),
+                key,
+                operation,
+                updated_at: positive_now_ms(),
+            })
+            .await?
+        {
+            MiniAppM1SurfaceKvResult::Value { value, revision } => MiniAppKvResponse::Value {
+                value: value.map(StrictJsonValue),
+                revision: revision
+                    .map(|value| positive_u64(value, "MiniApp KV revision"))
+                    .transpose()?,
+            },
+            MiniAppM1SurfaceKvResult::Written { revision } => {
+                MiniAppKvResponse::Written {
+                    revision: positive_u64(revision, "MiniApp KV revision")?,
+                }
+            }
+            MiniAppM1SurfaceKvResult::Deleted { existed } => {
+                MiniAppKvResponse::Deleted { existed }
+            }
+            MiniAppM1SurfaceKvResult::CompareAndSwap {
+                applied,
+                current_revision,
+            } => MiniAppKvResponse::CompareAndSwap {
+                applied,
+                current_revision: current_revision
+                    .map(|value| positive_u64(value, "MiniApp KV revision"))
+                    .transpose()?,
+            },
+        };
+        serde_json::to_value(response)
+            .map(StrictJsonValue)
+            .map_err(|error| {
+                MiniAppM1ApplicationError::Invalid(format!(
+                    "MiniApp KV response cannot be serialized: {error}"
+                ))
+            })
     }
 
     async fn finish_failed_build(
@@ -460,6 +1391,12 @@ fn prepare_build_release(
             "UI-only Source must contain ui/index.html".to_owned(),
         )
     })?;
+    let materialized_ui_index_html = materialize_surface_entrypoint(&ui_index_html)
+        .map_err(|error| {
+            MiniAppM1ApplicationError::Invalid(format!(
+                "UI-only Surface Bridge bootstrap failed: {error}"
+            ))
+        })?;
     let ui_assets = source_files
         .into_iter()
         .map(|(path, bytes)| MiniAppStaticBundleFile::new(path, bytes))
@@ -512,17 +1449,22 @@ fn prepare_build_release(
         .files
         .iter()
         .map(|file| {
-            let bytes = source
-                .file(&file.normalized_relative_path)
-                .ok_or_else(|| {
-                    MiniAppM1ApplicationError::Invalid(format!(
-                        "captured Source file disappeared: {}",
-                        file.normalized_relative_path
-                    ))
-                })?;
+            let bytes = if file.normalized_relative_path == "ui/index.html" {
+                materialized_ui_index_html.clone()
+            } else {
+                source
+                    .file(&file.normalized_relative_path)
+                    .ok_or_else(|| {
+                        MiniAppM1ApplicationError::Invalid(format!(
+                            "captured Source file disappeared: {}",
+                            file.normalized_relative_path
+                        ))
+                    })?
+                    .to_vec()
+            };
             Ok(MiniAppReleaseFileBytes::new(
                 file.normalized_relative_path.clone(),
-                bytes.to_vec(),
+                bytes,
             ))
         })
         .collect::<Result<Vec<_>, MiniAppM1ApplicationError>>()?;
@@ -653,18 +1595,24 @@ fn validate_build_request(
             "Build request is stale against the exact Product/Project/Source head".to_owned(),
         ));
     }
-    if snapshot.ready_release.as_ref().is_some_and(|ready| {
-        ready.project_id.as_deref() == Some(request.project_id.as_str())
-            && ready.source_snapshot_digest.as_deref()
-                == Some(request.expected_source_snapshot_digest.as_str())
-            && ready.dependency_lock_digest.as_deref()
-                == Some(request.expected_dependency_lock_digest.as_str())
-            && ready.build_generation
-                == Some(i64::try_from(request.expected_build_generation).unwrap_or(i64::MIN))
-    }) {
-        return Err(MiniAppM1ApplicationError::Invalid(
-            "the current Ready Release already represents this exact Source generation".to_owned(),
-        ));
+    for (label, release) in [
+        ("Ready", snapshot.ready_release.as_ref()),
+        ("Active", snapshot.active_release.as_ref()),
+        ("Previous", snapshot.previous_release.as_ref()),
+    ] {
+        if release.is_some_and(|release| {
+            release.project_id.as_deref() == Some(request.project_id.as_str())
+                && release.source_snapshot_digest.as_deref()
+                    == Some(request.expected_source_snapshot_digest.as_str())
+                && release.dependency_lock_digest.as_deref()
+                    == Some(request.expected_dependency_lock_digest.as_str())
+                && release.build_generation
+                    == Some(i64::try_from(request.expected_build_generation).unwrap_or(i64::MIN))
+        }) {
+            return Err(MiniAppM1ApplicationError::Invalid(format!(
+                "the current {label} Release already represents this exact Source generation"
+            )));
+        }
     }
     Ok(())
 }
@@ -740,6 +1688,359 @@ fn managed_source_lineage(
             })?,
         build_generation: snapshot.project.build_generation,
     })
+}
+
+async fn require_no_running_build(
+    repository: &dyn IMiniAppM1Repository,
+    owner_user_id: &str,
+    miniapp_id: &str,
+) -> Result<(), MiniAppM1ApplicationError> {
+    if repository
+        .list_build_operations(owner_user_id, miniapp_id)
+        .await?
+        .into_iter()
+        .any(|operation| operation.state == ProductOperationState::Running.as_str())
+    {
+        return Err(MiniAppM1ApplicationError::Database(
+            nomifun_db::DbError::Conflict(
+                "MiniApp Release pointers cannot change while a Build is running".to_owned(),
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn require_ui_only_release_mutation(
+    snapshot: &MiniAppM1Snapshot,
+) -> Result<(), MiniAppM1ApplicationError> {
+    if snapshot.product.kind != MiniAppM1Kind::UiOnly.as_str() {
+        return Err(MiniAppM1ApplicationError::Invalid(
+            "M1-0-02-B supports UI-only MiniApps; Service cutover belongs to M1-1".to_owned(),
+        ));
+    }
+    if matches!(snapshot.product.lifecycle.as_str(), "trashed" | "deleting") {
+        return Err(MiniAppM1ApplicationError::Invalid(
+            "trashed or deleting MiniApps cannot change Release pointers".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_publish_request(
+    snapshot: &MiniAppM1Snapshot,
+    request: &PublishMiniAppRequestDto,
+) -> Result<(), MiniAppM1ApplicationError> {
+    validate_request_identity(&request.miniapp_id, "miniapp_id")?;
+    validate_digest_string(
+        &request.expected_ready_release_digest,
+        "expected Ready Release digest",
+    )?;
+    if let Some(active) = &request.expected_active_release_digest {
+        validate_digest_string(active, "expected Active Release digest")?;
+    }
+    if request.expected_service_test_receipt_id.is_some() || request.acknowledge_test_warning {
+        return Err(MiniAppM1ApplicationError::Invalid(
+            "UI-only Publish does not accept Service Test warnings or receipts".to_owned(),
+        ));
+    }
+    let ready = snapshot
+        .ready_release
+        .as_ref()
+        .ok_or_else(|| MiniAppM1ApplicationError::Invalid("no Ready Release".to_owned()))?;
+    if snapshot.product.miniapp_id != request.miniapp_id
+        || positive_u64(snapshot.product.product_revision, "MiniApp product revision")?
+            != request.expected_product_revision
+        || positive_u64(snapshot.product.pointer_revision, "MiniApp pointer revision")?
+            != request.expected_pointer_revision
+        || nonnegative_u64(
+            snapshot.product.active_release_epoch,
+            "MiniApp active release epoch",
+        )? != request.expected_active_release_epoch
+        || ready.release_id != request.ready_release_id
+        || ready.release_digest != request.expected_ready_release_digest
+        || snapshot.product.active_release_digest.as_deref()
+            != request.expected_active_release_digest.as_deref()
+    {
+        return Err(MiniAppM1ApplicationError::Database(
+            nomifun_db::DbError::Conflict(
+                "MiniApp Publish request is stale against the exact Release pointers".to_owned(),
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_rollback_request(
+    snapshot: &MiniAppM1Snapshot,
+    request: &RollbackMiniAppRequestDto,
+) -> Result<(), MiniAppM1ApplicationError> {
+    validate_request_identity(&request.miniapp_id, "miniapp_id")?;
+    validate_digest_string(
+        &request.expected_current_release_digest,
+        "expected current Release digest",
+    )?;
+    validate_digest_string(
+        &request.expected_previous_release_digest,
+        "expected Previous Release digest",
+    )?;
+    let active = snapshot
+        .active_release
+        .as_ref()
+        .ok_or_else(|| MiniAppM1ApplicationError::Invalid("no Active Release".to_owned()))?;
+    let previous = snapshot
+        .previous_release
+        .as_ref()
+        .ok_or_else(|| MiniAppM1ApplicationError::Invalid("no Previous Release".to_owned()))?;
+    if snapshot.product.miniapp_id != request.miniapp_id
+        || positive_u64(snapshot.product.product_revision, "MiniApp product revision")?
+            != request.expected_product_revision
+        || positive_u64(snapshot.product.pointer_revision, "MiniApp pointer revision")?
+            != request.expected_pointer_revision
+        || positive_u64(
+            snapshot.product.active_release_epoch,
+            "MiniApp active release epoch",
+        )? != request.expected_active_release_epoch
+        || active.release_digest != request.expected_current_release_digest
+        || previous.release_id != request.previous_release_id
+        || previous.release_digest != request.expected_previous_release_digest
+    {
+        return Err(MiniAppM1ApplicationError::Database(
+            nomifun_db::DbError::Conflict(
+                "MiniApp Rollback request is stale against the exact Release pointers".to_owned(),
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_request_identity(
+    value: &str,
+    label: &str,
+) -> Result<(), MiniAppM1ApplicationError> {
+    nomifun_common::validate_uuidv7(value)
+        .map(|_| ())
+        .map_err(|error| {
+            MiniAppM1ApplicationError::Invalid(format!(
+                "{label} must be canonical UUIDv7: {error}"
+            ))
+        })
+}
+
+fn pointer_state_from_snapshot(
+    snapshot: &MiniAppM1Snapshot,
+) -> Result<MiniAppReleasePointerState, MiniAppM1ApplicationError> {
+    validate_digest_string(
+        &snapshot.product.materialized_catalog_digest,
+        "materialized Catalog digest",
+    )?;
+    let state = MiniAppReleasePointerState {
+        miniapp_id: MiniAppId::from(snapshot.product.miniapp_id.clone()),
+        pointer_revision: positive_u64(
+            snapshot.product.pointer_revision,
+            "MiniApp pointer revision",
+        )?,
+        active_release_epoch: nonnegative_u64(
+            snapshot.product.active_release_epoch,
+            "MiniApp active release epoch",
+        )?,
+        ready_release: snapshot.ready_release.as_ref().map(|release| {
+            MiniAppReadyReleaseRef {
+                release_id: MiniAppReleaseId::from(release.release_id.clone()),
+                release_digest: DigestHex::from(release.release_digest.clone()),
+            }
+        }),
+        active_release: snapshot.active_release.as_ref().map(release_contract_ref),
+        previous_release: snapshot
+            .previous_release
+            .as_ref()
+            .map(release_contract_ref),
+        materialized_catalog_digest: DigestHex::from(
+            snapshot.product.materialized_catalog_digest.clone(),
+        ),
+    };
+    state
+        .validate()
+        .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+    Ok(state)
+}
+
+fn pointer_expectation_from_snapshot(
+    snapshot: &MiniAppM1Snapshot,
+) -> Result<MiniAppPointerExpectation, MiniAppM1ApplicationError> {
+    Ok(MiniAppPointerExpectation::from_state(
+        &pointer_state_from_snapshot(snapshot)?,
+    ))
+}
+
+fn ui_only_non_ui_fingerprint(
+    release: &MiniAppStoredRelease,
+) -> Result<MiniAppNonUiReleaseFingerprint, MiniAppM1ApplicationError> {
+    let manifest = &release.artifact.manifest.payload;
+    if !manifest.is_ui_only() {
+        return Err(MiniAppM1ApplicationError::Invalid(
+            "UI-only auto Publish proof received a Service Release".to_owned(),
+        ));
+    }
+    Ok(MiniAppNonUiReleaseFingerprint {
+        manifest_without_ui_digest: ui_only_non_ui_manifest_digest(release)?,
+        service_run_key: None,
+        migration_set_digest: manifest
+            .migration_set_digest()
+            .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?,
+        contribution_set_digest: manifest
+            .contribution_set_digest()
+            .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?,
+        bridge_contract_digest: manifest.bridge_contract_digest.clone(),
+        config_schema_digest: manifest.config_schema_digest.clone(),
+        credential_slots_digest: manifest.credential_slots_digest.clone(),
+        resource_contract_digest: manifest.resource_contract_digest.clone(),
+        runtime_requirements_digest: digest_bytes(b"miniapp-ui-only-no-runtime"),
+        dependency_lock_digest: manifest.dependency_lock_digest.clone(),
+    })
+}
+
+fn ui_only_non_ui_manifest_digest(
+    release: &MiniAppStoredRelease,
+) -> Result<DigestHex, MiniAppM1ApplicationError> {
+    let mut manifest = release.artifact.manifest.payload.clone();
+    manifest.ui.entrypoint_digest = digest_bytes(b"normalized-ui-entrypoint-content");
+    manifest.ui.ui_tree_digest = digest_bytes(b"normalized-ui-tree-content");
+    digest_payload(&manifest)
+        .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))
+}
+
+fn changed_output_paths(
+    current: &MiniAppStoredRelease,
+    target: &MiniAppStoredRelease,
+) -> BTreeSet<String> {
+    let current = current
+        .artifact
+        .files
+        .iter()
+        .map(|file| {
+            (
+                file.normalized_relative_path.as_str(),
+                file.digest.as_ref(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let target = target
+        .artifact
+        .files
+        .iter()
+        .map(|file| {
+            (
+                file.normalized_relative_path.as_str(),
+                file.digest.as_ref(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    current
+        .keys()
+        .chain(target.keys())
+        .filter(|path| current.get(**path) != target.get(**path))
+        .map(|path| (*path).to_owned())
+        .collect()
+}
+
+fn changed_source_paths(
+    current: &[MiniAppSourceFile],
+    target: &[MiniAppSourceFile],
+) -> BTreeSet<String> {
+    let current = current
+        .iter()
+        .map(|file| {
+            (
+                file.normalized_relative_path.as_str(),
+                file.digest.as_ref(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let target = target
+        .iter()
+        .map(|file| {
+            (
+                file.normalized_relative_path.as_str(),
+                file.digest.as_ref(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    current
+        .keys()
+        .chain(target.keys())
+        .filter(|path| current.get(**path) != target.get(**path))
+        .map(|path| (*path).to_owned())
+        .collect()
+}
+
+fn source_matches_artifact(
+    source: &[MiniAppSourceFile],
+    release: &MiniAppStoredRelease,
+) -> bool {
+    let source = source
+        .iter()
+        .filter_map(|file| {
+            if file.normalized_relative_path == "ui/index.html" {
+                let bytes = materialize_surface_entrypoint(&file.bytes).ok()?;
+                Some((
+                    file.normalized_relative_path.as_str(),
+                    (digest_bytes(&bytes), bytes.len() as u64),
+                ))
+            } else {
+                Some((
+                    file.normalized_relative_path.as_str(),
+                    (file.digest.clone(), file.size_bytes),
+                ))
+            }
+        })
+        .collect::<BTreeMap<_, _>>();
+    let artifact = release
+        .artifact
+        .files
+        .iter()
+        .map(|file| {
+            (
+                file.normalized_relative_path.as_str(),
+                (file.digest.clone(), file.size_bytes),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    source.iter()
+        .map(|(path, (digest, size))| (*path, (digest.as_ref(), *size)))
+        .collect::<BTreeMap<_, _>>()
+        == artifact
+            .iter()
+            .map(|(path, (digest, size))| (*path, (digest.as_ref(), *size)))
+            .collect::<BTreeMap<_, _>>()
+}
+
+fn release_contract_ref(release: &MiniAppReleaseRow) -> MiniAppReleaseRef {
+    MiniAppReleaseRef {
+        release_id: MiniAppReleaseId::from(release.release_id.clone()),
+        artifact_id: ArtifactId::from(release.artifact_id.clone()),
+        release_digest: DigestHex::from(release.release_digest.clone()),
+        manifest_digest: DigestHex::from(release.manifest_digest.clone()),
+    }
+}
+
+#[derive(Serialize)]
+struct MaterializedMiniAppCatalogDigest<'a> {
+    miniapp_id: &'a str,
+    active_release: &'a MiniAppReleaseRef,
+    contributions: &'a PackageContributions,
+}
+
+fn materialized_catalog_digest(
+    miniapp_id: &str,
+    active_release: &MiniAppReleaseRef,
+    contributions: &PackageContributions,
+) -> Result<DigestHex, MiniAppM1ApplicationError> {
+    digest_payload(&MaterializedMiniAppCatalogDigest {
+        miniapp_id,
+        active_release,
+        contributions,
+    })
+    .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))
 }
 
 fn summary_from_product(
@@ -843,9 +2144,13 @@ fn workshop_from_snapshot(
                     error_code: None,
                 },
                 migration_count: 0,
-                can_publish: false,
-                can_auto_publish: false,
-                blocking_reasons: vec!["MINIAPP_PUBLISH_NOT_AVAILABLE".to_owned()],
+                can_publish: true,
+                can_auto_publish: snapshot
+                    .auto_publish_authorization
+                    .as_ref()
+                    .is_some_and(|authorization| authorization.enabled)
+                    && snapshot.active_release.is_some(),
+                blocking_reasons: Vec::new(),
             })
         })
         .transpose()?;
@@ -859,6 +2164,15 @@ fn workshop_from_snapshot(
         })?;
     Ok(MiniAppWorkshopDto {
         miniapp: summary,
+        publish_mode: if snapshot
+            .auto_publish_authorization
+            .as_ref()
+            .is_some_and(|authorization| authorization.enabled)
+        {
+            MiniAppPublishModeDto::AutoUiOnly
+        } else {
+            MiniAppPublishModeDto::Manual
+        },
         project_id: project.project_id.clone(),
         project_revision: positive_u64(
             project.project_revision,

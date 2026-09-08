@@ -8,19 +8,25 @@ import { ipcBridge } from '@/common';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import type {
   MiniAppOperationState,
+  MiniAppPublishMode,
   MiniAppReleaseRef,
+  MiniAppSurfaceLaunchDescriptor,
   MiniAppWorkshop,
 } from '@/common/types/miniAppPlatform';
 import { parseMiniAppId } from '@/common/types/ids';
 import HubPageShell from '@/renderer/components/layout/HubPageShell';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
-import { Button } from '@arco-design/web-react';
+import { Button, Modal, Radio, Tooltip } from '@arco-design/web-react';
 import {
   ArrowLeft,
   CheckOne,
   CloseOne,
   Code,
+  Power,
+  PreviewOpen,
   Refresh,
+  Undo,
+  Upload,
 } from '@icon-park/react';
 import React, {
   useCallback,
@@ -34,18 +40,38 @@ import { useNavigate, useParams } from 'react-router-dom';
 import {
   formatMiniAppTimestamp,
   miniAppBuildRequest,
+  miniAppCanOpenSurface,
+  miniAppPublishRequest,
+  miniAppRollbackRequest,
+  miniAppSetEnabledRequest,
+  miniAppSetPublishModeRequest,
+  miniAppSurfaceAssetPath,
+  miniAppSurfaceMatchesWorkshop,
   miniAppWorkflowState,
   shortMiniAppIdentity,
 } from './model';
+import MiniAppSurfacePanel from './MiniAppSurfacePanel';
 import {
   MiniAppKindBadge,
   MiniAppLifecycleBadge,
   MiniAppSourceBadge,
   MiniAppStatePanel,
+  MiniAppTestBadge,
   StatusBadge,
   WorkflowIcon,
 } from './MiniAppM1State';
 import styles from './MiniAppWorkbench.module.css';
+
+type MiniAppBusyAction =
+  | 'publish'
+  | 'rollback'
+  | 'enable'
+  | 'disable'
+  | 'publish_mode'
+  | 'open_surface'
+  | 'reload_surface'
+  | 'close_surface'
+  | null;
 
 function formatError(error: unknown): string {
   if (isBackendHttpError(error)) {
@@ -89,7 +115,7 @@ const Fact: React.FC<{
       className={`${styles.factValue} ${mono ? styles.mono : ''}`}
       title={title}
     >
-      {value || '—'}
+      {value ?? '—'}
     </span>
   </div>
 );
@@ -147,6 +173,15 @@ const MiniAppWorkshopDetail: React.FC<{
   onRefresh: () => void;
   onBuild: () => void;
   onCancelBuild: () => void;
+  onPublish: () => void;
+  onRollback: () => void;
+  onSetEnabled: (enabled: boolean) => void;
+  onSetPublishMode: (mode: MiniAppPublishMode) => void;
+  onOpenSurface: () => void;
+  onReloadSurface: () => void;
+  onCloseSurface: () => void;
+  surfaceDescriptor: MiniAppSurfaceLaunchDescriptor | null;
+  busyAction: MiniAppBusyAction;
   refreshing: boolean;
   building: boolean;
   canceling: boolean;
@@ -157,6 +192,15 @@ const MiniAppWorkshopDetail: React.FC<{
   onRefresh,
   onBuild,
   onCancelBuild,
+  onPublish,
+  onRollback,
+  onSetEnabled,
+  onSetPublishMode,
+  onOpenSurface,
+  onReloadSurface,
+  onCloseSurface,
+  surfaceDescriptor,
+  busyAction,
   refreshing,
   building,
   canceling,
@@ -167,6 +211,26 @@ const MiniAppWorkshopDetail: React.FC<{
   const buildRunning =
     operation?.kind === 'build' && operation.state === 'running';
   const canBuild = miniAppBuildRequest(workshop) !== null;
+  const canPublish = miniAppPublishRequest(workshop) !== null;
+  const canRollback = miniAppRollbackRequest(workshop) !== null;
+  const canEnable = miniAppSetEnabledRequest(workshop, true) !== null;
+  const canDisable = miniAppSetEnabledRequest(workshop, false) !== null;
+  const canOpenSurface = miniAppCanOpenSurface(workshop);
+  const autoPublishAvailable = Boolean(
+    miniapp.kind === 'ui_only' &&
+      miniapp.releases.active &&
+      (miniapp.lifecycle === 'enabled' || miniapp.lifecycle === 'disabled')
+  );
+  const primaryAction = canPublish
+    ? 'publish'
+    : canEnable
+      ? 'enable'
+      : canOpenSurface
+        ? 'surface'
+        : canBuild
+          ? 'build'
+          : null;
+  const controlsDisabled = busyAction !== null || building || canceling;
   const workflowSteps = [
     {
       key: 'source',
@@ -182,6 +246,16 @@ const MiniAppWorkshopDetail: React.FC<{
       key: 'ready',
       label: t('miniApps.workshop.workflow.ready'),
       state: workflow.ready,
+    },
+    {
+      key: 'publish',
+      label: t('miniApps.workshop.workflow.publish'),
+      state: workflow.publish,
+    },
+    {
+      key: 'surface',
+      label: t('miniApps.workshop.workflow.surface'),
+      state: workflow.surface,
     },
   ] as const;
 
@@ -212,20 +286,113 @@ const MiniAppWorkshopDetail: React.FC<{
           {t('miniApps.actions.backToLibrary')}
         </Button>
         <Button
-          type='primary'
+          type={primaryAction === 'build' ? 'primary' : 'default'}
           icon={<Code theme='outline' size='14' />}
           loading={building}
-          disabled={!canBuild || building || canceling}
+          disabled={!canBuild || controlsDisabled}
           onClick={onBuild}
         >
           {t('miniApps.actions.build')}
         </Button>
+        <Tooltip
+          content={
+            canPublish
+              ? ''
+              : ready
+                ? t('miniApps.errors.publishUnavailable')
+                : t('miniApps.workshop.ready.emptyBody')
+          }
+          disabled={canPublish}
+        >
+          <span>
+            <Button
+              type={primaryAction === 'publish' ? 'primary' : 'default'}
+              icon={<Upload theme='outline' size='14' />}
+              loading={busyAction === 'publish'}
+              disabled={controlsDisabled || !canPublish}
+              onClick={onPublish}
+            >
+              {t('miniApps.actions.publish')}
+            </Button>
+          </span>
+        </Tooltip>
+        <Tooltip
+          content={
+            canRollback
+              ? ''
+              : t('miniApps.workshop.releases.rollbackUnavailable')
+          }
+          disabled={canRollback}
+        >
+          <span>
+            <Button
+              icon={<Undo theme='outline' size='14' />}
+              loading={busyAction === 'rollback'}
+              disabled={controlsDisabled || !canRollback}
+              onClick={onRollback}
+            >
+              {t('miniApps.actions.rollback')}
+            </Button>
+          </span>
+        </Tooltip>
+        {miniapp.lifecycle === 'enabled' ? (
+          <Button
+            status='danger'
+            icon={<Power theme='outline' size='14' />}
+            loading={busyAction === 'disable'}
+            disabled={controlsDisabled || !canDisable}
+            onClick={() => onSetEnabled(false)}
+          >
+            {t('miniApps.actions.disable')}
+          </Button>
+        ) : miniapp.lifecycle === 'disabled' ? (
+          <Tooltip
+            content={
+              miniapp.releases.active
+                ? ''
+                : t('miniApps.errors.enableUnavailable')
+            }
+            disabled={Boolean(miniapp.releases.active)}
+          >
+            <span>
+              <Button
+                type={primaryAction === 'enable' ? 'primary' : 'default'}
+                icon={<Power theme='outline' size='14' />}
+                loading={busyAction === 'enable'}
+                disabled={controlsDisabled || !canEnable}
+                onClick={() => onSetEnabled(true)}
+              >
+                {t('miniApps.actions.enable')}
+              </Button>
+            </span>
+          </Tooltip>
+        ) : null}
+        <Tooltip
+          content={
+            canOpenSurface
+              ? ''
+              : t('miniApps.errors.surfaceUnavailable')
+          }
+          disabled={canOpenSurface}
+        >
+          <span>
+            <Button
+              type={primaryAction === 'surface' ? 'primary' : 'default'}
+              icon={<PreviewOpen theme='outline' size='14' />}
+              loading={busyAction === 'open_surface'}
+              disabled={controlsDisabled || !canOpenSurface}
+              onClick={onOpenSurface}
+            >
+              {t('miniApps.actions.openSurface')}
+            </Button>
+          </span>
+        </Tooltip>
         {buildRunning && operation.cancelable && (
           <Button
             status='danger'
             icon={<CloseOne theme='outline' size='14' />}
             loading={canceling}
-            disabled={canceling}
+            disabled={canceling || busyAction !== null}
             onClick={onCancelBuild}
           >
             {t('miniApps.actions.cancelBuild')}
@@ -234,6 +401,7 @@ const MiniAppWorkshopDetail: React.FC<{
         <Button
           icon={<Refresh theme='outline' size='14' />}
           loading={refreshing}
+          disabled={busyAction !== null}
           onClick={onRefresh}
         >
           {t('miniApps.actions.refresh')}
@@ -241,7 +409,7 @@ const MiniAppWorkshopDetail: React.FC<{
       </div>
 
       <ol
-        className={`${styles.workflow} ${styles.workflowCompact}`}
+        className={styles.workflow}
         aria-label={t('miniApps.workshop.workflow.ariaLabel')}
       >
         {workflowSteps.map((step, index) => (
@@ -329,6 +497,128 @@ const MiniAppWorkshopDetail: React.FC<{
         <div className={styles.sectionHeader}>
           <div>
             <h3 className={styles.sectionTitle}>
+              {t('miniApps.workshop.releases.title')}
+            </h3>
+            <p className={styles.sectionHint}>
+              {t('miniApps.workshop.releases.hint')}
+            </p>
+          </div>
+        </div>
+        <div className={styles.releaseGrid}>
+          <div className={`${styles.releaseItem} ${styles.releaseItemActive}`}>
+            <div className={styles.releaseName}>
+              {t('miniApps.workshop.releases.active')}
+            </div>
+            <div className={styles.releaseValue}>
+              {miniapp.releases.active
+                ? shortMiniAppIdentity(miniapp.releases.active.release_id)
+                : t('miniApps.common.none')}
+            </div>
+            {miniapp.releases.active && (
+              <div
+                className={styles.releaseDigest}
+                title={miniapp.releases.active.release_digest}
+              >
+                {shortMiniAppIdentity(
+                  miniapp.releases.active.release_digest,
+                  12
+                )}
+              </div>
+            )}
+          </div>
+          <div className={`${styles.releaseItem} ${styles.releaseItemPrevious}`}>
+            <div className={styles.releaseName}>
+              {t('miniApps.workshop.releases.previous')}
+            </div>
+            <div className={styles.releaseValue}>
+              {miniapp.releases.previous
+                ? shortMiniAppIdentity(miniapp.releases.previous.release_id)
+                : t('miniApps.common.none')}
+            </div>
+            {miniapp.releases.previous && (
+              <div
+                className={styles.releaseDigest}
+                title={miniapp.releases.previous.release_digest}
+              >
+                {shortMiniAppIdentity(
+                  miniapp.releases.previous.release_digest,
+                  12
+                )}
+              </div>
+            )}
+          </div>
+          <Fact
+            label={t('miniApps.workshop.identity.pointerRevision')}
+            value={miniapp.releases.pointer_revision}
+          />
+          <Fact
+            label={t('miniApps.workshop.identity.activeEpoch')}
+            value={miniapp.releases.active_release_epoch}
+          />
+        </div>
+        <div className={`${styles.notice} ${styles.noticeInfo}`}>
+          {t('miniApps.workshop.releases.publishDoesNotEnable')}
+        </div>
+      </section>
+
+      <section className={styles.section}>
+        <div className={styles.sectionHeader}>
+          <div>
+            <h3 className={styles.sectionTitle}>
+              {t('miniApps.workshop.publishMode.title')}
+            </h3>
+            <p className={styles.sectionHint}>
+              {t('miniApps.workshop.publishMode.hint')}
+            </p>
+          </div>
+          <StatusBadge
+            label={
+              workshop.publish_mode === 'auto_ui_only'
+                ? t('miniApps.workshop.publishMode.auto')
+                : t('miniApps.workshop.publishMode.manual')
+            }
+            tone={
+              workshop.publish_mode === 'auto_ui_only' ? 'success' : 'muted'
+            }
+          />
+        </div>
+        <span className={styles.publishModeControl}>
+          <Radio.Group
+            type='button'
+            size='small'
+            value={workshop.publish_mode}
+            disabled={
+              busyAction !== null || canceling || !autoPublishAvailable
+            }
+            onChange={(value: unknown) => {
+              if (value === 'manual' || value === 'auto_ui_only') {
+                onSetPublishMode(value);
+              }
+            }}
+            options={[
+              {
+                label: t('miniApps.workshop.publishMode.manual'),
+                value: 'manual',
+              },
+              {
+                label: t('miniApps.workshop.publishMode.auto'),
+                value: 'auto_ui_only',
+                disabled: !autoPublishAvailable || building,
+              },
+            ]}
+          />
+        </span>
+        <p className={styles.publishModeNote}>
+          {autoPublishAvailable
+            ? t('miniApps.workshop.publishMode.autoScope')
+            : t('miniApps.workshop.publishMode.autoDisabled')}
+        </p>
+      </section>
+
+      <section className={styles.section}>
+        <div className={styles.sectionHeader}>
+          <div>
+            <h3 className={styles.sectionTitle}>
               {t('miniApps.workshop.ready.title')}
             </h3>
             <p className={styles.sectionHint}>
@@ -343,11 +633,41 @@ const MiniAppWorkshopDetail: React.FC<{
           )}
         </div>
         {ready ? (
-          <ReadyReleaseSummary
-            release={ready.release}
-            buildGeneration={ready.project_build_generation}
-            createdAtMs={ready.created_at_ms}
-          />
+          <>
+            <ReadyReleaseSummary
+              release={ready.release}
+              buildGeneration={ready.project_build_generation}
+              createdAtMs={ready.created_at_ms}
+            />
+            <div className={`${styles.factGrid} ${styles.readyFacts}`}>
+              <Fact
+                label={t('miniApps.workshop.ready.test')}
+                value={<MiniAppTestBadge status={ready.test.status} />}
+              />
+              <Fact
+                label={t('miniApps.workshop.ready.publishEligibility')}
+                value={
+                  ready.can_publish
+                    ? t('miniApps.workshop.ready.canPublish')
+                    : t('miniApps.workshop.ready.blocked')
+                }
+              />
+              <Fact
+                label={t('miniApps.workshop.ready.migrations')}
+                value={ready.migration_count}
+              />
+            </div>
+            {ready.blocking_reasons.length > 0 && (
+              <ul className={styles.blockingList}>
+                {ready.blocking_reasons.map((reason) => (
+                  <li key={reason} className={styles.blockingItem}>
+                    <CloseOne theme='outline' size='13' />
+                    <code>{reason}</code>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </>
         ) : (
           <MiniAppStatePanel
             title={t('miniApps.workshop.ready.emptyTitle')}
@@ -355,6 +675,17 @@ const MiniAppWorkshopDetail: React.FC<{
           />
         )}
       </section>
+
+      {surfaceDescriptor && (
+        <MiniAppSurfacePanel
+          descriptor={surfaceDescriptor}
+          displayName={miniapp.display_name}
+          reloading={busyAction === 'reload_surface'}
+          closing={busyAction === 'close_surface'}
+          onReload={onReloadSurface}
+          onClose={onCloseSurface}
+        />
+      )}
 
       <section className={styles.section}>
         <div className={styles.sectionHeader}>
@@ -425,18 +756,24 @@ const MiniAppRunnerPage: React.FC = () => {
   const [refreshing, setRefreshing] = useState(false);
   const [building, setBuilding] = useState(false);
   const [canceling, setCanceling] = useState(false);
+  const [busyAction, setBusyAction] = useState<MiniAppBusyAction>(null);
+  const [surfaceDescriptor, setSurfaceDescriptor] =
+    useState<MiniAppSurfaceLaunchDescriptor | null>(null);
   const canceledBuildRef = useRef<string | null>(null);
   const [notFound, setNotFound] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
 
   const load = useCallback(
-    async (mode: 'initial' | 'refresh' | 'background' = 'initial') => {
+    async (
+      mode: 'initial' | 'refresh' | 'background' = 'initial'
+    ): Promise<MiniAppWorkshop | null> => {
       if (!miniappId) {
         setWorkshop(null);
+        setSurfaceDescriptor(null);
         setNotFound(true);
         setFailure(null);
         setLoading(false);
-        return;
+        return null;
       }
       if (mode === 'initial') setLoading(true);
       else if (mode === 'refresh') setRefreshing(true);
@@ -446,16 +783,19 @@ const MiniAppRunnerPage: React.FC = () => {
         });
         setWorkshop(next);
         setNotFound(false);
-        setFailure(null);
+        if (mode !== 'background') setFailure(null);
+        return next;
       } catch (error) {
         if (isBackendHttpError(error) && error.status === 404) {
           setWorkshop(null);
+          setSurfaceDescriptor(null);
           setNotFound(true);
           setFailure(null);
         } else {
           console.error('[miniapps] failed to load M1 Workshop', error);
           setFailure(formatError(error));
         }
+        return null;
       } finally {
         setLoading(false);
         if (mode === 'refresh') setRefreshing(false);
@@ -463,6 +803,60 @@ const MiniAppRunnerPage: React.FC = () => {
     },
     [miniappId]
   );
+
+  const requestSurfaceDescriptor = useCallback(
+    async (
+      target: MiniAppWorkshop
+    ): Promise<MiniAppSurfaceLaunchDescriptor> => {
+      if (
+        !miniappId ||
+        target.miniapp.miniapp_id !== miniappId ||
+        !miniAppCanOpenSurface(target)
+      ) {
+        throw new Error(t('miniApps.errors.surfaceUnavailable'));
+      }
+      const descriptor = await ipcBridge.miniapps.openSurface.invoke({
+        miniapp_id: miniappId,
+      });
+      if (
+        !miniAppSurfaceMatchesWorkshop(descriptor, target) ||
+        !miniAppSurfaceAssetPath(descriptor)
+      ) {
+        throw new Error(t('miniApps.errors.surfaceDescriptorMismatch'));
+      }
+      return descriptor;
+    },
+    [miniappId, t]
+  );
+
+  const syncSurface = useCallback(
+    async (target: MiniAppWorkshop, shouldOpen: boolean) => {
+      if (!shouldOpen || !miniAppCanOpenSurface(target)) {
+        setSurfaceDescriptor(null);
+        return;
+      }
+      if (
+        surfaceDescriptor &&
+        miniAppSurfaceMatchesWorkshop(surfaceDescriptor, target)
+      ) {
+        return;
+      }
+      setSurfaceDescriptor(null);
+      try {
+        setSurfaceDescriptor(await requestSurfaceDescriptor(target));
+      } catch (error) {
+        console.error('[miniapps] failed to refresh Surface descriptor', error);
+        setFailure(
+          `${t('miniApps.errors.loadSurfaceTitle')}: ${formatError(error)}`
+        );
+      }
+    },
+    [requestSurfaceDescriptor, surfaceDescriptor, t]
+  );
+
+  useEffect(() => {
+    setSurfaceDescriptor(null);
+  }, [miniappId]);
 
   useEffect(() => {
     void load();
@@ -487,15 +881,70 @@ const MiniAppRunnerPage: React.FC = () => {
     workshop?.active_operation?.state,
   ]);
 
+  useEffect(() => {
+    if (
+      surfaceDescriptor &&
+      workshop &&
+      (!miniAppSurfaceMatchesWorkshop(surfaceDescriptor, workshop) ||
+        !miniAppSurfaceAssetPath(surfaceDescriptor))
+    ) {
+      setSurfaceDescriptor(null);
+    }
+  }, [surfaceDescriptor, workshop]);
+
   const goBack = useCallback(() => navigate('/mini-apps'), [navigate]);
 
+  const runWorkshopMutation = useCallback(
+    async (
+      action: Exclude<
+        MiniAppBusyAction,
+        'open_surface' | 'reload_surface' | 'close_surface' | null
+      >,
+      invoke: () => Promise<MiniAppWorkshop>,
+      successMessage: string,
+      allowWhileBuilding = false
+    ) => {
+      if (busyAction || (!allowWhileBuilding && building) || canceling) return;
+      const surfaceWasOpen = surfaceDescriptor !== null;
+      setBusyAction(action);
+      setFailure(null);
+      try {
+        const next = await invoke();
+        setWorkshop(next);
+        setNotFound(false);
+        message.success(successMessage);
+        await syncSurface(next, surfaceWasOpen);
+      } catch (error) {
+        console.error(`[miniapps] ${action} failed`, error);
+        const detail = formatError(error);
+        const latest = await load('background');
+        if (latest) await syncSurface(latest, surfaceWasOpen);
+        setFailure(detail);
+      } finally {
+        setBusyAction(null);
+      }
+    },
+    [
+      building,
+      busyAction,
+      canceling,
+      load,
+      message,
+      surfaceDescriptor,
+      syncSurface,
+    ]
+  );
+
   const handleBuild = useCallback(async () => {
-    if (!workshop || !miniappId || building || canceling) return;
+    if (!workshop || !miniappId || building || canceling || busyAction) {
+      return;
+    }
     const request = miniAppBuildRequest(workshop);
     if (!request) {
       setFailure(t('miniApps.errors.buildUnavailable'));
       return;
     }
+    const surfaceWasOpen = surfaceDescriptor !== null;
     canceledBuildRef.current = null;
     setBuilding(true);
     setFailure(null);
@@ -503,21 +952,35 @@ const MiniAppRunnerPage: React.FC = () => {
       const next = await ipcBridge.miniapps.build.invoke(request);
       setWorkshop(next);
       message.success(t('miniApps.messages.buildSucceeded'));
+      await syncSurface(next, surfaceWasOpen);
     } catch (error) {
       if (canceledBuildRef.current) {
         canceledBuildRef.current = null;
       } else {
         console.error('[miniapps] UI-only Build failed', error);
-        setFailure(formatError(error));
-        await load('background');
+        const detail = formatError(error);
+        const latest = await load('background');
+        if (latest) await syncSurface(latest, surfaceWasOpen);
+        setFailure(detail);
       }
     } finally {
       setBuilding(false);
     }
-  }, [building, canceling, load, message, miniappId, t, workshop]);
+  }, [
+    building,
+    busyAction,
+    canceling,
+    load,
+    message,
+    miniappId,
+    surfaceDescriptor,
+    syncSurface,
+    t,
+    workshop,
+  ]);
 
   const handleCancelBuild = useCallback(async () => {
-    if (!workshop || !miniappId || canceling) return;
+    if (!workshop || !miniappId || canceling || busyAction) return;
     const operation = workshop.active_operation;
     if (
       !operation ||
@@ -546,7 +1009,234 @@ const MiniAppRunnerPage: React.FC = () => {
     } finally {
       setCanceling(false);
     }
-  }, [canceling, load, message, miniappId, t, workshop]);
+  }, [busyAction, canceling, load, message, miniappId, t, workshop]);
+
+  const handlePublish = useCallback(() => {
+    if (!workshop || busyAction || building || canceling) return;
+    const request = miniAppPublishRequest(workshop);
+    if (!request) {
+      setFailure(t('miniApps.errors.publishUnavailable'));
+      return;
+    }
+    Modal.confirm({
+      title: t('miniApps.confirm.publishTitle'),
+      content: workshop.miniapp.releases.active
+        ? t('miniApps.confirm.publishUpdateBody')
+        : t('miniApps.confirm.publishFirstBody'),
+      okText: t('miniApps.actions.publish'),
+      cancelText: t('miniApps.actions.cancel'),
+      onOk: () =>
+        runWorkshopMutation(
+          'publish',
+          () => ipcBridge.miniapps.publish.invoke(request),
+          t('miniApps.messages.published')
+        ),
+    });
+  }, [building, busyAction, canceling, runWorkshopMutation, t, workshop]);
+
+  const handleRollback = useCallback(() => {
+    if (!workshop || busyAction || building || canceling) return;
+    const request = miniAppRollbackRequest(workshop);
+    if (!request) {
+      setFailure(t('miniApps.errors.rollbackUnavailable'));
+      return;
+    }
+    Modal.confirm({
+      title: t('miniApps.confirm.rollbackTitle'),
+      content: t('miniApps.confirm.rollbackBody', {
+        current: shortMiniAppIdentity(
+          request.expected_current_release_digest,
+          8
+        ),
+        target: shortMiniAppIdentity(
+          request.expected_previous_release_digest,
+          8
+        ),
+      }),
+      okText: t('miniApps.actions.rollback'),
+      cancelText: t('miniApps.actions.cancel'),
+      okButtonProps: { status: 'warning' },
+      onOk: () =>
+        runWorkshopMutation(
+          'rollback',
+          () => ipcBridge.miniapps.rollback.invoke(request),
+          t('miniApps.messages.rolledBack')
+        ),
+    });
+  }, [building, busyAction, canceling, runWorkshopMutation, t, workshop]);
+
+  const handleSetEnabled = useCallback(
+    (enabled: boolean) => {
+      if (!workshop || busyAction || building || canceling) return;
+      const request = miniAppSetEnabledRequest(workshop, enabled);
+      if (!request) {
+        setFailure(
+          t(
+            enabled
+              ? 'miniApps.errors.enableUnavailable'
+              : 'miniApps.errors.disableUnavailable'
+          )
+        );
+        return;
+      }
+      const run = () =>
+        runWorkshopMutation(
+          enabled ? 'enable' : 'disable',
+          () => ipcBridge.miniapps.setEnabled.invoke(request),
+          t(
+            enabled
+              ? 'miniApps.messages.enabled'
+              : 'miniApps.messages.disabled'
+          )
+        );
+      if (enabled) {
+        void run();
+        return;
+      }
+      Modal.confirm({
+        title: t('miniApps.confirm.disableTitle'),
+        content: t('miniApps.confirm.disableBody'),
+        okText: t('miniApps.actions.disable'),
+        cancelText: t('miniApps.actions.cancel'),
+        okButtonProps: { status: 'danger' },
+        onOk: run,
+      });
+    },
+    [building, busyAction, canceling, runWorkshopMutation, t, workshop]
+  );
+
+  const handleSetPublishMode = useCallback(
+    (mode: MiniAppPublishMode) => {
+      if (
+        !workshop ||
+        busyAction ||
+        canceling ||
+        (building && mode !== 'manual')
+      ) {
+        return;
+      }
+      const request = miniAppSetPublishModeRequest(workshop, mode);
+      if (!request) {
+        if (
+          mode === 'auto_ui_only' &&
+          !workshop.miniapp.releases.active
+        ) {
+          setFailure(t('miniApps.errors.autoPublishRequiresActive'));
+        }
+        return;
+      }
+      void runWorkshopMutation(
+        'publish_mode',
+        () => ipcBridge.miniapps.setPublishMode.invoke(request),
+        t(
+          mode === 'auto_ui_only'
+            ? 'miniApps.messages.autoPublishEnabled'
+            : 'miniApps.messages.manualPublishEnabled'
+        ),
+        mode === 'manual'
+      );
+    },
+    [building, busyAction, canceling, runWorkshopMutation, t, workshop]
+  );
+
+  const handleOpenSurface = useCallback(async () => {
+    if (
+      !workshop ||
+      busyAction ||
+      building ||
+      canceling ||
+      !miniAppCanOpenSurface(workshop)
+    ) {
+      if (workshop && !miniAppCanOpenSurface(workshop)) {
+        setFailure(t('miniApps.errors.surfaceUnavailable'));
+      }
+      return;
+    }
+    setBusyAction('open_surface');
+    setFailure(null);
+    setSurfaceDescriptor(null);
+    try {
+      setSurfaceDescriptor(await requestSurfaceDescriptor(workshop));
+    } catch (error) {
+      console.error('[miniapps] failed to open Surface', error);
+      setFailure(formatError(error));
+    } finally {
+      setBusyAction(null);
+    }
+  }, [
+    building,
+    busyAction,
+    canceling,
+    requestSurfaceDescriptor,
+    t,
+    workshop,
+  ]);
+
+  const handleReloadSurface = useCallback(async () => {
+    if (
+      !workshop ||
+      !surfaceDescriptor ||
+      busyAction ||
+      building ||
+      canceling
+    ) {
+      return;
+    }
+    setBusyAction('reload_surface');
+    setFailure(null);
+    try {
+      setSurfaceDescriptor(await requestSurfaceDescriptor(workshop));
+    } catch (error) {
+      console.error('[miniapps] failed to reload Surface', error);
+      setSurfaceDescriptor(null);
+      setFailure(formatError(error));
+    } finally {
+      setBusyAction(null);
+    }
+  }, [
+    building,
+    busyAction,
+    canceling,
+    requestSurfaceDescriptor,
+    surfaceDescriptor,
+    workshop,
+  ]);
+
+  const handleCloseSurface = useCallback(async () => {
+    const descriptor = surfaceDescriptor;
+    if (
+      !descriptor ||
+      busyAction ||
+      building ||
+      canceling
+    ) {
+      return;
+    }
+    setBusyAction('close_surface');
+    setFailure(null);
+    try {
+      await ipcBridge.miniapps.closeSurface.invoke({
+        miniapp_id: descriptor.miniapp_id,
+        surface_session_id: descriptor.surface_session_id,
+        surface_capability: descriptor.surface_capability,
+      });
+      // Keep the descriptor mounted until the Host confirms the close. This
+      // preserves a retryable UI after a transient transport failure and lets
+      // the iframe cleanup run from the normal descriptor-unmount path.
+      setSurfaceDescriptor(null);
+    } catch (error) {
+      console.error('[miniapps] failed to close Surface session', error);
+      setFailure(formatError(error));
+    } finally {
+      setBusyAction(null);
+    }
+  }, [building, busyAction, canceling, surfaceDescriptor]);
+
+  const handleRefresh = useCallback(async () => {
+    const surfaceWasOpen = surfaceDescriptor !== null;
+    const next = await load('refresh');
+    if (next) await syncSurface(next, surfaceWasOpen);
+  }, [load, surfaceDescriptor, syncSurface]);
 
   return (
     <>
@@ -586,9 +1276,18 @@ const MiniAppRunnerPage: React.FC = () => {
               workshop={workshop}
               locale={i18n.language}
               onBack={goBack}
-              onRefresh={() => void load('refresh')}
+              onRefresh={() => void handleRefresh()}
               onBuild={() => void handleBuild()}
               onCancelBuild={() => void handleCancelBuild()}
+              onPublish={handlePublish}
+              onRollback={handleRollback}
+              onSetEnabled={handleSetEnabled}
+              onSetPublishMode={handleSetPublishMode}
+              onOpenSurface={() => void handleOpenSurface()}
+              onReloadSurface={() => void handleReloadSurface()}
+              onCloseSurface={() => void handleCloseSurface()}
+              surfaceDescriptor={surfaceDescriptor}
+              busyAction={busyAction}
               refreshing={refreshing}
               building={building}
               canceling={canceling}
