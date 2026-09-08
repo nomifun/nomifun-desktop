@@ -31,7 +31,8 @@ use crate::repository::miniapp_m1::{
     normalize_incoming_artifact, serialize_product_operation_log_tail, validate_artifact,
     validate_digest, validate_json_object, validate_kv_row, validate_managed_source_lineage,
     validate_optional_digest,
-    validate_product_operation_error_code, validate_project_source, validate_release,
+    validate_product_artifact_contract, validate_product_operation_error_code,
+    validate_project_source, validate_release,
     validate_uuid, validate_visible_ascii_key,
 };
 
@@ -70,11 +71,6 @@ impl SqliteMiniAppM1Repository {
             "materialized_catalog_digest",
         )?;
         if let Some(source) = source {
-            if params.kind != MiniAppM1Kind::UiOnly {
-                return Err(conflict(
-                    "MiniApp managed source is only valid for UI-only products",
-                ));
-            }
             validate_managed_source_lineage(source)?;
             if source.build_profile_version != MINIAPP_RELEASE_PROFILE_VERSION {
                 return Err(conflict(
@@ -302,6 +298,12 @@ async fn fetch_snapshot_in_tx(
             DbError::Init(format!(
                 "MiniApp Artifact {} failed persisted row validation: {error}",
                 artifact.artifact_id
+            ))
+        })?;
+        validate_product_artifact_contract(&product.kind, &artifact_payload).map_err(|error| {
+            DbError::Init(format!(
+                "MiniApp {} Release {} failed product/artifact kind validation: {error}",
+                product.kind, release_id
             ))
         })?;
         validate_release(&release, &artifact_payload).map_err(|error| {
@@ -1157,11 +1159,9 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
         let mut tx = self.pool.begin().await?;
         let product =
             lock_product_for_update(&mut tx, &params.owner_user_id, &params.miniapp_id).await?;
-        if product.kind != MiniAppM1Kind::UiOnly.as_str()
-            || matches!(product.lifecycle.as_str(), "trashed" | "deleting")
-        {
+        if matches!(product.lifecycle.as_str(), "trashed" | "deleting") {
             return Err(conflict(
-                "MiniApp Build requires a non-trashed UI-only product",
+                "MiniApp Build requires a non-trashed product",
             ));
         }
         let project = fetch_project(
@@ -1457,13 +1457,13 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
         let mut tx = self.pool.begin().await?;
         let product =
             lock_product_for_update(&mut tx, &params.owner_user_id, &params.miniapp_id).await?;
-        if product.kind != MiniAppM1Kind::UiOnly.as_str()
-            || matches!(product.lifecycle.as_str(), "trashed" | "deleting")
-        {
+        if matches!(product.lifecycle.as_str(), "trashed" | "deleting") {
             return Err(conflict(
-                "MiniApp Build Ready requires a non-trashed UI-only product",
+                "MiniApp Build Ready requires a non-trashed product",
             ));
         }
+        let artifact_payload = validate_artifact(&params.artifact)?;
+        validate_product_artifact_contract(&product.kind, &artifact_payload)?;
         if product.product_revision < params.expected_product_revision
             || product.pointer_revision != params.expected_pointer_revision
         {
@@ -1485,7 +1485,7 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
                 != Some(MINIAPP_RELEASE_PROFILE_VERSION)
         {
             return Err(conflict(
-                "MiniApp Build Ready project/source CAS does not match the exact UI-only head",
+                "MiniApp Build Ready project/source CAS does not match the exact Project head",
             ));
         }
         if params.release.source_snapshot_digest != project.source_head_digest
@@ -1708,11 +1708,9 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
         let mut tx = self.pool.begin().await?;
         let product =
             lock_product_for_update(&mut tx, &params.owner_user_id, &params.miniapp_id).await?;
-        if params.source_state == MiniAppM1ProjectSourceState::Editable
-            && product.kind != MiniAppM1Kind::UiOnly.as_str()
-        {
+        if matches!(product.lifecycle.as_str(), "trashed" | "deleting") {
             return Err(conflict(
-                "managed MiniApp Source is only available for UI-only products",
+                "MiniApp Project source requires a non-trashed product",
             ));
         }
         let current: MiniAppProjectRow = sqlx::query_as(
@@ -1827,6 +1825,7 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
         }
         let mut tx = self.pool.begin().await?;
         let product = lock_product(&mut tx, &params.owner_user_id, &params.miniapp_id).await?;
+        validate_product_artifact_contract(&product.kind, &artifact_payload)?;
         if product.product_revision != params.expected_product_revision
             || product.pointer_revision != params.expected_pointer_revision
         {
@@ -2004,11 +2003,9 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
         let mut tx = self.pool.begin().await?;
         let current =
             lock_product_for_update(&mut tx, &params.owner_user_id, &params.miniapp_id).await?;
-        if current.kind != MiniAppM1Kind::UiOnly.as_str()
-            || matches!(current.lifecycle.as_str(), "trashed" | "deleting")
-        {
+        if matches!(current.lifecycle.as_str(), "trashed" | "deleting") {
             return Err(conflict(
-                "MiniApp Publish requires a non-trashed UI-only product",
+                "MiniApp Publish requires a non-trashed product",
             ));
         }
         if current.product_revision != params.expected_product_revision
@@ -2214,11 +2211,9 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
         let mut tx = self.pool.begin().await?;
         let current =
             lock_product_for_update(&mut tx, &params.owner_user_id, &params.miniapp_id).await?;
-        if current.kind != MiniAppM1Kind::UiOnly.as_str()
-            || matches!(current.lifecycle.as_str(), "trashed" | "deleting")
-        {
+        if matches!(current.lifecycle.as_str(), "trashed" | "deleting") {
             return Err(conflict(
-                "MiniApp Rollback requires a non-trashed UI-only product",
+                "MiniApp Rollback requires a non-trashed product",
             ));
         }
         if current.product_revision != params.expected_product_revision
@@ -2339,8 +2334,7 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
         let mut tx = self.pool.begin().await?;
         let current =
             lock_product_for_update(&mut tx, &params.owner_user_id, &params.miniapp_id).await?;
-        if current.kind != MiniAppM1Kind::UiOnly.as_str()
-            || matches!(current.lifecycle.as_str(), "trashed" | "deleting")
+        if matches!(current.lifecycle.as_str(), "trashed" | "deleting")
             || current.product_revision != params.expected_product_revision
             || current.pointer_revision != params.expected_pointer_revision
             || current.active_release_digest.as_deref()
@@ -2584,8 +2578,7 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
         let mut tx = self.pool.begin().await?;
         let product =
             lock_product_for_update(&mut tx, &params.owner_user_id, &params.miniapp_id).await?;
-        if product.kind != MiniAppM1Kind::UiOnly.as_str()
-            || product.lifecycle != "enabled"
+        if product.lifecycle != "enabled"
             || product.product_revision != params.expected_product_revision
             || product.pointer_revision != params.expected_pointer_revision
             || product.active_release_id.as_deref()

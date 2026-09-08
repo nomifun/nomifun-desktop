@@ -687,6 +687,35 @@ pub(crate) fn validate_artifact(
     Ok(payload)
 }
 
+pub(crate) fn validate_product_artifact_contract(
+    product_kind: &str,
+    artifact: &MiniAppReleaseArtifactV1,
+) -> Result<(), DbError> {
+    match product_kind {
+        "ui_only" if artifact.manifest.payload.is_ui_only() => Ok(()),
+        "service" => {
+            let Some(service) = artifact.manifest.payload.service.as_ref() else {
+                return Err(conflict(
+                    "Service MiniApp Release must declare service/main.mjs",
+                ));
+            };
+            if service.uses_files
+                || service.uses_private_database
+                || !artifact.manifest.payload.migrations.is_empty()
+            {
+                return Err(conflict(
+                    "Service MiniApp Files, Private Database, and Migration capabilities are not implemented",
+                ));
+            }
+            Ok(())
+        }
+        "ui_only" => Err(conflict(
+            "UI-only MiniApp Release cannot declare a Service",
+        )),
+        _ => Err(conflict("MiniApp product kind is invalid")),
+    }
+}
+
 pub(crate) fn validate_release(
     release: &MiniAppReleaseRow,
     artifact: &MiniAppReleaseArtifactV1,
