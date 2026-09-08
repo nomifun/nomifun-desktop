@@ -344,6 +344,10 @@ import type {
   SetMiniAppPublishModeRequest,
   SetMiniAppServiceRunningRequest,
   RetryMiniAppServiceRequest,
+  RetryMiniAppDeleteRequest,
+  TrashMiniAppRequest,
+  RestoreMiniAppRequest,
+  DeleteMiniAppRequest,
 } from '../types/miniAppPlatform';
 
 export { plugins } from './pluginPlatformBridge';
@@ -2341,6 +2345,34 @@ export const miniapps = {
         `/api/miniapps/${encodeURIComponent(miniapp_id)}/service/retry`
     ),
     fromApiMiniAppWorkshop
+  ),
+  trash: withResponseMap(
+    httpPost<MiniAppWorkshop, TrashMiniAppRequest>(
+      ({ miniapp_id }) =>
+        `/api/miniapps/${encodeURIComponent(miniapp_id)}/trash`
+    ),
+    fromApiMiniAppWorkshop
+  ),
+  restore: withResponseMap(
+    httpPost<MiniAppWorkshop, RestoreMiniAppRequest>(
+      ({ miniapp_id }) =>
+        `/api/miniapps/${encodeURIComponent(miniapp_id)}/restore`
+    ),
+    fromApiMiniAppWorkshop
+  ),
+  delete: withResponseMap(
+    httpPost<MiniAppLibraryResponse, DeleteMiniAppRequest>(
+      ({ miniapp_id }) =>
+        `/api/miniapps/${encodeURIComponent(miniapp_id)}/delete`
+    ),
+    fromApiMiniAppLibrary
+  ),
+  retryDelete: withResponseMap(
+    httpPost<MiniAppLibraryResponse, RetryMiniAppDeleteRequest>(
+      ({ miniapp_id }) =>
+        `/api/miniapps/${encodeURIComponent(miniapp_id)}/delete/retry`
+    ),
+    fromApiMiniAppLibrary
   ),
   openSurface: withResponseMap(
     httpPost<MiniAppSurfaceLaunchDescriptor, OpenMiniAppSurfaceRequest>(

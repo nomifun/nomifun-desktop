@@ -181,6 +181,65 @@ pub struct CommitMiniAppM1LifecycleParams {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrashMiniAppM1Params {
+    pub owner_user_id: String,
+    pub miniapp_id: String,
+    pub expected_product_revision: i64,
+    pub expected_pointer_revision: i64,
+    pub expected_active_release_digest: Option<String>,
+    pub updated_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RestoreMiniAppM1Params {
+    pub owner_user_id: String,
+    pub miniapp_id: String,
+    pub expected_product_revision: i64,
+    pub expected_pointer_revision: i64,
+    pub expected_lifecycle: String,
+    pub updated_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BeginMiniAppM1DeleteParams {
+    pub owner_user_id: String,
+    pub miniapp_id: String,
+    pub expected_product_revision: i64,
+    pub expected_pointer_revision: i64,
+    pub expected_active_release_digest: Option<String>,
+    pub operation_id: String,
+    pub started_at_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FailMiniAppM1DeleteParams {
+    pub owner_user_id: String,
+    pub miniapp_id: String,
+    pub operation_id: String,
+    pub expected_operation_revision: i64,
+    pub error_code: String,
+    pub updated_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RestartMiniAppM1DeleteParams {
+    pub owner_user_id: String,
+    pub miniapp_id: String,
+    pub expected_failed_operation_id: String,
+    pub new_operation_id: String,
+    pub started_at_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FinalizeMiniAppM1DeleteParams {
+    pub owner_user_id: String,
+    pub miniapp_id: String,
+    pub operation_id: String,
+    pub expected_operation_revision: i64,
+    pub finished_at_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SetMiniAppM1AutoPublishParams {
     pub owner_user_id: String,
     pub miniapp_id: String,
@@ -347,6 +406,49 @@ pub trait IMiniAppM1Repository: Send + Sync {
         &self,
         params: &CommitMiniAppM1LifecycleParams,
     ) -> Result<MiniAppM1Snapshot, DbError>;
+
+    async fn trash_cas(
+        &self,
+        params: &TrashMiniAppM1Params,
+    ) -> Result<MiniAppM1Snapshot, DbError>;
+
+    async fn restore_cas(
+        &self,
+        params: &RestoreMiniAppM1Params,
+    ) -> Result<MiniAppM1Snapshot, DbError>;
+
+    async fn begin_delete(
+        &self,
+        params: &BeginMiniAppM1DeleteParams,
+    ) -> Result<MiniAppM1Snapshot, DbError>;
+
+    async fn fail_delete(
+        &self,
+        params: &FailMiniAppM1DeleteParams,
+    ) -> Result<MiniAppM1Snapshot, DbError>;
+
+    async fn restart_delete(
+        &self,
+        params: &RestartMiniAppM1DeleteParams,
+    ) -> Result<MiniAppM1Snapshot, DbError>;
+
+    async fn finalize_delete(
+        &self,
+        params: &FinalizeMiniAppM1DeleteParams,
+    ) -> Result<i64, DbError>;
+
+    async fn get_miniapp_operation(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &str,
+        operation_id: &str,
+    ) -> Result<Option<ProductOperationRow>, DbError>;
+
+    async fn list_miniapp_operations(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &str,
+    ) -> Result<Vec<ProductOperationRow>, DbError>;
 
     async fn set_auto_publish_cas(
         &self,

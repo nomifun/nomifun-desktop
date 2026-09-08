@@ -437,6 +437,16 @@ impl MiniAppServiceStoragePort for SlowStorage {
             .handle_service_request(miniapp_id, storage, request, cancellation)
             .await
     }
+
+    async fn purge_service_storage(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &MiniAppId,
+    ) -> nomifun_miniapp_platform::MiniAppPlatformResult<()> {
+        self.inner
+            .purge_service_storage(owner_user_id, miniapp_id)
+            .await
+    }
 }
 
 #[tokio::test]

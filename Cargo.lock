@@ -6911,6 +6911,7 @@ dependencies = [
  "async-trait",
  "getrandom 0.2.17",
  "hex",
+ "junction",
  "nomi-process-runtime",
  "nomifun-agent-contracts",
  "nomifun-api-types",

@@ -16,6 +16,7 @@ use crate::models::{
     ProductOperationState,
 };
 use crate::repository::miniapp_m1::{
+    BeginMiniAppM1DeleteParams, FailMiniAppM1DeleteParams, FinalizeMiniAppM1DeleteParams,
     CancelMiniAppM1BuildOperationParams, CloseMiniAppM1SurfaceSessionParams,
     CommitMiniAppM1LifecycleParams,
     CreateMiniAppM1Params, CreateMiniAppM1WithSourceParams,
@@ -26,6 +27,7 @@ use crate::repository::miniapp_m1::{
     MiniAppM1SurfaceKvOperation, MiniAppM1SurfaceKvResult,
     OpenMiniAppM1SurfaceSessionParams, PublishMiniAppM1ReadyParams,
     RecordMiniAppM1ReadyReleaseParams, ResolveMiniAppM1SurfaceSessionParams,
+    RestartMiniAppM1DeleteParams, RestoreMiniAppM1Params,
     RollbackMiniAppM1PreviousParams, SetMiniAppM1AutoPublishParams,
     StartMiniAppM1BuildOperationParams, UpdateMiniAppM1ProjectSourceParams, conflict, query_error,
     normalize_incoming_artifact, serialize_product_operation_log_tail, validate_artifact,
@@ -33,12 +35,23 @@ use crate::repository::miniapp_m1::{
     validate_optional_digest,
     validate_product_artifact_contract, validate_product_operation_error_code,
     validate_project_source, validate_release,
-    validate_uuid, validate_visible_ascii_key,
+    TrashMiniAppM1Params, validate_uuid, validate_visible_ascii_key,
 };
 
 #[derive(Clone, Debug)]
 pub struct SqliteMiniAppM1Repository {
     pool: SqlitePool,
+}
+
+#[derive(Clone, Debug, sqlx::FromRow)]
+struct MiniAppDeletionIntentQueryRow {
+    #[sqlx(rename = "id")]
+    _id: i64,
+    miniapp_id: String,
+    owner_user_id: String,
+    operation_id: String,
+    started_at_ms: i64,
+    last_error_code: Option<String>,
 }
 
 impl SqliteMiniAppM1Repository {
@@ -242,6 +255,7 @@ async fn fetch_snapshot_in_tx(
     else {
         return Ok(None);
     };
+    validate_deletion_state_in_tx(tx, &product).await?;
     let project = sqlx::query_as::<_, MiniAppProjectRow>(
         "SELECT * FROM miniapp_projects
          WHERE owner_user_id = ? AND miniapp_id = ?",
@@ -420,6 +434,71 @@ async fn fetch_snapshot_in_tx(
     }))
 }
 
+async fn validate_deletion_state_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    product: &MiniAppProductRow,
+) -> Result<(), DbError> {
+    let intent = sqlx::query_as::<_, MiniAppDeletionIntentQueryRow>(
+        "SELECT * FROM miniapp_deletion_intents
+         WHERE owner_user_id = ? AND miniapp_id = ?",
+    )
+    .bind(&product.owner_user_id)
+    .bind(&product.miniapp_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    let Some(intent) = intent else {
+        if product.lifecycle == "deleting" {
+            return Err(DbError::Init(format!(
+                "MiniApp {} is deleting without an exact deletion intent",
+                product.miniapp_id
+            )));
+        }
+        return Ok(());
+    };
+    if product.lifecycle != "deleting"
+        || intent.miniapp_id != product.miniapp_id
+        || intent.owner_user_id != product.owner_user_id
+    {
+        return Err(DbError::Init(format!(
+            "MiniApp deletion intent exists outside the deleting lifecycle for {}",
+            product.miniapp_id
+        )));
+    }
+    validate_uuid(&intent.operation_id, "deletion.operation_id")?;
+    validate_uuid(&intent.miniapp_id, "deletion.miniapp_id")?;
+    validate_uuid(&intent.owner_user_id, "deletion.owner_user_id")?;
+    validate_product_operation_error_code(intent.last_error_code.as_deref())?;
+
+    let operation = sqlx::query_as::<_, ProductOperationRow>(
+        "SELECT * FROM product_operations
+         WHERE operation_id = ? AND owner_kind = 'miniapp' AND owner_id = ?",
+    )
+    .bind(&intent.operation_id)
+    .bind(&product.miniapp_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| {
+        DbError::Init(format!(
+            "MiniApp deletion intent references missing operation {}",
+            intent.operation_id
+        ))
+    })?;
+    if operation.owner_id != intent.miniapp_id
+        || operation.kind != "miniapp_permanent_delete"
+        || operation.started_at_ms != intent.started_at_ms
+        || operation.progress_percent.is_some()
+        || !matches!(operation.state.as_str(), "running" | "failed")
+        || operation.last_error_code != intent.last_error_code
+    {
+        return Err(DbError::Init(format!(
+            "MiniApp deletion intent and operation are not an exact pair for {}",
+            product.miniapp_id
+        )));
+    }
+    Ok(())
+}
+
 async fn lock_product(
     tx: &mut Transaction<'_, Sqlite>,
     owner_user_id: &str,
@@ -433,7 +512,23 @@ async fn lock_product(
     .bind(miniapp_id)
     .fetch_optional(&mut **tx)
     .await?
-    .ok_or_else(|| DbError::NotFound(format!("MiniApp {miniapp_id}")))
+        .ok_or_else(|| DbError::NotFound(format!("MiniApp {miniapp_id}")))
+}
+
+async fn fetch_owned_product_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    owner_user_id: &str,
+    miniapp_id: &str,
+) -> Result<Option<MiniAppProductRow>, DbError> {
+    sqlx::query_as::<_, MiniAppProductRow>(
+        "SELECT * FROM miniapp_products
+         WHERE owner_user_id = ? AND miniapp_id = ?",
+    )
+    .bind(owner_user_id)
+    .bind(miniapp_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(DbError::Query)
 }
 
 async fn lock_product_for_update(
@@ -779,6 +874,94 @@ async fn ensure_no_running_build(
     Ok(())
 }
 
+fn validate_lifecycle_identity(
+    owner_user_id: &str,
+    miniapp_id: &str,
+    expected_product_revision: i64,
+    expected_pointer_revision: i64,
+    updated_at: i64,
+) -> Result<(), DbError> {
+    validate_uuid(owner_user_id, "owner_user_id")?;
+    validate_uuid(miniapp_id, "miniapp_id")?;
+    if expected_product_revision < 1 || expected_pointer_revision < 1 || updated_at <= 0 {
+        return Err(conflict(
+            "MiniApp lifecycle CAS expectations are invalid",
+        ));
+    }
+    Ok(())
+}
+
+async fn ensure_no_running_miniapp_operation(
+    tx: &mut Transaction<'_, Sqlite>,
+    miniapp_id: &str,
+) -> Result<(), DbError> {
+    let running: Option<String> = sqlx::query_scalar(
+        "SELECT operation_id FROM product_operations
+         WHERE owner_kind = 'miniapp' AND owner_id = ? AND state = 'running'
+         ORDER BY started_at_ms ASC, operation_id ASC LIMIT 1",
+    )
+    .bind(miniapp_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if let Some(operation_id) = running {
+        return Err(conflict(format!(
+            "MiniApp lifecycle mutation is blocked by running operation {operation_id}"
+        )));
+    }
+    Ok(())
+}
+
+async fn fetch_deletion_intent_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    owner_user_id: &str,
+    miniapp_id: &str,
+    operation_id: &str,
+) -> Result<MiniAppDeletionIntentQueryRow, DbError> {
+    sqlx::query_as::<_, MiniAppDeletionIntentQueryRow>(
+        "SELECT * FROM miniapp_deletion_intents
+         WHERE owner_user_id = ? AND miniapp_id = ? AND operation_id = ?",
+    )
+    .bind(owner_user_id)
+    .bind(miniapp_id)
+    .bind(operation_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| DbError::NotFound(format!("MiniApp deletion intent {operation_id}")))
+}
+
+async fn fetch_miniapp_operation_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    miniapp_id: &str,
+    operation_id: &str,
+) -> Result<Option<ProductOperationRow>, DbError> {
+    sqlx::query_as::<_, ProductOperationRow>(
+        "SELECT * FROM product_operations
+         WHERE operation_id = ? AND owner_kind = 'miniapp' AND owner_id = ?",
+    )
+    .bind(operation_id)
+    .bind(miniapp_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(DbError::Query)
+}
+
+async fn revoke_catalog_publication(
+    tx: &mut Transaction<'_, Sqlite>,
+    owner_user_id: &str,
+    miniapp_id: &str,
+) -> Result<(), DbError> {
+    sqlx::query(
+        "DELETE FROM miniapp_catalog_publications
+         WHERE owner_user_id = ? AND miniapp_id = ?",
+    )
+    .bind(owner_user_id)
+    .bind(miniapp_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(query_error)?;
+    Ok(())
+}
+
 fn rewrite_release_record_artifact_id(
     value: &str,
     artifact_id: &str,
@@ -1108,6 +1291,9 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
         .bind(owner_user_id)
         .fetch_all(&mut *tx)
         .await?;
+        for product in &products {
+            validate_deletion_state_in_tx(&mut tx, product).await?;
+        }
         tx.commit().await?;
         Ok(MiniAppM1LibrarySnapshot { library, products })
     }
@@ -2410,6 +2596,597 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
             .ok_or_else(|| DbError::Init("MiniApp lifecycle commit lost Product".into()))?;
         tx.commit().await?;
         Ok(snapshot)
+    }
+
+    async fn trash_cas(
+        &self,
+        params: &TrashMiniAppM1Params,
+    ) -> Result<MiniAppM1Snapshot, DbError> {
+        validate_lifecycle_identity(
+            &params.owner_user_id,
+            &params.miniapp_id,
+            params.expected_product_revision,
+            params.expected_pointer_revision,
+            params.updated_at,
+        )?;
+        validate_optional_digest(
+            params.expected_active_release_digest.as_deref(),
+            "expected_active_release_digest",
+        )?;
+
+        let mut tx = self.pool.begin().await?;
+        let current =
+            lock_product_for_update(&mut tx, &params.owner_user_id, &params.miniapp_id).await?;
+        if current.product_revision != params.expected_product_revision
+            || current.pointer_revision != params.expected_pointer_revision
+            || current.active_release_digest.as_deref()
+                != params.expected_active_release_digest.as_deref()
+            || !matches!(current.lifecycle.as_str(), "enabled" | "disabled")
+        {
+            return Err(conflict("MiniApp Trash exact lifecycle CAS failed"));
+        }
+        validate_deletion_state_in_tx(&mut tx, &current).await?;
+        ensure_no_running_miniapp_operation(&mut tx, &params.miniapp_id).await?;
+        let changed = sqlx::query(
+            "UPDATE miniapp_products
+             SET product_revision = product_revision + 1,
+                 lifecycle = 'trashed', updated_at = ?
+             WHERE owner_user_id = ? AND miniapp_id = ?
+               AND product_revision = ? AND pointer_revision = ?
+               AND lifecycle = ? AND updated_at <= ?",
+        )
+        .bind(params.updated_at)
+        .bind(&params.owner_user_id)
+        .bind(&params.miniapp_id)
+        .bind(params.expected_product_revision)
+        .bind(params.expected_pointer_revision)
+        .bind(&current.lifecycle)
+        .bind(params.updated_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        if changed.rows_affected() != 1 {
+            return Err(conflict("MiniApp Trash product CAS failed"));
+        }
+        revoke_catalog_publication(&mut tx, &params.owner_user_id, &params.miniapp_id).await?;
+        revoke_surface_session(&mut tx, &params.owner_user_id, &params.miniapp_id).await?;
+        bump_library_revision(&mut tx, &params.owner_user_id, params.updated_at).await?;
+        let snapshot = fetch_snapshot_in_tx(
+            &mut tx,
+            &params.owner_user_id,
+            &params.miniapp_id,
+        )
+        .await?
+        .ok_or_else(|| DbError::Init("MiniApp Trash lost Product".into()))?;
+        tx.commit().await?;
+        Ok(snapshot)
+    }
+
+    async fn restore_cas(
+        &self,
+        params: &RestoreMiniAppM1Params,
+    ) -> Result<MiniAppM1Snapshot, DbError> {
+        validate_lifecycle_identity(
+            &params.owner_user_id,
+            &params.miniapp_id,
+            params.expected_product_revision,
+            params.expected_pointer_revision,
+            params.updated_at,
+        )?;
+        if params.expected_lifecycle != "trashed" {
+            return Err(conflict(
+                "MiniApp Restore expected_lifecycle must be trashed",
+            ));
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let current =
+            lock_product_for_update(&mut tx, &params.owner_user_id, &params.miniapp_id).await?;
+        if current.product_revision != params.expected_product_revision
+            || current.pointer_revision != params.expected_pointer_revision
+            || current.lifecycle != params.expected_lifecycle
+        {
+            return Err(conflict("MiniApp Restore exact lifecycle CAS failed"));
+        }
+        validate_deletion_state_in_tx(&mut tx, &current).await?;
+        ensure_no_running_miniapp_operation(&mut tx, &params.miniapp_id).await?;
+        let changed = sqlx::query(
+            "UPDATE miniapp_products
+             SET product_revision = product_revision + 1,
+                 lifecycle = 'disabled', updated_at = ?
+             WHERE owner_user_id = ? AND miniapp_id = ?
+               AND product_revision = ? AND pointer_revision = ?
+               AND lifecycle = 'trashed' AND updated_at <= ?",
+        )
+        .bind(params.updated_at)
+        .bind(&params.owner_user_id)
+        .bind(&params.miniapp_id)
+        .bind(params.expected_product_revision)
+        .bind(params.expected_pointer_revision)
+        .bind(params.updated_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        if changed.rows_affected() != 1 {
+            return Err(conflict("MiniApp Restore product CAS failed"));
+        }
+        revoke_catalog_publication(&mut tx, &params.owner_user_id, &params.miniapp_id).await?;
+        revoke_surface_session(&mut tx, &params.owner_user_id, &params.miniapp_id).await?;
+        bump_library_revision(&mut tx, &params.owner_user_id, params.updated_at).await?;
+        let snapshot = fetch_snapshot_in_tx(
+            &mut tx,
+            &params.owner_user_id,
+            &params.miniapp_id,
+        )
+        .await?
+        .ok_or_else(|| DbError::Init("MiniApp Restore lost Product".into()))?;
+        tx.commit().await?;
+        Ok(snapshot)
+    }
+
+    async fn begin_delete(
+        &self,
+        params: &BeginMiniAppM1DeleteParams,
+    ) -> Result<MiniAppM1Snapshot, DbError> {
+        validate_lifecycle_identity(
+            &params.owner_user_id,
+            &params.miniapp_id,
+            params.expected_product_revision,
+            params.expected_pointer_revision,
+            params.started_at_ms,
+        )?;
+        validate_uuid(&params.operation_id, "operation_id")?;
+        validate_optional_digest(
+            params.expected_active_release_digest.as_deref(),
+            "expected_active_release_digest",
+        )?;
+
+        let mut tx = self.pool.begin().await?;
+        let current =
+            lock_product_for_update(&mut tx, &params.owner_user_id, &params.miniapp_id).await?;
+        if current.product_revision != params.expected_product_revision
+            || current.pointer_revision != params.expected_pointer_revision
+            || current.active_release_digest.as_deref()
+                != params.expected_active_release_digest.as_deref()
+            || current.lifecycle != "trashed"
+            || params.started_at_ms < current.updated_at
+        {
+            return Err(conflict("MiniApp Delete begin exact lifecycle CAS failed"));
+        }
+        validate_deletion_state_in_tx(&mut tx, &current).await?;
+        ensure_no_running_miniapp_operation(&mut tx, &params.miniapp_id).await?;
+        let existing_intent: Option<MiniAppDeletionIntentQueryRow> =
+            sqlx::query_as(
+                "SELECT * FROM miniapp_deletion_intents
+                 WHERE owner_user_id = ? AND miniapp_id = ?",
+            )
+            .bind(&params.owner_user_id)
+            .bind(&params.miniapp_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        if existing_intent.is_some() {
+            return Err(conflict("MiniApp deletion intent already exists"));
+        }
+        sqlx::query(
+            "INSERT INTO product_operations (
+                operation_id, kind, owner_kind, owner_id, state,
+                progress_percent, bounded_log_tail_json, started_at_ms
+             ) VALUES (?, 'miniapp_permanent_delete', 'miniapp', ?, 'running',
+                       NULL, '[]', ?)",
+        )
+        .bind(&params.operation_id)
+        .bind(&params.miniapp_id)
+        .bind(params.started_at_ms)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        sqlx::query(
+            "INSERT INTO miniapp_deletion_intents (
+                miniapp_id, owner_user_id, operation_id, started_at_ms, last_error_code
+             ) VALUES (?, ?, ?, ?, NULL)",
+        )
+        .bind(&params.miniapp_id)
+        .bind(&params.owner_user_id)
+        .bind(&params.operation_id)
+        .bind(params.started_at_ms)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        let changed = sqlx::query(
+            "UPDATE miniapp_products
+             SET product_revision = product_revision + 1,
+                 lifecycle = 'deleting', updated_at = ?
+             WHERE owner_user_id = ? AND miniapp_id = ?
+               AND product_revision = ? AND pointer_revision = ?
+               AND lifecycle = 'trashed' AND updated_at <= ?",
+        )
+        .bind(params.started_at_ms)
+        .bind(&params.owner_user_id)
+        .bind(&params.miniapp_id)
+        .bind(params.expected_product_revision)
+        .bind(params.expected_pointer_revision)
+        .bind(params.started_at_ms)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        if changed.rows_affected() != 1 {
+            return Err(conflict("MiniApp Delete begin product CAS failed"));
+        }
+        revoke_catalog_publication(&mut tx, &params.owner_user_id, &params.miniapp_id).await?;
+        revoke_surface_session(&mut tx, &params.owner_user_id, &params.miniapp_id).await?;
+        bump_library_revision(&mut tx, &params.owner_user_id, params.started_at_ms).await?;
+        let snapshot = fetch_snapshot_in_tx(
+            &mut tx,
+            &params.owner_user_id,
+            &params.miniapp_id,
+        )
+        .await?
+        .ok_or_else(|| DbError::Init("MiniApp Delete begin lost Product".into()))?;
+        tx.commit().await?;
+        Ok(snapshot)
+    }
+
+    async fn fail_delete(
+        &self,
+        params: &FailMiniAppM1DeleteParams,
+    ) -> Result<MiniAppM1Snapshot, DbError> {
+        validate_uuid(&params.owner_user_id, "owner_user_id")?;
+        validate_uuid(&params.miniapp_id, "miniapp_id")?;
+        validate_uuid(&params.operation_id, "operation_id")?;
+        validate_product_operation_error_code(Some(&params.error_code))?;
+        if params.expected_operation_revision != 1 || params.updated_at <= 0 {
+            return Err(conflict("MiniApp Delete failure CAS expectations are invalid"));
+        }
+        let mut tx = self.pool.begin().await?;
+        let product =
+            lock_product_for_update(&mut tx, &params.owner_user_id, &params.miniapp_id).await?;
+        if product.lifecycle != "deleting" {
+            return Err(conflict("MiniApp Delete failure requires deleting lifecycle"));
+        }
+        let intent = fetch_deletion_intent_in_tx(
+            &mut tx,
+            &params.owner_user_id,
+            &params.miniapp_id,
+            &params.operation_id,
+        )
+        .await?;
+        let operation =
+            fetch_miniapp_operation_in_tx(&mut tx, &params.miniapp_id, &params.operation_id)
+                .await?
+                .ok_or_else(|| DbError::NotFound(format!("MiniApp operation {}", params.operation_id)))?;
+        if operation.state != "running"
+            || operation.kind != "miniapp_permanent_delete"
+            || operation.progress_percent.is_some()
+            || operation.started_at_ms != intent.started_at_ms
+            || operation.last_error_code.is_some()
+        {
+            return Err(conflict("MiniApp Delete failure operation CAS failed"));
+        }
+        if params.updated_at < operation.started_at_ms {
+            return Err(conflict("MiniApp Delete failure timestamp predates operation"));
+        }
+        let changed = sqlx::query(
+            "UPDATE product_operations
+             SET state = 'failed', last_error_code = ?, finished_at_ms = ?
+             WHERE operation_id = ? AND owner_kind = 'miniapp'
+               AND owner_id = ? AND state = 'running'
+               AND progress_percent IS NULL",
+        )
+        .bind(&params.error_code)
+        .bind(params.updated_at)
+        .bind(&params.operation_id)
+        .bind(&params.miniapp_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        if changed.rows_affected() != 1 {
+            return Err(conflict("MiniApp Delete failure operation update CAS failed"));
+        }
+        let changed = sqlx::query(
+            "UPDATE miniapp_deletion_intents
+             SET last_error_code = ?
+             WHERE owner_user_id = ? AND miniapp_id = ? AND operation_id = ?
+               AND last_error_code IS NULL",
+        )
+        .bind(&params.error_code)
+        .bind(&params.owner_user_id)
+        .bind(&params.miniapp_id)
+        .bind(&params.operation_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        if changed.rows_affected() != 1 {
+            return Err(conflict("MiniApp Delete failure intent update CAS failed"));
+        }
+        bump_library_revision(&mut tx, &params.owner_user_id, params.updated_at).await?;
+        let snapshot = fetch_snapshot_in_tx(
+            &mut tx,
+            &params.owner_user_id,
+            &params.miniapp_id,
+        )
+        .await?
+        .ok_or_else(|| DbError::Init("MiniApp Delete failure lost Product".into()))?;
+        tx.commit().await?;
+        Ok(snapshot)
+    }
+
+    async fn restart_delete(
+        &self,
+        params: &RestartMiniAppM1DeleteParams,
+    ) -> Result<MiniAppM1Snapshot, DbError> {
+        validate_uuid(&params.owner_user_id, "owner_user_id")?;
+        validate_uuid(&params.miniapp_id, "miniapp_id")?;
+        validate_uuid(
+            &params.expected_failed_operation_id,
+            "expected_failed_operation_id",
+        )?;
+        validate_uuid(&params.new_operation_id, "new_operation_id")?;
+        if params.started_at_ms <= 0
+            || params.expected_failed_operation_id == params.new_operation_id
+        {
+            return Err(conflict("MiniApp Delete restart identities are invalid"));
+        }
+        let mut tx = self.pool.begin().await?;
+        let product =
+            lock_product_for_update(&mut tx, &params.owner_user_id, &params.miniapp_id).await?;
+        if product.lifecycle != "deleting" || params.started_at_ms < product.updated_at {
+            return Err(conflict("MiniApp Delete restart lifecycle is invalid"));
+        }
+        let intent = fetch_deletion_intent_in_tx(
+            &mut tx,
+            &params.owner_user_id,
+            &params.miniapp_id,
+            &params.expected_failed_operation_id,
+        )
+        .await?;
+        let old = fetch_miniapp_operation_in_tx(
+            &mut tx,
+            &params.miniapp_id,
+            &params.expected_failed_operation_id,
+        )
+        .await?
+        .ok_or_else(|| {
+            DbError::NotFound(format!(
+                "MiniApp operation {}",
+                params.expected_failed_operation_id
+            ))
+        })?;
+        if old.state != "failed"
+            || old.kind != "miniapp_permanent_delete"
+            || old.progress_percent.is_some()
+            || old.started_at_ms != intent.started_at_ms
+            || old.last_error_code != intent.last_error_code
+            || old
+                .finished_at_ms
+                .is_none_or(|finished_at_ms| params.started_at_ms < finished_at_ms)
+        {
+            return Err(conflict("MiniApp Delete restart requires the exact failed operation"));
+        }
+        ensure_no_running_miniapp_operation(&mut tx, &params.miniapp_id).await?;
+        sqlx::query(
+            "INSERT INTO product_operations (
+                operation_id, kind, owner_kind, owner_id, state,
+                progress_percent, bounded_log_tail_json, started_at_ms
+             ) VALUES (?, 'miniapp_permanent_delete', 'miniapp', ?, 'running',
+                       NULL, '[]', ?)",
+        )
+        .bind(&params.new_operation_id)
+        .bind(&params.miniapp_id)
+        .bind(params.started_at_ms)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        let changed = sqlx::query(
+            "UPDATE miniapp_deletion_intents
+             SET operation_id = ?, started_at_ms = ?, last_error_code = NULL
+             WHERE owner_user_id = ? AND miniapp_id = ?
+               AND operation_id = ? AND last_error_code IS NOT NULL",
+        )
+        .bind(&params.new_operation_id)
+        .bind(params.started_at_ms)
+        .bind(&params.owner_user_id)
+        .bind(&params.miniapp_id)
+        .bind(&params.expected_failed_operation_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        if changed.rows_affected() != 1 {
+            return Err(conflict("MiniApp Delete restart intent CAS failed"));
+        }
+        bump_library_revision(&mut tx, &params.owner_user_id, params.started_at_ms).await?;
+        let snapshot = fetch_snapshot_in_tx(
+            &mut tx,
+            &params.owner_user_id,
+            &params.miniapp_id,
+        )
+        .await?
+        .ok_or_else(|| DbError::Init("MiniApp Delete restart lost Product".into()))?;
+        tx.commit().await?;
+        Ok(snapshot)
+    }
+
+    async fn finalize_delete(
+        &self,
+        params: &FinalizeMiniAppM1DeleteParams,
+    ) -> Result<i64, DbError> {
+        validate_uuid(&params.owner_user_id, "owner_user_id")?;
+        validate_uuid(&params.miniapp_id, "miniapp_id")?;
+        validate_uuid(&params.operation_id, "operation_id")?;
+        if params.expected_operation_revision != 1 || params.finished_at_ms <= 0 {
+            return Err(conflict("MiniApp Delete finalize CAS expectations are invalid"));
+        }
+        let mut tx = self.pool.begin().await?;
+        let product =
+            lock_product_for_update(&mut tx, &params.owner_user_id, &params.miniapp_id).await?;
+        if product.lifecycle != "deleting" {
+            return Err(conflict("MiniApp Delete finalize requires deleting lifecycle"));
+        }
+        let intent = fetch_deletion_intent_in_tx(
+            &mut tx,
+            &params.owner_user_id,
+            &params.miniapp_id,
+            &params.operation_id,
+        )
+        .await?;
+        let operation =
+            fetch_miniapp_operation_in_tx(&mut tx, &params.miniapp_id, &params.operation_id)
+                .await?
+                .ok_or_else(|| DbError::NotFound(format!("MiniApp operation {}", params.operation_id)))?;
+        if operation.state != "running"
+            || operation.kind != "miniapp_permanent_delete"
+            || operation.progress_percent.is_some()
+            || operation.started_at_ms != intent.started_at_ms
+        {
+            return Err(conflict("MiniApp Delete finalize operation CAS failed"));
+        }
+        if params.finished_at_ms < operation.started_at_ms {
+            return Err(conflict("MiniApp Delete finalize timestamp predates operation"));
+        }
+        let artifact_ids: Vec<String> = sqlx::query_scalar(
+            "SELECT artifact_id FROM miniapp_releases
+             WHERE owner_user_id = ? AND miniapp_id = ?",
+        )
+        .bind(&params.owner_user_id)
+        .bind(&params.miniapp_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let changed = sqlx::query(
+            "UPDATE product_operations
+             SET state = 'succeeded', last_error_code = NULL,
+                 finished_at_ms = ?
+             WHERE operation_id = ? AND owner_kind = 'miniapp'
+               AND owner_id = ? AND state = 'running'
+               AND progress_percent IS NULL",
+        )
+        .bind(params.finished_at_ms)
+        .bind(&params.operation_id)
+        .bind(&params.miniapp_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        if changed.rows_affected() != 1 {
+            return Err(conflict("MiniApp Delete finalize operation update CAS failed"));
+        }
+        revoke_catalog_publication(&mut tx, &params.owner_user_id, &params.miniapp_id).await?;
+        revoke_surface_session(&mut tx, &params.owner_user_id, &params.miniapp_id).await?;
+        for table in [
+            "miniapp_publish_authorizations",
+            "miniapp_credential_bindings",
+            "miniapp_kv",
+            "miniapp_build_operation_lineage",
+            "miniapp_releases",
+            "miniapp_projects",
+        ] {
+            let sql = format!(
+                "DELETE FROM {table} WHERE owner_user_id = ? AND miniapp_id = ?"
+            );
+            sqlx::query(&sql)
+                .bind(&params.owner_user_id)
+                .bind(&params.miniapp_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(query_error)?;
+        }
+        for artifact_id in artifact_ids {
+            sqlx::query(
+                "DELETE FROM miniapp_release_artifacts
+                 WHERE owner_user_id = ? AND artifact_id = ?
+                   AND NOT EXISTS (
+                       SELECT 1 FROM miniapp_releases release
+                       WHERE release.artifact_id = miniapp_release_artifacts.artifact_id
+                   )",
+            )
+            .bind(&params.owner_user_id)
+            .bind(artifact_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(query_error)?;
+        }
+        sqlx::query(
+            "DELETE FROM miniapp_deletion_intents
+             WHERE owner_user_id = ? AND miniapp_id = ?
+               AND operation_id = ?",
+        )
+        .bind(&params.owner_user_id)
+        .bind(&params.miniapp_id)
+        .bind(&params.operation_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        let deleted = sqlx::query(
+            "DELETE FROM miniapp_products
+             WHERE owner_user_id = ? AND miniapp_id = ? AND lifecycle = 'deleting'",
+        )
+        .bind(&params.owner_user_id)
+        .bind(&params.miniapp_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        if deleted.rows_affected() != 1 {
+            return Err(conflict("MiniApp Delete finalize Product cleanup failed"));
+        }
+        bump_library_revision(&mut tx, &params.owner_user_id, params.finished_at_ms).await?;
+        let revision: i64 = sqlx::query_scalar(
+            "SELECT revision FROM miniapp_library_state WHERE owner_user_id = ?",
+        )
+        .bind(&params.owner_user_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(revision)
+    }
+
+    async fn get_miniapp_operation(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &str,
+        operation_id: &str,
+    ) -> Result<Option<ProductOperationRow>, DbError> {
+        validate_uuid(owner_user_id, "owner_user_id")?;
+        validate_uuid(miniapp_id, "miniapp_id")?;
+        validate_uuid(operation_id, "operation_id")?;
+        ensure_owner(&self.pool, owner_user_id).await?;
+        let mut tx = self.pool.begin().await?;
+        let Some(product) =
+            fetch_owned_product_in_tx(&mut tx, owner_user_id, miniapp_id).await?
+        else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        validate_deletion_state_in_tx(&mut tx, &product).await?;
+        let operation =
+            fetch_miniapp_operation_in_tx(&mut tx, miniapp_id, operation_id).await?;
+        tx.commit().await?;
+        Ok(operation)
+    }
+
+    async fn list_miniapp_operations(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &str,
+    ) -> Result<Vec<ProductOperationRow>, DbError> {
+        validate_uuid(owner_user_id, "owner_user_id")?;
+        validate_uuid(miniapp_id, "miniapp_id")?;
+        ensure_owner(&self.pool, owner_user_id).await?;
+        let mut tx = self.pool.begin().await?;
+        let Some(product) =
+            fetch_owned_product_in_tx(&mut tx, owner_user_id, miniapp_id).await?
+        else {
+            tx.commit().await?;
+            return Ok(Vec::new());
+        };
+        validate_deletion_state_in_tx(&mut tx, &product).await?;
+        let operations = sqlx::query_as::<_, ProductOperationRow>(
+            "SELECT operation.* FROM product_operations operation
+             WHERE operation.owner_kind = 'miniapp'
+               AND operation.owner_id = ?
+             ORDER BY operation.started_at_ms ASC, operation.operation_id ASC",
+        )
+        .bind(miniapp_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(operations)
     }
 
     async fn set_auto_publish_cas(

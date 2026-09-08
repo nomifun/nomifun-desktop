@@ -382,6 +382,14 @@ pub struct DeleteMiniAppRequest {
     pub expected_active_release_digest: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetryMiniAppDeleteRequest {
+    pub miniapp_id: String,
+    pub failed_operation_id: String,
+    pub expected_operation_revision: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MiniAppShareContentDto {

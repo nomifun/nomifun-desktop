@@ -293,4 +293,58 @@ async fn production_storage_is_owner_scoped_and_persists_private_db() {
         )
         .await;
     assert!(rejected.is_err(), "unsafe type fragments must be rejected");
+
+    let files_path = root.path().join("files").join(&owner).join(&miniapp_id);
+    let database_path = root
+        .path()
+        .join("databases")
+        .join(&owner)
+        .join(format!("{miniapp_id}.sqlite"));
+    drop(resolved);
+    drop(resolved_after_migration);
+    drop(resolved_again);
+    drop(restarted);
+    drop(storage);
+
+    let recovered = SqliteMiniAppManagedStorage::new(
+        root.path().to_path_buf(),
+        _database.pool().clone(),
+    )
+    .unwrap();
+    recovered
+        .purge_service_storage(&owner, &miniapp)
+        .await
+        .unwrap();
+    recovered
+        .purge_service_storage(&owner, &miniapp)
+        .await
+        .unwrap();
+    assert!(!files_path.exists());
+    assert!(!database_path.exists());
+    assert!(!std::path::PathBuf::from(format!("{}-wal", database_path.display())).exists());
+    assert!(!std::path::PathBuf::from(format!("{}-shm", database_path.display())).exists());
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn production_storage_purge_rejects_junction_parent() {
+    let (database, owner, miniapp_id, storage, root) = service_fixture().await;
+    let miniapp = nomifun_agent_contracts::MiniAppId::from(miniapp_id.clone());
+    drop(storage);
+
+    let database_owner = root.path().join("databases").join(&owner);
+    let outside_owner = root.path().join("outside-database-owner");
+    std::fs::create_dir_all(&outside_owner).unwrap();
+    let marker = outside_owner.join(format!("{miniapp_id}.sqlite"));
+    std::fs::write(&marker, b"keep").unwrap();
+    junction::create(&outside_owner, &database_owner).unwrap();
+
+    let recovered =
+        SqliteMiniAppManagedStorage::new(root.path(), database.pool().clone()).unwrap();
+    assert!(recovered
+        .purge_service_storage(&owner, &miniapp)
+        .await
+        .is_err());
+    assert_eq!(std::fs::read(&marker).unwrap(), b"keep");
+    junction::delete(&database_owner).unwrap();
 }

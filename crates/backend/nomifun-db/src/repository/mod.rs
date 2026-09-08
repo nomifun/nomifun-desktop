@@ -116,7 +116,10 @@ pub use miniapp_m1::{
     MiniAppM1SurfaceKvResult,
     OpenMiniAppM1SurfaceSessionParams, PublishMiniAppM1ReadyParams,
     RecordMiniAppM1ReadyReleaseParams, ResolveMiniAppM1SurfaceSessionParams,
-    RollbackMiniAppM1PreviousParams, SetMiniAppM1AutoPublishParams,
+    BeginMiniAppM1DeleteParams, FailMiniAppM1DeleteParams,
+    FinalizeMiniAppM1DeleteParams, RestartMiniAppM1DeleteParams,
+    RestoreMiniAppM1Params, RollbackMiniAppM1PreviousParams,
+    SetMiniAppM1AutoPublishParams, TrashMiniAppM1Params,
     StartMiniAppM1BuildOperationParams, UpdateMiniAppM1ProjectSourceParams,
 };
 pub use knowledge::IKnowledgeRepository;

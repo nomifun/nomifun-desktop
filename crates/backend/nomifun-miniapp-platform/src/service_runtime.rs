@@ -128,6 +128,14 @@ pub trait MiniAppServiceRuntimeBinding: Send + Sync {
         ))
     }
 
+    async fn purge_storage(
+        &self,
+        _owner_user_id: &str,
+        _miniapp_id: &MiniAppId,
+    ) -> MiniAppPlatformResult<()> {
+        Ok(())
+    }
+
     async fn resolve_spec(
         &self,
         input: MiniAppServiceSpecInput,
@@ -407,6 +415,19 @@ impl MiniAppServiceRuntimeBinding for ProductionMiniAppServiceRuntimeBinding {
             })?
             .handle_service_request(miniapp_id, storage, request, cancellation)
             .await
+    }
+
+    async fn purge_storage(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &MiniAppId,
+    ) -> MiniAppPlatformResult<()> {
+        if let Some(storage) = &self.storage {
+            storage
+                .purge_service_storage(owner_user_id, miniapp_id)
+                .await?;
+        }
+        Ok(())
     }
 
     async fn resolve_spec(

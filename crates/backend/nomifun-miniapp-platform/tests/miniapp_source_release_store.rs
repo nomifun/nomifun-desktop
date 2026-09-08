@@ -644,6 +644,155 @@ fn service_release_publishes_and_loads_exact_main_module() {
     );
 }
 
+#[test]
+fn source_and_release_project_purge_are_owner_scoped_and_idempotent() {
+    let source_root = TestRoot::new("source-purge");
+    let source_store = MiniAppSourceStore::new(source_root.path()).unwrap();
+    let first = source_store
+        .create_project("owner-1", "miniapp-1", "project-1", "First")
+        .unwrap();
+    let second = source_store
+        .create_project("owner-2", "miniapp-2", "project-2", "Second")
+        .unwrap();
+
+    let first_snapshot = source_store
+        .read_snapshot(
+            "owner-1",
+            "miniapp-1",
+            "project-1",
+            &first.source_snapshot_digest,
+        )
+        .unwrap();
+    let artifact = MiniAppStaticBundleBuilder::new()
+        .build_ui_only(static_input(
+            first_snapshot
+                .files
+                .iter()
+                .map(|file| {
+                    (
+                        file.normalized_relative_path.clone(),
+                        file.bytes.clone(),
+                    )
+                })
+                .collect(),
+            first_snapshot.dependency_lock_digest.clone(),
+        ))
+        .unwrap();
+    let file_bytes = artifact
+        .files
+        .iter()
+        .map(|file| {
+            let source_bytes = first_snapshot
+                .file(&file.normalized_relative_path)
+                .unwrap();
+            MiniAppReleaseFileBytes::new(
+                file.normalized_relative_path.clone(),
+                if file.normalized_relative_path == "ui/index.html" {
+                    materialize_surface_entrypoint(source_bytes).unwrap()
+                } else {
+                    source_bytes.to_vec()
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let release_root = TestRoot::new("release-purge");
+    let release_store = MiniAppReleaseStore::new(release_root.path()).unwrap();
+    release_store
+        .publish(MiniAppReleasePublishRequest::ui_only(
+            scope(),
+            first.source_snapshot_digest.clone(),
+            first.dependency_lock_digest.clone(),
+            first.build_generation,
+            artifact,
+            file_bytes,
+        ))
+        .unwrap();
+
+    source_store
+        .purge_project("owner-1", "miniapp-1", "project-1")
+        .unwrap();
+    release_store
+        .purge_project("owner-1", "miniapp-1", "project-1")
+        .unwrap();
+    source_store
+        .purge_project("owner-1", "miniapp-1", "project-1")
+        .unwrap();
+    release_store
+        .purge_project("owner-1", "miniapp-1", "project-1")
+        .unwrap();
+
+    assert!(matches!(
+        source_store.read_snapshot(
+            "owner-1",
+            "miniapp-1",
+            "project-1",
+            &first.source_snapshot_digest
+        ),
+        Err(MiniAppSourceStoreError::ProjectNotFound)
+    ));
+    assert!(source_store
+        .read_snapshot(
+            "owner-2",
+            "miniapp-2",
+            "project-2",
+            &second.source_snapshot_digest,
+        )
+        .is_ok());
+    assert!(!release_root
+        .path()
+        .join("releases")
+        .join("owner-1")
+        .join("miniapps")
+        .join("miniapp-1")
+        .join("projects")
+        .join("project-1")
+        .exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn project_purge_rejects_junction_parent_without_touching_external_data() {
+    let source_root = TestRoot::new("source-purge-junction");
+    let source_store = MiniAppSourceStore::new(source_root.path()).unwrap();
+    let source_owner = source_root.path().join("sources").join("owner-1");
+    let outside_source_owner = source_root.path().join("outside-source-owner");
+    let outside_source_project = outside_source_owner
+        .join("miniapps")
+        .join("miniapp-1")
+        .join("projects")
+        .join("project-1");
+    fs::create_dir_all(&outside_source_project).unwrap();
+    let source_marker = outside_source_project.join("keep.txt");
+    fs::write(&source_marker, b"keep").unwrap();
+    junction::create(&outside_source_owner, &source_owner).unwrap();
+
+    assert!(source_store
+        .purge_project("owner-1", "miniapp-1", "project-1")
+        .is_err());
+    assert_eq!(fs::read(&source_marker).unwrap(), b"keep");
+    junction::delete(&source_owner).unwrap();
+
+    let release_root = TestRoot::new("release-purge-junction");
+    let release_store = MiniAppReleaseStore::new(release_root.path()).unwrap();
+    let release_owner = release_root.path().join("releases").join("owner-1");
+    let outside_release_owner = release_root.path().join("outside-release-owner");
+    let outside_release_project = outside_release_owner
+        .join("miniapps")
+        .join("miniapp-1")
+        .join("projects")
+        .join("project-1");
+    fs::create_dir_all(outside_release_project.join("artifacts")).unwrap();
+    let release_marker = outside_release_project.join("keep.txt");
+    fs::write(&release_marker, b"keep").unwrap();
+    junction::create(&outside_release_owner, &release_owner).unwrap();
+
+    assert!(release_store
+        .purge_project("owner-1", "miniapp-1", "project-1")
+        .is_err());
+    assert_eq!(fs::read(&release_marker).unwrap(), b"keep");
+    junction::delete(&release_owner).unwrap();
+}
+
 fn static_input(
     bytes: BTreeMap<String, Vec<u8>>,
     dependency_lock_digest: DigestHex,

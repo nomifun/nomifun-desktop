@@ -596,6 +596,16 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
         .await;
     if let Err(error) = services
         .miniapp_application
+        .reconcile_pending_deletions(services.authoritative_user_id.as_ref())
+        .await
+    {
+        tracing::warn!(
+            error = %error,
+            "MiniApp permanent-delete startup reconciliation left durable failures"
+        );
+    }
+    if let Err(error) = services
+        .miniapp_application
         .reconcile_all_service_runtime(services.authoritative_user_id.as_ref())
         .await
     {

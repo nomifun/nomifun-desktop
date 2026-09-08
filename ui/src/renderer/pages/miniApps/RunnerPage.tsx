@@ -23,6 +23,7 @@ import {
   CheckOne,
   CloseOne,
   Code,
+  Delete,
   Power,
   PreviewOpen,
   Refresh,
@@ -42,11 +43,15 @@ import {
   formatMiniAppTimestamp,
   miniAppBuildRequest,
   miniAppCanOpenSurface,
+  miniAppDeleteRequest,
   miniAppPublishRequest,
+  miniAppRestoreRequest,
+  miniAppRetryDeleteRequest,
   miniAppRetryServiceRequest,
   miniAppRollbackRequest,
   miniAppSetEnabledRequest,
   miniAppSetServiceRunningRequest,
+  miniAppTrashRequest,
   miniAppSetPublishModeRequest,
   miniAppSurfaceAssetPath,
   miniAppSurfaceMatchesWorkshop,
@@ -75,6 +80,10 @@ type MiniAppBusyAction =
   | 'service_start'
   | 'service_stop'
   | 'service_retry'
+  | 'trash'
+  | 'restore'
+  | 'delete'
+  | 'retry_delete'
   | 'open_surface'
   | 'reload_surface'
   | 'close_surface'
@@ -86,6 +95,16 @@ function formatError(error: unknown): string {
     return error.code ? `${error.code}: ${detail}` : detail;
   }
   return error instanceof Error ? error.message : String(error);
+}
+
+function isPermanentDeleteRunning(
+  workshop: MiniAppWorkshop | null | undefined
+): boolean {
+  return Boolean(
+    workshop?.miniapp.lifecycle === 'deleting' &&
+      workshop.active_operation?.kind === 'miniapp_permanent_delete' &&
+      workshop.active_operation.state === 'running'
+  );
 }
 
 const OperationBadge: React.FC<{ state: MiniAppOperationState }> = ({
@@ -187,6 +206,10 @@ const MiniAppWorkshopDetail: React.FC<{
   onSetServiceLifecycle: (lifecycle: MiniAppServiceLifecycle) => void;
   onSetServiceRunning: (running: boolean) => void;
   onRetryService: () => void;
+  onTrash: () => void;
+  onRestore: () => void;
+  onDelete: () => void;
+  onRetryDelete: () => void;
   onOpenSurface: () => void;
   onReloadSurface: () => void;
   onCloseSurface: () => void;
@@ -210,6 +233,10 @@ const MiniAppWorkshopDetail: React.FC<{
   onSetServiceLifecycle,
   onSetServiceRunning,
   onRetryService,
+  onTrash,
+  onRestore,
+  onDelete,
+  onRetryDelete,
   onOpenSurface,
   onReloadSurface,
   onCloseSurface,
@@ -226,12 +253,30 @@ const MiniAppWorkshopDetail: React.FC<{
   const workflow = miniAppWorkflowState(workshop);
   const buildRunning =
     operation?.kind === 'build' && operation.state === 'running';
-  const canBuild = miniAppBuildRequest(workshop, serviceLifecycle) !== null;
-  const canPublish = miniAppPublishRequest(workshop) !== null;
-  const canRollback = miniAppRollbackRequest(workshop) !== null;
-  const canEnable = miniAppSetEnabledRequest(workshop, true) !== null;
-  const canDisable = miniAppSetEnabledRequest(workshop, false) !== null;
-  const canOpenSurface = miniAppCanOpenSurface(workshop);
+  const lifecycleActive =
+    miniapp.lifecycle === 'enabled' || miniapp.lifecycle === 'disabled';
+  const permanentDeleteRunning = isPermanentDeleteRunning(workshop);
+  const permanentDeleteFailed =
+    miniapp.lifecycle === 'deleting' &&
+    operation?.kind === 'miniapp_permanent_delete' &&
+    operation.state === 'failed';
+  const canBuild =
+    lifecycleActive &&
+    miniAppBuildRequest(workshop, serviceLifecycle) !== null;
+  const canPublish =
+    lifecycleActive && miniAppPublishRequest(workshop) !== null;
+  const canRollback =
+    lifecycleActive && miniAppRollbackRequest(workshop) !== null;
+  const canEnable =
+    lifecycleActive && miniAppSetEnabledRequest(workshop, true) !== null;
+  const canDisable =
+    lifecycleActive && miniAppSetEnabledRequest(workshop, false) !== null;
+  const canOpenSurface =
+    lifecycleActive && miniAppCanOpenSurface(workshop);
+  const canTrash = miniAppTrashRequest(workshop) !== null;
+  const canRestore = miniAppRestoreRequest(workshop) !== null;
+  const canDelete = miniAppDeleteRequest(workshop) !== null;
+  const canRetryDelete = miniAppRetryDeleteRequest(workshop) !== null;
   const autoPublishAvailable = Boolean(
     miniapp.kind === 'ui_only' &&
       miniapp.releases.active &&
@@ -301,117 +346,163 @@ const MiniAppWorkshopDetail: React.FC<{
         >
           {t('miniApps.actions.backToLibrary')}
         </Button>
-        <Button
-          type={primaryAction === 'build' ? 'primary' : 'default'}
-          icon={<Code theme='outline' size='14' />}
-          loading={building}
-          disabled={!canBuild || controlsDisabled}
-          onClick={onBuild}
-        >
-          {t('miniApps.actions.build')}
-        </Button>
-        <Tooltip
-          content={
-            canPublish
-              ? ''
-              : ready
-                ? t('miniApps.errors.publishUnavailable')
-                : t('miniApps.workshop.ready.emptyBody')
-          }
-          disabled={canPublish}
-        >
-          <span>
+        {lifecycleActive && (
+          <>
             <Button
-              type={primaryAction === 'publish' ? 'primary' : 'default'}
-              icon={<Upload theme='outline' size='14' />}
-              loading={busyAction === 'publish'}
-              disabled={controlsDisabled || !canPublish}
-              onClick={onPublish}
+              type={primaryAction === 'build' ? 'primary' : 'default'}
+              icon={<Code theme='outline' size='14' />}
+              loading={building}
+              disabled={!canBuild || controlsDisabled}
+              onClick={onBuild}
             >
-              {t('miniApps.actions.publish')}
+              {t('miniApps.actions.build')}
             </Button>
-          </span>
-        </Tooltip>
-        <Tooltip
-          content={
-            canRollback
-              ? ''
-              : t('miniApps.workshop.releases.rollbackUnavailable')
-          }
-          disabled={canRollback}
-        >
-          <span>
-            <Button
-              icon={<Undo theme='outline' size='14' />}
-              loading={busyAction === 'rollback'}
-              disabled={controlsDisabled || !canRollback}
-              onClick={onRollback}
+            <Tooltip
+              content={
+                canPublish
+                  ? ''
+                  : ready
+                    ? t('miniApps.errors.publishUnavailable')
+                    : t('miniApps.workshop.ready.emptyBody')
+              }
+              disabled={canPublish}
             >
-              {t('miniApps.actions.rollback')}
-            </Button>
-          </span>
-        </Tooltip>
-        {miniapp.lifecycle === 'enabled' ? (
-          <Button
-            status='danger'
-            icon={<Power theme='outline' size='14' />}
-            loading={busyAction === 'disable'}
-            disabled={controlsDisabled || !canDisable}
-            onClick={() => onSetEnabled(false)}
-          >
-            {t('miniApps.actions.disable')}
-          </Button>
-        ) : miniapp.lifecycle === 'disabled' ? (
-          <Tooltip
-            content={
-              miniapp.releases.active
-                ? ''
-                : t('miniApps.errors.enableUnavailable')
-            }
-            disabled={Boolean(miniapp.releases.active)}
-          >
-            <span>
+              <span>
+                <Button
+                  type={primaryAction === 'publish' ? 'primary' : 'default'}
+                  icon={<Upload theme='outline' size='14' />}
+                  loading={busyAction === 'publish'}
+                  disabled={controlsDisabled || !canPublish}
+                  onClick={onPublish}
+                >
+                  {t('miniApps.actions.publish')}
+                </Button>
+              </span>
+            </Tooltip>
+            <Tooltip
+              content={
+                canRollback
+                  ? ''
+                  : t('miniApps.workshop.releases.rollbackUnavailable')
+              }
+              disabled={canRollback}
+            >
+              <span>
+                <Button
+                  icon={<Undo theme='outline' size='14' />}
+                  loading={busyAction === 'rollback'}
+                  disabled={controlsDisabled || !canRollback}
+                  onClick={onRollback}
+                >
+                  {t('miniApps.actions.rollback')}
+                </Button>
+              </span>
+            </Tooltip>
+            {miniapp.lifecycle === 'enabled' ? (
               <Button
-                type={primaryAction === 'enable' ? 'primary' : 'default'}
+                status='danger'
                 icon={<Power theme='outline' size='14' />}
-                loading={busyAction === 'enable'}
-                disabled={controlsDisabled || !canEnable}
-                onClick={() => onSetEnabled(true)}
+                loading={busyAction === 'disable'}
+                disabled={controlsDisabled || !canDisable}
+                onClick={() => onSetEnabled(false)}
               >
-                {t('miniApps.actions.enable')}
+                {t('miniApps.actions.disable')}
               </Button>
-            </span>
-          </Tooltip>
-        ) : null}
-        <Tooltip
-          content={
-            canOpenSurface
-              ? ''
-              : t('miniApps.errors.surfaceUnavailable')
-          }
-          disabled={canOpenSurface}
-        >
-          <span>
-            <Button
-              type={primaryAction === 'surface' ? 'primary' : 'default'}
-              icon={<PreviewOpen theme='outline' size='14' />}
-              loading={busyAction === 'open_surface'}
-              disabled={controlsDisabled || !canOpenSurface}
-              onClick={onOpenSurface}
+            ) : (
+              <Tooltip
+                content={
+                  miniapp.releases.active
+                    ? ''
+                    : t('miniApps.errors.enableUnavailable')
+                }
+                disabled={Boolean(miniapp.releases.active)}
+              >
+                <span>
+                  <Button
+                    type={primaryAction === 'enable' ? 'primary' : 'default'}
+                    icon={<Power theme='outline' size='14' />}
+                    loading={busyAction === 'enable'}
+                    disabled={controlsDisabled || !canEnable}
+                    onClick={() => onSetEnabled(true)}
+                  >
+                    {t('miniApps.actions.enable')}
+                  </Button>
+                </span>
+              </Tooltip>
+            )}
+            {canTrash && (
+              <Button
+                icon={<Delete theme='outline' size='14' />}
+                loading={busyAction === 'trash'}
+                disabled={controlsDisabled}
+                onClick={onTrash}
+              >
+                {t('miniApps.actions.trash')}
+              </Button>
+            )}
+            <Tooltip
+              content={
+                canOpenSurface
+                  ? ''
+                  : t('miniApps.errors.surfaceUnavailable')
+              }
+              disabled={canOpenSurface}
             >
-              {t('miniApps.actions.openSurface')}
-            </Button>
-          </span>
-        </Tooltip>
-        {buildRunning && operation.cancelable && (
+              <span>
+                <Button
+                  type={primaryAction === 'surface' ? 'primary' : 'default'}
+                  icon={<PreviewOpen theme='outline' size='14' />}
+                  loading={busyAction === 'open_surface'}
+                  disabled={controlsDisabled || !canOpenSurface}
+                  onClick={onOpenSurface}
+                >
+                  {t('miniApps.actions.openSurface')}
+                </Button>
+              </span>
+            </Tooltip>
+            {buildRunning && operation.cancelable && (
+              <Button
+                status='danger'
+                icon={<CloseOne theme='outline' size='14' />}
+                loading={canceling}
+                disabled={canceling || busyAction !== null}
+                onClick={onCancelBuild}
+              >
+                {t('miniApps.actions.cancelBuild')}
+              </Button>
+            )}
+          </>
+        )}
+        {canRestore && (
+          <Button
+            icon={<Undo theme='outline' size='14' />}
+            loading={busyAction === 'restore'}
+            disabled={controlsDisabled}
+            onClick={onRestore}
+          >
+            {t('miniApps.actions.restore')}
+          </Button>
+        )}
+        {canDelete && (
           <Button
             status='danger'
-            icon={<CloseOne theme='outline' size='14' />}
-            loading={canceling}
-            disabled={canceling || busyAction !== null}
-            onClick={onCancelBuild}
+            icon={<Delete theme='outline' size='14' />}
+            loading={busyAction === 'delete'}
+            disabled={controlsDisabled}
+            onClick={onDelete}
           >
-            {t('miniApps.actions.cancelBuild')}
+            {t('miniApps.actions.deletePermanently')}
+          </Button>
+        )}
+        {canRetryDelete && (
+          <Button
+            status='danger'
+            icon={<Refresh theme='outline' size='14' />}
+            loading={busyAction === 'retry_delete'}
+            disabled={controlsDisabled}
+            onClick={onRetryDelete}
+          >
+            {t('miniApps.actions.retryDelete')}
           </Button>
         )}
         <Button
@@ -423,6 +514,21 @@ const MiniAppWorkshopDetail: React.FC<{
           {t('miniApps.actions.refresh')}
         </Button>
       </div>
+      {miniapp.lifecycle === 'trashed' && (
+        <div className={`${styles.notice} ${styles.noticeWarning}`}>
+          {t('miniApps.workshop.deletion.trashedNotice')}
+        </div>
+      )}
+      {permanentDeleteRunning && (
+        <div className={`${styles.notice} ${styles.noticeInfo}`}>
+          {t('miniApps.workshop.deletion.runningNotice')}
+        </div>
+      )}
+      {permanentDeleteFailed && (
+        <div className={`${styles.notice} ${styles.noticeError}`}>
+          {t('miniApps.workshop.deletion.failedNotice')}
+        </div>
+      )}
 
       <ol
         className={styles.workflow}
@@ -620,7 +726,7 @@ const MiniAppWorkshopDetail: React.FC<{
               type='button'
               size='small'
               value={serviceLifecycle}
-              disabled={controlsDisabled || buildRunning}
+              disabled={controlsDisabled || buildRunning || !lifecycleActive}
               onChange={(value: unknown) => {
                 if (value === 'on_demand' || value === 'continuous') {
                   onSetServiceLifecycle(value);
@@ -832,6 +938,21 @@ const MiniAppWorkshopDetail: React.FC<{
           <div className={styles.operationGrid}>
             <div className={styles.operationItem}>
               <div className={styles.releaseName}>
+                {t('miniApps.workshop.operation.kind')}
+              </div>
+              <div className={styles.releaseValue}>
+                {operation.kind === 'miniapp_permanent_delete'
+                  ? t(
+                      'miniApps.workshop.operation.kindValue.permanentDelete'
+                    )
+                  : t(
+                      `miniApps.workshop.operation.kindValue.${operation.kind}`
+                    )
+                }
+              </div>
+            </div>
+            <div className={styles.operationItem}>
+              <div className={styles.releaseName}>
                 {t('miniApps.workshop.operation.status')}
               </div>
               <div className={styles.releaseValue}>
@@ -892,8 +1013,26 @@ const MiniAppRunnerPage: React.FC = () => {
   const [surfaceDescriptor, setSurfaceDescriptor] =
     useState<MiniAppSurfaceLaunchDescriptor | null>(null);
   const canceledBuildRef = useRef<string | null>(null);
+  const deletionInProgressRef = useRef(false);
   const [notFound, setNotFound] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
+
+  const finishDeletion = useCallback(
+    (successMessage: string) => {
+      deletionInProgressRef.current = false;
+      setWorkshop(null);
+      setSurfaceDescriptor(null);
+      setFailure(null);
+      message.success(successMessage);
+      navigate('/mini-apps', { replace: true });
+    },
+    [message, navigate]
+  );
+
+  useEffect(() => {
+    deletionInProgressRef.current =
+      workshop?.miniapp.lifecycle === 'deleting';
+  }, [workshop?.miniapp.lifecycle]);
 
   useEffect(() => {
     if (workshop?.miniapp.kind !== 'service') {
@@ -934,6 +1073,10 @@ const MiniAppRunnerPage: React.FC = () => {
         return next;
       } catch (error) {
         if (isBackendHttpError(error) && error.status === 404) {
+          if (deletionInProgressRef.current) {
+            finishDeletion(t('miniApps.messages.deletedPermanently'));
+            return null;
+          }
           setWorkshop(null);
           setSurfaceDescriptor(null);
           setNotFound(true);
@@ -948,7 +1091,7 @@ const MiniAppRunnerPage: React.FC = () => {
         if (mode === 'refresh') setRefreshing(false);
       }
     },
-    [miniappId]
+    [finishDeletion, miniappId, t]
   );
 
   const requestSurfaceDescriptor = useCallback(
@@ -1002,6 +1145,7 @@ const MiniAppRunnerPage: React.FC = () => {
   );
 
   useEffect(() => {
+    deletionInProgressRef.current = false;
     setSurfaceDescriptor(null);
   }, [miniappId]);
 
@@ -1027,6 +1171,49 @@ const MiniAppRunnerPage: React.FC = () => {
     workshop?.active_operation?.operation_id,
     workshop?.active_operation?.state,
   ]);
+
+  const permanentDeleteRunning = isPermanentDeleteRunning(workshop);
+
+  useEffect(() => {
+    if (!miniappId || !permanentDeleteRunning) return;
+    let canceled = false;
+    let timer: number | null = null;
+
+    const poll = async () => {
+      try {
+        const next = await ipcBridge.miniapps.getWorkshop.invoke({
+          miniapp_id: miniappId,
+        });
+        if (canceled) return;
+        deletionInProgressRef.current =
+          next.miniapp.lifecycle === 'deleting';
+        setWorkshop(next);
+        setNotFound(false);
+        setFailure(null);
+        if (isPermanentDeleteRunning(next)) {
+          timer = window.setTimeout(poll, 750);
+        }
+      } catch (error) {
+        if (canceled) return;
+        if (isBackendHttpError(error) && error.status === 404) {
+          finishDeletion(t('miniApps.messages.deletedPermanently'));
+          return;
+        }
+        console.error(
+          '[miniapps] failed to poll permanent deletion',
+          error
+        );
+        setFailure(formatError(error));
+        timer = window.setTimeout(poll, 1500);
+      }
+    };
+
+    timer = window.setTimeout(poll, 750);
+    return () => {
+      canceled = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [finishDeletion, miniappId, permanentDeleteRunning, t]);
 
   useEffect(() => {
     if (
@@ -1079,6 +1266,58 @@ const MiniAppRunnerPage: React.FC = () => {
       message,
       surfaceDescriptor,
       syncSurface,
+    ]
+  );
+
+  const runPermanentDelete = useCallback(
+    async (
+      action: 'delete' | 'retry_delete',
+      invoke: () => Promise<unknown>,
+      successMessage: string
+    ) => {
+      if (!miniappId || busyAction || building || canceling) return;
+      deletionInProgressRef.current = true;
+      setBusyAction(action);
+      setFailure(null);
+      setSurfaceDescriptor(null);
+      try {
+        await invoke();
+        finishDeletion(successMessage);
+      } catch (error) {
+        console.error(`[miniapps] ${action} failed`, error);
+        const detail = formatError(error);
+        try {
+          const latest = await ipcBridge.miniapps.getWorkshop.invoke({
+            miniapp_id: miniappId,
+          });
+          deletionInProgressRef.current =
+            latest.miniapp.lifecycle === 'deleting';
+          setWorkshop(latest);
+          setNotFound(false);
+        } catch (refreshError) {
+          if (
+            isBackendHttpError(refreshError) &&
+            refreshError.status === 404
+          ) {
+            finishDeletion(successMessage);
+            return;
+          }
+          console.error(
+            '[miniapps] failed to reload Workshop after delete failure',
+            refreshError
+          );
+        }
+        setFailure(detail);
+      } finally {
+        setBusyAction(null);
+      }
+    },
+    [
+      building,
+      busyAction,
+      canceling,
+      finishDeletion,
+      miniappId,
     ]
   );
 
@@ -1291,6 +1530,101 @@ const MiniAppRunnerPage: React.FC = () => {
     [building, busyAction, canceling, runWorkshopMutation, t, workshop]
   );
 
+  const handleTrash = useCallback(() => {
+    if (!workshop || busyAction || building || canceling) return;
+    const request = miniAppTrashRequest(workshop);
+    if (!request) {
+      setFailure(t('miniApps.errors.trashUnavailable'));
+      return;
+    }
+    Modal.confirm({
+      title: t('miniApps.confirm.trashTitle', {
+        name: workshop.miniapp.display_name,
+      }),
+      content: t('miniApps.confirm.trashBody'),
+      okText: t('miniApps.actions.trash'),
+      cancelText: t('miniApps.actions.cancel'),
+      okButtonProps: { status: 'warning' },
+      onOk: () =>
+        runWorkshopMutation(
+          'trash',
+          () => ipcBridge.miniapps.trash.invoke(request),
+          t('miniApps.messages.trashed')
+        ),
+    });
+  }, [building, busyAction, canceling, runWorkshopMutation, t, workshop]);
+
+  const handleRestore = useCallback(() => {
+    if (!workshop || busyAction || building || canceling) return;
+    const request = miniAppRestoreRequest(workshop);
+    if (!request) {
+      setFailure(t('miniApps.errors.restoreUnavailable'));
+      return;
+    }
+    Modal.confirm({
+      title: t('miniApps.confirm.restoreTitle', {
+        name: workshop.miniapp.display_name,
+      }),
+      content: t('miniApps.confirm.restoreBody'),
+      okText: t('miniApps.actions.restore'),
+      cancelText: t('miniApps.actions.cancel'),
+      onOk: () =>
+        runWorkshopMutation(
+          'restore',
+          () => ipcBridge.miniapps.restore.invoke(request),
+          t('miniApps.messages.restored')
+        ),
+    });
+  }, [building, busyAction, canceling, runWorkshopMutation, t, workshop]);
+
+  const handleDelete = useCallback(() => {
+    if (!workshop || busyAction || building || canceling) return;
+    const request = miniAppDeleteRequest(workshop);
+    if (!request) {
+      setFailure(t('miniApps.errors.deleteUnavailable'));
+      return;
+    }
+    Modal.confirm({
+      title: t('miniApps.confirm.deleteTitle', {
+        name: workshop.miniapp.display_name,
+      }),
+      content: t('miniApps.confirm.deleteBody'),
+      okText: t('miniApps.actions.deletePermanently'),
+      cancelText: t('miniApps.actions.cancel'),
+      okButtonProps: { status: 'danger' },
+      onOk: () =>
+        runPermanentDelete(
+          'delete',
+          () => ipcBridge.miniapps.delete.invoke(request),
+          t('miniApps.messages.deletedPermanently')
+        ),
+    });
+  }, [building, busyAction, canceling, runPermanentDelete, t, workshop]);
+
+  const handleRetryDelete = useCallback(() => {
+    if (!workshop || busyAction || building || canceling) return;
+    const request = miniAppRetryDeleteRequest(workshop);
+    if (!request) {
+      setFailure(t('miniApps.errors.retryDeleteUnavailable'));
+      return;
+    }
+    Modal.confirm({
+      title: t('miniApps.confirm.retryDeleteTitle', {
+        name: workshop.miniapp.display_name,
+      }),
+      content: t('miniApps.confirm.retryDeleteBody'),
+      okText: t('miniApps.actions.retryDelete'),
+      cancelText: t('miniApps.actions.cancel'),
+      okButtonProps: { status: 'danger' },
+      onOk: () =>
+        runPermanentDelete(
+          'retry_delete',
+          () => ipcBridge.miniapps.retryDelete.invoke(request),
+          t('miniApps.messages.deleteRetryCompleted')
+        ),
+    });
+  }, [building, busyAction, canceling, runPermanentDelete, t, workshop]);
+
   const handleSetPublishMode = useCallback(
     (mode: MiniAppPublishMode) => {
       if (
@@ -1472,6 +1806,10 @@ const MiniAppRunnerPage: React.FC = () => {
               onSetServiceLifecycle={setServiceLifecycle}
               onSetServiceRunning={handleSetServiceRunning}
               onRetryService={handleRetryService}
+              onTrash={handleTrash}
+              onRestore={handleRestore}
+              onDelete={handleDelete}
+              onRetryDelete={handleRetryDelete}
               onOpenSurface={() => void handleOpenSurface()}
               onReloadSurface={() => void handleReloadSurface()}
               onCloseSurface={() => void handleCloseSurface()}

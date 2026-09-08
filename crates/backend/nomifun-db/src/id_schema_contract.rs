@@ -98,6 +98,7 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "miniapp_build_operation_lineage",
     "miniapp_catalog_publications",
     "miniapp_credential_bindings",
+    "miniapp_deletion_intents",
     "miniapp_kv",
     "miniapp_library_state",
     "miniapp_products",
@@ -703,6 +704,11 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     text_ref!("miniapp_credential_bindings", "owner_user_id" => "users", "user_id", false, "idx_miniapp_credential_bindings_owner_user_id", Cascade),
     text_ref!("miniapp_credential_bindings", "miniapp_id" => "miniapp_products", "miniapp_id", false, "idx_miniapp_credential_bindings_miniapp_id", Cascade),
     external_ref!("miniapp_credential_bindings", "credential_id", Text, false, Opaque, "idx_miniapp_credential_bindings_credential_id", KeepHistory),
+    text_ref!("miniapp_deletion_intents", "owner_user_id" => "users", "user_id", false, "idx_miniapp_deletion_intents_owner_user_id", Cascade),
+    text_ref!("miniapp_deletion_intents", "miniapp_id" => "miniapp_products", "miniapp_id", false, "idx_miniapp_deletion_intents_miniapp_id", Cascade)
+        .with_aggregate_scope("parent.owner_user_id = child.owner_user_id AND parent.lifecycle = 'deleting'"),
+    text_ref!("miniapp_deletion_intents", "operation_id" => "product_operations", "operation_id", false, "idx_miniapp_deletion_intents_operation_id", Restrict)
+        .with_aggregate_scope("parent.owner_kind = 'miniapp' AND parent.owner_id = child.miniapp_id AND parent.kind = 'miniapp_permanent_delete'"),
     text_ref!("miniapp_kv", "owner_user_id" => "users", "user_id", false, "idx_miniapp_kv_owner_user_id", Cascade),
     text_ref!("miniapp_kv", "miniapp_id" => "miniapp_products", "miniapp_id", false, "idx_miniapp_kv_miniapp_id", Cascade)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),

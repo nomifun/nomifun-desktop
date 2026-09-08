@@ -10,6 +10,10 @@ import {
   miniAppBuildRequest,
   miniAppCanOpenSurface,
   miniAppPublishRequest,
+  miniAppDeleteRequest,
+  miniAppRestoreRequest,
+  miniAppRetryDeleteRequest,
+  miniAppTrashRequest,
   miniAppRetryServiceRequest,
   miniAppReleaseStage,
   miniAppRollbackRequest,
@@ -283,6 +287,63 @@ describe('MiniApp M1 view model', () => {
     value.miniapp.lifecycle = 'enabled';
     value.miniapp.surface_available = true;
     expect(miniAppCanOpenSurface(value)).toBe(true);
+  });
+
+  test('constructs exact Trash, Restore, Delete, and failed Delete Retry requests', () => {
+    const value = workshop({
+      miniapp: {
+        ...workshop().miniapp,
+        lifecycle: 'disabled',
+        releases: {
+          pointer_revision: 4,
+          active_release_epoch: 2,
+          active: {
+            release_id: 'active',
+            artifact_id: 'artifact',
+            release_digest: 'a'.repeat(64),
+            manifest_digest: 'b'.repeat(64),
+          },
+        },
+      },
+    });
+    expect(miniAppTrashRequest(value)).toEqual({
+      miniapp_id: value.miniapp.miniapp_id,
+      expected_product_revision: 1,
+      expected_pointer_revision: 4,
+      expected_active_release_digest: 'a'.repeat(64),
+    });
+
+    value.miniapp.lifecycle = 'trashed';
+    expect(miniAppRestoreRequest(value)).toEqual({
+      miniapp_id: value.miniapp.miniapp_id,
+      expected_product_revision: 1,
+      expected_lifecycle: 'trashed',
+      expected_pointer_revision: 4,
+    });
+    expect(miniAppDeleteRequest(value)).toEqual({
+      miniapp_id: value.miniapp.miniapp_id,
+      expected_product_revision: 1,
+      expected_lifecycle: 'trashed',
+      expected_pointer_revision: 4,
+      expected_active_release_digest: 'a'.repeat(64),
+    });
+
+    value.miniapp.lifecycle = 'deleting';
+    value.active_operation = {
+      operation_id: 'delete-operation',
+      operation_revision: 2,
+      kind: 'miniapp_permanent_delete',
+      owner: { owner: 'miniapp', miniapp_id: value.miniapp.miniapp_id },
+      state: 'failed',
+      cancelable: false,
+      started_at_ms: 5,
+      completed_at_ms: 6,
+    };
+    expect(miniAppRetryDeleteRequest(value)).toEqual({
+      miniapp_id: value.miniapp.miniapp_id,
+      failed_operation_id: 'delete-operation',
+      expected_operation_revision: 2,
+    });
   });
 
   test('constructs the versioned Surface asset path and rejects unsafe entrypoints', () => {

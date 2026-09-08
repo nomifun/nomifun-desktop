@@ -288,6 +288,34 @@ export interface SetMiniAppServiceRunningRequest {
   running: boolean;
 }
 
+export interface RetryMiniAppDeleteRequest {
+  miniapp_id: MiniAppId;
+  failed_operation_id: string;
+  expected_operation_revision: number;
+}
+
+export interface TrashMiniAppRequest {
+  miniapp_id: MiniAppId;
+  expected_product_revision: number;
+  expected_pointer_revision: number;
+  expected_active_release_digest?: string;
+}
+
+export interface RestoreMiniAppRequest {
+  miniapp_id: MiniAppId;
+  expected_product_revision: number;
+  expected_lifecycle: 'trashed';
+  expected_pointer_revision: number;
+}
+
+export interface DeleteMiniAppRequest {
+  miniapp_id: MiniAppId;
+  expected_product_revision: number;
+  expected_lifecycle: 'trashed';
+  expected_pointer_revision: number;
+  expected_active_release_digest?: string;
+}
+
 export interface RetryMiniAppServiceRequest {
   miniapp_id: MiniAppId;
   expected_product_revision: number;

@@ -29,11 +29,12 @@ use nomifun_api_types::{
     MiniAppReleaseRefDto, MiniAppReleaseTestDto, MiniAppServiceDescriptorDto,
     MiniAppServiceHealthDto, MiniAppServiceLifecycleDto, MiniAppSummaryDto,
     MiniAppSurfaceLaunchDescriptorDto, MiniAppTestStatusDto,
-    MiniAppWorkshopDto, PluginConfigSchemaDto, PluginConfigStateDto,
+    DeleteMiniAppRequest, MiniAppWorkshopDto, PluginConfigSchemaDto, PluginConfigStateDto,
     PublishMiniAppRequest as PublishMiniAppRequestDto,
-    RetryMiniAppServiceRequest, RollbackMiniAppRequest as RollbackMiniAppRequestDto,
+    RestoreMiniAppRequest, RetryMiniAppDeleteRequest, RetryMiniAppServiceRequest,
+    RollbackMiniAppRequest as RollbackMiniAppRequestDto,
     SetMiniAppEnabledRequest, SetMiniAppPublishModeRequest,
-    SetMiniAppServiceRunningRequest,
+    SetMiniAppServiceRunningRequest, TrashMiniAppRequest,
 };
 use nomifun_db::{
     CancelMiniAppM1BuildOperationParams, CloseMiniAppM1SurfaceSessionParams,
@@ -48,7 +49,10 @@ use nomifun_db::{
     ProductOperationRow, ProductOperationState, PublishMiniAppM1ReadyParams,
     ResolveMiniAppM1SurfaceSessionParams, RollbackMiniAppM1PreviousParams,
     SetMiniAppM1AutoPublishParams,
-    CommitMiniAppM1LifecycleParams, StartMiniAppM1BuildOperationParams,
+    BeginMiniAppM1DeleteParams, CommitMiniAppM1LifecycleParams,
+    FailMiniAppM1DeleteParams, FinalizeMiniAppM1DeleteParams,
+    RestartMiniAppM1DeleteParams, RestoreMiniAppM1Params,
+    StartMiniAppM1BuildOperationParams, TrashMiniAppM1Params,
 };
 use nomifun_js_runtime::ResolvedNodeRuntime;
 use serde::Serialize;
@@ -73,6 +77,8 @@ use crate::{
 pub enum MiniAppM1ApplicationError {
     #[error("MiniApp input is invalid: {0}")]
     Invalid(String),
+    #[error("MiniApp runtime failed: {0}")]
+    Runtime(String),
     #[error("MiniApp was not found")]
     NotFound,
     #[error("MiniApp database failed: {0}")]
@@ -639,6 +645,16 @@ impl MiniAppM1ApplicationService {
         snapshot: &MiniAppM1Snapshot,
         active_operation: Option<DurableOperationSummaryDto>,
     ) -> Result<MiniAppWorkshopDto, MiniAppM1ApplicationError> {
+        let active_operation = match active_operation {
+            Some(operation) => Some(operation),
+            None => {
+                self.latest_miniapp_operation(
+                    owner_user_id,
+                    &snapshot.product.miniapp_id,
+                )
+                .await?
+            }
+        };
         let observation = self.service_observation(snapshot).await?;
         let mut workshop =
             workshop_from_snapshot_with_observation(snapshot, active_operation, observation.as_ref())?;
@@ -1284,6 +1300,281 @@ impl MiniAppM1ApplicationService {
             .await
     }
 
+    pub async fn trash(
+        &self,
+        owner_user_id: &str,
+        request: TrashMiniAppRequest,
+    ) -> Result<MiniAppWorkshopDto, MiniAppM1ApplicationError> {
+        validate_request_identity(&request.miniapp_id, "miniapp_id")?;
+        let snapshot = self
+            .repository
+            .get(owner_user_id, &request.miniapp_id)
+            .await?
+            .ok_or(MiniAppM1ApplicationError::NotFound)?;
+        if snapshot.product.product_revision
+            != to_i64(request.expected_product_revision, "product revision")?
+            || snapshot.product.pointer_revision
+                != to_i64(request.expected_pointer_revision, "pointer revision")?
+            || snapshot.product.active_release_digest.as_deref()
+                != request.expected_active_release_digest.as_deref()
+        {
+            return Err(MiniAppM1ApplicationError::Database(
+                nomifun_db::DbError::Conflict(
+                    "MiniApp Trash request is stale against the exact Product pointers"
+                        .to_owned(),
+                ),
+            ));
+        }
+        if !matches!(snapshot.product.lifecycle.as_str(), "enabled" | "disabled") {
+            return Err(MiniAppM1ApplicationError::Invalid(format!(
+                "MiniApp cannot be trashed while lifecycle is {}",
+                snapshot.product.lifecycle
+            )));
+        }
+        let updated_at = positive_now_ms().max(snapshot.product.updated_at);
+        let committed = self
+            .repository
+            .trash_cas(&TrashMiniAppM1Params {
+                owner_user_id: owner_user_id.to_owned(),
+                miniapp_id: request.miniapp_id.clone(),
+                expected_product_revision: snapshot.product.product_revision,
+                expected_pointer_revision: snapshot.product.pointer_revision,
+                expected_active_release_digest: snapshot
+                    .product
+                    .active_release_digest
+                    .clone(),
+                updated_at,
+            })
+            .await?;
+        if committed.product.kind == MiniAppM1Kind::Service.as_str() {
+            self.service_runtime()
+                .await
+                .stop(&MiniAppId::from(request.miniapp_id.clone()))
+                .await
+                .map_err(|error| {
+                    MiniAppM1ApplicationError::Invalid(format!(
+                        "MiniApp was trashed but its Service Host could not stop: {error}"
+                    ))
+                })?;
+        }
+        self.workshop_projection(owner_user_id, &committed, None)
+            .await
+    }
+
+    pub async fn restore(
+        &self,
+        owner_user_id: &str,
+        request: RestoreMiniAppRequest,
+    ) -> Result<MiniAppWorkshopDto, MiniAppM1ApplicationError> {
+        validate_request_identity(&request.miniapp_id, "miniapp_id")?;
+        if request.expected_lifecycle != MiniAppLifecycleDto::Trashed {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "MiniApp Restore requires expected_lifecycle=trashed".into(),
+            ));
+        }
+        let snapshot = self
+            .repository
+            .get(owner_user_id, &request.miniapp_id)
+            .await?
+            .ok_or(MiniAppM1ApplicationError::NotFound)?;
+        let committed = self
+            .repository
+            .restore_cas(&RestoreMiniAppM1Params {
+                owner_user_id: owner_user_id.to_owned(),
+                miniapp_id: request.miniapp_id,
+                expected_product_revision: to_i64(
+                    request.expected_product_revision,
+                    "product revision",
+                )?,
+                expected_pointer_revision: to_i64(
+                    request.expected_pointer_revision,
+                    "pointer revision",
+                )?,
+                expected_lifecycle: "trashed".to_owned(),
+                updated_at: positive_now_ms().max(snapshot.product.updated_at),
+            })
+            .await?;
+        self.workshop_projection(owner_user_id, &committed, None)
+            .await
+    }
+
+    pub async fn delete(
+        &self,
+        owner_user_id: &str,
+        request: DeleteMiniAppRequest,
+    ) -> Result<MiniAppLibraryResponseDto, MiniAppM1ApplicationError> {
+        validate_request_identity(&request.miniapp_id, "miniapp_id")?;
+        if request.expected_lifecycle != MiniAppLifecycleDto::Trashed {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "MiniApp Delete requires expected_lifecycle=trashed".into(),
+            ));
+        }
+        let snapshot = self
+            .repository
+            .get(owner_user_id, &request.miniapp_id)
+            .await?
+            .ok_or(MiniAppM1ApplicationError::NotFound)?;
+        let operation_id = Uuid::now_v7().to_string();
+        let deleting = self
+            .repository
+            .begin_delete(&BeginMiniAppM1DeleteParams {
+                owner_user_id: owner_user_id.to_owned(),
+                miniapp_id: request.miniapp_id.clone(),
+                expected_product_revision: to_i64(
+                    request.expected_product_revision,
+                    "product revision",
+                )?,
+                expected_pointer_revision: to_i64(
+                    request.expected_pointer_revision,
+                    "pointer revision",
+                )?,
+                expected_active_release_digest: request.expected_active_release_digest,
+                operation_id: operation_id.clone(),
+                started_at_ms: positive_now_ms().max(snapshot.product.updated_at),
+            })
+            .await?;
+        self.run_delete_cleanup(
+            owner_user_id,
+            &deleting,
+            &operation_id,
+            1,
+        )
+        .await?;
+        self.library(owner_user_id).await
+    }
+
+    pub async fn retry_delete(
+        &self,
+        owner_user_id: &str,
+        request: RetryMiniAppDeleteRequest,
+    ) -> Result<MiniAppLibraryResponseDto, MiniAppM1ApplicationError> {
+        validate_request_identity(&request.miniapp_id, "miniapp_id")?;
+        validate_request_identity(&request.failed_operation_id, "failed_operation_id")?;
+        let operation = self
+            .repository
+            .get_miniapp_operation(
+                owner_user_id,
+                &request.miniapp_id,
+                &request.failed_operation_id,
+            )
+            .await?
+            .ok_or(MiniAppM1ApplicationError::NotFound)?;
+        if operation.kind != "miniapp_permanent_delete"
+            || operation.state != ProductOperationState::Failed.as_str()
+            || operation_revision(&operation)
+                != request.expected_operation_revision
+        {
+            return Err(operation_conflict(
+                &request.failed_operation_id,
+                &operation.state,
+                "delete operation is not the expected failed revision",
+            ));
+        }
+        let snapshot = self
+            .repository
+            .get(owner_user_id, &request.miniapp_id)
+            .await?
+            .ok_or(MiniAppM1ApplicationError::NotFound)?;
+        let operation_id = Uuid::now_v7().to_string();
+        let restarted = self
+            .repository
+            .restart_delete(&RestartMiniAppM1DeleteParams {
+                owner_user_id: owner_user_id.to_owned(),
+                miniapp_id: request.miniapp_id.clone(),
+                expected_failed_operation_id: request.failed_operation_id,
+                new_operation_id: operation_id.clone(),
+                started_at_ms: positive_now_ms().max(snapshot.product.updated_at),
+            })
+            .await?;
+        self.run_delete_cleanup(owner_user_id, &restarted, &operation_id, 1)
+            .await?;
+        self.library(owner_user_id).await
+    }
+
+    async fn run_delete_cleanup(
+        &self,
+        owner_user_id: &str,
+        snapshot: &MiniAppM1Snapshot,
+        operation_id: &str,
+        expected_operation_revision: i64,
+    ) -> Result<(), MiniAppM1ApplicationError> {
+        let cleanup = async {
+            let miniapp_id = MiniAppId::from(snapshot.product.miniapp_id.clone());
+            let runtime = self.service_runtime().await;
+            runtime
+                .stop(&miniapp_id)
+                .await
+                .map_err(|error| {
+                    MiniAppM1ApplicationError::Runtime(format!(
+                        "Service stop during permanent delete failed: {error}"
+                    ))
+                })?;
+            runtime
+                .purge_storage(owner_user_id, &miniapp_id)
+                .await
+                .map_err(|error| {
+                    MiniAppM1ApplicationError::Runtime(format!(
+                        "managed storage purge failed: {error}"
+                    ))
+                })?;
+            self.stores
+                .source
+                .purge_project(
+                    owner_user_id,
+                    &snapshot.product.miniapp_id,
+                    &snapshot.project.project_id,
+                )
+                .map_err(|error| {
+                    MiniAppM1ApplicationError::Runtime(format!(
+                        "Source purge failed: {error}"
+                    ))
+                })?;
+            self.stores
+                .release
+                .purge_project(
+                    owner_user_id,
+                    &snapshot.product.miniapp_id,
+                    &snapshot.project.project_id,
+                )
+                .map_err(|error| {
+                    MiniAppM1ApplicationError::Runtime(format!(
+                        "Release purge failed: {error}"
+                    ))
+                })?;
+            Ok::<(), MiniAppM1ApplicationError>(())
+        }
+        .await;
+        if let Err(error) = cleanup {
+            let fail = self
+                .repository
+                .fail_delete(&FailMiniAppM1DeleteParams {
+                    owner_user_id: owner_user_id.to_owned(),
+                    miniapp_id: snapshot.product.miniapp_id.clone(),
+                    operation_id: operation_id.to_owned(),
+                    expected_operation_revision,
+                    error_code: "miniapp_delete_cleanup_failed".to_owned(),
+                    updated_at: positive_now_ms(),
+                })
+                .await;
+            return match fail {
+                Ok(_) => Err(error),
+                Err(record_error) => Err(MiniAppM1ApplicationError::Runtime(format!(
+                    "MiniApp Delete cleanup failed ({error}); recording its durable failure failed: {record_error}"
+                ))),
+            };
+        }
+        self.repository
+            .finalize_delete(&FinalizeMiniAppM1DeleteParams {
+                owner_user_id: owner_user_id.to_owned(),
+                miniapp_id: snapshot.product.miniapp_id.clone(),
+                operation_id: operation_id.to_owned(),
+                expected_operation_revision,
+                finished_at_ms: positive_now_ms(),
+            })
+            .await?;
+        Ok(())
+    }
+
     pub async fn set_service_running(
         &self,
         owner_user_id: &str,
@@ -1464,6 +1755,98 @@ impl MiniAppM1ApplicationService {
             }
         }
         Ok(())
+    }
+
+    pub async fn reconcile_pending_deletions(
+        &self,
+        owner_user_id: &str,
+    ) -> Result<(), MiniAppM1ApplicationError> {
+        let library = self.repository.library(owner_user_id).await?;
+        let mut failures = Vec::new();
+        for product in library
+            .products
+            .into_iter()
+            .filter(|product| product.lifecycle == "deleting")
+        {
+            let result = async {
+                let snapshot = self
+                    .repository
+                    .get(owner_user_id, &product.miniapp_id)
+                    .await?
+                    .ok_or(MiniAppM1ApplicationError::NotFound)?;
+                let mut operations = self
+                    .repository
+                    .list_miniapp_operations(owner_user_id, &product.miniapp_id)
+                    .await?
+                    .into_iter()
+                    .filter(|operation| operation.kind == "miniapp_permanent_delete")
+                    .collect::<Vec<_>>();
+                operations.sort_by(|left, right| {
+                    left.started_at_ms
+                        .cmp(&right.started_at_ms)
+                        .then_with(|| left.operation_id.cmp(&right.operation_id))
+                });
+                let operation = operations.pop().ok_or_else(|| {
+                    MiniAppM1ApplicationError::Invalid(format!(
+                        "deleting MiniApp {} has no durable Delete operation",
+                        product.miniapp_id
+                    ))
+                })?;
+                match operation.state.as_str() {
+                    "running" => {
+                        self.run_delete_cleanup(
+                            owner_user_id,
+                            &snapshot,
+                            &operation.operation_id,
+                            1,
+                        )
+                        .await
+                    }
+                    "failed" => {
+                        let operation_id = Uuid::now_v7().to_string();
+                        let restarted = self
+                            .repository
+                            .restart_delete(&RestartMiniAppM1DeleteParams {
+                                owner_user_id: owner_user_id.to_owned(),
+                                miniapp_id: product.miniapp_id.clone(),
+                                expected_failed_operation_id: operation.operation_id,
+                                new_operation_id: operation_id.clone(),
+                                started_at_ms: positive_now_ms()
+                                    .max(snapshot.product.updated_at),
+                            })
+                            .await?;
+                        self.run_delete_cleanup(
+                            owner_user_id,
+                            &restarted,
+                            &operation_id,
+                            1,
+                        )
+                        .await
+                    }
+                    state => Err(MiniAppM1ApplicationError::Invalid(format!(
+                        "deleting MiniApp {} references terminal operation state {state}",
+                        product.miniapp_id
+                    ))),
+                }
+            }
+            .await;
+            if let Err(error) = result {
+                tracing::warn!(
+                    miniapp_id = %product.miniapp_id,
+                    error = %error,
+                    "MiniApp permanent-delete startup reconciliation failed; durable intent remains"
+                );
+                failures.push(format!("{}: {error}", product.miniapp_id));
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(MiniAppM1ApplicationError::Invalid(format!(
+                "MiniApp deletion reconciliation left durable failures: {}",
+                failures.join("; ")
+            )))
+        }
     }
 
     pub async fn set_publish_mode(
@@ -2037,13 +2420,47 @@ impl MiniAppM1ApplicationService {
             .get(owner_user_id, miniapp_id)
             .await?
             .ok_or(MiniAppM1ApplicationError::NotFound)?;
-        let active_operation = latest_running_build(
-            self.repository
-                .list_build_operations(owner_user_id, miniapp_id)
-                .await?,
-        )?;
+        let active_operation = self
+            .latest_miniapp_operation(owner_user_id, miniapp_id)
+            .await?;
         self.workshop_projection(owner_user_id, &snapshot, active_operation)
             .await
+    }
+
+    async fn latest_miniapp_operation(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &str,
+    ) -> Result<Option<DurableOperationSummaryDto>, MiniAppM1ApplicationError> {
+        let operations = self
+            .repository
+            .list_miniapp_operations(owner_user_id, miniapp_id)
+            .await?;
+        let mut active = operations
+            .into_iter()
+            .filter(|operation| {
+                operation.state == ProductOperationState::Running.as_str()
+                    || (operation.kind == "miniapp_permanent_delete"
+                        && operation.state == ProductOperationState::Failed.as_str())
+            })
+            .collect::<Vec<_>>();
+        active.sort_by(|left, right| {
+            left.started_at_ms
+                .cmp(&right.started_at_ms)
+                .then_with(|| left.operation_id.cmp(&right.operation_id))
+        });
+        let Some(operation) = active.pop() else {
+            return Ok(None);
+        };
+        if active.iter().any(|other| {
+            other.state == ProductOperationState::Running.as_str()
+                && operation.state == ProductOperationState::Running.as_str()
+        }) {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "MiniApp has more than one active owner operation".into(),
+            ));
+        }
+        operation_summary(&operation).map(Some)
     }
 
     fn load_verified_release(
@@ -3277,11 +3694,20 @@ fn latest_running_build(
 fn operation_summary(
     operation: &ProductOperationRow,
 ) -> Result<DurableOperationSummaryDto, MiniAppM1ApplicationError> {
-    if operation.kind != "build" || operation.owner_kind != "miniapp" {
+    if operation.owner_kind != "miniapp" {
         return Err(MiniAppM1ApplicationError::Invalid(
-            "MiniApp operation is not an owner-scoped Build".to_owned(),
+            "MiniApp operation is not owner-scoped".to_owned(),
         ));
     }
+    let kind = match operation.kind.as_str() {
+        "build" => DurableOperationKindDto::Build,
+        "miniapp_permanent_delete" => DurableOperationKindDto::MiniappPermanentDelete,
+        value => {
+            return Err(MiniAppM1ApplicationError::Invalid(format!(
+                "unknown MiniApp operation kind {value}"
+            )));
+        }
+    };
     let state = match operation.state.as_str() {
         "running" => DurableOperationStateDto::Running,
         "succeeded" => DurableOperationStateDto::Succeeded,
@@ -3298,7 +3724,7 @@ fn operation_summary(
         .map(|value| {
             u8::try_from(value).map_err(|_| {
                 MiniAppM1ApplicationError::Invalid(
-                    "MiniApp Build operation progress is outside u8 range".to_owned(),
+                    "MiniApp operation progress is outside u8 range".to_owned(),
                 )
             })
         })
@@ -3306,12 +3732,13 @@ fn operation_summary(
     Ok(DurableOperationSummaryDto {
         operation_id: operation.operation_id.clone(),
         operation_revision: operation_revision(operation),
-        kind: DurableOperationKindDto::Build,
+        kind,
         owner: DurableOperationOwnerDto::Miniapp {
             miniapp_id: operation.owner_id.clone(),
         },
         state,
-        cancelable: operation.state == ProductOperationState::Running.as_str(),
+        cancelable: kind == DurableOperationKindDto::Build
+            && operation.state == ProductOperationState::Running.as_str(),
         progress_percent,
         started_at_ms: operation.started_at_ms,
         completed_at_ms: operation.finished_at_ms,
@@ -3450,6 +3877,7 @@ fn build_error_code(error: &MiniAppM1ApplicationError) -> &'static str {
     match error {
         MiniAppM1ApplicationError::NotFound => "MINIAPP_NOT_FOUND",
         MiniAppM1ApplicationError::Database(_) => "MINIAPP_DATABASE_ERROR",
+        MiniAppM1ApplicationError::Runtime(_) => "MINIAPP_RUNTIME_ERROR",
         MiniAppM1ApplicationError::Invalid(message) if message.contains("Source Store") => {
             "MINIAPP_SOURCE_REJECTED"
         }
