@@ -46,6 +46,8 @@ pub enum MiniAppPlatformError {
     StorageConflict,
     #[error("MiniApp managed database request is invalid: {0}")]
     InvalidDatabaseRequest(String),
+    #[error("MiniApp managed database failed: {0}")]
+    Database(String),
     #[error("MiniApp repository failed: {0}")]
     Repository(String),
     #[error("MiniApp commit is authoritative but runtime reconciliation is required: {0}")]

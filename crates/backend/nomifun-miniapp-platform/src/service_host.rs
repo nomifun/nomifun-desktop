@@ -434,6 +434,24 @@ impl InMemoryMiniAppServiceHost {
             error: reason,
         };
     }
+
+    /// Returns the exact specs for enabled Service bindings.
+    ///
+    /// Runtime candidate validation uses these immutable inputs after the
+    /// current processes have been quiesced. Disabled slots are deliberately
+    /// omitted because they do not participate in the active Runtime switch.
+    pub async fn enabled_service_specs(&self) -> Vec<ResolvedMiniAppServiceSpec> {
+        let slots = self.slots.lock().await.values().cloned().collect::<Vec<_>>();
+        let mut specs = Vec::new();
+        for slot in slots {
+            let slot = slot.lock().await;
+            if slot.enabled {
+                specs.push(slot.spec.clone());
+            }
+        }
+        specs.sort_by(|left, right| left.miniapp_id.cmp(&right.miniapp_id));
+        specs
+    }
 }
 
 #[async_trait]
@@ -685,6 +703,7 @@ impl MiniAppServiceHostPort for InMemoryMiniAppServiceHost {
         let slot = self.slot(miniapp_id).await?;
         Some(slot.lock().await.state.clone())
     }
+
 }
 
 fn capacity_snapshot(capacity: &ServiceCapacityState) -> MiniAppServiceCapacitySnapshot {

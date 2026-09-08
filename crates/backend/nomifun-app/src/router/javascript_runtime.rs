@@ -430,6 +430,25 @@ struct NomiCoreRuntimeSwitchParticipant {
     host_root: PathBuf,
 }
 
+fn miniapp_service_participant_result(
+    passed: bool,
+) -> nomifun_agent_contracts::RuntimeSwitchParticipantResult {
+    nomifun_agent_contracts::RuntimeSwitchParticipantResult {
+        kind: nomifun_agent_contracts::RuntimeSwitchParticipantKind::MiniappService,
+        owner_id: "miniapp-production-host".to_owned(),
+        outcome: if passed {
+            nomifun_agent_contracts::RuntimeSwitchParticipantOutcome::Passed
+        } else {
+            nomifun_agent_contracts::RuntimeSwitchParticipantOutcome::Failed
+        },
+        error_code: (!passed).then(|| {
+            nomifun_agent_contracts::CanonicalErrorCode::from(
+                "MINIAPP_SERVICE_RUNTIME_VALIDATION_FAILED",
+            )
+        }),
+    }
+}
+
 #[async_trait]
 impl RuntimeSwitchParticipant for NomiCoreRuntimeSwitchParticipant {
     async fn quiesce_and_stop(
@@ -525,15 +544,13 @@ impl RuntimeSwitchParticipant for NomiCoreRuntimeSwitchParticipant {
                 .validate_candidate(owner_user_id, candidate)
                 .await?,
         );
-        // The M1 production Service Host is intentionally not claimed before
-        // its SQLite/Bridge production adapter exists. It remains a visible
-        // local decision rather than silently being treated as compatible.
-        results.push(nomifun_agent_contracts::RuntimeSwitchParticipantResult {
-            kind: nomifun_agent_contracts::RuntimeSwitchParticipantKind::MiniappService,
-            owner_id: "miniapp-production-host".to_owned(),
-            outcome: nomifun_agent_contracts::RuntimeSwitchParticipantOutcome::NotCovered,
-            error_code: None,
-        });
+        let miniapp_service_validation = self
+            .miniapp_application
+            .validate_service_runtime_candidate(owner_user_id, candidate)
+            .await;
+        results.push(miniapp_service_participant_result(
+            miniapp_service_validation.is_ok(),
+        ));
         Ok(RuntimeParticipantValidation {
             foundation_hello_passed: true,
             participants: results,
@@ -728,6 +745,26 @@ mod tests {
         assert_eq!(
             uncovered.status(),
             StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[test]
+    fn miniapp_service_switch_participant_is_covered_or_failed() {
+        let passed = miniapp_service_participant_result(true);
+        assert_eq!(
+            passed.outcome,
+            nomifun_agent_contracts::RuntimeSwitchParticipantOutcome::Passed
+        );
+        assert_eq!(passed.error_code, None);
+
+        let failed = miniapp_service_participant_result(false);
+        assert_eq!(
+            failed.outcome,
+            nomifun_agent_contracts::RuntimeSwitchParticipantOutcome::Failed
+        );
+        assert_eq!(
+            failed.error_code.as_ref().map(AsRef::as_ref),
+            Some("MINIAPP_SERVICE_RUNTIME_VALIDATION_FAILED")
         );
     }
 

@@ -15,6 +15,91 @@ use crate::{
     MiniAppCallCancellation, MiniAppHostKvPort, MiniAppPlatformError, MiniAppPlatformResult,
 };
 
+/// The storage descriptor and ledger resolved for one exact Service run.
+///
+/// Handles are Host-owned. The descriptor is passed into the canonical
+/// `ResolvedMiniAppServiceSpec`; raw database paths never leave the Host.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MiniAppServiceStorageResolution {
+    pub descriptor: MiniAppServiceStorageDescriptor,
+    pub migration_ledger: Option<MiniAppMigrationLedger>,
+}
+
+impl MiniAppServiceStorageResolution {
+    pub fn host_kv(miniapp_id: MiniAppId) -> Self {
+        Self {
+            descriptor: MiniAppServiceStorageDescriptor {
+                kv: MiniAppKvHandleDescriptor {
+                    handle_id: MiniAppKvHandleId::from(format!(
+                        "miniapp-kv-{}",
+                        miniapp_id.as_ref()
+                    )),
+                    miniapp_id,
+                    namespace_revision: 1,
+                },
+                files_dir: None,
+                private_database: None,
+            },
+            migration_ledger: None,
+        }
+    }
+}
+
+/// Requests issued by a trusted Node Service back to the Host over the private
+/// Service IPC channel. The MiniApp and owner are selected by the Host process
+/// binding, never by this payload.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MiniAppServiceStorageRequest {
+    Kv {
+        request: MiniAppBridgeKvRequest,
+    },
+    DatabaseQuery {
+        statement: MiniAppDatabaseStatement,
+    },
+    DatabaseExecute {
+        statement: MiniAppDatabaseStatement,
+    },
+    DatabaseBatch {
+        statements: Vec<MiniAppDatabaseStatement>,
+    },
+}
+
+/// Production/runtime boundary for owner-scoped MiniApp storage.
+///
+/// The in-memory implementation below remains useful for deterministic
+/// contract tests. Production composition supplies the SQLite/filesystem
+/// implementation from `managed_storage.rs`.
+#[async_trait]
+pub trait MiniAppServiceStoragePort: Send + Sync {
+    async fn resolve_service_storage(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &MiniAppId,
+        uses_files: bool,
+        uses_private_database: bool,
+    ) -> MiniAppPlatformResult<MiniAppServiceStorageResolution>;
+
+    async fn apply_additive_migrations(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &MiniAppId,
+        storage: &MiniAppServiceStorageDescriptor,
+        expected_ledger_digest: &DigestHex,
+        release: &MiniAppReleaseRef,
+        migrations: &[MiniAppMigration],
+        applied_at_ms: i64,
+    ) -> MiniAppPlatformResult<MiniAppMigrationLedger>;
+
+    async fn handle_service_request(
+        &self,
+        miniapp_id: &MiniAppId,
+        storage: &MiniAppServiceStorageDescriptor,
+        request: MiniAppServiceStorageRequest,
+        cancellation: MiniAppCallCancellation,
+    ) -> MiniAppPlatformResult<StrictJsonValue>;
+}
+
 #[async_trait]
 pub trait MiniAppFilesPort: Send + Sync {
     async fn resolve(
@@ -594,6 +679,151 @@ impl MiniAppPrivateDatabasePort for InMemoryMiniAppManagedStorage {
     ) -> MiniAppPlatformResult<MiniAppMigrationLedger> {
         let state = self.state.lock().await;
         Ok(owned_database(&state, miniapp_id, handle_id)?.ledger.clone())
+    }
+}
+
+#[async_trait]
+impl MiniAppServiceStoragePort for InMemoryMiniAppManagedStorage {
+    async fn resolve_service_storage(
+        &self,
+        _owner_user_id: &str,
+        miniapp_id: &MiniAppId,
+        uses_files: bool,
+        uses_private_database: bool,
+    ) -> MiniAppPlatformResult<MiniAppServiceStorageResolution> {
+        let mut resolution = MiniAppServiceStorageResolution::host_kv(miniapp_id.clone());
+        if uses_files {
+            let path = std::env::temp_dir()
+                .join("nomifun-miniapp-memory")
+                .join(miniapp_id.as_ref())
+                .join("files");
+            std::fs::create_dir_all(&path).map_err(|error| {
+                MiniAppPlatformError::Runtime(format!(
+                    "cannot create in-memory filesDir fixture: {error}"
+                ))
+            })?;
+            resolution.descriptor.files_dir = Some(MiniAppFilesDirDescriptor {
+                handle_id: MiniAppFilesHandleId::from(format!(
+                    "miniapp-files-{}",
+                    miniapp_id.as_ref()
+                )),
+                miniapp_id: miniapp_id.clone(),
+                absolute_path: path.display().to_string(),
+            });
+        }
+        if uses_private_database {
+            let handle_id =
+                MiniAppDatabaseHandleId::from(format!("miniapp-db-{}", miniapp_id.as_ref()));
+            let ledger = MiniAppMigrationLedger::empty(
+                miniapp_id.clone(),
+                handle_id.clone(),
+                1,
+            )?;
+            resolution.descriptor.private_database =
+                Some(MiniAppPrivateDatabaseDescriptor {
+                    handle_id,
+                    miniapp_id: miniapp_id.clone(),
+                    schema_epoch: ledger.schema_epoch,
+                    migration_ledger_digest: ledger.ledger_digest.clone(),
+                });
+            resolution.migration_ledger = Some(ledger);
+        }
+        self.register(
+            resolution.descriptor.clone(),
+            resolution.migration_ledger.clone(),
+        )
+        .await?;
+        Ok(resolution)
+    }
+
+    async fn apply_additive_migrations(
+        &self,
+        _owner_user_id: &str,
+        miniapp_id: &MiniAppId,
+        storage: &MiniAppServiceStorageDescriptor,
+        expected_ledger_digest: &DigestHex,
+        release: &MiniAppReleaseRef,
+        migrations: &[MiniAppMigration],
+        applied_at_ms: i64,
+    ) -> MiniAppPlatformResult<MiniAppMigrationLedger> {
+        let database = storage
+            .private_database
+            .as_ref()
+            .ok_or(MiniAppPlatformError::UnknownStorageHandle)?;
+        MiniAppPrivateDatabasePort::apply_additive_migrations(
+            self,
+            miniapp_id,
+            &database.handle_id,
+            expected_ledger_digest,
+            release,
+            migrations,
+            applied_at_ms,
+        )
+        .await
+    }
+
+    async fn handle_service_request(
+        &self,
+        miniapp_id: &MiniAppId,
+        storage: &MiniAppServiceStorageDescriptor,
+        request: MiniAppServiceStorageRequest,
+        cancellation: MiniAppCallCancellation,
+    ) -> MiniAppPlatformResult<StrictJsonValue> {
+        let value = match request {
+            MiniAppServiceStorageRequest::Kv { request } => {
+                return MiniAppHostKvPort::execute(self, miniapp_id, storage, &request).await;
+            }
+            MiniAppServiceStorageRequest::DatabaseQuery { statement } => {
+                let database = storage
+                    .private_database
+                    .as_ref()
+                    .ok_or(MiniAppPlatformError::UnknownStorageHandle)?;
+                serde_json::to_value(
+                    MiniAppPrivateDatabasePort::query(
+                        self,
+                        miniapp_id,
+                        &database.handle_id,
+                        statement,
+                        cancellation,
+                    )
+                    .await?,
+                )
+            }
+            MiniAppServiceStorageRequest::DatabaseExecute { statement } => {
+                let database = storage
+                    .private_database
+                    .as_ref()
+                    .ok_or(MiniAppPlatformError::UnknownStorageHandle)?;
+                serde_json::to_value(
+                    MiniAppPrivateDatabasePort::execute(
+                        self,
+                        miniapp_id,
+                        &database.handle_id,
+                        statement,
+                        cancellation,
+                    )
+                    .await?,
+                )
+            }
+            MiniAppServiceStorageRequest::DatabaseBatch { statements } => {
+                let database = storage
+                    .private_database
+                    .as_ref()
+                    .ok_or(MiniAppPlatformError::UnknownStorageHandle)?;
+                serde_json::to_value(
+                    MiniAppPrivateDatabasePort::batch(
+                        self,
+                        miniapp_id,
+                        &database.handle_id,
+                        statements,
+                        cancellation,
+                    )
+                    .await?,
+                )
+            }
+        }
+        .map_err(|error| MiniAppPlatformError::Runtime(error.to_string()))?;
+        Ok(StrictJsonValue(value))
     }
 }
 

@@ -6917,6 +6917,7 @@ dependencies = [
  "nomifun-common",
  "nomifun-db",
  "nomifun-js-runtime",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
