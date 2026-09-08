@@ -218,10 +218,26 @@ impl MiniAppMigrationLedger {
                 "Private Database schema epoch must be positive".into(),
             ));
         }
+        let expected_schema_epoch = u64::try_from(self.entries.len())
+            .ok()
+            .and_then(|length| length.checked_add(1))
+            .ok_or_else(|| {
+                MiniAppPlatformError::InvalidState(
+                    "Private Database migration ledger is too large".into(),
+                )
+            })?;
+        if self.schema_epoch != expected_schema_epoch {
+            return Err(MiniAppPlatformError::InvalidState(
+                "Private Database schema epoch does not match its migration ledger".into(),
+            ));
+        }
         let mut ids = BTreeSet::new();
         for (index, entry) in self.entries.iter().enumerate() {
             if entry.ordinal != index as u64 + 1
                 || entry.applied_at_ms <= 0
+                || entry.migration_id.as_ref().trim().is_empty()
+                || !is_digest(&entry.migration_digest)
+                || entry.release.validate().is_err()
                 || !ids.insert(entry.migration_id.clone())
             {
                 return Err(MiniAppPlatformError::InvalidState(
@@ -250,6 +266,7 @@ impl MiniAppMigrationLedger {
         applied_at_ms: i64,
     ) -> MiniAppPlatformResult<Self> {
         self.validate()?;
+        release.validate()?;
         if applied_at_ms <= 0 {
             return Err(MiniAppPlatformError::InvalidState(
                 "migration application time must be positive".into(),
@@ -306,6 +323,14 @@ impl MiniAppMigrationLedger {
         next.validate()?;
         Ok(next)
     }
+}
+
+fn is_digest(value: &DigestHex) -> bool {
+    value.as_ref().len() == 64
+        && value
+            .as_ref()
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 #[async_trait]

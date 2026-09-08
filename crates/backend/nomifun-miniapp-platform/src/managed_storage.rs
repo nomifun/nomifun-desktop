@@ -52,6 +52,18 @@ struct RegisteredStorage {
     database_lock: Arc<Mutex<()>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct StorageKey {
+    owner_user_id: String,
+    miniapp_id: String,
+}
+
+struct SqliteAuthorizationState {
+    allow_schema: AtomicBool,
+    allow_transactions: AtomicBool,
+    allow_dml: AtomicBool,
+}
+
 /// Production owner-scoped MiniApp storage.
 ///
 /// Host KV stays in the canonical M1 SQLite database. Service files live in a
@@ -61,7 +73,7 @@ struct RegisteredStorage {
 pub struct SqliteMiniAppManagedStorage {
     root: Arc<PathBuf>,
     pool: SqlitePool,
-    registrations: Arc<RwLock<BTreeMap<String, RegisteredStorage>>>,
+    registrations: Arc<RwLock<BTreeMap<StorageKey, RegisteredStorage>>>,
 }
 
 impl std::fmt::Debug for SqliteMiniAppManagedStorage {
@@ -113,7 +125,10 @@ impl SqliteMiniAppManagedStorage {
             .registrations
             .read()
             .await
-            .get(miniapp_id.as_ref())
+            .get(&StorageKey {
+                owner_user_id: owner_user_id.to_owned(),
+                miniapp_id: miniapp_id.as_ref().to_owned(),
+            })
             .cloned()
             .ok_or(MiniAppPlatformError::UnknownStorageHandle)?;
         if registration.owner_user_id != owner_user_id
@@ -133,11 +148,36 @@ impl SqliteMiniAppManagedStorage {
             .registrations
             .read()
             .await
-            .get(miniapp_id.as_ref())
+            .iter()
+            .filter(|(key, value)| {
+                key.miniapp_id == miniapp_id.as_ref() && value.descriptor == *descriptor
+            })
+            .map(|(_, value)| value)
+            .next()
             .cloned()
             .ok_or(MiniAppPlatformError::UnknownStorageHandle)?;
         if registration.descriptor != *descriptor {
             return Err(MiniAppPlatformError::UnknownStorageHandle);
+        }
+        Ok(registration)
+    }
+
+    async fn registration_for_miniapp(
+        &self,
+        miniapp_id: &MiniAppId,
+    ) -> MiniAppPlatformResult<RegisteredStorage> {
+        let registrations = self.registrations.read().await;
+        let mut matches = registrations
+            .iter()
+            .filter(|(key, _)| key.miniapp_id == miniapp_id.as_ref())
+            .map(|(_, registration)| registration.clone());
+        let registration = matches
+            .next()
+            .ok_or(MiniAppPlatformError::UnknownStorageHandle)?;
+        if matches.next().is_some() {
+            return Err(MiniAppPlatformError::InvalidState(
+                "MiniApp storage registration is ambiguous across owners".into(),
+            ));
         }
         Ok(registration)
     }
@@ -168,7 +208,9 @@ impl SqliteMiniAppManagedStorage {
         miniapp_id: &MiniAppId,
         storage: &MiniAppServiceStorageDescriptor,
         request: MiniAppBridgeKvRequest,
+        cancellation: MiniAppCallCancellation,
     ) -> MiniAppPlatformResult<StrictJsonValue> {
+        ensure_not_canceled(&cancellation)?;
         self.ensure_product_owner(owner_user_id, miniapp_id).await?;
         if storage.kv.miniapp_id != *miniapp_id {
             return Err(MiniAppPlatformError::UnknownStorageHandle);
@@ -212,6 +254,7 @@ impl SqliteMiniAppManagedStorage {
             .begin()
             .await
             .map_err(|error| MiniAppPlatformError::Database(error.to_string()))?;
+        ensure_not_canceled(&cancellation)?;
         let current = fetch_kv(
             &mut transaction,
             owner_user_id,
@@ -344,6 +387,7 @@ impl SqliteMiniAppManagedStorage {
                 }
             }
         };
+        ensure_not_canceled(&cancellation)?;
         transaction
             .commit()
             .await
@@ -360,7 +404,7 @@ impl SqliteMiniAppManagedStorage {
     ) -> MiniAppPlatformResult<T>
     where
         T: Send + 'static,
-        F: FnOnce(Connection, Arc<AtomicBool>) -> Result<T, MiniAppPlatformError>
+        F: FnOnce(Connection, Arc<SqliteAuthorizationState>) -> Result<T, MiniAppPlatformError>
             + Send
             + 'static,
     {
@@ -387,21 +431,13 @@ impl MiniAppServiceStoragePort for SqliteMiniAppManagedStorage {
         uses_private_database: bool,
     ) -> MiniAppPlatformResult<MiniAppServiceStorageResolution> {
         self.ensure_product_owner(owner_user_id, miniapp_id).await?;
+        validate_path_component(owner_user_id, "owner_user_id")?;
+        validate_path_component(miniapp_id.as_ref(), "miniapp_id")?;
         let files_dir = if uses_files {
-            validate_path_component(owner_user_id, "owner_user_id")?;
-            validate_path_component(miniapp_id.as_ref(), "miniapp_id")?;
-            let path = self
-                .root
-                .join(FILES_DIRECTORY)
-                .join(owner_user_id)
-                .join(miniapp_id.as_ref());
-            ensure_directory(&path)?;
-            let canonical = fs::canonicalize(&path).map_err(|error| {
-                MiniAppPlatformError::Runtime(format!(
-                    "cannot canonicalize MiniApp filesDir: {error}"
-                ))
-            })?;
-            ensure_within(self.root(), &canonical)?;
+            let canonical = ensure_managed_directory(
+                self.root(),
+                &[FILES_DIRECTORY, owner_user_id, miniapp_id.as_ref()],
+            )?;
             Some(MiniAppFilesDirDescriptor {
                 handle_id: MiniAppFilesHandleId::from(format!(
                     "miniapp-files-{}",
@@ -416,26 +452,18 @@ impl MiniAppServiceStoragePort for SqliteMiniAppManagedStorage {
 
         let (private_database, migration_ledger, database_path) =
             if uses_private_database {
-                let path = self
-                    .root
-                    .join(DATABASES_DIRECTORY)
-                    .join(owner_user_id)
-                    .join(format!("{}.sqlite", miniapp_id.as_ref()));
-                ensure_database_path(&path)?;
-                ensure_within(
+                let database_parent = ensure_managed_directory(
                     self.root(),
-                    path.parent().ok_or_else(|| {
-                        MiniAppPlatformError::InvalidState(
-                            "MiniApp private database has no parent".into(),
-                        )
-                    })?,
+                    &[DATABASES_DIRECTORY, owner_user_id],
                 )?;
+                let path = database_parent.join(format!("{}.sqlite", miniapp_id.as_ref()));
+                ensure_database_path(&path)?;
                 let ledger = tokio::task::spawn_blocking({
                     let path = path.clone();
                     let miniapp_id = miniapp_id.clone();
                     move || {
                         let (connection, internal_mode) = open_private_database(&path)?;
-                        with_internal_mode(&internal_mode, || {
+                        with_authorizer_mode(&internal_mode, true, true, true, || {
                             read_ledger(&connection, &miniapp_id, &MiniAppDatabaseHandleId::from(
                                 format!("miniapp-db-{}", miniapp_id.as_ref()),
                             ))
@@ -474,19 +502,27 @@ impl MiniAppServiceStoragePort for SqliteMiniAppManagedStorage {
             files_dir,
             private_database,
         };
-        let registration = RegisteredStorage {
-            owner_user_id: owner_user_id.to_owned(),
-            descriptor: descriptor.clone(),
-            database_path,
-            database_lock: Arc::new(Mutex::new(())),
-        };
         let mut registrations = self.registrations.write().await;
-        if let Some(existing) = registrations.get(miniapp_id.as_ref())
+        let storage_key = StorageKey {
+            owner_user_id: owner_user_id.to_owned(),
+            miniapp_id: miniapp_id.as_ref().to_owned(),
+        };
+        if let Some(existing) = registrations.get(&storage_key)
             && existing.owner_user_id != owner_user_id
         {
             return Err(MiniAppPlatformError::UnknownStorageHandle);
         }
-        registrations.insert(miniapp_id.as_ref().to_owned(), registration);
+        let database_lock = registrations
+            .get(&storage_key)
+            .map(|existing| Arc::clone(&existing.database_lock))
+            .unwrap_or_else(|| Arc::new(Mutex::new(())));
+        let registration = RegisteredStorage {
+            owner_user_id: owner_user_id.to_owned(),
+            descriptor: descriptor.clone(),
+            database_path,
+            database_lock,
+        };
+        registrations.insert(storage_key, registration);
         Ok(MiniAppServiceStorageResolution {
             descriptor,
             migration_ledger,
@@ -527,7 +563,7 @@ impl MiniAppServiceStoragePort for SqliteMiniAppManagedStorage {
         let migrations_owned = migrations.to_vec();
         let next = tokio::task::spawn_blocking(move || {
             let (mut connection, internal_mode) = open_private_database(&database_path)?;
-            with_internal_mode(&internal_mode, || {
+            with_authorizer_mode(&internal_mode, true, true, true, || {
                 let current = read_ledger(&connection, &miniapp_id_owned, &handle_id)?;
                 if current.ledger_digest != expected_ledger_digest_owned {
                     return Err(MiniAppPlatformError::StorageConflict);
@@ -607,7 +643,10 @@ impl MiniAppServiceStoragePort for SqliteMiniAppManagedStorage {
 
         let mut registrations = self.registrations.write().await;
         let current = registrations
-            .get_mut(miniapp_id.as_ref())
+            .get_mut(&StorageKey {
+                owner_user_id: owner_user_id.to_owned(),
+                miniapp_id: miniapp_id.as_ref().to_owned(),
+            })
             .ok_or(MiniAppPlatformError::UnknownStorageHandle)?;
         let database = current
             .descriptor
@@ -634,6 +673,7 @@ impl MiniAppServiceStoragePort for SqliteMiniAppManagedStorage {
                     miniapp_id,
                     storage,
                     request,
+                    cancellation,
                 )
                 .await
             }
@@ -704,7 +744,13 @@ impl MiniAppHostKvPort for SqliteMiniAppManagedStorage {
             .registration_for(miniapp_id, storage)
             .await?
             .owner_user_id;
-        self.execute_kv(&owner, miniapp_id, storage, request.clone())
+        self.execute_kv(
+            &owner,
+            miniapp_id,
+            storage,
+            request.clone(),
+            MiniAppCallCancellation::default(),
+        )
             .await
     }
 }
@@ -716,11 +762,11 @@ impl MiniAppFilesPort for SqliteMiniAppManagedStorage {
         miniapp_id: &MiniAppId,
         handle_id: &MiniAppFilesHandleId,
     ) -> MiniAppPlatformResult<MiniAppFilesDirDescriptor> {
-        self.registrations
-            .read()
-            .await
-            .get(miniapp_id.as_ref())
-            .and_then(|registration| registration.descriptor.files_dir.clone())
+        self.registration_for_miniapp(miniapp_id)
+            .await?
+            .descriptor
+            .files_dir
+            .clone()
             .filter(|descriptor| &descriptor.handle_id == handle_id)
             .ok_or(MiniAppPlatformError::UnknownStorageHandle)
     }
@@ -736,13 +782,7 @@ impl MiniAppPrivateDatabasePort for SqliteMiniAppManagedStorage {
         cancellation: MiniAppCallCancellation,
     ) -> MiniAppPlatformResult<MiniAppDatabaseQueryResult> {
         statement.validate_query()?;
-        let registration = self
-            .registrations
-            .read()
-            .await
-            .get(miniapp_id.as_ref())
-            .cloned()
-            .ok_or(MiniAppPlatformError::UnknownStorageHandle)?;
+        let registration = self.registration_for_miniapp(miniapp_id).await?;
         if registration
             .descriptor
             .private_database
@@ -754,16 +794,20 @@ impl MiniAppPrivateDatabasePort for SqliteMiniAppManagedStorage {
         ensure_not_canceled(&cancellation)?;
         self.with_database(registration, move |connection, _| {
             ensure_not_canceled(&cancellation)?;
+            install_cancellation_handler(&connection, cancellation.clone());
             let values = parameter_values(&statement.parameters)?;
             let mut prepared = connection
                 .prepare(&statement.sql)
-                .map_err(database_error)?;
+                .map_err(|error| canceled_database_error(error, &cancellation))?;
             let mut rows = prepared
                 .query(params_from_iter(values.iter()))
-                .map_err(database_error)?;
+                .map_err(|error| canceled_database_error(error, &cancellation))?;
             let mut result = Vec::new();
             let mut result_bytes = 0usize;
-            while let Some(row) = rows.next().map_err(database_error)? {
+            while let Some(row) = rows
+                .next()
+                .map_err(|error| canceled_database_error(error, &cancellation))?
+            {
                 if result.len() >= MAX_DATABASE_RESULT_ROWS {
                     return Err(MiniAppPlatformError::Database(
                         "database query result exceeds the row limit".into(),
@@ -794,13 +838,7 @@ impl MiniAppPrivateDatabasePort for SqliteMiniAppManagedStorage {
         cancellation: MiniAppCallCancellation,
     ) -> MiniAppPlatformResult<MiniAppDatabaseExecuteResult> {
         statement.validate_execute()?;
-        let registration = self
-            .registrations
-            .read()
-            .await
-            .get(miniapp_id.as_ref())
-            .cloned()
-            .ok_or(MiniAppPlatformError::UnknownStorageHandle)?;
+        let registration = self.registration_for_miniapp(miniapp_id).await?;
         if registration
             .descriptor
             .private_database
@@ -810,15 +848,18 @@ impl MiniAppPrivateDatabasePort for SqliteMiniAppManagedStorage {
             return Err(MiniAppPlatformError::UnknownStorageHandle);
         }
         ensure_not_canceled(&cancellation)?;
-        self.with_database(registration, move |connection, _| {
+        self.with_database(registration, move |connection, authorization| {
             ensure_not_canceled(&cancellation)?;
-            let values = parameter_values(&statement.parameters)?;
-            let affected = connection
-                .execute(&statement.sql, params_from_iter(values.iter()))
-                .map_err(database_error)?;
-            ensure_not_canceled(&cancellation)?;
-            Ok(MiniAppDatabaseExecuteResult {
-                affected_rows: affected as u64,
+            install_cancellation_handler(&connection, cancellation.clone());
+            with_authorizer_mode(&authorization, false, false, true, || {
+                let values = parameter_values(&statement.parameters)?;
+                let affected = connection
+                    .execute(&statement.sql, params_from_iter(values.iter()))
+                    .map_err(|error| canceled_database_error(error, &cancellation))?;
+                ensure_not_canceled(&cancellation)?;
+                Ok(MiniAppDatabaseExecuteResult {
+                    affected_rows: affected as u64,
+                })
             })
         })
         .await
@@ -839,13 +880,7 @@ impl MiniAppPrivateDatabasePort for SqliteMiniAppManagedStorage {
         for statement in &statements {
             statement.validate_execute()?;
         }
-        let registration = self
-            .registrations
-            .read()
-            .await
-            .get(miniapp_id.as_ref())
-            .cloned()
-            .ok_or(MiniAppPlatformError::UnknownStorageHandle)?;
+        let registration = self.registration_for_miniapp(miniapp_id).await?;
         if registration
             .descriptor
             .private_database
@@ -855,27 +890,30 @@ impl MiniAppPrivateDatabasePort for SqliteMiniAppManagedStorage {
             return Err(MiniAppPlatformError::UnknownStorageHandle);
         }
         ensure_not_canceled(&cancellation)?;
-        self.with_database(registration, move |mut connection, internal_mode| {
+        self.with_database(registration, move |mut connection, authorization| {
             ensure_not_canceled(&cancellation)?;
-            internal_mode.store(true, Ordering::Release);
-            let result = (|| {
-                let transaction = connection.transaction().map_err(database_error)?;
+            install_cancellation_handler(&connection, cancellation.clone());
+            let result = with_authorizer_mode(&authorization, false, true, true, || {
+                let transaction = connection
+                    .transaction()
+                    .map_err(|error| canceled_database_error(error, &cancellation))?;
                 let mut output = Vec::with_capacity(statements.len());
                 for statement in &statements {
                     ensure_not_canceled(&cancellation)?;
                     let values = parameter_values(&statement.parameters)?;
                     let affected = transaction
                         .execute(&statement.sql, params_from_iter(values.iter()))
-                        .map_err(database_error)?;
+                        .map_err(|error| canceled_database_error(error, &cancellation))?;
                     output.push(MiniAppDatabaseExecuteResult {
                         affected_rows: affected as u64,
                     });
                 }
                 ensure_not_canceled(&cancellation)?;
-                transaction.commit().map_err(database_error)?;
+                transaction
+                    .commit()
+                    .map_err(|error| canceled_database_error(error, &cancellation))?;
                 Ok(output)
-            })();
-            internal_mode.store(false, Ordering::Release);
+            });
             result
         })
         .await
@@ -890,13 +928,7 @@ impl MiniAppPrivateDatabasePort for SqliteMiniAppManagedStorage {
         migrations: &[MiniAppMigration],
         applied_at_ms: i64,
     ) -> MiniAppPlatformResult<MiniAppMigrationLedger> {
-        let registration = self
-            .registrations
-            .read()
-            .await
-            .get(miniapp_id.as_ref())
-            .cloned()
-            .ok_or(MiniAppPlatformError::UnknownStorageHandle)?;
+        let registration = self.registration_for_miniapp(miniapp_id).await?;
         let descriptor = registration
             .descriptor
             .private_database
@@ -924,13 +956,7 @@ impl MiniAppPrivateDatabasePort for SqliteMiniAppManagedStorage {
         miniapp_id: &MiniAppId,
         handle_id: &MiniAppDatabaseHandleId,
     ) -> MiniAppPlatformResult<MiniAppMigrationLedger> {
-        let registration = self
-            .registrations
-            .read()
-            .await
-            .get(miniapp_id.as_ref())
-            .cloned()
-            .ok_or(MiniAppPlatformError::UnknownStorageHandle)?;
+        let registration = self.registration_for_miniapp(miniapp_id).await?;
         let descriptor = registration
             .descriptor
             .private_database
@@ -947,7 +973,7 @@ impl MiniAppPrivateDatabasePort for SqliteMiniAppManagedStorage {
         let handle_id_owned = handle_id.clone();
         tokio::task::spawn_blocking(move || {
             let (connection, internal_mode) = open_private_database(&path)?;
-            with_internal_mode(&internal_mode, || {
+            with_authorizer_mode(&internal_mode, true, true, true, || {
                 read_ledger(&connection, &miniapp_id_owned, &handle_id_owned)
             })
         })
@@ -958,7 +984,7 @@ impl MiniAppPrivateDatabasePort for SqliteMiniAppManagedStorage {
 
 fn ensure_directory(path: &Path) -> MiniAppPlatformResult<()> {
     if let Ok(metadata) = fs::symlink_metadata(path) {
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        if is_reparse_or_symlink(&metadata) || !metadata.is_dir() {
             return Err(MiniAppPlatformError::InvalidState(format!(
                 "MiniApp managed storage path is not a regular directory: {}",
                 path.display()
@@ -978,7 +1004,7 @@ fn ensure_directory(path: &Path) -> MiniAppPlatformResult<()> {
             path.display()
         ))
     })?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+    if is_reparse_or_symlink(&metadata) || !metadata.is_dir() {
         return Err(MiniAppPlatformError::InvalidState(format!(
             "MiniApp managed storage path is not a regular directory: {}",
             path.display()
@@ -989,17 +1015,74 @@ fn ensure_directory(path: &Path) -> MiniAppPlatformResult<()> {
 
 fn ensure_database_path(path: &Path) -> MiniAppPlatformResult<()> {
     if let Ok(metadata) = fs::symlink_metadata(path) {
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
+        if is_reparse_or_symlink(&metadata) || !metadata.is_file() {
             return Err(MiniAppPlatformError::InvalidState(format!(
                 "MiniApp private database path is not a regular file: {}",
                 path.display()
             )));
         }
     }
-    if let Some(parent) = path.parent() {
-        ensure_directory(parent)?;
-    }
     Ok(())
+}
+
+fn ensure_managed_directory(
+    root: &Path,
+    components: &[&str],
+) -> MiniAppPlatformResult<PathBuf> {
+    let mut current = root.to_path_buf();
+    for component in components {
+        validate_path_component(component, "managed storage component")?;
+        current.push(component);
+        if let Ok(metadata) = fs::symlink_metadata(&current) {
+            if is_reparse_or_symlink(&metadata) || !metadata.is_dir() {
+                return Err(MiniAppPlatformError::InvalidState(format!(
+                    "managed storage component is not a regular directory: {}",
+                    current.display()
+                )));
+            }
+        } else {
+            fs::create_dir(&current).map_err(|error| {
+                MiniAppPlatformError::Runtime(format!(
+                    "cannot create managed storage directory {}: {error}",
+                    current.display()
+                ))
+            })?;
+        }
+        let canonical = fs::canonicalize(&current).map_err(|error| {
+            MiniAppPlatformError::Runtime(format!(
+                "cannot canonicalize managed storage directory {}: {error}",
+                current.display()
+            ))
+        })?;
+        ensure_within(root, &canonical)?;
+        let metadata = fs::symlink_metadata(&current).map_err(|error| {
+            MiniAppPlatformError::Runtime(format!(
+                "cannot inspect managed storage directory {}: {error}",
+                current.display()
+            ))
+        })?;
+        if is_reparse_or_symlink(&metadata) || !metadata.is_dir() {
+            return Err(MiniAppPlatformError::InvalidState(format!(
+                "managed storage component changed during creation: {}",
+                current.display()
+            )));
+        }
+    }
+    Ok(current)
+}
+
+#[cfg(windows)]
+fn is_reparse_or_symlink(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    metadata.file_type().is_symlink()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn is_reparse_or_symlink(metadata: &fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
 }
 
 fn ensure_within(root: &Path, child: &Path) -> MiniAppPlatformResult<()> {
@@ -1196,7 +1279,7 @@ enum KvOperation {
 
 fn open_private_database(
     path: &Path,
-) -> MiniAppPlatformResult<(Connection, Arc<AtomicBool>)> {
+) -> MiniAppPlatformResult<(Connection, Arc<SqliteAuthorizationState>)> {
     ensure_database_path(path)?;
     let connection = Connection::open(path).map_err(database_error)?;
     connection
@@ -1228,47 +1311,30 @@ fn open_private_database(
              );"
         ))
         .map_err(database_error)?;
-    let internal_mode = Arc::new(AtomicBool::new(false));
-    install_authorizer(&connection, Arc::clone(&internal_mode));
-    Ok((connection, internal_mode))
+    let authorization = Arc::new(SqliteAuthorizationState {
+        allow_schema: AtomicBool::new(false),
+        allow_transactions: AtomicBool::new(false),
+        allow_dml: AtomicBool::new(false),
+    });
+    install_authorizer(&connection, Arc::clone(&authorization));
+    Ok((connection, authorization))
 }
 
-fn install_authorizer(connection: &Connection, internal_mode: Arc<AtomicBool>) {
+fn install_authorizer(
+    connection: &Connection,
+    authorization: Arc<SqliteAuthorizationState>,
+) {
     connection.authorizer(Some(move |context: AuthContext<'_>| {
-        let internal = internal_mode.load(Ordering::Acquire);
+        let allow_schema = authorization.allow_schema.load(Ordering::Acquire);
+        let allow_transactions = authorization
+            .allow_transactions
+            .load(Ordering::Acquire);
+        let allow_dml = authorization.allow_dml.load(Ordering::Acquire);
         let main_database = context
             .database_name
             .is_none_or(|database| database == "main");
         if !main_database {
             return Authorization::Deny;
-        }
-        if internal {
-            return match context.action {
-                AuthAction::Attach { .. }
-                | AuthAction::Detach { .. }
-                | AuthAction::Pragma { .. }
-                | AuthAction::CreateTempIndex { .. }
-                | AuthAction::CreateTempTable { .. }
-                | AuthAction::CreateTempTrigger { .. }
-                | AuthAction::CreateTempView { .. }
-                | AuthAction::CreateTrigger { .. }
-                | AuthAction::CreateView { .. }
-                | AuthAction::DropIndex { .. }
-                | AuthAction::DropTable { .. }
-                | AuthAction::DropTempIndex { .. }
-                | AuthAction::DropTempTable { .. }
-                | AuthAction::DropTempTrigger { .. }
-                | AuthAction::DropTempView { .. }
-                | AuthAction::DropTrigger { .. }
-                | AuthAction::DropView { .. }
-                | AuthAction::CreateVtable { .. }
-                | AuthAction::DropVtable { .. }
-                | AuthAction::Reindex { .. }
-                | AuthAction::Analyze { .. }
-                | AuthAction::Recursive
-                | AuthAction::Unknown { .. } => Authorization::Deny,
-                _ => Authorization::Allow,
-            };
         }
         match context.action {
             AuthAction::Attach { .. }
@@ -1301,26 +1367,35 @@ fn install_authorizer(connection: &Connection, internal_mode: Arc<AtomicBool>) {
                 Authorization::Deny
             }
             AuthAction::Transaction { .. } | AuthAction::Savepoint { .. } => {
-                if internal {
+                if allow_transactions {
                     Authorization::Allow
                 } else {
                     Authorization::Deny
                 }
             }
             AuthAction::CreateTable { table_name }
-            | AuthAction::CreateIndex { index_name: table_name, .. }
+            | AuthAction::CreateIndex {
+                table_name,
+                ..
+            }
             | AuthAction::AlterTable { table_name, .. } => {
-                if internal && !table_name.starts_with("sqlite_") {
+                if allow_schema && is_user_table_name(table_name) {
                     Authorization::Allow
                 } else {
                     Authorization::Deny
                 }
             }
-            AuthAction::Read { table_name, .. }
-            | AuthAction::Insert { table_name }
+            AuthAction::Read { table_name, .. } => {
+                if !allow_schema && !is_user_table_name(table_name) {
+                    Authorization::Deny
+                } else {
+                    Authorization::Allow
+                }
+            }
+            AuthAction::Insert { table_name }
             | AuthAction::Update { table_name, .. }
             | AuthAction::Delete { table_name } => {
-                if !internal && !is_user_table_name(table_name) {
+                if !allow_dml || (!allow_schema && !is_user_table_name(table_name)) {
                     Authorization::Deny
                 } else {
                     Authorization::Allow
@@ -1332,13 +1407,26 @@ fn install_authorizer(connection: &Connection, internal_mode: Arc<AtomicBool>) {
     }));
 }
 
-fn with_internal_mode<T>(
-    mode: &Arc<AtomicBool>,
+fn with_authorizer_mode<T>(
+    authorization: &Arc<SqliteAuthorizationState>,
+    allow_schema: bool,
+    allow_transactions: bool,
+    allow_dml: bool,
     operation: impl FnOnce() -> MiniAppPlatformResult<T>,
 ) -> MiniAppPlatformResult<T> {
-    mode.store(true, Ordering::Release);
+    authorization
+        .allow_schema
+        .store(allow_schema, Ordering::Release);
+    authorization
+        .allow_transactions
+        .store(allow_transactions, Ordering::Release);
+    authorization.allow_dml.store(allow_dml, Ordering::Release);
     let result = operation();
-    mode.store(false, Ordering::Release);
+    authorization.allow_schema.store(false, Ordering::Release);
+    authorization
+        .allow_transactions
+        .store(false, Ordering::Release);
+    authorization.allow_dml.store(false, Ordering::Release);
     result
 }
 
@@ -1371,6 +1459,10 @@ fn read_ledger(
         .map_err(database_error)?;
     let rows = statement
         .query_map([], |row| {
+            let ordinal = row.get::<_, i64>(0)?;
+            if ordinal <= 0 {
+                return Err(rusqlite::Error::IntegralValueOutOfRange(0, ordinal));
+            }
             let release_json: String = row.get(3)?;
             let release = serde_json::from_str(&release_json).map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(
@@ -1380,7 +1472,9 @@ fn read_ledger(
                 )
             })?;
             Ok(MiniAppMigrationLedgerEntry {
-                ordinal: row.get::<_, i64>(0)? as u64,
+                ordinal: u64::try_from(ordinal).map_err(|_| {
+                    rusqlite::Error::IntegralValueOutOfRange(0, ordinal)
+                })?,
                 migration_id: MiniAppMigrationId::from(row.get::<_, String>(1)?),
                 migration_digest: DigestHex::from(row.get::<_, String>(2)?),
                 release,
@@ -1391,6 +1485,19 @@ fn read_ledger(
     let entries = rows
         .collect::<Result<Vec<_>, _>>()
         .map_err(database_error)?;
+    for entry in &entries {
+        if entry.migration_id.as_ref().trim().is_empty()
+            || !is_digest_value(entry.migration_digest.as_ref())
+        {
+            return Err(MiniAppPlatformError::Database(
+                "private database migration ledger contains an invalid identity".into(),
+            ));
+        }
+        entry
+            .release
+            .validate()
+            .map_err(|error| MiniAppPlatformError::Database(error.to_string()))?;
+    }
     let ledger_digest = ledger_digest(miniapp_id, handle_id, schema_epoch, &entries)?;
     let ledger = MiniAppMigrationLedger {
         miniapp_id: miniapp_id.clone(),
@@ -1401,6 +1508,13 @@ fn read_ledger(
     };
     ledger.validate()?;
     Ok(ledger)
+}
+
+fn is_digest_value(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn ledger_digest(
@@ -1527,6 +1641,11 @@ fn validate_migration_identifier(
     field: &str,
 ) -> MiniAppPlatformResult<()> {
     if value.is_empty()
+        || value.len() > 128
+        || !value
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
         || !value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
@@ -1535,7 +1654,7 @@ fn validate_migration_identifier(
             "{field} is not a safe SQL identifier"
         )));
     }
-    if value.starts_with("sqlite_") || value.starts_with("__nomifun_") {
+    if is_reserved_host_name(value) {
         return Err(MiniAppPlatformError::InvalidDatabaseRequest(format!(
             "{field} uses a reserved Host namespace"
         )));
@@ -1631,11 +1750,15 @@ fn is_quoted_sql_string(value: &str) -> bool {
 
 fn is_user_table_name(value: &str) -> bool {
     !value.is_empty()
-        && !value.starts_with("sqlite_")
-        && !value.starts_with("__nomifun_")
+        && !is_reserved_host_name(value)
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn is_reserved_host_name(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.starts_with("sqlite_") || lower.starts_with("__nomifun_")
 }
 
 fn quote_identifier(value: &str) -> String {
@@ -1697,6 +1820,24 @@ fn row_to_json(row: &rusqlite::Row<'_>) -> MiniAppPlatformResult<JsonValue> {
 
 fn database_error(error: impl std::fmt::Display) -> MiniAppPlatformError {
     MiniAppPlatformError::Database(error.to_string())
+}
+
+fn install_cancellation_handler(
+    connection: &Connection,
+    cancellation: MiniAppCallCancellation,
+) {
+    connection.progress_handler(1_000, Some(move || cancellation.is_canceled()));
+}
+
+fn canceled_database_error(
+    error: impl std::fmt::Display,
+    cancellation: &MiniAppCallCancellation,
+) -> MiniAppPlatformError {
+    if cancellation.is_canceled() {
+        MiniAppPlatformError::Canceled
+    } else {
+        MiniAppPlatformError::Database(error.to_string())
+    }
 }
 
 fn ensure_not_canceled(

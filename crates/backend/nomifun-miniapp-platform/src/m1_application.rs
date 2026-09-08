@@ -384,36 +384,17 @@ impl MiniAppM1ApplicationService {
                 )
                 .await
             {
-                if let Some(current) = current.clone() {
-                    runtime
-                        .bind_active(current, true)
-                        .await
-                        .map_err(|restore_error| {
-                            MiniAppM1ApplicationError::Invalid(format!(
-                                "Service migration failed ({error}); restoring the previous Service failed: {restore_error}"
-                            ))
-                        })?;
+                if current.is_some() {
+                    self.restore_current_service(
+                        owner_user_id,
+                        snapshot,
+                        "Service migration failed",
+                    )
+                    .await?;
                 }
                 return Err(MiniAppM1ApplicationError::Invalid(format!(
                     "Service migration failed before Publish commit: {error}"
                 )));
-            }
-            if target.is_some() {
-                target = Some(
-                    self.resolve_service_spec(
-                        snapshot,
-                        target_release,
-                        target_active_release_epoch,
-                        owner_user_id,
-                    )
-                    .await?
-                    .ok_or_else(|| {
-                        MiniAppM1ApplicationError::Invalid(
-                            "target Service Release has no Service descriptor after migration"
-                                .into(),
-                        )
-                    })?,
-                );
             }
             if current.is_some() {
                 let active = snapshot.active_release.as_ref().ok_or_else(|| {
@@ -422,8 +403,8 @@ impl MiniAppM1ApplicationService {
                             .into(),
                     )
                 })?;
-                current = Some(
-                    self.resolve_service_spec(
+                current = match self
+                    .resolve_service_spec(
                         snapshot,
                         active,
                         u64::try_from(snapshot.product.active_release_epoch).map_err(|_| {
@@ -433,27 +414,82 @@ impl MiniAppM1ApplicationService {
                         })?,
                         owner_user_id,
                     )
-                    .await?
-                    .ok_or_else(|| {
-                        MiniAppM1ApplicationError::Invalid(
+                    .await
+                {
+                    Ok(Some(spec)) => Some(spec),
+                    Ok(None) => {
+                        self.restore_current_service(
+                            owner_user_id,
+                            snapshot,
+                            "current Service descriptor disappeared after migration",
+                        )
+                        .await?;
+                        return Err(MiniAppM1ApplicationError::Invalid(
                             "current Service Release has no Service descriptor after migration"
                                 .into(),
-                        )
-                    })?,
-                );
+                        ));
+                    }
+                    Err(error) => {
+                        if current.is_some() {
+                            self.restore_current_service(
+                                owner_user_id,
+                                snapshot,
+                                &format!("current Service resolution failed after migration ({error})"),
+                            )
+                            .await?;
+                        }
+                        return Err(error);
+                    }
+                };
+            }
+            if target.is_some() {
+                target = match self
+                    .resolve_service_spec(
+                        snapshot,
+                        target_release,
+                        target_active_release_epoch,
+                        owner_user_id,
+                    )
+                    .await
+                {
+                    Ok(Some(spec)) => Some(spec),
+                    Ok(None) => {
+                        if current.is_some() {
+                            self.restore_current_service(
+                                owner_user_id,
+                                snapshot,
+                                "target Service storage migrated but target descriptor disappeared",
+                            )
+                            .await?;
+                        }
+                        return Err(MiniAppM1ApplicationError::Invalid(
+                            "target Service Release has no Service descriptor after migration"
+                                .into(),
+                        ));
+                    }
+                    Err(error) => {
+                        if current.is_some() {
+                            self.restore_current_service(
+                                owner_user_id,
+                                snapshot,
+                                &format!("target Service resolution failed after migration ({error})"),
+                            )
+                            .await?;
+                        }
+                        return Err(error);
+                    }
+                };
             }
         }
         if let Some(target_spec) = target.as_ref() {
             if let Err(error) = runtime.start(target_spec.clone()).await {
-                if let Some(current) = current.clone() {
-                    runtime
-                        .bind_active(current, true)
-                        .await
-                        .map_err(|restore_error| {
-                            MiniAppM1ApplicationError::Invalid(format!(
-                                "target Service start failed ({error}); restoring the previous Service failed: {restore_error}"
-                            ))
-                        })?;
+                if current.is_some() {
+                    self.restore_current_service(
+                        owner_user_id,
+                        snapshot,
+                        &format!("target Service start failed ({error})"),
+                    )
+                    .await?;
                 }
                 return Err(MiniAppM1ApplicationError::Invalid(format!(
                     "target Service failed readiness before Release commit: {error}"
@@ -465,18 +501,56 @@ impl MiniAppM1ApplicationService {
 
     async fn restore_service_after_failed_cutover(
         &self,
+        owner_user_id: &str,
         snapshot: &MiniAppM1Snapshot,
         current: Option<nomifun_agent_contracts::ResolvedMiniAppServiceSpec>,
     ) -> Result<(), MiniAppM1ApplicationError> {
         let Some(current) = current else {
             return Ok(());
         };
+        let _ = current;
+        self.restore_current_service(
+            owner_user_id,
+            snapshot,
+            "release commit failed",
+        )
+        .await
+    }
+
+    async fn restore_current_service(
+        &self,
+        owner_user_id: &str,
+        snapshot: &MiniAppM1Snapshot,
+        reason: &str,
+    ) -> Result<(), MiniAppM1ApplicationError> {
+        let active = snapshot.active_release.as_ref().ok_or_else(|| {
+            MiniAppM1ApplicationError::Invalid(
+                "cannot restore a Service without its current Active Release".into(),
+            )
+        })?;
+        let current = self
+            .resolve_service_spec(
+                snapshot,
+                active,
+                u64::try_from(snapshot.product.active_release_epoch).map_err(|_| {
+                    MiniAppM1ApplicationError::Invalid(
+                        "MiniApp active release epoch is negative".into(),
+                    )
+                })?,
+                owner_user_id,
+            )
+            .await?
+            .ok_or_else(|| {
+                MiniAppM1ApplicationError::Invalid(
+                    "current Active Release has no Service descriptor".into(),
+                )
+            })?;
         self.service_runtime()
             .await
             .bind_active(current, true)
             .await
             .map_err(|error| MiniAppM1ApplicationError::Invalid(format!(
-                "release commit failed and the previous Service could not be restored for {}: {error}",
+                "{reason}; restoring the previous Service failed for {}: {error}",
                 snapshot.product.miniapp_id
             )))
     }
@@ -1035,7 +1109,11 @@ impl MiniAppM1ApplicationService {
         let committed = match committed {
             Ok(committed) => committed,
             Err(error) => {
-                self.restore_service_after_failed_cutover(&snapshot, current_service)
+                self.restore_service_after_failed_cutover(
+                    owner_user_id,
+                    &snapshot,
+                    current_service,
+                )
                     .await?;
                 return Err(error.into());
             }
@@ -1126,7 +1204,11 @@ impl MiniAppM1ApplicationService {
         let committed = match committed {
             Ok(committed) => committed,
             Err(error) => {
-                self.restore_service_after_failed_cutover(&snapshot, current_service)
+                self.restore_service_after_failed_cutover(
+                    owner_user_id,
+                    &snapshot,
+                    current_service,
+                )
                     .await?;
                 return Err(error.into());
             }
