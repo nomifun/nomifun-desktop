@@ -1440,7 +1440,33 @@ foundation 冒充真实 Service Host：
 
 已通过 DB、Platform、App 和 UI 定向验证；完整命令与结果记录在本台账的 B 收口记录中。
 
-下一切片正式转为 M1-1-01：在复用 N1-1-02/N1-1-03 的 Node supervisor、private IPC、
-watchdog 和 generation fence 基础上，接入一个 MiniApp 一个 dedicated Service Host，
-实现 on-demand/continuous、Service run key、真实 MessageChannel Service target 和
-单 App crash isolation；随后由 M1-1-02 接管 Files/Private SQLite/迁移 ledger。
+`M1-1-01` 与 `M1-1-02` 已在 Windows Desktop 主机完成实现，设计合同保持不变：
+
+- 一个 Service MiniApp 只绑定一个 dedicated Node Host；Host 使用私有 NDJSON IPC，
+  精确校验 Hello、Runtime、Release、module digest、run key、epoch 和 generation，
+  并实现 on-demand/continuous、容量、idle reap、crash backoff、Retry、EOF/timeout/
+  迟到响应拒绝和 process-tree cleanup；
+- Surface 与 Service 调用仍由 Host 绑定 owner、Active Release、epoch、Surface Session
+  和 storage descriptor，HTTP/renderer wire 不携带路径、database path、token 或
+  process identity；
+- 生产 Storage 使用 owner-scoped Files directory、主 M1 DB 中的 KV tombstone/CAS 和
+  独立 Host-managed Private SQLite。Private SQLite 只开放参数化 `query`、`execute`
+  和最多 64 条 DML `batch`，SQLite authorizer 拒绝 Attach/Detach/PRAGMA/DDL/trigger/
+  view/系统表/非主数据库；
+- Migration 是 immutable ID+digest ledger；Publish 时停止旧 Service，在一个 SQLite
+  transaction 内执行 CREATE TABLE/INDEX 或 ADD COLUMN，重新解析 ledger-bound Storage
+  descriptor 并启动目标 Service 后才提交 Active/Previous/Catalog pointer。失败时旧
+  Active 保持不变，已提交的 additive schema 不做反向回滚；
+- Node `context.storage` 通过同一私有 IPC 回调 Host，提供 KV、`filesDir` 和隐藏 DB
+  API；Storage callback 不阻塞 Service actor，并继承 parent invocation cancellation；
+- Runtime switch participant 已对 enabled Service 逐项使用 candidate Node 做真实启动/
+  Hello/停止验证，不再把生产 MiniApp Service 标记为 `NotCovered`。
+
+实现证据已记录在 `PHASE-N1-M1-CLOSURE-TODO.zh.md` 的
+“M1-1-01 / M1-1-02 实现收口”中。M1-1-02 的 SQLite/Node Storage 定向 suite 只需在
+canonical Windows integration 环境运行一次；其他平台只执行自身的 open/query/write/
+migration/package smoke。
+
+当前不提前领取 M1-2：Service Test 的临时 KV/DB/files namespace 与 receipt、Trash/
+Restore/Permanent Delete、Share/Backup Import-as-new、最终 Windows NSIS Candidate 及
+macOS/Linux 原生验证仍按依赖顺序保留。
