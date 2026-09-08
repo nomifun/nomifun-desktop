@@ -313,6 +313,7 @@ impl InMemoryMiniAppServiceHost {
     async fn ensure_started(
         &self,
         slot: &mut ServiceSlot,
+        now_ms: i64,
     ) -> MiniAppPlatformResult<(
         Arc<dyn MiniAppServiceProcess>,
         MiniAppServiceGenerationFence,
@@ -356,17 +357,34 @@ impl InMemoryMiniAppServiceHost {
                 slot.state = MiniAppServiceHostState::Running {
                     fence: fence.clone(),
                 };
+                slot.last_activity_ms = now_ms;
                 Ok((process, fence))
             }
             Err(error) => {
                 self.release_capacity(&slot.spec.miniapp_id, generation)
                     .await;
                 slot.process = None;
-                slot.state = MiniAppServiceHostState::Error {
-                    host_generation: generation,
-                    consecutive_failures: slot.consecutive_failures,
-                    error: error.to_string(),
-                };
+                slot.consecutive_failures = slot.consecutive_failures.saturating_add(1);
+                let error_text = error.to_string();
+                if slot.spec.lifecycle == MiniAppServiceLifecycle::Continuous
+                    && slot.consecutive_failures < MINIAPP_CONTINUOUS_CRASH_FAILURE_THRESHOLD
+                {
+                    let backoff_index = slot.consecutive_failures.saturating_sub(1) as usize;
+                    let backoff_ms = MINIAPP_CONTINUOUS_CRASH_BACKOFF_MS[backoff_index
+                        .min(MINIAPP_CONTINUOUS_CRASH_BACKOFF_MS.len().saturating_sub(1))];
+                    slot.state = MiniAppServiceHostState::Backoff {
+                        host_generation: generation,
+                        consecutive_failures: slot.consecutive_failures,
+                        retry_at_ms: now_ms.saturating_add(backoff_ms),
+                        error: error_text.clone(),
+                    };
+                } else {
+                    slot.state = MiniAppServiceHostState::Error {
+                        host_generation: generation,
+                        consecutive_failures: slot.consecutive_failures,
+                        error: error_text,
+                    };
+                }
                 Err(error)
             }
         }
@@ -452,7 +470,7 @@ impl MiniAppServiceHostPort for InMemoryMiniAppServiceHost {
             && slot.spec.lifecycle == MiniAppServiceLifecycle::Continuous
             && matches!(slot.state, MiniAppServiceHostState::Stopped)
         {
-            self.ensure_started(&mut slot).await?;
+            self.ensure_started(&mut slot, nomifun_common::now_ms()).await?;
         }
         Ok(())
     }
@@ -487,7 +505,7 @@ impl MiniAppServiceHostPort for InMemoryMiniAppServiceHost {
                     call_id.as_ref().into(),
                 ));
             }
-            let (process, fence) = self.ensure_started(&mut slot).await?;
+            let (process, fence) = self.ensure_started(&mut slot, now_ms).await?;
             slot.in_flight.insert(call_id.clone(), cancellation.clone());
             slot.last_activity_ms = now_ms;
             (process, fence)
@@ -570,7 +588,7 @@ impl MiniAppServiceHostPort for InMemoryMiniAppServiceHost {
             ));
         }
         slot.consecutive_failures = 0;
-        self.ensure_started(&mut slot).await?;
+        self.ensure_started(&mut slot, nomifun_common::now_ms()).await?;
         Ok(())
     }
 
@@ -642,7 +660,7 @@ impl MiniAppServiceHostPort for InMemoryMiniAppServiceHost {
             {
                 continue;
             }
-            match self.ensure_started(&mut slot).await {
+            match self.ensure_started(&mut slot, now_ms).await {
                 Ok(_) => result.restarted.push(slot.spec.miniapp_id.clone()),
                 Err(error @ MiniAppPlatformError::ServiceCapacityExhausted { .. }) => {
                     result
@@ -650,8 +668,10 @@ impl MiniAppServiceHostPort for InMemoryMiniAppServiceHost {
                         .push((slot.spec.miniapp_id.clone(), error.to_string()));
                 }
                 Err(error) => {
-                    self.transition_crash(&mut slot, error.to_string(), now_ms)
-                        .await;
+                    if matches!(slot.state, MiniAppServiceHostState::Stopped) {
+                        self.transition_crash(&mut slot, error.to_string(), now_ms)
+                            .await;
+                    }
                     result
                         .blocked
                         .push((slot.spec.miniapp_id.clone(), error.to_string()));

@@ -81,6 +81,11 @@ pub trait MiniAppServiceRuntimeBinding: Send + Sync {
         enabled: bool,
     ) -> MiniAppPlatformResult<()>;
 
+    async fn start(
+        &self,
+        spec: ResolvedMiniAppServiceSpec,
+    ) -> MiniAppPlatformResult<()>;
+
     async fn invoke(
         &self,
         spec: &ResolvedMiniAppServiceSpec,
@@ -98,6 +103,8 @@ pub trait MiniAppServiceRuntimeBinding: Send + Sync {
     async fn retry(&self, miniapp_id: &MiniAppId) -> MiniAppPlatformResult<()>;
 
     async fn state(&self, miniapp_id: &MiniAppId) -> Option<MiniAppServiceHostState>;
+
+    async fn maintain(&self, now_ms: i64) -> MiniAppPlatformResult<()>;
 
     async fn register_module(
         &self,
@@ -133,6 +140,15 @@ impl MiniAppServiceRuntimeBinding for NoopMiniAppServiceRuntime {
         ))
     }
 
+    async fn start(
+        &self,
+        _spec: ResolvedMiniAppServiceSpec,
+    ) -> MiniAppPlatformResult<()> {
+        Err(MiniAppPlatformError::Runtime(
+            "MiniApp Service Runtime is not configured".into(),
+        ))
+    }
+
     async fn invoke(
         &self,
         _spec: &ResolvedMiniAppServiceSpec,
@@ -161,6 +177,10 @@ impl MiniAppServiceRuntimeBinding for NoopMiniAppServiceRuntime {
 
     async fn state(&self, _miniapp_id: &MiniAppId) -> Option<MiniAppServiceHostState> {
         None
+    }
+
+    async fn maintain(&self, _now_ms: i64) -> MiniAppPlatformResult<()> {
+        Ok(())
     }
 
     async fn register_module(
@@ -276,6 +296,21 @@ impl MiniAppServiceRuntimeBinding for ProductionMiniAppServiceRuntimeBinding {
         self.host.bind_active(spec, enabled).await
     }
 
+    async fn start(
+        &self,
+        spec: ResolvedMiniAppServiceSpec,
+    ) -> MiniAppPlatformResult<()> {
+        let miniapp_id = spec.miniapp_id.clone();
+        self.host.bind_active(spec, true).await?;
+        if matches!(
+            self.host.state(&miniapp_id).await,
+            Some(MiniAppServiceHostState::Running { .. })
+        ) {
+            return Ok(());
+        }
+        self.host.retry(&miniapp_id).await
+    }
+
     async fn invoke(
         &self,
         spec: &ResolvedMiniAppServiceSpec,
@@ -304,6 +339,16 @@ impl MiniAppServiceRuntimeBinding for ProductionMiniAppServiceRuntimeBinding {
 
     async fn state(&self, miniapp_id: &MiniAppId) -> Option<MiniAppServiceHostState> {
         self.host.state(miniapp_id).await
+    }
+
+    async fn maintain(&self, now_ms: i64) -> MiniAppPlatformResult<()> {
+        self.host
+            .reap_idle(now_ms, 60_000)
+            .await?;
+        self.host
+            .reconcile_continuous(now_ms)
+            .await
+            .map(|_| ())
     }
 
     async fn register_module(
@@ -402,8 +447,7 @@ mod tests {
     use super::*;
     use nomifun_agent_contracts::{
         MiniAppKvHandleDescriptor, MiniAppKvHandleId, MiniAppServiceLifecycle,
-        MiniAppServiceReleaseDescriptor, MiniAppServiceStorageDescriptor, MiniAppUserAuthorizationId,
-        RuntimeInstallationId, RuntimeTarget, VersionString,
+        MiniAppServiceReleaseDescriptor, MiniAppServiceStorageDescriptor, VersionString,
         MINIAPP_SERVICE_HOST_PROTOCOL_VERSION, MINIAPP_SERVICE_SDK_CONTRACT_VERSION,
         digest_bytes,
     };
@@ -444,6 +488,7 @@ mod tests {
             credential_slots_digest: digest("credentials"),
             resource_contract_digest: digest("resources"),
             resource_bindings_digest: digest("bindings"),
+            bridge_contract_digest: digest("bridge"),
             contribution_set_digest: digest("contributions"),
             storage: MiniAppServiceStorageDescriptor {
                 kv: MiniAppKvHandleDescriptor {

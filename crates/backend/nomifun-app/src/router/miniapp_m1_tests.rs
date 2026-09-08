@@ -406,6 +406,7 @@ fn build_request(workshop: &MiniAppWorkshopDto) -> BuildMiniAppRequest {
             .dependency_lock_digest
             .clone()
             .expect("dependency lock"),
+        service_lifecycle: None,
     }
 }
 
