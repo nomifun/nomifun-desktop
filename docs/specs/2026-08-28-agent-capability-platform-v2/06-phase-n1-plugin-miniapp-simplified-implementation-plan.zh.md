@@ -172,7 +172,7 @@
     不迁移、双写或 alias 旧 `miniapps`；生产路由、MiniApp runtime、Bridge、Storage
     与 UI 仍按 §6 依赖顺序后续实施。
 
-## 2026-09-08 实施切片冻结
+## 2026-09-07 M1-0-02-A 实施切片冻结
 
 本节只冻结本轮 `M1-0-02-A：UI-only Source → Build → Ready` 的实现填充，不扩大
 §4.4～§4.5 已确认的产品合同，也不提前实现 Service、Bridge、Publish 或 Rollback。
