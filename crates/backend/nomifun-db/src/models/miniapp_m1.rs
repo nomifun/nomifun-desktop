@@ -221,6 +221,17 @@ pub struct MiniAppSurfaceSessionRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+#[allow(dead_code)]
+pub struct MiniAppDeletionIntentRow {
+    pub id: i64,
+    pub miniapp_id: String,
+    pub owner_user_id: String,
+    pub operation_id: String,
+    pub started_at_ms: i64,
+    pub last_error_code: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct MiniAppCredentialBindingRow {
     pub id: i64,
     pub miniapp_id: String,

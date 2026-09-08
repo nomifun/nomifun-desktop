@@ -98,6 +98,12 @@ pub trait MiniAppServiceStoragePort: Send + Sync {
         request: MiniAppServiceStorageRequest,
         cancellation: MiniAppCallCancellation,
     ) -> MiniAppPlatformResult<StrictJsonValue>;
+
+    async fn purge_service_storage(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &MiniAppId,
+    ) -> MiniAppPlatformResult<()>;
 }
 
 #[async_trait]
@@ -849,6 +855,52 @@ impl MiniAppServiceStoragePort for InMemoryMiniAppManagedStorage {
         }
         .map_err(|error| MiniAppPlatformError::Runtime(error.to_string()))?;
         Ok(StrictJsonValue(value))
+    }
+
+    async fn purge_service_storage(
+        &self,
+        _owner_user_id: &str,
+        miniapp_id: &MiniAppId,
+    ) -> MiniAppPlatformResult<()> {
+        let mut state = self.state.lock().await;
+        let file_paths = state
+            .files
+            .values()
+            .filter(|descriptor| &descriptor.miniapp_id == miniapp_id)
+            .map(|descriptor| descriptor.absolute_path.clone())
+            .collect::<Vec<_>>();
+        state
+            .kv
+            .retain(|_, namespace| &namespace.descriptor.miniapp_id != miniapp_id);
+        state
+            .files
+            .retain(|_, descriptor| &descriptor.miniapp_id != miniapp_id);
+        state
+            .databases
+            .retain(|_, database| &database.descriptor.miniapp_id != miniapp_id);
+        drop(state);
+        for path in file_paths {
+            let path = std::path::Path::new(&path);
+            match std::fs::symlink_metadata(path) {
+                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                    return Err(MiniAppPlatformError::InvalidState(
+                        "in-memory filesDir fixture changed before purge".into(),
+                    ));
+                }
+                Ok(_) => std::fs::remove_dir_all(path).map_err(|error| {
+                    MiniAppPlatformError::Runtime(format!(
+                        "cannot purge in-memory filesDir fixture: {error}"
+                    ))
+                })?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(MiniAppPlatformError::Runtime(format!(
+                        "cannot inspect in-memory filesDir fixture: {error}"
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 }
 

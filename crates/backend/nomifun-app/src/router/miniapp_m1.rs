@@ -8,12 +8,13 @@ use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use nomifun_api_types::{
     ApiResponse, BuildMiniAppRequest, CancelMiniAppBuildRequest,
-    CloseMiniAppSurfaceRequest, CreateMiniAppProjectRequest,
+    CloseMiniAppSurfaceRequest, CreateMiniAppProjectRequest, DeleteMiniAppRequest,
     DurableOperationSummaryDto,
     MiniAppLibraryResponseDto, MiniAppSurfaceLaunchDescriptorDto,
     MiniAppWorkshopDto, OpenMiniAppSurfaceRequest, PublishMiniAppRequest, RollbackMiniAppRequest,
-    RetryMiniAppServiceRequest, SetMiniAppEnabledRequest, SetMiniAppPublishModeRequest,
-    SetMiniAppServiceRunningRequest,
+    RestoreMiniAppRequest, RetryMiniAppDeleteRequest, RetryMiniAppServiceRequest,
+    SetMiniAppEnabledRequest, SetMiniAppPublishModeRequest, SetMiniAppServiceRunningRequest,
+    TrashMiniAppRequest,
 };
 use nomifun_agent_contracts::{MiniAppBridgeRequest, StrictJsonValue};
 use nomifun_auth::CurrentUser;
@@ -92,6 +93,22 @@ pub(crate) fn miniapp_m1_write_routes(
         .route(
             "/api/miniapps/{miniapp_id}/service/retry",
             post(retry_miniapp_service),
+        )
+        .route(
+            "/api/miniapps/{miniapp_id}/trash",
+            post(trash_miniapp),
+        )
+        .route(
+            "/api/miniapps/{miniapp_id}/restore",
+            post(restore_miniapp),
+        )
+        .route(
+            "/api/miniapps/{miniapp_id}/delete",
+            post(delete_miniapp),
+        )
+        .route(
+            "/api/miniapps/{miniapp_id}/delete/retry",
+            post(retry_delete_miniapp),
         )
         .route(
             "/api/miniapps/{miniapp_id}/surface/open",
@@ -294,6 +311,66 @@ async fn retry_miniapp_service(
     Ok(Json(ApiResponse::ok(workshop)))
 }
 
+async fn trash_miniapp(
+    State(state): State<MiniAppM1RouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(miniapp_id): Path<String>,
+    Json(request): Json<TrashMiniAppRequest>,
+) -> Result<Json<ApiResponse<MiniAppWorkshopDto>>, AppError> {
+    require_route_id("miniapp_id", &miniapp_id, &request.miniapp_id)?;
+    let workshop = state
+        .application
+        .trash(user.id.as_str(), request)
+        .await
+        .map_err(application_error)?;
+    Ok(Json(ApiResponse::ok(workshop)))
+}
+
+async fn restore_miniapp(
+    State(state): State<MiniAppM1RouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(miniapp_id): Path<String>,
+    Json(request): Json<RestoreMiniAppRequest>,
+) -> Result<Json<ApiResponse<MiniAppWorkshopDto>>, AppError> {
+    require_route_id("miniapp_id", &miniapp_id, &request.miniapp_id)?;
+    let workshop = state
+        .application
+        .restore(user.id.as_str(), request)
+        .await
+        .map_err(application_error)?;
+    Ok(Json(ApiResponse::ok(workshop)))
+}
+
+async fn delete_miniapp(
+    State(state): State<MiniAppM1RouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(miniapp_id): Path<String>,
+    Json(request): Json<DeleteMiniAppRequest>,
+) -> Result<Json<ApiResponse<MiniAppLibraryResponseDto>>, AppError> {
+    require_route_id("miniapp_id", &miniapp_id, &request.miniapp_id)?;
+    let library = state
+        .application
+        .delete(user.id.as_str(), request)
+        .await
+        .map_err(application_error)?;
+    Ok(Json(ApiResponse::ok(library)))
+}
+
+async fn retry_delete_miniapp(
+    State(state): State<MiniAppM1RouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(miniapp_id): Path<String>,
+    Json(request): Json<RetryMiniAppDeleteRequest>,
+) -> Result<Json<ApiResponse<MiniAppLibraryResponseDto>>, AppError> {
+    require_route_id("miniapp_id", &miniapp_id, &request.miniapp_id)?;
+    let library = state
+        .application
+        .retry_delete(user.id.as_str(), request)
+        .await
+        .map_err(application_error)?;
+    Ok(Json(ApiResponse::ok(library)))
+}
+
 async fn call_surface_bridge(
     State(state): State<MiniAppM1RouterState>,
     Extension(user): Extension<CurrentUser>,
@@ -384,6 +461,9 @@ fn application_error(error: MiniAppM1ApplicationError) -> AppError {
         }
         MiniAppM1ApplicationError::NotFound => {
             AppError::NotFound("MiniApp".to_owned())
+        }
+        MiniAppM1ApplicationError::Runtime(message) => {
+            AppError::Internal(format!("MiniApp runtime failed: {message}"))
         }
         MiniAppM1ApplicationError::Database(error) => error.into(),
     }

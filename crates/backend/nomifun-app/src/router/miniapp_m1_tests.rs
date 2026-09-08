@@ -1,14 +1,23 @@
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use axum::{Extension, Router};
 use http_body_util::BodyExt;
+use nomifun_agent_contracts::{
+    DigestHex, MiniAppBridgeCallId, MiniAppId, ResolvedMiniAppServiceSpec,
+    StrictJsonValue,
+};
 use nomifun_api_types::{
     ApiResponse, BuildMiniAppRequest, CreateMiniAppProjectRequest,
+    DeleteMiniAppRequest,
     DurableOperationKindDto, DurableOperationOwnerDto,
     DurableOperationStateDto, DurableOperationSummaryDto, ErrorResponse,
-    MiniAppKindDto, MiniAppLibraryResponseDto, MiniAppWorkshopDto,
+    MiniAppKindDto, MiniAppLibraryResponseDto, MiniAppLifecycleDto,
+    MiniAppServiceHealthDto, MiniAppSurfaceLaunchDescriptorDto,
+    MiniAppWorkshopDto, PublishMiniAppRequest, RestoreMiniAppRequest,
+    RetryMiniAppDeleteRequest, SetMiniAppEnabledRequest, TrashMiniAppRequest,
 };
 use nomifun_auth::CurrentUser;
 use nomifun_common::{AppError, UserId};
@@ -17,15 +26,22 @@ use nomifun_db::{
     SqliteMiniAppM1Repository, StartMiniAppM1BuildOperationParams,
     init_database_memory, installation_owner_id,
 };
-use nomifun_miniapp_platform::MiniAppM1ApplicationService;
+use nomifun_miniapp_platform::{
+    MiniAppCallCancellation, MiniAppM1ApplicationService,
+    MiniAppPlatformError, MiniAppPlatformResult, MiniAppServiceHostState,
+    MiniAppServiceRuntimeBinding, MiniAppServiceSpecInput,
+};
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use tower::ServiceExt;
 
 use super::{
     MiniAppM1RouterState, application_error, miniapp_m1_read_routes,
-    miniapp_m1_write_routes,
+    miniapp_m1_surface_routes, miniapp_m1_write_routes,
 };
+
+const MISMATCHED_MINIAPP_ID: &str =
+    "0190f5fe-7c00-7000-8000-000000000993";
 
 #[tokio::test]
 async fn split_routes_preserve_owner_scope_and_api_envelopes() {
@@ -369,6 +385,688 @@ async fn build_and_cancel_routes_use_real_application_state() {
     assert_eq!(error.code, "CONFLICT");
 }
 
+#[tokio::test]
+async fn lifecycle_routes_enforce_identity_owner_state_and_surface_revocation() {
+    let database = init_database_memory().await.unwrap();
+    let owner_id = installation_owner_id(database.pool()).await.unwrap();
+    let other = insert_other_user(&database, "lifecycle-other").await;
+    let repository = Arc::new(
+        SqliteMiniAppM1Repository::new(database.pool().clone()),
+    );
+    let store_root = tempfile::tempdir().unwrap();
+    let application = Arc::new(
+        MiniAppM1ApplicationService::new_with_root(
+            repository.clone(),
+            store_root.path(),
+        )
+        .unwrap(),
+    );
+    let enabled = create_enabled_ui_miniapp(
+        application.as_ref(),
+        &owner_id,
+        "Lifecycle Routes",
+    )
+    .await;
+    let miniapp_id = enabled.miniapp.miniapp_id.clone();
+    let active = enabled
+        .miniapp
+        .releases
+        .active
+        .clone()
+        .expect("enabled MiniApp must retain its Active Release");
+    let persisted = repository
+        .get(&owner_id, &miniapp_id)
+        .await
+        .unwrap()
+        .expect("enabled MiniApp");
+    let source_path = store_root
+        .path()
+        .join("source")
+        .join(
+            persisted
+                .project
+                .managed_source_path
+                .as_ref()
+                .expect("managed source path"),
+        );
+    let release_managed_path: String = nomifun_db::sqlx::query_scalar(
+        "SELECT artifact.managed_path
+         FROM miniapp_release_artifacts artifact
+         JOIN miniapp_releases release
+           ON release.owner_user_id = artifact.owner_user_id
+          AND release.artifact_id = artifact.artifact_id
+         WHERE release.owner_user_id = ? AND release.miniapp_id = ?
+         LIMIT 1",
+    )
+    .bind(&owner_id)
+    .bind(&miniapp_id)
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    let release_path = store_root
+        .path()
+        .join("release")
+        .join(release_managed_path);
+    assert!(source_path.is_dir());
+    assert!(release_path.is_dir());
+
+    let state = MiniAppM1RouterState::new(application);
+    let owner = current_user(&owner_id, "owner");
+    let owner_read =
+        miniapp_m1_read_routes(state.clone()).layer(Extension(owner.clone()));
+    let owner_write =
+        miniapp_m1_write_routes(state.clone()).layer(Extension(owner));
+    let other_write =
+        miniapp_m1_write_routes(state.clone()).layer(Extension(other));
+    let surface_routes = miniapp_m1_surface_routes(state);
+
+    let open_path = format!("/api/miniapps/{miniapp_id}/surface/open");
+    let response = send(
+        &owner_write,
+        Method::POST,
+        &open_path,
+        Some(json!({ "miniapp_id": miniapp_id })),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let surface: MiniAppSurfaceLaunchDescriptorDto =
+        response_data(response).await;
+    let asset_path = format!(
+        "/api/miniapps/{miniapp_id}/surface/assets/{}/{}/{}/{}",
+        surface.surface_capability,
+        surface.active_release_epoch,
+        surface.expected_release_digest,
+        surface.ui_entrypoint
+    );
+    let response =
+        send(&surface_routes, Method::GET, &asset_path, None).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "the issued Surface capability must work before Trash"
+    );
+
+    let trash_path = format!("/api/miniapps/{miniapp_id}/trash");
+    let trash_request = TrashMiniAppRequest {
+        miniapp_id: miniapp_id.clone(),
+        expected_product_revision: enabled.miniapp.product_revision,
+        expected_pointer_revision: enabled.miniapp.releases.pointer_revision,
+        expected_active_release_digest: Some(active.release_digest.clone()),
+    };
+    let mismatched_trash = TrashMiniAppRequest {
+        miniapp_id: MISMATCHED_MINIAPP_ID.to_owned(),
+        ..trash_request.clone()
+    };
+    assert_api_error(
+        send(
+            &owner_write,
+            Method::POST,
+            &trash_path,
+            Some(serde_json::to_value(mismatched_trash).unwrap()),
+        )
+        .await,
+        StatusCode::BAD_REQUEST,
+        "BAD_REQUEST",
+    )
+    .await;
+    assert_api_error(
+        send(
+            &other_write,
+            Method::POST,
+            &trash_path,
+            Some(serde_json::to_value(&trash_request).unwrap()),
+        )
+        .await,
+        StatusCode::NOT_FOUND,
+        "NOT_FOUND",
+    )
+    .await;
+    assert_eq!(
+        send(&surface_routes, Method::GET, &asset_path, None)
+            .await
+            .status(),
+        StatusCode::OK,
+        "rejected Trash requests must not revoke the owner's Surface"
+    );
+
+    let response = send(
+        &owner_write,
+        Method::POST,
+        &trash_path,
+        Some(serde_json::to_value(trash_request).unwrap()),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let trashed: MiniAppWorkshopDto = response_data(response).await;
+    assert_eq!(trashed.miniapp.lifecycle, MiniAppLifecycleDto::Trashed);
+    assert_eq!(
+        trashed.miniapp.product_revision,
+        enabled.miniapp.product_revision + 1
+    );
+    assert_eq!(
+        trashed.miniapp.releases.pointer_revision,
+        enabled.miniapp.releases.pointer_revision
+    );
+    assert!(!trashed.miniapp.surface_available);
+    assert_api_error(
+        send(&surface_routes, Method::GET, &asset_path, None).await,
+        StatusCode::NOT_FOUND,
+        "NOT_FOUND",
+    )
+    .await;
+
+    let restore_path = format!("/api/miniapps/{miniapp_id}/restore");
+    let restore_request = RestoreMiniAppRequest {
+        miniapp_id: miniapp_id.clone(),
+        expected_product_revision: trashed.miniapp.product_revision,
+        expected_lifecycle: MiniAppLifecycleDto::Trashed,
+        expected_pointer_revision: trashed.miniapp.releases.pointer_revision,
+    };
+    let mismatched_restore = RestoreMiniAppRequest {
+        miniapp_id: MISMATCHED_MINIAPP_ID.to_owned(),
+        ..restore_request.clone()
+    };
+    assert_api_error(
+        send(
+            &owner_write,
+            Method::POST,
+            &restore_path,
+            Some(serde_json::to_value(mismatched_restore).unwrap()),
+        )
+        .await,
+        StatusCode::BAD_REQUEST,
+        "BAD_REQUEST",
+    )
+    .await;
+    assert_api_error(
+        send(
+            &other_write,
+            Method::POST,
+            &restore_path,
+            Some(serde_json::to_value(&restore_request).unwrap()),
+        )
+        .await,
+        StatusCode::NOT_FOUND,
+        "NOT_FOUND",
+    )
+    .await;
+    let invalid_restore = RestoreMiniAppRequest {
+        expected_lifecycle: MiniAppLifecycleDto::Disabled,
+        ..restore_request.clone()
+    };
+    assert_api_error(
+        send(
+            &owner_write,
+            Method::POST,
+            &restore_path,
+            Some(serde_json::to_value(invalid_restore).unwrap()),
+        )
+        .await,
+        StatusCode::BAD_REQUEST,
+        "BAD_REQUEST",
+    )
+    .await;
+
+    let response = send(
+        &owner_write,
+        Method::POST,
+        &restore_path,
+        Some(serde_json::to_value(restore_request).unwrap()),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let restored: MiniAppWorkshopDto = response_data(response).await;
+    assert_eq!(
+        restored.miniapp.lifecycle,
+        MiniAppLifecycleDto::Disabled,
+        "Restore must never reactivate an enabled MiniApp"
+    );
+    assert_eq!(
+        restored.miniapp.product_revision,
+        trashed.miniapp.product_revision + 1
+    );
+    assert_eq!(
+        restored.miniapp.releases.pointer_revision,
+        trashed.miniapp.releases.pointer_revision
+    );
+    assert!(!restored.miniapp.surface_available);
+    assert_api_error(
+        send(
+            &owner_write,
+            Method::POST,
+            &open_path,
+            Some(json!({ "miniapp_id": miniapp_id })),
+        )
+        .await,
+        StatusCode::BAD_REQUEST,
+        "BAD_REQUEST",
+    )
+    .await;
+
+    let response = send(
+        &owner_write,
+        Method::POST,
+        &trash_path,
+        Some(
+            serde_json::to_value(TrashMiniAppRequest {
+                miniapp_id: miniapp_id.clone(),
+                expected_product_revision: restored.miniapp.product_revision,
+                expected_pointer_revision: restored
+                    .miniapp
+                    .releases
+                    .pointer_revision,
+                expected_active_release_digest: Some(
+                    active.release_digest.clone(),
+                ),
+            })
+            .unwrap(),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let trashed_again: MiniAppWorkshopDto = response_data(response).await;
+
+    let delete_path = format!("/api/miniapps/{miniapp_id}/delete");
+    let delete_request = DeleteMiniAppRequest {
+        miniapp_id: miniapp_id.clone(),
+        expected_product_revision: trashed_again.miniapp.product_revision,
+        expected_lifecycle: MiniAppLifecycleDto::Trashed,
+        expected_pointer_revision: trashed_again
+            .miniapp
+            .releases
+            .pointer_revision,
+        expected_active_release_digest: Some(active.release_digest),
+    };
+    let mismatched_delete = DeleteMiniAppRequest {
+        miniapp_id: MISMATCHED_MINIAPP_ID.to_owned(),
+        ..delete_request.clone()
+    };
+    assert_api_error(
+        send(
+            &owner_write,
+            Method::POST,
+            &delete_path,
+            Some(serde_json::to_value(mismatched_delete).unwrap()),
+        )
+        .await,
+        StatusCode::BAD_REQUEST,
+        "BAD_REQUEST",
+    )
+    .await;
+    assert_api_error(
+        send(
+            &other_write,
+            Method::POST,
+            &delete_path,
+            Some(serde_json::to_value(&delete_request).unwrap()),
+        )
+        .await,
+        StatusCode::NOT_FOUND,
+        "NOT_FOUND",
+    )
+    .await;
+    let invalid_delete = DeleteMiniAppRequest {
+        expected_lifecycle: MiniAppLifecycleDto::Disabled,
+        ..delete_request.clone()
+    };
+    assert_api_error(
+        send(
+            &owner_write,
+            Method::POST,
+            &delete_path,
+            Some(serde_json::to_value(invalid_delete).unwrap()),
+        )
+        .await,
+        StatusCode::BAD_REQUEST,
+        "BAD_REQUEST",
+    )
+    .await;
+
+    let response = send(
+        &owner_write,
+        Method::POST,
+        &delete_path,
+        Some(serde_json::to_value(delete_request).unwrap()),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let deleted_library: MiniAppLibraryResponseDto =
+        response_data(response).await;
+    assert!(
+        deleted_library
+            .miniapps
+            .iter()
+            .all(|miniapp| miniapp.miniapp_id != miniapp_id)
+    );
+    assert!(repository.get(&owner_id, &miniapp_id).await.unwrap().is_none());
+    assert!(!source_path.exists(), "Delete must purge managed Source");
+    assert!(!release_path.exists(), "Delete must purge managed Release");
+
+    let response = send(&owner_read, Method::GET, "/api/miniapps", None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let reloaded_library: MiniAppLibraryResponseDto =
+        response_data(response).await;
+    assert_eq!(reloaded_library, deleted_library);
+    assert_api_error(
+        send(
+            &owner_read,
+            Method::GET,
+            &format!("/api/miniapps/{miniapp_id}/workshop"),
+            None,
+        )
+        .await,
+        StatusCode::NOT_FOUND,
+        "NOT_FOUND",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn trash_route_stops_the_exact_service_runtime_identity() {
+    let database = init_database_memory().await.unwrap();
+    let owner_id = installation_owner_id(database.pool()).await.unwrap();
+    let repository: Arc<dyn IMiniAppM1Repository> = Arc::new(
+        SqliteMiniAppM1Repository::new(database.pool().clone()),
+    );
+    let store_root = tempfile::tempdir().unwrap();
+    let application = Arc::new(
+        MiniAppM1ApplicationService::new_with_root(
+            repository,
+            store_root.path(),
+        )
+        .unwrap(),
+    );
+    let runtime = Arc::new(LifecycleTestRuntime::new(false));
+    application.install_service_runtime(runtime.clone()).await;
+    let created = application
+        .create(
+            &owner_id,
+            CreateMiniAppProjectRequest {
+                expected_library_revision: 0,
+                display_name: "Service Trash".to_owned(),
+                description: None,
+                kind: MiniAppKindDto::Service,
+            },
+        )
+        .await
+        .unwrap();
+    let miniapp_id = created.miniapp.miniapp_id.clone();
+    let write = miniapp_m1_write_routes(MiniAppM1RouterState::new(application))
+        .layer(Extension(current_user(&owner_id, "owner")));
+
+    let response = send(
+        &write,
+        Method::POST,
+        &format!("/api/miniapps/{miniapp_id}/trash"),
+        Some(
+            serde_json::to_value(TrashMiniAppRequest {
+                miniapp_id: miniapp_id.clone(),
+                expected_product_revision: created.miniapp.product_revision,
+                expected_pointer_revision: created
+                    .miniapp
+                    .releases
+                    .pointer_revision,
+                expected_active_release_digest: None,
+            })
+            .unwrap(),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let trashed: MiniAppWorkshopDto = response_data(response).await;
+    assert_eq!(trashed.miniapp.lifecycle, MiniAppLifecycleDto::Trashed);
+    assert_eq!(
+        trashed.miniapp.service_health,
+        MiniAppServiceHealthDto::Stopped
+    );
+    assert_eq!(runtime.stopped_ids(), vec![miniapp_id]);
+}
+
+#[tokio::test]
+async fn retry_delete_route_recovers_failed_cleanup_with_exact_owner_and_revision() {
+    let database = init_database_memory().await.unwrap();
+    let owner_id = installation_owner_id(database.pool()).await.unwrap();
+    let other = insert_other_user(&database, "retry-other").await;
+    let repository = Arc::new(
+        SqliteMiniAppM1Repository::new(database.pool().clone()),
+    );
+    let store_root = tempfile::tempdir().unwrap();
+    let application = Arc::new(
+        MiniAppM1ApplicationService::new_with_root(
+            repository.clone(),
+            store_root.path(),
+        )
+        .unwrap(),
+    );
+    let runtime = Arc::new(LifecycleTestRuntime::new(true));
+    application.install_service_runtime(runtime.clone()).await;
+    let created = application
+        .create(
+            &owner_id,
+            CreateMiniAppProjectRequest {
+                expected_library_revision: 0,
+                display_name: "Retry Delete".to_owned(),
+                description: None,
+                kind: MiniAppKindDto::UiOnly,
+            },
+        )
+        .await
+        .unwrap();
+    let built = application
+        .build(&owner_id, build_request(&created))
+        .await
+        .unwrap();
+    let miniapp_id = built.miniapp.miniapp_id.clone();
+    let persisted = repository
+        .get(&owner_id, &miniapp_id)
+        .await
+        .unwrap()
+        .expect("built MiniApp");
+    let source_path = store_root
+        .path()
+        .join("source")
+        .join(
+            persisted
+                .project
+                .managed_source_path
+                .as_ref()
+                .expect("managed source path"),
+        );
+    let release_managed_path: String = nomifun_db::sqlx::query_scalar(
+        "SELECT artifact.managed_path
+         FROM miniapp_release_artifacts artifact
+         JOIN miniapp_releases release
+           ON release.owner_user_id = artifact.owner_user_id
+          AND release.artifact_id = artifact.artifact_id
+         WHERE release.owner_user_id = ? AND release.miniapp_id = ?
+         LIMIT 1",
+    )
+    .bind(&owner_id)
+    .bind(&miniapp_id)
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    let release_path = store_root
+        .path()
+        .join("release")
+        .join(release_managed_path);
+
+    let state = MiniAppM1RouterState::new(application);
+    let owner_write = miniapp_m1_write_routes(state.clone())
+        .layer(Extension(current_user(&owner_id, "owner")));
+    let owner_read = miniapp_m1_read_routes(state.clone())
+        .layer(Extension(current_user(&owner_id, "owner")));
+    let other_write =
+        miniapp_m1_write_routes(state).layer(Extension(other));
+
+    let response = send(
+        &owner_write,
+        Method::POST,
+        &format!("/api/miniapps/{miniapp_id}/trash"),
+        Some(
+            serde_json::to_value(TrashMiniAppRequest {
+                miniapp_id: miniapp_id.clone(),
+                expected_product_revision: built.miniapp.product_revision,
+                expected_pointer_revision: built
+                    .miniapp
+                    .releases
+                    .pointer_revision,
+                expected_active_release_digest: None,
+            })
+            .unwrap(),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let trashed: MiniAppWorkshopDto = response_data(response).await;
+
+    let delete_path = format!("/api/miniapps/{miniapp_id}/delete");
+    let delete_request = DeleteMiniAppRequest {
+        miniapp_id: miniapp_id.clone(),
+        expected_product_revision: trashed.miniapp.product_revision,
+        expected_lifecycle: MiniAppLifecycleDto::Trashed,
+        expected_pointer_revision: trashed.miniapp.releases.pointer_revision,
+        expected_active_release_digest: None,
+    };
+    assert_api_error(
+        send(
+            &owner_write,
+            Method::POST,
+            &delete_path,
+            Some(serde_json::to_value(delete_request).unwrap()),
+        )
+        .await,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "INTERNAL_ERROR",
+    )
+    .await;
+    assert_eq!(runtime.purge_calls(), 1);
+    assert!(source_path.is_dir());
+    assert!(release_path.is_dir());
+
+    let deleting = repository
+        .get(&owner_id, &miniapp_id)
+        .await
+        .unwrap()
+        .expect("failed Delete must retain the deleting Product");
+    assert_eq!(deleting.product.lifecycle, "deleting");
+    let failed = repository
+        .list_miniapp_operations(&owner_id, &miniapp_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|operation| operation.kind == "miniapp_permanent_delete")
+        .expect("failed permanent Delete operation");
+    assert_eq!(failed.state, "failed");
+    assert_eq!(
+        failed.last_error_code.as_deref(),
+        Some("miniapp_delete_cleanup_failed")
+    );
+    assert!(failed.finished_at_ms.is_some());
+
+    let retry_path =
+        format!("/api/miniapps/{miniapp_id}/delete/retry");
+    let retry_request = RetryMiniAppDeleteRequest {
+        miniapp_id: miniapp_id.clone(),
+        failed_operation_id: failed.operation_id.clone(),
+        expected_operation_revision: 2,
+    };
+    let mismatched_retry = RetryMiniAppDeleteRequest {
+        miniapp_id: MISMATCHED_MINIAPP_ID.to_owned(),
+        ..retry_request.clone()
+    };
+    assert_api_error(
+        send(
+            &owner_write,
+            Method::POST,
+            &retry_path,
+            Some(serde_json::to_value(mismatched_retry).unwrap()),
+        )
+        .await,
+        StatusCode::BAD_REQUEST,
+        "BAD_REQUEST",
+    )
+    .await;
+    assert_api_error(
+        send(
+            &other_write,
+            Method::POST,
+            &retry_path,
+            Some(serde_json::to_value(&retry_request).unwrap()),
+        )
+        .await,
+        StatusCode::NOT_FOUND,
+        "NOT_FOUND",
+    )
+    .await;
+    let stale_retry = RetryMiniAppDeleteRequest {
+        expected_operation_revision: 1,
+        ..retry_request.clone()
+    };
+    assert_api_error(
+        send(
+            &owner_write,
+            Method::POST,
+            &retry_path,
+            Some(serde_json::to_value(stale_retry).unwrap()),
+        )
+        .await,
+        StatusCode::CONFLICT,
+        "CONFLICT",
+    )
+    .await;
+
+    let response = send(
+        &owner_write,
+        Method::POST,
+        &retry_path,
+        Some(serde_json::to_value(retry_request).unwrap()),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let library: MiniAppLibraryResponseDto = response_data(response).await;
+    assert!(
+        library
+            .miniapps
+            .iter()
+            .all(|miniapp| miniapp.miniapp_id != miniapp_id)
+    );
+    assert_eq!(runtime.purge_calls(), 2);
+    assert!(!source_path.exists());
+    assert!(!release_path.exists());
+    assert!(repository.get(&owner_id, &miniapp_id).await.unwrap().is_none());
+
+    let deletion_states: Vec<String> = nomifun_db::sqlx::query_scalar(
+        "SELECT state FROM product_operations
+         WHERE owner_kind = 'miniapp' AND owner_id = ?
+           AND kind = 'miniapp_permanent_delete'",
+    )
+    .bind(&miniapp_id)
+    .fetch_all(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(deletion_states.len(), 2);
+    assert_eq!(
+        deletion_states
+            .iter()
+            .filter(|state| state.as_str() == "failed")
+            .count(),
+        1
+    );
+    assert_eq!(
+        deletion_states
+            .iter()
+            .filter(|state| state.as_str() == "succeeded")
+            .count(),
+        1
+    );
+
+    let response = send(&owner_read, Method::GET, "/api/miniapps", None).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let reloaded: MiniAppLibraryResponseDto = response_data(response).await;
+    assert_eq!(reloaded, library);
+}
+
 #[test]
 fn application_errors_map_to_app_error_semantics() {
     let invalid = application_error(
@@ -383,12 +1081,242 @@ fn application_errors_map_to_app_error_semantics() {
     );
     assert!(matches!(not_found, AppError::NotFound(_)));
 
+    let runtime = application_error(
+        nomifun_miniapp_platform::MiniAppM1ApplicationError::Runtime(
+            "cleanup failed".to_owned(),
+        ),
+    );
+    assert!(matches!(runtime, AppError::Internal(_)));
+
     let conflict = application_error(
         nomifun_miniapp_platform::MiniAppM1ApplicationError::Database(
             DbError::Conflict("stale library revision".to_owned()),
         ),
     );
     assert!(matches!(conflict, AppError::Conflict(_)));
+}
+
+struct LifecycleTestRuntime {
+    fail_next_purge: AtomicBool,
+    purge_calls: AtomicUsize,
+    stopped_ids: StdMutex<Vec<String>>,
+}
+
+impl LifecycleTestRuntime {
+    fn new(fail_next_purge: bool) -> Self {
+        Self {
+            fail_next_purge: AtomicBool::new(fail_next_purge),
+            purge_calls: AtomicUsize::new(0),
+            stopped_ids: StdMutex::new(Vec::new()),
+        }
+    }
+
+    fn purge_calls(&self) -> usize {
+        self.purge_calls.load(Ordering::SeqCst)
+    }
+
+    fn stopped_ids(&self) -> Vec<String> {
+        self.stopped_ids.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl MiniAppServiceRuntimeBinding for LifecycleTestRuntime {
+    async fn purge_storage(
+        &self,
+        _owner_user_id: &str,
+        _miniapp_id: &MiniAppId,
+    ) -> MiniAppPlatformResult<()> {
+        self.purge_calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail_next_purge.swap(false, Ordering::SeqCst) {
+            return Err(MiniAppPlatformError::Runtime(
+                "injected MiniApp storage purge failure".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn resolve_spec(
+        &self,
+        _input: MiniAppServiceSpecInput,
+    ) -> MiniAppPlatformResult<ResolvedMiniAppServiceSpec> {
+        Err(MiniAppPlatformError::Runtime(
+            "Service resolution is outside this lifecycle route fixture"
+                .to_owned(),
+        ))
+    }
+
+    async fn bind_active(
+        &self,
+        _spec: ResolvedMiniAppServiceSpec,
+        _enabled: bool,
+    ) -> MiniAppPlatformResult<()> {
+        Ok(())
+    }
+
+    async fn start(
+        &self,
+        _spec: ResolvedMiniAppServiceSpec,
+    ) -> MiniAppPlatformResult<()> {
+        Ok(())
+    }
+
+    async fn invoke(
+        &self,
+        _spec: &ResolvedMiniAppServiceSpec,
+        _call_id: MiniAppBridgeCallId,
+        _method: String,
+        _payload: StrictJsonValue,
+        _cancellation: MiniAppCallCancellation,
+        _now_ms: i64,
+    ) -> MiniAppPlatformResult<StrictJsonValue> {
+        Err(MiniAppPlatformError::ServiceUnavailable(
+            "Service invocation is outside this lifecycle route fixture"
+                .to_owned(),
+        ))
+    }
+
+    async fn cancel(
+        &self,
+        _miniapp_id: &MiniAppId,
+        _call_id: &MiniAppBridgeCallId,
+    ) {
+    }
+
+    async fn stop(
+        &self,
+        miniapp_id: &MiniAppId,
+    ) -> MiniAppPlatformResult<()> {
+        self.stopped_ids
+            .lock()
+            .unwrap()
+            .push(miniapp_id.as_ref().to_owned());
+        Ok(())
+    }
+
+    async fn retry(
+        &self,
+        _miniapp_id: &MiniAppId,
+    ) -> MiniAppPlatformResult<()> {
+        Ok(())
+    }
+
+    async fn state(
+        &self,
+        _miniapp_id: &MiniAppId,
+    ) -> Option<MiniAppServiceHostState> {
+        Some(MiniAppServiceHostState::Stopped)
+    }
+
+    async fn maintain(&self, _now_ms: i64) -> MiniAppPlatformResult<()> {
+        Ok(())
+    }
+
+    async fn register_module(
+        &self,
+        _miniapp_id: MiniAppId,
+        _release_digest: DigestHex,
+        _module_path: std::path::PathBuf,
+    ) -> MiniAppPlatformResult<()> {
+        Ok(())
+    }
+}
+
+async fn create_enabled_ui_miniapp(
+    application: &MiniAppM1ApplicationService,
+    owner_id: &str,
+    display_name: &str,
+) -> MiniAppWorkshopDto {
+    let created = application
+        .create(
+            owner_id,
+            CreateMiniAppProjectRequest {
+                expected_library_revision: 0,
+                display_name: display_name.to_owned(),
+                description: None,
+                kind: MiniAppKindDto::UiOnly,
+            },
+        )
+        .await
+        .unwrap();
+    let built = application
+        .build(owner_id, build_request(&created))
+        .await
+        .unwrap();
+    let ready = built
+        .ready
+        .as_ref()
+        .expect("Build must commit Ready")
+        .release
+        .clone();
+    let published = application
+        .publish(
+            owner_id,
+            PublishMiniAppRequest {
+                miniapp_id: built.miniapp.miniapp_id.clone(),
+                expected_product_revision: built.miniapp.product_revision,
+                expected_pointer_revision: built
+                    .miniapp
+                    .releases
+                    .pointer_revision,
+                expected_active_release_epoch: built
+                    .miniapp
+                    .releases
+                    .active_release_epoch,
+                ready_release_id: ready.release_id,
+                expected_ready_release_digest: ready.release_digest,
+                expected_active_release_digest: None,
+                expected_service_test_receipt_id: None,
+                acknowledge_test_warning: false,
+            },
+        )
+        .await
+        .unwrap();
+    let active = published
+        .miniapp
+        .releases
+        .active
+        .as_ref()
+        .expect("Publish must commit Active");
+    application
+        .set_enabled(
+            owner_id,
+            SetMiniAppEnabledRequest {
+                miniapp_id: published.miniapp.miniapp_id.clone(),
+                expected_product_revision: published.miniapp.product_revision,
+                expected_pointer_revision: published
+                    .miniapp
+                    .releases
+                    .pointer_revision,
+                expected_active_release_digest: Some(
+                    active.release_digest.clone(),
+                ),
+                enabled: true,
+            },
+        )
+        .await
+        .unwrap()
+}
+
+async fn insert_other_user(
+    database: &nomifun_db::Database,
+    username: &str,
+) -> CurrentUser {
+    let user = CurrentUser {
+        id: UserId::new(),
+        username: username.to_owned(),
+    };
+    nomifun_db::sqlx::query(
+        "INSERT INTO users (
+            user_id, username, password_hash, jwt_secret, created_at, updated_at
+         ) VALUES (?, ?, '', '', 1, 1)",
+    )
+    .bind(user.id.as_str())
+    .bind(&user.username)
+    .execute(database.pool())
+    .await
+    .unwrap();
+    user
 }
 
 fn build_request(workshop: &MiniAppWorkshopDto) -> BuildMiniAppRequest {
@@ -445,6 +1373,16 @@ where
     let response: ApiResponse<T> = response_json(response).await;
     assert!(response.success);
     response.data.expect("success response must contain data")
+}
+
+async fn assert_api_error(
+    response: axum::response::Response,
+    expected_status: StatusCode,
+    expected_code: &str,
+) {
+    assert_eq!(response.status(), expected_status);
+    let error: ErrorResponse = response_json(response).await;
+    assert_eq!(error.code, expected_code);
 }
 
 async fn response_json<T>(response: axum::response::Response) -> T

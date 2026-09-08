@@ -6,16 +6,20 @@
 
 import type {
   BuildMiniAppRequest,
+  DeleteMiniAppRequest,
   MiniAppPublishMode,
   MiniAppServiceLifecycle,
   MiniAppSurfaceLaunchDescriptor,
   MiniAppSummary,
   MiniAppWorkshop,
   PublishMiniAppRequest,
+  RestoreMiniAppRequest,
+  RetryMiniAppDeleteRequest,
   RollbackMiniAppRequest,
   SetMiniAppEnabledRequest,
   SetMiniAppPublishModeRequest,
   SetMiniAppServiceRunningRequest,
+  TrashMiniAppRequest,
   RetryMiniAppServiceRequest,
 } from '@/common/types/miniAppPlatform';
 
@@ -290,6 +294,81 @@ export function miniAppRetryServiceRequest(
   if (!request) return null;
   const { running: _running, ...retry } = request;
   return retry;
+}
+
+export function miniAppTrashRequest(
+  workshop: MiniAppWorkshop
+): TrashMiniAppRequest | null {
+  const { miniapp } = workshop;
+  if (
+    (miniapp.lifecycle !== 'enabled' && miniapp.lifecycle !== 'disabled') ||
+    workshop.active_operation?.state === 'running'
+  ) {
+    return null;
+  }
+  return {
+    miniapp_id: miniapp.miniapp_id,
+    expected_product_revision: miniapp.product_revision,
+    expected_pointer_revision: miniapp.releases.pointer_revision,
+    ...(miniapp.releases.active
+      ? {
+          expected_active_release_digest:
+            miniapp.releases.active.release_digest,
+        }
+      : {}),
+  };
+}
+
+export function miniAppRestoreRequest(
+  workshop: MiniAppWorkshop
+): RestoreMiniAppRequest | null {
+  const { miniapp } = workshop;
+  if (
+    miniapp.lifecycle !== 'trashed' ||
+    workshop.active_operation?.state === 'running'
+  ) {
+    return null;
+  }
+  return {
+    miniapp_id: miniapp.miniapp_id,
+    expected_product_revision: miniapp.product_revision,
+    expected_lifecycle: 'trashed',
+    expected_pointer_revision: miniapp.releases.pointer_revision,
+  };
+}
+
+export function miniAppDeleteRequest(
+  workshop: MiniAppWorkshop
+): DeleteMiniAppRequest | null {
+  const restore = miniAppRestoreRequest(workshop);
+  if (!restore) return null;
+  return {
+    ...restore,
+    ...(workshop.miniapp.releases.active
+      ? {
+          expected_active_release_digest:
+            workshop.miniapp.releases.active.release_digest,
+        }
+      : {}),
+  };
+}
+
+export function miniAppRetryDeleteRequest(
+  workshop: MiniAppWorkshop
+): RetryMiniAppDeleteRequest | null {
+  const operation = workshop.active_operation;
+  if (
+    workshop.miniapp.lifecycle !== 'deleting' ||
+    operation?.kind !== 'miniapp_permanent_delete' ||
+    operation.state !== 'failed'
+  ) {
+    return null;
+  }
+  return {
+    miniapp_id: workshop.miniapp.miniapp_id,
+    failed_operation_id: operation.operation_id,
+    expected_operation_revision: operation.operation_revision,
+  };
 }
 
 export function miniAppCanOpenSurface(workshop: MiniAppWorkshop): boolean {

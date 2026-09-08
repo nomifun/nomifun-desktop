@@ -22,6 +22,10 @@
     "rollback": "Rollback",
     "enable": "Enable",
     "disable": "Disable",
+    "trash": "Move to Trash",
+    "restore": "Restore",
+    "deletePermanently": "Delete Permanently",
+    "retryDelete": "Retry Delete",
     "openSurface": "Open Surface",
     "reloadSurface": "Reload Surface",
     "closeSurface": "Close Surface",
@@ -44,6 +48,10 @@
     "rollbackUnavailable": "There is no exact Active/Previous pair available for Rollback.",
     "enableUnavailable": "The MiniApp needs an Active Release before it can be enabled.",
     "disableUnavailable": "The MiniApp is already disabled or cannot change lifecycle now.",
+    "trashUnavailable": "This MiniApp cannot be moved to Trash in its current lifecycle or operation state.",
+    "restoreUnavailable": "Only a trashed MiniApp without a running operation can be restored.",
+    "deleteUnavailable": "Permanent deletion is available only for a trashed MiniApp without a running operation.",
+    "retryDeleteUnavailable": "Retry Delete requires the latest permanent-delete operation to be failed.",
     "autoPublishRequiresActive": "Auto Publish is available only after a UI-only MiniApp has an Active Release.",
     "surfaceUnavailable": "Surface requires an enabled MiniApp with an Active Release.",
     "surfaceDescriptorMismatch": "The Surface descriptor no longer matches the current Active Release.",
@@ -60,7 +68,15 @@
     "rollbackTitle": "Rollback to Previous Release?",
     "rollbackBody": "Active {{current}} will be exchanged with Previous {{target}}. Stored data is not rolled back.",
     "disableTitle": "Disable this MiniApp?",
-    "disableBody": "The Active Release remains retained, but Surface becomes unavailable until you enable the MiniApp again."
+    "disableBody": "The Active Release remains retained, but Surface becomes unavailable until you enable the MiniApp again.",
+    "trashTitle": "Move “{{name}}” to Trash?",
+    "trashBody": "Surface access is revoked immediately and a running Service is stopped. Source, Releases, and managed data are retained so you can restore the MiniApp later.",
+    "restoreTitle": "Restore “{{name}}”?",
+    "restoreBody": "The MiniApp returns in Disabled state. Surface access and its Service remain stopped until you explicitly enable or start them.",
+    "deleteTitle": "Permanently delete “{{name}}”?",
+    "deleteBody": "This permanently removes Source, Releases, KV, Files, and Private DB data. The operation cannot be canceled or undone.",
+    "retryDeleteTitle": "Retry deletion of “{{name}}”?",
+    "retryDeleteBody": "Cleanup continues from the recorded failure. Permanent deletion remains non-cancelable, and the MiniApp disappears after cleanup completes."
   },
   "create": {
     "action": "Create mini-app",
@@ -263,6 +279,11 @@
       "uiOnly": "This is a UI-only mini-app. Rust terminates Host KV directly, and the Node process count must remain zero.",
       "noDescriptor": "There is no runnable Service Release yet."
     },
+    "deletion": {
+      "trashedNotice": "This MiniApp is in Trash. Its Surface is revoked and its Service is stopped. Restore returns it to Disabled, or permanently delete all managed data.",
+      "runningNotice": "Permanent deletion is running and cannot be canceled. This page checks progress automatically and returns to Library when cleanup finishes.",
+      "failedNotice": "Permanent deletion stopped after a cleanup failure. The deletion intent and operation record are retained; use Retry Delete to continue."
+    },
     "operation": {
       "title": "Current Operation",
       "hint": "Only Build, Import, Export, and permanent deletion are durable Operations.",
@@ -272,6 +293,12 @@
       "started": "Started",
       "emptyTitle": "No active Operation",
       "emptyBody": "Short transactional commands are not disguised as long-running jobs.",
+      "kindValue": {
+        "build": "Build",
+        "import": "Import",
+        "export": "Export",
+        "permanentDelete": "Permanent deletion"
+      },
       "state": {
         "running": "Running",
         "succeeded": "Succeeded",
@@ -296,6 +323,10 @@
     "manualPublishEnabled": "Manual Publish enabled",
     "serviceStarted": "Service start requested",
     "serviceStopped": "Service stopped",
-    "serviceRetried": "Service retry requested"
+    "serviceRetried": "Service retry requested",
+    "trashed": "MiniApp moved to Trash",
+    "restored": "MiniApp restored in Disabled state",
+    "deletedPermanently": "MiniApp permanently deleted",
+    "deleteRetryCompleted": "Permanent deletion completed after retry"
   }
 }

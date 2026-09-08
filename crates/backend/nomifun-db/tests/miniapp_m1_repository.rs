@@ -15,10 +15,12 @@ use nomifun_agent_contracts::{
     MINIAPP_SERVICE_SDK_CONTRACT_VERSION, canonical_ui_tree_digest, digest_bytes, digest_payload,
 };
 use nomifun_db::{
+    BeginMiniAppM1DeleteParams,
     CancelMiniAppM1BuildOperationParams, CloseMiniAppM1SurfaceSessionParams,
     CommitMiniAppM1LifecycleParams,
     CreateMiniAppM1Params, CreateMiniAppM1WithSourceParams,
     ExecuteMiniAppM1SurfaceKvParams,
+    FailMiniAppM1DeleteParams, FinalizeMiniAppM1DeleteParams,
     FinishMiniAppM1BuildAndRecordReadyParams, FinishMiniAppM1BuildOperationParams,
     IMiniAppM1Repository, MiniAppM1AutoPublishGuard, MiniAppM1Kind,
     MiniAppM1ManagedSourceLineage, MiniAppM1ProjectSourceState,
@@ -26,10 +28,11 @@ use nomifun_db::{
     MiniAppReleaseArtifactRow, MiniAppReleaseRow,
     OpenMiniAppM1SurfaceSessionParams, ProductOperationState,
     PublishMiniAppM1ReadyParams, ResolveMiniAppM1SurfaceSessionParams,
+    RestartMiniAppM1DeleteParams, RestoreMiniAppM1Params,
     RollbackMiniAppM1PreviousParams, SetMiniAppM1AutoPublishParams,
     SqliteMiniAppM1Repository,
     StartMiniAppM1BuildOperationParams,
-    UpdateMiniAppM1ProjectSourceParams, installation_owner_id,
+    TrashMiniAppM1Params, UpdateMiniAppM1ProjectSourceParams, installation_owner_id,
 };
 use serde_json::json;
 use sqlx::migrate::{Migrate, Migrator};
@@ -553,6 +556,467 @@ async fn create_editable_app(
         })
         .await
         .unwrap()
+}
+
+async fn create_enabled_service_app(
+    repository: &SqliteMiniAppM1Repository,
+    owner: &str,
+) -> MiniAppM1Snapshot {
+    let source = managed_source("sources/owner/service/source", 'b', 'c', 1);
+    repository
+        .create_with_source(&CreateMiniAppM1WithSourceParams {
+            create: create_params(
+                owner,
+                SERVICE_MINIAPP_ID,
+                SERVICE_PROJECT_ID,
+                0,
+                MiniAppM1Kind::Service,
+                10,
+            ),
+            source: source.clone(),
+        })
+        .await
+        .unwrap();
+    let operation_id = Uuid::now_v7().to_string();
+    start_build(
+        repository,
+        owner,
+        SERVICE_MINIAPP_ID,
+        SERVICE_PROJECT_ID,
+        1,
+        &source,
+        &operation_id,
+        20,
+    )
+    .await;
+    let artifact = service_artifact(
+        owner,
+        &Uuid::now_v7().to_string(),
+        "delete-service",
+        21,
+        false,
+        false,
+        false,
+    );
+    let artifact_digest = artifact.artifact_digest.clone();
+    let release_id = Uuid::now_v7().to_string();
+    let release = release(
+        owner,
+        SERVICE_MINIAPP_ID,
+        SERVICE_PROJECT_ID,
+        &artifact,
+        &release_id,
+        &artifact_digest,
+        &operation_id,
+        &source.source_head_digest,
+        &source.dependency_lock_digest,
+        22,
+    );
+    let ready = repository
+        .finish_build_and_record_ready(&FinishMiniAppM1BuildAndRecordReadyParams {
+            owner_user_id: owner.to_owned(),
+            miniapp_id: SERVICE_MINIAPP_ID.to_owned(),
+            project_id: SERVICE_PROJECT_ID.to_owned(),
+            operation_id: operation_id.clone(),
+            expected_product_revision: 1,
+            expected_pointer_revision: 1,
+            expected_project_revision: 1,
+            expected_build_generation: 1,
+            artifact,
+            release,
+            bounded_log_tail: Vec::new(),
+            finished_at_ms: 23,
+        })
+        .await
+        .unwrap();
+    let published = repository
+        .publish_ready_cas(&PublishMiniAppM1ReadyParams {
+            owner_user_id: owner.to_owned(),
+            miniapp_id: SERVICE_MINIAPP_ID.to_owned(),
+            expected_product_revision: ready.product.product_revision,
+            expected_pointer_revision: ready.product.pointer_revision,
+            expected_active_release_epoch: 0,
+            expected_ready_release_id: release_id,
+            expected_ready_release_digest: artifact_digest,
+            expected_active_release_digest: None,
+            target_catalog_digest: "d".repeat(64),
+            auto_publish_guard: None,
+            updated_at: 24,
+        })
+        .await
+        .unwrap();
+    repository
+        .commit_lifecycle_cas(&CommitMiniAppM1LifecycleParams {
+            owner_user_id: owner.to_owned(),
+            miniapp_id: SERVICE_MINIAPP_ID.to_owned(),
+            expected_product_revision: published.product.product_revision,
+            expected_pointer_revision: published.product.pointer_revision,
+            expected_active_release_digest: published.product.active_release_digest.clone(),
+            enabled: true,
+            updated_at: 25,
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn trash_and_restore_are_exact_owner_scoped_lifecycle_transactions() {
+    let database = init_miniapp_test_database().await;
+    let owner = installation_owner_id(database.pool()).await.unwrap();
+    let other_owner = insert_other_owner(database.pool()).await;
+    let repository = SqliteMiniAppM1Repository::new(database.pool().clone());
+    let enabled = create_enabled_service_app(&repository, &owner).await;
+    let active_release_id = enabled.product.active_release_id.clone().unwrap();
+    let active_release_digest = enabled.product.active_release_digest.clone().unwrap();
+    repository
+        .open_surface_session_cas(&OpenMiniAppM1SurfaceSessionParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: SERVICE_MINIAPP_ID.to_owned(),
+            surface_session_id: Uuid::now_v7().to_string(),
+            capability_digest: "7".repeat(64),
+            expected_product_revision: enabled.product.product_revision,
+            expected_pointer_revision: enabled.product.pointer_revision,
+            expected_active_release_id: active_release_id,
+            expected_active_release_digest: active_release_digest.clone(),
+            expected_active_release_epoch: enabled.product.active_release_epoch,
+            issued_at_ms: 26,
+        })
+        .await
+        .unwrap();
+
+    let cross_owner = repository
+        .trash_cas(&TrashMiniAppM1Params {
+            owner_user_id: other_owner,
+            miniapp_id: SERVICE_MINIAPP_ID.to_owned(),
+            expected_product_revision: enabled.product.product_revision,
+            expected_pointer_revision: enabled.product.pointer_revision,
+            expected_active_release_digest: Some(active_release_digest.clone()),
+            updated_at: 27,
+        })
+        .await
+        .unwrap_err();
+    assert!(cross_owner.to_string().contains("not found"));
+
+    let stale = repository
+        .trash_cas(&TrashMiniAppM1Params {
+            owner_user_id: owner.clone(),
+            miniapp_id: SERVICE_MINIAPP_ID.to_owned(),
+            expected_product_revision: enabled.product.product_revision - 1,
+            expected_pointer_revision: enabled.product.pointer_revision,
+            expected_active_release_digest: Some(active_release_digest.clone()),
+            updated_at: 27,
+        })
+        .await
+        .unwrap_err();
+    assert!(stale.to_string().contains("CAS"));
+
+    let trashed = repository
+        .trash_cas(&TrashMiniAppM1Params {
+            owner_user_id: owner.clone(),
+            miniapp_id: SERVICE_MINIAPP_ID.to_owned(),
+            expected_product_revision: enabled.product.product_revision,
+            expected_pointer_revision: enabled.product.pointer_revision,
+            expected_active_release_digest: Some(active_release_digest),
+            updated_at: 27,
+        })
+        .await
+        .unwrap();
+    assert_eq!(trashed.product.lifecycle, "trashed");
+    assert_eq!(
+        trashed.product.product_revision,
+        enabled.product.product_revision + 1
+    );
+    assert!(trashed.catalog_publication.is_none());
+    let surfaces: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM miniapp_surface_sessions WHERE miniapp_id = ?",
+    )
+    .bind(SERVICE_MINIAPP_ID)
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(surfaces, 0);
+
+    let restored = repository
+        .restore_cas(&RestoreMiniAppM1Params {
+            owner_user_id: owner,
+            miniapp_id: SERVICE_MINIAPP_ID.to_owned(),
+            expected_product_revision: trashed.product.product_revision,
+            expected_pointer_revision: trashed.product.pointer_revision,
+            expected_lifecycle: "trashed".to_owned(),
+            updated_at: 28,
+        })
+        .await
+        .unwrap();
+    assert_eq!(restored.product.lifecycle, "disabled");
+    assert_eq!(
+        restored.product.product_revision,
+        trashed.product.product_revision + 1
+    );
+    assert!(restored.catalog_publication.is_none());
+}
+
+#[tokio::test]
+async fn deletion_intent_failure_restart_and_finalize_preserve_operation_history() {
+    let database = init_miniapp_test_database().await;
+    let owner = installation_owner_id(database.pool()).await.unwrap();
+    let other_owner = insert_other_owner(database.pool()).await;
+    let repository = SqliteMiniAppM1Repository::new(database.pool().clone());
+    let enabled = create_enabled_service_app(&repository, &owner).await;
+    repository
+        .put_kv_cas(
+            &owner,
+            SERVICE_MINIAPP_ID,
+            "service",
+            "retained",
+            &json!({"value": 1}),
+            None,
+            26,
+        )
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO miniapp_credential_bindings (
+            miniapp_id, owner_user_id, slot_key, credential_id, created_at, updated_at
+         ) VALUES (?, ?, 'token', 'credential-reference', 26, 26)",
+    )
+    .bind(SERVICE_MINIAPP_ID)
+    .bind(&owner)
+    .execute(database.pool())
+    .await
+    .unwrap();
+    let trashed = repository
+        .trash_cas(&TrashMiniAppM1Params {
+            owner_user_id: owner.clone(),
+            miniapp_id: SERVICE_MINIAPP_ID.to_owned(),
+            expected_product_revision: enabled.product.product_revision,
+            expected_pointer_revision: enabled.product.pointer_revision,
+            expected_active_release_digest: enabled.product.active_release_digest.clone(),
+            updated_at: 27,
+        })
+        .await
+        .unwrap();
+    let first_operation_id = Uuid::now_v7().to_string();
+    let deleting = repository
+        .begin_delete(&BeginMiniAppM1DeleteParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: SERVICE_MINIAPP_ID.to_owned(),
+            expected_product_revision: trashed.product.product_revision,
+            expected_pointer_revision: trashed.product.pointer_revision,
+            expected_active_release_digest: trashed.product.active_release_digest.clone(),
+            operation_id: first_operation_id.clone(),
+            started_at_ms: 28,
+        })
+        .await
+        .unwrap();
+    assert_eq!(deleting.product.lifecycle, "deleting");
+    let first = repository
+        .get_miniapp_operation(&owner, SERVICE_MINIAPP_ID, &first_operation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.kind, "miniapp_permanent_delete");
+    assert_eq!(first.state, "running");
+    assert_eq!(first.progress_percent, None);
+    assert!(repository
+        .get_miniapp_operation(&other_owner, SERVICE_MINIAPP_ID, &first_operation_id)
+        .await
+        .unwrap()
+        .is_none());
+
+    repository
+        .fail_delete(&FailMiniAppM1DeleteParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: SERVICE_MINIAPP_ID.to_owned(),
+            operation_id: first_operation_id.clone(),
+            expected_operation_revision: 1,
+            error_code: "MINIAPP_DELETE_STORAGE_FAILED".to_owned(),
+            updated_at: 29,
+        })
+        .await
+        .unwrap();
+    let failed = repository
+        .get_miniapp_operation(&owner, SERVICE_MINIAPP_ID, &first_operation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(failed.state, "failed");
+    assert_eq!(
+        failed.last_error_code.as_deref(),
+        Some("MINIAPP_DELETE_STORAGE_FAILED")
+    );
+
+    let second_operation_id = Uuid::now_v7().to_string();
+    repository
+        .restart_delete(&RestartMiniAppM1DeleteParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: SERVICE_MINIAPP_ID.to_owned(),
+            expected_failed_operation_id: first_operation_id.clone(),
+            new_operation_id: second_operation_id.clone(),
+            started_at_ms: 30,
+        })
+        .await
+        .unwrap();
+    let operations = repository
+        .list_miniapp_operations(&owner, SERVICE_MINIAPP_ID)
+        .await
+        .unwrap();
+    assert!(operations.iter().any(|operation| {
+        operation.operation_id == first_operation_id && operation.state == "failed"
+    }));
+    assert!(operations.iter().any(|operation| {
+        operation.operation_id == second_operation_id && operation.state == "running"
+    }));
+
+    let wrong_owner_finalize = repository
+        .finalize_delete(&FinalizeMiniAppM1DeleteParams {
+            owner_user_id: other_owner,
+            miniapp_id: SERVICE_MINIAPP_ID.to_owned(),
+            operation_id: second_operation_id.clone(),
+            expected_operation_revision: 1,
+            finished_at_ms: 31,
+        })
+        .await
+        .unwrap_err();
+    assert!(wrong_owner_finalize.to_string().contains("not found"));
+
+    sqlx::query(
+        "DELETE FROM miniapp_kv
+         WHERE owner_user_id = ? AND miniapp_id = ? AND namespace = 'service'",
+    )
+    .bind(&owner)
+    .bind(SERVICE_MINIAPP_ID)
+    .execute(database.pool())
+    .await
+    .unwrap();
+    let revision = repository
+        .finalize_delete(&FinalizeMiniAppM1DeleteParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: SERVICE_MINIAPP_ID.to_owned(),
+            operation_id: second_operation_id.clone(),
+            expected_operation_revision: 1,
+            finished_at_ms: 31,
+        })
+        .await
+        .unwrap();
+    assert_eq!(revision, deleting.library_revision + 3);
+    assert!(repository
+        .get(&owner, SERVICE_MINIAPP_ID)
+        .await
+        .unwrap()
+        .is_none());
+    for table in [
+        "miniapp_surface_sessions",
+        "miniapp_catalog_publications",
+        "miniapp_publish_authorizations",
+        "miniapp_credential_bindings",
+        "miniapp_kv",
+        "miniapp_build_operation_lineage",
+        "miniapp_projects",
+        "miniapp_releases",
+        "miniapp_release_artifacts",
+        "miniapp_deletion_intents",
+    ] {
+        let count: i64 =
+            sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+                .fetch_one(database.pool())
+                .await
+                .unwrap();
+        assert_eq!(count, 0, "{table} must be cleaned");
+    }
+    let first_history: String = sqlx::query_scalar(
+        "SELECT state FROM product_operations WHERE operation_id = ?",
+    )
+    .bind(first_operation_id)
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    let second_history: String = sqlx::query_scalar(
+        "SELECT state FROM product_operations WHERE operation_id = ?",
+    )
+    .bind(second_operation_id)
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(first_history, "failed");
+    assert_eq!(second_history, "succeeded");
+}
+
+#[tokio::test]
+async fn deleting_snapshot_fails_closed_without_its_exact_intent() {
+    let database = init_miniapp_test_database().await;
+    let owner = installation_owner_id(database.pool()).await.unwrap();
+    let repository = SqliteMiniAppM1Repository::new(database.pool().clone());
+    let enabled = create_enabled_service_app(&repository, &owner).await;
+    let trashed = repository
+        .trash_cas(&TrashMiniAppM1Params {
+            owner_user_id: owner.clone(),
+            miniapp_id: SERVICE_MINIAPP_ID.to_owned(),
+            expected_product_revision: enabled.product.product_revision,
+            expected_pointer_revision: enabled.product.pointer_revision,
+            expected_active_release_digest: enabled.product.active_release_digest,
+            updated_at: 27,
+        })
+        .await
+        .unwrap();
+    let operation_id = Uuid::now_v7().to_string();
+    repository
+        .begin_delete(&BeginMiniAppM1DeleteParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: SERVICE_MINIAPP_ID.to_owned(),
+            expected_product_revision: trashed.product.product_revision,
+            expected_pointer_revision: trashed.product.pointer_revision,
+            expected_active_release_digest: trashed.product.active_release_digest,
+            operation_id: operation_id.clone(),
+            started_at_ms: 28,
+        })
+        .await
+        .unwrap();
+    sqlx::query(
+        "DELETE FROM miniapp_deletion_intents
+         WHERE owner_user_id = ? AND miniapp_id = ?",
+    )
+    .bind(&owner)
+    .bind(SERVICE_MINIAPP_ID)
+    .execute(database.pool())
+    .await
+    .unwrap();
+    let error = repository
+        .get(&owner, SERVICE_MINIAPP_ID)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("without an exact deletion intent"));
+    let library_error = repository.library(&owner).await.unwrap_err();
+    assert!(library_error
+        .to_string()
+        .contains("without an exact deletion intent"));
+
+    sqlx::query(
+        "INSERT INTO miniapp_deletion_intents (
+            miniapp_id, owner_user_id, operation_id, started_at_ms, last_error_code
+         ) VALUES (?, ?, ?, 28, NULL)",
+    )
+    .bind(SERVICE_MINIAPP_ID)
+    .bind(&owner)
+    .bind(&operation_id)
+    .execute(database.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE miniapp_products SET lifecycle = 'trashed'
+         WHERE owner_user_id = ? AND miniapp_id = ?",
+    )
+    .bind(&owner)
+    .bind(SERVICE_MINIAPP_ID)
+    .execute(database.pool())
+    .await
+    .unwrap();
+    let outside = repository
+        .get(&owner, SERVICE_MINIAPP_ID)
+        .await
+        .unwrap_err();
+    assert!(outside
+        .to_string()
+        .contains("intent exists outside the deleting lifecycle"));
 }
 
 #[tokio::test]

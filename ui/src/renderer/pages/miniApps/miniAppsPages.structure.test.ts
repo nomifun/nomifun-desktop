@@ -92,7 +92,14 @@ describe('MiniApp M1 product surfaces', () => {
     expect(
       runnerSource.includes('ipcBridge.miniapps.cancelBuild.invoke({')
     ).toBe(true);
-    expect(runnerSource.includes('ipcBridge.miniapps.delete')).toBe(false);
+    for (const route of [
+      'ipcBridge.miniapps.trash.invoke(',
+      'ipcBridge.miniapps.restore.invoke(',
+      'ipcBridge.miniapps.delete.invoke(',
+      'ipcBridge.miniapps.retryDelete.invoke(',
+    ]) {
+      expect(runnerSource.includes(route)).toBe(true);
+    }
   });
 
   test('Surface uses only a capability/epoch/digest-fenced strict iframe', () => {

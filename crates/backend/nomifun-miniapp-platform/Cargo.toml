@@ -26,3 +26,6 @@ uuid.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 which.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+junction = "1"

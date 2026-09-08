@@ -22,6 +22,10 @@
     "rollback": "回滚",
     "enable": "启用",
     "disable": "停用",
+    "trash": "移入回收站",
+    "restore": "恢复",
+    "deletePermanently": "永久删除",
+    "retryDelete": "重试删除",
     "openSurface": "打开 Surface",
     "reloadSurface": "重新加载 Surface",
     "closeSurface": "关闭 Surface",
@@ -44,6 +48,10 @@
     "rollbackUnavailable": "当前没有可用于回滚的 exact Active/Previous Release 对。",
     "enableUnavailable": "小程序必须先有 Active Release 才能启用。",
     "disableUnavailable": "小程序已经停用，或当前不能变更生命周期。",
+    "trashUnavailable": "当前生命周期或 Operation 状态不允许将这个小程序移入回收站。",
+    "restoreUnavailable": "只有已移入回收站且没有运行中 Operation 的小程序才能恢复。",
+    "deleteUnavailable": "只有已移入回收站且没有运行中 Operation 的小程序才能永久删除。",
+    "retryDeleteUnavailable": "只有最新的永久删除 Operation 处于失败状态时才能重试删除。",
     "autoPublishRequiresActive": "只有纯 UI 小程序已经存在 Active Release 后才能开启自动发布。",
     "surfaceUnavailable": "只有已启用且存在 Active Release 的小程序才能打开 Surface。",
     "surfaceDescriptorMismatch": "Surface descriptor 已不再匹配当前 Active Release。",
@@ -60,7 +68,15 @@
     "rollbackTitle": "回滚到 Previous Release？",
     "rollbackBody": "当前 Active {{current}} 将与 Previous {{target}} 交换。受管数据不会回滚。",
     "disableTitle": "停用这个小程序？",
-    "disableBody": "Active Release 仍会保留，但 Surface 将不可用，直到你再次启用小程序。"
+    "disableBody": "Active Release 仍会保留，但 Surface 将不可用，直到你再次启用小程序。",
+    "trashTitle": "将“{{name}}”移入回收站？",
+    "trashBody": "Surface 访问会立即撤销，正在运行的 Service 也会停止。Source、Release 与受管数据仍会保留，之后可以恢复。",
+    "restoreTitle": "恢复“{{name}}”？",
+    "restoreBody": "小程序会恢复为停用状态。你显式启用或启动前，Surface 与 Service 都不会自动恢复。",
+    "deleteTitle": "永久删除“{{name}}”？",
+    "deleteBody": "这会永久删除 Source、Release、KV、Files 与 Private DB 数据。该 Operation 无法取消，也无法撤销。",
+    "retryDeleteTitle": "重试删除“{{name}}”？",
+    "retryDeleteBody": "系统会从已记录的失败继续清理。永久删除仍不可取消，清理完成后该小程序会消失。"
   },
   "create": {
     "action": "创建小程序",
@@ -263,6 +279,11 @@
       "uiOnly": "这是纯 UI 小程序。Host KV 由 Rust 直接处理，Node 进程数必须始终为 0。",
       "noDescriptor": "当前还没有可运行的 Service Release。"
     },
+    "deletion": {
+      "trashedNotice": "这个小程序位于回收站中，Surface 已撤销，Service 已停止。恢复会回到停用状态，也可以永久删除全部受管数据。",
+      "runningNotice": "永久删除正在执行且无法取消。本页面会自动检查进度，清理完成后返回小程序库。",
+      "failedNotice": "永久删除因清理失败而停止。删除意图与 Operation 记录仍被保留，请使用“重试删除”继续。"
+    },
     "operation": {
       "title": "当前 Operation",
       "hint": "只有 Build、Import、Export 与永久删除属于持久 Operation。",
@@ -272,6 +293,12 @@
       "started": "开始时间",
       "emptyTitle": "没有进行中的 Operation",
       "emptyBody": "短事务动作不会伪装成长任务。",
+      "kindValue": {
+        "build": "构建",
+        "import": "导入",
+        "export": "导出",
+        "permanentDelete": "永久删除"
+      },
       "state": {
         "running": "运行中",
         "succeeded": "已完成",
@@ -296,6 +323,10 @@
     "manualPublishEnabled": "已切换为人工发布",
     "serviceStarted": "已发起 Service 启动",
     "serviceStopped": "Service 已停止",
-    "serviceRetried": "已发起 Service 重试"
+    "serviceRetried": "已发起 Service 重试",
+    "trashed": "小程序已移入回收站",
+    "restored": "小程序已恢复为停用状态",
+    "deletedPermanently": "小程序已永久删除",
+    "deleteRetryCompleted": "重试后已完成永久删除"
   }
 }

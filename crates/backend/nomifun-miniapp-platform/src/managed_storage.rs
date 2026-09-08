@@ -730,6 +730,42 @@ impl MiniAppServiceStoragePort for SqliteMiniAppManagedStorage {
             }
         }
     }
+
+    async fn purge_service_storage(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &MiniAppId,
+    ) -> MiniAppPlatformResult<()> {
+        validate_path_component(owner_user_id, "owner_user_id")?;
+        validate_path_component(miniapp_id.as_ref(), "miniapp_id")?;
+        let storage_key = StorageKey {
+            owner_user_id: owner_user_id.to_owned(),
+            miniapp_id: miniapp_id.as_ref().to_owned(),
+        };
+        let registration = {
+            let registrations = self.registrations.read().await;
+            registrations.get(&storage_key).cloned()
+        };
+        let database_path = self
+            .root
+            .join(DATABASES_DIRECTORY)
+            .join(owner_user_id)
+            .join(format!("{}.sqlite", miniapp_id.as_ref()));
+        let files_path = self
+            .root
+            .join(FILES_DIRECTORY)
+            .join(owner_user_id)
+            .join(miniapp_id.as_ref());
+        if let Some(registration) = registration {
+            let _guard = registration.database_lock.lock().await;
+            remove_private_database_files(self.root(), &database_path)?;
+        } else {
+            remove_private_database_files(self.root(), &database_path)?;
+        }
+        remove_managed_directory(self.root(), &files_path)?;
+        self.registrations.write().await.remove(&storage_key);
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -753,6 +789,7 @@ impl MiniAppHostKvPort for SqliteMiniAppManagedStorage {
         )
             .await
     }
+
 }
 
 #[async_trait]
@@ -1018,6 +1055,213 @@ fn ensure_database_path(path: &Path) -> MiniAppPlatformResult<()> {
         if is_reparse_or_symlink(&metadata) || !metadata.is_file() {
             return Err(MiniAppPlatformError::InvalidState(format!(
                 "MiniApp private database path is not a regular file: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn remove_private_database_files(root: &Path, path: &Path) -> MiniAppPlatformResult<()> {
+    let parent = path.parent().ok_or_else(|| {
+        MiniAppPlatformError::InvalidState(
+            "MiniApp private database cleanup target has no parent".into(),
+        )
+    })?;
+    let Some(canonical_parent) = canonical_existing_directory_chain(root, parent)? else {
+        return Ok(());
+    };
+    let file_name = path.file_name().ok_or_else(|| {
+        MiniAppPlatformError::InvalidState(
+            "MiniApp private database cleanup target has no file name".into(),
+        )
+    })?;
+    let base_path = canonical_parent.join(file_name);
+    for suffix in ["", "-wal", "-shm"] {
+        let target = if suffix.is_empty() {
+            base_path.clone()
+        } else {
+            let mut value = base_path.as_os_str().to_os_string();
+            value.push(suffix);
+            PathBuf::from(value)
+        };
+        match fs::symlink_metadata(&target) {
+            Ok(metadata) if is_reparse_or_symlink(&metadata) => {
+                return Err(MiniAppPlatformError::InvalidState(format!(
+                    "MiniApp private database cleanup encountered a symlink or reparse point: {}",
+                    target.display()
+                )));
+            }
+            Ok(metadata) if metadata.is_file() => {
+                fs::remove_file(&target).map_err(|error| {
+                    MiniAppPlatformError::Runtime(format!(
+                        "cannot remove MiniApp private database file {}: {error}",
+                        target.display()
+                    ))
+                })?
+            }
+            Ok(_) => {
+                return Err(MiniAppPlatformError::InvalidState(format!(
+                    "MiniApp private database cleanup target is not a regular file: {}",
+                    target.display()
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(MiniAppPlatformError::Runtime(format!(
+                    "cannot inspect MiniApp private database file {}: {error}",
+                    target.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn remove_managed_directory(root: &Path, path: &Path) -> MiniAppPlatformResult<()> {
+    let parent = path.parent().ok_or_else(|| {
+        MiniAppPlatformError::InvalidState(
+            "MiniApp filesDir cleanup target has no parent".into(),
+        )
+    })?;
+    let Some(canonical_parent) = canonical_existing_directory_chain(root, parent)? else {
+        return Ok(());
+    };
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(MiniAppPlatformError::Runtime(format!(
+                "cannot inspect MiniApp filesDir during cleanup: {error}"
+            )));
+        }
+    };
+    if is_reparse_or_symlink(&metadata) || !metadata.is_dir() {
+        return Err(MiniAppPlatformError::InvalidState(
+            "MiniApp filesDir is not a regular managed directory".into(),
+        ));
+    }
+    let canonical = fs::canonicalize(path).map_err(|error| {
+        MiniAppPlatformError::Runtime(format!(
+            "cannot canonicalize MiniApp filesDir during cleanup: {error}"
+        ))
+    })?;
+    if canonical.parent() != Some(canonical_parent.as_path()) {
+        return Err(MiniAppPlatformError::InvalidState(
+            "MiniApp filesDir escaped its owner boundary".into(),
+        ));
+    }
+    validate_removal_tree(&canonical)?;
+    fs::remove_dir_all(&canonical).map_err(|error| {
+        MiniAppPlatformError::Runtime(format!(
+            "cannot remove MiniApp filesDir {}: {error}",
+            canonical.display()
+        ))
+    })
+}
+
+fn canonical_existing_directory_chain(
+    root: &Path,
+    target: &Path,
+) -> MiniAppPlatformResult<Option<PathBuf>> {
+    let relative = target.strip_prefix(root).map_err(|_| {
+        MiniAppPlatformError::InvalidState(
+            "MiniApp managed storage path escaped its root".into(),
+        )
+    })?;
+    let root_metadata = fs::symlink_metadata(root).map_err(|error| {
+        MiniAppPlatformError::Runtime(format!(
+            "cannot inspect MiniApp managed storage root: {error}"
+        ))
+    })?;
+    if is_reparse_or_symlink(&root_metadata) || !root_metadata.is_dir() {
+        return Err(MiniAppPlatformError::InvalidState(
+            "MiniApp managed storage root is not a regular directory".into(),
+        ));
+    }
+    let canonical_root = fs::canonicalize(root).map_err(|error| {
+        MiniAppPlatformError::Runtime(format!(
+            "cannot canonicalize MiniApp managed storage root: {error}"
+        ))
+    })?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(value) = component else {
+            return Err(MiniAppPlatformError::InvalidState(
+                "MiniApp managed storage path contains a non-normal component".into(),
+            ));
+        };
+        current.push(value);
+        let metadata = match fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(MiniAppPlatformError::Runtime(format!(
+                    "cannot inspect MiniApp managed storage directory {}: {error}",
+                    current.display()
+                )));
+            }
+        };
+        if is_reparse_or_symlink(&metadata) || !metadata.is_dir() {
+            return Err(MiniAppPlatformError::InvalidState(format!(
+                "MiniApp managed storage directory is not regular: {}",
+                current.display()
+            )));
+        }
+    }
+    let canonical_target = fs::canonicalize(target).map_err(|error| {
+        MiniAppPlatformError::Runtime(format!(
+            "cannot canonicalize MiniApp managed storage directory {}: {error}",
+            target.display()
+        ))
+    })?;
+    ensure_within(&canonical_root, &canonical_target)?;
+    Ok(Some(canonical_target))
+}
+
+fn validate_removal_tree(root: &Path) -> MiniAppPlatformResult<()> {
+    let metadata = fs::symlink_metadata(root).map_err(|error| {
+        MiniAppPlatformError::Runtime(format!(
+            "cannot inspect MiniApp removal target {}: {error}",
+            root.display()
+        ))
+    })?;
+    if is_reparse_or_symlink(&metadata) || !metadata.is_dir() {
+        return Err(MiniAppPlatformError::InvalidState(format!(
+            "MiniApp removal target is not a regular directory: {}",
+            root.display()
+        )));
+    }
+    for entry in fs::read_dir(root).map_err(|error| {
+        MiniAppPlatformError::Runtime(format!(
+            "cannot read MiniApp removal target {}: {error}",
+            root.display()
+        ))
+    })? {
+        let entry = entry.map_err(|error| {
+            MiniAppPlatformError::Runtime(format!(
+                "cannot inspect MiniApp removal entry under {}: {error}",
+                root.display()
+            ))
+        })?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            MiniAppPlatformError::Runtime(format!(
+                "cannot inspect MiniApp removal entry {}: {error}",
+                path.display()
+            ))
+        })?;
+        if is_reparse_or_symlink(&metadata) {
+            return Err(MiniAppPlatformError::InvalidState(format!(
+                "MiniApp removal target contains a symlink or reparse point: {}",
+                path.display()
+            )));
+        }
+        if metadata.is_dir() {
+            validate_removal_tree(&path)?;
+        } else if !metadata.is_file() {
+            return Err(MiniAppPlatformError::InvalidState(format!(
+                "MiniApp removal target contains a special file: {}",
                 path.display()
             )));
         }

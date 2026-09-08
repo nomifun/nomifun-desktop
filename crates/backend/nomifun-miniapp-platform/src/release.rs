@@ -446,6 +446,57 @@ impl MiniAppReleaseStore {
         self.load_exact(scope, expected).map(|_| ())
     }
 
+    /// Idempotently remove all immutable Release bytes for one owner-scoped
+    /// MiniApp Project. Database Release rows are removed by the repository;
+    /// this method only owns the corresponding physical Store tree.
+    pub fn purge_project(
+        &self,
+        owner: impl AsRef<str>,
+        miniapp_id: impl AsRef<str>,
+        project_id: impl AsRef<str>,
+    ) -> Result<(), MiniAppReleaseStoreError> {
+        let scope = MiniAppSourceScope::new(owner, miniapp_id, project_id)
+            .map_err(|error| MiniAppReleaseStoreError::InvalidScope(error.to_string()))?;
+        let _guard = self.lock_mutation()?;
+        let artifacts_root = self.artifact_parent(&scope)?;
+        let project_root = artifacts_root.parent().ok_or_else(|| {
+            MiniAppReleaseStoreError::Corrupt(
+                "Release Project purge target has no Project parent".into(),
+            )
+        })?;
+        let projects_root = project_root.parent().ok_or_else(|| {
+            MiniAppReleaseStoreError::Corrupt(
+                "Release Project purge target has no projects root".into(),
+            )
+        })?;
+        let Some(canonical_projects_root) =
+            canonical_existing_directory_chain(&self.releases_root, projects_root)?
+        else {
+            return Ok(());
+        };
+        let metadata = match fs::symlink_metadata(project_root) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(io_error(project_root, error)),
+        };
+        if is_reparse_or_symlink(&metadata) || !metadata.is_dir() {
+            return Err(MiniAppReleaseStoreError::Corrupt(
+                "Release Project purge target must be a regular directory".into(),
+            ));
+        }
+        let canonical_project =
+            fs::canonicalize(project_root).map_err(|error| io_error(project_root, error))?;
+        if canonical_project.parent() != Some(canonical_projects_root.as_path()) {
+            return Err(MiniAppReleaseStoreError::Corrupt(
+                "Release Project purge target escaped its managed root".into(),
+            ));
+        }
+        validate_removal_tree(&canonical_project)?;
+        fs::remove_dir_all(&canonical_project)
+            .map_err(|error| io_error(&canonical_project, error))?;
+        sync_directory_if_supported(&canonical_projects_root)
+    }
+
     pub fn cleanup_staging(&self) -> Result<usize, MiniAppReleaseStoreError> {
         let _guard = self.lock_mutation()?;
         let mut removed = 0usize;
@@ -1195,7 +1246,7 @@ fn join_relative(root: &Path, path: &str) -> Result<PathBuf, MiniAppReleaseStore
 
 fn ensure_directory_without_symlink(path: &Path) -> Result<(), MiniAppReleaseStoreError> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+        Ok(metadata) if is_reparse_or_symlink(&metadata) || !metadata.is_dir() => {
             Err(MiniAppReleaseStoreError::Corrupt(format!(
                 "managed path is not a regular directory: {}",
                 path.display()
@@ -1204,6 +1255,13 @@ fn ensure_directory_without_symlink(path: &Path) -> Result<(), MiniAppReleaseSto
         Ok(_) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             fs::create_dir_all(path).map_err(|error| io_error(path, error))?;
+            let metadata = fs::symlink_metadata(path).map_err(|error| io_error(path, error))?;
+            if is_reparse_or_symlink(&metadata) || !metadata.is_dir() {
+                return Err(MiniAppReleaseStoreError::Corrupt(format!(
+                    "managed path became unsafe: {}",
+                    path.display()
+                )));
+            }
             Ok(())
         }
         Err(error) => Err(io_error(path, error)),
@@ -1230,6 +1288,96 @@ fn ensure_direct_child_directory(
         )));
     }
     Ok(())
+}
+
+fn canonical_existing_directory_chain(
+    root: &Path,
+    target: &Path,
+) -> Result<Option<PathBuf>, MiniAppReleaseStoreError> {
+    let relative = target.strip_prefix(root).map_err(|_| {
+        MiniAppReleaseStoreError::Corrupt(
+            "managed directory escaped its store root".into(),
+        )
+    })?;
+    let root_metadata = fs::symlink_metadata(root).map_err(|error| io_error(root, error))?;
+    if is_reparse_or_symlink(&root_metadata) || !root_metadata.is_dir() {
+        return Err(MiniAppReleaseStoreError::Corrupt(
+            "managed store root is not a regular directory".into(),
+        ));
+    }
+    let canonical_root = fs::canonicalize(root).map_err(|error| io_error(root, error))?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(value) = component else {
+            return Err(MiniAppReleaseStoreError::Corrupt(
+                "managed directory contains a non-normal component".into(),
+            ));
+        };
+        current.push(value);
+        let metadata = match fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(io_error(&current, error)),
+        };
+        if is_reparse_or_symlink(&metadata) || !metadata.is_dir() {
+            return Err(MiniAppReleaseStoreError::Corrupt(format!(
+                "managed directory is not a regular directory: {}",
+                current.display()
+            )));
+        }
+    }
+    let canonical_target =
+        fs::canonicalize(target).map_err(|error| io_error(target, error))?;
+    if !canonical_target.starts_with(&canonical_root) {
+        return Err(MiniAppReleaseStoreError::Corrupt(
+            "managed directory escaped its canonical store root".into(),
+        ));
+    }
+    Ok(Some(canonical_target))
+}
+
+fn validate_removal_tree(root: &Path) -> Result<(), MiniAppReleaseStoreError> {
+    let metadata = fs::symlink_metadata(root).map_err(|error| io_error(root, error))?;
+    if is_reparse_or_symlink(&metadata) || !metadata.is_dir() {
+        return Err(MiniAppReleaseStoreError::Corrupt(format!(
+            "removal target is not a regular directory: {}",
+            root.display()
+        )));
+    }
+    for entry in fs::read_dir(root).map_err(|error| io_error(root, error))? {
+        let entry = entry.map_err(|error| io_error(root, error))?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path).map_err(|error| io_error(&path, error))?;
+        if is_reparse_or_symlink(&metadata) {
+            return Err(MiniAppReleaseStoreError::Corrupt(format!(
+                "removal target contains a symlink or reparse point: {}",
+                path.display()
+            )));
+        }
+        if metadata.is_dir() {
+            validate_removal_tree(&path)?;
+        } else if !metadata.is_file() {
+            return Err(MiniAppReleaseStoreError::Corrupt(format!(
+                "removal target contains a special file: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn is_reparse_or_symlink(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    metadata.file_type().is_symlink()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn is_reparse_or_symlink(metadata: &fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
 }
 
 fn ensure_relative_parent_directories(

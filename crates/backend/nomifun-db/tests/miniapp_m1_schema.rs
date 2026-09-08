@@ -697,7 +697,67 @@ async fn migration_081_adds_monotonic_host_kv_tombstone_columns() {
 }
 
 #[tokio::test]
-async fn migrations_078_through_081_upgrade_existing_release_state_in_place() {
+async fn migration_082_adds_owner_scoped_miniapp_deletion_intents() {
+    let database = migrated_pool(82).await;
+    let migration = include_str!("../migrations/082_miniapp_deletion_intents.sql");
+    for forbidden in ["FROM miniapps", "FOREIGN KEY", "REFERENCES", "CREATE TRIGGER"] {
+        assert!(
+            !migration.contains(forbidden),
+            "migration 082 must not contain {forbidden}"
+        );
+    }
+
+    let columns = sqlx::query("PRAGMA table_info('miniapp_deletion_intents')")
+        .fetch_all(&database)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|column| column.get::<String, _>("name"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        columns,
+        [
+            "id",
+            "miniapp_id",
+            "owner_user_id",
+            "operation_id",
+            "started_at_ms",
+            "last_error_code",
+        ]
+    );
+    let foreign_keys: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_foreign_key_list('miniapp_deletion_intents')",
+    )
+    .fetch_one(&database)
+    .await
+    .unwrap();
+    assert_eq!(foreign_keys, 0);
+    let triggers: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_schema
+         WHERE type = 'trigger' AND tbl_name = 'miniapp_deletion_intents'",
+    )
+    .fetch_one(&database)
+    .await
+    .unwrap();
+    assert_eq!(triggers, 0);
+    for index in [
+        "idx_miniapp_deletion_intents_owner_user_id",
+        "idx_miniapp_deletion_intents_miniapp_id",
+        "idx_miniapp_deletion_intents_operation_id",
+    ] {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' AND name = ?",
+        )
+        .bind(index)
+        .fetch_one(&database)
+        .await
+        .unwrap();
+        assert_eq!(count, 1, "missing index {index}");
+    }
+}
+
+#[tokio::test]
+async fn migrations_078_through_082_upgrade_existing_release_state_in_place() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("miniapp-v077-upgrade.db");
     let database = sqlx::sqlite::SqlitePoolOptions::new()
@@ -982,7 +1042,7 @@ async fn migrations_078_through_081_upgrade_existing_release_state_in_place() {
         .fetch_one(upgraded.pool())
         .await
         .unwrap();
-    assert_eq!(head, 81);
+    assert_eq!(head, 82);
     let quick_check: Vec<String> = sqlx::query_scalar("PRAGMA quick_check")
         .fetch_all(upgraded.pool())
         .await
