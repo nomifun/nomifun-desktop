@@ -7,6 +7,7 @@
 import type {
   BuildMiniAppRequest,
   MiniAppPublishMode,
+  MiniAppServiceLifecycle,
   MiniAppSurfaceLaunchDescriptor,
   MiniAppSummary,
   MiniAppWorkshop,
@@ -14,6 +15,8 @@ import type {
   RollbackMiniAppRequest,
   SetMiniAppEnabledRequest,
   SetMiniAppPublishModeRequest,
+  SetMiniAppServiceRunningRequest,
+  RetryMiniAppServiceRequest,
 } from '@/common/types/miniAppPlatform';
 
 export type MiniAppReleaseStage = 'draft' | 'ready' | 'active';
@@ -79,10 +82,12 @@ export function miniAppWorkflowState(
 }
 
 export function miniAppBuildRequest(
-  workshop: MiniAppWorkshop
+  workshop: MiniAppWorkshop,
+  serviceLifecycle: MiniAppServiceLifecycle = 'on_demand'
 ): BuildMiniAppRequest | null {
   if (
-    workshop.miniapp.kind !== 'ui_only' ||
+    workshop.miniapp.kind !== 'ui_only' &&
+    workshop.miniapp.kind !== 'service' ||
     workshop.source_state !== 'editable' ||
     workshop.active_operation?.state === 'running' ||
     !workshop.source_snapshot_digest ||
@@ -99,6 +104,9 @@ export function miniAppBuildRequest(
     expected_build_generation: workshop.build_generation,
     expected_source_snapshot_digest: workshop.source_snapshot_digest,
     expected_dependency_lock_digest: workshop.dependency_lock_digest,
+    ...(workshop.miniapp.kind === 'service'
+      ? { service_lifecycle: serviceLifecycle }
+      : {}),
   };
 }
 
@@ -118,7 +126,8 @@ function releaseRefsMatch(
 
 function miniAppAllowsReleaseMutation(workshop: MiniAppWorkshop): boolean {
   return (
-    workshop.miniapp.kind === 'ui_only' &&
+    (workshop.miniapp.kind === 'ui_only' ||
+      workshop.miniapp.kind === 'service') &&
     (workshop.miniapp.lifecycle === 'enabled' ||
       workshop.miniapp.lifecycle === 'disabled') &&
     workshop.active_operation?.state !== 'running'
@@ -135,8 +144,8 @@ export function miniAppPublishRequest(
     !ready ||
     !readyPointer ||
     !ready.can_publish ||
-    ready.kind !== 'ui_only' ||
-    ready.test.status !== 'not_required' ||
+    (ready.kind === 'ui_only' && ready.test.status !== 'not_required') ||
+    (ready.kind === 'service' && ready.test.status !== 'needs_test_input') ||
     ready.test.release_id !== ready.release.release_id ||
     ready.test.expected_release_digest !== ready.release.release_digest ||
     !releaseRefsMatch(readyPointer, ready.release)
@@ -160,7 +169,7 @@ export function miniAppPublishRequest(
     ...(ready.test.receipt_id
       ? { expected_service_test_receipt_id: ready.test.receipt_id }
       : {}),
-    acknowledge_test_warning: false,
+    acknowledge_test_warning: ready.kind === 'service',
   };
 }
 
@@ -196,7 +205,7 @@ export function miniAppSetEnabledRequest(
 ): SetMiniAppEnabledRequest | null {
   const { miniapp } = workshop;
   if (
-    miniapp.kind !== 'ui_only' ||
+    miniapp.kind !== 'ui_only' && miniapp.kind !== 'service' ||
     workshop.active_operation?.state === 'running' ||
     (miniapp.lifecycle !== 'enabled' && miniapp.lifecycle !== 'disabled') ||
     (enabled && !miniapp.releases.active) ||
@@ -250,9 +259,43 @@ export function miniAppSetPublishModeRequest(
   };
 }
 
+export function miniAppSetServiceRunningRequest(
+  workshop: MiniAppWorkshop,
+  running: boolean
+): SetMiniAppServiceRunningRequest | null {
+  const { miniapp } = workshop;
+  const active = miniapp.releases.active;
+  if (
+    miniapp.kind !== 'service' ||
+    miniapp.lifecycle !== 'enabled' ||
+    !active ||
+    miniapp.releases.active_release_epoch < 1
+  ) {
+    return null;
+  }
+  return {
+    miniapp_id: miniapp.miniapp_id,
+    expected_product_revision: miniapp.product_revision,
+    expected_pointer_revision: miniapp.releases.pointer_revision,
+    expected_active_release_epoch: miniapp.releases.active_release_epoch,
+    expected_active_release_digest: active.release_digest,
+    running,
+  };
+}
+
+export function miniAppRetryServiceRequest(
+  workshop: MiniAppWorkshop
+): RetryMiniAppServiceRequest | null {
+  const request = miniAppSetServiceRunningRequest(workshop, true);
+  if (!request) return null;
+  const { running: _running, ...retry } = request;
+  return retry;
+}
+
 export function miniAppCanOpenSurface(workshop: MiniAppWorkshop): boolean {
   return Boolean(
-    workshop.miniapp.kind === 'ui_only' &&
+    (workshop.miniapp.kind === 'ui_only' ||
+      workshop.miniapp.kind === 'service') &&
       workshop.miniapp.lifecycle === 'enabled' &&
       workshop.miniapp.surface_available &&
       workshop.miniapp.releases.active &&

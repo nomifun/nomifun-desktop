@@ -1,6 +1,6 @@
 {
   "title": "Mini-Apps",
-  "subtitle": "Build, publish, enable, and run UI-only mini-apps in a dedicated workbench",
+  "subtitle": "Build, publish, enable, and run mini-apps in a dedicated workbench",
   "nav": {
     "entry": "Mini-Apps",
     "siderEntry": "Mini-Apps"
@@ -24,7 +24,10 @@
     "disable": "Disable",
     "openSurface": "Open Surface",
     "reloadSurface": "Reload Surface",
-    "closeSurface": "Close Surface"
+    "closeSurface": "Close Surface",
+    "startService": "Start Service",
+    "stopService": "Stop Service",
+    "retryService": "Retry Service"
   },
   "states": {
     "loadingLibrary": "Loading the mini-app library…",
@@ -42,8 +45,9 @@
     "enableUnavailable": "The MiniApp needs an Active Release before it can be enabled.",
     "disableUnavailable": "The MiniApp is already disabled or cannot change lifecycle now.",
     "autoPublishRequiresActive": "Auto Publish is available only after a UI-only MiniApp has an Active Release.",
-    "surfaceUnavailable": "Surface requires an enabled UI-only MiniApp with an Active Release.",
+    "surfaceUnavailable": "Surface requires an enabled MiniApp with an Active Release.",
     "surfaceDescriptorMismatch": "The Surface descriptor no longer matches the current Active Release.",
+    "serviceUnavailable": "The Service is not ready for this lifecycle operation.",
     "loadSurfaceTitle": "Failed to load the Surface descriptor",
     "surfaceFrameTitle": "Surface could not be loaded",
     "surfaceFrameBody": "The capability may have expired after a Publish, Rollback, or lifecycle change. Reload the Surface."
@@ -51,6 +55,7 @@
   "confirm": {
     "publishTitle": "Publish Ready Release?",
     "publishFirstBody": "This creates the first Active Release. Publish does not enable the MiniApp; Enable remains a separate action.",
+    "publishServiceBody": "This Service Ready Release has not completed a formal runtime test. Continue only if you accept publishing an untested Service; Publish does not start it automatically.",
     "publishUpdateBody": "This makes the Ready Release Active and moves the current Active Release to Previous. The MiniApp lifecycle is unchanged.",
     "rollbackTitle": "Rollback to Previous Release?",
     "rollbackBody": "Active {{current}} will be exchanged with Previous {{target}}. Stored data is not rolled back.",
@@ -60,15 +65,15 @@
   "create": {
     "action": "Create mini-app",
     "title": "Create a mini-app project",
-    "intro": "Create a new UI-only Project and Product with managed Source. This version builds one immutable Ready Release.",
+    "intro": "Create a new Project and Product with managed Source. Build produces one immutable Ready Release.",
     "displayName": "Name",
     "displayNamePlaceholder": "For example: Project status board",
     "displayNameRequired": "Enter a mini-app name",
     "description": "Description",
     "descriptionPlaceholder": "What problem does it solve? (optional)",
     "kind": "Runtime shape",
-    "uiOnlyHint": "This slice creates UI-only Source. Build never starts Node; Service support arrives in a later phase.",
-    "serviceHint": "Includes one managed main.mjs Service with Host KV, Files, and Private DB.",
+    "uiOnlyHint": "UI-only builds stay in the Host and do not start Node.",
+    "serviceHint": "Service builds include one managed main.mjs and Host KV. Files and Private DB are not enabled in this slice.",
     "submit": "Create",
     "cancel": "Cancel",
     "success": "Mini-app project created",
@@ -146,8 +151,7 @@
         "runtimeOnly": "Runtime-only artifact"
       },
       "emptyNotice": "This Project has no Source yet. Chat Dev or a managed Source import must create it; the product never falls back to the legacy single-file workspace.",
-      "runtimeOnlyNotice": "This is a source-less runtime artifact. Continued development requires an explicit Source import or fork.",
-      "serviceDeferred": "Service mini-apps are outside the current delivery slice and cannot use the UI-only Build path."
+      "runtimeOnlyNotice": "This is a source-less runtime artifact. Continued development requires an explicit Source import or fork."
     },
     "sourceBuild": {
       "title": "Source and Build",
@@ -289,6 +293,9 @@
     "enabled": "MiniApp enabled",
     "disabled": "MiniApp disabled",
     "autoPublishEnabled": "Auto UI-only Publish enabled",
-    "manualPublishEnabled": "Manual Publish enabled"
+    "manualPublishEnabled": "Manual Publish enabled",
+    "serviceStarted": "Service start requested",
+    "serviceStopped": "Service stopped",
+    "serviceRetried": "Service retry requested"
   }
 }

@@ -96,6 +96,8 @@ describe('MiniApp M1 HTTP bridge', () => {
       '/rollback`',
       '/enabled`',
       '/publish-mode`',
+      '/service/running`',
+      '/service/retry`',
       '/surface/open`',
       '/surface/close`',
     ]) {
@@ -270,6 +272,48 @@ describe('MiniApp M1 HTTP bridge', () => {
       expected_release_digest: bridge.expected_release_digest,
       request: bridge.request,
     });
+
+    const serviceBridge = {
+      ...bridge,
+      request: {
+        call_id: 'call-service',
+        target: {
+          target: 'service' as const,
+          method: 'status',
+          payload: { verbose: true },
+        },
+      },
+    };
+    await miniapps.bridge.invoke(serviceBridge);
+    expect(requestBody).toEqual({
+      surface_capability: serviceBridge.surface_capability,
+      active_release_epoch: serviceBridge.active_release_epoch,
+      expected_release_digest: serviceBridge.expected_release_digest,
+      request: serviceBridge.request,
+    });
+
+    const serviceLifecycle = {
+      miniapp_id: MINIAPP_ID as never,
+      expected_product_revision: 10,
+      expected_pointer_revision: 11,
+      expected_active_release_epoch: 12,
+      expected_active_release_digest: 'e'.repeat(64),
+      running: true,
+    };
+    await miniapps.setServiceRunning.invoke(serviceLifecycle);
+    expect(requestPath).toBe(`/api/miniapps/${MINIAPP_ID}/service/running`);
+    expect(requestBody).toEqual(serviceLifecycle);
+
+    const retryService = {
+      miniapp_id: MINIAPP_ID as never,
+      expected_product_revision: 11,
+      expected_pointer_revision: 12,
+      expected_active_release_epoch: 13,
+      expected_active_release_digest: 'f'.repeat(64),
+    };
+    await miniapps.retryService.invoke(retryService);
+    expect(requestPath).toBe(`/api/miniapps/${MINIAPP_ID}/service/retry`);
+    expect(requestBody).toEqual(retryService);
   });
 
   test('opens and brands the authenticated Surface descriptor with an explicit POST body', async () => {

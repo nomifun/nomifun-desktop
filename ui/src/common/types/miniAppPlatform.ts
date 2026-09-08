@@ -200,6 +200,8 @@ export interface MiniAppOperationSummary {
 
 export interface MiniAppWorkshop {
   miniapp: MiniAppSummary;
+  service_lifecycle?: MiniAppServiceLifecycle;
+  active_service?: MiniAppServiceDescriptor;
   project_id: string;
   project_revision: number;
   publish_mode: MiniAppPublishMode;
@@ -231,6 +233,7 @@ export interface BuildMiniAppRequest {
   expected_build_generation: number;
   expected_source_snapshot_digest: string;
   expected_dependency_lock_digest: string;
+  service_lifecycle?: MiniAppServiceLifecycle;
 }
 
 export interface CancelMiniAppBuildRequest {
@@ -276,6 +279,23 @@ export interface SetMiniAppPublishModeRequest {
   mode: MiniAppPublishMode;
 }
 
+export interface SetMiniAppServiceRunningRequest {
+  miniapp_id: MiniAppId;
+  expected_product_revision: number;
+  expected_pointer_revision: number;
+  expected_active_release_epoch: number;
+  expected_active_release_digest: string;
+  running: boolean;
+}
+
+export interface RetryMiniAppServiceRequest {
+  miniapp_id: MiniAppId;
+  expected_product_revision: number;
+  expected_pointer_revision: number;
+  expected_active_release_epoch: number;
+  expected_active_release_digest: string;
+}
+
 export interface OpenMiniAppSurfaceRequest {
   miniapp_id: MiniAppId;
 }
@@ -312,10 +332,16 @@ export type MiniAppBridgeKvRequest =
 
 export interface MiniAppBridgeRequest {
   call_id: string;
-  target: {
-    target: 'host_kv';
-    request: MiniAppBridgeKvRequest;
-  };
+  target:
+    | {
+        target: 'host_kv';
+        request: MiniAppBridgeKvRequest;
+      }
+    | {
+        target: 'service';
+        method: string;
+        payload: Record<string, unknown>;
+      };
 }
 
 export type MiniAppKvResponse =

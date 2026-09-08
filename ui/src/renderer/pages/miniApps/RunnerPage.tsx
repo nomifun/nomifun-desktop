@@ -10,6 +10,7 @@ import type {
   MiniAppOperationState,
   MiniAppPublishMode,
   MiniAppReleaseRef,
+  MiniAppServiceLifecycle,
   MiniAppSurfaceLaunchDescriptor,
   MiniAppWorkshop,
 } from '@/common/types/miniAppPlatform';
@@ -42,8 +43,10 @@ import {
   miniAppBuildRequest,
   miniAppCanOpenSurface,
   miniAppPublishRequest,
+  miniAppRetryServiceRequest,
   miniAppRollbackRequest,
   miniAppSetEnabledRequest,
+  miniAppSetServiceRunningRequest,
   miniAppSetPublishModeRequest,
   miniAppSurfaceAssetPath,
   miniAppSurfaceMatchesWorkshop,
@@ -53,6 +56,7 @@ import {
 import MiniAppSurfacePanel from './MiniAppSurfacePanel';
 import {
   MiniAppKindBadge,
+  MiniAppHealthBadge,
   MiniAppLifecycleBadge,
   MiniAppSourceBadge,
   MiniAppStatePanel,
@@ -68,6 +72,9 @@ type MiniAppBusyAction =
   | 'enable'
   | 'disable'
   | 'publish_mode'
+  | 'service_start'
+  | 'service_stop'
+  | 'service_retry'
   | 'open_surface'
   | 'reload_surface'
   | 'close_surface'
@@ -177,6 +184,9 @@ const MiniAppWorkshopDetail: React.FC<{
   onRollback: () => void;
   onSetEnabled: (enabled: boolean) => void;
   onSetPublishMode: (mode: MiniAppPublishMode) => void;
+  onSetServiceLifecycle: (lifecycle: MiniAppServiceLifecycle) => void;
+  onSetServiceRunning: (running: boolean) => void;
+  onRetryService: () => void;
   onOpenSurface: () => void;
   onReloadSurface: () => void;
   onCloseSurface: () => void;
@@ -185,6 +195,7 @@ const MiniAppWorkshopDetail: React.FC<{
   refreshing: boolean;
   building: boolean;
   canceling: boolean;
+  serviceLifecycle: MiniAppServiceLifecycle;
 }> = ({
   workshop,
   locale,
@@ -196,6 +207,9 @@ const MiniAppWorkshopDetail: React.FC<{
   onRollback,
   onSetEnabled,
   onSetPublishMode,
+  onSetServiceLifecycle,
+  onSetServiceRunning,
+  onRetryService,
   onOpenSurface,
   onReloadSurface,
   onCloseSurface,
@@ -204,13 +218,15 @@ const MiniAppWorkshopDetail: React.FC<{
   refreshing,
   building,
   canceling,
+  serviceLifecycle,
 }) => {
   const { t } = useTranslation();
   const { miniapp, ready, active_operation: operation } = workshop;
+  const activeService = workshop.active_service ?? ready?.service;
   const workflow = miniAppWorkflowState(workshop);
   const buildRunning =
     operation?.kind === 'build' && operation.state === 'running';
-  const canBuild = miniAppBuildRequest(workshop) !== null;
+  const canBuild = miniAppBuildRequest(workshop, serviceLifecycle) !== null;
   const canPublish = miniAppPublishRequest(workshop) !== null;
   const canRollback = miniAppRollbackRequest(workshop) !== null;
   const canEnable = miniAppSetEnabledRequest(workshop, true) !== null;
@@ -486,11 +502,6 @@ const MiniAppWorkshopDetail: React.FC<{
             {t('miniApps.workshop.source.runtimeOnlyNotice')}
           </div>
         )}
-        {miniapp.kind !== 'ui_only' && (
-          <div className={`${styles.notice} ${styles.noticeWarning}`}>
-            {t('miniApps.workshop.source.serviceDeferred')}
-          </div>
-        )}
       </section>
 
       <section className={styles.section}>
@@ -560,6 +571,125 @@ const MiniAppWorkshopDetail: React.FC<{
           {t('miniApps.workshop.releases.publishDoesNotEnable')}
         </div>
       </section>
+
+      {miniapp.kind === 'service' && (
+        <section className={styles.section}>
+          <div className={styles.sectionHeader}>
+            <div>
+              <h3 className={styles.sectionTitle}>
+                {t('miniApps.workshop.service.title')}
+              </h3>
+              <p className={styles.sectionHint}>
+                {t('miniApps.workshop.service.hint')}
+              </p>
+            </div>
+            <MiniAppHealthBadge health={miniapp.service_health} />
+          </div>
+          <div className={styles.serviceGrid}>
+            <Fact
+              label={t('miniApps.workshop.service.lifecycle')}
+              value={
+                serviceLifecycle === 'continuous'
+                  ? t('miniApps.workshop.service.lifecycleValue.continuous')
+                  : t('miniApps.workshop.service.lifecycleValue.onDemand')
+              }
+            />
+            <Fact
+              label={t('miniApps.workshop.service.files')}
+              value={
+                activeService
+                  ? activeService.uses_files
+                    ? t('miniApps.common.yes')
+                    : t('miniApps.common.no')
+                  : t('miniApps.common.unknown')
+              }
+            />
+            <Fact
+              label={t('miniApps.workshop.service.privateDatabase')}
+              value={
+                activeService
+                  ? activeService.uses_private_database
+                    ? t('miniApps.common.yes')
+                    : t('miniApps.common.no')
+                  : t('miniApps.common.unknown')
+              }
+            />
+          </div>
+          <div className={styles.publishModeControl}>
+            <Radio.Group
+              type='button'
+              size='small'
+              value={serviceLifecycle}
+              disabled={controlsDisabled || buildRunning}
+              onChange={(value: unknown) => {
+                if (value === 'on_demand' || value === 'continuous') {
+                  onSetServiceLifecycle(value);
+                }
+              }}
+              options={[
+                {
+                  label: t(
+                    'miniApps.workshop.service.lifecycleValue.onDemand'
+                  ),
+                  value: 'on_demand',
+                },
+                {
+                  label: t(
+                    'miniApps.workshop.service.lifecycleValue.continuous'
+                  ),
+                  value: 'continuous',
+                },
+              ]}
+            />
+          </div>
+          <div className={styles.actionBar}>
+            <Button
+              icon={<Power theme='outline' size='14' />}
+              loading={busyAction === 'service_start'}
+              disabled={
+                controlsDisabled ||
+                miniapp.service_health.state === 'ready' ||
+                miniapp.service_health.state === 'starting' ||
+                !miniAppSetServiceRunningRequest(workshop, true)
+              }
+              onClick={() => onSetServiceRunning(true)}
+            >
+              {t('miniApps.actions.startService')}
+            </Button>
+            <Button
+              status='danger'
+              icon={<Power theme='outline' size='14' />}
+              loading={busyAction === 'service_stop'}
+              disabled={
+                controlsDisabled ||
+                (miniapp.service_health.state !== 'ready' &&
+                  miniapp.service_health.state !== 'starting') ||
+                !miniAppSetServiceRunningRequest(workshop, false)
+              }
+              onClick={() => onSetServiceRunning(false)}
+            >
+              {t('miniApps.actions.stopService')}
+            </Button>
+            <Button
+              icon={<Refresh theme='outline' size='14' />}
+              loading={busyAction === 'service_retry'}
+              disabled={
+                controlsDisabled ||
+                miniapp.service_health.state !== 'failed' ||
+                !miniAppRetryServiceRequest(workshop)
+              }
+              onClick={onRetryService}
+            >
+              {t('miniApps.actions.retryService')}
+            </Button>
+          </div>
+          {!activeService && (
+            <div className={`${styles.notice} ${styles.noticeInfo}`}>
+              {t('miniApps.workshop.service.noDescriptor')}
+            </div>
+          )}
+        </section>
+      )}
 
       <section className={styles.section}>
         <div className={styles.sectionHeader}>
@@ -756,12 +886,29 @@ const MiniAppRunnerPage: React.FC = () => {
   const [refreshing, setRefreshing] = useState(false);
   const [building, setBuilding] = useState(false);
   const [canceling, setCanceling] = useState(false);
+  const [serviceLifecycle, setServiceLifecycle] =
+    useState<MiniAppServiceLifecycle>('on_demand');
   const [busyAction, setBusyAction] = useState<MiniAppBusyAction>(null);
   const [surfaceDescriptor, setSurfaceDescriptor] =
     useState<MiniAppSurfaceLaunchDescriptor | null>(null);
   const canceledBuildRef = useRef<string | null>(null);
   const [notFound, setNotFound] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (workshop?.miniapp.kind !== 'service') {
+      setServiceLifecycle('on_demand');
+      return;
+    }
+    const persistedLifecycle =
+      workshop.service_lifecycle ?? workshop.ready?.service?.lifecycle;
+    if (persistedLifecycle) setServiceLifecycle(persistedLifecycle);
+  }, [
+    workshop?.miniapp.kind,
+    workshop?.service_lifecycle,
+    workshop?.ready?.release.release_id,
+    workshop?.ready?.service?.lifecycle,
+  ]);
 
   const load = useCallback(
     async (
@@ -939,7 +1086,7 @@ const MiniAppRunnerPage: React.FC = () => {
     if (!workshop || !miniappId || building || canceling || busyAction) {
       return;
     }
-    const request = miniAppBuildRequest(workshop);
+    const request = miniAppBuildRequest(workshop, serviceLifecycle);
     if (!request) {
       setFailure(t('miniApps.errors.buildUnavailable'));
       return;
@@ -973,6 +1120,7 @@ const MiniAppRunnerPage: React.FC = () => {
     load,
     message,
     miniappId,
+    serviceLifecycle,
     surfaceDescriptor,
     syncSurface,
     t,
@@ -1020,9 +1168,12 @@ const MiniAppRunnerPage: React.FC = () => {
     }
     Modal.confirm({
       title: t('miniApps.confirm.publishTitle'),
-      content: workshop.miniapp.releases.active
-        ? t('miniApps.confirm.publishUpdateBody')
-        : t('miniApps.confirm.publishFirstBody'),
+      content:
+        workshop.miniapp.kind === 'service'
+          ? t('miniApps.confirm.publishServiceBody')
+          : workshop.miniapp.releases.active
+            ? t('miniApps.confirm.publishUpdateBody')
+            : t('miniApps.confirm.publishFirstBody'),
       okText: t('miniApps.actions.publish'),
       cancelText: t('miniApps.actions.cancel'),
       onOk: () =>
@@ -1032,6 +1183,41 @@ const MiniAppRunnerPage: React.FC = () => {
           t('miniApps.messages.published')
         ),
     });
+  }, [building, busyAction, canceling, runWorkshopMutation, t, workshop]);
+
+  const handleSetServiceRunning = useCallback(
+    (running: boolean) => {
+      if (!workshop || busyAction || building || canceling) return;
+      const request = miniAppSetServiceRunningRequest(workshop, running);
+      if (!request) {
+        setFailure(t('miniApps.errors.serviceUnavailable'));
+        return;
+      }
+      void runWorkshopMutation(
+        running ? 'service_start' : 'service_stop',
+        () => ipcBridge.miniapps.setServiceRunning.invoke(request),
+        t(
+          running
+            ? 'miniApps.messages.serviceStarted'
+            : 'miniApps.messages.serviceStopped'
+        )
+      );
+    },
+    [building, busyAction, canceling, runWorkshopMutation, t, workshop]
+  );
+
+  const handleRetryService = useCallback(() => {
+    if (!workshop || busyAction || building || canceling) return;
+    const request = miniAppRetryServiceRequest(workshop);
+    if (!request) {
+      setFailure(t('miniApps.errors.serviceUnavailable'));
+      return;
+    }
+    void runWorkshopMutation(
+      'service_retry',
+      () => ipcBridge.miniapps.retryService.invoke(request),
+      t('miniApps.messages.serviceRetried')
+    );
   }, [building, busyAction, canceling, runWorkshopMutation, t, workshop]);
 
   const handleRollback = useCallback(() => {
@@ -1283,6 +1469,9 @@ const MiniAppRunnerPage: React.FC = () => {
               onRollback={handleRollback}
               onSetEnabled={handleSetEnabled}
               onSetPublishMode={handleSetPublishMode}
+              onSetServiceLifecycle={setServiceLifecycle}
+              onSetServiceRunning={handleSetServiceRunning}
+              onRetryService={handleRetryService}
               onOpenSurface={() => void handleOpenSurface()}
               onReloadSurface={() => void handleReloadSurface()}
               onCloseSurface={() => void handleCloseSurface()}
@@ -1291,6 +1480,7 @@ const MiniAppRunnerPage: React.FC = () => {
               refreshing={refreshing}
               building={building}
               canceling={canceling}
+              serviceLifecycle={serviceLifecycle}
             />
           </>
         ) : null}

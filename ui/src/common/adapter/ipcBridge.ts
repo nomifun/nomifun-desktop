@@ -342,6 +342,8 @@ import type {
   RollbackMiniAppRequest,
   SetMiniAppEnabledRequest,
   SetMiniAppPublishModeRequest,
+  SetMiniAppServiceRunningRequest,
+  RetryMiniAppServiceRequest,
 } from '../types/miniAppPlatform';
 
 export { plugins } from './pluginPlatformBridge';
@@ -2323,6 +2325,20 @@ export const miniapps = {
     httpPost<MiniAppWorkshop, SetMiniAppPublishModeRequest>(
       ({ miniapp_id }) =>
         `/api/miniapps/${encodeURIComponent(miniapp_id)}/publish-mode`
+    ),
+    fromApiMiniAppWorkshop
+  ),
+  setServiceRunning: withResponseMap(
+    httpPost<MiniAppWorkshop, SetMiniAppServiceRunningRequest>(
+      ({ miniapp_id }) =>
+        `/api/miniapps/${encodeURIComponent(miniapp_id)}/service/running`
+    ),
+    fromApiMiniAppWorkshop
+  ),
+  retryService: withResponseMap(
+    httpPost<MiniAppWorkshop, RetryMiniAppServiceRequest>(
+      ({ miniapp_id }) =>
+        `/api/miniapps/${encodeURIComponent(miniapp_id)}/service/retry`
     ),
     fromApiMiniAppWorkshop
   ),
