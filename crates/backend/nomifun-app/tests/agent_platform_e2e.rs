@@ -153,6 +153,7 @@ async fn canonical_agent_routes_use_the_fresh_v4_platform() {
         &router,
         "/api/agent-sessions",
         serde_json::to_value(CreateAgentSessionRequestDto {
+            model: None,
             preset_id: preset_id.clone(),
             title: Some("Route session".to_owned()),
         })

@@ -16,6 +16,7 @@ import '../src/renderer/styles/modal-contract.css';
 import agentSettings from '../src/renderer/services/i18n/locales/zh-CN/agentSettings.json';
 import common from '../src/renderer/services/i18n/locales/zh-CN/common.json';
 import guid from '../src/renderer/services/i18n/locales/zh-CN/guid.json';
+import settings from '../src/renderer/services/i18n/locales/zh-CN/settings.json';
 import GuidAgentSelectorPreview from './GuidAgentSelectorPreview';
 import catalog from './fixtures/agent-workbench-catalog.json';
 import seed from '../../crates/backend/nomifun-agent-contracts/contracts/presets/official-preset-seed-manifest.payload.json';
@@ -92,7 +93,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 }) as typeof fetch;
 
 const i18n = createInstance();
-await i18n.use(initReactI18next).init({ lng: 'zh-CN', fallbackLng: 'zh-CN', resources: { 'zh-CN': { translation: { agentSettings, common, guid } } }, interpolation: { escapeValue: false } });
+await i18n.use(initReactI18next).init({ lng: 'zh-CN', fallbackLng: 'zh-CN', resources: { 'zh-CN': { translation: { agentSettings, common, guid, settings } } }, interpolation: { escapeValue: false } });
 const { default: AgentSettingsPage } = await import('../src/renderer/pages/agentSettings/AgentSettingsPage');
 document.body.setAttribute('data-theme', 'light');
 if (!location.hash) location.hash = '/agent';

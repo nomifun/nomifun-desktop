@@ -485,6 +485,8 @@ pub struct CreateAgentPresetRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateAgentPresetFromTemplateRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<AgentChatModelSelectionDto>,
     /// Reuse an owner-owned stable configuration only while its document still
     /// exactly matches this template and the resolved default model.
     #[serde(default)]
@@ -862,6 +864,8 @@ pub struct AgentPresetEditorTestPlanDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateAgentSessionRequestDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<AgentChatModelSelectionDto>,
     #[serde(deserialize_with = "crate::serde_util::deserialize_preset_id")]
     pub preset_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -875,6 +879,16 @@ pub struct CreateAgentSessionResponseDto {
     pub agent_binding: AgentBindingValueDto,
     pub state: String,
     pub cursor: SessionCursorDto,
+}
+
+/// Product selection only; route, protocol and credential facts are host-owned.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentChatModelSelectionDto {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_provider_id")]
+    pub provider_id: String,
+    #[serde(deserialize_with = "crate::serde_util::deserialize_model_name")]
+    pub model: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

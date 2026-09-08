@@ -102,9 +102,9 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     const entryPlan = planGuidEntry(input, autoWork);
     let conversationId: ConversationId;
     let conversation;
+    if (!current_model) throw new Error('MODEL_REQUIRED');
 
     if (selection.kind === 'default') {
-      if (!current_model) throw new Error('MODEL_REQUIRED');
       conversation = await ipcBridge.conversation.create.invoke({
         type: 'nomi',
         name: entryPlan.conversationName,
@@ -129,6 +129,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
           launchPreset = await prepareOfficialAgent(
             selectedTemplate,
             t(`agentSettings.template.${TEMPLATE_I18N_PATH[selection.templateKey]}.name`),
+            current_model,
           );
         } catch (error) {
           throw new Error(officialAgentLaunchError(error, t));
@@ -143,6 +144,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
       const session = await ipcBridge.agentPlatform.sessions.create.invoke({
         preset_id: launchPreset.preset_id,
         title: entryPlan.conversationName,
+        model: { provider_id: current_model.id, model: current_model.use_model },
       });
       conversationId = parseConversationId(session.agent_session_id);
       conversation = await ipcBridge.conversation.get.invoke({
@@ -210,7 +212,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
   const sendMessageHandler = useCallback(() => {
     if (loading || sendingRef.current) return;
     if (!resourceResolutionReady) return;
-    if (selection.kind === 'default' && !current_model) {
+    if (!current_model) {
       Message.warning(t('conversation.noModelConfigured'));
       return;
     }
@@ -279,7 +281,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     t,
   ]);
 
-  const hasLaunchTarget =
+  const hasLaunchTarget = Boolean(current_model) && (
     selection.kind === 'default'
       ? Boolean(current_model)
       : selection.kind === 'template'
@@ -288,7 +290,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
           selectedPreset?.current_stable_revision &&
             selectedPreset.preset_id === selection.presetId &&
             resourceResolutionReady
-        );
+        ));
   const isButtonDisabled = loading || !input.trim() || !hasLaunchTarget;
 
   return {

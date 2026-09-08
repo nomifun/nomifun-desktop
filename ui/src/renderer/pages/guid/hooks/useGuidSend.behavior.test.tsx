@@ -142,7 +142,7 @@ const noopDispatch = <T,>(): Dispatch<SetStateAction<T>> =>
 const createDeps = ({
   selection,
   selectedPreset,
-  currentModel,
+  currentModel = MODEL,
   input = INPUT,
   loading = false,
   workspaceEnabled = true,
@@ -223,9 +223,9 @@ describe('useGuidSend HTTP behavior', () => {
     await act(async () => { await hook.result.current.handleSend(); });
     expect(calls[0]).toMatchObject({
       method: 'POST', url: '/api/agent-presets/from-template/chat.minimal',
-      body: { reuse_existing: true, model_route_refs: {}, chat_route_records: {} },
+      body: { reuse_existing: true, model_route_refs: {}, chat_route_records: {}, model: { provider_id: PROVIDER_ID, model: MODEL.use_model } },
     });
-    expect(calls[1]).toEqual({ method: 'POST', url: '/api/agent-sessions', body: { preset_id: PRESET_ID, title: INPUT } });
+    expect(calls[1]).toEqual({ method: 'POST', url: '/api/agent-sessions', body: { preset_id: PRESET_ID, title: INPUT, model: { provider_id: PROVIDER_ID, model: MODEL.use_model } } });
     expect(calls).toHaveLength(3);
     expect(readOnlyHandoff()).toMatchObject({ input: INPUT, files: FILES });
     expect(navigations).toEqual([`/conversation/${PRESET_CONVERSATION_ID}`]);
@@ -298,7 +298,7 @@ describe('useGuidSend HTTP behavior', () => {
     ]);
   });
 
-  test('preset mode POSTs exactly preset_id/title, stages one handoff, and navigates', async () => {
+  test('personal Agent launch sends the selected model with its preset and stages one handoff', async () => {
     resetBrowserStorage();
     const calls = installFetchRecorder();
     const navigations: string[] = [];
@@ -323,10 +323,11 @@ describe('useGuidSend HTTP behavior', () => {
       body: {
         preset_id: PRESET_ID,
         title: INPUT,
+        model: { provider_id: PROVIDER_ID, model: MODEL.use_model },
       },
     });
     expect(Object.keys(calls[0].body as Record<string, unknown>).sort()).toEqual(
-      ['preset_id', 'title']
+      ['model', 'preset_id', 'title']
     );
     expect(calls[1]).toEqual({
       method: 'GET',
@@ -413,7 +414,7 @@ describe('useGuidSend HTTP behavior', () => {
       )
     );
     const defaultMissingModel = renderHook(() =>
-      useGuidSend(createDeps({ selection: { kind: 'default' } }))
+      useGuidSend({ ...createDeps({ selection: { kind: 'default' } }), current_model: undefined })
     );
     const presetReady = renderHook(() =>
       useGuidSend(

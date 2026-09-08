@@ -485,6 +485,75 @@ async fn official_agent_direct_launch_reuses_configuration_and_creates_sessions(
 }
 
 #[tokio::test]
+async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_unchanged() {
+    const TRUST: &str = "agent-model-selection-test";
+    async fn call(router: axum::Router, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
+        let response = router.oneshot(Request::builder().method(method).uri(path)
+            .header("x-nomi-local-trust", TRUST).header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+    let (router, services) = common::build_local_trust_app(TRUST).await;
+    let (status, original) = call(router.clone(), "POST", "/api/agent-presets", json!({
+        "display_name": "Personal model test", "document": {
+            "schema_version": "1.0.0", "model_route_refs": {}, "chat_route_records": {},
+            "initial_capabilities": [{ "capability": { "id": "fs.read", "version": "1.0.0" } }],
+            "on_demand_capabilities": [], "skill_bindings": [], "system_role_provider_overrides": {},
+            "persona": "Research helper", "instructions": "Keep my working rules", "starter_prompts": []
+        }
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{original}");
+    let original = original["data"].clone();
+    let preset_id = original["preset"]["preset_id"].as_str().unwrap();
+    let alternate = original["revision"]["document"]["chat_route_records"]["agent_chat"]["failovers"][0].clone();
+    assert!(alternate["model"].is_string());
+    let selection = json!({ "provider_id": alternate["provider_id"], "model": alternate["model"] });
+    let mut sessions = Vec::new();
+    for _ in 0..2 {
+        let (status, result) = call(router.clone(), "POST", "/api/agent-sessions", json!({
+            "preset_id": preset_id, "title": "Chosen model", "model": selection
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        let id = result["data"]["agent_session_id"].as_str().unwrap();
+        let (status, conversation) = call(router.clone(), "GET", &format!("/api/conversations/{id}"), json!({})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(conversation["data"]["model"]["provider_id"], selection["provider_id"]);
+        assert_eq!(conversation["data"]["model"]["model"], selection["model"]);
+        let binding = result["data"]["agent_binding"].clone();
+        let variant = binding["preset_revision_ref"]["preset_id"].as_str().unwrap();
+        let (status, editor) = call(router.clone(), "GET", &format!("/api/agent-presets/{variant}/editor"), json!({})).await;
+        assert_eq!(status, StatusCode::OK);
+        let record = &editor["data"]["revision"]["document"]["chat_route_records"]["agent_chat"];
+        assert_eq!(record["primary"]["provider_id"], selection["provider_id"]);
+        assert_eq!(record["primary"]["model"], selection["model"]);
+        assert_eq!(record["failovers"], json!([]));
+        for field in ["initial_capabilities", "on_demand_capabilities", "skill_bindings", "system_role_provider_overrides", "persona", "instructions"] {
+            assert_eq!(editor["data"]["revision"]["document"][field], original["revision"]["document"][field], "must retain {field}");
+        }
+        sessions.push(binding);
+    }
+    assert_eq!(sessions[0], sessions[1], "same model reuses the frozen configuration");
+    let (_, reloaded) = call(router.clone(), "GET", &format!("/api/agent-presets/{preset_id}/editor"), json!({})).await;
+    assert_eq!(reloaded["data"]["revision"], original["revision"]);
+    let (_, library) = call(router.clone(), "GET", "/api/agent-preset-templates", json!({})).await;
+    assert_eq!(library["data"]["user_presets"].as_array().unwrap().len(), 1, "internal model variants stay out of the Agent library");
+    let (status, official) = call(router.clone(), "POST", "/api/agent-presets/from-template/chat.minimal", json!({
+        "display_name": "Official chosen model", "model_route_refs": {}, "chat_route_records": {},
+        "model": selection, "reuse_existing": true
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{official}");
+    assert_eq!(official["data"]["revision"]["document"]["chat_route_records"]["agent_chat"]["primary"]["model"], selection["model"]);
+    let (status, _) = call(router, "POST", "/api/agent-sessions", json!({
+        "preset_id": preset_id, "model": { "provider_id": selection["provider_id"], "model": "nonexistent-model" }
+    })).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "an unknown model cannot silently fall back");
+    services.shutdown_browser_platform().await.unwrap();
+    services.database.close().await;
+}
+
+#[tokio::test]
 async fn nomi_core_agent_settings_template_and_binding_surface_is_persistent() {
     let (router, services) = common::build_local_trust_app("agent-settings-local-trust").await;
     let response = router

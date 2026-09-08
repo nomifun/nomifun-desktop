@@ -106,14 +106,14 @@ const GuidPage: React.FC = () => {
   const workspaceEnabled =
     isDefaultAgent ||
     (presetResourceResolutionReady && presetResourceKinds.has('workspace'));
-  const hasLaunchTarget = isDefaultAgent
+  const hasLaunchTarget = Boolean(modelSelection.current_model) && (isDefaultAgent
     ? Boolean(modelSelection.current_model)
     : agentSelection.selection.kind === 'template'
       ? Boolean(agentSelection.selectedTemplate)
       : Boolean(
         agentSelection.selectedPreset?.current_stable_revision &&
           presetResourceResolutionReady
-      );
+      ));
 
   const mention = useGuidMention({
     presets: agentSelection.presets,
@@ -401,14 +401,14 @@ const GuidPage: React.FC = () => {
     </>
   );
 
-  const modelSelectorNode = isDefaultAgent ? (
+  const modelSelectorNode = (
     <GuidModelSelector
       isProviderModelMode
       modelList={modelSelection.modelList}
       current_model={modelSelection.current_model}
       setCurrentModel={modelSelection.setCurrentModel}
     />
-  ) : undefined;
+  );
 
   const autoWorkButtonDisabled =
     !hasLaunchTarget ||

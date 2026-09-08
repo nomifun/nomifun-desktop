@@ -1518,6 +1518,7 @@ mod tests {
                 &owner,
                 "chat.minimal",
                 CreateAgentPresetFromTemplateRequest {
+                    model: None,
                     reuse_existing: false,
                     display_name: "Remote smoke preset".to_owned(),
                     description: None,

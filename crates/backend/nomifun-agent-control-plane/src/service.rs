@@ -52,6 +52,20 @@ pub trait DefaultChatRouteResolver: Send + Sync {
         &self,
         owner: &UserId,
     ) -> Result<Option<nomifun_agent_contracts::ChatRouteRecord>, ControlPlaneError>;
+
+    async fn resolve_selected_chat_route(
+        &self,
+        owner: &UserId,
+        model: &nomifun_api_types::AgentChatModelSelectionDto,
+    ) -> Result<Option<nomifun_agent_contracts::ChatRouteRecord>, ControlPlaneError> {
+        let Some(mut route) = self.resolve_default_chat_route(owner).await? else { return Ok(None); };
+        let selected = std::iter::once(route.primary.clone()).chain(route.failovers)
+            .find(|candidate| candidate.provider_id == model.provider_id && candidate.model == model.model);
+        let Some(selected) = selected else { return Ok(None); };
+        route.primary = selected;
+        route.failovers = Vec::new();
+        Ok(Some(route))
+    }
 }
 
 pub struct AgentControlPlane {
@@ -135,6 +149,7 @@ impl AgentControlPlane {
 
         let user_presets = presets
             .iter()
+            .filter(|preset| !preset.session_only)
             .map(|preset| {
                 preset_summary(
                     preset,
@@ -249,6 +264,7 @@ impl AgentControlPlane {
                 ));
             }
             let stored = StoredPreset {
+                session_only: false,
                 preset: AgentPreset {
                     preset_id,
                     owner_user_id: Some(owner.clone()),
@@ -310,9 +326,16 @@ impl AgentControlPlane {
         let mut chat_route_records = request.chat_route_records;
         let uses_default_route = !model_route_refs.contains_key(CHAT_MODEL_TASK)
             && !chat_route_records.contains_key(CHAT_MODEL_TASK);
+        if request.model.is_some() && !uses_default_route {
+            return Err(ControlPlaneError::canonical("MODEL_ROUTE_RECORD_INVALID", axum::http::StatusCode::BAD_REQUEST,
+                "select a model or provide an explicit route, not both"));
+        }
         if uses_default_route
             && let Some(record) =
-                self.resolve_default_chat_route(owner).await?
+                match request.model.as_ref() {
+                    Some(model) => Some(self.resolve_selected_chat_route(owner, model).await?),
+                    None => self.resolve_default_chat_route(owner).await?,
+                }
         {
             model_route_refs.insert(
                 CHAT_MODEL_TASK.to_owned(),
@@ -350,7 +373,7 @@ impl AgentControlPlane {
         if request.reuse_existing {
             let requested_payload: nomifun_agent_contracts::AgentPresetRevisionPayload = wire_cast(&document)?;
             for preset in self.store.list_presets(owner).await? {
-                if preset.preset.source != AgentPresetSource::User {
+                if preset.session_only || preset.preset.source != AgentPresetSource::User {
                     continue;
                 }
                 let Some(revision) = self.current_revision(&preset).await? else {
@@ -373,6 +396,65 @@ impl AgentControlPlane {
             Some(template_key),
         )
         .await
+    }
+
+    async fn resolve_selected_chat_route(
+        &self,
+        owner: &UserId,
+        model: &nomifun_api_types::AgentChatModelSelectionDto,
+    ) -> Result<nomifun_agent_contracts::ChatRouteRecord, ControlPlaneError> {
+        let unavailable = || ControlPlaneError::canonical("MODEL_ROUTE_NOT_FOUND",
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY, "the selected provider/model has no enabled Chat capability");
+        let resolver = self.default_chat_route_resolver.as_ref().ok_or_else(unavailable)?;
+        let route = resolver.resolve_selected_chat_route(owner, model).await?.ok_or_else(unavailable)?;
+        route.validate().map_err(|error| ControlPlaneError::Wire(error.to_string()))?;
+        if route.primary.provider_id != model.provider_id || route.primary.model != model.model {
+            return Err(unavailable());
+        }
+        Ok(route)
+    }
+
+    /// Freeze the chosen model for this new session without updating the user's
+    /// stable Agent configuration. Internal variants are hidden from the library.
+    pub async fn resolve_agent_session_binding_with_model(
+        &self,
+        owner: &UserId,
+        preset_id: &str,
+        model: Option<&nomifun_api_types::AgentChatModelSelectionDto>,
+    ) -> Result<AgentBindingValueDto, ControlPlaneError> {
+        let Some(model) = model else { return self.resolve_agent_session_binding(owner, preset_id).await; };
+        let _guard = self.template_launch_lock.lock().await;
+        let source = self.owned_preset(owner, preset_id).await?;
+        let revision = self.current_revision(&source).await?.ok_or_else(|| not_found("AgentPresetRevision"))?;
+        let source_snapshot = self.current_snapshot(Some(&revision)).await?;
+        if source_snapshot.is_none() {
+            return Err(ControlPlaneError::canonical("CAPABILITY_NOT_MATERIALIZED",
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY, "the saved Agent has no compiled Snapshot"));
+        }
+        let route = self.resolve_selected_chat_route(owner, model).await?;
+        let mut payload = revision.payload.clone();
+        payload.model_route_refs.insert(CHAT_MODEL_TASK.into(), route.primary.model_route_id.clone());
+        payload.chat_route_records.insert(CHAT_MODEL_TASK.into(), route);
+        if template_launch_payload_matches(&revision.payload, &payload, true) {
+            return self.resolve_agent_session_binding(owner, preset_id).await;
+        }
+        for existing in self.store.list_presets(owner).await? {
+            if !existing.session_only { continue; }
+            let Some(saved) = self.current_revision(&existing).await? else { continue; };
+            if !template_launch_payload_matches(&saved.payload, &payload, true) { continue; }
+            let snapshot = self.current_snapshot(Some(&saved)).await?;
+            if snapshot.as_ref().map(|value| value.content.required_runtime_profile)
+                == source_snapshot.as_ref().map(|value| value.content.required_runtime_profile)
+                && snapshot.is_some()
+            {
+                return self.resolve_agent_session_binding(owner, existing.preset.preset_id.as_ref()).await;
+            }
+        }
+        let prepared = self.create_configuration_with_initial_revision(
+            owner, AgentPresetId::from(Uuid::now_v7().to_string()), source.preset.display_name,
+            source.preset.description, wire_cast(&payload)?, None, true, source_snapshot.as_ref(),
+        ).await?;
+        self.resolve_agent_session_binding(owner, &prepared.preset.preset_id).await
     }
 
     async fn resolve_default_chat_route(
@@ -977,6 +1059,21 @@ impl AgentControlPlane {
         document: nomifun_api_types::AgentPresetDocumentDto,
         transient_template_key: Option<OfficialPresetKey>,
     ) -> Result<AgentPresetEditorResponse, ControlPlaneError> {
+        self.create_configuration_with_initial_revision(owner, preset_id, display_name, description,
+            document, transient_template_key, false, None).await
+    }
+
+    async fn create_configuration_with_initial_revision(
+        &self,
+        owner: &UserId,
+        preset_id: AgentPresetId,
+        display_name: String,
+        description: Option<String>,
+        document: nomifun_api_types::AgentPresetDocumentDto,
+        transient_template_key: Option<OfficialPresetKey>,
+        session_only: bool,
+        source_snapshot: Option<&nomifun_agent_contracts::ResolvedSnapshotEnvelope>,
+    ) -> Result<AgentPresetEditorResponse, ControlPlaneError> {
         let draft = AgentPresetDraftDto {
             preset_id: preset_id.as_ref().to_owned(),
             display_name: display_name.clone(),
@@ -999,7 +1096,7 @@ impl AgentControlPlane {
             owner,
             &preview_request,
             None,
-            None,
+            source_snapshot,
             transient_template_key,
             &catalog,
         )?;
@@ -1029,6 +1126,7 @@ impl AgentControlPlane {
         let canonical_document: nomifun_api_types::AgentPresetDocumentDto =
             wire_cast(&revision.payload)?;
         let stored = StoredPreset {
+            session_only,
             preset: AgentPreset {
                 preset_id,
                 owner_user_id: Some(owner.clone()),
@@ -1724,6 +1822,7 @@ mod tests {
                 &owner,
                 "chat.minimal",
                 CreateAgentPresetFromTemplateRequest {
+                    model: None,
                     reuse_existing: false,
                     display_name: "Minimal".into(),
                     description: None,
@@ -1776,6 +1875,7 @@ mod tests {
 
     fn official_launch_request(reuse_existing: bool) -> CreateAgentPresetFromTemplateRequest {
         CreateAgentPresetFromTemplateRequest {
+            model: None,
             reuse_existing,
             display_name: "Minimal".into(),
             description: None,
@@ -1875,6 +1975,7 @@ mod tests {
                 &owner,
                 "chat.minimal",
                 CreateAgentPresetFromTemplateRequest {
+                    model: None,
                     reuse_existing: false,
                     display_name: "Retire me".into(),
                     description: None,
@@ -2040,6 +2141,7 @@ mod tests {
                 &owner,
                 "chat.minimal",
                 CreateAgentPresetFromTemplateRequest {
+                    model: None,
                     reuse_existing: false,
                     display_name: "Minimal".into(),
                     description: None,
@@ -2173,6 +2275,7 @@ mod tests {
         let binding_id = RemoteBindingId::from("remote-binding-1");
         store
             .insert_preset(StoredPreset {
+                session_only: false,
                 preset: AgentPreset {
                     preset_id: AgentPresetId::from("preset-1"),
                     owner_user_id: Some(owner.clone()),
@@ -2256,6 +2359,7 @@ mod tests {
                 &owner,
                 "chat.minimal",
                 CreateAgentPresetFromTemplateRequest {
+                    model: None,
                     reuse_existing: false,
                     display_name: "Minimal".into(),
                     description: None,

@@ -778,6 +778,8 @@ impl SqliteControlPlaneStore {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PersistedPresetDisplay {
+    #[serde(default)]
+    session_only: bool,
     display_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     description: Option<String>,
@@ -854,6 +856,7 @@ impl ControlPlaneStore for SqliteControlPlaneStore {
         let owner = encode_control_json(&preset_owner_ref(&preset.preset))?;
         let source = encode_control_json(&preset.preset.source)?;
         let display = encode_control_json(&PersistedPresetDisplay {
+            session_only: preset.session_only,
             display_name: preset.preset.display_name.clone(),
             description: preset.preset.description.clone(),
         })?;
@@ -998,7 +1001,11 @@ impl ControlPlaneStore for SqliteControlPlaneStore {
             ));
         }
         insert_revision_snapshot_tx(&mut tx, &revision, &snapshot).await?;
+        let session_only: bool = sqlx::query_scalar(
+            "SELECT COALESCE(json_extract(display_json, '$.session_only'), 0) FROM agent_presets WHERE preset_id = ?"
+        ).bind(revision.reference.preset_id.as_ref()).fetch_one(&mut *tx).await.map_err(control_sql)?;
         let display = encode_control_json(&PersistedPresetDisplay {
+            session_only,
             display_name,
             description,
         })?;
@@ -1450,6 +1457,7 @@ async fn preset_from_row(
     };
     let display = display_from_json(&display_json)?;
     Ok(StoredPreset {
+        session_only: display.session_only,
         preset: AgentPreset {
             preset_id,
             owner_user_id: owner_from_json(&owner_json)?,
@@ -1491,6 +1499,7 @@ async fn insert_preset_tx(
     .bind(encode_control_json(&preset_owner_ref(&preset.preset))?)
     .bind(encode_control_json(&preset.preset.source)?)
     .bind(encode_control_json(&PersistedPresetDisplay {
+        session_only: preset.session_only,
         display_name: preset.preset.display_name.clone(),
         description: preset.preset.description.clone(),
     })?)
@@ -2563,7 +2572,7 @@ impl AgentPlatform {
     ) -> Result<CreateAgentSessionResponseDto, AgentPlatformError> {
         let binding = self
             .control_plane
-            .resolve_agent_session_binding(owner, &request.preset_id)
+            .resolve_agent_session_binding_with_model(owner, &request.preset_id, request.model.as_ref())
             .await?;
         let mut open = OpenAgentSessionRequest::user(
             owner,
@@ -5007,6 +5016,7 @@ mod control_plane_store_tests {
 
     fn user_preset(id: &str, owner: &UserId) -> StoredPreset {
         StoredPreset {
+            session_only: false,
             preset: AgentPreset {
                 preset_id: AgentPresetId::from(id),
                 owner_user_id: Some(owner.clone()),
