@@ -5,11 +5,14 @@ use nomifun_agent_contracts::{
     ArtifactId, DigestHex, JavaScriptBuildProfile, LocalizedMetadata,
     MiniAppReleaseArtifactV1, MiniAppReleaseFile, MiniAppReleaseRef,
     MiniAppReleaseV1Manifest, MiniAppReadyOrigin, MiniAppReadyRelease,
-    MiniAppResourceContract, MiniAppSourceLineage, MiniAppUiReleaseDescriptor,
-    PackageId, PackageRef, StrictJsonValue, VersionString,
+    MiniAppAdditiveMigrationAction, MiniAppMigration, MiniAppMigrationColumn,
+    MiniAppMigrationId,
+    MiniAppResourceContract, MiniAppServiceLifecycle, MiniAppServiceReleaseDescriptor,
+    MiniAppSourceLineage, MiniAppUiReleaseDescriptor, PackageId, PackageRef, StrictJsonValue,
+    VersionString,
     MINIAPP_BRIDGE_CONTRACT_VERSION, MINIAPP_M1_SCHEMA_VERSION,
-    MINIAPP_RELEASE_PROFILE_VERSION, canonical_ui_tree_digest, digest_bytes,
-    digest_payload,
+    MINIAPP_RELEASE_PROFILE_VERSION, MINIAPP_SERVICE_HOST_PROTOCOL_VERSION,
+    MINIAPP_SERVICE_SDK_CONTRACT_VERSION, canonical_ui_tree_digest, digest_bytes, digest_payload,
 };
 use nomifun_db::{
     CancelMiniAppM1BuildOperationParams, CloseMiniAppM1SurfaceSessionParams,
@@ -36,6 +39,8 @@ static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
 
 const MINIAPP_ID: &str = "0190f5fe-7c00-7000-8000-000000000101";
 const PROJECT_ID: &str = "0190f5fe-7c00-7000-8000-000000000102";
+const SERVICE_MINIAPP_ID: &str = "0190f5fe-7c00-7000-8000-000000000103";
+const SERVICE_PROJECT_ID: &str = "0190f5fe-7c00-7000-8000-000000000104";
 
 struct MiniAppTestDatabase {
     pool: nomifun_db::SqlitePool,
@@ -276,16 +281,62 @@ fn fixture_artifact_payload(
     artifact_id: &str,
     artifact_seed: &str,
 ) -> MiniAppReleaseArtifactV1 {
+    fixture_artifact_payload_with_service(
+        artifact_id,
+        artifact_seed,
+        false,
+        false,
+        false,
+        false,
+    )
+}
+
+fn fixture_service_artifact_payload(
+    artifact_id: &str,
+    artifact_seed: &str,
+    uses_files: bool,
+) -> MiniAppReleaseArtifactV1 {
+    fixture_artifact_payload_with_service(
+        artifact_id,
+        artifact_seed,
+        true,
+        uses_files,
+        false,
+        false,
+    )
+}
+
+fn fixture_artifact_payload_with_service(
+    artifact_id: &str,
+    artifact_seed: &str,
+    has_service: bool,
+    uses_files: bool,
+    uses_private_database: bool,
+    with_migration: bool,
+) -> MiniAppReleaseArtifactV1 {
     let html = format!(
         "<!doctype html><html><body><main><h1>fixture-{artifact_seed}</h1></main></body></html>"
     )
     .into_bytes();
-    let file = MiniAppReleaseFile {
+    let ui_file = MiniAppReleaseFile {
         normalized_relative_path: "ui/index.html".to_owned(),
         digest: digest_bytes(&html),
         size_bytes: html.len() as u64,
     };
-    let files = vec![file];
+    let files = if has_service {
+        let service = format!("export default {{ invoke() {{ return '{artifact_seed}'; }} }};")
+            .into_bytes();
+        vec![
+            ui_file,
+            MiniAppReleaseFile {
+                normalized_relative_path: "service/main.mjs".to_owned(),
+                digest: digest_bytes(&service),
+                size_bytes: service.len() as u64,
+            },
+        ]
+    } else {
+        vec![ui_file]
+    };
     let config_schema = StrictJsonValue(json!({
         "type": "object",
         "additionalProperties": false
@@ -306,7 +357,17 @@ fn fixture_artifact_payload(
             entrypoint_digest: files[0].digest.clone(),
             ui_tree_digest: canonical_ui_tree_digest(&files).unwrap(),
         },
-        service: None,
+        service: has_service.then(|| MiniAppServiceReleaseDescriptor {
+            entrypoint: "service/main.mjs".to_owned(),
+            module_digest: files[1].digest.clone(),
+            lifecycle: MiniAppServiceLifecycle::OnDemand,
+            uses_files,
+            uses_private_database,
+            service_contract_digest: digest_bytes(b"service-contract"),
+            host_protocol_version: MINIAPP_SERVICE_HOST_PROTOCOL_VERSION.into(),
+            sdk_contract_version: MINIAPP_SERVICE_SDK_CONTRACT_VERSION.into(),
+            runtime_requirements_digest: digest_bytes(b"runtime-requirements"),
+        }),
         dependency_lock_digest: DigestHex::from("c".repeat(64)),
         dependency_graph_digest: digest_bytes(
             format!("graph-{artifact_seed}").as_bytes(),
@@ -330,7 +391,24 @@ fn fixture_artifact_payload(
             version: VersionString::from("1.0.0"),
         },
         contributions: Default::default(),
-        migrations: Vec::new(),
+        migrations: if with_migration {
+            vec![MiniAppMigration::new(
+                MiniAppMigrationId::from("001_create_state"),
+                vec![MiniAppAdditiveMigrationAction::CreateTable {
+                    table_name: "state".to_owned(),
+                    columns: vec![MiniAppMigrationColumn {
+                        name: "id".to_owned(),
+                        declared_type: "INTEGER".to_owned(),
+                        nullable: false,
+                        default_literal: None,
+                    }],
+                    primary_key_columns: vec!["id".to_owned()],
+                }],
+            )
+            .unwrap()]
+        } else {
+            Vec::new()
+        },
     };
     MiniAppReleaseArtifactV1::new(
         ArtifactId::from(artifact_id),
@@ -338,6 +416,43 @@ fn fixture_artifact_payload(
         files,
     )
     .unwrap()
+}
+
+fn service_artifact(
+    owner: &str,
+    artifact_id: &str,
+    artifact_seed: &str,
+    created_at: i64,
+    uses_files: bool,
+    uses_private_database: bool,
+    with_migration: bool,
+) -> MiniAppReleaseArtifactRow {
+    let artifact_payload = if uses_files || uses_private_database || with_migration {
+        fixture_artifact_payload_with_service(
+            artifact_id,
+            artifact_seed,
+            true,
+            uses_files,
+            uses_private_database,
+            with_migration,
+        )
+    } else {
+        fixture_service_artifact_payload(artifact_id, artifact_seed, false)
+    };
+    let artifact_record_json = String::from_utf8(
+        nomifun_agent_contracts::canonical_json_bytes(&artifact_payload).unwrap(),
+    )
+    .unwrap();
+    MiniAppReleaseArtifactRow {
+        id: 0,
+        artifact_id: artifact_id.to_owned(),
+        owner_user_id: owner.to_owned(),
+        artifact_digest: artifact_payload.artifact_digest.as_ref().to_owned(),
+        manifest_digest: artifact_payload.manifest.payload_digest.as_ref().to_owned(),
+        artifact_record_json,
+        managed_path: format!("artifacts/{}", artifact_payload.artifact_digest.as_ref()),
+        created_at,
+    }
 }
 
 fn release(
@@ -438,6 +553,410 @@ async fn create_editable_app(
         })
         .await
         .unwrap()
+}
+
+#[tokio::test]
+async fn service_product_supports_build_ready_publish_rollback_and_lifecycle() {
+    let database = init_miniapp_test_database().await;
+    let owner = installation_owner_id(database.pool()).await.unwrap();
+    let repository = SqliteMiniAppM1Repository::new(database.pool().clone());
+    let source = managed_source("sources/owner/service/source", 'b', 'c', 1);
+
+    let created = repository
+        .create_with_source(&CreateMiniAppM1WithSourceParams {
+            create: create_params(
+                &owner,
+                SERVICE_MINIAPP_ID,
+                SERVICE_PROJECT_ID,
+                0,
+                MiniAppM1Kind::Service,
+                10,
+            ),
+            source: source.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(created.product.kind, MiniAppM1Kind::Service.as_str());
+    assert_eq!(created.project.source_state, "editable");
+
+    let operation_one = Uuid::now_v7().to_string();
+    start_build(
+        &repository,
+        &owner,
+        SERVICE_MINIAPP_ID,
+        SERVICE_PROJECT_ID,
+        1,
+        &source,
+        &operation_one,
+        20,
+    )
+    .await;
+    let artifact_one = service_artifact(
+        &owner,
+        &Uuid::now_v7().to_string(),
+        "service-one",
+        21,
+        false,
+        false,
+        false,
+    );
+    let digest_one = artifact_one.artifact_digest.clone();
+    let release_one = release(
+        &owner,
+        SERVICE_MINIAPP_ID,
+        SERVICE_PROJECT_ID,
+        &artifact_one,
+        &Uuid::now_v7().to_string(),
+        &digest_one,
+        &operation_one,
+        &source.source_head_digest,
+        &source.dependency_lock_digest,
+        22,
+    );
+    let ready_one = repository
+        .finish_build_and_record_ready(&FinishMiniAppM1BuildAndRecordReadyParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: SERVICE_MINIAPP_ID.to_owned(),
+            project_id: SERVICE_PROJECT_ID.to_owned(),
+            operation_id: operation_one,
+            expected_product_revision: 1,
+            expected_pointer_revision: 1,
+            expected_project_revision: 1,
+            expected_build_generation: 1,
+            artifact: artifact_one,
+            release: release_one,
+            bounded_log_tail: vec!["service build succeeded".to_owned()],
+            finished_at_ms: 23,
+        })
+        .await
+        .unwrap();
+    assert!(ready_one.ready_release.is_some());
+    assert!(ready_one.active_release.is_none());
+
+    let published_one = repository
+        .publish_ready_cas(&PublishMiniAppM1ReadyParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: SERVICE_MINIAPP_ID.to_owned(),
+            expected_product_revision: 2,
+            expected_pointer_revision: 2,
+            expected_active_release_epoch: 0,
+            expected_ready_release_id: ready_one
+                .product
+                .ready_release_id
+                .clone()
+                .unwrap(),
+            expected_ready_release_digest: ready_one
+                .product
+                .ready_release_digest
+                .clone()
+                .unwrap(),
+            expected_active_release_digest: None,
+            target_catalog_digest: "3".repeat(64),
+            auto_publish_guard: None,
+            updated_at: 24,
+        })
+        .await
+        .unwrap();
+    let active_one_id = published_one.product.active_release_id.clone().unwrap();
+    let active_one_digest = published_one
+        .product
+        .active_release_digest
+        .clone()
+        .unwrap();
+    assert_eq!(published_one.product.active_release_epoch, 1);
+
+    let enabled = repository
+        .commit_lifecycle_cas(&CommitMiniAppM1LifecycleParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: SERVICE_MINIAPP_ID.to_owned(),
+            expected_product_revision: 3,
+            expected_pointer_revision: 3,
+            expected_active_release_digest: Some(active_one_digest.clone()),
+            enabled: true,
+            updated_at: 25,
+        })
+        .await
+        .unwrap();
+    assert_eq!(enabled.product.lifecycle, "enabled");
+    assert!(enabled.catalog_publication.is_some());
+
+    let operation_two = Uuid::now_v7().to_string();
+    start_build(
+        &repository,
+        &owner,
+        SERVICE_MINIAPP_ID,
+        SERVICE_PROJECT_ID,
+        1,
+        &source,
+        &operation_two,
+        30,
+    )
+    .await;
+    let artifact_two = service_artifact(
+        &owner,
+        &Uuid::now_v7().to_string(),
+        "service-two",
+        31,
+        false,
+        false,
+        false,
+    );
+    let digest_two = artifact_two.artifact_digest.clone();
+    let release_two_id = Uuid::now_v7().to_string();
+    let release_two = release(
+        &owner,
+        SERVICE_MINIAPP_ID,
+        SERVICE_PROJECT_ID,
+        &artifact_two,
+        &release_two_id,
+        &digest_two,
+        &operation_two,
+        &source.source_head_digest,
+        &source.dependency_lock_digest,
+        32,
+    );
+    let ready_two = repository
+        .finish_build_and_record_ready(&FinishMiniAppM1BuildAndRecordReadyParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: SERVICE_MINIAPP_ID.to_owned(),
+            project_id: SERVICE_PROJECT_ID.to_owned(),
+            operation_id: operation_two,
+            expected_product_revision: 4,
+            expected_pointer_revision: 3,
+            expected_project_revision: 1,
+            expected_build_generation: 1,
+            artifact: artifact_two,
+            release: release_two,
+            bounded_log_tail: vec![],
+            finished_at_ms: 33,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        ready_two.product.ready_release_digest,
+        Some(digest_two.clone())
+    );
+    assert_eq!(
+        ready_two.product.active_release_digest,
+        Some(active_one_digest.clone())
+    );
+    let published_two = repository
+        .publish_ready_cas(&PublishMiniAppM1ReadyParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: SERVICE_MINIAPP_ID.to_owned(),
+            expected_product_revision: 5,
+            expected_pointer_revision: 4,
+            expected_active_release_epoch: 1,
+            expected_ready_release_id: release_two_id,
+            expected_ready_release_digest: digest_two.clone(),
+            expected_active_release_digest: Some(active_one_digest.clone()),
+            target_catalog_digest: "4".repeat(64),
+            auto_publish_guard: None,
+            updated_at: 34,
+        })
+        .await
+        .unwrap();
+    assert_eq!(published_two.product.previous_release_id, Some(active_one_id.clone()));
+    assert_eq!(published_two.product.active_release_epoch, 2);
+
+    let rolled_back = repository
+        .rollback_previous_cas(&RollbackMiniAppM1PreviousParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: SERVICE_MINIAPP_ID.to_owned(),
+            expected_product_revision: 6,
+            expected_pointer_revision: 5,
+            expected_active_release_epoch: 2,
+            expected_current_release_id: published_two
+                .product
+                .active_release_id
+                .clone()
+                .unwrap(),
+            expected_current_release_digest: published_two
+                .product
+                .active_release_digest
+                .clone()
+                .unwrap(),
+            expected_previous_release_id: active_one_id,
+            expected_previous_release_digest: active_one_digest.clone(),
+            target_catalog_digest: "5".repeat(64),
+            updated_at: 35,
+        })
+        .await
+        .unwrap();
+    assert_eq!(rolled_back.product.active_release_epoch, 3);
+    assert_eq!(
+        rolled_back.product.active_release_digest,
+        Some(active_one_digest.clone())
+    );
+
+    let disabled = repository
+        .commit_lifecycle_cas(&CommitMiniAppM1LifecycleParams {
+            owner_user_id: owner,
+            miniapp_id: SERVICE_MINIAPP_ID.to_owned(),
+            expected_product_revision: 7,
+            expected_pointer_revision: 6,
+            expected_active_release_digest: Some(active_one_digest),
+            enabled: false,
+            updated_at: 36,
+        })
+        .await
+        .unwrap();
+    assert_eq!(disabled.product.lifecycle, "disabled");
+    assert!(disabled.catalog_publication.is_none());
+}
+
+#[tokio::test]
+async fn service_product_rejects_unimplemented_storage_and_wrong_manifest_kind() {
+    let database = init_miniapp_test_database().await;
+    let owner = installation_owner_id(database.pool()).await.unwrap();
+    let repository = SqliteMiniAppM1Repository::new(database.pool().clone());
+    let source = managed_source("sources/owner/service/source", 'b', 'c', 1);
+
+    repository
+        .create_with_source(&CreateMiniAppM1WithSourceParams {
+            create: create_params(
+                &owner,
+                SERVICE_MINIAPP_ID,
+                SERVICE_PROJECT_ID,
+                0,
+                MiniAppM1Kind::Service,
+                10,
+            ),
+            source: source.clone(),
+        })
+        .await
+        .unwrap();
+
+    for (index, (uses_files, uses_private_database, with_migration)) in
+        [(true, false, false), (false, true, false), (false, true, true)]
+            .into_iter()
+            .enumerate()
+    {
+        let operation_id = Uuid::now_v7().to_string();
+        start_build(
+            &repository,
+            &owner,
+            SERVICE_MINIAPP_ID,
+            SERVICE_PROJECT_ID,
+            1,
+            &source,
+            &operation_id,
+            20 + index as i64 * 3,
+        )
+        .await;
+        let artifact = service_artifact(
+            &owner,
+            &Uuid::now_v7().to_string(),
+            &format!("unsupported-{index}"),
+            21 + index as i64 * 3,
+            uses_files,
+            uses_private_database,
+            with_migration,
+        );
+        let release = release(
+            &owner,
+            SERVICE_MINIAPP_ID,
+            SERVICE_PROJECT_ID,
+            &artifact,
+            &Uuid::now_v7().to_string(),
+            &artifact.artifact_digest,
+            &operation_id,
+            &source.source_head_digest,
+            &source.dependency_lock_digest,
+            22 + index as i64 * 3,
+        );
+        let error = repository
+            .finish_build_and_record_ready(&FinishMiniAppM1BuildAndRecordReadyParams {
+                owner_user_id: owner.clone(),
+                miniapp_id: SERVICE_MINIAPP_ID.to_owned(),
+                project_id: SERVICE_PROJECT_ID.to_owned(),
+                operation_id: operation_id.clone(),
+                expected_product_revision: 1,
+                expected_pointer_revision: 1,
+                expected_project_revision: 1,
+                expected_build_generation: 1,
+                artifact,
+                release,
+                bounded_log_tail: vec![],
+                finished_at_ms: 23 + index as i64 * 3,
+            })
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains(
+            "Service MiniApp Files, Private Database, and Migration capabilities are not implemented"
+        ));
+        assert_eq!(
+            repository
+                .get_build_operation(&owner, SERVICE_MINIAPP_ID, &operation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            "running"
+        );
+        repository
+            .cancel_build_operation(&CancelMiniAppM1BuildOperationParams {
+                owner_user_id: owner.clone(),
+                miniapp_id: SERVICE_MINIAPP_ID.to_owned(),
+                operation_id,
+                bounded_log_tail: vec!["rejected artifact".to_owned()],
+                finished_at_ms: 24 + index as i64 * 3,
+            })
+            .await
+            .unwrap();
+    }
+
+    let operation_id = Uuid::now_v7().to_string();
+    start_build(
+        &repository,
+        &owner,
+        SERVICE_MINIAPP_ID,
+        SERVICE_PROJECT_ID,
+        1,
+        &source,
+        &operation_id,
+        40,
+    )
+    .await;
+    let ui_artifact = artifact(
+        &owner,
+        &Uuid::now_v7().to_string(),
+        "ui-for-service",
+        "ignored",
+        41,
+    );
+    let ui_release = release(
+        &owner,
+        SERVICE_MINIAPP_ID,
+        SERVICE_PROJECT_ID,
+        &ui_artifact,
+        &Uuid::now_v7().to_string(),
+        &ui_artifact.artifact_digest,
+        &operation_id,
+        &source.source_head_digest,
+        &source.dependency_lock_digest,
+        42,
+    );
+    let error = repository
+        .finish_build_and_record_ready(&FinishMiniAppM1BuildAndRecordReadyParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: SERVICE_MINIAPP_ID.to_owned(),
+            project_id: SERVICE_PROJECT_ID.to_owned(),
+            operation_id: operation_id.clone(),
+            expected_product_revision: 1,
+            expected_pointer_revision: 1,
+            expected_project_revision: 1,
+            expected_build_generation: 1,
+            artifact: ui_artifact,
+            release: ui_release,
+            bounded_log_tail: vec![],
+            finished_at_ms: 43,
+        })
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("Service MiniApp Release must declare service/main.mjs"));
 }
 
 #[tokio::test]
