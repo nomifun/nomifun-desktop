@@ -1,23 +1,25 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use nomifun_agent_contracts::{
     canonical_json_bytes, digest_bytes, digest_payload, ArtifactId, DigestHex,
     JavaScriptBuildProfile, LocalizedMetadata, MiniAppBridgeKvRequest,
     MiniAppBridgeRequest, MiniAppBridgeSession, MiniAppBridgeSessionId,
-    MiniAppBridgeTarget, MiniAppId, MiniAppKvResponse,
+    MiniAppBridgeTarget, MiniAppId, MiniAppKvHandleDescriptor, MiniAppKvHandleId,
+    MiniAppKvResponse,
     MiniAppNonUiReleaseFingerprint, MiniAppProjectId,
     MiniAppPublishAuthorization,
     MiniAppPublishRequest as MiniAppPublishContract,
     MiniAppPointerExpectation, MiniAppReadyOrigin, MiniAppReadyRelease,
     MiniAppReadyReleaseRef, MiniAppReleaseId, MiniAppReleasePointerState,
     MiniAppReleaseRef, MiniAppResourceContract, MiniAppSourceLineage, OperationId,
+    MiniAppServiceLifecycle, MiniAppServiceStorageDescriptor,
     PackageContributions, PackageId, PackageRef, StrictJsonValue,
     MiniAppSurfaceSessionId, MiniAppUiOnlyAutoPublishAuthorization,
     MiniAppUiOnlyAutoPublishProof, MiniAppUserAuthorizationId, VersionString,
     MiniAppBridgeTransport, MINIAPP_BRIDGE_CONTRACT_VERSION,
-    MINIAPP_RELEASE_PROFILE_VERSION,
+    MINIAPP_RELEASE_PROFILE_VERSION, MINIAPP_SERVICE_HOST_PROTOCOL_VERSION,
 };
 use nomifun_api_types::{
     BuildMiniAppRequest, CredentialBindingStatusDto, CredentialSlotBindingDto,
@@ -25,12 +27,14 @@ use nomifun_api_types::{
     DurableOperationStateDto, DurableOperationSummaryDto, MiniAppKindDto,
     MiniAppLibraryResponseDto, MiniAppLifecycleDto, MiniAppProjectSourceStateDto,
     MiniAppPublishModeDto, MiniAppReadyReleaseDto, MiniAppReleasePointersDto,
-    MiniAppReleaseRefDto, MiniAppReleaseTestDto, MiniAppServiceHealthDto,
-    MiniAppSummaryDto, MiniAppSurfaceLaunchDescriptorDto, MiniAppTestStatusDto,
+    MiniAppReleaseRefDto, MiniAppReleaseTestDto, MiniAppServiceDescriptorDto,
+    MiniAppServiceHealthDto, MiniAppServiceLifecycleDto, MiniAppSummaryDto,
+    MiniAppSurfaceLaunchDescriptorDto, MiniAppTestStatusDto,
     MiniAppWorkshopDto, PluginConfigSchemaDto, PluginConfigStateDto,
     PublishMiniAppRequest as PublishMiniAppRequestDto,
-    RollbackMiniAppRequest as RollbackMiniAppRequestDto, SetMiniAppEnabledRequest,
-    SetMiniAppPublishModeRequest,
+    RetryMiniAppServiceRequest, RollbackMiniAppRequest as RollbackMiniAppRequestDto,
+    SetMiniAppEnabledRequest, SetMiniAppPublishModeRequest,
+    SetMiniAppServiceRunningRequest,
 };
 use nomifun_db::{
     CancelMiniAppM1BuildOperationParams, CloseMiniAppM1SurfaceSessionParams,
@@ -50,6 +54,7 @@ use nomifun_db::{
 use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
+use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::{
@@ -58,7 +63,10 @@ use crate::{
     MiniAppReleaseStore,
     MiniAppSourceFile, MiniAppSourceScope, MiniAppSourceSnapshot, MiniAppSourceStore,
     MiniAppStaticBundleBuilder, MiniAppStaticBundleFile, MiniAppStaticBundleInput,
-    MiniAppStoredRelease, materialize_surface_entrypoint,
+    MiniAppStaticServiceInput, MiniAppStoredRelease, MiniAppServiceRuntimeBinding,
+    MiniAppServiceSpecInput, NoopMiniAppServiceRuntime, MiniAppCallCancellation,
+    MiniAppServiceObservation,
+    materialize_surface_entrypoint,
 };
 
 #[derive(Debug, Error)]
@@ -87,6 +95,7 @@ struct MiniAppM1Stores {
 pub struct MiniAppM1ApplicationService {
     repository: Arc<dyn IMiniAppM1Repository>,
     stores: MiniAppM1Stores,
+    service_runtime: Arc<RwLock<Arc<dyn MiniAppServiceRuntimeBinding>>>,
 }
 
 impl std::fmt::Debug for MiniAppM1ApplicationService {
@@ -128,7 +137,367 @@ impl MiniAppM1ApplicationService {
         Ok(Self {
             repository,
             stores: MiniAppM1Stores { source, release },
+            service_runtime: Arc::new(RwLock::new(Arc::new(NoopMiniAppServiceRuntime))),
         })
+    }
+
+    pub async fn install_service_runtime(
+        &self,
+        runtime: Arc<dyn MiniAppServiceRuntimeBinding>,
+    ) {
+        *self.service_runtime.write().await = runtime;
+    }
+
+    async fn service_runtime(&self) -> Arc<dyn MiniAppServiceRuntimeBinding> {
+        self.service_runtime.read().await.clone()
+    }
+
+    async fn resolve_service_spec(
+        &self,
+        snapshot: &MiniAppM1Snapshot,
+        release: &MiniAppReleaseRow,
+        active_release_epoch: u64,
+        owner_user_id: &str,
+    ) -> Result<Option<nomifun_agent_contracts::ResolvedMiniAppServiceSpec>, MiniAppM1ApplicationError>
+    {
+        let stored = self.load_verified_release(owner_user_id, release)?;
+        let Some(descriptor) = stored.artifact.manifest.payload.service.clone() else {
+            return Ok(None);
+        };
+        let config: Value = serde_json::from_str(&snapshot.product.config_json)
+            .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+        let runtime = self.service_runtime().await;
+        runtime
+            .register_module(
+                MiniAppId::from(snapshot.product.miniapp_id.clone()),
+                DigestHex::from(release.release_digest.clone()),
+                stored
+                    .artifact_root
+                    .join("files")
+                    .join("service")
+                    .join("main.mjs"),
+            )
+            .await
+            .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+        let spec = runtime
+            .resolve_spec(MiniAppServiceSpecInput {
+                miniapp_id: MiniAppId::from(snapshot.product.miniapp_id.clone()),
+                release: release_contract_ref(release),
+                active_release_epoch,
+                descriptor: descriptor.clone(),
+                config_schema_digest: stored.artifact.manifest.payload.config_schema_digest.clone(),
+                config_snapshot_digest: digest_payload(&config)
+                    .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?,
+                credential_slots_digest: stored
+                    .artifact
+                    .manifest
+                    .payload
+                    .credential_slots_digest
+                    .clone(),
+                resource_contract_digest: stored
+                    .artifact
+                    .manifest
+                    .payload
+                    .resource_contract_digest
+                    .clone(),
+                resource_bindings_digest: digest_payload(&BTreeMap::<String, String>::new())
+                .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?,
+                bridge_contract_digest: stored
+                    .artifact
+                    .manifest
+                    .payload
+                    .bridge_contract_digest
+                    .clone(),
+                contribution_set_digest: stored
+                    .artifact
+                    .manifest
+                    .payload
+                    .contribution_set_digest()
+                    .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?,
+                storage: MiniAppServiceStorageDescriptor {
+                    kv: MiniAppKvHandleDescriptor {
+                        handle_id: MiniAppKvHandleId::from(format!(
+                            "miniapp-kv-{}",
+                            snapshot.product.miniapp_id
+                        )),
+                        miniapp_id: MiniAppId::from(snapshot.product.miniapp_id.clone()),
+                        namespace_revision: 1,
+                    },
+                    files_dir: None,
+                    private_database: None,
+                },
+            })
+            .await
+            .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+        Ok(Some(spec))
+    }
+
+    async fn reconcile_service_runtime(
+        &self,
+        owner_user_id: &str,
+        snapshot: &MiniAppM1Snapshot,
+    ) -> Result<(), MiniAppM1ApplicationError> {
+        let Some(active) = snapshot.active_release.as_ref() else {
+            return Ok(());
+        };
+        if snapshot.product.kind != MiniAppM1Kind::Service.as_str() {
+            return Ok(());
+        }
+        let runtime = self.service_runtime().await;
+        if snapshot.product.lifecycle != "enabled" {
+            runtime
+                .stop(&MiniAppId::from(snapshot.product.miniapp_id.clone()))
+                .await
+                .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+            return Ok(());
+        }
+        let spec = self
+            .resolve_service_spec(
+                snapshot,
+                active,
+                u64::try_from(snapshot.product.active_release_epoch).map_err(|_| {
+                    MiniAppM1ApplicationError::Invalid(
+                        "MiniApp active release epoch is negative".into(),
+                    )
+                })?,
+                owner_user_id,
+            )
+            .await?
+            .ok_or_else(|| {
+                MiniAppM1ApplicationError::Invalid(
+                    "Service Active Release has no Service descriptor".into(),
+                )
+            })?;
+        runtime
+            .bind_active(spec, true)
+            .await
+            .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))
+    }
+
+    async fn prepare_service_cutover(
+        &self,
+        owner_user_id: &str,
+        snapshot: &MiniAppM1Snapshot,
+        target_release: &MiniAppReleaseRow,
+        target_active_release_epoch: u64,
+    ) -> Result<
+        (
+            Option<nomifun_agent_contracts::ResolvedMiniAppServiceSpec>,
+            Option<nomifun_agent_contracts::ResolvedMiniAppServiceSpec>,
+        ),
+        MiniAppM1ApplicationError,
+    > {
+        if snapshot.product.kind != MiniAppM1Kind::Service.as_str() {
+            return Ok((None, None));
+        }
+        let runtime = self.service_runtime().await;
+        let miniapp_id = MiniAppId::from(snapshot.product.miniapp_id.clone());
+        let current = if snapshot.product.lifecycle == "enabled" {
+            let active = snapshot.active_release.as_ref().ok_or_else(|| {
+                MiniAppM1ApplicationError::Invalid(
+                    "enabled Service MiniApp has no Active Release".into(),
+                )
+            })?;
+            Some(
+                self.resolve_service_spec(
+                    snapshot,
+                    active,
+                    u64::try_from(snapshot.product.active_release_epoch).map_err(|_| {
+                        MiniAppM1ApplicationError::Invalid(
+                            "MiniApp active release epoch is negative".into(),
+                        )
+                    })?,
+                    owner_user_id,
+                )
+                .await?
+                .ok_or_else(|| {
+                    MiniAppM1ApplicationError::Invalid(
+                        "Active Service Release has no Service descriptor".into(),
+                    )
+                })?,
+            )
+        } else {
+            None
+        };
+        let target = if snapshot.product.lifecycle == "enabled" {
+            Some(
+                self.resolve_service_spec(
+                    snapshot,
+                    target_release,
+                    target_active_release_epoch,
+                    owner_user_id,
+                )
+                .await?
+                .ok_or_else(|| {
+                    MiniAppM1ApplicationError::Invalid(
+                        "target Service Release has no Service descriptor".into(),
+                    )
+                })?,
+            )
+        } else {
+            None
+        };
+        runtime
+            .stop(&miniapp_id)
+            .await
+            .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+        Ok((current, target))
+    }
+
+    async fn restore_service_after_failed_cutover(
+        &self,
+        snapshot: &MiniAppM1Snapshot,
+        current: Option<nomifun_agent_contracts::ResolvedMiniAppServiceSpec>,
+    ) -> Result<(), MiniAppM1ApplicationError> {
+        let Some(current) = current else {
+            return Ok(());
+        };
+        self.service_runtime()
+            .await
+            .bind_active(current, true)
+            .await
+            .map_err(|error| MiniAppM1ApplicationError::Invalid(format!(
+                "release commit failed and the previous Service could not be restored for {}: {error}",
+                snapshot.product.miniapp_id
+            )))
+    }
+
+    async fn complete_service_cutover(
+        &self,
+        committed: &MiniAppM1Snapshot,
+        target: Option<nomifun_agent_contracts::ResolvedMiniAppServiceSpec>,
+    ) -> Result<(), MiniAppM1ApplicationError> {
+        let runtime = self.service_runtime().await;
+        if committed.product.kind != MiniAppM1Kind::Service.as_str()
+            || committed.product.lifecycle != "enabled"
+        {
+            runtime
+                .stop(&MiniAppId::from(committed.product.miniapp_id.clone()))
+                .await
+                .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+            return Ok(());
+        }
+        let target = target.ok_or_else(|| {
+            MiniAppM1ApplicationError::Invalid(
+                "committed enabled Service has no resolved target spec".into(),
+            )
+        })?;
+        runtime
+            .bind_active(target, true)
+            .await
+            .map_err(|error| MiniAppM1ApplicationError::Invalid(format!(
+                "Service Release committed but Host reconciliation failed: {error}"
+            )))
+    }
+
+    async fn service_observation(
+        &self,
+        snapshot: &MiniAppM1Snapshot,
+    ) -> Result<Option<MiniAppServiceObservation>, MiniAppM1ApplicationError> {
+        if snapshot.product.kind != MiniAppM1Kind::Service.as_str() {
+            return Ok(None);
+        }
+        let Some(active) = snapshot.active_release.as_ref() else {
+            return Ok(Some(MiniAppServiceObservation::Stopped));
+        };
+        let release = release_contract_ref(active);
+        let state = self
+            .service_runtime()
+            .await
+            .state(&MiniAppId::from(snapshot.product.miniapp_id.clone()))
+            .await;
+        Ok(Some(match state {
+            Some(crate::MiniAppServiceHostState::Starting { .. }) => {
+                MiniAppServiceObservation::Starting { release }
+            }
+            Some(crate::MiniAppServiceHostState::Running { .. }) => {
+                MiniAppServiceObservation::Ready {
+                    release,
+                    started_at_ms: snapshot.product.updated_at,
+                }
+            }
+            Some(crate::MiniAppServiceHostState::Backoff { error, .. })
+            | Some(crate::MiniAppServiceHostState::Error { error, .. }) => {
+                MiniAppServiceObservation::Failed {
+                    release,
+                    error_code: bounded_error_code(&error),
+                }
+            }
+            None | Some(crate::MiniAppServiceHostState::Stopped) => {
+                MiniAppServiceObservation::Stopped
+            }
+        }))
+    }
+
+    async fn summary_projection(
+        &self,
+        snapshot: &MiniAppM1Snapshot,
+    ) -> Result<MiniAppSummaryDto, MiniAppM1ApplicationError> {
+        let observation = self.service_observation(snapshot).await?;
+        Ok(summary_from_snapshot_with_observation(
+            snapshot,
+            observation.as_ref(),
+        )?)
+    }
+
+    async fn workshop_projection(
+        &self,
+        owner_user_id: &str,
+        snapshot: &MiniAppM1Snapshot,
+        active_operation: Option<DurableOperationSummaryDto>,
+    ) -> Result<MiniAppWorkshopDto, MiniAppM1ApplicationError> {
+        let observation = self.service_observation(snapshot).await?;
+        let mut workshop =
+            workshop_from_snapshot_with_observation(snapshot, active_operation, observation.as_ref())?;
+        if let Some(ready) = snapshot.ready_release.as_ref() {
+            let stored = self.load_verified_release(owner_user_id, ready)?;
+            if let Some(service) = stored.artifact.manifest.payload.service.as_ref() {
+                workshop.ready.as_mut().expect("ready row is present").service =
+                    Some(service_descriptor_dto(service));
+                workshop.ready.as_mut().expect("ready row is present").test.status =
+                    MiniAppTestStatusDto::NeedsTestInput;
+                workshop.ready.as_mut().expect("ready row is present").migration_count =
+                    stored.artifact.manifest.payload.migrations.len() as u32;
+                workshop.ready.as_mut().expect("ready row is present").can_publish = true;
+                workshop.ready.as_mut().expect("ready row is present").blocking_reasons =
+                    vec!["service_test_not_run".to_owned()];
+            }
+        }
+        let active_service_lifecycle = if let Some(active) = snapshot.active_release.as_ref() {
+            let stored = self.load_verified_release(owner_user_id, active)?;
+            stored
+                .artifact
+                .manifest
+                .payload
+                .service
+                .as_ref()
+                .map(|service| match service.lifecycle {
+                    MiniAppServiceLifecycle::OnDemand => MiniAppServiceLifecycleDto::OnDemand,
+                    MiniAppServiceLifecycle::Continuous => MiniAppServiceLifecycleDto::Continuous,
+                })
+        } else {
+            None
+        };
+        workshop.active_service = if let Some(active) = snapshot.active_release.as_ref() {
+            let stored = self.load_verified_release(owner_user_id, active)?;
+            stored
+                .artifact
+                .manifest
+                .payload
+                .service
+                .as_ref()
+                .map(service_descriptor_dto)
+        } else {
+            None
+        };
+        workshop.service_lifecycle = active_service_lifecycle.or_else(|| {
+            workshop
+                .ready
+                .as_ref()
+                .and_then(|ready| ready.service.as_ref())
+                .map(|service| service.lifecycle)
+        });
+        Ok(workshop)
     }
 
     pub async fn library(
@@ -148,7 +517,7 @@ impl MiniAppM1ApplicationService {
                         product.miniapp_id
                     ))
                 })?;
-            miniapps.push(summary_from_snapshot(&snapshot)?);
+            miniapps.push(self.summary_projection(&snapshot).await?);
         }
         Ok(MiniAppLibraryResponseDto {
             library_revision: nonnegative_u64(
@@ -164,11 +533,6 @@ impl MiniAppM1ApplicationService {
         owner_user_id: &str,
         request: CreateMiniAppProjectRequest,
     ) -> Result<MiniAppWorkshopDto, MiniAppM1ApplicationError> {
-        if request.kind != MiniAppKindDto::UiOnly {
-            return Err(MiniAppM1ApplicationError::Invalid(
-                "Service MiniApp creation is deferred to M1-1".to_owned(),
-            ));
-        }
         let expected_library_revision = to_i64(
             request.expected_library_revision,
             "library revision",
@@ -176,14 +540,21 @@ impl MiniAppM1ApplicationService {
         let stores = &self.stores;
         let miniapp_id = Uuid::now_v7().to_string();
         let project_id = Uuid::now_v7().to_string();
-        let source = stores
-            .source
-            .create_project(
+        let source = match request.kind {
+            MiniAppKindDto::UiOnly => stores.source.create_project(
                 owner_user_id,
                 &miniapp_id,
                 &project_id,
                 request.display_name.clone(),
-            )
+            ),
+            MiniAppKindDto::Service => stores.source.create_service_project(
+                owner_user_id,
+                &miniapp_id,
+                &project_id,
+                request.display_name.clone(),
+                default_service_module(),
+            ),
+        }
             .map_err(|error| store_error("Source Store", error))?;
         let create = CreateMiniAppM1Params {
             owner_user_id: owner_user_id.to_owned(),
@@ -193,7 +564,10 @@ impl MiniAppM1ApplicationService {
             display_name: request.display_name,
             description: request.description,
             icon_asset_id: None,
-            kind: MiniAppM1Kind::UiOnly,
+            kind: match request.kind {
+                MiniAppKindDto::UiOnly => MiniAppM1Kind::UiOnly,
+                MiniAppKindDto::Service => MiniAppM1Kind::Service,
+            },
             materialized_catalog_digest: nomifun_agent_contracts::digest_bytes(
                 b"miniapp-m1-empty-catalog",
             )
@@ -234,7 +608,8 @@ impl MiniAppM1ApplicationService {
                 }
             }
         };
-        workshop_from_snapshot(&snapshot, None)
+        self.workshop_projection(owner_user_id, &snapshot, None)
+            .await
     }
 
     pub async fn build(
@@ -264,7 +639,13 @@ impl MiniAppM1ApplicationService {
                     "project revision",
                 )?,
                 expected_source: source_lineage,
-                bounded_log_tail: vec!["UI-only Build started".to_owned()],
+                bounded_log_tail: vec![
+                    if snapshot.product.kind == MiniAppM1Kind::Service.as_str() {
+                        "Service Build started".to_owned()
+                    } else {
+                        "UI-only Build started".to_owned()
+                    },
+                ],
                 started_at_ms,
             })
             .await?;
@@ -287,9 +668,30 @@ impl MiniAppM1ApplicationService {
                         &operation_id,
                         error,
                     )
-                    .await);
+                .await);
             }
         };
+        if let Some(module_path) = &prepared.service_module_path {
+            let registration = self
+                .service_runtime()
+                .await
+                .register_module(
+                    MiniAppId::from(request.miniapp_id.clone()),
+                    DigestHex::from(prepared.release.release_digest.clone()),
+                    module_path.clone(),
+                )
+                .await;
+            if let Err(error) = registration {
+                return Err(self
+                    .finish_failed_build(
+                        owner_user_id,
+                        &request.miniapp_id,
+                        &operation_id,
+                        MiniAppM1ApplicationError::Invalid(error.to_string()),
+                    )
+                    .await);
+            }
+        }
         let operation = self
             .repository
             .get_build_operation(owner_user_id, &request.miniapp_id, &operation_id)
@@ -329,7 +731,11 @@ impl MiniAppM1ApplicationService {
                 artifact: prepared.artifact,
                 release: prepared.release,
                 bounded_log_tail: vec![
-                    "UI-only Release admitted".to_owned(),
+                    if snapshot.product.kind == MiniAppM1Kind::Service.as_str() {
+                        "Service Release admitted".to_owned()
+                    } else {
+                        "UI-only Release admitted".to_owned()
+                    },
                     "Ready Release committed atomically".to_owned(),
                 ],
                 finished_at_ms: prepared.finished_at_ms,
@@ -344,7 +750,11 @@ impl MiniAppM1ApplicationService {
                     && snapshot.active_release.is_some()
                 {
                     match self.auto_publish_ready(owner_user_id, snapshot.clone()).await {
-                        Ok(snapshot) => return workshop_from_snapshot(&snapshot, None),
+                        Ok(snapshot) => {
+                            return self
+                                .workshop_projection(owner_user_id, &snapshot, None)
+                                .await
+                        }
                         Err(error) => {
                             let observed = self
                                 .repository
@@ -358,11 +768,14 @@ impl MiniAppM1ApplicationService {
                                 active_release_id = ?observed.product.active_release_id,
                                 "strict UI-only auto Publish returned an error; reconciled persisted state"
                             );
-                            return workshop_from_snapshot(&observed, None);
+                            return self
+                                .workshop_projection(owner_user_id, &observed, None)
+                                .await;
                         }
                     }
                 }
-                workshop_from_snapshot(&snapshot, None)
+                self.workshop_projection(owner_user_id, &snapshot, None)
+                    .await
             }
             Err(database_error) => {
                 let original = MiniAppM1ApplicationError::Database(database_error);
@@ -437,7 +850,7 @@ impl MiniAppM1ApplicationService {
             .get(owner_user_id, &request.miniapp_id)
             .await?
             .ok_or(MiniAppM1ApplicationError::NotFound)?;
-        require_ui_only_release_mutation(&snapshot)?;
+        require_release_mutation(&snapshot)?;
         require_no_running_build(&*self.repository, owner_user_id, &request.miniapp_id).await?;
         validate_publish_request(&snapshot, &request)?;
 
@@ -446,9 +859,11 @@ impl MiniAppM1ApplicationService {
             .as_ref()
             .ok_or_else(|| MiniAppM1ApplicationError::Invalid("no Ready Release".to_owned()))?;
         let stored = self.load_verified_release(owner_user_id, ready)?;
-        if !stored.artifact.manifest.payload.is_ui_only() {
+        if snapshot.product.kind == MiniAppM1Kind::UiOnly.as_str()
+            && !stored.artifact.manifest.payload.is_ui_only()
+        {
             return Err(MiniAppM1ApplicationError::Invalid(
-                "M1-0-02-B only publishes UI-only Releases".to_owned(),
+                "UI-only MiniApp cannot publish a Service Release".to_owned(),
             ));
         }
 
@@ -458,6 +873,21 @@ impl MiniAppM1ApplicationService {
             &target,
             &stored.artifact.manifest.payload.contributions,
         )?;
+        let target_epoch = u64::try_from(snapshot.product.active_release_epoch)
+            .map_err(|_| {
+                MiniAppM1ApplicationError::Invalid(
+                    "MiniApp active Release epoch is negative".to_owned(),
+                )
+            })?
+            .checked_add(1)
+            .ok_or_else(|| {
+                MiniAppM1ApplicationError::Invalid(
+                    "MiniApp active Release epoch overflow".to_owned(),
+                )
+            })?;
+        let (current_service, target_service) = self
+            .prepare_service_cutover(owner_user_id, &snapshot, ready, target_epoch)
+            .await?;
         let committed = self
             .repository
             .publish_ready_cas(&PublishMiniAppM1ReadyParams {
@@ -482,8 +912,18 @@ impl MiniAppM1ApplicationService {
                 auto_publish_guard: None,
                 updated_at: positive_now_ms(),
             })
-            .await?;
-        workshop_from_snapshot(&committed, None)
+            .await;
+        let committed = match committed {
+            Ok(committed) => committed,
+            Err(error) => {
+                self.restore_service_after_failed_cutover(&snapshot, current_service)
+                    .await?;
+                return Err(error.into());
+            }
+        };
+        self.complete_service_cutover(&committed, target_service).await?;
+        self.workshop_projection(owner_user_id, &committed, None)
+            .await
     }
 
     pub async fn rollback(
@@ -496,7 +936,7 @@ impl MiniAppM1ApplicationService {
             .get(owner_user_id, &request.miniapp_id)
             .await?
             .ok_or(MiniAppM1ApplicationError::NotFound)?;
-        require_ui_only_release_mutation(&snapshot)?;
+        require_release_mutation(&snapshot)?;
         require_no_running_build(&*self.repository, owner_user_id, &request.miniapp_id).await?;
         validate_rollback_request(&snapshot, &request)?;
 
@@ -510,9 +950,11 @@ impl MiniAppM1ApplicationService {
             .ok_or_else(|| MiniAppM1ApplicationError::Invalid("no Previous Release".to_owned()))?;
         self.load_verified_release(owner_user_id, active)?;
         let target = self.load_verified_release(owner_user_id, previous)?;
-        if !target.artifact.manifest.payload.is_ui_only() {
+        if snapshot.product.kind == MiniAppM1Kind::UiOnly.as_str()
+            && !target.artifact.manifest.payload.is_ui_only()
+        {
             return Err(MiniAppM1ApplicationError::Invalid(
-                "M1-0-02-B only rolls back UI-only Releases".to_owned(),
+                "UI-only MiniApp cannot roll back to a Service Release".to_owned(),
             ));
         }
 
@@ -522,6 +964,21 @@ impl MiniAppM1ApplicationService {
             &rollback_target,
             &target.artifact.manifest.payload.contributions,
         )?;
+        let target_epoch = u64::try_from(snapshot.product.active_release_epoch)
+            .map_err(|_| {
+                MiniAppM1ApplicationError::Invalid(
+                    "MiniApp active Release epoch is negative".to_owned(),
+                )
+            })?
+            .checked_add(1)
+            .ok_or_else(|| {
+                MiniAppM1ApplicationError::Invalid(
+                    "MiniApp active Release epoch overflow".to_owned(),
+                )
+            })?;
+        let (current_service, target_service) = self
+            .prepare_service_cutover(owner_user_id, &snapshot, previous, target_epoch)
+            .await?;
         let committed = self
             .repository
             .rollback_previous_cas(&RollbackMiniAppM1PreviousParams {
@@ -546,8 +1003,18 @@ impl MiniAppM1ApplicationService {
                 target_catalog_digest: target_catalog_digest.as_ref().to_owned(),
                 updated_at: positive_now_ms(),
             })
-            .await?;
-        workshop_from_snapshot(&committed, None)
+            .await;
+        let committed = match committed {
+            Ok(committed) => committed,
+            Err(error) => {
+                self.restore_service_after_failed_cutover(&snapshot, current_service)
+                    .await?;
+                return Err(error.into());
+            }
+        };
+        self.complete_service_cutover(&committed, target_service).await?;
+        self.workshop_projection(owner_user_id, &committed, None)
+            .await
     }
 
     pub async fn set_enabled(
@@ -561,7 +1028,7 @@ impl MiniAppM1ApplicationService {
             .get(owner_user_id, &request.miniapp_id)
             .await?
             .ok_or(MiniAppM1ApplicationError::NotFound)?;
-        require_ui_only_release_mutation(&snapshot)?;
+        require_release_mutation(&snapshot)?;
         if snapshot.product.product_revision
             != to_i64(request.expected_product_revision, "product revision")?
             || snapshot.product.pointer_revision
@@ -610,7 +1077,158 @@ impl MiniAppM1ApplicationService {
                 updated_at: positive_now_ms(),
             })
             .await?;
-        workshop_from_snapshot(&committed, None)
+        self.reconcile_service_runtime(owner_user_id, &committed)
+            .await?;
+        self.workshop_projection(owner_user_id, &committed, None)
+            .await
+    }
+
+    pub async fn set_service_running(
+        &self,
+        owner_user_id: &str,
+        request: SetMiniAppServiceRunningRequest,
+    ) -> Result<MiniAppWorkshopDto, MiniAppM1ApplicationError> {
+        validate_request_identity(&request.miniapp_id, "miniapp_id")?;
+        let snapshot = self
+            .repository
+            .get(owner_user_id, &request.miniapp_id)
+            .await?
+            .ok_or(MiniAppM1ApplicationError::NotFound)?;
+        validate_service_runtime_request(
+            &snapshot,
+            request.expected_product_revision,
+            request.expected_pointer_revision,
+            request.expected_active_release_epoch,
+            &request.expected_active_release_digest,
+        )?;
+        let active = snapshot
+            .active_release
+            .as_ref()
+            .ok_or_else(|| {
+                MiniAppM1ApplicationError::Invalid(
+                    "Service Start/Stop requires an Active Release".to_owned(),
+                )
+            })?;
+        if request.running {
+            let spec = self
+                .resolve_service_spec(
+                    &snapshot,
+                    active,
+                    request.expected_active_release_epoch,
+                    owner_user_id,
+                )
+                .await?
+                .ok_or_else(|| {
+                    MiniAppM1ApplicationError::Invalid(
+                        "Active Release has no Service descriptor".to_owned(),
+                    )
+                })?;
+            self.service_runtime()
+                .await
+                .start(spec)
+                .await
+                .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+        } else {
+            self.service_runtime()
+                .await
+                .stop(&MiniAppId::from(request.miniapp_id.clone()))
+                .await
+                .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+        }
+        self.workshop_projection(owner_user_id, &snapshot, None)
+            .await
+    }
+
+    pub async fn retry_service(
+        &self,
+        owner_user_id: &str,
+        request: RetryMiniAppServiceRequest,
+    ) -> Result<MiniAppWorkshopDto, MiniAppM1ApplicationError> {
+        validate_request_identity(&request.miniapp_id, "miniapp_id")?;
+        let snapshot = self
+            .repository
+            .get(owner_user_id, &request.miniapp_id)
+            .await?
+            .ok_or(MiniAppM1ApplicationError::NotFound)?;
+        validate_service_runtime_request(
+            &snapshot,
+            request.expected_product_revision,
+            request.expected_pointer_revision,
+            request.expected_active_release_epoch,
+            &request.expected_active_release_digest,
+        )?;
+        let active = snapshot
+            .active_release
+            .as_ref()
+            .ok_or_else(|| {
+                MiniAppM1ApplicationError::Invalid(
+                    "Service Retry requires an Active Release".to_owned(),
+                )
+            })?;
+        let spec = self
+            .resolve_service_spec(
+                &snapshot,
+                active,
+                request.expected_active_release_epoch,
+                owner_user_id,
+            )
+            .await?
+            .ok_or_else(|| {
+                MiniAppM1ApplicationError::Invalid(
+                    "Active Release has no Service descriptor".to_owned(),
+                )
+            })?;
+        self.service_runtime()
+            .await
+            .start(spec)
+            .await
+            .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+        self.workshop_projection(owner_user_id, &snapshot, None)
+            .await
+    }
+
+    pub async fn shutdown_service_runtime(
+        &self,
+        owner_user_id: &str,
+    ) -> Result<(), MiniAppM1ApplicationError> {
+        let library = self.repository.library(owner_user_id).await?;
+        let runtime = self.service_runtime().await;
+        for product in library.products {
+            if product.kind == MiniAppM1Kind::Service.as_str() {
+                runtime
+                    .stop(&MiniAppId::from(product.miniapp_id))
+                    .await
+                    .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn reconcile_all_service_runtime(
+        &self,
+        owner_user_id: &str,
+    ) -> Result<(), MiniAppM1ApplicationError> {
+        let library = self.repository.library(owner_user_id).await?;
+        for product in library.products {
+            let Some(snapshot) = self
+                .repository
+                .get(owner_user_id, &product.miniapp_id)
+                .await?
+            else {
+                continue;
+            };
+            if let Err(error) = self
+                .reconcile_service_runtime(owner_user_id, &snapshot)
+                .await
+            {
+                tracing::warn!(
+                    miniapp_id = %product.miniapp_id,
+                    error = %error,
+                    "MiniApp Service startup reconciliation failed; keeping the persisted Product authoritative"
+                );
+            }
+        }
+        Ok(())
     }
 
     pub async fn set_publish_mode(
@@ -682,7 +1300,8 @@ impl MiniAppM1ApplicationService {
                 .list_build_operations(owner_user_id, &committed.product.miniapp_id)
                 .await?,
         )?;
-        workshop_from_snapshot(&committed, active_operation)
+        self.workshop_projection(owner_user_id, &committed, active_operation)
+            .await
     }
 
     async fn auto_publish_ready(
@@ -897,16 +1516,34 @@ impl MiniAppM1ApplicationService {
                 "MiniApp Surface is available only while enabled".to_owned(),
             ));
         }
-        if snapshot.product.kind != MiniAppM1Kind::UiOnly.as_str() {
-            return Err(MiniAppM1ApplicationError::Invalid(
-                "MiniApp Service Surface is deferred to M1-1".to_owned(),
-            ));
-        }
         let active = snapshot
             .active_release
             .as_ref()
             .ok_or_else(|| MiniAppM1ApplicationError::Invalid("no Active Release".to_owned()))?;
         let stored = self.load_verified_release(owner_user_id, active)?;
+        if snapshot.product.kind == MiniAppM1Kind::Service.as_str() {
+            let spec = self
+                .resolve_service_spec(
+                    &snapshot,
+                    active,
+                    positive_u64(
+                        snapshot.product.active_release_epoch,
+                        "MiniApp active release epoch",
+                    )?,
+                    owner_user_id,
+                )
+                .await?
+                .ok_or_else(|| {
+                    MiniAppM1ApplicationError::Invalid(
+                        "Service Active Release has no Service descriptor".to_owned(),
+                    )
+                })?;
+            self.service_runtime()
+                .await
+                .bind_active(spec, true)
+                .await
+                .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+        }
         let entrypoint = stored.artifact.manifest.payload.ui.entrypoint.clone();
         if stored
             .files
@@ -953,7 +1590,7 @@ impl MiniAppM1ApplicationService {
             )?,
             surface_capability: capability,
             ui_entrypoint: entrypoint,
-            kind: MiniAppKindDto::UiOnly,
+            kind: kind_dto(&snapshot.product.kind)?,
         })
     }
 
@@ -1000,7 +1637,6 @@ impl MiniAppM1ApplicationService {
             .await?
             .ok_or(MiniAppM1ApplicationError::NotFound)?;
         if snapshot.product.lifecycle != "enabled"
-            || snapshot.product.kind != MiniAppM1Kind::UiOnly.as_str()
             || nonnegative_u64(
                 snapshot.product.active_release_epoch,
                 "MiniApp active release epoch",
@@ -1068,7 +1704,6 @@ impl MiniAppM1ApplicationService {
             .await?
             .ok_or(MiniAppM1ApplicationError::NotFound)?;
         if snapshot.product.lifecycle != "enabled"
-            || snapshot.product.kind != MiniAppM1Kind::UiOnly.as_str()
             || positive_u64(
                 snapshot.product.active_release_epoch,
                 "MiniApp active release epoch",
@@ -1087,6 +1722,24 @@ impl MiniAppM1ApplicationService {
         }
         self.load_verified_release(owner_user_id, active)?;
         let pointer = pointer_state_from_snapshot(&snapshot)?;
+        let service_spec = if snapshot.product.kind == MiniAppM1Kind::Service.as_str() {
+            Some(
+                self.resolve_service_spec(
+                    &snapshot,
+                    active,
+                    active_release_epoch,
+                    owner_user_id,
+                )
+                .await?
+                .ok_or_else(|| {
+                    MiniAppM1ApplicationError::Invalid(
+                        "Service Active Release has no Service descriptor".to_owned(),
+                    )
+                })?,
+            )
+        } else {
+            None
+        };
         let session = MiniAppBridgeSession {
             bridge_contract_version: MINIAPP_BRIDGE_CONTRACT_VERSION.into(),
             bridge_session_id: MiniAppBridgeSessionId::from(
@@ -1099,24 +1752,43 @@ impl MiniAppM1ApplicationService {
             active_release: release_contract_ref(active),
             active_release_epoch,
             transport: MiniAppBridgeTransport::MessageChannelV1,
-            service_run_key: None,
+            service_run_key: service_spec
+                .as_ref()
+                .map(|spec| spec.service_run_key.clone()),
         };
         request
             .validate_for(&session, &pointer)
             .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+        let call_id = request.call_id.clone();
         match request.target {
             MiniAppBridgeTarget::HostKv { request } => {
                 self.execute_surface_kv(
                     owner_user_id,
                     miniapp_id,
-                    &surface_session,
-                    request,
+                        &surface_session,
+                        request,
                 )
                 .await
             }
-            MiniAppBridgeTarget::Service { .. } => Err(MiniAppM1ApplicationError::Invalid(
-                "UI-only MiniApp Bridge cannot invoke a Service".to_owned(),
-            )),
+            MiniAppBridgeTarget::Service { method, payload } => {
+                let spec = service_spec.ok_or_else(|| {
+                    MiniAppM1ApplicationError::Invalid(
+                        "MiniApp has no Active Service specification".to_owned(),
+                    )
+                })?;
+                self.service_runtime()
+                    .await
+                    .invoke(
+                        &spec,
+                        call_id,
+                        method,
+                        payload,
+                        MiniAppCallCancellation::default(),
+                        positive_now_ms(),
+                    )
+                    .await
+                    .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))
+            }
         }
     }
 
@@ -1135,7 +1807,8 @@ impl MiniAppM1ApplicationService {
                 .list_build_operations(owner_user_id, miniapp_id)
                 .await?,
         )?;
-        workshop_from_snapshot(&snapshot, active_operation)
+        self.workshop_projection(owner_user_id, &snapshot, active_operation)
+            .await
     }
 
     fn load_verified_release(
@@ -1353,6 +2026,7 @@ struct PreparedBuildRelease {
     artifact: MiniAppReleaseArtifactRow,
     release: MiniAppReleaseRow,
     finished_at_ms: i64,
+    service_module_path: Option<PathBuf>,
 }
 
 fn prepare_build_release(
@@ -1372,10 +2046,11 @@ fn prepare_build_release(
         })?;
     if !lock.dependencies.is_empty() {
         return Err(MiniAppM1ApplicationError::Invalid(
-            "M1-0-02-A accepts only the empty UI-only dependency lock".to_owned(),
+            "M1-1-01 accepts only the empty MiniApp dependency lock".to_owned(),
         ));
     }
 
+    let is_service = snapshot.product.kind == MiniAppM1Kind::Service.as_str();
     let mut source_files = source
         .files
         .iter()
@@ -1388,9 +2063,18 @@ fn prepare_build_release(
         .collect::<BTreeMap<_, _>>();
     let ui_index_html = source_files.remove("ui/index.html").ok_or_else(|| {
         MiniAppM1ApplicationError::Invalid(
-            "UI-only Source must contain ui/index.html".to_owned(),
+            "MiniApp Source must contain ui/index.html".to_owned(),
         )
     })?;
+    let service_main_mjs = if is_service {
+        Some(source_files.remove("service/main.mjs").ok_or_else(|| {
+            MiniAppM1ApplicationError::Invalid(
+                "Service Source must contain service/main.mjs".to_owned(),
+            )
+        })?)
+    } else {
+        None
+    };
     let materialized_ui_index_html = materialize_surface_entrypoint(&ui_index_html)
         .map_err(|error| {
             MiniAppM1ApplicationError::Invalid(format!(
@@ -1407,8 +2091,8 @@ fn prepare_build_release(
                 "MiniApp config schema is invalid: {error}"
             ))
         })?;
-    let artifact = MiniAppStaticBundleBuilder::new()
-        .build_ui_only(MiniAppStaticBundleInput {
+    let service_lifecycle = service_lifecycle_from_request(request.service_lifecycle)?;
+    let artifact_input = MiniAppStaticBundleInput {
             artifact_id: ArtifactId::from(Uuid::now_v7().to_string()),
             display: LocalizedMetadata {
                 name: snapshot.product.display_name.clone(),
@@ -1423,7 +2107,16 @@ fn prepare_build_release(
             },
             ui_index_html,
             ui_assets,
-            service: None,
+            service: service_main_mjs.clone().map(|main_mjs| MiniAppStaticServiceInput {
+                main_mjs,
+                lifecycle: service_lifecycle,
+                uses_files: false,
+                uses_private_database: false,
+                service_contract_digest: digest_payload(&MINIAPP_SERVICE_HOST_PROTOCOL_VERSION)
+                    .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))
+                    .unwrap_or_else(|_| digest_bytes(b"miniapp-service-contract")),
+                runtime_requirements_digest: digest_bytes(b"miniapp-service-runtime"),
+            }),
             package_json: None,
             dependency_lock_digest: source.dependency_lock_digest.clone(),
             dependency_graph_digest: digest_payload(&lock.dependencies).map_err(|error| {
@@ -1441,9 +2134,11 @@ fn prepare_build_release(
             },
             contributions: Default::default(),
             migrations: Vec::new(),
-        })
+        };
+    let artifact = MiniAppStaticBundleBuilder::new()
+        .build(artifact_input)
         .map_err(|error| {
-            MiniAppM1ApplicationError::Invalid(format!("fixed UI-only Build failed: {error}"))
+            MiniAppM1ApplicationError::Invalid(format!("MiniApp Build failed: {error}"))
         })?;
     let file_bytes = artifact
         .files
@@ -1475,14 +2170,25 @@ fn prepare_build_release(
     )
     .map_err(|error| store_error("Source scope", error))?;
     let published = release_store
-        .publish(MiniAppReleasePublishRequest::ui_only(
-            scope,
-            source.source_snapshot_digest.clone(),
-            source.dependency_lock_digest.clone(),
-            request.expected_build_generation,
-            artifact,
-            file_bytes,
-        ))
+        .publish(if is_service {
+            MiniAppReleasePublishRequest::service(
+                scope,
+                source.source_snapshot_digest.clone(),
+                source.dependency_lock_digest.clone(),
+                request.expected_build_generation,
+                artifact,
+                file_bytes,
+            )
+        } else {
+            MiniAppReleasePublishRequest::ui_only(
+                scope,
+                source.source_snapshot_digest.clone(),
+                source.dependency_lock_digest.clone(),
+                request.expected_build_generation,
+                artifact,
+                file_bytes,
+            )
+        })
         .map_err(|error| store_error("Release Store", error))?;
     let artifact = published.stored.artifact;
     let finished_at_ms = positive_now_ms().max(started_at_ms);
@@ -1545,6 +2251,14 @@ fn prepare_build_release(
             created_at: finished_at_ms,
         },
         finished_at_ms,
+        service_module_path: is_service.then(|| {
+            published
+                .stored
+                .artifact_root
+                .join("files")
+                .join("service")
+                .join("main.mjs")
+        }),
     })
 }
 
@@ -1567,9 +2281,18 @@ fn validate_build_request(
             "Build identity does not match the owner-scoped Product/Project".to_owned(),
         ));
     }
-    if snapshot.product.kind != MiniAppM1Kind::UiOnly.as_str() {
+    if snapshot.product.kind != MiniAppM1Kind::UiOnly.as_str()
+        && snapshot.product.kind != MiniAppM1Kind::Service.as_str()
+    {
         return Err(MiniAppM1ApplicationError::Invalid(
-            "M1-0-02-A only builds UI-only MiniApps".to_owned(),
+            "MiniApp product kind is invalid".to_owned(),
+        ));
+    }
+    if snapshot.product.kind == MiniAppM1Kind::UiOnly.as_str()
+        && request.service_lifecycle.is_some()
+    {
+        return Err(MiniAppM1ApplicationError::Invalid(
+            "UI-only Build cannot declare a Service lifecycle".to_owned(),
         ));
     }
     if matches!(snapshot.product.lifecycle.as_str(), "trashed" | "deleting") {
@@ -1713,9 +2436,23 @@ async fn require_no_running_build(
 fn require_ui_only_release_mutation(
     snapshot: &MiniAppM1Snapshot,
 ) -> Result<(), MiniAppM1ApplicationError> {
+    require_release_mutation(snapshot)?;
     if snapshot.product.kind != MiniAppM1Kind::UiOnly.as_str() {
         return Err(MiniAppM1ApplicationError::Invalid(
-            "M1-0-02-B supports UI-only MiniApps; Service cutover belongs to M1-1".to_owned(),
+            "auto Publish mode is available only for UI-only MiniApps".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn require_release_mutation(
+    snapshot: &MiniAppM1Snapshot,
+) -> Result<(), MiniAppM1ApplicationError> {
+    if snapshot.product.kind != MiniAppM1Kind::UiOnly.as_str()
+        && snapshot.product.kind != MiniAppM1Kind::Service.as_str()
+    {
+        return Err(MiniAppM1ApplicationError::Invalid(
+            "MiniApp product kind is invalid".to_owned(),
         ));
     }
     if matches!(snapshot.product.lifecycle.as_str(), "trashed" | "deleting") {
@@ -1738,9 +2475,25 @@ fn validate_publish_request(
     if let Some(active) = &request.expected_active_release_digest {
         validate_digest_string(active, "expected Active Release digest")?;
     }
-    if request.expected_service_test_receipt_id.is_some() || request.acknowledge_test_warning {
+    let is_service = snapshot.product.kind == MiniAppM1Kind::Service.as_str();
+    if !is_service
+        && (request.expected_service_test_receipt_id.is_some()
+            || request.acknowledge_test_warning)
+    {
         return Err(MiniAppM1ApplicationError::Invalid(
             "UI-only Publish does not accept Service Test warnings or receipts".to_owned(),
+        ));
+    }
+    if is_service && request.expected_service_test_receipt_id.is_some() {
+        return Err(MiniAppM1ApplicationError::Invalid(
+            "Service Test receipts are not available until the managed Service Test lane is delivered"
+                .to_owned(),
+        ));
+    }
+    if is_service && !request.acknowledge_test_warning {
+        return Err(MiniAppM1ApplicationError::Invalid(
+            "Service Publish requires explicit acknowledgement that Service Test has not run"
+                .to_owned(),
         ));
     }
     let ready = snapshot
@@ -1808,6 +2561,43 @@ fn validate_rollback_request(
             nomifun_db::DbError::Conflict(
                 "MiniApp Rollback request is stale against the exact Release pointers".to_owned(),
             ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_service_runtime_request(
+    snapshot: &MiniAppM1Snapshot,
+    expected_product_revision: u64,
+    expected_pointer_revision: u64,
+    expected_active_release_epoch: u64,
+    expected_active_release_digest: &str,
+) -> Result<(), MiniAppM1ApplicationError> {
+    if snapshot.product.kind != MiniAppM1Kind::Service.as_str() {
+        return Err(MiniAppM1ApplicationError::Invalid(
+            "Service lifecycle operations require a Service MiniApp".to_owned(),
+        ));
+    }
+    validate_digest_string(expected_active_release_digest, "expected Active Release digest")?;
+    if snapshot.product.product_revision
+        != to_i64(expected_product_revision, "product revision")?
+        || snapshot.product.pointer_revision
+            != to_i64(expected_pointer_revision, "pointer revision")?
+        || snapshot.product.active_release_epoch
+            != to_i64(expected_active_release_epoch, "active release epoch")?
+        || snapshot.product.active_release_digest.as_deref()
+            != Some(expected_active_release_digest)
+    {
+        return Err(MiniAppM1ApplicationError::Database(
+            nomifun_db::DbError::Conflict(
+                "MiniApp Service lifecycle request is stale against the exact Active Release"
+                    .to_owned(),
+            ),
+        ));
+    }
+    if snapshot.product.lifecycle != "enabled" {
+        return Err(MiniAppM1ApplicationError::Invalid(
+            "MiniApp Service must be enabled before it can start or retry".to_owned(),
         ));
     }
     Ok(())
@@ -2082,8 +2872,9 @@ fn summary_from_product(
     })
 }
 
-fn summary_from_snapshot(
+fn summary_from_snapshot_with_observation(
     snapshot: &MiniAppM1Snapshot,
+    observation: Option<&MiniAppServiceObservation>,
 ) -> Result<MiniAppSummaryDto, MiniAppM1ApplicationError> {
     let mut summary = summary_from_product(&snapshot.product)?;
     summary.releases.ready = snapshot
@@ -2098,16 +2889,23 @@ fn summary_from_snapshot(
         .previous_release
         .as_ref()
         .map(release_ref_from_row);
+    if let Some(observation) = observation {
+        summary.service_health = service_health_dto_from_observation(
+            &snapshot.product.kind,
+            observation,
+        )?;
+    }
     Ok(summary)
 }
 
-fn workshop_from_snapshot(
+fn workshop_from_snapshot_with_observation(
     snapshot: &MiniAppM1Snapshot,
     active_operation: Option<DurableOperationSummaryDto>,
+    observation: Option<&MiniAppServiceObservation>,
 ) -> Result<MiniAppWorkshopDto, MiniAppM1ApplicationError> {
     let product = &snapshot.product;
     let project = &snapshot.project;
-    let summary = summary_from_snapshot(snapshot)?;
+    let summary = summary_from_snapshot_with_observation(snapshot, observation)?;
     let source_state = match project.source_state.as_str() {
         "empty" => MiniAppProjectSourceStateDto::Empty,
         "editable" => MiniAppProjectSourceStateDto::Editable,
@@ -2164,6 +2962,8 @@ fn workshop_from_snapshot(
         })?;
     Ok(MiniAppWorkshopDto {
         miniapp: summary,
+        service_lifecycle: None,
+        active_service: None,
         publish_mode: if snapshot
             .auto_publish_authorization
             .as_ref()
@@ -2357,6 +3157,15 @@ fn kind_dto(value: &str) -> Result<MiniAppKindDto, MiniAppM1ApplicationError> {
     }
 }
 
+fn service_lifecycle_from_request(
+    value: Option<MiniAppServiceLifecycleDto>,
+) -> Result<MiniAppServiceLifecycle, MiniAppM1ApplicationError> {
+    match value.unwrap_or(MiniAppServiceLifecycleDto::OnDemand) {
+        MiniAppServiceLifecycleDto::OnDemand => Ok(MiniAppServiceLifecycle::OnDemand),
+        MiniAppServiceLifecycleDto::Continuous => Ok(MiniAppServiceLifecycle::Continuous),
+    }
+}
+
 fn lifecycle_dto(
     value: &str,
 ) -> Result<MiniAppLifecycleDto, MiniAppM1ApplicationError> {
@@ -2418,4 +3227,75 @@ fn build_error_code(error: &MiniAppM1ApplicationError) -> &'static str {
 
 fn bounded_log_line(value: &str) -> String {
     value.chars().take(4_096).collect()
+}
+
+fn bounded_error_code(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || *character == '_')
+        .take(128)
+        .collect::<String>()
+        .to_ascii_uppercase()
+}
+
+fn service_descriptor_dto(
+    service: &nomifun_agent_contracts::MiniAppServiceReleaseDescriptor,
+) -> MiniAppServiceDescriptorDto {
+    MiniAppServiceDescriptorDto {
+        lifecycle: match service.lifecycle {
+            MiniAppServiceLifecycle::OnDemand => MiniAppServiceLifecycleDto::OnDemand,
+            MiniAppServiceLifecycle::Continuous => MiniAppServiceLifecycleDto::Continuous,
+        },
+        uses_files: service.uses_files,
+        uses_private_database: service.uses_private_database,
+        service_contract_digest: service.service_contract_digest.as_ref().to_owned(),
+    }
+}
+
+fn service_health_dto_from_observation(
+    kind: &str,
+    observation: &MiniAppServiceObservation,
+) -> Result<MiniAppServiceHealthDto, MiniAppM1ApplicationError> {
+    if kind != MiniAppM1Kind::Service.as_str() {
+        return Ok(MiniAppServiceHealthDto::NotApplicable);
+    }
+    Ok(match observation {
+        MiniAppServiceObservation::Stopped => MiniAppServiceHealthDto::Stopped,
+        MiniAppServiceObservation::Starting { release } => {
+            MiniAppServiceHealthDto::Starting {
+                release_id: release.release_id.as_ref().to_owned(),
+                expected_release_digest: release.release_digest.as_ref().to_owned(),
+            }
+        }
+        MiniAppServiceObservation::Ready {
+            release,
+            started_at_ms,
+        } => MiniAppServiceHealthDto::Ready {
+            release_id: release.release_id.as_ref().to_owned(),
+            expected_release_digest: release.release_digest.as_ref().to_owned(),
+            started_at_ms: *started_at_ms,
+        },
+        MiniAppServiceObservation::Failed {
+            release,
+            error_code,
+        } => MiniAppServiceHealthDto::Failed {
+            release_id: release.release_id.as_ref().to_owned(),
+            expected_release_digest: release.release_digest.as_ref().to_owned(),
+            error_code: error_code.clone(),
+        },
+    })
+}
+
+fn default_service_module() -> Vec<u8> {
+    br#"export async function start(context) {
+  return {
+    async invoke({ method, payload }) {
+      if (method === "echo") return payload;
+      throw new Error(`Unknown MiniApp Service method: ${method}`);
+    },
+    async dispose() {},
+  };
+}
+"#
+    .to_vec()
 }

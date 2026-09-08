@@ -2503,6 +2503,13 @@ impl AppServices {
 
         self.request_background_shutdown();
         self.shutdown_cron_timers();
+        if let Err(error) = self
+            .miniapp_application
+            .shutdown_service_runtime(self.authoritative_user_id.as_ref())
+            .await
+        {
+            errors.push(format!("MiniApp Service cleanup failed: {error}"));
+        }
         if let Err(error) = self.shutdown_auto_work_runner().await {
             errors.push(format!("AutoWork cleanup failed: {error:#}"));
         }
@@ -2606,6 +2613,16 @@ impl AppServices {
     /// preserving the original failure as the primary error.
     pub async fn cleanup_after_startup_failure(&self, error: anyhow::Error) -> anyhow::Error {
         self.request_background_shutdown();
+        if let Err(error) = self
+            .miniapp_application
+            .shutdown_service_runtime(self.authoritative_user_id.as_ref())
+            .await
+        {
+            tracing::error!(
+                %error,
+                "MiniApp Service cleanup failed during startup failure cleanup"
+            );
+        }
         if let Err(cleanup_error) = self.shutdown_auto_work_runner().await {
             tracing::error!(
                 %cleanup_error,

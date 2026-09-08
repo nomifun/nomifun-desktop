@@ -2677,7 +2677,6 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
                AND session.capability_digest = ?
                AND session.active_release_digest = ?
                AND session.active_release_epoch = ?
-               AND product.kind = 'ui_only'
                AND product.lifecycle = 'enabled'
                AND product.active_release_id = session.active_release_id
                AND product.active_release_digest = session.active_release_digest

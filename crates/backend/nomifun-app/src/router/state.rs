@@ -27,6 +27,7 @@ use nomifun_agent_platform::{
     KernelCatalogProvider,
 };
 use nomifun_api_types::{AgentResolvedSnapshot, TerminalExitEvent};
+use nomifun_miniapp_platform::MiniAppServiceRuntimeBinding;
 use nomifun_auth::extract_token_from_ws_headers;
 use nomifun_channel::ChannelRouterState;
 use nomifun_common::{AppError, OnConversationDelete, OnTerminalDelete};
@@ -544,7 +545,7 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
         build_nomi_core_agent_api_state(
             services,
             conversation_owner.clone(),
-            runtime_authority,
+            runtime_authority.clone(),
         )
         .await
         .unwrap_or_else(|error| {
@@ -555,11 +556,66 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
             javascript_runtime_foundation,
             plugin_state.clone(),
             plugin_runtime_participant,
+            services.miniapp_application.clone(),
         )
         .await
         .unwrap_or_else(|error| {
             panic!("JavaScript Runtime Manager composition failed: {error:#}")
         });
+    let service_registry = Arc::new(
+        nomifun_miniapp_platform::MiniAppServiceModuleRegistry::new(
+            services.data_dir.join("miniapp-m1").join("release"),
+        )
+        .unwrap_or_else(|error| {
+            panic!("MiniApp Service module registry composition failed: {error}")
+        }),
+    );
+    let service_runtime = Arc::new(
+        nomifun_miniapp_platform::ProductionMiniAppServiceRuntimeBinding::new(
+            runtime_authority,
+            service_registry,
+            nomifun_miniapp_platform::DEFAULT_MAX_ACTIVE_SERVICE_HOSTS,
+        )
+        .unwrap_or_else(|error| {
+            panic!("MiniApp Service runtime composition failed: {error}")
+        }),
+    );
+    services
+        .miniapp_application
+        .install_service_runtime(service_runtime.clone())
+        .await;
+    if let Err(error) = services
+        .miniapp_application
+        .reconcile_all_service_runtime(services.authoritative_user_id.as_ref())
+        .await
+    {
+        tracing::warn!(
+            error = %error,
+            "MiniApp Service startup reconciliation inventory failed"
+        );
+    }
+    let service_runtime_for_maintenance = service_runtime;
+    let service_shutdown = services.background_shutdown.child_token();
+    services.register_background_task(tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = service_shutdown.cancelled() => break,
+                _ = interval.tick() => {
+                    if let Err(error) = service_runtime_for_maintenance
+                        .maintain(nomifun_common::now_ms().max(1))
+                        .await
+                    {
+                        tracing::warn!(
+                            error = %error,
+                            "MiniApp Service runtime maintenance failed"
+                        );
+                    }
+                }
+            }
+        }
+    }));
     let cron = build_cron_state(services, conversation_owner.clone());
     cron.cron_service.with_agent_preset_resolver(Arc::new(
         NomiCoreCronAgentPresetResolver {

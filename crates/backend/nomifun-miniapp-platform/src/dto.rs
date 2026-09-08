@@ -140,6 +140,8 @@ pub fn workshop_dto(
 
     Ok(MiniAppWorkshopDto {
         miniapp: summary_dto(snapshot, service),
+        service_lifecycle: None,
+        active_service: None,
         publish_mode: if root.product.auto_publish.as_ref().is_some_and(|value| value.enabled) {
             MiniAppPublishModeDto::AutoUiOnly
         } else {

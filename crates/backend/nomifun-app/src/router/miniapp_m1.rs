@@ -12,7 +12,8 @@ use nomifun_api_types::{
     DurableOperationSummaryDto,
     MiniAppLibraryResponseDto, MiniAppSurfaceLaunchDescriptorDto,
     MiniAppWorkshopDto, OpenMiniAppSurfaceRequest, PublishMiniAppRequest, RollbackMiniAppRequest,
-    SetMiniAppEnabledRequest, SetMiniAppPublishModeRequest,
+    RetryMiniAppServiceRequest, SetMiniAppEnabledRequest, SetMiniAppPublishModeRequest,
+    SetMiniAppServiceRunningRequest,
 };
 use nomifun_agent_contracts::{MiniAppBridgeRequest, StrictJsonValue};
 use nomifun_auth::CurrentUser;
@@ -83,6 +84,14 @@ pub(crate) fn miniapp_m1_write_routes(
         .route(
             "/api/miniapps/{miniapp_id}/publish-mode",
             post(set_miniapp_publish_mode),
+        )
+        .route(
+            "/api/miniapps/{miniapp_id}/service/running",
+            post(set_miniapp_service_running),
+        )
+        .route(
+            "/api/miniapps/{miniapp_id}/service/retry",
+            post(retry_miniapp_service),
         )
         .route(
             "/api/miniapps/{miniapp_id}/surface/open",
@@ -250,6 +259,36 @@ async fn set_miniapp_publish_mode(
     let workshop = state
         .application
         .set_publish_mode(user.id.as_str(), request)
+        .await
+        .map_err(application_error)?;
+    Ok(Json(ApiResponse::ok(workshop)))
+}
+
+async fn set_miniapp_service_running(
+    State(state): State<MiniAppM1RouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(miniapp_id): Path<String>,
+    Json(request): Json<SetMiniAppServiceRunningRequest>,
+) -> Result<Json<ApiResponse<MiniAppWorkshopDto>>, AppError> {
+    require_route_id("miniapp_id", &miniapp_id, &request.miniapp_id)?;
+    let workshop = state
+        .application
+        .set_service_running(user.id.as_str(), request)
+        .await
+        .map_err(application_error)?;
+    Ok(Json(ApiResponse::ok(workshop)))
+}
+
+async fn retry_miniapp_service(
+    State(state): State<MiniAppM1RouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(miniapp_id): Path<String>,
+    Json(request): Json<RetryMiniAppServiceRequest>,
+) -> Result<Json<ApiResponse<MiniAppWorkshopDto>>, AppError> {
+    require_route_id("miniapp_id", &miniapp_id, &request.miniapp_id)?;
+    let workshop = state
+        .application
+        .retry_service(user.id.as_str(), request)
         .await
         .map_err(application_error)?;
     Ok(Json(ApiResponse::ok(workshop)))

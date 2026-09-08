@@ -117,13 +117,13 @@ async fn workshop_is_not_visible_to_another_owner() {
     let repository: Arc<dyn IMiniAppM1Repository> = Arc::new(
         SqliteMiniAppM1Repository::new(database.pool().clone()),
     );
-    let store_root = TestStoreRoot::new("service-rejected");
+    let store_root = TestStoreRoot::new("service-created");
     let service = MiniAppM1ApplicationService::new_with_root(
         repository,
         store_root.path(),
     )
     .unwrap();
-    let error = service
+    let created = service
         .create(
             &owner,
             CreateMiniAppProjectRequest {
@@ -134,12 +134,9 @@ async fn workshop_is_not_visible_to_another_owner() {
             },
         )
         .await
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        MiniAppM1ApplicationError::Invalid(message)
-            if message.contains("deferred to M1-1")
-    ));
+        .unwrap();
+    assert_eq!(created.miniapp.kind, MiniAppKindDto::Service);
+    assert_eq!(created.source_state, MiniAppProjectSourceStateDto::Editable);
     assert_eq!(service.library(&another_owner).await.unwrap().miniapps.len(), 0);
 }
 
@@ -186,6 +183,7 @@ async fn ui_only_build_commits_ready_atomically_and_exposes_created_at() {
                     .dependency_lock_digest
                     .clone()
                     .unwrap(),
+                service_lifecycle: None,
             },
         )
         .await

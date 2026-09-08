@@ -167,6 +167,10 @@ pub struct MiniAppReadyReleaseDto {
 #[serde(deny_unknown_fields)]
 pub struct MiniAppWorkshopDto {
     pub miniapp: MiniAppSummaryDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_lifecycle: Option<MiniAppServiceLifecycleDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_service: Option<MiniAppServiceDescriptorDto>,
     pub publish_mode: MiniAppPublishModeDto,
     pub project_id: String,
     pub project_revision: u64,
@@ -222,6 +226,8 @@ pub struct BuildMiniAppRequest {
     pub expected_build_generation: u64,
     pub expected_source_snapshot_digest: String,
     pub expected_dependency_lock_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_lifecycle: Option<MiniAppServiceLifecycleDto>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
