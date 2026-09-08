@@ -303,7 +303,7 @@
     - DB contract 20、M1 schema 2、M1 repository 3 项定向测试通过。生产 App routes、
       MiniApp Service/Bridge/Storage adapter、旧链删除和 UI 尚未接入，不能计入 M1 完成度。
 
-## 2026-09-08 实施记录
+## 2026-09-07 M1-0-02-A 实施记录
 
 1. 远端分支已核对与当前 `HEAD=d2180373a` 对齐；本轮不处理未跟踪的 `.githooks/`，
    也不重写历史提交。
