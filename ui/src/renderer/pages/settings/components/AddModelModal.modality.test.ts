@@ -46,6 +46,6 @@ describe('single-source model management integration', () => {
     expect(source.includes('<ModelAdvancedEditor')).toBe(true);
     expect(source.includes('ipcBridge.providerModel.save.invoke')).toBe(true);
     expect(source.includes('capabilities: row.capabilities.map(capabilityInputFromResponse)')).toBe(true);
-    expect(source.includes('updateModelCapabilities')).toBe(true);
+    expect(source.includes('updateModelDefinition')).toBe(true);
   });
 });
