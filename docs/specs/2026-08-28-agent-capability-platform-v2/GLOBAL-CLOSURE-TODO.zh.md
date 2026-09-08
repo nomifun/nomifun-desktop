@@ -574,7 +574,7 @@ macOS x64、Linux Headless、Wave 3/4 非核心业务全覆盖、Knowledge 高�
 Codex-native、external Codex integration、C9 shutdown 和 Nomi-free RC 不是当前阶段的
 未完成阻断项；它们只有在后续重新立项并满足独立前置条件后，才建立新的执行台账。
 
-## 2026-09-09 06 Windows 主线状态同步（M1-1 收口后）
+## 2026-09-08 06 Windows 主线状态同步（M1-1 收口后）
 
 AP-0～AP-7、一期 C8 与 S0-S5 的口径保持不变；06 的实时状态继续由
 PHASE-N1-M1-CLOSURE-TODO.zh.md 维护。M1-0-02-A/B、M1-1-01 和 M1-1-02 已完成

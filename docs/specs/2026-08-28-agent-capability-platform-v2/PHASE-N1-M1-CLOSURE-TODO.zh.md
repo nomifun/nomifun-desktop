@@ -493,7 +493,7 @@ Migration，再启动目标 Host，失败时保留旧 Active 并重建旧 Servic
    adapter、Service Bridge、Files/Private SQLite 生产接入；Windows 完成前不交接外部
    原生环境。
 
-## 2026-09-09 M1-1-01 / M1-1-02 实现收口
+## 2026-09-08 M1-1-01 / M1-1-02 实现收口
 
 1. `M1-1-01` 已完成 Windows 主机实现：
    - 一个 MiniApp 一个 dedicated Node Service Host，固定 `on_demand` /
