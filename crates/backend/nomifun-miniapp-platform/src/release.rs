@@ -31,6 +31,12 @@ const MAX_PATH_BYTES: usize = 1024;
 const MAX_COMPONENT_BYTES: usize = 255;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MiniAppReleaseContentKind {
+    UiOnly,
+    Service,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MiniAppReleaseStoreLimits {
     pub max_file_count: usize,
     pub max_single_file_bytes: u64,
@@ -174,6 +180,7 @@ pub struct MiniAppReleasePublishRequest {
     pub build_generation: u64,
     pub artifact: MiniAppReleaseArtifactV1,
     pub files: Vec<MiniAppReleaseFileBytes>,
+    pub content_kind: MiniAppReleaseContentKind,
 }
 
 impl MiniAppReleasePublishRequest {
@@ -194,6 +201,28 @@ impl MiniAppReleasePublishRequest {
             build_generation,
             artifact,
             files,
+            content_kind: MiniAppReleaseContentKind::UiOnly,
+        }
+    }
+
+    pub fn service(
+        scope: MiniAppSourceScope,
+        source_snapshot_digest: DigestHex,
+        dependency_lock_digest: DigestHex,
+        build_generation: u64,
+        artifact: MiniAppReleaseArtifactV1,
+        files: Vec<MiniAppReleaseFileBytes>,
+    ) -> Self {
+        Self {
+            scope,
+            source_snapshot_digest,
+            dependency_lock_digest,
+            build_profile: JavaScriptBuildProfile::MiniAppReleaseV1,
+            build_profile_version: MINIAPP_RELEASE_PROFILE_VERSION.into(),
+            build_generation,
+            artifact,
+            files,
+            content_kind: MiniAppReleaseContentKind::Service,
         }
     }
 }
@@ -327,6 +356,29 @@ impl MiniAppReleaseStore {
         let scope = MiniAppSourceScope::new(owner, miniapp_id, project_id)
             .map_err(|error| MiniAppReleaseStoreError::InvalidScope(error.to_string()))?;
         self.publish(MiniAppReleasePublishRequest::ui_only(
+            scope,
+            source_snapshot_digest,
+            dependency_lock_digest,
+            build_generation,
+            artifact.clone(),
+            files.to_vec(),
+        ))
+    }
+
+    pub fn publish_service_for(
+        &self,
+        owner: impl AsRef<str>,
+        miniapp_id: impl AsRef<str>,
+        project_id: impl AsRef<str>,
+        source_snapshot_digest: DigestHex,
+        dependency_lock_digest: DigestHex,
+        build_generation: u64,
+        artifact: &MiniAppReleaseArtifactV1,
+        files: &[MiniAppReleaseFileBytes],
+    ) -> Result<MiniAppReleasePublishResult, MiniAppReleaseStoreError> {
+        let scope = MiniAppSourceScope::new(owner, miniapp_id, project_id)
+            .map_err(|error| MiniAppReleaseStoreError::InvalidScope(error.to_string()))?;
+        self.publish(MiniAppReleasePublishRequest::service(
             scope,
             source_snapshot_digest,
             dependency_lock_digest,
@@ -611,10 +663,22 @@ fn prepare_request(
         .artifact
         .validate()
         .map_err(|error| MiniAppReleaseStoreError::InvalidInput(error.to_string()))?;
-    if request.artifact.manifest.payload.service.is_some() {
-        return Err(MiniAppReleaseStoreError::InvalidInput(
-            "M1-0-02-A Release Store accepts UI-only artifacts only".into(),
-        ));
+    match (
+        request.content_kind,
+        request.artifact.manifest.payload.service.is_some(),
+    ) {
+        (MiniAppReleaseContentKind::UiOnly, false)
+        | (MiniAppReleaseContentKind::Service, true) => {}
+        (MiniAppReleaseContentKind::UiOnly, true) => {
+            return Err(MiniAppReleaseStoreError::InvalidInput(
+                "UI-only Release publish cannot accept a Service artifact".into(),
+            ));
+        }
+        (MiniAppReleaseContentKind::Service, false) => {
+            return Err(MiniAppReleaseStoreError::InvalidInput(
+                "Service Release publish requires a Service artifact".into(),
+            ));
+        }
     }
     if request.artifact.manifest.payload.build_profile_version
         != MINIAPP_RELEASE_PROFILE_VERSION.into()
@@ -646,7 +710,7 @@ fn prepare_request(
     let mut by_path = BTreeMap::new();
     let mut total_size = 0u64;
     for file in files {
-        validate_ui_path(&file.normalized_relative_path)?;
+        validate_release_path(&file.normalized_relative_path, request.content_kind)?;
         if !collision_keys.insert(windows_collision_key(&file.normalized_relative_path)?) {
             return Err(MiniAppReleaseStoreError::InvalidPath {
                 path: file.normalized_relative_path,
@@ -734,12 +798,11 @@ fn validate_record(
         ));
     }
     let artifact = &record.artifact.payload;
-    if artifact.manifest.payload.service.is_some()
-        || artifact.manifest.payload.build_profile_version
-            != MINIAPP_RELEASE_PROFILE_VERSION.into()
+    if artifact.manifest.payload.build_profile_version
+        != MINIAPP_RELEASE_PROFILE_VERSION.into()
     {
         return Err(MiniAppReleaseStoreError::Corrupt(
-            "artifact UI-only profile is invalid".into(),
+            "artifact MiniApp Release profile is invalid".into(),
         ));
     }
     artifact.validate().map_err(|error| {
@@ -850,7 +913,7 @@ fn collect_release_files(
             .strip_prefix(root)
             .map_err(|_| MiniAppReleaseStoreError::Corrupt("release path escaped root".into()))?;
         let normalized = normalize_filesystem_path(relative)?;
-        validate_ui_path(&normalized)?;
+        validate_stored_release_path(&normalized)?;
         let bytes = read_regular_bounded(&path, limits.max_single_file_bytes)?;
         if bytes.is_empty() {
             return Err(MiniAppReleaseStoreError::EmptyFile { path: normalized });
@@ -920,19 +983,49 @@ fn validate_scope(scope: &MiniAppSourceScope) -> Result<(), MiniAppReleaseStoreE
     .map_err(|error| MiniAppReleaseStoreError::InvalidScope(error.to_string()))
 }
 
-fn validate_ui_path(path: &str) -> Result<(), MiniAppReleaseStoreError> {
+fn validate_release_path(
+    path: &str,
+    content_kind: MiniAppReleaseContentKind,
+) -> Result<(), MiniAppReleaseStoreError> {
     validate_relative_path(path)?;
-    if path == "service/main.mjs" || path.starts_with("service/") {
+    if content_kind == MiniAppReleaseContentKind::UiOnly
+        && (path == "service/main.mjs" || path.starts_with("service/"))
+    {
         return Err(MiniAppReleaseStoreError::ServiceFileForbidden {
             path: path.to_owned(),
         });
     }
-    if path == "ui/index.html" || path.starts_with("ui/") {
+    if path == "ui/index.html"
+        || path.starts_with("ui/")
+        || (content_kind == MiniAppReleaseContentKind::Service
+            && path == "service/main.mjs")
+    {
         Ok(())
     } else {
         Err(MiniAppReleaseStoreError::InvalidPath {
             path: path.to_owned(),
-            reason: "UI-only Release permits ui/index.html and ui/** only".into(),
+            reason: match content_kind {
+                MiniAppReleaseContentKind::UiOnly => {
+                    "UI-only Release permits ui/index.html and ui/** only"
+                }
+                MiniAppReleaseContentKind::Service => {
+                    "Service Release permits ui/index.html, ui/**, and service/main.mjs only"
+                }
+            }
+            .into(),
+        })
+    }
+}
+
+fn validate_stored_release_path(path: &str) -> Result<(), MiniAppReleaseStoreError> {
+    validate_relative_path(path)?;
+    if path == "ui/index.html" || path.starts_with("ui/") || path == "service/main.mjs" {
+        Ok(())
+    } else {
+        Err(MiniAppReleaseStoreError::InvalidPath {
+            path: path.to_owned(),
+            reason: "MiniApp Release permits ui/index.html, ui/**, and optional service/main.mjs only"
+                .into(),
         })
     }
 }

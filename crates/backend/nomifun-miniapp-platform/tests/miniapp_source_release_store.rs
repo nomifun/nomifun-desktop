@@ -4,12 +4,14 @@ use std::path::{Path, PathBuf};
 
 use nomifun_agent_contracts::{
     canonical_json_bytes, digest_bytes, ArtifactEnvelope, ArtifactId, DigestHex,
-    LocalizedMetadata, MiniAppResourceContract, StrictJsonValue, MINIAPP_RELEASE_PROFILE_VERSION,
+    LocalizedMetadata, MiniAppResourceContract, MiniAppServiceLifecycle, StrictJsonValue,
+    MINIAPP_RELEASE_PROFILE_VERSION,
 };
 use nomifun_miniapp_platform::{
     MiniAppReleaseArtifactIdentity, MiniAppReleaseFileBytes, MiniAppReleasePublishRequest,
-    MiniAppReleaseStore, MiniAppSourceFileInput, MiniAppSourceScope, MiniAppSourceStore,
-    MiniAppSourceStoreError, MiniAppStaticBundleBuilder, MiniAppStaticBundleInput,
+    MiniAppReleaseStore, MiniAppSourceContentKind, MiniAppSourceFileInput,
+    MiniAppSourceScope, MiniAppSourceStore, MiniAppSourceStoreError,
+    MiniAppStaticBundleBuilder, MiniAppStaticBundleInput, MiniAppStaticServiceInput,
     materialize_surface_entrypoint,
 };
 use serde_json::{Value, json};
@@ -148,6 +150,122 @@ fn source_replace_is_owner_cas_and_rejects_service_or_unsafe_paths() {
             vec![MiniAppSourceFileInput::new("../escape", b"no".to_vec())],
         )
         .is_err());
+}
+
+#[test]
+fn service_source_round_trips_exact_main_module_without_relaxing_ui_only_paths() {
+    let root = TestRoot::new("service-source");
+    let store = MiniAppSourceStore::new(root.path()).unwrap();
+    let service_main = b"export async function invoke(method, payload) { return { method, payload }; }\n";
+    assert!(matches!(
+        store.create_service_project(
+            "owner-1",
+            "miniapp-1",
+            "project-failed",
+            "Broken Service",
+            Vec::new(),
+        ),
+        Err(MiniAppSourceStoreError::EmptyFile { path })
+            if path == "service/main.mjs"
+    ));
+    assert_eq!(
+        fs::read_dir(store.staging_root()).unwrap().count(),
+        0,
+        "failed Service Source creation must clean its private staging tree"
+    );
+
+    let project = store
+        .create_service_project(
+            "owner-1",
+            "miniapp-1",
+            "project-1",
+            "Service Notes",
+            service_main.to_vec(),
+        )
+        .unwrap();
+    let snapshot = store
+        .read_snapshot(
+            "owner-1",
+            "miniapp-1",
+            "project-1",
+            &project.source_snapshot_digest,
+        )
+        .unwrap();
+
+    assert_eq!(snapshot.content_kind(), MiniAppSourceContentKind::Service);
+    assert_eq!(snapshot.service_main_mjs(), Some(service_main.as_slice()));
+    assert_eq!(
+        snapshot
+            .files
+            .iter()
+            .find(|file| file.normalized_relative_path == "service/main.mjs")
+            .unwrap()
+            .digest,
+        digest(service_main)
+    );
+
+    let replaced = store
+        .replace_service_source(
+            "owner-1",
+            "miniapp-1",
+            "project-1",
+            &project.source_snapshot_digest,
+            vec![
+                MiniAppSourceFileInput::new(
+                    "ui/index.html",
+                    b"<!doctype html><title>service</title>".to_vec(),
+                ),
+                MiniAppSourceFileInput::new(
+                    "service/main.mjs",
+                    b"export async function invoke() { return 'updated'; }\n".to_vec(),
+                ),
+            ],
+        )
+        .unwrap();
+    assert_eq!(replaced.source_revision, 2);
+    assert!(store
+        .replace_service_source(
+            "owner-1",
+            "miniapp-1",
+            "project-1",
+            &replaced.source_snapshot_digest,
+            vec![
+                MiniAppSourceFileInput::new("ui/index.html", b"ok".to_vec()),
+                MiniAppSourceFileInput::new(
+                    "service/helper.mjs",
+                    b"export const forbidden = true;\n".to_vec(),
+                ),
+            ],
+        )
+        .is_err());
+    assert!(store
+        .replace_service_source(
+            "owner-1",
+            "miniapp-1",
+            "project-1",
+            &replaced.source_snapshot_digest,
+            vec![MiniAppSourceFileInput::new(
+                "ui/index.html",
+                b"missing service".to_vec(),
+            )],
+        )
+        .is_err());
+    assert!(matches!(
+        store.replace_source(
+            "owner-1",
+            "miniapp-1",
+            "project-1",
+            &replaced.source_snapshot_digest,
+            vec![
+                MiniAppSourceFileInput::new("ui/index.html", b"ok".to_vec()),
+                MiniAppSourceFileInput::new(
+                    "service/main.mjs",
+                    b"export default {};\n".to_vec(),
+                ),
+            ],
+        ),
+        Err(MiniAppSourceStoreError::ServiceSourceForbidden { .. })
+    ));
 }
 
 #[test]
@@ -380,6 +498,152 @@ fn release_publish_loads_immutable_bytes_and_keeps_owner_project_boundaries() {
         .is_err());
 }
 
+#[test]
+fn service_release_publishes_and_loads_exact_main_module() {
+    let source_root = TestRoot::new("service-release-source");
+    let source_store = MiniAppSourceStore::new(source_root.path()).unwrap();
+    let service_main =
+        b"export async function invoke(method, payload) { return { method, payload }; }\n";
+    let source = source_store
+        .create_service_project(
+            "owner-1",
+            "miniapp-1",
+            "project-1",
+            "Service Notes",
+            service_main.to_vec(),
+        )
+        .unwrap();
+    let snapshot = source_store
+        .read_snapshot(
+            "owner-1",
+            "miniapp-1",
+            "project-1",
+            &source.source_snapshot_digest,
+        )
+        .unwrap();
+    let input_files = snapshot
+        .files
+        .iter()
+        .map(|file| {
+            (
+                file.normalized_relative_path.clone(),
+                file.bytes.clone(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let artifact = MiniAppStaticBundleBuilder::new()
+        .build(service_static_input(
+            input_files,
+            snapshot.dependency_lock_digest.clone(),
+        ))
+        .unwrap();
+    let file_bytes = artifact
+        .files
+        .iter()
+        .map(|file| {
+            let source_bytes = snapshot.file(&file.normalized_relative_path).unwrap();
+            let bytes = if file.normalized_relative_path == "ui/index.html" {
+                materialize_surface_entrypoint(source_bytes).unwrap()
+            } else {
+                source_bytes.to_vec()
+            };
+            MiniAppReleaseFileBytes::new(file.normalized_relative_path.clone(), bytes)
+        })
+        .collect::<Vec<_>>();
+
+    let release_root = TestRoot::new("service-release-store");
+    let store = MiniAppReleaseStore::new(release_root.path()).unwrap();
+    assert!(store
+        .publish(MiniAppReleasePublishRequest::ui_only(
+            scope(),
+            source.source_snapshot_digest.clone(),
+            source.dependency_lock_digest.clone(),
+            source.build_generation,
+            artifact.clone(),
+            file_bytes.clone(),
+        ))
+        .is_err());
+
+    let mut mismatched_service_bytes = file_bytes.clone();
+    mismatched_service_bytes
+        .iter_mut()
+        .find(|file| file.normalized_relative_path == "service/main.mjs")
+        .unwrap()
+        .bytes = b"export default async function changed() {};\n".to_vec();
+    assert!(store
+        .publish(MiniAppReleasePublishRequest::service(
+            scope(),
+            source.source_snapshot_digest.clone(),
+            source.dependency_lock_digest.clone(),
+            source.build_generation,
+            artifact.clone(),
+            mismatched_service_bytes,
+        ))
+        .is_err());
+
+    let mut forbidden_service_path = file_bytes.clone();
+    forbidden_service_path.push(MiniAppReleaseFileBytes::new(
+        "service/helper.mjs",
+        b"export const forbidden = true;\n".to_vec(),
+    ));
+    assert!(store
+        .publish(MiniAppReleasePublishRequest::service(
+            scope(),
+            source.source_snapshot_digest.clone(),
+            source.dependency_lock_digest.clone(),
+            source.build_generation,
+            artifact.clone(),
+            forbidden_service_path,
+        ))
+        .is_err());
+    assert_eq!(
+        fs::read_dir(store.staging_root()).unwrap().count(),
+        0,
+        "rejected Service Releases must not leave staging state"
+    );
+
+    let published = store
+        .publish(MiniAppReleasePublishRequest::service(
+            scope(),
+            source.source_snapshot_digest,
+            source.dependency_lock_digest,
+            source.build_generation,
+            artifact.clone(),
+            file_bytes.clone(),
+        ))
+        .unwrap();
+    assert!(!published.already_present);
+    assert_eq!(
+        published
+            .stored
+            .files
+            .iter()
+            .find(|file| file.normalized_relative_path == "service/main.mjs")
+            .unwrap()
+            .bytes,
+        service_main
+    );
+    assert_eq!(
+        published
+            .stored
+            .artifact
+            .manifest
+            .payload
+            .service
+            .as_ref()
+            .unwrap()
+            .module_digest,
+        digest(service_main)
+    );
+    assert_eq!(
+        store
+            .load(scope(), artifact.artifact_digest.as_ref())
+            .unwrap()
+            .files,
+        file_bytes
+    );
+}
+
 fn static_input(
     bytes: BTreeMap<String, Vec<u8>>,
     dependency_lock_digest: DigestHex,
@@ -418,4 +682,21 @@ fn static_input(
         contributions: Default::default(),
         migrations: Vec::new(),
     }
+}
+
+fn service_static_input(
+    mut bytes: BTreeMap<String, Vec<u8>>,
+    dependency_lock_digest: DigestHex,
+) -> MiniAppStaticBundleInput {
+    let service_main = bytes.remove("service/main.mjs").unwrap();
+    let mut input = static_input(bytes, dependency_lock_digest);
+    input.service = Some(MiniAppStaticServiceInput {
+        main_mjs: service_main,
+        lifecycle: MiniAppServiceLifecycle::OnDemand,
+        uses_files: false,
+        uses_private_database: false,
+        service_contract_digest: digest(b"service-contract"),
+        runtime_requirements_digest: digest(b"runtime-requirements"),
+    });
+    input
 }
