@@ -926,6 +926,27 @@ const ModelDefinitionEditor = React.forwardRef<ModelDefinitionEditorHandle, Mode
         </div>
       )}
 
+      {modelReadOnly && (
+        <div hidden={focusedCallConfigTask !== undefined} className='space-y-8px'>
+          <label htmlFor={modelAliasInputId} className='text-13px font-500 text-t-secondary'>
+            {t('settings.modelDisplayNameTitle', { defaultValue: '模型别名（选填）' })}
+          </label>
+          <Input
+            id={modelAliasInputId}
+            value={value.displayName ?? ''}
+            placeholder={t('settings.modelDisplayNamePlaceholder', { defaultValue: '例如：Seedance 1.5 Pro' })}
+            maxLength={128}
+            allowClear
+            onChange={(displayName) => onChange((current) => ({ ...current, displayName }))}
+            aria-describedby={`${modelAliasInputId}-hint`}
+            data-model-alias-input
+          />
+          <div id={`${modelAliasInputId}-hint`} className='text-11px leading-4 text-t-tertiary'>
+            {t('settings.modelDisplayNameHint', { defaultValue: '非必填，仅用于界面展示；实际请求仍使用原始模型 ID。' })}
+          </div>
+        </div>
+      )}
+
       <div className='space-y-10px' data-capability-card-list>
         {value.capabilities
           .filter(

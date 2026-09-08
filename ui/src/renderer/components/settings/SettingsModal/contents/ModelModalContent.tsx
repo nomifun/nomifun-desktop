@@ -43,7 +43,7 @@ import {
 } from './providerInUse';
 import AddModelModal from '@/renderer/pages/settings/components/AddModelModal';
 import AddPlatformModal from '@/renderer/pages/settings/components/AddPlatformModal';
-import ModelAdvancedEditor from '@/renderer/pages/settings/components/ModelAdvancedEditor';
+import ModelAdvancedEditor, { type ModelAdvancedPatch } from '@/renderer/pages/settings/components/ModelAdvancedEditor';
 import ProviderConnectionsSection from '@/renderer/pages/settings/components/ProviderConnectionsSection';
 import EditModeModal from '@/renderer/pages/settings/components/EditModeModal';
 import NomiScrollArea from '@/renderer/components/base/NomiScrollArea';
@@ -56,7 +56,6 @@ import { reorderById, reorderStrings } from './modelProviderOrdering';
 import { healthFailureHeadline } from './healthFailureHeadline';
 import {
   capabilityInputFromResponse,
-  type ProviderModelCapabilityInput,
 } from '@/renderer/pages/settings/components/providerModelAdvanced';
 import '../model-provider.css';
 
@@ -520,15 +519,15 @@ const ModelModalContent: React.FC = () => {
       });
   };
 
-  const updateModelCapabilities = async (
+  const updateModelDefinition = async (
     platform: IProvider,
     row: ProviderModelResponse,
-    capabilities: ProviderModelCapabilityInput[]
+    patch: ModelAdvancedPatch
   ): Promise<void> => {
     try {
       await ipcBridge.providerModel.save.invoke({
         provider_id: platform.id,
-        model: { ...providerModelInputFor(row), capabilities },
+        model: { ...providerModelInputFor(applyRowPatch(row, patch)), capabilities: patch.capabilities },
       });
       await mutate();
     } catch (error) {
@@ -1173,8 +1172,9 @@ const ModelModalContent: React.FC = () => {
                                   providerBaseUrl={platform.base_url}
                                   providerAuthScheme={platform.auth_scheme}
                                   model={model}
+                                  displayName={modelDisplayName}
                                   capabilities={row.capabilities}
-                                  onSave={(patch) => updateModelCapabilities(platform, row, patch.capabilities)}
+                                  onSave={(patch) => updateModelDefinition(platform, row, patch)}
                                 />
 
                                 {/* 模型启用开关（行级）/ Model enable switch (row-level) */}

@@ -26,6 +26,7 @@ import { useProviderConnections } from './useProviderConnections';
 import ModelCallConfigModalFooter from './ModelCallConfigModalFooter';
 
 export interface ModelAdvancedPatch {
+  display_name: string | null;
   capabilities: ProviderModelCapabilityInput[];
 }
 
@@ -37,9 +38,10 @@ const ModelAdvancedEditor: React.FC<{
   providerBaseUrl: string;
   providerAuthScheme: string;
   model: string;
+  displayName?: string;
   capabilities: ProviderModelCapabilityResponse[];
   onSave: (patch: ModelAdvancedPatch) => Promise<void>;
-}> = ({ providerId, providerName, preset, providerBaseUrl, providerAuthScheme, model, capabilities, onSave }) => {
+}> = ({ providerId, providerName, preset, providerBaseUrl, providerAuthScheme, model, displayName, capabilities, onSave }) => {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -47,6 +49,7 @@ const ModelAdvancedEditor: React.FC<{
   const modelEditorRef = useRef<ModelDefinitionEditorHandle>(null);
   const [definition, setDefinition] = useState<ModelDefinitionDraft>(() => ({
     model,
+    displayName,
     capabilities: capabilities.map(capabilityDraftFromResponse),
   }));
   const selectedTasks = useMemo(
@@ -85,7 +88,7 @@ const ModelAdvancedEditor: React.FC<{
   );
 
   const resetDraft = () => {
-    setDefinition({ model, capabilities: capabilities.map(capabilityDraftFromResponse) });
+    setDefinition({ model, displayName, capabilities: capabilities.map(capabilityDraftFromResponse) });
   };
 
   const handleOpen = () => {
@@ -99,7 +102,7 @@ const ModelAdvancedEditor: React.FC<{
     if (!validation.valid || !nextCapabilities) return;
     setSaving(true);
     try {
-      await onSave({ capabilities: nextCapabilities });
+      await onSave({ display_name: definition.displayName?.trim() || null, capabilities: nextCapabilities });
       setOpen(false);
     } catch {
       // The parent owns the persistence toast. Keep the editor open for retry.
