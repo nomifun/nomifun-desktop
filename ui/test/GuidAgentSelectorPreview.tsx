@@ -10,7 +10,7 @@ import type { ExecutableAgentPreset } from '../src/renderer/pages/guid/types';
 const provider = {
   id: '0190f5fe-7c00-7a00-8000-000000000111', platform: 'preview', name: '测试模型服务',
   base_url: 'https://example.invalid', enabled: true, has_credentials: false, auth_scheme: 'bearer',
-  models: ['模型 A', '模型 B'].map((model) => ({ model, enabled: true,
+  models: ['模型 A', '模型 B'].map((model) => ({ model, display_name: model === '模型 A' ? '日常助理模型' : undefined, enabled: true,
     capabilities: [{ task: 'chat', traits: [], protocol: 'openai.chat_text', connection_role: 'default' }] })),
 } as IProvider;
 const modelCache = { provider: () => new Map(), revalidateOnMount: false, fallback: { providers: [provider] } };
