@@ -167,6 +167,7 @@ pub struct MiniAppReadyReleaseDto {
 #[serde(deny_unknown_fields)]
 pub struct MiniAppWorkshopDto {
     pub miniapp: MiniAppSummaryDto,
+    pub publish_mode: MiniAppPublishModeDto,
     pub project_id: String,
     pub project_revision: u64,
     pub source_state: MiniAppProjectSourceStateDto,
@@ -194,7 +195,9 @@ pub struct MiniAppSurfaceLaunchDescriptorDto {
     pub release_id: String,
     pub expected_release_digest: String,
     pub active_release_epoch: u64,
-    pub ui_asset_id: String,
+    pub surface_session_id: String,
+    pub surface_generation: u64,
+    pub surface_capability: String,
     pub ui_entrypoint: String,
     pub kind: MiniAppKindDto,
 }
@@ -306,6 +309,20 @@ pub struct SetMiniAppEnabledRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_active_release_digest: Option<String>,
     pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OpenMiniAppSurfaceRequest {
+    pub miniapp_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloseMiniAppSurfaceRequest {
+    pub miniapp_id: String,
+    pub surface_session_id: String,
+    pub surface_capability: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -462,7 +479,9 @@ mod tests {
             release_id: "release-2".into(),
             expected_release_digest: "a".repeat(64),
             active_release_epoch: 8,
-            ui_asset_id: "artifact-2".into(),
+            surface_session_id: "surface-session-1".into(),
+            surface_generation: 2,
+            surface_capability: "surface-capability".into(),
             ui_entrypoint: "ui/index.html".into(),
             kind: MiniAppKindDto::Service,
         })
@@ -500,6 +519,22 @@ mod tests {
         }))
         .unwrap_err();
 
+        assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn surface_open_request_is_explicit_and_rejects_extra_authority() {
+        let request = serde_json::to_value(OpenMiniAppSurfaceRequest {
+            miniapp_id: "miniapp-1".into(),
+        })
+        .unwrap();
+        assert_eq!(request, json!({"miniapp_id": "miniapp-1"}));
+
+        let error = serde_json::from_value::<OpenMiniAppSurfaceRequest>(json!({
+            "miniapp_id": "miniapp-1",
+            "surface_capability": "caller-must-not-supply-capability"
+        }))
+        .unwrap_err();
         assert!(error.to_string().contains("unknown field"));
     }
 

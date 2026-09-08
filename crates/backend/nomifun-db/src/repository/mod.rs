@@ -106,12 +106,18 @@ pub use javascript_runtime_selection::{
     IJavaScriptRuntimeSelectionRepository, SaveJavaScriptRuntimeSelectionParams,
 };
 pub use miniapp_m1::{
-    CancelMiniAppM1BuildOperationParams, CommitMiniAppM1PointerStateParams,
+    CancelMiniAppM1BuildOperationParams, CloseMiniAppM1SurfaceSessionParams,
+    CommitMiniAppM1LifecycleParams,
     CreateMiniAppM1Params, CreateMiniAppM1WithSourceParams,
+    ExecuteMiniAppM1SurfaceKvParams,
     FinishMiniAppM1BuildAndRecordReadyParams, FinishMiniAppM1BuildOperationParams,
-    IMiniAppM1Repository, MiniAppM1ManagedSourceLineage,
-    RecordMiniAppM1ReadyReleaseParams, StartMiniAppM1BuildOperationParams,
-    UpdateMiniAppM1ProjectSourceParams,
+    IMiniAppM1Repository, MiniAppM1AutoPublishGuard, MiniAppM1ManagedSourceLineage,
+    MiniAppM1SurfaceKvOperation,
+    MiniAppM1SurfaceKvResult,
+    OpenMiniAppM1SurfaceSessionParams, PublishMiniAppM1ReadyParams,
+    RecordMiniAppM1ReadyReleaseParams, ResolveMiniAppM1SurfaceSessionParams,
+    RollbackMiniAppM1PreviousParams, SetMiniAppM1AutoPublishParams,
+    StartMiniAppM1BuildOperationParams, UpdateMiniAppM1ProjectSourceParams,
 };
 pub use knowledge::IKnowledgeRepository;
 pub use knowledge_entry::{

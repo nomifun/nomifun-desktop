@@ -3444,10 +3444,21 @@ impl AppServices {
         // MiniApp M1 starts from its own owner-scoped Product/Project/Release
         // data root. Legacy HTML snapshots and conversation workspaces are not
         // migrated, read, or dual-written.
-        let miniapp_repository: Arc<dyn nomifun_db::IMiniAppM1Repository> =
+        let miniapp_repository =
             Arc::new(nomifun_db::SqliteMiniAppM1Repository::new(
                 database.pool().clone(),
             ));
+        nomifun_db::IMiniAppM1Repository::revoke_all_surface_sessions_on_startup(
+            miniapp_repository.as_ref(),
+        )
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "failed to revoke stale MiniApp Surface sessions: {error}"
+                )
+            })?;
+        let miniapp_repository: Arc<dyn nomifun_db::IMiniAppM1Repository> =
+            miniapp_repository;
         let miniapp_store_root = data_dir.join("miniapp-m1");
         let miniapp_source_store = Arc::new(
             nomifun_miniapp_platform::MiniAppSourceStore::new(

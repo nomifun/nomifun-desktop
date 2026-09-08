@@ -6909,6 +6909,8 @@ name = "nomifun-miniapp-platform"
 version = "0.7.6"
 dependencies = [
  "async-trait",
+ "getrandom 0.2.17",
+ "hex",
  "nomifun-agent-contracts",
  "nomifun-api-types",
  "nomifun-common",
@@ -6917,6 +6919,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.19",
  "tokio",
+ "tracing",
  "uuid",
 ]
 

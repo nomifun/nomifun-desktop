@@ -109,3 +109,15 @@ ReactDOM/Arco 会在模块加载时探测 DOM。新增 `ui/bunfig.toml`，统一
 | `a6493a1ae` | style: optimize creative studio UI alignment |
 | `52aa9dbb4` | fix: preserve canvas prompt IME composition |
 | `34a7695f3` | chore(release): v0.7.6 |
+
+## 2026-09-08 M1-0-02-B checkpoint（待提交归档）
+
+- 在 99c4e50d5 基线之上完成 UI-only MiniApp Publish/Catalog/Surface/Rollback 收口。
+- 新增 migrations 078–081：auto Publish/Catalog、Release digest reuse、digest-only
+  Surface session、KV tombstone/key generation。
+- 收紧 typed Artifact/Release record、expected Artifact identity、owner/aggregate scope、
+  running Build mutation fence 和 Surface Close retry。
+- Surface API 改为 local-trust POST /api/miniapps/{id}/surface/open；固定 Build bootstrap
+  负责 custom HTML 的 nonce handshake，UI 只在握手后转移 MessagePort。
+- 当前验证只针对 Windows Desktop x64；不运行手机模式，不交接 macOS/Linux。提交前需
+  排除本地 .githooks/，并按 DB/Platform/App/UI/Contracts 五组审查 staged diff。

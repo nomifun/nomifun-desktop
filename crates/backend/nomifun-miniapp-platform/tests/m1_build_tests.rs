@@ -12,6 +12,7 @@ use nomifun_miniapp_platform::{
     validate_static_bundle_path, MiniAppStaticBundleBuildError,
     MiniAppStaticBundleBuilder, MiniAppStaticBundleFile,
     MiniAppStaticBundleInput, MiniAppStaticServiceInput,
+    materialize_surface_entrypoint, MINIAPP_SURFACE_BRIDGE_BOOTSTRAP_MARKER,
 };
 use serde_json::json;
 
@@ -63,7 +64,7 @@ fn base_input() -> MiniAppStaticBundleInput {
 #[test]
 fn ui_only_build_is_deterministic_and_declares_no_node_runtime() {
     let input = base_input();
-    let expected_html = input.ui_index_html.clone();
+    let expected_html = materialize_surface_entrypoint(&input.ui_index_html).unwrap();
     let artifact = MiniAppStaticBundleBuilder::new()
         .build_ui_only(input)
         .unwrap();
@@ -230,4 +231,18 @@ fn ui_only_entrypoint_rejects_service_input() {
         MiniAppStaticBundleBuilder::new().build_ui_only(input),
         Err(MiniAppStaticBundleBuildError::UiOnlyServiceSource)
     ));
+}
+
+#[test]
+fn every_release_entrypoint_gets_one_host_bridge_bootstrap() {
+    let source = br#"<!doctype html><html><head></head><body>custom</body></html>"#;
+    let first = materialize_surface_entrypoint(source).unwrap();
+    let second = materialize_surface_entrypoint(&first).unwrap();
+    assert_eq!(first, second);
+    assert_eq!(
+        String::from_utf8_lossy(&first)
+            .matches(MINIAPP_SURFACE_BRIDGE_BOOTSTRAP_MARKER)
+            .count(),
+        1
+    );
 }

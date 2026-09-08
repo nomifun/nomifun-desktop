@@ -1,14 +1,30 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use nomifun_agent_contracts::MINIAPP_RELEASE_PROFILE_VERSION;
+use nomifun_agent_contracts::{
+    ArtifactId, DigestHex, JavaScriptBuildProfile, LocalizedMetadata,
+    MiniAppReleaseArtifactV1, MiniAppReleaseFile, MiniAppReleaseRef,
+    MiniAppReleaseV1Manifest, MiniAppReadyOrigin, MiniAppReadyRelease,
+    MiniAppResourceContract, MiniAppSourceLineage, MiniAppUiReleaseDescriptor,
+    PackageId, PackageRef, StrictJsonValue, VersionString,
+    MINIAPP_BRIDGE_CONTRACT_VERSION, MINIAPP_M1_SCHEMA_VERSION,
+    MINIAPP_RELEASE_PROFILE_VERSION, canonical_ui_tree_digest, digest_bytes,
+    digest_payload,
+};
 use nomifun_db::{
-    CancelMiniAppM1BuildOperationParams, CommitMiniAppM1PointerStateParams,
+    CancelMiniAppM1BuildOperationParams, CloseMiniAppM1SurfaceSessionParams,
+    CommitMiniAppM1LifecycleParams,
     CreateMiniAppM1Params, CreateMiniAppM1WithSourceParams,
+    ExecuteMiniAppM1SurfaceKvParams,
     FinishMiniAppM1BuildAndRecordReadyParams, FinishMiniAppM1BuildOperationParams,
-    IMiniAppM1Repository, MiniAppM1Kind, MiniAppM1ManagedSourceLineage,
-    MiniAppM1ProjectSourceState, MiniAppM1Snapshot, MiniAppReleaseArtifactRow,
-    MiniAppReleaseRow, ProductOperationState, SqliteMiniAppM1Repository,
+    IMiniAppM1Repository, MiniAppM1AutoPublishGuard, MiniAppM1Kind,
+    MiniAppM1ManagedSourceLineage, MiniAppM1ProjectSourceState,
+    MiniAppM1Snapshot, MiniAppM1SurfaceKvOperation, MiniAppM1SurfaceKvResult,
+    MiniAppReleaseArtifactRow, MiniAppReleaseRow,
+    OpenMiniAppM1SurfaceSessionParams, ProductOperationState,
+    PublishMiniAppM1ReadyParams, ResolveMiniAppM1SurfaceSessionParams,
+    RollbackMiniAppM1PreviousParams, SetMiniAppM1AutoPublishParams,
+    SqliteMiniAppM1Repository,
     StartMiniAppM1BuildOperationParams,
     UpdateMiniAppM1ProjectSourceParams, installation_owner_id,
 };
@@ -232,25 +248,96 @@ async fn new_repository_never_reads_the_retired_miniapps_store() {
 fn artifact(
     owner: &str,
     artifact_id: &str,
-    artifact_digest: &str,
-    manifest_digest: &str,
+    artifact_seed: &str,
+    _manifest_seed: &str,
     created_at: i64,
 ) -> MiniAppReleaseArtifactRow {
+    let artifact_payload = fixture_artifact_payload(artifact_id, artifact_seed);
+    let artifact_record_json = String::from_utf8(
+        nomifun_agent_contracts::canonical_json_bytes(&artifact_payload).unwrap(),
+    )
+    .unwrap();
     MiniAppReleaseArtifactRow {
         id: 0,
         artifact_id: artifact_id.to_owned(),
         owner_user_id: owner.to_owned(),
-        artifact_digest: artifact_digest.to_owned(),
-        manifest_digest: manifest_digest.to_owned(),
-        artifact_record_json: json!({
-            "artifact_id": artifact_id,
-            "artifact_digest": artifact_digest,
-            "manifest_digest": manifest_digest
-        })
-        .to_string(),
-        managed_path: format!("artifacts/{artifact_digest}"),
+        artifact_digest: artifact_payload.artifact_digest.as_ref().to_owned(),
+        manifest_digest: artifact_payload.manifest.payload_digest.as_ref().to_owned(),
+        artifact_record_json,
+        managed_path: format!(
+            "artifacts/{}",
+            artifact_payload.artifact_digest.as_ref()
+        ),
         created_at,
     }
+}
+
+fn fixture_artifact_payload(
+    artifact_id: &str,
+    artifact_seed: &str,
+) -> MiniAppReleaseArtifactV1 {
+    let html = format!(
+        "<!doctype html><html><body><main><h1>fixture-{artifact_seed}</h1></main></body></html>"
+    )
+    .into_bytes();
+    let file = MiniAppReleaseFile {
+        normalized_relative_path: "ui/index.html".to_owned(),
+        digest: digest_bytes(&html),
+        size_bytes: html.len() as u64,
+    };
+    let files = vec![file];
+    let config_schema = StrictJsonValue(json!({
+        "type": "object",
+        "additionalProperties": false
+    }));
+    let resource_contract = MiniAppResourceContract::default();
+    let manifest = MiniAppReleaseV1Manifest {
+        schema_version: VersionString::from(MINIAPP_M1_SCHEMA_VERSION),
+        build_profile: JavaScriptBuildProfile::MiniAppReleaseV1,
+        build_profile_version: VersionString::from(MINIAPP_RELEASE_PROFILE_VERSION),
+        display: LocalizedMetadata {
+            name: format!("Fixture {artifact_seed}"),
+            description: "MiniApp repository fixture".to_owned(),
+            localized_names: BTreeMap::new(),
+            localized_descriptions: BTreeMap::new(),
+        },
+        ui: MiniAppUiReleaseDescriptor {
+            entrypoint: "ui/index.html".to_owned(),
+            entrypoint_digest: files[0].digest.clone(),
+            ui_tree_digest: canonical_ui_tree_digest(&files).unwrap(),
+        },
+        service: None,
+        dependency_lock_digest: DigestHex::from("c".repeat(64)),
+        dependency_graph_digest: digest_bytes(
+            format!("graph-{artifact_seed}").as_bytes(),
+        ),
+        config_schema: config_schema.clone(),
+        config_schema_digest: digest_payload(&config_schema.0).unwrap(),
+        credential_slots: Vec::new(),
+        credential_slots_digest: digest_payload(&Vec::<
+            nomifun_agent_contracts::CredentialSlotDeclaration,
+        >::new())
+        .unwrap(),
+        resource_contract: resource_contract.clone(),
+        resource_contract_digest: digest_payload(&resource_contract).unwrap(),
+        schemas: BTreeMap::new(),
+        bridge_contract_digest: digest_payload(&VersionString::from(
+            MINIAPP_BRIDGE_CONTRACT_VERSION,
+        ))
+        .unwrap(),
+        contribution_package: PackageRef {
+            id: PackageId::from("miniapp.test"),
+            version: VersionString::from("1.0.0"),
+        },
+        contributions: Default::default(),
+        migrations: Vec::new(),
+    };
+    MiniAppReleaseArtifactV1::new(
+        ArtifactId::from(artifact_id),
+        manifest,
+        files,
+    )
+    .unwrap()
 }
 
 fn release(
@@ -259,12 +346,39 @@ fn release(
     project_id: &str,
     artifact: &MiniAppReleaseArtifactRow,
     release_id: &str,
-    release_digest: &str,
+    _release_seed: &str,
     operation_id: &str,
     source_digest: &str,
     lock_digest: &str,
     created_at: i64,
 ) -> MiniAppReleaseRow {
+    let artifact_payload: MiniAppReleaseArtifactV1 =
+        serde_json::from_str(&artifact.artifact_record_json).unwrap();
+    let ready = MiniAppReadyRelease {
+        miniapp_id: miniapp_id.into(),
+        release: MiniAppReleaseRef {
+            release_id: release_id.into(),
+            artifact_id: artifact_payload.artifact_id.clone(),
+            release_digest: artifact_payload.artifact_digest.clone(),
+            manifest_digest: artifact_payload.manifest.payload_digest.clone(),
+        },
+        origin_operation_id: operation_id.into(),
+        origin: MiniAppReadyOrigin::Build,
+        source_lineage: MiniAppSourceLineage::Managed {
+            project_id: project_id.into(),
+            source_snapshot_digest: source_digest.into(),
+            dependency_lock_digest: lock_digest.into(),
+            build_profile_version: MINIAPP_RELEASE_PROFILE_VERSION.into(),
+            build_generation: 1,
+        },
+        matching_service_test_receipt: None,
+        created_at_ms: created_at,
+    };
+    ready.validate_for_artifact(&artifact_payload).unwrap();
+    let release_record_json = String::from_utf8(
+        nomifun_agent_contracts::canonical_json_bytes(&ready).unwrap(),
+    )
+    .unwrap();
     MiniAppReleaseRow {
         id: 0,
         release_id: release_id.to_owned(),
@@ -273,7 +387,7 @@ fn release(
         artifact_id: artifact.artifact_id.clone(),
         artifact_digest: artifact.artifact_digest.clone(),
         manifest_digest: artifact.manifest_digest.clone(),
-        release_digest: release_digest.to_owned(),
+        release_digest: artifact.artifact_digest.clone(),
         origin_kind: "build".to_owned(),
         origin_operation_id: operation_id.to_owned(),
         source_kind: "managed".to_owned(),
@@ -282,13 +396,28 @@ fn release(
         dependency_lock_digest: Some(lock_digest.to_owned()),
         build_profile_version: Some(MINIAPP_RELEASE_PROFILE_VERSION.to_owned()),
         build_generation: Some(1),
-        release_record_json: json!({
-            "release_id": release_id,
-            "release_digest": release_digest
-        })
-        .to_string(),
+        release_record_json,
         created_at,
     }
+}
+
+fn set_release_build_generation(release: &mut MiniAppReleaseRow, build_generation: i64) {
+    let mut record: MiniAppReadyRelease =
+        serde_json::from_str(&release.release_record_json).unwrap();
+    if let MiniAppSourceLineage::Managed {
+        build_generation: record_generation,
+        ..
+    } = &mut record.source_lineage
+    {
+        *record_generation = build_generation as u64;
+    } else {
+        panic!("repository fixture must use managed source lineage");
+    }
+    release.build_generation = Some(build_generation);
+    release.release_record_json = String::from_utf8(
+        nomifun_agent_contracts::canonical_json_bytes(&record).unwrap(),
+    )
+    .unwrap();
 }
 
 async fn create_editable_app(
@@ -344,13 +473,14 @@ async fn ready_release_and_pointer_cas_bind_exact_lineage_and_owner() {
         &"e".repeat(64),
         31,
     );
+    let digest_one = artifact_one.artifact_digest.clone();
     let release_one = release(
         &owner,
         MINIAPP_ID,
         PROJECT_ID,
         &artifact_one,
         &release_one_id,
-        &"d".repeat(64),
+        &digest_one,
         &op_one,
         &"b".repeat(64),
         &"c".repeat(64),
@@ -386,6 +516,30 @@ async fn ready_release_and_pointer_cas_bind_exact_lineage_and_owner() {
     assert_eq!(succeeded.state, "succeeded");
     assert_eq!(succeeded.progress_percent, Some(100));
 
+    let published_one = repository
+        .publish_ready_cas(&PublishMiniAppM1ReadyParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            expected_product_revision: 2,
+            expected_pointer_revision: 2,
+            expected_active_release_epoch: 0,
+            expected_ready_release_id: release_one_id.clone(),
+            expected_ready_release_digest: digest_one.clone(),
+            expected_active_release_digest: None,
+            target_catalog_digest: "3".repeat(64),
+            auto_publish_guard: None,
+            updated_at: 34,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        published_one.product.active_release_id.as_deref(),
+        Some(release_one_id.as_str())
+    );
+    assert!(published_one.product.ready_release_id.is_none());
+    assert!(published_one.catalog_publication.is_none());
+    assert_eq!(published_one.product.active_release_epoch, 1);
+
     let op_two = Uuid::now_v7().to_string();
     let artifact_two_id = Uuid::now_v7().to_string();
     let release_two_id = Uuid::now_v7().to_string();
@@ -407,26 +561,27 @@ async fn ready_release_and_pointer_cas_bind_exact_lineage_and_owner() {
         &"2".repeat(64),
         41,
     );
+    let digest_two = artifact_two.artifact_digest.clone();
     let release_two = release(
         &owner,
         MINIAPP_ID,
         PROJECT_ID,
         &artifact_two,
         &release_two_id,
-        &"1".repeat(64),
+        &digest_two,
         &op_two,
         &"b".repeat(64),
         &"c".repeat(64),
         42,
     );
-    let ready_two = repository
+    let _ready_two = repository
         .finish_build_and_record_ready(&FinishMiniAppM1BuildAndRecordReadyParams {
             owner_user_id: owner.clone(),
             miniapp_id: MINIAPP_ID.to_owned(),
             project_id: PROJECT_ID.to_owned(),
             operation_id: op_two,
-            expected_product_revision: 2,
-            expected_pointer_revision: 2,
+            expected_product_revision: 3,
+            expected_pointer_revision: 3,
             expected_project_revision: 1,
             expected_build_generation: 1,
             artifact: artifact_two,
@@ -438,50 +593,986 @@ async fn ready_release_and_pointer_cas_bind_exact_lineage_and_owner() {
         .unwrap();
 
     let activated = repository
-        .commit_pointer_state_cas(&CommitMiniAppM1PointerStateParams {
+        .publish_ready_cas(&PublishMiniAppM1ReadyParams {
             owner_user_id: owner.clone(),
             miniapp_id: MINIAPP_ID.to_owned(),
-            expected_product_revision: 3,
-            expected_pointer_revision: 3,
-            expected_active_release_epoch: 0,
-            ready_release_id: Some(release_two_id.clone()),
-            ready_release_digest: Some("1".repeat(64)),
-            active_release_id: Some(release_one_id.clone()),
-            active_release_digest: Some("d".repeat(64)),
-            previous_release_id: None,
-            previous_release_digest: None,
-            active_release_epoch: 1,
-            materialized_catalog_digest: "4".repeat(64),
+            expected_product_revision: 4,
+            expected_pointer_revision: 4,
+            expected_active_release_epoch: 1,
+            expected_ready_release_id: release_two_id.clone(),
+            expected_ready_release_digest: digest_two.clone(),
+            expected_active_release_digest: Some(digest_one.clone()),
+            target_catalog_digest: "4".repeat(64),
+            auto_publish_guard: None,
             updated_at: 44,
         })
         .await
         .unwrap();
     assert_eq!(
         activated.product.active_release_id.as_deref(),
+        Some(release_two_id.as_str())
+    );
+    assert_eq!(
+        activated.product.previous_release_id.as_deref(),
         Some(release_one_id.as_str())
     );
-    assert_eq!(activated.product.active_release_epoch, 1);
+    assert_eq!(activated.product.active_release_epoch, 2);
 
     let stale = repository
-        .commit_pointer_state_cas(&CommitMiniAppM1PointerStateParams {
-            owner_user_id: owner,
+        .publish_ready_cas(&PublishMiniAppM1ReadyParams {
+            owner_user_id: owner.clone(),
             miniapp_id: MINIAPP_ID.to_owned(),
-            expected_product_revision: 3,
-            expected_pointer_revision: 3,
-            expected_active_release_epoch: 0,
-            ready_release_id: ready_two.product.ready_release_id,
-            ready_release_digest: ready_two.product.ready_release_digest,
-            active_release_id: None,
-            active_release_digest: None,
-            previous_release_id: None,
-            previous_release_digest: None,
-            active_release_epoch: 0,
-            materialized_catalog_digest: "5".repeat(64),
+            expected_product_revision: 4,
+            expected_pointer_revision: 4,
+            expected_active_release_epoch: 1,
+            expected_ready_release_id: release_two_id.clone(),
+            expected_ready_release_digest: digest_two.clone(),
+            expected_active_release_digest: Some(digest_one.clone()),
+            target_catalog_digest: "5".repeat(64),
+            auto_publish_guard: None,
             updated_at: 45,
         })
         .await
         .unwrap_err();
     assert!(stale.to_string().contains("CAS"));
+
+    let rolled_back = repository
+        .rollback_previous_cas(&RollbackMiniAppM1PreviousParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            expected_product_revision: 5,
+            expected_pointer_revision: 5,
+            expected_active_release_epoch: 2,
+            expected_current_release_id: release_two_id.clone(),
+            expected_current_release_digest: digest_two.clone(),
+            expected_previous_release_id: release_one_id.clone(),
+            expected_previous_release_digest: digest_one.clone(),
+            target_catalog_digest: "5".repeat(64),
+            updated_at: 46,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        rolled_back.product.active_release_id.as_deref(),
+        Some(release_one_id.as_str())
+    );
+    assert_eq!(rolled_back.product.active_release_epoch, 3);
+    assert_eq!(
+        rolled_back.product.previous_release_digest.as_deref(),
+        Some(digest_two.as_str())
+    );
+
+    let enabled = repository
+        .commit_lifecycle_cas(&CommitMiniAppM1LifecycleParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            expected_product_revision: 6,
+            expected_pointer_revision: 6,
+            expected_active_release_digest: Some(digest_one.clone()),
+            enabled: true,
+            updated_at: 47,
+        })
+        .await
+        .unwrap();
+    let catalog = enabled.catalog_publication.as_ref().unwrap();
+    assert_eq!(catalog.active_release_id, release_one_id);
+    assert_eq!(catalog.active_release_epoch, 3);
+
+    sqlx::query(
+        "CREATE TRIGGER fail_miniapp_catalog_update
+         BEFORE UPDATE ON miniapp_catalog_publications
+         BEGIN
+             SELECT RAISE(ABORT, 'forced catalog projection failure');
+         END",
+    )
+    .execute(database.pool())
+    .await
+    .unwrap();
+    let failed_catalog_cutover = repository
+        .rollback_previous_cas(&RollbackMiniAppM1PreviousParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            expected_product_revision: 7,
+            expected_pointer_revision: 6,
+            expected_active_release_epoch: 3,
+            expected_current_release_id: release_one_id.clone(),
+            expected_current_release_digest: digest_one.clone(),
+            expected_previous_release_id: release_two_id,
+            expected_previous_release_digest: digest_two.clone(),
+            target_catalog_digest: "6".repeat(64),
+            updated_at: 48,
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        failed_catalog_cutover
+            .to_string()
+            .contains("forced catalog projection failure")
+    );
+    let after_failed_catalog_cutover = repository
+        .get(&owner, MINIAPP_ID)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after_failed_catalog_cutover.product.product_revision, 7);
+    assert_eq!(after_failed_catalog_cutover.product.pointer_revision, 6);
+    assert_eq!(after_failed_catalog_cutover.product.active_release_epoch, 3);
+    assert_eq!(
+        after_failed_catalog_cutover
+            .product
+            .active_release_id
+            .as_deref(),
+        Some(release_one_id.as_str())
+    );
+    assert_eq!(after_failed_catalog_cutover.library_revision, 7);
+    assert_eq!(
+        after_failed_catalog_cutover.catalog_publication,
+        enabled.catalog_publication
+    );
+    sqlx::query("DROP TRIGGER fail_miniapp_catalog_update")
+        .execute(database.pool())
+        .await
+        .unwrap();
+
+    let authorization_id = Uuid::now_v7().to_string();
+    let auto = repository
+        .set_auto_publish_cas(&SetMiniAppM1AutoPublishParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            expected_product_revision: 7,
+            expected_pointer_revision: 6,
+            expected_authorization_revision: None,
+            authorization_id: authorization_id.clone(),
+            enabled: true,
+            user_authorized_at_ms: 48,
+            updated_at: 48,
+        })
+        .await
+        .unwrap();
+    assert!(auto.auto_publish_authorization.as_ref().unwrap().enabled);
+
+    let disabled = repository
+        .commit_lifecycle_cas(&CommitMiniAppM1LifecycleParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            expected_product_revision: 8,
+            expected_pointer_revision: 6,
+            expected_active_release_digest: Some(digest_one.clone()),
+            enabled: false,
+            updated_at: 49,
+        })
+        .await
+        .unwrap();
+    assert!(disabled.catalog_publication.is_none());
+
+    let manual = repository
+        .set_auto_publish_cas(&SetMiniAppM1AutoPublishParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            expected_product_revision: 9,
+            expected_pointer_revision: 6,
+            expected_authorization_revision: Some(1),
+            authorization_id,
+            enabled: false,
+            user_authorized_at_ms: 48,
+            updated_at: 50,
+        })
+        .await
+        .unwrap();
+    let authorization = manual.auto_publish_authorization.unwrap();
+    assert!(!authorization.enabled);
+    assert_eq!(authorization.revision, 2);
+}
+
+#[tokio::test]
+async fn surface_sessions_are_exact_revocable_and_disable_enable_aba_safe() {
+    let database = init_miniapp_test_database().await;
+    let owner = installation_owner_id(database.pool()).await.unwrap();
+    let repository = SqliteMiniAppM1Repository::new(database.pool().clone());
+    create_editable_app(&repository, &owner).await;
+    let source = managed_source("sources/owner/project/source", 'b', 'c', 1);
+    let operation_id = Uuid::now_v7().to_string();
+    let artifact_id = Uuid::now_v7().to_string();
+    let release_id = Uuid::now_v7().to_string();
+    start_build(
+        &repository,
+        &owner,
+        MINIAPP_ID,
+        PROJECT_ID,
+        1,
+        &source,
+        &operation_id,
+        20,
+    )
+    .await;
+    let artifact = artifact(
+        &owner,
+        &artifact_id,
+        &"d".repeat(64),
+        &"e".repeat(64),
+        21,
+    );
+    let digest = artifact.artifact_digest.clone();
+    let release = release(
+        &owner,
+        MINIAPP_ID,
+        PROJECT_ID,
+        &artifact,
+        &release_id,
+        &digest,
+        &operation_id,
+        &"b".repeat(64),
+        &"c".repeat(64),
+        22,
+    );
+    let ready = repository
+        .finish_build_and_record_ready(&FinishMiniAppM1BuildAndRecordReadyParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            project_id: PROJECT_ID.to_owned(),
+            operation_id,
+            expected_product_revision: 1,
+            expected_pointer_revision: 1,
+            expected_project_revision: 1,
+            expected_build_generation: 1,
+            artifact,
+            release,
+            bounded_log_tail: vec![],
+            finished_at_ms: 23,
+        })
+        .await
+        .unwrap();
+    let published = repository
+        .publish_ready_cas(&PublishMiniAppM1ReadyParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            expected_product_revision: ready.product.product_revision,
+            expected_pointer_revision: ready.product.pointer_revision,
+            expected_active_release_epoch: 0,
+            expected_ready_release_id: release_id.clone(),
+            expected_ready_release_digest: digest.clone(),
+            expected_active_release_digest: None,
+            target_catalog_digest: "1".repeat(64),
+            auto_publish_guard: None,
+            updated_at: 24,
+        })
+        .await
+        .unwrap();
+    let enabled = repository
+        .commit_lifecycle_cas(&CommitMiniAppM1LifecycleParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            expected_product_revision: published.product.product_revision,
+            expected_pointer_revision: published.product.pointer_revision,
+            expected_active_release_digest: Some(digest.clone()),
+            enabled: true,
+            updated_at: 25,
+        })
+        .await
+        .unwrap();
+
+    let first_session_id = Uuid::now_v7().to_string();
+    let first = repository
+        .open_surface_session_cas(&OpenMiniAppM1SurfaceSessionParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            surface_session_id: first_session_id.clone(),
+            capability_digest: "2".repeat(64),
+            expected_product_revision: enabled.product.product_revision,
+            expected_pointer_revision: enabled.product.pointer_revision,
+            expected_active_release_id: release_id.clone(),
+            expected_active_release_digest: digest.clone(),
+            expected_active_release_epoch: 1,
+            issued_at_ms: 26,
+        })
+        .await
+        .unwrap();
+    let written = repository
+        .execute_surface_kv(&ExecuteMiniAppM1SurfaceKvParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            surface_session_id: first.surface_session_id.clone(),
+            expected_surface_generation: first.generation,
+            expected_capability_digest: first.capability_digest.clone(),
+            expected_active_release_epoch: 1,
+            expected_active_release_digest: digest.clone(),
+            namespace: "surface".to_owned(),
+            key: "state".to_owned(),
+            operation: MiniAppM1SurfaceKvOperation::Set {
+                value: json!({"value": 1}),
+            },
+            updated_at: 27,
+        })
+        .await
+        .unwrap();
+    assert_eq!(written, MiniAppM1SurfaceKvResult::Written { revision: 1 });
+
+    let second_session_id = Uuid::now_v7().to_string();
+    let second = repository
+        .open_surface_session_cas(&OpenMiniAppM1SurfaceSessionParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            surface_session_id: second_session_id.clone(),
+            capability_digest: "3".repeat(64),
+            expected_product_revision: enabled.product.product_revision,
+            expected_pointer_revision: enabled.product.pointer_revision,
+            expected_active_release_id: release_id.clone(),
+            expected_active_release_digest: digest.clone(),
+            expected_active_release_epoch: 1,
+            issued_at_ms: 28,
+        })
+        .await
+        .unwrap();
+    assert_eq!(second.generation, first.generation + 1);
+    assert!(repository
+        .execute_surface_kv(&ExecuteMiniAppM1SurfaceKvParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            surface_session_id: first.surface_session_id,
+            expected_surface_generation: first.generation,
+            expected_capability_digest: first.capability_digest,
+            expected_active_release_epoch: 1,
+            expected_active_release_digest: digest.clone(),
+            namespace: "surface".to_owned(),
+            key: "state".to_owned(),
+            operation: MiniAppM1SurfaceKvOperation::Set {
+                value: json!({"value": "stale"}),
+            },
+            updated_at: 29,
+        })
+        .await
+        .is_err());
+    assert!(repository
+        .resolve_surface_session(&ResolveMiniAppM1SurfaceSessionParams {
+            miniapp_id: MINIAPP_ID.to_owned(),
+            capability_digest: "2".repeat(64),
+            expected_active_release_digest: digest.clone(),
+            expected_active_release_epoch: 1,
+        })
+        .await
+        .unwrap()
+        .is_none());
+    assert!(repository
+        .close_surface_session_cas(&CloseMiniAppM1SurfaceSessionParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            surface_session_id: second.surface_session_id.clone(),
+            capability_digest: second.capability_digest.clone(),
+        })
+        .await
+        .unwrap());
+    assert!(!repository
+        .close_surface_session_cas(&CloseMiniAppM1SurfaceSessionParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            surface_session_id: second.surface_session_id,
+            capability_digest: second.capability_digest,
+        })
+        .await
+        .unwrap());
+
+    let third = repository
+        .open_surface_session_cas(&OpenMiniAppM1SurfaceSessionParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            surface_session_id: Uuid::now_v7().to_string(),
+            capability_digest: "4".repeat(64),
+            expected_product_revision: enabled.product.product_revision,
+            expected_pointer_revision: enabled.product.pointer_revision,
+            expected_active_release_id: release_id,
+            expected_active_release_digest: digest.clone(),
+            expected_active_release_epoch: 1,
+            issued_at_ms: 30,
+        })
+        .await
+        .unwrap();
+    let disabled = repository
+        .commit_lifecycle_cas(&CommitMiniAppM1LifecycleParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            expected_product_revision: enabled.product.product_revision,
+            expected_pointer_revision: enabled.product.pointer_revision,
+            expected_active_release_digest: Some(digest.clone()),
+            enabled: false,
+            updated_at: 31,
+        })
+        .await
+        .unwrap();
+    let reenabled = repository
+        .commit_lifecycle_cas(&CommitMiniAppM1LifecycleParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            expected_product_revision: disabled.product.product_revision,
+            expected_pointer_revision: disabled.product.pointer_revision,
+            expected_active_release_digest: Some(digest.clone()),
+            enabled: true,
+            updated_at: 32,
+        })
+        .await
+        .unwrap();
+    assert!(repository
+        .execute_surface_kv(&ExecuteMiniAppM1SurfaceKvParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            surface_session_id: third.surface_session_id,
+            expected_surface_generation: third.generation,
+            expected_capability_digest: third.capability_digest,
+            expected_active_release_epoch: 1,
+            expected_active_release_digest: digest.clone(),
+            namespace: "surface".to_owned(),
+            key: "state".to_owned(),
+            operation: MiniAppM1SurfaceKvOperation::Get,
+            updated_at: 33,
+        })
+        .await
+        .is_err());
+    let restarted_session = repository
+        .open_surface_session_cas(&OpenMiniAppM1SurfaceSessionParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            surface_session_id: Uuid::now_v7().to_string(),
+            capability_digest: "5".repeat(64),
+            expected_product_revision: reenabled.product.product_revision,
+            expected_pointer_revision: reenabled.product.pointer_revision,
+            expected_active_release_id: reenabled
+                .product
+                .active_release_id
+                .clone()
+                .unwrap(),
+            expected_active_release_digest: digest.clone(),
+            expected_active_release_epoch: 1,
+            issued_at_ms: 34,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        repository
+            .revoke_all_surface_sessions_on_startup()
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(repository
+        .resolve_surface_session(&ResolveMiniAppM1SurfaceSessionParams {
+            miniapp_id: MINIAPP_ID.to_owned(),
+            capability_digest: restarted_session.capability_digest,
+            expected_active_release_digest: digest.clone(),
+            expected_active_release_epoch: 1,
+        })
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn identical_artifact_content_keeps_distinct_release_lineage_and_pointer_identity() {
+    let database = init_miniapp_test_database().await;
+    let owner = installation_owner_id(database.pool()).await.unwrap();
+    let repository = SqliteMiniAppM1Repository::new(database.pool().clone());
+    create_editable_app(&repository, &owner).await;
+    let source_one = managed_source("sources/owner/project/source", 'b', 'c', 1);
+    let operation_one = Uuid::now_v7().to_string();
+    let artifact_id = Uuid::now_v7().to_string();
+    let release_one_id = Uuid::now_v7().to_string();
+    start_build(
+        &repository,
+        &owner,
+        MINIAPP_ID,
+        PROJECT_ID,
+        1,
+        &source_one,
+        &operation_one,
+        20,
+    )
+    .await;
+    let artifact_one = artifact(
+        &owner,
+        &artifact_id,
+        &"d".repeat(64),
+        &"e".repeat(64),
+        21,
+    );
+    let digest = artifact_one.artifact_digest.clone();
+    let release_one = release(
+        &owner,
+        MINIAPP_ID,
+        PROJECT_ID,
+        &artifact_one,
+        &release_one_id,
+        &digest,
+        &operation_one,
+        &"b".repeat(64),
+        &"c".repeat(64),
+        22,
+    );
+    let ready_one = repository
+        .finish_build_and_record_ready(&FinishMiniAppM1BuildAndRecordReadyParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            project_id: PROJECT_ID.to_owned(),
+            operation_id: operation_one,
+            expected_product_revision: 1,
+            expected_pointer_revision: 1,
+            expected_project_revision: 1,
+            expected_build_generation: 1,
+            artifact: artifact_one.clone(),
+            release: release_one,
+            bounded_log_tail: vec![],
+            finished_at_ms: 23,
+        })
+        .await
+        .unwrap();
+    let published_one = repository
+        .publish_ready_cas(&PublishMiniAppM1ReadyParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            expected_product_revision: ready_one.product.product_revision,
+            expected_pointer_revision: ready_one.product.pointer_revision,
+            expected_active_release_epoch: 0,
+            expected_ready_release_id: release_one_id.clone(),
+            expected_ready_release_digest: digest.clone(),
+            expected_active_release_digest: None,
+            target_catalog_digest: "1".repeat(64),
+            auto_publish_guard: None,
+            updated_at: 24,
+        })
+        .await
+        .unwrap();
+
+    let source_two = managed_source("sources/owner/project/source", 'f', 'c', 2);
+    repository
+        .update_project_source_cas(&UpdateMiniAppM1ProjectSourceParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            project_id: PROJECT_ID.to_owned(),
+            expected_project_revision: 1,
+            source_state: MiniAppM1ProjectSourceState::Editable,
+            managed_source_path: Some(source_two.managed_source_path.clone()),
+            source_head_digest: Some(source_two.source_head_digest.clone()),
+            dependency_lock_digest: Some(source_two.dependency_lock_digest.clone()),
+            build_profile_version: Some(source_two.build_profile_version.clone()),
+            build_generation: 2,
+            updated_at: 25,
+        })
+        .await
+        .unwrap();
+    let operation_two = Uuid::now_v7().to_string();
+    let release_two_id = Uuid::now_v7().to_string();
+    start_build(
+        &repository,
+        &owner,
+        MINIAPP_ID,
+        PROJECT_ID,
+        2,
+        &source_two,
+        &operation_two,
+        26,
+    )
+    .await;
+    let artifact_two = MiniAppReleaseArtifactRow {
+        created_at: 27,
+        ..artifact_one
+    };
+    let mut release_two = release(
+        &owner,
+        MINIAPP_ID,
+        PROJECT_ID,
+        &artifact_two,
+        &release_two_id,
+        &digest,
+        &operation_two,
+        &"f".repeat(64),
+        &"c".repeat(64),
+        28,
+    );
+    set_release_build_generation(&mut release_two, 2);
+    let ready_two = repository
+        .finish_build_and_record_ready(&FinishMiniAppM1BuildAndRecordReadyParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            project_id: PROJECT_ID.to_owned(),
+            operation_id: operation_two,
+            expected_product_revision: published_one.product.product_revision,
+            expected_pointer_revision: published_one.product.pointer_revision,
+            expected_project_revision: 2,
+            expected_build_generation: 2,
+            artifact: artifact_two,
+            release: release_two,
+            bounded_log_tail: vec![],
+            finished_at_ms: 29,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        ready_two.product.ready_release_digest,
+        ready_two.product.active_release_digest
+    );
+    assert_ne!(
+        ready_two.product.ready_release_id,
+        ready_two.product.active_release_id
+    );
+
+    let published_two = repository
+        .publish_ready_cas(&PublishMiniAppM1ReadyParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            expected_product_revision: ready_two.product.product_revision,
+            expected_pointer_revision: ready_two.product.pointer_revision,
+            expected_active_release_epoch: 1,
+            expected_ready_release_id: release_two_id.clone(),
+            expected_ready_release_digest: digest.clone(),
+            expected_active_release_digest: Some(digest.clone()),
+            target_catalog_digest: "2".repeat(64),
+            auto_publish_guard: None,
+            updated_at: 30,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        published_two.product.active_release_id.as_deref(),
+        Some(release_two_id.as_str())
+    );
+    assert_eq!(
+        published_two.product.previous_release_id.as_deref(),
+        Some(release_one_id.as_str())
+    );
+    assert_eq!(
+        published_two.product.active_release_digest,
+        published_two.product.previous_release_digest
+    );
+    assert_eq!(published_two.product.active_release_epoch, 2);
+
+    let rolled_back = repository
+        .rollback_previous_cas(&RollbackMiniAppM1PreviousParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            expected_product_revision: published_two.product.product_revision,
+            expected_pointer_revision: published_two.product.pointer_revision,
+            expected_active_release_epoch: 2,
+            expected_current_release_id: release_two_id,
+            expected_current_release_digest: digest.clone(),
+            expected_previous_release_id: release_one_id.clone(),
+            expected_previous_release_digest: digest.clone(),
+            target_catalog_digest: "1".repeat(64),
+            updated_at: 31,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        rolled_back.product.active_release_id.as_deref(),
+        Some(release_one_id.as_str())
+    );
+    assert_eq!(rolled_back.product.active_release_epoch, 3);
+    let artifact_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM miniapp_release_artifacts")
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+    let release_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM miniapp_releases")
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+    assert_eq!(artifact_count, 1);
+    assert_eq!(release_count, 2);
+}
+
+#[tokio::test]
+async fn auto_publish_guard_rejects_advanced_source_and_revoke_wins_running_build() {
+    let database = init_miniapp_test_database().await;
+    let owner = installation_owner_id(database.pool()).await.unwrap();
+    let repository = SqliteMiniAppM1Repository::new(database.pool().clone());
+    create_editable_app(&repository, &owner).await;
+    let source_one = managed_source("sources/owner/project/source", 'b', 'c', 1);
+    let operation_one = Uuid::now_v7().to_string();
+    let artifact_one_id = Uuid::now_v7().to_string();
+    let release_one_id = Uuid::now_v7().to_string();
+    start_build(
+        &repository,
+        &owner,
+        MINIAPP_ID,
+        PROJECT_ID,
+        1,
+        &source_one,
+        &operation_one,
+        20,
+    )
+    .await;
+    let artifact_one = artifact(
+        &owner,
+        &artifact_one_id,
+        &"d".repeat(64),
+        &"e".repeat(64),
+        21,
+    );
+    let digest_one = artifact_one.artifact_digest.clone();
+    let release_one = release(
+        &owner,
+        MINIAPP_ID,
+        PROJECT_ID,
+        &artifact_one,
+        &release_one_id,
+        &digest_one,
+        &operation_one,
+        &"b".repeat(64),
+        &"c".repeat(64),
+        22,
+    );
+    let ready_one = repository
+        .finish_build_and_record_ready(&FinishMiniAppM1BuildAndRecordReadyParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            project_id: PROJECT_ID.to_owned(),
+            operation_id: operation_one,
+            expected_product_revision: 1,
+            expected_pointer_revision: 1,
+            expected_project_revision: 1,
+            expected_build_generation: 1,
+            artifact: artifact_one,
+            release: release_one,
+            bounded_log_tail: vec![],
+            finished_at_ms: 23,
+        })
+        .await
+        .unwrap();
+    let published = repository
+        .publish_ready_cas(&PublishMiniAppM1ReadyParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            expected_product_revision: ready_one.product.product_revision,
+            expected_pointer_revision: ready_one.product.pointer_revision,
+            expected_active_release_epoch: 0,
+            expected_ready_release_id: release_one_id.clone(),
+            expected_ready_release_digest: digest_one.clone(),
+            expected_active_release_digest: None,
+            target_catalog_digest: "1".repeat(64),
+            auto_publish_guard: None,
+            updated_at: 24,
+        })
+        .await
+        .unwrap();
+    let authorization_id = Uuid::now_v7().to_string();
+    let authorized = repository
+        .set_auto_publish_cas(&SetMiniAppM1AutoPublishParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            expected_product_revision: published.product.product_revision,
+            expected_pointer_revision: published.product.pointer_revision,
+            expected_authorization_revision: None,
+            authorization_id: authorization_id.clone(),
+            enabled: true,
+            user_authorized_at_ms: 25,
+            updated_at: 25,
+        })
+        .await
+        .unwrap();
+    let source_two = managed_source("sources/owner/project/source", 'f', 'c', 2);
+    repository
+        .update_project_source_cas(&UpdateMiniAppM1ProjectSourceParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            project_id: PROJECT_ID.to_owned(),
+            expected_project_revision: 1,
+            source_state: MiniAppM1ProjectSourceState::Editable,
+            managed_source_path: Some(source_two.managed_source_path.clone()),
+            source_head_digest: Some(source_two.source_head_digest.clone()),
+            dependency_lock_digest: Some(source_two.dependency_lock_digest.clone()),
+            build_profile_version: Some(source_two.build_profile_version.clone()),
+            build_generation: 2,
+            updated_at: 26,
+        })
+        .await
+        .unwrap();
+    let operation_two = Uuid::now_v7().to_string();
+    let artifact_two_id = Uuid::now_v7().to_string();
+    let release_two_id = Uuid::now_v7().to_string();
+    start_build(
+        &repository,
+        &owner,
+        MINIAPP_ID,
+        PROJECT_ID,
+        2,
+        &source_two,
+        &operation_two,
+        27,
+    )
+    .await;
+    let artifact_two = artifact(
+        &owner,
+        &artifact_two_id,
+        &"5".repeat(64),
+        &"6".repeat(64),
+        28,
+    );
+    let digest_two = artifact_two.artifact_digest.clone();
+    let mut release_two = release(
+        &owner,
+        MINIAPP_ID,
+        PROJECT_ID,
+        &artifact_two,
+        &release_two_id,
+        &digest_two,
+        &operation_two,
+        &"f".repeat(64),
+        &"c".repeat(64),
+        29,
+    );
+    set_release_build_generation(&mut release_two, 2);
+    let ready_two = repository
+        .finish_build_and_record_ready(&FinishMiniAppM1BuildAndRecordReadyParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            project_id: PROJECT_ID.to_owned(),
+            operation_id: operation_two,
+            expected_product_revision: authorized.product.product_revision,
+            expected_pointer_revision: authorized.product.pointer_revision,
+            expected_project_revision: 2,
+            expected_build_generation: 2,
+            artifact: artifact_two,
+            release: release_two,
+            bounded_log_tail: vec![],
+            finished_at_ms: 30,
+        })
+        .await
+        .unwrap();
+    let source_three = managed_source("sources/owner/project/source", '7', 'c', 3);
+    repository
+        .update_project_source_cas(&UpdateMiniAppM1ProjectSourceParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            project_id: PROJECT_ID.to_owned(),
+            expected_project_revision: 2,
+            source_state: MiniAppM1ProjectSourceState::Editable,
+            managed_source_path: Some(source_three.managed_source_path.clone()),
+            source_head_digest: Some(source_three.source_head_digest.clone()),
+            dependency_lock_digest: Some(source_three.dependency_lock_digest.clone()),
+            build_profile_version: Some(source_three.build_profile_version.clone()),
+            build_generation: 3,
+            updated_at: 31,
+        })
+        .await
+        .unwrap();
+    let stale_auto_publish = repository
+        .publish_ready_cas(&PublishMiniAppM1ReadyParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            expected_product_revision: ready_two.product.product_revision,
+            expected_pointer_revision: ready_two.product.pointer_revision,
+            expected_active_release_epoch: 1,
+            expected_ready_release_id: release_two_id.clone(),
+            expected_ready_release_digest: digest_two.clone(),
+            expected_active_release_digest: Some(digest_one.clone()),
+            target_catalog_digest: "2".repeat(64),
+            auto_publish_guard: Some(MiniAppM1AutoPublishGuard {
+                authorization_id: authorization_id.clone(),
+                authorization_revision: 1,
+                project_id: PROJECT_ID.to_owned(),
+                project_revision: 2,
+                source_head_digest: "f".repeat(64),
+                dependency_lock_digest: "c".repeat(64),
+                build_profile_version: MINIAPP_RELEASE_PROFILE_VERSION.to_owned(),
+                build_generation: 2,
+            }),
+            updated_at: 32,
+        })
+        .await
+        .unwrap_err();
+    assert!(stale_auto_publish.to_string().contains("Project head advanced"));
+    let retained = repository.get(&owner, MINIAPP_ID).await.unwrap().unwrap();
+    assert_eq!(
+        retained.product.active_release_id.as_deref(),
+        Some(release_one_id.as_str())
+    );
+    assert_eq!(
+        retained.product.ready_release_id.as_deref(),
+        Some(release_two_id.as_str())
+    );
+    assert_eq!(retained.product.active_release_epoch, 1);
+
+    let operation_three = Uuid::now_v7().to_string();
+    start_build(
+        &repository,
+        &owner,
+        MINIAPP_ID,
+        PROJECT_ID,
+        3,
+        &source_three,
+        &operation_three,
+        33,
+    )
+    .await;
+    let revoked = repository
+        .set_auto_publish_cas(&SetMiniAppM1AutoPublishParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            expected_product_revision: retained.product.product_revision,
+            expected_pointer_revision: retained.product.pointer_revision,
+            expected_authorization_revision: Some(1),
+            authorization_id,
+            enabled: false,
+            user_authorized_at_ms: 25,
+            updated_at: 34,
+        })
+        .await
+        .unwrap();
+    assert!(!revoked.auto_publish_authorization.as_ref().unwrap().enabled);
+
+    let artifact_three_id = Uuid::now_v7().to_string();
+    let release_three_id = Uuid::now_v7().to_string();
+    let artifact_three = artifact(
+        &owner,
+        &artifact_three_id,
+        &"8".repeat(64),
+        &"9".repeat(64),
+        35,
+    );
+    let mut release_three = release(
+        &owner,
+        MINIAPP_ID,
+        PROJECT_ID,
+        &artifact_three,
+        &release_three_id,
+        &"8".repeat(64),
+        &operation_three,
+        &"7".repeat(64),
+        &"c".repeat(64),
+        36,
+    );
+    set_release_build_generation(&mut release_three, 3);
+    let completed = repository
+        .finish_build_and_record_ready(&FinishMiniAppM1BuildAndRecordReadyParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            project_id: PROJECT_ID.to_owned(),
+            operation_id: operation_three.clone(),
+            expected_product_revision: retained.product.product_revision,
+            expected_pointer_revision: retained.product.pointer_revision,
+            expected_project_revision: 3,
+            expected_build_generation: 3,
+            artifact: artifact_three,
+            release: release_three,
+            bounded_log_tail: vec![],
+            finished_at_ms: 36,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        completed.product.ready_release_id.as_deref(),
+        Some(release_three_id.as_str())
+    );
+    assert_eq!(
+        completed.product.active_release_id.as_deref(),
+        Some(release_one_id.as_str())
+    );
+    assert!(!completed.auto_publish_authorization.unwrap().enabled);
+    assert_eq!(
+        repository
+            .get_build_operation(&owner, MINIAPP_ID, &operation_three)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        "succeeded"
+    );
 }
 
 #[tokio::test]
@@ -722,6 +1813,166 @@ async fn concurrent_build_start_is_single_flight_per_miniapp() {
 }
 
 #[tokio::test]
+async fn concurrent_lifecycle_and_snapshot_reads_never_observe_catalog_half_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = nomifun_db::init_database(&directory.path().join("miniapp-snapshot-race.db"))
+        .await
+        .unwrap();
+    let owner = installation_owner_id(database.pool()).await.unwrap();
+    let repository = SqliteMiniAppM1Repository::new(database.pool().clone());
+    create_editable_app(&repository, &owner).await;
+    let source = managed_source("sources/owner/project/source", 'b', 'c', 1);
+    let operation_id = Uuid::now_v7().to_string();
+    let artifact_id = Uuid::now_v7().to_string();
+    let release_id = Uuid::now_v7().to_string();
+    start_build(
+        &repository,
+        &owner,
+        MINIAPP_ID,
+        PROJECT_ID,
+        1,
+        &source,
+        &operation_id,
+        20,
+    )
+    .await;
+    let artifact = artifact(
+        &owner,
+        &artifact_id,
+        &"d".repeat(64),
+        &"e".repeat(64),
+        21,
+    );
+    let digest = artifact.artifact_digest.clone();
+    let release = release(
+        &owner,
+        MINIAPP_ID,
+        PROJECT_ID,
+        &artifact,
+        &release_id,
+        &digest,
+        &operation_id,
+        &"b".repeat(64),
+        &"c".repeat(64),
+        22,
+    );
+    let ready = repository
+        .finish_build_and_record_ready(&FinishMiniAppM1BuildAndRecordReadyParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            project_id: PROJECT_ID.to_owned(),
+            operation_id,
+            expected_product_revision: 1,
+            expected_pointer_revision: 1,
+            expected_project_revision: 1,
+            expected_build_generation: 1,
+            artifact,
+            release,
+            bounded_log_tail: vec![],
+            finished_at_ms: 23,
+        })
+        .await
+        .unwrap();
+    let published = repository
+        .publish_ready_cas(&PublishMiniAppM1ReadyParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            expected_product_revision: ready.product.product_revision,
+            expected_pointer_revision: ready.product.pointer_revision,
+            expected_active_release_epoch: 0,
+            expected_ready_release_id: release_id,
+            expected_ready_release_digest: digest.clone(),
+            expected_active_release_digest: None,
+            target_catalog_digest: "1".repeat(64),
+            auto_publish_guard: None,
+            updated_at: 24,
+        })
+        .await
+        .unwrap();
+    repository
+        .commit_lifecycle_cas(&CommitMiniAppM1LifecycleParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            expected_product_revision: published.product.product_revision,
+            expected_pointer_revision: published.product.pointer_revision,
+            expected_active_release_digest: Some(digest.clone()),
+            enabled: true,
+            updated_at: 25,
+        })
+        .await
+        .unwrap();
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(3));
+    let writer = {
+        let repository = repository.clone();
+        let owner = owner.clone();
+        let barrier = Arc::clone(&barrier);
+        tokio::spawn(async move {
+            barrier.wait().await;
+            for _ in 0..40 {
+                let snapshot = repository
+                    .get(&owner, MINIAPP_ID)
+                    .await?
+                    .expect("MiniApp must remain present");
+                let enable = snapshot.product.lifecycle == "disabled";
+                repository
+                    .commit_lifecycle_cas(&CommitMiniAppM1LifecycleParams {
+                        owner_user_id: owner.clone(),
+                        miniapp_id: MINIAPP_ID.to_owned(),
+                        expected_product_revision: snapshot.product.product_revision,
+                        expected_pointer_revision: snapshot.product.pointer_revision,
+                        expected_active_release_digest: snapshot
+                            .product
+                            .active_release_digest
+                            .clone(),
+                        enabled: enable,
+                        updated_at: snapshot.product.updated_at.saturating_add(1),
+                    })
+                    .await?;
+            }
+            Ok::<(), nomifun_db::DbError>(())
+        })
+    };
+    let reader = {
+        let repository = repository.clone();
+        let owner = owner.clone();
+        let barrier = Arc::clone(&barrier);
+        tokio::spawn(async move {
+            barrier.wait().await;
+            for _ in 0..200 {
+                let snapshot = repository
+                    .get(&owner, MINIAPP_ID)
+                    .await?
+                    .expect("MiniApp must remain present");
+                match snapshot.product.lifecycle.as_str() {
+                    "enabled" => {
+                        let catalog = snapshot
+                            .catalog_publication
+                            .as_ref()
+                            .expect("enabled snapshot requires Catalog");
+                        assert_eq!(
+                            snapshot.product.active_release_id.as_deref(),
+                            Some(catalog.active_release_id.as_str())
+                        );
+                        assert_eq!(
+                            snapshot.product.active_release_epoch,
+                            catalog.active_release_epoch
+                        );
+                    }
+                    "disabled" => assert!(snapshot.catalog_publication.is_none()),
+                    lifecycle => panic!("unexpected lifecycle {lifecycle}"),
+                }
+                tokio::task::yield_now().await;
+            }
+            Ok::<(), nomifun_db::DbError>(())
+        })
+    };
+    barrier.wait().await;
+    writer.await.unwrap().unwrap();
+    reader.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn atomic_build_ready_timestamp_cas_rolls_back_all_writes() {
     let database = init_miniapp_test_database().await;
     let owner = installation_owner_id(database.pool()).await.unwrap();
@@ -927,6 +2178,69 @@ async fn product_config_and_credential_references_use_exact_owner_scoped_cas() {
 }
 
 #[tokio::test]
+async fn config_and_credential_mutations_are_blocked_during_a_running_build() {
+    let database = init_miniapp_test_database().await;
+    let owner = installation_owner_id(database.pool()).await.unwrap();
+    let repository = SqliteMiniAppM1Repository::new(database.pool().clone());
+    create_editable_app(&repository, &owner).await;
+    let source = managed_source("sources/owner/project/source", 'b', 'c', 1);
+    let operation_id = Uuid::now_v7().to_string();
+    start_build(
+        &repository,
+        &owner,
+        MINIAPP_ID,
+        PROJECT_ID,
+        1,
+        &source,
+        &operation_id,
+        20,
+    )
+    .await;
+
+    let snapshot = repository.get(&owner, MINIAPP_ID).await.unwrap().unwrap();
+    let config_error = repository
+        .update_config_cas(
+            &owner,
+            MINIAPP_ID,
+            snapshot.product.product_revision,
+            snapshot.product.pointer_revision,
+            snapshot.product.config_revision,
+            &snapshot.product.config_schema_json,
+            &snapshot.product.config_json,
+            21,
+        )
+        .await
+        .unwrap_err();
+    assert!(config_error.to_string().contains("running Build"));
+
+    let credential_error = repository
+        .replace_credential_bindings_cas(
+            &owner,
+            MINIAPP_ID,
+            snapshot.product.product_revision,
+            snapshot.product.pointer_revision,
+            snapshot.product.credential_bindings_revision,
+            &BTreeMap::new(),
+            21,
+        )
+        .await
+        .unwrap_err();
+    assert!(credential_error.to_string().contains("running Build"));
+
+    let canceled = repository
+        .cancel_build_operation(&CancelMiniAppM1BuildOperationParams {
+            owner_user_id: owner,
+            miniapp_id: MINIAPP_ID.to_owned(),
+            operation_id,
+            bounded_log_tail: vec!["cleanup".to_owned()],
+            finished_at_ms: 22,
+        })
+        .await
+        .unwrap();
+    assert_eq!(canceled.state, "canceled");
+}
+
+#[tokio::test]
 async fn host_kv_is_owner_and_namespace_scoped_with_checked_revision_cas() {
     let database = init_miniapp_test_database().await;
     let owner = installation_owner_id(database.pool()).await.unwrap();
@@ -1030,9 +2344,14 @@ async fn host_kv_is_owner_and_namespace_scoped_with_checked_revision_cas() {
             .await
             .unwrap()
     );
+    let stale_tombstone_delete = repository
+        .delete_kv_cas(&owner, MINIAPP_ID, "surface", "state", 2, 16)
+        .await
+        .unwrap_err();
+    assert!(stale_tombstone_delete.to_string().contains("CAS"));
     assert!(
         !repository
-            .delete_kv_cas(&owner, MINIAPP_ID, "surface", "state", 2, 16)
+            .delete_kv_cas(&owner, MINIAPP_ID, "surface", "state", 3, 17)
             .await
             .unwrap()
     );
@@ -1043,6 +2362,35 @@ async fn host_kv_is_owner_and_namespace_scoped_with_checked_revision_cas() {
             .unwrap()
             .is_none()
     );
+    let recreated = repository
+        .put_kv_cas(
+            &owner,
+            MINIAPP_ID,
+            "surface",
+            "state",
+            &json!({"value": 4}),
+            Some(3),
+            18,
+        )
+        .await
+        .unwrap();
+    assert_eq!(recreated.revision, 4);
+    assert_eq!(recreated.key_generation, 2);
+    assert!(!recreated.is_tombstone);
+    assert_eq!(recreated.value_json, r#"{"value":4}"#);
+    let stale_recreate = repository
+        .put_kv_cas(
+            &owner,
+            MINIAPP_ID,
+            "surface",
+            "state",
+            &json!({"value": 5}),
+            Some(3),
+            19,
+        )
+        .await
+        .unwrap_err();
+    assert!(stale_recreate.to_string().contains("CAS"));
     assert!(
         repository
             .get_kv(&owner, MINIAPP_ID, "preview", "state")

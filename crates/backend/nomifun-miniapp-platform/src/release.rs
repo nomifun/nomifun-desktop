@@ -5,9 +5,9 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use nomifun_agent_contracts::{
-    canonical_json_bytes, digest_bytes, DigestHex, JavaScriptBuildProfile,
-    MiniAppReleaseArtifactV1, MiniAppReleaseFile, MiniAppReleaseManifestArtifact, VersionString,
-    MINIAPP_RELEASE_PROFILE_VERSION,
+    canonical_json_bytes, digest_bytes, ArtifactEnvelope, ArtifactId, DigestHex,
+    JavaScriptBuildProfile, MiniAppReleaseArtifactV1, MiniAppReleaseFile,
+    MiniAppReleaseManifestArtifact, VersionString, MINIAPP_RELEASE_PROFILE_VERSION,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::MiniAppSourceScope;
 
-pub const MINIAPP_RELEASE_STORE_FORMAT_VERSION: &str = "1.0.0";
+pub const MINIAPP_RELEASE_STORE_FORMAT_VERSION: &str = "2.0.0";
 
 const RELEASES_DIRECTORY: &str = "releases";
 const MINIAPPS_DIRECTORY: &str = "miniapps";
@@ -24,7 +24,7 @@ const PROJECTS_DIRECTORY: &str = "projects";
 const ARTIFACTS_DIRECTORY: &str = "artifacts";
 const FILES_DIRECTORY: &str = "files";
 const STAGING_DIRECTORY: &str = ".staging";
-const RELEASE_RECORD_FILE: &str = "release.json";
+const ARTIFACT_RECORD_FILE: &str = "artifact.json";
 const MANIFEST_FILE: &str = "manifest.json";
 const STAGING_PREFIX: &str = "publish-";
 const MAX_PATH_BYTES: usize = 1024;
@@ -123,6 +123,47 @@ impl MiniAppReleaseFileBytes {
     }
 }
 
+/// The immutable identity that a caller can use to verify that a content-
+/// addressed Artifact is the exact Artifact it expected.
+///
+/// `artifact_digest` intentionally remains content-addressed (Manifest +
+/// declared file digests), so two Build lineages may reuse the same bytes.
+/// `artifact_id` is nevertheless part of the persisted identity and must not
+/// be silently replaced when an Artifact record is read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MiniAppReleaseArtifactIdentity {
+    pub artifact_id: ArtifactId,
+    pub artifact_digest: DigestHex,
+    pub manifest_digest: DigestHex,
+}
+
+impl MiniAppReleaseArtifactIdentity {
+    pub fn from_artifact(artifact: &MiniAppReleaseArtifactV1) -> Self {
+        Self {
+            artifact_id: artifact.artifact_id.clone(),
+            artifact_digest: artifact.artifact_digest.clone(),
+            manifest_digest: artifact.manifest.payload_digest.clone(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), MiniAppReleaseStoreError> {
+        if self.artifact_id.as_ref().is_empty() {
+            return Err(MiniAppReleaseStoreError::InvalidInput(
+                "expected artifact identity requires a non-empty artifact_id".into(),
+            ));
+        }
+        validate_digest(self.artifact_digest.as_ref())?;
+        validate_digest(self.manifest_digest.as_ref())?;
+        Ok(())
+    }
+
+    fn matches(&self, artifact: &MiniAppReleaseArtifactV1) -> bool {
+        self.artifact_id == artifact.artifact_id
+            && self.artifact_digest == artifact.artifact_digest
+            && self.manifest_digest == artifact.manifest.payload_digest
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct MiniAppReleasePublishRequest {
     pub scope: MiniAppSourceScope,
@@ -160,11 +201,6 @@ impl MiniAppReleasePublishRequest {
 #[derive(Clone, Debug, PartialEq)]
 pub struct MiniAppStoredRelease {
     pub scope: MiniAppSourceScope,
-    pub source_snapshot_digest: DigestHex,
-    pub dependency_lock_digest: DigestHex,
-    pub build_profile: JavaScriptBuildProfile,
-    pub build_profile_version: VersionString,
-    pub build_generation: u64,
     pub artifact: MiniAppReleaseArtifactV1,
     pub manifest_bytes: Vec<u8>,
     pub files: Vec<MiniAppReleaseFileBytes>,
@@ -232,7 +268,7 @@ impl MiniAppReleaseStore {
         let final_root = parent.join(prepared.artifact.artifact_digest.as_ref());
 
         if fs::symlink_metadata(&final_root).is_ok() {
-            let stored = self.verify_published(&prepared.scope, &final_root)?;
+            let stored = self.verify_published(&prepared.scope, &final_root, None)?;
             compare_stored(&stored, &prepared)?;
             return Ok(MiniAppReleasePublishResult {
                 stored,
@@ -250,7 +286,7 @@ impl MiniAppReleaseStore {
                 if error.kind() == io::ErrorKind::AlreadyExists
                     || final_root.exists() =>
             {
-                let stored = self.verify_published(&prepared.scope, &final_root)?;
+                let stored = self.verify_published(&prepared.scope, &final_root, None)?;
                 compare_stored(&stored, &prepared)?;
                 return Ok(MiniAppReleasePublishResult {
                     stored,
@@ -261,7 +297,7 @@ impl MiniAppReleaseStore {
         }
         sync_directory_if_supported(&parent)?;
 
-        let published = self.verify_published(&prepared.scope, &final_root);
+        let published = self.verify_published(&prepared.scope, &final_root, None);
         match published {
             Ok(stored) => {
                 staging.commit()?;
@@ -313,7 +349,33 @@ impl MiniAppReleaseStore {
         if fs::symlink_metadata(&root).is_err() {
             return Err(MiniAppReleaseStoreError::NotFound(digest.0));
         }
-        self.verify_published(&scope, &root)
+        self.verify_published(&scope, &root, None)
+    }
+
+    /// Load an Artifact and require all three immutable identity fields to
+    /// match the caller's expected typed identity.
+    ///
+    /// This is intentionally separate from `load`: content-addressed reuse
+    /// can legitimately receive a new Build's proposed `artifact_id`, while a
+    /// database Release/Artifact cross-check must be able to reject a
+    /// tampered or wrong identity explicitly.
+    pub fn load_exact(
+        &self,
+        scope: MiniAppSourceScope,
+        expected: &MiniAppReleaseArtifactIdentity,
+    ) -> Result<MiniAppStoredRelease, MiniAppReleaseStoreError> {
+        validate_scope(&scope)?;
+        expected.validate()?;
+        let _guard = self.lock_mutation()?;
+        let root = self
+            .artifact_parent(&scope)?
+            .join(expected.artifact_digest.as_ref());
+        if fs::symlink_metadata(&root).is_err() {
+            return Err(MiniAppReleaseStoreError::NotFound(
+                expected.artifact_digest.0.clone(),
+            ));
+        }
+        self.verify_published(&scope, &root, Some(expected))
     }
 
     pub fn verify(
@@ -322,6 +384,14 @@ impl MiniAppReleaseStore {
         artifact_digest: impl AsRef<str>,
     ) -> Result<(), MiniAppReleaseStoreError> {
         self.load(scope, artifact_digest).map(|_| ())
+    }
+
+    pub fn verify_exact(
+        &self,
+        scope: MiniAppSourceScope,
+        expected: &MiniAppReleaseArtifactIdentity,
+    ) -> Result<(), MiniAppReleaseStoreError> {
+        self.load_exact(scope, expected).map(|_| ())
     }
 
     pub fn cleanup_staging(&self) -> Result<usize, MiniAppReleaseStoreError> {
@@ -415,6 +485,7 @@ impl MiniAppReleaseStore {
         &self,
         expected_scope: &MiniAppSourceScope,
         artifact_root: &Path,
+        expected_identity: Option<&MiniAppReleaseArtifactIdentity>,
     ) -> Result<MiniAppStoredRelease, MiniAppReleaseStoreError> {
         let expected_digest = artifact_root
             .file_name()
@@ -438,19 +509,25 @@ impl MiniAppReleaseStore {
         }
         verify_release_inventory(artifact_root).map_err(|_| mismatch())?;
 
-        let record: ReleaseRecord = parse_canonical(
+        let record: ArtifactRecord = parse_canonical(
             &read_regular_bounded(
-                &artifact_root.join(RELEASE_RECORD_FILE),
+                &artifact_root.join(ARTIFACT_RECORD_FILE),
                 self.limits.max_metadata_bytes,
             )?,
             self.limits.max_metadata_bytes,
         )
         .map_err(|_| mismatch())?;
-        if record.scope != *expected_scope || record.format_version != MINIAPP_RELEASE_STORE_FORMAT_VERSION {
+        if record.scope != *expected_scope
+            || record.format_version != MINIAPP_RELEASE_STORE_FORMAT_VERSION
+        {
             return Err(mismatch());
         }
-        let digest = validate_digest(&record.artifact.artifact_digest.0)?;
+        let artifact = &record.artifact.payload;
+        let digest = validate_digest(artifact.artifact_digest.as_ref())?;
         if digest.as_ref() != expected_digest {
+            return Err(mismatch());
+        }
+        if expected_identity.is_some_and(|expected| !expected.matches(artifact)) {
             return Err(mismatch());
         }
         validate_record(&record, self.limits)?;
@@ -463,25 +540,20 @@ impl MiniAppReleaseStore {
         let manifest: MiniAppReleaseManifestArtifact =
             parse_canonical(&manifest_bytes, self.limits.max_metadata_bytes)
                 .map_err(|_| mismatch())?;
-        if manifest != record.artifact.manifest {
+        if manifest != artifact.manifest {
             return Err(mismatch());
         }
 
         let files_root = artifact_root.join(FILES_DIRECTORY);
         let observed = scan_published_files(&files_root, self.limits).map_err(|_| mismatch())?;
-        if observed != record.artifact.files {
+        if observed != artifact.files {
             return Err(mismatch());
         }
-        let files = read_published_file_bytes(&files_root, &record.artifact.files, self.limits)
+        let files = read_published_file_bytes(&files_root, &artifact.files, self.limits)
             .map_err(|_| mismatch())?;
         Ok(MiniAppStoredRelease {
             scope: record.scope,
-            source_snapshot_digest: record.source_snapshot_digest,
-            dependency_lock_digest: record.dependency_lock_digest,
-            build_profile: record.build_profile,
-            build_profile_version: record.build_profile_version,
-            build_generation: record.build_generation,
-            artifact: record.artifact,
+            artifact: artifact.clone(),
             manifest_bytes,
             files,
             managed_relative_path: format!(
@@ -510,15 +582,10 @@ struct PreparedRelease {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ReleaseRecord {
+struct ArtifactRecord {
     format_version: String,
     scope: MiniAppSourceScope,
-    source_snapshot_digest: DigestHex,
-    dependency_lock_digest: DigestHex,
-    build_profile: JavaScriptBuildProfile,
-    build_profile_version: VersionString,
-    build_generation: u64,
-    artifact: MiniAppReleaseArtifactV1,
+    artifact: ArtifactEnvelope<MiniAppReleaseArtifactV1>,
 }
 
 fn prepare_request(
@@ -653,49 +720,34 @@ fn prepare_request(
 }
 
 fn validate_record(
-    record: &ReleaseRecord,
+    record: &ArtifactRecord,
     limits: MiniAppReleaseStoreLimits,
 ) -> Result<(), MiniAppReleaseStoreError> {
     validate_scope(&record.scope)?;
-    validate_digest(record.source_snapshot_digest.as_ref())?;
-    validate_digest(record.dependency_lock_digest.as_ref())?;
-    if record.build_generation == 0
-        || record.build_profile != JavaScriptBuildProfile::MiniAppReleaseV1
-        || record.build_profile_version.as_ref() != MINIAPP_RELEASE_PROFILE_VERSION
-        || record.artifact.manifest.payload.service.is_some()
-        || record.artifact.manifest.payload.build_profile_version
-            != MINIAPP_RELEASE_PROFILE_VERSION.into()
-        || record.artifact.manifest.payload.dependency_lock_digest
-            != record.dependency_lock_digest
+    if !record
+        .artifact
+        .verify()
+        .map_err(|error| MiniAppReleaseStoreError::Corrupt(error.to_string()))?
     {
         return Err(MiniAppReleaseStoreError::Corrupt(
-            "release lineage or UI-only profile is invalid".into(),
+            "artifact identity envelope digest does not match its typed payload".into(),
         ));
     }
-    let request = MiniAppReleasePublishRequest {
-        scope: record.scope.clone(),
-        source_snapshot_digest: record.source_snapshot_digest.clone(),
-        dependency_lock_digest: record.dependency_lock_digest.clone(),
-        build_profile: record.build_profile,
-        build_profile_version: record.build_profile_version.clone(),
-        build_generation: record.build_generation,
-        artifact: record.artifact.clone(),
-        files: record
-            .artifact
-            .files
-            .iter()
-            .map(|file| MiniAppReleaseFileBytes {
-                normalized_relative_path: file.normalized_relative_path.clone(),
-                bytes: Vec::new(),
-            })
-            .collect(),
-    };
-    request.artifact.validate().map_err(|error| {
+    let artifact = &record.artifact.payload;
+    if artifact.manifest.payload.service.is_some()
+        || artifact.manifest.payload.build_profile_version
+            != MINIAPP_RELEASE_PROFILE_VERSION.into()
+    {
+        return Err(MiniAppReleaseStoreError::Corrupt(
+            "artifact UI-only profile is invalid".into(),
+        ));
+    }
+    artifact.validate().map_err(|error| {
         MiniAppReleaseStoreError::Corrupt(format!("artifact contract: {error}"))
     })?;
-    if request.artifact.files.len() > limits.max_file_count {
+    if artifact.files.len() > limits.max_file_count {
         return Err(MiniAppReleaseStoreError::TooManyFiles {
-            observed: request.artifact.files.len(),
+            observed: artifact.files.len(),
             limit: limits.max_file_count,
         });
     }
@@ -710,17 +762,16 @@ fn write_release_tree(
     fs::create_dir_all(root).map_err(|error| io_error(root, error))?;
     let files_root = root.join(FILES_DIRECTORY);
     fs::create_dir(&files_root).map_err(|error| io_error(&files_root, error))?;
-    let record = ReleaseRecord {
+    let record = ArtifactRecord {
         format_version: MINIAPP_RELEASE_STORE_FORMAT_VERSION.into(),
         scope: release.scope.clone(),
-        source_snapshot_digest: release.source_snapshot_digest.clone(),
-        dependency_lock_digest: release.dependency_lock_digest.clone(),
-        build_profile: release.build_profile,
-        build_profile_version: release.build_profile_version.clone(),
-        build_generation: release.build_generation,
-        artifact: release.artifact.clone(),
+        artifact: ArtifactEnvelope::new(release.artifact.clone())
+            .map_err(|error| MiniAppReleaseStoreError::Canonical(error.to_string()))?,
     };
-    write_new_synced(&root.join(RELEASE_RECORD_FILE), &canonical_bytes(&record)?)?;
+    write_new_synced(
+        &root.join(ARTIFACT_RECORD_FILE),
+        &canonical_bytes(&record)?,
+    )?;
     write_new_synced(
         &root.join(MANIFEST_FILE),
         &canonical_bytes(&release.artifact.manifest)?,
@@ -742,12 +793,9 @@ fn compare_stored(
     incoming: &PreparedRelease,
 ) -> Result<(), MiniAppReleaseStoreError> {
     if stored.scope != incoming.scope
-        || stored.source_snapshot_digest != incoming.source_snapshot_digest
-        || stored.dependency_lock_digest != incoming.dependency_lock_digest
-        || stored.build_profile != incoming.build_profile
-        || stored.build_profile_version != incoming.build_profile_version
-        || stored.build_generation != incoming.build_generation
-        || stored.artifact != incoming.artifact
+        || stored.artifact.artifact_digest != incoming.artifact.artifact_digest
+        || stored.artifact.manifest != incoming.artifact.manifest
+        || stored.artifact.files != incoming.artifact.files
         || stored.files != incoming.files
     {
         return Err(MiniAppReleaseStoreError::PublishedReleaseMismatch(
@@ -1131,7 +1179,7 @@ fn verify_release_inventory(root: &Path) -> Result<(), MiniAppReleaseStoreError>
             fs::symlink_metadata(entry.path()).map_err(|error| io_error(entry.path(), error))?;
         let valid = matches!(
             name.as_str(),
-            RELEASE_RECORD_FILE | MANIFEST_FILE | FILES_DIRECTORY
+            ARTIFACT_RECORD_FILE | MANIFEST_FILE | FILES_DIRECTORY
         ) && !metadata.file_type().is_symlink()
             && ((name == FILES_DIRECTORY && metadata.is_dir())
                 || (name != FILES_DIRECTORY && metadata.is_file()));
@@ -1144,7 +1192,7 @@ fn verify_release_inventory(root: &Path) -> Result<(), MiniAppReleaseStoreError>
         names.insert(name);
     }
     if names != BTreeSet::from([
-        RELEASE_RECORD_FILE.to_owned(),
+        ARTIFACT_RECORD_FILE.to_owned(),
         MANIFEST_FILE.to_owned(),
         FILES_DIRECTORY.to_owned(),
     ]) {

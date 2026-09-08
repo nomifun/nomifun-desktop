@@ -5,6 +5,11 @@ mod common;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
+use nomifun_db::{
+    IMiniAppM1Repository, MiniAppM1ProjectSourceState, SqliteMiniAppM1Repository,
+    UpdateMiniAppM1ProjectSourceParams,
+};
+use nomifun_miniapp_platform::{MiniAppSourceFileInput, MiniAppSourceStore};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
@@ -81,9 +86,9 @@ async fn m1_routes_replace_the_legacy_product_chain() {
     nomifun_common::MiniAppId::parse(miniapp_id.clone())
         .expect("canonical MiniApp UUIDv7");
     assert_eq!(created["data"]["miniapp"]["display_name"], "M1 Notes");
-    assert_eq!(created["data"]["source_state"], "empty");
+    assert_eq!(created["data"]["source_state"], "editable");
     assert_eq!(created["data"]["project_revision"], 1);
-    assert_eq!(created["data"]["build_generation"], 0);
+    assert_eq!(created["data"]["build_generation"], 1);
     assert_eq!(created["data"]["miniapp"]["surface_available"], false);
 
     let response = request(
@@ -138,10 +143,6 @@ async fn m1_routes_replace_the_legacy_product_chain() {
             Method::POST,
             format!("/api/miniapps/{miniapp_id}/workspace"),
         ),
-        (
-            Method::POST,
-            format!("/api/miniapps/{miniapp_id}/publish"),
-        ),
         (Method::POST, "/api/miniapps/validate".to_owned()),
         (Method::POST, "/api/miniapps/import".to_owned()),
     ] {
@@ -158,6 +159,814 @@ async fn m1_routes_replace_the_legacy_product_chain() {
             response.status()
         );
     }
+
+    services
+        .shutdown_browser_platform()
+        .await
+        .expect("background cleanup");
+    services.database.close().await;
+}
+
+#[tokio::test]
+async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
+    let (router, services) = common::build_local_trust_app(LOCAL_TRUST).await;
+    let owner_id = services.authoritative_user_id.to_string();
+    let owner_jwt = services
+        .jwt_service
+        .sign(&owner_id, "admin")
+        .expect("owner JWT");
+    let create = request(
+        &router,
+        Method::POST,
+        "/api/miniapps/projects",
+        Some(json!({
+            "expected_library_revision": 0,
+            "display_name": "Surface Notes",
+            "description": "UI-only lifecycle",
+            "kind": "ui_only"
+        })),
+    )
+    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
+    .send()
+    .await;
+    assert_eq!(create.status(), StatusCode::OK);
+    let created = response_json(create).await["data"].clone();
+    let miniapp_id = created["miniapp"]["miniapp_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let build_body = json!({
+        "miniapp_id": miniapp_id,
+        "expected_product_revision": created["miniapp"]["product_revision"],
+        "project_id": created["project_id"],
+        "expected_project_revision": created["project_revision"],
+        "expected_build_generation": created["build_generation"],
+        "expected_source_snapshot_digest": created["source_snapshot_digest"],
+        "expected_dependency_lock_digest": created["dependency_lock_digest"]
+    });
+    let build = request(
+        &router,
+        Method::POST,
+        &format!("/api/miniapps/{miniapp_id}/build"),
+        Some(build_body),
+    )
+    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
+    .send()
+    .await;
+    assert_eq!(build.status(), StatusCode::OK);
+    let ready = response_json(build).await["data"].clone();
+    assert_eq!(ready["miniapp"]["surface_available"], false);
+    assert!(ready["ready"]["release"]["release_id"].as_str().is_some());
+
+    let premature_auto = request(
+        &router,
+        Method::POST,
+        &format!("/api/miniapps/{miniapp_id}/publish-mode"),
+        Some(json!({
+            "miniapp_id": miniapp_id,
+            "expected_product_revision": ready["miniapp"]["product_revision"],
+            "expected_pointer_revision": ready["miniapp"]["releases"]["pointer_revision"],
+            "mode": "auto_ui_only"
+        })),
+    )
+    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
+    .send()
+    .await;
+    assert_eq!(premature_auto.status(), StatusCode::BAD_REQUEST);
+
+    let publish_body = json!({
+        "miniapp_id": miniapp_id,
+        "expected_product_revision": ready["miniapp"]["product_revision"],
+        "expected_pointer_revision": ready["miniapp"]["releases"]["pointer_revision"],
+        "expected_active_release_epoch": ready["miniapp"]["releases"]["active_release_epoch"],
+        "ready_release_id": ready["ready"]["release"]["release_id"],
+        "expected_ready_release_digest": ready["ready"]["release"]["release_digest"],
+        "acknowledge_test_warning": false
+    });
+    let publish = request(
+        &router,
+        Method::POST,
+        &format!("/api/miniapps/{miniapp_id}/publish"),
+        Some(publish_body),
+    )
+    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
+    .send()
+    .await;
+    assert_eq!(publish.status(), StatusCode::OK);
+    let published = response_json(publish).await["data"].clone();
+    assert_eq!(published["miniapp"]["lifecycle"], "disabled");
+    assert_eq!(published["miniapp"]["surface_available"], false);
+    assert!(published["miniapp"]["releases"]["active"].is_object());
+    assert!(published["ready"].is_null());
+
+    let enable_body = json!({
+        "miniapp_id": miniapp_id,
+        "expected_product_revision": published["miniapp"]["product_revision"],
+        "expected_pointer_revision": published["miniapp"]["releases"]["pointer_revision"],
+        "expected_active_release_digest": published["miniapp"]["releases"]["active"]["release_digest"],
+        "enabled": true
+    });
+    let enable = request(
+        &router,
+        Method::POST,
+        &format!("/api/miniapps/{miniapp_id}/enabled"),
+        Some(enable_body),
+    )
+    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
+    .send()
+    .await;
+    assert_eq!(enable.status(), StatusCode::OK);
+    let enabled = response_json(enable).await["data"].clone();
+    assert_eq!(enabled["miniapp"]["lifecycle"], "enabled");
+    assert_eq!(enabled["miniapp"]["surface_available"], true);
+    assert_eq!(
+        enabled["miniapp"]["releases"]["active_release_epoch"],
+        1
+    );
+
+    let old_surface_get = request(
+        &router,
+        Method::GET,
+        &format!("/api/miniapps/{miniapp_id}/surface"),
+        None,
+    )
+    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
+    .send()
+    .await;
+    assert_eq!(old_surface_get.status(), StatusCode::NOT_FOUND);
+
+    let wrong_method = request(
+        &router,
+        Method::GET,
+        &format!("/api/miniapps/{miniapp_id}/surface/open"),
+        None,
+    )
+    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
+    .send()
+    .await;
+    assert_eq!(wrong_method.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+    let owner_only = request(
+        &router,
+        Method::POST,
+        &format!("/api/miniapps/{miniapp_id}/surface/open"),
+        Some(json!({ "miniapp_id": miniapp_id })),
+    )
+    .header("authorization", format!("Bearer {owner_jwt}"))
+    .send()
+    .await;
+    assert_eq!(
+        owner_only.status(),
+        StatusCode::FORBIDDEN,
+        "Surface capability signing must require host-local trust"
+    );
+
+    let mismatched_open = request(
+        &router,
+        Method::POST,
+        &format!("/api/miniapps/{miniapp_id}/surface/open"),
+        Some(json!({
+            "miniapp_id": "0190f5fe-7c00-7000-8000-000000000452"
+        })),
+    )
+    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
+    .send()
+    .await;
+    assert_eq!(mismatched_open.status(), StatusCode::BAD_REQUEST);
+    let open_session_count: i64 =
+        nomifun_db::sqlx::query_scalar("SELECT COUNT(*) FROM miniapp_surface_sessions")
+            .fetch_one(services.database.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        open_session_count, 0,
+        "failed Surface open attempts must not sign or persist a capability"
+    );
+
+    let surface = request(
+        &router,
+        Method::POST,
+        &format!("/api/miniapps/{miniapp_id}/surface/open"),
+        Some(json!({ "miniapp_id": miniapp_id })),
+    )
+    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
+    .send()
+    .await;
+    assert_eq!(surface.status(), StatusCode::OK);
+    let descriptor = response_json(surface).await["data"].clone();
+    let capability = descriptor["surface_capability"].as_str().unwrap();
+    let epoch = descriptor["active_release_epoch"].as_u64().unwrap();
+    let digest = descriptor["expected_release_digest"].as_str().unwrap();
+    let entrypoint = descriptor["ui_entrypoint"].as_str().unwrap();
+    let asset = request(
+        &router,
+        Method::GET,
+        &format!(
+            "/api/miniapps/{miniapp_id}/surface/assets/{capability}/{epoch}/{digest}/{entrypoint}"
+        ),
+        None,
+    )
+    .send()
+    .await;
+    assert_eq!(asset.status(), StatusCode::OK);
+    assert_eq!(
+        asset.headers()[header::CONTENT_TYPE],
+        "text/html; charset=utf-8"
+    );
+    let asset_body = asset
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes();
+    assert!(String::from_utf8_lossy(&asset_body).contains("Surface Notes"));
+
+    let bridge_path = format!("/api/miniapps/{miniapp_id}/surface/bridge");
+    let bridge_set = request(
+        &router,
+        Method::POST,
+        &bridge_path,
+        Some(json!({
+            "surface_capability": capability,
+            "active_release_epoch": epoch,
+            "expected_release_digest": digest,
+            "request": {
+                "call_id": "set-preference",
+                "target": {
+                    "target": "host_kv",
+                    "request": {
+                        "operation": "set",
+                        "key": "preference",
+                        "value": {"density": "compact"}
+                    }
+                }
+            }
+        })),
+    )
+    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
+    .send()
+    .await;
+    assert_eq!(bridge_set.status(), StatusCode::OK);
+    assert_eq!(response_json(bridge_set).await["data"]["outcome"], "written");
+
+    let bridge_get = request(
+        &router,
+        Method::POST,
+        &bridge_path,
+        Some(json!({
+            "surface_capability": capability,
+            "active_release_epoch": epoch,
+            "expected_release_digest": digest,
+            "request": {
+                "call_id": "get-preference",
+                "target": {
+                    "target": "host_kv",
+                    "request": {
+                        "operation": "get",
+                        "key": "preference"
+                    }
+                }
+            }
+        })),
+    )
+    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
+    .send()
+    .await;
+    assert_eq!(bridge_get.status(), StatusCode::OK);
+    let bridge_value = response_json(bridge_get).await;
+    assert_eq!(
+        bridge_value["data"]["value"]["density"],
+        "compact"
+    );
+    assert_eq!(bridge_value["data"]["revision"], 1);
+
+    let bridge_cas = request(
+        &router,
+        Method::POST,
+        &bridge_path,
+        Some(json!({
+            "surface_capability": capability,
+            "active_release_epoch": epoch,
+            "expected_release_digest": digest,
+            "request": {
+                "call_id": "cas-preference",
+                "target": {
+                    "target": "host_kv",
+                    "request": {
+                        "operation": "compare_and_swap",
+                        "key": "preference",
+                        "expected_revision": 1,
+                        "value": {"density": "comfortable"}
+                    }
+                }
+            }
+        })),
+    )
+    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
+    .send()
+    .await;
+    assert_eq!(bridge_cas.status(), StatusCode::OK);
+    let bridge_cas = response_json(bridge_cas).await;
+    assert_eq!(bridge_cas["data"]["applied"], true);
+    assert_eq!(bridge_cas["data"]["current_revision"], 2);
+
+    let second_build_body = json!({
+        "miniapp_id": miniapp_id,
+        "expected_product_revision": enabled["miniapp"]["product_revision"],
+        "project_id": enabled["project_id"],
+        "expected_project_revision": enabled["project_revision"],
+        "expected_build_generation": enabled["build_generation"],
+        "expected_source_snapshot_digest": enabled["source_snapshot_digest"],
+        "expected_dependency_lock_digest": enabled["dependency_lock_digest"]
+    });
+    let unchanged_build = request(
+        &router,
+        Method::POST,
+        &format!("/api/miniapps/{miniapp_id}/build"),
+        Some(second_build_body.clone()),
+    )
+    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
+    .send()
+    .await;
+    assert_eq!(unchanged_build.status(), StatusCode::BAD_REQUEST);
+
+    let repository = SqliteMiniAppM1Repository::new(services.database.pool().clone());
+    let before_edit = repository
+        .get(&owner_id, &miniapp_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let source_store =
+        MiniAppSourceStore::new(services.data_dir.join("miniapp-m1").join("source"))
+            .unwrap();
+    let source = source_store
+        .replace_source(
+            &owner_id,
+            &miniapp_id,
+            &before_edit.project.project_id,
+            before_edit.project.source_head_digest.as_deref().unwrap(),
+            vec![MiniAppSourceFileInput::new(
+                "ui/index.html",
+                b"<!doctype html><html><body><main><h1>Surface Notes v2</h1></main></body></html>"
+                    .to_vec(),
+            )],
+        )
+        .unwrap();
+    repository
+        .update_project_source_cas(&UpdateMiniAppM1ProjectSourceParams {
+            owner_user_id: owner_id.clone(),
+            miniapp_id: miniapp_id.clone(),
+            project_id: before_edit.project.project_id.clone(),
+            expected_project_revision: before_edit.project.project_revision,
+            source_state: MiniAppM1ProjectSourceState::Editable,
+            managed_source_path: Some(source.managed_relative_path),
+            source_head_digest: Some(source.source_snapshot_digest.0),
+            dependency_lock_digest: Some(source.dependency_lock_digest.0),
+            build_profile_version: Some(source.build_profile_version.0),
+            build_generation: i64::try_from(source.build_generation).unwrap(),
+            updated_at: nomifun_common::now_ms()
+                .max(before_edit.product.updated_at)
+                .max(before_edit.project.updated_at),
+        })
+        .await
+        .unwrap();
+    let refreshed = request(
+        &router,
+        Method::GET,
+        &format!("/api/miniapps/{miniapp_id}/workshop"),
+        None,
+    )
+    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
+    .send()
+    .await;
+    assert_eq!(refreshed.status(), StatusCode::OK);
+    let edited = response_json(refreshed).await["data"].clone();
+    let second_build_body = json!({
+        "miniapp_id": miniapp_id,
+        "expected_product_revision": edited["miniapp"]["product_revision"],
+        "project_id": edited["project_id"],
+        "expected_project_revision": edited["project_revision"],
+        "expected_build_generation": edited["build_generation"],
+        "expected_source_snapshot_digest": edited["source_snapshot_digest"],
+        "expected_dependency_lock_digest": edited["dependency_lock_digest"]
+    });
+    let second_build = request(
+        &router,
+        Method::POST,
+        &format!("/api/miniapps/{miniapp_id}/build"),
+        Some(second_build_body),
+    )
+    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
+    .send()
+    .await;
+    assert_eq!(second_build.status(), StatusCode::OK);
+    let second_ready = response_json(second_build).await["data"].clone();
+    assert!(second_ready["ready"].is_object());
+
+    let second_publish_body = json!({
+        "miniapp_id": miniapp_id,
+        "expected_product_revision": second_ready["miniapp"]["product_revision"],
+        "expected_pointer_revision": second_ready["miniapp"]["releases"]["pointer_revision"],
+        "expected_active_release_epoch": second_ready["miniapp"]["releases"]["active_release_epoch"],
+        "ready_release_id": second_ready["ready"]["release"]["release_id"],
+        "expected_ready_release_digest": second_ready["ready"]["release"]["release_digest"],
+        "expected_active_release_digest": second_ready["miniapp"]["releases"]["active"]["release_digest"],
+        "acknowledge_test_warning": false
+    });
+    let second_publish = request(
+        &router,
+        Method::POST,
+        &format!("/api/miniapps/{miniapp_id}/publish"),
+        Some(second_publish_body),
+    )
+    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
+    .send()
+    .await;
+    assert_eq!(second_publish.status(), StatusCode::OK);
+    let second_published = response_json(second_publish).await["data"].clone();
+    assert_eq!(
+        second_published["miniapp"]["releases"]["active_release_epoch"],
+        2
+    );
+    assert!(second_published["miniapp"]["releases"]["previous"].is_object());
+
+    let old_asset = request(
+        &router,
+        Method::GET,
+        &format!(
+            "/api/miniapps/{miniapp_id}/surface/assets/{capability}/{epoch}/{digest}/{entrypoint}"
+        ),
+        None,
+    )
+    .send()
+    .await;
+    assert_eq!(old_asset.status(), StatusCode::NOT_FOUND);
+    let old_bridge = request(
+        &router,
+        Method::POST,
+        &bridge_path,
+        Some(json!({
+            "surface_capability": capability,
+            "active_release_epoch": epoch,
+            "expected_release_digest": digest,
+            "request": {
+                "call_id": "stale-get",
+                "target": {
+                    "target": "host_kv",
+                    "request": {
+                        "operation": "get",
+                        "key": "preference"
+                    }
+                }
+            }
+        })),
+    )
+    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
+    .send()
+    .await;
+    assert_eq!(old_bridge.status(), StatusCode::NOT_FOUND);
+
+    let rollback_body = json!({
+        "miniapp_id": miniapp_id,
+        "expected_product_revision": second_published["miniapp"]["product_revision"],
+        "expected_pointer_revision": second_published["miniapp"]["releases"]["pointer_revision"],
+        "expected_active_release_epoch": second_published["miniapp"]["releases"]["active_release_epoch"],
+        "expected_current_release_digest": second_published["miniapp"]["releases"]["active"]["release_digest"],
+        "previous_release_id": second_published["miniapp"]["releases"]["previous"]["release_id"],
+        "expected_previous_release_digest": second_published["miniapp"]["releases"]["previous"]["release_digest"]
+    });
+    let rollback = request(
+        &router,
+        Method::POST,
+        &format!("/api/miniapps/{miniapp_id}/rollback"),
+        Some(rollback_body),
+    )
+    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
+    .send()
+    .await;
+    assert_eq!(rollback.status(), StatusCode::OK);
+    let rolled_back = response_json(rollback).await["data"].clone();
+    assert_eq!(
+        rolled_back["miniapp"]["releases"]["active"]["release_digest"],
+        enabled["miniapp"]["releases"]["active"]["release_digest"]
+    );
+    assert_eq!(
+        rolled_back["miniapp"]["releases"]["active_release_epoch"],
+        3
+    );
+    assert_eq!(rolled_back["miniapp"]["lifecycle"], "enabled");
+
+    let auto_mode = request(
+        &router,
+        Method::POST,
+        &format!("/api/miniapps/{miniapp_id}/publish-mode"),
+        Some(json!({
+            "miniapp_id": miniapp_id,
+            "expected_product_revision": rolled_back["miniapp"]["product_revision"],
+            "expected_pointer_revision": rolled_back["miniapp"]["releases"]["pointer_revision"],
+            "mode": "auto_ui_only"
+        })),
+    )
+    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
+    .send()
+    .await;
+    assert_eq!(auto_mode.status(), StatusCode::OK);
+    let auto_enabled = response_json(auto_mode).await["data"].clone();
+    assert_eq!(auto_enabled["publish_mode"], "auto_ui_only");
+
+    let pre_auto_surface = request(
+        &router,
+        Method::POST,
+        &format!("/api/miniapps/{miniapp_id}/surface/open"),
+        Some(json!({ "miniapp_id": miniapp_id })),
+    )
+    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
+    .send()
+    .await;
+    assert_eq!(pre_auto_surface.status(), StatusCode::OK);
+    let pre_auto_descriptor = response_json(pre_auto_surface).await["data"].clone();
+
+    let before_auto_edit = repository
+        .get(&owner_id, &miniapp_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let auto_source = source_store
+        .replace_source(
+            &owner_id,
+            &miniapp_id,
+            &before_auto_edit.project.project_id,
+            before_auto_edit
+                .project
+                .source_head_digest
+                .as_deref()
+                .unwrap(),
+            vec![MiniAppSourceFileInput::new(
+                "ui/index.html",
+                b"<!doctype html><html><body><main><h1>Surface Notes auto</h1></main></body></html>"
+                    .to_vec(),
+            )],
+        )
+        .unwrap();
+    repository
+        .update_project_source_cas(&UpdateMiniAppM1ProjectSourceParams {
+            owner_user_id: owner_id.clone(),
+            miniapp_id: miniapp_id.clone(),
+            project_id: before_auto_edit.project.project_id.clone(),
+            expected_project_revision: before_auto_edit.project.project_revision,
+            source_state: MiniAppM1ProjectSourceState::Editable,
+            managed_source_path: Some(auto_source.managed_relative_path),
+            source_head_digest: Some(auto_source.source_snapshot_digest.0),
+            dependency_lock_digest: Some(auto_source.dependency_lock_digest.0),
+            build_profile_version: Some(auto_source.build_profile_version.0),
+            build_generation: i64::try_from(auto_source.build_generation).unwrap(),
+            updated_at: nomifun_common::now_ms()
+                .max(before_auto_edit.product.updated_at)
+                .max(before_auto_edit.project.updated_at),
+        })
+        .await
+        .unwrap();
+    let auto_edited = request(
+        &router,
+        Method::GET,
+        &format!("/api/miniapps/{miniapp_id}/workshop"),
+        None,
+    )
+    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
+    .send()
+    .await;
+    assert_eq!(auto_edited.status(), StatusCode::OK);
+    let auto_edited = response_json(auto_edited).await["data"].clone();
+    let auto_build = request(
+        &router,
+        Method::POST,
+        &format!("/api/miniapps/{miniapp_id}/build"),
+        Some(json!({
+            "miniapp_id": miniapp_id,
+            "expected_product_revision": auto_edited["miniapp"]["product_revision"],
+            "project_id": auto_edited["project_id"],
+            "expected_project_revision": auto_edited["project_revision"],
+            "expected_build_generation": auto_edited["build_generation"],
+            "expected_source_snapshot_digest": auto_edited["source_snapshot_digest"],
+            "expected_dependency_lock_digest": auto_edited["dependency_lock_digest"]
+        })),
+    )
+    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
+    .send()
+    .await;
+    assert_eq!(auto_build.status(), StatusCode::OK);
+    let auto_published = response_json(auto_build).await["data"].clone();
+    assert!(auto_published["ready"].is_null());
+    assert_eq!(auto_published["publish_mode"], "auto_ui_only");
+    assert_eq!(
+        auto_published["miniapp"]["releases"]["active_release_epoch"],
+        4
+    );
+    assert_eq!(
+        auto_published["miniapp"]["releases"]["previous"]["release_id"],
+        rolled_back["miniapp"]["releases"]["active"]["release_id"]
+    );
+    let pre_auto_asset = request(
+        &router,
+        Method::GET,
+        &format!(
+            "/api/miniapps/{miniapp_id}/surface/assets/{}/{}/{}/{}",
+            pre_auto_descriptor["surface_capability"].as_str().unwrap(),
+            pre_auto_descriptor["active_release_epoch"].as_u64().unwrap(),
+            pre_auto_descriptor["expected_release_digest"].as_str().unwrap(),
+            pre_auto_descriptor["ui_entrypoint"].as_str().unwrap(),
+        ),
+        None,
+    )
+    .send()
+    .await;
+    assert_eq!(pre_auto_asset.status(), StatusCode::NOT_FOUND);
+
+    let current_surface = request(
+        &router,
+        Method::POST,
+        &format!("/api/miniapps/{miniapp_id}/surface/open"),
+        Some(json!({ "miniapp_id": miniapp_id })),
+    )
+    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
+    .send()
+    .await;
+    assert_eq!(current_surface.status(), StatusCode::OK);
+    let current_descriptor = response_json(current_surface).await["data"].clone();
+
+    let before_non_ui_edit = repository
+        .get(&owner_id, &miniapp_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let renamed_at = nomifun_common::now_ms().max(before_non_ui_edit.product.updated_at);
+    nomifun_db::sqlx::query(
+        "UPDATE miniapp_products
+         SET product_revision = product_revision + 1,
+             display_name = 'Surface Notes renamed', updated_at = ?
+         WHERE owner_user_id = ? AND miniapp_id = ?
+           AND product_revision = ? AND updated_at <= ?",
+    )
+    .bind(renamed_at)
+    .bind(&owner_id)
+    .bind(&miniapp_id)
+    .bind(before_non_ui_edit.product.product_revision)
+    .bind(renamed_at)
+    .execute(services.database.pool())
+    .await
+    .unwrap();
+    let non_ui_source = source_store
+        .replace_source(
+            &owner_id,
+            &miniapp_id,
+            &before_non_ui_edit.project.project_id,
+            before_non_ui_edit
+                .project
+                .source_head_digest
+                .as_deref()
+                .unwrap(),
+            vec![MiniAppSourceFileInput::new(
+                "ui/index.html",
+                b"<!doctype html><html><body><main><h1>Surface Notes ready only</h1></main></body></html>"
+                    .to_vec(),
+            )],
+        )
+        .unwrap();
+    repository
+        .update_project_source_cas(&UpdateMiniAppM1ProjectSourceParams {
+            owner_user_id: owner_id.clone(),
+            miniapp_id: miniapp_id.clone(),
+            project_id: before_non_ui_edit.project.project_id.clone(),
+            expected_project_revision: before_non_ui_edit.project.project_revision,
+            source_state: MiniAppM1ProjectSourceState::Editable,
+            managed_source_path: Some(non_ui_source.managed_relative_path),
+            source_head_digest: Some(non_ui_source.source_snapshot_digest.0),
+            dependency_lock_digest: Some(non_ui_source.dependency_lock_digest.0),
+            build_profile_version: Some(non_ui_source.build_profile_version.0),
+            build_generation: i64::try_from(non_ui_source.build_generation).unwrap(),
+            updated_at: nomifun_common::now_ms()
+                .max(renamed_at)
+                .max(before_non_ui_edit.project.updated_at),
+        })
+        .await
+        .unwrap();
+    let non_ui_edited = request(
+        &router,
+        Method::GET,
+        &format!("/api/miniapps/{miniapp_id}/workshop"),
+        None,
+    )
+    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
+    .send()
+    .await;
+    assert_eq!(non_ui_edited.status(), StatusCode::OK);
+    let non_ui_edited = response_json(non_ui_edited).await["data"].clone();
+    let ready_only_build = request(
+        &router,
+        Method::POST,
+        &format!("/api/miniapps/{miniapp_id}/build"),
+        Some(json!({
+            "miniapp_id": miniapp_id,
+            "expected_product_revision": non_ui_edited["miniapp"]["product_revision"],
+            "project_id": non_ui_edited["project_id"],
+            "expected_project_revision": non_ui_edited["project_revision"],
+            "expected_build_generation": non_ui_edited["build_generation"],
+            "expected_source_snapshot_digest": non_ui_edited["source_snapshot_digest"],
+            "expected_dependency_lock_digest": non_ui_edited["dependency_lock_digest"]
+        })),
+    )
+    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
+    .send()
+    .await;
+    assert_eq!(ready_only_build.status(), StatusCode::OK);
+    let ready_only = response_json(ready_only_build).await["data"].clone();
+    assert!(ready_only["ready"].is_object());
+    assert_eq!(
+        ready_only["miniapp"]["releases"]["active_release_epoch"],
+        auto_published["miniapp"]["releases"]["active_release_epoch"]
+    );
+    assert_eq!(
+        ready_only["miniapp"]["releases"]["active"]["release_id"],
+        auto_published["miniapp"]["releases"]["active"]["release_id"]
+    );
+    let surviving_asset = request(
+        &router,
+        Method::GET,
+        &format!(
+            "/api/miniapps/{miniapp_id}/surface/assets/{}/{}/{}/{}",
+            current_descriptor["surface_capability"].as_str().unwrap(),
+            current_descriptor["active_release_epoch"].as_u64().unwrap(),
+            current_descriptor["expected_release_digest"].as_str().unwrap(),
+            current_descriptor["ui_entrypoint"].as_str().unwrap(),
+        ),
+        None,
+    )
+    .send()
+    .await;
+    assert_eq!(
+        surviving_asset.status(),
+        StatusCode::OK,
+        "Ready-only Build must not revoke the unchanged Active Surface"
+    );
+    let latest_operation_state: String = nomifun_db::sqlx::query_scalar(
+        "SELECT state FROM product_operations
+         WHERE owner_kind = 'miniapp' AND owner_id = ? AND kind = 'build'
+         ORDER BY started_at_ms DESC, operation_id DESC LIMIT 1",
+    )
+    .bind(&miniapp_id)
+    .fetch_one(services.database.pool())
+    .await
+    .unwrap();
+    assert_eq!(latest_operation_state, "succeeded");
+
+    let manual_mode = request(
+        &router,
+        Method::POST,
+        &format!("/api/miniapps/{miniapp_id}/publish-mode"),
+        Some(json!({
+            "miniapp_id": miniapp_id,
+            "expected_product_revision": ready_only["miniapp"]["product_revision"],
+            "expected_pointer_revision": ready_only["miniapp"]["releases"]["pointer_revision"],
+            "mode": "manual"
+        })),
+    )
+    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
+    .send()
+    .await;
+    assert_eq!(manual_mode.status(), StatusCode::OK);
+    assert_eq!(response_json(manual_mode).await["data"]["publish_mode"], "manual");
+
+    let close_surface = request(
+        &router,
+        Method::POST,
+        &format!("/api/miniapps/{miniapp_id}/surface/close"),
+        Some(json!({
+            "miniapp_id": miniapp_id,
+            "surface_session_id": current_descriptor["surface_session_id"],
+            "surface_capability": current_descriptor["surface_capability"]
+        })),
+    )
+    .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
+    .send()
+    .await;
+    assert_eq!(close_surface.status(), StatusCode::OK);
+    assert_eq!(response_json(close_surface).await["data"], true);
+    let closed_asset = request(
+        &router,
+        Method::GET,
+        &format!(
+            "/api/miniapps/{miniapp_id}/surface/assets/{}/{}/{}/{}",
+            current_descriptor["surface_capability"].as_str().unwrap(),
+            current_descriptor["active_release_epoch"].as_u64().unwrap(),
+            current_descriptor["expected_release_digest"].as_str().unwrap(),
+            current_descriptor["ui_entrypoint"].as_str().unwrap(),
+        ),
+        None,
+    )
+    .send()
+    .await;
+    assert_eq!(closed_asset.status(), StatusCode::NOT_FOUND);
 
     services
         .shutdown_browser_platform()

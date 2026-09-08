@@ -121,6 +121,21 @@ pub struct MiniAppProjectRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct MiniAppKvRow {
+    pub id: i64,
+    pub miniapp_id: String,
+    pub owner_user_id: String,
+    pub namespace: String,
+    pub key: String,
+    pub value_json: String,
+    pub revision: i64,
+    pub key_generation: i64,
+    pub is_tombstone: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct MiniAppReleaseArtifactRow {
     pub id: i64,
     pub artifact_id: String,
@@ -170,6 +185,42 @@ pub struct MiniAppBuildOperationLineageRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct MiniAppPublishAuthorizationRow {
+    pub id: i64,
+    pub authorization_id: String,
+    pub miniapp_id: String,
+    pub owner_user_id: String,
+    pub revision: i64,
+    pub enabled: bool,
+    pub user_authorized_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct MiniAppCatalogPublicationRow {
+    pub id: i64,
+    pub miniapp_id: String,
+    pub owner_user_id: String,
+    pub active_release_id: String,
+    pub active_release_digest: String,
+    pub active_release_epoch: i64,
+    pub catalog_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct MiniAppSurfaceSessionRow {
+    pub id: i64,
+    pub surface_session_id: String,
+    pub miniapp_id: String,
+    pub owner_user_id: String,
+    pub generation: i64,
+    pub capability_digest: String,
+    pub active_release_id: String,
+    pub active_release_digest: String,
+    pub active_release_epoch: i64,
+    pub issued_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct MiniAppCredentialBindingRow {
     pub id: i64,
     pub miniapp_id: String,
@@ -188,6 +239,8 @@ pub struct MiniAppM1Snapshot {
     pub ready_release: Option<MiniAppReleaseRow>,
     pub active_release: Option<MiniAppReleaseRow>,
     pub previous_release: Option<MiniAppReleaseRow>,
+    pub auto_publish_authorization: Option<MiniAppPublishAuthorizationRow>,
+    pub catalog_publication: Option<MiniAppCatalogPublicationRow>,
     pub credential_bindings: Vec<MiniAppCredentialBindingRow>,
 }
 

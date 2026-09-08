@@ -11,6 +11,7 @@ export type { MiniAppId } from './ids';
 export type MiniAppKind = 'ui_only' | 'service';
 export type MiniAppServiceLifecycle = 'on_demand' | 'continuous';
 export type MiniAppLifecycle = 'enabled' | 'disabled' | 'trashed' | 'deleting';
+export type MiniAppPublishMode = 'manual' | 'auto_ui_only';
 export type MiniAppProjectSourceState = 'empty' | 'editable' | 'runtime_only';
 export type MiniAppTestStatus =
   | 'not_required'
@@ -201,6 +202,7 @@ export interface MiniAppWorkshop {
   miniapp: MiniAppSummary;
   project_id: string;
   project_revision: number;
+  publish_mode: MiniAppPublishMode;
   source_state: MiniAppProjectSourceState;
   build_generation: number;
   source_snapshot_digest?: string;
@@ -235,4 +237,101 @@ export interface CancelMiniAppBuildRequest {
   miniapp_id: MiniAppId;
   operation_id: string;
   expected_operation_revision: number;
+}
+
+export interface PublishMiniAppRequest {
+  miniapp_id: MiniAppId;
+  expected_product_revision: number;
+  expected_pointer_revision: number;
+  expected_active_release_epoch: number;
+  ready_release_id: string;
+  expected_ready_release_digest: string;
+  expected_active_release_digest?: string;
+  expected_service_test_receipt_id?: string;
+  acknowledge_test_warning: boolean;
+}
+
+export interface RollbackMiniAppRequest {
+  miniapp_id: MiniAppId;
+  expected_product_revision: number;
+  expected_pointer_revision: number;
+  expected_active_release_epoch: number;
+  expected_current_release_digest: string;
+  previous_release_id: string;
+  expected_previous_release_digest: string;
+}
+
+export interface SetMiniAppEnabledRequest {
+  miniapp_id: MiniAppId;
+  expected_product_revision: number;
+  expected_pointer_revision: number;
+  expected_active_release_digest?: string;
+  enabled: boolean;
+}
+
+export interface SetMiniAppPublishModeRequest {
+  miniapp_id: MiniAppId;
+  expected_product_revision: number;
+  expected_pointer_revision: number;
+  mode: MiniAppPublishMode;
+}
+
+export interface OpenMiniAppSurfaceRequest {
+  miniapp_id: MiniAppId;
+}
+
+export interface MiniAppSurfaceLaunchDescriptor {
+  miniapp_id: MiniAppId;
+  product_revision: number;
+  release_id: string;
+  expected_release_digest: string;
+  active_release_epoch: number;
+  surface_session_id: string;
+  surface_generation: number;
+  surface_capability: string;
+  ui_entrypoint: string;
+  kind: MiniAppKind;
+}
+
+export interface CloseMiniAppSurfaceRequest {
+  miniapp_id: MiniAppId;
+  surface_session_id: string;
+  surface_capability: string;
+}
+
+export type MiniAppBridgeKvRequest =
+  | { operation: 'get'; key: string }
+  | { operation: 'set'; key: string; value: unknown }
+  | { operation: 'delete'; key: string }
+  | {
+      operation: 'compare_and_swap';
+      key: string;
+      expected_revision?: number;
+      value?: unknown;
+    };
+
+export interface MiniAppBridgeRequest {
+  call_id: string;
+  target: {
+    target: 'host_kv';
+    request: MiniAppBridgeKvRequest;
+  };
+}
+
+export type MiniAppKvResponse =
+  | { outcome: 'value'; value?: unknown; revision?: number }
+  | { outcome: 'written'; revision: number }
+  | { outcome: 'deleted'; existed: boolean }
+  | {
+      outcome: 'compare_and_swap';
+      applied: boolean;
+      current_revision?: number;
+    };
+
+export interface MiniAppSurfaceBridgeRequest {
+  miniapp_id: MiniAppId;
+  surface_capability: string;
+  active_release_epoch: number;
+  expected_release_digest: string;
+  request: MiniAppBridgeRequest;
 }

@@ -328,11 +328,20 @@ import {
 import type {
   BuildMiniAppRequest,
   CancelMiniAppBuildRequest,
+  CloseMiniAppSurfaceRequest,
   CreateMiniAppProjectRequest,
   MiniAppLibraryResponse,
+  MiniAppKvResponse,
   MiniAppOperationSummary,
+  MiniAppSurfaceBridgeRequest,
+  MiniAppSurfaceLaunchDescriptor,
   MiniAppSummary,
   MiniAppWorkshop,
+  OpenMiniAppSurfaceRequest,
+  PublishMiniAppRequest,
+  RollbackMiniAppRequest,
+  SetMiniAppEnabledRequest,
+  SetMiniAppPublishModeRequest,
 } from '../types/miniAppPlatform';
 
 export { plugins } from './pluginPlatformBridge';
@@ -2208,8 +2217,9 @@ export const ssh = {
 // MiniApp M1 - owner-scoped Product/Project/Release state.
 //
 // This is a clean cut from the retired single-HTML and conversation workspace
-// API. The first executable slice is UI-only Source → Build → Ready. Publish,
-// Surface, and Service commands remain outside this slice.
+// API. UI-only MiniApps move through Source -> Build -> Ready -> Active, with
+// lifecycle kept separate from Publish. Service and managed-data commands stay
+// outside this slice.
 // ---------------------------------------------------------------------------
 
 const fromApiMiniAppSummary = (value: MiniAppSummary): MiniAppSummary => ({
@@ -2247,6 +2257,13 @@ const fromApiMiniAppWorkshop = (
     : undefined,
 });
 
+const fromApiMiniAppSurfaceLaunchDescriptor = (
+  value: MiniAppSurfaceLaunchDescriptor
+): MiniAppSurfaceLaunchDescriptor => ({
+  ...value,
+  miniapp_id: parseMiniAppId(value.miniapp_id),
+});
+
 export const miniapps = {
   library: withResponseMap(
     httpGet<MiniAppLibraryResponse, void>('/api/miniapps'),
@@ -2280,6 +2297,50 @@ export const miniapps = {
         request
     ),
     fromApiMiniAppOperation
+  ),
+  publish: withResponseMap(
+    httpPost<MiniAppWorkshop, PublishMiniAppRequest>(
+      ({ miniapp_id }) =>
+        `/api/miniapps/${encodeURIComponent(miniapp_id)}/publish`
+    ),
+    fromApiMiniAppWorkshop
+  ),
+  rollback: withResponseMap(
+    httpPost<MiniAppWorkshop, RollbackMiniAppRequest>(
+      ({ miniapp_id }) =>
+        `/api/miniapps/${encodeURIComponent(miniapp_id)}/rollback`
+    ),
+    fromApiMiniAppWorkshop
+  ),
+  setEnabled: withResponseMap(
+    httpPost<MiniAppWorkshop, SetMiniAppEnabledRequest>(
+      ({ miniapp_id }) =>
+        `/api/miniapps/${encodeURIComponent(miniapp_id)}/enabled`
+    ),
+    fromApiMiniAppWorkshop
+  ),
+  setPublishMode: withResponseMap(
+    httpPost<MiniAppWorkshop, SetMiniAppPublishModeRequest>(
+      ({ miniapp_id }) =>
+        `/api/miniapps/${encodeURIComponent(miniapp_id)}/publish-mode`
+    ),
+    fromApiMiniAppWorkshop
+  ),
+  openSurface: withResponseMap(
+    httpPost<MiniAppSurfaceLaunchDescriptor, OpenMiniAppSurfaceRequest>(
+      ({ miniapp_id }) =>
+        `/api/miniapps/${encodeURIComponent(miniapp_id)}/surface/open`
+    ),
+    fromApiMiniAppSurfaceLaunchDescriptor
+  ),
+  closeSurface: httpPost<boolean, CloseMiniAppSurfaceRequest>(
+    ({ miniapp_id }) =>
+      `/api/miniapps/${encodeURIComponent(miniapp_id)}/surface/close`
+  ),
+  bridge: httpPost<MiniAppKvResponse, MiniAppSurfaceBridgeRequest>(
+    ({ miniapp_id }) =>
+      `/api/miniapps/${encodeURIComponent(miniapp_id)}/surface/bridge`,
+    ({ miniapp_id: _miniappId, ...request }) => request
   ),
 };
 

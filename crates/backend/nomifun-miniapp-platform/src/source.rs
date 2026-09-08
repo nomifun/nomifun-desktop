@@ -425,6 +425,31 @@ impl MiniAppSourceStore {
         Ok(snapshot)
     }
 
+    pub fn read_revision_files(
+        &self,
+        owner: impl AsRef<str>,
+        miniapp_id: impl AsRef<str>,
+        project_id: impl AsRef<str>,
+        source_snapshot_digest: impl AsRef<str>,
+    ) -> Result<Vec<MiniAppSourceFile>, MiniAppSourceStoreError> {
+        let scope = MiniAppSourceScope::new(owner, miniapp_id, project_id)?;
+        let source_snapshot_digest =
+            validate_digest_value(source_snapshot_digest.as_ref())?;
+        let _guard = self.lock_mutation()?;
+        let (_, _, _, _, source_root) = self.load_project_unlocked(&scope)?;
+        let revision_root = source_root
+            .join(REVISIONS_DIRECTORY)
+            .join(source_snapshot_digest.as_ref());
+        let snapshot = self.read_revision_unlocked(&revision_root)?;
+        if snapshot.snapshot_digest != source_snapshot_digest {
+            return Err(MiniAppSourceStoreError::DigestMismatch {
+                expected: source_snapshot_digest.0,
+                observed: snapshot.snapshot_digest.0,
+            });
+        }
+        read_revision_files(&revision_root, &snapshot, self.limits)
+    }
+
     pub fn replace_source(
         &self,
         owner: impl AsRef<str>,

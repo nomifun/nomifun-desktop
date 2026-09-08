@@ -573,3 +573,11 @@ macOS x64、Linux Headless、Wave 3/4 非核心业务全覆盖、Knowledge 高�
 
 Codex-native、external Codex integration、C9 shutdown 和 Nomi-free RC 不是当前阶段的
 未完成阻断项；它们只有在后续重新立项并满足独立前置条件后，才建立新的执行台账。
+
+## 2026-09-08 06 Windows 主线状态同步
+
+AP-0～AP-7、一期 C8 与 S0-S5 的口径保持不变；06 的实时状态继续由
+PHASE-N1-M1-CLOSURE-TODO.zh.md 维护。该台账已关闭 M1-0-02-B 的 UI-only
+Publish/Catalog/Surface/Rollback/Host KV 写集，下一步进入 M1-1-01 dedicated Service
+Host。真实 Service process adapter、Files/Private SQLite、M1-2 生命周期、Windows 最终
+候选和 macOS/Linux 原生验证均未被本次 B checkpoint 关闭。

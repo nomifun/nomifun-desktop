@@ -1,18 +1,36 @@
 use std::sync::Arc;
 
+use axum::body::Body;
 use axum::extract::{Path, State};
+use axum::http::{StatusCode, header};
+use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use nomifun_api_types::{
     ApiResponse, BuildMiniAppRequest, CancelMiniAppBuildRequest,
-    CreateMiniAppProjectRequest, DurableOperationSummaryDto,
-    MiniAppLibraryResponseDto, MiniAppWorkshopDto,
+    CloseMiniAppSurfaceRequest, CreateMiniAppProjectRequest,
+    DurableOperationSummaryDto,
+    MiniAppLibraryResponseDto, MiniAppSurfaceLaunchDescriptorDto,
+    MiniAppWorkshopDto, OpenMiniAppSurfaceRequest, PublishMiniAppRequest, RollbackMiniAppRequest,
+    SetMiniAppEnabledRequest, SetMiniAppPublishModeRequest,
 };
+use nomifun_agent_contracts::{MiniAppBridgeRequest, StrictJsonValue};
 use nomifun_auth::CurrentUser;
 use nomifun_common::AppError;
 use nomifun_miniapp_platform::{
-    MiniAppM1ApplicationError, MiniAppM1ApplicationService,
+    content_type_for_surface_path, MiniAppM1ApplicationError,
+    MiniAppM1ApplicationService,
 };
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MiniAppSurfaceBridgeHttpRequest {
+    surface_capability: String,
+    active_release_epoch: u64,
+    expected_release_digest: String,
+    request: MiniAppBridgeRequest,
+}
 
 #[derive(Clone)]
 pub struct MiniAppM1RouterState {
@@ -49,6 +67,43 @@ pub(crate) fn miniapp_m1_write_routes(
         .route(
             "/api/miniapps/{miniapp_id}/operations/{operation_id}/cancel",
             post(cancel_miniapp_build),
+        )
+        .route(
+            "/api/miniapps/{miniapp_id}/publish",
+            post(publish_miniapp),
+        )
+        .route(
+            "/api/miniapps/{miniapp_id}/rollback",
+            post(rollback_miniapp),
+        )
+        .route(
+            "/api/miniapps/{miniapp_id}/enabled",
+            post(set_miniapp_enabled),
+        )
+        .route(
+            "/api/miniapps/{miniapp_id}/publish-mode",
+            post(set_miniapp_publish_mode),
+        )
+        .route(
+            "/api/miniapps/{miniapp_id}/surface/open",
+            post(open_surface),
+        )
+        .route(
+            "/api/miniapps/{miniapp_id}/surface/bridge",
+            post(call_surface_bridge),
+        )
+        .route(
+            "/api/miniapps/{miniapp_id}/surface/close",
+            post(close_surface),
+        )
+        .with_state(state)
+}
+
+pub(crate) fn miniapp_m1_surface_routes(state: MiniAppM1RouterState) -> Router {
+    Router::new()
+        .route(
+            "/api/miniapps/{miniapp_id}/surface/assets/{capability_id}/{active_release_epoch}/{release_digest}/{*asset_path}",
+            get(get_surface_asset),
         )
         .with_state(state)
 }
@@ -91,6 +146,21 @@ async fn get_workshop(
     Ok(Json(ApiResponse::ok(workshop)))
 }
 
+async fn open_surface(
+    State(state): State<MiniAppM1RouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(miniapp_id): Path<String>,
+    Json(request): Json<OpenMiniAppSurfaceRequest>,
+) -> Result<Json<ApiResponse<MiniAppSurfaceLaunchDescriptorDto>>, AppError> {
+    require_route_id("miniapp_id", &miniapp_id, &request.miniapp_id)?;
+    let descriptor = state
+        .application
+        .open_surface(user.id.as_str(), &miniapp_id)
+        .await
+        .map_err(application_error)?;
+    Ok(Json(ApiResponse::ok(descriptor)))
+}
+
 async fn build_miniapp(
     State(state): State<MiniAppM1RouterState>,
     Extension(user): Extension<CurrentUser>,
@@ -123,6 +193,139 @@ async fn cancel_miniapp_build(
         .await
         .map_err(application_error)?;
     Ok(Json(ApiResponse::ok(operation)))
+}
+
+async fn publish_miniapp(
+    State(state): State<MiniAppM1RouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(miniapp_id): Path<String>,
+    Json(request): Json<PublishMiniAppRequest>,
+) -> Result<Json<ApiResponse<MiniAppWorkshopDto>>, AppError> {
+    require_route_id("miniapp_id", &miniapp_id, &request.miniapp_id)?;
+    let workshop = state
+        .application
+        .publish(user.id.as_str(), request)
+        .await
+        .map_err(application_error)?;
+    Ok(Json(ApiResponse::ok(workshop)))
+}
+
+async fn rollback_miniapp(
+    State(state): State<MiniAppM1RouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(miniapp_id): Path<String>,
+    Json(request): Json<RollbackMiniAppRequest>,
+) -> Result<Json<ApiResponse<MiniAppWorkshopDto>>, AppError> {
+    require_route_id("miniapp_id", &miniapp_id, &request.miniapp_id)?;
+    let workshop = state
+        .application
+        .rollback(user.id.as_str(), request)
+        .await
+        .map_err(application_error)?;
+    Ok(Json(ApiResponse::ok(workshop)))
+}
+
+async fn set_miniapp_enabled(
+    State(state): State<MiniAppM1RouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(miniapp_id): Path<String>,
+    Json(request): Json<SetMiniAppEnabledRequest>,
+) -> Result<Json<ApiResponse<MiniAppWorkshopDto>>, AppError> {
+    require_route_id("miniapp_id", &miniapp_id, &request.miniapp_id)?;
+    let workshop = state
+        .application
+        .set_enabled(user.id.as_str(), request)
+        .await
+        .map_err(application_error)?;
+    Ok(Json(ApiResponse::ok(workshop)))
+}
+
+async fn set_miniapp_publish_mode(
+    State(state): State<MiniAppM1RouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(miniapp_id): Path<String>,
+    Json(request): Json<SetMiniAppPublishModeRequest>,
+) -> Result<Json<ApiResponse<MiniAppWorkshopDto>>, AppError> {
+    require_route_id("miniapp_id", &miniapp_id, &request.miniapp_id)?;
+    let workshop = state
+        .application
+        .set_publish_mode(user.id.as_str(), request)
+        .await
+        .map_err(application_error)?;
+    Ok(Json(ApiResponse::ok(workshop)))
+}
+
+async fn call_surface_bridge(
+    State(state): State<MiniAppM1RouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(miniapp_id): Path<String>,
+    Json(body): Json<MiniAppSurfaceBridgeHttpRequest>,
+) -> Result<Json<ApiResponse<StrictJsonValue>>, AppError> {
+    let result = state
+        .application
+        .surface_bridge_request(
+            user.id.as_str(),
+            &miniapp_id,
+            &body.surface_capability,
+            body.active_release_epoch,
+            &body.expected_release_digest,
+            body.request,
+        )
+        .await
+        .map_err(application_error)?;
+    Ok(Json(ApiResponse::ok(result)))
+}
+
+async fn close_surface(
+    State(state): State<MiniAppM1RouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(miniapp_id): Path<String>,
+    Json(request): Json<CloseMiniAppSurfaceRequest>,
+) -> Result<Json<ApiResponse<bool>>, AppError> {
+    require_route_id("miniapp_id", &miniapp_id, &request.miniapp_id)?;
+    let closed = state
+        .application
+        .close_surface(
+            user.id.as_str(),
+            &miniapp_id,
+            &request.surface_session_id,
+            &request.surface_capability,
+        )
+        .await
+        .map_err(application_error)?;
+    Ok(Json(ApiResponse::ok(closed)))
+}
+
+async fn get_surface_asset(
+    State(state): State<MiniAppM1RouterState>,
+    Path((
+        miniapp_id,
+        capability_id,
+        active_release_epoch,
+        release_digest,
+        asset_path,
+    )): Path<(String, String, u64, String, String)>,
+) -> Result<Response, AppError> {
+    let asset = state
+        .application
+        .surface_asset(
+            &miniapp_id,
+            &capability_id,
+            active_release_epoch,
+            &release_digest,
+            &asset_path,
+        )
+        .await
+        .map_err(application_error)?;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(
+            header::CONTENT_TYPE,
+            content_type_for_surface_path(&asset.normalized_relative_path),
+        )
+        .header(header::CACHE_CONTROL, "private, no-store")
+        .body(Body::from(asset.bytes))
+        .map_err(|error| AppError::Internal(error.to_string()))
 }
 
 fn require_route_id(field: &'static str, route: &str, body: &str) -> Result<(), AppError> {

@@ -119,6 +119,55 @@ async fn split_routes_preserve_owner_scope_and_api_envelopes() {
     let workshop: MiniAppWorkshopDto = response_data(response).await;
     assert_eq!(workshop, created);
 
+    let surface_path = format!(
+        "/api/miniapps/{}/surface/open",
+        created.miniapp.miniapp_id
+    );
+    let response = send(
+        &read,
+        Method::POST,
+        &surface_path,
+        Some(json!({ "miniapp_id": created.miniapp.miniapp_id })),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "Surface capability signing must not be mounted in read routes"
+    );
+    let response = send(&write, Method::GET, &surface_path, None).await;
+    assert_eq!(
+        response.status(),
+        StatusCode::METHOD_NOT_ALLOWED,
+        "Surface capability signing must be POST-only"
+    );
+    let response = send(
+        &write,
+        Method::GET,
+        &format!("/api/miniapps/{}/surface", created.miniapp.miniapp_id),
+        None,
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "the legacy GET Surface signer must not remain mounted"
+    );
+    let response = send(
+        &write,
+        Method::POST,
+        &surface_path,
+        Some(json!({
+            "miniapp_id": "0190f5fe-7c00-7000-8000-000000000993"
+        })),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "Surface open must reject a body identity different from the route"
+    );
+
     let other = CurrentUser {
         id: UserId::new(),
         username: "other".to_owned(),

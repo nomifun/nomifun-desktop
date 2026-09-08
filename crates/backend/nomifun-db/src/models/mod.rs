@@ -91,11 +91,12 @@ pub use knowledge_tree_operation::{
 pub use mcp_server::McpServerRow;
 pub use message::MessageRow;
 pub use miniapp_m1::{
-    MiniAppBuildOperationLineageRow, MiniAppCredentialBindingRow, MiniAppLibraryStateRow,
-    MiniAppM1LibrarySnapshot,
+    MiniAppBuildOperationLineageRow, MiniAppCatalogPublicationRow,
+    MiniAppCredentialBindingRow, MiniAppLibraryStateRow, MiniAppM1LibrarySnapshot,
     MiniAppM1Kind, MiniAppM1ProjectSourceState, MiniAppM1ReleaseOrigin,
     MiniAppM1ReleaseSourceKind, MiniAppM1Snapshot, MiniAppProductRow,
-    MiniAppProjectRow, MiniAppReleaseArtifactRow, MiniAppReleaseRow,
+    MiniAppKvRow, MiniAppProjectRow, MiniAppPublishAuthorizationRow, MiniAppReleaseArtifactRow,
+    MiniAppReleaseRow, MiniAppSurfaceSessionRow,
 };
 pub use oauth_token::OAuthTokenRow;
 pub use plugin_n1::{

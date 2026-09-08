@@ -2130,3 +2130,23 @@ AP-0 术语/owner/入口冻结
 - **Plugin 模板：**建议 N1 首版先不开放 `agent_template` contribution，后续只作为不授予能力的创建种子。
 
 后两项若未来出现真实产品需求可以另行修订；公开名称和单一 Agent 工作台入口不再作为待拍板项。实施者不得重新引入“旧设定 + Agent 设定”双轨。
+
+## 2026-09-08 MiniApp Surface 实现落地注记
+
+本注记只记录一期实现如何落地既有合同，不新增产品入口或第二套权限模型：
+
+- UI-only MiniApp 的 Surface capability 由 local-trust 保护的 POST /surface/open 签发，
+  只在 owner、enabled Active Release、epoch 和 pointer exact CAS 同时成立时创建 Host-owned
+  session；持久化只保存 capability digest。
+- UI entrypoint 在固定 miniapp-release-v1 Build 阶段注入 Host Bridge bootstrap。原始
+  Source Store bytes 不被改写；该注入是可重复的确定性物化步骤，auto Publish 比较复用同一
+  规则，因此不会把 Host bootstrap 当作用户业务差异。
+- iframe 通过 challenge/nonce handshake 验证同一加载窗口后才接收一次性 MessagePort；
+  owner、MiniApp、Active Release、epoch、session generation 和 KV namespace 仍由 Host
+  端绑定，页面不能通过 wire 自报这些事实。
+- Surface Close 保留后端失败后的 descriptor 以支持重试；Release/lifecycle/disable/enable
+  和 startup revoke 会撤销旧 session，KV tombstone/key generation 阻断旧 revision 的
+  Delete → Recreate ABA。
+
+这些实现不改变本文件对 dedicated Service Host、Files/Private SQLite、M1-2 生命周期和
+三平台原生验证的后续边界。

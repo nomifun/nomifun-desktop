@@ -32,6 +32,7 @@ const rawWorkshop = (miniappId: unknown = MINIAPP_ID) => ({
   miniapp: rawSummary(miniappId),
   project_id: '0190f5fe-7c00-7a00-8000-0000000000b2',
   project_revision: 1,
+  publish_mode: 'manual',
   source_state: 'empty',
   build_generation: 0,
   config_schema: {
@@ -74,7 +75,7 @@ afterEach(() => {
 });
 
 describe('MiniApp M1 HTTP bridge', () => {
-  test('spells only the Library, Create Project, and Workshop routes', () => {
+  test('spells the clean-start Library, Workshop, release, lifecycle, and Surface routes', () => {
     expect(
       source.includes(
         "httpGet<MiniAppLibraryResponse, void>('/api/miniapps')"
@@ -90,17 +91,33 @@ describe('MiniApp M1 HTTP bridge', () => {
         '`/api/miniapps/${encodeURIComponent(miniapp_id)}/workshop`'
       )
     ).toBe(true);
+    for (const route of [
+      '/publish`',
+      '/rollback`',
+      '/enabled`',
+      '/publish-mode`',
+      '/surface/open`',
+      '/surface/close`',
+    ]) {
+      expect(source.includes(route)).toBe(true);
+    }
 
     for (const retired of [
       '/api/miniapps/validate',
       '/api/miniapps/import',
-      '/publish`',
       '/workspace`',
+      '/api/miniapps/${p.miniapp_id}/serve',
     ]) {
       expect(source.includes(retired)).toBe(false);
     }
+    expect(source.includes('/surface/assets/')).toBe(false);
+    expect(
+      source.includes(
+        'httpGet<MiniAppSurfaceLaunchDescriptor, { miniapp_id: MiniAppId }>'
+      )
+    ).toBe(false);
+    expect(source.includes('getSurface:')).toBe(false);
     expect(source.includes('/api/miniapps/${')).toBe(true);
-    expect(source.includes('/api/miniapps/${p.miniapp_id}/serve')).toBe(false);
   });
 
   test('brands every Library miniapp_id at the boundary', async () => {
@@ -161,5 +178,163 @@ describe('MiniApp M1 HTTP bridge', () => {
       kind: 'ui_only',
     });
     expect(workshop.miniapp.miniapp_id).toBe(MINIAPP_ID);
+  });
+
+  test('release, lifecycle, and publish-mode mutations preserve exact request bodies', async () => {
+    let requestPath = '';
+    let requestBody: unknown;
+    globalThis.fetch = (async (input, init) => {
+      requestPath = new URL(String(input), 'http://127.0.0.1').pathname;
+      requestBody =
+        typeof init?.body === 'string' ? JSON.parse(init.body) : init?.body;
+      return new Response(
+        JSON.stringify({ success: true, data: rawWorkshop() }),
+        {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }
+      );
+    }) as typeof fetch;
+
+    const publish = {
+      miniapp_id: MINIAPP_ID as never,
+      expected_product_revision: 4,
+      expected_pointer_revision: 5,
+      expected_active_release_epoch: 6,
+      ready_release_id: 'ready-release',
+      expected_ready_release_digest: 'a'.repeat(64),
+      expected_active_release_digest: 'b'.repeat(64),
+      acknowledge_test_warning: false,
+    };
+    await miniapps.publish.invoke(publish);
+    expect(requestPath).toBe(`/api/miniapps/${MINIAPP_ID}/publish`);
+    expect(requestBody).toEqual(publish);
+
+    const rollback = {
+      miniapp_id: MINIAPP_ID as never,
+      expected_product_revision: 5,
+      expected_pointer_revision: 6,
+      expected_active_release_epoch: 7,
+      expected_current_release_digest: 'b'.repeat(64),
+      previous_release_id: 'previous-release',
+      expected_previous_release_digest: 'c'.repeat(64),
+    };
+    await miniapps.rollback.invoke(rollback);
+    expect(requestPath).toBe(`/api/miniapps/${MINIAPP_ID}/rollback`);
+    expect(requestBody).toEqual(rollback);
+
+    const enabled = {
+      miniapp_id: MINIAPP_ID as never,
+      expected_product_revision: 6,
+      expected_pointer_revision: 7,
+      expected_active_release_digest: 'c'.repeat(64),
+      enabled: true,
+    };
+    await miniapps.setEnabled.invoke(enabled);
+    expect(requestPath).toBe(`/api/miniapps/${MINIAPP_ID}/enabled`);
+    expect(requestBody).toEqual(enabled);
+
+    const publishMode = {
+      miniapp_id: MINIAPP_ID as never,
+      expected_product_revision: 7,
+      expected_pointer_revision: 8,
+      mode: 'auto_ui_only' as const,
+    };
+    await miniapps.setPublishMode.invoke(publishMode);
+    expect(requestPath).toBe(`/api/miniapps/${MINIAPP_ID}/publish-mode`);
+    expect(requestBody).toEqual(publishMode);
+
+    const bridge = {
+      miniapp_id: MINIAPP_ID as never,
+      surface_capability: 'surface-capability',
+      active_release_epoch: 9,
+      expected_release_digest: 'd'.repeat(64),
+      request: {
+        call_id: 'call-1',
+        target: {
+          target: 'host_kv' as const,
+          request: {
+            operation: 'set' as const,
+            key: 'preference',
+            value: { density: 'compact' },
+          },
+        },
+      },
+    };
+    await miniapps.bridge.invoke(bridge);
+    expect(requestPath).toBe(`/api/miniapps/${MINIAPP_ID}/surface/bridge`);
+    expect(requestPath.includes(bridge.surface_capability)).toBe(false);
+    expect(requestBody).toEqual({
+      surface_capability: bridge.surface_capability,
+      active_release_epoch: bridge.active_release_epoch,
+      expected_release_digest: bridge.expected_release_digest,
+      request: bridge.request,
+    });
+  });
+
+  test('opens and brands the authenticated Surface descriptor with an explicit POST body', async () => {
+    let requestPath = '';
+    let requestMethod = '';
+    let requestBody: unknown;
+    globalThis.fetch = (async (input, init) => {
+      requestPath = new URL(String(input), 'http://127.0.0.1').pathname;
+      requestMethod = init?.method ?? '';
+      requestBody =
+        typeof init?.body === 'string' ? JSON.parse(init.body) : init?.body;
+      return new Response(
+        JSON.stringify({
+          success: true,
+          data: {
+            miniapp_id: MINIAPP_ID,
+            product_revision: 8,
+            release_id: 'active-release',
+            expected_release_digest: 'a'.repeat(64),
+            active_release_epoch: 9,
+            surface_session_id: '0190f5fe-7c00-7a00-8000-0000000000b4',
+            surface_generation: 3,
+            surface_capability: 'temporary-capability',
+            ui_entrypoint: 'ui/index.html',
+            kind: 'ui_only',
+          },
+        }),
+        {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }
+      );
+    }) as typeof fetch;
+
+    const request = {
+      miniapp_id: MINIAPP_ID as never,
+    };
+    const descriptor = await miniapps.openSurface.invoke(request);
+    expect(requestMethod).toBe('POST');
+    expect(requestPath).toBe(`/api/miniapps/${MINIAPP_ID}/surface/open`);
+    expect(requestBody).toEqual(request);
+    expect(descriptor.miniapp_id).toBe(MINIAPP_ID);
+    expect(descriptor.surface_generation).toBe(3);
+    expect(descriptor.surface_capability).toBe('temporary-capability');
+    expect(source.includes('/surface/assets/')).toBe(false);
+  });
+
+  test('closes the exact Host-owned Surface session', async () => {
+    let requestPath = '';
+    let requestBody = '';
+    globalThis.fetch = (async (input, init) => {
+      requestPath = new URL(String(input), 'http://127.0.0.1').pathname;
+      requestBody = String(init?.body ?? '');
+      return new Response(JSON.stringify({ success: true, data: true }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as typeof fetch;
+    const request = {
+      miniapp_id: MINIAPP_ID as never,
+      surface_session_id: '0190f5fe-7c00-7a00-8000-0000000000b4',
+      surface_capability: 'surface-capability',
+    };
+    expect(await miniapps.closeSurface.invoke(request)).toBe(true);
+    expect(requestPath).toBe(`/api/miniapps/${MINIAPP_ID}/surface/close`);
+    expect(JSON.parse(requestBody)).toEqual(request);
   });
 });

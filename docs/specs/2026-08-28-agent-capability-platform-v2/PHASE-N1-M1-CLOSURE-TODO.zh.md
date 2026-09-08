@@ -9,8 +9,10 @@
 > 当前结论：AP-0～AP-7 与一期 Windows C8 已通过。用户已授权在 Windows 主机继续
 > 完成 Plugin N1 和 MiniApp M1；macOS arm64、Linux Desktop x64 统一延后到全部
 > Windows 开发与候选验证完成后交接。手机模式不属于 `nomifun-desktop` 范围。
-> 2026-09-08 已同步远端 AgentPreset/会话模型选择修正；M1-0-02-A 已完成实现与
-> 定向回归，下一步进入 M1-0-02-B，不提前关闭 Service/Bridge 或外部平台验证。
+> 2026-09-08 已同步远端 AgentPreset/会话模型选择修正；M1-0-02-A 与 M1-0-02-B
+> 已完成实现和定向回归。M1-0-02-B 已关闭 Ready → Manual Publish → Surface →
+> Rollback、UI-only auto Publish、Host KV 与 Surface 生命周期边界；下一步进入
+> M1-1-01 dedicated Service Host，不把本轮 UI-only Bridge 误报为 Service Host 完成。
 
 本文是 06 的唯一实时执行台账。06 保存产品与架构合同，GLOBAL TODO 保存一期 S0-S5；
 二期状态不得回填成一期完成度，也不得用旧 Extension/MiniApp 的代码量冒充 N1/M1 进度。
@@ -43,9 +45,9 @@
 
 | 分类 | 数量 | 项目 |
 | --- | ---: | --- |
-| 已关闭 | 16 | 在原有 15 项基础上关闭 `M1-0-02-A` |
+| 已关闭 | 17 | 在原有 15 项基础上关闭 `M1-0-02-A`、`M1-0-02-B` |
 | 正在实施 | 5 | `N1-1-01`、`N1-2-03`、`N1-4-01`、`N1-U-01`、`M1-0-01` |
-| 已解锁待领取 | 1 | `M1-0-02-B` |
+| 已解锁待领取 | 1 | `M1-1-01` dedicated Service Host |
 | 依赖阻塞 | 10 | 其余 N1/M1 Windows 项与最终合流 |
 | 外部原生 | 2 | `RC-MA-01`、`RC-LD-01` |
 | 明确延后 | 2 | Marketplace/远程分发、第二 Runtime |
@@ -436,10 +438,11 @@
 | `M1-V-01` | blocked | 集成 Owner | Windows M1 contract/integration/fault/product/NSIS candidate | 所有 M1 项 | UI-only + Service representative lifecycle |
 
 `nomifun-miniapp-platform` 的内存 Service Host、Bridge 和 Storage 合同不等于
-production adapter。当前仅领取 `M1-0-01` 的生产数据根和 `M1-0-02-A` 的 UI-only
-Source→Build→Ready 写集；这两项不接 Service/Bridge/旧 MiniApp 主链，也不把 foundation
-测试冒充完整 M1 完成。`M1-0-02-B` 及后续 Service、生命周期和产品 Surface 仍按依赖
-顺序等待。
+production adapter。`M1-0-02-A` 与 `M1-0-02-B` 现在已经完成 UI-only 的生产
+Source→Build→Ready→Publish→Surface→Rollback 写集；本轮 Surface Bridge 只处理
+Host KV，且由固定 Build bootstrap 完成 nonce handshake，不代表 dedicated Service Host、
+Files、Private SQLite 或 Service consumer 已交付。下一执行切片为 `M1-1-01`，继续按
+依赖顺序实现真实 Service Host/Bridge。
 
 ## 最终候选与外部验证
 
@@ -455,3 +458,33 @@ Source→Build→Ready 写集；这两项不接 Service/Bridge/旧 MiniApp 主�
 - Marketplace、publisher、URL/Git 安装、远程 Registry 自动更新。
 - 第二 Runtime、Bun Runtime provider、多 Runtime 并行。
 - macOS x64、Linux Headless、手机模式。
+
+## 2026-09-08 M1-0-02-B 收口记录
+
+1. M1-0-02-B 已按 clean-cut 交付，未恢复旧 MiniApp 路由、旧 ui_asset_id 身份或
+   localhost Bridge：
+   - migration 078 增加 owner-scoped auto Publish authorization 与 Catalog publication；
+   - migration 079 将 Release 身份固定为 release_id，允许相同 Artifact digest 对应多个
+     Release lineage，并保留 SQLite AUTOINCREMENT 高水位；
+   - migration 080 持久化 Host-owned Surface session，只保存 capability digest，不保存
+     明文 capability；migration 081 为 Host KV 增加 tombstone 与单调 key generation，阻断
+     Delete → Recreate 的 revision ABA；
+   - Publish、Rollback、Enable/Disable、Catalog projection 和 Surface session 使用事务内
+     exact CAS；Config/Credential mutation 在 running Build 期间 fail closed；
+   - Artifact/Release record 使用 typed contract、完整 digest/identity 校验和 canonical JSON；
+     Artifact Store 提供 load_exact，独立检测 artifact_id 篡改；
+   - Surface 签发改为 local-trust 保护的 POST /api/miniapps/{miniapp_id}/surface/open；
+     iframe 必须先完成 challenge/nonce handshake 才转移一次性 MessagePort；Close 只有
+     Host 成功确认后才清理 descriptor，失败保留可重试状态；
+   - UI-only Build 自动注入固定 Host Bridge bootstrap，Source Store 原始 bytes 不变，
+     auto Publish 比较使用同一确定性物化规则。
+2. 定向 evidence：
+   - nomifun-db：db lifecycle 31、ID/schema 20、MiniApp schema 11、repository 13；
+   - nomifun-miniapp-platform：library 17、M1 build 6、Source/Release Store 3；
+   - nomifun-app：MiniApp route 3、MiniApp E2E 2；
+   - UI MiniApp/Bridge/model/http 定向测试 51；Agent contracts 84；受影响 crate
+     cargo check 与定向 cargo fmt --check 通过。
+3. 明确边界：本记录不关闭 M1-1-01、M1-1-02、M1-2-01、M1-V-01，也不构成
+   macOS/Linux 或手机模式验证。M1-1-01 的下一步是把 Service Host、真实 process
+   adapter、Service Bridge、Files/Private SQLite 生产接入；Windows 完成前不交接外部
+   原生环境。
