@@ -6911,16 +6911,19 @@ dependencies = [
  "async-trait",
  "getrandom 0.2.17",
  "hex",
+ "nomi-process-runtime",
  "nomifun-agent-contracts",
  "nomifun-api-types",
  "nomifun-common",
  "nomifun-db",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.19",
  "tokio",
  "tracing",
  "uuid",
+ "which 7.0.3",
 ]
 
 [[package]]
