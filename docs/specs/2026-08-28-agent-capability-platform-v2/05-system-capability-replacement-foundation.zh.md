@@ -2150,3 +2150,21 @@ AP-0 术语/owner/入口冻结
 
 这些实现不改变本文件对 dedicated Service Host、Files/Private SQLite、M1-2 生命周期和
 三平台原生验证的后续边界。
+
+## 2026-09-08 MiniApp 生命周期删除落地注记
+
+06 的 `M1-2` 生命周期删除子切片已由 `86afa7af6` 接入独立 MiniApp 产品域。该实现不把
+MiniApp 生命周期放入 AgentPreset，也不让 Agent 工作台取得 MiniApp owner 权限：
+
+- Trash/Restore/Permanent Delete 只经 MiniApp application service 和 owner-scoped exact
+  CAS；Catalog/Surface 撤销仍由 MiniApp 发布域负责；
+- Permanent Delete 的 intent、不可取消 Operation、Retry 和启动 Reconciler 不进入
+  Agent Revision/Snapshot/Binding；
+- Plugin/MiniApp Capability consumer 只观察 Active/available 结果，不能改写 MiniApp
+  lifecycle、Release pointer、Service 或受管数据；
+- 删除后旧 Capability publication 不再可解析，但已经冻结的 Agent Session 仍按既有
+  ContributionLock/availability 规则显式失败，不获得 fallback 或 owner 绕行。
+
+该注记只确认 05 §15 的 owner/consumer 边界在 M1 lifecycle 中保持成立。Service Test、
+Share/Backup Import-as-new、Capability Catalog 正式消费和 Windows Candidate 仍由 06 与
+独立 N1/M1 台账继续跟踪。

@@ -1470,3 +1470,22 @@ migration/package smoke。
 当前不提前领取 M1-2：Service Test 的临时 KV/DB/files namespace 与 receipt、Trash/
 Restore/Permanent Delete、Share/Backup Import-as-new、最终 Windows NSIS Candidate 及
 macOS/Linux 原生验证仍按依赖顺序保留。
+
+## 2026-09-08 M1-2 生命周期删除实现落地注记
+
+`86afa7af6` 已按 §4.6B 的单 intent、无逐 Store phase 方案完成生命周期删除子切片：
+
+- Trash 以 owner/pointer exact CAS 撤销 Catalog 与 Surface，并停止对应 Service；
+  Restore 只恢复为 `disabled`；
+- Permanent Delete 使用不可取消的 durable Operation，从头幂等清理 Service、受管
+  Storage、Source、Release 和数据库 owner rows；失败保留 intent 和 Operation，由用户
+  Retry 或启动 Reconciler继续；
+- Source/Release/Files/Private SQLite purge 在 Windows 逐级拒绝 symlink、junction 和
+  reparse point，重启后不依赖内存 registration；
+- Desktop Workshop 已提供 Trash、Restore、Delete、Retry Delete 的确认、进度和错误恢复，
+  不暴露 Store phase、路径、database handle 或 process identity。
+
+该实现没有扩展 Durable Operation 集合，也没有新增 deletion journal。`M1-2` 仍未关闭：
+Service Test 的 transient namespace/receipt、Share Bundle/prebuilt Import 和 disabled
+Whole-App Backup Import-as-new 继续作为后续切片；Windows Candidate 与 macOS/Linux 原生
+验证状态不变。

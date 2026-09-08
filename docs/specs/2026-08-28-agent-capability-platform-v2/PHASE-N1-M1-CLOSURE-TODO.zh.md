@@ -14,7 +14,9 @@
 > Service Host、真实 Node process adapter、on-demand/continuous、candidate Runtime
 > 验证和 Service Bridge；M1-1-02 已交付 owner-scoped Files、Host-managed Private
 > SQLite、authorizer、参数化 query/execute/batch、additive Migration ledger 与
-> Publish migration fence。下一步进入 M1-2 生命周期/导入导出；Windows Candidate、
+> Publish migration fence。M1-2 的 Trash/Restore/Permanent Delete 与启动恢复子切片
+> 已由 `86afa7af6` 完成；下一步进入 Service Test 和 Share/Backup Import-as-new。
+> Windows Candidate、
 > NSIS、产品验收和 macOS/Linux 外部验证仍未关闭。
 
 本文是 06 的唯一实时执行台账。06 保存产品与架构合同，GLOBAL TODO 保存一期 S0-S5；
@@ -436,7 +438,7 @@
 | `M1-0-02-B` | closed | MiniApp release lane；Publish/Catalog/Surface adapter 与 Desktop Workshop | Ready→Manual Publish→Surface→Rollback、纯 UI auto Publish、Host KV | `M1-0-02-A`,`M1-1-01` | UI-only Release/Catalog 原子切换、Active/Previous pointer CAS、Surface epoch fence、UI 定向验证通过 |
 | `M1-1-01` | closed | Service/Bridge lane；`nomifun-miniapp-platform/src/{service_host,service_process,service_runtime}.rs` | 单 `main.mjs`、dedicated Host、on-demand/continuous、MessageChannel epoch fence | `M1-0-02`,`N1-1-02` | 真实 Node NDJSON 3、Service application 1、Runtime candidate 3、旧 generation/崩溃隔离/容量/backoff 通过 |
 | `M1-1-02` | closed | Managed data lane；`managed_storage.rs`、Service IPC、M1 cutover | UI/Service KV、Files、Private SQLite、authorizer、参数化 SQL、additive migration ledger | `M1-1-01` | production SQLite Storage 1、真实 Node Storage IPC 3、authorizer/批量回滚/启动与取消边界通过 |
-| `M1-2-01` | in-progress | Lifecycle lane；MiniApp lifecycle/application/data cleanup | Enable/Disable/Trash/Restore/Permanent Delete、Share/Backup Import-as-new | `M1-1-02` | 下一切片；当前尚未实现 durable delete、数据导出/导入与恢复 Reconciler |
+| `M1-2-01` | in-progress | Lifecycle lane；MiniApp lifecycle/application/data cleanup | Enable/Disable/Trash/Restore/Permanent Delete、Service Test、Share/Backup Import-as-new | `M1-1-02` | `86afa7af6` 已关闭 durable delete、物理清理、Retry/启动 Reconciler 和 Desktop 操作；仍需 transient Service Test receipt、Share/Backup Import-as-new |
 | `M1-U-01` | blocked | UI lane；整体重写 `pages/miniApps/**` | Library/Workshop/Surface，删除 Guid/Conversation 旧 MiniApp 模式 | `M1-0-02`,`M1-1-01` | real Desktop workflow/build/a11y |
 | `M1-V-01` | blocked | 集成 Owner | Windows M1 contract/integration/fault/product/NSIS candidate | 所有 M1 项 | UI-only + Service representative lifecycle |
 
@@ -445,8 +447,9 @@
 Surface/Service Bridge、owner-scoped Files、Host-managed Private SQLite 和持久
 Migration ledger。Node Service 的 Storage 请求使用同一私有 NDJSON 通道，数据库路径
 不进入 Service SDK/HTTP/renderer wire；Publish 在旧 Host 停止后执行 pending additive
-Migration，再启动目标 Host，失败时保留旧 Active 并重建旧 Service。下一执行切片为
-`M1-2-01`，不把本轮实现误报为 Windows Candidate 或跨平台完成。
+Migration，再启动目标 Host，失败时保留旧 Active 并重建旧 Service。M1-2 生命周期
+删除子切片已完成；下一执行切片为 transient Service Test 与 receipt，随后进入
+Share/Backup Import-as-new。当前仍不构成 Windows Candidate 或跨平台完成。
 
 ## 最终候选与外部验证
 
@@ -533,3 +536,40 @@ Migration，再启动目标 Host，失败时保留旧 Active 并重建旧 Servic
 4. 当前边界：本收口不关闭 `M1-2-01` 的 Trash/Restore/Permanent Delete、Share/
    Backup Import-as-new、Service Test 临时 namespace/receipt、Windows NSIS Candidate
    或 macOS/Linux 原生验证；这些继续按依赖推进。
+
+## 2026-09-08 M1-2 生命周期删除子切片收口
+
+1. `86afa7af6` 已完成全新 M1 数据根上的产品生命周期闭环：
+   - migration 082 新增 owner-scoped `miniapp_deletion_intents`；Trash、Restore、
+     begin/fail/restart/finalize Permanent Delete 均使用单 SQLite transaction 和 exact CAS；
+   - Trash 原子撤销 Catalog/Surface，Service 使用 exact MiniApp identity 停止；Restore
+     固定返回 `disabled`，不会恢复执行、Surface 或 Catalog；
+   - Permanent Delete 写入不可取消的 `miniapp_permanent_delete` Operation 后，从头幂等
+     清理 Service、Files、Private SQLite、Source、Release 和 M1 owner rows；失败保留
+     intent/Operation，用户 Retry 与启动 Reconciler 均可继续；
+   - finalize 只在物理清理成功后删除 Product/Project/Release/Config/Credential/KV/
+     Surface/Catalog rows，并保留成功/失败 Operation 历史。
+2. Windows 文件系统边界已加固：
+   - Source、Release、Files 和 Private SQLite purge 逐级验证受管父链、canonical
+     containment，并在删除前递归拒绝 symlink、junction、reparse point 和 special file；
+   - Private SQLite `-wal/-shm` 使用原生 `OsString` 拼接，不经有损 `display()`；
+   - restart recovery 不依赖内存 storage registration，重复清理已不存在的目标成功。
+3. Desktop Workshop 已接入移入回收站、恢复、永久删除和失败重试：
+   - 所有动作使用产品确认对话框和 exact request，删除中限制其他写操作并轮询 durable
+     Operation；成功后返回 Library，失败后重载 `deleting + failed` 状态并显示 Retry；
+   - 中英文文案、i18n key、model 和 HTTP bridge 均已同步；普通 active lifecycle 控件
+     不会在 trashed/deleting 状态继续显示。
+4. 定向证据：
+   - `cargo test --locked -p nomifun-db --test miniapp_m1_repository
+     --test miniapp_m1_schema`：18 + 12 passed；
+   - `cargo test --locked -p nomifun-miniapp-platform --test m1_application
+     --test managed_storage --test miniapp_source_release_store
+     --test service_storage_ipc`：5 + 2 + 7 + 3 passed；
+   - `cargo test --locked -p nomifun-app --lib router::miniapp_m1::tests
+     --no-default-features -- --test-threads=1`：6 passed；
+   - MiniApp UI/wire 定向测试 26 passed；i18n parity/generation、受影响 crate check、
+     定向 rustfmt 和 `git diff --check` 通过。
+5. 当前边界：`M1-2-01` 仍为 `in-progress`。本子切片没有实现 Service Test 的 transient
+   KV/DB/files namespace 与 Host-issued receipt，也没有实现无用户数据 Share Bundle、
+   source-less prebuilt Import 或 disabled Whole-App Backup Import-as-new；`M1-U-01`、
+   `M1-V-01`、Windows NSIS 和 macOS/Linux 原生验证均未关闭。

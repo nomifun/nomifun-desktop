@@ -585,3 +585,17 @@ Publish migration fence 和 Runtime candidate Service 验证均已接入并推�
 当前下一步是 M1-2 生命周期/Service Test/导入导出实现；Windows Candidate/NSIS、
 最终 cohort、macOS/Linux 原生验证和 Stable 提升仍未关闭。手机模式不属于
 `nomifun-desktop` 范围。
+
+## 2026-09-08 06 Windows 主线状态同步（M1-2 生命周期删除子切片）
+
+`86afa7af6` 已完成 M1 Trash/Restore/Permanent Delete、失败 Retry 与启动 Reconciler：
+deleting intent 和不可取消 Operation 使用 owner-scoped SQLite transaction；Catalog/
+Surface 先撤销，Service、Files、Private SQLite、Source、Release 和数据库 owner rows
+从头幂等清理。Windows purge 已加入父链 canonical containment 与 junction/reparse 拒绝；
+Desktop Workshop 已接四个生命周期动作、删除进度和失败恢复。
+
+该 checkpoint 通过 DB 30、Platform 17、App route 6、UI/wire 26 项定向测试，以及受影响
+crate check、i18n、rustfmt 和 diff check。`M1-2-01` 仍为进行中；下一步依次完成 Service
+Test transient namespace/receipt、Share Bundle/prebuilt Import、disabled Whole-App Backup
+Import-as-new，再进入 MiniApp Capability Catalog、旧 MiniApp 拆除和 Windows Candidate。
+macOS/Linux 继续等待最终 Windows cohort，手机模式不在范围内。
