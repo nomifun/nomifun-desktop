@@ -76,7 +76,7 @@ describe('Guid default Nomi and AgentPreset launch behavior', () => {
     expect(selection.includes('presets[0]')).toBe(false);
   });
 
-  test('keeps the model selector available for default, official and personal Agents', () => {
+  test('keeps the model selector only for plain Nomi', () => {
     const page = readSource(new URL('./GuidPage.tsx', import.meta.url));
     const actionRow = readSource(
       new URL('./components/GuidActionRow.tsx', import.meta.url)
@@ -87,10 +87,7 @@ describe('Guid default Nomi and AgentPreset launch behavior', () => {
         "const isDefaultAgent = agentSelection.selection.kind === 'default';"
       )
     ).toBe(true);
-    expect(
-      page.includes('const modelSelectorNode = (')
-    ).toBe(true);
-    expect(page.includes('const modelSelectorNode = isDefaultAgent ? (')).toBe(false);
+    expect(page.includes('const modelSelectorNode = isDefaultAgent ? (')).toBe(true);
     expect(page.includes('<GuidModelSelector')).toBe(true);
     expect(page.includes('modelSelectorNode={modelSelectorNode}')).toBe(true);
     expect(actionRow.includes('modelSelectorNode?: React.ReactNode;')).toBe(
@@ -119,20 +116,18 @@ describe('Guid default Nomi and AgentPreset launch behavior', () => {
     expect(payload.includes('model: current_model')).toBe(true);
     expect(payload.includes('preset_id')).toBe(false);
     expect(
-      send.includes(
-        'const hasLaunchTarget = Boolean(current_model)'
-      )
+      send.includes("const hasLaunchTarget = selection.kind === 'default'")
     ).toBe(true);
   });
 
-  test('Agent launch submits a model identity without client-owned route or binding facts', () => {
+  test('Agent launch submits only the preset identity without client-owned route or binding facts', () => {
     const send = readSource(new URL('./hooks/useGuidSend.ts', import.meta.url));
     const payload = extractObjectArgument(
       send,
       'ipcBridge.agentPlatform.sessions.create.invoke'
     );
 
-    expect(topLevelKeys(payload)).toEqual(['preset_id', 'title', 'model']);
+    expect(topLevelKeys(payload)).toEqual(['preset_id', 'title']);
     expect(payload.includes('preset_id: launchPreset.preset_id')).toBe(true);
     expect(payload.includes('title: entryPlan.conversationName')).toBe(true);
 

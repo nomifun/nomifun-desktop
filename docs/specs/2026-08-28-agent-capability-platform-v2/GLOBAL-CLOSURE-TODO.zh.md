@@ -690,3 +690,15 @@ Tool consumer 5、MiniApp Platform 29 及既有 application/backup/service suite
 `M1-U-01`、`M1-V-01`、`N1-V-01` 或 `RC-WIN-01`；真实 MiniApp callable
 contribution 的产品 E2E、旧生产链物理清理、Desktop accessibility/NSIS Candidate
 仍按依赖顺序继续。
+
+## 2026-09-09 Guid AgentPreset 启动链路收口
+
+修正首页 Guid 的产品链路：普通 Nomi 才显示模型选择器并要求显式模型；已保存
+AgentPreset/官方模板进入冻结 Snapshot 流程时不再显示或提交客户端模型，Session
+Create 只提交 `preset_id + title`，模型由稳定 Revision/Snapshot 在服务端解析。
+官方模板准备允许省略客户端模型，服务端使用 default Chat route；Preset 会话不再
+因本机没有当前普通会话模型而被前端错误阻断。
+
+对应 `gate:agent-v2 --self-test`、Guid 结构/行为测试、UI production build 均通过。
+全量 UI typecheck 仍有仓库既有 Arco/隐式 any 基线错误，未把无关错误扩大为本轮
+修复范围。该修正不改变 MiniApp/Plugin 的 Snapshot 或跨平台边界。

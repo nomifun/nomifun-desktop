@@ -723,3 +723,14 @@ digest、epoch、owner、action 和 typed resource 漂移均 fail closed。
 受影响 crate check、定向 rustfmt 和 `git diff --check` 通过。该子切片仍不关闭
 真实 callable contribution 产品 E2E、`M1-U-01`、`M1-V-01`、`N1-V-01` 或
 `RC-WIN-01`；旧 MiniApp/Extension 生产链清理和 Windows Candidate 继续后置。
+
+## 2026-09-09 AgentPreset 启动入口模型边界修正
+
+Guid 入口现按 05 §15.5/15.6 执行：默认 Nomi 保留模型选择器；AgentPreset/官方
+模板模式隐藏模型选择器，创建 Session 时只发送 `preset_id` 和 `title`，服务端从
+稳定 Revision/Snapshot 取得冻结模型。官方模板准备可省略模型并由 default Chat
+route 完成首次配置；普通 Nomi 没有模型时仍明确阻断。
+
+`gate:agent-v2 --self-test`、Guid 结构/行为测试和 UI production build 已通过；
+全量 UI typecheck 的既有基线错误仍未纳入本轮。该项是产品入口纠偏，不关闭
+`N1-U-01`、`M1-U-01` 或 Windows Candidate。
