@@ -32,9 +32,8 @@ nomifun-channel.workspace = true
 # Filesystem + shell-open domain capabilities.
 nomifun-file.workspace = true
 nomifun-shell.workspace = true
-# MCP-server + extensions/hub/skills domain capabilities.
+# MCP-server and Skill library capabilities.
 nomifun-mcp.workspace = true
-nomifun-extension.workspace = true
 nomifun-skill-library.workspace = true
 axum.workspace = true
 tokio.workspace = true

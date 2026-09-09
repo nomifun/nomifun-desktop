@@ -390,15 +390,15 @@ mod tests {
 
     /// Floor on the registered-capability count. A drop below this almost always
     /// means a `caps_*` module's `register()` call was accidentally removed from
-    /// `build()` (or a domain module deleted). Bump the floor when capabilities
-    /// are intentionally removed. Host UI capabilities are currently absent
-    /// from every build until a canonical typed host-operation port is wired.
+    /// `build()` (or a domain module deleted). Bump or lower the floor only when
+    /// capabilities are intentionally changed. The retired legacy management
+    /// tools are no longer part of the Gateway registry.
     #[test]
     fn registry_capability_count_floor() {
         let n = Registry::global().len();
         assert!(
-            n >= 128,
-            "capability count fell to {n} (floor 129) — a caps_* module may have lost its \
+            n >= 123,
+            "capability count fell to {n} (floor 123) — a caps_* module may have lost its \
              register() call in Registry::build(), or a domain was removed. If intentional, lower the floor."
         );
     }

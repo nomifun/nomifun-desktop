@@ -1,7 +1,7 @@
-//! MCP-servers, Extensions, Skills, and Hub management capabilities.
+//! MCP server and Skill library capabilities.
 //!
-//! Lets the LLM agent manage the desktop's MCP server registry, enable/disable
-//! extensions, import/delete skills, and install extensions from the Hub.
+//! These tools operate only on services with an explicit owner in the current
+//! Gateway composition: the MCP server registry and the local Skill library.
 //!
 //! ## Assumed CompatibilityCapabilityHost fields (parent must wire):
 //!
@@ -9,32 +9,16 @@
 //!    Clone of `states.mcp.config_service` (from `McpRouterState`).
 //!    Crate: `nomifun-mcp`, type: `nomifun_mcp::McpConfigService`.
 //!
-//! - `extension_registry: ExtensionRegistry`
-//!    Clone of `states.extension.registry` (from `ExtensionRouterState`).
-//!    Crate: `nomifun-extension`, type: `nomifun_extension::ExtensionRegistry`.
-//!
-//! - `hub_installer: HubInstaller`
-//!    Clone of `states.hub.installer` (from `HubRouterState`).
-//!    Crate: `nomifun-extension`, type: `nomifun_extension::hub::installer::HubInstaller`.
-//!
-//! - `hub_index_manager: HubIndexManager`
-//!    Clone of `states.hub.index_manager` (from `HubRouterState`).
-//!    Crate: `nomifun-extension`, type: `nomifun_extension::hub::index_manager::HubIndexManager`.
-//!
 //! - `skill_paths: SkillPaths`
 //!    Clone of `states.skill.skill_paths` (from `SkillRouterState`).
 //!    Crate: `nomifun-skill-library`, type: `nomifun_skill_library::SkillPaths`.
 //!
-//! ## SKIPPED tools (listed at the bottom of this file):
+//! ## Skipped tools:
 //!
-//! - `nomi_mcp_test_connection` — requires building a `McpServerTransport`
-//!   from the API `McpTransport` enum (tagged union with three variants), which
-//!   is awkward to expose in a flat JSON schema for an LLM. The route handler
-//!   also persists test results back to the config service by server id. Skipped
-//!   until a clear agent use case emerges.
-//!
-//! - `nomi_skill_set_tags` — needs `skill_tag_repo` + `builtin_skill_tags`;
-//!   low agent utility (user-facing tagging).
+//! - `nomi_mcp_test_connection` requires an additional connection-test service
+//!   and persists test results; the desktop UI remains its owner.
+//! - `nomi_skill_set_tags` is a user-facing classification operation with no
+//!   agent-owned workflow.
 
 use std::{collections::HashMap, future::Future, sync::Arc};
 
@@ -135,31 +119,6 @@ struct McpToggleServerParams {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// Extension param structs
-// ══════════════════════════════════════════════════════════════════════════════
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ExtensionListParams {}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ExtensionEnableParams {
-    /// Extension name (from nomi_extension_list).
-    name: String,
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ExtensionDisableParams {
-    /// Extension name (from nomi_extension_list).
-    name: String,
-    /// Optional reason for disabling.
-    #[serde(default)]
-    reason: Option<String>,
-}
-
-// ══════════════════════════════════════════════════════════════════════════════
 // Skill param structs
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -182,30 +141,12 @@ struct SkillDeleteParams {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// Hub param structs
-// ══════════════════════════════════════════════════════════════════════════════
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct HubListExtensionsParams {}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct HubInstallExtensionParams {
-    /// Extension name from the Hub index (from nomi_hub_list_extensions).
-    name: String,
-}
-
-// ══════════════════════════════════════════════════════════════════════════════
 // MCP Server handlers
 // ══════════════════════════════════════════════════════════════════════════════
 
 #[derive(Clone)]
-struct McpCapabilityDeps {
+struct McpSkillCapabilityDeps {
     config: nomifun_mcp::McpConfigService,
-    extensions: nomifun_extension::ExtensionRegistry,
-    hub_index: nomifun_extension::HubIndexManager,
-    hub_installer: nomifun_extension::HubInstaller,
     skill_paths: nomifun_skill_library::SkillPaths,
 }
 
@@ -214,7 +155,7 @@ fn adapt<P, F, Fut>(
 ) -> impl Fn(Arc<CompatibilityCapabilityHost>, CallerCtx, P) -> Fut + Send + Sync + 'static
 where
     P: Send + 'static,
-    F: Fn(Arc<McpCapabilityDeps>, CallerCtx, P) -> Fut
+    F: Fn(Arc<McpSkillCapabilityDeps>, CallerCtx, P) -> Fut
         + Send
         + Sync
         + Clone
@@ -223,11 +164,8 @@ where
 {
     move |deps, ctx, params| {
         handler(
-            Arc::new(McpCapabilityDeps {
+            Arc::new(McpSkillCapabilityDeps {
                 config: deps.mcp_config_service.clone(),
-                extensions: deps.extension_registry.clone(),
-                hub_index: deps.hub_index_manager.clone(),
-                hub_installer: deps.hub_installer.clone(),
                 skill_paths: deps.skill_paths.clone(),
             }),
             ctx,
@@ -237,7 +175,7 @@ where
 }
 
 async fn mcp_list_servers(
-    deps: Arc<McpCapabilityDeps>,
+    deps: Arc<McpSkillCapabilityDeps>,
     _ctx: CallerCtx,
     _p: McpListServersParams,
 ) -> Value {
@@ -248,7 +186,7 @@ async fn mcp_list_servers(
 }
 
 async fn mcp_add_server(
-    deps: Arc<McpCapabilityDeps>,
+    deps: Arc<McpSkillCapabilityDeps>,
     _ctx: CallerCtx,
     p: McpAddServerParams,
 ) -> Value {
@@ -266,7 +204,7 @@ async fn mcp_add_server(
 }
 
 async fn mcp_edit_server(
-    deps: Arc<McpCapabilityDeps>,
+    deps: Arc<McpSkillCapabilityDeps>,
     _ctx: CallerCtx,
     p: McpEditServerParams,
 ) -> Value {
@@ -288,7 +226,7 @@ async fn mcp_edit_server(
 }
 
 async fn mcp_delete_server(
-    deps: Arc<McpCapabilityDeps>,
+    deps: Arc<McpSkillCapabilityDeps>,
     _ctx: CallerCtx,
     p: McpDeleteServerParams,
 ) -> Value {
@@ -306,7 +244,7 @@ async fn mcp_delete_server(
 }
 
 async fn mcp_toggle_server(
-    deps: Arc<McpCapabilityDeps>,
+    deps: Arc<McpSkillCapabilityDeps>,
     _ctx: CallerCtx,
     p: McpToggleServerParams,
 ) -> Value {
@@ -321,62 +259,11 @@ async fn mcp_toggle_server(
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// Extension handlers
-// ══════════════════════════════════════════════════════════════════════════════
-
-async fn extension_list(
-    deps: Arc<McpCapabilityDeps>,
-    _ctx: CallerCtx,
-    _p: ExtensionListParams,
-) -> Value {
-    let summaries = deps.extensions.get_loaded_extensions().await;
-    let items: Vec<Value> = summaries
-        .into_iter()
-        .map(|s| {
-            json!({
-                "name": s.name,
-                "version": s.version,
-                "display_name": s.display_name,
-                "description": s.description,
-                "enabled": s.enabled,
-            })
-        })
-        .collect();
-    ok(items)
-}
-
-async fn extension_enable(
-    deps: Arc<McpCapabilityDeps>,
-    _ctx: CallerCtx,
-    p: ExtensionEnableParams,
-) -> Value {
-    match deps.extensions.enable_extension(&p.name).await {
-        Ok(()) => ok(json!({ "enabled": true, "name": p.name })),
-        Err(e) => json!({ "error": e.to_string() }),
-    }
-}
-
-async fn extension_disable(
-    deps: Arc<McpCapabilityDeps>,
-    _ctx: CallerCtx,
-    p: ExtensionDisableParams,
-) -> Value {
-    match deps
-        .extensions
-        .disable_extension(&p.name, p.reason.as_deref())
-        .await
-    {
-        Ok(()) => ok(json!({ "disabled": true, "name": p.name })),
-        Err(e) => json!({ "error": e.to_string() }),
-    }
-}
-
-// ══════════════════════════════════════════════════════════════════════════════
 // Skill handlers
 // ══════════════════════════════════════════════════════════════════════════════
 
 async fn skill_list(
-    deps: Arc<McpCapabilityDeps>,
+    deps: Arc<McpSkillCapabilityDeps>,
     _ctx: CallerCtx,
     _p: SkillListParams,
 ) -> Value {
@@ -399,7 +286,7 @@ async fn skill_list(
 }
 
 async fn skill_import(
-    deps: Arc<McpCapabilityDeps>,
+    deps: Arc<McpSkillCapabilityDeps>,
     _ctx: CallerCtx,
     p: SkillImportParams,
 ) -> Value {
@@ -411,7 +298,7 @@ async fn skill_import(
 }
 
 async fn skill_delete(
-    deps: Arc<McpCapabilityDeps>,
+    deps: Arc<McpSkillCapabilityDeps>,
     _ctx: CallerCtx,
     p: SkillDeleteParams,
 ) -> Value {
@@ -422,52 +309,10 @@ async fn skill_delete(
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// Hub handlers
-// ══════════════════════════════════════════════════════════════════════════════
-
-async fn hub_list_extensions(
-    deps: Arc<McpCapabilityDeps>,
-    _ctx: CallerCtx,
-    _p: HubListExtensionsParams,
-) -> Value {
-    let entries = deps.hub_index.load_index().await;
-    let items: Vec<Value> = entries
-        .into_iter()
-        .map(|e| {
-            let status_str = serde_json::to_value(&e.status)
-                .ok()
-                .and_then(|v| v.as_str().map(String::from))
-                .unwrap_or_else(|| "notInstalled".to_string());
-            json!({
-                "name": e.name,
-                "version": e.version,
-                "display_name": e.display_name,
-                "description": e.description,
-                "author": e.author,
-                "status": status_str,
-            })
-        })
-        .collect();
-    ok(items)
-}
-
-async fn hub_install_extension(
-    deps: Arc<McpCapabilityDeps>,
-    _ctx: CallerCtx,
-    p: HubInstallExtensionParams,
-) -> Value {
-    let result = deps.hub_installer.install(&p.name).await;
-    ok(json!({
-        "success": result.success,
-        "msg": result.msg,
-    }))
-}
-
-// ══════════════════════════════════════════════════════════════════════════════
 // Registration
 // ══════════════════════════════════════════════════════════════════════════════
 
-/// Register the MCP/Extension/Skill/Hub domain capabilities.
+/// Register the MCP server and Skill library capabilities.
 pub(crate) fn register(out: &mut Vec<Capability>) {
     // ── MCP Servers ──────────────────────────────────────────────────────
 
@@ -521,38 +366,6 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         adapt(mcp_toggle_server),
     ));
 
-    // ── Extensions ───────────────────────────────────────────────────────
-
-    out.push(Capability::new::<ExtensionListParams, _, _>(
-        CapabilityMeta::new(
-            "nomi_extension_list",
-            "extension",
-            "List all loaded extensions (name, version, enabled state).",
-            EffectClass::Read,
-        ),
-        adapt(extension_list),
-    ));
-
-    out.push(Capability::new::<ExtensionEnableParams, _, _>(
-        CapabilityMeta::new(
-            "nomi_extension_enable",
-            "extension",
-            "Enable a disabled extension by name.",
-            EffectClass::Write,
-        ),
-        adapt(extension_enable),
-    ));
-
-    out.push(Capability::new::<ExtensionDisableParams, _, _>(
-        CapabilityMeta::new(
-            "nomi_extension_disable",
-            "extension",
-            "Disable an enabled extension by name (with optional reason).",
-            EffectClass::Write,
-        ),
-        adapt(extension_disable),
-    ));
-
     // ── Skills ───────────────────────────────────────────────────────────
 
     out.push(Capability::new::<SkillListParams, _, _>(
@@ -584,28 +397,6 @@ pub(crate) fn register(out: &mut Vec<Capability>) {
         ),
         adapt(skill_delete),
     ));
-
-    // ── Hub ──────────────────────────────────────────────────────────────
-
-    out.push(Capability::new::<HubListExtensionsParams, _, _>(
-        CapabilityMeta::new(
-            "nomi_hub_list_extensions",
-            "hub",
-            "List extensions available in the Hub marketplace (name, version, install status).",
-            EffectClass::Read,
-        ),
-        adapt(hub_list_extensions),
-    ));
-
-    out.push(Capability::new::<HubInstallExtensionParams, _, _>(
-        CapabilityMeta::new(
-            "nomi_hub_install_extension",
-            "hub",
-            "Install an extension from the Hub by name. Downloads and registers it locally.",
-            EffectClass::Write,
-        ),
-        adapt(hub_install_extension),
-    ));
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -631,6 +422,36 @@ mod tests {
     use crate::registry::{Registry, Surface};
 
     const MCP_SERVER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000123";
+
+    #[test]
+    fn registration_contains_only_owned_mcp_and_skill_tools() {
+        let mut capabilities = Vec::new();
+        register(&mut capabilities);
+
+        let names: Vec<_> = capabilities
+            .iter()
+            .map(|capability| capability.meta.name)
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "nomi_mcp_list_servers",
+                "nomi_mcp_add_server",
+                "nomi_mcp_edit_server",
+                "nomi_mcp_delete_server",
+                "nomi_mcp_toggle_server",
+                "nomi_skill_list",
+                "nomi_skill_import",
+                "nomi_skill_delete",
+            ]
+        );
+        assert!(
+            capabilities
+                .iter()
+                .all(|capability| capability.meta.domain == "mcp"
+                    || capability.meta.domain == "skill")
+        );
+    }
 
     #[test]
     fn mcp_server_mutation_params_accept_only_canonical_uuid_v7_business_ids() {
