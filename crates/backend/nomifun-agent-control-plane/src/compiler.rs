@@ -4,10 +4,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use nomifun_agent_contracts::{
     AgentPresetRevision, AgentPresetRevisionPayload, CanonicalErrorCode,
-    CapabilityConsumer, ContributionId, ContributionLock, ContributionSourceKind, DigestHex,
-    McpToolCapabilityMapping, OfficialPresetKey, OperationId, PluginMountId,
-    PresetRevisionRef, PrincipalRef, ResolvedCapability, ResolvedSnapshotEnvelope,
-    PluginSourceKind, PluginSourceMetadata, SkillRef,
+    CapabilityCatalogPublication, CapabilityConsumer, CapabilityRef, ContributionId,
+    ContributionLock, ContributionSourceKind, DigestHex, McpToolCapabilityMapping,
+    MiniAppCapabilityCatalogPublication, OfficialPresetKey, OperationId, PluginMountId,
+    PresetRevisionRef, PrincipalRef, ResolvedCapability, ResolvedMiniAppCapability,
+    ResolvedSnapshotEnvelope, PluginSourceKind, PluginSourceMetadata, SkillRef,
     StableSourceIdentity, UserId, VersionString, digest_payload,
 };
 use nomifun_agent_kernel::{
@@ -145,6 +146,11 @@ impl PresetPreviewCompiler {
         } else {
             Some(self.canonical_inputs()?)
         };
+        let miniapp_capabilities = if clean {
+            Vec::new()
+        } else {
+            resolved_miniapp_capabilities_for_payload(&payload, catalog)?
+        };
         let contribution_locks = if clean {
             current_revision
                 .map(|revision| revision.contribution_locks.clone())
@@ -248,6 +254,7 @@ impl PresetPreviewCompiler {
                 audience: request.audience.clone(),
                 created_at_ms: now_ms(),
                 resolver_run_id: OperationId::from(Uuid::now_v7().to_string()),
+                miniapp_capabilities,
             };
             match KernelAgentPresetCompiler::compile(&registry, &environment, request) {
                 Ok(snapshot) => Some(snapshot),
@@ -412,6 +419,156 @@ fn validate_direct_catalog_availability(
     }
 }
 
+fn resolved_miniapp_capabilities_for_payload(
+    payload: &AgentPresetRevisionPayload,
+    catalog: &CatalogSnapshot,
+) -> Result<Vec<ResolvedMiniAppCapability>, ControlPlaneError> {
+    let mut capabilities = Vec::new();
+    for selection in payload
+        .initial_capabilities
+        .iter()
+        .chain(&payload.on_demand_capabilities)
+    {
+        if let Some(capability) =
+            resolved_miniapp_capability_for_selection(selection, catalog)?
+        {
+            capabilities.push(capability);
+        }
+    }
+    capabilities.sort_by(|left, right| left.capability.cmp(&right.capability));
+    Ok(capabilities)
+}
+
+fn resolved_miniapp_capability_for_selection(
+    selection: &nomifun_agent_contracts::CapabilitySelection,
+    catalog: &CatalogSnapshot,
+) -> Result<Option<ResolvedMiniAppCapability>, ControlPlaneError> {
+    let Some((publication, capability)) =
+        miniapp_publication_for(catalog, &selection.capability)?
+    else {
+        return Ok(None);
+    };
+    let operation_lock = miniapp_catalog_operation_lock(publication, capability)?;
+    let manifest = &capability.manifest;
+    let required_resource_kinds = capability.entry.typed_resource_kinds.clone();
+    if required_resource_kinds != manifest.contributions.resource_kinds {
+        return Err(miniapp_catalog_error(format!(
+            "MiniApp capability {}@{} has inconsistent typed resource requirements",
+            selection.capability.id.as_ref(),
+            selection.capability.version.as_ref()
+        )));
+    }
+
+    let resolved = ResolvedMiniAppCapability {
+        capability: capability.entry.capability.clone(),
+        source_package: manifest.package.clone(),
+        contribution_id: capability.entry.contribution_id.clone(),
+        contribution_lock: operation_lock.contribution,
+        miniapp_id: publication.miniapp_id.clone(),
+        active_release: publication.active_release.clone(),
+        active_release_epoch: publication.active_release_epoch,
+        catalog_digest: publication.catalog_digest.clone(),
+        display_name: manifest.display.name.clone(),
+        description: manifest.display.description.clone(),
+        actions: manifest.contributions.actions.clone(),
+        required_resource_kinds,
+        action_allowlist: selection.action_allowlist.clone(),
+    };
+    resolved
+        .validate()
+        .map_err(|error| miniapp_catalog_error(error.message))?;
+    Ok(Some(resolved))
+}
+
+fn miniapp_publication_for<'a>(
+    catalog: &'a CatalogSnapshot,
+    reference: &CapabilityRef,
+) -> Result<
+    Option<(
+        &'a MiniAppCapabilityCatalogPublication,
+        &'a CapabilityCatalogPublication,
+    )>,
+    ControlPlaneError,
+> {
+    let has_kernel_materialization =
+        catalog.materialized_capability(reference).is_some();
+    let mut match_value = None;
+    for publication in catalog.miniapp_publications.values() {
+        for capability in &publication.capabilities {
+            if capability.entry.capability != *reference {
+                continue;
+            }
+            if match_value.is_some() {
+                return Err(miniapp_catalog_error(format!(
+                    "MiniApp capability {}@{} appears in multiple publications",
+                    reference.id.as_ref(),
+                    reference.version.as_ref()
+                )));
+            }
+            match_value = Some((publication, capability));
+        }
+    }
+    if has_kernel_materialization && match_value.is_some() {
+        return Err(miniapp_catalog_error(format!(
+            "capability {}@{} is present in both the Kernel registry and a MiniApp publication",
+            reference.id.as_ref(),
+            reference.version.as_ref()
+        )));
+    }
+    Ok(match_value)
+}
+
+fn miniapp_catalog_operation_lock(
+    publication: &MiniAppCapabilityCatalogPublication,
+    capability: &CapabilityCatalogPublication,
+) -> Result<nomifun_agent_contracts::CapabilityOperationLock, ControlPlaneError> {
+    publication
+        .validate()
+        .map_err(|error| miniapp_catalog_error(error.to_string()))?;
+    capability
+        .validate()
+        .map_err(|error| miniapp_catalog_error(error.to_string()))?;
+    let operation_lock = capability
+        .entry
+        .operation_lock(CapabilityConsumer::Agent)
+        .map_err(|error| {
+            ControlPlaneError::canonical(
+                error.code(),
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                error.to_string(),
+            )
+        })?;
+    operation_lock
+        .validate()
+        .map_err(|error| miniapp_catalog_error(error.to_string()))?;
+    let contribution = &operation_lock.contribution;
+    if operation_lock.capability != capability.entry.capability
+        || contribution.source_kind != ContributionSourceKind::MiniAppActiveRelease
+        || contribution.miniapp_id.as_ref() != Some(&publication.miniapp_id)
+        || contribution.mount_id.is_some()
+        || contribution.mcp_binding_id.is_some()
+        || contribution.contribution_id != capability.entry.contribution_id
+        || contribution.contract_digest != capability.entry.contract_digest
+        || operation_lock.target_artifact_digest.as_ref()
+            != Some(&publication.active_release.release_digest)
+    {
+        return Err(miniapp_catalog_error(format!(
+            "Catalog operation lock for MiniApp capability {}@{} does not bind the exact Active Release",
+            capability.entry.capability.id.as_ref(),
+            capability.entry.capability.version.as_ref()
+        )));
+    }
+    Ok(operation_lock)
+}
+
+fn miniapp_catalog_error(message: impl Into<String>) -> ControlPlaneError {
+    ControlPlaneError::canonical(
+        "CAPABILITY_CATALOG_INVALID",
+        axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+        message,
+    )
+}
+
 fn contribution_locks_for_payload(
     payload: &AgentPresetRevisionPayload,
     catalog: &CatalogSnapshot,
@@ -425,6 +582,15 @@ fn contribution_locks_for_payload(
         .iter()
         .chain(payload.on_demand_capabilities.iter())
     {
+        if let Some(miniapp_capability) =
+            resolved_miniapp_capability_for_selection(selection, catalog)?
+        {
+            let contribution_id = miniapp_capability.contribution_id.clone();
+            if seen.insert(contribution_id.as_ref().to_owned()) {
+                locks.push(miniapp_capability.contribution_lock);
+            }
+            continue;
+        }
         let Some(catalog_capability) =
             catalog.materialized_capability(&selection.capability)
         else {
@@ -1074,14 +1240,17 @@ pub fn revision_api(
 mod tests {
     use super::*;
     use nomifun_agent_contracts::{
+        ActionId, ArtifactId, CapabilityActionDescriptor,
         CapabilityCatalogMaterialization, CapabilityCatalogMaterializer,
         CapabilityContributions, CapabilityId, CapabilityKind,
         CapabilityManifest, CapabilityOwner, CapabilityProvenance,
         CapabilityRef, CapabilityReleaseState, CapabilitySelection,
-        CatalogAvailability, LocalizedMetadata, LogicalArtifactRef,
-        McpBindingId, McpServerId, McpToolCapabilityMapping, McpToolKey,
-        PackageId, PackageRef, PluginSourceMetadata, RuntimeProfileKind,
-        SkillDefinition, SkillId, StrictJsonValue,
+        CanonicalSchemaRef, CatalogAvailability, EffectClass, LocalizedMetadata,
+        LogicalArtifactRef, McpBindingId, McpServerId, McpToolCapabilityMapping,
+        McpToolKey, MiniAppId, MiniAppReleaseId, MiniAppReleaseRef, PackageId,
+        PackageRef, PlatformConstraint, PluginSourceMetadata, ResourceKind,
+        RuntimeProfileKind, SkillDefinition, SkillId, StrictJsonValue,
+        ToolPresentationKind,
         capability_surface_declarations,
     };
     use nomifun_agent_kernel::{
@@ -1353,5 +1522,156 @@ mod tests {
             contribution_locks_for_payload(&payload, &catalog, &registry)
                 .unwrap_err();
         assert_eq!(error.code().as_ref(), "CAPABILITY_CATALOG_INVALID");
+    }
+
+    #[test]
+    fn miniapp_contribution_lock_uses_catalog_without_kernel_materialization() {
+        let package = PackageRef {
+            id: PackageId::from("miniapp.example"),
+            version: VersionString::from("1.0.0"),
+        };
+        let miniapp_id = MiniAppId::from("miniapp.example");
+        let capability_ref = CapabilityRef {
+            id: CapabilityId::from("miniapp.example.search"),
+            version: VersionString::from("1.0.0"),
+        };
+        let action = CapabilityActionDescriptor {
+            action_id: ActionId::from("miniapp.example.search.invoke"),
+            input_schema: CanonicalSchemaRef::from("schema://miniapp.example/search-input@1"),
+            output_schema: CanonicalSchemaRef::from(
+                "schema://miniapp.example/search-output@1",
+            ),
+            effect_class: EffectClass::ReadSensitive,
+            presentation: ToolPresentationKind::FunctionTool,
+        };
+        let manifest = CapabilityManifest {
+            id: capability_ref.id.clone(),
+            contribution_id: ContributionId::from("capability:miniapp.example.search"),
+            version: capability_ref.version.clone(),
+            kind: CapabilityKind::Tool,
+            package: package.clone(),
+            display: LocalizedMetadata {
+                name: "MiniApp Search".to_owned(),
+                description: "Search through the selected resource.".to_owned(),
+                localized_names: BTreeMap::new(),
+                localized_descriptions: BTreeMap::new(),
+            },
+            requires: Vec::new(),
+            conflicts: Vec::new(),
+            supported_surfaces: capability_surface_declarations(
+                ["desktop"],
+                [CapabilityConsumer::Agent],
+            ),
+            requires_runtime_features: Vec::new(),
+            supported_platforms: vec![PlatformConstraint::Any],
+            config_schema: StrictJsonValue(json!({"type": "object"})),
+            contributions: CapabilityContributions {
+                actions: vec![action.clone()],
+                resource_kinds: BTreeSet::from([ResourceKind::from("knowledge.base")]),
+                ..Default::default()
+            },
+        };
+        let active_release = MiniAppReleaseRef {
+            release_id: MiniAppReleaseId::from("release-1"),
+            artifact_id: ArtifactId::from("artifact-1"),
+            release_digest: DigestHex::from("a".repeat(64)),
+            manifest_digest: DigestHex::from("b".repeat(64)),
+        };
+        let entry = CapabilityCatalogMaterializer::materialize(
+            CapabilityCatalogMaterialization {
+                manifest: manifest.clone(),
+                provenance: CapabilityProvenance {
+                    owner: CapabilityOwner::Package {
+                        package: package.clone(),
+                    },
+                    source_kind: ContributionSourceKind::MiniAppActiveRelease,
+                    source_identity: StableSourceIdentity::from("miniapp:miniapp.example"),
+                    mount_id: None,
+                    miniapp_id: Some(miniapp_id.clone()),
+                    mcp_binding_id: None,
+                    artifact_digest: Some(active_release.release_digest.clone()),
+                },
+                release_state: CapabilityReleaseState::PublishedActive,
+                availability: BTreeMap::from([(
+                    CapabilityConsumer::Agent,
+                    CatalogAvailability::Active,
+                )]),
+            },
+        )
+        .unwrap();
+        let mut publication = MiniAppCapabilityCatalogPublication {
+            miniapp_id: miniapp_id.clone(),
+            active_release: active_release.clone(),
+            active_release_epoch: 7,
+            catalog_digest: DigestHex::from("0".repeat(64)),
+            capabilities: vec![CapabilityCatalogPublication {
+                manifest,
+                entry: entry.clone(),
+            }],
+        };
+        publication.catalog_digest = publication.computed_catalog_digest().unwrap();
+        publication.validate().unwrap();
+
+        let catalog = CatalogSnapshot {
+            capabilities: Vec::new(),
+            formal_capability_entries: BTreeMap::from([(
+                entry.capability.clone(),
+                entry.clone(),
+            )]),
+            miniapp_publications: BTreeMap::from([(
+                miniapp_id.clone(),
+                publication.clone(),
+            )]),
+            skills: Vec::new(),
+            mcp_tools: Vec::new(),
+            unavailable_capabilities: BTreeMap::new(),
+            service_key_diagnostics: Vec::new(),
+        };
+        catalog.validate().unwrap();
+
+        let action_allowlist = BTreeSet::from([action.action_id.clone()]);
+        let payload = AgentPresetRevisionPayload {
+            schema_version: VersionString::from("1.0.0"),
+            model_route_refs: BTreeMap::new(),
+            chat_route_records: BTreeMap::new(),
+            initial_capabilities: vec![CapabilitySelection {
+                capability: capability_ref.clone(),
+                action_allowlist: action_allowlist.clone(),
+            }],
+            on_demand_capabilities: Vec::new(),
+            skill_bindings: Vec::new(),
+            system_role_provider_overrides: BTreeMap::new(),
+            persona: "MiniApp fixture".to_owned(),
+            instructions: "Use the exact Catalog lock.".to_owned(),
+            starter_prompts: Vec::new(),
+        };
+
+        let registry = MaterializedRegistry::empty();
+        let locks = contribution_locks_for_payload(&payload, &catalog, &registry).unwrap();
+        assert_eq!(locks, vec![ContributionLock {
+            source_kind: ContributionSourceKind::MiniAppActiveRelease,
+            source_identity: StableSourceIdentity::from("miniapp:miniapp.example"),
+            mount_id: None,
+            miniapp_id: Some(miniapp_id.clone()),
+            mcp_binding_id: None,
+            contribution_id: entry.contribution_id.clone(),
+            contract_digest: entry.contract_digest.clone(),
+        }]);
+
+        let resolved =
+            resolved_miniapp_capability_for_selection(&payload.initial_capabilities[0], &catalog)
+                .unwrap()
+                .unwrap();
+        assert_eq!(resolved.capability, capability_ref);
+        assert_eq!(resolved.miniapp_id, miniapp_id);
+        assert_eq!(resolved.active_release, active_release);
+        assert_eq!(resolved.active_release_epoch, 7);
+        assert_eq!(resolved.catalog_digest, publication.catalog_digest);
+        assert_eq!(resolved.source_package, package);
+        assert_eq!(resolved.actions, vec![action]);
+        assert_eq!(resolved.required_resource_kinds, BTreeSet::from([
+            ResourceKind::from("knowledge.base"),
+        ]));
+        assert_eq!(resolved.action_allowlist, action_allowlist);
     }
 }

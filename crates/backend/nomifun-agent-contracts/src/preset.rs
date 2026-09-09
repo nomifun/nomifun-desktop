@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::digest::{CanonicalDigestError, digest_payload};
 use crate::package::{
-    CapabilityRef, ExactRoleProviderRef, PackageRef, PluginSourceMetadata,
-    RoleProviderSelection, SkillRef, TargetPackageInventoryPayload,
+    CapabilityActionDescriptor, CapabilityRef, ExactRoleProviderRef, PackageRef,
+    PluginSourceMetadata, RoleProviderSelection, SkillRef,
+    TargetPackageInventoryPayload,
 };
 use crate::runtime::RuntimeProfileKind;
 use crate::{
@@ -16,6 +17,7 @@ use crate::{
     PrincipalRef, ResolvedSnapshotId, ResourceKind, RuntimeFeatureId,
     StableSourceIdentity, TypedResourceBindings, UserId, VersionString,
 };
+use crate::miniapp_m1::MiniAppReleaseRef;
 
 pub const CAPABILITY_NOT_MATERIALIZED: &str = "CAPABILITY_NOT_MATERIALIZED";
 pub const CAPABILITY_NOT_IN_PRESET: &str = "CAPABILITY_NOT_IN_PRESET";
@@ -454,6 +456,108 @@ impl ResolvedCapability {
     }
 }
 
+/// Exact executable facts for a Capability published by a MiniApp Active
+/// Release.
+///
+/// MiniApp capabilities are published into the shared Catalog but are not
+/// materialized in the Kernel Plugin Registry.  Keeping this projection
+/// separate from [`ResolvedCapability`] prevents a MiniApp Release from being
+/// represented as a fake Plugin mount while still freezing the manifest,
+/// release identity, publication digest, and action allowlist in the Agent
+/// Snapshot.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResolvedMiniAppCapability {
+    pub capability: CapabilityRef,
+    pub source_package: PackageRef,
+    pub contribution_id: ContributionId,
+    pub contribution_lock: ContributionLock,
+    pub miniapp_id: MiniAppId,
+    pub active_release: MiniAppReleaseRef,
+    pub active_release_epoch: u64,
+    pub catalog_digest: DigestHex,
+    pub display_name: String,
+    pub description: String,
+    pub actions: Vec<CapabilityActionDescriptor>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub required_resource_kinds: BTreeSet<ResourceKind>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub action_allowlist: BTreeSet<ActionId>,
+}
+
+impl ResolvedMiniAppCapability {
+    pub fn validate(&self) -> Result<(), PresetContractViolation> {
+        validate_non_empty_canonical_value(
+            self.source_package.id.as_ref(),
+            "source_package.id",
+        )?;
+        validate_non_empty_canonical_value(
+            self.source_package.version.as_ref(),
+            "source_package.version",
+        )?;
+        validate_non_empty_canonical_value(
+            self.contribution_id.as_ref(),
+            "contribution_id",
+        )?;
+        validate_non_empty_canonical_value(self.miniapp_id.as_ref(), "miniapp_id")?;
+        self.active_release
+            .validate()
+            .map_err(|error| snapshot_capability_violation(
+                &self.capability.id,
+                error.to_string(),
+            ))?;
+        if self.active_release_epoch == 0 {
+            return Err(snapshot_capability_violation(
+                &self.capability.id,
+                "active_release_epoch must be greater than zero",
+            ));
+        }
+        if !is_lowercase_hex_digest(&self.catalog_digest) {
+            return Err(snapshot_capability_violation(
+                &self.capability.id,
+                "catalog_digest must be 64 lowercase hexadecimal characters",
+            ));
+        }
+        self.contribution_lock.validate()?;
+        if self.contribution_lock.source_kind
+            != ContributionSourceKind::MiniAppActiveRelease
+            || self.contribution_lock.miniapp_id.as_ref() != Some(&self.miniapp_id)
+            || self.contribution_lock.mount_id.is_some()
+            || self.contribution_lock.mcp_binding_id.is_some()
+            || self.contribution_lock.contribution_id != self.contribution_id
+        {
+            return Err(snapshot_capability_violation(
+                &self.capability.id,
+                "MiniApp contribution lock has invalid provenance",
+            ));
+        }
+        let declared_actions = self.actions
+            .iter()
+            .map(|action| action.action_id.clone())
+            .collect::<BTreeSet<_>>();
+        if let Some(action_id) = self
+            .action_allowlist
+            .iter()
+            .find(|action_id| !declared_actions.contains(*action_id))
+        {
+            return Err(snapshot_capability_violation(
+                &self.capability.id,
+                format!(
+                    "MiniApp action allowlist contains undeclared action {}",
+                    action_id.as_ref()
+                ),
+            ));
+        }
+        if self.actions.is_empty() {
+            return Err(snapshot_capability_violation(
+                &self.capability.id,
+                "MiniApp capability must freeze at least one action",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CompactOnDemandCapabilityEntry {
@@ -538,6 +642,10 @@ pub struct ResolvedSnapshotContent {
     pub chat_route_identity: Option<ChatRouteIdentity>,
     pub initial_capabilities: Vec<ResolvedCapability>,
     pub on_demand_capabilities: Vec<ResolvedCapability>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub initial_miniapp_capabilities: Vec<ResolvedMiniAppCapability>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub on_demand_miniapp_capabilities: Vec<ResolvedMiniAppCapability>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub required_resource_kinds: BTreeSet<ResourceKind>,
     pub on_demand_activation_plans:
@@ -573,6 +681,10 @@ impl ResolvedSnapshotEnvelope {
             &self.content.initial_capabilities,
             &self.content.on_demand_capabilities,
         )?;
+        validate_resolved_miniapp_capability_sets(
+            &self.content.initial_miniapp_capabilities,
+            &self.content.on_demand_miniapp_capabilities,
+        )?;
         validate_snapshot_chat_route_identity(&self.content)?;
         validate_resolved_role_provider_locks(
             &self.content.resolved_role_providers,
@@ -594,6 +706,30 @@ impl ResolvedSnapshotEnvelope {
         }
         Ok(())
     }
+}
+
+fn validate_resolved_miniapp_capability_sets(
+    initial: &[ResolvedMiniAppCapability],
+    on_demand: &[ResolvedMiniAppCapability],
+) -> Result<(), PresetContractViolation> {
+    let mut ids = BTreeSet::new();
+    for (set_name, capabilities) in [
+        ("initial_miniapp_capabilities", initial),
+        ("on_demand_miniapp_capabilities", on_demand),
+    ] {
+        for capability in capabilities {
+            capability.validate()?;
+            if !ids.insert(capability.capability.id.clone()) {
+                return Err(snapshot_capability_violation(
+                    &capability.capability.id,
+                    format!(
+                        "MiniApp capability appears more than once across Snapshot sets ({set_name})"
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_resolved_role_provider_locks(
@@ -1413,6 +1549,8 @@ mod tests {
             chat_route_identity: None,
             initial_capabilities,
             on_demand_capabilities,
+            initial_miniapp_capabilities: Vec::new(),
+            on_demand_miniapp_capabilities: Vec::new(),
             required_resource_kinds: BTreeSet::new(),
             on_demand_activation_plans: BTreeMap::new(),
             compact_on_demand_index: Vec::new(),

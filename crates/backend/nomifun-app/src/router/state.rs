@@ -915,6 +915,7 @@ async fn build_nomi_core_agent_api_state(
                 Arc::clone(&kernel),
                 environment,
                 plugin.schema_resolver,
+                Arc::clone(&services.miniapp_application),
             ),
         ))?;
     let remote_repository: Arc<dyn IRemoteBindingRepository> = Arc::new(

@@ -3097,6 +3097,7 @@ impl AgentPlatform {
             &registry,
             &environment,
             CompileRequest {
+                miniapp_capabilities: Vec::new(),
                 revision,
                 principal: principal.clone(),
                 scene: scene.into(),

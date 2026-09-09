@@ -2826,6 +2826,7 @@ mod tests {
                 availability_evidence_revision: "wave2-host-test".to_owned(),
             },
             CompileRequest {
+                miniapp_capabilities: Vec::new(),
                 revision,
                 principal: principal.clone(),
                 scene: "wave2-host-test".to_owned(),

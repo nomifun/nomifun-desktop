@@ -1009,6 +1009,7 @@ fn compile_kernel_snapshot(
             availability_evidence_revision: BUILD_IDENTITY.to_owned(),
         },
         CompileRequest {
+            miniapp_capabilities: Vec::new(),
             revision,
             principal: owner_ref.clone(),
             scene: "agent_settings".to_owned(),

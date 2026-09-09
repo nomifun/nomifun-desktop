@@ -219,6 +219,8 @@ mod tests {
                     chat_route_identity: None,
                     initial_capabilities: Vec::new(),
                     on_demand_capabilities: Vec::new(),
+                    initial_miniapp_capabilities: Vec::new(),
+                    on_demand_miniapp_capabilities: Vec::new(),
                     required_resource_kinds: BTreeSet::new(),
                     on_demand_activation_plans: BTreeMap::from([(
                         capability.clone(),

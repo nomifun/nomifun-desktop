@@ -433,6 +433,7 @@ async fn service_product_runs_the_application_surface_bridge_lifecycle() {
                 version: VersionString::from("1.0.0"),
             },
             action_id: ActionId::from("miniapp.missing.invoke"),
+            action_allowlist: std::collections::BTreeSet::new(),
             active_release: nomifun_agent_contracts::MiniAppReleaseRef {
                 release_id: active.release_id.clone().into(),
                 artifact_id: active.artifact_id.clone().into(),

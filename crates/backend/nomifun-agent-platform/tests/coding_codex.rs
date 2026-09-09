@@ -159,6 +159,8 @@ fn resolved_content(contract: &CodingCodexContract) -> ResolvedSnapshotContent {
             .iter()
             .map(resolved_capability)
             .collect(),
+        initial_miniapp_capabilities: Vec::new(),
+        on_demand_miniapp_capabilities: Vec::new(),
         required_resource_kinds: BTreeSet::from([ResourceKind::from("workspace")]),
         on_demand_activation_plans: activation_plans,
         compact_on_demand_index,

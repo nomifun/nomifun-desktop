@@ -1437,6 +1437,34 @@
   },
   "agent_snapshot": {
     "$defs": {
+      "CapabilityActionDescriptor": {
+        "additionalProperties": false,
+        "properties": {
+          "action_id": {
+            "type": "string"
+          },
+          "effect_class": {
+            "$ref": "#/$defs/EffectClass"
+          },
+          "input_schema": {
+            "type": "string"
+          },
+          "output_schema": {
+            "type": "string"
+          },
+          "presentation": {
+            "$ref": "#/$defs/ToolPresentationKind"
+          }
+        },
+        "required": [
+          "action_id",
+          "input_schema",
+          "output_schema",
+          "effect_class",
+          "presentation"
+        ],
+        "type": "object"
+      },
       "ChatRouteIdentity": {
         "additionalProperties": false,
         "description": "The immutable identity of one model route as selected by one Preset\nRevision.\n\nThis is deliberately a value object rather than four independently-carried\nfields.  Every layer that resolves or admits a Chat route must carry this\nexact identity unchanged.",
@@ -1546,6 +1574,21 @@
         ],
         "type": "string"
       },
+      "EffectClass": {
+        "enum": [
+          "pure",
+          "read_local",
+          "read_sensitive",
+          "write_reversible",
+          "write_durable",
+          "execute_local",
+          "external_transmit",
+          "destructive",
+          "irreversible",
+          "physical"
+        ],
+        "type": "string"
+      },
       "ExactRoleContractRef": {
         "additionalProperties": false,
         "properties": {
@@ -1599,6 +1642,30 @@
         "required": [
           "id",
           "version"
+        ],
+        "type": "object"
+      },
+      "MiniAppReleaseRef": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "type": "string"
+          },
+          "manifest_digest": {
+            "type": "string"
+          },
+          "release_digest": {
+            "type": "string"
+          },
+          "release_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "release_id",
+          "artifact_id",
+          "release_digest",
+          "manifest_digest"
         ],
         "type": "object"
       },
@@ -1795,6 +1862,78 @@
         ],
         "type": "object"
       },
+      "ResolvedMiniAppCapability": {
+        "additionalProperties": false,
+        "description": "Exact executable facts for a Capability published by a MiniApp Active\nRelease.\n\nMiniApp capabilities are published into the shared Catalog but are not\nmaterialized in the Kernel Plugin Registry.  Keeping this projection\nseparate from [`ResolvedCapability`] prevents a MiniApp Release from being\nrepresented as a fake Plugin mount while still freezing the manifest,\nrelease identity, publication digest, and action allowlist in the Agent\nSnapshot.",
+        "properties": {
+          "action_allowlist": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "actions": {
+            "items": {
+              "$ref": "#/$defs/CapabilityActionDescriptor"
+            },
+            "type": "array"
+          },
+          "active_release": {
+            "$ref": "#/$defs/MiniAppReleaseRef"
+          },
+          "active_release_epoch": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "capability": {
+            "$ref": "#/$defs/ExactVersionRef"
+          },
+          "catalog_digest": {
+            "type": "string"
+          },
+          "contribution_id": {
+            "type": "string"
+          },
+          "contribution_lock": {
+            "$ref": "#/$defs/ContributionLock"
+          },
+          "description": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "miniapp_id": {
+            "type": "string"
+          },
+          "required_resource_kinds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "source_package": {
+            "$ref": "#/$defs/ExactVersionRef"
+          }
+        },
+        "required": [
+          "capability",
+          "source_package",
+          "contribution_id",
+          "contribution_lock",
+          "miniapp_id",
+          "active_release",
+          "active_release_epoch",
+          "catalog_digest",
+          "display_name",
+          "description",
+          "actions"
+        ],
+        "type": "object"
+      },
       "ResolvedRoleProviderLock": {
         "additionalProperties": false,
         "properties": {
@@ -1881,6 +2020,12 @@
             },
             "type": "array"
           },
+          "initial_miniapp_capabilities": {
+            "items": {
+              "$ref": "#/$defs/ResolvedMiniAppCapability"
+            },
+            "type": "array"
+          },
           "mcp_tool_locks": {
             "items": {
               "$ref": "#/$defs/ResolvedMcpToolLock"
@@ -1902,6 +2047,12 @@
           "on_demand_capabilities": {
             "items": {
               "$ref": "#/$defs/ResolvedCapability"
+            },
+            "type": "array"
+          },
+          "on_demand_miniapp_capabilities": {
+            "items": {
+              "$ref": "#/$defs/ResolvedMiniAppCapability"
             },
             "type": "array"
           },
@@ -2011,6 +2162,15 @@
         "enum": [
           "coding_native",
           "managed_minimal"
+        ],
+        "type": "string"
+      },
+      "ToolPresentationKind": {
+        "enum": [
+          "native_coding",
+          "function_tool",
+          "code_mode",
+          "hidden"
         ],
         "type": "string"
       }

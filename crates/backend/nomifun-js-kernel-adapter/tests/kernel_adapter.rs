@@ -416,6 +416,7 @@ fn compile_snapshot(
         materialized,
         &environment(materialized.registry_digest.clone()),
         CompileRequest {
+            miniapp_capabilities: Vec::new(),
             revision: revision(owner, materialized),
             principal: owner.clone(),
             scene: "fixture".into(),

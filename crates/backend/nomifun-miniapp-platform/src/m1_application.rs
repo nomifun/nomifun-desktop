@@ -128,6 +128,7 @@ pub struct MiniAppAgentCapabilityInvocation {
     pub miniapp_id: MiniAppId,
     pub capability: nomifun_agent_contracts::CapabilityRef,
     pub action_id: nomifun_agent_contracts::ActionId,
+    pub action_allowlist: BTreeSet<nomifun_agent_contracts::ActionId>,
     pub active_release: MiniAppReleaseRef,
     pub active_release_epoch: u64,
     pub catalog_digest: DigestHex,
@@ -402,6 +403,113 @@ impl MiniAppM1ApplicationService {
         self.service_runtime.read().await.clone()
     }
 
+    /// Resolve one exact input/output schema owned by a frozen MiniApp
+    /// capability projection. The lookup is intentionally application-owned:
+    /// MiniApp releases are not Kernel Plugin artifacts and their schema bytes
+    /// must remain behind the owner-scoped Release Store boundary.
+    pub async fn resolve_agent_capability_schema(
+        &self,
+        owner_user_id: &str,
+        capability: &nomifun_agent_contracts::ResolvedMiniAppCapability,
+        reference: &nomifun_agent_contracts::CanonicalSchemaRef,
+    ) -> Result<StrictJsonValue, MiniAppM1ApplicationError> {
+        validate_request_identity(owner_user_id, "owner_user_id")?;
+        capability
+            .validate()
+            .map_err(|error| MiniAppM1ApplicationError::Invalid(error.message))?;
+        let snapshot = self
+            .repository
+            .get(owner_user_id, capability.miniapp_id.as_ref())
+            .await?
+            .ok_or(MiniAppM1ApplicationError::NotFound)?;
+        if snapshot.product.lifecycle != "enabled"
+            || snapshot.product.active_release_epoch
+                != i64::try_from(capability.active_release_epoch).map_err(|_| {
+                    MiniAppM1ApplicationError::Invalid(
+                        "Active Release epoch exceeds SQLite range".into(),
+                    )
+                })?
+            || snapshot.active_release.as_ref().is_none_or(|release| {
+                release_contract_ref(release) != capability.active_release
+            })
+            || snapshot.product.materialized_catalog_digest != capability.catalog_digest.as_ref()
+        {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "MiniApp Agent schema request is stale against the Active Release".into(),
+            ));
+        }
+        let active = snapshot
+            .active_release
+            .as_ref()
+            .ok_or_else(|| MiniAppM1ApplicationError::Invalid("no Active Release".into()))?;
+        let stored = self.load_verified_release(
+            owner_user_id,
+            &snapshot.project.project_id,
+            active,
+        )?;
+        let publication = build_miniapp_catalog_publication(
+            capability.miniapp_id.clone(),
+            capability.active_release.clone(),
+            &stored.artifact.manifest.payload.contributions,
+        )?;
+        if publication.catalog_digest != capability.catalog_digest {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "MiniApp Agent schema request has a stale Catalog publication".into(),
+            ));
+        }
+        let published = publication
+            .capabilities
+            .iter()
+            .find(|item| item.entry.capability == capability.capability)
+            .ok_or_else(|| {
+                MiniAppM1ApplicationError::Invalid(
+                    "MiniApp Agent schema capability is not in the Active Release".into(),
+                )
+            })?;
+        if published.manifest.package != capability.source_package
+            || published.manifest.contribution_id != capability.contribution_id
+            || published.manifest.contributions.resource_kinds
+                != capability.required_resource_kinds
+            || published.manifest.contributions.actions != capability.actions
+            || published
+                .entry
+                .operation_lock(CapabilityConsumer::Agent)
+                .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?
+                .contribution
+                != capability.contribution_lock
+        {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "MiniApp Agent schema capability provenance drifted".into(),
+            ));
+        }
+        if !capability
+            .actions
+            .iter()
+            .any(|action| {
+                (&action.input_schema == reference || &action.output_schema == reference)
+                    && (capability.action_allowlist.is_empty()
+                        || capability.action_allowlist.contains(&action.action_id))
+            })
+        {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "MiniApp Agent schema ref is not declared by the frozen action allowlist".into(),
+            ));
+        }
+        stored
+            .artifact
+            .manifest
+            .payload
+            .schemas
+            .get(reference)
+            .cloned()
+            .ok_or_else(|| {
+                MiniAppM1ApplicationError::Invalid(format!(
+                    "MiniApp Release is missing canonical schema {}",
+                    reference.as_ref()
+                ))
+            })
+    }
+
     async fn invoke_agent_capability_inner(
         &self,
         request: MiniAppAgentCapabilityInvocation,
@@ -508,6 +616,13 @@ impl MiniAppM1ApplicationService {
         {
             return Err(MiniAppM1ApplicationError::Invalid(
                 "CAPABILITY_ACTION_NOT_DECLARED".into(),
+            ));
+        }
+        if !request.action_allowlist.is_empty()
+            && !request.action_allowlist.contains(&request.action_id)
+        {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "CAPABILITY_ACTION_NOT_ALLOWED".into(),
             ));
         }
         let spec = self
@@ -5976,13 +6091,21 @@ fn build_miniapp_catalog_publication(
         let consumers = manifest
             .supported_consumers()
             .map_err(MiniAppM1ApplicationError::Invalid)?;
+        let service_dispatch_available =
+            consumers.contains(&CapabilityConsumer::MiniAppService);
         let availability = consumers
             .iter()
             .copied()
             .map(|consumer| {
                 (
                     consumer,
-                    if consumer == CapabilityConsumer::MiniAppService {
+                    if service_dispatch_available
+                        && matches!(
+                            consumer,
+                            CapabilityConsumer::Agent
+                                | CapabilityConsumer::MiniAppService
+                        )
+                    {
                         CatalogAvailability::Active
                     } else {
                         CatalogAvailability::Unavailable {

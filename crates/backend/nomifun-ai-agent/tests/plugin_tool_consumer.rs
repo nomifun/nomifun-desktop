@@ -13,19 +13,21 @@ use nomi_tools::{
 };
 use nomi_types::tool::{JsonSchema, ToolResult};
 use nomifun_agent_contracts::{
-    ActionId, AgentPresetId, AgentPresetRevision,
+    ActionId, AgentPresetId, AgentPresetRevision, ArtifactId,
     AgentPresetRevisionPayload, AgentSessionId, ArtifactEnvelope,
     CancellationDescriptor, CapabilityActionDescriptor,
     CapabilityConsumer, CapabilityContributions, CapabilityId,
     CapabilityKind, CapabilityManifest, CapabilityRef,
-    CapabilitySelection, CanonicalSchemaRef,
+    CapabilitySelection, CanonicalSchemaRef, ContributionLock,
+    ContributionSourceKind,
     DeclaredServiceViewDescriptor, DigestHex, EffectClass, HostPortId,
     HostPortRef, InProcessEntrypointMetadata, LocalizedMetadata,
     ManagedTaskRegistrationDescriptor, OperationId, PackageContributions,
     PackageId, PackageManifest, PackageRef, PlatformConstraint,
     PluginBootCriticality, PluginBootState, PluginContextDescriptor,
     PluginDesiredState, PluginEffectiveState, PluginIdentityDescriptor,
-    PluginMountId, PluginRegistrarDescriptor, PluginRegistrarOperation,
+    MiniAppId, MiniAppReleaseId, MiniAppReleaseRef, PluginMountId,
+    PluginRegistrarDescriptor, PluginRegistrarOperation,
     PluginRegistrationMetadata, PluginSourceKind, PluginSourceMetadata,
     PluginStateHandleDescriptor, PluginStateMethod, PresetRevisionRef,
     PrincipalRef, RuntimeProfileKind, RuntimeTarget, ScopeKey,
@@ -42,7 +44,9 @@ use nomifun_agent_kernel::{
     PluginStatePersistence,
 };
 use nomifun_ai_agent::{
-    KernelNomiPluginToolSession, NomiPluginToolSchemaResolver,
+    KernelNomiPluginToolSession, NomiMiniAppToolInvoker,
+    NomiMiniAppToolInvocation, NomiMiniAppToolSchemaResolver,
+    NomiPluginToolError, NomiPluginToolSchemaResolver,
 };
 use serde_json::{Value, json};
 
@@ -121,6 +125,51 @@ impl CapabilityContextContributionFactory for EmptyContextFactory {
 #[derive(Default)]
 struct SchemaMap {
     schemas: BTreeMap<CanonicalSchemaRef, StrictJsonValue>,
+}
+
+#[derive(Default)]
+struct MiniAppSchemaMap {
+    schemas: BTreeMap<CanonicalSchemaRef, StrictJsonValue>,
+}
+
+#[async_trait]
+impl NomiMiniAppToolSchemaResolver for MiniAppSchemaMap {
+    async fn resolve(
+        &self,
+        _owner: &PrincipalRef,
+        _capability: &nomifun_agent_contracts::ResolvedMiniAppCapability,
+        reference: &CanonicalSchemaRef,
+    ) -> Result<StrictJsonValue, String> {
+        self.schemas
+            .get(reference)
+            .cloned()
+            .ok_or_else(|| format!("MiniApp schema {} is missing", reference.as_ref()))
+    }
+}
+
+#[derive(Default)]
+struct CapturingMiniAppInvoker {
+    calls: AtomicUsize,
+    action_ids: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl NomiMiniAppToolInvoker for CapturingMiniAppInvoker {
+    async fn invoke(
+        &self,
+        request: NomiMiniAppToolInvocation,
+    ) -> Result<StrictJsonValue, NomiPluginToolError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.action_ids
+            .lock()
+            .unwrap()
+            .push(request.action().action_id.as_ref().to_owned());
+        Ok(StrictJsonValue(json!({
+            "miniapp": request.capability().miniapp_id.as_ref(),
+            "action": request.action().action_id.as_ref(),
+            "input": request.input().0,
+        })))
+    }
 }
 
 #[async_trait]
@@ -571,6 +620,7 @@ fn compile(
             availability_evidence_revision: "plugin-tool-test".to_owned(),
         },
         CompileRequest {
+            miniapp_capabilities: Vec::new(),
             revision: revision(materialized, deferred),
             principal: owner(),
             scene: "chat".to_owned(),
@@ -855,4 +905,205 @@ async fn deferred_tool_search_activates_then_invokes_kernel() {
         "deferred:ready"
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+fn miniapp_fixture() -> (
+    nomifun_agent_contracts::ResolvedMiniAppCapability,
+    Arc<MiniAppSchemaMap>,
+) {
+    let input_schema = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "message": {"type": "string"}
+        },
+        "required": ["message"]
+    });
+    let output_schema = json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "miniapp": {"type": "string"},
+            "action": {"type": "string"},
+            "input": {"type": "object"}
+        },
+        "required": ["miniapp", "action", "input"]
+    });
+    let input_ref = schema_ref("miniapp.fixture/input", &input_schema);
+    let output_ref = schema_ref("miniapp.fixture/output", &output_schema);
+    let action = CapabilityActionDescriptor {
+        action_id: ActionId::from("miniapp.fixture.echo.invoke"),
+        input_schema: input_ref.clone(),
+        output_schema: output_ref,
+        effect_class: EffectClass::Pure,
+        presentation: ToolPresentationKind::FunctionTool,
+    };
+    let miniapp_id = MiniAppId::from("miniapp-fixture");
+    let capability_id = CapabilityId::from("miniapp.fixture.echo");
+    let contribution_id =
+        nomifun_agent_contracts::ContributionId::from("capability:miniapp.fixture.echo");
+    let capability = nomifun_agent_contracts::ResolvedMiniAppCapability {
+        capability: CapabilityRef {
+            id: capability_id,
+            version: VersionString::from(VERSION),
+        },
+        source_package: PackageRef {
+            id: PackageId::from("miniapp.fixture"),
+            version: VersionString::from(VERSION),
+        },
+        contribution_id: contribution_id.clone(),
+        contribution_lock: ContributionLock {
+            source_kind: ContributionSourceKind::MiniAppActiveRelease,
+            source_identity: format!("miniapp:{}", miniapp_id.as_ref()).into(),
+            mount_id: None,
+            miniapp_id: Some(miniapp_id.clone()),
+            mcp_binding_id: None,
+            contribution_id,
+            contract_digest: DigestHex::from("a".repeat(64)),
+        },
+        miniapp_id: miniapp_id.clone(),
+        active_release: MiniAppReleaseRef {
+            release_id: MiniAppReleaseId::from("release-fixture"),
+            artifact_id: ArtifactId::from("artifact-fixture"),
+            release_digest: DigestHex::from("b".repeat(64)),
+            manifest_digest: DigestHex::from("c".repeat(64)),
+        },
+        active_release_epoch: 3,
+        catalog_digest: DigestHex::from("d".repeat(64)),
+        display_name: "MiniApp Fixture".to_owned(),
+        description: "MiniApp fixture action".to_owned(),
+        actions: vec![action],
+        required_resource_kinds: BTreeSet::new(),
+        action_allowlist: BTreeSet::new(),
+    };
+    let schemas = Arc::new(MiniAppSchemaMap {
+        schemas: BTreeMap::from([(input_ref, StrictJsonValue(input_schema))]),
+    });
+    (capability, schemas)
+}
+
+fn compile_miniapp_fixture(
+    capability: &nomifun_agent_contracts::ResolvedMiniAppCapability,
+) -> nomifun_agent_kernel::CompiledSnapshot {
+    let selection = CapabilitySelection {
+        capability: capability.capability.clone(),
+        action_allowlist: capability.action_allowlist.clone(),
+    };
+    let payload = AgentPresetRevisionPayload {
+        schema_version: VersionString::from(VERSION),
+        model_route_refs: BTreeMap::new(),
+        chat_route_records: BTreeMap::new(),
+        initial_capabilities: vec![selection],
+        on_demand_capabilities: Vec::new(),
+        skill_bindings: Vec::new(),
+        system_role_provider_overrides: BTreeMap::new(),
+        persona: "MiniApp fixture".to_owned(),
+        instructions: "Use the MiniApp fixture.".to_owned(),
+        starter_prompts: Vec::new(),
+    };
+    let mut revision = AgentPresetRevision {
+        reference: PresetRevisionRef {
+            preset_id: AgentPresetId::from("miniapp.fixture.preset"),
+            revision: 1,
+            revision_digest: DigestHex::from(""),
+        },
+        payload,
+        contribution_locks: vec![capability.contribution_lock.clone()],
+        created_by: UserId::from(OWNER),
+        created_at_ms: 1,
+        reason: None,
+    };
+    revision.reference.revision_digest = revision.revision_digest().unwrap();
+    AgentPresetCompiler::compile(
+        &nomifun_agent_kernel::MaterializedRegistry::empty(),
+        &CompilerEnvironment {
+            resolver_version: VersionString::from(VERSION),
+            required_runtime_protocol_version: VersionString::from(VERSION),
+            required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
+            runtime_feature_inventory_digest: DigestHex::from("1".repeat(64)),
+            available_runtime_features: BTreeSet::new(),
+            installation_role_bindings: BTreeMap::new(),
+            canonical_schema_manifest_digest: DigestHex::from("2".repeat(64)),
+            target_contribution_manifest_digest: DigestHex::from("3".repeat(64)),
+            host_target: RuntimeTarget::from("x86_64-pc-windows-msvc"),
+            host_surface: "desktop".to_owned(),
+            availability_evidence_revision: "miniapp-tool-test".to_owned(),
+        },
+        CompileRequest {
+            miniapp_capabilities: vec![capability.clone()],
+            revision,
+            principal: owner(),
+            scene: "chat".to_owned(),
+            surface: "desktop".to_owned(),
+            audience: "owner".to_owned(),
+            created_at_ms: 2,
+            resolver_run_id: OperationId::from("miniapp-tool-test"),
+        },
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn miniapp_active_release_action_joins_the_same_nomi_tool_session() {
+    let (capability, schemas) = miniapp_fixture();
+    let compiled = compile_miniapp_fixture(&capability);
+    let kernel = Arc::new(
+        KernelRegistry::new(
+            policy(),
+            Arc::new(InMemoryPluginStatePersistence::new()),
+        )
+        .unwrap(),
+    );
+    let base = KernelNomiPluginToolSession::materialize(
+        kernel,
+        Arc::new(compiled.clone()),
+        owner(),
+        AgentSessionId::from(SESSION),
+        ScopeKey::from(format!("session:{SESSION}")),
+        Arc::new(SchemaMap::default()),
+    )
+    .await
+    .unwrap();
+    let actions = KernelNomiPluginToolSession::materialize_miniapp_actions(
+        &compiled,
+        &owner(),
+        &AgentSessionId::from(SESSION),
+        &ScopeKey::from(format!("session:{SESSION}")),
+        schemas,
+    )
+    .await
+    .unwrap();
+    assert_eq!(actions.len(), 1);
+    assert!(actions[0].provider_name().starts_with("miniapp__"));
+
+    let invoker = Arc::new(CapturingMiniAppInvoker::default());
+    let session = base
+        .with_miniapp_actions(actions, invoker.clone())
+        .unwrap();
+    assert_eq!(session.actions().len(), 0);
+    assert_eq!(session.miniapp_actions().len(), 1);
+
+    let mut registry = ToolRegistry::new();
+    session.register_into(&mut registry).unwrap();
+    let action = &session.miniapp_actions()[0];
+    let result = registry
+        .get(action.provider_name())
+        .unwrap()
+        .execute_with_context(
+            json!({"message": "hello"}),
+            &ToolExecutionContext::from_scoped_tool_call(
+                "turn-miniapp",
+                "call-miniapp",
+            ),
+        )
+        .await;
+    assert!(!result.is_error, "{}", result.content);
+    let output: Value = serde_json::from_str(&result.content).unwrap();
+    assert_eq!(output["miniapp"], "miniapp-fixture");
+    assert_eq!(output["action"], "miniapp.fixture.echo.invoke");
+    assert_eq!(invoker.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        invoker.action_ids.lock().unwrap().as_slice(),
+        &["miniapp.fixture.echo.invoke".to_owned()]
+    );
 }

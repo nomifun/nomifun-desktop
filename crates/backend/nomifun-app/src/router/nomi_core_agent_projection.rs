@@ -788,6 +788,8 @@ mod tests {
             ),
             initial_capabilities: vec![resolved_capability("fs.read")],
             on_demand_capabilities: Vec::new(),
+            initial_miniapp_capabilities: Vec::new(),
+            on_demand_miniapp_capabilities: Vec::new(),
             required_resource_kinds: BTreeSet::from(["workspace".into()]),
             on_demand_activation_plans: BTreeMap::new(),
             compact_on_demand_index: Vec::new(),
