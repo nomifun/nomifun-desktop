@@ -109,10 +109,7 @@ pub struct CompatibilityCapabilityHost {
     pub shell_service: Arc<nomifun_shell::ShellService>,
     /// MCP server CRUD (same instance as the `/api/mcp` routes).
     pub mcp_config_service: nomifun_mcp::McpConfigService,
-    /// Extension registry + hub + skills.
-    pub extension_registry: nomifun_extension::ExtensionRegistry,
-    pub hub_index_manager: nomifun_extension::HubIndexManager,
-    pub hub_installer: nomifun_extension::HubInstaller,
+    /// User and built-in Skill library paths.
     pub skill_paths: nomifun_skill_library::SkillPaths,
     /// Agent catalog (same instance as the agent routes).
     pub agent_service: Arc<AgentService>,
