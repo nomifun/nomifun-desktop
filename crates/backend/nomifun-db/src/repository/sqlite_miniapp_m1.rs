@@ -1193,7 +1193,6 @@ async fn persist_or_reuse_artifact(
     let mut comparable_incoming = incoming_payload;
     comparable_incoming.artifact_id = stored_payload.artifact_id.clone();
     if stored.manifest_digest != incoming.manifest_digest
-        || stored.managed_path != incoming.managed_path
         || comparable_incoming != stored_payload
     {
         return Err(conflict(

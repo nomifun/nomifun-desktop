@@ -9,12 +9,12 @@ use axum::{Extension, Json, Router};
 use nomifun_api_types::{
     ApiResponse, BuildMiniAppRequest, CancelMiniAppBuildRequest,
     CloseMiniAppSurfaceRequest, CreateMiniAppProjectRequest, DeleteMiniAppRequest,
-    DurableOperationSummaryDto,
+    DurableOperationSummaryDto, ImportMiniAppArtifactRequest, ImportMiniAppShareRequest,
     MiniAppLibraryResponseDto, MiniAppSurfaceLaunchDescriptorDto,
     MiniAppWorkshopDto, OpenMiniAppSurfaceRequest, PublishMiniAppRequest, RollbackMiniAppRequest,
     RestoreMiniAppRequest, RetryMiniAppDeleteRequest, RetryMiniAppServiceRequest,
     SetMiniAppEnabledRequest, SetMiniAppPublishModeRequest, SetMiniAppServiceRunningRequest,
-    TestMiniAppReleaseRequest, TrashMiniAppRequest,
+    ShareMiniAppRequest, TestMiniAppReleaseRequest, TrashMiniAppRequest,
 };
 use nomifun_agent_contracts::{MiniAppBridgeRequest, StrictJsonValue};
 use nomifun_auth::CurrentUser;
@@ -62,6 +62,8 @@ pub(crate) fn miniapp_m1_write_routes(
 ) -> Router {
     Router::new()
         .route("/api/miniapps/projects", post(create_project))
+        .route("/api/miniapps/import/share", post(import_share))
+        .route("/api/miniapps/import/artifact", post(import_artifact))
         .route(
             "/api/miniapps/{miniapp_id}/build",
             post(build_miniapp),
@@ -78,6 +80,7 @@ pub(crate) fn miniapp_m1_write_routes(
             "/api/miniapps/{miniapp_id}/test",
             post(test_miniapp_release),
         )
+        .route("/api/miniapps/{miniapp_id}/share", post(export_share))
         .route(
             "/api/miniapps/{miniapp_id}/rollback",
             post(rollback_miniapp),
@@ -158,6 +161,32 @@ async fn create_project(
     let workshop = state
         .application
         .create(user.id.as_str(), request)
+        .await
+        .map_err(application_error)?;
+    Ok(Json(ApiResponse::ok(workshop)))
+}
+
+async fn import_share(
+    State(state): State<MiniAppM1RouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Json(request): Json<ImportMiniAppShareRequest>,
+) -> Result<Json<ApiResponse<MiniAppWorkshopDto>>, AppError> {
+    let workshop = state
+        .application
+        .import_share(user.id.as_str(), request)
+        .await
+        .map_err(application_error)?;
+    Ok(Json(ApiResponse::ok(workshop)))
+}
+
+async fn import_artifact(
+    State(state): State<MiniAppM1RouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Json(request): Json<ImportMiniAppArtifactRequest>,
+) -> Result<Json<ApiResponse<MiniAppWorkshopDto>>, AppError> {
+    let workshop = state
+        .application
+        .import_prebuilt(user.id.as_str(), request)
         .await
         .map_err(application_error)?;
     Ok(Json(ApiResponse::ok(workshop)))
@@ -253,6 +282,21 @@ async fn test_miniapp_release(
         .await
         .map_err(application_error)?;
     Ok(Json(ApiResponse::ok(workshop)))
+}
+
+async fn export_share(
+    State(state): State<MiniAppM1RouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(miniapp_id): Path<String>,
+    Json(request): Json<ShareMiniAppRequest>,
+) -> Result<Json<ApiResponse<DurableOperationSummaryDto>>, AppError> {
+    require_route_id("miniapp_id", &miniapp_id, &request.miniapp_id)?;
+    let operation = state
+        .application
+        .export_share(user.id.as_str(), request)
+        .await
+        .map_err(application_error)?;
+    Ok(Json(ApiResponse::ok(operation)))
 }
 
 async fn rollback_miniapp(
