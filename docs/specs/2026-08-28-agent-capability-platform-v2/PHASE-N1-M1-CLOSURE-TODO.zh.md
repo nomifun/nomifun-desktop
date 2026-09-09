@@ -22,6 +22,9 @@
 > identity digest 和 owner operation 互斥。
 > Windows Candidate、
 > NSIS、产品验收和 macOS/Linux 外部验证仍未关闭。
+>
+> Windows 阶段性交接启动材料：
+> `CROSS-MACHINE-WORK-START-PROMPT-2026-09-09.zh.md`
 
 本文是 06 的唯一实时执行台账。06 保存产品与架构合同，GLOBAL TODO 保存一期 S0-S5；
 二期状态不得回填成一期完成度，也不得用旧 Extension/MiniApp 的代码量冒充 N1/M1 进度。
@@ -659,3 +662,15 @@ Export/Import-as-new 均已完成。`M1-2-01` 现已关闭；当前仍不构成 
 4. `M1-2-01` 现已关闭。`M1-U-01` 的 Desktop 产品/accessibility 走查、
    `M1-V-01` 的 Windows Candidate/NSIS/fault 验证仍未关闭；macOS arm64、
    Linux Desktop x64 和手机模式均不在本机当前验证范围。
+
+## 2026-09-09 跨机器阶段性交接
+
+当前 Windows N1/M1 主线已在 `51b0243f7` 形成可交接基线。用户要求先完成稳定的
+阶段性收尾，再由另一台更快的 coding agent 继续实现；启动顺序、已交付事实、当前
+代码勘察点、最小验证命令、StepFun Credential Manager 规则和 Git 提交流程统一记录在
+`CROSS-MACHINE-WORK-START-PROMPT-2026-09-09.zh.md`。
+
+本次交接不改变本台账的状态含义：`M1-2-01` 已关闭，`M1-U-01`、`M1-V-01`、
+`N1-V-01` 和 `RC-WIN-01` 仍未关闭；MiniApp Active Release 的 shared Catalog
+consumer integration、旧生产链物理清理和 Windows Candidate 仍须按本文及 06 的依赖
+顺序推进。手机模式、macOS arm64 和 Linux Desktop x64 不在当前 Windows 交付范围内。

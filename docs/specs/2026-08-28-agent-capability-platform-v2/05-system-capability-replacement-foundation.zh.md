@@ -160,7 +160,7 @@
 
 - Thin Kernel、统一 Plugin/Capability 主链、单一 AgentSession 和可显式扩展的 Runtime host boundary 等总目标继续有效；本阶段的唯一产品执行内核改为 NomiFun 原有 Nomi engine，Codex-derived Runtime 不再是本阶段交付前提；
 - 本文明确列出的 Gate、Evidence、生命周期、Compiler、Snapshot、Effect、文件边界、产品 UI 与平台矩阵改用本文的新策略；文末新增的 AgentPreset 平台级能力建设（§15）是进入二期 06 前必须完成的后续 TODO；
-- 01～04 与 `DECISIONS` 保留为核心设计依据，并按本文删除或改写其中已经判定错误的条款；不得因局部设计被止损而整体删除这些文档。旧 `IMPLEMENTATION-STATUS`、旧 `START-PROMPT` 和过期 handoff 只保留在 Git 历史，且仅用于说明已撤销方案；当前状态只由 `GLOBAL-CLOSURE-TODO.zh.md` 记录；
+- 01～04 与 `DECISIONS` 保留为核心设计依据，并按本文删除或改写其中已经判定错误的条款；不得因局部设计被止损而整体删除这些文档。旧 `IMPLEMENTATION-STATUS`、旧 `START-PROMPT` 和过期 handoff 只保留在 Git 历史，且仅用于说明已撤销方案；当前状态只由 `GLOBAL-CLOSURE-TODO.zh.md` 记录。用户若明确要求一次性阶段性交接，可另附不改变合同与状态源的启动材料；
 - `GLOBAL-CLOSURE-TODO` 的 84 个工作包不再是一期必须逐个关闭的阻断清单；只把其中仍属于本文最小交付的项目迁入新的收口清单；
 - 已生成的 Manifest、fixture、digest 或结构测试不能因为自身存在而阻止删除；证明系统不具有高于产品系统的优先级；
 - 实施只采用普通 commit/revert/merge，不使用 reset、force-push 或历史重写；回滚前先检查下游消费，保留真实用户功能和无争议的基础正确性。
@@ -177,7 +177,7 @@
 
 以下方向在完成本文对应简化前不得继续扩张：
 
-1. 已废弃的 C8/C10 Evidence、四元 cohort tuple、跨机 handoff、recheck、digest envelope 和 residual 分类系统；
+1. 已废弃的 C8/C10 Evidence、四元 cohort tuple、长期跨机 handoff 协议、recheck、digest envelope 和 residual 分类系统；
 2. D-027 在线 canary drain、祖先 deadline、durable handoff 和多维 exact-zero proof；
 3. 为所有本地写入统一增加 `started/succeeded/failed/uncertain/reconciled`、receipt、outbox 和 replay matrix；
 4. 为防御同权限恶意本地进程而继续扩张逐组件 no-follow、系统目录别名和 TOCTOU 证明；
@@ -1517,8 +1517,10 @@ result；未来候选若包含 Codex Sidecar，再单独记录其真实 digest�
 - 不改写一期候选/evidence；06 使用后续普通提交和独立台账推进。
 
 外部原生环境只验证冻结候选，不领取开发任务、不编辑代码或 merge 分支。发现问题时返回
-实际命令、原始日志和结果，由当前主机修复并生成新候选；不建立机器专用 Prompt、
-handoff、manifest、result template、远端 SHA 清单或跨机 attestation。若远程任务已经
+实际命令、原始日志和结果，由当前主机修复并生成新候选；不建立机器专用的长期 Prompt、
+handoff、manifest、result template、远端 SHA 清单或跨机 attestation。用户明确要求
+阶段性交接时，允许使用一次性的启动材料，但它不属于外部验证证据，也不产生第二个状态源。
+若远程任务已经
 开始直接接线 Browser/Computer，应暂停该局部接线并按本文重新划分依赖；不在现有直连上
 继续叠加 Provider Adapter。进入二期 Plugin/MiniApp 实现前，还必须完成文末 §15 的
 AP-0～AP-7。
