@@ -52,7 +52,7 @@ const formatError = (error: unknown): string => {
 const releaseCount = (app: MiniAppSummary): number =>
   [app.releases.ready, app.releases.active, app.releases.previous].filter(Boolean).length;
 
-const MiniAppLibraryCard: React.FC<{
+export const MiniAppLibraryCard: React.FC<{
   app: MiniAppSummary;
   locale: string;
   onOpen: (app: MiniAppSummary) => void;
@@ -60,15 +60,23 @@ const MiniAppLibraryCard: React.FC<{
   const { t } = useTranslation();
   const stage = miniAppReleaseStage(app);
   const stageKey = `miniApps.library.releaseStage.${stage}` as const;
+  const titleId = `miniapp-library-card-title-${app.miniapp_id}`;
+  const descriptionId = `miniapp-library-card-description-${app.miniapp_id}`;
 
   return (
-    <article className={styles.libraryCard}>
+    <article
+      className={styles.libraryCard}
+      aria-labelledby={titleId}
+      aria-describedby={descriptionId}
+    >
       <div className={styles.libraryCardHeader}>
         <span className={styles.libraryCardIcon} aria-hidden='true'>
           <ApplicationOne theme='outline' size='20' />
         </span>
         <div className={styles.libraryCardCopy}>
-          <h2 className={styles.libraryCardTitle}>{app.display_name}</h2>
+          <h2 id={titleId} className={styles.libraryCardTitle}>
+            {app.display_name}
+          </h2>
           <div className={styles.libraryBadgeRow}>
             <MiniAppKindBadge kind={app.kind} />
             <MiniAppLifecycleBadge lifecycle={app.lifecycle} />
@@ -76,7 +84,7 @@ const MiniAppLibraryCard: React.FC<{
         </div>
       </div>
 
-      <p className={styles.libraryCardDescription}>
+      <p id={descriptionId} className={styles.libraryCardDescription}>
         {app.description || t('miniApps.library.noDescription')}
       </p>
 
@@ -123,6 +131,7 @@ const MiniAppLibraryCard: React.FC<{
         <Button
           size='small'
           icon={<Right theme='outline' size='13' />}
+          aria-label={`${t('miniApps.library.openWorkshop')}: ${app.display_name}`}
           onClick={() => onOpen(app)}
         >
           {t('miniApps.library.openWorkshop')}

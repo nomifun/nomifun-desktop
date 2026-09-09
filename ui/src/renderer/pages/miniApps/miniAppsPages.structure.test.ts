@@ -43,6 +43,18 @@ describe('MiniApp M1 product surfaces', () => {
     );
   });
 
+  test('Library cards expose a named card and an app-specific open action', () => {
+    expect(listSource.includes('aria-labelledby={titleId}')).toBe(true);
+    expect(listSource.includes('aria-describedby={descriptionId}')).toBe(true);
+    expect(listSource.includes('id={titleId}')).toBe(true);
+    expect(listSource.includes('id={descriptionId}')).toBe(true);
+    expect(
+      listSource.includes(
+        "aria-label={`${t('miniApps.library.openWorkshop')}: ${app.display_name}`}"
+      )
+    ).toBe(true);
+  });
+
   test('Workshop reads a branded owner-scoped M1 detail', () => {
     expect(runnerSource.includes('parseMiniAppId(rawId)')).toBe(true);
     expect(
