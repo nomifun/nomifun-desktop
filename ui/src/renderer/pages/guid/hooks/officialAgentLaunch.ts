@@ -23,7 +23,7 @@ export function officialAgentLaunchError(error: unknown, t: TFunction): string {
 export async function prepareOfficialAgent(
   template: OfficialPresetTemplate,
   displayName: string,
-  model: TProviderWithModel,
+  model?: TProviderWithModel,
   createFromTemplate = agentPlatform.createFromTemplate.invoke,
 ): Promise<ExecutableAgentPreset> {
   const editor = await createFromTemplate({
@@ -33,7 +33,9 @@ export async function prepareOfficialAgent(
       model_route_refs: {},
       chat_route_records: {},
       reuse_existing: true,
-      model: { provider_id: model.id, model: model.use_model },
+      ...(model
+        ? { model: { provider_id: model.id, model: model.use_model } }
+        : {}),
     },
   });
   if (!editor.preset.current_stable_revision) {

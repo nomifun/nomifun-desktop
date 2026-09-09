@@ -5804,7 +5804,8 @@ function ap7AgentPresetLaunchContract() {
     'plain Nomi must retain the ordinary conversation create path with an explicit model'
   );
   require(
-    requestPayload.includes('preset_id: selectedPreset.preset_id') &&
+    (requestPayload.includes('preset_id: selectedPreset.preset_id') ||
+      requestPayload.includes('preset_id: launchPreset.preset_id')) &&
       requestPayload.includes('title: entryPlan.conversationName') &&
       !requestPayload.includes('agent_binding') &&
       !requestPayload.includes('model') &&

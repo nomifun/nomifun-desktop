@@ -225,7 +225,7 @@ describe('useGuidSend HTTP behavior', () => {
       method: 'POST', url: '/api/agent-presets/from-template/chat.minimal',
       body: { reuse_existing: true, model_route_refs: {}, chat_route_records: {}, model: { provider_id: PROVIDER_ID, model: MODEL.use_model } },
     });
-    expect(calls[1]).toEqual({ method: 'POST', url: '/api/agent-sessions', body: { preset_id: PRESET_ID, title: INPUT, model: { provider_id: PROVIDER_ID, model: MODEL.use_model } } });
+    expect(calls[1]).toEqual({ method: 'POST', url: '/api/agent-sessions', body: { preset_id: PRESET_ID, title: INPUT } });
     expect(calls).toHaveLength(3);
     expect(readOnlyHandoff()).toMatchObject({ input: INPUT, files: FILES });
     expect(navigations).toEqual([`/conversation/${PRESET_CONVERSATION_ID}`]);
@@ -298,7 +298,7 @@ describe('useGuidSend HTTP behavior', () => {
     ]);
   });
 
-  test('personal Agent launch sends the selected model with its preset and stages one handoff', async () => {
+  test('personal Agent launch uses its frozen preset model and stages one handoff', async () => {
     resetBrowserStorage();
     const calls = installFetchRecorder();
     const navigations: string[] = [];
@@ -323,11 +323,10 @@ describe('useGuidSend HTTP behavior', () => {
       body: {
         preset_id: PRESET_ID,
         title: INPUT,
-        model: { provider_id: PROVIDER_ID, model: MODEL.use_model },
       },
     });
     expect(Object.keys(calls[0].body as Record<string, unknown>).sort()).toEqual(
-      ['model', 'preset_id', 'title']
+      ['preset_id', 'title']
     );
     expect(calls[1]).toEqual({
       method: 'GET',
