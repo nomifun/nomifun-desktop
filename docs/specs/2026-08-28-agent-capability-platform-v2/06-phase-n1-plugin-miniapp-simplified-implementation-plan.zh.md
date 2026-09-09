@@ -1489,3 +1489,17 @@ macOS/Linux 原生验证仍按依赖顺序保留。
 Service Test 的 transient namespace/receipt、Share Bundle/prebuilt Import 和 disabled
 Whole-App Backup Import-as-new 继续作为后续切片；Windows Candidate 与 macOS/Linux 原生
 验证状态不变。
+
+## 2026-09-09 M1-2 Service Test 实现落地注记
+
+`708ef83b7` 已按 §4.5G 完成 transient Service Test：生产 Service 短暂停止，一次性
+Storage 复制 KV/Private SQLite、创建空 Files 目录并执行 Ready Migration；独立
+`MiniappServiceTestHost` Node 进程结束后整代回收，测试状态幂等删除，再恢复 Active
+Service。Host-issued receipt 精确绑定 Ready、prospective epoch 生成的 service run key、
+Runtime、测试输入 digest 和复制数据摘要。
+
+该实现不把“可加载”统一冒充行为通过：无正式 callable contribution 时启动验证可为
+`passed`；缺少受管输入时为 `needs_test_input`；Host 失败为 `failed`。Runtime、Ready、
+Product、Config 或 Credential 漂移后 receipt 显式 `stale`。Service Test 仍不是 Durable
+Operation，不创建 Test Deployment 或生产 Files overlay。M1-2 剩余 Share/prebuilt/
+Whole-App Backup Import-as-new。

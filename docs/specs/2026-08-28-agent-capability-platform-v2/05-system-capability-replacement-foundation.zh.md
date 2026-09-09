@@ -2168,3 +2168,11 @@ MiniApp 生命周期放入 AgentPreset，也不让 Agent 工作台取得 MiniApp
 该注记只确认 05 §15 的 owner/consumer 边界在 M1 lifecycle 中保持成立。Service Test、
 Share/Backup Import-as-new、Capability Catalog 正式消费和 Windows Candidate 仍由 06 与
 独立 N1/M1 台账继续跟踪。
+
+## 2026-09-09 MiniApp Service Test owner 边界注记
+
+`708ef83b7` 的 Service Test 仍属于 MiniApp 产品域：receipt、transient KV/DB/Files、
+Runtime lease 与 Service Host 不进入 AgentPreset Revision/Snapshot/Binding。Agent 或
+其他 Capability consumer 只能观察 Active Release 的正式 availability；Ready Test 不发布
+Catalog，也不授予 MiniApp owner、Credential 或部署权限。Runtime/Config/Credential 漂移
+使 receipt stale，不产生 Agent fallback。
