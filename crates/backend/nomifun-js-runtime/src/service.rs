@@ -466,6 +466,11 @@ impl JavaScriptRuntimeService {
                 candidate.executable_path.clone(),
             ))
             .await;
+        probe
+            .validate()
+            .map_err(|_| JavaScriptRuntimeError::CandidateStale)?;
+        let executable_path =
+            exact_executable_path(&candidate.executable_path, &probe.executable_path)?;
         let observed = probe
             .fingerprint
             .clone()
@@ -481,7 +486,7 @@ impl JavaScriptRuntimeService {
         }
         let exact = RuntimeCandidate {
             fingerprint: observed,
-            executable_path: PathBuf::from(&probe.executable_path),
+            executable_path,
             disposition: probe.disposition,
         };
         let mut inventory = self.inventory.write().await;
@@ -610,6 +615,46 @@ fn resolved_selected(
         _ => Err(JavaScriptRuntimeError::Contract(
             "selected Runtime binding is incomplete".to_owned(),
         )),
+    }
+}
+
+/// A probe is the authority for the executable identity, not for rebinding a
+/// candidate to an unrelated path. Accept a canonical alias of the requested
+/// path when both paths resolve to the same file, but fail closed for any
+/// other path before the switch coordinator can persist it.
+fn exact_executable_path(
+    expected: &std::path::Path,
+    observed: &str,
+) -> Result<PathBuf, JavaScriptRuntimeError> {
+    let observed = PathBuf::from(observed);
+    if !expected.is_absolute() || !observed.is_absolute() {
+        return Err(JavaScriptRuntimeError::CandidateStale);
+    }
+
+    let expected_canonical = dunce::canonicalize(expected);
+    let observed_canonical = dunce::canonicalize(&observed);
+    let same_file = match (&expected_canonical, &observed_canonical) {
+        (Ok(expected), Ok(observed)) => {
+            runtime_path_key(expected) == runtime_path_key(observed)
+        }
+        _ => runtime_path_key(expected) == runtime_path_key(&observed),
+    };
+    if !same_file {
+        return Err(JavaScriptRuntimeError::CandidateStale);
+    }
+
+    Ok(expected_canonical.unwrap_or_else(|_| expected.to_path_buf()))
+}
+
+fn runtime_path_key(path: &std::path::Path) -> String {
+    let key = path.to_string_lossy().replace('\\', "/");
+    #[cfg(windows)]
+    {
+        key.to_ascii_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        key
     }
 }
 
@@ -927,6 +972,7 @@ mod tests {
     #[derive(Clone)]
     struct FakeProbe {
         candidate: RuntimeCandidate,
+        reprobe_path: Option<PathBuf>,
     }
 
     #[async_trait]
@@ -945,7 +991,11 @@ mod tests {
             &self,
             _candidate: &NodeProbeCandidate,
         ) -> NodeRuntimeProbeResult {
-            probe_result(&self.candidate)
+            let mut result = probe_result(&self.candidate);
+            if let Some(path) = &self.reprobe_path {
+                result.executable_path = path.display().to_string();
+            }
+            result
         }
     }
 
@@ -1088,8 +1138,17 @@ mod tests {
         candidate: RuntimeCandidate,
         outcome: RuntimeSwitchParticipantOutcome,
     ) -> Arc<JavaScriptRuntimeService> {
+        service_with_reprobe_path(candidate, outcome, None)
+    }
+
+    fn service_with_reprobe_path(
+        candidate: RuntimeCandidate,
+        outcome: RuntimeSwitchParticipantOutcome,
+        reprobe_path: Option<PathBuf>,
+    ) -> Arc<JavaScriptRuntimeService> {
         let probe = Arc::new(FakeProbe {
             candidate: candidate.clone(),
+            reprobe_path,
         });
         let manager = Arc::new(NodeRuntimeManager::new(Arc::new(
             MemoryStore::default(),
@@ -1110,6 +1169,53 @@ mod tests {
             }),
             switch,
         ))
+    }
+
+    #[tokio::test]
+    async fn switch_rejects_a_probe_that_rebinds_the_same_fingerprint() {
+        let candidate = candidate(NodeRuntimeSourceKind::ProcessPath, 24);
+        let service = service_with_reprobe_path(
+            candidate.clone(),
+            RuntimeSwitchParticipantOutcome::NotCovered,
+            Some(PathBuf::from(r"C:\other\node.exe")),
+        );
+        service
+            .probe(ProbeJavascriptRuntimeRequest::AutoDiscover {
+                expected_selection_revision: 0,
+            })
+            .await
+            .unwrap();
+
+        let error = service
+            .begin_switch(
+                "owner",
+                BeginJavascriptRuntimeSwitchRequest {
+                    expected_selection_revision: 0,
+                    expected_selected_runtime_id: None,
+                    expected_selected_executable_digest: None,
+                    candidate_runtime_id: candidate
+                        .fingerprint
+                        .runtime_installation_id
+                        .as_ref()
+                        .to_owned(),
+                    expected_candidate_executable_digest: candidate
+                        .fingerprint
+                        .executable_digest
+                        .as_ref()
+                        .to_owned(),
+                    acknowledge_non_recommended_runtime: false,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            JavaScriptRuntimeError::CandidateStale
+        ));
+
+        let status = service.status().await.unwrap();
+        assert_eq!(status.selection_revision, 0);
+        assert!(status.pending_candidate.is_none());
     }
 
     #[tokio::test]
