@@ -734,3 +734,20 @@ route 完成首次配置；普通 Nomi 没有模型时仍明确阻断。
 `gate:agent-v2 --self-test`、Guid 结构/行为测试和 UI production build 已通过；
 全量 UI typecheck 的既有基线错误仍未纳入本轮。该项是产品入口纠偏，不关闭
 `N1-U-01`、`M1-U-01` 或 Windows Candidate。
+
+## 2026-09-09 Windows Candidate 前置检查与旧链安全审计
+
+本机静态/自测试前置均已通过：Agent-v2/N1 gate self-test、Candidate smoke harness
+测试、release-lock 测试、NSIS source contract 和 `gate-plugin-n1` contract dry-run。
+`windows_candidate --scope combined --cohort local-preflight --dry-run` 明确列出
+18 个 required product/integration/fault checks 仍为 `pending`，因此不关闭
+`N1-V-01`、`M1-V-01` 或 `RC-WIN-01`。
+
+旧链审计结论：当前没有安全可直接删除的生产代码集合。Extension 仍被
+App/Channel/Gateway/UI 消费；旧 MiniApp schema 仍由 DB/id-schema/backup 合同保留。
+`N1-X-02` 和旧 MiniApp physical cleanup 必须等待前置消费者迁移与历史 schema 策略，
+本轮不做破坏性删除、不做 alias/fallback。
+
+全量 UI typecheck 仍有既有 Arco/隐式 `any` 基线错误；生产 UI build 和本轮 Guid
+定向测试通过。下一步应由具备安装器/Provider 主机权限的环境继续 Candidate，而不是
+在本机伪造 release evidence。

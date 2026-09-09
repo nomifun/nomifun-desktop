@@ -702,3 +702,21 @@ Create 只提交 `preset_id + title`，模型由稳定 Revision/Snapshot 在服�
 对应 `gate:agent-v2 --self-test`、Guid 结构/行为测试、UI production build 均通过。
 全量 UI typecheck 仍有仓库既有 Arco/隐式 any 基线错误，未把无关错误扩大为本轮
 修复范围。该修正不改变 MiniApp/Plugin 的 Snapshot 或跨平台边界。
+
+## 2026-09-09 Windows Candidate 前置与旧链审计边界
+
+本机已完成不需要安装器或真实 Provider 的前置检查：
+
+- `gate:agent-v2 --self-test`、`gate:plugin-n1 -- --self-test` 通过；
+- Windows Candidate smoke harness、release-lock、NSIS source contract 静态测试通过；
+- `gate-plugin-n1 windows_candidate --scope combined --cohort local-preflight --dry-run`
+  能正确生成合同矩阵，但仍列出 18 个 required product/integration/fault checks 为
+  `pending`，不产生 synthetic PASS；
+- `SL-S3-10` dependency audit 仍报告 `production_legacy_files=0`、`candidate=none`；
+- 旧 Extension 仍被 App/Channel/Gateway/UI 真实消费，旧 MiniApp schema 仍属于
+  当前 DB/id-schema/backup 合同，因此当前安全可直接物理删除集合为 **空集**。
+
+当前工作已到需要真实 Windows Candidate/安装版、Provider Credential Manager smoke、
+主机状态和产品 accessibility 走查的边界。不得用现有历史 C8 产物代替当前 HEAD；
+不得在 dirty worktree 上生成 release evidence；macOS/Linux 和手机模式继续不在本机
+范围内。
