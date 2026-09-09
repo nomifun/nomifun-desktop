@@ -7295,6 +7295,12 @@
           "null"
         ]
       },
+      "error_code": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
       "host_generation": {
         "format": "uint64",
         "minimum": 0,

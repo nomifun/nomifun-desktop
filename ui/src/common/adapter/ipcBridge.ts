@@ -343,6 +343,7 @@ import type {
   SetMiniAppEnabledRequest,
   SetMiniAppPublishModeRequest,
   SetMiniAppServiceRunningRequest,
+  TestMiniAppReleaseRequest,
   RetryMiniAppServiceRequest,
   RetryMiniAppDeleteRequest,
   TrashMiniAppRequest,
@@ -2292,6 +2293,13 @@ export const miniapps = {
     httpPost<MiniAppWorkshop, BuildMiniAppRequest>(
       ({ miniapp_id }) =>
         `/api/miniapps/${encodeURIComponent(miniapp_id)}/build`
+    ),
+    fromApiMiniAppWorkshop
+  ),
+  test: withResponseMap(
+    httpPost<MiniAppWorkshop, TestMiniAppReleaseRequest>(
+      ({ miniapp_id }) =>
+        `/api/miniapps/${encodeURIComponent(miniapp_id)}/test`
     ),
     fromApiMiniAppWorkshop
   ),

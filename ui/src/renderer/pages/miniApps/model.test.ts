@@ -7,6 +7,7 @@
 import { describe, expect, test } from 'bun:test';
 import type { MiniAppWorkshop } from '@/common/types/miniAppPlatform';
 import {
+  EMPTY_MINIAPP_TEST_INPUT_DIGEST,
   miniAppBuildRequest,
   miniAppCanOpenSurface,
   miniAppPublishRequest,
@@ -21,6 +22,7 @@ import {
   miniAppSetServiceRunningRequest,
   miniAppSetPublishModeRequest,
   miniAppSurfaceAssetPath,
+  miniAppTestRequest,
   miniAppWorkflowState,
   shortMiniAppIdentity,
 } from './model';
@@ -160,6 +162,48 @@ describe('MiniApp M1 view model', () => {
       expected_active_release_epoch: 4,
       expected_active_release_digest: 'd'.repeat(64),
     });
+
+    const readyRelease = {
+      release_id: 'ready-service',
+      artifact_id: 'ready-artifact',
+      release_digest: 'f'.repeat(64),
+      manifest_digest: '0'.repeat(64),
+    };
+    value.miniapp.releases.ready = readyRelease;
+    value.ready = {
+      release: readyRelease,
+      project_build_generation: 3,
+      created_at_ms: 2,
+      kind: 'service',
+      service: {
+        lifecycle: 'continuous',
+        uses_files: true,
+        uses_private_database: true,
+        service_contract_digest: '1'.repeat(64),
+      },
+      test: {
+        status: 'not_run',
+        release_id: readyRelease.release_id,
+        expected_release_digest: readyRelease.release_digest,
+      },
+      migration_count: 1,
+      can_publish: true,
+      can_auto_publish: false,
+      blocking_reasons: ['service_test_not_run'],
+    };
+    expect(miniAppTestRequest(value)).toEqual({
+      miniapp_id: value.miniapp.miniapp_id,
+      expected_product_revision: 1,
+      expected_pointer_revision: 1,
+      project_id: value.project_id,
+      expected_project_revision: 1,
+      expected_build_generation: 3,
+      release_id: readyRelease.release_id,
+      expected_release_digest: readyRelease.release_digest,
+      expected_config_revision: 1,
+      expected_credential_bindings_revision: 1,
+      resolved_test_input_digest: EMPTY_MINIAPP_TEST_INPUT_DIGEST,
+    });
   });
 
   test('builds exact Publish, Rollback, lifecycle, and publish-mode CAS requests', () => {
@@ -223,6 +267,45 @@ describe('MiniApp M1 view model', () => {
       expected_active_release_digest: activeRelease.release_digest,
       acknowledge_test_warning: false,
     });
+    value.miniapp.kind = 'service';
+    value.ready.kind = 'service';
+    value.ready.service = {
+      lifecycle: 'on_demand',
+      uses_files: false,
+      uses_private_database: false,
+      service_contract_digest: '9'.repeat(64),
+    };
+    value.ready.test = {
+      status: 'passed',
+      release_id: readyRelease.release_id,
+      expected_release_digest: readyRelease.release_digest,
+      receipt_id: 'receipt-1',
+      expected_service_run_key: '8'.repeat(64),
+    };
+    expect(miniAppPublishRequest(value)).toMatchObject({
+      expected_service_test_receipt_id: 'receipt-1',
+      acknowledge_test_warning: false,
+    });
+    value.ready.test.status = 'needs_test_input';
+    expect(miniAppPublishRequest(value)).toMatchObject({
+      expected_service_test_receipt_id: 'receipt-1',
+      acknowledge_test_warning: true,
+    });
+    value.ready.test.status = 'stale';
+    expect(miniAppPublishRequest(value)).toMatchObject({
+      acknowledge_test_warning: true,
+    });
+    expect(
+      miniAppPublishRequest(value)?.expected_service_test_receipt_id
+    ).toBeUndefined();
+    value.miniapp.kind = 'ui_only';
+    value.ready.kind = 'ui_only';
+    delete value.ready.service;
+    value.ready.test = {
+      status: 'not_required',
+      release_id: readyRelease.release_id,
+      expected_release_digest: readyRelease.release_digest,
+    };
     expect(miniAppRollbackRequest(value)).toEqual({
       miniapp_id: value.miniapp.miniapp_id,
       expected_product_revision: 4,

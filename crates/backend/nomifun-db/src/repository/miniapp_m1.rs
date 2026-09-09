@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use nomifun_agent_contracts::{
-    MiniAppReadyOrigin, MiniAppReadyRelease, MiniAppReleaseArtifactV1, MiniAppSourceLineage,
-    MINIAPP_RELEASE_PROFILE_VERSION, canonical_json_bytes,
+    MiniAppReadyOrigin, MiniAppReadyRelease, MiniAppReleaseArtifactV1,
+    MiniAppServiceTestOutcome, MiniAppSourceLineage, MINIAPP_RELEASE_PROFILE_VERSION,
+    canonical_json_bytes,
 };
 
 use crate::error::DbError;
@@ -11,8 +12,8 @@ pub use crate::models::MiniAppKvRow;
 use crate::models::{
     MiniAppM1Kind, MiniAppM1LibrarySnapshot, MiniAppM1ProjectSourceState,
     MiniAppM1ReleaseOrigin, MiniAppM1ReleaseSourceKind, MiniAppM1Snapshot,
-    MiniAppProjectRow, MiniAppReleaseArtifactRow, MiniAppReleaseRow, ProductOperationRow,
-    ProductOperationState, MiniAppSurfaceSessionRow,
+    MiniAppProjectRow, MiniAppReleaseArtifactRow, MiniAppReleaseRow, MiniAppSurfaceSessionRow,
+    ProductOperationRow, ProductOperationState,
 };
 use crate::repository::plugin_n1::{
     MAX_PRODUCT_OPERATION_LOG_LINE_CHARS, MAX_PRODUCT_OPERATION_LOG_LINES,
@@ -125,6 +126,49 @@ pub struct RecordMiniAppM1ReadyReleaseParams {
     pub artifact: MiniAppReleaseArtifactRow,
     pub release: MiniAppReleaseRow,
     pub updated_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecordMiniAppM1ServiceTestReceiptParams {
+    pub owner_user_id: String,
+    pub miniapp_id: String,
+    pub expected_product_revision: i64,
+    pub expected_pointer_revision: i64,
+    pub expected_config_revision: i64,
+    pub expected_credential_bindings_revision: i64,
+    pub expected_ready_release_id: String,
+    pub expected_ready_release_digest: String,
+    pub receipt_id: String,
+    pub service_run_key: String,
+    pub outcome: MiniAppServiceTestOutcome,
+    pub error_code: Option<String>,
+    pub receipt_digest: String,
+    pub runtime_fingerprint_digest: String,
+    pub resolved_test_input_digest: String,
+    pub receipt: serde_json::Value,
+    pub issued_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, sqlx::FromRow)]
+pub struct MiniAppServiceTestReceiptRow {
+    pub id: i64,
+    pub receipt_id: String,
+    pub owner_user_id: String,
+    pub miniapp_id: String,
+    pub release_id: String,
+    pub release_digest: String,
+    pub service_run_key: String,
+    pub outcome: String,
+    pub error_code: Option<String>,
+    pub receipt_digest: String,
+    pub runtime_fingerprint_digest: String,
+    pub resolved_test_input_digest: String,
+    pub tested_product_revision: i64,
+    pub tested_pointer_revision: i64,
+    pub tested_config_revision: i64,
+    pub tested_credential_bindings_revision: i64,
+    pub receipt_json: String,
+    pub issued_at_ms: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -391,6 +435,17 @@ pub trait IMiniAppM1Repository: Send + Sync {
         &self,
         params: &RecordMiniAppM1ReadyReleaseParams,
     ) -> Result<MiniAppM1Snapshot, DbError>;
+
+    async fn record_service_test_receipt_cas(
+        &self,
+        params: &RecordMiniAppM1ServiceTestReceiptParams,
+    ) -> Result<MiniAppM1Snapshot, DbError>;
+
+    async fn get_ready_service_test_receipt(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &str,
+    ) -> Result<Option<MiniAppServiceTestReceiptRow>, DbError>;
 
     async fn publish_ready_cas(
         &self,

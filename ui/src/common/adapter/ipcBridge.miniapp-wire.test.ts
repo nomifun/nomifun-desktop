@@ -92,6 +92,7 @@ describe('MiniApp M1 HTTP bridge', () => {
       )
     ).toBe(true);
     for (const route of [
+      '/test`',
       '/publish`',
       '/rollback`',
       '/enabled`',

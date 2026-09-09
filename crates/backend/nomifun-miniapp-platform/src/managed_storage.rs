@@ -14,7 +14,7 @@ use nomifun_agent_contracts::{
     DigestHex, MiniAppAdditiveMigrationAction, MiniAppBridgeKvRequest, MiniAppDatabaseHandleId,
     MiniAppFilesDirDescriptor, MiniAppFilesHandleId, MiniAppId, MiniAppKvResponse,
     MiniAppMigration, MiniAppMigrationId, MiniAppPrivateDatabaseDescriptor, MiniAppReleaseRef,
-    MiniAppServiceStorageDescriptor, StrictJsonValue, digest_payload,
+    MiniAppServiceStorageDescriptor, StrictJsonValue, digest_bytes, digest_payload,
 };
 use nomifun_db::{MiniAppKvRow, SqlitePool};
 use rusqlite::{
@@ -32,11 +32,16 @@ use crate::{
     MiniAppDatabaseStatement, MiniAppFilesPort, MiniAppHostKvPort, MiniAppMigrationLedger,
     MiniAppPlatformError, MiniAppPlatformResult, MiniAppPrivateDatabasePort,
     MiniAppServiceStoragePort, MiniAppServiceStorageRequest, MiniAppServiceStorageResolution,
+    MiniAppServiceTestKvSnapshotEntry, MiniAppServiceTestStorageResolution,
+    service_test_kv_digest, validate_service_test_id,
 };
 use crate::MiniAppMigrationLedgerEntry;
 
 const FILES_DIRECTORY: &str = "files";
 const DATABASES_DIRECTORY: &str = "databases";
+const SERVICE_TESTS_DIRECTORY: &str = "service-tests";
+const PRODUCTION_KV_NAMESPACE: &str = "service";
+const SERVICE_TEST_KV_NAMESPACE_PREFIX: &str = "service-test:";
 const LEDGER_TABLE: &str = "__nomifun_migration_ledger";
 const META_TABLE: &str = "__nomifun_storage_meta";
 const SCHEMA_EPOCH_KEY: &str = "schema_epoch";
@@ -48,6 +53,7 @@ const MAX_DATABASE_RESULT_BYTES: usize = 4 * 1024 * 1024;
 struct RegisteredStorage {
     owner_user_id: String,
     descriptor: MiniAppServiceStorageDescriptor,
+    kv_namespace: String,
     database_path: Option<PathBuf>,
     database_lock: Arc<Mutex<()>>,
 }
@@ -56,6 +62,7 @@ struct RegisteredStorage {
 struct StorageKey {
     owner_user_id: String,
     miniapp_id: String,
+    test_id: Option<String>,
 }
 
 struct SqliteAuthorizationState {
@@ -104,6 +111,7 @@ impl SqliteMiniAppManagedStorage {
         })?;
         ensure_directory(&root.join(FILES_DIRECTORY))?;
         ensure_directory(&root.join(DATABASES_DIRECTORY))?;
+        ensure_directory(&root.join(SERVICE_TESTS_DIRECTORY))?;
         Ok(Self {
             root: Arc::new(root),
             pool,
@@ -125,9 +133,11 @@ impl SqliteMiniAppManagedStorage {
             .registrations
             .read()
             .await
-            .get(&StorageKey {
-                owner_user_id: owner_user_id.to_owned(),
-                miniapp_id: miniapp_id.as_ref().to_owned(),
+            .values()
+            .find(|registration| {
+                registration.owner_user_id == owner_user_id
+                    && registration.descriptor.kv.miniapp_id == *miniapp_id
+                    && registration.descriptor == *descriptor
             })
             .cloned()
             .ok_or(MiniAppPlatformError::UnknownStorageHandle)?;
@@ -162,24 +172,46 @@ impl SqliteMiniAppManagedStorage {
         Ok(registration)
     }
 
-    async fn registration_for_miniapp(
+    async fn registration_for_files_handle(
         &self,
         miniapp_id: &MiniAppId,
+        handle_id: &MiniAppFilesHandleId,
     ) -> MiniAppPlatformResult<RegisteredStorage> {
-        let registrations = self.registrations.read().await;
-        let mut matches = registrations
+        self.registrations
+            .read()
+            .await
             .iter()
-            .filter(|(key, _)| key.miniapp_id == miniapp_id.as_ref())
-            .map(|(_, registration)| registration.clone());
-        let registration = matches
-            .next()
-            .ok_or(MiniAppPlatformError::UnknownStorageHandle)?;
-        if matches.next().is_some() {
-            return Err(MiniAppPlatformError::InvalidState(
-                "MiniApp storage registration is ambiguous across owners".into(),
-            ));
-        }
-        Ok(registration)
+            .find(|(_, registration)| {
+                registration.descriptor.kv.miniapp_id == *miniapp_id
+                    && registration
+                        .descriptor
+                        .files_dir
+                        .as_ref()
+                        .is_some_and(|files| &files.handle_id == handle_id)
+            })
+            .map(|(_, registration)| registration.clone())
+            .ok_or(MiniAppPlatformError::UnknownStorageHandle)
+    }
+
+    async fn registration_for_database_handle(
+        &self,
+        miniapp_id: &MiniAppId,
+        handle_id: &MiniAppDatabaseHandleId,
+    ) -> MiniAppPlatformResult<RegisteredStorage> {
+        self.registrations
+            .read()
+            .await
+            .iter()
+            .find(|(_, registration)| {
+                registration.descriptor.kv.miniapp_id == *miniapp_id
+                    && registration
+                        .descriptor
+                        .private_database
+                        .as_ref()
+                        .is_some_and(|database| &database.handle_id == handle_id)
+            })
+            .map(|(_, registration)| registration.clone())
+            .ok_or(MiniAppPlatformError::UnknownStorageHandle)
     }
 
     async fn ensure_product_owner(
@@ -207,6 +239,7 @@ impl SqliteMiniAppManagedStorage {
         owner_user_id: &str,
         miniapp_id: &MiniAppId,
         storage: &MiniAppServiceStorageDescriptor,
+        namespace: &str,
         request: MiniAppBridgeKvRequest,
         cancellation: MiniAppCallCancellation,
     ) -> MiniAppPlatformResult<StrictJsonValue> {
@@ -215,24 +248,21 @@ impl SqliteMiniAppManagedStorage {
         if storage.kv.miniapp_id != *miniapp_id {
             return Err(MiniAppPlatformError::UnknownStorageHandle);
         }
-        let (namespace, key, operation) = match request {
+        let (key, operation) = match request {
             MiniAppBridgeKvRequest::Get { key } => {
-                ("service".to_owned(), key, KvOperation::Get)
+                (key, KvOperation::Get)
             }
-            MiniAppBridgeKvRequest::Set { key, value } => (
-                "service".to_owned(),
-                key,
-                KvOperation::Set { value: value.0 },
-            ),
+            MiniAppBridgeKvRequest::Set { key, value } => {
+                (key, KvOperation::Set { value: value.0 })
+            }
             MiniAppBridgeKvRequest::Delete { key } => {
-                ("service".to_owned(), key, KvOperation::Delete)
+                (key, KvOperation::Delete)
             }
             MiniAppBridgeKvRequest::CompareAndSwap {
                 key,
                 expected_revision,
                 value,
             } => (
-                "service".to_owned(),
                 key,
                 KvOperation::CompareAndSwap {
                     expected_revision: expected_revision
@@ -246,7 +276,7 @@ impl SqliteMiniAppManagedStorage {
                 },
             ),
         };
-        validate_visible_key(&namespace, 128)?;
+        validate_visible_key(namespace, 128)?;
         validate_visible_key(&key, 256)?;
 
         let mut transaction = self
@@ -259,7 +289,7 @@ impl SqliteMiniAppManagedStorage {
             &mut transaction,
             owner_user_id,
             miniapp_id,
-            &namespace,
+            namespace,
             &key,
         )
         .await?;
@@ -295,7 +325,7 @@ impl SqliteMiniAppManagedStorage {
                     &mut transaction,
                     owner_user_id,
                     miniapp_id,
-                    &namespace,
+                    namespace,
                     &key,
                     &value_json,
                     current.as_ref(),
@@ -313,7 +343,7 @@ impl SqliteMiniAppManagedStorage {
                             &mut transaction,
                             owner_user_id,
                             miniapp_id,
-                            &namespace,
+                            namespace,
                             &key,
                             row,
                             now_ms,
@@ -353,7 +383,7 @@ impl SqliteMiniAppManagedStorage {
                                 &mut transaction,
                                 owner_user_id,
                                 miniapp_id,
-                                &namespace,
+                                namespace,
                                 &key,
                                 &value_json,
                                 current.as_ref(),
@@ -367,7 +397,7 @@ impl SqliteMiniAppManagedStorage {
                                     &mut transaction,
                                     owner_user_id,
                                     miniapp_id,
-                                    &namespace,
+                                    namespace,
                                     &key,
                                     row,
                                     now_ms,
@@ -506,6 +536,7 @@ impl MiniAppServiceStoragePort for SqliteMiniAppManagedStorage {
         let storage_key = StorageKey {
             owner_user_id: owner_user_id.to_owned(),
             miniapp_id: miniapp_id.as_ref().to_owned(),
+            test_id: None,
         };
         if let Some(existing) = registrations.get(&storage_key)
             && existing.owner_user_id != owner_user_id
@@ -519,6 +550,7 @@ impl MiniAppServiceStoragePort for SqliteMiniAppManagedStorage {
         let registration = RegisteredStorage {
             owner_user_id: owner_user_id.to_owned(),
             descriptor: descriptor.clone(),
+            kv_namespace: PRODUCTION_KV_NAMESPACE.to_owned(),
             database_path,
             database_lock,
         };
@@ -643,9 +675,11 @@ impl MiniAppServiceStoragePort for SqliteMiniAppManagedStorage {
 
         let mut registrations = self.registrations.write().await;
         let current = registrations
-            .get_mut(&StorageKey {
-                owner_user_id: owner_user_id.to_owned(),
-                miniapp_id: miniapp_id.as_ref().to_owned(),
+            .values_mut()
+            .find(|registration| {
+                registration.owner_user_id == owner_user_id
+                    && registration.descriptor.kv.miniapp_id == *miniapp_id
+                    && registration.descriptor == *storage
             })
             .ok_or(MiniAppPlatformError::UnknownStorageHandle)?;
         let database = current
@@ -672,6 +706,7 @@ impl MiniAppServiceStoragePort for SqliteMiniAppManagedStorage {
                     &registration.owner_user_id,
                     miniapp_id,
                     storage,
+                    &registration.kv_namespace,
                     request,
                     cancellation,
                 )
@@ -731,6 +766,229 @@ impl MiniAppServiceStoragePort for SqliteMiniAppManagedStorage {
         }
     }
 
+    async fn create_service_test_storage(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &MiniAppId,
+        test_id: &str,
+        uses_files: bool,
+        uses_private_database: bool,
+    ) -> MiniAppPlatformResult<MiniAppServiceTestStorageResolution> {
+        self.ensure_product_owner(owner_user_id, miniapp_id).await?;
+        validate_path_component(owner_user_id, "owner_user_id")?;
+        validate_path_component(miniapp_id.as_ref(), "miniapp_id")?;
+        validate_service_test_id(test_id)?;
+        self.purge_service_test_storage(owner_user_id, miniapp_id, test_id)
+            .await?;
+
+        let production = self
+            .resolve_service_storage(
+                owner_user_id,
+                miniapp_id,
+                uses_files,
+                uses_private_database,
+            )
+            .await?;
+        let production_registration = self
+            .registration(owner_user_id, miniapp_id, &production.descriptor)
+            .await?;
+        let kv_namespace = service_test_kv_namespace(test_id)?;
+        let test_root = ensure_managed_directory(
+            self.root(),
+            &[
+                SERVICE_TESTS_DIRECTORY,
+                owner_user_id,
+                miniapp_id.as_ref(),
+                test_id,
+            ],
+        )?;
+        let materialized: MiniAppPlatformResult<_> = async {
+            let files_dir = if uses_files {
+                let canonical = ensure_managed_directory(&test_root, &["files"])?;
+                Some(MiniAppFilesDirDescriptor {
+                    handle_id: MiniAppFilesHandleId::from(format!(
+                        "miniapp-test-files-{}-{test_id}",
+                        miniapp_id.as_ref()
+                    )),
+                    miniapp_id: miniapp_id.clone(),
+                    absolute_path: canonical.display().to_string(),
+                })
+            } else {
+                None
+            };
+            let copied_kv_digest = copy_service_test_kv(
+                &self.pool,
+                owner_user_id,
+                miniapp_id,
+                &kv_namespace,
+            )
+            .await?;
+            let (
+                private_database,
+                copied_private_database_digest,
+                migration_ledger,
+                database_path,
+            ) = if uses_private_database {
+                let source_path = production_registration
+                    .database_path
+                    .clone()
+                    .ok_or(MiniAppPlatformError::UnknownStorageHandle)?;
+                let target_path = test_root.join("private.sqlite");
+                ensure_database_path(&target_path)?;
+                let handle_id = MiniAppDatabaseHandleId::from(format!(
+                    "miniapp-test-db-{}-{test_id}",
+                    miniapp_id.as_ref()
+                ));
+                let miniapp_id_owned = miniapp_id.clone();
+                let handle_id_owned = handle_id.clone();
+                let source_lock = Arc::clone(&production_registration.database_lock);
+                let (database_digest, ledger) = tokio::task::spawn_blocking(move || {
+                    let _guard = source_lock.blocking_lock();
+                    create_private_database_snapshot(
+                        &source_path,
+                        &target_path,
+                        &miniapp_id_owned,
+                        &handle_id_owned,
+                    )
+                })
+                .await
+                .map_err(|error| MiniAppPlatformError::Database(error.to_string()))??;
+                let canonical_path = fs::canonicalize(test_root.join("private.sqlite"))
+                    .map_err(|error| {
+                        MiniAppPlatformError::Runtime(format!(
+                            "cannot canonicalize Service Test private database: {error}"
+                        ))
+                    })?;
+                ensure_within(self.root(), &canonical_path)?;
+                (
+                    Some(MiniAppPrivateDatabaseDescriptor {
+                        handle_id,
+                        miniapp_id: miniapp_id.clone(),
+                        schema_epoch: ledger.schema_epoch,
+                        migration_ledger_digest: ledger.ledger_digest.clone(),
+                    }),
+                    Some(database_digest),
+                    Some(ledger),
+                    Some(canonical_path),
+                )
+            } else {
+                (None, None, None, None)
+            };
+            Ok((
+                files_dir,
+                copied_kv_digest,
+                private_database,
+                copied_private_database_digest,
+                migration_ledger,
+                database_path,
+            ))
+        }
+        .await;
+        let (
+            files_dir,
+            copied_kv_digest,
+            private_database,
+            copied_private_database_digest,
+            migration_ledger,
+            database_path,
+        ) = match materialized {
+            Ok(materialized) => materialized,
+            Err(error) => {
+                let directory_cleanup = remove_managed_directory(self.root(), &test_root);
+                let kv_cleanup = delete_service_test_kv(
+                    &self.pool,
+                    owner_user_id,
+                    miniapp_id,
+                    &kv_namespace,
+                )
+                .await;
+                if let Err(cleanup_error) = directory_cleanup.and(kv_cleanup) {
+                    return Err(MiniAppPlatformError::Runtime(format!(
+                        "Service Test storage creation failed: {error}; cleanup failed: {cleanup_error}"
+                    )));
+                }
+                return Err(error);
+            }
+        };
+
+        let descriptor = MiniAppServiceStorageDescriptor {
+            kv: nomifun_agent_contracts::MiniAppKvHandleDescriptor {
+                handle_id: nomifun_agent_contracts::MiniAppKvHandleId::from(format!(
+                    "miniapp-test-kv-{}-{test_id}",
+                    miniapp_id.as_ref()
+                )),
+                miniapp_id: miniapp_id.clone(),
+                namespace_revision: 1,
+            },
+            files_dir,
+            private_database,
+        };
+        let registration = RegisteredStorage {
+            owner_user_id: owner_user_id.to_owned(),
+            descriptor: descriptor.clone(),
+            kv_namespace,
+            database_path,
+            database_lock: Arc::new(Mutex::new(())),
+        };
+        self.registrations.write().await.insert(
+            StorageKey {
+                owner_user_id: owner_user_id.to_owned(),
+                miniapp_id: miniapp_id.as_ref().to_owned(),
+                test_id: Some(test_id.to_owned()),
+            },
+            registration,
+        );
+        Ok(MiniAppServiceTestStorageResolution {
+            descriptor,
+            copied_kv_digest,
+            copied_private_database_digest,
+            empty_files_dir: uses_files.then_some(true),
+            migration_ledger,
+        })
+    }
+
+    async fn purge_service_test_storage(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &MiniAppId,
+        test_id: &str,
+    ) -> MiniAppPlatformResult<()> {
+        validate_path_component(owner_user_id, "owner_user_id")?;
+        validate_path_component(miniapp_id.as_ref(), "miniapp_id")?;
+        validate_service_test_id(test_id)?;
+        let storage_key = StorageKey {
+            owner_user_id: owner_user_id.to_owned(),
+            miniapp_id: miniapp_id.as_ref().to_owned(),
+            test_id: Some(test_id.to_owned()),
+        };
+        let registration = self
+            .registrations
+            .read()
+            .await
+            .get(&storage_key)
+            .cloned();
+        let _database_guard = match registration {
+            Some(registration) => Some(registration.database_lock.lock_owned().await),
+            None => None,
+        };
+        let test_root = self
+            .root
+            .join(SERVICE_TESTS_DIRECTORY)
+            .join(owner_user_id)
+            .join(miniapp_id.as_ref())
+            .join(test_id);
+        remove_managed_directory(self.root(), &test_root)?;
+        delete_service_test_kv(
+            &self.pool,
+            owner_user_id,
+            miniapp_id,
+            &service_test_kv_namespace(test_id)?,
+        )
+        .await?;
+        self.registrations.write().await.remove(&storage_key);
+        Ok(())
+    }
+
     async fn purge_service_storage(
         &self,
         owner_user_id: &str,
@@ -738,14 +996,21 @@ impl MiniAppServiceStoragePort for SqliteMiniAppManagedStorage {
     ) -> MiniAppPlatformResult<()> {
         validate_path_component(owner_user_id, "owner_user_id")?;
         validate_path_component(miniapp_id.as_ref(), "miniapp_id")?;
-        let storage_key = StorageKey {
-            owner_user_id: owner_user_id.to_owned(),
-            miniapp_id: miniapp_id.as_ref().to_owned(),
-        };
-        let registration = {
+        let registrations = {
             let registrations = self.registrations.read().await;
-            registrations.get(&storage_key).cloned()
+            registrations
+                .iter()
+                .filter(|(key, _)| {
+                    key.owner_user_id == owner_user_id
+                        && key.miniapp_id == miniapp_id.as_ref()
+                })
+                .map(|(_, registration)| registration.clone())
+                .collect::<Vec<_>>()
         };
+        let mut _database_guards = Vec::with_capacity(registrations.len());
+        for registration in registrations {
+            _database_guards.push(registration.database_lock.lock_owned().await);
+        }
         let database_path = self
             .root
             .join(DATABASES_DIRECTORY)
@@ -756,14 +1021,18 @@ impl MiniAppServiceStoragePort for SqliteMiniAppManagedStorage {
             .join(FILES_DIRECTORY)
             .join(owner_user_id)
             .join(miniapp_id.as_ref());
-        if let Some(registration) = registration {
-            let _guard = registration.database_lock.lock().await;
-            remove_private_database_files(self.root(), &database_path)?;
-        } else {
-            remove_private_database_files(self.root(), &database_path)?;
-        }
+        let tests_path = self
+            .root
+            .join(SERVICE_TESTS_DIRECTORY)
+            .join(owner_user_id)
+            .join(miniapp_id.as_ref());
+        remove_private_database_files(self.root(), &database_path)?;
         remove_managed_directory(self.root(), &files_path)?;
-        self.registrations.write().await.remove(&storage_key);
+        remove_managed_directory(self.root(), &tests_path)?;
+        delete_all_service_kv(&self.pool, owner_user_id, miniapp_id).await?;
+        self.registrations.write().await.retain(|key, _| {
+            key.owner_user_id != owner_user_id || key.miniapp_id != miniapp_id.as_ref()
+        });
         Ok(())
     }
 }
@@ -778,12 +1047,12 @@ impl MiniAppHostKvPort for SqliteMiniAppManagedStorage {
     ) -> MiniAppPlatformResult<StrictJsonValue> {
         let owner = self
             .registration_for(miniapp_id, storage)
-            .await?
-            .owner_user_id;
+            .await?;
         self.execute_kv(
-            &owner,
+            &owner.owner_user_id,
             miniapp_id,
             storage,
+            &owner.kv_namespace,
             request.clone(),
             MiniAppCallCancellation::default(),
         )
@@ -799,7 +1068,7 @@ impl MiniAppFilesPort for SqliteMiniAppManagedStorage {
         miniapp_id: &MiniAppId,
         handle_id: &MiniAppFilesHandleId,
     ) -> MiniAppPlatformResult<MiniAppFilesDirDescriptor> {
-        self.registration_for_miniapp(miniapp_id)
+        self.registration_for_files_handle(miniapp_id, handle_id)
             .await?
             .descriptor
             .files_dir
@@ -819,7 +1088,9 @@ impl MiniAppPrivateDatabasePort for SqliteMiniAppManagedStorage {
         cancellation: MiniAppCallCancellation,
     ) -> MiniAppPlatformResult<MiniAppDatabaseQueryResult> {
         statement.validate_query()?;
-        let registration = self.registration_for_miniapp(miniapp_id).await?;
+        let registration = self
+            .registration_for_database_handle(miniapp_id, handle_id)
+            .await?;
         if registration
             .descriptor
             .private_database
@@ -875,7 +1146,9 @@ impl MiniAppPrivateDatabasePort for SqliteMiniAppManagedStorage {
         cancellation: MiniAppCallCancellation,
     ) -> MiniAppPlatformResult<MiniAppDatabaseExecuteResult> {
         statement.validate_execute()?;
-        let registration = self.registration_for_miniapp(miniapp_id).await?;
+        let registration = self
+            .registration_for_database_handle(miniapp_id, handle_id)
+            .await?;
         if registration
             .descriptor
             .private_database
@@ -917,7 +1190,9 @@ impl MiniAppPrivateDatabasePort for SqliteMiniAppManagedStorage {
         for statement in &statements {
             statement.validate_execute()?;
         }
-        let registration = self.registration_for_miniapp(miniapp_id).await?;
+        let registration = self
+            .registration_for_database_handle(miniapp_id, handle_id)
+            .await?;
         if registration
             .descriptor
             .private_database
@@ -965,7 +1240,9 @@ impl MiniAppPrivateDatabasePort for SqliteMiniAppManagedStorage {
         migrations: &[MiniAppMigration],
         applied_at_ms: i64,
     ) -> MiniAppPlatformResult<MiniAppMigrationLedger> {
-        let registration = self.registration_for_miniapp(miniapp_id).await?;
+        let registration = self
+            .registration_for_database_handle(miniapp_id, handle_id)
+            .await?;
         let descriptor = registration
             .descriptor
             .private_database
@@ -993,7 +1270,9 @@ impl MiniAppPrivateDatabasePort for SqliteMiniAppManagedStorage {
         miniapp_id: &MiniAppId,
         handle_id: &MiniAppDatabaseHandleId,
     ) -> MiniAppPlatformResult<MiniAppMigrationLedger> {
-        let registration = self.registration_for_miniapp(miniapp_id).await?;
+        let registration = self
+            .registration_for_database_handle(miniapp_id, handle_id)
+            .await?;
         let descriptor = registration
             .descriptor
             .private_database
@@ -1017,6 +1296,165 @@ impl MiniAppPrivateDatabasePort for SqliteMiniAppManagedStorage {
         .await
         .map_err(|error| MiniAppPlatformError::Database(error.to_string()))?
     }
+}
+
+fn service_test_kv_namespace(test_id: &str) -> MiniAppPlatformResult<String> {
+    validate_service_test_id(test_id)?;
+    let namespace = format!("{SERVICE_TEST_KV_NAMESPACE_PREFIX}{test_id}");
+    validate_visible_key(&namespace, 128)?;
+    Ok(namespace)
+}
+
+async fn copy_service_test_kv(
+    pool: &SqlitePool,
+    owner_user_id: &str,
+    miniapp_id: &MiniAppId,
+    test_namespace: &str,
+) -> MiniAppPlatformResult<DigestHex> {
+    let mut transaction = pool
+        .begin()
+        .await
+        .map_err(|error| MiniAppPlatformError::Database(error.to_string()))?;
+    nomifun_db::sqlx::query(
+        "DELETE FROM miniapp_kv
+         WHERE owner_user_id = ? AND miniapp_id = ? AND namespace = ?",
+    )
+    .bind(owner_user_id)
+    .bind(miniapp_id.as_ref())
+    .bind(test_namespace)
+    .execute(&mut *transaction)
+    .await
+    .map_err(|error| MiniAppPlatformError::Database(error.to_string()))?;
+    let rows = nomifun_db::sqlx::query_as::<_, MiniAppKvRow>(
+        "SELECT * FROM miniapp_kv
+         WHERE owner_user_id = ? AND miniapp_id = ? AND namespace = ?
+         ORDER BY key",
+    )
+    .bind(owner_user_id)
+    .bind(miniapp_id.as_ref())
+    .bind(PRODUCTION_KV_NAMESPACE)
+    .fetch_all(&mut *transaction)
+    .await
+    .map_err(|error| MiniAppPlatformError::Database(error.to_string()))?;
+    let mut digest_entries = Vec::with_capacity(rows.len());
+    for row in rows {
+        if row.revision < 1
+            || row.key_generation < 1
+            || row.key_generation > row.revision
+            || (row.is_tombstone && row.value_json != "null")
+        {
+            return Err(MiniAppPlatformError::Database(
+                "MiniApp KV row violates its tombstone contract".into(),
+            ));
+        }
+        let value = serde_json::from_str(&row.value_json).map_err(|error| {
+            MiniAppPlatformError::Database(format!(
+                "MiniApp KV value is invalid JSON: {error}"
+            ))
+        })?;
+        digest_entries.push(MiniAppServiceTestKvSnapshotEntry {
+            key: row.key.clone(),
+            value: StrictJsonValue(value),
+            revision: u64::try_from(row.revision)
+                .map_err(|_| MiniAppPlatformError::KvRevisionOverflow)?,
+            key_generation: u64::try_from(row.key_generation)
+                .map_err(|_| MiniAppPlatformError::KvRevisionOverflow)?,
+            is_tombstone: row.is_tombstone,
+        });
+        nomifun_db::sqlx::query(
+            "INSERT INTO miniapp_kv (
+                miniapp_id, owner_user_id, namespace, key, value_json,
+                revision, key_generation, is_tombstone, created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(miniapp_id.as_ref())
+        .bind(owner_user_id)
+        .bind(test_namespace)
+        .bind(&row.key)
+        .bind(&row.value_json)
+        .bind(row.revision)
+        .bind(row.key_generation)
+        .bind(row.is_tombstone)
+        .bind(row.created_at)
+        .bind(row.updated_at)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| MiniAppPlatformError::Database(error.to_string()))?;
+    }
+    let digest = service_test_kv_digest(digest_entries)?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| MiniAppPlatformError::Database(error.to_string()))?;
+    Ok(digest)
+}
+
+async fn delete_service_test_kv(
+    pool: &SqlitePool,
+    owner_user_id: &str,
+    miniapp_id: &MiniAppId,
+    test_namespace: &str,
+) -> MiniAppPlatformResult<()> {
+    nomifun_db::sqlx::query(
+        "DELETE FROM miniapp_kv
+         WHERE owner_user_id = ? AND miniapp_id = ? AND namespace = ?",
+    )
+    .bind(owner_user_id)
+    .bind(miniapp_id.as_ref())
+    .bind(test_namespace)
+    .execute(pool)
+    .await
+    .map_err(|error| MiniAppPlatformError::Database(error.to_string()))?;
+    Ok(())
+}
+
+async fn delete_all_service_kv(
+    pool: &SqlitePool,
+    owner_user_id: &str,
+    miniapp_id: &MiniAppId,
+) -> MiniAppPlatformResult<()> {
+    nomifun_db::sqlx::query(
+        "DELETE FROM miniapp_kv
+         WHERE owner_user_id = ? AND miniapp_id = ?
+           AND (namespace = ? OR namespace LIKE ?)",
+    )
+    .bind(owner_user_id)
+    .bind(miniapp_id.as_ref())
+    .bind(PRODUCTION_KV_NAMESPACE)
+    .bind(format!("{SERVICE_TEST_KV_NAMESPACE_PREFIX}%"))
+    .execute(pool)
+    .await
+    .map_err(|error| MiniAppPlatformError::Database(error.to_string()))?;
+    Ok(())
+}
+
+fn create_private_database_snapshot(
+    source_path: &Path,
+    target_path: &Path,
+    miniapp_id: &MiniAppId,
+    test_handle_id: &MiniAppDatabaseHandleId,
+) -> MiniAppPlatformResult<(DigestHex, MiniAppMigrationLedger)> {
+    ensure_database_path(source_path)?;
+    if target_path.exists() {
+        return Err(MiniAppPlatformError::StorageConflict);
+    }
+    let source = Connection::open(source_path).map_err(database_error)?;
+    let target = target_path.to_string_lossy().into_owned();
+    source
+        .execute("VACUUM main INTO ?1", rusqlite::params![target])
+        .map_err(database_error)?;
+    drop(source);
+    ensure_database_path(target_path)?;
+    let copied_digest = fs::read(target_path)
+        .map(|bytes| digest_bytes(&bytes))
+        .map_err(|error| {
+            MiniAppPlatformError::Runtime(format!(
+                "cannot hash Service Test private database snapshot: {error}"
+            ))
+        })?;
+    let snapshot = Connection::open(target_path).map_err(database_error)?;
+    let ledger = read_ledger(&snapshot, miniapp_id, test_handle_id)?;
+    Ok((copied_digest, ledger))
 }
 
 fn ensure_directory(path: &Path) -> MiniAppPlatformResult<()> {

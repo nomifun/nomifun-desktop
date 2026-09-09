@@ -757,7 +757,125 @@ async fn migration_082_adds_owner_scoped_miniapp_deletion_intents() {
 }
 
 #[tokio::test]
-async fn migrations_078_through_082_upgrade_existing_release_state_in_place() {
+async fn migration_083_adds_immutable_owner_scoped_service_test_receipt_history() {
+    let database = migrated_pool(83).await;
+    let migration = include_str!("../migrations/083_miniapp_service_test_receipts.sql");
+    for forbidden in ["FROM miniapps", "FOREIGN KEY", "REFERENCES", "CREATE TRIGGER"] {
+        assert!(
+            !migration.contains(forbidden),
+            "migration 083 must not contain {forbidden}"
+        );
+    }
+
+    let columns = sqlx::query("PRAGMA table_info('miniapp_service_test_receipts')")
+        .fetch_all(&database)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|column| column.get::<String, _>("name"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        columns,
+        [
+            "id",
+            "receipt_id",
+            "owner_user_id",
+            "miniapp_id",
+            "release_id",
+            "release_digest",
+            "service_run_key",
+            "outcome",
+            "error_code",
+            "receipt_digest",
+            "runtime_fingerprint_digest",
+            "resolved_test_input_digest",
+            "tested_product_revision",
+            "tested_pointer_revision",
+            "tested_config_revision",
+            "tested_credential_bindings_revision",
+            "receipt_json",
+            "issued_at_ms",
+        ]
+    );
+    let foreign_keys: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pragma_foreign_key_list('miniapp_service_test_receipts')",
+    )
+    .fetch_one(&database)
+    .await
+    .unwrap();
+    assert_eq!(foreign_keys, 0);
+    let triggers: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_schema
+         WHERE type = 'trigger' AND tbl_name = 'miniapp_service_test_receipts'",
+    )
+    .fetch_one(&database)
+    .await
+    .unwrap();
+    assert_eq!(triggers, 0);
+    for index in [
+        "idx_miniapp_service_test_receipts_owner_user_id",
+        "idx_miniapp_service_test_receipts_miniapp_id",
+        "idx_miniapp_service_test_receipts_release_id",
+        "idx_miniapp_service_test_receipts_current",
+    ] {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' AND name = ?",
+        )
+        .bind(index)
+        .fetch_one(&database)
+        .await
+        .unwrap();
+        assert_eq!(count, 1, "missing index {index}");
+    }
+
+    let invalid_receipt_id = sqlx::query(
+        "INSERT INTO miniapp_service_test_receipts (
+            receipt_id, owner_user_id, miniapp_id, release_id,
+            release_digest, service_run_key, outcome, receipt_digest,
+            runtime_fingerprint_digest, resolved_test_input_digest,
+            tested_product_revision, tested_pointer_revision,
+            tested_config_revision, tested_credential_bindings_revision,
+            receipt_json, issued_at_ms
+         ) VALUES ('not-a-uuid', ?, ?, ?, ?, ?, 'passed', ?, ?, ?, 1, 1, 1, 1, '{}', 1)",
+    )
+    .bind("0190f5fe-7c00-7000-8000-000000000201")
+    .bind("0190f5fe-7c00-7000-8000-000000000301")
+    .bind("0190f5fe-7c00-7000-8000-000000000302")
+    .bind("a".repeat(64))
+    .bind("b".repeat(64))
+    .bind("c".repeat(64))
+    .bind("d".repeat(64))
+    .bind("e".repeat(64))
+    .execute(&database)
+    .await;
+    assert!(invalid_receipt_id.is_err());
+
+    let invalid_outcome = sqlx::query(
+        "INSERT INTO miniapp_service_test_receipts (
+            receipt_id, owner_user_id, miniapp_id, release_id,
+            release_digest, service_run_key, outcome, receipt_digest,
+            runtime_fingerprint_digest, resolved_test_input_digest,
+            tested_product_revision, tested_pointer_revision,
+            tested_config_revision, tested_credential_bindings_revision,
+            receipt_json, issued_at_ms
+         ) VALUES (?, ?, ?, ?, ?, ?, 'unknown', ?, ?, ?, 1, 1, 1, 1, '{}', 1)",
+    )
+    .bind("0190f5fe-7c00-7000-8000-000000000303")
+    .bind("0190f5fe-7c00-7000-8000-000000000201")
+    .bind("0190f5fe-7c00-7000-8000-000000000301")
+    .bind("0190f5fe-7c00-7000-8000-000000000302")
+    .bind("a".repeat(64))
+    .bind("b".repeat(64))
+    .bind("c".repeat(64))
+    .bind("d".repeat(64))
+    .bind("e".repeat(64))
+    .execute(&database)
+    .await;
+    assert!(invalid_outcome.is_err());
+}
+
+#[tokio::test]
+async fn migrations_078_through_083_upgrade_existing_release_state_in_place() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("miniapp-v077-upgrade.db");
     let database = sqlx::sqlite::SqlitePoolOptions::new()
@@ -1042,7 +1160,7 @@ async fn migrations_078_through_082_upgrade_existing_release_state_in_place() {
         .fetch_one(upgraded.pool())
         .await
         .unwrap();
-    assert_eq!(head, 82);
+    assert_eq!(head, 83);
     let quick_check: Vec<String> = sqlx::query_scalar("PRAGMA quick_check")
         .fetch_all(upgraded.pool())
         .await

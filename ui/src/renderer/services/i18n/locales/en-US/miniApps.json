@@ -16,6 +16,7 @@
     "retry": "Retry",
     "backToLibrary": "Back to library",
     "build": "Build Ready Release",
+    "testService": "Test Ready Service",
     "cancelBuild": "Cancel build",
     "cancel": "Cancel",
     "publish": "Publish",
@@ -44,6 +45,7 @@
     "notFoundTitle": "Mini-app not found",
     "notFoundBody": "It may have been deleted or belong to another user.",
     "buildUnavailable": "This Project has no exact buildable Source, or a build is already running.",
+    "testUnavailable": "Service Test requires the current Ready Service and exact Product, Project, Config, and Credential revisions.",
     "publishUnavailable": "The current Ready Release is not eligible for manual Publish.",
     "rollbackUnavailable": "There is no exact Active/Previous pair available for Rollback.",
     "enableUnavailable": "The MiniApp needs an Active Release before it can be enabled.",
@@ -62,6 +64,8 @@
   },
   "confirm": {
     "publishTitle": "Publish Ready Release?",
+    "testTitle": "Test this Ready Service?",
+    "testBody": "The active Service is stopped briefly. NomiFun copies KV and Private DB into isolated temporary test storage, creates an empty Files directory, runs Ready migrations there, and restores the active Service afterward. Raw filesystem, network, child-process, and external side effects are not sandboxed.",
     "publishFirstBody": "This creates the first Active Release. Publish does not enable the MiniApp; Enable remains a separate action.",
     "publishServiceBody": "This Service Ready Release has not completed a formal runtime test. Continue only if you accept publishing an untested Service; Publish does not start it automatically.",
     "publishUpdateBody": "This makes the Ready Release Active and moves the current Active Release to Previous. The MiniApp lifecycle is unchanged.",
@@ -314,6 +318,7 @@
   },
   "messages": {
     "buildSucceeded": "Ready Release built",
+    "testCompleted": "Ready Service test completed",
     "buildCanceled": "Build canceled",
     "published": "Ready Release published; lifecycle unchanged",
     "rolledBack": "MiniApp rolled back to Previous Release",

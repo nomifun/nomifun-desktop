@@ -1,10 +1,13 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 use nomifun_agent_contracts::{
-    DigestHex, MiniAppBridgeCallId, MiniAppServiceReleaseDescriptor,
-    MiniAppMigration, MiniAppServiceRuntimeFingerprint,
-    MiniAppServiceStorageDescriptor, MiniAppId, MiniAppReleaseRef, ResolvedMiniAppServiceSpec,
-    ResolvedMiniAppServiceSpecInputs, StrictJsonValue,
+    CanonicalErrorCode, DigestHex, MiniAppBridgeCallId, MiniAppId, MiniAppMigration,
+    MiniAppReadyRelease, MiniAppReleaseRef, MiniAppServiceReleaseDescriptor,
+    MiniAppServiceRuntimeFingerprint, MiniAppServiceStorageDescriptor,
+    MiniAppServiceTestCredentialMode, MiniAppServiceTestOutcome,
+    MiniAppServiceTestReceipt, MiniAppServiceTestReceiptId, ResolvedMiniAppServiceSpec,
+    ResolvedMiniAppServiceSpecInputs, StrictJsonValue, MINIAPP_SERVICE_HOST_PROTOCOL_VERSION,
+    MINIAPP_SERVICE_SDK_CONTRACT_VERSION, MINIAPP_SERVICE_TEST_CONTRACT_VERSION,
 };
 use nomifun_js_runtime::{CommittedRuntimeProvider, ResolvedNodeRuntime};
 use crate::{
@@ -13,7 +16,8 @@ use crate::{
     MiniAppServiceModuleRegistry, MiniAppServiceProcessFactory,
     RuntimeAwareMiniAppServiceProcessFactory, MiniAppServiceLaunch,
     NodeMiniAppServiceProcessFactory, MiniAppServiceStoragePort,
-    MiniAppServiceStorageRequest, MiniAppServiceStorageResolution, MiniAppMigrationLedger,
+    MiniAppServiceStorageRequest, MiniAppServiceStorageResolution,
+    MiniAppServiceTestStorageResolution, MiniAppMigrationLedger,
 };
 
 /// All immutable inputs needed to resolve one Service Host run.
@@ -64,6 +68,19 @@ impl MiniAppServiceSpecInput {
         }
         Ok(())
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct MiniAppServiceTestRunInput {
+    pub receipt_id: MiniAppServiceTestReceiptId,
+    pub ready: MiniAppReadyRelease,
+    pub spec: ResolvedMiniAppServiceSpec,
+    pub resolved_test_input_digest: DigestHex,
+    pub copied_kv_digest: DigestHex,
+    pub copied_private_database_digest: Option<DigestHex>,
+    pub empty_files_dir: Option<bool>,
+    pub migration_ledger_digest: Option<DigestHex>,
+    pub requires_managed_input: bool,
 }
 
 /// Runtime/process boundary consumed by the MiniApp application service.
@@ -134,6 +151,43 @@ pub trait MiniAppServiceRuntimeBinding: Send + Sync {
         _miniapp_id: &MiniAppId,
     ) -> MiniAppPlatformResult<()> {
         Ok(())
+    }
+
+    async fn create_service_test_storage(
+        &self,
+        _owner_user_id: &str,
+        _miniapp_id: &MiniAppId,
+        _test_id: &str,
+        _uses_files: bool,
+        _uses_private_database: bool,
+    ) -> MiniAppPlatformResult<MiniAppServiceTestStorageResolution> {
+        Err(MiniAppPlatformError::ServiceUnavailable(
+            "MiniApp Service Test storage is not configured".into(),
+        ))
+    }
+
+    async fn purge_service_test_storage(
+        &self,
+        _owner_user_id: &str,
+        _miniapp_id: &MiniAppId,
+        _test_id: &str,
+    ) -> MiniAppPlatformResult<()> {
+        Ok(())
+    }
+
+    async fn run_service_test(
+        &self,
+        _input: MiniAppServiceTestRunInput,
+    ) -> MiniAppPlatformResult<MiniAppServiceTestReceipt> {
+        Err(MiniAppPlatformError::ServiceUnavailable(
+            "MiniApp Service Test Host is not configured".into(),
+        ))
+    }
+
+    async fn current_runtime_fingerprint(
+        &self,
+    ) -> MiniAppPlatformResult<Option<MiniAppServiceRuntimeFingerprint>> {
+        Ok(None)
     }
 
     async fn resolve_spec(
@@ -430,6 +484,145 @@ impl MiniAppServiceRuntimeBinding for ProductionMiniAppServiceRuntimeBinding {
         Ok(())
     }
 
+    async fn create_service_test_storage(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &MiniAppId,
+        test_id: &str,
+        uses_files: bool,
+        uses_private_database: bool,
+    ) -> MiniAppPlatformResult<MiniAppServiceTestStorageResolution> {
+        self.storage
+            .as_ref()
+            .ok_or_else(|| {
+                MiniAppPlatformError::ServiceUnavailable(
+                    "MiniApp managed Service storage is not configured".into(),
+                )
+            })?
+            .create_service_test_storage(
+                owner_user_id,
+                miniapp_id,
+                test_id,
+                uses_files,
+                uses_private_database,
+            )
+            .await
+    }
+
+    async fn purge_service_test_storage(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &MiniAppId,
+        test_id: &str,
+    ) -> MiniAppPlatformResult<()> {
+        if let Some(storage) = &self.storage {
+            storage
+                .purge_service_test_storage(owner_user_id, miniapp_id, test_id)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn run_service_test(
+        &self,
+        input: MiniAppServiceTestRunInput,
+    ) -> MiniAppPlatformResult<MiniAppServiceTestReceipt> {
+        input
+            .spec
+            .validate()
+            .map_err(MiniAppPlatformError::Contract)?;
+        let storage = self.storage.as_ref().ok_or_else(|| {
+            MiniAppPlatformError::ServiceUnavailable(
+                "MiniApp managed Service storage is not configured".into(),
+            )
+        })?;
+        let lease = self
+            .authority
+            .acquire_use(nomifun_js_runtime::JavaScriptWorkKind::MiniappServiceTestHost)
+            .await
+            .map_err(|error| MiniAppPlatformError::Runtime(error.to_string()))?;
+        let runtime = lease.runtime();
+        let expected_runtime = MiniAppServiceRuntimeFingerprint {
+            runtime_installation_id: runtime.fingerprint.runtime_installation_id.clone(),
+            runtime_target: runtime.fingerprint.runtime_target.clone(),
+            runtime_executable_digest: runtime.fingerprint.executable_digest.clone(),
+            node_version: runtime.fingerprint.node_version.clone(),
+        };
+        if input.spec.runtime != expected_runtime {
+            return Err(MiniAppPlatformError::StaleServiceGeneration);
+        }
+        let factory = NodeMiniAppServiceProcessFactory::new(
+            runtime.executable_path.clone(),
+            Arc::clone(&self.registry) as Arc<dyn crate::MiniAppServiceModuleResolver>,
+        )?
+        .with_storage(Arc::clone(storage));
+        let host_generation = 1;
+        let launch = MiniAppServiceLaunch {
+            spec: input.spec.clone(),
+            host_generation,
+        };
+        let (outcome, error_code) = match factory.start(launch).await {
+            Ok(process) => {
+                process.stop().await;
+                (
+                    if input.requires_managed_input {
+                        MiniAppServiceTestOutcome::NeedsTestInput
+                    } else {
+                        MiniAppServiceTestOutcome::Passed
+                    },
+                    None,
+                )
+            }
+            Err(_) => (
+                MiniAppServiceTestOutcome::Failed,
+                Some(CanonicalErrorCode::from(
+                    "miniapp_service_test_host_failed",
+                )),
+            ),
+        };
+        let receipt = MiniAppServiceTestReceipt {
+            receipt_id: input.receipt_id,
+            miniapp_id: input.spec.miniapp_id.clone(),
+            release: input.spec.release.clone(),
+            service_run_key: input.spec.service_run_key.clone(),
+            outcome,
+            error_code,
+            runtime: input.spec.runtime.clone(),
+            host_target: input.spec.runtime.runtime_target.clone(),
+            host_protocol_version: MINIAPP_SERVICE_HOST_PROTOCOL_VERSION.into(),
+            sdk_contract_version: MINIAPP_SERVICE_SDK_CONTRACT_VERSION.into(),
+            test_contract_version: MINIAPP_SERVICE_TEST_CONTRACT_VERSION.into(),
+            resolved_test_input_digest: input.resolved_test_input_digest,
+            copied_kv_digest: input.copied_kv_digest,
+            copied_private_database_digest: input.copied_private_database_digest,
+            empty_files_dir: input.empty_files_dir,
+            migration_ledger_digest: input.migration_ledger_digest,
+            credential_mode: MiniAppServiceTestCredentialMode::None,
+            host_generation,
+            issued_at_ms: nomifun_common::now_ms().max(1),
+        };
+        receipt
+            .validate_for(&input.ready, &input.spec)
+            .map_err(MiniAppPlatformError::Contract)?;
+        Ok(receipt)
+    }
+
+    async fn current_runtime_fingerprint(
+        &self,
+    ) -> MiniAppPlatformResult<Option<MiniAppServiceRuntimeFingerprint>> {
+        Ok(self
+            .authority
+            .committed_runtime()
+            .await
+            .map_err(|error| MiniAppPlatformError::Runtime(error.to_string()))?
+            .map(|runtime| MiniAppServiceRuntimeFingerprint {
+                runtime_installation_id: runtime.fingerprint.runtime_installation_id,
+                runtime_target: runtime.fingerprint.runtime_target,
+                runtime_executable_digest: runtime.fingerprint.executable_digest,
+                node_version: runtime.fingerprint.node_version,
+            }))
+    }
+
     async fn resolve_spec(
         &self,
         input: MiniAppServiceSpecInput,
@@ -693,23 +886,28 @@ impl PlatformStorageValidation for MiniAppServiceStorageDescriptor {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use async_trait::async_trait;
     use super::*;
     use nomifun_agent_contracts::{
-        ArtifactId, MiniAppKvHandleDescriptor, MiniAppKvHandleId, MiniAppReleaseId,
-        MiniAppReleaseRef, MiniAppServiceLifecycle,
+        ArtifactId, MiniAppKvHandleDescriptor, MiniAppKvHandleId, MiniAppReadyOrigin,
+        MiniAppReadyRelease, MiniAppReleaseId, MiniAppReleaseRef, MiniAppServiceLifecycle,
+        MiniAppSourceLineage,
         MiniAppServiceReleaseDescriptor, MiniAppServiceStorageDescriptor,
-        NodeRuntimeFingerprint, NodeRuntimeSourceKind, ResolvedMiniAppServiceSpec,
+        NodeProbeDisposition, NodeRuntimeFingerprint, NodeRuntimeProbeResult,
+        NodeRuntimeSourceKind, ResolvedMiniAppServiceSpec, RuntimeSelectionRecord,
         ResolvedMiniAppServiceSpecInputs, RuntimeInstallationId, RuntimeTarget, VersionString,
         MINIAPP_SERVICE_HOST_PROTOCOL_VERSION, MINIAPP_SERVICE_SDK_CONTRACT_VERSION, digest_bytes,
     };
     use nomifun_js_runtime::{
         CommittedRuntimeProvider, JavaScriptRuntimeError, JavaScriptWorkKind,
-        RuntimeUseLease,
+        NodeDiscoveryRequest, NodeProbeCandidate, NodeRuntimeManager, NodeRuntimeProbePort,
+        RuntimeAuthority, RuntimeSelectionStore, RuntimeSelectionStoreError, RuntimeUseLease,
+        VersionedRuntimeSelection,
     };
     use tempfile::TempDir;
+    use tokio::sync::Mutex;
 
     fn digest(seed: &str) -> DigestHex {
         digest_bytes(seed.as_bytes())
@@ -733,6 +931,77 @@ mod tests {
         ) -> Result<Option<nomifun_js_runtime::ResolvedNodeRuntime>, JavaScriptRuntimeError>
         {
             Ok(None)
+        }
+    }
+
+    struct TestRuntimeStore {
+        value: Mutex<VersionedRuntimeSelection>,
+    }
+
+    impl Default for TestRuntimeStore {
+        fn default() -> Self {
+            Self {
+                value: Mutex::new(VersionedRuntimeSelection::empty()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl RuntimeSelectionStore for TestRuntimeStore {
+        async fn load(
+            &self,
+        ) -> Result<VersionedRuntimeSelection, RuntimeSelectionStoreError> {
+            Ok(self.value.lock().await.clone())
+        }
+
+        async fn save_cas(
+            &self,
+            expected_revision: u64,
+            selection: &RuntimeSelectionRecord,
+            selected_executable_path: Option<&Path>,
+            pending_candidate_executable_path: Option<&Path>,
+            updated_at_ms: i64,
+        ) -> Result<VersionedRuntimeSelection, RuntimeSelectionStoreError> {
+            let mut value = self.value.lock().await;
+            if value.revision != expected_revision {
+                return Err(RuntimeSelectionStoreError::Conflict("stale".into()));
+            }
+            value.revision += 1;
+            value.selection = selection.clone();
+            value.selected_executable_path =
+                selected_executable_path.map(Path::to_path_buf);
+            value.pending_candidate_executable_path =
+                pending_candidate_executable_path.map(Path::to_path_buf);
+            value.updated_at_ms = updated_at_ms;
+            Ok(value.clone())
+        }
+    }
+
+    struct TestRuntimeProbe {
+        fingerprint: NodeRuntimeFingerprint,
+        executable_path: PathBuf,
+    }
+
+    #[async_trait]
+    impl NodeRuntimeProbePort for TestRuntimeProbe {
+        async fn resolve(
+            &self,
+            _request: NodeDiscoveryRequest,
+        ) -> Result<nomifun_js_runtime::NodeResolution, JavaScriptRuntimeError> {
+            Ok(nomifun_js_runtime::NodeResolution {
+                selected: Some(self.fingerprint.clone()),
+                probes: vec![NodeRuntimeProbeResult {
+                    source_kind: self.fingerprint.source_kind,
+                    executable_path: self.executable_path.display().to_string(),
+                    disposition: NodeProbeDisposition::CompatibleRecommended,
+                    fingerprint: Some(self.fingerprint.clone()),
+                    error_code: None,
+                }],
+            })
+        }
+
+        async fn probe(&self, _candidate: &NodeProbeCandidate) -> NodeRuntimeProbeResult {
+            unreachable!()
         }
     }
 
@@ -989,5 +1258,157 @@ export async function start() {
             binding.host().state(&miniapp_id).await,
             Some(MiniAppServiceHostState::Stopped)
         ));
+    }
+
+    #[tokio::test]
+    async fn production_service_test_uses_one_shot_node_and_returns_host_receipt() {
+        let node = which::which("node").expect("Node is required for this production check");
+        let node_digest = digest_bytes(
+            &tokio::fs::read(&node)
+                .await
+                .expect("read Node executable"),
+        );
+        let fingerprint = NodeRuntimeFingerprint {
+            runtime_installation_id: RuntimeInstallationId::from("service-test-node"),
+            source_kind: NodeRuntimeSourceKind::ProcessPath,
+            runtime_target: RuntimeTarget::from("windows-x86_64"),
+            node_version: VersionString::from("24.0.0"),
+            node_major: 24,
+            executable_digest: node_digest.clone(),
+            javascript_host_protocol_version:
+                nomifun_agent_contracts::JAVASCRIPT_HOST_PROTOCOL_VERSION.into(),
+            javascript_sdk_contract_version:
+                nomifun_agent_contracts::JAVASCRIPT_SDK_CONTRACT_VERSION.into(),
+        };
+        let authority = RuntimeAuthority::new(
+            Arc::new(NodeRuntimeManager::new(Arc::new(
+                TestRuntimeStore::default(),
+            ))),
+            Arc::new(TestRuntimeProbe {
+                fingerprint: fingerprint.clone(),
+                executable_path: node,
+            }),
+        );
+        authority.initialize_if_empty().await.unwrap();
+
+        let temp = TempDir::new().unwrap();
+        let module_path = temp
+            .path()
+            .join("release-test")
+            .join("service")
+            .join("main.mjs");
+        tokio::fs::create_dir_all(module_path.parent().unwrap())
+            .await
+            .unwrap();
+        let module = br#"
+export async function start() {
+  return {
+    async invoke({ payload }) { return payload; },
+    async dispose() {},
+  };
+}
+"#;
+        tokio::fs::write(&module_path, module).await.unwrap();
+        let miniapp_id = MiniAppId::from("miniapp-service-test");
+        let release_digest = digest("service-test-release");
+        let release = MiniAppReleaseRef {
+            release_id: MiniAppReleaseId::from("release-service-test"),
+            artifact_id: ArtifactId::from("artifact-service-test"),
+            release_digest: release_digest.clone(),
+            manifest_digest: digest("service-test-manifest"),
+        };
+        let registry = Arc::new(MiniAppServiceModuleRegistry::new(temp.path()).unwrap());
+        registry
+            .register(
+                miniapp_id.clone(),
+                release_digest,
+                module_path,
+            )
+            .await
+            .unwrap();
+        let storage = Arc::new(crate::InMemoryMiniAppManagedStorage::new());
+        let binding = ProductionMiniAppServiceRuntimeBinding::new_with_storage(
+            authority,
+            registry,
+            Some(storage.clone()),
+            1,
+        )
+        .unwrap();
+        let test_id = uuid::Uuid::now_v7().to_string();
+        let test_storage = binding
+            .create_service_test_storage(
+                "owner-service-test",
+                &miniapp_id,
+                &test_id,
+                true,
+                false,
+            )
+            .await
+            .unwrap();
+        let spec = ResolvedMiniAppServiceSpec::new(ResolvedMiniAppServiceSpecInputs {
+            miniapp_id: miniapp_id.clone(),
+            release: release.clone(),
+            active_release_epoch: 1,
+            service_module_digest: digest_bytes(module),
+            lifecycle: MiniAppServiceLifecycle::OnDemand,
+            host_protocol_version: MINIAPP_SERVICE_HOST_PROTOCOL_VERSION.into(),
+            sdk_contract_version: MINIAPP_SERVICE_SDK_CONTRACT_VERSION.into(),
+            runtime: MiniAppServiceRuntimeFingerprint {
+                runtime_installation_id: fingerprint.runtime_installation_id,
+                runtime_target: fingerprint.runtime_target,
+                runtime_executable_digest: node_digest,
+                node_version: fingerprint.node_version,
+            },
+            config_schema_digest: digest("schema"),
+            config_snapshot_digest: digest("config"),
+            credential_slots_digest: digest("credentials"),
+            resource_contract_digest: digest("resources"),
+            resource_bindings_digest: digest("bindings"),
+            runtime_requirements_digest: digest("requirements"),
+            bridge_contract_digest: digest("bridge"),
+            contribution_set_digest: digest("contributions"),
+            storage: test_storage.descriptor,
+        })
+        .unwrap();
+        let ready = MiniAppReadyRelease {
+            miniapp_id: miniapp_id.clone(),
+            release,
+            origin_operation_id: "build-service-test".into(),
+            origin: MiniAppReadyOrigin::Build,
+            source_lineage: MiniAppSourceLineage::Managed {
+                project_id: "project-service-test".into(),
+                source_snapshot_digest: digest("source"),
+                dependency_lock_digest: digest("lock"),
+                build_profile_version:
+                    nomifun_agent_contracts::MINIAPP_RELEASE_PROFILE_VERSION.into(),
+                build_generation: 1,
+            },
+            matching_service_test_receipt: None,
+            created_at_ms: 1,
+        };
+        let receipt = binding
+            .run_service_test(MiniAppServiceTestRunInput {
+                receipt_id: MiniAppServiceTestReceiptId::from(test_id.clone()),
+                ready,
+                spec,
+                resolved_test_input_digest: digest("test-input"),
+                copied_kv_digest: test_storage.copied_kv_digest,
+                copied_private_database_digest: None,
+                empty_files_dir: Some(true),
+                migration_ledger_digest: None,
+                requires_managed_input: false,
+            })
+            .await
+            .unwrap();
+        assert_eq!(receipt.outcome, MiniAppServiceTestOutcome::Passed);
+        assert_eq!(receipt.error_code, None);
+        binding
+            .purge_service_test_storage(
+                "owner-service-test",
+                &miniapp_id,
+                &test_id,
+            )
+            .await
+            .unwrap();
     }
 }

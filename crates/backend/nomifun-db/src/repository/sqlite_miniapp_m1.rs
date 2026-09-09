@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
 
 use nomifun_agent_contracts::{
-    ArtifactId, MiniAppReadyRelease, MINIAPP_RELEASE_PROFILE_VERSION, canonical_json_bytes,
+    ArtifactId, MiniAppReadyRelease, MiniAppServiceTestOutcome, MiniAppServiceTestReceipt,
+    MINIAPP_RELEASE_PROFILE_VERSION, MINIAPP_SERVICE_HOST_PROTOCOL_VERSION,
+    MINIAPP_SERVICE_SDK_CONTRACT_VERSION, MINIAPP_SERVICE_TEST_CONTRACT_VERSION,
+    canonical_json_bytes, digest_payload,
 };
 use sqlx::{Sqlite, SqlitePool, Transaction};
 
@@ -26,7 +29,8 @@ use crate::repository::miniapp_m1::{
     MiniAppM1ManagedSourceLineage,
     MiniAppM1SurfaceKvOperation, MiniAppM1SurfaceKvResult,
     OpenMiniAppM1SurfaceSessionParams, PublishMiniAppM1ReadyParams,
-    RecordMiniAppM1ReadyReleaseParams, ResolveMiniAppM1SurfaceSessionParams,
+    MiniAppServiceTestReceiptRow, RecordMiniAppM1ReadyReleaseParams,
+    RecordMiniAppM1ServiceTestReceiptParams, ResolveMiniAppM1SurfaceSessionParams,
     RestartMiniAppM1DeleteParams, RestoreMiniAppM1Params,
     RollbackMiniAppM1PreviousParams, SetMiniAppM1AutoPublishParams,
     StartMiniAppM1BuildOperationParams, UpdateMiniAppM1ProjectSourceParams, conflict, query_error,
@@ -973,6 +977,155 @@ fn rewrite_release_record_artifact_id(
         .map_err(|error| conflict(format!("release_record_json cannot be serialized: {error}")))?;
     String::from_utf8(bytes)
         .map_err(|error| conflict(format!("release_record_json is not UTF-8: {error}")))
+}
+
+fn service_test_outcome(value: MiniAppServiceTestOutcome) -> &'static str {
+    match value {
+        MiniAppServiceTestOutcome::Passed => "passed",
+        MiniAppServiceTestOutcome::Failed => "failed",
+        MiniAppServiceTestOutcome::NeedsTestInput => "needs_test_input",
+    }
+}
+
+fn canonical_service_test_receipt(
+    params: &RecordMiniAppM1ServiceTestReceiptParams,
+) -> Result<(String, MiniAppServiceTestReceipt), DbError> {
+    let receipt: MiniAppServiceTestReceipt = serde_json::from_value(params.receipt.clone())
+        .map_err(|error| conflict(format!("Service Test receipt JSON is invalid: {error}")))?;
+    let receipt_error_code = receipt.error_code.as_ref().map(AsRef::as_ref);
+    if receipt.receipt_id.as_ref() != params.receipt_id
+        || receipt.miniapp_id.as_ref() != params.miniapp_id
+        || receipt.release.release_id.as_ref() != params.expected_ready_release_id
+        || receipt.release.release_digest.as_ref() != params.expected_ready_release_digest
+        || receipt.service_run_key.as_ref() != params.service_run_key
+        || receipt.outcome != params.outcome
+        || receipt_error_code != params.error_code.as_deref()
+        || receipt.resolved_test_input_digest.as_ref() != params.resolved_test_input_digest
+        || receipt.issued_at_ms != params.issued_at_ms
+    {
+        return Err(conflict(
+            "Service Test receipt JSON does not match its exact record fields",
+        ));
+    }
+    match (receipt.outcome, receipt_error_code) {
+        (MiniAppServiceTestOutcome::Failed, Some(_))
+        | (MiniAppServiceTestOutcome::Passed, None)
+        | (MiniAppServiceTestOutcome::NeedsTestInput, None) => {}
+        (MiniAppServiceTestOutcome::Failed, None) => {
+            return Err(conflict(
+                "failed Service Test receipt requires an error_code",
+            ));
+        }
+        (_, Some(_)) => {
+            return Err(conflict(
+                "non-failed Service Test receipt cannot carry an error_code",
+            ));
+        }
+    }
+    if receipt.host_target != receipt.runtime.runtime_target
+        || receipt.host_protocol_version.as_ref() != MINIAPP_SERVICE_HOST_PROTOCOL_VERSION
+        || receipt.sdk_contract_version.as_ref() != MINIAPP_SERVICE_SDK_CONTRACT_VERSION
+        || receipt.test_contract_version.as_ref() != MINIAPP_SERVICE_TEST_CONTRACT_VERSION
+        || receipt.host_generation == 0
+        || receipt.issued_at_ms <= 0
+        || receipt.empty_files_dir == Some(false)
+    {
+        return Err(conflict(
+            "Service Test receipt Host identity or contract version is invalid",
+        ));
+    }
+    for (value, label) in [
+        (receipt.release.release_digest.as_ref(), "receipt.release_digest"),
+        (receipt.service_run_key.as_ref(), "receipt.service_run_key"),
+        (
+            receipt.runtime.runtime_executable_digest.as_ref(),
+            "receipt.runtime.runtime_executable_digest",
+        ),
+        (
+            receipt.resolved_test_input_digest.as_ref(),
+            "receipt.resolved_test_input_digest",
+        ),
+        (receipt.copied_kv_digest.as_ref(), "receipt.copied_kv_digest"),
+    ] {
+        validate_digest(value, label)?;
+    }
+    validate_optional_digest(
+        receipt
+            .copied_private_database_digest
+            .as_ref()
+            .map(AsRef::as_ref),
+        "receipt.copied_private_database_digest",
+    )?;
+    validate_optional_digest(
+        receipt
+            .migration_ledger_digest
+            .as_ref()
+            .map(AsRef::as_ref),
+        "receipt.migration_ledger_digest",
+    )?;
+    let computed_receipt_digest = digest_payload(&receipt)
+        .map_err(|error| conflict(format!("Service Test receipt cannot be digested: {error}")))?;
+    if computed_receipt_digest.as_ref() != params.receipt_digest {
+        return Err(conflict("Service Test receipt_digest does not match receipt JSON"));
+    }
+    let computed_runtime_digest = digest_payload(&receipt.runtime)
+        .map_err(|error| conflict(format!("Service Test runtime cannot be digested: {error}")))?;
+    if computed_runtime_digest.as_ref() != params.runtime_fingerprint_digest {
+        return Err(conflict(
+            "Service Test runtime_fingerprint_digest does not match receipt JSON",
+        ));
+    }
+    let canonical = String::from_utf8(
+        canonical_json_bytes(&receipt)
+            .map_err(|error| conflict(format!("Service Test receipt cannot be canonicalized: {error}")))?,
+    )
+    .map_err(|error| conflict(format!("Service Test receipt JSON is not UTF-8: {error}")))?;
+    Ok((canonical, receipt))
+}
+
+fn validate_persisted_service_test_receipt(
+    row: &MiniAppServiceTestReceiptRow,
+) -> Result<MiniAppServiceTestReceipt, DbError> {
+    let receipt: MiniAppServiceTestReceipt = serde_json::from_str(&row.receipt_json)
+        .map_err(|error| DbError::Init(format!("persisted Service Test receipt is invalid: {error}")))?;
+    let canonical = String::from_utf8(canonical_json_bytes(&receipt).map_err(|error| {
+        DbError::Init(format!(
+            "persisted Service Test receipt cannot be canonicalized: {error}"
+        ))
+    })?)
+    .map_err(|error| {
+        DbError::Init(format!(
+            "persisted Service Test receipt canonical JSON is not UTF-8: {error}"
+        ))
+    })?;
+    let receipt_digest = digest_payload(&receipt).map_err(|error| {
+        DbError::Init(format!(
+            "persisted Service Test receipt cannot be digested: {error}"
+        ))
+    })?;
+    let runtime_digest = digest_payload(&receipt.runtime).map_err(|error| {
+        DbError::Init(format!(
+            "persisted Service Test runtime cannot be digested: {error}"
+        ))
+    })?;
+    if canonical != row.receipt_json
+        || receipt.receipt_id.as_ref() != row.receipt_id
+        || receipt.miniapp_id.as_ref() != row.miniapp_id
+        || receipt.release.release_id.as_ref() != row.release_id
+        || receipt.release.release_digest.as_ref() != row.release_digest
+        || receipt.service_run_key.as_ref() != row.service_run_key
+        || service_test_outcome(receipt.outcome) != row.outcome
+        || receipt.error_code.as_ref().map(AsRef::as_ref) != row.error_code.as_deref()
+        || receipt.resolved_test_input_digest.as_ref() != row.resolved_test_input_digest
+        || receipt.issued_at_ms != row.issued_at_ms
+        || receipt_digest.as_ref() != row.receipt_digest
+        || runtime_digest.as_ref() != row.runtime_fingerprint_digest
+    {
+        return Err(DbError::Init(
+            "persisted Service Test receipt row does not match its canonical JSON".to_owned(),
+        ));
+    }
+    Ok(receipt)
 }
 
 async fn persist_or_reuse_artifact(
@@ -2156,6 +2309,289 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
         Ok(snapshot)
     }
 
+    async fn record_service_test_receipt_cas(
+        &self,
+        params: &RecordMiniAppM1ServiceTestReceiptParams,
+    ) -> Result<MiniAppM1Snapshot, DbError> {
+        validate_uuid(&params.owner_user_id, "owner_user_id")?;
+        validate_uuid(&params.miniapp_id, "miniapp_id")?;
+        validate_uuid(&params.expected_ready_release_id, "expected_ready_release_id")?;
+        validate_uuid(&params.receipt_id, "receipt_id")?;
+        validate_digest(
+            &params.expected_ready_release_digest,
+            "expected_ready_release_digest",
+        )?;
+        validate_digest(&params.service_run_key, "service_run_key")?;
+        validate_digest(&params.receipt_digest, "receipt_digest")?;
+        validate_digest(
+            &params.runtime_fingerprint_digest,
+            "runtime_fingerprint_digest",
+        )?;
+        validate_digest(
+            &params.resolved_test_input_digest,
+            "resolved_test_input_digest",
+        )?;
+        validate_product_operation_error_code(params.error_code.as_deref())?;
+        if params.expected_product_revision < 1
+            || params.expected_pointer_revision < 1
+            || params.expected_config_revision < 1
+            || params.expected_credential_bindings_revision < 1
+            || params.issued_at_ms <= 0
+        {
+            return Err(conflict(
+                "Service Test receipt CAS expectations are invalid",
+            ));
+        }
+        let (receipt_json, receipt) = canonical_service_test_receipt(params)?;
+        let mut tx = self.pool.begin().await?;
+        let product =
+            lock_product_for_update(&mut tx, &params.owner_user_id, &params.miniapp_id).await?;
+        if product.kind != MiniAppM1Kind::Service.as_str()
+            || matches!(product.lifecycle.as_str(), "trashed" | "deleting")
+        {
+            return Err(conflict(
+                "Service Test receipt requires a non-trashed Service MiniApp",
+            ));
+        }
+        if product.product_revision != params.expected_product_revision
+            || product.pointer_revision != params.expected_pointer_revision
+            || product.config_revision != params.expected_config_revision
+            || product.credential_bindings_revision
+                != params.expected_credential_bindings_revision
+            || product.ready_release_id.as_deref()
+                != Some(params.expected_ready_release_id.as_str())
+            || product.ready_release_digest.as_deref()
+                != Some(params.expected_ready_release_digest.as_str())
+        {
+            return Err(conflict(
+                "Service Test receipt lost its exact Product/Ready/config/credential CAS",
+            ));
+        }
+        if params.issued_at_ms < product.updated_at {
+            return Err(conflict(
+                "Service Test receipt timestamp predates Product state",
+            ));
+        }
+        let release = sqlx::query_as::<_, MiniAppReleaseRow>(
+            "SELECT * FROM miniapp_releases
+             WHERE owner_user_id = ? AND miniapp_id = ?
+               AND release_id = ? AND release_digest = ?",
+        )
+        .bind(&params.owner_user_id)
+        .bind(&params.miniapp_id)
+        .bind(&params.expected_ready_release_id)
+        .bind(&params.expected_ready_release_digest)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| conflict("Service Test receipt Ready Release is missing"))?;
+        if params.issued_at_ms < release.created_at {
+            return Err(conflict(
+                "Service Test receipt timestamp predates Ready Release",
+            ));
+        }
+        let artifact = sqlx::query_as::<_, MiniAppReleaseArtifactRow>(
+            "SELECT * FROM miniapp_release_artifacts
+             WHERE owner_user_id = ? AND artifact_id = ?",
+        )
+        .bind(&params.owner_user_id)
+        .bind(&release.artifact_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| conflict("Service Test receipt Release Artifact is missing"))?;
+        let artifact_payload = validate_artifact(&artifact)?;
+        if artifact_payload.manifest.payload.service.is_none() {
+            return Err(conflict(
+                "Service Test receipt cannot bind a UI-only Ready Release",
+            ));
+        }
+        let mut ready = validate_release(&release, &artifact_payload)?;
+        if ready.miniapp_id != receipt.miniapp_id || ready.release != receipt.release {
+            return Err(conflict(
+                "Service Test receipt does not bind the exact typed Ready Release",
+            ));
+        }
+        ready.matching_service_test_receipt = Some(receipt.reference());
+        ready
+            .validate_for_artifact(&artifact_payload)
+            .map_err(|error| conflict(format!("Service Test Ready reference is invalid: {error}")))?;
+        let ready_json = String::from_utf8(canonical_json_bytes(&ready).map_err(|error| {
+            conflict(format!(
+                "Service Test Ready Release cannot be canonicalized: {error}"
+            ))
+        })?)
+        .map_err(|error| {
+            conflict(format!(
+                "Service Test Ready Release canonical JSON is not UTF-8: {error}"
+            ))
+        })?;
+
+        sqlx::query(
+            "INSERT INTO miniapp_service_test_receipts (
+                receipt_id, owner_user_id, miniapp_id, release_id, release_digest,
+                service_run_key, outcome, error_code, receipt_digest,
+                runtime_fingerprint_digest, resolved_test_input_digest,
+                tested_product_revision, tested_pointer_revision,
+                tested_config_revision, tested_credential_bindings_revision,
+                receipt_json, issued_at_ms
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&params.receipt_id)
+        .bind(&params.owner_user_id)
+        .bind(&params.miniapp_id)
+        .bind(&params.expected_ready_release_id)
+        .bind(&params.expected_ready_release_digest)
+        .bind(&params.service_run_key)
+        .bind(service_test_outcome(params.outcome))
+        .bind(&params.error_code)
+        .bind(&params.receipt_digest)
+        .bind(&params.runtime_fingerprint_digest)
+        .bind(&params.resolved_test_input_digest)
+        .bind(params.expected_product_revision)
+        .bind(params.expected_pointer_revision)
+        .bind(params.expected_config_revision)
+        .bind(params.expected_credential_bindings_revision)
+        .bind(&receipt_json)
+        .bind(params.issued_at_ms)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        let release_updated = sqlx::query(
+            "UPDATE miniapp_releases
+             SET release_record_json = ?
+             WHERE owner_user_id = ? AND miniapp_id = ?
+               AND release_id = ? AND release_digest = ?
+               AND release_record_json = ?",
+        )
+        .bind(&ready_json)
+        .bind(&params.owner_user_id)
+        .bind(&params.miniapp_id)
+        .bind(&params.expected_ready_release_id)
+        .bind(&params.expected_ready_release_digest)
+        .bind(&release.release_record_json)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        if release_updated.rows_affected() != 1 {
+            return Err(conflict(
+                "Service Test receipt lost the Ready Release record CAS",
+            ));
+        }
+        let product_updated = sqlx::query(
+            "UPDATE miniapp_products
+             SET product_revision = product_revision + 1, updated_at = ?
+             WHERE owner_user_id = ? AND miniapp_id = ?
+               AND product_revision = ? AND pointer_revision = ?
+               AND config_revision = ? AND credential_bindings_revision = ?
+               AND ready_release_id = ? AND ready_release_digest = ?
+               AND updated_at <= ?",
+        )
+        .bind(params.issued_at_ms)
+        .bind(&params.owner_user_id)
+        .bind(&params.miniapp_id)
+        .bind(params.expected_product_revision)
+        .bind(params.expected_pointer_revision)
+        .bind(params.expected_config_revision)
+        .bind(params.expected_credential_bindings_revision)
+        .bind(&params.expected_ready_release_id)
+        .bind(&params.expected_ready_release_digest)
+        .bind(params.issued_at_ms)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        if product_updated.rows_affected() != 1 {
+            return Err(conflict(
+                "Service Test receipt lost the Product revision CAS",
+            ));
+        }
+        bump_library_revision(&mut tx, &params.owner_user_id, params.issued_at_ms).await?;
+        let snapshot = fetch_snapshot_in_tx(&mut tx, &params.owner_user_id, &params.miniapp_id)
+            .await?
+            .ok_or_else(|| DbError::Init("Service Test receipt commit lost Product".into()))?;
+        tx.commit().await?;
+        Ok(snapshot)
+    }
+
+    async fn get_ready_service_test_receipt(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &str,
+    ) -> Result<Option<MiniAppServiceTestReceiptRow>, DbError> {
+        validate_uuid(owner_user_id, "owner_user_id")?;
+        validate_uuid(miniapp_id, "miniapp_id")?;
+        ensure_owner(&self.pool, owner_user_id).await?;
+        let mut tx = self.pool.begin().await?;
+        let Some(product) = fetch_owned_product_in_tx(&mut tx, owner_user_id, miniapp_id).await?
+        else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        let (Some(ready_release_id), Some(ready_release_digest)) = (
+            product.ready_release_id.as_deref(),
+            product.ready_release_digest.as_deref(),
+        ) else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        let release: Option<MiniAppReleaseRow> = sqlx::query_as(
+            "SELECT * FROM miniapp_releases
+             WHERE owner_user_id = ? AND miniapp_id = ?
+               AND release_id = ? AND release_digest = ?",
+        )
+        .bind(owner_user_id)
+        .bind(miniapp_id)
+        .bind(ready_release_id)
+        .bind(ready_release_digest)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(release) = release else {
+            return Err(DbError::Init(
+                "Ready Service Test receipt lookup lost its Ready Release".to_owned(),
+            ));
+        };
+        let ready: MiniAppReadyRelease = serde_json::from_str(&release.release_record_json)
+            .map_err(|error| {
+                DbError::Init(format!(
+                    "Ready Service Test receipt lookup found invalid Release JSON: {error}"
+                ))
+            })?;
+        let Some(reference) = ready.matching_service_test_receipt else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        let row = sqlx::query_as::<_, MiniAppServiceTestReceiptRow>(
+            "SELECT * FROM miniapp_service_test_receipts
+             WHERE owner_user_id = ? AND miniapp_id = ?
+               AND receipt_id = ? AND release_id = ? AND release_digest = ?
+               AND service_run_key = ?",
+        )
+        .bind(owner_user_id)
+        .bind(miniapp_id)
+        .bind(reference.receipt_id.as_ref())
+        .bind(reference.release_id.as_ref())
+        .bind(reference.release_digest.as_ref())
+        .bind(reference.service_run_key.as_ref())
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(row) = row else {
+            return Err(DbError::Init(
+                "Ready Release references a missing Service Test receipt".to_owned(),
+            ));
+        };
+        validate_persisted_service_test_receipt(&row)?;
+        let matching = row
+            .tested_product_revision
+            .checked_add(1)
+            .is_some_and(|revision| revision == product.product_revision)
+            && row.tested_pointer_revision == product.pointer_revision
+            && row.tested_config_revision == product.config_revision
+            && row.tested_credential_bindings_revision
+                == product.credential_bindings_revision
+            && row.release_id == ready_release_id
+            && row.release_digest == ready_release_digest;
+        tx.commit().await?;
+        Ok(matching.then_some(row))
+    }
+
     async fn publish_ready_cas(
         &self,
         params: &PublishMiniAppM1ReadyParams,
@@ -3074,6 +3510,7 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
             "miniapp_credential_bindings",
             "miniapp_kv",
             "miniapp_build_operation_lineage",
+            "miniapp_service_test_receipts",
             "miniapp_releases",
             "miniapp_projects",
         ] {

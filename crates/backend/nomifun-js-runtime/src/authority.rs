@@ -23,6 +23,7 @@ pub enum JavaScriptWorkKind {
     CandidateTestHost,
     BuildHost,
     MiniappServiceHost,
+    MiniappServiceTestHost,
 }
 
 /// The exact executable and fingerprint that a JavaScript consumer is
