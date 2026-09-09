@@ -30,19 +30,24 @@ use nomifun_api_types::{
     MiniAppReleaseRefDto, MiniAppReleaseTestDto, MiniAppServiceDescriptorDto,
     MiniAppServiceHealthDto, MiniAppServiceLifecycleDto, MiniAppSummaryDto,
     MiniAppSurfaceLaunchDescriptorDto, MiniAppTestStatusDto,
-    DeleteMiniAppRequest, MiniAppWorkshopDto, PluginConfigSchemaDto, PluginConfigStateDto,
-    PublishMiniAppRequest as PublishMiniAppRequestDto,
-    RestoreMiniAppRequest, RetryMiniAppDeleteRequest, RetryMiniAppServiceRequest,
+    DeleteMiniAppRequest, ImportMiniAppArtifactRequest, ImportMiniAppShareRequest,
+    MiniAppShareContentDto, MiniAppWorkshopDto, PluginConfigSchemaDto, PluginConfigStateDto,
+    PublishMiniAppRequest as PublishMiniAppRequestDto, RestoreMiniAppRequest,
+    RetryMiniAppDeleteRequest, RetryMiniAppServiceRequest,
     RollbackMiniAppRequest as RollbackMiniAppRequestDto,
     SetMiniAppEnabledRequest, SetMiniAppPublishModeRequest,
-    SetMiniAppServiceRunningRequest, TestMiniAppReleaseRequest, TrashMiniAppRequest,
+    SetMiniAppServiceRunningRequest, ShareMiniAppRequest, TestMiniAppReleaseRequest,
+    TrashMiniAppRequest,
 };
 use nomifun_db::{
-    CancelMiniAppM1BuildOperationParams, CloseMiniAppM1SurfaceSessionParams,
+    BeginMiniAppM1ImportAsNewParams, CancelMiniAppM1BuildOperationParams,
+    CloseMiniAppM1SurfaceSessionParams,
     CreateMiniAppM1Params, CreateMiniAppM1WithSourceParams,
     ExecuteMiniAppM1SurfaceKvParams,
+    FailMiniAppM1ExportOperationParams, FailMiniAppM1ImportParams,
     FinishMiniAppM1BuildAndRecordReadyParams, FinishMiniAppM1BuildOperationParams,
-    IMiniAppM1Repository, MiniAppM1AutoPublishGuard, MiniAppM1Kind,
+    FinishMiniAppM1ExportOperationParams, FinishMiniAppM1ImportReadyParams,
+    IMiniAppM1Repository, MiniAppM1AutoPublishGuard, MiniAppM1ImportSource, MiniAppM1Kind,
     MiniAppM1ManagedSourceLineage, MiniAppM1Snapshot, MiniAppM1SurfaceKvOperation,
     MiniAppM1SurfaceKvResult, MiniAppProductRow,
     MiniAppReleaseArtifactRow, MiniAppReleaseRow, MiniAppSurfaceSessionRow,
@@ -55,7 +60,8 @@ use nomifun_db::{
     BeginMiniAppM1DeleteParams, CommitMiniAppM1LifecycleParams,
     FailMiniAppM1DeleteParams, FinalizeMiniAppM1DeleteParams,
     RestartMiniAppM1DeleteParams, RestoreMiniAppM1Params,
-    StartMiniAppM1BuildOperationParams, TrashMiniAppM1Params,
+    StartMiniAppM1BuildOperationParams, StartMiniAppM1ExportOperationParams,
+    TrashMiniAppM1Params,
 };
 use nomifun_js_runtime::ResolvedNodeRuntime;
 use serde::Serialize;
@@ -65,10 +71,13 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::{
-    MiniAppDependencyLockV1, MiniAppReleaseFileBytes, MiniAppReleasePublishRequest,
+    MiniAppDependencyLockV1, MiniAppImportedRelease, MiniAppImportedSource,
+    MiniAppReleaseFileBytes,
+    MiniAppReleasePublishRequest,
     issue_surface_capability, surface_capability_digest, MiniAppReleaseArtifactIdentity,
-    MiniAppReleaseStore,
-    MiniAppSourceFile, MiniAppSourceScope, MiniAppSourceSnapshot, MiniAppSourceStore,
+    MiniAppReleaseStore, MiniAppShareBundleExport, MiniAppShareBundleFilesystem,
+    MiniAppShareSourceExport, MiniAppSourceExactImportRequest, MiniAppSourceFile,
+    MiniAppSourceFileInput, MiniAppSourceScope, MiniAppSourceSnapshot, MiniAppSourceStore,
     MiniAppStaticBundleBuilder, MiniAppStaticBundleFile, MiniAppStaticBundleInput,
     MiniAppStaticServiceInput, MiniAppStoredRelease, MiniAppServiceRuntimeBinding,
     MiniAppServiceSpecInput, MiniAppServiceTestRunInput, NoopMiniAppServiceRuntime,
@@ -189,7 +198,11 @@ impl MiniAppM1ApplicationService {
         storage_override: Option<MiniAppServiceStorageDescriptor>,
     ) -> Result<Option<nomifun_agent_contracts::ResolvedMiniAppServiceSpec>, MiniAppM1ApplicationError>
     {
-        let stored = self.load_verified_release(owner_user_id, release)?;
+        let stored = self.load_verified_release(
+            owner_user_id,
+            &snapshot.project.project_id,
+            release,
+        )?;
         let Some(descriptor) = stored.artifact.manifest.payload.service.clone() else {
             return Ok(None);
         };
@@ -351,7 +364,11 @@ impl MiniAppM1ApplicationService {
         } else {
             None
         };
-        let target_stored = self.load_verified_release(owner_user_id, target_release)?;
+        let target_stored = self.load_verified_release(
+            owner_user_id,
+            &snapshot.project.project_id,
+            target_release,
+        )?;
         let target_descriptor = target_stored
             .artifact
             .manifest
@@ -686,7 +703,11 @@ impl MiniAppM1ApplicationService {
         let mut workshop =
             workshop_from_snapshot_with_observation(snapshot, active_operation, observation.as_ref())?;
         if let Some(ready) = snapshot.ready_release.as_ref() {
-            let stored = self.load_verified_release(owner_user_id, ready)?;
+            let stored = self.load_verified_release(
+                owner_user_id,
+                &snapshot.project.project_id,
+                ready,
+            )?;
             if let Some(service) = stored.artifact.manifest.payload.service.as_ref() {
                 let ready_record: MiniAppReadyRelease =
                     serde_json::from_str(&ready.release_record_json).map_err(|error| {
@@ -739,7 +760,11 @@ impl MiniAppM1ApplicationService {
             }
         }
         let active_service_lifecycle = if let Some(active) = snapshot.active_release.as_ref() {
-            let stored = self.load_verified_release(owner_user_id, active)?;
+            let stored = self.load_verified_release(
+                owner_user_id,
+                &snapshot.project.project_id,
+                active,
+            )?;
             stored
                 .artifact
                 .manifest
@@ -754,7 +779,11 @@ impl MiniAppM1ApplicationService {
             None
         };
         workshop.active_service = if let Some(active) = snapshot.active_release.as_ref() {
-            let stored = self.load_verified_release(owner_user_id, active)?;
+            let stored = self.load_verified_release(
+                owner_user_id,
+                &snapshot.project.project_id,
+                active,
+            )?;
             stored
                 .artifact
                 .manifest
@@ -1236,7 +1265,11 @@ impl MiniAppM1ApplicationService {
                 ),
             ));
         }
-        let stored = self.load_verified_release(owner_user_id, ready)?;
+        let stored = self.load_verified_release(
+            owner_user_id,
+            &snapshot.project.project_id,
+            ready,
+        )?;
         let descriptor = stored
             .artifact
             .manifest
@@ -1480,6 +1513,470 @@ impl MiniAppM1ApplicationService {
         Ok(())
     }
 
+    pub async fn export_share(
+        &self,
+        owner_user_id: &str,
+        request: ShareMiniAppRequest,
+    ) -> Result<DurableOperationSummaryDto, MiniAppM1ApplicationError> {
+        validate_request_identity(&request.miniapp_id, "miniapp_id")?;
+        let snapshot = self
+            .repository
+            .get(owner_user_id, &request.miniapp_id)
+            .await?
+            .ok_or(MiniAppM1ApplicationError::NotFound)?;
+        require_release_mutation(&snapshot)?;
+        if snapshot.product.product_revision
+            != to_i64(request.expected_product_revision, "product revision")?
+            || snapshot.product.pointer_revision
+                != to_i64(request.expected_pointer_revision, "pointer revision")?
+        {
+            return Err(nomifun_db::DbError::Conflict(
+                "MiniApp Share Export request is stale".into(),
+            )
+            .into());
+        }
+        let release = match request.content {
+            MiniAppShareContentDto::ReadyRelease => snapshot.ready_release.as_ref(),
+            MiniAppShareContentDto::ActiveRelease => snapshot.active_release.as_ref(),
+        }
+        .ok_or_else(|| {
+            MiniAppM1ApplicationError::Invalid(
+                "selected MiniApp Share Release is unavailable".into(),
+            )
+        })?;
+        if release.release_id != request.release_id
+            || release.release_digest != request.expected_release_digest
+        {
+            return Err(nomifun_db::DbError::Conflict(
+                "MiniApp Share Export Release changed".into(),
+            )
+            .into());
+        }
+        let stored = self.load_verified_release(
+            owner_user_id,
+            &snapshot.project.project_id,
+            release,
+        )?;
+        let source_snapshot = if request.include_source {
+            let project_id = release.project_id.as_deref().ok_or_else(|| {
+                MiniAppM1ApplicationError::Invalid(
+                    "selected Release has no Project lineage".into(),
+                )
+            })?;
+            let source_digest = release.source_snapshot_digest.as_deref().ok_or_else(|| {
+                MiniAppM1ApplicationError::Invalid(
+                    "selected Release has no editable Source lineage".into(),
+                )
+            })?;
+            Some(
+                self.stores
+                    .source
+                    .read_snapshot(
+                        owner_user_id,
+                        &request.miniapp_id,
+                        project_id,
+                        source_digest,
+                    )
+                    .map_err(|error| store_error("Share Source", error))?,
+            )
+        } else {
+            None
+        };
+        let operation_id = Uuid::now_v7().to_string();
+        let started_at_ms = positive_now_ms().max(snapshot.product.updated_at);
+        self.repository
+            .start_export_operation(&StartMiniAppM1ExportOperationParams {
+                owner_user_id: owner_user_id.to_owned(),
+                miniapp_id: request.miniapp_id.clone(),
+                operation_id: operation_id.clone(),
+                expected_product_revision: snapshot.product.product_revision,
+                expected_pointer_revision: snapshot.product.pointer_revision,
+                bounded_log_tail: vec!["MiniApp Share Export started".into()],
+                started_at_ms,
+            })
+            .await?;
+        let exported = MiniAppShareBundleFilesystem::default().export(
+            MiniAppShareBundleExport {
+                bundle_id: Uuid::now_v7().to_string().into(),
+                source_miniapp_id: Some(MiniAppId::from(request.miniapp_id.clone())),
+                release: &stored,
+                source: source_snapshot.as_ref().map(|snapshot| MiniAppShareSourceExport {
+                    snapshot,
+                    source_archive_artifact_id: Uuid::now_v7().to_string().into(),
+                    dependency_lock_artifact_id: Uuid::now_v7().to_string().into(),
+                }),
+                test_provenance: None,
+            },
+            &request.destination_path,
+        );
+        let operation = match exported {
+            Ok(bundle) => {
+                self.repository
+                    .finish_export_operation(&FinishMiniAppM1ExportOperationParams {
+                        owner_user_id: owner_user_id.to_owned(),
+                        miniapp_id: request.miniapp_id,
+                        operation_id,
+                        bounded_log_tail: vec![format!(
+                            "MiniApp Share Bundle {} exported",
+                            bundle.bundle_digest.as_ref()
+                        )],
+                        finished_at_ms: positive_now_ms().max(started_at_ms),
+                    })
+                    .await?
+            }
+            Err(error) => {
+                let _ = self
+                    .repository
+                    .fail_export_operation(&FailMiniAppM1ExportOperationParams {
+                        owner_user_id: owner_user_id.to_owned(),
+                        miniapp_id: request.miniapp_id,
+                        operation_id,
+                        progress_percent: 0,
+                        error_code: "miniapp_share_export_failed".into(),
+                        bounded_log_tail: vec![bounded_log_line(&error.to_string())],
+                        finished_at_ms: positive_now_ms().max(started_at_ms),
+                    })
+                    .await;
+                return Err(MiniAppM1ApplicationError::Runtime(error.to_string()));
+            }
+        };
+        operation_summary(&operation)
+    }
+
+    pub async fn import_share(
+        &self,
+        owner_user_id: &str,
+        request: ImportMiniAppShareRequest,
+    ) -> Result<MiniAppWorkshopDto, MiniAppM1ApplicationError> {
+        let imported = MiniAppShareBundleFilesystem::default()
+            .import_share_bundle(&request.source_path)
+            .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+        if imported.bundle.bundle_digest.as_ref() != request.expected_bundle_digest
+            || imported.release.artifact.artifact_digest.as_ref()
+                != request.expected_release_digest
+        {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "Share Bundle digest expectations do not match".into(),
+            ));
+        }
+        self.import_as_new(
+            owner_user_id,
+            request.expected_library_revision,
+            request.display_name,
+            imported.release,
+            imported.source,
+        )
+        .await
+    }
+
+    pub async fn import_prebuilt(
+        &self,
+        owner_user_id: &str,
+        request: ImportMiniAppArtifactRequest,
+    ) -> Result<MiniAppWorkshopDto, MiniAppM1ApplicationError> {
+        let release = MiniAppShareBundleFilesystem::default()
+            .import_prebuilt_release(&request.source_path)
+            .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+        if release.artifact.artifact_digest.as_ref() != request.expected_artifact_digest {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "prebuilt Release digest expectation does not match".into(),
+            ));
+        }
+        self.import_as_new(
+            owner_user_id,
+            request.expected_library_revision,
+            request.display_name,
+            release,
+            None,
+        )
+        .await
+    }
+
+    async fn import_as_new(
+        &self,
+        owner_user_id: &str,
+        expected_library_revision: u64,
+        display_name: String,
+        imported: MiniAppImportedRelease,
+        source: Option<MiniAppImportedSource>,
+    ) -> Result<MiniAppWorkshopDto, MiniAppM1ApplicationError> {
+        let miniapp_id = Uuid::now_v7().to_string();
+        let project_id = Uuid::now_v7().to_string();
+        let operation_id = Uuid::now_v7().to_string();
+        let started_at_ms = positive_now_ms();
+        let kind = if imported.artifact.manifest.payload.service.is_some() {
+            MiniAppM1Kind::Service
+        } else {
+            MiniAppM1Kind::UiOnly
+        };
+        let managed_path = format!(
+            "sources/{owner_user_id}/miniapps/{miniapp_id}/projects/{project_id}/source"
+        );
+        let import_source = source.as_ref().map_or(
+            MiniAppM1ImportSource::RuntimeOnly,
+            |source| {
+                MiniAppM1ImportSource::Managed(MiniAppM1ManagedSourceLineage {
+                    managed_source_path: managed_path.clone(),
+                    source_head_digest: source
+                        .source
+                        .source_snapshot_digest
+                        .as_ref()
+                        .to_owned(),
+                    dependency_lock_digest: source
+                        .source
+                        .dependency_lock_digest
+                        .as_ref()
+                        .to_owned(),
+                    build_profile_version: source
+                        .source
+                        .build_profile_version
+                        .as_ref()
+                        .to_owned(),
+                    build_generation: 1,
+                })
+            },
+        );
+        let begun = self
+            .repository
+            .begin_import_as_new(&BeginMiniAppM1ImportAsNewParams {
+                create: CreateMiniAppM1Params {
+                    owner_user_id: owner_user_id.to_owned(),
+                    miniapp_id: miniapp_id.clone(),
+                    project_id: project_id.clone(),
+                    expected_library_revision: to_i64(
+                        expected_library_revision,
+                        "library revision",
+                    )?,
+                    display_name: display_name.clone(),
+                    description: Some(
+                        imported.artifact.manifest.payload.display.description.clone(),
+                    ),
+                    icon_asset_id: None,
+                    kind,
+                    materialized_catalog_digest: digest_payload(
+                        &"miniapp-m1-empty-catalog",
+                    )
+                    .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?
+                    .as_ref()
+                    .to_owned(),
+                    config_schema_json: canonical_json_string(
+                        &imported.artifact.manifest.payload.config_schema.0,
+                    )?,
+                    config_json: "{}".into(),
+                    created_at: started_at_ms,
+                },
+                operation_id: operation_id.clone(),
+                source: import_source,
+                bounded_log_tail: vec!["MiniApp Import started".into()],
+                started_at_ms,
+            })
+            .await?;
+        let result = async {
+            if let Some(source) = source {
+                self.stores
+                    .source
+                    .import_project_exact(MiniAppSourceExactImportRequest {
+                        scope: MiniAppSourceScope::new(
+                            owner_user_id,
+                            &miniapp_id,
+                            &project_id,
+                        )
+                        .map_err(|error| store_error("Import Source scope", error))?,
+                        display_name: display_name.clone(),
+                        content_kind: if kind == MiniAppM1Kind::Service {
+                            crate::MiniAppSourceContentKind::Service
+                        } else {
+                            crate::MiniAppSourceContentKind::UiOnly
+                        },
+                        dependency_lock: source.dependency_lock,
+                        files: source
+                            .files
+                            .into_iter()
+                            .map(|file| {
+                                MiniAppSourceFileInput::new(
+                                    file.normalized_relative_path,
+                                    file.bytes,
+                                )
+                            })
+                            .collect(),
+                        expected_source_snapshot_digest: source
+                            .source
+                            .source_snapshot_digest,
+                        expected_dependency_lock_digest: source
+                            .source
+                            .dependency_lock_digest,
+                        build_generation: 1,
+                        build_profile_version: source.source.build_profile_version,
+                    })
+                    .map_err(|error| store_error("Import Source", error))?;
+            }
+            let scope = MiniAppSourceScope::new(owner_user_id, &miniapp_id, &project_id)
+                .map_err(|error| store_error("Import Release scope", error))?;
+            let source_digest = begun
+                .snapshot
+                .project
+                .source_head_digest
+                .clone()
+                .unwrap_or_else(|| imported.artifact.artifact_digest.as_ref().to_owned());
+            let lock_digest = begun
+                .snapshot
+                .project
+                .dependency_lock_digest
+                .clone()
+                .unwrap_or_else(|| {
+                    imported
+                        .artifact
+                        .manifest
+                        .payload
+                        .dependency_lock_digest
+                        .as_ref()
+                        .to_owned()
+                });
+            let published = self
+                .stores
+                .release
+                .publish(if kind == MiniAppM1Kind::Service {
+                    MiniAppReleasePublishRequest::service(
+                        scope,
+                        source_digest.clone().into(),
+                        lock_digest.clone().into(),
+                        1,
+                        imported.artifact,
+                        imported.files,
+                    )
+                } else {
+                    MiniAppReleasePublishRequest::ui_only(
+                        scope,
+                        source_digest.clone().into(),
+                        lock_digest.clone().into(),
+                        1,
+                        imported.artifact,
+                        imported.files,
+                    )
+                })
+                .map_err(|error| store_error("Import Release", error))?;
+            let artifact = published.stored.artifact;
+            let release_id = Uuid::now_v7().to_string();
+            let finished_at_ms = positive_now_ms().max(started_at_ms);
+            let source_lineage = if begun.snapshot.project.source_state == "editable" {
+                MiniAppSourceLineage::Managed {
+                    project_id: project_id.clone().into(),
+                    source_snapshot_digest: source_digest.clone().into(),
+                    dependency_lock_digest: lock_digest.clone().into(),
+                    build_profile_version: MINIAPP_RELEASE_PROFILE_VERSION.into(),
+                    build_generation: 1,
+                }
+            } else {
+                MiniAppSourceLineage::RuntimeOnly
+            };
+            let ready = MiniAppReadyRelease {
+                miniapp_id: miniapp_id.clone().into(),
+                release: MiniAppReleaseRef {
+                    release_id: release_id.clone().into(),
+                    artifact_id: artifact.artifact_id.clone(),
+                    release_digest: artifact.artifact_digest.clone(),
+                    manifest_digest: artifact.manifest.payload_digest.clone(),
+                },
+                origin_operation_id: operation_id.clone().into(),
+                origin: MiniAppReadyOrigin::Import,
+                source_lineage,
+                matching_service_test_receipt: None,
+                created_at_ms: finished_at_ms,
+            };
+            ready
+                .validate_for_artifact(&artifact)
+                .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+            self.repository
+                .finish_import_ready(&FinishMiniAppM1ImportReadyParams {
+                    owner_user_id: owner_user_id.to_owned(),
+                    miniapp_id: miniapp_id.clone(),
+                    project_id: project_id.clone(),
+                    operation_id: operation_id.clone(),
+                    expected_library_revision: begun.snapshot.library_revision,
+                    expected_product_revision: begun.snapshot.product.product_revision,
+                    expected_pointer_revision: begun.snapshot.product.pointer_revision,
+                    expected_project_revision: begun.snapshot.project.project_revision,
+                    artifact: MiniAppReleaseArtifactRow {
+                        id: 0,
+                        artifact_id: artifact.artifact_id.as_ref().to_owned(),
+                        owner_user_id: owner_user_id.to_owned(),
+                        artifact_digest: artifact.artifact_digest.as_ref().to_owned(),
+                        manifest_digest: artifact.manifest.payload_digest.as_ref().to_owned(),
+                        artifact_record_json: canonical_json_string(&artifact)?,
+                        managed_path: published.stored.managed_relative_path,
+                        created_at: finished_at_ms,
+                    },
+                    release: MiniAppReleaseRow {
+                        id: 0,
+                        release_id,
+                        miniapp_id: miniapp_id.clone(),
+                        owner_user_id: owner_user_id.to_owned(),
+                        artifact_id: artifact.artifact_id.as_ref().to_owned(),
+                        artifact_digest: artifact.artifact_digest.as_ref().to_owned(),
+                        manifest_digest: artifact.manifest.payload_digest.as_ref().to_owned(),
+                        release_digest: artifact.artifact_digest.as_ref().to_owned(),
+                        origin_kind: "import".into(),
+                        origin_operation_id: operation_id.clone(),
+                        source_kind: if begun.snapshot.project.source_state == "editable" {
+                            "managed".into()
+                        } else {
+                            "runtime_only".into()
+                        },
+                        project_id: (begun.snapshot.project.source_state == "editable")
+                            .then_some(project_id.clone()),
+                        source_snapshot_digest: (begun.snapshot.project.source_state
+                            == "editable")
+                            .then_some(source_digest),
+                        dependency_lock_digest: (begun.snapshot.project.source_state
+                            == "editable")
+                            .then_some(lock_digest),
+                        build_profile_version: (begun.snapshot.project.source_state
+                            == "editable")
+                            .then_some(MINIAPP_RELEASE_PROFILE_VERSION.into()),
+                        build_generation: (begun.snapshot.project.source_state == "editable")
+                            .then_some(1),
+                        release_record_json: canonical_json_string(&ready)?,
+                        created_at: finished_at_ms,
+                    },
+                    bounded_log_tail: vec!["MiniApp Import Ready committed".into()],
+                    finished_at_ms,
+                })
+                .await
+                .map_err(MiniAppM1ApplicationError::from)
+        }
+        .await;
+        match result {
+            Ok(snapshot) => self.workshop_projection(owner_user_id, &snapshot, None).await,
+            Err(error) => {
+                let _ = self
+                    .repository
+                    .fail_import(&FailMiniAppM1ImportParams {
+                        owner_user_id: owner_user_id.to_owned(),
+                        miniapp_id: miniapp_id.clone(),
+                        project_id: project_id.clone(),
+                        operation_id,
+                        expected_product_revision: begun.snapshot.product.product_revision,
+                        expected_pointer_revision: begun.snapshot.product.pointer_revision,
+                        expected_project_revision: begun.snapshot.project.project_revision,
+                        progress_percent: 0,
+                        error_code: "miniapp_import_failed".into(),
+                        bounded_log_tail: vec![bounded_log_line(&error.to_string())],
+                        finished_at_ms: positive_now_ms().max(started_at_ms),
+                    })
+                    .await;
+                let _ = self
+                    .stores
+                    .source
+                    .purge_project(owner_user_id, &miniapp_id, &project_id);
+                let _ = self
+                    .stores
+                    .release
+                    .purge_project(owner_user_id, &miniapp_id, &project_id);
+                Err(error)
+            }
+        }
+    }
+
     pub async fn publish(
         &self,
         owner_user_id: &str,
@@ -1498,7 +1995,11 @@ impl MiniAppM1ApplicationService {
             .ready_release
             .as_ref()
             .ok_or_else(|| MiniAppM1ApplicationError::Invalid("no Ready Release".to_owned()))?;
-        let stored = self.load_verified_release(owner_user_id, ready)?;
+        let stored = self.load_verified_release(
+            owner_user_id,
+            &snapshot.project.project_id,
+            ready,
+        )?;
         if snapshot.product.kind == MiniAppM1Kind::UiOnly.as_str()
             && !stored.artifact.manifest.payload.is_ui_only()
         {
@@ -1688,8 +2189,16 @@ impl MiniAppM1ApplicationService {
             .previous_release
             .as_ref()
             .ok_or_else(|| MiniAppM1ApplicationError::Invalid("no Previous Release".to_owned()))?;
-        self.load_verified_release(owner_user_id, active)?;
-        let target = self.load_verified_release(owner_user_id, previous)?;
+        self.load_verified_release(
+            owner_user_id,
+            &snapshot.project.project_id,
+            active,
+        )?;
+        let target = self.load_verified_release(
+            owner_user_id,
+            &snapshot.project.project_id,
+            previous,
+        )?;
         if snapshot.product.kind == MiniAppM1Kind::UiOnly.as_str()
             && !target.artifact.manifest.payload.is_ui_only()
         {
@@ -2477,8 +2986,16 @@ impl MiniAppM1ApplicationService {
             .ready_release
             .as_ref()
             .ok_or_else(|| MiniAppM1ApplicationError::Invalid("no Ready Release".to_owned()))?;
-        let current_stored = self.load_verified_release(owner_user_id, active)?;
-        let target_stored = self.load_verified_release(owner_user_id, ready)?;
+        let current_stored = self.load_verified_release(
+            owner_user_id,
+            &snapshot.project.project_id,
+            active,
+        )?;
+        let target_stored = self.load_verified_release(
+            owner_user_id,
+            &snapshot.project.project_id,
+            ready,
+        )?;
         let current_ref = release_contract_ref(active);
         let target_ref = release_contract_ref(ready);
         let current_non_ui = ui_only_non_ui_fingerprint(&current_stored)?;
@@ -2665,7 +3182,11 @@ impl MiniAppM1ApplicationService {
             .active_release
             .as_ref()
             .ok_or_else(|| MiniAppM1ApplicationError::Invalid("no Active Release".to_owned()))?;
-        let stored = self.load_verified_release(owner_user_id, active)?;
+        let stored = self.load_verified_release(
+            owner_user_id,
+            &snapshot.project.project_id,
+            active,
+        )?;
         if snapshot.product.kind == MiniAppM1Kind::Service.as_str() {
             let spec = self
                 .resolve_service_spec(
@@ -2798,7 +3319,11 @@ impl MiniAppM1ApplicationService {
         if active.release_id != session.active_release_id {
             return Err(MiniAppM1ApplicationError::NotFound);
         }
-        let stored = self.load_verified_release(&session.owner_user_id, active)?;
+        let stored = self.load_verified_release(
+            &session.owner_user_id,
+            &snapshot.project.project_id,
+            active,
+        )?;
         let file = stored
             .files
             .into_iter()
@@ -2865,7 +3390,11 @@ impl MiniAppM1ApplicationService {
         if active.release_id != surface_session.active_release_id {
             return Err(MiniAppM1ApplicationError::NotFound);
         }
-        self.load_verified_release(owner_user_id, active)?;
+        self.load_verified_release(
+            owner_user_id,
+            &snapshot.project.project_id,
+            active,
+        )?;
         let pointer = pointer_state_from_snapshot(&snapshot)?;
         let service_spec = if snapshot.product.kind == MiniAppM1Kind::Service.as_str() {
             Some(
@@ -2993,13 +3522,10 @@ impl MiniAppM1ApplicationService {
     fn load_verified_release(
         &self,
         owner_user_id: &str,
+        storage_project_id: &str,
         release: &MiniAppReleaseRow,
     ) -> Result<MiniAppStoredRelease, MiniAppM1ApplicationError> {
-        let project_id = release.project_id.as_deref().ok_or_else(|| {
-            MiniAppM1ApplicationError::Invalid(
-                "M1-0-02-B requires a managed Release with Project lineage".to_owned(),
-            )
-        })?;
+        let project_id = release.project_id.as_deref().unwrap_or(storage_project_id);
         let scope = MiniAppSourceScope::new(owner_user_id, &release.miniapp_id, project_id)
             .map_err(|error| store_error("Release scope", error))?;
         let expected_artifact_identity = MiniAppReleaseArtifactIdentity {
@@ -3030,38 +3556,53 @@ impl MiniAppM1ApplicationService {
         record
             .validate_for_artifact(&stored.artifact)
             .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
-        let MiniAppSourceLineage::Managed {
-            project_id: record_project_id,
-            source_snapshot_digest,
-            dependency_lock_digest,
-            build_profile_version,
-            build_generation,
-        } = &record.source_lineage
-        else {
-            return Err(MiniAppM1ApplicationError::Invalid(
-                "managed database Release has a runtime-only Release record".to_owned(),
-            ));
-        };
         if record.miniapp_id.as_ref() != release.miniapp_id
             || record.release.release_id.as_ref() != release.release_id
             || record.release.artifact_id.as_ref() != release.artifact_id
             || record.release.release_digest.as_ref() != release.release_digest
             || record.release.manifest_digest.as_ref() != release.manifest_digest
-            || record.origin != MiniAppReadyOrigin::Build
+            || record.origin
+                != if release.origin_kind == "build" {
+                    MiniAppReadyOrigin::Build
+                } else {
+                    MiniAppReadyOrigin::Import
+                }
             || record.origin_operation_id.as_ref() != release.origin_operation_id
-            || record_project_id.as_ref() != project_id
-            || source_snapshot_digest.as_ref()
-                != release.source_snapshot_digest.as_deref().unwrap_or_default()
-            || dependency_lock_digest.as_ref()
-                != release.dependency_lock_digest.as_deref().unwrap_or_default()
-            || build_profile_version.as_ref()
-                != release.build_profile_version.as_deref().unwrap_or_default()
-            || i64::try_from(*build_generation).ok() != release.build_generation
             || record.created_at_ms != release.created_at
         {
             return Err(MiniAppM1ApplicationError::Invalid(
                 "database Release row does not match its canonical Release record".to_owned(),
             ));
+        }
+        match (&record.source_lineage, release.source_kind.as_str()) {
+            (
+                MiniAppSourceLineage::Managed {
+                    project_id: record_project_id,
+                    source_snapshot_digest,
+                    dependency_lock_digest,
+                    build_profile_version,
+                    build_generation,
+                },
+                "managed",
+            ) if record_project_id.as_ref() == project_id
+                && source_snapshot_digest.as_ref()
+                    == release.source_snapshot_digest.as_deref().unwrap_or_default()
+                && dependency_lock_digest.as_ref()
+                    == release.dependency_lock_digest.as_deref().unwrap_or_default()
+                && build_profile_version.as_ref()
+                    == release.build_profile_version.as_deref().unwrap_or_default()
+                && i64::try_from(*build_generation).ok() == release.build_generation => {}
+            (MiniAppSourceLineage::RuntimeOnly, "runtime_only")
+                if release.project_id.is_none()
+                    && release.source_snapshot_digest.is_none()
+                    && release.dependency_lock_digest.is_none()
+                    && release.build_profile_version.is_none()
+                    && release.build_generation.is_none() => {}
+            _ => {
+                return Err(MiniAppM1ApplicationError::Invalid(
+                    "database Release lineage does not match its canonical Release record".into(),
+                ));
+            }
         }
         Ok(stored)
     }
@@ -4216,6 +4757,8 @@ fn operation_summary(
     }
     let kind = match operation.kind.as_str() {
         "build" => DurableOperationKindDto::Build,
+        "import" => DurableOperationKindDto::Import,
+        "export" => DurableOperationKindDto::Export,
         "miniapp_permanent_delete" => DurableOperationKindDto::MiniappPermanentDelete,
         value => {
             return Err(MiniAppM1ApplicationError::Invalid(format!(
@@ -4252,8 +4795,12 @@ fn operation_summary(
             miniapp_id: operation.owner_id.clone(),
         },
         state,
-        cancelable: kind == DurableOperationKindDto::Build
-            && operation.state == ProductOperationState::Running.as_str(),
+        cancelable: matches!(
+            kind,
+            DurableOperationKindDto::Build
+                | DurableOperationKindDto::Import
+                | DurableOperationKindDto::Export
+        ) && operation.state == ProductOperationState::Running.as_str(),
         progress_percent,
         started_at_ms: operation.started_at_ms,
         completed_at_ms: operation.finished_at_ms,
