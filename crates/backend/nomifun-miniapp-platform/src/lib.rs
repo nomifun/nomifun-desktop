@@ -26,6 +26,7 @@ mod storage;
 mod managed_storage;
 mod source;
 mod release;
+mod share;
 #[cfg(test)]
 mod foundation_tests;
 #[cfg(test)]
@@ -50,3 +51,4 @@ pub use storage::*;
 pub use managed_storage::*;
 pub use source::*;
 pub use release::*;
+pub use share::*;

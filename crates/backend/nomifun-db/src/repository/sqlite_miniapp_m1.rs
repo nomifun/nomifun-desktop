@@ -19,27 +19,30 @@ use crate::models::{
     ProductOperationState,
 };
 use crate::repository::miniapp_m1::{
-    BeginMiniAppM1DeleteParams, FailMiniAppM1DeleteParams, FinalizeMiniAppM1DeleteParams,
-    CancelMiniAppM1BuildOperationParams, CloseMiniAppM1SurfaceSessionParams,
-    CommitMiniAppM1LifecycleParams,
+    BeginMiniAppM1DeleteParams, BeginMiniAppM1ImportAsNewParams,
+    BeginMiniAppM1ImportAsNewResult, CancelMiniAppM1BuildOperationParams,
+    CancelMiniAppM1ExportOperationParams, CancelMiniAppM1ImportParams,
+    CloseMiniAppM1SurfaceSessionParams, CommitMiniAppM1LifecycleParams,
     CreateMiniAppM1Params, CreateMiniAppM1WithSourceParams,
-    ExecuteMiniAppM1SurfaceKvParams,
-    FinishMiniAppM1BuildAndRecordReadyParams, FinishMiniAppM1BuildOperationParams,
-    IMiniAppM1Repository, MiniAppM1AutoPublishGuard,
-    MiniAppM1ManagedSourceLineage,
+    ExecuteMiniAppM1SurfaceKvParams, FailMiniAppM1DeleteParams,
+    FailMiniAppM1ExportOperationParams, FailMiniAppM1ImportParams,
+    FinalizeMiniAppM1DeleteParams, FinishMiniAppM1BuildAndRecordReadyParams,
+    FinishMiniAppM1BuildOperationParams, FinishMiniAppM1ExportOperationParams,
+    FinishMiniAppM1ImportReadyParams, IMiniAppM1Repository,
+    MiniAppM1AutoPublishGuard, MiniAppM1ImportSource, MiniAppM1ManagedSourceLineage,
     MiniAppM1SurfaceKvOperation, MiniAppM1SurfaceKvResult,
-    OpenMiniAppM1SurfaceSessionParams, PublishMiniAppM1ReadyParams,
-    MiniAppServiceTestReceiptRow, RecordMiniAppM1ReadyReleaseParams,
+    MiniAppServiceTestReceiptRow, OpenMiniAppM1SurfaceSessionParams,
+    PublishMiniAppM1ReadyParams, RecordMiniAppM1ReadyReleaseParams,
     RecordMiniAppM1ServiceTestReceiptParams, ResolveMiniAppM1SurfaceSessionParams,
     RestartMiniAppM1DeleteParams, RestoreMiniAppM1Params,
     RollbackMiniAppM1PreviousParams, SetMiniAppM1AutoPublishParams,
-    StartMiniAppM1BuildOperationParams, UpdateMiniAppM1ProjectSourceParams, conflict, query_error,
-    normalize_incoming_artifact, serialize_product_operation_log_tail, validate_artifact,
-    validate_digest, validate_json_object, validate_kv_row, validate_managed_source_lineage,
-    validate_optional_digest,
+    StartMiniAppM1BuildOperationParams, StartMiniAppM1ExportOperationParams,
+    TrashMiniAppM1Params, UpdateMiniAppM1ProjectSourceParams, conflict,
+    normalize_incoming_artifact, query_error, serialize_product_operation_log_tail,
+    validate_artifact, validate_digest, validate_json_object, validate_kv_row,
+    validate_managed_source_lineage, validate_optional_digest,
     validate_product_artifact_contract, validate_product_operation_error_code,
-    validate_project_source, validate_release,
-    TrashMiniAppM1Params, validate_uuid, validate_visible_ascii_key,
+    validate_project_source, validate_release, validate_uuid, validate_visible_ascii_key,
 };
 
 #[derive(Clone, Debug)]
@@ -635,6 +638,30 @@ async fn validate_persisted_release_lineage(
     tx: &mut Transaction<'_, Sqlite>,
     release: &MiniAppReleaseRow,
 ) -> Result<(), DbError> {
+    if release.origin_kind == "import" {
+        let operation =
+            fetch_miniapp_operation_in_tx(tx, &release.miniapp_id, &release.origin_operation_id)
+                .await?
+                .ok_or_else(|| {
+                    DbError::Init(format!(
+                        "imported MiniApp Release {} lost its Import operation",
+                        release.release_id
+                    ))
+                })?;
+        if operation.kind != "import"
+            || operation.state != ProductOperationState::Succeeded.as_str()
+            || release.created_at < operation.started_at_ms
+            || operation
+                .finished_at_ms
+                .is_none_or(|finished_at_ms| release.created_at > finished_at_ms)
+        {
+            return Err(DbError::Init(format!(
+                "imported MiniApp Release {} does not match its successful Import operation",
+                release.release_id
+            )));
+        }
+        return Ok(());
+    }
     if release.origin_kind != "build" {
         return Ok(());
     }
@@ -1414,6 +1441,218 @@ async fn tombstone_kv(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn terminalize_import_operation(
+    pool: &SqlitePool,
+    owner_user_id: &str,
+    miniapp_id: &str,
+    project_id: &str,
+    operation_id: &str,
+    expected_product_revision: i64,
+    expected_pointer_revision: i64,
+    expected_project_revision: i64,
+    state: ProductOperationState,
+    progress_percent: Option<u8>,
+    error_code: Option<&str>,
+    bounded_log_tail: &[String],
+    finished_at_ms: i64,
+) -> Result<ProductOperationRow, DbError> {
+    validate_uuid(owner_user_id, "owner_user_id")?;
+    validate_uuid(miniapp_id, "miniapp_id")?;
+    validate_uuid(project_id, "project_id")?;
+    validate_uuid(operation_id, "operation_id")?;
+    validate_product_operation_error_code(error_code)?;
+    if expected_product_revision < 1
+        || expected_pointer_revision < 1
+        || expected_project_revision < 1
+        || finished_at_ms <= 0
+        || progress_percent.is_some_and(|progress| progress > 100)
+        || !matches!(
+            (state, error_code),
+            (ProductOperationState::Failed, Some(_))
+                | (ProductOperationState::Canceled, None)
+        )
+    {
+        return Err(conflict(
+            "MiniApp Import terminal operation expectations are invalid",
+        ));
+    }
+    let bounded_log_tail_json = serialize_product_operation_log_tail(bounded_log_tail)?;
+    let mut tx = pool.begin().await?;
+    let product = lock_product_for_update(&mut tx, owner_user_id, miniapp_id).await?;
+    if product.lifecycle != "disabled"
+        || product.product_revision != expected_product_revision
+        || product.pointer_revision != expected_pointer_revision
+        || product.ready_release_id.is_some()
+        || product.active_release_id.is_some()
+        || product.previous_release_id.is_some()
+    {
+        return Err(conflict(
+            "MiniApp Import terminal operation lost its exact disabled Product CAS",
+        ));
+    }
+    let project = fetch_project(&mut tx, owner_user_id, miniapp_id, project_id).await?;
+    if project.project_revision != expected_project_revision {
+        return Err(conflict(
+            "MiniApp Import terminal operation lost its exact Project CAS",
+        ));
+    }
+    let operation = fetch_miniapp_operation_in_tx(&mut tx, miniapp_id, operation_id)
+        .await?
+        .ok_or_else(|| DbError::NotFound(format!("MiniApp Import operation {operation_id}")))?;
+    if operation.kind != "import"
+        || operation.state != ProductOperationState::Running.as_str()
+        || operation.progress_percent.is_none()
+        || operation.last_error_code.is_some()
+        || operation.finished_at_ms.is_some()
+        || finished_at_ms < operation.started_at_ms
+        || finished_at_ms < product.updated_at
+        || finished_at_ms < project.updated_at
+    {
+        return Err(conflict(
+            "MiniApp Import terminal operation lost its running-operation CAS",
+        ));
+    }
+    let release_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM miniapp_releases
+         WHERE owner_user_id = ? AND miniapp_id = ?
+           AND origin_kind = 'import' AND origin_operation_id = ?",
+    )
+    .bind(owner_user_id)
+    .bind(miniapp_id)
+    .bind(operation_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let catalog_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM miniapp_catalog_publications
+         WHERE owner_user_id = ? AND miniapp_id = ?",
+    )
+    .bind(owner_user_id)
+    .bind(miniapp_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if release_count != 0 || catalog_count != 0 {
+        return Err(DbError::Init(
+            "unfinished MiniApp Import leaked Release or Catalog state".to_owned(),
+        ));
+    }
+    let changed = sqlx::query(
+        "UPDATE product_operations
+         SET state = ?, progress_percent = ?, last_error_code = ?,
+             bounded_log_tail_json = ?, finished_at_ms = ?
+         WHERE operation_id = ? AND kind = 'import'
+           AND owner_kind = 'miniapp' AND owner_id = ? AND state = 'running'",
+    )
+    .bind(state.as_str())
+    .bind(progress_percent.map(i64::from).or(operation.progress_percent))
+    .bind(error_code)
+    .bind(bounded_log_tail_json)
+    .bind(finished_at_ms)
+    .bind(operation_id)
+    .bind(miniapp_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(query_error)?;
+    if changed.rows_affected() != 1 {
+        return Err(conflict(
+            "MiniApp Import terminal update lost its running-operation CAS",
+        ));
+    }
+    let operation = sqlx::query_as::<_, ProductOperationRow>(
+        "SELECT * FROM product_operations WHERE operation_id = ?",
+    )
+    .bind(operation_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(DbError::Query)?;
+    tx.commit().await?;
+    Ok(operation)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn terminalize_export_operation(
+    pool: &SqlitePool,
+    owner_user_id: &str,
+    miniapp_id: &str,
+    operation_id: &str,
+    state: ProductOperationState,
+    progress_percent: Option<u8>,
+    error_code: Option<&str>,
+    bounded_log_tail: &[String],
+    finished_at_ms: i64,
+) -> Result<ProductOperationRow, DbError> {
+    validate_uuid(owner_user_id, "owner_user_id")?;
+    validate_uuid(miniapp_id, "miniapp_id")?;
+    validate_uuid(operation_id, "operation_id")?;
+    validate_product_operation_error_code(error_code)?;
+    if finished_at_ms <= 0
+        || progress_percent.is_some_and(|progress| progress > 100)
+        || !matches!(
+            (state, error_code),
+            (ProductOperationState::Succeeded, None)
+                | (ProductOperationState::Failed, Some(_))
+                | (ProductOperationState::Canceled, None)
+        )
+    {
+        return Err(conflict(
+            "MiniApp Export terminal operation expectations are invalid",
+        ));
+    }
+    let bounded_log_tail_json = serialize_product_operation_log_tail(bounded_log_tail)?;
+    let mut tx = pool.begin().await?;
+    lock_product_for_update(&mut tx, owner_user_id, miniapp_id).await?;
+    let operation = fetch_miniapp_operation_in_tx(&mut tx, miniapp_id, operation_id)
+        .await?
+        .ok_or_else(|| DbError::NotFound(format!("MiniApp Export operation {operation_id}")))?;
+    if operation.kind != "export"
+        || operation.state != ProductOperationState::Running.as_str()
+        || operation.progress_percent.is_none()
+        || operation.last_error_code.is_some()
+        || operation.finished_at_ms.is_some()
+        || finished_at_ms < operation.started_at_ms
+    {
+        return Err(conflict(
+            "MiniApp Export terminal operation lost its running-operation CAS",
+        ));
+    }
+    let terminal_progress = if state == ProductOperationState::Succeeded {
+        Some(100_i64)
+    } else {
+        progress_percent.map(i64::from).or(operation.progress_percent)
+    };
+    let changed = sqlx::query(
+        "UPDATE product_operations
+         SET state = ?, progress_percent = ?, last_error_code = ?,
+             bounded_log_tail_json = ?, finished_at_ms = ?
+         WHERE operation_id = ? AND kind = 'export'
+           AND owner_kind = 'miniapp' AND owner_id = ? AND state = 'running'",
+    )
+    .bind(state.as_str())
+    .bind(terminal_progress)
+    .bind(error_code)
+    .bind(bounded_log_tail_json)
+    .bind(finished_at_ms)
+    .bind(operation_id)
+    .bind(miniapp_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(query_error)?;
+    if changed.rows_affected() != 1 {
+        return Err(conflict(
+            "MiniApp Export terminal update lost its running-operation CAS",
+        ));
+    }
+    let operation = sqlx::query_as::<_, ProductOperationRow>(
+        "SELECT * FROM product_operations WHERE operation_id = ?",
+    )
+    .bind(operation_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(DbError::Query)?;
+    tx.commit().await?;
+    Ok(operation)
+}
+
 #[async_trait::async_trait]
 impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
     async fn library(
@@ -1476,6 +1715,604 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
         params: &CreateMiniAppM1WithSourceParams,
     ) -> Result<MiniAppM1Snapshot, DbError> {
         self.create_inner(&params.create, Some(&params.source)).await
+    }
+
+    async fn begin_import_as_new(
+        &self,
+        params: &BeginMiniAppM1ImportAsNewParams,
+    ) -> Result<BeginMiniAppM1ImportAsNewResult, DbError> {
+        let create = &params.create;
+        validate_uuid(&create.owner_user_id, "owner_user_id")?;
+        validate_uuid(&create.miniapp_id, "miniapp_id")?;
+        validate_uuid(&create.project_id, "project_id")?;
+        validate_uuid(&params.operation_id, "operation_id")?;
+        if create.expected_library_revision < 0
+            || create.created_at < 0
+            || params.started_at_ms <= 0
+            || params.started_at_ms < create.created_at
+        {
+            return Err(conflict(
+                "MiniApp Import create CAS/timestamps are invalid",
+            ));
+        }
+        if create.display_name.trim().is_empty()
+            || create.display_name.chars().count() > 255
+        {
+            return Err(conflict(
+                "MiniApp display_name must contain 1 to 255 characters",
+            ));
+        }
+        validate_json_object(&create.config_schema_json, "config_schema_json")?;
+        validate_json_object(&create.config_json, "config_json")?;
+        validate_digest(
+            &create.materialized_catalog_digest,
+            "materialized_catalog_digest",
+        )?;
+        let source_fields = match &params.source {
+            MiniAppM1ImportSource::Managed(source) => {
+                validate_managed_source_lineage(source)?;
+                if source.build_profile_version != MINIAPP_RELEASE_PROFILE_VERSION {
+                    return Err(conflict(
+                        "MiniApp managed Import uses an unsupported release profile version",
+                    ));
+                }
+                (
+                    MiniAppM1ProjectSourceState::Editable,
+                    Some(source.managed_source_path.as_str()),
+                    Some(source.source_head_digest.as_str()),
+                    Some(source.dependency_lock_digest.as_str()),
+                    Some(source.build_profile_version.as_str()),
+                    source.build_generation,
+                )
+            }
+            MiniAppM1ImportSource::RuntimeOnly => (
+                MiniAppM1ProjectSourceState::RuntimeOnly,
+                None,
+                None,
+                None,
+                None,
+                0,
+            ),
+        };
+        validate_project_source(
+            source_fields.0,
+            source_fields.1,
+            source_fields.2,
+            source_fields.3,
+            source_fields.4,
+            source_fields.5,
+        )?;
+        let bounded_log_tail_json =
+            serialize_product_operation_log_tail(&params.bounded_log_tail)?;
+        ensure_owner(&self.pool, &create.owner_user_id).await?;
+
+        let mut tx = self.pool.begin().await?;
+        let current = sqlx::query_as::<_, MiniAppLibraryStateRow>(
+            "SELECT * FROM miniapp_library_state WHERE owner_user_id = ?",
+        )
+        .bind(&create.owner_user_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let current_revision = current.as_ref().map_or(0, |row| row.revision);
+        if current_revision != create.expected_library_revision {
+            return Err(conflict(format!(
+                "MiniApp Import library revision changed from expected {} to {}",
+                create.expected_library_revision, current_revision
+            )));
+        }
+        let next_library_revision = current_revision
+            .checked_add(1)
+            .ok_or_else(|| conflict("MiniApp library revision overflow"))?;
+        if current.is_none() {
+            sqlx::query(
+                "INSERT INTO miniapp_library_state
+                 (singleton_key, owner_user_id, revision, updated_at)
+                 VALUES ('miniapp_m1', ?, ?, ?)",
+            )
+            .bind(&create.owner_user_id)
+            .bind(next_library_revision)
+            .bind(create.created_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(query_error)?;
+        } else {
+            let changed = sqlx::query(
+                "UPDATE miniapp_library_state
+                 SET revision = ?, updated_at = ?
+                 WHERE owner_user_id = ? AND revision = ? AND updated_at <= ?",
+            )
+            .bind(next_library_revision)
+            .bind(create.created_at)
+            .bind(&create.owner_user_id)
+            .bind(current_revision)
+            .bind(create.created_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(query_error)?;
+            if changed.rows_affected() != 1 {
+                return Err(conflict(
+                    "MiniApp Import library create CAS or timestamp check failed",
+                ));
+            }
+        }
+        sqlx::query(
+            "INSERT INTO miniapp_products
+             (miniapp_id, owner_user_id, display_name, description,
+              icon_asset_id, kind, materialized_catalog_digest,
+              config_schema_json, config_json, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&create.miniapp_id)
+        .bind(&create.owner_user_id)
+        .bind(&create.display_name)
+        .bind(&create.description)
+        .bind(&create.icon_asset_id)
+        .bind(create.kind.as_str())
+        .bind(&create.materialized_catalog_digest)
+        .bind(&create.config_schema_json)
+        .bind(&create.config_json)
+        .bind(create.created_at)
+        .bind(create.created_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        sqlx::query(
+            "INSERT INTO miniapp_projects
+             (project_id, miniapp_id, owner_user_id, source_state,
+              managed_source_path, source_head_digest, dependency_lock_digest,
+              build_profile_version, build_generation, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&create.project_id)
+        .bind(&create.miniapp_id)
+        .bind(&create.owner_user_id)
+        .bind(source_fields.0.as_str())
+        .bind(source_fields.1)
+        .bind(source_fields.2)
+        .bind(source_fields.3)
+        .bind(source_fields.4)
+        .bind(source_fields.5)
+        .bind(create.created_at)
+        .bind(create.created_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        sqlx::query(
+            "INSERT INTO product_operations (
+                operation_id, kind, owner_kind, owner_id, state,
+                progress_percent, bounded_log_tail_json, started_at_ms
+             ) VALUES (?, 'import', 'miniapp', ?, 'running', 0, ?, ?)",
+        )
+        .bind(&params.operation_id)
+        .bind(&create.miniapp_id)
+        .bind(bounded_log_tail_json)
+        .bind(params.started_at_ms)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        let snapshot =
+            fetch_snapshot_in_tx(&mut tx, &create.owner_user_id, &create.miniapp_id)
+                .await?
+                .ok_or_else(|| DbError::Init("MiniApp Import create lost Product".into()))?;
+        let operation = sqlx::query_as::<_, ProductOperationRow>(
+            "SELECT * FROM product_operations
+             WHERE operation_id = ? AND kind = 'import'
+               AND owner_kind = 'miniapp' AND owner_id = ?",
+        )
+        .bind(&params.operation_id)
+        .bind(&create.miniapp_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(DbError::Query)?;
+        tx.commit().await?;
+        Ok(BeginMiniAppM1ImportAsNewResult {
+            snapshot,
+            operation,
+        })
+    }
+
+    async fn finish_import_ready(
+        &self,
+        params: &FinishMiniAppM1ImportReadyParams,
+    ) -> Result<MiniAppM1Snapshot, DbError> {
+        validate_uuid(&params.owner_user_id, "owner_user_id")?;
+        validate_uuid(&params.miniapp_id, "miniapp_id")?;
+        validate_uuid(&params.project_id, "project_id")?;
+        validate_uuid(&params.operation_id, "operation_id")?;
+        if params.expected_library_revision < 1
+            || params.expected_product_revision < 1
+            || params.expected_pointer_revision < 1
+            || params.expected_project_revision < 1
+            || params.finished_at_ms <= 0
+        {
+            return Err(conflict(
+                "MiniApp Import Ready CAS expectations are invalid",
+            ));
+        }
+        let bounded_log_tail_json =
+            serialize_product_operation_log_tail(&params.bounded_log_tail)?;
+        let artifact_payload = validate_artifact(&params.artifact)?;
+        validate_release(&params.release, &artifact_payload)?;
+        if params.artifact.owner_user_id != params.owner_user_id
+            || params.release.owner_user_id != params.owner_user_id
+            || params.release.miniapp_id != params.miniapp_id
+            || params.release.origin_kind != "import"
+            || params.release.origin_operation_id != params.operation_id
+            || params.release.artifact_id != params.artifact.artifact_id
+            || params.release.artifact_digest != params.artifact.artifact_digest
+            || params.release.manifest_digest != params.artifact.manifest_digest
+            || params.release.release_digest != params.artifact.artifact_digest
+            || params.artifact.created_at > params.finished_at_ms
+            || params.release.created_at > params.finished_at_ms
+        {
+            return Err(conflict(
+                "MiniApp Import Ready does not bind its exact operation and Artifact",
+            ));
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let product =
+            lock_product_for_update(&mut tx, &params.owner_user_id, &params.miniapp_id).await?;
+        validate_product_artifact_contract(&product.kind, &artifact_payload)?;
+        if product.lifecycle != "disabled"
+            || product.product_revision != params.expected_product_revision
+            || product.pointer_revision != params.expected_pointer_revision
+            || product.ready_release_id.is_some()
+            || product.active_release_id.is_some()
+            || product.previous_release_id.is_some()
+        {
+            return Err(conflict(
+                "MiniApp Import Ready lost its exact disabled Product CAS",
+            ));
+        }
+        let library_revision: i64 = sqlx::query_scalar(
+            "SELECT revision FROM miniapp_library_state WHERE owner_user_id = ?",
+        )
+        .bind(&params.owner_user_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if library_revision != params.expected_library_revision {
+            return Err(conflict(
+                "MiniApp Import Ready lost its exact Library revision CAS",
+            ));
+        }
+        let project = fetch_project(
+            &mut tx,
+            &params.owner_user_id,
+            &params.miniapp_id,
+            &params.project_id,
+        )
+        .await?;
+        if project.project_revision != params.expected_project_revision {
+            return Err(conflict(
+                "MiniApp Import Ready lost its exact Project revision CAS",
+            ));
+        }
+        match params.release.source_kind.as_str() {
+            "managed"
+                if project.source_state == "editable"
+                    && params.release.project_id.as_deref()
+                        == Some(params.project_id.as_str())
+                    && params.release.source_snapshot_digest == project.source_head_digest
+                    && params.release.dependency_lock_digest == project.dependency_lock_digest
+                    && params.release.build_profile_version == project.build_profile_version
+                    && params.release.build_generation == Some(project.build_generation) => {}
+            "runtime_only"
+                if project.source_state == "runtime_only"
+                    && params.release.project_id.is_none()
+                    && params.release.source_snapshot_digest.is_none()
+                    && params.release.dependency_lock_digest.is_none()
+                    && params.release.build_profile_version.is_none()
+                    && params.release.build_generation.is_none() => {}
+            _ => {
+                return Err(conflict(
+                    "MiniApp Import Ready lineage differs from its exact Project source state",
+                ));
+            }
+        }
+        let operation = fetch_miniapp_operation_in_tx(
+            &mut tx,
+            &params.miniapp_id,
+            &params.operation_id,
+        )
+        .await?
+        .ok_or_else(|| {
+            DbError::NotFound(format!(
+                "MiniApp Import operation {}",
+                params.operation_id
+            ))
+        })?;
+        if operation.kind != "import"
+            || operation.state != ProductOperationState::Running.as_str()
+            || operation.progress_percent.is_none()
+            || operation.last_error_code.is_some()
+            || operation.finished_at_ms.is_some()
+            || params.finished_at_ms < operation.started_at_ms
+            || params.artifact.created_at < operation.started_at_ms
+            || params.release.created_at < operation.started_at_ms
+            || params.finished_at_ms < product.updated_at
+            || params.finished_at_ms < project.updated_at
+        {
+            return Err(conflict(
+                "MiniApp Import Ready lost its exact running-operation CAS",
+            ));
+        }
+        let catalog_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM miniapp_catalog_publications
+             WHERE owner_user_id = ? AND miniapp_id = ?",
+        )
+        .bind(&params.owner_user_id)
+        .bind(&params.miniapp_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if catalog_count != 0 {
+            return Err(DbError::Init(
+                "unfinished MiniApp Import unexpectedly published Catalog state".to_owned(),
+            ));
+        }
+
+        let persisted_artifact =
+            persist_or_reuse_artifact(&mut tx, &params.artifact).await?;
+        let mut release = params.release.clone();
+        release.artifact_id = persisted_artifact.artifact_id.clone();
+        release.manifest_digest = persisted_artifact.manifest_digest.clone();
+        if params.release.artifact_id != persisted_artifact.artifact_id {
+            release.release_record_json = rewrite_release_record_artifact_id(
+                &release.release_record_json,
+                &persisted_artifact.artifact_id,
+            )?;
+        }
+        let persisted_artifact_payload = validate_artifact(&persisted_artifact)?;
+        validate_release(&release, &persisted_artifact_payload)?;
+        sqlx::query(
+            "INSERT INTO miniapp_releases
+             (release_id, miniapp_id, owner_user_id, artifact_id,
+              artifact_digest, manifest_digest, release_digest, origin_kind,
+              origin_operation_id, source_kind, project_id, source_snapshot_digest,
+              dependency_lock_digest, build_profile_version, build_generation,
+              release_record_json, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 'import', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&release.release_id)
+        .bind(&release.miniapp_id)
+        .bind(&release.owner_user_id)
+        .bind(&release.artifact_id)
+        .bind(&release.artifact_digest)
+        .bind(&release.manifest_digest)
+        .bind(&release.release_digest)
+        .bind(&release.origin_operation_id)
+        .bind(&release.source_kind)
+        .bind(&release.project_id)
+        .bind(&release.source_snapshot_digest)
+        .bind(&release.dependency_lock_digest)
+        .bind(&release.build_profile_version)
+        .bind(release.build_generation)
+        .bind(&release.release_record_json)
+        .bind(release.created_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        let product_updated = sqlx::query(
+            "UPDATE miniapp_products
+             SET product_revision = product_revision + 1,
+                 pointer_revision = pointer_revision + 1,
+                 ready_release_id = ?, ready_release_digest = ?,
+                 updated_at = ?
+             WHERE owner_user_id = ? AND miniapp_id = ?
+               AND lifecycle = 'disabled'
+               AND product_revision = ? AND pointer_revision = ?
+               AND ready_release_id IS NULL AND active_release_id IS NULL
+               AND previous_release_id IS NULL AND updated_at <= ?",
+        )
+        .bind(&release.release_id)
+        .bind(&release.release_digest)
+        .bind(params.finished_at_ms)
+        .bind(&params.owner_user_id)
+        .bind(&params.miniapp_id)
+        .bind(params.expected_product_revision)
+        .bind(params.expected_pointer_revision)
+        .bind(params.finished_at_ms)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        if product_updated.rows_affected() != 1 {
+            return Err(conflict("MiniApp Import Ready Product/pointer CAS failed"));
+        }
+        let library_updated = sqlx::query(
+            "UPDATE miniapp_library_state
+             SET revision = revision + 1, updated_at = ?
+             WHERE owner_user_id = ? AND revision = ? AND updated_at <= ?",
+        )
+        .bind(params.finished_at_ms)
+        .bind(&params.owner_user_id)
+        .bind(params.expected_library_revision)
+        .bind(params.finished_at_ms)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        if library_updated.rows_affected() != 1 {
+            return Err(conflict("MiniApp Import Ready Library revision CAS failed"));
+        }
+        let operation_updated = sqlx::query(
+            "UPDATE product_operations
+             SET state = 'succeeded', progress_percent = 100,
+                 last_error_code = NULL, bounded_log_tail_json = ?,
+                 finished_at_ms = ?
+             WHERE operation_id = ? AND kind = 'import'
+               AND owner_kind = 'miniapp' AND owner_id = ? AND state = 'running'",
+        )
+        .bind(bounded_log_tail_json)
+        .bind(params.finished_at_ms)
+        .bind(&params.operation_id)
+        .bind(&params.miniapp_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        if operation_updated.rows_affected() != 1 {
+            return Err(conflict(
+                "MiniApp Import success lost its running-operation CAS",
+            ));
+        }
+        let snapshot =
+            fetch_snapshot_in_tx(&mut tx, &params.owner_user_id, &params.miniapp_id)
+                .await?
+                .ok_or_else(|| DbError::Init("MiniApp Import Ready lost Product".into()))?;
+        tx.commit().await?;
+        Ok(snapshot)
+    }
+
+    async fn fail_import(
+        &self,
+        params: &FailMiniAppM1ImportParams,
+    ) -> Result<ProductOperationRow, DbError> {
+        terminalize_import_operation(
+            &self.pool,
+            &params.owner_user_id,
+            &params.miniapp_id,
+            &params.project_id,
+            &params.operation_id,
+            params.expected_product_revision,
+            params.expected_pointer_revision,
+            params.expected_project_revision,
+            ProductOperationState::Failed,
+            Some(params.progress_percent),
+            Some(&params.error_code),
+            &params.bounded_log_tail,
+            params.finished_at_ms,
+        )
+        .await
+    }
+
+    async fn cancel_import(
+        &self,
+        params: &CancelMiniAppM1ImportParams,
+    ) -> Result<ProductOperationRow, DbError> {
+        terminalize_import_operation(
+            &self.pool,
+            &params.owner_user_id,
+            &params.miniapp_id,
+            &params.project_id,
+            &params.operation_id,
+            params.expected_product_revision,
+            params.expected_pointer_revision,
+            params.expected_project_revision,
+            ProductOperationState::Canceled,
+            None,
+            None,
+            &params.bounded_log_tail,
+            params.finished_at_ms,
+        )
+        .await
+    }
+
+    async fn start_export_operation(
+        &self,
+        params: &StartMiniAppM1ExportOperationParams,
+    ) -> Result<ProductOperationRow, DbError> {
+        validate_uuid(&params.owner_user_id, "owner_user_id")?;
+        validate_uuid(&params.miniapp_id, "miniapp_id")?;
+        validate_uuid(&params.operation_id, "operation_id")?;
+        if params.expected_product_revision < 1
+            || params.expected_pointer_revision < 1
+            || params.started_at_ms <= 0
+        {
+            return Err(conflict(
+                "MiniApp Export start CAS/timestamp is invalid",
+            ));
+        }
+        let bounded_log_tail_json =
+            serialize_product_operation_log_tail(&params.bounded_log_tail)?;
+        let mut tx = self.pool.begin().await?;
+        let product =
+            lock_product_for_update(&mut tx, &params.owner_user_id, &params.miniapp_id).await?;
+        if matches!(product.lifecycle.as_str(), "trashed" | "deleting")
+            || product.product_revision != params.expected_product_revision
+            || product.pointer_revision != params.expected_pointer_revision
+            || params.started_at_ms < product.updated_at
+        {
+            return Err(conflict(
+                "MiniApp Export start lost its exact non-trashed Product CAS",
+            ));
+        }
+        sqlx::query(
+            "INSERT INTO product_operations (
+                operation_id, kind, owner_kind, owner_id, state,
+                progress_percent, bounded_log_tail_json, started_at_ms
+             ) VALUES (?, 'export', 'miniapp', ?, 'running', 0, ?, ?)",
+        )
+        .bind(&params.operation_id)
+        .bind(&params.miniapp_id)
+        .bind(bounded_log_tail_json)
+        .bind(params.started_at_ms)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        let operation = sqlx::query_as::<_, ProductOperationRow>(
+            "SELECT * FROM product_operations
+             WHERE operation_id = ? AND kind = 'export'
+               AND owner_kind = 'miniapp' AND owner_id = ?",
+        )
+        .bind(&params.operation_id)
+        .bind(&params.miniapp_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(DbError::Query)?;
+        tx.commit().await?;
+        Ok(operation)
+    }
+
+    async fn finish_export_operation(
+        &self,
+        params: &FinishMiniAppM1ExportOperationParams,
+    ) -> Result<ProductOperationRow, DbError> {
+        terminalize_export_operation(
+            &self.pool,
+            &params.owner_user_id,
+            &params.miniapp_id,
+            &params.operation_id,
+            ProductOperationState::Succeeded,
+            Some(100),
+            None,
+            &params.bounded_log_tail,
+            params.finished_at_ms,
+        )
+        .await
+    }
+
+    async fn fail_export_operation(
+        &self,
+        params: &FailMiniAppM1ExportOperationParams,
+    ) -> Result<ProductOperationRow, DbError> {
+        terminalize_export_operation(
+            &self.pool,
+            &params.owner_user_id,
+            &params.miniapp_id,
+            &params.operation_id,
+            ProductOperationState::Failed,
+            Some(params.progress_percent),
+            Some(&params.error_code),
+            &params.bounded_log_tail,
+            params.finished_at_ms,
+        )
+        .await
+    }
+
+    async fn cancel_export_operation(
+        &self,
+        params: &CancelMiniAppM1ExportOperationParams,
+    ) -> Result<ProductOperationRow, DbError> {
+        terminalize_export_operation(
+            &self.pool,
+            &params.owner_user_id,
+            &params.miniapp_id,
+            &params.operation_id,
+            ProductOperationState::Canceled,
+            None,
+            None,
+            &params.bounded_log_tail,
+            params.finished_at_ms,
+        )
+        .await
     }
 
     async fn start_build_operation(
