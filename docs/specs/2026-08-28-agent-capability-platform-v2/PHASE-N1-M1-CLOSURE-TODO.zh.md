@@ -16,9 +16,10 @@
 > SQLite、authorizer、参数化 query/execute/batch、additive Migration ledger 与
 > Publish migration fence。M1-2 的 Trash/Restore/Permanent Delete 与启动恢复子切片
 > 已由 `86afa7af6` 完成；Service Test transient namespace/receipt 已由 `708ef83b7`
-> 完成。Share Bundle Export/Import、source-less prebuilt Import-as-new 的
-> Application/API/E2E 已由 `a1534ad09`、`47f03ae0f` 完成；Desktop Transfer UI
-> 正在实施，disabled Whole-App Backup Export/Import-as-new 尚未开始。
+> 完成。Share Bundle Export/Import、source-less prebuilt Import-as-new、Desktop Transfer
+> UI 和 disabled Whole-App Backup Export/Import-as-new 已完成实现与 Windows 定向回归。
+> Whole-App Backup 还覆盖 Service Files、Private SQLite、Migration ledger、Catalog
+> identity digest 和 owner operation 互斥。
 > Windows Candidate、
 > NSIS、产品验收和 macOS/Linux 外部验证仍未关闭。
 
@@ -53,8 +54,8 @@
 
 | 分类 | 数量 | 项目 |
 | --- | ---: | --- |
-| 已关闭 | 20 | 当前表内已关闭的 W0/N1/M1 项，包含 `M1-0-01`、`M1-0-02-A`、`M1-0-02-B`、`M1-1-01`、`M1-1-02` |
-| 正在实施 | 5 | `N1-1-01`、`N1-2-03`、`N1-4-01`、`N1-U-01`、M1-2 生命周期 lane |
+| 已关闭 | 21 | 当前表内已关闭的 W0/N1/M1 项，包含 `M1-0-01`、`M1-0-02-A`、`M1-0-02-B`、`M1-1-01`、`M1-1-02`、`M1-2-01` |
+| 正在实施 | 4 | `N1-1-01`、`N1-2-03`、`N1-4-01`、`N1-U-01` |
 | 已解锁待领取 | 0 | 当前 Windows 主线无未领取的前置切片 |
 | 依赖阻塞 | 8 | 其余 N1/M1 Windows 项与最终合流 |
 | 外部原生 | 2 | `RC-MA-01`、`RC-LD-01` |
@@ -441,7 +442,7 @@
 | `M1-0-02-B` | closed | MiniApp release lane；Publish/Catalog/Surface adapter 与 Desktop Workshop | Ready→Manual Publish→Surface→Rollback、纯 UI auto Publish、Host KV | `M1-0-02-A`,`M1-1-01` | UI-only Release/Catalog 原子切换、Active/Previous pointer CAS、Surface epoch fence、UI 定向验证通过 |
 | `M1-1-01` | closed | Service/Bridge lane；`nomifun-miniapp-platform/src/{service_host,service_process,service_runtime}.rs` | 单 `main.mjs`、dedicated Host、on-demand/continuous、MessageChannel epoch fence | `M1-0-02`,`N1-1-02` | 真实 Node NDJSON 3、Service application 1、Runtime candidate 3、旧 generation/崩溃隔离/容量/backoff 通过 |
 | `M1-1-02` | closed | Managed data lane；`managed_storage.rs`、Service IPC、M1 cutover | UI/Service KV、Files、Private SQLite、authorizer、参数化 SQL、additive migration ledger | `M1-1-01` | production SQLite Storage 1、真实 Node Storage IPC 3、authorizer/批量回滚/启动与取消边界通过 |
-| `M1-2-01` | in-progress | Lifecycle lane；MiniApp lifecycle/application/data cleanup | Enable/Disable/Trash/Restore/Permanent Delete、Service Test、Share/Backup Import-as-new | `M1-1-02` | 删除恢复与 Service Test 已关闭；Share Bundle Export/Import、source-less prebuilt Import-as-new 的 Application/API/E2E 已关闭；剩余 Desktop Transfer UI 与 disabled Whole-App Backup Export/Import-as-new |
+| `M1-2-01` | closed | Lifecycle lane；MiniApp lifecycle/application/data cleanup | Enable/Disable/Trash/Restore/Permanent Delete、Service Test、Share/Backup Import-as-new | `M1-1-02` | 删除恢复、Service Test、Share/prebuilt Import-as-new、Desktop Transfer UI、Whole-App Backup Export/Import-as-new 均已通过 Windows 定向验证；含 Service Files/SQLite/ledger、Catalog digest、owner export mutex |
 | `M1-U-01` | blocked | UI lane；整体重写 `pages/miniApps/**` | Library/Workshop/Surface，删除 Guid/Conversation 旧 MiniApp 模式 | `M1-0-02`,`M1-1-01` | real Desktop workflow/build/a11y |
 | `M1-V-01` | blocked | 集成 Owner | Windows M1 contract/integration/fault/product/NSIS candidate | 所有 M1 项 | UI-only + Service representative lifecycle |
 
@@ -452,9 +453,10 @@ Migration ledger。Node Service 的 Storage 请求使用同一私有 NDJSON 通�
 不进入 Service SDK/HTTP/renderer wire；Publish 在旧 Host 停止后执行 pending additive
 Migration，再启动目标 Host，失败时保留旧 Active 并重建旧 Service。M1-2 生命周期删除
 与 Service Test 子切片已完成；Share Bundle Export/Import、source-less prebuilt
-Import-as-new 的 Application/API/E2E 已完成，当前下一执行切片为 Desktop Transfer UI，
-随后实现 disabled Whole-App Backup Export/Import-as-new。当前仍不构成 Windows Candidate
-或跨平台完成。
+Import-as-new 的 Application/API/E2E、Desktop Transfer UI 和 disabled Whole-App Backup
+Export/Import-as-new 均已完成。`M1-2-01` 现已关闭；当前仍不构成 Windows Candidate
+或跨平台完成。下一边界是 MiniApp Capability Catalog 正式消费者接入、旧 MiniApp
+物理拆除和 Windows Candidate。
 
 ## 最终候选与外部验证
 
@@ -616,7 +618,44 @@ Import-as-new 的 Application/API/E2E 已完成，当前下一执行切片为 De
 2. 所有导入都创建新的 disabled MiniApp identity，不静默覆盖现有产品；带 Source 的
    Share Bundle 同时创建可继续开发的 editable Project，source-less prebuilt
    Artifact 保持 runtime-only，不伪造可编辑 Source。
-3. 当前边界：`M1-2-01` 仍为 `in-progress`。Share Application/API/E2E 已关闭，
-   Desktop Transfer UI 正在实施；disabled Whole-App Backup Export/Import-as-new
-   尚未实现。`M1-U-01`、`M1-V-01`、Windows NSIS 和 macOS/Linux 原生验证状态
-   不变。
+3. 当时边界：`M1-2-01` 尚未关闭。该阶段记录的 Share Application/API/E2E 已关闭，
+   Desktop Transfer UI 与 disabled Whole-App Backup Export/Import-as-new 随后在
+   2026-09-09 收口；`M1-U-01`、`M1-V-01`、Windows NSIS 和 macOS/Linux 原生验证
+   状态由后续条目继续跟踪。
+
+## 2026-09-09 M1-2 Desktop Transfer 与 Whole-App Backup 收口
+
+1. Desktop Transfer UI 已完成 Share Bundle、source-less prebuilt Artifact 和
+   Whole-App Backup 的导入/导出入口：
+   - Share Bundle 与携带业务数据的 Backup 继续使用两个独立产品流程；
+   - Backup 导出只允许明确的 disabled MiniApp，导入始终创建新的 disabled
+     MiniApp、Project、Release identity，不恢复本机 Credential binding；
+   - 普通用户只选择目录和显示名称，不接触 digest、handle、generation 或内部路径。
+2. Whole-App Backup 已完成真实 application/API/存储闭环：
+   - 固定目录格式、canonical JSON、严格 inventory、digest 校验、大小限制以及
+     symlink/junction/reparse/special file 拒绝；
+   - Product/Project、Ready/Active/Previous Release、Source、非秘密 Config、KV、
+     Service Files、Private SQLite 和 Migration ledger 可导出并导入；
+   - 导入后的 Active Catalog digest 按新 MiniApp/Release identity 重新计算；
+     Credential slot 必须与保留 Release 的 union 完全一致；
+   - Migration ledger 只接受仍在 Backup 保留指针中的精确 Release，不能伪造历史
+     Release ref；
+   - Files 与 Private SQLite 使用 sibling staging + quarantine 原子交换，失败时
+     保留旧目标；导出在同一 storage lock 内捕获 Files/SQLite，普通 Share Export
+     与 Backup Export 共享 owner operation 互斥。
+3. 定向验证：
+   - `cargo test --locked -p nomifun-miniapp-platform --lib backup::tests`：4 passed；
+   - `cargo test --locked -p nomifun-miniapp-platform --test backup_application`：
+     2 passed（UI-only、active Catalog digest）；
+   - `cargo test --locked -p nomifun-miniapp-platform --test backup_service_application`：
+     1 passed（Files、Private SQLite、Migration ledger、Release 重绑定）；
+   - `cargo test --locked -p nomifun-miniapp-platform --test managed_storage
+     --test service_test_storage --test share_application`：7 passed；
+   - `cargo test --locked -p nomifun-db --test miniapp_m1_repository
+     --test miniapp_m1_schema --test id_schema_contract`：定向通过，包含普通
+     Export/Backup operation 互斥；
+   - MiniApp UI/wire 定向测试 35 passed，`check:i18n`、UI production build、
+     受影响 crate `cargo check`、定向 rustfmt 和 `git diff --check` 通过。
+4. `M1-2-01` 现已关闭。`M1-U-01` 的 Desktop 产品/accessibility 走查、
+   `M1-V-01` 的 Windows Candidate/NSIS/fault 验证仍未关闭；macOS arm64、
+   Linux Desktop x64 和手机模式均不在本机当前验证范围。

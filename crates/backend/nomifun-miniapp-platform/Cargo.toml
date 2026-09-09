@@ -9,6 +9,7 @@ repository.workspace = true
 async-trait.workspace = true
 getrandom.workspace = true
 hex.workspace = true
+libc.workspace = true
 nomifun-agent-contracts.workspace = true
 nomifun-api-types.workspace = true
 nomifun-common.workspace = true

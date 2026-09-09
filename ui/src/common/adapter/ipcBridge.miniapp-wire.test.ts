@@ -88,6 +88,7 @@ describe('MiniApp M1 HTTP bridge', () => {
     ).toBe(true);
     expect(source.includes("'/api/miniapps/import/share'")).toBe(true);
     expect(source.includes("'/api/miniapps/import/artifact'")).toBe(true);
+    expect(source.includes("'/api/miniapps/import/backup'")).toBe(true);
     expect(
       source.includes(
         '`/api/miniapps/${encodeURIComponent(miniapp_id)}/workshop`'
@@ -102,6 +103,7 @@ describe('MiniApp M1 HTTP bridge', () => {
       '/service/running`',
       '/service/retry`',
       '/share`',
+      '/backup`',
       '/surface/open`',
       '/surface/close`',
     ]) {
@@ -254,6 +256,61 @@ describe('MiniApp M1 HTTP bridge', () => {
     await miniapps.importArtifact.invoke(importArtifact);
     expect(requestPath).toBe('/api/miniapps/import/artifact');
     expect(requestBody).toEqual(importArtifact);
+  });
+
+  test('Whole-App Backup export and import preserve exact CAS and metadata digest fields', async () => {
+    let requestPath = '';
+    let requestBody: unknown;
+    globalThis.fetch = (async (input, init) => {
+      requestPath = new URL(String(input), 'http://127.0.0.1').pathname;
+      requestBody =
+        typeof init?.body === 'string' ? JSON.parse(init.body) : init?.body;
+      const responseData =
+        requestPath === `/api/miniapps/${MINIAPP_ID}/backup`
+          ? {
+              operation_id: '0190f5fe-7c00-7a00-8000-0000000000b6',
+              operation_revision: 1,
+              kind: 'export',
+              owner: { owner: 'miniapp', miniapp_id: MINIAPP_ID },
+              state: 'succeeded',
+              cancelable: false,
+              progress_percent: 100,
+              started_at_ms: 1_780_000_000_000,
+              completed_at_ms: 1_780_000_000_001,
+            }
+          : rawWorkshop();
+      return new Response(JSON.stringify({ success: true, data: responseData }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as typeof fetch;
+
+    const exportRequest = {
+      miniapp_id: MINIAPP_ID as never,
+      expected_product_revision: 4,
+      expected_lifecycle: 'disabled' as const,
+      expected_pointer_revision: 7,
+      expected_config_revision: 2,
+      expected_credential_bindings_revision: 3,
+      destination_path: 'C:\\exports\\status-board.backup',
+    };
+    const operation = await miniapps.exportBackup.invoke(exportRequest);
+    expect(requestPath).toBe(`/api/miniapps/${MINIAPP_ID}/backup`);
+    expect(requestBody).toEqual(exportRequest);
+    expect(operation.owner).toEqual({
+      owner: 'miniapp',
+      miniapp_id: MINIAPP_ID,
+    });
+
+    const importRequest = {
+      expected_library_revision: 8,
+      source_path: 'C:\\imports\\status-board.backup',
+      expected_backup_metadata_digest: 'e'.repeat(64),
+      display_name: 'Status Board Restored',
+    };
+    await miniapps.importBackup.invoke(importRequest);
+    expect(requestPath).toBe('/api/miniapps/import/backup');
+    expect(requestBody).toEqual(importRequest);
   });
 
   test('release, lifecycle, and publish-mode mutations preserve exact request bodies', async () => {

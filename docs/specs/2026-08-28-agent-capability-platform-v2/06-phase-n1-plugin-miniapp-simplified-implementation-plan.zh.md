@@ -1102,7 +1102,7 @@ Plugin 与 MiniApp 共用一个 chat-first Project Workshop：Chat 是主入口�
 - **NomiFun Share Bundle：**包含 Project Source、dependency lock、Build Profile version、immutable Artifact、Manifest和最小 Test/provenance metadata，导入后可以验证、使用并继续开发；Share manifest 必须固定并校验 `source snapshot digest + lock digest + build profile version + artifact digest` 完整链，不一致时不得把 Source与Artifact关联为可继续开发的同一 Project，只能拒绝或分别按 runtime-only Artifact 与 detached Source处理；默认不包含用户 Credential、KV、`dataDir`、Files 或 Private DB；Test 默认只导出 pass/fail、digest、平台/Runtime/Test contract 等元数据，不导出测试输入、输出、API响应或日志，诊断内容必须由用户另行审阅导出；
 - **Prebuilt Runtime Artifact：**由外部 IDE/AI/工具链按公开 Artifact Schema/SDK types/validator 合同生成；导入后可 Test、Install/Replace 或 Publish，但没有 Source 时只能使用，继续开发需显式导入 Source 或创建 fork。
 
-Plugin Share Bundle 或 prebuilt Artifact 导入后统一进入 Ready Candidate和既有 diff/Apply 流程；首次安装必须人工。MiniApp Share Bundle 或 source-less prebuilt Release 一律创建新的 MiniApp identity和 Ready Release，不静默覆盖现有 App；包含 Source 时同时创建 editable Project，source-less 时明确标记 read-only artifact，仍可本机 Test/Publish，继续开发需导入 Source或 fork。待实现的独立 disabled Whole-App Backup Export 继续作为携带业务数据的 Backup/迁移包，与默认无用户数据的 Share Bundle 分开；两者都不包含明文 Credential，导入后重新绑定。
+Plugin Share Bundle 或 prebuilt Artifact 导入后统一进入 Ready Candidate和既有 diff/Apply 流程；首次安装必须人工。MiniApp Share Bundle 或 source-less prebuilt Release 一律创建新的 MiniApp identity和 Ready Release，不静默覆盖现有 App；包含 Source 时同时创建 editable Project，source-less 时明确标记 read-only artifact，仍可本机 Test/Publish，继续开发需导入 Source或 fork。独立 disabled Whole-App Backup Export 已按本合同实现为携带业务数据的 Backup/迁移包，与默认无用户数据的 Share Bundle 分开；两者都不包含明文 Credential，导入后重新绑定。
 
 Share Bundle 中携带的 Test result 只作为来源 provenance 展示，不能直接满足本机 auto-Apply/Publish eligibility；导入后必须用本机当前 committed Runtime 和本机 Test contract 重新得到 matching passed result。外部或分享产物可以在用户明确确认下跳过 Test手动应用，但不能凭来源自述获得自动部署资格。
 
@@ -1512,5 +1512,25 @@ MiniApp application service，并由 E2E 验证。
 
 导入始终创建新的 disabled MiniApp identity；带 Source 的 Share Bundle 创建可继续
 开发的 editable Project，source-less Artifact 保持 runtime-only，不从运行产物反推
-可编辑 Source。Desktop Transfer UI 尚未收口，disabled Whole-App Backup
-Export/Import-as-new 尚未实现，`M1-2` 继续保持 `in-progress`。
+可编辑 Source。Desktop Transfer UI 和 disabled Whole-App Backup
+Export/Import-as-new 已完成，`M1-2` 的产品实现已收口。
+
+## 2026-09-09 M1-2 Desktop Transfer 与 Whole-App Backup 实现落地注记
+
+Desktop Transfer UI 已完成 Share Bundle、source-less prebuilt Artifact 和
+Whole-App Backup 的目录选择、摘要校验、导入/导出提交与成功/失败反馈。普通用户只
+选择目录和显示名称，不接触 digest、handle、generation 或内部路径。
+
+Whole-App Backup 已完成 Windows application/API/存储闭环：固定目录格式、
+canonical JSON、严格 inventory/digest/大小限制、Windows reparse/junction 拒绝；
+UI-only 与 Service（Files、Private SQLite、Migration ledger）均有 application
+roundtrip。导入始终创建新的 disabled identity，Active Catalog digest 按新 identity
+重建，Credential slot 必须与保留 Release union 一致，ledger 不能引用未保留 Release。
+Files 与 Private SQLite 使用 sibling staging + quarantine 原子替换，普通 Share Export
+与 Backup Export 使用同一 owner operation 互斥。
+
+定向证据：Backup filesystem 4、Backup application 2、Service Backup application 1、
+managed storage/service-test/share 回归 7、MiniApp UI/wire 35；受影响 crate
+`cargo check`、定向 rustfmt、`check:i18n` 和 UI production build 通过。`M1-2-01`
+现已关闭；`M1-U-01` 的 Desktop accessibility/产品走查、`M1-V-01` 的 Windows
+Candidate/NSIS/fault 验证，以及 Catalog consumer 和旧 MiniApp 清理仍按顺序进行。

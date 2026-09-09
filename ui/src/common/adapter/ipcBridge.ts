@@ -351,6 +351,8 @@ import type {
   DeleteMiniAppRequest,
   ImportMiniAppArtifactRequest,
   ImportMiniAppShareRequest,
+  ExportMiniAppBackupRequest,
+  ImportMiniAppBackupRequest,
   ShareMiniAppRequest,
 } from '../types/miniAppPlatform';
 
@@ -2294,6 +2296,19 @@ export const miniapps = {
   importArtifact: withResponseMap(
     httpPost<MiniAppWorkshop, ImportMiniAppArtifactRequest>(
       '/api/miniapps/import/artifact'
+    ),
+    fromApiMiniAppWorkshop
+  ),
+  exportBackup: withResponseMap(
+    httpPost<MiniAppOperationSummary, ExportMiniAppBackupRequest>(
+      ({ miniapp_id }) =>
+        `/api/miniapps/${encodeURIComponent(miniapp_id)}/backup`
+    ),
+    fromApiMiniAppOperation
+  ),
+  importBackup: withResponseMap(
+    httpPost<MiniAppWorkshop, ImportMiniAppBackupRequest>(
+      '/api/miniapps/import/backup'
     ),
     fromApiMiniAppWorkshop
   ),

@@ -15,7 +15,8 @@ const source = readFileSync(
 describe('MiniApp Transfer dialog source contract', () => {
   test('exposes the fixed parent-page integration surface', () => {
     for (const contract of [
-      "mode: 'export' | 'import_share' | 'import_artifact';",
+      "'export_backup'",
+      "'import_backup'",
       'visible: boolean;',
       'libraryRevision: number;',
       'workshop?: MiniAppWorkshop | null;',
@@ -39,7 +40,7 @@ describe('MiniApp Transfer dialog source contract', () => {
 
   test('reads only summary metadata from the mode-specific manifest', () => {
     expect(source.includes("? 'bundle.json'")).toBe(true);
-    expect(source.includes(": 'release/artifact.json'")).toBe(true);
+    expect(source.includes("'release/artifact.json'")).toBe(true);
     expect(
       source.includes('ipcBridge.fs.readFile.invoke({')
     ).toBe(true);
@@ -59,13 +60,8 @@ describe('MiniApp Transfer dialog source contract', () => {
         'const targetPath = joinLocalPath(parentPath, folderName.trim());'
       )
     ).toBe(true);
-    expect(
-      source.includes('ipcBridge.miniapps.share.invoke({')
-    ).toBe(false);
+    expect(source.includes('ipcBridge.miniapps.share.invoke(')).toBe(true);
     expect(source.includes('miniAppShareRequest(')).toBe(true);
-    expect(source.includes('ipcBridge.miniapps.share.invoke(request)')).toBe(
-      true
-    );
     expect(source.includes('onExported(operation, targetPath)')).toBe(true);
   });
 
@@ -89,5 +85,9 @@ describe('MiniApp Transfer dialog source contract', () => {
       source.includes("source_path: joinLocalPath(sourcePath, 'release')")
     ).toBe(true);
     expect(source.includes('onImported(imported)')).toBe(true);
+    expect(source.includes('ipcBridge.miniapps.importBackup.invoke({')).toBe(
+      true
+    );
+    expect(source.includes('expected_backup_metadata_digest:')).toBe(true);
   });
 });

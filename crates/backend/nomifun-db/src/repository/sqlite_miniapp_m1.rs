@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use nomifun_agent_contracts::{
     ArtifactId, MiniAppReadyRelease, MiniAppServiceTestOutcome, MiniAppServiceTestReceipt,
@@ -29,6 +29,9 @@ use crate::repository::miniapp_m1::{
     FinalizeMiniAppM1DeleteParams, FinishMiniAppM1BuildAndRecordReadyParams,
     FinishMiniAppM1BuildOperationParams, FinishMiniAppM1ExportOperationParams,
     FinishMiniAppM1ImportReadyParams, IMiniAppM1Repository,
+    FinishMiniAppM1BackupImportParams, MiniAppM1BackupExportSnapshot,
+    MiniAppM1BackupReleaseSlot,
+    StartMiniAppM1BackupExportParams,
     MiniAppM1AutoPublishGuard, MiniAppM1ImportSource, MiniAppM1ManagedSourceLineage,
     MiniAppM1SurfaceKvOperation, MiniAppM1SurfaceKvResult,
     MiniAppServiceTestReceiptRow, OpenMiniAppM1SurfaceSessionParams,
@@ -2233,6 +2236,7 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
                 "MiniApp Export start lost its exact non-trashed Product CAS",
             ));
         }
+        ensure_no_running_miniapp_operation(&mut tx, &params.miniapp_id).await?;
         sqlx::query(
             "INSERT INTO product_operations (
                 operation_id, kind, owner_kind, owner_id, state,
@@ -2258,6 +2262,524 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
         .map_err(DbError::Query)?;
         tx.commit().await?;
         Ok(operation)
+    }
+
+    async fn start_backup_export(
+        &self,
+        params: &StartMiniAppM1BackupExportParams,
+    ) -> Result<MiniAppM1BackupExportSnapshot, DbError> {
+        validate_uuid(&params.owner_user_id, "owner_user_id")?;
+        validate_uuid(&params.miniapp_id, "miniapp_id")?;
+        validate_uuid(&params.operation_id, "operation_id")?;
+        if params.expected_product_revision < 1
+            || params.expected_pointer_revision < 1
+            || params.expected_config_revision < 1
+            || params.expected_credential_bindings_revision < 1
+            || params.started_at_ms <= 0
+        {
+            return Err(conflict(
+                "MiniApp Whole-App Backup export CAS/timestamp is invalid",
+            ));
+        }
+        let bounded_log_tail_json = serialize_product_operation_log_tail(&[
+            "MiniApp Whole-App Backup export started".to_owned(),
+        ])?;
+        let mut tx = self.pool.begin().await?;
+        let product =
+            lock_product_for_update(&mut tx, &params.owner_user_id, &params.miniapp_id).await?;
+        if product.lifecycle != "disabled"
+            || product.product_revision != params.expected_product_revision
+            || product.pointer_revision != params.expected_pointer_revision
+            || product.config_revision != params.expected_config_revision
+            || product.credential_bindings_revision
+                != params.expected_credential_bindings_revision
+            || params.started_at_ms < product.updated_at
+        {
+            return Err(conflict(
+                "Whole-App Backup requires the exact disabled Product and configuration revisions",
+            ));
+        }
+        ensure_no_running_miniapp_operation(&mut tx, &params.miniapp_id).await?;
+        let catalog_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM miniapp_catalog_publications
+             WHERE owner_user_id = ? AND miniapp_id = ?",
+        )
+        .bind(&params.owner_user_id)
+        .bind(&params.miniapp_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let surface_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM miniapp_surface_sessions
+             WHERE owner_user_id = ? AND miniapp_id = ?",
+        )
+        .bind(&params.owner_user_id)
+        .bind(&params.miniapp_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if catalog_count != 0 || surface_count != 0 {
+            return Err(conflict(
+                "Whole-App Backup requires no Catalog publication or Surface session",
+            ));
+        }
+        sqlx::query(
+            "INSERT INTO product_operations (
+                operation_id, kind, owner_kind, owner_id, state,
+                progress_percent, bounded_log_tail_json, started_at_ms
+             ) VALUES (?, 'export', 'miniapp', ?, 'running', 0, ?, ?)",
+        )
+        .bind(&params.operation_id)
+        .bind(&params.miniapp_id)
+        .bind(bounded_log_tail_json)
+        .bind(params.started_at_ms)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+
+        let snapshot = fetch_snapshot_in_tx(
+            &mut tx,
+            &params.owner_user_id,
+            &params.miniapp_id,
+        )
+        .await?
+        .ok_or_else(|| DbError::Init("Whole-App Backup export lost Product".into()))?;
+        let mut release_ids = BTreeSet::new();
+        for release_id in [
+            snapshot.product.ready_release_id.as_deref(),
+            snapshot.product.active_release_id.as_deref(),
+            snapshot.product.previous_release_id.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            release_ids.insert(release_id.to_owned());
+        }
+        let mut releases = Vec::with_capacity(release_ids.len());
+        let mut artifact_ids = BTreeSet::new();
+        for release_id in release_ids {
+            let release = sqlx::query_as::<_, MiniAppReleaseRow>(
+                "SELECT * FROM miniapp_releases
+                 WHERE owner_user_id = ? AND miniapp_id = ? AND release_id = ?",
+            )
+            .bind(&params.owner_user_id)
+            .bind(&params.miniapp_id)
+            .bind(&release_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| {
+                DbError::Init(format!(
+                    "Whole-App Backup pointer references missing Release {release_id}"
+                ))
+            })?;
+            let artifact = sqlx::query_as::<_, MiniAppReleaseArtifactRow>(
+                "SELECT * FROM miniapp_release_artifacts
+                 WHERE owner_user_id = ? AND artifact_id = ?",
+            )
+            .bind(&params.owner_user_id)
+            .bind(&release.artifact_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| {
+                DbError::Init(format!(
+                    "Whole-App Backup Release {} references missing Artifact {}",
+                    release.release_id, release.artifact_id
+                ))
+            })?;
+            let artifact_payload = validate_artifact(&artifact)?;
+            validate_product_artifact_contract(&product.kind, &artifact_payload)?;
+            validate_release(&release, &artifact_payload)?;
+            artifact_ids.insert(artifact.artifact_id.clone());
+            releases.push(release);
+        }
+        let mut kv = sqlx::query_as::<_, MiniAppKvRow>(
+            "SELECT * FROM miniapp_kv
+             WHERE owner_user_id = ? AND miniapp_id = ?
+               AND namespace NOT LIKE 'service-test:%'
+             ORDER BY namespace, key",
+        )
+        .bind(&params.owner_user_id)
+        .bind(&params.miniapp_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        for row in &kv {
+            if row.owner_user_id != params.owner_user_id
+                || row.miniapp_id != params.miniapp_id
+                || row.namespace.starts_with("service-test:")
+            {
+                return Err(DbError::Init(
+                    "Whole-App Backup captured a foreign or transient KV row".into(),
+                ));
+            }
+            validate_visible_ascii_key(&row.namespace, "MiniApp KV namespace", 128)?;
+            validate_visible_ascii_key(&row.key, "MiniApp KV key", 256)?;
+            validate_kv_row(row)?;
+        }
+        releases.sort_by(|left, right| left.release_id.cmp(&right.release_id));
+        let mut artifacts = Vec::with_capacity(artifact_ids.len());
+        for artifact_id in artifact_ids {
+            let artifact = sqlx::query_as::<_, MiniAppReleaseArtifactRow>(
+                "SELECT * FROM miniapp_release_artifacts
+                 WHERE owner_user_id = ? AND artifact_id = ?",
+            )
+            .bind(&params.owner_user_id)
+            .bind(&artifact_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(DbError::Query)?;
+            artifacts.push(artifact);
+        }
+        let operation = sqlx::query_as::<_, ProductOperationRow>(
+            "SELECT * FROM product_operations
+             WHERE operation_id = ? AND kind = 'export'
+               AND owner_kind = 'miniapp' AND owner_id = ?",
+        )
+        .bind(&params.operation_id)
+        .bind(&params.miniapp_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(DbError::Query)?;
+        tx.commit().await?;
+        Ok(MiniAppM1BackupExportSnapshot {
+            snapshot,
+            releases,
+            artifacts,
+            kv: std::mem::take(&mut kv),
+            operation,
+        })
+    }
+
+    async fn finish_backup_import(
+        &self,
+        params: &FinishMiniAppM1BackupImportParams,
+    ) -> Result<MiniAppM1Snapshot, DbError> {
+        validate_uuid(&params.owner_user_id, "owner_user_id")?;
+        validate_uuid(&params.miniapp_id, "miniapp_id")?;
+        validate_uuid(&params.project_id, "project_id")?;
+        validate_uuid(&params.operation_id, "operation_id")?;
+        validate_digest(&params.target_catalog_digest, "target_catalog_digest")?;
+        if params.expected_library_revision < 1
+            || params.expected_product_revision < 1
+            || params.expected_pointer_revision < 1
+            || params.expected_project_revision < 1
+            || params.finished_at_ms <= 0
+            || params.releases.len() > 3
+        {
+            return Err(conflict(
+                "Whole-App Backup import CAS or Release inventory is invalid",
+            ));
+        }
+        let mut slots = BTreeSet::new();
+        let mut release_ids = BTreeSet::new();
+        for item in &params.releases {
+            if !slots.insert(item.slot)
+                || !release_ids.insert(item.release.release_id.clone())
+            {
+                return Err(conflict(
+                    "Whole-App Backup import Release slots and identities must be unique",
+                ));
+            }
+            validate_uuid(&item.artifact.artifact_id, "backup artifact_id")?;
+            validate_uuid(&item.artifact.owner_user_id, "backup artifact owner")?;
+            validate_uuid(&item.release.release_id, "backup release_id")?;
+            validate_uuid(&item.release.miniapp_id, "backup release miniapp_id")?;
+            validate_uuid(&item.release.owner_user_id, "backup release owner")?;
+            validate_uuid(&item.release.origin_operation_id, "backup release operation")?;
+            validate_digest(&item.release.release_digest, "backup release digest")?;
+            if item.release.origin_kind != "import"
+                || item.release.miniapp_id != params.miniapp_id
+                || item.release.owner_user_id != params.owner_user_id
+                || item.release.origin_operation_id != params.operation_id
+                || item.artifact.owner_user_id != params.owner_user_id
+            {
+                return Err(conflict(
+                    "Whole-App Backup Release must bind the target owner and Import operation",
+                ));
+            }
+        }
+
+        let mut kv_keys = BTreeSet::new();
+        for row in &params.kv {
+            if row.owner_user_id != params.owner_user_id
+                || row.miniapp_id != params.miniapp_id
+                || row.namespace.starts_with("service-test:")
+                || !kv_keys.insert((row.namespace.clone(), row.key.clone()))
+            {
+                return Err(conflict(
+                    "Whole-App Backup KV rows must be target-scoped, non-transient, and unique",
+                ));
+            }
+            validate_visible_ascii_key(&row.namespace, "MiniApp KV namespace", 128)?;
+            validate_visible_ascii_key(&row.key, "MiniApp KV key", 256)?;
+            validate_kv_row(row)?;
+            let value: serde_json::Value = serde_json::from_str(&row.value_json)
+                .map_err(|error| {
+                    conflict(format!("Whole-App Backup KV value is invalid: {error}"))
+                })?;
+            let canonical = String::from_utf8(
+                canonical_json_bytes(&value).map_err(|error| {
+                    conflict(format!("Whole-App Backup KV cannot be canonicalized: {error}"))
+                })?,
+            )
+            .map_err(|error| {
+                conflict(format!("Whole-App Backup KV canonical JSON is not UTF-8: {error}"))
+            })?;
+            if canonical != row.value_json {
+                return Err(conflict(
+                    "Whole-App Backup KV values must use canonical JSON",
+                ));
+            }
+            if row.created_at < 0
+                || row.updated_at < row.created_at
+                || row.updated_at > params.finished_at_ms
+            {
+                return Err(conflict(
+                    "Whole-App Backup KV timestamps are invalid",
+                ));
+            }
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let product =
+            lock_product_for_update(&mut tx, &params.owner_user_id, &params.miniapp_id).await?;
+        if product.lifecycle != "disabled"
+            || product.product_revision != params.expected_product_revision
+            || product.pointer_revision != params.expected_pointer_revision
+            || product.ready_release_id.is_some()
+            || product.active_release_id.is_some()
+            || product.previous_release_id.is_some()
+        {
+            return Err(conflict(
+                "Whole-App Backup import requires an exact empty disabled Product",
+            ));
+        }
+        let library_revision: i64 = sqlx::query_scalar(
+            "SELECT revision FROM miniapp_library_state WHERE owner_user_id = ?",
+        )
+        .bind(&params.owner_user_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if library_revision != params.expected_library_revision {
+            return Err(conflict(
+                "Whole-App Backup import lost its exact Library revision",
+            ));
+        }
+        let project = fetch_project(
+            &mut tx,
+            &params.owner_user_id,
+            &params.miniapp_id,
+            &params.project_id,
+        )
+        .await?;
+        if project.project_revision != params.expected_project_revision {
+            return Err(conflict(
+                "Whole-App Backup import lost its exact Project revision",
+            ));
+        }
+        let operation =
+            fetch_miniapp_operation_in_tx(&mut tx, &params.miniapp_id, &params.operation_id)
+                .await?
+                .ok_or_else(|| {
+                    DbError::NotFound(format!(
+                        "MiniApp Backup import operation {}",
+                        params.operation_id
+                    ))
+                })?;
+        if operation.kind != "import"
+            || operation.state != ProductOperationState::Running.as_str()
+            || operation.progress_percent.is_none()
+            || operation.last_error_code.is_some()
+            || operation.finished_at_ms.is_some()
+            || params.finished_at_ms < operation.started_at_ms
+        {
+            return Err(conflict(
+                "Whole-App Backup import lost its exact running Operation",
+            ));
+        }
+
+        let mut persisted = Vec::with_capacity(params.releases.len());
+        for item in &params.releases {
+            let artifact_payload = validate_artifact(&item.artifact)?;
+            validate_product_artifact_contract(&product.kind, &artifact_payload)?;
+            let artifact = persist_or_reuse_artifact(&mut tx, &item.artifact).await?;
+            let mut release = item.release.clone();
+            release.artifact_id = artifact.artifact_id.clone();
+            release.manifest_digest = artifact.manifest_digest.clone();
+            if item.release.artifact_id != artifact.artifact_id {
+                release.release_record_json = rewrite_release_record_artifact_id(
+                    &release.release_record_json,
+                    &artifact.artifact_id,
+                )?;
+            }
+            let persisted_payload = validate_artifact(&artifact)?;
+            validate_release(&release, &persisted_payload)?;
+            match release.source_kind.as_str() {
+                "managed"
+                    if release.project_id.as_deref() == Some(params.project_id.as_str())
+                        && release.source_snapshot_digest.is_some()
+                        && release.dependency_lock_digest.is_some()
+                        && release.build_profile_version.as_deref()
+                            == Some(MINIAPP_RELEASE_PROFILE_VERSION)
+                        && release.build_generation.is_some_and(|value| value > 0) => {}
+                "runtime_only"
+                    if release.project_id.is_none()
+                        && release.source_snapshot_digest.is_none()
+                        && release.dependency_lock_digest.is_none()
+                        && release.build_profile_version.is_none()
+                        && release.build_generation.is_none() => {}
+                _ => {
+                    return Err(conflict(
+                        "Whole-App Backup Release lineage does not bind the target Project",
+                    ));
+                }
+            }
+            if release.created_at < operation.started_at_ms
+                || release.created_at > params.finished_at_ms
+            {
+                return Err(conflict(
+                    "Whole-App Backup Release timestamp is outside Import operation",
+                ));
+            }
+            sqlx::query(
+                "INSERT INTO miniapp_releases
+                 (release_id, miniapp_id, owner_user_id, artifact_id,
+                  artifact_digest, manifest_digest, release_digest, origin_kind,
+                  origin_operation_id, source_kind, project_id, source_snapshot_digest,
+                  dependency_lock_digest, build_profile_version, build_generation,
+                  release_record_json, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, 'import', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&release.release_id)
+            .bind(&release.miniapp_id)
+            .bind(&release.owner_user_id)
+            .bind(&release.artifact_id)
+            .bind(&release.artifact_digest)
+            .bind(&release.manifest_digest)
+            .bind(&release.release_digest)
+            .bind(&release.origin_operation_id)
+            .bind(&release.source_kind)
+            .bind(&release.project_id)
+            .bind(&release.source_snapshot_digest)
+            .bind(&release.dependency_lock_digest)
+            .bind(&release.build_profile_version)
+            .bind(release.build_generation)
+            .bind(&release.release_record_json)
+            .bind(release.created_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(query_error)?;
+            persisted.push((item.slot, release));
+        }
+        for row in &params.kv {
+            sqlx::query(
+                "INSERT INTO miniapp_kv (
+                    miniapp_id, owner_user_id, namespace, key, value_json,
+                    revision, key_generation, is_tombstone, created_at, updated_at
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&row.miniapp_id)
+            .bind(&row.owner_user_id)
+            .bind(&row.namespace)
+            .bind(&row.key)
+            .bind(&row.value_json)
+            .bind(row.revision)
+            .bind(row.key_generation)
+            .bind(row.is_tombstone)
+            .bind(row.created_at)
+            .bind(row.updated_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(query_error)?;
+        }
+        let pointer = |slot: MiniAppM1BackupReleaseSlot| {
+            persisted
+                .iter()
+                .find(|(candidate, _)| *candidate == slot)
+                .map(|(_, release)| (release.release_id.clone(), release.release_digest.clone()))
+        };
+        let ready = pointer(MiniAppM1BackupReleaseSlot::Ready);
+        let active = pointer(MiniAppM1BackupReleaseSlot::Active);
+        let previous = pointer(MiniAppM1BackupReleaseSlot::Previous);
+        let changed = sqlx::query(
+            "UPDATE miniapp_products
+             SET product_revision = product_revision + 1,
+                 pointer_revision = pointer_revision + 1,
+                 active_release_epoch = ?,
+                 ready_release_id = ?, ready_release_digest = ?,
+                 active_release_id = ?, active_release_digest = ?,
+                 previous_release_id = ?, previous_release_digest = ?,
+                 materialized_catalog_digest = ?, updated_at = ?
+             WHERE owner_user_id = ? AND miniapp_id = ?
+               AND lifecycle = 'disabled'
+               AND product_revision = ? AND pointer_revision = ?
+               AND ready_release_id IS NULL AND active_release_id IS NULL
+               AND previous_release_id IS NULL AND updated_at <= ?",
+        )
+        .bind(if active.is_some() { 1_i64 } else { 0_i64 })
+        .bind(ready.as_ref().map(|value| &value.0))
+        .bind(ready.as_ref().map(|value| &value.1))
+        .bind(active.as_ref().map(|value| &value.0))
+        .bind(active.as_ref().map(|value| &value.1))
+        .bind(previous.as_ref().map(|value| &value.0))
+        .bind(previous.as_ref().map(|value| &value.1))
+        .bind(&params.target_catalog_digest)
+        .bind(params.finished_at_ms)
+        .bind(&params.owner_user_id)
+        .bind(&params.miniapp_id)
+        .bind(params.expected_product_revision)
+        .bind(params.expected_pointer_revision)
+        .bind(params.finished_at_ms)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        if changed.rows_affected() != 1 {
+            return Err(conflict(
+                "Whole-App Backup import Product/pointer CAS failed",
+            ));
+        }
+        let library_updated = sqlx::query(
+            "UPDATE miniapp_library_state
+             SET revision = revision + 1, updated_at = ?
+             WHERE owner_user_id = ? AND revision = ? AND updated_at <= ?",
+        )
+        .bind(params.finished_at_ms)
+        .bind(&params.owner_user_id)
+        .bind(params.expected_library_revision)
+        .bind(params.finished_at_ms)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        if library_updated.rows_affected() != 1 {
+            return Err(conflict(
+                "Whole-App Backup import Library CAS failed",
+            ));
+        }
+        let operation_updated = sqlx::query(
+            "UPDATE product_operations
+             SET state = 'succeeded', progress_percent = 100,
+                 last_error_code = NULL, bounded_log_tail_json = ?,
+                 finished_at_ms = ?
+             WHERE operation_id = ? AND kind = 'import'
+               AND owner_kind = 'miniapp' AND owner_id = ? AND state = 'running'",
+        )
+        .bind(serialize_product_operation_log_tail(&[
+            "MiniApp Whole-App Backup import committed".to_owned(),
+        ])?)
+        .bind(params.finished_at_ms)
+        .bind(&params.operation_id)
+        .bind(&params.miniapp_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        if operation_updated.rows_affected() != 1 {
+            return Err(conflict(
+                "Whole-App Backup import Operation completion CAS failed",
+            ));
+        }
+        let snapshot =
+            fetch_snapshot_in_tx(&mut tx, &params.owner_user_id, &params.miniapp_id)
+                .await?
+                .ok_or_else(|| DbError::Init("Whole-App Backup import lost Product".into()))?;
+        tx.commit().await?;
+        Ok(snapshot)
     }
 
     async fn finish_export_operation(

@@ -26,14 +26,16 @@ use rusqlite::{
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use tokio::sync::{Mutex, RwLock};
+use uuid::Uuid;
 
 use crate::{
-    MiniAppCallCancellation, MiniAppDatabaseExecuteResult, MiniAppDatabaseQueryResult,
-    MiniAppDatabaseStatement, MiniAppFilesPort, MiniAppHostKvPort, MiniAppMigrationLedger,
-    MiniAppPlatformError, MiniAppPlatformResult, MiniAppPrivateDatabasePort,
+    MiniAppBackupFile, MiniAppBackupStorage, MiniAppCallCancellation,
+    MiniAppDatabaseExecuteResult, MiniAppDatabaseQueryResult, MiniAppDatabaseStatement,
+    MiniAppFilesPort, MiniAppHostKvPort, MiniAppMigrationLedger, MiniAppPlatformError,
+    MiniAppPlatformResult, MiniAppPrivateDatabasePort,
     MiniAppServiceStoragePort, MiniAppServiceStorageRequest, MiniAppServiceStorageResolution,
     MiniAppServiceTestKvSnapshotEntry, MiniAppServiceTestStorageResolution,
-    service_test_kv_digest, validate_service_test_id,
+    rebind_migration_ledger_for_target, service_test_kv_digest, validate_service_test_id,
 };
 use crate::MiniAppMigrationLedgerEntry;
 
@@ -1035,6 +1037,214 @@ impl MiniAppServiceStoragePort for SqliteMiniAppManagedStorage {
         });
         Ok(())
     }
+
+    async fn export_backup_storage(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &MiniAppId,
+        uses_files: bool,
+        uses_private_database: bool,
+    ) -> MiniAppPlatformResult<MiniAppBackupStorage> {
+        self.ensure_product_owner(owner_user_id, miniapp_id).await?;
+        let resolution = self
+            .resolve_service_storage(
+                owner_user_id,
+                miniapp_id,
+                uses_files,
+                uses_private_database,
+            )
+            .await?;
+        let registration = self
+            .registration(owner_user_id, miniapp_id, &resolution.descriptor)
+            .await?;
+        let _guard = registration.database_lock.lock().await;
+        let files = match resolution.descriptor.files_dir.as_ref() {
+            Some(files) => read_backup_files(
+                Path::new(&files.absolute_path),
+                self.root(),
+            )?,
+            None => Vec::new(),
+        };
+        let (private_database, migration_ledger) =
+            if let Some(database) = resolution.descriptor.private_database.as_ref() {
+                let source_path = registration
+                    .database_path
+                    .clone()
+                    .ok_or(MiniAppPlatformError::UnknownStorageHandle)?;
+                let temporary_root = ensure_managed_directory(
+                    self.root(),
+                    &[
+                        SERVICE_TESTS_DIRECTORY,
+                        owner_user_id,
+                        miniapp_id.as_ref(),
+                    ],
+                )?;
+                let temporary_path =
+                    temporary_root.join(format!(".backup-{}.sqlite", Uuid::now_v7()));
+                let miniapp_id_owned = miniapp_id.clone();
+                let handle_id = database.handle_id.clone();
+                let temporary_path_for_task = temporary_path.clone();
+                let ledger = tokio::task::spawn_blocking(move || {
+                    let (_, ledger) = create_private_database_snapshot(
+                        &source_path,
+                        &temporary_path_for_task,
+                        &miniapp_id_owned,
+                        &handle_id,
+                    )?;
+                    Ok::<_, MiniAppPlatformError>(ledger)
+                })
+                .await
+                .map_err(|error| MiniAppPlatformError::Database(error.to_string()))??;
+                let bytes = fs::read(&temporary_path).map_err(|error| {
+                    MiniAppPlatformError::Runtime(format!(
+                        "cannot read MiniApp backup database snapshot: {error}"
+                    ))
+                })?;
+                remove_private_database_files(self.root(), &temporary_path)?;
+                (Some(bytes), Some(ledger))
+            } else {
+                (None, None)
+            };
+        Ok(MiniAppBackupStorage {
+            kv: Vec::new(),
+            files,
+            private_database,
+            migration_ledger,
+        })
+    }
+
+    async fn import_backup_storage(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &MiniAppId,
+        storage: MiniAppBackupStorage,
+        uses_files: bool,
+        uses_private_database: bool,
+    ) -> MiniAppPlatformResult<()> {
+        self.ensure_product_owner(owner_user_id, miniapp_id).await?;
+        if !storage.kv.is_empty() {
+            return Err(MiniAppPlatformError::InvalidState(
+                "MiniApp backup KV must be restored by the DB repository".into(),
+            ));
+        }
+        if uses_files {
+            let resolution = self
+                .resolve_service_storage(owner_user_id, miniapp_id, true, uses_private_database)
+                .await?;
+            let files_dir = resolution
+                .descriptor
+                .files_dir
+                .as_ref()
+                .ok_or(MiniAppPlatformError::UnknownStorageHandle)?;
+            let root = PathBuf::from(&files_dir.absolute_path);
+            restore_backup_files_atomically(&root, &storage.files, self.root())?;
+        } else if !storage.files.is_empty() {
+            return Err(MiniAppPlatformError::InvalidState(
+                "backup contains Files for a Service without Files capability".into(),
+            ));
+        }
+
+        if uses_private_database {
+            let resolution = self
+                .resolve_service_storage(owner_user_id, miniapp_id, uses_files, true)
+                .await?;
+            let database = resolution
+                .descriptor
+                .private_database
+                .as_ref()
+                .ok_or(MiniAppPlatformError::UnknownStorageHandle)?;
+            let bytes = storage
+                .private_database
+                .as_deref()
+                .ok_or_else(|| {
+                    MiniAppPlatformError::InvalidState(
+                        "backup is missing the required Private Database".into(),
+                    )
+                })?;
+            let ledger = storage.migration_ledger.as_ref().ok_or_else(|| {
+                MiniAppPlatformError::InvalidState(
+                    "backup is missing the required migration ledger".into(),
+                )
+            })?;
+            ledger.validate()?;
+            let registration = self
+                .registration(owner_user_id, miniapp_id, &resolution.descriptor)
+                .await?;
+            let target_path = registration
+                .database_path
+                .clone()
+                .ok_or(MiniAppPlatformError::UnknownStorageHandle)?;
+            let parent = target_path.parent().ok_or_else(|| {
+                MiniAppPlatformError::InvalidState(
+                    "MiniApp backup database target has no parent".into(),
+                )
+            })?;
+            let temporary_path = parent.join(format!(".restore-{}.sqlite", Uuid::now_v7()));
+            write_new_regular_file(&temporary_path, bytes)?;
+            let lock = Arc::clone(&registration.database_lock);
+            let miniapp_id_owned = miniapp_id.clone();
+            let handle_id = database.handle_id.clone();
+            let target_path_owned = target_path.clone();
+            let storage_root = self.root().to_path_buf();
+            let expected_ledger = rebind_migration_ledger_for_target(
+                ledger,
+                miniapp_id.clone(),
+                handle_id.clone(),
+            )?;
+            let result = tokio::task::spawn_blocking(move || {
+                let _guard = lock.blocking_lock();
+                let (mut connection, internal_mode) =
+                    open_private_database(&temporary_path)?;
+                with_authorizer_mode(&internal_mode, true, true, true, || {
+                    let transaction = connection.transaction().map_err(database_error)?;
+                    for entry in &expected_ledger.entries {
+                        let release_json =
+                            serde_json::to_string(&entry.release).map_err(database_error)?;
+                        let changed = transaction
+                            .execute(
+                                &format!(
+                                    "UPDATE {LEDGER_TABLE}
+                                     SET release_json = ?1
+                                     WHERE ordinal = ?2"
+                                ),
+                                rusqlite::params![
+                                    release_json,
+                                    i64::try_from(entry.ordinal).map_err(|_| {
+                                        MiniAppPlatformError::Database(
+                                            "migration ordinal overflow".into(),
+                                        )
+                                    })?,
+                                ],
+                            )
+                            .map_err(database_error)?;
+                        if changed != 1 {
+                            return Err(MiniAppPlatformError::StorageConflict);
+                        }
+                    }
+                    transaction.commit().map_err(database_error)?;
+                    let observed = read_ledger(&connection, &miniapp_id_owned, &handle_id)?;
+                    if observed != expected_ledger {
+                        return Err(MiniAppPlatformError::StorageConflict);
+                    }
+                    Ok(())
+                })?;
+                drop(connection);
+                replace_private_database_atomically(
+                    &storage_root,
+                    &temporary_path,
+                    &target_path_owned,
+                )
+            })
+            .await
+            .map_err(|error| MiniAppPlatformError::Database(error.to_string()))?;
+            result?;
+        } else if storage.private_database.is_some() || storage.migration_ledger.is_some() {
+            return Err(MiniAppPlatformError::InvalidState(
+                "backup contains a Private Database for a Service without that capability".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -1500,6 +1710,238 @@ fn ensure_database_path(path: &Path) -> MiniAppPlatformResult<()> {
     Ok(())
 }
 
+fn write_new_regular_file(path: &Path, bytes: &[u8]) -> MiniAppPlatformResult<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)
+        .map_err(|error| {
+            MiniAppPlatformError::Runtime(format!(
+                "cannot create MiniApp storage staging file {}: {error}",
+                path.display()
+            ))
+        })?;
+    use std::io::Write;
+    file.write_all(bytes).map_err(|error| {
+        MiniAppPlatformError::Runtime(format!(
+            "cannot write MiniApp storage staging file {}: {error}",
+            path.display()
+        ))
+    })?;
+    file.sync_all().map_err(|error| {
+        MiniAppPlatformError::Runtime(format!(
+            "cannot sync MiniApp storage staging file {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+fn read_backup_files(
+    root: &Path,
+    managed_root: &Path,
+) -> MiniAppPlatformResult<Vec<MiniAppBackupFile>> {
+    let canonical_root = fs::canonicalize(root).map_err(|error| {
+        MiniAppPlatformError::Runtime(format!(
+            "cannot canonicalize MiniApp backup Files root {}: {error}",
+            root.display()
+        ))
+    })?;
+    ensure_within(managed_root, &canonical_root)?;
+    let mut files = Vec::new();
+    collect_backup_files(&canonical_root, &canonical_root, &mut files)?;
+    files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    Ok(files)
+}
+
+fn collect_backup_files(
+    root: &Path,
+    current: &Path,
+    output: &mut Vec<MiniAppBackupFile>,
+) -> MiniAppPlatformResult<()> {
+    for entry in fs::read_dir(current).map_err(|error| {
+        MiniAppPlatformError::Runtime(format!(
+            "cannot read MiniApp backup Files directory {}: {error}",
+            current.display()
+        ))
+    })? {
+        let entry = entry.map_err(|error| {
+            MiniAppPlatformError::Runtime(format!(
+                "cannot inspect MiniApp backup Files entry: {error}"
+            ))
+        })?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            MiniAppPlatformError::Runtime(format!(
+                "cannot inspect MiniApp backup Files entry {}: {error}",
+                path.display()
+            ))
+        })?;
+        if is_reparse_or_symlink(&metadata) {
+            return Err(MiniAppPlatformError::InvalidState(
+                "MiniApp backup Files cannot contain symlinks or reparse points".into(),
+            ));
+        }
+        let relative = path.strip_prefix(root).map_err(|_| {
+            MiniAppPlatformError::InvalidState(
+                "MiniApp backup Files entry escaped its root".into(),
+            )
+        })?;
+        let relative = relative
+            .components()
+            .map(|component| match component {
+                std::path::Component::Normal(value) => value.to_str().ok_or_else(|| {
+                    MiniAppPlatformError::InvalidState(
+                        "MiniApp backup Files path must be UTF-8".into(),
+                    )
+                }),
+                _ => Err(MiniAppPlatformError::InvalidState(
+                    "MiniApp backup Files path contains a non-normal component".into(),
+                )),
+            })
+            .collect::<MiniAppPlatformResult<Vec<_>>>()?
+            .join("/");
+        if metadata.is_dir() {
+            collect_backup_files(root, &path, output)?;
+        } else if metadata.is_file() {
+            output.push(MiniAppBackupFile::new(
+                relative,
+                fs::read(&path).map_err(|error| {
+                    MiniAppPlatformError::Runtime(format!(
+                        "cannot read MiniApp backup File {}: {error}",
+                        path.display()
+                    ))
+                })?,
+            ));
+        } else {
+            return Err(MiniAppPlatformError::InvalidState(
+                "MiniApp backup Files cannot contain special entries".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn write_backup_files(
+    root: &Path,
+    files: &[MiniAppBackupFile],
+    managed_root: &Path,
+) -> MiniAppPlatformResult<()> {
+    let canonical_root = fs::canonicalize(root).map_err(|error| {
+        MiniAppPlatformError::Runtime(format!(
+            "cannot canonicalize MiniApp restore Files root {}: {error}",
+            root.display()
+        ))
+    })?;
+    ensure_within(managed_root, &canonical_root)?;
+    let mut seen = BTreeSet::new();
+    for file in files {
+        if file.relative_path.is_empty()
+            || file.relative_path.contains('\\')
+            || file.relative_path.contains(':')
+            || file.relative_path.split('/').any(|part| {
+                part.is_empty() || part == "." || part == ".." || part.ends_with(['.', ' '])
+            })
+            || !seen.insert(file.relative_path.to_ascii_lowercase())
+        {
+            return Err(MiniAppPlatformError::InvalidState(
+                "MiniApp backup Files contain an invalid or duplicate path".into(),
+            ));
+        }
+        let target = file
+            .relative_path
+            .split('/')
+            .fold(canonical_root.clone(), |path, component| path.join(component));
+        if !target.starts_with(&canonical_root) {
+            return Err(MiniAppPlatformError::InvalidState(
+                "MiniApp backup File escaped its target root".into(),
+            ));
+        }
+        let parent = target.parent().ok_or_else(|| {
+            MiniAppPlatformError::InvalidState(
+                "MiniApp backup File has no parent directory".into(),
+            )
+        })?;
+        ensure_directory(parent)?;
+        write_new_regular_file(&target, &file.bytes)?;
+    }
+    Ok(())
+}
+
+fn restore_backup_files_atomically(
+    root: &Path,
+    files: &[MiniAppBackupFile],
+    managed_root: &Path,
+) -> MiniAppPlatformResult<()> {
+    let canonical_root = fs::canonicalize(root).map_err(|error| {
+        MiniAppPlatformError::Runtime(format!(
+            "cannot canonicalize MiniApp restore Files root {}: {error}",
+            root.display()
+        ))
+    })?;
+    ensure_within(managed_root, &canonical_root)?;
+    let parent = canonical_root.parent().ok_or_else(|| {
+        MiniAppPlatformError::InvalidState(
+            "MiniApp restore Files root has no parent directory".into(),
+        )
+    })?;
+    ensure_directory(parent)?;
+    let staging = parent.join(format!(".restore-files-{}", Uuid::now_v7()));
+    fs::create_dir(&staging).map_err(|error| {
+        MiniAppPlatformError::Runtime(format!(
+            "cannot create MiniApp restore Files staging directory {}: {error}",
+            staging.display()
+        ))
+    })?;
+
+    let result = (|| {
+        write_backup_files(&staging, files, managed_root)?;
+        let mut expected = files.to_vec();
+        expected.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+        let mut observed = read_backup_files(&staging, managed_root)?;
+        observed.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+        if observed != expected {
+            return Err(MiniAppPlatformError::StorageConflict);
+        }
+        sync_storage_tree(&staging)?;
+
+        let quarantine = parent.join(format!(".restore-files-old-{}", Uuid::now_v7()));
+        fs::rename(&canonical_root, &quarantine).map_err(|error| {
+            MiniAppPlatformError::Runtime(format!(
+                "cannot quarantine existing MiniApp Files directory: {error}"
+            ))
+        })?;
+        if let Err(error) = fs::rename(&staging, &canonical_root) {
+            let rollback = fs::rename(&quarantine, &canonical_root);
+            if rollback.is_err() {
+                return Err(MiniAppPlatformError::Runtime(format!(
+                    "cannot install MiniApp Files restore ({error}); rollback also failed"
+                )));
+            }
+            return Err(MiniAppPlatformError::Runtime(format!(
+                "cannot install MiniApp Files restore: {error}"
+            )));
+        }
+        let _ = sync_directory_if_supported(parent);
+        if validate_removal_tree(&quarantine).is_ok() {
+            let _ = fs::remove_dir_all(&quarantine);
+        }
+        Ok(())
+    })();
+
+    if result.is_err() {
+        if fs::symlink_metadata(&staging).is_ok() {
+            let _ = validate_removal_tree(&staging).and_then(|()| {
+                fs::remove_dir_all(&staging).map_err(|error| {
+                    MiniAppPlatformError::Runtime(format!(
+                        "cannot clean MiniApp Files restore staging: {error}"
+                    ))
+                })
+            });
+        }
+    }
+    result
+}
+
 fn remove_private_database_files(root: &Path, path: &Path) -> MiniAppPlatformResult<()> {
     let parent = path.parent().ok_or_else(|| {
         MiniAppPlatformError::InvalidState(
@@ -1515,7 +1957,7 @@ fn remove_private_database_files(root: &Path, path: &Path) -> MiniAppPlatformRes
         )
     })?;
     let base_path = canonical_parent.join(file_name);
-    for suffix in ["", "-wal", "-shm"] {
+    for suffix in ["", "-wal", "-shm", "-journal"] {
         let target = if suffix.is_empty() {
             base_path.clone()
         } else {
@@ -1554,6 +1996,186 @@ fn remove_private_database_files(root: &Path, path: &Path) -> MiniAppPlatformRes
         }
     }
     Ok(())
+}
+
+fn replace_private_database_atomically(
+    managed_root: &Path,
+    temporary_path: &Path,
+    target_path: &Path,
+) -> MiniAppPlatformResult<()> {
+    let parent = target_path.parent().ok_or_else(|| {
+        MiniAppPlatformError::InvalidState(
+            "MiniApp private database target has no parent".into(),
+        )
+    })?;
+    let canonical_parent = canonical_existing_directory_chain(managed_root, parent)?
+        .ok_or_else(|| {
+            MiniAppPlatformError::InvalidState(
+                "MiniApp private database target parent is missing".into(),
+            )
+        })?;
+    ensure_database_path(temporary_path)?;
+    let target_name = target_path.file_name().ok_or_else(|| {
+        MiniAppPlatformError::InvalidState(
+            "MiniApp private database target has no file name".into(),
+        )
+    })?;
+    let target = canonical_parent.join(target_name);
+    let quarantine_base =
+        canonical_parent.join(format!(".restore-database-old-{}", Uuid::now_v7()));
+    let mut moved = Vec::new();
+
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let original = database_companion_path(&target, suffix);
+        let metadata = match fs::symlink_metadata(&original) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(MiniAppPlatformError::Runtime(format!(
+                    "cannot inspect MiniApp private database file {}: {error}",
+                    original.display()
+                )));
+            }
+        };
+        if is_reparse_or_symlink(&metadata) || !metadata.is_file() {
+            return Err(MiniAppPlatformError::InvalidState(format!(
+                "MiniApp private database replacement target is not a regular file: {}",
+                original.display()
+            )));
+        }
+        let quarantine = database_companion_path(&quarantine_base, suffix);
+        if let Err(error) = fs::rename(&original, &quarantine) {
+            for (rollback_original, rollback_quarantine) in moved.iter().rev() {
+                let _ = fs::rename(rollback_quarantine, rollback_original);
+            }
+            return Err(MiniAppPlatformError::Runtime(format!(
+                "cannot quarantine MiniApp private database file {}: {error}",
+                original.display()
+            )));
+        }
+        moved.push((original, quarantine));
+    }
+
+    if let Err(error) = fs::rename(temporary_path, &target) {
+        let mut rollback_failed = false;
+        for (original, quarantine) in moved.iter().rev() {
+            if fs::rename(quarantine, original).is_err() {
+                rollback_failed = true;
+            }
+        }
+        let _ = remove_private_database_files(managed_root, temporary_path);
+        if rollback_failed {
+            return Err(MiniAppPlatformError::Runtime(format!(
+                "cannot install MiniApp private database restore ({error}); rollback also failed"
+            )));
+        }
+        return Err(MiniAppPlatformError::Runtime(format!(
+            "cannot install MiniApp private database restore: {error}"
+        )));
+    }
+
+    let _ = sync_directory_if_supported(&canonical_parent);
+    for (_, quarantine) in moved {
+        let _ = fs::remove_file(quarantine);
+    }
+    Ok(())
+}
+
+fn database_companion_path(base: &Path, suffix: &str) -> PathBuf {
+    if suffix.is_empty() {
+        base.to_path_buf()
+    } else {
+        let mut value = base.as_os_str().to_os_string();
+        value.push(suffix);
+        PathBuf::from(value)
+    }
+}
+
+fn sync_storage_tree(root: &Path) -> MiniAppPlatformResult<()> {
+    let mut directories = Vec::new();
+    collect_storage_directories(root, &mut directories)?;
+    directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    for directory in directories {
+        sync_directory_if_supported(&directory)?;
+    }
+    Ok(())
+}
+
+fn collect_storage_directories(
+    root: &Path,
+    directories: &mut Vec<PathBuf>,
+) -> MiniAppPlatformResult<()> {
+    let metadata = fs::symlink_metadata(root).map_err(|error| {
+        MiniAppPlatformError::Runtime(format!(
+            "cannot inspect MiniApp storage staging directory {}: {error}",
+            root.display()
+        ))
+    })?;
+    if is_reparse_or_symlink(&metadata) || !metadata.is_dir() {
+        return Err(MiniAppPlatformError::InvalidState(format!(
+            "MiniApp storage staging path is not a regular directory: {}",
+            root.display()
+        )));
+    }
+    directories.push(root.to_path_buf());
+    for entry in fs::read_dir(root).map_err(|error| {
+        MiniAppPlatformError::Runtime(format!(
+            "cannot read MiniApp storage staging directory {}: {error}",
+            root.display()
+        ))
+    })? {
+        let entry = entry.map_err(|error| {
+            MiniAppPlatformError::Runtime(format!(
+                "cannot inspect MiniApp storage staging entry: {error}"
+            ))
+        })?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            MiniAppPlatformError::Runtime(format!(
+                "cannot inspect MiniApp storage staging entry {}: {error}",
+                path.display()
+            ))
+        })?;
+        if is_reparse_or_symlink(&metadata) {
+            return Err(MiniAppPlatformError::InvalidState(
+                "MiniApp storage staging cannot contain symlinks or reparse points".into(),
+            ));
+        }
+        if metadata.is_dir() {
+            collect_storage_directories(&path, directories)?;
+        } else if !metadata.is_file() {
+            return Err(MiniAppPlatformError::InvalidState(
+                "MiniApp storage staging cannot contain special files".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn sync_directory_if_supported(path: &Path) -> MiniAppPlatformResult<()> {
+    #[cfg(unix)]
+    {
+        match fs::File::open(path).and_then(|file| file.sync_all()) {
+            Ok(()) => Ok(()),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::InvalidInput | std::io::ErrorKind::Unsupported
+                ) =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(MiniAppPlatformError::Runtime(format!(
+                "cannot sync MiniApp storage directory {}: {error}",
+                path.display()
+            ))),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
 }
 
 fn remove_managed_directory(root: &Path, path: &Path) -> MiniAppPlatformResult<()> {

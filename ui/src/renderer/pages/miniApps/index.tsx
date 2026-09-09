@@ -142,7 +142,7 @@ const MiniAppsListPage: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [createVisible, setCreateVisible] = useState(false);
   const [transferMode, setTransferMode] = useState<
-    'import_share' | 'import_artifact' | null
+    'import_share' | 'import_artifact' | 'import_backup' | null
   >(null);
 
   const refresh = useCallback(async () => {
@@ -196,7 +196,9 @@ const MiniAppsListPage: React.FC = () => {
         t(
           completedMode === 'import_artifact'
             ? 'miniApps.messages.artifactImported'
-            : 'miniApps.messages.shareImported'
+            : completedMode === 'import_backup'
+              ? 'miniApps.messages.backupImported'
+              : 'miniApps.messages.shareImported'
         )
       );
       navigate(`/mini-apps/${workshop.miniapp.miniapp_id}`);
@@ -236,6 +238,14 @@ const MiniAppsListPage: React.FC = () => {
                 onClick={() => setTransferMode('import_artifact')}
               >
                 {t('miniApps.transfer.importArtifact.submit')}
+              </Button>
+              <Button
+                size='small'
+                icon={<Download theme='outline' size='14' />}
+                disabled={loading || Boolean(failure)}
+                onClick={() => setTransferMode('import_backup')}
+              >
+                {t('miniApps.transfer.importBackup.submit')}
               </Button>
               <Button
                 size='small'

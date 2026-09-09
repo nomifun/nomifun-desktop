@@ -28,6 +28,7 @@
     "deletePermanently": "Delete Permanently",
     "retryDelete": "Retry Delete",
     "share": "Share",
+    "exportBackup": "Export backup",
     "openSurface": "Open Surface",
     "reloadSurface": "Reload Surface",
     "closeSurface": "Close Surface",
@@ -132,12 +133,28 @@
       "sourcePlaceholder": "Choose the prebuilt package directory",
       "layoutHint": "The selected directory must contain release/artifact.json and its exact Release files."
     },
+    "exportBackup": {
+      "title": "Export Whole-App Backup",
+      "intro": "Export a disabled MiniApp with its Source, retained Releases, non-secret configuration, KV, Files, and Private Database. Credential bindings are never included.",
+      "submit": "Export Backup",
+      "disabledOnly": "Only a disabled, quiescent MiniApp can be backed up. The backup imports as a new identity and requires Credential rebinding.",
+      "destinationHint": "NomiFun creates this backup directory atomically and never overwrites an existing path."
+    },
+    "importBackup": {
+      "title": "Import Whole-App Backup",
+      "intro": "Import the product and its managed data as a new disabled MiniApp identity. Credential values and local bindings are not restored.",
+      "submit": "Import Backup",
+      "sourcePlaceholder": "Choose the Whole-App Backup directory",
+      "layoutHint": "The selected directory must contain metadata.json and the complete backup layout.",
+      "defaultName": "Imported MiniApp"
+    },
     "import": {
       "sourceDirectory": "Source directory",
       "displayName": "New MiniApp name",
       "displayNamePlaceholder": "Name for the imported MiniApp",
       "bundleDigest": "Bundle digest",
       "artifactDigest": "Release artifact digest",
+      "backupMetadataDigest": "Backup metadata digest",
       "backendAuthority": "This preview reads only display metadata and expected digests. The backend remains the sole authority for schema, inventory, digest, lineage, and safety validation."
     },
     "errors": {
@@ -383,8 +400,10 @@
     "trashed": "MiniApp moved to Trash",
     "restored": "MiniApp restored in Disabled state",
     "shareExported": "Share Bundle exported to {{path}}",
+    "backupExported": "Whole-App Backup exported to {{path}}",
     "shareImported": "Share Bundle imported as a new disabled MiniApp",
     "artifactImported": "Prebuilt Artifact imported as a new disabled runtime-only MiniApp",
+    "backupImported": "Whole-App Backup imported as a new disabled MiniApp",
     "deletedPermanently": "MiniApp permanently deleted",
     "deleteRetryCompleted": "Permanent deletion completed after retry"
   }

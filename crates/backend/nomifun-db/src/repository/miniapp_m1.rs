@@ -127,6 +127,67 @@ pub struct StartMiniAppM1ExportOperationParams {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StartMiniAppM1BackupExportParams {
+    pub owner_user_id: String,
+    pub miniapp_id: String,
+    pub operation_id: String,
+    pub expected_product_revision: i64,
+    pub expected_pointer_revision: i64,
+    pub expected_config_revision: i64,
+    pub expected_credential_bindings_revision: i64,
+    pub started_at_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MiniAppM1BackupExportSnapshot {
+    pub snapshot: MiniAppM1Snapshot,
+    pub releases: Vec<MiniAppReleaseRow>,
+    pub artifacts: Vec<MiniAppReleaseArtifactRow>,
+    pub kv: Vec<MiniAppKvRow>,
+    pub operation: ProductOperationRow,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MiniAppM1BackupReleaseSlot {
+    Ready,
+    Active,
+    Previous,
+}
+
+impl MiniAppM1BackupReleaseSlot {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Active => "active",
+            Self::Previous => "previous",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MiniAppM1BackupImportRelease {
+    pub slot: MiniAppM1BackupReleaseSlot,
+    pub artifact: MiniAppReleaseArtifactRow,
+    pub release: MiniAppReleaseRow,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FinishMiniAppM1BackupImportParams {
+    pub owner_user_id: String,
+    pub miniapp_id: String,
+    pub project_id: String,
+    pub operation_id: String,
+    pub expected_library_revision: i64,
+    pub expected_product_revision: i64,
+    pub expected_pointer_revision: i64,
+    pub expected_project_revision: i64,
+    pub releases: Vec<MiniAppM1BackupImportRelease>,
+    pub kv: Vec<MiniAppKvRow>,
+    pub target_catalog_digest: String,
+    pub finished_at_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FinishMiniAppM1ExportOperationParams {
     pub owner_user_id: String,
     pub miniapp_id: String,
@@ -522,6 +583,16 @@ pub trait IMiniAppM1Repository: Send + Sync {
         &self,
         params: &StartMiniAppM1ExportOperationParams,
     ) -> Result<ProductOperationRow, DbError>;
+
+    async fn start_backup_export(
+        &self,
+        params: &StartMiniAppM1BackupExportParams,
+    ) -> Result<MiniAppM1BackupExportSnapshot, DbError>;
+
+    async fn finish_backup_import(
+        &self,
+        params: &FinishMiniAppM1BackupImportParams,
+    ) -> Result<MiniAppM1Snapshot, DbError>;
 
     async fn finish_export_operation(
         &self,
@@ -996,17 +1067,9 @@ pub(crate) fn validate_product_artifact_contract(
     match product_kind {
         "ui_only" if artifact.manifest.payload.is_ui_only() => Ok(()),
         "service" => {
-            let Some(service) = artifact.manifest.payload.service.as_ref() else {
+            if artifact.manifest.payload.service.is_none() {
                 return Err(conflict(
                     "Service MiniApp Release must declare service/main.mjs",
-                ));
-            };
-            if service.uses_files
-                || service.uses_private_database
-                || !artifact.manifest.payload.migrations.is_empty()
-            {
-                return Err(conflict(
-                    "Service MiniApp Files, Private Database, and Migration capabilities are not implemented",
                 ));
             }
             Ok(())

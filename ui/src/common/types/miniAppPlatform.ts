@@ -278,6 +278,23 @@ export interface ImportMiniAppArtifactRequest {
   display_name: string;
 }
 
+export interface ExportMiniAppBackupRequest {
+  miniapp_id: MiniAppId;
+  expected_product_revision: number;
+  expected_lifecycle: 'disabled';
+  expected_pointer_revision: number;
+  expected_config_revision: number;
+  expected_credential_bindings_revision: number;
+  destination_path: string;
+}
+
+export interface ImportMiniAppBackupRequest {
+  expected_library_revision: number;
+  source_path: string;
+  expected_backup_metadata_digest: string;
+  display_name: string;
+}
+
 export interface CancelMiniAppBuildRequest {
   miniapp_id: MiniAppId;
   operation_id: string;

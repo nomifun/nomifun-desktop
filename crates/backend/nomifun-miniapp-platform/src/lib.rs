@@ -10,6 +10,7 @@
 mod dto;
 mod error;
 mod bridge;
+mod backup;
 mod model;
 mod operation;
 mod repository;
@@ -35,6 +36,7 @@ mod tests;
 pub use dto::*;
 pub use error::*;
 pub use bridge::*;
+pub use backup::*;
 pub use model::*;
 pub use operation::*;
 pub use repository::*;
