@@ -5,14 +5,14 @@ use std::path::{Path, PathBuf};
 use nomifun_agent_contracts::{
     canonical_json_bytes, digest_bytes, ArtifactEnvelope, ArtifactId, DigestHex,
     LocalizedMetadata, MiniAppResourceContract, MiniAppServiceLifecycle, StrictJsonValue,
-    MINIAPP_RELEASE_PROFILE_VERSION,
+    VersionString, MINIAPP_RELEASE_PROFILE_VERSION,
 };
 use nomifun_miniapp_platform::{
-    MiniAppReleaseArtifactIdentity, MiniAppReleaseFileBytes, MiniAppReleasePublishRequest,
-    MiniAppReleaseStore, MiniAppSourceContentKind, MiniAppSourceFileInput,
-    MiniAppSourceScope, MiniAppSourceStore, MiniAppSourceStoreError,
+    materialize_surface_entrypoint, MiniAppDependencyLockV1, MiniAppReleaseArtifactIdentity,
+    MiniAppReleaseFileBytes, MiniAppReleasePublishRequest, MiniAppReleaseStore,
+    MiniAppSourceContentKind, MiniAppSourceExactImportRequest, MiniAppSourceFileInput,
+    MiniAppSourceScope, MiniAppSourceSnapshot, MiniAppSourceStore, MiniAppSourceStoreError,
     MiniAppStaticBundleBuilder, MiniAppStaticBundleInput, MiniAppStaticServiceInput,
-    materialize_surface_entrypoint,
 };
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -43,6 +43,34 @@ fn scope() -> MiniAppSourceScope {
 
 fn digest(bytes: &[u8]) -> DigestHex {
     digest_bytes(bytes)
+}
+
+fn exact_import_request(
+    snapshot: &MiniAppSourceSnapshot,
+    scope: MiniAppSourceScope,
+    display_name: &str,
+    content_kind: MiniAppSourceContentKind,
+) -> MiniAppSourceExactImportRequest {
+    MiniAppSourceExactImportRequest {
+        scope,
+        display_name: display_name.into(),
+        content_kind,
+        dependency_lock: snapshot.dependency_lock.clone(),
+        files: snapshot
+            .files
+            .iter()
+            .map(|file| {
+                MiniAppSourceFileInput::new(
+                    file.normalized_relative_path.clone(),
+                    file.bytes.clone(),
+                )
+            })
+            .collect(),
+        expected_source_snapshot_digest: snapshot.source_snapshot_digest.clone(),
+        expected_dependency_lock_digest: snapshot.dependency_lock_digest.clone(),
+        build_generation: snapshot.project.build_generation,
+        build_profile_version: snapshot.project.build_profile_version.clone(),
+    }
 }
 
 #[test]
@@ -266,6 +294,368 @@ fn service_source_round_trips_exact_main_module_without_relaxing_ui_only_paths()
         ),
         Err(MiniAppSourceStoreError::ServiceSourceForbidden { .. })
     ));
+}
+
+#[test]
+fn source_exact_import_round_trips_ui_and_service_without_default_source() {
+    let root = TestRoot::new("source-exact-import-roundtrip");
+    let store = MiniAppSourceStore::new(root.path()).unwrap();
+
+    let ui = store
+        .create_project("owner-origin", "miniapp-ui", "project-ui", "Origin UI")
+        .unwrap();
+    let ui = store
+        .replace_source(
+            "owner-origin",
+            "miniapp-ui",
+            "project-ui",
+            &ui.source_snapshot_digest,
+            vec![
+                MiniAppSourceFileInput::new(
+                    "ui/index.html",
+                    b"<!doctype html><main id=\"imported-ui\"></main>".to_vec(),
+                ),
+                MiniAppSourceFileInput::new(
+                    "ui/app.js",
+                    b"globalThis.__exactImport = 'ui';\n".to_vec(),
+                ),
+            ],
+        )
+        .unwrap();
+    let ui_snapshot = store
+        .read_snapshot(
+            "owner-origin",
+            "miniapp-ui",
+            "project-ui",
+            &ui.source_snapshot_digest,
+        )
+        .unwrap();
+    let dependency_lock = MiniAppDependencyLockV1 {
+        format_version: VersionString::from("1.0.0"),
+        dependencies: BTreeMap::from([
+            ("nomifun-runtime".into(), "1.2.3".into()),
+            ("zod".into(), "4.0.0".into()),
+        ]),
+    };
+    let dependency_lock_bytes = dependency_lock.canonical_bytes().unwrap();
+    let dependency_lock_digest = dependency_lock.digest().unwrap();
+    let mut ui_import = exact_import_request(
+        &ui_snapshot,
+        MiniAppSourceScope::new("owner-import", "miniapp-ui-copy", "project-ui-copy").unwrap(),
+        "Imported UI",
+        MiniAppSourceContentKind::UiOnly,
+    );
+    ui_import.dependency_lock = dependency_lock_bytes.clone();
+    ui_import.expected_dependency_lock_digest = dependency_lock_digest.clone();
+    ui_import.build_generation = 42;
+
+    let imported_ui = store.import_project_exact(ui_import).unwrap();
+    assert_eq!(imported_ui.display_name, "Imported UI");
+    assert_eq!(imported_ui.source_revision, 1);
+    assert_eq!(imported_ui.build_generation, 42);
+    assert_eq!(
+        imported_ui.source_snapshot_digest,
+        ui_snapshot.source_snapshot_digest
+    );
+    assert_eq!(
+        imported_ui.dependency_lock_digest,
+        dependency_lock_digest
+    );
+    let imported_ui_snapshot = store
+        .read_snapshot(
+            "owner-import",
+            "miniapp-ui-copy",
+            "project-ui-copy",
+            &imported_ui.source_snapshot_digest,
+        )
+        .unwrap();
+    assert_eq!(imported_ui_snapshot.files, ui_snapshot.files);
+    assert_eq!(imported_ui_snapshot.dependency_lock, dependency_lock_bytes);
+    assert_eq!(
+        imported_ui_snapshot.content_kind(),
+        MiniAppSourceContentKind::UiOnly
+    );
+    assert_eq!(
+        imported_ui_snapshot.file("ui/index.html"),
+        Some(b"<!doctype html><main id=\"imported-ui\"></main>".as_slice())
+    );
+
+    let service = store
+        .create_service_project(
+            "owner-origin",
+            "miniapp-service",
+            "project-service",
+            "Origin Service",
+            b"export async function invoke() { return 'origin'; }\n".to_vec(),
+        )
+        .unwrap();
+    let service = store
+        .replace_service_source(
+            "owner-origin",
+            "miniapp-service",
+            "project-service",
+            &service.source_snapshot_digest,
+            vec![
+                MiniAppSourceFileInput::new(
+                    "ui/index.html",
+                    b"<!doctype html><main id=\"service-ui\"></main>".to_vec(),
+                ),
+                MiniAppSourceFileInput::new(
+                    "ui/client.js",
+                    b"globalThis.__exactImport = 'service';\n".to_vec(),
+                ),
+                MiniAppSourceFileInput::new(
+                    "service/main.mjs",
+                    b"export async function invoke(method) { return `copied:${method}`; }\n"
+                        .to_vec(),
+                ),
+            ],
+        )
+        .unwrap();
+    let service_snapshot = store
+        .read_snapshot(
+            "owner-origin",
+            "miniapp-service",
+            "project-service",
+            &service.source_snapshot_digest,
+        )
+        .unwrap();
+    let service_import = exact_import_request(
+        &service_snapshot,
+        MiniAppSourceScope::new(
+            "owner-import",
+            "miniapp-service-copy",
+            "project-service-copy",
+        )
+        .unwrap(),
+        "Imported Service",
+        MiniAppSourceContentKind::Service,
+    );
+
+    let imported_service = store.import_project_exact(service_import).unwrap();
+    let imported_service_snapshot = store
+        .read_snapshot(
+            "owner-import",
+            "miniapp-service-copy",
+            "project-service-copy",
+            &imported_service.source_snapshot_digest,
+        )
+        .unwrap();
+    assert_eq!(imported_service.source_revision, 1);
+    assert_eq!(
+        imported_service.build_generation,
+        service_snapshot.project.build_generation
+    );
+    assert_eq!(imported_service_snapshot.files, service_snapshot.files);
+    assert_eq!(
+        imported_service_snapshot.content_kind(),
+        MiniAppSourceContentKind::Service
+    );
+    assert_eq!(
+        imported_service_snapshot.service_main_mjs(),
+        service_snapshot.service_main_mjs()
+    );
+}
+
+#[test]
+fn source_exact_import_rejects_tampering_and_kind_or_lineage_drift() {
+    let root = TestRoot::new("source-exact-import-reject");
+    let store = MiniAppSourceStore::new(root.path()).unwrap();
+    let ui = store
+        .create_project("owner-origin", "miniapp-ui", "project-ui", "Origin UI")
+        .unwrap();
+    let ui_snapshot = store
+        .read_snapshot(
+            "owner-origin",
+            "miniapp-ui",
+            "project-ui",
+            &ui.source_snapshot_digest,
+        )
+        .unwrap();
+
+    let mut source_tamper = exact_import_request(
+        &ui_snapshot,
+        MiniAppSourceScope::new("owner-import", "miniapp-tamper", "project-tamper").unwrap(),
+        "Tampered",
+        MiniAppSourceContentKind::UiOnly,
+    );
+    source_tamper.files[0].bytes.extend_from_slice(b"tampered");
+    assert!(matches!(
+        store.import_project_exact(source_tamper),
+        Err(MiniAppSourceStoreError::DigestMismatch { .. })
+    ));
+
+    let changed_lock = MiniAppDependencyLockV1 {
+        format_version: VersionString::from("1.0.0"),
+        dependencies: BTreeMap::from([("changed".into(), "1.0.0".into())]),
+    }
+    .canonical_bytes()
+    .unwrap();
+    let mut lock_tamper = exact_import_request(
+        &ui_snapshot,
+        MiniAppSourceScope::new("owner-import", "miniapp-lock", "project-lock").unwrap(),
+        "Lock Tamper",
+        MiniAppSourceContentKind::UiOnly,
+    );
+    lock_tamper.dependency_lock = changed_lock;
+    assert!(matches!(
+        store.import_project_exact(lock_tamper),
+        Err(MiniAppSourceStoreError::DigestMismatch { .. })
+    ));
+
+    let ui_as_service = exact_import_request(
+        &ui_snapshot,
+        MiniAppSourceScope::new("owner-import", "miniapp-kind-ui", "project-kind-ui").unwrap(),
+        "Wrong Kind",
+        MiniAppSourceContentKind::Service,
+    );
+    assert!(matches!(
+        store.import_project_exact(ui_as_service),
+        Err(MiniAppSourceStoreError::InvalidRecord(_))
+    ));
+
+    let service = store
+        .create_service_project(
+            "owner-origin",
+            "miniapp-service",
+            "project-service",
+            "Origin Service",
+            b"export async function invoke() { return true; }\n".to_vec(),
+        )
+        .unwrap();
+    let service_snapshot = store
+        .read_snapshot(
+            "owner-origin",
+            "miniapp-service",
+            "project-service",
+            &service.source_snapshot_digest,
+        )
+        .unwrap();
+    let service_as_ui = exact_import_request(
+        &service_snapshot,
+        MiniAppSourceScope::new(
+            "owner-import",
+            "miniapp-kind-service",
+            "project-kind-service",
+        )
+        .unwrap(),
+        "Wrong Kind",
+        MiniAppSourceContentKind::UiOnly,
+    );
+    assert!(matches!(
+        store.import_project_exact(service_as_ui),
+        Err(MiniAppSourceStoreError::ServiceSourceForbidden { .. })
+    ));
+
+    let mut wrong_profile = exact_import_request(
+        &ui_snapshot,
+        MiniAppSourceScope::new(
+            "owner-import",
+            "miniapp-wrong-profile",
+            "project-wrong-profile",
+        )
+        .unwrap(),
+        "Wrong Profile",
+        MiniAppSourceContentKind::UiOnly,
+    );
+    wrong_profile.build_profile_version = VersionString::from("0.0.0");
+    assert!(matches!(
+        store.import_project_exact(wrong_profile),
+        Err(MiniAppSourceStoreError::InvalidRecord(_))
+    ));
+
+    let mut zero_generation = exact_import_request(
+        &ui_snapshot,
+        MiniAppSourceScope::new(
+            "owner-import",
+            "miniapp-zero-generation",
+            "project-zero-generation",
+        )
+        .unwrap(),
+        "Zero Generation",
+        MiniAppSourceContentKind::UiOnly,
+    );
+    zero_generation.build_generation = 0;
+    assert!(matches!(
+        store.import_project_exact(zero_generation),
+        Err(MiniAppSourceStoreError::InvalidRecord(_))
+    ));
+    assert_eq!(
+        fs::read_dir(store.staging_root()).unwrap().count(),
+        0,
+        "all rejected exact imports must clean their private staging trees"
+    );
+}
+
+#[test]
+fn source_exact_import_rejects_duplicate_target_and_preserves_owner_scope() {
+    let root = TestRoot::new("source-exact-import-owner");
+    let store = MiniAppSourceStore::new(root.path()).unwrap();
+    let origin = store
+        .create_project(
+            "owner-origin",
+            "miniapp-origin",
+            "project-origin",
+            "Origin",
+        )
+        .unwrap();
+    let snapshot = store
+        .read_snapshot(
+            "owner-origin",
+            "miniapp-origin",
+            "project-origin",
+            &origin.source_snapshot_digest,
+        )
+        .unwrap();
+    let request = exact_import_request(
+        &snapshot,
+        MiniAppSourceScope::new("owner-1", "miniapp-copy", "project-copy").unwrap(),
+        "Owner One",
+        MiniAppSourceContentKind::UiOnly,
+    );
+
+    store.import_project_exact(request.clone()).unwrap();
+    assert!(matches!(
+        store.import_project_exact(request),
+        Err(MiniAppSourceStoreError::ProjectAlreadyExists)
+    ));
+
+    let mut other_owner = exact_import_request(
+        &snapshot,
+        MiniAppSourceScope::new("owner-2", "miniapp-copy", "project-copy").unwrap(),
+        "Owner Two",
+        MiniAppSourceContentKind::UiOnly,
+    );
+    other_owner.build_generation = 7;
+    let owner_two = store.import_project_exact(other_owner).unwrap();
+    assert_eq!(owner_two.owner_id, "owner-2");
+    assert_eq!(owner_two.build_generation, 7);
+    assert!(store
+        .read_snapshot(
+            "owner-1",
+            "miniapp-copy",
+            "project-copy",
+            &snapshot.source_snapshot_digest,
+        )
+        .is_ok());
+    assert!(store
+        .read_snapshot(
+            "owner-2",
+            "miniapp-copy",
+            "project-copy",
+            &snapshot.source_snapshot_digest,
+        )
+        .is_ok());
+    assert!(matches!(
+        store.read_snapshot(
+            "owner-3",
+            "miniapp-copy",
+            "project-copy",
+            &snapshot.source_snapshot_digest,
+        ),
+        Err(MiniAppSourceStoreError::ProjectNotFound)
+    ));
+    assert_eq!(fs::read_dir(store.staging_root()).unwrap().count(), 0);
 }
 
 #[test]

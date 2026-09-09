@@ -18,14 +18,15 @@ use nomifun_agent_contracts::{
     canonical_ui_tree_digest, digest_bytes, digest_payload,
 };
 use nomifun_db::{
-    BeginMiniAppM1DeleteParams,
+    BeginMiniAppM1DeleteParams, BeginMiniAppM1ImportAsNewParams,
     CancelMiniAppM1BuildOperationParams, CloseMiniAppM1SurfaceSessionParams,
     CommitMiniAppM1LifecycleParams,
     CreateMiniAppM1Params, CreateMiniAppM1WithSourceParams,
     ExecuteMiniAppM1SurfaceKvParams,
     FailMiniAppM1DeleteParams, FinalizeMiniAppM1DeleteParams,
     FinishMiniAppM1BuildAndRecordReadyParams, FinishMiniAppM1BuildOperationParams,
-    IMiniAppM1Repository, MiniAppM1AutoPublishGuard, MiniAppM1Kind,
+    FinishMiniAppM1ExportOperationParams, FinishMiniAppM1ImportReadyParams,
+    IMiniAppM1Repository, MiniAppM1AutoPublishGuard, MiniAppM1ImportSource, MiniAppM1Kind,
     MiniAppM1ManagedSourceLineage, MiniAppM1ProjectSourceState,
     MiniAppM1Snapshot, MiniAppM1SurfaceKvOperation, MiniAppM1SurfaceKvResult,
     MiniAppReleaseArtifactRow, MiniAppReleaseRow,
@@ -35,7 +36,7 @@ use nomifun_db::{
     RestartMiniAppM1DeleteParams, RestoreMiniAppM1Params,
     RollbackMiniAppM1PreviousParams, SetMiniAppM1AutoPublishParams,
     SqliteMiniAppM1Repository,
-    StartMiniAppM1BuildOperationParams,
+    StartMiniAppM1BuildOperationParams, StartMiniAppM1ExportOperationParams,
     TrashMiniAppM1Params, UpdateMiniAppM1ProjectSourceParams, installation_owner_id,
 };
 use serde_json::json;
@@ -255,6 +256,121 @@ async fn new_repository_never_reads_the_retired_miniapps_store() {
         .await
         .unwrap();
     assert_eq!(old_count, 0);
+}
+
+#[tokio::test]
+async fn managed_import_as_new_commits_ready_and_export_operation_exactly() {
+    let database = init_miniapp_test_database().await;
+    let owner = installation_owner_id(database.pool()).await.unwrap();
+    let repository = SqliteMiniAppM1Repository::new(database.pool().clone());
+    let miniapp_id = Uuid::now_v7().to_string();
+    let project_id = Uuid::now_v7().to_string();
+    let operation_id = Uuid::now_v7().to_string();
+    let source = managed_source(
+        &format!(
+            "sources/{owner}/miniapps/{miniapp_id}/projects/{project_id}/source"
+        ),
+        'b',
+        'c',
+        1,
+    );
+    let begun = repository
+        .begin_import_as_new(&BeginMiniAppM1ImportAsNewParams {
+            create: create_params(
+                &owner,
+                &miniapp_id,
+                &project_id,
+                0,
+                MiniAppM1Kind::UiOnly,
+                10,
+            ),
+            operation_id: operation_id.clone(),
+            source: MiniAppM1ImportSource::Managed(source.clone()),
+            bounded_log_tail: vec!["import started".into()],
+            started_at_ms: 10,
+        })
+        .await
+        .unwrap();
+    assert_eq!(begun.snapshot.product.lifecycle, "disabled");
+    assert_eq!(begun.snapshot.project.source_state, "editable");
+    assert_eq!(begun.operation.state, "running");
+    assert!(begun.snapshot.catalog_publication.is_none());
+
+    let artifact_id = Uuid::now_v7().to_string();
+    let release_id = Uuid::now_v7().to_string();
+    let artifact = artifact(&owner, &artifact_id, "imported", "manifest", 11);
+    let mut imported_release = release(
+        &owner,
+        &miniapp_id,
+        &project_id,
+        &artifact,
+        &release_id,
+        "imported",
+        &operation_id,
+        &source.source_head_digest,
+        &source.dependency_lock_digest,
+        11,
+    );
+    imported_release.origin_kind = "import".into();
+    let mut ready: MiniAppReadyRelease =
+        serde_json::from_str(&imported_release.release_record_json).unwrap();
+    ready.origin = MiniAppReadyOrigin::Import;
+    imported_release.release_record_json = String::from_utf8(
+        nomifun_agent_contracts::canonical_json_bytes(&ready).unwrap(),
+    )
+    .unwrap();
+    let finished = repository
+        .finish_import_ready(&FinishMiniAppM1ImportReadyParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: miniapp_id.clone(),
+            project_id: project_id.clone(),
+            operation_id: operation_id.clone(),
+            expected_library_revision: begun.snapshot.library_revision,
+            expected_product_revision: begun.snapshot.product.product_revision,
+            expected_pointer_revision: begun.snapshot.product.pointer_revision,
+            expected_project_revision: begun.snapshot.project.project_revision,
+            artifact,
+            release: imported_release,
+            bounded_log_tail: vec!["import ready committed".into()],
+            finished_at_ms: 12,
+        })
+        .await
+        .unwrap();
+    assert_eq!(finished.product.ready_release_id.as_deref(), Some(release_id.as_str()));
+    assert!(finished.product.active_release_id.is_none());
+    assert!(finished.catalog_publication.is_none());
+    let import_operation = repository
+        .get_miniapp_operation(&owner, &miniapp_id, &operation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(import_operation.state, "succeeded");
+
+    let export_id = Uuid::now_v7().to_string();
+    repository
+        .start_export_operation(&StartMiniAppM1ExportOperationParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: miniapp_id.clone(),
+            operation_id: export_id.clone(),
+            expected_product_revision: finished.product.product_revision,
+            expected_pointer_revision: finished.product.pointer_revision,
+            bounded_log_tail: vec!["export started".into()],
+            started_at_ms: 13,
+        })
+        .await
+        .unwrap();
+    let exported = repository
+        .finish_export_operation(&FinishMiniAppM1ExportOperationParams {
+            owner_user_id: owner,
+            miniapp_id,
+            operation_id: export_id,
+            bounded_log_tail: vec!["export completed".into()],
+            finished_at_ms: 14,
+        })
+        .await
+        .unwrap();
+    assert_eq!(exported.state, "succeeded");
+    assert_eq!(exported.progress_percent, Some(100));
 }
 
 fn artifact(

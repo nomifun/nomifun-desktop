@@ -51,6 +51,111 @@ pub struct CreateMiniAppM1WithSourceParams {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MiniAppM1ImportSource {
+    Managed(MiniAppM1ManagedSourceLineage),
+    RuntimeOnly,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BeginMiniAppM1ImportAsNewParams {
+    pub create: CreateMiniAppM1Params,
+    pub operation_id: String,
+    pub source: MiniAppM1ImportSource,
+    pub bounded_log_tail: Vec<String>,
+    pub started_at_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BeginMiniAppM1ImportAsNewResult {
+    pub snapshot: MiniAppM1Snapshot,
+    pub operation: ProductOperationRow,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FinishMiniAppM1ImportReadyParams {
+    pub owner_user_id: String,
+    pub miniapp_id: String,
+    pub project_id: String,
+    pub operation_id: String,
+    pub expected_library_revision: i64,
+    pub expected_product_revision: i64,
+    pub expected_pointer_revision: i64,
+    pub expected_project_revision: i64,
+    pub artifact: MiniAppReleaseArtifactRow,
+    pub release: MiniAppReleaseRow,
+    pub bounded_log_tail: Vec<String>,
+    pub finished_at_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FailMiniAppM1ImportParams {
+    pub owner_user_id: String,
+    pub miniapp_id: String,
+    pub project_id: String,
+    pub operation_id: String,
+    pub expected_product_revision: i64,
+    pub expected_pointer_revision: i64,
+    pub expected_project_revision: i64,
+    pub progress_percent: u8,
+    pub error_code: String,
+    pub bounded_log_tail: Vec<String>,
+    pub finished_at_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CancelMiniAppM1ImportParams {
+    pub owner_user_id: String,
+    pub miniapp_id: String,
+    pub project_id: String,
+    pub operation_id: String,
+    pub expected_product_revision: i64,
+    pub expected_pointer_revision: i64,
+    pub expected_project_revision: i64,
+    pub bounded_log_tail: Vec<String>,
+    pub finished_at_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StartMiniAppM1ExportOperationParams {
+    pub owner_user_id: String,
+    pub miniapp_id: String,
+    pub operation_id: String,
+    pub expected_product_revision: i64,
+    pub expected_pointer_revision: i64,
+    pub bounded_log_tail: Vec<String>,
+    pub started_at_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FinishMiniAppM1ExportOperationParams {
+    pub owner_user_id: String,
+    pub miniapp_id: String,
+    pub operation_id: String,
+    pub bounded_log_tail: Vec<String>,
+    pub finished_at_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FailMiniAppM1ExportOperationParams {
+    pub owner_user_id: String,
+    pub miniapp_id: String,
+    pub operation_id: String,
+    pub progress_percent: u8,
+    pub error_code: String,
+    pub bounded_log_tail: Vec<String>,
+    pub finished_at_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CancelMiniAppM1ExportOperationParams {
+    pub owner_user_id: String,
+    pub miniapp_id: String,
+    pub operation_id: String,
+    pub bounded_log_tail: Vec<String>,
+    pub finished_at_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UpdateMiniAppM1ProjectSourceParams {
     pub owner_user_id: String,
     pub miniapp_id: String,
@@ -392,6 +497,46 @@ pub trait IMiniAppM1Repository: Send + Sync {
         &self,
         params: &CreateMiniAppM1WithSourceParams,
     ) -> Result<MiniAppM1Snapshot, DbError>;
+
+    async fn begin_import_as_new(
+        &self,
+        params: &BeginMiniAppM1ImportAsNewParams,
+    ) -> Result<BeginMiniAppM1ImportAsNewResult, DbError>;
+
+    async fn finish_import_ready(
+        &self,
+        params: &FinishMiniAppM1ImportReadyParams,
+    ) -> Result<MiniAppM1Snapshot, DbError>;
+
+    async fn fail_import(
+        &self,
+        params: &FailMiniAppM1ImportParams,
+    ) -> Result<ProductOperationRow, DbError>;
+
+    async fn cancel_import(
+        &self,
+        params: &CancelMiniAppM1ImportParams,
+    ) -> Result<ProductOperationRow, DbError>;
+
+    async fn start_export_operation(
+        &self,
+        params: &StartMiniAppM1ExportOperationParams,
+    ) -> Result<ProductOperationRow, DbError>;
+
+    async fn finish_export_operation(
+        &self,
+        params: &FinishMiniAppM1ExportOperationParams,
+    ) -> Result<ProductOperationRow, DbError>;
+
+    async fn fail_export_operation(
+        &self,
+        params: &FailMiniAppM1ExportOperationParams,
+    ) -> Result<ProductOperationRow, DbError>;
+
+    async fn cancel_export_operation(
+        &self,
+        params: &CancelMiniAppM1ExportOperationParams,
+    ) -> Result<ProductOperationRow, DbError>;
 
     async fn update_project_source_cas(
         &self,

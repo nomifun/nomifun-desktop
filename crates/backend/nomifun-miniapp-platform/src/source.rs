@@ -246,6 +246,19 @@ impl MiniAppSourceFileInput {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MiniAppSourceExactImportRequest {
+    pub scope: MiniAppSourceScope,
+    pub display_name: String,
+    pub content_kind: MiniAppSourceContentKind,
+    pub dependency_lock: Vec<u8>,
+    pub files: Vec<MiniAppSourceFileInput>,
+    pub expected_source_snapshot_digest: DigestHex,
+    pub expected_dependency_lock_digest: DigestHex,
+    pub build_generation: u64,
+    pub build_profile_version: VersionString,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MiniAppSourceProject {
     pub owner_id: String,
     pub miniapp_id: MiniAppId,
@@ -369,6 +382,90 @@ impl MiniAppSourceStore {
         )
     }
 
+    pub fn import_project_exact(
+        &self,
+        request: MiniAppSourceExactImportRequest,
+    ) -> Result<MiniAppSourceProject, MiniAppSourceStoreError> {
+        let scope = MiniAppSourceScope::new(
+            &request.scope.owner_id,
+            request.scope.miniapp_id.as_ref(),
+            request.scope.project_id.as_ref(),
+        )?;
+        let display_name = validate_display_name(request.display_name)?;
+        let expected_source_snapshot_digest =
+            validate_digest_value(request.expected_source_snapshot_digest.as_ref())?;
+        let expected_dependency_lock_digest =
+            validate_digest_value(request.expected_dependency_lock_digest.as_ref())?;
+        if request.build_generation == 0
+            || request.build_profile_version.as_ref()
+                != MINIAPP_SOURCE_BUILD_PROFILE_VERSION
+        {
+            return Err(MiniAppSourceStoreError::InvalidRecord(
+                "exact Source import requires a positive build generation and the current build profile version"
+                    .into(),
+            ));
+        }
+
+        let dependency_lock = parse_canonical::<MiniAppDependencyLockV1>(
+            &request.dependency_lock,
+            self.limits.max_dependency_lock_bytes,
+        )?;
+        let observed_dependency_lock_digest = dependency_lock.digest()?;
+        if observed_dependency_lock_digest != expected_dependency_lock_digest {
+            return Err(MiniAppSourceStoreError::DigestMismatch {
+                expected: expected_dependency_lock_digest.0,
+                observed: observed_dependency_lock_digest.0,
+            });
+        }
+
+        let prepared =
+            prepare_source_files(request.files, request.content_kind, self.limits)?;
+        let observed_content_kind = source_content_kind(
+            prepared
+                .iter()
+                .map(|file| file.normalized_relative_path.as_str()),
+        );
+        if observed_content_kind != request.content_kind {
+            return Err(MiniAppSourceStoreError::InvalidRecord(
+                "exact Source import content kind does not match its file inventory".into(),
+            ));
+        }
+        let snapshot = snapshot_record(&prepared)?;
+        if snapshot.snapshot_digest != expected_source_snapshot_digest {
+            return Err(MiniAppSourceStoreError::DigestMismatch {
+                expected: expected_source_snapshot_digest.0,
+                observed: snapshot.snapshot_digest.0,
+            });
+        }
+
+        let project_record = ProjectRecord {
+            format_version: MINIAPP_SOURCE_STORE_FORMAT_VERSION.into(),
+            owner_id: scope.owner_id.clone(),
+            miniapp_id: scope.miniapp_id.as_ref().into(),
+            project_id: scope.project_id.as_ref().into(),
+            display_name,
+        };
+        let head = HeadRecord {
+            format_version: MINIAPP_SOURCE_STORE_FORMAT_VERSION.into(),
+            snapshot_digest: snapshot.snapshot_digest.clone(),
+            dependency_lock_digest: observed_dependency_lock_digest,
+            build_profile: JavaScriptBuildProfile::MiniAppReleaseV1,
+            build_profile_version: request.build_profile_version.as_ref().into(),
+            source_revision: 1,
+            build_generation: request.build_generation,
+        };
+
+        let _guard = self.lock_mutation()?;
+        self.install_new_project_unlocked(
+            &scope,
+            project_record,
+            &request.dependency_lock,
+            &prepared,
+            &snapshot,
+            &head,
+        )
+    }
+
     fn create_project_with_service(
         &self,
         owner: impl AsRef<str>,
@@ -379,22 +476,6 @@ impl MiniAppSourceStore {
     ) -> Result<MiniAppSourceProject, MiniAppSourceStoreError> {
         let scope = MiniAppSourceScope::new(owner, miniapp_id, project_id)?;
         let display_name = validate_display_name(display_name.into())?;
-        let _guard = self.lock_mutation()?;
-        let parent = self.ensure_project_parent(&scope)?;
-        let final_project_root = parent.join(scope.project_id.as_ref());
-        if fs::symlink_metadata(&final_project_root).is_ok() {
-            return Err(MiniAppSourceStoreError::ProjectAlreadyExists);
-        }
-
-        let mut staging = self.allocate_staging(STAGING_PREFIX_CREATE)?;
-        let staged_project_root = staging.path().join("project");
-        let staged_source_root = staged_project_root.join(SOURCE_DIRECTORY);
-        fs::create_dir(&staged_project_root)
-            .map_err(|error| io_error(&staged_project_root, error))?;
-        fs::create_dir(&staged_source_root)
-            .map_err(|error| io_error(&staged_source_root, error))?;
-        fs::create_dir(staged_source_root.join(REVISIONS_DIRECTORY))
-            .map_err(|error| io_error(staged_source_root.join(REVISIONS_DIRECTORY), error))?;
 
         let project_record = ProjectRecord {
             format_version: MINIAPP_SOURCE_STORE_FORMAT_VERSION.into(),
@@ -403,17 +484,9 @@ impl MiniAppSourceStore {
             project_id: scope.project_id.as_ref().into(),
             display_name,
         };
-        write_new_synced(
-            &staged_project_root.join(PROJECT_RECORD_FILE),
-            &canonical_bytes(&project_record)?,
-        )?;
 
         let lock = MiniAppDependencyLockV1::empty();
         let lock_bytes = lock.canonical_bytes()?;
-        write_new_synced(
-            &staged_project_root.join(DEPENDENCY_LOCK_FILE),
-            &lock_bytes,
-        )?;
 
         let mut files = vec![MiniAppSourceFileInput::new(
             "ui/index.html",
@@ -430,10 +503,6 @@ impl MiniAppSourceStore {
         };
         let prepared = prepare_source_files(files, content_kind, self.limits)?;
         let snapshot = snapshot_record(&prepared)?;
-        let revision_root = staged_source_root
-            .join(REVISIONS_DIRECTORY)
-            .join(snapshot.snapshot_digest.as_ref());
-        write_revision(&revision_root, &prepared, &snapshot)?;
         let head = HeadRecord {
             format_version: MINIAPP_SOURCE_STORE_FORMAT_VERSION.into(),
             snapshot_digest: snapshot.snapshot_digest.clone(),
@@ -443,25 +512,16 @@ impl MiniAppSourceStore {
             source_revision: 1,
             build_generation: 1,
         };
-        write_new_synced(
-            &staged_source_root.join(HEAD_FILE),
-            &canonical_bytes(&head)?,
-        )?;
-        sync_tree_directories(&staged_project_root)?;
 
-        match fs::rename(&staged_project_root, &final_project_root) {
-            Ok(()) => {}
-            Err(error)
-                if error.kind() == io::ErrorKind::AlreadyExists
-                    || final_project_root.exists() =>
-            {
-                return Err(MiniAppSourceStoreError::ProjectAlreadyExists);
-            }
-            Err(error) => return Err(io_error(&final_project_root, error)),
-        }
-        sync_directory_if_supported(&parent)?;
-        staging.commit()?;
-        self.read_project_summary_unlocked(&scope)
+        let _guard = self.lock_mutation()?;
+        self.install_new_project_unlocked(
+            &scope,
+            project_record,
+            &lock_bytes,
+            &prepared,
+            &snapshot,
+            &head,
+        )
     }
 
     pub fn read_snapshot(
@@ -721,6 +781,66 @@ impl MiniAppSourceStore {
                 "could not allocate a unique MiniApp Source staging directory",
             ),
         })
+    }
+
+    fn install_new_project_unlocked(
+        &self,
+        scope: &MiniAppSourceScope,
+        project_record: ProjectRecord,
+        dependency_lock: &[u8],
+        files: &[MiniAppSourceFile],
+        snapshot: &SnapshotRecord,
+        head: &HeadRecord,
+    ) -> Result<MiniAppSourceProject, MiniAppSourceStoreError> {
+        let parent = self.ensure_project_parent(scope)?;
+        let final_project_root = parent.join(scope.project_id.as_ref());
+        match fs::symlink_metadata(&final_project_root) {
+            Ok(_) => return Err(MiniAppSourceStoreError::ProjectAlreadyExists),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(io_error(&final_project_root, error)),
+        }
+
+        let mut staging = self.allocate_staging(STAGING_PREFIX_CREATE)?;
+        let staged_project_root = staging.path().join("project");
+        let staged_source_root = staged_project_root.join(SOURCE_DIRECTORY);
+        fs::create_dir(&staged_project_root)
+            .map_err(|error| io_error(&staged_project_root, error))?;
+        fs::create_dir(&staged_source_root)
+            .map_err(|error| io_error(&staged_source_root, error))?;
+        fs::create_dir(staged_source_root.join(REVISIONS_DIRECTORY))
+            .map_err(|error| io_error(staged_source_root.join(REVISIONS_DIRECTORY), error))?;
+
+        write_new_synced(
+            &staged_project_root.join(PROJECT_RECORD_FILE),
+            &canonical_bytes(&project_record)?,
+        )?;
+        write_new_synced(
+            &staged_project_root.join(DEPENDENCY_LOCK_FILE),
+            dependency_lock,
+        )?;
+        let revision_root = staged_source_root
+            .join(REVISIONS_DIRECTORY)
+            .join(snapshot.snapshot_digest.as_ref());
+        write_revision(&revision_root, files, snapshot)?;
+        write_new_synced(
+            &staged_source_root.join(HEAD_FILE),
+            &canonical_bytes(head)?,
+        )?;
+        sync_tree_directories(&staged_project_root)?;
+
+        match fs::rename(&staged_project_root, &final_project_root) {
+            Ok(()) => {}
+            Err(error)
+                if error.kind() == io::ErrorKind::AlreadyExists
+                    || final_project_root.exists() =>
+            {
+                return Err(MiniAppSourceStoreError::ProjectAlreadyExists);
+            }
+            Err(error) => return Err(io_error(&final_project_root, error)),
+        }
+        sync_directory_if_supported(&parent)?;
+        staging.commit()?;
+        self.read_project_summary_unlocked(scope)
     }
 
     fn ensure_project_parent(
