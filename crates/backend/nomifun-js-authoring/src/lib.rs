@@ -43,4 +43,7 @@ pub use nomifun_agent_contracts::{
 pub use path::NormalizedSourcePath;
 pub use scaffold::PluginScaffoldRequest;
 pub use snapshot::{CapturedSource, SourceFileDigest, SourceSnapshot};
-pub use store::{ScaffoldedPluginProject, SourceStore, StagedSource, StoredSourceProject};
+pub use store::{
+    ScaffoldedPluginProject, SourceEditOutcome, SourceFileEdit, SourceStore,
+    StagedSource, StoredSourceProject,
+};

@@ -28,8 +28,18 @@ pub enum AuthoringError {
     ScopeMismatch,
     #[error("source project metadata is invalid: {0}")]
     InvalidScopeRecord(String),
+    #[error("source mutation lock is poisoned")]
+    MutationLockPoisoned,
     #[error("source snapshot changed (expected {expected}, observed {observed})")]
     SourceChanged { expected: String, observed: String },
+    #[error(
+        "source edit changes dependency requests without a matching exact lock \
+         (lock request {lock_request}, next request {next_request})"
+    )]
+    DependencyLockOutOfDate {
+        lock_request: String,
+        next_request: String,
+    },
     #[error("source operation was canceled")]
     Canceled,
     #[error("source contains too many files ({observed} > {limit})")]
