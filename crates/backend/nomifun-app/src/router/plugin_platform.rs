@@ -62,6 +62,8 @@ use nomifun_plugin_service::{
     PluginHostCoordinator, PluginOperationCancellation, PluginRegistryPublisher,
     PluginRepository, PluginRouterState,
     PluginServiceDependencies, PluginServiceError, PluginServicePaths,
+    ApplyPluginSourceEditInput, ApplyPluginSourceEditRequest,
+    PluginSourceFileEdit,
 };
 use tokio::sync::{Mutex, RwLock};
 use serde::Deserialize;
@@ -731,6 +733,10 @@ pub(crate) fn plugin_routes(state: PluginRouterState) -> Router {
             "/api/plugin-projects/{project_id}",
             get(get_project).delete(delete_project),
         )
+        .route(
+            "/api/plugin-projects/{project_id}/source/edit",
+            post(apply_source_edit),
+        )
         .route("/api/plugin-imports", post(import_prebuilt))
         .route(
             "/api/plugin-projects/{project_id}/build",
@@ -827,6 +833,45 @@ struct CancelPluginOperationRequest {
     expected_operation_revision: u64,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ApplyPluginSourceEditHttpRequest {
+    project_id: String,
+    expected_source_snapshot_digest: String,
+    edit: ApplyPluginSourceEditHttp,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum ApplyPluginSourceEditHttp {
+    Replace { path: String, content: String },
+    Delete { path: String },
+}
+
+impl ApplyPluginSourceEditHttpRequest {
+    fn into_service(
+        self,
+    ) -> Result<ApplyPluginSourceEditRequest, PluginServiceError> {
+        let edit = match self.edit {
+            ApplyPluginSourceEditHttp::Replace { path, content } => {
+                PluginSourceFileEdit::Replace {
+                    path,
+                    bytes: content.into_bytes(),
+                }
+            }
+            ApplyPluginSourceEditHttp::Delete { path } => {
+                PluginSourceFileEdit::Delete { path }
+            }
+        };
+        Ok(ApplyPluginSourceEditRequest {
+            project_id: self.project_id,
+            expected_source_snapshot_digest: self
+                .expected_source_snapshot_digest,
+            edit,
+        })
+    }
+}
+
 async fn list_plugins(
     State(state): State<PluginRouterState>,
     Extension(user): Extension<CurrentUser>,
@@ -845,6 +890,25 @@ async fn get_project(
         state
             .service
             .get_project(user.id.as_str(), &project_id)
+            .await?,
+    )))
+}
+
+async fn apply_source_edit(
+    State(state): State<PluginRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    AxumPath(project_id): AxumPath<String>,
+    Json(request): Json<ApplyPluginSourceEditHttpRequest>,
+) -> Result<Json<ApiResponse<PluginProjectDetailDto>>, PluginHttpError> {
+    require_route_id("project_id", &project_id, &request.project_id)?;
+    let request = request.into_service()?;
+    Ok(Json(ApiResponse::ok(
+        state
+            .service
+            .apply_source_edit(ApplyPluginSourceEditInput {
+                owner_user_id: user.id.as_str().to_owned(),
+                request,
+            })
             .await?,
     )))
 }

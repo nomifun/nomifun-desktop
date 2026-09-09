@@ -13,8 +13,8 @@ use nomifun_agent_contracts::{
 use nomifun_js_authoring::{
     AuthoringError, ExactDependencyLock, FixedPluginPacker, NeverCancel,
     NpmResolverIdentity, OperationCancellation, PluginLanguage,
-    PluginPackageBuildOptions, PluginScaffoldRequest, SourceScope, SourceStore,
-    SourceStoreLimits,
+    PluginPackageBuildOptions, PluginScaffoldRequest, SourceFileEdit, SourceScope,
+    SourceStore, SourceStoreLimits,
 };
 use nomifun_db::{
     ApplyPluginCandidateParams, CreatePluginArtifactParams, CreatePluginProjectParams,
@@ -25,7 +25,7 @@ use nomifun_db::{
     RecordPluginCandidateTestReceiptParams, RecordPluginReadyCandidateParams,
     ReplacePluginCredentialBindingsParams, RestorePluginMountParams, SqlitePluginN1Repository,
     SqlitePool, StartProductOperationParams, UninstallPluginMountParams,
-    UpdatePluginMountConfigParams,
+    UpdatePluginMountConfigParams, UpdatePluginProjectSourceParams,
 };
 use nomifun_js_host::{ExtensionHostSupervisor, JavaScriptHostError};
 use nomifun_plugin_platform::{
@@ -37,8 +37,9 @@ use tokio::sync::{Mutex, Notify};
 
 use crate::error::PluginServiceError;
 use crate::types::{
-    BuildOutput, CandidateTestOutput, CreatedPluginSource, ImportedPluginArtifact,
-    LinkPluginProjectParams, PluginInventory,
+    AppliedPluginSource, ApplyPluginSourceEditRequest, BuildOutput, CandidateTestOutput,
+    CreatedPluginSource, ImportedPluginArtifact, LinkPluginProjectParams, PluginInventory,
+    PluginSourceFileEdit,
 };
 
 #[async_trait]
@@ -69,6 +70,10 @@ pub trait PluginRepository: Send + Sync {
     async fn create_project(
         &self,
         params: &CreatePluginProjectParams,
+    ) -> Result<PluginProjectRow, PluginServiceError>;
+    async fn update_project_source_cas(
+        &self,
+        params: &UpdatePluginProjectSourceParams,
     ) -> Result<PluginProjectRow, PluginServiceError>;
     async fn delete_project_cas(
         &self,
@@ -202,6 +207,12 @@ pub trait PluginSourceStorePort: Send + Sync {
         owner_user_id: &str,
         project_id: &str,
     ) -> Result<(), PluginServiceError>;
+
+    async fn apply_source_edit(
+        &self,
+        owner_user_id: &str,
+        request: &ApplyPluginSourceEditRequest,
+    ) -> Result<AppliedPluginSource, PluginServiceError>;
 }
 
 pub struct FsPluginArtifactStore {
@@ -499,6 +510,47 @@ fn map_authoring_build_error(error: AuthoringError) -> PluginServiceError {
     }
 }
 
+fn map_authoring_source_edit_error(error: AuthoringError) -> PluginServiceError {
+    match error {
+        AuthoringError::Canceled => {
+            PluginServiceError::operation_canceled("Plugin Source edit was canceled")
+        }
+        AuthoringError::SourceChanged { .. }
+        | AuthoringError::DependencyLockOutOfDate { .. } => {
+            PluginServiceError::stale(error.to_string())
+        }
+        AuthoringError::UnsafeSourcePath { .. }
+        | AuthoringError::ForbiddenSourceEntry { .. }
+        | AuthoringError::PathCollision { .. }
+        | AuthoringError::FileTooLarge { .. }
+        | AuthoringError::TooManyFiles { .. }
+        | AuthoringError::TotalSizeExceeded { .. }
+        | AuthoringError::InvalidPackageJson(_)
+        | AuthoringError::InvalidDependency(_)
+        | AuthoringError::InvalidDependencyLock(_)
+        | AuthoringError::InvalidField { .. } => {
+            PluginServiceError::invalid(error.to_string())
+        }
+        AuthoringError::ProjectNotFound | AuthoringError::ScopeMismatch => {
+            PluginServiceError::reconcile_required(error.to_string())
+        }
+        _ => PluginServiceError::integration(error.to_string()),
+    }
+}
+
+fn source_edit_from_request(
+    edit: &PluginSourceFileEdit,
+) -> Result<SourceFileEdit, PluginServiceError> {
+    match edit {
+        PluginSourceFileEdit::Replace { path, bytes } => {
+            SourceFileEdit::replace(path.clone(), bytes.clone())
+                .map_err(|error| PluginServiceError::invalid(error.to_string()))
+        }
+        PluginSourceFileEdit::Delete { path } => SourceFileEdit::delete(path.clone())
+            .map_err(|error| PluginServiceError::invalid(error.to_string())),
+    }
+}
+
 fn map_artifact_build_error(error: PluginArtifactStoreError) -> PluginServiceError {
     match error {
         PluginArtifactStoreError::Canceled => {
@@ -581,6 +633,56 @@ impl PluginSourceStorePort for FsPluginSourceStore {
             managed_relative_path: scaffold.project().managed_relative_path().to_owned(),
             source_snapshot_digest: capture.snapshot().digest().as_ref().to_owned(),
             dependency_lock_digest: lock_digest.as_ref().to_owned(),
+        })
+    }
+
+    async fn apply_source_edit(
+        &self,
+        owner_user_id: &str,
+        request: &ApplyPluginSourceEditRequest,
+    ) -> Result<AppliedPluginSource, PluginServiceError> {
+        let scope = SourceScope::new(
+            UserId::from(owner_user_id.to_owned()),
+            PluginProjectId::from(request.project_id.clone()),
+        )
+        .map_err(|error| PluginServiceError::invalid(error.to_string()))?;
+        let expected = self
+            .store
+            .snapshot(&scope, &NeverCancel)
+            .map_err(map_authoring_source_edit_error)?;
+        if expected.snapshot().digest().as_ref()
+            != request.expected_source_snapshot_digest
+        {
+            return Err(PluginServiceError::stale(
+                "Plugin Source snapshot differs from the requested Project head",
+            ));
+        }
+        let edit = source_edit_from_request(&request.edit)?;
+        let outcome = self
+            .store
+            .apply_source_edit(
+                &scope,
+                expected.snapshot(),
+                edit,
+                &NeverCancel,
+            )
+            .map_err(map_authoring_source_edit_error)?;
+        let dependency_lock = self
+            .store
+            .load_dependency_lock(&scope, &NeverCancel)
+            .map_err(map_authoring_source_edit_error)?;
+        let dependency_lock_digest = dependency_lock
+            .digest()
+            .map_err(|error| PluginServiceError::integration(error.to_string()))?;
+        Ok(AppliedPluginSource {
+            source_snapshot_digest: outcome
+                .capture()
+                .snapshot()
+                .digest()
+                .as_ref()
+                .to_owned(),
+            dependency_lock_digest: dependency_lock_digest.as_ref().to_owned(),
+            changed: outcome.changed(),
         })
     }
 
@@ -1131,6 +1233,13 @@ impl PluginRepository for DbPluginRepositoryAdapter {
         params: &CreatePluginProjectParams,
     ) -> Result<PluginProjectRow, PluginServiceError> {
         Ok(self.inner.create_project(params).await?)
+    }
+
+    async fn update_project_source_cas(
+        &self,
+        params: &UpdatePluginProjectSourceParams,
+    ) -> Result<PluginProjectRow, PluginServiceError> {
+        Ok(self.inner.update_project_source_cas(params).await?)
     }
 
     async fn delete_project_cas(

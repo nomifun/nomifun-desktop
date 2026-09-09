@@ -46,6 +46,32 @@ pub struct PluginServicePaths {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApplyPluginSourceEditRequest {
+    pub project_id: String,
+    pub expected_source_snapshot_digest: String,
+    pub edit: PluginSourceFileEdit,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PluginSourceFileEdit {
+    Replace { path: String, bytes: Vec<u8> },
+    Delete { path: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApplyPluginSourceEditInput {
+    pub owner_user_id: String,
+    pub request: ApplyPluginSourceEditRequest,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppliedPluginSource {
+    pub source_snapshot_digest: String,
+    pub dependency_lock_digest: String,
+    pub changed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CreateProjectInput {
     pub owner_user_id: String,
     pub request: CreatePluginProjectRequest,
