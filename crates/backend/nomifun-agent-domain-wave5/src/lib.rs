@@ -2310,6 +2310,7 @@ mod tests {
                 availability_evidence_revision: "wave5-test".to_owned(),
             },
             CompileRequest {
+                miniapp_capabilities: Vec::new(),
                 revision,
                 principal: owner.clone(),
                 scene: "wave5-test".to_owned(),

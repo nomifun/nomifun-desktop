@@ -61,7 +61,9 @@ pub use plugin_tools::{
     KernelNomiPluginToolSession, NomiPluginToolAction, NomiPluginToolError,
     NomiPluginToolInvocation, NomiPluginToolInvoker, NomiPluginToolSchemaResolver,
     NomiPluginToolSession, NomiPluginToolSessionProvider,
-    NomiPluginToolSessionRequest,
+    NomiPluginToolSessionRequest, NomiMiniAppToolAction,
+    NomiMiniAppToolInvocation, NomiMiniAppToolInvoker,
+    NomiMiniAppToolSchemaResolver,
 };
 pub use factory::{
     AgentFactoryDeps, CompanionPromptProvider,

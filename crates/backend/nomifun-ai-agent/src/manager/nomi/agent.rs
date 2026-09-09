@@ -1178,11 +1178,13 @@ impl NomiAgentManager {
                     "Nomi Plugin Tool registration failed: {error}"
                 ))
             })?;
-            debug!(
-                conversation_id = %conversation_id,
-                tool_count = session.actions().len(),
-                "Registered exact Snapshot-bound Plugin Tools"
-            );
+                debug!(
+                    conversation_id = %conversation_id,
+                    tool_count = session.tool_count(),
+                    plugin_tool_count = session.actions().len(),
+                    miniapp_tool_count = session.miniapp_actions().len(),
+                    "Registered exact Snapshot-bound hosted Tools"
+                );
         }
         if let Some(sink) = requirement_sink {
             engine

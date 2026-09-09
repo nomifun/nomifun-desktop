@@ -879,6 +879,7 @@ fn compiler_environment(target_digest: DigestHex) -> CompilerEnvironment {
 
 fn compile_request(revision: AgentPresetRevision, owner: PrincipalRef) -> CompileRequest {
     CompileRequest {
+        miniapp_capabilities: Vec::new(),
         revision,
         principal: owner,
         scene: "sample".to_owned(),

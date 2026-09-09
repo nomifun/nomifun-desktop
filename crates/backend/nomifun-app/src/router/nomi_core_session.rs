@@ -23,12 +23,15 @@ use futures_util::FutureExt;
 use nomifun_ai_agent::types::AgentRuntimeBuildOptions;
 use nomifun_ai_agent::{
     AgentRuntimeRegistry, AgentStreamEvent, KernelNomiPluginToolSession,
+    NomiMiniAppToolInvoker, NomiMiniAppToolInvocation,
+    NomiMiniAppToolSchemaResolver, NomiPluginToolError,
     NomiPluginToolSchemaResolver, NomiPluginToolSession,
     NomiPluginToolSessionProvider, NomiPluginToolSessionRequest,
 };
 use nomifun_agent_contracts::{
     AgentBindingValue, AgentSessionId, AgentSessionLiveRecord, AgentSessionMetadata,
-    OperationId, PrincipalRef, RemoteBindingProvenance, ScopeKey, UserId,
+    MiniAppBridgeCallId, OperationId, PrincipalRef, RemoteBindingProvenance,
+    ResolvedMiniAppCapability, ScopeKey, StrictJsonValue, UserId,
 };
 use nomifun_agent_control_plane::{
     AgentControlPlane, AuthenticatedOwner, ControlPlaneError,
@@ -66,6 +69,9 @@ use nomifun_agent_session::{
 use nomifun_agent_kernel::{
     AgentPresetCompiler, CompileRequest, CompiledSnapshot,
     CompilerEnvironment, KernelRegistry,
+};
+use nomifun_miniapp_platform::{
+    MiniAppAgentCapabilityInvocation, MiniAppAgentCapabilityPort,
 };
 use nomifun_auth::{
     CurrentUser, InstanceTokenValidator, JwtService, extract_token_from_headers,
@@ -253,6 +259,8 @@ pub(crate) struct NomiCorePluginToolSessionProvider {
     kernel: Arc<KernelRegistry>,
     compiler_environment: CompilerEnvironment,
     schema_resolver: Arc<dyn NomiPluginToolSchemaResolver>,
+    miniapp_application:
+        Arc<nomifun_miniapp_platform::MiniAppM1ApplicationService>,
 }
 
 impl NomiCorePluginToolSessionProvider {
@@ -262,6 +270,9 @@ impl NomiCorePluginToolSessionProvider {
         kernel: Arc<KernelRegistry>,
         compiler_environment: CompilerEnvironment,
         schema_resolver: Arc<dyn NomiPluginToolSchemaResolver>,
+        miniapp_application: Arc<
+            nomifun_miniapp_platform::MiniAppM1ApplicationService,
+        >,
     ) -> Self {
         Self {
             session_owner,
@@ -269,6 +280,7 @@ impl NomiCorePluginToolSessionProvider {
             kernel,
             compiler_environment,
             schema_resolver,
+            miniapp_application,
         }
     }
 }
@@ -330,11 +342,12 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
             snapshot,
             &principal,
         )?;
-        KernelNomiPluginToolSession::materialize(
+        let compiled = Arc::new(compiled);
+        let plugin_session = KernelNomiPluginToolSession::materialize(
             Arc::clone(&self.kernel),
-            Arc::new(compiled),
-            principal,
-            session_id,
+            Arc::clone(&compiled),
+            principal.clone(),
+            session_id.clone(),
             ScopeKey::from(format!(
                 "session:{}",
                 request.conversation_id
@@ -342,12 +355,113 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
             Arc::clone(&self.schema_resolver),
         )
         .await
-        .map(Some)
         .map_err(|error| {
             AppError::Conflict(format!(
                 "Nomi Plugin Tool session materialization failed: {error}"
             ))
+        })?;
+        let miniapp_actions =
+            KernelNomiPluginToolSession::materialize_miniapp_actions(
+                &compiled,
+                &principal,
+                &session_id,
+                &ScopeKey::from(format!(
+                    "session:{}",
+                    request.conversation_id
+                )),
+                Arc::new(NomiCoreMiniAppSchemaResolver {
+                    application: Arc::clone(&self.miniapp_application),
+                }),
+            )
+            .await
+            .map_err(|error| {
+                AppError::Conflict(format!(
+                    "Nomi MiniApp Tool session materialization failed: {error}"
+                ))
+            })?;
+        plugin_session
+            .with_miniapp_actions(
+                miniapp_actions,
+                Arc::new(NomiCoreMiniAppToolInvoker {
+                    application: Arc::clone(&self.miniapp_application),
+                    owner_user_id: common_owner.as_ref().to_owned(),
+                }),
+            )
+            .map(Some)
+        .map_err(|error| {
+            AppError::Conflict(format!(
+                "Nomi hosted Tool session assembly failed: {error}"
+            ))
         })
+    }
+}
+
+struct NomiCoreMiniAppSchemaResolver {
+    application:
+        Arc<nomifun_miniapp_platform::MiniAppM1ApplicationService>,
+}
+
+#[async_trait]
+impl NomiMiniAppToolSchemaResolver for NomiCoreMiniAppSchemaResolver {
+    async fn resolve(
+        &self,
+        owner: &PrincipalRef,
+        capability: &ResolvedMiniAppCapability,
+        reference: &nomifun_agent_contracts::CanonicalSchemaRef,
+    ) -> Result<StrictJsonValue, String> {
+        if owner.principal_kind != "user" {
+            return Err("MiniApp Agent Tool owner must be a user principal".to_owned());
+        }
+        self.application
+            .resolve_agent_capability_schema(
+                &owner.principal_id,
+                capability,
+                reference,
+            )
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
+
+struct NomiCoreMiniAppToolInvoker {
+    application:
+        Arc<nomifun_miniapp_platform::MiniAppM1ApplicationService>,
+    owner_user_id: String,
+}
+
+#[async_trait]
+impl NomiMiniAppToolInvoker for NomiCoreMiniAppToolInvoker {
+    async fn invoke(
+        &self,
+        request: NomiMiniAppToolInvocation,
+    ) -> Result<StrictJsonValue, NomiPluginToolError> {
+        let operation_id = request.operation_id().clone();
+        self.application
+            .invoke_agent_capability(
+                MiniAppAgentCapabilityInvocation {
+                    owner_user_id: self.owner_user_id.clone(),
+                    miniapp_id: request.capability().miniapp_id.clone(),
+                    capability: request.capability().capability.clone(),
+                    action_id: request.action().action_id.clone(),
+                    action_allowlist: request
+                        .capability()
+                        .action_allowlist
+                        .clone(),
+                    active_release: request.capability().active_release.clone(),
+                    active_release_epoch: request
+                        .capability()
+                        .active_release_epoch,
+                    catalog_digest: request.capability().catalog_digest.clone(),
+                    operation_id: operation_id.clone(),
+                    call_id: MiniAppBridgeCallId::from(format!(
+                        "nomi-miniapp:{}",
+                        operation_id.as_ref()
+                    )),
+                    payload: request.input().clone(),
+                },
+            )
+            .await
+            .map_err(|error| NomiPluginToolError::Contract(error.to_string()))
     }
 }
 
@@ -397,6 +511,19 @@ fn compile_nomi_plugin_snapshot(
             audience: persisted.audience.clone(),
             created_at_ms: persisted.created_at_ms,
             resolver_run_id: persisted.resolver_run_id.clone(),
+            miniapp_capabilities: persisted
+                .content
+                .initial_miniapp_capabilities
+                .iter()
+                .cloned()
+                .chain(
+                    persisted
+                        .content
+                        .on_demand_miniapp_capabilities
+                        .iter()
+                        .cloned(),
+                )
+                .collect(),
         },
     )
     .map_err(kernel_error_to_app)?;

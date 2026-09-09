@@ -19,9 +19,10 @@ use nomi_types::tool::{JsonSchema, ToolResult};
 use nomifun_agent_contracts::{
     ActionId, AgentSessionId, CapabilityActionDescriptor, CapabilityConsumer,
     CapabilityId, CapabilityKind, CanonicalSchemaRef, CorrelationId,
-    DigestHex, EffectClass, IdempotencyKey, OperationId, PrincipalRef,
-    ResolvedCapability, ResolvedSnapshotRef, ScopeKey, StrictJsonValue,
-    ToolPresentationKind, canonical_json_bytes, digest_payload,
+    DigestHex, EffectClass, IdempotencyKey, OperationId,
+    PrincipalRef, ResolvedCapability, ResolvedMiniAppCapability,
+    ResolvedSnapshotRef, ScopeKey, StrictJsonValue, ToolPresentationKind,
+    canonical_json_bytes, digest_payload,
 };
 use nomifun_agent_kernel::{
     CapabilityInvocationRequest, CompiledSnapshot, CompletedTurnBoundary,
@@ -38,10 +39,6 @@ const PROVIDER_NAME_PREFIX: &str = "plugin__";
 const PROVIDER_NAME_SEPARATOR: &str = "__";
 const PROVIDER_NAME_MAX_BYTES: usize = 64;
 const PROVIDER_NAME_HASH_HEX_BYTES: usize = 20;
-const PROVIDER_NAME_SLUG_BYTES: usize = PROVIDER_NAME_MAX_BYTES
-    - PROVIDER_NAME_PREFIX.len()
-    - PROVIDER_NAME_SEPARATOR.len()
-    - PROVIDER_NAME_HASH_HEX_BYTES;
 
 tokio::task_local! {
     static CURRENT_NOMI_PLUGIN_TOOL_SESSION: Option<NomiPluginToolSession>;
@@ -70,6 +67,21 @@ pub trait NomiPluginToolSchemaResolver: Send + Sync {
     async fn resolve(
         &self,
         capability: &ResolvedCapability,
+        reference: &CanonicalSchemaRef,
+    ) -> Result<StrictJsonValue, String>;
+}
+
+/// Host-owned resolver for schemas exported by a MiniApp Active Release.
+///
+/// The owner is passed separately because MiniApp release storage is
+/// owner-scoped. The resolver must verify the exact release/catalog facts in
+/// the supplied snapshot projection before returning schema bytes.
+#[async_trait]
+pub trait NomiMiniAppToolSchemaResolver: Send + Sync {
+    async fn resolve(
+        &self,
+        owner: &PrincipalRef,
+        capability: &ResolvedMiniAppCapability,
         reference: &CanonicalSchemaRef,
     ) -> Result<StrictJsonValue, String>;
 }
@@ -125,6 +137,14 @@ struct NomiPluginToolActionIdentity {
     input_schema_digest: DigestHex,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize)]
+struct NomiMiniAppToolActionIdentity {
+    resolved_snapshot_ref: ResolvedSnapshotRef,
+    resolved_capability: ResolvedMiniAppCapability,
+    action: CapabilityActionDescriptor,
+    input_schema_digest: DigestHex,
+}
+
 /// One provider-visible action derived from an exact Plugin capability.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NomiPluginToolAction {
@@ -137,6 +157,44 @@ pub struct NomiPluginToolAction {
 }
 
 impl NomiPluginToolAction {
+    pub fn provider_name(&self) -> &str {
+        &self.provider_name
+    }
+
+    pub fn activation_identity(&self) -> &str {
+        &self.activation_identity
+    }
+
+    pub fn capability_id(&self) -> &CapabilityId {
+        &self.identity.resolved_capability.capability.id
+    }
+
+    pub fn action_id(&self) -> &ActionId {
+        &self.identity.action.action_id
+    }
+
+    pub fn input_schema(&self) -> &StrictJsonValue {
+        &self.input_schema
+    }
+
+    pub fn is_deferred(&self) -> bool {
+        self.deferred
+    }
+}
+
+/// One provider-visible action derived from an exact MiniApp Active Release
+/// capability.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NomiMiniAppToolAction {
+    provider_name: String,
+    activation_identity: String,
+    description: String,
+    input_schema: StrictJsonValue,
+    identity: NomiMiniAppToolActionIdentity,
+    deferred: bool,
+}
+
+impl NomiMiniAppToolAction {
     pub fn provider_name(&self) -> &str {
         &self.provider_name
     }
@@ -181,12 +239,62 @@ pub trait NomiPluginToolInvoker: Send + Sync {
     ) -> Result<StrictJsonValue, NomiPluginToolError>;
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct NomiMiniAppToolInvocation {
+    identity: NomiMiniAppToolActionIdentity,
+    operation_id: OperationId,
+    idempotency_key: IdempotencyKey,
+    correlation_id: CorrelationId,
+    deferred_activation_proven: bool,
+    input: StrictJsonValue,
+}
+
+impl NomiMiniAppToolInvocation {
+    pub fn capability(&self) -> &ResolvedMiniAppCapability {
+        &self.identity.resolved_capability
+    }
+
+    pub fn action(&self) -> &CapabilityActionDescriptor {
+        &self.identity.action
+    }
+
+    pub fn operation_id(&self) -> &OperationId {
+        &self.operation_id
+    }
+
+    pub fn idempotency_key(&self) -> &IdempotencyKey {
+        &self.idempotency_key
+    }
+
+    pub fn correlation_id(&self) -> &CorrelationId {
+        &self.correlation_id
+    }
+
+    pub fn deferred_activation_proven(&self) -> bool {
+        self.deferred_activation_proven
+    }
+
+    pub fn input(&self) -> &StrictJsonValue {
+        &self.input
+    }
+}
+
+#[async_trait]
+pub trait NomiMiniAppToolInvoker: Send + Sync {
+    async fn invoke(
+        &self,
+        request: NomiMiniAppToolInvocation,
+    ) -> Result<StrictJsonValue, NomiPluginToolError>;
+}
+
 /// A complete set of Plugin action tools for one frozen Nomi session.
 #[derive(Clone)]
 pub struct NomiPluginToolSession {
     resolved_snapshot_ref: ResolvedSnapshotRef,
     actions: Arc<[NomiPluginToolAction]>,
     invoker: Arc<dyn NomiPluginToolInvoker>,
+    miniapp_actions: Arc<[NomiMiniAppToolAction]>,
+    miniapp_invoker: Option<Arc<dyn NomiMiniAppToolInvoker>>,
 }
 
 impl fmt::Debug for NomiPluginToolSession {
@@ -195,6 +303,7 @@ impl fmt::Debug for NomiPluginToolSession {
             .debug_struct("NomiPluginToolSession")
             .field("resolved_snapshot_ref", &self.resolved_snapshot_ref)
             .field("actions", &self.actions)
+            .field("miniapp_actions", &self.miniapp_actions)
             .finish_non_exhaustive()
     }
 }
@@ -238,7 +347,59 @@ impl NomiPluginToolSession {
             resolved_snapshot_ref,
             actions: Arc::from(actions),
             invoker,
+            miniapp_actions: Arc::from(Vec::<NomiMiniAppToolAction>::new()),
+            miniapp_invoker: None,
         })
+    }
+
+    /// Add exact MiniApp Active Release actions to this same Nomi Tool
+    /// session. Plugin and MiniApp actions share one registry/policy surface,
+    /// while their invokers remain separate execution adapters.
+    pub fn with_miniapp_actions(
+        mut self,
+        mut actions: Vec<NomiMiniAppToolAction>,
+        invoker: Arc<dyn NomiMiniAppToolInvoker>,
+    ) -> Result<Self, NomiPluginToolError> {
+        actions.sort_by(|left, right| {
+            (
+                left.capability_id(),
+                left.action_id(),
+                left.provider_name(),
+            )
+                .cmp(&(
+                    right.capability_id(),
+                    right.action_id(),
+                    right.provider_name(),
+                ))
+        });
+        let mut names = self
+            .actions
+            .iter()
+            .map(|action| action.provider_name.clone())
+            .collect::<BTreeSet<_>>();
+        let mut identities = self
+            .actions
+            .iter()
+            .map(|action| action.activation_identity.clone())
+            .collect::<BTreeSet<_>>();
+        for action in &actions {
+            if !names.insert(action.provider_name.clone()) {
+                return Err(NomiPluginToolError::Contract(format!(
+                    "duplicate provider tool name {}",
+                    action.provider_name
+                )));
+            }
+            if !identities.insert(action.activation_identity.clone()) {
+                return Err(NomiPluginToolError::Contract(format!(
+                    "duplicate activation identity for {}/{}",
+                    action.capability_id().as_ref(),
+                    action.action_id().as_ref()
+                )));
+            }
+        }
+        self.miniapp_actions = Arc::from(actions);
+        self.miniapp_invoker = Some(invoker);
+        Ok(self)
     }
 
     pub fn resolved_snapshot_ref(&self) -> &ResolvedSnapshotRef {
@@ -247,6 +408,14 @@ impl NomiPluginToolSession {
 
     pub fn actions(&self) -> &[NomiPluginToolAction] {
         &self.actions
+    }
+
+    pub fn miniapp_actions(&self) -> &[NomiMiniAppToolAction] {
+        &self.miniapp_actions
+    }
+
+    pub fn tool_count(&self) -> usize {
+        self.actions.len() + self.miniapp_actions.len()
     }
 
     pub fn provider_names_for(
@@ -261,6 +430,15 @@ impl NomiPluginToolSession {
                     && action.deferred == deferred
             })
             .map(|action| action.provider_name.clone())
+            .chain(
+                self.miniapp_actions
+                    .iter()
+                    .filter(|action| {
+                        action.capability_id().as_ref() == capability_id
+                            && action.deferred == deferred
+                    })
+                    .map(|action| action.provider_name.clone()),
+            )
             .collect()
     }
 
@@ -277,6 +455,12 @@ impl NomiPluginToolSession {
                 push_unique(deferred_tools, &action.provider_name);
             }
         }
+        for action in self.miniapp_actions.iter() {
+            push_unique(allowed_tools, &action.provider_name);
+            if action.deferred {
+                push_unique(deferred_tools, &action.provider_name);
+            }
+        }
         if !deferred_tools.is_empty() {
             push_unique(allowed_tools, "ToolSearch");
         }
@@ -288,11 +472,11 @@ impl NomiPluginToolSession {
         &self,
         registry: &mut ToolRegistry,
     ) -> Result<(), NomiPluginToolError> {
-        if self.actions.is_empty() {
+        if self.actions.is_empty() && self.miniapp_actions.is_empty() {
             return Ok(());
         }
         let deferred_state = registry.deferred_state();
-        let tools = self
+        let mut tools: Vec<Box<dyn Tool>> = self
             .actions
             .iter()
             .cloned()
@@ -304,16 +488,34 @@ impl NomiPluginToolSession {
                 }) as Box<dyn Tool>
             })
             .collect();
+        if let Some(invoker) = &self.miniapp_invoker {
+            tools.extend(self.miniapp_actions.iter().cloned().map(|action| {
+                Box::new(NomiMiniAppTool {
+                    action,
+                    invoker: Arc::clone(invoker),
+                    deferred_state: deferred_state.clone(),
+                }) as Box<dyn Tool>
+            }));
+        } else if !self.miniapp_actions.is_empty() {
+            return Err(NomiPluginToolError::Contract(
+                "MiniApp actions are present without an execution adapter".to_owned(),
+            ));
+        }
         let inserted = registry.register_batch(tools);
         let expected = self
             .actions
             .iter()
             .map(|action| action.provider_name.clone())
+            .chain(
+                self.miniapp_actions
+                    .iter()
+                    .map(|action| action.provider_name.clone()),
+            )
             .collect::<BTreeSet<_>>();
         let inserted = inserted.into_iter().collect::<BTreeSet<_>>();
         if inserted != expected {
             return Err(NomiPluginToolError::Contract(
-                "Nomi registry rejected one or more exact Plugin Tool routes"
+                "Nomi registry rejected one or more exact hosted Tool routes"
                     .to_owned(),
             ));
         }
@@ -467,6 +669,86 @@ impl KernelNomiPluginToolSession {
             invoker,
         )
     }
+
+    /// Materialize the MiniApp portion of the same frozen Nomi Tool session.
+    ///
+    /// MiniApp capabilities are intentionally not looked up in the Kernel
+    /// Plugin Registry. Their exact release/provenance projection is already
+    /// frozen in the Snapshot and schema bytes come from the owner-scoped
+    /// MiniApp release resolver.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn materialize_miniapp_actions(
+        compiled: &CompiledSnapshot,
+        owner: &PrincipalRef,
+        agent_session_id: &AgentSessionId,
+        state_scope_key: &ScopeKey,
+        schema_resolver: Arc<dyn NomiMiniAppToolSchemaResolver>,
+    ) -> Result<Vec<NomiMiniAppToolAction>, NomiPluginToolError> {
+        validate_session_identity(
+            compiled,
+            owner,
+            agent_session_id,
+            state_scope_key,
+        )?;
+        let initial = compiled
+            .content()
+            .initial_miniapp_capabilities
+            .iter()
+            .map(|capability| capability.capability.id.clone())
+            .collect::<BTreeSet<_>>();
+        let on_demand = compiled
+            .content()
+            .on_demand_miniapp_capabilities
+            .iter()
+            .map(|capability| capability.capability.id.clone())
+            .collect::<BTreeSet<_>>();
+        let mut actions = Vec::new();
+        for resolved in compiled
+            .content()
+            .initial_miniapp_capabilities
+            .iter()
+            .chain(&compiled.content().on_demand_miniapp_capabilities)
+        {
+            resolved
+                .validate()
+                .map_err(|error| NomiPluginToolError::Contract(error.message))?;
+            let deferred = if initial.contains(&resolved.capability.id) {
+                false
+            } else if on_demand.contains(&resolved.capability.id) {
+                true
+            } else {
+                return Err(NomiPluginToolError::Contract(format!(
+                    "MiniApp capability {} is in neither Snapshot set",
+                    resolved.capability.id.as_ref()
+                )));
+            };
+            for action in &resolved.actions {
+                if (!resolved.action_allowlist.is_empty()
+                    && !resolved.action_allowlist.contains(&action.action_id))
+                    || action.presentation != ToolPresentationKind::FunctionTool
+                {
+                    continue;
+                }
+                let input_schema = schema_resolver
+                    .resolve(owner, resolved, &action.input_schema)
+                    .await
+                    .map_err(|reason| NomiPluginToolError::Schema {
+                        reference: action.input_schema.clone(),
+                        reason,
+                    })?;
+                actions.push(build_miniapp_action(
+                    compiled.snapshot_ref().clone(),
+                    resolved.clone(),
+                    action.clone(),
+                    resolved.display_name.clone(),
+                    resolved.description.clone(),
+                    input_schema,
+                    deferred,
+                )?);
+            }
+        }
+        Ok(actions)
+    }
 }
 
 struct KernelNomiPluginToolInvoker {
@@ -560,6 +842,106 @@ struct NomiPluginTool {
     action: NomiPluginToolAction,
     invoker: Arc<dyn NomiPluginToolInvoker>,
     deferred_state: DeferredToolState,
+}
+
+struct NomiMiniAppTool {
+    action: NomiMiniAppToolAction,
+    invoker: Arc<dyn NomiMiniAppToolInvoker>,
+    deferred_state: DeferredToolState,
+}
+
+#[async_trait]
+impl Tool for NomiMiniAppTool {
+    fn name(&self) -> &str {
+        &self.action.provider_name
+    }
+
+    fn activation_identity(&self) -> &str {
+        &self.action.activation_identity
+    }
+
+    fn artifact_identity(&self) -> &str {
+        &self.action.activation_identity
+    }
+
+    fn deferred_search_aliases(&self) -> Vec<String> {
+        vec![
+            self.action.capability_id().as_ref().to_owned(),
+            self.action.action_id().as_ref().to_owned(),
+        ]
+    }
+
+    fn description(&self) -> &str {
+        &self.action.description
+    }
+
+    fn input_schema(&self) -> JsonSchema {
+        self.action.input_schema.0.clone()
+    }
+
+    fn is_concurrency_safe(&self, _input: &Value) -> bool {
+        matches!(
+            self.action.identity.action.effect_class,
+            EffectClass::Pure
+                | EffectClass::ReadLocal
+                | EffectClass::ReadSensitive
+        )
+    }
+
+    fn is_deferred(&self) -> bool {
+        self.action.deferred
+    }
+
+    async fn execute(&self, _input: Value) -> ToolResult {
+        ToolResult::error(
+            "MiniApp Tool invocation requires an engine-owned execution context",
+        )
+    }
+
+    async fn execute_with_context(
+        &self,
+        input: Value,
+        context: &ToolExecutionContext,
+    ) -> ToolResult {
+        let deferred_activation_proven = !self.action.deferred
+            || self
+                .deferred_state
+                .is_activated(&self.action.activation_identity);
+        if !deferred_activation_proven {
+            return ToolResult::error(format!(
+                "MiniApp Tool '{}' is deferred; activate it through ToolSearch before invoking it",
+                self.action.provider_name
+            ));
+        }
+        let operation_identity = context.operation_id();
+        let operation_id =
+            OperationId::from(format!("nomi-miniapp:{operation_identity}"));
+        let request = NomiMiniAppToolInvocation {
+            identity: self.action.identity.clone(),
+            idempotency_key: IdempotencyKey::from(format!(
+                "nomi-miniapp:{operation_identity}"
+            )),
+            correlation_id: CorrelationId::from(format!(
+                "nomi-miniapp:{operation_identity}"
+            )),
+            operation_id,
+            deferred_activation_proven,
+            input: StrictJsonValue(input),
+        };
+        match self.invoker.invoke(request).await {
+            Ok(output) => match serde_json::to_string_pretty(&output.0) {
+                Ok(content) => ToolResult::text(content),
+                Err(error) => ToolResult::error(format!(
+                    "MiniApp Tool output could not be serialized: {error}"
+                )),
+            },
+            Err(error) => ToolResult::error(error.to_string()),
+        }
+    }
+
+    fn category(&self) -> ToolCategory {
+        effect_category(self.action.identity.action.effect_class)
+    }
 }
 
 #[async_trait]
@@ -707,6 +1089,58 @@ fn build_action(
     })
 }
 
+fn build_miniapp_action(
+    resolved_snapshot_ref: ResolvedSnapshotRef,
+    resolved_capability: ResolvedMiniAppCapability,
+    action: CapabilityActionDescriptor,
+    display_name: String,
+    description: String,
+    input_schema: StrictJsonValue,
+    deferred: bool,
+) -> Result<NomiMiniAppToolAction, NomiPluginToolError> {
+    let input_schema_digest =
+        validate_canonical_input_schema(&action.input_schema, &input_schema)?;
+    let identity = NomiMiniAppToolActionIdentity {
+        resolved_snapshot_ref,
+        resolved_capability,
+        action,
+        input_schema_digest,
+    };
+    let canonical_identity = canonical_json_bytes(&identity).map_err(|error| {
+        NomiPluginToolError::Contract(format!(
+            "MiniApp Tool activation identity could not be encoded: {error}"
+        ))
+    })?;
+    let activation_identity =
+        String::from_utf8(canonical_identity.clone()).map_err(|error| {
+            NomiPluginToolError::Contract(format!(
+                "MiniApp Tool activation identity is not UTF-8: {error}"
+            ))
+        })?;
+    let provider_name = provider_tool_name_with_prefix(
+        "miniapp__",
+        identity.resolved_capability.capability.id.as_ref(),
+        identity.action.action_id.as_ref(),
+        &canonical_identity,
+    );
+    let description = if description.trim().is_empty() {
+        format!("{display_name} action {}", identity.action.action_id.as_ref())
+    } else {
+        format!(
+            "{display_name}: {description} Action: {}.",
+            identity.action.action_id.as_ref()
+        )
+    };
+    Ok(NomiMiniAppToolAction {
+        provider_name,
+        activation_identity,
+        description,
+        input_schema,
+        identity,
+        deferred,
+    })
+}
+
 fn validate_session_identity(
     compiled: &CompiledSnapshot,
     owner: &PrincipalRef,
@@ -830,6 +1264,20 @@ fn provider_tool_name(
     action_id: &str,
     canonical_identity: &[u8],
 ) -> String {
+    provider_tool_name_with_prefix(
+        PROVIDER_NAME_PREFIX,
+        capability_id,
+        action_id,
+        canonical_identity,
+    )
+}
+
+fn provider_tool_name_with_prefix(
+    prefix: &str,
+    capability_id: &str,
+    action_id: &str,
+    canonical_identity: &[u8],
+) -> String {
     let mut slug = format!("{capability_id}_{action_id}")
         .bytes()
         .map(|byte| {
@@ -846,14 +1294,18 @@ fn provider_tool_name(
     if slug.is_empty() {
         slug.extend_from_slice(b"tool");
     }
-    slug.truncate(PROVIDER_NAME_SLUG_BYTES);
+    let slug_bytes = PROVIDER_NAME_MAX_BYTES
+        .saturating_sub(prefix.len())
+        .saturating_sub(PROVIDER_NAME_SEPARATOR.len())
+        .saturating_sub(PROVIDER_NAME_HASH_HEX_BYTES);
+    slug.truncate(slug_bytes);
     while slug.last() == Some(&b'_') {
         slug.pop();
     }
     let hash = hex::encode(Sha256::digest(canonical_identity));
     let slug = String::from_utf8(slug).expect("ASCII slug");
     let name = format!(
-        "{PROVIDER_NAME_PREFIX}{slug}{PROVIDER_NAME_SEPARATOR}{}",
+        "{prefix}{slug}{PROVIDER_NAME_SEPARATOR}{}",
         &hash[..PROVIDER_NAME_HASH_HEX_BYTES]
     );
     debug_assert!(name.len() <= PROVIDER_NAME_MAX_BYTES);
