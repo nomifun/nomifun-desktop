@@ -11,11 +11,12 @@ use nomifun_db::{
 };
 use nomifun_plugin_platform::OwnerMutationCoordinator;
 use nomifun_plugin_service::{
-    CreatedPluginSource, DbPluginRepositoryAdapter, ImportedPluginArtifact,
-    PluginApplicationService, PluginArtifactStorePort, PluginHostCoordinator,
-    PluginMountDataStore, PluginOperationCancellation, PluginRegistryPublisher,
-    PluginRepository, PluginServiceDependencies, PluginServiceError,
-    PluginServicePaths, PluginSourceStorePort,
+    AppliedPluginSource, ApplyPluginSourceEditRequest, CreatedPluginSource,
+    DbPluginRepositoryAdapter, ImportedPluginArtifact, PluginApplicationService,
+    PluginArtifactStorePort, PluginHostCoordinator, PluginMountDataStore,
+    PluginOperationCancellation, PluginRegistryPublisher, PluginRepository,
+    PluginServiceDependencies, PluginServiceError, PluginServicePaths,
+    PluginSourceStorePort,
     UnconfiguredPluginBuildExecutor, UnconfiguredPluginCandidateTestExecutor, ERR_FORBIDDEN,
     ERR_INTEGRATION, ERR_NOT_FOUND, ERR_RECONCILE_REQUIRED, ERR_STALE,
 };
@@ -229,6 +230,16 @@ impl PluginSourceStorePort for UnavailableSourceStore {
         _project_id: &str,
     ) -> Result<(), PluginServiceError> {
         Ok(())
+    }
+
+    async fn apply_source_edit(
+        &self,
+        _owner_user_id: &str,
+        _request: &ApplyPluginSourceEditRequest,
+    ) -> Result<AppliedPluginSource, PluginServiceError> {
+        Err(PluginServiceError::integration(
+            "Source authoring is outside this test",
+        ))
     }
 }
 

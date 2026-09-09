@@ -35,7 +35,7 @@ use nomifun_db::{
     ProductOperationState, RecordPluginCandidateTestReceiptParams,
     RecordPluginReadyCandidateParams, ReplacePluginCredentialBindingsParams,
     RestorePluginMountParams, StartProductOperationParams, UninstallPluginMountParams,
-    UpdatePluginMountConfigParams,
+    UpdatePluginMountConfigParams, UpdatePluginProjectSourceParams,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -52,9 +52,10 @@ use crate::repository::{
     PluginRegistryPublisher, PluginRepository, PluginSourceStorePort,
 };
 use crate::types::{
-    ApplyAuthorization, BuildRequest, ConfigureInput, CreateProjectInput, DeleteDataRequest,
-    EnableRequest, ImportRequest, LinkPluginProjectParams, PluginInventory,
-    PluginServicePaths, RetryRequest, RestoreRequest, TestRequest, UninstallRequest,
+    ApplyAuthorization, ApplyPluginSourceEditInput, BuildRequest, ConfigureInput,
+    CreateProjectInput, DeleteDataRequest, EnableRequest, ImportRequest,
+    LinkPluginProjectParams, PluginInventory, PluginServicePaths, RetryRequest,
+    RestoreRequest, TestRequest, UninstallRequest,
 };
 
 pub struct PluginApplicationService {
@@ -244,6 +245,106 @@ impl PluginApplicationService {
             receipt.as_ref(),
             operation.as_ref(),
         )
+    }
+
+    pub async fn apply_source_edit(
+        &self,
+        input: ApplyPluginSourceEditInput,
+    ) -> Result<PluginProjectDetailDto, PluginServiceError> {
+        let _guard = self.project_guard(
+            &input.owner_user_id,
+            &input.request.project_id,
+        )
+        .await?;
+        let project = self
+            .owned_project(&input.owner_user_id, &input.request.project_id)
+            .await?;
+        let expected_source = project.source_head_digest.as_deref().ok_or_else(|| {
+            PluginServiceError::conflict(
+                "runtime-only Plugin Project has no editable Source",
+            )
+        })?;
+        let expected_lock = project.dependency_lock_digest.as_deref().ok_or_else(|| {
+            PluginServiceError::reconcile_required(
+                "managed Plugin Project has no exact dependency lock",
+            )
+        })?;
+        if project.managed_source_path.is_none() {
+            return Err(PluginServiceError::conflict(
+                "runtime-only Plugin Project has no editable Source",
+            ));
+        }
+        if expected_source != input.request.expected_source_snapshot_digest {
+            return Err(PluginServiceError::stale(
+                "Plugin Project Source snapshot changed",
+            ));
+        }
+
+        let applied = self
+            .source_store
+            .apply_source_edit(
+                &input.owner_user_id,
+                &input.request,
+            )
+            .await?;
+        if applied.dependency_lock_digest != expected_lock {
+            return Err(PluginServiceError::reconcile_required(
+                "Plugin Source edit changed or lost the exact dependency lock",
+            ));
+        }
+        if !applied.changed {
+            if applied.source_snapshot_digest != expected_source {
+                return Err(PluginServiceError::reconcile_required(
+                    "unchanged Plugin Source returned a different snapshot digest",
+                ));
+            }
+            return self
+                .get_project(
+                    &input.owner_user_id,
+                    &input.request.project_id,
+                )
+                .await;
+        }
+
+        let updated_at = now_ms();
+        let updated = self
+            .repository
+            .update_project_source_cas(&UpdatePluginProjectSourceParams {
+                project_id: project.project_id.clone(),
+                expected_generation: project.build_generation,
+                source_head_digest: applied.source_snapshot_digest.clone(),
+                dependency_lock_digest: Some(
+                    applied.dependency_lock_digest.clone(),
+                ),
+                updated_at,
+            })
+            .await;
+        match updated {
+            Ok(_) => {}
+            Err(error) => {
+                let observed = self
+                    .repository
+                    .get_project(&project.project_id)
+                    .await?
+                    .ok_or_else(|| {
+                        PluginServiceError::reconcile_required(
+                            "Plugin Project disappeared after Source commit",
+                        )
+                    })?;
+                if observed.owner_user_id != input.owner_user_id
+                    || observed.source_head_digest.as_deref()
+                        != Some(applied.source_snapshot_digest.as_str())
+                    || observed.dependency_lock_digest.as_deref()
+                        != Some(applied.dependency_lock_digest.as_str())
+                {
+                    return Err(PluginServiceError::reconcile_required(format!(
+                        "Plugin Source commit succeeded but Project metadata CAS failed: {error}"
+                    )));
+                }
+            }
+        }
+        self.get_project(&input.owner_user_id, &input.request.project_id)
+            .await
     }
 
     pub async fn delete_project(

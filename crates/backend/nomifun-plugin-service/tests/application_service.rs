@@ -34,17 +34,18 @@ use nomifun_db::{
     RecordPluginCandidateTestReceiptParams, RecordPluginReadyCandidateParams,
     ReplacePluginCredentialBindingsParams,
     RestorePluginMountParams, StartProductOperationParams, UninstallPluginMountParams,
-    UpdatePluginMountConfigParams,
+    UpdatePluginMountConfigParams, UpdatePluginProjectSourceParams,
 };
 use nomifun_plugin_service::{
+    AppliedPluginSource, ApplyPluginSourceEditInput, ApplyPluginSourceEditRequest,
     BuildOutput, CandidateTestOutput, ConfigureInput, CreateProjectInput,
     CreatedPluginSource, ImportedPluginArtifact, LinkPluginProjectParams,
     PluginApplicationService, PluginArtifactStorePort, PluginBuildExecutor,
     PluginCandidateTestExecutor, PluginHostCoordinator, PluginInventory,
     PluginMountDataStore, PluginOperationCancellation, PluginRegistryPublisher,
     PluginRepository, PluginServiceDependencies, PluginServiceError,
-    PluginServicePaths, PluginSourceStorePort, ERR_RECONCILE_REQUIRED,
-    ERR_RUNTIME, ERR_STALE,
+    PluginServicePaths, PluginSourceStorePort,
+    ERR_RECONCILE_REQUIRED, ERR_RUNTIME, ERR_STALE,
 };
 use nomifun_plugin_platform::{OwnerMutationCoordinator, PluginOwnerMutationScope};
 use serde_json::json;
@@ -271,6 +272,29 @@ impl PluginRepository for FakeRepository {
         state.projects.push(row.clone());
         state.library_revision += 1;
         Ok(row)
+    }
+
+    async fn update_project_source_cas(
+        &self,
+        params: &UpdatePluginProjectSourceParams,
+    ) -> Result<PluginProjectRow, PluginServiceError> {
+        let mut state = self.state.lock().await;
+        let project = state
+            .projects
+            .iter_mut()
+            .find(|project| project.project_id == params.project_id)
+            .ok_or_else(|| PluginServiceError::not_found("project"))?;
+        if project.build_generation != params.expected_generation
+            || project.managed_source_path.is_none()
+            || params.updated_at < project.updated_at
+        {
+            return Err(PluginServiceError::stale("project source CAS"));
+        }
+        project.source_head_digest = Some(params.source_head_digest.clone());
+        project.dependency_lock_digest = params.dependency_lock_digest.clone();
+        project.build_generation += 1;
+        project.updated_at = params.updated_at;
+        Ok(project.clone())
     }
 
     async fn delete_project_cas(
@@ -935,7 +959,9 @@ impl FakeDataStore {
 #[derive(Default)]
 struct FakeSourceStore {
     deleted: Mutex<Vec<String>>,
+    edits: Mutex<Vec<ApplyPluginSourceEditRequest>>,
     fail_delete: bool,
+    next_edit_result: Mutex<Option<Result<AppliedPluginSource, PluginServiceError>>>,
 }
 
 #[async_trait]
@@ -967,6 +993,22 @@ impl PluginSourceStorePort for FakeSourceStore {
         }
         self.deleted.lock().await.push(project_id.to_owned());
         Ok(())
+    }
+
+    async fn apply_source_edit(
+        &self,
+        _owner_user_id: &str,
+        request: &ApplyPluginSourceEditRequest,
+    ) -> Result<AppliedPluginSource, PluginServiceError> {
+        self.edits.lock().await.push(request.clone());
+        if let Some(result) = self.next_edit_result.lock().await.take() {
+            return result;
+        }
+        Ok(AppliedPluginSource {
+            source_snapshot_digest: "e".repeat(64),
+            dependency_lock_digest: "d".repeat(64),
+            changed: true,
+        })
     }
 }
 
@@ -1611,7 +1653,9 @@ async fn project_delete_reports_reconcile_required_after_authoritative_db_commit
     let repo = Arc::new(FakeRepository::default());
     let source_store = Arc::new(FakeSourceStore {
         deleted: Mutex::new(Vec::new()),
+        edits: Mutex::new(Vec::new()),
         fail_delete: true,
+        next_edit_result: Mutex::new(None),
     });
     let service = service_with_source_store(
         Arc::clone(&repo),
@@ -1652,6 +1696,57 @@ async fn project_delete_reports_reconcile_required_after_authoritative_db_commit
         .unwrap_err();
     assert_eq!(error.code(), ERR_RECONCILE_REQUIRED);
     assert!(repo.get_project(&project_id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn source_edit_updates_project_head_with_exact_dependency_lock_cas() {
+    let repo = Arc::new(FakeRepository::default());
+    let source_store = Arc::new(FakeSourceStore::default());
+    repo.insert_project(project_row(
+        "project-source-edit",
+        "user-1",
+        Some("sources/user-1/project-source-edit/source"),
+        None,
+    ))
+    .await;
+    let service = service_with_source_store(
+        Arc::clone(&repo),
+        Arc::new(QueueArtifactStore::new(Vec::new())),
+        no_builder(),
+        Arc::clone(&source_store) as Arc<dyn PluginSourceStorePort>,
+    );
+
+    let detail = service
+        .apply_source_edit(ApplyPluginSourceEditInput {
+            owner_user_id: "user-1".to_owned(),
+            request: ApplyPluginSourceEditRequest {
+                project_id: "project-source-edit".to_owned(),
+                expected_source_snapshot_digest: "c".repeat(64),
+                edit: nomifun_plugin_service::PluginSourceFileEdit::Replace {
+                    path: "src/main.js".to_owned(),
+                    bytes: b"export const edited = true;\n".to_vec(),
+                },
+            },
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        detail.source_snapshot_digest.as_deref(),
+        Some("e".repeat(64).as_str())
+    );
+    assert_eq!(detail.dependency_lock_digest.as_deref(), Some("d".repeat(64).as_str()));
+    assert_eq!(detail.summary.build_generation, 2);
+    assert_eq!(source_store.edits.lock().await.len(), 1);
+    assert_eq!(
+        repo.get_project("project-source-edit")
+            .await
+            .unwrap()
+            .unwrap()
+            .source_head_digest
+            .as_deref(),
+        Some("e".repeat(64).as_str())
+    );
 }
 
 #[tokio::test]
