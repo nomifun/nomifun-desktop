@@ -1549,5 +1549,49 @@ Windows Candidate 仍按台账推进。
 MiniApp Agent consumer 的第一阶段 adapter 已在 application service 内形成独立
 `MiniAppAgentCapabilityPort`：它复用 Active Release、Service spec 和 dedicated Host，
 并对 owner、epoch、artifact/publication digest、consumer/action 和 typed resource
-做调用前校验。Nomi Tool session 的统一 target 分流仍是后续实现，不允许把该 port
-单独宣称为完整 Agent dispatch。
+做调用前校验。
+
+## 2026-09-09 MiniApp Agent exact lock 与 Nomi Tool session 实施注记
+
+本轮把 MiniApp capability 从“已发布但尚未被 Agent 消费”推进到第一阶段的真实
+Nomi host seam，仍保持简单边界：
+
+```text
+Active Release publication
+  → shared Formal Capability Catalog
+  → ResolvedMiniAppCapability exact Snapshot projection
+  → same Nomi dynamic Tool session as ordinary Plugin actions
+  → MiniAppAgentCapabilityPort
+  → dedicated Service Host
+```
+
+### A. Snapshot/Compiler
+
+`ResolvedMiniAppCapability` 是独立的 exact value，不是 Plugin mount 的别名。它只
+冻结执行所需的 MiniApp ID、Package contribution lock、Active Release/epoch、
+publication/catalog digest、action descriptors、action allowlist 和 required
+resource kinds；具体资源实例仍由消费目标绑定。Kernel Compiler 接收由 Control
+Plane 从 Catalog 生成的 projection，拒绝重复来源、Plugin ID 冲突、Revision lock
+漂移、action 越权和没有 exact placement 的能力。没有 MiniApp 时，Plugin-only
+runtime profile digest 的 canonical 形状不变。
+
+### B. Nomi session
+
+现有 `NomiPluginToolSession` 作为当前 Nomi host 的最小 hosted Tool 容器，同时承载
+Plugin 与 MiniApp action；不新增第三套 Registry。MiniApp 使用独立 `miniapp__`
+provider name、schema resolver 和 invoker，ToolSearch、initial/on-demand 和
+engine-owned operation identity 与 Plugin 共用同一 Nomi ToolRegistry。schema resolver
+每次从 owner-scoped Release Store 校验 Active Release、epoch、catalog digest、
+Package/contribution/action facts；invoker 只把 exact request 交给
+`MiniAppAgentCapabilityPort`，不读取 latest Catalog、不复用 Surface Bridge。
+
+### C. 明确未交付边界
+
+- typed resource binding 仍 fail closed 为
+  `CAPABILITY_RESOURCE_BINDING_UNAVAILABLE`，本轮不预建 MiniApp 资源 picker 或
+  第二套资源数据库；
+- Gateway/Remote/Automation consumer 仍保持 unavailable；
+- 真实 callable MiniApp contribution 的完整产品 E2E、旧 MiniApp/Extension 生产链
+ 物理清理、Desktop accessibility、NSIS/Windows Candidate 和跨平台原生验证仍按
+  `PHASE-N1-M1-CLOSURE-TODO.zh.md` 顺序执行；
+- 不把该实现解释为 M1-U-01/M1-V-01/N1-V-01/RC-WIN-01 已关闭。

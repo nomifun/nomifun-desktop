@@ -703,5 +703,23 @@ consumer 声明和 action allowlist，再通过现有 dedicated Service Host 执
 Plugin Registry，也不授予 MiniApp owner 权限。
 
 定向验证增加 Service application stale Catalog digest fail-closed 测试并通过。
-该 port 尚未接入 Nomi 动态 Tool session，因此不关闭 MiniApp Agent dispatch、
-`M1-U-01`、`M1-V-01` 或 `RC-WIN-01`。
+
+## 2026-09-09 MiniApp Agent 动态 Tool session 第一阶段收口
+
+Control Plane/Kernel 已增加独立 `ResolvedMiniAppCapability` exact projection：
+MiniApp capability 不进入 Kernel Plugin Registry，也不复用 `ResolvedCapability` 的
+Plugin mount 字段。Snapshot 现在冻结 MiniApp ID、Active Release/epoch、catalog
+digest、contribution lock、action schema/action allowlist 和 required resource kinds；
+on-demand activation plan 与 compact index 同样纳入 Snapshot/runtime profile digest。
+
+Nomi-core 通过现有 session provider 将 Plugin 和 MiniApp action 合并进同一个
+动态 Tool session；MiniApp action 使用独立 provider 名称和 invoker，schema 由
+owner-scoped Release Store 校验，调用最终进入 `MiniAppAgentCapabilityPort` 和
+dedicated Service Host。Plugin 行为没有改走 MiniApp 路径，Active Release、catalog
+digest、epoch、owner、action 和 typed resource 漂移均 fail closed。
+
+定向验证：Kernel 28、Control Plane 22、Nomi Tool consumer 5、MiniApp Platform 29
+及既有 application/backup/service suites 通过；contract generator `write/check`、
+受影响 crate check、定向 rustfmt 和 `git diff --check` 通过。该子切片仍不关闭
+真实 callable contribution 产品 E2E、`M1-U-01`、`M1-V-01`、`N1-V-01` 或
+`RC-WIN-01`；旧 MiniApp/Extension 生产链清理和 Windows Candidate 继续后置。
