@@ -568,8 +568,9 @@ opening/ready/failed 结果，不创建第二 Session；token revoke 提交后�
 
 集成 Owner 直接审查工作树 diff、`git diff --check` 和依赖影响，再形成普通 checkpoint。
 可选的本地临时分支/worktree 只用于隔离并发写集；完成合流后删除，不作为任务入口。
-不生成机器专用 Prompt、handoff、manifest、result template、远端 SHA 清单或跨机
-attestation。
+不生成机器专用的长期 Prompt、handoff、manifest、result template、远端 SHA 清单或
+跨机 attestation。用户明确要求阶段性交接时，允许使用一次性启动材料，但它不改变
+canonical contract、状态源或集成 Owner，也不成为长期跨机协调协议。
 
 ## 9. 验证策略
 

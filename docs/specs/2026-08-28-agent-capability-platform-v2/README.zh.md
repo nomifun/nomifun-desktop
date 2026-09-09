@@ -1,19 +1,22 @@
 # Agent Capability Platform v2 文档入口
 
-> 更新日期：2026-09-06
+> 更新日期：2026-09-09
 >
 > 适用分支：`rf/agent-capability-platform-v2`
 
 本目录保留经当前修订仍有效的核心设计、分阶段执行台账，以及仍被 Gate/Generator 使用的
 机器文件。设计文档不能因为形成时间较早而整体删除；发生方向修订时，应在原设计中删除
-或改写错误条款，并保留仍有效的目标、边界、理由和演进依据。本轮所有实现、修复、测试
-编排和 merge 均由当前主机负责，以互斥写集的本机并发 lane 推进。跨机开发分配、第二台
-开发机入口、远端 SHA 同步、专用 Prompt/manifest/result template 和跨机 attestation
-均不是当前执行要求；这些概念只可作为明确标注已废弃的历史理由出现在核心文档或 Git
-历史中。
+或改写错误条款，并保留仍有效的目标、边界、理由和演进依据。默认情况下，所有实现、修复、
+测试编排和 merge 均由当前主机负责，以互斥写集的本机并发 lane 推进，不建立长期跨机
+开发协议。2026-09-09 用户明确要求把 Windows N1/M1 阶段性交给另一台机器，因此新增
+`CROSS-MACHINE-WORK-START-PROMPT-2026-09-09.zh.md` 作为一次性启动材料；它不改变
+设计合同、状态源、owner 或 Git 交付规则。
 
 ## 阅读顺序
 
+0. `CROSS-MACHINE-WORK-START-PROMPT-2026-09-09.zh.md`
+   - 当前 Windows N1/M1 阶段性交接的启动顺序、基线、下一步边界和安全/Git 纪律；
+     仅用于启动，不是设计合同或实时状态源。
 1. `05-system-capability-replacement-foundation.zh.md`
    - 2026-09-02 一期止损修订、Role/Provider 基础和完成定义，优先于更早的设计条款。
 2. `GLOBAL-CLOSURE-TODO.zh.md`
@@ -67,13 +70,16 @@ canonical Rust / SQL / generated schema / behavior tests
 
 它们是 Gate 输入或历史阶段的自动化检查点，不是人工设计入口，也不是跨机交接材料。
 其内容与 05 或 canonical 代码冲突时，必须修改自动化合同/Gate，不能让过期生成物反向
-覆盖设计。
+覆盖设计。当前一次性跨机启动材料只认本文开头列出的交接文档，不从这些 JSON 推导
+机器分工或实时状态。
 
 ## 已删除的过期执行文件
 
 `IMPLEMENTATION-STATUS`、旧 `START-PROMPT`、旧 macOS handoff、旧跨机批次 Prompt/清单/
 结果模板和不再消费的旧 C8 migration batch manifests 只存在于 Git 历史。这些名称仅
-用于说明已撤销的执行方式，不属于当前主机的执行材料，也不得据此恢复跨机任务。
+用于说明已撤销的执行方式，不属于当前执行材料，也不得据此恢复跨机任务。当前唯一的
+一次性阶段性交接入口是 `CROSS-MACHINE-WORK-START-PROMPT-2026-09-09.zh.md`；它不
+替代 GLOBAL/PHASE 台账，也不授权恢复旧方案。
 
 需要审计时使用 `git show <commit>:<path>`；不要据此恢复过期任务状态或覆盖 GLOBAL TODO。
 
@@ -83,3 +89,5 @@ canonical Rust / SQL / generated schema / behavior tests
 2. 不用笼统的“历史文档”免责声明掩盖正文冲突，也不因局部错误整体删除核心设计。
 3. 实施状态只更新对应阶段台账；设计文档不复制 closed/open 数量和临时 commit 进度。
 4. 一次性执行说明和临时测试记录在失效后删除，长期设计理由回写核心文档。
+5. 若用户明确要求阶段性交接，可新增一次性启动材料；该材料必须标明基线和失效边界，
+   不得成为第二个状态源、设计合同或长期跨机协调协议。

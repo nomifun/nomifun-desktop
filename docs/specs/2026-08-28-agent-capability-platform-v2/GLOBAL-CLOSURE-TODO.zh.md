@@ -1,6 +1,6 @@
 # Agent Capability Platform v2 一期精简闭合 TODO
 
-> 盘点日期：2026-09-06
+> 盘点日期：2026-09-09
 >
 > 基线分支：`rf/agent-capability-platform-v2`
 >
@@ -59,8 +59,10 @@ C9/Nomi 删除和 Nomi-free RC 已延后，不新增当前阶段阻断。
 执行约束：
 
 1. 05 与本文冲突时以 05 为准；经修订的 01-04 与 `DECISIONS` 保留设计依据，但不记录实时
-   状态。旧 `IMPLEMENTATION-STATUS`、旧 GLOBAL TODO、旧 Prompt 和 handoff 仅作 Git
-   历史审计，不是当前执行材料。
+   状态。旧 `IMPLEMENTATION-STATUS`、旧 GLOBAL TODO、旧 Prompt 和旧 handoff 仅作 Git
+   历史审计，不是当前执行材料。用户于 2026-09-09 明确要求阶段性交接时，当前唯一的
+   启动入口是 `CROSS-MACHINE-WORK-START-PROMPT-2026-09-09.zh.md`；它不替代本文、
+   PHASE 台账或 05/06 设计合同。
 2. 不使用 reset、force-push 或历史重写；revert 必须使用普通提交，并先检查真实消费者。
 3. 每个任务只实现一个实际闭环；需要第二份事实、新 coordinator、新全局 digest 或新状态机
    时先停止并重新核对 05。
@@ -465,7 +467,10 @@ Codex app-server 或其他 Runtime。当前没有运行中 Runtime selector、pe
   应用本身的 Tauri/后端 smoke 已完成，以上均作为环境/harness 记录，未继续盲目重试。
 - 关闭生命周期：Nomi-core 应用和桌面 host 先取消后台任务，再清理 Terminal、Gateway/
   Browser、Robot、SSH，最后关闭数据库；IDMM janitor 不再在数据库关闭后继续查询。
-- 当前所有开发、合流和验证继续在本机进行；没有机器 2 Prompt、handoff、压缩包或跨机 attestation。
+- 默认所有开发、合流和验证继续在本机进行，不建立长期跨机开发协议。2026-09-09 用户
+  明确要求将 Windows N1/M1 阶段性交给另一台机器；启动上下文集中记录在
+  `CROSS-MACHINE-WORK-START-PROMPT-2026-09-09.zh.md`，不产生压缩包、跨机 attestation
+  或第二个状态源。
 
 ### 2026-09-05 本机续接 checkpoint
 
@@ -629,3 +634,16 @@ identity Catalog digest；普通 Share Export 与 Backup Export 的 owner operat
 MiniApp Capability Catalog 正式 consumer integration → 旧 MiniApp 生产链物理清理
 → Windows Candidate/NSIS/fault/accessibility → 最终 Windows cohort；只有其后才交接
 macOS arm64 与 Linux Desktop x64，手机模式不属于 `nomifun-desktop` 范围。
+
+## 2026-09-09 Windows N1/M1 阶段性交接
+
+用户要求先进行阶段性收尾，再由另一台更快的 coding agent 接手后续 Windows 主线。
+当前交接材料为：
+
+`CROSS-MACHINE-WORK-START-PROMPT-2026-09-09.zh.md`
+
+该文档固定了 `rf/agent-capability-platform-v2` 的交接基线
+`51b0243f7587df22a4007ad63655b64d0f861b7a`、已交付的 M1-2 Whole-App Backup
+闭环、当前未关闭边界、第一轮 MiniApp shared Catalog consumer integration 的启动方法、
+Windows/Provider/Git 安全规则和停止边界。它只用于跨机器启动，不得覆盖本文状态，
+不得恢复旧 Catalog 实验、旧 Extension/MiniApp 兼容路径或已撤销的跨机执行协议。
