@@ -662,3 +662,31 @@ dedicated Service Host 执行 enabled Service Active Release 的 action，并在
 校验 owner、Release/epoch、artifact/publication digest、consumer、action 和 typed
 resource 边界。MiniAppService consumer 可据此标记 active；Agent/Gateway consumer
 仍保持 unavailable，Nomi 动态 Tool session、旧链清理和 Windows Candidate 仍未完成。
+
+## 2026-09-09 MiniApp Agent exact Snapshot / Nomi Tool session checkpoint
+
+MiniApp Agent capability 已完成第一阶段的正式消费链路接入：
+
+- Control Plane 从共享 Formal Capability Catalog 生成独立
+  `ResolvedMiniAppCapability`，冻结 MiniApp ID、Active Release、epoch、完整
+  publication/catalog digest、Package contribution lock、action schema/action
+  allowlist 和 required resource kinds；
+- Kernel Compiler 将 MiniApp projection 保留在独立的 Snapshot 字段中，不把
+  MiniApp 伪装成 Plugin Mount，也不把它写入 Kernel Plugin Registry；Plugin-only
+  runtime profile digest 在没有 MiniApp 时保持原有序列化形状；
+- Nomi 动态 Tool session 现在可以在同一个 ToolRegistry 中同时承载 Plugin 与
+  MiniApp action。MiniApp action 使用 `miniapp__` 独立命名和独立 invoker，schema
+  由 owner-scoped MiniApp Release Store 重新校验，执行最终进入
+  `MiniAppAgentCapabilityPort` 和 dedicated Service Host；
+- initial/on-demand、ToolSearch、action allowlist、Active Release/catalog drift
+  和 MiniApp/Plugin provenance 均保持 fail closed；typed resource 当前仍明确返回
+  `CAPABILITY_RESOURCE_BINDING_UNAVAILABLE`，不借此切换到旧 Surface Bridge 或
+  Plugin Registry。
+
+定向证据：Agent contracts 84、Kernel 28、Control Plane 22、Nomi Plugin/MiniApp
+Tool consumer 5、MiniApp Platform 29 及既有 application/backup/service suites
+均通过；受影响 crate `cargo check`、定向 rustfmt、contract generator
+`write/check` 和 `git diff --check` 通过。该 checkpoint 仍不关闭
+`M1-U-01`、`M1-V-01`、`N1-V-01` 或 `RC-WIN-01`；真实 MiniApp callable
+contribution 的产品 E2E、旧生产链物理清理、Desktop accessibility/NSIS Candidate
+仍按依赖顺序继续。
