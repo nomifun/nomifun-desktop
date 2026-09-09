@@ -1534,3 +1534,13 @@ managed storage/service-test/share 回归 7、MiniApp UI/wire 35；受影响 cra
 `cargo check`、定向 rustfmt、`check:i18n` 和 UI production build 通过。`M1-2-01`
 现已关闭；`M1-U-01` 的 Desktop accessibility/产品走查、`M1-V-01` 的 Windows
 Candidate/NSIS/fault 验证，以及 Catalog consumer 和旧 MiniApp 清理仍按顺序进行。
+
+## 2026-09-09 MiniApp shared Catalog publication 实现边界
+
+MiniApp Active Release 已开始进入平台共享 Formal Capability Catalog，但本节只记录
+publication/read-side 一致性：publication 使用 owner-scoped 版本更新和 tombstone；
+`catalog_digest` 覆盖排序后的完整 publication；MiniApp capability 合同 owner 仍是
+Package，产品生命周期 owner 仍由 MiniApp application service 管理；真实 Agent/Gateway
+adapter 接入前 consumer availability 一律 unavailable，避免 metadata-only success。
+Agent dispatch、Gateway invoke、typed resource binding、旧 MiniApp/Extension 清理和
+Windows Candidate 仍按台账推进。

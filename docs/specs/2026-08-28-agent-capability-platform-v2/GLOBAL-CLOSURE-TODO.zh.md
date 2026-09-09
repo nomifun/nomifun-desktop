@@ -647,3 +647,10 @@ macOS arm64 与 Linux Desktop x64，手机模式不属于 `nomifun-desktop` 范�
 闭环、当前未关闭边界、第一轮 MiniApp shared Catalog consumer integration 的启动方法、
 Windows/Provider/Git 安全规则和停止边界。它只用于跨机器启动，不得覆盖本文状态，
 不得恢复旧 Catalog 实验、旧 Extension/MiniApp 兼容路径或已撤销的跨机执行协议。
+
+## 2026-09-09 Windows MiniApp Catalog publication checkpoint
+
+已完成 MiniApp Active Release 到共享 Formal Capability Catalog 的一致性接入：完整
+publication digest、owner-scoped 版本更新和 tombstone 均已生效；无真实执行适配器的
+MiniApp consumer 保持显式 unavailable。该 checkpoint 不等于 MiniApp Agent/Gateway
+dispatch 完成，也不改变 M1-U-01、M1-V-01、N1-V-01、RC-WIN-01 或外部平台状态。

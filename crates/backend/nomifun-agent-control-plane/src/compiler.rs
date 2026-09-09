@@ -1293,6 +1293,7 @@ mod tests {
                 catalog_entry.capability.clone(),
                 catalog_entry,
             )]),
+            miniapp_publications: BTreeMap::new(),
             skills: vec![materialized_skill.clone()],
             mcp_tools: vec![materialized_mcp.clone()],
             unavailable_capabilities: BTreeMap::new(),

@@ -728,6 +728,7 @@ fn catalog_from_registry(registry: &MaterializedRegistry) -> CatalogSnapshot {
             .cloned()
             .collect(),
         formal_capability_entries: BTreeMap::new(),
+        miniapp_publications: BTreeMap::new(),
         skills: registry
             .skills
             .values()

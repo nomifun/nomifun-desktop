@@ -5,14 +5,13 @@ use nomifun_api_types::{
     ImportMiniAppBackupRequest, MiniAppKindDto, MiniAppLifecycleDto,
 };
 use nomifun_agent_contracts::{
-    MiniAppReleaseArtifactV1, MiniAppReleaseRef, PackageContributions, digest_payload,
+    MiniAppReleaseArtifactV1, MiniAppReleaseRef,
 };
 use nomifun_db::{
     IMiniAppM1Repository, SqliteMiniAppM1Repository, init_database_memory,
     installation_owner_id,
 };
 use nomifun_miniapp_platform::MiniAppM1ApplicationService;
-use serde::Serialize;
 
 #[tokio::test]
 async fn whole_app_backup_roundtrips_disabled_ui_only_product_as_new_identity() {
@@ -244,27 +243,21 @@ async fn whole_app_backup_import_recomputes_catalog_digest_for_new_identity() {
         release_digest: active.release_digest.clone().into(),
         manifest_digest: active.manifest_digest.clone().into(),
     };
-    let expected = digest_payload(&CatalogDigestInput {
-        miniapp_id: &imported.miniapp.miniapp_id,
-        active_release: &active_ref,
-        contributions: &artifact.manifest.payload.contributions,
-    })
-    .unwrap()
-    .as_ref()
-    .to_owned();
+    let expected = nomifun_miniapp_platform::miniapp_catalog_digest(
+        &imported.miniapp.miniapp_id,
+        &active_ref,
+        &artifact.manifest.payload.contributions,
+    )
+    .unwrap();
     let imported_row = repository
         .get(&owner, &imported.miniapp.miniapp_id)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(imported_row.product.materialized_catalog_digest, expected);
-}
-
-#[derive(Serialize)]
-struct CatalogDigestInput<'a> {
-    miniapp_id: &'a str,
-    active_release: &'a MiniAppReleaseRef,
-    contributions: &'a PackageContributions,
+    assert_eq!(
+        imported_row.product.materialized_catalog_digest,
+        expected.as_ref()
+    );
 }
 
 fn built_id(workshop: &nomifun_api_types::MiniAppWorkshopDto) -> String {

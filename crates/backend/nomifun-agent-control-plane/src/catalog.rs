@@ -1,12 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use nomifun_agent_contracts::{
-    CanonicalErrorCode, CapabilityCatalogEntry, CapabilityConsumer,
-    CapabilityId, CapabilityOwner, CapabilityRef, CatalogAvailability,
-    ContributionSourceKind, McpBindingId, McpServerId, McpToolKey,
-    OfficialPresetKey, OfficialPresetSeedManifestPayload, PluginSourceKind,
-    SkillRef, digest_payload,
+    CanonicalErrorCode, CapabilityCatalogEntry,
+    CapabilityConsumer, CapabilityId, CapabilityOwner, CapabilityRef,
+    CatalogAvailability, ContributionSourceKind, McpBindingId, McpServerId,
+    McpToolKey, MiniAppCapabilityCatalogPublication, MiniAppCapabilityCatalogSink,
+    MiniAppCapabilityCatalogPublicationUpdate, MiniAppId, OfficialPresetKey,
+    OfficialPresetSeedManifestPayload,
+    PluginSourceKind, SkillRef, digest_payload,
     official_preset_seed_manifest_payload,
 };
 use nomifun_agent_kernel::{
@@ -25,10 +27,107 @@ use crate::wire::{wire_cast, wire_name};
 pub struct CatalogSnapshot {
     pub capabilities: Vec<MaterializedCapability>,
     pub formal_capability_entries: BTreeMap<CapabilityRef, CapabilityCatalogEntry>,
+    pub miniapp_publications:
+        BTreeMap<MiniAppId, MiniAppCapabilityCatalogPublication>,
     pub skills: Vec<MaterializedSkill>,
     pub mcp_tools: Vec<MaterializedMcpTool>,
     pub unavailable_capabilities: BTreeMap<CapabilityId, CanonicalErrorCode>,
     pub service_key_diagnostics: Vec<String>,
+}
+
+/// Read-side source for durable MiniApp Active Release publications.
+///
+/// The source is deliberately narrower than `CatalogProvider`: it contributes
+/// only MiniApp publications, while `KernelCatalogProvider` remains the single
+/// assembled Catalog provider used by all consumers.
+pub trait MiniAppCatalogPublicationSource: Send + Sync {
+    fn publications(
+        &self,
+    ) -> Result<Vec<MiniAppCapabilityCatalogPublication>, ControlPlaneError>;
+}
+
+/// Shared in-process publication index used by the Desktop composition.
+///
+/// Each MiniApp is replaced as one immutable publication. This prevents a
+/// consumer snapshot from observing capabilities from two different Active
+/// Release identities.
+#[derive(Clone, Default)]
+pub struct SharedMiniAppCatalogPublications {
+    publications:
+        Arc<RwLock<BTreeMap<(nomifun_agent_contracts::UserId, MiniAppId), MiniAppCapabilityCatalogPublicationUpdate>>>,
+}
+
+impl SharedMiniAppCatalogPublications {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl MiniAppCapabilityCatalogSink for SharedMiniAppCatalogPublications {
+    fn replace_miniapp_publication(
+        &self,
+        update: MiniAppCapabilityCatalogPublicationUpdate,
+    ) -> Result<(), String> {
+        update.validate().map_err(|error| error.to_string())?;
+        let mut publications = self
+            .publications
+            .write()
+            .map_err(|_| "MiniApp Catalog publication index is poisoned".to_owned())?;
+        let key = (update.owner_user_id.clone(), update.miniapp_id.clone());
+        if let Some(current) = publications.get(&key) {
+            let ordering = miniapp_publication_version(current)
+                .cmp(&miniapp_publication_version(&update));
+            match ordering {
+                std::cmp::Ordering::Greater => return Ok(()),
+                std::cmp::Ordering::Equal if current == &update => return Ok(()),
+                std::cmp::Ordering::Equal => {
+                    return Err(
+                        "MiniApp Catalog update reuses a version with different publication facts"
+                            .to_owned(),
+                    );
+                }
+                std::cmp::Ordering::Less => {}
+            }
+        }
+        publications.insert(key, update);
+        Ok(())
+    }
+}
+
+impl MiniAppCatalogPublicationSource for SharedMiniAppCatalogPublications {
+    fn publications(
+        &self,
+    ) -> Result<Vec<MiniAppCapabilityCatalogPublication>, ControlPlaneError> {
+        self.publications
+            .read()
+            .map_err(|_| catalog_invalid("MiniApp Catalog publication index is poisoned"))
+            .and_then(|publications| {
+                let mut active = BTreeMap::new();
+                for update in publications.values() {
+                    if let Some(publication) = &update.publication {
+                        if active
+                            .insert(publication.miniapp_id.clone(), publication.clone())
+                            .is_some()
+                        {
+                            return Err(catalog_invalid(
+                                "multiple owner-scoped MiniApp publications share one MiniApp identity",
+                            ));
+                        }
+                    }
+                }
+                Ok(active.into_values().collect())
+            })
+    }
+}
+
+fn miniapp_publication_version(
+    update: &MiniAppCapabilityCatalogPublicationUpdate,
+) -> (u64, u64, u64) {
+    (
+        update.product_revision,
+        update.pointer_revision,
+        update.active_release_epoch,
+    )
 }
 
 impl CatalogSnapshot {
@@ -77,13 +176,56 @@ impl CatalogSnapshot {
                 )));
             }
         }
+        for (miniapp_id, publication) in &self.miniapp_publications {
+        publication
+            .validate()
+            .map_err(|error| catalog_invalid(error.to_string()))?;
+            if miniapp_id != &publication.miniapp_id {
+                return Err(catalog_invalid(
+                    "MiniApp Catalog publication map key differs from its payload identity",
+                ));
+            }
+            for capability in &publication.capabilities {
+                let reference = capability.entry.capability.clone();
+                if !capabilities.insert(reference.clone()) {
+                    return Err(catalog_invalid(format!(
+                        "duplicate materialized capability {}@{}",
+                        reference.id.as_ref(),
+                        reference.version.as_ref()
+                    )));
+                }
+                if !contribution_ids.insert(capability.entry.contribution_id.clone()) {
+                    return Err(catalog_invalid(format!(
+                        "duplicate contribution identity {}",
+                        capability.entry.contribution_id.as_ref()
+                    )));
+                }
+                let entry = self
+                    .formal_capability_entries
+                    .get(&reference)
+                    .ok_or_else(|| {
+                        catalog_invalid(format!(
+                            "MiniApp capability {}@{} has no formal Catalog entry",
+                            reference.id.as_ref(),
+                            reference.version.as_ref()
+                        ))
+                    })?;
+                if entry != &capability.entry {
+                    return Err(catalog_invalid(format!(
+                        "MiniApp capability {}@{} differs from its formal Catalog entry",
+                        reference.id.as_ref(),
+                        reference.version.as_ref()
+                    )));
+                }
+            }
+        }
         if let Some(reference) = self
             .formal_capability_entries
             .keys()
             .find(|reference| !capabilities.contains(*reference))
         {
             return Err(catalog_invalid(format!(
-                "formal Catalog entry {}@{} has no materialized capability",
+                "formal Catalog entry {}@{} has no materialized publication",
                 reference.id.as_ref(),
                 reference.version.as_ref()
             )));
@@ -188,43 +330,59 @@ impl CatalogSnapshot {
         &self,
         reference: &CapabilityRef,
     ) -> Option<&nomifun_agent_contracts::CapabilityManifest> {
-        let capability = self.materialized_capability(reference)?;
-        if !capability
-            .manifest
-            .supports_consumer(CapabilityConsumer::Agent)
-        {
-            return None;
+        if let Some(capability) = self.materialized_capability(reference) {
+            if !capability
+                .manifest
+                .supports_consumer(CapabilityConsumer::Agent)
+            {
+                return None;
+            }
+            if capability.source.source_kind != PluginSourceKind::TestFixture
+                && !self.formal_capability_entries.contains_key(reference)
+            {
+                return None;
+            }
+            return Some(&capability.manifest);
         }
-        if capability.source.source_kind != PluginSourceKind::TestFixture
-            && !self.formal_capability_entries.contains_key(reference)
-        {
-            return None;
-        }
-        Some(&capability.manifest)
+        self.miniapp_publications
+            .values()
+            .flat_map(|publication| publication.capabilities.iter())
+            .find(|publication| {
+                publication.entry.capability == *reference
+                    && publication
+                        .entry
+                        .supports_consumer(CapabilityConsumer::Agent)
+            })
+            .map(|publication| &publication.manifest)
     }
 
     pub fn capability_catalog_entry(
         &self,
         reference: &CapabilityRef,
     ) -> Result<Option<CapabilityCatalogEntry>, ControlPlaneError> {
-        let Some(capability) = self.materialized_capability(reference) else {
-            return Ok(None);
-        };
-        if capability.source.source_kind == PluginSourceKind::TestFixture {
-            return Ok(None);
+        if let Some(capability) = self.materialized_capability(reference) {
+            if capability.source.source_kind == PluginSourceKind::TestFixture {
+                return Ok(None);
+            }
+            let entry = self
+                .formal_capability_entries
+                .get(reference)
+                .ok_or_else(|| {
+                    catalog_invalid(format!(
+                        "materialized capability {}@{} has no formal Catalog entry",
+                        reference.id.as_ref(),
+                        reference.version.as_ref()
+                    ))
+                })?;
+            validate_capability_entry(capability, entry)?;
+            return Ok(Some(entry.clone()));
         }
-        let entry = self
-            .formal_capability_entries
-            .get(reference)
-            .ok_or_else(|| {
-                catalog_invalid(format!(
-                    "materialized capability {}@{} has no formal Catalog entry",
-                    reference.id.as_ref(),
-                    reference.version.as_ref()
-                ))
-            })?;
-        validate_capability_entry(capability, entry)?;
-        Ok(Some(entry.clone()))
+        Ok(self
+            .miniapp_publications
+            .values()
+            .flat_map(|publication| publication.capabilities.iter())
+            .find(|publication| publication.entry.capability == *reference)
+            .map(|publication| publication.entry.clone()))
     }
 
     pub fn materialized_skill(
@@ -288,77 +446,34 @@ impl CatalogSnapshot {
                             ),
                         )
                     })?;
-                let unavailable_code = match entry
-                    .availability_for(CapabilityConsumer::Agent)
-                {
-                    Some(CatalogAvailability::Active) => None,
-                    Some(CatalogAvailability::Unavailable { reason })
-                    | Some(CatalogAvailability::Disabled { reason }) => {
-                        Some(reason.clone())
-                    }
-                    Some(CatalogAvailability::NeedsRuntime { .. }) => {
-                        Some("CAPABILITY_NEEDS_RUNTIME".to_owned())
-                    }
-                    Some(CatalogAvailability::ContractMismatch { .. }) => {
-                        Some("CAPABILITY_CONTRACT_MISMATCH".to_owned())
-                    }
-                    None => Some("CAPABILITY_CONSUMER_UNSUPPORTED".to_owned()),
-                };
-                Ok(CapabilityCatalogItemDto {
-                    capability: ExactCatalogRefDto {
-                        id: manifest.id.as_ref().to_owned(),
-                        version: manifest.version.as_ref().to_owned(),
-                    },
-                    kind: wire_name(&manifest.kind)?,
-                    display_name: manifest.display.name.clone(),
-                    description: manifest.display.description.clone(),
-                    source_package: ExactCatalogRefDto {
-                        id: manifest.package.id.as_ref().to_owned(),
-                        version: manifest.package.version.as_ref().to_owned(),
-                    },
-                    source_kind: wire_name(&capability.source.source_kind)?,
-                    materialization_state: if unavailable_code.is_some() {
-                        CatalogMaterializationStateDto::Unavailable
-                    } else {
-                        CatalogMaterializationStateDto::Materialized
-                    },
-                    unavailable_code,
-                    supported_surfaces: entry.host_surfaces.clone(),
-                    required_runtime_features: manifest
-                        .requires_runtime_features
-                        .iter()
-                        .map(|feature| feature.id.as_ref().to_owned())
-                        .collect(),
-                    required_resource_kinds: manifest
-                        .contributions
-                        .resource_kinds
-                        .iter()
-                        .map(|kind| kind.as_ref().to_owned())
-                        .collect(),
-                    required_capabilities: manifest
-                        .requires
-                        .iter()
-                        .map(|reference| ExactCatalogRefDto {
-                            id: reference.id.as_ref().to_owned(),
-                            version: reference.version.as_ref().to_owned(),
-                        })
-                        .collect(),
-                    conflicting_capabilities: manifest
-                        .conflicts
-                        .iter()
-                        .map(|conflict| ExactCatalogRefDto {
-                            id: conflict.capability.id.as_ref().to_owned(),
-                            version: conflict.capability.version.as_ref().to_owned(),
-                        })
-                        .collect(),
-                    action_count: manifest.contributions.actions.len() as u32,
-                    context_contributor_count: manifest
-                        .contributions
-                        .context_schema_refs
-                        .len() as u32,
-                })
+                capability_catalog_item(
+                    manifest,
+                    &entry,
+                    wire_name(&capability.source.source_kind)?,
+                )
             })
             .collect::<Result<Vec<_>, ControlPlaneError>>()?;
+        let mut capabilities = capabilities;
+        for publication in self.miniapp_publications.values() {
+            for capability in &publication.capabilities {
+                if capability
+                    .entry
+                    .supports_consumer(CapabilityConsumer::Agent)
+                {
+                    capabilities.push(capability_catalog_item(
+                        &capability.manifest,
+                        &capability.entry,
+                        wire_name(&capability.entry.provenance.source_kind)?,
+                    )?);
+                }
+            }
+        }
+        capabilities.sort_by(|left, right| {
+            left.capability
+                .id
+                .cmp(&right.capability.id)
+                .then_with(|| left.capability.version.cmp(&right.capability.version))
+        });
 
         let skills = self
             .skills
@@ -423,6 +538,78 @@ impl CatalogSnapshot {
             mcp_tools,
         })
     }
+}
+
+fn capability_catalog_item(
+    manifest: &nomifun_agent_contracts::CapabilityManifest,
+    entry: &CapabilityCatalogEntry,
+    source_kind: String,
+) -> Result<CapabilityCatalogItemDto, ControlPlaneError> {
+    let unavailable_code = match entry.availability_for(CapabilityConsumer::Agent) {
+        Some(CatalogAvailability::Active) => None,
+        Some(CatalogAvailability::Unavailable { reason })
+        | Some(CatalogAvailability::Disabled { reason }) => Some(reason.clone()),
+        Some(CatalogAvailability::NeedsRuntime { .. }) => {
+            Some("CAPABILITY_NEEDS_RUNTIME".to_owned())
+        }
+        Some(CatalogAvailability::ContractMismatch { .. }) => {
+            Some("CAPABILITY_CONTRACT_MISMATCH".to_owned())
+        }
+        None => Some("CAPABILITY_CONSUMER_UNSUPPORTED".to_owned()),
+    };
+    Ok(CapabilityCatalogItemDto {
+        capability: ExactCatalogRefDto {
+            id: manifest.id.as_ref().to_owned(),
+            version: manifest.version.as_ref().to_owned(),
+        },
+        kind: wire_name(&manifest.kind)?,
+        display_name: manifest.display.name.clone(),
+        description: manifest.display.description.clone(),
+        source_package: ExactCatalogRefDto {
+            id: manifest.package.id.as_ref().to_owned(),
+            version: manifest.package.version.as_ref().to_owned(),
+        },
+        source_kind,
+        materialization_state: if unavailable_code.is_some() {
+            CatalogMaterializationStateDto::Unavailable
+        } else {
+            CatalogMaterializationStateDto::Materialized
+        },
+        unavailable_code,
+        supported_surfaces: entry.host_surfaces.clone(),
+        required_runtime_features: manifest
+            .requires_runtime_features
+            .iter()
+            .map(|feature| feature.id.as_ref().to_owned())
+            .collect(),
+        required_resource_kinds: manifest
+            .contributions
+            .resource_kinds
+            .iter()
+            .map(|kind| kind.as_ref().to_owned())
+            .collect(),
+        required_capabilities: manifest
+            .requires
+            .iter()
+            .map(|reference| ExactCatalogRefDto {
+                id: reference.id.as_ref().to_owned(),
+                version: reference.version.as_ref().to_owned(),
+            })
+            .collect(),
+        conflicting_capabilities: manifest
+            .conflicts
+            .iter()
+            .map(|conflict| ExactCatalogRefDto {
+                id: conflict.capability.id.as_ref().to_owned(),
+                version: conflict.capability.version.as_ref().to_owned(),
+            })
+            .collect(),
+        action_count: manifest.contributions.actions.len() as u32,
+        context_contributor_count: manifest
+            .contributions
+            .context_schema_refs
+            .len() as u32,
+    })
 }
 
 fn capability_reference(capability: &MaterializedCapability) -> CapabilityRef {

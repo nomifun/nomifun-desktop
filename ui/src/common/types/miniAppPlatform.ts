@@ -5,6 +5,7 @@
  */
 
 import type { MiniAppId } from './ids';
+import type { CapabilityCatalogItem } from './agentPlatform/contracts';
 
 export type { MiniAppId } from './ids';
 
@@ -106,43 +107,7 @@ export interface MiniAppReadyRelease {
   blocking_reasons: string[];
 }
 
-export type MiniAppConsumerSurface =
-  | 'agent'
-  | 'gateway'
-  | 'knowledge'
-  | 'remote'
-  | 'automation'
-  | 'ui'
-  | 'miniapp_service';
-export type MiniAppConsumerAvailabilityStatus =
-  | 'active'
-  | 'disabled'
-  | 'unavailable'
-  | 'needs_runtime'
-  | 'contract_mismatch';
-
-export interface MiniAppConsumerAvailability {
-  surface: MiniAppConsumerSurface;
-  status: MiniAppConsumerAvailabilityStatus;
-  reason_code?: string;
-}
-
-export interface MiniAppCapabilityContribution {
-  capability_id: string;
-  capability_version: string;
-  display_name: string;
-  description?: string;
-  provenance: {
-    mount_id: string;
-    mount_revision: number;
-    artifact_id: string;
-    artifact_digest: string;
-    manifest_digest: string;
-    contribution_id: string;
-    contract_digest: string;
-  };
-  consumer_availability: MiniAppConsumerAvailability[];
-}
+export type MiniAppCapabilityContribution = CapabilityCatalogItem;
 
 export interface MiniAppConfigSchema {
   schema_digest: string;

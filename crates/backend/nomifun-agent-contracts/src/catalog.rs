@@ -17,8 +17,9 @@ use crate::package::{
 };
 use crate::{
     ArtifactEnvelope, CapabilityRef, ContributionId, ContributionLock,
-    ContributionSourceKind, DigestHex, McpBindingId, MiniAppId, PluginMountId,
-    ResourceKind, RuntimeFeatureId, StableSourceIdentity,
+    ContributionSourceKind, DigestHex, McpBindingId, MiniAppId, MiniAppReleaseRef,
+    PluginMountId, ResourceKind, RuntimeFeatureId, StableSourceIdentity,
+    UserId,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -238,6 +239,208 @@ pub struct CapabilityCatalogEntry {
 }
 
 pub type CapabilityCatalogEntryArtifact = ArtifactEnvelope<CapabilityCatalogEntry>;
+
+/// One capability manifest together with the formal Catalog entry materialized
+/// from that exact manifest.
+///
+/// This is a value type rather than a second registry. The manifest remains
+/// the executable contract while the entry carries provenance, consumer
+/// availability, and release admission facts.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilityCatalogPublication {
+    pub manifest: CapabilityManifest,
+    pub entry: CapabilityCatalogEntry,
+}
+
+impl CapabilityCatalogPublication {
+    pub fn validate(&self) -> Result<(), CapabilityCatalogContractError> {
+        self.entry.validate()?;
+        let reference = CapabilityRef {
+            id: self.manifest.id.clone(),
+            version: self.manifest.version.clone(),
+        };
+        let manifest_digest = digest_payload(&self.manifest).map_err(|error| {
+            CapabilityCatalogContractError::InvalidField {
+                field: "manifest",
+                reason: error.to_string(),
+            }
+        })?;
+        let supported_consumers =
+            self.manifest
+                .supported_consumers()
+                .map_err(|reason| CapabilityCatalogContractError::InvalidField {
+                    field: "manifest.supported_surfaces",
+                    reason,
+                })?;
+        if self.entry.capability != reference
+            || self.entry.contribution_id != self.manifest.contribution_id
+            || self.entry.contract_digest != manifest_digest
+            || self.entry.provenance.owner
+                != (CapabilityOwner::Package {
+                    package: self.manifest.package.clone(),
+                })
+            || self.entry.supported_consumers != supported_consumers
+        {
+            return Err(CapabilityCatalogContractError::InvalidField {
+                field: "publication",
+                reason: "Catalog entry does not match its capability manifest".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// The complete shared-Catalog publication for one enabled MiniApp Active
+/// Release. It is swapped as one value so consumers cannot observe a mixture
+/// of two Release identities.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MiniAppCapabilityCatalogPublication {
+    pub miniapp_id: MiniAppId,
+    pub active_release: MiniAppReleaseRef,
+    pub active_release_epoch: u64,
+    pub catalog_digest: DigestHex,
+    pub capabilities: Vec<CapabilityCatalogPublication>,
+}
+
+#[derive(Serialize)]
+struct MiniAppCapabilityCatalogDigestInput<'a> {
+    miniapp_id: &'a MiniAppId,
+    active_release: &'a MiniAppReleaseRef,
+    capabilities: &'a [CapabilityCatalogPublication],
+}
+
+impl MiniAppCapabilityCatalogPublication {
+    pub fn computed_catalog_digest(
+        &self,
+    ) -> Result<DigestHex, CapabilityCatalogContractError> {
+        let mut capabilities = self.capabilities.clone();
+        capabilities.sort_by(|left, right| {
+            left.entry
+                .capability
+                .cmp(&right.entry.capability)
+                .then_with(|| left.entry.contribution_id.cmp(&right.entry.contribution_id))
+        });
+        digest_payload(&MiniAppCapabilityCatalogDigestInput {
+            miniapp_id: &self.miniapp_id,
+            active_release: &self.active_release,
+            capabilities: &capabilities,
+        })
+        .map_err(|error| CapabilityCatalogContractError::InvalidField {
+            field: "catalog_digest",
+            reason: error.to_string(),
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), CapabilityCatalogContractError> {
+        validate_non_empty(self.miniapp_id.as_ref(), "miniapp_id")?;
+        self.active_release
+            .validate()
+            .map_err(|error| CapabilityCatalogContractError::InvalidField {
+                field: "active_release",
+                reason: error.to_string(),
+            })?;
+        if self.active_release_epoch == 0 {
+            return Err(CapabilityCatalogContractError::InvalidField {
+                field: "active_release_epoch",
+                reason: "must be greater than zero".into(),
+            });
+        }
+        validate_digest(&self.catalog_digest, "catalog_digest")?;
+
+        let mut references = BTreeSet::new();
+        let mut contribution_ids = BTreeSet::new();
+        for publication in &self.capabilities {
+            publication.validate()?;
+            let entry = &publication.entry;
+            if entry.provenance.source_kind
+                != ContributionSourceKind::MiniAppActiveRelease
+                || entry.provenance.miniapp_id.as_ref() != Some(&self.miniapp_id)
+                || entry.provenance.mount_id.is_some()
+                || entry.provenance.mcp_binding_id.is_some()
+                || entry.provenance.artifact_digest.as_ref()
+                    != Some(&self.active_release.release_digest)
+                || entry.admission.release_state != CapabilityReleaseState::PublishedActive
+            {
+                return Err(CapabilityCatalogContractError::InvalidField {
+                    field: "capabilities.provenance",
+                    reason: "MiniApp publication must bind the exact Active Release".into(),
+                });
+            }
+            if !references.insert(entry.capability.clone()) {
+                return Err(CapabilityCatalogContractError::DuplicateCapability {
+                    capability: entry.capability.clone(),
+                });
+            }
+            if !contribution_ids.insert(entry.contribution_id.clone()) {
+                return Err(CapabilityCatalogContractError::DuplicateContribution {
+                    contribution_id: entry.contribution_id.clone(),
+                });
+            }
+        }
+        let expected_catalog_digest = self.computed_catalog_digest()?;
+        if self.catalog_digest != expected_catalog_digest {
+            return Err(CapabilityCatalogContractError::InvalidField {
+                field: "catalog_digest",
+                reason: "does not match the canonical MiniApp publication".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// A versioned read-side update for one owner-scoped MiniApp publication.
+///
+/// `publication = None` is a tombstone. Tombstones are retained by the
+/// in-process store so a late post-commit callback cannot resurrect an older
+/// Active Release after Disable, Trash, or Delete.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MiniAppCapabilityCatalogPublicationUpdate {
+    pub owner_user_id: UserId,
+    pub miniapp_id: MiniAppId,
+    pub product_revision: u64,
+    pub pointer_revision: u64,
+    pub active_release_epoch: u64,
+    pub publication: Option<MiniAppCapabilityCatalogPublication>,
+}
+
+impl MiniAppCapabilityCatalogPublicationUpdate {
+    pub fn validate(&self) -> Result<(), CapabilityCatalogContractError> {
+        validate_non_empty(self.owner_user_id.as_ref(), "owner_user_id")?;
+        validate_non_empty(self.miniapp_id.as_ref(), "miniapp_id")?;
+        if self.product_revision == 0 || self.pointer_revision == 0 {
+            return Err(CapabilityCatalogContractError::InvalidField {
+                field: "publication_version",
+                reason: "product_revision and pointer_revision must be greater than zero"
+                    .into(),
+            });
+        }
+        if let Some(publication) = &self.publication {
+            if publication.miniapp_id != self.miniapp_id
+                || publication.active_release_epoch != self.active_release_epoch
+            {
+                return Err(CapabilityCatalogContractError::InvalidField {
+                    field: "publication",
+                    reason: "publication identity does not match its versioned update"
+                        .into(),
+                });
+            }
+            publication.validate()?;
+        }
+        Ok(())
+    }
+}
+
+/// Synchronous update port used by the MiniApp application service to publish
+/// its durable Active Release into the platform's single shared Catalog.
+pub trait MiniAppCapabilityCatalogSink: Send + Sync {
+    fn replace_miniapp_publication(
+        &self,
+        update: MiniAppCapabilityCatalogPublicationUpdate,
+    ) -> Result<(), String>;
+}
 
 impl CapabilityCatalogEntry {
     pub fn validate(&self) -> Result<(), CapabilityCatalogContractError> {
