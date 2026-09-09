@@ -19,6 +19,7 @@ import type {
   SetMiniAppEnabledRequest,
   SetMiniAppPublishModeRequest,
   SetMiniAppServiceRunningRequest,
+  TestMiniAppReleaseRequest,
   TrashMiniAppRequest,
   RetryMiniAppServiceRequest,
 } from '@/common/types/miniAppPlatform';
@@ -37,6 +38,9 @@ export interface MiniAppWorkflowState {
   publish: MiniAppWorkflowStepState;
   surface: MiniAppWorkflowStepState;
 }
+
+export const EMPTY_MINIAPP_TEST_INPUT_DIGEST =
+  'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
 
 export function miniAppReleaseStage(
   miniapp: MiniAppSummary
@@ -114,6 +118,34 @@ export function miniAppBuildRequest(
   };
 }
 
+export function miniAppTestRequest(
+  workshop: MiniAppWorkshop
+): TestMiniAppReleaseRequest | null {
+  const { miniapp, ready } = workshop;
+  if (
+    miniapp.kind !== 'service' ||
+    (miniapp.lifecycle !== 'enabled' && miniapp.lifecycle !== 'disabled') ||
+    !ready?.service ||
+    workshop.active_operation?.state === 'running'
+  ) {
+    return null;
+  }
+  return {
+    miniapp_id: miniapp.miniapp_id,
+    expected_product_revision: miniapp.product_revision,
+    expected_pointer_revision: miniapp.releases.pointer_revision,
+    project_id: workshop.project_id,
+    expected_project_revision: workshop.project_revision,
+    expected_build_generation: workshop.build_generation,
+    release_id: ready.release.release_id,
+    expected_release_digest: ready.release.release_digest,
+    expected_config_revision: workshop.config.config_revision,
+    expected_credential_bindings_revision:
+      workshop.credential_bindings_revision,
+    resolved_test_input_digest: EMPTY_MINIAPP_TEST_INPUT_DIGEST,
+  };
+}
+
 function releaseRefsMatch(
   left: MiniAppSummary['releases']['ready'],
   right: MiniAppSummary['releases']['ready']
@@ -149,7 +181,6 @@ export function miniAppPublishRequest(
     !readyPointer ||
     !ready.can_publish ||
     (ready.kind === 'ui_only' && ready.test.status !== 'not_required') ||
-    (ready.kind === 'service' && ready.test.status !== 'needs_test_input') ||
     ready.test.release_id !== ready.release.release_id ||
     ready.test.expected_release_digest !== ready.release.release_digest ||
     !releaseRefsMatch(readyPointer, ready.release)
@@ -170,10 +201,13 @@ export function miniAppPublishRequest(
             miniapp.releases.active.release_digest,
         }
       : {}),
-    ...(ready.test.receipt_id
+    ...(ready.kind === 'service' &&
+    ready.test.status !== 'stale' &&
+    ready.test.receipt_id
       ? { expected_service_test_receipt_id: ready.test.receipt_id }
       : {}),
-    acknowledge_test_warning: ready.kind === 'service',
+    acknowledge_test_warning:
+      ready.kind === 'service' && ready.test.status !== 'passed',
   };
 }
 

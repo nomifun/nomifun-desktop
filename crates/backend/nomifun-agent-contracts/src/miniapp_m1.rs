@@ -2061,6 +2061,8 @@ pub struct MiniAppServiceTestReceipt {
     pub release: MiniAppReleaseRef,
     pub service_run_key: DigestHex,
     pub outcome: MiniAppServiceTestOutcome,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<CanonicalErrorCode>,
     pub runtime: MiniAppServiceRuntimeFingerprint,
     pub host_target: RuntimeTarget,
     pub host_protocol_version: VersionString,
@@ -2089,6 +2091,24 @@ impl MiniAppServiceTestReceipt {
         validate_nonempty(self.miniapp_id.as_ref(), "miniapp_id")?;
         self.release.validate()?;
         validate_digest(&self.service_run_key, "service_run_key")?;
+        match (self.outcome, self.error_code.as_ref()) {
+            (MiniAppServiceTestOutcome::Failed, Some(error_code)) => {
+                validate_machine_key(error_code.as_ref(), "error_code")?;
+            }
+            (MiniAppServiceTestOutcome::Failed, None) => {
+                return Err(invalid(
+                    "error_code",
+                    "failed Service Test receipts require an error code",
+                ));
+            }
+            (_, Some(_)) => {
+                return Err(invalid(
+                    "error_code",
+                    "non-failed Service Test receipts cannot carry an error code",
+                ));
+            }
+            (_, None) => {}
+        }
         self.runtime.validate()?;
         validate_nonempty(self.host_target.as_ref(), "host_target")?;
         if self.host_target != self.runtime.runtime_target {
@@ -3841,6 +3861,7 @@ mod tests {
             release: spec.release.clone(),
             service_run_key: spec.service_run_key.clone(),
             outcome: MiniAppServiceTestOutcome::Passed,
+            error_code: None,
             runtime: spec.runtime.clone(),
             host_target: spec.runtime.runtime_target.clone(),
             host_protocol_version: MINIAPP_SERVICE_HOST_PROTOCOL_VERSION.into(),

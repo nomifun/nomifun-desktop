@@ -17,7 +17,8 @@ use nomifun_api_types::{
     MiniAppKindDto, MiniAppLibraryResponseDto, MiniAppLifecycleDto,
     MiniAppServiceHealthDto, MiniAppSurfaceLaunchDescriptorDto,
     MiniAppWorkshopDto, PublishMiniAppRequest, RestoreMiniAppRequest,
-    RetryMiniAppDeleteRequest, SetMiniAppEnabledRequest, TrashMiniAppRequest,
+    RetryMiniAppDeleteRequest, SetMiniAppEnabledRequest, TestMiniAppReleaseRequest,
+    TrashMiniAppRequest,
 };
 use nomifun_auth::CurrentUser;
 use nomifun_common::{AppError, UserId};
@@ -101,6 +102,58 @@ async fn split_routes_preserve_owner_scope_and_api_envelopes() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let test_path = format!(
+        "/api/miniapps/{}/test",
+        created.miniapp.miniapp_id
+    );
+    let test_request = TestMiniAppReleaseRequest {
+        miniapp_id: created.miniapp.miniapp_id.clone(),
+        expected_product_revision: created.miniapp.product_revision,
+        expected_pointer_revision: created.miniapp.releases.pointer_revision,
+        project_id: created.project_id.clone(),
+        expected_project_revision: created.project_revision,
+        expected_build_generation: created.build_generation,
+        release_id: MISMATCHED_MINIAPP_ID.to_owned(),
+        expected_release_digest: "a".repeat(64),
+        expected_config_revision: created.config.config_revision,
+        expected_credential_bindings_revision: created.credential_bindings_revision,
+        resolved_test_input_digest: "b".repeat(64),
+    };
+    let response = send(
+        &read,
+        Method::POST,
+        &test_path,
+        Some(serde_json::to_value(&test_request).unwrap()),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let response = send(
+        &write,
+        Method::POST,
+        &test_path,
+        Some(
+            serde_json::to_value(TestMiniAppReleaseRequest {
+                miniapp_id: MISMATCHED_MINIAPP_ID.to_owned(),
+                ..test_request.clone()
+            })
+            .unwrap(),
+        ),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let response = send(
+        &write,
+        Method::POST,
+        &test_path,
+        Some(serde_json::to_value(test_request).unwrap()),
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "UI-only MiniApps must not enter the Service Test application path"
+    );
 
     let operation_id = "0190f5fe-7c00-7000-8000-000000000991";
     let cancel_path = format!(

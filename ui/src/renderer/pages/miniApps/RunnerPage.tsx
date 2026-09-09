@@ -53,6 +53,7 @@ import {
   miniAppSetServiceRunningRequest,
   miniAppTrashRequest,
   miniAppSetPublishModeRequest,
+  miniAppTestRequest,
   miniAppSurfaceAssetPath,
   miniAppSurfaceMatchesWorkshop,
   miniAppWorkflowState,
@@ -80,6 +81,7 @@ type MiniAppBusyAction =
   | 'service_start'
   | 'service_stop'
   | 'service_retry'
+  | 'test'
   | 'trash'
   | 'restore'
   | 'delete'
@@ -198,6 +200,7 @@ const MiniAppWorkshopDetail: React.FC<{
   onBack: () => void;
   onRefresh: () => void;
   onBuild: () => void;
+  onTest: () => void;
   onCancelBuild: () => void;
   onPublish: () => void;
   onRollback: () => void;
@@ -225,6 +228,7 @@ const MiniAppWorkshopDetail: React.FC<{
   onBack,
   onRefresh,
   onBuild,
+  onTest,
   onCancelBuild,
   onPublish,
   onRollback,
@@ -263,6 +267,7 @@ const MiniAppWorkshopDetail: React.FC<{
   const canBuild =
     lifecycleActive &&
     miniAppBuildRequest(workshop, serviceLifecycle) !== null;
+  const canTest = miniAppTestRequest(workshop) !== null;
   const canPublish =
     lifecycleActive && miniAppPublishRequest(workshop) !== null;
   const canRollback =
@@ -357,6 +362,16 @@ const MiniAppWorkshopDetail: React.FC<{
             >
               {t('miniApps.actions.build')}
             </Button>
+            {miniapp.kind === 'service' && (
+              <Button
+                icon={<CheckOne theme='outline' size='14' />}
+                loading={busyAction === 'test'}
+                disabled={controlsDisabled || !canTest}
+                onClick={onTest}
+              >
+                {t('miniApps.actions.testService')}
+              </Button>
+            )}
             <Tooltip
               content={
                 canPublish
@@ -1424,6 +1439,28 @@ const MiniAppRunnerPage: React.FC = () => {
     });
   }, [building, busyAction, canceling, runWorkshopMutation, t, workshop]);
 
+  const handleTest = useCallback(() => {
+    if (!workshop || busyAction || building || canceling) return;
+    const request = miniAppTestRequest(workshop);
+    if (!request) {
+      setFailure(t('miniApps.errors.testUnavailable'));
+      return;
+    }
+    Modal.confirm({
+      title: t('miniApps.confirm.testTitle'),
+      content: t('miniApps.confirm.testBody'),
+      okText: t('miniApps.actions.testService'),
+      cancelText: t('miniApps.actions.cancel'),
+      okButtonProps: { status: 'warning' },
+      onOk: () =>
+        runWorkshopMutation(
+          'test',
+          () => ipcBridge.miniapps.test.invoke(request),
+          t('miniApps.messages.testCompleted')
+        ),
+    });
+  }, [building, busyAction, canceling, runWorkshopMutation, t, workshop]);
+
   const handleSetServiceRunning = useCallback(
     (running: boolean) => {
       if (!workshop || busyAction || building || canceling) return;
@@ -1798,6 +1835,7 @@ const MiniAppRunnerPage: React.FC = () => {
               onBack={goBack}
               onRefresh={() => void handleRefresh()}
               onBuild={() => void handleBuild()}
+              onTest={handleTest}
               onCancelBuild={() => void handleCancelBuild()}
               onPublish={handlePublish}
               onRollback={handleRollback}

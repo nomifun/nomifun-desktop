@@ -236,6 +236,20 @@ export interface BuildMiniAppRequest {
   service_lifecycle?: MiniAppServiceLifecycle;
 }
 
+export interface TestMiniAppReleaseRequest {
+  miniapp_id: MiniAppId;
+  expected_product_revision: number;
+  expected_pointer_revision: number;
+  project_id: string;
+  expected_project_revision: number;
+  expected_build_generation: number;
+  release_id: string;
+  expected_release_digest: string;
+  expected_config_revision: number;
+  expected_credential_bindings_revision: number;
+  resolved_test_input_digest: string;
+}
+
 export interface CancelMiniAppBuildRequest {
   miniapp_id: MiniAppId;
   operation_id: string;

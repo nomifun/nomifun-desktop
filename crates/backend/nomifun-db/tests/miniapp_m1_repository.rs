@@ -6,13 +6,16 @@ use nomifun_agent_contracts::{
     MiniAppReleaseArtifactV1, MiniAppReleaseFile, MiniAppReleaseRef,
     MiniAppReleaseV1Manifest, MiniAppReadyOrigin, MiniAppReadyRelease,
     MiniAppAdditiveMigrationAction, MiniAppMigration, MiniAppMigrationColumn,
-    MiniAppMigrationId,
+    MiniAppMigrationId, MiniAppServiceRuntimeFingerprint,
+    MiniAppServiceTestCredentialMode, MiniAppServiceTestOutcome,
+    MiniAppServiceTestReceipt, RuntimeInstallationId, RuntimeTarget,
     MiniAppResourceContract, MiniAppServiceLifecycle, MiniAppServiceReleaseDescriptor,
     MiniAppSourceLineage, MiniAppUiReleaseDescriptor, PackageId, PackageRef, StrictJsonValue,
     VersionString,
     MINIAPP_BRIDGE_CONTRACT_VERSION, MINIAPP_M1_SCHEMA_VERSION,
     MINIAPP_RELEASE_PROFILE_VERSION, MINIAPP_SERVICE_HOST_PROTOCOL_VERSION,
-    MINIAPP_SERVICE_SDK_CONTRACT_VERSION, canonical_ui_tree_digest, digest_bytes, digest_payload,
+    MINIAPP_SERVICE_SDK_CONTRACT_VERSION, MINIAPP_SERVICE_TEST_CONTRACT_VERSION,
+    canonical_ui_tree_digest, digest_bytes, digest_payload,
 };
 use nomifun_db::{
     BeginMiniAppM1DeleteParams,
@@ -28,6 +31,7 @@ use nomifun_db::{
     MiniAppReleaseArtifactRow, MiniAppReleaseRow,
     OpenMiniAppM1SurfaceSessionParams, ProductOperationState,
     PublishMiniAppM1ReadyParams, ResolveMiniAppM1SurfaceSessionParams,
+    RecordMiniAppM1ServiceTestReceiptParams,
     RestartMiniAppM1DeleteParams, RestoreMiniAppM1Params,
     RollbackMiniAppM1PreviousParams, SetMiniAppM1AutoPublishParams,
     SqliteMiniAppM1Repository,
@@ -562,6 +566,43 @@ async fn create_enabled_service_app(
     repository: &SqliteMiniAppM1Repository,
     owner: &str,
 ) -> MiniAppM1Snapshot {
+    let ready = create_ready_service_app(repository, owner).await;
+    let release_id = ready.product.ready_release_id.clone().unwrap();
+    let artifact_digest = ready.product.ready_release_digest.clone().unwrap();
+    let published = repository
+        .publish_ready_cas(&PublishMiniAppM1ReadyParams {
+            owner_user_id: owner.to_owned(),
+            miniapp_id: SERVICE_MINIAPP_ID.to_owned(),
+            expected_product_revision: ready.product.product_revision,
+            expected_pointer_revision: ready.product.pointer_revision,
+            expected_active_release_epoch: 0,
+            expected_ready_release_id: release_id,
+            expected_ready_release_digest: artifact_digest,
+            expected_active_release_digest: None,
+            target_catalog_digest: "d".repeat(64),
+            auto_publish_guard: None,
+            updated_at: 24,
+        })
+        .await
+        .unwrap();
+    repository
+        .commit_lifecycle_cas(&CommitMiniAppM1LifecycleParams {
+            owner_user_id: owner.to_owned(),
+            miniapp_id: SERVICE_MINIAPP_ID.to_owned(),
+            expected_product_revision: published.product.product_revision,
+            expected_pointer_revision: published.product.pointer_revision,
+            expected_active_release_digest: published.product.active_release_digest.clone(),
+            enabled: true,
+            updated_at: 25,
+        })
+        .await
+        .unwrap()
+}
+
+async fn create_ready_service_app(
+    repository: &SqliteMiniAppM1Repository,
+    owner: &str,
+) -> MiniAppM1Snapshot {
     let source = managed_source("sources/owner/service/source", 'b', 'c', 1);
     repository
         .create_with_source(&CreateMiniAppM1WithSourceParams {
@@ -612,7 +653,7 @@ async fn create_enabled_service_app(
         &source.dependency_lock_digest,
         22,
     );
-    let ready = repository
+    repository
         .finish_build_and_record_ready(&FinishMiniAppM1BuildAndRecordReadyParams {
             owner_user_id: owner.to_owned(),
             miniapp_id: SERVICE_MINIAPP_ID.to_owned(),
@@ -628,35 +669,266 @@ async fn create_enabled_service_app(
             finished_at_ms: 23,
         })
         .await
+        .unwrap()
+}
+
+fn service_test_receipt_params(
+    snapshot: &MiniAppM1Snapshot,
+    receipt_id: String,
+    digest_seed: char,
+    issued_at_ms: i64,
+) -> RecordMiniAppM1ServiceTestReceiptParams {
+    let ready_row = snapshot.ready_release.as_ref().unwrap();
+    let ready: MiniAppReadyRelease =
+        serde_json::from_str(&ready_row.release_record_json).unwrap();
+    let runtime = MiniAppServiceRuntimeFingerprint {
+        runtime_installation_id: RuntimeInstallationId::from("test-runtime"),
+        runtime_target: RuntimeTarget::from("windows-x86_64"),
+        runtime_executable_digest: DigestHex::from(digest_seed.to_string().repeat(64)),
+        node_version: VersionString::from("24.1.0"),
+    };
+    let receipt = MiniAppServiceTestReceipt {
+        receipt_id: receipt_id.clone().into(),
+        miniapp_id: SERVICE_MINIAPP_ID.into(),
+        release: ready.release.clone(),
+        service_run_key: DigestHex::from(
+            char::from_u32(digest_seed as u32 + 1)
+                .unwrap()
+                .to_string()
+                .repeat(64),
+        ),
+        outcome: MiniAppServiceTestOutcome::Passed,
+        error_code: None,
+        runtime: runtime.clone(),
+        host_target: runtime.runtime_target.clone(),
+        host_protocol_version: MINIAPP_SERVICE_HOST_PROTOCOL_VERSION.into(),
+        sdk_contract_version: MINIAPP_SERVICE_SDK_CONTRACT_VERSION.into(),
+        test_contract_version: MINIAPP_SERVICE_TEST_CONTRACT_VERSION.into(),
+        resolved_test_input_digest: DigestHex::from(
+            char::from_u32(digest_seed as u32 + 2)
+                .unwrap()
+                .to_string()
+                .repeat(64),
+        ),
+        copied_kv_digest: DigestHex::from(
+            char::from_u32(digest_seed as u32 + 3)
+                .unwrap()
+                .to_string()
+                .repeat(64),
+        ),
+        copied_private_database_digest: None,
+        empty_files_dir: None,
+        migration_ledger_digest: None,
+        credential_mode: MiniAppServiceTestCredentialMode::None,
+        host_generation: 1,
+        issued_at_ms,
+    };
+    RecordMiniAppM1ServiceTestReceiptParams {
+        owner_user_id: snapshot.product.owner_user_id.clone(),
+        miniapp_id: snapshot.product.miniapp_id.clone(),
+        expected_product_revision: snapshot.product.product_revision,
+        expected_pointer_revision: snapshot.product.pointer_revision,
+        expected_config_revision: snapshot.product.config_revision,
+        expected_credential_bindings_revision: snapshot.product.credential_bindings_revision,
+        expected_ready_release_id: ready_row.release_id.clone(),
+        expected_ready_release_digest: ready_row.release_digest.clone(),
+        receipt_id,
+        service_run_key: receipt.service_run_key.as_ref().to_owned(),
+        outcome: receipt.outcome,
+        error_code: None,
+        receipt_digest: digest_payload(&receipt).unwrap().as_ref().to_owned(),
+        runtime_fingerprint_digest: digest_payload(&runtime).unwrap().as_ref().to_owned(),
+        resolved_test_input_digest: receipt.resolved_test_input_digest.as_ref().to_owned(),
+        receipt: serde_json::to_value(receipt).unwrap(),
+        issued_at_ms,
+    }
+}
+
+#[tokio::test]
+async fn service_test_receipt_is_owner_scoped_exact_and_retest_preserves_history() {
+    let database = init_miniapp_test_database().await;
+    let owner = installation_owner_id(database.pool()).await.unwrap();
+    let other_owner = insert_other_owner(database.pool()).await;
+    let repository = SqliteMiniAppM1Repository::new(database.pool().clone());
+    let ready = create_ready_service_app(&repository, &owner).await;
+    let original_pointer_revision = ready.product.pointer_revision;
+    let first_receipt_id = Uuid::now_v7().to_string();
+    let first_params =
+        service_test_receipt_params(&ready, first_receipt_id.clone(), '1', 24);
+
+    let mut wrong_owner_params =
+        service_test_receipt_params(&ready, Uuid::now_v7().to_string(), '1', 24);
+    wrong_owner_params.owner_user_id = other_owner.clone();
+    let wrong_owner = repository
+        .record_service_test_receipt_cas(&wrong_owner_params)
+        .await
+        .unwrap_err();
+    assert!(wrong_owner.to_string().contains("not found"));
+
+    let first = repository
+        .record_service_test_receipt_cas(&first_params)
+        .await
         .unwrap();
-    let published = repository
-        .publish_ready_cas(&PublishMiniAppM1ReadyParams {
-            owner_user_id: owner.to_owned(),
+    assert_eq!(
+        first.product.product_revision,
+        ready.product.product_revision + 1
+    );
+    assert_eq!(first.product.pointer_revision, original_pointer_revision);
+    assert_eq!(first.library_revision, ready.library_revision + 1);
+    let first_row = repository
+        .get_ready_service_test_receipt(&owner, SERVICE_MINIAPP_ID)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first_row.receipt_id, first_receipt_id);
+    assert_eq!(first_row.outcome, "passed");
+    assert_eq!(first_row.error_code, None);
+    assert_eq!(
+        first_row.resolved_test_input_digest,
+        first_params.resolved_test_input_digest
+    );
+    assert!(
+        repository
+            .get_ready_service_test_receipt(&other_owner, SERVICE_MINIAPP_ID)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let stored_ready: MiniAppReadyRelease =
+        serde_json::from_str(&first.ready_release.as_ref().unwrap().release_record_json).unwrap();
+    assert_eq!(
+        stored_ready
+            .matching_service_test_receipt
+            .as_ref()
+            .unwrap()
+            .receipt_id
+            .as_ref(),
+        first_row.receipt_id
+    );
+
+    let mut stale =
+        service_test_receipt_params(&first, Uuid::now_v7().to_string(), '4', 25);
+    stale.expected_product_revision -= 1;
+    let stale_error = repository
+        .record_service_test_receipt_cas(&stale)
+        .await
+        .unwrap_err();
+    assert!(stale_error.to_string().contains("CAS"));
+
+    let second_receipt_id = Uuid::now_v7().to_string();
+    let second_params =
+        service_test_receipt_params(&first, second_receipt_id.clone(), '4', 25);
+    let second = repository
+        .record_service_test_receipt_cas(&second_params)
+        .await
+        .unwrap();
+    assert_eq!(second.product.pointer_revision, original_pointer_revision);
+    assert_eq!(second.product.product_revision, first.product.product_revision + 1);
+    let current = repository
+        .get_ready_service_test_receipt(&owner, SERVICE_MINIAPP_ID)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.receipt_id, second_receipt_id);
+    let history: Vec<String> = sqlx::query_scalar(
+        "SELECT receipt_id FROM miniapp_service_test_receipts
+         WHERE owner_user_id = ? AND miniapp_id = ? ORDER BY id",
+    )
+    .bind(&owner)
+    .bind(SERVICE_MINIAPP_ID)
+    .fetch_all(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(history, [first_row.receipt_id, current.receipt_id]);
+
+    repository
+        .update_config_cas(
+            &owner,
+            SERVICE_MINIAPP_ID,
+            second.product.product_revision,
+            second.product.pointer_revision,
+            second.product.config_revision,
+            &second.product.config_schema_json,
+            r#"{"mode":"changed"}"#,
+            26,
+        )
+        .await
+        .unwrap();
+    assert!(
+        repository
+            .get_ready_service_test_receipt(&owner, SERVICE_MINIAPP_ID)
+            .await
+            .unwrap()
+            .is_none(),
+        "config mutation must stale the current receipt without deleting history"
+    );
+    let history_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM miniapp_service_test_receipts
+         WHERE owner_user_id = ? AND miniapp_id = ?",
+    )
+    .bind(&owner)
+    .bind(SERVICE_MINIAPP_ID)
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(history_count, 2);
+}
+
+#[tokio::test]
+async fn permanent_delete_removes_service_test_receipt_history() {
+    let database = init_miniapp_test_database().await;
+    let owner = installation_owner_id(database.pool()).await.unwrap();
+    let repository = SqliteMiniAppM1Repository::new(database.pool().clone());
+    let ready = create_ready_service_app(&repository, &owner).await;
+    let tested = repository
+        .record_service_test_receipt_cas(&service_test_receipt_params(
+            &ready,
+            Uuid::now_v7().to_string(),
+            '1',
+            24,
+        ))
+        .await
+        .unwrap();
+    let trashed = repository
+        .trash_cas(&TrashMiniAppM1Params {
+            owner_user_id: owner.clone(),
             miniapp_id: SERVICE_MINIAPP_ID.to_owned(),
-            expected_product_revision: ready.product.product_revision,
-            expected_pointer_revision: ready.product.pointer_revision,
-            expected_active_release_epoch: 0,
-            expected_ready_release_id: release_id,
-            expected_ready_release_digest: artifact_digest,
+            expected_product_revision: tested.product.product_revision,
+            expected_pointer_revision: tested.product.pointer_revision,
             expected_active_release_digest: None,
-            target_catalog_digest: "d".repeat(64),
-            auto_publish_guard: None,
-            updated_at: 24,
+            updated_at: 25,
+        })
+        .await
+        .unwrap();
+    let operation_id = Uuid::now_v7().to_string();
+    repository
+        .begin_delete(&BeginMiniAppM1DeleteParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: SERVICE_MINIAPP_ID.to_owned(),
+            expected_product_revision: trashed.product.product_revision,
+            expected_pointer_revision: trashed.product.pointer_revision,
+            expected_active_release_digest: None,
+            operation_id: operation_id.clone(),
+            started_at_ms: 26,
         })
         .await
         .unwrap();
     repository
-        .commit_lifecycle_cas(&CommitMiniAppM1LifecycleParams {
-            owner_user_id: owner.to_owned(),
+        .finalize_delete(&FinalizeMiniAppM1DeleteParams {
+            owner_user_id: owner,
             miniapp_id: SERVICE_MINIAPP_ID.to_owned(),
-            expected_product_revision: published.product.product_revision,
-            expected_pointer_revision: published.product.pointer_revision,
-            expected_active_release_digest: published.product.active_release_digest.clone(),
-            enabled: true,
-            updated_at: 25,
+            operation_id,
+            expected_operation_revision: 1,
+            finished_at_ms: 27,
         })
         .await
-        .unwrap()
+        .unwrap();
+    let receipt_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM miniapp_service_test_receipts")
+            .fetch_one(database.pool())
+            .await
+            .unwrap();
+    assert_eq!(receipt_count, 0);
 }
 
 #[tokio::test]
@@ -911,6 +1183,7 @@ async fn deletion_intent_failure_restart_and_finalize_preserve_operation_history
         "miniapp_credential_bindings",
         "miniapp_kv",
         "miniapp_build_operation_lineage",
+        "miniapp_service_test_receipts",
         "miniapp_projects",
         "miniapp_releases",
         "miniapp_release_artifacts",

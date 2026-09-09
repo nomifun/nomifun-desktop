@@ -3,23 +3,28 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use nomifun_agent_contracts::{
     DigestHex, MiniAppBridgeCallId, MiniAppBridgeTarget, MiniAppId,
-    MiniAppServiceRuntimeFingerprint, ResolvedMiniAppServiceSpec,
+    MiniAppServiceRuntimeFingerprint, MiniAppServiceTestCredentialMode,
+    MiniAppServiceTestOutcome, MiniAppServiceTestReceipt, ResolvedMiniAppServiceSpec,
     ResolvedMiniAppServiceSpecInputs, RuntimeInstallationId, RuntimeTarget, StrictJsonValue,
-    VersionString, digest_bytes,
+    VersionString, MINIAPP_SERVICE_HOST_PROTOCOL_VERSION,
+    MINIAPP_SERVICE_SDK_CONTRACT_VERSION, MINIAPP_SERVICE_TEST_CONTRACT_VERSION, digest_bytes,
 };
 use nomifun_api_types::{
     BuildMiniAppRequest, CreateMiniAppProjectRequest, MiniAppKindDto,
     MiniAppServiceLifecycleDto, PublishMiniAppRequest, SetMiniAppEnabledRequest,
+    TestMiniAppReleaseRequest,
 };
 use nomifun_db::{
     IMiniAppM1Repository, SqliteMiniAppM1Repository, init_database_memory,
     installation_owner_id,
 };
 use nomifun_miniapp_platform::{
-    InMemoryMiniAppServiceHost, MiniAppCallCancellation, MiniAppM1ApplicationService,
-    MiniAppPlatformResult, MiniAppServiceHostPort,
+    InMemoryMiniAppManagedStorage, InMemoryMiniAppServiceHost, MiniAppCallCancellation,
+    MiniAppM1ApplicationService, MiniAppPlatformResult, MiniAppServiceHostPort,
     MiniAppServiceInvocation, MiniAppServiceProcess, MiniAppServiceProcessError,
     MiniAppServiceProcessFactory, MiniAppServiceRuntimeBinding, MiniAppServiceSpecInput,
+    MiniAppServiceStoragePort, MiniAppServiceTestRunInput,
+    MiniAppServiceTestStorageResolution,
 };
 use serde_json::json;
 use tokio::sync::Mutex;
@@ -63,6 +68,7 @@ impl MiniAppServiceProcessFactory for TestProcessFactory {
 
 struct TestRuntime {
     host: Arc<InMemoryMiniAppServiceHost>,
+    storage: Arc<InMemoryMiniAppManagedStorage>,
     started: Mutex<Vec<MiniAppId>>,
 }
 
@@ -72,7 +78,17 @@ impl TestRuntime {
             host: Arc::new(InMemoryMiniAppServiceHost::new(Arc::new(
                 TestProcessFactory,
             ))),
+            storage: Arc::new(InMemoryMiniAppManagedStorage::new()),
             started: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn runtime_fingerprint() -> MiniAppServiceRuntimeFingerprint {
+        MiniAppServiceRuntimeFingerprint {
+            runtime_installation_id: RuntimeInstallationId::from("test-runtime"),
+            runtime_target: RuntimeTarget::from("windows-x86_64"),
+            runtime_executable_digest: digest("runtime"),
+            node_version: VersionString::from("24.0.0"),
         }
     }
 }
@@ -84,12 +100,7 @@ impl MiniAppServiceRuntimeBinding for TestRuntime {
         input: MiniAppServiceSpecInput,
     ) -> MiniAppPlatformResult<ResolvedMiniAppServiceSpec> {
         input.validate()?;
-        let runtime = MiniAppServiceRuntimeFingerprint {
-            runtime_installation_id: RuntimeInstallationId::from("test-runtime"),
-            runtime_target: RuntimeTarget::from("windows-x86_64"),
-            runtime_executable_digest: digest("runtime"),
-            node_version: VersionString::from("24.0.0"),
-        };
+        let runtime = Self::runtime_fingerprint();
         ResolvedMiniAppServiceSpec::new(ResolvedMiniAppServiceSpecInputs {
             miniapp_id: input.miniapp_id,
             release: input.release,
@@ -182,6 +193,77 @@ impl MiniAppServiceRuntimeBinding for TestRuntime {
     ) -> MiniAppPlatformResult<()> {
         Ok(())
     }
+
+    async fn create_service_test_storage(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &MiniAppId,
+        test_id: &str,
+        uses_files: bool,
+        uses_private_database: bool,
+    ) -> MiniAppPlatformResult<MiniAppServiceTestStorageResolution> {
+        self.storage
+            .create_service_test_storage(
+                owner_user_id,
+                miniapp_id,
+                test_id,
+                uses_files,
+                uses_private_database,
+            )
+            .await
+    }
+
+    async fn purge_service_test_storage(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &MiniAppId,
+        test_id: &str,
+    ) -> MiniAppPlatformResult<()> {
+        self.storage
+            .purge_service_test_storage(owner_user_id, miniapp_id, test_id)
+            .await
+    }
+
+    async fn run_service_test(
+        &self,
+        input: MiniAppServiceTestRunInput,
+    ) -> MiniAppPlatformResult<MiniAppServiceTestReceipt> {
+        let receipt = MiniAppServiceTestReceipt {
+            receipt_id: input.receipt_id,
+            miniapp_id: input.spec.miniapp_id.clone(),
+            release: input.spec.release.clone(),
+            service_run_key: input.spec.service_run_key.clone(),
+            outcome: if input.requires_managed_input {
+                MiniAppServiceTestOutcome::NeedsTestInput
+            } else {
+                MiniAppServiceTestOutcome::Passed
+            },
+            error_code: None,
+            runtime: input.spec.runtime.clone(),
+            host_target: input.spec.runtime.runtime_target.clone(),
+            host_protocol_version: MINIAPP_SERVICE_HOST_PROTOCOL_VERSION.into(),
+            sdk_contract_version: MINIAPP_SERVICE_SDK_CONTRACT_VERSION.into(),
+            test_contract_version: MINIAPP_SERVICE_TEST_CONTRACT_VERSION.into(),
+            resolved_test_input_digest: input.resolved_test_input_digest,
+            copied_kv_digest: input.copied_kv_digest,
+            copied_private_database_digest: input.copied_private_database_digest,
+            empty_files_dir: input.empty_files_dir,
+            migration_ledger_digest: input.migration_ledger_digest,
+            credential_mode: MiniAppServiceTestCredentialMode::None,
+            host_generation: 1,
+            issued_at_ms: nomifun_common::now_ms().max(1),
+        };
+        receipt
+            .validate_for(&input.ready, &input.spec)
+            .map_err(nomifun_miniapp_platform::MiniAppPlatformError::Contract)?;
+        Ok(receipt)
+    }
+
+    async fn current_runtime_fingerprint(
+        &self,
+    ) -> MiniAppPlatformResult<Option<MiniAppServiceRuntimeFingerprint>> {
+        Ok(Some(Self::runtime_fingerprint()))
+    }
 }
 
 fn digest(seed: &str) -> DigestHex {
@@ -246,22 +328,51 @@ async fn service_product_runs_the_application_surface_bridge_lifecycle() {
     );
     assert_eq!(
         ready.test.status,
-        nomifun_api_types::MiniAppTestStatusDto::NeedsTestInput
+        nomifun_api_types::MiniAppTestStatusDto::NotRun
     );
+
+    let tested = application
+        .test_ready_service(
+            &owner,
+            TestMiniAppReleaseRequest {
+                miniapp_id: created.miniapp.miniapp_id.clone(),
+                expected_product_revision: built.miniapp.product_revision,
+                expected_pointer_revision: built.miniapp.releases.pointer_revision,
+                project_id: built.project_id.clone(),
+                expected_project_revision: built.project_revision,
+                expected_build_generation: built.build_generation,
+                release_id: ready.release.release_id.clone(),
+                expected_release_digest: ready.release.release_digest.clone(),
+                expected_config_revision: built.config.config_revision,
+                expected_credential_bindings_revision: built
+                    .credential_bindings_revision,
+                resolved_test_input_digest:
+                    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                        .into(),
+            },
+        )
+        .await
+        .unwrap();
+    let tested_ready = tested.ready.as_ref().unwrap();
+    assert_eq!(
+        tested_ready.test.status,
+        nomifun_api_types::MiniAppTestStatusDto::Passed
+    );
+    assert!(tested_ready.test.receipt_id.is_some());
 
     let published = application
         .publish(
             &owner,
             PublishMiniAppRequest {
                 miniapp_id: created.miniapp.miniapp_id.clone(),
-                expected_product_revision: built.miniapp.product_revision,
-                expected_pointer_revision: built.miniapp.releases.pointer_revision,
-                expected_active_release_epoch: built.miniapp.releases.active_release_epoch,
+                expected_product_revision: tested.miniapp.product_revision,
+                expected_pointer_revision: tested.miniapp.releases.pointer_revision,
+                expected_active_release_epoch: tested.miniapp.releases.active_release_epoch,
                 ready_release_id: ready.release.release_id.clone(),
                 expected_ready_release_digest: ready.release.release_digest.clone(),
                 expected_active_release_digest: None,
-                expected_service_test_receipt_id: None,
-                acknowledge_test_warning: true,
+                expected_service_test_receipt_id: tested_ready.test.receipt_id.clone(),
+                acknowledge_test_warning: false,
             },
         )
         .await

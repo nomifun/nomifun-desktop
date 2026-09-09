@@ -14,7 +14,7 @@ use nomifun_api_types::{
     MiniAppWorkshopDto, OpenMiniAppSurfaceRequest, PublishMiniAppRequest, RollbackMiniAppRequest,
     RestoreMiniAppRequest, RetryMiniAppDeleteRequest, RetryMiniAppServiceRequest,
     SetMiniAppEnabledRequest, SetMiniAppPublishModeRequest, SetMiniAppServiceRunningRequest,
-    TrashMiniAppRequest,
+    TestMiniAppReleaseRequest, TrashMiniAppRequest,
 };
 use nomifun_agent_contracts::{MiniAppBridgeRequest, StrictJsonValue};
 use nomifun_auth::CurrentUser;
@@ -73,6 +73,10 @@ pub(crate) fn miniapp_m1_write_routes(
         .route(
             "/api/miniapps/{miniapp_id}/publish",
             post(publish_miniapp),
+        )
+        .route(
+            "/api/miniapps/{miniapp_id}/test",
+            post(test_miniapp_release),
         )
         .route(
             "/api/miniapps/{miniapp_id}/rollback",
@@ -231,6 +235,21 @@ async fn publish_miniapp(
     let workshop = state
         .application
         .publish(user.id.as_str(), request)
+        .await
+        .map_err(application_error)?;
+    Ok(Json(ApiResponse::ok(workshop)))
+}
+
+async fn test_miniapp_release(
+    State(state): State<MiniAppM1RouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(miniapp_id): Path<String>,
+    Json(request): Json<TestMiniAppReleaseRequest>,
+) -> Result<Json<ApiResponse<MiniAppWorkshopDto>>, AppError> {
+    require_route_id("miniapp_id", &miniapp_id, &request.miniapp_id)?;
+    let workshop = state
+        .application
+        .test_ready_service(user.id.as_str(), request)
         .await
         .map_err(application_error)?;
     Ok(Json(ApiResponse::ok(workshop)))

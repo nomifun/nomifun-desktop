@@ -54,6 +54,20 @@ function readKey(
 }
 
 describe('MiniApp Runner lifecycle wiring', () => {
+  test('runs Ready Service Test through the exact bridge and confirmation', () => {
+    const section = sourceSection(
+      'const handleTest = useCallback',
+      'const handleSetServiceRunning = useCallback'
+    );
+    expect(section.includes('miniAppTestRequest(workshop)')).toBe(true);
+    expect(section.includes('miniApps.confirm.testTitle')).toBe(true);
+    expect(section.includes('ipcBridge.miniapps.test.invoke(request)')).toBe(
+      true
+    );
+    expect(runnerSource.includes('onTest={handleTest}')).toBe(true);
+    expect(runnerSource.includes('miniApps.actions.testService')).toBe(true);
+  });
+
   test('wires all lifecycle handlers through confirmation dialogs', () => {
     const sections = [
       {

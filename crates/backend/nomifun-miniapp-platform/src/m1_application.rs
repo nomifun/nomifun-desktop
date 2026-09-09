@@ -13,7 +13,8 @@ use nomifun_agent_contracts::{
     MiniAppPointerExpectation, MiniAppReadyOrigin, MiniAppReadyRelease,
     MiniAppReadyReleaseRef, MiniAppReleaseId, MiniAppReleasePointerState,
     MiniAppReleaseRef, MiniAppResourceContract, MiniAppSourceLineage, OperationId,
-    MiniAppServiceLifecycle,
+    MiniAppServiceLifecycle, MiniAppServiceStorageDescriptor,
+    MiniAppServiceTestOutcome, MiniAppServiceTestReceipt, MiniAppServiceTestReceiptId,
     PackageContributions, PackageId, PackageRef, StrictJsonValue,
     MiniAppSurfaceSessionId, MiniAppUiOnlyAutoPublishAuthorization,
     MiniAppUiOnlyAutoPublishProof, MiniAppUserAuthorizationId, VersionString,
@@ -34,7 +35,7 @@ use nomifun_api_types::{
     RestoreMiniAppRequest, RetryMiniAppDeleteRequest, RetryMiniAppServiceRequest,
     RollbackMiniAppRequest as RollbackMiniAppRequestDto,
     SetMiniAppEnabledRequest, SetMiniAppPublishModeRequest,
-    SetMiniAppServiceRunningRequest, TrashMiniAppRequest,
+    SetMiniAppServiceRunningRequest, TestMiniAppReleaseRequest, TrashMiniAppRequest,
 };
 use nomifun_db::{
     CancelMiniAppM1BuildOperationParams, CloseMiniAppM1SurfaceSessionParams,
@@ -45,8 +46,10 @@ use nomifun_db::{
     MiniAppM1ManagedSourceLineage, MiniAppM1Snapshot, MiniAppM1SurfaceKvOperation,
     MiniAppM1SurfaceKvResult, MiniAppProductRow,
     MiniAppReleaseArtifactRow, MiniAppReleaseRow, MiniAppSurfaceSessionRow,
+    MiniAppServiceTestReceiptRow,
     OpenMiniAppM1SurfaceSessionParams,
     ProductOperationRow, ProductOperationState, PublishMiniAppM1ReadyParams,
+    RecordMiniAppM1ServiceTestReceiptParams,
     ResolveMiniAppM1SurfaceSessionParams, RollbackMiniAppM1PreviousParams,
     SetMiniAppM1AutoPublishParams,
     BeginMiniAppM1DeleteParams, CommitMiniAppM1LifecycleParams,
@@ -68,7 +71,8 @@ use crate::{
     MiniAppSourceFile, MiniAppSourceScope, MiniAppSourceSnapshot, MiniAppSourceStore,
     MiniAppStaticBundleBuilder, MiniAppStaticBundleFile, MiniAppStaticBundleInput,
     MiniAppStaticServiceInput, MiniAppStoredRelease, MiniAppServiceRuntimeBinding,
-    MiniAppServiceSpecInput, NoopMiniAppServiceRuntime, MiniAppCallCancellation,
+    MiniAppServiceSpecInput, MiniAppServiceTestRunInput, NoopMiniAppServiceRuntime,
+    MiniAppCallCancellation,
     MiniAppServiceObservation,
     materialize_surface_entrypoint,
 };
@@ -166,6 +170,25 @@ impl MiniAppM1ApplicationService {
         owner_user_id: &str,
     ) -> Result<Option<nomifun_agent_contracts::ResolvedMiniAppServiceSpec>, MiniAppM1ApplicationError>
     {
+        self.resolve_service_spec_with_storage(
+            snapshot,
+            release,
+            active_release_epoch,
+            owner_user_id,
+            None,
+        )
+        .await
+    }
+
+    async fn resolve_service_spec_with_storage(
+        &self,
+        snapshot: &MiniAppM1Snapshot,
+        release: &MiniAppReleaseRow,
+        active_release_epoch: u64,
+        owner_user_id: &str,
+        storage_override: Option<MiniAppServiceStorageDescriptor>,
+    ) -> Result<Option<nomifun_agent_contracts::ResolvedMiniAppServiceSpec>, MiniAppM1ApplicationError>
+    {
         let stored = self.load_verified_release(owner_user_id, release)?;
         let Some(descriptor) = stored.artifact.manifest.payload.service.clone() else {
             return Ok(None);
@@ -173,15 +196,19 @@ impl MiniAppM1ApplicationService {
         let config: Value = serde_json::from_str(&snapshot.product.config_json)
             .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
         let runtime = self.service_runtime().await;
-        let storage = runtime
-            .resolve_storage(
-                owner_user_id,
-                &MiniAppId::from(snapshot.product.miniapp_id.clone()),
-                descriptor.uses_files,
-                descriptor.uses_private_database,
-            )
-            .await
-            .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+        let storage = match storage_override {
+            Some(storage) => storage,
+            None => runtime
+                .resolve_storage(
+                    owner_user_id,
+                    &MiniAppId::from(snapshot.product.miniapp_id.clone()),
+                    descriptor.uses_files,
+                    descriptor.uses_private_database,
+                )
+                .await
+                .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?
+                .descriptor,
+        };
         runtime
             .register_module(
                 MiniAppId::from(snapshot.product.miniapp_id.clone()),
@@ -229,7 +256,7 @@ impl MiniAppM1ApplicationService {
                     .payload
                     .contribution_set_digest()
                 .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?,
-                storage: storage.descriptor,
+                storage,
             })
             .await
             .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
@@ -661,15 +688,54 @@ impl MiniAppM1ApplicationService {
         if let Some(ready) = snapshot.ready_release.as_ref() {
             let stored = self.load_verified_release(owner_user_id, ready)?;
             if let Some(service) = stored.artifact.manifest.payload.service.as_ref() {
-                workshop.ready.as_mut().expect("ready row is present").service =
-                    Some(service_descriptor_dto(service));
-                workshop.ready.as_mut().expect("ready row is present").test.status =
-                    MiniAppTestStatusDto::NeedsTestInput;
-                workshop.ready.as_mut().expect("ready row is present").migration_count =
+                let ready_record: MiniAppReadyRelease =
+                    serde_json::from_str(&ready.release_record_json).map_err(|error| {
+                        MiniAppM1ApplicationError::Runtime(format!(
+                            "stored Ready Release record is invalid: {error}"
+                        ))
+                    })?;
+                ready_record
+                    .validate_for_artifact(&stored.artifact)
+                    .map_err(|error| MiniAppM1ApplicationError::Runtime(error.to_string()))?;
+                let receipt = self
+                    .repository
+                    .get_ready_service_test_receipt(
+                        owner_user_id,
+                        &snapshot.product.miniapp_id,
+                    )
+                    .await?;
+                let test = self
+                    .service_test_projection(
+                        ready,
+                        ready_record.matching_service_test_receipt.as_ref(),
+                        receipt.as_ref(),
+                    )
+                    .await?;
+                let blocking_reasons = match test.status {
+                    MiniAppTestStatusDto::Passed => Vec::new(),
+                    MiniAppTestStatusDto::Failed => vec![
+                        test.error_code
+                            .clone()
+                            .unwrap_or_else(|| "service_test_failed".to_owned()),
+                    ],
+                    MiniAppTestStatusDto::NeedsTestInput => {
+                        vec!["service_test_needs_input".to_owned()]
+                    }
+                    MiniAppTestStatusDto::Stale => {
+                        vec!["service_test_stale".to_owned()]
+                    }
+                    MiniAppTestStatusDto::NotRun => {
+                        vec!["service_test_not_run".to_owned()]
+                    }
+                    MiniAppTestStatusDto::NotRequired => Vec::new(),
+                };
+                let ready_projection = workshop.ready.as_mut().expect("ready row is present");
+                ready_projection.service = Some(service_descriptor_dto(service));
+                ready_projection.test = test;
+                ready_projection.migration_count =
                     stored.artifact.manifest.payload.migrations.len() as u32;
-                workshop.ready.as_mut().expect("ready row is present").can_publish = true;
-                workshop.ready.as_mut().expect("ready row is present").blocking_reasons =
-                    vec!["service_test_not_run".to_owned()];
+                ready_projection.can_publish = true;
+                ready_projection.blocking_reasons = blocking_reasons;
             }
         }
         let active_service_lifecycle = if let Some(active) = snapshot.active_release.as_ref() {
@@ -707,6 +773,69 @@ impl MiniAppM1ApplicationService {
                 .map(|service| service.lifecycle)
         });
         Ok(workshop)
+    }
+
+    async fn service_test_projection(
+        &self,
+        ready: &MiniAppReleaseRow,
+        reference: Option<&nomifun_agent_contracts::MiniAppServiceTestReceiptRef>,
+        row: Option<&MiniAppServiceTestReceiptRow>,
+    ) -> Result<MiniAppReleaseTestDto, MiniAppM1ApplicationError> {
+        let mut projection = MiniAppReleaseTestDto {
+            status: MiniAppTestStatusDto::NotRun,
+            release_id: ready.release_id.clone(),
+            expected_release_digest: ready.release_digest.clone(),
+            receipt_id: reference.map(|value| value.receipt_id.as_ref().to_owned()),
+            expected_service_run_key: reference
+                .map(|value| value.service_run_key.as_ref().to_owned()),
+            issued_at_ms: None,
+            error_code: None,
+        };
+        let Some(row) = row else {
+            if reference.is_some() {
+                projection.status = MiniAppTestStatusDto::Stale;
+            }
+            return Ok(projection);
+        };
+        let receipt: MiniAppServiceTestReceipt =
+            serde_json::from_str(&row.receipt_json).map_err(|error| {
+                MiniAppM1ApplicationError::Runtime(format!(
+                    "stored Service Test receipt is invalid: {error}"
+                ))
+            })?;
+        let current_runtime = self
+            .service_runtime()
+            .await
+            .current_runtime_fingerprint()
+            .await
+            .map_err(|error| {
+                MiniAppM1ApplicationError::Runtime(format!(
+                    "cannot resolve current Runtime for Service Test receipt: {error}"
+                ))
+            })?;
+        let runtime_matches = match current_runtime {
+            Some(runtime) => digest_payload(&runtime)
+                .map_err(|error| MiniAppM1ApplicationError::Runtime(error.to_string()))?
+                .as_ref()
+                == row.runtime_fingerprint_digest,
+            None => false,
+        };
+        projection.receipt_id = Some(row.receipt_id.clone());
+        projection.expected_service_run_key = Some(row.service_run_key.clone());
+        projection.issued_at_ms = Some(row.issued_at_ms);
+        projection.error_code = row.error_code.clone();
+        projection.status = if !runtime_matches {
+            MiniAppTestStatusDto::Stale
+        } else {
+            match receipt.outcome {
+                MiniAppServiceTestOutcome::Passed => MiniAppTestStatusDto::Passed,
+                MiniAppServiceTestOutcome::Failed => MiniAppTestStatusDto::Failed,
+                MiniAppServiceTestOutcome::NeedsTestInput => {
+                    MiniAppTestStatusDto::NeedsTestInput
+                }
+            }
+        };
+        Ok(projection)
     }
 
     pub async fn library(
@@ -1049,6 +1178,308 @@ impl MiniAppM1ApplicationService {
         }
     }
 
+    pub async fn test_ready_service(
+        &self,
+        owner_user_id: &str,
+        request: TestMiniAppReleaseRequest,
+    ) -> Result<MiniAppWorkshopDto, MiniAppM1ApplicationError> {
+        validate_request_identity(&request.miniapp_id, "miniapp_id")?;
+        validate_request_identity(&request.project_id, "project_id")?;
+        validate_request_identity(&request.release_id, "release_id")?;
+        validate_digest_string(
+            &request.expected_release_digest,
+            "expected Ready Release digest",
+        )?;
+        validate_digest_string(
+            &request.resolved_test_input_digest,
+            "resolved Service Test input digest",
+        )?;
+        let snapshot = self
+            .repository
+            .get(owner_user_id, &request.miniapp_id)
+            .await?
+            .ok_or(MiniAppM1ApplicationError::NotFound)?;
+        require_release_mutation(&snapshot)?;
+        require_no_running_build(&*self.repository, owner_user_id, &request.miniapp_id).await?;
+        if snapshot.product.kind != MiniAppM1Kind::Service.as_str() {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "Service Test requires a Service MiniApp".into(),
+            ));
+        }
+        let ready = snapshot
+            .ready_release
+            .as_ref()
+            .ok_or_else(|| MiniAppM1ApplicationError::Invalid("no Ready Release".into()))?;
+        if snapshot.product.product_revision
+            != to_i64(request.expected_product_revision, "product revision")?
+            || snapshot.product.pointer_revision
+                != to_i64(request.expected_pointer_revision, "pointer revision")?
+            || snapshot.project.project_id != request.project_id
+            || snapshot.project.project_revision
+                != to_i64(request.expected_project_revision, "project revision")?
+            || snapshot.project.build_generation
+                != to_i64(request.expected_build_generation, "build generation")?
+            || snapshot.product.config_revision
+                != to_i64(request.expected_config_revision, "config revision")?
+            || snapshot.product.credential_bindings_revision
+                != to_i64(
+                    request.expected_credential_bindings_revision,
+                    "credential bindings revision",
+                )?
+            || ready.release_id != request.release_id
+            || ready.release_digest != request.expected_release_digest
+        {
+            return Err(MiniAppM1ApplicationError::Database(
+                nomifun_db::DbError::Conflict(
+                    "MiniApp Service Test request is stale against the exact Ready state"
+                        .into(),
+                ),
+            ));
+        }
+        let stored = self.load_verified_release(owner_user_id, ready)?;
+        let descriptor = stored
+            .artifact
+            .manifest
+            .payload
+            .service
+            .clone()
+            .ok_or_else(|| {
+                MiniAppM1ApplicationError::Invalid(
+                    "Ready Release has no Service descriptor".into(),
+                )
+            })?;
+        let ready_contract: MiniAppReadyRelease =
+            serde_json::from_str(&ready.release_record_json).map_err(|error| {
+                MiniAppM1ApplicationError::Runtime(format!(
+                    "Ready Release record is invalid: {error}"
+                ))
+            })?;
+        ready_contract
+            .validate_for_artifact(&stored.artifact)
+            .map_err(|error| MiniAppM1ApplicationError::Runtime(error.to_string()))?;
+        let prospective_epoch = nonnegative_u64(
+            snapshot.product.active_release_epoch,
+            "MiniApp active release epoch",
+        )?
+        .checked_add(1)
+        .ok_or_else(|| {
+            MiniAppM1ApplicationError::Invalid(
+                "MiniApp active release epoch overflow".into(),
+            )
+        })?;
+        let runtime = self.service_runtime().await;
+        let miniapp_id = MiniAppId::from(request.miniapp_id.clone());
+        let restore_running = matches!(
+            runtime.state(&miniapp_id).await,
+            Some(crate::MiniAppServiceHostState::Running { .. })
+                | Some(crate::MiniAppServiceHostState::Starting { .. })
+        );
+        runtime.stop(&miniapp_id).await.map_err(|error| {
+            MiniAppM1ApplicationError::Runtime(format!(
+                "cannot stop production Service before Test: {error}"
+            ))
+        })?;
+
+        let receipt_id = Uuid::now_v7().to_string();
+        let test_result = async {
+            let mut storage = runtime
+                .create_service_test_storage(
+                    owner_user_id,
+                    &miniapp_id,
+                    &receipt_id,
+                    descriptor.uses_files,
+                    descriptor.uses_private_database,
+                )
+                .await
+                .map_err(|error| {
+                    MiniAppM1ApplicationError::Runtime(format!(
+                        "cannot create Service Test storage: {error}"
+                    ))
+                })?;
+            let migrations = stored.artifact.manifest.payload.migrations.clone();
+            if !migrations.is_empty() {
+                let database = storage
+                    .descriptor
+                    .private_database
+                    .as_ref()
+                    .ok_or_else(|| {
+                        MiniAppM1ApplicationError::Runtime(
+                            "Service Test migrations require a Private Database".into(),
+                        )
+                    })?;
+                let ledger = runtime
+                    .apply_storage_migrations(
+                        owner_user_id,
+                        &miniapp_id,
+                        &storage.descriptor,
+                        &database.migration_ledger_digest,
+                        &release_contract_ref(ready),
+                        &migrations,
+                        positive_now_ms(),
+                    )
+                    .await
+                    .map_err(|error| {
+                        MiniAppM1ApplicationError::Runtime(format!(
+                            "Service Test migration failed: {error}"
+                        ))
+                    })?;
+                let database = storage
+                    .descriptor
+                    .private_database
+                    .as_mut()
+                    .expect("migration database was checked");
+                database.schema_epoch = ledger.schema_epoch;
+                database.migration_ledger_digest = ledger.ledger_digest.clone();
+                storage.migration_ledger = Some(ledger);
+            }
+            let spec = self
+                .resolve_service_spec_with_storage(
+                    &snapshot,
+                    ready,
+                    prospective_epoch,
+                    owner_user_id,
+                    Some(storage.descriptor.clone()),
+                )
+                .await?
+                .ok_or_else(|| {
+                    MiniAppM1ApplicationError::Runtime(
+                        "Ready Release lost its Service descriptor".into(),
+                    )
+                })?;
+            let contributions = &stored.artifact.manifest.payload.contributions;
+            runtime
+                .run_service_test(MiniAppServiceTestRunInput {
+                    receipt_id: MiniAppServiceTestReceiptId::from(receipt_id.clone()),
+                    ready: ready_contract,
+                    spec,
+                    resolved_test_input_digest: DigestHex::from(
+                        request.resolved_test_input_digest.clone(),
+                    ),
+                    copied_kv_digest: storage.copied_kv_digest,
+                    copied_private_database_digest: storage
+                        .copied_private_database_digest,
+                    empty_files_dir: storage.empty_files_dir,
+                    migration_ledger_digest: storage
+                        .migration_ledger
+                        .map(|ledger| ledger.ledger_digest),
+                    requires_managed_input: contributions
+                        != &PackageContributions::default(),
+                })
+                .await
+                .map_err(|error| {
+                    MiniAppM1ApplicationError::Runtime(format!(
+                        "Service Test Host failed: {error}"
+                    ))
+                })
+        }
+        .await;
+
+        let cleanup_result = runtime
+            .purge_service_test_storage(owner_user_id, &miniapp_id, &receipt_id)
+            .await;
+        let restore_result = self
+            .restore_service_after_test(owner_user_id, &snapshot, restore_running)
+            .await;
+        if let Err(error) = cleanup_result {
+            return Err(MiniAppM1ApplicationError::Runtime(format!(
+                "Service Test storage cleanup failed: {error}"
+            )));
+        }
+        restore_result?;
+        let receipt = test_result?;
+        let receipt_json = serde_json::to_value(&receipt).map_err(|error| {
+            MiniAppM1ApplicationError::Runtime(format!(
+                "Service Test receipt serialization failed: {error}"
+            ))
+        })?;
+        let receipt_digest = digest_payload(&receipt)
+            .map_err(|error| MiniAppM1ApplicationError::Runtime(error.to_string()))?;
+        let runtime_digest = digest_payload(&receipt.runtime)
+            .map_err(|error| MiniAppM1ApplicationError::Runtime(error.to_string()))?;
+        let committed = self
+            .repository
+            .record_service_test_receipt_cas(
+                &RecordMiniAppM1ServiceTestReceiptParams {
+                    owner_user_id: owner_user_id.to_owned(),
+                    miniapp_id: request.miniapp_id,
+                    expected_product_revision: snapshot.product.product_revision,
+                    expected_pointer_revision: snapshot.product.pointer_revision,
+                    expected_config_revision: snapshot.product.config_revision,
+                    expected_credential_bindings_revision: snapshot
+                        .product
+                        .credential_bindings_revision,
+                    expected_ready_release_id: ready.release_id.clone(),
+                    expected_ready_release_digest: ready.release_digest.clone(),
+                    receipt_id: receipt.receipt_id.as_ref().to_owned(),
+                    service_run_key: receipt.service_run_key.as_ref().to_owned(),
+                    outcome: receipt.outcome,
+                    error_code: receipt.error_code.as_ref().map(|value| {
+                        value.as_ref().to_owned()
+                    }),
+                    receipt_digest: receipt_digest.as_ref().to_owned(),
+                    runtime_fingerprint_digest: runtime_digest.as_ref().to_owned(),
+                    resolved_test_input_digest: receipt
+                        .resolved_test_input_digest
+                        .as_ref()
+                        .to_owned(),
+                    receipt: receipt_json,
+                    issued_at_ms: receipt.issued_at_ms,
+                },
+            )
+            .await?;
+        self.workshop_projection(owner_user_id, &committed, None)
+            .await
+    }
+
+    async fn restore_service_after_test(
+        &self,
+        owner_user_id: &str,
+        snapshot: &MiniAppM1Snapshot,
+        restore_running: bool,
+    ) -> Result<(), MiniAppM1ApplicationError> {
+        if snapshot.product.lifecycle != "enabled" {
+            return Ok(());
+        }
+        let active = snapshot.active_release.as_ref().ok_or_else(|| {
+            MiniAppM1ApplicationError::Runtime(
+                "enabled Service MiniApp lost its Active Release during Test".into(),
+            )
+        })?;
+        let spec = self
+            .resolve_service_spec(
+                snapshot,
+                active,
+                positive_u64(
+                    snapshot.product.active_release_epoch,
+                    "MiniApp active release epoch",
+                )?,
+                owner_user_id,
+            )
+            .await?
+            .ok_or_else(|| {
+                MiniAppM1ApplicationError::Runtime(
+                    "Active Release lost its Service descriptor during Test".into(),
+                )
+            })?;
+        let runtime = self.service_runtime().await;
+        runtime
+            .bind_active(spec.clone(), true)
+            .await
+            .map_err(|error| {
+                MiniAppM1ApplicationError::Runtime(format!(
+                    "cannot restore Active Service after Test: {error}"
+                ))
+            })?;
+        if restore_running {
+            runtime.start(spec).await.map_err(|error| {
+                MiniAppM1ApplicationError::Runtime(format!(
+                    "cannot restart Active Service after Test: {error}"
+                ))
+            })?;
+        }
+        Ok(())
+    }
+
     pub async fn publish(
         &self,
         owner_user_id: &str,
@@ -1075,6 +1506,8 @@ impl MiniAppM1ApplicationService {
                 "UI-only MiniApp cannot publish a Service Release".to_owned(),
             ));
         }
+        self.validate_service_publish_receipt(owner_user_id, &snapshot, &request)
+            .await?;
 
         let target = release_contract_ref(ready);
         let target_catalog_digest = materialized_catalog_digest(
@@ -1137,6 +1570,100 @@ impl MiniAppM1ApplicationService {
         self.complete_service_cutover(&committed, target_service).await?;
         self.workshop_projection(owner_user_id, &committed, None)
             .await
+    }
+
+    async fn validate_service_publish_receipt(
+        &self,
+        owner_user_id: &str,
+        snapshot: &MiniAppM1Snapshot,
+        request: &PublishMiniAppRequestDto,
+    ) -> Result<(), MiniAppM1ApplicationError> {
+        if snapshot.product.kind != MiniAppM1Kind::Service.as_str() {
+            return Ok(());
+        }
+        let Some(expected_receipt_id) =
+            request.expected_service_test_receipt_id.as_deref()
+        else {
+            if request.acknowledge_test_warning {
+                return Ok(());
+            }
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "Service Publish requires a current passed receipt or explicit Test warning acknowledgement"
+                    .into(),
+            ));
+        };
+        let row = self
+            .repository
+            .get_ready_service_test_receipt(
+                owner_user_id,
+                &snapshot.product.miniapp_id,
+            )
+            .await?
+            .ok_or_else(|| {
+                MiniAppM1ApplicationError::Database(
+                    nomifun_db::DbError::Conflict(
+                        "Service Test receipt is stale for the current Ready state".into(),
+                    ),
+                )
+            })?;
+        if row.receipt_id != expected_receipt_id
+            || row.release_id != request.ready_release_id
+            || row.release_digest != request.expected_ready_release_digest
+        {
+            return Err(MiniAppM1ApplicationError::Database(
+                nomifun_db::DbError::Conflict(
+                    "Service Publish does not bind the current Ready Test receipt".into(),
+                ),
+            ));
+        }
+        let current_runtime = self
+            .service_runtime()
+            .await
+            .current_runtime_fingerprint()
+            .await
+            .map_err(|error| {
+                MiniAppM1ApplicationError::Runtime(format!(
+                    "cannot resolve current Runtime for Service Publish: {error}"
+                ))
+            })?
+            .ok_or_else(|| {
+                MiniAppM1ApplicationError::Database(
+                    nomifun_db::DbError::Conflict(
+                        "Service Test receipt is stale because no Runtime is selected".into(),
+                    ),
+                )
+            })?;
+        let runtime_digest = digest_payload(&current_runtime)
+            .map_err(|error| MiniAppM1ApplicationError::Runtime(error.to_string()))?;
+        if runtime_digest.as_ref() != row.runtime_fingerprint_digest {
+            return Err(MiniAppM1ApplicationError::Database(
+                nomifun_db::DbError::Conflict(
+                    "Service Test receipt Runtime no longer matches the committed Runtime".into(),
+                ),
+            ));
+        }
+        let receipt: MiniAppServiceTestReceipt =
+            serde_json::from_str(&row.receipt_json).map_err(|error| {
+                MiniAppM1ApplicationError::Runtime(format!(
+                    "stored Service Test receipt is invalid: {error}"
+                ))
+            })?;
+        match receipt.outcome {
+            MiniAppServiceTestOutcome::Passed => Ok(()),
+            MiniAppServiceTestOutcome::Failed
+            | MiniAppServiceTestOutcome::NeedsTestInput
+                if request.acknowledge_test_warning =>
+            {
+                Ok(())
+            }
+            MiniAppServiceTestOutcome::Failed
+            | MiniAppServiceTestOutcome::NeedsTestInput => {
+                Err(MiniAppM1ApplicationError::Invalid(
+                    "Service Publish requires explicit acknowledgement for a non-passed Test receipt"
+                        .into(),
+                ))
+            }
+        }
     }
 
     pub async fn rollback(
@@ -3134,18 +3661,6 @@ fn validate_publish_request(
     {
         return Err(MiniAppM1ApplicationError::Invalid(
             "UI-only Publish does not accept Service Test warnings or receipts".to_owned(),
-        ));
-    }
-    if is_service && request.expected_service_test_receipt_id.is_some() {
-        return Err(MiniAppM1ApplicationError::Invalid(
-            "Service Test receipts are not available until the managed Service Test lane is delivered"
-                .to_owned(),
-        ));
-    }
-    if is_service && !request.acknowledge_test_warning {
-        return Err(MiniAppM1ApplicationError::Invalid(
-            "Service Publish requires explicit acknowledgement that Service Test has not run"
-                .to_owned(),
         ));
     }
     let ready = snapshot

@@ -106,6 +106,7 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "miniapp_publish_authorizations",
     "miniapp_release_artifacts",
     "miniapp_releases",
+    "miniapp_service_test_receipts",
     "miniapp_surface_sessions",
     "miniapps",
     "nomi_remote_events",
@@ -192,6 +193,7 @@ const UUIDV7_BUSINESS_COLUMNS: &[(&str, &str)] = &[
     ("miniapp_publish_authorizations", "authorization_id"),
     ("miniapp_release_artifacts", "artifact_id"),
     ("miniapp_releases", "release_id"),
+    ("miniapp_service_test_receipts", "receipt_id"),
     ("miniapp_surface_sessions", "surface_session_id"),
     ("miniapps", "miniapp_id"),
     ("nomi_remote_events", "event_id"),
@@ -294,6 +296,7 @@ const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
     ("miniapp_publish_authorizations", "authorization_id"),
     ("miniapp_release_artifacts", "artifact_id"),
     ("miniapp_releases", "release_id"),
+    ("miniapp_service_test_receipts", "receipt_id"),
     ("miniapp_surface_sessions", "surface_session_id"),
     ("miniapps", "miniapp_id"),
     ("nomi_agent_bindings", "target_id"),
@@ -701,6 +704,14 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     text_ref!("miniapp_releases", "artifact_id" => "miniapp_release_artifacts", "artifact_id", false, "idx_miniapp_releases_artifact_id", Restrict),
     text_ref!("miniapp_releases", "project_id" => "miniapp_projects", "project_id", true, "idx_miniapp_releases_project_id", Restrict),
     text_ref!("miniapp_releases", "origin_operation_id" => "product_operations", "operation_id", false, "idx_miniapp_releases_origin_operation_id", KeepHistory),
+    text_ref!("miniapp_service_test_receipts", "owner_user_id" => "users", "user_id", false, "idx_miniapp_service_test_receipts_owner_user_id", Cascade),
+    text_ref!("miniapp_service_test_receipts", "miniapp_id" => "miniapp_products", "miniapp_id", false, "idx_miniapp_service_test_receipts_miniapp_id", Cascade)
+        .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
+    text_ref!("miniapp_service_test_receipts", "release_id" => "miniapp_releases", "release_id", false, "idx_miniapp_service_test_receipts_release_id", Restrict)
+        .with_aggregate_scope(
+            "parent.owner_user_id = child.owner_user_id \
+             AND parent.miniapp_id = child.miniapp_id",
+        ),
     text_ref!("miniapp_credential_bindings", "owner_user_id" => "users", "user_id", false, "idx_miniapp_credential_bindings_owner_user_id", Cascade),
     text_ref!("miniapp_credential_bindings", "miniapp_id" => "miniapp_products", "miniapp_id", false, "idx_miniapp_credential_bindings_miniapp_id", Cascade),
     external_ref!("miniapp_credential_bindings", "credential_id", Text, false, Opaque, "idx_miniapp_credential_bindings_credential_id", KeepHistory),

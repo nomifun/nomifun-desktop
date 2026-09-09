@@ -25,6 +25,16 @@ pub struct MiniAppServiceStorageResolution {
     pub migration_ledger: Option<MiniAppMigrationLedger>,
 }
 
+/// Isolated storage materialized for one transient Service Test.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MiniAppServiceTestStorageResolution {
+    pub descriptor: MiniAppServiceStorageDescriptor,
+    pub copied_kv_digest: DigestHex,
+    pub copied_private_database_digest: Option<DigestHex>,
+    pub empty_files_dir: Option<bool>,
+    pub migration_ledger: Option<MiniAppMigrationLedger>,
+}
+
 impl MiniAppServiceStorageResolution {
     pub fn host_kv(miniapp_id: MiniAppId) -> Self {
         Self {
@@ -98,6 +108,38 @@ pub trait MiniAppServiceStoragePort: Send + Sync {
         request: MiniAppServiceStorageRequest,
         cancellation: MiniAppCallCancellation,
     ) -> MiniAppPlatformResult<StrictJsonValue>;
+
+    async fn create_service_test_storage(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &MiniAppId,
+        test_id: &str,
+        uses_files: bool,
+        uses_private_database: bool,
+    ) -> MiniAppPlatformResult<MiniAppServiceTestStorageResolution> {
+        let _ = (
+            owner_user_id,
+            miniapp_id,
+            test_id,
+            uses_files,
+            uses_private_database,
+        );
+        Err(MiniAppPlatformError::Runtime(
+            "MiniApp Service Test storage is not configured".into(),
+        ))
+    }
+
+    async fn purge_service_test_storage(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &MiniAppId,
+        test_id: &str,
+    ) -> MiniAppPlatformResult<()> {
+        let _ = (owner_user_id, miniapp_id, test_id);
+        Err(MiniAppPlatformError::Runtime(
+            "MiniApp Service Test storage is not configured".into(),
+        ))
+    }
 
     async fn purge_service_storage(
         &self,
@@ -394,6 +436,13 @@ struct KvCell {
     value: StrictJsonValue,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct InMemoryTestStorageKey {
+    owner_user_id: String,
+    miniapp_id: String,
+    test_id: String,
+}
+
 #[derive(Clone)]
 struct DatabaseState {
     descriptor: MiniAppPrivateDatabaseDescriptor,
@@ -406,6 +455,7 @@ struct ManagedStorageState {
     kv: BTreeMap<MiniAppKvHandleId, KvNamespace>,
     files: BTreeMap<MiniAppFilesHandleId, MiniAppFilesDirDescriptor>,
     databases: BTreeMap<MiniAppDatabaseHandleId, DatabaseState>,
+    test_storage: BTreeMap<InMemoryTestStorageKey, MiniAppServiceStorageDescriptor>,
 }
 
 /// Contract-focused in-memory storage. It enforces owner/handle isolation,
@@ -857,6 +907,180 @@ impl MiniAppServiceStoragePort for InMemoryMiniAppManagedStorage {
         Ok(StrictJsonValue(value))
     }
 
+    async fn create_service_test_storage(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &MiniAppId,
+        test_id: &str,
+        uses_files: bool,
+        uses_private_database: bool,
+    ) -> MiniAppPlatformResult<MiniAppServiceTestStorageResolution> {
+        validate_service_test_id(test_id)?;
+        let production = self
+            .resolve_service_storage(
+                owner_user_id,
+                miniapp_id,
+                uses_files,
+                uses_private_database,
+            )
+            .await?;
+        self.purge_service_test_storage(owner_user_id, miniapp_id, test_id)
+            .await?;
+
+        let test_key = InMemoryTestStorageKey {
+            owner_user_id: owner_user_id.to_owned(),
+            miniapp_id: miniapp_id.as_ref().to_owned(),
+            test_id: test_id.to_owned(),
+        };
+        let kv_handle_id = MiniAppKvHandleId::from(format!(
+            "miniapp-test-kv-{}-{test_id}",
+            miniapp_id.as_ref()
+        ));
+        let mut state = self.state.lock().await;
+        let production_kv = state
+            .kv
+            .get(&production.descriptor.kv.handle_id)
+            .filter(|namespace| namespace.descriptor == production.descriptor.kv)
+            .cloned()
+            .ok_or(MiniAppPlatformError::UnknownStorageHandle)?;
+        let copied_kv_digest = service_test_kv_digest(
+            production_kv
+                .values
+                .iter()
+                .map(|(key, cell)| MiniAppServiceTestKvSnapshotEntry {
+                    key: key.clone(),
+                    value: cell.value.clone(),
+                    revision: cell.revision,
+                    key_generation: 1,
+                    is_tombstone: false,
+                })
+                .collect(),
+        )?;
+        let kv = MiniAppKvHandleDescriptor {
+            handle_id: kv_handle_id.clone(),
+            miniapp_id: miniapp_id.clone(),
+            namespace_revision: 1,
+        };
+        state.kv.insert(
+            kv_handle_id,
+            KvNamespace {
+                descriptor: kv.clone(),
+                values: production_kv.values,
+            },
+        );
+
+        let files_dir = if uses_files {
+            let path =
+                in_memory_service_test_files_path(owner_user_id, miniapp_id, test_id);
+            std::fs::create_dir_all(&path).map_err(|error| {
+                MiniAppPlatformError::Runtime(format!(
+                    "cannot create in-memory Service Test filesDir fixture: {error}"
+                ))
+            })?;
+            let descriptor = MiniAppFilesDirDescriptor {
+                handle_id: MiniAppFilesHandleId::from(format!(
+                    "miniapp-test-files-{}-{test_id}",
+                    miniapp_id.as_ref()
+                )),
+                miniapp_id: miniapp_id.clone(),
+                absolute_path: path.display().to_string(),
+            };
+            state
+                .files
+                .insert(descriptor.handle_id.clone(), descriptor.clone());
+            Some(descriptor)
+        } else {
+            None
+        };
+
+        let (private_database, copied_private_database_digest, migration_ledger) =
+            if uses_private_database {
+                let production_database = production
+                    .descriptor
+                    .private_database
+                    .as_ref()
+                    .and_then(|descriptor| state.databases.get(&descriptor.handle_id))
+                    .cloned()
+                    .ok_or(MiniAppPlatformError::UnknownStorageHandle)?;
+                let copied_private_database_digest =
+                    digest_payload(&InMemoryDatabaseSnapshotDigestInput {
+                        ledger: &production_database.ledger,
+                        statements: &production_database.statements,
+                    })
+                    .map_err(|error| MiniAppPlatformError::Runtime(error.to_string()))?;
+                let handle_id = MiniAppDatabaseHandleId::from(format!(
+                    "miniapp-test-db-{}-{test_id}",
+                    miniapp_id.as_ref()
+                ));
+                let ledger = rebind_migration_ledger(&production_database.ledger, handle_id.clone())?;
+                let descriptor = MiniAppPrivateDatabaseDescriptor {
+                    handle_id: handle_id.clone(),
+                    miniapp_id: miniapp_id.clone(),
+                    schema_epoch: ledger.schema_epoch,
+                    migration_ledger_digest: ledger.ledger_digest.clone(),
+                };
+                state.databases.insert(
+                    handle_id,
+                    DatabaseState {
+                        descriptor: descriptor.clone(),
+                        ledger: ledger.clone(),
+                        statements: production_database.statements,
+                    },
+                );
+                (Some(descriptor), Some(copied_private_database_digest), Some(ledger))
+            } else {
+                (None, None, None)
+            };
+        let descriptor = MiniAppServiceStorageDescriptor {
+            kv,
+            files_dir,
+            private_database,
+        };
+        state.test_storage.insert(test_key, descriptor.clone());
+        Ok(MiniAppServiceTestStorageResolution {
+            descriptor,
+            copied_kv_digest,
+            copied_private_database_digest,
+            empty_files_dir: uses_files.then_some(true),
+            migration_ledger,
+        })
+    }
+
+    async fn purge_service_test_storage(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &MiniAppId,
+        test_id: &str,
+    ) -> MiniAppPlatformResult<()> {
+        validate_service_test_id(test_id)?;
+        let key = InMemoryTestStorageKey {
+            owner_user_id: owner_user_id.to_owned(),
+            miniapp_id: miniapp_id.as_ref().to_owned(),
+            test_id: test_id.to_owned(),
+        };
+        let descriptor = self.state.lock().await.test_storage.get(&key).cloned();
+        let file_path = descriptor
+            .as_ref()
+            .and_then(|storage| storage.files_dir.as_ref())
+            .map(|files| std::path::PathBuf::from(&files.absolute_path))
+            .unwrap_or_else(|| {
+                in_memory_service_test_files_path(owner_user_id, miniapp_id, test_id)
+            });
+        remove_in_memory_managed_directory(&file_path)?;
+        let mut state = self.state.lock().await;
+        let descriptor = state.test_storage.remove(&key);
+        if let Some(storage) = descriptor {
+            state.kv.remove(&storage.kv.handle_id);
+            if let Some(files) = storage.files_dir {
+                state.files.remove(&files.handle_id);
+            }
+            if let Some(database) = storage.private_database {
+                state.databases.remove(&database.handle_id);
+            }
+        }
+        Ok(())
+    }
+
     async fn purge_service_storage(
         &self,
         _owner_user_id: &str,
@@ -870,6 +1094,9 @@ impl MiniAppServiceStoragePort for InMemoryMiniAppManagedStorage {
             .map(|descriptor| descriptor.absolute_path.clone())
             .collect::<Vec<_>>();
         state
+            .test_storage
+            .retain(|key, _| key.miniapp_id != miniapp_id.as_ref());
+        state
             .kv
             .retain(|_, namespace| &namespace.descriptor.miniapp_id != miniapp_id);
         state
@@ -880,28 +1107,180 @@ impl MiniAppServiceStoragePort for InMemoryMiniAppManagedStorage {
             .retain(|_, database| &database.descriptor.miniapp_id != miniapp_id);
         drop(state);
         for path in file_paths {
-            let path = std::path::Path::new(&path);
-            match std::fs::symlink_metadata(path) {
-                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-                    return Err(MiniAppPlatformError::InvalidState(
-                        "in-memory filesDir fixture changed before purge".into(),
-                    ));
-                }
-                Ok(_) => std::fs::remove_dir_all(path).map_err(|error| {
-                    MiniAppPlatformError::Runtime(format!(
-                        "cannot purge in-memory filesDir fixture: {error}"
-                    ))
-                })?,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(MiniAppPlatformError::Runtime(format!(
-                        "cannot inspect in-memory filesDir fixture: {error}"
-                    )));
-                }
-            }
+            remove_in_memory_managed_directory(std::path::Path::new(&path))?;
         }
         Ok(())
     }
+}
+
+#[derive(Serialize)]
+struct InMemoryDatabaseSnapshotDigestInput<'a> {
+    ledger: &'a MiniAppMigrationLedger,
+    statements: &'a [MiniAppDatabaseStatement],
+}
+
+#[derive(Serialize)]
+pub(crate) struct MiniAppServiceTestKvSnapshotEntry {
+    pub key: String,
+    pub value: StrictJsonValue,
+    pub revision: u64,
+    pub key_generation: u64,
+    pub is_tombstone: bool,
+}
+
+pub(crate) fn service_test_kv_digest(
+    entries: Vec<MiniAppServiceTestKvSnapshotEntry>,
+) -> MiniAppPlatformResult<DigestHex> {
+    digest_payload(&entries).map_err(|error| MiniAppPlatformError::Runtime(error.to_string()))
+}
+
+pub(crate) fn validate_service_test_id(test_id: &str) -> MiniAppPlatformResult<()> {
+    if test_id.is_empty()
+        || test_id.len() > 64
+        || !test_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(MiniAppPlatformError::InvalidState(
+            "Service Test identity must contain 1 to 64 ASCII letters, digits, '-' or '_'".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn rebind_migration_ledger(
+    source: &MiniAppMigrationLedger,
+    handle_id: MiniAppDatabaseHandleId,
+) -> MiniAppPlatformResult<MiniAppMigrationLedger> {
+    let ledger_digest = ledger_digest(
+        &source.miniapp_id,
+        &handle_id,
+        source.schema_epoch,
+        &source.entries,
+    )?;
+    let rebound = MiniAppMigrationLedger {
+        miniapp_id: source.miniapp_id.clone(),
+        handle_id,
+        schema_epoch: source.schema_epoch,
+        entries: source.entries.clone(),
+        ledger_digest,
+    };
+    rebound.validate()?;
+    Ok(rebound)
+}
+
+fn remove_in_memory_managed_directory(path: &std::path::Path) -> MiniAppPlatformResult<()> {
+    let root = std::env::temp_dir().join("nomifun-miniapp-memory");
+    let relative = path.strip_prefix(&root).map_err(|_| {
+        MiniAppPlatformError::InvalidState(
+            "in-memory filesDir fixture escaped its managed root".into(),
+        )
+    })?;
+    match std::fs::symlink_metadata(&root) {
+        Ok(metadata) if in_memory_reparse_or_symlink(&metadata) || !metadata.is_dir() => {
+            return Err(MiniAppPlatformError::InvalidState(
+                "in-memory filesDir fixture root is not a regular directory".into(),
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(MiniAppPlatformError::Runtime(format!(
+                "cannot inspect in-memory filesDir fixture root: {error}"
+            )));
+        }
+    }
+    let mut current = root;
+    for component in relative.components() {
+        let std::path::Component::Normal(component) = component else {
+            return Err(MiniAppPlatformError::InvalidState(
+                "in-memory filesDir fixture contains a non-normal component".into(),
+            ));
+        };
+        current.push(component);
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata)
+                if in_memory_reparse_or_symlink(&metadata) || !metadata.is_dir() =>
+            {
+                return Err(MiniAppPlatformError::InvalidState(
+                    "in-memory filesDir fixture changed before purge".into(),
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(MiniAppPlatformError::Runtime(format!(
+                    "cannot inspect in-memory filesDir fixture: {error}"
+                )));
+            }
+        }
+    }
+    validate_in_memory_removal_tree(path)?;
+    std::fs::remove_dir_all(path).map_err(|error| {
+        MiniAppPlatformError::Runtime(format!(
+            "cannot purge in-memory filesDir fixture: {error}"
+        ))
+    })
+}
+
+fn validate_in_memory_removal_tree(path: &std::path::Path) -> MiniAppPlatformResult<()> {
+    for entry in std::fs::read_dir(path).map_err(|error| {
+        MiniAppPlatformError::Runtime(format!(
+            "cannot read in-memory filesDir fixture: {error}"
+        ))
+    })? {
+        let entry = entry.map_err(|error| {
+            MiniAppPlatformError::Runtime(format!(
+                "cannot inspect in-memory filesDir fixture entry: {error}"
+            ))
+        })?;
+        let metadata = std::fs::symlink_metadata(entry.path()).map_err(|error| {
+            MiniAppPlatformError::Runtime(format!(
+                "cannot inspect in-memory filesDir fixture entry: {error}"
+            ))
+        })?;
+        if in_memory_reparse_or_symlink(&metadata) {
+            return Err(MiniAppPlatformError::InvalidState(
+                "in-memory filesDir fixture contains a symlink or reparse point".into(),
+            ));
+        }
+        if metadata.is_dir() {
+            validate_in_memory_removal_tree(&entry.path())?;
+        } else if !metadata.is_file() {
+            return Err(MiniAppPlatformError::InvalidState(
+                "in-memory filesDir fixture contains a special file".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn in_memory_reparse_or_symlink(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    metadata.file_type().is_symlink()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn in_memory_reparse_or_symlink(metadata: &std::fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
+}
+
+fn in_memory_service_test_files_path(
+    owner_user_id: &str,
+    miniapp_id: &MiniAppId,
+    test_id: &str,
+) -> std::path::PathBuf {
+    std::env::temp_dir()
+        .join("nomifun-miniapp-memory")
+        .join(owner_user_id)
+        .join(miniapp_id.as_ref())
+        .join("service-tests")
+        .join(test_id)
+        .join("files")
 }
 
 fn owned_database<'a>(
