@@ -1,17 +1,26 @@
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::Path,
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use nomifun_agent_contracts::{
-    ActionId, CapabilityId, CapabilityRef, DigestHex, MiniAppBridgeCallId,
-    MiniAppBridgeTarget, MiniAppId,
+    capability_surface_declarations, digest_payload, ActionId, CapabilityActionDescriptor,
+    CapabilityContributions, CapabilityConsumer, CapabilityId, CapabilityKind, CapabilityManifest,
+    CapabilityRef, CanonicalSchemaRef, DigestHex, EffectClass, LocalizedMetadata,
+    MiniAppBridgeCallId, MiniAppBridgeTarget, MiniAppId, MiniAppReleaseRef,
+    MiniAppResourceContract, MiniAppServiceLifecycle, MiniAppShareBundleId,
+    PackageContributions, PackageId, PackageRef, PlatformConstraint,
     MiniAppServiceRuntimeFingerprint, MiniAppServiceTestCredentialMode,
     MiniAppServiceTestOutcome, MiniAppServiceTestReceipt, ResolvedMiniAppServiceSpec,
     ResolvedMiniAppServiceSpecInputs, RuntimeInstallationId, RuntimeTarget, StrictJsonValue,
-    VersionString, MINIAPP_SERVICE_HOST_PROTOCOL_VERSION,
+    ToolPresentationKind, VersionString, MINIAPP_SERVICE_HOST_PROTOCOL_VERSION,
     MINIAPP_SERVICE_SDK_CONTRACT_VERSION, MINIAPP_SERVICE_TEST_CONTRACT_VERSION, digest_bytes,
 };
 use nomifun_api_types::{
-    BuildMiniAppRequest, CreateMiniAppProjectRequest, MiniAppKindDto,
+    BuildMiniAppRequest, CreateMiniAppProjectRequest, ImportMiniAppArtifactRequest, MiniAppKindDto,
     MiniAppServiceLifecycleDto, PublishMiniAppRequest, SetMiniAppEnabledRequest,
     TestMiniAppReleaseRequest,
 };
@@ -26,10 +35,18 @@ use nomifun_miniapp_platform::{
     MiniAppServiceInvocation, MiniAppServiceProcess, MiniAppServiceProcessError,
     MiniAppServiceProcessFactory, MiniAppServiceRuntimeBinding, MiniAppServiceSpecInput,
     MiniAppServiceStoragePort, MiniAppServiceTestRunInput,
-    MiniAppServiceTestStorageResolution,
+    MiniAppServiceTestStorageResolution, MiniAppReleaseFileBytes, MiniAppReleasePublishRequest,
+    MiniAppReleaseStore, MiniAppShareBundleExport, MiniAppShareBundleFilesystem,
+    MiniAppSourceScope, MiniAppStaticBundleBuilder,
+    MiniAppStaticBundleFile, MiniAppStaticBundleInput, MiniAppStaticServiceInput,
+    materialize_surface_entrypoint,
 };
 use serde_json::json;
 use tokio::sync::Mutex;
+use uuid::Uuid;
+
+const CALLABLE_CAPABILITY_ID: &str = "miniapp.callable.echo";
+const CALLABLE_ACTION_ID: &str = "miniapp.callable.echo.invoke";
 
 #[derive(Default)]
 struct TestProcessFactory;
@@ -272,6 +289,203 @@ fn digest(seed: &str) -> DigestHex {
     digest_bytes(seed.as_bytes())
 }
 
+fn callable_service_artifact() -> nomifun_agent_contracts::MiniAppReleaseArtifactV1 {
+    let input_schema = StrictJsonValue(json!({
+        "additionalProperties": false,
+        "properties": {
+            "value": {"type": "integer"}
+        },
+        "required": ["value"],
+        "type": "object"
+    }));
+    let output_schema = StrictJsonValue(json!({
+        "additionalProperties": false,
+        "properties": {
+            "call_id": {"type": "string"},
+            "method": {"type": "string"},
+            "payload": {"type": "object"}
+        },
+        "required": ["call_id", "method", "payload"],
+        "type": "object"
+    }));
+    let input_schema_ref = CanonicalSchemaRef::from(format!(
+        "schema://miniapp.callable/echo-input@1#{}",
+        digest_payload(&input_schema.0).unwrap().as_ref()
+    ));
+    let output_schema_ref = CanonicalSchemaRef::from(format!(
+        "schema://miniapp.callable/echo-output@1#{}",
+        digest_payload(&output_schema.0).unwrap().as_ref()
+    ));
+    let package = PackageRef {
+        id: PackageId::from("miniapp.callable"),
+        version: VersionString::from("1.0.0"),
+    };
+    let capability = CapabilityManifest {
+        id: CapabilityId::from(CALLABLE_CAPABILITY_ID),
+        contribution_id: "contribution:miniapp.callable.echo".into(),
+        version: VersionString::from("1.0.0"),
+        kind: CapabilityKind::Tool,
+        package: package.clone(),
+        display: LocalizedMetadata {
+            name: "Callable Echo".into(),
+            description: "A deterministic callable MiniApp capability fixture.".into(),
+            localized_names: BTreeMap::new(),
+            localized_descriptions: BTreeMap::new(),
+        },
+        requires: Vec::new(),
+        conflicts: Vec::new(),
+        supported_surfaces: capability_surface_declarations(
+            ["desktop"],
+            [CapabilityConsumer::Agent, CapabilityConsumer::MiniAppService],
+        ),
+        requires_runtime_features: Vec::new(),
+        supported_platforms: vec![PlatformConstraint::Any],
+        config_schema: StrictJsonValue(json!({"type": "object"})),
+        contributions: CapabilityContributions {
+            actions: vec![CapabilityActionDescriptor {
+                action_id: ActionId::from(CALLABLE_ACTION_ID),
+                input_schema: input_schema_ref.clone(),
+                output_schema: output_schema_ref.clone(),
+                effect_class: EffectClass::ReadLocal,
+                presentation: ToolPresentationKind::FunctionTool,
+            }],
+            ..Default::default()
+        },
+    };
+
+    MiniAppStaticBundleBuilder::new()
+        .build(MiniAppStaticBundleInput {
+            artifact_id: Uuid::now_v7().to_string().into(),
+            display: LocalizedMetadata {
+                name: "Callable Service".into(),
+                description: "Service Release with one callable Capability.".into(),
+                localized_names: BTreeMap::new(),
+                localized_descriptions: BTreeMap::new(),
+            },
+            ui_index_html: b"<!doctype html><html><body>callable</body></html>".to_vec(),
+            ui_assets: vec![MiniAppStaticBundleFile::new(
+                "ui/app.js",
+                b"export const ready = true;\n".to_vec(),
+            )],
+            service: Some(MiniAppStaticServiceInput {
+                main_mjs: b"export async function start() { return { async invoke() { return null; } }; }\n"
+                    .to_vec(),
+                lifecycle: MiniAppServiceLifecycle::OnDemand,
+                uses_files: false,
+                uses_private_database: false,
+                service_contract_digest: digest("service-contract"),
+                runtime_requirements_digest: digest("runtime-requirements"),
+            }),
+            package_json: Some(
+                br#"{"private":true,"type":"module","scripts":{}}"#.to_vec(),
+            ),
+            dependency_lock_digest: digest("callable-lock"),
+            dependency_graph_digest: digest("callable-graph"),
+            config_schema: StrictJsonValue(json!({
+                "additionalProperties": false,
+                "type": "object"
+            })),
+            credential_slots: Vec::new(),
+            resource_contract: MiniAppResourceContract::default(),
+            schemas: BTreeMap::from([
+                (input_schema_ref, input_schema),
+                (output_schema_ref, output_schema),
+            ]),
+            bridge_contract_digest: digest("bridge-contract"),
+            contribution_package: package,
+            contributions: PackageContributions {
+                capabilities: vec![capability],
+                ..Default::default()
+            },
+            migrations: Vec::new(),
+        })
+        .expect("callable Service fixture must build")
+}
+
+fn release_files(
+    artifact: &nomifun_agent_contracts::MiniAppReleaseArtifactV1,
+) -> Vec<MiniAppReleaseFileBytes> {
+    artifact
+        .files
+        .iter()
+        .map(|file| {
+            let bytes = match file.normalized_relative_path.as_str() {
+                "ui/index.html" => materialize_surface_entrypoint(
+                    b"<!doctype html><html><body>callable</body></html>",
+                )
+                .unwrap(),
+                "ui/app.js" => b"export const ready = true;\n".to_vec(),
+                "service/main.mjs" => {
+                    b"export async function start() { return { async invoke() { return null; } }; }\n"
+                        .to_vec()
+                }
+                path => panic!("unexpected callable Service fixture path: {path}"),
+            };
+            assert_eq!(
+                digest_bytes(&bytes),
+                file.digest,
+                "fixture bytes must match the built Artifact"
+            );
+            assert_eq!(bytes.len() as u64, file.size_bytes);
+            MiniAppReleaseFileBytes::new(
+                file.normalized_relative_path.clone(),
+                bytes,
+            )
+        })
+        .collect()
+}
+
+fn copy_tree(source: &Path, destination: &Path) {
+    fs::create_dir_all(destination).unwrap();
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let target = destination.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+fn contract_release_ref(
+    release: &nomifun_api_types::MiniAppReleaseRefDto,
+) -> MiniAppReleaseRef {
+    MiniAppReleaseRef {
+        release_id: release.release_id.clone().into(),
+        artifact_id: release.artifact_id.clone().into(),
+        release_digest: release.release_digest.clone().into(),
+        manifest_digest: release.manifest_digest.clone().into(),
+    }
+}
+
+fn agent_invocation(
+    owner: &str,
+    miniapp_id: &str,
+    release: &nomifun_api_types::MiniAppReleaseRefDto,
+    active_release_epoch: u64,
+    catalog_digest: DigestHex,
+    action_allowlist: BTreeSet<ActionId>,
+    call_id: &str,
+) -> MiniAppAgentCapabilityInvocation {
+    MiniAppAgentCapabilityInvocation {
+        owner_user_id: owner.to_owned(),
+        miniapp_id: MiniAppId::from(miniapp_id),
+        capability: CapabilityRef {
+            id: CapabilityId::from(CALLABLE_CAPABILITY_ID),
+            version: VersionString::from("1.0.0"),
+        },
+        action_id: ActionId::from(CALLABLE_ACTION_ID),
+        action_allowlist,
+        active_release: contract_release_ref(release),
+        active_release_epoch,
+        catalog_digest,
+        operation_id: format!("operation-{call_id}").into(),
+        call_id: MiniAppBridgeCallId::from(call_id),
+        payload: StrictJsonValue(json!({"value": 7})),
+    }
+}
+
 #[tokio::test]
 async fn service_product_runs_the_application_surface_bridge_lifecycle() {
     let database = init_database_memory().await.unwrap();
@@ -489,6 +703,250 @@ async fn service_product_runs_the_application_surface_bridge_lifecycle() {
                     .releases
                     .active_release_epoch,
                 expected_active_release_digest: active.release_digest.clone(),
+                running: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        stopped.miniapp.service_health,
+        nomifun_api_types::MiniAppServiceHealthDto::Stopped
+    );
+    assert!(!runtime.started.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn callable_service_release_runs_build_publish_enable_start_and_agent_invoke() {
+    let database = init_database_memory().await.unwrap();
+    let owner = installation_owner_id(database.pool()).await.unwrap();
+    let repository: Arc<dyn IMiniAppM1Repository> = Arc::new(
+        SqliteMiniAppM1Repository::new(database.pool().clone()),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let application = Arc::new(
+        MiniAppM1ApplicationService::new_with_root(repository, root.path()).unwrap(),
+    );
+    let runtime = Arc::new(TestRuntime::new());
+    application.install_service_runtime(runtime.clone()).await;
+
+    // Build a real immutable Service Release with one Agent-callable
+    // contribution using the same MiniAppReleaseV1 builder as M1 builds.
+    let artifact = callable_service_artifact();
+    assert!(artifact.manifest.payload.service.is_some());
+    assert_eq!(
+        artifact.manifest.payload.contributions.capabilities.len(),
+        1
+    );
+    let contributions = artifact.manifest.payload.contributions.clone();
+    let fixture_release_store =
+        MiniAppReleaseStore::new(root.path().join("fixture-release-store")).unwrap();
+    let stored = fixture_release_store
+        .publish(MiniAppReleasePublishRequest::service(
+            MiniAppSourceScope::new(
+                "fixture-owner",
+                "fixture-miniapp",
+                "fixture-project",
+            )
+            .unwrap(),
+            digest("fixture-source"),
+            artifact.manifest.payload.dependency_lock_digest.clone(),
+            1,
+            artifact.clone(),
+            release_files(&artifact),
+        ))
+        .unwrap()
+        .stored;
+
+    // The application import path gives the prebuilt artifact a durable
+    // Ready Release; the rest of the test exercises the actual Product
+    // Publish -> Enable -> Start transitions.
+    let share_root = root.path().join("callable-share");
+    let bundle = MiniAppShareBundleFilesystem::default()
+        .export(
+            MiniAppShareBundleExport {
+                bundle_id: MiniAppShareBundleId::from("callable-service-bundle"),
+                source_miniapp_id: Some(MiniAppId::from("fixture-miniapp")),
+                release: &stored,
+                source: None,
+                test_provenance: None,
+            },
+            &share_root,
+        )
+        .unwrap();
+    let prebuilt_root = root.path().join("callable-prebuilt");
+    copy_tree(&share_root.join("release"), &prebuilt_root);
+
+    let imported = application
+        .import_prebuilt(
+            &owner,
+            ImportMiniAppArtifactRequest {
+                expected_library_revision: 0,
+                source_path: prebuilt_root.display().to_string(),
+                expected_artifact_digest: bundle.release.artifact_digest.as_ref().to_owned(),
+                display_name: "Callable Service".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(imported.miniapp.kind, MiniAppKindDto::Service);
+    let ready = imported.ready.as_ref().expect("prebuilt Service is Ready");
+
+    let published = application
+        .publish(
+            &owner,
+            PublishMiniAppRequest {
+                miniapp_id: imported.miniapp.miniapp_id.clone(),
+                expected_product_revision: imported.miniapp.product_revision,
+                expected_pointer_revision: imported.miniapp.releases.pointer_revision,
+                expected_active_release_epoch: imported
+                    .miniapp
+                    .releases
+                    .active_release_epoch,
+                ready_release_id: ready.release.release_id.clone(),
+                expected_ready_release_digest: ready.release.release_digest.clone(),
+                expected_active_release_digest: None,
+                expected_service_test_receipt_id: None,
+                acknowledge_test_warning: true,
+            },
+        )
+        .await
+        .unwrap();
+    let active = published
+        .miniapp
+        .releases
+        .active
+        .clone()
+        .expect("published Service has an Active Release");
+    let active_ref = contract_release_ref(&active);
+    let catalog_digest = nomifun_miniapp_platform::miniapp_catalog_digest(
+        &published.miniapp.miniapp_id,
+        &active_ref,
+        &contributions,
+    )
+    .unwrap();
+
+    let enabled = application
+        .set_enabled(
+            &owner,
+            SetMiniAppEnabledRequest {
+                miniapp_id: published.miniapp.miniapp_id.clone(),
+                expected_product_revision: published.miniapp.product_revision,
+                expected_pointer_revision: published.miniapp.releases.pointer_revision,
+                expected_active_release_digest: Some(active.release_digest.clone()),
+                enabled: true,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        enabled.miniapp.service_health,
+        nomifun_api_types::MiniAppServiceHealthDto::Stopped
+    );
+
+    let started = application
+        .set_service_running(
+            &owner,
+            nomifun_api_types::SetMiniAppServiceRunningRequest {
+                miniapp_id: enabled.miniapp.miniapp_id.clone(),
+                expected_product_revision: enabled.miniapp.product_revision,
+                expected_pointer_revision: enabled.miniapp.releases.pointer_revision,
+                expected_active_release_epoch: enabled
+                    .miniapp
+                    .releases
+                    .active_release_epoch,
+                expected_active_release_digest: active.release_digest.clone(),
+                running: true,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        started.miniapp.service_health,
+        nomifun_api_types::MiniAppServiceHealthDto::Ready { .. }
+    ));
+
+    let allowed = BTreeSet::from([ActionId::from(CALLABLE_ACTION_ID)]);
+    let result = application
+        .invoke_agent_capability(agent_invocation(
+            &owner,
+            &started.miniapp.miniapp_id,
+            &active,
+            started.miniapp.releases.active_release_epoch,
+            catalog_digest.clone(),
+            allowed.clone(),
+            "agent-call-success",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(result.0["method"], json!(CALLABLE_ACTION_ID));
+    assert_eq!(result.0["payload"], json!({"value": 7}));
+    assert_eq!(result.0["call_id"], json!("agent-call-success"));
+
+    let denied = application
+        .invoke_agent_capability(agent_invocation(
+            &owner,
+            &started.miniapp.miniapp_id,
+            &active,
+            started.miniapp.releases.active_release_epoch,
+            catalog_digest.clone(),
+            BTreeSet::from([ActionId::from("miniapp.callable.other")]),
+            "agent-call-denied",
+        ))
+        .await
+        .unwrap_err();
+    assert!(
+        denied.to_string().contains("CAPABILITY_ACTION_NOT_ALLOWED"),
+        "unexpected allowlist error: {denied}"
+    );
+
+    let stale_catalog = application
+        .invoke_agent_capability(agent_invocation(
+            &owner,
+            &started.miniapp.miniapp_id,
+            &active,
+            started.miniapp.releases.active_release_epoch,
+            digest("stale-catalog"),
+            allowed.clone(),
+            "agent-call-stale-catalog",
+        ))
+        .await
+        .unwrap_err();
+    assert!(
+        stale_catalog.to_string().contains("stale Catalog digest"),
+        "unexpected Catalog error: {stale_catalog}"
+    );
+
+    let stale_epoch = application
+        .invoke_agent_capability(agent_invocation(
+            &owner,
+            &started.miniapp.miniapp_id,
+            &active,
+            started.miniapp.releases.active_release_epoch + 1,
+            catalog_digest,
+            allowed,
+            "agent-call-stale-epoch",
+        ))
+        .await
+        .unwrap_err();
+    assert!(
+        stale_epoch
+            .to_string()
+            .contains("stale against the Active Release"),
+        "unexpected epoch error: {stale_epoch}"
+    );
+
+    let stopped = application
+        .set_service_running(
+            &owner,
+            nomifun_api_types::SetMiniAppServiceRunningRequest {
+                miniapp_id: started.miniapp.miniapp_id.clone(),
+                expected_product_revision: started.miniapp.product_revision,
+                expected_pointer_revision: started.miniapp.releases.pointer_revision,
+                expected_active_release_epoch: started
+                    .miniapp
+                    .releases
+                    .active_release_epoch,
+                expected_active_release_digest: active.release_digest,
                 running: false,
             },
         )
