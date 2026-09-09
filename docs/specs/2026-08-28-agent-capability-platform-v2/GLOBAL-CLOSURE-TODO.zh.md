@@ -654,3 +654,11 @@ Windows/Provider/Git 安全规则和停止边界。它只用于跨机器启动�
 publication digest、owner-scoped 版本更新和 tombstone 均已生效；无真实执行适配器的
 MiniApp consumer 保持显式 unavailable。该 checkpoint 不等于 MiniApp Agent/Gateway
 dispatch 完成，也不改变 M1-U-01、M1-V-01、N1-V-01、RC-WIN-01 或外部平台状态。
+
+## 2026-09-09 MiniApp Agent port checkpoint
+
+MiniApp application service 已增加独立的 `MiniAppAgentCapabilityPort`，仅复用真实
+dedicated Service Host 执行 enabled Service Active Release 的 action，并在调用前
+校验 owner、Release/epoch、artifact/publication digest、consumer、action 和 typed
+resource 边界。MiniAppService consumer 可据此标记 active；Agent/Gateway consumer
+仍保持 unavailable，Nomi 动态 Tool session、旧链清理和 Windows Candidate 仍未完成。
