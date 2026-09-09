@@ -1541,6 +1541,13 @@ MiniApp Active Release 已开始进入平台共享 Formal Capability Catalog，�
 publication/read-side 一致性：publication 使用 owner-scoped 版本更新和 tombstone；
 `catalog_digest` 覆盖排序后的完整 publication；MiniApp capability 合同 owner 仍是
 Package，产品生命周期 owner 仍由 MiniApp application service 管理；真实 Agent/Gateway
-adapter 接入前 consumer availability 一律 unavailable，避免 metadata-only success。
+adapter 接入前 Agent/Gateway consumer availability 保持 unavailable；已有 Service
+adapter 才标记 MiniAppService active，避免 metadata-only success。
 Agent dispatch、Gateway invoke、typed resource binding、旧 MiniApp/Extension 清理和
 Windows Candidate 仍按台账推进。
+
+MiniApp Agent consumer 的第一阶段 adapter 已在 application service 内形成独立
+`MiniAppAgentCapabilityPort`：它复用 Active Release、Service spec 和 dedicated Host，
+并对 owner、epoch、artifact/publication digest、consumer/action 和 typed resource
+做调用前校验。Nomi Tool session 的统一 target 分流仍是后续实现，不允许把该 port
+单独宣称为完整 Agent dispatch。

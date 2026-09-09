@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use nomifun_agent_contracts::{
-    DigestHex, MiniAppBridgeCallId, MiniAppBridgeTarget, MiniAppId,
+    ActionId, CapabilityId, CapabilityRef, DigestHex, MiniAppBridgeCallId,
+    MiniAppBridgeTarget, MiniAppId,
     MiniAppServiceRuntimeFingerprint, MiniAppServiceTestCredentialMode,
     MiniAppServiceTestOutcome, MiniAppServiceTestReceipt, ResolvedMiniAppServiceSpec,
     ResolvedMiniAppServiceSpecInputs, RuntimeInstallationId, RuntimeTarget, StrictJsonValue,
@@ -20,6 +21,7 @@ use nomifun_db::{
 };
 use nomifun_miniapp_platform::{
     InMemoryMiniAppManagedStorage, InMemoryMiniAppServiceHost, MiniAppCallCancellation,
+    MiniAppAgentCapabilityInvocation, MiniAppAgentCapabilityPort,
     MiniAppM1ApplicationService, MiniAppPlatformResult, MiniAppServiceHostPort,
     MiniAppServiceInvocation, MiniAppServiceProcess, MiniAppServiceProcessError,
     MiniAppServiceProcessFactory, MiniAppServiceRuntimeBinding, MiniAppServiceSpecInput,
@@ -421,6 +423,33 @@ async fn service_product_runs_the_application_surface_bridge_lifecycle() {
             started_at_ms: started.miniapp.updated_at_ms,
         }
     );
+
+    let stale_catalog = application
+        .invoke_agent_capability(MiniAppAgentCapabilityInvocation {
+            owner_user_id: owner.clone(),
+            miniapp_id: created.miniapp.miniapp_id.clone().into(),
+            capability: CapabilityRef {
+                id: CapabilityId::from("miniapp.missing"),
+                version: VersionString::from("1.0.0"),
+            },
+            action_id: ActionId::from("miniapp.missing.invoke"),
+            active_release: nomifun_agent_contracts::MiniAppReleaseRef {
+                release_id: active.release_id.clone().into(),
+                artifact_id: active.artifact_id.clone().into(),
+                release_digest: active.release_digest.clone().into(),
+                manifest_digest: active.manifest_digest.clone().into(),
+            },
+            active_release_epoch: started.miniapp.releases.active_release_epoch,
+            catalog_digest: digest("stale-catalog"),
+            operation_id: "operation-stale-catalog".into(),
+            call_id: MiniAppBridgeCallId::from("agent-call-stale-catalog"),
+            payload: StrictJsonValue(json!({})),
+        })
+        .await
+        .unwrap_err();
+    assert!(stale_catalog
+        .to_string()
+        .contains("stale Catalog digest"));
 
     let surface = application
         .open_surface(&owner, &created.miniapp.miniapp_id)
