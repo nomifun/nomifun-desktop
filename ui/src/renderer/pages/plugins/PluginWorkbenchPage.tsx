@@ -7,6 +7,7 @@
 import { ipcBridge } from '@/common';
 import type {
   ConfigurePluginRequest,
+  ApplyPluginSourceEditRequest,
   PluginDetail,
   PluginLibraryResponse,
   PluginMountId,
@@ -37,6 +38,7 @@ import {
   PluginPrebuiltImportModal,
   PluginProjectCreateModal,
 } from './PluginWorkbenchDialogs';
+import PluginSourceEditDialog from './PluginSourceEditDialog';
 import {
   applyPluginCandidateRequest,
   buildPluginProjectRequest,
@@ -86,6 +88,7 @@ const PluginWorkbenchPage: React.FC = () => {
   const [importDialogVisible, setImportDialogVisible] = useState(false);
   const [testDialogVisible, setTestDialogVisible] = useState(false);
   const [applyDialogVisible, setApplyDialogVisible] = useState(false);
+  const [sourceEditDialogVisible, setSourceEditDialogVisible] = useState(false);
   const [configureDialogVisible, setConfigureDialogVisible] = useState(false);
   const mountLoadSequence = useRef(0);
   const projectLoadSequence = useRef(0);
@@ -454,6 +457,27 @@ const PluginWorkbenchPage: React.FC = () => {
     }
   }, [message, projectBusyAction, projectDetail, refreshLibrary, t]);
 
+  const handleSourceEdit = useCallback(
+    async (request: ApplyPluginSourceEditRequest) => {
+      if (projectBusyAction) return;
+      setProjectBusyAction('edit');
+      setProjectMutationFailure(null);
+      try {
+        const next = await ipcBridge.plugins.applySourceEdit.invoke(request);
+        setProjectDetail(next);
+        setSourceEditDialogVisible(false);
+        await refreshLibrary();
+        message.success(t('pluginWorkbench.messages.sourceEdited'));
+      } catch (error) {
+        console.error('[plugins] source edit failed', error);
+        setProjectMutationFailure(pluginLoadFailure(error, 'resource'));
+      } finally {
+        setProjectBusyAction(null);
+      }
+    },
+    [message, projectBusyAction, refreshLibrary, t]
+  );
+
   const handleTestCandidate = useCallback(
     async (resolvedTestInputDigest: string) => {
       if (!projectDetail || projectBusyAction) return;
@@ -783,6 +807,10 @@ const PluginWorkbenchPage: React.FC = () => {
                   setMountDetail(null);
                 }}
                 onBuild={() => void handleBuildProject()}
+                onEditSource={() => {
+                  setProjectMutationFailure(null);
+                  setSourceEditDialogVisible(true);
+                }}
                 onTest={() => setTestDialogVisible(true)}
                 onApply={() => setApplyDialogVisible(true)}
                 onDelete={handleDeleteProject}
@@ -840,6 +868,17 @@ const PluginWorkbenchPage: React.FC = () => {
         failure={applyDialogVisible ? projectMutationFailure : null}
         onCancel={() => setApplyDialogVisible(false)}
         onSubmit={handleApplyCandidate}
+      />
+      <PluginSourceEditDialog
+        visible={sourceEditDialogVisible}
+        detail={projectDetail}
+        loading={projectBusyAction === 'edit'}
+        failure={sourceEditDialogVisible ? projectMutationFailure : null}
+        onCancel={() => {
+          setSourceEditDialogVisible(false);
+          setProjectMutationFailure(null);
+        }}
+        onSubmit={handleSourceEdit}
       />
     </HubPageShell>
   );

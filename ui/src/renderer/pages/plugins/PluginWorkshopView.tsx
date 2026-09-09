@@ -33,6 +33,7 @@ import {
 export type PluginProjectBusyAction =
   | 'create'
   | 'import'
+  | 'edit'
   | 'build'
   | 'test'
   | 'apply'
@@ -54,6 +55,7 @@ interface PluginWorkshopViewProps {
   onRetryDetail: () => void;
   onOpenMount: (mountId: PluginMountId) => void;
   onBuild: () => void;
+  onEditSource: () => void;
   onTest: () => void;
   onApply: () => void;
   onDelete: () => void;
@@ -89,6 +91,7 @@ const PluginProjectDetailPanel: React.FC<{
   locale: string;
   onOpenMount: (mountId: PluginMountId) => void;
   onBuild: () => void;
+  onEditSource: () => void;
   onTest: () => void;
   onApply: () => void;
   onDelete: () => void;
@@ -100,6 +103,7 @@ const PluginProjectDetailPanel: React.FC<{
   locale,
   onOpenMount,
   onBuild,
+  onEditSource,
   onTest,
   onApply,
   onDelete,
@@ -220,6 +224,15 @@ const PluginProjectDetailPanel: React.FC<{
             </Button>
           </span>
         </Tooltip>
+        {canBuild && (
+          <Button
+            icon={<Code theme='outline' size='14' />}
+            disabled={disabled}
+            onClick={onEditSource}
+          >
+            {t('pluginWorkbench.actions.editSource')}
+          </Button>
+        )}
         {ready && (
           <Button
             icon={<PlayOne theme='outline' size='14' />}
@@ -453,6 +466,7 @@ const PluginWorkshopView: React.FC<PluginWorkshopViewProps> = ({
   onRetryDetail,
   onOpenMount,
   onBuild,
+  onEditSource,
   onTest,
   onApply,
   onDelete,
@@ -537,6 +551,7 @@ const PluginWorkshopView: React.FC<PluginWorkshopViewProps> = ({
             locale={locale}
             onOpenMount={onOpenMount}
             onBuild={onBuild}
+            onEditSource={onEditSource}
             onTest={onTest}
             onApply={onApply}
             onDelete={onDelete}

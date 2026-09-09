@@ -6,6 +6,7 @@
 
 import type {
   ApplyPluginCandidateRequest,
+  ApplyPluginSourceEditRequest,
   BuildPluginProjectRequest,
   CancelPluginOperationRequest,
   ConfigurePluginRequest,
@@ -178,6 +179,13 @@ export const plugins = {
   buildProject: withResponseMap(
     httpPost<PluginProjectDetail, BuildPluginProjectRequest>(
       (request) => `/api/plugin-projects/${encodeURIComponent(request.project_id)}/build`
+    ),
+    mapProjectDetail
+  ),
+  applySourceEdit: withResponseMap(
+    httpPost<PluginProjectDetail, ApplyPluginSourceEditRequest>(
+      (request) =>
+        `/api/plugin-projects/${encodeURIComponent(request.project_id)}/source/edit`
     ),
     mapProjectDetail
   ),
