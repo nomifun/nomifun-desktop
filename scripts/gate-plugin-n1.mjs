@@ -657,6 +657,8 @@ function captureCleanHead() {
     '--',
     '.',
     ':(exclude)build.noindex',
+    ':(exclude).githooks',
+    ':(exclude).githooks/**',
   ]);
   const evaluation = evaluateCleanHead({
     headStatus: head.status,
