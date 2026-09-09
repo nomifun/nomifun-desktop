@@ -107,9 +107,9 @@ describe('MiniApp M1 product surfaces', () => {
       /sandbox=['"]([^'"]+)['"]/
     )?.[1];
     expect(sandboxValue).toBe('allow-scripts allow-forms');
-    expect(sandboxValue).not.toContain('allow-same-origin');
-    expect(sandboxValue).not.toContain('allow-popups');
-    expect(sandboxValue).not.toContain('allow-top-navigation');
+    expect(sandboxValue?.includes('allow-same-origin')).toBe(false);
+    expect(sandboxValue?.includes('allow-popups')).toBe(false);
+    expect(sandboxValue?.includes('allow-top-navigation')).toBe(false);
     expect(surfaceSource.includes('miniAppSurfaceAssetPath(descriptor)')).toBe(
       true
     );
@@ -218,7 +218,6 @@ describe('MiniApp M1 product surfaces', () => {
       'published_at',
       'has_unpublished_changes',
       'source_conversation_id',
-      'source_path',
     ]) {
       expect(typesSource.includes(legacyField)).toBe(false);
     }

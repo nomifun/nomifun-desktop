@@ -609,3 +609,10 @@ macOS/Linux 继续等待最终 Windows cohort，手机模式不在范围内。
 `M1-2-01` 继续为进行中；下一步是 Share Bundle/prebuilt Import 与 disabled Whole-App
 Backup Import-as-new。随后再进入 MiniApp Catalog 正式消费、旧 MiniApp 拆除和 Windows
 Candidate；macOS/Linux 与手机范围不变。
+
+## 2026-09-09 06 Windows 主线状态同步（M1-2 Share Application）
+
+Share Application/API/E2E 已关闭；Desktop Share UI 正在实施，Whole-App Backup 尚未
+开始，`M1-2-01` 继续为 `in-progress`。完成顺序为 Share UI → Whole-App Backup →
+MiniApp Catalog 正式消费 → 旧 MiniApp 拆除 → Windows Candidate。macOS/Linux 继续等待
+最终 Windows cohort，手机模式不在范围内。

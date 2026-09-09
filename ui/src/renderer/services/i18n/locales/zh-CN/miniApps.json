@@ -27,6 +27,7 @@
     "restore": "恢复",
     "deletePermanently": "永久删除",
     "retryDelete": "重试删除",
+    "share": "分享",
     "openSurface": "打开 Surface",
     "reloadSurface": "重新加载 Surface",
     "closeSurface": "关闭 Surface",
@@ -98,6 +99,56 @@
     "cancel": "取消",
     "success": "小程序项目已创建",
     "error": "创建失败：{{message}}"
+  },
+  "transfer": {
+    "chooseDirectory": "选择目录",
+    "export": {
+      "title": "导出 MiniApp Share Bundle",
+      "intro": "将精确的 Ready 或 Active Release 导出到一个新目录。目标目录必须尚不存在。",
+      "submit": "导出",
+      "release": "要导出的 Release",
+      "ready": "Ready Release",
+      "active": "Active Release",
+      "includeSource": "包含可编辑 Source",
+      "includeSourceHint": "当所选 Release 具有匹配的来源链时，将包含精确的受管 Source 与 dependency lock。",
+      "sourceUnavailable": "当前 Project 没有可包含的可编辑 Source。",
+      "parentDirectory": "父目录",
+      "parentPlaceholder": "选择一个已存在的父目录",
+      "folderName": "新目录名称",
+      "folderNamePlaceholder": "miniapp-share",
+      "destinationHint": "NomiFun 将原子创建该目录，不会覆盖已存在的路径。"
+    },
+    "importShare": {
+      "title": "导入 MiniApp Share Bundle",
+      "intro": "将 Share Bundle 导入为全新的停用 MiniApp，并创建独立的 Product 与 Project 身份。",
+      "submit": "导入 Share Bundle",
+      "sourcePlaceholder": "选择 Share Bundle 目录",
+      "layoutHint": "所选目录必须包含 bundle.json 与 release 目录。"
+    },
+    "importArtifact": {
+      "title": "导入预构建 MiniApp Artifact",
+      "intro": "将不含 Source 的预构建 Release 导入为全新的停用、仅运行时 MiniApp。",
+      "submit": "导入 Artifact",
+      "sourcePlaceholder": "选择预构建包目录",
+      "layoutHint": "所选目录必须包含 release/artifact.json 及其精确 Release 文件。"
+    },
+    "import": {
+      "sourceDirectory": "来源目录",
+      "displayName": "新 MiniApp 名称",
+      "displayNamePlaceholder": "为导入的 MiniApp 输入名称",
+      "bundleDigest": "Bundle digest",
+      "artifactDigest": "Release artifact digest",
+      "backendAuthority": "此预览只读取展示元数据与预期 digest。Schema、文件清单、digest、来源链与安全校验仍以后端为唯一权威。"
+    },
+    "errors": {
+      "metadataUnreadable": "无法读取预期的元数据文件。",
+      "metadataInvalid": "元数据文件中缺少所需的展示名称或 digest 摘要。",
+      "releaseRequired": "请选择可用的 Ready 或 Active Release。",
+      "parentRequired": "请选择一个已存在的父目录。",
+      "folderNameInvalid": "请输入一个有效的新目录名称，不能包含分隔符、保留名称或尾随句点。",
+      "sourceRequired": "请选择来源目录，并等待元数据摘要读取完成。",
+      "displayNameRequired": "请输入导入后 MiniApp 的名称。"
+    }
   },
   "library": {
     "revision": "库修订 r{{revision}}",
@@ -331,6 +382,9 @@
     "serviceRetried": "已发起 Service 重试",
     "trashed": "小程序已移入回收站",
     "restored": "小程序已恢复为停用状态",
+    "shareExported": "Share Bundle 已导出到 {{path}}",
+    "shareImported": "Share Bundle 已导入为新的停用小程序",
+    "artifactImported": "预构建 Artifact 已导入为新的停用、仅运行时小程序",
     "deletedPermanently": "小程序已永久删除",
     "deleteRetryCompleted": "重试后已完成永久删除"
   }

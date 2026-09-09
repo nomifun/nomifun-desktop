@@ -349,6 +349,9 @@ import type {
   TrashMiniAppRequest,
   RestoreMiniAppRequest,
   DeleteMiniAppRequest,
+  ImportMiniAppArtifactRequest,
+  ImportMiniAppShareRequest,
+  ShareMiniAppRequest,
 } from '../types/miniAppPlatform';
 
 export { plugins } from './pluginPlatformBridge';
@@ -2282,6 +2285,18 @@ export const miniapps = {
     ),
     fromApiMiniAppWorkshop
   ),
+  importShare: withResponseMap(
+    httpPost<MiniAppWorkshop, ImportMiniAppShareRequest>(
+      '/api/miniapps/import/share'
+    ),
+    fromApiMiniAppWorkshop
+  ),
+  importArtifact: withResponseMap(
+    httpPost<MiniAppWorkshop, ImportMiniAppArtifactRequest>(
+      '/api/miniapps/import/artifact'
+    ),
+    fromApiMiniAppWorkshop
+  ),
   getWorkshop: withResponseMap(
     httpGet<MiniAppWorkshop, { miniapp_id: MiniAppId }>(
       ({ miniapp_id }) =>
@@ -2302,6 +2317,13 @@ export const miniapps = {
         `/api/miniapps/${encodeURIComponent(miniapp_id)}/test`
     ),
     fromApiMiniAppWorkshop
+  ),
+  share: withResponseMap(
+    httpPost<MiniAppOperationSummary, ShareMiniAppRequest>(
+      ({ miniapp_id }) =>
+        `/api/miniapps/${encodeURIComponent(miniapp_id)}/share`
+    ),
+    fromApiMiniAppOperation
   ),
   cancelBuild: withResponseMap(
     httpPost<MiniAppOperationSummary, CancelMiniAppBuildRequest>(
