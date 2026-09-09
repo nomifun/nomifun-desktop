@@ -1102,7 +1102,7 @@ Plugin 与 MiniApp 共用一个 chat-first Project Workshop：Chat 是主入口�
 - **NomiFun Share Bundle：**包含 Project Source、dependency lock、Build Profile version、immutable Artifact、Manifest和最小 Test/provenance metadata，导入后可以验证、使用并继续开发；Share manifest 必须固定并校验 `source snapshot digest + lock digest + build profile version + artifact digest` 完整链，不一致时不得把 Source与Artifact关联为可继续开发的同一 Project，只能拒绝或分别按 runtime-only Artifact 与 detached Source处理；默认不包含用户 Credential、KV、`dataDir`、Files 或 Private DB；Test 默认只导出 pass/fail、digest、平台/Runtime/Test contract 等元数据，不导出测试输入、输出、API响应或日志，诊断内容必须由用户另行审阅导出；
 - **Prebuilt Runtime Artifact：**由外部 IDE/AI/工具链按公开 Artifact Schema/SDK types/validator 合同生成；导入后可 Test、Install/Replace 或 Publish，但没有 Source 时只能使用，继续开发需显式导入 Source 或创建 fork。
 
-Plugin Share Bundle 或 prebuilt Artifact 导入后统一进入 Ready Candidate和既有 diff/Apply 流程；首次安装必须人工。MiniApp Share Bundle 或 source-less prebuilt Release 一律创建新的 MiniApp identity和 Ready Release，不静默覆盖现有 App；包含 Source 时同时创建 editable Project，source-less 时明确标记 read-only artifact，仍可本机 Test/Publish，继续开发需导入 Source或 fork。现有 disabled Whole-App Backup Export 继续作为携带业务数据的 Backup/迁移包，与默认无用户数据的 Share Bundle 分开；两者都不包含明文 Credential，导入后重新绑定。
+Plugin Share Bundle 或 prebuilt Artifact 导入后统一进入 Ready Candidate和既有 diff/Apply 流程；首次安装必须人工。MiniApp Share Bundle 或 source-less prebuilt Release 一律创建新的 MiniApp identity和 Ready Release，不静默覆盖现有 App；包含 Source 时同时创建 editable Project，source-less 时明确标记 read-only artifact，仍可本机 Test/Publish，继续开发需导入 Source或 fork。待实现的独立 disabled Whole-App Backup Export 继续作为携带业务数据的 Backup/迁移包，与默认无用户数据的 Share Bundle 分开；两者都不包含明文 Credential，导入后重新绑定。
 
 Share Bundle 中携带的 Test result 只作为来源 provenance 展示，不能直接满足本机 auto-Apply/Publish eligibility；导入后必须用本机当前 committed Runtime 和本机 Test contract 重新得到 matching passed result。外部或分享产物可以在用户明确确认下跳过 Test手动应用，但不能凭来源自述获得自动部署资格。
 
@@ -1503,3 +1503,14 @@ Runtime、测试输入 digest 和复制数据摘要。
 Product、Config 或 Credential 漂移后 receipt 显式 `stale`。Service Test 仍不是 Durable
 Operation，不创建 Test Deployment 或生产 Files overlay。M1-2 剩余 Share/prebuilt/
 Whole-App Backup Import-as-new。
+
+## 2026-09-09 M1-2 Share Application 实现落地注记
+
+`a1534ad09`、`47f03ae0f` 已完成 Share Application/API/E2E：默认无用户数据的
+Share Bundle Export/Import 与 source-less prebuilt Release Import-as-new 均已进入
+MiniApp application service，并由 E2E 验证。
+
+导入始终创建新的 disabled MiniApp identity；带 Source 的 Share Bundle 创建可继续
+开发的 editable Project，source-less Artifact 保持 runtime-only，不从运行产物反推
+可编辑 Source。Desktop Transfer UI 尚未收口，disabled Whole-App Backup
+Export/Import-as-new 尚未实现，`M1-2` 继续保持 `in-progress`。

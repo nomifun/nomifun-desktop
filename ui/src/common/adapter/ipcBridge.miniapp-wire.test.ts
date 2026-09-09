@@ -86,6 +86,8 @@ describe('MiniApp M1 HTTP bridge', () => {
         source
       )
     ).toBe(true);
+    expect(source.includes("'/api/miniapps/import/share'")).toBe(true);
+    expect(source.includes("'/api/miniapps/import/artifact'")).toBe(true);
     expect(
       source.includes(
         '`/api/miniapps/${encodeURIComponent(miniapp_id)}/workshop`'
@@ -99,6 +101,7 @@ describe('MiniApp M1 HTTP bridge', () => {
       '/publish-mode`',
       '/service/running`',
       '/service/retry`',
+      '/share`',
       '/surface/open`',
       '/surface/close`',
     ]) {
@@ -107,7 +110,7 @@ describe('MiniApp M1 HTTP bridge', () => {
 
     for (const retired of [
       '/api/miniapps/validate',
-      '/api/miniapps/import',
+      "httpPost<MiniAppWorkshop, MiniAppImportRequest>('/api/miniapps/import')",
       '/workspace`',
       '/api/miniapps/${p.miniapp_id}/serve',
     ]) {
@@ -181,6 +184,76 @@ describe('MiniApp M1 HTTP bridge', () => {
       kind: 'ui_only',
     });
     expect(workshop.miniapp.miniapp_id).toBe(MINIAPP_ID);
+  });
+
+  test('Share export and import preserve exact paths, digests, and CAS fields', async () => {
+    let requestPath = '';
+    let requestBody: unknown;
+    globalThis.fetch = (async (input, init) => {
+      requestPath = new URL(String(input), 'http://127.0.0.1').pathname;
+      requestBody =
+        typeof init?.body === 'string' ? JSON.parse(init.body) : init?.body;
+      const responseData =
+        requestPath === `/api/miniapps/${MINIAPP_ID}/share`
+          ? {
+              operation_id: '0190f5fe-7c00-7a00-8000-0000000000b5',
+              operation_revision: 1,
+              kind: 'export',
+              owner: { owner: 'miniapp', miniapp_id: MINIAPP_ID },
+              state: 'succeeded',
+              cancelable: false,
+              progress_percent: 100,
+              started_at_ms: 1_780_000_000_000,
+              completed_at_ms: 1_780_000_000_001,
+            }
+          : rawWorkshop();
+      return new Response(
+        JSON.stringify({ success: true, data: responseData }),
+        {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }
+      );
+    }) as typeof fetch;
+
+    const share = {
+      miniapp_id: MINIAPP_ID as never,
+      expected_product_revision: 4,
+      expected_pointer_revision: 7,
+      content: 'ready_release' as const,
+      release_id: 'ready-release',
+      expected_release_digest: 'a'.repeat(64),
+      destination_path: 'C:\\exports\\status-board.nomifun-miniapp',
+      include_source: true,
+    };
+    const operation = await miniapps.share.invoke(share);
+    expect(requestPath).toBe(`/api/miniapps/${MINIAPP_ID}/share`);
+    expect(requestBody).toEqual(share);
+    expect(operation.owner).toEqual({
+      owner: 'miniapp',
+      miniapp_id: MINIAPP_ID,
+    });
+
+    const importShare = {
+      expected_library_revision: 8,
+      source_path: 'C:\\imports\\status-board.nomifun-miniapp',
+      expected_bundle_digest: 'b'.repeat(64),
+      expected_release_digest: 'c'.repeat(64),
+      display_name: 'Status Board Copy',
+    };
+    await miniapps.importShare.invoke(importShare);
+    expect(requestPath).toBe('/api/miniapps/import/share');
+    expect(requestBody).toEqual(importShare);
+
+    const importArtifact = {
+      expected_library_revision: 9,
+      source_path: 'C:\\imports\\status-board-runtime',
+      expected_artifact_digest: 'd'.repeat(64),
+      display_name: 'Status Board Runtime',
+    };
+    await miniapps.importArtifact.invoke(importArtifact);
+    expect(requestPath).toBe('/api/miniapps/import/artifact');
+    expect(requestBody).toEqual(importArtifact);
   });
 
   test('release, lifecycle, and publish-mode mutations preserve exact request bodies', async () => {

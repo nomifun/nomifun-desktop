@@ -250,6 +250,34 @@ export interface TestMiniAppReleaseRequest {
   resolved_test_input_digest: string;
 }
 
+export type MiniAppShareContent = 'ready_release' | 'active_release';
+
+export interface ShareMiniAppRequest {
+  miniapp_id: MiniAppId;
+  expected_product_revision: number;
+  expected_pointer_revision: number;
+  content: MiniAppShareContent;
+  release_id: string;
+  expected_release_digest: string;
+  destination_path: string;
+  include_source: boolean;
+}
+
+export interface ImportMiniAppShareRequest {
+  expected_library_revision: number;
+  source_path: string;
+  expected_bundle_digest: string;
+  expected_release_digest: string;
+  display_name: string;
+}
+
+export interface ImportMiniAppArtifactRequest {
+  expected_library_revision: number;
+  source_path: string;
+  expected_artifact_digest: string;
+  display_name: string;
+}
+
 export interface CancelMiniAppBuildRequest {
   miniapp_id: MiniAppId;
   operation_id: string;

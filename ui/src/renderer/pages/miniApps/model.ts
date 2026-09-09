@@ -22,6 +22,7 @@ import type {
   TestMiniAppReleaseRequest,
   TrashMiniAppRequest,
   RetryMiniAppServiceRequest,
+  ShareMiniAppRequest,
 } from '@/common/types/miniAppPlatform';
 
 export type MiniAppReleaseStage = 'draft' | 'ready' | 'active';
@@ -143,6 +144,44 @@ export function miniAppTestRequest(
     expected_credential_bindings_revision:
       workshop.credential_bindings_revision,
     resolved_test_input_digest: EMPTY_MINIAPP_TEST_INPUT_DIGEST,
+  };
+}
+
+export function miniAppShareRequest(
+  workshop: MiniAppWorkshop,
+  content: ShareMiniAppRequest['content'],
+  destinationPath: string,
+  includeSource: boolean
+): ShareMiniAppRequest | null {
+  const { miniapp } = workshop;
+  const release =
+    content === 'ready_release'
+      ? workshop.ready?.release
+      : miniapp.releases.active;
+  if (
+    (miniapp.lifecycle !== 'enabled' && miniapp.lifecycle !== 'disabled') ||
+    workshop.active_operation?.state === 'running' ||
+    !release ||
+    !destinationPath.trim() ||
+    (includeSource && workshop.source_state !== 'editable')
+  ) {
+    return null;
+  }
+  if (
+    content === 'ready_release' &&
+    !releaseRefsMatch(miniapp.releases.ready, release)
+  ) {
+    return null;
+  }
+  return {
+    miniapp_id: miniapp.miniapp_id,
+    expected_product_revision: miniapp.product_revision,
+    expected_pointer_revision: miniapp.releases.pointer_revision,
+    content,
+    release_id: release.release_id,
+    expected_release_digest: release.release_digest,
+    destination_path: destinationPath.trim(),
+    include_source: includeSource,
   };
 }
 

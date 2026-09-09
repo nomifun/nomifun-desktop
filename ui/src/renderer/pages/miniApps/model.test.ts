@@ -21,6 +21,7 @@ import {
   miniAppSetEnabledRequest,
   miniAppSetServiceRunningRequest,
   miniAppSetPublishModeRequest,
+  miniAppShareRequest,
   miniAppSurfaceAssetPath,
   miniAppTestRequest,
   miniAppWorkflowState,
@@ -347,6 +348,92 @@ describe('MiniApp M1 view model', () => {
       expected_pointer_revision: 7,
       mode: 'manual',
     });
+  });
+
+  test('builds exact Share requests for Ready or Active releases', () => {
+    const value = workshop({
+      source_state: 'editable',
+      build_generation: 2,
+      source_snapshot_digest: '1'.repeat(64),
+      dependency_lock_digest: '2'.repeat(64),
+    });
+    value.miniapp.lifecycle = 'disabled';
+    value.miniapp.product_revision = 4;
+    value.miniapp.releases.pointer_revision = 7;
+    const readyRelease = {
+      release_id: 'ready-release',
+      artifact_id: 'ready-artifact',
+      release_digest: 'a'.repeat(64),
+      manifest_digest: 'b'.repeat(64),
+    };
+    const activeRelease = {
+      release_id: 'active-release',
+      artifact_id: 'active-artifact',
+      release_digest: 'c'.repeat(64),
+      manifest_digest: 'd'.repeat(64),
+    };
+    value.miniapp.releases.ready = readyRelease;
+    value.miniapp.releases.active = activeRelease;
+    value.miniapp.releases.active_release_epoch = 3;
+    value.ready = {
+      release: readyRelease,
+      project_build_generation: 2,
+      created_at_ms: 3,
+      kind: 'ui_only',
+      test: {
+        status: 'not_required',
+        release_id: readyRelease.release_id,
+        expected_release_digest: readyRelease.release_digest,
+      },
+      migration_count: 0,
+      can_publish: true,
+      can_auto_publish: false,
+      blocking_reasons: [],
+    };
+
+    expect(
+      miniAppShareRequest(
+        value,
+        'ready_release',
+        ' C:\\exports\\ready.nomifun-miniapp ',
+        true
+      )
+    ).toEqual({
+      miniapp_id: value.miniapp.miniapp_id,
+      expected_product_revision: 4,
+      expected_pointer_revision: 7,
+      content: 'ready_release',
+      release_id: readyRelease.release_id,
+      expected_release_digest: readyRelease.release_digest,
+      destination_path: 'C:\\exports\\ready.nomifun-miniapp',
+      include_source: true,
+    });
+    expect(
+      miniAppShareRequest(
+        value,
+        'active_release',
+        'C:\\exports\\active.nomifun-miniapp',
+        false
+      )
+    ).toMatchObject({
+      content: 'active_release',
+      release_id: activeRelease.release_id,
+      expected_release_digest: activeRelease.release_digest,
+      include_source: false,
+    });
+
+    value.source_state = 'runtime_only';
+    expect(
+      miniAppShareRequest(
+        value,
+        'active_release',
+        'C:\\exports\\runtime.nomifun-miniapp',
+        true
+      )
+    ).toBeNull();
+    expect(
+      miniAppShareRequest(value, 'active_release', '', false)
+    ).toBeNull();
   });
 
   test('requires an Active Release and enabled lifecycle before opening Surface', () => {

@@ -2176,3 +2176,9 @@ Runtime lease 与 Service Host 不进入 AgentPreset Revision/Snapshot/Binding�
 其他 Capability consumer 只能观察 Active Release 的正式 availability；Ready Test 不发布
 Catalog，也不授予 MiniApp owner、Credential 或部署权限。Runtime/Config/Credential 漂移
 使 receipt stale，不产生 Agent fallback。
+
+## 2026-09-09 MiniApp Share owner/consumer 边界注记
+
+Share Import/Export 仍由 MiniApp application service 所有，不进入 AgentPreset
+Revision/Binding；Import 创建新 identity，Agent consumer 只能消费之后正式发布的 Active
+Capability。Share UI、Backup 和 Catalog consumer 状态继续由 06 台账跟踪。

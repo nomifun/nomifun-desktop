@@ -27,6 +27,7 @@
     "restore": "Restore",
     "deletePermanently": "Delete Permanently",
     "retryDelete": "Retry Delete",
+    "share": "Share",
     "openSurface": "Open Surface",
     "reloadSurface": "Reload Surface",
     "closeSurface": "Close Surface",
@@ -98,6 +99,56 @@
     "cancel": "Cancel",
     "success": "Mini-app project created",
     "error": "Create failed: {{message}}"
+  },
+  "transfer": {
+    "chooseDirectory": "Choose directory",
+    "export": {
+      "title": "Export MiniApp Share Bundle",
+      "intro": "Export an exact Ready or Active Release into a new directory. The destination directory must not already exist.",
+      "submit": "Export",
+      "release": "Release to export",
+      "ready": "Ready Release",
+      "active": "Active Release",
+      "includeSource": "Include editable Source",
+      "includeSourceHint": "The exact managed Source and dependency lock are included when the selected Release has matching lineage.",
+      "sourceUnavailable": "This Project has no editable Source to include.",
+      "parentDirectory": "Parent directory",
+      "parentPlaceholder": "Choose an existing parent directory",
+      "folderName": "New directory name",
+      "folderNamePlaceholder": "miniapp-share",
+      "destinationHint": "NomiFun creates this directory atomically; it cannot overwrite an existing path."
+    },
+    "importShare": {
+      "title": "Import MiniApp Share Bundle",
+      "intro": "Import a Share Bundle as a new disabled MiniApp with its own Product and Project identity.",
+      "submit": "Import Share Bundle",
+      "sourcePlaceholder": "Choose the Share Bundle directory",
+      "layoutHint": "The selected directory must contain bundle.json and the release directory."
+    },
+    "importArtifact": {
+      "title": "Import prebuilt MiniApp Artifact",
+      "intro": "Import a source-less prebuilt Release as a new disabled, runtime-only MiniApp.",
+      "submit": "Import Artifact",
+      "sourcePlaceholder": "Choose the prebuilt package directory",
+      "layoutHint": "The selected directory must contain release/artifact.json and its exact Release files."
+    },
+    "import": {
+      "sourceDirectory": "Source directory",
+      "displayName": "New MiniApp name",
+      "displayNamePlaceholder": "Name for the imported MiniApp",
+      "bundleDigest": "Bundle digest",
+      "artifactDigest": "Release artifact digest",
+      "backendAuthority": "This preview reads only display metadata and expected digests. The backend remains the sole authority for schema, inventory, digest, lineage, and safety validation."
+    },
+    "errors": {
+      "metadataUnreadable": "The expected metadata file could not be read.",
+      "metadataInvalid": "The metadata file does not contain the required display name and digest summary.",
+      "releaseRequired": "Choose an available Ready or Active Release.",
+      "parentRequired": "Choose an existing parent directory.",
+      "folderNameInvalid": "Enter one valid new directory name without separators, reserved names, or trailing dots.",
+      "sourceRequired": "Choose a source directory and wait for its metadata summary.",
+      "displayNameRequired": "Enter a name for the imported MiniApp."
+    }
   },
   "library": {
     "revision": "Library revision r{{revision}}",
@@ -331,6 +382,9 @@
     "serviceRetried": "Service retry requested",
     "trashed": "MiniApp moved to Trash",
     "restored": "MiniApp restored in Disabled state",
+    "shareExported": "Share Bundle exported to {{path}}",
+    "shareImported": "Share Bundle imported as a new disabled MiniApp",
+    "artifactImported": "Prebuilt Artifact imported as a new disabled runtime-only MiniApp",
     "deletedPermanently": "MiniApp permanently deleted",
     "deleteRetryCompleted": "Permanent deletion completed after retry"
   }

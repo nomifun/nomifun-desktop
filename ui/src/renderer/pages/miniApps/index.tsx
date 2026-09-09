@@ -17,6 +17,8 @@ import { Button, Input, Spin } from '@arco-design/web-react';
 import {
   AddOne,
   ApplicationOne,
+  Download,
+  ImportAndExport,
   Refresh,
   Right,
   Search,
@@ -25,6 +27,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import MiniAppCreateProjectDialog from './MiniAppCreateProjectDialog';
+import MiniAppTransferDialog from './MiniAppTransferDialog';
 import {
   formatMiniAppTimestamp,
   miniAppReleaseStage,
@@ -138,6 +141,9 @@ const MiniAppsListPage: React.FC = () => {
   const [failure, setFailure] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [createVisible, setCreateVisible] = useState(false);
+  const [transferMode, setTransferMode] = useState<
+    'import_share' | 'import_artifact' | null
+  >(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -182,6 +188,22 @@ const MiniAppsListPage: React.FC = () => {
     [message, navigate, t]
   );
 
+  const handleImported = useCallback(
+    (workshop: MiniAppWorkshop) => {
+      const completedMode = transferMode;
+      setTransferMode(null);
+      message.success(
+        t(
+          completedMode === 'import_artifact'
+            ? 'miniApps.messages.artifactImported'
+            : 'miniApps.messages.shareImported'
+        )
+      );
+      navigate(`/mini-apps/${workshop.miniapp.miniapp_id}`);
+    },
+    [message, navigate, t, transferMode]
+  );
+
   const apps = library?.miniapps ?? [];
 
   return (
@@ -199,6 +221,22 @@ const MiniAppsListPage: React.FC = () => {
               {!loading && <span>{t('miniApps.library.count', { count: apps.length })}</span>}
             </div>
             <div className='flex items-center gap-8px'>
+              <Button
+                size='small'
+                icon={<ImportAndExport theme='outline' size='14' />}
+                disabled={loading || Boolean(failure)}
+                onClick={() => setTransferMode('import_share')}
+              >
+                {t('miniApps.transfer.importShare.submit')}
+              </Button>
+              <Button
+                size='small'
+                icon={<Download theme='outline' size='14' />}
+                disabled={loading || Boolean(failure)}
+                onClick={() => setTransferMode('import_artifact')}
+              >
+                {t('miniApps.transfer.importArtifact.submit')}
+              </Button>
               <Button
                 size='small'
                 icon={<Refresh theme='outline' size='14' />}
@@ -294,6 +332,14 @@ const MiniAppsListPage: React.FC = () => {
         libraryRevision={library?.library_revision ?? 0}
         onCancel={() => setCreateVisible(false)}
         onCreated={handleCreated}
+      />
+      <MiniAppTransferDialog
+        mode={transferMode ?? 'import_share'}
+        visible={transferMode !== null}
+        libraryRevision={library?.library_revision ?? 0}
+        onCancel={() => setTransferMode(null)}
+        onImported={handleImported}
+        onExported={() => undefined}
       />
     </>
   );

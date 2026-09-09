@@ -27,6 +27,7 @@ import {
   Power,
   PreviewOpen,
   Refresh,
+  ShareOne,
   Undo,
   Upload,
 } from '@icon-park/react';
@@ -60,6 +61,7 @@ import {
   shortMiniAppIdentity,
 } from './model';
 import MiniAppSurfacePanel from './MiniAppSurfacePanel';
+import MiniAppTransferDialog from './MiniAppTransferDialog';
 import {
   MiniAppKindBadge,
   MiniAppHealthBadge,
@@ -213,6 +215,7 @@ const MiniAppWorkshopDetail: React.FC<{
   onRestore: () => void;
   onDelete: () => void;
   onRetryDelete: () => void;
+  onShare: () => void;
   onOpenSurface: () => void;
   onReloadSurface: () => void;
   onCloseSurface: () => void;
@@ -241,6 +244,7 @@ const MiniAppWorkshopDetail: React.FC<{
   onRestore,
   onDelete,
   onRetryDelete,
+  onShare,
   onOpenSurface,
   onReloadSurface,
   onCloseSurface,
@@ -282,6 +286,11 @@ const MiniAppWorkshopDetail: React.FC<{
   const canRestore = miniAppRestoreRequest(workshop) !== null;
   const canDelete = miniAppDeleteRequest(workshop) !== null;
   const canRetryDelete = miniAppRetryDeleteRequest(workshop) !== null;
+  const canShare = Boolean(
+    lifecycleActive &&
+      (workshop.ready || miniapp.releases.active) &&
+      operation?.state !== 'running'
+  );
   const autoPublishAvailable = Boolean(
     miniapp.kind === 'ui_only' &&
       miniapp.releases.active &&
@@ -455,6 +464,13 @@ const MiniAppWorkshopDetail: React.FC<{
                 {t('miniApps.actions.trash')}
               </Button>
             )}
+            <Button
+              icon={<ShareOne theme='outline' size='14' />}
+              disabled={controlsDisabled || !canShare}
+              onClick={onShare}
+            >
+              {t('miniApps.actions.share')}
+            </Button>
             <Tooltip
               content={
                 canOpenSurface
@@ -1027,6 +1043,7 @@ const MiniAppRunnerPage: React.FC = () => {
   const [busyAction, setBusyAction] = useState<MiniAppBusyAction>(null);
   const [surfaceDescriptor, setSurfaceDescriptor] =
     useState<MiniAppSurfaceLaunchDescriptor | null>(null);
+  const [shareVisible, setShareVisible] = useState(false);
   const canceledBuildRef = useRef<string | null>(null);
   const deletionInProgressRef = useRef(false);
   const [notFound, setNotFound] = useState(false);
@@ -1037,6 +1054,7 @@ const MiniAppRunnerPage: React.FC = () => {
       deletionInProgressRef.current = false;
       setWorkshop(null);
       setSurfaceDescriptor(null);
+      setShareVisible(false);
       setFailure(null);
       message.success(successMessage);
       navigate('/mini-apps', { replace: true });
@@ -1162,6 +1180,7 @@ const MiniAppRunnerPage: React.FC = () => {
   useEffect(() => {
     deletionInProgressRef.current = false;
     setSurfaceDescriptor(null);
+    setShareVisible(false);
   }, [miniappId]);
 
   useEffect(() => {
@@ -1795,6 +1814,17 @@ const MiniAppRunnerPage: React.FC = () => {
     if (next) await syncSurface(next, surfaceWasOpen);
   }, [load, surfaceDescriptor, syncSurface]);
 
+  const handleShareExported = useCallback(
+    (_operation: unknown, destinationPath: string) => {
+      setShareVisible(false);
+      message.success(
+        t('miniApps.messages.shareExported', { path: destinationPath })
+      );
+      void load('background');
+    },
+    [load, message, t]
+  );
+
   return (
     <>
       {messageContext}
@@ -1848,6 +1878,7 @@ const MiniAppRunnerPage: React.FC = () => {
               onRestore={handleRestore}
               onDelete={handleDelete}
               onRetryDelete={handleRetryDelete}
+              onShare={() => setShareVisible(true)}
               onOpenSurface={() => void handleOpenSurface()}
               onReloadSurface={() => void handleReloadSurface()}
               onCloseSurface={() => void handleCloseSurface()}
@@ -1861,6 +1892,15 @@ const MiniAppRunnerPage: React.FC = () => {
           </>
         ) : null}
       </HubPageShell>
+      <MiniAppTransferDialog
+        mode='export'
+        visible={shareVisible}
+        libraryRevision={0}
+        workshop={workshop}
+        onCancel={() => setShareVisible(false)}
+        onImported={() => undefined}
+        onExported={handleShareExported}
+      />
     </>
   );
 };
