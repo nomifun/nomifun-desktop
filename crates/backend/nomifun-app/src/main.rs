@@ -69,6 +69,12 @@ async fn async_main(merged_path: String, cli: Cli) -> Result<ExitCode> {
             bundle,
             destination_data_dir,
         }) => commands::run_restore(bundle.clone(), destination_data_dir.clone()).await,
+        Some(Command::Plugin { operation }) => {
+            Ok(commands::run_plugin(&cli, operation).await)
+        }
+        Some(Command::MiniApp { operation }) => {
+            Ok(commands::run_miniapp(operation).await)
+        }
         None => nomifun_app::run_embedded_server(&cli, &merged_path).await,
     }
 }

@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 /// The default data directory shared by all hosts built for the same channel
 /// (desktop shell, `nomifun-web`, the `nomicore` bin): the per-user
@@ -133,6 +133,27 @@ pub struct Cli {
 // `Mcp` prefix is load-bearing on Mcp* variants — clap derives kebab-case
 // subcommand names (`mcp-requirement-stdio`, etc.) that external callers
 // (ACP agent CLI, injected MCP bridge specs) depend on verbatim.
+/// Connection options shared by the product-facing headless commands.
+///
+/// These commands are clients of an already running local NomiFun HTTP
+/// application. They intentionally do not compose a second AppServices graph
+/// or open the database beside the desktop/server process.
+#[derive(Args, Clone, Debug)]
+pub struct HeadlessConnectionArgs {
+    /// NomiFun base URL (default `$NOMIFUN_URL` or http://127.0.0.1:25808).
+    #[arg(long, env = "NOMIFUN_URL", value_name = "URL")]
+    pub url: Option<String>,
+
+    /// Installation access token (default `$NOMIFUN_ACCESS_TOKEN`).
+    #[arg(long, env = "NOMIFUN_ACCESS_TOKEN", value_name = "TOKEN")]
+    pub token: Option<String>,
+}
+
+/// Stable empty test-input identity used when a Plugin candidate has no
+/// user-provided test fixture. Callers with a real fixture can override it.
+pub(crate) const DEFAULT_PLUGIN_TEST_INPUT_DIGEST: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
+
 #[derive(Subcommand)]
 pub enum Command {
     /// MCP stdio server for AutoWork requirement declaration tools
@@ -199,6 +220,130 @@ pub enum Command {
         #[arg(long = "destination-data-dir")]
         destination_data_dir: PathBuf,
     },
+    /// Headless Plugin product commands.
+    Plugin {
+        #[command(subcommand)]
+        operation: PluginCommand,
+    },
+    /// Headless MiniApp product commands.
+    #[command(name = "miniapp")]
+    MiniApp {
+        #[command(subcommand)]
+        operation: MiniAppCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum PluginCommand {
+    /// Plugin Project authoring commands.
+    Project {
+        #[command(subcommand)]
+        operation: PluginProjectCommand,
+    },
+    /// Build the current managed Project Source into one Ready Candidate.
+    Build(PluginProjectArgs),
+    /// Run the Candidate Test Host against the current Ready Candidate.
+    Test(PluginTestArgs),
+    /// Apply or restore a Plugin Candidate through the application service.
+    Candidate {
+        #[command(subcommand)]
+        operation: PluginCandidateCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum PluginProjectCommand {
+    /// Print the managed Source directory for a Project.
+    SourcePath(PluginProjectArgs),
+}
+
+#[derive(Subcommand)]
+pub enum PluginCandidateCommand {
+    /// Apply the current Ready Candidate to its linked Mount or install it.
+    Apply(PluginCandidateApplyArgs),
+    /// Restore the previous target of an installed Plugin Mount.
+    Restore(PluginMountArgs),
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct PluginProjectArgs {
+    /// Plugin Project identity.
+    #[arg(value_name = "PROJECT_ID")]
+    pub project_id: String,
+
+    #[command(flatten)]
+    pub connection: HeadlessConnectionArgs,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct PluginTestArgs {
+    /// Plugin Project identity.
+    #[arg(value_name = "PROJECT_ID")]
+    pub project_id: String,
+
+    /// Exact digest of the resolved test input fixture.
+    #[arg(
+        long = "resolved-test-input-digest",
+        alias = "test-input-digest",
+        default_value = DEFAULT_PLUGIN_TEST_INPUT_DIGEST,
+        value_name = "DIGEST"
+    )]
+    pub resolved_test_input_digest: String,
+
+    #[command(flatten)]
+    pub connection: HeadlessConnectionArgs,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct PluginCandidateApplyArgs {
+    /// Plugin Project identity.
+    #[arg(value_name = "PROJECT_ID")]
+    pub project_id: String,
+
+    /// Permit a breaking contract replacement.
+    #[arg(long)]
+    pub allow_breaking: bool,
+
+    /// Explicitly apply without a matching passed Candidate Test.
+    #[arg(long)]
+    pub acknowledge_test_warning: bool,
+
+    #[command(flatten)]
+    pub connection: HeadlessConnectionArgs,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct PluginMountArgs {
+    /// Installed Plugin Mount identity.
+    #[arg(value_name = "MOUNT_ID")]
+    pub mount_id: String,
+
+    #[command(flatten)]
+    pub connection: HeadlessConnectionArgs,
+}
+
+#[derive(Subcommand)]
+pub enum MiniAppCommand {
+    /// List the owner-scoped MiniApp Library.
+    List(MiniAppListArgs),
+    /// Show the owner-scoped MiniApp Workshop state.
+    Show(MiniAppShowArgs),
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct MiniAppListArgs {
+    #[command(flatten)]
+    pub connection: HeadlessConnectionArgs,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct MiniAppShowArgs {
+    /// MiniApp identity.
+    #[arg(value_name = "MINIAPP_ID")]
+    pub miniapp_id: String,
+
+    #[command(flatten)]
+    pub connection: HeadlessConnectionArgs,
 }
 
 #[derive(Subcommand)]
@@ -500,5 +645,79 @@ mod tests {
         let command = Cli::command();
         assert!(command.find_subcommand("tools").is_none());
         assert!(command.find_subcommand("call").is_none());
+    }
+
+    #[test]
+    fn headless_plugin_and_miniapp_commands_parse_with_connection_options() {
+        let source_path = Cli::try_parse_from([
+            "nomicore",
+            "plugin",
+            "project",
+            "source-path",
+            "project-1",
+            "--url",
+            "http://127.0.0.1:25808",
+            "--token",
+            "secret",
+        ])
+        .unwrap();
+        assert!(matches!(
+            source_path.command,
+            Some(Command::Plugin {
+                operation: super::PluginCommand::Project {
+                    operation: super::PluginProjectCommand::SourcePath(args),
+                },
+            }) if args.project_id == "project-1"
+                && args.connection.url.as_deref()
+                    == Some("http://127.0.0.1:25808")
+                && args.connection.token.as_deref() == Some("secret")
+        ));
+
+        let test = Cli::try_parse_from([
+            "nomicore",
+            "plugin",
+            "test",
+            "project-1",
+        ])
+        .unwrap();
+        assert!(matches!(
+            test.command,
+            Some(Command::Plugin {
+                operation: super::PluginCommand::Test(args),
+            }) if args.project_id == "project-1"
+                && args.resolved_test_input_digest
+                    == super::DEFAULT_PLUGIN_TEST_INPUT_DIGEST
+        ));
+
+        let miniapp = Cli::try_parse_from([
+            "nomicore",
+            "miniapp",
+            "show",
+            "miniapp-1",
+            "--token",
+            "secret",
+        ])
+        .unwrap();
+        assert!(matches!(
+            miniapp.command,
+            Some(Command::MiniApp {
+                operation: super::MiniAppCommand::Show(args),
+            }) if args.miniapp_id == "miniapp-1"
+                && args.connection.token.as_deref() == Some("secret")
+        ));
+    }
+
+    #[test]
+    fn headless_command_help_exposes_only_product_level_operations() {
+        let command = Cli::command();
+        let plugin = command.find_subcommand("plugin").unwrap();
+        assert!(plugin.find_subcommand("build").is_some());
+        assert!(plugin.find_subcommand("test").is_some());
+        assert!(plugin.find_subcommand("candidate").is_some());
+        assert!(plugin.find_subcommand("deployment").is_none());
+
+        let miniapp = command.find_subcommand("miniapp").unwrap();
+        assert!(miniapp.find_subcommand("list").is_some());
+        assert!(miniapp.find_subcommand("show").is_some());
     }
 }
