@@ -4,6 +4,12 @@ use std::sync::Arc;
 
 use nomifun_agent_contracts::{
     canonical_json_bytes, digest_bytes, digest_payload, ArtifactId, DigestHex,
+    CapabilityCatalogMaterialization, CapabilityCatalogMaterializer,
+    CapabilityCatalogPublication, CapabilityOwner, CapabilityProvenance,
+    CapabilityReleaseState, CatalogAvailability,
+    ContributionSourceKind, MiniAppCapabilityCatalogPublication,
+    MiniAppCapabilityCatalogPublicationUpdate,
+    MiniAppCapabilityCatalogSink,
     JavaScriptBuildProfile, LocalizedMetadata, MiniAppBridgeKvRequest,
     MiniAppBridgeRequest, MiniAppBridgeSession, MiniAppBridgeSessionId,
     MiniAppBridgeTarget, MiniAppId, MiniAppKvResponse,
@@ -23,7 +29,8 @@ use nomifun_agent_contracts::{
     MINIAPP_RELEASE_PROFILE_VERSION, MINIAPP_SERVICE_HOST_PROTOCOL_VERSION,
 };
 use nomifun_api_types::{
-    BuildMiniAppRequest, CredentialBindingStatusDto, CredentialSlotBindingDto,
+    BuildMiniAppRequest, CapabilityCatalogItemDto, CatalogMaterializationStateDto,
+    CredentialBindingStatusDto, CredentialSlotBindingDto,
     CreateMiniAppProjectRequest, DurableOperationKindDto, DurableOperationOwnerDto,
     DurableOperationStateDto, DurableOperationSummaryDto, MiniAppKindDto,
     MiniAppLibraryResponseDto, MiniAppLifecycleDto, MiniAppProjectSourceStateDto,
@@ -206,6 +213,7 @@ pub struct MiniAppM1ApplicationService {
     repository: Arc<dyn IMiniAppM1Repository>,
     stores: MiniAppM1Stores,
     service_runtime: Arc<RwLock<Arc<dyn MiniAppServiceRuntimeBinding>>>,
+    catalog_sink: Arc<RwLock<Option<Arc<dyn MiniAppCapabilityCatalogSink>>>>,
 }
 
 impl std::fmt::Debug for MiniAppM1ApplicationService {
@@ -248,6 +256,7 @@ impl MiniAppM1ApplicationService {
             repository,
             stores: MiniAppM1Stores { source, release },
             service_runtime: Arc::new(RwLock::new(Arc::new(NoopMiniAppServiceRuntime))),
+            catalog_sink: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -256,6 +265,113 @@ impl MiniAppM1ApplicationService {
         runtime: Arc<dyn MiniAppServiceRuntimeBinding>,
     ) {
         *self.service_runtime.write().await = runtime;
+    }
+
+    pub async fn install_catalog_sink(
+        &self,
+        sink: Arc<dyn MiniAppCapabilityCatalogSink>,
+    ) {
+        *self.catalog_sink.write().await = Some(sink);
+    }
+
+    async fn catalog_sink(&self) -> Option<Arc<dyn MiniAppCapabilityCatalogSink>> {
+        self.catalog_sink.read().await.clone()
+    }
+
+    /// Rebuild the shared Catalog read-side from the durable M1 Active
+    /// Release inventory. This is called once during startup and is also used
+    /// after every pointer/lifecycle mutation.
+    pub async fn hydrate_catalog_publications(
+        &self,
+        owner_user_id: &str,
+    ) -> Result<(), MiniAppM1ApplicationError> {
+        let library = self.repository.library(owner_user_id).await?;
+        for product in library.products {
+            if let Some(snapshot) = self
+                .repository
+                .get(owner_user_id, &product.miniapp_id)
+                .await?
+            {
+                self.sync_catalog_publication(owner_user_id, &snapshot)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn sync_catalog_publication(
+        &self,
+        owner_user_id: &str,
+        snapshot: &MiniAppM1Snapshot,
+    ) -> Result<(), MiniAppM1ApplicationError> {
+        let Some(sink) = self.catalog_sink().await else {
+            return Ok(());
+        };
+        let miniapp_id = MiniAppId::from(snapshot.product.miniapp_id.clone());
+        let publication = self.catalog_publication_for_snapshot(owner_user_id, snapshot)?;
+        let update = MiniAppCapabilityCatalogPublicationUpdate {
+            owner_user_id: owner_user_id.to_owned().into(),
+            miniapp_id,
+            product_revision: positive_u64(
+                snapshot.product.product_revision,
+                "MiniApp product revision",
+            )?,
+            pointer_revision: positive_u64(
+                snapshot.product.pointer_revision,
+                "MiniApp pointer revision",
+            )?,
+            active_release_epoch: nonnegative_u64(
+                snapshot.product.active_release_epoch,
+                "MiniApp active release epoch",
+            )?,
+            publication,
+        };
+        sink.replace_miniapp_publication(update)
+            .map_err(MiniAppM1ApplicationError::Invalid)
+    }
+
+    fn catalog_publication_for_snapshot(
+        &self,
+        owner_user_id: &str,
+        snapshot: &MiniAppM1Snapshot,
+    ) -> Result<Option<MiniAppCapabilityCatalogPublication>, MiniAppM1ApplicationError> {
+        if snapshot.product.lifecycle != "enabled" {
+            return Ok(None);
+        }
+        let active = snapshot
+            .active_release
+            .as_ref()
+            .ok_or_else(|| {
+                MiniAppM1ApplicationError::Invalid(
+                    "enabled MiniApp has no Active Release for Catalog publication".into(),
+                )
+            })?;
+        let stored = self.load_verified_release(
+            owner_user_id,
+            &snapshot.project.project_id,
+            active,
+        )?;
+        let mut publication = build_miniapp_catalog_publication(
+            MiniAppId::from(snapshot.product.miniapp_id.clone()),
+            release_contract_ref(active),
+            &stored.artifact.manifest.payload.contributions,
+        )?;
+        publication.active_release_epoch = positive_u64(
+            snapshot.product.active_release_epoch,
+            "MiniApp active release epoch",
+        )?;
+        if publication.catalog_digest.as_ref()
+            != snapshot.product.materialized_catalog_digest.as_str()
+        {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "MiniApp Product Catalog digest does not match the materialized publication"
+                    .into(),
+            ));
+        }
+        publication
+            .validate()
+            .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+        Ok(Some(publication))
     }
 
     async fn service_runtime(&self) -> Arc<dyn MiniAppServiceRuntimeBinding> {
@@ -793,6 +909,15 @@ impl MiniAppM1ApplicationService {
         let observation = self.service_observation(snapshot).await?;
         let mut workshop =
             workshop_from_snapshot_with_observation(snapshot, active_operation, observation.as_ref())?;
+        if let Some(publication) =
+            self.catalog_publication_for_snapshot(owner_user_id, snapshot)?
+        {
+            workshop.capabilities = publication
+                .capabilities
+                .iter()
+                .map(miniapp_capability_catalog_item)
+                .collect::<Result<Vec<_>, _>>()?;
+        }
         if let Some(ready) = snapshot.ready_release.as_ref() {
             let stored = self.load_verified_release(
                 owner_user_id,
@@ -2675,7 +2800,7 @@ impl MiniAppM1ApplicationService {
                                 ))
                             },
                         )?;
-                    materialized_catalog_digest(
+                    miniapp_catalog_digest(
                         &miniapp_id,
                         active_ref,
                         &active_artifact.manifest.payload.contributions,
@@ -3133,7 +3258,7 @@ impl MiniAppM1ApplicationService {
             .await?;
 
         let target = release_contract_ref(ready);
-        let target_catalog_digest = materialized_catalog_digest(
+        let target_catalog_digest = miniapp_catalog_digest(
             &request.miniapp_id,
             &target,
             &stored.artifact.manifest.payload.contributions,
@@ -3191,6 +3316,8 @@ impl MiniAppM1ApplicationService {
             }
         };
         self.complete_service_cutover(&committed, target_service).await?;
+        self.sync_catalog_publication(owner_user_id, &committed)
+            .await?;
         self.workshop_projection(owner_user_id, &committed, None)
             .await
     }
@@ -3330,7 +3457,7 @@ impl MiniAppM1ApplicationService {
         }
 
         let rollback_target = release_contract_ref(previous);
-        let target_catalog_digest = materialized_catalog_digest(
+        let target_catalog_digest = miniapp_catalog_digest(
             &request.miniapp_id,
             &rollback_target,
             &target.artifact.manifest.payload.contributions,
@@ -3388,6 +3515,8 @@ impl MiniAppM1ApplicationService {
             }
         };
         self.complete_service_cutover(&committed, target_service).await?;
+        self.sync_catalog_publication(owner_user_id, &committed)
+            .await?;
         self.workshop_projection(owner_user_id, &committed, None)
             .await
     }
@@ -3454,6 +3583,8 @@ impl MiniAppM1ApplicationService {
             .await?;
         self.reconcile_service_runtime(owner_user_id, &committed)
             .await?;
+        self.sync_catalog_publication(owner_user_id, &committed)
+            .await?;
         self.workshop_projection(owner_user_id, &committed, None)
             .await
     }
@@ -3515,6 +3646,8 @@ impl MiniAppM1ApplicationService {
                     ))
                 })?;
         }
+        self.sync_catalog_publication(owner_user_id, &committed)
+            .await?;
         self.workshop_projection(owner_user_id, &committed, None)
             .await
     }
@@ -3551,6 +3684,8 @@ impl MiniAppM1ApplicationService {
                 expected_lifecycle: "trashed".to_owned(),
                 updated_at: positive_now_ms().max(snapshot.product.updated_at),
             })
+            .await?;
+        self.sync_catalog_publication(owner_user_id, &committed)
             .await?;
         self.workshop_projection(owner_user_id, &committed, None)
             .await
@@ -3590,6 +3725,8 @@ impl MiniAppM1ApplicationService {
                 operation_id: operation_id.clone(),
                 started_at_ms: positive_now_ms().max(snapshot.product.updated_at),
             })
+            .await?;
+        self.sync_catalog_publication(owner_user_id, &deleting)
             .await?;
         self.run_delete_cleanup(
             owner_user_id,
@@ -4214,7 +4351,7 @@ impl MiniAppM1ApplicationService {
             })?,
             user_authorized_at_ms: authorization.user_authorized_at_ms,
         };
-        let catalog_digest = materialized_catalog_digest(
+        let catalog_digest = miniapp_catalog_digest(
             &snapshot.product.miniapp_id,
             &target_ref,
             &target_stored.artifact.manifest.payload.contributions,
@@ -4233,7 +4370,8 @@ impl MiniAppM1ApplicationService {
         if contract.next_state(&current_pointer).is_err() {
             return Ok(snapshot);
         }
-        self.repository
+        let committed = self
+            .repository
             .publish_ready_cas(&PublishMiniAppM1ReadyParams {
                 owner_user_id: owner_user_id.to_owned(),
                 miniapp_id: snapshot.product.miniapp_id.clone(),
@@ -4281,7 +4419,10 @@ impl MiniAppM1ApplicationService {
                 updated_at: positive_now_ms(),
             })
             .await
-            .map_err(Into::into)
+            ?;
+        self.sync_catalog_publication(owner_user_id, &committed)
+            .await?;
+        Ok(committed)
     }
 
     pub async fn open_surface(
@@ -5643,24 +5784,171 @@ fn release_contract_ref(release: &MiniAppReleaseRow) -> MiniAppReleaseRef {
     }
 }
 
-#[derive(Serialize)]
-struct MaterializedMiniAppCatalogDigest<'a> {
-    miniapp_id: &'a str,
-    active_release: &'a MiniAppReleaseRef,
-    contributions: &'a PackageContributions,
-}
-
-fn materialized_catalog_digest(
+pub fn miniapp_catalog_digest(
     miniapp_id: &str,
     active_release: &MiniAppReleaseRef,
     contributions: &PackageContributions,
 ) -> Result<DigestHex, MiniAppM1ApplicationError> {
-    digest_payload(&MaterializedMiniAppCatalogDigest {
+    let publication = build_miniapp_catalog_publication(
+        MiniAppId::from(miniapp_id),
+        active_release.clone(),
+        contributions,
+    )?;
+    Ok(publication.catalog_digest)
+}
+
+fn build_miniapp_catalog_publication(
+    miniapp_id: MiniAppId,
+    active_release: MiniAppReleaseRef,
+    contributions: &PackageContributions,
+) -> Result<MiniAppCapabilityCatalogPublication, MiniAppM1ApplicationError> {
+    let mut capabilities = Vec::with_capacity(contributions.capabilities.len());
+    for manifest in &contributions.capabilities {
+        let consumers = manifest
+            .supported_consumers()
+            .map_err(MiniAppM1ApplicationError::Invalid)?;
+        let availability = consumers
+            .iter()
+            .copied()
+            .map(|consumer| {
+                (
+                    consumer,
+                    CatalogAvailability::Unavailable {
+                        reason: format!(
+                            "CAPABILITY_MINIAPP_{}_DISPATCH_UNAVAILABLE",
+                            consumer.as_str().to_ascii_uppercase()
+                        ),
+                    },
+                )
+            })
+            .collect();
+        let entry = CapabilityCatalogMaterializer::materialize(
+            CapabilityCatalogMaterialization {
+                manifest: manifest.clone(),
+                provenance: CapabilityProvenance {
+                    owner: CapabilityOwner::Package {
+                        package: manifest.package.clone(),
+                    },
+                    source_kind: ContributionSourceKind::MiniAppActiveRelease,
+                    source_identity: format!("miniapp:{}", miniapp_id.as_ref()).into(),
+                    mount_id: None,
+                    miniapp_id: Some(miniapp_id.clone()),
+                    mcp_binding_id: None,
+                    artifact_digest: Some(active_release.release_digest.clone()),
+                },
+                release_state: CapabilityReleaseState::PublishedActive,
+                availability,
+            },
+        )
+        .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+        capabilities.push(CapabilityCatalogPublication {
+            manifest: manifest.clone(),
+            entry,
+        });
+    }
+    let mut publication = MiniAppCapabilityCatalogPublication {
         miniapp_id,
         active_release,
-        contributions,
+        active_release_epoch: 1,
+        catalog_digest: DigestHex::from("0".repeat(64)),
+        capabilities,
+    };
+    publication.catalog_digest = publication
+        .computed_catalog_digest()
+        .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+    Ok(publication)
+}
+
+fn miniapp_capability_catalog_item(
+    publication: &CapabilityCatalogPublication,
+) -> Result<CapabilityCatalogItemDto, MiniAppM1ApplicationError> {
+    let manifest = &publication.manifest;
+    let unavailable_code = match publication
+        .entry
+        .availability_for(nomifun_agent_contracts::CapabilityConsumer::Agent)
+    {
+        Some(CatalogAvailability::Active) => None,
+        Some(CatalogAvailability::Unavailable { reason })
+        | Some(CatalogAvailability::Disabled { reason }) => Some(reason.clone()),
+        Some(CatalogAvailability::NeedsRuntime { .. }) => {
+            Some("CAPABILITY_NEEDS_RUNTIME".to_owned())
+        }
+        Some(CatalogAvailability::ContractMismatch { .. }) => {
+            Some("CAPABILITY_CONTRACT_MISMATCH".to_owned())
+        }
+        None => Some("CAPABILITY_CONSUMER_UNSUPPORTED".to_owned()),
+    };
+    Ok(CapabilityCatalogItemDto {
+        capability: nomifun_api_types::ExactCatalogRefDto {
+            id: manifest.id.as_ref().to_owned(),
+            version: manifest.version.as_ref().to_owned(),
+        },
+        kind: match manifest.kind {
+            nomifun_agent_contracts::CapabilityKind::Tool => "tool",
+            nomifun_agent_contracts::CapabilityKind::ContextContributor => {
+                "context_contributor"
+            }
+            nomifun_agent_contracts::CapabilityKind::ResourceProvider => {
+                "resource_provider"
+            }
+            nomifun_agent_contracts::CapabilityKind::EventSource => "event_source",
+            nomifun_agent_contracts::CapabilityKind::EventConsumer => "event_consumer",
+            nomifun_agent_contracts::CapabilityKind::TurnMiddleware => "turn_middleware",
+            nomifun_agent_contracts::CapabilityKind::Transport => "transport",
+            nomifun_agent_contracts::CapabilityKind::Scheduler => "scheduler",
+            nomifun_agent_contracts::CapabilityKind::BackgroundService => {
+                "background_service"
+            }
+            nomifun_agent_contracts::CapabilityKind::UiContribution => "ui_contribution",
+        }
+        .to_owned(),
+        display_name: manifest.display.name.clone(),
+        description: manifest.display.description.clone(),
+        source_package: nomifun_api_types::ExactCatalogRefDto {
+            id: manifest.package.id.as_ref().to_owned(),
+            version: manifest.package.version.as_ref().to_owned(),
+        },
+        source_kind: "miniapp_active_release".to_owned(),
+        materialization_state: if unavailable_code.is_some() {
+            CatalogMaterializationStateDto::Unavailable
+        } else {
+            CatalogMaterializationStateDto::Materialized
+        },
+        unavailable_code,
+        supported_surfaces: publication.entry.host_surfaces.clone(),
+        required_runtime_features: manifest
+            .requires_runtime_features
+            .iter()
+            .map(|feature| feature.id.as_ref().to_owned())
+            .collect(),
+        required_resource_kinds: manifest
+            .contributions
+            .resource_kinds
+            .iter()
+            .map(|kind| kind.as_ref().to_owned())
+            .collect(),
+        required_capabilities: manifest
+            .requires
+            .iter()
+            .map(|reference| nomifun_api_types::ExactCatalogRefDto {
+                id: reference.id.as_ref().to_owned(),
+                version: reference.version.as_ref().to_owned(),
+            })
+            .collect(),
+        conflicting_capabilities: manifest
+            .conflicts
+            .iter()
+            .map(|conflict| nomifun_api_types::ExactCatalogRefDto {
+                id: conflict.capability.id.as_ref().to_owned(),
+                version: conflict.capability.version.as_ref().to_owned(),
+            })
+            .collect(),
+        action_count: manifest.contributions.actions.len() as u32,
+        context_contributor_count: manifest
+            .contributions
+            .context_schema_refs
+            .len() as u32,
     })
-    .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))
 }
 
 fn validate_backup_credential_slot_union(

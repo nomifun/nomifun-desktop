@@ -674,3 +674,19 @@ Export/Import-as-new 均已完成。`M1-2-01` 现已关闭；当前仍不构成 
 `N1-V-01` 和 `RC-WIN-01` 仍未关闭；MiniApp Active Release 的 shared Catalog
 consumer integration、旧生产链物理清理和 Windows Candidate 仍须按本文及 06 的依赖
 顺序推进。手机模式、macOS arm64 和 Linux Desktop x64 不在当前 Windows 交付范围内。
+
+## 2026-09-09 MiniApp shared Catalog publication 一致性收口
+
+本轮完成 MiniApp Active Release 到共享 Formal Capability Catalog 的第一阶段接入。
+publication update 使用 owner、Product/Pointer revision 和 Active Release epoch，
+并用版本 tombstone 防止迟到 Publish/Disable/Delete 回调复活旧能力。
+`catalog_digest` 现在覆盖排序后的完整 `CapabilityCatalogPublication`；Product digest
+漂移时启动 hydrate fail closed。MiniApp capability 合同 owner 仍是 Package，产品
+生命周期 owner 仍由 application service 的 `owner_user_id + miniapp_id` 校验。
+尚无真实执行适配器的 MiniApp consumer 保持显式 unavailable，因此本轮不关闭 Agent
+dispatch、Gateway invoke、旧生产链清理或 Windows Candidate。
+
+定向证据：Agent contracts 84、Control Plane 22、Agent Platform 18、MiniApp Platform
+29、MiniApp backup application 2、MiniApp DB repository/schema 22 + 13；受影响 crate
+check 和 `git diff --check` 通过。全量 rustfmt 仍受 Windows 文件名长度限制，使用
+受影响 crate 定向检查替代。

@@ -320,6 +320,7 @@ mod tests {
                 formal_capability.capability.clone(),
                 formal_capability,
             )]),
+            miniapp_publications: BTreeMap::new(),
             skills: vec![materialized_skill],
             mcp_tools: vec![materialized_mcp],
             unavailable_capabilities: BTreeMap::from([(

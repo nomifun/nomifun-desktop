@@ -17,7 +17,8 @@ use nomifun_agent_contracts::{
     fresh_v4_schema_manifest_payload, official_preset_seed_manifest_payload,
 };
 use nomifun_agent_control_plane::{
-    AgentControlPlane, CompilerReleaseInputs, OfficialTemplateCatalog, PresetPreviewCompiler,
+    AgentControlPlane, CompilerReleaseInputs, OfficialTemplateCatalog,
+    PresetPreviewCompiler, SharedMiniAppCatalogPublications,
 };
 use nomifun_agent_kernel::{
     CompilerEnvironment, InMemoryPluginStatePersistence, KernelRegistry,
@@ -804,6 +805,16 @@ async fn build_nomi_core_agent_api_state(
     )?);
     let materialized = kernel
         .replace_all(registrations.clone())?;
+    let miniapp_catalog = Arc::new(SharedMiniAppCatalogPublications::new());
+    services
+        .miniapp_application
+        .install_catalog_sink(miniapp_catalog.clone())
+        .await;
+    services
+        .miniapp_application
+        .hydrate_catalog_publications(services.authoritative_user_id.as_ref())
+        .await
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let unavailable_capabilities = materialized
         .capabilities
         .values()
@@ -827,7 +838,8 @@ async fn build_nomi_core_agent_api_state(
         .collect::<BTreeMap<_, _>>();
     let catalog = Arc::new(
         KernelCatalogProvider::new(Arc::clone(&kernel))
-            .with_unavailable_capabilities(unavailable_capabilities),
+            .with_unavailable_capabilities(unavailable_capabilities)
+            .with_miniapp_publication_source(miniapp_catalog),
     );
     let plugin = super::plugin_platform::build_nomi_core_plugin_state(
         services.database.pool().clone(),

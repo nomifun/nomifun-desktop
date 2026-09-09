@@ -208,7 +208,7 @@ describe('MiniApp M1 product surfaces', () => {
       'MiniAppSummary',
       'MiniAppWorkshop',
       'MiniAppReadyRelease',
-      'MiniAppCapabilityContribution',
+      'MiniAppWorkshop',
       'CreateMiniAppProjectRequest',
     ]) {
       expect(typesSource.includes(`interface ${typeName}`)).toBe(true);

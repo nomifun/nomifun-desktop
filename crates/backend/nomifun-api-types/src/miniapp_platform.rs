@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    CredentialSlotBindingDto, DurableOperationSummaryDto, PluginCapabilityContributionDto,
+    CapabilityCatalogItemDto, CredentialSlotBindingDto, DurableOperationSummaryDto,
     PluginConfigSchemaDto, PluginConfigStateDto,
 };
 
@@ -186,7 +186,7 @@ pub struct MiniAppWorkshopDto {
     pub config: PluginConfigStateDto,
     pub credential_bindings_revision: u64,
     pub credential_slots: Vec<CredentialSlotBindingDto>,
-    pub capabilities: Vec<PluginCapabilityContributionDto>,
+    pub capabilities: Vec<CapabilityCatalogItemDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_operation: Option<DurableOperationSummaryDto>,
 }
