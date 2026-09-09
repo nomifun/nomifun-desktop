@@ -1,6 +1,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -8,7 +9,9 @@ use uuid::Uuid;
 use crate::canonical::{canonical_json_bytes, strict_json_from_slice};
 use crate::dependency::ExactDependencyLock;
 use crate::error::{AuthoringError, io_error};
-use crate::model::{OperationCancellation, SourceScope, SourceStoreLimits, check_canceled};
+use crate::model::{
+    NeverCancel, OperationCancellation, SourceScope, SourceStoreLimits, check_canceled,
+};
 use crate::scaffold::{PluginScaffoldRequest, render_plugin_scaffold};
 use crate::snapshot::{CapturedSource, SourceSnapshot, capture_source_tree, verify_source_file};
 
@@ -27,6 +30,7 @@ pub struct SourceStore {
     sources_root: PathBuf,
     staging_root: PathBuf,
     limits: SourceStoreLimits,
+    mutation_lock: Arc<Mutex<()>>,
 }
 
 impl SourceStore {
@@ -48,6 +52,7 @@ impl SourceStore {
             sources_root,
             staging_root,
             limits,
+            mutation_lock: Arc::new(Mutex::new(())),
         })
     }
 
@@ -61,6 +66,7 @@ impl SourceStore {
         request: &PluginScaffoldRequest,
         cancellation: &dyn OperationCancellation,
     ) -> Result<ScaffoldedPluginProject, AuthoringError> {
+        let _mutation = self.lock_mutation()?;
         check_canceled(cancellation)?;
         let files = render_plugin_scaffold(request)?;
         let final_parent = self.ensure_project_parent(&scope)?;
@@ -186,6 +192,7 @@ impl SourceStore {
         lock: &ExactDependencyLock,
         cancellation: &dyn OperationCancellation,
     ) -> Result<crate::DigestHex, AuthoringError> {
+        let _mutation = self.lock_mutation()?;
         check_canceled(cancellation)?;
         let project = self.load_project(scope)?;
         let captured =
@@ -220,28 +227,126 @@ impl SourceStore {
         scope: &SourceScope,
         cancellation: &dyn OperationCancellation,
     ) -> Result<ExactDependencyLock, AuthoringError> {
+        let _mutation = self.lock_mutation()?;
         check_canceled(cancellation)?;
         let project = self.load_project(scope)?;
-        let bytes = read_regular_bounded(
-            &project.project_root.join(DEPENDENCY_LOCK_FILE),
-            MAX_DEPENDENCY_LOCK_BYTES,
-        )?;
-        let lock: ExactDependencyLock = strict_json_from_slice(&bytes)?;
-        if canonical_json_bytes(&lock)? != bytes {
-            return Err(AuthoringError::InvalidDependencyLock(
-                "dependency lock must use canonical JSON".into(),
-            ));
-        }
         let captured =
             capture_source_tree(&project.source_root, self.limits, cancellation)?;
-        lock.validate_against(captured.dependency_requests())?;
-        Ok(lock)
+        self.read_dependency_lock_unlocked(
+            &project,
+            captured.dependency_requests(),
+        )
+    }
+
+    /// Apply one project-scoped Chat Dev source edit using an exact source CAS.
+    ///
+    /// The edit is fully validated in private staging before the live source
+    /// entry is replaced. A dependency-changing edit is rejected until the
+    /// application service has produced a matching exact lock through its
+    /// dedicated dependency workflow.
+    pub fn apply_source_edit(
+        &self,
+        scope: &SourceScope,
+        expected_source: &SourceSnapshot,
+        edit: SourceFileEdit,
+        cancellation: &dyn OperationCancellation,
+    ) -> Result<SourceEditOutcome, AuthoringError> {
+        check_canceled(cancellation)?;
+        let project = self.load_project(scope)?;
+        let current = capture_source_tree(&project.source_root, self.limits, cancellation)?;
+        ensure_expected_snapshot(expected_source, &current)?;
+        let current_lock = self.read_dependency_lock_unlocked(
+            &project,
+            current.dependency_requests(),
+        )?;
+
+        let staging = self.allocate_staging("edit")?;
+        let staged_source_root = staging.path().join(SOURCE_DIRECTORY);
+        fs::create_dir(&staged_source_root)
+            .map_err(|error| io_error(&staged_source_root, error))?;
+        copy_snapshot_to_staging(
+            &project.source_root,
+            &staged_source_root,
+            current.snapshot(),
+            cancellation,
+        )?;
+        apply_staged_source_edit(&staged_source_root, &edit)?;
+
+        let next = capture_source_tree(&staged_source_root, self.limits, cancellation)?;
+        let lock_request = current_lock.request_digest().as_ref().to_owned();
+        let next_request = next.dependency_requests().digest()?.as_ref().to_owned();
+        if lock_request != next_request {
+            return Err(AuthoringError::DependencyLockOutOfDate {
+                lock_request,
+                next_request,
+            });
+        }
+        current_lock.validate_against(next.dependency_requests())?;
+
+        check_canceled(cancellation)?;
+        // Staging is intentionally outside the mutation lock so independent
+        // projects and readers do not wait for a large source copy. Recheck
+        // the exact Project head while holding the short commit fence.
+        let _mutation = self.lock_mutation()?;
+        let observed = capture_source_tree(&project.source_root, self.limits, cancellation)?;
+        ensure_expected_snapshot(expected_source, &observed)?;
+        let live_lock = self.read_dependency_lock_unlocked(
+            &project,
+            observed.dependency_requests(),
+        )?;
+        if live_lock.request_digest().as_ref() != next_request {
+            return Err(AuthoringError::DependencyLockOutOfDate {
+                lock_request: live_lock.request_digest().as_ref().to_owned(),
+                next_request,
+            });
+        }
+        live_lock.validate_against(next.dependency_requests())?;
+
+        if next.snapshot() == observed.snapshot() {
+            return Ok(SourceEditOutcome {
+                capture: observed,
+                changed: false,
+            });
+        }
+
+        let staged_target = edit.path().join(&staged_source_root);
+        let live_target = edit.path().join(&project.source_root);
+        let backup_target = staging.path().join("previous-source-entry");
+        match &edit {
+            SourceFileEdit::Replace { .. } => {
+                ensure_relative_parent_directories(&project.source_root, &live_target)?;
+                atomic_replace_source_file(
+                    &staged_target,
+                    &live_target,
+                    &backup_target,
+                )?;
+            }
+            SourceFileEdit::Delete { .. } => {
+                atomic_delete_source_file(&live_target, &backup_target)?;
+            }
+        }
+
+        // The file swap is the commit boundary. Cancellation cannot be
+        // reported after it, because the caller cannot roll the edit back.
+        let final_capture =
+            capture_source_tree(&project.source_root, self.limits, &NeverCancel)?;
+        if final_capture.snapshot() != next.snapshot() {
+            return Err(AuthoringError::SourceChanged {
+                expected: next.snapshot().digest().as_ref().to_owned(),
+                observed: final_capture.snapshot().digest().as_ref().to_owned(),
+            });
+        }
+        Ok(SourceEditOutcome {
+            capture: final_capture,
+            changed: true,
+        })
     }
 
     pub fn delete_project(
         &self,
         scope: &SourceScope,
     ) -> Result<(), AuthoringError> {
+        let _mutation = self.lock_mutation()?;
         let project = match self.load_project(scope) {
             Ok(project) => project,
             Err(AuthoringError::ProjectNotFound) => return Ok(()),
@@ -305,6 +410,29 @@ impl SourceStore {
             operation_root,
             capture,
         })
+    }
+
+    fn lock_mutation(&self) -> Result<MutexGuard<'_, ()>, AuthoringError> {
+        self.mutation_lock
+            .lock()
+            .map_err(|_| AuthoringError::MutationLockPoisoned)
+    }
+
+    fn read_dependency_lock_unlocked(
+        &self,
+        project: &StoredSourceProject,
+        requests: &crate::DependencyRequestSet,
+    ) -> Result<ExactDependencyLock, AuthoringError> {
+        let path = project.project_root.join(DEPENDENCY_LOCK_FILE);
+        let bytes = read_regular_bounded(&path, MAX_DEPENDENCY_LOCK_BYTES)?;
+        let lock: ExactDependencyLock = strict_json_from_slice(&bytes)?;
+        if canonical_json_bytes(&lock)? != bytes {
+            return Err(AuthoringError::InvalidDependencyLock(
+                "dependency lock must use canonical JSON".into(),
+            ));
+        }
+        lock.validate_against(requests)?;
+        Ok(lock)
     }
 
     fn allocate_staging(&self, kind: &str) -> Result<StagingGuard, AuthoringError> {
@@ -402,6 +530,57 @@ pub struct StagedSource {
     capture: CapturedSource,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SourceFileEdit {
+    Replace {
+        path: crate::NormalizedSourcePath,
+        bytes: Vec<u8>,
+    },
+    Delete {
+        path: crate::NormalizedSourcePath,
+    },
+}
+
+impl SourceFileEdit {
+    pub fn replace(
+        path: impl Into<String>,
+        bytes: impl Into<Vec<u8>>,
+    ) -> Result<Self, AuthoringError> {
+        let path = validate_edit_path(crate::NormalizedSourcePath::parse(path)?)?;
+        Ok(Self::Replace {
+            path,
+            bytes: bytes.into(),
+        })
+    }
+
+    pub fn delete(path: impl Into<String>) -> Result<Self, AuthoringError> {
+        let path = validate_edit_path(crate::NormalizedSourcePath::parse(path)?)?;
+        Ok(Self::Delete { path })
+    }
+
+    pub fn path(&self) -> &crate::NormalizedSourcePath {
+        match self {
+            Self::Replace { path, .. } | Self::Delete { path } => path,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceEditOutcome {
+    capture: CapturedSource,
+    changed: bool,
+}
+
+impl SourceEditOutcome {
+    pub fn capture(&self) -> &CapturedSource {
+        &self.capture
+    }
+
+    pub fn changed(&self) -> bool {
+        self.changed
+    }
+}
+
 impl StagedSource {
     pub fn operation_root(&self) -> &Path {
         &self.operation_root
@@ -462,6 +641,152 @@ fn managed_relative_source_path(scope: &SourceScope) -> String {
         scope.owner_id().as_ref(),
         scope.project_id().as_ref()
     )
+}
+
+fn ensure_expected_snapshot(
+    expected: &SourceSnapshot,
+    observed: &CapturedSource,
+) -> Result<(), AuthoringError> {
+    if observed.snapshot() != expected {
+        return Err(AuthoringError::SourceChanged {
+            expected: expected.digest().as_ref().to_owned(),
+            observed: observed.snapshot().digest().as_ref().to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_edit_path(
+    path: crate::NormalizedSourcePath,
+) -> Result<crate::NormalizedSourcePath, AuthoringError> {
+    if let Some(reason) = path.fixed_profile_rejection() {
+        return Err(AuthoringError::ForbiddenSourceEntry {
+            path: path.to_string(),
+            reason: reason.into(),
+        });
+    }
+    Ok(path)
+}
+
+fn copy_snapshot_to_staging(
+    source_root: &Path,
+    staged_source_root: &Path,
+    snapshot: &SourceSnapshot,
+    cancellation: &dyn OperationCancellation,
+) -> Result<(), AuthoringError> {
+    for file in snapshot.files() {
+        check_canceled(cancellation)?;
+        let source = file.normalized_relative_path().join(source_root);
+        let target = file.normalized_relative_path().join(staged_source_root);
+        ensure_relative_parent_directories(staged_source_root, &target)?;
+        verify_source_file(&source, &target, file, cancellation)?;
+    }
+    Ok(())
+}
+
+fn apply_staged_source_edit(
+    staged_source_root: &Path,
+    edit: &SourceFileEdit,
+) -> Result<(), AuthoringError> {
+    let target = edit.path().join(staged_source_root);
+    match edit {
+        SourceFileEdit::Replace { bytes, .. } => {
+            if let Ok(metadata) = fs::symlink_metadata(&target) {
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    return Err(AuthoringError::UnsafeSourcePath {
+                        path: edit.path().to_string(),
+                        reason: "source edit target is not a regular file".into(),
+                    });
+                }
+                fs::remove_file(&target).map_err(|error| io_error(&target, error))?;
+            }
+            ensure_relative_parent_directories(staged_source_root, &target)?;
+            write_new_synced(&target, bytes)
+        }
+        SourceFileEdit::Delete { .. } => match fs::symlink_metadata(&target) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                Err(AuthoringError::UnsafeSourcePath {
+                    path: edit.path().to_string(),
+                    reason: "source edit target is not a regular file".into(),
+                })
+            }
+            Ok(_) => fs::remove_file(&target).map_err(|error| io_error(&target, error)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(io_error(&target, error)),
+        },
+    }
+}
+
+fn atomic_replace_source_file(
+    staged: &Path,
+    target: &Path,
+    backup: &Path,
+) -> Result<(), AuthoringError> {
+    ensure_regular_or_missing_source_file(target)?;
+    match fs::symlink_metadata(target) {
+        Ok(_) => {
+            fs::rename(target, backup).map_err(|error| io_error(target, error))?;
+            if let Err(error) = fs::rename(staged, target) {
+                let _ = fs::rename(backup, target);
+                return Err(io_error(target, error));
+            }
+            if let Err(error) = fs::remove_file(backup) {
+                let _ = fs::remove_file(target);
+                let _ = fs::rename(backup, target);
+                return Err(io_error(backup, error));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::rename(staged, target).map_err(|error| io_error(target, error))?;
+        }
+        Err(error) => return Err(io_error(target, error)),
+    }
+    sync_directory_if_supported(
+        target
+            .parent()
+            .ok_or_else(|| AuthoringError::UnsafeManagedPath {
+                path: target.to_path_buf(),
+            })?,
+    )
+}
+
+fn atomic_delete_source_file(
+    target: &Path,
+    backup: &Path,
+) -> Result<(), AuthoringError> {
+    ensure_regular_or_missing_source_file(target)?;
+    match fs::symlink_metadata(target) {
+        Ok(_) => {
+            fs::rename(target, backup).map_err(|error| io_error(target, error))?;
+            if let Err(error) = fs::remove_file(backup) {
+                let _ = fs::rename(backup, target);
+                return Err(io_error(backup, error));
+            }
+            sync_directory_if_supported(
+                target
+                    .parent()
+                    .ok_or_else(|| AuthoringError::UnsafeManagedPath {
+                        path: target.to_path_buf(),
+                    })?,
+            )
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io_error(target, error)),
+    }
+}
+
+fn ensure_regular_or_missing_source_file(path: &Path) -> Result<(), AuthoringError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            Err(AuthoringError::UnsafeSourcePath {
+                path: path.display().to_string(),
+                reason: "source edit target is not a regular file".into(),
+            })
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io_error(path, error)),
+    }
 }
 
 fn ensure_directory_without_symlink(path: &Path) -> Result<(), AuthoringError> {
@@ -592,6 +917,7 @@ fn cleanup_owned_staging(staging_parent: &Path, target: &Path) {
     let Some(uuid) = name
         .strip_prefix("create-")
         .or_else(|| name.strip_prefix("build-"))
+        .or_else(|| name.strip_prefix("edit-"))
     else {
         return;
     };
