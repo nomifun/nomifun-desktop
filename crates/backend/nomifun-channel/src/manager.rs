@@ -208,19 +208,29 @@ impl ChannelManager {
         Arc::clone(&self.group_policy_fence)
     }
 
-    /// Returns the status of all registered plugins from the database.
+    /// Returns the status of all built-in plugins from the database.
     ///
-    /// Merges DB state with live runtime status for active plugins.
+    /// Merges DB state with live runtime status for active plugins. Rows that
+    /// do not name a built-in [`PluginType`] are legacy/unsupported channel
+    /// data and are intentionally omitted.
     pub async fn get_plugin_status(&self) -> Result<Vec<PluginStatusResponse>, ChannelError> {
         let rows = self.load_all_plugin_rows().await?;
         let statuses: Vec<PluginStatusResponse> = rows
             .into_iter()
-            .map(|row| {
+            .filter_map(|row| {
+                if PluginType::from_str_opt(&row.r#type).is_none() {
+                    debug!(
+                        plugin_id = %row.channel_plugin_id,
+                        plugin_type = %row.r#type,
+                        "omitting unsupported channel plugin from status"
+                    );
+                    return None;
+                }
                 let live_status = self
                     .plugins
                     .get(row.channel_plugin_id.as_str())
                     .map(|p| p.status().to_string());
-                self.row_to_status_response(&row, live_status)
+                Some(self.row_to_status_response(&row, live_status))
             })
             .collect();
         Ok(statuses)
@@ -541,89 +551,6 @@ impl ChannelManager {
         Ok(channel_plugin_id)
     }
 
-    /// Enables an extension-contributed plugin in metadata-only mode.
-    ///
-    /// The backend does not yet execute extension channel runtime JS, but we
-    /// still persist the plugin configuration and enabled flag so Settings UI
-    /// can behave consistently and survive restarts.
-    pub async fn enable_extension_plugin(
-        &self,
-        plugin_type: &str,
-        plugin_name: &str,
-        config: &PluginConfig,
-    ) -> Result<String, ChannelError> {
-        let matching_rows: Vec<_> = self
-            .load_all_plugin_rows()
-            .await?
-            .into_iter()
-            .filter(|row| row.r#type == plugin_type)
-            .collect();
-        if matching_rows.len() > 1 {
-            return Err(ChannelError::InvalidConfig(format!(
-                "extension plugin type '{plugin_type}' has multiple channel rows"
-            )));
-        }
-        let existing = matching_rows.into_iter().next();
-        if let Some(channel_plugin_id) = existing
-            .as_ref()
-            .map(|row| row.channel_plugin_id.as_str())
-            && self.plugins.contains_key(channel_plugin_id)
-        {
-            self.stop_plugin(channel_plugin_id).await;
-        }
-
-        let config_json = serde_json::to_string(config)?;
-        let encrypted_config = encrypt_string(&config_json, &self.encryption_key)
-            .map_err(|e| ChannelError::EncryptionFailed(e.to_string()))?;
-
-        let now = now_ms();
-        let row = if let Some(existing) = existing.as_ref() {
-            self.repo
-                .update_plugin(&ChannelPluginRow {
-                    channel_plugin_id: existing.channel_plugin_id.clone(),
-                    r#type: plugin_type.to_owned(),
-                    name: plugin_name.to_owned(),
-                    enabled: true,
-                    config: encrypted_config,
-                    status: Some(PluginStatus::Stopped.to_string()),
-                    last_connected: existing.last_connected,
-                    companion_id: existing.companion_id.clone(),
-                    bot_key: existing.bot_key.clone(),
-                    owner_domain: existing.owner_domain.clone(),
-                    group_access_mode: GroupAccessMode::from_persisted(Some(
-                        &existing.group_access_mode,
-                    ))
-                    .as_str()
-                    .to_owned(),
-                    created_at: existing.created_at,
-                    updated_at: now,
-                })
-                .await?
-        } else {
-            self.repo
-                .create_plugin(&NewChannelPluginRow {
-                    r#type: plugin_type.to_owned(),
-                    name: plugin_name.to_owned(),
-                    enabled: true,
-                    config: encrypted_config,
-                    status: Some(PluginStatus::Stopped.to_string()),
-                    last_connected: None,
-                    companion_id: None,
-                    bot_key: None,
-                    owner_domain: nomifun_db::models::default_owner_domain(),
-                    group_access_mode: GroupAccessMode::Allowlist.as_str().to_owned(),
-                    created_at: now,
-                    updated_at: now,
-                })
-                .await?
-        };
-        let channel_plugin_id = row.channel_plugin_id;
-
-        info!(plugin_id = %channel_plugin_id, plugin_type = %plugin_type, "extension plugin enabled (metadata-only mode)");
-        self.broadcast_status_change(&channel_plugin_id).await;
-        Ok(channel_plugin_id)
-    }
-
     /// Disables a plugin: stops the connection, updates DB, and removes
     /// the active instance.
     ///
@@ -931,9 +858,8 @@ impl ChannelManager {
                 info!(
                     plugin_id = %row.channel_plugin_id,
                     plugin_type = %row.r#type,
-                    "skipping extension plugin runtime restore; metadata-only mode"
+                    "skipping unsupported channel plugin runtime restore"
                 );
-                self.broadcast_status_change(&row.channel_plugin_id).await;
                 continue;
             }
             if let Err(e) = self.restore_single_plugin(&row, factory).await {
@@ -2053,6 +1979,31 @@ mod tests {
         assert!(
             !statuses[0].connected,
             "a stale DB running value without a live instance is not connected"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_status_omits_legacy_extension_rows() {
+        let (mgr, repo, _bc) = make_manager();
+        repo.plugins.lock().unwrap().push(ChannelPluginRow {
+            channel_plugin_id: test_channel_id(),
+            r#type: "legacy-channel".into(),
+            name: "Legacy Channel".into(),
+            enabled: true,
+            config: "opaque".into(),
+            status: Some("running".into()),
+            last_connected: Some(now_ms()),
+            companion_id: None,
+            bot_key: None,
+            owner_domain: "companion".into(),
+            group_access_mode: "allowlist".into(),
+            created_at: now_ms(),
+            updated_at: now_ms(),
+        });
+
+        assert!(
+            mgr.get_plugin_status().await.unwrap().is_empty(),
+            "legacy extension rows must not be exposed by the Channel status API"
         );
     }
 
