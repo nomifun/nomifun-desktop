@@ -675,8 +675,7 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
     // later step; for now we rely on the builtin + internal seed rows.
 
     let (channel_state, channel_components) =
-        build_channel_state(services, ext_state.registry.clone(), conversation_owner.clone())
-            .await;
+        build_channel_state(services, conversation_owner.clone()).await;
     tracing::info!(elapsed_ms = boot.elapsed().as_millis(), "startup: channel state built");
 
     let agent_service = AgentService::new(
@@ -1454,7 +1453,6 @@ impl nomifun_channel::message_service::CsRouting for AppCsRouting {
 /// Build the default `ChannelRouterState` and message-loop components.
 pub async fn build_channel_state(
     services: &AppServices,
-    extension_registry: ExtensionRegistry,
     conversation_owner: Arc<NomiCoreSessionOwner>,
 ) -> (ChannelRouterState, ChannelMessageLoopComponents) {
     let pool = services.database.pool().clone();
@@ -1591,7 +1589,6 @@ pub async fn build_channel_state(
         plugin_factory: Arc::clone(&plugin_factory),
         settings_service: channel_settings,
         channel_agent_profile: Some(channel_agent_profile),
-        extension_registry,
     };
 
     let components = ChannelMessageLoopComponents {
@@ -2725,7 +2722,7 @@ mod tests {
             "module assembly must reuse the single Nomi-core Conversation owner"
         );
         assert!(
-            production_source.contains("build_channel_state(services, ext_state.registry.clone(), conversation_owner.clone())"),
+            production_source.contains("build_channel_state(services, conversation_owner.clone())"),
             "Channel must receive the shared Conversation owner"
         );
         assert!(

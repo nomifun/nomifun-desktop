@@ -25,7 +25,6 @@ nomifun-db.workspace = true
 nomifun-api-types.workspace = true
 nomifun-realtime.workspace = true
 nomifun-ai-agent.workspace = true
-nomifun-extension.workspace = true
 # Telegram update-watermark persistence anchors on the process-global
 # runtime root ({data_dir}/runtime) — see plugins/telegram/watermark.rs.
 nomifun-runtime = { workspace = true, optional = true }

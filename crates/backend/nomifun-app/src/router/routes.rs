@@ -356,9 +356,6 @@ pub async fn try_create_router(services: &AppServices) -> anyhow::Result<Router>
         file_service: states.file.file_service.clone(),
         shell_service: states.shell.shell_service.clone(),
         mcp_config_service: states.mcp.config_service.clone(),
-        extension_registry: states.extension.registry.clone(),
-        hub_index_manager: states.hub.index_manager.clone(),
-        hub_installer: states.hub.installer.clone(),
         skill_paths: states.skill.skill_paths.clone(),
         agent_service: states.agent.service.clone(),
         client_pref_repo: Arc::new(nomifun_db::SqliteClientPreferenceRepository::new(
