@@ -802,38 +802,74 @@ impl PluginApplicationService {
     ) -> Result<bool, PluginServiceError> {
         let _guard = self.mount_guard(owner_user_id, &request.mount_id).await?;
         async {
-            if request.expected_lifecycle != PluginLifecycleDto::UninstalledDataRetained
-                || request.expected_mount_revision != request.expected_data_revision
-            {
+            if request.expected_mount_revision != request.expected_data_revision {
                 return Err(PluginServiceError::stale(
                     "delete-data requires the exact retained lifecycle revision",
                 ));
             }
             let (mount, _) = self.owned_mount(owner_user_id, &request.mount_id).await?;
-            if mount.revision as u64 != request.expected_mount_revision
-                || !mount.retained
-                || mount.current_artifact_digest.is_some()
-            {
-                return Err(PluginServiceError::stale(
-                    "Mount is no longer retained and uninstalled",
-                ));
-            }
+            let already_pending = match request.expected_lifecycle {
+                PluginLifecycleDto::UninstalledDataRetained => {
+                    if mount.revision as u64 != request.expected_mount_revision
+                        || !mount.retained
+                        || mount.delete_pending
+                        || mount.current_artifact_digest.is_some()
+                        || mount.previous_artifact_digest.is_some()
+                    {
+                        return Err(PluginServiceError::stale(
+                            "Mount is no longer retained and uninstalled",
+                        ));
+                    }
+                    false
+                }
+                PluginLifecycleDto::DeletePending => {
+                    if mount.revision as u64 != request.expected_mount_revision
+                        || !mount.retained
+                        || !mount.delete_pending
+                        || mount.current_artifact_digest.is_some()
+                        || mount.previous_artifact_digest.is_some()
+                    {
+                        return Err(PluginServiceError::stale(
+                            "Mount does not have the exact pending data deletion",
+                        ));
+                    }
+                    true
+                }
+                _ => {
+                    return Err(PluginServiceError::stale(
+                        "delete-data requires a retained or pending lifecycle revision",
+                    ));
+                }
+            };
             require_commit_fence(self.host.commit_fence(&request.mount_id).await?)?;
-            let pending = self
-                .repository
-                .mark_delete_pending(
-                    &request.mount_id,
-                    request.expected_data_revision as i64,
-                    now_ms(),
-                )
-                .await?;
-            self.data_store
-                .delete_mount_data(
-                    &pending.mount_id,
-                    &pending.data_dir_path,
-                )
-                .await?;
-            self.repository.complete_data_delete(&pending.mount_id).await
+            let pending = if already_pending {
+                mount
+            } else {
+                self.repository
+                    .mark_delete_pending(
+                        &request.mount_id,
+                        request.expected_data_revision as i64,
+                        now_ms(),
+                    )
+                    .await?
+            };
+            if let Err(error) = self
+                .data_store
+                .delete_mount_data(&pending.mount_id, &pending.data_dir_path)
+                .await
+            {
+                return Err(PluginServiceError::reconcile_required(format!(
+                    "Plugin Mount data deletion remains pending and must be retried: {error}"
+                )));
+            }
+            self.repository
+                .complete_data_delete(&pending.mount_id)
+                .await
+                .map_err(|error| {
+                    PluginServiceError::reconcile_required(format!(
+                        "Plugin Mount data was removed locally but durable deletion finalization must be retried: {error}"
+                    ))
+                })
         }
         .await
     }

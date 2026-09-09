@@ -923,6 +923,13 @@ impl PluginHostCoordinator for UnavailableRuntimeHost {
 #[derive(Default)]
 struct FakeDataStore {
     deleted: Mutex<Vec<String>>,
+    fail_next: Mutex<Option<String>>,
+}
+
+impl FakeDataStore {
+    async fn fail_next(&self, message: impl Into<String>) {
+        *self.fail_next.lock().await = Some(message.into());
+    }
 }
 
 #[derive(Default)]
@@ -1014,6 +1021,9 @@ impl PluginMountDataStore for FakeDataStore {
         mount_id: &str,
         _managed_relative_path: &str,
     ) -> Result<(), PluginServiceError> {
+        if let Some(message) = self.fail_next.lock().await.take() {
+            return Err(PluginServiceError::integration(message));
+        }
         self.deleted.lock().await.push(mount_id.into());
         Ok(())
     }
@@ -1137,6 +1147,26 @@ fn service_with_host(
     operation_cancellation: Arc<dyn PluginOperationCancellation>,
     host: Arc<dyn PluginHostCoordinator>,
 ) -> PluginApplicationService {
+    service_with_host_and_data_store(
+        repo,
+        store,
+        builder,
+        source_store,
+        operation_cancellation,
+        host,
+        Arc::new(FakeDataStore::default()),
+    )
+}
+
+fn service_with_host_and_data_store(
+    repo: Arc<FakeRepository>,
+    store: Arc<QueueArtifactStore>,
+    builder: Arc<dyn PluginBuildExecutor>,
+    source_store: Arc<dyn PluginSourceStorePort>,
+    operation_cancellation: Arc<dyn PluginOperationCancellation>,
+    host: Arc<dyn PluginHostCoordinator>,
+    data_store: Arc<dyn PluginMountDataStore>,
+) -> PluginApplicationService {
     PluginApplicationService::new(PluginServiceDependencies {
         repository: repo,
         artifacts: store,
@@ -1147,7 +1177,7 @@ fn service_with_host(
         tester: Arc::new(FakeTester),
         operation_cancellation,
         source_store,
-        data_store: Arc::new(FakeDataStore::default()),
+        data_store,
         paths: PluginServicePaths {
             mount_data_relative_root: "plugin-mount-data".into(),
         },
@@ -1806,6 +1836,78 @@ async fn uninstall_retains_data_until_explicit_delete_data() {
             .unwrap()
     );
     assert!(repo.get_mount("mount-1").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn delete_data_fault_is_reconcileable_and_retry_accepts_pending_revision() {
+    let repo = Arc::new(FakeRepository::default());
+    let package = artifact(b"export const plugin = 1;\n", "1.0.0");
+    let digest = package.artifact_digest.as_ref().to_owned();
+    repo.insert_artifact(artifact_row(&package, "artifact")).await;
+    repo.insert_mount(mount_row("mount-1", "example.csv", Some(digest.clone()), 1))
+        .await;
+    let data_store = Arc::new(FakeDataStore::default());
+    data_store.fail_next("injected data cleanup failure").await;
+    let service = service_with_host_and_data_store(
+        Arc::clone(&repo),
+        Arc::new(QueueArtifactStore::new(Vec::new())),
+        no_builder(),
+        Arc::new(FakeSourceStore::default()),
+        Arc::new(FakeOperationCancellation),
+        Arc::new(FakeHost),
+        Arc::clone(&data_store) as Arc<dyn PluginMountDataStore>,
+    );
+
+    service
+        .uninstall(
+            "user-1",
+            UninstallPluginRequest {
+                mount_id: "mount-1".into(),
+                expected_mount_revision: 1,
+                expected_current_target_digest: digest,
+            },
+        )
+        .await
+        .unwrap();
+
+    let error = service
+        .delete_data(
+            "user-1",
+            DeletePluginDataRequest {
+                mount_id: "mount-1".into(),
+                expected_mount_revision: 2,
+                expected_lifecycle: PluginLifecycleDto::UninstalledDataRetained,
+                expected_data_revision: 2,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), ERR_RECONCILE_REQUIRED);
+
+    let pending = repo
+        .get_mount("mount-1")
+        .await
+        .unwrap()
+        .expect("failed physical deletion keeps the pending Mount");
+    assert!(pending.delete_pending);
+    assert_eq!(pending.revision, 3);
+
+    assert!(
+        service
+            .delete_data(
+                "user-1",
+                DeletePluginDataRequest {
+                    mount_id: "mount-1".into(),
+                    expected_mount_revision: 3,
+                    expected_lifecycle: PluginLifecycleDto::DeletePending,
+                    expected_data_revision: 3,
+                },
+            )
+            .await
+            .unwrap()
+    );
+    assert!(repo.get_mount("mount-1").await.unwrap().is_none());
+    assert_eq!(data_store.deleted.lock().await.as_slice(), ["mount-1"]);
 }
 
 #[tokio::test]
