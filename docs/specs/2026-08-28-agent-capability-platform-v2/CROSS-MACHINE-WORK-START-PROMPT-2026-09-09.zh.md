@@ -233,6 +233,8 @@ UI production build 存在既有的 chunk size 和 dynamic-import 警告，但�
 - `f4d71a133`：同步 GLOBAL/PHASE/06 台账与设计注记；
 - `b6c9c2e89`：修正 Guid 启动入口：普通 Nomi 才选择模型，AgentPreset/官方模板
   使用服务端冻结 Snapshot，不向 Session Create 提交客户端模型。
+- `e95448a22`：记录 Windows Candidate dry-run 的 18 个 required pending checks、
+  旧 Extension/MiniApp 安全审计结论和当前外部验证边界。
 
 当前远端分支已包含上述提交；下一台机器必须先 `git pull --ff-only` 并阅读最新
 台账，不得把原始 `51b0243f7` 当作最新 HEAD。`gate:agent-v2 --self-test`、
