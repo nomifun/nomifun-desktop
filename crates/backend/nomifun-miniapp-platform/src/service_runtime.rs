@@ -153,6 +153,49 @@ pub trait MiniAppServiceRuntimeBinding: Send + Sync {
         Ok(())
     }
 
+    async fn export_backup_storage(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &MiniAppId,
+        uses_files: bool,
+        uses_private_database: bool,
+    ) -> MiniAppPlatformResult<crate::MiniAppBackupStorage> {
+        let _ = (owner_user_id, miniapp_id);
+        if uses_files || uses_private_database {
+            return Err(MiniAppPlatformError::Runtime(
+                "MiniApp backup storage is not configured".into(),
+            ));
+        }
+        Ok(crate::MiniAppBackupStorage {
+            kv: Vec::new(),
+            files: Vec::new(),
+            private_database: None,
+            migration_ledger: None,
+        })
+    }
+
+    async fn import_backup_storage(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &MiniAppId,
+        storage: crate::MiniAppBackupStorage,
+        uses_files: bool,
+        uses_private_database: bool,
+    ) -> MiniAppPlatformResult<()> {
+        let _ = (owner_user_id, miniapp_id);
+        if uses_files
+            || uses_private_database
+            || !storage.files.is_empty()
+            || storage.private_database.is_some()
+            || storage.migration_ledger.is_some()
+        {
+            return Err(MiniAppPlatformError::Runtime(
+                "MiniApp backup storage is not configured".into(),
+            ));
+        }
+        Ok(())
+    }
+
     async fn create_service_test_storage(
         &self,
         _owner_user_id: &str,
@@ -482,6 +525,54 @@ impl MiniAppServiceRuntimeBinding for ProductionMiniAppServiceRuntimeBinding {
                 .await?;
         }
         Ok(())
+    }
+
+    async fn export_backup_storage(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &MiniAppId,
+        uses_files: bool,
+        uses_private_database: bool,
+    ) -> MiniAppPlatformResult<crate::MiniAppBackupStorage> {
+        self.storage
+            .as_ref()
+            .ok_or_else(|| {
+                MiniAppPlatformError::Runtime(
+                    "MiniApp managed Service storage is not configured".into(),
+                )
+            })?
+            .export_backup_storage(
+                owner_user_id,
+                miniapp_id,
+                uses_files,
+                uses_private_database,
+            )
+            .await
+    }
+
+    async fn import_backup_storage(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &MiniAppId,
+        storage: crate::MiniAppBackupStorage,
+        uses_files: bool,
+        uses_private_database: bool,
+    ) -> MiniAppPlatformResult<()> {
+        self.storage
+            .as_ref()
+            .ok_or_else(|| {
+                MiniAppPlatformError::Runtime(
+                    "MiniApp managed Service storage is not configured".into(),
+                )
+            })?
+            .import_backup_storage(
+                owner_user_id,
+                miniapp_id,
+                storage,
+                uses_files,
+                uses_private_database,
+            )
+            .await
     }
 
     async fn create_service_test_storage(

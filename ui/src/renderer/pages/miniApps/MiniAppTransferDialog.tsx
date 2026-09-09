@@ -28,7 +28,12 @@ import { miniAppShareRequest } from './model';
 import styles from './MiniAppWorkbench.module.css';
 
 export interface MiniAppTransferDialogProps {
-  mode: 'export' | 'import_share' | 'import_artifact';
+  mode:
+    | 'export'
+    | 'export_backup'
+    | 'import_share'
+    | 'import_artifact'
+    | 'import_backup';
   visible: boolean;
   libraryRevision: number;
   workshop?: MiniAppWorkshop | null;
@@ -42,8 +47,9 @@ export interface MiniAppTransferDialogProps {
 
 interface ImportSummary {
   displayName: string;
-  artifactDigest: string;
+  artifactDigest?: string;
   bundleDigest?: string;
+  backupMetadataDigest?: string;
 }
 
 type JsonRecord = Record<string, unknown>;
@@ -87,12 +93,26 @@ function shareSummary(value: unknown): ImportSummary | null {
   return release && bundleDigest ? { ...release, bundleDigest } : null;
 }
 
-function normalizeSuggestedFolderName(displayName: string | undefined): string {
+function backupSummary(
+  value: unknown,
+  backupMetadataDigest: string
+): ImportSummary | null {
+  const metadata = asRecord(value);
+  const sourceMiniAppId = stringField(metadata, 'source_miniapp_id');
+  return sourceMiniAppId && backupMetadataDigest
+    ? { displayName: '', backupMetadataDigest }
+    : null;
+}
+
+function normalizeSuggestedFolderName(
+  displayName: string | undefined,
+  suffix: 'share' | 'backup'
+): string {
   const normalized = (displayName || 'miniapp')
     .trim()
     .replace(INVALID_FOLDER_CHARACTER, '-')
     .replace(/[. ]+$/g, '');
-  return `${normalized || 'miniapp'}-share`;
+  return `${normalized || 'miniapp'}-${suffix}`;
 }
 
 function validFolderName(value: string): boolean {
@@ -148,7 +168,10 @@ const MiniAppTransferDialog: React.FC<MiniAppTransferDialogProps> = ({
     setIncludeSource(workshop?.source_state === 'editable');
     setParentPath('');
     setFolderName(
-      normalizeSuggestedFolderName(workshop?.miniapp.display_name)
+      normalizeSuggestedFolderName(
+        workshop?.miniapp.display_name,
+        mode === 'export_backup' ? 'backup' : 'share'
+      )
     );
     setSourcePath('');
     setDisplayName('');
@@ -175,31 +198,63 @@ const MiniAppTransferDialog: React.FC<MiniAppTransferDialogProps> = ({
   const title =
     mode === 'export'
       ? t('miniApps.transfer.export.title')
+      : mode === 'export_backup'
+        ? t('miniApps.transfer.exportBackup.title')
       : mode === 'import_share'
         ? t('miniApps.transfer.importShare.title')
-        : t('miniApps.transfer.importArtifact.title');
+        : mode === 'import_artifact'
+          ? t('miniApps.transfer.importArtifact.title')
+          : t('miniApps.transfer.importBackup.title');
   const intro =
     mode === 'export'
       ? t('miniApps.transfer.export.intro')
+      : mode === 'export_backup'
+        ? t('miniApps.transfer.exportBackup.intro')
       : mode === 'import_share'
         ? t('miniApps.transfer.importShare.intro')
-        : t('miniApps.transfer.importArtifact.intro');
+        : mode === 'import_artifact'
+          ? t('miniApps.transfer.importArtifact.intro')
+          : t('miniApps.transfer.importBackup.intro');
   const submitLabel =
     mode === 'export'
       ? t('miniApps.transfer.export.submit')
+      : mode === 'export_backup'
+        ? t('miniApps.transfer.exportBackup.submit')
       : mode === 'import_share'
         ? t('miniApps.transfer.importShare.submit')
-        : t('miniApps.transfer.importArtifact.submit');
+        : mode === 'import_artifact'
+          ? t('miniApps.transfer.importArtifact.submit')
+          : t('miniApps.transfer.importBackup.submit');
 
   const canSubmit =
-    mode === 'export'
-      ? Boolean(workshop && selectedRelease && destinationPath)
+    mode === 'export' || mode === 'export_backup'
+      ? Boolean(
+          workshop &&
+            destinationPath &&
+            (mode === 'export_backup'
+              ? workshop.miniapp.lifecycle === 'disabled'
+              : selectedRelease)
+        )
       : Boolean(
           sourcePath &&
             importSummary &&
             displayName.trim() &&
-            (mode !== 'import_share' || importSummary.bundleDigest)
+            (mode === 'import_share'
+              ? importSummary.bundleDigest && importSummary.artifactDigest
+              : mode === 'import_artifact'
+                ? importSummary.artifactDigest
+                : importSummary.backupMetadataDigest)
         );
+
+  const sha256Hex = async (value: string): Promise<string> => {
+    const digest = await globalThis.crypto.subtle.digest(
+      'SHA-256',
+      new TextEncoder().encode(value)
+    );
+    return Array.from(new Uint8Array(digest), (byte) =>
+      byte.toString(16).padStart(2, '0')
+    ).join('');
+  };
 
   const pickDirectory = async () => {
     setPicking(true);
@@ -212,7 +267,7 @@ const MiniAppTransferDialog: React.FC<MiniAppTransferDialogProps> = ({
       const selectedPath = paths?.[0]?.trim();
       if (!selectedPath) return;
 
-      if (mode === 'export') {
+      if (mode === 'export' || mode === 'export_backup') {
         setParentPath(selectedPath);
         return;
       }
@@ -223,33 +278,49 @@ const MiniAppTransferDialog: React.FC<MiniAppTransferDialogProps> = ({
       const manifestRelativePath =
         mode === 'import_share'
           ? 'bundle.json'
-          : 'release/artifact.json';
-      const manifestPath = joinLocalPath(
-        selectedPath,
-        manifestRelativePath
-      );
-      const contents = await ipcBridge.fs.readFile.invoke({
-        path: manifestPath,
+          : mode === 'import_artifact'
+            ? 'release/artifact.json'
+            : 'metadata.json';
+      const metadataContents = await ipcBridge.fs.readFile.invoke({
+        path: joinLocalPath(selectedPath, manifestRelativePath),
       });
-      if (!contents) {
+      if (!metadataContents) {
         throw new Error(t('miniApps.transfer.errors.metadataUnreadable'));
       }
-
       let parsed: unknown;
       try {
-        parsed = JSON.parse(contents) as unknown;
+        parsed = JSON.parse(metadataContents) as unknown;
       } catch {
         throw new Error(t('miniApps.transfer.errors.metadataInvalid'));
       }
       const summary =
         mode === 'import_share'
           ? shareSummary(parsed)
-          : artifactSummary(parsed);
+          : mode === 'import_artifact'
+            ? artifactSummary(parsed)
+            : backupSummary(
+                parsed,
+                await sha256Hex(metadataContents)
+              );
       if (!summary) {
         throw new Error(t('miniApps.transfer.errors.metadataInvalid'));
       }
+      if (mode === 'import_backup') {
+        const productContents = await ipcBridge.fs.readFile.invoke({
+          path: joinLocalPath(selectedPath, 'product.json'),
+        });
+        if (productContents) {
+          try {
+            const product = asRecord(JSON.parse(productContents));
+            const productName = stringField(product, 'display_name');
+            if (productName) summary.displayName = productName;
+          } catch {
+            throw new Error(t('miniApps.transfer.errors.metadataInvalid'));
+          }
+        }
+      }
       setImportSummary(summary);
-      setDisplayName(summary.displayName);
+      setDisplayName(summary.displayName || t('miniApps.transfer.importBackup.defaultName'));
     } catch (error) {
       setRequestError(errorMessage(error));
     } finally {
@@ -261,8 +332,12 @@ const MiniAppTransferDialog: React.FC<MiniAppTransferDialogProps> = ({
     setValidationError('');
     setRequestError('');
 
-    if (mode === 'export') {
-      if (!workshop || !selectedRelease) {
+    if (mode === 'export' || mode === 'export_backup') {
+      if (
+        !workshop ||
+        (mode === 'export' && !selectedRelease) ||
+        (mode === 'export_backup' && workshop.miniapp.lifecycle !== 'disabled')
+      ) {
         setValidationError(t('miniApps.transfer.errors.releaseRequired'));
         return;
       }
@@ -276,19 +351,29 @@ const MiniAppTransferDialog: React.FC<MiniAppTransferDialogProps> = ({
       }
 
       const targetPath = joinLocalPath(parentPath, folderName.trim());
-      const request = miniAppShareRequest(
-        workshop,
-        exportContent,
-        targetPath,
-        includeSource
-      );
-      if (!request) {
-        setValidationError(t('miniApps.transfer.errors.releaseRequired'));
-        return;
-      }
       setSubmitting(true);
       try {
-        const operation = await ipcBridge.miniapps.share.invoke(request);
+        const operation =
+          mode === 'export_backup'
+            ? await ipcBridge.miniapps.exportBackup.invoke({
+                miniapp_id: workshop.miniapp.miniapp_id,
+                expected_product_revision: workshop.miniapp.product_revision,
+                expected_lifecycle: 'disabled',
+                expected_pointer_revision:
+                  workshop.miniapp.releases.pointer_revision,
+                expected_config_revision: workshop.config.config_revision,
+                expected_credential_bindings_revision:
+                  workshop.credential_bindings_revision,
+                destination_path: targetPath,
+              })
+            : await ipcBridge.miniapps.share.invoke(
+                miniAppShareRequest(
+                  workshop,
+                  exportContent,
+                  targetPath,
+                  includeSource
+                )!
+              );
         onExported(operation, targetPath);
       } catch (error) {
         setRequestError(errorMessage(error));
@@ -316,15 +401,23 @@ const MiniAppTransferDialog: React.FC<MiniAppTransferDialogProps> = ({
               expected_library_revision: libraryRevision,
               source_path: sourcePath,
               expected_bundle_digest: importSummary.bundleDigest!,
-              expected_release_digest: importSummary.artifactDigest,
+              expected_release_digest: importSummary.artifactDigest!,
               display_name: importedDisplayName,
             })
-          : await ipcBridge.miniapps.importArtifact.invoke({
+          : mode === 'import_artifact'
+            ? await ipcBridge.miniapps.importArtifact.invoke({
               expected_library_revision: libraryRevision,
               source_path: joinLocalPath(sourcePath, 'release'),
               expected_artifact_digest: importSummary.artifactDigest,
               display_name: importedDisplayName,
-            });
+            })
+            : await ipcBridge.miniapps.importBackup.invoke({
+                expected_library_revision: libraryRevision,
+                source_path: sourcePath,
+                expected_backup_metadata_digest:
+                  importSummary.backupMetadataDigest!,
+                display_name: importedDisplayName,
+              });
       onImported(imported);
     } catch (error) {
       setRequestError(errorMessage(error));
@@ -351,9 +444,9 @@ const MiniAppTransferDialog: React.FC<MiniAppTransferDialogProps> = ({
     >
       <p className={styles.dialogIntro}>{intro}</p>
       <div className={styles.transferForm}>
-        {mode === 'export' ? (
+        {mode === 'export' || mode === 'export_backup' ? (
           <>
-            <div className={styles.transferField}>
+            {mode === 'export' ? <div className={styles.transferField}>
               <div className={styles.transferFieldLabel}>
                 {t('miniApps.transfer.export.release')}
               </div>
@@ -382,9 +475,15 @@ const MiniAppTransferDialog: React.FC<MiniAppTransferDialogProps> = ({
                   {selectedRelease.release_digest}
                 </div>
               )}
-            </div>
+            </div> : (
+              <Alert
+                type='info'
+                showIcon
+                content={t('miniApps.transfer.exportBackup.disabledOnly')}
+              />
+            )}
 
-            <div className={styles.transferField}>
+            {mode === 'export' && <div className={styles.transferField}>
               <Checkbox
                 checked={includeSource}
                 disabled={!canIncludeSource}
@@ -399,7 +498,7 @@ const MiniAppTransferDialog: React.FC<MiniAppTransferDialogProps> = ({
                     : 'miniApps.transfer.export.sourceUnavailable'
                 )}
               </div>
-            </div>
+            </div>}
 
             <div className={styles.transferField}>
               <div className={styles.transferFieldLabel}>
@@ -425,7 +524,7 @@ const MiniAppTransferDialog: React.FC<MiniAppTransferDialogProps> = ({
               </div>
             </div>
 
-            <div className={styles.transferField}>
+            {(mode === 'export' || mode === 'export_backup') && <div className={styles.transferField}>
               <div className={styles.transferFieldLabel}>
                 {t('miniApps.transfer.export.folderName')}
               </div>
@@ -443,14 +542,18 @@ const MiniAppTransferDialog: React.FC<MiniAppTransferDialogProps> = ({
                 prefix={<Download theme='outline' size='14' />}
               />
               <div className={styles.transferHint}>
-                {t('miniApps.transfer.export.destinationHint')}
+                {t(
+                  mode === 'export_backup'
+                    ? 'miniApps.transfer.exportBackup.destinationHint'
+                    : 'miniApps.transfer.export.destinationHint'
+                )}
               </div>
               {destinationPath && (
                 <div className={styles.transferPath} title={destinationPath}>
                   {destinationPath}
                 </div>
               )}
-            </div>
+            </div>}
           </>
         ) : (
           <>
@@ -466,7 +569,9 @@ const MiniAppTransferDialog: React.FC<MiniAppTransferDialogProps> = ({
                   placeholder={t(
                     mode === 'import_share'
                       ? 'miniApps.transfer.importShare.sourcePlaceholder'
-                      : 'miniApps.transfer.importArtifact.sourcePlaceholder'
+                      : mode === 'import_artifact'
+                        ? 'miniApps.transfer.importArtifact.sourcePlaceholder'
+                        : 'miniApps.transfer.importBackup.sourcePlaceholder'
                   )}
                 />
                 <Button
@@ -482,7 +587,9 @@ const MiniAppTransferDialog: React.FC<MiniAppTransferDialogProps> = ({
                 {t(
                   mode === 'import_share'
                     ? 'miniApps.transfer.importShare.layoutHint'
-                    : 'miniApps.transfer.importArtifact.layoutHint'
+                    : mode === 'import_artifact'
+                      ? 'miniApps.transfer.importArtifact.layoutHint'
+                      : 'miniApps.transfer.importBackup.layoutHint'
                 )}
               </div>
             </div>
@@ -516,12 +623,24 @@ const MiniAppTransferDialog: React.FC<MiniAppTransferDialogProps> = ({
                     </code>
                   </div>
                 )}
-                <div className={styles.transferMetadataRow}>
-                  <span>{t('miniApps.transfer.import.artifactDigest')}</span>
-                  <code title={importSummary.artifactDigest}>
-                    {importSummary.artifactDigest}
-                  </code>
-                </div>
+                {importSummary.artifactDigest && (
+                  <div className={styles.transferMetadataRow}>
+                    <span>{t('miniApps.transfer.import.artifactDigest')}</span>
+                    <code title={importSummary.artifactDigest}>
+                      {importSummary.artifactDigest}
+                    </code>
+                  </div>
+                )}
+                {importSummary.backupMetadataDigest && (
+                  <div className={styles.transferMetadataRow}>
+                    <span>
+                      {t('miniApps.transfer.import.backupMetadataDigest')}
+                    </span>
+                    <code title={importSummary.backupMetadataDigest}>
+                      {importSummary.backupMetadataDigest}
+                    </code>
+                  </div>
+                )}
               </div>
             )}
 

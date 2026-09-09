@@ -13,9 +13,10 @@ use nomifun_agent_contracts::{
     MiniAppPointerExpectation, MiniAppReadyOrigin, MiniAppReadyRelease,
     MiniAppReadyReleaseRef, MiniAppReleaseId, MiniAppReleasePointerState,
     MiniAppReleaseRef, MiniAppResourceContract, MiniAppSourceLineage, OperationId,
-    MiniAppServiceLifecycle, MiniAppServiceStorageDescriptor,
+    MiniAppServiceLifecycle, MiniAppServiceStorageDescriptor, MiniAppSourceBundle,
+    MiniAppDatabaseHandleId,
     MiniAppServiceTestOutcome, MiniAppServiceTestReceipt, MiniAppServiceTestReceiptId,
-    PackageContributions, PackageId, PackageRef, StrictJsonValue,
+    CredentialSlotDeclaration, PackageContributions, PackageId, PackageRef, StrictJsonValue,
     MiniAppSurfaceSessionId, MiniAppUiOnlyAutoPublishAuthorization,
     MiniAppUiOnlyAutoPublishProof, MiniAppUserAuthorizationId, VersionString,
     MiniAppBridgeTransport, MINIAPP_BRIDGE_CONTRACT_VERSION,
@@ -32,6 +33,7 @@ use nomifun_api_types::{
     MiniAppSurfaceLaunchDescriptorDto, MiniAppTestStatusDto,
     DeleteMiniAppRequest, ImportMiniAppArtifactRequest, ImportMiniAppShareRequest,
     MiniAppShareContentDto, MiniAppWorkshopDto, PluginConfigSchemaDto, PluginConfigStateDto,
+    ExportMiniAppBackupRequest, ImportMiniAppBackupRequest,
     PublishMiniAppRequest as PublishMiniAppRequestDto, RestoreMiniAppRequest,
     RetryMiniAppDeleteRequest, RetryMiniAppServiceRequest,
     RollbackMiniAppRequest as RollbackMiniAppRequestDto,
@@ -47,6 +49,8 @@ use nomifun_db::{
     FailMiniAppM1ExportOperationParams, FailMiniAppM1ImportParams,
     FinishMiniAppM1BuildAndRecordReadyParams, FinishMiniAppM1BuildOperationParams,
     FinishMiniAppM1ExportOperationParams, FinishMiniAppM1ImportReadyParams,
+    FinishMiniAppM1BackupImportParams, MiniAppM1BackupExportSnapshot,
+    MiniAppM1BackupImportRelease, MiniAppM1BackupReleaseSlot, MiniAppKvRow,
     IMiniAppM1Repository, MiniAppM1AutoPublishGuard, MiniAppM1ImportSource, MiniAppM1Kind,
     MiniAppM1ManagedSourceLineage, MiniAppM1Snapshot, MiniAppM1SurfaceKvOperation,
     MiniAppM1SurfaceKvResult, MiniAppProductRow,
@@ -61,6 +65,7 @@ use nomifun_db::{
     FailMiniAppM1DeleteParams, FinalizeMiniAppM1DeleteParams,
     RestartMiniAppM1DeleteParams, RestoreMiniAppM1Params,
     StartMiniAppM1BuildOperationParams, StartMiniAppM1ExportOperationParams,
+    StartMiniAppM1BackupExportParams,
     TrashMiniAppM1Params,
 };
 use nomifun_js_runtime::ResolvedNodeRuntime;
@@ -83,7 +88,11 @@ use crate::{
     MiniAppServiceSpecInput, MiniAppServiceTestRunInput, NoopMiniAppServiceRuntime,
     MiniAppCallCancellation,
     MiniAppServiceObservation,
-    materialize_surface_entrypoint,
+    MiniAppBackupFile, MiniAppBackupRelease, MiniAppBackupSource,
+    MiniAppBackupStorage, MiniAppWholeAppBackupExport,
+    MiniAppWholeAppBackupFilesystem,
+    rebind_migration_ledger_for_target_with_releases,
+    materialize_surface_entrypoint, MiniAppSourceContentKind,
 };
 
 #[derive(Debug, Error)]
@@ -102,6 +111,88 @@ pub enum MiniAppM1ApplicationError {
 pub struct MiniAppSurfaceAsset {
     pub normalized_relative_path: String,
     pub bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BackupProductMetadata {
+    miniapp_id: String,
+    product_revision: i64,
+    display_name: String,
+    description: Option<String>,
+    icon_asset_id: Option<String>,
+    kind: String,
+    lifecycle: String,
+    pointer_revision: i64,
+    active_release_epoch: i64,
+    materialized_catalog_digest: String,
+    ready_release_id: Option<String>,
+    ready_release_digest: Option<String>,
+    active_release_id: Option<String>,
+    active_release_digest: Option<String>,
+    previous_release_id: Option<String>,
+    previous_release_digest: Option<String>,
+    release_lineage: BTreeMap<String, BackupReleaseMetadata>,
+}
+
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BackupReleaseMetadata {
+    release_id: String,
+    artifact_id: String,
+    artifact_digest: String,
+    manifest_digest: String,
+    source_kind: String,
+    project_id: Option<String>,
+    source_snapshot_digest: Option<String>,
+    dependency_lock_digest: Option<String>,
+    build_profile_version: Option<String>,
+    build_generation: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BackupProjectMetadata {
+    miniapp_id: String,
+    project_id: String,
+    project_revision: i64,
+    source_state: String,
+    build_generation: i64,
+    source_snapshot_digest: Option<String>,
+    dependency_lock_digest: Option<String>,
+    build_profile_version: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BackupConfigMetadata {
+    config_revision: i64,
+    schema_digest: String,
+    schema: Value,
+    values: Value,
+}
+
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BackupKvMetadata {
+    namespace: String,
+    key: String,
+    value_json: String,
+    revision: i64,
+    key_generation: i64,
+    is_tombstone: bool,
+    created_at: i64,
+    updated_at: i64,
+}
+
+struct PreparedApplicationBackup {
+    product: Value,
+    project: Value,
+    config: Value,
+    credential_slots: Value,
+    releases: BTreeMap<String, MiniAppBackupRelease>,
+    source: Option<MiniAppBackupSource>,
+    storage: MiniAppBackupStorage,
 }
 
 #[derive(Clone)]
@@ -1643,6 +1734,415 @@ impl MiniAppM1ApplicationService {
         operation_summary(&operation)
     }
 
+    pub async fn export_backup(
+        &self,
+        owner_user_id: &str,
+        request: ExportMiniAppBackupRequest,
+    ) -> Result<DurableOperationSummaryDto, MiniAppM1ApplicationError> {
+        validate_request_identity(&request.miniapp_id, "miniapp_id")?;
+        if request.expected_lifecycle != MiniAppLifecycleDto::Disabled
+            || request.destination_path.trim().is_empty()
+        {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "Whole-App Backup requires an explicit disabled lifecycle and destination"
+                    .into(),
+            ));
+        }
+        let initial = self
+            .repository
+            .get(owner_user_id, &request.miniapp_id)
+            .await?
+            .ok_or(MiniAppM1ApplicationError::NotFound)?;
+        if initial.product.lifecycle != "disabled" {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "Whole-App Backup requires a disabled MiniApp".into(),
+            ));
+        }
+        let miniapp_id = MiniAppId::from(request.miniapp_id.clone());
+        let runtime = self.service_runtime().await;
+        if initial.product.kind == MiniAppM1Kind::Service.as_str() {
+            runtime.stop(&miniapp_id).await.map_err(|error| {
+                MiniAppM1ApplicationError::Runtime(format!(
+                    "cannot stop MiniApp Service before Whole-App Backup: {error}"
+                ))
+            })?;
+            if runtime
+                .state(&miniapp_id)
+                .await
+                .is_some_and(|state| state != crate::MiniAppServiceHostState::Stopped)
+            {
+                return Err(MiniAppM1ApplicationError::Invalid(
+                    "Whole-App Backup owner is still busy".into(),
+                ));
+            }
+        }
+
+        let operation_id = Uuid::now_v7().to_string();
+        let started_at_ms = positive_now_ms().max(initial.product.updated_at);
+        let captured = self
+            .repository
+            .start_backup_export(&StartMiniAppM1BackupExportParams {
+                owner_user_id: owner_user_id.to_owned(),
+                miniapp_id: request.miniapp_id.clone(),
+                operation_id: operation_id.clone(),
+                expected_product_revision: to_i64(
+                    request.expected_product_revision,
+                    "product revision",
+                )?,
+                expected_pointer_revision: to_i64(
+                    request.expected_pointer_revision,
+                    "pointer revision",
+                )?,
+                expected_config_revision: to_i64(
+                    request.expected_config_revision,
+                    "config revision",
+                )?,
+                expected_credential_bindings_revision: to_i64(
+                    request.expected_credential_bindings_revision,
+                    "credential bindings revision",
+                )?,
+                started_at_ms,
+            })
+            .await?;
+        let result = async {
+            let prepared = self
+                .prepare_backup_export(owner_user_id, &captured)
+                .await?;
+            MiniAppWholeAppBackupFilesystem::new()
+                .export(
+                    MiniAppWholeAppBackupExport {
+                        backup_id: Uuid::now_v7().to_string().into(),
+                        source_miniapp_id: miniapp_id,
+                        owner_quiescent: true,
+                        created_at_ms: positive_now_ms().max(started_at_ms),
+                        product: &prepared.product,
+                        project: &prepared.project,
+                        config: &prepared.config,
+                        credential_slots: &prepared.credential_slots,
+                        releases: &prepared.releases,
+                        source: prepared.source.as_ref(),
+                        storage: &prepared.storage,
+                    },
+                    &request.destination_path,
+                )
+                .map_err(|error| MiniAppM1ApplicationError::Runtime(error.to_string()))
+        }
+        .await;
+        let operation = match result {
+            Ok(metadata) => {
+                self.repository
+                    .finish_export_operation(&FinishMiniAppM1ExportOperationParams {
+                        owner_user_id: owner_user_id.to_owned(),
+                        miniapp_id: request.miniapp_id,
+                        operation_id,
+                        bounded_log_tail: vec![format!(
+                            "MiniApp Whole-App Backup {} exported",
+                            metadata.metadata_digest().map_err(|error| {
+                                MiniAppM1ApplicationError::Invalid(error.to_string())
+                            })?.as_ref()
+                        )],
+                        finished_at_ms: positive_now_ms().max(started_at_ms),
+                    })
+                    .await?
+            }
+            Err(error) => {
+                let _ = self
+                    .repository
+                    .fail_export_operation(&FailMiniAppM1ExportOperationParams {
+                        owner_user_id: owner_user_id.to_owned(),
+                        miniapp_id: request.miniapp_id,
+                        operation_id,
+                        progress_percent: 0,
+                        error_code: "miniapp_backup_export_failed".into(),
+                        bounded_log_tail: vec![bounded_log_line(&error.to_string())],
+                        finished_at_ms: positive_now_ms().max(started_at_ms),
+                    })
+                    .await;
+                return Err(error);
+            }
+        };
+        operation_summary(&operation)
+    }
+
+    async fn prepare_backup_export(
+        &self,
+        owner_user_id: &str,
+        captured: &MiniAppM1BackupExportSnapshot,
+    ) -> Result<PreparedApplicationBackup, MiniAppM1ApplicationError> {
+        let snapshot = &captured.snapshot;
+        let mut product_metadata = BackupProductMetadata {
+            miniapp_id: snapshot.product.miniapp_id.clone(),
+            product_revision: snapshot.product.product_revision,
+            display_name: snapshot.product.display_name.clone(),
+            description: snapshot.product.description.clone(),
+            icon_asset_id: snapshot.product.icon_asset_id.clone(),
+            kind: snapshot.product.kind.clone(),
+            lifecycle: snapshot.product.lifecycle.clone(),
+            pointer_revision: snapshot.product.pointer_revision,
+            active_release_epoch: snapshot.product.active_release_epoch,
+            materialized_catalog_digest: snapshot
+                .product
+                .materialized_catalog_digest
+                .clone(),
+            ready_release_id: snapshot.product.ready_release_id.clone(),
+            ready_release_digest: snapshot.product.ready_release_digest.clone(),
+            active_release_id: snapshot.product.active_release_id.clone(),
+            active_release_digest: snapshot.product.active_release_digest.clone(),
+            previous_release_id: snapshot.product.previous_release_id.clone(),
+            previous_release_digest: snapshot.product.previous_release_digest.clone(),
+            release_lineage: BTreeMap::new(),
+        };
+        let project = serde_json::to_value(BackupProjectMetadata {
+            miniapp_id: snapshot.project.miniapp_id.clone(),
+            project_id: snapshot.project.project_id.clone(),
+            project_revision: snapshot.project.project_revision,
+            source_state: snapshot.project.source_state.clone(),
+            build_generation: snapshot.project.build_generation,
+            source_snapshot_digest: snapshot.project.source_head_digest.clone(),
+            dependency_lock_digest: snapshot.project.dependency_lock_digest.clone(),
+            build_profile_version: snapshot.project.build_profile_version.clone(),
+        })
+        .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+        let schema: Value = serde_json::from_str(&snapshot.product.config_schema_json)
+            .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+        let values: Value = serde_json::from_str(&snapshot.product.config_json)
+            .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+        let config = serde_json::to_value(BackupConfigMetadata {
+            config_revision: snapshot.product.config_revision,
+            schema_digest: digest_payload(&schema)
+                .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?
+                .as_ref()
+                .to_owned(),
+            schema,
+            values,
+        })
+        .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+
+        let mut releases = BTreeMap::new();
+        let mut credential_slots = BTreeMap::<String, CredentialSlotDeclaration>::new();
+        let slot_for = |release_id: &str| {
+            if snapshot.product.ready_release_id.as_deref() == Some(release_id) {
+                Some("ready")
+            } else if snapshot.product.active_release_id.as_deref() == Some(release_id) {
+                Some("active")
+            } else if snapshot.product.previous_release_id.as_deref() == Some(release_id) {
+                Some("previous")
+            } else {
+                None
+            }
+        };
+        for release in &captured.releases {
+            let slot = slot_for(&release.release_id).ok_or_else(|| {
+                MiniAppM1ApplicationError::Invalid(
+                    "Whole-App Backup captured a Release outside the retained pointers".into(),
+                )
+            })?;
+            let stored = self.load_verified_release(
+                owner_user_id,
+                &snapshot.project.project_id,
+                release,
+            )?;
+            product_metadata.release_lineage.insert(
+                slot.to_owned(),
+                BackupReleaseMetadata {
+                    release_id: release.release_id.clone(),
+                    artifact_id: release.artifact_id.clone(),
+                    artifact_digest: release.artifact_digest.clone(),
+                    manifest_digest: release.manifest_digest.clone(),
+                    source_kind: release.source_kind.clone(),
+                    project_id: release.project_id.clone(),
+                    source_snapshot_digest: release.source_snapshot_digest.clone(),
+                    dependency_lock_digest: release.dependency_lock_digest.clone(),
+                    build_profile_version: release.build_profile_version.clone(),
+                    build_generation: release.build_generation,
+                },
+            );
+            for declaration in &stored.artifact.manifest.payload.credential_slots {
+                match credential_slots.get(declaration.slot_key.as_ref()) {
+                    Some(existing) if existing != declaration => {
+                        return Err(MiniAppM1ApplicationError::Invalid(format!(
+                            "Credential slot {} changed across retained Releases",
+                            declaration.slot_key.as_ref()
+                        )));
+                    }
+                    Some(_) => {}
+                    None => {
+                        credential_slots.insert(
+                            declaration.slot_key.as_ref().to_owned(),
+                            declaration.clone(),
+                        );
+                    }
+                }
+            }
+            releases.insert(
+                slot.to_owned(),
+                MiniAppBackupRelease {
+                    artifact: stored.artifact,
+                    manifest_bytes: stored.manifest_bytes,
+                    files: stored
+                        .files
+                        .into_iter()
+                        .map(|file| {
+                            MiniAppBackupFile::new(
+                                file.normalized_relative_path,
+                                file.bytes,
+                            )
+                        })
+                        .collect(),
+                },
+            );
+        }
+        let product = serde_json::to_value(&product_metadata)
+            .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+        let credential_slots = serde_json::to_value(
+            credential_slots.into_values().collect::<Vec<_>>(),
+        )
+        .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+        let source = if snapshot.project.source_state == "editable" {
+            let digest = snapshot
+                .project
+                .source_head_digest
+                .as_deref()
+                .ok_or_else(|| {
+                    MiniAppM1ApplicationError::Invalid(
+                        "editable Backup Project has no Source digest".into(),
+                    )
+                })?;
+            let source = self
+                .stores
+                .source
+                .read_snapshot(
+                    owner_user_id,
+                    &snapshot.product.miniapp_id,
+                    &snapshot.project.project_id,
+                    digest,
+                )
+                .map_err(|error| store_error("Backup Source", error))?;
+            Some(MiniAppBackupSource {
+                source: MiniAppSourceBundle {
+                    project_id: source.project.project_id.clone(),
+                    source_archive_artifact_id: Uuid::now_v7().to_string().into(),
+                    source_snapshot_digest: source.source_snapshot_digest.clone(),
+                    dependency_lock_artifact_id: Uuid::now_v7().to_string().into(),
+                    dependency_lock_digest: source.dependency_lock_digest.clone(),
+                    build_profile_version: source.project.build_profile_version.clone(),
+                },
+                dependency_lock: source.dependency_lock,
+                files: source
+                    .files
+                    .into_iter()
+                    .map(|file| {
+                        MiniAppBackupFile::new(
+                            file.normalized_relative_path,
+                            file.bytes,
+                        )
+                    })
+                    .collect(),
+            })
+        } else {
+            None
+        };
+
+        let mut storage = MiniAppBackupStorage {
+            kv: captured
+                .kv
+                .iter()
+                .map(|row| {
+                    serde_json::to_value(BackupKvMetadata {
+                        namespace: row.namespace.clone(),
+                        key: row.key.clone(),
+                        value_json: row.value_json.clone(),
+                        revision: row.revision,
+                        key_generation: row.key_generation,
+                        is_tombstone: row.is_tombstone,
+                        created_at: row.created_at,
+                        updated_at: row.updated_at,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?,
+            files: Vec::new(),
+            private_database: None,
+            migration_ledger: None,
+        };
+        if snapshot.product.kind == MiniAppM1Kind::Service.as_str() {
+            let retained = snapshot
+                .active_release
+                .as_ref()
+                .or(snapshot.ready_release.as_ref())
+                .or(snapshot.previous_release.as_ref());
+            let (uses_files, uses_private_database) = match retained {
+                Some(release) => {
+                    let stored = self.load_verified_release(
+                        owner_user_id,
+                        &snapshot.project.project_id,
+                        release,
+                    )?;
+                    stored
+                        .artifact
+                        .manifest
+                        .payload
+                        .service
+                        .as_ref()
+                        .map(|service| {
+                            (service.uses_files, service.uses_private_database)
+                        })
+                        .unwrap_or((false, false))
+                }
+                None => (false, false),
+            };
+            let mut managed = self
+                .service_runtime()
+                .await
+                .export_backup_storage(
+                    owner_user_id,
+                    &MiniAppId::from(snapshot.product.miniapp_id.clone()),
+                    uses_files,
+                    uses_private_database,
+                )
+                .await
+                .map_err(|error| MiniAppM1ApplicationError::Runtime(error.to_string()))?;
+            managed.kv = storage.kv;
+            storage = managed;
+        }
+        if let Some(ledger) = &storage.migration_ledger {
+            let retained = product_metadata
+                .release_lineage
+                .values()
+                .map(|release| {
+                    (
+                        release.release_id.as_str(),
+                        release.artifact_id.as_str(),
+                        release.artifact_digest.as_str(),
+                        release.manifest_digest.as_str(),
+                    )
+                })
+                .collect::<BTreeSet<_>>();
+            if ledger.entries.iter().any(|entry| {
+                !retained.contains(&(
+                    entry.release.release_id.as_ref(),
+                    entry.release.artifact_id.as_ref(),
+                    entry.release.release_digest.as_ref(),
+                    entry.release.manifest_digest.as_ref(),
+                ))
+            }) {
+                return Err(MiniAppM1ApplicationError::Invalid(
+                    "Whole-App Backup migration ledger references a non-retained Release".into(),
+                ));
+            }
+        }
+
+        Ok(PreparedApplicationBackup {
+            product,
+            project,
+            config,
+            credential_slots,
+            releases,
+            source,
+            storage,
+        })
+    }
+
     pub async fn import_share(
         &self,
         owner_user_id: &str,
@@ -1690,6 +2190,628 @@ impl MiniAppM1ApplicationService {
             None,
         )
         .await
+    }
+
+    pub async fn import_backup(
+        &self,
+        owner_user_id: &str,
+        request: ImportMiniAppBackupRequest,
+    ) -> Result<MiniAppWorkshopDto, MiniAppM1ApplicationError> {
+        validate_digest_string(
+            &request.expected_backup_metadata_digest,
+            "Whole-App Backup metadata digest",
+        )?;
+        if request.display_name.trim().is_empty() {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "MiniApp display name is required".into(),
+            ));
+        }
+        let imported = MiniAppWholeAppBackupFilesystem::new()
+            .import(&request.source_path)
+            .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+        let metadata_digest = imported
+            .metadata
+            .metadata_digest()
+            .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+        if metadata_digest.as_ref() != request.expected_backup_metadata_digest {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "Whole-App Backup metadata digest expectation does not match".into(),
+            ));
+        }
+        let product: BackupProductMetadata =
+            serde_json::from_value(imported.product.clone()).map_err(|error| {
+                MiniAppM1ApplicationError::Invalid(format!(
+                    "Whole-App Backup product metadata is invalid: {error}"
+                ))
+            })?;
+        let project: BackupProjectMetadata =
+            serde_json::from_value(imported.project.clone()).map_err(|error| {
+                MiniAppM1ApplicationError::Invalid(format!(
+                    "Whole-App Backup project metadata is invalid: {error}"
+                ))
+            })?;
+        let config: BackupConfigMetadata =
+            serde_json::from_value(imported.config.clone()).map_err(|error| {
+                MiniAppM1ApplicationError::Invalid(format!(
+                    "Whole-App Backup config metadata is invalid: {error}"
+                ))
+            })?;
+        let credential_slots: Vec<CredentialSlotDeclaration> =
+            serde_json::from_value(imported.credential_slots.clone()).map_err(|error| {
+                MiniAppM1ApplicationError::Invalid(format!(
+                    "Whole-App Backup credential slots are invalid: {error}"
+                ))
+            })?;
+        let credential_slot_keys = credential_slots
+            .iter()
+            .map(|slot| slot.slot_key.as_ref().to_owned())
+            .collect::<BTreeSet<_>>();
+        if credential_slot_keys != imported.metadata.credential_slot_keys {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "Whole-App Backup credential slot inventory does not match metadata".into(),
+            ));
+        }
+        validate_backup_credential_slot_union(&credential_slots, &imported.releases)?;
+        let expected_release_slots = [
+            ("ready", product.ready_release_id.is_some()),
+            ("active", product.active_release_id.is_some()),
+            ("previous", product.previous_release_id.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(slot, present)| present.then_some(slot))
+        .collect::<BTreeSet<_>>();
+        let actual_release_slots = imported.releases.keys().map(String::as_str).collect();
+        if expected_release_slots != actual_release_slots {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "Whole-App Backup Release inventory does not match Product pointers".into(),
+            ));
+        }
+        if product.miniapp_id != imported.metadata.source_miniapp_id.as_ref()
+            || project.miniapp_id != product.miniapp_id
+            || project.project_id.trim().is_empty()
+            || product.lifecycle != "disabled"
+            || !matches!(product.kind.as_str(), "ui_only" | "service")
+            || (project.source_state == "editable") != imported.source.is_some()
+            || (project.source_state != "editable"
+                && project.source_state != "runtime_only"
+                && project.source_state != "empty")
+            || (product.active_release_id.is_some() != (product.active_release_epoch > 0))
+            || product.product_revision < 1
+            || product.pointer_revision < 1
+            || project.project_revision < 1
+            || (project.source_state == "editable" && project.build_generation < 1)
+        {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "Whole-App Backup identity, lifecycle, or Source state is inconsistent".into(),
+            ));
+        }
+        if config.schema_digest
+            != digest_payload(&config.schema)
+                .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?
+                .as_ref()
+        {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "Whole-App Backup configuration schema digest is invalid".into(),
+            ));
+        }
+        if !config.schema.is_object() || !config.values.is_object() {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "Whole-App Backup configuration must contain JSON objects".into(),
+            ));
+        }
+        let kind = if product.kind == "service" {
+            MiniAppM1Kind::Service
+        } else {
+            MiniAppM1Kind::UiOnly
+        };
+        let miniapp_id = Uuid::now_v7().to_string();
+        let project_id = Uuid::now_v7().to_string();
+        let operation_id = Uuid::now_v7().to_string();
+        let started_at_ms = positive_now_ms();
+        let source_lineage = imported.source.as_ref().map(|source| {
+            MiniAppM1ImportSource::Managed(MiniAppM1ManagedSourceLineage {
+                managed_source_path: format!(
+                    "sources/{owner_user_id}/miniapps/{miniapp_id}/projects/{project_id}/source"
+                ),
+                source_head_digest: source.source.source_snapshot_digest.as_ref().to_owned(),
+                dependency_lock_digest: source.source.dependency_lock_digest.as_ref().to_owned(),
+                build_profile_version: source.source.build_profile_version.as_ref().to_owned(),
+                build_generation: project.build_generation.max(1),
+            })
+        });
+        let begun = self
+            .repository
+            .begin_import_as_new(&BeginMiniAppM1ImportAsNewParams {
+                create: CreateMiniAppM1Params {
+                    owner_user_id: owner_user_id.to_owned(),
+                    miniapp_id: miniapp_id.clone(),
+                    project_id: project_id.clone(),
+                    expected_library_revision: to_i64(
+                        request.expected_library_revision,
+                        "library revision",
+                    )?,
+                    display_name: request.display_name.trim().to_owned(),
+                    description: product.description.clone(),
+                    icon_asset_id: None,
+                    kind,
+                    materialized_catalog_digest: digest_bytes(b"miniapp-m1-empty-catalog")
+                        .as_ref()
+                        .to_owned(),
+                    config_schema_json: canonical_json_string(&config.schema)?,
+                    config_json: canonical_json_string(&config.values)?,
+                    created_at: started_at_ms,
+                },
+                operation_id: operation_id.clone(),
+                source: source_lineage
+                    .clone()
+                    .unwrap_or(MiniAppM1ImportSource::RuntimeOnly),
+                bounded_log_tail: vec!["MiniApp Whole-App Backup import started".into()],
+                started_at_ms,
+            })
+            .await?;
+
+        let imported_releases = imported.releases;
+        let imported_source = imported.source;
+        let mut imported_storage = imported.storage;
+        let kv_payloads = imported_storage.kv.clone();
+        let result = async {
+            if let Some(source) = imported_source {
+                let build_generation = project.build_generation.max(1) as u64;
+                self.stores
+                    .source
+                    .import_project_exact(MiniAppSourceExactImportRequest {
+                        scope: MiniAppSourceScope::new(
+                            owner_user_id,
+                            &miniapp_id,
+                            &project_id,
+                        )
+                        .map_err(|error| store_error("Backup Source scope", error))?,
+                        display_name: request.display_name.trim().to_owned(),
+                        content_kind: if kind == MiniAppM1Kind::Service {
+                            MiniAppSourceContentKind::Service
+                        } else {
+                            MiniAppSourceContentKind::UiOnly
+                        },
+                        dependency_lock: source.dependency_lock,
+                        files: source
+                            .files
+                            .into_iter()
+                            .map(|file| {
+                                MiniAppSourceFileInput::new(file.relative_path, file.bytes)
+                            })
+                            .collect(),
+                        expected_source_snapshot_digest: source.source.source_snapshot_digest,
+                        expected_dependency_lock_digest: source.source.dependency_lock_digest,
+                        build_generation,
+                        build_profile_version: source.source.build_profile_version,
+                    })
+                    .map_err(|error| store_error("Backup Source import", error))?;
+            }
+
+            let mut release_refs = BTreeMap::new();
+            let mut release_items = Vec::with_capacity(imported_releases.len());
+            for (slot, release) in &imported_releases {
+                let slot = match slot.as_str() {
+                    "ready" => MiniAppM1BackupReleaseSlot::Ready,
+                    "active" => MiniAppM1BackupReleaseSlot::Active,
+                    "previous" => MiniAppM1BackupReleaseSlot::Previous,
+                    _ => {
+                        return Err(MiniAppM1ApplicationError::Invalid(
+                            "Whole-App Backup contains an unsupported Release slot".into(),
+                        ));
+                    }
+                };
+                let old_id = match slot {
+                    MiniAppM1BackupReleaseSlot::Ready => product.ready_release_id.as_deref(),
+                    MiniAppM1BackupReleaseSlot::Active => product.active_release_id.as_deref(),
+                    MiniAppM1BackupReleaseSlot::Previous => {
+                        product.previous_release_id.as_deref()
+                    }
+                }
+                .ok_or_else(|| {
+                    MiniAppM1ApplicationError::Invalid(
+                        "Whole-App Backup Release slot is not referenced by Product metadata"
+                            .into(),
+                    )
+                })?;
+                let slot_name = slot.as_str();
+                let release_metadata = product.release_lineage.get(slot_name).ok_or_else(|| {
+                    MiniAppM1ApplicationError::Invalid(format!(
+                        "Whole-App Backup is missing lineage metadata for Release slot {slot_name}"
+                    ))
+                })?;
+                let artifact = &release.artifact;
+                if release_metadata.release_id != old_id
+                    || release_metadata.artifact_id != artifact.artifact_id.as_ref()
+                    || release_metadata.artifact_digest != artifact.artifact_digest.as_ref()
+                    || release_metadata.manifest_digest
+                        != artifact.manifest.payload_digest.as_ref()
+                {
+                    return Err(MiniAppM1ApplicationError::Invalid(
+                        "Whole-App Backup Release lineage does not match its Artifact".into(),
+                    ));
+                }
+                if (kind == MiniAppM1Kind::Service)
+                    != artifact.manifest.payload.service.is_some()
+                {
+                    return Err(MiniAppM1ApplicationError::Invalid(
+                        "Whole-App Backup Release kind differs from Product kind".into(),
+                    ));
+                }
+                let release_id = Uuid::now_v7().to_string();
+                let managed_lineage = match release_metadata.source_kind.as_str() {
+                    "managed" => {
+                        let source_digest = release_metadata
+                            .source_snapshot_digest
+                            .clone()
+                            .ok_or_else(|| {
+                                MiniAppM1ApplicationError::Invalid(
+                                    "managed Backup Release has no Source digest".into(),
+                                )
+                            })?;
+                        let lock_digest = release_metadata
+                            .dependency_lock_digest
+                            .clone()
+                            .ok_or_else(|| {
+                                MiniAppM1ApplicationError::Invalid(
+                                    "managed Backup Release has no dependency lock digest".into(),
+                                )
+                            })?;
+                        let build_generation = release_metadata.build_generation.ok_or_else(|| {
+                            MiniAppM1ApplicationError::Invalid(
+                                "managed Backup Release has no build generation".into(),
+                            )
+                        })?;
+                        if release_metadata.project_id.as_deref() != Some(
+                            project.project_id.as_str(),
+                        ) || release_metadata.build_profile_version.as_deref()
+                            != Some(MINIAPP_RELEASE_PROFILE_VERSION)
+                        {
+                            return Err(MiniAppM1ApplicationError::Invalid(
+                                "managed Backup Release Project lineage is invalid".into(),
+                            ));
+                        }
+                        MiniAppSourceLineage::Managed {
+                            project_id: MiniAppProjectId::from(project_id.clone()),
+                            source_snapshot_digest: DigestHex::from(source_digest),
+                            dependency_lock_digest: DigestHex::from(lock_digest),
+                            build_profile_version: MINIAPP_RELEASE_PROFILE_VERSION.into(),
+                            build_generation: u64::try_from(build_generation).map_err(|_| {
+                                MiniAppM1ApplicationError::Invalid(
+                                    "Backup Release build generation is invalid".into(),
+                                )
+                            })?,
+                        }
+                    }
+                    "runtime_only" => MiniAppSourceLineage::RuntimeOnly,
+                    _ => {
+                        return Err(MiniAppM1ApplicationError::Invalid(
+                            "Whole-App Backup Release source kind is invalid".into(),
+                        ));
+                    }
+                };
+                let is_managed = matches!(
+                    managed_lineage,
+                    MiniAppSourceLineage::Managed { .. }
+                );
+                let release_source_digest = release_metadata
+                    .source_snapshot_digest
+                    .clone()
+                    .unwrap_or_else(|| artifact.artifact_digest.as_ref().to_owned());
+                let release_lock_digest = release_metadata
+                    .dependency_lock_digest
+                    .clone()
+                    .unwrap_or_else(|| {
+                        artifact
+                            .manifest
+                            .payload
+                            .dependency_lock_digest
+                            .as_ref()
+                            .to_owned()
+                    });
+                let release_generation = release_metadata
+                    .build_generation
+                    .and_then(|value| u64::try_from(value).ok())
+                    .unwrap_or(1);
+                let ready = MiniAppReadyRelease {
+                    miniapp_id: MiniAppId::from(miniapp_id.clone()),
+                    release: MiniAppReleaseRef {
+                        release_id: MiniAppReleaseId::from(release_id.clone()),
+                        artifact_id: artifact.artifact_id.clone(),
+                        release_digest: artifact.artifact_digest.clone(),
+                        manifest_digest: artifact.manifest.payload_digest.clone(),
+                    },
+                    origin_operation_id: OperationId::from(operation_id.clone()),
+                    origin: MiniAppReadyOrigin::Import,
+                    source_lineage: managed_lineage.clone(),
+                    matching_service_test_receipt: None,
+                    created_at_ms: positive_now_ms().max(started_at_ms),
+                };
+                ready
+                    .validate_for_artifact(artifact)
+                    .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+                let published = self
+                    .stores
+                    .release
+                    .publish(if kind == MiniAppM1Kind::Service {
+                        MiniAppReleasePublishRequest::service(
+                            MiniAppSourceScope::new(
+                                owner_user_id,
+                                &miniapp_id,
+                                &project_id,
+                            )
+                            .map_err(|error| store_error("Backup Release scope", error))?,
+                            release_source_digest.clone().into(),
+                            release_lock_digest.clone().into(),
+                            release_generation,
+                            artifact.clone(),
+                            release
+                                .files
+                                .iter()
+                                .map(|file| {
+                                    MiniAppReleaseFileBytes::new(
+                                        file.relative_path.clone(),
+                                        file.bytes.clone(),
+                                    )
+                                })
+                                .collect(),
+                        )
+                    } else {
+                        MiniAppReleasePublishRequest::ui_only(
+                            MiniAppSourceScope::new(
+                                owner_user_id,
+                                &miniapp_id,
+                                &project_id,
+                            )
+                            .map_err(|error| store_error("Backup Release scope", error))?,
+                            release_source_digest.clone().into(),
+                            release_lock_digest.clone().into(),
+                            release_generation,
+                            artifact.clone(),
+                            release
+                                .files
+                                .iter()
+                                .map(|file| {
+                                    MiniAppReleaseFileBytes::new(
+                                        file.relative_path.clone(),
+                                        file.bytes.clone(),
+                                    )
+                                })
+                                .collect(),
+                        )
+                    })
+                    .map_err(|error| store_error("Backup Release import", error))?;
+                let artifact = published.stored.artifact;
+                let mut release_ref = ready.release.clone();
+                release_ref.artifact_id = artifact.artifact_id.clone();
+                release_ref.manifest_digest = artifact.manifest.payload_digest.clone();
+                release_refs.insert(old_id.to_owned(), release_ref.clone());
+                release_items.push(MiniAppM1BackupImportRelease {
+                    slot,
+                    artifact: MiniAppReleaseArtifactRow {
+                        id: 0,
+                        artifact_id: artifact.artifact_id.as_ref().to_owned(),
+                        owner_user_id: owner_user_id.to_owned(),
+                        artifact_digest: artifact.artifact_digest.as_ref().to_owned(),
+                        manifest_digest: artifact.manifest.payload_digest.as_ref().to_owned(),
+                        artifact_record_json: canonical_json_string(&artifact)?,
+                        managed_path: published.stored.managed_relative_path,
+                        created_at: ready.created_at_ms,
+                    },
+                    release: MiniAppReleaseRow {
+                        id: 0,
+                        release_id,
+                        miniapp_id: miniapp_id.clone(),
+                        owner_user_id: owner_user_id.to_owned(),
+                        artifact_id: artifact.artifact_id.as_ref().to_owned(),
+                        artifact_digest: artifact.artifact_digest.as_ref().to_owned(),
+                        manifest_digest: artifact.manifest.payload_digest.as_ref().to_owned(),
+                        release_digest: artifact.artifact_digest.as_ref().to_owned(),
+                        origin_kind: "import".into(),
+                        origin_operation_id: operation_id.clone(),
+                        source_kind: if matches!(
+                            ready.source_lineage,
+                            MiniAppSourceLineage::Managed { .. }
+                        ) {
+                            "managed".into()
+                        } else {
+                            "runtime_only".into()
+                        },
+                        project_id: if matches!(
+                            ready.source_lineage,
+                            MiniAppSourceLineage::Managed { .. }
+                        ) {
+                            Some(project_id.clone())
+                        } else {
+                            None
+                        },
+                        source_snapshot_digest: if is_managed {
+                            Some(release_source_digest.clone())
+                        } else {
+                            None
+                        },
+                        dependency_lock_digest: if is_managed {
+                            Some(release_lock_digest.clone())
+                        } else {
+                            None
+                        },
+                        build_profile_version: if is_managed {
+                            Some(MINIAPP_RELEASE_PROFILE_VERSION.into())
+                        } else {
+                            None
+                        },
+                        build_generation: if is_managed {
+                            Some(release_generation as i64)
+                        } else {
+                            None
+                        },
+                        release_record_json: canonical_json_string(&ready)?,
+                        created_at: ready.created_at_ms,
+                    },
+                });
+            }
+            let target_catalog_digest = match product.active_release_id.as_deref() {
+                Some(old_active_release_id) => {
+                    let active = release_items
+                        .iter()
+                        .find(|item| item.slot == MiniAppM1BackupReleaseSlot::Active)
+                        .ok_or_else(|| {
+                            MiniAppM1ApplicationError::Invalid(
+                                "Whole-App Backup Active Release is missing".into(),
+                            )
+                        })?;
+                    let active_ref = release_refs
+                        .get(old_active_release_id)
+                        .ok_or_else(|| {
+                            MiniAppM1ApplicationError::Invalid(
+                                "Whole-App Backup Active Release identity is missing".into(),
+                            )
+                        })?;
+                    let active_artifact: nomifun_agent_contracts::MiniAppReleaseArtifactV1 =
+                        serde_json::from_str(&active.artifact.artifact_record_json).map_err(
+                            |error| {
+                                MiniAppM1ApplicationError::Invalid(format!(
+                                    "imported Active Release Artifact is invalid: {error}"
+                                ))
+                            },
+                        )?;
+                    materialized_catalog_digest(
+                        &miniapp_id,
+                        active_ref,
+                        &active_artifact.manifest.payload.contributions,
+                    )?
+                    .as_ref()
+                    .to_owned()
+                }
+                None => digest_bytes(b"miniapp-m1-empty-catalog").as_ref().to_owned(),
+            };
+            let mut ledger = imported_storage.migration_ledger.take();
+            if let Some(ledger_value) = ledger.as_mut() {
+                *ledger_value = rebind_migration_ledger_for_target_with_releases(
+                    ledger_value,
+                    MiniAppId::from(miniapp_id.clone()),
+                    MiniAppDatabaseHandleId::from(format!("miniapp-db-{miniapp_id}")),
+                    &release_refs,
+                )
+                .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+            }
+            let mut storage = imported_storage;
+            storage.migration_ledger = ledger;
+            storage.kv.clear();
+            if kind == MiniAppM1Kind::Service {
+                let active_artifact = release_items
+                    .iter()
+                    .find(|item| item.slot == MiniAppM1BackupReleaseSlot::Active)
+                    .or_else(|| {
+                        release_items
+                            .iter()
+                            .find(|item| item.slot == MiniAppM1BackupReleaseSlot::Ready)
+                    })
+                    .map(|item| item.artifact.artifact_record_json.clone());
+                let (uses_files, uses_private_database) = active_artifact
+                    .as_deref()
+                    .map(|value| {
+                        serde_json::from_str::<nomifun_agent_contracts::MiniAppReleaseArtifactV1>(
+                            value,
+                        )
+                        .ok()
+                        .and_then(|artifact| {
+                            artifact.manifest.payload.service.map(|service| {
+                                (service.uses_files, service.uses_private_database)
+                            })
+                        })
+                        .unwrap_or((false, false))
+                    })
+                    .unwrap_or((false, false));
+                self.service_runtime()
+                    .await
+                    .import_backup_storage(
+                        owner_user_id,
+                        &MiniAppId::from(miniapp_id.clone()),
+                        storage,
+                        uses_files,
+                        uses_private_database,
+                    )
+                    .await
+                    .map_err(|error| MiniAppM1ApplicationError::Runtime(error.to_string()))?;
+            }
+            let kv = kv_payloads
+                .iter()
+                .map(|value| {
+                    let row: BackupKvMetadata = serde_json::from_value(value.clone())
+                        .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+                    Ok(MiniAppKvRow {
+                        id: 0,
+                        miniapp_id: miniapp_id.clone(),
+                        owner_user_id: owner_user_id.to_owned(),
+                        namespace: row.namespace,
+                        key: row.key,
+                        value_json: row.value_json,
+                        revision: row.revision,
+                        key_generation: row.key_generation,
+                        is_tombstone: row.is_tombstone,
+                        created_at: row.created_at,
+                        updated_at: row.updated_at,
+                    })
+                })
+                .collect::<Result<Vec<_>, MiniAppM1ApplicationError>>()?;
+            self.repository
+                .finish_backup_import(&FinishMiniAppM1BackupImportParams {
+                    owner_user_id: owner_user_id.to_owned(),
+                    miniapp_id: miniapp_id.clone(),
+                    project_id: project_id.clone(),
+                    operation_id: operation_id.clone(),
+                    expected_library_revision: begun.snapshot.library_revision,
+                    expected_product_revision: begun.snapshot.product.product_revision,
+                    expected_pointer_revision: begun.snapshot.product.pointer_revision,
+                    expected_project_revision: begun.snapshot.project.project_revision,
+                    releases: release_items,
+                    kv,
+                    target_catalog_digest,
+                    finished_at_ms: positive_now_ms().max(started_at_ms),
+                })
+                .await
+                .map_err(MiniAppM1ApplicationError::from)
+        }
+        .await;
+        match result {
+            Ok(snapshot) => self.workshop_projection(owner_user_id, &snapshot, None).await,
+            Err(error) => {
+                let _ = self
+                    .repository
+                    .fail_import(&FailMiniAppM1ImportParams {
+                        owner_user_id: owner_user_id.to_owned(),
+                        miniapp_id: miniapp_id.clone(),
+                        project_id: project_id.clone(),
+                        operation_id,
+                        expected_product_revision: begun.snapshot.product.product_revision,
+                        expected_pointer_revision: begun.snapshot.product.pointer_revision,
+                        expected_project_revision: begun.snapshot.project.project_revision,
+                        progress_percent: 0,
+                        error_code: "miniapp_backup_import_failed".into(),
+                        bounded_log_tail: vec![bounded_log_line(&error.to_string())],
+                        finished_at_ms: positive_now_ms().max(started_at_ms),
+                    })
+                    .await;
+                let _ = self
+                    .service_runtime()
+                    .await
+                    .purge_storage(
+                        owner_user_id,
+                        &MiniAppId::from(miniapp_id.clone()),
+                    )
+                    .await;
+                let _ = self
+                    .stores
+                    .source
+                    .purge_project(owner_user_id, &miniapp_id, &project_id);
+                let _ = self
+                    .stores
+                    .release
+                    .purge_project(owner_user_id, &miniapp_id, &project_id);
+                Err(error)
+            }
+        }
     }
 
     async fn import_as_new(
@@ -4539,6 +5661,48 @@ fn materialized_catalog_digest(
         contributions,
     })
     .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))
+}
+
+fn validate_backup_credential_slot_union(
+    credential_slots: &[CredentialSlotDeclaration],
+    releases: &BTreeMap<String, MiniAppBackupRelease>,
+) -> Result<(), MiniAppM1ApplicationError> {
+    let declared = credential_slots
+        .iter()
+        .map(|slot| (slot.slot_key.as_ref().to_owned(), slot))
+        .collect::<BTreeMap<_, _>>();
+    if declared.len() != credential_slots.len() {
+        return Err(MiniAppM1ApplicationError::Invalid(
+            "Whole-App Backup credential slots contain duplicates".into(),
+        ));
+    }
+    let mut observed = BTreeMap::<String, CredentialSlotDeclaration>::new();
+    for release in releases.values() {
+        for slot in &release.artifact.manifest.payload.credential_slots {
+            match observed.get(slot.slot_key.as_ref()) {
+                Some(existing) if existing != slot => {
+                    return Err(MiniAppM1ApplicationError::Invalid(format!(
+                        "Whole-App Backup credential slot {} changes across Releases",
+                        slot.slot_key.as_ref()
+                    )));
+                }
+                Some(_) => {}
+                None => {
+                    observed.insert(slot.slot_key.as_ref().to_owned(), slot.clone());
+                }
+            }
+        }
+    }
+    if observed != declared
+        .into_iter()
+        .map(|(key, slot)| (key, slot.clone()))
+        .collect::<BTreeMap<_, _>>()
+    {
+        return Err(MiniAppM1ApplicationError::Invalid(
+            "Whole-App Backup credential slots do not match the retained Release union".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn summary_from_product(

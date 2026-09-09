@@ -616,3 +616,16 @@ Share Application/API/E2E 已关闭；Desktop Share UI 正在实施，Whole-App 
 开始，`M1-2-01` 继续为 `in-progress`。完成顺序为 Share UI → Whole-App Backup →
 MiniApp Catalog 正式消费 → 旧 MiniApp 拆除 → Windows Candidate。macOS/Linux 继续等待
 最终 Windows cohort，手机模式不在范围内。
+
+## 2026-09-09 06 Windows 主线状态同步（M1-2 Backup 收口）
+
+MiniApp M1-2 的 Share/Prebuilt Import、Desktop Transfer UI 和 disabled Whole-App
+Backup Export/Import-as-new 已完成 Windows 定向实现与回归。Backup application 已覆盖
+UI-only 以及 Service Files、Private SQLite、Migration ledger、Release 重绑定和新
+identity Catalog digest；普通 Share Export 与 Backup Export 的 owner operation 互斥也
+已验证。对应 `M1-2-01` 在 06 台账中关闭。
+
+本 checkpoint 不关闭 `M1-U-01`、`M1-V-01` 或 `RC-WIN-01`。下一顺序保持：
+MiniApp Capability Catalog 正式 consumer integration → 旧 MiniApp 生产链物理清理
+→ Windows Candidate/NSIS/fault/accessibility → 最终 Windows cohort；只有其后才交接
+macOS arm64 与 Linux Desktop x64，手机模式不属于 `nomifun-desktop` 范围。

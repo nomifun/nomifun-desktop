@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::{
-    MiniAppCallCancellation, MiniAppHostKvPort, MiniAppPlatformError, MiniAppPlatformResult,
+    MiniAppBackupStorage, MiniAppCallCancellation, MiniAppHostKvPort,
+    MiniAppPlatformError, MiniAppPlatformResult,
 };
 
 /// The storage descriptor and ledger resolved for one exact Service run.
@@ -146,6 +147,48 @@ pub trait MiniAppServiceStoragePort: Send + Sync {
         owner_user_id: &str,
         miniapp_id: &MiniAppId,
     ) -> MiniAppPlatformResult<()>;
+
+    async fn export_backup_storage(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &MiniAppId,
+        uses_files: bool,
+        uses_private_database: bool,
+    ) -> MiniAppPlatformResult<MiniAppBackupStorage> {
+        let _ = (owner_user_id, miniapp_id);
+        if uses_files || uses_private_database {
+            return Err(MiniAppPlatformError::Runtime(
+                "MiniApp backup storage is not configured".into(),
+            ));
+        }
+        Ok(MiniAppBackupStorage {
+            kv: Vec::new(),
+            files: Vec::new(),
+            private_database: None,
+            migration_ledger: None,
+        })
+    }
+
+    async fn import_backup_storage(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &MiniAppId,
+        storage: MiniAppBackupStorage,
+        uses_files: bool,
+        uses_private_database: bool,
+    ) -> MiniAppPlatformResult<()> {
+        let _ = (owner_user_id, miniapp_id);
+        if uses_files || uses_private_database
+            || !storage.files.is_empty()
+            || storage.private_database.is_some()
+            || storage.migration_ledger.is_some()
+        {
+            return Err(MiniAppPlatformError::Runtime(
+                "MiniApp backup storage is not configured".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -1163,6 +1206,69 @@ fn rebind_migration_ledger(
         handle_id,
         schema_epoch: source.schema_epoch,
         entries: source.entries.clone(),
+        ledger_digest,
+    };
+    rebound.validate()?;
+    Ok(rebound)
+}
+
+pub(crate) fn rebind_migration_ledger_for_target(
+    source: &MiniAppMigrationLedger,
+    miniapp_id: MiniAppId,
+    handle_id: MiniAppDatabaseHandleId,
+) -> MiniAppPlatformResult<MiniAppMigrationLedger> {
+    rebind_migration_ledger_for_target_with_releases(
+        source,
+        miniapp_id,
+        handle_id,
+        &BTreeMap::new(),
+    )
+}
+
+pub(crate) fn rebind_migration_ledger_for_target_with_releases(
+    source: &MiniAppMigrationLedger,
+    miniapp_id: MiniAppId,
+    handle_id: MiniAppDatabaseHandleId,
+    release_refs: &BTreeMap<String, MiniAppReleaseRef>,
+) -> MiniAppPlatformResult<MiniAppMigrationLedger> {
+    source.validate()?;
+    let entries = source
+        .entries
+        .iter()
+        .map(|entry| {
+            let release = if release_refs.is_empty() {
+                entry.release.clone()
+            } else {
+                release_refs
+                    .get(entry.release.release_id.as_ref())
+                    .cloned()
+                    .ok_or_else(|| {
+                        MiniAppPlatformError::InvalidState(format!(
+                            "migration ledger references a Release absent from the imported backup: {}",
+                            entry.release.release_id.as_ref()
+                        ))
+                    })?
+            };
+            Ok(MiniAppMigrationLedgerEntry {
+                ordinal: entry.ordinal,
+                migration_id: entry.migration_id.clone(),
+                migration_digest: entry.migration_digest.clone(),
+                release,
+                applied_at_ms: entry.applied_at_ms,
+            })
+        })
+        .collect::<MiniAppPlatformResult<Vec<_>>>()?;
+    let ledger_digest = ledger_digest(
+        &miniapp_id,
+        &handle_id,
+        source.schema_epoch,
+        &entries,
+    )?;
+    let rebound = MiniAppMigrationLedger {
+        miniapp_id,
+        handle_id,
+        schema_epoch: source.schema_epoch,
+        entries,
         ledger_digest,
     };
     rebound.validate()?;

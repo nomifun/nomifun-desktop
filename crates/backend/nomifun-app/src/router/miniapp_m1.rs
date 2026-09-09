@@ -10,6 +10,7 @@ use nomifun_api_types::{
     ApiResponse, BuildMiniAppRequest, CancelMiniAppBuildRequest,
     CloseMiniAppSurfaceRequest, CreateMiniAppProjectRequest, DeleteMiniAppRequest,
     DurableOperationSummaryDto, ImportMiniAppArtifactRequest, ImportMiniAppShareRequest,
+    ExportMiniAppBackupRequest, ImportMiniAppBackupRequest,
     MiniAppLibraryResponseDto, MiniAppSurfaceLaunchDescriptorDto,
     MiniAppWorkshopDto, OpenMiniAppSurfaceRequest, PublishMiniAppRequest, RollbackMiniAppRequest,
     RestoreMiniAppRequest, RetryMiniAppDeleteRequest, RetryMiniAppServiceRequest,
@@ -64,6 +65,7 @@ pub(crate) fn miniapp_m1_write_routes(
         .route("/api/miniapps/projects", post(create_project))
         .route("/api/miniapps/import/share", post(import_share))
         .route("/api/miniapps/import/artifact", post(import_artifact))
+        .route("/api/miniapps/import/backup", post(import_backup))
         .route(
             "/api/miniapps/{miniapp_id}/build",
             post(build_miniapp),
@@ -81,6 +83,7 @@ pub(crate) fn miniapp_m1_write_routes(
             post(test_miniapp_release),
         )
         .route("/api/miniapps/{miniapp_id}/share", post(export_share))
+        .route("/api/miniapps/{miniapp_id}/backup", post(export_backup))
         .route(
             "/api/miniapps/{miniapp_id}/rollback",
             post(rollback_miniapp),
@@ -192,6 +195,19 @@ async fn import_artifact(
     Ok(Json(ApiResponse::ok(workshop)))
 }
 
+async fn import_backup(
+    State(state): State<MiniAppM1RouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Json(request): Json<ImportMiniAppBackupRequest>,
+) -> Result<Json<ApiResponse<MiniAppWorkshopDto>>, AppError> {
+    let workshop = state
+        .application
+        .import_backup(user.id.as_str(), request)
+        .await
+        .map_err(application_error)?;
+    Ok(Json(ApiResponse::ok(workshop)))
+}
+
 async fn get_workshop(
     State(state): State<MiniAppM1RouterState>,
     Extension(user): Extension<CurrentUser>,
@@ -294,6 +310,21 @@ async fn export_share(
     let operation = state
         .application
         .export_share(user.id.as_str(), request)
+        .await
+        .map_err(application_error)?;
+    Ok(Json(ApiResponse::ok(operation)))
+}
+
+async fn export_backup(
+    State(state): State<MiniAppM1RouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(miniapp_id): Path<String>,
+    Json(request): Json<ExportMiniAppBackupRequest>,
+) -> Result<Json<ApiResponse<DurableOperationSummaryDto>>, AppError> {
+    require_route_id("miniapp_id", &miniapp_id, &request.miniapp_id)?;
+    let operation = state
+        .application
+        .export_backup(user.id.as_str(), request)
         .await
         .map_err(application_error)?;
     Ok(Json(ApiResponse::ok(operation)))

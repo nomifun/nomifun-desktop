@@ -2182,3 +2182,20 @@ Catalog，也不授予 MiniApp owner、Credential 或部署权限。Runtime/Conf
 Share Import/Export 仍由 MiniApp application service 所有，不进入 AgentPreset
 Revision/Binding；Import 创建新 identity，Agent consumer 只能消费之后正式发布的 Active
 Capability。Share UI、Backup 和 Catalog consumer 状态继续由 06 台账跟踪。
+
+## 2026-09-09 MiniApp Whole-App Backup 实现边界注记
+
+disabled Whole-App Backup 已接入 MiniApp application/API/UI 主链，且与无用户数据
+Share Bundle 保持独立。Backup 导出包含 Product/Project、Source、保留 Release、
+非秘密 Config、KV、Service Files、Private SQLite 和 Migration ledger；不包含明文
+Credential 或本机 binding，导入总是创建新的 MiniApp/Project/Release identity 并保持
+disabled。
+
+Backup filesystem 使用 canonical JSON、严格 inventory/digest/大小校验和
+symlink/junction/reparse/special file 拒绝。导入后的 Active Catalog digest 按新
+identity 重建；ledger 只能引用 Backup 保留的精确 Release。Service Files 与 Private
+SQLite 在 sibling staging 完整校验后原子交换，失败保留旧目标。普通 Share Export 与
+Backup Export 共用 owner operation 互斥，避免同一 MiniApp 并行捕获。
+
+这些实现只关闭 M1-2 的产品导入导出切片，不提前关闭 MiniApp Capability Catalog
+正式消费者、旧 MiniApp 清理、Windows Candidate 或 macOS/Linux 原生验证。

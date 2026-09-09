@@ -28,6 +28,7 @@
     "deletePermanently": "永久删除",
     "retryDelete": "重试删除",
     "share": "分享",
+    "exportBackup": "导出备份",
     "openSurface": "打开 Surface",
     "reloadSurface": "重新加载 Surface",
     "closeSurface": "关闭 Surface",
@@ -132,12 +133,28 @@
       "sourcePlaceholder": "选择预构建包目录",
       "layoutHint": "所选目录必须包含 release/artifact.json 及其精确 Release 文件。"
     },
+    "exportBackup": {
+      "title": "导出完整应用备份",
+      "intro": "导出停用 MiniApp 的 Source、保留的 Release、非秘密配置、KV、Files 与 Private Database。Credential 绑定不会进入备份。",
+      "submit": "导出备份",
+      "disabledOnly": "只有停用且已静默的 MiniApp 才能备份。导入后会创建新 identity，并需要重新绑定 Credential。",
+      "destinationHint": "NomiFun 将原子创建备份目录，不会覆盖已存在的路径。"
+    },
+    "importBackup": {
+      "title": "导入完整应用备份",
+      "intro": "将产品及其受管数据导入为全新的停用 MiniApp identity。Credential 值与本机绑定不会恢复。",
+      "submit": "导入备份",
+      "sourcePlaceholder": "选择完整应用备份目录",
+      "layoutHint": "所选目录必须包含 metadata.json 及完整备份结构。",
+      "defaultName": "导入的小程序"
+    },
     "import": {
       "sourceDirectory": "来源目录",
       "displayName": "新 MiniApp 名称",
       "displayNamePlaceholder": "为导入的 MiniApp 输入名称",
       "bundleDigest": "Bundle digest",
       "artifactDigest": "Release artifact digest",
+      "backupMetadataDigest": "备份元数据 digest",
       "backendAuthority": "此预览只读取展示元数据与预期 digest。Schema、文件清单、digest、来源链与安全校验仍以后端为唯一权威。"
     },
     "errors": {
@@ -383,8 +400,10 @@
     "trashed": "小程序已移入回收站",
     "restored": "小程序已恢复为停用状态",
     "shareExported": "Share Bundle 已导出到 {{path}}",
+    "backupExported": "完整应用备份已导出到 {{path}}",
     "shareImported": "Share Bundle 已导入为新的停用小程序",
     "artifactImported": "预构建 Artifact 已导入为新的停用、仅运行时小程序",
+    "backupImported": "完整应用备份已导入为新的停用小程序",
     "deletedPermanently": "小程序已永久删除",
     "deleteRetryCompleted": "重试后已完成永久删除"
   }

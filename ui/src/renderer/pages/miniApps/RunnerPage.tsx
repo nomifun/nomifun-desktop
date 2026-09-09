@@ -24,6 +24,7 @@ import {
   CloseOne,
   Code,
   Delete,
+  Download,
   Power,
   PreviewOpen,
   Refresh,
@@ -216,6 +217,7 @@ const MiniAppWorkshopDetail: React.FC<{
   onDelete: () => void;
   onRetryDelete: () => void;
   onShare: () => void;
+  onBackup: () => void;
   onOpenSurface: () => void;
   onReloadSurface: () => void;
   onCloseSurface: () => void;
@@ -245,6 +247,7 @@ const MiniAppWorkshopDetail: React.FC<{
   onDelete,
   onRetryDelete,
   onShare,
+  onBackup,
   onOpenSurface,
   onReloadSurface,
   onCloseSurface,
@@ -471,6 +474,15 @@ const MiniAppWorkshopDetail: React.FC<{
             >
               {t('miniApps.actions.share')}
             </Button>
+            {miniapp.lifecycle === 'disabled' && (
+              <Button
+                icon={<Download theme='outline' size='14' />}
+                disabled={controlsDisabled}
+                onClick={onBackup}
+              >
+                {t('miniApps.actions.exportBackup')}
+              </Button>
+            )}
             <Tooltip
               content={
                 canOpenSurface
@@ -1044,6 +1056,7 @@ const MiniAppRunnerPage: React.FC = () => {
   const [surfaceDescriptor, setSurfaceDescriptor] =
     useState<MiniAppSurfaceLaunchDescriptor | null>(null);
   const [shareVisible, setShareVisible] = useState(false);
+  const [backupVisible, setBackupVisible] = useState(false);
   const canceledBuildRef = useRef<string | null>(null);
   const deletionInProgressRef = useRef(false);
   const [notFound, setNotFound] = useState(false);
@@ -1055,6 +1068,7 @@ const MiniAppRunnerPage: React.FC = () => {
       setWorkshop(null);
       setSurfaceDescriptor(null);
       setShareVisible(false);
+      setBackupVisible(false);
       setFailure(null);
       message.success(successMessage);
       navigate('/mini-apps', { replace: true });
@@ -1181,6 +1195,7 @@ const MiniAppRunnerPage: React.FC = () => {
     deletionInProgressRef.current = false;
     setSurfaceDescriptor(null);
     setShareVisible(false);
+    setBackupVisible(false);
   }, [miniappId]);
 
   useEffect(() => {
@@ -1879,6 +1894,7 @@ const MiniAppRunnerPage: React.FC = () => {
               onDelete={handleDelete}
               onRetryDelete={handleRetryDelete}
               onShare={() => setShareVisible(true)}
+              onBackup={() => setBackupVisible(true)}
               onOpenSurface={() => void handleOpenSurface()}
               onReloadSurface={() => void handleReloadSurface()}
               onCloseSurface={() => void handleCloseSurface()}
@@ -1900,6 +1916,20 @@ const MiniAppRunnerPage: React.FC = () => {
         onCancel={() => setShareVisible(false)}
         onImported={() => undefined}
         onExported={handleShareExported}
+      />
+      <MiniAppTransferDialog
+        mode='export_backup'
+        visible={backupVisible}
+        libraryRevision={0}
+        workshop={workshop}
+        onCancel={() => setBackupVisible(false)}
+        onImported={() => undefined}
+        onExported={(_operation, destinationPath) => {
+          setBackupVisible(false);
+          message.success(
+            t('miniApps.messages.backupExported', { path: destinationPath })
+          );
+        }}
       />
     </>
   );

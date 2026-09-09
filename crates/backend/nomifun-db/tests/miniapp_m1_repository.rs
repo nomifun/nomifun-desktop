@@ -36,7 +36,8 @@ use nomifun_db::{
     RestartMiniAppM1DeleteParams, RestoreMiniAppM1Params,
     RollbackMiniAppM1PreviousParams, SetMiniAppM1AutoPublishParams,
     SqliteMiniAppM1Repository,
-    StartMiniAppM1BuildOperationParams, StartMiniAppM1ExportOperationParams,
+    StartMiniAppM1BackupExportParams, StartMiniAppM1BuildOperationParams,
+    StartMiniAppM1ExportOperationParams,
     TrashMiniAppM1Params, UpdateMiniAppM1ProjectSourceParams, installation_owner_id,
 };
 use serde_json::json;
@@ -371,6 +372,56 @@ async fn managed_import_as_new_commits_ready_and_export_operation_exactly() {
         .unwrap();
     assert_eq!(exported.state, "succeeded");
     assert_eq!(exported.progress_percent, Some(100));
+}
+
+#[tokio::test]
+async fn ordinary_export_start_is_blocked_by_a_running_backup_export() {
+    let database = init_miniapp_test_database().await;
+    let owner = installation_owner_id(database.pool()).await.unwrap();
+    let repository = SqliteMiniAppM1Repository::new(database.pool().clone());
+    let miniapp_id = Uuid::now_v7().to_string();
+    let project_id = Uuid::now_v7().to_string();
+    let created = repository
+        .create(&create_params(
+            &owner,
+            &miniapp_id,
+            &project_id,
+            0,
+            MiniAppM1Kind::UiOnly,
+            1,
+        ))
+        .await
+        .unwrap();
+
+    repository
+        .start_backup_export(&StartMiniAppM1BackupExportParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: miniapp_id.clone(),
+            operation_id: Uuid::now_v7().to_string(),
+            expected_product_revision: created.product.product_revision,
+            expected_pointer_revision: created.product.pointer_revision,
+            expected_config_revision: created.product.config_revision,
+            expected_credential_bindings_revision: created
+                .product
+                .credential_bindings_revision,
+            started_at_ms: 2,
+        })
+        .await
+        .unwrap();
+
+    let error = repository
+        .start_export_operation(&StartMiniAppM1ExportOperationParams {
+            owner_user_id: owner,
+            miniapp_id,
+            operation_id: Uuid::now_v7().to_string(),
+            expected_product_revision: created.product.product_revision,
+            expected_pointer_revision: created.product.pointer_revision,
+            bounded_log_tail: vec!["share export started".into()],
+            started_at_ms: 3,
+        })
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("running operation"));
 }
 
 fn artifact(
@@ -1659,32 +1710,30 @@ async fn service_product_supports_build_ready_publish_rollback_and_lifecycle() {
 }
 
 #[tokio::test]
-async fn service_product_rejects_unimplemented_storage_and_wrong_manifest_kind() {
-    let database = init_miniapp_test_database().await;
-    let owner = installation_owner_id(database.pool()).await.unwrap();
-    let repository = SqliteMiniAppM1Repository::new(database.pool().clone());
-    let source = managed_source("sources/owner/service/source", 'b', 'c', 1);
-
-    repository
-        .create_with_source(&CreateMiniAppM1WithSourceParams {
-            create: create_params(
-                &owner,
-                SERVICE_MINIAPP_ID,
-                SERVICE_PROJECT_ID,
-                0,
-                MiniAppM1Kind::Service,
-                10,
-            ),
-            source: source.clone(),
-        })
-        .await
-        .unwrap();
-
+async fn service_product_accepts_managed_storage_and_rejects_wrong_manifest_kind() {
     for (index, (uses_files, uses_private_database, with_migration)) in
         [(true, false, false), (false, true, false), (false, true, true)]
             .into_iter()
             .enumerate()
     {
+        let database = init_miniapp_test_database().await;
+        let owner = installation_owner_id(database.pool()).await.unwrap();
+        let repository = SqliteMiniAppM1Repository::new(database.pool().clone());
+        let source = managed_source("sources/owner/service/source", 'b', 'c', 1);
+        repository
+            .create_with_source(&CreateMiniAppM1WithSourceParams {
+                create: create_params(
+                    &owner,
+                    SERVICE_MINIAPP_ID,
+                    SERVICE_PROJECT_ID,
+                    0,
+                    MiniAppM1Kind::Service,
+                    10,
+                ),
+                source: source.clone(),
+            })
+            .await
+            .unwrap();
         let operation_id = Uuid::now_v7().to_string();
         start_build(
             &repository,
@@ -1718,7 +1767,7 @@ async fn service_product_rejects_unimplemented_storage_and_wrong_manifest_kind()
             &source.dependency_lock_digest,
             22 + index as i64 * 3,
         );
-        let error = repository
+        let ready = repository
             .finish_build_and_record_ready(&FinishMiniAppM1BuildAndRecordReadyParams {
                 owner_user_id: owner.clone(),
                 miniapp_id: SERVICE_MINIAPP_ID.to_owned(),
@@ -1734,31 +1783,36 @@ async fn service_product_rejects_unimplemented_storage_and_wrong_manifest_kind()
                 finished_at_ms: 23 + index as i64 * 3,
             })
             .await
-            .unwrap_err();
-        assert!(error.to_string().contains(
-            "Service MiniApp Files, Private Database, and Migration capabilities are not implemented"
-        ));
-        assert_eq!(
-            repository
-                .get_build_operation(&owner, SERVICE_MINIAPP_ID, &operation_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .state,
-            "running"
-        );
-        repository
-            .cancel_build_operation(&CancelMiniAppM1BuildOperationParams {
-                owner_user_id: owner.clone(),
-                miniapp_id: SERVICE_MINIAPP_ID.to_owned(),
-                operation_id,
-                bounded_log_tail: vec!["rejected artifact".to_owned()],
-                finished_at_ms: 24 + index as i64 * 3,
-            })
-            .await
             .unwrap();
+        assert_eq!(
+            ready
+                .ready_release
+                .as_ref()
+                .map(|release| release.release_digest.as_str()),
+            ready.product.ready_release_digest.as_deref()
+        );
+
+        assert_eq!(ready.product.kind, "service");
     }
 
+    let database = init_miniapp_test_database().await;
+    let owner = installation_owner_id(database.pool()).await.unwrap();
+    let repository = SqliteMiniAppM1Repository::new(database.pool().clone());
+    let source = managed_source("sources/owner/service/source", 'b', 'c', 1);
+    repository
+        .create_with_source(&CreateMiniAppM1WithSourceParams {
+            create: create_params(
+                &owner,
+                SERVICE_MINIAPP_ID,
+                SERVICE_PROJECT_ID,
+                0,
+                MiniAppM1Kind::Service,
+                10,
+            ),
+            source: source.clone(),
+        })
+        .await
+        .unwrap();
     let operation_id = Uuid::now_v7().to_string();
     start_build(
         &repository,
