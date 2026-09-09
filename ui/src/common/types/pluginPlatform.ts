@@ -237,6 +237,16 @@ export interface PluginProjectDetail {
   active_operation?: DurablePluginOperationSummary;
 }
 
+export type PluginSourceFileEdit =
+  | { kind: 'replace'; path: string; content: string }
+  | { kind: 'delete'; path: string };
+
+export interface ApplyPluginSourceEditRequest {
+  project_id: PluginProjectId;
+  expected_source_snapshot_digest: string;
+  edit: PluginSourceFileEdit;
+}
+
 export interface CreatePluginProjectRequest {
   expected_library_revision: number;
   package_id: string;

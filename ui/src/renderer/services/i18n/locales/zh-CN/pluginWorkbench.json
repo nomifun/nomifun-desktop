@@ -24,6 +24,7 @@
     "deleteProject": "删除项目",
     "createProject": "创建项目",
     "importArtifact": "导入运行包",
+    "editSource": "编辑源码",
     "build": "构建",
     "testCandidate": "测试候选版本",
     "applyCandidate": "应用候选版本",
@@ -110,6 +111,7 @@
     "buildCompleted": "构建已完成并生成 Ready Candidate",
     "candidateTested": "Candidate Test 已完成",
     "candidateApplied": "Ready Candidate 已应用",
+    "sourceEdited": "源码已更新",
     "operationCanceled": "操作已取消",
     "projectDeleted": "Plugin Project 已删除；已安装 Plugin 与运行数据未受影响"
   },
@@ -170,6 +172,22 @@
     "apply": "Apply"
   },
   "dialogs": {
+    "sourceEdit": {
+      "title": "编辑 Plugin 源码",
+      "body": "替换或删除一个受管源码文件。提交前会校验精确 Source 快照和依赖锁。",
+      "operation": "操作",
+      "replace": "替换文件",
+      "delete": "删除文件",
+      "path": "源码相对路径",
+      "pathPlaceholder": "src/main.js",
+      "content": "文件内容",
+      "contentPlaceholder": "输入完整文件内容",
+      "submit": "提交源码修改",
+      "hint": "依赖变化必须通过独立的精确依赖锁解析流程完成，此处会拒绝。",
+      "pathRequired": "请输入安全的源码相对路径。",
+      "contentRequired": "替换文件前请输入文件内容。",
+      "projectUnavailable": "该 Project 已没有可编辑的 Source 快照。"
+    },
     "configure": {
       "title": "配置与凭据",
       "body": "编辑 {{name}} 声明的配置项与 Credential 绑定。",

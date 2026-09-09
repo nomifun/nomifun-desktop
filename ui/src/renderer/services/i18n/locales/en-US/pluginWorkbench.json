@@ -24,6 +24,7 @@
     "deleteProject": "Delete project",
     "createProject": "Create project",
     "importArtifact": "Import runtime package",
+    "editSource": "Edit Source",
     "build": "Build",
     "testCandidate": "Test candidate",
     "applyCandidate": "Apply candidate",
@@ -110,6 +111,7 @@
     "buildCompleted": "Build completed with a Ready Candidate",
     "candidateTested": "Candidate Test completed",
     "candidateApplied": "Ready Candidate applied",
+    "sourceEdited": "Source updated",
     "operationCanceled": "Operation canceled",
     "projectDeleted": "Plugin Project deleted; the installed Plugin and runtime data were preserved"
   },
@@ -170,6 +172,22 @@
     "apply": "Apply"
   },
   "dialogs": {
+    "sourceEdit": {
+      "title": "Edit Plugin Source",
+      "body": "Replace or delete one managed source file. The exact Source snapshot and dependency lock are checked before commit.",
+      "operation": "Operation",
+      "replace": "Replace file",
+      "delete": "Delete file",
+      "path": "Relative source path",
+      "pathPlaceholder": "src/main.js",
+      "content": "File content",
+      "contentPlaceholder": "Enter the complete file content",
+      "submit": "Apply Source Edit",
+      "hint": "Dependency changes require a separate exact lock resolution and are rejected here.",
+      "pathRequired": "Enter a safe relative source path.",
+      "contentRequired": "Enter file content before replacing a file.",
+      "projectUnavailable": "This Project no longer has an editable Source snapshot."
+    },
     "configure": {
       "title": "Config and credentials",
       "body": "Edit the declared settings and Credential bindings for {{name}}.",
