@@ -2,16 +2,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use nomifun_agent_contracts::{
     canonical_json_bytes, digest_bytes, digest_payload, ArtifactId, DigestHex,
     CapabilityCatalogMaterialization, CapabilityCatalogMaterializer,
     CapabilityCatalogPublication, CapabilityOwner, CapabilityProvenance,
-    CapabilityReleaseState, CatalogAvailability,
+    CapabilityConsumer, CapabilityReleaseState, CatalogAvailability,
     ContributionSourceKind, MiniAppCapabilityCatalogPublication,
     MiniAppCapabilityCatalogPublicationUpdate,
     MiniAppCapabilityCatalogSink,
     JavaScriptBuildProfile, LocalizedMetadata, MiniAppBridgeKvRequest,
-    MiniAppBridgeRequest, MiniAppBridgeSession, MiniAppBridgeSessionId,
+    MiniAppBridgeCallId, MiniAppBridgeRequest, MiniAppBridgeSession,
+    MiniAppBridgeSessionId,
     MiniAppBridgeTarget, MiniAppId, MiniAppKvResponse,
     MiniAppNonUiReleaseFingerprint, MiniAppProjectId,
     MiniAppPublishAuthorization,
@@ -118,6 +120,28 @@ pub enum MiniAppM1ApplicationError {
 pub struct MiniAppSurfaceAsset {
     pub normalized_relative_path: String,
     pub bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MiniAppAgentCapabilityInvocation {
+    pub owner_user_id: String,
+    pub miniapp_id: MiniAppId,
+    pub capability: nomifun_agent_contracts::CapabilityRef,
+    pub action_id: nomifun_agent_contracts::ActionId,
+    pub active_release: MiniAppReleaseRef,
+    pub active_release_epoch: u64,
+    pub catalog_digest: DigestHex,
+    pub operation_id: OperationId,
+    pub call_id: MiniAppBridgeCallId,
+    pub payload: StrictJsonValue,
+}
+
+#[async_trait]
+pub trait MiniAppAgentCapabilityPort: Send + Sync {
+    async fn invoke_agent_capability(
+        &self,
+        request: MiniAppAgentCapabilityInvocation,
+    ) -> Result<StrictJsonValue, MiniAppM1ApplicationError>;
 }
 
 #[derive(Clone, Debug, Serialize, serde::Deserialize)]
@@ -376,6 +400,141 @@ impl MiniAppM1ApplicationService {
 
     async fn service_runtime(&self) -> Arc<dyn MiniAppServiceRuntimeBinding> {
         self.service_runtime.read().await.clone()
+    }
+
+    async fn invoke_agent_capability_inner(
+        &self,
+        request: MiniAppAgentCapabilityInvocation,
+    ) -> Result<StrictJsonValue, MiniAppM1ApplicationError> {
+        validate_request_identity(request.owner_user_id.as_str(), "owner_user_id")?;
+        validate_request_identity(request.miniapp_id.as_ref(), "miniapp_id")?;
+        request
+            .active_release
+            .validate()
+            .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))?;
+        validate_digest_string(request.catalog_digest.as_ref(), "catalog digest")?;
+        if request.active_release_epoch == 0 {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "Agent capability invocation requires a positive Active Release epoch".into(),
+            ));
+        }
+
+        let snapshot = self
+            .repository
+            .get(&request.owner_user_id, request.miniapp_id.as_ref())
+            .await?
+            .ok_or(MiniAppM1ApplicationError::NotFound)?;
+        if snapshot.product.lifecycle != "enabled"
+            || snapshot.active_release.as_ref().is_none_or(|active| {
+                release_contract_ref(active) != request.active_release
+            })
+            || snapshot.product.active_release_epoch
+                != i64::try_from(request.active_release_epoch).map_err(|_| {
+                    MiniAppM1ApplicationError::Invalid(
+                        "Active Release epoch exceeds SQLite range".into(),
+                    )
+                })?
+        {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "MiniApp Agent capability invocation is stale against the Active Release"
+                    .into(),
+            ));
+        }
+        if snapshot.product.materialized_catalog_digest != request.catalog_digest.as_ref() {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "MiniApp Agent capability invocation has a stale Catalog digest".into(),
+            ));
+        }
+        let active = snapshot
+            .active_release
+            .as_ref()
+            .ok_or_else(|| MiniAppM1ApplicationError::Invalid("no Active Release".into()))?;
+        let stored = self.load_verified_release(
+            &request.owner_user_id,
+            &snapshot.project.project_id,
+            active,
+        )?;
+        let publication = build_miniapp_catalog_publication(
+            request.miniapp_id.clone(),
+            request.active_release.clone(),
+            &stored.artifact.manifest.payload.contributions,
+        )?;
+        if publication.catalog_digest != request.catalog_digest {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "MiniApp Agent capability invocation publication digest is invalid".into(),
+            ));
+        }
+        let capability = publication
+            .capabilities
+            .iter()
+            .find(|capability| capability.entry.capability == request.capability)
+            .ok_or_else(|| {
+                MiniAppM1ApplicationError::Invalid(
+                    "MiniApp Agent capability is not in the Active Release".into(),
+                )
+            })?;
+        if !capability
+            .manifest
+            .supports_consumer(CapabilityConsumer::Agent)
+        {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "MiniApp capability does not support the Agent consumer".into(),
+            ));
+        }
+        if !capability
+            .manifest
+            .supports_consumer(CapabilityConsumer::MiniAppService)
+        {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "MiniApp capability does not support the MiniApp Service consumer".into(),
+            ));
+        }
+        if !capability
+            .manifest
+            .contributions
+            .resource_kinds
+            .is_empty()
+        {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "CAPABILITY_RESOURCE_BINDING_UNAVAILABLE".into(),
+            ));
+        }
+        if !capability
+            .manifest
+            .contributions
+            .actions
+            .iter()
+            .any(|action| action.action_id == request.action_id)
+        {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "CAPABILITY_ACTION_NOT_DECLARED".into(),
+            ));
+        }
+        let spec = self
+            .resolve_service_spec(
+                &snapshot,
+                active,
+                request.active_release_epoch,
+                &request.owner_user_id,
+            )
+            .await?
+            .ok_or_else(|| {
+                MiniAppM1ApplicationError::Invalid(
+                    "MiniApp Agent capability requires an Active Service".into(),
+                )
+            })?;
+        self.service_runtime()
+            .await
+            .invoke(
+                &spec,
+                request.call_id,
+                request.action_id.as_ref().to_owned(),
+                request.payload,
+                MiniAppCallCancellation::default(),
+                positive_now_ms(),
+            )
+            .await
+            .map_err(|error| MiniAppM1ApplicationError::Runtime(error.to_string()))
     }
 
     async fn resolve_service_spec(
@@ -5670,6 +5829,16 @@ fn ui_only_non_ui_manifest_digest(
         .map_err(|error| MiniAppM1ApplicationError::Invalid(error.to_string()))
 }
 
+#[async_trait]
+impl MiniAppAgentCapabilityPort for MiniAppM1ApplicationService {
+    async fn invoke_agent_capability(
+        &self,
+        request: MiniAppAgentCapabilityInvocation,
+    ) -> Result<StrictJsonValue, MiniAppM1ApplicationError> {
+        self.invoke_agent_capability_inner(request).await
+    }
+}
+
 fn changed_output_paths(
     current: &MiniAppStoredRelease,
     target: &MiniAppStoredRelease,
@@ -5813,11 +5982,15 @@ fn build_miniapp_catalog_publication(
             .map(|consumer| {
                 (
                     consumer,
-                    CatalogAvailability::Unavailable {
-                        reason: format!(
-                            "CAPABILITY_MINIAPP_{}_DISPATCH_UNAVAILABLE",
-                            consumer.as_str().to_ascii_uppercase()
-                        ),
+                    if consumer == CapabilityConsumer::MiniAppService {
+                        CatalogAvailability::Active
+                    } else {
+                        CatalogAvailability::Unavailable {
+                            reason: format!(
+                                "CAPABILITY_MINIAPP_{}_DISPATCH_UNAVAILABLE",
+                                consumer.as_str().to_ascii_uppercase()
+                            ),
+                        }
                     },
                 )
             })

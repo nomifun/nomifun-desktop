@@ -683,10 +683,25 @@ publication update 使用 owner、Product/Pointer revision 和 Active Release ep
 `catalog_digest` 现在覆盖排序后的完整 `CapabilityCatalogPublication`；Product digest
 漂移时启动 hydrate fail closed。MiniApp capability 合同 owner 仍是 Package，产品
 生命周期 owner 仍由 application service 的 `owner_user_id + miniapp_id` 校验。
-尚无真实执行适配器的 MiniApp consumer 保持显式 unavailable，因此本轮不关闭 Agent
-dispatch、Gateway invoke、旧生产链清理或 Windows Candidate。
+尚无真实执行适配器的 Agent/Gateway consumer 保持显式 unavailable；已落地的
+MiniAppService consumer 才可标记 active。因此本轮不关闭 Agent dispatch、Gateway
+invoke、旧生产链清理或 Windows Candidate。
 
 定向证据：Agent contracts 84、Control Plane 22、Agent Platform 18、MiniApp Platform
 29、MiniApp backup application 2、MiniApp DB repository/schema 22 + 13；受影响 crate
 check 和 `git diff --check` 通过。全量 rustfmt 仍受 Windows 文件名长度限制，使用
 受影响 crate 定向检查替代。
+
+## 2026-09-09 MiniApp Agent capability port 第一阶段
+
+`MiniAppAgentCapabilityPort` 已在 MiniApp application service 内落地。它只允许
+enabled Service MiniApp 的正式 Active Release capability，调用前重新校验 owner、
+Release identity、epoch、artifact digest、完整 publication digest、Agent/Service
+consumer 声明和 action allowlist，再通过现有 dedicated Service Host 执行
+`CapabilityActionDescriptor.action_id`。typed resource requirement 当前明确返回
+`CAPABILITY_RESOURCE_BINDING_UNAVAILABLE`；不复用 Surface Bridge、不进入 Kernel
+Plugin Registry，也不授予 MiniApp owner 权限。
+
+定向验证增加 Service application stale Catalog digest fail-closed 测试并通过。
+该 port 尚未接入 Nomi 动态 Tool session，因此不关闭 MiniApp Agent dispatch、
+`M1-U-01`、`M1-V-01` 或 `RC-WIN-01`。
