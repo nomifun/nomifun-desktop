@@ -599,3 +599,13 @@ crate check、i18n、rustfmt 和 diff check。`M1-2-01` 仍为进行中；下一
 Test transient namespace/receipt、Share Bundle/prebuilt Import、disabled Whole-App Backup
 Import-as-new，再进入 MiniApp Capability Catalog、旧 MiniApp 拆除和 Windows Candidate。
 macOS/Linux 继续等待最终 Windows cohort，手机模式不在范围内。
+
+## 2026-09-09 06 Windows 主线状态同步（M1-2 Service Test）
+
+`708ef83b7` 已交付 Service Test transient KV/Private SQLite/empty Files、Ready Migration、
+独立 one-shot Node Host、Host receipt、Runtime/revision stale 判定和 Desktop Test 动作。
+真实 Node Test Host、重启清理、并行 namespace 与 Windows junction 拒绝均已验证。
+
+`M1-2-01` 继续为进行中；下一步是 Share Bundle/prebuilt Import 与 disabled Whole-App
+Backup Import-as-new。随后再进入 MiniApp Catalog 正式消费、旧 MiniApp 拆除和 Windows
+Candidate；macOS/Linux 与手机范围不变。

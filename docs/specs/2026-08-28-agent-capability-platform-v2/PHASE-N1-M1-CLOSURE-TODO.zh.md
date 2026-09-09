@@ -15,7 +15,8 @@
 > 验证和 Service Bridge；M1-1-02 已交付 owner-scoped Files、Host-managed Private
 > SQLite、authorizer、参数化 query/execute/batch、additive Migration ledger 与
 > Publish migration fence。M1-2 的 Trash/Restore/Permanent Delete 与启动恢复子切片
-> 已由 `86afa7af6` 完成；下一步进入 Service Test 和 Share/Backup Import-as-new。
+> 已由 `86afa7af6` 完成；Service Test transient namespace/receipt 已由 `708ef83b7`
+> 完成。下一步进入 Share/Backup Import-as-new。
 > Windows Candidate、
 > NSIS、产品验收和 macOS/Linux 外部验证仍未关闭。
 
@@ -438,7 +439,7 @@
 | `M1-0-02-B` | closed | MiniApp release lane；Publish/Catalog/Surface adapter 与 Desktop Workshop | Ready→Manual Publish→Surface→Rollback、纯 UI auto Publish、Host KV | `M1-0-02-A`,`M1-1-01` | UI-only Release/Catalog 原子切换、Active/Previous pointer CAS、Surface epoch fence、UI 定向验证通过 |
 | `M1-1-01` | closed | Service/Bridge lane；`nomifun-miniapp-platform/src/{service_host,service_process,service_runtime}.rs` | 单 `main.mjs`、dedicated Host、on-demand/continuous、MessageChannel epoch fence | `M1-0-02`,`N1-1-02` | 真实 Node NDJSON 3、Service application 1、Runtime candidate 3、旧 generation/崩溃隔离/容量/backoff 通过 |
 | `M1-1-02` | closed | Managed data lane；`managed_storage.rs`、Service IPC、M1 cutover | UI/Service KV、Files、Private SQLite、authorizer、参数化 SQL、additive migration ledger | `M1-1-01` | production SQLite Storage 1、真实 Node Storage IPC 3、authorizer/批量回滚/启动与取消边界通过 |
-| `M1-2-01` | in-progress | Lifecycle lane；MiniApp lifecycle/application/data cleanup | Enable/Disable/Trash/Restore/Permanent Delete、Service Test、Share/Backup Import-as-new | `M1-1-02` | `86afa7af6` 已关闭 durable delete、物理清理、Retry/启动 Reconciler 和 Desktop 操作；仍需 transient Service Test receipt、Share/Backup Import-as-new |
+| `M1-2-01` | in-progress | Lifecycle lane；MiniApp lifecycle/application/data cleanup | Enable/Disable/Trash/Restore/Permanent Delete、Service Test、Share/Backup Import-as-new | `M1-1-02` | `86afa7af6` 已关闭删除恢复；`708ef83b7` 已关闭 transient Service Test/receipt；仍需 Share Bundle、prebuilt Import 与 disabled Whole-App Backup Import-as-new |
 | `M1-U-01` | blocked | UI lane；整体重写 `pages/miniApps/**` | Library/Workshop/Surface，删除 Guid/Conversation 旧 MiniApp 模式 | `M1-0-02`,`M1-1-01` | real Desktop workflow/build/a11y |
 | `M1-V-01` | blocked | 集成 Owner | Windows M1 contract/integration/fault/product/NSIS candidate | 所有 M1 项 | UI-only + Service representative lifecycle |
 
@@ -573,3 +574,30 @@ Share/Backup Import-as-new。当前仍不构成 Windows Candidate 或跨平台�
    KV/DB/files namespace 与 Host-issued receipt，也没有实现无用户数据 Share Bundle、
    source-less prebuilt Import 或 disabled Whole-App Backup Import-as-new；`M1-U-01`、
    `M1-V-01`、Windows NSIS 和 macOS/Linux 原生验证均未关闭。
+
+## 2026-09-09 M1-2 Service Test 子切片收口
+
+1. `708ef83b7` 已完成 Service Ready Test：
+   - migration 083 持久化 owner-scoped immutable receipt 历史；record CAS 精确锁定
+     Product/Pointer/Config/Credential revisions 与 current Ready Release，Retest 只替换
+     Ready receipt ref 并保留历史；
+   - Test 使用 prospective Active epoch 解析同一 canonical Service spec；Runtime 新增
+     `MiniappServiceTestHost` lease，独立 one-shot Node Host 不进入生产 Host 容量表；
+   - 生产 Service 在 Test 前停止；KV 复制到一次性 namespace，Private SQLite 使用一致
+     快照，Files 为空目录，Ready Migration 只在测试 DB 执行；结束后清理并恢复 Active
+     Service；
+   - 无正式 callable contribution 时 Host start/stop 可形成 `passed`；需要受管输入时
+     返回 `needs_test_input`；Host 失败记录 `failed + error_code`，不伪造通过。
+2. Receipt 与 Publish：
+   - Workshop 显示 `not_run/passed/failed/needs_test_input/stale`；
+   - Runtime、Ready、Product、Config 或 Credential 漂移使 receipt 失效；
+   - Publish 使用 passed receipt 时无需警告；failed/needs-input 或无 receipt 时必须显式
+     确认，旧 receipt 不作为 fallback。
+3. Desktop 已接“测试 Ready Service”动作和风险确认，不要求用户填写 digest、路径、
+   generation 或 raw Storage handle。
+4. 定向证据：DB repository 20、schema 13、ID schema 20；Platform lib 25、Service Test
+   Storage 4、Service application 1、managed storage 2、真实 Storage IPC 3；App route 6；
+   Agent contract 21；UI/wire 27。受影响 crate check、generated contract check、i18n、
+   rustfmt 和 diff check 均通过。
+5. 当前边界：`M1-2-01` 仍未关闭。下一步实现默认无用户数据 Share Bundle、source-less
+   prebuilt Import，以及与其分离的 disabled Whole-App Backup Export/Import-as-new。
