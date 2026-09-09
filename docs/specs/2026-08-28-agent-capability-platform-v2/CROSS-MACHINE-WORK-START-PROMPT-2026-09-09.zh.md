@@ -223,3 +223,20 @@ UI production build 存在既有的 chunk size 和 dynamic-import 警告，但�
 4. 已确认第一项工作是共享 Catalog 的 MiniApp consumer integration，而不是复制
    Agent Catalog 或恢复旧兼容层；
 5. 已给出本轮互斥写集、最小验证和预计提交边界。
+
+## 2026-09-09 当前主机继续实施 checkpoint
+
+原始阶段性交接基线 `51b0243f7` 已由以下后继提交推进：
+
+- `926ad5d31`：MiniApp Agent exact Snapshot projection、Compiler、同一 Nomi
+  hosted Tool session、Release Store schema revalidation 和 Service Host dispatch；
+- `f4d71a133`：同步 GLOBAL/PHASE/06 台账与设计注记；
+- `b6c9c2e89`：修正 Guid 启动入口：普通 Nomi 才选择模型，AgentPreset/官方模板
+  使用服务端冻结 Snapshot，不向 Session Create 提交客户端模型。
+
+当前远端分支已包含上述提交；下一台机器必须先 `git pull --ff-only` 并阅读最新
+台账，不得把原始 `51b0243f7` 当作最新 HEAD。`gate:agent-v2 --self-test`、
+`gate:plugin-n1 -- --self-test`、Guid 定向测试和 UI production build 已通过；
+全量 UI typecheck 仍有既有基线错误。旧 Extension/旧 MiniApp 当前不存在可直接
+安全删除的生产代码集合；Channel、Gateway、App、UI 和历史 schema 仍需先完成
+前置迁移，N1-X-02 保持 blocked。`.githooks/` 继续保持未跟踪且不纳入提交。
