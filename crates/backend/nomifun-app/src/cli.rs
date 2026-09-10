@@ -235,6 +235,10 @@ pub enum Command {
 
 #[derive(Subcommand)]
 pub enum PluginCommand {
+    /// List the owner-scoped installed Plugins and authoring Projects.
+    List(PluginListArgs),
+    /// Show one installed Plugin Mount.
+    Show(PluginShowArgs),
     /// Plugin Project authoring commands.
     Project {
         #[command(subcommand)]
@@ -249,6 +253,11 @@ pub enum PluginCommand {
         #[command(subcommand)]
         operation: PluginCandidateCommand,
     },
+    /// Mutate one installed Plugin Mount through the application service.
+    Mount {
+        #[command(subcommand)]
+        operation: PluginMountCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -259,10 +268,52 @@ pub enum PluginProjectCommand {
 
 #[derive(Subcommand)]
 pub enum PluginCandidateCommand {
+    /// Show the current Ready Candidate for a Project.
+    Show(PluginCandidateShowArgs),
     /// Apply the current Ready Candidate to its linked Mount or install it.
     Apply(PluginCandidateApplyArgs),
     /// Restore the previous target of an installed Plugin Mount.
     Restore(PluginMountArgs),
+}
+
+#[derive(Subcommand)]
+pub enum PluginMountCommand {
+    /// Enable an installed Plugin Mount.
+    Enable(PluginMountArgs),
+    /// Disable an installed Plugin Mount.
+    Disable(PluginMountArgs),
+    /// Retry reconciliation of an installed Plugin Mount.
+    Retry(PluginMountArgs),
+    /// Uninstall an installed Plugin Mount while retaining its data.
+    Uninstall(PluginMountArgs),
+    /// Permanently delete retained Plugin Mount data.
+    DeleteData(PluginMountArgs),
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct PluginListArgs {
+    #[command(flatten)]
+    pub connection: HeadlessConnectionArgs,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct PluginShowArgs {
+    /// Installed Plugin Mount identity.
+    #[arg(value_name = "MOUNT_ID")]
+    pub mount_id: String,
+
+    #[command(flatten)]
+    pub connection: HeadlessConnectionArgs,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct PluginCandidateShowArgs {
+    /// Plugin Project identity.
+    #[arg(value_name = "PROJECT_ID")]
+    pub project_id: String,
+
+    #[command(flatten)]
+    pub connection: HeadlessConnectionArgs,
 }
 
 #[derive(Args, Clone, Debug)]
@@ -649,6 +700,39 @@ mod tests {
 
     #[test]
     fn headless_plugin_and_miniapp_commands_parse_with_connection_options() {
+        let list = Cli::try_parse_from([
+            "nomicore",
+            "plugin",
+            "list",
+            "--url",
+            "http://127.0.0.1:25808",
+            "--token",
+            "secret",
+        ])
+        .unwrap();
+        assert!(matches!(
+            list.command,
+            Some(Command::Plugin {
+                operation: super::PluginCommand::List(args),
+            }) if args.connection.url.as_deref()
+                == Some("http://127.0.0.1:25808")
+                && args.connection.token.as_deref() == Some("secret")
+        ));
+
+        let show = Cli::try_parse_from([
+            "nomicore",
+            "plugin",
+            "show",
+            "mount-1",
+        ])
+        .unwrap();
+        assert!(matches!(
+            show.command,
+            Some(Command::Plugin {
+                operation: super::PluginCommand::Show(args),
+            }) if args.mount_id == "mount-1"
+        ));
+
         let source_path = Cli::try_parse_from([
             "nomicore",
             "plugin",
@@ -705,16 +789,66 @@ mod tests {
             }) if args.miniapp_id == "miniapp-1"
                 && args.connection.token.as_deref() == Some("secret")
         ));
+
+        let candidate = Cli::try_parse_from([
+            "nomicore",
+            "plugin",
+            "candidate",
+            "show",
+            "project-1",
+        ])
+        .unwrap();
+        assert!(matches!(
+            candidate.command,
+            Some(Command::Plugin {
+                operation: super::PluginCommand::Candidate {
+                    operation: super::PluginCandidateCommand::Show(args),
+                },
+            }) if args.project_id == "project-1"
+        ));
+
+        let enable = Cli::try_parse_from([
+            "nomicore",
+            "plugin",
+            "mount",
+            "enable",
+            "mount-1",
+        ])
+        .unwrap();
+        assert!(matches!(
+            enable.command,
+            Some(Command::Plugin {
+                operation: super::PluginCommand::Mount {
+                    operation: super::PluginMountCommand::Enable(args),
+                },
+            }) if args.mount_id == "mount-1"
+        ));
     }
 
     #[test]
     fn headless_command_help_exposes_only_product_level_operations() {
         let command = Cli::command();
         let plugin = command.find_subcommand("plugin").unwrap();
+        assert!(plugin.find_subcommand("list").is_some());
+        assert!(plugin.find_subcommand("show").is_some());
         assert!(plugin.find_subcommand("build").is_some());
         assert!(plugin.find_subcommand("test").is_some());
         assert!(plugin.find_subcommand("candidate").is_some());
+        assert!(plugin.find_subcommand("mount").is_some());
         assert!(plugin.find_subcommand("deployment").is_none());
+
+        let candidate = plugin.find_subcommand("candidate").unwrap();
+        assert!(candidate.find_subcommand("show").is_some());
+        assert!(candidate.find_subcommand("apply").is_some());
+        assert!(candidate.find_subcommand("restore").is_some());
+        assert!(candidate.find_subcommand("discard").is_none());
+
+        let mount = plugin.find_subcommand("mount").unwrap();
+        assert!(mount.find_subcommand("enable").is_some());
+        assert!(mount.find_subcommand("disable").is_some());
+        assert!(mount.find_subcommand("retry").is_some());
+        assert!(mount.find_subcommand("uninstall").is_some());
+        assert!(mount.find_subcommand("delete-data").is_some());
 
         let miniapp = command.find_subcommand("miniapp").unwrap();
         assert!(miniapp.find_subcommand("list").is_some());

@@ -9,9 +9,10 @@ use std::process::ExitCode;
 use nomifun_api_types::{
     ApiResponse, ApplyPluginCandidateRequest, ApplyPluginTargetDto,
     BuildPluginProjectRequest, ErrorResponse, MiniAppLibraryResponseDto,
-    MiniAppWorkshopDto, PluginDetailDto, PluginLibraryResponseDto,
-    PluginProjectDetailDto, RestorePluginPreviousRequest,
-    TestPluginCandidateRequest,
+    DeletePluginDataRequest, MiniAppWorkshopDto, PluginDetailDto,
+    PluginLibraryResponseDto, PluginProjectDetailDto, RetryPluginRequest,
+    RestorePluginPreviousRequest, SetPluginEnabledRequest, TestPluginCandidateRequest,
+    UninstallPluginRequest,
 };
 use reqwest::{Client, RequestBuilder, StatusCode};
 use serde::de::DeserializeOwned;
@@ -21,7 +22,8 @@ use serde_json::Value;
 use crate::cli::{
     Cli, HeadlessConnectionArgs, MiniAppCommand, MiniAppListArgs,
     MiniAppShowArgs, PluginCandidateApplyArgs, PluginCandidateCommand,
-    PluginCommand, PluginMountArgs, PluginProjectArgs, PluginProjectCommand,
+    PluginCandidateShowArgs, PluginCommand, PluginListArgs, PluginMountArgs,
+    PluginMountCommand, PluginProjectArgs, PluginProjectCommand, PluginShowArgs,
     PluginTestArgs,
 };
 
@@ -46,6 +48,8 @@ async fn run_plugin_inner(
     operation: &PluginCommand,
 ) -> Result<Value, CliFailure> {
     match operation {
+        PluginCommand::List(args) => run_plugin_list(args).await,
+        PluginCommand::Show(args) => run_plugin_show(args).await,
         PluginCommand::Project { operation } => match operation {
             PluginProjectCommand::SourcePath(args) => {
                 run_source_path(cli, args).await
@@ -54,8 +58,16 @@ async fn run_plugin_inner(
         PluginCommand::Build(args) => run_build(args).await,
         PluginCommand::Test(args) => run_test(args).await,
         PluginCommand::Candidate { operation } => match operation {
+            PluginCandidateCommand::Show(args) => run_candidate_show(args).await,
             PluginCandidateCommand::Apply(args) => run_apply(args).await,
             PluginCandidateCommand::Restore(args) => run_restore(args).await,
+        },
+        PluginCommand::Mount { operation } => match operation {
+            PluginMountCommand::Enable(args) => run_set_enabled(args, true).await,
+            PluginMountCommand::Disable(args) => run_set_enabled(args, false).await,
+            PluginMountCommand::Retry(args) => run_retry_mount(args).await,
+            PluginMountCommand::Uninstall(args) => run_uninstall_mount(args).await,
+            PluginMountCommand::DeleteData(args) => run_delete_mount_data(args).await,
         },
     }
 }
@@ -67,6 +79,35 @@ async fn run_miniapp_inner(
         MiniAppCommand::List(args) => run_miniapp_list(args).await,
         MiniAppCommand::Show(args) => run_miniapp_show(args).await,
     }
+}
+
+async fn run_plugin_list(args: &PluginListArgs) -> Result<Value, CliFailure> {
+    let client = HeadlessClient::new(&args.connection)?;
+    let response: ApiResponse<PluginLibraryResponseDto> =
+        client.get_api("/api/plugins").await?;
+    to_value(response)
+}
+
+async fn run_plugin_show(args: &PluginShowArgs) -> Result<Value, CliFailure> {
+    let mount_id = checked_segment(&args.mount_id, "mount_id")?;
+    let client = HeadlessClient::new(&args.connection)?;
+    let response = client
+        .get_api::<PluginDetailDto>(&format!("/api/plugin-mounts/{mount_id}"))
+        .await?;
+    to_value(response)
+}
+
+async fn run_candidate_show(
+    args: &PluginCandidateShowArgs,
+) -> Result<Value, CliFailure> {
+    let project_id = checked_segment(&args.project_id, "project_id")?;
+    let client = HeadlessClient::new(&args.connection)?;
+    let response = client
+        .get_api::<PluginProjectDetailDto>(&format!(
+            "/api/plugin-projects/{project_id}"
+        ))
+        .await?;
+    to_value(response)
 }
 
 async fn run_source_path(
@@ -266,6 +307,99 @@ async fn run_restore(args: &PluginMountArgs) -> Result<Value, CliFailure> {
     let response: ApiResponse<PluginDetailDto> = client
         .post_api(
             &format!("/api/plugin-mounts/{mount_id}/restore"),
+            &request,
+        )
+        .await?;
+    to_value(response)
+}
+
+async fn run_set_enabled(
+    args: &PluginMountArgs,
+    enabled: bool,
+) -> Result<Value, CliFailure> {
+    let mount_id = checked_segment(&args.mount_id, "mount_id")?;
+    let client = HeadlessClient::new(&args.connection)?;
+    let mount = fetch_mount(&client, &mount_id).await?;
+    let current = mount.summary.current.ok_or_else(|| {
+        CliFailure::state("the Plugin Mount has no current target")
+    })?;
+    let request = SetPluginEnabledRequest {
+        mount_id: mount_id.clone(),
+        expected_mount_revision: mount.summary.mount_revision,
+        expected_current_target_digest: current.artifact_digest,
+        enabled,
+    };
+    let response: ApiResponse<PluginDetailDto> = client
+        .put_api(
+            &format!("/api/plugin-mounts/{mount_id}/enabled"),
+            &request,
+        )
+        .await?;
+    to_value(response)
+}
+
+async fn run_retry_mount(args: &PluginMountArgs) -> Result<Value, CliFailure> {
+    let mount_id = checked_segment(&args.mount_id, "mount_id")?;
+    let client = HeadlessClient::new(&args.connection)?;
+    let mount = fetch_mount(&client, &mount_id).await?;
+    let current = mount.summary.current.ok_or_else(|| {
+        CliFailure::state("the Plugin Mount has no current target")
+    })?;
+    let request = RetryPluginRequest {
+        mount_id: mount_id.clone(),
+        expected_mount_revision: mount.summary.mount_revision,
+        expected_current_target_digest: current.artifact_digest,
+    };
+    let response: ApiResponse<PluginDetailDto> = client
+        .post_api(
+            &format!("/api/plugin-mounts/{mount_id}/retry"),
+            &request,
+        )
+        .await?;
+    to_value(response)
+}
+
+async fn run_uninstall_mount(args: &PluginMountArgs) -> Result<Value, CliFailure> {
+    let mount_id = checked_segment(&args.mount_id, "mount_id")?;
+    let client = HeadlessClient::new(&args.connection)?;
+    let mount = fetch_mount(&client, &mount_id).await?;
+    let current = mount.summary.current.ok_or_else(|| {
+        CliFailure::state("the Plugin Mount has no current target")
+    })?;
+    let request = UninstallPluginRequest {
+        mount_id: mount_id.clone(),
+        expected_mount_revision: mount.summary.mount_revision,
+        expected_current_target_digest: current.artifact_digest,
+    };
+    let response: ApiResponse<PluginDetailDto> = client
+        .post_api(
+            &format!("/api/plugin-mounts/{mount_id}/uninstall"),
+            &request,
+        )
+        .await?;
+    to_value(response)
+}
+
+async fn run_delete_mount_data(args: &PluginMountArgs) -> Result<Value, CliFailure> {
+    let mount_id = checked_segment(&args.mount_id, "mount_id")?;
+    let client = HeadlessClient::new(&args.connection)?;
+    let mount = fetch_mount(&client, &mount_id).await?;
+    let request = DeletePluginDataRequest {
+        mount_id: mount_id.clone(),
+        expected_mount_revision: mount.summary.mount_revision,
+        expected_lifecycle: nomifun_api_types::PluginLifecycleDto::UninstalledDataRetained,
+        expected_data_revision: mount.summary.mount_revision,
+    };
+    if mount.summary.lifecycle
+        != nomifun_api_types::PluginLifecycleDto::UninstalledDataRetained
+    {
+        return Err(CliFailure::state(
+            "Plugin Mount runtime data can only be deleted after uninstall",
+        ));
+    }
+    let response: ApiResponse<()> = client
+        .delete_api(
+            &format!("/api/plugin-mounts/{mount_id}/data"),
             &request,
         )
         .await?;
@@ -563,6 +697,38 @@ impl HeadlessClient {
             self.client
                 .get(&endpoint)
                 .bearer_auth(&self.token),
+            endpoint,
+        )
+        .await
+    }
+
+    async fn put_api<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<ApiResponse<T>, CliFailure> {
+        let endpoint = self.endpoint(path);
+        self.decode_json(
+            self.client
+                .put(&endpoint)
+                .bearer_auth(&self.token)
+                .json(body),
+            endpoint,
+        )
+        .await
+    }
+
+    async fn delete_api<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<ApiResponse<T>, CliFailure> {
+        let endpoint = self.endpoint(path);
+        self.decode_json(
+            self.client
+                .delete(&endpoint)
+                .bearer_auth(&self.token)
+                .json(body),
             endpoint,
         )
         .await
