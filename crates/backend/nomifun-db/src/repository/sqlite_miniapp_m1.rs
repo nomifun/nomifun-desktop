@@ -14,19 +14,20 @@ use crate::models::{
     MiniAppCredentialBindingRow, MiniAppLibraryStateRow, MiniAppM1Kind,
     MiniAppM1LibrarySnapshot, MiniAppM1ProjectSourceState, MiniAppM1Snapshot,
     MiniAppKvRow, MiniAppProductRow, MiniAppProjectRow, MiniAppPublishAuthorizationRow,
-    MiniAppReleaseArtifactRow,
-    MiniAppReleaseRow, MiniAppSurfaceSessionRow, ProductOperationRow,
-    ProductOperationState,
+    MiniAppReleaseArtifactRow, MiniAppReleaseRow, MiniAppSourceMutationIntentRow,
+    MiniAppSurfaceSessionRow, ProductOperationRow, ProductOperationState,
 };
 use crate::repository::miniapp_m1::{
-    BeginMiniAppM1DeleteParams, BeginMiniAppM1ImportAsNewParams,
+    AbortMiniAppSourceMutationParams, BeginMiniAppM1DeleteParams,
+    BeginMiniAppM1ImportAsNewParams, BeginMiniAppSourceMutationParams,
     BeginMiniAppM1ImportAsNewResult, CancelMiniAppM1BuildOperationParams,
     CancelMiniAppM1ExportOperationParams, CancelMiniAppM1ImportParams,
     CloseMiniAppM1SurfaceSessionParams, CommitMiniAppM1LifecycleParams,
     CreateMiniAppM1Params, CreateMiniAppM1WithSourceParams,
     ExecuteMiniAppM1SurfaceKvParams, FailMiniAppM1DeleteParams,
     FailMiniAppM1ExportOperationParams, FailMiniAppM1ImportParams,
-    FinalizeMiniAppM1DeleteParams, FinishMiniAppM1BuildAndRecordReadyParams,
+    FinalizeMiniAppM1DeleteParams, FinalizeMiniAppSourceMutationParams,
+    FinishMiniAppM1BuildAndRecordReadyParams,
     FinishMiniAppM1BuildOperationParams, FinishMiniAppM1ExportOperationParams,
     FinishMiniAppM1ImportReadyParams, IMiniAppM1Repository,
     FinishMiniAppM1BackupImportParams, MiniAppM1BackupExportSnapshot,
@@ -3385,6 +3386,226 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
             .ok_or_else(|| DbError::Init("MiniApp Build Ready commit lost Product".into()))?;
         tx.commit().await?;
         Ok(snapshot)
+    }
+
+    async fn begin_source_mutation(
+        &self,
+        params: &BeginMiniAppSourceMutationParams,
+    ) -> Result<MiniAppSourceMutationIntentRow, DbError> {
+        validate_uuid(&params.intent_id, "intent_id")?;
+        validate_uuid(&params.owner_user_id, "owner_user_id")?;
+        validate_uuid(&params.miniapp_id, "miniapp_id")?;
+        validate_uuid(&params.project_id, "project_id")?;
+        validate_digest(&params.expected_source_digest, "expected_source_digest")?;
+        validate_digest(&params.next_source_digest, "next_source_digest")?;
+        if params.expected_product_revision < 1
+            || params.expected_project_revision < 1
+            || params.expected_build_generation < 1
+            || params.next_build_generation != params.expected_build_generation + 1
+            || params.expected_source_digest == params.next_source_digest
+            || params.created_at < 1
+        {
+            return Err(conflict("MiniApp Source mutation intent is invalid"));
+        }
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO miniapp_source_mutation_intents (
+                intent_id, owner_user_id, miniapp_id, project_id,
+                expected_product_revision, expected_project_revision,
+                expected_build_generation, expected_source_digest,
+                next_source_digest, next_build_generation, created_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&params.intent_id)
+        .bind(&params.owner_user_id)
+        .bind(&params.miniapp_id)
+        .bind(&params.project_id)
+        .bind(params.expected_product_revision)
+        .bind(params.expected_project_revision)
+        .bind(params.expected_build_generation)
+        .bind(&params.expected_source_digest)
+        .bind(&params.next_source_digest)
+        .bind(params.next_build_generation)
+        .bind(params.created_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        let intent = sqlx::query_as::<_, MiniAppSourceMutationIntentRow>(
+            "SELECT * FROM miniapp_source_mutation_intents WHERE intent_id = ?",
+        )
+        .bind(&params.intent_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        tx.commit().await?;
+        Ok(intent)
+    }
+
+    async fn finalize_source_mutation(
+        &self,
+        params: &FinalizeMiniAppSourceMutationParams,
+    ) -> Result<MiniAppM1Snapshot, DbError> {
+        validate_uuid(&params.intent_id, "intent_id")?;
+        validate_uuid(&params.owner_user_id, "owner_user_id")?;
+        validate_uuid(&params.miniapp_id, "miniapp_id")?;
+        validate_uuid(&params.project_id, "project_id")?;
+        if params.updated_at < 1 {
+            return Err(conflict("MiniApp Source mutation timestamp is invalid"));
+        }
+        let mut tx = self.pool.begin().await?;
+        let intent = sqlx::query_as::<_, MiniAppSourceMutationIntentRow>(
+            "SELECT * FROM miniapp_source_mutation_intents
+             WHERE intent_id = ? AND owner_user_id = ?
+               AND miniapp_id = ? AND project_id = ?",
+        )
+        .bind(&params.intent_id)
+        .bind(&params.owner_user_id)
+        .bind(&params.miniapp_id)
+        .bind(&params.project_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(query_error)?
+        .ok_or_else(|| conflict("MiniApp Source mutation intent is unavailable"))?;
+        sqlx::query(
+            "INSERT INTO miniapp_source_mutation_commits
+                (project_id, intent_id, created_at)
+             VALUES (?, ?, ?)",
+        )
+        .bind(&params.project_id)
+        .bind(&params.intent_id)
+        .bind(params.updated_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        let changed = sqlx::query(
+            "UPDATE miniapp_projects
+             SET project_revision = project_revision + 1,
+                 source_head_digest = ?, build_generation = ?, updated_at = ?
+             WHERE owner_user_id = ? AND miniapp_id = ? AND project_id = ?
+               AND project_revision = ? AND build_generation = ?
+               AND source_head_digest = ? AND updated_at < ?",
+        )
+        .bind(&intent.next_source_digest)
+        .bind(intent.next_build_generation)
+        .bind(params.updated_at)
+        .bind(&params.owner_user_id)
+        .bind(&params.miniapp_id)
+        .bind(&params.project_id)
+        .bind(intent.expected_project_revision)
+        .bind(intent.expected_build_generation)
+        .bind(&intent.expected_source_digest)
+        .bind(params.updated_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        if changed.rows_affected() != 1 {
+            return Err(conflict("MiniApp Source mutation lost its Project CAS"));
+        }
+        let deleted = sqlx::query(
+            "DELETE FROM miniapp_source_mutation_intents
+             WHERE intent_id = ? AND owner_user_id = ?
+               AND miniapp_id = ? AND project_id = ?",
+        )
+        .bind(&params.intent_id)
+        .bind(&params.owner_user_id)
+        .bind(&params.miniapp_id)
+        .bind(&params.project_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        if deleted.rows_affected() != 1 {
+            return Err(conflict("MiniApp Source mutation intent cleanup lost its CAS"));
+        }
+        let marker_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM miniapp_source_mutation_commits
+             WHERE project_id = ? OR intent_id = ?",
+        )
+        .bind(&params.project_id)
+        .bind(&params.intent_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        if marker_count != 0 {
+            return Err(conflict("MiniApp Source commit marker was not consumed"));
+        }
+        bump_library_revision(&mut tx, &params.owner_user_id, params.updated_at).await?;
+        let snapshot = fetch_snapshot_in_tx(
+            &mut tx,
+            &params.owner_user_id,
+            &params.miniapp_id,
+        )
+        .await?
+        .ok_or_else(|| conflict("MiniApp Source mutation lost its Product"))?;
+        tx.commit().await?;
+        Ok(snapshot)
+    }
+
+    async fn abort_source_mutation(
+        &self,
+        params: &AbortMiniAppSourceMutationParams,
+    ) -> Result<(), DbError> {
+        validate_uuid(&params.intent_id, "intent_id")?;
+        validate_uuid(&params.owner_user_id, "owner_user_id")?;
+        validate_uuid(&params.miniapp_id, "miniapp_id")?;
+        validate_uuid(&params.project_id, "project_id")?;
+        let deleted = sqlx::query(
+            "DELETE FROM miniapp_source_mutation_intents
+             WHERE intent_id = ? AND owner_user_id = ?
+               AND miniapp_id = ? AND project_id = ?
+               AND EXISTS (
+                   SELECT 1 FROM miniapp_projects project
+                    WHERE project.owner_user_id = miniapp_source_mutation_intents.owner_user_id
+                      AND project.miniapp_id = miniapp_source_mutation_intents.miniapp_id
+                      AND project.project_id = miniapp_source_mutation_intents.project_id
+                      AND project.project_revision = miniapp_source_mutation_intents.expected_project_revision
+                      AND project.build_generation = miniapp_source_mutation_intents.expected_build_generation
+                      AND project.source_head_digest = miniapp_source_mutation_intents.expected_source_digest
+               )",
+        )
+        .bind(&params.intent_id)
+        .bind(&params.owner_user_id)
+        .bind(&params.miniapp_id)
+        .bind(&params.project_id)
+        .execute(&self.pool)
+        .await
+        .map_err(query_error)?;
+        if deleted.rows_affected() != 1 {
+            return Err(conflict("MiniApp Source mutation abort lost its CAS"));
+        }
+        Ok(())
+    }
+
+    async fn list_source_mutation_intents(
+        &self,
+    ) -> Result<Vec<MiniAppSourceMutationIntentRow>, DbError> {
+        sqlx::query_as(
+            "SELECT * FROM miniapp_source_mutation_intents
+             ORDER BY created_at ASC, intent_id ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(query_error)
+    }
+
+    async fn get_source_mutation_intent(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &str,
+        project_id: &str,
+    ) -> Result<Option<MiniAppSourceMutationIntentRow>, DbError> {
+        validate_uuid(owner_user_id, "owner_user_id")?;
+        validate_uuid(miniapp_id, "miniapp_id")?;
+        validate_uuid(project_id, "project_id")?;
+        sqlx::query_as(
+            "SELECT * FROM miniapp_source_mutation_intents
+             WHERE owner_user_id = ? AND miniapp_id = ? AND project_id = ?",
+        )
+        .bind(owner_user_id)
+        .bind(miniapp_id)
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(query_error)
     }
 
     async fn update_project_source_cas(

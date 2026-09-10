@@ -106,6 +106,7 @@ describe('MiniApp M1 HTTP bridge', () => {
       '/backup`',
       '/surface/open`',
       '/surface/close`',
+      '/source/edit`',
     ]) {
       expect(source.includes(route)).toBe(true);
     }
@@ -186,6 +187,63 @@ describe('MiniApp M1 HTTP bridge', () => {
       kind: 'ui_only',
     });
     expect(workshop.miniapp.miniapp_id).toBe(MINIAPP_ID);
+  });
+
+  test('Source read and replace preserve the encoded path and exact CAS body', async () => {
+    let requestPath = '';
+    let requestBody: unknown;
+    globalThis.fetch = (async (input, init) => {
+      requestPath = new URL(String(input), 'http://127.0.0.1').pathname;
+      requestBody =
+        typeof init?.body === 'string' ? JSON.parse(init.body) : init?.body;
+      const responseData =
+        init?.method === 'POST'
+          ? rawWorkshop()
+          : {
+              miniapp_id: MINIAPP_ID,
+              project_id: '0190f5fe-7c00-7a00-8000-0000000000b2',
+              path: 'ui/index.html',
+              content: '<main>v1</main>',
+              source_snapshot_digest: 'a'.repeat(64),
+              build_generation: 3,
+            };
+      return new Response(JSON.stringify({ success: true, data: responseData }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as typeof fetch;
+
+    const sourceFile = await miniapps.getSourceFile.invoke({
+      miniapp_id: MINIAPP_ID as never,
+      path: 'ui/index.html',
+    });
+    expect(requestPath).toBe(
+      `/api/miniapps/${MINIAPP_ID}/source/files/ui%2Findex.html`
+    );
+    expect(sourceFile.miniapp_id).toBe(MINIAPP_ID);
+    expect(sourceFile.content).toBe('<main>v1</main>');
+
+    await miniapps.replaceSourceFile.invoke({
+      miniapp_id: MINIAPP_ID as never,
+      expected_product_revision: 4,
+      project_id: '0190f5fe-7c00-7a00-8000-0000000000b2',
+      expected_project_revision: 5,
+      expected_build_generation: 3,
+      expected_source_snapshot_digest: 'a'.repeat(64),
+      path: 'ui/index.html',
+      content: '<main>v2</main>',
+    });
+    expect(requestPath).toBe(`/api/miniapps/${MINIAPP_ID}/source/edit`);
+    expect(requestBody).toEqual({
+      miniapp_id: MINIAPP_ID,
+      expected_product_revision: 4,
+      project_id: '0190f5fe-7c00-7a00-8000-0000000000b2',
+      expected_project_revision: 5,
+      expected_build_generation: 3,
+      expected_source_snapshot_digest: 'a'.repeat(64),
+      path: 'ui/index.html',
+      content: '<main>v2</main>',
+    });
   });
 
   test('Share export and import preserve exact paths, digests, and CAS fields', async () => {

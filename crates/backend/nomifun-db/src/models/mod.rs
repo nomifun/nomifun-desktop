@@ -96,7 +96,7 @@ pub use miniapp_m1::{
     MiniAppM1Kind, MiniAppM1ProjectSourceState, MiniAppM1ReleaseOrigin,
     MiniAppM1ReleaseSourceKind, MiniAppM1Snapshot, MiniAppProductRow,
     MiniAppKvRow, MiniAppProjectRow, MiniAppPublishAuthorizationRow, MiniAppReleaseArtifactRow,
-    MiniAppReleaseRow, MiniAppSurfaceSessionRow,
+    MiniAppReleaseRow, MiniAppSourceMutationIntentRow, MiniAppSurfaceSessionRow,
 };
 pub use oauth_token::OAuthTokenRow;
 pub use plugin_n1::{

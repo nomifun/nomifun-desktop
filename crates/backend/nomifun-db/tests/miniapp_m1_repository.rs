@@ -18,12 +18,14 @@ use nomifun_agent_contracts::{
     canonical_ui_tree_digest, digest_bytes, digest_payload,
 };
 use nomifun_db::{
-    BeginMiniAppM1DeleteParams, BeginMiniAppM1ImportAsNewParams,
+    AbortMiniAppSourceMutationParams, BeginMiniAppM1DeleteParams,
+    BeginMiniAppM1ImportAsNewParams, BeginMiniAppSourceMutationParams,
     CancelMiniAppM1BuildOperationParams, CloseMiniAppM1SurfaceSessionParams,
     CommitMiniAppM1LifecycleParams,
     CreateMiniAppM1Params, CreateMiniAppM1WithSourceParams,
     ExecuteMiniAppM1SurfaceKvParams,
     FailMiniAppM1DeleteParams, FinalizeMiniAppM1DeleteParams,
+    FinalizeMiniAppSourceMutationParams,
     FinishMiniAppM1BuildAndRecordReadyParams, FinishMiniAppM1BuildOperationParams,
     FinishMiniAppM1ExportOperationParams, FinishMiniAppM1ImportReadyParams,
     IMiniAppM1Repository, MiniAppM1AutoPublishGuard, MiniAppM1ImportSource, MiniAppM1Kind,
@@ -240,6 +242,148 @@ async fn owner_scoped_library_create_and_project_source_cas_are_exact() {
         .await
         .unwrap_err();
     assert!(stale.to_string().contains("CAS"));
+}
+
+#[tokio::test]
+async fn source_mutation_intent_fences_the_exact_project_and_finalizes_once() {
+    let database = init_miniapp_test_database().await;
+    let owner = installation_owner_id(database.pool()).await.unwrap();
+    let repository = SqliteMiniAppM1Repository::new(database.pool().clone());
+    repository
+        .create(&create_params(
+            &owner,
+            MINIAPP_ID,
+            PROJECT_ID,
+            0,
+            MiniAppM1Kind::UiOnly,
+            10,
+        ))
+        .await
+        .unwrap();
+    repository
+        .update_project_source_cas(&UpdateMiniAppM1ProjectSourceParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            project_id: PROJECT_ID.to_owned(),
+            expected_project_revision: 1,
+            source_state: MiniAppM1ProjectSourceState::Editable,
+            managed_source_path: Some("sources/owner/miniapp/project/source".into()),
+            source_head_digest: Some("b".repeat(64)),
+            dependency_lock_digest: Some("c".repeat(64)),
+            build_profile_version: Some(MINIAPP_RELEASE_PROFILE_VERSION.into()),
+            build_generation: 1,
+            updated_at: 20,
+        })
+        .await
+        .unwrap();
+
+    let intent_id = Uuid::now_v7().to_string();
+    let intent = repository
+        .begin_source_mutation(&BeginMiniAppSourceMutationParams {
+            intent_id: intent_id.clone(),
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            project_id: PROJECT_ID.to_owned(),
+            expected_product_revision: 1,
+            expected_project_revision: 2,
+            expected_build_generation: 1,
+            expected_source_digest: "b".repeat(64),
+            next_source_digest: "d".repeat(64),
+            next_build_generation: 2,
+            created_at: 21,
+        })
+        .await
+        .unwrap();
+    assert_eq!(intent.intent_id, intent_id);
+
+    let fenced_project = repository
+        .update_project_source_cas(&UpdateMiniAppM1ProjectSourceParams {
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            project_id: PROJECT_ID.to_owned(),
+            expected_project_revision: 2,
+            source_state: MiniAppM1ProjectSourceState::Editable,
+            managed_source_path: Some("sources/owner/miniapp/project/source".into()),
+            source_head_digest: Some("e".repeat(64)),
+            dependency_lock_digest: Some("c".repeat(64)),
+            build_profile_version: Some(MINIAPP_RELEASE_PROFILE_VERSION.into()),
+            build_generation: 2,
+            updated_at: 22,
+        })
+        .await
+        .unwrap_err();
+    assert!(fenced_project.to_string().contains("fenced"));
+    let fenced_product = sqlx::query(
+        "UPDATE miniapp_products SET description = 'racing edit' WHERE miniapp_id = ?",
+    )
+    .bind(MINIAPP_ID)
+    .execute(database.pool())
+    .await
+    .unwrap_err();
+    assert!(fenced_product.to_string().contains("fenced"));
+
+    let committed = repository
+        .finalize_source_mutation(&FinalizeMiniAppSourceMutationParams {
+            intent_id: intent_id.clone(),
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            project_id: PROJECT_ID.to_owned(),
+            updated_at: 22,
+        })
+        .await
+        .unwrap();
+    assert_eq!(committed.project.project_revision, 3);
+    assert_eq!(committed.project.build_generation, 2);
+    assert_eq!(committed.project.source_head_digest.as_deref(), Some("d".repeat(64).as_str()));
+    assert_eq!(committed.library_revision, 3);
+    assert!(repository
+        .get_source_mutation_intent(&owner, MINIAPP_ID, PROJECT_ID)
+        .await
+        .unwrap()
+        .is_none());
+    let markers: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM miniapp_source_mutation_commits")
+        .fetch_one(database.pool())
+        .await
+        .unwrap();
+    assert_eq!(markers, 0);
+    assert!(repository
+        .finalize_source_mutation(&FinalizeMiniAppSourceMutationParams {
+            intent_id,
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            project_id: PROJECT_ID.to_owned(),
+            updated_at: 23,
+        })
+        .await
+        .is_err());
+
+    let abort_id = Uuid::now_v7().to_string();
+    repository
+        .begin_source_mutation(&BeginMiniAppSourceMutationParams {
+            intent_id: abort_id.clone(),
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            project_id: PROJECT_ID.to_owned(),
+            expected_product_revision: 1,
+            expected_project_revision: 3,
+            expected_build_generation: 2,
+            expected_source_digest: "d".repeat(64),
+            next_source_digest: "e".repeat(64),
+            next_build_generation: 3,
+            created_at: 23,
+        })
+        .await
+        .unwrap();
+    repository
+        .abort_source_mutation(&AbortMiniAppSourceMutationParams {
+            intent_id: abort_id,
+            owner_user_id: owner.clone(),
+            miniapp_id: MINIAPP_ID.to_owned(),
+            project_id: PROJECT_ID.to_owned(),
+        })
+        .await
+        .unwrap();
+    assert!(repository.list_source_mutation_intents().await.unwrap().is_empty());
 }
 
 #[tokio::test]

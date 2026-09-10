@@ -875,7 +875,7 @@ async fn migration_083_adds_immutable_owner_scoped_service_test_receipt_history(
 }
 
 #[tokio::test]
-async fn migrations_078_through_083_upgrade_existing_release_state_in_place() {
+async fn migrations_after_077_upgrade_existing_release_state_in_place() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("miniapp-v077-upgrade.db");
     let database = sqlx::sqlite::SqlitePoolOptions::new()
@@ -1160,7 +1160,12 @@ async fn migrations_078_through_083_upgrade_existing_release_state_in_place() {
         .fetch_one(upgraded.pool())
         .await
         .unwrap();
-    assert_eq!(head, 83);
+    let expected_head = MIGRATOR
+        .iter()
+        .map(|migration| migration.version)
+        .max()
+        .expect("migration inventory");
+    assert_eq!(head, expected_head);
     let quick_check: Vec<String> = sqlx::query_scalar("PRAGMA quick_check")
         .fetch_all(upgraded.pool())
         .await

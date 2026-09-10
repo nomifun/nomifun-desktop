@@ -105,6 +105,7 @@ const renderDetail = (
   value: MiniAppWorkshop,
   callbacks: Partial<{
     onBuild: () => void;
+    onEditSource: () => void;
     onShare: () => void;
     onOpenSurface: () => void;
     onRefresh: () => void;
@@ -115,6 +116,7 @@ const renderDetail = (
     locale: 'en-US',
     onBack: () => {},
     onRefresh: callbacks.onRefresh ?? (() => {}),
+    onEditSource: callbacks.onEditSource ?? (() => {}),
     onBuild: callbacks.onBuild ?? (() => {}),
     onTest: () => {},
     onCancelBuild: () => {},
@@ -153,12 +155,16 @@ afterEach(() => cleanup());
 describe('MiniApp Workshop desktop actions', () => {
   test('keeps the primary delivery and recovery actions keyboard discoverable', () => {
     let builds = 0;
+    let sourceEdits = 0;
     let shares = 0;
     let surfaces = 0;
     let refreshes = 0;
     const view = renderDetail(workshop(), {
       onBuild: () => {
         builds += 1;
+      },
+      onEditSource: () => {
+        sourceEdits += 1;
       },
       onShare: () => {
         shares += 1;
@@ -177,6 +183,7 @@ describe('MiniApp Workshop desktop actions', () => {
     });
     for (const name of [
       'Build Ready Release: Status Board',
+      'Edit Source: Status Board',
       'Publish: Status Board',
       'Rollback: Status Board',
       'Move to Trash: Status Board',
@@ -187,6 +194,11 @@ describe('MiniApp Workshop desktop actions', () => {
       expect(within(toolbar).getByRole('button', { name })).toBeDefined();
     }
 
+    fireEvent.click(
+      within(toolbar).getByRole('button', {
+        name: 'Edit Source: Status Board',
+      })
+    );
     fireEvent.click(
       within(toolbar).getByRole('button', {
         name: 'Build Ready Release: Status Board',
@@ -205,6 +217,7 @@ describe('MiniApp Workshop desktop actions', () => {
     );
 
     expect(builds).toBe(1);
+    expect(sourceEdits).toBe(1);
     expect(shares).toBe(1);
     expect(surfaces).toBe(1);
     expect(refreshes).toBe(1);

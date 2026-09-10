@@ -15,7 +15,7 @@ use nomifun_api_types::{
     DurableOperationKindDto, DurableOperationOwnerDto,
     DurableOperationStateDto, DurableOperationSummaryDto, ErrorResponse,
     MiniAppKindDto, MiniAppLibraryResponseDto, MiniAppLifecycleDto,
-    MiniAppServiceHealthDto, MiniAppSurfaceLaunchDescriptorDto,
+    MiniAppServiceHealthDto, MiniAppSourceFileDto, MiniAppSurfaceLaunchDescriptorDto,
     MiniAppWorkshopDto, PublishMiniAppRequest, RestoreMiniAppRequest,
     RetryMiniAppDeleteRequest, SetMiniAppEnabledRequest, TestMiniAppReleaseRequest,
     TrashMiniAppRequest,
@@ -265,6 +265,77 @@ async fn split_routes_preserve_owner_scope_and_api_envelopes() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let error: ErrorResponse = response_json(response).await;
     assert_eq!(error.code, "NOT_FOUND");
+}
+
+#[tokio::test]
+async fn source_routes_are_local_mutations_with_exact_project_cas() {
+    let database = init_database_memory().await.unwrap();
+    let owner_id = installation_owner_id(database.pool()).await.unwrap();
+    let repository: Arc<dyn IMiniAppM1Repository> = Arc::new(
+        SqliteMiniAppM1Repository::new(database.pool().clone()),
+    );
+    let store_root = tempfile::tempdir().unwrap();
+    let state = MiniAppM1RouterState::new(Arc::new(
+        MiniAppM1ApplicationService::new_with_root(repository, store_root.path()).unwrap(),
+    ));
+    let owner = current_user(&owner_id, "owner");
+    let read = miniapp_m1_read_routes(state.clone()).layer(Extension(owner.clone()));
+    let write = miniapp_m1_write_routes(state).layer(Extension(owner));
+    let response = send(
+        &write,
+        Method::POST,
+        "/api/miniapps/projects",
+        Some(json!({
+            "expected_library_revision": 0,
+            "display_name": "Editable Route",
+            "kind": "ui_only"
+        })),
+    )
+    .await;
+    let created: MiniAppWorkshopDto = response_data(response).await;
+    let source_path = format!(
+        "/api/miniapps/{}/source/files/ui%2Findex.html",
+        created.miniapp.miniapp_id
+    );
+    assert_eq!(
+        send(&read, Method::GET, &source_path, None).await.status(),
+        StatusCode::NOT_FOUND,
+        "Source text must remain behind the local-product route group"
+    );
+    let source_response = send(&write, Method::GET, &source_path, None).await;
+    assert_eq!(source_response.status(), StatusCode::OK);
+    let source: MiniAppSourceFileDto = response_data(source_response).await;
+    assert_eq!(source.path, "ui/index.html");
+    assert!(!source.content.is_empty());
+    assert_eq!(source.build_generation, created.build_generation);
+    assert_eq!(
+        Some(source.source_snapshot_digest.as_str()),
+        created.source_snapshot_digest.as_deref()
+    );
+
+    let edit_path = format!(
+        "/api/miniapps/{}/source/edit",
+        created.miniapp.miniapp_id
+    );
+    let request = json!({
+        "miniapp_id": created.miniapp.miniapp_id.clone(),
+        "expected_product_revision": created.miniapp.product_revision,
+        "project_id": created.project_id.clone(),
+        "expected_project_revision": created.project_revision,
+        "expected_build_generation": created.build_generation,
+        "expected_source_snapshot_digest": source.source_snapshot_digest,
+        "path": source.path,
+        "content": "<!doctype html><main>edited through route</main>"
+    });
+    let edited_response = send(&write, Method::POST, &edit_path, Some(request.clone())).await;
+    assert_eq!(edited_response.status(), StatusCode::OK);
+    let edited: MiniAppWorkshopDto = response_data(edited_response).await;
+    assert_eq!(edited.project_revision, created.project_revision + 1);
+    assert_eq!(edited.build_generation, created.build_generation + 1);
+    assert_ne!(edited.source_snapshot_digest, created.source_snapshot_digest);
+
+    let stale_response = send(&write, Method::POST, &edit_path, Some(request)).await;
+    assert_eq!(stale_response.status(), StatusCode::CONFLICT);
 }
 
 #[tokio::test]

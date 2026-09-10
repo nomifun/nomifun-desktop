@@ -330,15 +330,18 @@ import type {
   CancelMiniAppBuildRequest,
   CloseMiniAppSurfaceRequest,
   CreateMiniAppProjectRequest,
+  GetMiniAppSourceFileRequest,
   MiniAppLibraryResponse,
   MiniAppKvResponse,
   MiniAppOperationSummary,
+  MiniAppSourceFile,
   MiniAppSurfaceBridgeRequest,
   MiniAppSurfaceLaunchDescriptor,
   MiniAppSummary,
   MiniAppWorkshop,
   OpenMiniAppSurfaceRequest,
   PublishMiniAppRequest,
+  ReplaceMiniAppSourceFileRequest,
   RollbackMiniAppRequest,
   SetMiniAppEnabledRequest,
   SetMiniAppPublishModeRequest,
@@ -2276,6 +2279,13 @@ const fromApiMiniAppSurfaceLaunchDescriptor = (
   miniapp_id: parseMiniAppId(value.miniapp_id),
 });
 
+const fromApiMiniAppSourceFile = (
+  value: MiniAppSourceFile
+): MiniAppSourceFile => ({
+  ...value,
+  miniapp_id: parseMiniAppId(value.miniapp_id),
+});
+
 export const miniapps = {
   library: withResponseMap(
     httpGet<MiniAppLibraryResponse, void>('/api/miniapps'),
@@ -2316,6 +2326,20 @@ export const miniapps = {
     httpGet<MiniAppWorkshop, { miniapp_id: MiniAppId }>(
       ({ miniapp_id }) =>
         `/api/miniapps/${encodeURIComponent(miniapp_id)}/workshop`
+    ),
+    fromApiMiniAppWorkshop
+  ),
+  getSourceFile: withResponseMap(
+    httpGet<MiniAppSourceFile, GetMiniAppSourceFileRequest>(
+      ({ miniapp_id, path }) =>
+        `/api/miniapps/${encodeURIComponent(miniapp_id)}/source/files/${encodeURIComponent(path)}`
+    ),
+    fromApiMiniAppSourceFile
+  ),
+  replaceSourceFile: withResponseMap(
+    httpPost<MiniAppWorkshop, ReplaceMiniAppSourceFileRequest>(
+      ({ miniapp_id }) =>
+        `/api/miniapps/${encodeURIComponent(miniapp_id)}/source/edit`
     ),
     fromApiMiniAppWorkshop
   ),

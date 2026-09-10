@@ -181,6 +181,66 @@ fn source_replace_is_owner_cas_and_rejects_service_or_unsafe_paths() {
 }
 
 #[test]
+fn prepared_file_replace_is_atomic_preserves_other_files_and_rejects_a_stale_head() {
+    let root = TestRoot::new("prepared-source-replace");
+    let store = MiniAppSourceStore::new(root.path()).unwrap();
+    let project = store
+        .create_project("owner-1", "miniapp-1", "project-1", "Notes")
+        .unwrap();
+    let before = store
+        .current_snapshot("owner-1", "miniapp-1", "project-1")
+        .unwrap();
+    let original_app = before.file("ui/app.js").map(ToOwned::to_owned);
+
+    let prepared = store
+        .prepare_file_replace(
+            "owner-1",
+            "miniapp-1",
+            "project-1",
+            &project.source_snapshot_digest,
+            "ui/index.html",
+            b"<html>prepared update</html>".to_vec(),
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .current_snapshot("owner-1", "miniapp-1", "project-1")
+            .unwrap()
+            .source_snapshot_digest,
+        project.source_snapshot_digest,
+        "prepare must not publish a new Source head"
+    );
+    assert_eq!(prepared.expected_build_generation, 1);
+    assert_eq!(prepared.next_build_generation, 2);
+
+    let committed = store.commit_prepared_source(&prepared).unwrap();
+    assert_eq!(committed.source_snapshot_digest, prepared.next_source_snapshot_digest);
+    assert_eq!(committed.build_generation, 2);
+    let after = store
+        .current_snapshot("owner-1", "miniapp-1", "project-1")
+        .unwrap();
+    assert_eq!(after.file("ui/index.html"), Some(b"<html>prepared update</html>".as_slice()));
+    assert_eq!(after.file("ui/app.js").map(ToOwned::to_owned), original_app);
+    assert!(matches!(
+        store.commit_prepared_source(&prepared),
+        Err(MiniAppSourceStoreError::CompareAndSwapConflict { .. })
+    ));
+
+    let noop = store
+        .prepare_file_replace(
+            "owner-1",
+            "miniapp-1",
+            "project-1",
+            &after.source_snapshot_digest,
+            "ui/index.html",
+            after.file("ui/index.html").unwrap().to_vec(),
+        )
+        .unwrap();
+    assert!(noop.is_noop());
+    assert_eq!(noop.expected_build_generation, noop.next_build_generation);
+}
+
+#[test]
 fn service_source_round_trips_exact_main_module_without_relaxing_ui_only_paths() {
     let root = TestRoot::new("service-source");
     let store = MiniAppSourceStore::new(root.path()).unwrap();

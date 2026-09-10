@@ -39,7 +39,7 @@ use nomifun_api_types::{
     MiniAppPublishModeDto, MiniAppReadyReleaseDto, MiniAppReleasePointersDto,
     MiniAppReleaseRefDto, MiniAppReleaseTestDto, MiniAppServiceDescriptorDto,
     MiniAppServiceHealthDto, MiniAppServiceLifecycleDto, MiniAppSummaryDto,
-    MiniAppSurfaceLaunchDescriptorDto, MiniAppTestStatusDto,
+    MiniAppSourceFileDto, MiniAppSurfaceLaunchDescriptorDto, MiniAppTestStatusDto,
     DeleteMiniAppRequest, ImportMiniAppArtifactRequest, ImportMiniAppShareRequest,
     MiniAppShareContentDto, MiniAppWorkshopDto, PluginConfigSchemaDto, PluginConfigStateDto,
     ExportMiniAppBackupRequest, ImportMiniAppBackupRequest,
@@ -48,15 +48,17 @@ use nomifun_api_types::{
     RollbackMiniAppRequest as RollbackMiniAppRequestDto,
     SetMiniAppEnabledRequest, SetMiniAppPublishModeRequest,
     SetMiniAppServiceRunningRequest, ShareMiniAppRequest, TestMiniAppReleaseRequest,
-    TrashMiniAppRequest,
+    TrashMiniAppRequest, ReplaceMiniAppSourceFileRequest,
 };
 use nomifun_db::{
-    BeginMiniAppM1ImportAsNewParams, CancelMiniAppM1BuildOperationParams,
+    AbortMiniAppSourceMutationParams, BeginMiniAppM1ImportAsNewParams,
+    BeginMiniAppSourceMutationParams, CancelMiniAppM1BuildOperationParams,
     CloseMiniAppM1SurfaceSessionParams,
     CreateMiniAppM1Params, CreateMiniAppM1WithSourceParams,
     ExecuteMiniAppM1SurfaceKvParams,
     FailMiniAppM1ExportOperationParams, FailMiniAppM1ImportParams,
-    FinishMiniAppM1BuildAndRecordReadyParams, FinishMiniAppM1BuildOperationParams,
+    FinalizeMiniAppSourceMutationParams, FinishMiniAppM1BuildAndRecordReadyParams,
+    FinishMiniAppM1BuildOperationParams,
     FinishMiniAppM1ExportOperationParams, FinishMiniAppM1ImportReadyParams,
     FinishMiniAppM1BackupImportParams, MiniAppM1BackupExportSnapshot,
     MiniAppM1BackupImportRelease, MiniAppM1BackupReleaseSlot, MiniAppKvRow,
@@ -64,7 +66,7 @@ use nomifun_db::{
     MiniAppM1ManagedSourceLineage, MiniAppM1Snapshot, MiniAppM1SurfaceKvOperation,
     MiniAppM1SurfaceKvResult, MiniAppProductRow,
     MiniAppReleaseArtifactRow, MiniAppReleaseRow, MiniAppSurfaceSessionRow,
-    MiniAppServiceTestReceiptRow,
+    MiniAppServiceTestReceiptRow, MiniAppSourceMutationIntentRow,
     OpenMiniAppM1SurfaceSessionParams,
     ProductOperationRow, ProductOperationState, PublishMiniAppM1ReadyParams,
     RecordMiniAppM1ServiceTestReceiptParams,
@@ -81,7 +83,7 @@ use nomifun_js_runtime::ResolvedNodeRuntime;
 use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 use crate::{
@@ -237,6 +239,7 @@ struct MiniAppM1Stores {
 pub struct MiniAppM1ApplicationService {
     repository: Arc<dyn IMiniAppM1Repository>,
     stores: MiniAppM1Stores,
+    source_mutation_lock: Arc<Mutex<()>>,
     service_runtime: Arc<RwLock<Arc<dyn MiniAppServiceRuntimeBinding>>>,
     catalog_sink: Arc<RwLock<Option<Arc<dyn MiniAppCapabilityCatalogSink>>>>,
 }
@@ -280,6 +283,7 @@ impl MiniAppM1ApplicationService {
         Ok(Self {
             repository,
             stores: MiniAppM1Stores { source, release },
+            source_mutation_lock: Arc::new(Mutex::new(())),
             service_runtime: Arc::new(RwLock::new(Arc::new(NoopMiniAppServiceRuntime))),
             catalog_sink: Arc::new(RwLock::new(None)),
         })
@@ -1361,6 +1365,7 @@ impl MiniAppM1ApplicationService {
         &self,
         owner_user_id: &str,
     ) -> Result<MiniAppLibraryResponseDto, MiniAppM1ApplicationError> {
+        self.reconcile_source_mutations().await?;
         let library = self.repository.library(owner_user_id).await?;
         let mut miniapps = Vec::with_capacity(library.products.len());
         for product in &library.products {
@@ -1383,6 +1388,264 @@ impl MiniAppM1ApplicationService {
             )?,
             miniapps,
         })
+    }
+
+    pub async fn source_file(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &str,
+        path: &str,
+    ) -> Result<MiniAppSourceFileDto, MiniAppM1ApplicationError> {
+        self.reconcile_source_mutations().await?;
+        let snapshot = self
+            .repository
+            .get(owner_user_id, miniapp_id)
+            .await?
+            .ok_or(MiniAppM1ApplicationError::NotFound)?;
+        if snapshot.project.source_state != "editable" {
+            return Err(MiniAppM1ApplicationError::Invalid(
+                "MiniApp Project Source is not editable".into(),
+            ));
+        }
+        let source = self
+            .stores
+            .source
+            .current_snapshot(
+                owner_user_id,
+                miniapp_id,
+                &snapshot.project.project_id,
+            )
+            .map_err(|error| store_error("Source Store", error))?;
+        require_source_matches_project(&source, &snapshot)?;
+        let content = source.file(path).ok_or_else(|| {
+            MiniAppM1ApplicationError::NotFound
+        })?;
+        let content = String::from_utf8(content.to_vec()).map_err(|_| {
+            MiniAppM1ApplicationError::Invalid(
+                "MiniApp Source editor supports UTF-8 text files only".into(),
+            )
+        })?;
+        Ok(MiniAppSourceFileDto {
+            miniapp_id: miniapp_id.to_owned(),
+            project_id: snapshot.project.project_id,
+            path: path.to_owned(),
+            content,
+            source_snapshot_digest: source.source_snapshot_digest.as_ref().to_owned(),
+            build_generation: source.project.build_generation,
+        })
+    }
+
+    pub async fn replace_source_file(
+        &self,
+        owner_user_id: &str,
+        request: ReplaceMiniAppSourceFileRequest,
+    ) -> Result<MiniAppWorkshopDto, MiniAppM1ApplicationError> {
+        let _mutation_guard = self.source_mutation_lock.lock().await;
+        self.reconcile_source_mutations_locked().await?;
+        let snapshot = self
+            .repository
+            .get(owner_user_id, &request.miniapp_id)
+            .await?
+            .ok_or(MiniAppM1ApplicationError::NotFound)?;
+        if snapshot.product.product_revision
+            != to_i64(request.expected_product_revision, "product revision")?
+            || snapshot.project.project_id != request.project_id
+            || snapshot.project.project_revision
+                != to_i64(request.expected_project_revision, "project revision")?
+            || snapshot.project.build_generation
+                != to_i64(request.expected_build_generation, "build generation")?
+            || snapshot.project.source_head_digest.as_deref()
+                != Some(request.expected_source_snapshot_digest.as_str())
+            || snapshot.project.source_state != "editable"
+            || matches!(snapshot.product.lifecycle.as_str(), "trashed" | "deleting")
+        {
+            return Err(MiniAppM1ApplicationError::Database(
+                nomifun_db::DbError::Conflict(
+                    "MiniApp Source edit is stale against the exact Product/Project head".into(),
+                ),
+            ));
+        }
+        require_no_running_build(
+            &*self.repository,
+            owner_user_id,
+            &request.miniapp_id,
+        )
+        .await?;
+        let prepared = self
+            .stores
+            .source
+            .prepare_file_replace(
+                owner_user_id,
+                &request.miniapp_id,
+                &request.project_id,
+                &request.expected_source_snapshot_digest,
+                &request.path,
+                request.content.into_bytes(),
+            )
+            .map_err(|error| store_error("Source Store", error))?;
+        if prepared.expected_build_generation != request.expected_build_generation {
+            return Err(MiniAppM1ApplicationError::Database(
+                nomifun_db::DbError::Conflict(
+                    "MiniApp Source Store generation differs from the Project".into(),
+                ),
+            ));
+        }
+        if prepared.is_noop() {
+            return self.workshop_projection(owner_user_id, &snapshot, None).await;
+        }
+        let intent_id = Uuid::now_v7().to_string();
+        let created_at = positive_now_ms().max(snapshot.project.updated_at);
+        self.repository
+            .begin_source_mutation(&BeginMiniAppSourceMutationParams {
+                intent_id: intent_id.clone(),
+                owner_user_id: owner_user_id.to_owned(),
+                miniapp_id: request.miniapp_id.clone(),
+                project_id: request.project_id.clone(),
+                expected_product_revision: snapshot.product.product_revision,
+                expected_project_revision: snapshot.project.project_revision,
+                expected_build_generation: snapshot.project.build_generation,
+                expected_source_digest: prepared
+                    .expected_source_snapshot_digest
+                    .as_ref()
+                    .to_owned(),
+                next_source_digest: prepared
+                    .next_source_snapshot_digest
+                    .as_ref()
+                    .to_owned(),
+                next_build_generation: to_i64(
+                    prepared.next_build_generation,
+                    "next build generation",
+                )?,
+                created_at,
+            })
+            .await?;
+        if let Err(error) = self.stores.source.commit_prepared_source(&prepared) {
+            self.repository
+                .abort_source_mutation(&AbortMiniAppSourceMutationParams {
+                    intent_id,
+                    owner_user_id: owner_user_id.to_owned(),
+                    miniapp_id: request.miniapp_id,
+                    project_id: request.project_id,
+                })
+                .await?;
+            return Err(store_error("Source Store", error));
+        }
+        let updated_at = positive_now_ms()
+            .max(created_at.saturating_add(1))
+            .max(snapshot.project.updated_at.saturating_add(1));
+        let committed = match self
+            .repository
+            .finalize_source_mutation(&FinalizeMiniAppSourceMutationParams {
+                intent_id: intent_id.clone(),
+                owner_user_id: owner_user_id.to_owned(),
+                miniapp_id: request.miniapp_id.clone(),
+                project_id: request.project_id.clone(),
+                updated_at,
+            })
+            .await
+        {
+            Ok(committed) => committed,
+            Err(error) => {
+                if let Some(intent) = self
+                    .repository
+                    .get_source_mutation_intent(
+                        owner_user_id,
+                        &request.miniapp_id,
+                        &request.project_id,
+                    )
+                    .await?
+                {
+                    self.reconcile_source_mutation(&intent)
+                        .await
+                        .map_err(|recovery| {
+                            MiniAppM1ApplicationError::Runtime(format!(
+                                "MiniApp Source was committed but database finalize failed ({error}); recovery failed ({recovery})"
+                            ))
+                        })?;
+                }
+                let recovered = self
+                    .repository
+                    .get(owner_user_id, &request.miniapp_id)
+                    .await?
+                    .ok_or(MiniAppM1ApplicationError::NotFound)?;
+                if recovered.project.source_head_digest.as_deref()
+                    != Some(prepared.next_source_snapshot_digest.as_ref())
+                    || recovered.project.build_generation
+                        != to_i64(prepared.next_build_generation, "next build generation")?
+                {
+                    return Err(MiniAppM1ApplicationError::Runtime(format!(
+                        "MiniApp Source database finalize failed without a recoverable commit: {error}"
+                    )));
+                }
+                recovered
+            }
+        };
+        self.workshop_projection(owner_user_id, &committed, None)
+            .await
+    }
+
+    pub async fn reconcile_source_mutations(
+        &self,
+    ) -> Result<(), MiniAppM1ApplicationError> {
+        let _mutation_guard = self.source_mutation_lock.lock().await;
+        self.reconcile_source_mutations_locked().await
+    }
+
+    async fn reconcile_source_mutations_locked(
+        &self,
+    ) -> Result<(), MiniAppM1ApplicationError> {
+        for intent in self.repository.list_source_mutation_intents().await? {
+            self.reconcile_source_mutation(&intent).await?;
+        }
+        Ok(())
+    }
+
+    async fn reconcile_source_mutation(
+        &self,
+        intent: &MiniAppSourceMutationIntentRow,
+    ) -> Result<(), MiniAppM1ApplicationError> {
+        let source = self
+            .stores
+            .source
+            .current_snapshot(
+                &intent.owner_user_id,
+                &intent.miniapp_id,
+                &intent.project_id,
+            )
+            .map_err(|error| store_error("Source recovery", error))?;
+        let source_digest = source.source_snapshot_digest.as_ref();
+        let generation = to_i64(source.project.build_generation, "Source recovery generation")?;
+        if source_digest == intent.expected_source_digest
+            && generation == intent.expected_build_generation
+        {
+            self.repository
+                .abort_source_mutation(&AbortMiniAppSourceMutationParams {
+                    intent_id: intent.intent_id.clone(),
+                    owner_user_id: intent.owner_user_id.clone(),
+                    miniapp_id: intent.miniapp_id.clone(),
+                    project_id: intent.project_id.clone(),
+                })
+                .await?;
+            return Ok(());
+        }
+        if source_digest == intent.next_source_digest
+            && generation == intent.next_build_generation
+        {
+            self.repository
+                .finalize_source_mutation(&FinalizeMiniAppSourceMutationParams {
+                    intent_id: intent.intent_id.clone(),
+                    owner_user_id: intent.owner_user_id.clone(),
+                    miniapp_id: intent.miniapp_id.clone(),
+                    project_id: intent.project_id.clone(),
+                    updated_at: positive_now_ms().max(intent.created_at.saturating_add(1)),
+                })
+                .await?;
+            return Ok(());
+        }
+        Err(MiniAppM1ApplicationError::Runtime(
+            "MiniApp Source mutation recovery found neither the exact old nor new Source head"
+                .into(),
+        ))
     }
 
     pub async fn create(
@@ -1474,6 +1737,7 @@ impl MiniAppM1ApplicationService {
         owner_user_id: &str,
         request: BuildMiniAppRequest,
     ) -> Result<MiniAppWorkshopDto, MiniAppM1ApplicationError> {
+        self.reconcile_source_mutations().await?;
         let stores = &self.stores;
         let snapshot = self
             .repository
@@ -5008,6 +5272,7 @@ impl MiniAppM1ApplicationService {
         owner_user_id: &str,
         miniapp_id: &str,
     ) -> Result<MiniAppWorkshopDto, MiniAppM1ApplicationError> {
+        self.reconcile_source_mutations().await?;
         let snapshot = self
             .repository
             .get(owner_user_id, miniapp_id)
@@ -5624,6 +5889,29 @@ fn read_exact_source(
         ));
     }
     Ok(source)
+}
+
+fn require_source_matches_project(
+    source: &MiniAppSourceSnapshot,
+    snapshot: &MiniAppM1Snapshot,
+) -> Result<(), MiniAppM1ApplicationError> {
+    if snapshot.project.source_head_digest.as_deref()
+        != Some(source.source_snapshot_digest.as_ref())
+        || snapshot.project.dependency_lock_digest.as_deref()
+            != Some(source.dependency_lock_digest.as_ref())
+        || snapshot.project.build_generation
+            != to_i64(source.project.build_generation, "Source build generation")?
+        || snapshot.project.managed_source_path.as_deref()
+            != Some(source.project.managed_relative_path.as_str())
+        || source.project.build_profile != JavaScriptBuildProfile::MiniAppReleaseV1
+        || source.project.build_profile_version.as_ref()
+            != MINIAPP_RELEASE_PROFILE_VERSION
+    {
+        return Err(MiniAppM1ApplicationError::Invalid(
+            "Source Store head does not match the exact DB Project lineage".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn managed_source_lineage(

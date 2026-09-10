@@ -25,6 +25,7 @@ import {
   Code,
   Delete,
   Download,
+  Edit,
   Power,
   PreviewOpen,
   Refresh,
@@ -62,6 +63,7 @@ import {
   shortMiniAppIdentity,
 } from './model';
 import MiniAppSurfacePanel from './MiniAppSurfacePanel';
+import MiniAppSourceEditDialog from './MiniAppSourceEditDialog';
 import MiniAppTransferDialog from './MiniAppTransferDialog';
 import {
   MiniAppKindBadge,
@@ -202,6 +204,7 @@ export const MiniAppWorkshopDetail: React.FC<{
   locale: string;
   onBack: () => void;
   onRefresh: () => void;
+  onEditSource: () => void;
   onBuild: () => void;
   onTest: () => void;
   onCancelBuild: () => void;
@@ -232,6 +235,7 @@ export const MiniAppWorkshopDetail: React.FC<{
   locale,
   onBack,
   onRefresh,
+  onEditSource,
   onBuild,
   onTest,
   onCancelBuild,
@@ -274,6 +278,10 @@ export const MiniAppWorkshopDetail: React.FC<{
   const canBuild =
     lifecycleActive &&
     miniAppBuildRequest(workshop, serviceLifecycle) !== null;
+  const canEditSource =
+    lifecycleActive &&
+    workshop.source_state === 'editable' &&
+    operation?.state !== 'running';
   const canTest = miniAppTestRequest(workshop) !== null;
   const canPublish =
     lifecycleActive && miniAppPublishRequest(workshop) !== null;
@@ -394,6 +402,14 @@ export const MiniAppWorkshopDetail: React.FC<{
         </Button>
         {lifecycleActive && (
           <>
+            <Button
+              icon={<Edit theme='outline' size='14' />}
+              aria-label={namedAction(t('miniApps.actions.editSource'))}
+              disabled={!canEditSource || controlsDisabled}
+              onClick={onEditSource}
+            >
+              {t('miniApps.actions.editSource')}
+            </Button>
             <Button
               type={primaryAction === 'build' ? 'primary' : 'default'}
               icon={<Code theme='outline' size='14' />}
@@ -1182,6 +1198,7 @@ const MiniAppRunnerPage: React.FC = () => {
     useState<MiniAppSurfaceLaunchDescriptor | null>(null);
   const [shareVisible, setShareVisible] = useState(false);
   const [backupVisible, setBackupVisible] = useState(false);
+  const [sourceEditVisible, setSourceEditVisible] = useState(false);
   const canceledBuildRef = useRef<string | null>(null);
   const deletionInProgressRef = useRef(false);
   const [notFound, setNotFound] = useState(false);
@@ -1194,6 +1211,7 @@ const MiniAppRunnerPage: React.FC = () => {
       setSurfaceDescriptor(null);
       setShareVisible(false);
       setBackupVisible(false);
+      setSourceEditVisible(false);
       setFailure(null);
       message.success(successMessage);
       navigate('/mini-apps', { replace: true });
@@ -1321,6 +1339,7 @@ const MiniAppRunnerPage: React.FC = () => {
     setSurfaceDescriptor(null);
     setShareVisible(false);
     setBackupVisible(false);
+    setSourceEditVisible(false);
   }, [miniappId]);
 
   useEffect(() => {
@@ -2019,6 +2038,7 @@ const MiniAppRunnerPage: React.FC = () => {
               locale={i18n.language}
               onBack={goBack}
               onRefresh={() => void handleRefresh()}
+              onEditSource={() => setSourceEditVisible(true)}
               onBuild={() => void handleBuild()}
               onTest={handleTest}
               onCancelBuild={() => void handleCancelBuild()}
@@ -2048,6 +2068,17 @@ const MiniAppRunnerPage: React.FC = () => {
           </>
         ) : null}
       </HubPageShell>
+      <MiniAppSourceEditDialog
+        visible={sourceEditVisible}
+        workshop={workshop}
+        onCancel={() => setSourceEditVisible(false)}
+        onSaved={(updated) => {
+          setWorkshop(updated);
+          setSourceEditVisible(false);
+          setFailure(null);
+          message.success(t('miniApps.messages.sourceSaved'));
+        }}
+      />
       <MiniAppTransferDialog
         mode='export'
         visible={shareVisible}

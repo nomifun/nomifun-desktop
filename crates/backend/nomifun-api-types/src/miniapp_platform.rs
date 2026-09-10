@@ -218,6 +218,30 @@ pub struct CreateMiniAppProjectRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct MiniAppSourceFileDto {
+    pub miniapp_id: String,
+    pub project_id: String,
+    pub path: String,
+    pub content: String,
+    pub source_snapshot_digest: String,
+    pub build_generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplaceMiniAppSourceFileRequest {
+    pub miniapp_id: String,
+    pub expected_product_revision: u64,
+    pub project_id: String,
+    pub expected_project_revision: u64,
+    pub expected_build_generation: u64,
+    pub expected_source_snapshot_digest: String,
+    pub path: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BuildMiniAppRequest {
     pub miniapp_id: String,
     pub expected_product_revision: u64,

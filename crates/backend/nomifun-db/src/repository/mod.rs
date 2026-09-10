@@ -106,14 +106,16 @@ pub use javascript_runtime_selection::{
     IJavaScriptRuntimeSelectionRepository, SaveJavaScriptRuntimeSelectionParams,
 };
 pub use miniapp_m1::{
-    BeginMiniAppM1DeleteParams, BeginMiniAppM1ImportAsNewParams,
+    AbortMiniAppSourceMutationParams, BeginMiniAppM1DeleteParams,
+    BeginMiniAppM1ImportAsNewParams, BeginMiniAppSourceMutationParams,
     BeginMiniAppM1ImportAsNewResult, CancelMiniAppM1BuildOperationParams,
     CancelMiniAppM1ExportOperationParams, CancelMiniAppM1ImportParams,
     CloseMiniAppM1SurfaceSessionParams, CommitMiniAppM1LifecycleParams,
     CreateMiniAppM1Params, CreateMiniAppM1WithSourceParams,
     ExecuteMiniAppM1SurfaceKvParams, FailMiniAppM1DeleteParams,
     FailMiniAppM1ExportOperationParams, FailMiniAppM1ImportParams,
-    FinalizeMiniAppM1DeleteParams, FinishMiniAppM1BuildAndRecordReadyParams,
+    FinalizeMiniAppM1DeleteParams, FinalizeMiniAppSourceMutationParams,
+    FinishMiniAppM1BuildAndRecordReadyParams,
     FinishMiniAppM1BuildOperationParams, FinishMiniAppM1ExportOperationParams,
     FinishMiniAppM1ImportReadyParams, IMiniAppM1Repository,
     FinishMiniAppM1BackupImportParams, MiniAppM1BackupExportSnapshot,

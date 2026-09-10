@@ -75,6 +75,55 @@ async function workshop(context, miniappId, phase) {
   );
 }
 
+async function editUiSource(context, current) {
+  const path = 'ui/index.html';
+  const source = await productApi(
+    context,
+    `/api/miniapps/${encodeURIComponent(current.miniapp.miniapp_id)}/source/files/${encodeURIComponent(path)}`,
+    { phase: 'miniapp.ui.source.read' },
+  );
+  const previousDigest = requireString(
+    source?.source_snapshot_digest,
+    'miniapp_source_file_digest_missing',
+    'MiniApp Source file response omitted its exact snapshot digest',
+  );
+  const previousGeneration = requireInteger(
+    source?.build_generation,
+    'miniapp_source_file_generation_missing',
+    'MiniApp Source file response omitted its build generation',
+  );
+  const content = requireString(
+    source?.content,
+    'miniapp_source_file_content_missing',
+    'MiniApp Source file response omitted its text content',
+  );
+  const edited = await productApi(
+    context,
+    `/api/miniapps/${encodeURIComponent(current.miniapp.miniapp_id)}/source/edit`,
+    {
+      method: 'POST',
+      phase: 'miniapp.ui.source.edit',
+      body: {
+        miniapp_id: current.miniapp.miniapp_id,
+        expected_product_revision: current.miniapp.product_revision,
+        project_id: current.project_id,
+        expected_project_revision: current.project_revision,
+        expected_build_generation: previousGeneration,
+        expected_source_snapshot_digest: previousDigest,
+        path,
+        content: `${content}\n<!-- installed-candidate-v2 -->\n`,
+      },
+    },
+  );
+  if (
+    edited.build_generation !== previousGeneration + 1 ||
+    edited.source_snapshot_digest === previousDigest
+  ) {
+    failure('miniapp_source_edit_not_committed', 'Source edit did not advance the exact Project generation and digest');
+  }
+  return edited;
+}
+
 async function createMiniApp(context, kind, displayName) {
   const current = await library(context, `miniapp.${kind}.library_before_create`);
   const created = await productApi(context, '/api/miniapps/projects', {
@@ -379,6 +428,7 @@ async function checkUiLifecycleTransfer(context, state) {
   await surfaceAsset(context, descriptor, 404);
 
   current = await workshop(context, current.miniapp.miniapp_id, 'miniapp.ui.before_second_build');
+  current = await editUiSource(context, current);
   current = await buildMiniApp(context, current);
   const second = structuredClone(current.ready.release);
   if (second.release_id === first.release_id) {

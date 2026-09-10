@@ -190,6 +190,31 @@ export interface CreateMiniAppProjectRequest {
   kind: MiniAppKind;
 }
 
+export interface MiniAppSourceFile {
+  miniapp_id: MiniAppId;
+  project_id: string;
+  path: string;
+  content: string;
+  source_snapshot_digest: string;
+  build_generation: number;
+}
+
+export interface GetMiniAppSourceFileRequest {
+  miniapp_id: MiniAppId;
+  path: string;
+}
+
+export interface ReplaceMiniAppSourceFileRequest {
+  miniapp_id: MiniAppId;
+  expected_product_revision: number;
+  project_id: string;
+  expected_project_revision: number;
+  expected_build_generation: number;
+  expected_source_snapshot_digest: string;
+  path: string;
+  content: string;
+}
+
 export interface BuildMiniAppRequest {
   miniapp_id: MiniAppId;
   expected_product_revision: number;

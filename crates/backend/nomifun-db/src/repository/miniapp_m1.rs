@@ -12,8 +12,9 @@ pub use crate::models::MiniAppKvRow;
 use crate::models::{
     MiniAppM1Kind, MiniAppM1LibrarySnapshot, MiniAppM1ProjectSourceState,
     MiniAppM1ReleaseOrigin, MiniAppM1ReleaseSourceKind, MiniAppM1Snapshot,
-    MiniAppProjectRow, MiniAppReleaseArtifactRow, MiniAppReleaseRow, MiniAppSurfaceSessionRow,
-    ProductOperationRow, ProductOperationState,
+    MiniAppProjectRow, MiniAppReleaseArtifactRow, MiniAppReleaseRow,
+    MiniAppSourceMutationIntentRow, MiniAppSurfaceSessionRow, ProductOperationRow,
+    ProductOperationState,
 };
 use crate::repository::plugin_n1::{
     MAX_PRODUCT_OPERATION_LOG_LINE_CHARS, MAX_PRODUCT_OPERATION_LOG_LINES,
@@ -229,6 +230,38 @@ pub struct UpdateMiniAppM1ProjectSourceParams {
     pub build_profile_version: Option<String>,
     pub build_generation: i64,
     pub updated_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BeginMiniAppSourceMutationParams {
+    pub intent_id: String,
+    pub owner_user_id: String,
+    pub miniapp_id: String,
+    pub project_id: String,
+    pub expected_product_revision: i64,
+    pub expected_project_revision: i64,
+    pub expected_build_generation: i64,
+    pub expected_source_digest: String,
+    pub next_source_digest: String,
+    pub next_build_generation: i64,
+    pub created_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FinalizeMiniAppSourceMutationParams {
+    pub intent_id: String,
+    pub owner_user_id: String,
+    pub miniapp_id: String,
+    pub project_id: String,
+    pub updated_at: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AbortMiniAppSourceMutationParams {
+    pub intent_id: String,
+    pub owner_user_id: String,
+    pub miniapp_id: String,
+    pub project_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -613,6 +646,32 @@ pub trait IMiniAppM1Repository: Send + Sync {
         &self,
         params: &UpdateMiniAppM1ProjectSourceParams,
     ) -> Result<MiniAppProjectRow, DbError>;
+
+    async fn begin_source_mutation(
+        &self,
+        params: &BeginMiniAppSourceMutationParams,
+    ) -> Result<MiniAppSourceMutationIntentRow, DbError>;
+
+    async fn finalize_source_mutation(
+        &self,
+        params: &FinalizeMiniAppSourceMutationParams,
+    ) -> Result<MiniAppM1Snapshot, DbError>;
+
+    async fn abort_source_mutation(
+        &self,
+        params: &AbortMiniAppSourceMutationParams,
+    ) -> Result<(), DbError>;
+
+    async fn list_source_mutation_intents(
+        &self,
+    ) -> Result<Vec<MiniAppSourceMutationIntentRow>, DbError>;
+
+    async fn get_source_mutation_intent(
+        &self,
+        owner_user_id: &str,
+        miniapp_id: &str,
+        project_id: &str,
+    ) -> Result<Option<MiniAppSourceMutationIntentRow>, DbError>;
 
     async fn start_build_operation(
         &self,
