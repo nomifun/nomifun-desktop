@@ -85,14 +85,23 @@ async function fetchWithTimeout(url, options, timeoutMs = HTTP_TIMEOUT_MS) {
 async function productApi(context, path, options = {}) {
   const method = options.method ?? 'GET';
   const expected = options.expected ?? [200];
-  const response = await fetchWithTimeout(`${context.getBaseUrl()}${path}`, {
-    method,
-    headers: {
-      authorization: `Bearer ${context.installationToken}`,
-      ...(options.body === undefined ? {} : { 'content-type': 'application/json' }),
-    },
-    ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
-  });
+  let response;
+  try {
+    response = await fetchWithTimeout(`${context.getBaseUrl()}${path}`, {
+      method,
+      headers: {
+        authorization: `Bearer ${context.installationToken}`,
+        ...(options.body === undefined ? {} : { 'content-type': 'application/json' }),
+      },
+      ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
+    }, options.timeoutMs ?? HTTP_TIMEOUT_MS);
+  } catch (error) {
+    failure('product_api_transport', `${method} ${path} did not complete within its transport budget`, {
+      phase: options.phase ?? path,
+      timeout_ms: options.timeoutMs ?? HTTP_TIMEOUT_MS,
+      transport_error: error instanceof Error ? error.name : 'unknown',
+    });
+  }
   const text = await response.text();
   let body = null;
   try {
@@ -220,6 +229,7 @@ async function buildAndTest(context, detail) {
     {
       method: 'POST',
       phase: 'plugin.build',
+      timeoutMs: 180_000,
       body: {
         project_id: projectId,
         expected_project_revision: detail.summary.project_revision,
@@ -247,6 +257,7 @@ async function buildAndTest(context, detail) {
     {
       method: 'POST',
       phase: 'plugin.test',
+      timeoutMs: 180_000,
       body: {
         project_id: projectId,
         expected_project_revision: built.summary.project_revision,
@@ -380,7 +391,7 @@ async function pageApi(client, baseUrl, path, options = {}) {
     let body = null;
     try { body = text.length > 0 ? JSON.parse(text) : null; } catch {}
     return {status: response.status, body};
-  })()`, HTTP_TIMEOUT_MS);
+  })()`, options.timeoutMs ?? HTTP_TIMEOUT_MS);
   const expected = options.expected ?? [200];
   if (!expected.includes(result?.status)) {
     failure('page_api_status', `${request.method} ${path} failed in the installed WebView`, {
@@ -656,8 +667,9 @@ async function invokeInstalledPluginThroughAgent(context, expectedVersion) {
       baseUrl,
       `/api/agent-sessions/${encodeURIComponent(sessionId)}/turns`,
       {
-        method: 'POST',
-        phase: 'agent.start_turn',
+      method: 'POST',
+      phase: 'agent.start_turn',
+      timeoutMs: 180_000,
         body: {
           input: { content: 'Invoke the candidate echo tool with candidate-product-payload.' },
           idempotency_key: `candidate-${Date.now()}`,
@@ -745,6 +757,7 @@ async function beginAndCommitRuntime(context, status, runtime, acknowledge) {
   const begun = await productApi(context, '/api/javascript-runtime/switch/begin', {
     method: 'POST',
     phase: 'runtime.switch.begin',
+    timeoutMs: 180_000,
     body: {
       expected_selection_revision: status.selection_revision,
       ...(status.selected
@@ -764,6 +777,7 @@ async function beginAndCommitRuntime(context, status, runtime, acknowledge) {
   const committed = await productApi(context, '/api/javascript-runtime/switch/decision', {
     method: 'POST',
     phase: 'runtime.switch.commit',
+    timeoutMs: 180_000,
     body: {
       expected_selection_revision: begun.selection_revision,
       candidate_runtime_id: runtime.runtime_installation_id,
@@ -873,6 +887,7 @@ async function checkRuntimeSwitchRestartFault(context) {
   const begun = await productApi(context, '/api/javascript-runtime/switch/begin', {
     method: 'POST',
     phase: 'runtime.switch.interrupted_begin',
+    timeoutMs: 180_000,
     body: {
       expected_selection_revision: candidateB.status.selection_revision,
       expected_selected_runtime_id: committedRuntimeId,
@@ -930,6 +945,7 @@ async function checkPluginLifecycle(context) {
     {
       method: 'POST',
       phase: 'plugin.apply.initial',
+      timeoutMs: 180_000,
       body: {
         project_id: project.summary.project_id,
         expected_project_revision: project.summary.project_revision,
@@ -964,6 +980,7 @@ async function checkPluginLifecycle(context) {
     {
       method: 'POST',
       phase: 'plugin.apply.replace',
+      timeoutMs: 180_000,
       body: {
         project_id: project.summary.project_id,
         expected_project_revision: project.summary.project_revision,
@@ -997,6 +1014,7 @@ async function checkPluginLifecycle(context) {
     {
       method: 'POST',
       phase: 'plugin.restore',
+      timeoutMs: 180_000,
       body: {
         mount_id: mountId,
         expected_mount_revision: replaced.summary.mount_revision,
