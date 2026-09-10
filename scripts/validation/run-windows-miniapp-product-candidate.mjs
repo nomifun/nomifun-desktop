@@ -11,8 +11,9 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  writeFileSync,
 } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -23,7 +24,6 @@ import {
 import {
   auditInteractiveNames,
   canonicalJson,
-  capturePage,
   connectToProductPage,
   productApi,
   resolveCurrentCandidate,
@@ -892,12 +892,25 @@ async function settleDesktopPaint(client) {
 
 async function captureSettledPage(client, outputPath) {
   await settleDesktopPaint(client);
-  await client.command('Page.captureScreenshot', {
+  // WebView2 can offset outer-page layers when the default surface capture
+  // composites a sandboxed out-of-process iframe. Capture the visible view so
+  // evidence matches the actual Desktop window rather than that OOPIF artifact.
+  const screenshot = await client.command('Page.captureScreenshot', {
     format: 'png',
     captureBeyondViewport: false,
+    fromSurface: false,
   });
+  const bytes = Buffer.from(screenshot.data, 'base64');
+  if (bytes.length < 1_024) {
+    failure('desktop_screenshot_invalid', 'Desktop screenshot is unexpectedly small');
+  }
+  writeFileSync(outputPath, bytes, { flag: 'wx' });
   await sleep(200);
-  return capturePage(client, outputPath);
+  return {
+    path: relative(REPO_ROOT, outputPath).replaceAll('\\', '/'),
+    size_bytes: bytes.length,
+    sha256: sha256(bytes),
+  };
 }
 
 async function checkDesktopA11y(context, state) {
