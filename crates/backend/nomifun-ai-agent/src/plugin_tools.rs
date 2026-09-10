@@ -150,6 +150,7 @@ struct NomiMiniAppToolActionIdentity {
 pub struct NomiPluginToolAction {
     provider_name: String,
     activation_identity: String,
+    artifact_identity: String,
     description: String,
     input_schema: StrictJsonValue,
     identity: NomiPluginToolActionIdentity,
@@ -163,6 +164,14 @@ impl NomiPluginToolAction {
 
     pub fn activation_identity(&self) -> &str {
         &self.activation_identity
+    }
+
+    /// Semantic identity used only for artifact-output classification.
+    /// Unlike `activation_identity`, this excludes package provenance fields
+    /// such as `artifact_digest` that would make every Plugin Tool look like
+    /// an artifact producer.
+    pub fn artifact_identity(&self) -> &str {
+        &self.artifact_identity
     }
 
     pub fn capability_id(&self) -> &CapabilityId {
@@ -188,6 +197,7 @@ impl NomiPluginToolAction {
 pub struct NomiMiniAppToolAction {
     provider_name: String,
     activation_identity: String,
+    artifact_identity: String,
     description: String,
     input_schema: StrictJsonValue,
     identity: NomiMiniAppToolActionIdentity,
@@ -201,6 +211,10 @@ impl NomiMiniAppToolAction {
 
     pub fn activation_identity(&self) -> &str {
         &self.activation_identity
+    }
+
+    pub fn artifact_identity(&self) -> &str {
+        &self.artifact_identity
     }
 
     pub fn capability_id(&self) -> &CapabilityId {
@@ -861,7 +875,7 @@ impl Tool for NomiMiniAppTool {
     }
 
     fn artifact_identity(&self) -> &str {
-        &self.action.activation_identity
+        self.action.artifact_identity()
     }
 
     fn deferred_search_aliases(&self) -> Vec<String> {
@@ -955,7 +969,7 @@ impl Tool for NomiPluginTool {
     }
 
     fn artifact_identity(&self) -> &str {
-        &self.action.activation_identity
+        self.action.artifact_identity()
     }
 
     fn deferred_search_aliases(&self) -> Vec<String> {
@@ -1071,6 +1085,11 @@ fn build_action(
         identity.action.action_id.as_ref(),
         &canonical_identity,
     );
+    let artifact_identity = format!(
+        "{} {}",
+        identity.resolved_capability.capability.id.as_ref(),
+        identity.action.action_id.as_ref(),
+    );
     let description = if description.trim().is_empty() {
         format!("{display_name} action {}", identity.action.action_id.as_ref())
     } else {
@@ -1082,6 +1101,7 @@ fn build_action(
     Ok(NomiPluginToolAction {
         provider_name,
         activation_identity,
+        artifact_identity,
         description,
         input_schema,
         identity,
@@ -1123,6 +1143,11 @@ fn build_miniapp_action(
         identity.action.action_id.as_ref(),
         &canonical_identity,
     );
+    let artifact_identity = format!(
+        "{} {}",
+        identity.resolved_capability.capability.id.as_ref(),
+        identity.action.action_id.as_ref(),
+    );
     let description = if description.trim().is_empty() {
         format!("{display_name} action {}", identity.action.action_id.as_ref())
     } else {
@@ -1134,6 +1159,7 @@ fn build_miniapp_action(
     Ok(NomiMiniAppToolAction {
         provider_name,
         activation_identity,
+        artifact_identity,
         description,
         input_schema,
         identity,

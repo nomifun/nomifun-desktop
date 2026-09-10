@@ -681,6 +681,20 @@ async fn dynamic_schema_registers_and_kernel_invoke_preserves_native_tools() {
     assert!(action.activation_identity().contains(AGENT_TOOL));
     assert!(action.activation_identity().contains(AGENT_ACTION));
     assert!(action.activation_identity().contains(&"a".repeat(64)));
+    assert_eq!(
+        action.artifact_identity(),
+        format!("{AGENT_TOOL} {AGENT_ACTION}")
+    );
+    assert!(
+        nomi_agent::output::artifact_contract(action.artifact_identity())
+            .is_none(),
+        "ordinary Plugin Tools must not inherit artifact obligations from provenance JSON"
+    );
+    assert!(
+        nomi_agent::output::artifact_contract(action.activation_identity())
+            .is_some(),
+        "regression fixture must demonstrate why canonical activation JSON is unsafe for artifact classification"
+    );
 
     let mut registry = ToolRegistry::new();
     assert!(registry.register(Box::new(NativeSentinel)));
@@ -1086,6 +1100,15 @@ async fn miniapp_active_release_action_joins_the_same_nomi_tool_session() {
     let mut registry = ToolRegistry::new();
     session.register_into(&mut registry).unwrap();
     let action = &session.miniapp_actions()[0];
+    assert_eq!(
+        action.artifact_identity(),
+        "miniapp.fixture.echo miniapp.fixture.echo.invoke"
+    );
+    assert!(
+        nomi_agent::output::artifact_contract(action.artifact_identity())
+            .is_none(),
+        "ordinary MiniApp Tools must not inherit artifact obligations from release provenance"
+    );
     let result = registry
         .get(action.provider_name())
         .unwrap()
