@@ -1073,14 +1073,23 @@ async function checkPluginLifecycle(context) {
   };
 }
 
-async function waitForPageSelector(client, hashRoute, selector, timeoutMs = 30_000) {
+async function waitForPageSelector(
+  client,
+  hashRoute,
+  selector,
+  timeoutMs = 30_000,
+  expectedText = null,
+) {
   await client.evaluate(`(() => { window.location.hash = ${JSON.stringify(hashRoute)}; return true; })()`);
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const state = await client.evaluate(`(() => {
       const element = document.querySelector(${JSON.stringify(selector)});
       return {
-        ready: Boolean(element),
+        ready: Boolean(element) && (
+          ${JSON.stringify(expectedText)} === null ||
+          (document.body?.innerText ?? '').includes(${JSON.stringify(expectedText)})
+        ),
         text: document.body?.innerText ?? '',
       };
     })()`);
@@ -1148,6 +1157,8 @@ async function checkDesktopProductA11y(context) {
       client,
       '/plugins?tab=workshop',
       'aside[aria-label]',
+      30_000,
+      'Installed Candidate Plugin',
     );
     if (!plugin.text.includes('Installed Candidate Plugin')) {
       failure('plugin_workshop_fixture_missing', 'Installed Plugin Workshop did not render the accepted Project');
