@@ -29,8 +29,10 @@
 > Plugin SDK declarations、无用户数据 Share Bundle Export/Import-as-new、来源 Test
 > provenance 展示、Desktop Transfer 与 headless import/share/auto-apply CLI 已完成，
 > `N1-4-03` 已关闭。
-> 当前 HEAD 的 0.7.6 NSIS 安装版基础 smoke 已通过；Plugin/MiniApp Candidate、
-> fault、产品验收和 macOS/Linux 外部验证仍未关闭。
+> Plugin N1 Windows Candidate 已在 source commit `a4ddeec70` 完成 18 项安装版
+> product smoke，并由 `windows_candidate/plugin_n1` Gate 整体通过；`N1-1-01`、
+> `N1-2-03`、`N1-U-01` 与 `N1-V-01` 已关闭。MiniApp Candidate、最终 Signed RC
+> 以及 macOS/Linux 外部原生验证仍未关闭。
 >
 > Windows 阶段性交接启动材料：
 > `CROSS-MACHINE-WORK-START-PROMPT-2026-09-09.zh.md`
@@ -66,10 +68,10 @@
 
 | 分类 | 数量 | 项目 |
 | --- | ---: | --- |
-| 已关闭 | 25 | 当前表内已关闭的 W0/N1/M1 项，包含 `N1-4-01`、`N1-4-02`、`N1-4-03`、`N1-X-02`、`M1-0-01`、`M1-0-02-A`、`M1-0-02-B`、`M1-1-01`、`M1-1-02`、`M1-2-01` |
-| 正在实施 | 3 | `N1-1-01`、`N1-2-03`、`N1-U-01` |
+| 已关闭 | 29 | 当前表内已关闭的 W0/N1/M1 项；Plugin N1（含 `N1-V-01`）已全部关闭，M1 已关闭至 `M1-2-01` |
+| 正在实施 | 0 | 当前 Windows 主线没有 `in-progress` 项 |
 | 已解锁待领取 | 0 | 当前 Windows 主线无未领取的前置切片 |
-| 依赖阻塞 | 5 | `N1-V-01`、`M1-U-01`、`M1-V-01` 与最终 Windows 合流等 |
+| 依赖阻塞 | 3 | `M1-U-01`、`M1-V-01`、`RC-WIN-01` |
 | 外部原生 | 2 | `RC-MA-01`、`RC-LD-01` |
 | 明确延后 | 2 | Marketplace/远程分发、第二 Runtime |
 
@@ -408,7 +410,7 @@
 
 | ID | 状态 | Owner/写集 | 目标 | 依赖 | 最小验证 |
 | --- | --- | --- | --- | --- | --- |
-| `N1-1-01` | in-progress | Runtime lane；`nomifun-js-runtime/**`、App composition、Plugin Runtime boundary | Node probe/download、唯一 committed Runtime authority、全局 admission fence、drain/stop/validation/commit-or-restore | `N1-0-02` | Runtime 21 + SQLite 3 + App route 3；authority/lease、071 reselection、pending recovery、Runtime-bound Host/Build/Test 与 fixed Build Foundation 已接；仍需真实 installed switch/fault/restart Gate |
+| `N1-1-01` | closed | Runtime lane；`nomifun-js-runtime/**`、App composition、Plugin Runtime boundary | Node probe/download、唯一 committed Runtime authority、全局 admission fence、drain/stop/validation/commit-or-restore | `N1-0-02` | Runtime/SQLite/App 定向回归；`a4ddeec70` 安装版完成 committed switch、两次 PID 变化重启、无效路径 typed fault、stale revision 拒绝与重启后 selection 保持；finalizer-before-fence-release 死锁回归已修复 |
 | `N1-1-02` | closed | Runtime lane；新 `nomifun-js-host/**` | lazy shared Extension Host、独立 Candidate Test Host、private IPC/Hello、watchdog、whole-tree cleanup、late-result fence | `N1-1-01` | Host 14；role-isolated process、demand=0、crash/restart、child cleanup、quiescent fence、installed-path materialization |
 | `N1-1-03` | closed | Kernel+Runtime 边界；`nomifun-js-kernel-adapter/**`、Kernel typed exports、Shared Host API | 普通 Plugin Tool/Context/Resource 的 Node proxy；N1 明确拒绝 Role Provider/Plugin Service | `N1-0-03`,`N1-1-02` | Host 13、Adapter 4、Kernel 23、Agent Platform 16；exact Artifact handle fence；无 Rust/Node 双 Registry |
 
@@ -419,7 +421,7 @@
 | `N1-2-00` | closed | Artifact lane；`nomifun-plugin-platform/**` | directory/zip containment、canonical digest、immutable CAS staging/publish | `N1-0-02` | 9 tests；tamper/traversal/collision/cancel/idempotency |
 | `N1-2-01` | closed | DB lane；migration 067/068/070/071、新 repository | Artifact/Project/Candidate/current/previous/Mount/Operation/retained data、Project display metadata 与 Runtime selection schema/path CAS | `N1-0-02` | `6debcb628` + 070/071；Plugin repository 13、Runtime selection 2、ID schema 20；fresh/restart/direct-SQL guards |
 | `N1-2-02` | closed | Plugin platform lane；migration 069、DB repository、owner mutation coordinator | Config、Credential slot binding、KV/CAS、stable `dataDir`、owner mutation lock | `N1-2-01`,`N1-1-02` | `a275ddd97`,`a16cfbeff`；repository 12 + ID/schema 20 + lifecycle 31 |
-| `N1-2-03` | in-progress | Plugin application-service/App lane；`nomifun-plugin-service/**`、`nomifun-app/src/router/plugin_platform.rs`、Runtime-bound Host | staging/containment/digest/install/replace/restore/uninstall/delete-data/project-delete 与真实 App/Kernel/Runtime 组合 | `N1-2-01`,`N1-2-02` | service 15 + App publisher E2E 1；Runtime-bound Shared/Candidate/Build Host、enable runtime gate、metadata/TestReceipt/Operation 已接；仍需安装版闭环、完整 Candidate/Apply/Restore 与 fault Gate |
+| `N1-2-03` | closed | Plugin application-service/App lane；`nomifun-plugin-service/**`、`nomifun-app/src/router/plugin_platform.rs`、Runtime-bound Host | staging/containment/digest/install/replace/restore/uninstall/delete-data/project-delete 与真实 App/Kernel/Runtime 组合 | `N1-2-01`,`N1-2-02` | `a4ddeec70` 安装版两代 Source→Build→Test→Apply，真实 Agent→Kernel→Shared Host Invoke 返回 `candidate-v2`，随后 Restore 回第一代 exact Artifact；library revision JSON-safe CAS 与 Plugin artifact identity 回归已覆盖 |
 
 ## N1-3：Catalog 与消费者
 
@@ -443,8 +445,8 @@
 | --- | --- | --- | --- | --- | --- |
 | `N1-X-01` | closed | Skill lane；新 `nomifun-skill-library/**` | 把 `skill_service`、builtin skills、Skill market 从 `nomifun-extension` 抽为独立 owner | `W0-01` | `610b59007`；Skill Library 150 passed/2 ignored；Extension/消费者 checks passed |
 | `N1-X-02` | closed | demolition lane；旧 Extension 生产链 | 删除旧 Extension loader/registry/hub/hot reload/permissions/settings/webui/agent/theme 路径 | `N1-X-01`,`N1-3-03`,`N1-4-03` | `nomifun-extension` crate、旧 `/api/extensions/*`/Hub/生产消费者已物理清理；剩余仅历史删除合同、负向测试和新 JS Host 的历史命名 |
-| `N1-U-01` | in-progress | UI lane；新 `pages/plugins/**`、`pages/settings/RuntimeManager/**` | Plugin Library/Workshop/配置/诊断、Node Runtime Manager；MCP 页面只保留 MCP | `N1-2-03`,`N1-4-02` | Plugin/Runtime targeted tests、dependency dialog、auto-Apply bridge/model、i18n/icons/production build 已通过；仍需 Desktop product/a11y/视觉走查 |
-| `N1-V-01` | blocked | 集成 Owner | Windows N1 contract/integration/fault/product/NSIS candidate | 所有 N1 项 | authored JS/TS → Test → Apply → invoke → Restore |
+| `N1-U-01` | closed | UI lane；新 `pages/plugins/**`、`pages/settings/RuntimeManager/**` | Plugin Library/Workshop/配置/诊断、Node Runtime Manager；MCP 页面只保留 MCP | `N1-2-03`,`N1-4-02` | targeted/UI production build；安装版 Plugin 窗口 23、Runtime Manager 6 个 visible interactive control 全部具名；两张 PNG 截图经人工视觉检查无明显布局异常 |
+| `N1-V-01` | closed | 集成 Owner | Windows N1 contract/integration/fault/product/NSIS candidate | 所有 N1 项 | source `a4ddeec70`；18/18 安装版 smoke PASS；Plugin N1 Windows Candidate Gate PASS，cohort `360adb09d405daac79163883098541d235f5f4a78cf75399017f2318bd5d1e18` |
 
 ## M1：Full-stack MiniApp
 
@@ -915,3 +917,49 @@ Extension 命中仅属于历史删除合同、负向 404 测试、通用语义�
    CLI parse/help 2；UI bridge/model 15、Share dialog 1、dependency dialog 2、i18n 与
    production build、contract generator write/check 与定向 Clippy 通过。安装版一站式 Build→Test→Apply→Invoke→Restore/Share smoke
    继续归 `N1-V-01`，不以 crate 测试冒充 Candidate PASS。
+
+## 2026-09-11 Plugin N1 Windows Candidate 收口
+
+1. `N1-1-01`、`N1-2-03`、`N1-U-01` 与 `N1-V-01` 已关闭。最终冻结 source
+   commit 为 `a4ddeec70643d6b9fd2fd719f23be289c9d93048`；NSIS 安装器 SHA-256 为
+   `93fbe4216c4c4c69909942f62b026f5bf629729ffdab8ffc05834479185dcd52`，安装后
+   x64 主程序 SHA-256 为
+   `a0a9ecc7bb9d799cf5b268eb9671b932423cc2f11727a74e8cfb2254e026b57c`。
+2. 安装版 product runner 共 18 项全部 PASS：干净 source checkpoint、隔离安装、x64
+   二进制、启动/port/health/WebView2 CDP、installation-token 控制面、Runtime
+   switch/restart/fault、Plugin lifecycle/Invoke/Restore、Desktop a11y、精确进程树清理、
+   静默卸载和注册表归零。canonical evidence 位于
+   `build.noindex/windows-candidate/a4ddeec70/product-runs/mtvr04gd-17as`。
+3. Runtime 使用复制到隔离数据根的真实 Node 24.18.0 完成 committed switch；提交后和
+   fault 后各重启一次 Desktop，PID 均变化且 selection digest 保持。无效路径产生
+   `NODE_PROBE_FAILED`，stale revision switch 返回 typed conflict。实跑发现并修复了
+   committed CAS 后仍持 write fence 调用 availability finalizer 的 read/write 自死锁；
+   新回归测试直接让 finalizer 反向读取 committed Runtime，必须在 1 秒内完成。
+4. Headless 产品控制面现在接受 installation Bearer 并只绑定 canonical installation
+   owner；错误 token、普通 JWT 对 Plugin local-product surface、以及 installation token
+   对 Agent Catalog 均 fail closed。非 ambient Bearer 正确跳过 cookie CSRF，但有效性和
+   scope 仍由后续 auth/owner/local-product middleware 决定。
+5. Plugin Project 使用两代同版本不同 digest Artifact：第一代
+   `886730583386df4fbc20fb49cc528796e8fbbb4076f79cf847996c45b9b389eb`，第二代
+   `4f80ad9c740b3d11283396239fbad4a2a091bc9d28a0aa551c1d9099c6ff1d14`。两代均完成
+   Build/Test/Apply；本地 deterministic OpenAI-compatible mock 只决定 Tool call，不伪造
+   结果，真实 Agent→Kernel→Shared Host Invoke 返回 `candidate-v2`，随后 Restore 把
+   current/previous 精确交换回第一代。
+6. 实跑另修复两个只会在 JS 产品边界出现的问题：content-derived Plugin library
+   revision 现限制为非零 53-bit JSON-safe integer，避免 Desktop/CLI 往返丢精度导致
+   `PLUGIN_STALE`；Plugin/MiniApp Tool 的完整 activation identity 与 artifact semantic
+   identity 已分离，普通 JSON Tool 不再因 provenance 中固定存在 `package`、
+   `artifact_digest` 而被误判为文件产物，exact activation digest 锁保持不变。
+7. Desktop 安装版可访问性扫描覆盖 Plugin 工作台 23 个、Runtime Manager 6 个 visible
+   interactive control，均有 accessible name。截图
+   `evidence/plugin-workshop.png`（SHA-256
+   `7f8a76e2c62763913a7ada443c510e6fb5cbc4a83ce9bbf0df9db700d4520bf5`）与
+   `evidence/runtime-manager.png`（SHA-256
+   `854b1e83c56cd733cd6e1931d4ec1ae4521db72633807fc2bf99c20a449936c5`）经人工检查
+   无明显重叠、不可辨识控件或状态层级异常。
+8. Plugin N1 `windows_candidate/plugin_n1` Gate 整体 PASS，canonical result 位于
+   `build.noindex/plugin-n1-gate/n1-win-a4ddeec70/windows_candidate/plugin_n1-windows_desktop_x64.result.json`，
+   cohort digest 为
+   `360adb09d405daac79163883098541d235f5f4a78cf75399017f2318bd5d1e18`。MiniApp M1
+   installed product/a11y、最终 Signed RC 与 macOS/Linux 原生 Gate 继续保持未关闭，
+   不由本次 Plugin N1 Candidate 代替。
