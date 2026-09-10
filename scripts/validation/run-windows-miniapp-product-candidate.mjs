@@ -831,7 +831,30 @@ async function auditPage(client, rootSelector, phase) {
       missing: audit.missing,
     });
   }
-  return audit;
+  const layout = await client.evaluate(`(() => {
+    const scrolling = document.scrollingElement ?? document.documentElement;
+    const content = document.querySelector('.layout-content');
+    return {
+      viewport_width: document.documentElement.clientWidth,
+      document_scroll_width: scrolling.scrollWidth,
+      document_scroll_left: scrolling.scrollLeft,
+      content_client_width: content?.clientWidth ?? 0,
+      content_scroll_width: content?.scrollWidth ?? 0,
+      content_scroll_left: content?.scrollLeft ?? 0,
+    };
+  })()`);
+  if (
+    layout.document_scroll_width > layout.viewport_width + 1 ||
+    layout.document_scroll_left !== 0 ||
+    layout.content_scroll_width > layout.content_client_width + 1 ||
+    layout.content_scroll_left !== 0
+  ) {
+    failure('miniapp_desktop_horizontal_overflow', `${phase} drifted outside the Desktop content viewport`, {
+      phase,
+      layout,
+    });
+  }
+  return { ...audit, layout };
 }
 
 async function checkDesktopA11y(context, state) {

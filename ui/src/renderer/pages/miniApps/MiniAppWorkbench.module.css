@@ -3,7 +3,7 @@
   --miniapp-muted: var(--color-text-3);
   --miniapp-surface: var(--color-bg-2);
   --miniapp-inset: var(--color-fill-1);
-  min-width: 980px;
+  min-width: 0;
 }
 
 .toolbar {
@@ -837,6 +837,7 @@
 }
 
 .surfaceSection {
+  min-width: 0;
   border-top: 1px solid var(--miniapp-border);
   background: var(--color-bg-1);
 }
@@ -862,6 +863,9 @@
 
 .surfaceViewport {
   position: relative;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
   min-height: 520px;
   margin: 0 20px 20px;
   overflow: hidden;
@@ -873,6 +877,7 @@
 .surfaceFrame {
   display: block;
   width: 100%;
+  max-width: 100%;
   min-height: 520px;
   height: min(720px, 68vh);
   border: 0;
@@ -1052,10 +1057,6 @@
 }
 
 @media (max-width: 1180px) {
-  .page {
-    min-width: 900px;
-  }
-
   .workspace {
     grid-template-columns: minmax(236px, 276px) minmax(0, 1fr);
   }
