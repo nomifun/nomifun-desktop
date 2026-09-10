@@ -821,54 +821,111 @@ function processIsRunning(pid) {
   }
 }
 
-async function waitForChildExit(child, timeoutMs) {
-  if (!child || child.exitCode !== null || child.signalCode !== null) {
-    return true;
+function descendantProcessIdsSync(rootPid, timeoutMs = 5_000) {
+  if (!Number.isInteger(rootPid) || rootPid <= 0) return [];
+  const script = [
+    `$rootPid = ${rootPid}`,
+    '$all = @(Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId)',
+    '$frontier = @($rootPid)',
+    '$result = @()',
+    'while ($frontier.Count -gt 0) {',
+    '  $next = @()',
+    '  foreach ($parentPid in $frontier) {',
+    '    $children = @($all | Where-Object { $_.ParentProcessId -eq $parentPid })',
+    '    foreach ($childProcess in $children) {',
+    '      $result += [int]$childProcess.ProcessId',
+    '      $next += [int]$childProcess.ProcessId',
+    '    }',
+    '  }',
+    '  $frontier = $next',
+    '}',
+    'ConvertTo-Json -Compress -InputObject @($result)',
+  ].join('; ');
+  const result = spawnSync(
+    'powershell.exe',
+    ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
+    {
+      shell: false,
+      windowsHide: true,
+      encoding: 'utf8',
+      stdio: 'pipe',
+      timeout: timeoutMs,
+    },
+  );
+  if (result.status !== 0 || result.error) {
+    fail('process_tree_snapshot_failed', 'failed to snapshot the Desktop process tree');
   }
-  return new Promise((resolvePromise) => {
-    let settled = false;
-    const finish = (exited) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      child.off('close', onClose);
-      resolvePromise(exited);
-    };
-    const onClose = () => finish(true);
-    const timer = setTimeout(() => finish(false), timeoutMs);
-    child.once('close', onClose);
-  });
+  const parsed = JSON.parse(String(result.stdout || '[]'));
+  const values = Array.isArray(parsed) ? parsed : [parsed];
+  if (!values.every((pid) => Number.isInteger(pid) && pid > 0)) {
+    fail('process_tree_snapshot_invalid', 'Desktop process-tree snapshot contained an invalid PID');
+  }
+  return [...new Set(values)];
+}
+
+function terminateSingleProcessSync(pid, timeoutMs = 5_000) {
+  const result = spawnSync(
+    'taskkill.exe',
+    ['/PID', String(pid), '/F'],
+    {
+      shell: false,
+      windowsHide: true,
+      stdio: 'ignore',
+      timeout: timeoutMs,
+    },
+  );
+  return {
+    pid,
+    status: typeof result.status === 'number' ? result.status : null,
+    timed_out: result.error?.code === 'ETIMEDOUT',
+  };
+}
+
+async function waitForProcessesAbsent(processIds, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let remaining = processIds.filter(processIsRunning);
+  while (remaining.length > 0 && Date.now() < deadline) {
+    await sleep(POLL_INTERVAL_MS);
+    remaining = processIds.filter(processIsRunning);
+  }
+  return remaining;
 }
 
 async function terminateApplicationTree(child, timeoutMs) {
-  const runningBefore = processIsRunning(child?.pid);
-  const cleanup = runningBefore
-    ? terminateProcessTreeSync(child.pid, Math.min(timeoutMs, 10_000))
-    : { attempted: false, status: null, timed_out: false };
-  // `taskkill` is synchronous while Node's event loop is blocked. Windows can
-  // terminate the root successfully but leave the ChildProcess `close` event
-  // queued until after this function attaches its listener; checking the OS
-  // process state first avoids waiting the whole budget and reporting a false
-  // failure for an already-absent root.
-  let closeEventObserved =
-    child?.exitCode !== null || child?.signalCode !== null;
-  let rootExited = !processIsRunning(child?.pid);
-  if (!rootExited) {
-    closeEventObserved = await waitForChildExit(child, timeoutMs);
-    rootExited = !processIsRunning(child?.pid);
+  const rootPid = child?.pid;
+  const runningBefore = processIsRunning(rootPid);
+  const descendants = runningBefore
+    ? descendantProcessIdsSync(rootPid, Math.min(timeoutMs, 5_000))
+    : [];
+  const processIds = [...descendants.reverse(), rootPid].filter(
+    (pid) => Number.isInteger(pid) && pid > 0,
+  );
+  const terminations = [];
+  for (const pid of processIds) {
+    if (!processIsRunning(pid)) continue;
+    terminations.push(
+      terminateSingleProcessSync(pid, Math.min(timeoutMs, 5_000)),
+    );
   }
-  if (!rootExited) {
+  const remaining = await waitForProcessesAbsent(processIds, timeoutMs);
+  if (remaining.length > 0) {
     fail('process_tree_cleanup_failed', 'desktop application process tree remained alive', {
-      root_pid: child?.pid || null,
-      cleanup,
+      root_pid: rootPid || null,
+      remaining_process_ids: remaining,
+      terminations,
     });
   }
   return {
-    root_pid: child?.pid || null,
+    root_pid: rootPid || null,
     running_before: runningBefore,
-    root_exited: rootExited,
-    close_event_observed: closeEventObserved,
-    taskkill: cleanup,
+    root_exited: !processIsRunning(rootPid),
+    descendant_count: descendants.length,
+    remaining_process_ids: remaining,
+    taskkill: {
+      attempted: terminations.length > 0,
+      timed_out: terminations.some((termination) => termination.timed_out),
+      results: terminations,
+    },
   };
 }
 
