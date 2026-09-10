@@ -30,8 +30,8 @@ use nomifun_api_types::{
     ImportPluginRequest,
     PluginDetailDto, PluginLibraryResponseDto, PluginProjectDetailDto,
     RestorePluginPreviousRequest, RetryPluginRequest,
-    SetPluginAutoApplyRequest, SetPluginEnabledRequest, TestPluginCandidateRequest,
-    UninstallPluginRequest, UpdatePluginDependenciesRequest,
+    SetPluginAutoApplyRequest, SetPluginEnabledRequest, SharePluginRequest,
+    TestPluginCandidateRequest, UninstallPluginRequest, UpdatePluginDependenciesRequest,
 };
 use nomifun_auth::CurrentUser;
 use nomifun_db::{
@@ -762,6 +762,10 @@ pub(crate) fn plugin_routes(state: PluginRouterState) -> Router {
         )
         .route("/api/plugin-imports", post(import_prebuilt))
         .route(
+            "/api/plugin-projects/{project_id}/share",
+            post(export_share),
+        )
+        .route(
             "/api/plugin-projects/{project_id}/build",
             post(build_project),
         )
@@ -1010,6 +1014,21 @@ async fn import_prebuilt(
         state
             .service
             .import_prebuilt(user.id.as_str(), request)
+            .await?,
+    )))
+}
+
+async fn export_share(
+    State(state): State<PluginRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    AxumPath(project_id): AxumPath<String>,
+    Json(request): Json<SharePluginRequest>,
+) -> Result<Json<ApiResponse<DurableOperationDetailDto>>, PluginHttpError> {
+    require_route_id("project_id", &project_id, &request.project_id)?;
+    Ok(Json(ApiResponse::ok(
+        state
+            .service
+            .export_share(user.id.as_str(), request)
             .await?,
     )))
 }
@@ -1797,7 +1816,7 @@ mod tests {
         CreatePluginProjectRequest, ImportPluginRequest,
         PluginImportKindDto, PluginProjectLanguageDto,
         PluginProjectSourceStateDto, UninstallPluginRequest,
-        SetPluginAutoApplyRequest, UpdatePluginDependenciesRequest,
+        SetPluginAutoApplyRequest, SharePluginRequest, UpdatePluginDependenciesRequest,
     };
     use nomifun_plugin_service::CreateProjectInput;
     use nomifun_js_runtime::{
@@ -2244,6 +2263,77 @@ mod tests {
             .await
             .unwrap();
         let candidate = project.ready.clone().unwrap();
+        let share_destination = data_root.path().join("exported-plugin-share");
+        let share_response = plugin_routes(state.clone())
+            .layer(Extension(CurrentUser {
+                id: nomifun_common::UserId::parse(owner_user_id.clone()).unwrap(),
+                username: "owner".to_owned(),
+            }))
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(axum::http::Method::POST)
+                    .uri(format!(
+                        "/api/plugin-projects/{}/share",
+                        project.summary.project_id
+                    ))
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&SharePluginRequest {
+                            project_id: project.summary.project_id.clone(),
+                            expected_project_revision: project.summary.project_revision,
+                            source: nomifun_api_types::PluginShareSourceDto::ReadyCandidate,
+                            candidate_id: Some(candidate.candidate.candidate_id.clone()),
+                            expected_candidate_digest: Some(
+                                candidate.candidate.candidate_digest.clone(),
+                            ),
+                            mount_id: None,
+                            expected_mount_revision: None,
+                            expected_target_digest: None,
+                            destination_path: share_destination.display().to_string(),
+                            include_source: false,
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(share_response.status(), StatusCode::OK);
+        assert!(share_destination.join("bundle.json").is_file());
+        let share_digest = nomifun_agent_contracts::digest_bytes(
+            &std::fs::read(share_destination.join("bundle.json")).unwrap(),
+        );
+        let share_import_response = plugin_routes(state.clone())
+            .layer(Extension(CurrentUser {
+                id: nomifun_common::UserId::parse(owner_user_id.clone()).unwrap(),
+                username: "owner".to_owned(),
+            }))
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(axum::http::Method::POST)
+                    .uri("/api/plugin-imports")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&ImportPluginRequest {
+                            expected_library_revision: state
+                                .service
+                                .list_library(&owner_user_id)
+                                .await
+                                .unwrap()
+                                .library_revision,
+                            import_kind: PluginImportKindDto::ShareBundle,
+                            source_path: share_destination.display().to_string(),
+                            expected_bundle_or_artifact_digest: share_digest.as_ref().to_owned(),
+                            target_project_id: None,
+                            expected_project_revision: None,
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(share_import_response.status(), StatusCode::OK);
         let discard_response = plugin_routes(state.clone())
             .layer(Extension(CurrentUser {
                 id: nomifun_common::UserId::parse(owner_user_id.clone()).unwrap(),

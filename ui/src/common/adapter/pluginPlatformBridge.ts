@@ -30,6 +30,7 @@ import type {
   RetryPluginRequest,
   SetPluginEnabledRequest,
   SetPluginAutoApplyRequest,
+  SharePluginRequest,
   TestPluginCandidateRequest,
   UninstallPluginRequest,
   UpdatePluginDependenciesRequest,
@@ -177,6 +178,12 @@ export const plugins = {
   importPrebuilt: withResponseMap(
     httpPost<PluginProjectDetail, ImportPluginRequest>('/api/plugin-imports'),
     mapProjectDetail
+  ),
+  exportShare: withResponseMap(
+    httpPost<DurablePluginOperationDetail, SharePluginRequest>(
+      (request) => `/api/plugin-projects/${encodeURIComponent(request.project_id)}/share`
+    ),
+    mapOperationDetail
   ),
   buildProject: withResponseMap(
     httpPost<PluginProjectDetail, BuildPluginProjectRequest>(

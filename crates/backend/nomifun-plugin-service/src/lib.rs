@@ -10,11 +10,13 @@
 mod error;
 mod repository;
 mod service;
+mod share;
 mod state;
 mod types;
 
 pub use error::*;
 pub use repository::*;
 pub use service::*;
+pub use share::*;
 pub use state::*;
 pub use types::*;

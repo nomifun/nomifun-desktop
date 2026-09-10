@@ -1904,6 +1904,15 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
             ],
         ),
         (
+            "trg_plugin_candidate_imported_provenance_guard",
+            &[
+                "BEFORE INSERT ON PLUGIN_READY_CANDIDATES",
+                "NEW.IMPORTED_TEST_PROVENANCE_JSON IS NOT NULL",
+                "NEW.ORIGIN_KIND <> 'IMPORT'",
+                "RAISE(ABORT, 'ONLY IMPORTED PLUGIN CANDIDATES CAN CARRY SOURCE TEST PROVENANCE')",
+            ],
+        ),
+        (
             "trg_plugin_candidate_receipts_exact_insert",
             &[
                 "BEFORE INSERT ON PLUGIN_CANDIDATE_TEST_RECEIPTS",
@@ -2205,6 +2214,23 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
                 "FROM JSON_EACH(NEW.BOUNDED_LOG_TAIL_JSON) ENTRY",
                 "LENGTH(ENTRY.VALUE) > 4096",
                 "RAISE(ABORT, 'PRODUCT OPERATION LOG TAIL LINES MUST BE BOUNDED STRINGS')",
+            ],
+        ),
+        (
+            "trg_product_operation_result_guard",
+            &[
+                "BEFORE UPDATE OF RESULT_ARTIFACT_DIGESTS_JSON ON PRODUCT_OPERATIONS",
+                "FROM JSON_EACH(NEW.RESULT_ARTIFACT_DIGESTS_JSON) ENTRY",
+                "LENGTH(ENTRY.VALUE) <> 64",
+                "RAISE(ABORT, 'PRODUCT OPERATION RESULT ARTIFACTS MUST BE BOUNDED SHA-256 FACTS')",
+            ],
+        ),
+        (
+            "trg_product_operation_result_insert_guard",
+            &[
+                "BEFORE INSERT ON PRODUCT_OPERATIONS",
+                "NEW.RESULT_ARTIFACT_DIGESTS_JSON <> '{}'",
+                "RAISE(ABORT, 'PRODUCT OPERATION MUST BEGIN WITHOUT RESULT ARTIFACTS')",
             ],
         ),
         (

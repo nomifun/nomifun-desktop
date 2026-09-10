@@ -11,8 +11,8 @@ use nomifun_api_types::{
     BuildPluginProjectRequest, ErrorResponse, MiniAppLibraryResponseDto,
     DeletePluginDataRequest, MiniAppWorkshopDto, PluginDetailDto,
     PluginLibraryResponseDto, PluginProjectDetailDto, RetryPluginRequest,
-    RestorePluginPreviousRequest, SetPluginEnabledRequest, TestPluginCandidateRequest,
-    UninstallPluginRequest,
+    RestorePluginPreviousRequest, SetPluginAutoApplyRequest, SetPluginEnabledRequest,
+    SharePluginRequest, TestPluginCandidateRequest, UninstallPluginRequest,
 };
 use reqwest::{Client, RequestBuilder, StatusCode};
 use serde::de::DeserializeOwned;
@@ -23,8 +23,9 @@ use crate::cli::{
     Cli, HeadlessConnectionArgs, MiniAppCommand, MiniAppListArgs,
     MiniAppShowArgs, PluginCandidateApplyArgs, PluginCandidateCommand,
     PluginCandidateDiscardArgs,
-    PluginCandidateShowArgs, PluginCommand, PluginListArgs, PluginMountArgs,
-    PluginMountCommand, PluginProjectArgs, PluginProjectCommand, PluginShowArgs,
+    PluginAutoApplyCommand, PluginCandidateShowArgs, PluginCommand, PluginImportArgs,
+    PluginListArgs, PluginMountArgs, PluginMountCommand, PluginProjectArgs,
+    PluginProjectCommand, PluginShareCommand, PluginShareExportArgs, PluginShowArgs,
     PluginTestArgs,
 };
 
@@ -58,6 +59,15 @@ async fn run_plugin_inner(
         },
         PluginCommand::Build(args) => run_build(args).await,
         PluginCommand::Test(args) => run_test(args).await,
+        PluginCommand::Import(args) => run_import(args).await,
+        PluginCommand::Share { operation } => match operation {
+            PluginShareCommand::Export(args) => run_share_export(args).await,
+        },
+        PluginCommand::AutoApply { operation } => match operation {
+            PluginAutoApplyCommand::Enable(args) => run_auto_apply(args, true, false).await,
+            PluginAutoApplyCommand::Disable(args) => run_auto_apply(args, false, false).await,
+            PluginAutoApplyCommand::Retry(args) => run_auto_apply(args, true, true).await,
+        },
         PluginCommand::Candidate { operation } => match operation {
             PluginCandidateCommand::Show(args) => run_candidate_show(args).await,
             PluginCandidateCommand::Discard(args) => run_candidate_discard(args).await,
@@ -257,6 +267,134 @@ async fn run_test(args: &PluginTestArgs) -> Result<Value, CliFailure> {
             &format!("/api/plugin-projects/{project_id}/test"),
             &request,
         )
+        .await?;
+    to_value(response)
+}
+
+async fn run_import(args: &PluginImportArgs) -> Result<Value, CliFailure> {
+    validate_digest(&args.expected_digest, "expected-digest")?;
+    let client = HeadlessClient::new(&args.connection)?;
+    let library: ApiResponse<PluginLibraryResponseDto> = client.get_api("/api/plugins").await?;
+    let library = require_data(library, "Plugin library")?;
+    let request = nomifun_api_types::ImportPluginRequest {
+        expected_library_revision: library.library_revision,
+        import_kind: if args.share_bundle {
+            nomifun_api_types::PluginImportKindDto::ShareBundle
+        } else {
+            nomifun_api_types::PluginImportKindDto::PrebuiltArtifact
+        },
+        source_path: args.source_path.display().to_string(),
+        expected_bundle_or_artifact_digest: args.expected_digest.to_ascii_lowercase(),
+        target_project_id: None,
+        expected_project_revision: None,
+    };
+    let response: ApiResponse<PluginProjectDetailDto> =
+        client.post_api("/api/plugin-imports", &request).await?;
+    to_value(response)
+}
+
+async fn run_share_export(args: &PluginShareExportArgs) -> Result<Value, CliFailure> {
+    let project_id = checked_segment(&args.project_id, "project_id")?;
+    let client = HeadlessClient::new(&args.connection)?;
+    let project = fetch_project(&client, &project_id).await?;
+    let request = if args.current_mount {
+        if args.include_source {
+            return Err(CliFailure::usage(
+                "--include-source is only valid for an exact Ready Candidate",
+            ));
+        }
+        let mount_id = project.summary.linked_mount_id.as_deref().ok_or_else(|| {
+            CliFailure::state("the Plugin Project has no linked Mount")
+        })?;
+        let mount_id = checked_segment(mount_id, "mount_id")?;
+        let mount = fetch_mount(&client, &mount_id).await?;
+        let current = mount.summary.current.ok_or_else(|| {
+            CliFailure::state("the linked Plugin Mount has no current target")
+        })?;
+        SharePluginRequest {
+            project_id: project.summary.project_id.clone(),
+            expected_project_revision: project.summary.project_revision,
+            source: nomifun_api_types::PluginShareSourceDto::CurrentMount,
+            candidate_id: None,
+            expected_candidate_digest: None,
+            mount_id: Some(mount_id),
+            expected_mount_revision: Some(mount.summary.mount_revision),
+            expected_target_digest: Some(current.artifact_digest),
+            destination_path: args.output.display().to_string(),
+            include_source: false,
+        }
+    } else {
+        let ready = project.ready.as_ref().ok_or_else(|| {
+            CliFailure::state("the Plugin Project has no Ready Candidate")
+        })?;
+        SharePluginRequest {
+            project_id: project.summary.project_id.clone(),
+            expected_project_revision: project.summary.project_revision,
+            source: nomifun_api_types::PluginShareSourceDto::ReadyCandidate,
+            candidate_id: Some(ready.candidate.candidate_id.clone()),
+            expected_candidate_digest: Some(ready.candidate.candidate_digest.clone()),
+            mount_id: None,
+            expected_mount_revision: None,
+            expected_target_digest: None,
+            destination_path: args.output.display().to_string(),
+            include_source: args.include_source,
+        }
+    };
+    let response: ApiResponse<nomifun_api_types::DurableOperationDetailDto> = client
+        .post_api(&format!("/api/plugin-projects/{project_id}/share"), &request)
+        .await?;
+    to_value(response)
+}
+
+async fn run_auto_apply(
+    args: &PluginProjectArgs,
+    enabled: bool,
+    retry: bool,
+) -> Result<Value, CliFailure> {
+    let project_id = checked_segment(&args.project_id, "project_id")?;
+    let client = HeadlessClient::new(&args.connection)?;
+    let project = fetch_project(&client, &project_id).await?;
+    if retry
+        && project.summary.apply_mode
+            != nomifun_api_types::PluginApplyModeDto::AutoCompatibleWhenIdle
+    {
+        return Err(CliFailure::state(
+            "auto Apply retry requires an existing standing authorization",
+        ));
+    }
+    let (linked_mount_id, expected_linked_mount_revision, expected_linked_target_digest) =
+        if enabled {
+            let mount_id = project.summary.linked_mount_id.as_deref().ok_or_else(|| {
+                CliFailure::state("auto Apply requires an exact linked Mount")
+            })?;
+            let mount_id = checked_segment(mount_id, "mount_id")?;
+            let mount = fetch_mount(&client, &mount_id).await?;
+            let current = mount.summary.current.ok_or_else(|| {
+                CliFailure::state("the linked Plugin Mount has no current target")
+            })?;
+            (
+                Some(mount_id),
+                Some(mount.summary.mount_revision),
+                Some(current.artifact_digest),
+            )
+        } else {
+            (None, None, None)
+        };
+    let request = SetPluginAutoApplyRequest {
+        project_id: project.summary.project_id,
+        expected_project_revision: project.summary.project_revision,
+        expected_build_generation: project.summary.build_generation,
+        linked_mount_id,
+        expected_linked_mount_revision,
+        expected_linked_target_digest,
+        apply_mode: if enabled {
+            nomifun_api_types::PluginApplyModeDto::AutoCompatibleWhenIdle
+        } else {
+            nomifun_api_types::PluginApplyModeDto::AskBeforeApply
+        },
+    };
+    let response: ApiResponse<PluginProjectDetailDto> = client
+        .put_api(&format!("/api/plugin-projects/{project_id}/auto-apply"), &request)
         .await?;
     to_value(response)
 }

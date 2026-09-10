@@ -103,6 +103,7 @@ async fn active_fixture() -> Fixture {
             progress_percent: Some(100),
             last_error_code: None,
             bounded_log_tail: vec!["import succeeded".into()],
+            result_artifact_digests: Default::default(),
             finished_at_ms: 13,
         })
         .await
@@ -120,6 +121,7 @@ async fn active_fixture() -> Fixture {
             source_snapshot_digest: None,
             dependency_lock_digest: None,
             contract_diff: json!({"compatibility": "compatible", "changes": []}),
+            imported_test_provenance: None,
             origin_operation_id,
             expected_generation: 0,
             created_at: 14,
@@ -183,6 +185,15 @@ impl PluginArtifactStorePort for UnavailableArtifactStore {
         _artifact: &nomifun_db::PluginArtifactRow,
     ) -> Result<(), PluginServiceError> {
         Ok(())
+    }
+
+    async fn load_for_share(
+        &self,
+        _artifact: &nomifun_db::PluginArtifactRow,
+    ) -> Result<nomifun_plugin_platform::StoredPluginArtifact, PluginServiceError> {
+        Err(PluginServiceError::integration(
+            "artifact Share is outside this test",
+        ))
     }
 }
 
@@ -311,6 +322,27 @@ impl PluginSourceStorePort for UnavailableSourceStore {
         _retained_mutation_ids: &BTreeSet<String>,
     ) -> Result<(), PluginServiceError> {
         Ok(())
+    }
+
+    async fn export_source_archive(
+        &self,
+        _owner_user_id: &str,
+        _project_id: &str,
+    ) -> Result<nomifun_js_authoring::PluginSourceArchive, PluginServiceError> {
+        Err(PluginServiceError::integration(
+            "Source Share is outside this test",
+        ))
+    }
+
+    async fn import_source_archive(
+        &self,
+        _owner_user_id: &str,
+        _project_id: &str,
+        _archive: &nomifun_js_authoring::PluginSourceArchive,
+    ) -> Result<CreatedPluginSource, PluginServiceError> {
+        Err(PluginServiceError::integration(
+            "Source Share is outside this test",
+        ))
     }
 }
 

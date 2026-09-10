@@ -10,6 +10,7 @@ import {
   parsePluginArtifactId,
   parsePluginCandidateId,
   parsePluginMountId,
+  parsePluginOperationId,
   parsePluginProjectId,
 } from '../types/ids';
 import type {
@@ -19,7 +20,9 @@ import type {
   PluginDetail,
   PluginLibraryResponse,
   PluginProjectDetail,
+  ImportPluginRequest,
   SetPluginAutoApplyRequest,
+  SharePluginRequest,
   UpdatePluginDependenciesRequest,
 } from '../types/pluginPlatform';
 import { plugins } from './pluginPlatformBridge';
@@ -28,6 +31,7 @@ const PROJECT_ID = parsePluginProjectId('0190f5fe-7c00-7a00-8000-000000000001');
 const MOUNT_ID = parsePluginMountId('0190f5fe-7c00-7a00-8000-000000000002');
 const ARTIFACT_ID = parsePluginArtifactId('0190f5fe-7c00-7a00-8000-000000000003');
 const CANDIDATE_ID = parsePluginCandidateId('0190f5fe-7c00-7a00-8000-000000000004');
+const OPERATION_ID = parsePluginOperationId('0190f5fe-7c00-7a00-8000-000000000005');
 const realFetch = globalThis.fetch;
 
 const target = {
@@ -96,6 +100,22 @@ const projectDetail: PluginProjectDetail = {
   direct_dependencies: {},
 };
 
+const exportOperation = {
+  summary: {
+    operation_id: OPERATION_ID,
+    operation_revision: 2,
+    kind: 'export' as const,
+    owner: { owner: 'plugin_project' as const, project_id: PROJECT_ID },
+    state: 'succeeded' as const,
+    cancelable: false,
+    progress_percent: 100,
+    started_at_ms: 1,
+    completed_at_ms: 2,
+  },
+  bounded_log_tail: ['Plugin Share Bundle exported'],
+  result_artifact_digests: { share_bundle: '9'.repeat(64) },
+};
+
 type RecordedCall = {
   method: string;
   path: string;
@@ -111,9 +131,11 @@ function installFetchFixture(): void {
     const body = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined;
     calls.push({ method, path, body });
 
-    const data = path === '/api/plugins'
-      ? library
-      : path.includes('/api/plugin-projects/')
+    const data = path.endsWith('/share')
+      ? exportOperation
+      : path === '/api/plugins'
+        ? library
+        : path === '/api/plugin-imports' || path.includes('/api/plugin-projects/')
         ? projectDetail
         : path.endsWith('/data')
           ? undefined
@@ -300,6 +322,52 @@ describe('Plugin Platform bridge', () => {
       {
         method: 'PUT',
         path: `/api/plugin-projects/${PROJECT_ID}/auto-apply`,
+        body: request,
+      },
+    ]);
+  });
+
+  test('exports an exact Ready Candidate Share Bundle without user data fields', async () => {
+    installFetchFixture();
+    const request: SharePluginRequest = {
+      project_id: PROJECT_ID,
+      expected_project_revision: 5,
+      source: 'ready_candidate',
+      candidate_id: CANDIDATE_ID,
+      expected_candidate_digest: 'd'.repeat(64),
+      destination_path: 'C:\\exports\\plugin-share',
+      include_source: true,
+    };
+
+    const operation = await plugins.exportShare.invoke(request);
+
+    expect(operation.summary.operation_id).toBe(OPERATION_ID);
+    expect(calls).toEqual([
+      {
+        method: 'POST',
+        path: `/api/plugin-projects/${PROJECT_ID}/share`,
+        body: request,
+      },
+    ]);
+    expect(JSON.stringify(calls[0]?.body)).not.toContain('credential');
+    expect(JSON.stringify(calls[0]?.body)).not.toContain('data_dir');
+  });
+
+  test('imports a Share Bundle through the same Ready Candidate boundary', async () => {
+    installFetchFixture();
+    const request: ImportPluginRequest = {
+      expected_library_revision: 12,
+      import_kind: 'share_bundle',
+      source_path: 'C:\\imports\\plugin-share',
+      expected_bundle_or_artifact_digest: '9'.repeat(64),
+    };
+
+    await plugins.importPrebuilt.invoke(request);
+
+    expect(calls).toEqual([
+      {
+        method: 'POST',
+        path: '/api/plugin-imports',
         body: request,
       },
     ]);

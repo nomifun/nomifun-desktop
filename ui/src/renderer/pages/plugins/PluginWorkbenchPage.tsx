@@ -15,6 +15,7 @@ import type {
   PluginProjectId,
   CreatePluginProjectRequest,
   ImportPluginRequest,
+  SharePluginRequest,
   UpdatePluginDependenciesRequest,
 } from '@/common/types/pluginPlatform';
 import { Alert, Button, Input, Modal } from '@arco-design/web-react';
@@ -41,6 +42,7 @@ import {
 } from './PluginWorkbenchDialogs';
 import PluginSourceEditDialog from './PluginSourceEditDialog';
 import PluginDependencyDialog from './PluginDependencyDialog';
+import PluginShareExportDialog from './PluginShareExportDialog';
 import {
   applyPluginCandidateRequest,
   buildPluginProjectRequest,
@@ -93,6 +95,7 @@ const PluginWorkbenchPage: React.FC = () => {
   const [applyDialogVisible, setApplyDialogVisible] = useState(false);
   const [sourceEditDialogVisible, setSourceEditDialogVisible] = useState(false);
   const [dependencyDialogVisible, setDependencyDialogVisible] = useState(false);
+  const [shareDialogVisible, setShareDialogVisible] = useState(false);
   const [configureDialogVisible, setConfigureDialogVisible] = useState(false);
   const mountLoadSequence = useRef(0);
   const projectLoadSequence = useRef(0);
@@ -562,6 +565,30 @@ const PluginWorkbenchPage: React.FC = () => {
     ]
   );
 
+  const handleShareExport = useCallback(
+    async (request: SharePluginRequest) => {
+      if (projectBusyAction) return;
+      setProjectBusyAction('share');
+      setProjectMutationFailure(null);
+      try {
+        const operation = await ipcBridge.plugins.exportShare.invoke(request);
+        setShareDialogVisible(false);
+        await refreshLibrary();
+        message.success(
+          t('pluginWorkbench.messages.shareExported', {
+            digest: operation.result_artifact_digests.share_bundle?.slice(0, 12) ?? '-',
+          })
+        );
+      } catch (error) {
+        console.error('[plugins] Share Bundle export failed', error);
+        setProjectMutationFailure(pluginLoadFailure(error, 'resource'));
+      } finally {
+        setProjectBusyAction(null);
+      }
+    },
+    [message, projectBusyAction, refreshLibrary, t]
+  );
+
   const handleTestCandidate = useCallback(
     async (resolvedTestInputDigest: string) => {
       if (!projectDetail || projectBusyAction) return;
@@ -908,6 +935,10 @@ const PluginWorkbenchPage: React.FC = () => {
                   setDependencyDialogVisible(true);
                 }}
                 onSetAutoApply={handleSetAutoApply}
+                onExportShare={() => {
+                  setProjectMutationFailure(null);
+                  setShareDialogVisible(true);
+                }}
                 onTest={() => setTestDialogVisible(true)}
                 onApply={() => setApplyDialogVisible(true)}
                 onDelete={handleDeleteProject}
@@ -987,6 +1018,18 @@ const PluginWorkbenchPage: React.FC = () => {
           setProjectMutationFailure(null);
         }}
         onSubmit={handleDependencyUpdate}
+      />
+      <PluginShareExportDialog
+        visible={shareDialogVisible}
+        detail={projectDetail}
+        linkedMount={linkedProjectMount}
+        loading={projectBusyAction === 'share'}
+        failure={shareDialogVisible ? projectMutationFailure : null}
+        onCancel={() => {
+          setShareDialogVisible(false);
+          setProjectMutationFailure(null);
+        }}
+        onSubmit={handleShareExport}
       />
     </HubPageShell>
   );

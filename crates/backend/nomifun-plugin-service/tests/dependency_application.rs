@@ -117,6 +117,13 @@ impl PluginArtifactStorePort for UnusedArtifactStore {
     ) -> Result<(), PluginServiceError> {
         Ok(())
     }
+
+    async fn load_for_share(
+        &self,
+        _artifact: &nomifun_db::PluginArtifactRow,
+    ) -> Result<nomifun_plugin_platform::StoredPluginArtifact, PluginServiceError> {
+        Err(PluginServiceError::integration("unused artifact store"))
+    }
 }
 
 #[derive(Default)]

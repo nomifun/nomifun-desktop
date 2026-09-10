@@ -408,6 +408,18 @@ pub struct PluginCandidateTestDto {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct PluginImportedTestProvenanceDto {
+    pub outcome: PluginCandidateTestStatusDto,
+    pub candidate_digest: String,
+    pub runtime_target: String,
+    pub runtime_executable_digest: String,
+    pub host_contract_version: String,
+    pub javascript_sdk_contract_version: String,
+    pub test_contract_version: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PluginAffectedConsumerDto {
     pub surface: PluginConsumerSurfaceDto,
     pub consumer_id: String,
@@ -439,6 +451,8 @@ pub struct PluginReadyCandidateDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_target_digest: Option<String>,
     pub test: PluginCandidateTestDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported_test_provenance: Option<PluginImportedTestProvenanceDto>,
     pub impact: PluginCandidateImpactDto,
 }
 

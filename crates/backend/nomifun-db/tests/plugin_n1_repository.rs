@@ -65,6 +65,7 @@ async fn succeed_operation(
         progress_percent: (kind != ProductOperationKind::MiniappPermanentDelete).then_some(100),
         last_error_code: None,
         bounded_log_tail: vec!["started".into(), "succeeded".into()],
+        result_artifact_digests: Default::default(),
         finished_at_ms: timestamp + 1,
     })
     .await
@@ -152,6 +153,7 @@ async fn managed_fixture() -> ManagedFixture {
             source_snapshot_digest: Some(source_digest.clone()),
             dependency_lock_digest: Some(lock_digest.clone()),
             contract_diff: json!({"compatibility": "initial"}),
+            imported_test_provenance: None,
             origin_operation_id: operation_id,
             expected_generation: 1,
             created_at: 5,
@@ -237,6 +239,7 @@ async fn add_managed_candidate(
             source_snapshot_digest: Some(source_digest.into()),
             dependency_lock_digest: Some(lock_digest.into()),
             contract_diff: json!({"compatibility": "compatible"}),
+            imported_test_provenance: None,
             origin_operation_id: operation_id,
             expected_generation: generation,
             created_at: timestamp + 2,
@@ -804,6 +807,7 @@ async fn runtime_only_read_only_project_imports_generation_zero_candidate_with_e
             source_snapshot_digest: None,
             dependency_lock_digest: None,
             contract_diff: json!({"compatibility": "unknown"}),
+            imported_test_provenance: None,
             origin_operation_id: operation_id,
             expected_generation: 0,
             created_at: 4,
@@ -953,6 +957,7 @@ async fn managed_build_requires_real_source_lock_and_positive_generation() {
             source_snapshot_digest: Some(digest('3')),
             dependency_lock_digest: None,
             contract_diff: json!({}),
+            imported_test_provenance: None,
             origin_operation_id: valid_build,
             expected_generation: 2,
             created_at: 8,
@@ -1002,6 +1007,7 @@ async fn ready_candidate_generation_cas_preserves_previous_ready_on_stale_build(
             source_snapshot_digest: Some(fixture.source_digest),
             dependency_lock_digest: Some(fixture.lock_digest),
             contract_diff: json!({}),
+            imported_test_provenance: None,
             origin_operation_id: operation_id,
             expected_generation: 1,
             created_at: 13,
@@ -1965,6 +1971,7 @@ async fn product_operation_owner_state_progress_error_and_log_contract_is_strict
             progress_percent: Some(42),
             last_error_code: Some("plugin_import_failed".into()),
             bounded_log_tail: vec!["importing".into(), "failed".into()],
+            result_artifact_digests: Default::default(),
             finished_at_ms: 8,
         })
         .await

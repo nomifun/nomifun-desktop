@@ -1111,6 +1111,28 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
         }
         validate_error_code(params.last_error_code.as_deref())?;
         let bounded_log_tail_json = validate_log_tail(&params.bounded_log_tail)?;
+        if params.state != ProductOperationState::Succeeded
+            && !params.result_artifact_digests.is_empty()
+        {
+            return Err(conflict(
+                "only successful product operations can publish result Artifacts",
+            ));
+        }
+        for (name, digest) in &params.result_artifact_digests {
+            if name.is_empty()
+                || name.len() > 64
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte))
+            {
+                return Err(conflict("product operation result Artifact name is invalid"));
+            }
+            validate_digest(digest, "result_artifact_digest")?;
+        }
+        let result_artifact_digests_json = serde_json::to_string(
+            &params.result_artifact_digests,
+        )
+        .map_err(|error| conflict(format!("cannot serialize result Artifact digests: {error}")))?;
         if (params.state == ProductOperationState::Failed) != params.last_error_code.is_some() {
             return Err(conflict(
                 "only failed product operations carry last_error_code",
@@ -1162,13 +1184,15 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
         sqlx::query(
             "UPDATE product_operations
              SET state = ?, progress_percent = ?, last_error_code = ?,
-                 bounded_log_tail_json = ?, finished_at_ms = ?
+                 bounded_log_tail_json = ?, result_artifact_digests_json = ?,
+                 finished_at_ms = ?
              WHERE operation_id = ? AND state = 'running'",
         )
         .bind(params.state.as_str())
         .bind(params.progress_percent.map(i64::from))
         .bind(&params.last_error_code)
         .bind(bounded_log_tail_json)
+        .bind(result_artifact_digests_json)
         .bind(params.finished_at_ms)
         .bind(&params.operation_id)
         .execute(&mut *tx)
@@ -1206,6 +1230,18 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
         )?;
         validate_timestamp(params.created_at, "created_at")?;
         let contract_diff_json = json_object(&params.contract_diff, "contract_diff")?;
+        let imported_test_provenance_json = params
+            .imported_test_provenance
+            .as_ref()
+            .map(|value| json_object(value, "imported_test_provenance"))
+            .transpose()?;
+        if imported_test_provenance_json.is_some()
+            && params.origin != PluginCandidateOrigin::Import
+        {
+            return Err(conflict(
+                "only imported Candidates can carry source Test provenance",
+            ));
+        }
         let mut tx = self.pool.begin().await?;
         let project = lock_project(&mut tx, &params.project_id).await?;
         require_project_generation(&project, params.expected_generation)?;
@@ -1274,8 +1310,9 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
                 candidate_id, project_id, candidate_digest, origin_kind,
                 artifact_id, artifact_digest,
                 base_target_digest, source_snapshot_digest, dependency_lock_digest,
-                contract_diff_json, origin_operation_id, build_generation, created_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                contract_diff_json, imported_test_provenance_json,
+                origin_operation_id, build_generation, created_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&params.candidate_id)
         .bind(&params.project_id)
@@ -1287,6 +1324,7 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
         .bind(&params.source_snapshot_digest)
         .bind(&params.dependency_lock_digest)
         .bind(contract_diff_json)
+        .bind(imported_test_provenance_json)
         .bind(&params.origin_operation_id)
         .bind(params.expected_generation)
         .bind(params.created_at)

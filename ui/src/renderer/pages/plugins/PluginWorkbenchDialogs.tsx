@@ -133,7 +133,7 @@ export const PluginProjectCreateModal: React.FC<PluginProjectCreateModalProps> =
   );
 };
 
-type ImportSourceKind = 'directory' | 'archive';
+type ImportSourceKind = 'directory' | 'archive' | 'share_bundle';
 
 export interface PluginPrebuiltImportModalProps {
   visible: boolean;
@@ -173,7 +173,7 @@ export const PluginPrebuiltImportModal: React.FC<PluginPrebuiltImportModalProps>
     setError(null);
     try {
       const result = await ipcBridge.dialog.showOpen.invoke(
-        sourceKind === 'directory'
+        sourceKind !== 'archive'
           ? { properties: ['openDirectory'] }
           : {
               properties: ['openFile'],
@@ -202,7 +202,8 @@ export const PluginPrebuiltImportModal: React.FC<PluginPrebuiltImportModalProps>
     setError(null);
     await onSubmit({
       expected_library_revision: libraryRevision,
-      import_kind: 'prebuilt_artifact',
+      import_kind:
+        sourceKind === 'share_bundle' ? 'share_bundle' : 'prebuilt_artifact',
       source_path: normalizedPath,
       expected_bundle_or_artifact_digest: normalizedDigest,
     });
@@ -240,6 +241,9 @@ export const PluginPrebuiltImportModal: React.FC<PluginPrebuiltImportModalProps>
           </Radio>
           <Radio value='archive'>
             <Upload theme='outline' size='14' /> {t('pluginWorkbench.dialogs.import.archive')}
+          </Radio>
+          <Radio value='share_bundle'>
+            <Upload theme='outline' size='14' /> {t('pluginWorkbench.dialogs.import.shareBundle')}
           </Radio>
         </Radio.Group>
 

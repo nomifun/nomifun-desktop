@@ -45,6 +45,7 @@ pub use scaffold::PluginScaffoldRequest;
 pub use snapshot::{CapturedSource, SourceFileDigest, SourceSnapshot};
 pub use store::{
     DependencyMutationFacts, DependencyState, DurableDependencyMutation,
-    PreparedDependencyMutation, ScaffoldedPluginProject, SourceEditOutcome,
-    SourceFileEdit, SourceStore, StagedSource, StoredSourceProject,
+    ImportedSourceProject, PluginSourceArchive, PluginSourceFileBytes,
+    PreparedDependencyMutation, ScaffoldedPluginProject, SourceEditOutcome, SourceFileEdit,
+    SourceStore, StagedSource, StoredSourceProject,
 };

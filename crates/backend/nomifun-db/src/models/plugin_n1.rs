@@ -66,6 +66,7 @@ pub struct PluginReadyCandidateRow {
     pub source_snapshot_digest: Option<String>,
     pub dependency_lock_digest: Option<String>,
     pub contract_diff_json: String,
+    pub imported_test_provenance_json: Option<String>,
     pub origin_operation_id: String,
     pub build_generation: i64,
     pub created_at: i64,
@@ -234,6 +235,7 @@ pub struct ProductOperationRow {
     pub progress_percent: Option<i64>,
     pub last_error_code: Option<String>,
     pub bounded_log_tail_json: String,
+    pub result_artifact_digests_json: String,
     pub started_at_ms: i64,
     pub finished_at_ms: Option<i64>,
 }

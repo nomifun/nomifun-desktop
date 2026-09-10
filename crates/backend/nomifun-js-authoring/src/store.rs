@@ -220,6 +220,142 @@ impl SourceStore {
         })
     }
 
+    pub fn export_project_source(
+        &self,
+        scope: &SourceScope,
+        cancellation: &dyn OperationCancellation,
+    ) -> Result<PluginSourceArchive, AuthoringError> {
+        let _mutation = self.lock_mutation()?;
+        check_canceled(cancellation)?;
+        let project = self.load_project(scope)?;
+        let capture = capture_source_tree(&project.source_root, self.limits, cancellation)?;
+        let dependency_lock =
+            self.read_dependency_lock_unlocked(&project, capture.dependency_requests())?;
+        let mut files = Vec::with_capacity(capture.snapshot().files().len());
+        for expected in capture.snapshot().files() {
+            check_canceled(cancellation)?;
+            let path = expected.normalized_relative_path().join(&project.source_root);
+            let bytes = read_regular_bounded(&path, self.limits.max_single_file_bytes)?;
+            if u64::try_from(bytes.len()).unwrap_or(u64::MAX) != expected.size_bytes()
+                || nomifun_agent_contracts::digest_bytes(&bytes) != *expected.digest()
+            {
+                return Err(AuthoringError::SourceChanged {
+                    expected: expected.digest().as_ref().to_owned(),
+                    observed: nomifun_agent_contracts::digest_bytes(&bytes).as_ref().to_owned(),
+                });
+            }
+            files.push(PluginSourceFileBytes {
+                normalized_relative_path: expected.normalized_relative_path().clone(),
+                bytes,
+            });
+        }
+        let observed = capture_source_tree(&project.source_root, self.limits, cancellation)?;
+        if observed.snapshot() != capture.snapshot() {
+            return Err(AuthoringError::SourceChanged {
+                expected: capture.snapshot().digest().as_ref().to_owned(),
+                observed: observed.snapshot().digest().as_ref().to_owned(),
+            });
+        }
+        let observed_lock =
+            self.read_dependency_lock_unlocked(&project, observed.dependency_requests())?;
+        if observed_lock != dependency_lock {
+            return Err(AuthoringError::DependencyLockChanged {
+                expected: dependency_lock.digest()?.as_ref().to_owned(),
+                observed: observed_lock.digest()?.as_ref().to_owned(),
+            });
+        }
+        Ok(PluginSourceArchive {
+            snapshot: capture.snapshot().clone(),
+            dependency_lock,
+            files,
+        })
+    }
+
+    pub fn import_project_source(
+        &self,
+        scope: SourceScope,
+        archive: &PluginSourceArchive,
+        cancellation: &dyn OperationCancellation,
+    ) -> Result<ImportedSourceProject, AuthoringError> {
+        let _mutation = self.lock_mutation()?;
+        check_canceled(cancellation)?;
+        let final_parent = self.ensure_project_parent(&scope)?;
+        let final_project_root = final_parent.join(scope.project_id().as_ref());
+        if fs::symlink_metadata(&final_project_root).is_ok() {
+            return Err(AuthoringError::ProjectAlreadyExists);
+        }
+        let staging = self.allocate_staging("import-source")?;
+        let staged_project_root = staging.path().join("project");
+        let staged_source_root = staged_project_root.join(SOURCE_DIRECTORY);
+        fs::create_dir(&staged_project_root)
+            .map_err(|error| io_error(&staged_project_root, error))?;
+        fs::create_dir(&staged_source_root)
+            .map_err(|error| io_error(&staged_source_root, error))?;
+        write_new_synced(
+            &staged_project_root.join(SCOPE_RECORD_FILE),
+            &canonical_json_bytes(&ScopeRecord {
+                format_version: SCOPE_RECORD_VERSION.into(),
+                scope: scope.clone(),
+            })?,
+        )?;
+        let lock_bytes = canonical_json_bytes(&archive.dependency_lock)?;
+        require_dependency_lock_size(&lock_bytes)?;
+        write_new_synced(
+            &staged_project_root.join(DEPENDENCY_LOCK_FILE),
+            &lock_bytes,
+        )?;
+        let mut previous: Option<&crate::NormalizedSourcePath> = None;
+        for file in &archive.files {
+            check_canceled(cancellation)?;
+            if previous.is_some_and(|path| path >= &file.normalized_relative_path) {
+                return Err(AuthoringError::PathCollision {
+                    path: file.normalized_relative_path.to_string(),
+                });
+            }
+            if u64::try_from(file.bytes.len()).unwrap_or(u64::MAX)
+                > self.limits.max_single_file_bytes
+            {
+                return Err(AuthoringError::FileTooLarge {
+                    path: file.normalized_relative_path.to_string(),
+                    observed: u64::try_from(file.bytes.len()).unwrap_or(u64::MAX),
+                    limit: self.limits.max_single_file_bytes,
+                });
+            }
+            let target = file.normalized_relative_path.join(&staged_source_root);
+            ensure_relative_parent_directories(&staged_source_root, &target)?;
+            write_new_synced(&target, &file.bytes)?;
+            previous = Some(&file.normalized_relative_path);
+        }
+        let capture = capture_source_tree(&staged_source_root, self.limits, cancellation)?;
+        if capture.snapshot() != &archive.snapshot {
+            return Err(AuthoringError::SourceChanged {
+                expected: archive.snapshot.digest().as_ref().to_owned(),
+                observed: capture.snapshot().digest().as_ref().to_owned(),
+            });
+        }
+        archive
+            .dependency_lock
+            .validate_against(capture.dependency_requests())?;
+        let lock_digest = archive.dependency_lock.digest()?;
+        check_canceled(cancellation)?;
+        match fs::rename(&staged_project_root, &final_project_root) {
+            Ok(()) => {}
+            Err(error)
+                if error.kind() == std::io::ErrorKind::AlreadyExists
+                    || final_project_root.exists() =>
+            {
+                return Err(AuthoringError::ProjectAlreadyExists);
+            }
+            Err(error) => return Err(io_error(&final_project_root, error)),
+        }
+        sync_directory_if_supported(&final_parent)?;
+        Ok(ImportedSourceProject {
+            project: self.load_project(&scope)?,
+            capture,
+            dependency_lock_digest: lock_digest,
+        })
+    }
+
     pub fn write_initial_dependency_lock(
         &self,
         scope: &SourceScope,
@@ -910,6 +1046,87 @@ impl SourceFileEdit {
 pub struct SourceEditOutcome {
     capture: CapturedSource,
     changed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginSourceFileBytes {
+    normalized_relative_path: crate::NormalizedSourcePath,
+    bytes: Vec<u8>,
+}
+
+impl PluginSourceFileBytes {
+    pub fn new(normalized_relative_path: crate::NormalizedSourcePath, bytes: Vec<u8>) -> Self {
+        Self {
+            normalized_relative_path,
+            bytes,
+        }
+    }
+
+    pub fn normalized_relative_path(&self) -> &crate::NormalizedSourcePath {
+        &self.normalized_relative_path
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginSourceArchive {
+    snapshot: SourceSnapshot,
+    dependency_lock: ExactDependencyLock,
+    files: Vec<PluginSourceFileBytes>,
+}
+
+impl PluginSourceArchive {
+    pub fn new(
+        snapshot: SourceSnapshot,
+        dependency_lock: ExactDependencyLock,
+        mut files: Vec<PluginSourceFileBytes>,
+    ) -> Self {
+        files.sort_by(|left, right| {
+            left.normalized_relative_path
+                .cmp(&right.normalized_relative_path)
+        });
+        Self {
+            snapshot,
+            dependency_lock,
+            files,
+        }
+    }
+
+    pub fn snapshot(&self) -> &SourceSnapshot {
+        &self.snapshot
+    }
+
+    pub fn dependency_lock(&self) -> &ExactDependencyLock {
+        &self.dependency_lock
+    }
+
+    pub fn files(&self) -> &[PluginSourceFileBytes] {
+        &self.files
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImportedSourceProject {
+    project: StoredSourceProject,
+    capture: CapturedSource,
+    dependency_lock_digest: crate::DigestHex,
+}
+
+impl ImportedSourceProject {
+    pub fn project(&self) -> &StoredSourceProject {
+        &self.project
+    }
+
+    pub fn capture(&self) -> &CapturedSource {
+        &self.capture
+    }
+
+    pub fn dependency_lock_digest(&self) -> &crate::DigestHex {
+        &self.dependency_lock_digest
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1731,6 +1948,7 @@ fn cleanup_owned_staging(staging_parent: &Path, target: &Path) {
     };
     let Some(uuid) = name
         .strip_prefix("create-")
+        .or_else(|| name.strip_prefix("import-source-"))
         .or_else(|| name.strip_prefix("build-"))
         .or_else(|| name.strip_prefix("edit-"))
         .or_else(|| name.strip_prefix("dependency-"))

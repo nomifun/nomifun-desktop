@@ -26,6 +26,9 @@
 > 用户针对 exact linked Mount 的 `auto_compatible_when_idle` standing authorization、
 > Host-owned eligibility 重算、Runtime lease、resident quiescent fence 与 Apply audit
 > 已完成，`N1-4-02` 已关闭。
+> Plugin SDK declarations、无用户数据 Share Bundle Export/Import-as-new、来源 Test
+> provenance 展示、Desktop Transfer 与 headless import/share/auto-apply CLI 已完成，
+> `N1-4-03` 已关闭。
 > 当前 HEAD 的 0.7.6 NSIS 安装版基础 smoke 已通过；Plugin/MiniApp Candidate、
 > fault、产品验收和 macOS/Linux 外部验证仍未关闭。
 >
@@ -63,8 +66,8 @@
 
 | 分类 | 数量 | 项目 |
 | --- | ---: | --- |
-| 已关闭 | 24 | 当前表内已关闭的 W0/N1/M1 项，包含 `N1-4-01`、`N1-4-02`、`N1-X-02`、`M1-0-01`、`M1-0-02-A`、`M1-0-02-B`、`M1-1-01`、`M1-1-02`、`M1-2-01` |
-| 正在实施 | 4 | `N1-1-01`、`N1-2-03`、`N1-4-03`、`N1-U-01` |
+| 已关闭 | 25 | 当前表内已关闭的 W0/N1/M1 项，包含 `N1-4-01`、`N1-4-02`、`N1-4-03`、`N1-X-02`、`M1-0-01`、`M1-0-02-A`、`M1-0-02-B`、`M1-1-01`、`M1-1-02`、`M1-2-01` |
+| 正在实施 | 3 | `N1-1-01`、`N1-2-03`、`N1-U-01` |
 | 已解锁待领取 | 0 | 当前 Windows 主线无未领取的前置切片 |
 | 依赖阻塞 | 5 | `N1-V-01`、`M1-U-01`、`M1-V-01` 与最终 Windows 合流等 |
 | 外部原生 | 2 | `RC-MA-01`、`RC-LD-01` |
@@ -432,7 +435,7 @@
 | --- | --- | --- | --- | --- | --- |
 | `N1-4-01` | closed | Authoring lane；`nomifun-js-authoring/**` | Source Store、JS/TS scaffold、pure-JS dependency exact lock、fixed packer/Build Host | `N1-0-02`,`N1-1-02`,`N1-2-01` | authoring 42 + public npm live smoke 1；production HTTPS registry/SRI/tar containment、全图 budgets、resolver/cache、共享 registry/build admission、static bundler/Node Host/Artifact admission/cancel、Chat Dev Source edit，以及 SQLite intent + filesystem journal + exact finalize/startup recovery 的 Project dependency mutation 均已通过 |
 | `N1-4-02` | closed | Plugin project lane | single Ready、Candidate Test、impact、manual/compatible-idle Apply、Discard、Retry/Restore | `N1-2-03`,`N1-3-01`,`N1-4-01` | migration 085 持久授权/revision；Host-owned 15-predicate eligibility；Runtime lease + non-resident/resident quiescent fence；busy 保留 Ready、quiescent 原子 Apply；不可变 Mount revision 记录 manual/standing-auto 来源；DB 18、Service 31、App route 1、UI bridge/model 13 |
-| `N1-4-03` | in-progress | SDK/CLI lane | Plugin SDK、Share Bundle/prebuilt import/export、本地 CLI | `N1-4-02` | 当前 CLI 已覆盖 list/show/source-path/build/test/candidate show-discard-apply-restore/mount lifecycle；Share/Export 等未实现接口不虚构 |
+| `N1-4-03` | closed | SDK/CLI lane | Plugin SDK、Share Bundle/prebuilt import/export、本地 CLI | `N1-4-02` | scaffold 固定 SDK declarations；无用户数据目录型 Share Bundle exact Source/lock/Artifact/Test provenance；Import-as-new 进入本机 Ready/Test/Apply；Desktop export/import；CLI import/share/auto-apply + 既有生命周期命令；Authoring 44、Service 34、DB 18+20、App route/CLI、UI 定向与 production build 通过 |
 
 ## N1-X：旧 Extension 删除与产品 UI
 
@@ -874,3 +877,41 @@ Extension 命中仅属于历史删除合同、负向 404 测试、通用语义�
    事件后应用且从不进入 manual stop；真实 Node Host resident fence 1；App 组合路由 1；
    UI bridge/model 13、dependency dialog 2、i18n 与 production build 通过。完整安装版
    Build→Test→auto Apply→Invoke→Restore 仍属于 `N1-V-01`，没有提前记为 Candidate PASS。
+
+## 2026-09-10 Plugin SDK、Share Bundle 与 headless CLI 收口
+
+1. `N1-4-03` 已关闭。新建 JavaScript/TypeScript Project 固定包含
+   `nomifun-plugin-sdk.d.ts`，声明 Host 注入的 exact Mount target、Credential resolve
+   与 owner-scoped State get/set/delete/compareAndSwap；TypeScript scaffold 直接使用
+   `PluginActivationContext`，declaration 不进入运行 bundle，也不会被当作未引用可执行
+   Source。运行时仍只有现有 Host 注入 SDK，不建立第二套 loader/Registry。
+2. Plugin Share Bundle 使用固定目录 inventory：canonical `bundle.json`、immutable
+   Artifact record/package，以及可选 canonical Source snapshot、Host-owned dependency
+   lock 和逐文件 bytes。Export 只允许 exact Ready Candidate，或 exact linked current
+   Mount；只有 Ready 的 Source/lock/build lineage 仍等于 Project head 和 Artifact lock
+   时才能带 Source，current Mount 不猜测已经漂移的作者 Source。
+3. Bundle import 对文件与空目录都执行 exact-set、file/total/count/path budget、Windows
+   case/path 规则、symlink/junction/reparse/special file 拒绝，逐项重算 Source、lock、
+   Manifest 与 Artifact digest，并再次通过正式 Artifact Store admission。Source
+   package identity 必须等于 Artifact；任何 tamper、额外 `credentials.json`、额外空目录
+   或 lineage 分裂都 fail closed，目标目录存在时不覆盖，失败 staging 自动清理。
+4. Import 始终创建新的 Project identity：带 Source 的 Bundle 创建 generation=1 的
+   editable Project，source-less Bundle 创建 runtime-only Project；两者都只生成 Ready
+   Candidate，不安装、不启用。来源 Test provenance 只持久化/展示 outcome、Candidate
+   digest、Runtime target/executable digest 和 Host/SDK/Test contract version，不含测试
+   输入、输出、API response 或日志，也不能满足本机 Test/auto-Apply eligibility。
+5. migration 086 为 Product Operation 持久化 bounded result Artifact digest map，并以
+   insert/update trigger 保证 Operation 从空结果开始、只有成功状态可发布 SHA-256 facts；
+   Ready Candidate 可保存仅属于 import 的来源 Test provenance。Share Export/Import
+   Operation 返回 `share_bundle` 与 `package` digest，可审计且不暴露本地内部路径。
+6. Desktop Workshop 新增 Ready/current Share Export，明确不包含 Credential bindings、
+   Config、KV、dataDir、Files 或测试内容；原 Import 对话框新增 NomiFun Share Bundle
+   类型。Headless CLI 新增 `plugin import [--share-bundle]`、`plugin share export` 和
+   `plugin auto-apply enable|disable|retry`，继续只调用同一 HTTP application service，
+   不直开 SQLite/Source Store 或绕过 Candidate。
+7. 定向证据：`nomifun-js-authoring` 44 passed / 1 public npm test ignored（live smoke 已在
+   前序切片显式通过）；Plugin Service 34，其中 Share filesystem/application 3；DB
+   Plugin repository 18、ID/schema 20；App 组合路由 1 覆盖 Share Export→Import-as-new，
+   CLI parse/help 2；UI bridge/model 15、Share dialog 1、dependency dialog 2、i18n 与
+   production build、contract generator write/check 与定向 Clippy 通过。安装版一站式 Build→Test→Apply→Invoke→Restore/Share smoke
+   继续归 `N1-V-01`，不以 crate 测试冒充 Candidate PASS。

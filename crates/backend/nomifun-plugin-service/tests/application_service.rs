@@ -626,6 +626,7 @@ impl PluginRepository for FakeRepository {
             progress_percent: params.progress_percent.map(i64::from),
             last_error_code: None,
             bounded_log_tail_json: serde_json::to_string(&params.bounded_log_tail).unwrap(),
+            result_artifact_digests_json: "{}".into(),
             started_at_ms: params.started_at_ms,
             finished_at_ms: None,
         };
@@ -647,6 +648,8 @@ impl PluginRepository for FakeRepository {
         row.progress_percent = params.progress_percent.map(i64::from);
         row.last_error_code = params.last_error_code.clone();
         row.bounded_log_tail_json = serde_json::to_string(&params.bounded_log_tail).unwrap();
+        row.result_artifact_digests_json =
+            serde_json::to_string(&params.result_artifact_digests).unwrap();
         row.finished_at_ms = Some(params.finished_at_ms);
         Ok(row.clone())
     }
@@ -686,6 +689,10 @@ impl PluginRepository for FakeRepository {
             source_snapshot_digest: params.source_snapshot_digest.clone(),
             dependency_lock_digest: params.dependency_lock_digest.clone(),
             contract_diff_json: serde_json::to_string(&params.contract_diff).unwrap(),
+            imported_test_provenance_json: params
+                .imported_test_provenance
+                .as_ref()
+                .map(|value| serde_json::to_string(value).unwrap()),
             origin_operation_id: params.origin_operation_id.clone(),
             build_generation: params.expected_generation,
             created_at: params.created_at,
@@ -1130,6 +1137,15 @@ impl PluginArtifactStorePort for QueueArtifactStore {
     async fn verify(&self, _artifact: &PluginArtifactRow) -> Result<(), PluginServiceError> {
         Ok(())
     }
+
+    async fn load_for_share(
+        &self,
+        _artifact: &PluginArtifactRow,
+    ) -> Result<nomifun_plugin_platform::StoredPluginArtifact, PluginServiceError> {
+        Err(PluginServiceError::integration(
+            "Share export is outside this artifact fake",
+        ))
+    }
 }
 
 #[derive(Default)]
@@ -1374,6 +1390,27 @@ impl PluginSourceStorePort for FakeSourceStore {
         _retained_mutation_ids: &BTreeSet<String>,
     ) -> Result<(), PluginServiceError> {
         Ok(())
+    }
+
+    async fn export_source_archive(
+        &self,
+        _owner_user_id: &str,
+        _project_id: &str,
+    ) -> Result<nomifun_js_authoring::PluginSourceArchive, PluginServiceError> {
+        Err(PluginServiceError::integration(
+            "Share export is outside this Source fake",
+        ))
+    }
+
+    async fn import_source_archive(
+        &self,
+        _owner_user_id: &str,
+        _project_id: &str,
+        _archive: &nomifun_js_authoring::PluginSourceArchive,
+    ) -> Result<CreatedPluginSource, PluginServiceError> {
+        Err(PluginServiceError::integration(
+            "Share import is outside this Source fake",
+        ))
     }
 }
 
@@ -1890,6 +1927,7 @@ fn candidate_row(
         source_snapshot_digest: Some("c".repeat(64)),
         dependency_lock_digest: Some("d".repeat(64)),
         contract_diff_json: serde_json::to_string(&diff).unwrap(),
+        imported_test_provenance_json: None,
         origin_operation_id: Uuid::now_v7().to_string(),
         build_generation: generation,
         created_at: 8,
