@@ -4,6 +4,7 @@
   --miniapp-surface: var(--color-bg-2);
   --miniapp-inset: var(--color-fill-1);
   min-width: 0;
+  overflow-x: hidden;
 }
 
 .toolbar {
