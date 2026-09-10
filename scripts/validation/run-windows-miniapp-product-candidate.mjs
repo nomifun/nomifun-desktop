@@ -854,6 +854,7 @@ async function auditPage(client, rootSelector, phase) {
   const layout = await client.evaluate(`(() => {
     const scrolling = document.scrollingElement ?? document.documentElement;
     const content = document.querySelector('.layout-content');
+    const page = content?.firstElementChild;
     return {
       viewport_width: document.documentElement.clientWidth,
       document_scroll_width: scrolling.scrollWidth,
@@ -861,13 +862,18 @@ async function auditPage(client, rootSelector, phase) {
       content_client_width: content?.clientWidth ?? 0,
       content_scroll_width: content?.scrollWidth ?? 0,
       content_scroll_left: content?.scrollLeft ?? 0,
+      page_client_width: page?.clientWidth ?? 0,
+      page_scroll_width: page?.scrollWidth ?? 0,
+      page_scroll_left: page?.scrollLeft ?? 0,
     };
   })()`);
   if (
     layout.document_scroll_width > layout.viewport_width + 1 ||
     layout.document_scroll_left !== 0 ||
     layout.content_scroll_width > layout.content_client_width + 1 ||
-    layout.content_scroll_left !== 0
+    layout.content_scroll_left !== 0 ||
+    layout.page_scroll_width > layout.page_client_width + 1 ||
+    layout.page_scroll_left !== 0
   ) {
     failure('miniapp_desktop_horizontal_overflow', `${phase} drifted outside the Desktop content viewport`, {
       phase,

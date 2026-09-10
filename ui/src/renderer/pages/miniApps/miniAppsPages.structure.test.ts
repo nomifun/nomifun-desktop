@@ -101,6 +101,7 @@ describe('MiniApp M1 product surfaces', () => {
   test('Surface layout can shrink inside the desktop content rail without horizontal page drift', () => {
     expect(stylesSource.includes('min-width: 980px')).toBe(false);
     expect(stylesSource.includes('min-width: 900px')).toBe(false);
+    expect(stylesSource.includes('min-width: 0;\n  overflow-x: hidden;')).toBe(true);
     expect(stylesSource.includes('.surfaceSection {\n  min-width: 0;')).toBe(true);
     expect(stylesSource.includes('.surfaceFrame {\n  display: block;\n  width: 100%;\n  max-width: 100%;')).toBe(true);
   });
