@@ -167,7 +167,7 @@ export function evaluateAuthenticode(observation) {
   };
 }
 
-function inspectAuthenticode(path) {
+export function inspectAuthenticode(path) {
   const script = [
     "$target = [Environment]::GetEnvironmentVariable('NOMIFUN_SIGNATURE_TARGET')",
     "$signature = Get-AuthenticodeSignature -LiteralPath $target",
