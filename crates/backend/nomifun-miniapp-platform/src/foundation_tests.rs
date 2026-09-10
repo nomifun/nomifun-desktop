@@ -37,6 +37,7 @@ struct TestProcess {
     entered: AtomicBool,
     released: AtomicBool,
     stopped: AtomicBool,
+    crashed: AtomicBool,
 }
 
 impl TestProcess {
@@ -56,6 +57,10 @@ impl TestProcess {
     fn release(&self) {
         self.released.store(true, Ordering::Release);
     }
+
+    fn crash(&self) {
+        self.crashed.store(true, Ordering::Release);
+    }
 }
 
 #[async_trait]
@@ -74,6 +79,12 @@ impl MiniAppServiceProcess for TestProcess {
 
     async fn stop(&self) {
         self.stopped.store(true, Ordering::Release);
+    }
+
+    fn terminal_result(&self) -> Option<Result<(), String>> {
+        self.crashed
+            .load(Ordering::Acquire)
+            .then(|| Err("simulated passive process exit".into()))
     }
 }
 
@@ -218,6 +229,36 @@ async fn service_host_enforces_lifecycle_idle_reap_and_crash_isolation() {
         Some(MiniAppServiceHostState::Stopped),
         "one MiniApp crash must not mutate another dedicated Host"
     );
+}
+
+#[tokio::test]
+async fn maintenance_observes_a_passive_on_demand_process_exit() {
+    let factory = Arc::new(TestProcessFactory::default());
+    let host = InMemoryMiniAppServiceHost::new(factory.clone());
+    let service = service_spec("passive-exit", 1, MiniAppServiceLifecycle::OnDemand);
+    host.bind_active(service.clone(), true).await.unwrap();
+    host.invoke(
+        &service,
+        MiniAppBridgeCallId::from("start-before-passive-exit"),
+        "start".into(),
+        json_object("ok", 1),
+        MiniAppCallCancellation::default(),
+        100,
+    )
+    .await
+    .unwrap();
+    factory.latest(&service.miniapp_id).await.crash();
+
+    assert_eq!(
+        host.observe_process_exits(101).await,
+        vec![service.miniapp_id.clone()]
+    );
+    assert!(matches!(
+        host.state(&service.miniapp_id).await,
+        Some(MiniAppServiceHostState::Error { error, .. })
+            if error == "simulated passive process exit"
+    ));
+    assert!(host.capacity_snapshot().await.active_miniapps.is_empty());
 }
 
 #[tokio::test]

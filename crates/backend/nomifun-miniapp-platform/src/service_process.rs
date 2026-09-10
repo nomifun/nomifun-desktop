@@ -513,6 +513,10 @@ impl MiniAppServiceProcess for RuntimeLeasedMiniAppServiceProcess {
     async fn stop(&self) {
         self.inner.stop().await;
     }
+
+    fn terminal_result(&self) -> Option<Result<(), String>> {
+        self.inner.terminal_result()
+    }
 }
 
 #[async_trait]
@@ -1735,6 +1739,10 @@ impl MiniAppServiceProcess for NodeMiniAppServiceProcess {
 
     async fn stop(&self) {
         let _ = self.stop_with_result().await;
+    }
+
+    fn terminal_result(&self) -> Option<Result<(), String>> {
+        self.inner.completion.borrow().clone()
     }
 }
 
