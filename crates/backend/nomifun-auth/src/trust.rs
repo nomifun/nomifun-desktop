@@ -18,12 +18,13 @@
 use std::sync::Arc;
 
 use axum::extract::{Request, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, header};
 use axum::middleware::Next;
 use axum::response::Response;
 
 use nomifun_common::{AppError, UserId};
 
+use crate::instance_token::InstanceTokenValidator;
 use crate::middleware::CurrentUser;
 
 /// HTTP header the desktop webview presents to prove it is the trusted local
@@ -73,6 +74,23 @@ impl AuthPolicy {
 /// middleware (to skip — header-trusted requests are not cookie-ambient).
 #[derive(Clone, Copy, Debug)]
 pub struct LocalTrusted;
+
+/// Marker injected when an installation access token authenticates the owner
+/// for a local product control-plane route.
+///
+/// This is deliberately distinct from [`LocalTrusted`]: an installation token
+/// may use the supported headless HTTP surface, but it does not gain the
+/// WebView-only trust used by credential and shell-adjacent endpoints.
+#[derive(Clone, Copy, Debug)]
+pub struct InstallationTokenTrusted;
+
+/// State for resolving the installation access token on the narrow product
+/// control planes that explicitly support the headless CLI.
+#[derive(Clone)]
+pub struct InstallationTokenTrustState {
+    pub validator: Arc<InstanceTokenValidator>,
+    pub authoritative_user_id: Arc<str>,
+}
 
 /// State for [`trust_resolve_middleware`].
 #[derive(Clone)]
@@ -149,6 +167,62 @@ pub async fn require_local_trust_middleware(request: Request, next: Next) -> Res
     } else {
         Err(AppError::Forbidden(
             "This endpoint is only available to the local desktop client".into(),
+        ))
+    }
+}
+
+/// Resolve a valid installation bearer token to the canonical installation
+/// owner without rejecting other authentication mechanisms.
+///
+/// This middleware must run before `auth_middleware`. A locally trusted
+/// WebView request already has `CurrentUser` and is left unchanged. A valid
+/// installation token gets a `CurrentUser` plus the narrower
+/// [`InstallationTokenTrusted`] marker. Missing or non-installation tokens are
+/// passed through for the normal JWT middleware to decide.
+pub async fn installation_token_trust_resolve_middleware(
+    State(state): State<InstallationTokenTrustState>,
+    mut request: Request,
+    next: Next,
+) -> Result<Response, AppError> {
+    if request.extensions().get::<CurrentUser>().is_none() {
+        let presented = request
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .unwrap_or("");
+        if state.validator.validate(presented) {
+            let user_id = UserId::parse(state.authoritative_user_id.as_ref()).map_err(|_| {
+                tracing::error!("installation token owner has a noncanonical user id");
+                AppError::Internal("Installation owner identity is invalid".into())
+            })?;
+            request.extensions_mut().insert(CurrentUser {
+                id: user_id,
+                username: state.authoritative_user_id.to_string(),
+            });
+            request.extensions_mut().insert(InstallationTokenTrusted);
+        }
+    }
+    Ok(next.run(request).await)
+}
+
+/// Require either the privileged local desktop trust or a validated
+/// installation token. Use only on product control planes that intentionally
+/// support the headless CLI; do not use this for credential or shell surfaces.
+pub async fn require_local_product_trust_middleware(
+    request: Request,
+    next: Next,
+) -> Result<Response, AppError> {
+    if request.extensions().get::<LocalTrusted>().is_some()
+        || request
+            .extensions()
+            .get::<InstallationTokenTrusted>()
+            .is_some()
+    {
+        Ok(next.run(request).await)
+    } else {
+        Err(AppError::Forbidden(
+            "This endpoint requires the local desktop client or installation token".into(),
         ))
     }
 }

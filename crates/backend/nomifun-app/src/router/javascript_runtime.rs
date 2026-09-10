@@ -789,7 +789,8 @@ mod tests {
             .expect("Runtime route group must end before Agent routes")
             .0;
         assert!(runtime_group.contains("protect_instance_owner("));
-        assert!(runtime_group.contains("require_local_trust_middleware"));
+        assert!(runtime_group.contains("admit_headless_installation_owner("));
+        assert!(runtime_group.contains("require_local_product_trust_middleware"));
     }
 
     #[tokio::test]

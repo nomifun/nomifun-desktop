@@ -17,9 +17,10 @@ use nomifun_agent_contracts::{
 use nomifun_agent_control_plane::AgentControlPlane;
 use nomifun_assets::{AssetRouterState, asset_routes};
 use nomifun_auth::{
-    AuthRouterState, AuthState, InstanceOwnerState, TrustState, auth_middleware, auth_routes,
-    csrf_middleware, require_instance_owner_middleware, require_local_trust_middleware,
-    security_headers_middleware, trust_resolve_middleware,
+    AuthRouterState, AuthState, InstallationTokenTrustState, InstanceOwnerState, TrustState,
+    auth_middleware, auth_routes, csrf_middleware, installation_token_trust_resolve_middleware,
+    require_instance_owner_middleware, require_local_product_trust_middleware,
+    require_local_trust_middleware, security_headers_middleware, trust_resolve_middleware,
 };
 use nomifun_channel::channel_routes;
 use nomifun_companion::{companion_public_routes, companion_routes};
@@ -237,6 +238,22 @@ fn protect_instance_owner(
             require_instance_owner_middleware,
         ))
         .route_layer(from_fn_with_state(auth_state.clone(), auth_middleware))
+}
+
+/// Add installation-token resolution outside the normal owner/JWT gates.
+///
+/// The resolver is intentionally non-authoritative for unknown tokens: normal
+/// JWT authentication remains available where the enclosed route group allows
+/// it. Product-local write groups additionally use
+/// `require_local_product_trust_middleware` to reject an ordinary JWT.
+fn admit_headless_installation_owner(
+    router: Router,
+    state: &InstallationTokenTrustState,
+) -> Router {
+    router.route_layer(from_fn_with_state(
+        state.clone(),
+        installation_token_trust_resolve_middleware,
+    ))
 }
 
 /// Fallible Nomi-core router assembly with the current product routes
@@ -751,6 +768,10 @@ fn create_nomi_core_router_with_all_state(
     };
     let instance_owner_state =
         InstanceOwnerState::new(services.authoritative_user_id.clone());
+    let installation_token_trust_state = InstallationTokenTrustState {
+        validator: services.instance_token_validator.clone(),
+        authoritative_user_id: services.authoritative_user_id.clone(),
+    };
 
     // Current Nomi-core Agent Settings/AgentSession/Remote surface.  This is
     // deliberately built from the shared NomiCoreSessionOwner and the
@@ -830,34 +851,48 @@ fn create_nomi_core_router_with_all_state(
 
     // MiniApp reads require the installation owner identity. Mutations are a
     // separate route group because they additionally require local trust.
-    let miniapp_read_authenticated = protect_instance_owner(
-        super::miniapp_m1::miniapp_m1_read_routes(states.miniapp.clone()),
-        &auth_mw_state,
-        &instance_owner_state,
+    let miniapp_read_authenticated = admit_headless_installation_owner(
+        protect_instance_owner(
+            super::miniapp_m1::miniapp_m1_read_routes(states.miniapp.clone()),
+            &auth_mw_state,
+            &instance_owner_state,
+        ),
+        &installation_token_trust_state,
     );
     let miniapp_surface =
         super::miniapp_m1::miniapp_m1_surface_routes(states.miniapp.clone());
-    let miniapp_write_local = protect_instance_owner(
-        super::miniapp_m1::miniapp_m1_write_routes(states.miniapp)
-            .route_layer(middleware::from_fn(require_local_trust_middleware)),
-        &auth_mw_state,
-        &instance_owner_state,
+    let miniapp_write_local = admit_headless_installation_owner(
+        protect_instance_owner(
+            super::miniapp_m1::miniapp_m1_write_routes(states.miniapp).route_layer(
+                middleware::from_fn(require_local_product_trust_middleware),
+            ),
+            &auth_mw_state,
+            &instance_owner_state,
+        ),
+        &installation_token_trust_state,
     );
 
-    let plugin_authenticated = protect_instance_owner(
-        super::plugin_platform::plugin_routes(states.plugin)
-            .route_layer(middleware::from_fn(require_local_trust_middleware)),
-        &auth_mw_state,
-        &instance_owner_state,
+    let plugin_authenticated = admit_headless_installation_owner(
+        protect_instance_owner(
+            super::plugin_platform::plugin_routes(states.plugin).route_layer(
+                middleware::from_fn(require_local_product_trust_middleware),
+            ),
+            &auth_mw_state,
+            &instance_owner_state,
+        ),
+        &installation_token_trust_state,
     );
 
-    let javascript_runtime_authenticated = protect_instance_owner(
-        super::javascript_runtime::javascript_runtime_routes(
-            states.javascript_runtime,
-        )
-        .route_layer(middleware::from_fn(require_local_trust_middleware)),
-        &auth_mw_state,
-        &instance_owner_state,
+    let javascript_runtime_authenticated = admit_headless_installation_owner(
+        protect_instance_owner(
+            super::javascript_runtime::javascript_runtime_routes(
+                states.javascript_runtime,
+            )
+            .route_layer(middleware::from_fn(require_local_product_trust_middleware)),
+            &auth_mw_state,
+            &instance_owner_state,
+        ),
+        &installation_token_trust_state,
     );
 
     // Unified agent listing/refresh/test routes protected by auth middleware

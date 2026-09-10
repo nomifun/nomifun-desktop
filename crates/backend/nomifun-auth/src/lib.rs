@@ -69,8 +69,10 @@ pub use middleware::{
 
 // Trust resolution (local-trust secret, auth policy)
 pub use trust::{
-    AuthPolicy, LOCAL_TRUST_HEADER, LocalTrusted, TrustState, is_locally_trusted,
-    require_local_trust_middleware, trust_resolve_middleware,
+    AuthPolicy, InstallationTokenTrustState, InstallationTokenTrusted, LOCAL_TRUST_HEADER,
+    LocalTrusted, TrustState, installation_token_trust_resolve_middleware, is_locally_trusted,
+    require_local_product_trust_middleware, require_local_trust_middleware,
+    trust_resolve_middleware,
 };
 
 // QR token store

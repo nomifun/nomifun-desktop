@@ -14,7 +14,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import {
   closeSync,
   createReadStream,
@@ -91,7 +91,7 @@ const INSTALL_REGISTRY_KEYS = Object.freeze([
   'HKCU\\Software\\Classes\\nomifun',
 ]);
 
-class SmokeFailure extends Error {
+export class SmokeFailure extends Error {
   constructor(code, message, details = {}) {
     super(message);
     this.name = 'SmokeFailure';
@@ -467,8 +467,11 @@ function withTimeout(promise, timeoutMs, checkId) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-async function runCheck(report, id, operation) {
-  const timeoutMs = CHECK_TIMEOUTS_MS[id];
+async function runCheck(report, id, operation, timeoutOverrideMs = null) {
+  const timeoutMs = timeoutOverrideMs ?? CHECK_TIMEOUTS_MS[id];
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+    throw new Error(`check ${id} requires a positive bounded timeout`);
+  }
   const startedAt = Date.now();
   try {
     const details = await withTimeout(
@@ -496,18 +499,18 @@ async function runCheck(report, id, operation) {
   }
 }
 
-function markMissingChecksSkipped(report) {
+function markMissingChecksSkipped(report, plannedCheckIds = CHECK_IDS) {
   const observed = new Set(report.checks.map((entry) => entry.id));
-  for (const id of CHECK_IDS) {
+  for (const id of plannedCheckIds) {
     if (observed.has(id)) continue;
     report.checks.push({
       id,
       status: 'skipped',
-      timeout_ms: CHECK_TIMEOUTS_MS[id],
+      timeout_ms: CHECK_TIMEOUTS_MS[id] ?? null,
       reason: 'prerequisite_failed',
     });
   }
-  const order = new Map(CHECK_IDS.map((id, index) => [id, index]));
+  const order = new Map(plannedCheckIds.map((id, index) => [id, index]));
   report.checks.sort(
     (left, right) =>
       (order.get(left.id) ?? Number.MAX_SAFE_INTEGER) -
@@ -1039,6 +1042,33 @@ export async function runCandidateSmoke(options) {
 
   const sourceCommit = options.sourceCommit.toLowerCase();
   const report = createInitialResult(sourceCommit);
+  const productChecks = options.productChecks ?? [];
+  if (!Array.isArray(productChecks)) {
+    throw new Error('productChecks must be an array when provided');
+  }
+  const productCheckIds = new Set();
+  for (const check of productChecks) {
+    if (
+      !check ||
+      typeof check.id !== 'string' ||
+      !/^[a-z0-9][a-z0-9-]{0,95}$/.test(check.id) ||
+      CHECK_IDS.includes(check.id) ||
+      productCheckIds.has(check.id) ||
+      typeof check.run !== 'function' ||
+      !Number.isSafeInteger(check.timeoutMs) ||
+      check.timeoutMs <= 0
+    ) {
+      throw new Error('each product check requires a unique id, run function, and bounded timeout');
+    }
+    productCheckIds.add(check.id);
+  }
+  const cleanupIndex = CHECK_IDS.indexOf('process-tree-cleanup');
+  const plannedCheckIds = [
+    ...CHECK_IDS.slice(0, cleanupIndex),
+    ...productChecks.map((check) => check.id),
+    ...CHECK_IDS.slice(cleanupIndex),
+  ];
+  report.suite.checks = plannedCheckIds;
   const logSpecs = [];
   let canProceed = true;
   let work = null;
@@ -1048,7 +1078,67 @@ export async function runCandidateSmoke(options) {
   let mainBinary = null;
   let uninstaller = null;
   let appChild = null;
+  let applicationEnvironment = null;
+  let installationToken = null;
+  let launchOrdinal = 0;
   let installAttempted = false;
+
+  const launchProductApplication = async () => {
+    launchOrdinal += 1;
+    const cdpPort = await reserveFreeTcpPort();
+    applicationEnvironment = {
+      ...applicationEnvironment,
+      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${cdpPort}`,
+    };
+    const suffix = launchOrdinal === 1 ? 'application' : `application-restart-${launchOrdinal}`;
+    const stdoutLog = join(runRoot, 'logs', `${suffix}.stdout.log`);
+    const stderrLog = join(runRoot, 'logs', `${suffix}.stderr.log`);
+    logSpecs.push(
+      { kind: `${suffix}_stdout`, path: stdoutLog },
+      { kind: `${suffix}_stderr`, path: stderrLog },
+    );
+    appChild = await launchInstalledApplication(mainBinary, {
+      cwd: installDirectory,
+      env: applicationEnvironment,
+      stdoutLog,
+      stderrLog,
+      timeoutMs: CHECK_TIMEOUTS_MS.launch,
+    });
+    report.install.application_pid = appChild.pid;
+    report.cdp.port = cdpPort;
+    report.cdp.endpoint = `http://127.0.0.1:${cdpPort}/json/list`;
+
+    const portFile = join(dataRoot, 'port.json');
+    const announcement = await waitForPortAnnouncement(
+      portFile,
+      appChild,
+      CHECK_TIMEOUTS_MS['port-announcement'],
+    );
+    report.data.announcement = announcement;
+    report.backend.base_url = loopbackBaseUrl(announcement.host, announcement.port);
+    report.backend.health_url = `${report.backend.base_url}/health`;
+    const health = await waitForBackendHealth(
+      report.backend.health_url,
+      appChild,
+      CHECK_TIMEOUTS_MS['backend-health'],
+    );
+    Object.assign(report.backend, health);
+    const cdp = await waitForNomiFunCdpTarget(
+      report.cdp.endpoint,
+      appChild,
+      CHECK_TIMEOUTS_MS['webview2-cdp'],
+    );
+    report.cdp.target = cdp.target;
+    report.cdp.observed_target_count = cdp.observedTargetCount;
+    return {
+      pid: appChild.pid,
+      baseUrl: report.backend.base_url,
+      cdpEndpoint: report.cdp.endpoint,
+      cdpTarget: cdp.target,
+      announcement,
+      health,
+    };
+  };
 
   try {
     canProceed =
@@ -1232,6 +1322,11 @@ export async function runCandidateSmoke(options) {
         environment.NOMIFUN_DATA_DIR = dataRoot;
         environment.WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS =
           `--remote-debugging-port=${cdpPort}`;
+        if (productChecks.length > 0) {
+          installationToken = randomBytes(32).toString('hex');
+          environment.NOMIFUN_ACCESS_TOKEN = installationToken;
+        }
+        applicationEnvironment = environment;
         appChild = await launchInstalledApplication(mainBinary, {
           cwd: installDirectory,
           env: environment,
@@ -1242,6 +1337,7 @@ export async function runCandidateSmoke(options) {
         report.install.application_pid = appChild.pid;
         report.cdp.port = cdpPort;
         report.cdp.endpoint = `http://127.0.0.1:${cdpPort}/json/list`;
+        launchOrdinal = 1;
         return {
           pid: appChild.pid,
           executable: reportPath(mainBinary),
@@ -1299,6 +1395,39 @@ export async function runCandidateSmoke(options) {
           target: observed.target,
         };
       });
+    }
+
+    for (const productCheck of productChecks) {
+      if (!canProceed) break;
+      canProceed = await runCheck(
+        report,
+        productCheck.id,
+        async () => {
+          const restart = async () => {
+            const cleanup = await terminateApplicationTree(
+              appChild,
+              CHECK_TIMEOUTS_MS['process-tree-cleanup'],
+            );
+            const launched = await launchProductApplication();
+            return { cleanup, ...launched };
+          };
+          return productCheck.run({
+            sourceCommit,
+            runRoot,
+            installDirectory,
+            dataRoot,
+            mainBinary,
+            installationToken,
+            getBaseUrl: () => report.backend.base_url,
+            getCdpEndpoint: () => report.cdp.endpoint,
+            getCdpTarget: () => report.cdp.target,
+            assertApplicationRunning: (phase) =>
+              assertApplicationStillRunning(appChild, phase),
+            restart,
+          });
+        },
+        productCheck.timeoutMs,
+      );
     }
   } finally {
     if (appChild) {
@@ -1398,11 +1527,11 @@ export async function runCandidateSmoke(options) {
     }
   }
 
-  markMissingChecksSkipped(report);
+  markMissingChecksSkipped(report, plannedCheckIds);
   report.logs = await collectLogEvidence(logSpecs);
   report.status =
     canProceed &&
-    report.checks.length === CHECK_IDS.length &&
+    report.checks.length === plannedCheckIds.length &&
     report.checks.every((entry) => entry.status === 'pass')
       ? 'pass'
       : 'fail';
