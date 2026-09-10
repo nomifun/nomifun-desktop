@@ -33,6 +33,10 @@ const typesSource = readFileSync(
   new URL('../../../common/types/miniAppPlatform.ts', import.meta.url),
   'utf8'
 );
+const stylesSource = readFileSync(
+  new URL('./MiniAppWorkbench.module.css', import.meta.url),
+  'utf8'
+);
 
 describe('MiniApp M1 product surfaces', () => {
   test('Library uses only the clean-start M1 collection and project routes', () => {
@@ -92,6 +96,13 @@ describe('MiniApp M1 product surfaces', () => {
       true
     );
     expect(transferSource.includes("role='alert'")).toBe(true);
+  });
+
+  test('Surface layout can shrink inside the desktop content rail without horizontal page drift', () => {
+    expect(stylesSource.includes('min-width: 980px')).toBe(false);
+    expect(stylesSource.includes('min-width: 900px')).toBe(false);
+    expect(stylesSource.includes('.surfaceSection {\n  min-width: 0;')).toBe(true);
+    expect(stylesSource.includes('.surfaceFrame {\n  display: block;\n  width: 100%;\n  max-width: 100%;')).toBe(true);
   });
 
   test('Workshop reads a branded owner-scoped M1 detail', () => {
