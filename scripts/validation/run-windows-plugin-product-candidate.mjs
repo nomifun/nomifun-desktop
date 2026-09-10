@@ -943,7 +943,7 @@ async function checkPluginLifecycle(context) {
       package_version: '1.0.0',
       display_name: 'Installed Candidate Plugin',
       description: 'Windows installed product acceptance fixture.',
-      language: 'javascript',
+      language: 'java_script',
     },
   });
   project = await editProject(context, project, 'nomifun.plugin.json', buildSourceManifest('v1'));
