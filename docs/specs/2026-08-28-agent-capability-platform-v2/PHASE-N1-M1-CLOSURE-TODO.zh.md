@@ -34,7 +34,9 @@
 > `N1-2-03`、`N1-U-01` 与 `N1-V-01` 已关闭。MiniApp M1 Windows Candidate 亦已在
 > source commit `cf2f334ff` 完成安装版 UI-only/Service/故障/可访问性 smoke，并由
 > `windows_candidate/miniapp_m1` Gate 整体通过；`M1-U-01` 与 `M1-V-01` 已关闭。
-> 最终 Signed RC 以及 macOS/Linux 外部原生验证仍未关闭。
+> Windows Signed RC 的两个产品 Gate runner 已实现，当前 StepFun Coding Plan smoke
+> 再次通过；本机没有 release code-signing certificate，故 `RC-WIN-01` 保持
+> `pending-validation`。macOS/Linux 外部原生验证仍未关闭。
 >
 > Windows 阶段性交接启动材料：
 > `CROSS-MACHINE-WORK-START-PROMPT-2026-09-09.zh.md`
@@ -72,7 +74,8 @@
 | --- | ---: | --- |
 | 已关闭 | 31 | 当前表内已关闭的 W0/N1/M1 项；Plugin N1 与 MiniApp M1 Windows Candidate 均已关闭 |
 | 正在实施 | 0 | 当前 Windows 主线没有 `in-progress` 项 |
-| 已解锁待领取 | 1 | `RC-WIN-01` |
+| 已解锁待领取 | 0 | 当前 Windows 主线没有未领取实现项 |
+| 待 Windows 验证 | 1 | `RC-WIN-01`；等待真实签名身份与 signed artifact/release lock |
 | 依赖阻塞 | 1 | `RC-MERGE-01` |
 | 外部原生 | 2 | `RC-MA-01`、`RC-LD-01` |
 | 明确延后 | 2 | Marketplace/远程分发、第二 Runtime |
@@ -480,7 +483,7 @@ lock/result。
 
 | ID | 状态 | 目标 | 依赖 | 完成定义 |
 | --- | --- | --- | --- | --- |
-| `RC-WIN-01` | open | 冻结全部 Windows 开发的最终 source cohort | `N1-V-01`,`M1-V-01` | final NSIS、StepFun、Plugin/MiniApp installed-app smoke、release lock/result |
+| `RC-WIN-01` | pending-validation | 冻结全部 Windows 开发的最终 source cohort | `N1-V-01`,`M1-V-01` | final NSIS、StepFun、Plugin/MiniApp installed-app smoke、release lock/result；Gate runner 已齐，当前缺真实签名身份与 signed artifact root |
 | `RC-MA-01` | external | macOS arm64 required 原生验证 | `RC-WIN-01` | 同 cohort package/install/runtime/Plugin/MiniApp/cleanup |
 | `RC-LD-01` | external | Linux Desktop x64 required 原生验证 | `RC-WIN-01` | 同 cohort Desktop/CLI/runtime/Plugin/MiniApp/cleanup |
 | `RC-MERGE-01` | blocked | required 三平台原样提升 | `RC-WIN-01`,`RC-MA-01`,`RC-LD-01` | 同 source/input/digest，Stable 不重建 |
@@ -1005,5 +1008,30 @@ Extension 命中仅属于历史删除合同、负向 404 测试、通用语义�
    `build.noindex/plugin-n1-gate/m1-win-cf2f334ff/windows_candidate/miniapp_m1-windows_desktop_x64.result.json`，
    cohort digest 为
    `b8863b5f7ca8b6dca4411a7ed3860b7c0c14b907f385caedde3f5fd03c7b535c`。
-   `RC-WIN-01` 的依赖现已全部满足并改为 `open`；Signed RC、同 cohort release lock/result、
+   `RC-WIN-01` 的依赖现已全部满足；Signed RC、同 cohort release lock/result、
    macOS arm64 与 Linux Desktop x64 仍未关闭。
+
+## 2026-09-11 Windows Signed RC Gate 实现与当前外部条件
+
+1. 提交 `ed87c3437` 已实现 Signed RC 阶段最后两个 pending product cell；
+   `windows_signed_rc/combined` 的 12 个 required checks 现在全部拥有真实命令，不再以
+   `check_runner_not_implemented` 阻塞。
+2. 新 runner `run-windows-signed-rc-product.mjs` 只接纳当前 clean source 下
+   `build.noindex/windows-signed-rc/<HEAD-short>/artifacts` 的真实制品。Host 与 NSIS 均须为
+   非空普通文件并具有 `Valid` Authenticode signer 与 timestamp certificate；release lock
+   必须逐文件重算通过，且 source commit、`x86_64-pc-windows-msvc`、Host path 与 package
+   path 全部精确一致，随后才允许调用既有 Plugin/MiniApp installed-product runner。
+   `NOMIFUN_WINDOWS_SIGNED_RC_ROOT` 只允许覆盖到本仓库 `build.noindex` 子目录，不能把外部
+   任意文件冒充 RC。
+3. Candidate resolver 新增受约束的 `NOMIFUN_WINDOWS_CANDIDATE_ROOT`，只供上述已验证
+   signed root 复用既有隔离安装/启动/故障/卸载 harness；普通 Candidate 默认路径和
+   provenance 检查保持不变。Signed runner/self-test、基础安装 harness 14 项测试、Gate
+   self-test 和 Signed RC combined dry-run 均通过。
+4. 当前 source 的真实 StepFun Coding Plan `step-3.7-flash` smoke 已从 Windows Credential
+   Manager 隔离执行并再次返回 `live_smoke_status=pass code=OK status=200`；secret 未进入
+   argv、源码、日志或 Git。
+5. 本机 `WINDOWS_CERTIFICATE_THUMBPRINT` 与 `TAURI_SIGNING_PRIVATE_KEY` 均未配置，当前用户
+   Code Signing certificate 数量为 0，因此不能诚实生成 release-grade signed Host/NSIS。
+   runner 对两个 scope 均以 `signed_rc_root_missing` fail closed，预期路径为
+   `build.noindex/windows-signed-rc/ed87c3437`。`RC-WIN-01` 据此改为
+   `pending-validation`，不得使用 unsigned Candidate、自签名临时证书或复制旧制品关闭。
