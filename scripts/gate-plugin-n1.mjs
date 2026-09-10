@@ -319,6 +319,12 @@ const PRODUCT_CHECK_COMMANDS = Object.freeze({
     'test',
     'scripts/release/release-lock.test.mjs',
   ],
+  plugin_n1_windows_signed_install_author_apply_invoke_restore: [
+    'bun',
+    'scripts/validation/run-windows-signed-rc-product.mjs',
+    '--scope',
+    'plugin_n1',
+  ],
   plugin_n1_windows_signed_process_cleanup: [
     'cargo',
     'test',
@@ -339,6 +345,12 @@ const PRODUCT_CHECK_COMMANDS = Object.freeze({
     'agent-v2-contract',
     '--',
     'check',
+  ],
+  miniapp_m1_windows_signed_install_build_publish_surface_rollback: [
+    'bun',
+    'scripts/validation/run-windows-signed-rc-product.mjs',
+    '--scope',
+    'miniapp_m1',
   ],
   miniapp_m1_windows_signed_service_bridge_storage: [
     'cargo',
@@ -1043,13 +1055,21 @@ function runSelfTest() {
     'pre-run inputs contain a source SHA self-reference',
   );
   assert(
-    checkPlan('windows_signed_rc', 'combined').some(
-      (check) =>
-        check.required &&
-        check.implementation === 'pending' &&
-        check.check_id === 'plugin_n1_windows_signed_install_author_apply_invoke_restore',
+    checkPlan('windows_signed_rc', 'combined')
+      .filter((check) => check.required)
+      .every((check) => check.implementation === 'implemented' && check.command),
+    'signed RC registry still contains an unimplemented required check',
+  );
+  assert(
+    checkPlan('windows_signed_rc', 'combined').filter((check) =>
+      [
+        'plugin_n1_windows_signed_install_author_apply_invoke_restore',
+        'miniapp_m1_windows_signed_install_build_publish_surface_rollback',
+      ].includes(check.check_id),
+    ).every((check) =>
+      check.command.includes('scripts/validation/run-windows-signed-rc-product.mjs'),
     ),
-    'candidate registry is not fail-closed',
+    'signed RC product checks do not use the fail-closed Authenticode runner',
   );
   assert(
     checkPlan('contract', 'combined').some(
