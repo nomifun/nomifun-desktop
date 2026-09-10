@@ -184,6 +184,28 @@ async fn installation_token_is_limited_to_headless_product_control_planes() {
         assert_eq!(response.status(), StatusCode::OK, "product route {path}");
     }
 
+    let mutation = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/plugin-projects")
+                .header(
+                    "authorization",
+                    format!("Bearer {installation_token}"),
+                )
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .expect("build installation-token mutation"),
+        )
+        .await
+        .expect("dispatch installation-token mutation");
+    assert_eq!(
+        mutation.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "Bearer mutation must pass CSRF/auth and reach JSON validation"
+    );
+
     let owner_jwt = services
         .jwt_service
         .sign(services.authoritative_user_id.as_ref(), "owner")
