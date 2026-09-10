@@ -10,11 +10,11 @@ use nomifun_api_types::{
     TrashMiniAppRequest,
 };
 use nomifun_db::{
-    BeginMiniAppM1DeleteParams, IMiniAppM1Repository, SqliteMiniAppM1Repository,
-    init_database_memory, installation_owner_id,
+    BeginMiniAppM1DeleteParams, BeginMiniAppSourceMutationParams, IMiniAppM1Repository,
+    SqliteMiniAppM1Repository, init_database_memory, installation_owner_id,
 };
 use nomifun_miniapp_platform::{
-    MiniAppM1ApplicationError, MiniAppM1ApplicationService,
+    MiniAppM1ApplicationError, MiniAppM1ApplicationService, MiniAppSourceStore,
 };
 use uuid::Uuid;
 
@@ -152,6 +152,101 @@ async fn owner_scoped_library_create_and_workshop_use_the_new_data_root() {
         .await
         .unwrap();
     assert_eq!(workshop, created);
+}
+
+#[tokio::test]
+async fn source_mutation_recovery_aborts_old_head_and_finalizes_new_head() {
+    let database = init_database_memory().await.unwrap();
+    let owner = installation_owner_id(database.pool()).await.unwrap();
+    let repository = Arc::new(SqliteMiniAppM1Repository::new(database.pool().clone()));
+    let repository_port: Arc<dyn IMiniAppM1Repository> = repository.clone();
+    let store_root = TestStoreRoot::new("source-recovery");
+    let service = MiniAppM1ApplicationService::new_with_root(repository_port, store_root.path())
+        .unwrap();
+    let created = service
+        .create(
+            &owner,
+            CreateMiniAppProjectRequest {
+                expected_library_revision: 0,
+                display_name: "Recoverable Source".to_owned(),
+                description: None,
+                kind: MiniAppKindDto::UiOnly,
+            },
+        )
+        .await
+        .unwrap();
+    let source_store = MiniAppSourceStore::new(store_root.path().join("source")).unwrap();
+    let original_digest = created.source_snapshot_digest.clone().unwrap();
+    let prepared = source_store
+        .prepare_file_replace(
+            &owner,
+            &created.miniapp.miniapp_id,
+            &created.project_id,
+            &original_digest,
+            "ui/index.html",
+            b"<!doctype html><main>recovered</main>".to_vec(),
+        )
+        .unwrap();
+
+    let aborted_id = Uuid::now_v7().to_string();
+    repository
+        .begin_source_mutation(&BeginMiniAppSourceMutationParams {
+            intent_id: aborted_id,
+            owner_user_id: owner.clone(),
+            miniapp_id: created.miniapp.miniapp_id.clone(),
+            project_id: created.project_id.clone(),
+            expected_product_revision: created.miniapp.product_revision as i64,
+            expected_project_revision: created.project_revision as i64,
+            expected_build_generation: created.build_generation as i64,
+            expected_source_digest: original_digest.clone(),
+            next_source_digest: prepared.next_source_snapshot_digest.as_ref().to_owned(),
+            next_build_generation: prepared.next_build_generation as i64,
+            created_at: nomifun_common::now_ms().max(1),
+        })
+        .await
+        .unwrap();
+    service.reconcile_source_mutations().await.unwrap();
+    assert!(repository.list_source_mutation_intents().await.unwrap().is_empty());
+    assert_eq!(
+        service
+            .workshop(&owner, &created.miniapp.miniapp_id)
+            .await
+            .unwrap()
+            .source_snapshot_digest
+            .as_deref(),
+        Some(original_digest.as_str())
+    );
+
+    let committed_id = Uuid::now_v7().to_string();
+    repository
+        .begin_source_mutation(&BeginMiniAppSourceMutationParams {
+            intent_id: committed_id,
+            owner_user_id: owner.clone(),
+            miniapp_id: created.miniapp.miniapp_id.clone(),
+            project_id: created.project_id.clone(),
+            expected_product_revision: created.miniapp.product_revision as i64,
+            expected_project_revision: created.project_revision as i64,
+            expected_build_generation: created.build_generation as i64,
+            expected_source_digest: original_digest,
+            next_source_digest: prepared.next_source_snapshot_digest.as_ref().to_owned(),
+            next_build_generation: prepared.next_build_generation as i64,
+            created_at: nomifun_common::now_ms().max(1),
+        })
+        .await
+        .unwrap();
+    source_store.commit_prepared_source(&prepared).unwrap();
+    service.reconcile_source_mutations().await.unwrap();
+    let recovered = service
+        .workshop(&owner, &created.miniapp.miniapp_id)
+        .await
+        .unwrap();
+    assert_eq!(recovered.project_revision, created.project_revision + 1);
+    assert_eq!(recovered.build_generation, created.build_generation + 1);
+    assert_eq!(
+        recovered.source_snapshot_digest.as_deref(),
+        Some(prepared.next_source_snapshot_digest.as_ref())
+    );
+    assert!(repository.list_source_mutation_intents().await.unwrap().is_empty());
 }
 
 #[tokio::test]

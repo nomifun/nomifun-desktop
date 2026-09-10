@@ -580,6 +580,13 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
         .miniapp_application
         .install_service_runtime(service_runtime.clone())
         .await;
+    services
+        .miniapp_application
+        .reconcile_source_mutations()
+        .await
+        .unwrap_or_else(|error| {
+            panic!("MiniApp Source mutation startup reconciliation failed: {error}")
+        });
     if let Err(error) = services
         .miniapp_application
         .reconcile_pending_deletions(services.authoritative_user_id.as_ref())

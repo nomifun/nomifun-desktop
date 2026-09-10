@@ -107,6 +107,8 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "miniapp_release_artifacts",
     "miniapp_releases",
     "miniapp_service_test_receipts",
+    "miniapp_source_mutation_commits",
+    "miniapp_source_mutation_intents",
     "miniapp_surface_sessions",
     "miniapps",
     "nomi_remote_events",
@@ -196,6 +198,7 @@ const UUIDV7_BUSINESS_COLUMNS: &[(&str, &str)] = &[
     ("miniapp_release_artifacts", "artifact_id"),
     ("miniapp_releases", "release_id"),
     ("miniapp_service_test_receipts", "receipt_id"),
+    ("miniapp_source_mutation_intents", "intent_id"),
     ("miniapp_surface_sessions", "surface_session_id"),
     ("miniapps", "miniapp_id"),
     ("nomi_remote_events", "event_id"),
@@ -300,6 +303,7 @@ const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
     ("miniapp_release_artifacts", "artifact_id"),
     ("miniapp_releases", "release_id"),
     ("miniapp_service_test_receipts", "receipt_id"),
+    ("miniapp_source_mutation_intents", "intent_id"),
     ("miniapp_surface_sessions", "surface_session_id"),
     ("miniapps", "miniapp_id"),
     ("nomi_agent_bindings", "target_id"),
@@ -702,6 +706,13 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     text_ref!("miniapp_projects", "owner_user_id" => "users", "user_id", false, "idx_miniapp_projects_owner_user_id", Cascade),
     text_ref!("miniapp_projects", "miniapp_id" => "miniapp_products", "miniapp_id", false, "idx_miniapp_projects_miniapp_id", Cascade)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
+    text_ref!("miniapp_source_mutation_intents", "owner_user_id" => "users", "user_id", false, "idx_miniapp_source_mutation_intents_owner_user_id", Cascade),
+    text_ref!("miniapp_source_mutation_intents", "miniapp_id" => "miniapp_products", "miniapp_id", false, "idx_miniapp_source_mutation_intents_miniapp_id", Restrict)
+        .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
+    text_ref!("miniapp_source_mutation_intents", "project_id" => "miniapp_projects", "project_id", false, "idx_miniapp_source_mutation_intents_project_id", Restrict)
+        .with_aggregate_scope("parent.owner_user_id = child.owner_user_id AND parent.miniapp_id = child.miniapp_id"),
+    text_ref!("miniapp_source_mutation_commits", "project_id" => "miniapp_projects", "project_id", false, "idx_miniapp_source_mutation_commits_project_id", Restrict),
+    text_ref!("miniapp_source_mutation_commits", "intent_id" => "miniapp_source_mutation_intents", "intent_id", false, "idx_miniapp_source_mutation_commits_intent_id", Cascade),
     text_ref!("miniapp_release_artifacts", "owner_user_id" => "users", "user_id", false, "idx_miniapp_release_artifacts_owner_user_id", Cascade),
     text_ref!("miniapp_releases", "owner_user_id" => "users", "user_id", false, "idx_miniapp_releases_owner_user_id", Cascade),
     text_ref!("miniapp_releases", "miniapp_id" => "miniapp_products", "miniapp_id", false, "idx_miniapp_releases_miniapp_id", Restrict),
@@ -1855,6 +1866,78 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
                 "NEW.ACTIVE_TURN_OPERATION_ID IS NOT OLD.ACTIVE_TURN_OPERATION_ID",
                 "NEW.ADMISSION_EPOCH IS NOT OLD.ADMISSION_EPOCH",
                 "RAISE( ABORT, 'CONVERSATION RUNNING OWNER AND EPOCH ARE IMMUTABLE' )",
+            ],
+        ),
+        (
+            "trg_miniapp_source_build_start_guard",
+            &[
+                "BEFORE INSERT ON PRODUCT_OPERATIONS",
+                "NEW.OWNER_KIND = 'MINIAPP'",
+                "NEW.KIND = 'BUILD'",
+                "FROM MINIAPP_SOURCE_MUTATION_INTENTS INTENT",
+                "RAISE(ABORT, 'MINIAPP BUILD IS FENCED BY A SOURCE MUTATION INTENT')",
+            ],
+        ),
+        (
+            "trg_miniapp_source_commit_cleanup",
+            &[
+                "AFTER UPDATE ON MINIAPP_PROJECTS",
+                "FROM MINIAPP_SOURCE_MUTATION_COMMITS COMMIT_MARKER",
+                "DELETE FROM MINIAPP_SOURCE_MUTATION_COMMITS",
+            ],
+        ),
+        (
+            "trg_miniapp_source_commit_insert_guard",
+            &[
+                "BEFORE INSERT ON MINIAPP_SOURCE_MUTATION_COMMITS",
+                "FROM MINIAPP_SOURCE_MUTATION_INTENTS INTENT",
+                "RAISE(ABORT, 'MINIAPP SOURCE COMMIT MARKER MUST BIND A DURABLE INTENT')",
+            ],
+        ),
+        (
+            "trg_miniapp_source_intent_insert_guard",
+            &[
+                "BEFORE INSERT ON MINIAPP_SOURCE_MUTATION_INTENTS",
+                "FROM MINIAPP_PRODUCTS PRODUCT",
+                "JOIN MINIAPP_PROJECTS PROJECT",
+                "PRODUCT.PRODUCT_REVISION = NEW.EXPECTED_PRODUCT_REVISION",
+                "PROJECT.PROJECT_REVISION = NEW.EXPECTED_PROJECT_REVISION",
+                "RAISE(ABORT, 'MINIAPP SOURCE INTENT MUST BIND THE EXACT EDITABLE PROJECT HEAD')",
+            ],
+        ),
+        (
+            "trg_miniapp_source_product_delete_guard",
+            &[
+                "BEFORE DELETE ON MINIAPP_PRODUCTS",
+                "FROM MINIAPP_SOURCE_MUTATION_INTENTS INTENT",
+                "RAISE(ABORT, 'MINIAPP DELETE IS FENCED BY A SOURCE MUTATION INTENT')",
+            ],
+        ),
+        (
+            "trg_miniapp_source_product_update_guard",
+            &[
+                "BEFORE UPDATE ON MINIAPP_PRODUCTS",
+                "FROM MINIAPP_SOURCE_MUTATION_INTENTS INTENT",
+                "RAISE(ABORT, 'MINIAPP PRODUCT IS FENCED BY A SOURCE MUTATION INTENT')",
+            ],
+        ),
+        (
+            "trg_miniapp_source_project_delete_guard",
+            &[
+                "BEFORE DELETE ON MINIAPP_PROJECTS",
+                "FROM MINIAPP_SOURCE_MUTATION_INTENTS INTENT",
+                "RAISE(ABORT, 'MINIAPP PROJECT DELETE IS FENCED BY A SOURCE MUTATION INTENT')",
+            ],
+        ),
+        (
+            "trg_miniapp_source_project_update_guard",
+            &[
+                "BEFORE UPDATE ON MINIAPP_PROJECTS",
+                "FROM MINIAPP_SOURCE_MUTATION_INTENTS INTENT",
+                "FROM MINIAPP_SOURCE_MUTATION_COMMITS COMMIT_MARKER",
+                "NEW.PROJECT_REVISION = OLD.PROJECT_REVISION + 1",
+                "NEW.SOURCE_HEAD_DIGEST = INTENT.NEXT_SOURCE_DIGEST",
+                "RAISE(ABORT, 'MINIAPP PROJECT IS FENCED BY A SOURCE MUTATION INTENT')",
             ],
         ),
         (

@@ -11,9 +11,10 @@ use nomifun_api_types::{
     CloseMiniAppSurfaceRequest, CreateMiniAppProjectRequest, DeleteMiniAppRequest,
     DurableOperationSummaryDto, ImportMiniAppArtifactRequest, ImportMiniAppShareRequest,
     ExportMiniAppBackupRequest, ImportMiniAppBackupRequest,
-    MiniAppLibraryResponseDto, MiniAppSurfaceLaunchDescriptorDto,
-    MiniAppWorkshopDto, OpenMiniAppSurfaceRequest, PublishMiniAppRequest, RollbackMiniAppRequest,
-    RestoreMiniAppRequest, RetryMiniAppDeleteRequest, RetryMiniAppServiceRequest,
+    MiniAppLibraryResponseDto, MiniAppSourceFileDto, MiniAppSurfaceLaunchDescriptorDto,
+    MiniAppWorkshopDto, OpenMiniAppSurfaceRequest, PublishMiniAppRequest,
+    ReplaceMiniAppSourceFileRequest, RestoreMiniAppRequest, RetryMiniAppDeleteRequest,
+    RetryMiniAppServiceRequest, RollbackMiniAppRequest,
     SetMiniAppEnabledRequest, SetMiniAppPublishModeRequest, SetMiniAppServiceRunningRequest,
     ShareMiniAppRequest, TestMiniAppReleaseRequest, TrashMiniAppRequest,
 };
@@ -63,6 +64,14 @@ pub(crate) fn miniapp_m1_write_routes(
 ) -> Router {
     Router::new()
         .route("/api/miniapps/projects", post(create_project))
+        .route(
+            "/api/miniapps/{miniapp_id}/source/files/{*source_path}",
+            get(get_source_file),
+        )
+        .route(
+            "/api/miniapps/{miniapp_id}/source/edit",
+            post(replace_source_file),
+        )
         .route("/api/miniapps/import/share", post(import_share))
         .route("/api/miniapps/import/artifact", post(import_artifact))
         .route("/api/miniapps/import/backup", post(import_backup))
@@ -164,6 +173,34 @@ async fn create_project(
     let workshop = state
         .application
         .create(user.id.as_str(), request)
+        .await
+        .map_err(application_error)?;
+    Ok(Json(ApiResponse::ok(workshop)))
+}
+
+async fn get_source_file(
+    State(state): State<MiniAppM1RouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path((miniapp_id, source_path)): Path<(String, String)>,
+) -> Result<Json<ApiResponse<MiniAppSourceFileDto>>, AppError> {
+    let source = state
+        .application
+        .source_file(user.id.as_str(), &miniapp_id, &source_path)
+        .await
+        .map_err(application_error)?;
+    Ok(Json(ApiResponse::ok(source)))
+}
+
+async fn replace_source_file(
+    State(state): State<MiniAppM1RouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(miniapp_id): Path<String>,
+    Json(request): Json<ReplaceMiniAppSourceFileRequest>,
+) -> Result<Json<ApiResponse<MiniAppWorkshopDto>>, AppError> {
+    require_route_id("miniapp_id", &miniapp_id, &request.miniapp_id)?;
+    let workshop = state
+        .application
+        .replace_source_file(user.id.as_str(), request)
         .await
         .map_err(application_error)?;
     Ok(Json(ApiResponse::ok(workshop)))

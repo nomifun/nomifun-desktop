@@ -15,6 +15,7 @@
     "refresh": "Refresh",
     "retry": "Retry",
     "backToLibrary": "Back to library",
+    "editSource": "Edit Source",
     "build": "Build Ready Release",
     "testService": "Test Ready Service",
     "cancelBuild": "Cancel build",
@@ -100,6 +101,21 @@
     "cancel": "Cancel",
     "success": "Mini-app project created",
     "error": "Create failed: {{message}}"
+  },
+  "sourceEdit": {
+    "title": "Edit MiniApp Source",
+    "intro": "Load one existing managed text file, edit it, and commit a new exact Source snapshot. Active and retained Releases are not modified.",
+    "path": "Relative source path",
+    "load": "Load file",
+    "content": "File content",
+    "save": "Save Source",
+    "uiHint": "The UI entrypoint is ui/index.html.",
+    "serviceHint": "Edit ui/index.html for the Surface or service/main.mjs for the dedicated Service.",
+    "fence": "Loaded from build generation {{generation}} · Source {{digest}}",
+    "pathInvalid": "Enter a safe relative path to an existing managed file.",
+    "loadRequired": "Load the selected file before saving it.",
+    "contentRequired": "A managed Source file cannot be empty.",
+    "identityMismatch": "The loaded Source file does not match this Project."
   },
   "transfer": {
     "chooseDirectory": "Choose directory",
@@ -385,6 +401,7 @@
     "frameTitle": "{{name}} Surface"
   },
   "messages": {
+    "sourceSaved": "A new exact Source snapshot was saved",
     "buildSucceeded": "Ready Release built",
     "testCompleted": "Ready Service test completed",
     "buildCanceled": "Build canceled",

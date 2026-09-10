@@ -15,6 +15,7 @@
     "refresh": "刷新",
     "retry": "重试",
     "backToLibrary": "返回小程序库",
+    "editSource": "编辑 Source",
     "build": "构建 Ready Release",
     "testService": "测试 Ready Service",
     "cancelBuild": "取消构建",
@@ -100,6 +101,21 @@
     "cancel": "取消",
     "success": "小程序项目已创建",
     "error": "创建失败：{{message}}"
+  },
+  "sourceEdit": {
+    "title": "编辑 MiniApp Source",
+    "intro": "读取一个现有的受管文本文件并提交新的 exact Source snapshot；Active 与已保留 Release 不会被改写。",
+    "path": "Source 相对路径",
+    "load": "读取文件",
+    "content": "文件内容",
+    "save": "保存 Source",
+    "uiHint": "UI 入口文件是 ui/index.html。",
+    "serviceHint": "Surface 使用 ui/index.html；独立 Service 使用 service/main.mjs。",
+    "fence": "读取自 build generation {{generation}} · Source {{digest}}",
+    "pathInvalid": "请输入现有受管文件的安全相对路径。",
+    "loadRequired": "保存前请先读取所选文件。",
+    "contentRequired": "受管 Source 文件不能为空。",
+    "identityMismatch": "读取到的 Source 文件不属于当前 Project。"
   },
   "transfer": {
     "chooseDirectory": "选择目录",
@@ -385,6 +401,7 @@
     "frameTitle": "{{name}} Surface"
   },
   "messages": {
+    "sourceSaved": "新的 exact Source snapshot 已保存",
     "buildSucceeded": "Ready Release 已构建",
     "testCompleted": "Ready Service 测试已完成",
     "buildCanceled": "构建已取消",

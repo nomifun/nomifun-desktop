@@ -913,6 +913,38 @@
   line-height: 19px;
 }
 
+.dialogForm {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dialogFieldLabel {
+  color: var(--color-text-2);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 17px;
+}
+
+.dialogHint {
+  margin-top: -7px;
+  color: var(--miniapp-muted);
+  font-size: 10px;
+  line-height: 16px;
+}
+
+.dialogPickerRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.monoInput :global(input),
+.monoInput :global(textarea) {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+}
+
 .fieldError {
   margin-top: 5px;
   color: rgb(var(--danger-6));

@@ -121,6 +121,22 @@ pub struct MiniAppProjectRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct MiniAppSourceMutationIntentRow {
+    pub id: i64,
+    pub intent_id: String,
+    pub owner_user_id: String,
+    pub miniapp_id: String,
+    pub project_id: String,
+    pub expected_product_revision: i64,
+    pub expected_project_revision: i64,
+    pub expected_build_generation: i64,
+    pub expected_source_digest: String,
+    pub next_source_digest: String,
+    pub next_build_generation: i64,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct MiniAppKvRow {
     pub id: i64,
     pub miniapp_id: String,

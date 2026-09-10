@@ -282,6 +282,23 @@ pub struct MiniAppSourceSnapshot {
     pub files: Vec<MiniAppSourceFile>,
 }
 
+#[derive(Clone, Debug)]
+pub struct MiniAppPreparedSourceMutation {
+    scope: MiniAppSourceScope,
+    content_kind: MiniAppSourceContentKind,
+    files: Vec<MiniAppSourceFileInput>,
+    pub expected_source_snapshot_digest: DigestHex,
+    pub next_source_snapshot_digest: DigestHex,
+    pub expected_build_generation: u64,
+    pub next_build_generation: u64,
+}
+
+impl MiniAppPreparedSourceMutation {
+    pub fn is_noop(&self) -> bool {
+        self.expected_source_snapshot_digest == self.next_source_snapshot_digest
+    }
+}
+
 impl MiniAppSourceSnapshot {
     pub fn digest(&self) -> &DigestHex {
         &self.source_snapshot_digest
@@ -542,6 +559,106 @@ impl MiniAppSourceStore {
             });
         }
         Ok(snapshot)
+    }
+
+    pub fn current_snapshot(
+        &self,
+        owner: impl AsRef<str>,
+        miniapp_id: impl AsRef<str>,
+        project_id: impl AsRef<str>,
+    ) -> Result<MiniAppSourceSnapshot, MiniAppSourceStoreError> {
+        let scope = MiniAppSourceScope::new(owner, miniapp_id, project_id)?;
+        let _guard = self.lock_mutation()?;
+        self.read_snapshot_unlocked(&scope)
+    }
+
+    pub fn prepare_file_replace(
+        &self,
+        owner: impl AsRef<str>,
+        miniapp_id: impl AsRef<str>,
+        project_id: impl AsRef<str>,
+        expected_digest: impl AsRef<str>,
+        path: impl AsRef<str>,
+        bytes: impl Into<Vec<u8>>,
+    ) -> Result<MiniAppPreparedSourceMutation, MiniAppSourceStoreError> {
+        let scope = MiniAppSourceScope::new(owner, miniapp_id, project_id)?;
+        let expected_digest = validate_digest_value(expected_digest.as_ref())?;
+        let path = path.as_ref();
+        let replacement = bytes.into();
+        let _guard = self.lock_mutation()?;
+        let current = self.read_snapshot_unlocked(&scope)?;
+        if current.source_snapshot_digest != expected_digest {
+            return Err(MiniAppSourceStoreError::CompareAndSwapConflict {
+                expected: expected_digest.0,
+                observed: current.source_snapshot_digest.0,
+            });
+        }
+        if current
+            .files
+            .iter()
+            .all(|file| file.normalized_relative_path != path)
+        {
+            return Err(MiniAppSourceStoreError::InvalidPath {
+                path: path.to_owned(),
+                reason: "Source edit may replace only an existing managed file".into(),
+            });
+        }
+        let inputs = current
+            .files
+            .iter()
+            .map(|file| {
+                MiniAppSourceFileInput::new(
+                    file.normalized_relative_path.clone(),
+                    if file.normalized_relative_path == path {
+                        replacement.clone()
+                    } else {
+                        file.bytes.clone()
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let content_kind = current.content_kind();
+        let prepared = prepare_source_files(inputs.clone(), content_kind, self.limits)?;
+        let next_snapshot = snapshot_record(&prepared)?;
+        let next_build_generation = if next_snapshot.snapshot_digest
+            == current.source_snapshot_digest
+        {
+            current.project.build_generation
+        } else {
+            checked_increment(current.project.build_generation, "build generation")?
+        };
+        Ok(MiniAppPreparedSourceMutation {
+            scope,
+            content_kind,
+            files: inputs,
+            expected_source_snapshot_digest: current.source_snapshot_digest,
+            next_source_snapshot_digest: next_snapshot.snapshot_digest,
+            expected_build_generation: current.project.build_generation,
+            next_build_generation,
+        })
+    }
+
+    pub fn commit_prepared_source(
+        &self,
+        prepared: &MiniAppPreparedSourceMutation,
+    ) -> Result<MiniAppSourceProject, MiniAppSourceStoreError> {
+        if prepared.is_noop() {
+            return Ok(self
+                .current_snapshot(
+                    &prepared.scope.owner_id,
+                    prepared.scope.miniapp_id.as_ref(),
+                    prepared.scope.project_id.as_ref(),
+                )?
+                .project);
+        }
+        self.replace_source_with_kind(
+            &prepared.scope.owner_id,
+            prepared.scope.miniapp_id.as_ref(),
+            prepared.scope.project_id.as_ref(),
+            prepared.expected_source_snapshot_digest.as_ref(),
+            prepared.files.clone(),
+            prepared.content_kind,
+        )
     }
 
     pub fn read_revision_files(
