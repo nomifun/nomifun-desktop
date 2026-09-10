@@ -2238,6 +2238,15 @@ fn operation_revision(operation: &ProductOperationRow) -> u64 {
     u64::from(operation.finished_at_ms.is_some()) + 1
 }
 
+// Product revisions cross the JSON boundary through JavaScript clients. Keep
+// the content-derived value inside Number.MAX_SAFE_INTEGER so exact CAS values
+// survive deserialize -> serialize round trips in Desktop and Headless CLI.
+const JSON_SAFE_INTEGER_MAX: u64 = (1_u64 << 53) - 1;
+
+fn json_safe_revision(prefix: [u8; 8]) -> u64 {
+    (u64::from_be_bytes(prefix) & JSON_SAFE_INTEGER_MAX).max(1)
+}
+
 fn inventory_revision(
     artifacts: &[PluginArtifactRow],
     projects: &[PluginProjectRow],
@@ -2258,5 +2267,17 @@ fn inventory_revision(
     let digest = Sha256::digest(bytes);
     let mut prefix = [0_u8; 8];
     prefix.copy_from_slice(&digest[..8]);
-    Ok(u64::from_be_bytes(prefix).max(1))
+    Ok(json_safe_revision(prefix))
+}
+
+#[cfg(test)]
+mod inventory_revision_tests {
+    use super::{JSON_SAFE_INTEGER_MAX, json_safe_revision};
+
+    #[test]
+    fn derived_revisions_are_nonzero_and_json_safe() {
+        assert_eq!(json_safe_revision([0; 8]), 1);
+        assert_eq!(json_safe_revision([0xff; 8]), JSON_SAFE_INTEGER_MAX);
+        assert!(json_safe_revision([0x80, 1, 2, 3, 4, 5, 6, 7]) <= JSON_SAFE_INTEGER_MAX);
+    }
 }
