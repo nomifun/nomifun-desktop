@@ -568,7 +568,7 @@ impl RuntimeSwitchParticipant for NomiCoreRuntimeSwitchParticipant {
         &self,
         _candidate: &ResolvedNodeRuntime,
     ) -> Result<(), JavaScriptRuntimeError> {
-        self.plugin_runtime.finalize_runtime().await
+        self.plugin_runtime.finalize_runtime(true).await
     }
 
     async fn restore_selected(

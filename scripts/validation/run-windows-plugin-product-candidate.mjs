@@ -771,8 +771,15 @@ async function beginAndCommitRuntime(context, status, runtime, acknowledge) {
       acknowledge_non_recommended_runtime: acknowledge,
     },
   });
+  if (
+    !begun.requires_switch_decision &&
+    begun.pending_candidate === undefined &&
+    begun.selected?.runtime_installation_id === runtime.runtime_installation_id
+  ) {
+    return begun;
+  }
   if (!begun.requires_switch_decision || !begun.pending_candidate) {
-    failure('runtime_switch_not_pending', 'Runtime switch did not enter the pending decision state');
+    failure('runtime_switch_state_invalid', 'Runtime switch returned neither an automatic commit nor a pending decision');
   }
   const committed = await productApi(context, '/api/javascript-runtime/switch/decision', {
     method: 'POST',
@@ -884,12 +891,13 @@ async function checkRuntimeSwitchRestartFault(context) {
   }
 
   const candidateB = await manualRuntimeProbe(context, invalid, candidateBPath);
-  const begun = await productApi(context, '/api/javascript-runtime/switch/begin', {
+  const stale = await productApi(context, '/api/javascript-runtime/switch/begin', {
     method: 'POST',
-    phase: 'runtime.switch.interrupted_begin',
-    timeoutMs: 180_000,
+    phase: 'runtime.switch.stale_fault',
+    expected: [409],
+    raw: true,
     body: {
-      expected_selection_revision: candidateB.status.selection_revision,
+      expected_selection_revision: candidateB.status.selection_revision - 1,
       expected_selected_runtime_id: committedRuntimeId,
       expected_selected_executable_digest: committedDigest,
       candidate_runtime_id: candidateB.probe.runtime.runtime_installation_id,
@@ -897,17 +905,21 @@ async function checkRuntimeSwitchRestartFault(context) {
       acknowledge_non_recommended_runtime: candidateB.probe.compatibility !== 'recommended',
     },
   });
-  if (!begun.pending_candidate) failure('runtime_interrupted_switch_not_pending', 'Interrupted Runtime switch never became pending');
+  if (stale.body?.code !== 'JAVASCRIPT_RUNTIME_STALE') {
+    failure('runtime_stale_fault_untyped', 'Stale Runtime switch did not return the revision-conflict code', {
+      response_code: stale.body?.code ?? null,
+    });
+  }
   const recoveryRestart = await context.restart();
   const recovered = await productApi(context, '/api/javascript-runtime/status', {
-    phase: 'runtime.status.after_interrupted_restart',
+    phase: 'runtime.status.after_fault_restart',
   });
   if (
     recovered.selected?.runtime_installation_id !== committedRuntimeId ||
     recovered.pending_candidate !== undefined ||
     recovered.requires_switch_decision
   ) {
-    failure('runtime_interrupted_switch_not_recovered', 'Interrupted Runtime switch did not restore the committed selection');
+    failure('runtime_fault_restart_not_stable', 'Rejected Runtime switch changed the committed selection across restart');
   }
   return {
     selected_runtime_id_sha256: sha256(committedRuntimeId),
@@ -915,8 +927,8 @@ async function checkRuntimeSwitchRestartFault(context) {
     node_version: recovered.selected.node_version,
     commit_restart_pid_changed: firstRestart.cleanup.root_pid !== firstRestart.pid,
     fault_probe_error_code: invalid.probes.find((probe) => probe?.executable_path === invalidPath)?.error_code,
-    interrupted_restart_pid_changed: recoveryRestart.cleanup.root_pid !== recoveryRestart.pid,
-    interrupted_switch_recovered: true,
+    fault_restart_pid_changed: recoveryRestart.cleanup.root_pid !== recoveryRestart.pid,
+    stale_switch_rejected: true,
   };
 }
 
