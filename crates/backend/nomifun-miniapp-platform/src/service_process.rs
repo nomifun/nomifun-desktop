@@ -737,6 +737,10 @@ impl MiniAppServiceProcessFactory for NodeMiniAppServiceProcessFactory {
             ))
         })?;
         let bootstrap_hex = hex::encode(bootstrap_json);
+        let working_directory = service_process_working_directory(
+            &module,
+            &self.node_executable,
+        )?;
 
         let mut builder = ChildProcessBuilder::new(&self.node_executable);
         builder
@@ -744,11 +748,7 @@ impl MiniAppServiceProcessFactory for NodeMiniAppServiceProcessFactory {
             .arg("-e")
             .arg(SERVICE_HOST_SCRIPT)
             .arg(&bootstrap_hex)
-            .current_dir(module.parent().ok_or_else(|| {
-                MiniAppPlatformError::InvalidState(
-                    "MiniApp Service module has no parent directory".into(),
-                )
-            })?)
+            .current_dir(working_directory)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -847,6 +847,36 @@ impl MiniAppServiceProcessFactory for NodeMiniAppServiceProcessFactory {
             }),
         }))
     }
+}
+
+fn service_process_working_directory(
+    module: &std::path::Path,
+    node_executable: &std::path::Path,
+) -> MiniAppPlatformResult<PathBuf> {
+    let module_directory = module.parent().ok_or_else(|| {
+        MiniAppPlatformError::InvalidState(
+            "MiniApp Service module has no parent directory".into(),
+        )
+    })?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+
+        // CreateProcessW does not accept an extended-length `lpCurrentDirectory`.
+        // The module itself is imported by its verified absolute file URL, so a
+        // short, stable cwd does not weaken module identity or relative imports.
+        if module_directory.as_os_str().encode_wide().count() >= 248 {
+            return node_executable
+                .parent()
+                .map(PathBuf::from)
+                .ok_or_else(|| {
+                    MiniAppPlatformError::InvalidState(
+                        "MiniApp Service Node executable has no parent directory".into(),
+                    )
+                });
+        }
+    }
+    Ok(module_directory.to_path_buf())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
