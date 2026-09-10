@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================================
 # 打 Linux 桌面端安装包(.deb / .AppImage / .rpm),汇总到 dist/desktop/。
+# 每个真实 package 同时生成并验证 Host/package/legal release lock。
 # 仅能在 Linux 上运行。
 #
 #   bun run build:linux               # 默认打当前机器架构(x64 或 arm64)
@@ -37,6 +38,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CONF="apps/desktop/tauri.conf.json"
 DIST="$ROOT/dist/desktop"
+RELEASE_LOCK_TOOL="$ROOT/scripts/release/release-lock.mjs"
+
+for tool in bun git rustup node; do
+  command -v "$tool" >/dev/null 2>&1 || {
+    echo "❌ Linux packaging requires '$tool'." >&2
+    exit 1
+  }
+done
+[[ -f "$RELEASE_LOCK_TOOL" ]] || {
+  echo "❌ missing release-lock tool: $RELEASE_LOCK_TOOL" >&2
+  exit 1
+}
 
 require_linux_build_deps() {
   local missing=()
@@ -129,6 +142,35 @@ ensure_target() {
   fi
 }
 
+validate_release_host() {
+  local host="$1"
+  [[ -f "$host" && ! -L "$host" && -x "$host" ]] || {
+    echo "❌ expected a regular executable Linux Host: $host" >&2
+    exit 1
+  }
+}
+
+write_release_lock() {
+  local target="$1"
+  local host="$2"
+  local package="$3"
+  local output="$4"
+  validate_release_host "$host"
+  [[ -f "$package" && ! -L "$package" ]] || {
+    echo "❌ cannot lock missing/non-regular Linux package: $package" >&2
+    exit 1
+  }
+  bun "$RELEASE_LOCK_TOOL" create \
+    --root "$ROOT" \
+    --platform "$target" \
+    --host "$host" \
+    --package "$package" \
+    --legal "$ROOT/LICENSE" \
+    --legal "$ROOT/NOTICE" \
+    --output "$output" >/dev/null
+  bun "$RELEASE_LOCK_TOOL" verify --root "$ROOT" --lock "$output" >/dev/null
+}
+
 mkdir -p "$DIST"
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -137,6 +179,7 @@ echo "产物汇总目录: $DIST"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 COLLECTED=()
+COLLECTED_LOCKS=()
 for t in "${TRIPLES[@]}"; do
   ensure_target "$t"
   if [[ "$t" != "$HOST_TRIPLE" ]]; then
@@ -149,11 +192,21 @@ for t in "${TRIPLES[@]}"; do
 
   # Linux 产物在 target/<triple>/release/bundle/{deb,appimage,rpm}/
   bundle_dir="$ROOT/target/$t/release/bundle"
+  host="$ROOT/target/$t/release/nomifun-desktop"
   while IFS= read -r -d '' pkg; do
-    cp -f "$pkg" "$DIST/"
-    COLLECTED+=("$DIST/$(basename "$pkg")")
+    package="$DIST/$(basename "$pkg")"
+    lock="$package.release-lock.json"
+    cp -f "$pkg" "$package"
+    write_release_lock "$t" "$host" "$package" "$lock"
+    COLLECTED+=("$package")
+    COLLECTED_LOCKS+=("$lock")
   done < <(find "$bundle_dir" -type f \( -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' \) -print0 2>/dev/null)
 done
+
+if [[ "${#COLLECTED[@]}" -eq 0 ]]; then
+  echo "❌ Tauri did not produce any Linux Desktop package." >&2
+  exit 1
+fi
 
 echo ""
 echo "▶ 清理 Linux 构建后 debug/flycheck 中间产物(保留 release 安装包与 updater 签名)..."
@@ -165,5 +218,9 @@ echo "✅ 全部完成,安装包已汇总到 $DIST :"
 for f in "${COLLECTED[@]}"; do
   size="$(du -h "$f" | cut -f1)"
   printf "   %-44s %s\n" "$(basename "$f")" "$size"
+done
+echo "Release locks:"
+for f in "${COLLECTED_LOCKS[@]}"; do
+  printf "   %s\n" "$(basename "$f")"
 done
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
