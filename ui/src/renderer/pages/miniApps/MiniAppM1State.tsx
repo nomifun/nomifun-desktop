@@ -131,30 +131,53 @@ export const MiniAppStatePanel: React.FC<{
   title: string;
   body: string;
   onRetry?: () => void;
-}> = ({ loading = false, title, body, onRetry }) => {
+  actionLabel?: string;
+}> = ({ loading = false, title, body, onRetry, actionLabel }) => {
   const { t } = useTranslation();
+  const panelId = React.useId();
+  const titleId = `${panelId}-title`;
+  const bodyId = `${panelId}-body`;
+  const panelRole = loading || !onRetry ? 'status' : 'alert';
   if (loading) {
     return (
-      <div className={styles.statePanel}>
+      <div
+        className={styles.statePanel}
+        role={panelRole}
+        aria-live='polite'
+        aria-busy='true'
+        aria-describedby={bodyId}
+      >
         <Spin size={24} />
-        <span className={styles.stateBody}>{body}</span>
+        <span id={bodyId} className={styles.stateBody}>
+          {body}
+        </span>
       </div>
     );
   }
   return (
-    <div className={styles.statePanel}>
-      <span className={styles.stateIcon}>
+    <div
+      className={styles.statePanel}
+      role={panelRole}
+      aria-live={panelRole === 'alert' ? 'assertive' : 'polite'}
+      aria-labelledby={title ? titleId : undefined}
+      aria-describedby={bodyId}
+    >
+      <span className={styles.stateIcon} aria-hidden='true'>
         <Attention theme='outline' size='24' />
       </span>
-      <span className={styles.stateTitle}>{title}</span>
-      <span className={styles.stateBody}>{body}</span>
+      <span id={titleId} className={styles.stateTitle}>
+        {title}
+      </span>
+      <span id={bodyId} className={styles.stateBody}>
+        {body}
+      </span>
       {onRetry && (
         <Button
           size='small'
           icon={<PlayOne theme='outline' size='14' />}
           onClick={onRetry}
         >
-          {t('miniApps.actions.retry')}
+          {actionLabel ?? t('miniApps.actions.retry')}
         </Button>
       )}
     </div>

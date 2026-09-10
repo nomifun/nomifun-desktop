@@ -406,11 +406,11 @@ const MiniAppTransferDialog: React.FC<MiniAppTransferDialogProps> = ({
             })
           : mode === 'import_artifact'
             ? await ipcBridge.miniapps.importArtifact.invoke({
-              expected_library_revision: libraryRevision,
-              source_path: joinLocalPath(sourcePath, 'release'),
-              expected_artifact_digest: importSummary.artifactDigest,
-              display_name: importedDisplayName,
-            })
+                expected_library_revision: libraryRevision,
+                source_path: joinLocalPath(sourcePath, 'release'),
+                expected_artifact_digest: importSummary.artifactDigest!,
+                display_name: importedDisplayName,
+              })
             : await ipcBridge.miniapps.importBackup.invoke({
                 expected_library_revision: libraryRevision,
                 source_path: sourcePath,
@@ -431,6 +431,7 @@ const MiniAppTransferDialog: React.FC<MiniAppTransferDialogProps> = ({
       className={styles.modal}
       visible={visible}
       title={title}
+      aria-describedby='miniapp-transfer-intro'
       onCancel={submitting || picking ? undefined : onCancel}
       onOk={() => void submit()}
       okText={submitLabel}
@@ -442,7 +443,9 @@ const MiniAppTransferDialog: React.FC<MiniAppTransferDialogProps> = ({
       autoFocus={false}
       unmountOnExit
     >
-      <p className={styles.dialogIntro}>{intro}</p>
+      <p id='miniapp-transfer-intro' className={styles.dialogIntro}>
+        {intro}
+      </p>
       <div className={styles.transferForm}>
         {mode === 'export' || mode === 'export_backup' ? (
           <>
@@ -452,6 +455,7 @@ const MiniAppTransferDialog: React.FC<MiniAppTransferDialogProps> = ({
               </div>
               <Radio.Group
                 type='button'
+                aria-label={t('miniApps.transfer.export.release')}
                 value={exportContent}
                 onChange={(value: MiniAppShareContent) => {
                   setExportContent(value);
@@ -487,6 +491,7 @@ const MiniAppTransferDialog: React.FC<MiniAppTransferDialogProps> = ({
               <Checkbox
                 checked={includeSource}
                 disabled={!canIncludeSource}
+                aria-label={t('miniApps.transfer.export.includeSource')}
                 onChange={setIncludeSource}
               >
                 {t('miniApps.transfer.export.includeSource')}
@@ -508,6 +513,7 @@ const MiniAppTransferDialog: React.FC<MiniAppTransferDialogProps> = ({
                 <Input
                   value={parentPath}
                   readOnly
+                  aria-label={t('miniApps.transfer.export.parentDirectory')}
                   title={parentPath}
                   placeholder={t(
                     'miniApps.transfer.export.parentPlaceholder'
@@ -515,6 +521,9 @@ const MiniAppTransferDialog: React.FC<MiniAppTransferDialogProps> = ({
                 />
                 <Button
                   icon={<FolderClose theme='outline' size='14' />}
+                  aria-label={`${t('miniApps.transfer.chooseDirectory')}: ${t(
+                    'miniApps.transfer.export.parentDirectory'
+                  )}`}
                   loading={picking}
                   disabled={submitting}
                   onClick={() => void pickDirectory()}
@@ -532,6 +541,7 @@ const MiniAppTransferDialog: React.FC<MiniAppTransferDialogProps> = ({
                 value={folderName}
                 maxLength={120}
                 disabled={submitting}
+                aria-label={t('miniApps.transfer.export.folderName')}
                 placeholder={t(
                   'miniApps.transfer.export.folderNamePlaceholder'
                 )}
@@ -565,6 +575,7 @@ const MiniAppTransferDialog: React.FC<MiniAppTransferDialogProps> = ({
                 <Input
                   value={sourcePath}
                   readOnly
+                  aria-label={t('miniApps.transfer.import.sourceDirectory')}
                   title={sourcePath}
                   placeholder={t(
                     mode === 'import_share'
@@ -576,6 +587,9 @@ const MiniAppTransferDialog: React.FC<MiniAppTransferDialogProps> = ({
                 />
                 <Button
                   icon={<FolderClose theme='outline' size='14' />}
+                  aria-label={`${t('miniApps.transfer.chooseDirectory')}: ${t(
+                    'miniApps.transfer.import.sourceDirectory'
+                  )}`}
                   loading={picking}
                   disabled={submitting}
                   onClick={() => void pickDirectory()}
@@ -602,6 +616,7 @@ const MiniAppTransferDialog: React.FC<MiniAppTransferDialogProps> = ({
                 value={displayName}
                 maxLength={120}
                 disabled={!importSummary || submitting}
+                aria-label={t('miniApps.transfer.import.displayName')}
                 placeholder={t(
                   'miniApps.transfer.import.displayNamePlaceholder'
                 )}
@@ -647,16 +662,30 @@ const MiniAppTransferDialog: React.FC<MiniAppTransferDialogProps> = ({
             <Alert
               type='info'
               showIcon
+              role='status'
+              aria-live='polite'
               content={t('miniApps.transfer.import.backendAuthority')}
             />
           </>
         )}
 
         {validationError && (
-          <Alert type='warning' showIcon content={validationError} />
+          <Alert
+            type='warning'
+            showIcon
+            role='alert'
+            aria-live='assertive'
+            content={validationError}
+          />
         )}
         {requestError && (
-          <Alert type='error' showIcon content={requestError} />
+          <Alert
+            type='error'
+            showIcon
+            role='alert'
+            aria-live='assertive'
+            content={requestError}
+          />
         )}
       </div>
     </TransferModal>

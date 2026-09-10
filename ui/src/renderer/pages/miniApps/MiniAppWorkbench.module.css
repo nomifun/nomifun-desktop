@@ -645,6 +645,16 @@
   line-height: 16px;
 }
 
+.noticeMessage {
+  min-width: 0;
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+
+.noticeAction {
+  flex: 0 0 auto;
+}
+
 .notice + .notice {
   margin-top: 8px;
 }
@@ -893,6 +903,7 @@
 .surfaceState {
   position: relative;
   min-height: 520px;
+  pointer-events: auto;
 }
 
 .dialogIntro {

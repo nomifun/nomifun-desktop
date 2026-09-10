@@ -150,6 +150,7 @@ const MiniAppSurfacePanel: React.FC<MiniAppSurfacePanelProps> = ({
   const { t } = useTranslation();
   const [frameLoading, setFrameLoading] = useState(true);
   const [frameFailed, setFrameFailed] = useState(false);
+  const [frameGeneration, setFrameGeneration] = useState(0);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const bridgePortRef = useRef<MessagePort | null>(null);
   const inFlightCallsRef = useRef<Set<string> | null>(null);
@@ -355,6 +356,7 @@ const MiniAppSurfacePanel: React.FC<MiniAppSurfacePanelProps> = ({
       ) {
         bridgeLoadRef.current.handshakeNonce = null;
         clearHandshake();
+        setFrameFailed(true);
       }
     }, BRIDGE_HANDSHAKE_TIMEOUT_MS);
     handshakeCleanupRef.current = () => {
@@ -424,6 +426,9 @@ const MiniAppSurfacePanel: React.FC<MiniAppSurfacePanelProps> = ({
 
   const handleReload = useCallback(() => {
     revokeBridge();
+    setFrameLoading(true);
+    setFrameFailed(false);
+    setFrameGeneration((value) => value + 1);
     onReload();
   }, [onReload, revokeBridge]);
 
@@ -432,13 +437,18 @@ const MiniAppSurfacePanel: React.FC<MiniAppSurfacePanelProps> = ({
   }, [onClose]);
 
   return (
-    <section className={styles.surfaceSection} aria-labelledby='miniapp-surface-title'>
+    <section
+      className={styles.surfaceSection}
+      aria-labelledby='miniapp-surface-title'
+      aria-describedby='miniapp-surface-hint'
+      aria-busy={reloading || closing || frameLoading || undefined}
+    >
       <header className={styles.surfaceHeader}>
         <div className={styles.surfaceHeading}>
           <h3 id='miniapp-surface-title' className={styles.sectionTitle}>
             {t('miniApps.surface.title')}
           </h3>
-          <p className={styles.sectionHint}>
+          <p id='miniapp-surface-hint' className={styles.sectionHint}>
             {t('miniApps.surface.fence', {
               epoch: descriptor.active_release_epoch,
               digest: shortMiniAppIdentity(
@@ -452,6 +462,7 @@ const MiniAppSurfacePanel: React.FC<MiniAppSurfacePanelProps> = ({
           <Button
             size='small'
             icon={<Refresh theme='outline' size='14' />}
+            aria-label={`${t('miniApps.actions.reloadSurface')}: ${displayName}`}
             loading={reloading}
             disabled={reloading || closing}
             onClick={handleReload}
@@ -461,6 +472,7 @@ const MiniAppSurfacePanel: React.FC<MiniAppSurfacePanelProps> = ({
           <Button
             size='small'
             icon={<CloseOne theme='outline' size='14' />}
+            aria-label={`${t('miniApps.actions.closeSurface')}: ${displayName}`}
             loading={closing}
             disabled={reloading || closing}
             onClick={handleClose}
@@ -472,13 +484,27 @@ const MiniAppSurfacePanel: React.FC<MiniAppSurfacePanelProps> = ({
 
       <div className={styles.surfaceViewport}>
         {!source || frameFailed ? (
-          <div className={styles.surfaceState} role='alert'>
+          <div
+            className={styles.surfaceState}
+            role='alert'
+            aria-live='assertive'
+          >
             <span className={styles.stateTitle}>
               {t('miniApps.errors.surfaceFrameTitle')}
             </span>
             <span className={styles.stateBody}>
               {t('miniApps.errors.surfaceFrameBody')}
             </span>
+            <Button
+              size='small'
+              icon={<Refresh theme='outline' size='14' />}
+              aria-label={`${t('miniApps.actions.reloadSurface')}: ${displayName}`}
+              loading={reloading}
+              disabled={reloading || closing}
+              onClick={handleReload}
+            >
+              {t('miniApps.actions.reloadSurface')}
+            </Button>
           </div>
         ) : (
           <>
@@ -490,7 +516,7 @@ const MiniAppSurfacePanel: React.FC<MiniAppSurfacePanelProps> = ({
             )}
             <iframe
               ref={iframeRef}
-              key={bridgeDescriptorKey}
+              key={`${bridgeDescriptorKey}:${frameGeneration}`}
               className={styles.surfaceFrame}
               src={source}
               sandbox='allow-scripts allow-forms'

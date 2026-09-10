@@ -301,6 +301,7 @@ const MiniAppsListPage: React.FC = () => {
                     prefix={<Search theme='outline' size='14' />}
                     value={searchQuery}
                     allowClear
+                    aria-label={t('miniApps.library.searchPlaceholder')}
                     placeholder={t('miniApps.library.searchPlaceholder')}
                     onChange={setSearchQuery}
                   />
@@ -309,7 +310,11 @@ const MiniAppsListPage: React.FC = () => {
             </div>
 
             {apps.length === 0 ? (
-              <div className={styles.emptyState}>
+              <div
+                className={styles.emptyState}
+                role='status'
+                aria-live='polite'
+              >
                 <span className={styles.stateIcon} aria-hidden='true'>
                   <ApplicationOne theme='outline' size='24' />
                 </span>
@@ -324,7 +329,11 @@ const MiniAppsListPage: React.FC = () => {
                 </Button>
               </div>
             ) : filteredApps.length === 0 ? (
-              <div className={styles.emptyState}>
+              <div
+                className={styles.emptyState}
+                role='status'
+                aria-live='polite'
+              >
                 <span className={styles.stateIcon} aria-hidden='true'>
                   <Search theme='outline' size='22' />
                 </span>
