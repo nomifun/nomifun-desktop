@@ -252,6 +252,25 @@ async function buildAndTest(context, detail) {
   if (!ready || !ready.candidate) {
     failure('plugin_ready_candidate_missing', 'Plugin Build did not publish a Ready Candidate');
   }
+  let expectedConfigRevision = 0;
+  let expectedCredentialBindingsRevision = 0;
+  if (built.summary.linked_mount_id) {
+    const linkedMount = await productApi(
+      context,
+      `/api/plugin-mounts/${encodeURIComponent(built.summary.linked_mount_id)}`,
+      { phase: 'plugin.test.linked_mount' },
+    );
+    expectedConfigRevision = assertInteger(
+      linkedMount.config?.config_revision,
+      'plugin_config_revision_missing',
+      'Linked Plugin Mount config revision is missing',
+    );
+    expectedCredentialBindingsRevision = assertInteger(
+      linkedMount.credential_bindings_revision,
+      'plugin_credential_revision_missing',
+      'Linked Plugin Mount credential revision is missing',
+    );
+  }
   const tested = await productApi(
     context,
     `/api/plugin-projects/${encodeURIComponent(projectId)}/test`,
@@ -265,8 +284,8 @@ async function buildAndTest(context, detail) {
         expected_build_generation: built.summary.build_generation,
         candidate_id: ready.candidate.candidate_id,
         expected_candidate_digest: ready.candidate.candidate_digest,
-        expected_config_revision: 0,
-        expected_credential_bindings_revision: 0,
+        expected_config_revision: expectedConfigRevision,
+        expected_credential_bindings_revision: expectedCredentialBindingsRevision,
         resolved_test_input_digest: sha256(canonicalJson({})),
       },
     },
