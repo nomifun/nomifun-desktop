@@ -349,6 +349,9 @@ async function checkUiLifecycleTransfer(context, state) {
   current = await buildMiniApp(context, current);
   const first = structuredClone(current.ready.release);
   current = await publishReady(context, current);
+  if (current.miniapp.lifecycle === 'disabled') {
+    current = await setEnabled(context, current, true);
+  }
 
   const descriptor = await openSurface(context, current, 'miniapp.ui.surface.open');
   const asset = await surfaceAsset(context, descriptor);
@@ -635,6 +638,9 @@ async function checkServiceLifecycleFault(context, state) {
   current = await buildMiniApp(context, current, 'on_demand');
   current = await testServiceReady(context, current);
   current = await publishReady(context, current);
+  if (current.miniapp.lifecycle === 'disabled') {
+    current = await setEnabled(context, current, true);
+  }
   current = await setServiceRunning(context, current, true);
   if (current.miniapp.service_health?.state !== 'ready') {
     failure('miniapp_service_start_failed', 'Published Service did not become ready');
