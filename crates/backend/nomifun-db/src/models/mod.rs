@@ -101,7 +101,8 @@ pub use miniapp_m1::{
 pub use oauth_token::OAuthTokenRow;
 pub use plugin_n1::{
     PluginArtifactRow, PluginCandidateTestReceiptRow, PluginCredentialBindingInput,
-    PluginCredentialBindingRow, PluginCredentialBindingSnapshot, PluginKvRow,
+    PluginCredentialBindingRow, PluginCredentialBindingSnapshot,
+    PluginDependencyMutationIntentRow, PluginKvRow,
     PluginMountRevisionRow, PluginMountRow, PluginMountRuntimeState, PluginProjectRow,
     PluginReadyCandidateRow,
     PluginCandidateOrigin, ProductOperationKind, ProductOperationRow, ProductOperationState,

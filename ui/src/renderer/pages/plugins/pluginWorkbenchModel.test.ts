@@ -159,6 +159,7 @@ describe('Plugin Workbench lifecycle model', () => {
       },
       source_snapshot_digest: 'f'.repeat(64),
       dependency_lock_digest: '1'.repeat(64),
+      direct_dependencies: {},
       ready: {
         candidate: {
           candidate_id: candidateId,

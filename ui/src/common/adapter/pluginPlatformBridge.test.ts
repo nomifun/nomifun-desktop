@@ -19,6 +19,7 @@ import type {
   PluginDetail,
   PluginLibraryResponse,
   PluginProjectDetail,
+  UpdatePluginDependenciesRequest,
 } from '../types/pluginPlatform';
 import { plugins } from './pluginPlatformBridge';
 
@@ -90,6 +91,7 @@ const projectDetail: PluginProjectDetail = {
   summary: projectSummary,
   source_snapshot_digest: 'f'.repeat(64),
   dependency_lock_digest: '1'.repeat(64),
+  direct_dependencies: {},
 };
 
 type RecordedCall = {
@@ -251,6 +253,28 @@ describe('Plugin Platform bridge', () => {
       {
         method: 'DELETE',
         path: `/api/plugin-projects/${PROJECT_ID}`,
+        body: request,
+      },
+    ]);
+  });
+
+  test('sends dependency requests with the exact Source and lock CAS', async () => {
+    installFetchFixture();
+    const request: UpdatePluginDependenciesRequest = {
+      project_id: PROJECT_ID,
+      expected_project_revision: 5,
+      expected_build_generation: 3,
+      expected_source_snapshot_digest: 'f'.repeat(64),
+      expected_dependency_lock_digest: '1'.repeat(64),
+      dependencies: { alpha: '^1.0.0' },
+    };
+
+    await plugins.updateDependencies.invoke(request);
+
+    expect(calls).toEqual([
+      {
+        method: 'PUT',
+        path: `/api/plugin-projects/${PROJECT_ID}/source/dependencies`,
         body: request,
       },
     ]);

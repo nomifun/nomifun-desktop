@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -10,6 +11,10 @@ use nomifun_db::{
     RecordPluginReadyCandidateParams, StartProductOperationParams, UninstallPluginMountParams,
 };
 use nomifun_plugin_platform::OwnerMutationCoordinator;
+use nomifun_js_authoring::{
+    DependencyMutationFacts, DependencyState, DurableDependencyMutation,
+    PreparedDependencyMutation,
+};
 use nomifun_plugin_service::{
     AppliedPluginSource, ApplyPluginSourceEditRequest, CreatedPluginSource,
     DbPluginRepositoryAdapter, ImportedPluginArtifact, PluginApplicationService,
@@ -240,6 +245,71 @@ impl PluginSourceStorePort for UnavailableSourceStore {
         Err(PluginServiceError::integration(
             "Source authoring is outside this test",
         ))
+    }
+
+    async fn dependency_state(
+        &self,
+        _owner_user_id: &str,
+        _project_id: &str,
+    ) -> Result<DependencyState, PluginServiceError> {
+        Err(PluginServiceError::integration(
+            "Source authoring is outside this test",
+        ))
+    }
+
+    async fn prepare_dependency_mutation(
+        &self,
+        _owner_user_id: &str,
+        _mutation_id: &str,
+        _request: &nomifun_api_types::UpdatePluginDependenciesRequest,
+    ) -> Result<PreparedDependencyMutation, PluginServiceError> {
+        Err(PluginServiceError::integration(
+            "Source authoring is outside this test",
+        ))
+    }
+
+    async fn commit_dependency_mutation(
+        &self,
+        _mutation: &DurableDependencyMutation,
+    ) -> Result<(), PluginServiceError> {
+        Err(PluginServiceError::integration(
+            "Source authoring is outside this test",
+        ))
+    }
+
+    async fn finish_dependency_mutation(
+        &self,
+        _facts: &DependencyMutationFacts,
+    ) -> Result<(), PluginServiceError> {
+        Ok(())
+    }
+
+    async fn rollback_dependency_mutation(
+        &self,
+        _facts: &DependencyMutationFacts,
+    ) -> Result<(), PluginServiceError> {
+        Ok(())
+    }
+
+    async fn list_dependency_mutation_journals(
+        &self,
+    ) -> Result<Vec<DependencyMutationFacts>, PluginServiceError> {
+        Ok(Vec::new())
+    }
+
+    async fn dependency_mutation_journal(
+        &self,
+        _owner_user_id: &str,
+        _project_id: &str,
+    ) -> Result<Option<DependencyMutationFacts>, PluginServiceError> {
+        Ok(None)
+    }
+
+    async fn cleanup_orphan_dependency_staging(
+        &self,
+        _retained_mutation_ids: &BTreeSet<String>,
+    ) -> Result<(), PluginServiceError> {
+        Ok(())
     }
 }
 

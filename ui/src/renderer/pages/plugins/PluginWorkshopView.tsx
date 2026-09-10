@@ -34,6 +34,7 @@ export type PluginProjectBusyAction =
   | 'create'
   | 'import'
   | 'edit'
+  | 'dependencies'
   | 'build'
   | 'test'
   | 'apply'
@@ -56,6 +57,7 @@ interface PluginWorkshopViewProps {
   onOpenMount: (mountId: PluginMountId) => void;
   onBuild: () => void;
   onEditSource: () => void;
+  onEditDependencies: () => void;
   onTest: () => void;
   onApply: () => void;
   onDelete: () => void;
@@ -92,6 +94,7 @@ const PluginProjectDetailPanel: React.FC<{
   onOpenMount: (mountId: PluginMountId) => void;
   onBuild: () => void;
   onEditSource: () => void;
+  onEditDependencies: () => void;
   onTest: () => void;
   onApply: () => void;
   onDelete: () => void;
@@ -104,6 +107,7 @@ const PluginProjectDetailPanel: React.FC<{
   onOpenMount,
   onBuild,
   onEditSource,
+  onEditDependencies,
   onTest,
   onApply,
   onDelete,
@@ -231,6 +235,16 @@ const PluginProjectDetailPanel: React.FC<{
             onClick={onEditSource}
           >
             {t('pluginWorkbench.actions.editSource')}
+          </Button>
+        )}
+        {canBuild && (
+          <Button
+            icon={<Code theme='outline' size='14' />}
+            loading={busyAction === 'dependencies'}
+            disabled={disabled}
+            onClick={onEditDependencies}
+          >
+            {t('pluginWorkbench.actions.editDependencies')}
           </Button>
         )}
         {ready && (
@@ -467,6 +481,7 @@ const PluginWorkshopView: React.FC<PluginWorkshopViewProps> = ({
   onOpenMount,
   onBuild,
   onEditSource,
+  onEditDependencies,
   onTest,
   onApply,
   onDelete,
@@ -552,6 +567,7 @@ const PluginWorkshopView: React.FC<PluginWorkshopViewProps> = ({
             onOpenMount={onOpenMount}
             onBuild={onBuild}
             onEditSource={onEditSource}
+            onEditDependencies={onEditDependencies}
             onTest={onTest}
             onApply={onApply}
             onDelete={onDelete}

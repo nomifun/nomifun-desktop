@@ -32,6 +32,21 @@ pub struct PluginProjectRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct PluginDependencyMutationIntentRow {
+    pub id: i64,
+    pub intent_id: String,
+    pub project_id: String,
+    pub owner_user_id: String,
+    pub expected_project_updated_at: i64,
+    pub expected_build_generation: i64,
+    pub expected_source_digest: String,
+    pub expected_lock_digest: String,
+    pub next_source_digest: String,
+    pub next_lock_digest: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct PluginReadyCandidateRow {
     pub id: i64,
     pub candidate_id: String,

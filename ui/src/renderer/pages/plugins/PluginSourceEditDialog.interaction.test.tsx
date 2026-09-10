@@ -47,6 +47,7 @@ const detail: PluginProjectDetail = {
   },
   source_snapshot_digest: sourceDigest,
   dependency_lock_digest: 'b'.repeat(64),
+  direct_dependencies: {},
 };
 
 const renderDialog = (

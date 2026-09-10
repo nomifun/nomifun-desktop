@@ -25,6 +25,7 @@
     "createProject": "创建项目",
     "importArtifact": "导入运行包",
     "editSource": "编辑源码",
+    "editDependencies": "编辑依赖",
     "build": "构建",
     "testCandidate": "测试候选版本",
     "applyCandidate": "应用候选版本",
@@ -112,6 +113,7 @@
     "candidateTested": "Candidate Test 已完成",
     "candidateApplied": "Ready Candidate 已应用",
     "sourceEdited": "源码已更新",
+    "dependenciesUpdated": "依赖已解析并更新精确锁",
     "operationCanceled": "操作已取消",
     "projectDeleted": "Plugin Project 已删除；已安装 Plugin 与运行数据未受影响"
   },
@@ -187,6 +189,16 @@
       "pathRequired": "请输入安全的源码相对路径。",
       "contentRequired": "替换文件前请输入文件内容。",
       "projectUnavailable": "该 Project 已没有可编辑的 Source 快照。"
+    },
+    "dependencies": {
+      "title": "更新 Plugin 依赖",
+      "body": "检查完整的 npm 直接依赖映射。NomiFun 会解析纯 ESM 包、校验 registry 完整性，并通过可恢复 mutation 一起提交 package.json 与 Host 管理的精确锁。",
+      "directDependencies": "直接依赖（JSON）",
+      "submit": "解析并更新",
+      "hint": "仅支持 npm SemVer；空对象会移除全部直接依赖。生命周期脚本、CommonJS、原生 addon、optional/peer dependency、不安全归档以及过期 Project 事实都会被拒绝。",
+      "invalidJson": "请输入有效 JSON。",
+      "invalidShape": "依赖必须是 JSON 对象，且每个值都是 SemVer 字符串。",
+      "projectUnavailable": "该 Project 已没有可编辑的 Source 快照和精确依赖锁。"
     },
     "configure": {
       "title": "配置与凭据",

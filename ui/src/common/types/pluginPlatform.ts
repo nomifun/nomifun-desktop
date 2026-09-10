@@ -233,6 +233,7 @@ export interface PluginProjectDetail {
   summary: PluginProjectSummary;
   source_snapshot_digest?: string;
   dependency_lock_digest?: string;
+  direct_dependencies: Record<string, string>;
   ready?: PluginReadyCandidate;
   active_operation?: DurablePluginOperationSummary;
 }
@@ -274,6 +275,15 @@ export interface BuildPluginProjectRequest {
   expected_build_generation: number;
   expected_source_snapshot_digest: string;
   expected_dependency_lock_digest: string;
+}
+
+export interface UpdatePluginDependenciesRequest {
+  project_id: PluginProjectId;
+  expected_project_revision: number;
+  expected_build_generation: number;
+  expected_source_snapshot_digest: string;
+  expected_dependency_lock_digest: string;
+  dependencies: Record<string, string>;
 }
 
 export interface TestPluginCandidateRequest {

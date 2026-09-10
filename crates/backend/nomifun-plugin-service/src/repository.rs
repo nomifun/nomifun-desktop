@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
 use std::sync::{
     Arc,
@@ -11,17 +11,22 @@ use nomifun_agent_contracts::{
     DigestHex, PluginMountId, PluginProjectId, RuntimeTarget, UserId,
 };
 use nomifun_js_authoring::{
-    AuthoringError, ExactDependencyLock, FixedPluginPacker, NeverCancel,
-    NpmResolverIdentity, OperationCancellation, PluginLanguage,
+    AuthoringError, CancellationFlag, ContentAddressedNpmCache,
+    DependencyMutationFacts, DependencyRequestSet, DependencyState,
+    DurableDependencyMutation, ExactDependencyLock, FixedPluginPacker, NeverCancel,
+    NpmRegistryPort, NpmResolver, NpmResolverIdentity, OperationCancellation,
+    PluginLanguage, PreparedDependencyMutation,
     PluginPackageBuildOptions, PluginScaffoldRequest, SourceFileEdit, SourceScope,
     SourceStore, SourceStoreLimits,
 };
 use nomifun_db::{
-    ApplyPluginCandidateParams, CreatePluginArtifactParams, CreatePluginProjectParams,
+    AbortPluginDependencyMutationParams, ApplyPluginCandidateParams,
+    BeginPluginDependencyMutationParams, CreatePluginArtifactParams, CreatePluginProjectParams,
     DeletePluginProjectParams, DiscardPluginCandidateParams,
-    FinishProductOperationParams, IPluginN1Repository, ListPluginCredentialBindingsParams,
-    PluginArtifactRow, PluginCandidateTestReceiptRow, PluginMountRow, PluginProjectRow,
-    PluginReadyCandidateRow, ProductOperationRow, ProductOperationState,
+    FinalizePluginDependencyMutationParams, FinishProductOperationParams, IPluginN1Repository,
+    ListPluginCredentialBindingsParams, PluginArtifactRow, PluginCandidateTestReceiptRow,
+    PluginDependencyMutationIntentRow, PluginMountRow, PluginProjectRow, PluginReadyCandidateRow,
+    ProductOperationRow, ProductOperationState,
     RecordPluginCandidateTestReceiptParams, RecordPluginReadyCandidateParams,
     ReplacePluginCredentialBindingsParams, RestorePluginMountParams, SqlitePluginN1Repository,
     SqlitePool, StartProductOperationParams, UninstallPluginMountParams,
@@ -75,6 +80,25 @@ pub trait PluginRepository: Send + Sync {
         &self,
         params: &UpdatePluginProjectSourceParams,
     ) -> Result<PluginProjectRow, PluginServiceError>;
+    async fn begin_dependency_mutation(
+        &self,
+        params: &BeginPluginDependencyMutationParams,
+    ) -> Result<PluginDependencyMutationIntentRow, PluginServiceError>;
+    async fn finalize_dependency_mutation(
+        &self,
+        params: &FinalizePluginDependencyMutationParams,
+    ) -> Result<PluginProjectRow, PluginServiceError>;
+    async fn abort_dependency_mutation(
+        &self,
+        params: &AbortPluginDependencyMutationParams,
+    ) -> Result<bool, PluginServiceError>;
+    async fn list_dependency_mutation_intents(
+        &self,
+    ) -> Result<Vec<PluginDependencyMutationIntentRow>, PluginServiceError>;
+    async fn get_dependency_mutation_intent(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<PluginDependencyMutationIntentRow>, PluginServiceError>;
     async fn delete_project_cas(
         &self,
         params: &DeletePluginProjectParams,
@@ -217,6 +241,49 @@ pub trait PluginSourceStorePort: Send + Sync {
         owner_user_id: &str,
         request: &ApplyPluginSourceEditRequest,
     ) -> Result<AppliedPluginSource, PluginServiceError>;
+
+    async fn dependency_state(
+        &self,
+        owner_user_id: &str,
+        project_id: &str,
+    ) -> Result<DependencyState, PluginServiceError>;
+
+    async fn prepare_dependency_mutation(
+        &self,
+        owner_user_id: &str,
+        mutation_id: &str,
+        request: &nomifun_api_types::UpdatePluginDependenciesRequest,
+    ) -> Result<PreparedDependencyMutation, PluginServiceError>;
+
+    async fn commit_dependency_mutation(
+        &self,
+        mutation: &DurableDependencyMutation,
+    ) -> Result<(), PluginServiceError>;
+
+    async fn finish_dependency_mutation(
+        &self,
+        facts: &DependencyMutationFacts,
+    ) -> Result<(), PluginServiceError>;
+
+    async fn rollback_dependency_mutation(
+        &self,
+        facts: &DependencyMutationFacts,
+    ) -> Result<(), PluginServiceError>;
+
+    async fn list_dependency_mutation_journals(
+        &self,
+    ) -> Result<Vec<DependencyMutationFacts>, PluginServiceError>;
+
+    async fn dependency_mutation_journal(
+        &self,
+        owner_user_id: &str,
+        project_id: &str,
+    ) -> Result<Option<DependencyMutationFacts>, PluginServiceError>;
+
+    async fn cleanup_orphan_dependency_staging(
+        &self,
+        retained_mutation_ids: &BTreeSet<String>,
+    ) -> Result<(), PluginServiceError>;
 }
 
 pub struct FsPluginArtifactStore {
@@ -230,6 +297,8 @@ pub struct FsPluginMountDataStore {
 pub struct FsPluginSourceStore {
     store: SourceStore,
     resolver: NpmResolverIdentity,
+    registry: Option<Arc<dyn NpmRegistryPort>>,
+    npm_cache: Option<ContentAddressedNpmCache>,
 }
 
 pub struct FsPluginBuildExecutor {
@@ -245,6 +314,32 @@ struct BuildCancellation {
     canceled: AtomicBool,
     completed: AtomicBool,
     completion: Notify,
+}
+
+struct CancelDependencyWorkerOnDrop {
+    cancellation: Arc<CancellationFlag>,
+    armed: bool,
+}
+
+impl CancelDependencyWorkerOnDrop {
+    fn new(cancellation: Arc<CancellationFlag>) -> Self {
+        Self {
+            cancellation,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CancelDependencyWorkerOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            self.cancellation.cancel();
+        }
+    }
 }
 
 impl BuildCancellation {
@@ -316,7 +411,22 @@ impl FsPluginSourceStore {
                 "cannot initialize Plugin dependency resolver identity: {error}"
             ))
         })?;
-        Ok(Self { store, resolver })
+        Ok(Self {
+            store,
+            resolver,
+            registry: None,
+            npm_cache: None,
+        })
+    }
+
+    pub fn with_npm_registry(
+        mut self,
+        registry: Arc<dyn NpmRegistryPort>,
+        npm_cache: ContentAddressedNpmCache,
+    ) -> Self {
+        self.registry = Some(registry);
+        self.npm_cache = Some(npm_cache);
+        self
     }
 
     pub fn store(&self) -> &SourceStore {
@@ -520,8 +630,15 @@ fn map_authoring_source_edit_error(error: AuthoringError) -> PluginServiceError 
             PluginServiceError::operation_canceled("Plugin Source edit was canceled")
         }
         AuthoringError::SourceChanged { .. }
-        | AuthoringError::DependencyLockOutOfDate { .. } => {
+        | AuthoringError::DependencyLockOutOfDate { .. }
+        | AuthoringError::DependencyLockChanged { .. } => {
             PluginServiceError::stale(error.to_string())
+        }
+        AuthoringError::DependencyMutationNeedsRecovery(_) => {
+            PluginServiceError::reconcile_required(error.to_string())
+        }
+        AuthoringError::DependencyMutationConflict(_) => {
+            PluginServiceError::conflict(error.to_string())
         }
         AuthoringError::UnsafeSourcePath { .. }
         | AuthoringError::ForbiddenSourceEntry { .. }
@@ -690,6 +807,189 @@ impl PluginSourceStorePort for FsPluginSourceStore {
         })
     }
 
+    async fn dependency_state(
+        &self,
+        owner_user_id: &str,
+        project_id: &str,
+    ) -> Result<DependencyState, PluginServiceError> {
+        let store = self.store.clone();
+        let owner_user_id = owner_user_id.to_owned();
+        let project_id = project_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let scope = SourceScope::new(
+                UserId::from(owner_user_id),
+                PluginProjectId::from(project_id),
+            )
+            .map_err(|error| PluginServiceError::invalid(error.to_string()))?;
+            store
+                .dependency_state(&scope, &NeverCancel)
+                .map_err(map_authoring_source_edit_error)
+        })
+        .await
+        .map_err(dependency_worker_join_error)?
+    }
+
+    async fn prepare_dependency_mutation(
+        &self,
+        owner_user_id: &str,
+        mutation_id: &str,
+        request: &nomifun_api_types::UpdatePluginDependenciesRequest,
+    ) -> Result<PreparedDependencyMutation, PluginServiceError> {
+        let registry = self.registry.clone().ok_or_else(|| {
+            PluginServiceError::integration("production npm registry is not configured")
+        })?;
+        let npm_cache = self.npm_cache.clone().ok_or_else(|| {
+            PluginServiceError::integration("production npm cache is not configured")
+        })?;
+        let store = self.store.clone();
+        let resolver_identity = self.resolver.clone();
+        let owner_user_id = owner_user_id.to_owned();
+        let mutation_id = mutation_id.to_owned();
+        let request = request.clone();
+        let cancellation = Arc::new(CancellationFlag::default());
+        let worker_cancellation = Arc::clone(&cancellation);
+        let mut cancel_on_drop = CancelDependencyWorkerOnDrop::new(cancellation);
+        let worker = tokio::task::spawn_blocking(move || {
+            let scope = SourceScope::new(
+                UserId::from(owner_user_id),
+                PluginProjectId::from(request.project_id.clone()),
+            )
+            .map_err(|error| PluginServiceError::invalid(error.to_string()))?;
+            let current = store
+                .dependency_state(&scope, worker_cancellation.as_ref())
+                .map_err(map_authoring_source_edit_error)?;
+            if current.source_digest().as_ref() != request.expected_source_snapshot_digest
+                || current.lock_digest().as_ref() != request.expected_dependency_lock_digest
+            {
+                return Err(PluginServiceError::stale(
+                    "Plugin Source or dependency lock differs from the requested Project head",
+                ));
+            }
+            let requests = DependencyRequestSet::new(request.dependencies)
+                .map_err(map_authoring_source_edit_error)?;
+            let lock = if current.direct_dependencies() == requests.dependencies() {
+                store
+                    .load_dependency_lock(&scope, worker_cancellation.as_ref())
+                    .map_err(map_authoring_source_edit_error)?
+            } else {
+                NpmResolver::new(resolver_identity, registry, npm_cache)
+                    .resolve(&requests, worker_cancellation.as_ref())
+                    .map_err(map_authoring_source_edit_error)?
+            };
+            store
+                .prepare_dependency_mutation(
+                    &scope,
+                    &mutation_id,
+                    request.expected_project_revision,
+                    request.expected_build_generation,
+                    current.source_digest(),
+                    current.lock_digest(),
+                    &requests,
+                    &lock,
+                    worker_cancellation.as_ref(),
+                )
+                .map_err(map_authoring_source_edit_error)
+        });
+        let result = worker.await.map_err(dependency_worker_join_error);
+        cancel_on_drop.disarm();
+        result?
+    }
+
+    async fn commit_dependency_mutation(
+        &self,
+        mutation: &DurableDependencyMutation,
+    ) -> Result<(), PluginServiceError> {
+        let store = self.store.clone();
+        let mutation = mutation.clone();
+        tokio::task::spawn_blocking(move || {
+            store
+                .commit_dependency_mutation(&mutation)
+                .map_err(map_authoring_source_edit_error)
+        })
+        .await
+        .map_err(dependency_worker_join_error)?
+    }
+
+    async fn finish_dependency_mutation(
+        &self,
+        facts: &DependencyMutationFacts,
+    ) -> Result<(), PluginServiceError> {
+        let store = self.store.clone();
+        let facts = facts.clone();
+        tokio::task::spawn_blocking(move || {
+            store
+                .finish_dependency_mutation(&facts)
+                .map_err(map_authoring_source_edit_error)
+        })
+        .await
+        .map_err(dependency_worker_join_error)?
+    }
+
+    async fn rollback_dependency_mutation(
+        &self,
+        facts: &DependencyMutationFacts,
+    ) -> Result<(), PluginServiceError> {
+        let store = self.store.clone();
+        let facts = facts.clone();
+        tokio::task::spawn_blocking(move || {
+            store
+                .rollback_dependency_mutation(&facts)
+                .map_err(map_authoring_source_edit_error)
+        })
+        .await
+        .map_err(dependency_worker_join_error)?
+    }
+
+    async fn list_dependency_mutation_journals(
+        &self,
+    ) -> Result<Vec<DependencyMutationFacts>, PluginServiceError> {
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || {
+            store
+                .list_dependency_mutation_journals()
+                .map_err(map_authoring_source_edit_error)
+        })
+        .await
+        .map_err(dependency_worker_join_error)?
+    }
+
+    async fn dependency_mutation_journal(
+        &self,
+        owner_user_id: &str,
+        project_id: &str,
+    ) -> Result<Option<DependencyMutationFacts>, PluginServiceError> {
+        let store = self.store.clone();
+        let owner_user_id = owner_user_id.to_owned();
+        let project_id = project_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let scope = SourceScope::new(
+                UserId::from(owner_user_id),
+                PluginProjectId::from(project_id),
+            )
+            .map_err(|error| PluginServiceError::invalid(error.to_string()))?;
+            store
+                .dependency_mutation_journal(&scope)
+                .map_err(map_authoring_source_edit_error)
+        })
+        .await
+        .map_err(dependency_worker_join_error)?
+    }
+
+    async fn cleanup_orphan_dependency_staging(
+        &self,
+        retained_mutation_ids: &BTreeSet<String>,
+    ) -> Result<(), PluginServiceError> {
+        let store = self.store.clone();
+        let retained_mutation_ids = retained_mutation_ids.clone();
+        tokio::task::spawn_blocking(move || {
+            store
+                .cleanup_orphan_dependency_staging(&retained_mutation_ids)
+                .map_err(map_authoring_source_edit_error)
+        })
+        .await
+        .map_err(dependency_worker_join_error)?
+    }
+
     async fn delete_project(
         &self,
         owner_user_id: &str,
@@ -704,6 +1004,10 @@ impl PluginSourceStorePort for FsPluginSourceStore {
             .delete_project(&scope)
             .map_err(|error| PluginServiceError::integration(error.to_string()))
     }
+}
+
+fn dependency_worker_join_error(error: tokio::task::JoinError) -> PluginServiceError {
+    PluginServiceError::integration(format!("Plugin dependency worker failed: {error}"))
 }
 
 impl FsPluginMountDataStore {
@@ -1244,6 +1548,43 @@ impl PluginRepository for DbPluginRepositoryAdapter {
         params: &UpdatePluginProjectSourceParams,
     ) -> Result<PluginProjectRow, PluginServiceError> {
         Ok(self.inner.update_project_source_cas(params).await?)
+    }
+
+    async fn begin_dependency_mutation(
+        &self,
+        params: &BeginPluginDependencyMutationParams,
+    ) -> Result<PluginDependencyMutationIntentRow, PluginServiceError> {
+        Ok(self.inner.begin_dependency_mutation(params).await?)
+    }
+
+    async fn finalize_dependency_mutation(
+        &self,
+        params: &FinalizePluginDependencyMutationParams,
+    ) -> Result<PluginProjectRow, PluginServiceError> {
+        Ok(self.inner.finalize_dependency_mutation(params).await?)
+    }
+
+    async fn abort_dependency_mutation(
+        &self,
+        params: &AbortPluginDependencyMutationParams,
+    ) -> Result<bool, PluginServiceError> {
+        Ok(self.inner.abort_dependency_mutation(params).await?)
+    }
+
+    async fn list_dependency_mutation_intents(
+        &self,
+    ) -> Result<Vec<PluginDependencyMutationIntentRow>, PluginServiceError> {
+        Ok(self.inner.list_dependency_mutation_intents().await?)
+    }
+
+    async fn get_dependency_mutation_intent(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<PluginDependencyMutationIntentRow>, PluginServiceError> {
+        Ok(self
+            .inner
+            .get_dependency_mutation_intent(project_id)
+            .await?)
     }
 
     async fn delete_project_cas(
