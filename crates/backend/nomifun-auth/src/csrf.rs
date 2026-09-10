@@ -21,6 +21,10 @@ use crate::extract::extract_cookie_value;
 ///   (idempotent and self-deauthorizing — a forged logout can only end the
 ///   victim's own session, while requiring a token here meant a stale cookie
 ///   made logout permanently fail and the server session survive).
+/// - Requests carrying a non-empty `Authorization: Bearer` credential bypass
+///   cookie CSRF validation. Bearer credentials are non-ambient; the route's
+///   authentication middleware remains authoritative for their validity and
+///   scope.
 /// - All other requests must include an `x-csrf-token` header whose value
 ///   matches the `nomifun-csrf-token` cookie.
 /// - Every response re-issues the CSRF cookie (same token, fresh `Max-Age`):
@@ -59,8 +63,19 @@ pub async fn csrf_middleware(
     // Locally-trusted requests authenticate via the `X-Nomi-Local-Trust` header,
     // not an ambient cookie, so they are not a CSRF target — skip validation.
     let local_trusted = request.extensions().get::<crate::trust::LocalTrusted>().is_some();
+    let has_non_ambient_bearer = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .is_some_and(|token| !token.is_empty());
 
-    if needs_validation && !is_exempt && !is_mcp_transport && !local_trusted {
+    if needs_validation
+        && !is_exempt
+        && !is_mcp_transport
+        && !local_trusted
+        && !has_non_ambient_bearer
+    {
         let header_token = request
             .headers()
             .get(CSRF_HEADER_NAME)
@@ -209,6 +224,40 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn mutation_with_non_ambient_bearer_skips_cookie_csrf() {
+        let resp = test_router()
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/api/thing")
+                    .header(header::AUTHORIZATION, "Bearer installation-token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn malformed_or_non_bearer_authorization_does_not_skip_cookie_csrf() {
+        for authorization in ["Bearer ", "Basic abc", "bearer lowercase"] {
+            let resp = test_router()
+                .oneshot(
+                    HttpRequest::builder()
+                        .method("POST")
+                        .uri("/api/thing")
+                        .header(header::AUTHORIZATION, authorization)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN, "{authorization}");
+        }
     }
 
     #[tokio::test]
