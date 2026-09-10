@@ -10,7 +10,8 @@ use crate::models::{
 };
 use crate::repository::plugin_n1::{
     ApplyPluginCandidateParams, CreatePluginArtifactParams, CreatePluginProjectParams,
-    DeletePluginKvParams, DeletePluginProjectParams, FinishProductOperationParams,
+    DeletePluginKvParams, DeletePluginProjectParams, DiscardPluginCandidateParams,
+    FinishProductOperationParams,
     GetPluginKvParams,
     IPluginN1Repository, ListPluginCredentialBindingsParams, PutPluginKvParams,
     RecordPluginCandidateTestReceiptParams, RecordPluginReadyCandidateParams,
@@ -572,6 +573,83 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
         if deleted != 1 {
             return Err(conflict("plugin project deletion lost its exact CAS"));
         }
+        tx.commit().await.map_err(DbError::Query)?;
+        Ok(true)
+    }
+
+    async fn discard_candidate(
+        &self,
+        params: &DiscardPluginCandidateParams,
+    ) -> Result<bool, DbError> {
+        validate_uuid(&params.project_id, "project_id")?;
+        validate_uuid(&params.owner_user_id, "owner_user_id")?;
+        validate_uuid(&params.candidate_id, "candidate_id")?;
+        validate_digest(
+            &params.expected_candidate_digest,
+            "expected_candidate_digest",
+        )?;
+        validate_timestamp(params.expected_updated_at, "expected_updated_at")?;
+        if params.expected_generation < 0 {
+            return Err(conflict("expected_generation must be non-negative"));
+        }
+
+        let mut tx = self.pool.begin().await.map_err(DbError::Query)?;
+        let project = lock_project(&mut tx, &params.project_id).await?;
+        if project.owner_user_id != params.owner_user_id
+            || project.updated_at != params.expected_updated_at
+            || project.build_generation != params.expected_generation
+        {
+            return Err(conflict(
+                "plugin project owner, revision, or build generation changed",
+            ));
+        }
+        if project.ready_candidate_id.as_deref() != Some(params.candidate_id.as_str()) {
+            return Err(conflict(
+                "candidate is no longer the project's exact ready candidate",
+            ));
+        }
+        let candidate = fetch_candidate_by_id(&mut tx, &params.candidate_id).await?;
+        if candidate.project_id != project.project_id
+            || candidate.build_generation != project.build_generation
+            || candidate.candidate_digest != params.expected_candidate_digest
+        {
+            return Err(conflict(
+                "plugin project Ready Candidate changed before discard",
+            ));
+        }
+
+        let updated_at = nomifun_common::now_ms().max(project.updated_at.saturating_add(1));
+        let cleared = sqlx::query(
+            "UPDATE plugin_projects
+             SET ready_candidate_id = NULL, updated_at = ?
+             WHERE project_id = ? AND owner_user_id = ?
+               AND updated_at = ? AND build_generation = ?
+               AND ready_candidate_id = ?",
+        )
+        .bind(updated_at)
+        .bind(&project.project_id)
+        .bind(&project.owner_user_id)
+        .bind(project.updated_at)
+        .bind(project.build_generation)
+        .bind(&candidate.candidate_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?
+        .rows_affected();
+        if cleared != 1 {
+            return Err(conflict("plugin candidate discard lost its exact CAS"));
+        }
+
+        sqlx::query("DELETE FROM plugin_candidate_test_receipts WHERE candidate_id = ?")
+            .bind(&candidate.candidate_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(query_error)?;
+        sqlx::query("DELETE FROM plugin_ready_candidates WHERE candidate_id = ?")
+            .bind(&candidate.candidate_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(query_error)?;
         tx.commit().await.map_err(DbError::Query)?;
         Ok(true)
     }

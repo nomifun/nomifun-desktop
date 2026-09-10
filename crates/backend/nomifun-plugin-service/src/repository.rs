@@ -18,7 +18,7 @@ use nomifun_js_authoring::{
 };
 use nomifun_db::{
     ApplyPluginCandidateParams, CreatePluginArtifactParams, CreatePluginProjectParams,
-    DeletePluginProjectParams,
+    DeletePluginProjectParams, DiscardPluginCandidateParams,
     FinishProductOperationParams, IPluginN1Repository, ListPluginCredentialBindingsParams,
     PluginArtifactRow, PluginCandidateTestReceiptRow, PluginMountRow, PluginProjectRow,
     PluginReadyCandidateRow, ProductOperationRow, ProductOperationState,
@@ -78,6 +78,10 @@ pub trait PluginRepository: Send + Sync {
     async fn delete_project_cas(
         &self,
         params: &DeletePluginProjectParams,
+    ) -> Result<bool, PluginServiceError>;
+    async fn discard_candidate(
+        &self,
+        params: &DiscardPluginCandidateParams,
     ) -> Result<bool, PluginServiceError>;
     async fn link_project(
         &self,
@@ -1247,6 +1251,13 @@ impl PluginRepository for DbPluginRepositoryAdapter {
         params: &DeletePluginProjectParams,
     ) -> Result<bool, PluginServiceError> {
         Ok(self.inner.delete_project_cas(params).await?)
+    }
+
+    async fn discard_candidate(
+        &self,
+        params: &DiscardPluginCandidateParams,
+    ) -> Result<bool, PluginServiceError> {
+        Ok(self.inner.discard_candidate(params).await?)
     }
 
     async fn link_project(

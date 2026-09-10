@@ -20,7 +20,7 @@ use nomifun_agent_contracts::{
 use nomifun_api_types::{
     ApplyPluginCandidateRequest, ApplyPluginTargetDto, BuildPluginProjectRequest,
     ConfigurePluginRequest, CreatePluginProjectRequest, DeletePluginDataRequest,
-    DeletePluginProjectRequest,
+    DeletePluginProjectRequest, DiscardPluginCandidateRequest,
     ImportPluginRequest, PluginImportKindDto, PluginLifecycleDto, PluginProjectSourceStateDto,
     PluginCandidateOriginDto, RestorePluginPreviousRequest,
     SetPluginEnabledRequest, TestPluginCandidateRequest, UninstallPluginRequest,
@@ -328,6 +328,46 @@ impl PluginRepository for FakeRepository {
             .receipts
             .retain(|receipt| !removed_candidate_ids.contains(&receipt.candidate_id));
         state.library_revision += 1;
+        Ok(true)
+    }
+
+    async fn discard_candidate(
+        &self,
+        params: &nomifun_db::DiscardPluginCandidateParams,
+    ) -> Result<bool, PluginServiceError> {
+        let mut state = self.state.lock().await;
+        let project_index = state
+            .projects
+            .iter()
+            .position(|project| project.project_id == params.project_id)
+            .ok_or_else(|| PluginServiceError::not_found("project"))?;
+        let project = state.projects[project_index].clone();
+        if project.owner_user_id != params.owner_user_id
+            || project.updated_at != params.expected_updated_at
+            || project.build_generation != params.expected_generation
+            || project.ready_candidate_id.as_deref() != Some(params.candidate_id.as_str())
+        {
+            return Err(PluginServiceError::stale("candidate discard CAS"));
+        }
+        let candidate = state
+            .candidates
+            .iter()
+            .find(|candidate| candidate.candidate_id == params.candidate_id)
+            .ok_or_else(|| PluginServiceError::not_found("candidate"))?;
+        if candidate.project_id != project.project_id
+            || candidate.build_generation != project.build_generation
+            || candidate.candidate_digest != params.expected_candidate_digest
+        {
+            return Err(PluginServiceError::stale("candidate discard identity"));
+        }
+        state.projects[project_index].ready_candidate_id = None;
+        state.projects[project_index].updated_at += 1;
+        state
+            .receipts
+            .retain(|receipt| receipt.candidate_id != params.candidate_id);
+        state
+            .candidates
+            .retain(|candidate| candidate.candidate_id != params.candidate_id);
         Ok(true)
     }
 
@@ -2114,6 +2154,67 @@ async fn candidate_stale_apply_then_restore_use_exact_digest_cas() {
         restored.summary.current.unwrap().artifact_digest,
         old_digest
     );
+}
+
+#[tokio::test]
+async fn discard_candidate_clears_ready_state_without_touching_generation_or_artifact() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = Arc::new(FakeRepository::default());
+    let package = artifact(b"export const plugin = 1;\n", "1.0.0");
+    let project = project_row("project-discard", "user-1", Some("C:\\source"), None);
+    repo.insert_project(project.clone()).await;
+    repo.insert_artifact(artifact_row(&package, "artifact")).await;
+    let candidate = candidate_row("project-discard", &package, None, project.build_generation);
+    let candidate_id = candidate.candidate_id.clone();
+    let candidate_digest = candidate.candidate_digest.clone();
+    repo.insert_candidate(candidate.clone()).await;
+    repo.record_test_receipt(&RecordPluginCandidateTestReceiptParams {
+        receipt_id: Uuid::now_v7().to_string(),
+        candidate_id: candidate_id.clone(),
+        candidate_digest: candidate_digest.clone(),
+        artifact_id: candidate.artifact_id.clone(),
+        artifact_digest: candidate.artifact_digest.clone(),
+        receipt_digest: "a".repeat(64),
+        runtime_fingerprint_digest: "b".repeat(64),
+        receipt: json!({"outcome":"passed"}),
+        tested_at: 10,
+    })
+    .await
+    .unwrap();
+    let service = service(
+        Arc::clone(&repo),
+        Arc::new(QueueArtifactStore::new(Vec::new())),
+        no_builder(),
+        &temp,
+    );
+
+    let discarded = service
+        .discard_candidate(
+            "user-1",
+            DiscardPluginCandidateRequest {
+                project_id: project.project_id.clone(),
+                expected_project_revision: project.updated_at as u64,
+                expected_build_generation: project.build_generation as u64,
+                candidate_id,
+                expected_candidate_digest: candidate_digest,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(discarded.ready.is_none());
+    assert_eq!(discarded.summary.build_generation, project.build_generation as u64);
+    let inventory = repo.snapshot().await;
+    let project = inventory
+        .projects
+        .iter()
+        .find(|row| row.project_id == "project-discard")
+        .unwrap();
+    assert!(project.ready_candidate_id.is_none());
+    assert_eq!(project.build_generation, 1);
+    assert!(inventory.candidates.is_empty());
+    assert!(inventory.receipts.is_empty());
+    assert_eq!(inventory.artifacts.len(), 1);
 }
 
 #[tokio::test]

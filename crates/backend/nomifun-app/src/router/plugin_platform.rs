@@ -26,7 +26,8 @@ use nomifun_api_types::{
     ApiResponse, ApplyPluginCandidateRequest, BuildPluginProjectRequest,
     ConfigurePluginRequest, CreatePluginProjectRequest,
     DeletePluginDataRequest, DeletePluginProjectRequest, DurableOperationDetailDto,
-    DurableOperationSummaryDto, ErrorResponse, ImportPluginRequest,
+    DiscardPluginCandidateRequest, DurableOperationSummaryDto, ErrorResponse,
+    ImportPluginRequest,
     PluginDetailDto, PluginLibraryResponseDto, PluginProjectDetailDto,
     RestorePluginPreviousRequest, RetryPluginRequest,
     SetPluginEnabledRequest, TestPluginCandidateRequest,
@@ -751,6 +752,10 @@ pub(crate) fn plugin_routes(state: PluginRouterState) -> Router {
             post(apply_candidate),
         )
         .route(
+            "/api/plugin-projects/{project_id}/candidate/discard",
+            post(discard_candidate),
+        )
+        .route(
             "/api/plugin-mounts/{mount_id}",
             get(get_mount),
         )
@@ -995,6 +1000,21 @@ async fn apply_candidate(
         state
             .service
             .apply_candidate(user.id.as_str(), request)
+            .await?,
+    )))
+}
+
+async fn discard_candidate(
+    State(state): State<PluginRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    AxumPath(project_id): AxumPath<String>,
+    Json(request): Json<DiscardPluginCandidateRequest>,
+) -> Result<Json<ApiResponse<PluginProjectDetailDto>>, PluginHttpError> {
+    require_route_id("project_id", &project_id, &request.project_id)?;
+    Ok(Json(ApiResponse::ok(
+        state
+            .service
+            .discard_candidate(user.id.as_str(), request)
             .await?,
     )))
 }
@@ -2032,7 +2052,7 @@ mod tests {
         let artifact = package_artifact(main);
         let source = data_root.path().join("incoming-plugin");
         write_package(&source, &artifact, main);
-        let project = state
+        let mut project = state
             .service
             .import_prebuilt(
                 &owner_user_id,
@@ -2052,6 +2072,68 @@ mod tests {
                         .to_owned(),
                     target_project_id: None,
                     expected_project_revision: None,
+                },
+            )
+            .await
+            .unwrap();
+        let candidate = project.ready.clone().unwrap();
+        let discard_response = plugin_routes(state.clone())
+            .layer(Extension(CurrentUser {
+                id: nomifun_common::UserId::parse(owner_user_id.clone()).unwrap(),
+                username: "owner".to_owned(),
+            }))
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(axum::http::Method::POST)
+                    .uri(format!(
+                        "/api/plugin-projects/{}/candidate/discard",
+                        project.summary.project_id
+                    ))
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&DiscardPluginCandidateRequest {
+                            project_id: project.summary.project_id.clone(),
+                            expected_project_revision: project.summary.project_revision,
+                            expected_build_generation: project.summary.build_generation,
+                            candidate_id: candidate.candidate.candidate_id,
+                            expected_candidate_digest: candidate.candidate.candidate_digest,
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(discard_response.status(), StatusCode::OK);
+        let discarded = state
+            .service
+            .get_project(&owner_user_id, &project.summary.project_id)
+            .await
+            .unwrap();
+        assert!(discarded.ready.is_none());
+        assert_eq!(
+            discarded.summary.build_generation,
+            project.summary.build_generation
+        );
+        project = state
+            .service
+            .import_prebuilt(
+                &owner_user_id,
+                ImportPluginRequest {
+                    expected_library_revision: state
+                        .service
+                        .list_library(&owner_user_id)
+                        .await
+                        .unwrap()
+                        .library_revision,
+                    import_kind: PluginImportKindDto::PrebuiltArtifact,
+                    source_path: source.display().to_string(),
+                    expected_bundle_or_artifact_digest: artifact
+                        .artifact_digest
+                        .as_ref()
+                        .to_owned(),
+                    target_project_id: Some(project.summary.project_id.clone()),
+                    expected_project_revision: Some(discarded.summary.project_revision),
                 },
             )
             .await

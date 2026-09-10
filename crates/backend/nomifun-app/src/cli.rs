@@ -248,7 +248,7 @@ pub enum PluginCommand {
     Build(PluginProjectArgs),
     /// Run the Candidate Test Host against the current Ready Candidate.
     Test(PluginTestArgs),
-    /// Apply or restore a Plugin Candidate through the application service.
+    /// Inspect, discard, apply, or restore a Plugin Candidate through the application service.
     Candidate {
         #[command(subcommand)]
         operation: PluginCandidateCommand,
@@ -270,6 +270,8 @@ pub enum PluginProjectCommand {
 pub enum PluginCandidateCommand {
     /// Show the current Ready Candidate for a Project.
     Show(PluginCandidateShowArgs),
+    /// Discard the current Ready Candidate without changing the Project generation.
+    Discard(PluginCandidateDiscardArgs),
     /// Apply the current Ready Candidate to its linked Mount or install it.
     Apply(PluginCandidateApplyArgs),
     /// Restore the previous target of an installed Plugin Mount.
@@ -308,6 +310,16 @@ pub struct PluginShowArgs {
 
 #[derive(Args, Clone, Debug)]
 pub struct PluginCandidateShowArgs {
+    /// Plugin Project identity.
+    #[arg(value_name = "PROJECT_ID")]
+    pub project_id: String,
+
+    #[command(flatten)]
+    pub connection: HeadlessConnectionArgs,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct PluginCandidateDiscardArgs {
     /// Plugin Project identity.
     #[arg(value_name = "PROJECT_ID")]
     pub project_id: String,
@@ -807,6 +819,30 @@ mod tests {
             }) if args.project_id == "project-1"
         ));
 
+        let discard = Cli::try_parse_from([
+            "nomicore",
+            "plugin",
+            "candidate",
+            "discard",
+            "project-1",
+            "--url",
+            "http://127.0.0.1:25808",
+            "--token",
+            "secret",
+        ])
+        .unwrap();
+        assert!(matches!(
+            discard.command,
+            Some(Command::Plugin {
+                operation: super::PluginCommand::Candidate {
+                    operation: super::PluginCandidateCommand::Discard(args),
+                },
+            }) if args.project_id == "project-1"
+                && args.connection.url.as_deref()
+                    == Some("http://127.0.0.1:25808")
+                && args.connection.token.as_deref() == Some("secret")
+        ));
+
         let enable = Cli::try_parse_from([
             "nomicore",
             "plugin",
@@ -839,9 +875,9 @@ mod tests {
 
         let candidate = plugin.find_subcommand("candidate").unwrap();
         assert!(candidate.find_subcommand("show").is_some());
+        assert!(candidate.find_subcommand("discard").is_some());
         assert!(candidate.find_subcommand("apply").is_some());
         assert!(candidate.find_subcommand("restore").is_some());
-        assert!(candidate.find_subcommand("discard").is_none());
 
         let mount = plugin.find_subcommand("mount").unwrap();
         assert!(mount.find_subcommand("enable").is_some());
