@@ -125,17 +125,37 @@ async function editUiSource(context, current) {
 }
 
 async function createMiniApp(context, kind, displayName) {
-  const current = await library(context, `miniapp.${kind}.library_before_create`);
-  const created = await productApi(context, '/api/miniapps/projects', {
-    method: 'POST',
-    phase: `miniapp.${kind}.create`,
-    body: {
-      expected_library_revision: current.library_revision,
-      display_name: displayName,
-      description: `Installed ${kind} MiniApp Candidate fixture.`,
-      kind,
-    },
-  });
+  let created = null;
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const current = await library(
+      context,
+      `miniapp.${kind}.library_before_create.${attempt}`,
+    );
+    try {
+      created = await productApi(context, '/api/miniapps/projects', {
+        method: 'POST',
+        phase: `miniapp.${kind}.create`,
+        body: {
+          expected_library_revision: current.library_revision,
+          display_name: displayName,
+          description: `Installed ${kind} MiniApp Candidate fixture.`,
+          kind,
+        },
+      });
+      break;
+    } catch (error) {
+      const retryableCas =
+        attempt === 1 &&
+        error instanceof SmokeFailure &&
+        error.code === 'product_api_status' &&
+        error.details?.status_code === 409;
+      if (!retryableCas) throw error;
+      await sleep(100);
+    }
+  }
+  if (!created) {
+    failure('miniapp_create_retry_exhausted', `Could not create ${kind} MiniApp after an exact Library refresh`);
+  }
   if (
     created?.miniapp?.kind !== kind ||
     created?.source_state !== 'editable' ||
