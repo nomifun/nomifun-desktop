@@ -6,6 +6,8 @@
 #   bun run build:mac --signed        # 默认 Universal,带 Developer ID 签名 + 公证
 #   bun run build:mac arm intel       # 显式指定架构(可多选,空格分隔)
 #   bun run build:mac --signed intel  # 只打 Intel,且签名+公证
+#   bun run build:mac arm --with-codex-runtime
+#                                     # 仅显式兼容旧外供 Runtime sidecar
 #   bun run build:mac --config '{"bundle":{"createUpdaterArtifacts":true}}'
 #                                     # 未知 --xxx 选项会原样透传给 tauri build
 #   bun run build:mac arm --config '{"bundle":{"createUpdaterArtifacts":true}}'
@@ -47,6 +49,7 @@ CHECK_ONLY=0
 SELECT=()
 PASSTHRU=()
 SIGNED=0
+WITH_CODEX_RUNTIME=0
 seen_dashdash=0
 for arg in "$@"; do
   if [[ "$seen_dashdash" -eq 1 ]]; then
@@ -55,6 +58,8 @@ for arg in "$@"; do
     seen_dashdash=1
   elif [[ "$arg" == "--signed" ]]; then
     SIGNED=1
+  elif [[ "$arg" == "--with-codex-runtime" ]]; then
+    WITH_CODEX_RUNTIME=1
   elif [[ "$arg" == "--check" || "$arg" == "--check-only" ]]; then
     CHECK_ONLY=1
   elif [[ "$arg" == --* ]]; then
@@ -364,6 +369,10 @@ stage_runtime_resources() {
   }
   rm -rf "$RUNTIME_STAGE"
   mkdir -p "$RUNTIME_STAGE"
+  if [[ "$WITH_CODEX_RUNTIME" -eq 0 ]]; then
+    echo "▶ 当前 Nomi-core 构建不包含旧 Codex Runtime sidecar"
+    return
+  fi
   local required=()
   for t in "${TRIPLES[@]}"; do
     if [[ "$t" == "universal-apple-darwin" ]]; then
@@ -431,14 +440,21 @@ verify_macos_app() {
       echo "❌ Universal app is missing arm64 or x86_64 slice: $archs" >&2
       exit 1
     }
-    verify_bundled_runtime "$app" arm64
-    verify_bundled_runtime "$app" x86_64
+    if [[ "$WITH_CODEX_RUNTIME" -eq 1 ]]; then
+      verify_bundled_runtime "$app" arm64
+      verify_bundled_runtime "$app" x86_64
+    fi
   elif [[ "$target" == "aarch64-apple-darwin" ]]; then
     [[ "$archs" == "arm64" ]] || { echo "❌ arm64 app has architectures: $archs" >&2; exit 1; }
-    verify_bundled_runtime "$app" arm64
+    [[ "$WITH_CODEX_RUNTIME" -eq 0 ]] || verify_bundled_runtime "$app" arm64
   else
     [[ "$archs" == "x86_64" ]] || { echo "❌ x86_64 app has architectures: $archs" >&2; exit 1; }
-    verify_bundled_runtime "$app" x86_64
+    [[ "$WITH_CODEX_RUNTIME" -eq 0 ]] || verify_bundled_runtime "$app" x86_64
+  fi
+  if [[ "$WITH_CODEX_RUNTIME" -eq 0 ]] && \
+     find "$app/Contents/Resources" -type f -name 'nomifun-codex-runtime' -print -quit 2>/dev/null | grep -q .; then
+    echo "❌ 默认 Nomi-core app 意外包含旧 Codex Runtime sidecar: $app" >&2
+    exit 1
   fi
 }
 
@@ -468,12 +484,14 @@ write_release_lock() {
     --legal "$notice"
     --output "$output"
   )
-  if [[ "$target" == "universal-apple-darwin" || "$target" == "aarch64-apple-darwin" ]]; then
+  if [[ "$WITH_CODEX_RUNTIME" -eq 1 ]] && \
+     [[ "$target" == "universal-apple-darwin" || "$target" == "aarch64-apple-darwin" ]]; then
     args+=(
       --sidecar "macos_desktop_arm64=$app/Contents/Resources/runtime/macos/arm64/nomifun-codex-runtime"
     )
   fi
-  if [[ "$target" == "universal-apple-darwin" || "$target" == "x86_64-apple-darwin" ]]; then
+  if [[ "$WITH_CODEX_RUNTIME" -eq 1 ]] && \
+     [[ "$target" == "universal-apple-darwin" || "$target" == "x86_64-apple-darwin" ]]; then
     args+=(
       --sidecar "macos_desktop_x64=$app/Contents/Resources/runtime/macos/x64/nomifun-codex-runtime"
     )
@@ -509,6 +527,7 @@ mkdir -p "$DIST"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "将依次构建以下目标: ${TRIPLES[*]}"
 [[ "$SIGNED" -eq 1 ]] && echo "签名: 开启 (公证: $([[ "$HAS_NOTARY" -eq 1 ]] && echo 开启 || echo 关闭))" || echo "签名: 关闭 (本地测试包)"
+[[ "$WITH_CODEX_RUNTIME" -eq 1 ]] && echo "旧 Codex Runtime sidecar: 显式兼容打包" || echo "旧 Codex Runtime sidecar: 不打包 (Nomi-core 默认)"
 echo "产物汇总目录: $DIST"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
