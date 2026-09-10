@@ -81,6 +81,12 @@ pub trait MiniAppServiceProcess: Send + Sync {
     ) -> Result<StrictJsonValue, MiniAppServiceProcessError>;
 
     async fn stop(&self);
+
+    /// Returns a terminal process result without waiting. Implementations that
+    /// cannot observe passive exits may keep the default `None`.
+    fn terminal_result(&self) -> Option<Result<(), String>> {
+        None
+    }
 }
 
 #[async_trait]
@@ -451,6 +457,33 @@ impl InMemoryMiniAppServiceHost {
         }
         specs.sort_by(|left, right| left.miniapp_id.cmp(&right.miniapp_id));
         specs
+    }
+
+    /// Detect processes that exited without an invocation being in flight.
+    /// Runtime maintenance uses this so an externally terminated on-demand
+    /// Service cannot remain projected as Running.
+    pub async fn observe_process_exits(&self, now_ms: i64) -> Vec<MiniAppId> {
+        let slots = self.slots.lock().await.values().cloned().collect::<Vec<_>>();
+        let mut exited = Vec::new();
+        for slot in slots {
+            let mut slot = slot.lock().await;
+            let terminal = match (&slot.process, &slot.state) {
+                (Some(process), MiniAppServiceHostState::Running { .. }) => {
+                    process.terminal_result()
+                }
+                _ => None,
+            };
+            let Some(terminal) = terminal else {
+                continue;
+            };
+            let reason = terminal.err().unwrap_or_else(|| {
+                "MiniApp Service process exited without a Host stop request".into()
+            });
+            exited.push(slot.spec.miniapp_id.clone());
+            self.transition_crash(&mut slot, reason, now_ms).await;
+        }
+        exited.sort();
+        exited
     }
 }
 

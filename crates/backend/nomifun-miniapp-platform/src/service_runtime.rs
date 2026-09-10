@@ -811,6 +811,7 @@ impl MiniAppServiceRuntimeBinding for ProductionMiniAppServiceRuntimeBinding {
     }
 
     async fn maintain(&self, now_ms: i64) -> MiniAppPlatformResult<()> {
+        self.host.observe_process_exits(now_ms).await;
         self.host
             .reap_idle(now_ms, 60_000)
             .await?;
