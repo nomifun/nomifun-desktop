@@ -2201,3 +2201,20 @@ Backup Export 共用 owner operation 互斥，避免同一 MiniApp 并行捕获�
 
 这些实现只关闭 M1-2 的产品导入导出切片，不提前关闭 MiniApp Capability Catalog
 正式消费者、旧 MiniApp 清理、Windows Candidate 或 macOS/Linux 原生验证。
+
+## 2026-09-10 实施事实校正：旧 Extension 与 Candidate discard
+
+截至当前 Windows HEAD，旧 Extension 产品生产链已经完成物理清理：
+`nomifun-extension` crate、旧 `/api/extensions/*`/Hub 路径及其生产消费者均已删除。
+后续 residual scan 中出现的 `Extension` 只允许属于历史删除合同、负向路由测试、
+通用语言/API 的 `Extension` 类型，或新 JavaScript Host 的历史内部命名；不得据此
+恢复兼容层，也不得把历史删除合同误判为仍有生产 consumer。
+
+Plugin Candidate discard 已按 05 §15 的单一 Candidate/CAS 语义落地。它只撤销
+Project 的 Ready pointer 并清理 Candidate/receipt，不删除 immutable Artifact、
+origin Operation 或 Build generation；HTTP/CLI 只是同一 application service 的产品
+入口，不构成第二套 Registry/Runtime/loader。
+
+当前这两项事实不改变 05 对 typed fail-closed、AgentPreset 不绑定具体资源、
+MiniApp capability 独立 projection、以及 Windows Candidate 完成前不进行
+macOS/Linux 原生验证的约束。

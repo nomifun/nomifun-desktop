@@ -1610,3 +1610,29 @@ Guid 的 Agent 选择器现在把普通 Nomi 与 AgentPreset 分成两条清晰�
 
 该修正只收敛产品入口，不增加持久化状态或兼容层；`gate:agent-v2 --self-test`、
 Guid 定向测试和 UI production build 通过。
+
+## 2026-09-10 Windows Candidate discard 与 0.7.6 基础安装证据
+
+Plugin Candidate discard 已按本文件的单 Ready/CAS 约束落地：
+
+- SQLite repository 在单事务中校验 owner、Project revision、Build generation、
+  Candidate ID/digest；
+- 清除 Ready pointer，删除 Candidate Test receipt 与 Ready Candidate，保留 Artifact、
+  origin Operation 和 Build generation；
+- Application Service、HTTP route 和本地 CLI 均复用同一 application service，不增加
+  第二条 loader 或兼容路径；
+- DB、Service、App route 和 CLI 定向测试均通过。
+
+当前 HEAD 已构建新鲜 Windows x64 NSIS `NomiFun_0.7.6_x64-setup.exe`，安装版基础
+smoke 已覆盖安装、启动、health、WebView2 CDP、进程树清理和卸载。该证据只证明
+Desktop 安装基础，不等价于 authored Plugin/MiniApp 生命周期、fault injection、
+Provider 或人工 accessibility 验收。
+
+旧 Extension 生产链已物理清理；剩余同名命中只允许存在于历史删除合同、负向测试、
+通用 API/语言语义或新 JavaScript Host 的历史内部命名。旧 MiniApp schema 是否删除
+继续由 DB/id-schema/backup 迁移策略决定，不在本 checkpoint 破坏性删除。
+
+当前仍未交付：安装版 Plugin Build→Test→Apply→Invoke→Restore、Runtime switch/
+restart/fault、完整 MiniApp callable 产品 E2E、auto-apply authorization persistence、
+resident Host busy/quiescent 产品证据、Desktop 产品/accessibility 走查和最终
+Windows cohort/release lock。手机模式及 macOS/Linux 原生验证继续不在本机范围内。

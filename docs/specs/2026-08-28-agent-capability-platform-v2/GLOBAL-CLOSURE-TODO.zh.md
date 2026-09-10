@@ -713,10 +713,30 @@ Create 只提交 `preset_id + title`，模型由稳定 Revision/Snapshot 在服�
   能正确生成合同矩阵，但仍列出 18 个 required product/integration/fault checks 为
   `pending`，不产生 synthetic PASS；
 - `SL-S3-10` dependency audit 仍报告 `production_legacy_files=0`、`candidate=none`；
-- 旧 Extension 仍被 App/Channel/Gateway/UI 真实消费，旧 MiniApp schema 仍属于
-  当前 DB/id-schema/backup 合同，因此当前安全可直接物理删除集合为 **空集**。
+- 旧 Extension 生产链已物理清理；剩余命中仅属于历史删除合同、负向测试、通用语义
+  或新 JavaScript Host 的历史内部命名。旧 MiniApp schema 仍属于当前 DB/id-schema/
+  backup 合同，因此旧 MiniApp 数据结构的安全可直接物理删除集合仍为 **空集**。
 
 当前工作已到需要真实 Windows Candidate/安装版、Provider Credential Manager smoke、
 主机状态和产品 accessibility 走查的边界。不得用现有历史 C8 产物代替当前 HEAD；
 不得在 dirty worktree 上生成 release evidence；macOS/Linux 和手机模式继续不在本机
 范围内。
+
+## 2026-09-10 Windows 0.7.6 基础候选与 Plugin Candidate discard checkpoint
+
+当前 HEAD `0e57c3a9cba5ae3cecabcf323f862562c9f2d40c` 已构建新鲜 Windows x64
+NSIS `NomiFun_0.7.6_x64-setup.exe`。真实安装版基础 smoke 通过 `14/14`：
+安装、x64 binary、启动、port announcement、backend health、WebView2 CDP、
+进程树清理、卸载和注册表/安装目录清理均有结果文件；这只证明 Desktop 安装基础，
+不替代 Plugin/MiniApp installed-app lifecycle、fault 或人工 accessibility。
+
+Plugin Candidate discard 已在 `0e57c3a9c` 完成 DB transaction、Application Service、
+HTTP route、CLI 和定向测试。当前 CLI 的真实覆盖范围是：
+`plugin list/show/project source-path/build/test/candidate show|discard|apply|restore`
+以及 `plugin mount enable|disable|retry|uninstall|delete-data`；未实现的 Share/Export/
+auto-apply 命令不在 CLI 中伪造。
+
+本 checkpoint 仍不关闭 `N1-V-01`、`M1-V-01` 或 `RC-WIN-01`。剩余阻断是安装版
+Plugin/MiniApp 产品闭环、Runtime switch/restart/fault、真实 MiniApp callable
+产品 E2E、Desktop 产品/accessibility 走查、Provider smoke 与最终 release lock/
+cohort 证据。

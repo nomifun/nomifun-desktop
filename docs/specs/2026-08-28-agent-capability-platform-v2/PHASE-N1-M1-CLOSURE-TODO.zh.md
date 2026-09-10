@@ -20,8 +20,8 @@
 > UI 和 disabled Whole-App Backup Export/Import-as-new 已完成实现与 Windows 定向回归。
 > Whole-App Backup 还覆盖 Service Files、Private SQLite、Migration ledger、Catalog
 > identity digest 和 owner operation 互斥。
-> Windows Candidate、
-> NSIS、产品验收和 macOS/Linux 外部验证仍未关闭。
+> 当前 HEAD 的 0.7.6 NSIS 安装版基础 smoke 已通过；Plugin/MiniApp Candidate、
+> fault、产品验收和 macOS/Linux 外部验证仍未关闭。
 >
 > Windows 阶段性交接启动材料：
 > `CROSS-MACHINE-WORK-START-PROMPT-2026-09-09.zh.md`
@@ -57,21 +57,22 @@
 
 | 分类 | 数量 | 项目 |
 | --- | ---: | --- |
-| 已关闭 | 21 | 当前表内已关闭的 W0/N1/M1 项，包含 `M1-0-01`、`M1-0-02-A`、`M1-0-02-B`、`M1-1-01`、`M1-1-02`、`M1-2-01` |
-| 正在实施 | 4 | `N1-1-01`、`N1-2-03`、`N1-4-01`、`N1-U-01` |
+| 已关闭 | 22 | 当前表内已关闭的 W0/N1/M1 项，包含 `N1-X-02`、`M1-0-01`、`M1-0-02-A`、`M1-0-02-B`、`M1-1-01`、`M1-1-02`、`M1-2-01` |
+| 正在实施 | 6 | `N1-1-01`、`N1-2-03`、`N1-4-01`、`N1-4-02`、`N1-4-03`、`N1-U-01` |
 | 已解锁待领取 | 0 | 当前 Windows 主线无未领取的前置切片 |
-| 依赖阻塞 | 8 | 其余 N1/M1 Windows 项与最终合流 |
+| 依赖阻塞 | 5 | `N1-V-01`、`M1-U-01`、`M1-V-01` 与最终 Windows 合流等 |
 | 外部原生 | 2 | `RC-MA-01`、`RC-LD-01` |
 | 明确延后 | 2 | Marketplace/远程分发、第二 Runtime |
 
 ## 2026-09-06 实施记录
 
 1. `N1-0-01` 已完成全仓依赖与产品残留扫描：
-   - 旧 `/api/presets` 生产可达性仍为 `0`；
-   - 旧 Extension 非 Skill 主链仍有 App、Channel、Gateway、UI 等真实消费者，必须等新
-     Plugin 主链可用后按 UI → Gateway/Channel → App composition → crate 的顺序删除；
-   - 旧 MiniApp REST/UI/DB/Conversation 路径仍完整生产可达，且当前
-     `miniapp.read/edit/publish/serve` 没有真实 M1 owner，不能计入二期完成度。
+   - 旧 `/api/presets` 生产可达性为 `0`；
+   - 旧 Extension 非 Skill 生产链已随新 Plugin 主链完成迁移并物理删除；剩余命中仅限
+     历史删除合同、负向路由测试、通用语义中的 `Extension` 字样，以及新 JavaScript
+     Host 的历史内部命名；
+   - 旧 MiniApp 数据表仍由 DB/id-schema/backup 合同保留，不能在没有迁移策略和真实
+     消费者证据时破坏性删除。
 2. `N1-X-01` 已由提交 `610b59007` 物理抽离：
    `nomifun-skill-library` 独立拥有 Skill service/routes/assets/market，所有直接消费者已
    切换，`nomifun-extension` 不保留 Skill re-export、alias 或 fallback。
@@ -424,15 +425,15 @@
 | ID | 状态 | Owner/写集 | 目标 | 依赖 | 最小验证 |
 | --- | --- | --- | --- | --- | --- |
 | `N1-4-01` | in-progress | Authoring lane；`nomifun-js-authoring/**` | Source Store、JS/TS scaffold、pure-JS dependency exact lock、fixed packer/Build Host | `N1-0-02`,`N1-1-02`,`N1-2-01` | authoring 27 + real Build Executor E2E 2；resolver/cache/static local+npm bundler/Node Host/Artifact admission/cancel 已接；仍需 production registry/lock mutation、MiniApp profile 和 Chat Dev Source edit |
-| `N1-4-02` | blocked | Plugin project lane | single Ready、Candidate Test、impact、manual/compatible-idle Apply、Retry/Restore | `N1-2-03`,`N1-3-01`,`N1-4-01` | stale base/busy/breaking/no auto rollback |
-| `N1-4-03` | blocked | SDK/CLI lane | Plugin SDK、Share Bundle/prebuilt import/export、本地 CLI | `N1-4-02` | same application service；secret-free bundle |
+| `N1-4-02` | in-progress | Plugin project lane | single Ready、Candidate Test、impact、manual/compatible-idle Apply、Discard、Retry/Restore | `N1-2-03`,`N1-3-01`,`N1-4-01` | Candidate discard 已完成；仍缺授权持久化 auto-apply、resident Host busy/quiescent 产品证据 |
+| `N1-4-03` | in-progress | SDK/CLI lane | Plugin SDK、Share Bundle/prebuilt import/export、本地 CLI | `N1-4-02` | 当前 CLI 已覆盖 list/show/source-path/build/test/candidate show-discard-apply-restore/mount lifecycle；Share/Export 等未实现接口不虚构 |
 
 ## N1-X：旧 Extension 删除与产品 UI
 
 | ID | 状态 | Owner/写集 | 目标 | 依赖 | 最小验证 |
 | --- | --- | --- | --- | --- | --- |
 | `N1-X-01` | closed | Skill lane；新 `nomifun-skill-library/**` | 把 `skill_service`、builtin skills、Skill market 从 `nomifun-extension` 抽为独立 owner | `W0-01` | `610b59007`；Skill Library 150 passed/2 ignored；Extension/消费者 checks passed |
-| `N1-X-02` | blocked | demolition lane；`nomifun-extension/**` 及消费者 | 删除旧 Extension loader/registry/hub/hot reload/permissions/settings/webui/agent/theme 路径 | `N1-X-01`,`N1-3-03`,`N1-4-03` | `/api/extensions/*`、Hub、`nomi-extension.json` 生产可达性为 0 |
+| `N1-X-02` | closed | demolition lane；旧 Extension 生产链 | 删除旧 Extension loader/registry/hub/hot reload/permissions/settings/webui/agent/theme 路径 | `N1-X-01`,`N1-3-03`,`N1-4-03` | `nomifun-extension` crate、旧 `/api/extensions/*`/Hub/生产消费者已物理清理；剩余仅历史删除合同、负向测试和新 JS Host 的历史命名 |
 | `N1-U-01` | in-progress | UI lane；新 `pages/plugins/**`、`pages/settings/RuntimeManager/**` | Plugin Library/Workshop/配置/诊断、Node Runtime Manager；MCP 页面只保留 MCP | `N1-2-03`,`N1-4-02` | Plugin/Runtime bridge+model/interaction 39 targeted tests、i18n/icons/production build 已通过；全量 typecheck 有既有基线错误，仍需 Desktop product/a11y/视觉走查 |
 | `N1-V-01` | blocked | 集成 Owner | Windows N1 contract/integration/fault/product/NSIS candidate | 所有 N1 项 | authored JS/TS → Test → Apply → invoke → Restore |
 
@@ -743,11 +744,38 @@ route 完成首次配置；普通 Nomi 没有模型时仍明确阻断。
 18 个 required product/integration/fault checks 仍为 `pending`，因此不关闭
 `N1-V-01`、`M1-V-01` 或 `RC-WIN-01`。
 
-旧链审计结论：当前没有安全可直接删除的生产代码集合。Extension 仍被
-App/Channel/Gateway/UI 消费；旧 MiniApp schema 仍由 DB/id-schema/backup 合同保留。
-`N1-X-02` 和旧 MiniApp physical cleanup 必须等待前置消费者迁移与历史 schema 策略，
-本轮不做破坏性删除、不做 alias/fallback。
+旧链审计结论：旧 Extension 生产链已经物理清理，当前没有可恢复的兼容入口；剩余
+Extension 命中仅属于历史删除合同、负向 404 测试、通用语义或新 JavaScript Host
+历史命名。旧 MiniApp schema 仍由 DB/id-schema/backup 合同保留，不能在缺少迁移策略
+时破坏性删除。`N1-X-02` 已关闭，旧 MiniApp physical cleanup 继续按独立数据迁移
+策略跟踪。
 
 全量 UI typecheck 仍有既有 Arco/隐式 `any` 基线错误；生产 UI build 和本轮 Guid
 定向测试通过。下一步应由具备安装器/Provider 主机权限的环境继续 Candidate，而不是
 在本机伪造 release evidence。
+
+## 2026-09-10 Candidate discard、Windows 安装版基础 smoke 与当前边界
+
+本轮完成并提交 `0e57c3a9c`：
+
+1. Plugin Candidate discard 已形成完整最小闭环。`POST
+   /api/plugin-projects/{project_id}/candidate/discard` 使用单个 SQLite transaction
+   校验 owner、Project revision、Build generation、Ready Candidate ID/digest，清除
+   `ready_candidate_id`，删除 Candidate Test receipt 与 Ready Candidate，保留
+   Build generation、Artifact 和 origin Operation。CLI 新增
+   `plugin candidate discard <PROJECT_ID>`。
+2. Candidate discard 定向证据通过：DB Plugin N1 `14 passed`、Plugin application
+   service `18 passed`、App route `1 passed`，CLI parse/adapter 测试通过。
+3. 当前 HEAD `0e57c3a9cba5ae3cecabcf323f862562c9f2d40c` 已构建新鲜 Windows x64
+   NSIS `NomiFun_0.7.6_x64-setup.exe`；真实安装版基础 smoke 通过 `14/14`，覆盖
+   安装、x64 binary、启动、port announcement、backend health、WebView2 CDP、
+   进程树清理、卸载和注册表/安装目录清理。该 smoke 不等于 Plugin/MiniApp
+   生命周期或 fault Candidate 通过。
+4. 当前仍未关闭：`N1-1-01` 的安装版 Runtime switch/restart/fault 证据、
+   `N1-2-03` 的安装版 Plugin Build→Test→Apply→Invoke→Restore、`N1-4-01/02`
+   的 production dependency mutation/auto-apply authorization 与 resident Host
+   busy/quiescent 产品证据、`M1-U-01` 的真实 Tauri 产品/accessibility 走查、
+   MiniApp callable 完整产品 E2E、`N1-V-01`、`M1-V-01` 和 `RC-WIN-01`。
+5. 当前生成的安装包只作为本机候选输入，尚未把未完成的产品/fault checks 伪装成
+   Gate PASS；历史 `0.7.4` 安装包禁止复用。手机模式、macOS arm64 和 Linux
+   Desktop x64 仍不在本机范围内。
