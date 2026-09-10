@@ -1032,6 +1032,12 @@ Extension 命中仅属于历史删除合同、负向 404 测试、通用语义�
    argv、源码、日志或 Git。
 5. 本机 `WINDOWS_CERTIFICATE_THUMBPRINT` 与 `TAURI_SIGNING_PRIVATE_KEY` 均未配置，当前用户
    Code Signing certificate 数量为 0，因此不能诚实生成 release-grade signed Host/NSIS。
-   runner 对两个 scope 均以 `signed_rc_root_missing` fail closed，预期路径为
-   `build.noindex/windows-signed-rc/ed87c3437`。`RC-WIN-01` 据此改为
+   product runner 对两个 scope 均以 `signed_rc_root_missing` fail closed；一键编排器在
+   任何构建或文件写入前以 `signed_rc_certificate_missing` 停止。`RC-WIN-01` 据此改为
    `pending-validation`，不得使用 unsigned Candidate、自签名临时证书或复制旧制品关闭。
+6. 提交 `c88c25e0a` 新增串行 `bun run release:win:signed-rc`：只在真实证书 preflight
+   通过后运行 `build:win x64 --signed`，校验 Host/NSIS 的 timestamped Authenticode，
+   把 Host、NSIS、LICENSE、NOTICE 和 release lock 原子发布到唯一 source-keyed RC 根，
+   然后依次运行 Credential Manager StepFun smoke 与 `windows_signed_rc/combined` Gate。
+   已存在 RC 根不会覆盖，staging 失败会清理，不产生半发布 cohort；orchestrator、
+   Authenticode runner 与 release-lock 合计 8 项定向测试通过。
