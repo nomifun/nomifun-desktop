@@ -1628,6 +1628,11 @@ smoke 已覆盖安装、启动、health、WebView2 CDP、进程树清理和卸�
 Desktop 安装基础，不等价于 authored Plugin/MiniApp 生命周期、fault injection、
 Provider 或人工 accessibility 验收。
 
+Windows Credential Manager runner 已完成一次真实 StepFun Coding Plan
+`step-3.7-flash` smoke，输出 `live_smoke_status=pass code=OK status=200`。凭据边界
+符合本文件要求，不进入源码、argv、日志、fixture 或 Git；该结果仅关闭对应的
+Nomi-core Provider smoke 证据，不关闭 Plugin/MiniApp installed-app Candidate。
+
 旧 Extension 生产链已物理清理；剩余同名命中只允许存在于历史删除合同、负向测试、
 通用 API/语言语义或新 JavaScript Host 的历史内部命名。旧 MiniApp schema 是否删除
 继续由 DB/id-schema/backup 迁移策略决定，不在本 checkpoint 破坏性删除。

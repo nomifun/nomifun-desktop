@@ -771,11 +771,15 @@ Extension 命中仅属于历史删除合同、负向 404 测试、通用语义�
    安装、x64 binary、启动、port announcement、backend health、WebView2 CDP、
    进程树清理、卸载和注册表/安装目录清理。该 smoke 不等于 Plugin/MiniApp
    生命周期或 fault Candidate 通过。
-4. 当前仍未关闭：`N1-1-01` 的安装版 Runtime switch/restart/fault 证据、
+4. Windows Credential Manager runner 已完成一次真实 StepFun Coding Plan
+   `step-3.7-flash` smoke，结果为 `live_smoke_status=pass code=OK status=200`；
+   凭据未进入源码、argv、日志、fixture 或 Git。该 smoke 只证明 Nomi-core Provider
+   链路，不替代 Plugin/MiniApp Candidate。
+5. 当前仍未关闭：`N1-1-01` 的安装版 Runtime switch/restart/fault 证据、
    `N1-2-03` 的安装版 Plugin Build→Test→Apply→Invoke→Restore、`N1-4-01/02`
    的 production dependency mutation/auto-apply authorization 与 resident Host
    busy/quiescent 产品证据、`M1-U-01` 的真实 Tauri 产品/accessibility 走查、
    MiniApp callable 完整产品 E2E、`N1-V-01`、`M1-V-01` 和 `RC-WIN-01`。
-5. 当前生成的安装包只作为本机候选输入，尚未把未完成的产品/fault checks 伪装成
+6. 当前生成的安装包只作为本机候选输入，尚未把未完成的产品/fault checks 伪装成
    Gate PASS；历史 `0.7.4` 安装包禁止复用。手机模式、macOS arm64 和 Linux
    Desktop x64 仍不在本机范围内。
