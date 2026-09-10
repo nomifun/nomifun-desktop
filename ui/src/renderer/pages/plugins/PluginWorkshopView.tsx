@@ -35,6 +35,7 @@ export type PluginProjectBusyAction =
   | 'import'
   | 'edit'
   | 'dependencies'
+  | 'auto_apply'
   | 'build'
   | 'test'
   | 'apply'
@@ -58,6 +59,7 @@ interface PluginWorkshopViewProps {
   onBuild: () => void;
   onEditSource: () => void;
   onEditDependencies: () => void;
+  onSetAutoApply: (enabled: boolean) => void;
   onTest: () => void;
   onApply: () => void;
   onDelete: () => void;
@@ -95,6 +97,7 @@ const PluginProjectDetailPanel: React.FC<{
   onBuild: () => void;
   onEditSource: () => void;
   onEditDependencies: () => void;
+  onSetAutoApply: (enabled: boolean) => void;
   onTest: () => void;
   onApply: () => void;
   onDelete: () => void;
@@ -108,6 +111,7 @@ const PluginProjectDetailPanel: React.FC<{
   onBuild,
   onEditSource,
   onEditDependencies,
+  onSetAutoApply,
   onTest,
   onApply,
   onDelete,
@@ -115,6 +119,18 @@ const PluginProjectDetailPanel: React.FC<{
 }) => {
   const { t } = useTranslation();
   const { summary, ready, active_operation: operation } = detail;
+  const autoApplyBlockingLabels: Record<string, string> = {
+    authorization_required: t('pluginWorkbench.autoApply.blockers.authorization'),
+    linked_target_changed: t('pluginWorkbench.autoApply.blockers.linkedTarget'),
+    source_or_test_changed: t('pluginWorkbench.autoApply.blockers.sourceOrTest'),
+    contract_or_dependency_changed: t(
+      'pluginWorkbench.autoApply.blockers.contractOrDependency'
+    ),
+    runtime_or_platform_changed: t('pluginWorkbench.autoApply.blockers.runtimeOrPlatform'),
+    validation_incomplete: t('pluginWorkbench.autoApply.blockers.validation'),
+    runtime_unavailable: t('pluginWorkbench.autoApply.blockers.runtimeUnavailable'),
+    linked_mount_unavailable: t('pluginWorkbench.autoApply.blockers.linkedMountUnavailable'),
+  };
   const canDelete = projectDeleteAvailable(detail);
   const operationRunning = operation?.state === 'running';
   const canBuild =
@@ -237,6 +253,32 @@ const PluginProjectDetailPanel: React.FC<{
             {t('pluginWorkbench.actions.editSource')}
           </Button>
         )}
+        {canBuild && summary.linked_mount_id && (
+          <Button
+            icon={<CheckOne theme='outline' size='14' />}
+            loading={busyAction === 'auto_apply'}
+            disabled={disabled}
+            onClick={() =>
+              onSetAutoApply(summary.apply_mode !== 'auto_compatible_when_idle')
+            }
+          >
+            {summary.apply_mode === 'auto_compatible_when_idle'
+              ? t('pluginWorkbench.actions.disableAutoApply')
+              : t('pluginWorkbench.actions.enableAutoApply')}
+          </Button>
+        )}
+        {canBuild &&
+          summary.linked_mount_id &&
+          summary.apply_mode === 'auto_compatible_when_idle' &&
+          ready && (
+            <Button
+              loading={busyAction === 'auto_apply'}
+              disabled={disabled}
+              onClick={() => onSetAutoApply(true)}
+            >
+              {t('pluginWorkbench.actions.retryAutoApply')}
+            </Button>
+          )}
         {canBuild && (
           <Button
             icon={<Code theme='outline' size='14' />}
@@ -412,7 +454,7 @@ const PluginProjectDetailPanel: React.FC<{
             {ready.impact.blocking_reasons.length > 0 && (
               <ul className={styles.blockingList}>
                 {ready.impact.blocking_reasons.map((reason) => (
-                  <li key={reason}>{reason}</li>
+                  <li key={reason}>{autoApplyBlockingLabels[reason] ?? reason}</li>
                 ))}
               </ul>
             )}
@@ -482,6 +524,7 @@ const PluginWorkshopView: React.FC<PluginWorkshopViewProps> = ({
   onBuild,
   onEditSource,
   onEditDependencies,
+  onSetAutoApply,
   onTest,
   onApply,
   onDelete,
@@ -568,6 +611,7 @@ const PluginWorkshopView: React.FC<PluginWorkshopViewProps> = ({
             onBuild={onBuild}
             onEditSource={onEditSource}
             onEditDependencies={onEditDependencies}
+            onSetAutoApply={onSetAutoApply}
             onTest={onTest}
             onApply={onApply}
             onDelete={onDelete}

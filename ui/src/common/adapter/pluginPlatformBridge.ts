@@ -29,6 +29,7 @@ import type {
   RestorePluginPreviousRequest,
   RetryPluginRequest,
   SetPluginEnabledRequest,
+  SetPluginAutoApplyRequest,
   TestPluginCandidateRequest,
   UninstallPluginRequest,
   UpdatePluginDependenciesRequest,
@@ -194,6 +195,13 @@ export const plugins = {
     httpPut<PluginProjectDetail, UpdatePluginDependenciesRequest>(
       (request) =>
         `/api/plugin-projects/${encodeURIComponent(request.project_id)}/source/dependencies`
+    ),
+    mapProjectDetail
+  ),
+  setAutoApply: withResponseMap(
+    httpPut<PluginProjectDetail, SetPluginAutoApplyRequest>(
+      (request) =>
+        `/api/plugin-projects/${encodeURIComponent(request.project_id)}/auto-apply`
     ),
     mapProjectDetail
   ),

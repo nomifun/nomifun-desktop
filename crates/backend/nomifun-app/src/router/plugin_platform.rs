@@ -30,7 +30,7 @@ use nomifun_api_types::{
     ImportPluginRequest,
     PluginDetailDto, PluginLibraryResponseDto, PluginProjectDetailDto,
     RestorePluginPreviousRequest, RetryPluginRequest,
-    SetPluginEnabledRequest, TestPluginCandidateRequest,
+    SetPluginAutoApplyRequest, SetPluginEnabledRequest, TestPluginCandidateRequest,
     UninstallPluginRequest, UpdatePluginDependenciesRequest,
 };
 use nomifun_auth::CurrentUser;
@@ -61,7 +61,8 @@ use nomifun_plugin_service::{
     FsPluginSourceStore,
     CandidateTestOutput, FsPluginBuildExecutor, PluginApplicationService,
     PluginArtifactStorePort, PluginBuildExecutor, PluginCandidateTestExecutor,
-    PluginHostCoordinator, PluginOperationCancellation, PluginRegistryPublisher,
+    PluginAutoApplyCommitPermit, PluginAutoApplyPermit, PluginHostCoordinator,
+    PluginOperationCancellation, PluginRegistryPublisher,
     PluginRepository, PluginRouterState,
     PluginServiceDependencies, PluginServiceError, PluginServicePaths,
     ApplyPluginSourceEditInput, ApplyPluginSourceEditRequest,
@@ -459,6 +460,7 @@ pub(crate) async fn build_nomi_core_plugin_state(
     let host_coordinator: Arc<dyn PluginHostCoordinator> =
         Arc::new(RuntimeBoundPluginHostCoordinator {
             host: Arc::clone(&shared_host),
+            runtime: Arc::clone(&runtime) as Arc<dyn CommittedRuntimeProvider>,
         });
     let tester: Arc<dyn PluginCandidateTestExecutor> =
         Arc::new(NomiCorePluginCandidateTestExecutor {
@@ -497,6 +499,7 @@ pub(crate) async fn build_nomi_core_plugin_state(
         },
     ));
     service.reconcile_dependency_mutations().await?;
+    service.reconcile_auto_applies(owner_user_id).await?;
     let runtime_participant = Arc::new(NomiCorePluginRuntimeParticipant {
         shared_host,
         build,
@@ -753,6 +756,10 @@ pub(crate) fn plugin_routes(state: PluginRouterState) -> Router {
             "/api/plugin-projects/{project_id}/source/dependencies",
             put(update_dependencies),
         )
+        .route(
+            "/api/plugin-projects/{project_id}/auto-apply",
+            put(set_auto_apply),
+        )
         .route("/api/plugin-imports", post(import_prebuilt))
         .route(
             "/api/plugin-projects/{project_id}/build",
@@ -944,6 +951,21 @@ async fn update_dependencies(
         state
             .service
             .update_dependencies(user.id.as_str(), request)
+            .await?,
+    )))
+}
+
+async fn set_auto_apply(
+    State(state): State<PluginRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    AxumPath(project_id): AxumPath<String>,
+    Json(request): Json<SetPluginAutoApplyRequest>,
+) -> Result<Json<ApiResponse<PluginProjectDetailDto>>, PluginHttpError> {
+    require_route_id("project_id", &project_id, &request.project_id)?;
+    Ok(Json(ApiResponse::ok(
+        state
+            .service
+            .set_auto_apply(user.id.as_str(), request)
             .await?,
     )))
 }
@@ -1208,12 +1230,27 @@ fn require_route_id(
 
 struct RuntimeBoundPluginHostCoordinator {
     host: Arc<super::plugin_runtime_host::RuntimeBoundExtensionHost>,
+    runtime: Arc<dyn CommittedRuntimeProvider>,
 }
 
 #[async_trait]
 impl PluginHostCoordinator for RuntimeBoundPluginHostCoordinator {
     async fn runtime_available(&self) -> Result<bool, PluginServiceError> {
         self.host.runtime_available().await
+    }
+
+    async fn committed_runtime_fingerprint(
+        &self,
+    ) -> Result<Option<nomifun_agent_contracts::NodeRuntimeFingerprint>, PluginServiceError> {
+        Ok(self
+            .runtime
+            .committed_runtime()
+            .await
+            .map_err(|error| PluginServiceError::Coded {
+                code: nomifun_plugin_service::ERR_RUNTIME,
+                message: error.to_string(),
+            })?
+            .map(|runtime| runtime.fingerprint))
     }
 
     async fn commit_fence(
@@ -1224,6 +1261,32 @@ impl PluginHostCoordinator for RuntimeBoundPluginHostCoordinator {
             .commit_fence_for_mount(&PluginMountId::from(mount_id.to_owned()))
             .await
             .map_err(Into::into)
+    }
+
+    async fn auto_apply_commit_permit(
+        &self,
+        mount_id: &str,
+    ) -> Result<PluginAutoApplyCommitPermit, PluginServiceError> {
+        let lease = self
+            .runtime
+            .acquire_use(JavaScriptWorkKind::SharedExtensionHost)
+            .await
+            .map_err(|error| PluginServiceError::Coded {
+                code: nomifun_plugin_service::ERR_RUNTIME,
+                message: error.to_string(),
+            })?;
+        let runtime = lease.fingerprint().clone();
+        match self
+            .host
+            .try_auto_apply_fence_for_mount(&PluginMountId::from(mount_id.to_owned()))
+            .await
+            .map_err(PluginServiceError::from)?
+        {
+            Some(fence) => Ok(PluginAutoApplyCommitPermit::Ready(
+                PluginAutoApplyPermit::new(mount_id, fence, runtime, lease),
+            )),
+            None => Ok(PluginAutoApplyCommitPermit::Busy),
+        }
     }
 }
 
@@ -1734,7 +1797,7 @@ mod tests {
         CreatePluginProjectRequest, ImportPluginRequest,
         PluginImportKindDto, PluginProjectLanguageDto,
         PluginProjectSourceStateDto, UninstallPluginRequest,
-        UpdatePluginDependenciesRequest,
+        SetPluginAutoApplyRequest, UpdatePluginDependenciesRequest,
     };
     use nomifun_plugin_service::CreateProjectInput;
     use nomifun_js_runtime::{
@@ -2110,6 +2173,37 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(scaffolded_after_noop.summary, scaffolded.summary);
+
+        let auto_apply_response = plugin_routes(state.clone())
+            .layer(Extension(CurrentUser {
+                id: nomifun_common::UserId::parse(owner_user_id.clone()).unwrap(),
+                username: "owner".to_owned(),
+            }))
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(axum::http::Method::PUT)
+                    .uri(format!(
+                        "/api/plugin-projects/{}/auto-apply",
+                        scaffolded.summary.project_id
+                    ))
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&SetPluginAutoApplyRequest {
+                            project_id: scaffolded.summary.project_id.clone(),
+                            expected_project_revision: scaffolded.summary.project_revision,
+                            expected_build_generation: scaffolded.summary.build_generation,
+                            linked_mount_id: None,
+                            expected_linked_mount_revision: None,
+                            expected_linked_target_digest: None,
+                            apply_mode: nomifun_api_types::PluginApplyModeDto::AskBeforeApply,
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(auto_apply_response.status(), StatusCode::OK);
 
         let main = br#"
             export async function activate() {

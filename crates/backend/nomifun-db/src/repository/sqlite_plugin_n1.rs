@@ -17,8 +17,9 @@ use crate::repository::plugin_n1::{
     GetPluginKvParams,
     IPluginN1Repository, ListPluginCredentialBindingsParams, PutPluginKvParams,
     RecordPluginCandidateTestReceiptParams, RecordPluginReadyCandidateParams,
-    ReplacePluginCredentialBindingsParams, RestorePluginMountParams, StartProductOperationParams,
-    UninstallPluginMountParams, UpdatePluginMountConfigParams, UpdatePluginProjectSourceParams,
+    ReplacePluginCredentialBindingsParams, RestorePluginMountParams, SetPluginAutoApplyParams,
+    StartProductOperationParams, UninstallPluginMountParams, UpdatePluginMountConfigParams,
+    UpdatePluginProjectSourceParams,
     MAX_PRODUCT_OPERATION_LOG_LINES,
     MAX_PRODUCT_OPERATION_LOG_LINE_CHARS,
 };
@@ -691,6 +692,120 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
         .map_err(DbError::Query)
     }
 
+    async fn set_auto_apply(
+        &self,
+        params: &SetPluginAutoApplyParams,
+    ) -> Result<PluginProjectRow, DbError> {
+        validate_uuid(&params.project_id, "project_id")?;
+        validate_uuid(&params.owner_user_id, "owner_user_id")?;
+        validate_timestamp(
+            params.expected_project_updated_at,
+            "expected_project_updated_at",
+        )?;
+        validate_timestamp(params.updated_at, "updated_at")?;
+        if params.expected_build_generation < 0 {
+            return Err(conflict("auto Apply Project generation must be non-negative"));
+        }
+        let mut tx = self.pool.begin().await?;
+        let project = lock_project(&mut tx, &params.project_id).await?;
+        if project.owner_user_id != params.owner_user_id
+            || project.updated_at != params.expected_project_updated_at
+            || project.build_generation != params.expected_build_generation
+        {
+            return Err(conflict(
+                "auto Apply authorization lost its exact Project CAS",
+            ));
+        }
+        let requested_mode = if params.enabled {
+            "auto_compatible_when_idle"
+        } else {
+            "ask_before_apply"
+        };
+        if project.apply_mode == requested_mode {
+            return Ok(project);
+        }
+
+        let authorized_mount_id = if params.enabled {
+            let mount_id = params.linked_mount_id.as_deref().ok_or_else(|| {
+                conflict("auto Apply authorization requires the exact linked Mount")
+            })?;
+            let expected_mount_revision = params.expected_linked_mount_revision.ok_or_else(|| {
+                conflict("auto Apply authorization requires the linked Mount revision")
+            })?;
+            let expected_target_digest = params
+                .expected_linked_target_digest
+                .as_deref()
+                .ok_or_else(|| {
+                    conflict("auto Apply authorization requires the linked current target")
+                })?;
+            validate_uuid(mount_id, "linked_mount_id")?;
+            validate_digest(expected_target_digest, "expected_linked_target_digest")?;
+            if expected_mount_revision <= 0
+                || project.linked_mount_id.as_deref() != Some(mount_id)
+                || project.managed_source_path.is_none()
+                || project.source_head_digest.is_none()
+                || project.dependency_lock_digest.is_none()
+            {
+                return Err(conflict(
+                    "auto Apply authorization requires an editable Project linked to the exact Mount",
+                ));
+            }
+            let mount = lock_mount(&mut tx, mount_id).await?;
+            if mount.package_id != project.package_id
+                || mount.revision != expected_mount_revision
+                || mount.current_artifact_digest.as_deref() != Some(expected_target_digest)
+                || mount.retained
+                || mount.delete_pending
+            {
+                return Err(conflict(
+                    "auto Apply authorization lost its exact linked Mount CAS",
+                ));
+            }
+            Some(mount_id.to_owned())
+        } else {
+            None
+        };
+        let next_revision = project
+            .auto_apply_authorization_revision
+            .checked_add(1)
+            .ok_or_else(|| conflict("auto Apply authorization revision overflow"))?;
+        let updated_at = params
+            .updated_at
+            .max(project.updated_at.saturating_add(1));
+        let updated = sqlx::query(
+            "UPDATE plugin_projects
+             SET apply_mode = ?, auto_apply_mount_id = ?,
+                 auto_apply_authorization_revision = ?, auto_apply_authorized_at = ?,
+                 updated_at = ?
+             WHERE project_id = ? AND owner_user_id = ?
+               AND updated_at = ? AND build_generation = ?",
+        )
+        .bind(requested_mode)
+        .bind(authorized_mount_id)
+        .bind(next_revision)
+        .bind(params.enabled.then_some(updated_at))
+        .bind(updated_at)
+        .bind(&project.project_id)
+        .bind(&project.owner_user_id)
+        .bind(project.updated_at)
+        .bind(project.build_generation)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        if updated.rows_affected() != 1 {
+            return Err(conflict(
+                "auto Apply authorization lost its exact Project update CAS",
+            ));
+        }
+        let project = sqlx::query_as("SELECT * FROM plugin_projects WHERE project_id = ?")
+            .bind(&project.project_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(DbError::Query)?;
+        tx.commit().await?;
+        Ok(project)
+    }
+
     async fn delete_project_cas(
         &self,
         params: &DeletePluginProjectParams,
@@ -1251,6 +1366,11 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
             "expected_current_artifact_digest",
         )?;
         validate_digest(&params.config_schema_digest, "config_schema_digest")?;
+        if params.auto_apply_authorization_revision.is_some_and(|revision| revision <= 0) {
+            return Err(conflict(
+                "auto Apply authorization revision must be positive",
+            ));
+        }
         let initial_config_json = json_object(&params.initial_config, "initial_config")?;
         let mut tx = self.pool.begin().await?;
         let project = lock_project(&mut tx, &params.project_id).await?;
@@ -1332,6 +1452,15 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
                 "candidate base target is stale relative to the mount current artifact",
             ));
         }
+        if let Some(authorization_revision) = params.auto_apply_authorization_revision
+            && (project.apply_mode != "auto_compatible_when_idle"
+                || project.auto_apply_mount_id.as_deref() != Some(mount.mount_id.as_str())
+                || project.auto_apply_authorization_revision != authorization_revision)
+        {
+            return Err(conflict(
+                "candidate auto Apply does not match the standing Project authorization",
+            ));
+        }
         let config_changed = mount.config_json != initial_config_json
             || mount.config_schema_digest.as_deref()
                 != Some(params.config_schema_digest.as_str());
@@ -1348,8 +1477,9 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
         sqlx::query(
             "INSERT INTO plugin_mount_revisions (
                 mount_revision_id, mount_id, revision, artifact_id, artifact_digest,
-                candidate_key, candidate_digest, base_target_digest, applied_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                candidate_key, candidate_digest, base_target_digest,
+                apply_authorization_kind, auto_apply_authorization_revision, applied_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&mount_revision_id)
         .bind(&mount.mount_id)
@@ -1359,6 +1489,12 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
         .bind(&candidate.candidate_id)
         .bind(&candidate.candidate_digest)
         .bind(&candidate.base_target_digest)
+        .bind(if params.auto_apply_authorization_revision.is_some() {
+            "standing_auto"
+        } else {
+            "manual_user_confirmation"
+        })
+        .bind(params.auto_apply_authorization_revision)
         .bind(params.applied_at)
         .execute(&mut *tx)
         .await
@@ -1590,6 +1726,20 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
         {
             return Err(conflict("plugin mount does not have a deletable pending-data intent"));
         }
+        sqlx::query(
+            "UPDATE plugin_projects
+             SET apply_mode = 'ask_before_apply', auto_apply_mount_id = NULL,
+                 auto_apply_authorization_revision = auto_apply_authorization_revision + 1,
+                 auto_apply_authorized_at = NULL,
+                 updated_at = MAX(updated_at, ?)
+             WHERE linked_mount_id = ?
+               AND apply_mode = 'auto_compatible_when_idle'",
+        )
+        .bind(mount.updated_at)
+        .bind(mount_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
         sqlx::query(
             "UPDATE plugin_projects
              SET linked_mount_id = NULL,

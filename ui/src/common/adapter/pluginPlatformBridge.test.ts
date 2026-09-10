@@ -19,6 +19,7 @@ import type {
   PluginDetail,
   PluginLibraryResponse,
   PluginProjectDetail,
+  SetPluginAutoApplyRequest,
   UpdatePluginDependenciesRequest,
 } from '../types/pluginPlatform';
 import { plugins } from './pluginPlatformBridge';
@@ -62,6 +63,7 @@ const projectSummary = {
     candidate_digest: 'd'.repeat(64),
   },
   apply_mode: 'ask_before_apply' as const,
+  auto_apply_authorization_revision: 0,
   updated_at_ms: 1_788_716_800_000,
 };
 
@@ -275,6 +277,29 @@ describe('Plugin Platform bridge', () => {
       {
         method: 'PUT',
         path: `/api/plugin-projects/${PROJECT_ID}/source/dependencies`,
+        body: request,
+      },
+    ]);
+  });
+
+  test('sends standing auto Apply authorization with exact Project and Mount CAS', async () => {
+    installFetchFixture();
+    const request: SetPluginAutoApplyRequest = {
+      project_id: PROJECT_ID,
+      expected_project_revision: 5,
+      expected_build_generation: 3,
+      linked_mount_id: MOUNT_ID,
+      expected_linked_mount_revision: 7,
+      expected_linked_target_digest: 'a'.repeat(64),
+      apply_mode: 'auto_compatible_when_idle',
+    };
+
+    await plugins.setAutoApply.invoke(request);
+
+    expect(calls).toEqual([
+      {
+        method: 'PUT',
+        path: `/api/plugin-projects/${PROJECT_ID}/auto-apply`,
         body: request,
       },
     ]);

@@ -26,6 +26,9 @@
     "importArtifact": "Import runtime package",
     "editSource": "Edit Source",
     "editDependencies": "Edit dependencies",
+    "enableAutoApply": "Enable compatible auto Apply",
+    "disableAutoApply": "Disable auto Apply",
+    "retryAutoApply": "Try auto Apply now",
     "build": "Build",
     "testCandidate": "Test candidate",
     "applyCandidate": "Apply candidate",
@@ -114,6 +117,10 @@
     "candidateApplied": "Ready Candidate applied",
     "sourceEdited": "Source updated",
     "dependenciesUpdated": "Dependencies resolved and the exact lock was updated",
+    "autoApplyEnabled": "Compatible auto Apply authorization is enabled",
+    "autoApplyDisabled": "Auto Apply authorization is disabled",
+    "autoApplyWaiting": "Authorization is enabled; the Ready Candidate is waiting for all eligibility checks and an idle Host",
+    "autoApplied": "Compatible Ready Candidate was automatically applied; Restore Previous remains available",
     "operationCanceled": "Operation canceled",
     "projectDeleted": "Plugin Project deleted; the installed Plugin and runtime data were preserved"
   },
@@ -317,6 +324,21 @@
       "acknowledgeTestWarning": "I understand this Candidate has not passed the current local test and still want to apply it manually",
       "changedContracts": "Changed contracts",
       "affectedConsumers": "Affected consumers"
+    }
+  },
+  "autoApply": {
+    "confirmTitle": "Enable standing auto Apply authorization?",
+    "confirmBody": "NomiFun may apply future locally built Candidates to this exact linked Plugin without asking again, but only after a matching local Test, a complete compatible contract check, the same dependency lock and Runtime, and an atomic idle-Host fence. Contract-compatible does not guarantee behavior, cost, network effects, or data compatibility. Only one previous version is retained for Restore.",
+    "linkedMountUnavailable": "The exact linked Plugin target is unavailable. Refresh the Project before changing auto Apply authorization.",
+    "blockers": {
+      "authorization": "Standing auto Apply authorization is not enabled.",
+      "linkedTarget": "The linked Mount or Candidate base target changed.",
+      "sourceOrTest": "The authored Source lineage or matching local Candidate Test is incomplete or stale.",
+      "contractOrDependency": "A contract, config, credential, resource, Host/SDK, or dependency-lock fact changed.",
+      "runtimeOrPlatform": "The committed Runtime or supported platform no longer matches.",
+      "validation": "Static validation is incomplete or an exact fact is unknown.",
+      "runtimeUnavailable": "No committed JavaScript Runtime is available.",
+      "linkedMountUnavailable": "This Candidate is not linked to an installed current target."
     }
   },
   "detail": {

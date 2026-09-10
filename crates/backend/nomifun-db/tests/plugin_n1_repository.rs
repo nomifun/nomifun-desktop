@@ -11,7 +11,8 @@ use nomifun_db::{
     RecordPluginCandidateTestReceiptParams, RecordPluginReadyCandidateParams,
     DiscardPluginCandidateParams,
     ReplacePluginCredentialBindingsParams, RestorePluginMountParams, SqlitePluginN1Repository,
-    StartProductOperationParams, UninstallPluginMountParams, UpdatePluginMountConfigParams,
+    SetPluginAutoApplyParams, StartProductOperationParams, UninstallPluginMountParams,
+    UpdatePluginMountConfigParams,
     UpdatePluginProjectSourceParams, init_database, init_database_memory, installation_owner_id,
     MAX_PRODUCT_OPERATION_LOG_LINE_CHARS, MAX_PRODUCT_OPERATION_LOG_LINES,
 };
@@ -516,6 +517,238 @@ async fn dependency_intent_abort_requires_the_unchanged_old_project_head() {
 }
 
 #[tokio::test]
+async fn auto_apply_authorization_is_exact_linked_and_revisioned() {
+    let fixture = managed_fixture().await;
+    let mount_id = id();
+    let mount = fixture
+        .repo
+        .apply_candidate(&ApplyPluginCandidateParams {
+            project_id: fixture.project_id.clone(),
+            candidate_id: fixture.candidate_id.clone(),
+            expected_project_generation: 1,
+            expected_mount_revision: Some(0),
+            expected_current_artifact_digest: None,
+            new_mount_id: Some(mount_id.clone()),
+            new_data_dir_path: Some(format!("plugin-data/{mount_id}")),
+            config_schema_digest: digest('f'),
+            initial_config: json!({}),
+            auto_apply_authorization_revision: None,
+            applied_at: 7,
+        })
+        .await
+        .unwrap();
+    let project = fixture
+        .repo
+        .get_project(&fixture.project_id)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let enabled = fixture
+        .repo
+        .set_auto_apply(&SetPluginAutoApplyParams {
+            project_id: fixture.project_id.clone(),
+            owner_user_id: fixture.owner_user_id.clone(),
+            expected_project_updated_at: project.updated_at,
+            expected_build_generation: project.build_generation,
+            linked_mount_id: Some(mount.mount_id.clone()),
+            expected_linked_mount_revision: Some(mount.revision),
+            expected_linked_target_digest: mount.current_artifact_digest.clone(),
+            enabled: true,
+            updated_at: 8,
+        })
+        .await
+        .unwrap();
+    assert_eq!(enabled.apply_mode, "auto_compatible_when_idle");
+    assert_eq!(enabled.auto_apply_mount_id.as_deref(), Some(mount_id.as_str()));
+    assert_eq!(enabled.auto_apply_authorization_revision, 1);
+    assert_eq!(enabled.auto_apply_authorized_at, Some(enabled.updated_at));
+
+    assert!(
+        fixture
+            .repo
+            .set_auto_apply(&SetPluginAutoApplyParams {
+                project_id: fixture.project_id.clone(),
+                owner_user_id: fixture.owner_user_id.clone(),
+                expected_project_updated_at: project.updated_at,
+                expected_build_generation: project.build_generation,
+                linked_mount_id: Some(mount.mount_id),
+                expected_linked_mount_revision: Some(mount.revision),
+                expected_linked_target_digest: mount.current_artifact_digest,
+                enabled: true,
+                updated_at: 9,
+            })
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query(
+            "UPDATE plugin_projects
+             SET auto_apply_authorization_revision = auto_apply_authorization_revision
+             WHERE project_id = ?",
+        )
+        .bind(&fixture.project_id)
+        .execute(&fixture.pool)
+        .await
+        .is_err()
+    );
+
+    let disabled = fixture
+        .repo
+        .set_auto_apply(&SetPluginAutoApplyParams {
+            project_id: fixture.project_id,
+            owner_user_id: fixture.owner_user_id,
+            expected_project_updated_at: enabled.updated_at,
+            expected_build_generation: enabled.build_generation,
+            linked_mount_id: None,
+            expected_linked_mount_revision: None,
+            expected_linked_target_digest: None,
+            enabled: false,
+            updated_at: 9,
+        })
+        .await
+        .unwrap();
+    assert_eq!(disabled.apply_mode, "ask_before_apply");
+    assert!(disabled.auto_apply_mount_id.is_none());
+    assert_eq!(disabled.auto_apply_authorization_revision, 2);
+    assert!(disabled.auto_apply_authorized_at.is_none());
+
+    let mount = fixture.repo.get_mount(&mount_id).await.unwrap().unwrap();
+    let reenabled = fixture
+        .repo
+        .set_auto_apply(&SetPluginAutoApplyParams {
+            project_id: disabled.project_id.clone(),
+            owner_user_id: disabled.owner_user_id.clone(),
+            expected_project_updated_at: disabled.updated_at,
+            expected_build_generation: disabled.build_generation,
+            linked_mount_id: Some(mount.mount_id.clone()),
+            expected_linked_mount_revision: Some(mount.revision),
+            expected_linked_target_digest: mount.current_artifact_digest.clone(),
+            enabled: true,
+            updated_at: 10,
+        })
+        .await
+        .unwrap();
+    assert_eq!(reenabled.auto_apply_authorization_revision, 3);
+    let uninstalled = fixture
+        .repo
+        .uninstall_retain_data(&UninstallPluginMountParams {
+            mount_id: mount.mount_id.clone(),
+            expected_revision: mount.revision,
+            expected_current_artifact_digest: mount.current_artifact_digest.unwrap(),
+            uninstalled_at: 11,
+        })
+        .await
+        .unwrap();
+    let pending = fixture
+        .repo
+        .mark_mount_delete_pending(&mount.mount_id, uninstalled.revision, 12)
+        .await
+        .unwrap();
+    assert!(
+        fixture
+            .repo
+            .complete_mount_data_delete(&pending.mount_id)
+            .await
+            .unwrap()
+    );
+    let unlinked = fixture
+        .repo
+        .get_project(&reenabled.project_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(unlinked.linked_mount_id.is_none());
+    assert_eq!(unlinked.apply_mode, "ask_before_apply");
+    assert_eq!(unlinked.auto_apply_authorization_revision, 4);
+}
+
+#[tokio::test]
+async fn auto_apply_mount_revision_records_the_exact_authorization_revision() {
+    let fixture = managed_fixture().await;
+    let mount_id = id();
+    let first = fixture
+        .repo
+        .apply_candidate(&ApplyPluginCandidateParams {
+            project_id: fixture.project_id.clone(),
+            candidate_id: fixture.candidate_id.clone(),
+            expected_project_generation: 1,
+            expected_mount_revision: Some(0),
+            expected_current_artifact_digest: None,
+            new_mount_id: Some(mount_id.clone()),
+            new_data_dir_path: Some(format!("plugin-data/{mount_id}")),
+            config_schema_digest: digest('f'),
+            initial_config: json!({}),
+            auto_apply_authorization_revision: None,
+            applied_at: 7,
+        })
+        .await
+        .unwrap();
+    let project = fixture
+        .repo
+        .get_project(&fixture.project_id)
+        .await
+        .unwrap()
+        .unwrap();
+    fixture
+        .repo
+        .set_auto_apply(&SetPluginAutoApplyParams {
+            project_id: project.project_id.clone(),
+            owner_user_id: project.owner_user_id.clone(),
+            expected_project_updated_at: project.updated_at,
+            expected_build_generation: project.build_generation,
+            linked_mount_id: Some(mount_id.clone()),
+            expected_linked_mount_revision: Some(first.revision),
+            expected_linked_target_digest: first.current_artifact_digest.clone(),
+            enabled: true,
+            updated_at: 8,
+        })
+        .await
+        .unwrap();
+    let (candidate_id, _, next_artifact_digest) = add_managed_candidate(
+        &fixture,
+        1,
+        &fixture.source_digest,
+        &fixture.lock_digest,
+        'b',
+        "1.0.0",
+        first.current_artifact_digest.clone(),
+        9,
+    )
+    .await;
+    let applied = fixture
+        .repo
+        .apply_candidate(&ApplyPluginCandidateParams {
+            project_id: fixture.project_id.clone(),
+            candidate_id,
+            expected_project_generation: 1,
+            expected_mount_revision: Some(first.revision),
+            expected_current_artifact_digest: first.current_artifact_digest,
+            new_mount_id: None,
+            new_data_dir_path: None,
+            config_schema_digest: digest('f'),
+            initial_config: json!({}),
+            auto_apply_authorization_revision: Some(1),
+            applied_at: 12,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        applied.current_artifact_digest.as_deref(),
+        Some(next_artifact_digest.as_str())
+    );
+    let audit: (String, Option<i64>) = sqlx::query_as(
+        "SELECT apply_authorization_kind, auto_apply_authorization_revision
+         FROM plugin_mount_revisions WHERE mount_id = ? AND revision = 2",
+    )
+    .bind(&mount_id)
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    assert_eq!(audit, ("standing_auto".into(), Some(1)));
+}
+
+#[tokio::test]
 async fn runtime_only_read_only_project_imports_generation_zero_candidate_with_exact_target() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("runtime-only-project.db");
@@ -804,6 +1037,7 @@ async fn replace_rotates_current_previous_rejects_stale_base_and_restore_uses_ex
             new_data_dir_path: Some(format!("plugin-data/{mount_id}")),
             config_schema_digest: digest('f'),
             initial_config: json!({}),
+            auto_apply_authorization_revision: None,
             applied_at: 6,
         })
         .await
@@ -846,6 +1080,7 @@ async fn replace_rotates_current_previous_rejects_stale_base_and_restore_uses_ex
             new_data_dir_path: None,
             config_schema_digest: digest('f'),
             initial_config: json!({}),
+            auto_apply_authorization_revision: None,
             applied_at: 11,
         })
         .await
@@ -895,6 +1130,7 @@ async fn replace_rotates_current_previous_rejects_stale_base_and_restore_uses_ex
             new_data_dir_path: None,
             config_schema_digest: digest('f'),
             initial_config: json!({}),
+            auto_apply_authorization_revision: None,
             applied_at: 16,
         })
         .await
@@ -946,6 +1182,7 @@ async fn direct_current_pointer_sql_bypass_is_rejected() {
             new_data_dir_path: Some(format!("plugin-data/{mount_id}")),
             config_schema_digest: digest('f'),
             initial_config: json!({}),
+            auto_apply_authorization_revision: None,
             applied_at: 6,
         })
         .await
@@ -1218,6 +1455,7 @@ async fn mount_data_delete_preserves_project_ready_candidate_and_test_receipt_as
             new_data_dir_path: Some(format!("plugin-data/{mount_id}")),
             config_schema_digest: digest('f'),
             initial_config: json!({}),
+            auto_apply_authorization_revision: None,
             applied_at: 6,
         })
         .await
@@ -1390,6 +1628,7 @@ async fn kv_is_mount_namespaced_and_uses_revision_cas() {
             new_data_dir_path: Some(format!("plugin-data/{mount_id}")),
             config_schema_digest: digest('f'),
             initial_config: json!({}),
+            auto_apply_authorization_revision: None,
             applied_at: 6,
         })
         .await
@@ -1522,6 +1761,7 @@ async fn config_credentials_and_runtime_state_use_exact_mount_cas() {
             new_data_dir_path: Some(format!("plugin-data/{mount_id}")),
             config_schema_digest: digest('f'),
             initial_config: json!({"mode": "initial"}),
+            auto_apply_authorization_revision: None,
             applied_at: 6,
         })
         .await
@@ -1681,6 +1921,7 @@ async fn product_operation_owner_state_progress_error_and_log_contract_is_strict
             new_data_dir_path: Some(format!("plugin-data/{mount_id}")),
             config_schema_digest: digest('f'),
             initial_config: json!({}),
+            auto_apply_authorization_revision: None,
             applied_at: 6,
         })
         .await

@@ -26,6 +26,9 @@
     "importArtifact": "导入运行包",
     "editSource": "编辑源码",
     "editDependencies": "编辑依赖",
+    "enableAutoApply": "启用兼容版本自动应用",
+    "disableAutoApply": "关闭自动应用",
+    "retryAutoApply": "立即重试自动应用",
     "build": "构建",
     "testCandidate": "测试候选版本",
     "applyCandidate": "应用候选版本",
@@ -114,6 +117,10 @@
     "candidateApplied": "Ready Candidate 已应用",
     "sourceEdited": "源码已更新",
     "dependenciesUpdated": "依赖已解析并更新精确锁",
+    "autoApplyEnabled": "已启用兼容版本自动应用授权",
+    "autoApplyDisabled": "已关闭自动应用授权",
+    "autoApplyWaiting": "授权已启用；Ready Candidate 正在等待全部资格检查与 Host 空闲",
+    "autoApplied": "兼容的 Ready Candidate 已自动应用；仍可使用 Restore Previous",
     "operationCanceled": "操作已取消",
     "projectDeleted": "Plugin Project 已删除；已安装 Plugin 与运行数据未受影响"
   },
@@ -317,6 +324,21 @@
       "acknowledgeTestWarning": "我确认 Candidate 尚未通过当前本机测试，仍要手动应用",
       "changedContracts": "变更的合同",
       "affectedConsumers": "受影响消费者"
+    }
+  },
+  "autoApply": {
+    "confirmTitle": "启用持续自动应用授权？",
+    "confirmBody": "NomiFun 以后可以不再逐次询问，把本机 Build 的 Candidate 应用到这个精确关联的 Plugin；但仍必须通过匹配的本机 Test、完整兼容性检查、相同 dependency lock 与 Runtime，并原子取得空闲 Host fence。合同兼容不保证行为、费用、网络副作用或数据兼容；Restore 只保留上一代。",
+    "linkedMountUnavailable": "无法取得精确关联的 Plugin target。请刷新 Project 后再修改自动应用授权。",
+    "blockers": {
+      "authorization": "尚未启用持续自动应用授权。",
+      "linkedTarget": "关联 Mount 或 Candidate 基准 target 已变化。",
+      "sourceOrTest": "作者 Source lineage 或匹配的本机 Candidate Test 不完整或已过期。",
+      "contractOrDependency": "合同、配置、凭据、资源、Host/SDK 或 dependency lock 事实发生了变化。",
+      "runtimeOrPlatform": "当前已提交 Runtime 或受支持平台不再匹配。",
+      "validation": "静态校验尚未完成，或存在无法精确比较的事实。",
+      "runtimeUnavailable": "当前没有已提交的 JavaScript Runtime。",
+      "linkedMountUnavailable": "该 Candidate 尚未关联到已安装的 current target。"
     }
   },
   "detail": {

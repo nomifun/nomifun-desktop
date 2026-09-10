@@ -18,6 +18,7 @@ import type {
   PluginSummary,
   RestorePluginPreviousRequest,
   RetryPluginRequest,
+  SetPluginAutoApplyRequest,
   SetPluginEnabledRequest,
   TestPluginCandidateRequest,
   UninstallPluginRequest,
@@ -117,6 +118,31 @@ export function deletePluginProjectRequest(
           expected_ready_candidate_digest: ready.candidate_digest,
         }
       : {}),
+  };
+}
+
+export function setPluginAutoApplyRequest(
+  detail: PluginProjectDetail,
+  enabled: boolean,
+  linkedMount?: PluginSummary
+): SetPluginAutoApplyRequest {
+  if (enabled && (!linkedMount?.current || !detail.summary.linked_mount_id)) {
+    throw new Error('Linked Plugin Mount has no exact current target');
+  }
+  return {
+    project_id: detail.summary.project_id,
+    expected_project_revision: detail.summary.project_revision,
+    expected_build_generation: detail.summary.build_generation,
+    ...(enabled && linkedMount?.current
+      ? {
+          linked_mount_id: linkedMount.mount_id,
+          expected_linked_mount_revision: linkedMount.mount_revision,
+          expected_linked_target_digest: linkedMount.current.artifact_digest,
+        }
+      : {}),
+    apply_mode: enabled
+      ? 'auto_compatible_when_idle'
+      : 'ask_before_apply',
   };
 }
 

@@ -43,6 +43,7 @@ const detail: PluginProjectDetail = {
     source_state: 'editable',
     build_generation: 2,
     apply_mode: 'ask_before_apply',
+    auto_apply_authorization_revision: 0,
     updated_at_ms: 1,
   },
   source_snapshot_digest: sourceDigest,

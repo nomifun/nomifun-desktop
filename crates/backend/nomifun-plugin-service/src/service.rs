@@ -4,7 +4,8 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use nomifun_agent_contracts::{
-    AffectedConsumerKind, CandidateTestReceipt, CapabilityConsumer,
+    AffectedConsumerKind, CandidateTestOutcome, CandidateTestReceipt, CapabilityConsumer,
+    NodeRuntimeFingerprint,
     PluginAutoApplyEligibility,
     PluginCompatibility, PluginContractChangeKind, PluginContractDiff, PluginHostCommitFence,
     PluginMountId, PluginPackageV1Manifest, PluginProjectId, PluginReadyCandidate,
@@ -23,7 +24,8 @@ use nomifun_api_types::{
     PluginConsumerAvailabilityStatusDto, PluginConsumerSurfaceDto, PluginDetailDto,
     PluginLibraryResponseDto, PluginLifecycleDto, PluginProjectDetailDto,
     PluginProjectSourceStateDto, PluginProjectSummaryDto, PluginReadyCandidateDto,
-    PluginSummaryDto, PluginTargetRefDto, UpdatePluginDependenciesRequest,
+    PluginSummaryDto, PluginTargetRefDto, SetPluginAutoApplyRequest,
+    UpdatePluginDependenciesRequest,
 };
 use nomifun_db::{
     AbortPluginDependencyMutationParams, ApplyPluginCandidateParams,
@@ -37,7 +39,8 @@ use nomifun_db::{
     PluginReadyCandidateRow, ProductOperationKind, ProductOperationRow, ProductOperationState,
     RecordPluginCandidateTestReceiptParams,
     RecordPluginReadyCandidateParams, ReplacePluginCredentialBindingsParams,
-    RestorePluginMountParams, StartProductOperationParams, UninstallPluginMountParams,
+    RestorePluginMountParams, SetPluginAutoApplyParams, StartProductOperationParams,
+    UninstallPluginMountParams,
     UpdatePluginMountConfigParams, UpdatePluginProjectSourceParams,
 };
 use serde_json::{Value, json};
@@ -56,8 +59,9 @@ use nomifun_plugin_platform::{
 use crate::PluginServiceError;
 use crate::repository::{
     PluginArtifactStorePort, PluginBuildExecutor, PluginCandidateTestExecutor,
-    PluginHostCoordinator, PluginMountDataStore, PluginOperationCancellation,
-    PluginRegistryPublisher, PluginRepository, PluginSourceStorePort,
+    PluginAutoApplyCommitPermit, PluginAutoApplyPermit, PluginHostCoordinator,
+    PluginMountDataStore, PluginOperationCancellation, PluginRegistryPublisher,
+    PluginRepository, PluginSourceStorePort,
 };
 use crate::types::{
     ApplyAuthorization, ApplyPluginSourceEditInput, BuildRequest, ConfigureInput,
@@ -78,6 +82,19 @@ pub struct PluginApplicationService {
     source_store: Arc<dyn PluginSourceStorePort>,
     data_store: Arc<dyn PluginMountDataStore>,
     paths: PluginServicePaths,
+}
+
+struct AutoApplyState {
+    project: PluginProjectRow,
+    candidate: PluginReadyCandidateRow,
+    mount: PluginMountRow,
+    eligibility: PluginAutoApplyEligibility,
+}
+
+#[derive(Default)]
+struct AutoApplyProjection {
+    can_auto_apply: bool,
+    blocking_reasons: Vec<String>,
 }
 
 pub struct PluginServiceDependencies {
@@ -279,12 +296,31 @@ impl PluginApplicationService {
         } else {
             BTreeMap::new()
         };
+        let auto_apply = if candidate.is_some() {
+            match self.host.committed_runtime_fingerprint().await? {
+                Some(runtime) => self
+                    .auto_apply_state(owner_user_id, project_id, &runtime)
+                    .await?
+                    .map(|state| auto_apply_projection(&state.eligibility))
+                    .unwrap_or_else(|| AutoApplyProjection {
+                        can_auto_apply: false,
+                        blocking_reasons: vec!["linked_mount_unavailable".into()],
+                    }),
+                None => AutoApplyProjection {
+                    can_auto_apply: false,
+                    blocking_reasons: vec!["runtime_unavailable".into()],
+                },
+            }
+        } else {
+            AutoApplyProjection::default()
+        };
         project_detail_with_state(
             &project,
             candidate.as_ref(),
             receipt.as_ref(),
             operation.as_ref(),
             direct_dependencies,
+            Some(&auto_apply),
         )
     }
 
@@ -541,6 +577,42 @@ impl PluginApplicationService {
         self.source_store
             .cleanup_orphan_dependency_staging(&retained)
             .await
+    }
+
+    pub async fn set_auto_apply(
+        &self,
+        owner_user_id: &str,
+        request: SetPluginAutoApplyRequest,
+    ) -> Result<PluginProjectDetailDto, PluginServiceError> {
+        let guard = self.project_guard(owner_user_id, &request.project_id).await?;
+        let project = self.owned_project(owner_user_id, &request.project_id).await?;
+        require_project_request_fresh(
+            &project,
+            request.expected_project_revision,
+            request.expected_build_generation,
+        )?;
+        let enabled = request.apply_mode == PluginApplyModeDto::AutoCompatibleWhenIdle;
+        let updated = self.repository
+            .set_auto_apply(&SetPluginAutoApplyParams {
+                project_id: project.project_id.clone(),
+                owner_user_id: owner_user_id.to_owned(),
+                expected_project_updated_at: project.updated_at,
+                expected_build_generation: project.build_generation,
+                linked_mount_id: request.linked_mount_id,
+                expected_linked_mount_revision: request
+                    .expected_linked_mount_revision
+                    .map(|value| value as i64),
+                expected_linked_target_digest: request.expected_linked_target_digest,
+                enabled,
+                updated_at: now_ms(),
+            })
+            .await?;
+        if enabled {
+            self.try_auto_apply_locked(owner_user_id, &updated.project_id)
+                .await?;
+        }
+        drop(guard);
+        self.get_project(owner_user_id, &project.project_id).await
     }
 
     async fn reconcile_project_dependency_mutation(
@@ -827,7 +899,7 @@ impl PluginApplicationService {
                 })
                 .await?;
         }
-        project_detail_with_state(&project, None, None, None, BTreeMap::new())
+        project_detail_with_state(&project, None, None, None, BTreeMap::new(), None)
     }
 
     pub async fn import_prebuilt(
@@ -1592,7 +1664,237 @@ impl PluginApplicationService {
                 tested_at: output.receipt.issued_at_ms,
             })
             .await?;
+        self.try_auto_apply_locked(owner_user_id, &project.project_id)
+            .await?;
         self.get_project(owner_user_id, &project.project_id).await
+    }
+
+    pub async fn reconcile_auto_apply(
+        &self,
+        owner_user_id: &str,
+        project_id: &str,
+    ) -> Result<bool, PluginServiceError> {
+        let _guard = self.project_guard(owner_user_id, project_id).await?;
+        self.try_auto_apply_locked(owner_user_id, project_id).await
+    }
+
+    pub async fn reconcile_auto_applies(
+        &self,
+        owner_user_id: &str,
+    ) -> Result<(), PluginServiceError> {
+        let project_ids = self
+            .repository
+            .inventory(owner_user_id)
+            .await?
+            .projects
+            .into_iter()
+            .filter(|project| project.apply_mode == "auto_compatible_when_idle")
+            .map(|project| project.project_id)
+            .collect::<Vec<_>>();
+        for project_id in project_ids {
+            self.reconcile_auto_apply(owner_user_id, &project_id).await?;
+        }
+        Ok(())
+    }
+
+    async fn try_auto_apply_locked(
+        &self,
+        owner_user_id: &str,
+        project_id: &str,
+    ) -> Result<bool, PluginServiceError> {
+        let Some(runtime) = self.host.committed_runtime_fingerprint().await? else {
+            return Ok(false);
+        };
+        let Some(preflight) = self
+            .auto_apply_state(owner_user_id, project_id, &runtime)
+            .await?
+        else {
+            return Ok(false);
+        };
+        if !preflight.eligibility.is_eligible() {
+            return Ok(false);
+        }
+        let permit = match self
+            .host
+            .auto_apply_commit_permit(&preflight.mount.mount_id)
+            .await?
+        {
+            PluginAutoApplyCommitPermit::Busy => return Ok(false),
+            PluginAutoApplyCommitPermit::Ready(permit) => permit,
+        };
+        let Some(committed) = self
+            .auto_apply_state(owner_user_id, project_id, permit.runtime())
+            .await?
+        else {
+            return Ok(false);
+        };
+        if !committed.eligibility.is_eligible() {
+            return Ok(false);
+        }
+        let current = committed
+            .mount
+            .current_artifact_digest
+            .clone()
+            .ok_or_else(|| PluginServiceError::stale("auto Apply Mount lost its current target"))?;
+        let request = ApplyPluginCandidateRequest {
+            project_id: committed.project.project_id.clone(),
+            expected_project_revision: committed.project.updated_at as u64,
+            expected_build_generation: committed.project.build_generation as u64,
+            candidate_id: committed.candidate.candidate_id.clone(),
+            expected_candidate_digest: committed.candidate.candidate_digest.clone(),
+            target: ApplyPluginTargetDto::ExistingMount {
+                mount_id: committed.mount.mount_id.clone(),
+                expected_mount_revision: committed.mount.revision as u64,
+                expected_current_target_digest: current,
+            },
+            allow_breaking: false,
+            acknowledge_test_warning: false,
+        };
+        self.apply_candidate_locked(
+            owner_user_id,
+            request,
+            ApplyAuthorization::StandingAuto {
+                authorization_revision: committed.project.auto_apply_authorization_revision as u64,
+                eligibility: committed.eligibility,
+            },
+            Some(&permit),
+        )
+        .await?;
+        Ok(true)
+    }
+
+    async fn auto_apply_state(
+        &self,
+        owner_user_id: &str,
+        project_id: &str,
+        runtime: &NodeRuntimeFingerprint,
+    ) -> Result<Option<AutoApplyState>, PluginServiceError> {
+        let project = self.owned_project(owner_user_id, project_id).await?;
+        let Some(candidate) = self.repository.get_candidate(project_id).await? else {
+            return Ok(None);
+        };
+        let Some(mount_id) = project.linked_mount_id.as_deref() else {
+            return Ok(None);
+        };
+        let (mount, _) = self.owned_mount(owner_user_id, mount_id).await?;
+        let Some(current_digest) = mount.current_artifact_digest.as_deref() else {
+            return Ok(None);
+        };
+        let candidate_artifact = self
+            .verified_artifact(&candidate.artifact_digest)
+            .await?
+            .ok_or_else(|| PluginServiceError::not_found("candidate artifact"))?;
+        let current_artifact = self
+            .verified_artifact(current_digest)
+            .await?
+            .ok_or_else(|| PluginServiceError::not_found("current Mount artifact"))?;
+        let candidate_manifest = artifact_manifest(&candidate_artifact)?;
+        let current_manifest = artifact_manifest(&current_artifact)?;
+        candidate_manifest
+            .validate()
+            .map_err(|error| PluginServiceError::invalid(error.to_string()))?;
+        current_manifest
+            .validate()
+            .map_err(|error| PluginServiceError::invalid(error.to_string()))?;
+        let candidate_manifest_digest = digest_payload(&candidate_manifest)
+            .map_err(|error| PluginServiceError::invalid(error.to_string()))?;
+        let current_manifest_digest = digest_payload(&current_manifest)
+            .map_err(|error| PluginServiceError::invalid(error.to_string()))?;
+        let candidate_config_schema_digest = digest_payload(&candidate_manifest.package.config_schema)
+            .map_err(|error| PluginServiceError::invalid(error.to_string()))?;
+        let stored_diff: PluginContractDiff = serde_json::from_str(&candidate.contract_diff_json)
+            .map_err(|error| PluginServiceError::invalid(format!("stored contract diff: {error}")))?;
+        let recomputed_diff = plugin_contract_diff(Some(&current_manifest), &candidate_manifest)?;
+        let receipt_row = self
+            .repository
+            .get_test_receipt(&candidate.candidate_id)
+            .await?;
+        let receipt = receipt_row
+            .as_ref()
+            .and_then(|row| serde_json::from_str::<CandidateTestReceipt>(&row.receipt_json).ok());
+        let receipt_integrity = receipt_row
+            .as_ref()
+            .zip(receipt.as_ref())
+            .is_some_and(|(row, receipt)| {
+                serde_json::from_str::<Value>(&row.receipt_json)
+                    .is_ok_and(|value| digest_json(&value) == row.receipt_digest)
+                    && digest_payload(&receipt.runtime).is_ok_and(|digest| {
+                        digest.as_ref() == row.runtime_fingerprint_digest
+                    })
+            });
+        let contract_candidate = candidate_contract(&candidate)?;
+        let receipt_matches = receipt.as_ref().is_some_and(|receipt| {
+            receipt_integrity
+                && receipt.outcome == CandidateTestOutcome::Passed
+                && receipt.runtime == *runtime
+                && receipt.validate_for(&contract_candidate).is_ok()
+        });
+        let changes = &recomputed_diff.changes;
+        let node_major = runtime
+            .node_version
+            .as_ref()
+            .trim_start_matches('v')
+            .split('.')
+            .next()
+            .and_then(|value| value.parse::<u16>().ok());
+        let target_and_runtime_match = candidate_manifest
+            .supported_targets
+            .contains(&runtime.runtime_target)
+            && node_major.is_some_and(|major| major >= candidate_manifest.minimum_node_major);
+        let managed_source_matches = candidate.origin_kind == "build"
+            && candidate.source_snapshot_digest == project.source_head_digest
+            && candidate.dependency_lock_digest == project.dependency_lock_digest
+            && candidate.dependency_lock_digest.as_deref()
+                == Some(candidate_manifest.dependency_lock_digest.as_ref())
+            && candidate.build_generation == project.build_generation;
+        let eligibility = PluginAutoApplyEligibility {
+            standing_authorization_matches: project.apply_mode
+                == "auto_compatible_when_idle"
+                && project.auto_apply_authorization_revision > 0
+                && project.auto_apply_authorized_at.is_some()
+                && project.auto_apply_mount_id.as_deref() == Some(mount_id),
+            linked_mount_matches: mount.package_id == project.package_id
+                && candidate.target_package_id == project.package_id,
+            base_target_matches: candidate.base_target_digest.as_deref() == Some(current_digest),
+            managed_source_matches_project_head: managed_source_matches,
+            matching_local_test_passed: receipt_matches,
+            contribution_contracts_unchanged: !changes.contains(
+                &PluginContractChangeKind::ContributionSet,
+            ) && !changes.contains(&PluginContractChangeKind::ContractDigest),
+            config_schema_unchanged: !changes.contains(&PluginContractChangeKind::ConfigSchema)
+                && mount.config_schema_digest.as_deref()
+                    == Some(candidate_config_schema_digest.as_ref()),
+            credential_slots_unchanged: !changes
+                .contains(&PluginContractChangeKind::CredentialSlots),
+            resource_effect_contracts_unchanged: !changes
+                .contains(&PluginContractChangeKind::ResourceOrEffectContract),
+            runtime_requirement_unchanged: !changes
+                .contains(&PluginContractChangeKind::RuntimeRequirement)
+                && target_and_runtime_match,
+            dependency_lock_unchanged: !changes
+                .contains(&PluginContractChangeKind::DependencyLock)
+                && current_manifest.dependency_lock_digest
+                    == candidate_manifest.dependency_lock_digest,
+            host_sdk_contract_unchanged: !changes
+                .contains(&PluginContractChangeKind::HostSdkContract),
+            supported_targets_unchanged: !changes
+                .contains(&PluginContractChangeKind::SupportedTargets)
+                && target_and_runtime_match,
+            static_validation_passed: true,
+            no_unknown_facts: stored_diff == recomputed_diff
+                && receipt_integrity
+                && candidate_artifact.manifest_digest
+                    == candidate.target_manifest_digest
+                && candidate_artifact.manifest_digest == candidate_manifest_digest.as_ref()
+                && current_artifact.manifest_digest == current_manifest_digest.as_ref()
+                && candidate_artifact.artifact_id == candidate.artifact_id,
+        };
+        Ok(Some(AutoApplyState {
+            project,
+            candidate,
+            mount,
+            eligibility,
+        }))
     }
 
     pub async fn apply_candidate(
@@ -1602,24 +1904,6 @@ impl PluginApplicationService {
     ) -> Result<PluginDetailDto, PluginServiceError> {
         self.apply_candidate_authorized(owner_user_id, request, ApplyAuthorization::Manual)
             .await
-    }
-
-    pub async fn auto_apply_candidate(
-        &self,
-        owner_user_id: &str,
-        request: ApplyPluginCandidateRequest,
-        authorization_revision: u64,
-        eligibility: PluginAutoApplyEligibility,
-    ) -> Result<PluginDetailDto, PluginServiceError> {
-        self.apply_candidate_authorized(
-            owner_user_id,
-            request,
-            ApplyAuthorization::StandingAuto {
-                authorization_revision,
-                eligibility,
-            },
-        )
-        .await
     }
 
     async fn apply_candidate_authorized(
@@ -1640,7 +1924,7 @@ impl PluginApplicationService {
             }
         };
         let _guard = self.mutation_coordinator.acquire(&scope).await?;
-        self.apply_candidate_locked(owner_user_id, request, authorization)
+        self.apply_candidate_locked(owner_user_id, request, authorization, None)
             .await
     }
 
@@ -1649,6 +1933,7 @@ impl PluginApplicationService {
         owner_user_id: &str,
         request: ApplyPluginCandidateRequest,
         authorization: ApplyAuthorization,
+        auto_permit: Option<&PluginAutoApplyPermit>,
     ) -> Result<PluginDetailDto, PluginServiceError> {
         if matches!(
             (&authorization, &request.target),
@@ -1700,6 +1985,9 @@ impl PluginApplicationService {
                 eligibility,
             } => {
                 if *authorization_revision == 0
+                    || project.apply_mode != "auto_compatible_when_idle"
+                    || project.auto_apply_authorization_revision as u64
+                        != *authorization_revision
                     || !eligibility.is_eligible()
                     || compatibility != PluginCompatibility::Compatible
                     || matches!(request.target, ApplyPluginTargetDto::InitialInstall { .. })
@@ -1737,7 +2025,7 @@ impl PluginApplicationService {
                 ApplyPluginTargetDto::InitialInstall {
                     expected_library_revision,
                 } => {
-                    if !matches!(authorization, ApplyAuthorization::Manual)
+                    if !matches!(&authorization, ApplyAuthorization::Manual)
                         || candidate.base_target_digest.is_some()
                     {
                         return Err(PluginServiceError::invalid(
@@ -1766,8 +2054,27 @@ impl PluginApplicationService {
                     expected_mount_revision,
                     expected_current_target_digest,
                 } => {
-                    require_commit_fence(self.host.commit_fence(&mount_id).await?)?;
+                    match &authorization {
+                        ApplyAuthorization::Manual => {
+                            require_commit_fence(self.host.commit_fence(&mount_id).await?)?;
+                        }
+                        ApplyAuthorization::StandingAuto { .. } => {
+                            let permit = auto_permit.ok_or_else(|| {
+                                PluginServiceError::conflict(
+                                    "auto Apply requires a Runtime-bound quiescent permit",
+                                )
+                            })?;
+                            if permit.mount_id() != mount_id {
+                                return Err(PluginServiceError::conflict(
+                                    "auto Apply quiescent permit belongs to another Mount",
+                                ));
+                            }
+                            require_commit_fence(permit.fence().clone())?;
+                        }
+                    }
                     if project.linked_mount_id.as_deref() != Some(mount_id.as_str())
+                        || (matches!(&authorization, ApplyAuthorization::StandingAuto { .. })
+                            && project.auto_apply_mount_id.as_deref() != Some(mount_id.as_str()))
                         || candidate.base_target_digest.as_deref()
                             != Some(expected_current_target_digest.as_str())
                     {
@@ -1795,6 +2102,13 @@ impl PluginApplicationService {
                 new_data_dir_path,
                 config_schema_digest: config_schema_digest.as_ref().to_owned(),
                 initial_config: json!({}),
+                auto_apply_authorization_revision: match &authorization {
+                    ApplyAuthorization::Manual => None,
+                    ApplyAuthorization::StandingAuto {
+                        authorization_revision,
+                        ..
+                    } => Some(*authorization_revision as i64),
+                },
                 applied_at: now_ms(),
             })
             .await?;
@@ -2288,7 +2602,12 @@ fn project_summary(
             candidate_id: candidate.candidate_id.clone(),
             candidate_digest: candidate.candidate_digest.clone(),
         }),
-        apply_mode: PluginApplyModeDto::AskBeforeApply,
+        apply_mode: if project.apply_mode == "auto_compatible_when_idle" {
+            PluginApplyModeDto::AutoCompatibleWhenIdle
+        } else {
+            PluginApplyModeDto::AskBeforeApply
+        },
+        auto_apply_authorization_revision: project.auto_apply_authorization_revision as u64,
         updated_at_ms: project.updated_at,
     }
 }
@@ -2299,6 +2618,7 @@ fn project_detail_with_state(
     receipt: Option<&PluginCandidateTestReceiptRow>,
     operation: Option<&ProductOperationRow>,
     direct_dependencies: BTreeMap<String, String>,
+    auto_apply: Option<&AutoApplyProjection>,
 ) -> Result<PluginProjectDetailDto, PluginServiceError> {
     Ok(PluginProjectDetailDto {
         summary: project_summary(project, candidate),
@@ -2306,7 +2626,7 @@ fn project_detail_with_state(
         dependency_lock_digest: project.dependency_lock_digest.clone(),
         direct_dependencies,
         ready: candidate
-            .map(|candidate| candidate_dto(candidate, receipt))
+            .map(|candidate| candidate_dto(candidate, receipt, auto_apply))
             .transpose()?,
         active_operation: operation.map(operation_summary),
     })
@@ -2322,9 +2642,46 @@ fn target_dto(artifact: &PluginArtifactRow) -> PluginTargetRefDto {
     }
 }
 
+fn auto_apply_projection(eligibility: &PluginAutoApplyEligibility) -> AutoApplyProjection {
+    let mut blocking_reasons = Vec::new();
+    if !eligibility.standing_authorization_matches {
+        blocking_reasons.push("authorization_required".into());
+    }
+    if !(eligibility.linked_mount_matches && eligibility.base_target_matches) {
+        blocking_reasons.push("linked_target_changed".into());
+    }
+    if !(eligibility.managed_source_matches_project_head
+        && eligibility.matching_local_test_passed)
+    {
+        blocking_reasons.push("source_or_test_changed".into());
+    }
+    if !(eligibility.contribution_contracts_unchanged
+        && eligibility.config_schema_unchanged
+        && eligibility.credential_slots_unchanged
+        && eligibility.resource_effect_contracts_unchanged
+        && eligibility.dependency_lock_unchanged
+        && eligibility.host_sdk_contract_unchanged)
+    {
+        blocking_reasons.push("contract_or_dependency_changed".into());
+    }
+    if !(eligibility.runtime_requirement_unchanged
+        && eligibility.supported_targets_unchanged)
+    {
+        blocking_reasons.push("runtime_or_platform_changed".into());
+    }
+    if !(eligibility.static_validation_passed && eligibility.no_unknown_facts) {
+        blocking_reasons.push("validation_incomplete".into());
+    }
+    AutoApplyProjection {
+        can_auto_apply: eligibility.is_eligible(),
+        blocking_reasons,
+    }
+}
+
 fn candidate_dto(
     candidate: &PluginReadyCandidateRow,
     receipt: Option<&PluginCandidateTestReceiptRow>,
+    auto_apply: Option<&AutoApplyProjection>,
 ) -> Result<PluginReadyCandidateDto, PluginServiceError> {
     let diff = serde_json::from_str::<PluginContractDiff>(&candidate.contract_diff_json).ok();
     let compatibility = match diff.as_ref().map(|diff| &diff.compatibility) {
@@ -2432,8 +2789,10 @@ fn candidate_dto(
             changed_contracts,
             affected_consumers,
             can_apply: true,
-            can_auto_apply: false,
-            blocking_reasons: Vec::new(),
+            can_auto_apply: auto_apply.is_some_and(|projection| projection.can_auto_apply),
+            blocking_reasons: auto_apply
+                .map(|projection| projection.blocking_reasons.clone())
+                .unwrap_or_default(),
         },
     })
 }

@@ -156,8 +156,9 @@ pub use plugin_n1::{
     GetPluginKvParams,
     IPluginN1Repository, ListPluginCredentialBindingsParams, PutPluginKvParams,
     RecordPluginCandidateTestReceiptParams, RecordPluginReadyCandidateParams,
-    ReplacePluginCredentialBindingsParams, RestorePluginMountParams, StartProductOperationParams,
-    UninstallPluginMountParams, UpdatePluginMountConfigParams, UpdatePluginProjectSourceParams,
+    ReplacePluginCredentialBindingsParams, RestorePluginMountParams, SetPluginAutoApplyParams,
+    StartProductOperationParams, UninstallPluginMountParams, UpdatePluginMountConfigParams,
+    UpdatePluginProjectSourceParams,
     MAX_PRODUCT_OPERATION_LOG_LINES,
     MAX_PRODUCT_OPERATION_LOG_LINE_CHARS,
 };
