@@ -736,6 +736,11 @@ HTTP route、CLI 和定向测试。当前 CLI 的真实覆盖范围是：
 以及 `plugin mount enable|disable|retry|uninstall|delete-data`；未实现的 Share/Export/
 auto-apply 命令不在 CLI 中伪造。
 
+Windows Credential Manager runner 已完成一次真实 StepFun Coding Plan
+`step-3.7-flash` smoke，输出 `live_smoke_status=pass code=OK status=200`；凭据只在
+受控 runner 到测试进程的 stdin 交接中短暂存在，未进入源码、argv、日志、fixture 或
+Git。
+
 本 checkpoint 仍不关闭 `N1-V-01`、`M1-V-01` 或 `RC-WIN-01`。剩余阻断是安装版
 Plugin/MiniApp 产品闭环、Runtime switch/restart/fault、真实 MiniApp callable
 产品 E2E、Desktop 产品/accessibility 走查、Provider smoke 与最终 release lock/
