@@ -94,6 +94,10 @@ pub(crate) fn render_plugin_scaffold(
             canonical_json_bytes(&package_json)?,
         ),
         (
+            NormalizedSourcePath::parse("nomifun-plugin-sdk.d.ts")?,
+            PLUGIN_SDK_DECLARATIONS.as_bytes().to_vec(),
+        ),
+        (
             NormalizedSourcePath::parse(entrypoint)?,
             source.as_bytes().to_vec(),
         ),
@@ -111,23 +115,71 @@ struct FixedPackageJson<'a> {
     dependencies: BTreeMap<String, String>,
 }
 
-const JAVASCRIPT_ENTRYPOINT: &str = r#"export async function activate({ mount, sdk }) {
+const JAVASCRIPT_ENTRYPOINT: &str = r#"/** @param {PluginActivationContext} context */
+export async function activate({ mount, sdk }) {
   void mount;
   void sdk;
   return { capabilities: {} };
 }
 "#;
 
-const TYPESCRIPT_ENTRYPOINT: &str = r#"type ActivationContext = Readonly<{
-  mount: unknown;
-  sdk: unknown;
-}>;
-
-export async function activate({ mount, sdk }: ActivationContext) {
+const TYPESCRIPT_ENTRYPOINT: &str = r#"export async function activate({ mount, sdk }: PluginActivationContext) {
   void mount;
   void sdk;
   return { capabilities: {} };
 }
+"#;
+
+const PLUGIN_SDK_DECLARATIONS: &str = r#"type PluginJson = null | boolean | number | string | PluginJson[] | { [key: string]: PluginJson };
+
+type PluginTargetLock = Readonly<{
+  mount_id: string;
+  package: Readonly<{ id: string; version: string }>;
+  artifact_digest: string;
+  manifest_digest: string;
+}>;
+
+type PluginMountContext = Readonly<{
+  target: PluginTargetLock;
+  mount_handle_id: string;
+  config: PluginJson;
+  credential_bindings: ReadonlyArray<Readonly<Record<string, PluginJson>>>;
+  state: Readonly<Record<string, PluginJson>>;
+  data_dir: string;
+}>;
+
+type PluginStateKey = Readonly<{ scope_key: string; state_key: string }>;
+type PluginStateEntry = Readonly<{
+  namespace: Readonly<Record<string, PluginJson>>;
+  revision: number;
+  state_format_version: string;
+  writer_package_version: string;
+  value: PluginJson;
+}>;
+
+type PluginSdk = Readonly<{
+  credential: Readonly<{
+    resolve(slotKey: string): Promise<string>;
+  }>;
+  state: Readonly<{
+    get(request: PluginStateKey): Promise<Readonly<{ entry?: PluginStateEntry }>>;
+    set(request: PluginStateKey & Readonly<{ state_format_version: string; value: PluginJson }>): Promise<Readonly<{ revision: number }>>;
+    delete(request: PluginStateKey): Promise<Readonly<{ deleted: boolean }>>;
+    compareAndSwap(request: PluginStateKey & Readonly<{
+      expected_revision: number;
+      state_format_version: string;
+      value?: PluginJson;
+    }>): Promise<
+      | Readonly<{ outcome: "applied"; revision: number }>
+      | Readonly<{ outcome: "conflict"; current_revision: number; current_value?: PluginJson }>
+    >;
+  }>;
+}>;
+
+type PluginActivationContext = Readonly<{
+  mount: PluginMountContext;
+  sdk: PluginSdk;
+}>;
 "#;
 
 fn validate_display_text(

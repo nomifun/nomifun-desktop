@@ -16,7 +16,7 @@ use nomifun_js_authoring::{
     DependencyMutationFacts, DependencyRequestSet, DependencyState,
     DurableDependencyMutation, ExactDependencyLock, FixedPluginPacker, NeverCancel,
     NpmRegistryPort, NpmResolver, NpmResolverIdentity, OperationCancellation,
-    PluginLanguage, PreparedDependencyMutation,
+    PluginLanguage, PluginSourceArchive, PreparedDependencyMutation,
     PluginPackageBuildOptions, PluginScaffoldRequest, SourceFileEdit, SourceScope,
     SourceStore, SourceStoreLimits,
 };
@@ -36,7 +36,7 @@ use nomifun_db::{
 use nomifun_js_host::{ExtensionHostSupervisor, JavaScriptHostError};
 use nomifun_plugin_platform::{
     ArtifactStoreLimits, ImportCancellation, PluginArtifactStore,
-    PluginArtifactStoreError,
+    PluginArtifactStoreError, StoredPluginArtifact,
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, Notify};
@@ -215,6 +215,10 @@ pub trait PluginArtifactStorePort: Send + Sync {
     async fn import_zip(&self, source: &Path)
         -> Result<ImportedPluginArtifact, PluginServiceError>;
     async fn verify(&self, artifact: &PluginArtifactRow) -> Result<(), PluginServiceError>;
+    async fn load_for_share(
+        &self,
+        artifact: &PluginArtifactRow,
+    ) -> Result<StoredPluginArtifact, PluginServiceError>;
 }
 
 #[async_trait]
@@ -289,6 +293,19 @@ pub trait PluginSourceStorePort: Send + Sync {
         &self,
         retained_mutation_ids: &BTreeSet<String>,
     ) -> Result<(), PluginServiceError>;
+
+    async fn export_source_archive(
+        &self,
+        owner_user_id: &str,
+        project_id: &str,
+    ) -> Result<PluginSourceArchive, PluginServiceError>;
+
+    async fn import_source_archive(
+        &self,
+        owner_user_id: &str,
+        project_id: &str,
+        archive: &PluginSourceArchive,
+    ) -> Result<CreatedPluginSource, PluginServiceError>;
 }
 
 pub struct FsPluginArtifactStore {
@@ -995,6 +1012,65 @@ impl PluginSourceStorePort for FsPluginSourceStore {
         .map_err(dependency_worker_join_error)?
     }
 
+    async fn export_source_archive(
+        &self,
+        owner_user_id: &str,
+        project_id: &str,
+    ) -> Result<PluginSourceArchive, PluginServiceError> {
+        let store = self.store.clone();
+        let owner_user_id = owner_user_id.to_owned();
+        let project_id = project_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let scope = SourceScope::new(
+                UserId::from(owner_user_id),
+                PluginProjectId::from(project_id),
+            )
+            .map_err(|error| PluginServiceError::invalid(error.to_string()))?;
+            store
+                .export_project_source(&scope, &NeverCancel)
+                .map_err(map_authoring_source_edit_error)
+        })
+        .await
+        .map_err(dependency_worker_join_error)?
+    }
+
+    async fn import_source_archive(
+        &self,
+        owner_user_id: &str,
+        project_id: &str,
+        archive: &PluginSourceArchive,
+    ) -> Result<CreatedPluginSource, PluginServiceError> {
+        let store = self.store.clone();
+        let owner_user_id = owner_user_id.to_owned();
+        let project_id = project_id.to_owned();
+        let archive = archive.clone();
+        tokio::task::spawn_blocking(move || {
+            let scope = SourceScope::new(
+                UserId::from(owner_user_id),
+                PluginProjectId::from(project_id),
+            )
+            .map_err(|error| PluginServiceError::invalid(error.to_string()))?;
+            let imported = store
+                .import_project_source(scope, &archive, &NeverCancel)
+                .map_err(map_authoring_source_edit_error)?;
+            Ok(CreatedPluginSource {
+                managed_relative_path: imported.project().managed_relative_path().to_owned(),
+                source_snapshot_digest: imported
+                    .capture()
+                    .snapshot()
+                    .digest()
+                    .as_ref()
+                    .to_owned(),
+                dependency_lock_digest: imported
+                    .dependency_lock_digest()
+                    .as_ref()
+                    .to_owned(),
+            })
+        })
+        .await
+        .map_err(dependency_worker_join_error)?
+    }
+
     async fn delete_project(
         &self,
         owner_user_id: &str,
@@ -1126,22 +1202,39 @@ impl PluginArtifactStorePort for FsPluginArtifactStore {
         let stored = self
             .store
             .load(&DigestHex::from(artifact.artifact_digest.clone()))?;
-        let package = &stored.artifact.manifest.payload.package;
-        if stored.artifact.artifact_id.as_ref() != artifact.artifact_id
-            || stored.artifact.artifact_digest.as_ref() != artifact.artifact_digest
-            || stored.artifact.manifest.payload_digest.as_ref() != artifact.manifest_digest
-            || package.package_id.as_ref() != artifact.package_id
-            || package.package_version.as_ref() != artifact.package_version
-            || stored.managed_relative_path != artifact.managed_path
-        {
-            return Err(PluginServiceError::Coded {
-                code: crate::ERR_ARTIFACT,
-                message: "persisted Plugin artifact metadata differs from the verified store"
-                    .into(),
-            });
-        }
-        Ok(())
+        require_stored_artifact_matches(&stored, artifact)
     }
+
+    async fn load_for_share(
+        &self,
+        artifact: &PluginArtifactRow,
+    ) -> Result<StoredPluginArtifact, PluginServiceError> {
+        let stored = self
+            .store
+            .load(&DigestHex::from(artifact.artifact_digest.clone()))?;
+        require_stored_artifact_matches(&stored, artifact)?;
+        Ok(stored)
+    }
+}
+
+fn require_stored_artifact_matches(
+    stored: &StoredPluginArtifact,
+    artifact: &PluginArtifactRow,
+) -> Result<(), PluginServiceError> {
+    let package = &stored.artifact.manifest.payload.package;
+    if stored.artifact.artifact_id.as_ref() != artifact.artifact_id
+        || stored.artifact.artifact_digest.as_ref() != artifact.artifact_digest
+        || stored.artifact.manifest.payload_digest.as_ref() != artifact.manifest_digest
+        || package.package_id.as_ref() != artifact.package_id
+        || package.package_version.as_ref() != artifact.package_version
+        || stored.managed_relative_path != artifact.managed_path
+    {
+        return Err(PluginServiceError::Coded {
+            code: crate::ERR_ARTIFACT,
+            message: "persisted Plugin artifact metadata differs from the verified store".into(),
+        });
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -2130,6 +2223,7 @@ impl PluginRepository for DbPluginRepositoryAdapter {
                 progress_percent,
                 last_error_code: None,
                 bounded_log_tail,
+                result_artifact_digests: Default::default(),
                 finished_at_ms: finished_at_ms.max(operation.started_at_ms),
             })
             .await?)

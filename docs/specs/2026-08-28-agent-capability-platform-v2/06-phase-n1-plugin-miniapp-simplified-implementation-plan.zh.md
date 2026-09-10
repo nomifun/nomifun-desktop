@@ -1650,3 +1650,11 @@ Project/Candidate/TestReceipt/Artifact/Mount/Runtime 重算完整 eligibility，
 fence；resident busy 保留 Ready、不取消调用，quiescent 后才原子 Apply 并回收旧
 generation。不可变 Mount revision 记录 manual/standing-auto 授权来源，Desktop 提供
 风险确认、关闭、事件驱动重试和成功通知。实现关闭不替代安装版 Candidate Gate。
+
+Plugin SDK/Share/CLI 后续实施也已完成：Project scaffold 固定提供 Host 注入 SDK 的
+TypeScript declarations；目录型 Share Bundle 对 Source snapshot、Host-owned lock、
+immutable Artifact 和最小 Test provenance 使用一套 canonical/exact inventory，默认
+不含 Credential、Config、KV、dataDir、Files、测试内容或日志。Import 始终创建新
+editable/runtime-only Project 和 Ready Candidate，来源 Test 只作展示，必须在本机重测。
+Desktop 与 headless import/share/auto-apply 均调用同一 application service；最终安装版
+一站式 smoke 仍归 Windows Candidate Gate。

@@ -12,7 +12,7 @@ import type {
   PluginProjectSummary,
 } from '@/common/types/pluginPlatform';
 import { Button, Tooltip } from '@arco-design/web-react';
-import { CheckOne, CloseOne, Code, Delete, PlayOne, Plug } from '@icon-park/react';
+import { CheckOne, CloseOne, Code, Delete, PlayOne, Plug, Upload } from '@icon-park/react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import type { PluginLoadFailure } from './pluginWorkbenchModel';
@@ -36,6 +36,7 @@ export type PluginProjectBusyAction =
   | 'edit'
   | 'dependencies'
   | 'auto_apply'
+  | 'share'
   | 'build'
   | 'test'
   | 'apply'
@@ -60,6 +61,7 @@ interface PluginWorkshopViewProps {
   onEditSource: () => void;
   onEditDependencies: () => void;
   onSetAutoApply: (enabled: boolean) => void;
+  onExportShare: () => void;
   onTest: () => void;
   onApply: () => void;
   onDelete: () => void;
@@ -98,6 +100,7 @@ const PluginProjectDetailPanel: React.FC<{
   onEditSource: () => void;
   onEditDependencies: () => void;
   onSetAutoApply: (enabled: boolean) => void;
+  onExportShare: () => void;
   onTest: () => void;
   onApply: () => void;
   onDelete: () => void;
@@ -112,6 +115,7 @@ const PluginProjectDetailPanel: React.FC<{
   onEditSource,
   onEditDependencies,
   onSetAutoApply,
+  onExportShare,
   onTest,
   onApply,
   onDelete,
@@ -279,6 +283,16 @@ const PluginProjectDetailPanel: React.FC<{
               {t('pluginWorkbench.actions.retryAutoApply')}
             </Button>
           )}
+        {(ready || summary.linked_mount_id) && (
+          <Button
+            icon={<Upload theme='outline' size='14' />}
+            loading={busyAction === 'share'}
+            disabled={disabled}
+            onClick={onExportShare}
+          >
+            {t('pluginWorkbench.actions.exportShare')}
+          </Button>
+        )}
         {canBuild && (
           <Button
             icon={<Code theme='outline' size='14' />}
@@ -451,6 +465,14 @@ const PluginProjectDetailPanel: React.FC<{
                 </span>
               </div>
             </div>
+            {ready.imported_test_provenance && (
+              <div className={`${styles.notice} ${styles.noticeInSection}`}>
+                {t('pluginWorkbench.workshop.importedTestProvenance', {
+                  outcome: ready.imported_test_provenance.outcome,
+                  runtime: ready.imported_test_provenance.runtime_target,
+                })}
+              </div>
+            )}
             {ready.impact.blocking_reasons.length > 0 && (
               <ul className={styles.blockingList}>
                 {ready.impact.blocking_reasons.map((reason) => (
@@ -525,6 +547,7 @@ const PluginWorkshopView: React.FC<PluginWorkshopViewProps> = ({
   onEditSource,
   onEditDependencies,
   onSetAutoApply,
+  onExportShare,
   onTest,
   onApply,
   onDelete,
@@ -612,6 +635,7 @@ const PluginWorkshopView: React.FC<PluginWorkshopViewProps> = ({
             onEditSource={onEditSource}
             onEditDependencies={onEditDependencies}
             onSetAutoApply={onSetAutoApply}
+            onExportShare={onExportShare}
             onTest={onTest}
             onApply={onApply}
             onDelete={onDelete}

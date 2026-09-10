@@ -994,6 +994,9 @@ impl<'a> FixedEsmBundler<'a> {
 
 fn is_executable_source_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".d.ts") || lower.ends_with(".d.mts") {
+        return false;
+    }
     lower.ends_with(".js")
         || lower.ends_with(".mjs")
         || lower.ends_with(".ts")
@@ -1417,6 +1420,7 @@ fn validate_source_inventory(
         let path = file.normalized_relative_path().as_str();
         if path == PLUGIN_SOURCE_MANIFEST_FILE
             || path == "package.json"
+            || path == "nomifun-plugin-sdk.d.ts"
             || path == manifest.entrypoint().as_str()
         {
             continue;

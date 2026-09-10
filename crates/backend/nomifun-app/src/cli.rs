@@ -248,6 +248,18 @@ pub enum PluginCommand {
     Build(PluginProjectArgs),
     /// Run the Candidate Test Host against the current Ready Candidate.
     Test(PluginTestArgs),
+    /// Import a prebuilt Artifact or NomiFun Share Bundle as a Ready Candidate.
+    Import(PluginImportArgs),
+    /// Export a content-addressed NomiFun Share Bundle.
+    Share {
+        #[command(subcommand)]
+        operation: PluginShareCommand,
+    },
+    /// Manage user-owned compatible-when-idle authorization.
+    AutoApply {
+        #[command(subcommand)]
+        operation: PluginAutoApplyCommand,
+    },
     /// Inspect, discard, apply, or restore a Plugin Candidate through the application service.
     Candidate {
         #[command(subcommand)]
@@ -264,6 +276,22 @@ pub enum PluginCommand {
 pub enum PluginProjectCommand {
     /// Print the managed Source directory for a Project.
     SourcePath(PluginProjectArgs),
+}
+
+#[derive(Subcommand)]
+pub enum PluginShareCommand {
+    /// Export the Ready Candidate or exact current Mount target.
+    Export(PluginShareExportArgs),
+}
+
+#[derive(Subcommand)]
+pub enum PluginAutoApplyCommand {
+    /// Enable standing compatible-when-idle authorization for the linked Mount.
+    Enable(PluginProjectArgs),
+    /// Disable standing auto Apply authorization.
+    Disable(PluginProjectArgs),
+    /// Retry an already-authorized Ready Candidate without polling.
+    Retry(PluginProjectArgs),
 }
 
 #[derive(Subcommand)]
@@ -352,6 +380,46 @@ pub struct PluginTestArgs {
         value_name = "DIGEST"
     )]
     pub resolved_test_input_digest: String,
+
+    #[command(flatten)]
+    pub connection: HeadlessConnectionArgs,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct PluginImportArgs {
+    /// Prebuilt package directory/zip or NomiFun Share Bundle directory.
+    #[arg(value_name = "SOURCE_PATH")]
+    pub source_path: PathBuf,
+
+    /// User-approved Artifact digest, or canonical Share manifest digest.
+    #[arg(long = "expected-digest", value_name = "DIGEST")]
+    pub expected_digest: String,
+
+    /// Treat SOURCE_PATH as a NomiFun Share Bundle instead of a prebuilt package.
+    #[arg(long)]
+    pub share_bundle: bool,
+
+    #[command(flatten)]
+    pub connection: HeadlessConnectionArgs,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct PluginShareExportArgs {
+    /// Plugin Project identity.
+    #[arg(value_name = "PROJECT_ID")]
+    pub project_id: String,
+
+    /// New destination directory; it must not already exist.
+    #[arg(long, value_name = "DIRECTORY")]
+    pub output: PathBuf,
+
+    /// Export the linked current Mount instead of the Ready Candidate.
+    #[arg(long)]
+    pub current_mount: bool,
+
+    /// Include exact Project Source and dependency lock (Ready Candidate only).
+    #[arg(long)]
+    pub include_source: bool,
 
     #[command(flatten)]
     pub connection: HeadlessConnectionArgs,
@@ -859,6 +927,60 @@ mod tests {
                 },
             }) if args.mount_id == "mount-1"
         ));
+
+        let import = Cli::try_parse_from([
+            "nomicore",
+            "plugin",
+            "import",
+            "C:\\share",
+            "--expected-digest",
+            &"a".repeat(64),
+            "--share-bundle",
+        ])
+        .unwrap();
+        assert!(matches!(
+            import.command,
+            Some(Command::Plugin {
+                operation: super::PluginCommand::Import(args),
+            }) if args.share_bundle && args.source_path == PathBuf::from("C:\\share")
+        ));
+
+        let share = Cli::try_parse_from([
+            "nomicore",
+            "plugin",
+            "share",
+            "export",
+            "project-1",
+            "--output",
+            "C:\\exports\\plugin-share",
+            "--include-source",
+        ])
+        .unwrap();
+        assert!(matches!(
+            share.command,
+            Some(Command::Plugin {
+                operation: super::PluginCommand::Share {
+                    operation: super::PluginShareCommand::Export(args),
+                },
+            }) if args.project_id == "project-1" && args.include_source
+        ));
+
+        let auto_apply = Cli::try_parse_from([
+            "nomicore",
+            "plugin",
+            "auto-apply",
+            "enable",
+            "project-1",
+        ])
+        .unwrap();
+        assert!(matches!(
+            auto_apply.command,
+            Some(Command::Plugin {
+                operation: super::PluginCommand::AutoApply {
+                    operation: super::PluginAutoApplyCommand::Enable(args),
+                },
+            }) if args.project_id == "project-1"
+        ));
     }
 
     #[test]
@@ -869,9 +991,19 @@ mod tests {
         assert!(plugin.find_subcommand("show").is_some());
         assert!(plugin.find_subcommand("build").is_some());
         assert!(plugin.find_subcommand("test").is_some());
+        assert!(plugin.find_subcommand("import").is_some());
+        assert!(plugin.find_subcommand("share").is_some());
+        assert!(plugin.find_subcommand("auto-apply").is_some());
         assert!(plugin.find_subcommand("candidate").is_some());
         assert!(plugin.find_subcommand("mount").is_some());
         assert!(plugin.find_subcommand("deployment").is_none());
+
+        let share = plugin.find_subcommand("share").unwrap();
+        assert!(share.find_subcommand("export").is_some());
+        let auto_apply = plugin.find_subcommand("auto-apply").unwrap();
+        assert!(auto_apply.find_subcommand("enable").is_some());
+        assert!(auto_apply.find_subcommand("disable").is_some());
+        assert!(auto_apply.find_subcommand("retry").is_some());
 
         let candidate = plugin.find_subcommand("candidate").unwrap();
         assert!(candidate.find_subcommand("show").is_some());

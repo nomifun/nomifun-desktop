@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde_json::Value;
 
 use crate::DbError;
@@ -127,6 +129,7 @@ pub struct FinishProductOperationParams {
     pub progress_percent: Option<u8>,
     pub last_error_code: Option<String>,
     pub bounded_log_tail: Vec<String>,
+    pub result_artifact_digests: BTreeMap<String, String>,
     pub finished_at_ms: i64,
 }
 
@@ -142,6 +145,7 @@ pub struct RecordPluginReadyCandidateParams {
     pub source_snapshot_digest: Option<String>,
     pub dependency_lock_digest: Option<String>,
     pub contract_diff: Value,
+    pub imported_test_provenance: Option<Value>,
     pub origin_operation_id: String,
     pub expected_generation: i64,
     pub created_at: i64,

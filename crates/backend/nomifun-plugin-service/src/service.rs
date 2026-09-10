@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use nomifun_agent_contracts::{
-    AffectedConsumerKind, CandidateTestOutcome, CandidateTestReceipt, CapabilityConsumer,
-    NodeRuntimeFingerprint,
+    AffectedConsumerKind, CandidateTestOutcome, CandidateTestProvenance, CandidateTestReceipt,
+    CapabilityConsumer, NodeRuntimeFingerprint,
     PluginAutoApplyEligibility,
     PluginCompatibility, PluginContractChangeKind, PluginContractDiff, PluginHostCommitFence,
     PluginMountId, PluginPackageV1Manifest, PluginProjectId, PluginReadyCandidate,
@@ -23,9 +23,10 @@ use nomifun_api_types::{
     PluginConfigSchemaDto, PluginConfigStateDto, PluginConsumerAvailabilityDto,
     PluginConsumerAvailabilityStatusDto, PluginConsumerSurfaceDto, PluginDetailDto,
     PluginLibraryResponseDto, PluginLifecycleDto, PluginProjectDetailDto,
+    PluginImportedTestProvenanceDto,
     PluginProjectSourceStateDto, PluginProjectSummaryDto, PluginReadyCandidateDto,
-    PluginSummaryDto, PluginTargetRefDto, SetPluginAutoApplyRequest,
-    UpdatePluginDependenciesRequest,
+    PluginShareSourceDto, PluginSummaryDto, PluginTargetRefDto, SetPluginAutoApplyRequest,
+    SharePluginRequest, UpdatePluginDependenciesRequest,
 };
 use nomifun_db::{
     AbortPluginDependencyMutationParams, ApplyPluginCandidateParams,
@@ -69,6 +70,7 @@ use crate::types::{
     LinkPluginProjectParams, PluginInventory, PluginServicePaths, RetryRequest,
     RestoreRequest, TestRequest, UninstallRequest,
 };
+use crate::{PluginShareBundleFilesystem, PluginShareExport};
 
 pub struct PluginApplicationService {
     repository: Arc<dyn PluginRepository>,
@@ -927,12 +929,216 @@ impl PluginApplicationService {
             .await
     }
 
+    pub async fn export_share(
+        &self,
+        owner_user_id: &str,
+        request: SharePluginRequest,
+    ) -> Result<DurableOperationDetailDto, PluginServiceError> {
+        let _guard = self.project_guard(owner_user_id, &request.project_id).await?;
+        let project = self.owned_project(owner_user_id, &request.project_id).await?;
+        if project.updated_at as u64 != request.expected_project_revision {
+            return Err(PluginServiceError::stale(
+                "Plugin Project revision changed before Share export",
+            ));
+        }
+        let (artifact_row, source, test_provenance) = match request.source {
+            PluginShareSourceDto::ReadyCandidate => {
+                if request.mount_id.is_some()
+                    || request.expected_mount_revision.is_some()
+                    || request.expected_target_digest.is_some()
+                {
+                    return Err(PluginServiceError::invalid(
+                        "Ready Candidate Share cannot carry Mount CAS fields",
+                    ));
+                }
+                let candidate = self
+                    .repository
+                    .get_candidate(&project.project_id)
+                    .await?
+                    .ok_or_else(|| PluginServiceError::not_found("ready candidate"))?;
+                if request.candidate_id.as_deref() != Some(candidate.candidate_id.as_str())
+                    || request.expected_candidate_digest.as_deref()
+                        != Some(candidate.candidate_digest.as_str())
+                {
+                    return Err(PluginServiceError::stale(
+                        "Share export lost its exact Ready Candidate CAS",
+                    ));
+                }
+                let artifact = self
+                    .repository
+                    .get_artifact(&candidate.artifact_digest)
+                    .await?
+                    .ok_or_else(|| PluginServiceError::not_found("candidate artifact"))?;
+                let source = if request.include_source {
+                    if candidate.source_snapshot_digest != project.source_head_digest
+                        || candidate.dependency_lock_digest != project.dependency_lock_digest
+                        || candidate.build_generation != project.build_generation
+                    {
+                        return Err(PluginServiceError::stale(
+                            "Ready Candidate no longer matches the current Project Source lineage",
+                        ));
+                    }
+                    let source = self
+                        .source_store
+                        .export_source_archive(owner_user_id, &project.project_id)
+                        .await?;
+                    if candidate.source_snapshot_digest.as_deref()
+                        != Some(source.snapshot().digest().as_ref())
+                        || candidate.dependency_lock_digest.as_deref()
+                            != Some(
+                                source
+                                    .dependency_lock()
+                                    .digest()
+                                    .map_err(|error| {
+                                        PluginServiceError::invalid(error.to_string())
+                                    })?
+                                    .as_ref(),
+                            )
+                    {
+                        return Err(PluginServiceError::stale(
+                            "exported Source bytes differ from the Candidate lineage",
+                        ));
+                    }
+                    Some(source)
+                } else {
+                    None
+                };
+                let local_provenance = self
+                    .repository
+                    .get_test_receipt(&candidate.candidate_id)
+                    .await?
+                    .map(|row| imported_test_provenance(&row))
+                    .transpose()?;
+                let provenance = match local_provenance {
+                    Some(provenance) => Some(provenance),
+                    None => candidate
+                        .imported_test_provenance_json
+                        .as_ref()
+                        .map(|value| {
+                            serde_json::from_str(value).map_err(|error| {
+                                PluginServiceError::integration(format!(
+                                    "stored imported Test provenance is invalid: {error}"
+                                ))
+                            })
+                        })
+                        .transpose()?,
+                };
+                (artifact, source, provenance)
+            }
+            PluginShareSourceDto::CurrentMount => {
+                if request.candidate_id.is_some() || request.expected_candidate_digest.is_some() {
+                    return Err(PluginServiceError::invalid(
+                        "current Mount Share cannot carry Candidate CAS fields",
+                    ));
+                }
+                if request.include_source {
+                    return Err(PluginServiceError::invalid(
+                        "current Mount Share cannot attach unproven current Project Source; export the exact Ready Candidate instead",
+                    ));
+                }
+                let mount_id = request.mount_id.as_deref().ok_or_else(|| {
+                    PluginServiceError::invalid("current Mount Share requires mount_id")
+                })?;
+                let (mount, _) = self.owned_mount(owner_user_id, mount_id).await?;
+                let current = mount.current_artifact_digest.as_deref().ok_or_else(|| {
+                    PluginServiceError::conflict("current Mount has no executable target")
+                })?;
+                if project.linked_mount_id.as_deref() != Some(mount_id)
+                    || request.expected_mount_revision != Some(mount.revision as u64)
+                    || request.expected_target_digest.as_deref() != Some(current)
+                {
+                    return Err(PluginServiceError::stale(
+                        "Share export lost its exact current Mount CAS",
+                    ));
+                }
+                let artifact = self
+                    .repository
+                    .get_artifact(current)
+                    .await?
+                    .ok_or_else(|| PluginServiceError::not_found("current Mount artifact"))?;
+                (artifact, None, None)
+            }
+        };
+        let stored = self.artifacts.load_for_share(&artifact_row).await?;
+        let operation_id = Uuid::now_v7().to_string();
+        self.repository
+            .start_operation(&StartProductOperationParams {
+                operation_id: operation_id.clone(),
+                kind: ProductOperationKind::Export,
+                owner_kind: "plugin_project".into(),
+                owner_id: project.project_id.clone(),
+                progress_percent: Some(10),
+                bounded_log_tail: vec!["Plugin Share export started".into()],
+                started_at_ms: now_ms(),
+            })
+            .await?;
+        let destination = std::path::PathBuf::from(request.destination_path);
+        let project_id = project.project_id.clone();
+        let exported = tokio::task::spawn_blocking(move || {
+            PluginShareBundleFilesystem.export(
+                PluginShareExport {
+                    originating_project_id: source.as_ref().map(|_| project_id.as_str()),
+                    artifact: &stored,
+                    source: source.as_ref(),
+                    test_provenance,
+                },
+                destination,
+            )
+        })
+        .await
+        .unwrap_or_else(|error| {
+            Err(PluginServiceError::integration(format!(
+                "Plugin Share worker failed: {error}"
+            )))
+        });
+        let manifest = match exported {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                self.repository
+                    .finish_operation(&FinishProductOperationParams {
+                        operation_id,
+                        state: ProductOperationState::Failed,
+                        progress_percent: None,
+                        last_error_code: Some(error.code().into()),
+                        bounded_log_tail: vec!["Plugin Share export failed".into()],
+                        result_artifact_digests: BTreeMap::new(),
+                        finished_at_ms: now_ms(),
+                    })
+                    .await?;
+                return Err(error);
+            }
+        };
+        let bundle_digest = digest_payload(&manifest)
+            .map_err(|error| PluginServiceError::invalid(error.to_string()))?;
+        let operation = self
+            .repository
+            .finish_operation(&FinishProductOperationParams {
+                operation_id,
+                state: ProductOperationState::Succeeded,
+                progress_percent: Some(100),
+                last_error_code: None,
+                bounded_log_tail: vec!["Plugin Share Bundle exported".into()],
+                result_artifact_digests: BTreeMap::from([
+                    ("share_bundle".into(), bundle_digest.as_ref().to_owned()),
+                    ("package".into(), artifact_row.artifact_digest),
+                ]),
+                finished_at_ms: now_ms(),
+            })
+            .await?;
+        Ok(operation_detail(&operation))
+    }
+
     async fn import_prebuilt_locked(
         &self,
         owner_user_id: &str,
         request: ImportRequest,
         reserved_project_id: Option<String>,
     ) -> Result<PluginProjectDetailDto, PluginServiceError> {
+        if request.import_kind == nomifun_api_types::PluginImportKindDto::ShareBundle {
+            return self
+                .import_share_bundle_locked(owner_user_id, request, reserved_project_id)
+                .await;
+        }
         if request.import_kind != nomifun_api_types::PluginImportKindDto::PrebuiltArtifact {
             return Err(PluginServiceError::invalid(
                 "this boundary accepts only prebuilt directory or zip imports",
@@ -1026,6 +1232,7 @@ impl PluginApplicationService {
                 progress_percent: Some(100),
                 last_error_code: None,
                 bounded_log_tail: vec!["read-only candidate ready".into()],
+                result_artifact_digests: Default::default(),
                 finished_at_ms: now_ms(),
             })
             .await?;
@@ -1064,6 +1271,180 @@ impl PluginApplicationService {
                 source_snapshot_digest: None,
                 dependency_lock_digest: None,
                 contract_diff: serde_json::to_value(contract_diff)
+                    .map_err(|error| PluginServiceError::invalid(error.to_string()))?,
+                imported_test_provenance: None,
+                origin_operation_id: operation_id,
+                expected_generation: project.build_generation,
+                created_at: now_ms(),
+            })
+            .await?;
+        self.get_project(owner_user_id, &project.project_id).await
+    }
+
+    async fn import_share_bundle_locked(
+        &self,
+        owner_user_id: &str,
+        request: ImportRequest,
+        reserved_project_id: Option<String>,
+    ) -> Result<PluginProjectDetailDto, PluginServiceError> {
+        if request.target_project_id.is_some() || request.expected_project_revision.is_some() {
+            return Err(PluginServiceError::invalid(
+                "Plugin Share Bundle import always creates a new Project identity",
+            ));
+        }
+        let inventory = self.repository.inventory(owner_user_id).await?;
+        if inventory.library_revision != request.expected_library_revision {
+            return Err(PluginServiceError::stale("library revision changed"));
+        }
+        let project_id = reserved_project_id.ok_or_else(|| {
+            PluginServiceError::integration("Share import Project identity was not reserved")
+        })?;
+        let source_path = std::path::PathBuf::from(request.source_path);
+        let imported = tokio::task::spawn_blocking(move || {
+            PluginShareBundleFilesystem.import(source_path)
+        })
+        .await
+        .map_err(|error| {
+            PluginServiceError::integration(format!("Plugin Share worker failed: {error}"))
+        })??;
+        if imported.bundle_digest != request.expected_bundle_or_artifact_digest {
+            return Err(PluginServiceError::stale(
+                "Plugin Share Bundle digest differs from the approved digest",
+            ));
+        }
+        let imported_artifact = self
+            .artifacts
+            .import_directory(&imported.artifact_package_root)
+            .await?;
+        if imported_artifact.artifact.artifact_digest != imported.artifact.artifact_digest
+            || imported_artifact.artifact.manifest != imported.artifact.manifest
+            || imported_artifact.artifact.files != imported.artifact.files
+        {
+            return Err(PluginServiceError::stale(
+                "Artifact Store admission changed the Plugin Share Artifact facts",
+            ));
+        }
+        let created_source = match imported.source.as_ref() {
+            Some(source) => Some(
+                self.source_store
+                    .import_source_archive(owner_user_id, &project_id, source)
+                    .await?,
+            ),
+            None => None,
+        };
+        let package = &imported_artifact.artifact.manifest.payload.package;
+        let initial_generation = i64::from(created_source.is_some());
+        let project = match self
+            .repository
+            .create_project(&CreatePluginProjectParams {
+                project_id: project_id.clone(),
+                owner_user_id: owner_user_id.to_owned(),
+                package_id: package.package_id.as_ref().to_owned(),
+                display_name: package.display.name.clone(),
+                description: package.display.description.clone(),
+                managed_source_path: created_source
+                    .as_ref()
+                    .map(|source| source.managed_relative_path.clone()),
+                source_head_digest: created_source
+                    .as_ref()
+                    .map(|source| source.source_snapshot_digest.clone()),
+                dependency_lock_digest: created_source
+                    .as_ref()
+                    .map(|source| source.dependency_lock_digest.clone()),
+                initial_build_generation: initial_generation,
+                created_at: now_ms(),
+            })
+            .await
+        {
+            Ok(project) => project,
+            Err(error) => {
+                if created_source.is_some() {
+                    let _ = self
+                        .source_store
+                        .delete_project(owner_user_id, &project_id)
+                        .await;
+                }
+                return Err(error);
+            }
+        };
+        let operation_id = Uuid::now_v7().to_string();
+        self.repository
+            .start_operation(&StartProductOperationParams {
+                operation_id: operation_id.clone(),
+                kind: ProductOperationKind::Import,
+                owner_kind: "plugin_project".into(),
+                owner_id: project.project_id.clone(),
+                progress_percent: Some(10),
+                bounded_log_tail: vec!["Plugin Share Bundle accepted".into()],
+                started_at_ms: now_ms(),
+            })
+            .await?;
+        let artifact = self
+            .repository
+            .put_artifact(&CreatePluginArtifactParams {
+                artifact_id: imported_artifact.artifact.artifact_id.as_ref().to_owned(),
+                artifact_digest: imported_artifact.artifact.artifact_digest.as_ref().to_owned(),
+                package_id: package.package_id.as_ref().to_owned(),
+                package_version: package.package_version.as_ref().to_owned(),
+                manifest_digest: imported_artifact
+                    .artifact
+                    .manifest
+                    .payload_digest
+                    .as_ref()
+                    .to_owned(),
+                manifest: serde_json::to_value(&imported_artifact.artifact.manifest.payload)
+                    .map_err(|error| PluginServiceError::invalid(error.to_string()))?,
+                managed_path: imported_artifact.managed_relative_path.clone(),
+                created_at: now_ms(),
+            })
+            .await?;
+        self.artifacts.verify(&artifact).await?;
+        self.repository
+            .finish_operation(&FinishProductOperationParams {
+                operation_id: operation_id.clone(),
+                state: ProductOperationState::Succeeded,
+                progress_percent: Some(100),
+                last_error_code: None,
+                bounded_log_tail: vec!["Plugin Share Candidate ready".into()],
+                result_artifact_digests: BTreeMap::from([
+                    ("share_bundle".into(), imported.bundle_digest),
+                    ("package".into(), artifact.artifact_digest.clone()),
+                ]),
+                finished_at_ms: now_ms(),
+            })
+            .await?;
+        let contract_diff = plugin_contract_diff(None, &imported_artifact.artifact.manifest.payload)?;
+        let candidate_digest = digest_json(&json!({
+            "project_id": project.project_id,
+            "project_build_generation": project.build_generation,
+            "artifact_digest": artifact.artifact_digest,
+            "source_snapshot_digest": created_source.as_ref().map(|source| &source.source_snapshot_digest),
+            "dependency_lock_digest": created_source.as_ref().map(|source| &source.dependency_lock_digest),
+            "origin_operation_id": operation_id,
+        }));
+        self.repository
+            .record_candidate(&RecordPluginReadyCandidateParams {
+                candidate_id: Uuid::now_v7().to_string(),
+                project_id: project.project_id.clone(),
+                candidate_digest,
+                origin: DbCandidateOrigin::Import,
+                artifact_id: artifact.artifact_id,
+                artifact_digest: artifact.artifact_digest,
+                base_target_digest: None,
+                source_snapshot_digest: created_source
+                    .as_ref()
+                    .map(|source| source.source_snapshot_digest.clone()),
+                dependency_lock_digest: created_source
+                    .as_ref()
+                    .map(|source| source.dependency_lock_digest.clone()),
+                contract_diff: serde_json::to_value(contract_diff)
+                    .map_err(|error| PluginServiceError::invalid(error.to_string()))?,
+                imported_test_provenance: imported
+                    .manifest
+                    .test_provenance
+                    .as_ref()
+                    .map(serde_json::to_value)
+                    .transpose()
                     .map_err(|error| PluginServiceError::invalid(error.to_string()))?,
                 origin_operation_id: operation_id,
                 expected_generation: project.build_generation,
@@ -1462,6 +1843,7 @@ impl PluginApplicationService {
                 progress_percent: Some(100),
                 last_error_code: None,
                 bounded_log_tail: vec!["candidate built".into()],
+                result_artifact_digests: Default::default(),
                 finished_at_ms: now_ms(),
             })
             .await?;
@@ -1485,6 +1867,7 @@ impl PluginApplicationService {
                 dependency_lock_digest: Some(output.dependency_lock_digest),
                 contract_diff: serde_json::to_value(contract_diff)
                     .map_err(|error| PluginServiceError::invalid(error.to_string()))?,
+                imported_test_provenance: None,
                 origin_operation_id: operation_id,
                 expected_generation: project.build_generation,
                 created_at: now_ms(),
@@ -1514,6 +1897,7 @@ impl PluginApplicationService {
             } else {
                 "build failed".into()
             }],
+            result_artifact_digests: Default::default(),
             finished_at_ms: now_ms(),
         };
         if let Err(finish_error) = self.repository.finish_operation(&terminal).await {
@@ -2465,6 +2849,25 @@ fn candidate_compatibility(
     Ok(diff.compatibility)
 }
 
+fn imported_test_provenance(
+    row: &PluginCandidateTestReceiptRow,
+) -> Result<CandidateTestProvenance, PluginServiceError> {
+    let receipt: CandidateTestReceipt = serde_json::from_str(&row.receipt_json).map_err(|error| {
+        PluginServiceError::integration(format!(
+            "stored Candidate Test receipt is invalid: {error}"
+        ))
+    })?;
+    Ok(CandidateTestProvenance {
+        outcome: receipt.outcome,
+        candidate_digest: receipt.candidate_digest,
+        runtime_target: receipt.runtime.runtime_target,
+        runtime_executable_digest: receipt.runtime.executable_digest,
+        host_contract_version: receipt.host_contract_version,
+        javascript_sdk_contract_version: receipt.javascript_sdk_contract_version,
+        test_contract_version: receipt.test_contract_version,
+    })
+}
+
 fn candidate_contract(
     candidate: &PluginReadyCandidateRow,
 ) -> Result<PluginReadyCandidate, PluginServiceError> {
@@ -2678,6 +3081,14 @@ fn auto_apply_projection(eligibility: &PluginAutoApplyEligibility) -> AutoApplyP
     }
 }
 
+fn candidate_test_status(outcome: CandidateTestOutcome) -> PluginCandidateTestStatusDto {
+    match outcome {
+        CandidateTestOutcome::Passed => PluginCandidateTestStatusDto::Passed,
+        CandidateTestOutcome::Failed => PluginCandidateTestStatusDto::Failed,
+        CandidateTestOutcome::NeedsTestInput => PluginCandidateTestStatusDto::NeedsTestInput,
+    }
+}
+
 fn candidate_dto(
     candidate: &PluginReadyCandidateRow,
     receipt: Option<&PluginCandidateTestReceiptRow>,
@@ -2731,6 +3142,29 @@ fn candidate_dto(
                 ))
             })?;
     }
+    let imported_test_provenance = candidate
+        .imported_test_provenance_json
+        .as_ref()
+        .map(|value| {
+            serde_json::from_str::<CandidateTestProvenance>(value).map_err(|error| {
+                PluginServiceError::integration(format!(
+                    "stored imported Test provenance is invalid: {error}"
+                ))
+            })
+        })
+        .transpose()?
+        .map(|provenance| PluginImportedTestProvenanceDto {
+            outcome: candidate_test_status(provenance.outcome),
+            candidate_digest: provenance.candidate_digest.as_ref().to_owned(),
+            runtime_target: provenance.runtime_target.as_ref().to_owned(),
+            runtime_executable_digest: provenance.runtime_executable_digest.as_ref().to_owned(),
+            host_contract_version: provenance.host_contract_version.as_ref().to_owned(),
+            javascript_sdk_contract_version: provenance
+                .javascript_sdk_contract_version
+                .as_ref()
+                .to_owned(),
+            test_contract_version: provenance.test_contract_version.as_ref().to_owned(),
+        });
     Ok(PluginReadyCandidateDto {
         candidate: PluginCandidateRefDto {
             candidate_id: candidate.candidate_id.clone(),
@@ -2784,6 +3218,7 @@ fn candidate_dto(
             issued_at_ms: receipt.as_ref().map(|receipt| receipt.issued_at_ms),
             error_code: None,
         },
+        imported_test_provenance,
         impact: PluginCandidateImpactDto {
             compatibility,
             changed_contracts,
@@ -2979,7 +3414,7 @@ fn operation_summary(row: &ProductOperationRow) -> DurableOperationSummaryDto {
             "failed" => DurableOperationStateDto::Failed,
             _ => DurableOperationStateDto::Canceled,
         },
-        cancelable: row.state == "running",
+        cancelable: row.state == "running" && row.kind == "build",
         progress_percent: row.progress_percent.map(|value| value as u8),
         started_at_ms: row.started_at_ms,
         completed_at_ms: row.finished_at_ms,
@@ -2994,7 +3429,8 @@ fn operation_detail(row: &ProductOperationRow) -> DurableOperationDetailDto {
     DurableOperationDetailDto {
         summary: operation_summary(row),
         bounded_log_tail: serde_json::from_str(&row.bounded_log_tail_json).unwrap_or_default(),
-        result_artifact_digests: BTreeMap::new(),
+        result_artifact_digests: serde_json::from_str(&row.result_artifact_digests_json)
+            .unwrap_or_default(),
         last_error_code: row.last_error_code.clone(),
     }
 }

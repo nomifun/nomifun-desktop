@@ -186,6 +186,15 @@ export interface PluginReadyCandidate {
   project_build_generation: number;
   base_target_digest?: string;
   test: PluginCandidateTest;
+  imported_test_provenance?: {
+    outcome: PluginCandidateTestStatus;
+    candidate_digest: string;
+    runtime_target: string;
+    runtime_executable_digest: string;
+    host_contract_version: string;
+    javascript_sdk_contract_version: string;
+    test_contract_version: string;
+  };
   impact: PluginCandidateImpact;
 }
 
@@ -268,6 +277,19 @@ export interface ImportPluginRequest {
   expected_bundle_or_artifact_digest: string;
   target_project_id?: PluginProjectId;
   expected_project_revision?: number;
+}
+
+export interface SharePluginRequest {
+  project_id: PluginProjectId;
+  expected_project_revision: number;
+  source: 'ready_candidate' | 'current_mount';
+  candidate_id?: PluginCandidateId;
+  expected_candidate_digest?: string;
+  mount_id?: PluginMountId;
+  expected_mount_revision?: number;
+  expected_target_digest?: string;
+  destination_path: string;
+  include_source: boolean;
 }
 
 export interface BuildPluginProjectRequest {

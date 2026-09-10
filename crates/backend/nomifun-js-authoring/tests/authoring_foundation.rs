@@ -110,6 +110,16 @@ fn javascript_and_typescript_scaffolds_are_distinct_fixed_inputs() {
             .unwrap()
             .contains("ActivationContext")
     );
+    let sdk = fs::read_to_string(
+        typescript
+            .project()
+            .source_root()
+            .join("nomifun-plugin-sdk.d.ts"),
+    )
+    .unwrap();
+    assert!(sdk.contains("type PluginActivationContext"));
+    assert!(sdk.contains("resolve(slotKey: string): Promise<string>"));
+    assert!(sdk.contains("compareAndSwap"));
 }
 
 #[test]

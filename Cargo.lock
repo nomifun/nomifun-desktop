@@ -7002,6 +7002,7 @@ dependencies = [
  "nomifun-js-authoring",
  "nomifun-js-host",
  "nomifun-plugin-platform",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
