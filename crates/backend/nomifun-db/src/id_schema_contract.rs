@@ -977,6 +977,7 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     text_ref!("installation_identity", "owner_user_id" => "users", "user_id", false, "idx_installation_identity_owner_user_id", Restrict),
     text_ref!("plugin_projects", "owner_user_id" => "users", "user_id", false, "idx_plugin_projects_owner_user_id", Cascade),
     text_ref!("plugin_projects", "linked_mount_id" => "plugin_mounts", "mount_id", true, "idx_plugin_projects_linked_mount_id", SetNull),
+    text_ref!("plugin_projects", "auto_apply_mount_id" => "plugin_mounts", "mount_id", true, "idx_plugin_projects_auto_apply_mount_id", SetNull),
     text_ref!("plugin_projects", "ready_candidate_id" => "plugin_ready_candidates", "candidate_id", true, "idx_plugin_projects_ready_candidate_id", SetNull),
     text_ref!("plugin_dependency_mutation_intents", "project_id" => "plugin_projects", "project_id", false, "idx_plugin_dependency_mutation_intents_project_id", Restrict),
     text_ref!("plugin_dependency_mutation_intents", "owner_user_id" => "users", "user_id", false, "idx_plugin_dependency_mutation_intents_owner_user_id", Cascade),
@@ -1895,6 +1896,14 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
             ],
         ),
         (
+            "trg_plugin_auto_apply_dependency_fence",
+            &[
+                "BEFORE UPDATE OF APPLY_MODE, AUTO_APPLY_MOUNT_ID, AUTO_APPLY_AUTHORIZATION_REVISION, AUTO_APPLY_AUTHORIZED_AT ON PLUGIN_PROJECTS",
+                "FROM PLUGIN_DEPENDENCY_MUTATION_INTENTS INTENT",
+                "RAISE(ABORT, 'PLUGIN AUTO APPLY AUTHORIZATION IS FENCED BY A DEPENDENCY MUTATION')",
+            ],
+        ),
+        (
             "trg_plugin_candidate_receipts_exact_insert",
             &[
                 "BEFORE INSERT ON PLUGIN_CANDIDATE_TEST_RECEIPTS",
@@ -2058,6 +2067,15 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
             ],
         ),
         (
+            "trg_plugin_mount_revision_authorization_guard",
+            &[
+                "BEFORE INSERT ON PLUGIN_MOUNT_REVISIONS",
+                "NEW.APPLY_AUTHORIZATION_KIND = 'STANDING_AUTO'",
+                "PROJECT.AUTO_APPLY_AUTHORIZATION_REVISION = NEW.AUTO_APPLY_AUTHORIZATION_REVISION",
+                "RAISE(ABORT, 'PLUGIN MOUNT REVISION REQUIRES AN EXACT APPLY AUTHORIZATION')",
+            ],
+        ),
+        (
             "trg_plugin_mount_revision_insert_guard",
             &[
                 "BEFORE INSERT ON PLUGIN_MOUNT_REVISIONS",
@@ -2093,6 +2111,30 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
                 "BEFORE UPDATE OF UPDATED_AT ON PLUGIN_MOUNTS",
                 "NEW.UPDATED_AT < OLD.UPDATED_AT",
                 "RAISE(ABORT, 'PLUGIN MOUNT UPDATED_AT CANNOT MOVE BACKWARDS')",
+            ],
+        ),
+        (
+            "trg_plugin_project_auto_apply_insert_guard",
+            &[
+                "BEFORE INSERT ON PLUGIN_PROJECTS",
+                "NEW.APPLY_MODE = 'ASK_BEFORE_APPLY'",
+                "RAISE(ABORT, 'PLUGIN PROJECT MUST BEGIN WITHOUT STANDING AUTO APPLY AUTHORIZATION')",
+            ],
+        ),
+        (
+            "trg_plugin_project_auto_apply_revision_guard",
+            &[
+                "BEFORE UPDATE OF APPLY_MODE, AUTO_APPLY_MOUNT_ID, AUTO_APPLY_AUTHORIZATION_REVISION, AUTO_APPLY_AUTHORIZED_AT ON PLUGIN_PROJECTS",
+                "NEW.AUTO_APPLY_AUTHORIZATION_REVISION <> OLD.AUTO_APPLY_AUTHORIZATION_REVISION + 1",
+                "RAISE(ABORT, 'PLUGIN AUTO APPLY AUTHORIZATION REVISION MUST ADVANCE EXACTLY ONCE')",
+            ],
+        ),
+        (
+            "trg_plugin_project_auto_apply_update_guard",
+            &[
+                "BEFORE UPDATE OF APPLY_MODE, AUTO_APPLY_MOUNT_ID, AUTO_APPLY_AUTHORIZATION_REVISION, AUTO_APPLY_AUTHORIZED_AT, LINKED_MOUNT_ID, MANAGED_SOURCE_PATH, SOURCE_HEAD_DIGEST, DEPENDENCY_LOCK_DIGEST ON PLUGIN_PROJECTS",
+                "NEW.AUTO_APPLY_MOUNT_ID = NEW.LINKED_MOUNT_ID",
+                "RAISE(ABORT, 'PLUGIN AUTO APPLY AUTHORIZATION HAS AN INVALID PROJECT SHAPE')",
             ],
         ),
         (

@@ -24,6 +24,7 @@ import {
   pluginMountActions,
   projectDeleteAvailable,
   restorePluginRequest,
+  setPluginAutoApplyRequest,
   setPluginEnabledRequest,
   testPluginCandidateRequest,
   uninstallPluginRequest,
@@ -152,9 +153,11 @@ describe('Plugin Workbench lifecycle model', () => {
         project_id: projectId,
         project_revision: 1,
         display_name: 'Example',
+        linked_mount_id: mountId,
         source_state: 'editable',
         build_generation: 1,
         apply_mode: 'ask_before_apply',
+        auto_apply_authorization_revision: 0,
         updated_at_ms: 1,
       },
       source_snapshot_digest: 'f'.repeat(64),
@@ -209,5 +212,20 @@ describe('Plugin Workbench lifecycle model', () => {
       expected_ready_candidate_digest: '2'.repeat(64),
     });
     expect(projectDeleteAvailable(project)).toBe(true);
+    expect(setPluginAutoApplyRequest(project, true, detail('enabled').summary)).toEqual({
+      project_id: projectId,
+      expected_project_revision: 1,
+      expected_build_generation: 1,
+      linked_mount_id: mountId,
+      expected_linked_mount_revision: 9,
+      expected_linked_target_digest: 'a'.repeat(64),
+      apply_mode: 'auto_compatible_when_idle',
+    });
+    expect(setPluginAutoApplyRequest(project, false)).toEqual({
+      project_id: projectId,
+      expected_project_revision: 1,
+      expected_build_generation: 1,
+      apply_mode: 'ask_before_apply',
+    });
   });
 });

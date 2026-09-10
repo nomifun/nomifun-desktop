@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use nomifun_agent_contracts::{
@@ -12,7 +13,7 @@ use nomifun_agent_contracts::{
     JAVASCRIPT_SDK_CONTRACT_VERSION, JavaScriptBuildProfile, JavaScriptEntrypointMetadata,
     LocalizedMetadata, MINIMUM_NODE_MAJOR, NodeRuntimeFingerprint, NodeRuntimeSourceKind,
     PLUGIN_N1_SCHEMA_VERSION, PLUGIN_PACKAGE_PROFILE_VERSION, PackageContributions, PackageId,
-    PackageManifest, PlatformConstraint, PluginAutoApplyEligibility, PluginCompatibility,
+    PackageManifest, PlatformConstraint, PluginCompatibility,
     PluginContractChangeKind, PluginContractDiff, PluginHostCommitFence,
     PluginPackageArtifactV1, PluginPackageV1Manifest, RuntimeTarget, StrictJsonValue,
     VersionString,
@@ -22,8 +23,9 @@ use nomifun_api_types::{
     ConfigurePluginRequest, CreatePluginProjectRequest, DeletePluginDataRequest,
     DeletePluginProjectRequest, DiscardPluginCandidateRequest,
     ImportPluginRequest, PluginImportKindDto, PluginLifecycleDto, PluginProjectSourceStateDto,
-    PluginCandidateOriginDto, RestorePluginPreviousRequest,
-    SetPluginEnabledRequest, TestPluginCandidateRequest, UninstallPluginRequest,
+    PluginApplyModeDto, PluginCandidateOriginDto, RestorePluginPreviousRequest,
+    SetPluginAutoApplyRequest, SetPluginEnabledRequest, TestPluginCandidateRequest,
+    UninstallPluginRequest,
     UpdatePluginDependenciesRequest,
 };
 use nomifun_db::{
@@ -36,7 +38,8 @@ use nomifun_db::{
     PluginReadyCandidateRow, ProductOperationRow,
     RecordPluginCandidateTestReceiptParams, RecordPluginReadyCandidateParams,
     ReplacePluginCredentialBindingsParams,
-    RestorePluginMountParams, StartProductOperationParams, UninstallPluginMountParams,
+    RestorePluginMountParams, SetPluginAutoApplyParams, StartProductOperationParams,
+    UninstallPluginMountParams,
     UpdatePluginMountConfigParams, UpdatePluginProjectSourceParams,
 };
 use nomifun_js_authoring::{
@@ -47,7 +50,8 @@ use nomifun_plugin_service::{
     AppliedPluginSource, ApplyPluginSourceEditInput, ApplyPluginSourceEditRequest,
     BuildOutput, CandidateTestOutput, ConfigureInput, CreateProjectInput,
     CreatedPluginSource, ImportedPluginArtifact, LinkPluginProjectParams,
-    PluginApplicationService, PluginArtifactStorePort, PluginBuildExecutor,
+    PluginApplicationService, PluginArtifactStorePort, PluginAutoApplyCommitPermit,
+    PluginAutoApplyPermit, PluginBuildExecutor,
     PluginCandidateTestExecutor, PluginHostCoordinator, PluginInventory,
     PluginMountDataStore, PluginOperationCancellation, PluginRegistryPublisher,
     PluginRepository, PluginServiceDependencies, PluginServiceError,
@@ -72,6 +76,7 @@ struct FakeState {
     credentials: BTreeMap<String, PluginCredentialBindingSnapshot>,
     operations: Vec<ProductOperationRow>,
     dependency_intents: Vec<PluginDependencyMutationIntentRow>,
+    last_auto_apply_authorization_revision: Option<i64>,
 }
 
 #[derive(Default)]
@@ -115,6 +120,13 @@ impl FakeRepository {
             receipts: state.receipts.clone(),
             operations: state.operations.clone(),
         }
+    }
+
+    async fn last_auto_apply_authorization_revision(&self) -> Option<i64> {
+        self.state
+            .lock()
+            .await
+            .last_auto_apply_authorization_revision
     }
 }
 
@@ -268,6 +280,10 @@ impl PluginRepository for FakeRepository {
             package_id: params.package_id.clone(),
             display_name: params.display_name.clone(),
             description: params.description.clone(),
+            apply_mode: "ask_before_apply".into(),
+            auto_apply_mount_id: None,
+            auto_apply_authorization_revision: 0,
+            auto_apply_authorized_at: None,
             managed_source_path: params.managed_source_path.clone(),
             source_head_digest: params.source_head_digest.clone(),
             dependency_lock_digest: params.dependency_lock_digest.clone(),
@@ -421,6 +437,36 @@ impl PluginRepository for FakeRepository {
             .iter()
             .find(|intent| intent.project_id == project_id)
             .cloned())
+    }
+
+    async fn set_auto_apply(
+        &self,
+        params: &SetPluginAutoApplyParams,
+    ) -> Result<PluginProjectRow, PluginServiceError> {
+        let mut state = self.state.lock().await;
+        let project = state
+            .projects
+            .iter_mut()
+            .find(|project| project.project_id == params.project_id)
+            .ok_or_else(|| PluginServiceError::not_found("project"))?;
+        if project.owner_user_id != params.owner_user_id
+            || project.updated_at != params.expected_project_updated_at
+            || project.build_generation != params.expected_build_generation
+        {
+            return Err(PluginServiceError::stale("auto Apply Project CAS"));
+        }
+        project.auto_apply_authorization_revision += 1;
+        project.updated_at = params.updated_at.max(project.updated_at + 1);
+        if params.enabled {
+            project.apply_mode = "auto_compatible_when_idle".into();
+            project.auto_apply_mount_id = params.linked_mount_id.clone();
+            project.auto_apply_authorized_at = Some(project.updated_at);
+        } else {
+            project.apply_mode = "ask_before_apply".into();
+            project.auto_apply_mount_id = None;
+            project.auto_apply_authorized_at = None;
+        }
+        Ok(project.clone())
     }
 
     async fn delete_project_cas(
@@ -678,6 +724,8 @@ impl PluginRepository for FakeRepository {
         params: &ApplyPluginCandidateParams,
     ) -> Result<PluginMountRow, PluginServiceError> {
         let mut state = self.state.lock().await;
+        state.last_auto_apply_authorization_revision =
+            params.auto_apply_authorization_revision;
         let candidate = state
             .candidates
             .iter()
@@ -732,9 +780,13 @@ impl PluginRepository for FakeRepository {
         let result = mount.clone();
         state.projects[project_index].linked_mount_id = Some(result.mount_id.clone());
         state.projects[project_index].ready_candidate_id = None;
+        state.projects[project_index].updated_at = params.applied_at;
         state
             .candidates
             .retain(|existing| existing.candidate_id != candidate.candidate_id);
+        state
+            .receipts
+            .retain(|receipt| receipt.candidate_id != candidate.candidate_id);
         Ok(result)
     }
 
@@ -1085,6 +1137,12 @@ struct FakeHost;
 
 #[async_trait]
 impl PluginHostCoordinator for FakeHost {
+    async fn committed_runtime_fingerprint(
+        &self,
+    ) -> Result<Option<NodeRuntimeFingerprint>, PluginServiceError> {
+        Ok(Some(runtime()))
+    }
+
     async fn commit_fence(
         &self,
         _mount_id: &str,
@@ -1092,6 +1150,60 @@ impl PluginHostCoordinator for FakeHost {
         Ok(PluginHostCommitFence::NotResident)
     }
 
+    async fn auto_apply_commit_permit(
+        &self,
+        _mount_id: &str,
+    ) -> Result<PluginAutoApplyCommitPermit, PluginServiceError> {
+        Ok(PluginAutoApplyCommitPermit::Ready(
+            PluginAutoApplyPermit::new(
+                _mount_id,
+                PluginHostCommitFence::NotResident,
+                runtime(),
+                (),
+            ),
+        ))
+    }
+}
+
+struct SwitchableAutoHost {
+    busy: AtomicBool,
+}
+
+#[async_trait]
+impl PluginHostCoordinator for SwitchableAutoHost {
+    async fn committed_runtime_fingerprint(
+        &self,
+    ) -> Result<Option<NodeRuntimeFingerprint>, PluginServiceError> {
+        Ok(Some(runtime()))
+    }
+
+    async fn commit_fence(
+        &self,
+        _mount_id: &str,
+    ) -> Result<PluginHostCommitFence, PluginServiceError> {
+        panic!("busy auto Apply must not enter the manual Host stop path")
+    }
+
+    async fn auto_apply_commit_permit(
+        &self,
+        _mount_id: &str,
+    ) -> Result<PluginAutoApplyCommitPermit, PluginServiceError> {
+        if self.busy.load(Ordering::Acquire) {
+            Ok(PluginAutoApplyCommitPermit::Busy)
+        } else {
+            Ok(PluginAutoApplyCommitPermit::Ready(
+                PluginAutoApplyPermit::new(
+                    _mount_id,
+                    PluginHostCommitFence::ResidentFenced {
+                        host_generation: 1,
+                        fence_token_digest: "f".repeat(64).into(),
+                    },
+                    runtime(),
+                    (),
+                ),
+            ))
+        }
+    }
 }
 
 struct UnavailableRuntimeHost;
@@ -1700,6 +1812,10 @@ fn project_row(
         package_id: "example.csv".into(),
         display_name: "CSV Tools".into(),
         description: "Read CSV files.".into(),
+        apply_mode: "ask_before_apply".into(),
+        auto_apply_mount_id: None,
+        auto_apply_authorization_revision: 0,
+        auto_apply_authorized_at: None,
         managed_source_path: source.map(str::to_owned),
         source_head_digest: source.map(|_| "c".repeat(64)),
         dependency_lock_digest: source.map(|_| "d".repeat(64)),
@@ -2674,50 +2790,199 @@ async fn operation_cancel_accepts_a_builder_that_already_persisted_canceled() {
 }
 
 #[tokio::test]
-async fn auto_apply_requires_every_explicit_eligibility_predicate() {
+async fn standing_auto_apply_is_persisted_and_applies_only_after_matching_test() {
     let temp = tempfile::tempdir().unwrap();
     let repo = Arc::new(FakeRepository::default());
-    let service = service(
-        repo,
+    let old = artifact(b"export const plugin = 1;\n", "1.0.0");
+    let new = artifact(b"export const plugin = 2;\n", "1.0.0");
+    let old_digest = old.artifact_digest.as_ref().to_owned();
+    let new_digest = new.artifact_digest.as_ref().to_owned();
+    let mut project = project_row("project-auto", "user-1", Some("C:\\source"), Some("mount-auto"));
+    project.dependency_lock_digest = Some("b".repeat(64));
+    repo.insert_project(project.clone()).await;
+    repo.insert_artifact(artifact_row(&old, "old")).await;
+    repo.insert_artifact(artifact_row(&new, "new")).await;
+    repo.insert_mount(mount_row(
+        "mount-auto",
+        "example.csv",
+        Some(old_digest.clone()),
+        1,
+    ))
+    .await;
+    let mut candidate = candidate_row(
+        "project-auto",
+        &new,
+        Some(old_digest.clone()),
+        project.build_generation,
+    );
+    candidate.dependency_lock_digest = Some("b".repeat(64));
+    repo.insert_candidate(candidate.clone()).await;
+    let source_store = Arc::new(FakeSourceStore::default());
+    *source_store.dependency_state.lock().await = Some(
+        DependencyState::new(
+            AuthoringDigestHex::from("c".repeat(64)),
+            AuthoringDigestHex::from("b".repeat(64)),
+            BTreeMap::new(),
+        )
+        .unwrap(),
+    );
+    let service = service_with_host(
+        Arc::clone(&repo),
         Arc::new(QueueArtifactStore::new(Vec::new())),
         no_builder(),
-        &temp,
+        source_store,
+        Arc::new(FakeOperationCancellation),
+        Arc::new(FakeHost),
     );
-    let request = ApplyPluginCandidateRequest {
-        project_id: "missing".into(),
-        expected_project_revision: 1,
-        expected_build_generation: 1,
-        candidate_id: "missing".into(),
-        expected_candidate_digest: "0".repeat(64),
-        target: ApplyPluginTargetDto::InitialInstall {
-            expected_library_revision: 0,
-        },
-        allow_breaking: false,
-        acknowledge_test_warning: false,
-    };
-    let eligibility = PluginAutoApplyEligibility {
-        standing_authorization_matches: false,
-        linked_mount_matches: false,
-        base_target_matches: false,
-        managed_source_matches_project_head: false,
-        matching_local_test_passed: false,
-        contribution_contracts_unchanged: false,
-        config_schema_unchanged: false,
-        credential_slots_unchanged: false,
-        resource_effect_contracts_unchanged: false,
-        runtime_requirement_unchanged: false,
-        dependency_lock_unchanged: false,
-        host_sdk_contract_unchanged: false,
-        supported_targets_unchanged: false,
-        static_validation_passed: false,
-        no_unknown_facts: false,
-    };
+    let authorized = service
+        .set_auto_apply(
+            "user-1",
+            SetPluginAutoApplyRequest {
+                project_id: project.project_id.clone(),
+                expected_project_revision: project.updated_at as u64,
+                expected_build_generation: project.build_generation as u64,
+                linked_mount_id: Some("mount-auto".into()),
+                expected_linked_mount_revision: Some(1),
+                expected_linked_target_digest: Some(old_digest.clone()),
+                apply_mode: PluginApplyModeDto::AutoCompatibleWhenIdle,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        authorized.summary.apply_mode,
+        PluginApplyModeDto::AutoCompatibleWhenIdle
+    );
+    assert_eq!(authorized.summary.auto_apply_authorization_revision, 1);
+    let authorized_ready = authorized
+        .ready
+        .as_ref()
+        .expect("authorization alone must not bypass Candidate Test");
+    assert!(!authorized_ready.impact.can_auto_apply);
     assert!(
-        service
-            .auto_apply_candidate("user-1", request, 1, eligibility)
-            .await
-            .is_err()
+        authorized_ready
+            .impact
+            .blocking_reasons
+            .contains(&"source_or_test_changed".to_owned())
     );
+
+    let tested = service
+        .test_candidate(
+            "user-1",
+            TestPluginCandidateRequest {
+                project_id: project.project_id,
+                expected_project_revision: authorized.summary.project_revision,
+                expected_build_generation: authorized.summary.build_generation,
+                candidate_id: candidate.candidate_id,
+                expected_candidate_digest: candidate.candidate_digest,
+                expected_config_revision: 1,
+                expected_credential_bindings_revision: 0,
+                resolved_test_input_digest: "9".repeat(64),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(tested.ready.is_none());
+    let inventory = repo.snapshot().await;
+    assert_eq!(
+        inventory.mounts[0].current_artifact_digest.as_deref(),
+        Some(new_digest.as_str())
+    );
+    assert_eq!(inventory.mounts[0].previous_artifact_digest.as_deref(), Some(old_digest.as_str()));
+    assert_eq!(inventory.projects[0].apply_mode, "auto_compatible_when_idle");
+    assert_eq!(inventory.projects[0].auto_apply_authorization_revision, 1);
+    assert_eq!(repo.last_auto_apply_authorization_revision().await, Some(1));
+    drop(temp);
+}
+
+#[tokio::test]
+async fn resident_busy_auto_apply_keeps_ready_then_quiescent_event_applies() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = Arc::new(FakeRepository::default());
+    let old = artifact(b"export const plugin = 1;\n", "1.0.0");
+    let new = artifact(b"export const plugin = 2;\n", "1.0.0");
+    let old_digest = old.artifact_digest.as_ref().to_owned();
+    let new_digest = new.artifact_digest.as_ref().to_owned();
+    let mut project = project_row("project-busy", "user-1", Some("C:\\source"), Some("mount-busy"));
+    project.dependency_lock_digest = Some("b".repeat(64));
+    project.apply_mode = "auto_compatible_when_idle".into();
+    project.auto_apply_mount_id = Some("mount-busy".into());
+    project.auto_apply_authorization_revision = 1;
+    project.auto_apply_authorized_at = Some(6);
+    repo.insert_project(project.clone()).await;
+    repo.insert_artifact(artifact_row(&old, "old")).await;
+    repo.insert_artifact(artifact_row(&new, "new")).await;
+    repo.insert_mount(mount_row(
+        "mount-busy",
+        "example.csv",
+        Some(old_digest.clone()),
+        1,
+    ))
+    .await;
+    let mut candidate = candidate_row(
+        "project-busy",
+        &new,
+        Some(old_digest.clone()),
+        project.build_generation,
+    );
+    candidate.dependency_lock_digest = Some("b".repeat(64));
+    repo.insert_candidate(candidate.clone()).await;
+    let source_store = Arc::new(FakeSourceStore::default());
+    *source_store.dependency_state.lock().await = Some(
+        DependencyState::new(
+            AuthoringDigestHex::from("c".repeat(64)),
+            AuthoringDigestHex::from("b".repeat(64)),
+            BTreeMap::new(),
+        )
+        .unwrap(),
+    );
+    let host = Arc::new(SwitchableAutoHost {
+        busy: AtomicBool::new(true),
+    });
+    let service = service_with_host(
+        Arc::clone(&repo),
+        Arc::new(QueueArtifactStore::new(Vec::new())),
+        no_builder(),
+        source_store,
+        Arc::new(FakeOperationCancellation),
+        host.clone(),
+    );
+
+    let tested = service
+        .test_candidate(
+            "user-1",
+            TestPluginCandidateRequest {
+                project_id: project.project_id,
+                expected_project_revision: project.updated_at as u64,
+                expected_build_generation: project.build_generation as u64,
+                candidate_id: candidate.candidate_id,
+                expected_candidate_digest: candidate.candidate_digest,
+                expected_config_revision: 1,
+                expected_credential_bindings_revision: 0,
+                resolved_test_input_digest: "9".repeat(64),
+            },
+        )
+        .await
+        .unwrap();
+    let ready = tested.ready.expect("busy Host must preserve Ready Candidate");
+    assert!(
+        ready.impact.can_auto_apply,
+        "unexpected blockers: {:?}",
+        ready.impact.blocking_reasons
+    );
+    assert!(ready.impact.blocking_reasons.is_empty());
+    let inventory = repo.snapshot().await;
+    assert_eq!(inventory.mounts[0].current_artifact_digest.as_deref(), Some(old_digest.as_str()));
+    assert!(inventory.mounts[0].previous_artifact_digest.is_none());
+    assert_eq!(inventory.candidates.len(), 1);
+    host.busy.store(false, Ordering::Release);
+    service.reconcile_auto_applies("user-1").await.unwrap();
+    let inventory = repo.snapshot().await;
+    assert_eq!(inventory.mounts[0].current_artifact_digest.as_deref(), Some(new_digest.as_str()));
+    assert_eq!(inventory.mounts[0].previous_artifact_digest.as_deref(), Some(old_digest.as_str()));
+    assert!(inventory.candidates.is_empty());
+    assert_eq!(repo.last_auto_apply_authorization_revision().await, Some(1));
+    drop(temp);
 }
 
 #[tokio::test]

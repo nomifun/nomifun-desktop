@@ -49,6 +49,7 @@ import {
   pluginLoadFailure,
   restorePluginRequest,
   retryPluginRequest,
+  setPluginAutoApplyRequest,
   setPluginEnabledRequest,
   testPluginCandidateRequest,
   uninstallPluginRequest,
@@ -502,6 +503,65 @@ const PluginWorkbenchPage: React.FC = () => {
     [message, projectBusyAction, refreshLibrary, t]
   );
 
+  const handleSetAutoApply = useCallback(
+    (enabled: boolean) => {
+      if (!projectDetail || projectBusyAction) return;
+      const execute = async () => {
+        const mount = linkedProjectMount;
+        if (enabled && (!mount?.current || !projectDetail.summary.linked_mount_id)) {
+          setProjectMutationFailure({
+            kind: 'resource',
+            message: t('pluginWorkbench.autoApply.linkedMountUnavailable'),
+          });
+          return;
+        }
+        const request = setPluginAutoApplyRequest(projectDetail, enabled, mount);
+        setProjectBusyAction('auto_apply');
+        setProjectMutationFailure(null);
+        try {
+          const next = await ipcBridge.plugins.setAutoApply.invoke(request);
+          setProjectDetail(next);
+          await refreshLibrary();
+          message.success(
+            t(
+              enabled
+                ? projectDetail.ready && !next.ready
+                  ? 'pluginWorkbench.messages.autoApplied'
+                  : next.ready
+                    ? 'pluginWorkbench.messages.autoApplyWaiting'
+                    : 'pluginWorkbench.messages.autoApplyEnabled'
+                : 'pluginWorkbench.messages.autoApplyDisabled'
+            )
+          );
+        } catch (error) {
+          console.error('[plugins] updating auto Apply authorization failed', error);
+          setProjectMutationFailure(pluginLoadFailure(error, 'resource'));
+        } finally {
+          setProjectBusyAction(null);
+        }
+      };
+      if (enabled && projectDetail.summary.apply_mode !== 'auto_compatible_when_idle') {
+        Modal.confirm({
+          title: t('pluginWorkbench.autoApply.confirmTitle'),
+          content: t('pluginWorkbench.autoApply.confirmBody'),
+          okText: t('pluginWorkbench.actions.enableAutoApply'),
+          cancelText: t('pluginWorkbench.actions.cancel'),
+          onOk: execute,
+        });
+      } else {
+        void execute();
+      }
+    },
+    [
+      linkedProjectMount,
+      message,
+      projectBusyAction,
+      projectDetail,
+      refreshLibrary,
+      t,
+    ]
+  );
+
   const handleTestCandidate = useCallback(
     async (resolvedTestInputDigest: string) => {
       if (!projectDetail || projectBusyAction) return;
@@ -524,7 +584,15 @@ const PluginWorkbenchPage: React.FC = () => {
         setTestDialogVisible(false);
         setProjectDetail(next);
         await refreshLibrary();
-        message.success(t('pluginWorkbench.messages.candidateTested'));
+        message.success(
+          t(
+            projectDetail.summary.apply_mode === 'auto_compatible_when_idle' &&
+              projectDetail.ready &&
+              !next.ready
+              ? 'pluginWorkbench.messages.autoApplied'
+              : 'pluginWorkbench.messages.candidateTested'
+          )
+        );
       } catch (error) {
         console.error('[plugins] Candidate Test failed', error);
         setProjectMutationFailure(pluginLoadFailure(error, 'resource'));
@@ -839,6 +907,7 @@ const PluginWorkbenchPage: React.FC = () => {
                   setProjectMutationFailure(null);
                   setDependencyDialogVisible(true);
                 }}
+                onSetAutoApply={handleSetAutoApply}
                 onTest={() => setTestDialogVisible(true)}
                 onApply={() => setApplyDialogVisible(true)}
                 onDelete={handleDeleteProject}

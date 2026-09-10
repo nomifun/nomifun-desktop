@@ -189,6 +189,43 @@ impl RuntimeBoundExtensionHost {
             Err(error) => Err(error),
         }
     }
+
+    pub(crate) async fn try_auto_apply_fence_for_mount(
+        &self,
+        mount_id: &PluginMountId,
+    ) -> Result<Option<PluginHostCommitFence>, JavaScriptHostError> {
+        if self.state.lock().await.is_none() {
+            return Ok(Some(PluginHostCommitFence::NotResident));
+        }
+        let lease = self
+            .runtime
+            .acquire_use(JavaScriptWorkKind::SharedExtensionHost)
+            .await
+            .map_err(|error| JavaScriptHostError::RuntimeVerification(error.to_string()))?;
+        let host = {
+            let state = self.state.lock().await;
+            let Some(bound) = state.as_ref() else {
+                return Ok(Some(PluginHostCommitFence::NotResident));
+            };
+            if bound.runtime != *lease.runtime() {
+                return Err(JavaScriptHostError::RuntimeVerification(
+                    "shared Host Runtime differs from the committed selection".to_owned(),
+                ));
+            }
+            Arc::clone(&bound.supervisor)
+        };
+        match host.commit_fence_for_mount(mount_id).await {
+            Ok(fence) => Ok(Some(fence)),
+            Err(JavaScriptHostError::NotQuiescent { generation }) => {
+                match host.stop_generation(generation).await {
+                    Ok(fence) => Ok(Some(fence)),
+                    Err(JavaScriptHostError::NotQuiescent { .. }) => Ok(None),
+                    Err(error) => Err(error),
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
 }
 
 #[async_trait]

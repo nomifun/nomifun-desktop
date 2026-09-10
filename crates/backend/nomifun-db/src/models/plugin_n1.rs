@@ -21,6 +21,10 @@ pub struct PluginProjectRow {
     pub package_id: String,
     pub display_name: String,
     pub description: String,
+    pub apply_mode: String,
+    pub auto_apply_mount_id: Option<String>,
+    pub auto_apply_authorization_revision: i64,
+    pub auto_apply_authorized_at: Option<i64>,
     pub managed_source_path: Option<String>,
     pub source_head_digest: Option<String>,
     pub dependency_lock_digest: Option<String>,
@@ -121,6 +125,8 @@ pub struct PluginMountRevisionRow {
     pub candidate_key: String,
     pub candidate_digest: String,
     pub base_target_digest: Option<String>,
+    pub apply_authorization_kind: String,
+    pub auto_apply_authorization_revision: Option<i64>,
     pub applied_at: i64,
 }
 

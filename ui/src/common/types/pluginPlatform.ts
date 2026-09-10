@@ -89,6 +89,7 @@ export interface PluginProjectSummary {
   build_generation: number;
   ready_candidate?: PluginCandidateRef;
   apply_mode: PluginApplyMode;
+  auto_apply_authorization_revision: number;
   updated_at_ms: number;
 }
 
@@ -284,6 +285,16 @@ export interface UpdatePluginDependenciesRequest {
   expected_source_snapshot_digest: string;
   expected_dependency_lock_digest: string;
   dependencies: Record<string, string>;
+}
+
+export interface SetPluginAutoApplyRequest {
+  project_id: PluginProjectId;
+  expected_project_revision: number;
+  expected_build_generation: number;
+  linked_mount_id?: PluginMountId;
+  expected_linked_mount_revision?: number;
+  expected_linked_target_digest?: string;
+  apply_mode: PluginApplyMode;
 }
 
 export interface TestPluginCandidateRequest {

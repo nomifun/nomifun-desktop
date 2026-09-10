@@ -77,6 +77,19 @@ pub struct AbortPluginDependencyMutationParams {
 }
 
 #[derive(Debug, Clone)]
+pub struct SetPluginAutoApplyParams {
+    pub project_id: String,
+    pub owner_user_id: String,
+    pub expected_project_updated_at: i64,
+    pub expected_build_generation: i64,
+    pub linked_mount_id: Option<String>,
+    pub expected_linked_mount_revision: Option<i64>,
+    pub expected_linked_target_digest: Option<String>,
+    pub enabled: bool,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone)]
 pub struct DeletePluginProjectParams {
     pub project_id: String,
     pub owner_user_id: String,
@@ -158,6 +171,7 @@ pub struct ApplyPluginCandidateParams {
     pub new_data_dir_path: Option<String>,
     pub config_schema_digest: String,
     pub initial_config: Value,
+    pub auto_apply_authorization_revision: Option<i64>,
     pub applied_at: i64,
 }
 
@@ -279,6 +293,11 @@ pub trait IPluginN1Repository: Send + Sync {
         &self,
         project_id: &str,
     ) -> Result<Option<PluginDependencyMutationIntentRow>, DbError>;
+
+    async fn set_auto_apply(
+        &self,
+        params: &SetPluginAutoApplyParams,
+    ) -> Result<PluginProjectRow, DbError>;
 
     async fn delete_project_cas(
         &self,

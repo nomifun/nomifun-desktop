@@ -258,6 +258,7 @@ pub struct PluginProjectSummaryDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ready_candidate: Option<PluginCandidateRefDto>,
     pub apply_mode: PluginApplyModeDto,
+    pub auto_apply_authorization_revision: u64,
     pub updated_at_ms: i64,
 }
 

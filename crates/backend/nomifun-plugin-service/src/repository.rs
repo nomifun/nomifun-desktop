@@ -8,7 +8,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use nomifun_agent_contracts::{
-    DigestHex, PluginMountId, PluginProjectId, RuntimeTarget, UserId,
+    DigestHex, NodeRuntimeFingerprint, PluginHostCommitFence, PluginMountId,
+    PluginProjectId, RuntimeTarget, UserId,
 };
 use nomifun_js_authoring::{
     AuthoringError, CancellationFlag, ContentAddressedNpmCache,
@@ -29,7 +30,7 @@ use nomifun_db::{
     ProductOperationRow, ProductOperationState,
     RecordPluginCandidateTestReceiptParams, RecordPluginReadyCandidateParams,
     ReplacePluginCredentialBindingsParams, RestorePluginMountParams, SqlitePluginN1Repository,
-    SqlitePool, StartProductOperationParams, UninstallPluginMountParams,
+    SetPluginAutoApplyParams, SqlitePool, StartProductOperationParams, UninstallPluginMountParams,
     UpdatePluginMountConfigParams, UpdatePluginProjectSourceParams,
 };
 use nomifun_js_host::{ExtensionHostSupervisor, JavaScriptHostError};
@@ -99,6 +100,10 @@ pub trait PluginRepository: Send + Sync {
         &self,
         project_id: &str,
     ) -> Result<Option<PluginDependencyMutationIntentRow>, PluginServiceError>;
+    async fn set_auto_apply(
+        &self,
+        params: &SetPluginAutoApplyParams,
+    ) -> Result<PluginProjectRow, PluginServiceError>;
     async fn delete_project_cas(
         &self,
         params: &DeletePluginProjectParams,
@@ -1147,10 +1152,63 @@ pub trait PluginHostCoordinator: Send + Sync {
         Ok(true)
     }
 
+    async fn committed_runtime_fingerprint(
+        &self,
+    ) -> Result<Option<NodeRuntimeFingerprint>, PluginServiceError> {
+        Ok(None)
+    }
+
     async fn commit_fence(
         &self,
         mount_id: &str,
     ) -> Result<nomifun_agent_contracts::PluginHostCommitFence, PluginServiceError>;
+
+    async fn auto_apply_commit_permit(
+        &self,
+        _mount_id: &str,
+    ) -> Result<PluginAutoApplyCommitPermit, PluginServiceError> {
+        Ok(PluginAutoApplyCommitPermit::Busy)
+    }
+}
+
+pub enum PluginAutoApplyCommitPermit {
+    Busy,
+    Ready(PluginAutoApplyPermit),
+}
+
+pub struct PluginAutoApplyPermit {
+    mount_id: String,
+    fence: PluginHostCommitFence,
+    runtime: NodeRuntimeFingerprint,
+    _runtime_lease: Box<dyn Send + Sync>,
+}
+
+impl PluginAutoApplyPermit {
+    pub fn new(
+        mount_id: impl Into<String>,
+        fence: PluginHostCommitFence,
+        runtime: NodeRuntimeFingerprint,
+        runtime_lease: impl Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            mount_id: mount_id.into(),
+            fence,
+            runtime,
+            _runtime_lease: Box::new(runtime_lease),
+        }
+    }
+
+    pub fn mount_id(&self) -> &str {
+        &self.mount_id
+    }
+
+    pub fn fence(&self) -> &PluginHostCommitFence {
+        &self.fence
+    }
+
+    pub fn runtime(&self) -> &NodeRuntimeFingerprint {
+        &self.runtime
+    }
 }
 
 pub struct SharedJsHostCoordinator {
@@ -1585,6 +1643,13 @@ impl PluginRepository for DbPluginRepositoryAdapter {
             .inner
             .get_dependency_mutation_intent(project_id)
             .await?)
+    }
+
+    async fn set_auto_apply(
+        &self,
+        params: &SetPluginAutoApplyParams,
+    ) -> Result<PluginProjectRow, PluginServiceError> {
+        Ok(self.inner.set_auto_apply(params).await?)
     }
 
     async fn delete_project_cas(

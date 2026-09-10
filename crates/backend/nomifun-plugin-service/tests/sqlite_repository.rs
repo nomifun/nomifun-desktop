@@ -138,6 +138,7 @@ async fn active_fixture() -> Fixture {
             new_data_dir_path: Some(format!("plugin-mount-data/{mount_id}")),
             config_schema_digest: digest('d'),
             initial_config: json!({}),
+            auto_apply_authorization_revision: None,
             applied_at: 15,
         })
         .await

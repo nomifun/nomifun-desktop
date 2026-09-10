@@ -23,6 +23,9 @@
 > Plugin Authoring 的 production npm registry adapter 已形成并通过真实 public npm
 > smoke；dependency request/lock 已接入 SQLite durable intent、filesystem journal、
 > exact finalize CAS、request cancellation 与 startup recovery，`N1-4-01` 已关闭。
+> 用户针对 exact linked Mount 的 `auto_compatible_when_idle` standing authorization、
+> Host-owned eligibility 重算、Runtime lease、resident quiescent fence 与 Apply audit
+> 已完成，`N1-4-02` 已关闭。
 > 当前 HEAD 的 0.7.6 NSIS 安装版基础 smoke 已通过；Plugin/MiniApp Candidate、
 > fault、产品验收和 macOS/Linux 外部验证仍未关闭。
 >
@@ -60,8 +63,8 @@
 
 | 分类 | 数量 | 项目 |
 | --- | ---: | --- |
-| 已关闭 | 23 | 当前表内已关闭的 W0/N1/M1 项，包含 `N1-4-01`、`N1-X-02`、`M1-0-01`、`M1-0-02-A`、`M1-0-02-B`、`M1-1-01`、`M1-1-02`、`M1-2-01` |
-| 正在实施 | 5 | `N1-1-01`、`N1-2-03`、`N1-4-02`、`N1-4-03`、`N1-U-01` |
+| 已关闭 | 24 | 当前表内已关闭的 W0/N1/M1 项，包含 `N1-4-01`、`N1-4-02`、`N1-X-02`、`M1-0-01`、`M1-0-02-A`、`M1-0-02-B`、`M1-1-01`、`M1-1-02`、`M1-2-01` |
+| 正在实施 | 4 | `N1-1-01`、`N1-2-03`、`N1-4-03`、`N1-U-01` |
 | 已解锁待领取 | 0 | 当前 Windows 主线无未领取的前置切片 |
 | 依赖阻塞 | 5 | `N1-V-01`、`M1-U-01`、`M1-V-01` 与最终 Windows 合流等 |
 | 外部原生 | 2 | `RC-MA-01`、`RC-LD-01` |
@@ -428,7 +431,7 @@
 | ID | 状态 | Owner/写集 | 目标 | 依赖 | 最小验证 |
 | --- | --- | --- | --- | --- | --- |
 | `N1-4-01` | closed | Authoring lane；`nomifun-js-authoring/**` | Source Store、JS/TS scaffold、pure-JS dependency exact lock、fixed packer/Build Host | `N1-0-02`,`N1-1-02`,`N1-2-01` | authoring 42 + public npm live smoke 1；production HTTPS registry/SRI/tar containment、全图 budgets、resolver/cache、共享 registry/build admission、static bundler/Node Host/Artifact admission/cancel、Chat Dev Source edit，以及 SQLite intent + filesystem journal + exact finalize/startup recovery 的 Project dependency mutation 均已通过 |
-| `N1-4-02` | in-progress | Plugin project lane | single Ready、Candidate Test、impact、manual/compatible-idle Apply、Discard、Retry/Restore | `N1-2-03`,`N1-3-01`,`N1-4-01` | Candidate discard 已完成；仍缺授权持久化 auto-apply、resident Host busy/quiescent 产品证据 |
+| `N1-4-02` | closed | Plugin project lane | single Ready、Candidate Test、impact、manual/compatible-idle Apply、Discard、Retry/Restore | `N1-2-03`,`N1-3-01`,`N1-4-01` | migration 085 持久授权/revision；Host-owned 15-predicate eligibility；Runtime lease + non-resident/resident quiescent fence；busy 保留 Ready、quiescent 原子 Apply；不可变 Mount revision 记录 manual/standing-auto 来源；DB 18、Service 31、App route 1、UI bridge/model 13 |
 | `N1-4-03` | in-progress | SDK/CLI lane | Plugin SDK、Share Bundle/prebuilt import/export、本地 CLI | `N1-4-02` | 当前 CLI 已覆盖 list/show/source-path/build/test/candidate show-discard-apply-restore/mount lifecycle；Share/Export 等未实现接口不虚构 |
 
 ## N1-X：旧 Extension 删除与产品 UI
@@ -437,7 +440,7 @@
 | --- | --- | --- | --- | --- | --- |
 | `N1-X-01` | closed | Skill lane；新 `nomifun-skill-library/**` | 把 `skill_service`、builtin skills、Skill market 从 `nomifun-extension` 抽为独立 owner | `W0-01` | `610b59007`；Skill Library 150 passed/2 ignored；Extension/消费者 checks passed |
 | `N1-X-02` | closed | demolition lane；旧 Extension 生产链 | 删除旧 Extension loader/registry/hub/hot reload/permissions/settings/webui/agent/theme 路径 | `N1-X-01`,`N1-3-03`,`N1-4-03` | `nomifun-extension` crate、旧 `/api/extensions/*`/Hub/生产消费者已物理清理；剩余仅历史删除合同、负向测试和新 JS Host 的历史命名 |
-| `N1-U-01` | in-progress | UI lane；新 `pages/plugins/**`、`pages/settings/RuntimeManager/**` | Plugin Library/Workshop/配置/诊断、Node Runtime Manager；MCP 页面只保留 MCP | `N1-2-03`,`N1-4-02` | Plugin/Runtime targeted tests 及 dependency bridge/dialog 9 tests、i18n/icons/production build 已通过；仍需 Desktop product/a11y/视觉走查 |
+| `N1-U-01` | in-progress | UI lane；新 `pages/plugins/**`、`pages/settings/RuntimeManager/**` | Plugin Library/Workshop/配置/诊断、Node Runtime Manager；MCP 页面只保留 MCP | `N1-2-03`,`N1-4-02` | Plugin/Runtime targeted tests、dependency dialog、auto-Apply bridge/model、i18n/icons/production build 已通过；仍需 Desktop product/a11y/视觉走查 |
 | `N1-V-01` | blocked | 集成 Owner | Windows N1 contract/integration/fault/product/NSIS candidate | 所有 N1 项 | authored JS/TS → Test → Apply → invoke → Restore |
 
 ## M1：Full-stack MiniApp
@@ -779,9 +782,8 @@ Extension 命中仅属于历史删除合同、负向 404 测试、通用语义�
    凭据未进入源码、argv、日志、fixture 或 Git。该 smoke 只证明 Nomi-core Provider
    链路，不替代 Plugin/MiniApp Candidate。
 5. 当前仍未关闭：`N1-1-01` 的安装版 Runtime switch/restart/fault 证据、
-   `N1-2-03` 的安装版 Plugin Build→Test→Apply→Invoke→Restore、`N1-4-02`
-   的 auto-apply authorization 与 resident Host
-   busy/quiescent 产品证据、`M1-U-01` 的真实 Tauri 产品/accessibility 走查、
+   `N1-2-03` 的安装版 Plugin Build→Test→Apply→Invoke→Restore、
+   `M1-U-01` 的真实 Tauri 产品/accessibility 走查、
    MiniApp callable 完整产品 E2E、`N1-V-01`、`M1-V-01` 和 `RC-WIN-01`。
 6. 当前生成的安装包只作为本机候选输入，尚未把未完成的产品/fault checks 伪装成
    Gate PASS；历史 `0.7.4` 安装包禁止复用。手机模式、macOS arm64 和 Linux
@@ -838,3 +840,37 @@ Extension 命中仅属于历史删除合同、负向 404 测试、通用语义�
    均通过；`check:i18n`、UI production build、contract generator check、定向 rustfmt
    与 `git diff --check` 通过。App 的非定向 integration test 编译仍会命中仓库既有缺失
    `tests/extension_e2e.rs`，本轮使用 `--lib` 精确执行并通过目标路由测试。
+
+## 2026-09-10 Plugin compatible-when-idle auto Apply 收口
+
+1. `N1-4-02` 已关闭。migration 085 把 `ask_before_apply |
+   auto_compatible_when_idle`、exact authorized Mount、单调 authorization revision 与
+   authorized time 写入 Plugin Project；Project 初始状态永远无授权，启用必须同时通过
+   owner、Project revision/Build generation、linked Mount revision/current digest 的
+   exact CAS，关闭授权只要求 Project CAS，Mount 故障时仍可撤销。
+2. eligibility 不再由调用者提交。Application service 在 owner linked-mutation lock 内
+   从 SQLite Project/Candidate/TestReceipt/Mount、immutable Artifact Store 和 committed
+   Runtime 重算合同冻结的 15 个 predicate，包含 authored Source/lock lineage、Candidate
+   base/current、完整 receipt/runtime digest、Contribution/Config/Credential/Resource/
+   Effect/Host SDK/Runtime/platform/dependency lock、静态校验和 unknown-facts fail-closed。
+   runtime-only、首次安装、Breaking、dependency-lock 变化和任一 stale/unknown 均保留
+   Ready 并转人工。
+3. 真正提交前取得持有到 DB commit 结束的 Runtime read lease；非 resident Mount 不启动
+   Node。resident Mount 使用 Host admission write fence 原子阻止新请求：有 in-flight/
+   queued 调用时返回 busy、保持 Ready 且绝不进入人工 stop/cancel；quiescent 后停止并
+   reap 整代，再由同一 SQLite transaction 轮换 current→previous、Candidate→current
+   并只清除 exact Ready/TestReceipt。下次真实 demand 才按新 current 冷启动。
+4. auto Apply 在匹配 Candidate Test 完成、用户启用/重试授权和 App 启动时事件驱动尝试，
+   不建设 polling updater。`plugin_mount_revisions` 的不可变记录新增
+   `manual_user_confirmation | standing_auto` 与 exact authorization revision，构成 Apply
+   审计；Desktop 在自动成功时给出非阻断通知并继续提供 Restore Previous。
+5. Desktop Workshop 已增加启用、关闭与“立即重试自动应用”入口。首次启用明确提示：
+   contract-compatible 不保证行为、费用、网络副作用或 dataDir 兼容，且连续 Apply 只
+   保留一代 previous。Candidate blocking reason 使用本地化分组，不向用户显示内部
+   predicate 字段名。
+6. 定向证据：DB Plugin repository 18（含持久授权、stale CAS、data-delete revoke、
+   auto audit）、ID/schema contract 20；Plugin Service 31，其中 auto Apply 2 覆盖
+   “授权但未 Test 不应用”、非 resident 自动应用、resident busy 保留 Ready、quiescent
+   事件后应用且从不进入 manual stop；真实 Node Host resident fence 1；App 组合路由 1；
+   UI bridge/model 13、dependency dialog 2、i18n 与 production build 通过。完整安装版
+   Build→Test→auto Apply→Invoke→Restore 仍属于 `N1-V-01`，没有提前记为 Candidate PASS。

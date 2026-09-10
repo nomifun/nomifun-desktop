@@ -1640,6 +1640,13 @@ Nomi-core Provider smoke 证据，不关闭 Plugin/MiniApp installed-app Candida
 继续由 DB/id-schema/backup 迁移策略决定，不在本 checkpoint 破坏性删除。
 
 当前仍未交付：安装版 Plugin Build→Test→Apply→Invoke→Restore、Runtime switch/
-restart/fault、完整 MiniApp callable 产品 E2E、auto-apply authorization persistence、
-resident Host busy/quiescent 产品证据、Desktop 产品/accessibility 走查和最终
+restart/fault、完整 MiniApp callable 产品 E2E、Desktop 产品/accessibility 走查和最终
 Windows cohort/release lock。手机模式及 macOS/Linux 原生验证继续不在本机范围内。
+
+后续 Windows 实施已完成 `auto_compatible_when_idle`：standing authorization 绑定
+exact linked Mount 并持久化单调 revision；Application service 从 authoritative
+Project/Candidate/TestReceipt/Artifact/Mount/Runtime 重算完整 eligibility，不接受调用者
+自报。提交期间同时持有 owner mutation lock、Runtime read lease 和 Host quiescent
+fence；resident busy 保留 Ready、不取消调用，quiescent 后才原子 Apply 并回收旧
+generation。不可变 Mount revision 记录 manual/standing-auto 授权来源，Desktop 提供
+风险确认、关闭、事件驱动重试和成功通知。实现关闭不替代安装版 Candidate Gate。
