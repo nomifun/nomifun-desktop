@@ -31,8 +31,10 @@
 > `N1-4-03` 已关闭。
 > Plugin N1 Windows Candidate 已在 source commit `a4ddeec70` 完成 18 项安装版
 > product smoke，并由 `windows_candidate/plugin_n1` Gate 整体通过；`N1-1-01`、
-> `N1-2-03`、`N1-U-01` 与 `N1-V-01` 已关闭。MiniApp Candidate、最终 Signed RC
-> 以及 macOS/Linux 外部原生验证仍未关闭。
+> `N1-2-03`、`N1-U-01` 与 `N1-V-01` 已关闭。MiniApp M1 Windows Candidate 亦已在
+> source commit `cf2f334ff` 完成安装版 UI-only/Service/故障/可访问性 smoke，并由
+> `windows_candidate/miniapp_m1` Gate 整体通过；`M1-U-01` 与 `M1-V-01` 已关闭。
+> 最终 Signed RC 以及 macOS/Linux 外部原生验证仍未关闭。
 >
 > Windows 阶段性交接启动材料：
 > `CROSS-MACHINE-WORK-START-PROMPT-2026-09-09.zh.md`
@@ -68,10 +70,10 @@
 
 | 分类 | 数量 | 项目 |
 | --- | ---: | --- |
-| 已关闭 | 29 | 当前表内已关闭的 W0/N1/M1 项；Plugin N1（含 `N1-V-01`）已全部关闭，M1 已关闭至 `M1-2-01` |
+| 已关闭 | 31 | 当前表内已关闭的 W0/N1/M1 项；Plugin N1 与 MiniApp M1 Windows Candidate 均已关闭 |
 | 正在实施 | 0 | 当前 Windows 主线没有 `in-progress` 项 |
-| 已解锁待领取 | 0 | 当前 Windows 主线无未领取的前置切片 |
-| 依赖阻塞 | 3 | `M1-U-01`、`M1-V-01`、`RC-WIN-01` |
+| 已解锁待领取 | 1 | `RC-WIN-01` |
+| 依赖阻塞 | 1 | `RC-MERGE-01` |
 | 外部原生 | 2 | `RC-MA-01`、`RC-LD-01` |
 | 明确延后 | 2 | Marketplace/远程分发、第二 Runtime |
 
@@ -458,8 +460,8 @@
 | `M1-1-01` | closed | Service/Bridge lane；`nomifun-miniapp-platform/src/{service_host,service_process,service_runtime}.rs` | 单 `main.mjs`、dedicated Host、on-demand/continuous、MessageChannel epoch fence | `M1-0-02`,`N1-1-02` | 真实 Node NDJSON 3、Service application 1、Runtime candidate 3、旧 generation/崩溃隔离/容量/backoff 通过 |
 | `M1-1-02` | closed | Managed data lane；`managed_storage.rs`、Service IPC、M1 cutover | UI/Service KV、Files、Private SQLite、authorizer、参数化 SQL、additive migration ledger | `M1-1-01` | production SQLite Storage 1、真实 Node Storage IPC 3、authorizer/批量回滚/启动与取消边界通过 |
 | `M1-2-01` | closed | Lifecycle lane；MiniApp lifecycle/application/data cleanup | Enable/Disable/Trash/Restore/Permanent Delete、Service Test、Share/Backup Import-as-new | `M1-1-02` | 删除恢复、Service Test、Share/prebuilt Import-as-new、Desktop Transfer UI、Whole-App Backup Export/Import-as-new 均已通过 Windows 定向验证；含 Service Files/SQLite/ledger、Catalog digest、owner export mutex |
-| `M1-U-01` | blocked | UI lane；整体重写 `pages/miniApps/**` | Library/Workshop/Surface，删除 Guid/Conversation 旧 MiniApp 模式 | `M1-0-02`,`M1-1-01` | real Desktop workflow/build/a11y |
-| `M1-V-01` | blocked | 集成 Owner | Windows M1 contract/integration/fault/product/NSIS candidate | 所有 M1 项 | UI-only + Service representative lifecycle |
+| `M1-U-01` | closed | UI lane；整体重写 `pages/miniApps/**` | Library/Workshop/Surface，删除 Guid/Conversation 旧 MiniApp 模式 | `M1-0-02`,`M1-1-01` | 安装版 Library 18、UI Workshop/Surface 21、Service Workshop 23 个 visible interactive control 全部具名；三层 viewport/page 横向滚动指标均为 0；截图完成自动取证与人工视觉复核 |
+| `M1-V-01` | closed | 集成 Owner | Windows M1 contract/integration/fault/product/NSIS candidate | 所有 M1 项 | source `cf2f334ff`；安装版 17/17 smoke PASS；MiniApp M1 Windows Candidate Gate 10/10 PASS，cohort `b8863b5f7ca8b6dca4411a7ed3860b7c0c14b907f385caedde3f5fd03c7b535c` |
 
 `nomifun-miniapp-platform` 的内存实现仍保留作为合同测试，但不再承担生产事实。当前
 生产组合已接入 dedicated Node Service Host、candidate Runtime 验证、Host-owned
@@ -469,15 +471,16 @@ Migration ledger。Node Service 的 Storage 请求使用同一私有 NDJSON 通�
 Migration，再启动目标 Host，失败时保留旧 Active 并重建旧 Service。M1-2 生命周期删除
 与 Service Test 子切片已完成；Share Bundle Export/Import、source-less prebuilt
 Import-as-new 的 Application/API/E2E、Desktop Transfer UI 和 disabled Whole-App Backup
-Export/Import-as-new 均已完成。`M1-2-01` 现已关闭；当前仍不构成 Windows Candidate
-或跨平台完成。下一边界是 MiniApp Capability Catalog 正式消费者接入、旧 MiniApp
-物理拆除和 Windows Candidate。
+Export/Import-as-new 均已完成。`M1-2-01`、`M1-U-01` 与 `M1-V-01` 现已关闭，当前
+已构成 Windows M1 Candidate，但不构成 Signed RC 或跨平台完成。下一边界是
+`RC-WIN-01` 的最终 source cohort、签名安装包、StepFun 与 Plugin/MiniApp 联合 release
+lock/result。
 
 ## 最终候选与外部验证
 
 | ID | 状态 | 目标 | 依赖 | 完成定义 |
 | --- | --- | --- | --- | --- |
-| `RC-WIN-01` | blocked | 冻结全部 Windows 开发的最终 source cohort | `N1-V-01`,`M1-V-01` | final NSIS、StepFun、Plugin/MiniApp installed-app smoke、release lock/result |
+| `RC-WIN-01` | open | 冻结全部 Windows 开发的最终 source cohort | `N1-V-01`,`M1-V-01` | final NSIS、StepFun、Plugin/MiniApp installed-app smoke、release lock/result |
 | `RC-MA-01` | external | macOS arm64 required 原生验证 | `RC-WIN-01` | 同 cohort package/install/runtime/Plugin/MiniApp/cleanup |
 | `RC-LD-01` | external | Linux Desktop x64 required 原生验证 | `RC-WIN-01` | 同 cohort Desktop/CLI/runtime/Plugin/MiniApp/cleanup |
 | `RC-MERGE-01` | blocked | required 三平台原样提升 | `RC-WIN-01`,`RC-MA-01`,`RC-LD-01` | 同 source/input/digest，Stable 不重建 |
@@ -963,3 +966,44 @@ Extension 命中仅属于历史删除合同、负向 404 测试、通用语义�
    `360adb09d405daac79163883098541d235f5f4a78cf75399017f2318bd5d1e18`。MiniApp M1
    installed product/a11y、最终 Signed RC 与 macOS/Linux 原生 Gate 继续保持未关闭，
    不由本次 Plugin N1 Candidate 代替。
+
+## 2026-09-11 MiniApp M1 Windows Candidate 收口
+
+1. `M1-U-01` 与 `M1-V-01` 已关闭。最终冻结 source commit 为
+   `cf2f334ff76c63dd34b3eaeffbb800f4819b7130`；Windows x64 NSIS 安装器 SHA-256 为
+   `d6f58ab9de34c01faf1f5a73b2c03552715173304c6288ad6a8f45533581ed65`。
+2. 安装版 product runner 共 17 项全部 PASS：干净 source checkpoint、隔离安装、x64
+   binary、启动/port/health/WebView2 CDP、UI-only Create→Build→Publish→Enable→Surface、
+   Host KV、Source 编辑→第二次 Build/Publish→Rollback、Share/Backup Import-as-new、
+   Trash/Restore/Permanent Delete、Service Test/Publish/Bridge、强杀 Node→Failed→Retry 新
+   PID、stale Surface 拒绝、Desktop restart、进程树清理、静默卸载与注册表归零。最终
+   product evidence 位于
+   `build.noindex/windows-candidate/cf2f334ff/miniapp-product-runs/mtvxuuuw-11kc`。
+3. MiniApp Source 编辑不再绕过数据根：migration 087 记录 exact Product/Project/source/
+   generation intent 与一次性 commit marker，SQLite trigger 在 intent 期间栅栏普通
+   Project/Product/Build 变化；Source Store 原子切换 head 后由数据库 finalize，启动恢复
+   能确定性区分旧 head 撤销与新 head 补提交。Desktop Source dialog 和 HTTP bridge 只
+   替换现有 UTF-8 受管文件，携带完整 CAS。
+4. 实跑修复了两个仅在安装态长路径/故障注入中暴露的 Service 缺口：Windows
+   `CreateProcessW` 不接受超长 `lpCurrentDirectory`，长 Release 路径现在只把 cwd 回退到
+   已验证 Node 目录，模块仍按绝对路径、Release identity 与 digest 加载；后台
+   maintenance 现在主动读取 process completion，外部强杀的 on-demand Service 不再长期
+   停留在虚假的 Ready 状态，而是释放容量并进入 Failed，显式 Retry 使用新 PID。
+5. Desktop a11y 扫描覆盖 Library 18 个、UI Workshop/Surface 21 个、Service Workshop
+   23 个 visible interactive control，全部有 accessible name。document、layout content 与
+   MiniApp page 三层均满足 `scrollWidth == clientWidth`、`scrollLeft == 0`；MiniApp 页显式
+   禁止横向滚动残留。最终 Gate 截图为 `evidence/miniapp-library.png`（SHA-256
+   `bde9617662f23b7b39d5f24202a916852d382fe522fec9f5874ec182d3af3d44`）、
+   `evidence/miniapp-workshop-surface.png`（SHA-256
+   `833745a8545245e74d716ff7c5dd69d6e17c2f46265940d25691888c0bf2f80c`）和
+   `evidence/miniapp-service-workshop.png`（SHA-256
+   `5b5273cb1e53fb4ed0f702269e91e91d6f5c231021b672a8e3e6250a986d374e`）。
+   WebView2 对 sandboxed OOPIF 的 surface capture 偶发把外层合成图横向偏移，因此 runner
+   同时等待 iframe 退出 `aria-busy`、双 animation frame，并使用 view capture；人工视觉
+   复核另以同一 UI artifact 的完整稳定帧确认无真实裁切、重叠或不可辨识控件。
+6. MiniApp M1 `windows_candidate/miniapp_m1` Gate 10/10 PASS，canonical result 位于
+   `build.noindex/plugin-n1-gate/m1-win-cf2f334ff/windows_candidate/miniapp_m1-windows_desktop_x64.result.json`，
+   cohort digest 为
+   `b8863b5f7ca8b6dca4411a7ed3860b7c0c14b907f385caedde3f5fd03c7b535c`。
+   `RC-WIN-01` 的依赖现已全部满足并改为 `open`；Signed RC、同 cohort release lock/result、
+   macOS arm64 与 Linux Desktop x64 仍未关闭。
