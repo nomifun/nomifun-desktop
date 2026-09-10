@@ -591,7 +591,7 @@ async function checkUiLifecycleTransfer(context, state) {
   };
 }
 
-function descendantProcesses(rootPid) {
+async function descendantProcesses(rootPid) {
   const script = [
     `$rootPid = ${rootPid}`,
     '$rootProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $rootPid"',
@@ -613,20 +613,44 @@ function descendantProcesses(rootPid) {
     '}',
     'ConvertTo-Json -Compress -InputObject @($result)',
   ].join('; ');
-  const result = spawnSync(
-    'powershell.exe',
-    ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
-    { encoding: 'utf8', shell: false, windowsHide: true, stdio: 'pipe', timeout: 10_000 },
-  );
-  if (result.status !== 0 || result.error) {
-    failure('miniapp_service_process_snapshot_failed', 'Could not snapshot Service process descendants');
+  const attempts = [];
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const result = spawnSync(
+      'powershell.exe',
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
+      { encoding: 'utf8', shell: false, windowsHide: true, stdio: 'pipe', timeout: 15_000 },
+    );
+    if (result.status === 0 && !result.error) {
+      try {
+        const parsed = JSON.parse(String(result.stdout || '[]'));
+        return Array.isArray(parsed) ? parsed : [parsed];
+      } catch (error) {
+        attempts.push({
+          attempt,
+          status: result.status,
+          parse_error: error instanceof Error ? error.name : 'parse_error',
+          stdout_sha256: sha256(String(result.stdout || '')),
+        });
+      }
+    } else {
+      attempts.push({
+        attempt,
+        status: result.status,
+        error_code: result.error?.code ?? null,
+        stderr_sha256: sha256(String(result.stderr || '')),
+      });
+    }
+    await sleep(200 * attempt);
   }
-  const parsed = JSON.parse(String(result.stdout || '[]'));
-  return Array.isArray(parsed) ? parsed : [parsed];
+  failure(
+    'miniapp_service_process_snapshot_failed',
+    'Could not snapshot Service process descendants after bounded retries',
+    { attempts },
+  );
 }
 
-function serviceNodeProcess(context) {
-  const candidates = descendantProcesses(context.getApplicationPid()).filter((process) =>
+async function serviceNodeProcess(context) {
+  const candidates = (await descendantProcesses(context.getApplicationPid())).filter((process) =>
     /node\.exe$/i.test(process.name || '') &&
     String(process.command_line || '').includes('--input-type=module'),
   );
@@ -709,7 +733,7 @@ async function checkServiceLifecycleFault(context, state) {
     failure('miniapp_service_bridge_failed', 'Service Bridge did not return the exact payload');
   }
 
-  const crashed = serviceNodeProcess(context);
+  const crashed = await serviceNodeProcess(context);
   terminateProcess(crashed.process_id);
   current = await waitForServiceHealth(
     context,
@@ -736,7 +760,7 @@ async function checkServiceLifecycleFault(context, state) {
   if (current.miniapp.service_health?.state !== 'ready') {
     failure('miniapp_service_retry_failed', 'Service Retry did not start a fresh Host');
   }
-  const restarted = serviceNodeProcess(context);
+  const restarted = await serviceNodeProcess(context);
   if (restarted.process_id === crashed.process_id) {
     failure('miniapp_service_generation_reused', 'Service Retry reused the crashed process identity');
   }
