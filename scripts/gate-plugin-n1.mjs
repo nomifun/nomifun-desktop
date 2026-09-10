@@ -128,6 +128,11 @@ const PRODUCT_CHECK_COMMANDS = Object.freeze({
     'scripts/validation/run-windows-plugin-product-candidate.mjs',
     '--current-candidate',
   ],
+  miniapp_m1_windows_installed_app_smoke: [
+    'bun',
+    'scripts/validation/run-windows-miniapp-product-candidate.mjs',
+    '--current-candidate',
+  ],
   plugin_n1_windows_runtime_selection: [
     'cargo',
     'test',
@@ -1038,11 +1043,11 @@ function runSelfTest() {
     'pre-run inputs contain a source SHA self-reference',
   );
   assert(
-    checkPlan('windows_candidate', 'combined').some(
+    checkPlan('windows_signed_rc', 'combined').some(
       (check) =>
         check.required &&
         check.implementation === 'pending' &&
-        check.check_id === 'miniapp_m1_windows_installed_app_smoke',
+        check.check_id === 'plugin_n1_windows_signed_install_author_apply_invoke_restore',
     ),
     'candidate registry is not fail-closed',
   );

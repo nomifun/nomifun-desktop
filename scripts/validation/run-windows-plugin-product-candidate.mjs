@@ -50,11 +50,11 @@ function sleep(milliseconds) {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds));
 }
 
-function sha256(value) {
+export function sha256(value) {
   return createHash('sha256').update(value).digest('hex');
 }
 
-function canonicalJson(value) {
+export function canonicalJson(value) {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
   const entries = Object.keys(value)
@@ -83,7 +83,7 @@ async function fetchWithTimeout(url, options, timeoutMs = HTTP_TIMEOUT_MS) {
   }
 }
 
-async function productApi(context, path, options = {}) {
+export async function productApi(context, path, options = {}) {
   const method = options.method ?? 'GET';
   const expected = options.expected ?? [200];
   let response;
@@ -375,7 +375,7 @@ class CdpClient {
   }
 }
 
-async function connectToProductPage(context) {
+export async function connectToProductPage(context) {
   const response = await fetchWithTimeout(context.getCdpEndpoint(), { method: 'GET' }, 10_000);
   if (response.status !== 200) failure('cdp_targets_unavailable', 'WebView2 target list is unavailable');
   const targets = await response.json();
@@ -394,7 +394,7 @@ async function connectToProductPage(context) {
   return client;
 }
 
-async function pageApi(client, baseUrl, path, options = {}) {
+export async function pageApi(client, baseUrl, path, options = {}) {
   const request = {
     url: `${baseUrl}${path}`,
     method: options.method ?? 'GET',
@@ -1073,7 +1073,7 @@ async function checkPluginLifecycle(context) {
   };
 }
 
-async function waitForPageSelector(
+export async function waitForPageSelector(
   client,
   hashRoute,
   selector,
@@ -1101,7 +1101,7 @@ async function waitForPageSelector(
   });
 }
 
-async function auditInteractiveNames(client, rootSelector) {
+export async function auditInteractiveNames(client, rootSelector) {
   return client.evaluate(`(() => {
     const root = document.querySelector(${JSON.stringify(rootSelector)}) ?? document.body;
     const candidates = [...root.querySelectorAll('button,input,select,textarea,a[href],[role="button"],[role="link"],[tabindex]')];
@@ -1133,7 +1133,7 @@ async function auditInteractiveNames(client, rootSelector) {
   })()`);
 }
 
-async function capturePage(client, outputPath) {
+export async function capturePage(client, outputPath) {
   const screenshot = await client.command('Page.captureScreenshot', {
     format: 'png',
     captureBeyondViewport: false,

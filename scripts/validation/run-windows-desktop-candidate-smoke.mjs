@@ -1506,6 +1506,7 @@ export async function runCandidateSmoke(options) {
             getBaseUrl: () => report.backend.base_url,
             getCdpEndpoint: () => report.cdp.endpoint,
             getCdpTarget: () => report.cdp.target,
+            getApplicationPid: () => appChild?.pid ?? null,
             assertApplicationRunning: (phase) =>
               assertApplicationStillRunning(appChild, phase),
             restart,
