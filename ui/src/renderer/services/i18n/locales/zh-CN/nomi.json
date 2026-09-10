@@ -87,7 +87,6 @@
     "noDescription": "这个技能还没有描述",
     "catalogSourceBuiltin": "内置",
     "catalogSourceCustom": "自定义",
-    "catalogSourceExtension": "扩展",
     "filterAll": "全部",
     "filterEmpty": "这个筛选下还没有技能",
     "sourceCatalog": "已配置",

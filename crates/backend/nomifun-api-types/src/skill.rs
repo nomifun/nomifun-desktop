@@ -6,7 +6,7 @@ use std::collections::HashMap;
 // A. Skill list & info
 // ---------------------------------------------------------------------------
 
-/// Origin of a listed skill — `builtin`, `custom`, or `extension`.
+/// Origin of a listed skill — `builtin` or `custom`.
 ///
 /// Matches the renderer contract in
 /// `src/common/adapter/ipcBridge.ts::listAvailableSkills`.
@@ -15,7 +15,6 @@ use std::collections::HashMap;
 pub enum SkillSourceResponse {
     Builtin,
     Custom,
-    Extension,
 }
 
 /// Single item in the available skills list (`GET /api/skills`).
@@ -471,10 +470,6 @@ mod tests {
         assert_eq!(
             serde_json::to_value(SkillSourceResponse::Custom).unwrap(),
             serde_json::json!("custom")
-        );
-        assert_eq!(
-            serde_json::to_value(SkillSourceResponse::Extension).unwrap(),
-            serde_json::json!("extension")
         );
     }
 

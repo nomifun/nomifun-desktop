@@ -5,7 +5,7 @@
  */
 
 import { resolveLocaleKey } from '@/common/utils';
-import { resolveExtensionAssetUrl } from '@/renderer/utils/platform';
+import { resolveBackendAssetUrl } from '@/renderer/utils/platform';
 
 export type LocalizedAgentIdentity = {
   id?: string;
@@ -47,7 +47,7 @@ export const resolveAgentAvatarImageSrc = (
   const mapped = avatarImageMap[value];
   if (mapped) return mapped;
 
-  const resolved = resolveExtensionAssetUrl(value) || value;
+  const resolved = resolveBackendAssetUrl(value) || value;
   const isImage =
     /\.(?:svg|png|jpe?g|webp|gif|avif|bmp|ico)(?:[?#].*)?$/i.test(resolved) ||
     /^(?:https?:|file:\/\/|data:image\/|\/)/i.test(resolved);

@@ -56,7 +56,6 @@
     "gridDescription": "可被 Agent、设定和伙伴复用的独立能力包。",
     "noDescription": "暂无描述。",
     "noMatch": "没有符合当前筛选条件的技能。",
-    "sourceExtension": "扩展",
     "sourceAuto": "自动",
     "editTags": "编辑标签",
     "editTagsTitle": "标签",
@@ -1252,7 +1251,6 @@
     "agent": "对话 Agent",
     "agentDesc": "用于企业微信对话"
   },
-  "extensionPresetReadonly": "扩展设定为只读，你可以复制它并编辑副本。",
   "runtimeManager": {
     "title": "JavaScript 运行时",
     "subtitle": "管理 NomiFun Plugin 和 MiniApp 使用的 Node.js 运行时。",
@@ -1585,12 +1583,8 @@
     "domainCronDesc": "创建、读取和维护计划任务。",
     "domainMcpTitle": "MCP 服务",
     "domainMcpDesc": "读取和维护已接入的 MCP server 配置。",
-    "domainExtensionTitle": "扩展",
-    "domainExtensionDesc": "扩展包、扩展来源和扩展状态相关能力。",
     "domainSkillTitle": "Skills",
     "domainSkillDesc": "读取、导入和管理技能包。",
-    "domainHubTitle": "Hub",
-    "domainHubDesc": "浏览、安装和同步 Hub 能力。",
     "domainSystemTitle": "系统",
     "domainSystemDesc": "系统设置、主题、模型提供商和客户端偏好。",
     "domainProviderTitle": "模型提供商",

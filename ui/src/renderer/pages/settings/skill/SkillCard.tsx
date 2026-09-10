@@ -3,7 +3,7 @@
  * soft hover lift, fixed two-line description, and hover actions.
  *   - a deterministic letter avatar (shared getAvatarColorClass), or a Lightning
  *     glyph for auto-injected skills
- *   - a source badge: Built-in / Custom / Extension / Auto-injected
+ *   - a source badge: Built-in / Custom / Auto-injected
  *   - NO enable switch (skills aren't toggled here)
  *   - hover footer: Delete (custom only)
  * The whole card is clickable → onOpenDetails.
@@ -53,17 +53,6 @@ const SourceBadge: React.FC<{ skill: SkillInfo; isAutoInjected: boolean }> = ({ 
         className='!flex-shrink-0 !h-14px !text-9px !leading-12px !px-5px !py-0 !rounded-5px !bg-[rgba(var(--orange-6),0.1)] !text-[rgba(var(--orange-6),1)]'
       >
         {t('settings.skillsHub.custom', { defaultValue: 'Custom' })}
-      </Tag>
-    );
-  }
-  if (skill.source === 'extension') {
-    return (
-      <Tag
-        size='small'
-        bordered={false}
-        className='!flex-shrink-0 !h-14px !text-9px !leading-12px !px-5px !py-0 !rounded-5px !bg-fill-2 !text-t-secondary'
-      >
-        {t('settings.skillsHub.sourceExtension', { defaultValue: 'Extension' })}
       </Tag>
     );
   }

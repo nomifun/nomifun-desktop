@@ -13,25 +13,19 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import NomiScrollArea from '@/renderer/components/base/NomiScrollArea';
 import AddMcpServerModal from '@/renderer/pages/settings/components/AddMcpServerModal';
-import ExtensionMcpServerItem from '@/renderer/pages/settings/ToolsSettings/ExtensionMcpServerItem';
 import McpServerItem from '@/renderer/pages/settings/ToolsSettings/McpServerItem';
 import { ENHANCED_TOOLS_SURFACE_CLASS } from '@/renderer/pages/settings/enhancedToolsLayout';
 import { useMcpServers, useMcpConnection, useMcpModal, useMcpServerCRUD, useMcpOAuth } from '@/renderer/hooks/mcp';
-import {
-  extensionMcpUiKey,
-  mcpServerUiKey,
-  type ExtensionMcpServerContribution,
-} from '@/renderer/hooks/mcp/extensionCatalog';
+import { mcpServerUiKey } from '@/renderer/hooks/mcp/mcpUiKey';
 
 type MessageInstance = Required<ReturnType<typeof Message.useMessage>[0]>;
 
 const ModalMcpManagementSection: React.FC<{
   message: MessageInstance;
   mcpServers: IMcpServer[];
-  extensionMcpServers: ExtensionMcpServerContribution[];
   setMcpServers: React.Dispatch<React.SetStateAction<IMcpServer[]>>;
   saveMcpServers: (serversOrUpdater: IMcpServer[] | ((prev: IMcpServer[]) => IMcpServer[])) => Promise<void>;
-}> = ({ message, mcpServers, extensionMcpServers, setMcpServers, saveMcpServers }) => {
+}> = ({ message, mcpServers, setMcpServers, saveMcpServers }) => {
   const { t } = useTranslation();
   const { oauthStatus, loggingIn, checkOAuthStatus, markLoginRequired, clearLoginRequired, login } = useMcpOAuth();
   const visibleMcpServers = useMemo(() => mcpServers, [mcpServers]);
@@ -212,7 +206,7 @@ const ModalMcpManagementSection: React.FC<{
       </div>
 
       <div className='flex-1 min-h-0'>
-        {visibleMcpServers.length === 0 && extensionMcpServers.length === 0 ? (
+        {visibleMcpServers.length === 0 ? (
           <div className='py-20px text-center text-t-secondary text-14px border border-dashed border-arco-2 rd-12px'>
             {t('settings.mcpNoServersFound')}
           </div>
@@ -234,17 +228,6 @@ const ModalMcpManagementSection: React.FC<{
                     onEditServer={showEditMcpModal}
                     onDeleteServer={showDeleteConfirm}
                     onOAuthLogin={handleOAuthLogin}
-                  />
-                );
-              })}
-              {extensionMcpServers.map((server) => {
-                const uiKey = extensionMcpUiKey(server.source_key);
-                return (
-                  <ExtensionMcpServerItem
-                    key={uiKey}
-                    server={server}
-                    isCollapsed={mcpCollapseKey[uiKey] || false}
-                    onToggleCollapse={() => toggleServerCollapse(uiKey)}
                   />
                 );
               })}
@@ -284,13 +267,12 @@ const ModalMcpManagementSection: React.FC<{
 
 const ToolsModalContent: React.FC = () => {
   const [mcpMessage, mcpMessageContext] = useArcoMessage({ maxCount: 10 });
-  const { mcpServers, extensionMcpServers, saveMcpServers, setMcpServers } = useMcpServers();
+  const { mcpServers, saveMcpServers, setMcpServers } = useMcpServers();
   return (
     <ToolsModalContentWithState
       mcpMessage={mcpMessage}
       mcpMessageContext={mcpMessageContext}
       mcpServers={mcpServers}
-      extensionMcpServers={extensionMcpServers}
       saveMcpServers={saveMcpServers}
       setMcpServers={setMcpServers}
     />
@@ -306,10 +288,9 @@ export const ToolsModalContentWithState: React.FC<{
   mcpMessage: MessageInstance;
   mcpMessageContext: React.ReactNode;
   mcpServers: IMcpServer[];
-  extensionMcpServers: ExtensionMcpServerContribution[];
   setMcpServers: React.Dispatch<React.SetStateAction<IMcpServer[]>>;
   saveMcpServers: (serversOrUpdater: IMcpServer[] | ((prev: IMcpServer[]) => IMcpServer[])) => Promise<void>;
-}> = ({ mcpMessage, mcpMessageContext, mcpServers, extensionMcpServers, saveMcpServers, setMcpServers }) => {
+}> = ({ mcpMessage, mcpMessageContext, mcpServers, saveMcpServers, setMcpServers }) => {
   return (
     <div className='flex flex-col h-full w-full'>
       {mcpMessageContext}
@@ -323,7 +304,6 @@ export const ToolsModalContentWithState: React.FC<{
             <ModalMcpManagementSection
               message={mcpMessage}
               mcpServers={mcpServers}
-              extensionMcpServers={extensionMcpServers}
               setMcpServers={setMcpServers}
               saveMcpServers={saveMcpServers}
             />

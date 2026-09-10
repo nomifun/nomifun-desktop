@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ipcBridge } from '@/common';
 import { configService } from '@/common/config/configService';
 import type { ICssTheme } from '@/common/config/storage';
 import { uuid } from '@/common/utils';
@@ -14,8 +13,7 @@ import {
   injectBackgroundCssBlock,
 } from '@renderer/pages/settings/DisplaySettings/backgroundUtils';
 import { DEFAULT_THEME_ID, getCssThemeDisplayName, PRESET_THEMES } from '@renderer/pages/settings/DisplaySettings/presets';
-import { resolveExtensionAssetUrl } from '@renderer/utils/platform';
-import { resolveCssByActiveTheme, setExtensionThemesCache } from '@renderer/utils/theme/themeCssSync';
+import { resolveCssByActiveTheme } from '@renderer/utils/theme/themeCssSync';
 import { Message } from '@arco-design/web-react';
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -99,7 +97,7 @@ export const applyCssThemeRaw = (css: string, themeId: string): Promise<void> =>
 };
 
 export interface UseCssThemeResult {
-  /** Merged, deduped theme list: presets + extension-contributed + user-defined. */
+  /** Merged theme list: built-in presets plus user-defined themes. */
   themes: ICssTheme[];
   /** Currently active theme id (reactively tracks `css.activeThemeId`). */
   activeThemeId: string;
@@ -135,20 +133,10 @@ export const useCssTheme = (): UseCssThemeResult => {
 
       const normalizedPresets = PRESET_THEMES.map((th) => ensureBackgroundCss(th));
 
-      // Extension-contributed themes (best-effort; absent in WebUI mode).
-      let extensionThemes: ICssTheme[] = [];
-      try {
-        const loaded = await ipcBridge.extensions.getThemes.invoke();
-        extensionThemes = loaded.map((th) => ({ ...th, cover: resolveExtensionAssetUrl(th.cover) }));
-        setExtensionThemesCache(extensionThemes);
-      } catch {
-        // Extensions unavailable — keep presets + user themes only.
-      }
-
-      // Merge & dedupe by id (first occurrence wins): preset → extension → user.
+      // Merge & dedupe by id (first occurrence wins): built-in ? user.
       const seen = new Set<string>();
       const all: ICssTheme[] = [];
-      for (const th of [...normalizedPresets, ...extensionThemes, ...normalized.filter((x) => !x.is_preset)]) {
+      for (const th of [...normalizedPresets, ...normalized.filter((x) => !x.is_preset)]) {
         if (!th?.id || seen.has(th.id)) continue;
         seen.add(th.id);
         all.push(th);

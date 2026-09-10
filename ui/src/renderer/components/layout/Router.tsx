@@ -23,7 +23,6 @@ const BrowserPage = React.lazy(() => import('@renderer/pages/browser'));
 const SystemSettings = React.lazy(() => import('@renderer/pages/settings/SystemSettings'));
 const ExecutionEngineSettings = React.lazy(() => import('@renderer/pages/settings/AgentSettings'));
 const SshHostSettings = React.lazy(() => import('@renderer/pages/settings/SshHostSettings'));
-const ExtensionSettingsPage = React.lazy(() => import('@renderer/pages/settings/ExtensionSettingsPage'));
 const LoginPage = React.lazy(() => import('@renderer/pages/login'));
 const ComponentsShowcase = React.lazy(() => import('@renderer/pages/TestShowcase'));
 const ScheduledTasksPage = React.lazy(() => import('@renderer/pages/cron/ScheduledTasksPage'));
@@ -153,24 +152,6 @@ const SessionShellRoute: React.FC = () => {
   );
 };
 
-const withSearch = (path: string, searchParams: URLSearchParams) => {
-  const search = searchParams.toString();
-  return search ? `${path}?${search}` : path;
-};
-
-const LegacyExtensionsRedirect: React.FC = () => {
-  const { search } = useLocation();
-  const searchParams = new URLSearchParams(search);
-  const tab = searchParams.get('tab');
-  searchParams.delete('tab');
-
-  if (tab === 'tools') {
-    return <Navigate to={withSearch('/mcp', searchParams)} replace />;
-  }
-
-  return <Navigate to={withSearch('/skills', searchParams)} replace />;
-};
-
 const CreativeStudioCanvasesRedirect: React.FC = () => {
   const { search, hash } = useLocation();
   return (
@@ -238,7 +219,6 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
             <Route path='/agent' element={withRouteFallback(AgentSettingsPage)} />
             <Route path='/agent-sessions/:agentSessionId' element={withRouteFallback(AgentSessionPage)} />
             <Route path='/models' element={withRouteFallback(ModelHubPage)} />
-            <Route path='/extensions' element={<LegacyExtensionsRedirect />} />
             <Route path='/mcp' element={withRouteFallback(McpPage)} />
             <Route path='/plugins' element={withRouteFallback(PluginWorkbenchPage)} />
             <Route path='/open-capabilities' element={withRouteFallback(OpenCapabilitiesPage)} />
@@ -265,7 +245,6 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
             <Route path='/settings/browser-use' element={<Navigate to='/browser?tab=settings' replace />} />
             <Route path='/settings/computer-use' element={withRouteFallback(SystemSettings)} />
             <Route path='/settings/about' element={withRouteFallback(SystemSettings)} />
-            <Route path='/settings/ext/:tabId' element={withRouteFallback(ExtensionSettingsPage)} />
             <Route path='/settings/webhook' element={<Navigate to='/requirements/extensions?tab=notify' replace />} />
             <Route path='/settings' element={<Navigate to='/settings/system' replace />} />
             <Route path='/test/components' element={withRouteFallback(ComponentsShowcase)} />

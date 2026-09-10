@@ -30,7 +30,6 @@ use nomifun_conversation::{
     conversation_ops_routes, conversation_routes, creative_studio_agent_session_routes,
 };
 use nomifun_cron::cron_routes;
-use nomifun_extension::{extension_routes, hub_routes};
 use nomifun_file::file_routes;
 use nomifun_idmm::idmm_routes;
 use nomifun_knowledge::knowledge_routes;
@@ -903,20 +902,6 @@ fn create_nomi_core_router_with_all_state(
         &instance_owner_state,
     );
 
-    // Extension routes protected by auth middleware
-    let extension_authenticated = protect_instance_owner(
-        extension_routes(states.extension),
-        &auth_mw_state,
-        &instance_owner_state,
-    );
-
-    // Hub routes protected by auth middleware
-    let hub_authenticated = protect_instance_owner(
-        hub_routes(states.hub),
-        &auth_mw_state,
-        &instance_owner_state,
-    );
-
     // This router is the explicitly selected Nomi-core composition. Fresh-v4
     // owns its control-plane routes in its own application router and never
     // reaches this Nomi-core skill catalog.
@@ -1200,9 +1185,7 @@ fn create_nomi_core_router_with_all_state(
         .merge(model_failover_authenticated)
         .merge(connection_test_authenticated)
         .merge(file_authenticated)
-        .merge(mcp_authenticated)
-        .merge(extension_authenticated)
-        .merge(hub_authenticated);
+        .merge(mcp_authenticated);
     let router = match skill_authenticated {
         Some(skill) => router.merge(skill),
         None => router,

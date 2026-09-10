@@ -75,7 +75,7 @@ function isAbsoluteAssetUrl(url: string): boolean {
  *
  * Keyed on `isDesktopShell()` (the `__backendPort` signal) — the Tauri renderer
  * is not same-origin with the backend, so without this expansion every
- * backend-relative asset (agent/model logos, extension icons) would point at
+ * backend-relative asset (agent/model logos and managed product assets) would point at
  * the dev/static server instead of the backend and fail to load.
  */
 export const resolveBackendAssetUrl = (url: string | undefined): string | undefined => {
@@ -85,18 +85,6 @@ export const resolveBackendAssetUrl = (url: string | undefined): string | undefi
     return isDesktopShell() ? `${getBaseUrl()}${url}` : url;
   }
   return url;
-};
-
-/**
- * Resolve an extension asset URL for the current environment.
- * Backend-managed extension assets are already emitted as HTTP URLs, so this
- * helper resolves app-relative backend paths into absolute backend URLs when
- * the desktop renderer is not same-origin with the backend process.
- *
- * 将扩展资源 URL 转换为当前环境可用的地址
- */
-export const resolveExtensionAssetUrl = (url: string | undefined): string | undefined => {
-  return resolveBackendAssetUrl(url);
 };
 
 /**

@@ -76,16 +76,12 @@ const SkillDetailDrawer: React.FC<SkillDetailDrawerProps> = ({
     ? t('settings.skillsHub.sourceAuto', { defaultValue: 'Auto' })
     : skill?.source === 'custom'
       ? t('settings.skillsHub.custom', { defaultValue: 'Custom' })
-      : skill?.source === 'extension'
-        ? t('settings.skillsHub.sourceExtension', { defaultValue: 'Extension' })
-        : t('settings.skillsHub.builtin', { defaultValue: 'Built-in' });
+      : t('settings.skillsHub.builtin', { defaultValue: 'Built-in' });
   const sourceBadgeClass = isAutoInjected
     ? 'bg-[rgba(var(--success-6),0.1)] text-success-6'
     : skill?.source === 'custom'
       ? 'bg-[rgba(var(--orange-6),0.1)] text-[rgba(var(--orange-6),1)]'
-      : skill?.source === 'extension'
-        ? 'bg-fill-2 text-t-secondary'
-        : 'bg-primary-1 text-primary-6';
+      : 'bg-primary-1 text-primary-6';
 
   return (
     <Drawer

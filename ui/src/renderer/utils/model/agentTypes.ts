@@ -14,13 +14,12 @@ export const DETECTED_AGENTS_SWR_KEY = 'agents.detected';
 export type AgentType = 'nomi';
 
 /** Source tier of an agent row, mirroring backend `agent_source` enum. */
-export type AgentSource = 'internal' | 'builtin' | 'extension' | 'custom';
+export type AgentSource = 'internal' | 'builtin' | 'custom';
 
 /** Source-specific bookkeeping (how to probe, how to upgrade). */
 export type AgentSourceInfo = {
   binary_name?: string;
   bridge_binary?: string;
-  hub_package_id?: string;
   version?: string;
 };
 

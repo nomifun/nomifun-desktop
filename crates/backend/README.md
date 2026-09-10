@@ -17,7 +17,6 @@ are:
 | `nomifun-conversation` | Conversation/message service and agent stream relay. |
 | `nomifun-ai-agent` | Single bridge into `crates/agent`; builds the built-in `nomi` Agent runtime and owns the runtime registry and session lifecycle. |
 | `nomifun-mcp` | MCP server config, OAuth, adapters, sync, and connection tests. |
-| `nomifun-extension` | Extension, skill, assistant contribution, and hub plumbing. |
 | `nomifun-requirement` | Requirements Platform and the persistent AutoWork runner. |
 | `nomifun-terminal` | PTY-backed terminal sessions. |
 | `nomifun-knowledge` | Knowledge bases and scoped knowledge MCP server. |

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export type SkillSource = 'builtin' | 'custom' | 'extension';
+export type SkillSource = 'builtin' | 'custom';
 
 export type SkillInfo = {
   name: string;

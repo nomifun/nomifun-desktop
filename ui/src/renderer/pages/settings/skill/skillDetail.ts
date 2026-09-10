@@ -8,8 +8,8 @@ export type SkillContentReaders = {
 /**
  * Read the canonical SKILL.md for a listed skill.
  *
- * Built-in skills use the dedicated embedded-resource route. Custom and
- * extension skills use the absolute location returned by GET /api/skills.
+ * Built-in skills use the dedicated embedded-resource route. Custom skills
+ * use the absolute location returned by GET /api/skills.
  */
 export const readSkillContent = async (skill: SkillInfo, readers: SkillContentReaders): Promise<string> => {
   if (skill.source === 'builtin' && skill.relative_location) {

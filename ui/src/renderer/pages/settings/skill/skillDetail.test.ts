@@ -40,7 +40,7 @@ describe('skill detail content', () => {
     expect(fileCalls).toEqual([]);
   });
 
-  test('uses the listed absolute path for custom and extension skills', async () => {
+  test('uses the listed absolute path for custom skills', async () => {
     const builtinCalls: string[] = [];
     const fileCalls: string[] = [];
     const readBuiltinSkill = async (location: string) => {

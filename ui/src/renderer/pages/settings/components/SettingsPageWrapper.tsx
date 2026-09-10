@@ -1,15 +1,10 @@
 import classNames from 'classnames';
 import React from 'react';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
-import { resolveExtensionAssetUrl } from '@/renderer/utils/platform';
-import { type IExtensionSettingsTab } from '@/common/adapter/ipcBridge';
-import { useExtensionSettingsTabs } from '@/renderer/hooks/system/useExtensionSettingsTabs';
-import { Computer, Cpu, Info, Puzzle, Server, System } from '@icon-park/react';
+import { Computer, Cpu, Info, Server, System } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { useExtI18n } from '@/renderer/hooks/system/useExtI18n';
 import { BUILTIN_TAB_IDS } from './SettingsSider';
-import { buildSettingsNavItems } from './settingsNavigation';
 import './settings.css';
 
 interface SettingsPageWrapperProps {
@@ -56,31 +51,7 @@ const SettingsPageWrapper: React.FC<SettingsPageWrapperProps> = ({ children, cla
   const { pathname } = useLocation();
   const { t } = useTranslation();
 
-  const extensionTabs = useExtensionSettingsTabs();
-
-  const { resolveExtTabName } = useExtI18n();
-
-  const menuItems = React.useMemo(() => {
-    const builtins = getBuiltinSettingsNavItems(t);
-
-    const toNavItem = (tab: IExtensionSettingsTab): NavItem => {
-      const resolvedIcon = resolveExtensionAssetUrl(tab.icon) || tab.icon;
-      return {
-        id: tab.id,
-        label: resolveExtTabName(tab),
-        icon: resolvedIcon ? (
-          <img src={resolvedIcon} alt='' className='w-16px h-16px object-contain' />
-        ) : (
-          <Puzzle theme='outline' size='16' />
-        ),
-        path: `ext/${tab.id}`,
-      };
-    };
-
-    // Insert extension tabs at their anchor, or (unanchored) at the end of the
-    // "Application" group — before "about" — to keep them inside that group.
-    return buildSettingsNavItems(builtins, extensionTabs, toNavItem).items;
-  }, [t, extensionTabs, resolveExtTabName]);
+  const menuItems = React.useMemo(() => getBuiltinSettingsNavItems(t), [t]);
 
   const containerClass = classNames(
     'settings-page-wrapper w-full min-h-full box-border overflow-y-auto',

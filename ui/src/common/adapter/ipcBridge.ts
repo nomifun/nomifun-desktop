@@ -13,6 +13,7 @@
  */
 
 import { bridge } from '@/platform';
+import type { AgentMetadata } from '@/renderer/utils/model/agentTypes';
 import type { McpConnectionTestRequest } from './mcpRequest';
 import {
   noopEmitter,
@@ -59,7 +60,6 @@ import {
   tauriUpdateInstallAndRelaunch,
 } from './tauriUpdater';
 import type {
-  ICssTheme,
   IMcpServer,
   ISessionMcpServer,
   TChatConversation,
@@ -3721,99 +3721,6 @@ interface IBridgeResponse<D = {}> {
 }
 
 // ---------------------------------------------------------------------------
-// Extensions API
-// ---------------------------------------------------------------------------
-
-export interface IExtensionInfo {
-  name: string;
-  display_name: string;
-  version: string;
-  description?: string;
-  source: string;
-  enabled: boolean;
-}
-
-export interface IExtensionPermissionSummary {
-  name: string;
-  description: string;
-  level: 'safe' | 'moderate' | 'dangerous';
-  granted: boolean;
-}
-
-export interface IExtensionSettingsTab {
-  id: string;
-  label: string;
-  icon?: string;
-  url: string;
-  position?: { relative_to: string; placement: 'before' | 'after' };
-  order: number;
-  extension_name: string;
-}
-
-export interface IExtensionWebuiContribution {
-  extension_name: string;
-  id: string;
-  directory: string;
-  routes: Array<{ path: string; method: string; handler: string }>;
-}
-
-export interface IExtensionMcpServerContribution {
-  source_key: string;
-  name: string;
-  description?: string;
-  enabled: boolean;
-  transport: unknown;
-  extension_name: string;
-}
-
-export type AgentActivityState = 'idle' | 'writing' | 'researching' | 'executing' | 'syncing' | 'error';
-
-export interface IExtensionAgentActivityEvent {
-  conversationId: ConversationId;
-  at: number;
-  kind: 'status' | 'tool' | 'message';
-  text: string;
-}
-
-export interface IExtensionAgentActivityItem {
-  id: string;
-  backend: string;
-  agentName: string;
-  state: AgentActivityState;
-  runtimeStatus: 'pending' | 'running' | 'finished' | 'unknown';
-  conversations: number;
-  activeConversations: number;
-  lastActiveAt: number;
-  lastStatus?: string;
-  currentTask?: string;
-  recentEvents: IExtensionAgentActivityEvent[];
-}
-
-export interface IExtensionAgentActivitySnapshot {
-  generatedAt: number;
-  totalConversations: number;
-  runningConversations: number;
-  agents: IExtensionAgentActivityItem[];
-}
-
-export const extensions = {
-  getThemes: httpGet<ICssTheme[], void>('/api/extensions/themes'),
-  getLoadedExtensions: httpGet<IExtensionInfo[], void>('/api/extensions'),
-  getAgents: httpGet<Record<string, unknown>[], void>('/api/extensions/agents'),
-  getMcpServers: httpGet<IExtensionMcpServerContribution[], void>('/api/extensions/mcp-servers'),
-  getSkills: httpGet<Array<{ name: string; description: string; location: string }>, void>('/api/extensions/skills'),
-  getSettingsTabs: httpGet<IExtensionSettingsTab[], void>('/api/extensions/settings-tabs'),
-  getWebuiContributions: httpGet<IExtensionWebuiContribution[], void>('/api/extensions/webui'),
-  getAgentActivitySnapshot: httpGet<IExtensionAgentActivitySnapshot, void>('/api/extensions/agent-activity'),
-  getExtI18nForLocale: httpPost<Record<string, unknown>, { locale: string }>('/api/extensions/i18n'),
-  enableExtension: httpPost<void, { name: string }>('/api/extensions/enable'),
-  disableExtension: httpPost<void, { name: string; reason?: string }>('/api/extensions/disable'),
-  getPermissions: httpPost<IExtensionPermissionSummary[], { name: string }>('/api/extensions/permissions'),
-  getRiskLevel: httpPost<string, { name: string }>('/api/extensions/risk-level'),
-  stateChanged: wsEmitter<{ name: string; enabled: boolean; reason?: string }>('extensions.state-changed'),
-};
-
-// ---------------------------------------------------------------------------
 // Channel API — routed to /api/channel/*
 // ---------------------------------------------------------------------------
 
@@ -3868,8 +3775,6 @@ function toPluginStatus(raw: RawPluginStatus): IChannelPluginStatus {
     owner_domain: raw.owner_domain === 'customer_service' ? 'customer_service' : 'companion',
     companionId: raw.companion_id == null ? undefined : parseCompanionId(raw.companion_id),
     botKey: raw.bot_key as string | undefined,
-    isExtension: raw.is_extension as boolean | undefined,
-    extensionMeta: raw.extension_meta as IChannelPluginStatus['extensionMeta'],
   };
 }
 
@@ -4030,27 +3935,6 @@ export const channel = {
     baseUrl?: string;
     message?: string;
   }>('channel.weixin-login'),
-};
-
-// ---------------------------------------------------------------------------
-// Agent Hub API — routed to /api/hub/*
-// ---------------------------------------------------------------------------
-
-import type { HubExtensionStatus, IHubAgentItem } from '@/common/types/agent/hub';
-import type { AgentMetadata } from '@/renderer/utils/model/agentTypes';
-
-export const hub = {
-  getExtensionList: httpGet<IHubAgentItem[], void>('/api/hub/extensions'),
-  install: httpPost<void, { name: string }>('/api/hub/install'),
-  uninstall: httpPost<void, { name: string }>('/api/hub/uninstall'),
-  retryInstall: httpPost<void, { name: string }>('/api/hub/retry-install'),
-  checkUpdates: httpPost<{ name: string }[], void>('/api/hub/check-updates'),
-  update: httpPost<void, { name: string }>('/api/hub/update'),
-  onStateChanged: wsEmitter<{
-    name: string;
-    status: HubExtensionStatus;
-    error?: string;
-  }>('hub.state-changed'),
 };
 
 // ── Requirements Platform (需求平台) ─────────────────────────────────

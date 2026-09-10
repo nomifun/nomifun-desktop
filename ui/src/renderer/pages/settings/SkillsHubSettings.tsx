@@ -331,7 +331,7 @@ const SkillsHubSettings: React.FC = () => {
                   key={skill.name}
                   skill={skill}
                   localeKey={localeKey}
-                  isAutoInjected={skill.source !== 'extension' && autoInjectedNames.has(skill.name)}
+                  isAutoInjected={autoInjectedNames.has(skill.name)}
                   onOpenDetails={setDetailSkill}
                   onDelete={confirmDelete}
                   highlighted={highlightedSkill === skill.name}
@@ -380,7 +380,6 @@ const SkillsHubSettings: React.FC = () => {
         localeKey={localeKey}
         isAutoInjected={
           detailSkill !== null &&
-          detailSkill.source !== 'extension' &&
           autoInjectedNames.has(detailSkill.name)
         }
         onClose={() => setDetailSkill(null)}

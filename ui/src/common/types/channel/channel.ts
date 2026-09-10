@@ -67,28 +67,6 @@ export interface IChannelPluginStatus {
   companionId?: CompanionId;
   /** 平台级机器人身份（lark app_id / telegram bot id / ...）。 */
   botKey?: string;
-  isExtension?: boolean;
-  extensionMeta?: {
-    credentialFields?: Array<{
-      key: string;
-      label: string;
-      type: 'text' | 'password' | 'select' | 'number' | 'boolean';
-      required?: boolean;
-      options?: string[];
-      default?: string | number | boolean;
-    }>;
-    configFields?: Array<{
-      key: string;
-      label: string;
-      type: 'text' | 'password' | 'select' | 'number' | 'boolean';
-      required?: boolean;
-      options?: string[];
-      default?: string | number | boolean;
-    }>;
-    description?: string;
-    extensionName?: string;
-    icon?: string;
-  };
 }
 
 export interface IChannelPairingRequest {

@@ -47,17 +47,6 @@ macro_rules! app_frame_ancestor_sources {
 
 const OFFICE_FRAME_ANCESTORS: &str = concat!("frame-ancestors ", app_frame_ancestor_sources!());
 
-/// Routes whose responses may be framed with no policy of their own:
-/// `/api/extensions/{name}/assets/**`, because an extension renders its own
-/// settings UI inside an iframe in the app.
-fn allows_embedding(path: &str) -> bool {
-    let mut segments = path.trim_start_matches('/').split('/');
-    matches!(
-        (segments.next(), segments.next(), segments.next(), segments.next(),),
-        (Some("api"), Some("extensions"), Some(_extension_name), Some("assets"))
-    )
-}
-
 fn is_office_preview_capability_path(path: &str) -> bool {
     let mut segments = path.split('/');
     matches!(
@@ -160,7 +149,7 @@ pub async fn security_headers_middleware(request: Request, next: Next) -> Respon
         || is_miniapp_surface_capability_path(&path)
     {
         apply_office_frame_policy(headers);
-    } else if !allows_embedding(&path) {
+    } else {
         headers.insert(X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     }
     headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
@@ -324,29 +313,6 @@ mod tests {
         assert_eq!(response.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
         // Security headers still present even on error responses
         assert_eq!(response.headers().get("x-frame-options").unwrap(), "DENY");
-    }
-
-    #[tokio::test]
-    async fn extension_asset_routes_omit_frame_deny_header() {
-        let app = Router::new()
-            .route(
-                "/api/extensions/hello/assets/settings/index.html",
-                get(|| async { "ok" }),
-            )
-            .layer(middleware::from_fn(security_headers_middleware));
-
-        let response = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri("/api/extensions/hello/assets/settings/index.html")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert!(response.headers().get("x-frame-options").is_none());
-        assert_eq!(response.headers().get("x-content-type-options").unwrap(), "nosniff");
     }
 
     #[tokio::test]
