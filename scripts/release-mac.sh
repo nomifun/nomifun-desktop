@@ -232,6 +232,7 @@ fi
 Tar="target/$Triple/release/bundle/macos/NomiFun.app.tar.gz"
 Sig="$Tar.sig"
 Dmg="dist/desktop/NomiFun_${TargetVersion}_universal.dmg"
+ReleaseLock="${Dmg%.dmg}.release-lock.json"
 App="target/$Triple/release/bundle/macos/NomiFun.app"
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -245,7 +246,7 @@ else
   echo "  版本变更  : 无（沿用当前 ${CurVer}）"
 fi
 echo "  仓库      : ${Repo}"
-echo "  目标产物  : ${Dmg} + ${Tar} (+ .sig)"
+echo "  目标产物  : ${Dmg} + ${ReleaseLock} + ${Tar} (+ .sig)"
 if [[ "$Mode" == "CREATE" ]]; then
   if [[ -n "$NotesFile" ]]; then
     echo "  release note: 文件 ${NotesFile}（首发建 Release 用）"
@@ -288,8 +289,10 @@ fi
 echo "▶ 构建 macOS 签名/公证产物（Rust release，耗时较长）..."
 bun run build:mac --signed --config "$UpdaterConf" || fail "构建失败。"
 [[ -f "$Dmg" ]] || fail "构建后未找到手动安装包: ${Dmg}"
+[[ -f "$ReleaseLock" ]] || fail "构建后未找到 release lock: ${ReleaseLock}"
 [[ -f "$Tar" ]] || fail "构建后未找到 updater 包: ${Tar}"
 [[ -f "$Sig" ]] || fail "构建后未找到 updater 签名: ${Sig}"
+bun scripts/release/release-lock.mjs verify --root "$ROOT" --lock "$ReleaseLock" >/dev/null || fail "release lock 校验失败。"
 
 echo "▶ 校验 macOS 签名与公证状态 ..."
 xcrun stapler validate "$Dmg" || fail "DMG staple 校验失败。"
@@ -322,11 +325,11 @@ if [[ "$Mode" == "CREATE" ]]; then
     git push origin "$Tag" || fail "git push tag 失败。"
 
     echo "▶ 创建 Release ${Tag} 并上传 macOS 产物 ..."
-    "$gh_bin" release create "$Tag" --repo "$Repo" "$Tar" "$Sig" "$Dmg" "$LatestJson" --title "$Tag" --notes-file "$NotesTmp" || fail "gh release create 失败。"
+    "$gh_bin" release create "$Tag" --repo "$Repo" "$Tar" "$Sig" "$Dmg" "$ReleaseLock" "$LatestJson" --title "$Tag" --notes-file "$NotesTmp" || fail "gh release create 失败。"
   fi
 else
   echo "▶ 上传 macOS 资产到 Release ${Tag}（--clobber）..."
-  "$gh_bin" release upload "$Tag" --repo "$Repo" "$Tar" "$Sig" "$Dmg" "$LatestJson" --clobber || fail "上传失败。"
+  "$gh_bin" release upload "$Tag" --repo "$Repo" "$Tar" "$Sig" "$Dmg" "$ReleaseLock" "$LatestJson" --clobber || fail "上传失败。"
   if [[ -n "$NotesTmp" ]]; then
     echo "▶ 更新 Release 正文（-Notes/-NotesFile 提供了新说明）..."
     "$gh_bin" release edit "$Tag" --repo "$Repo" --notes-file "$NotesTmp" || echo "⚠️  gh release edit 更新正文失败（不阻断）。" >&2
