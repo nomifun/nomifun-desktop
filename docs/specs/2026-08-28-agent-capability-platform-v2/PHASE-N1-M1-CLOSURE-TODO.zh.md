@@ -36,7 +36,8 @@
 > `windows_candidate/miniapp_m1` Gate 整体通过；`M1-U-01` 与 `M1-V-01` 已关闭。
 > Windows Signed RC 的两个产品 Gate runner 已实现，当前 StepFun Coding Plan smoke
 > 再次通过；本机没有 release code-signing certificate，故 `RC-WIN-01` 保持
-> `pending-validation`。macOS/Linux 外部原生验证仍未关闭。
+> `pending-validation`。三平台 record/cohort-lock 聚合器、macOS 默认 Nomi-core 打包和
+> Linux package release-lock 链均已形成；macOS/Linux 外部原生验证仍未关闭。
 >
 > Windows 阶段性交接启动材料：
 > `CROSS-MACHINE-WORK-START-PROMPT-2026-09-09.zh.md`
@@ -484,9 +485,9 @@ lock/result。
 | ID | 状态 | 目标 | 依赖 | 完成定义 |
 | --- | --- | --- | --- | --- |
 | `RC-WIN-01` | pending-validation | 冻结全部 Windows 开发的最终 source cohort | `N1-V-01`,`M1-V-01` | final NSIS、StepFun、Plugin/MiniApp installed-app smoke、release lock/result；Gate runner 已齐，当前缺真实签名身份与 signed artifact root |
-| `RC-MA-01` | external | macOS arm64 required 原生验证 | `RC-WIN-01` | 同 cohort package/install/runtime/Plugin/MiniApp/cleanup |
-| `RC-LD-01` | external | Linux Desktop x64 required 原生验证 | `RC-WIN-01` | 同 cohort Desktop/CLI/runtime/Plugin/MiniApp/cleanup |
-| `RC-MERGE-01` | blocked | required 三平台原样提升 | `RC-WIN-01`,`RC-MA-01`,`RC-LD-01` | 同 source/input/digest，Stable 不重建 |
+| `RC-MA-01` | external | macOS arm64 required 原生验证 | `RC-WIN-01` | 同 cohort package/install/runtime/Plugin/MiniApp/cleanup；默认 Nomi-core DMG 不再要求旧 Codex Runtime sidecar，并生成/发布真实 release lock |
+| `RC-LD-01` | external | Linux Desktop x64 required 原生验证 | `RC-WIN-01` | 同 cohort Desktop/CLI/runtime/Plugin/MiniApp/cleanup；每个 `.deb`/`.AppImage`/`.rpm` 均生成、校验并发布 Host/package/legal release lock |
+| `RC-MERGE-01` | blocked | required 三平台原样提升 | `RC-WIN-01`,`RC-MA-01`,`RC-LD-01` | `release:cohort` 只接纳同 source/input 下三格 candidate + signed_rc PASS record；Stable 不重建 |
 
 ## 明确延后
 
@@ -1041,3 +1042,29 @@ Extension 命中仅属于历史删除合同、负向 404 测试、通用语义�
    然后依次运行 Credential Manager StepFun smoke 与 `windows_signed_rc/combined` Gate。
    已存在 RC 根不会覆盖，staging 失败会清理，不产生半发布 cohort；orchestrator、
    Authenticode runner 与 release-lock 合计 8 项定向测试通过。
+
+## 2026-09-11 required 三平台证据链准备
+
+1. 提交 `1ff29d511` 新增 `bun run release:cohort`。它校验唯一
+   `N1PlatformValidationRecord` 形状、required/optional matrix、source/cohort、真实
+   record bytes digest，并且只有 Windows x64、macOS arm64、Linux Desktop x64 三格的
+   `candidate + signed_rc` 全部 PASS 才允许生成 Stable `N1CohortLock`；缺格、失败或
+   `not_delivered` required cell 均 fail closed。该工具只聚合原生机器已经产生的事实，
+   不执行产品测试，也不能把缺失证据变成 PASS。
+2. 提交 `08e66b472` 把 macOS 默认包改为 Nomi-core：退休的 Codex Runtime sidecar 只在
+   显式 `--with-codex-runtime` 兼容模式下打包和进入 release lock，默认包若意外携带该
+   sidecar 会失败。`bash -n`、3 项 macOS build 静态合同和 9 项既有 arm64 native checker
+   测试通过。
+3. 提交 `0d516867a` 使 Linux Desktop 每个实际 `.deb`、`.AppImage`、`.rpm` 在汇总后
+   立即生成并验证 source-bound Host/package/LICENSE/NOTICE release lock；没有任何安装包
+   时构建明确失败。提交 `e38a099a4` 进一步让 macOS/Linux 发版脚本校验并上传这些 lock，
+   不再只生成在本地后丢失。相关 bash 语法和 12 项定向测试通过。
+4. 本 Windows 主机曾执行
+   `cargo check --locked --target aarch64-apple-darwin -p nomifun-miniapp-platform -p nomifun-app`；
+   `ring` 构建因缺少 Apple C compiler/SDK（`cc` 不存在）停止。这是交叉工具链限制，不是
+   macOS 原生 PASS，也没有据此关闭 `RC-MA-01`。Linux Desktop x64 同理必须在真实 Linux
+   图形/安装环境运行，不能用 Windows 静态测试冒充。
+5. 当前唯一可执行顺序仍为：提供真实 Windows release code-signing certificate 后运行
+   `bun run release:win:signed-rc` 关闭 `RC-WIN-01`；再把该最终 source cohort 原样交给
+   macOS arm64 与 Linux Desktop x64，分别完成安装、Runtime、authored Plugin/MiniApp、
+   host-loss、cleanup 与卸载；最后用六份原生 PASS record 生成 Stable cohort lock。
