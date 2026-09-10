@@ -242,3 +242,29 @@ UI production build 存在既有的 chunk size 和 dynamic-import 警告，但�
 全量 UI typecheck 仍有既有基线错误。旧 Extension/旧 MiniApp 当前不存在可直接
 安全删除的生产代码集合；Channel、Gateway、App、UI 和历史 schema 仍需先完成
 前置迁移，N1-X-02 保持 blocked。`.githooks/` 继续保持未跟踪且不纳入提交。
+
+## 2026-09-11 最新交接覆盖说明
+
+本节覆盖本文前面基于 `51b0243f7` 的历史启动说明。新机器必须先同步
+`rf/agent-capability-platform-v2` 的最新 HEAD，再以
+`PHASE-N1-M1-CLOSURE-TODO.zh.md` 的“当前快照”和条目表为唯一实时状态；不要按本文前面的
+旧 checkpoint 重做已经完成的 Windows 功能。
+
+当前事实如下：
+
+1. `N1-1-01`、`N1-2-03`、`N1-4-01`、`N1-4-02`、`N1-4-03`、`N1-U-01` 均已
+   `closed`。Plugin N1 Windows Candidate 已在 `a4ddeec70` 完成 18/18 安装版 smoke；
+   MiniApp M1 Windows Candidate 已在 `cf2f334ff` 完成 17/17 安装版 smoke。历史段落中的
+   “已进入实施”“保持 in-progress”只描述当时 checkpoint，不代表当前状态。
+2. Windows Signed RC Gate 与串行入口已由 `ed87c3437`、`c88c25e0a` 实现。本机 StepFun
+   live smoke 已通过，但没有真实 release code-signing certificate；因此
+   `RC-WIN-01=pending-validation`，不得用 unsigned Candidate 或自签名临时证书关闭。
+3. 三平台证据聚合器由 `1ff29d511` 提供；macOS 默认 Nomi-core/旧 sidecar opt-in 由
+   `08e66b472` 提供；Linux per-package release lock 由 `0d516867a` 提供；macOS/Linux
+   release lock 校验与发布由 `e38a099a4` 提供。
+4. macOS arm64 与 Linux Desktop x64 仍是 `external`。它们必须接收 Windows Signed RC
+   冻结后的同一 source/input cohort，在各自原生环境完成真实 package/install/runtime、
+   authored Plugin Build→Test→Apply→Invoke→Restore、MiniApp Build→Publish→Surface/
+   Service、host-loss、cleanup 与 uninstall，再分别提交 candidate 和 signed_rc record。
+5. 最终只用 `bun run release:cohort` 聚合三格共六份 PASS record；任何 required cell 缺失
+   或失败都不得生成 Stable lock。`.githooks/` 始终属于用户本地内容，不纳入提交。
