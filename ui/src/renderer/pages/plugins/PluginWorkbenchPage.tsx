@@ -15,6 +15,7 @@ import type {
   PluginProjectId,
   CreatePluginProjectRequest,
   ImportPluginRequest,
+  UpdatePluginDependenciesRequest,
 } from '@/common/types/pluginPlatform';
 import { Alert, Button, Input, Modal } from '@arco-design/web-react';
 import { AddOne, Code, Refresh, Search, Plug, Upload } from '@icon-park/react';
@@ -39,6 +40,7 @@ import {
   PluginProjectCreateModal,
 } from './PluginWorkbenchDialogs';
 import PluginSourceEditDialog from './PluginSourceEditDialog';
+import PluginDependencyDialog from './PluginDependencyDialog';
 import {
   applyPluginCandidateRequest,
   buildPluginProjectRequest,
@@ -89,6 +91,7 @@ const PluginWorkbenchPage: React.FC = () => {
   const [testDialogVisible, setTestDialogVisible] = useState(false);
   const [applyDialogVisible, setApplyDialogVisible] = useState(false);
   const [sourceEditDialogVisible, setSourceEditDialogVisible] = useState(false);
+  const [dependencyDialogVisible, setDependencyDialogVisible] = useState(false);
   const [configureDialogVisible, setConfigureDialogVisible] = useState(false);
   const mountLoadSequence = useRef(0);
   const projectLoadSequence = useRef(0);
@@ -478,6 +481,27 @@ const PluginWorkbenchPage: React.FC = () => {
     [message, projectBusyAction, refreshLibrary, t]
   );
 
+  const handleDependencyUpdate = useCallback(
+    async (request: UpdatePluginDependenciesRequest) => {
+      if (projectBusyAction) return;
+      setProjectBusyAction('dependencies');
+      setProjectMutationFailure(null);
+      try {
+        const next = await ipcBridge.plugins.updateDependencies.invoke(request);
+        setProjectDetail(next);
+        setDependencyDialogVisible(false);
+        await refreshLibrary();
+        message.success(t('pluginWorkbench.messages.dependenciesUpdated'));
+      } catch (error) {
+        console.error('[plugins] dependency update failed', error);
+        setProjectMutationFailure(pluginLoadFailure(error, 'resource'));
+      } finally {
+        setProjectBusyAction(null);
+      }
+    },
+    [message, projectBusyAction, refreshLibrary, t]
+  );
+
   const handleTestCandidate = useCallback(
     async (resolvedTestInputDigest: string) => {
       if (!projectDetail || projectBusyAction) return;
@@ -811,6 +835,10 @@ const PluginWorkbenchPage: React.FC = () => {
                   setProjectMutationFailure(null);
                   setSourceEditDialogVisible(true);
                 }}
+                onEditDependencies={() => {
+                  setProjectMutationFailure(null);
+                  setDependencyDialogVisible(true);
+                }}
                 onTest={() => setTestDialogVisible(true)}
                 onApply={() => setApplyDialogVisible(true)}
                 onDelete={handleDeleteProject}
@@ -879,6 +907,17 @@ const PluginWorkbenchPage: React.FC = () => {
           setProjectMutationFailure(null);
         }}
         onSubmit={handleSourceEdit}
+      />
+      <PluginDependencyDialog
+        visible={dependencyDialogVisible}
+        detail={projectDetail}
+        loading={projectBusyAction === 'dependencies'}
+        failure={dependencyDialogVisible ? projectMutationFailure : null}
+        onCancel={() => {
+          setDependencyDialogVisible(false);
+          setProjectMutationFailure(null);
+        }}
+        onSubmit={handleDependencyUpdate}
       />
     </HubPageShell>
   );

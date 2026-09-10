@@ -24,17 +24,24 @@ use nomifun_api_types::{
     ImportPluginRequest, PluginImportKindDto, PluginLifecycleDto, PluginProjectSourceStateDto,
     PluginCandidateOriginDto, RestorePluginPreviousRequest,
     SetPluginEnabledRequest, TestPluginCandidateRequest, UninstallPluginRequest,
+    UpdatePluginDependenciesRequest,
 };
 use nomifun_db::{
-    ApplyPluginCandidateParams, CreatePluginArtifactParams, CreatePluginProjectParams,
+    AbortPluginDependencyMutationParams, ApplyPluginCandidateParams,
+    BeginPluginDependencyMutationParams, CreatePluginArtifactParams, CreatePluginProjectParams,
     DeletePluginProjectParams, FinishProductOperationParams,
-    ListPluginCredentialBindingsParams, PluginArtifactRow,
+    FinalizePluginDependencyMutationParams, ListPluginCredentialBindingsParams, PluginArtifactRow,
     PluginCandidateTestReceiptRow, PluginCredentialBindingRow, PluginCredentialBindingSnapshot,
-    PluginMountRow, PluginProjectRow, PluginReadyCandidateRow, ProductOperationRow,
+    PluginDependencyMutationIntentRow, PluginMountRow, PluginProjectRow,
+    PluginReadyCandidateRow, ProductOperationRow,
     RecordPluginCandidateTestReceiptParams, RecordPluginReadyCandidateParams,
     ReplacePluginCredentialBindingsParams,
     RestorePluginMountParams, StartProductOperationParams, UninstallPluginMountParams,
     UpdatePluginMountConfigParams, UpdatePluginProjectSourceParams,
+};
+use nomifun_js_authoring::{
+    DependencyMutationFacts, DependencyState, DigestHex as AuthoringDigestHex,
+    DurableDependencyMutation, PreparedDependencyMutation,
 };
 use nomifun_plugin_service::{
     AppliedPluginSource, ApplyPluginSourceEditInput, ApplyPluginSourceEditRequest,
@@ -64,6 +71,7 @@ struct FakeState {
     receipts: Vec<PluginCandidateTestReceiptRow>,
     credentials: BTreeMap<String, PluginCredentialBindingSnapshot>,
     operations: Vec<ProductOperationRow>,
+    dependency_intents: Vec<PluginDependencyMutationIntentRow>,
 }
 
 #[derive(Default)]
@@ -295,6 +303,124 @@ impl PluginRepository for FakeRepository {
         project.build_generation += 1;
         project.updated_at = params.updated_at;
         Ok(project.clone())
+    }
+
+    async fn begin_dependency_mutation(
+        &self,
+        params: &BeginPluginDependencyMutationParams,
+    ) -> Result<PluginDependencyMutationIntentRow, PluginServiceError> {
+        let mut state = self.state.lock().await;
+        if state
+            .dependency_intents
+            .iter()
+            .any(|intent| intent.project_id == params.project_id)
+        {
+            return Err(PluginServiceError::conflict("dependency intent exists"));
+        }
+        let project = state
+            .projects
+            .iter()
+            .find(|project| project.project_id == params.project_id)
+            .ok_or_else(|| PluginServiceError::not_found("project"))?;
+        if project.owner_user_id != params.owner_user_id
+            || project.updated_at != params.expected_project_updated_at
+            || project.build_generation != params.expected_build_generation
+            || project.source_head_digest.as_deref()
+                != Some(params.expected_source_digest.as_str())
+            || project.dependency_lock_digest.as_deref()
+                != Some(params.expected_lock_digest.as_str())
+        {
+            return Err(PluginServiceError::stale("dependency intent Project head"));
+        }
+        let row = PluginDependencyMutationIntentRow {
+            id: state.dependency_intents.len() as i64 + 1,
+            intent_id: params.intent_id.clone(),
+            project_id: params.project_id.clone(),
+            owner_user_id: params.owner_user_id.clone(),
+            expected_project_updated_at: params.expected_project_updated_at,
+            expected_build_generation: params.expected_build_generation,
+            expected_source_digest: params.expected_source_digest.clone(),
+            expected_lock_digest: params.expected_lock_digest.clone(),
+            next_source_digest: params.next_source_digest.clone(),
+            next_lock_digest: params.next_lock_digest.clone(),
+            created_at: params.created_at,
+        };
+        state.dependency_intents.push(row.clone());
+        Ok(row)
+    }
+
+    async fn finalize_dependency_mutation(
+        &self,
+        params: &FinalizePluginDependencyMutationParams,
+    ) -> Result<PluginProjectRow, PluginServiceError> {
+        let mut state = self.state.lock().await;
+        let intent_index = state
+            .dependency_intents
+            .iter()
+            .position(|intent| {
+                intent.intent_id == params.intent_id
+                    && intent.project_id == params.project_id
+                    && intent.owner_user_id == params.owner_user_id
+            })
+            .ok_or_else(|| PluginServiceError::not_found("dependency intent"))?;
+        let intent = state.dependency_intents[intent_index].clone();
+        let project = state
+            .projects
+            .iter_mut()
+            .find(|project| project.project_id == intent.project_id)
+            .ok_or_else(|| PluginServiceError::not_found("project"))?;
+        if project.updated_at != intent.expected_project_updated_at
+            || project.build_generation != intent.expected_build_generation
+            || project.source_head_digest.as_deref()
+                != Some(intent.expected_source_digest.as_str())
+            || project.dependency_lock_digest.as_deref()
+                != Some(intent.expected_lock_digest.as_str())
+        {
+            return Err(PluginServiceError::stale("dependency finalize Project head"));
+        }
+        project.source_head_digest = Some(intent.next_source_digest);
+        project.dependency_lock_digest = Some(intent.next_lock_digest);
+        project.build_generation += 1;
+        project.updated_at = params.updated_at.max(project.updated_at + 1);
+        let project = project.clone();
+        state.dependency_intents.remove(intent_index);
+        Ok(project)
+    }
+
+    async fn abort_dependency_mutation(
+        &self,
+        params: &AbortPluginDependencyMutationParams,
+    ) -> Result<bool, PluginServiceError> {
+        let mut state = self.state.lock().await;
+        let Some(index) = state.dependency_intents.iter().position(|intent| {
+            intent.intent_id == params.intent_id
+                && intent.project_id == params.project_id
+                && intent.owner_user_id == params.owner_user_id
+        }) else {
+            return Ok(false);
+        };
+        state.dependency_intents.remove(index);
+        Ok(true)
+    }
+
+    async fn list_dependency_mutation_intents(
+        &self,
+    ) -> Result<Vec<PluginDependencyMutationIntentRow>, PluginServiceError> {
+        Ok(self.state.lock().await.dependency_intents.clone())
+    }
+
+    async fn get_dependency_mutation_intent(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<PluginDependencyMutationIntentRow>, PluginServiceError> {
+        Ok(self
+            .state
+            .lock()
+            .await
+            .dependency_intents
+            .iter()
+            .find(|intent| intent.project_id == project_id)
+            .cloned())
     }
 
     async fn delete_project_cas(
@@ -1000,6 +1126,7 @@ impl FakeDataStore {
 struct FakeSourceStore {
     deleted: Mutex<Vec<String>>,
     edits: Mutex<Vec<ApplyPluginSourceEditRequest>>,
+    dependency_state: Mutex<Option<DependencyState>>,
     fail_delete: bool,
     next_edit_result: Mutex<Option<Result<AppliedPluginSource, PluginServiceError>>>,
 }
@@ -1041,14 +1168,100 @@ impl PluginSourceStorePort for FakeSourceStore {
         request: &ApplyPluginSourceEditRequest,
     ) -> Result<AppliedPluginSource, PluginServiceError> {
         self.edits.lock().await.push(request.clone());
-        if let Some(result) = self.next_edit_result.lock().await.take() {
-            return result;
+        let result = self
+            .next_edit_result
+            .lock()
+            .await
+            .take()
+            .unwrap_or_else(|| {
+                Ok(AppliedPluginSource {
+                    source_snapshot_digest: "e".repeat(64),
+                    dependency_lock_digest: "d".repeat(64),
+                    changed: true,
+                })
+            });
+        if let Ok(applied) = &result {
+            *self.dependency_state.lock().await = Some(
+                DependencyState::new(
+                    AuthoringDigestHex::from(applied.source_snapshot_digest.clone()),
+                    AuthoringDigestHex::from(applied.dependency_lock_digest.clone()),
+                    BTreeMap::new(),
+                )
+                .unwrap(),
+            );
         }
-        Ok(AppliedPluginSource {
-            source_snapshot_digest: "e".repeat(64),
-            dependency_lock_digest: "d".repeat(64),
-            changed: true,
-        })
+        result
+    }
+
+    async fn dependency_state(
+        &self,
+        _owner_user_id: &str,
+        _project_id: &str,
+    ) -> Result<DependencyState, PluginServiceError> {
+        if let Some(state) = self.dependency_state.lock().await.clone() {
+            return Ok(state);
+        }
+        DependencyState::new(
+            AuthoringDigestHex::from("c".repeat(64)),
+            AuthoringDigestHex::from("d".repeat(64)),
+            BTreeMap::new(),
+        )
+        .map_err(|error| PluginServiceError::integration(error.to_string()))
+    }
+
+    async fn prepare_dependency_mutation(
+        &self,
+        _owner_user_id: &str,
+        _mutation_id: &str,
+        _request: &UpdatePluginDependenciesRequest,
+    ) -> Result<PreparedDependencyMutation, PluginServiceError> {
+        Err(PluginServiceError::integration(
+            "dependency mutation is outside this fake",
+        ))
+    }
+
+    async fn commit_dependency_mutation(
+        &self,
+        _mutation: &DurableDependencyMutation,
+    ) -> Result<(), PluginServiceError> {
+        Err(PluginServiceError::integration(
+            "dependency mutation is outside this fake",
+        ))
+    }
+
+    async fn finish_dependency_mutation(
+        &self,
+        _facts: &DependencyMutationFacts,
+    ) -> Result<(), PluginServiceError> {
+        Ok(())
+    }
+
+    async fn rollback_dependency_mutation(
+        &self,
+        _facts: &DependencyMutationFacts,
+    ) -> Result<(), PluginServiceError> {
+        Ok(())
+    }
+
+    async fn list_dependency_mutation_journals(
+        &self,
+    ) -> Result<Vec<DependencyMutationFacts>, PluginServiceError> {
+        Ok(Vec::new())
+    }
+
+    async fn dependency_mutation_journal(
+        &self,
+        _owner_user_id: &str,
+        _project_id: &str,
+    ) -> Result<Option<DependencyMutationFacts>, PluginServiceError> {
+        Ok(None)
+    }
+
+    async fn cleanup_orphan_dependency_staging(
+        &self,
+        _retained_mutation_ids: &BTreeSet<String>,
+    ) -> Result<(), PluginServiceError> {
+        Ok(())
     }
 }
 
@@ -1694,6 +1907,7 @@ async fn project_delete_reports_reconcile_required_after_authoritative_db_commit
     let source_store = Arc::new(FakeSourceStore {
         deleted: Mutex::new(Vec::new()),
         edits: Mutex::new(Vec::new()),
+        dependency_state: Mutex::new(None),
         fail_delete: true,
         next_edit_result: Mutex::new(None),
     });

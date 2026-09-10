@@ -25,6 +25,7 @@
     "createProject": "Create project",
     "importArtifact": "Import runtime package",
     "editSource": "Edit Source",
+    "editDependencies": "Edit dependencies",
     "build": "Build",
     "testCandidate": "Test candidate",
     "applyCandidate": "Apply candidate",
@@ -112,6 +113,7 @@
     "candidateTested": "Candidate Test completed",
     "candidateApplied": "Ready Candidate applied",
     "sourceEdited": "Source updated",
+    "dependenciesUpdated": "Dependencies resolved and the exact lock was updated",
     "operationCanceled": "Operation canceled",
     "projectDeleted": "Plugin Project deleted; the installed Plugin and runtime data were preserved"
   },
@@ -187,6 +189,16 @@
       "pathRequired": "Enter a safe relative source path.",
       "contentRequired": "Enter file content before replacing a file.",
       "projectUnavailable": "This Project no longer has an editable Source snapshot."
+    },
+    "dependencies": {
+      "title": "Update Plugin dependencies",
+      "body": "Review the complete direct npm dependency map. NomiFun resolves pure ESM packages, verifies registry integrity, and commits package.json with the Host-owned exact lock through a recoverable mutation.",
+      "directDependencies": "Direct dependencies (JSON)",
+      "submit": "Resolve and update",
+      "hint": "Use npm SemVer requirements only. An empty object removes all direct dependencies. Lifecycle scripts, CommonJS, native addons, optional or peer dependencies, unsafe archives, and stale Project facts are rejected.",
+      "invalidJson": "Enter valid JSON.",
+      "invalidShape": "Dependencies must be a JSON object whose values are SemVer strings.",
+      "projectUnavailable": "This Project no longer has an editable Source snapshot and exact dependency lock."
     },
     "configure": {
       "title": "Config and credentials",

@@ -161,10 +161,11 @@ Files/Private SQLite、Share/Import、永久删除或跨平台原生验证。M1-
     exact operation flag，取消返回前证明 worker/process/staging 已退出。base current 和
     compatibility diff 由 application service 从 linked Mount 与 canonical Manifest
     计算，不接受 Builder 自报。Authoring 27、Plugin Service 22、真实 Build E2E 2 和
-    App crate check 通过。后续 Windows 实施已补齐 Chat Dev Source 编辑和 production
-    npm registry adapter；MiniApp build profile 由独立 M1 主链完成。具备 request cancel、
-    crash journal 与 startup recovery 的 dependency lock mutation 仍未完成，因此
-    `N1-4-01` 按实时台账保持实施中；Plugin Share、auto-Apply 与安装版闭环也仍属于后续项。
+    App crate check 通过。后续 Windows 实施已补齐 Chat Dev Source 编辑、production
+    npm registry adapter，以及具备 exact request CAS、SQLite durable intent、filesystem
+    crash journal、request cancel 和 startup rollback/finish recovery 的 dependency
+    lock mutation；`N1-4-01` 已按实时台账关闭。MiniApp build profile 由独立 M1 主链
+    完成；Plugin Share、auto-Apply 与安装版闭环仍属于后续项。
 12. `plugin-package-v1` 已把 contribution schema registry 冻结为 Artifact 的正式组成：
     Tool input/output、Context 和 Event schema ref 必须精确出现在 registry 中，并以
     `schema://...#<sha256>` 绑定 canonical 内容；missing、extra、digest tamper 均拒绝。

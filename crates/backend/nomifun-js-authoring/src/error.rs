@@ -40,6 +40,12 @@ pub enum AuthoringError {
         lock_request: String,
         next_request: String,
     },
+    #[error("dependency lock changed (expected {expected}, observed {observed})")]
+    DependencyLockChanged { expected: String, observed: String },
+    #[error("dependency mutation conflict: {0}")]
+    DependencyMutationConflict(String),
+    #[error("dependency mutation requires recovery: {0}")]
+    DependencyMutationNeedsRecovery(String),
     #[error("source operation was canceled")]
     Canceled,
     #[error("source contains too many files ({observed} > {limit})")]

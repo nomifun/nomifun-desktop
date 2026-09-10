@@ -31,7 +31,7 @@ use nomifun_api_types::{
     PluginDetailDto, PluginLibraryResponseDto, PluginProjectDetailDto,
     RestorePluginPreviousRequest, RetryPluginRequest,
     SetPluginEnabledRequest, TestPluginCandidateRequest,
-    UninstallPluginRequest,
+    UninstallPluginRequest, UpdatePluginDependenciesRequest,
 };
 use nomifun_auth::CurrentUser;
 use nomifun_db::{
@@ -43,7 +43,8 @@ use nomifun_js_host::{
     JavaScriptHostConfig, materialize_bundled_extension_host,
 };
 use nomifun_js_authoring::{
-    ContentAddressedNpmCache, FixedPluginPacker, NodeBuildHost, SourceStoreLimits,
+    ContentAddressedNpmCache, FixedPluginPacker, NodeBuildHost,
+    NpmRegistryHttpClient, SourceStoreLimits,
 };
 use nomifun_js_kernel_adapter::{
     JsKernelPluginAdapter, PluginPackageInput,
@@ -420,10 +421,19 @@ pub(crate) async fn build_nomi_core_plugin_state(
         platform_root.join(PLUGIN_ARTIFACT_DIRECTORY),
         ArtifactStoreLimits::default(),
     )?);
-    let source_store = Arc::new(FsPluginSourceStore::new(
-        platform_root.join(PLUGIN_AUTHORING_DIRECTORY),
-        SourceStoreLimits::default(),
-    )?);
+    let npm_cache = ContentAddressedNpmCache::new(
+        platform_root.join(PLUGIN_NPM_CACHE_DIRECTORY),
+    )?;
+    let source_store = Arc::new(
+        FsPluginSourceStore::new(
+            platform_root.join(PLUGIN_AUTHORING_DIRECTORY),
+            SourceStoreLimits::default(),
+        )?
+        .with_npm_registry(
+            Arc::new(NpmRegistryHttpClient::npmjs()?),
+            npm_cache,
+        ),
+    );
     let host_module =
         materialize_bundled_extension_host(platform_root.join("host"))?;
     let shared_host = super::plugin_runtime_host::RuntimeBoundExtensionHost::new(
@@ -486,6 +496,7 @@ pub(crate) async fn build_nomi_core_plugin_state(
             },
         },
     ));
+    service.reconcile_dependency_mutations().await?;
     let runtime_participant = Arc::new(NomiCorePluginRuntimeParticipant {
         shared_host,
         build,
@@ -738,6 +749,10 @@ pub(crate) fn plugin_routes(state: PluginRouterState) -> Router {
             "/api/plugin-projects/{project_id}/source/edit",
             post(apply_source_edit),
         )
+        .route(
+            "/api/plugin-projects/{project_id}/source/dependencies",
+            put(update_dependencies),
+        )
         .route("/api/plugin-imports", post(import_prebuilt))
         .route(
             "/api/plugin-projects/{project_id}/build",
@@ -914,6 +929,21 @@ async fn apply_source_edit(
                 owner_user_id: user.id.as_str().to_owned(),
                 request,
             })
+            .await?,
+    )))
+}
+
+async fn update_dependencies(
+    State(state): State<PluginRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    AxumPath(project_id): AxumPath<String>,
+    Json(request): Json<UpdatePluginDependenciesRequest>,
+) -> Result<Json<ApiResponse<PluginProjectDetailDto>>, PluginHttpError> {
+    require_route_id("project_id", &project_id, &request.project_id)?;
+    Ok(Json(ApiResponse::ok(
+        state
+            .service
+            .update_dependencies(user.id.as_str(), request)
             .await?,
     )))
 }
@@ -1704,6 +1734,7 @@ mod tests {
         CreatePluginProjectRequest, ImportPluginRequest,
         PluginImportKindDto, PluginProjectLanguageDto,
         PluginProjectSourceStateDto, UninstallPluginRequest,
+        UpdatePluginDependenciesRequest,
     };
     use nomifun_plugin_service::CreateProjectInput;
     use nomifun_js_runtime::{
@@ -2037,6 +2068,48 @@ mod tests {
                 .join("dependency-lock.json")
                 .is_file()
         );
+
+        let dependency_response = plugin_routes(state.clone())
+            .layer(Extension(CurrentUser {
+                id: nomifun_common::UserId::parse(owner_user_id.clone()).unwrap(),
+                username: "owner".to_owned(),
+            }))
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(axum::http::Method::PUT)
+                    .uri(format!(
+                        "/api/plugin-projects/{}/source/dependencies",
+                        scaffolded.summary.project_id
+                    ))
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::to_vec(&UpdatePluginDependenciesRequest {
+                            project_id: scaffolded.summary.project_id.clone(),
+                            expected_project_revision: scaffolded.summary.project_revision,
+                            expected_build_generation: scaffolded.summary.build_generation,
+                            expected_source_snapshot_digest: scaffolded
+                                .source_snapshot_digest
+                                .clone()
+                                .unwrap(),
+                            expected_dependency_lock_digest: scaffolded
+                                .dependency_lock_digest
+                                .clone()
+                                .unwrap(),
+                            dependencies: BTreeMap::new(),
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(dependency_response.status(), StatusCode::OK);
+        let scaffolded_after_noop = state
+            .service
+            .get_project(&owner_user_id, &scaffolded.summary.project_id)
+            .await
+            .unwrap();
+        assert_eq!(scaffolded_after_noop.summary, scaffolded.summary);
 
         let main = br#"
             export async function activate() {

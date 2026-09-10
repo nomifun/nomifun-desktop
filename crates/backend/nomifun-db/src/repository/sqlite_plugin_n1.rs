@@ -5,13 +5,15 @@ use crate::DbError;
 use crate::models::{
     PluginArtifactRow, PluginCandidateOrigin, PluginCandidateTestReceiptRow,
     PluginCredentialBindingInput, PluginCredentialBindingRow, PluginCredentialBindingSnapshot,
-    PluginKvRow, PluginMountRow, PluginMountRuntimeState, PluginProjectRow,
-    PluginReadyCandidateRow, ProductOperationKind, ProductOperationRow, ProductOperationState,
+    PluginDependencyMutationIntentRow, PluginKvRow, PluginMountRow, PluginMountRuntimeState,
+    PluginProjectRow, PluginReadyCandidateRow, ProductOperationKind, ProductOperationRow,
+    ProductOperationState,
 };
 use crate::repository::plugin_n1::{
-    ApplyPluginCandidateParams, CreatePluginArtifactParams, CreatePluginProjectParams,
+    AbortPluginDependencyMutationParams, ApplyPluginCandidateParams,
+    BeginPluginDependencyMutationParams, CreatePluginArtifactParams, CreatePluginProjectParams,
     DeletePluginKvParams, DeletePluginProjectParams, DiscardPluginCandidateParams,
-    FinishProductOperationParams,
+    FinalizePluginDependencyMutationParams, FinishProductOperationParams,
     GetPluginKvParams,
     IPluginN1Repository, ListPluginCredentialBindingsParams, PutPluginKvParams,
     RecordPluginCandidateTestReceiptParams, RecordPluginReadyCandidateParams,
@@ -448,6 +450,245 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
         self.get_project(&params.project_id)
             .await?
             .ok_or_else(|| DbError::NotFound(format!("plugin project {}", params.project_id)))
+    }
+
+    async fn begin_dependency_mutation(
+        &self,
+        params: &BeginPluginDependencyMutationParams,
+    ) -> Result<PluginDependencyMutationIntentRow, DbError> {
+        validate_uuid(&params.intent_id, "intent_id")?;
+        validate_uuid(&params.project_id, "project_id")?;
+        validate_uuid(&params.owner_user_id, "owner_user_id")?;
+        validate_timestamp(
+            params.expected_project_updated_at,
+            "expected_project_updated_at",
+        )?;
+        if params.expected_build_generation < 0 || params.created_at <= 0 {
+            return Err(conflict(
+                "dependency intent generation must be non-negative and created_at positive",
+            ));
+        }
+        for (value, label) in [
+            (&params.expected_source_digest, "expected_source_digest"),
+            (&params.expected_lock_digest, "expected_lock_digest"),
+            (&params.next_source_digest, "next_source_digest"),
+            (&params.next_lock_digest, "next_lock_digest"),
+        ] {
+            validate_digest(value, label)?;
+        }
+        if params.expected_source_digest == params.next_source_digest
+            && params.expected_lock_digest == params.next_lock_digest
+        {
+            return Err(conflict("dependency mutation must change Source or lock facts"));
+        }
+
+        let mut tx = self.pool.begin().await?;
+        let project = lock_project(&mut tx, &params.project_id).await?;
+        if project.owner_user_id != params.owner_user_id
+            || project.managed_source_path.is_none()
+            || project.updated_at != params.expected_project_updated_at
+            || project.build_generation != params.expected_build_generation
+            || project.source_head_digest.as_deref()
+                != Some(params.expected_source_digest.as_str())
+            || project.dependency_lock_digest.as_deref()
+                != Some(params.expected_lock_digest.as_str())
+        {
+            return Err(conflict(
+                "dependency intent no longer matches the exact managed Project head",
+            ));
+        }
+        sqlx::query(
+            "INSERT INTO plugin_dependency_mutation_intents (
+                intent_id, project_id, owner_user_id,
+                expected_project_updated_at, expected_build_generation,
+                expected_source_digest, expected_lock_digest,
+                next_source_digest, next_lock_digest, created_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&params.intent_id)
+        .bind(&params.project_id)
+        .bind(&params.owner_user_id)
+        .bind(params.expected_project_updated_at)
+        .bind(params.expected_build_generation)
+        .bind(&params.expected_source_digest)
+        .bind(&params.expected_lock_digest)
+        .bind(&params.next_source_digest)
+        .bind(&params.next_lock_digest)
+        .bind(params.created_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        let intent = sqlx::query_as::<_, PluginDependencyMutationIntentRow>(
+            "SELECT * FROM plugin_dependency_mutation_intents WHERE intent_id = ?",
+        )
+        .bind(&params.intent_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(DbError::Query)?;
+        tx.commit().await?;
+        Ok(intent)
+    }
+
+    async fn finalize_dependency_mutation(
+        &self,
+        params: &FinalizePluginDependencyMutationParams,
+    ) -> Result<PluginProjectRow, DbError> {
+        validate_uuid(&params.intent_id, "intent_id")?;
+        validate_uuid(&params.project_id, "project_id")?;
+        validate_uuid(&params.owner_user_id, "owner_user_id")?;
+        validate_timestamp(params.updated_at, "updated_at")?;
+        let mut tx = self.pool.begin().await?;
+        let intent = sqlx::query_as::<_, PluginDependencyMutationIntentRow>(
+            "SELECT * FROM plugin_dependency_mutation_intents
+             WHERE intent_id = ? AND project_id = ? AND owner_user_id = ?",
+        )
+        .bind(&params.intent_id)
+        .bind(&params.project_id)
+        .bind(&params.owner_user_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(DbError::Query)?
+        .ok_or_else(|| DbError::NotFound("plugin dependency mutation intent".into()))?;
+        let committed_at = params
+            .updated_at
+            .max(intent.expected_project_updated_at.saturating_add(1));
+        sqlx::query(
+            "INSERT INTO plugin_dependency_mutation_commits (
+                project_id, intent_id, created_at
+             ) VALUES (?, ?, ?)",
+        )
+        .bind(&intent.project_id)
+        .bind(&intent.intent_id)
+        .bind(committed_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        let updated = sqlx::query(
+            "UPDATE plugin_projects
+             SET source_head_digest = ?, dependency_lock_digest = ?,
+                 build_generation = build_generation + 1, updated_at = ?
+             WHERE project_id = ? AND owner_user_id = ?
+               AND managed_source_path IS NOT NULL
+               AND updated_at = ? AND build_generation = ?
+               AND source_head_digest = ? AND dependency_lock_digest = ?",
+        )
+        .bind(&intent.next_source_digest)
+        .bind(&intent.next_lock_digest)
+        .bind(committed_at)
+        .bind(&intent.project_id)
+        .bind(&intent.owner_user_id)
+        .bind(intent.expected_project_updated_at)
+        .bind(intent.expected_build_generation)
+        .bind(&intent.expected_source_digest)
+        .bind(&intent.expected_lock_digest)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        if updated.rows_affected() != 1 {
+            return Err(conflict(
+                "dependency mutation lost its exact Project finalize CAS",
+            ));
+        }
+        let deleted = sqlx::query(
+            "DELETE FROM plugin_dependency_mutation_intents
+             WHERE intent_id = ? AND project_id = ? AND owner_user_id = ?",
+        )
+        .bind(&intent.intent_id)
+        .bind(&intent.project_id)
+        .bind(&intent.owner_user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        if deleted.rows_affected() != 1 {
+            return Err(conflict(
+                "dependency mutation intent disappeared during finalize",
+            ));
+        }
+        let project = sqlx::query_as("SELECT * FROM plugin_projects WHERE project_id = ?")
+            .bind(&intent.project_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(DbError::Query)?;
+        tx.commit().await?;
+        Ok(project)
+    }
+
+    async fn abort_dependency_mutation(
+        &self,
+        params: &AbortPluginDependencyMutationParams,
+    ) -> Result<bool, DbError> {
+        validate_uuid(&params.intent_id, "intent_id")?;
+        validate_uuid(&params.project_id, "project_id")?;
+        validate_uuid(&params.owner_user_id, "owner_user_id")?;
+        let mut tx = self.pool.begin().await?;
+        let intent = sqlx::query_as::<_, PluginDependencyMutationIntentRow>(
+            "SELECT * FROM plugin_dependency_mutation_intents
+             WHERE intent_id = ? AND project_id = ? AND owner_user_id = ?",
+        )
+        .bind(&params.intent_id)
+        .bind(&params.project_id)
+        .bind(&params.owner_user_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(DbError::Query)?;
+        let Some(intent) = intent else {
+            return Ok(false);
+        };
+        let project: PluginProjectRow =
+            sqlx::query_as("SELECT * FROM plugin_projects WHERE project_id = ?")
+                .bind(&intent.project_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(DbError::Query)?;
+        if project.updated_at != intent.expected_project_updated_at
+            || project.build_generation != intent.expected_build_generation
+            || project.source_head_digest.as_deref()
+                != Some(intent.expected_source_digest.as_str())
+            || project.dependency_lock_digest.as_deref()
+                != Some(intent.expected_lock_digest.as_str())
+        {
+            return Err(conflict(
+                "dependency intent cannot be aborted after Project facts changed",
+            ));
+        }
+        let deleted = sqlx::query(
+            "DELETE FROM plugin_dependency_mutation_intents
+             WHERE intent_id = ? AND project_id = ? AND owner_user_id = ?",
+        )
+        .bind(&intent.intent_id)
+        .bind(&intent.project_id)
+        .bind(&intent.owner_user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(query_error)?;
+        tx.commit().await?;
+        Ok(deleted.rows_affected() == 1)
+    }
+
+    async fn list_dependency_mutation_intents(
+        &self,
+    ) -> Result<Vec<PluginDependencyMutationIntentRow>, DbError> {
+        sqlx::query_as(
+            "SELECT * FROM plugin_dependency_mutation_intents
+             ORDER BY created_at, intent_id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(DbError::Query)
+    }
+
+    async fn get_dependency_mutation_intent(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<PluginDependencyMutationIntentRow>, DbError> {
+        validate_uuid(project_id, "project_id")?;
+        sqlx::query_as(
+            "SELECT * FROM plugin_dependency_mutation_intents WHERE project_id = ?",
+        )
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(DbError::Query)
     }
 
     async fn delete_project_cas(

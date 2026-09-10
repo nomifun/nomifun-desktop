@@ -3,9 +3,10 @@ use serde_json::Value;
 use crate::DbError;
 use crate::models::{
     PluginArtifactRow, PluginCandidateOrigin, PluginCandidateTestReceiptRow,
-    PluginCredentialBindingInput, PluginCredentialBindingSnapshot, PluginKvRow, PluginMountRow,
-    PluginMountRuntimeState, PluginProjectRow, PluginReadyCandidateRow, ProductOperationKind,
-    ProductOperationRow, ProductOperationState,
+    PluginCredentialBindingInput, PluginCredentialBindingSnapshot,
+    PluginDependencyMutationIntentRow, PluginKvRow, PluginMountRow, PluginMountRuntimeState,
+    PluginProjectRow, PluginReadyCandidateRow, ProductOperationKind, ProductOperationRow,
+    ProductOperationState,
 };
 
 pub const MAX_PRODUCT_OPERATION_LOG_LINES: usize = 200;
@@ -44,6 +45,35 @@ pub struct UpdatePluginProjectSourceParams {
     pub source_head_digest: String,
     pub dependency_lock_digest: Option<String>,
     pub updated_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct BeginPluginDependencyMutationParams {
+    pub intent_id: String,
+    pub project_id: String,
+    pub owner_user_id: String,
+    pub expected_project_updated_at: i64,
+    pub expected_build_generation: i64,
+    pub expected_source_digest: String,
+    pub expected_lock_digest: String,
+    pub next_source_digest: String,
+    pub next_lock_digest: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct FinalizePluginDependencyMutationParams {
+    pub intent_id: String,
+    pub project_id: String,
+    pub owner_user_id: String,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct AbortPluginDependencyMutationParams {
+    pub intent_id: String,
+    pub project_id: String,
+    pub owner_user_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -225,6 +255,30 @@ pub trait IPluginN1Repository: Send + Sync {
         &self,
         params: &UpdatePluginProjectSourceParams,
     ) -> Result<PluginProjectRow, DbError>;
+
+    async fn begin_dependency_mutation(
+        &self,
+        params: &BeginPluginDependencyMutationParams,
+    ) -> Result<PluginDependencyMutationIntentRow, DbError>;
+
+    async fn finalize_dependency_mutation(
+        &self,
+        params: &FinalizePluginDependencyMutationParams,
+    ) -> Result<PluginProjectRow, DbError>;
+
+    async fn abort_dependency_mutation(
+        &self,
+        params: &AbortPluginDependencyMutationParams,
+    ) -> Result<bool, DbError>;
+
+    async fn list_dependency_mutation_intents(
+        &self,
+    ) -> Result<Vec<PluginDependencyMutationIntentRow>, DbError>;
+
+    async fn get_dependency_mutation_intent(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<PluginDependencyMutationIntentRow>, DbError>;
 
     async fn delete_project_cas(
         &self,

@@ -1,9 +1,11 @@
 use std::path::Path;
 
 use nomifun_db::{
-    ApplyPluginCandidateParams, CreatePluginArtifactParams, CreatePluginProjectParams, DbError,
+    AbortPluginDependencyMutationParams, ApplyPluginCandidateParams,
+    BeginPluginDependencyMutationParams, CreatePluginArtifactParams, CreatePluginProjectParams,
+    DbError,
     DeletePluginKvParams, DeletePluginProjectParams, FinishProductOperationParams,
-    GetPluginKvParams,
+    FinalizePluginDependencyMutationParams, GetPluginKvParams,
     IPluginN1Repository, ListPluginCredentialBindingsParams, PluginCandidateOrigin,
     PluginCredentialBindingInput, ProductOperationKind, ProductOperationState, PutPluginKvParams,
     RecordPluginCandidateTestReceiptParams, RecordPluginReadyCandidateParams,
@@ -72,7 +74,9 @@ async fn succeed_operation(
 struct ManagedFixture {
     pool: sqlx::SqlitePool,
     repo: SqlitePluginN1Repository,
+    owner_user_id: String,
     project_id: String,
+    project_updated_at: i64,
     source_digest: String,
     lock_digest: String,
     artifact_id: String,
@@ -88,7 +92,7 @@ async fn managed_fixture() -> ManagedFixture {
     let project_id = id();
     repo.create_project(&CreatePluginProjectParams {
         project_id: project_id.clone(),
-        owner_user_id,
+        owner_user_id: owner_user_id.clone(),
         package_id: "dev.nomifun.fixture".into(),
         display_name: "Fixture Plugin".into(),
         description: "Managed Plugin repository fixture.".into(),
@@ -156,11 +160,19 @@ async fn managed_fixture() -> ManagedFixture {
     assert_eq!(candidate.target_package_id, "dev.nomifun.fixture");
     assert_eq!(candidate.target_package_version, "1.0.0");
     assert_eq!(candidate.target_manifest_digest, digest('3'));
+    let project_updated_at = repo
+        .get_project(&project_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .updated_at;
 
     ManagedFixture {
         pool,
         repo,
+        owner_user_id,
         project_id,
+        project_updated_at,
         source_digest,
         lock_digest,
         artifact_id,
@@ -289,13 +301,14 @@ async fn migrations_are_clean_start_preserve_legacy_miniapps_and_restart_at_sche
          WHERE type = 'table' AND name IN (
             'plugin_artifacts', 'plugin_projects', 'plugin_ready_candidates',
             'plugin_candidate_test_receipts', 'plugin_mounts', 'plugin_mount_revisions',
-            'plugin_credential_bindings', 'plugin_kv', 'product_operations'
+            'plugin_credential_bindings', 'plugin_dependency_mutation_intents',
+            'plugin_dependency_mutation_commits', 'plugin_kv', 'product_operations'
          )",
     )
     .fetch_one(database.pool())
     .await
     .unwrap();
-    assert_eq!(plugin_tables, 9);
+    assert_eq!(plugin_tables, 11);
     let runtime_tables: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_schema
          WHERE type = 'table' AND name = 'javascript_runtime_selection'",
@@ -336,6 +349,170 @@ async fn migrations_are_clean_start_preserve_legacy_miniapps_and_restart_at_sche
             .expect("the database must have at least one migration")
             .version
     );
+}
+
+fn dependency_intent_params(
+    fixture: &ManagedFixture,
+    intent_id: String,
+) -> BeginPluginDependencyMutationParams {
+    BeginPluginDependencyMutationParams {
+        intent_id,
+        project_id: fixture.project_id.clone(),
+        owner_user_id: fixture.owner_user_id.clone(),
+        expected_project_updated_at: fixture.project_updated_at,
+        expected_build_generation: 1,
+        expected_source_digest: fixture.source_digest.clone(),
+        expected_lock_digest: fixture.lock_digest.clone(),
+        next_source_digest: digest('3'),
+        next_lock_digest: digest('4'),
+        created_at: fixture.project_updated_at + 1,
+    }
+}
+
+#[tokio::test]
+async fn dependency_intent_fences_project_until_exact_finalize() {
+    let fixture = managed_fixture().await;
+    let intent_id = id();
+    let intent = fixture
+        .repo
+        .begin_dependency_mutation(&dependency_intent_params(&fixture, intent_id.clone()))
+        .await
+        .unwrap();
+    assert_eq!(intent.intent_id, intent_id);
+    assert_eq!(
+        fixture
+            .repo
+            .list_dependency_mutation_intents()
+            .await
+            .unwrap(),
+        vec![intent.clone()]
+    );
+    assert!(
+        fixture
+            .repo
+            .update_project_source_cas(&UpdatePluginProjectSourceParams {
+                project_id: fixture.project_id.clone(),
+                expected_generation: 1,
+                source_head_digest: digest('5'),
+                dependency_lock_digest: Some(digest('6')),
+                updated_at: fixture.project_updated_at + 2,
+            })
+            .await
+            .is_err()
+    );
+    assert!(
+        sqlx::query("UPDATE plugin_projects SET description = 'raced' WHERE project_id = ?")
+            .bind(&fixture.project_id)
+            .execute(&fixture.pool)
+            .await
+            .is_err()
+    );
+    sqlx::query(
+        "INSERT INTO plugin_dependency_mutation_commits (
+            project_id, intent_id, created_at
+         ) VALUES (?, ?, ?)",
+    )
+    .bind(&fixture.project_id)
+    .bind(&intent.intent_id)
+    .bind(fixture.project_updated_at + 2)
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+    assert!(
+        sqlx::query(
+            "UPDATE plugin_projects
+             SET source_head_digest = ?, dependency_lock_digest = ?,
+                 build_generation = 2, updated_at = ?, description = 'raced'
+             WHERE project_id = ?",
+        )
+        .bind(digest('3'))
+        .bind(digest('4'))
+        .bind(fixture.project_updated_at + 2)
+        .bind(&fixture.project_id)
+        .execute(&fixture.pool)
+        .await
+        .is_err()
+    );
+    sqlx::query("DELETE FROM plugin_dependency_mutation_commits WHERE project_id = ?")
+        .bind(&fixture.project_id)
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+
+    let project = fixture
+        .repo
+        .finalize_dependency_mutation(&FinalizePluginDependencyMutationParams {
+            intent_id: intent.intent_id.clone(),
+            project_id: fixture.project_id.clone(),
+            owner_user_id: fixture.owner_user_id.clone(),
+            updated_at: fixture.project_updated_at + 2,
+        })
+        .await
+        .unwrap();
+    assert_eq!(project.source_head_digest.as_deref(), Some(digest('3').as_str()));
+    assert_eq!(project.dependency_lock_digest.as_deref(), Some(digest('4').as_str()));
+    assert_eq!(project.build_generation, 2);
+    assert!(project.updated_at > intent.expected_project_updated_at);
+    assert!(
+        fixture
+            .repo
+            .get_dependency_mutation_intent(&fixture.project_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let marker_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM plugin_dependency_mutation_commits")
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+    assert_eq!(marker_count, 0);
+}
+
+#[tokio::test]
+async fn dependency_intent_abort_requires_the_unchanged_old_project_head() {
+    let fixture = managed_fixture().await;
+    let intent_id = id();
+    fixture
+        .repo
+        .begin_dependency_mutation(&dependency_intent_params(&fixture, intent_id.clone()))
+        .await
+        .unwrap();
+
+    assert!(
+        fixture
+            .repo
+            .abort_dependency_mutation(&AbortPluginDependencyMutationParams {
+                intent_id: intent_id.clone(),
+                project_id: fixture.project_id.clone(),
+                owner_user_id: fixture.owner_user_id.clone(),
+            })
+            .await
+            .unwrap()
+    );
+    assert!(
+        !fixture
+            .repo
+            .abort_dependency_mutation(&AbortPluginDependencyMutationParams {
+                intent_id,
+                project_id: fixture.project_id.clone(),
+                owner_user_id: fixture.owner_user_id.clone(),
+            })
+            .await
+            .unwrap()
+    );
+    let updated = fixture
+        .repo
+        .update_project_source_cas(&UpdatePluginProjectSourceParams {
+            project_id: fixture.project_id,
+            expected_generation: 1,
+            source_head_digest: digest('5'),
+            dependency_lock_digest: Some(digest('6')),
+            updated_at: fixture.project_updated_at + 2,
+        })
+        .await
+        .unwrap();
+    assert_eq!(updated.build_generation, 2);
 }
 
 #[tokio::test]

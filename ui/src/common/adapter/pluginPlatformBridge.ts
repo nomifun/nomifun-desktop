@@ -31,6 +31,7 @@ import type {
   SetPluginEnabledRequest,
   TestPluginCandidateRequest,
   UninstallPluginRequest,
+  UpdatePluginDependenciesRequest,
 } from '../types/pluginPlatform';
 import {
   parsePluginArtifactId,
@@ -186,6 +187,13 @@ export const plugins = {
     httpPost<PluginProjectDetail, ApplyPluginSourceEditRequest>(
       (request) =>
         `/api/plugin-projects/${encodeURIComponent(request.project_id)}/source/edit`
+    ),
+    mapProjectDetail
+  ),
+  updateDependencies: withResponseMap(
+    httpPut<PluginProjectDetail, UpdatePluginDependenciesRequest>(
+      (request) =>
+        `/api/plugin-projects/${encodeURIComponent(request.project_id)}/source/dependencies`
     ),
     mapProjectDetail
   ),

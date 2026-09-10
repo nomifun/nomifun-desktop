@@ -44,6 +44,7 @@ pub use path::NormalizedSourcePath;
 pub use scaffold::PluginScaffoldRequest;
 pub use snapshot::{CapturedSource, SourceFileDigest, SourceSnapshot};
 pub use store::{
-    ScaffoldedPluginProject, SourceEditOutcome, SourceFileEdit, SourceStore,
-    StagedSource, StoredSourceProject,
+    DependencyMutationFacts, DependencyState, DurableDependencyMutation,
+    PreparedDependencyMutation, ScaffoldedPluginProject, SourceEditOutcome,
+    SourceFileEdit, SourceStore, StagedSource, StoredSourceProject,
 };

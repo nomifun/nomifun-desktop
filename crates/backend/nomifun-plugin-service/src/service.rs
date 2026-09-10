@@ -23,16 +23,19 @@ use nomifun_api_types::{
     PluginConsumerAvailabilityStatusDto, PluginConsumerSurfaceDto, PluginDetailDto,
     PluginLibraryResponseDto, PluginLifecycleDto, PluginProjectDetailDto,
     PluginProjectSourceStateDto, PluginProjectSummaryDto, PluginReadyCandidateDto,
-    PluginSummaryDto, PluginTargetRefDto,
+    PluginSummaryDto, PluginTargetRefDto, UpdatePluginDependenciesRequest,
 };
 use nomifun_db::{
-    ApplyPluginCandidateParams, CreatePluginArtifactParams, CreatePluginProjectParams,
+    AbortPluginDependencyMutationParams, ApplyPluginCandidateParams,
+    BeginPluginDependencyMutationParams, CreatePluginArtifactParams, CreatePluginProjectParams,
     DeletePluginProjectParams, DiscardPluginCandidateParams,
-    FinishProductOperationParams, ListPluginCredentialBindingsParams, PluginArtifactRow,
+    FinalizePluginDependencyMutationParams, FinishProductOperationParams,
+    ListPluginCredentialBindingsParams, PluginArtifactRow,
     PluginCandidateOrigin as DbCandidateOrigin, PluginCandidateTestReceiptRow,
-    PluginCredentialBindingInput, PluginCredentialBindingSnapshot, PluginMountRow,
-    PluginProjectRow, PluginReadyCandidateRow, ProductOperationKind, ProductOperationRow,
-    ProductOperationState, RecordPluginCandidateTestReceiptParams,
+    PluginCredentialBindingInput, PluginCredentialBindingSnapshot,
+    PluginDependencyMutationIntentRow, PluginMountRow, PluginProjectRow,
+    PluginReadyCandidateRow, ProductOperationKind, ProductOperationRow, ProductOperationState,
+    RecordPluginCandidateTestReceiptParams,
     RecordPluginReadyCandidateParams, ReplacePluginCredentialBindingsParams,
     RestorePluginMountParams, StartProductOperationParams, UninstallPluginMountParams,
     UpdatePluginMountConfigParams, UpdatePluginProjectSourceParams,
@@ -40,6 +43,11 @@ use nomifun_db::{
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+use nomifun_js_authoring::{
+    DependencyMutationFacts, DigestHex as AuthoringDigestHex,
+    PluginProjectId as AuthoringPluginProjectId, SourceScope,
+    UserId as AuthoringUserId,
+};
 
 use nomifun_plugin_platform::{
     OwnerMutationCoordinator, OwnerMutationGuard, PluginOwnerMutationScope,
@@ -220,6 +228,21 @@ impl PluginApplicationService {
         owner_user_id: &str,
         project_id: &str,
     ) -> Result<PluginProjectDetailDto, PluginServiceError> {
+        let has_intent = self
+            .repository
+            .get_dependency_mutation_intent(project_id)
+            .await?
+            .is_some();
+        let has_journal = self
+            .source_store
+            .dependency_mutation_journal(owner_user_id, project_id)
+            .await?
+            .is_some();
+        if has_intent || has_journal {
+            let _guard = self.project_guard(owner_user_id, project_id).await?;
+            self.reconcile_project_dependency_mutation(owner_user_id, project_id)
+                .await?;
+        }
         let project = self.owned_project(owner_user_id, project_id).await?;
         let candidate = self.repository.get_candidate(project_id).await?;
         let receipt = match candidate.as_ref() {
@@ -239,11 +262,29 @@ impl PluginApplicationService {
                     && operation.owner_id == project.project_id
                     && operation.state == "running"
             });
+        let direct_dependencies = if project.managed_source_path.is_some() {
+            let state = self
+                .source_store
+                .dependency_state(owner_user_id, project_id)
+                .await?;
+            if project.source_head_digest.as_deref() != Some(state.source_digest().as_ref())
+                || project.dependency_lock_digest.as_deref()
+                    != Some(state.lock_digest().as_ref())
+            {
+                return Err(PluginServiceError::reconcile_required(
+                    "Plugin Project database facts differ from the managed Source dependency state",
+                ));
+            }
+            state.direct_dependencies().clone()
+        } else {
+            BTreeMap::new()
+        };
         project_detail_with_state(
             &project,
             candidate.as_ref(),
             receipt.as_ref(),
             operation.as_ref(),
+            direct_dependencies,
         )
     }
 
@@ -345,6 +386,226 @@ impl PluginApplicationService {
         }
         self.get_project(&input.owner_user_id, &input.request.project_id)
             .await
+    }
+
+    pub async fn update_dependencies(
+        &self,
+        owner_user_id: &str,
+        request: UpdatePluginDependenciesRequest,
+    ) -> Result<PluginProjectDetailDto, PluginServiceError> {
+        let guard = self.project_guard(owner_user_id, &request.project_id).await?;
+        self.reconcile_project_dependency_mutation(owner_user_id, &request.project_id)
+            .await?;
+        let project = self.owned_project(owner_user_id, &request.project_id).await?;
+        require_project_request_fresh(
+            &project,
+            request.expected_project_revision,
+            request.expected_build_generation,
+        )?;
+        if project.managed_source_path.is_none() {
+            return Err(PluginServiceError::conflict(
+                "runtime-only Plugin Project has no editable dependencies",
+            ));
+        }
+        if project.source_head_digest.as_deref()
+            != Some(request.expected_source_snapshot_digest.as_str())
+            || project.dependency_lock_digest.as_deref()
+                != Some(request.expected_dependency_lock_digest.as_str())
+        {
+            return Err(PluginServiceError::stale(
+                "Plugin Project Source or dependency lock changed",
+            ));
+        }
+
+        let mutation_id = Uuid::now_v7().to_string();
+        let prepared = self
+            .source_store
+            .prepare_dependency_mutation(
+                owner_user_id,
+                &mutation_id,
+                &request,
+            )
+            .await?;
+        let facts = prepared.facts().clone();
+        if facts.is_noop() {
+            drop(prepared);
+            drop(guard);
+            return self.get_project(owner_user_id, &request.project_id).await;
+        }
+        self.repository
+            .begin_dependency_mutation(&BeginPluginDependencyMutationParams {
+                intent_id: mutation_id,
+                project_id: project.project_id.clone(),
+                owner_user_id: owner_user_id.to_owned(),
+                expected_project_updated_at: project.updated_at,
+                expected_build_generation: project.build_generation,
+                expected_source_digest: facts.expected_source_digest().as_ref().to_owned(),
+                expected_lock_digest: facts.expected_lock_digest().as_ref().to_owned(),
+                next_source_digest: facts.next_source_digest().as_ref().to_owned(),
+                next_lock_digest: facts.next_lock_digest().as_ref().to_owned(),
+                created_at: now_ms(),
+            })
+            .await?;
+        let durable = prepared.persist();
+        if let Err(commit_error) = self
+            .source_store
+            .commit_dependency_mutation(&durable)
+            .await
+        {
+            return match self
+                .reconcile_project_dependency_mutation(owner_user_id, &request.project_id)
+                .await
+            {
+                Ok(()) => Err(commit_error),
+                Err(recovery_error) => Err(PluginServiceError::reconcile_required(format!(
+                    "dependency commit failed with {commit_error}; recovery failed with {recovery_error}"
+                ))),
+            };
+        }
+        let finalized = self
+            .repository
+            .finalize_dependency_mutation(&FinalizePluginDependencyMutationParams {
+                intent_id: facts.mutation_id().to_owned(),
+                project_id: project.project_id.clone(),
+                owner_user_id: owner_user_id.to_owned(),
+                updated_at: now_ms(),
+            })
+            .await;
+        if let Err(finalize_error) = finalized {
+            self.reconcile_project_dependency_mutation(owner_user_id, &request.project_id)
+                .await
+                .map_err(|recovery_error| {
+                    PluginServiceError::reconcile_required(format!(
+                        "dependency DB finalize failed with {finalize_error}; recovery failed with {recovery_error}"
+                    ))
+                })?;
+            let observed = self.owned_project(owner_user_id, &request.project_id).await?;
+            if project_matches_dependency_next(&observed, &facts) {
+                drop(guard);
+                return self.get_project(owner_user_id, &request.project_id).await;
+            }
+            return Err(finalize_error);
+        }
+        if let Err(finish_error) = self
+            .source_store
+            .finish_dependency_mutation(&facts)
+            .await
+        {
+            self.reconcile_project_dependency_mutation(owner_user_id, &request.project_id)
+                .await
+                .map_err(|recovery_error| {
+                    PluginServiceError::reconcile_required(format!(
+                        "dependency cleanup failed with {finish_error}; recovery failed with {recovery_error}"
+                    ))
+                })?;
+        }
+        drop(guard);
+        self.get_project(owner_user_id, &request.project_id).await
+    }
+
+    pub async fn reconcile_dependency_mutations(&self) -> Result<(), PluginServiceError> {
+        let intents = self.repository.list_dependency_mutation_intents().await?;
+        let journals = self
+            .source_store
+            .list_dependency_mutation_journals()
+            .await?;
+        let mut projects = BTreeMap::<String, String>::new();
+        for intent in &intents {
+            projects.insert(intent.project_id.clone(), intent.owner_user_id.clone());
+        }
+        for journal in &journals {
+            projects.insert(
+                journal.scope().project_id().as_ref().to_owned(),
+                journal.scope().owner_id().as_ref().to_owned(),
+            );
+        }
+        for (project_id, owner_user_id) in projects {
+            let _guard = self.project_guard(&owner_user_id, &project_id).await?;
+            self.reconcile_project_dependency_mutation(&owner_user_id, &project_id)
+                .await?;
+        }
+        let retained = self
+            .repository
+            .list_dependency_mutation_intents()
+            .await?
+            .into_iter()
+            .map(|intent| intent.intent_id)
+            .chain(
+                self.source_store
+                    .list_dependency_mutation_journals()
+                    .await?
+                    .into_iter()
+                    .map(|journal| journal.mutation_id().to_owned()),
+            )
+            .collect::<BTreeSet<_>>();
+        self.source_store
+            .cleanup_orphan_dependency_staging(&retained)
+            .await
+    }
+
+    async fn reconcile_project_dependency_mutation(
+        &self,
+        owner_user_id: &str,
+        project_id: &str,
+    ) -> Result<(), PluginServiceError> {
+        let intent = self
+            .repository
+            .get_dependency_mutation_intent(project_id)
+            .await?;
+        let journal = self
+            .source_store
+            .dependency_mutation_journal(owner_user_id, project_id)
+            .await?;
+        match (intent, journal) {
+            (None, None) => Ok(()),
+            (Some(intent), journal) => {
+                if intent.owner_user_id != owner_user_id {
+                    return Err(PluginServiceError::forbidden(
+                        "dependency mutation intent belongs to another owner",
+                    ));
+                }
+                let facts = dependency_facts_from_intent(&intent)?;
+                if journal.as_ref().is_some_and(|journal| journal != &facts) {
+                    return Err(PluginServiceError::reconcile_required(
+                        "dependency DB intent and filesystem journal disagree",
+                    ));
+                }
+                let project = self.owned_project(owner_user_id, project_id).await?;
+                if !project_matches_dependency_old(&project, &facts) {
+                    return Err(PluginServiceError::reconcile_required(
+                        "pending dependency intent no longer matches the old Project head",
+                    ));
+                }
+                self.source_store
+                    .rollback_dependency_mutation(&facts)
+                    .await?;
+                self.repository
+                    .abort_dependency_mutation(&AbortPluginDependencyMutationParams {
+                        intent_id: facts.mutation_id().to_owned(),
+                        project_id: project_id.to_owned(),
+                        owner_user_id: owner_user_id.to_owned(),
+                    })
+                    .await?;
+                Ok(())
+            }
+            (None, Some(facts)) => {
+                if facts.scope().owner_id().as_ref() != owner_user_id {
+                    return Err(PluginServiceError::forbidden(
+                        "dependency filesystem journal belongs to another owner",
+                    ));
+                }
+                let project = self.owned_project(owner_user_id, project_id).await?;
+                if project_matches_dependency_next(&project, &facts) {
+                    self.source_store.finish_dependency_mutation(&facts).await
+                } else if project_matches_dependency_old(&project, &facts) {
+                    self.source_store.rollback_dependency_mutation(&facts).await
+                } else {
+                    Err(PluginServiceError::reconcile_required(
+                        "orphan dependency journal matches neither old nor finalized Project facts",
+                    ))
+                }
+            }
+        }
     }
 
     pub async fn delete_project(
@@ -566,7 +827,7 @@ impl PluginApplicationService {
                 })
                 .await?;
         }
-        project_detail_with_state(&project, None, None, None)
+        project_detail_with_state(&project, None, None, None, BTreeMap::new())
     }
 
     pub async fn import_prebuilt(
@@ -1667,6 +1928,59 @@ fn require_project_request_fresh(
     }
 }
 
+fn dependency_facts_from_intent(
+    intent: &PluginDependencyMutationIntentRow,
+) -> Result<DependencyMutationFacts, PluginServiceError> {
+    let scope = SourceScope::new(
+        AuthoringUserId::from(intent.owner_user_id.clone()),
+        AuthoringPluginProjectId::from(intent.project_id.clone()),
+    )
+    .map_err(|error| {
+        PluginServiceError::reconcile_required(format!(
+            "stored dependency intent scope is invalid: {error}"
+        ))
+    })?;
+    DependencyMutationFacts::new(
+        intent.intent_id.clone(),
+        scope,
+        intent.expected_project_updated_at as u64,
+        intent.expected_build_generation as u64,
+        AuthoringDigestHex::from(intent.expected_source_digest.clone()),
+        AuthoringDigestHex::from(intent.expected_lock_digest.clone()),
+        AuthoringDigestHex::from(intent.next_source_digest.clone()),
+        AuthoringDigestHex::from(intent.next_lock_digest.clone()),
+    )
+    .map_err(|error| {
+        PluginServiceError::reconcile_required(format!(
+            "stored dependency intent facts are invalid: {error}"
+        ))
+    })
+}
+
+fn project_matches_dependency_old(
+    project: &PluginProjectRow,
+    facts: &DependencyMutationFacts,
+) -> bool {
+    project.updated_at as u64 == facts.expected_project_revision()
+        && project.build_generation as u64 == facts.expected_build_generation()
+        && project.source_head_digest.as_deref()
+            == Some(facts.expected_source_digest().as_ref())
+        && project.dependency_lock_digest.as_deref()
+            == Some(facts.expected_lock_digest().as_ref())
+}
+
+fn project_matches_dependency_next(
+    project: &PluginProjectRow,
+    facts: &DependencyMutationFacts,
+) -> bool {
+    project.updated_at as u64 > facts.expected_project_revision()
+        && project.build_generation as u64
+            == facts.expected_build_generation().saturating_add(1)
+        && project.source_head_digest.as_deref() == Some(facts.next_source_digest().as_ref())
+        && project.dependency_lock_digest.as_deref()
+            == Some(facts.next_lock_digest().as_ref())
+}
+
 fn require_mount_cas(
     mount: &PluginMountRow,
     expected_revision: u64,
@@ -1984,11 +2298,13 @@ fn project_detail_with_state(
     candidate: Option<&PluginReadyCandidateRow>,
     receipt: Option<&PluginCandidateTestReceiptRow>,
     operation: Option<&ProductOperationRow>,
+    direct_dependencies: BTreeMap<String, String>,
 ) -> Result<PluginProjectDetailDto, PluginServiceError> {
     Ok(PluginProjectDetailDto {
         summary: project_summary(project, candidate),
         source_snapshot_digest: project.source_head_digest.clone(),
         dependency_lock_digest: project.dependency_lock_digest.clone(),
+        direct_dependencies,
         ready: candidate
             .map(|candidate| candidate_dto(candidate, receipt))
             .transpose()?,

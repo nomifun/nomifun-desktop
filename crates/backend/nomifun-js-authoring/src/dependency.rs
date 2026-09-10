@@ -5,7 +5,7 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 use nomifun_agent_contracts::DigestHex;
 
-use crate::canonical::{canonical_digest, strict_json_from_slice};
+use crate::canonical::{canonical_digest, canonical_json_bytes, strict_json_from_slice};
 use crate::error::AuthoringError;
 
 pub const DEPENDENCY_REQUEST_FORMAT_VERSION: &str = "1.0.0";
@@ -113,20 +113,30 @@ struct DependencyRequestSetWire {
     dependencies: BTreeMap<String, String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FixedPackageJson {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     name: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     version: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     description: Option<String>,
     private: bool,
     #[serde(rename = "type")]
     module_type: String,
     #[serde(default)]
     dependencies: BTreeMap<String, String>,
+}
+
+pub(crate) fn package_json_with_dependencies(
+    bytes: &[u8],
+    requests: &DependencyRequestSet,
+) -> Result<Vec<u8>, AuthoringError> {
+    DependencyRequestSet::from_package_json(bytes)?;
+    let mut package: FixedPackageJson = strict_json_from_slice(bytes)?;
+    package.dependencies = requests.dependencies.clone();
+    canonical_json_bytes(&package)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

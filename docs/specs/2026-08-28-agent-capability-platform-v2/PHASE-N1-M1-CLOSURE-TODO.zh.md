@@ -21,7 +21,8 @@
 > Whole-App Backup 还覆盖 Service Files、Private SQLite、Migration ledger、Catalog
 > identity digest 和 owner operation 互斥。
 > Plugin Authoring 的 production npm registry adapter 已形成并通过真实 public npm
-> smoke；dependency request/lock 的 durable mutation/recovery 仍未完成。
+> smoke；dependency request/lock 已接入 SQLite durable intent、filesystem journal、
+> exact finalize CAS、request cancellation 与 startup recovery，`N1-4-01` 已关闭。
 > 当前 HEAD 的 0.7.6 NSIS 安装版基础 smoke 已通过；Plugin/MiniApp Candidate、
 > fault、产品验收和 macOS/Linux 外部验证仍未关闭。
 >
@@ -59,8 +60,8 @@
 
 | 分类 | 数量 | 项目 |
 | --- | ---: | --- |
-| 已关闭 | 22 | 当前表内已关闭的 W0/N1/M1 项，包含 `N1-X-02`、`M1-0-01`、`M1-0-02-A`、`M1-0-02-B`、`M1-1-01`、`M1-1-02`、`M1-2-01` |
-| 正在实施 | 6 | `N1-1-01`、`N1-2-03`、`N1-4-01`、`N1-4-02`、`N1-4-03`、`N1-U-01` |
+| 已关闭 | 23 | 当前表内已关闭的 W0/N1/M1 项，包含 `N1-4-01`、`N1-X-02`、`M1-0-01`、`M1-0-02-A`、`M1-0-02-B`、`M1-1-01`、`M1-1-02`、`M1-2-01` |
+| 正在实施 | 5 | `N1-1-01`、`N1-2-03`、`N1-4-02`、`N1-4-03`、`N1-U-01` |
 | 已解锁待领取 | 0 | 当前 Windows 主线无未领取的前置切片 |
 | 依赖阻塞 | 5 | `N1-V-01`、`M1-U-01`、`M1-V-01` 与最终 Windows 合流等 |
 | 外部原生 | 2 | `RC-MA-01`、`RC-LD-01` |
@@ -426,7 +427,7 @@
 
 | ID | 状态 | Owner/写集 | 目标 | 依赖 | 最小验证 |
 | --- | --- | --- | --- | --- | --- |
-| `N1-4-01` | in-progress | Authoring lane；`nomifun-js-authoring/**` | Source Store、JS/TS scaffold、pure-JS dependency exact lock、fixed packer/Build Host | `N1-0-02`,`N1-1-02`,`N1-2-01` | authoring 36 + public npm live smoke 1；production HTTPS registry/SRI/tar containment、全图 package/depth/file/bytes/time budget、resolver/cache、共享 registry/build admission、static bundler/Node Host/Artifact admission/cancel 和 Chat Dev Source edit 已接；仍需具备 crash/cancel recovery 的 Project dependency mutation，不能使用多文件 best-effort rename 冒充原子提交 |
+| `N1-4-01` | closed | Authoring lane；`nomifun-js-authoring/**` | Source Store、JS/TS scaffold、pure-JS dependency exact lock、fixed packer/Build Host | `N1-0-02`,`N1-1-02`,`N1-2-01` | authoring 42 + public npm live smoke 1；production HTTPS registry/SRI/tar containment、全图 budgets、resolver/cache、共享 registry/build admission、static bundler/Node Host/Artifact admission/cancel、Chat Dev Source edit，以及 SQLite intent + filesystem journal + exact finalize/startup recovery 的 Project dependency mutation 均已通过 |
 | `N1-4-02` | in-progress | Plugin project lane | single Ready、Candidate Test、impact、manual/compatible-idle Apply、Discard、Retry/Restore | `N1-2-03`,`N1-3-01`,`N1-4-01` | Candidate discard 已完成；仍缺授权持久化 auto-apply、resident Host busy/quiescent 产品证据 |
 | `N1-4-03` | in-progress | SDK/CLI lane | Plugin SDK、Share Bundle/prebuilt import/export、本地 CLI | `N1-4-02` | 当前 CLI 已覆盖 list/show/source-path/build/test/candidate show-discard-apply-restore/mount lifecycle；Share/Export 等未实现接口不虚构 |
 
@@ -436,7 +437,7 @@
 | --- | --- | --- | --- | --- | --- |
 | `N1-X-01` | closed | Skill lane；新 `nomifun-skill-library/**` | 把 `skill_service`、builtin skills、Skill market 从 `nomifun-extension` 抽为独立 owner | `W0-01` | `610b59007`；Skill Library 150 passed/2 ignored；Extension/消费者 checks passed |
 | `N1-X-02` | closed | demolition lane；旧 Extension 生产链 | 删除旧 Extension loader/registry/hub/hot reload/permissions/settings/webui/agent/theme 路径 | `N1-X-01`,`N1-3-03`,`N1-4-03` | `nomifun-extension` crate、旧 `/api/extensions/*`/Hub/生产消费者已物理清理；剩余仅历史删除合同、负向测试和新 JS Host 的历史命名 |
-| `N1-U-01` | in-progress | UI lane；新 `pages/plugins/**`、`pages/settings/RuntimeManager/**` | Plugin Library/Workshop/配置/诊断、Node Runtime Manager；MCP 页面只保留 MCP | `N1-2-03`,`N1-4-02` | Plugin/Runtime bridge+model/interaction 39 targeted tests、i18n/icons/production build 已通过；全量 typecheck 有既有基线错误，仍需 Desktop product/a11y/视觉走查 |
+| `N1-U-01` | in-progress | UI lane；新 `pages/plugins/**`、`pages/settings/RuntimeManager/**` | Plugin Library/Workshop/配置/诊断、Node Runtime Manager；MCP 页面只保留 MCP | `N1-2-03`,`N1-4-02` | Plugin/Runtime targeted tests 及 dependency bridge/dialog 9 tests、i18n/icons/production build 已通过；仍需 Desktop product/a11y/视觉走查 |
 | `N1-V-01` | blocked | 集成 Owner | Windows N1 contract/integration/fault/product/NSIS candidate | 所有 N1 项 | authored JS/TS → Test → Apply → invoke → Restore |
 
 ## M1：Full-stack MiniApp
@@ -778,8 +779,8 @@ Extension 命中仅属于历史删除合同、负向 404 测试、通用语义�
    凭据未进入源码、argv、日志、fixture 或 Git。该 smoke 只证明 Nomi-core Provider
    链路，不替代 Plugin/MiniApp Candidate。
 5. 当前仍未关闭：`N1-1-01` 的安装版 Runtime switch/restart/fault 证据、
-   `N1-2-03` 的安装版 Plugin Build→Test→Apply→Invoke→Restore、`N1-4-01/02`
-   的 production dependency mutation/auto-apply authorization 与 resident Host
+   `N1-2-03` 的安装版 Plugin Build→Test→Apply→Invoke→Restore、`N1-4-02`
+   的 auto-apply authorization 与 resident Host
    busy/quiescent 产品证据、`M1-U-01` 的真实 Tauri 产品/accessibility 走查、
    MiniApp callable 完整产品 E2E、`N1-V-01`、`M1-V-01` 和 `RC-WIN-01`。
 6. 当前生成的安装包只作为本机候选输入，尚未把未完成的产品/fault checks 伪装成
@@ -806,5 +807,34 @@ Extension 命中仅属于历史删除合同、负向 404 测试、通用语义�
 5. 本轮审查曾验证一个直接写 `package.json + dependency-lock.json` 的原型，但发现 HTTP
    取消可在 blocking worker 与 DB CAS 之间形成分裂，多次 rename 也没有 crash journal/
    startup recovery；该原型及其 API/UI 已撤回，没有把不安全的多文件提交暴露给用户。
-   `N1-4-01` 因此保持 `in-progress`。下一切片必须先定义 durable mutation intent 与
-   commit/recovery/finalize 顺序，再接 application/API/Desktop。
+   `N1-4-01` 因此在该子切片结束时保持 `in-progress`；随后已按下一节先定义 durable
+   mutation intent 与 commit/recovery/finalize 顺序，再接 application/API/Desktop。
+
+## 2026-09-10 Plugin durable dependency mutation 收口
+
+1. `N1-4-01` 已关闭。Plugin Project 的完整直接依赖映射现在通过唯一产品 API 更新；
+   request 必须携带 Project revision、Build generation、Source digest 与 lock digest
+   的 exact CAS。相同映射是无网络、无 generation 变化的 no-op；真实变化先在私有
+   staging 完成 npm resolution、SRI/admission 与新 Source/lock digest 计算。
+2. 提交顺序已固定为：SQLite 写入 durable mutation intent 并用 trigger fence 普通
+   Project UPDATE/DELETE；Source Store 持久化 canonical filesystem journal；交换
+   `package.json` 与 Host-owned `dependency-lock.json`；SQLite 在单 transaction 内按
+   intent exact finalize 并把 Build generation 加一；最后删除 staging/backups/journal。
+   不再使用无恢复协议的多文件 best-effort rename。
+3. request 取消只在 registry/resolver/staging 阶段生效，取消会清理 staging，且不会写
+   intent 或 live Source。进入 durable intent 后即使 HTTP future、进程或文件交换中断，
+   启动恢复和下一次 Project 读取都会按 DB old/new facts 确定性 rollback 或 finish；
+   orphan staging 只在与 DB intent/journal 集合核对后清理。
+4. migration 084 新增 owner/project-scoped intent、短生命周期 finalize marker 和五个
+   guard/cleanup trigger；普通仓储更新与直接 SQL 都不能越过 pending intent。测试还
+   人工模拟了 journal 已落盘但文件只完成第 1 步或第 3 步交换后的重启，两种状态均
+   精确恢复原 Source+lock。
+5. Desktop Workshop 已提供“编辑依赖”对话框，预载当前完整直接依赖映射，只提交
+   SemVer string map 和 exact CAS；失败保留表单，成功刷新 Project/Library。生产组合根
+   使用 hardened npmjs client 和 content-addressed cache，并在暴露 Router 前执行恢复。
+6. 定向证据：`nomifun-js-authoring` 42 passed / 1 public-registry test ignored（该
+   `yocto-queue@1.2.1` live smoke 已在前一子切片显式通过）；DB Plugin repository 16、
+   ID/schema contract 20、Plugin Service 30、App route 1、dependency UI bridge/dialog 9
+   均通过；`check:i18n`、UI production build、contract generator check、定向 rustfmt
+   与 `git diff --check` 通过。App 的非定向 integration test 编译仍会命中仓库既有缺失
+   `tests/extension_e2e.rs`，本轮使用 `--lib` 精确执行并通过目标路由测试。

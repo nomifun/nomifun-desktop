@@ -463,6 +463,8 @@ pub struct PluginProjectDetailDto {
     pub source_snapshot_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dependency_lock_digest: Option<String>,
+    #[serde(default)]
+    pub direct_dependencies: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ready: Option<PluginReadyCandidateDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -522,6 +524,17 @@ pub struct BuildPluginProjectRequest {
     pub expected_build_generation: u64,
     pub expected_source_snapshot_digest: String,
     pub expected_dependency_lock_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdatePluginDependenciesRequest {
+    pub project_id: String,
+    pub expected_project_revision: u64,
+    pub expected_build_generation: u64,
+    pub expected_source_snapshot_digest: String,
+    pub expected_dependency_lock_digest: String,
+    pub dependencies: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
