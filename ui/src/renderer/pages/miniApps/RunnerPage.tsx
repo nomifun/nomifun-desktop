@@ -197,7 +197,7 @@ const ReadyReleaseSummary: React.FC<{
   );
 };
 
-const MiniAppWorkshopDetail: React.FC<{
+export const MiniAppWorkshopDetail: React.FC<{
   workshop: MiniAppWorkshop;
   locale: string;
   onBack: () => void;
@@ -299,6 +299,23 @@ const MiniAppWorkshopDetail: React.FC<{
       miniapp.releases.active &&
       (miniapp.lifecycle === 'enabled' || miniapp.lifecycle === 'disabled')
   );
+  const idPrefix = `miniapp-workshop-${miniapp.miniapp_id}`;
+  const detailTitleId = `${idPrefix}-title`;
+  const detailDescriptionId = `${idPrefix}-description`;
+  const sourceBuildTitleId = `${idPrefix}-source-build-title`;
+  const sourceBuildHintId = `${idPrefix}-source-build-hint`;
+  const releasesTitleId = `${idPrefix}-releases-title`;
+  const releasesHintId = `${idPrefix}-releases-hint`;
+  const serviceTitleId = `${idPrefix}-service-title`;
+  const serviceHintId = `${idPrefix}-service-hint`;
+  const publishModeTitleId = `${idPrefix}-publish-mode-title`;
+  const publishModeHintId = `${idPrefix}-publish-mode-hint`;
+  const readyTitleId = `${idPrefix}-ready-title`;
+  const readyHintId = `${idPrefix}-ready-hint`;
+  const operationTitleId = `${idPrefix}-operation-title`;
+  const operationHintId = `${idPrefix}-operation-hint`;
+  const namedAction = (label: string): string =>
+    `${label}: ${miniapp.display_name}`;
   const primaryAction = canPublish
     ? 'publish'
     : canEnable
@@ -338,27 +355,39 @@ const MiniAppWorkshopDetail: React.FC<{
   ] as const;
 
   return (
-    <main className={styles.detail}>
+    <main
+      className={styles.detail}
+      aria-labelledby={detailTitleId}
+      aria-describedby={detailDescriptionId}
+      aria-busy={controlsDisabled || undefined}
+    >
       <header className={styles.detailHeader}>
         <div className={styles.detailHeaderCopy}>
           <span className={styles.eyebrow}>
             {t('miniApps.workshop.detailEyebrow')}
           </span>
           <div className={styles.detailTitleRow}>
-            <h2 className={styles.detailTitle}>{miniapp.display_name}</h2>
+            <h2 id={detailTitleId} className={styles.detailTitle}>
+              {miniapp.display_name}
+            </h2>
             <MiniAppKindBadge kind={miniapp.kind} />
             <MiniAppLifecycleBadge lifecycle={miniapp.lifecycle} />
             <MiniAppSourceBadge source={workshop.source_state} />
           </div>
-          <p className={styles.detailDescription}>
+          <p id={detailDescriptionId} className={styles.detailDescription}>
             {miniapp.description || t('miniApps.library.noDescription')}
           </p>
         </div>
       </header>
 
-      <div className={styles.actionBar}>
+      <div
+        className={styles.actionBar}
+        role='toolbar'
+        aria-label={namedAction(t('miniApps.workshop.detailEyebrow'))}
+      >
         <Button
           icon={<ArrowLeft theme='outline' size='14' />}
+          aria-label={t('miniApps.actions.backToLibrary')}
           onClick={onBack}
         >
           {t('miniApps.actions.backToLibrary')}
@@ -368,6 +397,7 @@ const MiniAppWorkshopDetail: React.FC<{
             <Button
               type={primaryAction === 'build' ? 'primary' : 'default'}
               icon={<Code theme='outline' size='14' />}
+              aria-label={namedAction(t('miniApps.actions.build'))}
               loading={building}
               disabled={!canBuild || controlsDisabled}
               onClick={onBuild}
@@ -377,6 +407,7 @@ const MiniAppWorkshopDetail: React.FC<{
             {miniapp.kind === 'service' && (
               <Button
                 icon={<CheckOne theme='outline' size='14' />}
+                aria-label={namedAction(t('miniApps.actions.testService'))}
                 loading={busyAction === 'test'}
                 disabled={controlsDisabled || !canTest}
                 onClick={onTest}
@@ -398,6 +429,14 @@ const MiniAppWorkshopDetail: React.FC<{
                 <Button
                   type={primaryAction === 'publish' ? 'primary' : 'default'}
                   icon={<Upload theme='outline' size='14' />}
+                  aria-label={namedAction(t('miniApps.actions.publish'))}
+                  title={
+                    canPublish
+                      ? undefined
+                      : ready
+                        ? t('miniApps.errors.publishUnavailable')
+                        : t('miniApps.workshop.ready.emptyBody')
+                  }
                   loading={busyAction === 'publish'}
                   disabled={controlsDisabled || !canPublish}
                   onClick={onPublish}
@@ -417,6 +456,12 @@ const MiniAppWorkshopDetail: React.FC<{
               <span>
                 <Button
                   icon={<Undo theme='outline' size='14' />}
+                  aria-label={namedAction(t('miniApps.actions.rollback'))}
+                  title={
+                    canRollback
+                      ? undefined
+                      : t('miniApps.workshop.releases.rollbackUnavailable')
+                  }
                   loading={busyAction === 'rollback'}
                   disabled={controlsDisabled || !canRollback}
                   onClick={onRollback}
@@ -429,6 +474,7 @@ const MiniAppWorkshopDetail: React.FC<{
               <Button
                 status='danger'
                 icon={<Power theme='outline' size='14' />}
+                aria-label={namedAction(t('miniApps.actions.disable'))}
                 loading={busyAction === 'disable'}
                 disabled={controlsDisabled || !canDisable}
                 onClick={() => onSetEnabled(false)}
@@ -448,6 +494,12 @@ const MiniAppWorkshopDetail: React.FC<{
                   <Button
                     type={primaryAction === 'enable' ? 'primary' : 'default'}
                     icon={<Power theme='outline' size='14' />}
+                    aria-label={namedAction(t('miniApps.actions.enable'))}
+                    title={
+                      miniapp.releases.active
+                        ? undefined
+                        : t('miniApps.errors.enableUnavailable')
+                    }
                     loading={busyAction === 'enable'}
                     disabled={controlsDisabled || !canEnable}
                     onClick={() => onSetEnabled(true)}
@@ -460,6 +512,7 @@ const MiniAppWorkshopDetail: React.FC<{
             {canTrash && (
               <Button
                 icon={<Delete theme='outline' size='14' />}
+                aria-label={namedAction(t('miniApps.actions.trash'))}
                 loading={busyAction === 'trash'}
                 disabled={controlsDisabled}
                 onClick={onTrash}
@@ -469,6 +522,7 @@ const MiniAppWorkshopDetail: React.FC<{
             )}
             <Button
               icon={<ShareOne theme='outline' size='14' />}
+              aria-label={namedAction(t('miniApps.actions.share'))}
               disabled={controlsDisabled || !canShare}
               onClick={onShare}
             >
@@ -477,6 +531,7 @@ const MiniAppWorkshopDetail: React.FC<{
             {miniapp.lifecycle === 'disabled' && (
               <Button
                 icon={<Download theme='outline' size='14' />}
+                aria-label={namedAction(t('miniApps.actions.exportBackup'))}
                 disabled={controlsDisabled}
                 onClick={onBackup}
               >
@@ -495,6 +550,12 @@ const MiniAppWorkshopDetail: React.FC<{
                 <Button
                   type={primaryAction === 'surface' ? 'primary' : 'default'}
                   icon={<PreviewOpen theme='outline' size='14' />}
+                  aria-label={namedAction(t('miniApps.actions.openSurface'))}
+                  title={
+                    canOpenSurface
+                      ? undefined
+                      : t('miniApps.errors.surfaceUnavailable')
+                  }
                   loading={busyAction === 'open_surface'}
                   disabled={controlsDisabled || !canOpenSurface}
                   onClick={onOpenSurface}
@@ -507,6 +568,7 @@ const MiniAppWorkshopDetail: React.FC<{
               <Button
                 status='danger'
                 icon={<CloseOne theme='outline' size='14' />}
+                aria-label={namedAction(t('miniApps.actions.cancelBuild'))}
                 loading={canceling}
                 disabled={canceling || busyAction !== null}
                 onClick={onCancelBuild}
@@ -519,6 +581,7 @@ const MiniAppWorkshopDetail: React.FC<{
         {canRestore && (
           <Button
             icon={<Undo theme='outline' size='14' />}
+            aria-label={namedAction(t('miniApps.actions.restore'))}
             loading={busyAction === 'restore'}
             disabled={controlsDisabled}
             onClick={onRestore}
@@ -530,6 +593,7 @@ const MiniAppWorkshopDetail: React.FC<{
           <Button
             status='danger'
             icon={<Delete theme='outline' size='14' />}
+            aria-label={namedAction(t('miniApps.actions.deletePermanently'))}
             loading={busyAction === 'delete'}
             disabled={controlsDisabled}
             onClick={onDelete}
@@ -541,6 +605,7 @@ const MiniAppWorkshopDetail: React.FC<{
           <Button
             status='danger'
             icon={<Refresh theme='outline' size='14' />}
+            aria-label={namedAction(t('miniApps.actions.retryDelete'))}
             loading={busyAction === 'retry_delete'}
             disabled={controlsDisabled}
             onClick={onRetryDelete}
@@ -550,6 +615,7 @@ const MiniAppWorkshopDetail: React.FC<{
         )}
         <Button
           icon={<Refresh theme='outline' size='14' />}
+          aria-label={namedAction(t('miniApps.actions.refresh'))}
           loading={refreshing}
           disabled={busyAction !== null}
           onClick={onRefresh}
@@ -558,17 +624,29 @@ const MiniAppWorkshopDetail: React.FC<{
         </Button>
       </div>
       {miniapp.lifecycle === 'trashed' && (
-        <div className={`${styles.notice} ${styles.noticeWarning}`}>
+        <div
+          className={`${styles.notice} ${styles.noticeWarning}`}
+          role='status'
+          aria-live='polite'
+        >
           {t('miniApps.workshop.deletion.trashedNotice')}
         </div>
       )}
       {permanentDeleteRunning && (
-        <div className={`${styles.notice} ${styles.noticeInfo}`}>
+        <div
+          className={`${styles.notice} ${styles.noticeInfo}`}
+          role='status'
+          aria-live='polite'
+        >
           {t('miniApps.workshop.deletion.runningNotice')}
         </div>
       )}
       {permanentDeleteFailed && (
-        <div className={`${styles.notice} ${styles.noticeError}`}>
+        <div
+          className={`${styles.notice} ${styles.noticeError}`}
+          role='alert'
+          aria-live='assertive'
+        >
           {t('miniApps.workshop.deletion.failedNotice')}
         </div>
       )}
@@ -583,8 +661,9 @@ const MiniAppWorkshopDetail: React.FC<{
             className={`${styles.workflowStep} ${
               styles[`workflowStep_${step.state}`]
             }`}
+            aria-current={step.state === 'active' ? 'step' : undefined}
           >
-            <span className={styles.workflowIndex}>
+            <span className={styles.workflowIndex} aria-hidden='true'>
               {step.state === 'done' ? (
                 <CheckOne theme='outline' size='13' />
               ) : (
@@ -598,13 +677,17 @@ const MiniAppWorkshopDetail: React.FC<{
         ))}
       </ol>
 
-      <section className={styles.section}>
+      <section
+        className={styles.section}
+        aria-labelledby={sourceBuildTitleId}
+        aria-describedby={sourceBuildHintId}
+      >
         <div className={styles.sectionHeader}>
           <div>
-            <h3 className={styles.sectionTitle}>
+            <h3 id={sourceBuildTitleId} className={styles.sectionTitle}>
               {t('miniApps.workshop.sourceBuild.title')}
             </h3>
-            <p className={styles.sectionHint}>
+            <p id={sourceBuildHintId} className={styles.sectionHint}>
               {t('miniApps.workshop.sourceBuild.hint')}
             </p>
           </div>
@@ -642,24 +725,36 @@ const MiniAppWorkshopDetail: React.FC<{
           />
         </div>
         {workshop.source_state === 'empty' && (
-          <div className={`${styles.notice} ${styles.noticeWarning}`}>
+          <div
+            className={`${styles.notice} ${styles.noticeWarning}`}
+            role='status'
+            aria-live='polite'
+          >
             {t('miniApps.workshop.source.emptyNotice')}
           </div>
         )}
         {workshop.source_state === 'runtime_only' && (
-          <div className={`${styles.notice} ${styles.noticeWarning}`}>
+          <div
+            className={`${styles.notice} ${styles.noticeWarning}`}
+            role='status'
+            aria-live='polite'
+          >
             {t('miniApps.workshop.source.runtimeOnlyNotice')}
           </div>
         )}
       </section>
 
-      <section className={styles.section}>
+      <section
+        className={styles.section}
+        aria-labelledby={releasesTitleId}
+        aria-describedby={releasesHintId}
+      >
         <div className={styles.sectionHeader}>
           <div>
-            <h3 className={styles.sectionTitle}>
+            <h3 id={releasesTitleId} className={styles.sectionTitle}>
               {t('miniApps.workshop.releases.title')}
             </h3>
-            <p className={styles.sectionHint}>
+            <p id={releasesHintId} className={styles.sectionHint}>
               {t('miniApps.workshop.releases.hint')}
             </p>
           </div>
@@ -716,19 +811,27 @@ const MiniAppWorkshopDetail: React.FC<{
             value={miniapp.releases.active_release_epoch}
           />
         </div>
-        <div className={`${styles.notice} ${styles.noticeInfo}`}>
+        <div
+          className={`${styles.notice} ${styles.noticeInfo}`}
+          role='status'
+          aria-live='polite'
+        >
           {t('miniApps.workshop.releases.publishDoesNotEnable')}
         </div>
       </section>
 
       {miniapp.kind === 'service' && (
-        <section className={styles.section}>
+        <section
+          className={styles.section}
+          aria-labelledby={serviceTitleId}
+          aria-describedby={serviceHintId}
+        >
           <div className={styles.sectionHeader}>
             <div>
-              <h3 className={styles.sectionTitle}>
+              <h3 id={serviceTitleId} className={styles.sectionTitle}>
                 {t('miniApps.workshop.service.title')}
               </h3>
-              <p className={styles.sectionHint}>
+              <p id={serviceHintId} className={styles.sectionHint}>
                 {t('miniApps.workshop.service.hint')}
               </p>
             </div>
@@ -768,6 +871,7 @@ const MiniAppWorkshopDetail: React.FC<{
             <Radio.Group
               type='button'
               size='small'
+              aria-label={t('miniApps.workshop.service.lifecycle')}
               value={serviceLifecycle}
               disabled={controlsDisabled || buildRunning || !lifecycleActive}
               onChange={(value: unknown) => {
@@ -791,9 +895,14 @@ const MiniAppWorkshopDetail: React.FC<{
               ]}
             />
           </div>
-          <div className={styles.actionBar}>
+          <div
+            className={styles.actionBar}
+            role='group'
+            aria-label={t('miniApps.workshop.service.title')}
+          >
             <Button
               icon={<Power theme='outline' size='14' />}
+              aria-label={namedAction(t('miniApps.actions.startService'))}
               loading={busyAction === 'service_start'}
               disabled={
                 controlsDisabled ||
@@ -808,6 +917,7 @@ const MiniAppWorkshopDetail: React.FC<{
             <Button
               status='danger'
               icon={<Power theme='outline' size='14' />}
+              aria-label={namedAction(t('miniApps.actions.stopService'))}
               loading={busyAction === 'service_stop'}
               disabled={
                 controlsDisabled ||
@@ -821,6 +931,7 @@ const MiniAppWorkshopDetail: React.FC<{
             </Button>
             <Button
               icon={<Refresh theme='outline' size='14' />}
+              aria-label={namedAction(t('miniApps.actions.retryService'))}
               loading={busyAction === 'service_retry'}
               disabled={
                 controlsDisabled ||
@@ -840,13 +951,17 @@ const MiniAppWorkshopDetail: React.FC<{
         </section>
       )}
 
-      <section className={styles.section}>
+      <section
+        className={styles.section}
+        aria-labelledby={publishModeTitleId}
+        aria-describedby={publishModeHintId}
+      >
         <div className={styles.sectionHeader}>
           <div>
-            <h3 className={styles.sectionTitle}>
+            <h3 id={publishModeTitleId} className={styles.sectionTitle}>
               {t('miniApps.workshop.publishMode.title')}
             </h3>
-            <p className={styles.sectionHint}>
+            <p id={publishModeHintId} className={styles.sectionHint}>
               {t('miniApps.workshop.publishMode.hint')}
             </p>
           </div>
@@ -865,6 +980,7 @@ const MiniAppWorkshopDetail: React.FC<{
           <Radio.Group
             type='button'
             size='small'
+            aria-label={t('miniApps.workshop.publishMode.title')}
             value={workshop.publish_mode}
             disabled={
               busyAction !== null || canceling || !autoPublishAvailable
@@ -894,13 +1010,17 @@ const MiniAppWorkshopDetail: React.FC<{
         </p>
       </section>
 
-      <section className={styles.section}>
+      <section
+        className={styles.section}
+        aria-labelledby={readyTitleId}
+        aria-describedby={readyHintId}
+      >
         <div className={styles.sectionHeader}>
           <div>
-            <h3 className={styles.sectionTitle}>
+            <h3 id={readyTitleId} className={styles.sectionTitle}>
               {t('miniApps.workshop.ready.title')}
             </h3>
-            <p className={styles.sectionHint}>
+            <p id={readyHintId} className={styles.sectionHint}>
               {t('miniApps.workshop.ready.hint')}
             </p>
           </div>
@@ -966,13 +1086,18 @@ const MiniAppWorkshopDetail: React.FC<{
         />
       )}
 
-      <section className={styles.section}>
+      <section
+        className={styles.section}
+        aria-labelledby={operationTitleId}
+        aria-describedby={operationHintId}
+        aria-live='polite'
+      >
         <div className={styles.sectionHeader}>
           <div>
-            <h3 className={styles.sectionTitle}>
+            <h3 id={operationTitleId} className={styles.sectionTitle}>
               {t('miniApps.workshop.operation.title')}
             </h3>
-            <p className={styles.sectionHint}>
+            <p id={operationHintId} className={styles.sectionHint}>
               {t('miniApps.workshop.operation.hint')}
             </p>
           </div>
@@ -1870,8 +1995,23 @@ const MiniAppRunnerPage: React.FC = () => {
         ) : workshop ? (
           <>
             {failure && (
-              <div className={`${styles.notice} ${styles.noticeError}`}>
-                {failure}
+              <div
+                className={`${styles.notice} ${styles.noticeError}`}
+                role='alert'
+                aria-live='assertive'
+              >
+                <span className={styles.noticeMessage}>{failure}</span>
+                <Button
+                  size='small'
+                  icon={<Refresh theme='outline' size='14' />}
+                  aria-label={`${t('miniApps.actions.retry')}: ${workshop.miniapp.display_name}`}
+                  loading={refreshing}
+                  disabled={refreshing || busyAction !== null}
+                  className={styles.noticeAction}
+                  onClick={() => void handleRefresh()}
+                >
+                  {t('miniApps.actions.retry')}
+                </Button>
               </div>
             )}
             <MiniAppWorkshopDetail

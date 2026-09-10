@@ -16,8 +16,16 @@ const surfaceSource = readFileSync(
   new URL('./MiniAppSurfacePanel.tsx', import.meta.url),
   'utf8'
 );
+const stateSource = readFileSync(
+  new URL('./MiniAppM1State.tsx', import.meta.url),
+  'utf8'
+);
 const dialogSource = readFileSync(
   new URL('./MiniAppCreateProjectDialog.tsx', import.meta.url),
+  'utf8'
+);
+const transferSource = readFileSync(
+  new URL('./MiniAppTransferDialog.tsx', import.meta.url),
   'utf8'
 );
 const modelSource = readFileSync(new URL('./model.ts', import.meta.url), 'utf8');
@@ -53,6 +61,37 @@ describe('MiniApp M1 product surfaces', () => {
         "aria-label={`${t('miniApps.library.openWorkshop')}: ${app.display_name}`}"
       )
     ).toBe(true);
+  });
+
+  test('Desktop surfaces expose named controls, live states, and local recovery', () => {
+    expect(listSource.includes('aria-label={t(\'miniApps.library.searchPlaceholder\')}')).toBe(
+      true
+    );
+    expect(listSource.includes("role='status'")).toBe(true);
+    expect(stateSource.includes("role={panelRole}")).toBe(true);
+    expect(stateSource.includes('aria-busy=\'true\'')).toBe(true);
+    expect(stateSource.includes('aria-labelledby={title ? titleId : undefined}')).toBe(
+      true
+    );
+    expect(runnerSource.includes("role='toolbar'")).toBe(true);
+    expect(runnerSource.includes('aria-busy={controlsDisabled || undefined}')).toBe(
+      true
+    );
+    expect(runnerSource.includes("role='alert'")).toBe(true);
+    expect(runnerSource.includes("t('miniApps.actions.retry')")).toBe(true);
+    expect(surfaceSource.includes("aria-describedby='miniapp-surface-hint'")).toBe(
+      true
+    );
+    expect(surfaceSource.includes("aria-live='assertive'")).toBe(true);
+    expect(
+      surfaceSource.includes("t('miniApps.actions.reloadSurface')")
+    ).toBe(true);
+    expect(
+      transferSource.includes("aria-describedby='miniapp-transfer-intro'")
+    ).toBe(
+      true
+    );
+    expect(transferSource.includes("role='alert'")).toBe(true);
   });
 
   test('Workshop reads a branded owner-scoped M1 detail', () => {
@@ -145,7 +184,9 @@ describe('MiniApp M1 product surfaces', () => {
     expect(surfaceSource.includes('target.method')).toBe(true);
     expect(surfaceSource.includes('target.payload')).toBe(true);
     expect(runnerSource.includes('ipcBridge.miniapps.closeSurface')).toBe(true);
-    expect(surfaceSource.includes('key={bridgeDescriptorKey}')).toBe(true);
+    expect(
+      surfaceSource.includes('key={`${bridgeDescriptorKey}:${frameGeneration}`}')
+    ).toBe(true);
     expect(surfaceSource.includes('key={source}')).toBe(false);
     expect(surfaceSource.includes('onLoad={handleFrameLoad}')).toBe(true);
     expect(

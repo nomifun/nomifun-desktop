@@ -97,6 +97,7 @@ const MiniAppCreateProjectDialog: React.FC<MiniAppCreateProjectDialogProps> = ({
     <CreateProjectModal
       className={styles.modal}
       title={t('miniApps.create.title')}
+      aria-describedby='miniapp-create-project-intro'
       visible={visible}
       onCancel={onCancel}
       onOk={() => void submit()}
@@ -105,25 +106,39 @@ const MiniAppCreateProjectDialog: React.FC<MiniAppCreateProjectDialogProps> = ({
       confirmLoading={submitting}
       unmountOnExit
     >
-      <p className={styles.dialogIntro}>{t('miniApps.create.intro')}</p>
+      <p id='miniapp-create-project-intro' className={styles.dialogIntro}>
+        {t('miniApps.create.intro')}
+      </p>
       <Form layout='vertical'>
         <Form.Item label={t('miniApps.create.displayName')}>
           <Input
             autoFocus
             value={displayName}
             maxLength={120}
+            aria-label={t('miniApps.create.displayName')}
+            aria-invalid={Boolean(validationError) || undefined}
+            aria-describedby={
+              validationError ? 'miniapp-create-name-error' : undefined
+            }
             placeholder={t('miniApps.create.displayNamePlaceholder')}
             onChange={setDisplayName}
             onPressEnter={() => void submit()}
           />
           {validationError && (
-            <div className={styles.noticeError}>{validationError}</div>
+            <div
+              id='miniapp-create-name-error'
+              className={styles.noticeError}
+              role='alert'
+            >
+              {validationError}
+            </div>
           )}
         </Form.Item>
         <Form.Item label={t('miniApps.create.description')}>
           <Input.TextArea
             value={description}
             maxLength={500}
+            aria-label={t('miniApps.create.description')}
             autoSize={{ minRows: 3, maxRows: 6 }}
             placeholder={t('miniApps.create.descriptionPlaceholder')}
             onChange={setDescription}
@@ -132,6 +147,7 @@ const MiniAppCreateProjectDialog: React.FC<MiniAppCreateProjectDialogProps> = ({
         <Form.Item label={t('miniApps.create.kind')}>
           <Radio.Group
             type='button'
+            aria-label={t('miniApps.create.kind')}
             value={kind}
             onChange={(value: unknown) => {
               if (value === 'ui_only' || value === 'service') {
@@ -159,7 +175,11 @@ const MiniAppCreateProjectDialog: React.FC<MiniAppCreateProjectDialogProps> = ({
         </div>
       </Form>
       {requestError && (
-        <div className={`${styles.notice} ${styles.noticeError}`}>
+        <div
+          className={`${styles.notice} ${styles.noticeError}`}
+          role='alert'
+          aria-live='assertive'
+        >
           {requestError}
         </div>
       )}
