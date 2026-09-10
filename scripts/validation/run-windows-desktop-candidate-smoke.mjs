@@ -845,8 +845,19 @@ async function terminateApplicationTree(child, timeoutMs) {
   const cleanup = runningBefore
     ? terminateProcessTreeSync(child.pid, Math.min(timeoutMs, 10_000))
     : { attempted: false, status: null, timed_out: false };
-  const exited = await waitForChildExit(child, timeoutMs);
-  if (!exited) {
+  // `taskkill` is synchronous while Node's event loop is blocked. Windows can
+  // terminate the root successfully but leave the ChildProcess `close` event
+  // queued until after this function attaches its listener; checking the OS
+  // process state first avoids waiting the whole budget and reporting a false
+  // failure for an already-absent root.
+  let closeEventObserved =
+    child?.exitCode !== null || child?.signalCode !== null;
+  let rootExited = !processIsRunning(child?.pid);
+  if (!rootExited) {
+    closeEventObserved = await waitForChildExit(child, timeoutMs);
+    rootExited = !processIsRunning(child?.pid);
+  }
+  if (!rootExited) {
     fail('process_tree_cleanup_failed', 'desktop application process tree remained alive', {
       root_pid: child?.pid || null,
       cleanup,
@@ -855,7 +866,8 @@ async function terminateApplicationTree(child, timeoutMs) {
   return {
     root_pid: child?.pid || null,
     running_before: runningBefore,
-    root_exited: exited,
+    root_exited: rootExited,
+    close_event_observed: closeEventObserved,
     taskkill: cleanup,
   };
 }
