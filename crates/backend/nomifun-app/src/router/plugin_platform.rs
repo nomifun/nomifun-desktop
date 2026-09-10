@@ -128,9 +128,10 @@ impl NomiCorePluginRuntimeParticipant {
 
     pub(crate) async fn finalize_runtime(
         &self,
+        runtime_available: bool,
     ) -> Result<(), JavaScriptRuntimeError> {
         self.publisher
-            .refresh_agent_availability()
+            .refresh_agent_availability_for_runtime(runtime_available)
             .await
             .map_err(|error| {
                 JavaScriptRuntimeError::SwitchNotCovered(format!(
@@ -144,7 +145,10 @@ impl NomiCorePluginRuntimeParticipant {
         runtime: Option<&ResolvedNodeRuntime>,
     ) -> Result<(), JavaScriptRuntimeError> {
         self.prepare_runtime(runtime).await?;
-        self.finalize_runtime().await
+        // Restore runs while the coordinator deliberately retains the write
+        // fence. Use the already-authoritative selected value rather than
+        // recursively acquiring the Runtime authority's read lock.
+        self.finalize_runtime(runtime.is_some()).await
     }
 
     pub(crate) async fn validate_candidate(
@@ -1633,6 +1637,14 @@ impl NomiCorePluginRegistryPublisher {
                 message: error.to_string(),
             })?
             .is_some();
+        self.refresh_agent_availability_for_runtime(runtime_available)
+            .await
+    }
+
+    async fn refresh_agent_availability_for_runtime(
+        &self,
+        runtime_available: bool,
+    ) -> Result<(), PluginServiceError> {
         let registry = self.kernel.snapshot().map_err(|error| {
             PluginServiceError::integration(format!(
                 "Kernel Plugin snapshot failed: {error}"

@@ -432,7 +432,13 @@ impl RuntimeSwitchCoordinator for CoordinatedRuntimeSwitch {
                 );
             }
         };
-        if let Err(error) = self.finalize_all(&switch.candidate).await {
+        // The durable selection is now authoritative. Release the global
+        // write fence before reconciling non-authoritative projections: a
+        // finalizer may legitimately read the committed Runtime, and keeping
+        // the fence here would self-deadlock that read.
+        let committed_candidate = switch.candidate.clone();
+        drop(switch);
+        if let Err(error) = self.finalize_all(&committed_candidate).await {
             let _ = self
                 .authority
                 .manager()
@@ -530,8 +536,12 @@ impl RuntimeSwitchCoordinator for CoordinatedRuntimeSwitch {
                         );
                     }
                 };
+                // See the automatic-commit path above: finalizers run after
+                // the selection CAS and after the write fence is released.
+                let committed_candidate = pending.candidate.clone();
+                drop(pending);
                 if let Err(error) =
-                    self.finalize_all(&pending.candidate).await
+                    self.finalize_all(&committed_candidate).await
                 {
                     let _ = self
                         .authority
@@ -720,6 +730,7 @@ mod tests {
     struct Participant {
         outcome: RuntimeSwitchParticipantOutcome,
         restore_fails: Option<Arc<AtomicBool>>,
+        finalize_authority: Option<Arc<RuntimeAuthority>>,
     }
 
     #[async_trait]
@@ -757,6 +768,19 @@ mod tests {
             &self,
             _candidate: &ResolvedNodeRuntime,
         ) -> Result<(), JavaScriptRuntimeError> {
+            Ok(())
+        }
+
+        async fn finalize_candidate(
+            &self,
+            _candidate: &ResolvedNodeRuntime,
+        ) -> Result<(), JavaScriptRuntimeError> {
+            if let Some(authority) = self.finalize_authority.as_ref() {
+                let lease = authority
+                    .acquire_use(JavaScriptWorkKind::BuildHost)
+                    .await?;
+                drop(lease);
+            }
             Ok(())
         }
 
@@ -816,6 +840,7 @@ mod tests {
             vec![Arc::new(Participant {
                 outcome,
                 restore_fails: None,
+                finalize_authority: None,
             })],
         )
         .unwrap()
@@ -842,6 +867,38 @@ mod tests {
             Some(candidate.fingerprint)
         );
         assert!(committed.selection.pending_candidate.is_none());
+    }
+
+    #[tokio::test]
+    async fn committed_selection_releases_write_fence_before_finalizers() {
+        let manager = Arc::new(NodeRuntimeManager::new(Arc::new(
+            MemoryStore::default(),
+        )));
+        let authority =
+            RuntimeAuthority::new(manager, Arc::new(UnusedProbe));
+        let coordinator = CoordinatedRuntimeSwitch::new(
+            Arc::clone(&authority),
+            vec![Arc::new(Participant {
+                outcome: RuntimeSwitchParticipantOutcome::Passed,
+                restore_fails: None,
+                finalize_authority: Some(authority),
+            })],
+        )
+        .unwrap();
+        let committed = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            coordinator.begin_switch(BeginRuntimeSwitchCommand {
+                expected_revision: 0,
+                owner_user_id: "owner".to_owned(),
+                selected_runtime: None,
+                candidate: candidate('a'),
+                acknowledge_non_recommended: false,
+            }),
+        )
+        .await
+        .expect("finalizer must not self-deadlock on committed Runtime")
+        .unwrap();
+        assert_eq!(committed.revision, 3);
     }
 
     #[tokio::test]
@@ -933,6 +990,7 @@ mod tests {
             vec![Arc::new(Participant {
                 outcome: RuntimeSwitchParticipantOutcome::NotCovered,
                 restore_fails: Some(Arc::clone(&restore_fails)),
+                finalize_authority: None,
             })],
         )
         .unwrap();
