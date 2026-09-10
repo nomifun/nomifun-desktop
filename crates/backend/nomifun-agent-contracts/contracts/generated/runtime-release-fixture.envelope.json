@@ -10,7 +10,7 @@
     "fork_commit": "dc2ccc6843abb09c9d297862dc10b6bd12a3935d",
     "tracked_upstream_commit": "dc2ccc6843abb09c9d297862dc10b6bd12a3935d",
     "patch_series_digest": "d4343bd392203dfc9ba52b716b0420cbd846ec9d3924a388f7102ff84356ea9e",
-    "cargo_lock_digest": "1ae097fe2d024cd7981dd2e12ac847c3bb25890689e9c97c13f0baf90172ea81",
+    "cargo_lock_digest": "b807836088fd3571eaec517eccd4cba3e05fa83a45dabcbc73c944a2cbb11f63",
     "protocol_version": "1.0.0",
     "protocol_schema_digest": "f1c0422f04c9de923e18c7df40d814d3c9f5b2db5f1c5fef2745e77e6d62590f",
     "rpc_allowlist": {
@@ -163,5 +163,5 @@
       "digest": "99fe64193883d1fd84dc939207839c080a45bd166d2eb6a7759d42b58d59448b"
     }
   },
-  "payload_digest": "c612ce5febab64b2f046a5687dacf4f34c3ff9e36ab2e2337761182edf1480a8"
+  "payload_digest": "08f6fc3fa1787f19aff9256663feeef8cf781dd0bdbe80bf0b6711cb578b1f45"
 }
