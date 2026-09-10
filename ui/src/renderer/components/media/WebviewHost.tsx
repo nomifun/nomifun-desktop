@@ -400,7 +400,7 @@ const WebviewHost: React.FC<WebviewHostProps> = ({
           ref={iframeRef}
           src={currentUrl}
           // Permissive sandbox: allow scripts + same-origin so localhost
-          // star-office and extension pages work, plus forms/popups for
+          // star-office pages work, plus forms/popups for
           // typical external https sites loaded by URLViewer.
           sandbox='allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox'
           referrerPolicy='no-referrer-when-downgrade'

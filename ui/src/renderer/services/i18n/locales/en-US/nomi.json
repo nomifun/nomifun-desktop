@@ -87,7 +87,6 @@
     "noDescription": "This skill has no description yet",
     "catalogSourceBuiltin": "Built-in",
     "catalogSourceCustom": "Custom",
-    "catalogSourceExtension": "Extension",
     "filterAll": "All",
     "filterEmpty": "No skills match this filter",
     "sourceCatalog": "Granted",

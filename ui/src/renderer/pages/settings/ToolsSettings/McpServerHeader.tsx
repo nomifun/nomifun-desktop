@@ -13,8 +13,6 @@ interface McpServerHeaderProps {
   isTestingConnection: boolean;
   oauthStatus?: McpOAuthStatus;
   isLoggingIn?: boolean;
-  /** Extension-contributed servers are read-only */
-  isReadOnly?: boolean;
   onTestConnection: (server: IMcpServer) => void;
   onEditServer: (server: IMcpServer) => void;
   onDeleteServer: (serverId: McpServerId) => void;
@@ -148,7 +146,6 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
   isTestingConnection,
   oauthStatus,
   isLoggingIn,
-  isReadOnly,
   onTestConnection,
   onEditServer,
   onDeleteServer,
@@ -178,7 +175,7 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
           </Tooltip>
         )}
         {isError && <FeedbackButton />}
-        {!isReadOnly && needsLogin && onOAuthLogin && (
+        {needsLogin && onOAuthLogin && (
           <Button
             size='mini'
             type='primary'
@@ -190,7 +187,7 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
             {t('settings.mcpLogin') || 'Login'}
           </Button>
         )}
-        {!isReadOnly && !needsLogin && (
+        {!needsLogin && (
           <Button
             size='mini'
             icon={<Refresh size={'14'} />}
@@ -200,8 +197,7 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
           />
         )}
       </div>
-      {!isReadOnly && (
-        <div className='flex items-center gap-2 invisible group-hover:visible' onClick={(e) => e.stopPropagation()}>
+      <div className='flex items-center gap-2 invisible group-hover:visible' onClick={(e) => e.stopPropagation()}>
           {!server.builtin && (
             <Dropdown
               trigger='hover'
@@ -225,8 +221,7 @@ const McpServerHeader: React.FC<McpServerHeaderProps> = ({
               <Button size='mini' icon={<SettingOne size={'14'} />} />
             </Dropdown>
           )}
-        </div>
-      )}
+      </div>
     </div>
   );
 };

@@ -90,25 +90,14 @@ export function getAgentLogo(agent: string | undefined | null): string | null {
  *
  * Priority:
  *   1. Explicit icon/avatar (if provided)
- *   2. Opaque extension AgentRegistry ID (`ext:extensionName:adapterId`) → built-in logo map
- *   3. Backend ID → built-in logo map
- *   4. null (caller renders its own fallback)
+ *   2. Backend vendor ID → built-in logo map
+ *   3. null (caller renders its own fallback)
  */
 export function resolveAgentLogo(opts: {
   icon?: string | null;
   backend?: string | null;
-  agentId?: string | null;
-  isExtension?: boolean;
 }): string | null {
   if (opts.icon) return normalizeLogoUrl(opts.icon);
-
-  // Extension IDs are opaque registry keys; only their final display segment
-  // is used for logo lookup, never for entity-ID parsing.
-  if (opts.isExtension && opts.agentId) {
-    const adapterId = opts.agentId.split(':').pop();
-    const logo = getAgentLogo(adapterId);
-    if (logo) return logo;
-  }
 
   return getAgentLogo(opts.backend);
 }

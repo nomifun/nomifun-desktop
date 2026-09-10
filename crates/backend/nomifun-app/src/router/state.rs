@@ -48,10 +48,6 @@ use nomifun_db::{
     SqliteSettingsRepository,
     MAX_UNSETTLED_TURN_ADMISSION_PAGE_SIZE,
 };
-use nomifun_extension::{
-    ExtensionRegistry, ExtensionRouterState, ExtensionStateStore, HubIndexManager, HubInstaller, HubRouterState,
-    resolve_install_target_dir_for_data_dir, resolve_scan_paths_for_data_dir, resolve_state_file_path,
-};
 use nomifun_file::{FileRouterState, FileService, FileWatchService, SnapshotService};
 use nomifun_idmm::{
     IdmmManager, IdmmRouterState, SessionSupervisionPort, SupervisionTurnScope,
@@ -103,8 +99,6 @@ pub struct ModuleStates {
     pub connection_test: ConnectionTestRouterState,
     pub file: FileRouterState,
     pub mcp: McpRouterState,
-    pub extension: ExtensionRouterState,
-    pub hub: HubRouterState,
     pub skill: SkillRouterState,
     pub channel: ChannelRouterState,
     pub cron: CronRouterState,
@@ -508,19 +502,10 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
     let boot = Instant::now();
     tracing::info!("startup: module state build started");
 
-    let (ext_state, hub_state, skill_state) = build_extension_states(services).await;
+    let skill_state = build_skill_state(services).await;
     tracing::info!(
         elapsed_ms = boot.elapsed().as_millis(),
-        "startup: extension states built"
-    );
-
-    let scan_paths = resolve_scan_paths_for_data_dir(&services.data_dir);
-    if let Err(error) = ext_state.registry.initialize_with_scan_paths(scan_paths).await {
-        tracing::warn!(error = %error, "extension registry initialize failed");
-    }
-    tracing::info!(
-        elapsed_ms = boot.elapsed().as_millis(),
-        "startup: extension registry initialized"
+        "startup: skill state built"
     );
 
     let conversation_service = build_nomi_core_conversation_owner(services);
@@ -720,8 +705,6 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
         connection_test: build_connection_test_state(),
         file: build_file_state(services),
         mcp: build_mcp_state(services),
-        extension: ext_state,
-        hub: hub_state,
         skill: skill_state,
         channel: channel_state,
         cron,
@@ -2546,20 +2529,12 @@ pub fn build_shell_state(services: &AppServices) -> ShellRouterState {
 #[derive(Default)]
 struct CronServiceTickRef(std::sync::Mutex<Option<Arc<nomifun_cron::service::CronService>>>);
 
-/// Build the default extension-related router states.
+/// Build the default Skill Library router state.
 ///
-/// Returns `(ExtensionRouterState, HubRouterState, SkillRouterState)`.
-pub async fn build_extension_states(
-    services: &AppServices,
-) -> (ExtensionRouterState, HubRouterState, SkillRouterState) {
+/// Skill discovery and managed paths are owned by `nomifun-skill-library`;
+/// there is no legacy Extension registry or Hub in the production composition.
+pub async fn build_skill_state(services: &AppServices) -> SkillRouterState {
     let skill_data_dir = services.data_dir.clone();
-
-    let state_store = ExtensionStateStore::new(resolve_state_file_path(&skill_data_dir));
-    let registry = ExtensionRegistry::new(state_store, services.event_bus.clone(), services.app_version.clone());
-
-    let hub_dir = resolve_install_target_dir_for_data_dir(&skill_data_dir);
-    let index_manager = HubIndexManager::new(hub_dir, registry.clone());
-    let installer = HubInstaller::new(index_manager.clone(), registry.clone());
 
     let app_resource_dir = std::env::current_exe()
         .ok()
@@ -2574,23 +2549,12 @@ pub async fn build_extension_states(
         Arc::new(nomifun_db::SqliteSkillTagRepository::new(services.database.pool().clone()));
     let builtin_skill_tags = Arc::new(nomifun_skill_library::skill_service::load_builtin_skill_tags());
 
-    let ext_state = ExtensionRouterState {
-        registry: registry.clone(),
-    };
-
-    let hub_state = HubRouterState {
-        index_manager,
-        installer,
-    };
-
-    let skill_state = SkillRouterState {
+    SkillRouterState {
         skill_paths,
         external_paths_manager: ext_paths_mgr,
         skill_tag_repo,
         builtin_skill_tags,
-    };
-
-    (ext_state, hub_state, skill_state)
+    }
 }
 
 /// Build the default `WsHandlerState` from application services.
@@ -2645,7 +2609,6 @@ mod tests {
     use super::*;
 
     use crate::AppConfig;
-    use nomifun_extension::{ExtensionSource, ScanPath};
 
     #[test]
     fn terminal_exit_notice_rejects_stale_relaunch_epochs() {
@@ -2918,53 +2881,6 @@ mod tests {
                 ),
             ]
         );
-    }
-
-    #[tokio::test]
-    async fn build_extension_states_uses_host_app_version_for_engine_filtering() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let data_dir = tmp.path().join("data");
-        let ext_root = tmp.path().join("extensions");
-        let ext_dir = ext_root.join("demo-ext");
-
-        std::fs::create_dir_all(&ext_dir).unwrap();
-        std::fs::write(
-            ext_dir.join("nomi-extension.json"),
-            serde_json::to_vec_pretty(&serde_json::json!({
-                "name": "demo-ext",
-                "version": "1.0.0",
-                "engine": {
-                    "nomifun": "^2.0.0"
-                }
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-
-        let db = nomifun_db::init_database_memory().await.unwrap();
-        let config = AppConfig {
-            data_dir: data_dir.clone(),
-            work_dir: data_dir,
-            app_version: "2.1.0".to_string(),
-            ..Default::default()
-        };
-        let services = AppServices::from_config(db, &config).await.unwrap();
-
-        let (ext_state, _hub_state, _skill_state) = build_extension_states(&services).await;
-        ext_state
-            .registry
-            .initialize_with_scan_paths(vec![ScanPath {
-                path: ext_root,
-                source: ExtensionSource::Local,
-            }])
-            .await
-            .unwrap();
-
-        let loaded = ext_state.registry.get_loaded_extensions().await;
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].name, "demo-ext");
-
-        services.database.close().await;
     }
 
     /// The pill must report on the socket the agent is actually using. Two pools

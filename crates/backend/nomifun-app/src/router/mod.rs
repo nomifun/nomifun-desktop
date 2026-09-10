@@ -41,5 +41,5 @@ pub use routes::{
 };
 pub use state::{
     ChannelMessageLoopComponents, ModuleStates, build_conversation_state,
-    build_extension_states, build_module_states, build_ws_state,
+    build_module_states, build_skill_state, build_ws_state,
 };

@@ -15,8 +15,8 @@
 //! field built by `build_module_states` in `nomifun_app::router::state`).
 //! `ChannelRouterState` bundles `Arc<ChannelManager>`, `Arc<PairingService>`,
 //! `Arc<SessionManager>`, `Arc<dyn IChannelRepository>`, `Arc<PluginFactory>`,
-//! `Arc<ChannelSettingsService>`, `Option<Arc<dyn ChannelAgentProfile>>`, and
-//! `ExtensionRegistry`.
+//! `Arc<ChannelSettingsService>`, and
+//! `Option<Arc<dyn ChannelAgentProfile>>`.
 
 use std::future::Future;
 use std::sync::Arc;

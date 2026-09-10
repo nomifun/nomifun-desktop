@@ -319,14 +319,12 @@ pub async fn read_builtin_skill(
 ///
 /// Matches the renderer contract in
 /// `src/common/adapter/ipcBridge.ts::listAvailableSkills`, which filters the
-/// Skills Hub UI by this value. `Extension` is reserved for
-/// extension-contributed skills once `ExtensionRegistry` is wired into the
-/// Rust backend; the pilot only emits `Builtin` / `Custom`.
+/// Skills UI by this value. The production Skill Library emits only
+/// `Builtin` / `Custom`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkillSource {
     Builtin,
     Custom,
-    Extension,
 }
 
 /// A discovered skill item for listing.

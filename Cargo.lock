@@ -6142,7 +6142,6 @@ dependencies = [
  "nomifun-browser-platform",
  "nomifun-common",
  "nomifun-db",
- "nomifun-extension",
  "nomifun-knowledge",
  "nomifun-mcp",
  "nomifun-model-invoke",
@@ -6239,7 +6238,6 @@ dependencies = [
  "nomifun-cron",
  "nomifun-customer-service",
  "nomifun-db",
- "nomifun-extension",
  "nomifun-file",
  "nomifun-gateway",
  "nomifun-idmm",
@@ -6638,28 +6636,6 @@ dependencies = [
  "tracing",
  "url",
  "windows 0.61.3",
-]
-
-[[package]]
-name = "nomifun-extension"
-version = "0.7.6"
-dependencies = [
- "axum",
- "dirs 6.0.0",
- "http-body-util",
- "mime_guess",
- "nomi-process-runtime",
- "nomifun-api-types",
- "nomifun-common",
- "nomifun-realtime",
- "semver",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.19",
- "tokio",
- "tower",
- "tracing",
 ]
 
 [[package]]

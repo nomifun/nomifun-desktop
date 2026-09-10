@@ -52,7 +52,7 @@ describe('capability hub navigation', () => {
     expect(siderSource.includes('SiderExtensionsEntry')).toBe(false);
   });
 
-  test('routes Open Capabilities and preserves MCP legacy destinations', () => {
+  test('routes Open Capabilities and preserves only supported product destinations', () => {
     const routerSource = readSource(new URL('../Router.tsx', import.meta.url));
 
     expect(routerSource.includes("path='/open-capabilities'")).toBe(true);
@@ -67,8 +67,8 @@ describe('capability hub navigation', () => {
     expect(routerSource.includes("path='/settings/agent-presets/*'")).toBe(false);
     expect(routerSource.includes("path='/settings/agent'")).toBe(false);
     expect(routerSource.includes("path='/skills'")).toBe(true);
-    expect(routerSource.includes('LegacyExtensionsRedirect')).toBe(true);
-    expect(routerSource.includes("path='/extensions'")).toBe(true);
+    expect(routerSource.includes('LegacyExtensionsRedirect')).toBe(false);
+    expect(routerSource.includes("path='/extensions'")).toBe(false);
   });
 
   test('keeps unified Browser settings reachable when Browser Use is disabled', () => {

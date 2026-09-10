@@ -23,8 +23,6 @@ pub enum AgentSource {
     Internal,
     /// Seeded from the migration.
     Builtin,
-    /// Installed from the extension hub.
-    Extension,
     /// User-defined row.
     Custom,
 }
@@ -38,8 +36,8 @@ pub struct AgentEnvEntry {
     pub description: Option<String>,
 }
 
-/// Source-specific bookkeeping (how to probe, how to upgrade, which Hub
-/// package it came from).
+/// Source-specific bookkeeping (how to probe and how to identify a custom
+/// installation).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentSourceInfo {
     /// Primary CLI binary checked for availability.
@@ -48,12 +46,7 @@ pub struct AgentSourceInfo {
     /// Extra binary required when the row spawns via a bridge (e.g. `bun`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bridge_binary: Option<String>,
-    /// Hub package identifier when `agent_source = "extension"`. Extension
-    /// rows still use a bare UUIDv7 `agent_id`; this field carries the
-    /// extension's catalog/package identity separately.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub hub_package_id: Option<String>,
-    /// Version string for Hub or custom rows.
+    /// Version string for custom rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
 }
@@ -180,7 +173,6 @@ mod tests {
         for (variant, expected) in [
             (AgentSource::Internal, "internal"),
             (AgentSource::Builtin, "builtin"),
-            (AgentSource::Extension, "extension"),
             (AgentSource::Custom, "custom"),
         ] {
             let s = serde_json::to_string(&variant).unwrap();

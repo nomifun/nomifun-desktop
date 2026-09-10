@@ -56,7 +56,6 @@
     "gridDescription": "Independent capability packages reusable by Agents, presets and companions.",
     "noDescription": "No description provided.",
     "noMatch": "No skills match the current filters.",
-    "sourceExtension": "Extension",
     "sourceAuto": "Auto",
     "editTags": "Edit Tags",
     "editTagsTitle": "Tags",
@@ -1252,7 +1251,6 @@
     "agent": "Agent",
     "agentDesc": "Used for WeCom conversations"
   },
-  "extensionPresetReadonly": "Extension presets are read-only. You can duplicate it and edit the copy.",
   "runtimeManager": {
     "title": "JavaScript Runtime",
     "subtitle": "Manage the Node.js runtime used by NomiFun Plugins and MiniApps.",
@@ -1585,12 +1583,8 @@
     "domainCronDesc": "Create, read, and maintain scheduled tasks.",
     "domainMcpTitle": "MCP servers",
     "domainMcpDesc": "Read and maintain connected MCP server configuration.",
-    "domainExtensionTitle": "Extensions",
-    "domainExtensionDesc": "Extension packages, sources, and extension state capabilities.",
     "domainSkillTitle": "Skills",
     "domainSkillDesc": "Read, import, and manage skill packs.",
-    "domainHubTitle": "Hub",
-    "domainHubDesc": "Browse, install, and sync Hub capabilities.",
     "domainSystemTitle": "System",
     "domainSystemDesc": "System settings, theme, model providers, and client preferences.",
     "domainProviderTitle": "Model providers",

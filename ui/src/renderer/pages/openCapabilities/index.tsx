@@ -129,25 +129,11 @@ const MCP_DOMAIN_OPTIONS: McpDomainOption[] = [
     defaultDesc: '读取和维护已接入的 MCP server 配置。',
   },
   {
-    id: 'extension',
-    titleKey: 'settings.openCapabilities.domainExtensionTitle',
-    defaultTitle: '扩展',
-    descKey: 'settings.openCapabilities.domainExtensionDesc',
-    defaultDesc: '扩展包、扩展来源和扩展状态相关能力。',
-  },
-  {
     id: 'skill',
     titleKey: 'settings.openCapabilities.domainSkillTitle',
     defaultTitle: 'Skills',
     descKey: 'settings.openCapabilities.domainSkillDesc',
     defaultDesc: '读取、导入和管理技能包。',
-  },
-  {
-    id: 'hub',
-    titleKey: 'settings.openCapabilities.domainHubTitle',
-    defaultTitle: 'Hub',
-    descKey: 'settings.openCapabilities.domainHubDesc',
-    defaultDesc: '浏览、安装和同步 Hub 能力。',
   },
   {
     id: 'system',

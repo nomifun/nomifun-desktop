@@ -2,7 +2,7 @@
 //! entry-name sanitization, symlink-entry detection, and a decompression-bomb
 //! budget (entry-count cap + cumulative actually-written bytes).
 //!
-//! Used by the skill importer (`nomifun-extension`), the knowledge-base
+//! Used by the Skill Library importer, the knowledge-base
 //! importer (`nomifun-knowledge`) and the companion-bundle importer
 //! (`nomifun-companion`). The extract loops themselves stay in the caller
 //! crates — their entry whitelists and duplicate-entry policies differ — only

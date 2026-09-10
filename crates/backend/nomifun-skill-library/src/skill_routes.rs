@@ -25,7 +25,6 @@ fn to_source_response(source: SkillSource) -> SkillSourceResponse {
     match source {
         SkillSource::Builtin => SkillSourceResponse::Builtin,
         SkillSource::Custom => SkillSourceResponse::Custom,
-        SkillSource::Extension => SkillSourceResponse::Extension,
     }
 }
 

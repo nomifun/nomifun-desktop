@@ -11,7 +11,6 @@ nomifun-db.workspace = true
 nomifun-mcp.workspace = true
 nomifun-runtime.workspace = true
 nomi-process-runtime.workspace = true
-nomifun-extension.workspace = true
 nomifun-knowledge.workspace = true
 nomifun-terminal.workspace = true
 nomifun-api-types.workspace = true
@@ -87,7 +86,6 @@ browser-use = ["nomi-agent/browser-use", "dep:nomi-browser", "dep:nomifun-browse
 tokio = { workspace = true, features = ["full"] }
 tracing-subscriber.workspace = true
 nomifun-common.workspace = true
-nomifun-extension.workspace = true
 nomifun-db.workspace = true
 nomifun-api-types.workspace = true
 # E2E knowledge_search regression (knowledge_search_e2e): a local NoopBroadcaster

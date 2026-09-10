@@ -25,7 +25,6 @@ const McpPage: React.FC = () => {
   const [mcpMessage, mcpMessageContext] = useArcoMessage({ maxCount: 10 });
   const {
     mcpServers,
-    extensionMcpServers,
     isMcpServersLoading,
     mcpServersLoadFailed,
     saveMcpServers,
@@ -62,7 +61,6 @@ const McpPage: React.FC = () => {
             mcpMessage={mcpMessage}
             mcpMessageContext={mcpMessageContext}
             mcpServers={mcpServers}
-            extensionMcpServers={extensionMcpServers}
             saveMcpServers={saveMcpServers}
             setMcpServers={setMcpServers}
           />

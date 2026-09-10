@@ -84,8 +84,7 @@ gtk = { version = "0.18", features = ["v3_24"] }
 tempfile.workspace = true
 tauri = { version = "2", features = ["test"] }
 
-# Tests build a real NTFS junction inside the fake legacy tree (the same
-# primitive nomifun-extension's skill_service materializes workspace skill
-# links with) to prove the data relocation skips links instead of failing.
+# Tests build a real NTFS junction inside the fake legacy tree to prove the
+# data relocation skips links instead of failing.
 [target.'cfg(windows)'.dev-dependencies]
 junction = "1"

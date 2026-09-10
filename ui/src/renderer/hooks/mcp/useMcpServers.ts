@@ -1,16 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
-import { ipcBridge } from '@/common';
 import type { IMcpServer } from '@/common/config/storage';
 import { ensureBackendMcpCatalog } from './catalog';
-import { parseExtensionMcpServers, type ExtensionMcpServerContribution } from './extensionCatalog';
 
 /**
  * MCP server state hook.
- * Combines backend-managed user servers with extension-contributed servers.
+ * Reads the canonical backend-managed MCP catalog.
  */
 export const useMcpServers = () => {
   const [mcpServers, setMcpServers] = useState<IMcpServer[]>([]);
-  const [extensionMcpServers, setExtensionMcpServers] = useState<ExtensionMcpServerContribution[]>([]);
   const [isMcpServersLoading, setIsMcpServersLoading] = useState(true);
   const [mcpServersLoadFailed, setMcpServersLoadFailed] = useState(false);
 
@@ -28,27 +25,6 @@ export const useMcpServers = () => {
       .finally(() => {
         setIsMcpServersLoading(false);
       });
-
-    void ipcBridge.extensions.getMcpServers
-      .invoke()
-      .then((extServers) => {
-        if (!extServers || extServers.length === 0) {
-          setExtensionMcpServers([]);
-          return;
-        }
-
-        const converted = parseExtensionMcpServers(extServers);
-        if (converted.length !== extServers.length) {
-          console.warn(
-            `[useMcpServers] Ignored ${extServers.length - converted.length} malformed extension MCP contribution(s)`
-          );
-        }
-        setExtensionMcpServers(converted);
-      })
-      .catch((error) => {
-        console.error('[useMcpServers] Failed to load extension MCP servers:', error);
-        setExtensionMcpServers([]);
-      });
   }, []);
 
   const saveMcpServers = useCallback((serversOrUpdater: IMcpServer[] | ((prev: IMcpServer[]) => IMcpServer[])) => {
@@ -65,8 +41,6 @@ export const useMcpServers = () => {
     mcpServers,
     isMcpServersLoading,
     mcpServersLoadFailed,
-    allMcpServers: [...mcpServers, ...extensionMcpServers],
-    extensionMcpServers,
     setMcpServers,
     saveMcpServers,
   };

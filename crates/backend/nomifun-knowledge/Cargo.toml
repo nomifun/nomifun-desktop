@@ -42,7 +42,8 @@ xattr = "1.6"
 
 [target.'cfg(windows)'.dependencies]
 # NTFS junctions mount knowledge bases into workspaces without requiring
-# the SeCreateSymbolicLink privilege (same rationale as nomifun-extension).
+# the SeCreateSymbolicLink privilege (same rationale as other managed
+# filesystem importers).
 junction = "1"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
