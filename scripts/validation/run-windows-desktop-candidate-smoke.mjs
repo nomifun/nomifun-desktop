@@ -825,7 +825,10 @@ function descendantProcessIdsSync(rootPid, timeoutMs = 5_000) {
   if (!Number.isInteger(rootPid) || rootPid <= 0) return [];
   const script = [
     `$rootPid = ${rootPid}`,
-    '$all = @(Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId)',
+    '$rootProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $rootPid"',
+    'if ($null -eq $rootProcess) { ConvertTo-Json -Compress -InputObject @(); exit 0 }',
+    '$rootCreated = $rootProcess.CreationDate',
+    '$all = @(Get-CimInstance Win32_Process | Where-Object { $_.CreationDate -ge $rootCreated } | Select-Object ProcessId, ParentProcessId, CreationDate)',
     '$frontier = @($rootPid)',
     '$result = @()',
     'while ($frontier.Count -gt 0) {',
