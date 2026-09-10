@@ -1163,7 +1163,10 @@ async function checkDesktopProductA11y(context) {
     if (!plugin.text.includes('Installed Candidate Plugin')) {
       failure('plugin_workshop_fixture_missing', 'Installed Plugin Workshop did not render the accepted Project');
     }
-    const pluginA11y = await auditInteractiveNames(client, 'main');
+    // HubPageShell is a div inside the application layout rather than a
+    // nested <main>. The route text above proves the target page is active;
+    // audit the whole visible window so global rail controls are covered too.
+    const pluginA11y = await auditInteractiveNames(client, 'body');
     if (pluginA11y.interactive_count === 0 || pluginA11y.missing.length > 0) {
       failure('plugin_workshop_a11y_failed', 'Plugin Workshop has unnamed interactive controls', {
         interactive_count: pluginA11y.interactive_count,
