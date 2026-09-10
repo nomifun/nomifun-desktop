@@ -19,6 +19,7 @@
     "release:mac": "bun scripts/run-mac-release.mjs",
     "release:win": "bun scripts/run-win-release.mjs",
     "release:win:signed-rc": "bun scripts/release/run-windows-signed-rc.mjs",
+    "release:cohort": "bun scripts/release/n1-cohort-evidence.mjs",
     "release:linux": "bun scripts/run-linux-release.mjs",
     "release:cloud": "bun scripts/crabnebula-release.mjs",
     "build:ui": "bun run --filter=./ui build",
