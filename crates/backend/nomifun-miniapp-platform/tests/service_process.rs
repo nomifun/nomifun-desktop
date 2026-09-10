@@ -327,6 +327,39 @@ async fn real_node_service_invokes_cancels_and_rejects_stale_generation() {
     process.stop().await;
 }
 
+#[cfg(windows)]
+#[tokio::test]
+async fn real_node_service_starts_from_an_extended_length_module_path() {
+    let Some(node) = node_executable() else {
+        eprintln!("Node is unavailable; skipping long-path MiniApp Service process test");
+        return;
+    };
+    let directory = TempDir::new().expect("temporary Service directory");
+    let mut module_root = directory.path().to_path_buf();
+    for index in 0..10 {
+        module_root.push(format!("managed-release-segment-{index:02}"));
+    }
+    std::fs::create_dir_all(&module_root).expect("create extended-length module root");
+    let module = module_root.join("main.mjs");
+    std::fs::write(&module, SERVICE_MODULE).expect("write extended-length Service module");
+    assert!(module.as_os_str().len() > 300);
+    let spec = service_spec(
+        &node,
+        SERVICE_MODULE.as_bytes(),
+        "miniapp-service-long-path",
+        1,
+        MiniAppServiceLifecycle::OnDemand,
+    );
+    let process = factory(&node, &module, Duration::from_secs(2))
+        .start(MiniAppServiceLaunch {
+            spec,
+            host_generation: 1,
+        })
+        .await
+        .expect("start Service process from an extended-length module path");
+    process.stop().await;
+}
+
 #[tokio::test]
 async fn crash_is_isolated_and_stop_reaps_spawned_process_tree() {
     let Some(node) = node_executable() else {
