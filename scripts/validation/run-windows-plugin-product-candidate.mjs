@@ -38,6 +38,7 @@ const PLUGIN_PACKAGE_ID = 'candidate.product.echo';
 const PLUGIN_CAPABILITY_ID = 'candidate.product.echo';
 const PLUGIN_CONTRIBUTION_ID = 'capability:candidate.product.echo';
 const PLUGIN_ACTION_ID = 'candidate.product.echo.invoke';
+const PLUGIN_DESCRIPTION = 'Windows installed product acceptance fixture.';
 const MOCK_MODEL = 'candidate-plugin-model';
 const INVOKE_MARKER = 'PLUGIN_INSTALLED_INVOKE_OK';
 
@@ -141,7 +142,7 @@ function buildSourceManifest(versionLabel) {
   const inputRef = `schema://${PLUGIN_PACKAGE_ID}/input@1#${sha256(canonicalJson(inputSchema))}`;
   const outputRef = `schema://${PLUGIN_PACKAGE_ID}/output@1#${sha256(canonicalJson(outputSchema))}`;
   const display = {
-    description: 'Installed candidate echo capability.',
+    description: PLUGIN_DESCRIPTION,
     name: `Candidate Plugin ${versionLabel}`,
   };
   return canonicalJson({
@@ -942,7 +943,7 @@ async function checkPluginLifecycle(context) {
       package_id: PLUGIN_PACKAGE_ID,
       package_version: '1.0.0',
       display_name: 'Installed Candidate Plugin',
-      description: 'Windows installed product acceptance fixture.',
+      description: PLUGIN_DESCRIPTION,
       language: 'java_script',
     },
   });
