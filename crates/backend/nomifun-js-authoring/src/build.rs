@@ -25,7 +25,10 @@ use crate::manifest::{
 };
 use crate::model::{OperationCancellation, check_canceled};
 use crate::path::NormalizedSourcePath;
-use crate::npm::{CachedNpmPackage, ContentAddressedNpmCache};
+use crate::npm::{
+    CachedNpmPackage, ContentAddressedNpmCache,
+    validate_registry_package_json,
+};
 use crate::snapshot::CapturedSource;
 use crate::store::StagedSource;
 
@@ -736,33 +739,26 @@ impl<'a> FixedEsmBundler<'a> {
                 )));
             }
             let package_json = package.file_bytes(&NormalizedSourcePath::parse("package.json")?)?;
-            let metadata: BundlerPackageJson = strict_json_from_slice(&package_json)
-                .map_err(|error| AuthoringError::Cache(error.to_string()))?;
-            if metadata.name != locked.name()
-                || metadata.version != locked.version()
-                || metadata.module_type.as_deref().is_some_and(|value| value != "module")
-                || metadata.scripts.as_ref().is_some_and(|value| !value.is_empty())
-                || metadata.optional_dependencies.as_ref().is_some_and(|value| !value.is_empty())
-                || metadata.gypfile == Some(true)
-            {
-                return Err(AuthoringError::Cache(format!(
-                    "npm package {key} is not pure ESM JavaScript"
-                )));
-            }
+            let metadata = validate_registry_package_json(
+                &package_json,
+                locked.name(),
+                locked.version(),
+            )
+            .map_err(|error| AuthoringError::Cache(error.to_string()))?;
             let locked_dependencies = self
                 .lock
                 .packages()
                 .get(key)
                 .expect("lock package checked before cache load")
                 .dependencies();
-            if metadata.dependencies.keys().collect::<BTreeSet<_>>()
+            if metadata.dependencies().dependencies().keys().collect::<BTreeSet<_>>()
                 != locked_dependencies.keys().collect::<BTreeSet<_>>()
             {
                 return Err(AuthoringError::Cache(format!(
                     "npm package {key} dependencies drift from exact lock"
                 )));
             }
-            for (dependency, requirement) in &metadata.dependencies {
+            for (dependency, requirement) in metadata.dependencies().dependencies() {
                 let target = locked_dependencies.get(dependency).ok_or_else(|| {
                     AuthoringError::Cache(format!(
                         "npm package {key} has an undeclared lock edge {dependency}"
@@ -791,8 +787,7 @@ impl<'a> FixedEsmBundler<'a> {
                     )));
                 }
             }
-            let entry = metadata.main.unwrap_or_else(|| "index.js".into());
-            let entry = NormalizedSourcePath::parse(entry)?;
+            let entry = metadata.entrypoint().clone();
             if !package.contains_file(&entry) {
                 return Err(AuthoringError::Cache(format!(
                     "npm package {key} entrypoint {entry} is missing"
@@ -1384,25 +1379,6 @@ enum ImportKind {
 struct ParsedExport {
     export_name: String,
     local_name: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BundlerPackageJson {
-    name: String,
-    version: String,
-    #[serde(default)]
-    dependencies: BTreeMap<String, String>,
-    #[serde(rename = "type", default)]
-    module_type: Option<String>,
-    #[serde(default)]
-    main: Option<String>,
-    #[serde(default)]
-    scripts: Option<BTreeMap<String, String>>,
-    #[serde(default)]
-    optional_dependencies: Option<BTreeMap<String, String>>,
-    #[serde(default)]
-    gypfile: Option<bool>,
 }
 
 fn validate_package_json_identity(

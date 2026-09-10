@@ -6736,15 +6736,20 @@ dependencies = [
 name = "nomifun-js-authoring"
 version = "0.7.6"
 dependencies = [
+ "base64 0.22.1",
+ "flate2",
  "hex",
  "nomifun-agent-contracts",
  "semver",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tar",
  "tempfile",
  "thiserror 2.0.19",
  "unicode-normalization",
+ "ureq",
+ "url",
  "uuid",
  "walkdir",
 ]
@@ -12497,6 +12502,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dea7109cdcd5864d4eeb1b58a1648dc9bf520360d7af16ec26d0a9354bafcfc0"
 dependencies = [
  "base64 0.22.1",
+ "flate2",
  "log",
  "percent-encoding",
  "rustls",
