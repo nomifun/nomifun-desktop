@@ -841,26 +841,39 @@ function descendantProcessIdsSync(rootPid, timeoutMs = 5_000) {
     '}',
     'ConvertTo-Json -Compress -InputObject @($result)',
   ].join('; ');
-  const result = spawnSync(
-    'powershell.exe',
-    ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
-    {
-      shell: false,
-      windowsHide: true,
-      encoding: 'utf8',
-      stdio: 'pipe',
-      timeout: timeoutMs,
-    },
-  );
-  if (result.status !== 0 || result.error) {
-    fail('process_tree_snapshot_failed', 'failed to snapshot the Desktop process tree');
+  const attempts = [];
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const result = spawnSync(
+      'powershell.exe',
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
+      {
+        shell: false,
+        windowsHide: true,
+        encoding: 'utf8',
+        stdio: 'pipe',
+        timeout: timeoutMs,
+      },
+    );
+    attempts.push({
+      attempt,
+      status: typeof result.status === 'number' ? result.status : null,
+      timed_out: result.error?.code === 'ETIMEDOUT',
+    });
+    if (result.status !== 0 || result.error) continue;
+    try {
+      const parsed = JSON.parse(String(result.stdout || '[]'));
+      const values = Array.isArray(parsed) ? parsed : [parsed];
+      if (values.every((pid) => Number.isInteger(pid) && pid > 0)) {
+        return [...new Set(values)];
+      }
+    } catch {
+      // A concurrent process exit can make a CIM projection transiently
+      // incomplete; retry the bounded, read-only snapshot.
+    }
   }
-  const parsed = JSON.parse(String(result.stdout || '[]'));
-  const values = Array.isArray(parsed) ? parsed : [parsed];
-  if (!values.every((pid) => Number.isInteger(pid) && pid > 0)) {
-    fail('process_tree_snapshot_invalid', 'Desktop process-tree snapshot contained an invalid PID');
-  }
-  return [...new Set(values)];
+  fail('process_tree_snapshot_failed', 'failed to snapshot the Desktop process tree', {
+    snapshot_attempts: attempts,
+  });
 }
 
 function terminateSingleProcessSync(pid, timeoutMs = 5_000) {
