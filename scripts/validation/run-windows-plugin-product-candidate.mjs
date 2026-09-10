@@ -28,6 +28,7 @@ import { fileURLToPath } from 'node:url';
 import {
   REPO_ROOT,
   SmokeFailure,
+  isPathWithin,
   runCandidateSmoke,
 } from './run-windows-desktop-candidate-smoke.mjs';
 
@@ -1219,7 +1220,14 @@ export function resolveCurrentCandidate(repoRoot = REPO_ROOT) {
   const sourceCommit = String(head.stdout).trim().toLowerCase();
   if (!/^[0-9a-f]{40}$/.test(sourceCommit)) throw new Error('current Git HEAD is not canonical');
   const shortCommit = sourceCommit.slice(0, 9);
-  const candidateRoot = join(repoRoot, 'build.noindex', 'windows-candidate', shortCommit);
+  const configuredRoot = process.env.NOMIFUN_WINDOWS_CANDIDATE_ROOT;
+  const candidateRoot = configuredRoot
+    ? resolve(configuredRoot)
+    : join(repoRoot, 'build.noindex', 'windows-candidate', shortCommit);
+  const allowedRoot = join(repoRoot, 'build.noindex');
+  if (!isPathWithin(allowedRoot, candidateRoot) || resolve(candidateRoot) === resolve(allowedRoot)) {
+    throw new Error('configured Windows Candidate root must be a child of build.noindex');
+  }
   const artifactRoot = join(candidateRoot, 'artifacts');
   const installers = existsSync(artifactRoot)
     ? readdirSync(artifactRoot, { withFileTypes: true })
