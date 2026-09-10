@@ -34,8 +34,8 @@ pub use model::{
     SourceStoreLimits,
 };
 pub use npm::{
-    CachedNpmPackage, ContentAddressedNpmCache, NpmRegistryPort, NpmResolver,
-    RegistryPackageRelease,
+    CachedNpmPackage, ContentAddressedNpmCache, NpmRegistryHttpClient,
+    NpmRegistryPort, NpmResolver, RegistryPackageRelease,
 };
 pub use nomifun_agent_contracts::{
     DigestHex, PluginProjectId, UserId, digest_bytes,

@@ -464,7 +464,12 @@ fn registry_package_source(
         "version": version,
         "type": "module",
         "main": "index.js",
-        "dependencies": dependency_json
+        "dependencies": dependency_json,
+        "license": "MIT",
+        "author": {"name": "Registry fixture"},
+        "repository": {"type": "git", "url": "https://example.invalid/fixture.git"},
+        "devDependencies": {"eslint": "9.0.0"},
+        "scripts": {"test": "node test.js"}
     });
     RegistryPackageRelease::new(
         name,
@@ -485,7 +490,7 @@ fn registry_package_source(
 }
 
 #[test]
-fn fixed_packer_bundles_transitive_pure_javascript_and_runs_output() {
+fn fixed_packer_bundles_realistic_registry_metadata_and_transitive_pure_javascript() {
     let (_temp, store) = fixture();
     let project = store
         .create_plugin_project(
@@ -609,6 +614,62 @@ fn offline_resolver_uses_content_addressed_cache_and_exact_lock() {
 }
 
 #[test]
+fn resolver_rejects_a_transitive_graph_beyond_the_fixed_depth_budget() {
+    let temp = tempfile::tempdir().unwrap();
+    let cache = ContentAddressedNpmCache::new(temp.path().join("cache")).unwrap();
+    let mut releases = BTreeMap::new();
+    for index in 0..65 {
+        let name = format!("depth-{index}");
+        let next = format!("depth-{}", index + 1);
+        let dependencies = if index < 64 {
+            vec![(next.as_str(), "1.0.0")]
+        } else {
+            Vec::new()
+        };
+        releases.insert(
+            name.clone(),
+            registry_package(&name, "1.0.0", &dependencies),
+        );
+    }
+    let resolver = NpmResolver::new(
+        NpmResolverIdentity::new("fake", "1.0.0").unwrap(),
+        FakeRegistry {
+            releases: Arc::new(Mutex::new(releases)),
+        },
+        cache,
+    );
+    let requests =
+        DependencyRequestSet::new([("depth-0".into(), "1.0.0".into())]).unwrap();
+
+    let error = resolver.resolve(&requests, &NeverCancel).unwrap_err();
+    assert!(matches!(error, AuthoringError::Registry(message) if message.contains("depth limit")));
+}
+
+#[test]
+fn resolver_rejects_more_than_the_fixed_package_budget() {
+    let temp = tempfile::tempdir().unwrap();
+    let cache = ContentAddressedNpmCache::new(temp.path().join("cache")).unwrap();
+    let mut releases = BTreeMap::new();
+    let mut direct = BTreeMap::new();
+    for index in 0..257 {
+        let name = format!("breadth-{index}");
+        direct.insert(name.clone(), "1.0.0".to_owned());
+        releases.insert(name.clone(), registry_package(&name, "1.0.0", &[]));
+    }
+    let resolver = NpmResolver::new(
+        NpmResolverIdentity::new("fake", "1.0.0").unwrap(),
+        FakeRegistry {
+            releases: Arc::new(Mutex::new(releases)),
+        },
+        cache,
+    );
+    let requests = DependencyRequestSet::new(direct).unwrap();
+
+    let error = resolver.resolve(&requests, &NeverCancel).unwrap_err();
+    assert!(matches!(error, AuthoringError::Registry(message) if message.contains("package limit")));
+}
+
+#[test]
 fn canceled_pack_drops_staging_without_starting_build_host() {
     let (_temp, store) = fixture();
     let project = store
@@ -645,18 +706,41 @@ fn canceled_pack_drops_staging_without_starting_build_host() {
 }
 
 #[test]
-fn registry_rejects_lifecycle_and_native_addon_inputs() {
-    for package_json in [
-        serde_json::json!({
-            "name": "bad",
-            "version": "1.0.0",
-            "scripts": {"postinstall": "evil"}
-        }),
-        serde_json::json!({
-            "name": "bad",
-            "version": "1.0.0",
-            "gypfile": true
-        }),
+fn registry_rejects_commonjs_lifecycle_and_native_addon_inputs() {
+    for (package_json, file_name) in [
+        (
+            serde_json::json!({
+                "name": "bad",
+                "version": "1.0.0"
+            }),
+            "index.js",
+        ),
+        (
+            serde_json::json!({
+                "name": "bad",
+                "version": "1.0.0",
+                "type": "module",
+                "scripts": {"postinstall": "evil"}
+            }),
+            "index.js",
+        ),
+        (
+            serde_json::json!({
+                "name": "bad",
+                "version": "1.0.0",
+                "type": "module",
+                "gypfile": true
+            }),
+            "index.js",
+        ),
+        (
+            serde_json::json!({
+                "name": "bad",
+                "version": "1.0.0",
+                "type": "module"
+            }),
+            "addon.node",
+        ),
     ] {
         let result = RegistryPackageRelease::new(
             "bad",
@@ -668,7 +752,7 @@ fn registry_rejects_lifecycle_and_native_addon_inputs() {
                     serde_json::to_vec(&package_json).unwrap(),
                 ),
                 (
-                    NormalizedSourcePath::parse("addon.node").unwrap(),
+                    NormalizedSourcePath::parse(file_name).unwrap(),
                     b"native".to_vec(),
                 ),
             ],

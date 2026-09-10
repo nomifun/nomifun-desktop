@@ -20,6 +20,8 @@
 > UI 和 disabled Whole-App Backup Export/Import-as-new 已完成实现与 Windows 定向回归。
 > Whole-App Backup 还覆盖 Service Files、Private SQLite、Migration ledger、Catalog
 > identity digest 和 owner operation 互斥。
+> Plugin Authoring 的 production npm registry adapter 已形成并通过真实 public npm
+> smoke；dependency request/lock 的 durable mutation/recovery 仍未完成。
 > 当前 HEAD 的 0.7.6 NSIS 安装版基础 smoke 已通过；Plugin/MiniApp Candidate、
 > fault、产品验收和 macOS/Linux 外部验证仍未关闭。
 >
@@ -424,7 +426,7 @@
 
 | ID | 状态 | Owner/写集 | 目标 | 依赖 | 最小验证 |
 | --- | --- | --- | --- | --- | --- |
-| `N1-4-01` | in-progress | Authoring lane；`nomifun-js-authoring/**` | Source Store、JS/TS scaffold、pure-JS dependency exact lock、fixed packer/Build Host | `N1-0-02`,`N1-1-02`,`N1-2-01` | authoring 27 + real Build Executor E2E 2；resolver/cache/static local+npm bundler/Node Host/Artifact admission/cancel 已接；仍需 production registry/lock mutation、MiniApp profile 和 Chat Dev Source edit |
+| `N1-4-01` | in-progress | Authoring lane；`nomifun-js-authoring/**` | Source Store、JS/TS scaffold、pure-JS dependency exact lock、fixed packer/Build Host | `N1-0-02`,`N1-1-02`,`N1-2-01` | authoring 36 + public npm live smoke 1；production HTTPS registry/SRI/tar containment、全图 package/depth/file/bytes/time budget、resolver/cache、共享 registry/build admission、static bundler/Node Host/Artifact admission/cancel 和 Chat Dev Source edit 已接；仍需具备 crash/cancel recovery 的 Project dependency mutation，不能使用多文件 best-effort rename 冒充原子提交 |
 | `N1-4-02` | in-progress | Plugin project lane | single Ready、Candidate Test、impact、manual/compatible-idle Apply、Discard、Retry/Restore | `N1-2-03`,`N1-3-01`,`N1-4-01` | Candidate discard 已完成；仍缺授权持久化 auto-apply、resident Host busy/quiescent 产品证据 |
 | `N1-4-03` | in-progress | SDK/CLI lane | Plugin SDK、Share Bundle/prebuilt import/export、本地 CLI | `N1-4-02` | 当前 CLI 已覆盖 list/show/source-path/build/test/candidate show-discard-apply-restore/mount lifecycle；Share/Export 等未实现接口不虚构 |
 
@@ -783,3 +785,26 @@ Extension 命中仅属于历史删除合同、负向 404 测试、通用语义�
 6. 当前生成的安装包只作为本机候选输入，尚未把未完成的产品/fault checks 伪装成
    Gate PASS；历史 `0.7.4` 安装包禁止复用。手机模式、macOS arm64 和 Linux
    Desktop x64 仍不在本机范围内。
+
+## 2026-09-10 Plugin production npm registry adapter 子切片
+
+1. `N1-4-01` 的 production registry adapter 已形成：只访问配置的同源 HTTPS registry，
+   不跟随重定向；metadata 和 tarball 都有固定大小/超时边界。同步 transport 不创建私有
+   Tokio runtime，可安全进入后续 application-owned blocking worker。
+2. tarball 在解包前校验 registry `sha512` SRI，解包只接受 canonical `package/` 根下的
+   普通文件，并拒绝 traversal、非 UTF-8、Windows case/NFC collision、symlink、hardlink、
+   special file、native addon、lifecycle script、optional/peer/bundled/platform install
+   surface。SemVer 解析继续生成 content-addressed cache 和 exact transitive lock；
+   每次 resolution 另有 package/file 数、递归深度、累计传输/解包 bytes 和总耗时预算，
+   递归时不再保留已缓存 Package 的完整文件 bytes。
+3. registry admission 与 fixed bundler 现在复用同一个 package.json 校验器：普通 author、
+   license、repository、devDependency 与非 lifecycle test/lint script 不造成 resolve/build
+   漂移；CommonJS、lifecycle/native/optional/peer/bundled/platform surface 在写 lock 前拒绝。
+4. 定向证据：`nomifun-js-authoring` 36 passed / 1 ignored；被 ignore 的 public npm
+   `yocto-queue@1.2.1` live smoke 已显式运行并通过。受影响 crate check、定向 rustfmt、
+   contract generator write/check 和 `git diff --check` 通过。
+5. 本轮审查曾验证一个直接写 `package.json + dependency-lock.json` 的原型，但发现 HTTP
+   取消可在 blocking worker 与 DB CAS 之间形成分裂，多次 rename 也没有 crash journal/
+   startup recovery；该原型及其 API/UI 已撤回，没有把不安全的多文件提交暴露给用户。
+   `N1-4-01` 因此保持 `in-progress`。下一切片必须先定义 durable mutation intent 与
+   commit/recovery/finalize 顺序，再接 application/API/Desktop。

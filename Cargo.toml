@@ -140,6 +140,7 @@ psl = "2"
 
 uuid = { version = "1", features = ["v7"] }
 reqwest = { version = "0.12", features = ["json", "multipart", "stream", "gzip", "rustls-tls", "socks", "system-proxy"], default-features = false }
+ureq = "3.3"
 dashmap = "6"
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
 prost = "0.13"
