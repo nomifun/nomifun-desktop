@@ -123,6 +123,11 @@ const WINDOWS_PRODUCT_CHECKS = Object.freeze({
 });
 
 const PRODUCT_CHECK_COMMANDS = Object.freeze({
+  plugin_n1_windows_installed_app_smoke: [
+    'bun',
+    'scripts/validation/run-windows-plugin-product-candidate.mjs',
+    '--current-candidate',
+  ],
   plugin_n1_windows_runtime_selection: [
     'cargo',
     'test',
@@ -1037,7 +1042,7 @@ function runSelfTest() {
       (check) =>
         check.required &&
         check.implementation === 'pending' &&
-        check.check_id === 'plugin_n1_windows_installed_app_smoke',
+        check.check_id === 'miniapp_m1_windows_installed_app_smoke',
     ),
     'candidate registry is not fail-closed',
   );

@@ -154,6 +154,67 @@ async fn default_nomi_core_router_answers_canonical_catalog_requests() {
 }
 
 #[tokio::test]
+async fn installation_token_is_limited_to_headless_product_control_planes() {
+    let trust_secret = "headless-product-local-trust";
+    let installation_token = "headless-product-installation-token";
+    let (router, services) = common::build_local_trust_app(trust_secret).await;
+    services
+        .instance_token_validator
+        .set_token(nomifun_auth::token_sha256_hex(installation_token));
+
+    for path in [
+        "/api/javascript-runtime/status",
+        "/api/plugins",
+        "/api/miniapps",
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header(
+                        "authorization",
+                        format!("Bearer {installation_token}"),
+                    )
+                    .body(Body::empty())
+                    .expect("build installation-token request"),
+            )
+            .await
+            .expect("dispatch installation-token request");
+        assert_eq!(response.status(), StatusCode::OK, "product route {path}");
+    }
+
+    let owner_jwt = services
+        .jwt_service
+        .sign(services.authoritative_user_id.as_ref(), "owner")
+        .expect("sign owner JWT");
+    for (path, token) in [
+        ("/api/plugins", "wrong-installation-token"),
+        ("/api/plugins", owner_jwt.as_str()),
+        ("/api/capabilities", installation_token),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .expect("build rejected product request"),
+            )
+            .await
+            .expect("dispatch rejected product request");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "route {path}");
+    }
+
+    services
+        .shutdown_browser_platform()
+        .await
+        .expect("browser cleanup");
+    services.database.close().await;
+}
+
+#[tokio::test]
 async fn nomi_core_remote_preserves_owner_jwt_and_rejects_selector_queries() {
     let trust_secret = "remote-jwt-query-local-trust";
     let (router, services) = common::build_local_trust_app(trust_secret).await;
