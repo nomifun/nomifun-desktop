@@ -57,6 +57,16 @@ pub struct DeletePluginProjectParams {
 }
 
 #[derive(Debug, Clone)]
+pub struct DiscardPluginCandidateParams {
+    pub project_id: String,
+    pub owner_user_id: String,
+    pub expected_updated_at: i64,
+    pub expected_generation: i64,
+    pub candidate_id: String,
+    pub expected_candidate_digest: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct StartProductOperationParams {
     pub operation_id: String,
     pub kind: ProductOperationKind,
@@ -219,6 +229,11 @@ pub trait IPluginN1Repository: Send + Sync {
     async fn delete_project_cas(
         &self,
         params: &DeletePluginProjectParams,
+    ) -> Result<bool, DbError>;
+
+    async fn discard_candidate(
+        &self,
+        params: &DiscardPluginCandidateParams,
     ) -> Result<bool, DbError>;
 
     async fn start_operation(

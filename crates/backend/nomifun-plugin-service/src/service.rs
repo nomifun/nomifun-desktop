@@ -27,7 +27,7 @@ use nomifun_api_types::{
 };
 use nomifun_db::{
     ApplyPluginCandidateParams, CreatePluginArtifactParams, CreatePluginProjectParams,
-    DeletePluginProjectParams,
+    DeletePluginProjectParams, DiscardPluginCandidateParams,
     FinishProductOperationParams, ListPluginCredentialBindingsParams, PluginArtifactRow,
     PluginCandidateOrigin as DbCandidateOrigin, PluginCandidateTestReceiptRow,
     PluginCredentialBindingInput, PluginCredentialBindingSnapshot, PluginMountRow,
@@ -399,6 +399,43 @@ impl PluginApplicationService {
             )));
         }
         Ok(deleted)
+    }
+
+    pub async fn discard_candidate(
+        &self,
+        owner_user_id: &str,
+        request: nomifun_api_types::DiscardPluginCandidateRequest,
+    ) -> Result<PluginProjectDetailDto, PluginServiceError> {
+        let _guard = self.project_guard(owner_user_id, &request.project_id).await?;
+        let project = self.owned_project(owner_user_id, &request.project_id).await?;
+        require_project_request_fresh(
+            &project,
+            request.expected_project_revision,
+            request.expected_build_generation,
+        )?;
+        let candidate = self
+            .repository
+            .get_candidate(&project.project_id)
+            .await?
+            .ok_or_else(|| PluginServiceError::not_found("ready candidate"))?;
+        if candidate.candidate_id != request.candidate_id
+            || candidate.candidate_digest != request.expected_candidate_digest
+        {
+            return Err(PluginServiceError::stale(
+                "ready candidate changed before discard",
+            ));
+        }
+        self.repository
+            .discard_candidate(&DiscardPluginCandidateParams {
+                project_id: project.project_id.clone(),
+                owner_user_id: owner_user_id.to_owned(),
+                expected_updated_at: project.updated_at,
+                expected_generation: project.build_generation,
+                candidate_id: request.candidate_id,
+                expected_candidate_digest: request.expected_candidate_digest,
+            })
+            .await?;
+        self.get_project(owner_user_id, &project.project_id).await
     }
 
     pub async fn get_mount(

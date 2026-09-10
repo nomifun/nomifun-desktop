@@ -150,7 +150,8 @@ pub use mcp_server::IMcpServerRepository;
 pub use oauth_token::IOAuthTokenRepository;
 pub use plugin_n1::{
     ApplyPluginCandidateParams, CreatePluginArtifactParams, CreatePluginProjectParams,
-    DeletePluginKvParams, DeletePluginProjectParams, FinishProductOperationParams,
+    DeletePluginKvParams, DeletePluginProjectParams, DiscardPluginCandidateParams,
+    FinishProductOperationParams,
     GetPluginKvParams,
     IPluginN1Repository, ListPluginCredentialBindingsParams, PutPluginKvParams,
     RecordPluginCandidateTestReceiptParams, RecordPluginReadyCandidateParams,

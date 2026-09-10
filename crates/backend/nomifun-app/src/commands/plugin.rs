@@ -22,6 +22,7 @@ use serde_json::Value;
 use crate::cli::{
     Cli, HeadlessConnectionArgs, MiniAppCommand, MiniAppListArgs,
     MiniAppShowArgs, PluginCandidateApplyArgs, PluginCandidateCommand,
+    PluginCandidateDiscardArgs,
     PluginCandidateShowArgs, PluginCommand, PluginListArgs, PluginMountArgs,
     PluginMountCommand, PluginProjectArgs, PluginProjectCommand, PluginShowArgs,
     PluginTestArgs,
@@ -59,6 +60,7 @@ async fn run_plugin_inner(
         PluginCommand::Test(args) => run_test(args).await,
         PluginCommand::Candidate { operation } => match operation {
             PluginCandidateCommand::Show(args) => run_candidate_show(args).await,
+            PluginCandidateCommand::Discard(args) => run_candidate_discard(args).await,
             PluginCandidateCommand::Apply(args) => run_apply(args).await,
             PluginCandidateCommand::Restore(args) => run_restore(args).await,
         },
@@ -106,6 +108,31 @@ async fn run_candidate_show(
         .get_api::<PluginProjectDetailDto>(&format!(
             "/api/plugin-projects/{project_id}"
         ))
+        .await?;
+    to_value(response)
+}
+
+async fn run_candidate_discard(
+    args: &PluginCandidateDiscardArgs,
+) -> Result<Value, CliFailure> {
+    let project_id = checked_segment(&args.project_id, "project_id")?;
+    let client = HeadlessClient::new(&args.connection)?;
+    let project = fetch_project(&client, &project_id).await?;
+    let ready = project.ready.clone().ok_or_else(|| {
+        CliFailure::state("the Plugin Project has no Ready Candidate")
+    })?;
+    let request = nomifun_api_types::DiscardPluginCandidateRequest {
+        project_id: project.summary.project_id.clone(),
+        expected_project_revision: project.summary.project_revision,
+        expected_build_generation: project.summary.build_generation,
+        candidate_id: ready.candidate.candidate_id,
+        expected_candidate_digest: ready.candidate.candidate_digest,
+    };
+    let response: ApiResponse<PluginProjectDetailDto> = client
+        .post_api(
+            &format!("/api/plugin-projects/{project_id}/candidate/discard"),
+            &request,
+        )
         .await?;
     to_value(response)
 }

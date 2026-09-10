@@ -7,6 +7,7 @@ use nomifun_db::{
     IPluginN1Repository, ListPluginCredentialBindingsParams, PluginCandidateOrigin,
     PluginCredentialBindingInput, ProductOperationKind, ProductOperationState, PutPluginKvParams,
     RecordPluginCandidateTestReceiptParams, RecordPluginReadyCandidateParams,
+    DiscardPluginCandidateParams,
     ReplacePluginCredentialBindingsParams, RestorePluginMountParams, SqlitePluginN1Repository,
     StartProductOperationParams, UninstallPluginMountParams, UpdatePluginMountConfigParams,
     UpdatePluginProjectSourceParams, init_database, init_database_memory, installation_owner_id,
@@ -859,6 +860,128 @@ async fn project_delete_requires_exact_ready_candidate_and_preserves_artifact_hi
         .unwrap(),
         1,
         "Project deletion preserves immutable Artifact history"
+    );
+}
+
+#[tokio::test]
+async fn candidate_discard_is_exact_cas_and_preserves_generation_artifact_and_origin() {
+    let fixture = managed_fixture().await;
+    let project = fixture
+        .repo
+        .get_project(&fixture.project_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let candidate = fixture
+        .repo
+        .get_ready_candidate(&fixture.project_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let receipt_id = id();
+    fixture
+        .repo
+        .record_candidate_test_receipt(&RecordPluginCandidateTestReceiptParams {
+            receipt_id: receipt_id.clone(),
+            candidate_id: candidate.candidate_id.clone(),
+            candidate_digest: candidate.candidate_digest.clone(),
+            artifact_id: candidate.artifact_id.clone(),
+            artifact_digest: candidate.artifact_digest.clone(),
+            receipt_digest: digest('e'),
+            runtime_fingerprint_digest: digest('f'),
+            receipt: json!({"outcome":"passed"}),
+            tested_at: 6,
+        })
+        .await
+        .unwrap();
+
+    let stale = fixture
+        .repo
+        .discard_candidate(&DiscardPluginCandidateParams {
+            project_id: project.project_id.clone(),
+            owner_user_id: project.owner_user_id.clone(),
+            expected_updated_at: project.updated_at,
+            expected_generation: project.build_generation,
+            candidate_id: candidate.candidate_id.clone(),
+            expected_candidate_digest: digest('0'),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(stale, DbError::Conflict(message) if message.contains("Ready Candidate")));
+    assert!(fixture
+        .repo
+        .get_ready_candidate(&fixture.project_id)
+        .await
+        .unwrap()
+        .is_some());
+
+    assert!(
+        fixture
+            .repo
+            .discard_candidate(&DiscardPluginCandidateParams {
+                project_id: project.project_id.clone(),
+                owner_user_id: project.owner_user_id,
+                expected_updated_at: project.updated_at,
+                expected_generation: project.build_generation,
+                candidate_id: candidate.candidate_id.clone(),
+                expected_candidate_digest: candidate.candidate_digest.clone(),
+            })
+            .await
+            .unwrap()
+    );
+    let discarded = fixture
+        .repo
+        .get_project(&fixture.project_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(discarded.build_generation, project.build_generation);
+    assert!(discarded.ready_candidate_id.is_none());
+    assert!(fixture
+        .repo
+        .get_ready_candidate(&fixture.project_id)
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM plugin_candidate_test_receipts WHERE candidate_id = ?",
+        )
+        .bind(&candidate.candidate_id)
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM plugin_artifacts WHERE artifact_id = ?",
+        )
+        .bind(&fixture.artifact_id)
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM product_operations WHERE operation_id = ?",
+        )
+        .bind(&candidate.origin_operation_id)
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM plugin_candidate_test_receipts WHERE receipt_id = ?",
+        )
+        .bind(receipt_id)
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap(),
+        0
     );
 }
 
