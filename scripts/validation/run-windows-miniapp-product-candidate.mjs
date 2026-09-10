@@ -438,27 +438,6 @@ async function checkUiLifecycleTransfer(context, state) {
   if (current.miniapp.releases.previous?.release_id !== first.release_id) {
     failure('miniapp_previous_release_missing', 'Second Publish did not retain the first Release as Previous');
   }
-  current = await productApi(
-    context,
-    `/api/miniapps/${encodeURIComponent(current.miniapp.miniapp_id)}/rollback`,
-    {
-      method: 'POST',
-      timeoutMs: 180_000,
-      phase: 'miniapp.ui.rollback',
-      body: {
-        miniapp_id: current.miniapp.miniapp_id,
-        expected_product_revision: current.miniapp.product_revision,
-        expected_pointer_revision: current.miniapp.releases.pointer_revision,
-        expected_active_release_epoch: current.miniapp.releases.active_release_epoch,
-        expected_current_release_digest: current.miniapp.releases.active.release_digest,
-        previous_release_id: current.miniapp.releases.previous.release_id,
-        expected_previous_release_digest: current.miniapp.releases.previous.release_digest,
-      },
-    },
-  );
-  if (current.miniapp.releases.active?.release_id !== first.release_id) {
-    failure('miniapp_rollback_failed', 'Rollback did not restore the first Release identity');
-  }
 
   const transferRoot = join(context.dataRoot, 'candidate-miniapp-transfer');
   mkdirSync(transferRoot, { recursive: true });
@@ -500,6 +479,28 @@ async function checkUiLifecycleTransfer(context, state) {
     importedShare.miniapp.lifecycle !== 'disabled'
   ) {
     failure('miniapp_share_import_identity_invalid', 'Share Import did not create a new disabled identity');
+  }
+
+  current = await productApi(
+    context,
+    `/api/miniapps/${encodeURIComponent(current.miniapp.miniapp_id)}/rollback`,
+    {
+      method: 'POST',
+      timeoutMs: 180_000,
+      phase: 'miniapp.ui.rollback',
+      body: {
+        miniapp_id: current.miniapp.miniapp_id,
+        expected_product_revision: current.miniapp.product_revision,
+        expected_pointer_revision: current.miniapp.releases.pointer_revision,
+        expected_active_release_epoch: current.miniapp.releases.active_release_epoch,
+        expected_current_release_digest: current.miniapp.releases.active.release_digest,
+        previous_release_id: current.miniapp.releases.previous.release_id,
+        expected_previous_release_digest: current.miniapp.releases.previous.release_digest,
+      },
+    },
+  );
+  if (current.miniapp.releases.active?.release_id !== first.release_id) {
+    failure('miniapp_rollback_failed', 'Rollback did not restore the first Release identity');
   }
 
   current = await setEnabled(context, current, false);
