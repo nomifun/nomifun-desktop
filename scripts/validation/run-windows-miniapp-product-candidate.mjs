@@ -877,6 +877,23 @@ async function auditPage(client, rootSelector, phase) {
   return { ...audit, layout };
 }
 
+async function settleDesktopPaint(client) {
+  await client.evaluate(`new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve(true)));
+  })`);
+  await sleep(300);
+}
+
+async function captureSettledPage(client, outputPath) {
+  await settleDesktopPaint(client);
+  await client.command('Page.captureScreenshot', {
+    format: 'png',
+    captureBeyondViewport: false,
+  });
+  await sleep(200);
+  return capturePage(client, outputPath);
+}
+
 async function checkDesktopA11y(context, state) {
   if (!state.uiMiniAppId || !state.serviceMiniAppId) {
     failure('miniapp_a11y_fixture_missing', 'MiniApp product fixtures are missing before Desktop audit');
@@ -893,8 +910,9 @@ async function checkDesktopA11y(context, state) {
       30_000,
       state.uiName,
     );
+    await settleDesktopPaint(client);
     const libraryAudit = await auditPage(client, 'body', 'MiniApp Library');
-    const libraryScreenshot = await capturePage(
+    const libraryScreenshot = await captureSettledPage(
       client,
       join(evidenceRoot, 'miniapp-library.png'),
     );
@@ -910,12 +928,13 @@ async function checkDesktopA11y(context, state) {
     await waitForPageSelector(
       client,
       `/mini-apps/${state.uiMiniAppId}`,
-      'iframe[title*="Surface"]',
+      'section[aria-labelledby="miniapp-surface-title"]:not([aria-busy]) iframe[title*="Surface"]',
       30_000,
       state.uiName,
     );
+    await settleDesktopPaint(client);
     const surfaceAudit = await auditPage(client, 'body', 'MiniApp Workshop/Surface');
-    const surfaceScreenshot = await capturePage(
+    const surfaceScreenshot = await captureSettledPage(
       client,
       join(evidenceRoot, 'miniapp-workshop-surface.png'),
     );
@@ -928,8 +947,9 @@ async function checkDesktopA11y(context, state) {
       30_000,
       state.serviceName,
     );
+    await settleDesktopPaint(client);
     const serviceAudit = await auditPage(client, 'body', 'MiniApp Service Workshop');
-    const serviceScreenshot = await capturePage(
+    const serviceScreenshot = await captureSettledPage(
       client,
       join(evidenceRoot, 'miniapp-service-workshop.png'),
     );
