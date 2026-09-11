@@ -128,6 +128,7 @@ export interface AgentResolvedSnapshot {
   resolved_agent_id?: AgentId;
   resolved_agent_type?: string;
   resolved_agent_backend?: string;
+  /** Initial model at creation; Conversation.model is the current chat model. */
   resolved_model?: {
     provider_id: ProviderId;
     model: string;
@@ -387,6 +388,7 @@ export interface CreateAgentPresetRequest {
 
 export interface CreateAgentPresetFromTemplateRequest {
   model?: { provider_id: string; model: string };
+  /** Prepare an internal launch configuration; false creates a personal Agent. */
   reuse_existing?: boolean;
   display_name: string;
   description?: string;

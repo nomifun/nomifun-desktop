@@ -5783,16 +5783,15 @@ function ap7AgentPresetLaunchContract() {
   );
   require(
     source.conversation.includes(
-      'const modelLocked = Boolean(conversation.preset_id);'
+      'const hasPreset = Boolean(conversation.preset_id);'
     ) &&
-      source.conversation.includes('if (modelLocked) return false;') &&
-      source.conversation.includes('if (modelLocked) return;') &&
-      source.sendBox.includes('disabled={modelLocked}') &&
-      !source.sendBox.includes('{!modelLocked && (') &&
-      source.conversationService.includes(
+      !source.conversation.includes('modelLocked') &&
+      !source.sendBox.includes('modelLocked') &&
+      source.sendBox.includes('<NomiModelSelector') &&
+      !source.conversationService.includes(
         'top-level `model` is immutable for AgentPreset conversations'
       ),
-    'AgentPreset conversations must show their frozen model without exposing public mutation'
+    'AgentPreset conversations must allow session model changes while retaining preset resource restrictions'
   );
   require(
     source.sendBox.includes(

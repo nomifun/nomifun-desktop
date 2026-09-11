@@ -28,6 +28,9 @@ pub fn delegation_policy_from_conversation_row(row: &ConversationRow) -> Result<
 
 /// Resolve a conversation row's canonical stored model.
 ///
+/// This remains authoritative after an explicit model switch in an AgentPreset
+/// conversation; the frozen Agent snapshot records only its initial model.
+///
 /// `NULL` means no conversation-level model (valid for backends such as ACP).
 /// Invalid JSON, legacy field aliases, malformed provider IDs, and incomplete
 /// model references are rejected as corrupt persisted state.

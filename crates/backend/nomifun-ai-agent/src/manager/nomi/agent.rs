@@ -957,13 +957,24 @@ impl NomiAgentManager {
         #[cfg(feature = "browser-use")]
         let browser_lane_binding = host_wiring.browser_lane_binding;
         let ssh_lease = host_wiring.ssh_lease;
-        let image_generation_discovery = host_wiring.image_generation_discovery;
-        let image_generation_tool = host_wiring.image_generation_tool;
+        let image_generation_entitled = host_wiring.image_generation_entitled
+            && ((!config_extra.enforce_tool_allowlist && config_extra.allowed_tools.is_empty())
+                || config_extra.allowed_tools.iter().any(|name| name == "image_gen"));
+        let image_generation_discovery = if image_generation_entitled {
+            host_wiring.image_generation_discovery
+        } else {
+            None
+        };
+        let image_generation_tool = if image_generation_entitled {
+            host_wiring.image_generation_tool
+        } else {
+            None
+        };
         let image_generation_availability = if image_generation_tool.is_some() {
             ImageGenerationAvailability::Ready
-        } else if host_wiring.image_generation_discovery_failed {
+        } else if image_generation_entitled && host_wiring.image_generation_discovery_failed {
             ImageGenerationAvailability::DiscoveryFailed
-        } else if host_wiring.image_generation_entitled {
+        } else if image_generation_entitled {
             ImageGenerationAvailability::NoConfiguredModel
         } else {
             ImageGenerationAvailability::NotEntitled
@@ -6924,6 +6935,29 @@ mod tests {
     }
 
     struct RepairedBuiltinCronSink(std::sync::atomic::AtomicUsize);
+
+    #[tokio::test]
+    async fn minimal_agent_starts_with_configured_image_tool_without_granting_it() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = make_test_config();
+        config.session_directory = root.path().join("sessions");
+        config.enforce_tool_allowlist = true;
+        config.allowed_tools.clear();
+        let agent = NomiAgentManager::new_with_host_wiring(
+            "minimal-with-image-catalog".into(), root.path().to_string_lossy().into_owned(), config,
+            None, None, None, None, Vec::new(), None, None, Vec::new(), None,
+            NomiHostWiring {
+                image_generation_tool: Some(Box::new(MissingImageArtifactTool)),
+                image_generation_discovery: Some(Arc::new(SequencedImageToolDiscovery::new([]))),
+                image_generation_entitled: true,
+                ..NomiHostWiring::default()
+            },
+        ).await.expect("an excluded optional image tool must not prevent chat startup");
+        assert_eq!(agent.image_generation_availability(), ImageGenerationAvailability::NotEntitled);
+        assert!(agent.image_generation_discovery.is_none());
+        assert!(agent.engine.lock().await.registry_mut().get("image_gen").is_none());
+        agent.kill_and_wait(None).await.unwrap();
+    }
 
     #[async_trait::async_trait]
     impl CronSink for RepairedBuiltinCronSink {

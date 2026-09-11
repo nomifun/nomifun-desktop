@@ -556,13 +556,22 @@ async fn official_agent_direct_launch_reuses_configuration_and_creates_sessions(
     assert_eq!(first["revision"]["reference"], second["revision"]["reference"]);
     let preset_id = first["preset"]["preset_id"].as_str().unwrap();
     let session_a = call(router.clone(), "/api/agent-sessions", json!({ "preset_id": preset_id, "title": "First conversation" })).await;
-    let session_b = call(router, "/api/agent-sessions", json!({ "preset_id": preset_id, "title": "Second conversation" })).await;
+    let session_b = call(router.clone(), "/api/agent-sessions", json!({ "preset_id": preset_id, "title": "Second conversation" })).await;
     assert_ne!(session_a["agent_session_id"], session_b["agent_session_id"]);
     assert_eq!(session_a["agent_binding"], session_b["agent_binding"]);
     assert_eq!(session_a["agent_binding"]["preset_revision_ref"], first["revision"]["reference"]);
     let persisted: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nomi_agent_preset_revisions WHERE preset_id = ?")
         .bind(preset_id).fetch_one(services.database.pool()).await.unwrap();
     assert_eq!(persisted, 1);
+    let library_response = router.oneshot(Request::builder()
+        .uri("/api/agent-preset-templates")
+        .header("x-nomi-local-trust", TRUST)
+        .body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(library_response.status(), StatusCode::OK);
+    let library: Value = serde_json::from_slice(&axum::body::to_bytes(
+        library_response.into_body(), 4 * 1024 * 1024).await.unwrap()).unwrap();
+    assert_eq!(library["data"]["user_presets"], json!([]),
+        "using an official Agent must not create personal Agents");
     services.shutdown_browser_platform().await.unwrap();
     services.database.close().await;
 }

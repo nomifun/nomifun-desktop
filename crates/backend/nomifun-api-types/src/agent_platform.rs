@@ -487,8 +487,8 @@ pub struct CreateAgentPresetRequest {
 pub struct CreateAgentPresetFromTemplateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<AgentChatModelSelectionDto>,
-    /// Reuse an owner-owned stable configuration only while its document still
-    /// exactly matches this template and the resolved default model.
+    /// Prepare/reuse an internal session-only configuration for direct official
+    /// Agent launch. False explicitly creates a personal Agent in the library.
     #[serde(default)]
     pub reuse_existing: bool,
     pub display_name: String,

@@ -3058,6 +3058,71 @@ async fn run_product_chain(
     workspace: &Path,
 ) -> Result<(), SmokeFailure> {
     let provider_id = configure_stepfun(router, api_key, base_url, model).await?;
+    // Reproduce the real installation: an image model exists, while the
+    // unmodified official chat.minimal Agent has an enforced empty tool list.
+    successful_json(
+        router, "guid.image_catalog", Method::POST, "/api/providers",
+        Some(json!({
+            "platform": "custom", "name": "Image catalog regression fixture",
+            "base_url": "http://127.0.0.1:1/v1", "auth_scheme": "bearer",
+            "credentials": {"api_keys": ["nonfunctional-image-fixture"]},
+            "enabled": true, "initial_model": {
+                "model": "image-fixture", "enabled": true,
+                "capabilities": [{"task": "image_generation", "protocol": "openai.images",
+                    "connection_role": "default", "provider_params": {}}]
+            }, "connections": []
+        })), LOCAL_API_DEADLINE, &[StatusCode::CREATED],
+    ).await?;
+    let official = successful_json(
+        router, "guid.official_prepare", Method::POST,
+        "/api/agent-presets/from-template/chat.minimal",
+        Some(json!({"display_name": "Minimal", "reuse_existing": true,
+            "model_route_refs": {}, "chat_route_records": {}})),
+        LOCAL_API_DEADLINE, &[StatusCode::OK],
+    ).await?;
+    let official = envelope_data("guid.official_prepare", official)?;
+    let minimal_id = required_string("guid.official_prepare", &official, "/preset/preset_id", "PRESET_ID_MISSING")?;
+    let (minimal_session, _) = create_session(router, &minimal_id, &provider_id, model).await?;
+    warm_guid_session(router, &minimal_session).await?;
+    start_guid_initial_turn(router, &minimal_session).await?;
+    wait_for_session_marker(router, "guid.minimal_reply", &minimal_session, 0,
+        GUID_INITIAL_MARKER, TURN_RESULT_DEADLINE).await?;
+    let before_switch = successful_json(router, "session.before_switch", Method::GET,
+        format!("/api/conversations/{minimal_session}"), None,
+        LOCAL_API_DEADLINE, &[StatusCode::OK]).await?;
+    let (original_messages, _) = session_messages_after(router, "session.original_history", &minimal_session, 0).await?;
+    let next_provider = configure_stepfun(router, api_key, base_url, model).await?;
+    successful_json(router, "session.switch_cancel", Method::POST,
+        format!("/api/conversations/{minimal_session}/cancel"), Some(json!({})),
+        TURN_COMMAND_DEADLINE, &[StatusCode::OK]).await?;
+    let switched = successful_json(router, "session.switch_model", Method::PATCH,
+        format!("/api/conversations/{minimal_session}"),
+        Some(json!({"model": {"provider_id": next_provider, "model": model},
+            "execution_model_pool": {"mode": "single", "model": {"provider_id": next_provider, "model": model}},
+            "execution_template_id": null})), LOCAL_API_DEADLINE, &[StatusCode::OK]).await?;
+    if switched.pointer("/data/model/provider_id") != Some(&Value::String(next_provider))
+        || switched.pointer("/data/agent_snapshot") != before_switch.pointer("/data/agent_snapshot")
+    {
+        return Err(SmokeFailure::new("session.switch_model", "SESSION_SWITCH_CONTRACT_MISMATCH", 409));
+    }
+    let switch_cursor = session_message_cursor(router, "session.switch_cursor", &minimal_session).await?;
+    start_session_turn(router, "session.switched_turn", &minimal_session,
+        &uuid::Uuid::now_v7().to_string(),
+        "Reply with exactly NOMIFUN_SWITCHED_MODEL_OK and no other text.".to_owned()).await?;
+    wait_for_session_marker(router, "session.switched_reply", &minimal_session, switch_cursor,
+        "NOMIFUN_SWITCHED_MODEL_OK", TURN_RESULT_DEADLINE).await?;
+    let (messages, _) = session_messages_after(router, "session.preserved_history", &minimal_session, 0).await?;
+    if original_messages.iter().any(|original| !messages.contains(original))
+        || exact_assistant_marker_count(&messages, GUID_INITIAL_MARKER) != 1
+        || exact_assistant_marker_count(&messages, "NOMIFUN_SWITCHED_MODEL_OK") != 1
+    {
+        return Err(SmokeFailure::new("session.preserved_history", "SESSION_HISTORY_CHANGED", 409));
+    }
+    let library = successful_json(router, "guid.library", Method::GET,
+        "/api/agent-preset-templates", None, LOCAL_API_DEADLINE, &[StatusCode::OK]).await?;
+    if library.pointer("/data/user_presets").and_then(Value::as_array).is_none_or(|items| !items.is_empty()) {
+        return Err(SmokeFailure::new("guid.library", "OFFICIAL_LAUNCH_CREATED_PERSONAL_AGENT", 409));
+    }
     let (preset_id, _source_binding) =
         create_agent_preset(router, &provider_id, STEPFUN_SOURCE_MODEL).await?;
 
