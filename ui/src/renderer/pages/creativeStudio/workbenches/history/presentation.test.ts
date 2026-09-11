@@ -10,7 +10,9 @@ import type { CreativeAssetPort } from '../../assets';
 import { testUuid } from '../../canvas/core/testFixtures';
 import type { CreativeTask } from '../../tasks';
 import { mapImageWorkbenchRuntimeResults, type CreativeWorkbenchRuntimeSnapshot } from '../runtime';
+import { parametersForStandaloneRetry } from '../retrySlot';
 import {
+  standaloneHistoryRetirementTaskIds,
   standaloneHistoryResumeRequests,
   standaloneHistoryRuntimeSnapshot,
 } from './presentation';
@@ -67,6 +69,55 @@ describe('standalone history presentation', () => {
     expect(snapshot.entries[0]?.outputs.map((output) => output.assetId)).toEqual([
       ASSET_A,
       ASSET_B,
+    ]);
+  });
+
+  test('projects one logical retry card and expands it for durable removal', () => {
+    const original: CreativeTask = {
+      ...task('failed'),
+      error: { kind: 'provider_error', message: 'failed', httpStatus: 500 },
+      finishedAt: 12,
+    };
+    const retried: CreativeTask = {
+      ...original,
+      taskId: testUuid(815),
+      parameters: parametersForStandaloneRetry(original),
+      status: 'running',
+      error: null,
+      submittedAt: 20,
+      startedAt: 21,
+      finishedAt: null,
+    };
+    const live: CreativeWorkbenchRuntimeSnapshot = {
+      ...runtime,
+      state: 'running',
+      entries: [
+        {
+          order: 0,
+          task: retried,
+          outputs: [],
+          requestError: null,
+          retryInput: null,
+          outputKind: 'image',
+        },
+      ],
+    };
+
+    const snapshot = standaloneHistoryRuntimeSnapshot(
+      scope,
+      [original],
+      live,
+      assets
+    );
+    expect(snapshot.entries).toHaveLength(1);
+    expect(snapshot.entries[0]?.task.taskId).toBe(retried.taskId);
+    expect(snapshot.entries[0]?.historyTaskIds).toEqual([
+      original.taskId,
+      retried.taskId,
+    ]);
+    expect(standaloneHistoryRetirementTaskIds(snapshot, [retried.taskId])).toEqual([
+      original.taskId,
+      retried.taskId,
     ]);
   });
 

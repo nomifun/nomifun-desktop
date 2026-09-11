@@ -34,6 +34,7 @@ import { creativeTaskHistoryClient } from '../../tasks/historyClient';
 import {
   combineStandaloneHistoryTasks,
   hydrateStandaloneTaskReferences,
+  standaloneHistoryRetirementTaskIds,
   standaloneHistoryResumeRequests,
   standaloneHistoryRuntimeSnapshot,
   useStandaloneWorkbenchHistory,
@@ -196,6 +197,7 @@ const OwnedVideoWorkbenchReady: React.FC<{
   );
   const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
   const [retireTaskIds, setRetireTaskIds] = useState<string[]>([]);
+  const [retireAttemptTaskIds, setRetireAttemptTaskIds] = useState<string[]>([]);
   const [retiredTaskIds, setRetiredTaskIds] = useState<string[]>([]);
   const [retiring, setRetiring] = useState(false);
   const [retireError, setRetireError] = useState<string | null>(null);
@@ -513,26 +515,43 @@ const OwnedVideoWorkbenchReady: React.FC<{
           );
         }
       }
+      const attemptTaskIds = standaloneHistoryRetirementTaskIds(
+        presentationRuntime,
+        unique
+      );
+      if (attemptTaskIds.length > 100) {
+        throw new Error(
+          t('creativeStudio.product.history.invalidSelection', {
+            defaultValue: '每次必须选择 1-100 条终态历史。',
+          })
+        );
+      }
       setRetireTaskIds(unique);
+      setRetireAttemptTaskIds(attemptTaskIds);
     } catch (reason) {
       setError(formatError(reason));
     }
   };
 
   const confirmRetirement = async (): Promise<void> => {
-    if (retireTaskIds.length === 0 || retiring) return;
+    if (
+      retireTaskIds.length === 0 ||
+      retireAttemptTaskIds.length === 0 ||
+      retiring
+    ) return;
     setRetiring(true);
     setError(null);
     setRetireError(null);
     try {
       const result = await creativeTaskHistoryClient.retireStandalone({
         workbenchKind: 'video',
-        taskIds: retireTaskIds,
+        taskIds: retireAttemptTaskIds,
       });
       runtime.dismiss(result.retiredTaskIds);
       setRetiredTaskIds((current) => [...new Set([...current, ...result.retiredTaskIds])]);
       setSelectedTaskIds([]);
       setRetireTaskIds([]);
+      setRetireAttemptTaskIds([]);
       await history.reload();
     } catch (reason) {
       setRetireError(formatError(reason));
@@ -773,6 +792,7 @@ const OwnedVideoWorkbenchReady: React.FC<{
         error={retireError}
         onCancel={() => {
           setRetireTaskIds([]);
+          setRetireAttemptTaskIds([]);
           setRetireError(null);
         }}
         onConfirm={() => void confirmRetirement()}

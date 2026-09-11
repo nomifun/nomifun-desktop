@@ -16,6 +16,7 @@ import type {
   CreativeWorkbenchRuntimeEntry,
   CreativeWorkbenchRuntimeSnapshot,
 } from '../runtime';
+import { parametersForStandaloneRetry } from '../retrySlot';
 import {
   canRetryStandaloneWorkbenchHistoryTask,
   isExactStandaloneWorkbenchHistoryTask,
@@ -156,6 +157,56 @@ describe('standalone workbench history model', () => {
     expect(result[0]?.canRetry).toBe(false);
     expect(result[1]?.canRetry).toBe(true);
     expect(result[2]?.canRetry).toBe(false);
+  });
+
+  test('replaces a failed card in its original slot across live and durable retries', () => {
+    const newer = task(541, 400);
+    const original = task(542, 300, {
+      status: 'failed',
+      error: { kind: 'provider_error', message: 'failed', httpStatus: 500 },
+      inputs: [],
+    });
+    const older = task(543, 200);
+    const retry = task(544, 500, {
+      parameters: parametersForStandaloneRetry(original),
+      inputs: [],
+      status: 'running',
+      startedAt: 501,
+    });
+
+    const live = mergeStandaloneWorkbenchHistory({
+      scope,
+      durableTasks: [newer, original, older],
+      runtime: runtime([liveEntry(retry)]),
+    });
+    expect(live.map((item) => item.task.taskId)).toEqual([
+      newer.taskId,
+      retry.taskId,
+      older.taskId,
+    ]);
+    expect(live[1]).toMatchObject({
+      slotTaskId: original.taskId,
+      slotSubmittedAt: original.submittedAt,
+      attemptTaskIds: [original.taskId, retry.taskId],
+    });
+
+    const failedRetry = {
+      ...retry,
+      status: 'failed' as const,
+      error: { kind: 'provider_error', message: 'failed again', httpStatus: 500 },
+      finishedAt: 510,
+    };
+    const restored = mergeStandaloneWorkbenchHistory({
+      scope,
+      durableTasks: [newer, original, failedRetry, older],
+      runtime: runtime([]),
+    });
+    expect(restored.map((item) => item.task.taskId)).toEqual([
+      newer.taskId,
+      failedRetry.taskId,
+      older.taskId,
+    ]);
+    expect(restored[1]?.canRetry).toBe(true);
   });
 
   test('deduplicates byte-equivalent durable rows but rejects any duplicate drift', () => {

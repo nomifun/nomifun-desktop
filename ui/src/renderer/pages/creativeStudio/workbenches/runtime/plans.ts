@@ -24,9 +24,10 @@ import type {
   ImageWorkbenchQuality,
 } from "../image";
 import { imageWorkbenchSizePolicyForModel } from "../image";
+import { parametersForStandaloneRetry } from "../retrySlot";
+import { validateWorkbenchReferences } from "./assets";
 import { resolveExactWorkbenchModel } from "./catalog";
 import type { CreativeWorkbenchModelSelection } from "./catalog";
-import { validateWorkbenchReferences } from "./assets";
 import type {
   CreativeWorkbenchReferences,
   CreativeWorkbenchTaskOperation,
@@ -385,7 +386,7 @@ export function prepareStandaloneHistoryRetry(
       model: task.model,
       task: task.task,
       capability: task.capability,
-      parameters: structuredClone(task.parameters),
+      parameters: parametersForStandaloneRetry(task),
       inputs: task.inputs.map((binding) => ({ ...binding })),
     },
   });

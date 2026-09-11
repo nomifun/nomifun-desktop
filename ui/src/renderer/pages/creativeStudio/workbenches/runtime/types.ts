@@ -64,6 +64,8 @@ export interface CreativeWorkbenchCommittedOutput {
 
 export interface CreativeWorkbenchRuntimeEntry {
   hasDeletedInputs?: boolean;
+  /** Durable backend attempts collapsed into this one logical history card. */
+  historyTaskIds?: readonly string[];
   order: number;
   task: CreativeTask;
   outputs: readonly CreativeWorkbenchCommittedOutput[];
