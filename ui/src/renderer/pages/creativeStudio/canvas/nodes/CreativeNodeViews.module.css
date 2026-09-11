@@ -131,34 +131,6 @@
   flex: 1;
 }
 
-.directorContent {
-  display: flex;
-  height: 100%;
-  min-height: 88px;
-  box-sizing: border-box;
-  align-items: center;
-  justify-content: center;
-  flex-direction: column;
-  gap: 9px;
-  padding: 14px;
-  color: var(--creative-node-accent);
-}
-
-.directorContent strong {
-  max-width: 100%;
-  overflow: hidden;
-  color: var(--color-text-2);
-  font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.directorContent progress {
-  width: min(180px, 84%);
-  height: 5px;
-  accent-color: var(--creative-node-accent);
-}
-
 .groupContent {
   position: absolute;
   inset: 0;

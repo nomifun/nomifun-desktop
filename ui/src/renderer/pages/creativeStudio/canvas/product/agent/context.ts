@@ -189,12 +189,6 @@ const summarizeNode = (node: CreativeCanvasNode, selected: boolean): SummarizedN
         truncated;
       truncated = addText(details, 'errorMessage', node.data.errorMessage) || truncated;
       break;
-    case 'director':
-      details.sceneId = node.data.sceneId;
-      details.cameraId = node.data.cameraId;
-      details.timelineMs = node.data.timelineMs;
-      details.durationMs = node.data.durationMs;
-      break;
     case 'group':
       truncated = addText(details, 'title', node.data.title) || truncated;
       details.collapsed = node.data.collapsed;

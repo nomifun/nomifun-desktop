@@ -172,21 +172,6 @@ impl CreativeProjectDocument {
                     "connections[{index}] must not connect config to config"
                 ));
             }
-            if *source_kind == CreativeNodeType::Director {
-                return Err(format!(
-                    "connections[{index}] must not use director as a source"
-                ));
-            }
-            if *target_kind == CreativeNodeType::Director
-                && !matches!(
-                    source_kind,
-                    CreativeNodeType::Image | CreativeNodeType::Panorama
-                )
-            {
-                return Err(format!(
-                    "connections[{index}] director targets require an image or panorama source"
-                ));
-            }
             if let Some(handle) = connection.source_handle.as_deref() {
                 require_id(&format!("connections[{index}].sourceHandle"), handle)?;
             }
@@ -365,9 +350,6 @@ impl<'de> Deserialize<'de> for CreativeNode {
             CreativeNodeType::Audio => CreativeNodeData::Audio(
                 serde_json::from_value(wire.data).map_err(D::Error::custom)?,
             ),
-            CreativeNodeType::Director => CreativeNodeData::Director(
-                serde_json::from_value(wire.data).map_err(D::Error::custom)?,
-            ),
             CreativeNodeType::Group => CreativeNodeData::Group(
                 serde_json::from_value(wire.data).map_err(D::Error::custom)?,
             ),
@@ -395,11 +377,10 @@ pub enum CreativeNodeType {
     Config,
     Video,
     Audio,
-    Director,
     Group,
 }
 
-/// Closed payload union for the eight canonical v1 node kinds. Untagged wire
+/// Closed payload union for the seven canonical v1 node kinds. Untagged wire
 /// encoding keeps the product JSON shape as `type + data`; [`CreativeNode`]'s
 /// custom deserializer selects exactly one strict payload from the sibling
 /// `type`, so kind/data drift is rejected before service validation.
@@ -412,7 +393,6 @@ pub enum CreativeNodeData {
     Config(CreativeConfigNodeData),
     Video(CreativeVideoNodeData),
     Audio(CreativeAudioNodeData),
-    Director(CreativeDirectorNodeData),
     Group(CreativeGroupNodeData),
 }
 
@@ -425,7 +405,6 @@ impl CreativeNodeData {
             Self::Config(_) => CreativeNodeType::Config,
             Self::Video(_) => CreativeNodeType::Video,
             Self::Audio(_) => CreativeNodeType::Audio,
-            Self::Director(_) => CreativeNodeType::Director,
             Self::Group(_) => CreativeNodeType::Group,
         }
     }
@@ -438,7 +417,6 @@ impl CreativeNodeData {
             Self::Config(data) => data.validate(path),
             Self::Video(data) => data.validate(path),
             Self::Audio(data) => data.validate(path),
-            Self::Director(data) => data.validate(path),
             Self::Group(data) => data.validate(path),
         }
     }
@@ -1090,30 +1068,6 @@ impl CreativeAudioComposerDraft {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CreativeDirectorNodeData {
-    /// Asset ID of the hidden canonical DirectorState v1 text sidecar.
-    pub scene_id: Option<String>,
-    pub camera_id: Option<String>,
-    pub timeline_ms: f64,
-    pub duration_ms: f64,
-}
-
-impl CreativeDirectorNodeData {
-    fn validate(&self, path: &str) -> Result<(), String> {
-        require_optional_id(&format!("{path}.sceneId"), self.scene_id.as_deref())?;
-        require_optional_id(&format!("{path}.cameraId"), self.camera_id.as_deref())?;
-        require_min(&format!("{path}.durationMs"), self.duration_ms, 0.0)?;
-        require_range(
-            &format!("{path}.timelineMs"),
-            self.timeline_ms,
-            0.0,
-            self.duration_ms,
-        )
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreativeGroupNodeData {
     pub title: String,
     pub color: Option<String>,
@@ -1273,7 +1227,6 @@ pub struct CreativeBottomPanel {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum CreativeBottomView {
-    Timeline,
     History,
 }
 
@@ -1646,12 +1599,6 @@ mod tests {
                     "format": "mp3"
                 }
             }),
-            "director" => serde_json::json!({
-                "sceneId": "scene-a",
-                "cameraId": null,
-                "timelineMs": 1200,
-                "durationMs": 5000
-            }),
             "group" => serde_json::json!({
                 "title": "scene group",
                 "color": "#f8a100",
@@ -1696,7 +1643,6 @@ mod tests {
             node("text", "text"),
             node("config-a", "config"),
             node("config-b", "config"),
-            node("director", "director"),
             node("group", "group"),
         ];
         doc
@@ -1825,7 +1771,7 @@ mod tests {
     }
 
     #[test]
-    fn all_eight_node_payloads_round_trip_and_validate() {
+    fn all_seven_node_payloads_round_trip_and_validate() {
         for kind in [
             "image",
             "panorama",
@@ -1833,7 +1779,6 @@ mod tests {
             "config",
             "video",
             "audio",
-            "director",
             "group",
         ] {
             let parsed = node(&format!("node-{kind}"), kind);
@@ -2175,7 +2120,7 @@ mod tests {
     }
 
     #[test]
-    fn graph_rejects_self_duplicate_group_config_and_invalid_director_edges() {
+    fn graph_rejects_self_duplicate_group_and_config_edges() {
         let cases = [
             ("self", vec![connection("edge-a", "text", "text")], "itself"),
             (
@@ -2201,16 +2146,6 @@ mod tests {
                 vec![connection("edge-a", "config-a", "config-b")],
                 "config to config",
             ),
-            (
-                "director source",
-                vec![connection("edge-a", "director", "image")],
-                "director as a source",
-            ),
-            (
-                "invalid director input",
-                vec![connection("edge-a", "text", "director")],
-                "image or panorama",
-            ),
         ];
 
         for (label, connections, expected) in cases {
@@ -2222,16 +2157,6 @@ mod tests {
                 "{label} produced unexpected error: {error}"
             );
         }
-    }
-
-    #[test]
-    fn graph_accepts_image_and_panorama_as_director_inputs() {
-        let mut doc = graph_document();
-        doc.connections = vec![
-            connection("edge-image", "image", "director"),
-            connection("edge-panorama", "panorama", "director"),
-        ];
-        doc.validate_for_project(PROJECT_ID).unwrap();
     }
 
     #[test]

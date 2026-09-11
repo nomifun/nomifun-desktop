@@ -12,8 +12,6 @@ export const CREATIVE_STUDIO_LEGACY_PROJECTS_PATH =
   `${CREATIVE_STUDIO_ROOT_PATH}/projects`;
 export const CREATIVE_STUDIO_CANVAS_PATTERN =
   '/workshop/canvas/:canvasId';
-export const CREATIVE_STUDIO_DIRECTOR_PATTERN =
-  '/workshop/director/:canvasId';
 export const CREATIVE_STUDIO_IMAGE_PATH = '/workshop/image';
 export const CREATIVE_STUDIO_VIDEO_PATH = '/workshop/video';
 export const CREATIVE_STUDIO_PROMPTS_PATH = '/workshop/prompts';
@@ -24,7 +22,6 @@ export const WORKBENCH_HOME_PATH = '/guid';
 export type CreativeStudioSection =
   | 'canvases'
   | 'canvas'
-  | 'director'
   | 'image'
   | 'video'
   | 'prompts'
@@ -32,10 +29,6 @@ export type CreativeStudioSection =
   | 'templates';
 
 export interface CreativeStudioCanvasRouteMatch {
-  canvasId: string;
-}
-
-export interface CreativeStudioDirectorRouteMatch {
   canvasId: string;
 }
 
@@ -56,11 +49,6 @@ const requiredCanvasId = (canvasId: string): string => {
 
 export const creativeStudioCanvasPath = (canvasId: string): string =>
   `${CREATIVE_STUDIO_ROOT_PATH}/canvas/${encodeURIComponent(
-    requiredCanvasId(canvasId)
-  )}`;
-
-export const creativeStudioDirectorPath = (canvasId: string): string =>
-  `${CREATIVE_STUDIO_ROOT_PATH}/director/${encodeURIComponent(
     requiredCanvasId(canvasId)
   )}`;
 
@@ -85,13 +73,6 @@ export const matchCreativeStudioCanvasPath = (
   return canvasId ? { canvasId } : null;
 };
 
-export const matchCreativeStudioDirectorPath = (
-  path: string
-): CreativeStudioDirectorRouteMatch | null => {
-  const canvasId = matchCanvasId(path, /^\/workshop\/director\/([^/]+)$/);
-  return canvasId ? { canvasId } : null;
-};
-
 /** Exact section matching keeps `/workshop-other` outside the product shell. */
 export const creativeStudioSectionForPath = (
   path: string
@@ -105,7 +86,6 @@ export const creativeStudioSectionForPath = (
     return 'canvases';
   }
   if (matchCreativeStudioCanvasPath(pathname)) return 'canvas';
-  if (matchCreativeStudioDirectorPath(pathname)) return 'director';
   if (pathname === CREATIVE_STUDIO_IMAGE_PATH) return 'image';
   if (pathname === CREATIVE_STUDIO_VIDEO_PATH) return 'video';
   if (pathname === CREATIVE_STUDIO_PROMPTS_PATH) return 'prompts';
@@ -125,21 +105,11 @@ export const CREATIVE_STUDIO_PROJECTS_PATH = CREATIVE_STUDIO_CANVASES_PATH;
 /** @deprecated Use CREATIVE_STUDIO_CANVAS_PATTERN. */
 export const CREATIVE_STUDIO_CANVAS_PROJECT_PATTERN =
   CREATIVE_STUDIO_CANVAS_PATTERN;
-/** @deprecated Use CREATIVE_STUDIO_DIRECTOR_PATTERN. */
-export const CREATIVE_STUDIO_DIRECTOR_PROJECT_PATTERN =
-  CREATIVE_STUDIO_DIRECTOR_PATTERN;
 /** @deprecated Use creativeStudioCanvasPath. */
 export const creativeStudioCanvasProjectPath = creativeStudioCanvasPath;
-/** @deprecated Use creativeStudioDirectorPath. */
-export const creativeStudioDirectorProjectPath = creativeStudioDirectorPath;
 
 /** @deprecated Use CreativeStudioCanvasRouteMatch. */
 export interface LegacyCreativeStudioCanvasProjectRouteMatch {
-  projectId: string;
-}
-
-/** @deprecated Use CreativeStudioDirectorRouteMatch. */
-export interface LegacyCreativeStudioDirectorProjectRouteMatch {
   projectId: string;
 }
 
@@ -148,13 +118,5 @@ export const matchCreativeStudioCanvasProjectPath = (
   path: string
 ): LegacyCreativeStudioCanvasProjectRouteMatch | null => {
   const match = matchCreativeStudioCanvasPath(path);
-  return match ? { projectId: match.canvasId } : null;
-};
-
-/** @deprecated Use matchCreativeStudioDirectorPath. */
-export const matchCreativeStudioDirectorProjectPath = (
-  path: string
-): LegacyCreativeStudioDirectorProjectRouteMatch | null => {
-  const match = matchCreativeStudioDirectorPath(path);
   return match ? { projectId: match.canvasId } : null;
 };

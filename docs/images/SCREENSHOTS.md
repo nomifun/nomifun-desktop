@@ -4,12 +4,11 @@ This manifest records the repository-local screenshots used by the Desktop
 README and technical guides. The current set was captured on **August 25, 2026**
 from the 0.7.2 codebase with an isolated data root.
 
-The Creative Studio set covers Canvas Library, the rich Canvas editor, Image
-Workbench, Video Workbench, Prompt Center, My Assets, Template Studio, Template
-Editor, the Director timeline and stage, and a visible native desktop
-companion. These are current running-app captures, not legacy mockups. Do not
-restore retired screenshots or introduce temporary aliases into the numbered
-gallery.
+The Creative Studio set covers Canvas Library, Image Workbench, Video Workbench,
+Prompt Center, My Assets, Template Studio, Template Editor, and a visible native
+desktop companion. These are current running-app captures, not legacy mockups.
+Do not restore retired screenshots or introduce temporary aliases into the
+numbered gallery.
 
 ## Ownership and storage
 
@@ -28,7 +27,6 @@ gallery.
 | `readme/en/models.png` / `readme/zh/models.png` | Model Management and task-aware model catalog |
 | `readme/en/companions.png` / `readme/zh/companions.png` | Current workspace with the live desktop companion visible |
 | `readme/en/skills.png` / `readme/zh/skills.png` | Skills Hub with Creative Studio skills |
-| `readme/en/creative-workshop.png` / `readme/zh/creative-workshop.png` | Rich Creative Studio Canvas editor |
 
 ## Creative Studio gallery
 
@@ -38,15 +36,12 @@ under `creative-studio/zh-CN/`. Both locale sets use the same route order:
 | File | Route / subject |
 | --- | --- |
 | `01-canvas-library.png` | `#/workshop/canvases` · Canvas Library |
-| `02-canvas-editor-rich.png` | `#/workshop/canvas/:canvasId` · rich Canvas editor, assets, Canvas Assistant, and Director panel |
 | `03-image-workbench.png` | `#/workshop/image` · standalone T2I/I2I workbench |
 | `04-video-workbench.png` | `#/workshop/video` · standalone T2V/I2V workbench |
 | `05-prompt-center.png` | `#/workshop/prompts` · searchable Prompt Center |
 | `06-asset-library.png` | `#/workshop/assets` · My Assets and reusable inputs |
 | `07-template-studio.png` | `#/workshop/templates` · private Template Studio, including multi-image series setup |
 | `08-template-editor.png` | Template Editor and bounded AI Create review flow |
-| `09-director-timeline.png` | Canvas-bound Director timeline, cameras, keyframes, and capture |
-| `10-director-stage.png` | Canvas-bound Director 3D stage and camera view |
 | `11-companion-settings.png` | Companion workspace with figure, persona, model, memory, Skills, and desktop visibility control |
 | `12-companion-workspace.png` | Companion surface kept visible beside the creative workspace |
 
@@ -57,10 +52,9 @@ transparent companion window. The numbered
 gallery references. Neither is a
 management-page thumbnail substituted for the native companion experience.
 
-The Canvas Editor capture visibly includes the Canvas Assistant and its
-explicit Creative Studio skill choices. The companion settings capture shows
-the desktop-visibility toggle, while the companion workspace capture shows the
-companion surface alongside the product. The separate top-level
+The companion settings capture shows the desktop-visibility toggle, while the
+companion workspace capture shows the companion surface alongside the product.
+The separate top-level
 `readme/en/skills.png` and `readme/zh/skills.png` captures document the
 reusable Skills Hub packages; there is no numbered `11-creative-skills.png`
 gallery asset.

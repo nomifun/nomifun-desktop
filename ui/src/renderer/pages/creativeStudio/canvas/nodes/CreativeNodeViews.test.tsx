@@ -79,12 +79,6 @@ const nodes: CreativeCanvasNode[] = [
   },
   {
     ...base,
-    id: 'director-1',
-    type: 'director',
-    data: { sceneId: 'scene-1', cameraId: 'camera-a', timelineMs: 2_400, durationMs: 8_000 },
-  },
-  {
-    ...base,
     id: 'group-1',
     type: 'group',
     data: { title: '第一幕素材', color: '#7583b2', collapsed: false },
@@ -106,12 +100,12 @@ describe('Creative Studio canonical node views', () => {
       expect(html.includes('<audio')).toBe(false);
     }
   });
-  test('renders the seven user-facing kinds and keeps config task records headless', () => {
+  test('renders the six user-facing kinds and keeps config task records headless', () => {
     const html = renderCanvas(
       <>{nodes.map((node) => <CreativeNodeView key={node.id} node={node} selected={node.id === 'text-1'} />)}</>
     );
 
-    expect(CREATIVE_NODE_VIEW_KINDS.length).toBe(7);
+    expect(CREATIVE_NODE_VIEW_KINDS.length).toBe(6);
     for (const kind of CREATIVE_NODE_VIEW_KINDS) {
       expect(html.includes(`data-node-type="${kind}"`)).toBe(true);
     }

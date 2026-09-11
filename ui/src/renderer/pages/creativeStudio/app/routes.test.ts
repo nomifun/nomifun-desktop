@@ -10,7 +10,6 @@ import {
   CREATIVE_STUDIO_ASSETS_PATH,
   CREATIVE_STUDIO_CANVASES_PATH,
   CREATIVE_STUDIO_CANVAS_PATTERN,
-  CREATIVE_STUDIO_DIRECTOR_PATTERN,
   CREATIVE_STUDIO_IMAGE_PATH,
   CREATIVE_STUDIO_LEGACY_PROJECTS_PATH,
   CREATIVE_STUDIO_PROMPTS_PATH,
@@ -20,12 +19,10 @@ import {
   CREATIVE_STUDIO_VIDEO_PATH,
   creativeStudioCanvasPath,
   creativeStudioCanvasProjectPath,
-  creativeStudioDirectorPath,
   creativeStudioSectionForPath,
   isCreativeStudioPath,
   matchCreativeStudioCanvasPath,
   matchCreativeStudioCanvasProjectPath,
-  matchCreativeStudioDirectorPath,
 } from './routes';
 
 describe('Creative Studio routes', () => {
@@ -36,23 +33,11 @@ describe('Creative Studio routes', () => {
     expect(CREATIVE_STUDIO_CANVAS_PATTERN).toBe(
       '/workshop/canvas/:canvasId'
     );
-    expect(CREATIVE_STUDIO_DIRECTOR_PATTERN).toBe(
-      '/workshop/director/:canvasId'
-    );
     expect(CREATIVE_STUDIO_IMAGE_PATH).toBe('/workshop/image');
     expect(CREATIVE_STUDIO_VIDEO_PATH).toBe('/workshop/video');
     expect(CREATIVE_STUDIO_PROMPTS_PATH).toBe('/workshop/prompts');
     expect(CREATIVE_STUDIO_ASSETS_PATH).toBe('/workshop/assets');
     expect(CREATIVE_STUDIO_TEMPLATES_PATH).toBe('/workshop/templates');
-  });
-
-  test('builds and matches encoded current-Canvas Director links', () => {
-    const path = creativeStudioDirectorPath('  canvas/一  ');
-
-    expect(path).toBe('/workshop/director/canvas%2F%E4%B8%80');
-    expect(matchCreativeStudioDirectorPath(`${path}/?camera=primary#timeline`)).toEqual({
-      canvasId: 'canvas/一',
-    });
   });
 
   test('builds and matches encoded Canvas links', () => {
@@ -76,9 +61,6 @@ describe('Creative Studio routes', () => {
     expect(matchCreativeStudioCanvasPath('/workshop/canvas')).toBe(null);
     expect(matchCreativeStudioCanvasPath('/workshop/canvas/a/extra')).toBe(null);
     expect(matchCreativeStudioCanvasPath('/workshop/canvas/%E0%A4%A')).toBe(null);
-    expect(matchCreativeStudioDirectorPath('/workshop/director')).toBe(null);
-    expect(matchCreativeStudioDirectorPath('/workshop/director/a/extra')).toBe(null);
-    expect(matchCreativeStudioDirectorPath('/workshop/director/%E0%A4%A')).toBe(null);
   });
 
   test('keeps deprecated helpers as aliases to canonical Canvas destinations', () => {
@@ -96,7 +78,7 @@ describe('Creative Studio routes', () => {
     expect(creativeStudioSectionForPath('/workshop/canvases')).toBe('canvases');
     expect(creativeStudioSectionForPath('/workshop/projects')).toBe('canvases');
     expect(creativeStudioSectionForPath('/workshop/canvas/canvas-1')).toBe('canvas');
-    expect(creativeStudioSectionForPath('/workshop/director/canvas-1')).toBe('director');
+    expect(creativeStudioSectionForPath('/workshop/director/canvas-1')).toBe(null);
     expect(creativeStudioSectionForPath('/workshop/image?draft=1')).toBe('image');
     expect(creativeStudioSectionForPath('/workshop/video/')).toBe('video');
     expect(creativeStudioSectionForPath('/workshop/prompts')).toBe('prompts');

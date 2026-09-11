@@ -5,7 +5,6 @@
  */
 
 import {
-  Camera,
   PanoramaHorizontal,
   Pic,
   VideoTwo,
@@ -361,52 +360,6 @@ export const CreativePanoramaNode: React.FC<CreativePanoramaNodeProps> = ({
   );
 };
 
-export interface CreativeDirectorNodeProps extends CreativeNodePresentationProps<'director'> {
-  title?: string;
-  emptyLabel?: string;
-  preview?: React.ReactNode;
-}
-
-export const CreativeDirectorNode: React.FC<CreativeDirectorNodeProps> = ({
-  title,
-  emptyLabel,
-  preview,
-  ...props
-}) => {
-  const { t } = useTranslation();
-  const { node } = props;
-  const timeline = Math.max(0, node.data.timelineMs);
-  const duration = Math.max(0, node.data.durationMs);
-  const resolvedTitle =
-    title ?? t('creativeStudio.canvas.nodeKinds.director');
-  const resolvedEmptyLabel =
-    emptyLabel ?? t('creativeStudio.canvas.nodes.director.empty');
-  return (
-    <CreativeNodeFrame
-      node={node}
-      title={resolvedTitle}
-      footer={`${formatMilliseconds(timeline)} / ${formatMilliseconds(duration)}`}
-      {...sharedFrameProps(props)}
-    >
-      {preview ? (
-        <div className={styles.previewSlot} data-node-preview='director'>
-          {preview}
-        </div>
-      ) : (
-        <div className={styles.directorContent}>
-          <Camera theme='outline' size={28} fill='currentColor' strokeWidth={2.5} />
-          <strong>{node.data.cameraId ?? resolvedEmptyLabel}</strong>
-          <progress
-            value={Math.min(timeline, duration)}
-            max={Math.max(duration, 1)}
-            aria-label={t('creativeStudio.canvas.nodes.director.timeline')}
-          />
-        </div>
-      )}
-    </CreativeNodeFrame>
-  );
-};
-
 export interface CreativeGroupNodeProps extends CreativeNodePresentationProps<'group'> {
   titleFallback?: string;
   children?: React.ReactNode;
@@ -442,7 +395,6 @@ export const CreativeGroupNode: React.FC<CreativeGroupNodeProps> = ({
 export type CreativeAnyNodeViewProps = CreativeNodePresentationProps<CreativeCanvasNodeKind> & {
   asset?: CreativeNodeAssetPresentation | null;
   panoramaPreview?: React.ReactNode;
-  directorPreview?: React.ReactNode;
   groupContent?: React.ReactNode;
   textEditing?: boolean;
   onTextChange?: (text: string) => void;
@@ -473,8 +425,6 @@ export const CreativeNodeView: React.FC<CreativeAnyNodeViewProps> = (props) => {
       return <CreativePanoramaNode {...props} node={node} asset={props.asset} preview={props.panoramaPreview} />;
     case 'config':
       return null;
-    case 'director':
-      return <CreativeDirectorNode {...props} node={node} preview={props.directorPreview} />;
     case 'group':
       return <CreativeGroupNode {...props} node={node}>{props.groupContent}</CreativeGroupNode>;
   }
@@ -486,6 +436,5 @@ export const CREATIVE_NODE_VIEW_KINDS = [
   'text',
   'video',
   'audio',
-  'director',
   'group',
 ] as const satisfies readonly Exclude<CreativeCanvasNodeKind, 'config'>[];

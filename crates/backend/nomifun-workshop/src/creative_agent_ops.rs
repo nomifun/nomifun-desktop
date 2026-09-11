@@ -78,7 +78,6 @@ fn default_size(node_type: CreativeNodeType) -> (f64, f64) {
         CreativeNodeType::Config => (360.0, 300.0),
         CreativeNodeType::Video => (360.0, 240.0),
         CreativeNodeType::Audio => (360.0, 140.0),
-        CreativeNodeType::Director => (400.0, 280.0),
         CreativeNodeType::Group => (480.0, 360.0),
     }
 }

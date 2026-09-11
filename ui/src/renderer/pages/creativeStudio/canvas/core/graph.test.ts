@@ -11,19 +11,15 @@ import { testDocument, testEdge, testNode, testUuid } from './testFixtures';
 
 describe('Creative Studio graph constraints', () => {
   const image = testNode('image', 1);
-  const panorama = testNode('panorama', 2);
   const text = testNode('text', 3);
   const firstConfig = testNode('config', 4);
   const secondConfig = testNode('config', 5);
-  const director = testNode('director', 6);
   const group = testNode('group', 7);
   const document = testDocument([
     image,
-    panorama,
     text,
     firstConfig,
     secondConfig,
-    director,
     group,
   ]);
 
@@ -89,33 +85,6 @@ describe('Creative Studio graph constraints', () => {
         targetNodeId: secondConfig.id,
       })
     ).toEqual({ ok: false, code: 'config_to_config' });
-  });
-
-  test('treats Director as image-input-only', () => {
-    expect(
-      validateCanvasConnection(document, {
-        sourceNodeId: director.id,
-        targetNodeId: image.id,
-      })
-    ).toEqual({ ok: false, code: 'director_output_not_supported' });
-    expect(
-      validateCanvasConnection(document, {
-        sourceNodeId: text.id,
-        targetNodeId: director.id,
-      })
-    ).toEqual({ ok: false, code: 'director_requires_image_input' });
-    expect(
-      validateCanvasConnection(document, {
-        sourceNodeId: image.id,
-        targetNodeId: director.id,
-      })
-    ).toEqual({ ok: true });
-    expect(
-      validateCanvasConnection(document, {
-        sourceNodeId: panorama.id,
-        targetNodeId: director.id,
-      })
-    ).toEqual({ ok: true });
   });
 
   test('creates canonical nullable handles after validation', () => {

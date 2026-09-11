@@ -75,7 +75,7 @@ export function normalizeCreativeStudioResumeLocation(value: unknown): string {
 
 /**
  * Resolve only locations owned by the My Canvases section. The list, Canvas
- * editor, and Director are one resumable section; sibling workbenches must not
+ * editor are one resumable section; sibling workbenches must not
  * replace its last detail location.
  */
 export function normalizeCreativeStudioCanvasesResumeLocation(
@@ -85,11 +85,7 @@ export function normalizeCreativeStudioCanvasesResumeLocation(
   if (!parsed) return null;
 
   const section = creativeStudioSectionForPath(parsed.pathname);
-  if (
-    section !== 'canvases' &&
-    section !== 'canvas' &&
-    section !== 'director'
-  ) {
+  if (section !== 'canvases' && section !== 'canvas') {
     return null;
   }
 

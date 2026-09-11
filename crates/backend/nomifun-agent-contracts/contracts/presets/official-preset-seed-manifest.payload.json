@@ -1,6 +1,6 @@
 {
   "manifest_version": "1.0.0",
-  "target_first_party_contribution_digest": "a1df1f5dc6772bc2cbbb5b6f6794059d19ba9b7820eeece666d925f0387de691",
+  "target_first_party_contribution_digest": "71c6aeb654159f99777e63a6444c1c2be4450e0be050f4daa350d19b8fce26a6",
   "target_runtime_feature_inventory_digest": "bc01fffa050a721debc7740405a05f53b966d4e2dc2d8b4392e321d944fca2ee",
   "templates": {
     "chat.minimal": {
@@ -458,10 +458,6 @@
           "version": "1.0.0"
         },
         {
-          "id": "workshop.director",
-          "version": "1.0.0"
-        },
-        {
           "id": "creation.text",
           "version": "1.0.0"
         },
@@ -733,7 +729,6 @@
         "workshop.asset.write",
         "workshop.canvas.edit",
         "workshop.canvas.read",
-        "workshop.director",
         "workshop.template.run"
       ],
       "required_runtime_features": [],

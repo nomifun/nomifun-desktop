@@ -20,7 +20,6 @@ import {
   type CreativeComposerModel,
   type CreativeConfigNodeData,
   type CreativeConfigOperation,
-  type CreativeDirectorNodeData,
   type CreativeGenerationStatus,
   type CreativeGroupNodeData,
   type CreativeImageComposerDraft,
@@ -803,19 +802,6 @@ const parseAudioData = (value: unknown, path: string): CreativeAudioNodeData => 
   };
 };
 
-const parseDirectorData = (value: unknown, path: string): CreativeDirectorNodeData => {
-  const code = 'INVALID_DOCUMENT';
-  const record = asRecord(value, path, code);
-  exactKeys(record, ['sceneId', 'cameraId', 'timelineMs', 'durationMs'], [], path, code);
-  const durationMs = asNumber(record.durationMs, `${path}.durationMs`, code, { min: 0 });
-  return {
-    sceneId: asNullableId(record.sceneId, `${path}.sceneId`, code),
-    cameraId: asNullableId(record.cameraId, `${path}.cameraId`, code),
-    timelineMs: asNumber(record.timelineMs, `${path}.timelineMs`, code, { min: 0, max: durationMs }),
-    durationMs,
-  };
-};
-
 const parseGroupData = (value: unknown, path: string): CreativeGroupNodeData => {
   const code = 'INVALID_DOCUMENT';
   const record = asRecord(value, path, code);
@@ -837,7 +823,6 @@ const NODE_KINDS: readonly CreativeCanvasNodeKind[] = [
   'config',
   'video',
   'audio',
-  'director',
   'group',
 ];
 
@@ -873,8 +858,6 @@ const parseNode = (value: unknown, path: string): CreativeCanvasNode => {
       return { ...base, type, data: parseVideoData(record.data, `${path}.data`) };
     case 'audio':
       return { ...base, type, data: parseAudioData(record.data, `${path}.data`) };
-    case 'director':
-      return { ...base, type, data: parseDirectorData(record.data, `${path}.data`) };
     case 'group':
       return { ...base, type, data: parseGroupData(record.data, `${path}.data`) };
   }
@@ -1032,7 +1015,7 @@ const parsePanels = (value: unknown, path: string): CreativeStudioPanelState => 
       height: asNumber(bottom.height, `${path}.bottom.height`, code, { min: 120, max: 800 }),
       activeView: asLiteral<CreativeBottomPanelView>(
         bottom.activeView,
-        ['timeline', 'history'],
+        ['history'],
         `${path}.bottom.activeView`,
         code
       ),
@@ -1153,12 +1136,6 @@ export function parseCreativeProjectDocument(
     }
     if (source.type === 'config' && target.type === 'config') {
       fail(code, `$.connections[${index}]`, 'connection other than config to config');
-    }
-    if (source.type === 'director') {
-      fail(code, `$.connections[${index}].sourceNodeId`, 'non-director source node');
-    }
-    if (target.type === 'director' && source.type !== 'image' && source.type !== 'panorama') {
-      fail(code, `$.connections[${index}].sourceNodeId`, 'image or panorama source for director');
     }
   }
   const pendingChatSessions: CreativeChatSessionReference[] = [];

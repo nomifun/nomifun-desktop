@@ -58,15 +58,12 @@ const loadCreativeStudioVideoWorkbenchRoute = () =>
   loadCreativeStudioWorkbenches().then((module) => ({
     default: module.VideoWorkbenchProductRoute,
   }));
-const loadCreativeStudioDirectorRoute = () =>
-  import('@renderer/pages/creativeStudio/canvases/CreativeCanvasDirectorRoute');
 const loadCreativeStudioTemplateRoute = () =>
   import('@renderer/pages/creativeStudio/templates/page/CreativeTemplateRoute');
 
 const creativeStudioRouteLoaders: Record<CreativeStudioSection, () => Promise<unknown>> = {
   canvases: loadCreativeStudioCanvasesRoute,
   canvas: loadCreativeStudioCanvasRoute,
-  director: loadCreativeStudioDirectorRoute,
   image: loadCreativeStudioImageWorkbenchRoute,
   video: loadCreativeStudioVideoWorkbenchRoute,
   prompts: loadCreativeStudioPromptsRoute,
@@ -115,7 +112,6 @@ const CreativeStudioAssetsRoute = React.lazy(loadCreativeStudioAssetsRoute);
 const CreativeStudioCanvasRoute = React.lazy(loadCreativeStudioCanvasRoute);
 const CreativeStudioImageWorkbenchRoute = React.lazy(loadCreativeStudioImageWorkbenchRoute);
 const CreativeStudioVideoWorkbenchRoute = React.lazy(loadCreativeStudioVideoWorkbenchRoute);
-const CreativeStudioDirectorRoute = React.lazy(loadCreativeStudioDirectorRoute);
 const CreativeStudioTemplateRoute = React.lazy(loadCreativeStudioTemplateRoute);
 const MiniAppsListPage = React.lazy(() => import('@renderer/pages/miniApps'));
 const MiniAppRunnerPage = React.lazy(() => import('@renderer/pages/miniApps/RunnerPage'));
@@ -208,7 +204,6 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
               <Route path='canvases' element={withRouteFallback(CreativeStudioCanvasesRoute)} />
               <Route path='projects' element={<CreativeStudioCanvasesRedirect />} />
               <Route path='canvas/:canvasId' element={withRouteFallback(CreativeStudioCanvasRoute)} />
-              <Route path='director/:canvasId' element={withRouteFallback(CreativeStudioDirectorRoute)} />
               <Route path='image' element={withRouteFallback(CreativeStudioImageWorkbenchRoute)} />
               <Route path='video' element={withRouteFallback(CreativeStudioVideoWorkbenchRoute)} />
               <Route path='prompts' element={withRouteFallback(CreativeStudioPromptsRoute)} />

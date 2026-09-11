@@ -79,12 +79,6 @@ const TEST_DATA: CreativeCanvasNodeDataByKind = {
     trimEndMs: null,
     composer: null,
   },
-  director: {
-    sceneId: null,
-    cameraId: null,
-    timelineMs: 0,
-    durationMs: 0,
-  },
   group: {
     title: 'Group',
     color: null,
