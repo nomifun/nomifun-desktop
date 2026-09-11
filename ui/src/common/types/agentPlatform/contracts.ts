@@ -511,6 +511,17 @@ export interface CreateAgentSessionResponse {
   cursor: SessionCursor;
 }
 
+export interface SwitchAgentSessionPresetRequest {
+  preset_id: AgentPresetId;
+}
+
+export interface SwitchAgentSessionPresetResponse {
+  agent_session_id: AgentSessionId;
+  agent_binding: AgentBindingValue;
+  state: string;
+  cursor: SessionCursor;
+}
+
 export interface CreateAgentSessionTurnRequest {
   input: unknown;
   idempotency_key: string;

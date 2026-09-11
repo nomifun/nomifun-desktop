@@ -5803,6 +5803,13 @@ function ap7AgentPresetLaunchContract() {
     'Guid initial delivery must wait for passive Agent runtime warmup'
   );
   require(
+    source.conversation.includes('<GuidAgentSelector') &&
+      source.conversation.includes('sessions.switchPreset.invoke') &&
+      source.sendBox.includes('{agentSelectorNode}') &&
+      source.conversationService.includes('replace_agent_preset_snapshot'),
+    'AgentPreset conversations must support in-place Agent switching without replacing conversation history'
+  );
+  require(
     ![
       'GuidSkillsDrawer',
       'GuidCollaboratorSelector',

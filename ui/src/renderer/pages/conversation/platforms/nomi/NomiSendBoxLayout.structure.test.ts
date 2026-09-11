@@ -128,6 +128,21 @@ describe('Nomi sendbox control layout', () => {
     expect(selectorSource.includes("data-readonly={disabled ? 'true' : undefined}")).toBe(true);
   });
 
+  test('exposes the shared Agent catalog on desktop and mobile conversation controls', () => {
+    const chatSource = readSource(new URL('../../components/ChatConversation.tsx', import.meta.url));
+    const nomiChatSource = readSource(new URL('./NomiChat.tsx', import.meta.url));
+    const sendBoxSource = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
+
+    expect(chatSource.includes('<GuidAgentSelector')).toBe(true);
+    expect(chatSource.includes('useAgentPresets()')).toBe(true);
+    expect(chatSource.includes('sessions.switchPreset.invoke')).toBe(true);
+    expect(chatSource.includes('request: { preset_id: targetPresetId }')).toBe(true);
+    expect(nomiChatSource.includes('agentSelectorNode={agentSelectorNode}')).toBe(true);
+    expect(sendBoxSource.includes('{agentSelectorNode}')).toBe(true);
+    expect(sendBoxSource.includes("key: 'agent'")).toBe(true);
+    expect(sendBoxSource.includes('options: agentSelection.options')).toBe(true);
+  });
+
   test('waits for passive runtime warmup before delivering the Guid initial message', () => {
     const source = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
     const initialMessageBlock = source.slice(

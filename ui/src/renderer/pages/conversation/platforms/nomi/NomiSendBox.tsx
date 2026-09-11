@@ -64,7 +64,7 @@ import { emitter, useAddEventListener } from '@/renderer/utils/emitter';
 import { mergeFileSelectionItems } from '@/renderer/utils/file/fileSelection';
 import { buildDisplayMessage, collectSelectedFiles } from '@/renderer/utils/file/messageFiles';
 import { Message, Tag } from '@arco-design/web-react';
-import { Brain, MagicHat, Shield } from '@icon-park/react';
+import { Brain, MagicHat, Robot, Shield } from '@icon-park/react';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { NomiMessageRuntime } from './useNomiMessage';
@@ -121,6 +121,13 @@ const useSendBoxDraft = (conversation_id: ConversationId) => {
 const NomiSendBox: React.FC<{
   conversation_id: ConversationId;
   modelSelection: NomiModelSelection;
+  agentSelectorNode?: React.ReactNode;
+  agentSelection?: {
+    label: string;
+    options: MobileActionSheetOption[];
+    onSelect: (key: string) => void;
+    disabled?: boolean;
+  };
   agent_name?: string;
   turnActivity: NomiMessageRuntime;
   /** Hide model and other editable controls on locked surfaces. */
@@ -136,6 +143,8 @@ const NomiSendBox: React.FC<{
 }> = ({
   conversation_id,
   modelSelection,
+  agentSelectorNode,
+  agentSelection,
   agent_name,
   turnActivity,
   hideAdvancedControls,
@@ -712,6 +721,20 @@ const NomiSendBox: React.FC<{
     const currentModelLabel = modelSelection.current_model?.use_model || t('conversation.welcome.selectModel');
 
     const entries: MobileActionSheetEntry[] = [
+      ...(agentSelection
+        ? [{
+            key: 'agent',
+            icon: <Robot theme='outline' size='16' />,
+            label: t('common.agent', { defaultValue: 'Agent' }),
+            meta: agentSelection.label,
+            disabled: agentSelection.disabled,
+            submenu: {
+              title: t('common.agent', { defaultValue: 'Agent' }),
+              options: agentSelection.options,
+              onSelect: agentSelection.onSelect,
+            },
+          }]
+        : []),
       ...(hideAdvancedControls
         ? []
         : [
@@ -780,6 +803,7 @@ const NomiSendBox: React.FC<{
     return entries;
   }, [
     attachEntries,
+    agentSelection,
     handleSheetModelSelect,
     hideAdvancedControls,
     isMobile,
@@ -937,6 +961,7 @@ const NomiSendBox: React.FC<{
                 selection={modelSelection}
                 className='nomi-sendbox-model-btn'
               />
+              {agentSelectorNode}
               {collaboratorSelectorNode}
               {extraRightTools}
             </div>

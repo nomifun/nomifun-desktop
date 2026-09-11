@@ -912,6 +912,45 @@ async fn update_switches_preset_conversation_model_without_rewriting_snapshot() 
 }
 
 #[tokio::test]
+async fn replace_agent_preset_snapshot_keeps_conversation_identity_model_and_workspace() {
+    let (svc, _, _runtime_registry) = setup().await;
+    let original = make_preset_snapshot("gpt-4o");
+    let conv = svc
+        .create_from_agent_snapshot(USER_ID, make_create_req(), original)
+        .await
+        .unwrap();
+    let mut replacement = make_preset_snapshot("gpt-4o");
+    replacement.preset_name = "Upgraded Agent".to_owned();
+    replacement.instructions = "Use the upgraded behavior".to_owned();
+    let replacement_id = replacement.preset_id.clone();
+
+    let updated = svc
+        .replace_agent_preset_snapshot(
+            USER_ID,
+            &conv.conversation_id,
+            replacement,
+            json!({
+                "allowed_tools": [],
+                "enforce_tool_allowlist": true,
+                "deferred_tools": [],
+                "browser_use": false,
+                "computer_use": false,
+                "nomi_core_session": {"version": 1}
+            }),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(updated.conversation_id, conv.conversation_id);
+    assert_eq!(updated.name, conv.name);
+    assert_eq!(updated.model, conv.model);
+    assert_eq!(updated.extra["workspace"], conv.extra["workspace"]);
+    assert_eq!(updated.preset_id.as_deref(), Some(replacement_id.as_str()));
+    assert_eq!(updated.agent_snapshot.as_ref().unwrap().preset_name, "Upgraded Agent");
+    assert_eq!(updated.extra["enforce_tool_allowlist"], true);
+}
+
+#[tokio::test]
 async fn update_preset_nomi_allows_conversation_collaboration_and_resource_changes() {
     let (svc, _, runtime_registry) = setup().await;
     let snapshot = make_preset_snapshot("gpt-4o");
