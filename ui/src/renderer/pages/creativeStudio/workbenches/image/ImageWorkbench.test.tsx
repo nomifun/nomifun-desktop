@@ -11,6 +11,10 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import ImageWorkbench from './ImageWorkbench';
 import {
+  ImageResultDetails,
+  imageWorkbenchResultColumnCount,
+} from './ImageWorkbenchResults';
+import {
   imageWorkbenchAspectRatioChoices,
   imageWorkbenchResolutionLabel,
   imageWorkbenchResolutionOptions,
@@ -81,6 +85,13 @@ const renderWorkbench = (overrides: Partial<ImageWorkbenchProps> = {}) =>
     </I18nextProvider>
   );
 
+const renderResultDetails = (result: ImageWorkbenchResult) =>
+  renderToStaticMarkup(
+    <I18nextProvider i18n={testI18n}>
+      <ImageResultDetails result={result} />
+    </I18nextProvider>
+  );
+
 const resultBase = {
   id: 'result-1',
   taskId: 'task-1',
@@ -92,11 +103,13 @@ const resultBase = {
 
 describe('ImageWorkbench visual states', () => {
   test('renders deleted history outputs as an explicit placeholder without media requests', () => {
-    const html = renderWorkbench({ results: [{ ...resultBase, status: 'succeeded', hasDeletedInputs: true,
+    const result: ImageWorkbenchResult = { ...resultBase, status: 'succeeded', hasDeletedInputs: true,
       outputs: [{ assetId: 'deleted-output', imageUrl: '/deleted-original', alt: 'Old result', availability: 'deleted' }],
-    }] });
+    };
+    const html = renderWorkbench({ results: [result] });
+    const detailsHtml = renderResultDetails(result);
     expect(html.includes('素材已删除')).toBe(true);
-    expect(html.includes('引用素材已删除')).toBe(true);
+    expect(detailsHtml.includes('引用素材已删除')).toBe(true);
     expect(html.includes('<img')).toBe(false);
     expect(html.includes('/deleted-original')).toBe(false);
   });
@@ -151,6 +164,7 @@ describe('ImageWorkbench visual states', () => {
 
   test('keeps the side-by-side workspace through compact desktop widths and adapts the result list', () => {
     const css = readFileSync(new URL('./ImageWorkbench.module.css', import.meta.url), 'utf8');
+    const resultsSource = readFileSync(new URL('./ImageWorkbenchResults.tsx', import.meta.url), 'utf8');
 
     expect(
       /@media \(max-width:\s*820px\)\s*\{[\s\S]*?\.sideLayout\s*\{[\s\S]*?flex-direction:\s*column;/.test(
@@ -158,13 +172,16 @@ describe('ImageWorkbench visual states', () => {
       )
     ).toBe(true);
     expect(css.includes('@media (max-width: 900px)')).toBe(false);
-    expect(
-      /@media \(max-width:\s*1120px\)\s*\{[\s\S]*?\.resultGrid\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\);/.test(
-        css
-      )
-    ).toBe(true);
     expect(/\.resultsPanel\s*\{[\s\S]*?overflow:\s*hidden;/.test(css)).toBe(true);
     expect(/\.resultGrid\s*\{[\s\S]*?overflow-y:\s*auto;/.test(css)).toBe(true);
+    expect(/\.resultColumn\s*\{[\s\S]*?width:\s*0;[\s\S]*?flex:\s*1 1 0;/.test(css)).toBe(true);
+    expect(/\.resultMasonry\s*\{[\s\S]*?gap:\s*6px;/.test(css)).toBe(true);
+    expect(/\.resultCard\s*\{[\s\S]*?box-sizing:\s*border-box;[\s\S]*?width:\s*100%;/.test(css)).toBe(true);
+    expect(resultsSource.includes('new ResizeObserver(updateColumnCount)')).toBe(true);
+    expect(resultsSource.includes('distributeResults(results, columnCount)')).toBe(true);
+    expect(imageWorkbenchResultColumnCount(183)).toBe(1);
+    expect(imageWorkbenchResultColumnCount(374)).toBe(2);
+    expect(imageWorkbenchResultColumnCount(760)).toBe(4);
   });
 
   test('renders the floating bottom composer with exact model and parameter controls', () => {
@@ -268,34 +285,44 @@ describe('ImageWorkbench visual states', () => {
   });
 
   test('renders only caller-supplied media for references and successful results', () => {
+    const result: ImageWorkbenchResult = {
+      ...resultBase,
+      status: 'succeeded',
+      outputs: [
+        {
+          assetId: 'asset-result-1',
+          imageUrl: 'https://media.invalid/result.png',
+          alt: '生成的未来城市',
+          width: 1536,
+          height: 1024,
+          sizeLabel: '2.4 MB',
+        },
+      ],
+    };
     const html = renderWorkbench({
       references: [
         { id: 'reference-1', name: '真实参考图', previewUrl: 'https://media.invalid/reference.png' },
       ],
-      results: [
-        {
-          ...resultBase,
-          status: 'succeeded',
-          outputs: [
-            {
-              assetId: 'asset-result-1',
-              imageUrl: 'https://media.invalid/result.png',
-              alt: '生成的未来城市',
-              width: 1536,
-              height: 1024,
-              sizeLabel: '2.4 MB',
-            },
-          ],
-        },
-      ],
+      results: [result],
       task: { state: 'succeeded', pendingCount: 0 },
     });
+    const detailsHtml = renderResultDetails(result);
 
     expect(html.includes('https://media.invalid/reference.png')).toBe(true);
     expect(html.includes('https://media.invalid/result.png')).toBe(true);
     expect(html.includes('生成的未来城市')).toBe(true);
-    expect(html.includes('1536 × 1024 · 2.4 MB')).toBe(true);
-    expect(html.includes('复制提示词')).toBe(true);
+    expect(detailsHtml.includes('1536 × 1024 · 2.4 MB')).toBe(true);
+    expect(detailsHtml.includes(result.prompt)).toBe(true);
+    expect(detailsHtml.includes('aria-label="复制提示词"')).toBe(true);
+    expect(html.includes('复制提示词')).toBe(false);
+    const css = readFileSync(new URL('./ImageWorkbench.module.css', import.meta.url), 'utf8');
+    expect(/\.resultMedia\s*\{[\s\S]*?width:\s*100%;[\s\S]*?height:\s*auto;/.test(css)).toBe(true);
+    expect(/\.detailInfoColumn\s*\{[\s\S]*?max-height:\s*min\(70vh, 720px\);[\s\S]*?scrollbar-width:\s*none;/.test(css)).toBe(true);
+    expect(/\.detailInfoColumn::-webkit-scrollbar\s*\{[\s\S]*?display:\s*none;/.test(css)).toBe(true);
+    expect(/\.detailFacts\s*\{[\s\S]*?grid-auto-rows:\s*max-content;[\s\S]*?overflow:\s*visible;/.test(css)).toBe(true);
+    expect(/\.detailFacts > div\s*\{[^}]*grid-auto-rows:\s*max-content;[^}]*align-content:\s*start;/.test(css)).toBe(true);
+    expect(/\.detailFacts > div\s*\{[^}]*min-height:/.test(css)).toBe(false);
+    expect(/\.detailFacts dd\s*\{[\s\S]*?overflow:\s*visible;[\s\S]*?white-space:\s*normal;/.test(css)).toBe(true);
     expect(html.includes('data:image')).toBe(false);
   });
 
