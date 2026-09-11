@@ -49,7 +49,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use nomifun_js_authoring::{
     DependencyMutationFacts, DigestHex as AuthoringDigestHex,
-    PluginProjectId as AuthoringPluginProjectId, SourceScope,
+    PluginProjectId as AuthoringPluginProjectId, PluginSourceManifest, SourceScope,
     UserId as AuthoringUserId,
 };
 
@@ -67,7 +67,8 @@ use crate::repository::{
 use crate::types::{
     ApplyAuthorization, ApplyPluginSourceEditInput, BuildRequest, ConfigureInput,
     CreateProjectInput, DeleteDataRequest, EnableRequest, ImportRequest,
-    LinkPluginProjectParams, PluginInventory, PluginServicePaths, RetryRequest,
+    LinkPluginProjectParams, PluginAuthoringContext, PluginImportInspection,
+    PluginInventory, PluginServicePaths, RetryRequest,
     RestoreRequest, TestRequest, UninstallRequest,
 };
 use crate::{PluginShareBundleFilesystem, PluginShareExport};
@@ -324,6 +325,52 @@ impl PluginApplicationService {
             direct_dependencies,
             Some(&auto_apply),
         )
+    }
+
+    pub async fn get_authoring_context(
+        &self,
+        owner_user_id: &str,
+        project_id: &str,
+    ) -> Result<PluginAuthoringContext, PluginServiceError> {
+        let project = self.owned_project(owner_user_id, project_id).await?;
+        if project.managed_source_path.is_none() {
+            return Err(PluginServiceError::conflict(
+                "runtime-only Plugin Project has no editable Source",
+            ));
+        }
+        let archive = self
+            .source_store
+            .export_source_archive(owner_user_id, project_id)
+            .await?;
+        let manifest_file = archive
+            .files()
+            .iter()
+            .find(|file| file.normalized_relative_path().as_str() == "nomifun.plugin.json")
+            .ok_or_else(|| PluginServiceError::reconcile_required(
+                "managed Plugin Source is missing nomifun.plugin.json",
+            ))?;
+        let manifest = PluginSourceManifest::from_canonical_bytes(manifest_file.bytes())
+            .map_err(|error| PluginServiceError::reconcile_required(error.to_string()))?;
+        let source_file = archive
+            .files()
+            .iter()
+            .find(|file| file.normalized_relative_path() == manifest.entrypoint())
+            .ok_or_else(|| PluginServiceError::reconcile_required(
+                "managed Plugin Source is missing its declared entrypoint",
+            ))?;
+        let source_content = String::from_utf8(source_file.bytes().to_vec()).map_err(|_| {
+            PluginServiceError::reconcile_required(
+                "managed Plugin entrypoint is not valid UTF-8",
+            )
+        })?;
+        Ok(PluginAuthoringContext {
+            package_id: manifest.package_id().as_ref().to_owned(),
+            package_version: manifest.package_version().as_ref().to_owned(),
+            display_name: manifest.display().name.clone(),
+            description: manifest.display().description.clone(),
+            source_path: manifest.entrypoint().as_str().to_owned(),
+            source_content,
+        })
     }
 
     pub async fn apply_source_edit(
@@ -902,6 +949,47 @@ impl PluginApplicationService {
                 .await?;
         }
         project_detail_with_state(&project, None, None, None, BTreeMap::new(), None)
+    }
+
+    pub async fn inspect_import(
+        &self,
+        source_path: &str,
+    ) -> Result<PluginImportInspection, PluginServiceError> {
+        let source = Path::new(source_path);
+        if source.is_dir() && source.join("bundle.json").is_file() {
+            let imported = PluginShareBundleFilesystem.import(source)?;
+            let package = &imported.artifact.manifest.payload.package;
+            return Ok(PluginImportInspection {
+                import_kind: "share_bundle",
+                expected_digest: imported.bundle_digest,
+                package_id: package.package_id.as_ref().to_owned(),
+                package_version: package.package_version.as_ref().to_owned(),
+                display_name: package.display.name.clone(),
+                description: package.display.description.clone(),
+                capability_count: package.contributions.capabilities.len(),
+                editable_source: imported.source.is_some(),
+            });
+        }
+        let artifact = if source
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
+        {
+            self.artifacts.inspect_zip(source).await?
+        } else {
+            self.artifacts.inspect_directory(source).await?
+        };
+        let package = &artifact.manifest.payload.package;
+        Ok(PluginImportInspection {
+            import_kind: "prebuilt_artifact",
+            expected_digest: artifact.artifact_digest.as_ref().to_owned(),
+            package_id: package.package_id.as_ref().to_owned(),
+            package_version: package.package_version.as_ref().to_owned(),
+            display_name: package.display.name.clone(),
+            description: package.display.description.clone(),
+            capability_count: package.contributions.capabilities.len(),
+            editable_source: false,
+        })
     }
 
     pub async fn import_prebuilt(
@@ -2943,6 +3031,10 @@ fn project_library(inventory: &PluginInventory) -> PluginLibraryResponseDto {
             let package_display = current_artifact
                 .and_then(|artifact| artifact_manifest(artifact).ok())
                 .map(|manifest| manifest.package.display);
+            let contribution_count = current_artifact
+                .and_then(|artifact| artifact_manifest(artifact).ok())
+                .map(|manifest| manifest.package.contributions.capabilities.len() as u32)
+                .unwrap_or_default();
             PluginSummaryDto {
                 mount_id: mount.mount_id.clone(),
                 mount_revision: mount.revision as u64,
@@ -2957,7 +3049,7 @@ fn project_library(inventory: &PluginInventory) -> PluginLibraryResponseDto {
                 current,
                 previous,
                 linked_project_id: linked_project.map(|project| project.project_id.clone()),
-                contribution_count: 0,
+                contribution_count,
                 updated_at_ms: mount.updated_at,
             }
         })

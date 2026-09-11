@@ -19,7 +19,12 @@ import { getBaseUrl } from '@/common/adapter/httpBridge';
  * auth: the desktop is single-user and must not show the login screen.
  */
 export const isDesktopShell = (): boolean => {
-  return typeof window !== 'undefined' && Boolean((window as { __backendPort?: number }).__backendPort);
+  if (typeof window === 'undefined') return false;
+  if (Boolean((window as { __backendPort?: number }).__backendPort)) return true;
+  const dev = (import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV;
+  return Boolean(
+    dev && new URLSearchParams(window.location.search).get('__desktopPreview') === '1'
+  );
 };
 
 /**

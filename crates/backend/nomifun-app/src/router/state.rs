@@ -838,6 +838,7 @@ async fn build_nomi_core_agent_api_state(
         Arc::clone(&catalog),
         registrations,
         runtime,
+        Some(services.model_invoke_service.clone()),
     )
     .await?;
     let plugin_state = plugin.router.clone();

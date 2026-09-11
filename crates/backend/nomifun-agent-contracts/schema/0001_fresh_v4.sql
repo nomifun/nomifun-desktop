@@ -178,7 +178,6 @@ CREATE TABLE agent_preset_revisions (
     created_at INTEGER NOT NULL,
     reason TEXT,
     UNIQUE (preset_id, revision_no),
-    UNIQUE (preset_id, revision_digest),
     FOREIGN KEY (preset_id) REFERENCES agent_presets (preset_id)
         ON UPDATE RESTRICT ON DELETE RESTRICT
 ) STRICT;

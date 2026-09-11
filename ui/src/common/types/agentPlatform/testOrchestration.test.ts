@@ -144,6 +144,79 @@ describe('D-022 Agent Settings Test orchestration', () => {
     expect('agent_binding' in sessionRequests[0]!).toBe(false);
   });
 
+  test('clean draft saves a refreshed revision when Plugin provenance changed', async () => {
+    const currentRevision = {
+      preset_id: presetId,
+      revision: 1,
+      revision_digest: asDigestHex('5'.repeat(64)),
+    };
+    const refreshedPreview = {
+      ...preview,
+      candidate_revision_ref: {
+        preset_id: presetId,
+        revision: 2,
+        revision_digest: asDigestHex('6'.repeat(64)),
+      },
+    };
+    const calls: string[] = [];
+    const ports: AgentPresetTestPorts = {
+      preview: async () => refreshedPreview,
+      save: async (request) => {
+        calls.push('save');
+        return {
+          preset: {
+            preset_id: presetId,
+            source: 'user',
+            display_name: 'Coding',
+            current_stable_revision: refreshedPreview.candidate_revision_ref,
+            bound_target_count: 0,
+          },
+          revision: {
+            reference: refreshedPreview.candidate_revision_ref,
+            document: request.draft.document,
+            created_by: 'owner',
+            created_at_ms: 1,
+          },
+          resolved_snapshot_ref: refreshedPreview.resolved_snapshot_ref!,
+          preview_digest: refreshedPreview.preview_digest,
+        };
+      },
+      createSession: async () => {
+        calls.push('session');
+        return {
+          agent_session_id: sessionId,
+          agent_binding: {
+            preset_revision_ref: refreshedPreview.candidate_revision_ref,
+            resolved_snapshot_ref: refreshedPreview.resolved_snapshot_ref!,
+            typed_resource_bindings: [],
+            binding_version: 1,
+          },
+          state: 'opening',
+          cursor: { agent_session_id: sessionId, seq: 1 },
+        };
+      },
+      createTurn: async () => {
+        calls.push('turn');
+        return {
+          agent_session_id: sessionId,
+          operation_id: 'turn-2',
+          cursor: { agent_session_id: sessionId, seq: 2 },
+          status: 'accepted',
+        };
+      },
+    };
+
+    await runAgentPresetTest({
+      draft: { ...draft, current_revision: currentRevision },
+      dirty: false,
+      input: 'Run',
+      idempotencyKey: 'editor-test-3',
+      ports,
+    });
+
+    expect(calls).toEqual(['save', 'session', 'turn']);
+  });
+
   test('save failure creates no Session or Turn', async () => {
     const calls: string[] = [];
     const ports: AgentPresetTestPorts = {

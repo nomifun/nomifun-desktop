@@ -140,9 +140,26 @@ impl PresetPreviewCompiler {
         let payload: AgentPresetRevisionPayload = wire_cast(&request.draft.document)?;
         let draft_digest = digest_payload(&payload)
             .map_err(|error| ControlPlaneError::Wire(error.to_string()))?;
-        let clean = current_revision.is_some_and(|current| current.payload == payload);
+        let payload_unchanged = current_revision.is_some_and(|current| current.payload == payload);
+        let current_canonical_inputs = if payload_unchanged && current_snapshot.is_some() {
+            self.canonical_inputs_if_configured()?
+        } else {
+            None
+        };
+        let materialization_unchanged = match (
+            current_snapshot,
+            current_canonical_inputs
+                .as_ref()
+                .map(|(registry, _)| registry.as_ref()),
+        ) {
+            (Some(snapshot), Some(registry)) => snapshot_matches_registry(snapshot, registry)?,
+            _ => true,
+        };
+        let clean = payload_unchanged && materialization_unchanged;
         let canonical_inputs = if clean {
             None
+        } else if let Some(inputs) = current_canonical_inputs {
+            Some(inputs)
         } else {
             Some(self.canonical_inputs()?)
         };
@@ -323,17 +340,59 @@ impl PresetPreviewCompiler {
     fn canonical_inputs(
         &self,
     ) -> Result<(Arc<MaterializedRegistry>, CompilerEnvironment), ControlPlaneError> {
-        match (&self.canonical_registry, &self.canonical_environment) {
-            (Some(provider), Some(environment)) => Ok((provider.snapshot()?, environment.clone())),
-            (None, None) => Err(ControlPlaneError::Wire(
+        self.canonical_inputs_if_configured()?.ok_or_else(|| {
+            ControlPlaneError::Wire(
                 "canonical compiler registry and environment are not configured".to_owned(),
-            )),
+            )
+        })
+    }
+
+    fn canonical_inputs_if_configured(
+        &self,
+    ) -> Result<Option<(Arc<MaterializedRegistry>, CompilerEnvironment)>, ControlPlaneError> {
+        match (&self.canonical_registry, &self.canonical_environment) {
+            (Some(provider), Some(environment)) => {
+                Ok(Some((provider.snapshot()?, environment.clone())))
+            }
+            (None, None) => Ok(None),
             _ => Err(ControlPlaneError::Wire(
                 "canonical compiler registry and environment must be configured together"
                     .to_owned(),
             )),
         }
     }
+}
+
+fn snapshot_matches_registry(
+    snapshot: &ResolvedSnapshotEnvelope,
+    registry: &MaterializedRegistry,
+) -> Result<bool, ControlPlaneError> {
+    for resolved in snapshot
+        .content
+        .initial_capabilities
+        .iter()
+        .chain(&snapshot.content.on_demand_capabilities)
+    {
+        let Some(current) = registry.capability(&resolved.capability.id) else {
+            return Ok(false);
+        };
+        let manifest_digest = digest_payload(&current.manifest)
+            .map_err(|error| ControlPlaneError::Wire(error.to_string()))?;
+        if current.manifest.id != resolved.capability.id
+            || current.manifest.version != resolved.capability.version
+            || current.manifest.package != resolved.source_package
+            || current.contribution_id != resolved.contribution_id
+            || current.contribution_lock != resolved.contribution_lock
+            || current.mount_id != resolved.resolved_mount_id
+            || current.source != resolved.resolved_source
+            || current.target_artifact_digest != resolved.target_artifact_digest
+            || current.schema_digest != resolved.schema_digest
+            || manifest_digest != resolved.schema_digest
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn has_errors(diagnostics: &[PreviewDiagnosticDto]) -> bool {

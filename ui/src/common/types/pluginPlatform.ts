@@ -279,6 +279,58 @@ export interface ImportPluginRequest {
   expected_project_revision?: number;
 }
 
+export interface GeneratePluginDraftRequest {
+  provider_id: string;
+  model: string;
+  requirement: string;
+  package_id: string;
+  package_version: string;
+  current_source?: string;
+}
+
+export interface GeneratedPluginCapability {
+  capability_id: string;
+  contribution_id: string;
+  display_name: string;
+  description: string;
+  effect_class: string;
+  consumers: string[];
+}
+
+export interface GeneratedPluginDraft {
+  assistant_message: string;
+  display_name: string;
+  description: string;
+  package_id: string;
+  package_version: string;
+  language: 'type_script';
+  manifest_content: string;
+  source_path: 'src/main.ts';
+  source_content: string;
+  dependencies: Record<string, string>;
+  capabilities: GeneratedPluginCapability[];
+}
+
+export interface PluginAuthoringContext {
+  package_id: string;
+  package_version: string;
+  display_name: string;
+  description: string;
+  source_path: string;
+  source_content: string;
+}
+
+export interface PluginImportInspection {
+  import_kind: 'prebuilt_artifact' | 'share_bundle';
+  expected_digest: string;
+  package_id: string;
+  package_version: string;
+  display_name: string;
+  description: string;
+  capability_count: number;
+  editable_source: boolean;
+}
+
 export interface SharePluginRequest {
   project_id: PluginProjectId;
   expected_project_revision: number;

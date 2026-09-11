@@ -224,6 +224,35 @@ impl PluginArtifactStore {
         Ok(result)
     }
 
+    pub fn inspect_directory(
+        &self,
+        source: impl AsRef<Path>,
+        cancellation: &dyn ImportCancellation,
+    ) -> Result<PluginPackageArtifactV1, PluginArtifactStoreError> {
+        check_canceled(cancellation)?;
+        let source = source.as_ref();
+        let source_metadata =
+            fs::symlink_metadata(source).map_err(|error| io_error(source, error))?;
+        if source_metadata.file_type().is_symlink() || !source_metadata.is_dir() {
+            return Err(PluginArtifactStoreError::InvalidSource {
+                path: source.to_path_buf(),
+            });
+        }
+        let source_root =
+            fs::canonicalize(source).map_err(|error| io_error(source, error))?;
+        if source_root.starts_with(&self.managed_root)
+            || self.managed_root.starts_with(&source_root)
+        {
+            return Err(PluginArtifactStoreError::UnsafeManagedPath {
+                path: source_root,
+            });
+        }
+        let staging = self.create_staging()?;
+        let scanned = self.stage_directory(&source_root, staging.path(), cancellation)?;
+        check_canceled(cancellation)?;
+        self.finish_staging(scanned, staging.path())
+    }
+
     pub fn import_zip(
         &self,
         source: impl AsRef<Path>,
@@ -253,6 +282,31 @@ impl PluginArtifactStore {
             staging.disarm();
         }
         Ok(result)
+    }
+
+    pub fn inspect_zip(
+        &self,
+        source: impl AsRef<Path>,
+        cancellation: &dyn ImportCancellation,
+    ) -> Result<PluginPackageArtifactV1, PluginArtifactStoreError> {
+        check_canceled(cancellation)?;
+        let source = source.as_ref();
+        let metadata = fs::symlink_metadata(source).map_err(|error| io_error(source, error))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(PluginArtifactStoreError::InvalidSource {
+                path: source.to_path_buf(),
+            });
+        }
+        if metadata.len() > self.limits.max_zip_bytes {
+            return Err(PluginArtifactStoreError::ZipTooLarge {
+                observed: metadata.len(),
+                limit: self.limits.max_zip_bytes,
+            });
+        }
+        let staging = self.create_staging()?;
+        let scanned = self.stage_zip(source, staging.path(), cancellation)?;
+        check_canceled(cancellation)?;
+        self.finish_staging(scanned, staging.path())
     }
 
     pub fn load(
