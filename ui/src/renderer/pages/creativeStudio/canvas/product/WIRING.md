@@ -40,13 +40,7 @@ an active exclusive Agent turn, then flushes the Editor. The left template panel
 uses the canonical template repository and durable run controller, opens the
 same typed runner and real asset picker as the standalone center, and resolves
 successful result IDs through the authenticated asset-detail endpoint before
-inserting canonical nodes. The bottom timeline now projects the Canvas's one
-canonical Director node without inventing global tracks or keyframes. It shows
-the saved scene pointer, camera pointer and timeline/duration values, and opens
-the real Director product only after the canvas CAS leave gate succeeds. New UI
-creation paths enforce one Director node per Canvas; malformed documents with
-multiple Director nodes remain visible as a fail-closed conflict. The Director
-close action returns to this same Canvas.
+inserting canonical nodes.
 
 The authenticated Agent mutation gateway is
 `POST /api/creative-studio/canvases/{canvasId}/agent-ops`. Its wrapper accepts

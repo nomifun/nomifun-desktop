@@ -14,9 +14,7 @@ export type CanvasConnectionErrorCode =
   | 'self_connection'
   | 'duplicate_connection'
   | 'group_connection'
-  | 'config_to_config'
-  | 'director_output_not_supported'
-  | 'director_requires_image_input';
+  | 'config_to_config';
 
 export type CanvasConnectionValidation =
   | { ok: true }
@@ -30,7 +28,6 @@ export interface CanvasConnectionCandidate {
 /**
  * Validate one directed edge.
  *
- * A Director is an input-only scene node: it accepts image or panorama nodes.
  * Groups are visual containers and never participate in the generation graph.
  */
 export function validateCanvasConnection(
@@ -55,12 +52,6 @@ export function validateCanvasConnection(
   }
   if (source.type === 'config' && target.type === 'config') {
     return { ok: false, code: 'config_to_config' };
-  }
-  if (source.type === 'director') {
-    return { ok: false, code: 'director_output_not_supported' };
-  }
-  if (target.type === 'director' && source.type !== 'image' && source.type !== 'panorama') {
-    return { ok: false, code: 'director_requires_image_input' };
   }
   return { ok: true };
 }

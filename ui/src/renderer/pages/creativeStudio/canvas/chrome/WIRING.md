@@ -38,7 +38,6 @@ the panel slots:
     },
     bottom: {
       history: <CreativeCanvasHistory />,
-      timeline: <CreativeCanvasTimeline />,
     },
   }}
   {...callbacks}
@@ -56,9 +55,9 @@ panel content.
 The hand icon is a pressed-state toggle: pressed selects the existing pan tool,
 while unpressed leaves the editor in its default selection mode. The bottom
 toolbar exposes one History icon for opening or closing the shared bottom
-panel; History and Timeline remain tabs inside that panel.
+panel.
 
-The bottom dock exposes text, image, video, audio, panorama, Director, and
+The bottom dock exposes text, image, video, audio, panorama, and
 generation-config creation directly in the reference order. Group creation is
 intentionally not a node-creation tool; it remains a selection action.
 

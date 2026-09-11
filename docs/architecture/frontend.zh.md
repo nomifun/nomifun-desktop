@@ -117,7 +117,7 @@ export function getBaseUrl(): string {
 | --- | --- |
 | `/workshop` | 创意工坊兼容入口，重定向到 Canvas 库。 |
 | `/workshop/canvases` | canonical Canvas 库。 |
-| `/workshop/canvas/:canvasId`、`/workshop/director/:canvasId` | Canvas 无限画布与受限 3D 导演台。 |
+| `/workshop/canvas/:canvasId` | Canvas 无限画布。 |
 | `/workshop/image`、`/workshop/video` | 独立 Image/Video Workbench；零 Canvas 时也可用。 |
 | `/workshop/prompts`、`/workshop/assets`、`/workshop/templates` | 提示词库、素材库与私有模板工作台。 |
 

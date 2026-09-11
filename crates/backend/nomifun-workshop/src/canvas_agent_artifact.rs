@@ -1106,7 +1106,6 @@ mod tests {
             "config",
             "video",
             "audio",
-            "director",
             "group",
         ] {
             let error = assert_artifact_rejected(artifact(json!([{

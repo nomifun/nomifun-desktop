@@ -103,12 +103,11 @@ describe('Creative Canvas product route composition', () => {
     expect(source.includes('onCopy={handleCopyPrompt}')).toBe(true);
     expect(source.includes('promptInsertTargetNodeId')).toBe(false);
     expect(source.includes('creativeTextNodeFromPrompt')).toBe(false);
-    expect(source.includes('<CreativeCanvasTimelinePanel')).toBe(true);
-    expect(source.includes('<CreativeCanvasTimelineUnwiredPanel')).toBe(false);
+    expect(source.includes('<CreativeCanvasTimelinePanel')).toBe(false);
     expect(source.includes("onAddDirector={() => addNode('director')}")).toBe(
-      true
+      false
     );
-    expect(source.includes('handleOpenDirector(nodeId)')).toBe(true);
+    expect(source.includes('handleOpenDirector(nodeId)')).toBe(false);
   });
 
   test('resolves typed interaction intents through real product boundaries', () => {
@@ -164,9 +163,6 @@ describe('Creative Canvas product route composition', () => {
       'canvasCommands.connect(source.id, derived.id',
       'const flush = await editor.flush()',
       'imageToolBusyRef.current',
-      'creativeStudioDirectorProjectPath(projectId)',
-      "state.document.nodes.filter((node) => node.type === 'director')",
-      "handleBottomViewChange('timeline')",
       'onOpen={onOpen}',
       'onToggleLock={onToggleLock}',
       "intent.mode === 'edit-text'",
@@ -176,6 +172,9 @@ describe('Creative Canvas product route composition', () => {
     ]) {
       expect(source.includes(token)).toBe(true);
     }
+    expect(source.includes('creativeStudioDirectorProjectPath(projectId)')).toBe(false);
+    expect(source.includes("state.document.nodes.filter((node) => node.type === 'director')")).toBe(false);
+    expect(source.includes("handleBottomViewChange('timeline')")).toBe(false);
     expect(source.includes('URL.createObjectURL')).toBe(false);
     expect(source.includes('data:image/')).toBe(false);
   });

@@ -157,8 +157,8 @@ See [`SECURITY.md`](SECURITY.md) for the deployment threat model and responsible
 </p>
 
 <p>
-  <img src="docs/images/readme/en/creative-workshop.png" alt="NomiFun Creative Studio Canvas editor" width="100%">
-  <br/><sub><b>Creative Studio · a persistent Canvas, focused media workbenches, reusable prompts and assets, templates, and a bounded Director</b></sub>
+  <img src="docs/images/creative-studio/en-US/01-canvas-library.png" alt="NomiFun Creative Studio Canvas library" width="100%">
+  <br/><sub><b>Creative Studio · persistent Canvases, focused media workbenches, reusable prompts and assets, and templates</b></sub>
 </p>
 
 <table>
@@ -168,7 +168,7 @@ See [`SECURITY.md`](SECURITY.md) for the deployment threat model and responsible
   </tr>
   <tr>
     <td width="50%"><img src="docs/images/readme/en/skills.png" alt="Current NomiFun Skills Hub"><br/><sub><b>Skills Hub · reusable, governed Agent capabilities</b></sub></td>
-    <td width="50%"><sub><b>More Creative Studio screens follow below</b><br/>The numbered gallery covers the current Canvas, workbenches, libraries, templates, Assistant, skills, Director, and companion workflow.</sub></td>
+    <td width="50%"><sub><b>More Creative Studio screens follow below</b><br/>The numbered gallery covers the current Canvas, workbenches, libraries, templates, Assistant, skills, and companion workflow.</sub></td>
   </tr>
 </table>
 
@@ -184,13 +184,12 @@ Creative Studio is a new, focused creation surface inside NomiFun Desktop—not 
 single marketing screen. The numbered gallery follows the product surfaces a
 creator can actually open: persistent Canvases, independent Image and Video
 Workbenches, Prompt Center, My Assets, private templates and AI Create,
-multi-image series, Director, Canvas Assistant, explicit Creative Studio skills,
+multi-image series, Canvas Assistant, explicit Creative Studio skills,
 and an optional native desktop companion.
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/images/creative-studio/en-US/01-canvas-library.png" alt="Creative Studio Canvas Library"><br/><sub><b>Canvas Library</b> · create, open, manage, import, and export persistent Canvases</sub></td>
-    <td width="50%"><img src="docs/images/creative-studio/en-US/02-canvas-editor-rich.png" alt="Creative Studio rich Canvas editor"><br/><sub><b>Canvas Editor</b> · an infinite document with media nodes, Asset library, Director panel, and Assistant</sub></td>
+    <td colspan="2" width="100%"><img src="docs/images/creative-studio/en-US/01-canvas-library.png" alt="Creative Studio Canvas Library"><br/><sub><b>Canvas Library</b> · create, open, manage, import, and export persistent Canvases</sub></td>
   </tr>
   <tr>
     <td width="50%"><img src="docs/images/creative-studio/en-US/03-image-workbench.png" alt="Creative Studio Image Workbench"><br/><sub><b>Image Workbench</b> · standalone T2I/I2I with the configured image task and real asset references</sub></td>
@@ -205,19 +204,14 @@ and an optional native desktop companion.
     <td width="50%"><img src="docs/images/creative-studio/en-US/08-template-editor.png" alt="Creative Studio AI Create template editor"><br/><sub><b>AI Create + Template Editor</b> · review one bounded draft, edit it, and explicitly Save before reuse</sub></td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/images/creative-studio/en-US/09-director-timeline.png" alt="Creative Studio Director timeline"><br/><sub><b>Director</b> · a Canvas-bound, bounded 3D scene and timeline with cameras, keyframes, capture, and Canvas references</sub></td>
-    <td width="50%"><img src="docs/images/creative-studio/en-US/10-director-stage.png" alt="Creative Studio Director 3D stage"><br/><sub><b>Director stage</b> · the bounded 3D scene and camera view attached to a Canvas</sub></td>
-  </tr>
-  <tr>
     <td width="50%"><img src="docs/images/creative-studio/en-US/11-companion-settings.png" alt="NomiFun companion workspace"><br/><sub><b>Companion workspace</b> · companion figure, persona, model, memory, Skills, and the <em>Show on desktop</em> control</sub></td>
     <td width="50%"><img src="docs/images/creative-studio/en-US/12-companion-workspace.png" alt="NomiFun desktop companion beside Creative Studio"><br/><sub><b>Desktop companion collaboration</b> · the native companion can stay visible while you create</sub></td>
   </tr>
 </table>
 
-The numbered paths are the stable README contract for the Creative Studio
-gallery: `01`–`12`. The Canvas Editor capture also shows the
-Canvas Assistant and its explicit Creative Studio skill choices; the Skills
-Hub capture above shows those packages as reusable capabilities. All captures
+The retained numbered paths are the stable README contract for the Creative Studio
+gallery: `01`, `03`–`08`, and `11`–`12`. The Skills Hub capture above shows the
+Creative Studio skill packages as reusable capabilities. All captures
 should represent the running product, not a mockup or an invented capability. See
 [`docs/images/SCREENSHOTS.md`](docs/images/SCREENSHOTS.md) for the capture
 manifest.
@@ -238,7 +232,7 @@ memory, tools, permissions, and execution runtime:
 |---|---|
 | **Multi-Agent execution cluster** | Plans dependency-aware work, delegates steps to specialized Agents, schedules parallel execution, and exposes live state, transcripts, approvals, retry, and recovery. |
 | **Agent Mini Apps** | Turns a normal Agent conversation into a previewable and publishable local web tool, with an editable working copy and a durable published snapshot. |
-| **Creative Studio** | Adds a persistent Canvas, independent Image and Video Workbenches, Prompt Center, My Assets, private templates, AI Create, multi-image series, Canvas Assistant, Creative Studio skills, a bounded Director, and optional companion-in-the-workspace collaboration. |
+| **Creative Studio** | Adds a persistent Canvas, independent Image and Video Workbenches, Prompt Center, My Assets, private templates, AI Create, multi-image series, Canvas Assistant, Creative Studio skills, and optional companion-in-the-workspace collaboration. |
 | **Task-aware multi-model control plane** | Separates provider credentials from model records, accepts native and compatible/custom endpoints including local or self-hosted services, and routes chat, realtime, speech, vision, media generation, embedding, and reranking with per-task fallback. |
 | **NomiFun Free Models** | Ships a managed provider that can be enabled, refreshed, health-checked, and used without first creating your own provider entry. |
 | **Phone, robot, and open access** | Pairs Mobile directly with Desktop, binds a Xiaozhi robot to a companion, and exposes governed capabilities through WebUI, REST, MCP, IM channels, and NomiRelay. |
@@ -285,7 +279,7 @@ Agents, data, models, and governed tools.
 
 Creative Studio is a persistent creative document system, not a disposable
 whiteboard. An infinite Canvas stores text, image, video, audio, panorama,
-config, director, and group nodes. Media nodes own the visible creation
+config, and group nodes. Media nodes own the visible creation
 surface; config nodes keep the exact provider/model/task, typed parameters,
 ordered inputs, task state, and results auditable. The **Canvas Assistant**
 proposes typed graph operations, validates them fail-closed, and waits for
@@ -310,17 +304,14 @@ applying a proposal still requires the user’s explicit confirmation.
 plans into private reusable templates. **AI Create** produces one strict draft
 for review; Apply opens an in-memory editor draft and only explicit **Save**
 persists it. Multi-image series can require review before generation.
-**Director** is a bounded 3D scene and timeline surface attached to Canvas: it
-manages cameras, keyframes, captures, and Canvas references without pretending
-to be a full DCC or video editor.
 
 Every operation carries an exact enabled `{ providerId, model, task }` identity:
 `chat` for Assistant and template drafting, `image_generation`/`image_edit`
 for T2I/I2I, `video_generation` for T2V/I2V, and `speech_synthesis` for TTS.
 Canvas writes use revision-based CAS; conflicts stop automatic saving instead
 of overwriting newer work, and task history reconciles the exact owner after
-reload. Canvas ZIP v2 exports the validated document, referenced asset closure,
-and Director sidecar while the v1 reader remains supported. Standalone history
+reload. Canvas ZIP v2 exports the validated document and referenced asset closure
+while the v1 reader remains supported. Standalone history
 is scoped by `workbenchKind`, not by a hidden Canvas binding.
 
 ### 🧠 Multi-Agent execution cluster — plan, schedule, supervise

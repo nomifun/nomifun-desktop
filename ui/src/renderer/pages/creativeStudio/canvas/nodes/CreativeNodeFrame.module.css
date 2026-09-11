@@ -35,10 +35,6 @@
   --creative-node-accent: rgb(var(--primary-5));
 }
 
-.frame[data-node-type='director'] {
-  --creative-node-accent: color-mix(in srgb, rgb(var(--primary-6)) 66%, rgb(var(--danger-6)));
-}
-
 .frame[data-node-selected='true'] {
   border-color: var(--creative-canvas-selection-accent, rgb(var(--primary-6)));
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--creative-canvas-selection-accent, rgb(var(--primary-6))) 34%, transparent);

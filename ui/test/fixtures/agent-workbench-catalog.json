@@ -3101,33 +3101,6 @@
   },
   {
     "capability": {
-      "id": "workshop.director",
-      "version": "1.0.0"
-    },
-    "kind": "tool",
-    "display_name": "workshop.director",
-    "description": "workshop.director",
-    "source_package": {
-      "id": "nomifun.workshop",
-      "version": "1.0.0"
-    },
-    "source_kind": "bundled",
-    "materialization_state": "unavailable",
-    "unavailable_code": "CAPABILITY_UNAVAILABLE",
-    "supported_surfaces": [
-      "desktop"
-    ],
-    "required_runtime_features": [],
-    "required_resource_kinds": [
-      "canvas"
-    ],
-    "required_capabilities": [],
-    "conflicting_capabilities": [],
-    "action_count": 1,
-    "context_contributor_count": 0
-  },
-  {
-    "capability": {
       "id": "office.preview",
       "version": "1.0.0"
     },

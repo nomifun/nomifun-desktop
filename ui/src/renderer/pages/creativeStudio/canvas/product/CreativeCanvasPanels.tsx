@@ -9,7 +9,6 @@ import {
   Group,
   Info,
   Lock,
-  Magic,
   PanoramaHorizontal,
   Pic,
   Redo,
@@ -47,7 +46,6 @@ const NODE_KIND_LABEL_KEYS: Record<CreativeCanvasUserNodeKind, string> = {
   panorama: 'creativeStudio.canvas.nodeKinds.panorama',
   video: 'creativeStudio.canvas.nodeKinds.video',
   audio: 'creativeStudio.canvas.nodeKinds.audio',
-  director: 'creativeStudio.canvas.nodeKinds.director',
   group: 'creativeStudio.canvas.nodeKinds.group',
 };
 
@@ -57,7 +55,6 @@ const NODE_KIND_LABEL_FALLBACKS: Record<CreativeCanvasUserNodeKind, string> = {
   panorama: '全景图',
   video: '视频',
   audio: '音频',
-  director: '导演台',
   group: '分组',
 };
 
@@ -86,8 +83,6 @@ function nodeKindIcon(kind: CreativeCanvasUserNodeKind): React.ReactNode {
       return <VideoTwo {...iconProps} />;
     case 'audio':
       return <Voice {...iconProps} />;
-    case 'director':
-      return <Magic {...iconProps} />;
     case 'group':
       return <Group {...iconProps} />;
   }
@@ -128,8 +123,6 @@ export function creativeCanvasNodeDisplayName(
         : nodeKindLabel('video', t);
     case 'audio':
       return compactText(node.data.title) || nodeKindLabel('audio', t);
-    case 'director':
-      return compactText(node.data.sceneId ?? '') || nodeKindLabel('director', t);
     case 'group':
       return (
         compactText(node.data.title) ||
@@ -540,35 +533,6 @@ const NodeDataProperties: React.FC<{ node: CreativeCanvasUserNode; memberCount: 
           />
         </>
       );
-    case 'director':
-      return (
-        <>
-          <PropertyRow
-            label={t('creativeStudio.canvas.properties.sceneId', {
-              defaultValue: '场景 ID',
-            })}
-            value={optionalValue(node.data.sceneId, t)}
-          />
-          <PropertyRow
-            label={t('creativeStudio.canvas.properties.cameraId', {
-              defaultValue: '机位 ID',
-            })}
-            value={optionalValue(node.data.cameraId, t)}
-          />
-          <PropertyRow
-            label={t('creativeStudio.canvas.properties.currentTime', {
-              defaultValue: '当前时间',
-            })}
-            value={milliseconds(node.data.timelineMs, t)}
-          />
-          <PropertyRow
-            label={t('creativeStudio.canvas.properties.duration', {
-              defaultValue: '时长',
-            })}
-            value={milliseconds(node.data.durationMs, t)}
-          />
-        </>
-      );
     case 'group':
       return (
         <>
@@ -976,69 +940,6 @@ const NodeDataEditor: React.FC<NodeDataEditorProps> = ({ node, onUpdate }) => {
                   'volume'
                 )
               }
-            />
-          </PropertyEditorField>
-        </>
-      );
-    case 'director':
-      return (
-        <>
-          <PropertyEditorField
-            label={t('creativeStudio.canvas.editor.currentTimeMs', {
-              defaultValue: '当前时间 (ms)',
-            })}
-          >
-            <input
-              type='number'
-              min={0}
-              max={node.data.durationMs}
-              value={node.data.timelineMs}
-              onChange={(event) =>
-                onUpdate(
-                  {
-                    ...node,
-                    data: {
-                      ...node.data,
-                      timelineMs: finiteNumber(
-                        event.currentTarget.valueAsNumber,
-                        node.data.timelineMs,
-                        0,
-                        node.data.durationMs
-                      ),
-                    },
-                  },
-                  'timelineMs'
-                )
-              }
-            />
-          </PropertyEditorField>
-          <PropertyEditorField
-            label={t('creativeStudio.canvas.editor.durationMs', {
-              defaultValue: '时长 (ms)',
-            })}
-          >
-            <input
-              type='number'
-              min={0}
-              value={node.data.durationMs}
-              onChange={(event) => {
-                const durationMs = finiteNumber(
-                  event.currentTarget.valueAsNumber,
-                  node.data.durationMs,
-                  0
-                );
-                onUpdate(
-                  {
-                    ...node,
-                    data: {
-                      ...node.data,
-                      durationMs,
-                      timelineMs: Math.min(node.data.timelineMs, durationMs),
-                    },
-                  },
-                  'durationMs'
-                );
-              }}
             />
           </PropertyEditorField>
         </>

@@ -71,7 +71,7 @@ The source of truth is
 | `/knowledge`, `/knowledge/:id` | Knowledge base list/detail. |
 | `/workshop` | Creative Studio compatibility entry; redirects to the Canvas library. |
 | `/workshop/canvases` | Canonical Canvas library. |
-| `/workshop/canvas/:canvasId`, `/workshop/director/:canvasId` | Canvas infinite editor and bounded 3D Director. |
+| `/workshop/canvas/:canvasId` | Canvas infinite editor. |
 | `/workshop/image`, `/workshop/video` | Independent Image and Video Workbenches; both work with zero Canvases. |
 | `/workshop/prompts`, `/workshop/assets`, `/workshop/templates` | Prompt and asset libraries plus the private Template Studio. |
 | `/mini-apps` | Mini-app library — the published single-file web tools, as a card grid. |

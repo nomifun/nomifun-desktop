@@ -136,7 +136,7 @@ describe('creative canvas editor model', () => {
 
   test('round-trips only the canonical canvas fields and preserves project metadata', () => {
     const first = testNode('image', 201, { x: 10, y: 20 });
-    const second = testNode('director', 202, { x: 300, y: 120 });
+    const second = testNode('text', 202, { x: 300, y: 120 });
     const connection = testEdge(203, first.id, second.id);
     const base = {
       ...createEmptyCreativeProjectDocument(PROJECT_ID),

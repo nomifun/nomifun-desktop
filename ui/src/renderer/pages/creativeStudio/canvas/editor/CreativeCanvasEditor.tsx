@@ -1449,7 +1449,7 @@ const CreativeCanvasEditor = React.forwardRef<CreativeCanvasEditorHandle, Creati
                   onPointerDown={(event) => beginConnectionDrag(node, 'target', event)}
                 />
               ) : null}
-              {node.type !== 'group' && node.type !== 'director' ? (
+              {node.type !== 'group' ? (
                 <button
                   type='button'
                   className={`${styles.connectionHandle} ${styles.connectionHandleOutput}`}

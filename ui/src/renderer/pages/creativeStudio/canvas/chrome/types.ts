@@ -20,7 +20,7 @@ export type CreativeCanvasChromeSaveStatus = CanvasCasSaveStatus;
 
 export type CreativeCanvasLeftView = 'canvas' | 'assets' | 'prompts' | 'templates';
 export type CreativeCanvasRightView = 'assistant' | 'properties';
-export type CreativeCanvasBottomView = 'history' | 'timeline';
+export type CreativeCanvasBottomView = 'history';
 
 export interface CreativeCanvasChromeSlots {
   canvas?: ReactNode;
@@ -75,7 +75,6 @@ export const CREATIVE_CANVAS_CHROME_NODE_KINDS = [
   'panorama',
   'video',
   'audio',
-  'director',
   'group',
 ] as const satisfies readonly CreativeCanvasChromeNodeKind[];
 
@@ -85,7 +84,6 @@ export const CREATIVE_CANVAS_CHROME_TOOLBAR_NODE_KINDS = [
   'video',
   'audio',
   'panorama',
-  'director',
 ] as const satisfies readonly CreativeCanvasChromeNodeKind[];
 
 export const CREATIVE_CANVAS_CHROME_BACKGROUNDS = [
