@@ -31,7 +31,7 @@ async fn provider_health_check_unauthenticated_is_rejected() {
 }
 
 #[tokio::test]
-async fn provider_health_check_requires_csrf_for_post() {
+async fn provider_health_check_bearer_auth_bypasses_cookie_csrf() {
     let (mut app, services) = build_app().await;
     let (token, _csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
@@ -40,6 +40,29 @@ async fn provider_health_check_requires_csrf_for_post() {
         .uri("/api/agents/provider-health-check")
         .header("content-type", "application/json")
         .header("authorization", format!("Bearer {token}"))
+        .body(Body::from(
+            serde_json::to_vec(&json!({"provider_id": "0190f5fe-7c00-7a00-8000-000000000010", "model": "gpt-4o"})).unwrap(),
+        ))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "Bearer-authenticated requests must reach provider validation without cookie CSRF"
+    );
+}
+
+#[tokio::test]
+async fn provider_health_check_cookie_auth_requires_csrf() {
+    let (mut app, services) = build_app().await;
+    let (token, _csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/agents/provider-health-check")
+        .header("content-type", "application/json")
+        .header("cookie", format!("nomifun-session={token}"))
         .body(Body::from(
             serde_json::to_vec(&json!({"provider_id": "0190f5fe-7c00-7a00-8000-000000000010", "model": "gpt-4o"})).unwrap(),
         ))

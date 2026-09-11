@@ -2,10 +2,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use nomi_process_runtime::{ChildProcessBuilder, ManagedChildProcess};
 use nomifun_agent_contracts::{
     ArtifactEnvelope, DigestHex, JAVASCRIPT_HOST_PROTOCOL_VERSION,
     JAVASCRIPT_SDK_CONTRACT_VERSION, JavaScriptBuildProfile,
@@ -161,42 +162,32 @@ impl NodeBuildHost {
             .open(&stderr_path)
             .map_err(|error| io_error(&stderr_path, error))?;
 
-        let mut command = Command::new(&self.node_executable);
-        command
-            .arg("--experimental-vm-modules")
-            .arg("--disable-warning=ExperimentalWarning")
-            .arg(node_visible_path(&host_path))
-            .arg(node_visible_path(&request_path))
-            .arg(node_visible_path(&response_path))
-            .current_dir(node_visible_path(operation_root))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::from(stderr))
-            .env_remove("NODE_OPTIONS")
-            .env_remove("NODE_PATH");
-        configure_process_group(&mut command);
-        let mut child = command.spawn().map_err(|error| {
-            AuthoringError::BuildHostUnavailable(format!(
-                "{}: {error}",
-                self.node_executable.display()
-            ))
-        })?;
-
-        let started = Instant::now();
-        let status = loop {
-            if cancellation.is_cancelled() {
-                terminate_process_tree(&mut child);
-                return Err(AuthoringError::Canceled);
-            }
-            if started.elapsed() >= self.timeout {
-                terminate_process_tree(&mut child);
-                return Err(AuthoringError::BuildHostTimeout(self.timeout));
-            }
-            match child.try_wait().map_err(|error| io_error(&self.node_executable, error))? {
-                Some(status) => break status,
-                None => thread::sleep(self.poll_interval),
-            }
-        };
+        // `run_build_host` is a synchronous API and is also called from an
+        // async Runtime validation path. Give the shared process-tree owner a
+        // dedicated current-thread Tokio runtime instead of nesting block_on
+        // in the caller's runtime or reimplementing taskkill/killpg here.
+        let status = thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    run_managed_build_process(
+                        &self.node_executable,
+                        operation_root,
+                        &host_path,
+                        &request_path,
+                        &response_path,
+                        stderr,
+                        self.timeout,
+                        self.poll_interval,
+                        cancellation,
+                    )
+                })
+                .join()
+        })
+        .map_err(|_| {
+            AuthoringError::BuildHostUnavailable(
+                "Plugin Build Host process owner panicked".into(),
+            )
+        })??;
 
         let stderr = read_bounded_diagnostic(&stderr_path);
         let response = fs::read(&response_path)
@@ -1558,58 +1549,81 @@ fn node_visible_path(path: &Path) -> String {
     value.into_owned()
 }
 
-#[cfg(windows)]
-fn configure_process_group(command: &mut Command) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-    command.creation_flags(CREATE_NEW_PROCESS_GROUP);
-}
-
-#[cfg(unix)]
-fn configure_process_group(command: &mut Command) {
-    use std::os::unix::process::CommandExt;
-    command.process_group(0);
-}
-
-#[cfg(not(any(windows, unix)))]
-fn configure_process_group(_command: &mut Command) {}
-
-#[cfg(windows)]
-fn terminate_process_tree(child: &mut Child) {
-    let system_root = std::env::var_os("SystemRoot")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
-    let taskkill = system_root.join("System32").join("taskkill.exe");
-    let _ = Command::new(taskkill)
-        .args([
-            "/PID",
-            &child.id().to_string(),
-            "/T",
-            "/F",
-        ])
+#[allow(clippy::too_many_arguments)]
+fn run_managed_build_process(
+    node_executable: &Path,
+    operation_root: &Path,
+    host_path: &Path,
+    request_path: &Path,
+    response_path: &Path,
+    stderr: fs::File,
+    timeout: Duration,
+    poll_interval: Duration,
+    cancellation: &dyn OperationCancellation,
+) -> Result<ExitStatus, AuthoringError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| {
+            AuthoringError::BuildHostUnavailable(format!(
+                "cannot create Plugin Build Host process runtime: {error}"
+            ))
+        })?;
+    let mut builder = ChildProcessBuilder::new(node_executable);
+    builder
+        .arg("--experimental-vm-modules")
+        .arg("--disable-warning=ExperimentalWarning")
+        .arg(node_visible_path(host_path))
+        .arg(node_visible_path(request_path))
+        .arg(node_visible_path(response_path))
+        .current_dir(operation_root)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    let _ = child.kill();
-    let _ = child.wait();
+        .stderr(Stdio::from(stderr))
+        .env_remove("NODE_OPTIONS")
+        .env_remove("NODE_PATH");
+    let mut process = {
+        let _runtime = runtime.enter();
+        builder.spawn_managed().map_err(|error| {
+            AuthoringError::BuildHostUnavailable(format!(
+                "{}: {error}",
+                node_executable.display()
+            ))
+        })?
+    };
+
+    let started = Instant::now();
+    let status = loop {
+        if cancellation.is_cancelled() {
+            shutdown_build_process(&runtime, &mut process, node_executable)?;
+            return Err(AuthoringError::Canceled);
+        }
+        if started.elapsed() >= timeout {
+            shutdown_build_process(&runtime, &mut process, node_executable)?;
+            return Err(AuthoringError::BuildHostTimeout(timeout));
+        }
+        match process
+            .child_mut()
+            .try_wait()
+            .map_err(|error| io_error(node_executable, error))?
+        {
+            Some(status) => break status,
+            None => thread::sleep(poll_interval),
+        }
+    };
+    shutdown_build_process(&runtime, &mut process, node_executable)?;
+    Ok(status)
 }
 
-#[cfg(unix)]
-fn terminate_process_tree(child: &mut Child) {
-    let _ = Command::new("/bin/kill")
-        .arg("-KILL")
-        .arg(format!("-{}", child.id()))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
-#[cfg(not(any(windows, unix)))]
-fn terminate_process_tree(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
+fn shutdown_build_process(
+    runtime: &tokio::runtime::Runtime,
+    process: &mut ManagedChildProcess,
+    node_executable: &Path,
+) -> Result<(), AuthoringError> {
+    runtime.block_on(process.shutdown()).map_err(|error| {
+        AuthoringError::BuildHostUnavailable(format!(
+            "Plugin Build Host process tree cleanup failed for {}: {error}",
+            node_executable.display()
+        ))
+    })
 }

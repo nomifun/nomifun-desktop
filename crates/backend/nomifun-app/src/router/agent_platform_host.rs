@@ -2778,17 +2778,21 @@ mod tests {
                     action_allowlist,
                 }
             };
+            let selected_capability_ids = [
+                "browser.identity",
+                "browser.observe",
+                "browser.navigate",
+                "browser.act",
+                "browser.render_content",
+            ];
             let payload = AgentPresetRevisionPayload {
                 schema_version: VersionString::from(CONTRACT_VERSION),
                 model_route_refs: BTreeMap::new(),
                 chat_route_records: BTreeMap::new(),
-                initial_capabilities: vec![
-                    capability("browser.identity"),
-                    capability("browser.observe"),
-                    capability("browser.navigate"),
-                    capability("browser.act"),
-                    capability("browser.render_content"),
-                ],
+                initial_capabilities: selected_capability_ids
+                    .iter()
+                    .map(|id| capability(id))
+                    .collect(),
                 on_demand_capabilities: Vec::new(),
                 skill_bindings: Vec::new(),
                 system_role_provider_overrides: BTreeMap::new(),
@@ -2796,7 +2800,16 @@ mod tests {
                 instructions: "Exercise the canonical Browser role owner.".to_owned(),
                 starter_prompts: Vec::new(),
             };
-            let contribution_locks = Vec::new();
+            let contribution_locks = selected_capability_ids
+                .iter()
+                .map(|id| {
+                    materialized
+                        .capability(&CapabilityId::from(*id))
+                        .expect("selected Browser capability is materialized")
+                        .contribution_lock
+                        .clone()
+                })
+                .collect();
             let mut revision = AgentPresetRevision {
                 reference: PresetRevisionRef {
                     preset_id: AgentPresetId::from("browser-role-live-test"),
@@ -3070,14 +3083,15 @@ mod tests {
                     action_allowlist,
                 }
             };
+            let selected_capability_ids = ["computer.observe", "computer.input"];
             let payload = AgentPresetRevisionPayload {
                 schema_version: VersionString::from(CONTRACT_VERSION),
                 model_route_refs: BTreeMap::new(),
                 chat_route_records: BTreeMap::new(),
-                initial_capabilities: vec![
-                    capability("computer.observe"),
-                    capability("computer.input"),
-                ],
+                initial_capabilities: selected_capability_ids
+                    .iter()
+                    .map(|id| capability(id))
+                    .collect(),
                 on_demand_capabilities: Vec::new(),
                 skill_bindings: Vec::new(),
                 system_role_provider_overrides: BTreeMap::new(),
@@ -3085,7 +3099,16 @@ mod tests {
                 instructions: "Exercise the canonical Computer role owner.".to_owned(),
                 starter_prompts: Vec::new(),
             };
-            let contribution_locks = Vec::new();
+            let contribution_locks = selected_capability_ids
+                .iter()
+                .map(|id| {
+                    materialized
+                        .capability(&CapabilityId::from(*id))
+                        .expect("selected Computer capability is materialized")
+                        .contribution_lock
+                        .clone()
+                })
+                .collect();
             let mut revision = AgentPresetRevision {
                 reference: PresetRevisionRef {
                     preset_id: AgentPresetId::from("computer-role-live-test"),

@@ -341,12 +341,21 @@ async fn nomi_core_catalog_exposes_native_nomi_capabilities() {
         .iter()
         .find(|item| item["capability"]["id"] == "browser.navigate")
         .expect("browser capability remains visible in the shared catalog");
+    let expected_browser_state = if cfg!(feature = "browser-use") {
+        "materialized"
+    } else {
+        "unavailable"
+    };
     assert_eq!(
         browser["materialization_state"],
-        "unavailable",
-        "Browser must not be reported as executable when this host has no Nomi Browser owner"
+        expected_browser_state,
+        "Browser availability must match whether this host compiled the Nomi Browser owner"
     );
-    assert_eq!(browser["unavailable_code"], "CAPABILITY_UNAVAILABLE");
+    if cfg!(feature = "browser-use") {
+        assert!(browser["unavailable_code"].is_null());
+    } else {
+        assert_eq!(browser["unavailable_code"], "CAPABILITY_UNAVAILABLE");
+    }
 
     let templates = router
         .clone()

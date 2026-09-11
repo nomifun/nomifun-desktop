@@ -104,10 +104,34 @@ pub struct RemoteShell {
     /// or loses synchronization, the channel is dropped instead of being
     /// returned to the pool in an unknown state.
     channel: Mutex<Option<russh::Channel<Msg>>>,
+    /// Preserve why the channel was retired. A caller-cancelled command has an
+    /// unknown outcome and must return Protocol on reuse, while a channel that
+    /// observably closed remains Disconnected for every later probe so the
+    /// pool redials instead of treating a dead shell as desynchronised.
+    unavailable: Mutex<ChannelUnavailable>,
     operation: Mutex<()>,
     /// Prompt-driven auto-answers (sudo password, apt y/n, ...). Injected during
     /// `run`; answers are written to input only, never captured.
     answer_rules: Vec<AnswerRule>,
+}
+
+#[derive(Clone, Copy)]
+enum ChannelUnavailable {
+    UnknownOutcome,
+    Disconnected,
+}
+
+impl ChannelUnavailable {
+    fn error(self) -> SshError {
+        match self {
+            Self::UnknownOutcome => SshError::Protocol(
+                "remote shell channel is unavailable after cancellation or failed recovery".into(),
+            ),
+            Self::Disconnected => SshError::Disconnected(
+                "remote shell channel has already closed".into(),
+            ),
+        }
+    }
 }
 
 struct OperationChannel {
@@ -227,6 +251,7 @@ impl SshConnection {
         let shell = RemoteShell {
             seq: std::sync::atomic::AtomicU64::new(1),
             channel: Mutex::new(Some(channel)),
+            unavailable: Mutex::new(ChannelUnavailable::UnknownOutcome),
             operation: Mutex::new(()),
             answer_rules,
         };
@@ -243,11 +268,11 @@ impl RemoteShell {
     pub async fn run(&self, submission: &str, timeout: Duration) -> Result<ShellOutcome, SshError> {
         validate_command(submission).map_err(limit_error)?;
         let _operation = self.operation.lock().await;
-        let channel = self.channel.lock().await.take().ok_or_else(|| {
-            SshError::Protocol(
-                "remote shell channel is unavailable after cancellation or failed recovery".into(),
-            )
-        })?;
+        let channel = match self.channel.lock().await.take() {
+            Some(channel) => channel,
+            None => return Err(self.unavailable.lock().await.error()),
+        };
+        *self.unavailable.lock().await = ChannelUnavailable::UnknownOutcome;
         let mut leased = OperationChannel::new(channel);
         let nonce = self.seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let prefix = sentinel_prefix(nonce);
@@ -260,11 +285,16 @@ impl RemoteShell {
         let payload = format!("{submission}; {}", sentinel_command(nonce));
         // russh only fails this send once its session task is gone, i.e. the
         // link is dead — that is a disconnect, not a protocol violation.
-        leased
+        if let Err(error) = leased
             .get_mut()
             .data_bytes(payload.into_bytes())
             .await
-            .map_err(|e| SshError::Disconnected(format!("shell channel write failed: {e}")))?;
+        {
+            *self.unavailable.lock().await = ChannelUnavailable::Disconnected;
+            return Err(SshError::Disconnected(format!(
+                "shell channel write failed: {error}"
+            )));
+        }
 
         let mut buf = String::new();
         let result = match collect_until_sentinel(
@@ -370,6 +400,8 @@ impl RemoteShell {
             .is_ok_and(|outcome| !outcome.timed_out || !outcome.cwd.is_empty());
         if reusable {
             *self.channel.lock().await = Some(leased.take_reusable());
+        } else if matches!(&result, Err(SshError::Disconnected(_))) {
+            *self.unavailable.lock().await = ChannelUnavailable::Disconnected;
         }
         result
     }

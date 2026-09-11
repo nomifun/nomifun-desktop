@@ -1689,6 +1689,11 @@ impl TerminalService {
         loop {
             let quiet = tokio::time::sleep(crate::submit::IDLE_SETTLE_WINDOW);
             tokio::select! {
+                // Under sustained PTY output the runtime can be busy long enough
+                // for both timers to become ready in the same poll.  The caller's
+                // overall deadline is authoritative; do not randomly report Idle
+                // after that deadline merely because select chose the quiet timer.
+                biased;
                 _ = &mut overall => return SettleReason::Timeout,
                 _ = quiet => return SettleReason::Idle,
                 r = out_rx.recv() => match r {

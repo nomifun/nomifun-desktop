@@ -37,6 +37,12 @@ const TERMINAL_SETTLE_MS: u64 = 25;
 const MAX_SCRIPT_TIMEOUT_MS: u64 = 600_000;
 const SCRIPT_OUTPUT_MAX_BYTES: usize = 48_000;
 const PYTHON_PROBE_MAX: Duration = Duration::from_secs(2);
+// A broken high-priority candidate must not consume half (or more) of the
+// complete probe budget. Non-final candidates get enough time to start a
+// normal local interpreter plus exact cleanup; the final fallback owns every
+// remaining millisecond. This keeps the fallback useful on loaded macOS and
+// Windows hosts while the overall validation deadline stays unchanged.
+const PYTHON_PROBE_NONFINAL_SLOT_MAX: Duration = Duration::from_millis(500);
 const PYTHON_PROBE_INTERRUPT_GRACE: Duration = Duration::from_millis(25);
 const PYTHON_PROBE_TERMINATE_GRACE: Duration = Duration::from_millis(25);
 const PYTHON_PROBE_REAP_GRACE: Duration = Duration::from_millis(100);
@@ -457,14 +463,19 @@ fn python_probe_candidate_window(
     if candidates_left == 0 || now >= overall_deadline {
         return None;
     }
-    let share = overall_deadline.duration_since(now) / candidates_left as u32;
-    let process_budget = share.checked_sub(PYTHON_PROBE_CLEANUP_BUDGET)?;
+    let remaining = overall_deadline.duration_since(now);
+    let slot = if candidates_left == 1 {
+        remaining
+    } else {
+        (remaining / candidates_left as u32).min(PYTHON_PROBE_NONFINAL_SLOT_MAX)
+    };
+    let process_budget = slot.checked_sub(PYTHON_PROBE_CLEANUP_BUDGET)?;
     if process_budget.is_zero() {
         return None;
     }
     Some(PythonProbeWindow {
         process_deadline: now.checked_add(process_budget)?,
-        slot_deadline: now.checked_add(share)?.min(overall_deadline),
+        slot_deadline: now.checked_add(slot)?.min(overall_deadline),
     })
 }
 
@@ -1601,6 +1612,10 @@ mod tests {
 
         let first = python_probe_candidate_window(started_at, overall_deadline, 3).unwrap();
         assert!(first.process_deadline < first.slot_deadline);
+        assert_eq!(
+            first.slot_deadline.duration_since(started_at),
+            PYTHON_PROBE_NONFINAL_SLOT_MAX
+        );
         assert_eq!(
             first.slot_deadline.duration_since(first.process_deadline),
             PYTHON_PROBE_CLEANUP_BUDGET

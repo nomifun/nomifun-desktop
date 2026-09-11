@@ -1143,8 +1143,16 @@ fn reset_agent_state_dir(root: &Path, path: &Path) -> Result<()> {
 }
 
 fn ensure_child_path(root: &Path, child: &Path) -> Result<()> {
-    let root = dunce::canonicalize(root)
-        .with_context(|| format!("canonicalize data directory {}", root.display()))?;
+    let requested_root = if root.is_absolute() {
+        root.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .context("resolve relative data directory")?
+            .join(root)
+    };
+    let canonical_root = dunce::canonicalize(&requested_root).with_context(|| {
+        format!("canonicalize data directory {}", requested_root.display())
+    })?;
     let child = if child.is_absolute() {
         child.to_path_buf()
     } else {
@@ -1152,14 +1160,14 @@ fn ensure_child_path(root: &Path, child: &Path) -> Result<()> {
             .context("resolve relative managed path")?
             .join(child)
     };
-    if !child.starts_with(&root) || child == root {
+    let relative = child
+        .strip_prefix(&requested_root)
+        .or_else(|_| child.strip_prefix(&canonical_root))
+        .context("resolve managed path relative to data directory")?;
+    if relative.as_os_str().is_empty() {
         anyhow::bail!("拒绝操作数据目录之外的 agent 状态路径");
     }
-
-    let relative = child
-        .strip_prefix(&root)
-        .context("resolve managed path relative to data directory")?;
-    let mut current = root.clone();
+    let mut current = canonical_root.clone();
     for component in relative.components() {
         let Component::Normal(name) = component else {
             anyhow::bail!("managed agent path contains an unsafe path component");
@@ -1176,7 +1184,7 @@ fn ensure_child_path(root: &Path, child: &Path) -> Result<()> {
                 let canonical = dunce::canonicalize(&current).with_context(|| {
                     format!("canonicalize managed agent path {}", current.display())
                 })?;
-                if !canonical.starts_with(&root) {
+                if !canonical.starts_with(&canonical_root) {
                     anyhow::bail!("拒绝操作数据目录之外的 agent 状态路径");
                 }
             }
@@ -1601,6 +1609,25 @@ mod tests {
         fs::create_dir_all(&child).unwrap();
         ensure_child_path(root.path(), &child).unwrap();
         assert!(ensure_child_path(root.path(), &root.path().join("..")).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn state_path_accepts_the_macos_var_private_var_alias() {
+        let root = tempfile::tempdir().unwrap();
+        let canonical_root = dunce::canonicalize(root.path()).unwrap();
+        assert_ne!(
+            root.path(),
+            canonical_root,
+            "the macOS temporary directory should exercise /var -> /private/var"
+        );
+
+        ensure_child_path(root.path(), &root.path().join("relay-agent/cache")).unwrap();
+        ensure_child_path(
+            root.path(),
+            &canonical_root.join("relay-agent/canonical-cache"),
+        )
+        .unwrap();
     }
 
     #[test]

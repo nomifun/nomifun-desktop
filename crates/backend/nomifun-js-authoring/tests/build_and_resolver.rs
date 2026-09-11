@@ -77,6 +77,14 @@ fn runtime_target() -> &'static str {
     "unsupported"
 }
 
+#[tokio::test]
+async fn build_foundation_can_run_inside_an_async_runtime() {
+    NodeBuildHost::new(node_executable(), Duration::from_secs(10))
+        .unwrap()
+        .validate_foundation()
+        .unwrap();
+}
+
 fn fixture() -> (TempDir, SourceStore) {
     let temp = tempfile::tempdir().unwrap();
     let store =

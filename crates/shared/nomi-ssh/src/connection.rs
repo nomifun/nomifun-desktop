@@ -177,7 +177,7 @@ impl SshConnection {
         match tokio::time::timeout(SSH_CONNECT_TIMEOUT, Self::connect_inner(cred, policy)).await {
             Ok(result) => result,
             Err(_) => Err(SshError::TimedOut(format!(
-                "SSH connect/authentication exceeded {}ms",
+                "SSH connect/authentication timed out after {}ms",
                 SSH_CONNECT_TIMEOUT.as_millis()
             ))),
         }

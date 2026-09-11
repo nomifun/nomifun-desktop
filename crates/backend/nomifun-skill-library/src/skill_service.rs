@@ -1952,6 +1952,7 @@ mod tests {
     /// The concrete escape: a drive-prefixed name must never leave the base.
     /// `is_absolute()` is `false` for `c:evil`, which is why a name-level
     /// rejection is the only guard that catches it.
+    #[cfg(windows)]
     #[test]
     fn drive_relative_skill_name_cannot_escape_base() {
         let base = Path::new("C:\\dest\\skills");
@@ -1968,8 +1969,8 @@ mod tests {
     /// `delete_skill`'s recursive delete at the whole skills tree.
     #[test]
     fn dot_skill_name_would_resolve_to_the_base_itself() {
-        let base = Path::new("C:\\dest\\skills");
-        assert_eq!(base.join("."), Path::new("C:\\dest\\skills\\."));
+        let base = Path::new("skills");
+        assert_eq!(base.join("."), base);
         assert!(validate_filename(".").is_err());
     }
 

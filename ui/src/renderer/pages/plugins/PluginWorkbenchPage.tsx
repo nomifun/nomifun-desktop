@@ -513,7 +513,7 @@ const PluginWorkbenchPage: React.FC = () => {
         const mount = linkedProjectMount;
         if (enabled && (!mount?.current || !projectDetail.summary.linked_mount_id)) {
           setProjectMutationFailure({
-            kind: 'resource',
+            kind: 'error',
             message: t('pluginWorkbench.autoApply.linkedMountUnavailable'),
           });
           return;

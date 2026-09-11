@@ -159,7 +159,7 @@ describe('Plugin source edit dialog', () => {
   test('keeps backend failure visible and disables destructive dismissal while loading', async () => {
     const page = renderDialog({
       loading: true,
-      failure: { message: 'Source snapshot is stale' },
+      failure: { kind: 'error', message: 'Source snapshot is stale' },
     });
     const dialog = within(document.body);
     await dialog.findByRole('dialog', { name: 'Edit Plugin Source' });
@@ -174,7 +174,7 @@ describe('Plugin source edit dialog', () => {
           visible
           detail={detail}
           loading
-          failure={{ message: 'Source snapshot is stale' }}
+          failure={{ kind: 'error', message: 'Source snapshot is stale' }}
           onCancel={() => {
             canceled += 1;
           }}
