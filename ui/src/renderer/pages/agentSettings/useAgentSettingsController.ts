@@ -106,7 +106,7 @@ export function useAgentSettingsController() {
           );
           if (currentPreset) return { kind: 'preset', preset: currentPreset };
         }
-        const firstTemplate = nextLibrary.official_templates.find((template) => template.template_key === 'assistant.general') ?? nextLibrary.official_templates[0];
+        const firstTemplate = nextLibrary.official_templates[0];
         return firstTemplate ? { kind: 'template', template: firstTemplate } : null;
       });
     } catch (loadError) {

@@ -5,7 +5,6 @@ import type { OfficialPresetKey } from '@/common/types/agentPlatform';
 import type { LanguageMode } from './i18n';
 
 export type GuidAgentSelectionPreference =
-  | { kind: 'default' }
   | { kind: 'template'; templateKey: OfficialPresetKey }
   | { kind: 'preset'; presetId: AgentPresetId };
 

@@ -49,7 +49,11 @@ describe('GuidPage advanced controls', () => {
     expect(page.includes("import { Alert, ConfigProvider } from '@arco-design/web-react';")).toBe(
       true
     );
-    expect(page.includes('!isDefaultAgent && presetCapabilities.error')).toBe(true);
+    expect(
+      page.includes(
+        "agentSelection.selection.kind === 'preset' && presetCapabilities.error"
+      )
+    ).toBe(true);
     expect(page.includes("<Alert\n                type='error'")).toBe(true);
     expect(page.includes("title={t('common.error')}")).toBe(true);
     expect(

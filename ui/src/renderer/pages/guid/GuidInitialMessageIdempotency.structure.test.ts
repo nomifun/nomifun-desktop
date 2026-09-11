@@ -10,12 +10,12 @@ import { describe, expect, test } from 'bun:test';
 const readSource = (url: URL): string => readFileSync(url, 'utf8');
 
 describe('Guid initial-message idempotency', () => {
-  test('persists a UUIDv7 key after either Guid launch mode resolves a conversation', () => {
+  test('persists a UUIDv7 key after an Agent Session resolves its conversation', () => {
     const source = readSource(new URL('./hooks/useGuidSend.ts', import.meta.url));
     const initialMessagePayload =
       source.match(/JSON\.stringify\(\{([\s\S]*?)\}\)\s*\)/)?.[1] ?? '';
     expect(source.includes("import { uuidv7 } from '@/common/utils';")).toBe(true);
-    expect(source.includes('ipcBridge.conversation.create.invoke')).toBe(true);
+    expect(source.includes('ipcBridge.conversation.create.invoke')).toBe(false);
     expect(source.includes('agentPlatform.sessions.create.invoke')).toBe(true);
     expect(source.match(/idempotency_key: uuidv7\(\),/g)).toHaveLength(1);
     expect(initialMessagePayload).not.toBe('');

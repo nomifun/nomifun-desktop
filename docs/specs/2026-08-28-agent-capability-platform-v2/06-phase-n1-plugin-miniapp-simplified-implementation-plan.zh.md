@@ -1598,17 +1598,19 @@ Package/contribution/action facts；invoker 只把 exact request 交给
   `PHASE-N1-M1-CLOSURE-TODO.zh.md` 顺序执行；
 - 不把该实现解释为 M1-U-01/M1-V-01/N1-V-01/RC-WIN-01 已关闭。
 
-## 2026-09-09 Guid 启动入口与模型冻结实施注记
+## 2026-09-11 Guid 单一 Agent 目录与模型冻结实施注记
 
-Guid 的 Agent 选择器现在把普通 Nomi 与 AgentPreset 分成两条清晰路径：
+Guid 的 Agent 选择器现在只暴露 Agent 工作台中的官方模板和用户 Agent，不再把底层
+Nomi 执行引擎伪装成一个不属于工作台目录的 `default` Agent：
 
-- `default` 选择显示模型选择器，并沿用普通 Conversation create；
-- `preset/template` 选择不显示模型选择器，也不从客户端向 Agent Session Create
-  提交模型、route、binding 或 snapshot；服务端使用稳定 Revision/Snapshot；
-- 官方 template preparation 的 `model` 变为可选，缺省时由 Control Plane 解析 default
-  Chat route；保存后的 AgentPreset Session 继续由 Snapshot 冻结模型；
-- AutoWork/发送按钮的 launch target 判断按当前模式分别校验，不再因为普通模型缓存
-  缺失而错误禁用已保存 AgentPreset。
+- Agent 工作台、首次进入、新建会话和已保存选择失效时统一选择官方目录第一项
+  `chat.minimal`；
+- `preset/template` 选择不显示独立模型选择器，也不从客户端向 Agent Session Create
+  提交模型、route、binding 或 snapshot；服务端使用 default Chat route 和稳定
+  Revision/Snapshot；
+- 官方 template preparation 在首次发送时自动创建或复用稳定配置，用户无需先创建个人
+  Agent；
+- AutoWork/发送按钮的 launch target 只按当前工作台 Agent 的模板或稳定 Revision 校验。
 
 该修正只收敛产品入口，不增加持久化状态或兼容层；`gate:agent-v2 --self-test`、
 Guid 定向测试和 UI production build 通过。
