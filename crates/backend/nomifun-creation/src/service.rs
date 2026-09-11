@@ -280,7 +280,17 @@ fn cap_to_task_request(
             quality: param_str(params, "quality"),
             extra: request_extra(
                 params,
-                &["prompt", "count", "n", "width", "height", "size", "quality", "interface_mode"],
+                &[
+                    "prompt",
+                    "count",
+                    "n",
+                    "width",
+                    "height",
+                    "size",
+                    "quality",
+                    "interface_mode",
+                    "aspect",
+                ],
             ),
         }),
         MediaCapability::I2i | MediaCapability::Inpaint => TaskRequest::ImageEdit(ImageEditRequest {
@@ -290,7 +300,16 @@ fn cap_to_task_request(
             inputs,
             extra: request_extra(
                 params,
-                &["prompt", "count", "n", "width", "height", "size", "interface_mode"],
+                &[
+                    "prompt",
+                    "count",
+                    "n",
+                    "width",
+                    "height",
+                    "size",
+                    "interface_mode",
+                    "aspect",
+                ],
             ),
         }),
         MediaCapability::T2v | MediaCapability::I2v => TaskRequest::VideoGeneration(VideoGenRequest {
@@ -4366,7 +4385,7 @@ mod tests {
     fn cap_to_task_request_maps_every_media_capability() {
         let params = json!({
             "prompt": "a cat", "count": 2, "width": 512, "height": 512,
-            "quality": "high", "seconds": 4, "voice": "alloy", "system": "be brief"
+            "quality": "high", "aspect": "1:1", "seconds": 4, "voice": "alloy", "system": "be brief"
         });
         let input = InputAsset { id: None, role: "mask".into(), bytes: vec![1], mime: "image/png".into() };
 
@@ -4389,6 +4408,7 @@ mod tests {
                     assert_eq!(r.count, 2);
                     assert_eq!(r.inputs.len(), 1);
                     assert_eq!(r.inputs[0].role, "mask");
+                    assert!(r.extra.get("aspect").is_none());
                 }
                 _ => panic!("{cap:?} must map to ImageEdit"),
             }
@@ -4466,6 +4486,36 @@ mod tests {
             request.extra,
             json!({})
         );
+
+        let automatic = json!({
+            "prompt": "model-selected framing",
+            "seconds": 5,
+            "resolution": "1080p",
+            "aspect": "auto"
+        });
+        let TaskRequest::VideoGeneration(request) =
+            cap_to_task_request(MediaCapability::T2v, &automatic, vec![]).unwrap()
+        else {
+            panic!("t2v must map to VideoGeneration");
+        };
+        assert!(request.size.is_none());
+        assert_eq!(request.extra, json!({}));
+    }
+
+    #[test]
+    fn automatic_image_size_stays_absent_from_the_provider_request() {
+        let params = json!({
+            "prompt": "model-selected framing",
+            "count": 1,
+            "aspect": "auto"
+        });
+        let TaskRequest::ImageGeneration(request) =
+            cap_to_task_request(MediaCapability::T2i, &params, vec![]).unwrap()
+        else {
+            panic!("t2i must map to ImageGeneration");
+        };
+        assert!(request.size.is_none());
+        assert_eq!(request.extra, json!({}));
     }
 
     #[test]

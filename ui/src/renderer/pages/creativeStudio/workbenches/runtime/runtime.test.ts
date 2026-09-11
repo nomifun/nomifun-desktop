@@ -828,6 +828,30 @@ describe("Creative workbench planning and presentation boundaries", () => {
     expect(unsupported?.message.includes("does not support the requested dimensions")).toBe(true);
   });
 
+  test("keeps automatic video dimensions absent while retaining history metadata", () => {
+    const plan = prepareVideoWorkbenchRun({
+      catalog: catalog("video_generation"),
+      owner: standaloneOwner("video"),
+      model: { providerId: PROVIDER_ID, model: "video_generation-model" },
+      references: { bindings: [], assets: [] },
+      operation: { task: "video_generation", capability: "t2v" },
+      prompt: "Slow camera movement with model-selected framing",
+      seconds: 5,
+      resolution: "1080p",
+      aspectRatio: "auto",
+      width: null,
+      height: null,
+      taskCount: 1,
+    });
+
+    expect(plan.input.parameters).toEqual({
+      prompt: "Slow camera movement with model-selected framing",
+      seconds: 5,
+      resolution: "1080p",
+      aspect: "auto",
+    });
+  });
+
   test("keeps audio cancellation enabled for an authoritative queued task", async () => {
     const plan = audioPlan();
     const queued = task(plan.input, "queued");
