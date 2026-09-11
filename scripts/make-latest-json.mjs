@@ -16,6 +16,7 @@
  * 流程：
  *   1) 扫 target/**\/release/bundle/ 下的更新产物（每个产物旁有一个 .sig）。
  *   2) 由所在 target triple（或默认 host 构建）推断平台键，读 .sig 内容。
+ *      Linux 另按 deb/rpm/appimage 区分安装器；通用 Linux 键只供 AppImage 兼容。
  *   3) url 指向 GitHub Releases 的版本化资产地址。
  *   4) 读入既有 latest.json（保留其它平台条目），更新 version/notes/pub_date + 本机条目，写回。
  *
@@ -111,6 +112,17 @@ function platformKeysFor(triple) {
   }
   if (triple.includes('windows')) return [triple.includes('aarch64') ? 'windows-aarch64' : 'windows-x86_64'];
   if (triple.includes('linux')) return [triple.includes('aarch64') ? 'linux-aarch64' : 'linux-x86_64'];
+  return [];
+}
+
+function artifactKeysFor(key, artifact) {
+  if (!key.startsWith('linux-')) return [key];
+  const name = basename(artifact).toLowerCase();
+  // tauri-plugin-updater looks up OS-arch-installer before OS-arch. A deb/rpm
+  // installation must never select AppImage bytes for its package installer.
+  if (name.endsWith('.appimage')) return [key, `${key}-appimage`];
+  if (name.endsWith('.deb')) return [`${key}-deb`];
+  if (name.endsWith('.rpm')) return [`${key}-rpm`];
   return [];
 }
 
@@ -212,7 +224,9 @@ for (const { dir, triple } of bundleDirs) {
     const signature = readFileSync(sig, 'utf8').trim();
     const url = `https://github.com/${repo}/releases/download/v${version}/${name}`;
     for (const key of keys) {
-      collectCandidate(key, { url, signature, artifact, sig });
+      for (const artifactKey of artifactKeysFor(key, artifact)) {
+        collectCandidate(artifactKey, { url, signature, artifact, sig });
+      }
     }
     uploads.add(artifact);
     uploads.add(sig);
@@ -269,7 +283,7 @@ console.log(line);
 console.log(`✓ latest.json 已写入: ${rel(out)}`);
 console.log(`  版本: ${version}    仓库: ${repo}`);
 console.log('  平台条目:');
-for (const key of ALL_KEYS) {
+for (const key of new Set([...ALL_KEYS, ...Object.keys(manifest.platforms)])) {
   const here = foundKeys.includes(key);
   const mark = here ? '✓ 本次填入' : manifest.platforms[key] ? '· 沿用既有' : '✗ 缺失（需在对应平台构建机补齐）';
   console.log(`    ${key.padEnd(16)} ${mark}`);

@@ -20,8 +20,8 @@ type GuidActionRowProps = {
   files: string[];
   onFilesUploaded: (paths: string[]) => void;
 
-  // Plain Nomi owns an explicit model picker; AgentPreset launches do not.
-  modelSelectorNode?: React.ReactNode;
+  // Agent identity and session model are independent launch choices.
+  modelSelectorNode: React.ReactNode;
 
   // Send button
   loading: boolean;
@@ -159,14 +159,12 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
         </div>
       </div>
       <div className={`${styles.actionSubmit} ${!isMobile ? styles.actionSubmitResponsive : ''}`}>
-        {modelSelectorNode && (
-          <div
-            className={`${styles.actionConfigGroup} ${!isMobile ? styles.actionConfigGroupResponsive : ''}`}
-            data-mobile={isMobile ? 'true' : undefined}
-          >
-            {modelSelectorNode}
-          </div>
-        )}
+        <div
+          className={`${styles.actionConfigGroup} ${!isMobile ? styles.actionConfigGroupResponsive : ''}`}
+          data-mobile={isMobile ? 'true' : undefined}
+        >
+          {modelSelectorNode}
+        </div>
         {speechInputNode}
         <Tooltip
           content={t('requirements.autowork.startSession')}

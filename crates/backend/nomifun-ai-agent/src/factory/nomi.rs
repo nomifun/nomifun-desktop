@@ -167,7 +167,9 @@ pub(super) async fn build(
 
     // A process-owned configuration object is the capability. There is no
     // serializable boolean grant that persisted or client JSON can forge.
-    let platform_gateway_entitled = is_instance_owner && overrides.allowed_tools.is_empty();
+    let platform_gateway_entitled = is_instance_owner
+        && !overrides.enforce_tool_allowlist
+        && overrides.allowed_tools.is_empty();
     overrides.gateway_mcp_config = if platform_gateway_entitled {
         deps.gateway_mcp_config.clone()
     } else {

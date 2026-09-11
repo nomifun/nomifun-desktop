@@ -23,7 +23,9 @@ export type GuidAgentSelectorProps = {
   isLoading?: boolean;
   loadError?: Error;
   onRetry?: () => Promise<void>;
-  onSelectDefault: () => void;
+  selectedLabelOverride?: string;
+  compact?: boolean;
+  disabled?: boolean;
   onSelectTemplate: (templateKey: OfficialPresetKey) => void;
   onSelectPreset: (presetId: AgentPresetId) => void;
 };
@@ -45,7 +47,9 @@ const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
   isLoading = false,
   loadError,
   onRetry,
-  onSelectDefault,
+  selectedLabelOverride,
+  compact = false,
+  disabled = false,
   onSelectTemplate,
   onSelectPreset,
 }) => {
@@ -57,16 +61,12 @@ const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
   const searchRef = useRef<HTMLInputElement>(null);
   const mineHeading = useId();
   const templateHeading = useId();
-  const defaultLabel = t('guid.defaultAgent', { defaultValue: 'Nomi Agent' });
-  const defaultDescription = t('guid.agentEntries.defaultDescription');
   const selectedPreset = selection.kind === 'preset'
     ? presets.find((preset) => preset.preset_id === selection.presetId)
     : undefined;
-  const selectedLabel = selection.kind === 'default'
-    ? defaultLabel
-    : selection.kind === 'template'
-      ? t(`agentSettings.template.${TEMPLATE_I18N_PATH[selection.templateKey]}.name`)
-      : selectedPreset?.display_name ?? t('guid.agentEntries.choose');
+  const selectedLabel = selectedLabelOverride ?? (selection.kind === 'template'
+    ? t(`agentSettings.template.${TEMPLATE_I18N_PATH[selection.templateKey]}.name`)
+    : selectedPreset?.display_name ?? t('guid.agentEntries.choose'));
 
   const changeOpen = (next: boolean) => {
     setOpen(next);
@@ -101,7 +101,6 @@ const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const matches = (name: string, description = '') =>
     `${name} ${description}`.toLocaleLowerCase().includes(normalizedQuery);
-  const showDefault = matches(defaultLabel, defaultDescription);
   const savedMatches = presets.filter((preset) => matches(preset.display_name, preset.description));
   const draftMatches = draftPresets.filter((preset) => matches(preset.display_name, preset.description));
   const templates = useMemo(() => officialTemplates.map((template) => ({
@@ -111,7 +110,7 @@ const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
   })), [officialTemplates, t]);
   const templateMatches = templates.filter((template) => matches(template.name, template.description));
   const visibleTemplates = normalizedQuery || allTemplates ? templateMatches : templateMatches.slice(0, 2);
-  const hasMine = showDefault || savedMatches.length > 0 || draftMatches.length > 0;
+  const hasMine = savedMatches.length > 0 || draftMatches.length > 0;
   const noMatches = !hasMine && visibleTemplates.length === 0;
 
   const choose = (action: () => void) => {
@@ -143,7 +142,8 @@ const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
       <button
         ref={refs.setReference}
         type='button'
-        className={styles.trigger}
+        className={`${styles.trigger} ${compact ? styles.compactTrigger : ''}`}
+        disabled={disabled}
         title={selectedLabel}
         data-testid='guid-agent-selector'
         {...getReferenceProps()}
@@ -185,9 +185,6 @@ const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
                 {hasMine && (
                   <section role='group' aria-labelledby={mineHeading}>
                     <h3 id={mineHeading} className={styles.heading}>{t('agentSettings.library.mine')}</h3>
-                    {showDefault && (
-                      <AgentRow name={defaultLabel} description={defaultDescription} icon={<Robot theme='outline' size={22} fill='currentColor' />} selected={selection.kind === 'default'} onClick={() => choose(onSelectDefault)} />
-                    )}
                     {savedMatches.map((preset) => (
                       <AgentRow key={preset.preset_id} name={preset.display_name} description={preset.description} icon={<User theme='outline' size={21} fill='currentColor' />} selected={selection.kind === 'preset' && selection.presetId === preset.preset_id} onClick={() => choose(() => onSelectPreset(preset.preset_id))} />
                     ))}

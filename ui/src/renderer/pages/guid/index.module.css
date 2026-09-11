@@ -373,7 +373,6 @@ button.guidResourceCard:focus-visible {
   margin-right: 0;
 }
 
-/* 方案E：模型 + 权限各自独立 tb-btn，中间有竖线分隔 */
 .actionConfigGroup {
   display: inline-flex;
   align-items: center;
@@ -451,7 +450,7 @@ button.guidResourceCard:focus-visible {
   }
 }
 
-/* 首页输入框右下「模型 / 模式」按钮：与对话框 .sendbox-tools/.sendbox-actions 同款 */
+/* 首页输入框右下模型选择器：与对话框 .sendbox-tools/.sendbox-actions 同款 */
 .actionSubmit :global(.sendbox-model-btn),
 .actionSubmit :global(.sendbox-model-btn:hover),
 .actionSubmit :global(.sendbox-model-btn:active),
@@ -777,14 +776,17 @@ button.guidResourceCard:focus-visible {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  padding: 10px;
+  justify-content: flex-start;
+  /* Keep the hero anchored when the selected Agent adds resource controls
+     (for example the Workspace footer used by assistant.general). Centering
+     a variable-height layout made the whole page move by half the delta. */
+  padding: clamp(88px, 18vh, 180px) 10px 10px;
   box-sizing: border-box;
 }
 
-/* 整体内容块略往上移，减轻「重心偏下」的感觉 */
+/* Agent capability rows may grow downward without moving the hero anchor. */
 .guidPrimaryStage .guidLayout {
-  margin-top: -5vh;
+  margin-top: 0;
 }
 
 .guidDiscoveryArea {

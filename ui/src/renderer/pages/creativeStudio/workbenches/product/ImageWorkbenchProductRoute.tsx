@@ -36,20 +36,24 @@ import {
   readStandaloneWorkbenchDraft,
   writeStandaloneWorkbenchDraft,
 } from '../drafts';
+import { resolveMediaAspectRatio } from '../aspectRatio';
 import {
   ImageWorkbench,
   type ImageWorkbenchAspectRatioOption,
   type ImageWorkbenchLayout,
   type ImageWorkbenchModelIdentity,
   type ImageWorkbenchSettings,
+  imageWorkbenchAspectRatioValue,
   imageWorkbenchSizePolicyForModel,
   imageWorkbenchSelectableSizeOptions,
+  imageWorkbenchSizeOptionForAspectRatio,
   imageWorkbenchSizeOptionForSettings,
   normalizeImageWorkbenchSettingsSize,
 } from '../image';
 import {
   combineStandaloneHistoryTasks,
   hydrateStandaloneTaskReferences,
+  standaloneHistoryRetirementTaskIds,
   standaloneHistoryResumeRequests,
   standaloneHistoryRuntimeSnapshot,
   useStandaloneWorkbenchHistory,
@@ -107,6 +111,7 @@ const OwnedImageWorkbenchReady: React.FC<{
   );
   const [selectedResultIds, setSelectedResultIds] = useState<string[]>([]);
   const [retireTaskIds, setRetireTaskIds] = useState<string[]>([]);
+  const [retireAttemptTaskIds, setRetireAttemptTaskIds] = useState<string[]>([]);
   const [retiredTaskIds, setRetiredTaskIds] = useState<string[]>([]);
   const [retiring, setRetiring] = useState(false);
   const [retireError, setRetireError] = useState<string | null>(null);
@@ -331,6 +336,24 @@ const OwnedImageWorkbenchReady: React.FC<{
       return;
     }
     try {
+      const resolvedAspectRatio = resolveMediaAspectRatio(
+        settings.aspectRatio,
+        prompt,
+        sizePolicy.options
+          .filter((option) => !option.disabled)
+          .map(imageWorkbenchAspectRatioValue)
+      );
+      const requestSizeOption = settings.aspectRatio === 'auto' && resolvedAspectRatio
+        ? imageWorkbenchSizeOptionForAspectRatio(
+            sizePolicy.options,
+            selectedSizeOption,
+            resolvedAspectRatio
+          ) ?? selectedSizeOption
+        : selectedSizeOption;
+      const requestAspectRatio =
+        settings.aspectRatio === 'auto'
+          ? resolvedAspectRatio ?? 'auto'
+          : imageWorkbenchAspectRatioValue(requestSizeOption);
       await runtime.generate({
         catalog,
         owner: standaloneWorkbenchOwner('image'),
@@ -349,10 +372,10 @@ const OwnedImageWorkbenchReady: React.FC<{
         prompt,
         interfaceMode: settings.interfaceMode,
         quality: settings.quality,
-        width: settings.width,
-        height: settings.height,
-        size: references.length ? null : selectedSizeOption?.requestSize ?? null,
-        aspectRatio: settings.aspectRatio,
+        width: requestSizeOption?.width ?? null,
+        height: requestSizeOption?.height ?? null,
+        size: references.length ? null : requestSizeOption?.requestSize ?? null,
+        aspectRatio: requestAspectRatio,
         count: settings.count,
       });
     } catch (reason) {
@@ -410,26 +433,43 @@ const OwnedImageWorkbenchReady: React.FC<{
           );
         }
       }
+      const attemptTaskIds = standaloneHistoryRetirementTaskIds(
+        presentationRuntime,
+        unique
+      );
+      if (attemptTaskIds.length > 100) {
+        throw new Error(
+          t('creativeStudio.product.history.invalidSelection', {
+            defaultValue: '每次必须选择 1-100 条终态历史。',
+          })
+        );
+      }
       setRetireTaskIds(unique);
+      setRetireAttemptTaskIds(attemptTaskIds);
     } catch (reason) {
       setError(formatError(reason));
     }
   };
 
   const confirmRetirement = async (): Promise<void> => {
-    if (retireTaskIds.length === 0 || retiring) return;
+    if (
+      retireTaskIds.length === 0 ||
+      retireAttemptTaskIds.length === 0 ||
+      retiring
+    ) return;
     setRetiring(true);
     setError(null);
     setRetireError(null);
     try {
       const result = await creativeTaskHistoryClient.retireStandalone({
         workbenchKind: 'image',
-        taskIds: retireTaskIds,
+        taskIds: retireAttemptTaskIds,
       });
       runtime.dismiss(result.retiredTaskIds);
       setRetiredTaskIds((current) => [...new Set([...current, ...result.retiredTaskIds])]);
       setSelectedResultIds([]);
       setRetireTaskIds([]);
+      setRetireAttemptTaskIds([]);
       await history.reload();
     } catch (reason) {
       setRetireError(formatError(reason));
@@ -649,6 +689,7 @@ const OwnedImageWorkbenchReady: React.FC<{
         error={retireError}
         onCancel={() => {
           setRetireTaskIds([]);
+          setRetireAttemptTaskIds([]);
           setRetireError(null);
         }}
         onConfirm={() => void confirmRetirement()}

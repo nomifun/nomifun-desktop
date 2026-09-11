@@ -282,6 +282,9 @@ export class CreativeWorkbenchRuntimeController {
       ...this.current,
       entries: this.current.entries.map((entry) => ({
         ...entry,
+        ...(entry.historyTaskIds
+          ? { historyTaskIds: [...entry.historyTaskIds] }
+          : {}),
         task: cloneTask(entry.task),
         outputs: entry.outputs.map((output) => ({ ...output })),
         retryInput: entry.retryInput ? cloneInput(entry.retryInput) : null,

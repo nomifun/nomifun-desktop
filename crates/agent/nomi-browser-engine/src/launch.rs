@@ -2254,11 +2254,10 @@ pub fn build_chrome_args_for_mode(
         args.push("--window-size=1280,800".into());
     }
 
-    // Linux 容器内 sandbox 常因缺 user-namespace 而启动失败；回退 --no-sandbox。
-    // TODO(verify-linux): 容器 sandbox 探测/回退需实机核对（当前为无条件回退，偏保守），
-    // 见 docs/superpowers/specs/browser-use/PLATFORM-VERIFICATION.md。
-    #[cfg(target_os = "linux")]
-    args.push("--no-sandbox".into());
+    // Linux desktops must retain Chromium's sandbox too. A restricted container
+    // or disabled user namespaces is not permission to silently remove browser
+    // isolation. Let Chromium fail if its OS sandbox prerequisites are absent;
+    // do not infer a security downgrade from the OS, WSL, or container identity.
 
     // **不自动开启动窗口/标签**：消除冗余的命令行起始标签——受控页由 backend
     // `Target.createTarget("about:blank")` 单独建（[`crate::backend::cdp`]），命令行再开一个就是
@@ -4208,14 +4207,16 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn linux_container_falls_back_to_no_sandbox() {
-        // TODO(verify-linux): 当前无条件回退 --no-sandbox（偏保守）；容器探测见
-        // docs/superpowers/specs/browser-use/PLATFORM-VERIFICATION.md。
-        let args = build_chrome_args(Path::new("/tmp/x"), true);
-        assert!(
-            args.iter().any(|a| a == "--no-sandbox"),
-            "linux must add --no-sandbox: {args:?}"
-        );
+    fn linux_keeps_chromium_sandbox_in_both_launch_modes() {
+        for mode in [BrowserHostLaunchMode::Headless, BrowserHostLaunchMode::Headful] {
+            let args = build_chrome_args_for_mode(Path::new("/tmp/x"), mode);
+            assert!(
+                !args.iter().any(|arg| matches!(arg.as_str(),
+                    "--no-sandbox" | "--disable-setuid-sandbox" | "--disable-seccomp-filter-sandbox"
+                )),
+                "Linux desktop launches must retain Chromium's sandbox: {args:?}"
+            );
+        }
     }
 
     #[cfg(not(target_os = "linux"))]

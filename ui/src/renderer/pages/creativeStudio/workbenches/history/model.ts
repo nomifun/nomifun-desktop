@@ -16,6 +16,10 @@ import type {
   CreativeWorkbenchRuntimeEntry,
   CreativeWorkbenchRuntimeSnapshot,
 } from '../runtime';
+import {
+  STANDALONE_RETRY_SLOT_PARAMETER,
+  standaloneRetrySlot,
+} from '../retrySlot';
 
 export interface StandaloneWorkbenchHistoryScope {
   workbenchKind: CreativeStandaloneWorkbenchKind;
@@ -28,6 +32,11 @@ export interface StandaloneWorkbenchHistoryItem {
   /** Preserves all committed outputs as one task instead of splitting by asset. */
   runtimeEntry: CreativeWorkbenchRuntimeEntry | null;
   canRetry: boolean;
+  /** Stable card position shared by the original task and every retry attempt. */
+  slotTaskId: string;
+  slotSubmittedAt: number;
+  /** Every backend attempt represented by this one logical history card. */
+  attemptTaskIds: readonly string[];
 }
 
 export interface MergeStandaloneWorkbenchHistoryInput {
@@ -270,11 +279,85 @@ const descendingTaskOrder = (
   left: StandaloneWorkbenchHistoryItem,
   right: StandaloneWorkbenchHistoryItem
 ): number => {
-  if (left.task.submittedAt !== right.task.submittedAt) {
-    return left.task.submittedAt > right.task.submittedAt ? -1 : 1;
+  if (left.slotSubmittedAt !== right.slotSubmittedAt) {
+    return left.slotSubmittedAt > right.slotSubmittedAt ? -1 : 1;
   }
-  if (left.task.taskId === right.task.taskId) return 0;
-  return left.task.taskId > right.task.taskId ? -1 : 1;
+  if (left.slotTaskId === right.slotTaskId) return 0;
+  return left.slotTaskId > right.slotTaskId ? -1 : 1;
+};
+
+const retryIdentity = (task: CreativeTask): unknown => {
+  const parameters = structuredClone(task.parameters);
+  delete parameters[STANDALONE_RETRY_SLOT_PARAMETER];
+  return {
+    owner: task.owner,
+    providerId: task.providerId,
+    model: task.model,
+    task: task.task,
+    capability: task.capability,
+    parameters,
+    inputs: task.inputs,
+  };
+};
+
+const isLaterAttempt = (
+  candidate: StandaloneWorkbenchHistoryItem,
+  current: StandaloneWorkbenchHistoryItem
+): boolean =>
+  candidate.task.submittedAt > current.task.submittedAt ||
+  (candidate.task.submittedAt === current.task.submittedAt &&
+    candidate.task.taskId > current.task.taskId);
+
+const collapseRetrySlots = (
+  items: readonly StandaloneWorkbenchHistoryItem[]
+): StandaloneWorkbenchHistoryItem[] => {
+  const slots = new Map<
+    string,
+    {
+      item: StandaloneWorkbenchHistoryItem;
+      identity: unknown;
+      attemptTaskIds: Set<string>;
+    }
+  >();
+  for (const item of items) {
+    const retry = standaloneRetrySlot(item.task);
+    const slotTaskId = retry?.taskId ?? item.task.taskId;
+    const slotSubmittedAt = retry?.submittedAt ?? item.task.submittedAt;
+    const attemptTaskIds = retry
+      ? [...retry.predecessorTaskIds, item.task.taskId]
+      : [item.task.taskId];
+    const candidate = {
+      ...item,
+      slotTaskId,
+      slotSubmittedAt,
+      attemptTaskIds,
+    };
+    const identity = retryIdentity(item.task);
+    const existing = slots.get(slotTaskId);
+    if (!existing) {
+      slots.set(slotTaskId, {
+        item: candidate,
+        identity,
+        attemptTaskIds: new Set(attemptTaskIds),
+      });
+      continue;
+    }
+    if (
+      existing.item.slotSubmittedAt !== slotSubmittedAt ||
+      !structurallyEqual(existing.identity, identity)
+    ) {
+      invalidResponse(
+        `Retry slot ${slotTaskId} contains tasks with conflicting identity`,
+        'tasks.parameters.nomifunRetrySlot'
+      );
+    }
+    for (const taskId of attemptTaskIds) existing.attemptTaskIds.add(taskId);
+    if (isLaterAttempt(candidate, existing.item)) existing.item = candidate;
+  }
+  return [...slots.values()].map(({ item, attemptTaskIds }) => ({
+    ...item,
+    attemptTaskIds: [...attemptTaskIds],
+  }));
 };
 
 /** Merge one exact owner scope without mutating either durable or live input. */
@@ -301,6 +384,9 @@ export function mergeStandaloneWorkbenchHistory(
       source: 'durable',
       runtimeEntry: null,
       canRetry: canRetryStandaloneWorkbenchHistoryTask(task),
+      slotTaskId: task.taskId,
+      slotSubmittedAt: task.submittedAt,
+      attemptTaskIds: [task.taskId],
     });
   }
 
@@ -325,8 +411,11 @@ export function mergeStandaloneWorkbenchHistory(
       source: 'live',
       runtimeEntry: entry,
       canRetry: canRetryStandaloneWorkbenchHistoryTask(entry.task),
+      slotTaskId: taskId,
+      slotSubmittedAt: entry.task.submittedAt,
+      attemptTaskIds: [taskId],
     });
   }
 
-  return [...merged.values()].sort(descendingTaskOrder);
+  return collapseRetrySlots([...merged.values()]).sort(descendingTaskOrder);
 }

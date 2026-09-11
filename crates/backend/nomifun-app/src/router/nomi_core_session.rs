@@ -16,7 +16,7 @@ use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::{Next, from_fn, from_fn_with_state};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Extension, Json, Router};
 use dashmap::DashMap;
 use futures_util::FutureExt;
@@ -47,8 +47,9 @@ use nomifun_api_types::{
     RemoteCancelRequestDto, RemoteMutationResponseDto, RemoteObserveRequestDto,
     RemoteObserveResponseDto, RemoteOpenRequestDto, RemoteOpenResponseDto,
     RemoteOpenStateViewDto, RemoteTurnRequestDto,
-    AgentResolvedSnapshot, SessionCursorDto,
+    AgentChatModelSelectionDto, AgentResolvedSnapshot, SessionCursorDto,
     SendMessageRequest, UpdateConversationRequest,
+    SwitchAgentSessionPresetRequestDto, SwitchAgentSessionPresetResponseDto,
 };
 use nomifun_common::{AppError, MessagePosition, MessageType};
 use nomifun_conversation::runtime_state::RuntimeBuildLease;
@@ -153,6 +154,18 @@ impl NomiCoreSessionOwner {
         session_id: &str,
     ) -> Result<ConversationResponse, AppError> {
         self.service.get(owner_id, session_id).await
+    }
+
+    pub(crate) async fn replace_agent_preset_snapshot(
+        &self,
+        owner_id: &str,
+        session_id: &str,
+        snapshot: AgentResolvedSnapshot,
+        runtime_extra: Value,
+    ) -> Result<ConversationResponse, AppError> {
+        self.service
+            .replace_agent_preset_snapshot(owner_id, session_id, snapshot, runtime_extra)
+            .await
     }
 
     /// Deliver an owner-visible turn through the one public at-most-once Nomi
@@ -2412,6 +2425,10 @@ fn nomi_core_session_routes(state: NomiCoreAgentApiState) -> Router {
             get(get_nomi_core_agent_session_capabilities),
         )
         .route(
+            "/api/agent-sessions/{agent_session_id}/preset",
+            put(switch_nomi_core_agent_session_preset),
+        )
+        .route(
             "/api/agent-sessions/{agent_session_id}/turns",
             post(start_nomi_core_agent_session_turn),
         )
@@ -4241,10 +4258,23 @@ async fn create_nomi_core_agent_session(
         .control_plane
         .resolve_agent_session_binding_with_model(&owner.0, &request.preset_id, request.model.as_ref())
         .await?;
+    let agent_name = state
+        .control_plane
+        .editor(
+            &owner.0,
+            &binding.preset_revision_ref.preset_id,
+            Some(binding.preset_revision_ref.revision),
+        )
+        .await?
+        .preset
+        .display_name;
     let projection =
         resolve_saved_binding_projection(&state, &owner, &binding, request.title.as_deref())
             .await?;
     let mut create_request = projection.projection.request;
+    if let Some(object) = create_request.extra.as_object_mut() {
+        object.insert("agent_name".to_owned(), Value::String(agent_name));
+    }
     attach_session_metadata(&mut create_request.extra, &projection.binding, None)?;
     let creation_key = request_idempotency_key(
         &headers,
@@ -4338,6 +4368,76 @@ async fn get_nomi_core_agent_session_capabilities(
             state_source: "nomi_core_saved_binding",
         },
     )))
+}
+
+async fn switch_nomi_core_agent_session_preset(
+    State(state): State<NomiCoreAgentApiState>,
+    Extension(owner): Extension<AuthenticatedOwner>,
+    Path(agent_session_id): Path<String>,
+    Json(request): Json<SwitchAgentSessionPresetRequestDto>,
+) -> Result<Json<ApiResponse<SwitchAgentSessionPresetResponseDto>>, NomiCoreApiError> {
+    let session_id = parse_agent_session_id(&agent_session_id)?;
+    let response = load_owned_nomi_core_session(&state, &owner, &session_id).await?;
+    let metadata = session_metadata(&response, &owner)?;
+    if metadata.remote.is_some() {
+        return Err(NomiCoreApiError::new(
+            StatusCode::CONFLICT,
+            "NOMI_CORE_REMOTE_PRESET_SWITCH_UNSUPPORTED",
+            "Remote AgentSessions cannot change AgentPreset through the local conversation UI",
+        ));
+    }
+    let current = response.model.as_ref().ok_or_else(|| {
+        NomiCoreApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "NOMI_CORE_SESSION_MODEL_MISSING",
+            "the AgentSession has no current model",
+        )
+    })?;
+    let selected_model = AgentChatModelSelectionDto {
+        provider_id: current.provider_id.clone(),
+        model: current
+            .use_model
+            .as_deref()
+            .unwrap_or(current.model.as_str())
+            .to_owned(),
+    };
+    let target_editor = state
+        .control_plane
+        .editor(&owner.0, &request.preset_id, None)
+        .await?;
+    let target_name = target_editor.preset.display_name;
+    let binding = state
+        .control_plane
+        .resolve_agent_session_binding_with_model(
+            &owner.0,
+            &request.preset_id,
+            Some(&selected_model),
+        )
+        .await?;
+    let projection =
+        resolve_saved_binding_projection(&state, &owner, &binding, Some(&target_name)).await?;
+    let response_binding = agent_binding_dto(&projection.binding)?;
+    let mut runtime_extra = projection.projection.request.extra;
+    if let Some(object) = runtime_extra.as_object_mut() {
+        object.insert("agent_name".to_owned(), Value::String(target_name));
+    }
+    attach_session_metadata(&mut runtime_extra, &projection.binding, None)?;
+    let updated = state
+        .session_owner
+        .replace_agent_preset_snapshot(
+            owner.as_ref(),
+            session_id.as_ref(),
+            projection.projection.snapshot,
+            runtime_extra,
+        )
+        .await?;
+    let cursor = durable_message_cursor(&state.session_owner, &session_id).await?;
+    Ok(Json(ApiResponse::ok(SwitchAgentSessionPresetResponseDto {
+        agent_session_id: session_id.as_ref().to_owned(),
+        agent_binding: response_binding,
+        state: projected_session_status(&updated),
+        cursor,
+    })))
 }
 
 async fn start_nomi_core_agent_session_turn(

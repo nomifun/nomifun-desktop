@@ -44,8 +44,8 @@ const topLevelKeys = (objectBody: string): string[] => {
   return keys;
 };
 
-describe('Guid default Nomi and AgentPreset launch behavior', () => {
-  test('uses the exact default-or-preset selection contract', () => {
+describe('Guid workbench Agent launch behavior', () => {
+  test('uses only official-template or personal-preset selection identities', () => {
     const configKeys = readSource(
       new URL('../../../common/config/configKeys.ts', import.meta.url)
     );
@@ -53,8 +53,14 @@ describe('Guid default Nomi and AgentPreset launch behavior', () => {
     const selection = readSource(
       new URL('./hooks/useGuidAgentSelection.ts', import.meta.url)
     );
+    const selectionUtils = readSource(
+      new URL('./hooks/agentSelectionUtils.ts', import.meta.url)
+    );
+    const workbenchController = readSource(
+      new URL('../agentSettings/useAgentSettingsController.ts', import.meta.url)
+    );
 
-    expect(configKeys.includes("| { kind: 'default' }")).toBe(true);
+    expect(configKeys.includes("| { kind: 'default' }")).toBe(false);
     expect(
       configKeys.includes("| { kind: 'preset'; presetId: AgentPresetId };")
     ).toBe(true);
@@ -69,65 +75,57 @@ describe('Guid default Nomi and AgentPreset launch behavior', () => {
       )
     ).toBe(true);
     expect(
-      selection.includes(
-        "const DEFAULT_AGENT_SELECTION: GuidAgentSelection = { kind: 'default' };"
+      selectionUtils.includes(
+        "templateKey: 'chat.minimal',"
       )
     ).toBe(true);
+    expect(selectionUtils.includes("kind: 'template',")).toBe(true);
     expect(selection.includes('presets[0]')).toBe(false);
+    expect(
+      workbenchController.includes(
+        'const firstTemplate = nextLibrary.official_templates[0];'
+      )
+    ).toBe(true);
   });
 
-  test('keeps the model selector only for plain Nomi', () => {
+  test('keeps session model selection visible and independent from Agent identity', () => {
     const page = readSource(new URL('./GuidPage.tsx', import.meta.url));
     const actionRow = readSource(
       new URL('./components/GuidActionRow.tsx', import.meta.url)
     );
 
-    expect(
-      page.includes(
-        "const isDefaultAgent = agentSelection.selection.kind === 'default';"
-      )
-    ).toBe(true);
-    expect(page.includes('const modelSelectorNode = isDefaultAgent ? (')).toBe(true);
+    expect(page.includes('isDefaultAgent')).toBe(false);
+    expect(page.includes('const modelSelectorNode = (')).toBe(true);
     expect(page.includes('<GuidModelSelector')).toBe(true);
     expect(page.includes('modelSelectorNode={modelSelectorNode}')).toBe(true);
-    expect(actionRow.includes('modelSelectorNode?: React.ReactNode;')).toBe(
-      true
-    );
-    expect(actionRow.includes('{modelSelectorNode && (')).toBe(true);
+    expect(actionRow.includes('modelSelectorNode: React.ReactNode;')).toBe(true);
   });
 
-  test('default mode creates a Nomi conversation with the selected model and no preset dependency', () => {
+  test('does not retain a hidden plain-Nomi launch branch', () => {
     const send = readSource(new URL('./hooks/useGuidSend.ts', import.meta.url));
-    const defaultBranchStart = send.indexOf(
-      "if (selection.kind === 'default')"
-    );
-    const presetBranchStart = send.indexOf('    } else {', defaultBranchStart);
-    expect(defaultBranchStart).toBeGreaterThan(-1);
-    expect(presetBranchStart).toBeGreaterThan(defaultBranchStart);
-    const defaultBranch = send.slice(defaultBranchStart, presetBranchStart);
-    const payload = extractObjectArgument(
-      defaultBranch,
-      'ipcBridge.conversation.create.invoke'
+    const officialLaunch = readSource(
+      new URL('./hooks/officialAgentLaunch.ts', import.meta.url)
     );
 
-    expect(defaultBranch.includes('selectedPreset')).toBe(false);
-    expect(defaultBranch.includes('agentPlatform.sessions.create')).toBe(false);
-    expect(payload.includes("type: 'nomi'")).toBe(true);
-    expect(payload.includes('model: current_model')).toBe(true);
-    expect(payload.includes('preset_id')).toBe(false);
-    expect(
-      send.includes("const hasLaunchTarget = selection.kind === 'default'")
-    ).toBe(true);
+    expect(send.includes("selection.kind === 'default'")).toBe(false);
+    expect(send.includes('ipcBridge.conversation.create.invoke')).toBe(false);
+    expect(send.includes('current_model')).toBe(true);
+    expect(send.includes('provider_id: current_model.id')).toBe(true);
+    expect(send.includes('model: current_model.use_model')).toBe(true);
+    expect(officialLaunch.includes('TProviderWithModel')).toBe(false);
+    expect(officialLaunch.includes('model: { provider_id:')).toBe(false);
   });
 
-  test('Agent launch submits only the preset identity without client-owned route or binding facts', () => {
+  test('Agent launch submits only Agent identity, title, and the typed session model choice', () => {
     const send = readSource(new URL('./hooks/useGuidSend.ts', import.meta.url));
     const payload = extractObjectArgument(
       send,
       'ipcBridge.agentPlatform.sessions.create.invoke'
     );
 
-    expect(topLevelKeys(payload)).toEqual(['preset_id', 'title']);
+    expect(topLevelKeys(payload)).toEqual(['preset_id', 'title', 'model']);
+    expect(payload.includes('provider_id: current_model.id')).toBe(true);
+    expect(payload.includes('model: current_model.use_model')).toBe(true);
     expect(payload.includes('preset_id: launchPreset.preset_id')).toBe(true);
     expect(payload.includes('title: entryPlan.conversationName')).toBe(true);
 
@@ -170,6 +168,6 @@ describe('Guid default Nomi and AgentPreset launch behavior', () => {
         "setSelection({ kind: 'preset', presetId: preset.preset_id });"
       )
     ).toBe(true);
-    expect(selection.includes('selectDefaultAgent();')).toBe(true);
+    expect(selection.includes('selectDefaultTemplate();')).toBe(true);
   });
 });

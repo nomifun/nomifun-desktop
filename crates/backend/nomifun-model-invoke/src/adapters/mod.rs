@@ -11,6 +11,9 @@
 //!   and sync JSON→binary `/audio/speech` (`"openai.audio_speech"`).
 //!
 //! Platform-specific protocols:
+//! - [`agnes`] — Agnes Image 2.1 Flash JSON generation/editing
+//!   (`"agnes.images"`) and Agnes Video v2.0 async jobs
+//!   (`"agnes.video_jobs"`).
 //! - [`gemini`] — Google `:generateContent` images
 //!   (`"gemini.generate_content"`). Chat protocols execute through the agent
 //!   stack and are intentionally absent from this request-adapter registry.
@@ -219,6 +222,7 @@ pub(crate) fn scalar_request_fields(
     Ok(fields)
 }
 
+pub mod agnes;
 pub mod ark;
 pub mod dashscope;
 pub mod deepgram;
@@ -243,6 +247,8 @@ pub mod zhipu;
 /// invoke service layer.
 pub fn default_adapters() -> Vec<Arc<dyn ProtocolAdapter>> {
     vec![
+        Arc::new(agnes::AgnesImagesAdapter),
+        Arc::new(agnes::AgnesVideoJobsAdapter),
         Arc::new(openai_images::OpenAiImagesAdapter),
         Arc::new(openai_videos::OpenAiVideosAdapter),
         Arc::new(openai_embeddings::OpenAiEmbeddingsAdapter),
@@ -435,6 +441,9 @@ mod tests {
     fn default_adapters_register_the_openai_family() {
         let registry = AdapterRegistry::new(default_adapters());
         for (protocol, task) in [
+            ("agnes.images", ModelTask::ImageGeneration),
+            ("agnes.images", ModelTask::ImageEdit),
+            ("agnes.video_jobs", ModelTask::VideoGeneration),
             ("openai.images", ModelTask::ImageGeneration),
             ("openai.images", ModelTask::ImageEdit),
             ("openai.videos", ModelTask::VideoGeneration),
@@ -474,8 +483,10 @@ mod tests {
             let adapter = registry.get(protocol, task).expect("registered + supported");
             assert_eq!(adapter.id(), protocol);
         }
-        assert_eq!(default_adapters().len(), 29);
+        assert_eq!(default_adapters().len(), 31);
         // Tasks outside an adapter's declared support are refused.
+        assert!(registry.get("agnes.images", ModelTask::Chat).is_err());
+        assert!(registry.get("agnes.video_jobs", ModelTask::ImageGeneration).is_err());
         assert!(registry.get("openai.images", ModelTask::Chat).is_err());
         assert!(registry.get("openai.videos", ModelTask::ImageGeneration).is_err());
         assert!(registry.get("openai.embeddings", ModelTask::Chat).is_err());

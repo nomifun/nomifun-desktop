@@ -91,29 +91,23 @@ const GuidPage: React.FC = () => {
   );
 
   const isAutoWorkMode = isAutoWorkEntry(advancedConfig.autoWork);
-  const isDefaultAgent = agentSelection.selection.kind === 'default';
-  const presetResourceResolutionReady =
-    isDefaultAgent ||
-    (agentSelection.selection.kind === 'template'
-      ? Boolean(agentSelection.selectedTemplate)
-      : !presetCapabilities.isLoading && !presetCapabilities.error);
+  const presetResourceResolutionReady = agentSelection.selection.kind === 'template'
+    ? Boolean(agentSelection.selectedTemplate)
+    : !presetCapabilities.isLoading && !presetCapabilities.error;
   const presetResourceKinds = agentSelection.selectedTemplate
     ? new Set(agentSelection.selectedTemplate.seed.required_resource_kinds)
     : presetCapabilities.requiredResourceKinds;
   const knowledgeEnabled =
-    isDefaultAgent ||
-    (presetResourceResolutionReady && presetResourceKinds.has('knowledge_base'));
+    presetResourceResolutionReady && presetResourceKinds.has('knowledge_base');
   const workspaceEnabled =
-    isDefaultAgent ||
-    (presetResourceResolutionReady && presetResourceKinds.has('workspace'));
-  const hasLaunchTarget = isDefaultAgent
-    ? Boolean(modelSelection.current_model)
-    : agentSelection.selection.kind === 'template'
-      ? Boolean(agentSelection.selectedTemplate)
-      : Boolean(
+    presetResourceResolutionReady && presetResourceKinds.has('workspace');
+  const hasAgentLaunchTarget = agentSelection.selection.kind === 'template'
+    ? Boolean(agentSelection.selectedTemplate)
+    : Boolean(
         agentSelection.selectedPreset?.current_stable_revision &&
           presetResourceResolutionReady
       );
+  const hasLaunchTarget = hasAgentLaunchTarget && Boolean(modelSelection.current_model);
 
   const mention = useGuidMention({
     presets: agentSelection.presets,
@@ -121,9 +115,6 @@ const GuidPage: React.FC = () => {
     selection: agentSelection.selection,
     setSelection: agentSelection.setSelection,
     selectedPreset: agentSelection.selectedPreset,
-    defaultAgentLabel: t('guid.defaultAgent', {
-      defaultValue: 'Nomi Agent',
-    }),
     setInput: guidInput.setInput,
   });
 
@@ -401,14 +392,14 @@ const GuidPage: React.FC = () => {
     </>
   );
 
-  const modelSelectorNode = isDefaultAgent ? (
+  const modelSelectorNode = (
     <GuidModelSelector
       isProviderModelMode
       modelList={modelSelection.modelList}
       current_model={modelSelection.current_model}
       setCurrentModel={modelSelection.setCurrentModel}
     />
-  ) : null;
+  );
 
   const autoWorkButtonDisabled =
     !hasLaunchTarget ||
@@ -454,7 +445,7 @@ const GuidPage: React.FC = () => {
               </p>
             </div>
 
-            {!isDefaultAgent && presetCapabilities.error && (
+            {agentSelection.selection.kind === 'preset' && presetCapabilities.error && (
               <Alert
                 type='error'
                 showIcon
@@ -506,9 +497,6 @@ const GuidPage: React.FC = () => {
                   isLoading={agentSelection.isLoading}
                   loadError={agentSelection.loadError}
                   onRetry={agentSelection.refreshPresets}
-                  onSelectDefault={() =>
-                    handleSelectAgent({ kind: 'default' })
-                  }
                   onSelectPreset={(presetId) =>
                     handleSelectAgent({ kind: 'preset', presetId })
                   }

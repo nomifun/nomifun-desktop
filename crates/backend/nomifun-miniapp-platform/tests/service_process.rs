@@ -327,6 +327,50 @@ async fn real_node_service_invokes_cancels_and_rejects_stale_generation() {
     process.stop().await;
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn node_path_alias_is_resolved_once_and_still_requires_the_selected_digest() {
+    let Some(node) = node_executable() else {
+        eprintln!("Node is unavailable; skipping Unix Service path-alias regression");
+        return;
+    };
+    let directory = TempDir::new().unwrap();
+    let alias = directory.path().join("node");
+    std::os::unix::fs::symlink(&node, &alias).unwrap();
+    let module = write_module(&directory, "main.mjs", SERVICE_MODULE);
+    let factory = factory(&alias, &module, Duration::from_secs(2));
+    let spec = service_spec(
+        &node,
+        SERVICE_MODULE.as_bytes(),
+        "miniapp-node-alias",
+        1,
+        MiniAppServiceLifecycle::OnDemand,
+    );
+
+    // A package manager can retarget the PATH alias after admission. The
+    // factory must continue using the originally resolved executable.
+    std::fs::remove_file(&alias).unwrap();
+    std::os::unix::fs::symlink(directory.path().join("missing-node"), &alias).unwrap();
+    let process = factory.start(MiniAppServiceLaunch {
+        spec: spec.clone(),
+        host_generation: 1,
+    }).await.expect("launch pinned executable, not retargeted PATH alias");
+    let result = invoke(
+        &process, &spec, 1, "alias-echo", "echo", json!({"unix": true}),
+        MiniAppCallCancellation::default(),
+    ).await.unwrap();
+    assert_eq!(result.0["payload"], json!({"unix": true}));
+    process.stop().await;
+
+    let mut wrong = spec;
+    wrong.runtime.runtime_executable_digest = digest_bytes(b"different executable");
+    let error = factory.start(MiniAppServiceLaunch {
+        spec: wrong,
+        host_generation: 2,
+    }).await.err().expect("wrong selected digest must be rejected");
+    assert!(error.to_string().contains("digest mismatch"), "{error}");
+}
+
 #[cfg(windows)]
 #[tokio::test]
 async fn real_node_service_starts_from_an_extended_length_module_path() {

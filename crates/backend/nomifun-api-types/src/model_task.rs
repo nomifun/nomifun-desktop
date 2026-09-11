@@ -131,6 +131,13 @@ fn verified_provider_profile(
     let base = base_model_name(model);
 
     match platform {
+        "agnes" => match base.as_str() {
+            "agnes-image-2.1-flash" => {
+                Some((vec![ImageGeneration, ImageEdit], vec![]))
+            }
+            "agnes-video-v2.0" => Some((vec![VideoGeneration], vec![])),
+            _ => None,
+        },
         "ark" | "volcengine" if is_unified_ark_seedream_model(model) => {
             Some((vec![ImageGeneration, ImageEdit], vec![]))
         }
@@ -400,6 +407,18 @@ mod tests {
         assert_eq!(
             tasks_of("openai", "gpt-image-2"),
             vec![ModelTask::ImageGeneration, ModelTask::ImageEdit]
+        );
+    }
+
+    #[test]
+    fn agnes_media_models_use_their_native_tasks() {
+        assert_eq!(
+            tasks_of("agnes", "agnes-image-2.1-flash"),
+            vec![ModelTask::ImageGeneration, ModelTask::ImageEdit]
+        );
+        assert_eq!(
+            tasks_of("agnes", "agnes-video-v2.0"),
+            vec![ModelTask::VideoGeneration]
         );
     }
 

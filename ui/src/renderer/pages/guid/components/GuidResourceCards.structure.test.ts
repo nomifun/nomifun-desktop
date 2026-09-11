@@ -10,7 +10,7 @@ import { describe, expect, test } from 'bun:test';
 const readSource = (url: URL) => readFileSync(url, 'utf8');
 
 describe('Guid resource cards placement', () => {
-  test('renders resource cards in the centered stage and companion poster in the scroll discovery area', () => {
+  test('renders resource cards in the stable primary stage and companion poster in the scroll discovery area', () => {
     const source = readSource(new URL('../GuidPage.tsx', import.meta.url));
 
     const inputIndex = source.indexOf('<GuidInputCard');
@@ -25,6 +25,19 @@ describe('Guid resource cards placement', () => {
     expect(discoveryAreaIndex).toBeGreaterThan(resourceIndex);
     expect(companionPreviewIndex).toBeGreaterThan(discoveryAreaIndex);
     expect(source.includes('onFillPrompt')).toBe(false);
+  });
+
+  test('anchors the primary stage so Agent-specific resource rows cannot shift the whole hero', () => {
+    const styles = readSource(new URL('../index.module.css', import.meta.url));
+    const primaryStage = styles.slice(
+      styles.indexOf('.guidPrimaryStage {'),
+      styles.indexOf('.guidDiscoveryArea {'),
+    );
+
+    expect(primaryStage.includes('justify-content: flex-start;')).toBe(true);
+    expect(primaryStage.includes('padding: clamp(88px, 18vh, 180px) 10px 10px;')).toBe(true);
+    expect(primaryStage.includes('margin-top: 0;')).toBe(true);
+    expect(primaryStage.includes('margin-top: -5vh;')).toBe(false);
   });
 
   test('contains docs, promo video, and contact feedback cards without recent prompt data access', () => {

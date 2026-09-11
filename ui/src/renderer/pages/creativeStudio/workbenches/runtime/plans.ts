@@ -24,9 +24,10 @@ import type {
   ImageWorkbenchQuality,
 } from "../image";
 import { imageWorkbenchSizePolicyForModel } from "../image";
+import { parametersForStandaloneRetry } from "../retrySlot";
+import { validateWorkbenchReferences } from "./assets";
 import { resolveExactWorkbenchModel } from "./catalog";
 import type { CreativeWorkbenchModelSelection } from "./catalog";
-import { validateWorkbenchReferences } from "./assets";
 import type {
   CreativeWorkbenchReferences,
   CreativeWorkbenchTaskOperation,
@@ -148,6 +149,9 @@ export interface PrepareVideoWorkbenchRunInput extends WorkbenchPlanBase {
   operation: VideoWorkbenchOperation;
   prompt: string;
   seconds: number;
+  /** Product-level metadata retained for history; adapters receive only size. */
+  resolution?: string;
+  aspectRatio?: string;
   width: number | null;
   height: number | null;
   taskCount: number;
@@ -382,7 +386,7 @@ export function prepareStandaloneHistoryRetry(
       model: task.model,
       task: task.task,
       capability: task.capability,
-      parameters: structuredClone(task.parameters),
+      parameters: parametersForStandaloneRetry(task),
       inputs: task.inputs.map((binding) => ({ ...binding })),
     },
   });
@@ -563,6 +567,12 @@ export function prepareVideoWorkbenchRun(
     {
       prompt: requirePrompt(input.prompt, "prompt"),
       seconds: requireInteger(input.seconds, "seconds", 1, 3_600),
+      ...(input.resolution
+        ? { resolution: requirePrompt(input.resolution, "resolution") }
+        : {}),
+      ...(input.aspectRatio
+        ? { aspect: requirePrompt(input.aspectRatio, "aspectRatio") }
+        : {}),
       ...dimensions(input.width, input.height, 8_192),
     },
     input.extraParameters,

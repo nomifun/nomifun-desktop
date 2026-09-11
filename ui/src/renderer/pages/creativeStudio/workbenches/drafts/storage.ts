@@ -222,7 +222,8 @@ const parseVideoDraft = (value: unknown): VideoWorkbenchSessionDraft | null => {
     (parameters.resolution !== '720p' && parameters.resolution !== '1080p') ||
     (parameters.aspect !== '16:9' &&
       parameters.aspect !== '9:16' &&
-      parameters.aspect !== '1:1') ||
+      parameters.aspect !== '1:1' &&
+      parameters.aspect !== 'auto') ||
     (parameters.duration !== '5' && parameters.duration !== '10') ||
     parameters.taskCount !== 1
   ) {

@@ -573,8 +573,25 @@ impl NodeMiniAppServiceProcessFactory {
         node_executable: impl Into<PathBuf>,
         resolver: Arc<dyn MiniAppServiceModuleResolver>,
     ) -> Result<Self, MiniAppPlatformError> {
+        let node_executable = node_executable.into();
+        if !node_executable.is_absolute() {
+            return Err(MiniAppPlatformError::InvalidState(
+                "MiniApp Service Node executable must be absolute".into(),
+            ));
+        }
+        // PATH entries on Unix commonly point through a symlink (for example
+        // /usr/local/bin/node). Resolve that entry once, as the Node probe and
+        // Build Host do, then retain the physical executable for this factory.
+        // Retargeting the alias must not change an admitted Service runtime;
+        // start still checks the regular file and the exact selected digest.
+        let node_executable = std::fs::canonicalize(&node_executable).map_err(|error| {
+            MiniAppPlatformError::Runtime(format!(
+                "cannot resolve MiniApp Service Node executable {}: {error}",
+                node_executable.display()
+            ))
+        })?;
         let factory = Self {
-            node_executable: node_executable.into(),
+            node_executable,
             resolver,
             limits: MiniAppServiceProcessLimits::default(),
             storage: None,
@@ -624,6 +641,7 @@ impl NodeMiniAppServiceProcessFactory {
         &self,
         spec: &ResolvedMiniAppServiceSpec,
     ) -> Result<(), MiniAppPlatformError> {
+        self.validate_node_executable()?;
         let bytes = tokio::fs::read(&self.node_executable)
             .await
             .map_err(|error| {

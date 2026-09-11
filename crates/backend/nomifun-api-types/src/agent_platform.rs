@@ -487,8 +487,8 @@ pub struct CreateAgentPresetRequest {
 pub struct CreateAgentPresetFromTemplateRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<AgentChatModelSelectionDto>,
-    /// Reuse an owner-owned stable configuration only while its document still
-    /// exactly matches this template and the resolved default model.
+    /// Prepare/reuse an internal session-only configuration for direct official
+    /// Agent launch. False explicitly creates a personal Agent in the library.
     #[serde(default)]
     pub reuse_existing: bool,
     pub display_name: String,
@@ -875,6 +875,22 @@ pub struct CreateAgentSessionRequestDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateAgentSessionResponseDto {
+    pub agent_session_id: String,
+    pub agent_binding: AgentBindingValueDto,
+    pub state: String,
+    pub cursor: SessionCursorDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SwitchAgentSessionPresetRequestDto {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_preset_id")]
+    pub preset_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SwitchAgentSessionPresetResponseDto {
     pub agent_session_id: String,
     pub agent_binding: AgentBindingValueDto,
     pub state: String,

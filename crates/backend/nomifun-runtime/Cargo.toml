@@ -39,3 +39,6 @@ hex.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 wait-timeout = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
