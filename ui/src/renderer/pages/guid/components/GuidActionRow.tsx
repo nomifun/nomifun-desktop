@@ -20,6 +20,9 @@ type GuidActionRowProps = {
   files: string[];
   onFilesUploaded: (paths: string[]) => void;
 
+  // Agent identity and session model are independent launch choices.
+  modelSelectorNode: React.ReactNode;
+
   // Send button
   loading: boolean;
   isButtonDisabled: boolean;
@@ -34,6 +37,7 @@ type GuidActionRowProps = {
 const GuidActionRow: React.FC<GuidActionRowProps> = ({
   files,
   onFilesUploaded,
+  modelSelectorNode,
   loading,
   isButtonDisabled,
   speechInputNode,
@@ -155,6 +159,12 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
         </div>
       </div>
       <div className={`${styles.actionSubmit} ${!isMobile ? styles.actionSubmitResponsive : ''}`}>
+        <div
+          className={`${styles.actionConfigGroup} ${!isMobile ? styles.actionConfigGroupResponsive : ''}`}
+          data-mobile={isMobile ? 'true' : undefined}
+        >
+          {modelSelectorNode}
+        </div>
         {speechInputNode}
         <Tooltip
           content={t('requirements.autowork.startSession')}

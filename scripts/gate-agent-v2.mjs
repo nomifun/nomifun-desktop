@@ -5772,12 +5772,14 @@ function ap7AgentPresetLaunchContract() {
     'Guid must default to official chat.minimal and reject the synthetic default/Nomi Agent identity'
   );
   require(
-    !source.page.includes('<GuidModelSelector') &&
+    source.page.includes('const modelSelectorNode = (') &&
+      source.page.includes('<GuidModelSelector') &&
+      source.page.includes('modelSelectorNode={modelSelectorNode}') &&
       !source.page.includes('isDefaultAgent') &&
-      !source.actionRow.includes('modelSelectorNode') &&
+      source.actionRow.includes('modelSelectorNode: React.ReactNode') &&
       !source.officialLaunch.includes('TProviderWithModel') &&
       !source.officialLaunch.includes('provider_id: model.id'),
-    'Guid Agent launch must use the control-plane Chat route instead of a separate engine-level model selector'
+    'Guid must keep session model selection visible and independent from the Workbench Agent identity'
   );
   require(
     source.conversation.includes(
@@ -5819,7 +5821,9 @@ function ap7AgentPresetLaunchContract() {
   require(
     !source.send.includes("selection.kind === 'default'") &&
       !source.send.includes('ipcBridge.conversation.create.invoke({') &&
-      !source.send.includes('current_model') &&
+      source.send.includes('current_model') &&
+      source.send.includes('provider_id: current_model.id') &&
+      source.send.includes('model: current_model.use_model') &&
       source.send.includes('prepareOfficialAgent(') &&
       source.send.includes('agentPlatform.sessions.create.invoke({'),
     'Guid must have one AgentPreset Session launch path with no hidden plain-Nomi branch'
@@ -5833,18 +5837,23 @@ function ap7AgentPresetLaunchContract() {
     (requestPayload.includes('preset_id: selectedPreset.preset_id') ||
       requestPayload.includes('preset_id: launchPreset.preset_id')) &&
       requestPayload.includes('title: entryPlan.conversationName') &&
+      requestPayload.includes('provider_id: current_model.id') &&
+      requestPayload.includes('model: current_model.use_model') &&
       !requestPayload.includes('agent_binding') &&
-      !requestPayload.includes('model') &&
+      !requestPayload.includes('protocol') &&
+      !requestPayload.includes('credential') &&
       !requestPayload.includes('snapshot'),
-    'Guid Session create must submit only preset_id and title'
+    'Guid Session create must submit only preset_id, title, and the typed provider/model selection'
   );
   require(
-    tsRequest.includes('preset_id: AgentPresetId') &&
+    tsRequest.includes('model?: { provider_id: string; model: string }') &&
+      tsRequest.includes('preset_id: AgentPresetId') &&
       !tsRequest.includes('agent_binding'),
     'the TypeScript Session request must be preset-native'
   );
   require(
-    rustRequest.includes('pub preset_id: String') &&
+    rustRequest.includes('pub model: Option<AgentChatModelSelectionDto>') &&
+      rustRequest.includes('pub preset_id: String') &&
       !rustRequest.includes('agent_binding'),
     'the Rust Session request DTO must reject client bindings'
   );

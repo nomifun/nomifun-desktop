@@ -6,6 +6,7 @@
  */
 
 import { ipcBridge } from '@/common';
+import type { TProviderWithModel } from '@/common/config/storage';
 import {
   conversationTarget,
   parseConversationId,
@@ -43,6 +44,7 @@ export type GuidSendDeps = {
   selection: GuidAgentSelection;
   selectedPreset: ExecutableAgentPreset | undefined;
   selectedTemplate?: OfficialPresetTemplate;
+  current_model: TProviderWithModel | undefined;
   applyAdvancedConfig?: (conversationId: ConversationId) => Promise<void>;
   autoWork: AutoWorkDraftValue;
   /** Whether the selected target may receive the staged workspace resource. */
@@ -79,6 +81,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     selection,
     selectedPreset,
     selectedTemplate,
+    current_model,
     applyAdvancedConfig,
     autoWork,
     workspaceEnabled,
@@ -97,6 +100,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
 
   const handleSend = useCallback(async () => {
     const entryPlan = planGuidEntry(input, autoWork);
+    if (!current_model) throw new Error('MODEL_REQUIRED');
     let conversationId: ConversationId;
     let conversation;
 
@@ -123,6 +127,10 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     const session = await ipcBridge.agentPlatform.sessions.create.invoke({
       preset_id: launchPreset.preset_id,
       title: entryPlan.conversationName,
+      model: {
+        provider_id: current_model.id,
+        model: current_model.use_model,
+      },
     });
     conversationId = parseConversationId(session.agent_session_id);
     conversation = await ipcBridge.conversation.get.invoke({
@@ -175,6 +183,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
   }, [
     applyAdvancedConfig,
     autoWork,
+    current_model,
     files,
     input,
     navigate,
@@ -188,6 +197,10 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
   const sendMessageHandler = useCallback(() => {
     if (loading || sendingRef.current) return;
     if (!resourceResolutionReady) return;
+    if (!current_model) {
+      Message.warning(t('conversation.noModelConfigured'));
+      return;
+    }
     if (selection.kind === 'template' && selectedTemplate?.template_key !== selection.templateKey) return;
     if (
       selection.kind === 'preset' &&
@@ -237,6 +250,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     handleSend,
     input,
     loading,
+    current_model,
     resourceResolutionReady,
     selection,
     selectedPreset,
@@ -252,7 +266,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     t,
   ]);
 
-  const hasLaunchTarget = selection.kind === 'template'
+  const hasAgentLaunchTarget = selection.kind === 'template'
     ? Boolean(
         selectedTemplate?.template_key === selection.templateKey &&
           resourceResolutionReady
@@ -262,6 +276,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
           selectedPreset.preset_id === selection.presetId &&
           resourceResolutionReady
       );
+  const hasLaunchTarget = hasAgentLaunchTarget && Boolean(current_model);
   const isButtonDisabled = loading || !input.trim() || !hasLaunchTarget;
 
   return {
