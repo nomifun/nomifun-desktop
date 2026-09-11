@@ -2350,6 +2350,7 @@ fn safe_devtools_timeout_error() -> BrowserError {
 /// An allowlist is intentional here: Chromium has many aliases and related
 /// switches that can change profile ownership, CDP exposure, extensions,
 /// sandboxing, or other security-sensitive behavior.
+#[cfg(any(debug_assertions, test))]
 fn filtered_extra_chrome_args(extra: &str) -> Vec<String> {
     #[cfg(debug_assertions)]
     {
@@ -2475,7 +2476,10 @@ pub(crate) async fn launch_chrome_with_cleanup_profile(
     )
     .map_err(|_| safe_profile_prepare_error())?;
 
+    #[cfg(debug_assertions)]
     let mut args = build_chrome_args(&config.user_data_dir, force_headless);
+    #[cfg(not(debug_assertions))]
+    let args = build_chrome_args(&config.user_data_dir, force_headless);
 
     // The environment escape hatch is compiled out of release builds.
     // Debug builds still use the exact allowlist above; arbitrary Chromium

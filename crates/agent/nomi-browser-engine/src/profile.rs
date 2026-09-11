@@ -6073,8 +6073,10 @@ mod tests {
             identity(207, "chrome-gone"),
         );
         let mut deep = profile.clone();
-        for level in 0..=MAX_EPHEMERAL_DELETE_DEPTH {
-            deep = deep.join(format!("d{level}"));
+        for _ in 0..=MAX_EPHEMERAL_DELETE_DEPTH {
+            // Keep the path below macOS PATH_MAX while still crossing the
+            // deletion walker's explicit depth ceiling.
+            deep = deep.join("d");
         }
         std::fs::create_dir_all(&deep).unwrap();
         std::fs::write(deep.join("entry.bin"), b"beyond-delete-depth").unwrap();
