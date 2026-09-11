@@ -2,6 +2,10 @@
 
 日期：2026-09-11。性质：**development preflight，不是 Linux Native RC PASS**。
 
+本文第 1–8 节保留首轮实施时的证据快照；该轮随后已提交为 `6ece83336`，合并远端后
+以 `9c6800f7f` 推送。用户明确收敛范围后的 **Linux 专项续查见第 9 节**，以该节更新的
+验证状态为准。第 5 节的通用业务/测试问题只作历史交接，不再由 Linux lane 调查或修改。
+
 ## 1. 结论与权威状态
 
 本轮在 WSL2 的真实 Linux 用户空间中完成了 Linux 编译、运行时/平台定向测试，
@@ -329,3 +333,116 @@ bun run build:linux x64 -- --bundles deb
   跑同一个 symlink regression；shell 的 macOS 原函数保持原样。
 - 集成前先比较远端最新提交与这几个共享文件，再正常 merge/cherry-pick；本轮没有为追赶
   远端而覆盖脏工作区，也没有擅自提交/推送。由集成 owner 统一冻结 source cohort。
+
+## 9. Linux 专项续查（2026-09-11）
+
+基线：`9c6800f7f` 加本次工作区改动。仅处理 Linux 专属执行路径、Linux 上才有意义的
+安装器/内核实现差异；不处理 Browser feature catalog、Agent 默认路由复用或其他通用
+业务问题。PHASE 与 RC 状态不变。没有操作远端 macOS 工作区、修改正式 latest.json、
+签名密钥、release record、发布资产或生产用户数据。
+
+### LNX-05：Linux deb/rpm 安装版会取得 AppImage 更新包
+
+证据：锁定的 `tauri-plugin-updater 2.10.1` 按当前包类型先查
+`linux-<arch>-<installer>`，再回退 `linux-<arch>`；deb/rpm 安装器分别验证输入包格式。
+原 `make-latest-json.mjs` 只生成通用架构键，并优先选择 AppImage，因此同时打三种包时，
+deb/rpm 安装版也会拿到 AppImage，不能由相应安装器安装。这不是 macOS/Windows 问题。
+
+修复只增加 Linux 分支：
+
+| 已安装包 / 更新键 | 生成的包格式 |
+| --- | --- |
+| `linux-<arch>-deb` | `.deb` |
+| `linux-<arch>-rpm` | `.rpm` |
+| `linux-<arch>-appimage` | `.AppImage` |
+| 兼容键 `linux-<arch>` | 仅 `.AppImage`，不再用 deb/rpm 冒充 |
+
+覆盖 x86_64/aarch64；只构建 deb/rpm 时，不新建不兼容的通用 AppImage 回退键。同版本
+追加会保留其他平台和已经生成的 Linux 格式条目。Linux 发版 preflight 现在要求三种
+安装器键齐全，并检查 URL 文件扩展名匹配，不能仅凭通用架构键宣布可发布。
+
+测试使用隔离目录内的假包/假签名，证明的是实际生成脚本与 updater 查找顺序匹配，
+**不是签名验真、实际系统安装或已发布更新通过**。真实 Linux 桌面仍需验证三种已安装
+包的下载、授权、安装、重启；CrabNebula 主端点实际响应也需独立验证，本修复仅证明
+GitHub 静态清单的生成结果，没有更改线上服务或 endpoint 顺序。
+
+### LNX-06：Linux release 构建入口接受改变产物目录的参数
+
+`desktop-build-linux.sh` 固定收集 `target/<selected-triple>/release`，却原样透传
+`--debug`、`--profile` 和第二个 `--target`。实际构建可以成功，但脚本清理和收集了
+错误目录，随后报没有 package；还会在这次 debug 构建前删除原 release 产物。
+
+现在在清理/构建前明确拒绝这些覆盖参数。架构用入口支持的 x64/arm64 选择；debug 或
+自定义 profile 直接使用 `bun x tauri build`，不进入 release-lock 入口。回归检查拒绝时
+旧 Linux bundle 保留、dist 未创建；原有正常 release、多架构空产物检查仍通过。
+
+### LNX-07：Linux 发版清理/上传选择会碰到其他平台的证据文件
+
+原 `release-linux.sh` 在共享 `dist/desktop` 中按所有 `*.sig` / `*.release-lock.json`
+进行清理和收集，会删除 macOS/Windows 签名/lock，或将其误纳入 Linux 上传列表。
+
+现在仅匹配 `.deb`、`.rpm`、`.AppImage` 及其精确后缀 `.sig` / `.release-lock.json`。
+Linux fixture 实际执行这两个 artifact 函数，证明 macOS/Windows 的文件被保留且不会
+进入 Linux asset 列表。测试不执行登录、构建、tag、commit、push 或 GitHub 上传。
+
+### LNX-08：Linux Browser 无条件关闭 Chromium sandbox
+
+原 `launch.rs` 仅根据 `target_os = "linux"` 就加入 `--no-sandbox`；真实 Linux 桌面、
+WSL、普通用户、具有 namespace/seccomp 能力的内核也全被降级，并非检测失败后的回退。
+已移除这一 Linux-only 参数，保留 Windows/macOS 原有参数、CDP pipe、profile 隔离、
+生命周期 owner、整树清理和 extra-args 安全限制。headless/headful 都默认保留 sandbox。
+
+从官方 CfT Linux x64 URL 下载仓库固定版本 `149.0.7827.155` 到独立 `/tmp` 目录，实际
+可执行路径为 `chrome-linux64/chrome`，zip 解出的可执行位有效；没有安装系统 Chrome。
+本轮用系统 unzip 创建测试夹具，不将其记为产品 managed installer 完整验收。
+
+新增显式 ignored 的 Linux 实机测试 `tests/linux_sandbox.rs`：通过产品 launcher 启动，
+通过真实 CDP pipe 创建 `chrome://sandbox` 页面并读取状态，然后释放连接/进程 guard，
+等待精确 runtime marker 清理。本机实际报告：Namespace sandbox、PID namespace、
+Network namespace、Seccomp-BPF / TSYNC 启用，`You are adequately sandboxed.`。
+
+**真实桌面待验：** Ubuntu AppArmor、禁用 unprivileged user namespace 的发行版、容器
+seccomp/root 运行等可能不满足 Chrome 的 sandbox 前提；本次不会静默重试 `--no-sandbox`，
+也没有修改内核参数/AppArmor 或安装 setuid helper。应在真实目标机确认受支持的系统浏览器
+或受管理员管理的 sandbox 配置；不能把本机 WSL 的成功当成所有发行版可用。
+
+### 续查验证与边界
+
+所有日志仍位于本机 `/tmp`，不会随 Git 迁移；以下为开发预检，不形成 RC record。
+
+| 定向验证 | 结果 / 证据 |
+| --- | --- |
+| Linux updater/build 回归，修复前 | 9 fail / 5 pass；`nomifun-linux-focused-before.log` |
+| Linux artifact 隔离，修复前 | 2 fail；`nomifun-linux-release-before.log` |
+| Linux sandbox 参数回归，修复前 | 1 fail；`nomifun-linux-sandbox-before.log` |
+| Linux 构建、更新清单、发布证据隔离 | 23 passed；`nomifun-linux-focused-after.log` |
+| Browser launcher 定向单测（含 Linux 参数回归） | 37 passed；`nomifun-linux-browser-launch-tests.log` |
+| 真实 Linux Chromium sandbox 页面与 pipe/marker 清理 | 1 passed；`nomifun-linux-browser-sandbox.log` |
+| 真实 Linux Chromium Host 正常 shutdown | 1 passed；`nomifun-linux-browser-shutdown.log` |
+| 真实 Linux Chromium Host/standalone Drop 与稳定 profile 重启 | 3 passed；`nomifun-linux-browser-drop.log` |
+| 真实 Linux Chromium headless 单受控页面 | 1 passed；`nomifun-linux-browser-headless.log` |
+
+合计 66 项定向检查通过，其中 6 项使用真实 Linux Chromium；未把重复运行重复计数。
+结束时 OS 进程表无残留 Chrome/WebKit/NomiFun 或本轮集成测试进程。两份 shell 脚本的
+`bash -n`、更新清单脚本的 `node --check` 和 `git diff --check` 通过。
+
+下载最初的 180 秒期限不足，断点续传后完成。直接对 Chrome 执行 `--dump-dom` 的一次
+20 秒诊断超时，未记为通过；改用产品实际 CDP 路径完成上述验证。新增 sandbox fixture
+最初在仅 `shutdown()` 而仍持有连接时等待 EOF，等待超时；修正为释放连接后再等进程退出，
+按产品 guard 异步清理语义等待 marker，未为此修改共享 transport 实现。
+
+可复现命令（`NOMIFUN_CHROME_BINARY` 必须指向专门测试用的真实 Linux Chrome）：
+
+```bash
+bun test scripts/desktop-build-linux.test.mjs scripts/make-latest-json-linux.test.mjs scripts/release-linux-artifacts.test.mjs scripts/release-native-locks.test.mjs
+cargo test --locked -p nomi-browser-engine --lib launch::tests::
+NOMIFUN_CHROME_BINARY=/absolute/test/chrome cargo test --locked -p nomi-browser-engine --test linux_sandbox -- --ignored --nocapture
+NOMIFUN_CHROME_BINARY=/absolute/test/chrome cargo test --locked -p nomi-browser-engine --test integration_managed_host managed_host_shutdown_clears_only_exact_runtime_profile_artifacts -- --ignored --exact
+NOMIFUN_CHROME_BINARY=/absolute/test/chrome cargo test --locked -p nomi-browser-engine --test integration_managed_host --test integration_single_tab drop_ -- --ignored --test-threads=1
+NOMIFUN_CHROME_BINARY=/absolute/test/chrome cargo test --locked -p nomi-browser-engine --test integration_single_tab single_tab_headless_has_exactly_one_page_target -- --ignored --exact
+```
+
+本次不重复首轮已完成的整个 App/业务测试组，不启动模型请求。不关闭 `RC-LD-01`，不宣称
+Computer Linux、桌面 portal、GPU/DPI/IME/托盘、原生安装/升级或 live provider 已通过。
+验收结束时重新 fetch，远端仍为 `9c6800f7f`，未出现新的共享文件冲突。此处记录验收时的
+工作区快照，后续提交与推送状态以 Git 历史为准；用户文件 `get-docker.sh` 未纳入本轮修改。

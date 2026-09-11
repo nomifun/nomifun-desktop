@@ -26,14 +26,21 @@ function runBuildFixture(args, noPackageTarget = '') {
     bun: `#!/bin/bash
 set -eu
 if [[ "$1" == x ]]; then
-  while [[ "$1" != --target ]]; do shift; done
-  shift
-  triple="$1"
-  mkdir -p "target/$triple/release/bundle/deb"
-  touch "target/$triple/release/nomifun-desktop"
-  chmod +x "target/$triple/release/nomifun-desktop"
+  profile=release
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      --target) shift; triple="$1" ;;
+      --debug|-d) profile=debug ;;
+      --profile) shift; profile="$1" ;;
+      --profile=*) profile="\${1#--profile=}" ;;
+    esac
+    shift
+  done
+  mkdir -p "target/$triple/$profile/bundle/deb"
+  touch "target/$triple/$profile/nomifun-desktop"
+  chmod +x "target/$triple/$profile/nomifun-desktop"
   if [[ "$triple" != "$MOCK_NO_PACKAGE_TARGET" ]]; then
-    printf 'current package' > "target/$triple/release/bundle/deb/current-$triple.deb"
+    printf 'current package' > "target/$triple/$profile/bundle/deb/current-$triple.deb"
   fi
 elif [[ "$1" == */release-lock.mjs && "$2" == create ]]; then
   while [[ "$1" != --output ]]; do shift; done
@@ -100,4 +107,18 @@ describe('Linux Desktop build contract', () => {
       rmSync(fixture.root, { recursive: true, force: true });
     }
   });
+
+  for (const args of [['--debug'], ['-d'], ['--profile', 'dev'], ['--profile=dev'], ['--target', 'aarch64-unknown-linux-gnu']]) {
+    test.skipIf(process.platform !== 'linux')(`rejects output-changing flags before deleting Linux bundles: ${args.join(' ')}`, () => {
+      const fixture = runBuildFixture(['x64', '--', ...args]);
+      try {
+        expect(fixture.result.status).toBe(1);
+        expect(fixture.result.stderr).toContain('release output');
+        expect(existsSync(fixture.stale)).toBe(true);
+        expect(existsSync(join(fixture.root, 'dist/desktop'))).toBe(false);
+      } finally {
+        rmSync(fixture.root, { recursive: true, force: true });
+      }
+    });
+  }
 });
