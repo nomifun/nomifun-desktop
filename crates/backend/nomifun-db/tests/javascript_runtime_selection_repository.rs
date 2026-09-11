@@ -21,6 +21,14 @@ fn runtime(id: &str, executable_digest: &str) -> serde_json::Value {
     })
 }
 
+fn node_path(label: &str) -> String {
+    std::env::temp_dir()
+        .join(format!("nomifun-db-runtime-{label}"))
+        .join(if cfg!(windows) { "node.exe" } else { "node" })
+        .display()
+        .to_string()
+}
+
 #[tokio::test]
 async fn empty_selection_saves_with_revision_cas_and_survives_restart() {
     let directory = tempfile::tempdir().unwrap();
@@ -41,11 +49,9 @@ async fn empty_selection_saves_with_revision_cas_and_survives_restart() {
         .save_cas(&SaveJavaScriptRuntimeSelectionParams {
             expected_revision: 0,
             selected_runtime: Some(selected.clone()),
-            selected_executable_path: Some(r"C:\node\selected.exe".into()),
+            selected_executable_path: Some(node_path("selected")),
             pending_candidate: Some(pending.clone()),
-            pending_candidate_executable_path: Some(
-                r"C:\node\candidate.exe".into(),
-            ),
+            pending_candidate_executable_path: Some(node_path("candidate")),
             validation_result: Some(validation.clone()),
             last_error_code: None,
             non_recommended_warning_acknowledged: BTreeSet::from([
@@ -67,7 +73,7 @@ async fn empty_selection_saves_with_revision_cas_and_survives_restart() {
         .save_cas(&SaveJavaScriptRuntimeSelectionParams {
             expected_revision: 0,
             selected_runtime: Some(selected),
-            selected_executable_path: Some(r"C:\node\selected.exe".into()),
+            selected_executable_path: Some(node_path("selected")),
             pending_candidate: None,
             pending_candidate_executable_path: None,
             validation_result: None,
@@ -101,9 +107,7 @@ async fn validation_must_bind_exact_pending_candidate_and_singleton_rejects_seco
             selected_runtime: None,
             selected_executable_path: None,
             pending_candidate: Some(pending),
-            pending_candidate_executable_path: Some(
-                r"C:\node\candidate.exe".into(),
-            ),
+            pending_candidate_executable_path: Some(node_path("candidate")),
             validation_result: Some(json!({
                 "candidate": runtime("another-runtime", &"c".repeat(64))
             })),

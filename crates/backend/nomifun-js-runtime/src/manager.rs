@@ -547,9 +547,7 @@ mod tests {
             source_kind: NodeRuntimeSourceKind::Managed,
             node_version: VersionString::from("24.8.0"),
             node_major: 24,
-            runtime_target: RuntimeTarget::from(
-                "x86_64-pc-windows-msvc",
-            ),
+            runtime_target: RuntimeTarget::from(crate::current_runtime_target()),
             executable_digest: DigestHex::from(digest.to_string().repeat(64)),
             javascript_host_protocol_version:
                 JAVASCRIPT_HOST_PROTOCOL_VERSION.into(),
@@ -587,7 +585,7 @@ mod tests {
             .begin_pending(
                 0,
                 candidate.clone(),
-                PathBuf::from(r"C:\managed\node.exe"),
+                std::env::temp_dir().join("nomifun-js-runtime-manager/node"),
                 false,
             )
             .await
@@ -634,7 +632,7 @@ mod tests {
             .select_initial(
                 0,
                 selected.clone(),
-                PathBuf::from(r"C:\managed\selected\node.exe"),
+                std::env::temp_dir().join("nomifun-js-runtime-manager/selected/node"),
             )
             .await
             .unwrap();
@@ -643,7 +641,7 @@ mod tests {
             .begin_pending(
                 1,
                 candidate.clone(),
-                PathBuf::from(r"C:\managed\candidate\node.exe"),
+                std::env::temp_dir().join("nomifun-js-runtime-manager/candidate/node"),
                 false,
             )
             .await
@@ -683,7 +681,7 @@ mod tests {
             .begin_pending(
                 0,
                 candidate.clone(),
-                PathBuf::from(r"C:\managed\node.exe"),
+                std::env::temp_dir().join("nomifun-js-runtime-manager/node"),
                 false,
             )
             .await
@@ -692,7 +690,7 @@ mod tests {
             .begin_pending(
                 0,
                 runtime('b'),
-                PathBuf::from(r"C:\managed\node-b.exe"),
+                std::env::temp_dir().join("nomifun-js-runtime-manager/node-b"),
                 false,
             )
             .await

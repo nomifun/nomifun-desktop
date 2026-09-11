@@ -8,6 +8,7 @@ repository.workspace = true
 [dependencies]
 async-trait.workspace = true
 dunce.workspace = true
+flate2.workspace = true
 hex.workspace = true
 nomifun-agent-contracts.workspace = true
 nomifun-api-types.workspace = true
@@ -19,6 +20,7 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tar.workspace = true
 which.workspace = true
 zip.workspace = true
 

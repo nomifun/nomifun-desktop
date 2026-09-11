@@ -2612,6 +2612,21 @@ mod tests {
         authenticated_request(app, &app.token, method, uri, csrf)
     }
 
+    fn cookie_authorized_request(
+        app: &TestApp,
+        method: &str,
+        uri: impl AsRef<str>,
+        csrf: bool,
+    ) -> Request<Body> {
+        let mut cookie = format!("nomifun-session={}", app.token);
+        let mut builder = Request::builder().method(method).uri(uri.as_ref());
+        if csrf {
+            cookie.push_str(&format!("; nomifun-csrf-token={}", app.csrf));
+            builder = builder.header("x-csrf-token", app.csrf);
+        }
+        builder.header("cookie", cookie).body(Body::empty()).unwrap()
+    }
+
     fn secondary_request(
         app: &TestApp,
         method: &str,
@@ -2957,7 +2972,7 @@ mod tests {
         let without_csrf = app
             .router
             .clone()
-            .oneshot(authorized_request(
+            .oneshot(cookie_authorized_request(
                 &app,
                 "POST",
                 format!("/api/browser/lanes/{}/close", app.lane_id),
@@ -2970,7 +2985,7 @@ mod tests {
         let foreground_without_csrf = app
             .router
             .clone()
-            .oneshot(authorized_request(
+            .oneshot(cookie_authorized_request(
                 &app,
                 "POST",
                 format!("/api/browser/lanes/{}/foreground", app.lane_id),
@@ -2990,7 +3005,7 @@ mod tests {
         let background_without_csrf = app
             .router
             .clone()
-            .oneshot(authorized_request(
+            .oneshot(cookie_authorized_request(
                 &app,
                 "POST",
                 format!("/api/browser/lanes/{}/background", app.lane_id),

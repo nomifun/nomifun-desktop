@@ -2355,6 +2355,17 @@ mod tests {
                 ]),
             })
             .collect();
+        let materialized = registry.snapshot().expect("registry snapshot");
+        let contribution_locks = capability_ids
+            .iter()
+            .map(|capability_id| {
+                materialized
+                    .capability(&CapabilityId::from(*capability_id))
+                    .expect("selected Wave 1 capability is materialized")
+                    .contribution_lock
+                    .clone()
+            })
+            .collect();
         let payload = AgentPresetRevisionPayload {
             schema_version: VersionString::from(CONTRACT_VERSION),
             model_route_refs: BTreeMap::new(),
@@ -2367,7 +2378,6 @@ mod tests {
             instructions: format!("Exercise the Wave 1 {fixture_name} owner."),
             starter_prompts: Vec::new(),
         };
-        let contribution_locks = Vec::new();
         let mut revision = AgentPresetRevision {
             reference: PresetRevisionRef {
                 preset_id: AgentPresetId::from(format!("wave1-{fixture_name}")),
@@ -2383,7 +2393,7 @@ mod tests {
         revision.reference.revision_digest =
             revision.revision_digest().expect("revision digest");
         let snapshot = AgentPresetCompiler::compile(
-            &registry.snapshot().expect("registry snapshot"),
+            &materialized,
             &CompilerEnvironment {
                 resolver_version: VersionString::from(CONTRACT_VERSION),
                 required_runtime_protocol_version: VersionString::from(

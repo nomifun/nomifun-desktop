@@ -45,11 +45,36 @@ fn node_executable() -> PathBuf {
     if let Ok(value) = std::env::var("NODE_EXECUTABLE") {
         return PathBuf::from(value);
     }
-    if cfg!(windows) {
-        PathBuf::from(r"C:\Program Files\nodejs\node.exe")
-    } else {
-        PathBuf::from("/usr/bin/node")
-    }
+    let path = std::env::var_os("PATH").expect("PATH is available");
+    std::env::split_paths(&path)
+        .flat_map(|directory| {
+            #[cfg(windows)]
+            let names = ["node.exe", "node"];
+            #[cfg(not(windows))]
+            let names = ["node", "node"];
+            names.map(move |name| directory.join(name))
+        })
+        .find(|candidate| candidate.is_file())
+        .expect("Node 24+ is required for JavaScript authoring tests")
+        .canonicalize()
+        .expect("Node path is canonical")
+}
+
+fn runtime_target() -> &'static str {
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    return "x86_64-pc-windows-msvc";
+    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+    return "aarch64-pc-windows-msvc";
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    return "aarch64-apple-darwin";
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    return "x86_64-apple-darwin";
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    return "x86_64-unknown-linux-gnu";
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    return "aarch64-unknown-linux-gnu";
+    #[allow(unreachable_code)]
+    "unsupported"
 }
 
 fn fixture() -> (TempDir, SourceStore) {
@@ -167,7 +192,7 @@ fn fixed_packer_builds_javascript_and_typescript_with_reproducible_outputs() {
             .pack(
                 first_staged,
                 &lock,
-                &PluginPackageBuildOptions::for_target("x86_64-pc-windows-msvc"),
+                &PluginPackageBuildOptions::for_target(runtime_target()),
                 &NeverCancel,
             )
             .unwrap();
@@ -192,7 +217,7 @@ fn fixed_packer_builds_javascript_and_typescript_with_reproducible_outputs() {
             .pack(
                 second_staged,
                 &lock,
-                &PluginPackageBuildOptions::for_target("x86_64-pc-windows-msvc"),
+                &PluginPackageBuildOptions::for_target(runtime_target()),
                 &NeverCancel,
             )
             .unwrap();
@@ -234,7 +259,7 @@ fn fixed_packer_bundles_static_local_modules() {
                 .stage_snapshot(&scope, snapshot.snapshot(), &NeverCancel)
                 .unwrap(),
             &lock,
-            &PluginPackageBuildOptions::for_target("x86_64-pc-windows-msvc"),
+            &PluginPackageBuildOptions::for_target(runtime_target()),
             &NeverCancel,
         )
         .unwrap();
@@ -275,7 +300,7 @@ fn fixed_packer_rejects_undeclared_import_and_cleans_staging() {
         .pack(
             staged,
             &empty_lock(&store, &scope),
-            &PluginPackageBuildOptions::for_target("x86_64-pc-windows-msvc"),
+            &PluginPackageBuildOptions::for_target(runtime_target()),
             &NeverCancel,
         )
     };
@@ -312,7 +337,7 @@ fn fixed_packer_preserves_node_public_api_static_imports() {
             .stage_snapshot(&scope, captured.snapshot(), &NeverCancel)
             .unwrap(),
         &empty_lock(&store, &scope),
-        &PluginPackageBuildOptions::for_target("x86_64-pc-windows-msvc"),
+        &PluginPackageBuildOptions::for_target(runtime_target()),
         &NeverCancel,
     )
     .unwrap();
@@ -371,7 +396,7 @@ fn diamond_importers_share_cached_exact_exports() {
             .stage_snapshot(&scope, captured.snapshot(), &NeverCancel)
             .unwrap(),
         &empty_lock(&store, &scope),
-        &PluginPackageBuildOptions::for_target("x86_64-pc-windows-msvc"),
+        &PluginPackageBuildOptions::for_target(runtime_target()),
         &NeverCancel,
     )
     .unwrap();
@@ -405,7 +430,7 @@ fn multi_binding_export_fails_closed_and_cleans_staging() {
     .pack(
         staged,
         &empty_lock(&store, &scope),
-        &PluginPackageBuildOptions::for_target("x86_64-pc-windows-msvc"),
+        &PluginPackageBuildOptions::for_target(runtime_target()),
         &NeverCancel,
     );
     assert!(matches!(result, Err(AuthoringError::PackRejected(_))));
@@ -554,7 +579,7 @@ fn fixed_packer_bundles_realistic_registry_metadata_and_transitive_pure_javascri
             .stage_snapshot(&scope, captured.snapshot(), &NeverCancel)
             .unwrap(),
         &lock,
-        &PluginPackageBuildOptions::for_target("x86_64-pc-windows-msvc"),
+        &PluginPackageBuildOptions::for_target(runtime_target()),
         &NeverCancel,
     )
     .unwrap();
@@ -698,7 +723,7 @@ fn canceled_pack_drops_staging_without_starting_build_host() {
             NpmResolverIdentity::new("test", "1.0.0").unwrap(),
         )
         .unwrap(),
-        &PluginPackageBuildOptions::for_target("x86_64-pc-windows-msvc"),
+        &PluginPackageBuildOptions::for_target(runtime_target()),
         &cancellation,
     );
     assert!(matches!(result, Err(AuthoringError::Canceled)));

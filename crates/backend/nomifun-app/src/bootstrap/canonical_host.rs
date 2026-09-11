@@ -237,8 +237,15 @@ impl FreshV4Host {
     }
 
     pub async fn compose(&self, config: &crate::AppConfig) -> Result<FreshV4Application> {
+        let config_root = nomifun_common::paths::canonicalize_simplified(&config.data_dir)
+            .with_context(|| {
+                format!(
+                    "canonicalize Fresh-v4 host config root {}",
+                    config.data_dir.display()
+                )
+            })?;
         if !nomifun_common::paths::paths_equivalent(
-            &config.data_dir,
+            &config_root,
             &self.outcome.canonical_root,
         ) {
             anyhow::bail!(

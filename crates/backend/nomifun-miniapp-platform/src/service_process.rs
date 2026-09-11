@@ -855,7 +855,7 @@ impl MiniAppServiceProcessFactory for NodeMiniAppServiceProcessFactory {
 
 fn service_process_working_directory(
     module: &std::path::Path,
-    node_executable: &std::path::Path,
+    _node_executable: &std::path::Path,
 ) -> MiniAppPlatformResult<PathBuf> {
     let module_directory = module.parent().ok_or_else(|| {
         MiniAppPlatformError::InvalidState(
@@ -870,7 +870,7 @@ fn service_process_working_directory(
         // The module itself is imported by its verified absolute file URL, so a
         // short, stable cwd does not weaken module identity or relative imports.
         if module_directory.as_os_str().encode_wide().count() >= 248 {
-            return node_executable
+            return _node_executable
                 .parent()
                 .map(PathBuf::from)
                 .ok_or_else(|| {

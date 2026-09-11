@@ -1,10 +1,11 @@
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{Cursor, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
+use flate2::read::GzDecoder;
 use nomifun_agent_contracts::{
     DigestHex, NodeProbeDisposition, NodeRuntimeFingerprint,
     NodeRuntimeSourceKind, RECOMMENDED_NODE_LTS_MAJOR, RuntimeTarget,
@@ -22,7 +23,10 @@ const NODE_RELEASE_INDEX_URL: &str = "https://nodejs.org/dist/index.json";
 const NODE_RELEASE_ROOT_URL: &str = "https://nodejs.org/dist";
 const MAX_MANAGED_NODE_ARCHIVE_BYTES: u64 = 192 * 1024 * 1024;
 const MAX_MANAGED_NODE_EXTRACTED_BYTES: u64 = 512 * 1024 * 1024;
-const MAX_MANAGED_NODE_FILES: usize = 4096;
+// Official Node distributions include npm/corepack documentation and can
+// exceed 4,096 entries. Keep extraction bounded while allowing the complete
+// release archive on every supported desktop target.
+const MAX_MANAGED_NODE_FILES: usize = 16_384;
 static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -287,8 +291,14 @@ impl ManagedNodeProvisioner {
         let staging = staging.to_path_buf();
         let extraction_staging = staging.clone();
         let archive_file_name = release.archive_file_name.clone();
+        let archive_format = profile.format;
         let extracted_root = tokio::task::spawn_blocking(move || {
-            extract_windows_zip(&archive, &archive_file_name, &extraction_staging)
+            extract_archive(
+                &archive,
+                &archive_file_name,
+                &extraction_staging,
+                archive_format,
+            )
         })
         .await
         .map_err(|error| JavaScriptRuntimeError::InvalidArchive(error.to_string()))??;
@@ -416,6 +426,13 @@ struct ArchiveProfile {
     file_key: &'static str,
     archive_suffix: &'static str,
     executable_relative_path: &'static str,
+    format: ArchiveFormat,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ArchiveFormat {
+    Zip,
+    TarGz,
 }
 
 fn archive_profile(target: &str) -> Result<ArchiveProfile, JavaScriptRuntimeError> {
@@ -424,6 +441,37 @@ fn archive_profile(target: &str) -> Result<ArchiveProfile, JavaScriptRuntimeErro
             file_key: "win-x64-zip",
             archive_suffix: "win-x64.zip",
             executable_relative_path: "node.exe",
+            format: ArchiveFormat::Zip,
+        }),
+        "aarch64-pc-windows-msvc" => Ok(ArchiveProfile {
+            file_key: "win-arm64-zip",
+            archive_suffix: "win-arm64.zip",
+            executable_relative_path: "node.exe",
+            format: ArchiveFormat::Zip,
+        }),
+        "aarch64-apple-darwin" => Ok(ArchiveProfile {
+            file_key: "osx-arm64-tar",
+            archive_suffix: "darwin-arm64.tar.gz",
+            executable_relative_path: "bin/node",
+            format: ArchiveFormat::TarGz,
+        }),
+        "x86_64-apple-darwin" => Ok(ArchiveProfile {
+            file_key: "osx-x64-tar",
+            archive_suffix: "darwin-x64.tar.gz",
+            executable_relative_path: "bin/node",
+            format: ArchiveFormat::TarGz,
+        }),
+        "x86_64-unknown-linux-gnu" => Ok(ArchiveProfile {
+            file_key: "linux-x64",
+            archive_suffix: "linux-x64.tar.gz",
+            executable_relative_path: "bin/node",
+            format: ArchiveFormat::TarGz,
+        }),
+        "aarch64-unknown-linux-gnu" => Ok(ArchiveProfile {
+            file_key: "linux-arm64",
+            archive_suffix: "linux-arm64.tar.gz",
+            executable_relative_path: "bin/node",
+            format: ArchiveFormat::TarGz,
         }),
         _ => Err(JavaScriptRuntimeError::ManagedTargetUnsupported(
             target.to_owned(),
@@ -526,14 +574,26 @@ fn verify_archive_digest(
     Ok(())
 }
 
-fn extract_windows_zip(
+fn extract_archive(
+    bytes: &[u8],
+    archive_file_name: &str,
+    staging: &Path,
+    format: ArchiveFormat,
+) -> Result<PathBuf, JavaScriptRuntimeError> {
+    match format {
+        ArchiveFormat::Zip => extract_zip(bytes, archive_file_name, staging),
+        ArchiveFormat::TarGz => extract_tar_gz(bytes, archive_file_name, staging),
+    }
+}
+
+fn extract_zip(
     bytes: &[u8],
     archive_file_name: &str,
     staging: &Path,
 ) -> Result<PathBuf, JavaScriptRuntimeError> {
     if !archive_file_name.ends_with(".zip") {
         return Err(JavaScriptRuntimeError::InvalidArchive(
-            "Windows managed Node archive must be zip".into(),
+            "managed Node zip archive must use the .zip suffix".into(),
         ));
     }
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
@@ -625,6 +685,196 @@ fn extract_windows_zip(
     Ok(extraction_root.join(top_level))
 }
 
+fn extract_tar_gz(
+    bytes: &[u8],
+    archive_file_name: &str,
+    staging: &Path,
+) -> Result<PathBuf, JavaScriptRuntimeError> {
+    if !archive_file_name.ends_with(".tar.gz") {
+        return Err(JavaScriptRuntimeError::InvalidArchive(
+            "managed Node tar archive must use the .tar.gz suffix".into(),
+        ));
+    }
+    let extraction_root = staging.join("extract");
+    std::fs::create_dir(&extraction_root)
+        .map_err(|error| fs_error(&extraction_root, error))?;
+
+    let mut archive = tar::Archive::new(GzDecoder::new(Cursor::new(bytes)));
+    archive.set_preserve_permissions(true);
+    archive.set_preserve_mtime(true);
+    let entries = archive
+        .entries()
+        .map_err(|error| JavaScriptRuntimeError::InvalidArchive(error.to_string()))?;
+    let mut top_level: Option<String> = None;
+    let mut extracted_bytes = 0u64;
+    let mut entry_count = 0usize;
+    let mut normalized_paths = BTreeSet::new();
+
+    for entry in entries {
+        entry_count = entry_count.checked_add(1).ok_or_else(|| {
+            JavaScriptRuntimeError::InvalidArchive("archive entry count overflow".into())
+        })?;
+        if entry_count > MAX_MANAGED_NODE_FILES {
+            return Err(JavaScriptRuntimeError::InvalidArchive(format!(
+                "archive has more than {MAX_MANAGED_NODE_FILES} entries"
+            )));
+        }
+        let mut entry = entry
+            .map_err(|error| JavaScriptRuntimeError::InvalidArchive(error.to_string()))?;
+        let relative = entry
+            .path()
+            .map_err(|error| JavaScriptRuntimeError::InvalidArchive(error.to_string()))?
+            .into_owned();
+        let path_components = archive_path_components(&relative)?;
+        let normalized = path_components.join("/").to_ascii_lowercase();
+        if !normalized_paths.insert(normalized) {
+            return Err(JavaScriptRuntimeError::InvalidArchive(
+                "archive contains duplicate or case-colliding paths".into(),
+            ));
+        }
+        let first = path_components.first().cloned().ok_or_else(|| {
+            JavaScriptRuntimeError::InvalidArchive("empty archive entry".into())
+        })?;
+        if let Some(expected) = &top_level {
+            if expected != &first {
+                return Err(JavaScriptRuntimeError::InvalidArchive(
+                    "archive must contain exactly one top-level directory".into(),
+                ));
+            }
+        } else {
+            top_level = Some(first.clone());
+        }
+
+        let entry_type = entry.header().entry_type();
+        if !(entry_type.is_file() || entry_type.is_dir() || entry_type.is_symlink()) {
+            return Err(JavaScriptRuntimeError::InvalidArchive(format!(
+                "archive entry {} has an unsupported type",
+                relative.display()
+            )));
+        }
+        if entry_type.is_symlink() {
+            let target = entry
+                .link_name()
+                .map_err(|error| JavaScriptRuntimeError::InvalidArchive(error.to_string()))?
+                .ok_or_else(|| {
+                    JavaScriptRuntimeError::InvalidArchive(format!(
+                        "archive symlink {} has no target",
+                        relative.display()
+                    ))
+                })?;
+            validate_archive_symlink(&path_components, &target, &first)?;
+        } else if entry_type.is_file() {
+            extracted_bytes = extracted_bytes
+                .checked_add(entry.size())
+                .ok_or_else(|| {
+                    JavaScriptRuntimeError::InvalidArchive(
+                        "archive extracted size overflow".into(),
+                    )
+                })?;
+            if extracted_bytes > MAX_MANAGED_NODE_EXTRACTED_BYTES {
+                return Err(JavaScriptRuntimeError::InvalidArchive(format!(
+                    "archive extracts beyond {MAX_MANAGED_NODE_EXTRACTED_BYTES} bytes"
+                )));
+            }
+        }
+        let unpacked = entry
+            .unpack_in(&extraction_root)
+            .map_err(|error| JavaScriptRuntimeError::InvalidArchive(error.to_string()))?;
+        if !unpacked {
+            return Err(JavaScriptRuntimeError::InvalidArchive(format!(
+                "archive entry {} escapes the extraction root",
+                relative.display()
+            )));
+        }
+    }
+
+    let top_level = top_level.ok_or_else(|| {
+        JavaScriptRuntimeError::InvalidArchive("archive is empty".into())
+    })?;
+    Ok(extraction_root.join(top_level))
+}
+
+fn archive_path_components(path: &Path) -> Result<Vec<String>, JavaScriptRuntimeError> {
+    let mut normalized = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(value) => {
+                let value = value.to_str().ok_or_else(|| {
+                    JavaScriptRuntimeError::InvalidArchive(
+                        "archive path is not valid UTF-8".into(),
+                    )
+                })?;
+                if value.is_empty() {
+                    return Err(JavaScriptRuntimeError::InvalidArchive(
+                        "archive path contains an empty component".into(),
+                    ));
+                }
+                normalized.push(value.to_owned());
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(JavaScriptRuntimeError::InvalidArchive(format!(
+                    "archive path {} escapes the extraction root",
+                    path.display()
+                )));
+            }
+        }
+    }
+    if normalized.is_empty() {
+        return Err(JavaScriptRuntimeError::InvalidArchive(
+            "archive path is empty".into(),
+        ));
+    }
+    Ok(normalized)
+}
+
+fn validate_archive_symlink(
+    entry_components: &[String],
+    target: &Path,
+    top_level: &str,
+) -> Result<(), JavaScriptRuntimeError> {
+    if target.is_absolute() {
+        return Err(JavaScriptRuntimeError::InvalidArchive(
+            "archive symlink target must be relative".into(),
+        ));
+    }
+    let mut resolved = entry_components
+        .get(..entry_components.len().saturating_sub(1))
+        .unwrap_or_default()
+        .to_vec();
+    for component in target.components() {
+        match component {
+            Component::Normal(value) => {
+                let value = value.to_str().ok_or_else(|| {
+                    JavaScriptRuntimeError::InvalidArchive(
+                        "archive symlink target is not valid UTF-8".into(),
+                    )
+                })?;
+                resolved.push(value.to_owned());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if resolved.pop().is_none() {
+                    return Err(JavaScriptRuntimeError::InvalidArchive(
+                        "archive symlink target escapes the extraction root".into(),
+                    ));
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(JavaScriptRuntimeError::InvalidArchive(
+                    "archive symlink target must be relative".into(),
+                ));
+            }
+        }
+    }
+    if resolved.first().is_none_or(|value| value != top_level) {
+        return Err(JavaScriptRuntimeError::InvalidArchive(
+            "archive symlink target escapes its top-level directory".into(),
+        ));
+    }
+    Ok(())
+}
+
 async fn remove_managed_staging(
     managed_root: &Path,
     candidate: &Path,
@@ -701,7 +951,61 @@ fn managed_executable_name() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flate2::{Compression, write::GzEncoder};
     use zip::write::SimpleFileOptions;
+
+    fn tar_gz_with_node_and_link(link_target: Option<&str>) -> Vec<u8> {
+        let encoder = GzEncoder::new(Vec::new(), Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        let node = b"node";
+        let mut node_header = tar::Header::new_gnu();
+        node_header.set_entry_type(tar::EntryType::Regular);
+        node_header.set_mode(0o755);
+        node_header.set_size(node.len() as u64);
+        node_header.set_cksum();
+        builder
+            .append_data(
+                &mut node_header,
+                "node-v24.2.0-darwin-arm64/bin/node",
+                Cursor::new(node),
+            )
+            .unwrap();
+        if let Some(target) = link_target {
+            let mut link_header = tar::Header::new_gnu();
+            link_header.set_entry_type(tar::EntryType::Symlink);
+            link_header.set_mode(0o777);
+            link_header.set_size(0);
+            link_header.set_link_name(target).unwrap();
+            link_header.set_cksum();
+            builder
+                .append_data(
+                    &mut link_header,
+                    "node-v24.2.0-darwin-arm64/bin/npm",
+                    Cursor::new([]),
+                )
+                .unwrap();
+        }
+        let encoder = builder.into_inner().unwrap();
+        encoder.finish().unwrap()
+    }
+
+    #[test]
+    fn archive_profiles_cover_every_supported_runtime_target() {
+        let expected = [
+            ("x86_64-pc-windows-msvc", "win-x64-zip", "win-x64.zip", ArchiveFormat::Zip),
+            ("aarch64-pc-windows-msvc", "win-arm64-zip", "win-arm64.zip", ArchiveFormat::Zip),
+            ("aarch64-apple-darwin", "osx-arm64-tar", "darwin-arm64.tar.gz", ArchiveFormat::TarGz),
+            ("x86_64-apple-darwin", "osx-x64-tar", "darwin-x64.tar.gz", ArchiveFormat::TarGz),
+            ("x86_64-unknown-linux-gnu", "linux-x64", "linux-x64.tar.gz", ArchiveFormat::TarGz),
+            ("aarch64-unknown-linux-gnu", "linux-arm64", "linux-arm64.tar.gz", ArchiveFormat::TarGz),
+        ];
+        for (target, file_key, suffix, format) in expected {
+            let profile = archive_profile(target).unwrap();
+            assert_eq!(profile.file_key, file_key);
+            assert_eq!(profile.archive_suffix, suffix);
+            assert_eq!(profile.format, format);
+        }
+    }
 
     #[test]
     fn release_selection_requires_lts_major_and_archive_profile() {
@@ -754,7 +1058,7 @@ mod tests {
             writer.finish().unwrap();
         }
         let directory = tempfile::tempdir().unwrap();
-        let error = extract_windows_zip(
+        let error = extract_zip(
             output.get_ref(),
             "node-v24.2.0-win-x64.zip",
             directory.path(),
@@ -779,7 +1083,7 @@ mod tests {
             writer.finish().unwrap();
         }
         let directory = tempfile::tempdir().unwrap();
-        let root = extract_windows_zip(
+        let root = extract_zip(
             output.get_ref(),
             "node-v24.2.0-win-x64.zip",
             directory.path(),
@@ -805,11 +1109,62 @@ mod tests {
             writer.finish().unwrap();
         }
         let directory = tempfile::tempdir().unwrap();
-        assert!(extract_windows_zip(
+        assert!(extract_zip(
             output.get_ref(),
             "node-v24.2.0-win-x64.zip",
             directory.path(),
         )
         .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tar_gz_extraction_preserves_node_executable_and_safe_internal_link() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let bytes = tar_gz_with_node_and_link(Some("node"));
+        let directory = tempfile::tempdir().unwrap();
+        let root = extract_tar_gz(
+            &bytes,
+            "node-v24.2.0-darwin-arm64.tar.gz",
+            directory.path(),
+        )
+        .unwrap();
+        let node = root.join("bin/node");
+        assert!(node.is_file());
+        assert_ne!(node.metadata().unwrap().permissions().mode() & 0o111, 0);
+        assert_eq!(std::fs::read_link(root.join("bin/npm")).unwrap(), Path::new("node"));
+    }
+
+    #[test]
+    fn tar_gz_extraction_rejects_symlink_escape() {
+        let bytes = tar_gz_with_node_and_link(Some("../../../outside"));
+        let directory = tempfile::tempdir().unwrap();
+        let error = extract_tar_gz(
+            &bytes,
+            "node-v24.2.0-darwin-arm64.tar.gz",
+            directory.path(),
+        )
+        .unwrap_err();
+        assert!(matches!(error, JavaScriptRuntimeError::InvalidArchive(_)));
+        assert!(!directory.path().parent().unwrap().join("outside").exists());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires access to the official Node.js release service"]
+    async fn official_lts_download_installs_and_probes_the_current_host() {
+        let directory = tempfile::tempdir().unwrap();
+        let provisioner = ManagedNodeProvisioner::new(directory.path().join("managed")).unwrap();
+        let fingerprint = provisioner
+            .provision(&ManagedNodeDownloadApproval {
+                approved_at_ms: 1,
+                recommended_major: RECOMMENDED_NODE_LTS_MAJOR,
+                runtime_target: RuntimeTarget::from(current_runtime_target()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(fingerprint.node_major, RECOMMENDED_NODE_LTS_MAJOR);
+        assert_eq!(fingerprint.runtime_target.as_ref(), current_runtime_target());
+        assert_eq!(provisioner.installed_executables().await.unwrap().len(), 1);
     }
 }

@@ -351,7 +351,10 @@ pub(crate) fn write_create_new_durable(
 }
 
 fn shared_marker_open_options() -> OpenOptions {
+    #[cfg(windows)]
     let mut options = OpenOptions::new();
+    #[cfg(not(windows))]
+    let options = OpenOptions::new();
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;

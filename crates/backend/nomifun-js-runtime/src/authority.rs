@@ -309,6 +309,12 @@ mod tests {
 
     struct Probe;
 
+    fn node_path(label: &str) -> PathBuf {
+        std::env::temp_dir()
+            .join(format!("nomifun-js-runtime-authority-{label}"))
+            .join(if cfg!(windows) { "node.exe" } else { "node" })
+    }
+
     #[async_trait]
     impl NodeRuntimeProbePort for Probe {
         async fn resolve(
@@ -320,7 +326,7 @@ mod tests {
                 selected: Some(fingerprint.clone()),
                 probes: vec![NodeRuntimeProbeResult {
                     source_kind: NodeRuntimeSourceKind::ProcessPath,
-                    executable_path: r"C:\node\node.exe".into(),
+                    executable_path: node_path("initial").display().to_string(),
                     disposition: NodeProbeDisposition::CompatibleRecommended,
                     fingerprint: Some(fingerprint),
                     error_code: None,
@@ -342,7 +348,7 @@ mod tests {
             source_kind: NodeRuntimeSourceKind::ProcessPath,
             node_version: VersionString::from("24.8.0"),
             node_major: 24,
-            runtime_target: RuntimeTarget::from("x86_64-pc-windows-msvc"),
+            runtime_target: RuntimeTarget::from(crate::current_runtime_target()),
             executable_digest: DigestHex::from("a".repeat(64)),
             javascript_host_protocol_version:
                 JAVASCRIPT_HOST_PROTOCOL_VERSION.into(),

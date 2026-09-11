@@ -26,15 +26,22 @@ use serde_json::json;
 use uuid::Uuid;
 
 fn node_executable() -> PathBuf {
-    std::env::var_os("NODE_EXECUTABLE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            if cfg!(windows) {
-                PathBuf::from(r"C:\Program Files\nodejs\node.exe")
-            } else {
-                PathBuf::from("/usr/bin/node")
-            }
+    if let Some(value) = std::env::var_os("NODE_EXECUTABLE") {
+        return PathBuf::from(value);
+    }
+    let path = std::env::var_os("PATH").expect("PATH is available");
+    std::env::split_paths(&path)
+        .flat_map(|directory| {
+            #[cfg(windows)]
+            let names = ["node.exe", "node"];
+            #[cfg(not(windows))]
+            let names = ["node", "node"];
+            names.map(move |name| directory.join(name))
         })
+        .find(|candidate| candidate.is_file())
+        .expect("Node 24+ is required for Plugin build executor tests")
+        .canonicalize()
+        .expect("Node path is canonical")
 }
 
 fn runtime_target() -> RuntimeTarget {

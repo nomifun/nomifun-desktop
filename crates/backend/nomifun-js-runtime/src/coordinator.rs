@@ -644,7 +644,7 @@ fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use nomifun_agent_contracts::{
@@ -809,9 +809,7 @@ mod tests {
                 source_kind: NodeRuntimeSourceKind::Managed,
                 node_version: VersionString::from("24.8.0"),
                 node_major: 24,
-                runtime_target: RuntimeTarget::from(
-                    "x86_64-pc-windows-msvc",
-                ),
+                runtime_target: RuntimeTarget::from(crate::current_runtime_target()),
                 executable_digest: DigestHex::from(
                     digest.to_string().repeat(64),
                 ),
@@ -820,9 +818,9 @@ mod tests {
                 javascript_sdk_contract_version:
                     JAVASCRIPT_SDK_CONTRACT_VERSION.into(),
             },
-            executable_path: PathBuf::from(format!(
-                r"C:\runtime-{digest}\node.exe"
-            )),
+            executable_path: std::env::temp_dir()
+                .join(format!("nomifun-js-runtime-coordinator-{digest}"))
+                .join(if cfg!(windows) { "node.exe" } else { "node" }),
             disposition: NodeProbeDisposition::CompatibleRecommended,
         }
     }
