@@ -1101,3 +1101,79 @@ Extension 命中仅属于历史删除合同、负向 404 测试、通用语义�
    lifecycle 只在调用者提供当前 source 的明确 Host/endpoint 后运行。这样 package helper
    不会把另一份旧 debug binary 的 Catalog 漂移错误归因给已锁定的签名 Desktop 制品，
    也不会把未执行的产品 journey 冒充 PASS。
+
+## 2026-09-11 macOS 全重构扩展验收与二次修正
+
+1. 已逐文件全文读取本规格目录 25 个文件、14,065 行，并以 05、06、GLOBAL、PHASE 和
+   DECISIONS 的当前覆盖关系审查本分支相对 `main` 的 1,446 个改动文件。默认产品路径仍是
+   `NomiCoreApplication`；Fresh-v4/Codex 研究线不进入当前包，也不作为 macOS 启动前提。
+2. `cargo test --workspace --no-run --jobs 1` 首次发现旧 Extension 被物理删除后，
+   `content_e2e_suite` 仍引用不存在的 `extension_e2e.rs`。失效聚合项已删除，测试目录自身的
+   exact inventory 回归与整个 workspace 测试编译均通过。随后 82 项 content E2E 中 81 项
+   直接通过；唯一失败是 Creative Studio 可永久删除资源已改成 `private, no-store`，旧 E2E
+   仍期待一小时缓存。断言已与当前删除语义收口，失败项定向复验通过。
+3. Desktop `nfagent` 缓存 containment 存在另一处 macOS `/var -> /private/var` 别名错误：
+   root 被 canonicalize 后仍与 lexical child 比较，导致合法缓存下载在发请求前被误判越界，
+   测试 server 随后等待不存在的请求。当前实现先在 requested/canonical root 下取得相对路径，
+   再从 canonical root 逐级拒绝 symlink/越界；Darwin 别名、坏缓存替换、下载失败 staging
+   清理及 Desktop 73 项全量测试均通过。
+4. Plugin Build Host 原先自行维护 Windows `taskkill` 与 Unix process group kill，违反全仓
+   唯一 `nomi-process-runtime` owner。当前已改为 `ChildProcessBuilder` /
+   `ManagedChildProcess`，同步 authoring API 使用独立 current-thread Tokio driver，正常退出、
+   cancel 与 timeout 都必须先取得共享进程树 cleanup proof。真实 Node Build、异步 Runtime
+   validation、12 项 bundler/resolver 回归和 `check:process-runtime-boundary` 均通过。
+5. Stricter ContributionLock 校验还暴露 Browser/Computer native Role 与 Wave 5
+   `schedule.store` fixture 仍保存空 lock。三处 fixture 现均从 materialized registry 取得 exact
+   contribution lock；Wave support/1-5 共 63 项、Kernel 28 项、Control Plane 23 项、
+   AgentPlatform 24 项全部通过。真实 Apple Silicon Chrome 已完成 canonical
+   `observe -> navigate -> act -> render_content -> cleanup`，并额外证明稳定 profile 与整棵
+   Chromium 进程树正常清理。
+6. macOS 原生进程层完成 130 项 unit、102 项 integration 测试，覆盖 Darwin watchdog、
+   kqueue、parent-death、Seatbelt、pipe/PTY、取消、超时和 descendant cleanup；N1/M1 六个
+   核心 crate 的普通测试全部通过，公网 Node/npm 两项保持显式 ignored，官方 Node live 下载
+   已在上一 checkpoint 单独通过。Desktop-feature App lib 为 `560 passed / 3 ignored / 0 failed`，
+   Computer 为 `82 passed / 7 permission/UI ignored / 0 failed`，UI 为 `3318 passed / 0 failed`，
+   production build、i18n/theme/icons/dead-css、Browser/automation/vocabulary 与 contract/gate
+   self-test 全部通过。
+7. 当前仍有两个不能伪造关闭的外部边界：本机处于锁屏状态，原生 UI 可访问性/视觉与真实
+   Computer TCC 动作不能执行；`nfagent` v0.1.0 及其当前上游 `main` 只接受 `-token`，没有
+   stdin、继承 FD 或 token-file 接口，Desktop 首次 enrol 的一次性 token 因而仍会出现在
+   child argv。后者需要先修改、发布并锁定新的 nfagent 上游制品，再由 Desktop 切换到安全
+   credential channel；不得用环境变量、日志遮蔽或旧二进制宣称已修复。
+8. 本轮继续产生产品代码、测试和 Cargo/contract digest 修改，因此此前
+   `aaaed14c67027d9d9375305fcb4f96718331e547` 的签名 macOS Artifact/release lock 只能作为
+   历史工程证据；不生成 candidate/signed_rc PASS record。Windows 必须在本轮最终新 HEAD
+   重新运行 Signed RC 并提供新的 `FINAL_SOURCE_COMMIT/COHORT_ID`，macOS 才能重新构建同一
+   cohort 的签名、公证制品并完成 RC-MA-01。
+9. SSH/SFTP 原生回归发现两处宿主假设：SFTP 把 canonical `/tmp` 固定断言为 `/tmp`，而
+   macOS 返回 `/private/tmp`；测试现与宿主 physical canonical path 比较。共享 Shell 在已观测
+   channel 断开后又把后续调用降成 `Protocol`，使连接池无法稳定 redial；当前持久区分
+   `Disconnected` 与取消/恢复失败的 `UnknownOutcome`，完整共享 SSH 39 项及 backend
+   dial-error 回归通过。
+10. backend SSH 测试夹具原先只从 Linux `/proc` 枚举 descendants；macOS 停止 listener 后
+    `sshd-session` 仍存活，旧连接继续呈现 Connected。夹具现通过跨平台 `sysinfo` snapshot
+    建立并在 signal 前复核 exact `(pid, ppid, sshd identity)`，仍禁止盲目 process-group kill；
+    pool lifecycle 17 项在 macOS 全部通过，未留下 session descendant。
+11. Python runtime probe 的旧均分预算会让损坏的高优先级候选在负载较高的 macOS 上吃掉
+    fallback 时间。当前所有非最终候选最多使用 500 ms slot，最后一个 fallback 获得剩余总
+    预算，整体 2 秒 deadline 与 cleanup grace 不变；定向 hanging candidate 连续 5 次、
+    `nomi-tools` 316 项均通过。
+12. 全 workspace 顺序回归继续修正了多处已漂移的跨平台/合同测试：Bearer 与 cookie CSRF
+    边界分开；Browser Catalog 的 materialized/unavailable 必须匹配 `browser-use` feature；
+    Channel 测试对齐 Extension 物理退役错误；DB lifecycle 从 embedded `MIGRATOR` 推导当前
+    migration head，不再硬编码 81；Windows drive-relative Skill premise 只在 Windows 执行，
+    `.` 删除防线改用平台中立 Path 语义。Terminal 高吞吐输出还暴露 overall deadline 与 quiet
+    timer 同时 ready 时的随机 `Idle`，现以 biased select 保证 overall Timeout 优先；该回归连续
+    5 次、Terminal 140 项全部通过。
+13. UI 静态门禁发现 Plugin/MiniApp 新页面仍有 TypeScript 合同漂移：测试使用未被当前 matcher
+    类型声明支持的 `toContain`，Source failure fixture 缺 `kind`，auto-Apply 使用不存在的
+    `resource` failure kind，Arco `Alert` 又被直接传入不支持的 DOM ARIA 属性。当前统一到
+    `PluginLoadFailure.error`，ARIA live/alert 语义由真实 DOM wrapper 承担；typecheck、UI
+    3318 项与 production build 全部通过。新增的 Windows Signed RC/cohort/N1 Gate 脚本也已
+    登记到 help registry，`bun run check` 全绿。
+14. 最终本机执行
+    `cargo test --workspace --locked --quiet -- --test-threads=1`，所有普通 Rust test binary 与
+    doctest 以 exit 0 完成；`agent-v2-contract write/check`、61 个 contract-closure payload、
+    macOS build/release/native helper 16 项、Agent-v2/Plugin-N1/cohort self-test 均通过。
+    正式 AP-7 admission 仍必须在提交后的 clean HEAD 运行；锁屏所阻塞的 Desktop 视觉/TCC、
+    上游 nfagent 安全 credential channel、以及新 Windows cohort 不得被上述自动回归替代。

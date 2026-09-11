@@ -122,7 +122,7 @@ describe('Plugin Share export dialog', () => {
       destination_path: 'C:\\exports\\Share Plugin-share',
       include_source: true,
     });
-    expect(JSON.stringify(request)).not.toContain('credential');
-    expect(JSON.stringify(request)).not.toContain('data_dir');
+    expect(JSON.stringify(request).includes('credential')).toBe(false);
+    expect(JSON.stringify(request).includes('data_dir')).toBe(false);
   });
 });

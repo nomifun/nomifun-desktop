@@ -69,7 +69,7 @@ describe('Plugin dependency dialog', () => {
     const dialog = within(document.body);
     await dialog.findByRole('dialog', { name: 'Update Plugin dependencies' });
     const input = dialog.getByLabelText('Direct dependencies (JSON)') as HTMLTextAreaElement;
-    expect(input.value).toContain('"existing": "1.0.0"');
+    expect(input.value.includes('"existing": "1.0.0"')).toBe(true);
     fireEvent.input(input, {
       target: { value: '{"alpha":"^1.0.0"}' },
     });

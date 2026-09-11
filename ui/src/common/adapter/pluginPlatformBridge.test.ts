@@ -349,8 +349,8 @@ describe('Plugin Platform bridge', () => {
         body: request,
       },
     ]);
-    expect(JSON.stringify(calls[0]?.body)).not.toContain('credential');
-    expect(JSON.stringify(calls[0]?.body)).not.toContain('data_dir');
+    expect(JSON.stringify(calls[0]?.body).includes('credential')).toBe(false);
+    expect(JSON.stringify(calls[0]?.body).includes('data_dir')).toBe(false);
   });
 
   test('imports a Share Bundle through the same Ready Candidate boundary', async () => {

@@ -27,7 +27,6 @@ const KNOWLEDGE_SOURCE_IDENTITY: &str =
     include_str!("../migrations/055_knowledge_source_identity.sql");
 const PUBLISHED_KNOWLEDGE_SOURCE_IDENTITY_CHECKSUM: &str =
     "08567374a7c524c9550ac3cb4dbd4043ca485481457c23cc84484389a86867b00637db9182061029743f4e9f8530f8a1";
-const CURRENT_PUBLISHED_MIGRATION_VERSION: i64 = 81;
 const CONVERSATION_TURN_AUTHORITY: &str =
     include_str!("../migrations/008_conversation_turn_authority.sql");
 const REQUIREMENT_CLAIM_CAPABILITIES: &str =
@@ -45,6 +44,14 @@ const ROBOT_STAGE_DIRECTION_BACKFILL: &str =
 const AUTOWORK_PROVENANCE_CONFLICT_NOTE: &str = "AutoWork did not start another turn because \
     durable Conversation state is ambiguous: AutoWork Requirement authority was revoked, \
     superseded, or targets another Conversation. Explicit reset or human review is required.";
+
+fn current_published_migration_version() -> i64 {
+    MIGRATOR
+        .iter()
+        .map(|migration| migration.version)
+        .max()
+        .expect("the embedded migration set is non-empty")
+}
 
 fn executable_baseline_sql() -> String {
     BASELINE
@@ -199,7 +206,7 @@ async fn v55_prefix_is_read_only_supported_then_file_init_applies_latest_suffix(
         .fetch_one(upgraded.pool())
         .await
         .unwrap();
-    assert_eq!(latest, CURRENT_PUBLISHED_MIGRATION_VERSION);
+    assert_eq!(latest, current_published_migration_version());
     let checksum_after_upgrade: Vec<u8> =
         sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = 55")
             .fetch_one(upgraded.pool())
@@ -557,7 +564,7 @@ async fn published_provider_output_limit_lineage_upgrades_in_place() {
         .fetch_one(upgraded.pool())
         .await
         .unwrap();
-    assert_eq!(latest, CURRENT_PUBLISHED_MIGRATION_VERSION);
+    assert_eq!(latest, current_published_migration_version());
     let creative_studio_tables: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_schema \
          WHERE type = 'table' AND name IN (\

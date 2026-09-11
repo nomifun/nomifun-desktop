@@ -659,33 +659,25 @@ const MiniAppTransferDialog: React.FC<MiniAppTransferDialogProps> = ({
               </div>
             )}
 
-            <Alert
-              type='info'
-              showIcon
-              role='status'
-              aria-live='polite'
-              content={t('miniApps.transfer.import.backendAuthority')}
-            />
+            <div role='status' aria-live='polite' aria-atomic='true'>
+              <Alert
+                type='info'
+                showIcon
+                content={t('miniApps.transfer.import.backendAuthority')}
+              />
+            </div>
           </>
         )}
 
         {validationError && (
-          <Alert
-            type='warning'
-            showIcon
-            role='alert'
-            aria-live='assertive'
-            content={validationError}
-          />
+          <div role='alert' aria-atomic='true'>
+            <Alert type='warning' showIcon content={validationError} />
+          </div>
         )}
         {requestError && (
-          <Alert
-            type='error'
-            showIcon
-            role='alert'
-            aria-live='assertive'
-            content={requestError}
-          />
+          <div role='alert' aria-atomic='true'>
+            <Alert type='error' showIcon content={requestError} />
+          </div>
         )}
       </div>
     </TransferModal>

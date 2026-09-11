@@ -224,11 +224,13 @@ async fn t12_2_csrf_blocks_post_without_token() {
     let (mut app, services) = build_app().await;
     let (token, _csrf) = setup_and_login(&mut app, &services, "admin", "StrongP@ss1").await;
 
-    // POST to a CSRF-guarded mutation without the token → 403
+    // An ambient session cookie on a CSRF-guarded mutation without the
+    // double-submit token is rejected. Non-ambient Bearer requests are tested
+    // separately and intentionally bypass this browser-cookie boundary.
     let req = Request::builder()
         .method("POST")
         .uri("/api/auth/change-password")
-        .header("authorization", format!("Bearer {token}"))
+        .header("cookie", format!("nomifun-session={token}"))
         .body(Body::empty())
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();

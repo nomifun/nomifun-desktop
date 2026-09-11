@@ -17,7 +17,6 @@ macro_rules! grouped_tests {
 grouped_tests!(
     assets_e2e => "../assets_e2e.rs",
     builtin_asset_contract => "../builtin_asset_contract.rs",
-    extension_e2e => "../extension_e2e.rs",
     file_e2e => "../file_e2e.rs",
     office_e2e => "../office_e2e.rs",
     shell_e2e => "../shell_e2e.rs",

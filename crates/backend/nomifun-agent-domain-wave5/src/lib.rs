@@ -2279,7 +2279,11 @@ mod tests {
             instructions: "Invoke the selected capability.".to_owned(),
             starter_prompts: Vec::new(),
         };
-        let contribution_locks = Vec::new();
+        let contribution_locks = vec![materialized
+            .capability(&CapabilityId::from(SCHEDULE_STORE))
+            .expect("selected schedule.store capability is materialized")
+            .contribution_lock
+            .clone()];
         let mut revision = AgentPresetRevision {
             reference: PresetRevisionRef {
                 preset_id: AgentPresetId::from("wave5-test"),
