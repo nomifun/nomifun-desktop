@@ -38,6 +38,7 @@ export function resolveAgentDisplayName(
   snapshot: AgentResolvedSnapshot | null,
 ): string {
   return (
+    (conversation.extra as { agent_name?: string } | undefined)?.agent_name?.trim() ||
     snapshot?.preset_name?.trim() ||
     conversation.name?.trim() ||
     'Agent'

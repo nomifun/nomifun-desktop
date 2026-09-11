@@ -71,6 +71,7 @@ fn canonical_surfaces_are_traceable_to_the_app_local_route_definitions() {
     for path in [
         "/api/agent-sessions",
         "/api/agent-sessions/{agent_session_id}",
+        "/api/agent-sessions/{agent_session_id}/preset",
         "/api/remote/open",
         "/api/remote/turn",
         "/api/remote/observe",

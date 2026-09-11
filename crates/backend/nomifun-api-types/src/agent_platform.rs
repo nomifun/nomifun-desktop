@@ -881,6 +881,22 @@ pub struct CreateAgentSessionResponseDto {
     pub cursor: SessionCursorDto,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SwitchAgentSessionPresetRequestDto {
+    #[serde(deserialize_with = "crate::serde_util::deserialize_preset_id")]
+    pub preset_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SwitchAgentSessionPresetResponseDto {
+    pub agent_session_id: String,
+    pub agent_binding: AgentBindingValueDto,
+    pub state: String,
+    pub cursor: SessionCursorDto,
+}
+
 /// Product selection only; route, protocol and credential facts are host-owned.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -13,3 +13,13 @@
 
 Agent 的资源控件仍依据 Snapshot 声明显示。不能把“具有 preset_id”重新解释为
 “禁止用户切换模型”。执行任务的只读记录与创意工坊专属会话仍由各自边界管理。
+
+## 会话内切换 Agent
+
+普通 AgentSession 还允许在同一会话中切换官方或个人 Agent。服务端使用当前模型
+解析目标 Agent 的稳定绑定，等待旧运行时退出后，原子替换会话的 Preset lineage、
+Snapshot、工具白名单和内部 Session binding。会话 ID、标题、消息历史、Workspace、
+当前模型和协作设置保持不变；下一条消息从完整历史中恢复并按新 Agent 执行。
+
+官方模板在切换前只生成可复用的内部运行配置，不进入“我的 Agent”。Remote、
+AgentExecution 只读记录及非 Nomi 会话不开放这项更新。

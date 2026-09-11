@@ -3126,6 +3126,107 @@ async fn run_product_chain(
     let (preset_id, _source_binding) =
         create_agent_preset(router, &provider_id, STEPFUN_SOURCE_MODEL).await?;
 
+    let before_agent_switch = successful_json(
+        router,
+        "session.before_agent_switch",
+        Method::GET,
+        format!("/api/conversations/{minimal_session}"),
+        None,
+        LOCAL_API_DEADLINE,
+        &[StatusCode::OK],
+    )
+    .await?;
+    let before_agent_switch = envelope_data("session.before_agent_switch", before_agent_switch)?;
+    let history_before_agent_switch = session_messages_after(
+        router,
+        "session.agent_switch_history_before",
+        &minimal_session,
+        0,
+    )
+    .await?
+    .0;
+    successful_json(
+        router,
+        "session.switch_agent",
+        Method::PUT,
+        format!("/api/agent-sessions/{minimal_session}/preset"),
+        Some(json!({"preset_id": preset_id})),
+        TURN_COMMAND_DEADLINE,
+        &[StatusCode::OK],
+    )
+    .await?;
+    let after_agent_switch = successful_json(
+        router,
+        "session.after_agent_switch",
+        Method::GET,
+        format!("/api/conversations/{minimal_session}"),
+        None,
+        LOCAL_API_DEADLINE,
+        &[StatusCode::OK],
+    )
+    .await?;
+    let after_agent_switch = envelope_data("session.after_agent_switch", after_agent_switch)?;
+    if after_agent_switch.get("conversation_id") != before_agent_switch.get("conversation_id")
+        || after_agent_switch.get("name") != before_agent_switch.get("name")
+        || after_agent_switch.get("model") != before_agent_switch.get("model")
+        || before_agent_switch.pointer("/extra/agent_name")
+            != Some(&Value::String("Minimal".to_owned()))
+        || after_agent_switch.pointer("/extra/agent_name")
+            != Some(&Value::String("Live Step Plan product smoke".to_owned()))
+        || after_agent_switch.pointer("/agent_snapshot/preset_name")
+            != Some(&Value::String("Live Step Plan product smoke".to_owned()))
+        || after_agent_switch.get("agent_snapshot") == before_agent_switch.get("agent_snapshot")
+    {
+        return Err(SmokeFailure::new(
+            "session.switch_agent",
+            "SESSION_AGENT_SWITCH_CONTRACT_MISMATCH",
+            StatusCode::CONFLICT.as_u16(),
+        ));
+    }
+    let agent_switch_cursor = session_message_cursor(
+        router,
+        "session.agent_switch_cursor",
+        &minimal_session,
+    )
+    .await?;
+    start_session_turn(
+        router,
+        "session.agent_switched_turn",
+        &minimal_session,
+        &uuid::Uuid::now_v7().to_string(),
+        format!(
+            "The earlier conversation contains {GUID_INITIAL_MARKER}. If you can see that history, reply with exactly NOMIFUN_AGENT_SWITCH_OK and no other text. Do not call tools."
+        ),
+    )
+    .await?;
+    wait_for_session_marker(
+        router,
+        "session.agent_switched_reply",
+        &minimal_session,
+        agent_switch_cursor,
+        "NOMIFUN_AGENT_SWITCH_OK",
+        TURN_RESULT_DEADLINE,
+    )
+    .await?;
+    let history_after_agent_switch = session_messages_after(
+        router,
+        "session.agent_switch_history_after",
+        &minimal_session,
+        0,
+    )
+    .await?
+    .0;
+    if history_before_agent_switch
+        .iter()
+        .any(|message| !history_after_agent_switch.contains(message))
+    {
+        return Err(SmokeFailure::new(
+            "session.agent_switch_history_after",
+            "SESSION_AGENT_SWITCH_LOST_HISTORY",
+            StatusCode::CONFLICT.as_u16(),
+        ));
+    }
+
     let (session_id, binding) =
         create_session(router, &preset_id, &provider_id, model).await?;
     warm_guid_session(router, &session_id).await?;

@@ -5210,6 +5210,146 @@ impl ConversationService {
         Ok(response)
     }
 
+    /// Replace the AgentPreset snapshot of an existing Nomi conversation while
+    /// retaining its identity, messages, workspace, current model and
+    /// conversation-scoped settings. This is a trusted AgentSession operation;
+    /// public Conversation PATCH cannot submit snapshot or lineage fields.
+    pub async fn replace_agent_preset_snapshot(
+        &self,
+        user_id: &str,
+        id: &str,
+        snapshot: AgentResolvedSnapshot,
+        replacement_runtime_extra: serde_json::Value,
+    ) -> Result<ConversationResponse, AppError> {
+        let conversation_id = parse_conv_id(id)?;
+        let initial = self
+            .conversation_repo
+            .get(conversation_id)
+            .await?
+            .filter(|row| row.user_id == user_id)
+            .ok_or_else(|| AppError::NotFound(format!("Conversation {id} not found")))?;
+        if string_to_enum::<AgentType>(&initial.r#type)? != AgentType::Nomi {
+            return Err(AppError::BadRequest(
+                "AgentPreset switching is supported only for Nomi conversations".to_owned(),
+            ));
+        }
+        let current_model = initial
+            .model
+            .as_deref()
+            .map(parse_provider_with_model)
+            .transpose()?
+            .ok_or_else(|| AppError::BadRequest("Nomi conversation has no current model".to_owned()))?;
+        let current_lead = conversation_lead_model(&current_model)?;
+        if snapshot.resolved_model.as_ref() != Some(&current_lead) {
+            return Err(AppError::BadRequest(
+                "replacement Agent snapshot must be resolved for the conversation's current model"
+                    .to_owned(),
+            ));
+        }
+        if snapshot.resolved_agent_type.as_deref() != Some(AgentType::Nomi.serde_name()) {
+            return Err(AppError::BadRequest(
+                "replacement Agent snapshot must resolve to the Nomi runtime".to_owned(),
+            ));
+        }
+        let replacement_object = replacement_runtime_extra.as_object().ok_or_else(|| {
+            AppError::BadRequest("replacement Agent runtime extra must be an object".to_owned())
+        })?;
+
+        let lease = self.begin_public_runtime_preparation(id, user_id)?;
+        let cancellation = lease.cancellation_token();
+        let _guard = self
+            .runtime_state
+            .acquire_preparation_gate(conversation_id, &cancellation)
+            .await?;
+        lease.ensure_active()?;
+        self.ensure_not_retained_execution_attempt(user_id, &conversation_id)
+            .await?;
+        Self::terminate_runtime_with_proof(
+            &self.runtime_registry,
+            id,
+            AgentKillReason::ConfigurationChanged,
+            "AgentPreset switch",
+        )
+        .await?;
+        lease.ensure_active()?;
+
+        let existing = self
+            .conversation_repo
+            .get(conversation_id)
+            .await?
+            .filter(|row| row.user_id == user_id)
+            .ok_or_else(|| AppError::NotFound(format!("Conversation {id} not found")))?;
+        let mut extra: serde_json::Value = serde_json::from_str(&existing.extra).map_err(|error| {
+            AppError::Internal(format!("Conversation {id} has invalid extra JSON: {error}"))
+        })?;
+        let object = extra.as_object_mut().ok_or_else(|| {
+            AppError::Internal(format!("Conversation {id} extra must be a JSON object"))
+        })?;
+        for key in [
+            "system_prompt",
+            "allowed_tools",
+            "enforce_tool_allowlist",
+            "deferred_tools",
+            "browser_use",
+            "computer_use",
+            "nomi_core_session",
+            "agent_name",
+        ] {
+            object.remove(key);
+            if let Some(value) = replacement_object.get(key) {
+                object.insert(key.to_owned(), value.clone());
+            }
+        }
+        object.remove("preset_rules");
+        object.remove("preset_context");
+        object.remove("preset_instructions_embedded");
+
+        let auto_inject = if self.execution_authority(user_id).controls_host() {
+            self.skill_resolver.auto_inject_names().await
+        } else {
+            Vec::new()
+        };
+        let skills = compute_initial_skills(
+            &auto_inject,
+            &snapshot.included_skills,
+            &snapshot.excluded_auto_skills,
+        );
+        object.insert(
+            "skills".to_owned(),
+            serde_json::Value::Array(
+                skills.into_iter().map(serde_json::Value::String).collect(),
+            ),
+        );
+
+        let preset_id = snapshot.preset_id.clone();
+        let preset_revision = snapshot.preset_revision;
+        let updates = ConversationRowUpdate {
+            extra: Some(serde_json::to_string(&extra).map_err(|error| {
+                AppError::Internal(format!("Failed to serialize AgentPreset switch: {error}"))
+            })?),
+            preset_id: Some(Some(preset_id)),
+            preset_revision: Some(Some(preset_revision)),
+            agent_snapshot: Some(Some(serde_json::to_string(&snapshot).map_err(|error| {
+                AppError::Internal(format!("Failed to serialize replacement Agent snapshot: {error}"))
+            })?)),
+            updated_at: Some(now_ms()),
+            ..Default::default()
+        };
+        lease.ensure_active()?;
+        self.conversation_repo.update(conversation_id, &updates).await?;
+        self.runtime_state.clear_knowledge_signature(id);
+
+        let updated = self
+            .conversation_repo
+            .get(conversation_id)
+            .await?
+            .ok_or_else(|| AppError::Internal("Conversation vanished after AgentPreset switch".into()))?;
+        let mut response = row_to_response(updated, &self.workspace_root)?;
+        self.project_execution_relation(user_id, &mut response).await?;
+        self.broadcast_list_changed(user_id, id, "updated", response.source.as_ref());
+        Ok(response)
+    }
+
     /// Merge backend-owned Agent metadata into `conversation.extra` without
     /// touching the typed conversation fields or terminating its runtime.
     ///
