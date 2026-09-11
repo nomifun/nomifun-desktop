@@ -18,7 +18,7 @@ export function officialAgentLaunchError(error: unknown, t: TFunction): string {
   return t('guid.agentEntries.launchFailed');
 }
 
-/** Selection itself is local. Prepare a stable configuration only on send. */
+/** Prepare an internal session configuration without adding a personal Agent. */
 export async function prepareOfficialAgent(
   template: OfficialPresetTemplate,
   displayName: string,

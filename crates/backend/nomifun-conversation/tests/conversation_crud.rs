@@ -878,7 +878,7 @@ async fn update_accepts_top_level_model_for_nomi() {
 }
 
 #[tokio::test]
-async fn update_rejects_top_level_model_for_preset_nomi() {
+async fn update_switches_preset_conversation_model_without_rewriting_snapshot() {
     let (svc, _, runtime_registry) = setup().await;
     let snapshot = make_preset_snapshot("gpt-4o");
     let preset_id = snapshot.preset_id.clone();
@@ -898,16 +898,17 @@ async fn update_rejects_top_level_model_for_preset_nomi() {
         }
     }))
     .unwrap();
-    let error = svc
+    let updated = svc
         .update(USER_ID, &conv.conversation_id, req, &runtime_registry)
         .await
-        .unwrap_err();
-
-    assert!(
-        matches!(error, AppError::BadRequest(message) if message.contains("immutable for AgentPreset conversations"))
-    );
-    let unchanged = svc.get(USER_ID, &conv.conversation_id).await.unwrap();
-    assert_eq!(unchanged.model.unwrap().model, "gpt-4o");
+        .unwrap();
+    assert_eq!(updated.model.as_ref().unwrap().model, "gpt-4o-mini");
+    let reloaded = svc.get(USER_ID, &conv.conversation_id).await.unwrap();
+    assert_eq!(reloaded.model.unwrap().model, "gpt-4o-mini");
+    assert_eq!(reloaded.preset_id, conv.preset_id);
+    assert_eq!(reloaded.preset_revision, conv.preset_revision);
+    assert_eq!(serde_json::to_value(reloaded.agent_snapshot).unwrap(),
+        serde_json::to_value(conv.agent_snapshot).unwrap());
 }
 
 #[tokio::test]

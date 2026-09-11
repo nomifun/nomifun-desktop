@@ -125,8 +125,6 @@ const NomiSendBox: React.FC<{
   turnActivity: NomiMessageRuntime;
   /** Hide model and other editable controls on locked surfaces. */
   hideAdvancedControls?: boolean;
-  /** Show the frozen AgentPreset model as read-only while preserving other tools. */
-  modelLocked?: boolean;
   /** Conversation collaborator-model control, rendered after the main model. */
   collaboratorSelectorNode?: React.ReactNode;
   /**
@@ -141,7 +139,6 @@ const NomiSendBox: React.FC<{
   agent_name,
   turnActivity,
   hideAdvancedControls,
-  modelLocked = false,
   collaboratorSelectorNode,
   extraRightTools,
 }) => {
@@ -417,10 +414,8 @@ const NomiSendBox: React.FC<{
     onExecute: executeCommand,
   });
 
-  // Handle the Guid handoff only after passive warmup owns a ready runtime.
-  // Mounting used to start warmup and the initial delivery concurrently; on a
-  // slower Agent/model initialization the first message could race the runtime
-  // build and persist a retryable internal-error turn.
+  // Handle the Guid handoff only after passive warmup has settled.
+  // This sequences the UI requests; runtime admission remains backend-owned.
   useEffect(() => {
     if (!conversation_id || !current_model?.use_model || !agentWarmed) return;
 
@@ -717,9 +712,6 @@ const NomiSendBox: React.FC<{
     const currentModelLabel = modelSelection.current_model?.use_model || t('conversation.welcome.selectModel');
 
     const entries: MobileActionSheetEntry[] = [
-      // AgentPreset surfaces still expose the frozen model identity; they only
-      // omit the mutation submenu because changing it would invalidate the
-      // immutable Session snapshot.
       ...(hideAdvancedControls
         ? []
         : [
@@ -728,16 +720,12 @@ const NomiSendBox: React.FC<{
               icon: <Brain theme='outline' size='16' />,
               label: t('common.model', { defaultValue: 'Model' }),
               meta: currentModelLabel,
-              ...(modelLocked
-                ? {}
-                : {
-                    submenu: {
-                      title: t('common.model', { defaultValue: 'Model' }),
-                      options: modelOptions,
-                      onSelect: handleSheetModelSelect,
-                      emptyText: t('conversation.welcome.selectModel'),
-                    },
-                  }),
+              submenu: {
+                title: t('common.model', { defaultValue: 'Model' }),
+                options: modelOptions,
+                onSelect: handleSheetModelSelect,
+                emptyText: t('conversation.welcome.selectModel'),
+              },
             },
           ]),
       ...attachEntries,
@@ -795,7 +783,6 @@ const NomiSendBox: React.FC<{
     handleSheetModelSelect,
     hideAdvancedControls,
     isMobile,
-    modelLocked,
     loadedMcpStatuses,
     loadedSkills,
     modelSelection,
@@ -948,7 +935,6 @@ const NomiSendBox: React.FC<{
               )}
               <NomiModelSelector
                 selection={modelSelection}
-                disabled={modelLocked}
                 className='nomi-sendbox-model-btn'
               />
               {collaboratorSelectorNode}

@@ -5002,17 +5002,9 @@ impl ConversationService {
                 existing.r#type
             )));
         }
-        if existing_type == AgentType::Nomi
-            && req.model.is_some()
-            && (existing.preset_id.is_some()
-                || existing.preset_revision.is_some()
-                || existing.agent_snapshot.is_some())
-        {
-            return Err(AppError::BadRequest(
-                "top-level `model` is immutable for AgentPreset conversations; create a new conversation to use another model"
-                    .to_owned(),
-            ));
-        }
+        // The preset snapshot records creation-time instructions/capabilities
+        // and the initial model. The conversation model is the current runtime
+        // selection and can change without rewriting that immutable snapshot.
 
         let now = now_ms();
 
