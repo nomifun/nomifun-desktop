@@ -1,43 +1,49 @@
 //! Bounded Linux startup-shell probing; no reader thread may outlive startup.
 
-use std::io::{ErrorKind, Read};
+use std::io::{self, ErrorKind};
 use std::os::fd::AsRawFd;
-use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
+
+use nomi_process_runtime::{ChildProcessBuilder, ManagedChildProcess};
 
 const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 
-struct ProbeChild(Child);
+struct ProbeChild {
+    process: ManagedChildProcess,
+    runtime: tokio::runtime::Runtime,
+}
 
 impl Drop for ProbeChild {
     fn drop(&mut self) {
-        // The child was spawned in its own process group. Clean up ordinary
-        // startup-file descendants even if the shell has already exited.
-        // This is lifecycle cleanup, not a sandbox against a setsid escape.
-        unsafe {
-            libc::kill(-(self.0.id() as libc::pid_t), libc::SIGKILL);
-        }
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        // The shared owner reaps the direct shell and proves its whole process
+        // tree empty, including startup-file descendants that retain stdout.
+        let _ = self.runtime.block_on(self.process.shutdown());
     }
 }
 
 pub(super) fn run(shell: &str, home_override: Option<&Path>, timeout: Duration) -> Option<String> {
     let start = Instant::now();
-    let mut command = Command::new(shell);
-    command
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    let mut builder = ChildProcessBuilder::new(shell);
+    builder
         .args(["-i", "-l", "-c", super::PATH_PROBE_SNIPPET])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .process_group(0);
+        .stderr(Stdio::null());
     if let Some(home) = home_override {
-        command.env("HOME", home).env_remove("ZDOTDIR");
+        builder.env("HOME", home).env_remove("ZDOTDIR");
     }
-    let mut child = ProbeChild(command.spawn().ok()?);
-    let mut stdout = child.0.stdout.take()?;
+    let process = {
+        let _runtime = runtime.enter();
+        builder.spawn_managed().ok()?
+    };
+    let mut child = ProbeChild { process, runtime };
+    let stdout = child.process.child_mut().stdout.take()?;
     // The pipe is owned exclusively here. Nonblocking reads let the one
     // startup thread enforce the deadline even if descendants retain stdout.
     let flags = unsafe { libc::fcntl(stdout.as_raw_fd(), libc::F_GETFL) };
@@ -54,7 +60,7 @@ pub(super) fn run(shell: &str, home_override: Option<&Path>, timeout: Duration) 
             tracing::warn!("Linux login shell PATH probe timed out");
             return None;
         }
-        let drained = match stdout.read(&mut buffer) {
+        let drained = match read_nonblocking(stdout.as_raw_fd(), &mut buffer) {
             Ok(0) => true,
             Ok(length) => {
                 if output.len() + length > MAX_OUTPUT_BYTES {
@@ -69,7 +75,7 @@ pub(super) fn run(shell: &str, home_override: Option<&Path>, timeout: Duration) 
             Err(_) => return None,
         };
         if status.is_none() {
-            status = child.0.try_wait().ok()?;
+            status = child.process.child_mut().try_wait().ok()?;
         }
         if let Some(status) = status {
             if !status.success() {
@@ -84,6 +90,15 @@ pub(super) fn run(shell: &str, home_override: Option<&Path>, timeout: Duration) 
         if drained {
             std::thread::sleep(Duration::from_millis(2));
         }
+    }
+}
+
+fn read_nonblocking(fd: std::os::fd::RawFd, buffer: &mut [u8]) -> io::Result<usize> {
+    let length = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
+    if length < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(length as usize)
     }
 }
 

@@ -1177,3 +1177,24 @@ Extension 命中仅属于历史删除合同、负向 404 测试、通用语义�
     macOS build/release/native helper 16 项、Agent-v2/Plugin-N1/cohort self-test 均通过。
     正式 AP-7 admission 仍必须在提交后的 clean HEAD 运行；锁屏所阻塞的 Desktop 视觉/TCC、
     上游 nfagent 安全 credential channel、以及新 Windows cohort 不得被上述自动回归替代。
+15. 验收期间远端继续推进至 `1910e221d`，已通过普通 merge 纳入，不重写共享历史；新增/修改的
+    06 与 Linux/WSL 交接文档已全文补读。合流暴露 C2/C6/C7 Gate 把 C1 后新增 migration
+    错判为修改 published migration：当前 Gate 只枚举 C1 checkpoint 当时已存在的 migration
+    并逐文件保持 bytes 不变，仍会拒绝修改/删除，但允许 additive migration。C2–C5、C6、C7
+    Gate 已分别复验通过，C9 仍因同源 C8-MERGE/D-027 未完成保持 blocked。
+16. 远端 Linux startup shell probe 曾重新自行持有 process group 并调用负 PID `kill`，违反
+    唯一 `nomi-process-runtime` owner；当前已切换到 `ChildProcessBuilder` 与
+    `ManagedChildProcess.shutdown()` 的 exact whole-tree proof，保留非阻塞 pipe、总 timeout
+    和 1 MiB 上限。macOS Runtime 43+4 项与 process boundary 通过；Linux 专属实现必须由
+    Linux lane 在新 HEAD 原生复验，不用 macOS 交叉编译替代。
+17. 合流后的 macOS 回归还发现 Linux 任意 filename bytes 测试错误地使用 `#[cfg(unix)]`，
+    APFS 对 `0xff` 路径正确返回 `EILSEQ`。非 UTF-8 bytes 前提已限定 Linux；macOS 继续覆盖
+    literal backslash 与 symlink alias，JavaScript Runtime 为 27 passed、1 个官方下载测试
+    ignored。Agent 工作台搜索改用标准 DOM `input` 事件，隐藏 Drawer 不再无条件 autofocus；
+    模板名称同时处理 DOM input 与 Arco change，branded AgentPreset ID、Video 动态 aspect
+    options、Audio SSR i18n/ARIA 合同同步修正。最终 UI 为 3333 passed、0 failed，typecheck、
+    production build 与静态 checks 全部通过。
+18. 用户随后明确采用“全局快照验收”口径：远端持续更新时不重复整仓测试，只需在一次最新
+    merge 后证明 `bun run dev` 能在真实 macOS 启动。本节前述整仓回归与故障修正作为本次
+    快照证据保留；最终交付以提交、最后一次远端合入及 dev 启动结果为准，仍不改变 cohort/
+    签名 RC 必须使用冻结输入的规则。

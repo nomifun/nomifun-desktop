@@ -1,8 +1,8 @@
 import '../../../../test/setup-dom.ts';
-import { useState } from 'react';
-import { cleanup, fireEvent, render, within, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, within, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { createInstance } from 'i18next';
+import { useState } from 'react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import {
   asCapabilityId, asPackageId, createEmptyAgentPresetDocument,
@@ -44,15 +44,22 @@ describe('Agent capability workspace', () => {
     expect(screen.queryByText('fs.read', { exact: true })).toBeNull();
   });
 
-  test('filters by search and category without changing the configured scope', () => {
+  test('filters by search and category without changing the configured scope', async () => {
     const screen = mount(documentWith([knowledge], [read]));
-    fireEvent.change(screen.getByRole('searchbox', { name: en.workbench.searchConfigured }), { target: { value: 'files' } });
-    expect(screen.queryByRole('button', { name: 'Read the knowledge base' })).toBeNull();
+    const search = screen.getByRole('searchbox', { name: en.workbench.searchConfigured });
+    search.focus();
+    await act(async () => {
+      fireEvent.input(search, { target: { value: 'files' } });
+    });
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Read the knowledge base' })).toBeNull());
     expect(screen.getByRole('button', { name: 'Read files' })).toBeTruthy();
     expect(screen.state().initial_capabilities).toHaveLength(1);
-    fireEvent.change(screen.getByRole('searchbox', { name: en.workbench.searchConfigured }), { target: { value: '' } });
+    await act(async () => {
+      fireEvent.input(screen.getByRole('searchbox', { name: en.workbench.searchConfigured }), { target: { value: '' } });
+    });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Read the knowledge base' })).toBeTruthy());
     fireEvent.click(screen.getByRole('button', { name: /^Knowledge & memory/ }));
-    expect(screen.queryByRole('button', { name: 'Read files' })).toBeNull();
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Read files' })).toBeNull());
     expect(screen.state().on_demand_capabilities).toHaveLength(1);
   });
 
@@ -149,7 +156,11 @@ describe('editable official preset', () => {
     expect((screen.getByRole('button', { name: en.workbench.saveAsMine }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: /Needs attention 1/ }));
     fireEvent.click(screen.getByRole('button', { name: en.workbench.removeUnavailable }));
-    fireEvent.change(screen.getByRole('textbox', { name: en.workbench.customName }), { target: { value: 'My assistant' } });
+    const nameInput = screen.getByRole('textbox', { name: en.workbench.customName }) as HTMLInputElement;
+    await act(async () => {
+      fireEvent.input(nameInput, { target: { value: 'My assistant' } });
+    });
+    await waitFor(() => expect(nameInput.value).toBe('My assistant'));
     expect(saved).toHaveLength(0);
     fireEvent.click(screen.getByRole('button', { name: en.workbench.saveAsMine }));
     await waitFor(() => expect(saved).toHaveLength(1));

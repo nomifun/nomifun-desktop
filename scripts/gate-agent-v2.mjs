@@ -124,6 +124,46 @@ function statSafe(path) {
   }
 }
 
+const C1_MIGRATION_CHECKPOINT =
+  '253e850b44bce83fa9b785dc6805c431201f6c91';
+const PUBLISHED_MIGRATION_ROOT = 'crates/backend/nomifun-db/migrations';
+
+function publishedMigrationPathsAt(checkpoint, runner = spawnSync) {
+  const result = runner('git', [
+    'ls-tree',
+    '-r',
+    '-z',
+    '--name-only',
+    checkpoint,
+    '--',
+    PUBLISHED_MIGRATION_ROOT,
+  ], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    shell: process.platform === 'win32',
+    stdio: 'pipe',
+  });
+  if (result.status !== 0) return null;
+  const paths = String(result.stdout || '').split('\0').filter(Boolean);
+  return paths.length > 0 ? paths : null;
+}
+
+function publishedMigrationsUnchanged(checkpoint) {
+  const paths = publishedMigrationPathsAt(checkpoint);
+  if (!paths) return false;
+  const result = spawnSync(
+    'git',
+    ['diff', '--quiet', checkpoint, '--', ...paths],
+    {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      shell: process.platform === 'win32',
+      stdio: 'pipe',
+    }
+  );
+  return result.status === 0;
+}
+
 const C8_MANIFEST_PATH =
   'docs/specs/2026-08-28-agent-capability-platform-v2/C8-WIN-PRE-MANIFEST.json';
 const C8_PLATFORM_VALIDATION_MANIFEST_PATH =
@@ -911,23 +951,7 @@ function runC2C5Gate() {
     }
   }
 
-  const migrationDiff = spawnSync(
-    'git',
-    [
-      'diff',
-      '--quiet',
-      '253e850b44bce83fa9b785dc6805c431201f6c91',
-      '--',
-      'crates/backend/nomifun-db/migrations',
-    ],
-    {
-      cwd: repoRoot,
-      encoding: 'utf8',
-      shell: process.platform === 'win32',
-      stdio: 'pipe',
-    }
-  );
-  if (migrationDiff.status !== 0) {
+  if (!publishedMigrationsUnchanged(C1_MIGRATION_CHECKPOINT)) {
     failures.push('published legacy migrations changed after the C1 checkpoint');
   }
 
@@ -1084,23 +1108,7 @@ function runC6TriadGate() {
     }
   }
 
-  const migrationDiff = spawnSync(
-    'git',
-    [
-      'diff',
-      '--quiet',
-      '253e850b44bce83fa9b785dc6805c431201f6c91',
-      '--',
-      'crates/backend/nomifun-db/migrations',
-    ],
-    {
-      cwd: repoRoot,
-      encoding: 'utf8',
-      shell: process.platform === 'win32',
-      stdio: 'pipe',
-    }
-  );
-  if (migrationDiff.status !== 0) {
+  if (!publishedMigrationsUnchanged(C1_MIGRATION_CHECKPOINT)) {
     failures.push('published legacy migrations changed after the C1 checkpoint');
   }
 
@@ -1123,8 +1131,7 @@ function runC6TriadGate() {
 function runC7DomainWavesGate() {
   const manifestPath =
     'docs/specs/2026-08-28-agent-capability-platform-v2/C7-WRITE-MANIFESTS.json';
-  const c1MigrationCheckpoint =
-    '253e850b44bce83fa9b785dc6805c431201f6c91';
+  const c1MigrationCheckpoint = C1_MIGRATION_CHECKPOINT;
   const expectedWaves = [
     {
       task_id: 'C7-W1-READ',
@@ -8480,15 +8487,20 @@ function c7PendingNativePoints() {
 }
 
 function recordC7ValidationCommands(migrationCheckpoint) {
-  const migrationArgs = [
-    'diff',
-    '--quiet',
+  const migrationPaths = publishedMigrationPathsAt(
     migrationCheckpoint,
-    '--',
-    'crates/backend/nomifun-db/migrations',
-  ];
-  const migrationResult = spawnC7Command('git', migrationArgs);
-  if (migrationResult.status !== 0) {
+    spawnC7Command
+  );
+  const migrationResult = migrationPaths
+    ? spawnC7Command('git', [
+        'diff',
+        '--quiet',
+        migrationCheckpoint,
+        '--',
+        ...migrationPaths,
+      ])
+    : null;
+  if (migrationResult?.status !== 0) {
     failures.push('published legacy migrations changed after the C1 checkpoint');
   }
 

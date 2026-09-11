@@ -932,8 +932,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn executable_identity_preserves_unix_backslashes_and_accepts_symlink_aliases() {
-        use std::os::unix::ffi::OsStringExt;
-
         let directory = tempfile::tempdir().unwrap();
         let literal = directory.path().join(r"node\bin").join("node");
         let nested = directory.path().join("node/bin/node");
@@ -948,6 +946,18 @@ mod tests {
             exact_executable_path(&alias, literal.to_str().unwrap()).unwrap(),
             std::fs::canonicalize(&literal).unwrap(),
         );
+    }
+
+    // Linux filesystems accept arbitrary non-NUL filename bytes. macOS path
+    // lookup rejects this particular ill-formed UTF-8 sequence with EILSEQ,
+    // so its native coverage stays in the valid-Unicode/backslash/symlink test
+    // above rather than pretending the Linux filesystem premise is portable.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn executable_identity_does_not_lossily_normalize_linux_filename_bytes() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let directory = tempfile::tempdir().unwrap();
         let non_utf8 = directory.path().join(std::ffi::OsString::from_vec(b"node-\xff".to_vec()));
         let replacement = directory.path().join("node-\u{fffd}");
         std::fs::write(&non_utf8, b"node").unwrap();

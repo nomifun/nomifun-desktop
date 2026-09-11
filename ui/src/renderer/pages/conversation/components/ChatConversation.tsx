@@ -408,7 +408,7 @@ const NomiConversationPanel: React.FC<{
     if (!hasPreset || agentSwitching) return;
     setAgentSwitching(true);
     try {
-      let targetPresetId: string;
+      let targetPresetId: AgentPresetId;
       let targetName: string;
       if (selection.kind === 'template') {
         const template = agentLibrary?.official_templates.find(
