@@ -3,10 +3,10 @@
   "payload": {
     "domain-wave-1-read-capabilities.json": "42c63237e09c4244e908f1d43eb90c950f9b29c3e76e4a5a22e7ede9a63f4d64",
     "domain-wave-2-coding-extensions.json": "0be103e5b9ef82d36ae560de04743ce912b90265cacb0d114eb064f12c93d651",
-    "domain-wave-3-creative-multimodal.json": "83a5bfe9809b6aec9680b917475e491e71de99a313f519af3617163565858566",
+    "domain-wave-3-creative-multimodal.json": "7f174bf023a0651dcf9c6ea3c4988565eec016333fa375bc6eff1a5795648f9f",
     "domain-wave-4-identity-channels-devices.json": "7bf21a73763116e1718806842605911e5d2ae9c1c321cdcd76ba01ef1d1c9387",
     "domain-wave-5-automation-supervision-remote.json": "4f7ee0ac0cda440459be17d5d6c320cddc48e721e5193f45c8d3e16c0dff6707",
     "triad-core.json": "caf171cb5df78794b7afece7621bb561e4537aeb3819e915efb9b4425c1521fd"
   },
-  "payload_digest": "bde07a4c614f152a57e2a76d7e23e76fc07ee098e77f18fcf42e66256193f0f9"
+  "payload_digest": "67d56ad6eced3599b3d02e78223af7fc08ad448ec70f83a9c39c7c9602d93cf8"
 }
