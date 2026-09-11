@@ -50,7 +50,7 @@ const OfficialTemplateOverview: React.FC<Props> = ({ template, busy, catalog, on
       <AgentCapabilityWorkspace document={document} catalog={catalog.capabilities} disabled={busy} onChange={setDocument} />
     </div>
     <footer className={styles.actionBar}>
-      <label className={styles.footerName}><span>{t('agentSettings.workbench.customName')}</span><Input value={displayName} maxLength={80} disabled={busy} onChange={setDisplayName} aria-label={t('agentSettings.workbench.customName')} /></label>
+      <label className={styles.footerName}><span>{t('agentSettings.workbench.customName')}</span><Input value={displayName} maxLength={80} disabled={busy} onChange={setDisplayName} onInput={(event) => setDisplayName((event.target as HTMLInputElement).value)} aria-label={t('agentSettings.workbench.customName')} /></label>
       <div className={styles.templateSaveState}><span className={blocked ? styles.statusWarningDot : styles.statusReadyDot} /><span>{t(blocked ? 'agentSettings.workbench.disabledSave' : 'agentSettings.workbench.readyToSave')}</span></div>
       <Button type='primary' icon={<Save theme='outline' size={16} />} loading={busy} disabled={busy || blocked || !displayName.trim()} onClick={() => onSave(displayName.trim(), document, t(`agentSettings.template.${path}.description`))}>{t('agentSettings.workbench.saveAsMine')}</Button>
     </footer>

@@ -149,7 +149,7 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({ document, catalog, disabled
     </div>}
 
     <div className={styles.toolbar}>
-      <label className={styles.searchField}><Search theme='outline' size={16} /><input type='search' value={search} placeholder={t('agentSettings.workbench.searchConfigured')} aria-label={t('agentSettings.workbench.searchConfigured')} onChange={(event) => setSearch(event.target.value)} /></label>
+      <label className={styles.searchField}><Search theme='outline' size={16} /><input type='search' value={search} placeholder={t('agentSettings.workbench.searchConfigured')} aria-label={t('agentSettings.workbench.searchConfigured')} onInput={(event) => setSearch(event.currentTarget.value)} /></label>
       <Select size='small' className={styles.modeFilter} value={filter} aria-label={t('agentSettings.workbench.filterStatus')} onChange={setFilter} options={[
         { value: 'all', label: t('agentSettings.workbench.allModes') },
         { value: 'initial', label: t('agentSettings.capabilities.initialShort') },
@@ -208,7 +208,7 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({ document, catalog, disabled
 
     <Drawer title={t('agentSettings.workbench.addCapabilities')} visible={pickerOpen} width='min(880px, calc(100vw - 24px))' className={styles.libraryDrawer} onCancel={() => setPickerOpen(false)} unmountOnExit footer={<div className={styles.drawerFooter}><span>{t('agentSettings.workbench.additionCount', { count: additions.size })}</span><div><Button onClick={() => setPickerOpen(false)}>{t('common.cancel')}</Button><Button type='primary' disabled={disabled || additions.size === 0} onClick={applyAdditions}>{t('agentSettings.workbench.addSelected', { count: additions.size })}</Button></div></div>}>
       <div className={styles.pickerIntro}><h3>{t('agentSettings.workbench.libraryTitle')}</h3><p>{t('agentSettings.workbench.libraryHint')}</p></div>
-      <label className={styles.searchField}><Search theme='outline' size={17} /><input autoFocus type='search' value={pickerSearch} placeholder={t('agentSettings.workbench.searchLibrary')} aria-label={t('agentSettings.workbench.searchLibrary')} onChange={(event) => setPickerSearch(event.target.value)} /></label>
+      <label className={styles.searchField}><Search theme='outline' size={17} /><input type='search' value={pickerSearch} placeholder={t('agentSettings.workbench.searchLibrary')} aria-label={t('agentSettings.workbench.searchLibrary')} onInput={(event) => setPickerSearch(event.currentTarget.value)} /></label>
       <div className={styles.pickerLayout}>
         <nav className={styles.pickerCategories} aria-label={t('agentSettings.workbench.libraryCategories')}>
           <button type='button' aria-pressed={pickerCategory === 'all'} onClick={() => setPickerCategory('all')}><Connection theme='outline' size={17} /><span>{t('agentSettings.workbench.allCategories')}</span><small>{candidates.length}</small></button>

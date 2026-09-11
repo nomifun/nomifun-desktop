@@ -49,7 +49,7 @@ describe('Guid Agent selector', () => {
       selectedLabelOverride: '当前会话 Agent',
     });
     const trigger = page.getByTestId('guid-agent-selector') as HTMLButtonElement;
-    expect(trigger.textContent).toContain('当前会话 Agent');
+    expect(trigger.textContent?.includes('当前会话 Agent')).toBe(true);
     expect(trigger.disabled).toBe(true);
   });
 

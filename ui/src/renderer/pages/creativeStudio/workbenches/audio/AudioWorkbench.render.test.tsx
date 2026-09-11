@@ -5,10 +5,21 @@
  */
 
 import { describe, expect, test } from 'bun:test';
+import { createInstance } from 'i18next';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { I18nextProvider, initReactI18next } from 'react-i18next';
 
+import creativeStudio from '@/renderer/services/i18n/locales/zh-CN/creativeStudio.json';
 import AudioWorkbench from './AudioWorkbench';
 import type { AudioWorkbenchProps, AudioWorkbenchResult, AudioWorkbenchTaskState } from './types';
+
+const testI18n = createInstance();
+await testI18n.use(initReactI18next).init({
+  lng: 'zh-CN',
+  fallbackLng: 'zh-CN',
+  resources: { 'zh-CN': { translation: { creativeStudio } } },
+  interpolation: { escapeValue: false },
+});
 
 const results: readonly AudioWorkbenchResult[] = [
   { id: 'queued', taskId: 'task-queued', status: 'queued', title: '等待中的旁白', text: '稍后开始处理' },
@@ -73,7 +84,11 @@ const baseProps: AudioWorkbenchProps = {
 };
 
 const renderWorkbench = (overrides: Partial<AudioWorkbenchProps> = {}) =>
-  renderToStaticMarkup(<AudioWorkbench {...baseProps} {...overrides} />);
+  renderToStaticMarkup(
+    <I18nextProvider i18n={testI18n}>
+      <AudioWorkbench {...baseProps} {...overrides} />
+    </I18nextProvider>
+  );
 
 describe('AudioWorkbench presentation', () => {
   test('renders the controlled composer, injected model slot and real references', () => {
@@ -84,7 +99,7 @@ describe('AudioWorkbench presentation', () => {
     expect(html.includes('data-audio-model-slot="true"')).toBe(true);
     expect(html.includes('data-speech-model-slot="true"')).toBe(true);
     expect(html.includes('朗读文本')).toBe(true);
-    expect(html.includes('模型与声音')).toBe(true);
+    expect(html.includes('模型与音色')).toBe(true);
     expect(html.includes('声音指令')).toBe(true);
     expect(html.includes('品牌主理人参考.wav')).toBe(true);
     expect(html.includes('audio/wav')).toBe(true);
