@@ -54,8 +54,7 @@ export function standaloneHistoryRuntimeSnapshot(
     runtime,
   });
   const entries = history.map((item, order): CreativeWorkbenchRuntimeEntry => {
-    if (item.runtimeEntry) return item.runtimeEntry;
-    return {
+    const entry = item.runtimeEntry ?? {
       order,
       task: item.task,
       outputs: committedWorkbenchOutputs(item.task, scope.workbenchKind, assets),
@@ -63,6 +62,7 @@ export function standaloneHistoryRuntimeSnapshot(
       retryInput: null,
       outputKind: scope.workbenchKind,
     };
+    return { ...entry, historyTaskIds: [...item.attemptTaskIds] };
   });
   return {
     ...runtime,
@@ -75,4 +75,20 @@ export function standaloneHistoryRuntimeSnapshot(
       })),
     })) : entries,
   };
+}
+
+/** Expand visible logical cards to every durable retry attempt they represent. */
+export function standaloneHistoryRetirementTaskIds(
+  runtime: Pick<CreativeWorkbenchRuntimeSnapshot, 'entries'>,
+  visibleTaskIds: readonly string[]
+): string[] {
+  const entries = new Map(runtime.entries.map((entry) => [entry.task.taskId, entry]));
+  const expanded = new Set<string>();
+  for (const taskId of visibleTaskIds) {
+    const entry = entries.get(taskId);
+    for (const historyTaskId of entry?.historyTaskIds ?? [taskId]) {
+      expanded.add(historyTaskId);
+    }
+  }
+  return [...expanded];
 }

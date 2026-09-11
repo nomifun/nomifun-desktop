@@ -257,6 +257,7 @@ fn request_extra(params: &Value, consumed: &[&str]) -> Value {
         "referenceWidth",
         "referenceHeight",
         "nomifunStandaloneWorkbench",
+        "nomifunRetrySlot",
     ] {
         extra.remove(key);
     }
@@ -4507,7 +4508,12 @@ mod tests {
         let params = json!({
             "prompt": "model-selected framing",
             "count": 1,
-            "aspect": "auto"
+            "aspect": "auto",
+            "nomifunRetrySlot": {
+                "taskId": "01900000-0000-7000-8000-000000000001",
+                "submittedAt": 1,
+                "predecessorTaskIds": ["01900000-0000-7000-8000-000000000001"]
+            }
         });
         let TaskRequest::ImageGeneration(request) =
             cap_to_task_request(MediaCapability::T2i, &params, vec![]).unwrap()
