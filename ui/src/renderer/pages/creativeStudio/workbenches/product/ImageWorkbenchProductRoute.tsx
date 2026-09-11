@@ -36,14 +36,17 @@ import {
   readStandaloneWorkbenchDraft,
   writeStandaloneWorkbenchDraft,
 } from '../drafts';
+import { resolveMediaAspectRatio } from '../aspectRatio';
 import {
   ImageWorkbench,
   type ImageWorkbenchAspectRatioOption,
   type ImageWorkbenchLayout,
   type ImageWorkbenchModelIdentity,
   type ImageWorkbenchSettings,
+  imageWorkbenchAspectRatioValue,
   imageWorkbenchSizePolicyForModel,
   imageWorkbenchSelectableSizeOptions,
+  imageWorkbenchSizeOptionForAspectRatio,
   imageWorkbenchSizeOptionForSettings,
   normalizeImageWorkbenchSettingsSize,
 } from '../image';
@@ -331,6 +334,24 @@ const OwnedImageWorkbenchReady: React.FC<{
       return;
     }
     try {
+      const resolvedAspectRatio = resolveMediaAspectRatio(
+        settings.aspectRatio,
+        prompt,
+        sizePolicy.options
+          .filter((option) => !option.disabled)
+          .map(imageWorkbenchAspectRatioValue)
+      );
+      const requestSizeOption = settings.aspectRatio === 'auto' && resolvedAspectRatio
+        ? imageWorkbenchSizeOptionForAspectRatio(
+            sizePolicy.options,
+            selectedSizeOption,
+            resolvedAspectRatio
+          ) ?? selectedSizeOption
+        : selectedSizeOption;
+      const requestAspectRatio =
+        settings.aspectRatio === 'auto'
+          ? resolvedAspectRatio ?? 'auto'
+          : imageWorkbenchAspectRatioValue(requestSizeOption);
       await runtime.generate({
         catalog,
         owner: standaloneWorkbenchOwner('image'),
@@ -349,10 +370,10 @@ const OwnedImageWorkbenchReady: React.FC<{
         prompt,
         interfaceMode: settings.interfaceMode,
         quality: settings.quality,
-        width: settings.width,
-        height: settings.height,
-        size: references.length ? null : selectedSizeOption?.requestSize ?? null,
-        aspectRatio: settings.aspectRatio,
+        width: requestSizeOption?.width ?? null,
+        height: requestSizeOption?.height ?? null,
+        size: references.length ? null : requestSizeOption?.requestSize ?? null,
+        aspectRatio: requestAspectRatio,
         count: settings.count,
       });
     } catch (reason) {

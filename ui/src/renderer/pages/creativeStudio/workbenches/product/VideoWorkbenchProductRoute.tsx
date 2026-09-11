@@ -39,6 +39,7 @@ import {
   useStandaloneWorkbenchHistory,
   type StandaloneWorkbenchHistoryState,
 } from '../history';
+import { resolveMediaAspectRatio } from '../aspectRatio';
 import {
   createDefaultVideoWorkbenchDraft,
   createVideoWorkbenchDraft,
@@ -75,7 +76,7 @@ const RESOLUTIONS = [
   { value: '720p', label: '720P' },
   { value: '1080p', label: '1080P' },
 ];
-const ASPECTS = [
+const FIXED_ASPECTS = [
   { value: '16:9', label: '16:9' },
   { value: '9:16', label: '9:16' },
   { value: '1:1', label: '1:1' },
@@ -121,12 +122,27 @@ const videoControlsFromTask = (
   const width = task.parameters.width;
   const height = task.parameters.height;
   const seconds = task.parameters.seconds;
-  if (
-    typeof prompt !== 'string' ||
-    !Number.isSafeInteger(width) ||
-    !Number.isSafeInteger(height) ||
-    (seconds !== 5 && seconds !== 10)
-  ) {
+  if (typeof prompt !== 'string' || (seconds !== 5 && seconds !== 10)) {
+    throw new Error(
+      t('creativeStudio.product.video.errors.incompleteSnapshot', {
+        taskId: task.taskId,
+        defaultValue: 'Task {{taskId}} has an incomplete video parameter snapshot.',
+      })
+    );
+  }
+  if (width === undefined && height === undefined) {
+    const savedResolution = task.parameters.resolution;
+    return {
+      prompt,
+      resolution:
+        savedResolution === '720p' || savedResolution === '1080p'
+          ? savedResolution
+          : '1080p',
+      aspect: 'auto',
+      duration: String(seconds),
+    };
+  }
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height)) {
     throw new Error(
       t('creativeStudio.product.video.errors.incompleteSnapshot', {
         taskId: task.taskId,
@@ -135,7 +151,7 @@ const videoControlsFromTask = (
     );
   }
   const match = RESOLUTIONS.flatMap((resolution) =>
-    ASPECTS.map((aspect) => ({
+    FIXED_ASPECTS.map((aspect) => ({
       resolution: resolution.value,
       aspect: aspect.value,
       dimensions: videoDimensions(resolution.value, aspect.value, t),
@@ -198,6 +214,16 @@ const OwnedVideoWorkbenchReady: React.FC<{
       {
         value: '10',
         label: t('creativeStudio.product.video.durationTen', { defaultValue: '10 秒' }),
+      },
+    ],
+    [t]
+  );
+  const aspectOptions = useMemo(
+    () => [
+      ...FIXED_ASPECTS,
+      {
+        value: 'auto',
+        label: t('creativeStudio.image.options.auto', { defaultValue: '自动' }),
       },
     ],
     [t]
@@ -373,7 +399,14 @@ const OwnedVideoWorkbenchReady: React.FC<{
     }
     try {
       const capability = references.length === 1 ? 'i2v' : 't2v';
-      const dimensions = videoDimensions(resolution, aspect, t);
+      const requestAspectRatio = resolveMediaAspectRatio(
+        aspect,
+        prompt,
+        FIXED_ASPECTS.map((option) => option.value)
+      );
+      const dimensions = requestAspectRatio
+        ? videoDimensions(resolution, requestAspectRatio, t)
+        : { width: null, height: null };
       await runtime.generate({
         catalog,
         owner: standaloneWorkbenchOwner('video'),
@@ -389,6 +422,8 @@ const OwnedVideoWorkbenchReady: React.FC<{
         operation: { task: 'video_generation', capability },
         prompt,
         seconds: Number(duration),
+        resolution,
+        aspectRatio: requestAspectRatio ?? 'auto',
         width: dimensions.width,
         height: dimensions.height,
         taskCount,
@@ -546,7 +581,7 @@ const OwnedVideoWorkbenchReady: React.FC<{
     resolutionOptions: RESOLUTIONS,
     onResolutionChange: setResolution,
     size: aspect,
-    sizeOptions: ASPECTS,
+    sizeOptions: aspectOptions,
     onSizeChange: setAspect,
     duration,
     durationOptions,

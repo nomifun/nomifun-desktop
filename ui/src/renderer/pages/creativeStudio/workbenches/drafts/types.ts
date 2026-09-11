@@ -26,7 +26,7 @@ export interface ImageWorkbenchDraftParameters {
 
 export interface VideoWorkbenchDraftParameters {
   resolution: '720p' | '1080p';
-  aspect: '16:9' | '9:16' | '1:1';
+  aspect: '16:9' | '9:16' | '1:1' | 'auto';
   duration: '5' | '10';
   taskCount: 1;
 }
