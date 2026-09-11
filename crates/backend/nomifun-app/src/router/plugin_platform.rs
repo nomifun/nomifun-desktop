@@ -10,14 +10,21 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Extension, Json, Router};
 use nomifun_agent_contracts::{
-    CANDIDATE_TEST_CONTRACT_VERSION, CandidateTestCredentialMode, CandidateTestOutcome,
-    CandidateTestReceipt, CandidateTestReceiptId, CanonicalErrorCode, CapabilityConsumer,
-    CanonicalSchemaRef, CredentialId, CredentialSlotBinding, DigestHex,
+    ActionId, CANDIDATE_TEST_CONTRACT_VERSION, CandidateTestCredentialMode,
+    CandidateTestOutcome, CandidateTestReceipt, CandidateTestReceiptId,
+    CanonicalErrorCode, CanonicalSchemaRef, CapabilityActionDescriptor,
+    CapabilityConsumer, CapabilityContributions, CapabilityId, CapabilityKind,
+    CapabilityManifest, CredentialId, CredentialSlotBinding,
+    CredentialSlotDeclaration, CredentialSlotKey, CredentialSlotKind, DigestHex,
+    EffectClass, LocalizedMetadata, PackageContributions, PackageId, PackageRef,
+    PlatformConstraint,
     JAVASCRIPT_HOST_PROTOCOL_VERSION, JAVASCRIPT_SDK_CONTRACT_VERSION,
     PLUGIN_PACKAGE_PROFILE_VERSION, PluginHostCommitFence, PluginMountId,
     PluginSourceLineage, ResolvedCapability,
     RuntimeSwitchParticipantKind, RuntimeSwitchParticipantOutcome,
-    RuntimeSwitchParticipantResult, StrictJsonValue, ValidatedPluginConfig,
+    RuntimeSwitchParticipantResult, StrictJsonValue, ToolPresentationKind,
+    ValidatedPluginConfig, VersionString, capability_surface_declarations,
+    digest_payload,
 };
 use nomifun_ai_agent::NomiPluginToolSchemaResolver;
 use nomifun_agent_kernel::{KernelRegistry, PluginRegistration};
@@ -44,7 +51,8 @@ use nomifun_js_host::{
 };
 use nomifun_js_authoring::{
     ContentAddressedNpmCache, FixedPluginPacker, NodeBuildHost,
-    NpmRegistryHttpClient, SourceStoreLimits,
+    NormalizedSourcePath, NpmRegistryHttpClient, PluginLanguage,
+    PluginSourceManifest, SourceStoreLimits,
 };
 use nomifun_js_kernel_adapter::{
     JsKernelPluginAdapter, PluginPackageInput,
@@ -64,12 +72,13 @@ use nomifun_plugin_service::{
     PluginAutoApplyCommitPermit, PluginAutoApplyPermit, PluginHostCoordinator,
     PluginOperationCancellation, PluginRegistryPublisher,
     PluginRepository, PluginRouterState,
+    PluginAuthoringCompletionPort,
     PluginServiceDependencies, PluginServiceError, PluginServicePaths,
     ApplyPluginSourceEditInput, ApplyPluginSourceEditRequest,
     PluginSourceFileEdit,
 };
 use tokio::sync::{Mutex, RwLock};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 const AGENT_EXECUTOR_UNAVAILABLE: &str = "CAPABILITY_UNAVAILABLE";
 const PLUGIN_PLATFORM_DIRECTORY: &str = "plugin-platform";
@@ -407,6 +416,65 @@ async fn plugin_adapter_for_mount(
     })
 }
 
+struct NomiCorePluginAuthoringCompletion {
+    model_invoke: Arc<nomifun_model_invoke::ModelInvokeService>,
+    workspace: PathBuf,
+}
+
+#[async_trait]
+impl PluginAuthoringCompletionPort for NomiCorePluginAuthoringCompletion {
+    async fn complete(
+        &self,
+        provider_id: &str,
+        model: &str,
+        system: String,
+        prompt: String,
+        max_tokens: u32,
+    ) -> Result<String, PluginServiceError> {
+        let config = nomifun_ai_agent::factory::provider_config::resolve_provider_config(
+            self.model_invoke.as_ref(),
+            provider_id,
+            model,
+            &self.workspace,
+        )
+        .await
+        .map_err(|error| {
+            PluginServiceError::integration(format!(
+                "Plugin AI authoring model is unavailable: {error}"
+            ))
+        })?;
+        let messages = vec![nomifun_ai_agent::factory::provider_config::user_message(prompt)];
+        let mut last_error = None;
+        for attempt in 0..3 {
+            match nomifun_ai_agent::factory::provider_config::one_shot_completion(
+                &config,
+                &system,
+                messages.clone(),
+                max_tokens,
+            )
+            .await
+            {
+                Ok(output) => return Ok(output),
+                Err(error) => {
+                    let message = error.to_string();
+                    let transient = message.to_ascii_lowercase().contains("rate limit")
+                        || message.to_ascii_lowercase().contains("free model is busy");
+                    last_error = Some(message);
+                    if transient && attempt < 2 {
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        continue;
+                    }
+                    break;
+                }
+            }
+        }
+        Err(PluginServiceError::integration(format!(
+            "Plugin AI authoring request failed: {}",
+            last_error.unwrap_or_else(|| "unknown model failure".to_owned())
+        )))
+    }
+}
+
 pub(crate) async fn build_nomi_core_plugin_state(
     pool: SqlitePool,
     data_root: PathBuf,
@@ -415,6 +483,7 @@ pub(crate) async fn build_nomi_core_plugin_state(
     catalog: Arc<KernelCatalogProvider>,
     base_registrations: Vec<PluginRegistration>,
     runtime: Arc<dyn CommittedRuntimeProvider>,
+    model_invoke: Option<Arc<nomifun_model_invoke::ModelInvokeService>>,
 ) -> anyhow::Result<NomiCorePluginComposition> {
     let data_root = std::fs::canonicalize(&data_root)?;
     let platform_root = data_root.join(PLUGIN_PLATFORM_DIRECTORY);
@@ -514,8 +583,17 @@ pub(crate) async fn build_nomi_core_plugin_state(
         kernel: participant_kernel,
         publisher,
     });
+    let mut router = PluginRouterState::new(service);
+    if let Some(model_invoke) = model_invoke {
+        router = router.with_authoring_completion(Arc::new(
+            NomiCorePluginAuthoringCompletion {
+                model_invoke,
+                workspace: data_root.clone(),
+            },
+        ));
+    }
     Ok(NomiCorePluginComposition {
-        router: PluginRouterState::new(service),
+        router,
         schema_resolver: Arc::new(NomiCorePluginSchemaResolver { artifacts }),
         runtime_participant,
     })
@@ -748,9 +826,14 @@ pub(crate) fn plugin_routes(state: PluginRouterState) -> Router {
     Router::new()
         .route("/api/plugins", get(list_plugins))
         .route("/api/plugin-projects", post(create_project))
+        .route("/api/plugin-authoring/generate", post(generate_plugin_draft))
         .route(
             "/api/plugin-projects/{project_id}",
             get(get_project).delete(delete_project),
+        )
+        .route(
+            "/api/plugin-projects/{project_id}/authoring-context",
+            get(get_project_authoring_context),
         )
         .route(
             "/api/plugin-projects/{project_id}/source/edit",
@@ -765,6 +848,7 @@ pub(crate) fn plugin_routes(state: PluginRouterState) -> Router {
             put(set_auto_apply),
         )
         .route("/api/plugin-imports", post(import_prebuilt))
+        .route("/api/plugin-imports/inspect", post(inspect_plugin_import))
         .route(
             "/api/plugin-projects/{project_id}/share",
             post(export_share),
@@ -907,6 +991,480 @@ impl ApplyPluginSourceEditHttpRequest {
     }
 }
 
+const PLUGIN_AUTHORING_MAX_TOKENS: u32 = 8_192;
+const PLUGIN_AUTHORING_MAX_REQUIREMENT_BYTES: usize = 16 * 1_024;
+const PLUGIN_AUTHORING_MAX_SOURCE_BYTES: usize = 512 * 1_024;
+const PLUGIN_AUTHORING_MAX_CAPABILITIES: usize = 12;
+const PLUGIN_AUTHORING_MAX_DEPENDENCIES: usize = 64;
+
+const PLUGIN_AUTHORING_SYSTEM_PROMPT: &str = r#"You are NomiFun's Plugin authoring engine. Turn the user's product requirement into a complete TypeScript capability Plugin. A Plugin has no independent UI: it extends NomiFun and is consumed by Agent, Gateway, Automation, Knowledge, Remote, UI, or MiniApp Service.
+
+Return exactly one JSON object and nothing else. Do not use markdown fences. Shape:
+{
+  "assistant_message": "short product-facing Chinese explanation of what was created",
+  "display_name": "concise Chinese product name",
+  "description": "one sentence describing how this enhances NomiFun",
+  "capabilities": [{
+    "key": "lowercase.machine.key",
+    "name": "human-facing Chinese capability name",
+    "description": "what this adds to NomiFun",
+    "effect_class": "pure|read_local|read_sensitive|write_reversible|write_durable|execute_local|external_transmit|destructive|irreversible",
+    "consumers": ["agent"],
+    "input_schema": {"additionalProperties": false, "properties": {}, "type": "object"},
+    "output_schema": {"additionalProperties": false, "properties": {}, "type": "object"}
+  }],
+  "config_schema": {"additionalProperties": false, "properties": {}, "type": "object"},
+  "credential_slots": [{"slot_key": "api_key", "display_name": "API Key", "required": true}],
+  "dependencies": {"package-name": "1.2.3"},
+  "source": "complete src/main.ts contents"
+}
+
+The caller supplies package_id. For every capability key K, the final capability id is PACKAGE_ID.K and its activation contribution key is capability:PACKAGE_ID.K. The source must export async function activate({ mount, sdk }: PluginActivationContext) and return { capabilities: { "capability:PACKAGE_ID.K": { async invoke({ actionId, input, contribution, signal }) { ... } } } }. The invoke argument is a host context object: read the user's JSON payload from its input property, never from the wrapper itself. Use only JSON-compatible input/output. Use sdk.credential.resolve(slotKey) for declared secrets and sdk.state for durable Plugin state. Never embed credentials. Prefer no dependencies and deterministic code. Raw Node APIs, network, filesystem, child processes, destructive work, and external transmission may only be used when the user requirement genuinely needs them, and the effect_class must reflect the strongest effect. Do not create an HTML page, React component, MiniApp, package.json, manifest, tests, build scripts, or explanatory prose outside the JSON object. The backend constructs and validates the canonical manifest."#;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GeneratePluginDraftRequest {
+    provider_id: String,
+    model: String,
+    requirement: String,
+    package_id: String,
+    package_version: String,
+    #[serde(default)]
+    current_source: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelPluginCapabilityDraft {
+    key: String,
+    name: String,
+    description: String,
+    effect_class: String,
+    #[serde(default)]
+    consumers: Vec<String>,
+    input_schema: serde_json::Value,
+    output_schema: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelCredentialSlotDraft {
+    slot_key: String,
+    display_name: String,
+    required: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelPluginDraft {
+    assistant_message: String,
+    display_name: String,
+    description: String,
+    capabilities: Vec<ModelPluginCapabilityDraft>,
+    #[serde(default)]
+    config_schema: Option<serde_json::Value>,
+    #[serde(default)]
+    credential_slots: Vec<ModelCredentialSlotDraft>,
+    #[serde(default)]
+    dependencies: BTreeMap<String, String>,
+    source: String,
+}
+
+#[derive(Debug, Serialize)]
+struct GeneratedPluginCapabilityDto {
+    capability_id: String,
+    contribution_id: String,
+    display_name: String,
+    description: String,
+    effect_class: String,
+    consumers: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct GeneratedPluginDraftResponse {
+    assistant_message: String,
+    display_name: String,
+    description: String,
+    package_id: String,
+    package_version: String,
+    language: &'static str,
+    manifest_content: String,
+    source_path: &'static str,
+    source_content: String,
+    dependencies: BTreeMap<String, String>,
+    capabilities: Vec<GeneratedPluginCapabilityDto>,
+}
+
+#[derive(Debug, Serialize)]
+struct PluginAuthoringContextResponse {
+    package_id: String,
+    package_version: String,
+    display_name: String,
+    description: String,
+    source_path: String,
+    source_content: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InspectPluginImportRequest {
+    source_path: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PluginImportInspectionResponse {
+    import_kind: &'static str,
+    expected_digest: String,
+    package_id: String,
+    package_version: String,
+    display_name: String,
+    description: String,
+    capability_count: usize,
+    editable_source: bool,
+}
+
+async fn generate_plugin_draft(
+    State(state): State<PluginRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Json(request): Json<GeneratePluginDraftRequest>,
+) -> Result<Json<ApiResponse<GeneratedPluginDraftResponse>>, PluginHttpError> {
+    validate_authoring_request(&request)?;
+    let completion = state.authoring_completion().ok_or_else(|| {
+        PluginServiceError::integration("Plugin AI authoring is unavailable in this host")
+    })?;
+    let prompt = plugin_authoring_prompt(&request)?;
+    let raw = completion
+        .complete(
+            &request.provider_id,
+            &request.model,
+            PLUGIN_AUTHORING_SYSTEM_PROMPT.to_owned(),
+            prompt,
+            PLUGIN_AUTHORING_MAX_TOKENS,
+        )
+        .await?;
+    let model = parse_model_plugin_draft(&raw)?;
+    let response = materialize_generated_plugin_draft(&request, model)?;
+    Ok(Json(ApiResponse::ok(response)))
+}
+
+fn validate_authoring_request(
+    request: &GeneratePluginDraftRequest,
+) -> Result<(), PluginServiceError> {
+    if request.provider_id.trim().is_empty() || request.model.trim().is_empty() {
+        return Err(PluginServiceError::invalid(
+            "Plugin AI authoring requires an available Chat model",
+        ));
+    }
+    let requirement = request.requirement.trim();
+    if requirement.is_empty() || requirement.len() > PLUGIN_AUTHORING_MAX_REQUIREMENT_BYTES {
+        return Err(PluginServiceError::invalid(format!(
+            "Plugin requirement must contain 1-{PLUGIN_AUTHORING_MAX_REQUIREMENT_BYTES} bytes"
+        )));
+    }
+    if request.current_source.as_ref().is_some_and(|source| {
+        source.len() > PLUGIN_AUTHORING_MAX_SOURCE_BYTES
+    }) {
+        return Err(PluginServiceError::invalid(
+            "Current Plugin source exceeds the AI authoring limit",
+        ));
+    }
+    PluginSourceManifest::new(
+        PackageId::from(request.package_id.clone()),
+        VersionString::from(request.package_version.clone()),
+        LocalizedMetadata {
+            name: "Draft Plugin".into(),
+            description: "AI-authored Plugin draft.".into(),
+            localized_names: BTreeMap::new(),
+            localized_descriptions: BTreeMap::new(),
+        },
+        PluginLanguage::TypeScript,
+        NormalizedSourcePath::parse("src/main.ts")
+            .map_err(|error| PluginServiceError::invalid(error.to_string()))?,
+    )
+    .map_err(|error| PluginServiceError::invalid(error.to_string()))?;
+    Ok(())
+}
+
+fn plugin_authoring_prompt(
+    request: &GeneratePluginDraftRequest,
+) -> Result<String, PluginServiceError> {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "package_id": request.package_id,
+        "package_version": request.package_version,
+        "requirement": request.requirement,
+        "current_source": request.current_source,
+        "instruction": if request.current_source.is_some() {
+            "Revise the complete Plugin. Return the full replacement source and complete capability declaration."
+        } else {
+            "Create the first complete Plugin draft."
+        }
+    }))
+    .map_err(|error| PluginServiceError::invalid(error.to_string()))
+}
+
+fn parse_model_plugin_draft(raw: &str) -> Result<ModelPluginDraft, PluginServiceError> {
+    let trimmed = raw.trim();
+    let json = if let Some(body) = trimmed.strip_prefix("```json") {
+        body.strip_suffix("```").unwrap_or(body).trim()
+    } else if let Some(body) = trimmed.strip_prefix("```") {
+        body.strip_suffix("```").unwrap_or(body).trim()
+    } else {
+        trimmed
+    };
+    serde_json::from_str(json).map_err(|error| {
+        PluginServiceError::invalid(format!(
+            "The model did not return a valid Plugin draft: {error}"
+        ))
+    })
+}
+
+fn materialize_generated_plugin_draft(
+    request: &GeneratePluginDraftRequest,
+    model: ModelPluginDraft,
+) -> Result<GeneratedPluginDraftResponse, PluginServiceError> {
+    if model.capabilities.is_empty()
+        || model.capabilities.len() > PLUGIN_AUTHORING_MAX_CAPABILITIES
+    {
+        return Err(PluginServiceError::invalid(format!(
+            "AI-authored Plugin must declare 1-{PLUGIN_AUTHORING_MAX_CAPABILITIES} capabilities"
+        )));
+    }
+    if model.dependencies.len() > PLUGIN_AUTHORING_MAX_DEPENDENCIES {
+        return Err(PluginServiceError::invalid(format!(
+            "AI-authored Plugin exceeds the {PLUGIN_AUTHORING_MAX_DEPENDENCIES}-dependency limit"
+        )));
+    }
+    if model.source.trim().is_empty() || model.source.len() > PLUGIN_AUTHORING_MAX_SOURCE_BYTES {
+        return Err(PluginServiceError::invalid(
+            "AI-authored Plugin source is empty or too large",
+        ));
+    }
+    if model.assistant_message.trim().is_empty() || model.assistant_message.len() > 4_096 {
+        return Err(PluginServiceError::invalid(
+            "AI-authored Plugin explanation is empty or too large",
+        ));
+    }
+
+    let package = PackageRef {
+        id: PackageId::from(request.package_id.clone()),
+        version: VersionString::from(request.package_version.clone()),
+    };
+    let mut schemas = BTreeMap::new();
+    let mut capabilities = Vec::with_capacity(model.capabilities.len());
+    let mut response_capabilities = Vec::with_capacity(model.capabilities.len());
+    for draft in model.capabilities {
+        validate_generated_machine_key(&draft.key, "capability key")?;
+        let capability_id = format!("{}.{}", request.package_id, draft.key);
+        let contribution_id = format!("capability:{capability_id}");
+        if !model.source.contains(&contribution_id) {
+            return Err(PluginServiceError::invalid(format!(
+                "AI-authored source does not implement {contribution_id}"
+            )));
+        }
+        let input_schema = StrictJsonValue(draft.input_schema);
+        let output_schema = StrictJsonValue(draft.output_schema);
+        if !input_schema.0.is_object() || !output_schema.0.is_object() {
+            return Err(PluginServiceError::invalid(format!(
+                "Capability {capability_id} schemas must be JSON objects"
+            )));
+        }
+        let input_ref = CanonicalSchemaRef::from(format!(
+            "schema://{capability_id}/input@1#{}",
+            digest_payload(&input_schema.0)
+                .map_err(|error| PluginServiceError::invalid(error.to_string()))?
+                .as_ref()
+        ));
+        let output_ref = CanonicalSchemaRef::from(format!(
+            "schema://{capability_id}/output@1#{}",
+            digest_payload(&output_schema.0)
+                .map_err(|error| PluginServiceError::invalid(error.to_string()))?
+                .as_ref()
+        ));
+        schemas.insert(input_ref.clone(), input_schema);
+        schemas.insert(output_ref.clone(), output_schema);
+        let effect_class = generated_effect_class(&draft.effect_class)?;
+        let consumers = generated_consumers(&draft.consumers)?;
+        capabilities.push(CapabilityManifest {
+            id: CapabilityId::from(capability_id.clone()),
+            contribution_id: contribution_id.clone().into(),
+            version: VersionString::from("1.0.0"),
+            kind: CapabilityKind::Tool,
+            package: package.clone(),
+            display: LocalizedMetadata {
+                name: draft.name.trim().to_owned(),
+                description: draft.description.trim().to_owned(),
+                localized_names: BTreeMap::new(),
+                localized_descriptions: BTreeMap::new(),
+            },
+            requires: Vec::new(),
+            conflicts: Vec::new(),
+            supported_surfaces: capability_surface_declarations(["desktop"], consumers.clone()),
+            requires_runtime_features: Vec::new(),
+            supported_platforms: vec![PlatformConstraint::Any],
+            config_schema: StrictJsonValue(serde_json::json!({"type": "object"})),
+            contributions: CapabilityContributions {
+                actions: vec![CapabilityActionDescriptor {
+                    action_id: ActionId::from(format!("{capability_id}.invoke")),
+                    input_schema: input_ref,
+                    output_schema: output_ref,
+                    effect_class,
+                    presentation: ToolPresentationKind::FunctionTool,
+                }],
+                ..Default::default()
+            },
+        });
+        response_capabilities.push(GeneratedPluginCapabilityDto {
+            capability_id,
+            contribution_id,
+            display_name: draft.name,
+            description: draft.description,
+            effect_class: draft.effect_class,
+            consumers: consumers
+                .into_iter()
+                .map(|consumer| consumer.as_str().to_owned())
+                .collect(),
+        });
+    }
+
+    let config_schema = model.config_schema.unwrap_or_else(|| {
+        serde_json::json!({
+            "additionalProperties": false,
+            "properties": {},
+            "type": "object"
+        })
+    });
+    if !config_schema.is_object() {
+        return Err(PluginServiceError::invalid(
+            "AI-authored Plugin config schema must be a JSON object",
+        ));
+    }
+    let credential_slots = model
+        .credential_slots
+        .into_iter()
+        .map(|slot| {
+            validate_generated_machine_key(&slot.slot_key, "credential slot")?;
+            Ok(CredentialSlotDeclaration {
+                slot_key: CredentialSlotKey::from(slot.slot_key),
+                kind: CredentialSlotKind::SecretText,
+                display_name: slot.display_name,
+                required: slot.required,
+            })
+        })
+        .collect::<Result<Vec<_>, PluginServiceError>>()?;
+    let manifest = PluginSourceManifest::new(
+        package.id.clone(),
+        package.version.clone(),
+        LocalizedMetadata {
+            name: model.display_name.trim().to_owned(),
+            description: model.description.trim().to_owned(),
+            localized_names: BTreeMap::new(),
+            localized_descriptions: BTreeMap::new(),
+        },
+        PluginLanguage::TypeScript,
+        NormalizedSourcePath::parse("src/main.ts")
+            .map_err(|error| PluginServiceError::invalid(error.to_string()))?,
+    )
+    .and_then(|manifest| {
+        manifest.with_contributions_and_schemas(
+            PackageContributions {
+                capabilities,
+                ..Default::default()
+            },
+            schemas,
+        )
+    })
+    .and_then(|manifest| manifest.with_config_schema(StrictJsonValue(config_schema)))
+    .and_then(|manifest| manifest.with_credential_slots(credential_slots))
+    .map_err(|error| PluginServiceError::invalid(error.to_string()))?;
+    let manifest_content = String::from_utf8(
+        manifest
+            .canonical_bytes()
+            .map_err(|error| PluginServiceError::invalid(error.to_string()))?,
+    )
+    .map_err(|error| PluginServiceError::invalid(error.to_string()))?;
+    Ok(GeneratedPluginDraftResponse {
+        assistant_message: model.assistant_message,
+        display_name: model.display_name,
+        description: model.description,
+        package_id: request.package_id.clone(),
+        package_version: request.package_version.clone(),
+        language: "type_script",
+        manifest_content,
+        source_path: "src/main.ts",
+        source_content: model.source,
+        dependencies: model.dependencies,
+        capabilities: response_capabilities,
+    })
+}
+
+fn validate_generated_machine_key(value: &str, field: &str) -> Result<(), PluginServiceError> {
+    if value.is_empty()
+        || value.len() > 96
+        || !value.bytes().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'.' | b'_' | b'-')
+        })
+    {
+        return Err(PluginServiceError::invalid(format!(
+            "AI-authored {field} must use lowercase ASCII letters, digits, dot, underscore, or hyphen"
+        )));
+    }
+    Ok(())
+}
+
+fn generated_effect_class(value: &str) -> Result<EffectClass, PluginServiceError> {
+    Ok(match value {
+        "pure" => EffectClass::Pure,
+        "read_local" => EffectClass::ReadLocal,
+        "read_sensitive" => EffectClass::ReadSensitive,
+        "write_reversible" => EffectClass::WriteReversible,
+        "write_durable" => EffectClass::WriteDurable,
+        "execute_local" => EffectClass::ExecuteLocal,
+        "external_transmit" => EffectClass::ExternalTransmit,
+        "destructive" => EffectClass::Destructive,
+        "irreversible" => EffectClass::Irreversible,
+        other => {
+            return Err(PluginServiceError::invalid(format!(
+                "AI-authored Plugin declared unsupported effect class {other}"
+            )));
+        }
+    })
+}
+
+fn generated_consumers(
+    values: &[String],
+) -> Result<Vec<CapabilityConsumer>, PluginServiceError> {
+    let mut requested = values.to_vec();
+    if requested.is_empty() {
+        requested.push("agent".to_owned());
+    }
+    let mut consumers = Vec::new();
+    for value in &requested {
+        let consumer = match value.as_str() {
+            "agent" => CapabilityConsumer::Agent,
+            "gateway" => CapabilityConsumer::Gateway,
+            "knowledge" => CapabilityConsumer::Knowledge,
+            "remote" => CapabilityConsumer::Remote,
+            "automation" => CapabilityConsumer::Automation,
+            "ui" => CapabilityConsumer::Ui,
+            "miniapp_service" => CapabilityConsumer::MiniAppService,
+            other => {
+                return Err(PluginServiceError::invalid(format!(
+                    "AI-authored Plugin declared unsupported consumer {other}"
+                )));
+            }
+        };
+        if !consumers.contains(&consumer) {
+            consumers.push(consumer);
+        }
+    }
+    if !consumers.contains(&CapabilityConsumer::Agent) {
+        consumers.push(CapabilityConsumer::Agent);
+    }
+    Ok(consumers)
+}
+
 async fn list_plugins(
     State(state): State<PluginRouterState>,
     Extension(user): Extension<CurrentUser>,
@@ -914,6 +1472,43 @@ async fn list_plugins(
     Ok(Json(ApiResponse::ok(
         state.service.list_library(user.id.as_str()).await?,
     )))
+}
+
+async fn get_project_authoring_context(
+    State(state): State<PluginRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    AxumPath(project_id): AxumPath<String>,
+) -> Result<Json<ApiResponse<PluginAuthoringContextResponse>>, PluginHttpError> {
+    let context = state
+        .service
+        .get_authoring_context(user.id.as_str(), &project_id)
+        .await?;
+    Ok(Json(ApiResponse::ok(PluginAuthoringContextResponse {
+        package_id: context.package_id,
+        package_version: context.package_version,
+        display_name: context.display_name,
+        description: context.description,
+        source_path: context.source_path,
+        source_content: context.source_content,
+    })))
+}
+
+async fn inspect_plugin_import(
+    State(state): State<PluginRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Json(request): Json<InspectPluginImportRequest>,
+) -> Result<Json<ApiResponse<PluginImportInspectionResponse>>, PluginHttpError> {
+    let inspection = state.service.inspect_import(&request.source_path).await?;
+    Ok(Json(ApiResponse::ok(PluginImportInspectionResponse {
+        import_kind: inspection.import_kind,
+        expected_digest: inspection.expected_digest,
+        package_id: inspection.package_id,
+        package_version: inspection.package_version,
+        display_name: inspection.display_name,
+        description: inspection.description,
+        capability_count: inspection.capability_count,
+        editable_source: inspection.editable_source,
+    })))
 }
 
 async fn get_project(
@@ -1843,6 +2438,100 @@ mod tests {
 
     use super::*;
 
+    fn generated_model_fixture() -> ModelPluginDraft {
+        ModelPluginDraft {
+            assistant_message: "已生成网页摘要增强。".into(),
+            display_name: "网页摘要增强".into(),
+            description: "为 NomiFun 增加结构化网页摘要。".into(),
+            capabilities: vec![ModelPluginCapabilityDraft {
+                key: "summarize".into(),
+                name: "结构化摘要".into(),
+                description: "把已有网页正文整理为重点。".into(),
+                effect_class: "pure".into(),
+                consumers: vec!["agent".into()],
+                input_schema: serde_json::json!({
+                    "additionalProperties": false,
+                    "properties": {"text": {"type": "string"}},
+                    "required": ["text"],
+                    "type": "object"
+                }),
+                output_schema: serde_json::json!({
+                    "additionalProperties": false,
+                    "properties": {"summary": {"type": "string"}},
+                    "required": ["summary"],
+                    "type": "object"
+                }),
+            }],
+            config_schema: None,
+            credential_slots: Vec::new(),
+            dependencies: BTreeMap::new(),
+            source: r#"type Input = Readonly<{ text: string }>;
+type Invocation = Readonly<{ input: Input }>;
+export async function activate() {
+  return {
+    capabilities: {
+      "capability:user.nomifun.summary.summarize": {
+        async invoke({ input }: Invocation) {
+          return { summary: input.text.trim() };
+        },
+      },
+    },
+  };
+}
+"#
+            .into(),
+        }
+    }
+
+    #[test]
+    fn ai_authoring_materializes_a_canonical_manifest_owned_by_the_requested_package() {
+        let request = GeneratePluginDraftRequest {
+            provider_id: "provider".into(),
+            model: "model".into(),
+            requirement: "总结网页".into(),
+            package_id: "user.nomifun.summary".into(),
+            package_version: "0.1.0".into(),
+            current_source: None,
+        };
+        let response =
+            materialize_generated_plugin_draft(&request, generated_model_fixture()).unwrap();
+        let manifest =
+            PluginSourceManifest::from_canonical_bytes(response.manifest_content.as_bytes())
+                .unwrap();
+        assert_eq!(manifest.package_id().as_ref(), request.package_id);
+        assert_eq!(manifest.contributions().capabilities.len(), 1);
+        assert_eq!(
+            response.capabilities[0].capability_id,
+            "user.nomifun.summary.summarize"
+        );
+    }
+
+    #[test]
+    fn ai_authoring_rejects_source_that_omits_a_declared_handler() {
+        let request = GeneratePluginDraftRequest {
+            provider_id: "provider".into(),
+            model: "model".into(),
+            requirement: "总结网页".into(),
+            package_id: "user.nomifun.summary".into(),
+            package_version: "0.1.0".into(),
+            current_source: None,
+        };
+        let mut model = generated_model_fixture();
+        model.source = "export async function activate() { return { capabilities: {} }; }".into();
+        assert!(materialize_generated_plugin_draft(&request, model).is_err());
+    }
+
+    #[test]
+    fn ai_authoring_prompt_matches_the_extension_host_invocation_wrapper() {
+        assert!(PLUGIN_AUTHORING_SYSTEM_PROMPT.contains(
+            "async invoke({ actionId, input, contribution, signal })"
+        ));
+        assert!(PLUGIN_AUTHORING_SYSTEM_PROMPT.contains(
+            "read the user's JSON payload from its input property"
+        ));
+        assert!(!PLUGIN_AUTHORING_SYSTEM_PROMPT.contains("async invoke(input)"));
+    }
+
     struct TestRuntimeStore {
         value: Mutex<VersionedRuntimeSelection>,
     }
@@ -2094,6 +2783,7 @@ mod tests {
             Arc::clone(&catalog),
             Vec::new(),
             test_runtime_authority().await,
+            None,
         )
         .await
         .unwrap();
@@ -2574,6 +3264,7 @@ mod tests {
             restarted_catalog,
             Vec::new(),
             test_runtime_authority().await,
+            None,
         )
         .await
         .unwrap()

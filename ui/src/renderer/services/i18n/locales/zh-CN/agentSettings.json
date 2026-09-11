@@ -281,6 +281,8 @@
     "notReady": "待接入",
     "sourceUnavailable": "暂不可用",
     "missingSource": "来源缺失",
+    "pluginUnavailable": "插件未启用",
+    "pluginCapabilityFallback": "插件能力：{{name}}",
     "missingReason": "这项能力的来源已不存在。可以将它移除，或恢复对应的插件后再使用。",
     "builtinReason": "当前版本尚未接入这项能力。可先移除它，再保存其他已就绪的能力。",
     "pluginReason": "请检查对应插件或连接是否已启用、配置完整，并具备可用的运行环境。",

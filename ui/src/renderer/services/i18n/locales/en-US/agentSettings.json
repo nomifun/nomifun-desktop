@@ -281,6 +281,8 @@
     "notReady": "Not yet provided",
     "sourceUnavailable": "Unavailable",
     "missingSource": "Missing source",
+    "pluginUnavailable": "Plugin not enabled",
+    "pluginCapabilityFallback": "Plugin capability: {{name}}",
     "missingReason": "The source of this capability is missing. Remove it, or restore the corresponding plugin before using it.",
     "builtinReason": "This version has not connected this capability yet. Remove it to save the rest of your ready configuration.",
     "pluginReason": "Check that the plugin or connection is enabled, fully configured, and has an available runtime.",

@@ -41,6 +41,28 @@ pub struct CreatedPluginSource {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginAuthoringContext {
+    pub package_id: String,
+    pub package_version: String,
+    pub display_name: String,
+    pub description: String,
+    pub source_path: String,
+    pub source_content: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginImportInspection {
+    pub import_kind: &'static str,
+    pub expected_digest: String,
+    pub package_id: String,
+    pub package_version: String,
+    pub display_name: String,
+    pub description: String,
+    pub capability_count: usize,
+    pub editable_source: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PluginServicePaths {
     pub mount_data_relative_root: String,
 }

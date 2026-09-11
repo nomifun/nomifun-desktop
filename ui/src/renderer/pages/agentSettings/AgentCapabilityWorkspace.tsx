@@ -1,8 +1,9 @@
 import type { AgentPresetDocument, CapabilityCatalogItem, CapabilityPlacement } from '@/common/types/agentPlatform';
 import { Button, Checkbox, Drawer, Pagination, Select, Tag } from '@arco-design/web-react';
 import { Add, Book, Code, Connection, Delete, Earth, Info, Lightning, Magic, Search, User } from '@icon-park/react';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useSearchParams } from 'react-router-dom';
 import {
   CAPABILITY_CATEGORIES, capabilityCategory, capabilityIsAvailable, isBuiltinCapability,
   selectedCapabilityReferences, unavailableCapabilityReferences,
@@ -32,6 +33,8 @@ type Props = {
 
 const AgentCapabilityWorkspace: React.FC<Props> = ({ document, catalog, disabled = false, onChange }) => {
   const { t, i18n } = useTranslation();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const handledPluginLink = useRef('');
   const [search, setSearch] = useState('');
   const [category, setCategory] = useState<CapabilityCategory | 'all'>('all');
   const [filter, setFilter] = useState('all');
@@ -50,9 +53,16 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({ document, catalog, disabled
   const selectedKeys = useMemo(() => new Set(selected.map(capabilityReferenceKey)), [selected]);
   const unavailable = useMemo(() => unavailableCapabilityReferences(document, catalog), [document, catalog]);
   const categoryName = (value: CapabilityCategory) => t(`agentSettings.workbench.categories.${value}`);
+  const isGeneratedPluginCapability = (reference: CapabilityReference) =>
+    reference.id.startsWith('user.nomifun.plugin-');
   const nameOf = (reference: CapabilityReference) => {
     const item = byKey.get(capabilityReferenceKey(reference));
-    return item ? capabilityProductCopy(item, i18n.language).name : capabilityProductName(reference.id, i18n.language);
+    if (item) return capabilityProductCopy(item, i18n.language).name;
+    if (isGeneratedPluginCapability(reference)) {
+      const name = reference.id.split('.').at(-1)?.replace(/[_-]+/g, ' ') ?? reference.id;
+      return t('agentSettings.workbench.pluginCapabilityFallback', { name });
+    }
+    return capabilityProductName(reference.id, i18n.language);
   };
   const resourceName = (value: string) => {
     const key = RESOURCE_KIND_I18N_KEYS[value];
@@ -68,8 +78,19 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({ document, catalog, disabled
     if (capabilityIsAvailable(item)) return t('agentSettings.common.available');
     return t(isBuiltinCapability(item) ? 'agentSettings.workbench.notReady' : 'agentSettings.workbench.sourceUnavailable');
   };
-  const statusReason = (item?: CapabilityCatalogItem) => t(!item ? 'agentSettings.workbench.missingReason' :
-    isBuiltinCapability(item) ? 'agentSettings.workbench.builtinReason' : 'agentSettings.workbench.pluginReason');
+  const statusLabelFor = (reference: CapabilityReference, item?: CapabilityCatalogItem) =>
+    !item && isGeneratedPluginCapability(reference)
+      ? t('agentSettings.workbench.pluginUnavailable')
+      : statusLabel(item);
+  const statusReasonFor = (reference: CapabilityReference, item?: CapabilityCatalogItem) => t(
+    !item && isGeneratedPluginCapability(reference)
+      ? 'agentSettings.workbench.pluginReason'
+      : !item
+        ? 'agentSettings.workbench.missingReason'
+        : isBuiltinCapability(item)
+          ? 'agentSettings.workbench.builtinReason'
+          : 'agentSettings.workbench.pluginReason'
+  );
 
   const filtered = selected.filter((reference) => {
     if (category !== 'all' && capabilityCategory(reference) !== category) return false;
@@ -88,6 +109,24 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({ document, catalog, disabled
   useEffect(() => {
     if (category !== 'all' && !selected.some((reference) => capabilityCategory(reference) === category)) setCategory('all');
   }, [category, selected]);
+  useEffect(() => {
+    const source = searchParams.get('source');
+    const capability = searchParams.get('capability') ?? '';
+    const key = `${source ?? ''}:${capability}`;
+    if (source !== 'plugin' || handledPluginLink.current === key) return;
+    handledPluginLink.current = key;
+    setAdditions(new Set());
+    setPickerSearch(capability);
+    setPickerCategory('all');
+    setPickerSource('plugin');
+    setShowUnavailable(true);
+    setPickerPage(1);
+    setPickerOpen(true);
+    const next = new URLSearchParams(searchParams);
+    next.delete('source');
+    next.delete('capability');
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
 
   const setMode = (references: readonly CapabilityReference[], mode: CapabilityPlacement) => {
     onChange(references.reduce((next, reference) => placeCapability(next, reference, mode), document));
@@ -118,11 +157,11 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({ document, catalog, disabled
   const renderDetails = (reference: CapabilityReference) => {
     const item = byKey.get(capabilityReferenceKey(reference));
     return <div className={styles.detailContent}>
-      <p>{item ? capabilityProductCopy(item, i18n.language).description : statusReason(item)}</p>
-      {!capabilityIsAvailable(item) && <div className={styles.detailWarning}>{statusReason(item)}</div>}
+      <p>{item ? capabilityProductCopy(item, i18n.language).description : statusReasonFor(reference, item)}</p>
+      {!capabilityIsAvailable(item) && <div className={styles.detailWarning}>{statusReasonFor(reference, item)}</div>}
       <dl className={styles.detailFacts}>
         <div><dt>{t('agentSettings.workbench.category')}</dt><dd>{categoryName(capabilityCategory(reference))}</dd></div>
-        <div><dt>{t('agentSettings.capabilities.source')}</dt><dd>{item ? t(isBuiltinCapability(item) ? 'agentSettings.workbench.builtin' : 'agentSettings.workbench.plugin') : statusLabel(item)}</dd></div>
+        <div><dt>{t('agentSettings.capabilities.source')}</dt><dd>{item ? t(isBuiltinCapability(item) ? 'agentSettings.workbench.builtin' : 'agentSettings.workbench.plugin') : statusLabelFor(reference, item)}</dd></div>
         <div><dt>{t('agentSettings.resources.requiredAtUse')}</dt><dd>{item?.required_resource_kinds.length ? item.required_resource_kinds.map(resourceName).join('、') : t('agentSettings.resources.noneRequired')}</dd></div>
       </dl>
       <details className={styles.technicalDetails}><summary>{t('common.technical_details')}</summary>
@@ -184,10 +223,10 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({ document, catalog, disabled
           {rows.map((reference) => {
             const identity = capabilityReferenceKey(reference); const item = byKey.get(identity); const name = nameOf(reference); const available = capabilityIsAvailable(item);
             return <div className={`${styles.capabilityRow} ${checked.has(identity) ? styles.rowChecked : ''}`} key={identity}>
-              <Checkbox checked={checked.has(identity)} disabled={disabled} aria-label={t('agentSettings.workbench.selectCapability', { name })} onChange={(value) => toggleChecked(identity, value)} />
+              <Checkbox checked={checked.has(identity)} disabled={disabled} aria-label={t('agentSettings.workbench.selectCapability', { name })} onChange={(value: boolean) => toggleChecked(identity, value)} />
               <div className={styles.rowCopy}>
-                <div className={styles.rowTitle}><button type='button' onClick={() => setDetails(reference)}>{name}</button>{!available && <span className={styles.unavailable}>{statusLabel(item)}</span>}</div>
-                <p>{item ? capabilityProductCopy(item, i18n.language).description : statusReason(item)}</p>
+                <div className={styles.rowTitle}><button type='button' onClick={() => setDetails(reference)}>{name}</button>{!available && <span className={styles.unavailable}>{statusLabelFor(reference, item)}</span>}</div>
+                <p>{item ? capabilityProductCopy(item, i18n.language).description : statusReasonFor(reference, item)}</p>
               </div>
               <div className={styles.rowActions}>
                 <Select size='small' value={capabilityPlacement(document, reference)} disabled={disabled} aria-label={t('agentSettings.capabilities.modeAria', { name })} onChange={(mode: CapabilityPlacement) => setMode([reference], mode)} options={[
