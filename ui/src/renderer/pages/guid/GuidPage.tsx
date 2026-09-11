@@ -28,6 +28,7 @@ import GuidAgentSelector from './components/GuidAgentSelector';
 import GuidActionRow from './components/GuidActionRow';
 import GuidCompanionPosterPreview from './components/GuidCompanionPosterPreview';
 import GuidInputCard from './components/GuidInputCard';
+import GuidModelSelector from './components/GuidModelSelector';
 import GuidResourceCards from './components/GuidResourceCards';
 import MentionDropdown, {
   MentionSelectorBadge,
@@ -41,6 +42,7 @@ import { useGuidAdvancedConfig } from './hooks/useGuidAdvancedConfig';
 import { useGuidAgentSelection } from './hooks/useGuidAgentSelection';
 import { useGuidInput } from './hooks/useGuidInput';
 import { useGuidMention } from './hooks/useGuidMention';
+import { useGuidModelSelection } from './hooks/useGuidModelSelection';
 import { useGuidPresetCapabilities } from './hooks/useGuidPresetCapabilities';
 import { useGuidSend } from './hooks/useGuidSend';
 import { useTypewriterPlaceholder } from './hooks/useTypewriterPlaceholder';
@@ -77,6 +79,7 @@ const GuidPage: React.FC = () => {
     selectedAgentPresetId: preselectedPresetId,
     locationKey: location.key,
   });
+  const modelSelection = useGuidModelSelection('nomi');
   const guidInput = useGuidInput({
     locationState: navigationState,
   });
@@ -98,12 +101,13 @@ const GuidPage: React.FC = () => {
     presetResourceResolutionReady && presetResourceKinds.has('knowledge_base');
   const workspaceEnabled =
     presetResourceResolutionReady && presetResourceKinds.has('workspace');
-  const hasLaunchTarget = agentSelection.selection.kind === 'template'
+  const hasAgentLaunchTarget = agentSelection.selection.kind === 'template'
     ? Boolean(agentSelection.selectedTemplate)
     : Boolean(
         agentSelection.selectedPreset?.current_stable_revision &&
           presetResourceResolutionReady
       );
+  const hasLaunchTarget = hasAgentLaunchTarget && Boolean(modelSelection.current_model);
 
   const mention = useGuidMention({
     presets: agentSelection.presets,
@@ -126,6 +130,7 @@ const GuidPage: React.FC = () => {
     selection: agentSelection.selection,
     selectedPreset: agentSelection.selectedPreset,
     selectedTemplate: agentSelection.selectedTemplate,
+    current_model: modelSelection.current_model,
     applyAdvancedConfig: (conversationId) =>
       advancedConfig.applyToConversation(conversationId, {
         allowKnowledgeBinding: knowledgeEnabled,
@@ -387,6 +392,15 @@ const GuidPage: React.FC = () => {
     </>
   );
 
+  const modelSelectorNode = (
+    <GuidModelSelector
+      isProviderModelMode
+      modelList={modelSelection.modelList}
+      current_model={modelSelection.current_model}
+      setCurrentModel={modelSelection.setCurrentModel}
+    />
+  );
+
   const autoWorkButtonDisabled =
     !hasLaunchTarget ||
     autoWorkStartDisabled(guidInput.loading, advancedConfig.autoWork);
@@ -394,6 +408,7 @@ const GuidPage: React.FC = () => {
     <GuidActionRow
       files={guidInput.files}
       onFilesUploaded={guidInput.handleFilesUploaded}
+      modelSelectorNode={modelSelectorNode}
       loading={guidInput.loading}
       speechInputNode={
         <SpeechInputButton

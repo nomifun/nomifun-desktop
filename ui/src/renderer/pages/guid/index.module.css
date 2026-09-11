@@ -373,6 +373,110 @@ button.guidResourceCard:focus-visible {
   margin-right: 0;
 }
 
+.actionConfigGroup {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.actionConfigGroupResponsive {
+  container-name: guid-action-config;
+  container-type: inline-size;
+  flex: 1 1 0;
+  justify-content: flex-end;
+  max-width: 100%;
+}
+
+@container guid-action-config (max-width: 440px) {
+  .actionConfigGroup :global(.sendbox-responsive-label),
+  .actionConfigGroup :global(.sendbox-responsive-chevron) {
+    display: none !important;
+  }
+
+  .actionConfigGroup :global(.guid-config-btn),
+  .actionConfigGroup :global(.agent-mode-compact-pill) {
+    width: auto !important;
+    min-width: 28px !important;
+    max-width: 28px !important;
+    height: 28px !important;
+    padding: 0 !important;
+    border-radius: 999px !important;
+    flex: 0 1 auto !important;
+    overflow: hidden !important;
+    transition:
+      max-width 160ms ease,
+      padding 160ms ease,
+      opacity 160ms ease !important;
+  }
+
+  .actionConfigGroup :global(.guid-config-btn .arco-btn-content),
+  .actionConfigGroup :global(.agent-mode-compact-pill .arco-btn-content) {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    overflow: visible !important;
+  }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  @container guid-action-config (max-width: 440px) {
+    .actionConfigGroup :global(.guid-config-btn:hover),
+    .actionConfigGroup :global(.guid-config-btn:focus-visible),
+    .actionConfigGroup :global(.agent-mode-compact-pill:hover),
+    .actionConfigGroup :global(.agent-mode-compact-pill:focus-visible) {
+      width: auto !important;
+      min-width: 28px !important;
+      max-width: 200px !important;
+      padding: 0 10px !important;
+      flex: 0 1 auto !important;
+      position: relative;
+      z-index: 2;
+    }
+
+    .actionConfigGroup :global(.guid-config-btn:hover .sendbox-responsive-label),
+    .actionConfigGroup :global(.guid-config-btn:hover .sendbox-responsive-chevron),
+    .actionConfigGroup :global(.guid-config-btn:focus-visible .sendbox-responsive-label),
+    .actionConfigGroup :global(.guid-config-btn:focus-visible .sendbox-responsive-chevron),
+    .actionConfigGroup :global(.agent-mode-compact-pill:hover .sendbox-responsive-label),
+    .actionConfigGroup :global(.agent-mode-compact-pill:hover .sendbox-responsive-chevron),
+    .actionConfigGroup :global(.agent-mode-compact-pill:focus-visible .sendbox-responsive-label),
+    .actionConfigGroup :global(.agent-mode-compact-pill:focus-visible .sendbox-responsive-chevron) {
+      display: inline-flex !important;
+    }
+  }
+}
+
+/* 首页输入框右下模型选择器：与对话框 .sendbox-tools/.sendbox-actions 同款 */
+.actionSubmit :global(.sendbox-model-btn),
+.actionSubmit :global(.sendbox-model-btn:hover),
+.actionSubmit :global(.sendbox-model-btn:active),
+.actionSubmit :global(.sendbox-model-btn:focus),
+.actionSubmit :global(.sendbox-model-btn:focus-visible) {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  color: var(--text-secondary) !important;
+}
+
+.actionSubmit :global(.sendbox-model-btn:hover),
+.actionSubmit :global(.sendbox-model-btn:active),
+.actionSubmit :global(.sendbox-model-btn:focus),
+.actionSubmit :global(.sendbox-model-btn:focus-visible) {
+  color: var(--text-primary) !important;
+}
+
+.actionConfigGroup :global(.sendbox-model-btn .arco-btn-content) {
+  gap: 0 !important;
+}
+
+.actionConfigGroup :global(.sendbox-model-btn .arco-btn-content > span:first-child) {
+  gap: 4px !important;
+}
+
 .actionSubmit {
   display: flex;
   align-items: center;
@@ -637,6 +741,10 @@ button.guidResourceCard:focus-visible {
 
   .actionEntry {
     margin-right: 0;
+  }
+
+  .actionConfigGroup {
+    gap: 0;
   }
 
   .actionSubmit {

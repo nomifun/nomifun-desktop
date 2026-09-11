@@ -137,6 +137,7 @@ const noopDispatch = <T,>(): Dispatch<SetStateAction<T>> =>
 const createDeps = ({
   selection,
   selectedPreset,
+  currentModel = MODEL,
   input = INPUT,
   loading = false,
   workspaceEnabled = true,
@@ -145,6 +146,7 @@ const createDeps = ({
 }: {
   selection: GuidAgentSelection;
   selectedPreset?: ExecutableAgentPreset;
+  currentModel?: TProviderWithModel | null;
   input?: string;
   loading?: boolean;
   workspaceEnabled?: boolean;
@@ -161,6 +163,7 @@ const createDeps = ({
   loading,
   selection,
   selectedPreset,
+  current_model: currentModel ?? undefined,
   workspaceEnabled,
   resourceResolutionReady,
   autoWork: { enabled: false },
@@ -222,7 +225,15 @@ describe('useGuidSend HTTP behavior', () => {
         chat_route_records: {},
       },
     });
-    expect(calls[1]).toEqual({ method: 'POST', url: '/api/agent-sessions', body: { preset_id: PRESET_ID, title: INPUT } });
+    expect(calls[1]).toEqual({
+      method: 'POST',
+      url: '/api/agent-sessions',
+      body: {
+        model: { provider_id: PROVIDER_ID, model: MODEL.use_model },
+        preset_id: PRESET_ID,
+        title: INPUT,
+      },
+    });
     expect(calls).toHaveLength(3);
     expect(readOnlyHandoff()).toMatchObject({ input: INPUT, files: FILES });
     expect(navigations).toEqual([`/conversation/${PRESET_CONVERSATION_ID}`]);
@@ -248,7 +259,7 @@ describe('useGuidSend HTTP behavior', () => {
     expect(sessionStorage.length).toBe(0);
   });
 
-  test('personal Agent launch uses its frozen preset model and stages one handoff', async () => {
+  test('personal Agent launch freezes the selected session model without changing the preset', async () => {
     resetBrowserStorage();
     const calls = installFetchRecorder();
     const navigations: string[] = [];
@@ -271,12 +282,13 @@ describe('useGuidSend HTTP behavior', () => {
       method: 'POST',
       url: '/api/agent-sessions',
       body: {
+        model: { provider_id: PROVIDER_ID, model: MODEL.use_model },
         preset_id: PRESET_ID,
         title: INPUT,
       },
     });
     expect(Object.keys(calls[0].body as Record<string, unknown>).sort()).toEqual(
-      ['preset_id', 'title']
+      ['model', 'preset_id', 'title']
     );
     expect(calls[1]).toEqual({
       method: 'GET',
@@ -352,7 +364,7 @@ describe('useGuidSend HTTP behavior', () => {
     expect(hook.result.current.isButtonDisabled).toBe(true);
   });
 
-  test('disables only when the selected workbench Agent lacks its launch target', () => {
+  test('requires both a workbench Agent and an explicit session model', () => {
     resetBrowserStorage();
     const templateReady = renderHook(() =>
       useGuidSend({
@@ -364,6 +376,15 @@ describe('useGuidSend HTTP behavior', () => {
       useGuidSend(
         createDeps({ selection: { kind: 'template', templateKey: 'chat.minimal' } })
       )
+    );
+    const templateMissingModel = renderHook(() =>
+      useGuidSend({
+        ...createDeps({
+          selection: { kind: 'template', templateKey: 'chat.minimal' },
+          currentModel: null,
+        }),
+        selectedTemplate: TEMPLATE,
+      })
     );
     const presetReady = renderHook(() =>
       useGuidSend(
@@ -394,6 +415,7 @@ describe('useGuidSend HTTP behavior', () => {
 
     expect(templateReady.result.current.isButtonDisabled).toBe(false);
     expect(templateMissing.result.current.isButtonDisabled).toBe(true);
+    expect(templateMissingModel.result.current.isButtonDisabled).toBe(true);
     expect(presetReady.result.current.isButtonDisabled).toBe(false);
     expect(presetMissing.result.current.isButtonDisabled).toBe(true);
     expect(emptyInput.result.current.isButtonDisabled).toBe(true);

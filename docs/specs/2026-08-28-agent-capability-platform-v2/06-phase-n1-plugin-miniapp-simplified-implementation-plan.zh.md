@@ -1605,9 +1605,10 @@ Nomi 执行引擎伪装成一个不属于工作台目录的 `default` Agent：
 
 - Agent 工作台、首次进入、新建会话和已保存选择失效时统一选择官方目录第一项
   `chat.minimal`；
-- `preset/template` 选择不显示独立模型选择器，也不从客户端向 Agent Session Create
-  提交模型、route、binding 或 snapshot；服务端使用 default Chat route 和稳定
-  Revision/Snapshot；
+- Agent 身份与本次会话模型是两个独立选择：所有 `preset/template` 都显示同一个模型
+  选择器，Agent Session Create 只提交 Agent 身份、标题和类型化
+  `{ provider_id, model }` 选择，不提交 route、binding、credential 或 snapshot；服务端
+  将所选模型冻结到本次 Session 的内部变体，不改写 Agent 的稳定 Revision；
 - 官方 template preparation 在首次发送时自动创建或复用稳定配置，用户无需先创建个人
   Agent；
 - AutoWork/发送按钮的 launch target 只按当前工作台 Agent 的模板或稳定 Revision 校验。

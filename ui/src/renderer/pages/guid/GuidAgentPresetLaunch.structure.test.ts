@@ -88,16 +88,17 @@ describe('Guid workbench Agent launch behavior', () => {
     ).toBe(true);
   });
 
-  test('does not expose the engine-level model selector on the Agent launch surface', () => {
+  test('keeps session model selection visible and independent from Agent identity', () => {
     const page = readSource(new URL('./GuidPage.tsx', import.meta.url));
     const actionRow = readSource(
       new URL('./components/GuidActionRow.tsx', import.meta.url)
     );
 
     expect(page.includes('isDefaultAgent')).toBe(false);
-    expect(page.includes('<GuidModelSelector')).toBe(false);
-    expect(page.includes('modelSelectorNode=')).toBe(false);
-    expect(actionRow.includes('modelSelectorNode')).toBe(false);
+    expect(page.includes('const modelSelectorNode = (')).toBe(true);
+    expect(page.includes('<GuidModelSelector')).toBe(true);
+    expect(page.includes('modelSelectorNode={modelSelectorNode}')).toBe(true);
+    expect(actionRow.includes('modelSelectorNode: React.ReactNode;')).toBe(true);
   });
 
   test('does not retain a hidden plain-Nomi launch branch', () => {
@@ -108,19 +109,23 @@ describe('Guid workbench Agent launch behavior', () => {
 
     expect(send.includes("selection.kind === 'default'")).toBe(false);
     expect(send.includes('ipcBridge.conversation.create.invoke')).toBe(false);
-    expect(send.includes('current_model')).toBe(false);
+    expect(send.includes('current_model')).toBe(true);
+    expect(send.includes('provider_id: current_model.id')).toBe(true);
+    expect(send.includes('model: current_model.use_model')).toBe(true);
     expect(officialLaunch.includes('TProviderWithModel')).toBe(false);
     expect(officialLaunch.includes('model: { provider_id:')).toBe(false);
   });
 
-  test('Agent launch submits only the preset identity without client-owned route or binding facts', () => {
+  test('Agent launch submits only Agent identity, title, and the typed session model choice', () => {
     const send = readSource(new URL('./hooks/useGuidSend.ts', import.meta.url));
     const payload = extractObjectArgument(
       send,
       'ipcBridge.agentPlatform.sessions.create.invoke'
     );
 
-    expect(topLevelKeys(payload)).toEqual(['preset_id', 'title']);
+    expect(topLevelKeys(payload)).toEqual(['preset_id', 'title', 'model']);
+    expect(payload.includes('provider_id: current_model.id')).toBe(true);
+    expect(payload.includes('model: current_model.use_model')).toBe(true);
     expect(payload.includes('preset_id: launchPreset.preset_id')).toBe(true);
     expect(payload.includes('title: entryPlan.conversationName')).toBe(true);
 
