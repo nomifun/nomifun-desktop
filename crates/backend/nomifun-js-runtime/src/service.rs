@@ -646,15 +646,16 @@ fn exact_executable_path(
     Ok(expected_canonical.unwrap_or_else(|_| expected.to_path_buf()))
 }
 
-fn runtime_path_key(path: &std::path::Path) -> String {
-    let key = path.to_string_lossy().replace('\\', "/");
+fn runtime_path_key(path: &std::path::Path) -> std::ffi::OsString {
     #[cfg(windows)]
     {
-        key.to_ascii_lowercase()
+        path.to_string_lossy().replace('\\', "/").to_ascii_lowercase().into()
     }
     #[cfg(not(windows))]
     {
-        key
+        // Unix filenames are byte-exact: neither backslashes nor invalid
+        // UTF-8 may be normalized into another executable's identity.
+        path.as_os_str().to_owned()
     }
 }
 
@@ -927,6 +928,32 @@ mod tests {
         RuntimeQuiesceResult, RuntimeSelectionStore,
         RuntimeSelectionStoreError, RuntimeSwitchParticipant,
     };
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_identity_preserves_unix_backslashes_and_accepts_symlink_aliases() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let literal = directory.path().join(r"node\bin").join("node");
+        let nested = directory.path().join("node/bin/node");
+        for path in [&literal, &nested] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"same bytes do not imply the same installation").unwrap();
+        }
+        assert!(exact_executable_path(&literal, nested.to_str().unwrap()).is_err());
+        let alias = directory.path().join("node-alias");
+        std::os::unix::fs::symlink(&literal, &alias).unwrap();
+        assert_eq!(
+            exact_executable_path(&alias, literal.to_str().unwrap()).unwrap(),
+            std::fs::canonicalize(&literal).unwrap(),
+        );
+        let non_utf8 = directory.path().join(std::ffi::OsString::from_vec(b"node-\xff".to_vec()));
+        let replacement = directory.path().join("node-\u{fffd}");
+        std::fs::write(&non_utf8, b"node").unwrap();
+        std::fs::write(&replacement, b"node").unwrap();
+        assert!(exact_executable_path(&non_utf8, replacement.to_str().unwrap()).is_err());
+    }
 
     #[derive(Default)]
     struct MemoryStore {
