@@ -60,6 +60,12 @@ pub fn preset_protocol_recommendation(platform: &str, task: ModelTask) -> Option
         // OpenAI native endpoints. OpenAI does not expose rerank.
         ("openai", task) => openai_route(task),
 
+        // Agnes media endpoints use provider-specific request fields and a
+        // video_id-based polling endpoint. Chat remains OpenAI compatible.
+        ("agnes", Chat) => route("openai.chat_text"),
+        ("agnes", ImageGeneration | ImageEdit) => route("agnes.images"),
+        ("agnes", VideoGeneration) => route("agnes.video_jobs"),
+
         // Gemini native generateContent adapters.
         ("gemini", ImageGeneration | ImageEdit) => route("gemini.generate_content"),
         ("gemini", Chat) => route("gemini.generate_text"),
@@ -248,6 +254,29 @@ mod tests {
         assert_eq!(platform_route("gemini", ImageEdit), plain("gemini.generate_content"));
         for task in [VideoGeneration, SpeechSynthesis, SpeechRecognition, Embedding, Rerank] {
             assert_eq!(platform_route("gemini", task), None, "(gemini, {task:?})");
+        }
+    }
+
+    #[test]
+    fn agnes_routes_media_to_its_native_contracts() {
+        assert_eq!(platform_route("agnes", Chat), plain("openai.chat_text"));
+        assert_eq!(
+            platform_route("agnes", ImageGeneration),
+            plain("agnes.images")
+        );
+        assert_eq!(platform_route("agnes", ImageEdit), plain("agnes.images"));
+        assert_eq!(
+            platform_route("agnes", VideoGeneration),
+            plain("agnes.video_jobs")
+        );
+        for task in [
+            RealtimeConversation,
+            SpeechSynthesis,
+            SpeechRecognition,
+            Embedding,
+            Rerank,
+        ] {
+            assert_eq!(platform_route("agnes", task), None, "(agnes, {task:?})");
         }
     }
 
