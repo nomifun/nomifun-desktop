@@ -23,7 +23,7 @@ const saved = {
   current_stable_revision: { preset_id: '0190f5fe-7c00-7a00-8000-000000000101', revision: 1, revision_digest: 'a'.repeat(64) },
 } as ExecutableAgentPreset;
 const draft = { ...saved, preset_id: '0190f5fe-7c00-7a00-8000-000000000102' as typeof saved.preset_id, display_name: 'New researcher', current_stable_revision: undefined };
-const templates = ['assistant.general', 'coding.codex', 'chat.minimal'].map((template_key) => ({ template_key }) as OfficialPresetTemplate);
+const templates = ['chat.minimal', 'assistant.general', 'coding.codex'].map((template_key) => ({ template_key }) as OfficialPresetTemplate);
 const LocationProbe = () => {
   const location = useLocation();
   return <output data-testid='location'>{location.pathname}{location.search}</output>;
@@ -31,9 +31,9 @@ const LocationProbe = () => {
 const renderSelector = (props: Partial<GuidAgentSelectorProps> = {}) => {
   const selections: GuidAgentSelection[] = [];
   const Harness = () => {
-    const [selection, setSelection] = useState<GuidAgentSelection>(props.selection ?? { kind: 'default' });
+    const [selection, setSelection] = useState<GuidAgentSelection>(props.selection ?? { kind: 'template', templateKey: 'chat.minimal' });
     const choose = (next: GuidAgentSelection) => { selections.push(next); setSelection(next); };
-    return <GuidAgentSelector presets={[saved]} officialTemplates={templates} draftPresets={[draft]} {...props} selection={selection} onSelectDefault={() => choose({ kind: 'default' })} onSelectTemplate={(templateKey) => choose({ kind: 'template', templateKey })} onSelectPreset={(presetId) => choose({ kind: 'preset', presetId })} />;
+    return <GuidAgentSelector presets={[saved]} officialTemplates={templates} draftPresets={[draft]} {...props} selection={selection} onSelectTemplate={(templateKey) => choose({ kind: 'template', templateKey })} onSelectPreset={(presetId) => choose({ kind: 'preset', presetId })} />;
   };
   const page = render(<I18nextProvider i18n={i18n}><MemoryRouter initialEntries={['/guid']}><Harness /><LocationProbe /></MemoryRouter></I18nextProvider>);
   const open = async () => { await act(async () => { fireEvent.click(page.getByTestId('guid-agent-selector')); }); };
@@ -44,7 +44,8 @@ afterEach(cleanup);
 describe('Guid Agent selector', () => {
   test('keeps the collection hidden until the current Agent is opened', async () => {
     const { page, open } = renderSelector();
-    expect(page.getByTestId('guid-agent-selector').textContent).toBe('Nomi Agent');
+    expect(page.getByTestId('guid-agent-selector').textContent).toBe(agentSettings.template.chat.minimal.name);
+    expect(page.queryByText('Nomi Agent')).toBeNull();
     expect(page.queryByRole('dialog')).toBeNull();
     expect(page.queryByText(saved.display_name)).toBeNull();
     await open();
@@ -62,8 +63,8 @@ describe('Guid Agent selector', () => {
     expect(page.queryByRole('dialog')).toBeNull();
     await open();
     expect(within(page.getByRole('dialog')).getByRole('button', { name: /Release reviewer/ }).getAttribute('aria-pressed')).toBe('true');
-    await act(async () => { fireEvent.click(page.getByRole('button', { name: /Nomi Agent Everyday/ })); });
-    expect(selections.at(-1)).toEqual({ kind: 'default' });
+    await act(async () => { fireEvent.click(page.getByRole('button', { name: agentSettings.template.chat.minimal.name })); });
+    expect(selections.at(-1)).toEqual({ kind: 'template', templateKey: 'chat.minimal' });
   });
 
   test('searches names and descriptions, including templates outside the initial preview', async () => {
@@ -72,9 +73,8 @@ describe('Guid Agent selector', () => {
     const search = page.getByRole('searchbox');
     await act(async () => { fireEvent.input(search, { target: { value: 'release PLANS' } }); });
     expect(page.getByRole('button', { name: /Release reviewer/ })).not.toBeNull();
-    expect(Boolean(page.queryByRole('button', { name: /Nomi Agent Everyday/ }))).toBe(false);
-    await act(async () => { fireEvent.input(search, { target: { value: agentSettings.template.chat.minimal.name } }); });
-    expect(page.getByRole('button', { name: agentSettings.template.chat.minimal.name })).not.toBeNull();
+    await act(async () => { fireEvent.input(search, { target: { value: agentSettings.template.coding.codex.name } }); });
+    expect(page.getByRole('button', { name: agentSettings.template.coding.codex.name })).not.toBeNull();
   });
 
   test('Enter chooses a filtered result but does not submit during IME composition', async () => {
@@ -93,9 +93,9 @@ describe('Guid Agent selector', () => {
     await open();
     const search = page.getByRole('searchbox');
     fireEvent.keyDown(search, { key: 'ArrowDown' });
-    expect(document.activeElement?.textContent?.includes('Nomi Agent')).toBe(true);
-    fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
     expect(document.activeElement?.textContent?.includes('Release reviewer')).toBe(true);
+    fireEvent.keyDown(document.activeElement!, { key: 'ArrowDown' });
+    expect(document.activeElement?.textContent?.includes('New researcher')).toBe(true);
     await act(async () => { fireEvent.keyDown(document.activeElement!, { key: 'Escape' }); });
     expect(page.queryByRole('dialog')).toBeNull();
   });
@@ -103,13 +103,13 @@ describe('Guid Agent selector', () => {
   test('official Agents select in place, update the label and checkmark, and close the menu', async () => {
     const { page, open, selections } = renderSelector();
     await open();
-    await act(async () => { fireEvent.click(page.getByRole('button', { name: agentSettings.template.coding.codex.name })); });
+    await act(async () => { fireEvent.click(page.getByRole('button', { name: agentSettings.template.assistant.general.name })); });
     expect(page.getByTestId('location').textContent).toBe('/guid');
-    expect(selections).toEqual([{ kind: 'template', templateKey: 'coding.codex' }]);
-    expect(page.getByTestId('guid-agent-selector').textContent).toBe(agentSettings.template.coding.codex.name);
+    expect(selections).toEqual([{ kind: 'template', templateKey: 'assistant.general' }]);
+    expect(page.getByTestId('guid-agent-selector').textContent).toBe(agentSettings.template.assistant.general.name);
     expect(page.queryByRole('dialog')).toBeNull();
     await open();
-    expect(within(page.getByRole('dialog')).getByRole('button', { name: agentSettings.template.coding.codex.name }).getAttribute('aria-pressed')).toBe('true');
+    expect(within(page.getByRole('dialog')).getByRole('button', { name: agentSettings.template.assistant.general.name }).getAttribute('aria-pressed')).toBe('true');
   });
 
   test('drafts stay discoverable and open the exact editor', async () => {
@@ -123,11 +123,11 @@ describe('Guid Agent selector', () => {
   test('all templates can be expanded and collapsed without changing the current Agent', async () => {
     const { page, open, selections } = renderSelector();
     await open();
-    expect(page.queryByRole('button', { name: agentSettings.template.chat.minimal.name })).toBeNull();
+    expect(page.queryByRole('button', { name: agentSettings.template.coding.codex.name })).toBeNull();
     fireEvent.click(page.getByRole('button', { name: guid.agentEntries.browseTemplates }));
-    expect(page.getByRole('button', { name: agentSettings.template.chat.minimal.name })).not.toBeNull();
+    expect(page.getByRole('button', { name: agentSettings.template.coding.codex.name })).not.toBeNull();
     fireEvent.click(page.getByRole('button', { name: guid.agentEntries.fewerTemplates }));
-    expect(page.queryByRole('button', { name: agentSettings.template.chat.minimal.name })).toBeNull();
+    expect(page.queryByRole('button', { name: agentSettings.template.coding.codex.name })).toBeNull();
     expect(selections).toEqual([]);
   });
 

@@ -5698,6 +5698,16 @@ function ap7AgentPresetLaunchContract() {
     send: 'ui/src/renderer/pages/guid/hooks/useGuidSend.ts',
     selection:
       'ui/src/renderer/pages/guid/hooks/useGuidAgentSelection.ts',
+    selectionUtils:
+      'ui/src/renderer/pages/guid/hooks/agentSelectionUtils.ts',
+    mention:
+      'ui/src/renderer/pages/guid/hooks/useGuidMention.ts',
+    officialLaunch:
+      'ui/src/renderer/pages/guid/hooks/officialAgentLaunch.ts',
+    workbenchController:
+      'ui/src/renderer/pages/agentSettings/useAgentSettingsController.ts',
+    quickStart:
+      'ui/src/renderer/hooks/agent/useNomiQuickStart.ts',
     conversation:
       'ui/src/renderer/pages/conversation/components/ChatConversation.tsx',
     sendBox:
@@ -5738,28 +5748,36 @@ function ap7AgentPresetLaunchContract() {
 
   require(
     source.page.includes('presets={agentSelection.presets}') &&
+      source.page.includes('officialTemplates={agentSelection.officialTemplates}') &&
       source.page.includes('selection={agentSelection.selection}') &&
       source.page.includes('selectedAgentPresetId'),
-    'Guid must render the default-or-preset selector and honor Workbench preselection'
+    'Guid must render the Workbench-backed official/personal Agent selector and honor Workbench preselection'
   );
   require(
-    source.selector.includes('onSelectDefault') &&
-      source.selector.includes("defaultValue: 'Nomi Agent'") &&
-      source.selection.includes(
-        "const DEFAULT_AGENT_SELECTION: GuidAgentSelection = { kind: 'default' };"
+    !source.selector.includes('onSelectDefault') &&
+      !source.selector.includes("defaultValue: 'Nomi Agent'") &&
+      source.selectionUtils.includes("templateKey: 'chat.minimal'") &&
+      source.workbenchController.includes(
+        'const firstTemplate = nextLibrary.official_templates[0];'
+      ) &&
+      source.selection.includes('normalizeGuidAgentSelection(saved)') &&
+      !source.config.includes("| { kind: 'default' }") &&
+      source.config.includes(
+        "| { kind: 'template'; templateKey: OfficialPresetKey }"
       ) &&
       source.config.includes(
         "| { kind: 'preset'; presetId: AgentPresetId };"
-      ),
-    'Guid must keep plain Nomi as a first-class option instead of a synthetic AgentPreset'
+      ) &&
+      !source.mention.includes('guid-agent-default'),
+    'Guid must default to official chat.minimal and reject the synthetic default/Nomi Agent identity'
   );
   require(
-    source.page.includes('const modelSelectorNode = isDefaultAgent ? (') &&
-      source.page.includes('<GuidModelSelector') &&
-      source.page.includes('modelSelectorNode={modelSelectorNode}') &&
-      source.actionRow.includes('modelSelectorNode?: React.ReactNode') &&
-      source.actionRow.includes('{modelSelectorNode && ('),
-    'plain Nomi must expose the model selector and AgentPreset mode must hide it'
+    !source.page.includes('<GuidModelSelector') &&
+      !source.page.includes('isDefaultAgent') &&
+      !source.actionRow.includes('modelSelectorNode') &&
+      !source.officialLaunch.includes('TProviderWithModel') &&
+      !source.officialLaunch.includes('provider_id: model.id'),
+    'Guid Agent launch must use the control-plane Chat route instead of a separate engine-level model selector'
   );
   require(
     source.conversation.includes(
@@ -5793,15 +5811,23 @@ function ap7AgentPresetLaunchContract() {
   require(
     source.selector.includes('name={preset.display_name}') &&
       source.selector.includes('onSelectPreset(preset.preset_id)') &&
+      source.selector.includes('officialTemplates.map') &&
+      source.selector.includes('onSelectTemplate(template.template_key)') &&
       source.selector.includes("to='/agent'"),
-    'the home Agent selector must expose saved presets and link management to /agent'
+    'the home Agent selector must expose the same official and personal entries as Agent Workbench'
   );
   require(
-    source.send.includes("if (selection.kind === 'default')") &&
-      source.send.includes('ipcBridge.conversation.create.invoke({') &&
-      source.send.includes("type: 'nomi'") &&
-      source.send.includes('model: current_model'),
-    'plain Nomi must retain the ordinary conversation create path with an explicit model'
+    !source.send.includes("selection.kind === 'default'") &&
+      !source.send.includes('ipcBridge.conversation.create.invoke({') &&
+      !source.send.includes('current_model') &&
+      source.send.includes('prepareOfficialAgent(') &&
+      source.send.includes('agentPlatform.sessions.create.invoke({'),
+    'Guid must have one AgentPreset Session launch path with no hidden plain-Nomi branch'
+  );
+  require(
+    source.quickStart.includes('ipcBridge.conversation.create.invoke({') &&
+      source.quickStart.includes("type: 'nomi'"),
+    'removing the Guid pseudo-Agent must not remove the internal Nomi quick-start/runtime path'
   );
   require(
     (requestPayload.includes('preset_id: selectedPreset.preset_id') ||
@@ -6566,7 +6592,7 @@ function runAp7SelfTest() {
   );
   c8SelfTestAssert(
     ap7AgentPresetLaunchContract().valid,
-    'AP-7 must reject a missing default Nomi path or an impure AgentPreset selector'
+    'AP-7 must reject a synthetic default Nomi Agent or an impure Workbench-backed selector'
   );
   c8SelfTestAssert(
     ap7RevisionStorageContract().valid,

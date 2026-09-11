@@ -28,7 +28,6 @@ import GuidAgentSelector from './components/GuidAgentSelector';
 import GuidActionRow from './components/GuidActionRow';
 import GuidCompanionPosterPreview from './components/GuidCompanionPosterPreview';
 import GuidInputCard from './components/GuidInputCard';
-import GuidModelSelector from './components/GuidModelSelector';
 import GuidResourceCards from './components/GuidResourceCards';
 import MentionDropdown, {
   MentionSelectorBadge,
@@ -42,7 +41,6 @@ import { useGuidAdvancedConfig } from './hooks/useGuidAdvancedConfig';
 import { useGuidAgentSelection } from './hooks/useGuidAgentSelection';
 import { useGuidInput } from './hooks/useGuidInput';
 import { useGuidMention } from './hooks/useGuidMention';
-import { useGuidModelSelection } from './hooks/useGuidModelSelection';
 import { useGuidPresetCapabilities } from './hooks/useGuidPresetCapabilities';
 import { useGuidSend } from './hooks/useGuidSend';
 import { useTypewriterPlaceholder } from './hooks/useTypewriterPlaceholder';
@@ -79,7 +77,6 @@ const GuidPage: React.FC = () => {
     selectedAgentPresetId: preselectedPresetId,
     locationKey: location.key,
   });
-  const modelSelection = useGuidModelSelection('nomi');
   const guidInput = useGuidInput({
     locationState: navigationState,
   });
@@ -91,26 +88,19 @@ const GuidPage: React.FC = () => {
   );
 
   const isAutoWorkMode = isAutoWorkEntry(advancedConfig.autoWork);
-  const isDefaultAgent = agentSelection.selection.kind === 'default';
-  const presetResourceResolutionReady =
-    isDefaultAgent ||
-    (agentSelection.selection.kind === 'template'
-      ? Boolean(agentSelection.selectedTemplate)
-      : !presetCapabilities.isLoading && !presetCapabilities.error);
+  const presetResourceResolutionReady = agentSelection.selection.kind === 'template'
+    ? Boolean(agentSelection.selectedTemplate)
+    : !presetCapabilities.isLoading && !presetCapabilities.error;
   const presetResourceKinds = agentSelection.selectedTemplate
     ? new Set(agentSelection.selectedTemplate.seed.required_resource_kinds)
     : presetCapabilities.requiredResourceKinds;
   const knowledgeEnabled =
-    isDefaultAgent ||
-    (presetResourceResolutionReady && presetResourceKinds.has('knowledge_base'));
+    presetResourceResolutionReady && presetResourceKinds.has('knowledge_base');
   const workspaceEnabled =
-    isDefaultAgent ||
-    (presetResourceResolutionReady && presetResourceKinds.has('workspace'));
-  const hasLaunchTarget = isDefaultAgent
-    ? Boolean(modelSelection.current_model)
-    : agentSelection.selection.kind === 'template'
-      ? Boolean(agentSelection.selectedTemplate)
-      : Boolean(
+    presetResourceResolutionReady && presetResourceKinds.has('workspace');
+  const hasLaunchTarget = agentSelection.selection.kind === 'template'
+    ? Boolean(agentSelection.selectedTemplate)
+    : Boolean(
         agentSelection.selectedPreset?.current_stable_revision &&
           presetResourceResolutionReady
       );
@@ -121,9 +111,6 @@ const GuidPage: React.FC = () => {
     selection: agentSelection.selection,
     setSelection: agentSelection.setSelection,
     selectedPreset: agentSelection.selectedPreset,
-    defaultAgentLabel: t('guid.defaultAgent', {
-      defaultValue: 'Nomi Agent',
-    }),
     setInput: guidInput.setInput,
   });
 
@@ -139,7 +126,6 @@ const GuidPage: React.FC = () => {
     selection: agentSelection.selection,
     selectedPreset: agentSelection.selectedPreset,
     selectedTemplate: agentSelection.selectedTemplate,
-    current_model: modelSelection.current_model,
     applyAdvancedConfig: (conversationId) =>
       advancedConfig.applyToConversation(conversationId, {
         allowKnowledgeBinding: knowledgeEnabled,
@@ -401,15 +387,6 @@ const GuidPage: React.FC = () => {
     </>
   );
 
-  const modelSelectorNode = isDefaultAgent ? (
-    <GuidModelSelector
-      isProviderModelMode
-      modelList={modelSelection.modelList}
-      current_model={modelSelection.current_model}
-      setCurrentModel={modelSelection.setCurrentModel}
-    />
-  ) : null;
-
   const autoWorkButtonDisabled =
     !hasLaunchTarget ||
     autoWorkStartDisabled(guidInput.loading, advancedConfig.autoWork);
@@ -417,7 +394,6 @@ const GuidPage: React.FC = () => {
     <GuidActionRow
       files={guidInput.files}
       onFilesUploaded={guidInput.handleFilesUploaded}
-      modelSelectorNode={modelSelectorNode}
       loading={guidInput.loading}
       speechInputNode={
         <SpeechInputButton
@@ -454,7 +430,7 @@ const GuidPage: React.FC = () => {
               </p>
             </div>
 
-            {!isDefaultAgent && presetCapabilities.error && (
+            {agentSelection.selection.kind === 'preset' && presetCapabilities.error && (
               <Alert
                 type='error'
                 showIcon
@@ -506,9 +482,6 @@ const GuidPage: React.FC = () => {
                   isLoading={agentSelection.isLoading}
                   loadError={agentSelection.loadError}
                   onRetry={agentSelection.refreshPresets}
-                  onSelectDefault={() =>
-                    handleSelectAgent({ kind: 'default' })
-                  }
                   onSelectPreset={(presetId) =>
                     handleSelectAgent({ kind: 'preset', presetId })
                   }

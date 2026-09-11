@@ -6,7 +6,6 @@
  */
 
 import { ipcBridge } from '@/common';
-import type { TProviderWithModel } from '@/common/config/storage';
 import {
   conversationTarget,
   parseConversationId,
@@ -44,7 +43,6 @@ export type GuidSendDeps = {
   selection: GuidAgentSelection;
   selectedPreset: ExecutableAgentPreset | undefined;
   selectedTemplate?: OfficialPresetTemplate;
-  current_model: TProviderWithModel | undefined;
   applyAdvancedConfig?: (conversationId: ConversationId) => Promise<void>;
   autoWork: AutoWorkDraftValue;
   /** Whether the selected target may receive the staged workspace resource. */
@@ -67,7 +65,7 @@ export type GuidSendResult = {
   isButtonDisabled: boolean;
 };
 
-/** Creates either a plain Nomi conversation or a frozen AgentPreset Session. */
+/** Creates a frozen AgentPreset Session from a workbench Agent selection. */
 export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
   const {
     input,
@@ -81,7 +79,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     selection,
     selectedPreset,
     selectedTemplate,
-    current_model,
     applyAdvancedConfig,
     autoWork,
     workspaceEnabled,
@@ -103,73 +100,54 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     let conversationId: ConversationId;
     let conversation;
 
-    if (selection.kind === 'default') {
-      if (!current_model) throw new Error('MODEL_REQUIRED');
-      conversation = await ipcBridge.conversation.create.invoke({
-        type: 'nomi',
-        name: entryPlan.conversationName,
-        model: current_model,
-        extra: {
-          default_files: files,
-          workspace: selectedWorkspace,
-          custom_workspace: Boolean(selectedWorkspace),
-        },
-      });
-      if (!conversation?.id) {
-        throw new Error('Nomi conversation was not created');
-      }
-      conversationId = conversation.id;
-    } else {
-      let launchPreset = selectedPreset;
-      if (selection.kind === 'template') {
-        if (!selectedTemplate || selectedTemplate.template_key !== selection.templateKey) {
-          throw new Error('AGENT_PRESET_REQUIRED');
-        }
-        try {
-          launchPreset = await prepareOfficialAgent(
-            selectedTemplate,
-            t(`agentSettings.template.${TEMPLATE_I18N_PATH[selection.templateKey]}.name`),
-            current_model,
-          );
-        } catch (error) {
-          throw new Error(officialAgentLaunchError(error, t));
-        }
-      }
-      if (
-        !launchPreset?.current_stable_revision ||
-        (selection.kind === 'preset' && launchPreset.preset_id !== selection.presetId)
-      ) {
+    let launchPreset = selectedPreset;
+    if (selection.kind === 'template') {
+      if (!selectedTemplate || selectedTemplate.template_key !== selection.templateKey) {
         throw new Error('AGENT_PRESET_REQUIRED');
       }
-      const session = await ipcBridge.agentPlatform.sessions.create.invoke({
-        preset_id: launchPreset.preset_id,
-        title: entryPlan.conversationName,
+      try {
+        launchPreset = await prepareOfficialAgent(
+          selectedTemplate,
+          t(`agentSettings.template.${TEMPLATE_I18N_PATH[selection.templateKey]}.name`),
+        );
+      } catch (error) {
+        throw new Error(officialAgentLaunchError(error, t));
+      }
+    }
+    if (
+      !launchPreset?.current_stable_revision ||
+      (selection.kind === 'preset' && launchPreset.preset_id !== selection.presetId)
+    ) {
+      throw new Error('AGENT_PRESET_REQUIRED');
+    }
+    const session = await ipcBridge.agentPlatform.sessions.create.invoke({
+      preset_id: launchPreset.preset_id,
+      title: entryPlan.conversationName,
+    });
+    conversationId = parseConversationId(session.agent_session_id);
+    conversation = await ipcBridge.conversation.get.invoke({
+      conversation_id: conversationId,
+    });
+    if (!conversation?.id) {
+      throw new Error(
+        'AgentSession was created without a Conversation projection'
+      );
+    }
+    if (selectedWorkspace) {
+      const updated = await ipcBridge.conversation.update.invoke({
+        conversation_id: conversationId,
+        updates: { extra: { workspace: selectedWorkspace } },
       });
-      conversationId = parseConversationId(session.agent_session_id);
+      if (!updated) {
+        throw new Error('AgentSession workspace was not bound');
+      }
       conversation = await ipcBridge.conversation.get.invoke({
         conversation_id: conversationId,
       });
       if (!conversation?.id) {
         throw new Error(
-          'AgentSession was created without a Conversation projection'
+          'AgentSession workspace update lost its Conversation projection'
         );
-      }
-      if (selectedWorkspace) {
-        const updated = await ipcBridge.conversation.update.invoke({
-          conversation_id: conversationId,
-          updates: { extra: { workspace: selectedWorkspace } },
-        });
-        if (!updated) {
-          throw new Error('AgentSession workspace was not bound');
-        }
-        conversation = await ipcBridge.conversation.get.invoke({
-          conversation_id: conversationId,
-        });
-        if (!conversation?.id) {
-          throw new Error(
-            'AgentSession workspace update lost its Conversation projection'
-          );
-        }
       }
     }
 
@@ -197,7 +175,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
   }, [
     applyAdvancedConfig,
     autoWork,
-    current_model,
     files,
     input,
     navigate,
@@ -211,10 +188,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
   const sendMessageHandler = useCallback(() => {
     if (loading || sendingRef.current) return;
     if (!resourceResolutionReady) return;
-    if (selection.kind === 'default' && !current_model) {
-      Message.warning(t('conversation.noModelConfigured'));
-      return;
-    }
     if (selection.kind === 'template' && selectedTemplate?.template_key !== selection.templateKey) return;
     if (
       selection.kind === 'preset' &&
@@ -264,7 +237,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     handleSend,
     input,
     loading,
-    current_model,
     resourceResolutionReady,
     selection,
     selectedPreset,
@@ -280,11 +252,12 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     t,
   ]);
 
-  const hasLaunchTarget = selection.kind === 'default'
-    ? Boolean(current_model)
-    : selection.kind === 'template'
-      ? Boolean(selectedTemplate?.template_key === selection.templateKey && resourceResolutionReady)
-      : Boolean(
+  const hasLaunchTarget = selection.kind === 'template'
+    ? Boolean(
+        selectedTemplate?.template_key === selection.templateKey &&
+          resourceResolutionReady
+      )
+    : Boolean(
         selectedPreset?.current_stable_revision &&
           selectedPreset.preset_id === selection.presetId &&
           resourceResolutionReady

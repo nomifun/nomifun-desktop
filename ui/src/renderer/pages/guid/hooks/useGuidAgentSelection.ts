@@ -8,8 +8,11 @@ import { configService } from '@/common/config/configService';
 import { useAgentPresets } from '@/renderer/hooks/agent/useAgentPresets';
 import type { AgentPresetSummary, OfficialPresetTemplate } from '@/common/types/agentPlatform';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { isExecutableAgentPreset } from './agentSelectionUtils';
-import { TEMPLATE_I18N_PATH } from '../../agentSettings/model';
+import {
+  DEFAULT_GUID_AGENT_SELECTION,
+  isExecutableAgentPreset,
+  normalizeGuidAgentSelection,
+} from './agentSelectionUtils';
 import type {
   ExecutableAgentPreset,
   GuidAgentSelection,
@@ -26,7 +29,6 @@ export type GuidAgentSelectionResult = {
   isLoaded: boolean;
   loadError: Error | undefined;
   setSelection: (selection: GuidAgentSelection) => void;
-  selectDefaultAgent: () => void;
   refreshPresets: () => Promise<void>;
 };
 
@@ -36,26 +38,9 @@ type UseGuidAgentSelectionOptions = {
   locationKey?: string;
 };
 
-const DEFAULT_AGENT_SELECTION: GuidAgentSelection = { kind: 'default' };
-
-const isGuidAgentSelection = (
-  value: unknown
-): value is GuidAgentSelection => {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return false;
-  }
-  const candidate = value as Record<string, unknown>;
-  return (
-    candidate.kind === 'default' ||
-    (candidate.kind === 'preset' && typeof candidate.presetId === 'string') ||
-    (candidate.kind === 'template' && typeof candidate.templateKey === 'string' &&
-      Object.hasOwn(TEMPLATE_I18N_PATH, candidate.templateKey))
-  );
-};
-
 const readSavedSelection = (): GuidAgentSelection => {
   const saved: unknown = configService.get('guid.agentSelection');
-  return isGuidAgentSelection(saved) ? saved : DEFAULT_AGENT_SELECTION;
+  return normalizeGuidAgentSelection(saved);
 };
 
 const saveSelection = (selection: GuidAgentSelection): void => {
@@ -66,7 +51,7 @@ const saveSelection = (selection: GuidAgentSelection): void => {
     });
 };
 
-/** Selects Nomi, an official Agent, or a saved personal Agent in place. */
+/** Selects an official Agent or a saved personal Agent from the workbench catalog. */
 export const useGuidAgentSelection = ({
   resetAgentSelection = false,
   selectedAgentPresetId,
@@ -76,7 +61,7 @@ export const useGuidAgentSelection = ({
     try {
       return readSavedSelection();
     } catch {
-      return DEFAULT_AGENT_SELECTION;
+      return DEFAULT_GUID_AGENT_SELECTION;
     }
   });
 
@@ -102,8 +87,8 @@ export const useGuidAgentSelection = ({
     saveSelection(nextSelection);
   }, []);
 
-  const selectDefaultAgent = useCallback(() => {
-    setSelection(DEFAULT_AGENT_SELECTION);
+  const selectDefaultTemplate = useCallback(() => {
+    setSelection(DEFAULT_GUID_AGENT_SELECTION);
   }, [setSelection]);
 
   const selectedPresetId =
@@ -117,10 +102,12 @@ export const useGuidAgentSelection = ({
   );
   const effectiveSelection =
     selection.kind === 'preset' && !selectedPreset && loadError
-      ? DEFAULT_AGENT_SELECTION
+      ? DEFAULT_GUID_AGENT_SELECTION
       : selection;
-  const selectedTemplate = selection.kind === 'template'
-    ? library?.official_templates.find((template) => template.template_key === selection.templateKey)
+  const selectedTemplate = effectiveSelection.kind === 'template'
+    ? library?.official_templates.find(
+        (template) => template.template_key === effectiveSelection.templateKey
+      )
     : undefined;
 
   const navigationRequestHandledRef = useRef(false);
@@ -135,7 +122,7 @@ export const useGuidAgentSelection = ({
 
     if (resetAgentSelection) {
       navigationRequestHandledRef.current = true;
-      selectDefaultAgent();
+      selectDefaultTemplate();
       return;
     }
 
@@ -152,14 +139,14 @@ export const useGuidAgentSelection = ({
       return;
     }
 
-    selectDefaultAgent();
+    selectDefaultTemplate();
   }, [
     isLoading,
     isLoaded,
     loadError,
     presets,
     resetAgentSelection,
-    selectDefaultAgent,
+    selectDefaultTemplate,
     selectedAgentPresetId,
     setSelection,
   ]);
@@ -171,13 +158,12 @@ export const useGuidAgentSelection = ({
       loadError ||
       resetAgentSelection ||
       selectedAgentPresetId ||
-      selection.kind === 'default' ||
       selectedPreset ||
       selectedTemplate
     ) {
       return;
     }
-    selectDefaultAgent();
+    selectDefaultTemplate();
   }, [
     isLoading,
     isLoaded,
@@ -186,8 +172,7 @@ export const useGuidAgentSelection = ({
     selectedAgentPresetId,
     selectedPreset,
     selectedTemplate,
-    selectDefaultAgent,
-    selection.kind,
+    selectDefaultTemplate,
   ]);
 
   return {
@@ -201,7 +186,6 @@ export const useGuidAgentSelection = ({
     isLoaded,
     loadError,
     setSelection,
-    selectDefaultAgent,
     refreshPresets,
   };
 };

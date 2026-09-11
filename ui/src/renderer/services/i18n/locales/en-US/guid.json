@@ -1,10 +1,8 @@
 {
-  "defaultAgent": "Nomi Agent",
   "agentEntries": {
     "needsSetup": "Needs setup",
     "choose": "Choose an Agent",
     "search": "Search Agents",
-    "defaultDescription": "Everyday questions and tasks",
     "fromTemplate": "Official Agents",
     "browseTemplates": "Browse official Agents",
     "fewerTemplates": "Show fewer official Agents",
@@ -12,7 +10,7 @@
     "empty": "No matching Agents or templates",
     "loading": "Loading Agents…",
     "loadFailed": "Couldn't load the Agent list",
-    "modelNeeded": "The selected model is unavailable for chat. Choose an available model or check its configuration, then retry. Your message and Agent selection have been kept.",
+    "modelNeeded": "No default chat model is currently available. Configure or enable one in Model Management, then retry. Your message and Agent selection have been kept.",
     "capabilitiesNeeded": "Some capabilities required by this official Agent are not implemented in this build. Your message and selection have been kept. Choose another Agent or adjust capabilities in Manage Agents.",
     "launchFailed": "This official Agent could not start. Check the service and retry. Your message and selection have been kept."
   },
