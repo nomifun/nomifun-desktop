@@ -17,7 +17,6 @@ import {
   HandDrag,
   History,
   Loading,
-  Magic,
   MenuFold,
   PanoramaHorizontal,
   Pic,
@@ -27,7 +26,6 @@ import {
   Setting,
   Square,
   Text,
-  Timeline,
   Undo,
   VideoTwo,
   Voice,
@@ -66,7 +64,6 @@ const NODE_LABEL_KEYS: Record<CreativeCanvasChromeNodeKind, string> = {
   panorama: 'creativeStudio.canvas.nodeKinds.panorama',
   video: 'creativeStudio.canvas.nodeKinds.video',
   audio: 'creativeStudio.canvas.nodeKinds.audio',
-  director: 'creativeStudio.canvas.nodeKinds.director',
   group: 'creativeStudio.canvas.nodeKinds.group',
 };
 
@@ -90,7 +87,6 @@ const RIGHT_LABEL_KEYS: Record<CreativeCanvasRightView, string> = {
 
 const BOTTOM_LABEL_KEYS: Record<CreativeCanvasBottomView, string> = {
   history: 'creativeStudio.canvas.panels.bottom.history',
-  timeline: 'creativeStudio.canvas.panels.bottom.timeline',
 };
 
 const SAVE_LABEL_KEYS: Record<CreativeCanvasChromeSaveStatus, string> = {
@@ -166,8 +162,6 @@ function nodeIcon(kind: CreativeCanvasChromeNodeKind): React.ReactNode {
       return <VideoTwo {...iconProps} />;
     case 'audio':
       return <Voice {...iconProps} />;
-    case 'director':
-      return <Magic {...iconProps} />;
     case 'group':
       return <Group {...iconProps} />;
   }
@@ -190,8 +184,8 @@ function rightIcon(view: CreativeCanvasRightView): React.ReactNode {
   return view === 'assistant' ? <Robot {...iconProps} /> : <Setting {...iconProps} />;
 }
 
-function bottomIcon(view: CreativeCanvasBottomView): React.ReactNode {
-  return view === 'history' ? <History {...iconProps} /> : <Timeline {...iconProps} />;
+function bottomIcon(_view: CreativeCanvasBottomView): React.ReactNode {
+  return <History {...iconProps} />;
 }
 
 function saveIcon(status: CreativeCanvasChromeSaveStatus): React.ReactNode {
@@ -745,7 +739,7 @@ const CreativeCanvasChrome: React.FC<CreativeCanvasChromeProps> = (props) => {
               role='tablist'
               aria-label={t('creativeStudio.canvas.chrome.bottomPanel')}
             >
-              {(['history', 'timeline'] as const).map((view) => (
+              {(['history'] as const).map((view) => (
                 <button
                   key={view}
                   type='button'

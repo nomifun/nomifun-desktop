@@ -16,7 +16,6 @@ export type CanvasNodeOpenMode =
   | 'edit-text'
   | 'compose'
   | 'preview-media'
-  | 'open-director'
   | 'inspect-group';
 
 export type CanvasDropImportKind = 'image' | 'video';

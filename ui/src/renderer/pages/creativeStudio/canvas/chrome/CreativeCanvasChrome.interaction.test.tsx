@@ -42,7 +42,6 @@ const baseProps = (
     },
     bottom: {
       history: <div>HISTORY CONTENT</div>,
-      timeline: <div>TIMELINE CONTENT</div>,
     },
   },
   onBackToCanvases: noop,
@@ -215,22 +214,10 @@ describe('CreativeCanvasChrome toolbar interactions', () => {
     expect(historyButton.getAttribute('aria-pressed')).toBe('true');
     expect(historyPanel?.textContent?.includes('HISTORY CONTENT')).toBe(true);
 
-    fireEvent.click(
-      within(historyPanel!).getByRole('tab', {
-        name: 'creativeStudio.canvas.panels.bottom.timeline',
-      })
-    );
-    const timelinePanel = container.querySelector<HTMLElement>(
-      'section[aria-label="creativeStudio.canvas.panels.bottom.timeline"]'
-    );
-    expect(timelinePanel).not.toBeNull();
-    expect(timelinePanel?.textContent?.includes('TIMELINE CONTENT')).toBe(true);
-    expect(historyButton.getAttribute('aria-pressed')).toBe('true');
-
     fireEvent.click(historyButton);
     expect(
       container.querySelector(
-        'section[aria-label="creativeStudio.canvas.panels.bottom.history"], section[aria-label="creativeStudio.canvas.panels.bottom.timeline"]'
+        'section[aria-label="creativeStudio.canvas.panels.bottom.history"]'
       )
     ).toBeNull();
     expect(historyButton.getAttribute('aria-pressed')).toBe('false');

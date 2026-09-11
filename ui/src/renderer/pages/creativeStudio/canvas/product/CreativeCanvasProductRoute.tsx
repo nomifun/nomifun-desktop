@@ -44,7 +44,6 @@ import {
 import {
   CREATIVE_STUDIO_PROJECTS_PATH,
   CREATIVE_STUDIO_TEMPLATES_PATH,
-  creativeStudioDirectorProjectPath,
 } from '../../app/routes';
 import {
   DEFAULT_CREATIVE_STUDIO_PANELS,
@@ -160,7 +159,6 @@ import {
   CreativeCanvasPropertiesPanel,
   CreativeCanvasUnavailablePanel,
 } from './CreativeCanvasPanels';
-import CreativeCanvasTimelinePanel from './CreativeCanvasTimelinePanel';
 import CreativeCanvasTemplatePanel from './CreativeCanvasTemplatePanel';
 import {
   CreativeCanvasProductAssetLibrary,
@@ -672,14 +670,6 @@ const connectionErrorMessage = (
     case 'config_to_config':
       return t('creativeStudio.canvas.connection.errors.configToConfig', {
         defaultValue: '两个生成任务记录不能直接连接',
-      });
-    case 'director_output_not_supported':
-      return t('creativeStudio.canvas.connection.errors.directorInputOnly', {
-        defaultValue: '导演节点只能接收输入',
-      });
-    case 'director_requires_image_input':
-      return t('creativeStudio.canvas.connection.errors.directorImageOnly', {
-        defaultValue: '导演节点只接受图片或全景图输入',
       });
     case 'no_valid_drop_target':
       return t('creativeStudio.canvas.connection.errors.invalidDropTarget', {
@@ -1543,45 +1533,15 @@ const CreativeCanvasProductRoute: React.FC = () => {
       const insertion = prepareCenteredInsertion();
       if (!insertion) return;
       const { editor, state, viewportSize } = insertion;
-      if (kind === 'director') {
-        const directors = state.document.nodes.filter(
-          (node) => node.type === 'director'
-        );
-        if (directors.length > 0) {
-          editor.dispatch(
-            canvasCommands.setSelection(directors.map((node) => node.id))
-          );
-          handleBottomViewChange('timeline');
-          setNotice(
-            directors.length === 1
-              ? t('creativeStudio.canvas.notices.directorSelected', {
-                  defaultValue: '画布已有唯一导演节点，已为你选中。',
-                })
-              : t('creativeStudio.canvas.notices.directorConflict', {
-                  defaultValue: '画布存在多个导演节点，请在时间线面板中处理冲突。',
-                })
-          );
-          return;
-        }
-      }
       const node = createCreativeCanvasProductNode(
         kind,
         state,
         viewportSize
       );
       editor.dispatch(canvasCommands.addNode(node));
-      if (kind === 'director') {
-        handleBottomViewChange('timeline');
-        setNotice(
-          t('creativeStudio.canvas.notices.directorCreated', {
-            defaultValue: '已创建当前画布唯一的导演节点。',
-          })
-        );
-      } else {
-        setNotice(null);
-      }
+      setNotice(null);
     },
-    [handleBottomViewChange, prepareCenteredInsertion, save.revision]
+    [prepareCenteredInsertion, save.revision]
   );
 
   const handleMiniMapNavigate = useCallback(
@@ -4125,57 +4085,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
     [importCanvasFile, insertClipboardText]
   );
 
-  const handleOpenDirector = useCallback(
-    async (requestedNodeId?: string) => {
-      const editor = editorRef.current;
-      if (!editor || save.revision === null) return;
-      const directors = editor
-        .getState()
-        .document.nodes.filter((node) => node.type === 'director');
-      handleBottomViewChange('timeline');
-      if (directors.length === 0) {
-        setNotice(
-          t('creativeStudio.canvas.notices.addDirectorFirst', {
-            defaultValue: '请先添加导演节点，再进入 3D 导演台。',
-          })
-        );
-        return;
-      }
-      if (directors.length > 1) {
-        editor.dispatch(
-          canvasCommands.setSelection(directors.map((node) => node.id))
-        );
-        setNotice(
-          t('creativeStudio.canvas.notices.resolveDirectorConflict', {
-            defaultValue:
-              '画布存在多个导演节点。请只保留一个，再进入 3D 导演台。',
-          })
-        );
-        return;
-      }
-      const director = directors[0];
-      if (requestedNodeId && requestedNodeId !== director.id) {
-        setNotice(
-          t('creativeStudio.canvas.notices.directorMissing', {
-            defaultValue: '请求的导演节点已不存在，请从时间线面板重新打开。',
-          })
-        );
-        return;
-      }
-      editor.dispatch(canvasCommands.setSelection([director.id]));
-      if (await flushBeforeLeave()) {
-        navigate(creativeStudioDirectorProjectPath(projectId));
-      }
-    },
-    [
-      flushBeforeLeave,
-      handleBottomViewChange,
-      navigate,
-      projectId,
-      save.revision,
-    ]
-  );
-
   const handleIntegrationIntent = useCallback(
     async (intent: CanvasIntegrationIntent) => {
       switch (intent.type) {
@@ -4252,10 +4161,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
             return;
           }
           setEditingTextNodeId(null);
-          if (intent.mode === 'open-director') {
-            await handleOpenDirector(intent.nodeId);
-            return;
-          }
           persistPanels(
             withCreativeCanvasRightView(panelsRef.current, 'properties')
           );
@@ -4310,7 +4215,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
     [
       dismissInteractionOverlays,
       dispatch,
-      handleOpenDirector,
       importCanvasFile,
       openCreateNodeMenu,
       persistPanels,
@@ -4363,40 +4267,17 @@ const CreativeCanvasProductRoute: React.FC = () => {
       const menu = createNodeMenu;
       if (!editor || !menu || save.revision === null) return;
       const state = editor.getState();
-      const directors =
-        kind === 'director'
-          ? state.document.nodes.filter((node) => node.type === 'director')
-          : [];
-      if (directors.length > 1) {
-        editor.dispatch(
-          canvasCommands.setSelection(directors.map((node) => node.id))
-        );
-        handleBottomViewChange('timeline');
-        setNotice(
-          t('creativeStudio.canvas.notices.directorCreateConflict', {
-            defaultValue:
-              '画布存在多个导演节点，请先处理冲突，未创建新的导演节点。',
-          })
-        );
-        dismissInteractionOverlays();
-        return;
-      }
-      const reusedDirector = directors[0] ?? null;
-      const node =
-        reusedDirector ??
-        createCreativeCanvasProductNode(
-          kind,
-          state,
-          measuredSize(canvasHostRef.current),
-          { position: centeredNodePosition(kind, menu.worldPosition) }
-        );
+      const node = createCreativeCanvasProductNode(
+        kind,
+        state,
+        measuredSize(canvasHostRef.current),
+        { position: centeredNodePosition(kind, menu.worldPosition) }
+      );
 
       if (menu.connection) {
         const candidateDocument = {
           ...state.document,
-          nodes: reusedDirector
-            ? state.document.nodes
-            : [...state.document.nodes, node],
+          nodes: [...state.document.nodes, node],
         };
         const at = Date.now();
         const mergeKey = `create-connected:${node.id}`;
@@ -4417,47 +4298,29 @@ const CreativeCanvasProductRoute: React.FC = () => {
           return;
         }
 
-        if (!reusedDirector) {
-          editor.dispatch(canvasCommands.addNode(node, { at, mergeKey }));
-        }
+        editor.dispatch(canvasCommands.addNode(node, { at, mergeKey }));
         for (const command of resolution.commands) editor.dispatch(command);
         editor.dispatch(canvasCommands.setSelection([node.id]));
         const batch = resolution.intents.find((intent) => intent.type === 'connection/batch-created');
         setNotice(
-          batch ? t('creativeStudio.canvas.notices.connectionsCreated', { count: batch.count, skipped: batch.skippedCount }) : reusedDirector
-            ? t('creativeStudio.canvas.notices.directorReusedAndConnected', {
-                defaultValue: '已复用画布唯一的导演节点并完成连接。',
-              })
+          batch ? t('creativeStudio.canvas.notices.connectionsCreated', { count: batch.count, skipped: batch.skippedCount })
             : t('creativeStudio.canvas.notices.nodeCreatedAndConnected', {
                 defaultValue: '已创建节点并完成连接。',
               })
         );
       } else {
-        if (reusedDirector) {
-          editor.dispatch(canvasCommands.setSelection([node.id]));
-          setNotice(
-            t('creativeStudio.canvas.notices.directorSelected', {
-              defaultValue: '画布已有唯一导演节点，已为你选中。',
-            })
-          );
-        } else {
-          editor.dispatch(canvasCommands.addNode(node));
-          setNotice(
-            t('creativeStudio.canvas.notices.nodeCreatedAtPosition', {
-              defaultValue: '已在指定位置创建节点。',
-            })
-          );
-        }
-      }
-      if (kind === 'director') {
-        handleBottomViewChange('timeline');
+        editor.dispatch(canvasCommands.addNode(node));
+        setNotice(
+          t('creativeStudio.canvas.notices.nodeCreatedAtPosition', {
+            defaultValue: '已在指定位置创建节点。',
+          })
+        );
       }
       dismissInteractionOverlays();
     },
     [
       createNodeMenu,
       dismissInteractionOverlays,
-      handleBottomViewChange,
       save.revision,
     ]
   );
@@ -4800,26 +4663,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
       })}
       description={t('creativeStudio.canvas.loading.historyDescription', {
         defaultValue: '历史面板仅展示当前编辑会话的真实撤销栈。',
-      })}
-    />
-  );
-
-  const timeline = renderCanvasState ? (
-    <CreativeCanvasTimelinePanel
-      state={renderCanvasState}
-      disabled={productDisabled}
-      onSelectNode={(nodeId) => dispatch(canvasCommands.setSelection([nodeId]))}
-      onAddDirector={() => addNode('director')}
-      onOpenDirector={(nodeId) => void handleOpenDirector(nodeId)}
-    />
-  ) : (
-    <CreativeCanvasUnavailablePanel
-      kind="generic"
-      title={t('creativeStudio.canvas.loading.timelineTitle', {
-        defaultValue: '正在载入导演时间线',
-      })}
-      description={t('creativeStudio.canvas.loading.documentValidation', {
-        defaultValue: '等待画布文档通过 canonical v1 校验。',
       })}
     />
   );
@@ -5680,7 +5523,6 @@ const CreativeCanvasProductRoute: React.FC = () => {
           },
           bottom: {
             history,
-            timeline,
           },
         }}
       />

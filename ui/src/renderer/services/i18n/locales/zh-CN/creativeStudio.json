@@ -443,8 +443,6 @@
       "edgeLabel": "连接 {{source}} 至 {{target}}",
       "errors": {
         "configToConfig": "两个生成任务记录不能直接连接",
-        "directorImageOnly": "导演节点只接受图片或全景图输入",
-        "directorInputOnly": "导演节点只能接收输入",
         "duplicate": "这两个节点已经连接",
         "groupUnsupported": "节点组不能参与生成连接",
         "invalidDropTarget": "请将连接拖到目标节点卡片上",
@@ -474,8 +472,6 @@
       "connectionInput": "连接输入",
       "connectionOutput": "连接输出",
       "connectionOutputHint": "拖到目标卡片即可连接；多选节点后可批量连接",
-      "currentTimeMs": "当前时间 (ms)",
-      "durationMs": "时长 (ms)",
       "fitContain": "完整显示",
       "fitCover": "填满裁切",
       "fitMode": "适配方式",
@@ -845,8 +841,7 @@
       "historyTitle": "正在载入撤销状态",
       "outlineTitle": "正在载入画布结构",
       "propertiesDescription": "选择真实节点后才能查看 canonical 属性。",
-      "propertiesTitle": "正在载入属性",
-      "timelineTitle": "正在载入导演时间线"
+      "propertiesTitle": "正在载入属性"
     },
     "loadingTitle": "正在载入画布…",
     "minimap": {
@@ -854,7 +849,6 @@
     },
     "nodeKinds": {
       "audio": "音频",
-      "director": "导演台",
       "group": "分组",
       "image": "图片",
       "panorama": "全景图",
@@ -868,10 +862,6 @@
       "connectedPanorama": "已连接全景素材",
       "connectedVideo": "已连接视频素材",
       "defaultGroupTitle": "节点组",
-      "director": {
-        "empty": "尚未建立场景",
-        "timeline": "时间线"
-      },
       "emptyText": "空文本",
       "group": {
         "collapsed": "已折叠",
@@ -917,7 +907,6 @@
       }
     },
     "notices": {
-      "addDirectorFirst": "请先添加导演节点，再进入 3D 导演台。",
       "agentApplyReloadFailed": "Agent 提案应用失败，远端画布也暂时无法重新载入。",
       "agentApplyReloaded": "Agent 提案的应用结果未确认；已重新载入远端画布，请复核。",
       "agentApplyUnconfirmedLeave": "Agent 提案的应用结果尚未确认，请复核远端画布后再离开。",
@@ -939,12 +928,6 @@
       "connectionsCreated": "已创建 {{count}} 条连接，跳过 {{skipped}} 条已有或不兼容连接。",
       "cropRecovered": "上传响应中断后已找回真实裁剪素材，并将派生节点保存到画布。",
       "cropSucceeded": "已裁剪真实原图，创建派生图片节点并保存连线。",
-      "directorConflict": "画布存在多个导演节点，请在时间线面板中处理冲突。",
-      "directorCreateConflict": "画布存在多个导演节点，请先处理冲突，未创建新的导演节点。",
-      "directorCreated": "已创建当前画布唯一的导演节点。",
-      "directorMissing": "请求的导演节点已不存在，请从时间线面板重新打开。",
-      "directorReusedAndConnected": "已复用画布唯一的导演节点并完成连接。",
-      "directorSelected": "画布已有唯一导演节点，已为你选中。",
       "imageOperationBusy": "已有图片或素材操作正在进行，请等待完成。",
       "imageTaskSubmitted": "图片创作任务已安全提交；对应输入节点会持续显示真实后端状态。",
       "imageToolBusyLeave": "图片工具仍在处理，请等待完成后再离开。",
@@ -958,7 +941,6 @@
       "propertiesOpened": "已在属性面板打开所选节点。",
       "remoteReloaded": "已重新载入远端版本。",
       "remoteUnavailable": "远端版本暂时不可用。",
-      "resolveDirectorConflict": "画布存在多个导演节点。请只保留一个，再进入 3D 导演台。",
       "resolvingTemplateResults": "正在解析模板的真实结果素材…",
       "saveCompleted": "保存已完成。",
       "splitRecovered": "上传响应中断后已找回切图素材，创建并保存 {{count}} 个图片子节点。",
@@ -986,8 +968,7 @@
     },
     "panels": {
       "bottom": {
-        "history": "历史",
-        "timeline": "时间线"
+        "history": "历史"
       },
       "left": {
         "assets": "素材",
@@ -1013,14 +994,11 @@
       "altText": "替代文本",
       "assetId": "素材 ID",
       "autoplay": "自动播放",
-      "cameraId": "机位 ID",
       "capability": "能力",
       "caption": "说明",
       "collapsed": "已折叠",
       "color": "颜色",
       "content": "内容",
-      "currentTime": "当前时间",
-      "duration": "时长",
       "editLabel": "编辑节点属性",
       "editTitle": "编辑",
       "emptyDescription": "属性面板只展示当前画布中的真实节点数据。",
@@ -1049,7 +1027,6 @@
       "provider": "提供商",
       "readOnlyNote": "当前属性面板未连接 canonical 更新命令。",
       "resultAssets": "结果素材",
-      "sceneId": "场景 ID",
       "selectHint": "选择节点后查看详情",
       "selectedCount": "已选择 {{count}} 个节点",
       "selectedNodesLabel": "已选择节点",
@@ -1129,25 +1106,6 @@
       "running": "{{task}}生成中",
       "syncInterrupted": "{{task}}同步中断",
       "video": "视频任务"
-    },
-    "timeline": {
-      "addDirector": "添加导演节点",
-      "cameraUnset": "尚未选择",
-      "conflictDescription": "一张画布只能绑定一个导演场景。请检查并删除多余节点后再打开导演台。",
-      "conflictNodesLabel": "冲突的导演节点",
-      "conflictTitle": "检测到多个导演节点",
-      "currentCamera": "当前机位",
-      "directorNode": "导演节点 {{index}}",
-      "emptyDescription": "添加唯一的导演节点后，可从这里查看真实场景时间并进入 3D 导演台。",
-      "emptyTitle": "还没有导演场景",
-      "openDirector": "打开 3D 导演台",
-      "progressLabel": "导演时间线进度",
-      "projectionDescription": "轨道、关键帧与播放控制由导演台维护；画布仅显示已保存的 canonical 投影。",
-      "readOnlyProjection": "只读时间投影",
-      "sceneConnected": "场景已连接",
-      "sceneDetail": "进入导演台并完成首次编辑后，将建立真实场景资产。",
-      "sceneLabel": "导演场景",
-      "scenePending": "场景等待初始化"
     },
     "toolbar": {
       "deleteSelection": "删除所选节点或连接",
@@ -1292,288 +1250,6 @@
     "title": "无限画布",
     "unknownError": "未知错误",
     "updatedAt": "更新于 {{formattedDate}}"
-  },
-  "director": {
-    "actions": {
-      "backToCanvas": "返回画布",
-      "closeRuntimeError": "关闭渲染错误",
-      "loadRemote": "载入远端",
-      "reload": "重新载入",
-      "retry": "重试"
-    },
-    "aspect": {
-      "free": "自由",
-      "options": "画幅比例选项",
-      "ruleOfThirds": "三分线",
-      "title": "比例"
-    },
-    "capture": {
-      "assetTitle": "3D 导演截图 {{date}}",
-      "name": "机位截图 {{index}}"
-    },
-    "defaults": {
-      "cameraName": "机位 {{index}}",
-      "sceneName": "场景"
-    },
-    "errors": {
-      "assetDecode": "无法解析 3D 素材。",
-      "assetFetch": "无法下载 3D 素材。",
-      "assetUrl": "无法解析 3D 素材地址。",
-      "canvasNotFound": "画布不存在或已被删除。",
-      "capture": "无法截取当前视角。",
-      "captureAssetMismatch": "截图素材已经变化，请重新选择。",
-      "captureNotFound": "导演场景中找不到所选截图。",
-      "captureNotImage": "所选截图不是可用的图片素材。",
-      "duplicateCapture": "所选截图中存在重复项。",
-      "emptyTransfer": "没有可发送到画布的截图。",
-      "invalidSceneAsset": "导演场景素材无效或无法读取。",
-      "missingCanvasId": "缺少 Creative Studio 画布 ID。",
-      "missingSceneAsset": "导演场景素材不存在，无法打开场景。",
-      "multipleDirectors": "当前画布包含多个导演场景，无法确定要打开的场景。",
-      "network": "无法连接到服务，请检查网络后重试。",
-      "noState": "导演场景没有可用状态。",
-      "permissionDenied": "没有权限访问这张画布。",
-      "projectMismatch": "导演场景素材属于另一张画布。",
-      "projectionMismatch": "导演场景与画布状态不一致，请重新载入。",
-      "renderer": "无法初始化 3D 渲染器。",
-      "revisionConflict": "画布已被其他操作更新，请重新载入。",
-      "title": "无法打开 3D 导演台",
-      "unknown": "操作失败，请重试。"
-    },
-    "inspector": {
-      "a11y": {
-        "colorPicker": "{{label}}取色器",
-        "hexInput": "{{label}} HEX 输入框",
-        "panel": "{{title}}右侧属性面板",
-        "panoramaThumbnail": "{{name}} 全景图缩略图",
-        "slider": "{{label}}滑杆",
-        "thumbnail": "{{name}} 缩略图"
-      },
-      "camera": {
-        "captureCurrent": "当前机位截图",
-        "capturesTab": "截图",
-        "clearAll": "清空全部",
-        "deleteCapture": "删除截图",
-        "deleteCaptureNamed": "删除截图 {{name}}",
-        "empty": "暂无机位截图",
-        "emptyHint": "从当前机位生成真实预览后会显示在这里。",
-        "fov": "机位 FOV",
-        "name": "机位名称",
-        "position": "机位位置",
-        "propertiesTab": "属性",
-        "rotation": "机位旋转",
-        "sendAll": "发送到画布",
-        "sendCapture": "发送到画布",
-        "sendCaptureNamed": "将 {{name}} 发送到画布",
-        "tabs": "机位面板标签",
-        "target": "注视目标",
-        "title": "机位",
-        "viewCapture": "查看截图",
-        "viewCaptureNamed": "查看截图 {{name}}"
-      },
-      "character": {
-        "bodyType": "角色体型",
-        "boundAsset": "已绑定真实素材",
-        "color": "角色颜色",
-        "name": "角色名称",
-        "posePresets": "姿势预设",
-        "position": "角色位置",
-        "rotation": "角色旋转",
-        "scale": "统一缩放",
-        "title": "角色",
-        "unboundAsset": "未绑定素材"
-      },
-      "environment": {
-        "groundHeight": "地面高度",
-        "groundOpacity": "地面透明度",
-        "noPanorama": "未连接全景图",
-        "panoramaBackground": "全景背景",
-        "panoramaRadius": "球形半径",
-        "panoramaSphere": "全景球",
-        "panoramaYaw": "水平旋转",
-        "position": "场景平移",
-        "removePanorama": "删除全景图",
-        "rotation": "场景旋转",
-        "sceneScale": "场景缩放",
-        "skyColor": "天空颜色",
-        "title": "3D 场景",
-        "toggles": {
-          "grid": "网格显示",
-          "ground": "地面",
-          "labels": "角色标签",
-          "snapToGrid": "网格吸附",
-          "title": "显示选项"
-        }
-      },
-      "object": {
-        "color": "模型颜色",
-        "missingAsset": "模型文件只保存在原导入设备，重新导入后会继承当前模型数据。",
-        "name": "模型名称",
-        "position": "模型位置",
-        "realLight": "真实{{type}}灯光",
-        "reimport": "重新导入模型",
-        "rotation": "模型旋转",
-        "scale": "统一缩放",
-        "source": "模型来源",
-        "title": "物体",
-        "unboundAsset": "未绑定模型素材"
-      }
-    },
-    "lightType": {
-      "ambient": "环境",
-      "directional": "平行",
-      "point": "点",
-      "spot": "聚光"
-    },
-    "loading": {
-      "description": "正在校验画布、场景资产和素材引用。",
-      "title": "正在载入 3D 导演台"
-    },
-    "modelLibrary": {
-      "addModel": "添加模型 {{name}}",
-      "categories": "模型分类",
-      "close": "关闭模型库",
-      "deleteModel": "删除模型 {{name}}",
-      "empty": "暂无任何模型",
-      "importLocal": "本地导入",
-      "list": "模型列表",
-      "myModels": "我的模型",
-      "title": "模型库"
-    },
-    "notifications": {
-      "aspectCameraRequired": "请先添加活动机位再设置画幅比例。",
-      "aspectFreePreview": "自由画幅是视口预览模式，不会覆盖机位的画幅比例。",
-      "captureBusy": "截图仍在处理，请等待完成后再离开。",
-      "captureCameraRequired": "请先添加并选择一个真实机位。",
-      "captureFailed": "截图失败，请确认 3D 视口已就绪后重试。",
-      "captureProcessing": "正在从真实 Three.js 视口生成截图…",
-      "captureRemoved": "已从场景记录移除截图；素材库原文件保持可恢复。",
-      "captureUnavailable": "当前机位无法开始截图。",
-      "captureUploaded": "截图已上传为真实 NomiFun 素材，可发送到画布。",
-      "capturesCleared": "已清空场景截图记录；素材库原文件未删除。",
-      "characterUnavailable": "角色需要真实 3D 模型；当前素材服务尚未提供 GLB，因此不会创建占位角色。",
-      "groundOpacityUnsupported": "当前场景格式只保存地面显示开关，暂不保存地面透明度。",
-      "multiCaptureUnavailable": "多方位截图需要真实机位旋转编排，当前版本不会生成四方位或十二方位占位结果。",
-      "panoramaConnected": "已连接真实全景素材“{{name}}”。",
-      "panoramaInvalid": "全景背景必须是具备真实尺寸信息的 2:1 图片。",
-      "panoramaUploadFailed": "全景图上传失败，请重试。",
-      "panoramaWrongRatio": "图片已真实上传到素材库，但尺寸不是 2:1，未绑定为全景背景。",
-      "saveFailed": "导演场景保存失败，请重试。",
-      "sceneNotLoaded": "导演画布尚未完成载入。",
-      "sceneSaved": "导演场景已保存。",
-      "transferAlreadyPresent": "所选截图已在画布中，没有创建重复节点。",
-      "transferConfirmed": "发送响应曾中断，但已确认截图已插入画布。",
-      "transferConflict": "画布已被其他操作更新，请重试发送。",
-      "transferFailed": "发送失败，已重新载入画布，请重试。",
-      "transferInserted": "已将 {{total}} 张截图发送到画布。",
-      "transferProcessing": "正在校验截图素材并写入画布…",
-      "transferSaveRequired": "导演场景尚未保存，无法发送到画布。"
-    },
-    "panoramaPicker": {
-      "description": "仅显示已验证宽高比为 2:1 的图片素材。",
-      "empty": "暂无符合条件的 2:1 图片",
-      "thumbnail": "{{name}} 全景缩略图",
-      "title": "选择真实 2:1 全景素材",
-      "upload": "上传全景图"
-    },
-    "runtime": {
-      "viewportLabel": "Three.js 3D 导演视口"
-    },
-    "save": {
-      "conflict": "保存冲突",
-      "error": "保存失败",
-      "loaded": "已载入",
-      "pending": "等待保存",
-      "saved": "已保存",
-      "saving": "正在保存",
-      "sceneAssetTitle": "{{name}} · 3D 导演场景"
-    },
-    "scene": {
-      "empty": "场景中还没有对象",
-      "groups": {
-        "cameras": "机位",
-        "characters": "角色",
-        "lights": "灯光",
-        "objects": "模型"
-      },
-      "list": {
-        "label": "场景对象列表"
-      },
-      "object": {
-        "hide": "在视口中隐藏",
-        "lock": "锁定对象",
-        "lockState": "{{name}} 锁定状态",
-        "show": "在视口中显示",
-        "unlock": "解锁对象",
-        "visibility": "{{name}} 可见性"
-      },
-      "search": {
-        "empty": "未搜索到内容",
-        "label": "搜索场景内容",
-        "placeholder": "请输入搜索内容"
-      },
-      "title": "场景对象"
-    },
-    "timeline": {
-      "addKeyframe": "添加关键帧",
-      "autoKey": "自动关键帧",
-      "close": "关闭时间轴",
-      "currentTime": "当前时间",
-      "deleteKeyframe": "删除",
-      "duration": "时间轴时长",
-      "empty": "添加角色、模型或机位后即可制作动画",
-      "exportCamera": "导出机位",
-      "fps": "{{fps}} FPS",
-      "keyframeAt": "{{time}} 秒关键帧",
-      "loop": "循环播放",
-      "pause": "暂停",
-      "play": "播放",
-      "playhead": "时间轴播放头",
-      "property": {
-        "focalLengthMm": "焦距",
-        "intensity": "强度",
-        "position": "位置",
-        "rotation": "旋转",
-        "scale": "缩放",
-        "visible": "可见性"
-      },
-      "rulerTime": "{{time}} 秒",
-      "sceneTracks": "场景轨道",
-      "title": "时间轴",
-      "trackLabel": "{{target}} · {{property}}"
-    },
-    "viewport": {
-      "actions": {
-        "addCamera": "添加机位",
-        "addCharacter": "添加角色",
-        "aspectRatio": "选择画幅比例",
-        "captureCurrent": "当前视角截图",
-        "captureFour": "四方位截图",
-        "captureTwelve": "十二方位截图",
-        "fullscreen": "全屏视口",
-        "importModel": "导入本地模型",
-        "importPanorama": "导入全景图",
-        "modelLibrary": "模型库",
-        "showSidebars": "显示侧边栏",
-        "timeline": "时间轴"
-      },
-      "title": "3D 视口",
-      "toolbar": "3D 视口快捷工具",
-      "transform": {
-        "rotate": "旋转",
-        "scale": "缩放",
-        "translate": "移动"
-      }
-    },
-    "workbench": {
-      "close": "关闭导演台",
-      "title": "3D 导演台",
-      "viewMode": {
-        "camera": "机位视角",
-        "director": "导演视角",
-        "label": "视角切换"
-      }
-    }
   },
   "image": {
     "actions": {

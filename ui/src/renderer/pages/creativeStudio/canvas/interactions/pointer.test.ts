@@ -7,7 +7,7 @@
 import { describe, expect, test } from 'bun:test';
 import { canvasCommands, canvasReducer, createInitialCanvasState } from '../core';
 import { sequentialTestIdFactory, testDocument, testEdge, testNode, testUuid } from '../core/testFixtures';
-import { finishCanvasConnectionDrag, planCanvasConnectionDrop, startCanvasConnectionDrag, updateCanvasConnectionDrag } from './connection';
+import { finishCanvasConnectionDrag, startCanvasConnectionDrag, updateCanvasConnectionDrag } from './connection';
 import { startCanvasResize, updateCanvasResize } from './resize';
 
 describe('canvas pointer controllers', () => {
@@ -42,13 +42,12 @@ describe('canvas pointer controllers', () => {
     });
   });
 
-  test('preserves graph restrictions for mixed batches and input-handle drags', () => {
+  test('preserves graph restrictions for mixed batches', () => {
     const image = testNode('image', 61);
     const text = testNode('text', 62);
-    const director = testNode('director', 63);
     const group = testNode('group', 64);
     const locked = { ...testNode('image', 65), locked: true };
-    const document = testDocument([image, text, director, group, locked]);
+    const document = testDocument([image, text, group, locked]);
     const start = (nodeId: string, handle: 'source' | 'target') => startCanvasConnectionDrag(document, {
       nodeId, handle, pointerId: 1, clientPosition: { x: 0, y: 0 },
       viewport: { x: 0, y: 0, zoom: 1 }, selectedNodeIds: document.nodes.map((node) => node.id),
@@ -56,19 +55,9 @@ describe('canvas pointer controllers', () => {
     const batch = start(image.id, 'source');
     if (!batch.ok) throw new Error('Connection did not start');
     expect(batch.gesture.fixedNodeIds).toEqual([image.id, text.id]);
-    expect(planCanvasConnectionDrop(document, batch.gesture, director.id)).toEqual({
-      candidates: [{ sourceNodeId: image.id, targetNodeId: director.id }],
-      rejected: ['director_requires_image_input'],
-    });
     expect(finishCanvasConnectionDrag(document, batch.gesture, 1, { nodeId: group.id }).intents).toEqual([
       { type: 'connection/rejected', code: 'group_connection' },
     ]);
-    const reverse = start(director.id, 'target');
-    if (!reverse.ok) throw new Error('Connection did not start');
-    expect(reverse.gesture.fixedNodeIds).toEqual([director.id]);
-    expect(finishCanvasConnectionDrag(document, reverse.gesture, 1, { nodeId: image.id }).commands[0]).toMatchObject({
-      edge: { sourceNodeId: image.id, targetNodeId: director.id },
-    });
   });
 
   test('resizes from a corner in world units and preserves the opposite edge', () => {

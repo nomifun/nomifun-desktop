@@ -55,7 +55,7 @@ pub const TARGET_PACKAGE_IDS: [&str; 4] = [
     MINIAPP_PACKAGE_ID,
 ];
 
-pub const TARGET_CAPABILITY_IDS: [&str; 19] = [
+pub const TARGET_CAPABILITY_IDS: [&str; 18] = [
     "creation.text",
     "creation.image",
     "creation.image_edit",
@@ -66,7 +66,6 @@ pub const TARGET_CAPABILITY_IDS: [&str; 19] = [
     "workshop.asset.read",
     "workshop.asset.write",
     "workshop.template.run",
-    "workshop.director",
     "office.preview",
     "office.document.edit",
     "office.sheet.edit",
@@ -78,7 +77,7 @@ pub const TARGET_CAPABILITY_IDS: [&str; 19] = [
 ];
 
 pub const PACKAGE_IDS: [&str; 4] = TARGET_PACKAGE_IDS;
-pub const ALL_CAPABILITY_IDS: [&str; 19] = TARGET_CAPABILITY_IDS;
+pub const ALL_CAPABILITY_IDS: [&str; 18] = TARGET_CAPABILITY_IDS;
 pub const AGENT_SURFACES: &[&str] = &["desktop", "headless", "remote", "web"];
 
 /// The single host port for action-bearing Wave 3 capabilities.
@@ -145,7 +144,6 @@ pub enum Wave3CapabilityOperation {
     WorkshopAssetRead { input: StrictJsonValue },
     WorkshopAssetWrite { input: StrictJsonValue },
     WorkshopTemplateRun { input: StrictJsonValue },
-    WorkshopDirector { input: StrictJsonValue },
     OfficePreview { input: StrictJsonValue },
     OfficeDocumentEdit { input: StrictJsonValue },
     OfficeSheetEdit { input: StrictJsonValue },
@@ -176,7 +174,6 @@ impl Wave3CapabilityOperation {
             Self::WorkshopAssetRead { .. } => "workshop.asset.read",
             Self::WorkshopAssetWrite { .. } => "workshop.asset.write",
             Self::WorkshopTemplateRun { .. } => "workshop.template.run",
-            Self::WorkshopDirector { .. } => "workshop.director",
             Self::OfficePreview { .. } => "office.preview",
             Self::OfficeDocumentEdit { .. } => "office.document.edit",
             Self::OfficeSheetEdit { .. } => "office.sheet.edit",
@@ -206,8 +203,7 @@ impl Wave3CapabilityOperation {
             | Self::WorkshopCanvasEdit { .. }
             | Self::WorkshopAssetRead { .. }
             | Self::WorkshopAssetWrite { .. }
-            | Self::WorkshopTemplateRun { .. }
-            | Self::WorkshopDirector { .. } => Wave3OwnerDomain::Workshop,
+            | Self::WorkshopTemplateRun { .. } => Wave3OwnerDomain::Workshop,
             Self::OfficePreview { .. }
             | Self::OfficeDocumentEdit { .. }
             | Self::OfficeSheetEdit { .. }
@@ -231,7 +227,6 @@ impl Wave3CapabilityOperation {
             | Self::WorkshopAssetRead { input }
             | Self::WorkshopAssetWrite { input }
             | Self::WorkshopTemplateRun { input }
-            | Self::WorkshopDirector { input }
             | Self::OfficePreview { input }
             | Self::OfficeDocumentEdit { input }
             | Self::OfficeSheetEdit { input }
@@ -500,7 +495,6 @@ const CANVAS_EDIT_RESOURCES: &[&str] = &[CANVAS_RESOURCE_KIND];
 const ASSET_READ_RESOURCES: &[&str] = &[ASSET_LIBRARY_RESOURCE_KIND];
 const ASSET_WRITE_RESOURCES: &[&str] = &[ASSET_LIBRARY_RESOURCE_KIND];
 const TEMPLATE_RUN_RESOURCES: &[&str] = &[CANVAS_RESOURCE_KIND];
-const DIRECTOR_RESOURCES: &[&str] = &[CANVAS_RESOURCE_KIND];
 
 const CANVAS_READ_REQUIREMENTS: &[ResourceRequirement] = &[ResourceRequirement {
     resource_kind: CANVAS_RESOURCE_KIND,
@@ -522,11 +516,6 @@ const TEMPLATE_RUN_REQUIREMENTS: &[ResourceRequirement] = &[ResourceRequirement 
     resource_kind: CANVAS_RESOURCE_KIND,
     operation: "write",
 }];
-const DIRECTOR_REQUIREMENTS: &[ResourceRequirement] = &[ResourceRequirement {
-    resource_kind: CANVAS_RESOURCE_KIND,
-    operation: "write",
-}];
-
 const OFFICE_PREVIEW_RESOURCES: &[&str] = &[ASSET_LIBRARY_RESOURCE_KIND];
 const OFFICE_DOCUMENT_EDIT_RESOURCES: &[&str] = &[ASSET_LIBRARY_RESOURCE_KIND];
 const OFFICE_SHEET_EDIT_RESOURCES: &[&str] = &[ASSET_LIBRARY_RESOURCE_KIND];
@@ -614,7 +603,7 @@ const CREATION_CAPABILITIES: [CapabilitySpec; 5] = [
     },
 ];
 
-const WORKSHOP_CAPABILITIES: [CapabilitySpec; 6] = [
+const WORKSHOP_CAPABILITIES: [CapabilitySpec; 5] = [
     CapabilitySpec {
         id: "workshop.canvas.read",
         display_name: "Read Canvas",
@@ -654,14 +643,6 @@ const WORKSHOP_CAPABILITIES: [CapabilitySpec; 6] = [
         resource_kinds: TEMPLATE_RUN_RESOURCES,
         requirements: TEMPLATE_RUN_REQUIREMENTS,
         effect_class: EffectClass::ExecuteLocal,
-    },
-    CapabilitySpec {
-        id: "workshop.director",
-        display_name: "Direct Canvas",
-        description: "Apply a director operation to the selected Canvas and assets.",
-        resource_kinds: DIRECTOR_RESOURCES,
-        requirements: DIRECTOR_REQUIREMENTS,
-        effect_class: EffectClass::WriteDurable,
     },
 ];
 
@@ -747,7 +728,7 @@ const PACKAGE_SPECS: [PackageSpec; 4] = [
         id: WORKSHOP_PACKAGE_ID,
         mount_id: "domain-workshop",
         display_name: "Workshop",
-        description: "Bundled Canvas, asset, template, and director capabilities.",
+        description: "Bundled Canvas, asset, and template capabilities.",
         capabilities: &WORKSHOP_CAPABILITIES,
     },
     PackageSpec {
@@ -1406,7 +1387,6 @@ pub fn operation_from_input(
         "workshop.asset.read" => Wave3CapabilityOperation::WorkshopAssetRead { input },
         "workshop.asset.write" => Wave3CapabilityOperation::WorkshopAssetWrite { input },
         "workshop.template.run" => Wave3CapabilityOperation::WorkshopTemplateRun { input },
-        "workshop.director" => Wave3CapabilityOperation::WorkshopDirector { input },
         "office.preview" => Wave3CapabilityOperation::OfficePreview { input },
         "office.document.edit" => Wave3CapabilityOperation::OfficeDocumentEdit { input },
         "office.sheet.edit" => Wave3CapabilityOperation::OfficeSheetEdit { input },
@@ -1642,7 +1622,6 @@ mod tests {
                     "workshop.asset.write".to_owned(),
                     "workshop.canvas.edit".to_owned(),
                     "workshop.canvas.read".to_owned(),
-                    "workshop.director".to_owned(),
                     "workshop.template.run".to_owned(),
                 ]),
             ),
@@ -1918,12 +1897,6 @@ mod tests {
                     assert!(matches!(
                         operation,
                         Wave3CapabilityOperation::WorkshopTemplateRun { .. }
-                    ));
-                }
-                "workshop.director" => {
-                    assert!(matches!(
-                        operation,
-                        Wave3CapabilityOperation::WorkshopDirector { .. }
                     ));
                 }
                 "office.preview" => {

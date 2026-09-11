@@ -129,7 +129,6 @@ describe('CreativeCanvasChrome source-shaped layout', () => {
       'video',
       'audio',
       'panorama',
-      'director',
     ]);
     for (const label of [
       'creativeStudio.canvas.nodeKinds.text',
@@ -137,7 +136,6 @@ describe('CreativeCanvasChrome source-shaped layout', () => {
       'creativeStudio.canvas.nodeKinds.video',
       'creativeStudio.canvas.nodeKinds.audio',
       'creativeStudio.canvas.nodeKinds.panorama',
-      'creativeStudio.canvas.nodeKinds.director',
     ]) {
       expect(html.includes(`aria-label="${label}"`)).toBe(true);
     }
@@ -159,7 +157,7 @@ describe('CreativeCanvasChrome source-shaped layout', () => {
     expect(properties.includes('PROPERTIES PANEL')).toBe(true);
   });
 
-  test('renders four left views, two right views, and two bottom views', () => {
+  test('renders four left views, two right views, and the History bottom view', () => {
     const html = renderChrome({ compact: true });
 
     for (const label of [
@@ -170,7 +168,6 @@ describe('CreativeCanvasChrome source-shaped layout', () => {
       'creativeStudio.canvas.panels.right.assistant',
       'creativeStudio.canvas.panels.right.properties',
       'creativeStudio.canvas.panels.bottom.history',
-      'creativeStudio.canvas.panels.bottom.timeline',
     ]) {
       expect(html.includes(label)).toBe(true);
     }
@@ -210,13 +207,13 @@ describe('CreativeCanvasChrome source-shaped layout', () => {
 });
 
 describe('CreativeCanvasChrome controlled menus', () => {
-  test('offers exactly the seven user-facing node kinds', () => {
+  test('offers exactly the six user-facing node kinds', () => {
     const html = renderToStaticMarkup(
       withCanvasTestI18n(<CreativeCanvasNodeMenu onSelect={noop} />)
     );
 
-    expect(CREATIVE_CANVAS_CHROME_NODE_KINDS).toHaveLength(7);
-    expect((html.match(/data-node-kind=/g) ?? []).length).toBe(7);
+    expect(CREATIVE_CANVAS_CHROME_NODE_KINDS).toHaveLength(6);
+    expect((html.match(/data-node-kind=/g) ?? []).length).toBe(6);
     for (const kind of CREATIVE_CANVAS_CHROME_NODE_KINDS) {
       expect(html.includes(`data-node-kind="${kind}"`)).toBe(true);
     }
@@ -243,7 +240,6 @@ describe('CreativeCanvasChrome controlled menus', () => {
     expect(toggleCreativeCanvasTool('pan')).toBe('select');
     expect(toggleCreativeCanvasBottomPanel(null)).toBe('history');
     expect(toggleCreativeCanvasBottomPanel('history')).toBe(null);
-    expect(toggleCreativeCanvasBottomPanel('timeline')).toBe(null);
     expect(toggleCreativeCanvasPanel(null, 'assistant')).toBe('assistant');
     expect(toggleCreativeCanvasPanel('assistant', 'assistant')).toBe(null);
     expect(toggleCreativeCanvasPanel('assistant', 'properties')).toBe('properties');

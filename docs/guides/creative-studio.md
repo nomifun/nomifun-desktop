@@ -4,8 +4,7 @@ Creative Studio is NomiFun Desktop's focused, local-first creation product.
 It has three independent creation surfaces:
 
 - **Canvas**: a persistent infinite canvas with media nodes, auditable
-  generation operations, reusable assets, private templates, and a bounded
-  Director.
+  generation operations, reusable assets, and private templates.
 - **Image Workbench**: a standalone image-generation workbench.
 - **Video Workbench**: a standalone video-generation workbench.
 
@@ -28,7 +27,7 @@ unknown, external, or overlong saved locations fail closed to
 `/workshop/canvases`. There is no separate Creative Studio home item; prompt-led
 creation is available from the **Canvas Assistant** inside an opened Canvas.
 **Back to Workbench** stays pinned to the bottom of that rail and returns to
-`/guid` after any pending Canvas or Director save has been resolved.
+`/guid` after any pending Canvas save has been resolved.
 
 The canonical route surface is:
 
@@ -37,7 +36,6 @@ The canonical route surface is:
 | `/workshop` | Compatibility entry that redirects to `/workshop/canvases`. |
 | `/workshop/canvases` | Create, rename, open, import, export, and delete Canvases. |
 | `/workshop/canvas/:canvasId` | Edit one Canvas's canonical infinite document. |
-| `/workshop/director/:canvasId` | Edit the bounded Director state attached to that Canvas. |
 | `/workshop/image` | Use the standalone Image Workbench. It is fully usable with zero Canvases. |
 | `/workshop/video` | Use the standalone Video Workbench. It is fully usable with zero Canvases. |
 | `/workshop/prompts`, `/workshop/assets`, `/workshop/templates` | Manage prompts, reusable assets, and private templates in Template Studio. |
@@ -71,7 +69,7 @@ Canvas. Live standalone tasks do not block deletion of any Canvas.
 ## Canvas model
 
 Each Canvas persists a versioned `nomifun.creative-studio/v1` document. Its
-graph has exactly eight canonical node kinds:
+graph has exactly seven canonical node kinds:
 
 | Node | Current role |
 | --- | --- |
@@ -81,7 +79,6 @@ graph has exactly eight canonical node kinds:
 | `audio` | A real audio asset or an empty TTS target with a durable composer draft. |
 | `panorama` | A real equirectangular panorama asset and view state. |
 | `config` | The auditable owner of an exact generation operation, parameters, task state, inputs, and results. |
-| `director` | A pointer from the Canvas to its Director scene, camera, and timeline state. |
 | `group` | A container created by grouping an existing selection; it is not presented as a generator. |
 
 Generator, loop, compare, and output are not canonical node kinds. Generation
@@ -97,8 +94,8 @@ Canvas edits use a short debounced compare-and-swap (CAS) save. Every write
 sends the last authoritative revision. A conflict stops automatic saving; it
 never force-writes or silently retries over a newer document. Resolve the
 visible conflict by loading the authoritative remote version, then reapply the
-intended change. Navigation out of Creative Studio flushes pending Canvas or
-Director writes and remains blocked if their result is not safe.
+intended change. Navigation out of Creative Studio flushes pending Canvas
+writes and remains blocked if their result is not safe.
 
 Canvas Agent changes are proposals, not background mutations. The supported
 proposal artifact is parsed fail-closed and only a user's **Apply to Canvas**
@@ -255,10 +252,9 @@ and backups are outside this deletion operation.
 
 The canonical Canvas export is a version-3
 `*.nomifun-canvas.zip` archive. Its manifest uses Canvas identity and carries
-the validated Canvas document plus the complete referenced asset closure,
-including the Director sidecar and its referenced assets. Import validates the
-archive and remaps Canvas, node, connection, asset, operation, session, and
-Director references so the imported copy does not alias the source. Version 3
+the validated Canvas document plus the complete referenced asset closure.
+Import validates the archive and remaps Canvas, node, connection, asset,
+operation, and session references so the imported copy does not alias the source. Version 3
 preserves deleted-asset markers with empty content entries; import never
 recreates the deleted media.
 
@@ -297,22 +293,6 @@ template publishing/discovery and complex template conversations are not part
 of this launch scope. The launch UI is private-only: create, edit, copy, and AI
 Apply all normalize the underlying template definition to `private`, and there is no
 public-visibility control.
-
-## Director v1 subset
-
-Director is a Canvas-bound Three.js scene editor, not a full DCC or video
-editor. The current product supports scene and camera transforms, camera
-aspect and thirds guides, a real 2:1 panorama environment, timeline
-duration/playback/loop, camera-position tracks and keyframes, current-camera
-PNG/JPEG capture, uploading captures as NomiFun image assets, and idempotently
-sending those captures back to the Canvas. Director state is stored as a
-versioned text sidecar referenced by the Canvas document and advanced through
-Canvas CAS.
-
-The current asset backend does not accept GLB/glTF model imports, so character
-and model-library actions do not create placeholders. Four-view and twelve-view
-batch capture, timeline/video export, and full panorama/video production remain
-unavailable.
 
 ## Current limits
 
