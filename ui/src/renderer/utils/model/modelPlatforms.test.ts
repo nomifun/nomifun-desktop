@@ -24,6 +24,7 @@ describe('model platform display presets', () => {
     expect(preset('Ark-Agent-Plan').platform).toBe('ark-agent-plan');
     expect(preset('StepFun').platform).toBe('stepfun');
     expect(preset('StepFun-Plan').platform).toBe('stepfun-plan');
+    expect(preset('Agnes').platform).toBe('agnes');
   });
 
   test('contains display metadata only', () => {
