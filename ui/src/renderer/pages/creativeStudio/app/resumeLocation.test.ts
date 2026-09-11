@@ -33,7 +33,6 @@ describe('Creative Studio resume location', () => {
       '/workshop/canvases',
       '/workshop/projects',
       `/workshop/canvas/${PROJECT_ID}`,
-      `/workshop/director/${PROJECT_ID}#timeline`,
       '/workshop/image?panel=history#result-2',
       '/workshop/video',
       '/workshop/prompts?query=portrait',
@@ -54,6 +53,7 @@ describe('Creative Studio resume location', () => {
       '/guid',
       '/workshop-other',
       '/workshop/unknown',
+      `/workshop/director/${PROJECT_ID}`,
       '//evil.example/workshop',
       'https://evil.example/workshop',
       `/workshop/prompts?value=${'x'.repeat(4096)}`,
@@ -85,8 +85,6 @@ describe('Creative Studio resume location', () => {
   });
 
   test('accepts only Canvas-family resume routes and canonicalizes the legacy list', () => {
-    const directorPath = `/workshop/director/${PROJECT_ID}?camera=primary#timeline`;
-
     expect(
       normalizeCreativeStudioCanvasesResumeLocation('/workshop/canvases')
     ).toBe('/workshop/canvases');
@@ -101,9 +99,6 @@ describe('Creative Studio resume location', () => {
       )
     ).toBe(`/workshop/canvas/${PROJECT_ID}#node-2`);
     expect(
-      normalizeCreativeStudioCanvasesResumeLocation(directorPath)
-    ).toBe(directorPath);
-    expect(
       normalizeCreativeStudioCanvasesResumeLocation(
         '/workshop/projects?sort=updated#recent'
       )
@@ -114,6 +109,7 @@ describe('Creative Studio resume location', () => {
       '/workshop/prompts',
       '/workshop/canvas',
       '/workshop/canvas/%E0%A4%A',
+      `/workshop/director/${PROJECT_ID}`,
       '/guid',
       '//evil.example/workshop/canvases',
       'https://evil.example/workshop/canvases',

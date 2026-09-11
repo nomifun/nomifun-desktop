@@ -443,8 +443,6 @@
       "edgeLabel": "Connection from {{source}} to {{target}}",
       "errors": {
         "configToConfig": "Generation task records cannot connect directly to each other.",
-        "directorImageOnly": "Director nodes accept only image or panorama inputs.",
-        "directorInputOnly": "Director nodes can receive connections but cannot create outgoing connections.",
         "duplicate": "These nodes are already connected.",
         "groupUnsupported": "Group nodes cannot be part of generation connections.",
         "invalidDropTarget": "Drop the connection anywhere on the target node card.",
@@ -474,8 +472,6 @@
       "connectionInput": "Input connector",
       "connectionOutput": "Output connector",
       "connectionOutputHint": "Drag to a target card to connect. Select multiple nodes to connect them together.",
-      "currentTimeMs": "Current time (ms)",
-      "durationMs": "Duration (ms)",
       "fitContain": "Fit entire image",
       "fitCover": "Fill and crop",
       "fitMode": "Fit mode",
@@ -845,8 +841,7 @@
       "historyTitle": "Loading undo history",
       "outlineTitle": "Loading canvas structure",
       "propertiesDescription": "Select a node to view its canonical properties.",
-      "propertiesTitle": "Loading properties",
-      "timelineTitle": "Loading Director timeline"
+      "propertiesTitle": "Loading properties"
     },
     "loadingTitle": "Loading canvas…",
     "minimap": {
@@ -854,7 +849,6 @@
     },
     "nodeKinds": {
       "audio": "Audio",
-      "director": "Director",
       "group": "Group",
       "image": "Image",
       "panorama": "Panorama",
@@ -868,10 +862,6 @@
       "connectedPanorama": "Panorama connected",
       "connectedVideo": "Video connected",
       "defaultGroupTitle": "Node group",
-      "director": {
-        "empty": "No scene yet",
-        "timeline": "Timeline"
-      },
       "emptyText": "Empty text",
       "group": {
         "collapsed": "Collapsed",
@@ -917,7 +907,6 @@
       }
     },
     "notices": {
-      "addDirectorFirst": "Add a Director node before opening the 3D Director.",
       "agentApplyReloadFailed": "The Agent proposal could not be applied, and the remote canvas could not be reloaded.",
       "agentApplyReloaded": "The Agent proposal result could not be confirmed. The remote canvas was reloaded; review it before continuing.",
       "agentApplyUnconfirmedLeave": "The Agent proposal result could not be confirmed. Review the remote canvas before leaving.",
@@ -939,12 +928,6 @@
       "connectionsCreated": "Created {{count}} connections; skipped {{skipped}} existing or incompatible connections.",
       "cropRecovered": "Recovered the crop after the upload response was interrupted, and saved the derived node to the canvas.",
       "cropSucceeded": "Cropped the source image and saved the derived image node and connection.",
-      "directorConflict": "This canvas contains multiple Director nodes. Resolve the conflict in the timeline panel.",
-      "directorCreateConflict": "This canvas contains multiple Director nodes. Resolve the conflict before creating another one.",
-      "directorCreated": "Created the only Director node on this canvas.",
-      "directorMissing": "The requested Director node no longer exists. Open it again from the timeline panel.",
-      "directorReusedAndConnected": "Reused and connected the canvas's only Director node.",
-      "directorSelected": "The canvas already has one Director node; it was selected.",
       "imageOperationBusy": "An image or asset operation is already in progress. Wait for it to finish.",
       "imageTaskSubmitted": "Image task submitted. Its input node will continue to show the backend status.",
       "imageToolBusyLeave": "The image tool is still processing. Wait for it to finish before leaving.",
@@ -958,7 +941,6 @@
       "propertiesOpened": "Opened the selected node in the Properties panel.",
       "remoteReloaded": "Reloaded the remote version.",
       "remoteUnavailable": "The remote version is temporarily unavailable.",
-      "resolveDirectorConflict": "This canvas contains multiple Director nodes. Keep only one before opening the 3D Director.",
       "resolvingTemplateResults": "Resolving the template's result assets...",
       "saveCompleted": "Save completed.",
       "splitRecovered": "Recovered the split assets after the upload response was interrupted, then created and saved {{count}} image child nodes.",
@@ -986,8 +968,7 @@
     },
     "panels": {
       "bottom": {
-        "history": "History",
-        "timeline": "Timeline"
+        "history": "History"
       },
       "left": {
         "assets": "Assets",
@@ -1013,14 +994,11 @@
       "altText": "Alt text",
       "assetId": "Asset ID",
       "autoplay": "Autoplay",
-      "cameraId": "Camera ID",
       "capability": "Capability",
       "caption": "Caption",
       "collapsed": "Collapsed",
       "color": "Color",
       "content": "Content",
-      "currentTime": "Current time",
-      "duration": "Duration",
       "editLabel": "Edit node properties",
       "editTitle": "Edit properties",
       "emptyDescription": "Select a node to view its saved properties.",
@@ -1049,7 +1027,6 @@
       "provider": "Provider",
       "readOnlyNote": "These properties are read-only because editing is not available here.",
       "resultAssets": "Result assets",
-      "sceneId": "Scene ID",
       "selectHint": "Select a node to view its details",
       "selectedCount": "{{count}} nodes selected",
       "selectedNodesLabel": "Selected nodes",
@@ -1129,25 +1106,6 @@
       "running": "{{task}} is running.",
       "syncInterrupted": "{{task}} sync was interrupted.",
       "video": "Video task"
-    },
-    "timeline": {
-      "addDirector": "Add Director node",
-      "cameraUnset": "No camera selected",
-      "conflictDescription": "A canvas can be linked to only one Director scene. Review and remove the extra nodes before opening 3D Director.",
-      "conflictNodesLabel": "Conflicting Director nodes",
-      "conflictTitle": "Multiple Director nodes detected",
-      "currentCamera": "Current camera",
-      "directorNode": "Director node {{index}}",
-      "emptyDescription": "Add one Director node to view the saved scene timeline here and open 3D Director.",
-      "emptyTitle": "No Director scene yet",
-      "openDirector": "Open 3D Director",
-      "progressLabel": "Director timeline progress",
-      "projectionDescription": "Tracks, keyframes, and playback controls are managed in 3D Director. The canvas shows only the last saved timeline.",
-      "readOnlyProjection": "Read-only timeline",
-      "sceneConnected": "Scene connected",
-      "sceneDetail": "Open 3D Director and save your first edit to create the scene asset.",
-      "sceneLabel": "Director scene",
-      "scenePending": "Scene not initialized"
     },
     "toolbar": {
       "deleteSelection": "Delete selected nodes or connections",
@@ -1292,288 +1250,6 @@
     "title": "Infinite canvas",
     "unknownError": "Unknown error",
     "updatedAt": "Updated {{formattedDate}}"
-  },
-  "director": {
-    "actions": {
-      "backToCanvas": "Back to canvas",
-      "closeRuntimeError": "Close render error",
-      "loadRemote": "Load remote version",
-      "reload": "Reload",
-      "retry": "Retry"
-    },
-    "aspect": {
-      "free": "Free",
-      "options": "Aspect ratio options",
-      "ruleOfThirds": "Rule of thirds",
-      "title": "Aspect ratio"
-    },
-    "capture": {
-      "assetTitle": "3D Director capture {{date}}",
-      "name": "Camera capture {{index}}"
-    },
-    "defaults": {
-      "cameraName": "Camera {{index}}",
-      "sceneName": "Scene"
-    },
-    "errors": {
-      "assetDecode": "Unable to decode the 3D asset.",
-      "assetFetch": "Unable to download the 3D asset.",
-      "assetUrl": "Unable to resolve the 3D asset URL.",
-      "canvasNotFound": "The canvas does not exist or has been deleted.",
-      "capture": "Unable to capture the current view.",
-      "captureAssetMismatch": "The capture asset has changed. Select it again.",
-      "captureNotFound": "The selected capture could not be found in the Director scene.",
-      "captureNotImage": "The selected capture is not a usable image asset.",
-      "duplicateCapture": "The selected captures contain duplicates.",
-      "emptyTransfer": "There are no captures to send to the canvas.",
-      "invalidSceneAsset": "The Director scene asset is invalid or unreadable.",
-      "missingCanvasId": "The Creative Studio canvas ID is missing.",
-      "missingSceneAsset": "The Director scene asset is missing, so the scene cannot be opened.",
-      "multipleDirectors": "This canvas contains multiple Director scenes, so the scene to open cannot be determined.",
-      "network": "Unable to reach the service. Check your network and try again.",
-      "noState": "The Director scene has no available state.",
-      "permissionDenied": "You do not have permission to access this canvas.",
-      "projectMismatch": "The Director scene asset belongs to another canvas.",
-      "projectionMismatch": "The Director scene and canvas state do not match. Reload and try again.",
-      "renderer": "Unable to initialize the 3D renderer.",
-      "revisionConflict": "The canvas was updated elsewhere. Reload the remote version.",
-      "title": "Unable to open 3D Director",
-      "unknown": "The operation failed. Try again."
-    },
-    "inspector": {
-      "a11y": {
-        "colorPicker": "{{label}} color picker",
-        "hexInput": "{{label}} HEX input",
-        "panel": "{{title}} properties panel",
-        "panoramaThumbnail": "{{name}} panorama thumbnail",
-        "slider": "{{label}} slider",
-        "thumbnail": "{{name}} thumbnail"
-      },
-      "camera": {
-        "captureCurrent": "Capture current camera view",
-        "capturesTab": "Captures",
-        "clearAll": "Clear all",
-        "deleteCapture": "Delete capture",
-        "deleteCaptureNamed": "Delete capture {{name}}",
-        "empty": "No camera captures",
-        "emptyHint": "Rendered previews from the current camera will appear here.",
-        "fov": "Field of view (FOV)",
-        "name": "Camera name",
-        "position": "Camera position",
-        "propertiesTab": "Properties",
-        "rotation": "Camera rotation",
-        "sendAll": "Send to canvas",
-        "sendCapture": "Send to canvas",
-        "sendCaptureNamed": "Send {{name}} to canvas",
-        "tabs": "Camera inspector tabs",
-        "target": "Look-at target",
-        "title": "Camera",
-        "viewCapture": "View capture",
-        "viewCaptureNamed": "View capture {{name}}"
-      },
-      "character": {
-        "bodyType": "Body type",
-        "boundAsset": "Linked to source asset",
-        "color": "Character color",
-        "name": "Character name",
-        "posePresets": "Pose presets",
-        "position": "Character position",
-        "rotation": "Character rotation",
-        "scale": "Uniform scale",
-        "title": "Character",
-        "unboundAsset": "No asset linked"
-      },
-      "environment": {
-        "groundHeight": "Ground height",
-        "groundOpacity": "Ground opacity",
-        "noPanorama": "No panorama connected",
-        "panoramaBackground": "Panorama background",
-        "panoramaRadius": "Sphere radius",
-        "panoramaSphere": "Panorama sphere",
-        "panoramaYaw": "Horizontal rotation",
-        "position": "Scene position",
-        "removePanorama": "Remove panorama",
-        "rotation": "Scene rotation",
-        "sceneScale": "Scene scale",
-        "skyColor": "Sky color",
-        "title": "3D Scene",
-        "toggles": {
-          "grid": "Grid",
-          "ground": "Ground",
-          "labels": "Character labels",
-          "snapToGrid": "Snap to grid",
-          "title": "Display options"
-        }
-      },
-      "object": {
-        "color": "Model color",
-        "missingAsset": "The model file is available only on the device where it was imported. Reimport it to retain the current model settings.",
-        "name": "Model name",
-        "position": "Model position",
-        "realLight": "{{type}} light",
-        "reimport": "Reimport model",
-        "rotation": "Model rotation",
-        "scale": "Uniform scale",
-        "source": "Model source",
-        "title": "Object",
-        "unboundAsset": "No model asset linked"
-      }
-    },
-    "lightType": {
-      "ambient": "ambient",
-      "directional": "directional",
-      "point": "point",
-      "spot": "spot"
-    },
-    "loading": {
-      "description": "Validating the canvas, scene assets, and asset references.",
-      "title": "Loading 3D Director"
-    },
-    "modelLibrary": {
-      "addModel": "Add model {{name}}",
-      "categories": "Model categories",
-      "close": "Close model library",
-      "deleteModel": "Delete model {{name}}",
-      "empty": "No models yet",
-      "importLocal": "Import local model",
-      "list": "Model list",
-      "myModels": "My models",
-      "title": "Model library"
-    },
-    "notifications": {
-      "aspectCameraRequired": "Add an active camera before setting the aspect ratio.",
-      "aspectFreePreview": "Free aspect is a viewport preview mode and does not override the camera aspect ratio.",
-      "captureBusy": "A capture is still processing. Wait for it to finish before leaving.",
-      "captureCameraRequired": "Add and select a camera first.",
-      "captureFailed": "Capture failed. Make sure the 3D viewport is ready and try again.",
-      "captureProcessing": "Capturing the current Three.js viewport…",
-      "captureRemoved": "The capture was removed from the scene record. The original asset is still available in the asset library.",
-      "captureUnavailable": "The current camera cannot start a capture.",
-      "captureUploaded": "The capture was uploaded to NomiFun and can now be sent to the canvas.",
-      "capturesCleared": "Scene capture records were cleared. Original files were not deleted from the asset library.",
-      "characterUnavailable": "Characters require a 3D model. Because the asset service does not provide GLB files yet, no placeholder character will be created.",
-      "groundOpacityUnsupported": "The current scene format stores only whether the ground is visible. Ground opacity is not saved yet.",
-      "multiCaptureUnavailable": "Multi-angle capture requires a camera rotation sequence. This version will not generate placeholder four-view or twelve-view results.",
-      "panoramaConnected": "Connected “{{name}}” as the panorama.",
-      "panoramaInvalid": "A panorama background must be a verified 2:1 image.",
-      "panoramaUploadFailed": "Failed to upload the panorama. Try again.",
-      "panoramaWrongRatio": "The image was uploaded to the asset library, but it was not linked as the panorama background because its aspect ratio is not 2:1.",
-      "saveFailed": "Failed to save the Director scene. Try again.",
-      "sceneNotLoaded": "The Director canvas has not finished loading.",
-      "sceneSaved": "Director scene saved.",
-      "transferAlreadyPresent": "The selected captures are already on the canvas, so no duplicate nodes were created.",
-      "transferConfirmed": "The response was interrupted, but the captures were confirmed on the canvas.",
-      "transferConflict": "The canvas was updated elsewhere. Try sending again.",
-      "transferFailed": "Sending failed. The canvas was reloaded; try again.",
-      "transferInserted": "Sent {{total}} captures to the canvas.",
-      "transferProcessing": "Validating capture assets and writing them to the canvas…",
-      "transferSaveRequired": "The Director scene has not been saved, so captures cannot be sent to the canvas."
-    },
-    "panoramaPicker": {
-      "description": "Only verified 2:1 image assets are shown.",
-      "empty": "No eligible 2:1 images",
-      "thumbnail": "{{name}} panorama thumbnail",
-      "title": "Choose a verified 2:1 panorama image",
-      "upload": "Upload panorama"
-    },
-    "runtime": {
-      "viewportLabel": "Three.js 3D Director viewport"
-    },
-    "save": {
-      "conflict": "Save conflict",
-      "error": "Save failed",
-      "loaded": "Loaded",
-      "pending": "Waiting to save",
-      "saved": "Saved",
-      "saving": "Saving",
-      "sceneAssetTitle": "{{name}} · 3D Director scene"
-    },
-    "scene": {
-      "empty": "There are no objects in this scene yet",
-      "groups": {
-        "cameras": "Cameras",
-        "characters": "Characters",
-        "lights": "Lights",
-        "objects": "Models"
-      },
-      "list": {
-        "label": "Scene object list"
-      },
-      "object": {
-        "hide": "Hide in viewport",
-        "lock": "Lock object",
-        "lockState": "{{name}} lock state",
-        "show": "Show in viewport",
-        "unlock": "Unlock object",
-        "visibility": "{{name}} visibility"
-      },
-      "search": {
-        "empty": "No results found",
-        "label": "Search scene content",
-        "placeholder": "Search scene objects"
-      },
-      "title": "Scene objects"
-    },
-    "timeline": {
-      "addKeyframe": "Add keyframe",
-      "autoKey": "Auto key",
-      "close": "Close timeline",
-      "currentTime": "Current time",
-      "deleteKeyframe": "Delete",
-      "duration": "Timeline duration",
-      "empty": "Add a character, model, or camera to create animation",
-      "exportCamera": "Export camera",
-      "fps": "{{fps}} FPS",
-      "keyframeAt": "Keyframe at {{time}} seconds",
-      "loop": "Loop playback",
-      "pause": "Pause",
-      "play": "Play",
-      "playhead": "Timeline playhead",
-      "property": {
-        "focalLengthMm": "Focal length",
-        "intensity": "Intensity",
-        "position": "Position",
-        "rotation": "Rotation",
-        "scale": "Scale",
-        "visible": "Visibility"
-      },
-      "rulerTime": "{{time}}s",
-      "sceneTracks": "Scene tracks",
-      "title": "Timeline",
-      "trackLabel": "{{target}} · {{property}}"
-    },
-    "viewport": {
-      "actions": {
-        "addCamera": "Add camera",
-        "addCharacter": "Add character",
-        "aspectRatio": "Choose aspect ratio",
-        "captureCurrent": "Capture current view",
-        "captureFour": "Capture four views",
-        "captureTwelve": "Capture twelve views",
-        "fullscreen": "Expand viewport",
-        "importModel": "Import local model",
-        "importPanorama": "Import panorama",
-        "modelLibrary": "Model library",
-        "showSidebars": "Show sidebars",
-        "timeline": "Timeline"
-      },
-      "title": "3D viewport",
-      "toolbar": "3D viewport tools",
-      "transform": {
-        "rotate": "Rotate",
-        "scale": "Scale",
-        "translate": "Move"
-      }
-    },
-    "workbench": {
-      "close": "Close Director",
-      "title": "3D Director",
-      "viewMode": {
-        "camera": "Camera view",
-        "director": "Director view",
-        "label": "View mode"
-      }
-    }
   },
   "image": {
     "actions": {

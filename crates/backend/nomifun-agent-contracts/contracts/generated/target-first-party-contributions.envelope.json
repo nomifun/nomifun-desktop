@@ -1587,13 +1587,6 @@
               "version": "1.0.0"
             },
             "kind": "tool"
-          },
-          {
-            "capability": {
-              "id": "workshop.director",
-              "version": "1.0.0"
-            },
-            "kind": "tool"
           }
         ],
         "skills": [],
@@ -1762,5 +1755,5 @@
       }
     ]
   },
-  "payload_digest": "a1df1f5dc6772bc2cbbb5b6f6794059d19ba9b7820eeece666d925f0387de691"
+  "payload_digest": "71c6aeb654159f99777e63a6444c1c2be4450e0be050f4daa350d19b8fce26a6"
 }

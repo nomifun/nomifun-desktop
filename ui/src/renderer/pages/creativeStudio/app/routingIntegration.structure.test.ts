@@ -26,12 +26,11 @@ describe('Creative Studio product route integration', () => {
     expect(router.includes("path='projects' element={<CreativeStudioCanvasesRedirect />}")).toBe(true);
     expect(router.includes('to={`${CREATIVE_STUDIO_CANVASES_PATH}${search}${hash}`}')).toBe(true);
     expect(router.includes("path='canvas/:canvasId'")).toBe(true);
-    expect(router.includes("path='director/:canvasId'")).toBe(true);
+    expect(router.includes("path='director/:canvasId'")).toBe(false);
     expect(router.includes("path='image'")).toBe(true);
     expect(router.includes("path='video'")).toBe(true);
     expect(router.includes('CreativeStudioImageWorkbenchRoute')).toBe(true);
     expect(router.includes('CreativeStudioVideoWorkbenchRoute')).toBe(true);
-    expect(router.includes('CreativeStudioDirectorRoute')).toBe(true);
     expect(router.includes('CreativeStudioTemplateRoute')).toBe(true);
     expect(router.includes("path='templates'")).toBe(true);
   });

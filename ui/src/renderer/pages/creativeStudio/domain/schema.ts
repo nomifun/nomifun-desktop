@@ -21,7 +21,6 @@ export type CreativeCanvasNodeKind =
   | 'config'
   | 'video'
   | 'audio'
-  | 'director'
   | 'group';
 
 /** Node kinds that belong to the user-authored canvas surface. */
@@ -213,13 +212,6 @@ export interface CreativeAudioComposerDraft {
   format: 'mp3' | 'wav';
 }
 
-export interface CreativeDirectorNodeData {
-  sceneId: string | null;
-  cameraId: string | null;
-  timelineMs: number;
-  durationMs: number;
-}
-
 export interface CreativeGroupNodeData {
   title: string;
   color: string | null;
@@ -233,7 +225,6 @@ export interface CreativeCanvasNodeDataByKind {
   config: CreativeConfigNodeData;
   video: CreativeVideoNodeData;
   audio: CreativeAudioNodeData;
-  director: CreativeDirectorNodeData;
   group: CreativeGroupNodeData;
 }
 
@@ -307,7 +298,7 @@ export interface CreativeChatSessionReference {
 
 export type CreativeLeftPanelView = 'canvas' | 'assets' | 'prompts' | 'templates';
 export type CreativeRightPanelView = 'assistant' | 'properties';
-export type CreativeBottomPanelView = 'timeline' | 'history';
+export type CreativeBottomPanelView = 'history';
 
 export interface CreativeStudioPanelState {
   left: {

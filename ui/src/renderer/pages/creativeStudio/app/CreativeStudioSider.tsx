@@ -36,7 +36,7 @@ import { normalizeCreativeStudioCanvasesResumeLocation } from './resumeLocation'
 interface CreativeStudioSiderProps {
   collapsed?: boolean;
   tooltipEnabled?: boolean;
-  /** Last exact route owned by the My Canvases list/editor/Director section. */
+  /** Last exact route owned by the My Canvases list/editor section. */
   canvasesResumePath?: string;
   /** Destination currently waiting on the product before-leave gate. */
   navigationPendingPath?: string | null;
@@ -52,7 +52,7 @@ interface NavigationIconProps {
 }
 
 interface NavigationItem {
-  section: Exclude<CreativeStudioSection, 'canvas' | 'director'>;
+  section: Exclude<CreativeStudioSection, 'canvas'>;
   path: string;
   label: string;
   icon: React.ReactElement<NavigationIconProps>;
@@ -70,8 +70,7 @@ const CreativeStudioSider: React.FC<CreativeStudioSiderProps> = ({
   const { t } = useTranslation();
   const { pathname } = useLocation();
   const section = creativeStudioSectionForPath(pathname);
-  const activeSection =
-    section === 'canvas' || section === 'director' ? 'canvases' : section;
+  const activeSection = section === 'canvas' ? 'canvases' : section;
   const safeCanvasesResumePath =
     normalizeCreativeStudioCanvasesResumeLocation(canvasesResumePath) ??
     CREATIVE_STUDIO_CANVASES_PATH;

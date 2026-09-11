@@ -144,6 +144,126 @@ fn migration_file_versions_are_unique() {
     );
 }
 
+#[tokio::test]
+async fn director_retirement_removes_only_its_graph_and_exclusive_sidecars() {
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    migrate_through(&pool, 87).await;
+
+    let retired_canvas_id = "00000000-0000-7000-8000-000000000001";
+    let shared_canvas_id = "00000000-0000-7000-8000-000000000002";
+    let referencing_canvas_id = "00000000-0000-7000-8000-000000000003";
+    let exclusive_sidecar_id = "00000000-0000-7000-8000-000000000011";
+    let shared_sidecar_id = "00000000-0000-7000-8000-000000000012";
+
+    for (asset_id, title) in [
+        (exclusive_sidecar_id, "exclusive scene"),
+        (shared_sidecar_id, "shared scene"),
+    ] {
+        sqlx::query(
+            "INSERT INTO workshop_assets \
+             (asset_id, kind, title, text_content, in_library, created_at, updated_at) \
+             VALUES (?, 'text', ?, '{}', 0, 1, 1)",
+        )
+        .bind(asset_id)
+        .bind(title)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let retired_document = serde_json::json!({
+        "schema": "nomifun.creative-studio/v1",
+        "projectId": retired_canvas_id,
+        "nodes": [
+            {"id": "text-a", "type": "text", "data": {"text": "keep a"}},
+            {"id": "director-a", "type": "director", "data": {"sceneId": exclusive_sidecar_id}},
+            {"id": "text-b", "type": "text", "data": {"text": "keep b"}}
+        ],
+        "connections": [
+            {"id": "drop", "sourceNodeId": "director-a", "targetNodeId": "text-a"},
+            {"id": "keep", "sourceNodeId": "text-a", "targetNodeId": "text-b"}
+        ],
+        "panels": {"bottom": {"activeView": "timeline"}}
+    });
+    let shared_document = serde_json::json!({
+        "schema": "nomifun.creative-studio/v1",
+        "projectId": shared_canvas_id,
+        "nodes": [
+            {"id": "director-b", "type": "director", "data": {"sceneId": shared_sidecar_id}}
+        ],
+        "connections": [],
+        "panels": {"bottom": {"activeView": "history"}}
+    });
+    let referencing_document = serde_json::json!({
+        "schema": "nomifun.creative-studio/v1",
+        "projectId": referencing_canvas_id,
+        "nodes": [
+            {"id": "text-c", "type": "text", "data": {"assetId": shared_sidecar_id}}
+        ],
+        "connections": [],
+        "panels": {"bottom": {"activeView": "history"}}
+    });
+
+    for (canvas_id, revision, node_count, connection_count, document) in [
+        (retired_canvas_id, 3_i64, 3_i64, 2_i64, retired_document),
+        (shared_canvas_id, 5, 1, 0, shared_document),
+        (referencing_canvas_id, 7, 1, 0, referencing_document),
+    ] {
+        sqlx::query(
+            "INSERT INTO creative_studio_projects \
+             (project_id, title, revision, node_count, connection_count, document_json, created_at, updated_at) \
+             VALUES (?, 'Canvas', ?, ?, ?, ?, 1, 1)",
+        )
+        .bind(canvas_id)
+        .bind(revision)
+        .bind(node_count)
+        .bind(connection_count)
+        .bind(document.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    migrate_through(&pool, 88).await;
+
+    let (revision, node_count, connection_count, document_json): (i64, i64, i64, String) =
+        sqlx::query_as(
+            "SELECT revision, node_count, connection_count, document_json \
+             FROM creative_studio_projects WHERE project_id = ?",
+        )
+        .bind(retired_canvas_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let document: serde_json::Value = serde_json::from_str(&document_json).unwrap();
+    assert_eq!((revision, node_count, connection_count), (4, 2, 1));
+    assert_eq!(document["panels"]["bottom"]["activeView"], "history");
+    assert_eq!(document["nodes"][0]["id"], "text-a");
+    assert_eq!(document["nodes"][1]["id"], "text-b");
+    assert_eq!(document["connections"][0]["id"], "keep");
+
+    let untouched_revision: i64 = sqlx::query_scalar(
+        "SELECT revision FROM creative_studio_projects WHERE project_id = ?",
+    )
+    .bind(referencing_canvas_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(untouched_revision, 7);
+
+    let remaining_assets: Vec<String> = sqlx::query_scalar(
+        "SELECT asset_id FROM workshop_assets ORDER BY asset_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(remaining_assets, vec![shared_sidecar_id.to_owned()]);
+}
+
 #[test]
 fn published_knowledge_source_identity_checksum_is_immutable() {
     let checksum = Sha384::digest(KNOWLEDGE_SOURCE_IDENTITY.as_bytes());

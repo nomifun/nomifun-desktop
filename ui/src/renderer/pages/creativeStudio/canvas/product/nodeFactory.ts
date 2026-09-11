@@ -30,7 +30,6 @@ export const CREATIVE_CANVAS_PRODUCT_NODE_SIZES = {
   video: { width: 420, height: 236 },
   audio: { width: 340, height: 160 },
   config: { width: 440, height: 240 },
-  director: { width: 360, height: 320 },
   group: { width: 760, height: 480 },
 } as const satisfies Record<CreativeCanvasNodeKind, CreativeSize>;
 
@@ -93,12 +92,6 @@ const DEFAULT_NODE_DATA: CreativeCanvasNodeDataByKind = {
     trimStartMs: 0,
     trimEndMs: null,
     composer: null,
-  },
-  director: {
-    sceneId: null,
-    cameraId: null,
-    timelineMs: 0,
-    durationMs: 0,
   },
   group: {
     title: '',
@@ -254,7 +247,7 @@ const createNodeWithData = <K extends CreativeCanvasNodeKind>(
   });
 };
 
-/** Build one of the eight canonical empty product nodes with a fresh UUIDv7. */
+/** Build one of the seven canonical empty product nodes with a fresh UUIDv7. */
 export function createCreativeCanvasProductNode<K extends CreativeCanvasNodeKind>(
   kind: K,
   state: CreativeCanvasProductState,

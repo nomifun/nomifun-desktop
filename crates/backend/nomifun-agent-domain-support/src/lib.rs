@@ -1457,13 +1457,12 @@ const CREATION_CAPABILITIES: [CapabilitySpec; 5] = [
     CapabilitySpec::tool("creation.video", EffectClass::WriteDurable, GENERATION_PROVIDER),
     CapabilitySpec::tool("creation.audio", EffectClass::WriteDurable, GENERATION_PROVIDER),
 ];
-const WORKSHOP_CAPABILITIES: [CapabilitySpec; 6] = [
+const WORKSHOP_CAPABILITIES: [CapabilitySpec; 5] = [
     CapabilitySpec::tool("workshop.canvas.read", EffectClass::ReadSensitive, CANVAS),
     CapabilitySpec::tool("workshop.canvas.edit", EffectClass::WriteReversible, CANVAS),
     CapabilitySpec::tool("workshop.asset.read", EffectClass::ReadSensitive, ASSET_LIBRARY),
     CapabilitySpec::tool("workshop.asset.write", EffectClass::WriteDurable, ASSET_LIBRARY),
     CapabilitySpec::tool("workshop.template.run", EffectClass::ExecuteLocal, CANVAS),
-    CapabilitySpec::tool("workshop.director", EffectClass::WriteDurable, CANVAS),
 ];
 const OFFICE_CAPABILITIES: [CapabilitySpec; 4] = [
     CapabilitySpec::tool("office.preview", EffectClass::ReadSensitive, ASSET_LIBRARY),

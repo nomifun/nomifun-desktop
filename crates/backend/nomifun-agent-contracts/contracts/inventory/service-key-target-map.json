@@ -219,7 +219,7 @@
     {
       "service_key": "service.workshop-assets.v1",
       "provider_package_key": "domain.workshop",
-      "purpose": "Own Canvas, Asset, Template and Director facts and binary references.",
+      "purpose": "Own Canvas, Asset and Template facts and binary references.",
       "current_provider_refs": [
         {
           "path": "crates/backend/nomifun-workshop/src/service.rs",

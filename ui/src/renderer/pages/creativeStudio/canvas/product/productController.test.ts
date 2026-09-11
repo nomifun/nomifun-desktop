@@ -56,7 +56,7 @@ describe('Creative Canvas product controller helpers', () => {
 
     const left = withCreativeCanvasLeftView(initial, 'assets');
     const right = withCreativeCanvasRightView(left, 'properties');
-    const bottom = withCreativeCanvasBottomView(right, 'timeline');
+    const bottom = withCreativeCanvasBottomView(right, 'history');
     const closed = withCreativeCanvasRightView(bottom, null);
 
     expect(creativeCanvasProductPanelViews(initial)).toEqual({
@@ -67,7 +67,7 @@ describe('Creative Canvas product controller helpers', () => {
     expect(creativeCanvasProductPanelViews(bottom)).toEqual({
       left: 'assets',
       right: 'properties',
-      bottom: 'timeline',
+      bottom: 'history',
     });
     expect(creativeCanvasProductPanelViews(closed).right).toBeNull();
     expect(closed.right.activeView).toBe('properties');

@@ -814,24 +814,24 @@ describe('Creative Studio v1 document contract', () => {
       locked: false,
       data: { assetId: null, caption: '', alt: '', fit: 'contain', naturalSize: null, composer: null },
     };
-    const director: CreativeCanvasNode = {
-      id: 'director-1',
-      type: 'director',
+    const text: CreativeCanvasNode = {
+      id: 'text-1',
+      type: 'text',
       position: { x: 400, y: 0 },
       size: { width: 360, height: 300 },
       groupId: null,
       zIndex: 1,
       locked: false,
-      data: { sceneId: null, cameraId: null, timelineMs: 0, durationMs: 0 },
+      data: { text: 'caption', format: 'plain', fontSize: 16, textAlign: 'left' },
     };
     const valid = {
       ...createEmptyCreativeProjectDocument(PROJECT_ID),
-      nodes: [image, director],
+      nodes: [image, text],
       connections: [
         {
           id: 'edge-1',
           sourceNodeId: image.id,
-          targetNodeId: director.id,
+          targetNodeId: text.id,
           sourceHandle: null,
           targetHandle: null,
         },
@@ -846,15 +846,6 @@ describe('Creative Studio v1 document contract', () => {
       () => parseCreativeProjectDocument(selfConnected),
       'INVALID_DOCUMENT',
       '$.connections[0].targetNodeId'
-    );
-
-    const directorOutput = structuredClone(valid);
-    directorOutput.connections[0].sourceNodeId = director.id;
-    directorOutput.connections[0].targetNodeId = image.id;
-    expectContractError(
-      () => parseCreativeProjectDocument(directorOutput),
-      'INVALID_DOCUMENT',
-      '$.connections[0].sourceNodeId'
     );
 
     const duplicate = structuredClone(valid);
