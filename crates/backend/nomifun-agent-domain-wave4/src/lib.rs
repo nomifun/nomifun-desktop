@@ -32,7 +32,10 @@ use nomifun_agent_contracts::{
     capability_surface_declarations, digest_payload,
 };
 use nomifun_agent_kernel::{
-    CapabilityHandler, CapabilityInvocationContext, KernelError, PluginRegistration,
+    CapabilityContextContributionFactory, CapabilityContextContributionRequest,
+    CapabilityHandler, CapabilityInvocationContext, CapabilityResourceProviderFactory,
+    CapabilityResourceProviderRequest, ContextContributionResult, KernelError,
+    PluginRegistration, ResourceProviderResult,
 };
 
 pub const CONTRACT_VERSION: &str = "1.0.0";
@@ -1230,6 +1233,24 @@ fn registration_for(
             )
             .map_err(|error| error.to_string())?;
     }
+    for capability in spec.capabilities.iter().copied() {
+        let capability_id = CapabilityId::from(capability.id);
+        match capability.kind {
+            CapabilityKind::ContextContributor => registration
+                .add_capability_context_factory(
+                    capability_id.clone(),
+                    Arc::new(Wave4UnavailableContextFactory { capability_id }),
+                )
+                .map_err(|error| error.to_string())?,
+            CapabilityKind::ResourceProvider => registration
+                .add_capability_resource_factory(
+                    capability_id.clone(),
+                    Arc::new(Wave4UnavailableResourceFactory { capability_id }),
+                )
+                .map_err(|error| error.to_string())?,
+            _ => {}
+        }
+    }
     Ok(registration)
 }
 
@@ -1442,6 +1463,54 @@ fn localized(name: &str, description: &str) -> LocalizedMetadata {
         description: description.to_owned(),
         localized_names: BTreeMap::new(),
         localized_descriptions: BTreeMap::new(),
+    }
+}
+
+struct Wave4UnavailableContextFactory {
+    capability_id: CapabilityId,
+}
+
+impl CapabilityContextContributionFactory for Wave4UnavailableContextFactory {
+    fn contribute<'life0, 'async_trait>(
+        &'life0 self,
+        _request: CapabilityContextContributionRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<ContextContributionResult, KernelError>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        Self: Sync + 'async_trait,
+    {
+        Box::pin(async move {
+            Err(KernelError::CapabilityExecution {
+                reason: format!(
+                    "Wave 4 Context capability {} has no configured context owner",
+                    self.capability_id.as_ref()
+                ),
+            })
+        })
+    }
+}
+
+struct Wave4UnavailableResourceFactory {
+    capability_id: CapabilityId,
+}
+
+impl CapabilityResourceProviderFactory for Wave4UnavailableResourceFactory {
+    fn acquire<'life0, 'async_trait>(
+        &'life0 self,
+        _request: CapabilityResourceProviderRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<ResourceProviderResult, KernelError>> + Send + 'async_trait>>
+    where
+        'life0: 'async_trait,
+        Self: Sync + 'async_trait,
+    {
+        Box::pin(async move {
+            Err(KernelError::CapabilityExecution {
+                reason: format!(
+                    "Wave 4 Resource capability {} has no configured resource owner",
+                    self.capability_id.as_ref()
+                ),
+            })
+        })
     }
 }
 
@@ -2362,10 +2431,10 @@ mod tests {
 
     #[test]
     fn channel_and_robot_availability_stays_on_host_execution_surfaces() {
-        let expected_surfaces = AGENT_SURFACES
-            .iter()
-            .map(|surface| (*surface).to_owned())
-            .collect::<BTreeSet<_>>();
+        let expected_surfaces = capability_surface_declarations(
+            AGENT_SURFACES.iter().copied(),
+            [CapabilityConsumer::Agent],
+        );
         for registration in [
             channel_registration().expect("channel registration"),
             robot_registration().expect("robot registration"),

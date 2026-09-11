@@ -1068,3 +1068,31 @@ Extension 命中仅属于历史删除合同、负向 404 测试、通用语义�
    `bun run release:win:signed-rc` 关闭 `RC-WIN-01`；再把该最终 source cohort 原样交给
    macOS arm64 与 Linux Desktop x64，分别完成安装、Runtime、authored Plugin/MiniApp、
    host-loss、cleanup 与卸载；最后用六份原生 PASS record 生成 Stable cohort lock。
+
+## 2026-09-11 macOS 原生兼容性预检修正
+
+1. 真实 Apple Silicon macOS 回归发现 JavaScript Runtime Manager 只实现了 Windows
+   Node ZIP profile，macOS/Linux 的官方 LTS 下载会返回 `ManagedTargetUnsupported`。
+   当前实现已补齐 Windows arm64、macOS arm64/x64 与 Linux arm64/x64 的官方发行物
+   profile，并为 Unix 使用有界、安全的 tar.gz 解包；真实 Node 官方 index、SHASUMS、
+   archive digest、可执行权限与 arm64 probe 全链已通过。
+2. Plugin Authoring、Runtime authority/switch、DB repository 与 CLI 测试中的固定
+   `C:\\...\\node.exe`、`/usr/bin/node` 和反斜杠路径断言已改为宿主 target、PATH Node
+   和平台中立 Path 语义。macOS 上 Plugin Build Host、Shared Extension Host、MiniApp
+   dedicated Service Host、Storage IPC、旧 generation fence 与 process-tree cleanup
+   均已执行真实 Node 测试。
+3. macOS `/var -> /private/var` 系统别名曾使 Fresh-v4 root 和 MiniApp Backup 把同一
+   目录误判为不同/不安全路径。当前在拥有边界保持 symlink/reparse 拒绝的同时，先比较
+   canonical physical chain；Fresh-v4 首次组合后重启和 temp-root Backup roundtrip 已通过。
+4. N1 收紧 `PluginRegistration` export 校验后，Wave1/2/4 的 direct Context/Resource
+   contribution 缺少 fail-closed typed factory，导致 Fresh-v4 materialization 不能启动；
+   当前已补齐 factory，并同步 Browser/Computer Role member/contract digest 与 generated
+   inventory。不存在用 synthetic success 代替未配置 owner 的路径。
+5. 本轮还固定 Unix Git index 中 literal backslash 不得被重解释为目录分隔符，并把
+   Bearer 免 CSRF 与 cookie double-submit 的测试边界分开。Desktop-feature App lib、
+   N1/M1 相关 Contract/Kernel/Runtime/Plugin/MiniApp/DB suite、UI/i18n/build 与 generator
+   check 已在原生 macOS arm64 通过。
+6. 上述代码和合同修改发生在旧 Windows Candidate 之后，因此旧 source/cohort 只能保留
+   为历史证据，不能关闭最终三平台 cohort。`RC-WIN-01` 必须在本轮新 HEAD 重新生成真实
+   Windows Signed RC；在新的 `FINAL_SOURCE_COMMIT/COHORT_ID` 与两份 Windows record
+   到达前，`RC-MA-01` 不生成 candidate 或 signed_rc PASS record。

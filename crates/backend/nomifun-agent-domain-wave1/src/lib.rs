@@ -31,8 +31,11 @@ use nomifun_agent_contracts::{
     digest_payload,
 };
 use nomifun_agent_kernel::{
-    CapabilityHandler, CapabilityInvocationContext, HostPluginStateApi, KernelError,
-    PluginRegistration, PluginStateError, PluginStateHandle,
+    CapabilityContextContributionFactory, CapabilityContextContributionRequest,
+    CapabilityHandler, CapabilityInvocationContext, CapabilityResourceProviderFactory,
+    CapabilityResourceProviderRequest, ContextContributionResult, HostPluginStateApi,
+    KernelError, PluginRegistration, PluginStateError, PluginStateHandle,
+    ResourceProviderResult,
 };
 use serde_json::{Value, json};
 
@@ -1360,6 +1363,24 @@ fn registration_for(
             )
             .map_err(|error| error.to_string())?;
     }
+    for capability in spec.capabilities {
+        let capability_id = CapabilityId::from(capability.id);
+        match capability.kind {
+            CapabilityKind::ContextContributor => registration
+                .add_capability_context_factory(
+                    capability_id.clone(),
+                    Arc::new(Wave1UnavailableContextFactory { capability_id }),
+                )
+                .map_err(|error| error.to_string())?,
+            CapabilityKind::ResourceProvider => registration
+                .add_capability_resource_factory(
+                    capability_id.clone(),
+                    Arc::new(Wave1UnavailableResourceFactory { capability_id }),
+                )
+                .map_err(|error| error.to_string())?,
+            _ => {}
+        }
+    }
     Ok(registration)
 }
 
@@ -1436,6 +1457,44 @@ pub fn supported_consumers(capability_id: &str) -> BTreeSet<CapabilityConsumer> 
             CapabilityConsumer::Gateway,
         ]),
         _ => BTreeSet::from([CapabilityConsumer::Agent]),
+    }
+}
+
+struct Wave1UnavailableContextFactory {
+    capability_id: CapabilityId,
+}
+
+#[async_trait]
+impl CapabilityContextContributionFactory for Wave1UnavailableContextFactory {
+    async fn contribute(
+        &self,
+        _request: CapabilityContextContributionRequest,
+    ) -> Result<ContextContributionResult, KernelError> {
+        Err(KernelError::CapabilityExecution {
+            reason: format!(
+                "Wave 1 Context capability {} has no configured context owner",
+                self.capability_id.as_ref()
+            ),
+        })
+    }
+}
+
+struct Wave1UnavailableResourceFactory {
+    capability_id: CapabilityId,
+}
+
+#[async_trait]
+impl CapabilityResourceProviderFactory for Wave1UnavailableResourceFactory {
+    async fn acquire(
+        &self,
+        _request: CapabilityResourceProviderRequest,
+    ) -> Result<ResourceProviderResult, KernelError> {
+        Err(KernelError::CapabilityExecution {
+            reason: format!(
+                "Wave 1 Resource capability {} has no configured resource owner",
+                self.capability_id.as_ref()
+            ),
+        })
     }
 }
 
@@ -2352,7 +2411,11 @@ mod tests {
             instructions: "Invoke the selected capability.".to_owned(),
             starter_prompts: Vec::new(),
         };
-        let contribution_locks = Vec::new();
+        let contribution_locks = vec![materialized
+            .capability(&CapabilityId::from("knowledge.search"))
+            .expect("materialized knowledge.search capability")
+            .contribution_lock
+            .clone()];
         let mut revision = AgentPresetRevision {
             reference: PresetRevisionRef {
                 preset_id: AgentPresetId::from("wave1-test"),

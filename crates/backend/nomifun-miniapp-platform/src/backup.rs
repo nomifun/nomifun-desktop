@@ -1581,7 +1581,12 @@ fn ensure_regular_directory(path: &Path) -> Result<(), MiniAppWholeAppBackupErro
 fn ensure_regular_directory_chain(
     path: &Path,
 ) -> Result<(), MiniAppWholeAppBackupError> {
-    let mut current = Some(path);
+    // Resolve stable host aliases (for example macOS `/var` -> `/private/var`)
+    // before walking ancestors. The caller already rejects a symlink at the
+    // owned root itself; checking the canonical chain keeps that boundary
+    // without making every temp-directory-backed backup invalid on macOS.
+    let canonical = fs::canonicalize(path).map_err(|error| io_error(path, error))?;
+    let mut current = Some(canonical.as_path());
     while let Some(candidate) = current {
         ensure_regular_directory(candidate)?;
         current = candidate.parent();

@@ -6797,6 +6797,7 @@ version = "0.7.6"
 dependencies = [
  "async-trait",
  "dunce",
+ "flate2",
  "hex",
  "nomifun-agent-contracts",
  "nomifun-api-types",
@@ -6806,6 +6807,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tar",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",

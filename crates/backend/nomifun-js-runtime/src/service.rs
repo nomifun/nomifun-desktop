@@ -1095,16 +1095,16 @@ mod tests {
                 source_kind: source,
                 node_version: VersionString::from(format!("{major}.1.0")),
                 node_major: major,
-                runtime_target: RuntimeTarget::from(
-                    "x86_64-pc-windows-msvc",
-                ),
+                runtime_target: RuntimeTarget::from(crate::current_runtime_target()),
                 executable_digest: DigestHex::from(digest.repeat(64)),
                 javascript_host_protocol_version:
                     JAVASCRIPT_HOST_PROTOCOL_VERSION.into(),
                 javascript_sdk_contract_version:
                     JAVASCRIPT_SDK_CONTRACT_VERSION.into(),
             },
-            executable_path: PathBuf::from(r"C:\node\node.exe"),
+            executable_path: std::env::temp_dir()
+                .join("nomifun-js-runtime-service")
+                .join(if cfg!(windows) { "node.exe" } else { "node" }),
             disposition: if major == RECOMMENDED_NODE_LTS_MAJOR {
                 NodeProbeDisposition::CompatibleRecommended
             } else {
@@ -1177,7 +1177,11 @@ mod tests {
         let service = service_with_reprobe_path(
             candidate.clone(),
             RuntimeSwitchParticipantOutcome::NotCovered,
-            Some(PathBuf::from(r"C:\other\node.exe")),
+            Some(
+                std::env::temp_dir()
+                    .join("nomifun-js-runtime-service-other")
+                    .join(if cfg!(windows) { "node.exe" } else { "node" }),
+            ),
         );
         service
             .probe(ProbeJavascriptRuntimeRequest::AutoDiscover {

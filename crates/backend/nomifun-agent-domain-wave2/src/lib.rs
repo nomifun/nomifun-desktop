@@ -37,12 +37,13 @@ use nomifun_agent_contracts::{
     capability_surface_declarations, digest_payload,
 };
 use nomifun_agent_kernel::{
-    CapabilityHandler, CapabilityInvocationContext, ContextContributionFactory,
-    HostPluginStateApi, KernelError, PluginRegistration, PluginStateError,
-    PluginStateHandle, ResourceProviderFactory,
-    ResourceProviderRequest, ResourceProviderResult, ResolvedRoleMemberContext,
-    ContextContributionRequest, ContextContributionResult,
-    RoleToolHandler, RoleToolInvocationContext,
+    CapabilityContextContributionFactory, CapabilityContextContributionRequest,
+    CapabilityHandler, CapabilityInvocationContext, CapabilityResourceProviderFactory,
+    CapabilityResourceProviderRequest, ContextContributionFactory, ContextContributionRequest,
+    ContextContributionResult, HostPluginStateApi, KernelError, PluginRegistration,
+    PluginStateError, PluginStateHandle, ResourceProviderFactory, ResourceProviderRequest,
+    ResourceProviderResult, ResolvedRoleMemberContext, RoleToolHandler,
+    RoleToolInvocationContext,
 };
 
 pub const CONTRACT_VERSION: &str = "1.0.0";
@@ -960,6 +961,44 @@ struct Wave2ContextFactory {
     host_port: Arc<dyn Wave2ContextHostPort>,
 }
 
+struct Wave2UnavailableCapabilityContextFactory {
+    capability_id: CapabilityId,
+}
+
+#[async_trait::async_trait]
+impl CapabilityContextContributionFactory for Wave2UnavailableCapabilityContextFactory {
+    async fn contribute(
+        &self,
+        _request: CapabilityContextContributionRequest,
+    ) -> Result<ContextContributionResult, KernelError> {
+        Err(KernelError::CapabilityExecution {
+            reason: format!(
+                "Wave 2 Context capability {} has no configured context owner",
+                self.capability_id.as_ref()
+            ),
+        })
+    }
+}
+
+struct Wave2UnavailableCapabilityResourceFactory {
+    capability_id: CapabilityId,
+}
+
+#[async_trait::async_trait]
+impl CapabilityResourceProviderFactory for Wave2UnavailableCapabilityResourceFactory {
+    async fn acquire(
+        &self,
+        _request: CapabilityResourceProviderRequest,
+    ) -> Result<ResourceProviderResult, KernelError> {
+        Err(KernelError::CapabilityExecution {
+            reason: format!(
+                "Wave 2 Resource capability {} has no configured resource owner",
+                self.capability_id.as_ref()
+            ),
+        })
+    }
+}
+
 #[async_trait::async_trait]
 impl ContextContributionFactory for Wave2ContextFactory {
     async fn contribute(
@@ -1627,6 +1666,31 @@ fn build_registration(
                 }),
             )
             .map_err(|error| format!("register {} role handler: {error}", package.id))?;
+    }
+    for definition in package.capabilities {
+        if role_id_for_capability(definition.id).is_some() {
+            continue;
+        }
+        let capability_id = CapabilityId::from(definition.id);
+        match definition.kind {
+            CapabilityKind::ContextContributor => registration
+                .add_capability_context_factory(
+                    capability_id.clone(),
+                    Arc::new(Wave2UnavailableCapabilityContextFactory { capability_id }),
+                )
+                .map_err(|error| {
+                    format!("register {} direct context factory: {error}", package.id)
+                })?,
+            CapabilityKind::ResourceProvider => registration
+                .add_capability_resource_factory(
+                    capability_id.clone(),
+                    Arc::new(Wave2UnavailableCapabilityResourceFactory { capability_id }),
+                )
+                .map_err(|error| {
+                    format!("register {} direct resource factory: {error}", package.id)
+                })?,
+            _ => {}
+        }
     }
     for definition in package.capabilities {
         let Some(role_id) = role_id_for_capability(definition.id) else {
@@ -2785,7 +2849,11 @@ mod tests {
             instructions: "Invoke the selected capability.".to_owned(),
             starter_prompts: Vec::new(),
         };
-        let contribution_locks = Vec::new();
+        let contribution_locks = vec![materialized
+            .capability(&CapabilityId::from("fs.read"))
+            .expect("materialized fs.read capability")
+            .contribution_lock
+            .clone()];
         let mut revision = AgentPresetRevision {
             reference: PresetRevisionRef {
                 preset_id: AgentPresetId::from("wave2-state-test"),
@@ -3115,7 +3183,17 @@ mod tests {
                 instructions: "Navigate with the selected Browser provider.".to_owned(),
                 starter_prompts: Vec::new(),
             };
-            let contribution_locks = Vec::new();
+            let contribution_locks = payload
+                .initial_capabilities
+                .iter()
+                .map(|selection| {
+                    materialized
+                        .capability(&selection.capability.id)
+                        .expect("selected Browser capability is materialized")
+                        .contribution_lock
+                        .clone()
+                })
+                .collect();
             let mut revision = AgentPresetRevision {
                 reference: PresetRevisionRef {
                     preset_id: AgentPresetId::from("browser-provider-fixture"),

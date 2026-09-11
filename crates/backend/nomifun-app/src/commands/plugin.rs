@@ -975,7 +975,7 @@ struct SourcePathOutput {
 mod tests {
     use super::*;
     use crate::cli::HeadlessConnectionArgs;
-    use std::path::PathBuf;
+    use std::path::Path;
 
     fn connection(url: &str, token: &str) -> HeadlessConnectionArgs {
         HeadlessConnectionArgs {
@@ -1034,7 +1034,7 @@ mod tests {
 
     #[test]
     fn source_path_uses_the_managed_authoring_layout() {
-        let root = PathBuf::from(r"C:\data");
+        let root = std::env::temp_dir().join("nomifun-plugin-source-layout");
         let path = root
             .join(PLUGIN_PLATFORM_DIRECTORY)
             .join(PLUGIN_AUTHORING_DIRECTORY)
@@ -1043,10 +1043,15 @@ mod tests {
             .join("projects")
             .join("project")
             .join("source");
-        assert!(path.ends_with(
-            PathBuf::from(
-                r"plugin-platform\authoring\sources\owner\projects\project\source"
-            )
-        ));
+        assert_eq!(
+            path.strip_prefix(&root).unwrap(),
+            Path::new(PLUGIN_PLATFORM_DIRECTORY)
+                .join(PLUGIN_AUTHORING_DIRECTORY)
+                .join("sources")
+                .join("owner")
+                .join("projects")
+                .join("project")
+                .join("source")
+        );
     }
 }

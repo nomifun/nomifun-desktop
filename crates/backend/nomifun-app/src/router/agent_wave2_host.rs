@@ -1956,6 +1956,12 @@ fn repo_path_component_matches(left: &str, right: &str) -> bool {
 }
 
 fn path_relative_to_workspace(path: &str, prefix: &str) -> Option<String> {
+    // Git index paths are canonical forward-slash paths on every platform.
+    // Treating a literal backslash as a separator on Unix can turn a sibling
+    // filename such as `nested\\outside.txt` into an apparently in-scope path.
+    if path.contains('\\') {
+        return None;
+    }
     let path = path.replace('\\', "/");
     let prefix = prefix.replace('\\', "/");
     if prefix.is_empty() {
@@ -2795,7 +2801,11 @@ mod tests {
             instructions: "Invoke the selected capability.".to_owned(),
             starter_prompts: Vec::new(),
         };
-        let contribution_locks = Vec::new();
+        let contribution_locks = vec![materialized
+            .capability(&CapabilityId::from("fs.read"))
+            .expect("materialized fs.read capability")
+            .contribution_lock
+            .clone()];
         let mut revision = AgentPresetRevision {
             reference: PresetRevisionRef {
                 preset_id: AgentPresetId::from("wave2-host-test"),
