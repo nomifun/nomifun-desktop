@@ -322,10 +322,14 @@ describe('C8-MA macOS arm64 validation helper', () => {
           expect.objectContaining({ id: 'macos-app:architectures', status: 'pass' }),
           expect.objectContaining({ id: 'macos-package:hdiutil-verify', status: 'pass' }),
           expect.objectContaining({ id: 'canonical-capability-inventory', status: 'pass' }),
-          expect.objectContaining({ id: 'startup:host-binary', status: 'blocked' }),
+          expect.objectContaining({ id: 'startup:absent-root', status: 'not_required' }),
+          expect.objectContaining({
+            id: 'startup:precreated-empty-root',
+            status: 'not_required',
+          }),
           expect.objectContaining({
             id: 'lifecycle:open-ready-turn-observe-cancel-dispose',
-            status: 'blocked',
+            status: 'not_required',
           }),
         ]),
       );

@@ -997,7 +997,7 @@ export async function runValidation(
     }
   }
 
-  const hostBinary = options.hostBinary || join(REPO_ROOT, 'target/debug/nomicore');
+  const hostBinary = options.hostBinary ? resolve(options.hostBinary) : null;
   let canonicalInventory = null;
   const capabilityInventoryPath =
     options.capabilityInventory ||
@@ -1018,8 +1018,14 @@ export async function runValidation(
     });
     report.blockers.push(`missing/invalid canonical capability inventory: ${capabilityInventoryPath}`);
   }
-  if (options.runStartup || existingFile(hostBinary)?.isFile()) {
-    if (!canonicalInventory) {
+  if (options.runStartup) {
+    if (!hostBinary || !existingFile(hostBinary)?.isFile()) {
+      check(report, 'startup:host-binary', 'blocked', {
+        reason: '--run-startup requires an explicit existing --host-binary built from the tested source',
+        path: hostBinary,
+      });
+      report.blockers.push('missing explicit host binary for requested startup validation');
+    } else if (!canonicalInventory) {
       check(report, 'startup:capability-inventory', 'blocked', {
         reason: 'startup inventory comparison cannot run without the canonical capability inventory',
       });
@@ -1048,18 +1054,19 @@ export async function runValidation(
       }
     }
   } else {
-    check(report, 'startup:host-binary', 'blocked', {
-      reason: 'nomicore host binary not found; provide --host-binary or build target/debug/nomicore',
-      path: hostBinary,
+    check(report, 'startup:absent-root', 'not_required', {
+      reason: 'package/native baseline does not run Host startup without --run-startup',
     });
-    report.blockers.push(`missing host binary: ${hostBinary}`);
+    check(report, 'startup:precreated-empty-root', 'not_required', {
+      reason: 'package/native baseline does not run Host startup without --run-startup',
+    });
   }
 
   if (options.runLifecycle) {
     await remoteLifecycle(options, report);
   } else {
-    check(report, 'lifecycle:open-ready-turn-observe-cancel-dispose', 'blocked', {
-      reason: 'live lifecycle not run; provide --endpoint and --binding-id --run-lifecycle',
+    check(report, 'lifecycle:open-ready-turn-observe-cancel-dispose', 'not_required', {
+      reason: 'package/native baseline does not run product lifecycle without --run-lifecycle',
     });
   }
 

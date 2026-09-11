@@ -1096,3 +1096,8 @@ Extension 命中仅属于历史删除合同、负向 404 测试、通用语义�
    为历史证据，不能关闭最终三平台 cohort。`RC-WIN-01` 必须在本轮新 HEAD 重新生成真实
    Windows Signed RC；在新的 `FINAL_SOURCE_COMMIT/COHORT_ID` 与两份 Windows record
    到达前，`RC-MA-01` 不生成 candidate 或 signed_rc PASS record。
+7. `check-macos-arm64-native.mjs` 已收敛回 package/native baseline：未显式请求
+   `--run-startup` 时不再自动执行工作区中可能陈旧的 `target/debug/nomicore`；Startup 与
+   lifecycle 只在调用者提供当前 source 的明确 Host/endpoint 后运行。这样 package helper
+   不会把另一份旧 debug binary 的 Catalog 漂移错误归因给已锁定的签名 Desktop 制品，
+   也不会把未执行的产品 journey 冒充 PASS。
