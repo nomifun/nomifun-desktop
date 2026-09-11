@@ -14,6 +14,8 @@ describe('native release evidence publishing', () => {
   test('Linux requires, verifies, and uploads one release lock per package', () => {
     expect(linux.includes('lock="$package.release-lock.json"')).toBe(true);
     expect(linux.includes('release-lock.mjs verify --root "$ROOT" --lock "$lock"')).toBe(true);
-    expect(linux.includes("-name '*.release-lock.json'")).toBe(true);
+    for (const format of ['deb', 'AppImage', 'rpm']) {
+      expect(linux.includes(`-name '*.${format}.release-lock.json'`)).toBe(true);
+    }
   });
 });

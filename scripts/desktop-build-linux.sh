@@ -12,6 +12,8 @@
 #                                     # 未知 --xxx 选项会原样透传给 tauri build
 #   bun run build:linux -- --bundles deb
 #                                     # `--` 之后的参数也会原样透传给 tauri build
+#   此入口固定生成 release lock；debug/custom profile 请直接使用 tauri build，
+#   不允许透传 --debug / --profile / --target 改变待收集的 Host/package 路径。
 #
 # 架构别名:
 #   x64   / x86_64        -> x86_64-unknown-linux-gnu
@@ -111,6 +113,20 @@ for arg in "$@"; do
   else
     SELECT+=("$arg")
   fi
+done
+
+# Host/package release locks below are deliberately rooted in the selected
+# triple's release directory. Reject output overrides before cleaning bundles;
+# otherwise a successful debug/custom-profile build cleans the wrong directory
+# and then reports missing packages because collection still looks in release.
+for arg in "${PASSTHRU[@]}"; do
+  case "$arg" in
+    --debug|-d|--profile|--profile=*|--target|--target=*|-t|-t?*)
+      echo "❌ build:linux requires release output for its selected architecture; unsupported override: $arg" >&2
+      echo "   使用 x64/arm64 选择架构；debug/custom profile 请直接运行 bun x tauri build。" >&2
+      exit 1
+      ;;
+  esac
 done
 
 resolve_triple() {
