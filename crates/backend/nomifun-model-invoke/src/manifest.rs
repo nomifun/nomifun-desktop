@@ -279,6 +279,7 @@ const PRESETS: &[PresetSpec] = &[
     PresetSpec { preset: "custom", platform: "custom", base_url: None, requires_user_input: true, auth_scheme: Some("bearer") },
     PresetSpec { preset: "new-api", platform: "new-api", base_url: None, requires_user_input: true, auth_scheme: Some("bearer") },
     PresetSpec { preset: "gemini", platform: "gemini", base_url: Some("https://generativelanguage.googleapis.com"), requires_user_input: false, auth_scheme: Some("header_key:x-goog-api-key") },
+    preset("Agnes", "agnes", "https://apihub.agnes-ai.com/v1"),
     preset("OpenAI", "openai", "https://api.openai.com/v1"),
     PresetSpec { preset: "Anthropic", platform: "anthropic", base_url: Some("https://api.anthropic.com"), requires_user_input: false, auth_scheme: Some("header_key:x-api-key") },
     PresetSpec { preset: "AWS-Bedrock", platform: "bedrock", base_url: None, requires_user_input: true, auth_scheme: Some("bedrock") },
@@ -459,7 +460,7 @@ fn allowed_auth_schemes(spec: ProtocolSpec) -> &'static [&'static str] {
         // Agent executors enforce these exact schemes before constructing the
         // provider client; advertising broader transport vocabulary would make
         // a model save successfully and fail on its first invocation.
-        "openai.chat_text" | "openai.responses" => &["bearer"],
+        "openai.chat_text" | "openai.responses" | "agnes.images" | "agnes.video_jobs" => &["bearer"],
         "anthropic.messages" => &["header_key:x-api-key"],
         "gemini.generate_text" => &["header_key:x-goog-api-key"],
         "bedrock.anthropic_messages" => &["bedrock"],
@@ -488,7 +489,7 @@ pub fn protocol_requires_output_ceiling(protocol_id: &str) -> bool {
 }
 
 const OPENAI_CHAT_PLATFORMS: &[&str] = &[
-    "openai", "deepseek", "mimo", "mimo-token-plan-cn", "mimo-token-plan-sgp",
+    "openai", "agnes", "deepseek", "mimo", "mimo-token-plan-cn", "mimo-token-plan-sgp",
     "mimo-token-plan-ams", "minimax", "minimax-code", "minimax-coding-plan", "novita",
     "openrouter", "dashscope", "dashscope-coding", "siliconflow", "zhipu", "glm-coding-plan",
     "moonshot-cn", "moonshot-global", "xai", "ark", "ark-coding-plan", "ark-agent-plan",
@@ -518,6 +519,14 @@ const PROTOCOL_SPECS: &[ProtocolSpec] = &[
         endpoint(VideoGeneration, "endpoint", Submit, "POST", "/videos"),
         endpoint(VideoGeneration, "poll_endpoint", Poll, "GET", "/videos/{id}"),
         endpoint(VideoGeneration, "content_endpoint", Content, "GET", "/videos/{id}/content"),
+    ] },
+    ProtocolSpec { id: "agnes.images", tasks: &[ImageGeneration, ImageEdit], executor: ModelInvoke, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["agnes"], connection_role: None, endpoints: &[
+        endpoint(ImageGeneration, "endpoint", Submit, "POST", "/images/generations"),
+        endpoint(ImageEdit, "endpoint", Submit, "POST", "/images/generations"),
+    ] },
+    ProtocolSpec { id: "agnes.video_jobs", tasks: &[VideoGeneration], executor: AsyncJob, transport: Http, scopes: NATIVE_CUSTOM, platforms: &["agnes"], connection_role: None, endpoints: &[
+        endpoint(VideoGeneration, "endpoint", Submit, "POST", "/videos"),
+        endpoint(VideoGeneration, "poll_endpoint", Poll, "GET", "https://apihub.agnes-ai.com/agnesapi?video_id={id}"),
     ] },
     ProtocolSpec { id: "openai.embeddings", tasks: &[Embedding], executor: ModelInvoke, transport: Http, scopes: ALL_SCOPES, platforms: &["openai", "novita", "openrouter", "siliconflow", "ppio", "infiniai", "qianfan", "hunyuan", "hunyuan-global", "ctyun", "zhipu"], connection_role: None, endpoints: &[endpoint(Embedding, "endpoint", Submit, "POST", "/embeddings")] },
     ProtocolSpec { id: "generic.rerank", tasks: &[Rerank], executor: ModelInvoke, transport: Http, scopes: COMPAT_CUSTOM, platforms: &["siliconflow", "ppio", "qianfan", "ctyun", "zhipu"], connection_role: None, endpoints: &[endpoint(Rerank, "endpoint", Submit, "POST", "/rerank")] },
@@ -766,6 +775,8 @@ fn provider_params_encoding(
         | ("gemini.generate_text", Chat)
         | ("openai.images", ImageGeneration)
         | ("openai.embeddings", Embedding)
+        | ("agnes.images", ImageGeneration | ImageEdit)
+        | ("agnes.video_jobs", VideoGeneration)
         | ("generic.rerank", Rerank)
         | ("openai.audio_speech", SpeechSynthesis)
         | ("gemini.generate_content", ImageGeneration | ImageEdit)
@@ -1702,6 +1713,8 @@ mod tests {
         for (protocol, expected) in [
             ("openai.chat_text", vec!["bearer"]),
             ("openai.responses", vec!["bearer"]),
+            ("agnes.images", vec!["bearer"]),
+            ("agnes.video_jobs", vec!["bearer"]),
             ("anthropic.messages", vec!["header_key:x-api-key"]),
             ("gemini.generate_text", vec!["header_key:x-goog-api-key"]),
             ("bedrock.anthropic_messages", vec!["bedrock"]),
@@ -1800,6 +1813,35 @@ mod tests {
         );
         let recommendation = view.recommendation.expect("OpenAI Chat recommendation");
         assert_eq!(recommendation.protocol_id, "openai.chat_text");
+    }
+
+    #[test]
+    fn agnes_preset_owns_image_and_video_lifecycles() {
+        let images = protocol_manifest_for("Agnes", ImageGeneration);
+        let image_recommendation = images.recommendation.expect("Agnes image recommendation");
+        assert_eq!(image_recommendation.protocol_id, "agnes.images");
+        assert_eq!(
+            image_recommendation.default_base_url.as_deref(),
+            Some("https://apihub.agnes-ai.com/v1")
+        );
+        assert_eq!(
+            image_recommendation.default_auth_scheme.as_deref(),
+            Some("bearer")
+        );
+
+        let videos = protocol_manifest_for("Agnes", VideoGeneration);
+        let video_recommendation = videos.recommendation.expect("Agnes video recommendation");
+        assert_eq!(video_recommendation.protocol_id, "agnes.video_jobs");
+        let descriptor = protocol_task_descriptor("agnes.video_jobs", VideoGeneration)
+            .expect("Agnes video descriptor");
+        assert_eq!(
+            descriptor
+                .endpoints
+                .iter()
+                .find(|endpoint| endpoint.purpose == Poll)
+                .map(|endpoint| endpoint.default_value.as_str()),
+            Some("https://apihub.agnes-ai.com/agnesapi?video_id={id}")
+        );
     }
 
     #[test]
@@ -1947,7 +1989,7 @@ mod tests {
             (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
         });
         assert_eq!(
-            hash, 15_708_070_195_996_868_304,
+            hash, 6_676_285_168_683_914_907,
             "recommendation URL snapshot changed:\n{snapshot}"
         );
     }
