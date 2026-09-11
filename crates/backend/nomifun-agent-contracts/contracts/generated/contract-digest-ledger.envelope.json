@@ -4,29 +4,29 @@
     "ledger_version": "1.0.0",
     "artifacts": {
       "canonical_api_inventory": "61e8b668453d61c970ad49a3c7a468d688918894f504d93c8e5d9af6b804d9c2",
-      "canonical_schema_manifest": "eaa350527ff6ebb7fe2ec7ffca96c3a22ba5e7178b465ea6c41acbb94b452c06",
+      "canonical_schema_manifest": "a6368440feec005240405111e42eb55f3e0899d13f3c88ed53ba50f947e599eb",
       "capability_catalog_entry": "06a4bca7e916f7fd7e6c7684eeb9d283bcada138746155938bb2e96f06a3cd88",
-      "cargo_lock": "eb3f110bf6242a2ca6771e0516104fe15fa094f9113c55993a4931a5aeed7ad8",
+      "cargo_lock": "ee8ad1d1e220d96d78427181219b07f187db951a3a815d5aa63ed4385669f3ea",
       "coding_codex_native_contract": "62687467ddfe329fedbb37e2576e598d5fb787fda24ab2de395377e8d93f9bdc",
       "confirmed_decision_contract": "b3c32f0579a36c1f720a906b785b76cea58e8c8a1e4b07df6416f0d7410d78d5",
       "database_schema": "72acbb4645581cb8c7c2a9f7c03f81f21a417fb517faedc04300872b711d3d65",
-      "deletion_manifest_set": "bde07a4c614f152a57e2a76d7e23e76fc07ee098e77f18fcf42e66256193f0f9",
+      "deletion_manifest_set": "67d56ad6eced3599b3d02e78223af7fc08ad448ec70f83a9c39c7c9602d93cf8",
       "error_registry": "fe64ac21087f7c86594f0c9ccd1158e3b97616288e3d0cf295d376276f99d62c",
       "miniapp_m1_contract": "b3a78693734bf6893181deeebf5fdf0eaaa2ea50858e6edecd3491fdca6f3503",
       "miniapp_m1_schema": "30874d1ac31cdaa6c216973ffb5b03567d89b7c0428e5dbabc395ed27891124c",
       "official_preset_seed_manifest": "15529177c8acfa08f8d70c1386864d449b44bef34650cf7ad91f3c470bd97e2b",
       "package_schema": "f82782c856ba53068161c4b0c98ba761c63a755ff23c773162571aa8fbe9d881",
       "platform_validation_contract": "a3f5180906c239d791a03281199d80f2ea957dbe8382fb849dc2926935672a9c",
-      "platform_validation_fixture": "49f4baa5dcd89eb57b3fba5ba5cc8efd05d3ae9c168489b50119b02893955b89",
+      "platform_validation_fixture": "f1690866e1c2d6bef4b06e1e6e26bea222553ec9279214f2414b8bdd907cb94e",
       "plugin_n1_contract": "96a1f080717010b8feeea91f38a68b1949f5aa3ef6860f82673744ceb17da36a",
       "plugin_n1_schema": "f7169c12d444af92e4bfcad8c7afd819b51612b4aec78e06a9524c9a92a58714",
       "runtime_feature_inventory": "bc01fffa050a721debc7740405a05f53b966d4e2dc2d8b4392e321d944fca2ee",
       "runtime_protocol": "f1c0422f04c9de923e18c7df40d814d3c9f5b2db5f1c5fef2745e77e6d62590f",
-      "runtime_release_fixture": "9df6805374ca2891cef60168f63a5e3e89df4c3fd797a6a3b1cc09d75410ec8b",
+      "runtime_release_fixture": "3bacc3575b0363756ef84cda4f36d03fe2ad014dd8fba45bd6098cd7e688d575",
       "rust_contract_schema": "d57e5a5bb3ca1a579a2a12e69c629c01b1ff18dee7fbcb56b4a1276d38d671cf",
       "session_event_registry": "e2cec429a2166b519e364483f94e47edfe4bc8c208ddc6bbdb82d70c5e69c74c",
       "target_first_party_inventory": "71c6aeb654159f99777e63a6444c1c2be4450e0be050f4daa350d19b8fce26a6"
     }
   },
-  "payload_digest": "1c3b89e8fbee89e47a95c2bc39da9766f3e461d92e49709c26c5c11e1efbf64f"
+  "payload_digest": "6a5474ea63fb4632bba1d7cd28168f7db08db273369c5bba1675b69180443a05"
 }
