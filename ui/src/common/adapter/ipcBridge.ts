@@ -179,6 +179,8 @@ import type {
   SaveAgentPresetRevisionRequest,
   SaveAgentPresetRevisionResponse,
   SkillCatalogItem,
+  SwitchAgentSessionPresetRequest,
+  SwitchAgentSessionPresetResponse,
   UpdateRemoteBindingRequest,
 } from '../types/agentPlatform';
 import type {
@@ -761,6 +763,17 @@ export const agentPlatform = {
           `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/capabilities`
       ),
       fromApiAgentSessionCapabilities
+    ),
+    switchPreset: httpPut<
+      SwitchAgentSessionPresetResponse,
+      {
+        agent_session_id: string;
+        request: SwitchAgentSessionPresetRequest;
+      }
+    >(
+      (params) =>
+        `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/preset`,
+      (params) => params.request
     ),
     createTurn: httpPost<
       CreateAgentSessionTurnResponse,

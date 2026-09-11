@@ -105,6 +105,21 @@
 .empty { padding: 22px 10px; margin: 0; text-align: center; font-size: 13px; color: var(--text-secondary); }
 .trigger:focus-visible, .row:focus-visible, .textAction:focus-visible, .manageLink:focus-visible { outline: 2px solid rgba(var(--primary-6), 0.6); outline-offset: -2px; }
 
+.compactTrigger {
+  min-height: 28px;
+  max-width: 180px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.compactTrigger:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
 @media (max-width: 480px) {
   .trigger { font-size: 14px; }
   .panel { border-radius: 12px; }

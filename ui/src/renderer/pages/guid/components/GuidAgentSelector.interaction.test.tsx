@@ -42,6 +42,17 @@ const renderSelector = (props: Partial<GuidAgentSelectorProps> = {}) => {
 afterEach(cleanup);
 
 describe('Guid Agent selector', () => {
+  test('supports a compact current-session label while an Agent switch is pending', () => {
+    const { page } = renderSelector({
+      compact: true,
+      disabled: true,
+      selectedLabelOverride: '当前会话 Agent',
+    });
+    const trigger = page.getByTestId('guid-agent-selector') as HTMLButtonElement;
+    expect(trigger.textContent).toContain('当前会话 Agent');
+    expect(trigger.disabled).toBe(true);
+  });
+
   test('keeps the collection hidden until the current Agent is opened', async () => {
     const { page, open } = renderSelector();
     expect(page.getByTestId('guid-agent-selector').textContent).toBe(agentSettings.template.chat.minimal.name);

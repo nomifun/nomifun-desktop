@@ -5783,16 +5783,15 @@ function ap7AgentPresetLaunchContract() {
   );
   require(
     source.conversation.includes(
-      'const modelLocked = Boolean(conversation.preset_id);'
+      'const hasPreset = Boolean(conversation.preset_id);'
     ) &&
-      source.conversation.includes('if (modelLocked) return false;') &&
-      source.conversation.includes('if (modelLocked) return;') &&
-      source.sendBox.includes('disabled={modelLocked}') &&
-      !source.sendBox.includes('{!modelLocked && (') &&
-      source.conversationService.includes(
+      !source.conversation.includes('modelLocked') &&
+      !source.sendBox.includes('modelLocked') &&
+      source.sendBox.includes('<NomiModelSelector') &&
+      !source.conversationService.includes(
         'top-level `model` is immutable for AgentPreset conversations'
       ),
-    'AgentPreset conversations must show their frozen model without exposing public mutation'
+    'AgentPreset conversations must allow session model changes while retaining preset resource restrictions'
   );
   require(
     source.sendBox.includes(
@@ -5802,6 +5801,13 @@ function ap7AgentPresetLaunchContract() {
         '[agentWarmed, conversation_id, current_model?.use_model, executeCommand, setContent]'
       ),
     'Guid initial delivery must wait for passive Agent runtime warmup'
+  );
+  require(
+    source.conversation.includes('<GuidAgentSelector') &&
+      source.conversation.includes('sessions.switchPreset.invoke') &&
+      source.sendBox.includes('{agentSelectorNode}') &&
+      source.conversationService.includes('replace_agent_preset_snapshot'),
+    'AgentPreset conversations must support in-place Agent switching without replacing conversation history'
   );
   require(
     ![
