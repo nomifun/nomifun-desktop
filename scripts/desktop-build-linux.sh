@@ -36,6 +36,7 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$ROOT"
 CONF="apps/desktop/tauri.conf.json"
 DIST="$ROOT/dist/desktop"
 RELEASE_LOCK_TOOL="$ROOT/scripts/release/release-lock.mjs"
@@ -57,6 +58,8 @@ require_linux_build_deps() {
   if ! command -v pkg-config >/dev/null 2>&1; then
     missing+=("pkg-config")
   else
+    pkg-config --exists gtk+-3.0 || missing+=("libgtk-3-dev (pkg-config: gtk+-3.0)")
+    pkg-config --exists webkit2gtk-4.1 || missing+=("libwebkit2gtk-4.1-dev (pkg-config: webkit2gtk-4.1)")
     pkg-config --exists gbm || missing+=("libgbm-dev (pkg-config: gbm)")
     pkg-config --exists librsvg-2.0 || missing+=("librsvg2-dev (pkg-config: librsvg-2.0)")
     if ! pkg-config --exists ayatana-appindicator3-0.1 && ! pkg-config --exists appindicator3-0.1; then
@@ -73,7 +76,7 @@ require_linux_build_deps() {
     cat >&2 <<'EOF'
 
 Debian/Ubuntu 可先安装:
-  sudo apt-get install -y pkg-config libgbm-dev libayatana-appindicator3-dev librsvg2-dev
+  sudo apt-get install -y build-essential pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev libgbm-dev libayatana-appindicator3-dev librsvg2-dev patchelf
 
 说明:
   - libgbm-dev 提供 -lgbm 链接名与 gbm.pc。
@@ -188,11 +191,19 @@ for t in "${TRIPLES[@]}"; do
   fi
   echo ""
   echo "▶▶▶ 构建 $t ..."
+  # A previous --bundles run may have left packages for other formats or
+  # versions. Never bind those bytes to this build's Host/source release lock.
+  # Only remove generated Linux bundles for this target; keep other platforms
+  # and the already collected dist artifacts untouched.
+  bundle_dir="$ROOT/target/$t/release/bundle"
+  if [[ -d "$bundle_dir" ]]; then
+    find "$bundle_dir" -type f \( -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' -o -name '*.sig' \) -delete
+  fi
   CI=true bun x tauri build --config "$CONF" --target "$t" ${PASSTHRU[@]+"${PASSTHRU[@]}"}
 
   # Linux 产物在 target/<triple>/release/bundle/{deb,appimage,rpm}/
-  bundle_dir="$ROOT/target/$t/release/bundle"
   host="$ROOT/target/$t/release/nomifun-desktop"
+  target_package_count=0
   while IFS= read -r -d '' pkg; do
     package="$DIST/$(basename "$pkg")"
     lock="$package.release-lock.json"
@@ -200,7 +211,12 @@ for t in "${TRIPLES[@]}"; do
     write_release_lock "$t" "$host" "$package" "$lock"
     COLLECTED+=("$package")
     COLLECTED_LOCKS+=("$lock")
+    target_package_count=$((target_package_count + 1))
   done < <(find "$bundle_dir" -type f \( -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' \) -print0 2>/dev/null)
+  if [[ "$target_package_count" -eq 0 ]]; then
+    echo "❌ Tauri did not produce any Linux Desktop package for $t." >&2
+    exit 1
+  fi
 done
 
 if [[ "${#COLLECTED[@]}" -eq 0 ]]; then
