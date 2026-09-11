@@ -115,7 +115,7 @@ describe('standalone workbench session draft storage', () => {
       prompt: '固定镜头，晨雾缓慢散去',
       model: { providerId: PROVIDER_A, model: 'video-exact-v1' },
       resolution: '720p',
-      aspect: '9:16',
+      aspect: 'auto',
       duration: '10',
       taskCount: 1,
       referenceAssetIds: [IMAGE_ASSET_A],

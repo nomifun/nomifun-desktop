@@ -8,8 +8,10 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'bun:test';
 import type { AgentPresetSummary } from '@/common/types/agentPlatform';
 import {
+  DEFAULT_GUID_AGENT_SELECTION,
   getAgentPresetKey,
   isExecutableAgentPreset,
+  normalizeGuidAgentSelection,
 } from './agentSelectionUtils';
 
 const readSource = (url: URL): string =>
@@ -41,6 +43,22 @@ describe('Guid Agent selection contract', () => {
 
   test('uses preset_id as the selection key', () => {
     expect(getAgentPresetKey(stablePreset)).toBe(stablePreset.preset_id);
+  });
+
+  test('normalizes legacy or invalid selections to the first official Agent', () => {
+    expect(DEFAULT_GUID_AGENT_SELECTION).toEqual({
+      kind: 'template',
+      templateKey: 'chat.minimal',
+    });
+    expect(normalizeGuidAgentSelection({ kind: 'default' })).toEqual(
+      DEFAULT_GUID_AGENT_SELECTION
+    );
+    expect(
+      normalizeGuidAgentSelection({ kind: 'template', templateKey: 'removed.template' })
+    ).toEqual(DEFAULT_GUID_AGENT_SELECTION);
+    expect(
+      normalizeGuidAgentSelection({ kind: 'template', templateKey: 'assistant.general' })
+    ).toEqual({ kind: 'template', templateKey: 'assistant.general' });
   });
 
   test('loads saved user presets and filters draft-only rows', () => {
@@ -93,8 +111,9 @@ describe('Guid Agent selection contract', () => {
     expect(page.includes('agentSelection.loadError,')).toBe(true);
   });
 
-  test('persists the exact default-or-preset selection and never auto-promotes the first preset', () => {
+  test('defaults to chat.minimal and persists only catalog-backed selections', () => {
     const selection = readSource(new URL('./useGuidAgentSelection.ts', import.meta.url));
+    const selectionUtils = readSource(new URL('./agentSelectionUtils.ts', import.meta.url));
     const configKeys = readSource(
       new URL('../../../../common/config/configKeys.ts', import.meta.url)
     );
@@ -105,10 +124,11 @@ describe('Guid Agent selection contract', () => {
       )
     ).toBe(true);
     expect(
-      selection.includes(
-        "const DEFAULT_AGENT_SELECTION: GuidAgentSelection = { kind: 'default' };"
+      selectionUtils.includes(
+        "templateKey: 'chat.minimal',"
       )
     ).toBe(true);
+    expect(configKeys.includes("| { kind: 'default' }")).toBe(false);
     expect(
       selection.includes("configService.get('guid.agentSelection')")
     ).toBe(true);
@@ -123,15 +143,12 @@ describe('Guid Agent selection contract', () => {
     expect(selection.includes('presets[0]')).toBe(false);
   });
 
-  test('keeps default and preset identities exact in the mention selector', () => {
+  test('keeps official-template and preset identities exact in the mention selector', () => {
     const mention = readSource(new URL('./useGuidMention.ts', import.meta.url));
 
-    expect(
-      mention.includes("selectionKey({ kind: 'default' })")
-    ).toBe(true);
-    expect(
-      mention.includes("selection: { kind: 'default' } as const")
-    ).toBe(true);
+    expect(mention.includes("kind: 'default'")).toBe(false);
+    expect(mention.includes('guid-agent-default')).toBe(false);
+    expect(mention.includes('guid-agent-template:${selection.templateKey}')).toBe(true);
     expect(
       mention.includes(
         "const presetSelection: GuidAgentSelection = {\n          kind: 'preset',\n          presetId: preset.preset_id,"

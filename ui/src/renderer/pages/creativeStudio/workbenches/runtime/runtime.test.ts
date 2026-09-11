@@ -787,9 +787,27 @@ describe("Creative workbench planning and presentation boundaries", () => {
       references: base.references,
     });
     expect(retry.input.owner).toEqual(plan.input.owner);
-    expect(retry.input.parameters).toEqual(plan.input.parameters);
+    const { nomifunRetrySlot, ...replayedParameters } = retry.input.parameters;
+    expect(replayedParameters).toEqual(plan.input.parameters);
+    expect(nomifunRetrySlot).toEqual({
+      taskId: failed.taskId,
+      submittedAt: failed.submittedAt,
+      predecessorTaskIds: [failed.taskId],
+    });
     expect(retry.input.inputs).toEqual(plan.input.inputs);
     expect(retry.input.idempotencyKey).not.toBe(plan.input.idempotencyKey);
+
+    const retriedFailure = task(retry.input, "failed");
+    const secondRetry = prepareStandaloneHistoryRetry({
+      catalog: base.catalog,
+      task: retriedFailure,
+      references: base.references,
+    });
+    expect(secondRetry.input.parameters.nomifunRetrySlot).toEqual({
+      taskId: failed.taskId,
+      submittedAt: failed.submittedAt,
+      predecessorTaskIds: [failed.taskId, retriedFailure.taskId],
+    });
   });
 
   test("projects StepFun dimensions into the provider-native size contract", () => {
@@ -826,6 +844,30 @@ describe("Creative workbench planning and presentation boundaries", () => {
       })
     );
     expect(unsupported?.message.includes("does not support the requested dimensions")).toBe(true);
+  });
+
+  test("keeps automatic video dimensions absent while retaining history metadata", () => {
+    const plan = prepareVideoWorkbenchRun({
+      catalog: catalog("video_generation"),
+      owner: standaloneOwner("video"),
+      model: { providerId: PROVIDER_ID, model: "video_generation-model" },
+      references: { bindings: [], assets: [] },
+      operation: { task: "video_generation", capability: "t2v" },
+      prompt: "Slow camera movement with model-selected framing",
+      seconds: 5,
+      resolution: "1080p",
+      aspectRatio: "auto",
+      width: null,
+      height: null,
+      taskCount: 1,
+    });
+
+    expect(plan.input.parameters).toEqual({
+      prompt: "Slow camera movement with model-selected framing",
+      seconds: 5,
+      resolution: "1080p",
+      aspect: "auto",
+    });
   });
 
   test("keeps audio cancellation enabled for an authoritative queued task", async () => {

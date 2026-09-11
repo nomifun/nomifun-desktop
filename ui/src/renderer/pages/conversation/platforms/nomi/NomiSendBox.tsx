@@ -64,7 +64,7 @@ import { emitter, useAddEventListener } from '@/renderer/utils/emitter';
 import { mergeFileSelectionItems } from '@/renderer/utils/file/fileSelection';
 import { buildDisplayMessage, collectSelectedFiles } from '@/renderer/utils/file/messageFiles';
 import { Message, Tag } from '@arco-design/web-react';
-import { Brain, MagicHat, Shield } from '@icon-park/react';
+import { Brain, MagicHat, Robot, Shield } from '@icon-park/react';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { NomiMessageRuntime } from './useNomiMessage';
@@ -121,12 +121,17 @@ const useSendBoxDraft = (conversation_id: ConversationId) => {
 const NomiSendBox: React.FC<{
   conversation_id: ConversationId;
   modelSelection: NomiModelSelection;
+  agentSelectorNode?: React.ReactNode;
+  agentSelection?: {
+    label: string;
+    options: MobileActionSheetOption[];
+    onSelect: (key: string) => void;
+    disabled?: boolean;
+  };
   agent_name?: string;
   turnActivity: NomiMessageRuntime;
   /** Hide model and other editable controls on locked surfaces. */
   hideAdvancedControls?: boolean;
-  /** Keep the owning AgentPreset model immutable while preserving other tools. */
-  modelLocked?: boolean;
   /** Conversation collaborator-model control, rendered after the main model. */
   collaboratorSelectorNode?: React.ReactNode;
   /**
@@ -138,10 +143,11 @@ const NomiSendBox: React.FC<{
 }> = ({
   conversation_id,
   modelSelection,
+  agentSelectorNode,
+  agentSelection,
   agent_name,
   turnActivity,
   hideAdvancedControls,
-  modelLocked = false,
   collaboratorSelectorNode,
   extraRightTools,
 }) => {
@@ -417,9 +423,10 @@ const NomiSendBox: React.FC<{
     onExecute: executeCommand,
   });
 
-  // Handle initial message from Guid page — wait until model is ready
+  // Handle the Guid handoff only after passive warmup has settled.
+  // This sequences the UI requests; runtime admission remains backend-owned.
   useEffect(() => {
-    if (!conversation_id || !current_model?.use_model) return;
+    if (!conversation_id || !current_model?.use_model || !agentWarmed) return;
 
     const target = conversationTarget(conversation_id);
     const draftStorageKey = sessionStorageKey('draft', target);
@@ -481,7 +488,7 @@ const NomiSendBox: React.FC<{
     };
 
     void processInitialMessage();
-  }, [conversation_id, current_model?.use_model, executeCommand, setContent]);
+  }, [agentWarmed, conversation_id, current_model?.use_model, executeCommand, setContent]);
 
   const onSendHandler = async (message: string) => {
     const filesToSend = collectSelectedFiles(uploadFile, atPath);
@@ -714,8 +721,21 @@ const NomiSendBox: React.FC<{
     const currentModelLabel = modelSelection.current_model?.use_model || t('conversation.welcome.selectModel');
 
     const entries: MobileActionSheetEntry[] = [
-      // Locked surfaces keep their model pinned to the owning profile.
-      ...(hideAdvancedControls || modelLocked
+      ...(agentSelection
+        ? [{
+            key: 'agent',
+            icon: <Robot theme='outline' size='16' />,
+            label: t('common.agent', { defaultValue: 'Agent' }),
+            meta: agentSelection.label,
+            disabled: agentSelection.disabled,
+            submenu: {
+              title: t('common.agent', { defaultValue: 'Agent' }),
+              options: agentSelection.options,
+              onSelect: agentSelection.onSelect,
+            },
+          }]
+        : []),
+      ...(hideAdvancedControls
         ? []
         : [
             {
@@ -783,10 +803,10 @@ const NomiSendBox: React.FC<{
     return entries;
   }, [
     attachEntries,
+    agentSelection,
     handleSheetModelSelect,
     hideAdvancedControls,
     isMobile,
-    modelLocked,
     loadedMcpStatuses,
     loadedSkills,
     modelSelection,
@@ -937,9 +957,11 @@ const NomiSendBox: React.FC<{
                   reasoningTokens={tokenUsage?.reasoning_tokens}
                 />
               )}
-              {!modelLocked && (
-                <NomiModelSelector selection={modelSelection} className='nomi-sendbox-model-btn' />
-              )}
+              <NomiModelSelector
+                selection={modelSelection}
+                className='nomi-sendbox-model-btn'
+              />
+              {agentSelectorNode}
               {collaboratorSelectorNode}
               {extraRightTools}
             </div>

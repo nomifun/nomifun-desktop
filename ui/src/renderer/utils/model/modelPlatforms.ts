@@ -17,6 +17,7 @@ export type PlatformType =
   | 'gemini'
   | 'gemini-vertex-ai'
   | 'anthropic'
+  | 'agnes'
   | 'openai'
   | 'custom'
   | 'new-api'
@@ -77,6 +78,7 @@ export const MODEL_PLATFORMS: PlatformConfig[] = [
     i18nKey: 'settings.platformNewApi',
   },
   { name: 'Gemini', value: 'gemini', logo: buildLogoAssetUrl('ai-major/gemini.svg'), platform: 'gemini' },
+  { name: 'Agnes', value: 'Agnes', logo: null, platform: 'agnes' },
   { name: 'OpenAI', value: 'OpenAI', logo: buildLogoAssetUrl('ai-major/openai.svg'), platform: 'openai' },
   {
     name: 'Anthropic',

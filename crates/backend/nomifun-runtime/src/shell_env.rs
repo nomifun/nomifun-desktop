@@ -22,6 +22,10 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
+#[path = "shell_env_linux.rs"]
+mod linux;
+
 /// Enhance the current process's `PATH`. Returns the merged PATH string
 /// for logging/debugging.
 ///
@@ -328,7 +332,12 @@ fn login_shell_path() -> Option<String> {
 /// `home_override` lets tests point the child at a scratch `$HOME` (and
 /// drops `ZDOTDIR` so zsh resolves its rc files under that `$HOME`); in
 /// production it is `None` and the real environment is inherited.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
+fn run_login_shell_path(shell: &str, home_override: Option<&Path>) -> Option<String> {
+    linux::run(shell, home_override, LOGIN_SHELL_TIMEOUT)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
 fn run_login_shell_path(shell: &str, home_override: Option<&Path>) -> Option<String> {
     use std::io::Read;
     use std::process::{Command, Stdio};

@@ -21,6 +21,7 @@ use zeroize::Zeroizing;
 
 const STEPFUN_PLAN_BASE_URL: &str = "https://api.stepfun.com/step_plan/v1";
 const STEPFUN_PLAN_MODEL: &str = "step-3.7-flash";
+const STEPFUN_SOURCE_MODEL: &str = "step-3.7-flash-source-placeholder";
 const LIVE_API_KEY_ENVIRONMENT_NAME: &str = "NOMIFUN_LIVE_STEPFUN_API_KEY";
 const STDIN_CREDENTIAL_LIMIT_BYTES: u64 = 16 * 1024;
 const BODY_LIMIT: usize = 4 * 1024 * 1024;
@@ -38,6 +39,7 @@ const CRON_REPLAY_SETTLE_DEADLINE: Duration = Duration::from_secs(10);
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(60);
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const REMOTE_MARKER: &str = "NOMIFUN_REMOTE_LIVE_OK";
+const GUID_INITIAL_MARKER: &str = "NOMIFUN_GUID_INITIAL_LIVE_OK";
 const CRON_MARKER: &str = "NOMIFUN_CRON_LIVE_OK";
 const CODING_CREATE_MARKER: &str = "NOMIFUN_CODING_CREATE_OK";
 const CODING_PATCH_MARKER: &str = "NOMIFUN_CODING_PATCH_OK";
@@ -492,12 +494,39 @@ async fn configure_stepfun(
             StatusCode::BAD_GATEWAY.as_u16(),
         ));
     }
-    required_string(
+    let provider_id = required_string(
         "provider.create",
         &provider,
         "/provider_id",
         "PROVIDER_ID_MISSING",
+    )?;
+    let source_model = successful_json(
+        router,
+        "provider.source_model",
+        Method::PUT,
+        "/api/provider-models",
+        Some(json!({
+            "provider_id": provider_id,
+            "model": {
+                "model": STEPFUN_SOURCE_MODEL,
+                "enabled": true,
+                "sort_order": 1,
+                "capabilities": [{
+                    "task": "chat",
+                    "traits": ["function_calling", "reasoning", "streaming"],
+                    "protocol": "openai.chat_text",
+                    "connection_role": "default",
+                    "provider_params": {"temperature": 0.0},
+                    "output_limit": 4096
+                }]
+            }
+        })),
+        LOCAL_API_DEADLINE,
+        &[StatusCode::OK],
     )
+    .await?;
+    let _ = envelope_data("provider.source_model", source_model)?;
+    Ok(provider_id)
 }
 
 async fn create_agent_preset(
@@ -513,7 +542,11 @@ async fn create_agent_preset(
         Some(json!({
             "display_name": "Live Step Plan product smoke",
             "model_route_refs": {},
-            "chat_route_records": {}
+            "chat_route_records": {},
+            "model": {
+                "provider_id": provider_id,
+                "model": model
+            }
         })),
         LOCAL_API_DEADLINE,
         &[StatusCode::OK],
@@ -782,7 +815,12 @@ async fn create_agent_preset(
     ))
 }
 
-async fn create_session(router: &Router, preset_id: &str) -> Result<String, SmokeFailure> {
+async fn create_session(
+    router: &Router,
+    preset_id: &str,
+    provider_id: &str,
+    model: &str,
+) -> Result<(String, Value), SmokeFailure> {
     let created = successful_json(
         router,
         "session.create",
@@ -790,19 +828,50 @@ async fn create_session(router: &Router, preset_id: &str) -> Result<String, Smok
         "/api/agent-sessions",
         Some(json!({
             "preset_id": preset_id,
-            "title": "Live Step Plan session"
+            "title": "Live Step Plan session",
+            "model": {
+                "provider_id": provider_id,
+                "model": model
+            }
         })),
         LOCAL_API_DEADLINE,
         &[StatusCode::OK],
     )
     .await?;
     let session = envelope_data("session.create", created)?;
-    required_string(
+    let session_id = required_string(
         "session.create",
         &session,
         "/agent_session_id",
         "SESSION_ID_MISSING",
+    )?;
+    let conversation = successful_json(
+        router,
+        "session.model_projection",
+        Method::GET,
+        format!("/api/conversations/{session_id}"),
+        None,
+        LOCAL_API_DEADLINE,
+        &[StatusCode::OK],
     )
+    .await?;
+    let conversation = envelope_data("session.model_projection", conversation)?;
+    if conversation.pointer("/model/provider_id") != Some(&Value::String(provider_id.to_owned()))
+        || conversation.pointer("/model/model") != Some(&Value::String(model.to_owned()))
+    {
+        return Err(SmokeFailure::new(
+            "session.model_projection",
+            "SESSION_MODEL_OVERRIDE_MISMATCH",
+            StatusCode::CONFLICT.as_u16(),
+        ));
+    }
+    let binding = require_value(
+        "session.create",
+        &session,
+        "/agent_binding",
+        "SESSION_BINDING_MISSING",
+    )?;
+    Ok((session_id, binding))
 }
 
 async fn bind_session_workspace(
@@ -879,6 +948,55 @@ async fn start_session_turn(
             StatusCode::CONFLICT.as_u16(),
         ));
     }
+    Ok(())
+}
+
+async fn start_guid_initial_turn(
+    router: &Router,
+    session_id: &str,
+) -> Result<(), SmokeFailure> {
+    let idempotency_key = uuid::Uuid::now_v7().to_string();
+    let response = successful_json_with_headers(
+        router,
+        "guid.initial_turn",
+        Method::POST,
+        format!("/api/conversations/{session_id}/messages"),
+        Some(json!({
+            "content": format!(
+                "Reply with exactly {GUID_INITIAL_MARKER}. Do not call any tool and do not add other text."
+            ),
+            "files": []
+        })),
+        TURN_COMMAND_DEADLINE,
+        &[StatusCode::ACCEPTED],
+        &[
+            ("idempotency-key", idempotency_key.as_str()),
+            ("x-nomifun-initial-delivery", "1"),
+        ],
+    )
+    .await?;
+    let response = envelope_data("guid.initial_turn", response)?;
+    if response.get("msg_id").and_then(Value::as_str).is_none() {
+        return Err(SmokeFailure::new(
+            "guid.initial_turn",
+            "GUID_INITIAL_MESSAGE_ID_MISSING",
+            StatusCode::BAD_GATEWAY.as_u16(),
+        ));
+    }
+    Ok(())
+}
+
+async fn warm_guid_session(router: &Router, session_id: &str) -> Result<(), SmokeFailure> {
+    successful_json(
+        router,
+        "guid.warmup",
+        Method::POST,
+        format!("/api/conversations/{session_id}/warmup"),
+        Some(json!({})),
+        TURN_COMMAND_DEADLINE,
+        &[StatusCode::OK],
+    )
+    .await?;
     Ok(())
 }
 
@@ -2940,9 +3058,190 @@ async fn run_product_chain(
     workspace: &Path,
 ) -> Result<(), SmokeFailure> {
     let provider_id = configure_stepfun(router, api_key, base_url, model).await?;
-    let (preset_id, binding) = create_agent_preset(router, &provider_id, model).await?;
+    // Reproduce the real installation: an image model exists, while the
+    // unmodified official chat.minimal Agent has an enforced empty tool list.
+    successful_json(
+        router, "guid.image_catalog", Method::POST, "/api/providers",
+        Some(json!({
+            "platform": "custom", "name": "Image catalog regression fixture",
+            "base_url": "http://127.0.0.1:1/v1", "auth_scheme": "bearer",
+            "credentials": {"api_keys": ["nonfunctional-image-fixture"]},
+            "enabled": true, "initial_model": {
+                "model": "image-fixture", "enabled": true,
+                "capabilities": [{"task": "image_generation", "protocol": "openai.images",
+                    "connection_role": "default", "provider_params": {}}]
+            }, "connections": []
+        })), LOCAL_API_DEADLINE, &[StatusCode::CREATED],
+    ).await?;
+    let official = successful_json(
+        router, "guid.official_prepare", Method::POST,
+        "/api/agent-presets/from-template/chat.minimal",
+        Some(json!({"display_name": "Minimal", "reuse_existing": true,
+            "model_route_refs": {}, "chat_route_records": {}})),
+        LOCAL_API_DEADLINE, &[StatusCode::OK],
+    ).await?;
+    let official = envelope_data("guid.official_prepare", official)?;
+    let minimal_id = required_string("guid.official_prepare", &official, "/preset/preset_id", "PRESET_ID_MISSING")?;
+    let (minimal_session, _) = create_session(router, &minimal_id, &provider_id, model).await?;
+    warm_guid_session(router, &minimal_session).await?;
+    start_guid_initial_turn(router, &minimal_session).await?;
+    wait_for_session_marker(router, "guid.minimal_reply", &minimal_session, 0,
+        GUID_INITIAL_MARKER, TURN_RESULT_DEADLINE).await?;
+    let before_switch = successful_json(router, "session.before_switch", Method::GET,
+        format!("/api/conversations/{minimal_session}"), None,
+        LOCAL_API_DEADLINE, &[StatusCode::OK]).await?;
+    let (original_messages, _) = session_messages_after(router, "session.original_history", &minimal_session, 0).await?;
+    let next_provider = configure_stepfun(router, api_key, base_url, model).await?;
+    successful_json(router, "session.switch_cancel", Method::POST,
+        format!("/api/conversations/{minimal_session}/cancel"), Some(json!({})),
+        TURN_COMMAND_DEADLINE, &[StatusCode::OK]).await?;
+    let switched = successful_json(router, "session.switch_model", Method::PATCH,
+        format!("/api/conversations/{minimal_session}"),
+        Some(json!({"model": {"provider_id": next_provider, "model": model},
+            "execution_model_pool": {"mode": "single", "model": {"provider_id": next_provider, "model": model}},
+            "execution_template_id": null})), LOCAL_API_DEADLINE, &[StatusCode::OK]).await?;
+    if switched.pointer("/data/model/provider_id") != Some(&Value::String(next_provider))
+        || switched.pointer("/data/agent_snapshot") != before_switch.pointer("/data/agent_snapshot")
+    {
+        return Err(SmokeFailure::new("session.switch_model", "SESSION_SWITCH_CONTRACT_MISMATCH", 409));
+    }
+    let switch_cursor = session_message_cursor(router, "session.switch_cursor", &minimal_session).await?;
+    start_session_turn(router, "session.switched_turn", &minimal_session,
+        &uuid::Uuid::now_v7().to_string(),
+        "Reply with exactly NOMIFUN_SWITCHED_MODEL_OK and no other text.".to_owned()).await?;
+    wait_for_session_marker(router, "session.switched_reply", &minimal_session, switch_cursor,
+        "NOMIFUN_SWITCHED_MODEL_OK", TURN_RESULT_DEADLINE).await?;
+    let (messages, _) = session_messages_after(router, "session.preserved_history", &minimal_session, 0).await?;
+    if original_messages.iter().any(|original| !messages.contains(original))
+        || exact_assistant_marker_count(&messages, GUID_INITIAL_MARKER) != 1
+        || exact_assistant_marker_count(&messages, "NOMIFUN_SWITCHED_MODEL_OK") != 1
+    {
+        return Err(SmokeFailure::new("session.preserved_history", "SESSION_HISTORY_CHANGED", 409));
+    }
+    let library = successful_json(router, "guid.library", Method::GET,
+        "/api/agent-preset-templates", None, LOCAL_API_DEADLINE, &[StatusCode::OK]).await?;
+    if library.pointer("/data/user_presets").and_then(Value::as_array).is_none_or(|items| !items.is_empty()) {
+        return Err(SmokeFailure::new("guid.library", "OFFICIAL_LAUNCH_CREATED_PERSONAL_AGENT", 409));
+    }
+    let (preset_id, _source_binding) =
+        create_agent_preset(router, &provider_id, STEPFUN_SOURCE_MODEL).await?;
 
-    let session_id = create_session(router, &preset_id).await?;
+    let before_agent_switch = successful_json(
+        router,
+        "session.before_agent_switch",
+        Method::GET,
+        format!("/api/conversations/{minimal_session}"),
+        None,
+        LOCAL_API_DEADLINE,
+        &[StatusCode::OK],
+    )
+    .await?;
+    let before_agent_switch = envelope_data("session.before_agent_switch", before_agent_switch)?;
+    let history_before_agent_switch = session_messages_after(
+        router,
+        "session.agent_switch_history_before",
+        &minimal_session,
+        0,
+    )
+    .await?
+    .0;
+    successful_json(
+        router,
+        "session.switch_agent",
+        Method::PUT,
+        format!("/api/agent-sessions/{minimal_session}/preset"),
+        Some(json!({"preset_id": preset_id})),
+        TURN_COMMAND_DEADLINE,
+        &[StatusCode::OK],
+    )
+    .await?;
+    let after_agent_switch = successful_json(
+        router,
+        "session.after_agent_switch",
+        Method::GET,
+        format!("/api/conversations/{minimal_session}"),
+        None,
+        LOCAL_API_DEADLINE,
+        &[StatusCode::OK],
+    )
+    .await?;
+    let after_agent_switch = envelope_data("session.after_agent_switch", after_agent_switch)?;
+    if after_agent_switch.get("conversation_id") != before_agent_switch.get("conversation_id")
+        || after_agent_switch.get("name") != before_agent_switch.get("name")
+        || after_agent_switch.get("model") != before_agent_switch.get("model")
+        || before_agent_switch.pointer("/extra/agent_name")
+            != Some(&Value::String("Minimal".to_owned()))
+        || after_agent_switch.pointer("/extra/agent_name")
+            != Some(&Value::String("Live Step Plan product smoke".to_owned()))
+        || after_agent_switch.pointer("/agent_snapshot/preset_name")
+            != Some(&Value::String("Live Step Plan product smoke".to_owned()))
+        || after_agent_switch.get("agent_snapshot") == before_agent_switch.get("agent_snapshot")
+    {
+        return Err(SmokeFailure::new(
+            "session.switch_agent",
+            "SESSION_AGENT_SWITCH_CONTRACT_MISMATCH",
+            StatusCode::CONFLICT.as_u16(),
+        ));
+    }
+    let agent_switch_cursor = session_message_cursor(
+        router,
+        "session.agent_switch_cursor",
+        &minimal_session,
+    )
+    .await?;
+    start_session_turn(
+        router,
+        "session.agent_switched_turn",
+        &minimal_session,
+        &uuid::Uuid::now_v7().to_string(),
+        format!(
+            "The earlier conversation contains {GUID_INITIAL_MARKER}. If you can see that history, reply with exactly NOMIFUN_AGENT_SWITCH_OK and no other text. Do not call tools."
+        ),
+    )
+    .await?;
+    wait_for_session_marker(
+        router,
+        "session.agent_switched_reply",
+        &minimal_session,
+        agent_switch_cursor,
+        "NOMIFUN_AGENT_SWITCH_OK",
+        TURN_RESULT_DEADLINE,
+    )
+    .await?;
+    let history_after_agent_switch = session_messages_after(
+        router,
+        "session.agent_switch_history_after",
+        &minimal_session,
+        0,
+    )
+    .await?
+    .0;
+    if history_before_agent_switch
+        .iter()
+        .any(|message| !history_after_agent_switch.contains(message))
+    {
+        return Err(SmokeFailure::new(
+            "session.agent_switch_history_after",
+            "SESSION_AGENT_SWITCH_LOST_HISTORY",
+            StatusCode::CONFLICT.as_u16(),
+        ));
+    }
+
+    let (session_id, binding) =
+        create_session(router, &preset_id, &provider_id, model).await?;
+    warm_guid_session(router, &session_id).await?;
+    let guid_start_cursor =
+        session_message_cursor(router, "guid.cursor_before", &session_id).await?;
+    start_guid_initial_turn(router, &session_id).await?;
+    wait_for_session_marker(
+        router,
+        "guid.messages",
+        &session_id,
+        guid_start_cursor,
+        GUID_INITIAL_MARKER,
+        TURN_RESULT_DEADLINE,
+    )
+    .await?;
     bind_session_workspace(router, &session_id, workspace).await?;
     run_coding_chain(router, &session_id, workspace).await?;
 

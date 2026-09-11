@@ -373,7 +373,7 @@ impl AgentControlPlane {
         if request.reuse_existing {
             let requested_payload: nomifun_agent_contracts::AgentPresetRevisionPayload = wire_cast(&document)?;
             for preset in self.store.list_presets(owner).await? {
-                if preset.session_only || preset.preset.source != AgentPresetSource::User {
+                if !preset.session_only || preset.preset.source != AgentPresetSource::User {
                     continue;
                 }
                 let Some(revision) = self.current_revision(&preset).await? else {
@@ -387,13 +387,15 @@ impl AgentControlPlane {
                 }
             }
         }
-        self.create_with_initial_revision(
+        self.create_configuration_with_initial_revision(
             owner,
             AgentPresetId::from(Uuid::now_v7().to_string()),
             display_name,
             request.description,
             document,
             Some(template_key),
+            request.reuse_existing,
+            None,
         )
         .await
     }
@@ -1933,10 +1935,14 @@ mod tests {
         assert_eq!(first.preset.preset_id, second.preset.preset_id);
         assert_eq!(first.preset.current_stable_revision, second.preset.current_stable_revision);
         assert_eq!(store.list_presets(&owner).await.unwrap().len(), 1);
+        assert!(control_plane.library(&owner).await.unwrap().user_presets.is_empty());
         let other_copy = control_plane.create_from_template(&other, "chat.minimal", official_launch_request(true)).await.unwrap();
         assert_ne!(first.preset.preset_id, other_copy.preset.preset_id);
         let explicit_copy = control_plane.create_from_template(&owner, "chat.minimal", official_launch_request(false)).await.unwrap();
         assert_ne!(first.preset.preset_id, explicit_copy.preset.preset_id);
+        let library = control_plane.library(&owner).await.unwrap();
+        assert_eq!(library.user_presets.len(), 1);
+        assert_eq!(library.user_presets[0].preset_id, explicit_copy.preset.preset_id);
     }
 
     #[tokio::test]
@@ -1944,7 +1950,7 @@ mod tests {
         let store = Arc::new(InMemoryControlPlaneStore::new());
         let control_plane = test_control_plane(store.clone());
         let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000001");
-        let original = control_plane.create_from_template(&owner, "chat.minimal", official_launch_request(true)).await.unwrap();
+        let original = control_plane.create_from_template(&owner, "chat.minimal", official_launch_request(false)).await.unwrap();
         let mut draft = original.draft.clone();
         draft.document.instructions = "User-specific behavior".into();
         let preview = control_plane.preview(&owner, &original.preset.preset_id, ResolveAgentPresetPreviewRequest {

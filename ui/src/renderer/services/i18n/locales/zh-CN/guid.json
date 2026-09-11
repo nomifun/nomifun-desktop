@@ -1,10 +1,8 @@
 {
-  "defaultAgent": "Nomi Agent",
   "agentEntries": {
     "needsSetup": "待配置",
     "choose": "选择 Agent",
     "search": "搜索 Agent",
-    "defaultDescription": "日常问答与任务处理",
     "fromTemplate": "官方 Agent",
     "browseTemplates": "查看全部官方 Agent",
     "fewerTemplates": "收起官方 Agent",
@@ -12,7 +10,7 @@
     "empty": "没有找到匹配的 Agent 或模板",
     "loading": "正在加载 Agent…",
     "loadFailed": "Agent 列表加载失败",
-    "modelNeeded": "所选模型暂不可用于聊天，请选择可用模型或检查模型配置后重试。当前输入和 Agent 选择已保留。",
+    "modelNeeded": "当前没有可用于聊天的默认模型，请在模型管理中配置或启用聊天模型后重试。当前输入和 Agent 选择已保留。",
     "capabilitiesNeeded": "这个官方 Agent 所需的部分能力尚未接入当前版本。当前输入和选择已保留，你可以选择其他 Agent，或在管理中调整能力。",
     "launchFailed": "暂时无法启动这个官方 Agent，请检查服务状态后重试。当前输入和选择已保留。"
   },
