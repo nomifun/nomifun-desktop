@@ -37,7 +37,7 @@ const NomiChat: React.FC<{
   isProcessing?: boolean;
   /** Hide model and other editable controls on locked surfaces. */
   hideAdvancedControls?: boolean;
-  /** Keep the owning AgentPreset model immutable while preserving other tools. */
+  /** Show the owning AgentPreset model read-only while preserving other tools. */
   modelLocked?: boolean;
   /** Conversation collaborator-model control rendered after the main model. */
   collaboratorSelectorNode?: React.ReactNode;

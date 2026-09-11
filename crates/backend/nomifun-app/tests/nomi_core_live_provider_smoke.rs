@@ -21,6 +21,7 @@ use zeroize::Zeroizing;
 
 const STEPFUN_PLAN_BASE_URL: &str = "https://api.stepfun.com/step_plan/v1";
 const STEPFUN_PLAN_MODEL: &str = "step-3.7-flash";
+const STEPFUN_SOURCE_MODEL: &str = "step-3.7-flash-source-placeholder";
 const LIVE_API_KEY_ENVIRONMENT_NAME: &str = "NOMIFUN_LIVE_STEPFUN_API_KEY";
 const STDIN_CREDENTIAL_LIMIT_BYTES: u64 = 16 * 1024;
 const BODY_LIMIT: usize = 4 * 1024 * 1024;
@@ -38,6 +39,7 @@ const CRON_REPLAY_SETTLE_DEADLINE: Duration = Duration::from_secs(10);
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(60);
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const REMOTE_MARKER: &str = "NOMIFUN_REMOTE_LIVE_OK";
+const GUID_INITIAL_MARKER: &str = "NOMIFUN_GUID_INITIAL_LIVE_OK";
 const CRON_MARKER: &str = "NOMIFUN_CRON_LIVE_OK";
 const CODING_CREATE_MARKER: &str = "NOMIFUN_CODING_CREATE_OK";
 const CODING_PATCH_MARKER: &str = "NOMIFUN_CODING_PATCH_OK";
@@ -492,12 +494,39 @@ async fn configure_stepfun(
             StatusCode::BAD_GATEWAY.as_u16(),
         ));
     }
-    required_string(
+    let provider_id = required_string(
         "provider.create",
         &provider,
         "/provider_id",
         "PROVIDER_ID_MISSING",
+    )?;
+    let source_model = successful_json(
+        router,
+        "provider.source_model",
+        Method::PUT,
+        "/api/provider-models",
+        Some(json!({
+            "provider_id": provider_id,
+            "model": {
+                "model": STEPFUN_SOURCE_MODEL,
+                "enabled": true,
+                "sort_order": 1,
+                "capabilities": [{
+                    "task": "chat",
+                    "traits": ["function_calling", "reasoning", "streaming"],
+                    "protocol": "openai.chat_text",
+                    "connection_role": "default",
+                    "provider_params": {"temperature": 0.0},
+                    "output_limit": 4096
+                }]
+            }
+        })),
+        LOCAL_API_DEADLINE,
+        &[StatusCode::OK],
     )
+    .await?;
+    let _ = envelope_data("provider.source_model", source_model)?;
+    Ok(provider_id)
 }
 
 async fn create_agent_preset(
@@ -513,7 +542,11 @@ async fn create_agent_preset(
         Some(json!({
             "display_name": "Live Step Plan product smoke",
             "model_route_refs": {},
-            "chat_route_records": {}
+            "chat_route_records": {},
+            "model": {
+                "provider_id": provider_id,
+                "model": model
+            }
         })),
         LOCAL_API_DEADLINE,
         &[StatusCode::OK],
@@ -782,7 +815,12 @@ async fn create_agent_preset(
     ))
 }
 
-async fn create_session(router: &Router, preset_id: &str) -> Result<String, SmokeFailure> {
+async fn create_session(
+    router: &Router,
+    preset_id: &str,
+    provider_id: &str,
+    model: &str,
+) -> Result<(String, Value), SmokeFailure> {
     let created = successful_json(
         router,
         "session.create",
@@ -790,19 +828,50 @@ async fn create_session(router: &Router, preset_id: &str) -> Result<String, Smok
         "/api/agent-sessions",
         Some(json!({
             "preset_id": preset_id,
-            "title": "Live Step Plan session"
+            "title": "Live Step Plan session",
+            "model": {
+                "provider_id": provider_id,
+                "model": model
+            }
         })),
         LOCAL_API_DEADLINE,
         &[StatusCode::OK],
     )
     .await?;
     let session = envelope_data("session.create", created)?;
-    required_string(
+    let session_id = required_string(
         "session.create",
         &session,
         "/agent_session_id",
         "SESSION_ID_MISSING",
+    )?;
+    let conversation = successful_json(
+        router,
+        "session.model_projection",
+        Method::GET,
+        format!("/api/conversations/{session_id}"),
+        None,
+        LOCAL_API_DEADLINE,
+        &[StatusCode::OK],
     )
+    .await?;
+    let conversation = envelope_data("session.model_projection", conversation)?;
+    if conversation.pointer("/model/provider_id") != Some(&Value::String(provider_id.to_owned()))
+        || conversation.pointer("/model/model") != Some(&Value::String(model.to_owned()))
+    {
+        return Err(SmokeFailure::new(
+            "session.model_projection",
+            "SESSION_MODEL_OVERRIDE_MISMATCH",
+            StatusCode::CONFLICT.as_u16(),
+        ));
+    }
+    let binding = require_value(
+        "session.create",
+        &session,
+        "/agent_binding",
+        "SESSION_BINDING_MISSING",
+    )?;
+    Ok((session_id, binding))
 }
 
 async fn bind_session_workspace(
@@ -879,6 +948,55 @@ async fn start_session_turn(
             StatusCode::CONFLICT.as_u16(),
         ));
     }
+    Ok(())
+}
+
+async fn start_guid_initial_turn(
+    router: &Router,
+    session_id: &str,
+) -> Result<(), SmokeFailure> {
+    let idempotency_key = uuid::Uuid::now_v7().to_string();
+    let response = successful_json_with_headers(
+        router,
+        "guid.initial_turn",
+        Method::POST,
+        format!("/api/conversations/{session_id}/messages"),
+        Some(json!({
+            "content": format!(
+                "Reply with exactly {GUID_INITIAL_MARKER}. Do not call any tool and do not add other text."
+            ),
+            "files": []
+        })),
+        TURN_COMMAND_DEADLINE,
+        &[StatusCode::ACCEPTED],
+        &[
+            ("idempotency-key", idempotency_key.as_str()),
+            ("x-nomifun-initial-delivery", "1"),
+        ],
+    )
+    .await?;
+    let response = envelope_data("guid.initial_turn", response)?;
+    if response.get("msg_id").and_then(Value::as_str).is_none() {
+        return Err(SmokeFailure::new(
+            "guid.initial_turn",
+            "GUID_INITIAL_MESSAGE_ID_MISSING",
+            StatusCode::BAD_GATEWAY.as_u16(),
+        ));
+    }
+    Ok(())
+}
+
+async fn warm_guid_session(router: &Router, session_id: &str) -> Result<(), SmokeFailure> {
+    successful_json(
+        router,
+        "guid.warmup",
+        Method::POST,
+        format!("/api/conversations/{session_id}/warmup"),
+        Some(json!({})),
+        TURN_COMMAND_DEADLINE,
+        &[StatusCode::OK],
+    )
+    .await?;
     Ok(())
 }
 
@@ -2940,9 +3058,24 @@ async fn run_product_chain(
     workspace: &Path,
 ) -> Result<(), SmokeFailure> {
     let provider_id = configure_stepfun(router, api_key, base_url, model).await?;
-    let (preset_id, binding) = create_agent_preset(router, &provider_id, model).await?;
+    let (preset_id, _source_binding) =
+        create_agent_preset(router, &provider_id, STEPFUN_SOURCE_MODEL).await?;
 
-    let session_id = create_session(router, &preset_id).await?;
+    let (session_id, binding) =
+        create_session(router, &preset_id, &provider_id, model).await?;
+    warm_guid_session(router, &session_id).await?;
+    let guid_start_cursor =
+        session_message_cursor(router, "guid.cursor_before", &session_id).await?;
+    start_guid_initial_turn(router, &session_id).await?;
+    wait_for_session_marker(
+        router,
+        "guid.messages",
+        &session_id,
+        guid_start_cursor,
+        GUID_INITIAL_MARKER,
+        TURN_RESULT_DEADLINE,
+    )
+    .await?;
     bind_session_workspace(router, &session_id, workspace).await?;
     run_coding_chain(router, &session_id, workspace).await?;
 
