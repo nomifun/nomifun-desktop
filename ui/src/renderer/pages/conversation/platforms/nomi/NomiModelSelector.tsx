@@ -32,12 +32,21 @@ const NomiModelSelector: React.FC<{
   const providerLabel = useModelSelectorProviderLabel();
 
   const current_model = selection?.current_model;
+  const label = getModelDisplayLabel({
+    selected_value: current_model?.use_model,
+    selectedLabel: current_model?.use_model || '',
+    defaultModelLabel,
+    fallbackLabel: t('conversation.welcome.selectModel'),
+  });
 
   const renderLogo = () => <Brain theme='outline' size='14' fill={iconColors.secondary} className='shrink-0' />;
 
   if (disabled || !selection) {
+    const readOnlyLabel = selection ? label : t('conversation.welcome.useCliModel');
     return (
       <Button
+        data-testid='nomi-model-selector'
+        data-readonly={disabled ? 'true' : undefined}
         className={classNames(
           'sendbox-model-btn header-model-btn min-w-0',
           compact ? '!max-w-[120px]' : '!max-w-[280px]',
@@ -47,12 +56,12 @@ const NomiModelSelector: React.FC<{
         shape='round'
         size='small'
         style={{ cursor: 'default' }}
-        aria-label={t('conversation.welcome.useCliModel')}
+        aria-label={readOnlyLabel}
       >
         <span className='flex items-center gap-6px min-w-0'>
           {renderLogo()}
           <span className='sendbox-responsive-label block truncate min-w-0'>
-            {t('conversation.welcome.useCliModel')}
+            {readOnlyLabel}
           </span>
         </span>
       </Button>
@@ -60,13 +69,6 @@ const NomiModelSelector: React.FC<{
   }
 
   const { providers, getAvailableModels, handleSelectModel } = selection;
-
-  const label = getModelDisplayLabel({
-    selected_value: current_model?.use_model,
-    selectedLabel: current_model?.use_model || '',
-    defaultModelLabel,
-    fallbackLabel: t('conversation.welcome.selectModel'),
-  });
 
   return (
     <Dropdown

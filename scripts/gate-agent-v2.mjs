@@ -5787,11 +5787,21 @@ function ap7AgentPresetLaunchContract() {
     ) &&
       source.conversation.includes('if (modelLocked) return false;') &&
       source.conversation.includes('if (modelLocked) return;') &&
-      source.sendBox.includes('{!modelLocked && (') &&
+      source.sendBox.includes('disabled={modelLocked}') &&
+      !source.sendBox.includes('{!modelLocked && (') &&
       source.conversationService.includes(
         'top-level `model` is immutable for AgentPreset conversations'
       ),
-    'AgentPreset conversations must retain their frozen model in the UI and public update service'
+    'AgentPreset conversations must show their frozen model without exposing public mutation'
+  );
+  require(
+    source.sendBox.includes(
+      'if (!conversation_id || !current_model?.use_model || !agentWarmed) return;'
+    ) &&
+      source.sendBox.includes(
+        '[agentWarmed, conversation_id, current_model?.use_model, executeCommand, setContent]'
+      ),
+    'Guid initial delivery must wait for passive Agent runtime warmup'
   );
   require(
     ![

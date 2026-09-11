@@ -776,14 +776,17 @@ button.guidResourceCard:focus-visible {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  padding: 10px;
+  justify-content: flex-start;
+  /* Keep the hero anchored when the selected Agent adds resource controls
+     (for example the Workspace footer used by assistant.general). Centering
+     a variable-height layout made the whole page move by half the delta. */
+  padding: clamp(88px, 18vh, 180px) 10px 10px;
   box-sizing: border-box;
 }
 
-/* 整体内容块略往上移，减轻「重心偏下」的感觉 */
+/* Agent capability rows may grow downward without moving the hero anchor. */
 .guidPrimaryStage .guidLayout {
-  margin-top: -5vh;
+  margin-top: 0;
 }
 
 .guidDiscoveryArea {

@@ -125,7 +125,7 @@ const NomiSendBox: React.FC<{
   turnActivity: NomiMessageRuntime;
   /** Hide model and other editable controls on locked surfaces. */
   hideAdvancedControls?: boolean;
-  /** Keep the owning AgentPreset model immutable while preserving other tools. */
+  /** Show the frozen AgentPreset model as read-only while preserving other tools. */
   modelLocked?: boolean;
   /** Conversation collaborator-model control, rendered after the main model. */
   collaboratorSelectorNode?: React.ReactNode;
@@ -417,9 +417,12 @@ const NomiSendBox: React.FC<{
     onExecute: executeCommand,
   });
 
-  // Handle initial message from Guid page — wait until model is ready
+  // Handle the Guid handoff only after passive warmup owns a ready runtime.
+  // Mounting used to start warmup and the initial delivery concurrently; on a
+  // slower Agent/model initialization the first message could race the runtime
+  // build and persist a retryable internal-error turn.
   useEffect(() => {
-    if (!conversation_id || !current_model?.use_model) return;
+    if (!conversation_id || !current_model?.use_model || !agentWarmed) return;
 
     const target = conversationTarget(conversation_id);
     const draftStorageKey = sessionStorageKey('draft', target);
@@ -481,7 +484,7 @@ const NomiSendBox: React.FC<{
     };
 
     void processInitialMessage();
-  }, [conversation_id, current_model?.use_model, executeCommand, setContent]);
+  }, [agentWarmed, conversation_id, current_model?.use_model, executeCommand, setContent]);
 
   const onSendHandler = async (message: string) => {
     const filesToSend = collectSelectedFiles(uploadFile, atPath);
@@ -714,8 +717,10 @@ const NomiSendBox: React.FC<{
     const currentModelLabel = modelSelection.current_model?.use_model || t('conversation.welcome.selectModel');
 
     const entries: MobileActionSheetEntry[] = [
-      // Locked surfaces keep their model pinned to the owning profile.
-      ...(hideAdvancedControls || modelLocked
+      // AgentPreset surfaces still expose the frozen model identity; they only
+      // omit the mutation submenu because changing it would invalidate the
+      // immutable Session snapshot.
+      ...(hideAdvancedControls
         ? []
         : [
             {
@@ -723,12 +728,16 @@ const NomiSendBox: React.FC<{
               icon: <Brain theme='outline' size='16' />,
               label: t('common.model', { defaultValue: 'Model' }),
               meta: currentModelLabel,
-              submenu: {
-                title: t('common.model', { defaultValue: 'Model' }),
-                options: modelOptions,
-                onSelect: handleSheetModelSelect,
-                emptyText: t('conversation.welcome.selectModel'),
-              },
+              ...(modelLocked
+                ? {}
+                : {
+                    submenu: {
+                      title: t('common.model', { defaultValue: 'Model' }),
+                      options: modelOptions,
+                      onSelect: handleSheetModelSelect,
+                      emptyText: t('conversation.welcome.selectModel'),
+                    },
+                  }),
             },
           ]),
       ...attachEntries,
@@ -937,9 +946,11 @@ const NomiSendBox: React.FC<{
                   reasoningTokens={tokenUsage?.reasoning_tokens}
                 />
               )}
-              {!modelLocked && (
-                <NomiModelSelector selection={modelSelection} className='nomi-sendbox-model-btn' />
-              )}
+              <NomiModelSelector
+                selection={modelSelection}
+                disabled={modelLocked}
+                className='nomi-sendbox-model-btn'
+              />
               {collaboratorSelectorNode}
               {extraRightTools}
             </div>
