@@ -38,6 +38,13 @@ import SshHostStatusPill from './SshHostStatusPill';
 import { useWorkspaceExtraTabs } from '../hooks/useWorkspaceExtraTabs';
 import { useExecutionModelPool } from '../execution/useExecutionModelPool';
 import { reconcileModelRefs, sameModelRefs } from '../execution/executionModelRefs';
+import GuidAgentSelector from '@/renderer/pages/guid/components/GuidAgentSelector';
+import { useAgentPresets } from '@/renderer/hooks/agent/useAgentPresets';
+import { isExecutableAgentPreset } from '@/renderer/pages/guid/hooks/agentSelectionUtils';
+import { prepareOfficialAgent } from '@/renderer/pages/guid/hooks/officialAgentLaunch';
+import { TEMPLATE_I18N_PATH } from '@/renderer/pages/agentSettings/model';
+import type { GuidAgentSelection } from '@/renderer/pages/guid/types';
+import type { AgentPresetId, OfficialPresetKey } from '@/common/types/agentPlatform';
 
 /** Check whether a specific skill is mounted on the conversation. */
 const hasLoadedSkill = (conversation: TChatConversation | undefined, skillName: string): boolean => {
@@ -71,15 +78,17 @@ const NomiConversationLayout: React.FC<{
   conversation: NomiConversation;
   chatLayoutProps: Omit<ChatLayoutProps, 'children' | 'workspaceCollaboration' | 'workspaceExtraTabs'>;
   modelSelection: React.ComponentProps<typeof NomiChat>['modelSelection'];
+  agentSelectorNode?: React.ReactNode;
+  agentSelection?: React.ComponentProps<typeof NomiChat>['agentSelection'];
   collaborationControlNode: React.ReactNode;
-  modelLocked: boolean;
   presetPresetName?: string;
 }> = ({
   conversation,
   chatLayoutProps,
   modelSelection,
+  agentSelectorNode,
+  agentSelection,
   collaborationControlNode,
-  modelLocked,
   presetPresetName,
 }) => {
   const workspaceExtraTabs = useWorkspaceExtraTabs(conversation);
@@ -95,13 +104,14 @@ const NomiConversationLayout: React.FC<{
         conversation_id={conversation.id}
         workspace={conversation.extra.workspace}
         modelSelection={modelSelection}
+        agentSelectorNode={agentSelectorNode}
+        agentSelection={agentSelection}
         cron_job_id={conversation.cron_job_id}
         loadedSkills={(conversation.extra as { skills?: string[] } | undefined)?.skills}
         loadedMcpStatuses={
           (conversation.extra as { mcp_statuses?: IConversationMcpStatus[] } | undefined)?.mcp_statuses
         }
         agent_name={presetPresetName}
-        modelLocked={modelLocked}
         collaboratorSelectorNode={collaborationControlNode}
         isProcessing={isConversationProcessing(conversation)}
       />
@@ -113,7 +123,34 @@ const NomiConversationPanel: React.FC<{
   conversation: NomiConversation;
   sliderTitle: React.ReactNode;
 }> = ({ conversation, sliderTitle }) => {
-  const modelLocked = Boolean(conversation.preset_id);
+  const hasPreset = Boolean(conversation.preset_id);
+  const { library: agentLibrary, presets: savedAgentPresets, isLoading: agentsLoading, error: agentsError, refresh: refreshAgents } = useAgentPresets();
+  const executableAgentPresets = useMemo(
+    () => savedAgentPresets.filter(isExecutableAgentPreset),
+    [savedAgentPresets],
+  );
+  const [agentChoice, setAgentChoice] = useState<GuidAgentSelection>(() =>
+    conversation.preset_id
+      ? { kind: 'preset', presetId: conversation.preset_id }
+      : { kind: 'template', templateKey: 'chat.minimal' },
+  );
+  const [agentSwitching, setAgentSwitching] = useState(false);
+  const [selectedAgentLabel, setSelectedAgentLabel] = useState<string | undefined>(
+    (conversation.extra as { agent_name?: string } | undefined)?.agent_name
+      ?? conversation.agent_snapshot?.preset_name,
+  );
+  useEffect(() => {
+    setAgentChoice(
+      conversation.preset_id
+        ? { kind: 'preset', presetId: conversation.preset_id }
+        : { kind: 'template', templateKey: 'chat.minimal' },
+    );
+    setAgentSwitching(false);
+    setSelectedAgentLabel(
+      (conversation.extra as { agent_name?: string } | undefined)?.agent_name
+        ?? conversation.agent_snapshot?.preset_name,
+    );
+  }, [conversation.id]);
   const [collaborators, setCollaboratorsState] = useState<TExecutionModelRef[]>(() => {
     const pool = conversation.execution_model_pool;
     return pool?.mode === 'range' ? pool.models.slice(1) : [];
@@ -179,7 +216,6 @@ const NomiConversationPanel: React.FC<{
   const { t } = useTranslation();
   const onSelectModel = useCallback(
     async (_provider: IProvider, modelName: string) => {
-      if (modelLocked) return false;
       const selected = {
         ..._provider,
         use_model: modelName,
@@ -207,7 +243,7 @@ const NomiConversationPanel: React.FC<{
       }
       return Boolean(ok);
     },
-    [activeCollaborators, conversation.id, modelLocked],
+    [activeCollaborators, conversation.id],
   );
 
   const modelSelection = useNomiModelSelection({
@@ -321,7 +357,7 @@ const NomiConversationPanel: React.FC<{
   );
   const { providers: healProviders, getAvailableModels: healGetAvailable } = healPool;
   useEffect(() => {
-    if (modelLocked) return;
+    if (hasPreset) return;
     if (!healProviders.length) return;
     const saved = configService.get('nomi.defaultModel');
     const heal = resolveHealModel(
@@ -363,19 +399,114 @@ const NomiConversationPanel: React.FC<{
     conversation.model?.use_model,
     healProviders,
     healGetAvailable,
-    modelLocked,
+    hasPreset,
     t,
   ]);
 
   const { info: presetPresetInfo } = useAgentInfo(conversation);
+  const switchAgent = useCallback(async (selection: GuidAgentSelection) => {
+    if (!hasPreset || agentSwitching) return;
+    setAgentSwitching(true);
+    try {
+      let targetPresetId: string;
+      let targetName: string;
+      if (selection.kind === 'template') {
+        const template = agentLibrary?.official_templates.find(
+          (candidate) => candidate.template_key === selection.templateKey,
+        );
+        if (!template) throw new Error('Official Agent is unavailable');
+        targetName = t(`agentSettings.template.${TEMPLATE_I18N_PATH[selection.templateKey]}.name`);
+        const prepared = await prepareOfficialAgent(template, targetName);
+        targetPresetId = prepared.preset_id;
+      } else {
+        const preset = executableAgentPresets.find(
+          (candidate) => candidate.preset_id === selection.presetId,
+        );
+        if (!preset) throw new Error('Saved Agent is unavailable');
+        targetPresetId = preset.preset_id;
+        targetName = preset.display_name;
+      }
+      await ipcBridge.conversation.stop.invoke({ conversation_id: conversation.id });
+      await ipcBridge.agentPlatform.sessions.switchPreset.invoke({
+        agent_session_id: conversation.id,
+        request: { preset_id: targetPresetId },
+      });
+      setAgentChoice(selection);
+      setSelectedAgentLabel(targetName);
+      Message.success(t('conversation.chat.switchedToAgent', { agent: targetName }));
+    } catch (error) {
+      console.error('[ChatConversation] Failed to switch Agent:', error);
+      Message.error(t('conversation.chat.switchAgentFailed'));
+    } finally {
+      setAgentSwitching(false);
+    }
+  }, [
+    agentLibrary?.official_templates,
+    agentSwitching,
+    conversation.id,
+    executableAgentPresets,
+    hasPreset,
+    t,
+  ]);
+  const currentAgentLabel = selectedAgentLabel ?? presetPresetInfo?.name ?? 'Agent';
+  const agentSelectorNode = hasPreset ? (
+    <GuidAgentSelector
+      compact
+      disabled={agentSwitching}
+      presets={executableAgentPresets}
+      officialTemplates={agentLibrary?.official_templates ?? []}
+      selection={agentChoice}
+      selectedLabelOverride={currentAgentLabel}
+      isLoading={agentsLoading}
+      loadError={agentsError}
+      onRetry={refreshAgents}
+      onSelectPreset={(presetId) => void switchAgent({ kind: 'preset', presetId })}
+      onSelectTemplate={(templateKey) => void switchAgent({ kind: 'template', templateKey })}
+    />
+  ) : undefined;
+  const mobileAgentSelection = useMemo(() => {
+    if (!hasPreset) return undefined;
+    const templateOptions = (agentLibrary?.official_templates ?? []).map((template) => ({
+      key: `template:${template.template_key}`,
+      label: t(`agentSettings.template.${TEMPLATE_I18N_PATH[template.template_key]}.name`),
+      active: agentChoice.kind === 'template' && agentChoice.templateKey === template.template_key,
+    }));
+    const presetOptions = executableAgentPresets.map((preset) => ({
+      key: `preset:${preset.preset_id}`,
+      label: preset.display_name,
+      description: preset.description,
+      active: agentChoice.kind === 'preset' && agentChoice.presetId === preset.preset_id,
+    }));
+    return {
+      label: currentAgentLabel,
+      options: [...templateOptions, ...presetOptions],
+      disabled: agentSwitching,
+      onSelect: (key: string) => {
+        if (key.startsWith('template:')) {
+          void switchAgent({ kind: 'template', templateKey: key.slice('template:'.length) as OfficialPresetKey });
+        } else if (key.startsWith('preset:')) {
+          void switchAgent({ kind: 'preset', presetId: key.slice('preset:'.length) as AgentPresetId });
+        }
+      },
+    };
+  }, [
+    agentChoice,
+    agentLibrary?.official_templates,
+    agentSwitching,
+    currentAgentLabel,
+    executableAgentPresets,
+    hasPreset,
+    switchAgent,
+    t,
+  ]);
   const presetResourceKinds = new Set(
     conversation.agent_snapshot?.required_resource_kinds ?? []
   );
   const workspaceEnabled =
     Boolean(conversation.extra?.workspace) &&
-    (!modelLocked || presetResourceKinds.has('workspace'));
+    (!hasPreset || presetResourceKinds.has('workspace'));
   const knowledgeEnabled =
-    !modelLocked || presetResourceKinds.has('knowledge_base');
+    !hasPreset || presetResourceKinds.has('knowledge_base');
   const sshHostId = sshHostIdOf(conversation);
 
   const chatLayoutProps = {
@@ -414,8 +545,9 @@ const NomiConversationPanel: React.FC<{
       conversation={conversation}
       chatLayoutProps={chatLayoutProps}
       modelSelection={modelSelection}
+      agentSelectorNode={agentSelectorNode}
+      agentSelection={mobileAgentSelection}
       collaborationControlNode={collaborationControlNode}
-      modelLocked={modelLocked}
       presetPresetName={presetPresetInfo?.name}
     />
   );

@@ -23,6 +23,9 @@ export type GuidAgentSelectorProps = {
   isLoading?: boolean;
   loadError?: Error;
   onRetry?: () => Promise<void>;
+  selectedLabelOverride?: string;
+  compact?: boolean;
+  disabled?: boolean;
   onSelectTemplate: (templateKey: OfficialPresetKey) => void;
   onSelectPreset: (presetId: AgentPresetId) => void;
 };
@@ -44,6 +47,9 @@ const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
   isLoading = false,
   loadError,
   onRetry,
+  selectedLabelOverride,
+  compact = false,
+  disabled = false,
   onSelectTemplate,
   onSelectPreset,
 }) => {
@@ -58,9 +64,9 @@ const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
   const selectedPreset = selection.kind === 'preset'
     ? presets.find((preset) => preset.preset_id === selection.presetId)
     : undefined;
-  const selectedLabel = selection.kind === 'template'
+  const selectedLabel = selectedLabelOverride ?? (selection.kind === 'template'
     ? t(`agentSettings.template.${TEMPLATE_I18N_PATH[selection.templateKey]}.name`)
-    : selectedPreset?.display_name ?? t('guid.agentEntries.choose');
+    : selectedPreset?.display_name ?? t('guid.agentEntries.choose'));
 
   const changeOpen = (next: boolean) => {
     setOpen(next);
@@ -136,7 +142,8 @@ const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
       <button
         ref={refs.setReference}
         type='button'
-        className={styles.trigger}
+        className={`${styles.trigger} ${compact ? styles.compactTrigger : ''}`}
+        disabled={disabled}
         title={selectedLabel}
         data-testid='guid-agent-selector'
         {...getReferenceProps()}

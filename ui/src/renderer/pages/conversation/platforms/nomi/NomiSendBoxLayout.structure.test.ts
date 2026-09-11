@@ -106,29 +106,41 @@ describe('Nomi sendbox control layout', () => {
     expect(source.includes('return <div className={styles.embedded}>{content}</div>')).toBe(true);
   });
 
-  test('shows the frozen lead model for AgentPreset conversations without exposing mutation', () => {
+  test('allows session model selection while keeping preset resource restrictions', () => {
     const chatSource = readSource(new URL('../../components/ChatConversation.tsx', import.meta.url));
     const nomiChatSource = readSource(new URL('./NomiChat.tsx', import.meta.url));
     const sendBoxSource = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
     const selectorSource = readSource(new URL('./NomiModelSelector.tsx', import.meta.url));
 
-    expect(chatSource.includes('const modelLocked = Boolean(conversation.preset_id);')).toBe(true);
-    expect(chatSource.includes('if (modelLocked) return false;')).toBe(true);
-    expect(chatSource.includes('if (modelLocked) return;')).toBe(true);
-    expect(chatSource.includes('modelLocked={modelLocked}')).toBe(true);
+    expect(chatSource.includes('modelLocked')).toBe(false);
+    expect(chatSource.includes('const hasPreset = Boolean(conversation.preset_id);')).toBe(true);
     expect(chatSource.includes('useAgentCapabilityResourceKinds')).toBe(false);
     expect(chatSource.includes('required_resource_kinds')).toBe(true);
 
-    expect(nomiChatSource.includes('modelLocked?: boolean;')).toBe(true);
-    expect(nomiChatSource.includes('modelLocked={modelLocked}')).toBe(true);
+    expect(nomiChatSource.includes('modelLocked')).toBe(false);
     expect(sendBoxSource.includes('hideAdvancedControls || modelLocked')).toBe(false);
     expect(sendBoxSource.includes('{!modelLocked && (')).toBe(false);
-    expect(sendBoxSource.includes('disabled={modelLocked}')).toBe(true);
-    expect(sendBoxSource.includes('...(modelLocked')).toBe(true);
+    expect(sendBoxSource.includes('modelLocked')).toBe(false);
+    expect(sendBoxSource.includes('onSelect: handleSheetModelSelect')).toBe(true);
     expect(sendBoxSource.includes('<NomiModelSelector')).toBe(true);
     expect(sendBoxSource.includes('{collaboratorSelectorNode}')).toBe(true);
     expect(selectorSource.includes("const readOnlyLabel = selection ? label")).toBe(true);
     expect(selectorSource.includes("data-readonly={disabled ? 'true' : undefined}")).toBe(true);
+  });
+
+  test('exposes the shared Agent catalog on desktop and mobile conversation controls', () => {
+    const chatSource = readSource(new URL('../../components/ChatConversation.tsx', import.meta.url));
+    const nomiChatSource = readSource(new URL('./NomiChat.tsx', import.meta.url));
+    const sendBoxSource = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
+
+    expect(chatSource.includes('<GuidAgentSelector')).toBe(true);
+    expect(chatSource.includes('useAgentPresets()')).toBe(true);
+    expect(chatSource.includes('sessions.switchPreset.invoke')).toBe(true);
+    expect(chatSource.includes('request: { preset_id: targetPresetId }')).toBe(true);
+    expect(nomiChatSource.includes('agentSelectorNode={agentSelectorNode}')).toBe(true);
+    expect(sendBoxSource.includes('{agentSelectorNode}')).toBe(true);
+    expect(sendBoxSource.includes("key: 'agent'")).toBe(true);
+    expect(sendBoxSource.includes('options: agentSelection.options')).toBe(true);
   });
 
   test('waits for passive runtime warmup before delivering the Guid initial message', () => {
