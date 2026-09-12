@@ -7,10 +7,9 @@
 //! [`nomifun_common::zip_safe`] hardening also used by the knowledge and
 //! companion importers.
 
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use nomifun_common::zip_safe::{self, ZipColonPolicy, ZipExtractionBudget};
+use nomifun_common::zip_safe::{self, ZipColonPolicy, ZipCopyError, ZipExtractionBudget};
 
 use crate::error::SkillError;
 
@@ -55,19 +54,10 @@ fn extract_zip_archive_with_budget(
             std::fs::create_dir_all(parent)?;
         }
         let mut output = std::fs::File::create(&output_path)?;
-        // Reserve actual decompressed bytes before each write. Checking only
-        // after io::copy would let one oversized entry exhaust the disk first.
-        let mut buffer = [0_u8; 8192];
-        loop {
-            let read = entry.read(&mut buffer)?;
-            if read == 0 {
-                break;
-            }
-            budget
-                .record_written(read as u64)
-                .map_err(|e| SkillError::InvalidSkillPath(e.to_string()))?;
-            output.write_all(&buffer[..read])?;
-        }
+        budget.copy_entry(&mut entry, &mut output).map_err(|error| match error {
+            ZipCopyError::Budget(error) => SkillError::InvalidSkillPath(error.to_string()),
+            ZipCopyError::Io(error) => SkillError::Io(error),
+        })?;
     }
 
     Ok(())
