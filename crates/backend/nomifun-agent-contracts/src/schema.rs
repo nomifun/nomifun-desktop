@@ -295,6 +295,12 @@ mod tests {
             "failovers": []
         });
         assert!(validator.is_valid(&record));
+        let mut with_web_search = record.clone();
+        with_web_search["primary"]["features"]
+            .as_array_mut()
+            .expect("features array")
+            .push(serde_json::json!(crate::ChatRouteFeature::WebSearch));
+        assert!(validator.is_valid(&with_web_search));
         assert!(!validator.is_valid(&serde_json::json!("route-1")));
         assert!(!validator.is_valid(&serde_json::json!({
             "schema": "nomifun.chat-route-record.v1",
