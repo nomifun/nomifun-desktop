@@ -116,6 +116,40 @@ const exportOperation = {
   result_artifact_digests: { share_bundle: '9'.repeat(64) },
 };
 
+const generatedDraft = {
+  assistant_message: 'Created',
+  display_name: 'Summary enhancer',
+  description: 'Adds summaries to NomiFun.',
+  package_id: 'user.nomifun.summary',
+  package_version: '0.1.0',
+  language: 'type_script' as const,
+  manifest_content: '{}',
+  source_path: 'src/main.ts' as const,
+  source_content: 'export async function activate() {}',
+  dependencies: {},
+  capabilities: [],
+};
+
+const authoringContext = {
+  package_id: generatedDraft.package_id,
+  package_version: generatedDraft.package_version,
+  display_name: generatedDraft.display_name,
+  description: generatedDraft.description,
+  source_path: generatedDraft.source_path,
+  source_content: generatedDraft.source_content,
+};
+
+const importInspection = {
+  import_kind: 'prebuilt_artifact' as const,
+  expected_digest: '9'.repeat(64),
+  package_id: 'example.imported',
+  package_version: '1.0.0',
+  display_name: 'Imported Plugin',
+  description: 'Imported fixture',
+  capability_count: 2,
+  editable_source: false,
+};
+
 type RecordedCall = {
   method: string;
   path: string;
@@ -131,7 +165,13 @@ function installFetchFixture(): void {
     const body = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined;
     calls.push({ method, path, body });
 
-    const data = path.endsWith('/share')
+    const data = path === '/api/plugin-authoring/generate'
+      ? generatedDraft
+      : path.endsWith('/authoring-context')
+        ? authoringContext
+        : path === '/api/plugin-imports/inspect'
+          ? importInspection
+          : path.endsWith('/share')
       ? exportOperation
       : path === '/api/plugins'
         ? library
@@ -153,6 +193,26 @@ afterEach(() => {
 });
 
 describe('Plugin Platform bridge', () => {
+  test('wires AI authoring, resumable Source context, and automatic import inspection', async () => {
+    installFetchFixture();
+    const request = {
+      provider_id: 'provider',
+      model: 'model',
+      requirement: 'Summarize web pages',
+      package_id: generatedDraft.package_id,
+      package_version: generatedDraft.package_version,
+    };
+
+    expect(await plugins.generateDraft.invoke(request)).toEqual(generatedDraft);
+    expect(await plugins.getAuthoringContext.invoke({ project_id: PROJECT_ID })).toEqual(authoringContext);
+    expect(await plugins.inspectImport.invoke({ source_path: 'C:\\imports\\plugin.zip' })).toEqual(importInspection);
+    expect(calls.map(({ method, path }) => ({ method, path }))).toEqual([
+      { method: 'POST', path: '/api/plugin-authoring/generate' },
+      { method: 'GET', path: `/api/plugin-projects/${PROJECT_ID}/authoring-context` },
+      { method: 'POST', path: '/api/plugin-imports/inspect' },
+    ]);
+  });
+
   test('maps collection and detail identities at the HTTP boundary', async () => {
     installFetchFixture();
 

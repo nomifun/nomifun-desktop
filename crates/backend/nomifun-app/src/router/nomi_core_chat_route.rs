@@ -17,10 +17,10 @@ use nomifun_agent_control_plane::{ControlPlaneError, DefaultChatRouteResolver};
 use nomifun_api_types::ModelTrait;
 use nomifun_chat_model_broker::ProviderIdRef;
 use nomifun_db::{
-    IProviderConnectionRepository, IProviderModelCapabilityRepository, IProviderModelRepository,
-    IProviderRepository, SqlitePool, SqliteProviderConnectionRepository,
-    SqliteProviderModelCapabilityRepository, SqliteProviderModelRepository,
-    SqliteProviderRepository,
+    IClientPreferenceRepository, IProviderConnectionRepository,
+    IProviderModelCapabilityRepository, IProviderModelRepository, IProviderRepository,
+    SqliteClientPreferenceRepository, SqlitePool, SqliteProviderConnectionRepository,
+    SqliteProviderModelCapabilityRepository, SqliteProviderModelRepository, SqliteProviderRepository,
 };
 use uuid::Uuid;
 
@@ -48,7 +48,26 @@ impl DefaultChatRouteResolver for NomiCoreDefaultChatRouteResolver {
         &self,
         _owner: &UserId,
     ) -> Result<Option<ChatRouteRecord>, ControlPlaneError> {
-        self.resolve_route(None).await
+        let preferences = SqliteClientPreferenceRepository::new(self.pool.clone())
+            .get_by_keys(&["nomi.defaultModel"])
+            .await
+            .map_err(|_| unavailable())?;
+        let selected = preferences
+            .into_iter()
+            .find(|preference| preference.key == "nomi.defaultModel")
+            .and_then(|preference| {
+                serde_json::from_str::<nomifun_api_types::AgentChatModelSelectionDto>(
+                    &preference.value,
+                )
+                .ok()
+            });
+        if let Some(route) = self.resolve_route(selected.as_ref()).await? {
+            return Ok(Some(route));
+        }
+        if selected.is_some() {
+            return self.resolve_route(None).await;
+        }
+        Ok(None)
     }
 
     async fn resolve_selected_chat_route(
@@ -263,4 +282,92 @@ fn unavailable() -> ControlPlaneError {
         StatusCode::SERVICE_UNAVAILABLE,
         "the host Chat model catalog is temporarily unavailable",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nomifun_db::{CreateProviderParams, NewProviderModel, NewProviderModelCapability};
+
+    async fn create_chat_provider(
+        pool: &SqlitePool,
+        provider_id: &str,
+        platform: &str,
+        model: &str,
+        sort_order: i64,
+    ) {
+        let capabilities = [NewProviderModelCapability {
+            task: "chat",
+            traits: "[]",
+            protocol: "openai.chat_text",
+            connection_role: "default",
+            provider_params: "{}",
+            ..Default::default()
+        }];
+        SqliteProviderRepository::new(pool.clone())
+            .create(
+                CreateProviderParams {
+                    provider_id: Some(provider_id),
+                    platform,
+                    name: platform,
+                    base_url: "https://example.invalid/v1",
+                    auth_scheme: "bearer",
+                    credentials_encrypted: "encrypted-test-value",
+                    enabled: true,
+                    bedrock_config: None,
+                    sort_order: Some(sort_order),
+                },
+                &NewProviderModel {
+                    model,
+                    enabled: true,
+                    sort_order: 0,
+                    description: None,
+                    capabilities: &capabilities,
+                },
+                &[],
+            )
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn default_agent_route_honors_the_saved_nomi_model_before_provider_order() {
+        let database = nomifun_db::init_database_memory().await.unwrap();
+        let free_provider = "0190f5fe-7c00-7a00-8abc-000000000021";
+        let stepfun_provider = "0190f5fe-7c00-7a00-8abc-000000000022";
+        create_chat_provider(
+            database.pool(),
+            free_provider,
+            "nomifun-free-model",
+            "big-pickle",
+            0,
+        )
+        .await;
+        create_chat_provider(
+            database.pool(),
+            stepfun_provider,
+            "stepfun-plan",
+            "step-3.7-flash",
+            1,
+        )
+        .await;
+        let preference = serde_json::json!({
+            "provider_id": stepfun_provider,
+            "model": "step-3.7-flash",
+        })
+        .to_string();
+        SqliteClientPreferenceRepository::new(database.pool().clone())
+            .upsert_batch(&[("nomi.defaultModel", preference.as_str())])
+            .await
+            .unwrap();
+
+        let route = NomiCoreDefaultChatRouteResolver::new(database.pool().clone())
+            .resolve_default_chat_route(&UserId::from("test-owner"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(route.primary.provider_id, stepfun_provider);
+        assert_eq!(route.primary.model, "step-3.7-flash");
+        assert!(route.failovers.is_empty());
+    }
 }

@@ -11,10 +11,11 @@ import type {
   PluginProjectDetail,
   PluginSummary,
 } from '@/common/types/pluginPlatform';
-import { Alert, Button, Checkbox, Form, Input, Modal, Radio, Select } from '@arco-design/web-react';
-import { CheckOne, Code, FolderClose, Upload } from '@icon-park/react';
+import { Alert, Button, Checkbox, Form, Input, Radio, Select } from '@arco-design/web-react';
+import { Code, FolderClose, Upload } from '@icon-park/react';
 import React, { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import NomiModal from '@/renderer/components/base/NomiModal';
 import {
   EMPTY_TEST_INPUT_DIGEST,
   isPluginDigest,
@@ -77,9 +78,9 @@ export const PluginProjectCreateModal: React.FC<PluginProjectCreateModalProps> =
   };
 
   return (
-    <Modal
+    <NomiModal
       visible={visible}
-      title={t('pluginWorkbench.dialogs.create.title')}
+      header={t('pluginWorkbench.dialogs.create.title')}
       onCancel={loading ? undefined : onCancel}
       onOk={() => void handleSubmit()}
       okText={t('pluginWorkbench.actions.createProject')}
@@ -129,7 +130,7 @@ export const PluginProjectCreateModal: React.FC<PluginProjectCreateModalProps> =
           <Input.TextArea autoSize={{ minRows: 3, maxRows: 6 }} maxLength={300} showWordLimit />
         </Form.Item>
       </Form>
-    </Modal>
+    </NomiModal>
   );
 };
 
@@ -210,9 +211,9 @@ export const PluginPrebuiltImportModal: React.FC<PluginPrebuiltImportModalProps>
   };
 
   return (
-    <Modal
+    <NomiModal
       visible={visible}
-      title={t('pluginWorkbench.dialogs.import.title')}
+      header={t('pluginWorkbench.dialogs.import.title')}
       onCancel={loading ? undefined : onCancel}
       onOk={() => void handleSubmit()}
       okText={t('pluginWorkbench.actions.importArtifact')}
@@ -275,7 +276,7 @@ export const PluginPrebuiltImportModal: React.FC<PluginPrebuiltImportModalProps>
         <div className={styles.dialogHint}>{t('pluginWorkbench.dialogs.import.digestHint')}</div>
         {error && <Alert type='error' showIcon content={error} />}
       </div>
-    </Modal>
+    </NomiModal>
   );
 };
 
@@ -290,42 +291,34 @@ export interface PluginCandidateTestModalProps {
 
 export const PluginCandidateTestModal: React.FC<PluginCandidateTestModalProps> = ({
   visible,
-  detail,
   loading,
   failure,
   onCancel,
   onSubmit,
 }) => {
   const { t } = useTranslation();
-  const [digest, setDigest] = useState(EMPTY_TEST_INPUT_DIGEST);
   const [acknowledged, setAcknowledged] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!visible) return;
-    setDigest(detail?.ready?.test.resolved_test_input_digest ?? EMPTY_TEST_INPUT_DIGEST);
     setAcknowledged(false);
     setError(null);
-  }, [detail, visible]);
+  }, [visible]);
 
   const handleSubmit = async () => {
-    const normalized = digest.trim().toLowerCase();
-    if (!isPluginDigest(normalized)) {
-      setError(t('pluginWorkbench.dialogs.test.digestInvalid'));
-      return;
-    }
     if (!acknowledged) {
       setError(t('pluginWorkbench.dialogs.test.acknowledgementRequired'));
       return;
     }
     setError(null);
-    await onSubmit(normalized);
+    await onSubmit(EMPTY_TEST_INPUT_DIGEST);
   };
 
   return (
-    <Modal
+    <NomiModal
       visible={visible}
-      title={t('pluginWorkbench.dialogs.test.title')}
+      header={t('pluginWorkbench.dialogs.test.title')}
       onCancel={loading ? undefined : onCancel}
       onOk={() => void handleSubmit()}
       okText={t('pluginWorkbench.actions.testCandidate')}
@@ -338,29 +331,13 @@ export const PluginCandidateTestModal: React.FC<PluginCandidateTestModalProps> =
       <div className={styles.dialogIntro}>{t('pluginWorkbench.dialogs.test.body')}</div>
       <div className={styles.dialogForm}>
         {failure && <Alert type='error' showIcon content={failure.message} />}
-        <div className={styles.dialogFieldLabel}>{t('pluginWorkbench.dialogs.test.inputDigest')}</div>
-        <Input
-          value={digest}
-          onChange={setDigest}
-          className={styles.monoInput}
-          spellCheck={false}
-        />
-        <div className={styles.dialogHint}>{t('pluginWorkbench.dialogs.test.inputDigestHint')}</div>
-        <Button
-          type='text'
-          size='small'
-          icon={<CheckOne theme='outline' size='14' />}
-          onClick={() => setDigest(EMPTY_TEST_INPUT_DIGEST)}
-        >
-          {t('pluginWorkbench.dialogs.test.useEmptyInput')}
-        </Button>
         <Alert type='warning' showIcon content={t('pluginWorkbench.dialogs.test.sideEffectWarning')} />
         <Checkbox checked={acknowledged} onChange={setAcknowledged}>
           {t('pluginWorkbench.dialogs.test.acknowledgeRisk')}
         </Checkbox>
         {error && <Alert type='error' showIcon content={error} />}
       </div>
-    </Modal>
+    </NomiModal>
   );
 };
 
@@ -422,9 +399,9 @@ export const PluginCandidateApplyModal: React.FC<PluginCandidateApplyModalProps>
   }, [linkedMount?.display_name, t, target]);
 
   return (
-    <Modal
+    <NomiModal
       visible={visible}
-      title={t('pluginWorkbench.dialogs.apply.title')}
+      header={t('pluginWorkbench.dialogs.apply.title')}
       onCancel={loading ? undefined : onCancel}
       onOk={() =>
         void onSubmit({
@@ -433,7 +410,7 @@ export const PluginCandidateApplyModal: React.FC<PluginCandidateApplyModalProps>
           acknowledgeTestWarning,
         })
       }
-      okText={t('pluginWorkbench.actions.applyCandidate')}
+      okText={t('pluginWorkbench.product.saveAndEnable')}
       cancelText={t('pluginWorkbench.actions.cancel')}
       confirmLoading={loading}
       okButtonProps={{ disabled: !canSubmit }}
@@ -470,44 +447,33 @@ export const PluginCandidateApplyModal: React.FC<PluginCandidateApplyModalProps>
             </Checkbox>
           )}
 
-          {ready.impact.changed_contracts.length > 0 && (
-            <div className={styles.dialogSubsection}>
-              <div className={styles.dialogFieldLabel}>
-                {t('pluginWorkbench.dialogs.apply.changedContracts')}
-              </div>
+          {(ready.impact.changed_contracts.length > 0 || ready.impact.affected_consumers.length > 0) && (
+            <details className={styles.dialogSubsection}>
+              <summary>{t('common.technical_details')}</summary>
               <div className={styles.dialogChipList}>
                 {ready.impact.changed_contracts.map((contract) => (
                   <span key={contract} className={`${styles.chip} ${styles.mono}`}>
                     {contract}
                   </span>
                 ))}
-              </div>
-            </div>
-          )}
-          {ready.impact.affected_consumers.length > 0 && (
-            <div className={styles.dialogSubsection}>
-              <div className={styles.dialogFieldLabel}>
-                {t('pluginWorkbench.dialogs.apply.affectedConsumers')}
-              </div>
-              <div className={styles.dialogChipList}>
                 {ready.impact.affected_consumers.map((consumer) => (
                   <span key={`${consumer.surface}:${consumer.consumer_id}`} className={styles.chip}>
                     {consumer.surface}: {consumer.consumer_id}
                   </span>
                 ))}
               </div>
-            </div>
+            </details>
           )}
-          {ready.impact.blocking_reasons.length > 0 && (
+          {!ready.impact.can_apply && ready.impact.blocking_reasons.length > 0 && (
             <Alert
               type='warning'
               showIcon
-              content={ready.impact.blocking_reasons.join(' ')}
+              content={t('pluginWorkbench.dialogs.apply.applyBlocked')}
             />
           )}
         </div>
       )}
-    </Modal>
+    </NomiModal>
   );
 };
 

@@ -36,7 +36,7 @@ use nomifun_db::{
 use nomifun_js_host::{ExtensionHostSupervisor, JavaScriptHostError};
 use nomifun_plugin_platform::{
     ArtifactStoreLimits, ImportCancellation, PluginArtifactStore,
-    PluginArtifactStoreError, StoredPluginArtifact,
+    PluginArtifactStoreError, StoredPluginArtifact, NeverCancel as ArtifactNeverCancel,
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, Notify};
@@ -208,6 +208,24 @@ pub trait PluginRepository: Send + Sync {
 
 #[async_trait]
 pub trait PluginArtifactStorePort: Send + Sync {
+    async fn inspect_directory(
+        &self,
+        source: &Path,
+    ) -> Result<nomifun_agent_contracts::PluginPackageArtifactV1, PluginServiceError> {
+        let _ = source;
+        Err(PluginServiceError::integration(
+            "Plugin import inspection is unavailable",
+        ))
+    }
+    async fn inspect_zip(
+        &self,
+        source: &Path,
+    ) -> Result<nomifun_agent_contracts::PluginPackageArtifactV1, PluginServiceError> {
+        let _ = source;
+        Err(PluginServiceError::integration(
+            "Plugin ZIP inspection is unavailable",
+        ))
+    }
     async fn import_directory(
         &self,
         source: &Path,
@@ -1171,6 +1189,24 @@ impl FsPluginArtifactStore {
 
 #[async_trait]
 impl PluginArtifactStorePort for FsPluginArtifactStore {
+    async fn inspect_directory(
+        &self,
+        source: &Path,
+    ) -> Result<nomifun_agent_contracts::PluginPackageArtifactV1, PluginServiceError> {
+        self.store
+            .inspect_directory(source, &ArtifactNeverCancel)
+            .map_err(PluginServiceError::from)
+    }
+
+    async fn inspect_zip(
+        &self,
+        source: &Path,
+    ) -> Result<nomifun_agent_contracts::PluginPackageArtifactV1, PluginServiceError> {
+        self.store
+            .inspect_zip(source, &ArtifactNeverCancel)
+            .map_err(PluginServiceError::from)
+    }
+
     async fn import_directory(
         &self,
         source: &Path,

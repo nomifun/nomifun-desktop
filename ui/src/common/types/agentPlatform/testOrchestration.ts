@@ -49,16 +49,22 @@ export async function runAgentPresetTest(
     throw new Error(preview.diagnostics[0]?.code ?? 'PRESET_REVISION_SAVE_FAILED');
   }
 
+  const currentRevision = input.draft.current_revision;
+  const previewRequiresSave =
+    input.dirty ||
+    !currentRevision ||
+    currentRevision.preset_id !== preview.candidate_revision_ref.preset_id ||
+    currentRevision.revision !== preview.candidate_revision_ref.revision ||
+    currentRevision.revision_digest !== preview.candidate_revision_ref.revision_digest;
+
   let savedRevision: SaveAgentPresetRevisionResponse | undefined;
-  if (input.dirty) {
+  if (previewRequiresSave) {
     savedRevision = await input.ports.save({
       expected_current_revision: input.draft.current_revision,
       preview_digest: preview.preview_digest,
       draft: input.draft,
       reason: 'Agent Settings Test',
     });
-  } else if (!input.draft.current_revision) {
-    throw new Error('CLEAN_DRAFT_REVISION_MISSING');
   }
 
   const session = await input.ports.createSession({

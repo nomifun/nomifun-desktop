@@ -217,6 +217,23 @@ fn directory_and_zip_import_share_one_idempotent_artifact() {
 }
 
 #[test]
+fn inspection_validates_directory_and_zip_without_publishing() {
+    let (temp, store, package) = fixture();
+    let directory = store.inspect_directory(&package, &NeverCancel).unwrap();
+    let archive = temp.path().join("package.zip");
+    package_zip(&archive, b"export const plugin = 1;\n", &[]);
+    let zipped = store.inspect_zip(&archive, &NeverCancel).unwrap();
+    assert_eq!(directory.artifact_digest, zipped.artifact_digest);
+    assert_eq!(directory.manifest.payload, zipped.manifest.payload);
+    assert_eq!(
+        fs::read_dir(store.managed_root().join("artifacts"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+#[test]
 fn published_tamper_is_rejected_without_replacement() {
     let (_temp, store, package) = fixture();
     let imported = store.import_directory(&package, &NeverCancel).unwrap();

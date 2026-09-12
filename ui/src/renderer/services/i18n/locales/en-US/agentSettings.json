@@ -295,6 +295,8 @@
     "configureAtUse": "Configure when used",
     "unavailableCode": "Failure code",
     "missingSource": "Missing source",
+    "pluginUnavailable": "Plugin not enabled",
+    "pluginCapabilityFallback": "Plugin capability: {{name}}",
     "missingReason": "The source of this capability is missing. Remove it, or restore the corresponding plugin before using it.",
     "builtinReason": "This official built-in capability is not connected correctly, which is a release-integrity failure in the current version. Update or repair the application, or remove it to continue editing the rest of the configuration.",
     "pluginReason": "Check that the plugin or connection is enabled, fully configured, and has an available runtime.",

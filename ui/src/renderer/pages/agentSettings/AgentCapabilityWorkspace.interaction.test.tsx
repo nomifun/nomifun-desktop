@@ -2,8 +2,9 @@ import '../../../../test/setup-dom.ts';
 import { act, cleanup, fireEvent, render, within, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'bun:test';
 import { createInstance } from 'i18next';
-import { useState } from 'react';
+import { type ReactElement, useState } from 'react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
+import { MemoryRouter } from 'react-router-dom';
 import {
   asCapabilityId, asPackageId, createEmptyAgentPresetDocument,
   type AgentPresetDocument, type CapabilityCatalogItem, type OfficialPresetTemplate,
@@ -26,10 +27,11 @@ const item = (id: string, available = true, name = id): CapabilityCatalogItem =>
 const read = item('fs.read'), knowledge = item('knowledge.read'), web = item('web.fetch'), unavailable = item('web.search', false);
 const selection = (row: CapabilityCatalogItem) => ({ capability: row.capability, action_allowlist: [`${row.capability.id}.invoke`] });
 const documentWith = (initial: CapabilityCatalogItem[], onDemand: CapabilityCatalogItem[] = []): AgentPresetDocument => ({ ...createEmptyAgentPresetDocument(), initial_capabilities: initial.map(selection), on_demand_capabilities: onDemand.map(selection) });
+const renderInRouter = (ui: ReactElement) => render(<MemoryRouter>{ui}</MemoryRouter>);
 function mount(document: AgentPresetDocument, catalog = [read, knowledge, web, unavailable], disabled = false) {
   let current = document;
   const Harness = () => { const [value, setValue] = useState(document); return <AgentCapabilityWorkspace document={value} catalog={catalog} disabled={disabled} onChange={(next) => { current = next; setValue(next); }} />; };
-  const result = render(<I18nextProvider i18n={testI18n}><Harness /></I18nextProvider>);
+  const result = renderInRouter(<I18nextProvider i18n={testI18n}><Harness /></I18nextProvider>);
   return { ...result, state: () => current };
 }
 afterEach(() => cleanup());
@@ -111,6 +113,14 @@ describe('Agent capability workspace', () => {
     expect(screen.getByRole('button', { name: 'Read files' })).toBeTruthy();
   });
 
+  test('explains a generated Plugin capability as disabled instead of deleted', () => {
+    const pluginCapability = item('user.nomifun.plugin-example.normalize_text');
+    const screen = mount(documentWith([pluginCapability]), []);
+    expect(screen.getByText(en.workbench.pluginUnavailable)).toBeTruthy();
+    expect(screen.getByText(en.workbench.pluginReason)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Plugin capability: normalize text' })).toBeTruthy();
+  });
+
   test('removing the last capability shows a useful empty state', () => {
     const screen = mount(documentWith([read]));
     fireEvent.click(screen.getByRole('button', { name: 'Remove Read files' }));
@@ -173,7 +183,7 @@ describe('editable official preset', () => {
       forkable: true,
     };
     const saved: Array<{ name: string; document: AgentPresetDocument }> = [];
-    const screen = render(<I18nextProvider i18n={testI18n}><OfficialTemplateOverview template={template} catalog={{ capabilities: [read, resourceScoped], skills: [], mcp_tools: [] }} busy={false} onSave={(name, document) => saved.push({ name, document })} /></I18nextProvider>);
+    const screen = renderInRouter(<I18nextProvider i18n={testI18n}><OfficialTemplateOverview template={template} catalog={{ capabilities: [read, resourceScoped], skills: [], mcp_tools: [] }} busy={false} onSave={(name, document) => saved.push({ name, document })} /></I18nextProvider>);
 
     expect(screen.getByRole('button', { name: /Needs attention 0/ })).toBeTruthy();
     expect(screen.queryByText(en.workbench.builtinUnavailable)).toBeNull();
@@ -189,7 +199,7 @@ describe('editable official preset', () => {
 
   test('treats an unavailable official built-in as a diagnosable release-integrity failure', async () => {
     const template: OfficialPresetTemplate = { template_key: 'assistant.general', seed: { initial_capabilities: [read.capability], on_demand_capabilities: [unavailable.capability], skill_bindings: [], required_resource_kinds: [], required_runtime_features: [] }, role_coverage: { required_capability_categories: [], required_capability_ids: [], required_runtime_features: [], required_resource_kinds: [] }, immutable: true, forkable: true };
-    const screen = render(<I18nextProvider i18n={testI18n}><OfficialTemplateOverview template={template} catalog={{ capabilities: [read, unavailable], skills: [], mcp_tools: [] }} busy={false} onSave={() => undefined} /></I18nextProvider>);
+    const screen = renderInRouter(<I18nextProvider i18n={testI18n}><OfficialTemplateOverview template={template} catalog={{ capabilities: [read, unavailable], skills: [], mcp_tools: [] }} busy={false} onSave={() => undefined} /></I18nextProvider>);
 
     expect((screen.getByRole('button', { name: en.workbench.saveAsMine }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByText(en.workbench.builtinUnavailable)).toBeTruthy();
@@ -203,7 +213,7 @@ describe('editable official preset', () => {
     const template: OfficialPresetTemplate = { template_key: 'assistant.general', seed: { initial_capabilities: [read.capability], on_demand_capabilities: [unavailable.capability], skill_bindings: [], required_resource_kinds: [], required_runtime_features: [] }, role_coverage: { required_capability_categories: [], required_capability_ids: [], required_runtime_features: [], required_resource_kinds: [] }, immutable: true, forkable: true };
     const original = structuredClone(template);
     const saved: Array<{ name: string; document: AgentPresetDocument }> = [];
-    const screen = render(<I18nextProvider i18n={testI18n}><OfficialTemplateOverview template={template} catalog={{ capabilities: [read, unavailable], skills: [], mcp_tools: [] }} busy={false} onSave={(name, document) => saved.push({ name, document })} /></I18nextProvider>);
+    const screen = renderInRouter(<I18nextProvider i18n={testI18n}><OfficialTemplateOverview template={template} catalog={{ capabilities: [read, unavailable], skills: [], mcp_tools: [] }} busy={false} onSave={(name, document) => saved.push({ name, document })} /></I18nextProvider>);
     expect((screen.getByRole('button', { name: en.workbench.saveAsMine }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: /Needs attention 1/ }));
     fireEvent.click(screen.getByRole('button', { name: en.workbench.removeUnavailable }));

@@ -928,6 +928,7 @@ async fn build_nomi_core_agent_api_state(
         registrations,
         runtime,
         approved_platform_builtin_capability_ids,
+        Some(services.model_invoke_service.clone()),
     )
     .await?;
     let plugin_state = plugin.router.clone();
