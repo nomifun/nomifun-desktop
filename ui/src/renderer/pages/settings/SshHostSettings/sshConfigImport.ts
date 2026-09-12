@@ -22,10 +22,16 @@ export type SshImportClause = { key: I18nKey; values?: Record<string, string | n
 /** What the host book's primary call to action should be. */
 export type SshHostBookCta = { kind: 'import'; count: number } | { kind: 'add' };
 
-/** `user@host:port` — the ssh command a candidate stands for. */
+/** Display `user@host:port`, bracketing IPv6 so its colons cannot obscure the port. */
 export const candidateEndpoint = (
   host: Pick<IApiSshConfigHost, 'host' | 'port' | 'username'>
-): string => (host.username ? `${host.username}@${host.host}:${host.port}` : `${host.host}:${host.port}`);
+): string => {
+  const address =
+    host.host.includes(':') && !(host.host.startsWith('[') && host.host.endsWith(']'))
+      ? `[${host.host}]`
+      : host.host;
+  return `${host.username ? `${host.username}@` : ''}${address}:${host.port}`;
+};
 
 /**
  * Import-first, but only when there is something to import.
