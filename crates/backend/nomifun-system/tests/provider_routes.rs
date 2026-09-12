@@ -187,6 +187,37 @@ async fn aggregate_create_validation_is_atomic() {
 }
 
 #[tokio::test]
+async fn aggregate_create_validates_the_trimmed_platform_before_writing() {
+    let db = init_database_memory().await.unwrap();
+    let app = system_routes(build_state(&db));
+    for platform in ["ark", " ark ", "volcengine", "\tvolcengine\n"] {
+        let mut body = create_body("Invalid Ark model");
+        body["platform"] = json!(platform);
+        body["initial_model"]["model"] = json!("doubao-seedance-1.5-pro");
+        body["initial_model"]["capabilities"] = json!([{
+            "task": "video_generation",
+            "protocol": "ark.video_jobs",
+            "connection_role": "default"
+        }]);
+        let response = app
+            .clone()
+            .oneshot(request("POST", "/api/providers", Some(body)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{platform:?}");
+        let error = body_json(response).await;
+        assert!(error.to_string().contains("console display name"), "{error}");
+    }
+    assert!(
+        SqliteProviderRepository::new(db.pool().clone())
+            .list()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn aggregate_named_connection_requires_explicit_credentials() {
     let db = init_database_memory().await.unwrap();
     let mut body = create_body("Missing child credentials");
@@ -518,7 +549,7 @@ async fn duplicate_id_is_rejected() {
 async fn bedrock_requires_explicit_sdk_auth_and_sdk_capability() {
     let db = init_database_memory().await.unwrap();
     let body = json!({
-        "platform": "bedrock",
+        "platform": " bedrock ",
         "name": "Bedrock",
         "base_url": "",
         "auth_scheme": "bedrock",
@@ -549,6 +580,7 @@ async fn bedrock_requires_explicit_sdk_auth_and_sdk_capability() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::CREATED);
     let created = body_json(response).await;
+    assert_eq!(created["data"]["platform"], "bedrock");
     assert_eq!(created["data"]["has_credentials"], true);
     assert_eq!(created["data"]["bedrock_config"]["auth_method"], "accessKey");
     let serialized = created.to_string();
@@ -563,5 +595,127 @@ async fn bedrock_requires_explicit_sdk_auth_and_sdk_capability() {
             !serialized.contains(secret),
             "Bedrock write-only credential leaked in response: {secret}"
         );
+    }
+}
+
+#[tokio::test]
+async fn bedrock_updates_persist_normalized_config_and_only_invalidate_real_changes() {
+    let db = init_database_memory().await.unwrap();
+    let app = system_routes(build_state(&db));
+    let provider_repo = SqliteProviderRepository::new(db.pool().clone());
+    let capability_repo = SqliteProviderModelCapabilityRepository::new(db.pool().clone());
+    for auth_method in ["accessKey", "profile", "defaultChain"] {
+        let mut body = create_body("Bedrock normalization");
+        body["platform"] = json!("bedrock");
+        body["base_url"] = json!("");
+        body["auth_scheme"] = json!("bedrock");
+        body["credentials"] = if auth_method == "accessKey" {
+            json!({"access_key_id": "TEST_ACCESS", "secret_access_key": "test-secret"})
+        } else {
+            json!({})
+        };
+        body["bedrock_config"] = json!({
+            "auth_method": auth_method,
+            "region": "us-east-1"
+        });
+        if auth_method == "profile" {
+            body["bedrock_config"]["profile"] = json!("work");
+        }
+        body["initial_model"]["capabilities"] = json!([{
+            "task": "chat",
+            "protocol": "bedrock.anthropic_messages",
+            "connection_role": "default",
+            "output_limit": 8192
+        }]);
+        let response = app
+            .clone()
+            .oneshot(request("POST", "/api/providers", Some(body)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED, "{auth_method}");
+        let created = body_json(response).await;
+        let provider_id = created["data"]["provider_id"].as_str().unwrap();
+        let canonical_config = created["data"]["bedrock_config"].clone();
+        let before = provider_repo.find_by_id(provider_id).await.unwrap().unwrap();
+        assert!(
+            capability_repo
+                .set_health(
+                    provider_id,
+                    before.config_revision,
+                    "gpt-test",
+                    "chat",
+                    Some(r#"{"status":"healthy","latency":7}"#),
+                )
+                .await
+                .unwrap()
+        );
+        let observed = capability_repo
+            .get(provider_id, "gpt-test", "chat")
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Only synthetic config is persisted; no SDK/profile or upstream is loaded.
+        let equivalent_config = json!({
+            "auth_method": auth_method,
+            "region": " us-east-1 ",
+            "profile": if auth_method == "profile" { " work " } else { " \t " }
+        });
+        for patch in [
+            json!({"bedrock_config": equivalent_config}),
+            json!({"name": "Renamed without resubmitting config"}),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(request(
+                    "PUT",
+                    &format!("/api/providers/{provider_id}"),
+                    Some(patch),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{auth_method}");
+            assert_eq!(
+                body_json(response).await["data"]["bedrock_config"],
+                canonical_config
+            );
+            let after = provider_repo.find_by_id(provider_id).await.unwrap().unwrap();
+            assert_eq!(after.bedrock_config, before.bedrock_config);
+            assert_eq!(after.config_revision, before.config_revision);
+            assert_eq!(after.credentials_encrypted, before.credentials_encrypted);
+            let health = capability_repo
+                .get(provider_id, "gpt-test", "chat")
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(health.health, observed.health);
+            assert_eq!(health.health_checked_at, observed.health_checked_at);
+        }
+
+        let mut changed_config = canonical_config;
+        changed_config["region"] = json!(" eu-west-1 ");
+        let response = app
+            .clone()
+            .oneshot(request(
+                "PUT",
+                &format!("/api/providers/{provider_id}"),
+                Some(json!({"bedrock_config": changed_config})),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            body_json(response).await["data"]["bedrock_config"]["region"],
+            "eu-west-1"
+        );
+        let after = provider_repo.find_by_id(provider_id).await.unwrap().unwrap();
+        assert_eq!(after.config_revision, before.config_revision + 1);
+        let health = capability_repo
+            .get(provider_id, "gpt-test", "chat")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(health.health, None);
+        assert_eq!(health.health_checked_at, None);
     }
 }
