@@ -4,9 +4,9 @@
 
 ## 续接位置
 
-- 当前批次：R51/R53/R54/R55 已复核、验证并按模块提交，随本台账正常推送；R56/R57/R58 独立审计中。上一检查点已核实远端为 `31ac3dc1a`，本批四个源码提交见下方验收。Browser Use 仍暂跳过；已验证项不重复审。
+- 当前批次：R57/R58/R59/R60 已复核、验证并按模块提交，随本台账正常推送；R56 UI 调用方、R61 Wave4、R62 Wave5 继续独立审计。上一检查点已核实远端为 `37cc5a568`。Browser Use 仍暂跳过；已验证项不重复审。
 - 后续集成：当前分支已包含 `dd35e01de` 的 MiniApp 分支合并；设计文档已跟踪。本批仅更新遗留路由测试，未修改 MiniApp 产品实现，模块仍待深审。
-- 全局覆盖：111 个模块边界中，7 个已验证、38 个部分完成、64 个待审、2 个审计中；134 个唯一问题/任务。完整阅读与跨模块问题闭环分开登记；Browser Use 待审边界仍暂跳过。
+- 全局覆盖：111 个模块边界中，7 个已验证、43 个部分完成、59 个待审、2 个审计中；143 个唯一问题/任务。完整阅读与跨模块问题闭环分开登记；Browser Use 待审边界仍暂跳过。
 - R1 证据：[首轮记录](2026-09-12-code-quality.zh.md)。R1–R39 各报告中的“未提交/dirty”描述是当时快照；当前提交状态以下方验收记录为准。
 - R2 证据：[运行时与测试边界记录](2026-09-12-runtime-and-test-boundaries.zh.md)，包含改动、失败尝试、验证及覆盖限制。
 - R3 证据：[生命周期与状态记录](2026-09-12-lifecycle-and-state.zh.md)，记录四个 Host 旧实现失败、Context falsy 初值及消息重放缺陷；保留待办，勿重复修复。
@@ -44,6 +44,29 @@
 - 钩子收尾验证（历史批次）：当时清单为 111 边界/90 唯一问题；仅钩子和记录变动，未重复代码测试。R40–R43 的最新结果见下方并行批次验收。
 - 完成定义：列清子模块→核对生产入口及跨模块调用→检查并发、错误、权限和关闭路径→记录问题及证据→修改→对应回归通过。没有证据不能标记完成。
 
+## R57 / R58 / R59 / R60 阶段验收
+
+| 批次 | 已提交源码 | 最终验证 |
+| --- | --- | --- |
+| R57 Wave1 | `0eae3feba` | cargo test --locked -p nomifun-agent-domain-wave1 --lib --tests：8/0 |
+| R58 Wave3 | `679024b0e` | cargo test --locked -p nomifun-agent-domain-wave3：10/0 |
+| R59 ZIP budget | `3fcbface2` | Common/Skills --lib zip_safe::：11/0+5/0；Companion/Knowledge --lib export::：26/0+9/0；Workshop --lib archive::：12/0 |
+| R60 Knowledge export | `e310c3acd` | cargo test --locked -p nomifun-knowledge --lib export::：11/0 |
+
+以上均4线程；最后有效结果合计83项（R60的11项替代R59知识库9项，不重复累计）。R59两处实际ZIP在旧实现写出超过4KiB后失败，修复后通过；R60固定临时文件被覆盖/源目录遍历失败却发布两回归旧失败后通过。R57/R58无修复前行为证据。App调用方已只读追踪，但本检查点未重跑App测试；另两个Wave正在编辑，避免把未冻结代码混入验证。未跑全Rust workspace/UI、其他OS或真实生成/外部服务。
+
+四批合计+301/-160，净增141行：生产+106/-125（净减19），测试+195/-35（净增160）。分别为R57生产-37/测试+62、R58 -8/+6、R59 +33/+68、R60 -7/+24。R60将已有tempfile从dev-dependency移至生产依赖；未新增包、版本、锁文件或框架。只修改已确认的问题，不因缺少产品owner而自动扩建能力。
+
+## 当前并行边界（R56 / R61 / R62）
+
+| 批次 / 负责人 | 独占写集 | 任务 |
+| --- | --- | --- |
+| R56 / Carver | useTheme/useColorScheme/useFontScale及专用测试 | 继续验证回滚/重载/DOM；离线后reload空对象的初始化状态通知需主线程协调configService |
+| R61 / Mencius | nomifun-agent-domain-wave4/src/**、crate tests | 身份/channel/device声明与资源/handler/生命周期 |
+| R62 / Hypatia | nomifun-agent-domain-wave5/src/**、crate tests | automation/supervision/Remote的声明与权限/生命周期 |
+
+R57/R58写集冻结转交主线程；agent不得回改。跨模块接口、configService、台账和提交统一由主线程处理；其余目录只读。R59/R60无未提交源码残留。Browser Use仍跳过。
+
 ## R51 / R53 / R54 / R55 阶段验收
 
 | 批次 | 已提交源码 | 最终验证 |
@@ -59,7 +82,7 @@ R51 新测试前 30 项对原逻辑加请求注入缝运行：4 通过、26 失�
 
 模块完整阅读不等于跨模块问题闭环：R51 服务端并发写顺序、R53 App shutdown/认证、R54 TOCTOU/原子导入及调用契约、R49-05 构建和平台遗留仍按索引保留。
 
-## 当前并行边界（R56–R58）
+## 历史并行边界（R56–R58）
 
 | 批次 / 负责人 | 独占写集 | 任务 |
 | --- | --- | --- |
@@ -369,10 +392,20 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | R53-02 | 已验证 | 心跳任务不随 manager 释放、连接计数测试靠固定 sleep | Drop 取消 heartbeat 与 client 信号；有界状态等待取代固定 sleep，删无效 accessor/无断言用例；Realtime 102/0 |
 | R53-03 | 待审 | Realtime 认证、全局 shutdown 与拥塞关闭/容量剩余契约 | WS vs HTTP 用户有效状态校验不一致；App 未显式持有 manager/upgrade shutdown；阻塞 sender.send 延迟 policy Close；heartbeat panic/runtime teardown 后 AtomicBool 不复位且 start_heartbeat 可多开；队列按条数非字节、无总连接上限 |
 | R54-01 | 已验证 | 技能导入导出先删目标可删除重叠源、同步非法目标先 prune | 规范化并检查源/目标重叠和全部 workspace 目标后才操作；缺源失败保留目标；替换末级链接不跟随；真实树回归通过 |
-| R54-02 | 已验证 | link AlreadyExists 回退复制覆盖并发赢家、ZIP 写完才校验额度 | 冲突直接返回，其他失败保留复制回退；每 8KiB 写前校验剩余额度；移除全局失败注入夹具 |
+| R54-02 | 已验证 | link AlreadyExists 回退覆盖并发赢家、ZIP 写完才校验额度 | R54 冲突直接返回；R59 将8KiB写前额度合并到common，修复Knowledge/Companion同类缺陷及u64饱和绕限；两真实ZIP先红后绿，Common11+Skills5+Companion26+Knowledge9+Workshop12通过 |
 | R54-03 | 已验证 | 外部路径设置持久化失败但已修改内存 | 锁内克隆候选，save 成功再发布；add/update/remove 失败均保持原状态 |
 | R54-04 | 已验证 | 技能 location 误用 frontmatter 名称且 IO/目录遍历错误被吞 | 使用实际目录，缺 name 从 manifest 父目录回退；保留非 NotFound IO、传播遍历错误，完整 fence 行支持 CRLF；160/0 |
-| R54-05 | 待审 | 技能文件发布/链接安全与跨模块命名及 ZIP 契约 | TOCTOU、内部链接递归复制/环、delete-then-copy 无回滚；JSON 写入非 crash/cancellation/cross-manager 原子；startup 两次 rename 读窗口。保留名 companion/shared/_drafts、frontmatter vs resolver 名称、复杂 YAML 序列化待统一；无生产调用 UI bridge 删除 query/JSON 与 scan shape 错配；Knowledge/Companion ZIP 同类预算问题待修 |
+| R54-05 | 部分完成 | 技能文件发布/链接安全与跨模块命名及 ZIP 契约 | R59 已修Knowledge/Companion ZIP预算并统一复制。仍待TOCTOU、内部链接递归复制/环、delete-then-copy无回滚；JSON非crash/cancellation/cross-manager原子；startup两rename读窗口。保留名companion/shared/_drafts、frontmatter vs resolver、复杂YAML、无调用UI bridge query/JSON与scan shape错配仍待核对 |
+
+| R57-01 | 已验证 | Wave1按trim后长度校验却向owner传原文，空白绕过maxLength | 改为仅用trim检查空值、原文计字符；跨10种operation边界和真实Kernel INVALID_PAYLOAD回归，8/0 |
+| R57-02 | 已验证 | Wave1无调用批量绑定包装及重复构造 | 删除typed_resource_bindings_for、三个canonical binding复用已有构造；全仓引用核对，生产净减37行 |
+| R57-03 | 待审 | Wave1声明、宿主装配及资源预算剩余范围 | knowledge.search声明Gateway但无action handler；六action/六context/两resource及source.sync/skill.hooks未接实际owner，先确认支持契约不自动补功能。Project items空数组校验与schema minItems不一致；items/Skill arguments总量嵌套及owner截止时间/取消后持久化未闭环 |
+| R58-01 | 已验证 | Wave3非对象输入错误归属不一致且公开转换可接收Serde位置数组 | 对象校验收敛到operation_from_input，统一WAVE3_INVALID_REQUEST；18action表驱动回归，10/0；非Creation其余字段仍由业务入口校验 |
+| R58-02 | 已验证 | Wave3重复空schema及恒成立/重复成功测试 | 合并两个完全相同schema函数不变digest，现有注册测试改核对每项effect/presentation；删重复转换测试，生产-8/测试+6 |
+| R58-03 | 待审 | Wave3输入深度与Creation/模板运行资源契约 | Creation仅要求generation_provider，Canvas/template由输入+安装owner业务校验，是否应冻结到snapshot须统一；template.run只声明canvas:write，实际provider/model来自模板；非Creation/输出对象之外依赖owner，Office未准入Nomi；不自动加新资源规则 |
+| R60-01 | 已验证 | 知识库导出固定dest.tmp覆盖无关文件、并发共享临时输出 | tempfile独占创建并持句柄写入、sync后persist，移除手动错误清理；既有同名tmp内容保留回归红→绿 |
+| R60-02 | 已验证 | 知识库导出吞WalkDir错误发布残缺包、每个文档整块读内存 | 遍历错误显式传播保留旧包，流复制取代整文件Vec；缺源旧回归失败，修复后export11/0 |
+| R60-03 | 待审 | 导入临时目录及知识库导出其余文件/事务边界 | Knowledge/Companion以PID+毫秒create_dir_all共享临时路径可碰撞，取消后blocking归属/清理待修；Knowledge导出lossy文件名/Unix反斜杠、非快照读取、目录fsync，导入metadata容错/重复entry、取消后DB+文件回滚及并发名称待核对 |
 
 ## 模块覆盖索引
 
@@ -400,11 +433,11 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | `crates/backend/nomifun-agent-contracts/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-agent-control-plane/` | 待审 | R1 仅回归通过，未独立深审 |
 | `crates/backend/nomifun-agent-domain-support/` | 已验证 | R37 全生产文件、C7 表、8 项现有测试及 App 两套装配已审；Kernel 按 role/mount/capability 校验绑定，不重复造校验层。假成功/重复构造/无调用辅助函数已清理；8/0、App check 通过，未新增完整调用夹具 |
-| `crates/backend/nomifun-agent-domain-wave1/` | 审计中 | R57 agent 独占 lib.rs 及 crate tests；注册/handler/context/resource 和实际调用边界，尚未验收 |
+| `crates/backend/nomifun-agent-domain-wave1/` | 部分完成 | R57 唯一 lib.rs 全部生产/测试、6 包/25 capability/14 operation 和 App/Kernel 调用已读；8/0，生产净减37行；Gateway声明/宿主未装配/预算等见 R57-03 |
 | `crates/backend/nomifun-agent-domain-wave2/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
-| `crates/backend/nomifun-agent-domain-wave3/` | 审计中 | R58 agent 独占 lib.rs 及 crate tests；创作/Office/MiniApp 声明与资源授权、handler，尚未验收 |
-| `crates/backend/nomifun-agent-domain-wave4/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
-| `crates/backend/nomifun-agent-domain-wave5/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
+| `crates/backend/nomifun-agent-domain-wave3/` | 部分完成 | R58 全3147行lib.rs及五个App适配器已读，4包/18action；10/0，统一对象输入和错误码，schema/helper及弱测试去重；输入/目标/provider权限契约 R58-03 保留 |
+| `crates/backend/nomifun-agent-domain-wave4/` | 审计中 | R61 agent 独占 lib.rs/crate tests，身份/channel/device声明与handler/资源/生命周期，尚未验收 |
+| `crates/backend/nomifun-agent-domain-wave5/` | 审计中 | R62 agent 独占 lib.rs/crate tests，automation/supervision/Remote声明及权限/生命周期，尚未验收 |
 | `crates/backend/nomifun-agent-execution/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-agent-kernel/` | 部分完成 | R1-01/02：registry 释放与句柄校验已修复验证；获取/关闭并发、其余注册/解析待审 |
 | `crates/backend/nomifun-agent-platform/` | 待审 | R1 仅回归通过；本轮将追踪 shutdown 与资源回收 |
@@ -418,8 +451,8 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | `crates/backend/nomifun-channel/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-chat-model-broker/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-codex-runtime/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
-| `crates/backend/nomifun-common/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
-| `crates/backend/nomifun-companion/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
+| `crates/backend/nomifun-common/` | 部分完成 | R59 完整 zip_safe.rs及预算所有调用已读；合并三导入器写前预算，11/0，调用方回归52/0；其余common文件仍待审 |
+| `crates/backend/nomifun-companion/` | 部分完成 | R59 仅 export.rs 解压/临时目录与预算边界已审，写前预算红→绿、export定向26/0；其余export和全模块未深审，临时目录归属问题见R60-03 |
 | `crates/backend/nomifun-conversation/` | 部分完成 | R4 已核对 list_messages 的 owner 校验、游标解析和 keyset 排序契约；其余 service、运行时/发送/权限路径待审 |
 | `crates/backend/nomifun-creation/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-cron/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
@@ -432,7 +465,7 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | `crates/backend/nomifun-js-host/` | 部分完成 | R2–R13 已记录子范围验证，最新跨层 121/0；在途 Mount 查询已修复；提交后持续准入及 JS 其余入口待审 |
 | `crates/backend/nomifun-js-kernel-adapter/` | 部分完成 | Host 句柄实例/代际及 opaque lease 传递、release 已核对；删除构造后立即丢弃的 identity；R5 跨层 77/0；注册映射其余待审 |
 | `crates/backend/nomifun-js-runtime/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
-| `crates/backend/nomifun-knowledge/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
+| `crates/backend/nomifun-knowledge/` | 部分完成 | R59/R60 export.rs全文件/测试及相关入口已读；ZIP写前预算、安全临时导出/遍历错误/流复制，11/0；service/其他文件待审，export未决R60-03 |
 | `crates/backend/nomifun-mcp/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-miniapp-platform/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-model-invoke/` | 部分完成 | R20 URL 去重/错误响应已验证；4 线程全量 396/0，默认并发热点 R20-02 未定位；调用/适配其余待审 |
