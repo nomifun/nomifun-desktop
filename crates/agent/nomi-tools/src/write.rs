@@ -26,8 +26,8 @@ impl WriteTool {
     /// When cache is `Some`, the tool updates the cache after each successful
     /// write so that subsequent Edit/Read calls see the latest content and mtime.
     ///
-    /// No "must Read first" guard: Write is intended for creating new files
-    /// or complete rewrites.
+    /// Existing files must be in the cache before overwriting; new files are
+    /// exempt from this guard.
     ///
     /// Pass `None` to disable cache integration (legacy behavior).
     pub fn new(file_cache: Option<Arc<RwLock<FileStateCache>>>) -> Self {
@@ -131,9 +131,11 @@ impl Tool for WriteTool {
         // a file cache is wired; None disables it, preserving legacy behavior.
         if existed
             && let Some(cache_arc) = &self.file_cache
-            && let Ok(mut cache) = cache_arc.write()
-            && cache.get(path).is_none()
         {
+            let Ok(mut cache) = cache_arc.write() else {
+                return ToolResult::error("File state cache is unavailable; refusing to overwrite");
+            };
+            if cache.get(path).is_none() {
                 return ToolResult {
                     content: format!(
                         "You must Read {} before overwriting it — it already exists. \
@@ -143,6 +145,7 @@ impl Tool for WriteTool {
                     is_error: true,
                     images: Vec::new(),
                 };
+            }
         }
 
         // Create parent directories
@@ -159,36 +162,10 @@ impl Tool for WriteTool {
             }
         }
 
-        // Write atomically: write to temp file, then rename
-        let tmp_path = format!("{}.tmp.{}", file_path, std::process::id());
-        if let Err(e) = std::fs::write(&tmp_path, content) {
+        if let Err(e) = crate::atomic_write(file_path, content) {
             return ToolResult {
                 content: format!("Failed to write file: {}", e),
                 is_error: true,
-                images: Vec::new(),
-            };
-        }
-
-        if let Err(e) = std::fs::rename(&tmp_path, file_path) {
-            // Fallback: direct write if rename fails (cross-device)
-            let _ = std::fs::remove_file(&tmp_path);
-            if let Err(e) = std::fs::write(file_path, content) {
-                return ToolResult {
-                    content: format!("Failed to write file: {}", e),
-                    is_error: true,
-                    images: Vec::new(),
-                };
-            }
-            if let Some(cache_arc) = &self.file_cache {
-                update_cache_after_write(cache_arc, path, content);
-            }
-
-            return ToolResult {
-                content: format!(
-                    "Updated {} (rename failed: {}, used direct write)",
-                    file_path, e
-                ),
-                is_error: false,
                 images: Vec::new(),
             };
         }
@@ -274,6 +251,8 @@ mod tests {
     async fn test_write_new_file() {
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("hello.txt");
+        let old_temp = dir.path().join(format!("hello.txt.tmp.{}", std::process::id()));
+        std::fs::write(&old_temp, "unrelated sibling").unwrap();
 
         let input = json!({
             "file_path": file_path.to_str().unwrap(),
@@ -290,6 +269,7 @@ mod tests {
         );
         assert!(file_path.exists(), "file should exist after write");
         assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "hello world");
+        assert_eq!(std::fs::read_to_string(&old_temp).unwrap(), "unrelated sibling");
     }
 
     #[tokio::test]

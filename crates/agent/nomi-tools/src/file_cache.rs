@@ -66,8 +66,15 @@ impl FileStateCache {
             self.current_size_bytes = self.current_size_bytes.saturating_sub(old.content_bytes());
         }
 
+        // An oversized revision must not evict unrelated entries or leave the
+        // previous revision available for stale-write checks. A smaller Read
+        // slice can still populate the cache for this path.
+        if new_size > self.max_size_bytes {
+            return;
+        }
+
         // Evict LRU entries until byte-size budget is available.
-        while self.current_size_bytes + new_size > self.max_size_bytes && !self.entries.is_empty() {
+        while self.current_size_bytes > self.max_size_bytes - new_size && !self.entries.is_empty() {
             if let Some((key, v)) = self.entries.pop_lru() {
                 self.unseen_after_write.remove(&key);
                 self.current_size_bytes = self.current_size_bytes.saturating_sub(v.content_bytes());
@@ -89,7 +96,9 @@ impl FileStateCache {
     pub fn insert_after_write(&mut self, path: PathBuf, state: FileState) {
         let normalized = normalize_path(&path);
         self.insert(path, state);
-        self.unseen_after_write.insert(normalized);
+        if self.entries.contains(&normalized) {
+            self.unseen_after_write.insert(normalized);
+        }
     }
 
     /// Whether the cached revision has not yet crossed the Read tool boundary.
@@ -435,9 +444,12 @@ mod tests {
 
     #[test]
     fn empty_content_cached() {
-        let config = make_config(10, 1_000_000);
+        let config = make_config(10, 0);
         let mut cache = FileStateCache::new(&config);
 
+        cache.insert_after_write(PathBuf::from("/full"), make_state("x", 1));
+        assert!(cache.is_empty());
+        assert!(!cache.needs_model_refresh(Path::new("/full")));
         cache.insert(PathBuf::from("/empty"), make_state("", 1));
         assert!(cache.get(Path::new("/empty")).is_some());
         assert_eq!(cache.current_size_bytes(), 0);
