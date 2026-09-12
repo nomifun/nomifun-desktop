@@ -3265,12 +3265,7 @@ fn automatic_assignment(
     detail: &AgentExecutionDetail,
     step: &ExecutionStep,
 ) -> Result<StepAssignment, AppError> {
-    let active: Vec<ExecutionParticipant> = detail
-        .participants
-        .iter()
-        .filter(|participant| participant.retired_in_revision.is_none())
-        .cloned()
-        .collect();
+    let active = active_participants(detail);
     let (participant, score, rationale) = if let Some(profile) = step.profile.as_ref() {
         if let Some(candidate) = rank_participants(&active, profile).first() {
             (
@@ -3463,13 +3458,7 @@ fn system_event(
     attempt_id: Option<&str>,
     payload: serde_json::Value,
 ) -> NewAgentExecutionEvent {
-    NewAgentExecutionEvent {
-        event_type: kind,
-        step_id: step_id.map(str::to_owned),
-        attempt_id: attempt_id.map(str::to_owned),
-        actor: AgentExecutionActor::system(),
-        payload: payload.to_string(),
-    }
+    actor_event(&AgentExecutionActor::system(), kind, step_id, attempt_id, payload)
 }
 
 fn explicit_cancel_payload() -> serde_json::Value {

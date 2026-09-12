@@ -303,7 +303,7 @@ impl PlanProducer for LlmPlanProducer {
 }
 
 fn pick_lead(participants: &[ExecutionParticipant]) -> Option<ProviderWithModel> {
-    participants.iter().find_map(|participant| {
+    participants.iter().filter(|participant| participant.retired_in_revision.is_none()).find_map(|participant| {
         let provider_id = participant.provider_id.as_ref()?;
         let model = participant.model.as_ref()?;
         (ProviderId::try_from(provider_id.as_str()).is_ok()
@@ -524,11 +524,12 @@ fn build_adjust_user_prompt(intent: &str, detail: &AgentExecutionDetail) -> Stri
         "INTENT:\n{}\n\nCURRENT EXECUTION (id | title | kind | status | dependencies | latest output):\n",
         intent.trim()
     );
-    for step in &detail.steps {
+    for step in detail.steps.iter().filter(|step| step.superseded_in_revision.is_none()) {
         let dependencies: Vec<&str> = detail
             .dependencies
             .iter()
-            .filter(|dependency| dependency.blocked_step_id == step.step_id)
+            .filter(|dependency| dependency.superseded_in_revision.is_none()
+                && dependency.blocked_step_id == step.step_id)
             .map(|dependency| dependency.blocker_step_id.as_str())
             .collect();
         let output = detail
@@ -581,6 +582,62 @@ mod tests {
             AdjustedExecutionNode::New { step, .. } => assert_eq!(step.spec, spec),
             _ => panic!("expected new step"),
         }
+    }
+
+    #[test]
+    fn lead_selection_excludes_retired_participants() {
+        let participant = |model: &str, retired| serde_json::from_value::<ExecutionParticipant>(
+            serde_json::json!({
+                "participant_id": nomifun_common::generate_id(),
+                "execution_id": nomifun_common::AgentExecutionId::new().into_string(),
+                "source_agent_id": nomifun_common::AgentId::new().into_string(),
+                "provider_id": "0190f5fe-7c00-7a00-8000-000000000001",
+                "model": model, "sort_order": 0, "introduced_in_revision": 1,
+                "retired_in_revision": retired, "created_at": 0
+            }),
+        ).unwrap();
+        let participants = [participant("old", Some(2)), participant("current", None)];
+        assert!(pick_lead(&participants[..1]).is_none());
+        assert_eq!(pick_lead(&participants).unwrap().model, "current");
+    }
+
+    #[test]
+    fn adjustment_prompt_excludes_superseded_steps_and_edges() {
+        let execution_id = nomifun_common::AgentExecutionId::new().into_string();
+        let old_id = nomifun_common::generate_id();
+        let live_id = nomifun_common::generate_id();
+        let step = |id: &str, title: &str, superseded| serde_json::json!({
+            "step_id": id, "execution_id": execution_id, "title": title, "spec": title,
+            "kind": "agent", "agent_mode": "normal", "status": "pending",
+            "tool_policy": "full", "failure_policy": "fail_execution", "assignment_locked": false,
+            "introduced_in_revision": 1, "superseded_in_revision": superseded,
+            "version": 1, "created_at": 0, "updated_at": 0
+        });
+        let mut detail: AgentExecutionDetail = serde_json::from_value(serde_json::json!({
+            "execution": {
+                "execution_id": execution_id, "goal": "goal", "delegation_policy": "automatic",
+                "adaptation_policy": "fixed", "decision_policy": "automatic", "max_parallel": 1,
+                "status": "running", "version": 2, "plan_revision": 2, "event_sequence": 0,
+                "created_at": 0, "updated_at": 0
+            },
+            "participants": [], "attempts": [],
+            "steps": [step(&old_id, "obsolete", Some(2)), step(&live_id, "current", None)],
+            "dependencies": [{
+                "execution_id": execution_id, "blocker_step_id": old_id, "blocked_step_id": live_id,
+                "introduced_in_revision": 1, "superseded_in_revision": 2
+            }]
+        })).unwrap();
+        let prompt = build_adjust_user_prompt("keep useful work", &detail);
+        assert!(prompt.contains(&live_id));
+        assert!(!prompt.contains(&old_id));
+        detail.steps[0].superseded_in_revision = None;
+        let prompt = build_adjust_user_prompt("keep useful work", &detail);
+        let current_line = prompt.lines().find(|line| line.starts_with(&live_id)).unwrap();
+        assert!(!current_line.contains(&old_id));
+        detail.dependencies[0].superseded_in_revision = None;
+        let prompt = build_adjust_user_prompt("keep useful work", &detail);
+        let current_line = prompt.lines().find(|line| line.starts_with(&live_id)).unwrap();
+        assert!(current_line.contains(&old_id));
     }
 
     #[test]
