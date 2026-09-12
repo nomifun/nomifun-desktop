@@ -20,12 +20,14 @@ use nomifun_ai_agent::protocol::events::{AgentStreamEvent, TurnStopReason};
 use nomifun_conversation::ConversationService;
 use nomifun_db::IClientPreferenceRepository;
 use nomifun_robot::endpoint::{EndpointAdvertiser, LanAdvertiser, LanEndpointSnapshot};
+use nomifun_robot::effect_ledger::RobotEffectLedger;
 use nomifun_robot::mcp_proxy::{MCP_PROXY_SERVER_NAME, RobotMcpProxyServer};
 use nomifun_robot::registry::RobotRegistry;
 use nomifun_robot::services::{SpeechServices, TurnEvent};
 use nomifun_robot::status::RobotStatusRegistry;
 use nomifun_robot::tool_registry::RobotToolRegistry;
 use nomifun_robot::vad::VadTuning;
+use nomifun_robot::vision::RobotVisionObservationRegistry;
 use nomifun_robot::wiring::{
     CompanionSlotReader, PreferenceReader, RobotSpeech, VisionCompletionExecutor,
     VisionCompletionRequest,
@@ -98,6 +100,8 @@ pub struct RobotServices {
     pub registry: Arc<RobotRegistry>,
     pub status: Arc<RobotStatusRegistry>,
     pub tools: Arc<RobotToolRegistry>,
+    pub effect_ledger: Arc<RobotEffectLedger>,
+    pub vision_observations: Arc<RobotVisionObservationRegistry>,
     pub advertiser: Arc<dyn EndpointAdvertiser>,
     pub speech: Arc<dyn SpeechServices>,
     /// Live view of the LAN listener. `desktop.rs` projects its `WebUiStatus`
@@ -129,6 +133,8 @@ impl RobotServices {
             owner_user_id.to_owned(),
         ));
         let tools = Arc::new(RobotToolRegistry::default());
+        let effect_ledger = Arc::new(RobotEffectLedger::load(data_dir).await?);
+        let vision_observations = Arc::new(RobotVisionObservationRegistry::default());
         let proxy = match RobotMcpProxyServer::spawn(tools.clone()).await {
             Ok(server) => Some(Arc::new(server)),
             Err(error) => {
@@ -159,6 +165,8 @@ impl RobotServices {
             registry,
             status,
             tools,
+            effect_ledger,
+            vision_observations,
             advertiser,
             speech,
             endpoint_tx,
@@ -1048,6 +1056,7 @@ pub fn mount(
             advertiser: robot.advertiser.clone(),
             acceptor,
             speech: robot.speech.clone(),
+            vision_observations: robot.vision_observations.clone(),
         }),
         admin: nomifun_robot::routes::admin_router(nomifun_robot::routes::RobotAdminState {
             registry: robot.registry.clone(),

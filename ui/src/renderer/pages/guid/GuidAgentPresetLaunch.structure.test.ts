@@ -116,7 +116,7 @@ describe('Guid workbench Agent launch behavior', () => {
     expect(officialLaunch.includes('model: { provider_id:')).toBe(false);
   });
 
-  test('Agent launch submits only Agent identity, title, and the typed session model choice', () => {
+  test('Agent launch submits Agent identity, title, model, and narrow product resource selections', () => {
     const send = readSource(new URL('./hooks/useGuidSend.ts', import.meta.url));
     const payload = extractObjectArgument(
       send,
@@ -128,6 +128,7 @@ describe('Guid workbench Agent launch behavior', () => {
     expect(payload.includes('model: current_model.use_model')).toBe(true);
     expect(payload.includes('preset_id: launchPreset.preset_id')).toBe(true);
     expect(payload.includes('title: entryPlan.conversationName')).toBe(true);
+    expect(payload.includes('resource_selections: resourceSelections')).toBe(true);
 
     for (const forbidden of [
       'agent_binding',
@@ -137,7 +138,7 @@ describe('Guid workbench Agent launch behavior', () => {
       'credential',
       'base_url',
       'skill',
-      'mcp',
+      'typed_resource_bindings',
     ]) {
       expect(payload.includes(forbidden)).toBe(false);
     }

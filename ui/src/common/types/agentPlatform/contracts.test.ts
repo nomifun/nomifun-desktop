@@ -59,6 +59,22 @@ describe('Agent Platform TypeScript contracts', () => {
     expect('agent_binding' in request).toBe(false);
   });
 
+  test('CreateAgentSessionRequest carries product resource choices, not bindings', () => {
+    const request: CreateAgentSessionRequest = {
+      preset_id: asAgentPresetId('0190f5fe-7c00-7a00-8000-000000000001'),
+      resource_selections: [
+        { resource_kind: 'companion', resource_id: 'companion-1' },
+        { resource_kind: 'channel', resource_id: 'channel-1' },
+      ],
+    };
+
+    expect(request.resource_selections).toEqual([
+      { resource_kind: 'companion', resource_id: 'companion-1' },
+      { resource_kind: 'channel', resource_id: 'channel-1' },
+    ]);
+    expect('agent_binding' in request).toBe(false);
+  });
+
   test('D-026 continuation requires same owner and explicit Session identity', () => {
     expect(remoteCredentialContinuationFixture()).toEqual({
       requires_same_owner: true,

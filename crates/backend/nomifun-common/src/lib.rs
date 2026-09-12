@@ -62,7 +62,7 @@ pub use id::{
     CreativeStudioCanvasId, CreativeStudioNodeId, CreativeStudioProjectId,
     CreativeStudioTemplateId, CreativeStudioTemplateRunId, CreativeStudioTemplateStepId,
     CronJobId, CronJobRunId,
-    CsAgentId, CsNoteId,
+    CsAgentCapabilityReceiptId, CsAgentId, CsHandoffId, CsNoteId,
     EntityId, FigureId,
     IdmmInterventionId, KnowledgeBaseId, KnowledgeBindingId, KnowledgeEntryId,
     KnowledgeSourceId, KnowledgeSourceItemId, KnowledgeTreeOperationId, McpServerId,

@@ -140,7 +140,8 @@ const AgentSettingsPage: React.FC = () => {
               onSave={() => void controller.saveRevision()}
               onDiscard={controller.discardChanges}
               onOpenModels={() => beforeSwitch(() => { void navigate('/models'); })}
-              onTest={(input) => void controller.runTest(input)}
+              onOpenResource={(route) => beforeSwitch(() => { void navigate(route); })}
+              onTest={(input, resourceSelections) => void controller.runTest(input, resourceSelections)}
               onStartConversation={startConversation}
             />
           ) : (

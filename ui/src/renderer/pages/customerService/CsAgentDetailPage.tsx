@@ -25,7 +25,7 @@ import {
 } from '@arco-design/web-react';
 import { DeleteOne, Down, EditOne, Left, More, Plus, PreviewOpen } from '@icon-park/react';
 import { ipcBridge } from '@/common';
-import type { ICsNote } from '@/common/adapter/ipcBridge';
+import type { ICsHandoff, ICsNote } from '@/common/adapter/ipcBridge';
 import { parseCsAgentId, type CsAgentId, type KnowledgeBaseId, type ProviderId } from '@/common/types/ids';
 import NomiInput from '@/renderer/components/base/NomiInput';
 import NomiSelect from '@/renderer/components/base/NomiSelect';
@@ -219,6 +219,96 @@ const CsAgentDetailPage: React.FC = () => {
     if (key === 'delete') removeNote(note);
   };
 
+  // ── durable human handoff queue ───────────────────────────────────
+  const [handoffs, setHandoffs] = useState<ICsHandoff[]>([]);
+  const [handoffsLoading, setHandoffsLoading] = useState(false);
+  const [handoffBusyId, setHandoffBusyId] = useState<string | null>(null);
+  const [resolvingHandoff, setResolvingHandoff] = useState<ICsHandoff | null>(null);
+  const [handoffResolution, setHandoffResolution] = useState('');
+
+  const refreshHandoffs = useCallback(async () => {
+    if (!csAgentId) return;
+    setHandoffsLoading(true);
+    try {
+      setHandoffs(await ipcBridge.customerService.listHandoffs.invoke({
+        cs_agent_id: csAgentId,
+        limit: 100,
+      }));
+    } catch (error) {
+      setHandoffs([]);
+      Message.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      setHandoffsLoading(false);
+    }
+  }, [csAgentId]);
+
+  useEffect(() => {
+    void refreshHandoffs();
+  }, [refreshHandoffs]);
+
+  const claimHandoff = async (handoff: ICsHandoff) => {
+    setHandoffBusyId(handoff.cs_handoff_id);
+    try {
+      await ipcBridge.customerService.claimHandoff.invoke({
+        cs_handoff_id: handoff.cs_handoff_id,
+        expected_status: 'pending',
+      });
+      Message.success(t('customerService.handoffs.claimed', { defaultValue: '已认领人工交接' }));
+      await refreshHandoffs();
+    } catch (error) {
+      Message.error(error instanceof Error ? error.message : String(error));
+      await refreshHandoffs();
+    } finally {
+      setHandoffBusyId(null);
+    }
+  };
+
+  const cancelHandoff = async (handoff: ICsHandoff) => {
+    setHandoffBusyId(handoff.cs_handoff_id);
+    try {
+      await ipcBridge.customerService.cancelHandoff.invoke({
+        cs_handoff_id: handoff.cs_handoff_id,
+        expected_status: handoff.status === 'claimed' ? 'claimed' : 'pending',
+        resolution: t('customerService.handoffs.cancelledByOwner', { defaultValue: '由主人取消' }),
+      });
+      Message.success(t('customerService.handoffs.cancelled', { defaultValue: '交接已取消' }));
+      await refreshHandoffs();
+    } catch (error) {
+      Message.error(error instanceof Error ? error.message : String(error));
+      await refreshHandoffs();
+    } finally {
+      setHandoffBusyId(null);
+    }
+  };
+
+  const resolveHandoff = async () => {
+    if (!resolvingHandoff || !handoffResolution.trim()) return;
+    setHandoffBusyId(resolvingHandoff.cs_handoff_id);
+    try {
+      await ipcBridge.customerService.resolveHandoff.invoke({
+        cs_handoff_id: resolvingHandoff.cs_handoff_id,
+        expected_status: 'claimed',
+        resolution: handoffResolution.trim(),
+      });
+      setResolvingHandoff(null);
+      setHandoffResolution('');
+      Message.success(t('customerService.handoffs.resolved', { defaultValue: '交接已完成' }));
+      await refreshHandoffs();
+    } catch (error) {
+      Message.error(error instanceof Error ? error.message : String(error));
+      await refreshHandoffs();
+    } finally {
+      setHandoffBusyId(null);
+    }
+  };
+
+  const handoffStatusLabel = (status: ICsHandoff['status']): string => {
+    if (status === 'pending') return t('customerService.handoffs.statusPending', { defaultValue: '待认领' });
+    if (status === 'claimed') return t('customerService.handoffs.statusClaimed', { defaultValue: '处理中' });
+    if (status === 'resolved') return t('customerService.handoffs.statusResolved', { defaultValue: '已完成' });
+    return t('customerService.handoffs.statusCancelled', { defaultValue: '已取消' });
+  };
+
   // ── delete agent ─────────────────────────────────────────────────────
   const deleteAgent = async () => {
     if (!csAgentId) return;
@@ -279,7 +369,7 @@ const CsAgentDetailPage: React.FC = () => {
             />
             <Popconfirm
               title={t('customerService.detail.deleteConfirm', {
-                defaultValue: '删除该客服？其绑定、对话记录与私有笔记将一并删除。',
+                defaultValue: '删除该客服？其绑定、对话记录、人工交接与私有笔记将一并删除。',
               })}
               onOk={() => void deleteAgent()}
             >
@@ -449,6 +539,83 @@ const CsAgentDetailPage: React.FC = () => {
               </Section>
             )}
 
+            <Section
+              title={t('customerService.sections.handoffs', { defaultValue: '人工交接队列' })}
+              extra={
+                <Button size='small' loading={handoffsLoading} onClick={() => void refreshHandoffs()}>
+                  {t('customerService.handoffs.refresh', { defaultValue: '刷新' })}
+                </Button>
+              }
+            >
+              <div className={styles.tableScroll}>
+                <div className={styles.tableInner}>
+                  <Table
+                    rowKey='cs_handoff_id'
+                    data={handoffs}
+                    loading={handoffsLoading}
+                    pagination={false}
+                    size='small'
+                    noDataElement={
+                      <span className='text-13px text-t-tertiary'>
+                        {t('customerService.handoffs.empty', { defaultValue: '当前没有人工交接' })}
+                      </span>
+                    }
+                    columns={[
+                      {
+                        title: t('customerService.handoffs.reason', { defaultValue: '原因' }),
+                        dataIndex: 'reason',
+                        render: (reason: string, handoff: ICsHandoff) => (
+                          <div className={styles.handoffReason}>
+                            <strong>{reason}</strong>
+                            {handoff.summary && <span>{handoff.summary}</span>}
+                          </div>
+                        ),
+                      },
+                      {
+                        title: t('customerService.handoffs.status', { defaultValue: '状态' }),
+                        width: 84,
+                        render: (_: unknown, handoff: ICsHandoff) => (
+                          <Tag
+                            size='small'
+                            color={handoff.status === 'pending' ? 'orange' : handoff.status === 'claimed' ? 'blue' : handoff.status === 'resolved' ? 'green' : 'gray'}
+                          >
+                            {handoffStatusLabel(handoff.status)}
+                          </Tag>
+                        ),
+                      },
+                      {
+                        title: '',
+                        width: 176,
+                        render: (_: unknown, handoff: ICsHandoff) => {
+                          const busy = handoffBusyId === handoff.cs_handoff_id;
+                          if (handoff.status === 'resolved' || handoff.status === 'cancelled') {
+                            return handoff.resolution ? <span className={styles.handoffResolution}>{handoff.resolution}</span> : null;
+                          }
+                          return (
+                            <span className='inline-flex items-center gap-6px'>
+                              {handoff.status === 'pending' && (
+                                <Button size='mini' type='primary' loading={busy} onClick={() => void claimHandoff(handoff)}>
+                                  {t('customerService.handoffs.claim', { defaultValue: '认领' })}
+                                </Button>
+                              )}
+                              {handoff.status === 'claimed' && (
+                                <Button size='mini' type='primary' loading={busy} onClick={() => { setResolvingHandoff(handoff); setHandoffResolution(''); }}>
+                                  {t('customerService.handoffs.resolve', { defaultValue: '完成' })}
+                                </Button>
+                              )}
+                              <Button size='mini' status='danger' disabled={busy} onClick={() => void cancelHandoff(handoff)}>
+                                {t('customerService.handoffs.cancel', { defaultValue: '取消' })}
+                              </Button>
+                            </span>
+                          );
+                        },
+                      },
+                    ]}
+                  />
+                </div>
+              </div>
+            </Section>
+
             {/* 客服笔记 */}
             <Section
               title={t('customerService.sections.notes', { defaultValue: '客服笔记' })}
@@ -570,6 +737,25 @@ const CsAgentDetailPage: React.FC = () => {
           </div>
         </main>
       </div>
+
+      <Modal
+        visible={Boolean(resolvingHandoff)}
+        title={t('customerService.handoffs.resolveTitle', { defaultValue: '完成人工交接' })}
+        onCancel={() => { if (!handoffBusyId) { setResolvingHandoff(null); setHandoffResolution(''); } }}
+        onOk={() => void resolveHandoff()}
+        confirmLoading={Boolean(resolvingHandoff && handoffBusyId === resolvingHandoff.cs_handoff_id)}
+        okButtonProps={{ disabled: !handoffResolution.trim() }}
+        unmountOnExit
+      >
+        <Input.TextArea
+          rows={4}
+          value={handoffResolution}
+          maxLength={12000}
+          showWordLimit
+          placeholder={t('customerService.handoffs.resolutionPlaceholder', { defaultValue: '记录处理结果，完成后自动客服将恢复接待后续消息。' })}
+          onChange={setHandoffResolution}
+        />
+      </Modal>
 
       {/* 新增 / 查看 / 编辑笔记 */}
       <Modal

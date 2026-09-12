@@ -66,7 +66,7 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({ document, catalog, disabled
   const statusLabel = (item?: CapabilityCatalogItem) => {
     if (!item) return t('agentSettings.workbench.missingSource');
     if (capabilityIsAvailable(item)) return t('agentSettings.common.available');
-    return t(isBuiltinCapability(item) ? 'agentSettings.workbench.notReady' : 'agentSettings.workbench.sourceUnavailable');
+    return t(isBuiltinCapability(item) ? 'agentSettings.workbench.builtinUnavailable' : 'agentSettings.workbench.sourceUnavailable');
   };
   const statusReason = (item?: CapabilityCatalogItem) => t(!item ? 'agentSettings.workbench.missingReason' :
     isBuiltinCapability(item) ? 'agentSettings.workbench.builtinReason' : 'agentSettings.workbench.pluginReason');
@@ -129,6 +129,7 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({ document, catalog, disabled
         <dl className={styles.detailFacts}>
           <div><dt>ID</dt><dd><code>{reference.id}</code></dd></div>
           <div><dt>{t('agentSettings.workbench.version')}</dt><dd>{reference.version}</dd></div>
+          {item?.unavailable_code && <div><dt>{t('agentSettings.workbench.unavailableCode')}</dt><dd><code>{item.unavailable_code}</code></dd></div>}
           {item && <><div><dt>{t('agentSettings.capabilities.source')}</dt><dd><code>{item.source_package.id}@{item.source_package.version}</code></dd></div>
             <div><dt>{t('agentSettings.workbench.contributions')}</dt><dd>{t('agentSettings.capabilities.tools', { count: item.action_count })} · {t('agentSettings.capabilities.contexts', { count: item.context_contributor_count })}</dd></div></>}
         </dl>
@@ -186,7 +187,12 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({ document, catalog, disabled
             return <div className={`${styles.capabilityRow} ${checked.has(identity) ? styles.rowChecked : ''}`} key={identity}>
               <Checkbox checked={checked.has(identity)} disabled={disabled} aria-label={t('agentSettings.workbench.selectCapability', { name })} onChange={(value) => toggleChecked(identity, value)} />
               <div className={styles.rowCopy}>
-                <div className={styles.rowTitle}><button type='button' onClick={() => setDetails(reference)}>{name}</button>{!available && <span className={styles.unavailable}>{statusLabel(item)}</span>}</div>
+                <div className={styles.rowTitle}>
+                  <button type='button' onClick={() => setDetails(reference)}>{name}</button>
+                  {!available
+                    ? <span className={styles.unavailable}>{statusLabel(item)}</span>
+                    : Boolean(item?.required_resource_kinds.length) && <span className={styles.configurable}>{t('agentSettings.workbench.configureAtUse')}</span>}
+                </div>
                 <p>{item ? capabilityProductCopy(item, i18n.language).description : statusReason(item)}</p>
               </div>
               <div className={styles.rowActions}>
@@ -222,7 +228,7 @@ const AgentCapabilityWorkspace: React.FC<Props> = ({ document, catalog, disabled
           {pickerRows.map((item) => {
             const reference = item.capability; const identity = capabilityReferenceKey(reference); const included = selectedKeys.has(identity); const available = capabilityIsAvailable(item); const copy = capabilityProductCopy(item, i18n.language);
             return <div className={`${styles.pickerCard} ${additions.has(identity) ? styles.pickerCardSelected : ''}`} key={identity}>
-              <label className={styles.pickerCardMain}><input type='checkbox' checked={included || additions.has(identity)} disabled={disabled || included || !available} aria-label={t('agentSettings.workbench.addCapability', { name: copy.name })} onChange={(event) => setAdditions((previous) => { const next = new Set(previous); if (event.target.checked) next.add(identity); else next.delete(identity); return next; })} /><div><strong>{copy.name}</strong><p>{copy.description}</p><span className={styles.sourceHint}>{t(isBuiltinCapability(item) ? 'agentSettings.workbench.builtin' : 'agentSettings.workbench.plugin')} · {categoryName(capabilityCategory(reference))}</span></div>{included ? <Tag size='small'>{t('agentSettings.workbench.alreadyAdded')}</Tag> : !available && <span className={styles.unavailable}>{statusLabel(item)}</span>}</label>
+              <label className={styles.pickerCardMain}><input type='checkbox' checked={included || additions.has(identity)} disabled={disabled || included || !available} aria-label={t('agentSettings.workbench.addCapability', { name: copy.name })} onChange={(event) => setAdditions((previous) => { const next = new Set(previous); if (event.target.checked) next.add(identity); else next.delete(identity); return next; })} /><div><strong>{copy.name}</strong><p>{copy.description}</p><span className={styles.sourceHint}>{t(isBuiltinCapability(item) ? 'agentSettings.workbench.builtin' : 'agentSettings.workbench.plugin')} · {categoryName(capabilityCategory(reference))}</span></div>{included ? <Tag size='small'>{t('agentSettings.workbench.alreadyAdded')}</Tag> : !available ? <span className={styles.unavailable}>{statusLabel(item)}</span> : item.required_resource_kinds.length > 0 && <span className={styles.configurable}>{t('agentSettings.workbench.configureAtUse')}</span>}</label>
               <details className={styles.pickerDetail}><summary>{t('agentSettings.workbench.viewDetails')}</summary>{renderDetails(reference)}</details>
             </div>;
           })}

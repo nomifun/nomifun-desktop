@@ -4,8 +4,8 @@ use std::sync::Arc;
 use nomifun_agent_contracts::{
     CapabilityConsumer, CapabilityOperationLock, CapabilityRef,
     AgentBindingValue, AgentPreset, AgentPresetId, AgentPresetRevision, AgentPresetSource,
-    CapabilitySelection, ExactVersionRef, OfficialPresetKey, PresetRevisionRef, RemoteBinding,
-    RemoteBindingId, UserId, compare_revision_contribution_locks,
+    CapabilitySelection, ChatRouteFeature, ExactVersionRef, OfficialPresetKey, PresetRevisionRef,
+    RemoteBinding, RemoteBindingId, UserId, compare_revision_contribution_locks,
 };
 use nomifun_api_types::{
     AgentBindingRecordDto, AgentBindingSummaryDto, AgentBindingTargetDto, AgentBindingValueDto,
@@ -37,6 +37,19 @@ const SETTINGS_SCENE: &str = "agent_settings";
 const SETTINGS_SURFACE: &str = "desktop";
 const SETTINGS_AUDIENCE: &str = "owner";
 const CHAT_MODEL_TASK: &str = nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT;
+
+fn required_chat_features<'a>(
+    capability_ids: impl IntoIterator<Item = &'a str>,
+) -> BTreeSet<ChatRouteFeature> {
+    capability_ids
+        .into_iter()
+        .filter_map(|capability_id| match capability_id {
+            "llm.vision" => Some(ChatRouteFeature::ImageInput),
+            "web.search" => Some(ChatRouteFeature::WebSearch),
+            _ => None,
+        })
+        .collect()
+}
 
 /// Host-owned source for the initial Chat route shown by the product editor.
 ///
@@ -322,6 +335,12 @@ impl AgentControlPlane {
             .seed(template_key)
             .ok_or_else(|| not_found("OfficialPresetTemplate"))?;
         let display_name = nonempty_name(request.display_name)?;
+        let required_chat_features = required_chat_features(
+            seed.initial_capabilities
+                .iter()
+                .chain(&seed.on_demand_capabilities)
+                .map(|capability| capability.id.as_ref()),
+        );
         let mut model_route_refs = request.model_route_refs;
         let mut chat_route_records = request.chat_route_records;
         let uses_default_route = !model_route_refs.contains_key(CHAT_MODEL_TASK)
@@ -334,7 +353,13 @@ impl AgentControlPlane {
             && let Some(record) =
                 match request.model.as_ref() {
                     Some(model) => Some(self.resolve_selected_chat_route(owner, model).await?),
-                    None => self.resolve_default_chat_route(owner).await?,
+                    None => {
+                        self.resolve_default_chat_route_for_features(
+                            owner,
+                            &required_chat_features,
+                        )
+                        .await?
+                    }
                 }
         {
             model_route_refs.insert(
@@ -479,12 +504,54 @@ impl AgentControlPlane {
         Ok(route)
     }
 
+    async fn resolve_default_chat_route_for_features(
+        &self,
+        owner: &UserId,
+        required: &BTreeSet<ChatRouteFeature>,
+    ) -> Result<Option<nomifun_agent_contracts::ChatRouteRecord>, ControlPlaneError> {
+        let Some(mut route) = self.resolve_default_chat_route(owner).await? else {
+            return Ok(None);
+        };
+        if required.is_empty() {
+            return Ok(Some(route));
+        }
+        let candidates = std::iter::once(route.primary.clone())
+            .chain(route.failovers.clone())
+            .collect::<Vec<_>>();
+        let Some(primary) = candidates
+            .iter()
+            .find(|candidate| required.is_subset(&candidate.features))
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        route.primary = primary.clone();
+        route.failovers = candidates
+            .into_iter()
+            .filter(|candidate| {
+                candidate.model_route_id != primary.model_route_id
+                    && required.is_subset(&candidate.features)
+            })
+            .collect();
+        Ok(Some(route))
+    }
+
     async fn materialize_default_chat_route(
         &self,
         owner: &UserId,
         mut document: nomifun_api_types::AgentPresetDocumentDto,
     ) -> Result<nomifun_api_types::AgentPresetDocumentDto, ControlPlaneError> {
-        if let Some(record) = self.resolve_default_chat_route(owner).await? {
+        let required = required_chat_features(
+            document
+                .initial_capabilities
+                .iter()
+                .chain(&document.on_demand_capabilities)
+                .map(|selection| selection.capability.id.as_str()),
+        );
+        if let Some(record) = self
+            .resolve_default_chat_route_for_features(owner, &required)
+            .await?
+        {
             document.model_route_refs.insert(
                 CHAT_MODEL_TASK.to_owned(),
                 record.primary.model_route_id.as_ref().to_owned(),

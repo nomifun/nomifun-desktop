@@ -19,6 +19,7 @@ pub mod manager;
 pub mod nomi_session_persistence;
 pub mod one_shot;
 pub mod plugin_tools;
+mod plugin_tool_error_projection;
 pub mod protocol;
 pub mod registry;
 pub mod routes;
@@ -27,6 +28,10 @@ pub mod runtime_registry;
 pub mod terminal_title_completer;
 pub mod types;
 pub mod web_fetch;
+mod subagent_gateway;
+#[path = "web_search_provider.rs"]
+pub mod web_search;
+pub mod vision_activation;
 
 // ── Agent-layer re-exports (the seam) ──────────────────────────────────────
 // Backend crates reach the agent (nomi-*) layer ONLY through nomifun-ai-agent.
@@ -40,6 +45,24 @@ pub use nomi_agent::ssh_backend::{
     SshSessionBinding, SshSessionLease,
 };
 pub use nomi_agent::requirement_tools::RequirementSink;
+pub use nomi_agent::context_contributor::ContextContributor;
+pub use nomi_agent::session_control_tools::{
+    AGENT_EXECUTION_OBSERVE_TOOL_NAME, AGENT_EXECUTION_STEER_TOOL_NAME,
+    AGENT_FORK_TOOL_NAME, AgentExecutionObserveTool, AgentExecutionSteerTool,
+    AgentForkTool, SessionControlSink,
+};
+pub use nomi_agent::subagent_tools::{
+    SUBAGENT_SEND_OUTCOME_UNKNOWN_CODE, SUBAGENT_SEND_TOOL_NAME, SUBAGENT_WAIT_TOOL_NAME,
+    DelegationHandleRecordingTool, HostSubagentChild, HostSubagentResult,
+    ParentScopedSubagentRegistry, SubagentHandle, SubagentHost, SubagentRunState,
+    SubagentSendTool, SubagentWaitTool,
+};
+pub use nomi_agent::mcp_capability_tools::{
+    MCP_RESOURCE_LIST_TOOL_NAME, MCP_RESOURCE_READ_TOOL_NAME,
+};
+pub use nomi_agent::lazy_mcp::{
+    MCP_CONNECT_TOOL_NAME, MCP_GENERIC_PROXY_TOOL_NAME,
+};
 pub use nomi_config;
 pub use nomi_types;
 
@@ -50,16 +73,31 @@ pub use boot_process_reaper::{
 #[cfg(any(test, feature = "test-support"))]
 pub use runtime_handle::MockAgentRuntime;
 pub use runtime_handle::{
-    AgentRuntimeControl, AgentRuntimeHandle, SystemResourceNoticeDelivery,
+    AgentCapabilityActivationSnapshot, AgentRuntimeControl, AgentRuntimeHandle,
+    SystemResourceNoticeDelivery,
 };
 pub use factory::provider_config::{
     one_shot_completion, one_shot_completion_bounded, resolve_provider_config,
-    streaming_completion, streaming_completion_text_or_reasoning, user_message, DeltaKind,
+    resolve_provider_config_at_revision, streaming_completion,
+    streaming_completion_text_or_reasoning, user_message, DeltaKind,
 };
 pub use one_shot::{OneShotDeps, OneShotTool, OneShotTurnRequest, one_shot_handler, run_one_shot_turn};
 pub use plugin_tools::{
-    KernelNomiPluginToolSession, NomiPluginToolAction, NomiPluginToolError,
-    NomiPluginToolInvocation, NomiPluginToolInvoker, NomiPluginToolSchemaResolver,
+    KernelNomiPluginToolSession, NomiDeferredContextAction,
+    NomiDeferredLifecycleAction,
+    NomiHostDynamicToolDescriptor, NomiHostDynamicToolError,
+    NomiHostDynamicToolInvocation,
+    NomiHostDynamicToolInvoker,
+    NomiInitialContextContribution,
+    NomiPlatformBuiltinContextAdmission, NomiPluginToolAction,
+    NomiPluginToolError, NomiPluginToolInvocation, NomiPluginToolInvoker,
+    NomiPluginToolSchemaResolver,
+    NomiPlatformBuiltinToolAdmission,
+    NomiPlatformBuiltinToolSchemaResolver,
+    NomiPlatformBuiltinToolSchemaRouter,
+    NomiPlatformBuiltinLifecycleAdmission,
+    NomiPlatformBuiltinLifecycleInvocation,
+    NomiPlatformBuiltinLifecycleInvoker,
     NomiPluginToolSession, NomiPluginToolSessionProvider,
     NomiPluginToolSessionRequest, NomiMiniAppToolAction,
     NomiMiniAppToolInvocation, NomiMiniAppToolInvoker,

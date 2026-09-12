@@ -238,6 +238,7 @@ import {
   parseProviderId,
   parseCsAgentId,
   parseCsDialogueId,
+  parseCsHandoffId,
   parseCsMessageId,
   parseCsNoteId,
   parseRequirementId,
@@ -270,6 +271,7 @@ import {
   type ProviderId,
   type CsAgentId,
   type CsDialogueId,
+  type CsHandoffId,
   type CsMessageId,
   type CsNoteId,
   type ChannelUserId,
@@ -281,6 +283,7 @@ import {
   type SshHostId,
   type SkillPatternId,
   type TerminalId,
+  type UserId,
   type WebhookId,
 } from '../types/ids';
 import {
@@ -6344,7 +6347,7 @@ export interface ICsChannelBinding {
   created_at: number;
 }
 
-/** One customer-service note (FAQ / script / business fact; read-only at runtime). */
+/** One customer-service note. Visitor one-shot turns are read-only; the owner-scoped official Agent may persist an explicit notes.write action. */
 export interface ICsNote {
   cs_note_id: CsNoteId;
   /** null = shared by every agent. */
@@ -6382,6 +6385,25 @@ export interface ICsMessage {
   role: 'visitor' | 'agent' | 'system';
   content: string;
   created_at: number;
+}
+
+export type CsHandoffStatus = 'pending' | 'claimed' | 'resolved' | 'cancelled';
+
+/** Durable human-escalation queue row created by customer_service.handoff. */
+export interface ICsHandoff {
+  cs_handoff_id: CsHandoffId;
+  cs_agent_id: CsAgentId;
+  cs_dialogue_id: CsDialogueId;
+  requested_by: UserId;
+  idempotency_key: string;
+  reason: string;
+  summary: string;
+  status: CsHandoffStatus;
+  claimed_by: UserId | null;
+  updated_by: UserId;
+  resolution: string;
+  created_at: number;
+  updated_at: number;
 }
 
 const fromApiCsAgent = (raw: unknown): ICsAgent => {
@@ -6436,6 +6458,19 @@ const fromApiCsMessage = (raw: unknown): ICsMessage => {
     ...(message as unknown as ICsMessage),
     cs_message_id: parseCsMessageId(message.cs_message_id),
     cs_dialogue_id: parseCsDialogueId(message.cs_dialogue_id),
+  };
+};
+
+const fromApiCsHandoff = (raw: unknown): ICsHandoff => {
+  const handoff = asWireObject(raw, 'customer-service handoff');
+  return {
+    ...(handoff as unknown as ICsHandoff),
+    cs_handoff_id: parseCsHandoffId(handoff.cs_handoff_id),
+    cs_agent_id: parseCsAgentId(handoff.cs_agent_id),
+    cs_dialogue_id: parseCsDialogueId(handoff.cs_dialogue_id),
+    requested_by: parseUserId(handoff.requested_by),
+    claimed_by: handoff.claimed_by == null ? null : parseUserId(handoff.claimed_by),
+    updated_by: parseUserId(handoff.updated_by),
   };
 };
 
@@ -6522,6 +6557,39 @@ export const customerService = {
       (p) => `/api/customer-service/dialogues/${p.cs_dialogue_id}/messages`
     ),
     (messages) => messages.map(fromApiCsMessage)
+  ),
+  /** Durable human handoff queue for one selected customer-service Agent. */
+  listHandoffs: withResponseMap(
+    httpGet<ICsHandoff[], { cs_agent_id: CsAgentId; status?: CsHandoffStatus; limit?: number }>(
+      (p) => {
+        const query = new URLSearchParams({ cs_agent_id: p.cs_agent_id });
+        if (p.status) query.set('status', p.status);
+        if (p.limit != null) query.set('limit', String(p.limit));
+        return `/api/customer-service/handoffs?${query.toString()}`;
+      }
+    ),
+    (handoffs) => handoffs.map(fromApiCsHandoff)
+  ),
+  claimHandoff: withResponseMap(
+    httpPost<ICsHandoff, { cs_handoff_id: CsHandoffId; expected_status: 'pending' }>(
+      (p) => `/api/customer-service/handoffs/${p.cs_handoff_id}/claim`,
+      (p) => ({ expected_status: p.expected_status })
+    ),
+    fromApiCsHandoff
+  ),
+  resolveHandoff: withResponseMap(
+    httpPost<ICsHandoff, { cs_handoff_id: CsHandoffId; expected_status: 'claimed'; resolution: string }>(
+      (p) => `/api/customer-service/handoffs/${p.cs_handoff_id}/resolve`,
+      (p) => ({ expected_status: p.expected_status, resolution: p.resolution })
+    ),
+    fromApiCsHandoff
+  ),
+  cancelHandoff: withResponseMap(
+    httpPost<ICsHandoff, { cs_handoff_id: CsHandoffId; expected_status: 'pending' | 'claimed'; resolution?: string }>(
+      (p) => `/api/customer-service/handoffs/${p.cs_handoff_id}/cancel`,
+      (p) => ({ expected_status: p.expected_status, resolution: p.resolution ?? '' })
+    ),
+    fromApiCsHandoff
   ),
 };
 

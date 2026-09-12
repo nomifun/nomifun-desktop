@@ -43,7 +43,8 @@ pub use session_ops::{
     SideQuestionResponse, WorkspaceBrowseQuery, WorkspaceEntry,
 };
 pub use agent_build_extra::{
-    NomiBuildExtra, NomiGoalSpec, SessionMcpServer, SessionMcpTransport, SlashCommandItem,
+    NomiBuildExtra, NomiGoalSpec, NomiMcpCapabilityPolicy, NomiRuntimeProfile,
+    SessionMcpServer, SessionMcpTransport, SlashCommandItem,
 };
 pub use agent_discovery::{
     AgentEnvEntry, AgentHandshake, AgentMetadata, AgentSource, AgentSourceInfo, BehaviorPolicy,

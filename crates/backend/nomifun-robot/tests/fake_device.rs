@@ -19,6 +19,7 @@ struct Harness {
     http: reqwest::Client,
     speech: Arc<MockSpeech>,
     dispatcher: Arc<MockDispatcher>,
+    tools: Arc<nomifun_robot::tool_registry::RobotToolRegistry>,
     /// The advertiser reads this; dropping it would freeze the endpoint at its
     /// last value, so the harness owns it for the life of the test.
     _endpoint_tx: tokio::sync::watch::Sender<LanEndpointSnapshot>,
@@ -70,6 +71,9 @@ async fn boot() -> Harness {
         advertiser: advertiser.clone(),
         acceptor,
         speech: speech.clone(),
+        vision_observations: Arc::new(
+            nomifun_robot::vision::RobotVisionObservationRegistry::default(),
+        ),
     };
     let admin_state = nomifun_robot::routes::RobotAdminState {
         registry: registry.clone(),
@@ -83,7 +87,7 @@ async fn boot() -> Harness {
             status,
             speech: speech.clone(),
             dispatcher: dispatcher.clone(),
-            tools,
+            tools: tools.clone(),
         },
     ));
     tokio::spawn(gateway.serve(vec![source]));
@@ -105,6 +109,7 @@ async fn boot() -> Harness {
         http: reqwest::Client::new(),
         speech,
         dispatcher,
+        tools,
         _endpoint_tx: endpoint_tx,
         _dir: dir,
     }
@@ -159,6 +164,19 @@ async fn next_json(socket: &mut Socket) -> Value {
             return serde_json::from_str(&raw).unwrap();
         }
     }
+}
+
+async fn answer_mcp(socket: &mut Socket, request: &Value, result: Value) {
+    let response = serde_json::json!({
+        "session_id": request["session_id"],
+        "type": "mcp",
+        "payload": {
+            "jsonrpc": "2.0",
+            "id": request["payload"]["id"],
+            "result": result,
+        }
+    });
+    send_text(socket, &serde_json::to_string(&response).unwrap()).await;
 }
 
 /// Encode `ms` of 16 kHz audio into 60 ms uplink packets, as the device would.
@@ -406,6 +424,148 @@ async fn a_device_reports_gets_claimed_talks_and_is_interrupted() {
         .await
         .unwrap();
     assert_eq!(statuses["statuses"][0]["phase"], "offline");
+}
+
+#[tokio::test]
+async fn authenticated_device_tools_are_scoped_and_called_through_the_live_link() {
+    use nomifun_robot::tool_registry::RobotToolCapability;
+
+    let h = boot().await;
+    let robot_id = "aa:bb:cc:dd:ee:20";
+    let ota: Value = h
+        .http
+        .post(format!("{}/robot/ota", h.base))
+        .header("Device-Id", robot_id)
+        .header("Client-Id", "cid")
+        .json(&serde_json::json!({
+            "version": 2,
+            "application": { "version": "1.9.0" },
+            "board": { "type": "esp32-s3n16r8-emoji" }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let token = ota["websocket"]["token"].as_str().unwrap().to_owned();
+    let ws_url = ota["websocket"]["url"].as_str().unwrap().to_owned();
+    h.http
+        .post(format!("{}/api/robots/claim", h.base))
+        .json(&serde_json::json!({
+            "code": ota["activation"]["code"],
+            "companion_id": "0190f5fe-7c00-7a00-8000-0000000000aa"
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+
+    let request = ws_request(
+        &ws_url,
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Device-Id", robot_id),
+            ("Client-Id", "cid"),
+            ("Protocol-Version", "1"),
+        ],
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    send_text(
+        &mut socket,
+        r#"{"type":"hello","version":1,"transport":"websocket","features":{"mcp":true}}"#,
+    )
+    .await;
+
+    let mut saw_hello = false;
+    let initialize = loop {
+        let frame = next_json(&mut socket).await;
+        if frame["type"] == "hello" {
+            saw_hello = true;
+        } else if frame["type"] == "mcp" && frame["payload"]["method"] == "initialize" {
+            break frame;
+        }
+    };
+    assert!(saw_hello);
+    answer_mcp(&mut socket, &initialize, serde_json::json!({})).await;
+
+    let list = next_json(&mut socket).await;
+    assert_eq!(list["payload"]["method"], "tools/list");
+    answer_mcp(
+        &mut socket,
+        &list,
+        serde_json::json!({
+            "tools": [
+                {
+                    "name": "self.head.look",
+                    "description": "turn the head",
+                    "inputSchema": { "type": "object" }
+                },
+                {
+                    "name": "self.emoji.set_expression",
+                    "description": "change the OLED face",
+                    "inputSchema": { "type": "object" }
+                }
+            ]
+        }),
+    )
+    .await;
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !h.tools.is_attached(robot_id).await {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("discovered tools must attach to the authenticated robot");
+
+    let call = tokio::spawn({
+        let tools = Arc::clone(&h.tools);
+        async move {
+            tools
+                .call_for_capability(
+                    robot_id,
+                    RobotToolCapability::Motion,
+                    "robot_head_look",
+                    serde_json::json!({ "direction": "left" }),
+                )
+                .await
+        }
+    });
+    let invocation = next_json(&mut socket).await;
+    assert_eq!(invocation["payload"]["method"], "tools/call");
+    assert_eq!(invocation["payload"]["params"]["name"], "self.head.look");
+    answer_mcp(
+        &mut socket,
+        &invocation,
+        serde_json::json!({
+            "content": [{ "type": "text", "text": "head turned" }],
+            "isError": false
+        }),
+    )
+    .await;
+    assert_eq!(call.await.unwrap().unwrap(), "head turned");
+
+    let error = h
+        .tools
+        .call_for_capability(
+            robot_id,
+            RobotToolCapability::Display,
+            "robot_head_look",
+            serde_json::json!({}),
+        )
+        .await
+        .expect_err("display capability cannot invoke a motion tool");
+    assert!(error.to_string().contains("robot.motion"));
+
+    drop(socket);
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while h.tools.is_attached(robot_id).await {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("disconnect must detach the authenticated device tool owner");
 }
 
 #[tokio::test]

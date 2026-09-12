@@ -253,21 +253,30 @@
         "type": "object"
       },
       "ChatRouteFeature": {
-        "enum": [
-          "text_input",
-          "image_input",
-          "audio_input",
-          "text_output",
-          "audio_output",
-          "tool_calls",
-          "reasoning",
-          "reasoning_signature",
-          "prompt_cache",
-          "structured_output",
-          "provider_round_state",
-          "native_responses_items"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "text_input",
+              "image_input",
+              "audio_input",
+              "text_output",
+              "audio_output",
+              "tool_calls",
+              "reasoning",
+              "reasoning_signature",
+              "prompt_cache",
+              "structured_output",
+              "provider_round_state",
+              "native_responses_items"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "web_search",
+            "description": "Exact Chat route supports provider-native web search with source\nattribution (currently OpenAI Responses built-in `web_search`).",
+            "type": "string"
+          }
+        ]
       },
       "ChatRouteProtocol": {
         "enum": [
@@ -635,21 +644,30 @@
         "type": "object"
       },
       "ChatRouteFeature": {
-        "enum": [
-          "text_input",
-          "image_input",
-          "audio_input",
-          "text_output",
-          "audio_output",
-          "tool_calls",
-          "reasoning",
-          "reasoning_signature",
-          "prompt_cache",
-          "structured_output",
-          "provider_round_state",
-          "native_responses_items"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "text_input",
+              "image_input",
+              "audio_input",
+              "text_output",
+              "audio_output",
+              "tool_calls",
+              "reasoning",
+              "reasoning_signature",
+              "prompt_cache",
+              "structured_output",
+              "provider_round_state",
+              "native_responses_items"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "web_search",
+            "description": "Exact Chat route supports provider-native web search with source\nattribution (currently OpenAI Responses built-in `web_search`).",
+            "type": "string"
+          }
+        ]
       },
       "ChatRouteProtocol": {
         "enum": [
@@ -909,21 +927,30 @@
         "type": "object"
       },
       "ChatRouteFeature": {
-        "enum": [
-          "text_input",
-          "image_input",
-          "audio_input",
-          "text_output",
-          "audio_output",
-          "tool_calls",
-          "reasoning",
-          "reasoning_signature",
-          "prompt_cache",
-          "structured_output",
-          "provider_round_state",
-          "native_responses_items"
-        ],
-        "type": "string"
+        "oneOf": [
+          {
+            "enum": [
+              "text_input",
+              "image_input",
+              "audio_input",
+              "text_output",
+              "audio_output",
+              "tool_calls",
+              "reasoning",
+              "reasoning_signature",
+              "prompt_cache",
+              "structured_output",
+              "provider_round_state",
+              "native_responses_items"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "web_search",
+            "description": "Exact Chat route supports provider-native web search with source\nattribution (currently OpenAI Responses built-in `web_search`).",
+            "type": "string"
+          }
+        ]
       },
       "ChatRouteProtocol": {
         "enum": [

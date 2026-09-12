@@ -422,6 +422,14 @@ define_entity_id!(
     CsNoteId
 );
 define_entity_id!(
+    /// Globally unique durable customer-service handoff identifier.
+    CsHandoffId
+);
+define_entity_id!(
+    /// Globally unique customer-service Agent capability receipt identifier.
+    CsAgentCapabilityReceiptId
+);
+define_entity_id!(
     /// Globally unique workshop-asset identifier.
     WorkshopAssetId
 );

@@ -5,6 +5,7 @@ import type {
   AgentPresetDocument,
   AgentPresetEditorResponse,
   AgentPresetLibraryResponse,
+  AgentResourceSelection,
   AgentPresetSummary,
   ChatRouteRecord,
   InstallationTokenStateResponse,
@@ -345,7 +346,7 @@ export function useAgentSettingsController() {
   }, [draft, refreshPresetLibraries, resolveDraftPreview]);
 
   const runTest = useCallback(
-    async (input: string) => {
+    async (input: string, resourceSelections: AgentResourceSelection[]) => {
       if (!draft) return;
       setBusyAction('test');
       setError(null);
@@ -356,6 +357,7 @@ export function useAgentSettingsController() {
           dirty,
           input,
           idempotencyKey: idempotencyKey(),
+          resourceSelections,
           ports: {
             preview: async (nextDraft) => resolveDraftPreview(nextDraft),
             save: async (request) =>

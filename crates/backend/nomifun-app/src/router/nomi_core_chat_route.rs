@@ -245,7 +245,7 @@ fn features_for(raw: &str) -> Result<BTreeSet<ChatRouteFeature>, ControlPlaneErr
             ModelTrait::VisionInput => ChatRouteFeature::ImageInput,
             ModelTrait::FunctionCalling => ChatRouteFeature::ToolCalls,
             ModelTrait::Reasoning => ChatRouteFeature::Reasoning,
-            ModelTrait::WebSearch => continue,
+            ModelTrait::WebSearch => ChatRouteFeature::WebSearch,
             ModelTrait::AudioInput => ChatRouteFeature::AudioInput,
             ModelTrait::AudioOutput => ChatRouteFeature::AudioOutput,
             ModelTrait::VideoInput => continue,

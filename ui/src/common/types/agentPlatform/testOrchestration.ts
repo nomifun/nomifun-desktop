@@ -1,5 +1,6 @@
 import type {
   AgentPresetDraft,
+  AgentResourceSelection,
   CreateAgentSessionRequest,
   CreateAgentSessionResponse,
   CreateAgentSessionTurnResponse,
@@ -24,6 +25,7 @@ export interface RunAgentPresetTestInput {
   dirty: boolean;
   input: string;
   idempotencyKey: string;
+  resourceSelections: AgentResourceSelection[];
   ports: AgentPresetTestPorts;
 }
 
@@ -62,6 +64,7 @@ export async function runAgentPresetTest(
   const session = await input.ports.createSession({
     preset_id: input.draft.preset_id,
     title: `${input.draft.display_name} Test`,
+    ...(input.resourceSelections.length > 0 ? { resource_selections: input.resourceSelections } : {}),
   });
   const turn = await input.ports.createTurn(
     session.agent_session_id,

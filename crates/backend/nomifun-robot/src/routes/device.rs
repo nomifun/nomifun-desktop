@@ -25,10 +25,13 @@ use crate::link::{
 };
 use crate::registry::{RobotRecord, RobotRegistry, RobotReport};
 use crate::services::SpeechServices;
+use crate::vision::{RobotVisionObservation, RobotVisionObservationRegistry};
 
 /// Largest photo we will accept. A 640×480 quality-80 JPEG is 30–60 KB; this is
 /// generous headroom without letting a bad actor stream forever.
 pub const VISION_MAX_BYTES: usize = 8 * 1024 * 1024;
+const VISION_QUESTION_MAX_CHARS: usize = 4_096;
+const DEFAULT_VISION_QUESTION: &str = "描述这张图片。";
 
 /// Message shown/spoken by the device while waiting to be claimed.
 const ACTIVATION_MESSAGE: &str = "请在 nomifun 中输入此码绑定伙伴";
@@ -44,6 +47,7 @@ pub struct RobotDeviceState {
     /// Vision lives here rather than on the session because the firmware uploads
     /// photos over plain HTTP, outside any websocket session.
     pub speech: Arc<dyn SpeechServices>,
+    pub vision_observations: Arc<RobotVisionObservationRegistry>,
 }
 
 /// Router for the device face, to be nested under `/robot`.
@@ -317,13 +321,37 @@ async fn vision_explain(
     let Some(jpeg) = jpeg else {
         return Json(json!({ "success": false, "message": "缺少 file 表单字段" })).into_response();
     };
+    let question = if question.trim().is_empty() {
+        DEFAULT_VISION_QUESTION.to_owned()
+    } else {
+        question.trim().to_owned()
+    };
+    if question.chars().count() > VISION_QUESTION_MAX_CHARS {
+        return Json(json!({
+            "success": false,
+            "message": format!("问题过长，最多 {VISION_QUESTION_MAX_CHARS} 个字符")
+        }))
+        .into_response();
+    }
 
     let ctx = crate::services::SpeechContext {
         robot_id: record.robot_id.clone(),
         companion_id,
     };
     match state.speech.explain_image(&ctx, jpeg, &question).await {
-        Ok(result) => Json(json!({ "success": true, "result": result })).into_response(),
+        Ok(result) => {
+            state
+                .vision_observations
+                .record(RobotVisionObservation {
+                    robot_id: record.robot_id,
+                    companion_id: ctx.companion_id,
+                    question,
+                    answer: result.clone(),
+                    observed_at_ms: chrono::Utc::now().timestamp_millis(),
+                })
+                .await;
+            Json(json!({ "success": true, "result": result })).into_response()
+        }
         Err(error) => {
             tracing::warn!(robot_id = %record.robot_id, %error, "robot: vision explain failed");
             Json(json!({ "success": false, "message": error.to_string() })).into_response()
@@ -426,6 +454,7 @@ mod tests {
                 advertiser: advertiser(enabled),
                 acceptor,
                 speech: speech.clone(),
+                vision_observations: Arc::new(RobotVisionObservationRegistry::default()),
             },
             speech,
             dir,
@@ -700,6 +729,17 @@ mod tests {
             value["result"], "桌上有一杯咖啡。",
             "the firmware hands this body straight to the model as the tool result"
         );
+        let observation = state
+            .vision_observations
+            .latest_recent(
+                "aa:bb:cc:dd:ee:10",
+                "0190f5fe-7c00-7a00-8000-0000000000aa",
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .await
+            .expect("successful device vision must publish Agent context");
+        assert_eq!(observation.question, "看到什么");
+        assert_eq!(observation.answer, "桌上有一杯咖啡。");
     }
 
     #[tokio::test]

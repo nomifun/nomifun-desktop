@@ -260,8 +260,40 @@ impl ModelInvokeService {
         m: &ModelRef,
         req: TaskRequest,
     ) -> Result<(TaskOutcome, InvocationContext), InvokeError> {
+        self.invoke_with_expected_revision(m, req, None).await
+    }
+
+    /// Invoke only when the provider's complete invocation graph still has the
+    /// revision frozen by the caller. The check happens after one internally
+    /// consistent resolution and before any adapter submission.
+    pub async fn invoke_at_config_revision(
+        &self,
+        m: &ModelRef,
+        expected_config_revision: i64,
+        req: TaskRequest,
+    ) -> Result<TaskOutcome, InvokeError> {
+        self.invoke_with_expected_revision(m, req, Some(expected_config_revision))
+            .await
+            .map(|(outcome, _context)| outcome)
+    }
+
+    async fn invoke_with_expected_revision(
+        &self,
+        m: &ModelRef,
+        req: TaskRequest,
+        expected_config_revision: Option<i64>,
+    ) -> Result<(TaskOutcome, InvocationContext), InvokeError> {
         let task = req.task();
         let (call, adapter) = self.resolve(m, task, req).await?;
+        if expected_config_revision
+            .is_some_and(|expected| call.config_revision != expected)
+        {
+            return Err(InvokeError::config(format!(
+                "provider config revision changed: expected {}, found {}",
+                expected_config_revision.expect("checked"),
+                call.config_revision
+            )));
+        }
         let mut context = InvocationContext::from_resolved(call, adapter)?;
         let _ = apply_known_media_prompt_limit(
             &context.call.protocol,
@@ -964,6 +996,58 @@ mod tests {
         let TaskOutcome::Done(TaskResult::Assets(assets)) = out else { panic!("expected Done(Assets)") };
         assert_eq!(assets.len(), 1);
         assert!(matches!(&assets[0].data, ProducedData::Bytes(b) if b == b"hi"));
+    }
+
+    #[tokio::test]
+    async fn invoke_at_config_revision_succeeds_exactly_then_rejects_catalog_change_before_wire() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/images/generations"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"data": [{"b64_json": "aGk="}]})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (svc, pool) = setup().await;
+        let pid = seed_provider(&pool, &server.uri()).await;
+        seed_model(
+            &pool,
+            &pid,
+            "gpt-image-1",
+            r#"["image_generation"]"#,
+            "{}",
+            true,
+        )
+        .await;
+        let revision = provider_revision(&pool, &pid).await;
+        svc.invoke_at_config_revision(
+            &mref(&pid, "gpt-image-1"),
+            revision,
+            image_request("first"),
+        )
+        .await
+        .expect("same revision invokes");
+
+        nomifun_db::sqlx::query(
+            "UPDATE providers SET config_revision = config_revision + 1 WHERE provider_id = ?",
+        )
+            .bind(&pid)
+            .execute(&pool)
+            .await
+            .expect("advance provider revision");
+        let error = svc
+            .invoke_at_config_revision(
+                &mref(&pid, "gpt-image-1"),
+                revision,
+                image_request("must not reach wire"),
+            )
+            .await
+            .expect_err("stale revision must fail closed");
+        assert_eq!(error.kind, InvokeErrorKind::Config);
+        assert!(error.message.contains("revision changed"));
     }
 
     #[tokio::test]

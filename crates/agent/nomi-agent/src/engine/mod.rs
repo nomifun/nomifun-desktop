@@ -2016,6 +2016,13 @@ impl AgentEngine {
         // autocompaction, which replaces the whole message vector (and can
         // reduce the root user message to a summary) from inside this very loop.
         let round_requirement = user_content.clone();
+        let turn_context = crate::context_contributor::TurnContext::from_user_content(
+            source_message_id,
+            &round_requirement,
+            self.host_context
+                .get(crate::context_contributor::CS_DIALOGUE_HOST_CONTEXT_KEY)
+                .cloned(),
+        );
         let mut completion_requirement = completion_context.requirement.clone();
         self.messages.push(Message::now(Role::User, user_content));
         *turn_started = true;
@@ -2155,7 +2162,16 @@ impl AgentEngine {
             } else {
                 let mut extras = Vec::new();
                 for contributor in &self.context_contributors {
-                    if let Some(extra) = contributor.pre_turn_context().await {
+                    if let Some(extra) = contributor
+                        .pre_turn_context_for_turn_result(&turn_context)
+                        .await
+                        .map_err(|error| {
+                            AgentError::ApiError(format!(
+                                "required turn context '{}' failed: {error}",
+                                contributor.label()
+                            ))
+                        })?
+                    {
                         extras.push(extra);
                     }
                 }

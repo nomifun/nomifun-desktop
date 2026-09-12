@@ -73,6 +73,29 @@ pub struct NomiGoalSpec {
     pub max_auto_continuations: Option<usize>,
 }
 
+/// Server-selected execution profile for the in-process Nomi runtime.
+///
+/// A profile is not a capability grant. The factory validates it against the
+/// already projected tool allowlist and may only reject or further constrain a
+/// build. Ordinary conversations leave the profile unset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NomiRuntimeProfile {
+    Coding,
+}
+
+/// Subtractive MCP policy projected from a canonical Agent capability set.
+/// Concrete server identities still come exclusively from typed resource
+/// bindings resolved by the host.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NomiMcpCapabilityPolicy {
+    pub connect: bool,
+    pub tool_proxy: bool,
+    pub resource: bool,
+    pub oauth: bool,
+}
+
 /// Transitional fields extracted from `extra` while the runtime factory is
 /// being replaced by the canonical Preset/Snapshot/AgentSession path.
 ///
@@ -84,6 +107,10 @@ pub struct NomiGoalSpec {
 pub struct NomiBuildExtra {
     #[serde(default)]
     pub system_prompt: Option<String>,
+    /// Immutable Chat-route provider graph digest frozen into the canonical
+    /// Agent Snapshot. It is a fail-closed build fence, never a credential.
+    #[serde(default)]
+    pub chat_config_revision_digest: Option<String>,
     #[serde(default)]
     pub preset_rules: Option<String>,
     #[serde(default)]
@@ -186,6 +213,27 @@ pub struct NomiBuildExtra {
     /// until the session activates it through ToolSearch.
     #[serde(default)]
     pub deferred_tools: Vec<String>,
+    /// Server-projected visual-context policy for a canonical Agent preset.
+    /// `Some(false)` is a subtractive fence that prevents image attachment
+    /// loading. `Some(true)` never promotes a model: the runtime still requires
+    /// the exact Chat capability to declare `vision_input`. Ordinary non-preset
+    /// conversations leave this as `None` and retain their model-derived
+    /// attachment behavior.
+    #[serde(default)]
+    pub vision_input: Option<bool>,
+    /// True when `llm.vision` is inside the frozen on-demand ceiling but has
+    /// not yet been activated for the current Session.
+    #[serde(default)]
+    pub vision_on_demand: bool,
+    /// Canonical runtime profile projected from an official Agent revision.
+    /// The Nomi factory accepts `coding` only when the exact bounded coding
+    /// tool policy is present; open JSON cannot use this field to add tools.
+    #[serde(default)]
+    pub runtime_profile: Option<NomiRuntimeProfile>,
+    /// Present for canonical Agent sessions, including an all-false fence.
+    /// `None` preserves existing ordinary-conversation MCP behavior.
+    #[serde(default)]
+    pub mcp_capabilities: Option<NomiMcpCapabilityPolicy>,
     /// Conversation-level delegation intent. This shapes when the Agent uses
     /// the unified persistent execution tools; it never grants tool authority.
     /// The factory always overwrites this from the typed runtime build option;
@@ -226,6 +274,62 @@ mod tests {
         assert_eq!(
             NomiBuildExtra::default().delegation_policy,
             DelegationPolicy::Automatic
+        );
+    }
+
+    #[test]
+    fn nomi_build_extra_preserves_server_projected_vision_policy() {
+        let enabled: NomiBuildExtra =
+            serde_json::from_value(serde_json::json!({ "vision_input": true })).unwrap();
+        assert_eq!(enabled.vision_input, Some(true));
+
+        let ordinary: NomiBuildExtra = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(ordinary.vision_input, None);
+        assert!(!ordinary.vision_on_demand);
+    }
+
+    #[test]
+    fn nomi_build_extra_parses_a_typed_coding_profile_without_granting_tools() {
+        let profile: NomiBuildExtra = serde_json::from_value(serde_json::json!({
+            "runtime_profile": "coding"
+        }))
+        .unwrap();
+        assert_eq!(profile.runtime_profile, Some(NomiRuntimeProfile::Coding));
+        assert!(profile.allowed_tools.is_empty());
+
+        assert!(
+            serde_json::from_value::<NomiBuildExtra>(serde_json::json!({
+                "runtime_profile": "unknown"
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn nomi_build_extra_parses_a_subtractive_mcp_capability_policy() {
+        let extra: NomiBuildExtra = serde_json::from_value(serde_json::json!({
+            "mcp_capabilities": {
+                "connect": true,
+                "tool_proxy": true,
+                "resource": false,
+                "oauth": true
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            extra.mcp_capabilities,
+            Some(NomiMcpCapabilityPolicy {
+                connect: true,
+                tool_proxy: true,
+                resource: false,
+                oauth: true,
+            })
+        );
+        assert!(
+            serde_json::from_value::<NomiBuildExtra>(serde_json::json!({
+                "mcp_capabilities": {"connect": true, "server_id": "forged"}
+            }))
+            .is_err()
         );
     }
 

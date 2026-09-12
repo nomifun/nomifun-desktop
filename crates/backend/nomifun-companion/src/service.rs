@@ -16,7 +16,7 @@ use crate::collector::{self, Collector, SharedConfig, SharedEventStoreLock};
 use crate::archiver::Archiver;
 use crate::companion::CompanionThreads;
 use crate::events::CompanionEventEmitter;
-use crate::evolution::{EvolutionEngine, NoopTranscriptSource};
+use crate::evolution::{EvolutionEngine, EvolveRun, NoopTranscriptSource};
 use crate::gamify::level_for_xp;
 use crate::learner::{CompanionCompleter, CompanionLearnResult, Learner};
 use crate::memory_search::{MemorySearchQuery, MemoryStatusFilter};
@@ -221,6 +221,13 @@ pub struct CompanionService {
 }
 
 impl CompanionService {
+    /// Installation owner whose persistent Companion dataset this service
+    /// instance controls. Agent adapters use it to reject a forged resource
+    /// binding before resolving any Companion identity.
+    pub fn authoritative_user_id(&self) -> &str {
+        self.authoritative_user_id.as_ref()
+    }
+
     /// Construct the service from the v3 companion layout, open the shared
     /// store, scan the companion roster, and spawn background tasks.
     pub async fn start(
@@ -1231,6 +1238,32 @@ impl CompanionService {
         self.store.list_memories(filter).await
     }
 
+    /// Return the bounded, durable memory projection used by an explicitly
+    /// bound Agent capability. This deliberately reuses the same ranking and
+    /// budget owner as companion prompt injection so a second recall policy
+    /// cannot drift into the Agent platform.
+    pub async fn recall_memories_for_agent(
+        &self,
+        companion_id: &str,
+        per_kind: i64,
+        char_budget: usize,
+    ) -> Result<Vec<CompanionMemory>, AppError> {
+        self.get_companion(companion_id).await?;
+        if !(1..=20).contains(&per_kind) {
+            return Err(AppError::BadRequest(
+                "agent memory recall per_kind must be between 1 and 20".into(),
+            ));
+        }
+        if !(1..=64 * 1024).contains(&char_budget) {
+            return Err(AppError::BadRequest(
+                "agent memory recall char_budget must be between 1 and 65536".into(),
+            ));
+        }
+        self.store
+            .memories_for_injection(companion_id, per_kind, char_budget)
+            .await
+    }
+
     /// Non-FTS list with an explicit sort (the REST `sort` param without `q`).
     pub async fn list_memory_page_sorted(&self, filter: &MemoryFilter, sort: MemoryListSort) -> Result<MemoryPage, AppError> {
         self.store.list_memory_page_sorted(filter, sort).await
@@ -1347,6 +1380,31 @@ impl CompanionService {
             }
         }
         Ok(merged)
+    }
+
+    /// Agent-facing merge over one explicitly bound companion. Unlike the
+    /// administrative merge surface, this refuses vestigial unowned rows as
+    /// well as rows owned by another companion before entering the atomic
+    /// store transition.
+    pub async fn merge_companion_memories_for_agent(
+        &self,
+        companion_id: &str,
+        group: &[String],
+        merged_content: &str,
+        kind: &str,
+    ) -> Result<CompanionMemory, AppError> {
+        self.get_companion(companion_id).await?;
+        for memory_id in group {
+            self.require_exact_companion_memory(companion_id, memory_id)
+                .await?;
+        }
+        self.merge_memories(
+            group,
+            merged_content,
+            kind,
+            &MemoryActor::Companion(companion_id.to_owned()),
+        )
+        .await
     }
 
     // ----- session-window day digests (伙伴会话归档回看) -----
@@ -1516,6 +1574,43 @@ impl CompanionService {
             self.emitter.emit_memory_updated(&updated);
         }
         Ok(())
+    }
+
+    /// Evolve one durable memory in place for the explicitly bound companion.
+    /// The store preserves identity, kind, lifecycle, pin and ownership while
+    /// atomically replacing/redacting content and refreshing its FTS row.
+    pub async fn evolve_companion_memory_for_agent(
+        &self,
+        companion_id: &str,
+        memory_id: &str,
+        content: &str,
+    ) -> Result<CompanionMemory, AppError> {
+        self.get_companion(companion_id).await?;
+        self.require_exact_companion_memory(companion_id, memory_id)
+            .await?;
+        self.update_memory(
+            memory_id,
+            Some(content),
+            None,
+            None,
+            &MemoryActor::Companion(companion_id.to_owned()),
+        )
+        .await?;
+        self.require_exact_companion_memory(companion_id, memory_id)
+            .await
+    }
+
+    async fn require_exact_companion_memory(
+        &self,
+        companion_id: &str,
+        memory_id: &str,
+    ) -> Result<CompanionMemory, AppError> {
+        match self.store.get_memory(memory_id).await? {
+            Some(memory) if memory.companion_id.as_deref() == Some(companion_id) => Ok(memory),
+            Some(_) | None => Err(AppError::NotFound(format!(
+                "memory '{memory_id}' not found"
+            ))),
+        }
     }
 
     pub async fn delete_memory(&self, memory_id: &str, actor: &MemoryActor) -> Result<(), AppError> {
@@ -1778,6 +1873,40 @@ impl CompanionService {
         self.learner.run_for(companion_id).await
     }
 
+    /// Run one explicit skill-evolution pass for exactly one live companion.
+    ///
+    /// The Agent capability adapter uses this same owner as the background
+    /// scheduler; it does not construct a second evolution engine or fall back
+    /// to the installation's default companion.
+    pub async fn run_evolve_now(
+        &self,
+        companion_id: &str,
+    ) -> Result<EvolveRun, AppError> {
+        self.evolution.run_for(companion_id).await
+    }
+
+    /// Build the current persona/memory prompt for one explicitly selected
+    /// companion resource.
+    ///
+    /// Unknown or deleted ids remain errors. This is intentionally stricter
+    /// than a display-oriented optional lookup because an Agent resource
+    /// binding must never silently switch to another companion.
+    pub async fn build_bound_system_prompt(
+        &self,
+        companion_id: &str,
+        channel_platform: Option<&str>,
+    ) -> Result<String, AppError> {
+        let profile = self.get_companion(companion_id).await?;
+        let smart = self.config.read().await.smart_collaboration;
+        Ok(crate::companion::build_companion_system_prompt(
+            &self.store,
+            &profile,
+            channel_platform,
+            smart,
+        )
+        .await)
+    }
+
     // ----- events -----
 
     pub async fn event_stats(&self) -> Result<Vec<SourceStats>, AppError> {
@@ -1880,10 +2009,9 @@ impl CompanionService {
 #[async_trait::async_trait]
 impl nomifun_ai_agent::CompanionPromptProvider for CompanionService {
     async fn build_system_prompt(&self, companion_id: Option<&str>, channel_platform: Option<&str>) -> Option<String> {
-        let companion_id = CompanionId::try_from(companion_id?).ok()?;
-        let profile = self.registry.get(companion_id.as_str()).await?;
-        let smart = self.config.read().await.smart_collaboration;
-        Some(crate::companion::build_companion_system_prompt(&self.store, &profile, channel_platform, smart).await)
+        self.build_bound_system_prompt(companion_id?, channel_platform)
+            .await
+            .ok()
     }
 }
 
@@ -1943,6 +2071,104 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn agent_memory_owner_recalls_writes_merges_evolves_and_survives_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let first_service = service(dir.path()).await;
+        let primary = first_service.create_companion("Primary", "ink").await.unwrap();
+        let other = first_service.create_companion("Other", "ink").await.unwrap();
+        let first = first_service
+            .add_memory(
+                "preference",
+                "Prefer release notes with concrete verification evidence.",
+                &["release".to_owned()],
+                Some(&primary.companion_id),
+            )
+            .await
+            .unwrap();
+        let second = first_service
+            .add_memory(
+                "preference",
+                "Keep unrelated working-tree changes intact.",
+                &["git".to_owned()],
+                Some(&primary.companion_id),
+            )
+            .await
+            .unwrap();
+        let foreign = first_service
+            .add_memory(
+                "preference",
+                "This belongs to another companion.",
+                &[],
+                Some(&other.companion_id),
+            )
+            .await
+            .unwrap();
+
+        let recalled = first_service
+            .recall_memories_for_agent(&primary.companion_id, 20, 48 * 1024)
+            .await
+            .unwrap();
+        assert!(recalled.iter().any(|memory| memory.memory_id == first.memory_id));
+        assert!(recalled.iter().any(|memory| memory.memory_id == second.memory_id));
+        assert!(!recalled.iter().any(|memory| memory.memory_id == foreign.memory_id));
+
+        let merged = first_service
+            .merge_companion_memories_for_agent(
+                &primary.companion_id,
+                &[first.memory_id.clone(), second.memory_id.clone()],
+                "Release notes must cite concrete checks and preserve unrelated changes.",
+                "preference",
+            )
+            .await
+            .unwrap();
+        assert_eq!(merged.source, "merge");
+        assert_eq!(merged.companion_id.as_deref(), Some(primary.companion_id.as_str()));
+        let evolved = first_service
+            .evolve_companion_memory_for_agent(
+                &primary.companion_id,
+                &merged.memory_id,
+                "Release notes must cite executed checks, preserve unrelated changes, and name remaining blockers.",
+            )
+            .await
+            .unwrap();
+        assert_eq!(evolved.memory_id, merged.memory_id);
+        assert!(evolved.content.contains("remaining blockers"));
+
+        assert!(
+            first_service
+                .evolve_companion_memory_for_agent(
+                    &primary.companion_id,
+                    &foreign.memory_id,
+                    "must not cross owners",
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            first_service
+                .merge_companion_memories_for_agent(
+                    &primary.companion_id,
+                    &[evolved.memory_id.clone(), foreign.memory_id],
+                    "must not cross owners",
+                    "preference",
+                )
+                .await
+                .is_err()
+        );
+
+        let restarted = service(dir.path()).await;
+        let after_restart = restarted
+            .recall_memories_for_agent(&primary.companion_id, 20, 48 * 1024)
+            .await
+            .unwrap();
+        assert!(after_restart.iter().any(|memory| {
+            memory.memory_id == evolved.memory_id && memory.content == evolved.content
+        }));
+        assert!(!after_restart.iter().any(|memory| memory.memory_id == first.memory_id));
+        assert!(!after_restart.iter().any(|memory| memory.memory_id == second.memory_id));
     }
 
     /// THE upgrade test. An install that had learning on at a non-default

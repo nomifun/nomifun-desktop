@@ -8,6 +8,7 @@
 pub mod audio;
 pub mod dto;
 pub mod endpoint;
+pub mod effect_ledger;
 pub mod events;
 pub mod lan_source;
 pub mod link;
@@ -22,6 +23,7 @@ pub mod session;
 pub mod status;
 pub mod tool_registry;
 pub mod vad;
+pub mod vision;
 pub mod wiring;
 
 use std::sync::Arc;

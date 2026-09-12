@@ -7,3 +7,4 @@ license.workspace = true
 [dependencies]
 nomifun-agent-contracts = { path = "../nomifun-agent-contracts" }
 nomifun-agent-kernel = { path = "../nomifun-agent-kernel" }
+serde_json.workspace = true

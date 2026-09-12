@@ -1,10 +1,16 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use nomi_agent::session::{Session, SessionManager};
+use nomi_agent::lazy_mcp::{
+    LazyMcpRuntime, SessionMcpBindingRef, SessionMcpConnectFailure, SessionMcpConnector,
+};
 use nomi_config::config::{McpServerConfig, TransportType};
+use nomi_mcp::manager::McpManager;
 use nomifun_api_types::{
-    GatewayMcpConfig, McpServerId, NomiBuildExtra, SessionMcpServer, SessionMcpTransport,
+    GatewayMcpConfig, McpServerId, NomiBuildExtra, NomiRuntimeProfile, SessionMcpServer,
+    SessionMcpTransport,
 };
 use nomifun_common::{
     AppError, DelegationPolicy, ExecutionAuthority, LoopbackCapabilityLease,
@@ -49,6 +55,315 @@ fn apply_model_only_ceiling(overrides: &mut NomiBuildExtra) {
     overrides.max_turns = Some(1);
     overrides.goal = None;
     overrides.delegation_policy = DelegationPolicy::Disabled;
+    overrides.runtime_profile = None;
+    overrides.mcp_capabilities = Some(Default::default());
+}
+
+/// Intersect a canonical Agent's visual-context selection with the exact Chat
+/// capability resolved from the provider registry. The JSON flag is never a
+/// promotion: only the persisted `vision_input` model trait can enable images,
+/// and a runtime observation may still downgrade that trait after an explicit
+/// upstream rejection.
+fn apply_vision_input_policy(
+    policy: Option<bool>,
+    on_demand: bool,
+    resolved_supports_image: &mut Option<bool>,
+) -> Result<(), AppError> {
+    if on_demand {
+        if *resolved_supports_image != Some(true) {
+            return Err(AppError::UnprocessableEntity(
+                "llm.vision is on demand, but the exact configured Chat model does not support image input"
+                    .to_owned(),
+            ));
+        }
+        return Ok(());
+    }
+    match policy {
+        Some(false) => {
+            *resolved_supports_image = Some(false);
+            Ok(())
+        }
+        Some(true) if *resolved_supports_image != Some(true) => {
+            Err(AppError::UnprocessableEntity(
+                "llm.vision is selected, but the exact configured Chat model does not currently support image input"
+                    .to_owned(),
+            ))
+        }
+        Some(true) | None => Ok(()),
+    }
+}
+
+const NOMI_CODING_PROFILE_REQUIRED_TOOLS: &[&str] = &[
+    "ApplyPatch",
+    "Edit",
+    "Glob",
+    "Grep",
+    "Read",
+    "ToolSearch",
+    "Write",
+    "exec_command",
+    "review.status",
+    "update_plan",
+    "vcs.commit",
+    "vcs.diff",
+    "vcs.stage",
+    "vcs.status",
+    "write_stdin",
+];
+
+const NOMI_CODING_PROFILE_PROMPT: &str = "Runtime profile: coding. Work only through the exact workspace, process, VCS, review, skill, and delegated-agent tools exposed for this session. Treat review.status as a read-only structured review snapshot; it never grants approval or permission to widen the current tool policy.";
+
+/// Activate the explicit Nomi coding profile only after its server-projected
+/// tool policy is complete. The profile never adds a tool: a spoofed or stale
+/// `extra.runtime_profile` can only make construction fail closed.
+fn apply_runtime_profile(overrides: &mut NomiBuildExtra) -> Result<(), AppError> {
+    let Some(NomiRuntimeProfile::Coding) = overrides.runtime_profile else {
+        return Ok(());
+    };
+    if !overrides.enforce_tool_allowlist {
+        return Err(AppError::UnprocessableEntity(
+            "the Nomi coding runtime profile requires an enforced tool allowlist".to_owned(),
+        ));
+    }
+    let missing = NOMI_CODING_PROFILE_REQUIRED_TOOLS
+        .iter()
+        .copied()
+        .filter(|name| !overrides.allowed_tools.iter().any(|tool| tool == name))
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(AppError::UnprocessableEntity(format!(
+            "the Nomi coding runtime profile is missing required tools: {}",
+            missing.join(", ")
+        )));
+    }
+    overrides.system_prompt = Some(match overrides.system_prompt.take() {
+        Some(existing) if !existing.trim().is_empty() => {
+            format!("{existing}\n\n{NOMI_CODING_PROFILE_PROMPT}")
+        }
+        _ => NOMI_CODING_PROFILE_PROMPT.to_owned(),
+    });
+    Ok(())
+}
+
+fn apply_mcp_capability_policy(overrides: &mut NomiBuildExtra) {
+    let Some(policy) = overrides.mcp_capabilities else {
+        return;
+    };
+    // Canonical Agents persist only exact, owner-validated MCP business IDs.
+    // Re-read transport and credentials from the owning repositories; never
+    // consume SessionMcpServer here because its env/headers may contain secrets.
+    overrides.session_mcp_servers.clear();
+    if overrides.mcp_server_ids.is_none() {
+        // `None` historically meant all enabled servers. Canonical Agents fail
+        // closed to an empty selection instead.
+        overrides.mcp_server_ids = Some(Vec::new());
+    }
+    if !policy.connect {
+        overrides.mcp_server_ids = Some(Vec::new());
+    }
+}
+
+async fn apply_mcp_oauth_credentials(
+    servers: &mut HashMap<String, McpServerConfig>,
+    service: Option<&Arc<nomifun_mcp::McpOAuthService>>,
+    enabled: bool,
+) -> Result<(), AppError> {
+    if !enabled || servers.is_empty() {
+        return Ok(());
+    }
+    let remote_endpoints = servers
+        .values_mut()
+        .filter_map(|config| config.url.as_ref().cloned().map(|url| (url, config)))
+        .collect::<Vec<_>>();
+    if remote_endpoints.is_empty() {
+        return Ok(());
+    }
+    let service = service.ok_or_else(|| {
+        AppError::UnprocessableEntity(
+            "mcp.oauth is selected, but the host MCP credential authority is unavailable"
+                .to_owned(),
+        )
+    })?;
+    for (endpoint, config) in remote_endpoints {
+        let headers = config.headers.get_or_insert_with(HashMap::new);
+        if headers
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case("authorization"))
+        {
+            continue;
+        }
+        if let Some(token) = service.get_token(&endpoint).await.map_err(|_| {
+            AppError::UnprocessableEntity(
+                "the selected MCP OAuth credential could not be resolved".to_owned(),
+            )
+        })? {
+            insert_oauth_authorization(headers, token)?;
+        }
+    }
+    Ok(())
+}
+
+struct RepositorySessionMcpConnector {
+    repository: Arc<dyn IMcpServerRepository>,
+    oauth_service: Option<Arc<nomifun_mcp::McpOAuthService>>,
+    oauth_enabled: bool,
+}
+
+#[async_trait]
+impl SessionMcpConnector for RepositorySessionMcpConnector {
+    async fn connect(
+        &self,
+        bindings: &[SessionMcpBindingRef],
+    ) -> Result<Vec<Arc<McpManager>>, SessionMcpConnectFailure> {
+        let mut servers = HashMap::new();
+        for binding in bindings {
+            let row = self
+                .repository
+                .find_by_id(binding.resource_id())
+                .await
+                .map_err(|_| SessionMcpConnectFailure::ResourceUnavailable)?
+                .filter(|row| row.enabled && row.deleted_at.is_none())
+                .ok_or(SessionMcpConnectFailure::ResourceUnavailable)?;
+            let expected_ref = format!("mcp-server:{}@{}", row.mcp_server_id, row.updated_at);
+            if binding.connection_config_ref() != expected_ref {
+                return Err(SessionMcpConnectFailure::ResourceUnavailable);
+            }
+            let mut config = row_to_mcp_server_config(&row)
+                .map_err(|_| SessionMcpConnectFailure::TransportUnavailable)?;
+            if self.oauth_enabled
+                && let Some(endpoint) = config.url.as_deref()
+            {
+                let service = self
+                    .oauth_service
+                    .as_ref()
+                    .ok_or(SessionMcpConnectFailure::CredentialUnavailable)?;
+                let headers = config.headers.get_or_insert_with(HashMap::new);
+                if !headers
+                    .keys()
+                    .any(|name| name.eq_ignore_ascii_case("authorization"))
+                {
+                    let token = service
+                        .get_token(endpoint)
+                        .await
+                        .map_err(|_| SessionMcpConnectFailure::CredentialUnavailable)?
+                        .ok_or(SessionMcpConnectFailure::CredentialUnavailable)?;
+                    insert_oauth_authorization(headers, token)
+                        .map_err(|_| SessionMcpConnectFailure::CredentialUnavailable)?;
+                }
+            }
+            if servers.insert(row.name, config).is_some() {
+                return Err(SessionMcpConnectFailure::ResourceUnavailable);
+            }
+        }
+        let manager = McpManager::connect_all(&servers)
+            .await
+            .map_err(|_| SessionMcpConnectFailure::TransportUnavailable)?;
+        Ok(vec![Arc::new(manager)])
+    }
+}
+
+fn build_lazy_mcp_runtime(
+    plugin_session: Option<&crate::NomiPluginToolSession>,
+    repository: Option<&Arc<dyn IMcpServerRepository>>,
+    oauth_service: Option<&Arc<nomifun_mcp::McpOAuthService>>,
+    policy: Option<nomifun_api_types::NomiMcpCapabilityPolicy>,
+    deferred_tools: &[String],
+) -> Result<Option<LazyMcpRuntime>, AppError> {
+    let Some(policy) = policy.filter(|policy| policy.connect) else {
+        return Ok(None);
+    };
+    if !deferred_tools
+        .iter()
+        .any(|name| name == nomi_agent::lazy_mcp::MCP_CONNECT_TOOL_NAME)
+    {
+        return Ok(None);
+    }
+    let session = plugin_session.ok_or_else(|| {
+        AppError::UnprocessableEntity(
+            "on-demand MCP requires a canonical server-materialized AgentSession".to_owned(),
+        )
+    })?;
+    let bindings = session
+        .target_resource_bindings()
+        .iter()
+        .filter(|binding| binding.resource_kind.as_ref() == "mcp_server")
+        .map(|binding| {
+            let config_ref = binding.connection_config_ref.as_ref().ok_or_else(|| {
+                AppError::Conflict(
+                    "the bound MCP server has no frozen connection-config reference".to_owned(),
+                )
+            })?;
+            SessionMcpBindingRef::new(
+                binding.resource_id.as_ref(),
+                config_ref.as_ref(),
+            )
+            .map_err(AppError::Conflict)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let repository = repository.cloned().ok_or_else(|| {
+        AppError::UnprocessableEntity(
+            "on-demand MCP requires the host MCP repository".to_owned(),
+        )
+    })?;
+    LazyMcpRuntime::new(
+        bindings,
+        Arc::new(RepositorySessionMcpConnector {
+            repository,
+            oauth_service: oauth_service.cloned(),
+            oauth_enabled: policy.oauth,
+        }),
+    )
+    .map(Some)
+    .map_err(AppError::Conflict)
+}
+
+async fn verify_chat_config_digest(
+    resolver: Option<&crate::factory::ProviderConfigDigestResolver>,
+    provider_id: &str,
+    expected: Option<&str>,
+) -> Result<(), AppError> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    if expected.len() != 64
+        || !expected
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(AppError::BadRequest(
+            "canonical Chat config revision digest is invalid".to_owned(),
+        ));
+    }
+    let resolver = resolver.ok_or_else(|| {
+        AppError::UnprocessableEntity(
+            "canonical Chat config revision validation is unavailable".to_owned(),
+        )
+    })?;
+    let current = resolver(provider_id.to_owned()).await?;
+    if current != expected {
+        return Err(AppError::Conflict(
+            "the provider configuration changed after the Agent Snapshot was resolved".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn insert_oauth_authorization(
+    headers: &mut HashMap<String, String>,
+    token: String,
+) -> Result<(), AppError> {
+    let authorization = format!("Bearer {token}");
+    // Validate before handing the value to the MCP transport. Its generic
+    // invalid-header error includes the rejected value; doing this here keeps
+    // an invalid stored OAuth secret out of runtime warnings, model-visible
+    // errors, and logs.
+    reqwest::header::HeaderValue::from_bytes(authorization.as_bytes()).map_err(|_| {
+        AppError::UnprocessableEntity(
+            "the selected MCP OAuth credential has an invalid header value".to_owned(),
+        )
+    })?;
+    headers.insert("Authorization".to_owned(), authorization);
+    Ok(())
 }
 
 /// Effective host authority for a Nomi runtime. Channel conversations are
@@ -136,6 +451,16 @@ pub(super) async fn build(
     if !is_instance_owner {
         apply_model_only_ceiling(&mut overrides);
     }
+    apply_runtime_profile(&mut overrides)?;
+    apply_mcp_capability_policy(&mut overrides);
+    let plugin_tool_session = crate::plugin_tools::current_nomi_plugin_tool_session();
+    let lazy_mcp_runtime = build_lazy_mcp_runtime(
+        plugin_tool_session.as_ref(),
+        deps.mcp_server_repo.as_ref(),
+        deps.mcp_oauth_service.as_ref(),
+        overrides.mcp_capabilities,
+        &overrides.deferred_tools,
+    )?;
 
     // Merge reusable preset instructions into `system_prompt` (used as
     // `custom_prompt` in Nomi's prompt builder).
@@ -217,9 +542,15 @@ pub(super) async fn build(
             None => (None, false),
         };
 
-    let (mut extra_mcp_servers, loopback_capability_leases) =
-        resolve_mcp_servers(&overrides, &ctx.conversation_id);
-    if is_instance_owner && let Some(repo) = deps.mcp_server_repo.as_ref() {
+    let (mut extra_mcp_servers, loopback_capability_leases) = if lazy_mcp_runtime.is_some() {
+        (HashMap::new(), LoopbackCapabilityLeaseSet::new())
+    } else {
+        resolve_mcp_servers(&overrides, &ctx.conversation_id)
+    };
+    if lazy_mcp_runtime.is_none()
+        && is_instance_owner
+        && let Some(repo) = deps.mcp_server_repo.as_ref()
+    {
         for (name, config) in load_user_mcp_servers(
             repo.as_ref(),
             overrides.mcp_server_ids.as_deref(),
@@ -230,12 +561,22 @@ pub(super) async fn build(
             extra_mcp_servers.entry(name).or_insert(config);
         }
     }
-    if is_instance_owner {
+    if lazy_mcp_runtime.is_none() && is_instance_owner {
         merge_session_snapshot_mcp_servers(
             &mut extra_mcp_servers,
             &overrides.session_mcp_servers,
             &ctx.conversation_id,
         );
+    }
+    if lazy_mcp_runtime.is_none() {
+        apply_mcp_oauth_credentials(
+            &mut extra_mcp_servers,
+            deps.mcp_oauth_service.as_ref(),
+            overrides
+                .mcp_capabilities
+                .is_some_and(|policy| policy.oauth),
+        )
+        .await?;
     }
 
     // Per-surface write policy (spec §3.2 unit 5): companion → direct, external
@@ -350,12 +691,84 @@ pub(super) async fn build(
     })?;
     let selected_model = resolve_runtime_model_selection(model_selection)?;
 
-    let fields = super::provider_config::resolve_provider_fields(
+    verify_chat_config_digest(
+        deps.provider_config_digest_resolver.as_ref(),
+        &selected_model.provider_id,
+        overrides.chat_config_revision_digest.as_deref(),
+    )
+    .await?;
+
+    let mut fields = super::provider_config::resolve_provider_fields(
         deps.model_invoke.as_ref(),
         &selected_model.provider_id,
         &selected_model.model,
     )
     .await?;
+    // Recheck after the exact task resolve. A concurrent catalog, connection,
+    // or credential edit therefore cannot slip between the immutable route
+    // fence and construction of the live provider configuration.
+    verify_chat_config_digest(
+        deps.provider_config_digest_resolver.as_ref(),
+        &selected_model.provider_id,
+        overrides.chat_config_revision_digest.as_deref(),
+    )
+    .await?;
+    apply_vision_input_policy(
+        overrides.vision_input,
+        overrides.vision_on_demand,
+        &mut fields.compat_overrides.supports_image,
+    )?;
+    let vision_activation = overrides.vision_input.map(|initial| {
+        Arc::new(std::sync::atomic::AtomicBool::new(initial))
+    });
+    let vision_activation_tool: Option<Box<dyn nomi_tools::Tool>> = overrides
+        .vision_on_demand
+        .then(|| {
+            let active = vision_activation
+                .clone()
+                .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicBool::new(false)));
+            Box::new(crate::vision_activation::VisionActivationTool::new(active))
+                as Box<dyn nomi_tools::Tool>
+        });
+    let session_citations = Arc::new(crate::web_search::SessionCitationStore::default());
+    let web_search_tool: Option<Box<dyn nomi_tools::Tool>> = if overrides
+        .allowed_tools
+        .iter()
+        .any(|name| name == crate::web_search::WEB_SEARCH_TOOL_NAME)
+    {
+        if fields.provider != "openai-responses" || !fields.supports_web_search {
+            return Err(AppError::UnprocessableEntity(
+                "web.search requires an exact openai.responses Chat model declaring the web_search trait"
+                    .to_owned(),
+            ));
+        }
+        let endpoint = fields.base_url.as_deref().ok_or_else(|| {
+            AppError::UnprocessableEntity(
+                "web.search requires the exact OpenAI Responses endpoint".to_owned(),
+            )
+        })?;
+        let provider = crate::web_search::OpenAiResponsesSearchProvider::new(
+            endpoint,
+            fields.api_key.clone(),
+            fields.model.clone(),
+        )
+        .map_err(AppError::UnprocessableEntity)?;
+        Some(Box::new(crate::web_search::WebSearchTool::with_citations(
+            Arc::new(provider),
+            Arc::clone(&session_citations),
+        )))
+    } else {
+        None
+    };
+    let citation_render_tool: Option<Box<dyn nomi_tools::Tool>> = overrides
+        .allowed_tools
+        .iter()
+        .any(|name| name == crate::web_search::CITATION_RENDER_TOOL_NAME)
+        .then(|| {
+            Box::new(crate::web_search::CitationRenderTool::new(
+                session_citations,
+            )) as Box<dyn nomi_tools::Tool>
+        });
 
     let session_directory = deps.data_dir.join("nomi-sessions");
     let output_ceiling = fields
@@ -705,8 +1118,12 @@ pub(super) async fn build(
         image_generation_entitled: platform_gateway_entitled,
         image_generation_discovery_failed,
         image_generation_response_in_chinese: app_language == "zh-CN",
-        plugin_tool_session:
-            crate::plugin_tools::current_nomi_plugin_tool_session(),
+        web_search_tool,
+        citation_render_tool,
+        vision_activation,
+        vision_activation_tool,
+        lazy_mcp_runtime,
+        plugin_tool_session,
     };
     let agent = NomiAgentManager::new_with_host_wiring(
         ctx.conversation_id,
@@ -1460,6 +1877,26 @@ fn gateway_mcp_to_config(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn canonical_chat_digest_mismatch_fails_closed_without_provider_details() {
+        let resolver: crate::factory::ProviderConfigDigestResolver = Arc::new(|_| {
+            Box::pin(async { Ok("b".repeat(64)) })
+        });
+        let expected = "a".repeat(64);
+        let error = verify_chat_config_digest(
+            Some(&resolver),
+            "private-provider",
+            Some(&expected),
+        )
+        .await
+        .expect_err("a stale Chat Snapshot must not use the live provider config");
+        assert!(matches!(error, AppError::Conflict(_)));
+        let message = error.to_string();
+        assert!(!message.contains("private-provider"));
+        assert!(!message.contains(&expected));
+        assert!(!message.contains(&"b".repeat(64)));
+    }
+
     #[test]
     fn bool_pref_parse_matches_the_boot_time_reader_semantics() {
         // Fail-open default-ON keys (persistentLogin): only an explicit
@@ -1479,6 +1916,127 @@ mod tests {
         assert!(parse_bool_pref("true", false));
         assert!(parse_bool_pref("\"true\"", false));
         assert!(parse_bool_pref("  \"true\"  ", false));
+    }
+
+    #[test]
+    fn vision_policy_is_subtractive_and_requires_exact_model_evidence() {
+        let mut supported = Some(true);
+        apply_vision_input_policy(Some(true), false, &mut supported)
+            .expect("declared vision model accepts the selected capability");
+        assert_eq!(supported, Some(true));
+
+        apply_vision_input_policy(Some(false), false, &mut supported)
+            .expect("unselected vision capability applies a subtractive fence");
+        assert_eq!(supported, Some(false));
+
+        let error = apply_vision_input_policy(Some(true), false, &mut Some(false))
+            .expect_err("text-only exact model must reject llm.vision");
+        assert!(error.to_string().contains("llm.vision"));
+
+        let mut ordinary = Some(true);
+        apply_vision_input_policy(None, false, &mut ordinary)
+            .expect("ordinary conversations keep model-derived behavior");
+        assert_eq!(ordinary, Some(true));
+
+        let mut deferred = Some(true);
+        apply_vision_input_policy(Some(false), true, &mut deferred)
+            .expect("on-demand vision preserves model support behind activation gate");
+        assert_eq!(deferred, Some(true));
+        assert!(apply_vision_input_policy(Some(false), true, &mut Some(false)).is_err());
+    }
+
+    #[test]
+    fn coding_profile_requires_the_exact_bounded_tool_policy() {
+        let mut incomplete = NomiBuildExtra {
+            runtime_profile: Some(NomiRuntimeProfile::Coding),
+            enforce_tool_allowlist: true,
+            allowed_tools: vec!["Read".to_owned()],
+            ..Default::default()
+        };
+        let error = apply_runtime_profile(&mut incomplete)
+            .expect_err("an incomplete coding profile must fail closed");
+        assert!(error.to_string().contains("review.status"));
+
+        let mut complete = NomiBuildExtra {
+            runtime_profile: Some(NomiRuntimeProfile::Coding),
+            enforce_tool_allowlist: true,
+            allowed_tools: NOMI_CODING_PROFILE_REQUIRED_TOOLS
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect(),
+            system_prompt: Some("Preset instructions".to_owned()),
+            ..Default::default()
+        };
+        apply_runtime_profile(&mut complete).expect("complete coding profile");
+        let prompt = complete.system_prompt.expect("coding prompt");
+        assert!(prompt.starts_with("Preset instructions\n\n"));
+        assert!(prompt.contains("Runtime profile: coding"));
+    }
+
+    #[test]
+    fn coding_profile_cannot_promote_an_unrestricted_or_model_only_session() {
+        let mut unrestricted = NomiBuildExtra {
+            runtime_profile: Some(NomiRuntimeProfile::Coding),
+            allowed_tools: NOMI_CODING_PROFILE_REQUIRED_TOOLS
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect(),
+            ..Default::default()
+        };
+        assert!(apply_runtime_profile(&mut unrestricted).is_err());
+
+        apply_model_only_ceiling(&mut unrestricted);
+        assert_eq!(unrestricted.runtime_profile, None);
+        apply_runtime_profile(&mut unrestricted).expect("model-only ceiling disables profile");
+        assert_eq!(unrestricted.allowed_tools, vec!["update_plan"]);
+    }
+
+    #[test]
+    fn canonical_mcp_policy_preserves_exact_ids_and_drops_secret_transport_snapshots() {
+        let bound_id = McpServerId::new();
+        let bound_server = SessionMcpServer {
+            mcp_server_id: bound_id.clone(),
+            name: "session-bound".to_owned(),
+            transport: SessionMcpTransport::Http {
+                url: "https://mcp.example.test".to_owned(),
+                headers: HashMap::new(),
+            },
+        };
+        let mut connected = NomiBuildExtra {
+            mcp_server_ids: Some(vec![bound_id.clone()]),
+            session_mcp_servers: vec![bound_server.clone()],
+            mcp_capabilities: Some(nomifun_api_types::NomiMcpCapabilityPolicy {
+                connect: true,
+                tool_proxy: true,
+                resource: true,
+                oauth: true,
+            }),
+            ..Default::default()
+        };
+        apply_mcp_capability_policy(&mut connected);
+        assert_eq!(connected.mcp_server_ids, Some(vec![bound_id]));
+        assert!(connected.session_mcp_servers.is_empty());
+
+        connected.mcp_capabilities = Some(Default::default());
+        apply_mcp_capability_policy(&mut connected);
+        assert_eq!(connected.mcp_server_ids, Some(Vec::new()));
+    }
+
+    #[test]
+    fn oauth_header_validation_never_echoes_a_rejected_secret() {
+        let mut headers = HashMap::new();
+        insert_oauth_authorization(&mut headers, "valid-token".to_owned())
+            .expect("valid OAuth bearer token");
+        assert_eq!(
+            headers.get("Authorization").map(String::as_str),
+            Some("Bearer valid-token")
+        );
+
+        let secret = "must-not-leak\r\nforged: value";
+        let error = insert_oauth_authorization(&mut HashMap::new(), secret.to_owned())
+            .expect_err("header injection must be rejected before MCP transport construction");
+        assert!(!error.to_string().contains(secret));
+        assert!(!error.to_string().contains("must-not-leak"));
     }
 
     fn gateway_config(port: u16, binary: &str, owner: &str) -> GatewayMcpConfig {

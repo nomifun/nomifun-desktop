@@ -3,13 +3,18 @@
 //! `ModuleStates` is the bundle returned by `build_module_states`; each
 //! `build_*_state` constructs one `*RouterState` from `AppServices`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
-use nomifun_ai_agent::{AgentRouterState, AgentRuntimeRegistry, AgentService};
+use nomifun_ai_agent::{
+    AgentRouterState, AgentRuntimeRegistry, AgentService,
+    NomiPlatformBuiltinContextAdmission,
+    NomiPlatformBuiltinLifecycleAdmission,
+    NomiPlatformBuiltinToolAdmission,
+};
 use nomifun_agent_contracts::{
     CapabilityConsumer, CanonicalErrorCode, CodingRuntimeFeatureInventoryPayload,
     PluginSourceKind, RuntimeProfileKind, RuntimeTarget, VersionString,
@@ -162,6 +167,8 @@ pub struct ChannelMessageLoopComponents {
     pub message_loop: nomifun_channel::message_loop::ChannelMessageLoop,
     pub message_rx: tokio::sync::mpsc::Receiver<nomifun_channel::types::ChannelIncoming>,
     pub manager: Arc<nomifun_channel::manager::ChannelManager>,
+    pub pairing_service: Arc<nomifun_channel::pairing::PairingService>,
+    pub repository: Arc<dyn nomifun_db::IChannelRepository>,
     pub plugin_factory: Arc<nomifun_channel::manager::PluginFactory>,
     /// Busy-time prompt queue drain (spec D1). The caller spawns
     /// `queue_drain.run(event_bus.subscribe_user())` next to the message loop.
@@ -527,6 +534,7 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
         nomi_core_agent_api,
         plugin_state,
         plugin_runtime_participant,
+        nomi_core_wave4_owners,
     ) =
         build_nomi_core_agent_api_state(
             services,
@@ -668,6 +676,21 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
 
     let (channel_state, channel_components) =
         build_channel_state(services, conversation_owner.clone()).await;
+    nomi_core_wave4_owners
+        .install_channel(
+            Arc::clone(&channel_components.manager),
+            Arc::clone(&channel_components.pairing_service),
+            Arc::clone(&channel_components.repository),
+            Arc::clone(&services.customer_service_service),
+        )
+        .unwrap_or_else(|error| {
+            panic!("Nomi-core Wave 4 Channel owner installation failed: {error}")
+        });
+    nomi_core_wave4_owners
+        .install_channel_ingress(Arc::clone(&channel_components.message_service))
+        .unwrap_or_else(|error| {
+            panic!("Nomi-core Wave 4 Channel ingress installation failed: {error}")
+        });
     tracing::info!(elapsed_ms = boot.elapsed().as_millis(), "startup: channel state built");
 
     let agent_service = AgentService::new(
@@ -755,9 +778,10 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
 /// Nomi-core HTTP surface.
 ///
 /// This registry is intentionally separate from the Fresh-v4 `AgentPlatform`
-/// runtime.  It materializes the same declarative catalog for Preview/Save
-/// while Session execution remains owned by `NomiCoreSessionOwner` and the
-/// existing Conversation/Nomi engine.
+/// runtime. It materializes the canonical inventory with real Nomi-owned wave
+/// registrations for Preview/Save and binds their exact Tool/Context/lifecycle
+/// projections into `NomiCoreSessionOwner` and the existing Conversation/Nomi
+/// engine.
 async fn build_nomi_core_agent_api_state(
     services: &AppServices,
     conversation_owner: Arc<NomiCoreSessionOwner>,
@@ -766,23 +790,32 @@ async fn build_nomi_core_agent_api_state(
     NomiCoreAgentApiState,
     nomifun_plugin_service::PluginRouterState,
     Arc<super::plugin_platform::NomiCorePluginRuntimeParticipant>,
+    Arc<super::nomi_core_wave4::NomiCoreWave4Owners>,
 )> {
     const CONTRACT_VERSION: &str = "1.0.0";
     const RUNTIME_FEATURE_INVENTORY_JSON: &str = include_str!(
         "../../../nomifun-agent-contracts/contracts/runtime/coding-runtime-feature-inventory.payload.json"
     );
 
-    let registrations = nomifun_agent_domain_support::registrations(
-        nomifun_agent_domain_support::c7_package_specs(),
-    )?;
+    let builtin_plan = super::nomi_core_builtins::build(services)?;
+    let wave4_owners = Arc::clone(&builtin_plan.wave4_owners);
+    let robot_owner = builtin_plan.robot_owner.clone();
+    wave4_owners
+        .reclaim_orphaned_receipts()
+        .await
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let registrations = builtin_plan.registrations;
+    let feature_inventory: CodingRuntimeFeatureInventoryPayload =
+        serde_json::from_str(RUNTIME_FEATURE_INVENTORY_JSON)?;
+    feature_inventory
+        .validate()
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+    let feature_digest = digest_payload(&feature_inventory)?;
 
     let mut policy = MaterializationPolicy::stable(CONTRACT_VERSION);
     policy.allowed_sources.insert(PluginSourceKind::ManagedLocal);
-    // Nomi-core is the current managed runtime.  It intentionally does not
-    // advertise the future Codex-native feature inventory as executable
-    // features; coding-native previews therefore remain explicitly blocked
-    // until that runtime is separately commissioned.
-    policy.available_runtime_features = Default::default();
+    policy.available_runtime_features =
+        feature_inventory.runtime_features.clone();
     // Kernel PluginState is an in-process capability-state cache. Durable
     // owner data belongs to the Plugin repository/KV and MiniApp data roots;
     // this NomiCore composition does not own the Fresh-v4 `plugin_states`
@@ -794,6 +827,57 @@ async fn build_nomi_core_agent_api_state(
     )?);
     let materialized = kernel
         .replace_all(registrations.clone())?;
+    let approved_platform_builtin_capability_ids = builtin_plan
+        .tool_capability_ids
+        .union(&builtin_plan.context_capability_ids)
+        .cloned()
+        .chain(builtin_plan.lifecycle_capability_ids.iter().cloned())
+        .chain(
+            builtin_plan
+                .host_dynamic_tool_capability_ids
+                .iter()
+                .cloned(),
+        )
+        .collect::<BTreeSet<_>>();
+    let native_capability_ids = materialized
+        .capabilities
+        .values()
+        .filter(|capability| {
+            capability
+                .manifest
+                .supports_consumer(CapabilityConsumer::Agent)
+                && super::nomi_core_agent_projection::nomi_capability_projection(
+                    capability.manifest.id.as_ref(),
+                )
+                .is_ok()
+                && !approved_platform_builtin_capability_ids
+                    .contains(&capability.manifest.id)
+        })
+        .map(|capability| capability.manifest.id.clone())
+        .collect::<BTreeSet<_>>();
+    let platform_builtin_tool_admission = Arc::new(
+        NomiPlatformBuiltinToolAdmission::from_registry(
+            &materialized,
+            builtin_plan.tool_capability_ids.clone(),
+            native_capability_ids.clone(),
+            Arc::clone(&builtin_plan.schema_resolver),
+        )?,
+    );
+    let platform_builtin_context_admission = Arc::new(
+        NomiPlatformBuiltinContextAdmission::from_registry(
+            &materialized,
+            builtin_plan.context_capability_ids.clone(),
+            native_capability_ids.clone(),
+        )?,
+    );
+    let platform_builtin_lifecycle_admission = Arc::new(
+        NomiPlatformBuiltinLifecycleAdmission::from_registry(
+            &materialized,
+            builtin_plan.lifecycle_capability_ids.clone(),
+            native_capability_ids,
+            Arc::clone(&builtin_plan.lifecycle_invoker),
+        )?,
+    );
     let miniapp_catalog = Arc::new(SharedMiniAppCatalogPublications::new());
     services
         .miniapp_application
@@ -813,6 +897,11 @@ async fn build_nomi_core_agent_api_state(
                 .supports_consumer(CapabilityConsumer::Agent)
         })
         .filter_map(|capability| {
+            if approved_platform_builtin_capability_ids
+                .contains(&capability.manifest.id)
+            {
+                return None;
+            }
             super::nomi_core_agent_projection::nomi_capability_projection(
                 capability.manifest.id.as_ref(),
             )
@@ -838,18 +927,13 @@ async fn build_nomi_core_agent_api_state(
         Arc::clone(&catalog),
         registrations,
         runtime,
+        approved_platform_builtin_capability_ids,
     )
     .await?;
     let plugin_state = plugin.router.clone();
     let plugin_runtime_participant =
         Arc::clone(&plugin.runtime_participant);
 
-    let feature_inventory: CodingRuntimeFeatureInventoryPayload =
-        serde_json::from_str(RUNTIME_FEATURE_INVENTORY_JSON)?;
-    feature_inventory
-        .validate()
-        .map_err(|error| anyhow::anyhow!(error.message))?;
-    let feature_digest = digest_payload(&feature_inventory)?;
     let schema_digest = digest_payload(&fresh_v4_schema_manifest_payload())?;
     let seed = official_preset_seed_manifest_payload();
     let environment = CompilerEnvironment {
@@ -857,7 +941,7 @@ async fn build_nomi_core_agent_api_state(
         required_runtime_protocol_version: VersionString::from(CONTRACT_VERSION),
         required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
         runtime_feature_inventory_digest: feature_digest.clone(),
-        available_runtime_features: Default::default(),
+        available_runtime_features: feature_inventory.runtime_features.clone(),
         installation_role_bindings: Default::default(),
         canonical_schema_manifest_digest: schema_digest.clone(),
         target_contribution_manifest_digest: seed.target_first_party_contribution_digest.clone(),
@@ -895,6 +979,14 @@ async fn build_nomi_core_agent_api_state(
     .with_default_chat_route_resolver(Arc::new(
         NomiCoreDefaultChatRouteResolver::new(services.database.pool().clone()),
     )));
+    let mcp_server_repository: Arc<dyn nomifun_db::IMcpServerRepository> =
+        Arc::new(nomifun_db::SqliteMcpServerRepository::new(
+            services.database.pool().clone(),
+        ));
+    let resource_bindings = super::nomi_core_resource_bindings::NomiCoreResourceBindingResolverRegistry::product(services)
+        .map_err(|error| {
+            anyhow::anyhow!("{}: {}", error.code(), error.message())
+        })?;
     services
         .agent_runtime_registry
         .install_nomi_plugin_tool_session_provider(Arc::new(
@@ -904,6 +996,12 @@ async fn build_nomi_core_agent_api_state(
                 Arc::clone(&kernel),
                 environment,
                 plugin.schema_resolver,
+                platform_builtin_tool_admission,
+                platform_builtin_context_admission,
+                platform_builtin_lifecycle_admission,
+                Arc::clone(&mcp_server_repository),
+                resource_bindings.clone(),
+                robot_owner,
                 Arc::clone(&services.miniapp_application),
             ),
         ))?;
@@ -916,9 +1014,13 @@ async fn build_nomi_core_agent_api_state(
             control_plane,
             remote_repository,
             services.nomi_core_remote_runtime.clone(),
+            resource_bindings,
+            mcp_server_repository,
+            Arc::clone(&wave4_owners),
         ),
         plugin_state,
         plugin_runtime_participant,
+        wave4_owners,
     ))
 }
 
@@ -1573,9 +1675,9 @@ pub async fn build_channel_state(
 
     let state = ChannelRouterState {
         manager: Arc::clone(&manager),
-        pairing_service,
+        pairing_service: Arc::clone(&pairing_service),
         session_manager,
-        repo,
+        repo: Arc::clone(&repo),
         plugin_factory: Arc::clone(&plugin_factory),
         settings_service: channel_settings,
         channel_agent_profile: Some(channel_agent_profile),
@@ -1585,6 +1687,8 @@ pub async fn build_channel_state(
         message_loop,
         message_rx,
         manager,
+        pairing_service,
+        repository: repo,
         plugin_factory,
         queue_drain,
         message_service,

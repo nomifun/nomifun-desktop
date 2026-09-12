@@ -5989,6 +5989,7 @@ name = "nomifun-agent-domain-wave2"
 version = "0.7.6"
 dependencies = [
  "async-trait",
+ "jsonschema",
  "nomifun-agent-contracts",
  "nomifun-agent-kernel",
  "serde_json",
@@ -6001,6 +6002,7 @@ dependencies = [
  "async-trait",
  "nomifun-agent-contracts",
  "nomifun-agent-kernel",
+ "serde",
  "serde_json",
 ]
 
@@ -6010,6 +6012,7 @@ version = "0.7.6"
 dependencies = [
  "nomifun-agent-contracts",
  "nomifun-agent-kernel",
+ "serde_json",
 ]
 
 [[package]]
@@ -6136,6 +6139,7 @@ dependencies = [
  "nomi-tools",
  "nomi-types",
  "nomifun-agent-contracts",
+ "nomifun-agent-domain-wave4",
  "nomifun-agent-kernel",
  "nomifun-api-types",
  "nomifun-auth",
@@ -6197,6 +6201,7 @@ dependencies = [
  "clap",
  "dashmap",
  "dirs 6.0.0",
+ "dunce",
  "fs2",
  "futures-util",
  "git2",
@@ -6266,6 +6271,7 @@ dependencies = [
  "nomifun-v4-root",
  "nomifun-webhook",
  "nomifun-workshop",
+ "notify",
  "percent-encoding",
  "reqwest 0.12.28",
  "rmcp",
@@ -6563,6 +6569,8 @@ dependencies = [
  "async-trait",
  "axum",
  "dashmap",
+ "nomifun-agent-contracts",
+ "nomifun-agent-domain-wave4",
  "nomifun-ai-agent",
  "nomifun-api-types",
  "nomifun-auth",
@@ -6572,6 +6580,7 @@ dependencies = [
  "nomifun-realtime",
  "serde",
  "serde_json",
+ "sqlx",
  "tempfile",
  "tokio",
  "tracing",

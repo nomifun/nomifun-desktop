@@ -21,6 +21,7 @@ import {
 import { setBrowserStorageGeneration } from '@/common/utils/browserStorageKey';
 import type { ExecutableAgentPreset, GuidAgentSelection } from '../types';
 import type { OfficialPresetTemplate } from '@/common/types/agentPlatform';
+import type { AgentResourceSelection } from '@/common/types/agentPlatform';
 import {
   useGuidSend,
   type GuidSendDeps,
@@ -142,6 +143,7 @@ const createDeps = ({
   loading = false,
   workspaceEnabled = true,
   resourceResolutionReady = true,
+  resourceSelections = [],
   navigations = [],
 }: {
   selection: GuidAgentSelection;
@@ -151,6 +153,7 @@ const createDeps = ({
   loading?: boolean;
   workspaceEnabled?: boolean;
   resourceResolutionReady?: boolean;
+  resourceSelections?: AgentResourceSelection[];
   navigations?: string[];
 }): GuidSendDeps => ({
   input,
@@ -166,6 +169,7 @@ const createDeps = ({
   current_model: currentModel ?? undefined,
   workspaceEnabled,
   resourceResolutionReady,
+  resourceSelections,
   autoWork: { enabled: false },
   setMentionOpen: noopDispatch<boolean>(),
   setMentionQuery: noopDispatch<string | null>(),
@@ -320,6 +324,31 @@ describe('useGuidSend HTTP behavior', () => {
     ]);
   });
 
+  test('submits only product resource kind/id selections when creating the session', async () => {
+    resetBrowserStorage();
+    const calls = installFetchRecorder();
+    const resourceSelections = [
+      { resource_kind: 'knowledge_base', resource_id: '0190f5fe-7c00-7a00-8000-000000000201' },
+      { resource_kind: 'workspace', resource_id: 'default-workspace' },
+    ];
+    const hook = renderHook(() => useGuidSend(createDeps({
+      selection: { kind: 'preset', presetId: PRESET_ID },
+      selectedPreset: PRESET,
+      workspaceEnabled: false,
+      resourceSelections,
+    })));
+
+    await act(async () => { await hook.result.current.handleSend(); });
+
+    expect(calls[0].body).toEqual({
+      model: { provider_id: PROVIDER_ID, model: MODEL.use_model },
+      preset_id: PRESET_ID,
+      title: INPUT,
+      resource_selections: resourceSelections,
+    });
+    expect(Object.keys((calls[0].body as { resource_selections: object[] }).resource_selections[0])).toEqual(['resource_kind', 'resource_id']);
+  });
+
   test('preset mode does not submit a workspace that the selected capabilities do not allow', async () => {
     resetBrowserStorage();
     const calls = installFetchRecorder();
@@ -349,8 +378,10 @@ describe('useGuidSend HTTP behavior', () => {
     ]);
   });
 
-  test('preset mode remains disabled until exact capability resource resolution completes', () => {
+  test('preset mode blocks session creation until every required resource is selected', async () => {
     resetBrowserStorage();
+    let calls = 0;
+    globalThis.fetch = (async () => { calls++; throw new Error('must not fetch'); }) as typeof fetch;
     const hook = renderHook(() =>
       useGuidSend(
         createDeps({
@@ -362,6 +393,10 @@ describe('useGuidSend HTTP behavior', () => {
     );
 
     expect(hook.result.current.isButtonDisabled).toBe(true);
+    let failure: unknown;
+    await act(async () => { try { await hook.result.current.handleSend(); } catch (error) { failure = error; } });
+    expect((failure as Error).message).toBe('RESOURCE_SELECTION_REQUIRED');
+    expect(calls).toBe(0);
   });
 
   test('requires both a workbench Agent and an explicit session model', () => {

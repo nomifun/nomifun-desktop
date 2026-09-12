@@ -4,11 +4,12 @@ use sqlx::{Row, SqlitePool};
 
 use crate::error::DbError;
 use crate::models::{
-    CsAgentRow, CsAuditEventRow, CsChannelBindingRow, CsDialogueRow, CsMessageRow, CsNoteRow,
-    NewCsAgentRow,
+    CS_HANDOFF_STATUS_CLAIMED, CS_HANDOFF_STATUS_PENDING, CsAgentRow, CsAuditEventRow,
+    CsChannelBindingRow, CsDialogueRow, CsHandoffRow, CsMessageRow, CsNoteRow, NewCsAgentRow,
 };
 use crate::repository::customer_service::{
-    CsDialogueKey, ICustomerServiceRepository, UpdateCsAgentParams,
+    CsDialogueKey, CsHandoffRequestResult, CsNoteWriteMutation, CsNoteWriteReceipt,
+    ICustomerServiceRepository, UpdateCsAgentParams,
 };
 use crate::repository::customer_service_search::{
     CsNoteSearchHit, fts_index_delete, fts_index_insert, list_note_topics, note_search_text,
@@ -22,6 +23,8 @@ const DIALOGUE_COLUMNS: &str = "cs_dialogue_id, cs_agent_id, channel_plugin_id, 
 const MESSAGE_COLUMNS: &str = "cs_message_id, cs_dialogue_id, role, content, created_at";
 const NOTE_COLUMNS: &str =
     "cs_note_id, cs_agent_id, kind, content, aliases, enabled, created_at, updated_at";
+const HANDOFF_COLUMNS: &str = "cs_handoff_id, cs_agent_id, cs_dialogue_id, requested_by, \
+     idempotency_key, reason, summary, status, claimed_by, updated_by, resolution, created_at, updated_at";
 
 fn canonical_id(kind: &str, value: &str) -> Result<(), DbError> {
     validate_uuidv7(value)
@@ -152,6 +155,14 @@ impl ICustomerServiceRepository for SqliteCustomerServiceRepository {
         .bind(cs_agent_id)
         .execute(&mut *tx)
         .await?;
+        sqlx::query("DELETE FROM cs_handoffs WHERE cs_agent_id = ?")
+            .bind(cs_agent_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM cs_agent_capability_receipts WHERE cs_agent_id = ?")
+            .bind(cs_agent_id)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("DELETE FROM cs_dialogues WHERE cs_agent_id = ?")
             .bind(cs_agent_id)
             .execute(&mut *tx)
@@ -380,6 +391,214 @@ impl ICustomerServiceRepository for SqliteCustomerServiceRepository {
             .await?)
     }
 
+    // ── cs_handoffs ─────────────────────────────────────────────────
+
+    async fn request_handoff(
+        &self,
+        handoff: &CsHandoffRow,
+    ) -> Result<CsHandoffRequestResult, DbError> {
+        canonical_id("cs_handoff_id", &handoff.cs_handoff_id)?;
+        canonical_id("cs_agent_id", &handoff.cs_agent_id)?;
+        canonical_id("cs_dialogue_id", &handoff.cs_dialogue_id)?;
+        canonical_id("requested_by", &handoff.requested_by)?;
+        if handoff.idempotency_key.trim().is_empty() {
+            return Err(DbError::Conflict(
+                "customer-service handoff idempotency key must be non-empty".into(),
+            ));
+        }
+        if handoff.status != CS_HANDOFF_STATUS_PENDING
+            || handoff.claimed_by.is_some()
+            || !handoff.resolution.is_empty()
+        {
+            return Err(DbError::Conflict(
+                "new customer-service handoff must start pending and unclaimed".into(),
+            ));
+        }
+
+        let mut tx = self.pool.begin().await?;
+        // Acquire the dialogue row's write authority before inspecting either
+        // uniqueness key. Concurrent requests for one dialogue therefore
+        // serialize before the partial unique index is reached.
+        let owned = sqlx::query(
+            "UPDATE cs_dialogues SET last_activity = last_activity \
+             WHERE cs_dialogue_id = ? AND cs_agent_id = ?",
+        )
+        .bind(&handoff.cs_dialogue_id)
+        .bind(&handoff.cs_agent_id)
+        .execute(&mut *tx)
+        .await?;
+        if owned.rows_affected() == 0 {
+            return Err(DbError::NotFound(format!(
+                "customer-service dialogue {} is not owned by agent {}",
+                handoff.cs_dialogue_id, handoff.cs_agent_id
+            )));
+        }
+
+        let by_idempotency = sqlx::query_as::<_, CsHandoffRow>(&format!(
+            "SELECT {HANDOFF_COLUMNS} FROM cs_handoffs WHERE idempotency_key = ?"
+        ))
+        .bind(&handoff.idempotency_key)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(existing) = by_idempotency {
+            if existing.cs_agent_id != handoff.cs_agent_id
+                || existing.cs_dialogue_id != handoff.cs_dialogue_id
+                || existing.requested_by != handoff.requested_by
+                || existing.reason != handoff.reason
+                || existing.summary != handoff.summary
+            {
+                return Err(DbError::Conflict(
+                    "customer-service handoff idempotency key was reused for a different request"
+                        .into(),
+                ));
+            }
+            tx.commit().await?;
+            return Ok(CsHandoffRequestResult {
+                handoff: existing,
+                created: false,
+            });
+        }
+
+        let active = sqlx::query_as::<_, CsHandoffRow>(&format!(
+            "SELECT {HANDOFF_COLUMNS} FROM cs_handoffs \
+             WHERE cs_dialogue_id = ? AND status IN (?, ?) \
+             ORDER BY created_at DESC, id DESC LIMIT 1"
+        ))
+        .bind(&handoff.cs_dialogue_id)
+        .bind(CS_HANDOFF_STATUS_PENDING)
+        .bind(CS_HANDOFF_STATUS_CLAIMED)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(existing) = active {
+            return Err(DbError::Conflict(format!(
+                "customer-service dialogue {} already has active handoff {}",
+                handoff.cs_dialogue_id, existing.cs_handoff_id
+            )));
+        }
+
+        let inserted = sqlx::query_as::<_, CsHandoffRow>(&format!(
+            "INSERT INTO cs_handoffs ({HANDOFF_COLUMNS}) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             RETURNING {HANDOFF_COLUMNS}"
+        ))
+        .bind(&handoff.cs_handoff_id)
+        .bind(&handoff.cs_agent_id)
+        .bind(&handoff.cs_dialogue_id)
+        .bind(&handoff.requested_by)
+        .bind(&handoff.idempotency_key)
+        .bind(&handoff.reason)
+        .bind(&handoff.summary)
+        .bind(&handoff.status)
+        .bind(&handoff.claimed_by)
+        .bind(&handoff.updated_by)
+        .bind(&handoff.resolution)
+        .bind(handoff.created_at)
+        .bind(handoff.updated_at)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(CsHandoffRequestResult {
+            handoff: inserted,
+            created: true,
+        })
+    }
+
+    async fn active_handoff_for_dialogue(
+        &self,
+        cs_dialogue_id: &str,
+    ) -> Result<Option<CsHandoffRow>, DbError> {
+        let sql = format!(
+            "SELECT {HANDOFF_COLUMNS} FROM cs_handoffs \
+             WHERE cs_dialogue_id = ? AND status IN (?, ?) \
+             ORDER BY created_at DESC, id DESC LIMIT 1"
+        );
+        Ok(sqlx::query_as::<_, CsHandoffRow>(&sql)
+            .bind(cs_dialogue_id)
+            .bind(CS_HANDOFF_STATUS_PENDING)
+            .bind(CS_HANDOFF_STATUS_CLAIMED)
+            .fetch_optional(&self.pool)
+            .await?)
+    }
+
+    async fn list_handoffs(
+        &self,
+        cs_agent_id: &str,
+        status: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<CsHandoffRow>, DbError> {
+        let limit = limit.clamp(1, 500) as i64;
+        let rows = if let Some(status) = status {
+            sqlx::query_as::<_, CsHandoffRow>(&format!(
+                "SELECT {HANDOFF_COLUMNS} FROM cs_handoffs \
+                 WHERE cs_agent_id = ? AND status = ? \
+                 ORDER BY created_at DESC, id DESC LIMIT ?"
+            ))
+            .bind(cs_agent_id)
+            .bind(status)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, CsHandoffRow>(&format!(
+                "SELECT {HANDOFF_COLUMNS} FROM cs_handoffs \
+                 WHERE cs_agent_id = ? ORDER BY created_at DESC, id DESC LIMIT ?"
+            ))
+            .bind(cs_agent_id)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?
+        };
+        Ok(rows)
+    }
+
+    async fn transition_handoff(
+        &self,
+        cs_handoff_id: &str,
+        expected_status: &str,
+        next_status: &str,
+        updated_by: &str,
+        claimed_by: Option<&str>,
+        resolution: &str,
+        now: TimestampMs,
+    ) -> Result<CsHandoffRow, DbError> {
+        canonical_id("cs_handoff_id", cs_handoff_id)?;
+        canonical_id("updated_by", updated_by)?;
+        if let Some(actor) = claimed_by {
+            canonical_id("claimed_by", actor)?;
+        }
+        let updated = sqlx::query_as::<_, CsHandoffRow>(&format!(
+            "UPDATE cs_handoffs SET status = ?, claimed_by = COALESCE(?, claimed_by), \
+             updated_by = ?, resolution = ?, updated_at = ? \
+             WHERE cs_handoff_id = ? AND status = ? RETURNING {HANDOFF_COLUMNS}"
+        ))
+        .bind(next_status)
+        .bind(claimed_by)
+        .bind(updated_by)
+        .bind(resolution)
+        .bind(now)
+        .bind(cs_handoff_id)
+        .bind(expected_status)
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(updated) = updated {
+            return Ok(updated);
+        }
+        let actual: Option<String> = sqlx::query_scalar(
+            "SELECT status FROM cs_handoffs WHERE cs_handoff_id = ?",
+        )
+        .bind(cs_handoff_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        match actual {
+            Some(actual) => Err(DbError::Conflict(format!(
+                "customer-service handoff {cs_handoff_id} is {actual}, expected {expected_status}"
+            ))),
+            None => Err(DbError::NotFound(format!(
+                "customer-service handoff {cs_handoff_id}"
+            ))),
+        }
+    }
+
     // ── cs_notes ─────────────────────────────────────────────────────
 
     async fn create_note(&self, row: &CsNoteRow) -> Result<CsNoteRow, DbError> {
@@ -539,6 +758,204 @@ impl ICustomerServiceRepository for SqliteCustomerServiceRepository {
         Ok(())
     }
 
+    async fn write_note_idempotent(
+        &self,
+        owner_user_id: &str,
+        cs_agent_id: &str,
+        capability_id: &str,
+        idempotency_key: &str,
+        request_digest: &str,
+        mutation: CsNoteWriteMutation,
+        now: TimestampMs,
+    ) -> Result<CsNoteWriteReceipt, DbError> {
+        canonical_id("owner_user_id", owner_user_id)?;
+        canonical_id("cs_agent_id", cs_agent_id)?;
+        if capability_id.trim().is_empty() || capability_id.len() > 256 {
+            return Err(DbError::Conflict(
+                "customer-service receipt capability_id is invalid".into(),
+            ));
+        }
+        if idempotency_key.trim().is_empty() || idempotency_key.len() > 512 {
+            return Err(DbError::Conflict(
+                "customer-service receipt idempotency_key is invalid".into(),
+            ));
+        }
+        if request_digest.len() != 64
+            || request_digest.bytes().any(|byte| {
+                !byte.is_ascii_digit() && !(b'a'..=b'f').contains(&byte)
+            })
+        {
+            return Err(DbError::Conflict(
+                "customer-service receipt request_digest must be lowercase SHA-256 hex".into(),
+            ));
+        }
+
+        let mut tx = self.pool.begin().await?;
+        // This no-op write both validates the selected customer resource and
+        // serializes competing keys before either inspects the receipt table.
+        let locked = sqlx::query(
+            "UPDATE cs_agents SET updated_at = updated_at WHERE cs_agent_id = ?",
+        )
+        .bind(cs_agent_id)
+        .execute(&mut *tx)
+        .await?;
+        if locked.rows_affected() == 0 {
+            return Err(DbError::NotFound(format!("cs agent {cs_agent_id}")));
+        }
+
+        let existing = sqlx::query(
+            "SELECT cs_agent_capability_receipt_id, cs_agent_id, request_digest, result_json \
+             FROM cs_agent_capability_receipts \
+             WHERE owner_user_id = ? AND capability_id = ? AND idempotency_key = ?",
+        )
+        .bind(owner_user_id)
+        .bind(capability_id)
+        .bind(idempotency_key)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(existing) = existing {
+            let existing_agent: String = existing.try_get("cs_agent_id")?;
+            let existing_digest: String = existing.try_get("request_digest")?;
+            if existing_agent != cs_agent_id || existing_digest != request_digest {
+                return Err(DbError::Conflict(
+                    "customer-service capability idempotency key was reused for a different request"
+                        .into(),
+                ));
+            }
+            let result_json: String = existing.try_get("result_json")?;
+            let note = serde_json::from_str(&result_json).map_err(|error| {
+                DbError::Conflict(format!(
+                    "customer-service capability receipt result is invalid: {error}"
+                ))
+            })?;
+            let receipt_id = existing.try_get("cs_agent_capability_receipt_id")?;
+            tx.commit().await?;
+            return Ok(CsNoteWriteReceipt {
+                cs_agent_capability_receipt_id: receipt_id,
+                note,
+                replayed: true,
+            });
+        }
+
+        let note = match mutation {
+            CsNoteWriteMutation::Create { note } => {
+                canonical_id("cs_note_id", &note.cs_note_id)?;
+                if note.cs_agent_id.as_deref() != Some(cs_agent_id) {
+                    return Err(DbError::Conflict(
+                        "notes.write create must target the selected customer resource".into(),
+                    ));
+                }
+                let search_text = note_search_text(&note.content, &note.aliases);
+                let inserted = sqlx::query(&format!(
+                    "INSERT INTO cs_notes ({NOTE_COLUMNS}, search_text) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                     RETURNING id, {NOTE_COLUMNS}"
+                ))
+                .bind(&note.cs_note_id)
+                .bind(&note.cs_agent_id)
+                .bind(&note.kind)
+                .bind(&note.content)
+                .bind(&note.aliases)
+                .bind(note.enabled)
+                .bind(note.created_at)
+                .bind(note.updated_at)
+                .bind(&search_text)
+                .fetch_one(&mut *tx)
+                .await?;
+                let rowid: i64 = inserted.try_get("id")?;
+                fts_index_insert(&mut tx, rowid, &search_text).await?;
+                CsNoteRow {
+                    cs_note_id: inserted.try_get("cs_note_id")?,
+                    cs_agent_id: inserted.try_get("cs_agent_id")?,
+                    kind: inserted.try_get("kind")?,
+                    content: inserted.try_get("content")?,
+                    aliases: inserted.try_get("aliases")?,
+                    enabled: inserted.try_get("enabled")?,
+                    created_at: inserted.try_get("created_at")?,
+                    updated_at: inserted.try_get("updated_at")?,
+                }
+            }
+            CsNoteWriteMutation::Update {
+                cs_note_id,
+                kind,
+                content,
+                aliases,
+                enabled,
+            } => {
+                canonical_id("cs_note_id", &cs_note_id)?;
+                let existing = sqlx::query(
+                    "SELECT id, cs_agent_id, content, aliases, search_text \
+                     FROM cs_notes WHERE cs_note_id = ?",
+                )
+                .bind(&cs_note_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or_else(|| DbError::NotFound(format!("cs note {cs_note_id}")))?;
+                let note_owner: Option<String> = existing.try_get("cs_agent_id")?;
+                if note_owner.as_deref() != Some(cs_agent_id) {
+                    return Err(DbError::Conflict(
+                        "notes.write cannot mutate a shared or foreign note".into(),
+                    ));
+                }
+                let rowid: i64 = existing.try_get("id")?;
+                let old_content: String = existing.try_get("content")?;
+                let old_aliases: String = existing.try_get("aliases")?;
+                let old_search_text: String = existing.try_get("search_text")?;
+                let new_search_text = note_search_text(
+                    content.as_deref().unwrap_or(&old_content),
+                    aliases.as_deref().unwrap_or(&old_aliases),
+                );
+                fts_index_delete(&mut tx, rowid, &old_search_text).await?;
+                let updated = sqlx::query_as::<_, CsNoteRow>(&format!(
+                    "UPDATE cs_notes SET kind = COALESCE(?, kind), \
+                     content = COALESCE(?, content), aliases = COALESCE(?, aliases), \
+                     enabled = COALESCE(?, enabled), search_text = ?, updated_at = ? \
+                     WHERE cs_note_id = ? RETURNING {NOTE_COLUMNS}"
+                ))
+                .bind(kind)
+                .bind(content)
+                .bind(aliases)
+                .bind(enabled)
+                .bind(&new_search_text)
+                .bind(now)
+                .bind(&cs_note_id)
+                .fetch_one(&mut *tx)
+                .await?;
+                fts_index_insert(&mut tx, rowid, &new_search_text).await?;
+                updated
+            }
+        };
+
+        let result_json = serde_json::to_string(&note).map_err(|error| {
+            DbError::Conflict(format!(
+                "customer-service capability result could not be encoded: {error}"
+            ))
+        })?;
+        let receipt_id = nomifun_common::CsAgentCapabilityReceiptId::new().into_string();
+        sqlx::query(
+            "INSERT INTO cs_agent_capability_receipts \
+             (cs_agent_capability_receipt_id, owner_user_id, cs_agent_id, capability_id, \
+              idempotency_key, request_digest, result_json, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&receipt_id)
+        .bind(owner_user_id)
+        .bind(cs_agent_id)
+        .bind(capability_id)
+        .bind(idempotency_key)
+        .bind(request_digest)
+        .bind(&result_json)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(CsNoteWriteReceipt {
+            cs_agent_capability_receipt_id: receipt_id,
+            note,
+            replayed: false,
+        })
+    }
+
     // ── cs_audit_events ──────────────────────────────────────────────
 
     async fn insert_audit_event(&self, row: &CsAuditEventRow) -> Result<(), DbError> {
@@ -595,7 +1012,9 @@ mod tests {
     use super::*;
     use crate::init_database_memory;
     use nomifun_common::text_search::expand_query;
-    use nomifun_common::{ChannelPluginId, ChannelUserId, generate_id};
+    use nomifun_common::{
+        ChannelPluginId, ChannelUserId, CsHandoffId, CsNoteId, UserId, generate_id,
+    };
 
     async fn repo() -> (crate::Database, SqliteCustomerServiceRepository) {
         let db = init_database_memory().await.unwrap();
@@ -731,6 +1150,176 @@ mod tests {
         other_chat.chat_id = "chat-2".into();
         let lane2 = repo.get_or_create_dialogue(&agent.cs_agent_id, &other_chat, 40).await.unwrap();
         assert_ne!(lane2.cs_dialogue_id, first.cs_dialogue_id);
+    }
+
+    #[tokio::test]
+    async fn handoff_queue_is_idempotent_single_active_and_compare_and_set() {
+        let (_db, repo) = repo().await;
+        let agent = repo.create_agent(&new_agent("A")).await.unwrap();
+        let dialogue = repo
+            .get_or_create_dialogue(&agent.cs_agent_id, &dialogue_key(), 10)
+            .await
+            .unwrap();
+        let owner = UserId::new().into_string();
+        let request = CsHandoffRow {
+            cs_handoff_id: CsHandoffId::new().into_string(),
+            cs_agent_id: agent.cs_agent_id.clone(),
+            cs_dialogue_id: dialogue.cs_dialogue_id.clone(),
+            requested_by: owner.clone(),
+            idempotency_key: "turn-1/handoff".into(),
+            reason: "visitor requested a human".into(),
+            summary: "billing question".into(),
+            status: CS_HANDOFF_STATUS_PENDING.into(),
+            claimed_by: None,
+            updated_by: owner.clone(),
+            resolution: String::new(),
+            created_at: 20,
+            updated_at: 20,
+        };
+
+        let first = repo.request_handoff(&request).await.unwrap();
+        assert!(first.created);
+        let replay = repo.request_handoff(&request).await.unwrap();
+        assert!(!replay.created);
+        assert_eq!(replay.handoff.cs_handoff_id, first.handoff.cs_handoff_id);
+
+        let mut concurrent = request.clone();
+        concurrent.cs_handoff_id = CsHandoffId::new().into_string();
+        concurrent.idempotency_key = "turn-2/handoff".into();
+        concurrent.reason = "duplicate escalation".into();
+        let conflict = repo.request_handoff(&concurrent).await.unwrap_err();
+        assert!(matches!(conflict, DbError::Conflict(_)));
+        assert_eq!(
+            repo.list_handoffs(&agent.cs_agent_id, Some(CS_HANDOFF_STATUS_PENDING), 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let claimed = repo
+            .transition_handoff(
+                &first.handoff.cs_handoff_id,
+                CS_HANDOFF_STATUS_PENDING,
+                CS_HANDOFF_STATUS_CLAIMED,
+                &owner,
+                Some(&owner),
+                "",
+                30,
+            )
+            .await
+            .unwrap();
+        assert_eq!(claimed.status, CS_HANDOFF_STATUS_CLAIMED);
+        assert_eq!(claimed.claimed_by.as_deref(), Some(owner.as_str()));
+
+        let stale = repo
+            .transition_handoff(
+                &first.handoff.cs_handoff_id,
+                CS_HANDOFF_STATUS_PENDING,
+                CS_HANDOFF_STATUS_CLAIMED,
+                &owner,
+                Some(&owner),
+                "",
+                31,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(stale, DbError::Conflict(_)));
+
+        let resolved = repo
+            .transition_handoff(
+                &first.handoff.cs_handoff_id,
+                CS_HANDOFF_STATUS_CLAIMED,
+                crate::models::CS_HANDOFF_STATUS_RESOLVED,
+                &owner,
+                None,
+                "answered by owner",
+                40,
+            )
+            .await
+            .unwrap();
+        assert_eq!(resolved.status, crate::models::CS_HANDOFF_STATUS_RESOLVED);
+        assert_eq!(resolved.claimed_by.as_deref(), Some(owner.as_str()));
+        assert!(repo
+            .active_handoff_for_dialogue(&dialogue.cs_dialogue_id)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn notes_write_receipt_replays_after_repo_restart_and_rejects_digest_conflict() {
+        let (db, repo) = repo().await;
+        let agent = repo.create_agent(&new_agent("A")).await.unwrap();
+        let owner = UserId::new().into_string();
+        let note = |content: &str| CsNoteWriteMutation::Create {
+            note: CsNoteRow {
+                cs_note_id: CsNoteId::new().into_string(),
+                cs_agent_id: Some(agent.cs_agent_id.clone()),
+                kind: "fact".into(),
+                content: content.into(),
+                aliases: String::new(),
+                enabled: true,
+                created_at: 10,
+                updated_at: 10,
+            },
+        };
+        let digest = "a".repeat(64);
+        let first = repo
+            .write_note_idempotent(
+                &owner,
+                &agent.cs_agent_id,
+                "customer_service.notes.write",
+                "lost-response",
+                &digest,
+                note("one fact"),
+                10,
+            )
+            .await
+            .unwrap();
+        assert!(!first.replayed);
+
+        let restarted = SqliteCustomerServiceRepository::new(db.pool().clone());
+        let replay = restarted
+            .write_note_idempotent(
+                &owner,
+                &agent.cs_agent_id,
+                "customer_service.notes.write",
+                "lost-response",
+                &digest,
+                note("one fact"),
+                20,
+            )
+            .await
+            .unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.note.cs_note_id, first.note.cs_note_id);
+        assert_eq!(
+            replay.cs_agent_capability_receipt_id,
+            first.cs_agent_capability_receipt_id
+        );
+        assert_eq!(
+            restarted.list_notes(Some(&agent.cs_agent_id)).await.unwrap().len(),
+            1
+        );
+
+        let conflict = restarted
+            .write_note_idempotent(
+                &owner,
+                &agent.cs_agent_id,
+                "customer_service.notes.write",
+                "lost-response",
+                &"b".repeat(64),
+                note("different fact"),
+                30,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(conflict, DbError::Conflict(_)));
+        assert_eq!(
+            restarted.list_notes(Some(&agent.cs_agent_id)).await.unwrap().len(),
+            1
+        );
     }
 
     #[tokio::test]

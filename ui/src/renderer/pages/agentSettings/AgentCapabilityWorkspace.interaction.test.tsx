@@ -19,6 +19,7 @@ const item = (id: string, available = true, name = id): CapabilityCatalogItem =>
   capability: { id: asCapabilityId(id), version: '1.0.0' }, kind: 'tool', display_name: name,
   description: id, source_package: { id: asPackageId('nomifun.example'), version: '1.0.0' },
   source_kind: 'bundled', materialization_state: available ? 'materialized' : 'unavailable',
+  unavailable_code: available ? undefined : 'CAPABILITY_UNAVAILABLE',
   supported_surfaces: ['desktop'], required_runtime_features: [], required_resource_kinds: id.startsWith('fs.') ? ['workspace'] : [],
   required_capabilities: [], conflicting_capabilities: [], action_count: 1, context_contributor_count: 0,
 });
@@ -148,6 +149,56 @@ describe('Agent capability workspace', () => {
 });
 
 describe('editable official preset', () => {
+  test('keeps materialized capabilities configurable when their concrete resources are chosen at use time', async () => {
+    const resourceScoped = {
+      ...item('knowledge.search'),
+      required_resource_kinds: ['knowledge_base'],
+    };
+    const template: OfficialPresetTemplate = {
+      template_key: 'assistant.general',
+      seed: {
+        initial_capabilities: [read.capability],
+        on_demand_capabilities: [resourceScoped.capability],
+        skill_bindings: [],
+        required_resource_kinds: ['knowledge_base'],
+        required_runtime_features: [],
+      },
+      role_coverage: {
+        required_capability_categories: [],
+        required_capability_ids: [resourceScoped.capability.id],
+        required_runtime_features: [],
+        required_resource_kinds: ['knowledge_base'],
+      },
+      immutable: true,
+      forkable: true,
+    };
+    const saved: Array<{ name: string; document: AgentPresetDocument }> = [];
+    const screen = render(<I18nextProvider i18n={testI18n}><OfficialTemplateOverview template={template} catalog={{ capabilities: [read, resourceScoped], skills: [], mcp_tools: [] }} busy={false} onSave={(name, document) => saved.push({ name, document })} /></I18nextProvider>);
+
+    expect(screen.getByRole('button', { name: /Needs attention 0/ })).toBeTruthy();
+    expect(screen.queryByText(en.workbench.builtinUnavailable)).toBeNull();
+    expect(screen.queryByText(en.common.unavailable)).toBeNull();
+    expect(screen.getAllByText(en.workbench.configureAtUse)).toHaveLength(2);
+    const save = screen.getByRole('button', { name: en.workbench.saveAsMine }) as HTMLButtonElement;
+    expect(save.disabled).toBe(false);
+
+    fireEvent.click(save);
+    await waitFor(() => expect(saved).toHaveLength(1));
+    expect(saved[0].document.on_demand_capabilities[0].capability).toEqual(resourceScoped.capability);
+  });
+
+  test('treats an unavailable official built-in as a diagnosable release-integrity failure', async () => {
+    const template: OfficialPresetTemplate = { template_key: 'assistant.general', seed: { initial_capabilities: [read.capability], on_demand_capabilities: [unavailable.capability], skill_bindings: [], required_resource_kinds: [], required_runtime_features: [] }, role_coverage: { required_capability_categories: [], required_capability_ids: [], required_runtime_features: [], required_resource_kinds: [] }, immutable: true, forkable: true };
+    const screen = render(<I18nextProvider i18n={testI18n}><OfficialTemplateOverview template={template} catalog={{ capabilities: [read, unavailable], skills: [], mcp_tools: [] }} busy={false} onSave={() => undefined} /></I18nextProvider>);
+
+    expect((screen.getByRole('button', { name: en.workbench.saveAsMine }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText(en.workbench.builtinUnavailable)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Search the web' }));
+    const body = within(document.body);
+    await body.findByText(en.workbench.builtinReason);
+    expect(body.getByText('CAPABILITY_UNAVAILABLE')).toBeTruthy();
+  });
+
   test('allows removing unavailable seed capabilities before creating a personal Agent', async () => {
     const template: OfficialPresetTemplate = { template_key: 'assistant.general', seed: { initial_capabilities: [read.capability], on_demand_capabilities: [unavailable.capability], skill_bindings: [], required_resource_kinds: [], required_runtime_features: [] }, role_coverage: { required_capability_categories: [], required_capability_ids: [], required_runtime_features: [], required_resource_kinds: [] }, immutable: true, forkable: true };
     const original = structuredClone(template);

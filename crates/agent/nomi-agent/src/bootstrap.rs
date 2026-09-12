@@ -28,6 +28,35 @@ struct SessionExtractModel {
     max_tokens: Option<u32>,
 }
 
+#[cfg(test)]
+mod mcp_capability_policy_tests {
+    use super::expand_mcp_tool_proxy_allowlist;
+
+    #[test]
+    fn proxy_marker_expands_only_exact_discovered_origins() {
+        let expected = nomi_mcp::tool_proxy::canonical_mcp_display_name("bound", "lookup");
+        let denied = nomi_mcp::tool_proxy::canonical_mcp_display_name("other", "lookup");
+
+        let mut without_marker = vec!["mcp_resource_list".to_owned()];
+        expand_mcp_tool_proxy_allowlist(&mut without_marker, [("bound", "lookup")]);
+        assert!(!without_marker.contains(&expected));
+
+        let mut allowed = vec!["mcp.tool_proxy".to_owned(), expected.clone()];
+        expand_mcp_tool_proxy_allowlist(
+            &mut allowed,
+            [("bound", "lookup"), ("bound", "lookup")],
+        );
+        assert_eq!(
+            allowed
+                .iter()
+                .filter(|name| name.as_str() == expected.as_str())
+                .count(),
+            1
+        );
+        assert!(!allowed.contains(&denied));
+    }
+}
+
 /// Drain a provider response for a tool-less, visible-text-only helper call.
 /// `Done` is a commit candidate rather than an early return: the channel must
 /// close cleanly before the candidate can be trusted, and any trailing event
@@ -362,6 +391,22 @@ pub struct BootstrapResult {
     pub provider: Arc<dyn LlmProvider>,
     pub mcp_managers: Vec<Arc<McpManager>>,
     pub has_mcp: bool,
+}
+
+fn expand_mcp_tool_proxy_allowlist<'a>(
+    allowed_tools: &mut Vec<String>,
+    discovered_tools: impl IntoIterator<Item = (&'a str, &'a str)>,
+) {
+    if !allowed_tools.iter().any(|name| name == "mcp.tool_proxy") {
+        return;
+    }
+    for (server_name, tool_name) in discovered_tools {
+        let provider_name =
+            nomi_mcp::tool_proxy::canonical_mcp_display_name(server_name, tool_name);
+        if !allowed_tools.contains(&provider_name) {
+            allowed_tools.push(provider_name);
+        }
+    }
 }
 
 /// Builder for creating a fully-initialized `AgentEngine`.
@@ -910,10 +955,22 @@ impl AgentBootstrap {
             deferred_state,
         )));
         if let Some(manager) = &mcp_manager {
+            let proxy_deferred = self
+                .config
+                .tools
+                .deferred_allowlist
+                .iter()
+                .any(|name| name == "mcp.tool_proxy");
+            let mut server_configs = self.config.mcp.servers.clone();
+            if proxy_deferred {
+                for config in server_configs.values_mut() {
+                    config.deferred = Some(true);
+                }
+            }
             nomi_mcp::tool_proxy::register_mcp_tools(
                 &mut registry,
                 manager,
-                &self.config.mcp.servers,
+                &server_configs,
             );
         }
 
@@ -922,6 +979,19 @@ impl AgentBootstrap {
         // 实时 deferred catalog，后续动态注册也能被搜索。ToolSearch 与旧顺序一致，
         // 始终保留；空 = 不限制（默认）。
         let mut allowed_tools = self.config.tools.builtin_allowlist.clone();
+        // `mcp.tool_proxy` is a canonical capability marker, not a provider
+        // tool name. Expand it only to the origin-stable names discovered from
+        // MCP servers already resolved into this exact Session. A model cannot
+        // use the marker to select or configure another server.
+        expand_mcp_tool_proxy_allowlist(
+            &mut allowed_tools,
+            mcp_managers.iter().flat_map(|manager| {
+                manager
+                    .all_tools()
+                    .into_iter()
+                    .map(|(server, tool)| (server, tool.name.as_str()))
+            }),
+        );
         if !allowed_tools.is_empty() && !allowed_tools.iter().any(|name| name == "ToolSearch") {
             allowed_tools.push("ToolSearch".to_owned());
         }
