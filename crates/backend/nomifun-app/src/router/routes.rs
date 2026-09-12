@@ -15,7 +15,7 @@ use nomifun_agent_contracts::{
     CapabilityConsumer, CapabilityOperationLock, CapabilityRef,
 };
 use nomifun_agent_control_plane::AgentControlPlane;
-use nomifun_assets::{AssetRouterState, asset_routes};
+use nomifun_assets::asset_routes;
 use nomifun_auth::{
     AuthRouterState, AuthState, InstallationTokenTrustState, InstanceOwnerState, TrustState,
     auth_middleware, auth_routes, csrf_middleware, installation_token_trust_resolve_middleware,
@@ -1114,7 +1114,7 @@ fn create_nomi_core_router_with_all_state(
     // mints a high-entropy, in-memory session capability in the URL path; these
     // routes accept only that revocable capability and never a caller-owned port.
     let office_proxy = office_proxy_routes(states.office);
-    let public_assets = asset_routes(AssetRouterState::default());
+    let public_assets = asset_routes();
     // Figure-image serving — exempt from auth: `<img>`/`new Image()` can't carry
     // the local-trust header, so the desktop webview would 403 every figure
     // thumbnail and the desktop companion would render blank. GET-only, opaque
