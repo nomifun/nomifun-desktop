@@ -167,9 +167,9 @@ impl ProviderModelService {
     pub async fn delete(&self, provider_id: &str, model: &str) -> Result<bool, AppError> {
         validate_provider_id(provider_id)?;
         let model = model.trim();
-        if model.is_empty() || model.chars().count() > 512 {
+        if model.is_empty() {
             return Err(AppError::BadRequest(
-                "provider model must contain 1 to 512 characters".into(),
+                "provider model must not be empty".into(),
             ));
         }
         let provider = self
