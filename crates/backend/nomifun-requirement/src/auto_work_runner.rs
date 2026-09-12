@@ -165,10 +165,6 @@ struct AutoWorkHandle {
     join: tokio::task::JoinHandle<()>,
     tag: String,
     max_requirements: Option<u32>,
-    config_revision: String,
-    /// Target kind, kept so `stop()` knows whether an in-flight turn lives in a
-    /// conversation agent (cancellable) or a terminal PTY (left untouched).
-    kind: AutoWorkTargetKind,
     /// Live progress (current requirement + completed count).
     progress: Arc<LiveProgress>,
     /// Monotonic id distinguishing this loop instance from a later restart on
@@ -533,13 +529,12 @@ impl AutoWorkRunner {
         if !self.wait_for_cleanup_locked(&key, STOP_WAIT_TIMEOUT).await {
             return AutoWorkStartOutcome::CleanupPending;
         }
-        if let Some(mut handle) = self.handles.get_mut(&key)
+        if let Some(handle) = self.handles.get(&key)
             && !handle.join.is_finished()
             && !handle.cancelled.load(Ordering::SeqCst)
             && handle.tag == tag
             && handle.max_requirements == max_requirements
         {
-            handle.config_revision = snapshot.revision;
             return AutoWorkStartOutcome::AlreadyRunning;
         }
         let restarted = self.handles.contains_key(&key);
@@ -549,6 +544,13 @@ impl AutoWorkRunner {
             return AutoWorkStartOutcome::CleanupPending;
         }
 
+        // Share the coordinator lock with shutdown so the final check and
+        // handle publication cannot cross shutdown's collection of live loops.
+        // No await is allowed between this guard and publication.
+        let _admission_guard = self.coordinators.lock().expect("AutoWork coordinator lock");
+        if self.shutdown.is_cancelled() {
+            return AutoWorkStartOutcome::ShuttingDown;
+        }
         let generation = self.next_generation.fetch_add(1, Ordering::SeqCst);
         let cancelled = Arc::new(AtomicBool::new(false));
         let cleanup_handoff = Arc::new(AtomicBool::new(false));
@@ -565,7 +567,6 @@ impl AutoWorkRunner {
         let cleanup_barrier_for_task = cleanup_barrier.clone();
         let guard_deps = deps.clone();
         let config_revision = snapshot.revision;
-        let config_revision_for_task = config_revision.clone();
         let (published_tx, published_rx) = oneshot::channel();
 
         // The spawned task cannot construct its Drop guard or enter run_loop
@@ -594,7 +595,7 @@ impl AutoWorkRunner {
                 cancelled_for_task,
                 progress_for_task,
                 max_requirements,
-                config_revision_for_task,
+                config_revision,
             )
             .await;
             info!(target_id = %conv, ?kind, tag = %loop_tag, "AutoWork loop exited");
@@ -607,8 +608,6 @@ impl AutoWorkRunner {
                 join,
                 tag,
                 max_requirements,
-                config_revision,
-                kind,
                 progress,
                 generation,
                 cleanup_handoff,
@@ -766,7 +765,7 @@ impl AutoWorkRunner {
                 .recover_active_claim_for_runner(
                     &handle.tag,
                     target_id,
-                    handle.kind,
+                    kind,
                     DEFAULT_LEASE_MS,
                 )
                 .await
@@ -791,7 +790,7 @@ impl AutoWorkRunner {
             // already finalized between abortion and this read.
             let active_claim = recovered_claim.or(published_claim);
 
-            if handle.kind == AutoWorkTargetKind::Conversation {
+            if kind == AutoWorkTargetKind::Conversation {
                 if let Err(error) = self.deps.conversation.cancel_active_turn(target_id).await {
                     warn!(
                         target_id,
@@ -804,7 +803,7 @@ impl AutoWorkRunner {
                 let req_id = active_claim.requirement_id;
                 let claim_generation = active_claim.claim_generation;
                 let claim_token = active_claim.claim_token;
-                if handle.kind == AutoWorkTargetKind::Conversation {
+                if kind == AutoWorkTargetKind::Conversation {
                     if let Err(error) = resolve_interrupted_conversation_claim(
                         &self.deps,
                         &req_id,
@@ -944,7 +943,7 @@ impl AutoWorkRunner {
                         );
                     }
                 }
-            } else if handle.kind == AutoWorkTargetKind::Terminal
+            } else if kind == AutoWorkTargetKind::Terminal
                 && let Some(driver) = &self.deps.terminal_driver
             {
                 // Even if the Requirement owner lookup failed, absorb any
@@ -3800,46 +3799,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn c4_target_key_distinguishes_canonical_session_domains() {
-        let conversation_id = ConversationId::new().into_string();
-        let terminal_id = TerminalId::new().into_string();
-        let conversation: TargetKey = (AutoWorkTargetKind::Conversation, conversation_id);
-        let terminal: TargetKey = (AutoWorkTargetKind::Terminal, terminal_id);
-        assert_ne!(conversation, terminal, "conversation and terminal keys must be distinct");
-
-        // The registry is a DashMap<TargetKey, _>; mirror its keying to prove
-        // the two domains never collide and `stop` of one leaves the other.
-        let map: DashMap<TargetKey, u32> = DashMap::new();
-        map.insert(conversation.clone(), 1);
-        map.insert(terminal.clone(), 2);
-        assert_eq!(map.len(), 2, "both domains coexist");
-        assert_eq!(map.get(&conversation).map(|v| *v), Some(1));
-        assert_eq!(map.get(&terminal).map(|v| *v), Some(2));
-
-        // Stopping the terminal domain leaves the conversation entry intact.
-        map.remove(&terminal);
-        assert!(map.contains_key(&conversation));
-        assert!(!map.contains_key(&terminal));
-    }
-
-    #[test]
-    fn c4_is_running_lookup_is_domain_scoped() {
-        // `is_running(kind, id)` builds the lookup key from BOTH kind and id, so
-        // an entry under one domain is invisible to the other domain's lookup.
-        // Mirror the exact `contains_key` the AutoWork runner uses.
-        let handles: DashMap<TargetKey, ()> = DashMap::new();
-        let conversation_id = ConversationId::new().into_string();
-        let terminal_id = TerminalId::new().into_string();
-        handles.insert((AutoWorkTargetKind::Conversation, conversation_id.clone()), ());
-
-        let conversation_lookup =
-            handles.contains_key(&(AutoWorkTargetKind::Conversation, conversation_id));
-        let terminal_lookup = handles.contains_key(&(AutoWorkTargetKind::Terminal, terminal_id));
-        assert!(conversation_lookup);
-        assert!(!terminal_lookup);
-    }
-
     #[tokio::test]
     async fn concurrent_restarts_share_one_target_transition_barrier() {
         let transitions = Arc::new(TargetTransitionMap::new());
@@ -4220,6 +4179,15 @@ mod tests {
             .expect("same running handle")
             .generation;
 
+        assert!(runner.is_running(AutoWorkTargetKind::Conversation, &session_id));
+        assert!(!runner.is_running(AutoWorkTargetKind::Terminal, &session_id));
+        assert_eq!(
+            runner.running_tag(AutoWorkTargetKind::Conversation, &session_id).as_deref(),
+            Some("release")
+        );
+        assert_eq!(runner.running_tag(AutoWorkTargetKind::Terminal, &session_id), None);
+        assert!(runner.live_progress(AutoWorkTargetKind::Conversation, &session_id).is_some());
+        assert_eq!(runner.live_progress(AutoWorkTargetKind::Terminal, &session_id), None);
         assert_eq!(first_generation, second_generation);
         assert_eq!(first.revision, replay.revision);
         assert_eq!(port.cancel_count.load(Ordering::SeqCst), 0);
@@ -4304,7 +4272,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bounded_stop_retains_cleanup_owner_until_exact_cleanup_finishes() {
+    async fn bounded_stop_retains_cleanup_and_shutdown_rejects_waiting_restart() {
         let (runner, port, _database, owner_id, session_id) =
             runner_fixture(None).await;
         let config = AutoWorkConfig::normalize(true, Some("cleanup"), None).unwrap();
@@ -4342,6 +4310,25 @@ mod tests {
             "the exact cleanup owner must survive the bounded waiter"
         );
 
+        let restart = runner.start(
+            AutoWorkTargetKind::Conversation,
+            session_id.clone(),
+            "cleanup".to_owned(),
+            None,
+        );
+        tokio::pin!(restart);
+        tokio::select! {
+            biased;
+            result = &mut restart => panic!("restart must wait for cleanup: {result:?}"),
+            _ = std::future::ready(()) => {}
+        }
+        let shutdown = runner.shutdown();
+        tokio::pin!(shutdown);
+        tokio::select! {
+            biased;
+            result = &mut shutdown => panic!("shutdown must wait for cleanup: {result:?}"),
+            _ = std::future::ready(()) => {}
+        }
         port.cancel_release.notify_one();
         timeout(Duration::from_secs(1), async {
             while runner.cleanups.contains_key(&key) {
@@ -4350,7 +4337,9 @@ mod tests {
         })
         .await
         .expect("retained cleanup must finish");
-        runner.shutdown().await.expect("runner shutdown");
+        assert_eq!(restart.await, AutoWorkStartOutcome::ShuttingDown);
+        shutdown.await.expect("runner shutdown");
+        assert!(runner.handles.is_empty());
     }
 
     #[test]
