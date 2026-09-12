@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { Button, Input, Message, Spin } from '@arco-design/web-react';
 import { Refresh, EditOne, Terminal } from '@icon-park/react';
@@ -251,7 +251,10 @@ const TerminalSessionContent: React.FC<{ sessionId: TerminalId }> = ({ sessionId
   const [xtermAttempt, setXtermAttempt] = useState(0);
   const [relaunching, setRelaunching] = useState(false);
   const [fallingBack, setFallingBack] = useState(false);
-  const fallingBackRef = useRef(false);
+  const restartingRef = useRef(false);
+  const activeRef = useRef(false);
+  const sessionEvents = useRef(0);
+  const snapshotRequest = useRef<object | null>(null);
   const xtermApi = useRef<XtermViewHandle | null>(null);
   // Inline title editing in the header.
   const [editingName, setEditingName] = useState(false);
@@ -260,46 +263,80 @@ const TerminalSessionContent: React.FC<{ sessionId: TerminalId }> = ({ sessionId
   const savingNameRef = useRef(false);
   const skipBlurSaveRef = useRef(false);
 
-  useEffect(() => {
+  // Invalidate at commit, before an old request can beat passive cleanup.
+  useLayoutEffect(() => {
     let active = true;
-    setSession(null);
+    activeRef.current = true;
+    const request = {};
+    snapshotRequest.current = request;
+    let loading = true;
+    const updates: Array<(value: ITerminalSession | null) => ITerminalSession | null> = [];
+    const applyLive = (update: (value: ITerminalSession | null) => ITerminalSession | null) => {
+      if (!active) return;
+      sessionEvents.current += 1;
+      if (loading && snapshotRequest.current === request) updates.push(update);
+      setSession(update);
+    };
     setLoadError(null);
+    const offExit = ipcBridge.terminal.onExit.on((evt) => {
+      if (!active || evt.terminal_id !== sessionId) return;
+      setTerminalError(null);
+      applyLive((prev) => prev ? { ...prev, last_status: 'exited', exit_code: evt.exit_code } : prev);
+    });
+    const offUpdated = ipcBridge.terminal.onUpdated.on((s) => {
+      if (!active || s.terminal_id !== sessionId) return;
+      setLoadError(null);
+      if (s.last_status === 'running') setTerminalError(null);
+      applyLive(() => s);
+    });
+    const offRemoved = ipcBridge.terminal.onRemoved.on((evt) => {
+      if (!active || evt.terminal_id !== sessionId) return;
+      applyLive(() => null);
+      setLoadError('not-found');
+    });
+    const offReconnected = ipcBridge.terminal.onReconnected.on(() => {
+      if (active) setLoadAttempt((attempt) => attempt + 1);
+    });
     void ipcBridge.terminal.get
       .invoke({ terminal_id: sessionId })
       .then((s) => {
-        if (!active) return;
-        if (s) {
-          setSession(s);
-          return;
-        }
-        setLoadError('not-found');
+        if (!active || snapshotRequest.current !== request) return;
+        // Preserve events received while the snapshot was in flight, including
+        // an exit before there was enough metadata to render the session.
+        const latest = updates.reduce<ITerminalSession | null>((value, update) => update(value), s ?? null);
+        setSession(latest);
+        setLoadError(latest ? null : 'not-found');
+        if (latest?.last_status !== 'running') setTerminalError(null);
       })
       .catch((error: unknown) => {
-        if (!active) return;
+        if (!active || snapshotRequest.current !== request) return;
         console.error('[TerminalSessionPage] Failed to load terminal session:', error);
-        setLoadError('request-failed');
-      });
-
-    const offExit = ipcBridge.terminal.onExit.on((evt) => {
-      if (evt.terminal_id === sessionId)
-        setSession((prev) => (prev ? { ...prev, last_status: 'exited', exit_code: evt.exit_code } : prev));
-    });
-    const offUpdated = ipcBridge.terminal.onUpdated.on((s) => {
-      if (s.terminal_id === sessionId) {
-        setLoadError(null);
-        if (s.last_status === 'running') setTerminalError(null);
-        setSession(s);
-      }
-    });
+        setLoadError((current) => current ?? 'request-failed');
+      })
+      .finally(() => { loading = false; updates.length = 0; });
     return () => {
       active = false;
+      activeRef.current = false;
+      snapshotRequest.current = null;
       offExit();
       offUpdated();
+      offRemoved();
+      offReconnected();
     };
   }, [loadAttempt, sessionId]);
 
+  // A callback retained by a disposed/retried xterm must not poison its successor.
+  const resizeOwner = useMemo(() => ({}), [xtermAttempt, session?.last_status, terminalError]);
+  const activeResizeOwner = useRef<object | null>(null);
+  useLayoutEffect(() => {
+    activeResizeOwner.current = resizeOwner;
+    return () => { activeResizeOwner.current = null; };
+  }, [resizeOwner]);
+
   const handleRelaunch = useCallback(async () => {
-    if (!session) return;
+    if (!activeRef.current || !session || restartingRef.current) return;
+    restartingRef.current = true;
+    const eventVersion = sessionEvents.current;
     setRelaunching(true);
     try {
       // Relaunch in place: the backend respawns the PTY for the SAME session id
@@ -310,15 +347,18 @@ const TerminalSessionContent: React.FC<{ sessionId: TerminalId }> = ({ sessionId
       const updated = await ipcBridge.terminal.relaunch.invoke({
         terminal_id: session.terminal_id,
       });
+      if (!activeRef.current) return;
+      snapshotRequest.current = null;
       xtermApi.current?.clear();
       xtermApi.current?.focus();
-      setSession(updated);
+      if (sessionEvents.current === eventVersion) setSession(updated);
       setTerminalError(null);
       setXtermAttempt((attempt) => attempt + 1);
     } catch (err) {
-      Message.error(err instanceof Error ? err.message : String(err));
+      if (activeRef.current) Message.error(err instanceof Error ? err.message : String(err));
     } finally {
-      setRelaunching(false);
+      restartingRef.current = false;
+      if (activeRef.current) setRelaunching(false);
     }
   }, [session]);
 
@@ -328,27 +368,31 @@ const TerminalSessionContent: React.FC<{ sessionId: TerminalId }> = ({ sessionId
   // / clears the garble). Wired to both the header button and the rapid-Ctrl+C
   // escalation. Guarded so a Ctrl+C burst + a button click cannot double-fire.
   const handleFallbackShell = useCallback(async () => {
-    if (!session || fallingBackRef.current) return;
-    fallingBackRef.current = true;
+    if (!activeRef.current || !session || restartingRef.current) return;
+    restartingRef.current = true;
+    const eventVersion = sessionEvents.current;
     setFallingBack(true);
     try {
       const updated = await ipcBridge.terminal.relaunchShell.invoke({ terminal_id: session.terminal_id });
+      if (!activeRef.current) return;
+      snapshotRequest.current = null;
       xtermApi.current?.reset();
       xtermApi.current?.focus();
-      setSession(updated);
+      if (sessionEvents.current === eventVersion) setSession(updated);
       setTerminalError(null);
       setXtermAttempt((attempt) => attempt + 1);
       Message.success(t('terminal.fallbackShellDone'));
     } catch (err) {
-      Message.error(err instanceof Error ? err.message : String(err));
+      if (activeRef.current) Message.error(err instanceof Error ? err.message : String(err));
     } finally {
-      fallingBackRef.current = false;
-      setFallingBack(false);
+      restartingRef.current = false;
+      if (activeRef.current) setFallingBack(false);
     }
   }, [session, t]);
 
   const startEditName = useCallback(() => {
     if (!session) return;
+    skipBlurSaveRef.current = false;
     setDraftName(session.name ?? '');
     setEditingName(true);
   }, [session]);
@@ -356,7 +400,7 @@ const TerminalSessionContent: React.FC<{ sessionId: TerminalId }> = ({ sessionId
   // Save the edited title via the same update API the sidebar rename uses; the
   // sidebar stays in sync through its own `terminal.updated` subscription.
   const saveName = useCallback(async () => {
-    if (savingNameRef.current || !session) return;
+    if (!activeRef.current || savingNameRef.current || !session) return;
     const trimmed = draftName.trim();
     // Empty or unchanged → treat as cancel; no request.
     if (!trimmed || trimmed === session.name) {
@@ -370,15 +414,18 @@ const TerminalSessionContent: React.FC<{ sessionId: TerminalId }> = ({ sessionId
         terminal_id: session.terminal_id,
         name: trimmed,
       });
-      setSession(updated);
+      if (!activeRef.current) return;
+      snapshotRequest.current = null;
+      // This action only changes the name; its full response can predate an exit.
+      setSession((prev) => prev ? { ...prev, name: updated.name } : prev);
       // Mirror cancelEditName: the unmount-triggered blur must not re-save.
       skipBlurSaveRef.current = true;
       setEditingName(false);
     } catch (err) {
-      Message.error(err instanceof Error ? err.message : String(err));
+      if (activeRef.current) Message.error(err instanceof Error ? err.message : String(err));
     } finally {
       savingNameRef.current = false;
-      setSavingName(false);
+      if (activeRef.current) setSavingName(false);
     }
   }, [session, draftName]);
 
@@ -423,7 +470,7 @@ const TerminalSessionContent: React.FC<{ sessionId: TerminalId }> = ({ sessionId
   // Capability is resolved from the launch command/args/backend the SAME way the
   // backend gate does (wrappers like `stepcode claude` count; a plain shell or
   // gemini does not).
-  const isAgentCli = isTerminalAutoworkCapable(session?.command ?? '', session?.args ?? [], session?.backend);
+  const isAgentCli = isTerminalAutoworkCapable(session.command, session.args, session.backend);
   const autoWorkDisabledReason = !isAgentCli
     ? t('terminal.autowork.requiresAgentCli')
     : isExited
@@ -521,6 +568,7 @@ const TerminalSessionContent: React.FC<{ sessionId: TerminalId }> = ({ sessionId
               <Button
                 size='small'
                 loading={fallingBack}
+                disabled={relaunching}
                 icon={<Terminal size='14' />}
                 onClick={handleFallbackShell}
                 title={t('terminal.fallbackShellTip')}
@@ -533,6 +581,7 @@ const TerminalSessionContent: React.FC<{ sessionId: TerminalId }> = ({ sessionId
                 type='primary'
                 size='small'
                 loading={relaunching}
+                disabled={fallingBack}
                 icon={<Refresh size='14' />}
                 onClick={handleRelaunch}
               >
@@ -572,9 +621,11 @@ const TerminalSessionContent: React.FC<{ sessionId: TerminalId }> = ({ sessionId
               apiRef={xtermApi}
               className='h-full'
               onEscalateShell={isAgentCli ? handleFallbackShell : undefined}
-              onResizeFailure={(error: unknown) =>
-                setTerminalError(error instanceof Error ? error : new Error(String(error)))
-              }
+              onResizeFailure={(error: unknown) => {
+                if (!isExited && activeResizeOwner.current === resizeOwner) {
+                  setTerminalError(error instanceof Error ? error : new Error(String(error)));
+                }
+              }}
             />
           )}
         </div>
@@ -592,7 +643,7 @@ const TerminalSessionContent: React.FC<{ sessionId: TerminalId }> = ({ sessionId
       {/* Right region: preview + workspace rail. Lives inside the page-level
           PreviewProvider above. Mounted only once the session is loaded (the
           rail needs session.terminal_id / session.cwd). */}
-      {session && <TerminalRightRegion session={session} />}
+      <TerminalRightRegion session={session} />
     </div>
     </PreviewProvider>
   );
