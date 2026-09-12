@@ -1191,26 +1191,26 @@ pub fn resource_descriptors() -> Vec<TypedResourceDescriptor> {
 pub fn canonical_resource_bindings(owner_id: impl Into<String>) -> Vec<TypedResourceBinding> {
     let owner_id = owner_id.into();
     vec![
-        resource_binding(
+        typed_resource_binding(
             "wave1-knowledge",
             KNOWLEDGE_BASE_RESOURCE_KIND,
             "knowledge",
-            &["embed", "mount", "read", "rerank", "search", "sync", "write"],
             &owner_id,
+            ["embed", "mount", "read", "rerank", "search", "sync", "write"],
         ),
-        resource_binding(
+        typed_resource_binding(
             "wave1-project-memory",
             PROJECT_MEMORY_RESOURCE_KIND,
             "project-memory",
-            &["read", "write"],
             &owner_id,
+            ["read", "write"],
         ),
-        resource_binding(
+        typed_resource_binding(
             "wave1-companion-memory",
             COMPANION_MEMORY_RESOURCE_KIND,
             "companion-memory",
-            &["read", "write"],
             &owner_id,
+            ["read", "write"],
         ),
     ]
 }
@@ -1241,24 +1241,6 @@ where
         connection_config_ref: None,
         typed_parameters: BTreeMap::new(),
     }
-}
-
-pub fn typed_resource_bindings_for<'a>(
-    owner_id: &str,
-    entries: impl IntoIterator<Item = (&'a str, &'a str, &'a str, &'a [&'a str])>,
-) -> TypedResourceBindings {
-    entries
-        .into_iter()
-        .map(|(binding_id, resource_kind, resource_id, operations)| {
-            typed_resource_binding(
-                binding_id,
-                resource_kind,
-                resource_id,
-                owner_id,
-                operations.iter().copied(),
-            )
-        })
-        .collect()
 }
 
 /// Check the host surface portion of Wave 1 availability.  Wave 1
@@ -2159,8 +2141,7 @@ fn validate_action_input(capability_id: &str, input: &Value) -> Result<(), Kerne
                         reason: format!("{capability_id} field `{key}` must be a string"),
                     });
                 };
-                let value = value.trim();
-                if value.is_empty() {
+                if value.trim().is_empty() {
                     return Err(KernelError::CapabilityExecution {
                         reason: format!("{capability_id} field `{key}` must not be empty"),
                     });
@@ -2602,24 +2583,6 @@ fn descriptor<const N: usize>(
     }
 }
 
-fn resource_binding(
-    binding_id: &str,
-    resource_kind: &str,
-    resource_id: &str,
-    operations: &[&str],
-    owner_id: &str,
-) -> TypedResourceBinding {
-    TypedResourceBinding {
-        binding_id: ResourceBindingId::from(binding_id),
-        resource_kind: ResourceKind::from(resource_kind),
-        resource_id: ResourceId::from(resource_id),
-        owner_id: owner_id.to_owned(),
-        operations: operations.iter().map(|operation| (*operation).to_owned()).collect(),
-        connection_config_ref: None,
-        typed_parameters: BTreeMap::new(),
-    }
-}
-
 fn host_port(id: &str) -> nomifun_agent_contracts::HostPortRef {
     nomifun_agent_contracts::HostPortRef {
         id: nomifun_agent_contracts::HostPortId::from(id),
@@ -2995,7 +2958,20 @@ mod tests {
                 input: StrictJsonValue(json!({})),
             }
         };
-        assert!(registry.invoke(&snapshot, &active, invalid).await.is_err());
+        for input in [
+            invalid.input.clone(),
+            StrictJsonValue(json!({"query": format!(" {}", "q".repeat(2_048))})),
+        ] {
+            let error = registry
+                .invoke(
+                    &snapshot,
+                    &active,
+                    CapabilityInvocationRequest { input, ..invalid.clone() },
+                )
+                .await
+                .expect_err("invalid input must not reach the successful host port");
+            assert_eq!(error.canonical_code().as_ref(), "INVALID_PAYLOAD");
+        }
     }
 
     #[test]
@@ -3083,6 +3059,55 @@ mod tests {
         )
         .expect_err("Companion writes must use the durable memory taxonomy");
         assert!(error.to_string().contains("supported memory kind"));
+    }
+
+    #[test]
+    fn string_limits_count_untrimmed_characters_and_preserve_valid_input() {
+        let cases = [
+            (KNOWLEDGE_SEARCH, json!({"query": "entry"})),
+            (WEB_FETCH, json!({"url": "https://example.com"})),
+            (KNOWLEDGE_READ, json!({"handle": "doc-1"})),
+            (KNOWLEDGE_WRITE, json!({"content": "entry"})),
+            (KNOWLEDGE_EMBEDDING, json!({"text": "entry"})),
+            (MEMORY_PROJECT_WRITE, json!({"content": "entry"})),
+            (MEMORY_COMPANION_WRITE, json!({"kind": "preference", "content": "entry"})),
+            (MEMORY_COMPANION_MERGE, json!({
+                "memory_ids": ["memory-1", "memory-2"],
+                "merged_content": "entry", "kind": "preference"
+            })),
+            (MEMORY_COMPANION_EVOLVE, json!({"memory_id": "memory-1", "content": "entry"})),
+            (SKILL_INVOKE, json!({"skill_id": "skill.example"})),
+        ];
+        for (capability_id, input) in cases {
+            let action = action_id(capability_id).unwrap();
+            let schema = tool_input_schema(capability_id);
+            for (field, property) in schema["properties"].as_object().unwrap() {
+                let Some(limit) = property["maxLength"].as_u64() else { continue };
+                let mut input = input.clone();
+                // Count Unicode characters, not UTF-8 bytes; retain surrounding whitespace.
+                input[field] = json!(format!(" {} ", "界".repeat(limit as usize - 2)));
+                operation_from_action(&action, StrictJsonValue(input.clone()))
+                    .expect("an exact-limit string with surrounding whitespace is valid");
+
+                for oversized in [
+                    format!(" {}", "x".repeat(limit as usize)),
+                    format!("{} ", "x".repeat(limit as usize)),
+                ] {
+                    input[field] = json!(oversized);
+                    let error = operation_from_action(&action, StrictJsonValue(input.clone()))
+                        .expect_err("surrounding whitespace must count toward the limit");
+                    assert!(error.to_string().contains(&format!("exceeds {limit} characters")));
+                }
+            }
+        }
+        let operation = operation_from_action(
+            &action_id(KNOWLEDGE_SEARCH).unwrap(),
+            StrictJsonValue(json!({"query": " entry "})),
+        ).unwrap();
+        assert_eq!(operation, Wave1CapabilityOperation::KnowledgeSearch(Wave1SearchRequest {
+            query: " entry ".to_owned(),
+            limit: None,
+        }));
     }
 
     #[test]
