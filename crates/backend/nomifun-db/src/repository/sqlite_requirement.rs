@@ -531,9 +531,8 @@ impl IRequirementRepository for SqliteRequirementRepository {
         let total: i64 = count_query.fetch_one(&self.pool).await?;
 
         // page
-        let page = params.page.unwrap_or(1).max(1);
-        let page_size = params.page_size.unwrap_or(20).clamp(1, 200);
-        let offset = (page - 1) * page_size;
+        let page_size = i64::from(params.page_size.unwrap_or(20).clamp(1, 200));
+        let offset = super::pagination::page_offset(i64::from(params.page.unwrap_or(1)), page_size);
 
         let page_sql = format!(
             "SELECT * FROM requirements{where_clause} {order_clause} LIMIT ? OFFSET ?",
@@ -543,7 +542,7 @@ impl IRequirementRepository for SqliteRequirementRepository {
         for bind in &binds {
             page_query = bind_value_as(page_query, bind);
         }
-        page_query = page_query.bind(page_size as i64).bind(offset as i64);
+        page_query = page_query.bind(page_size).bind(offset);
         let rows = page_query.fetch_all(&self.pool).await?;
 
         Ok((rows, total as u64))
@@ -1530,6 +1529,32 @@ mod tests {
             .unwrap_err(),
             DbError::NotFound(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn requirement_pagination_handles_large_page_indices() {
+        let (repo, _db, _, _) = setup().await;
+        let inserted = repo.insert(&make_row("pagination", "00000001")).await.unwrap();
+        for (page, page_size, is_first_page) in [
+            (u32::MAX, 200, false),
+            ((1 << 31) + 1, 2, false),
+            (0, 0, true),
+            (1, 1, true),
+            (2, 1, false),
+        ] {
+            let (rows, total) = repo.list(&ListRequirementsParams {
+                page: Some(page),
+                page_size: Some(page_size),
+                ..Default::default()
+            }).await.unwrap();
+            assert_eq!(total, 1);
+            if is_first_page {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].requirement_id, inserted.requirement_id);
+            } else {
+                assert!(rows.is_empty(), "page {page} must not wrap to the first page");
+            }
+        }
     }
 
     #[tokio::test]

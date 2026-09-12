@@ -1750,9 +1750,8 @@ impl IWorkshopRepository for SqliteWorkshopRepository {
         push_filters(&mut count_qb, &params);
         let total: i64 = count_qb.build_query_scalar().fetch_one(&self.pool).await?;
 
-        let page = params.page.max(1);
         let page_size = params.page_size.clamp(1, 200);
-        let offset = (page - 1) * page_size;
+        let offset = super::pagination::page_offset(params.page, page_size);
 
         let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new("SELECT * FROM workshop_assets");
         push_filters(&mut qb, &params);
@@ -2570,6 +2569,31 @@ mod tests {
             repo.get_asset(ASSET_1).await.unwrap().is_none(),
             "the first asset insert must also roll back"
         );
+    }
+
+    #[tokio::test]
+    async fn asset_pagination_handles_large_page_indices() {
+        let (repo, _db) = repo().await;
+        repo.create_asset(&sample_asset(1, ASSET_1, "image", "pagination")).await.unwrap();
+        for (page, page_size, is_first_page) in [
+            (i64::MAX, 200, false),
+            (i64::MAX, 2, false),
+            (i64::MIN, 0, true),
+            (0, -1, true),
+            (1, 1, true),
+            (2, 1, false),
+        ] {
+            let (rows, total) = repo.list_assets(ListAssetsParams {
+                page, page_size, ..Default::default()
+            }).await.unwrap();
+            assert_eq!(total, 1);
+            if is_first_page {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].asset_id, ASSET_1);
+            } else {
+                assert!(rows.is_empty(), "page {page} must not wrap to the first page");
+            }
+        }
     }
 
     #[tokio::test]
