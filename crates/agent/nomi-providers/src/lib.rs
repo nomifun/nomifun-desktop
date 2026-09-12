@@ -208,7 +208,7 @@ impl ProviderError {
                 content_type,
                 message,
             } => Self::NonApiResponse {
-                content_type,
+                content_type: content_type.map(|value| redactor.redact(&value)),
                 message: redactor.redact(&message),
             },
         }
@@ -528,7 +528,6 @@ pub(crate) async fn send_initial_with_key_rotation(
     build_headers: impl Fn(&str) -> Result<HeaderMap, ProviderError>,
 ) -> Result<(reqwest::Response, HeaderMap), ProviderError> {
     let redactor = SecretRedactor::new(api_keys);
-    let mut last_error = None;
     let key_count = api_keys.len();
     let start_index = current_api_key.load(Ordering::Acquire) % key_count.max(1);
 
@@ -552,15 +551,12 @@ pub(crate) async fn send_initial_with_key_rotation(
                     "provider rejected API key; trying the next configured key"
                 );
                 current_api_key.store(next_index, Ordering::Release);
-                last_error = Some(error);
             }
             Err(error) => return Err(error),
         }
     }
 
-    Err(last_error.unwrap_or_else(|| {
-        ProviderError::Connection("No usable API key configured".to_owned())
-    }))
+    Err(ProviderError::Connection("No usable API key configured".to_owned()))
 }
 
 struct SecretRedactingProvider {
@@ -1081,6 +1077,13 @@ mod retryable_tests {
         };
         let error = initial.stream(&empty_request()).await.unwrap_err();
         assert_secret_absent(&error.to_string());
+
+        let document_error = ProviderError::NonApiResponse {
+            content_type: Some(format!("text/html; token={URL_ENCODED_SECRET}")),
+            message: format!("reflected {REFLECTED_SECRET}"),
+        }
+        .redacted(&redactor);
+        assert_secret_absent(&document_error.to_string());
 
         let streaming = SecretRedactingProvider {
             inner: Arc::new(ReflectingProvider {
