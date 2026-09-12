@@ -43,6 +43,8 @@ pub trait ControlPlaneStore: Send + Sync {
         revision: AgentPresetRevision,
         snapshot: ResolvedSnapshotEnvelope,
     ) -> Result<StoredPreset, ControlPlaneError>;
+    /// Update presentation only if owner and current immutable Revision still match.
+    async fn update_preset_metadata(&self, preset: &StoredPreset) -> Result<(), ControlPlaneError>;
 
     async fn retire_preset(
         &self,
@@ -116,6 +118,24 @@ struct InMemoryState {
     snapshots: BTreeMap<(AgentPresetId, u64), ResolvedSnapshotEnvelope>,
     agent_bindings: BTreeMap<AgentBindingTarget, StoredAgentBinding>,
     remote_bindings: BTreeMap<RemoteBindingId, RemoteBinding>,
+}
+
+impl InMemoryState {
+    fn require_owned_preset(
+        &self,
+        owner: &UserId,
+        preset_id: &AgentPresetId,
+    ) -> Result<(), ControlPlaneError> {
+        if self.presets.get(preset_id).is_some_and(|stored| {
+            stored.preset.owner_user_id.as_ref() == Some(owner)
+                && stored.preset.source == nomifun_agent_contracts::AgentPresetSource::User
+                && !self.retired_presets.contains_key(preset_id)
+        }) {
+            Ok(())
+        } else {
+            Err(agent_preset_not_found())
+        }
+    }
 }
 
 #[derive(Default)]
@@ -198,6 +218,29 @@ impl ControlPlaneStore for InMemoryControlPlaneStore {
         state.snapshots.insert(key, snapshot);
         state.presets.insert(preset_id, preset.clone());
         Ok(preset)
+    }
+
+    async fn update_preset_metadata(&self, preset: &StoredPreset) -> Result<(), ControlPlaneError> {
+        let mut state = self.state.write().await;
+        if state.retired_presets.contains_key(&preset.preset.preset_id) {
+            return Err(agent_preset_not_found());
+        }
+        let current = state
+            .presets
+            .get_mut(&preset.preset.preset_id)
+            .ok_or_else(agent_preset_not_found)?;
+        if current.preset.owner_user_id != preset.preset.owner_user_id
+            || current.preset.current_stable_revision != preset.preset.current_stable_revision
+        {
+            return Err(ControlPlaneError::canonical(
+                "PRESET_REVISION_DIGEST_MISMATCH",
+                axum::http::StatusCode::CONFLICT,
+                "Preset owner or current Revision changed",
+            ));
+        }
+        current.preset.display_name.clone_from(&preset.preset.display_name);
+        current.preset.description.clone_from(&preset.preset.description);
+        Ok(())
     }
 
     async fn retire_preset(
@@ -360,16 +403,18 @@ impl ControlPlaneStore for InMemoryControlPlaneStore {
         expected_binding_version: Option<u64>,
     ) -> Result<StoredAgentBinding, ControlPlaneError> {
         let mut state = self.state.write().await;
-        let preset_id = &binding.value.preset_revision_ref.preset_id;
-        let active_owned_preset = state.presets.get(preset_id).is_some_and(|stored| {
-            stored.preset.owner_user_id.as_ref() == Some(&binding.owner_user_id)
-                && stored.preset.source == nomifun_agent_contracts::AgentPresetSource::User
-                && !state.retired_presets.contains_key(preset_id)
-        });
-        if !active_owned_preset {
-            return Err(agent_preset_not_found());
-        }
+        state.require_owned_preset(
+            &binding.owner_user_id,
+            &binding.value.preset_revision_ref.preset_id,
+        )?;
         if let Some(existing) = state.agent_bindings.get(&binding.target) {
+            if existing.owner_user_id != binding.owner_user_id {
+                return Err(ControlPlaneError::canonical(
+                    "PRESET_REVISION_DIGEST_MISMATCH",
+                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+                    "AgentBinding does not exist",
+                ));
+            }
             if expected_binding_version != Some(existing.value.binding_version) {
                 return Err(ControlPlaneError::canonical(
                     "PRESET_REVISION_DIGEST_MISMATCH",
@@ -423,14 +468,16 @@ impl ControlPlaneStore for InMemoryControlPlaneStore {
         binding: RemoteBinding,
     ) -> Result<RemoteBinding, ControlPlaneError> {
         let mut state = self.state.write().await;
-        let preset_id = &binding.agent_binding.preset_revision_ref.preset_id;
-        let active_owned_preset = state.presets.get(preset_id).is_some_and(|stored| {
-            stored.preset.owner_user_id.as_ref() == Some(&binding.owner_user_id)
-                && stored.preset.source == nomifun_agent_contracts::AgentPresetSource::User
-                && !state.retired_presets.contains_key(preset_id)
-        });
-        if !active_owned_preset {
-            return Err(agent_preset_not_found());
+        state.require_owned_preset(
+            &binding.owner_user_id,
+            &binding.agent_binding.preset_revision_ref.preset_id,
+        )?;
+        if state.remote_bindings.contains_key(&binding.remote_binding_id) {
+            return Err(ControlPlaneError::canonical(
+                "REMOTE_BINDING_VERSION_CONFLICT",
+                axum::http::StatusCode::CONFLICT,
+                "RemoteBinding ID already exists",
+            ));
         }
         state
             .remote_bindings
@@ -445,25 +492,15 @@ impl ControlPlaneStore for InMemoryControlPlaneStore {
         expected_agent_binding_digest: &str,
     ) -> Result<RemoteBinding, ControlPlaneError> {
         let mut state = self.state.write().await;
-        let preset_id = &binding.agent_binding.preset_revision_ref.preset_id;
-        let active_owned_preset = state.presets.get(preset_id).is_some_and(|stored| {
-            stored.preset.owner_user_id.as_ref() == Some(&binding.owner_user_id)
-                && stored.preset.source == nomifun_agent_contracts::AgentPresetSource::User
-                && !state.retired_presets.contains_key(preset_id)
-        });
-        if !active_owned_preset {
-            return Err(agent_preset_not_found());
-        }
+        state.require_owned_preset(
+            &binding.owner_user_id,
+            &binding.agent_binding.preset_revision_ref.preset_id,
+        )?;
         let existing = state
             .remote_bindings
             .get(&binding.remote_binding_id)
-            .ok_or_else(|| {
-                ControlPlaneError::canonical(
-                    "REMOTE_BINDING_NOT_FOUND",
-                    axum::http::StatusCode::NOT_FOUND,
-                    "RemoteBinding does not exist",
-                )
-            })?;
+            .filter(|existing| existing.owner_user_id == binding.owner_user_id)
+            .ok_or_else(remote_binding_not_found)?;
         if existing.agent_binding.binding_version != expected_binding_version {
             return Err(ControlPlaneError::canonical(
                 "REMOTE_BINDING_VERSION_CONFLICT",
@@ -492,20 +529,11 @@ impl ControlPlaneStore for InMemoryControlPlaneStore {
         binding_id: &RemoteBindingId,
     ) -> Result<(), ControlPlaneError> {
         let mut state = self.state.write().await;
-        let binding = state.remote_bindings.get(binding_id).ok_or_else(|| {
-            ControlPlaneError::canonical(
-                "REMOTE_BINDING_NOT_FOUND",
-                axum::http::StatusCode::NOT_FOUND,
-                "RemoteBinding does not exist",
-            )
-        })?;
-        if &binding.owner_user_id != owner {
-            return Err(ControlPlaneError::canonical(
-                "REMOTE_BINDING_NOT_FOUND",
-                axum::http::StatusCode::NOT_FOUND,
-                "RemoteBinding does not exist",
-            ));
-        }
+        state
+            .remote_bindings
+            .get(binding_id)
+            .filter(|binding| &binding.owner_user_id == owner)
+            .ok_or_else(remote_binding_not_found)?;
         state.remote_bindings.remove(binding_id);
         Ok(())
     }
@@ -517,6 +545,14 @@ fn now_ms() -> i64 {
         .unwrap_or_default()
         .as_millis()
         .min(i64::MAX as u128) as i64
+}
+
+fn remote_binding_not_found() -> ControlPlaneError {
+    ControlPlaneError::canonical(
+        "REMOTE_BINDING_NOT_FOUND",
+        axum::http::StatusCode::NOT_FOUND,
+        "RemoteBinding does not exist",
+    )
 }
 
 fn agent_preset_not_found() -> ControlPlaneError {
@@ -585,6 +621,32 @@ mod tests {
             .await
             .unwrap();
 
+        let mut metadata = store.get_preset(&preset_id).await.unwrap().unwrap();
+        metadata.preset.display_name = "Renamed".into();
+        metadata.preset.description = Some("Details".into());
+        metadata.session_only = true;
+        store.update_preset_metadata(&metadata).await.unwrap();
+        let saved = store.get_preset(&preset_id).await.unwrap().unwrap();
+        assert_eq!(saved.preset.display_name, "Renamed");
+        assert_eq!(saved.preset.description, metadata.preset.description);
+        assert!(!saved.session_only, "metadata cannot change admission scope");
+        for wrong_owner in [false, true] {
+            let mut stale = metadata.clone();
+            stale.preset.display_name = "Must not overwrite".into();
+            if wrong_owner {
+                stale.preset.owner_user_id = Some(other_owner.clone());
+            } else {
+                stale.preset.current_stable_revision = Some(PresetRevisionRef {
+                    preset_id: preset_id.clone(),
+                    revision: 99,
+                    revision_digest: "a".repeat(64).into(),
+                });
+            }
+            assert!(store.update_preset_metadata(&stale).await.is_err());
+        }
+        let unchanged = store.get_preset(&preset_id).await.unwrap().unwrap();
+        assert_eq!(unchanged.preset.display_name, "Renamed");
+
         let other_error = store
             .retire_preset(&other_owner, &preset_id)
             .await
@@ -594,6 +656,7 @@ mod tests {
         assert!(store.get_preset(&preset_id).await.unwrap().is_some());
 
         store.retire_preset(&owner, &preset_id).await.unwrap();
+        assert!(store.update_preset_metadata(&metadata).await.is_err());
         assert!(store.get_preset(&preset_id).await.unwrap().is_none());
         assert!(store.list_presets(&owner).await.unwrap().is_empty());
 
@@ -658,6 +721,31 @@ mod tests {
             })
             .await
             .unwrap();
+
+            let other_owner = UserId::from("owner-2");
+            store.insert_preset(preset("other-preset", Some(&other_owner), AgentPresetSource::User))
+                .await.unwrap();
+            let existing_agent = store.get_agent_binding(&target).await.unwrap().unwrap();
+            let existing_remote = store.get_remote_binding(&remote_id).await.unwrap().unwrap();
+            let mut stolen_agent = existing_agent.clone();
+            stolen_agent.owner_user_id = other_owner.clone();
+            stolen_agent.value = binding_value("other-preset");
+            let mut stolen_remote = existing_remote.clone();
+            stolen_remote.owner_user_id = other_owner;
+            stolen_remote.agent_binding = binding_value("other-preset");
+            let remote_digest = nomifun_agent_contracts::digest_payload(&existing_remote.agent_binding).unwrap();
+            let rejected = [
+                store.put_agent_binding(stolen_agent, Some(existing_agent.value.binding_version)).await.is_err(),
+                store.insert_remote_binding(existing_remote.clone()).await.is_err(),
+                store.update_remote_binding(stolen_remote, existing_remote.agent_binding.binding_version, remote_digest.as_ref()).await.is_err(),
+            ];
+            assert_eq!(rejected, [true; 3], "foreign owners and duplicate IDs cannot replace bindings");
+            assert_eq!(store.get_agent_binding(&target).await.unwrap().unwrap().owner_user_id, owner);
+            assert_eq!(store.get_remote_binding(&remote_id).await.unwrap().unwrap().owner_user_id, owner);
+
+            // Exact-owner updates remain valid after rejecting the conflicting writes.
+            store.put_agent_binding(existing_agent.clone(), Some(existing_agent.value.binding_version)).await.unwrap();
+            store.update_remote_binding(existing_remote.clone(), existing_remote.agent_binding.binding_version, remote_digest.as_ref()).await.unwrap();
 
         store.retire_preset(&owner, &preset_id).await.unwrap();
         assert!(store.get_preset(&preset_id).await.unwrap().is_none());

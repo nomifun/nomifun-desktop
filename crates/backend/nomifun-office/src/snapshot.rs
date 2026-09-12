@@ -25,14 +25,7 @@ impl SnapshotService {
 
     pub async fn list(&self, target: &PreviewHistoryTargetDto) -> Result<Vec<PreviewSnapshotInfoDto>, OfficeError> {
         let dir = self.target_dir(target);
-        let index_path = dir.join(INDEX_FILE);
-
-        if !index_path.exists() {
-            return Ok(Vec::new());
-        }
-
-        let content = tokio::fs::read_to_string(&index_path).await?;
-        let mut snapshots: Vec<PreviewSnapshotInfoDto> = serde_json::from_str(&content)?;
+        let mut snapshots = self.read_index(&dir).await?;
         snapshots.sort_by_key(|a| a.created_at);
         Ok(snapshots)
     }
@@ -44,6 +37,9 @@ impl SnapshotService {
     ) -> Result<PreviewSnapshotInfoDto, OfficeError> {
         let dir = self.target_dir(target);
         tokio::fs::create_dir_all(&dir).await?;
+        // Do not create content or overwrite history when the existing index
+        // cannot be read. Only a missing index represents an empty history.
+        let mut snapshots = self.read_index(&dir).await?;
 
         let now_ms = current_timestamp_ms();
         let snapshot_id = PreviewSnapshotId::new();
@@ -63,7 +59,6 @@ impl SnapshotService {
             file_path: target.file_path.clone(),
         };
 
-        let mut snapshots: Vec<PreviewSnapshotInfoDto> = self.read_index(&dir).await;
         snapshots.push(info.clone());
 
         self.trim_and_write_index(&dir, &mut snapshots).await?;
@@ -77,7 +72,7 @@ impl SnapshotService {
         snapshot_id: &PreviewSnapshotId,
     ) -> Result<Option<SnapshotContentResponse>, OfficeError> {
         let dir = self.target_dir(target);
-        let snapshots: Vec<PreviewSnapshotInfoDto> = self.read_index(&dir).await;
+        let snapshots = self.read_index(&dir).await?;
 
         let Some(info) = snapshots
             .into_iter()
@@ -87,11 +82,11 @@ impl SnapshotService {
         };
 
         let file_path = dir.join(format!("{snapshot_id}{SNAPSHOT_EXT}"));
-        if !file_path.exists() {
-            return Ok(None);
-        }
-
-        let content = tokio::fs::read_to_string(&file_path).await?;
+        let content = match tokio::fs::read_to_string(&file_path).await {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
         Ok(Some(SnapshotContentResponse {
             snapshot: info,
             content,
@@ -103,12 +98,13 @@ impl SnapshotService {
         self.base_dir.join(hash)
     }
 
-    async fn read_index(&self, dir: &Path) -> Vec<PreviewSnapshotInfoDto> {
+    async fn read_index(&self, dir: &Path) -> Result<Vec<PreviewSnapshotInfoDto>, OfficeError> {
         let index_path = dir.join(INDEX_FILE);
-        let Ok(content) = tokio::fs::read_to_string(&index_path).await else {
-            return Vec::new();
-        };
-        serde_json::from_str(&content).unwrap_or_default()
+        match tokio::fs::read_to_string(&index_path).await {
+            Ok(content) => Ok(serde_json::from_str(&content)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(error) => Err(error.into()),
+        }
     }
 
     async fn trim_and_write_index(
@@ -386,6 +382,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn service_index_errors_preserve_history() {
+        for corrupt_json in [true, false] {
+            let tmp = tempfile::tempdir().unwrap();
+            let svc = SnapshotService::new(tmp.path());
+            let target = make_target(PreviewContentType::Markdown, Some("/a.md"));
+            let info = svc.save(&target, "original").await.unwrap();
+            let dir = svc.target_dir(&target);
+            let index_path = dir.join(INDEX_FILE);
+            if corrupt_json {
+                tokio::fs::write(&index_path, "{").await.unwrap();
+            } else {
+                tokio::fs::remove_file(&index_path).await.unwrap();
+                tokio::fs::create_dir(&index_path).await.unwrap();
+            }
+
+            let errors = [
+                svc.list(&target).await.unwrap_err(),
+                svc.get_content(&target, &info.snapshot_id).await.unwrap_err(),
+                svc.save(&target, "replacement").await.unwrap_err(),
+            ];
+            for error in errors {
+                if corrupt_json {
+                    assert!(matches!(error, OfficeError::Json(_)));
+                } else {
+                    assert!(matches!(error, OfficeError::Io(_)));
+                }
+            }
+            assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+            assert_eq!(
+                tokio::fs::read_to_string(dir.join(format!("{}{SNAPSHOT_EXT}", info.snapshot_id)))
+                    .await
+                    .unwrap(),
+                "original"
+            );
+            if corrupt_json {
+                assert_eq!(tokio::fs::read_to_string(&index_path).await.unwrap(), "{");
+            } else {
+                assert!(index_path.is_dir());
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn service_get_content() {
         let tmp = tempfile::tempdir().unwrap();
         let svc = SnapshotService::new(tmp.path());
@@ -410,6 +449,12 @@ mod tests {
         let nonexistent = PreviewSnapshotId::new();
         let resp = svc.get_content(&target, &nonexistent).await.unwrap();
         assert!(resp.is_none());
+
+        let info = svc.save(&target, "removed content").await.unwrap();
+        tokio::fs::remove_file(svc.target_dir(&target).join(format!("{}{SNAPSHOT_EXT}", info.snapshot_id)))
+            .await
+            .unwrap();
+        assert!(svc.get_content(&target, &info.snapshot_id).await.unwrap().is_none());
     }
 
     #[tokio::test]

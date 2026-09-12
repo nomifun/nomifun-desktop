@@ -400,7 +400,7 @@ impl ContentAddressedNpmCache {
         fs::create_dir(&staging).map_err(|error| io_error(&staging, error))?;
         let guard = CacheStagingGuard {
             staging_root: self.staging_root.clone(),
-            path: staging.clone(),
+            path: Some(staging.clone()),
         };
         let files_root = staging.join(CACHE_FILES_DIRECTORY);
         fs::create_dir(&files_root).map_err(|error| io_error(&files_root, error))?;
@@ -439,12 +439,27 @@ impl ContentAddressedNpmCache {
         let bytes = fs::read(&record_path).map_err(|error| io_error(&record_path, error))?;
         let record: NpmCacheRecord = strict_json_from_slice(&bytes)
             .map_err(|error| AuthoringError::Cache(error.to_string()))?;
+        let payload = NpmCacheDigestPayload {
+            format_version: CACHE_RECORD_VERSION,
+            name: &record.name,
+            version: &record.version,
+            registry_integrity: &record.registry_integrity,
+            files: &record.files,
+        };
         if canonical_json_bytes(&record)? != bytes
             || record.format_version != CACHE_RECORD_VERSION
             || record.archive_digest != *digest
+            || digest_bytes(&canonical_json_bytes(&payload)?) != *digest
         {
             return Err(AuthoringError::Cache(
                 "cache object record is non-canonical or mismatched".into(),
+            ));
+        }
+        if !record.files.iter().any(|file| {
+            file.path.as_str() == "package.json" && file.digest == record.package_json_digest
+        }) {
+            return Err(AuthoringError::Cache(
+                "cache package.json digest does not match the file record".into(),
             ));
         }
         let files_root = canonical.join(CACHE_FILES_DIRECTORY);
@@ -493,6 +508,10 @@ impl CachedNpmPackage {
         &self.record.package_json_digest
     }
 
+    pub(crate) fn registry_integrity(&self) -> &str {
+        &self.record.registry_integrity
+    }
+
     pub fn name(&self) -> &str {
         &self.record.name
     }
@@ -524,23 +543,6 @@ impl CachedNpmPackage {
 
     pub fn contains_file(&self, path: &NormalizedSourcePath) -> bool {
         self.record.files.iter().any(|file| &file.path == path)
-    }
-
-    pub fn materialize_into(&self, target_root: &Path) -> Result<(), AuthoringError> {
-        if target_root.exists() {
-            return Err(AuthoringError::Cache(format!(
-                "dependency materialization target already exists: {}",
-                target_root.display()
-            )));
-        }
-        fs::create_dir_all(target_root).map_err(|error| io_error(target_root, error))?;
-        for file in &self.record.files {
-            let source = file.path.join(&self.object_root.join(CACHE_FILES_DIRECTORY));
-            let target = file.path.join(target_root);
-            ensure_contained_parent(target_root, &target)?;
-            fs::copy(&source, &target).map_err(|error| io_error(&target, error))?;
-        }
-        Ok(())
     }
 }
 
@@ -848,9 +850,9 @@ struct RegistryPackageJson {
     version: String,
     #[serde(default)]
     dependencies: BTreeMap<String, String>,
-    #[serde(default)]
+    #[serde(rename = "optionalDependencies", default)]
     optional_dependencies: Option<BTreeMap<String, String>>,
-    #[serde(default)]
+    #[serde(rename = "peerDependencies", default)]
     peer_dependencies: Option<BTreeMap<String, String>>,
     #[serde(
         rename = "bundledDependencies",
@@ -1297,26 +1299,28 @@ fn validate_digest(digest: &DigestHex) -> Result<(), AuthoringError> {
 
 struct CacheStagingGuard {
     staging_root: PathBuf,
-    path: PathBuf,
+    path: Option<PathBuf>,
 }
 
 impl CacheStagingGuard {
-    fn disarm(self) {
-        std::mem::forget(self);
+    fn disarm(mut self) {
+        self.path = None;
     }
 }
 
 impl Drop for CacheStagingGuard {
     fn drop(&mut self) {
-        if self.path.parent() == Some(self.staging_root.as_path())
-            && self
-                .path
+        let Some(path) = self.path.as_ref() else {
+            return;
+        };
+        if path.parent() == Some(self.staging_root.as_path())
+            && path
                 .file_name()
                 .and_then(|name| name.to_str())
                 .and_then(|name| name.strip_prefix("cache-"))
                 .is_some_and(|uuid| Uuid::parse_str(uuid).is_ok())
         {
-            let _ = fs::remove_dir_all(&self.path);
+            let _ = fs::remove_dir_all(path);
         }
     }
 }

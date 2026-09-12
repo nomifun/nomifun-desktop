@@ -1,7 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React, { useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Checkbox, Form, Input, Modal, Select, Switch } from '@arco-design/web-react';
 import { ipcBridge } from '@/common';
+import { isHandledAuthExpiredHttpError } from '@/common/adapter/httpBridge';
 import type { IWebhook } from '@/common/adapter/ipcBridge';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 
@@ -34,13 +35,18 @@ const ChannelFormModal: React.FC<ChannelFormModalProps> = ({ visible, editing, o
   const [message, ctx] = useArcoMessage();
   const [submitting, setSubmitting] = useState(false);
   const [clearSecret, setClearSecret] = useState(false);
+  const draftVersion = useRef(0);
+  const saving = useRef(false);
 
   const isEdit = editing != null;
 
   const platform = Form.useWatch('platform', form);
   const isLark = platform === 'lark';
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    draftVersion.current++;
+    saving.current = false;
+    setSubmitting(false);
     if (visible) {
       if (editing) {
         form.setFieldsValue({
@@ -57,12 +63,18 @@ const ChannelFormModal: React.FC<ChannelFormModalProps> = ({ visible, editing, o
       }
       setClearSecret(false);
     }
+    return () => { draftVersion.current++; };
   }, [visible, editing, form]);
 
   const handleSubmit = async () => {
+    if (!visible || saving.current) return;
+    saving.current = true;
+    const version = draftVersion.current;
+    const isCurrent = () => version === draftVersion.current;
+    setSubmitting(true);
     try {
       const values = await form.validate();
-      setSubmitting(true);
+      if (!isCurrent()) return;
 
       const submitPlatform = values.platform as IWebhook['platform'];
       const larkPlatform = submitPlatform === 'lark';
@@ -92,6 +104,7 @@ const ChannelFormModal: React.FC<ChannelFormModalProps> = ({ visible, editing, o
             secret: secretValue,
           },
         });
+        if (!isCurrent()) return;
         message.success(t('webhook.messages.updateOk'));
       } else {
         await ipcBridge.webhook.create.invoke({
@@ -102,18 +115,23 @@ const ChannelFormModal: React.FC<ChannelFormModalProps> = ({ visible, editing, o
           enabled: values.enabled,
           secret: larkPlatform ? values.secret || undefined : undefined,
         });
+        if (!isCurrent()) return;
         message.success(t('webhook.messages.createOk'));
       }
 
       await onSuccess();
     } catch (e) {
+      if (!isCurrent() || isHandledAuthExpiredHttpError(e)) return;
       if (e && typeof e === 'object' && 'errorFields' in e) {
         // form validation error — do not show Message
         return;
       }
       message.error(String(e));
     } finally {
-      setSubmitting(false);
+      if (isCurrent()) {
+        saving.current = false;
+        setSubmitting(false);
+      }
     }
   };
 

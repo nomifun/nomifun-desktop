@@ -16,12 +16,14 @@ use tokio::net::TcpListener;
 
 struct MockProcessHandle {
     alive: AtomicBool,
+    listener: std::sync::Mutex<Option<std::net::TcpListener>>,
 }
 
 impl MockProcessHandle {
-    fn new() -> Self {
+    fn new(listener: Option<std::net::TcpListener>) -> Self {
         Self {
             alive: AtomicBool::new(true),
+            listener: std::sync::Mutex::new(listener),
         }
     }
 }
@@ -29,6 +31,7 @@ impl MockProcessHandle {
 impl ProcessHandle for MockProcessHandle {
     fn kill(&self) {
         self.alive.store(false, Ordering::SeqCst);
+        drop(self.listener.lock().unwrap().take());
     }
 
     fn is_alive(&self) -> bool {
@@ -63,7 +66,7 @@ impl ProcessSpawner for HttpMockSpawner {
                 }
             }
         });
-        Ok(Box::new(MockProcessHandle::new()))
+        Ok(Box::new(MockProcessHandle::new(None)))
     }
 
     async fn install_officecli(&self) -> Result<(), OfficeError> {
@@ -87,8 +90,7 @@ impl ProcessSpawner for TcpOnlySpawner {
     ) -> Result<Box<dyn ProcessHandle>, OfficeError> {
         let listener = std::net::TcpListener::bind(format!("127.0.0.1:{port}"))
             .map_err(|e| OfficeError::StartFailed(e.to_string()))?;
-        std::mem::forget(listener);
-        Ok(Box::new(MockProcessHandle::new()))
+        Ok(Box::new(MockProcessHandle::new(Some(listener))))
     }
 
     async fn install_officecli(&self) -> Result<(), OfficeError> {

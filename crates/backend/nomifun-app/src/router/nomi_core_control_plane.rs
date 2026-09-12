@@ -484,6 +484,27 @@ impl ControlPlaneStore for NomiCoreControlPlaneStore {
         Ok(preset)
     }
 
+    async fn update_preset_metadata(&self, preset: &StoredPreset) -> Result<(), ControlPlaneError> {
+        let owner = preset.preset.owner_user_id.as_ref()
+            .ok_or_else(|| not_found("AgentPreset"))?;
+        let changed = sqlx::query(
+            "UPDATE nomi_agent_presets SET display_name = ?, description = ? \
+             WHERE preset_id = ? AND owner_user_id = ? AND retired_at_ms IS NULL \
+             AND current_revision IS ?",
+        )
+        .bind(&preset.preset.display_name)
+        .bind(&preset.preset.description)
+        .bind(preset.preset.preset_id.as_ref())
+        .bind(owner.as_ref())
+        .bind(preset.preset.current_stable_revision.as_ref()
+            .map(|r| i64_from_u64(r.revision, "revision")).transpose()?)
+        .execute(&self.pool).await.map_err(sql)?;
+        if changed.rows_affected() != 1 {
+            return Err(conflict("Preset owner or current Revision changed"));
+        }
+        Ok(())
+    }
+
     async fn retire_preset(
         &self,
         owner: &UserId,
@@ -1044,6 +1065,32 @@ mod tests {
         .await
         .unwrap();
 
+        let mut metadata = store.get_preset(&preset_id).await.unwrap().unwrap();
+        metadata.preset.display_name = "Renamed".into();
+        metadata.preset.description = Some("Details".into());
+        metadata.session_only = true;
+        store.update_preset_metadata(&metadata).await.unwrap();
+        let saved = store.get_preset(&preset_id).await.unwrap().unwrap();
+        assert_eq!(saved.preset.display_name, "Renamed");
+        assert_eq!(saved.preset.description, metadata.preset.description);
+        assert!(!saved.session_only, "metadata cannot change admission scope");
+        for wrong_owner in [false, true] {
+            let mut stale = metadata.clone();
+            stale.preset.display_name = "Must not overwrite".into();
+            if wrong_owner {
+                stale.preset.owner_user_id = Some(other_owner.clone());
+            } else {
+                stale.preset.current_stable_revision = Some(PresetRevisionRef {
+                    preset_id: preset_id.clone(),
+                    revision: 99,
+                    revision_digest: "a".repeat(64).into(),
+                });
+            }
+            assert!(store.update_preset_metadata(&stale).await.is_err());
+        }
+        let unchanged = store.get_preset(&preset_id).await.unwrap().unwrap();
+        assert_eq!(unchanged.preset.display_name, "Renamed");
+
         let other_error = store
             .retire_preset(&other_owner, &preset_id)
             .await
@@ -1052,6 +1099,7 @@ mod tests {
         assert_eq!(other_error.code().as_ref(), "AGENT_PRESET_NOT_FOUND");
 
         store.retire_preset(&owner, &preset_id).await.unwrap();
+        assert!(store.update_preset_metadata(&metadata).await.is_err());
         assert!(store.get_preset(&preset_id).await.unwrap().is_none());
         assert!(store.list_presets(&owner).await.unwrap().is_empty());
         let retired_at_ms: Option<i64> = sqlx::query_scalar(
