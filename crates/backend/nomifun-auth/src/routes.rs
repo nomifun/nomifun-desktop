@@ -68,11 +68,12 @@ pub fn auth_routes(state: AuthRouterState) -> Router {
     let api_limiter = Arc::new(RateLimiter::api());
     let action_limiter = Arc::new(RateLimiter::authenticated_action());
 
-    // Start periodic cleanup for rate limiters
+    // Start periodic cleanup for rate limiters and expired QR tokens.
     let cleanup_interval = Duration::from_secs(60);
     auth_limiter.start_cleanup_task(cleanup_interval);
     api_limiter.start_cleanup_task(cleanup_interval);
     action_limiter.start_cleanup_task(cleanup_interval);
+    state.qr_token_store.start_cleanup_task(cleanup_interval);
 
     let auth_state = AuthState {
         jwt_service: state.jwt_service.clone(),
@@ -469,8 +470,7 @@ async fn change_username_handler(
         state
             .user_repo
             .update_username(current_user.id.as_str(), &trimmed)
-            .await
-            .map_err(|e| AppError::Internal(format!("Database error: {e}")))?;
+            .await?;
     }
 
     Ok(Json(ApiResponse::ok(ChangeUsernameResponse { username: trimmed })))
@@ -726,8 +726,7 @@ async fn webui_change_username_handler(
         state
             .user_repo
             .update_username(user.user_id.as_str(), &trimmed)
-            .await
-            .map_err(|e| AppError::Internal(format!("Database error: {e}")))?;
+            .await?;
     }
 
     Ok(Json(ApiResponse::ok(WebuiChangeUsernameResponse { username: trimmed })))
@@ -906,6 +905,115 @@ mod tests {
             current_password: "OldP@ssword1".to_owned(),
             new_password: "NewP@ssword2".to_owned(),
         }))
+    }
+
+    #[tokio::test]
+    async fn sliding_renewal_respects_logout_cookies_and_revocation() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use nomifun_common::constants::COOKIE_NAME;
+        use nomifun_db::{SqliteUserRepository, init_database_memory};
+        use tower::ServiceExt;
+
+        let db = init_database_memory().await.unwrap();
+        let repo = Arc::new(SqliteUserRepository::new(db.pool().clone()));
+        let user = repo.get_system_user().await.unwrap().unwrap();
+        let now = (nomifun_common::now_ms() / 1000) as u64;
+        for case in ["logout", "explicit", "unrelated", "revoke", "rotate"] {
+            let jwt = Arc::new(JwtService::new("renewal-test-secret".into()));
+            let token = jwt.sign_with_window(
+                user.user_id.as_str(), &user.username,
+                now - 20 * 86400, now + 10 * 86400,
+            ).unwrap();
+            let state = test_state(jwt.clone(), repo.clone());
+            let auth_state = AuthState {
+                jwt_service: jwt.clone(),
+                user_repo: repo.clone(),
+                cookie_config: state.cookie_config.clone(),
+            };
+            let handler_jwt = jwt.clone();
+            let handler_token = token.clone();
+            let app = Router::new()
+                .route("/logout", post(logout_handler))
+                .route("/test", post(move || {
+                    let jwt = handler_jwt.clone();
+                    let token = handler_token.clone();
+                    async move {
+                        let mut response = Response::new(Body::empty());
+                        response.headers_mut().append(
+                            header::SET_COOKIE, "other-cookie=value; Path=/".parse().unwrap(),
+                        );
+                        match case {
+                            "explicit" => {
+                                response.headers_mut().append(
+                                    header::SET_COOKIE,
+                                    "nomifun-session=handler-token; Path=/".parse().unwrap(),
+                                );
+                            }
+                            "revoke" => jwt.blacklist_token(&token),
+                            "rotate" => jwt.install_secret("rotated-test-secret".into()).unwrap(),
+                            _ => {}
+                        }
+                        response
+                    }
+                }))
+                .route_layer(from_fn_with_state(auth_state, auth_middleware))
+                .with_state(state);
+            let response = app.oneshot(
+                Request::post(if case == "logout" { "/logout" } else { "/test" })
+                    .header(header::COOKIE, format!("{COOKIE_NAME}={token}"))
+                    .body(Body::empty()).unwrap(),
+            ).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{case}");
+            let cookies: Vec<_> = response.headers().get_all(header::SET_COOKIE).iter()
+                .map(|value| value.to_str().unwrap())
+                .filter(|cookie| cookie.starts_with("nomifun-session="))
+                .collect();
+            match case {
+                "logout" => {
+                    assert_eq!(cookies.len(), 1);
+                    assert!(cookies[0].contains("Max-Age=0"));
+                    assert!(jwt.verify(&token).is_err());
+                }
+                "explicit" => assert_eq!(cookies, ["nomifun-session=handler-token; Path=/"]),
+                "unrelated" => {
+                    assert_eq!(cookies.len(), 1);
+                    let renewed = cookies[0].split(';').next().unwrap()
+                        .strip_prefix("nomifun-session=").unwrap();
+                    assert_ne!(renewed, token);
+                    assert!(jwt.verify(renewed).is_ok());
+                }
+                _ => assert!(cookies.is_empty(), "{case} must not renew a revoked session"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn username_conflicts_remain_conflicts_for_both_handlers() {
+        use axum::http::StatusCode;
+        use nomifun_db::{SqliteUserRepository, init_database_memory};
+
+        let db = init_database_memory().await.unwrap();
+        let repo = Arc::new(SqliteUserRepository::new(db.pool().clone()));
+        let hash = hash_password("OldP@ssword1").unwrap();
+        repo.set_system_user_credentials("admin", &hash).await.unwrap();
+        repo.create_user("taken", &hash).await.unwrap();
+        let user = repo.get_system_user().await.unwrap().unwrap();
+        let state = test_state(Arc::new(JwtService::new("test-secret".into())), repo.clone());
+
+        let remote_error = change_username_handler(
+            State(state.clone()),
+            Extension(CurrentUser { id: user.user_id.clone(), username: user.username }),
+            Ok(Json(ChangeUsernameRequest {
+                current_password: "OldP@ssword1".into(), new_username: "taken".into(),
+            })),
+        ).await.unwrap_err();
+        let local_error = webui_change_username_handler(
+            State(state), Ok(Json(WebuiChangeUsernameRequest { new_username: "taken".into() })),
+        ).await.unwrap_err();
+        assert_eq!(remote_error.status_code(), StatusCode::CONFLICT);
+        assert_eq!(local_error.status_code(), StatusCode::CONFLICT);
+        assert_eq!(repo.find_by_id(user.user_id.as_str()).await.unwrap().unwrap().username, "admin");
     }
 
     #[tokio::test]

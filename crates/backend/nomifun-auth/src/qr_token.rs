@@ -1,21 +1,27 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 
 use nomifun_common::AppError;
 
 /// QR token time-to-live: 5 minutes.
-const QR_TOKEN_TTL_MS: i64 = 5 * 60 * 1000;
+const QR_TOKEN_TTL: Duration = Duration::from_secs(5 * 60);
 
 /// Random token length in bytes (produces 64-char hex string).
 const QR_TOKEN_BYTES: usize = 32;
 
 /// Internal data for a QR login token.
 struct QrTokenData {
-    created_at_ms: i64,
+    created_at: Instant,
     used: bool,
+}
+
+impl QrTokenData {
+    fn is_expired(&self, now: Instant) -> bool {
+        now.duration_since(self.created_at) >= QR_TOKEN_TTL
+    }
 }
 
 /// In-memory QR login token store with automatic expiration.
@@ -47,7 +53,9 @@ impl QrTokenStore {
     /// Generate a new QR login token and return it along with its expiry timestamp (ms).
     ///
     /// Returns `(token, expires_at_ms)` where `expires_at_ms` is the absolute
-    /// Unix time in milliseconds when the token becomes invalid.
+    /// Unix time in milliseconds when the token is expected to become invalid.
+    /// Enforcement uses monotonic elapsed time so wall-clock changes cannot
+    /// extend the token's lifetime.
     pub fn generate_with_expiry(&self) -> (String, i64) {
         let mut buf = [0u8; QR_TOKEN_BYTES];
         getrandom::getrandom(&mut buf).expect("OS entropy source unavailable");
@@ -61,12 +69,12 @@ impl QrTokenStore {
         self.tokens.insert(
             token.clone(),
             QrTokenData {
-                created_at_ms,
+                created_at: Instant::now(),
                 used: false,
             },
         );
 
-        (token, created_at_ms + QR_TOKEN_TTL_MS)
+        (token, created_at_ms.saturating_add(QR_TOKEN_TTL.as_millis() as i64))
     }
 
     /// Validate and consume a QR token (one-time use).
@@ -82,9 +90,7 @@ impl QrTokenStore {
             return Err(AppError::Unauthorized("QR token already used".into()));
         }
 
-        let now = nomifun_common::now_ms();
-        let elapsed_ms = now.saturating_sub(entry.created_at_ms);
-        if elapsed_ms > QR_TOKEN_TTL_MS {
+        if entry.is_expired(Instant::now()) {
             return Err(AppError::Unauthorized("QR token expired".into()));
         }
 
@@ -94,18 +100,22 @@ impl QrTokenStore {
 
     /// Remove expired tokens to prevent unbounded memory growth.
     pub fn cleanup(&self) {
-        let now = nomifun_common::now_ms();
+        let now = Instant::now();
         self.tokens
-            .retain(|_, data| now.saturating_sub(data.created_at_ms) <= QR_TOKEN_TTL_MS);
+            .retain(|_, data| !data.is_expired(now));
     }
 
     /// Start a background task that cleans up expired tokens periodically.
+    /// Stops on the next tick after the last owner drops the store.
     pub fn start_cleanup_task(self: &Arc<Self>, interval: Duration) {
-        let store = Arc::clone(self);
+        let store = Arc::downgrade(self);
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
             loop {
                 ticker.tick().await;
+                let Some(store) = store.upgrade() else {
+                    break;
+                };
                 store.cleanup();
             }
         });
@@ -178,7 +188,7 @@ mod tests {
         store.tokens.insert(
             "expired_token".to_owned(),
             QrTokenData {
-                created_at_ms: 1000, // very old
+                created_at: Instant::now() - QR_TOKEN_TTL,
                 used: false,
             },
         );
@@ -194,7 +204,7 @@ mod tests {
         store.tokens.insert(
             "old".to_owned(),
             QrTokenData {
-                created_at_ms: 1000,
+                created_at: Instant::now() - QR_TOKEN_TTL,
                 used: false,
             },
         );
@@ -212,5 +222,51 @@ mod tests {
         store.generate();
         store.cleanup();
         assert_eq!(store.token_count(), 1);
+    }
+
+    #[test]
+    fn expiry_includes_the_exact_deadline() {
+        let created_at = Instant::now();
+        let data = QrTokenData { created_at, used: false };
+        assert!(!data.is_expired(created_at + QR_TOKEN_TTL - Duration::from_nanos(1)));
+        assert!(data.is_expired(created_at + QR_TOKEN_TTL));
+    }
+
+    #[test]
+    fn concurrent_consumers_have_exactly_one_winner() {
+        let store = QrTokenStore::new();
+        let token = store.generate();
+        let barrier = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..8).map(|_| scope.spawn(|| {
+                barrier.wait();
+                store.validate_and_consume(&token).is_ok()
+            })).collect();
+            let winners = workers.into_iter().filter_map(|worker| {
+                worker.join().unwrap().then_some(())
+            }).count();
+            assert_eq!(winners, 1);
+        });
+    }
+
+    #[tokio::test]
+    async fn background_cleanup_expires_tokens_without_retaining_store() {
+        let store = Arc::new(QrTokenStore::new());
+        store.tokens.insert("expired".into(), QrTokenData {
+            created_at: Instant::now() - QR_TOKEN_TTL,
+            used: false,
+        });
+        let fresh = store.generate();
+        let weak = Arc::downgrade(&store);
+        store.start_cleanup_task(Duration::from_secs(60));
+        // Tokio intervals tick immediately; no wall-clock sleep is needed.
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while store.token_count() != 1 {
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("cleanup did not remove the expired token");
+        assert!(store.validate_and_consume(&fresh).is_ok());
+        drop(store);
+        assert!(weak.upgrade().is_none(), "cleanup retained the store between ticks");
     }
 }

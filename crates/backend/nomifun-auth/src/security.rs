@@ -113,7 +113,7 @@ fn apply_office_frame_policy(headers: &mut HeaderMap) {
     headers.remove(X_FRAME_OPTIONS);
 
     // Multiple CSP response fields are enforced as an intersection. Replace
-    // frame-ancestors in every field (rather than appending another policy), so
+    // frame-ancestors in every policy (rather than appending another policy), so
     // an upstream localhost policy cannot silently keep blocking the Tauri
     // ancestor while all unrelated upstream restrictions remain intact.
     let upstream_policies: Vec<String> = headers
@@ -132,8 +132,13 @@ fn apply_office_frame_policy(headers: &mut HeaderMap) {
     }
 
     for policy in upstream_policies {
-        if let Ok(value) = HeaderValue::from_str(&replace_frame_ancestors(&policy)) {
-            headers.append(CONTENT_SECURITY_POLICY.clone(), value);
+        // A field may contain a comma-separated policy list. Normalize each
+        // policy separately so removing frame-ancestors cannot also remove
+        // the first unrelated directive of the next policy.
+        for policy in policy.split(',') {
+            if let Ok(value) = HeaderValue::from_str(&replace_frame_ancestors(policy)) {
+                headers.append(CONTENT_SECURITY_POLICY.clone(), value);
+            }
         }
     }
 
@@ -213,7 +218,7 @@ mod tests {
         );
         response.headers_mut().append(
             CONTENT_SECURITY_POLICY.clone(),
-            HeaderValue::from_static("img-src 'self'; FRAME-ANCESTORS 'none'"),
+            HeaderValue::from_static("img-src 'self'; FRAME-ANCESTORS 'none', script-src 'none'; frame-ancestors 'none'"),
         );
         response
     }
@@ -408,9 +413,10 @@ mod tests {
             .iter()
             .map(|value| value.to_str().unwrap())
             .collect();
-        assert_eq!(policies.len(), 2);
+        assert_eq!(policies.len(), 3);
         assert!(policies[0].contains("default-src 'none'"));
         assert!(policies[1].contains("img-src 'self'"));
+        assert!(policies[2].contains("script-src 'none'"));
         assert!(policies.iter().all(|policy| policy.contains(OFFICE_FRAME_ANCESTORS)));
         assert!(policies.iter().all(|policy| {
             !policy.contains("evil.example") && !policy.to_ascii_lowercase().contains("frame-ancestors 'none'")
