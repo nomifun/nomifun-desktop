@@ -36,7 +36,6 @@ impl From<ExtractError> for ResolveError {
 }
 
 static RESOLVED_BUN: OnceLock<PathBuf> = OnceLock::new();
-static BUN_DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 /// Returns the path to a usable `bun` executable.
 ///
@@ -47,20 +46,13 @@ pub fn resolve_bun() -> Result<PathBuf, ResolveError> {
         return Ok(path.clone());
     }
     let resolved = resolve_with(&ProductionEmbed, std::env::var("NOMIFUN_BUN_PATH").ok().as_deref())?;
-    let _ = RESOLVED_BUN.set(resolved.clone());
-    Ok(resolved)
+    Ok(RESOLVED_BUN.get_or_init(|| resolved).clone())
 }
 
-/// Returns the directory that holds `bun` and `bunx`, if a bundled
-/// runtime was extracted. `None` when no embed + no override was used.
+/// Return the directory of the resolved Bun executable, including overrides
+/// and PATH fallback. Failed lookups remain retryable, as in `resolve_bun`.
 pub fn bun_bin_dir() -> Option<PathBuf> {
-    BUN_DIR
-        .get_or_init(|| {
-            resolve_with(&ProductionEmbed, std::env::var("NOMIFUN_BUN_PATH").ok().as_deref())
-                .ok()
-                .and_then(|p| p.parent().map(PathBuf::from))
-        })
-        .clone()
+    resolve_bun().ok().and_then(|path| path.parent().map(PathBuf::from))
 }
 
 fn resolve_with<E: EmbeddedBun>(embed: &E, override_raw: Option<&str>) -> Result<PathBuf, ResolveError> {
@@ -168,6 +160,36 @@ pub fn resolve_command_in(cmd: &str, dir: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use crate::embed::FakeEmbed;
+
+    #[test]
+    fn bun_directory_recovers_after_initial_resolution_failure() {
+        // Compile-time embeds cannot exercise the no-runtime startup case.
+        if ProductionEmbed.has() {
+            return;
+        }
+        if let Some(fixture) = std::env::var_os("NOMIFUN_RUNTIME_CACHE_TEST") {
+            let fixture = PathBuf::from(fixture);
+            assert_eq!(bun_bin_dir(), None);
+            assert!(matches!(resolve_bun(), Err(ResolveError::NotFound)));
+            let binary = fixture.join(extract::bun_filename());
+            std::fs::write(&binary, b"fixture only: never executed").unwrap();
+            assert_eq!(resolve_bun().unwrap(), binary);
+            assert_eq!(bun_bin_dir(), Some(fixture));
+            return;
+        }
+        // Isolate process-wide caches and environment from parallel tests.
+        // The child only resolves an artificial file; it never launches Bun.
+        let tmp = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "resolver::tests::bun_directory_recovers_after_initial_resolution_failure"])
+            .current_dir(tmp.path())
+            .env("NOMIFUN_RUNTIME_CACHE_TEST", tmp.path())
+            .env("NOMIFUN_BUN_PATH", tmp.path().join(extract::bun_filename()))
+            .env("PATH", tmp.path())
+            .output().unwrap();
+        assert!(output.status.success(), "{}\n{}",
+            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
 
     #[test]
     fn env_override_wins_over_embed() {
