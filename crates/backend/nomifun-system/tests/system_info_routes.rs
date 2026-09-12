@@ -13,7 +13,7 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use serde_json::json;
 use tower::ServiceExt;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use nomifun_db::init_database_memory;
@@ -68,7 +68,11 @@ fn get_request(uri: &str) -> Request<Body> {
     Request::builder().method("GET").uri(uri).body(Body::empty()).unwrap()
 }
 
-fn json_request(method_str: &str, uri: &str, body: serde_json::Value) -> Request<Body> {
+fn json_request(method_str: &str, uri: &str, mut body: serde_json::Value) -> Request<Body> {
+    // Version requests must not depend on the runner's repository override.
+    if let Some(object) = body.as_object_mut() {
+        object.entry("repo").or_insert_with(|| json!("nomifun/nomifun-app"));
+    }
     Request::builder()
         .method(method_str)
         .uri(uri)
@@ -258,6 +262,7 @@ async fn test_check_update_skips_prerelease_by_default() {
         .and(path("/repos/nomifun/nomifun-app/releases"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([
             make_github_release("v3.0.0-beta.1", false, true, vec![]),
+            make_github_release("v4.0.0-beta.1", false, false, vec![]),
             make_github_release("v2.0.0", false, false, vec![]),
         ])))
         .mount(&mock_server)
@@ -315,9 +320,13 @@ async fn test_check_update_recommended_asset_matches_platform() {
             false,
             false,
             vec![
+                make_github_asset("app-2.0.0-darwin-x64.dmg", 80_000_000),
+                make_github_asset("app-2.0.0-win-x64.exe.sig", 100),
                 make_github_asset("app-2.0.0-win-x64.exe", 50_000_000),
                 make_github_asset("app-2.0.0-darwin-arm64.dmg", 80_000_000),
                 make_github_asset("app-2.0.0-linux-amd64.deb", 60_000_000),
+                make_github_asset("app-2.0.0-win-arm64.exe", 50_000_000),
+                make_github_asset("app-2.0.0-linux-arm64.deb", 60_000_000),
             ]
         ),])))
         .mount(&mock_server)
@@ -332,15 +341,16 @@ async fn test_check_update_recommended_asset_matches_platform() {
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp).await;
     let recommended = &json["data"]["latest"]["recommended_asset"];
-    // On the CI runner's actual platform, the recommended asset should match
-    if recommended.is_object() {
-        let name = recommended["name"].as_str().unwrap();
-        // Verify it's one of the known assets
-        assert!(
-            name.contains("darwin") || name.contains("linux") || name.contains("win"),
-            "recommended asset should contain platform keyword: {name}"
-        );
-    }
+    let expected = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "x86_64") => Some("app-2.0.0-darwin-x64.dmg"),
+        ("macos", "aarch64") => Some("app-2.0.0-darwin-arm64.dmg"),
+        ("windows", "x86_64") => Some("app-2.0.0-win-x64.exe"),
+        ("windows", "aarch64") => Some("app-2.0.0-win-arm64.exe"),
+        ("linux", "x86_64") => Some("app-2.0.0-linux-amd64.deb"),
+        ("linux", "aarch64") => Some("app-2.0.0-linux-arm64.deb"),
+        _ => None,
+    };
+    assert_eq!(recommended["name"].as_str(), expected);
 }
 
 #[tokio::test]
@@ -348,7 +358,7 @@ async fn test_check_update_github_api_error() {
     let mock_server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/repos/nomifun/nomifun-app/releases"))
-        .respond_with(ResponseTemplate::new(500).set_body_string("Internal Server Error"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("SYNTHETIC_UPSTREAM_PRIVATE_BODY"))
         .mount(&mock_server)
         .await;
 
@@ -361,6 +371,8 @@ async fn test_check_update_github_api_error() {
     assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
     let json = body_json(resp).await;
     assert_eq!(json["success"], false);
+    assert!(json["error"].as_str().unwrap().contains("500"));
+    assert!(!json.to_string().contains("SYNTHETIC_UPSTREAM_PRIVATE_BODY"));
 }
 
 #[tokio::test]
@@ -466,4 +478,87 @@ async fn test_check_update_response_format() {
     // Verify camelCase is NOT used
     assert!(latest.get("tagName").is_none());
     assert!(latest.get("htmlUrl").is_none());
+}
+
+#[tokio::test]
+async fn test_check_update_rejects_invalid_local_inputs_before_network() {
+    let mock_server = MockServer::start().await;
+    let app = setup_with_mock("1.0.0", &mock_server).await;
+    for repo in ["org", "/repo", "org/", "org/..", "org/repo/extra", "org/repo?x=1", "org/repo#fragment", "org/%2e%2e", r"org/repo\extra", "https://example.invalid/repo"] {
+        let resp = app.clone().oneshot(json_request(
+            "POST", "/api/system/check-update", json!({"repo": repo}),
+        )).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{repo}");
+    }
+    let app = setup_with_mock("invalid-version", &mock_server).await;
+    let resp = app.oneshot(json_request("POST", "/api/system/check-update", json!({}))).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(mock_server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_check_update_follows_short_pages_but_stops_at_five() {
+    let mock_server = MockServer::start().await;
+    for page in 1..=5 {
+        Mock::given(method("GET"))
+            .and(path("/repos/nomifun/nomifun-app/releases"))
+            .and(query_param("per_page", "100"))
+            .and(query_param("page", page.to_string()))
+            .respond_with(ResponseTemplate::new(200)
+                .insert_header("Link", "<http://127.0.0.1:9/not-followed>; rel=\"next\"")
+                .set_body_json(json!([make_github_release(&format!("v{}.0.0", page + 1), false, false, vec![])])))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+    }
+    let app = setup_with_mock("1.0.0", &mock_server).await;
+    let resp = app.oneshot(json_request("POST", "/api/system/check-update", json!({}))).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["data"]["latest"]["version"], "6.0.0");
+    assert_eq!(mock_server.received_requests().await.unwrap().len(), 5);
+}
+
+#[tokio::test]
+async fn test_check_update_malformed_upstream_json_is_bad_gateway() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/nomifun/nomifun-app/releases"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw("not-json", "application/json"))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+    let app = setup_with_mock("1.0.0", &mock_server).await;
+    let resp = app.oneshot(json_request("POST", "/api/system/check-update", json!({}))).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(body_json(resp).await["code"], "BAD_GATEWAY");
+}
+
+#[tokio::test]
+async fn test_check_update_preserves_shorter_client_timeout() {
+    use std::time::Duration;
+
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/nomifun/nomifun-app/releases"))
+        .respond_with(ResponseTemplate::new(200)
+            .set_delay(Duration::from_millis(500))
+            .set_body_json(json!([])))
+        .mount(&mock_server)
+        .await;
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_millis(50))
+        .build()
+        .unwrap();
+    let service = VersionCheckService::with_api_base(client, "1.0.0".to_owned(), mock_server.uri());
+    let db = init_database_memory().await.unwrap();
+    let app = system_routes(build_state(&db, service));
+    let resp = tokio::time::timeout(
+        Duration::from_secs(2),
+        app.oneshot(json_request("POST", "/api/system/check-update", json!({}))),
+    ).await.expect("client timeout must remain effective").unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    let json = body_json(resp).await;
+    assert_eq!(json["code"], "BAD_GATEWAY");
+    assert!(!json["error"].as_str().unwrap().contains(&mock_server.uri()));
 }
