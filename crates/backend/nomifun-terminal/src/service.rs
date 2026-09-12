@@ -1073,8 +1073,19 @@ impl TerminalService {
             let lifecycle_terminal_id = terminal_id.clone();
             tokio::spawn(async move {
                 let mut titled_fired = false;
+                let mut tick = tokio::time::interval(Duration::from_secs(2));
                 loop {
-                    match rx.recv().await {
+                    let event = tokio::select! {
+                        event = rx.recv() => Some(event),
+                        _ = tick.tick() => None,
+                    };
+                    // The channel outlives each PTY. Do not retain a service
+                    // clone waiting forever on an exited/replaced generation.
+                    if svc.current_epoch(lifecycle_terminal_id.as_str()) != Some(epoch) {
+                        break;
+                    }
+                    let Some(event) = event else { continue };
+                    match event {
                         Ok(ev) => {
                             info!(terminal_id = %ev.terminal_id, kind = ?ev.kind, "terminal lifecycle event");
                             if !titled_fired && ev.kind == crate::lifecycle::LifecycleKind::TurnEnd
@@ -1532,20 +1543,23 @@ impl TerminalService {
     }
 
     /// One persistence pass: write every dirty live session's scrollback to the
-    /// DB. Snapshots are collected from the `DashMap` synchronously (no await
-    /// held across shard locks), then written outside the iterator.
+    /// DB. Only ids are collected under the map guard. Snapshot + persistence
+    /// share the lifecycle lock with exit/relaunch, so an older pass cannot
+    /// restore predecessor output after the replacement clears it.
     async fn flush_dirty_scrollback(&self) {
-        let pending: Vec<(String, Vec<u8>)> = self
-            .live
-            .iter()
-            .filter_map(|e| {
-                e.value()
-                    .take_dirty_scrollback()
-                    .map(|sb| (e.key().clone(), sb))
-            })
-            .collect();
-        for (id, sb) in pending {
+        let ids: Vec<String> = self.live.iter().map(|entry| entry.key().clone()).collect();
+        for id in ids {
+            let Some(slot) = self.existing_lifecycle_slot(&id) else { continue };
+            let lifecycle = slot.lock().await;
+            if matches!(*lifecycle, TerminalLifecycleState::Cancelled) {
+                continue;
+            }
+            let Some(handle) = self.live.get(&id).map(|entry| Arc::clone(entry.value())) else {
+                continue;
+            };
+            let Some(sb) = handle.take_dirty_scrollback() else { continue };
             if let Err(e) = self.repo.save_scrollback(&id, &sb).await {
+                handle.mark_scrollback_dirty();
                 warn!(terminal_id = id, error = %e, "failed to persist terminal scrollback");
             }
         }
@@ -1594,9 +1608,8 @@ impl TerminalService {
     /// path —this is deliberate driving, so it does NOT arm IDMM supervision or
     /// auto-title the way `input` (user typing) does. `Err(NotFound)` if not live.
     pub async fn submit_text(&self, id: &str, text: &str) -> Result<(), TerminalError> {
-        if !self.live.contains_key(id) {
-            return Err(TerminalError::NotFound(id.to_string()));
-        }
+        let epoch = self.current_epoch(id)
+            .ok_or_else(|| TerminalError::NotFound(id.to_owned()))?;
         let is_agent = match self.describe(id).await? {
             Some(d) => {
                 let (program, prog_args) = crate::types::resolve_command(&d.command, &d.args);
@@ -1606,11 +1619,13 @@ impl TerminalService {
             None => false,
         };
         match crate::submit::encode_submit_chunks(text, is_agent) {
-            crate::submit::SubmitChunks::Single(bytes) => self.write_input(id, &bytes).await,
+            crate::submit::SubmitChunks::Single(bytes) => {
+                self.write_input_exact_epoch(id, epoch, &bytes).await
+            }
             crate::submit::SubmitChunks::PasteThenCr { paste, cr } => {
-                self.write_input(id, &paste).await?;
+                self.write_input_exact_epoch(id, epoch, &paste).await?;
                 tokio::time::sleep(crate::submit::TERMINAL_SUBMIT_DELAY).await;
-                self.write_input(id, &cr).await
+                self.write_input_exact_epoch(id, epoch, &cr).await
             }
         }
     }
@@ -1654,14 +1669,18 @@ impl TerminalService {
                                 // instead of riding the full caller timeout to a
                                 // dishonest Timeout. Mirrors AutoWork's
                                 // `wait_terminal_turn_end`.
-                                if !self.is_alive(id) {
+                                if self.current_epoch(id) != Some(pty_epoch) {
                                     return SettleReason::Exited;
                                 }
                             }
                             ev = rx.recv() => {
                                 match ev {
                                     Ok(event) if event.kind == crate::lifecycle::LifecycleKind::TurnEnd => {
-                                        return SettleReason::TurnEnd;
+                                        return if self.current_epoch(id) == Some(pty_epoch) {
+                                            SettleReason::TurnEnd
+                                        } else {
+                                            SettleReason::Exited
+                                        };
                                     }
                                     Ok(_) => continue,
                                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -2447,7 +2466,14 @@ impl TerminalService {
 
         // Capture authoritative owners before rows disappear so delete_all does
         // not bypass the same logical-reference hooks as individual delete().
-        let deleted_rows = self.repo.list_all().await?;
+        let deleted_rows = match self.repo.list_all().await {
+            Ok(rows) => rows,
+            Err(error) => {
+                self.shutting_down
+                    .store(false, std::sync::atomic::Ordering::Release);
+                return Err(error.into());
+            }
+        };
 
         // Never erase the management rows until every live process tree reports
         // a successful bounded cleanup. Some earlier handles may already be
@@ -3299,6 +3325,9 @@ mod tests {
         fail_next_update_status: std::sync::atomic::AtomicBool,
         fail_next_delete: std::sync::atomic::AtomicBool,
         fail_next_delete_all: std::sync::atomic::AtomicBool,
+        fail_next_list_all: std::sync::atomic::AtomicBool,
+        fail_next_save_scrollback: std::sync::atomic::AtomicBool,
+        save_scrollback_gate: Mutex<Option<Arc<GetByIdGate>>>,
         create_commit_gate: Mutex<Option<Arc<CommitGate>>>,
         delete_commit_gate: Mutex<Option<Arc<CommitGate>>>,
         launch_state_commit_gate: Mutex<Option<Arc<CommitGate>>>,
@@ -3378,6 +3407,9 @@ mod tests {
         async fn list_all(
             &self,
         ) -> Result<Vec<nomifun_db::TerminalSessionRow>, nomifun_db::DbError> {
+            if self.fail_next_list_all.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                return Err(nomifun_db::DbError::Init("injected list_all failure".into()));
+            }
             Ok(self.rows.lock().unwrap().values().cloned().collect())
         }
 
@@ -3705,6 +3737,14 @@ mod tests {
         }
 
         async fn save_scrollback(&self, id: &str, data: &[u8]) -> Result<(), nomifun_db::DbError> {
+            if self.fail_next_save_scrollback.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                return Err(nomifun_db::DbError::Init("injected scrollback failure".into()));
+            }
+            let gate = self.save_scrollback_gate.lock().unwrap().take();
+            if let Some(gate) = gate {
+                gate.reached.notify_one();
+                gate.release.notified().await;
+            }
             self.scrollback
                 .lock()
                 .unwrap()
@@ -4806,7 +4846,6 @@ mod tests {
         // on both the create and GET responses.
         assert!(resp.is_default_workpath);
         svc.input(&resp.terminal_id, &BASE64.encode("xyz\n")).await.unwrap();
-        wait_for(|| true, 200).await;
 
         let got = svc.get(&resp.terminal_id).await.unwrap();
         assert!(got.scrollback_b64.is_some());
@@ -4852,6 +4891,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn submit_rejects_replacement_while_resolving_target() {
+        let (svc, _bc, repo) = service_with_repo();
+        let id = svc.create(TEST_USER_ID, req("cat", &[])).await.unwrap().terminal_id;
+        let gate = Arc::new(GetByIdGate::default());
+        *repo.get_by_id_gate.lock().unwrap() = Some(gate.clone());
+        let submit_svc = svc.clone();
+        let submit_id = id.clone();
+        let submit = tokio::spawn(async move {
+            submit_svc.submit_text(&submit_id, "must-not-reach-replacement").await
+        });
+        tokio::time::timeout(Duration::from_secs(2), gate.reached.notified())
+            .await.unwrap();
+        svc.relaunch(&id).await.unwrap();
+        gate.release.notify_one();
+        let result = submit.await.unwrap();
+        svc.delete(&id).await.unwrap();
+        assert!(matches!(result, Err(TerminalError::StaleGeneration(_))));
+    }
+
+    #[tokio::test]
     async fn await_turn_settle_idle_when_shell_goes_quiet() {
         let (svc, _bc) = service();
         let id = svc.create(TEST_USER_ID, req("cat", &[])).await.unwrap().terminal_id;
@@ -4877,7 +4936,7 @@ mod tests {
     #[tokio::test]
     async fn await_turn_settle_turn_end_via_lifecycle_for_agent_backend() {
         use crate::lifecycle::TerminalLifecycleServer;
-        let (svc, _bc) = service();
+        let (svc, _bc, repo) = service_with_repo();
         let srv = std::sync::Arc::new(TerminalLifecycleServer::start().await.unwrap());
         svc.with_terminal_lifecycle(srv.clone(), "nomicore".into());
 
@@ -4887,7 +4946,7 @@ mod tests {
             command: "cat".into(),
             args: vec![],
             env: None,
-            backend: Some("claude".into()),
+            backend: None,
             mode: Some("default".into()),
             cols: 80,
             rows: 24,
@@ -4895,6 +4954,9 @@ mod tests {
             knowledge_base_ids: None,
         };
         let id = svc.create(TEST_USER_ID, request).await.unwrap().terminal_id;
+        // Route the waiter as an agent only after spawning: cat cannot accept
+        // the real Claude --settings flags injected by the lifecycle renderer.
+        repo.rows.lock().unwrap().get_mut(id.as_str()).unwrap().backend = Some("claude".into());
         let pty_epoch = TerminalDriver::current_epoch(&svc, &id).unwrap();
 
         // settle future 与 POST future 用 tokio::join! 同任务并发（svc 非 Clone，
@@ -4922,7 +4984,7 @@ mod tests {
     #[tokio::test]
     async fn await_turn_settle_exited_when_lifecycle_pty_dies() {
         use crate::lifecycle::TerminalLifecycleServer;
-        let (svc, _bc) = service();
+        let (svc, _bc, repo) = service_with_repo();
         let srv = std::sync::Arc::new(TerminalLifecycleServer::start().await.unwrap());
         svc.with_terminal_lifecycle(srv.clone(), "nomicore".into());
 
@@ -4937,7 +4999,7 @@ mod tests {
             command: "cat".into(),
             args: vec![],
             env: None,
-            backend: Some("claude".into()),
+            backend: None,
             mode: Some("default".into()),
             cols: 80,
             rows: 24,
@@ -4945,19 +5007,15 @@ mod tests {
             knowledge_base_ids: None,
         };
         let id = svc.create(TEST_USER_ID, request).await.unwrap().terminal_id;
-
-        // Kill the PTY and let the exit callback drop it from the live map.
+        repo.rows.lock().unwrap().get_mut(id.as_str()).unwrap().backend = Some("claude".into());
+        let settle = svc.await_turn_settle(&id, Duration::from_secs(10));
+        tokio::pin!(settle);
+        assert!(tokio::time::timeout(Duration::from_millis(20), &mut settle).await.is_err());
+        // Kill only after the live-generation waiter has subscribed.
         svc.kill(&id).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        assert!(
-            !svc.live.contains_key(id.as_str()),
-            "the killed PTY must be gone from the live map before we await settle"
-        );
 
         let started = std::time::Instant::now();
-        let reason = svc
-            .await_turn_settle(&id, std::time::Duration::from_secs(10))
-            .await;
+        let reason = settle.await;
         let elapsed = started.elapsed();
         assert_eq!(reason, SettleReason::Exited);
         assert!(
@@ -4965,6 +5023,28 @@ mod tests {
             "must resolve via the 2s liveness tick, not ride the 10s timeout (elapsed {elapsed:?})"
         );
         svc.delete(&id).await.ok();
+    }
+
+    #[tokio::test]
+    async fn relaunch_retires_old_lifecycle_waiter_and_internal_listener() {
+        let (svc, _bc, repo) = service_with_repo();
+        let server = Arc::new(crate::lifecycle::TerminalLifecycleServer::start().await.unwrap());
+        svc.with_terminal_lifecycle(server, "nomicore".into());
+        let id = svc.create(TEST_USER_ID, req("cat", &[])).await.unwrap().terminal_id;
+        repo.rows.lock().unwrap().get_mut(id.as_str()).unwrap().backend = Some("claude".into());
+        let settle = svc.await_turn_settle(&id, Duration::from_secs(10));
+        tokio::pin!(settle);
+        assert!(tokio::time::timeout(Duration::from_millis(20), &mut settle).await.is_err());
+        repo.rows.lock().unwrap().get_mut(id.as_str()).unwrap().backend = None;
+        svc.relaunch(&id).await.unwrap();
+        let reason = tokio::time::timeout(Duration::from_secs(4), settle).await;
+        // Only the replacement listener may retain a clone of first_input.
+        let old_listener_retired = wait_for(|| Arc::strong_count(&svc.first_input) == 2, 3000).await;
+        svc.delete(&id).await.unwrap();
+        let deleted_listener_retired = wait_for(|| Arc::strong_count(&svc.first_input) == 1, 3000).await;
+        assert_eq!(reason.unwrap(), SettleReason::Exited);
+        assert!(old_listener_retired, "old-epoch listener retained the service");
+        assert!(deleted_listener_retired, "deleted terminal listener retained the service");
     }
 
     #[tokio::test]
@@ -5024,9 +5104,16 @@ mod tests {
 
     #[tokio::test]
     async fn flush_persists_dirty_live_scrollback() {
-        let (svc, _bc) = service();
+        let (svc, _bc, repo) = service_with_repo();
         let id = svc.create(TEST_USER_ID, req("cat", &[])).await.unwrap().terminal_id;
-        // Feed a line; the PTY echoes it (and cat re-emits) → scrollback dirty.
+        // Retry a failed snapshot before any input can generate another dirty
+        // mark. Windows ConPTY need not echo input without a newline.
+        svc.live.get(id.as_str()).unwrap().mark_scrollback_dirty();
+        repo.fail_next_save_scrollback.store(true, std::sync::atomic::Ordering::SeqCst);
+        svc.flush_dirty_scrollback().await;
+        assert!(repo.load_scrollback(&id).await.unwrap().is_none());
+        svc.flush_dirty_scrollback().await;
+        assert!(repo.load_scrollback(&id).await.unwrap().is_some());
         svc.input(&id, &BASE64.encode("echoline\n")).await.unwrap();
 
         // Actually wait for the echoed bytes to land in the live scrollback
@@ -5057,6 +5144,36 @@ mod tests {
             String::from_utf8_lossy(&bytes)
         );
         svc.kill(&id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn scrollback_flush_finishes_before_relaunch_clears_predecessor_output() {
+        let (svc, _bc, repo) = service_with_repo();
+        let id = svc.create(TEST_USER_ID, req("cat", &[])).await.unwrap().terminal_id;
+        let handle = Arc::clone(svc.live.get(id.as_str()).unwrap().value());
+        // A dirty empty snapshot is enough to exercise the persistence order
+        // without depending on PTY output timing.
+        handle.mark_scrollback_dirty();
+        let gate = Arc::new(GetByIdGate::default());
+        *repo.save_scrollback_gate.lock().unwrap() = Some(gate.clone());
+        let flush_svc = svc.clone();
+        let flush = tokio::spawn(async move { flush_svc.flush_dirty_scrollback().await });
+        tokio::time::timeout(Duration::from_secs(2), gate.reached.notified()).await.unwrap();
+        let relaunch_svc = svc.clone();
+        let relaunch_id = id.clone();
+        let mut relaunch = tokio::spawn(async move { relaunch_svc.relaunch(&relaunch_id).await });
+        let early = tokio::time::timeout(Duration::from_millis(50), &mut relaunch).await;
+        let waited = early.is_err();
+        gate.release.notify_one();
+        flush.await.unwrap();
+        match early {
+            Ok(result) => { result.unwrap().unwrap(); }
+            Err(_) => { relaunch.await.unwrap().unwrap(); }
+        }
+        let persisted = repo.load_scrollback(&id).await.unwrap();
+        svc.delete(&id).await.unwrap();
+        assert!(waited, "relaunch crossed an in-flight scrollback save");
+        assert!(persisted.is_none(), "old snapshot was restored after relaunch cleared it");
     }
 
     #[tokio::test]
@@ -5828,6 +5945,20 @@ mod tests {
         let second = svc.create(TEST_USER_ID, req("cat", &[])).await.unwrap().terminal_id;
         assert!(svc.live.contains_key(second.as_str()));
         assert_eq!(svc.shutdown_cleanup().await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn shutdown_list_failure_reopens_gate_without_killing_live_session() {
+        let (svc, _bc, repo) = service_with_repo();
+        let id = svc.create(TEST_USER_ID, req("cat", &[])).await.unwrap().terminal_id;
+        let epoch = svc.current_epoch(&id);
+        repo.fail_next_list_all.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(svc.shutdown_cleanup().await, Err(TerminalError::Database(_))));
+        assert!(!svc.shutting_down.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(svc.current_epoch(&id), epoch);
+        assert_eq!(svc.get(&id).await.unwrap().last_status, "running");
+        svc.resize(&id, 90, 30).await.expect("operations reopen after list failure");
+        assert_eq!(svc.shutdown_cleanup().await.unwrap(), 1);
     }
 
     async fn wait_for_name(svc: &TerminalService, id: &str, expected: &str, ms: u64) -> bool {
