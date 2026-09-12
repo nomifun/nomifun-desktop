@@ -6,9 +6,9 @@
 
 - 当前范围排除（用户2026-09-13追加）：Browser Use、小程序、插件均暂不审改。MiniApp/Plugin平台与服务、页面、专属打包/声明/契约/测试及正在重构的worktree由原负责人继续；共享模块只处理可独立证明不改变上述域契约的通用问题。跳过不计已验证，既有提交保留。
 
-- 当前批次：R107–R113已验收，源码截至 `85135e27e`，上一已核实远端 `a976c6bd1`；R114客服UI、R116 Computer按独占写集继续；R115按最新小程序/插件排除要求冻结复核。R117清单去冗余已提交8434dfd30。
+- 当前批次：R114/R117/R120已验收，源码截至 `abbd5aaad`，上一已核实远端 `421c938e5`；R116 Computer、R118通用API类型、R119客服hooks独占继续。R115按小程序/插件排除要求撤回本人未提交补丁。
 - 后续集成：当前分支已包含 `dd35e01de` 的 MiniApp 分支合并；设计文档已跟踪。本批仅更新遗留路由测试，未修改 MiniApp 产品实现，模块仍待深审。
-- 全局覆盖：111 个模块边界中，7 个已验证、64 个部分完成、40 个待审、0 个整模块审计中；290 个唯一问题/任务。当前三个子范围正在继续；完整阅读与跨模块问题闭环分开登记，Browser Use仍暂跳过。
+- 全局覆盖：111 个模块边界中，7 个已验证、65 个部分完成、39 个待审、0 个整模块审计中；297 个唯一问题/任务。当前三个子范围正在继续；完整阅读与跨模块问题闭环分开登记，Browser Use仍暂跳过。
 - R1 证据：[首轮记录](2026-09-12-code-quality.zh.md)。R1–R39 各报告中的“未提交/dirty”描述是当时快照；当前提交状态以下方验收记录为准。
 - R2 证据：[运行时与测试边界记录](2026-09-12-runtime-and-test-boundaries.zh.md)，包含改动、失败尝试、验证及覆盖限制。
 - R3 证据：[生命周期与状态记录](2026-09-12-lifecycle-and-state.zh.md)，记录四个 Host 旧实现失败、Context falsy 初值及消息重放缺陷；保留待办，勿重复修复。
@@ -271,6 +271,24 @@ R106完整补读Common constants/vision_registry/paths/ansi/text_search/stage_di
 
 四批生产净增20行（+21、+4、+10、-15），测试净增187行（+85、+20、+88、-6），总净增207行；R106本身总净减21行。Rust均4线程，无新依赖/框架，无全workspace/真实Officecli/设备验证；UI既存act/ref警告未称清零。
 
+## R114 / R115 / R120 阶段验收
+
+| 批次 | 源码状态 | 验证 |
+| --- | --- | --- |
+| R114 客服创建弹窗 | `9d69faa61` | 真实旧0/7→新7/0；主线客服目录21/0、完整UI typecheck通过 |
+| R115 Contracts声明 | 按用户新范围撤回本人未提交补丁 | catalog/preset恢复批次基线，package未改；没有Cargo验证、不计修复 |
+| R120 原生迁移去重 | `abbd5aaad` | Common dir_config及文件/目录防覆盖、真实临时目录迁移、回执回归15/0 |
+
+R114完整读客服页面原11文件2477行（生产2291/原测试186），渠道文件只计客服源码，插件/小程序及共享专属adapter不计覆盖。创建校验前同步防重，校验拒绝留给表单显示；关闭/重开/卸载后旧校验/创建/finally不得影响新草稿；Form.useWatch替代重复provider状态；空白名称和小数并发输入匹配原后端契约。中途一次Bun打印DOM断言崩溃不计缺陷证据，改等价数量断言后有效红绿0/7→7/0。旧请求仍可能落库，hook请求归属/详情草稿/笔记交接等未闭环；渠道/插件边界按新要求暂停。生产+16、测试+193，总+209。
+
+R115原catalog派生字段一致性会收紧小程序发布链；preset去重位于插件mount/role override。用户排除后worker按冻结快照准确撤回本人两文件全部改动，主线git diff确认空；既有他人提交未回滚。只保留范围调整记录，不计此次已审覆盖和已修复，也不提交未验收的契约变化。
+
+R120接R112剩余重复：factory_reset的Windows/Linux/macOS目录no-replace与atomic_file原生文件发布使用完全相同系统调用/flags/错误码，统一私有rename_noreplace并保留文件发布别名。其他平台目录迁移仍Unsupported，文件hardlink fallback合并相同cfg；不把文件fallback用于目录。删除pending_plan_work_dir单层转发。生产净减128行、测试净0；无公共API/依赖/框架变化。重构前文件/目录防覆盖及临时目录迁移3/0，最终15/0，仅Windows，未真实重置或运行其他OS。
+
+Common阅读续接：截至abbd5aaad，factory_reset生产5781行已全部阅读，atomic_file198行全部阅读；factory_reset测试只覆盖已明确记录的夹具/回归，余下仍待续读。已识别的has_phase错误降false、元数据/路径TOCTOU、外部owner重绑定/多文件提交、App/DB调用锁与物理断电语义需要结合调用端继续核实，不将疑点直接称为可利用漏洞或绕过。
+
+本组连同R117：生产净减127行（+16-15-128），测试净增193行，总净增66行；R115净0。不把测试增长包装成总量下降。
+
 ## R117 Common重置清单去冗余
 
 源码提交：`8434dfd30`。私有dataset_managed_roots仅有true调用，删除未用false分支和Box<dyn Iterator>；直接chain后collect一次，删除一次中间Vec。v1/v2冻结清单、顺序、kind及host-control保留策略均不变，旧计划兼容逻辑没有合并。生产净减15行，测试净0；无新增接口/框架。
@@ -309,12 +327,12 @@ R113沿用R107-02：Rust枚举/App转换支持可选web_search，但手工JSON s
 
 Git协作：R103–R106后普通merge远端99e8c2ddb（包含459f22bce MessageTips布局），已push并核实a976c6bd1；无强推或改历史。并行agent另提交05bcea045的Plugin/MiniApp分析文档，保留但不计本审计成果。
 
-## 当前并行边界（R114 / R115 / R116）
+## 当前并行边界（R116 / R118 / R119）
 
 | 批次 / 负责人 | 独占写集 | 任务 |
 | --- | --- | --- |
-| R114 / Carver | ui/src/renderer/pages/customerService及专属测试 | 客服页面完整阅读和局部输入/生命周期整改；共享adapter只读 |
-| R115 / Mencius | 原Contracts catalog.rs/preset.rs/package.rs | 用户排除小程序/插件后已冻结待边界复核；不得集成涉及专属打包/声明/契约的改动 |
+| R119 / Carver | 客服useCsAgents.ts/useKnowledgeBaseOptions.ts及专属测试 | R114验收后续审本地数据hooks；详情/渠道绑定/共享adapter不在写集 |
+| R118 / Mencius | nomifun-api-types/src及专属tests | R115按范围撤回后转通用DTO审计；小程序/插件专属DTO及生成绑定跳过 |
 | R116 / Hypatia | nomi-computer/src及专属tests/examples | 承接a11y调用归属；Browser和a11y只读，不操作真实桌面 |
 
 主线负责Common剩余子范围、跨模块契约、验证队列、台账及Git。R107–R113已冻结，worker不得回改；Rust验证串行、UI可并行。web_search是可选能力，不得新增必选要求。
@@ -925,6 +943,14 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | R117-01 | 已验证 | 私有重置清单构造保留无调用布尔分支 | 移除动态分派/中间Vec、生产-15；冻结v1/v2与临时目录回归前后3/0 |
 | R117-02 | 部分完成 | factory_reset控制面与根迁移阅读覆盖 | 8434dfd30的1–2905、2980–3873已读，底层R112覆盖；receipt后半/多数测试及App启动锁、断电/路径并发仍待审 |
 
+| R114-01 | 已验证 | 客服创建校验异常逃逸及重复提交 | 校验前同步锁、字段错误留在表单；有效旧失败，主线客服21/0/typecheck |
+| R114-02 | 已验证 | 客服旧创建影响关闭重开的新草稿 | 版本隔离校验/请求/回调/finally，旧失败；不撤销已发请求 |
+| R114-03 | 已验证 | 客服provider重复状态不随表单重置 | 复用Form.useWatch，删除重复状态；真实选项回归旧失败 |
+| R114-04 | 已验证 | 客服创建可提交空白名与小数并发 | 沿原契约补非空白/整数输入；旧失败，不改后端范围 |
+| R114-05 | 部分完成 | 客服UI全读后的数据归属与详情生命周期 | 11文件2477行；hooks交R119，详情草稿/笔记/交接待续审；插件渠道边界按用户要求跳过 |
+| R115-01 | 待审 | Contracts声明批次按新范围排除 | catalog/preset本人未提交改动已准确撤回；不计已修复/已完成，不继续插件小程序契约审计 |
+| R120-01 | 已验证 | factory_reset残留原生no-replace实现重复 | 接R112统一三平台原生操作、保留其他平台目录Unsupported及文件fallback，生产-128、Common15/0 |
+
 ## 模块覆盖索引
 
 以下目录各登记一次。Rust 76 个，UI 35 个，共 111 个自动核对边界。
@@ -969,7 +995,7 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | `crates/backend/nomifun-channel/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-chat-model-broker/` | 部分完成 | R84完整读8源文件+conformance/6fixtures，27/0；静默流释放/claim顺序及无效分支已修，R84-03保留 |
 | `crates/backend/nomifun-codex-runtime/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
-| `crates/backend/nomifun-common/` | 部分完成 | R59/R102/R106原范围；R110目录/执行配置20/0、R111 scoped_auth全读21/0；R112原子文件去重16/0；factory_reset只读底层/部分调用，跨模块契约未闭环 |
+| `crates/backend/nomifun-common/` | 部分完成 | R59/R102/R106原范围；R110目录/执行配置20/0、R111 scoped_auth全读21/0；R112原子文件去重16/0；R117/R120删冗余，最新15/0；factory_reset生产全读/测试部分，跨模块契约未闭环 |
 | `crates/backend/nomifun-companion/` | 部分完成 | R59/R63 export.rs解压预算及临时目录所有权已修，定向26/0；其余export/全模块未深审，后续业务取消事务见R60-03 |
 | `crates/backend/nomifun-conversation/` | 部分完成 | R4 已核对 list_messages 的 owner 校验、游标解析和 keyset 排序契约；其余 service、运行时/发送/权限路径待审 |
 | `crates/backend/nomifun-creation/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
@@ -1029,7 +1055,7 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | `ui/src/renderer/pages/conversation/` | 部分完成 | R1-07 旧订阅/fence 删除；R2-02 只读 hook/steering、R2-05 Provider、R3-02 批处理、R3-03 历史分页已验证；发送/流/其余状态待审 |
 | `ui/src/renderer/pages/creativeStudio/` | 部分完成 | R1-05/07 CAS 撤销保存修复、旧 Projects 删除；R2-06 部分测试导入统一；Canvas 路由/资产/执行待审 |
 | `ui/src/renderer/pages/cron/` | 部分完成 | R74完整32文件4491行；R78列表/runs归属及事件合并已修，Cron97/0及typecheck；R74-05其余未闭环 |
-| `ui/src/renderer/pages/customerService/` | 待审 | 未深审 |
+| `ui/src/renderer/pages/customerService/` | 部分完成 | R114原11文件2477行全读，创建弹窗旧0/7→7/0，目录21/0/typecheck；R119 hooks继续，详情剩余见R114-05；插件渠道边界跳过 |
 | `ui/src/renderer/pages/guid/` | 待审 | R43 仅对照 HEAD 核对官方 Agent 发起链并修旧结构断言，不计完整模块审计 |
 | `ui/src/renderer/pages/knowledge/` | 待审 | 未深审 |
 | `ui/src/renderer/pages/login/` | 部分完成 | R64页面/CSS/测试完整已读；提交/卸载/重定向/存储失败修复，UI3381/0；R71同步非Error网络错误断言，Auth/Login32/0/typecheck；R64-03仍保留 |
