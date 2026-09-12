@@ -27,14 +27,18 @@ fn init_empty_repo(path: &Path) {
 /// Create a git repo at `path` with an initial commit that tracks a file.
 /// Parent directories for nested filenames are created automatically.
 fn init_repo_with_file(path: &Path, filename: &str, content: &str) {
-    let file_path = path.join(filename);
-    if let Some(parent) = file_path.parent() {
-        std::fs::create_dir_all(parent).expect("create parent dirs");
-    }
-    std::fs::write(&file_path, content).expect("write file");
+    init_repo_with_files(path, &[(filename, content)]);
+}
+
+fn init_repo_with_files(path: &Path, files: &[(&str, &str)]) {
     let repo = Repository::init(path).expect("init repo");
     let mut index = repo.index().expect("index");
-    index.add_path(Path::new(filename)).expect("add path");
+    for (filename, content) in files {
+        let file_path = path.join(filename);
+        std::fs::create_dir_all(file_path.parent().unwrap()).expect("create parent dirs");
+        std::fs::write(&file_path, content).expect("write file");
+        index.add_path(Path::new(filename)).expect("add path");
+    }
     index.write().expect("write index");
     let tree_oid = index.write_tree().expect("write tree");
     let tree = repo.find_tree(tree_oid).expect("find tree");
@@ -784,41 +788,223 @@ async fn dispose_without_init_is_ok() {
 // =======================================================================
 
 #[tokio::test]
-async fn git_repo_full_stage_unstage_discard_flow() {
-    let tmp = tempfile::tempdir().unwrap();
-    init_repo_with_file(tmp.path(), "a.txt", "original");
+async fn single_file_operations_use_literal_paths() {
+    let names = [
+        ("file[1].txt", "file1.txt"),
+        ("dir[1]/a.txt", "dir1/a.txt"),
+        ("!file.txt", "file.txt"),
+        #[cfg(unix)]
+        ("file*.txt", "file1.txt"),
+        #[cfg(unix)]
+        ("file?.txt", "file1.txt"),
+        #[cfg(unix)]
+        (r"file\1.txt", "file1.txt"),
+    ];
+    for git_repo in [true, false] {
+        for (literal, neighbor) in names {
+            let tmp = tempfile::tempdir().unwrap();
+            if git_repo {
+                init_repo_with_files(tmp.path(), &[(literal, "original"), (neighbor, "original")]);
+            } else {
+                for name in [literal, neighbor] {
+                    let path = tmp.path().join(name);
+                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    std::fs::write(path, "original").unwrap();
+                }
+            }
+            let svc = SnapshotService::new();
+            let ws = tmp.path().to_str().unwrap();
+            svc.init(ws).await.unwrap();
+            let repo = Repository::open(svc.repo_path_for(ws).unwrap()).unwrap();
+            let indexed = |name: &str| {
+                let mut index = repo.index().unwrap();
+                index.read(true).unwrap();
+                index.get_path(Path::new(name), 0).map(|entry| (entry.id, entry.mode))
+            };
+            let baseline = indexed(literal).unwrap();
+            let neighbor_baseline = indexed(neighbor).unwrap();
+            std::fs::write(tmp.path().join(literal), "staged").unwrap();
+            std::fs::write(tmp.path().join(neighbor), "staged neighbor").unwrap();
+            svc.stage_file(ws, literal).await.unwrap();
+            assert_ne!(indexed(literal), Some(baseline));
+            assert_eq!(indexed(neighbor), Some(neighbor_baseline));
 
+            svc.stage_file(ws, neighbor).await.unwrap();
+            let neighbor_staged = indexed(neighbor).unwrap();
+            std::fs::write(tmp.path().join(neighbor), "unstaged neighbor").unwrap();
+            let assert_neighbor = || {
+                assert_eq!(indexed(neighbor), Some(neighbor_staged), "index changed for {neighbor} via {literal}");
+                assert_eq!(std::fs::read(tmp.path().join(neighbor)).unwrap(), b"unstaged neighbor");
+            };
+
+            svc.unstage_file(ws, literal).await.unwrap();
+            assert_eq!(indexed(literal), Some(baseline));
+            assert_eq!(std::fs::read(tmp.path().join(literal)).unwrap(), b"staged");
+            assert_neighbor();
+            svc.discard_file(ws, literal, FileChangeOperation::Modify).await.unwrap();
+            assert_eq!(std::fs::read(tmp.path().join(literal)).unwrap(), b"original");
+            assert_neighbor();
+
+            for operation in [FileChangeOperation::Modify, FileChangeOperation::Delete] {
+                if operation == FileChangeOperation::Modify {
+                    std::fs::write(tmp.path().join(literal), "modified").unwrap();
+                } else {
+                    std::fs::remove_file(tmp.path().join(literal)).unwrap();
+                }
+                svc.stage_file(ws, literal).await.unwrap();
+                assert_ne!(indexed(literal), Some(baseline));
+                assert_neighbor();
+                svc.reset_file(ws, literal, operation).await.unwrap();
+                assert_eq!(indexed(literal), Some(baseline));
+                assert_eq!(std::fs::read(tmp.path().join(literal)).unwrap(), b"original");
+                assert_neighbor();
+            }
+            drop(repo);
+            svc.dispose(ws).await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn single_file_missing_literal_and_directory_do_not_checkout_neighbors() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo_with_files(tmp.path(), &[("file1.txt", "original"), ("dir/a.txt", "original")]);
     let svc = SnapshotService::new();
     let ws = tmp.path().to_str().unwrap();
     svc.init(ws).await.unwrap();
+    for name in ["file1.txt", "dir/a.txt"] {
+        std::fs::write(tmp.path().join(name), "staged").unwrap();
+        svc.stage_file(ws, name).await.unwrap();
+        std::fs::write(tmp.path().join(name), "unstaged").unwrap();
+    }
+    let repo = Repository::open(tmp.path()).unwrap();
+    let index_before = std::fs::read(repo.path().join("index")).unwrap();
+    for name in ["file[1].txt", "dir"] {
+        assert!(svc.discard_file(ws, name, FileChangeOperation::Modify).await.is_err());
+    }
+    assert_eq!(std::fs::read(repo.path().join("index")).unwrap(), index_before);
 
-    // 1. Modify file
-    std::fs::write(tmp.path().join("a.txt"), "modified").unwrap();
-    let result = svc.compare(ws).await.unwrap();
-    assert_eq!(result.unstaged.len(), 1);
+    // A new literal file is absent in HEAD: unstage removes only that entry,
+    // while reset(Create) additionally removes only that working file.
+    std::fs::write(tmp.path().join("file[1].txt"), "new").unwrap();
+    svc.stage_file(ws, "file[1].txt").await.unwrap();
+    svc.unstage_file(ws, "file[1].txt").await.unwrap();
+    svc.stage_file(ws, "file[1].txt").await.unwrap();
+    svc.reset_file(ws, "file[1].txt", FileChangeOperation::Create).await.unwrap();
+    assert!(!tmp.path().join("file[1].txt").exists());
+    let mut index = repo.index().unwrap();
+    index.read(true).unwrap();
+    assert!(index.get_path(Path::new("file[1].txt"), 0).is_none());
+    for name in ["file1.txt", "dir/a.txt"] {
+        let entry = index.get_path(Path::new(name), 0).unwrap();
+        assert_eq!(repo.find_blob(entry.id).unwrap().content(), b"staged");
+        assert_eq!(std::fs::read(tmp.path().join(name)).unwrap(), b"unstaged");
+    }
+}
 
-    // 2. Stage it
-    svc.stage_file(ws, "a.txt").await.unwrap();
-    let result = svc.compare(ws).await.unwrap();
-    assert_eq!(result.staged.len(), 1);
-    assert!(result.unstaged.is_empty());
+#[tokio::test]
+async fn single_file_unstage_preserves_modes_and_neighbor_conflicts() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo_with_files(tmp.path(), &[("file[1].txt", "original"), ("file1.txt", "original")]);
+    let repo = Repository::open(tmp.path()).unwrap();
+    // Exercise the index's case-folding contract, even on a Unix filesystem.
+    repo.config().unwrap().set_bool("core.ignorecase", true).unwrap();
+    let mut index = repo.index().unwrap();
+    let baseline = index.get_path(Path::new("file[1].txt"), 0).unwrap();
+    let conflict_id = repo.blob(b"conflict").unwrap();
+    for name in ["file[1].txt", "file1.txt"] {
+        let mut entry = index.get_path(Path::new(name), 0).unwrap();
+        index.remove_path(Path::new(name)).unwrap();
+        entry.id = conflict_id;
+        entry.mode = 0o100755;
+        for stage in 1..=3 {
+            entry.flags = (entry.flags & !0x3000) | (stage << 12);
+            index.add(&entry).unwrap();
+        }
+    }
+    index.write().unwrap();
+    let svc = SnapshotService::new();
+    let ws = tmp.path().to_str().unwrap();
+    svc.init(ws).await.unwrap();
+    svc.unstage_file(ws, "FILE[1].TXT").await.unwrap();
+    index.read(true).unwrap();
+    let restored = index.get_path(Path::new("file[1].txt"), 0).unwrap();
+    assert_eq!((restored.id, restored.mode), (baseline.id, baseline.mode));
+    for stage in 1..=3 {
+        assert!(index.get_path(Path::new("file[1].txt"), stage).is_none());
+        let neighbor = index.get_path(Path::new("file1.txt"), stage).unwrap();
+        assert_eq!((neighbor.id, neighbor.mode), (conflict_id, 0o100755));
+    }
+    assert!(index.get_path(Path::new("file1.txt"), 0).is_none());
+}
 
-    // 3. Unstage it
-    svc.unstage_file(ws, "a.txt").await.unwrap();
-    let result = svc.compare(ws).await.unwrap();
-    assert!(result.staged.is_empty());
-    assert_eq!(result.unstaged.len(), 1);
+#[tokio::test]
+async fn single_file_reset_stops_on_index_or_head_error() {
+    for operation in [FileChangeOperation::Create, FileChangeOperation::Modify, FileChangeOperation::Delete] {
+        let tmp = tempfile::tempdir().unwrap();
+        if operation == FileChangeOperation::Create {
+            init_empty_repo(tmp.path());
+        } else {
+            init_repo_with_file(tmp.path(), "a.txt", "original");
+        }
+        let svc = SnapshotService::new();
+        let ws = tmp.path().to_str().unwrap();
+        svc.init(ws).await.unwrap();
+        if operation == FileChangeOperation::Delete {
+            std::fs::remove_file(tmp.path().join("a.txt")).unwrap();
+        } else {
+            std::fs::write(tmp.path().join("a.txt"), "staged").unwrap();
+        }
+        svc.stage_file(ws, "a.txt").await.unwrap();
+        let repo = Repository::open(tmp.path()).unwrap();
+        let index_before = std::fs::read(repo.path().join("index")).unwrap();
+        std::fs::write(repo.path().join("index.lock"), "held by another writer").unwrap();
+        assert!(svc.reset_file(ws, "a.txt", operation).await.is_err());
+        assert_eq!(std::fs::read(repo.path().join("index")).unwrap(), index_before);
+        if operation == FileChangeOperation::Delete {
+            assert!(!tmp.path().join("a.txt").exists());
+        } else {
+            assert_eq!(std::fs::read(tmp.path().join("a.txt")).unwrap(), b"staged");
+        }
+    }
 
-    // 4. Discard it
-    svc.discard_file(ws, "a.txt", FileChangeOperation::Modify)
-        .await
-        .unwrap();
-    let result = svc.compare(ws).await.unwrap();
-    assert!(result.staged.is_empty());
-    assert!(result.unstaged.is_empty());
+    // Missing HEAD is an error, not evidence that the file is unstaged.
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = Repository::init(tmp.path()).unwrap();
+    let svc = SnapshotService::new();
+    let ws = tmp.path().to_str().unwrap();
+    svc.init(ws).await.unwrap();
+    std::fs::write(tmp.path().join("new.txt"), "keep").unwrap();
+    svc.stage_file(ws, "new.txt").await.unwrap();
+    assert!(svc.reset_file(ws, "new.txt", FileChangeOperation::Create).await.is_err());
+    assert_eq!(std::fs::read(tmp.path().join("new.txt")).unwrap(), b"keep");
+    assert!(repo.index().unwrap().get_path(Path::new("new.txt"), 0).is_some());
+}
 
-    let content = std::fs::read_to_string(tmp.path().join("a.txt")).unwrap();
-    assert_eq!(content, "original");
+#[cfg(unix)]
+#[tokio::test]
+async fn single_file_stage_handles_dangling_links_and_metadata_errors() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_repo_with_file(tmp.path(), "dir/a.txt", "original");
+    let svc = SnapshotService::new();
+    let ws = tmp.path().to_str().unwrap();
+    svc.init(ws).await.unwrap();
+    std::os::unix::fs::symlink("missing", tmp.path().join("link")).unwrap();
+    svc.stage_file(ws, "link").await.unwrap();
+    let repo = Repository::open(tmp.path()).unwrap();
+    let mut index = repo.index().unwrap();
+    let entry = index.get_path(Path::new("link"), 0).expect("dangling link must be staged");
+    assert_eq!(entry.mode, 0o120000);
+    assert_eq!(repo.find_blob(entry.id).unwrap().content(), b"missing");
+
+    // ELOOP is deterministic even when running as root; it is not a deletion.
+    let before = index.get_path(Path::new("dir/a.txt"), 0).unwrap().id;
+    std::fs::remove_file(tmp.path().join("dir/a.txt")).unwrap();
+    std::fs::remove_dir(tmp.path().join("dir")).unwrap();
+    std::os::unix::fs::symlink("dir", tmp.path().join("dir")).unwrap();
+    assert!(svc.stage_file(ws, "dir/a.txt").await.is_err());
+    index.read(true).unwrap();
+    assert_eq!(index.get_path(Path::new("dir/a.txt"), 0).unwrap().id, before);
 }
 
 // =======================================================================
