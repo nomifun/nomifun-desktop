@@ -40,12 +40,19 @@ const result = (overrides: Partial<IApiSshImportResult> = {}): IApiSshImportResu
 });
 
 describe('candidateEndpoint', () => {
-  test('reads as the ssh command the host stands for', () => {
+  test('formats an endpoint with an unambiguous host and port', () => {
     expect(candidateEndpoint(candidate())).toBe('deploy@10.0.3.21:22');
+    expect(candidateEndpoint(candidate({ host: '2001:db8::1', port: 2222 }))).toBe(
+      'deploy@[2001:db8::1]:2222'
+    );
+    expect(candidateEndpoint(candidate({ host: '[2001:db8::1]' }))).toBe('deploy@[2001:db8::1]:22');
   });
 
   test('omits the user when the config named none, rather than inventing one', () => {
     expect(candidateEndpoint(candidate({ username: null }))).toBe('10.0.3.21:22');
+    expect(candidateEndpoint(candidate({ host: '2001:db8::1', username: null }))).toBe(
+      '[2001:db8::1]:22'
+    );
   });
 });
 
