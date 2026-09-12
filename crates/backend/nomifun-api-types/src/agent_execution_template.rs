@@ -29,7 +29,7 @@ pub struct AgentExecutionTemplate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentExecutionTemplateParticipant {
-    #[serde(deserialize_with = "crate::agent_execution::deserialize_uuidv7_id")]
+    #[serde(deserialize_with = "crate::serde_util::deserialize_uuidv7")]
     pub template_participant_id: String,
     #[serde(deserialize_with = "crate::serde_util::deserialize_agent_id")]
     pub source_agent_id: String,
