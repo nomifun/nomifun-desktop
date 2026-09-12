@@ -11,6 +11,9 @@ use sha2::{Digest, Sha256};
 const USER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
 const PROVIDER_ID: &str = "0190f5fe-7c00-7a00-8000-000000000002";
 
+#[path = "conversation_repository/pagination.rs"]
+mod pagination;
+
 async fn init_database_memory() -> Result<nomifun_db::Database, nomifun_db::DbError> {
     nomifun_db::init_database_memory_with_owner(
         nomifun_common::UserId::parse(USER_ID.to_owned()).expect("canonical fixture owner"),

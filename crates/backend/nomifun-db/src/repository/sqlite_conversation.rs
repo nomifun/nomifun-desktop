@@ -15,6 +15,7 @@ use crate::models::{
 };
 use crate::repository::agent_preset_lineage::validate_and_lock_agent_preset_lineage;
 use crate::repository::bind::{BindValue, bind_value, bind_value_as};
+use crate::repository::pagination::page_offset;
 use crate::repository::conversation::{
     ConversationDeliveryReceiptClaim, ConversationFilters, ConversationMessageProjection,
     ConversationRowUpdate, ConversationTurnAdmissionState,
@@ -5039,7 +5040,7 @@ impl IConversationRepository for SqliteConversationRepository {
     ) -> Result<PaginatedResult<ConversationRow>, DbError> {
         let limit = filters.effective_limit();
         // Fetch one extra row to determine hasMore
-        let fetch_limit = limit + 1;
+        let fetch_limit = i64::from(limit) + 1;
 
         let mut where_parts = vec!["c.user_id = ?".to_string()];
         let mut binds: Vec<BindValue> = vec![BindValue::Str(user_id.to_string())];
@@ -5081,7 +5082,7 @@ impl IConversationRepository for SqliteConversationRepository {
 
         let mut rows = query.fetch_all(&self.pool).await?;
 
-        let has_more = rows.len() as u32 > limit;
+        let has_more = rows.len() > limit as usize;
         if has_more {
             rows.pop();
         }
@@ -5223,10 +5224,9 @@ impl IConversationRepository for SqliteConversationRepository {
         page_size: u32,
         order: SortOrder,
     ) -> Result<PaginatedResult<MessageRow>, DbError> {
-        let effective_page = if page == 0 { 1 } else { page };
         let effective_size = if page_size == 0 { 50 } else { page_size };
-        let offset = (effective_page - 1) * effective_size;
-        let fetch_limit = effective_size + 1;
+        let offset = page_offset(i64::from(page), i64::from(effective_size));
+        let fetch_limit = i64::from(effective_size) + 1;
 
         let count_row: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM messages \
@@ -5255,7 +5255,7 @@ impl IConversationRepository for SqliteConversationRepository {
             .fetch_all(&self.pool)
             .await?;
 
-        let has_more = rows.len() as u32 > effective_size;
+        let has_more = rows.len() > effective_size as usize;
         if has_more {
             rows.pop();
         }
@@ -5274,7 +5274,7 @@ impl IConversationRepository for SqliteConversationRepository {
         limit: u32,
     ) -> Result<PaginatedResult<MessageRow>, DbError> {
         let effective_limit = if limit == 0 { 40 } else { limit };
-        let fetch_limit = effective_limit + 1;
+        let fetch_limit = i64::from(effective_limit) + 1;
 
         // Newest-first window; the UUIDv7 `message_id` is the stable keyset
         // tiebreaker for rows sharing a `created_at` millisecond.
@@ -5308,7 +5308,7 @@ impl IConversationRepository for SqliteConversationRepository {
             .await?
         };
 
-        let has_more = rows.len() as u32 > effective_limit;
+        let has_more = rows.len() > effective_limit as usize;
         if has_more {
             rows.pop();
         }
@@ -5348,7 +5348,7 @@ impl IConversationRepository for SqliteConversationRepository {
         limit: u32,
     ) -> Result<PaginatedResult<MessageRow>, DbError> {
         let effective_limit = if limit == 0 { 500 } else { limit };
-        let fetch_limit = effective_limit + 1;
+        let fetch_limit = i64::from(effective_limit) + 1;
 
         let count_row: (i64,) = sqlx::query_as(&format!(
             "SELECT COUNT(*) FROM messages \
@@ -5376,7 +5376,7 @@ impl IConversationRepository for SqliteConversationRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        let has_more = rows.len() as u32 > effective_limit;
+        let has_more = rows.len() > effective_limit as usize;
         if has_more {
             rows.pop();
         }
@@ -5978,10 +5978,9 @@ impl IConversationRepository for SqliteConversationRepository {
         page: u32,
         page_size: u32,
     ) -> Result<PaginatedResult<MessageSearchRow>, DbError> {
-        let effective_page = if page == 0 { 1 } else { page };
         let effective_size = if page_size == 0 { 20 } else { page_size };
-        let offset = (effective_page - 1) * effective_size;
-        let fetch_limit = effective_size + 1;
+        let offset = page_offset(i64::from(page), i64::from(effective_size));
+        let fetch_limit = i64::from(effective_size) + 1;
 
         let like_pattern = format!("%{keyword}%");
 
@@ -6001,7 +6000,7 @@ impl IConversationRepository for SqliteConversationRepository {
         .await?;
         let total = count_row.0 as u64;
 
-        let rows = sqlx::query_as::<_, MessageSearchRow>(
+        let mut rows = sqlx::query_as::<_, MessageSearchRow>(
             "SELECT \
                 m.message_id AS message_id, \
                 m.type, \
@@ -6041,14 +6040,12 @@ impl IConversationRepository for SqliteConversationRepository {
         .fetch_all(&self.pool)
         .await?;
 
-        let has_more = rows.len() as u32 > effective_size;
-        let items = if has_more {
-            rows[..effective_size as usize].to_vec()
-        } else {
-            rows
-        };
+        let has_more = rows.len() > effective_size as usize;
+        if has_more {
+            rows.pop();
+        }
 
-        Ok(PaginatedResult { items, total, has_more })
+        Ok(PaginatedResult { items: rows, total, has_more })
     }
 
     async fn list_artifacts(
