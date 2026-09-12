@@ -38,7 +38,7 @@ use crate::skill_file::{
 };
 use crate::types::{
     CreatedBy, CronAgentConfig, CronJob, CronSchedule, ExecutionMode, cron_job_from_row,
-    cron_job_to_response, cron_job_to_row, schedule_from_dto,
+    cron_job_to_response, cron_job_to_row, schedule_from_dto, schedule_to_row_fields,
 };
 
 const PLACEHOLDER_PATTERNS: &[&str] = &[
@@ -297,7 +297,7 @@ impl CronService {
     /// this only prevents a timer from creating new database work during
     /// shutdown.
     pub fn shutdown_timers(&self) {
-        self.scheduler.cancel_all();
+        self.scheduler.shutdown();
     }
 
     /// Return the process-local mutation/admission gate for one durable job.
@@ -580,6 +580,11 @@ impl CronService {
 
         let now = now_ms();
         let next_run_at = compute_next_run(&schedule, now);
+        if matches!(schedule, CronSchedule::Every { .. }) && next_run_at.is_none() {
+            return Err(CronError::InvalidSchedule(
+                "every_ms overflows the next run time".into(),
+            ));
+        }
 
         let mut job = CronJob {
             cron_job_id: CronJobId::new().into_string(),
@@ -765,6 +770,14 @@ impl CronService {
                 ))
             })?;
             job.next_run_at = compute_next_run(&job.schedule, now_ms());
+            if job.enabled
+                && matches!(job.schedule, CronSchedule::Every { .. })
+                && job.next_run_at.is_none()
+            {
+                return Err(CronError::InvalidSchedule(
+                    "every_ms overflows the next run time".into(),
+                ));
+            }
         }
         // A post-write conversation-bind failure is compensated with another
         // generation, never by decrementing back to the old revision (which
@@ -3738,20 +3751,6 @@ fn restore_update_params(
     }
 }
 
-#[cfg(test)]
-fn build_run_row(job_id: &str, status: &str) -> CronJobRunRow {
-    debug_assert!(CronJobId::parse(job_id).is_ok());
-    let now = now_ms();
-    CronJobRunRow {
-        id: 0,
-        cron_job_run_id: CronJobRunId::new().into_string(),
-        cron_job_id: job_id.to_owned(),
-        executed_at_ms: now,
-        status: status.to_owned(),
-        created_at_ms: now,
-    }
-}
-
 fn error_run_projection(message: &str) -> CronJobRunProjection {
     CronJobRunProjection {
         last_run_at: Some(now_ms()),
@@ -3813,38 +3812,6 @@ fn schedule_from_dto_with_existing_timezone(
             description: description.clone(),
         },
         _ => schedule_from_dto(dto),
-    }
-}
-
-fn schedule_to_row_fields(
-    schedule: &CronSchedule,
-) -> (String, String, Option<String>, Option<String>) {
-    match schedule {
-        CronSchedule::At { at_ms, description } => (
-            "at".to_owned(),
-            at_ms.to_string(),
-            None,
-            description.clone(),
-        ),
-        CronSchedule::Every {
-            every_ms,
-            description,
-        } => (
-            "every".to_owned(),
-            every_ms.to_string(),
-            None,
-            description.clone(),
-        ),
-        CronSchedule::Cron {
-            expr,
-            tz,
-            description,
-        } => (
-            "cron".to_owned(),
-            expr.clone(),
-            tz.clone(),
-            description.clone(),
-        ),
     }
 }
 
@@ -4235,20 +4202,6 @@ mod tests {
             retry_count: 0,
             max_retries: 3,
         }
-    }
-
-    #[test]
-    fn build_run_row_records_minimal_execution_fact() {
-        let before = now_ms();
-        let row = build_run_row(JOB_ID, "ok");
-        let after = now_ms();
-
-        assert_eq!(row.id, 0);
-        assert_eq!(row.cron_job_id, JOB_ID);
-        assert_eq!(row.status, "ok");
-        assert!(row.executed_at_ms >= before);
-        assert!(row.executed_at_ms <= after);
-        assert_eq!(row.created_at_ms, row.executed_at_ms);
     }
 
     #[test]

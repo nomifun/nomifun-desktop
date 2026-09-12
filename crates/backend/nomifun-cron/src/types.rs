@@ -502,7 +502,7 @@ fn validate_agent_config_ids(
     Ok(())
 }
 
-fn schedule_to_row_fields(
+pub(crate) fn schedule_to_row_fields(
     schedule: &CronSchedule,
 ) -> (String, String, Option<String>, Option<String>) {
     match schedule {

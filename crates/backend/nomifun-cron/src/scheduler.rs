@@ -1,5 +1,5 @@
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use chrono::{TimeZone, Utc};
@@ -53,7 +53,7 @@ pub fn compute_next_run(schedule: &CronSchedule, now: TimestampMs) -> Option<Tim
             if *every_ms <= 0 {
                 return None;
             }
-            Some(now + *every_ms)
+            now.checked_add(*every_ms)
         }
         CronSchedule::Cron { expr, tz, .. } => compute_cron_next_run(expr, tz.as_deref(), now),
     }
@@ -85,6 +85,11 @@ pub fn validate_schedule(schedule: &CronSchedule) -> Result<(), CronError> {
         CronSchedule::Every { every_ms, .. } => {
             if *every_ms <= 0 {
                 return Err(CronError::InvalidSchedule("every_ms must be positive".into()));
+            }
+            if now_ms().checked_add(*every_ms).is_none() {
+                return Err(CronError::InvalidSchedule(
+                    "every_ms overflows the next run time".into(),
+                ));
             }
             Ok(())
         }
@@ -133,6 +138,7 @@ pub struct CronScheduler {
     handles: Arc<DashMap<String, ScheduledHandle>>,
     tick_callback: TickCallback,
     next_generation: AtomicU64,
+    shutdown: AtomicBool,
     mutation_gate: Mutex<()>,
 }
 
@@ -142,6 +148,7 @@ impl CronScheduler {
             handles: Arc::new(DashMap::new()),
             tick_callback,
             next_generation: AtomicU64::new(1),
+            shutdown: AtomicBool::new(false),
             mutation_gate: Mutex::new(()),
         }
     }
@@ -157,6 +164,10 @@ impl CronScheduler {
             .mutation_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        if self.shutdown.load(Ordering::Acquire) {
+            return;
+        }
 
         if !job.enabled {
             self.cancel_if_not_newer(job);
@@ -334,6 +345,12 @@ impl CronScheduler {
             entry.value().task.abort();
         }
         self.handles.clear();
+    }
+
+    /// Unlike temporary cancellation during init/resume, shutdown is terminal.
+    pub(crate) fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
+        self.cancel_all();
     }
 
     pub fn active_count(&self) -> usize {
@@ -610,7 +627,7 @@ fn dispatch_if_current(
 
 fn delay_until(target_ms: TimestampMs) -> i64 {
     let now = now_ms();
-    (target_ms - now).max(0)
+    target_ms.saturating_sub(now).max(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -648,6 +665,8 @@ mod tests {
             description: None,
         };
         assert_eq!(compute_next_run(&schedule, 1000), Some(500));
+        assert_eq!(delay_until(i64::MIN), 0);
+        assert!(delay_until(i64::MAX) > 0);
     }
 
     #[test]
@@ -657,6 +676,8 @@ mod tests {
             description: None,
         };
         assert_eq!(compute_next_run(&schedule, 1000), Some(61000));
+        assert_eq!(compute_next_run(&schedule, i64::MAX - 60000), Some(i64::MAX));
+        assert_eq!(compute_next_run(&schedule, i64::MAX - 59999), None);
     }
 
     #[test]
@@ -744,21 +765,17 @@ mod tests {
     }
 
     #[test]
-    fn validate_every_zero_fails() {
-        let s = CronSchedule::Every {
-            every_ms: 0,
-            description: None,
-        };
-        assert!(validate_schedule(&s).is_err());
-    }
-
-    #[test]
-    fn validate_every_negative_fails() {
-        let s = CronSchedule::Every {
-            every_ms: -1,
-            description: None,
-        };
-        assert!(validate_schedule(&s).is_err());
+    fn validate_every_invalid_interval_fails() {
+        for every_ms in [0, -1, i64::MAX] {
+            let s = CronSchedule::Every {
+                every_ms,
+                description: None,
+            };
+            assert!(matches!(
+                validate_schedule(&s),
+                Err(CronError::InvalidSchedule(_))
+            ));
+        }
     }
 
     #[test]
@@ -940,6 +957,26 @@ mod tests {
 
         scheduler.cancel_all();
         assert_eq!(scheduler.active_count(), 0);
+
+        let job = make_test_job(JOB_1, true, Some(future));
+        scheduler.schedule_job(&job);
+        assert_eq!(
+            scheduler.active_count(),
+            1,
+            "temporary cancellation permits rescheduling"
+        );
+        let generation = scheduler
+            .current_generation_for(JOB_1, USER_ID, job.schedule_revision, future)
+            .unwrap();
+        scheduler.shutdown();
+        assert!(!scheduler.is_current_generation(JOB_1, USER_ID, generation));
+        scheduler.schedule_job(&job);
+        scheduler.reschedule_job(&job);
+        assert_eq!(
+            scheduler.active_count(),
+            0,
+            "shutdown must reject late installations"
+        );
     }
 
     #[tokio::test]

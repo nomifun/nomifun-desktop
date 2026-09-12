@@ -257,25 +257,12 @@ impl JobExecutor {
             run_id,
             saved_skill,
         } = prepared;
-        if self.busy_guard.is_busy(&conversation_id) {
+        let Some(_busy) = self.busy_guard.try_acquire(&conversation_id) else {
             return self.handle_busy(job);
-        }
-        self.busy_guard
-            .set_processing(&conversation_id, true);
+        };
 
-        let result = self
-            .execute_inner_with_run_id(
-                job,
-                &run_id,
-                &conversation_id,
-                saved_skill.as_ref(),
-            )
-            .await;
-
-        self.busy_guard
-            .set_processing(&conversation_id, false);
-
-        result
+        self.execute_inner_with_run_id(job, &run_id, &conversation_id, saved_skill.as_ref())
+            .await
     }
 
     pub fn busy_guard(&self) -> &CronBusyGuard {
@@ -1202,7 +1189,6 @@ impl JobExecutor {
 
         Ok(Some(SavedSkillContext {
             name: cron_skill_name(&job.cron_job_id)?,
-            raw_content: raw_content.to_owned(),
         }))
     }
 
@@ -1340,7 +1326,6 @@ fn replayed_delivery_result(
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SavedSkillContext {
     name: String,
-    raw_content: String,
 }
 
 fn build_conversation_extra(
@@ -1641,59 +1626,73 @@ mod tests {
     // -- handle_busy tests ---------------------------------------------------
 
     #[tokio::test]
-    async fn handle_busy_returns_retrying_when_under_limit() {
-        let guard = CronBusyGuard::new();
-        let executor = make_executor_for_busy_tests(Arc::new(guard));
-
-        let job = CronJob {
-            retry_count: 1,
-            max_retries: 3,
-            ..sample_job()
-        };
-        let result = executor.handle_busy(&job);
-        assert_eq!(result, ExecutionResult::Retrying { attempt: 2 });
+    async fn handle_busy_respects_retry_limit() {
+        const CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
+        let executor = make_executor_with_agent(AgentRuntimeHandle::Mock(Arc::new(
+            RecordingAgent::new(CONVERSATION_ID),
+        )));
+        for (retry_count, expected) in [
+            (0, ExecutionResult::Retrying { attempt: 1 }),
+            (1, ExecutionResult::Retrying { attempt: 2 }),
+            (3, ExecutionResult::Skipped),
+            (5, ExecutionResult::Skipped),
+        ] {
+            let job = CronJob {
+                retry_count,
+                max_retries: 3,
+                ..sample_job()
+            };
+            assert_eq!(executor.handle_busy(&job), expected);
+        }
     }
 
     #[tokio::test]
-    async fn handle_busy_returns_skipped_when_at_limit() {
-        let guard = CronBusyGuard::new();
-        let executor = make_executor_for_busy_tests(Arc::new(guard));
+    async fn execute_prepared_releases_busy_on_completion_and_cancellation() {
+        const CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
+        for cancel in [false, true] {
+            let agent = Arc::new(RecordingAgent::without_auto_finish(CONVERSATION_ID));
+            let executor = Arc::new(make_executor_with_agent(AgentRuntimeHandle::Mock(
+                agent.clone(),
+            )));
+            let prepared = || PreparedExecution {
+                conversation_id: CONVERSATION_ID.into(),
+                run_id: nomifun_common::CronJobRunId::new().into_string(),
+                saved_skill: None,
+            };
+            let first = prepared();
+            let task = tokio::spawn({
+                let executor = executor.clone();
+                async move { executor.execute_prepared(&sample_job(), first).await }
+            });
+            wait_for_agent_send(&agent, 1).await;
+            assert!(executor.busy_guard().is_busy(CONVERSATION_ID));
+            assert_eq!(
+                executor.execute_prepared(&sample_job(), prepared()).await,
+                ExecutionResult::Retrying { attempt: 1 },
+            );
+            assert_eq!(
+                agent.send_calls(),
+                1,
+                "busy rejection must not send another turn"
+            );
 
-        let job = CronJob {
-            retry_count: 3,
-            max_retries: 3,
-            ..sample_job()
-        };
-        let result = executor.handle_busy(&job);
-        assert_eq!(result, ExecutionResult::Skipped);
-    }
-
-    #[tokio::test]
-    async fn handle_busy_returns_skipped_when_over_limit() {
-        let guard = CronBusyGuard::new();
-        let executor = make_executor_for_busy_tests(Arc::new(guard));
-
-        let job = CronJob {
-            retry_count: 5,
-            max_retries: 3,
-            ..sample_job()
-        };
-        let result = executor.handle_busy(&job);
-        assert_eq!(result, ExecutionResult::Skipped);
-    }
-
-    #[tokio::test]
-    async fn handle_busy_first_retry_returns_attempt_1() {
-        let guard = CronBusyGuard::new();
-        let executor = make_executor_for_busy_tests(Arc::new(guard));
-
-        let job = CronJob {
-            retry_count: 0,
-            max_retries: 3,
-            ..sample_job()
-        };
-        let result = executor.handle_busy(&job);
-        assert_eq!(result, ExecutionResult::Retrying { attempt: 1 });
+            if cancel {
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+            } else {
+                agent.finish_successfully();
+                assert_eq!(
+                    timeout(Duration::from_secs(2), task)
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                    ExecutionResult::Success {
+                        conversation_id: CONVERSATION_ID.into()
+                    },
+                );
+            }
+            assert!(!executor.busy_guard().is_busy(CONVERSATION_ID));
+        }
     }
 
     // -- build_prompt tests --------------------------------------------------
@@ -1713,13 +1712,11 @@ mod tests {
             &job,
             Some(&SavedSkillContext {
                 name: JOB_SKILL_NAME.into(),
-                raw_content: "---\nname: test\ndescription: desc\n---\nDo X".into(),
             }),
             true,
         );
         assert!(prompt.contains("[Scheduled Task Execution]"));
         assert!(!prompt.contains("## Skill Instructions"));
-        assert!(!prompt.contains("Do X"));
     }
 
     #[test]
@@ -1732,7 +1729,6 @@ mod tests {
             &job,
             Some(&SavedSkillContext {
                 name: JOB_SKILL_NAME.into(),
-                raw_content: "---\nname: test\ndescription: desc\n---\nDo X".into(),
             }),
             true,
         );
@@ -1748,16 +1744,6 @@ mod tests {
         };
         let prompt = build_prompt(&job, None, true);
         assert!(prompt.contains("create a file named \"SKILL_SUGGEST.md\""));
-    }
-
-    #[test]
-    fn build_prompt_new_conv_empty_skill() {
-        let job = CronJob {
-            execution_mode: ExecutionMode::NewConversation,
-            ..sample_job()
-        };
-        let prompt = build_prompt(&job, None, true);
-        assert!(prompt.contains("SKILL_SUGGEST.md"));
     }
 
     #[test]
@@ -1900,7 +1886,6 @@ mod tests {
         };
         let saved_skill = SavedSkillContext {
             name: JOB_SKILL_NAME.into(),
-            raw_content: "---\nname: test\ndescription: desc\n---\nDo X".into(),
         };
         assert_eq!(
             resolve_task_skill_names(
@@ -1953,7 +1938,6 @@ mod tests {
         };
         let saved_skill = SavedSkillContext {
             name: JOB_SKILL_NAME.into(),
-            raw_content: "---\nname: test\ndescription: desc\n---\nDo X".into(),
         };
 
         let extra = build_conversation_extra(&job, Some(&saved_skill));
@@ -2011,46 +1995,6 @@ mod tests {
         let extra = build_conversation_extra(&job, None);
 
         assert!(extra.get("current_model_id").is_none());
-    }
-
-    // -- execution_result display ---------------------------------------------
-
-    #[test]
-    fn execution_result_variants() {
-        let success = ExecutionResult::Success {
-            conversation_id: "0190f5fe-7c00-7a00-8abc-012345678901".into(),
-        };
-        assert_eq!(
-            success,
-            ExecutionResult::Success {
-                conversation_id: "0190f5fe-7c00-7a00-8abc-012345678901".into()
-            }
-        );
-
-        let retrying = ExecutionResult::Retrying { attempt: 2 };
-        assert_eq!(retrying, ExecutionResult::Retrying { attempt: 2 });
-
-        assert_eq!(ExecutionResult::Skipped, ExecutionResult::Skipped);
-
-        let error = ExecutionResult::Error {
-            message: "oops".into(),
-        };
-        assert_eq!(
-            error,
-            ExecutionResult::Error {
-                message: "oops".into()
-            }
-        );
-
-        let quarantined = ExecutionResult::Quarantined {
-            message: "unproven external owner".into(),
-        };
-        assert_eq!(
-            quarantined,
-            ExecutionResult::Quarantined {
-                message: "unproven external owner".into()
-            }
-        );
     }
 
     #[tokio::test]
@@ -2809,7 +2753,6 @@ mod tests {
         };
         let saved_skill = SavedSkillContext {
             name: JOB_SKILL_NAME.into(),
-            raw_content: "---\nname: test\ndescription: desc\n---\nDo X".into(),
         };
 
         let result = executor.execute_inner(&job, "0190f5fe-7c00-7a00-8abc-012345678901", Some(&saved_skill)).await;
@@ -2854,7 +2797,6 @@ mod tests {
         let job = sample_job();
         let saved_skill = SavedSkillContext {
             name: JOB_SKILL_NAME.into(),
-            raw_content: "---\nname: test\ndescription: desc\n---\nDo X".into(),
         };
 
         let result = executor.execute_inner(&job, "0190f5fe-7c00-7a00-8abc-012345678901", Some(&saved_skill)).await;
@@ -2869,7 +2811,6 @@ mod tests {
         let sent_messages = agent.sent_messages().await;
         assert_eq!(sent_messages.len(), 1);
         assert!(!sent_messages[0].content.contains("## Skill Instructions"));
-        assert!(!sent_messages[0].content.contains("Do X"));
         assert!(sent_messages[0].inject_skills.is_empty());
     }
 
@@ -3139,226 +3080,6 @@ mod tests {
     }
 
     // -- helper ---------------------------------------------------------------
-
-    fn make_executor_for_busy_tests(guard: Arc<CronBusyGuard>) -> JobExecutor {
-        struct StubAgentRuntimeRegistry;
-        #[async_trait::async_trait]
-        impl AgentRuntimeRegistry for StubAgentRuntimeRegistry {
-            fn get_runtime(&self, _: &str) -> Option<AgentRuntimeHandle> {
-                None
-            }
-            async fn get_or_create_runtime(
-                &self,
-                _: &str,
-                _: AgentRuntimeBuildOptions,
-            ) -> Result<AgentRuntimeHandle, nomifun_common::AppError> {
-                Err(nomifun_common::AppError::Internal("stub".into()))
-            }
-            fn terminate(
-                &self,
-                _: &str,
-                _: Option<nomifun_common::AgentKillReason>,
-            ) -> Result<(), nomifun_common::AppError> {
-                Ok(())
-            }
-            fn terminate_all(&self) {}
-            fn active_runtime_count(&self) -> usize {
-                0
-            }
-        }
-
-        struct StubConvRepo;
-
-        #[async_trait::async_trait]
-        impl IConversationRepository for StubConvRepo {
-            async fn get(
-                &self,
-                _id: &str,
-            ) -> Result<Option<nomifun_db::models::ConversationRow>, nomifun_db::DbError>
-            {
-                Ok(None)
-            }
-
-            async fn find_creative_studio_agent_session_by_conversation(
-                &self,
-                _owner_id: &str,
-                _conversation_id: &str,
-            ) -> Result<
-                Option<nomifun_db::models::CreativeStudioAgentSessionBindingRow>,
-                nomifun_db::DbError,
-            > {
-                Ok(None)
-            }
-
-            async fn create(
-                &self,
-                _row: &nomifun_db::models::ConversationRow,
-            ) -> Result<String, nomifun_db::DbError> {
-                Ok("0190f5fe-7c00-7a00-8abc-012345678901".into())
-            }
-            async fn update(
-                &self,
-                _id: &str,
-                _updates: &ConversationRowUpdate,
-            ) -> Result<(), nomifun_db::DbError> {
-                Ok(())
-            }
-            async fn delete(&self, _id: &str) -> Result<(), nomifun_db::DbError> {
-                Ok(())
-            }
-            async fn list_paginated(
-                &self,
-                _user_id: &str,
-                _filters: &ConversationFilters,
-            ) -> Result<PaginatedResult<nomifun_db::models::ConversationRow>, nomifun_db::DbError>
-            {
-                Ok(PaginatedResult {
-                    items: vec![],
-                    total: 0,
-                    has_more: false,
-                })
-            }
-            async fn find_by_source_and_chat(
-                &self,
-                _user_id: &str,
-                _source: &str,
-                _chat_id: &str,
-                _agent_type: &str,
-            ) -> Result<Option<nomifun_db::models::ConversationRow>, nomifun_db::DbError>
-            {
-                Ok(None)
-            }
-            async fn list_by_cron_job(
-                &self,
-                _user_id: &str,
-                _cron_job_id: &str,
-            ) -> Result<Vec<nomifun_db::models::ConversationRow>, nomifun_db::DbError> {
-                Ok(vec![])
-            }
-            async fn list_associated(
-                &self,
-                _user_id: &str,
-                _conversation_id: &str,
-            ) -> Result<Vec<nomifun_db::models::ConversationRow>, nomifun_db::DbError> {
-                Ok(vec![])
-            }
-            async fn get_messages(
-                &self,
-                _conv_id: &str,
-                _page: u32,
-                _page_size: u32,
-                _order: SortOrder,
-            ) -> Result<PaginatedResult<nomifun_db::models::MessageRow>, nomifun_db::DbError>
-            {
-                Ok(PaginatedResult {
-                    items: vec![],
-                    total: 0,
-                    has_more: false,
-                })
-            }
-            async fn insert_message(
-                &self,
-                _message: &nomifun_db::models::MessageRow,
-            ) -> Result<(), nomifun_db::DbError> {
-                Ok(())
-            }
-            async fn update_message(
-                &self,
-                _id: &str,
-                _updates: &MessageRowUpdate,
-            ) -> Result<(), nomifun_db::DbError> {
-                Ok(())
-            }
-            async fn delete_messages_by_conversation(
-                &self,
-                _conv_id: &str,
-            ) -> Result<(), nomifun_db::DbError> {
-                Ok(())
-            }
-            async fn get_message_by_msg_id(
-                &self,
-                _conv_id: &str,
-                _msg_id: &str,
-                _msg_type: &str,
-            ) -> Result<Option<nomifun_db::models::MessageRow>, nomifun_db::DbError> {
-                Ok(None)
-            }
-            async fn search_messages(
-                &self,
-                _user_id: &str,
-                _keyword: &str,
-                _page: u32,
-                _page_size: u32,
-            ) -> Result<PaginatedResult<MessageSearchRow>, nomifun_db::DbError> {
-                Ok(PaginatedResult {
-                    items: vec![],
-                    total: 0,
-                    has_more: false,
-                })
-            }
-        }
-
-        struct StubBroadcaster;
-        impl nomifun_realtime::UserEventSink for StubBroadcaster {
-            fn send_to_user(&self, _: &str, _: WebSocketMessage<serde_json::Value>) {}
-        }
-
-        struct StubSkillResolver;
-        #[async_trait::async_trait]
-        impl nomifun_conversation::skill_resolver::SkillResolver for StubSkillResolver {
-            async fn auto_inject_names(&self) -> Vec<String> {
-                Vec::new()
-            }
-
-            async fn resolve_skills(
-                &self,
-                _names: &[String],
-            ) -> Vec<nomifun_conversation::skill_resolver::ResolvedAgentSkill> {
-                Vec::new()
-            }
-
-            async fn link_workspace_skills(
-                &self,
-                _workspace: &std::path::Path,
-                _rel_dirs: &[&str],
-                _skills: &[nomifun_conversation::skill_resolver::ResolvedAgentSkill],
-            ) -> usize {
-                0
-            }
-        }
-
-        let stub_broadcaster = Arc::new(StubBroadcaster);
-        let stub_repo: Arc<dyn IConversationRepository> = Arc::new(StubConvRepo);
-        let agent_metadata_repo: Arc<dyn nomifun_db::IAgentMetadataRepository> =
-            Arc::new(StubAgentMetadataRepo);
-        let runtime_registry: Arc<dyn AgentRuntimeRegistry> =
-            Arc::new(StubAgentRuntimeRegistry);
-        let conv_service = Arc::new(ConversationService::new(
-            Arc::<str>::from(USER_ID),
-            std::env::temp_dir(),
-            stub_broadcaster.clone(),
-            Arc::new(StubSkillResolver),
-            runtime_registry.clone(),
-            Arc::clone(&stub_repo),
-            Arc::clone(&agent_metadata_repo),
-            Arc::new(nomifun_conversation::NoExecutionConversationBoundary),
-        ));
-
-        let agent_registry = AgentRegistry::new(agent_metadata_repo);
-        let sessions =
-            crate::session_port::test_cron_session_port(conv_service, runtime_registry);
-
-        JobExecutor::new(
-            Arc::<str>::from(USER_ID),
-            sessions,
-            stub_repo,
-            guard,
-            std::env::temp_dir(),
-            std::env::temp_dir(),
-            stub_broadcaster,
-            agent_registry,
-        )
-    }
 
     struct RecordingAgent {
         conversation_id: String,

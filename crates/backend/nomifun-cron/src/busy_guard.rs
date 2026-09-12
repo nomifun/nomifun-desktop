@@ -1,9 +1,9 @@
-use dashmap::DashMap;
+use dashmap::{DashMap, mapref::entry::Entry};
 
 use nomifun_common::ConversationId;
 
 /// Presence-keyed busy set: a conversation id is in `busy` exactly while a cron
-/// execution is processing it. `set_processing(false)` removes the entry, so
+/// execution holds its permit. Dropping the permit removes the entry, so
 /// idle conversations never accumulate state.
 pub struct CronBusyGuard {
     busy: DashMap<String, ()>,
@@ -21,15 +21,30 @@ impl CronBusyGuard {
         self.busy.contains_key(conversation_id)
     }
 
-    pub fn set_processing(&self, conversation_id: &str, processing: bool) {
-        if ConversationId::try_from(conversation_id).is_err() {
-            return;
+    pub(crate) fn try_acquire(&self, conversation_id: &str) -> Option<CronBusyPermit<'_>> {
+        ConversationId::try_from(conversation_id).ok()?;
+        match self.busy.entry(conversation_id.to_owned()) {
+            Entry::Occupied(_) => None,
+            Entry::Vacant(entry) => {
+                entry.insert(());
+                Some(CronBusyPermit {
+                    guard: self,
+                    conversation_id: conversation_id.to_owned(),
+                })
+            }
         }
-        if processing {
-            self.busy.insert(conversation_id.to_owned(), ());
-        } else {
-            self.busy.remove(conversation_id);
-        }
+    }
+}
+
+/// Does not hold a DashMap lock across awaits; cancellation releases the entry.
+pub(crate) struct CronBusyPermit<'a> {
+    guard: &'a CronBusyGuard,
+    conversation_id: String,
+}
+
+impl Drop for CronBusyPermit<'_> {
+    fn drop(&mut self) {
+        self.guard.busy.remove(&self.conversation_id);
     }
 }
 
@@ -53,35 +68,18 @@ mod tests {
     }
 
     #[test]
-    fn set_processing_true_marks_busy() {
-        let guard = CronBusyGuard::new();
-        guard.set_processing(CONVERSATION_1, true);
-        assert!(guard.is_busy(CONVERSATION_1));
-    }
-
-    #[test]
-    fn set_processing_false_marks_not_busy() {
-        let guard = CronBusyGuard::new();
-        guard.set_processing(CONVERSATION_1, true);
-        guard.set_processing(CONVERSATION_1, false);
-        assert!(!guard.is_busy(CONVERSATION_1));
-    }
-
-    #[test]
-    fn set_processing_false_releases_the_entry() {
-        let guard = CronBusyGuard::new();
-        guard.set_processing(CONVERSATION_1, true);
-        guard.set_processing(CONVERSATION_1, false);
-        assert!(guard.busy.is_empty(), "idle conversations must not retain state");
-    }
-
-    #[test]
     fn multiple_conversations_independent() {
         let guard = CronBusyGuard::new();
-        guard.set_processing(CONVERSATION_1, true);
-        guard.set_processing(CONVERSATION_2, false);
+        let first = guard.try_acquire(CONVERSATION_1).unwrap();
+        let second = guard.try_acquire(CONVERSATION_2).unwrap();
         assert!(guard.is_busy(CONVERSATION_1));
-        assert!(!guard.is_busy(CONVERSATION_2));
+        assert!(guard.try_acquire(CONVERSATION_1).is_none());
+        drop(first);
+        assert!(guard.try_acquire(CONVERSATION_1).is_some());
+        assert!(guard.is_busy(CONVERSATION_2));
+        drop(second);
+        assert!(guard.busy.is_empty());
+        assert!(guard.try_acquire("invalid").is_none());
     }
 
     #[test]
