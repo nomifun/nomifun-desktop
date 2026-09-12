@@ -5684,6 +5684,7 @@ dependencies = [
  "nomi-protocol",
  "nomi-skills",
  "nomi-types",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

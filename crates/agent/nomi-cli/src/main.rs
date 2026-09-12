@@ -427,22 +427,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    engine.run_stop_hooks().await;
-    if let Some(report) = engine.shutdown_processes().await
-        && report.sessions.iter().any(|session| {
-            matches!(
-                &session.outcome,
-                nomi_process_runtime::ProcessOutcome::Lost { cleanup, .. } if !cleanup.reaped
-            )
-        })
-    {
-        tracing::error!(
-            target: "nomi_cli",
-            "engine shutdown could not prove every command process tree was reaped"
-        );
-    }
-
-    shutdown_mcp_managers_exact(result.mcp_managers.iter()).await?;
+    shutdown_runtime(&mut engine, result.mcp_managers.iter()).await?;
 
     if let Some(failure) = turn_failure {
         return Err(failure);
@@ -450,6 +435,10 @@ async fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "command_audit_tests.rs"]
+mod command_audit_tests;
 
 #[cfg(test)]
 mod tests {
@@ -773,7 +762,7 @@ fn to_mcp_server_config(
     })
 }
 
-/// Pending config fields: (model, thinking, thinking_budget, effort)
+/// Pending config fields: (model, thinking, thinking_budget, effort, compaction).
 type PendingConfig = (
     Option<String>,
     Option<String>,
@@ -782,11 +771,33 @@ type PendingConfig = (
     Option<String>,
 );
 
+const MAX_PENDING_CONFIG_UPDATES: usize = 32;
+
+fn queue_config_update(pending: &mut Vec<PendingConfig>, update: PendingConfig) -> bool {
+    if pending.len() >= MAX_PENDING_CONFIG_UPDATES {
+        return false;
+    }
+    // Apply in arrival order: thinking/budget and invalid values have semantics
+    // owned by AgentEngine, so field-wise coalescing here would change them.
+    pending.push(update);
+    true
+}
+
 async fn run_json_stream_mode(
     config: Config,
     cwd: &str,
     resume: Option<String>,
     session_id: Option<String>,
+) -> anyhow::Result<()> {
+    run_json_stream_mode_with_reader(config, cwd, resume, session_id, spawn_stdin_reader).await
+}
+
+async fn run_json_stream_mode_with_reader(
+    config: Config,
+    cwd: &str,
+    resume: Option<String>,
+    session_id: Option<String>,
+    read_commands: impl FnOnce() -> tokio::sync::mpsc::Receiver<ProtocolCommand>,
 ) -> anyhow::Result<()> {
     let writer = Arc::new(ProtocolWriter::new());
     let protocol_sink = Arc::new(ProtocolSink::new(writer.clone()));
@@ -825,13 +836,13 @@ async fn run_json_stream_mode(
 
     engine.set_protocol_writer(writer.clone());
 
-    let mut cmd_rx = spawn_stdin_reader();
+    let mut cmd_rx = read_commands();
 
-    // --- Pre-message phase: accept AddMcpServer commands ---
     let mut dynamic_managers: Vec<Arc<McpManager>> = Vec::new();
-    let mut first_cmd: Option<ProtocolCommand> = None;
+    let mut has_mcp = initial_has_mcp;
+    let mut message_started = false;
 
-    while let Some(cmd) = cmd_rx.recv().await {
+    'commands: while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
             ProtocolCommand::AddMcpServer {
                 name,
@@ -841,7 +852,7 @@ async fn run_json_stream_mode(
                 env,
                 url,
                 headers,
-            } => {
+            } if !message_started => {
                 if connected_mcp_server_names.contains(&name) {
                     output.emit_error(&format!(
                         "AddMcpServer '{name}': rejected — a connected MCP server already uses this name"
@@ -915,6 +926,7 @@ async fn run_json_stream_mode(
                             })
                             .collect();
                         dynamic_managers.push(mgr_arc);
+                        has_mcp = true;
                         let _ = writer.emit(&ProtocolEvent::McpReady {
                             name,
                             tools: tool_names,
@@ -927,31 +939,10 @@ async fn run_json_stream_mode(
                     }
                 }
             }
-            ProtocolCommand::Stop => return Ok(()),
-            other => {
-                first_cmd = Some(other);
-                break;
-            }
-        }
-    }
-
-    let has_mcp = initial_has_mcp || !dynamic_managers.is_empty();
-    let mut pending_cmd = first_cmd;
-
-    'commands: loop {
-        let cmd = if let Some(c) = pending_cmd.take() {
-            c
-        } else {
-            match cmd_rx.recv().await {
-                Some(c) => c,
-                None => break,
-            }
-        };
-
-        match cmd {
             ProtocolCommand::Message { msg_id, content } => {
+                message_started = true;
                 let mut stopped = false;
-                let mut pending_config: Option<PendingConfig> = None;
+                let mut pending_config = Vec::new();
 
                 {
                     let turn_execution = engine.execute_turn(&content, &msg_id);
@@ -978,20 +969,23 @@ async fn run_json_stream_mode(
                                 }
                                 break;
                             }
-                            Some(sub_cmd) = cmd_rx.recv() => {
+                            sub_cmd = cmd_rx.recv() => {
                                 match sub_cmd {
-                                    ProtocolCommand::Stop => {
+                                    None | Some(ProtocolCommand::Stop) => {
                                         stopped = true;
                                         break;
                                     }
-                                    ProtocolCommand::SetConfig { model, thinking, thinking_budget, effort, compaction } => {
-                                        pending_config = Some((model, thinking, thinking_budget, effort, compaction));
+                                    Some(ProtocolCommand::SetConfig { model, thinking, thinking_budget, effort, compaction }) => {
+                                        if !queue_config_update(&mut pending_config, (model, thinking, thinking_budget, effort, compaction)) {
+                                            output.emit_error("set_config: too many pending updates; update rejected");
+                                            continue;
+                                        }
                                         let _ = writer.emit(&nomi_protocol::events::ProtocolEvent::Info {
                                             msg_id: String::new(),
                                             message: "set_config: queued, will apply after current response".to_string(),
                                         });
                                     }
-                                    ProtocolCommand::Ping => {
+                                    Some(ProtocolCommand::Ping) => {
                                         let _ = writer.emit(&nomi_protocol::events::ProtocolEvent::Pong);
                                     }
                                     _ => {
@@ -1003,9 +997,7 @@ async fn run_json_stream_mode(
                     }
                 }
 
-                if let Some((model, thinking, thinking_budget, effort, compaction)) =
-                    pending_config.take()
-                {
+                for (model, thinking, thinking_budget, effort, compaction) in pending_config {
                     let changes = engine.apply_config_update(
                         model,
                         thinking,
@@ -1070,35 +1062,26 @@ async fn run_json_stream_mode(
         }
     }
 
-    engine.run_stop_hooks().await;
-    if let Some(report) = engine.shutdown_processes().await
-        && report.sessions.iter().any(|session| {
-            matches!(
-                &session.outcome,
-                nomi_process_runtime::ProcessOutcome::Lost { cleanup, .. } if !cleanup.reaped
-            )
-        })
-    {
-        tracing::error!(
-            target: "nomi_cli",
-            "engine shutdown could not prove every command process tree was reaped"
-        );
-    }
-    shutdown_mcp_managers_exact(
-        result
-            .mcp_managers
-            .iter()
-            .chain(dynamic_managers.iter()),
-    )
-    .await?;
+    shutdown_runtime(&mut engine, result.mcp_managers.iter().chain(dynamic_managers.iter())).await?;
 
     Ok(())
 }
 
-async fn shutdown_mcp_managers_exact<'a>(
+async fn shutdown_runtime<'a>(
+    engine: &mut nomi_agent::engine::AgentEngine,
     managers: impl IntoIterator<Item = &'a Arc<McpManager>>,
 ) -> anyhow::Result<()> {
+    engine.run_stop_hooks().await;
     let mut failures = Vec::new();
+    if let Some(report) = engine.shutdown_processes().await
+        && report.sessions.iter().any(|session| matches!(
+            &session.outcome,
+            nomi_process_runtime::ProcessOutcome::Lost { cleanup, .. } if !cleanup.reaped
+        ))
+    {
+        failures.push("engine shutdown could not prove every command process tree was reaped".to_owned());
+    }
+    // Always attempt every manager, even if engine cleanup already failed.
     for manager in managers {
         if let Err(error) = manager.shutdown().await {
             failures.push(error.to_string());
@@ -1107,9 +1090,6 @@ async fn shutdown_mcp_managers_exact<'a>(
     if failures.is_empty() {
         Ok(())
     } else {
-        anyhow::bail!(
-            "MCP shutdown could not prove exact process cleanup: {}",
-            failures.join(" | ")
-        )
+        anyhow::bail!("runtime shutdown could not prove exact process cleanup: {}", failures.join(" | "))
     }
 }

@@ -1,5 +1,4 @@
-use std::io::{self, BufWriter, Stdout, Write};
-use std::sync::Mutex;
+use std::io::{self, Stdout, Write};
 
 use crate::events::ProtocolEvent;
 
@@ -14,7 +13,7 @@ pub trait ProtocolEmitter: Send + Sync {
 
 /// Thread-safe JSON Lines writer to stdout
 pub struct ProtocolWriter {
-    writer: Mutex<BufWriter<Stdout>>,
+    writer: Stdout,
 }
 
 impl Default for ProtocolWriter {
@@ -26,20 +25,19 @@ impl Default for ProtocolWriter {
 impl ProtocolWriter {
     pub fn new() -> Self {
         Self {
-            writer: Mutex::new(BufWriter::new(io::stdout())),
+            writer: io::stdout(),
         }
     }
 }
 
 impl ProtocolEmitter for ProtocolWriter {
     fn emit(&self, event: &ProtocolEvent) -> io::Result<()> {
-        let mut w = self
-            .writer
-            .lock()
-            .map_err(|_| io::Error::other("protocol writer lock poisoned"))?;
-        serde_json::to_writer(&mut *w, event)
+        // Hold stdout's shared lock for the entire frame, even across different
+        // ProtocolWriter instances. Stdout already owns a line buffer.
+        let mut w = self.writer.lock();
+        serde_json::to_writer(&mut w, event)
             .map_err(|e| io::Error::other(format!("failed to serialize protocol event: {}", e)))?;
-        writeln!(&mut *w)?;
+        writeln!(&mut w)?;
         w.flush()
     }
 }
@@ -67,6 +65,6 @@ mod tests {
                 mcp: false,
             },
         };
-        let _ = writer.emit(&event);
+        writer.emit(&event).expect("protocol event should reach stdout");
     }
 }
