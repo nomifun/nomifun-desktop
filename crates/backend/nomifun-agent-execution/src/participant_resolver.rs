@@ -295,7 +295,7 @@ impl ParticipantResolver {
                 .clone()
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty());
-            let mut capability = derive_capability(&[], &[], None);
+            let mut capability = derive_capability(None);
             entry.traits.apply_to(&mut capability);
             snapshots.push(NewAgentExecutionParticipant {
                 participant_id:
@@ -400,17 +400,13 @@ impl ParticipantResolver {
             .transpose()?;
         participants.remove(matching_model_index);
 
-        let mut lead_capability = derive_capability(
-            &[],
-            &[],
-            snapshot.routing_description.as_deref(),
-        );
+        let mut lead_capability = derive_capability(snapshot.routing_description.as_deref());
         if let Some(inherited) = inherited_model_capability.as_ref() {
             copy_model_trait_capability(inherited, &mut lead_capability);
         }
 
-        for participant in participants.iter_mut() {
-            participant.sort_order += 1;
+        for (index, participant) in participants.iter_mut().enumerate() {
+            participant.sort_order = index as i64 + 1;
         }
         participants.insert(
             0,
@@ -498,11 +494,7 @@ fn promote_model_to_front(
     Ok(())
 }
 
-fn derive_capability(
-    audience_tags: &[String],
-    scenario_tags: &[String],
-    description: Option<&str>,
-) -> ParticipantCapability {
+fn derive_capability(description: Option<&str>) -> ParticipantCapability {
     const KEYWORDS: &[(&str, &str)] = &[
         ("cod", "coding"),
         ("program", "coding"),
@@ -521,17 +513,10 @@ fn derive_capability(
         ("plan", "planning"),
         ("规划", "planning"),
     ];
-    let mut inputs: Vec<String> = audience_tags
-        .iter()
-        .chain(scenario_tags)
-        .map(|value| value.to_lowercase())
-        .collect();
-    if let Some(description) = description {
-        inputs.push(description.to_lowercase());
-    }
+    let description = description.unwrap_or_default().to_lowercase();
     let mut strengths = Vec::new();
     for (needle, strength) in KEYWORDS {
-        if inputs.iter().any(|value| value.contains(needle))
+        if description.contains(needle)
             && !strengths.iter().any(|value| value == strength)
         {
             strengths.push((*strength).to_owned());
@@ -740,7 +725,7 @@ mod tests {
             .traits;
         assert_eq!(named_projection.modalities, ["video"]);
         assert!(!named_projection.modalities.iter().any(|value| value == "vision"));
-        let mut named_capability = derive_capability(&[], &[], None);
+        let mut named_capability = derive_capability(None);
         named_projection.apply_to(&mut named_capability);
         assert!(named_capability.tools);
         assert!(named_capability.web_search);
@@ -759,14 +744,14 @@ mod tests {
                 "streaming",
             ]
         );
-        let mut opaque_capability = derive_capability(&[], &[], None);
+        let mut opaque_capability = derive_capability(None);
         opaque_projection.apply_to(&mut opaque_capability);
         assert!(opaque_capability.tools);
         assert!(opaque_capability.web_search);
         assert_eq!(opaque_capability.reasoning, "high");
 
         let no_traits = project_chat_traits(PROVIDER_1, "plain", "[]").unwrap();
-        let mut plain_capability = derive_capability(&[], &[], None);
+        let mut plain_capability = derive_capability(None);
         no_traits.apply_to(&mut plain_capability);
         assert!(plain_capability.modalities.is_empty());
         assert!(!plain_capability.tools);
@@ -870,9 +855,11 @@ mod tests {
                 ));
             }
 
+            let mut caller_snapshot = snapshot();
+            caller_snapshot.routing_description = Some("CODING and research".to_owned());
             ParticipantResolver::prepend_frozen_snapshot(
                 &mut participants,
-                &snapshot(),
+                &caller_snapshot,
                 Some(&ExecutionModelRef {
                     provider_id: LEAD_PROVIDER.to_owned(),
                     model: "lead-model".to_owned(),
@@ -885,9 +872,10 @@ mod tests {
                 participants[0].preset_id.as_deref(),
                 Some(LEAD_PRESET_ID)
             );
-            assert_eq!(participants[0].sort_order, 0);
+            assert_eq!(participants.iter().map(|p| p.sort_order).collect::<Vec<_>>(), (0..size as i64).collect::<Vec<_>>());
             let frozen_capability: ParticipantCapability =
                 serde_json::from_str(participants[0].capability.as_deref().unwrap()).unwrap();
+            assert_eq!(frozen_capability.strengths, ["coding", "research"]);
             assert_eq!(frozen_capability.modalities, ["vision"]);
             assert!(frozen_capability.tools);
             assert!(frozen_capability.web_search);
