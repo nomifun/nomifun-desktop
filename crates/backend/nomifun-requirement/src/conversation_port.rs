@@ -503,93 +503,12 @@ pub use AutoWorkSessionPort as AutoWorkConversationPort;
 /// that vocabulary back into the runner or creating another Session owner.
 #[cfg(test)]
 pub(crate) mod compatibility {
-    use nomifun_conversation::service::BackgroundTurnReconciliationDisposition;
-    use nomifun_conversation::{IdempotentMessageDelivery, PublicTurnDeliveryState};
-
-    use super::{
-        AutoWorkMessageDelivery, AutoWorkReconciliationDisposition,
-        AutoWorkTurnDeliveryState,
-    };
-
-    pub(crate) fn delivery_from_conversation(
-        delivery: IdempotentMessageDelivery,
-    ) -> AutoWorkMessageDelivery {
-        AutoWorkMessageDelivery {
-            message_id: delivery.message_id,
-            replayed: delivery.replayed,
-            completed: delivery.completed,
-            result_ok: delivery.result_ok,
-            result_text: delivery.result_text,
-            result_error: delivery.result_error,
-            result_error_code: delivery.result_error_code,
-            result_error_retryable: delivery.result_error_retryable,
-        }
-    }
-
-    pub(crate) fn delivery_state_from_conversation(
-        state: PublicTurnDeliveryState,
-    ) -> AutoWorkTurnDeliveryState {
-        match state {
-            PublicTurnDeliveryState::Missing => AutoWorkTurnDeliveryState::Missing,
-            PublicTurnDeliveryState::Accepted { message_id } => {
-                AutoWorkTurnDeliveryState::Accepted { message_id }
-            }
-            PublicTurnDeliveryState::Completed(delivery) => {
-                AutoWorkTurnDeliveryState::Completed(delivery_from_conversation(delivery))
-            }
-        }
-    }
-
-    pub(crate) const fn reconciliation_from_conversation(
-        disposition: BackgroundTurnReconciliationDisposition,
-    ) -> AutoWorkReconciliationDisposition {
-        match disposition {
-            BackgroundTurnReconciliationDisposition::LiveExactOwnerWait => {
-                AutoWorkReconciliationDisposition::LiveExactOwnerWait
-            }
-            BackgroundTurnReconciliationDisposition::ReconciledOrTerminalReRead => {
-                AutoWorkReconciliationDisposition::ReconciledOrTerminalReRead
-            }
-            BackgroundTurnReconciliationDisposition::ExternalProofRequiredFailClosed => {
-                AutoWorkReconciliationDisposition::ExternalProofRequiredFailClosed
-            }
-            BackgroundTurnReconciliationDisposition::StaleConflict => {
-                AutoWorkReconciliationDisposition::StaleConflict
-            }
-        }
-    }
-
     pub(crate) use super::{
         AutoWorkMessageDelivery as TestMessageDelivery,
         AutoWorkReconciliationDisposition as TestReconciliationDisposition,
         AutoWorkRuntimeBuildLease as TestRuntimeBuildLease,
         AutoWorkTurnDeliveryState as TestTurnDeliveryState,
     };
-
-    #[test]
-    fn receipt_and_reconciliation_adapter_preserve_typed_state() {
-        let message_id = nomifun_common::MessageId::new().into_string();
-        let delivery = IdempotentMessageDelivery {
-            message_id: message_id.clone(),
-            replayed: true,
-            completed: true,
-            result_ok: Some(false),
-            result_text: Some("note".to_owned()),
-            result_error: Some("failed".to_owned()),
-            result_error_code: Some("provider_error".to_owned()),
-            result_error_retryable: Some(true),
-        };
-        assert_eq!(
-            delivery_state_from_conversation(PublicTurnDeliveryState::Completed(delivery.clone())),
-            AutoWorkTurnDeliveryState::Completed(delivery_from_conversation(delivery))
-        );
-        assert_eq!(
-            reconciliation_from_conversation(
-                BackgroundTurnReconciliationDisposition::ExternalProofRequiredFailClosed
-            ),
-            AutoWorkReconciliationDisposition::ExternalProofRequiredFailClosed
-        );
-    }
 }
 
 #[cfg(test)]

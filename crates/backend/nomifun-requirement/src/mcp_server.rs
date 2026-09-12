@@ -310,11 +310,11 @@ async fn exec_complete(
         Some(token) => token,
         None => return json!({"error": "missing or invalid opaque claim_token"}),
     };
-    let note = args
-        .get("completion_note")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned);
+    let note = match args.get("completion_note") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(note)) => (!note.is_empty()).then(|| note.clone()),
+        Some(_) => return json!({"error": "completion_note must be a string"}),
+    };
     if let Err(e) = verify_scope(svc, &id, claim_generation, claim_token, claims).await {
         return json!({"error": e});
     }
@@ -374,11 +374,11 @@ async fn exec_update_status(
             });
         }
     };
-    let note = args
-        .get("note")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned);
+    let note = match args.get("note") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(note)) => (!note.is_empty()).then(|| note.clone()),
+        Some(_) => return json!({"error": "note must be a string"}),
+    };
     if let Err(e) = verify_scope(svc, &id, claim_generation, claim_token, claims).await {
         return json!({"error": e});
     }
@@ -588,7 +588,6 @@ mod tests {
         .fetch_one(db.pool())
         .await
         .unwrap();
-        Box::leak(Box::new(db));
         (
             service,
             installation_owner,
@@ -759,6 +758,59 @@ mod tests {
             Some(owner_id.as_str())
         );
         assert!(row.owner_conversation_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn non_string_notes_are_rejected_without_mutation() {
+        for (tool, note_field, final_status, optional_note) in [
+            ("requirement_complete", "completion_note", RequirementStatus::Done, None),
+            ("requirement_complete", "completion_note", RequirementStatus::Done, Some(Value::Null)),
+            ("requirement_complete", "completion_note", RequirementStatus::Done, Some(json!(""))),
+            ("requirement_update_status", "note", RequirementStatus::Failed, None),
+            ("requirement_update_status", "note", RequirementStatus::Failed, Some(Value::Null)),
+            ("requirement_update_status", "note", RequirementStatus::Failed, Some(json!(""))),
+        ] {
+            let (service, installation_owner, owner_id, requirement_id, claim_token, _pool) =
+                service_with_claim(AutoWorkTargetKind::Conversation).await;
+            let server = RequirementMcpServer::start().await.unwrap();
+            server.set_service(Arc::downgrade(&service)).await;
+            let child = child_for(
+                &server,
+                &installation_owner,
+                AutoWorkTargetKind::Conversation,
+                &owner_id,
+            );
+            let before = serde_json::to_value(service.get(&requirement_id).await.unwrap()).unwrap();
+            let mut args = json!({
+                "id": requirement_id,
+                "claim_generation": 1,
+                "claim_token": claim_token,
+                "status": "failed",
+            });
+            for invalid_note in [json!(42), json!(false), json!([]), json!({})] {
+                args[note_field] = invalid_note;
+                let (status, body) = post_tool(&server, &child, tool, args.clone()).await;
+                assert_eq!(status, 200);
+                assert_eq!(body, json!({"error": format!("{note_field} must be a string")}));
+                assert_eq!(
+                    serde_json::to_value(service.get(&requirement_id).await.unwrap()).unwrap(),
+                    before,
+                    "invalid {note_field} must not mutate the requirement"
+                );
+            }
+
+            // Absent, null and empty notes retain their existing None semantics.
+            args.as_object_mut().unwrap().remove(note_field);
+            if let Some(note) = optional_note {
+                args[note_field] = note;
+            }
+            let (status, body) = post_tool(&server, &child, tool, args).await;
+            assert_eq!(status, 200);
+            assert!(body.get("result").is_some(), "{body}");
+            let after = service.get(&requirement_id).await.unwrap();
+            assert_eq!(after.status, final_status);
+            assert!(after.completion_note.is_none());
+        }
     }
 
     #[tokio::test]
