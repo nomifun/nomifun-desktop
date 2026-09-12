@@ -235,6 +235,28 @@ impl CsDialogueEngine {
         cs_dialogue_id: &str,
         batch: &[String],
     ) -> Result<String, AppError> {
+        let semaphore = self
+            .semaphores
+            .entry(agent.cs_agent_id.clone())
+            .or_insert_with(|| {
+                Arc::new(Semaphore::new(agent.max_concurrent.clamp(1, 64) as usize))
+            })
+            .clone();
+        let _permit = semaphore
+            .acquire()
+            .await
+            .map_err(|_| AppError::Internal("customer-service semaphore closed".into()))?;
+
+        // Either queue may outlive a settings change. Build the request only
+        // after admission, from the current enabled Agent and its current model/tools.
+        let agent = self
+            .repo
+            .get_agent(&agent.cs_agent_id)
+            .await?
+            .filter(|agent| agent.enabled)
+            .ok_or_else(|| {
+                AppError::Conflict("customer-service agent missing or disabled".into())
+            })?;
         let (Some(provider_id), Some(model)) = (agent.provider_id.clone(), agent.model.clone())
         else {
             return Err(AppError::Conflict(
@@ -284,7 +306,7 @@ impl CsDialogueEngine {
                 use_model: None,
             },
             system_prompt: build_system_prompt_with_notes(
-                agent,
+                &agent,
                 &self.pre_retrieved_notes(&agent.cs_agent_id, &user_text).await,
             ),
             history,
@@ -292,18 +314,6 @@ impl CsDialogueEngine {
             tools,
             timeout_secs: TURN_TIMEOUT_SECS,
         };
-
-        let semaphore = self
-            .semaphores
-            .entry(agent.cs_agent_id.clone())
-            .or_insert_with(|| {
-                Arc::new(Semaphore::new(agent.max_concurrent.clamp(1, 64) as usize))
-            })
-            .clone();
-        let _permit = semaphore
-            .acquire()
-            .await
-            .map_err(|_| AppError::Internal("customer-service semaphore closed".into()))?;
 
         let reply = self.runner.run(request).await?;
         self.repo
@@ -512,6 +522,7 @@ mod tests {
 
     struct OneShotCall {
         user_text: String,
+        model: String,
         history_len: usize,
         tool_names: Vec<String>,
         timeout_secs: u64,
@@ -536,6 +547,7 @@ mod tests {
             self.max_in_flight.fetch_max(now, Ordering::SeqCst);
             self.calls.lock().unwrap().push(OneShotCall {
                 user_text: req.user_text.clone(),
+                model: req.provider.model.clone(),
                 history_len: req.history.len(),
                 tool_names: req.tools.iter().map(|tool| tool.name.clone()).collect(),
                 timeout_secs: req.timeout_secs,
@@ -715,6 +727,76 @@ mod tests {
             1,
             "max_concurrent=1 must serialize turns"
         );
+    }
+
+    #[tokio::test]
+    async fn queued_turn_rechecks_agent_before_model_execution() {
+        for enabled in [false, true] {
+            let fx = fixture().await;
+            let agent = create_agent(&fx.repo, 1).await;
+            let runner = StubRunner::new(None, 0);
+            let engine = Arc::new(CsDialogueEngine::new(
+                Arc::clone(&fx.repo),
+                Arc::clone(&fx.knowledge),
+                runner.clone(),
+            ));
+            let semaphore = Arc::new(Semaphore::new(1));
+            engine
+                .semaphores
+                .insert(agent.cs_agent_id.clone(), semaphore.clone());
+            let permit = semaphore.acquire().await.unwrap();
+            let (plugin, visitor) = ids();
+            let pending_engine = engine.clone();
+            let agent_id = agent.cs_agent_id.clone();
+            let pending = tokio::spawn(async move {
+                pending_engine
+                    .handle_visitor_message(&agent_id, &plugin, &visitor, "queued-chat", "hi")
+                    .await
+            });
+            // Observing the drained, locked lane proves the initial Agent
+            // snapshot was read. The held permit prevents model execution.
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    if engine.lanes.iter().any(|lane| {
+                        lane.running.try_lock().is_err() && lane.pending.lock().unwrap().is_empty()
+                    }) {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            fx.repo
+                .update_agent(
+                    &agent.cs_agent_id,
+                    &nomifun_db::UpdateCsAgentParams {
+                        enabled: Some(enabled),
+                        model: Some(Some("updated-model".into())),
+                        ..Default::default()
+                    },
+                    2,
+                )
+                .await
+                .unwrap();
+            drop(permit);
+            let reply = tokio::time::timeout(std::time::Duration::from_secs(5), pending)
+                .await
+                .unwrap()
+                .unwrap();
+            let calls = runner.calls.lock().unwrap();
+            if enabled {
+                assert_eq!(reply.unwrap().as_deref(), Some("reply to: hi"));
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].model, "updated-model");
+            } else {
+                assert_eq!(reply.unwrap_err(), FALLBACK_ERROR_NOTICE);
+                assert!(
+                    calls.is_empty(),
+                    "a disabled queued Agent must not invoke the model"
+                );
+            }
+        }
     }
 
     /// 安全断言：回合传给引擎的工具白名单恰为三个只读工具，超时 120s。

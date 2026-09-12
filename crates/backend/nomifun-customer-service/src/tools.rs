@@ -294,22 +294,6 @@ pub fn build_cs_tools(
 mod tests {
     use super::*;
 
-    /// 安全不变量的静态面：客服工具构造器产出的白名单恰为三个只读工具。
-    #[test]
-    fn cs_tool_whitelist_is_exactly_three_read_only_tools() {
-        // Handler wiring needs live services; the whitelist SHAPE is what this
-        // asserts, so unreachable stubs suffice for name enumeration.
-        let names = ["knowledge_search", "knowledge_read", "cs_notes_search"];
-        assert_eq!(names.len(), 3);
-        // The authoritative construction-path assertion lives in
-        // dialogue::tests (build_cs_tools output) and the one-shot engine's
-        // whitelist tests; this guard documents the fixed name set so a new
-        // tool addition must consciously edit it.
-        for name in names {
-            assert!(!name.contains("write") && !name.contains("bash") && !name.contains("terminal"));
-        }
-    }
-
     #[test]
     fn queries_accept_an_array_and_dedupe_and_cap() {
         let input = serde_json::json!({ "queries": ["nomifun", " nomifun ", "价格", "", "  "] });
