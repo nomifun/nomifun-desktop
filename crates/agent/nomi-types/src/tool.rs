@@ -12,23 +12,15 @@ const DEFERRED_DESC_MAX_CHARS: usize = 200;
 /// Keeps up to the first blank line or `DEFERRED_DESC_MAX_CHARS` characters
 /// (whichever is shorter). If the text was trimmed, an ellipsis is appended.
 pub fn truncate_deferred_description(desc: &str) -> String {
-    // Find first blank line (double newline)
-    let end_at_blank = desc.find("\n\n").unwrap_or(desc.len());
-    let limit = end_at_blank.min(DEFERRED_DESC_MAX_CHARS);
-
-    if limit >= desc.len() {
+    let end_at_blank = [desc.find("\n\n"), desc.find("\r\n\r\n")]
+        .into_iter().flatten().min().unwrap_or(desc.len());
+    let end_at_limit = desc.char_indices().nth(DEFERRED_DESC_MAX_CHARS)
+        .map_or(desc.len(), |(index, _)| index);
+    let end = end_at_blank.min(end_at_limit);
+    if end == desc.len() {
         return desc.to_string();
     }
-
-    // Avoid cutting in the middle of a UTF-8 char boundary
-    let safe_end = desc
-        .char_indices()
-        .take_while(|(i, _)| *i < limit)
-        .last()
-        .map(|(i, c)| i + c.len_utf8())
-        .unwrap_or(0);
-
-    format!("{}…", &desc[..safe_end])
+    format!("{}…", &desc[..end])
 }
 
 /// Definition of a tool for the API
@@ -255,13 +247,14 @@ mod tests {
 
     #[test]
     fn truncate_multibyte_chars_safe() {
-        // 100 two-byte chars = 200 bytes, but only 100 char positions
         let desc: String = "é".repeat(150);
-        let result = truncate_deferred_description(&desc);
-        // Should not panic and should be valid UTF-8
-        assert!(result.ends_with('…'));
-        // Should be at most 200 chars (counting code points)
-        let char_count = result.chars().count();
-        assert!(char_count <= 201); // 200 chars + ellipsis
+        assert_eq!(truncate_deferred_description(&desc), desc);
+        let desc = "🦀".repeat(201);
+        assert_eq!(truncate_deferred_description(&desc), format!("{}…", "🦀".repeat(200)));
+    }
+
+    #[test]
+    fn truncate_windows_paragraph_boundary() {
+        assert_eq!(truncate_deferred_description("First paragraph.\r\n\r\nDetails."), "First paragraph.…");
     }
 }

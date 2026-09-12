@@ -13,8 +13,7 @@ pub fn compact_output(text: &str, level: CompactionLevel) -> String {
         CompactionLevel::Safe => sanitize::sanitize(text),
         CompactionLevel::Full => {
             let text = sanitize::sanitize(text);
-            let text = fold::fold_repeated_lines(&text);
-            json::compact_json(&text)
+            json::compact_json_block(&text, true).unwrap_or_else(|| fold::fold_repeated_lines(&text))
         }
     }
 }

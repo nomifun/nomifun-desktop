@@ -1,21 +1,17 @@
 const INLINE_THRESHOLD: usize = 80;
 
-fn compact_value(value: &serde_json::Value) -> String {
-    format_value(value, 0)
-}
-
 fn format_value(value: &serde_json::Value, depth: usize) -> String {
     match value {
         serde_json::Value::Object(map) => {
             let oneliner = serde_json::to_string(value).unwrap_or_default();
-            if oneliner.len() <= INLINE_THRESHOLD && !oneliner.contains('\n') {
+            if oneliner.len() <= INLINE_THRESHOLD {
                 return oneliner;
             }
             let indent = "  ".repeat(depth + 1);
             let close_indent = "  ".repeat(depth);
             let entries: Vec<String> = map
                 .iter()
-                .map(|(k, v)| format!("{indent}\"{k}\": {}", format_value(v, depth + 1)))
+                .map(|(k, v)| format!("{indent}{}: {}", serde_json::to_string(k).unwrap(), format_value(v, depth + 1)))
                 .collect();
             format!("{{\n{}\n{close_indent}}}", entries.join(",\n"))
         }
@@ -37,33 +33,24 @@ fn format_value(value: &serde_json::Value, depth: usize) -> String {
 }
 
 pub fn compact_json(text: &str) -> String {
-    if text.is_empty() {
-        return String::new();
+    compact_json_block(text, false).unwrap_or_else(|| text.to_owned())
+}
+
+// Parse with serde instead of counting brackets, which may occur inside strings.
+// Only fold the plain prefix. The suffix may contain more structured data.
+pub(crate) fn compact_json_block(text: &str, fold_logs: bool) -> Option<String> {
+    let start = text.find(['{', '['])?;
+    let mut values = serde_json::Deserializer::from_str(&text[start..]).into_iter::<serde_json::Value>();
+    let value = values.next()?.ok()?;
+    let end = start + values.byte_offset();
+    let compacted = format_value(&value, 0);
+    let body = if compacted.len() < end - start { &compacted } else { &text[start..end] };
+    if fold_logs {
+        Some(format!("{}{}{}", super::fold::fold_repeated_lines(&text[..start]), body,
+            &text[end..]))
+    } else {
+        Some(format!("{}{}{}", &text[..start], body, &text[end..]))
     }
-
-    let trimmed = text.trim();
-
-    if (trimmed.starts_with('{') || trimmed.starts_with('['))
-        && let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed)
-    {
-        let compacted = compact_value(&value);
-        if compacted.len() < trimmed.len() {
-            return compacted;
-        }
-        return text.to_string();
-    }
-
-    if let Some(start) = trimmed.find(['{', '[']) {
-        let candidate = &trimmed[start..];
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(candidate) {
-            let compacted = compact_value(&value);
-            if compacted.len() < candidate.len() {
-                return format!("{}{}", &trimmed[..start], compacted);
-            }
-        }
-    }
-
-    text.to_string()
 }
 
 #[cfg(test)]
