@@ -484,39 +484,6 @@ impl ControlPlaneStore for NomiCoreControlPlaneStore {
         Ok(preset)
     }
 
-    async fn update_preset(&self, preset: StoredPreset) -> Result<(), ControlPlaneError> {
-        let changed = sqlx::query(
-            "UPDATE nomi_agent_presets SET display_name = ?, description = ?, current_revision = ? \
-             WHERE preset_id = ? AND owner_user_id = ? AND retired_at_ms IS NULL",
-        )
-        .bind(&preset.preset.display_name)
-        .bind(&preset.preset.description)
-        .bind(
-            preset
-                .preset
-                .current_stable_revision
-                .as_ref()
-                .map(|reference| i64_from_u64(reference.revision, "revision"))
-                .transpose()?,
-        )
-        .bind(preset.preset.preset_id.as_ref())
-        .bind(
-            preset
-                .preset
-                .owner_user_id
-                .as_ref()
-                .ok_or_else(|| conflict("Preset owner is missing"))?
-                .as_ref(),
-        )
-        .execute(&self.pool)
-        .await
-        .map_err(sql)?;
-        if changed.rows_affected() != 1 {
-            return Err(not_found("AgentPreset"));
-        }
-        Ok(())
-    }
-
     async fn retire_preset(
         &self,
         owner: &UserId,
@@ -884,7 +851,8 @@ impl ControlPlaneStore for NomiCoreControlPlaneStore {
         let changed = sqlx::query(
             "UPDATE remote_bindings SET name = ?, agent_binding_json = ?, nomi_snapshot_json = ?, \
              provenance_json = ?, agent_binding_digest = ?, binding_version = ?, updated_at = ? \
-             WHERE remote_binding_id = ? AND owner_user_id = ?",
+             WHERE remote_binding_id = ? AND owner_user_id = ? \
+             AND binding_version = ? AND agent_binding_digest = ?",
         )
         .bind(&binding.name)
         .bind(wire(&binding.agent_binding)?)
@@ -898,11 +866,13 @@ impl ControlPlaneStore for NomiCoreControlPlaneStore {
         .bind(now_ms())
         .bind(binding.remote_binding_id.as_ref())
         .bind(binding.owner_user_id.as_ref())
+        .bind(i64_from_u64(expected_binding_version, "expected_binding_version")?)
+        .bind(expected_agent_binding_digest)
         .execute(&mut *tx)
         .await
         .map_err(sql)?;
         if changed.rows_affected() != 1 {
-            return Err(not_found("RemoteBinding"));
+            return Err(conflict("RemoteBinding version or digest changed"));
         }
         tx.commit().await.map_err(sql)?;
         Ok(binding)
@@ -951,6 +921,98 @@ mod tests {
                 current_stable_revision: None,
             },
         }
+    }
+
+    #[tokio::test]
+    async fn remote_update_rechecks_version_and_digest_at_commit() {
+        let database = nomifun_db::init_database_memory_with_owner(
+            CommonUserId::parse(OWNER_ID.to_owned()).unwrap(),
+        ).await.unwrap();
+        let store = NomiCoreControlPlaneStore::new(database.pool().clone());
+        let owner = UserId::from(OWNER_ID);
+        store.insert_preset(user_preset(PRESET_ID, &owner)).await.unwrap();
+        let reference = PresetRevisionRef {
+            preset_id: PRESET_ID.into(), revision: 1, revision_digest: "a".repeat(64).into(),
+        };
+        let content = nomifun_agent_contracts::ResolvedSnapshotContent {
+            schema_version: "1.0.0".into(), resolver_version: "1.0.0".into(),
+            preset_revision_ref: reference.clone(),
+            required_runtime_protocol_version: "1.0.0".into(),
+            required_runtime_profile: nomifun_agent_contracts::RuntimeProfileKind::ManagedMinimal,
+            runtime_feature_inventory_digest: "a".repeat(64).into(),
+            required_runtime_features: Default::default(),
+            compiled_runtime_profile_digest: "a".repeat(64).into(),
+            model_route_refs: Default::default(), chat_route_identity: None,
+            initial_capabilities: Vec::new(), on_demand_capabilities: Vec::new(),
+            initial_miniapp_capabilities: Vec::new(), on_demand_miniapp_capabilities: Vec::new(),
+            required_resource_kinds: Default::default(), on_demand_activation_plans: Default::default(),
+            compact_on_demand_index: Vec::new(), capability_allowlist: Default::default(),
+            skill_locks: Vec::new(), mcp_tool_locks: Vec::new(), resolved_role_providers: Default::default(),
+            canonical_schema_manifest_digest: "a".repeat(64).into(),
+            target_contribution_manifest_digest: "a".repeat(64).into(),
+        };
+        let snapshot = ResolvedSnapshotEnvelope {
+            snapshot_ref: nomifun_agent_contracts::ResolvedSnapshotRef {
+                snapshot_id: SESSION_ID.into(), snapshot_digest: digest_payload(&content).unwrap(),
+            },
+            content,
+            actor: nomifun_agent_contracts::PrincipalRef {
+                principal_kind: "user".into(), principal_id: OWNER_ID.into(),
+            },
+            scene: "test".into(), surface: "desktop".into(), audience: "user".into(),
+            created_at_ms: 1, resolver_run_id: SESSION_ID.into(), availability_evidence_revision: "test".into(),
+        };
+        snapshot.validate().unwrap();
+        sqlx::query("INSERT INTO nomi_agent_preset_revisions \
+            (revision_id, preset_id, revision_no, schema_version, payload_json, revision_digest, \
+             created_by, created_at, reason, snapshot_json, contribution_locks_json) \
+            VALUES (?, ?, 1, '1.0.0', '{}', ?, ?, 1, '', ?, '[]')")
+            .bind(format!("{PRESET_ID}@1")).bind(PRESET_ID).bind(reference.revision_digest.as_ref())
+            .bind(OWNER_ID).bind(wire(&snapshot).unwrap()).execute(database.pool()).await.unwrap();
+        let original = RemoteBinding {
+            remote_binding_id: REMOTE_BINDING_ID.into(), owner_user_id: owner.clone(), name: "Original".into(),
+            agent_binding: AgentBindingValue {
+                preset_revision_ref: reference, resolved_snapshot_ref: snapshot.snapshot_ref,
+                typed_resource_bindings: Vec::new(), binding_version: 1,
+            },
+        };
+        for change_version in [true, false] {
+            store.insert_remote_binding(original.clone()).await.unwrap();
+            let expected_digest = digest_payload(&original.agent_binding).unwrap();
+            let mut candidate = original.clone();
+            candidate.name = "Stale writer".into();
+            candidate.agent_binding.binding_version = 2;
+            let mut concurrent = original.clone();
+            concurrent.name = "Concurrent writer".into();
+            if change_version {
+                concurrent.agent_binding.binding_version = 2;
+            } else {
+                concurrent.agent_binding.resolved_snapshot_ref.snapshot_digest = "b".repeat(64).into();
+            }
+            // FIFO admission on the real single-connection pool pauses the
+            // update after its initial remote-row read, before snapshot lookup.
+            let held = database.pool().acquire().await.unwrap();
+            let mut update = Box::pin(store.update_remote_binding(candidate, 1, expected_digest.as_ref()));
+            assert!(futures_util::poll!(update.as_mut()).is_pending());
+            drop(held);
+            let mut held = tokio::select! {
+                biased;
+                result = &mut update => panic!("update escaped the held connection: {result:?}"),
+                connection = database.pool().acquire() => connection.unwrap(),
+            };
+            sqlx::query("UPDATE remote_bindings SET name = ?, agent_binding_json = ?, \
+                agent_binding_digest = ?, binding_version = ? WHERE remote_binding_id = ?")
+                .bind(&concurrent.name).bind(wire(&concurrent.agent_binding).unwrap())
+                .bind(digest_payload(&concurrent.agent_binding).unwrap().as_ref())
+                .bind(concurrent.agent_binding.binding_version as i64).bind(REMOTE_BINDING_ID)
+                .execute(&mut *held).await.unwrap();
+            drop(held);
+            let result = tokio::time::timeout(std::time::Duration::from_secs(2), update).await.unwrap();
+            assert_eq!(result.unwrap_err().status(), StatusCode::CONFLICT);
+            assert_eq!(store.get_remote_binding(&original.remote_binding_id).await.unwrap(), Some(concurrent));
+            store.delete_remote_binding(&owner, &original.remote_binding_id).await.unwrap();
+        }
+        database.close().await;
     }
 
     #[tokio::test]

@@ -853,39 +853,6 @@ impl ControlPlaneStore for SqliteControlPlaneStore {
         Ok(preset)
     }
 
-    async fn update_preset(&self, preset: StoredPreset) -> Result<(), ControlPlaneError> {
-        let owner = encode_control_json(&preset_owner_ref(&preset.preset))?;
-        let source = encode_control_json(&preset.preset.source)?;
-        let display = encode_control_json(&PersistedPresetDisplay {
-            session_only: preset.session_only,
-            display_name: preset.preset.display_name.clone(),
-            description: preset.preset.description.clone(),
-        })?;
-        let current = preset
-            .preset
-            .current_stable_revision
-            .as_ref()
-            .map(|reference| i64_from_u64(reference.revision, "revision"))
-            .transpose()?;
-        let changed = sqlx::query(
-            "UPDATE agent_presets SET owner_ref_json = ?, source_json = ?, display_json = ?, \
-                    current_stable_revision = ? \
-             WHERE preset_id = ? AND retired_at_ms IS NULL",
-        )
-        .bind(owner)
-        .bind(source)
-        .bind(display)
-        .bind(current)
-        .bind(preset.preset.preset_id.as_ref())
-        .execute(&self.pool)
-        .await
-        .map_err(control_sql)?;
-        if changed.rows_affected() != 1 {
-            return Err(control_not_found("AgentPreset"));
-        }
-        Ok(())
-    }
-
     async fn retire_preset(
         &self,
         owner: &UserId,
