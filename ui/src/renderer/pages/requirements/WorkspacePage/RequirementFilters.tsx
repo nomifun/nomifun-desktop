@@ -167,10 +167,10 @@ const RequirementFilters: React.FC<RequirementFiltersProps> = ({
   );
 
   const tagMenu = (
-    <Menu onClickMenuItem={(key) => onTagChange(key === ALL_TAGS ? undefined : String(key))}>
+    <Menu onClickMenuItem={(key) => onTagChange(key === ALL_TAGS ? undefined : String(key).slice(4))}>
       <Menu.Item key={ALL_TAGS}>{optionContent(t('requirements.allTags'), !tag)}</Menu.Item>
       {tagOptions.map((item) => (
-        <Menu.Item key={item.tag}>
+        <Menu.Item key={`tag:${item.tag}`}>
           {optionContent(`${item.tag} (${item.done}/${item.total})`, tag === item.tag)}
         </Menu.Item>
       ))}
