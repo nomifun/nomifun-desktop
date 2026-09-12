@@ -57,6 +57,39 @@ const documentWithTitle = (title: string) => ({
 });
 
 describe('CanvasCasSaveController', () => {
+  test('keeps undo to the baseline guarded until the in-flight save and compensating save finish', async () => {
+    let finishFirst!: (value: { revision: string }) => void;
+    const firstSave = new Promise<{ revision: string }>((resolve) => { finishFirst = resolve; });
+    const calls: Array<{ revision: string; title: string }> = [];
+    const controller = new CanvasCasSaveController(async (revision, document) => {
+      calls.push({ revision, title: document.chatSessions[0]?.title ?? '' });
+      return calls.length === 1 ? firstSave : { revision: '3' };
+    });
+    const baseline = documentWithTitle('baseline');
+    controller.reset('1', baseline);
+    controller.queue(documentWithTitle('edit'));
+    const firstFlush = controller.flush();
+    controller.queue(baseline);
+
+    const snapshotWhileSaving = controller.getSnapshot();
+    let secondFlushFinished = false;
+    const secondFlush = controller.flush().then(() => { secondFlushFinished = true; });
+    await Promise.resolve();
+    const finishedBeforeSave = secondFlushFinished;
+    finishFirst({ revision: '2' });
+    await Promise.all([firstFlush, secondFlush]);
+
+    expect(snapshotWhileSaving.status).toBe('saving');
+    expect(canvasSaveRequiresUnloadGuard(snapshotWhileSaving)).toBe(true);
+    expect(finishedBeforeSave).toBe(false);
+    expect(calls).toEqual([
+      { revision: '1', title: 'edit' },
+      { revision: '2', title: 'baseline' },
+    ]);
+    expect(canvasSaveRequiresUnloadGuard(controller.getSnapshot())).toBe(false);
+    controller.dispose();
+  });
+
   test('guards unload only while a hydrated revision has pending work', () => {
     expect(
       canvasSaveRequiresUnloadGuard({

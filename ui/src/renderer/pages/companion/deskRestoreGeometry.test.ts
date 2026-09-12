@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import { pickHostMonitor, resolveDeskRestoreLayout, type MonitorLayout } from './deskRestoreGeometry';
 
 const MONITOR = { x: 0, y: 0, width: 1920, height: 1080 };

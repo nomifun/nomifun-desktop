@@ -47,8 +47,9 @@ export class SerializedLatestWriteQueue {
         }
       });
 
-    // `done` handles the operation error, so the next mutation always runs.
-    this.tail = done;
+    // Callbacks can also reject. Preserve that failure for this caller without
+    // poisoning the scheduling chain and skipping every subsequent mutation.
+    this.tail = done.catch(() => undefined);
     return { generation, done };
   }
 }

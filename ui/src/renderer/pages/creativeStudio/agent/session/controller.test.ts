@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test } from 'bun:test';
 
 import { parseConversationId, parseMessageId, parseProviderId } from '@/common/types/ids';
 import { serializeCreativeStudioAgentHistory } from '../adapters';

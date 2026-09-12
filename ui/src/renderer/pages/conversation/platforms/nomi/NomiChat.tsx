@@ -71,7 +71,7 @@ const NomiChat: React.FC<{
   // pages on scroll-up. The nomi surface backs both work conversations and the
   // companion's single session (which also absorbs every IM-channel turn and can
   // grow without bound), so a one-shot 10k fetch would crush the API/DOM.
-  const historyPaging = useMessageLstCache(conversation_id, { windowed: true });
+  const historyPaging = useMessageLstCache(conversation_id);
   const turnActivity = useNomiMessage(conversation_id, { readOnly });
   const updateLocalImage = LocalImageView.useUpdateLocalImage();
   useEffect(() => {

@@ -74,6 +74,7 @@ import type { NomiModelSelection } from './useNomiModelSelection';
 import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
 import { evaluateNomiVisionSend } from './nomiVisionSendGuard';
+import { steerOrQueue } from './steerOrQueue';
 
 const useNomiSendBoxDraft = getSendBoxDraftHook('nomi', {
   _type: 'nomi',
@@ -653,16 +654,7 @@ const NomiSendBox: React.FC<{
     if (!canSendFiles(filesToSend)) return;
     clearFiles();
     emitter.emit('nomi.selected.file.clear');
-    try {
-      await executeSteer({ input: message, files: filesToSend });
-    } catch {
-      // Steering has no durable channel of its own: a failed delivery is simply
-      // gone. Divert into the same persisted command queue the normal send path
-      // uses when busy, so an offline click keeps both the text and the
-      // attachments instead of losing them to an error toast. This is the
-      // fallback the catch in executeSteer has always claimed to perform, and
-      // conversation.steer.fallbackQueued is the message written for it.
-      enqueue({ input: message, files: filesToSend });
+    if (!(await steerOrQueue({ input: message, files: filesToSend }, executeSteer, enqueue))) {
       Message.info(t('conversation.steer.fallbackQueued'));
     }
   };

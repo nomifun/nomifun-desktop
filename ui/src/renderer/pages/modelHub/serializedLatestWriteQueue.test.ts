@@ -24,6 +24,25 @@ const flushMicrotasks = async () => {
 };
 
 describe('SerializedLatestWriteQueue', () => {
+  test.each(['onLatestError', 'onLatestSettled'] as const)(
+    'continues writing after %s rejects',
+    async (callback) => {
+      const queue = new SerializedLatestWriteQueue();
+      const callbackFailure = new Error('refresh failed');
+      const first = queue.enqueue(
+        async () => { throw new Error('write failed'); },
+        { [callback]: async () => { throw callbackFailure; } }
+      );
+      let observed: unknown;
+      await first.done.catch((error: unknown) => { observed = error; });
+      expect(observed).toBe(callbackFailure);
+      let secondRan = false;
+      await queue.enqueue(async () => { secondRan = true; }).done;
+      expect(secondRan).toBe(true);
+      expect(queue.hasPending).toBe(false);
+    }
+  );
+
   test('sends rapid preference writes to the server in user-operation order', async () => {
     const queue = new SerializedLatestWriteQueue();
     const first = deferred();
