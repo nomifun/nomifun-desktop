@@ -23,6 +23,18 @@ pub trait SkillResolver: Send + Sync {
     /// the list of relative paths (e.g. `.claude/skills`) to populate.
     /// Returns the number of symlinks successfully created.
     async fn link_workspace_skills(&self, workspace: &Path, rel_dirs: &[&str], skills: &[ResolvedAgentSkill]) -> usize;
+
+    /// Reconcile backend-managed native Skill directories to an exact
+    /// selection. Test resolvers keep the legacy link-only default; the
+    /// production resolver performs safe stale-entry removal as well.
+    async fn sync_workspace_skills(
+        &self,
+        workspace: &Path,
+        rel_dirs: &[&str],
+        skills: &[ResolvedAgentSkill],
+    ) -> Result<usize, String> {
+        Ok(self.link_workspace_skills(workspace, rel_dirs, skills).await)
+    }
 }
 
 /// Production adapter backed by `nomifun_skill_library::skill_service`.
@@ -88,6 +100,17 @@ impl SkillResolver for ExtensionSkillResolver {
                 0
             }
         }
+    }
+
+    async fn sync_workspace_skills(
+        &self,
+        workspace: &Path,
+        rel_dirs: &[&str],
+        skills: &[ResolvedAgentSkill],
+    ) -> Result<usize, String> {
+        nomifun_skill_library::sync_workspace_skills(workspace, rel_dirs, skills)
+            .await
+            .map_err(|error| error.to_string())
     }
 }
 

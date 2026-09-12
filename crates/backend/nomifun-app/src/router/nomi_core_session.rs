@@ -43,7 +43,8 @@ use nomifun_agent_control_plane::{
     control_plane_router_without_legacy_skills,
 };
 use nomifun_api_types::{
-    AgentBindingValueDto, AgentResourceSelectionDto, ApiResponse, ConversationResponse,
+    AgentBindingValueDto, AgentResourceSelectionDto, AgentSessionCapabilitySelectionDto,
+    ApiResponse, ConversationResponse,
     ConversationRuntimeStateKind, CreateAgentSessionRequestDto, CreateConversationRequest,
     CreateAgentSessionResponseDto, CreateAgentSessionTurnRequestDto,
     CreateAgentSessionTurnResponseDto, ErrorResponse, ForkAgentSessionRequestDto,
@@ -56,6 +57,8 @@ use nomifun_api_types::{
     McpServerId,
     SendMessageRequest, UpdateConversationRequest,
     SwitchAgentSessionPresetRequestDto, SwitchAgentSessionPresetResponseDto,
+    UpdateAgentSessionCapabilitySelectionRequestDto,
+    UpdateAgentSessionCapabilitySelectionResponseDto,
 };
 use nomifun_common::{AppError, MessagePosition, MessageType};
 use nomifun_conversation::runtime_state::RuntimeBuildLease;
@@ -171,6 +174,23 @@ impl NomiCoreSessionOwner {
     ) -> Result<ConversationResponse, AppError> {
         self.service
             .replace_agent_preset_snapshot(owner_id, session_id, snapshot, runtime_extra)
+            .await
+    }
+
+    pub(crate) async fn replace_capability_selection(
+        &self,
+        owner_id: &str,
+        session_id: &str,
+        selection: &AgentSessionCapabilitySelectionDto,
+    ) -> Result<(ConversationResponse, bool), AppError> {
+        self.service
+            .replace_agent_session_capability_selection(
+                owner_id,
+                session_id,
+                &selection.enabled_skills,
+                &selection.excluded_auto_skills,
+                &selection.mcp_server_ids,
+            )
             .await
     }
 
@@ -664,6 +684,190 @@ async fn exact_session_mcp_selection(
     Ok(ExactSessionMcpSelection {
         ids: vec![server.mcp_server_id],
         names: vec![server.name],
+    })
+}
+
+fn normalize_session_capability_selection(
+    selection: &AgentSessionCapabilitySelectionDto,
+) -> Result<AgentSessionCapabilitySelectionDto, NomiCoreApiError> {
+    fn normalize_skill_ids(
+        field: &str,
+        values: &[String],
+    ) -> Result<Vec<String>, NomiCoreApiError> {
+        if values.len() > 128 {
+            return Err(NomiCoreApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "SESSION_SKILL_SELECTION_TOO_LARGE",
+                format!("{field} may contain at most 128 Skill IDs"),
+            ));
+        }
+        let mut normalized = values.to_vec();
+        normalized.sort();
+        normalized.dedup();
+        for skill_id in &normalized {
+            if skill_id.is_empty()
+                || skill_id.len() > 128
+                || skill_id.trim() != skill_id
+                || !skill_id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+            {
+                return Err(NomiCoreApiError::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "SESSION_SKILL_ID_INVALID",
+                    format!("{field} contains an invalid Skill ID"),
+                ));
+            }
+        }
+        Ok(normalized)
+    }
+
+    if selection.mcp_server_ids.len() > 64 {
+        return Err(NomiCoreApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "SESSION_MCP_SELECTION_TOO_LARGE",
+            "mcp_server_ids may contain at most 64 entries",
+        ));
+    }
+    let enabled_skills = normalize_skill_ids("enabled_skills", &selection.enabled_skills)?;
+    let excluded_auto_skills =
+        normalize_skill_ids("excluded_auto_skills", &selection.excluded_auto_skills)?;
+    if enabled_skills
+        .iter()
+        .any(|skill| excluded_auto_skills.binary_search(skill).is_ok())
+    {
+        return Err(NomiCoreApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "SESSION_SKILL_SELECTION_CONFLICT",
+            "a Skill cannot be both enabled and excluded",
+        ));
+    }
+    let mut seen_mcp_ids = HashSet::with_capacity(selection.mcp_server_ids.len());
+    let mut mcp_server_ids = Vec::with_capacity(selection.mcp_server_ids.len());
+    for raw_id in &selection.mcp_server_ids {
+        let id = McpServerId::parse(raw_id.clone()).map_err(|error| {
+            NomiCoreApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "SESSION_MCP_SERVER_ID_INVALID",
+                format!("invalid MCP server ID: {error}"),
+            )
+        })?;
+        if !seen_mcp_ids.insert(id.clone()) {
+            return Err(NomiCoreApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "SESSION_MCP_SERVER_DUPLICATE",
+                "mcp_server_ids contains a duplicate",
+            ));
+        }
+        mcp_server_ids.push(id.into_string());
+    }
+    Ok(AgentSessionCapabilitySelectionDto {
+        enabled_skills,
+        excluded_auto_skills,
+        mcp_server_ids,
+    })
+}
+
+#[cfg(test)]
+mod capability_selection_tests {
+    use super::normalize_session_capability_selection;
+    use nomifun_api_types::AgentSessionCapabilitySelectionDto;
+
+    #[test]
+    fn selection_normalization_is_deterministic_and_preserves_mcp_order() {
+        let normalized = normalize_session_capability_selection(
+            &AgentSessionCapabilitySelectionDto {
+                enabled_skills: vec!["pdf".into(), "cron".into(), "pdf".into()],
+                excluded_auto_skills: vec!["skill-creator".into()],
+                mcp_server_ids: vec![
+                    "0190f5fe-7c00-7a00-8000-000000000002".into(),
+                    "0190f5fe-7c00-7a00-8000-000000000001".into(),
+                ],
+            },
+        )
+        .unwrap();
+        assert_eq!(normalized.enabled_skills, ["cron", "pdf"]);
+        assert_eq!(
+            normalized.mcp_server_ids,
+            [
+                "0190f5fe-7c00-7a00-8000-000000000002",
+                "0190f5fe-7c00-7a00-8000-000000000001",
+            ]
+        );
+    }
+
+    #[test]
+    fn selection_normalization_rejects_conflicts_and_ambiguous_ids() {
+        for selection in [
+            AgentSessionCapabilitySelectionDto {
+                enabled_skills: vec!["cron".into()],
+                excluded_auto_skills: vec!["cron".into()],
+                mcp_server_ids: vec![],
+            },
+            AgentSessionCapabilitySelectionDto {
+                enabled_skills: vec!["../skill".into()],
+                excluded_auto_skills: vec![],
+                mcp_server_ids: vec![],
+            },
+            AgentSessionCapabilitySelectionDto {
+                enabled_skills: vec![],
+                excluded_auto_skills: vec![],
+                mcp_server_ids: vec![
+                    "0190f5fe-7c00-7a00-8000-000000000001".into(),
+                    "0190f5fe-7c00-7a00-8000-000000000001".into(),
+                ],
+            },
+        ] {
+            assert!(normalize_session_capability_selection(&selection).is_err());
+        }
+    }
+}
+
+async fn explicit_session_mcp_selection(
+    repository: &Arc<dyn nomifun_db::IMcpServerRepository>,
+    ids: &[String],
+) -> Result<ExactSessionMcpSelection, NomiCoreApiError> {
+    let mut resolved_ids = Vec::with_capacity(ids.len());
+    let mut names = Vec::with_capacity(ids.len());
+    for id in ids {
+        let row = repository
+            .find_by_id(id)
+            .await
+            .map_err(|error| AppError::Internal(error.to_string()))?
+            .ok_or_else(|| {
+                NomiCoreApiError::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "MCP_SERVER_NOT_FOUND",
+                    "a selected MCP server no longer exists",
+                )
+            })?;
+        if row.builtin {
+            return Err(NomiCoreApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "MCP_SERVER_NOT_SELECTABLE",
+                "built-in MCP servers are not conversation-selectable servers",
+            ));
+        }
+        if !row.enabled {
+            return Err(NomiCoreApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "MCP_SERVER_DISABLED",
+                "a selected MCP server is disabled",
+            ));
+        }
+        let server = nomifun_mcp::McpServer::from_row(row).map_err(|error| {
+            NomiCoreApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "MCP_SERVER_CONFIG_INVALID",
+                error.to_string(),
+            )
+        })?;
+        resolved_ids.push(server.mcp_server_id);
+        names.push(server.name);
+    }
+    Ok(ExactSessionMcpSelection {
+        ids: resolved_ids,
+        names,
     })
 }
 
@@ -2841,6 +3045,10 @@ fn nomi_core_session_routes(state: NomiCoreAgentApiState) -> Router {
             put(switch_nomi_core_agent_session_preset),
         )
         .route(
+            "/api/agent-sessions/{agent_session_id}/capability-selection",
+            put(update_nomi_core_agent_session_capability_selection),
+        )
+        .route(
             "/api/agent-sessions/{agent_session_id}/turns",
             post(start_nomi_core_agent_session_turn),
         )
@@ -4685,6 +4893,11 @@ async fn create_nomi_core_agent_session(
     headers: HeaderMap,
     Json(request): Json<CreateAgentSessionRequestDto>,
 ) -> Result<Json<ApiResponse<CreateAgentSessionResponseDto>>, NomiCoreApiError> {
+    let capability_selection = request
+        .capability_selection
+        .as_ref()
+        .map(normalize_session_capability_selection)
+        .transpose()?;
     let binding = state
         .control_plane
         .resolve_agent_session_binding_with_model(&owner.0, &request.preset_id, request.model.as_ref())
@@ -4711,10 +4924,32 @@ async fn create_nomi_core_agent_session(
     let projection =
         resolve_saved_binding_projection(&state, &owner, &binding, request.title.as_deref())
             .await?;
-    let mcp_selection =
-        exact_session_mcp_selection(&state.mcp_server_repository, &owner, &projection.binding)
-            .await?;
+    let mcp_selection = match capability_selection.as_ref() {
+        Some(selection) => {
+            explicit_session_mcp_selection(
+                &state.mcp_server_repository,
+                &selection.mcp_server_ids,
+            )
+            .await?
+        }
+        None => {
+            exact_session_mcp_selection(&state.mcp_server_repository, &owner, &projection.binding)
+                .await?
+        }
+    };
     let mut create_request = projection.projection.request;
+    if let Some(selection) = capability_selection.as_ref()
+        && let Some(object) = create_request.extra.as_object_mut()
+    {
+        object.insert(
+            "session_enabled_skills".to_owned(),
+            serde_json::to_value(&selection.enabled_skills)?,
+        );
+        object.insert(
+            "session_excluded_auto_skills".to_owned(),
+            serde_json::to_value(&selection.excluded_auto_skills)?,
+        );
+    }
     install_creation_mcp_selection(&mut create_request.extra, &mcp_selection)?;
     if let Some(object) = create_request.extra.as_object_mut() {
         object.insert("agent_name".to_owned(), Value::String(agent_name));
@@ -4745,6 +4980,49 @@ async fn create_nomi_core_agent_session(
         state: projected_session_status(&response),
         cursor,
     })))
+}
+
+async fn update_nomi_core_agent_session_capability_selection(
+    State(state): State<NomiCoreAgentApiState>,
+    Extension(owner): Extension<AuthenticatedOwner>,
+    Path(agent_session_id): Path<String>,
+    Json(request): Json<UpdateAgentSessionCapabilitySelectionRequestDto>,
+) -> Result<Json<ApiResponse<UpdateAgentSessionCapabilitySelectionResponseDto>>, NomiCoreApiError> {
+    let session_id = parse_agent_session_id(&agent_session_id)?;
+    let response = load_owned_nomi_core_session(&state, &owner, &session_id).await?;
+    // Current AgentSessions carry typed metadata, while conversations created
+    // before that boundary do not. Keep those local Nomi conversations usable
+    // in the shared composer; metadata, when present, must still validate and
+    // must never describe a Remote Session.
+    if response.extra.get(NOMI_CORE_SESSION_METADATA_KEY).is_some() {
+        let metadata = session_metadata(&response, &owner)?;
+        if metadata.remote.is_some() {
+            return Err(NomiCoreApiError::new(
+                StatusCode::CONFLICT,
+                "NOMI_CORE_REMOTE_CAPABILITY_SELECTION_UNSUPPORTED",
+                "Remote AgentSessions cannot change capabilities through the local conversation UI",
+            ));
+        }
+    }
+    let selection = normalize_session_capability_selection(&request.capability_selection)?;
+    // Resolve every MCP before terminating an idle runtime. This keeps a stale
+    // or disabled catalog choice from perturbing the current Session.
+    explicit_session_mcp_selection(
+        &state.mcp_server_repository,
+        &selection.mcp_server_ids,
+    )
+    .await?;
+    let (_, changed) = state
+        .session_owner
+        .replace_capability_selection(owner.as_ref(), session_id.as_ref(), &selection)
+        .await?;
+    Ok(Json(ApiResponse::ok(
+        UpdateAgentSessionCapabilitySelectionResponseDto {
+            agent_session_id: session_id.as_ref().to_owned(),
+            capability_selection: selection,
+            changed,
+        },
+    )))
 }
 
 async fn get_nomi_core_agent_session(

@@ -1,0 +1,236 @@
+.composerLayout {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.composerMain {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.rail {
+  width: 42px;
+  flex: 0 0 42px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.railButton {
+  position: relative;
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--color-border-2);
+  border-radius: 11px;
+  color: var(--color-text-2);
+  background: var(--color-bg-2);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.05);
+  cursor: pointer;
+  transition: color 140ms ease, border-color 140ms ease, background-color 140ms ease;
+}
+
+.railButton:hover,
+.railButton:focus-visible,
+.railButton.active {
+  color: rgb(var(--primary-6));
+  border-color: rgba(var(--primary-6), 0.45);
+  background: color-mix(in srgb, rgb(var(--primary-6)) 8%, var(--color-bg-2));
+  outline: none;
+}
+
+.badge {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 17px;
+  height: 17px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+  border: 2px solid var(--color-bg-1);
+  border-radius: 999px;
+  color: #fff;
+  background: rgb(var(--primary-6));
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 13px;
+  box-sizing: border-box;
+}
+
+.panel {
+  width: min(340px, calc(100vw - 32px));
+  overflow: hidden;
+  border: 1px solid var(--color-border-2);
+  border-radius: 16px;
+  color: var(--color-text-1);
+  background: var(--color-bg-2);
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.14);
+}
+
+.header {
+  min-height: 62px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px 9px 16px;
+  box-sizing: border-box;
+}
+
+.header h3,
+.header p {
+  margin: 0;
+}
+
+.header h3 {
+  font-size: 16px;
+  line-height: 22px;
+}
+
+.header p {
+  margin-top: 2px;
+  color: var(--color-text-3);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.list {
+  max-height: 248px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.row {
+  min-height: 62px;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: stretch;
+  column-gap: 10px;
+  padding: 7px 14px 7px 16px;
+  box-sizing: border-box;
+  cursor: pointer;
+}
+
+.row:hover {
+  background: var(--color-fill-1);
+}
+
+.rowDisabled {
+  cursor: not-allowed;
+}
+
+.checkboxCell {
+  display: flex;
+  align-items: center;
+  align-self: stretch;
+}
+
+.copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.copy strong,
+.copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.copy strong {
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 21px;
+}
+
+.copy small {
+  color: var(--color-text-3);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  align-self: center;
+  gap: 3px;
+  color: var(--color-text-3);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.status.available {
+  color: rgb(var(--success-6));
+}
+
+.status.error {
+  color: rgb(var(--danger-6));
+}
+
+.status.disabled {
+  color: var(--color-text-4);
+}
+
+.feedback {
+  min-height: 92px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: var(--color-text-3);
+  font-size: 13px;
+}
+
+.footer {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 12px 6px 16px;
+  border-top: 1px solid var(--color-border-2);
+  color: var(--color-text-3);
+  font-size: 12px;
+  box-sizing: border-box;
+}
+
+.footer :global(.arco-btn) {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+@media (max-width: 640px) {
+  .composerLayout {
+    gap: 4px;
+  }
+
+  .rail {
+    width: 36px;
+    flex-basis: 36px;
+    gap: 6px;
+  }
+
+  .railButton {
+    width: 32px;
+    height: 32px;
+    border-radius: 10px;
+  }
+}

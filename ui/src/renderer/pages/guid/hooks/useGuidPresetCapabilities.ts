@@ -15,6 +15,7 @@ import { useEffect, useState } from 'react';
 export type GuidPresetCapabilityState = {
   capabilityIds: ReadonlySet<string>;
   requiredResourceKinds: ReadonlySet<string>;
+  skillNames: ReadonlySet<string>;
   isLoading: boolean;
   error: Error | undefined;
 };
@@ -22,6 +23,7 @@ export type GuidPresetCapabilityState = {
 const emptyState = (): GuidPresetCapabilityState => ({
   capabilityIds: new Set<string>(),
   requiredResourceKinds: new Set<string>(),
+  skillNames: new Set<string>(),
   isLoading: false,
   error: undefined,
 });
@@ -42,6 +44,7 @@ export const requiredResourceKindsForDocument = (
     catalog
   );
 
+/** Load the stable capability, resource, and Skill defaults used by Guid. */
 export const useGuidPresetCapabilities = (
   presetId: AgentPresetId | undefined
 ): GuidPresetCapabilityState => {
@@ -57,6 +60,7 @@ export const useGuidPresetCapabilities = (
     setState({
       capabilityIds: new Set<string>(),
       requiredResourceKinds: new Set<string>(),
+      skillNames: new Set<string>(),
       isLoading: true,
       error: undefined,
     });
@@ -78,6 +82,7 @@ export const useGuidPresetCapabilities = (
         setState({
           capabilityIds,
           requiredResourceKinds: requiredResourceKindsForDocument(document, catalog),
+          skillNames: new Set(document.skill_bindings.map((skill) => skill.id)),
           isLoading: false,
           error: undefined,
         });
@@ -90,6 +95,7 @@ export const useGuidPresetCapabilities = (
         setState({
           capabilityIds: new Set<string>(),
           requiredResourceKinds: new Set<string>(),
+          skillNames: new Set<string>(),
           isLoading: false,
           error: normalizedError,
         });

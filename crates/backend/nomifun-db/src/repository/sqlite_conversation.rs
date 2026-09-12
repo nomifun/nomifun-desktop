@@ -6370,6 +6370,78 @@ impl IConversationRepository for SqliteConversationRepository {
         tx.commit().await?;
         Ok(())
     }
+
+    async fn replace_capability_selection_snapshot(
+        &self,
+        conversation_id: &str,
+        extra: &str,
+        mcp_server_ids: &[String],
+        updated_at: TimestampMs,
+    ) -> Result<(), DbError> {
+        let mut tx = self.pool.begin().await?;
+        lock_required_parent(
+            &mut tx,
+            "conversations",
+            "conversation_id",
+            "updated_at",
+            conversation_id,
+            "Conversation",
+        )
+        .await?;
+        lock_conversation_extra_references(&mut tx, extra).await?;
+
+        let mut unique_ids = HashSet::with_capacity(mcp_server_ids.len());
+        for mcp_server_id in mcp_server_ids {
+            nomifun_common::validate_uuidv7(mcp_server_id).map_err(|error| {
+                DbError::Conflict(format!(
+                    "MCP server '{mcp_server_id}' is not a canonical UUIDv7: {error}"
+                ))
+            })?;
+            if !unique_ids.insert(mcp_server_id.as_str()) {
+                return Err(DbError::Conflict(format!(
+                    "MCP server '{mcp_server_id}' appears more than once"
+                )));
+            }
+            let locked = sqlx::query(
+                "UPDATE mcp_servers SET updated_at = updated_at \
+                 WHERE mcp_server_id = ? AND deleted_at IS NULL",
+            )
+            .bind(mcp_server_id)
+            .execute(&mut *tx)
+            .await?;
+            if locked.rows_affected() == 0 {
+                return Err(DbError::Conflict(format!(
+                    "MCP server '{mcp_server_id}' does not exist or is deleted"
+                )));
+            }
+        }
+
+        sqlx::query(
+            "UPDATE conversations SET extra = ?, updated_at = ? WHERE conversation_id = ?",
+        )
+        .bind(extra)
+        .bind(updated_at)
+        .bind(conversation_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM conversation_mcp_servers WHERE conversation_id = ?")
+            .bind(conversation_id)
+            .execute(&mut *tx)
+            .await?;
+        for (sort_order, mcp_server_id) in mcp_server_ids.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO conversation_mcp_servers (conversation_id, mcp_server_id, sort_order) \
+                 VALUES (?, ?, ?)",
+            )
+            .bind(conversation_id)
+            .bind(mcp_server_id)
+            .bind(sort_order as i64)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
 }
 
 // ── Dynamic bind helpers ────────────────────────────────────────────
@@ -8197,6 +8269,55 @@ mod tests {
         // Empty slice clears the selection.
         repo.set_mcp_server_ids(&conv.conversation_id, &[]).await.unwrap();
         assert!(repo.list_mcp_server_ids(&conv.conversation_id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn capability_selection_replaces_extra_and_mcp_junction_atomically() {
+        let (repo, _db) = setup().await;
+        let mut conv = sample_conversation(TEST_INSTALLATION_OWNER);
+        conv.extra = serde_json::json!({"skills": ["old"]}).to_string();
+        conv.conversation_id = repo.create(&conv).await.unwrap();
+        let first = insert_mcp_server(&repo.pool, "capability_first").await;
+        let second = insert_mcp_server(&repo.pool, "capability_second").await;
+        repo.set_mcp_server_ids(&conv.conversation_id, std::slice::from_ref(&first))
+            .await
+            .unwrap();
+
+        let rejected = repo
+            .replace_capability_selection_snapshot(
+                &conv.conversation_id,
+                &serde_json::json!({"skills": ["should-not-commit"]}).to_string(),
+                &["not-a-uuid".to_owned()],
+                nomifun_common::now_ms(),
+            )
+            .await;
+        assert!(matches!(rejected, Err(DbError::Conflict(_))));
+        assert_eq!(
+            repo.get(&conv.conversation_id).await.unwrap().unwrap().extra,
+            conv.extra
+        );
+        assert_eq!(
+            repo.list_mcp_server_ids(&conv.conversation_id).await.unwrap(),
+            vec![first]
+        );
+
+        let next_extra = serde_json::json!({"skills": ["next"]}).to_string();
+        repo.replace_capability_selection_snapshot(
+            &conv.conversation_id,
+            &next_extra,
+            std::slice::from_ref(&second),
+            nomifun_common::now_ms(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            repo.get(&conv.conversation_id).await.unwrap().unwrap().extra,
+            next_extra
+        );
+        assert_eq!(
+            repo.list_mcp_server_ids(&conv.conversation_id).await.unwrap(),
+            vec![second]
+        );
     }
 
     #[tokio::test]
