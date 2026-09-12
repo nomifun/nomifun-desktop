@@ -805,31 +805,43 @@ async fn run_json_stream_mode_with_reader(
     session_id: Option<String>,
     read_commands: impl FnOnce() -> tokio::sync::mpsc::Receiver<ProtocolCommand>,
 ) -> anyhow::Result<()> {
-    let writer = Arc::new(ProtocolWriter::new());
-    let protocol_sink = Arc::new(ProtocolSink::new(writer.clone()));
     run_json_stream_mode_with_output(
         config,
         cwd,
         resume,
         session_id,
         read_commands,
-        protocol_sink,
-        writer,
+        Arc::new(ProtocolWriter::new()),
     )
     .await
 }
 
-// Keep the shared sink unchanged. The emitter seam covers only CLI-owned
-// writes (and the engine's explicit protocol events), not OutputSink callbacks.
+// Share one failure channel across CLI, sink callbacks and engine events.
+// Capacity one keeps the first pending error without unbounded buffering.
+struct CliProtocolEmitter {
+    inner: Arc<dyn ProtocolEmitter>,
+    failures: tokio::sync::mpsc::Sender<std::io::Error>,
+}
+
+impl ProtocolEmitter for CliProtocolEmitter {
+    fn emit(&self, event: &ProtocolEvent) -> std::io::Result<()> {
+        self.inner.emit(event).inspect_err(|error| {
+            let _ = self.failures.try_send(std::io::Error::new(error.kind(), error.to_string()));
+        })
+    }
+}
+
 async fn run_json_stream_mode_with_output(
     config: Config,
     cwd: &str,
     resume: Option<String>,
     session_id: Option<String>,
     read_commands: impl FnOnce() -> tokio::sync::mpsc::Receiver<ProtocolCommand>,
-    protocol_sink: Arc<ProtocolSink>,
     writer: Arc<dyn ProtocolEmitter>,
 ) -> anyhow::Result<()> {
+    let (failures, mut output_errors) = tokio::sync::mpsc::channel(1);
+    let writer: Arc<dyn ProtocolEmitter> = Arc::new(CliProtocolEmitter { inner: writer, failures });
+    let protocol_sink = Arc::new(ProtocolSink::new(writer.clone()));
     let output: Arc<dyn OutputSink> = protocol_sink.clone();
 
     let provider_name = config.provider_label.clone();
@@ -869,6 +881,9 @@ async fn run_json_stream_mode_with_output(
 
     let sid = engine.current_session_id();
     protocol_sink.emit_ready(engine.compat(), initial_has_mcp, sid);
+    if let Ok(error) = output_errors.try_recv() {
+        return shutdown_runtime(&mut engine, result.mcp_managers.iter(), Err(error.into())).await;
+    }
 
     engine.set_protocol_writer(writer.clone());
 
@@ -879,7 +894,11 @@ async fn run_json_stream_mode_with_output(
     let mut message_started = false;
 
     let command_result: anyhow::Result<()> = async {
-        'commands: while let Some(cmd) = cmd_rx.recv().await {
+        'commands: while let Some(cmd) = tokio::select! {
+            biased;
+            Some(error) = output_errors.recv() => return Err(error.into()),
+            cmd = cmd_rx.recv() => cmd,
+        } {
             match cmd {
                 ProtocolCommand::AddMcpServer {
                     name,
@@ -996,7 +1015,13 @@ async fn run_json_stream_mode_with_output(
 
                         loop {
                             tokio::select! {
+                                biased;
+                                Some(error) = output_errors.recv() => return Err(error.into()),
                                 result = &mut turn_execution => {
+                                    // A callback may fail in the same poll that completes the turn.
+                                    if let Ok(error) = output_errors.try_recv() {
+                                        return Err(error.into());
+                                    }
                                     match result {
                                         Ok(result) => {
                                             let retire_runtime = emit_json_turn_result(
