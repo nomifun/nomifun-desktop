@@ -346,11 +346,15 @@ impl Wave4TurnMiddlewareHostPort for CustomerServiceAgentCapabilityOwner {
                         "customer-service dialogue requires one selected customer resource",
                     )
                 })?;
-            let cs_dialogue_id = request
-                .turn_input
-                .0
-                .get("cs_dialogue_id")
-                .and_then(Value::as_str);
+            let cs_dialogue_id = match request.turn_input.0.get("cs_dialogue_id") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(cs_dialogue_id)) => Some(cs_dialogue_id.as_str()),
+                Some(_) => {
+                    return Err(Wave4HostPortError::invalid_request(
+                        "cs_dialogue_id must be a string or null when provided",
+                    ));
+                }
+            };
             let context = self
                 .dialogue_context_for_turn(
                     &request.principal.principal_id,
@@ -814,8 +818,8 @@ mod tests {
             .and_then(|capability| capability.contributions.context_schema_refs.first())
             .cloned()
             .unwrap();
-        let middleware = owner
-            .apply(Wave4TurnMiddlewareHostRequest {
+        let apply_middleware = |turn_input| {
+            owner.apply(Wave4TurnMiddlewareHostRequest {
                 principal: PrincipalRef {
                     principal_kind: "user".into(),
                     principal_id: owner_id.clone(),
@@ -833,18 +837,38 @@ mod tests {
                     nomifun_agent_domain_wave4::CUSTOMER_SERVICE_DIALOGUE,
                 ),
                 state_scope_key: ScopeKey::from("session:customer-middleware"),
-                resource_bindings: vec![binding],
-                schema_ref,
-                turn_input: StrictJsonValue(json!({
-                    "text": "hello",
-                    "cs_dialogue_id": dialogue_id
-                })),
+                resource_bindings: vec![binding.clone()],
+                schema_ref: schema_ref.clone(),
+                turn_input: StrictJsonValue(turn_input),
             })
+        };
+        let middleware = apply_middleware(json!({
+            "text": "hello",
+            "cs_dialogue_id": dialogue_id
+        }))
             .await
             .unwrap();
         assert_eq!(middleware.0["kind"], "customer_service_dialogue");
         assert_eq!(middleware.0["cs_agent_id"], cs_agent_id);
         assert_eq!(middleware.0["cs_dialogue_id"], dialogue_id);
+
+        for turn_input in [
+            json!({ "text": "hello" }),
+            json!({ "text": "hello", "cs_dialogue_id": null }),
+        ] {
+            let context = apply_middleware(turn_input).await.unwrap();
+            assert_eq!(context.0["cs_agent_id"], cs_agent_id);
+            assert!(context.0.get("cs_dialogue_id").is_none());
+        }
+        for invalid_id in [json!(42), json!(false), json!([]), json!({})] {
+            let error = apply_middleware(json!({
+                "text": "hello",
+                "cs_dialogue_id": invalid_id
+            }))
+            .await
+            .unwrap_err();
+            assert_eq!(error.code, nomifun_agent_domain_wave4::WAVE4_INVALID_REQUEST);
+        }
 
         let error = owner
             .dialogue_context(&UserId::new().into_string(), &cs_agent_id)
