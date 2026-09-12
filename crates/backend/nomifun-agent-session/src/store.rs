@@ -738,15 +738,10 @@ impl AgentSessionStore {
         &self,
         session_id: &AgentSessionId,
     ) -> Result<SessionEventCursor, SessionStoreError> {
-        require_live_session(&self.pool, session_id.as_ref()).await?;
-        let last_seq: i64 =
-            sqlx::query_scalar("SELECT last_seq FROM session_heads WHERE session_id = ?")
-                .bind(session_id.as_ref())
-                .fetch_one(&self.pool)
-                .await?;
+        let head = self.head(session_id).await?;
         Ok(SessionEventCursor {
             agent_session_id: session_id.clone(),
-            seq: as_u64(last_seq, "last_seq")?,
+            seq: head.last_seq,
         })
     }
 
@@ -756,14 +751,24 @@ impl AgentSessionStore {
         after: Option<&SessionEventCursor>,
         limit: u32,
     ) -> Result<SessionEventPage, SessionStoreError> {
-        require_live_session(&self.pool, session_id.as_ref()).await?;
+        let mut tx = self.pool.begin().await?;
+        require_live_session_tx(&mut tx, session_id.as_ref()).await?;
+        let head = head_by_id_tx(&mut tx, session_id.as_ref()).await?;
         let after_seq = validate_cursor(session_id, after)?;
-        let current_last_seq: i64 =
-            sqlx::query_scalar("SELECT last_seq FROM session_heads WHERE session_id = ?")
-                .bind(session_id.as_ref())
-                .fetch_one(&self.pool)
-                .await?;
-        if after_seq > as_u64(current_last_seq, "last_seq")? {
+        let page =
+            Self::read_event_page_tx(&mut tx, session_id, after_seq, head.last_seq, limit).await?;
+        tx.commit().await?;
+        Ok(page)
+    }
+
+    async fn read_event_page_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        session_id: &AgentSessionId,
+        after_seq: u64,
+        last_seq: u64,
+        limit: u32,
+    ) -> Result<SessionEventPage, SessionStoreError> {
+        if after_seq > last_seq {
             return Err(SessionStoreError::InvalidEvent(
                 "cursor is ahead of the committed AgentSession sequence".to_owned(),
             ));
@@ -780,7 +785,7 @@ impl AgentSessionStore {
         .bind(session_id.as_ref())
         .bind(as_i64(after_seq, "cursor")?)
         .bind(i64::from(limit))
-        .fetch_all(&self.pool)
+        .fetch_all(&mut **tx)
         .await?;
         let events = rows
             .into_iter()
@@ -880,13 +885,16 @@ impl AgentSessionStore {
         after: Option<&SessionEventCursor>,
         limit: u32,
     ) -> Result<SessionObservation, SessionStoreError> {
-        let session = self.get_live_session(session_id).await?;
-        let head = self.head(session_id).await?;
-        let page = self.read_events(session_id, after, limit).await?;
+        // All response fields must describe one committed SQLite snapshot.
+        // Reacquiring the pool between reads lets concurrent appends mix epochs.
+        let mut tx = self.pool.begin().await?;
+        let session = require_live_session_tx(&mut tx, session_id.as_ref()).await?;
+        let head = head_by_id_tx(&mut tx, session_id.as_ref()).await?;
         let after_seq = validate_cursor(session_id, after)?;
-        let messages = self
-            .message_projections_after(session_id, after_seq)
-            .await?;
+        let page = Self::read_event_page_tx(&mut tx, session_id, after_seq, head.last_seq, limit).await?;
+        let messages =
+            Self::message_projections_after_tx(&mut tx, session_id, after_seq, head.last_seq).await?;
+        tx.commit().await?;
         Ok(SessionObservation {
             session,
             head,
@@ -1075,18 +1083,11 @@ impl AgentSessionStore {
         &self,
         session_id: &AgentSessionId,
     ) -> Result<SessionHeadProjection, SessionStoreError> {
-        require_live_session(&self.pool, session_id.as_ref()).await?;
-        let row = sqlx::query_as::<_, StoredHeadRow>(
-            "SELECT session_id, status, active_turn_id, active_set_generation, \
-                    runtime_checkpoint_locator, runtime_checkpoint_digest, \
-                    runtime_bound_event_id, runtime_protocol_version, snapshot_digest, \
-                    checkpoint_through_seq, last_seq, unread_count \
-             FROM session_heads WHERE session_id = ?",
-        )
-        .bind(session_id.as_ref())
-        .fetch_one(&self.pool)
-        .await?;
-        head_from_row(row)
+        let mut tx = self.pool.begin().await?;
+        require_live_session_tx(&mut tx, session_id.as_ref()).await?;
+        let head = head_by_id_tx(&mut tx, session_id.as_ref()).await?;
+        tx.commit().await?;
+        Ok(head)
     }
 
     pub async fn message_projections_after(
@@ -1094,13 +1095,21 @@ impl AgentSessionStore {
         session_id: &AgentSessionId,
         after_seq: u64,
     ) -> Result<Vec<MessageProjection>, SessionStoreError> {
-        require_live_session(&self.pool, session_id.as_ref()).await?;
-        let current_last_seq: i64 =
-            sqlx::query_scalar("SELECT last_seq FROM session_heads WHERE session_id = ?")
-                .bind(session_id.as_ref())
-                .fetch_one(&self.pool)
-                .await?;
-        if after_seq > as_u64(current_last_seq, "last_seq")? {
+        let mut tx = self.pool.begin().await?;
+        require_live_session_tx(&mut tx, session_id.as_ref()).await?;
+        let head = head_by_id_tx(&mut tx, session_id.as_ref()).await?;
+        let messages = Self::message_projections_after_tx(&mut tx, session_id, after_seq, head.last_seq).await?;
+        tx.commit().await?;
+        Ok(messages)
+    }
+
+    async fn message_projections_after_tx(
+        tx: &mut Transaction<'_, Sqlite>,
+        session_id: &AgentSessionId,
+        after_seq: u64,
+        last_seq: u64,
+    ) -> Result<Vec<MessageProjection>, SessionStoreError> {
+        if after_seq > last_seq {
             return Err(SessionStoreError::InvalidEvent(
                 "projection cursor is ahead of the committed AgentSession sequence".to_owned(),
             ));
@@ -1114,7 +1123,7 @@ impl AgentSessionStore {
         )
         .bind(session_id.as_ref())
         .bind(as_i64(after_seq, "after_seq")?)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut **tx)
         .await?;
         rows.into_iter().map(projection_from_row).collect()
     }

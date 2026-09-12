@@ -11,8 +11,6 @@ pub enum JavaScriptHostError {
     RuntimeVerification(String),
     #[error("failed to start JavaScript Host: {0}")]
     Spawn(String),
-    #[error("JavaScript Host Hello timed out")]
-    HelloTimeout,
     #[error("JavaScript Host Hello was rejected: {0}")]
     HelloRejected(String),
     #[error("JavaScript Host generation {generation} failed: {reason}")]
@@ -25,6 +23,10 @@ pub enum JavaScriptHostError {
     GenerationMismatch { expected: u64, observed: u64 },
     #[error("JavaScript Host generation {generation} is not quiescent")]
     NotQuiescent { generation: u64 },
+    #[error("JavaScript Host request capacity is full; request was not sent")]
+    QueueFull,
+    #[error("JavaScript Host request expired before admission; request was not sent")]
+    AdmissionTimeout,
     #[error("Plugin Mount {0} is not resident in the active Host generation")]
     MountNotResident(String),
     #[error("Plugin contribution target does not match the resident Mount")]

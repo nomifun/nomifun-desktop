@@ -2,14 +2,48 @@ import { appendFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 
 let resourceReleaseCount = 0;
+let retiredSdk;
 
-export async function activate({ mount }) {
+export async function activate({ mount, sdk }) {
+  let serviceResult;
+  if (mount.config.value.activation === "service") {
+    serviceResult = await sdk.credential.resolve("activation");
+  }
+  if (mount.config.value.activation === "service_then_reject") {
+    retiredSdk = sdk;
+    void sdk.credential.resolve("activation").catch(() => {});
+    throw new Error("fixture activation rejected with an outstanding service");
+  }
+  if (mount.config.value.activation === "reject") {
+    throw new Error("fixture activation rejected");
+  }
+  if (mount.config.value.activation === "hang") {
+    await new Promise(() => {});
+  }
   const contributionId = `contribution.${mount.target.mount_id}`;
   return {
+    async deactivate() {
+      retiredSdk = sdk;
+      if (mount.config.value.deactivationService) {
+        await sdk.credential.resolve("deactivation");
+      }
+      if (mount.config.value.deactivationDetachedService) {
+        void sdk.credential.resolve("deactivation").catch(() => {});
+      }
+    },
     capabilities: {
       [contributionId]: {
         async invoke({ actionId, input, signal, contribution }) {
           switch (actionId) {
+            case "start_service":
+              serviceResult = sdk.credential.resolve(input.slot ?? "fixture")
+                .catch((error) => ({ error: error.message }));
+              return null;
+            case "await_service":
+              return await serviceResult;
+            case "stale_service":
+              return await retiredSdk.credential.resolve("retired")
+                .catch((error) => ({ error: error.message }));
             case "echo":
               return {
                 input,
@@ -67,10 +101,17 @@ export async function activate({ mount }) {
           };
         },
         async acquireResource({ bindingId, resourceKind, parameters }) {
+          if (parameters.waitForService) await sdk.credential.resolve("acquire");
           return {
-            handleId: `${mount.target.mount_id}:${bindingId}`,
-            release() {
+            handleId: parameters.handleId ?? `${mount.target.mount_id}:${bindingId}`,
+            async release() {
+              if (parameters.requireReceiver && this.handleId !== parameters.handleId) {
+                throw new Error("release callback lost its receiver");
+              }
               resourceReleaseCount += 1;
+              if (parameters.releaseLog) appendFileSync(parameters.releaseLog, bindingId + "\n");
+              if (parameters.waitForReleaseService) await sdk.credential.resolve("release");
+              if (parameters.failRelease) throw new Error("fixture release failed");
             },
             resourceKind,
             parameters,

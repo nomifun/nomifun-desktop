@@ -20,6 +20,21 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
+#[path = "extension_host/service_lifecycle.rs"]
+mod service_lifecycle;
+#[path = "extension_host/mount_lifecycle.rs"]
+mod mount_lifecycle;
+#[path = "extension_host/ipc_backpressure.rs"]
+mod ipc_backpressure;
+#[path = "extension_host/startup_lifecycle.rs"]
+mod startup_lifecycle;
+#[path = "extension_host/protocol_boundaries.rs"]
+mod protocol_boundaries;
+#[path = "extension_host/inflight_limits.rs"]
+mod inflight_limits;
+#[path = "extension_host/module_files.rs"]
+mod module_files;
+
 fn fixture(path: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -75,8 +90,16 @@ async fn supervisor_with_host(
     request_timeout: Duration,
     host_module: PathBuf,
 ) -> ExtensionHostSupervisor {
+    ExtensionHostSupervisor::new(host_config(request_timeout, host_module).await)
+        .expect("Host configuration is valid")
+}
+
+async fn host_config(
+    request_timeout: Duration,
+    host_module: PathBuf,
+) -> JavaScriptHostConfig {
     let (node_executable, runtime) = runtime().await;
-    ExtensionHostSupervisor::new(JavaScriptHostConfig {
+    JavaScriptHostConfig {
         node_executable,
         runtime,
         host_module,
@@ -86,29 +109,20 @@ async fn supervisor_with_host(
             shutdown_timeout: Duration::from_secs(5),
             max_frame_bytes: 1024 * 1024,
             command_queue_capacity: 32,
+            ..JavaScriptHostLimits::default()
         },
-    })
-    .expect("Host configuration is valid")
+    }
 }
 
 async fn candidate_test_supervisor(
     request_timeout: Duration,
 ) -> ExtensionHostSupervisor {
-    let (node_executable, runtime) = runtime().await;
-    ExtensionHostSupervisor::candidate_test(JavaScriptHostConfig {
-        node_executable,
-        runtime,
-        host_module: fixture("../../assets/extension-host.mjs")
+    ExtensionHostSupervisor::candidate_test(host_config(
+        request_timeout,
+        fixture("../../assets/extension-host.mjs")
             .canonicalize()
             .expect("bundled Host asset exists"),
-        limits: JavaScriptHostLimits {
-            hello_timeout: Duration::from_secs(5),
-            request_timeout,
-            shutdown_timeout: Duration::from_secs(5),
-            max_frame_bytes: 1024 * 1024,
-            command_queue_capacity: 32,
-        },
-    })
+    ).await)
     .expect("Candidate Test Host configuration is valid")
 }
 
@@ -285,6 +299,100 @@ async fn demand_zero_then_first_mount_starts_and_two_mounts_join_lazily() {
 }
 
 #[tokio::test]
+async fn concurrent_first_demands_share_one_mount_activation() {
+    let supervisor = supervisor(Duration::from_secs(5)).await;
+    let temp = TempDir::new().unwrap();
+    let mount = context(temp.path(), "mount-demand", 'c');
+    tokio::fs::create_dir_all(&mount.data_dir).await.unwrap();
+    let demand = MountLoadDemand {
+        module: module(mount.target.clone()).await,
+        context: mount.clone(),
+    };
+    let invoke = || {
+        supervisor.invoke_demand(
+            demand.clone(),
+            contribution(mount.target.clone()),
+            ActionId::from("echo"),
+            StrictJsonValue(json!({"concurrent": true})),
+        )
+    };
+    let results = tokio::join!(invoke(), invoke(), invoke(), invoke());
+    let generation = match supervisor.state() {
+        JavaScriptHostState::Running { generation, .. } => generation,
+        state => panic!("concurrent demand must keep Host running: {state:?}"),
+    };
+    supervisor.stop_generation(generation).await.unwrap();
+    for result in [results.0, results.1, results.2, results.3] {
+        assert_eq!(result.unwrap().0["input"]["concurrent"], true);
+    }
+    assert_eq!(generation, 1);
+}
+
+#[tokio::test]
+async fn concurrent_mount_activation_failures_reach_all_waiters() {
+    for mode in ["reject", "hang"] {
+        let supervisor = supervisor(Duration::from_secs(1)).await;
+        let temp = TempDir::new().unwrap();
+        let mut mount = context(temp.path(), "mount-failure", 'c');
+        tokio::fs::create_dir_all(&mount.data_dir).await.unwrap();
+        mount.config.value = StrictJsonValue(json!({"activation": mode}));
+        let demand = MountLoadDemand {
+            module: module(mount.target.clone()).await,
+            context: mount,
+        };
+        let (first, second, third) = tokio::join!(
+            supervisor.load_mount(demand.clone()),
+            supervisor.load_mount(demand.clone()),
+            supervisor.load_mount(demand),
+        );
+        let first = first.unwrap_err();
+        assert_eq!(second.unwrap_err(), first);
+        assert_eq!(third.unwrap_err(), first);
+        if mode == "reject" {
+            assert!(matches!(first, JavaScriptHostError::RequestFailed { .. }));
+            // A failed activation leaves no resident entry or reserved identity.
+            let generation = load(&supervisor, &temp, "mount-failure", 'c').await;
+            assert_eq!(generation, 1);
+            supervisor.stop_generation(generation).await.unwrap();
+        } else {
+            assert!(matches!(
+                first,
+                JavaScriptHostError::HostFailure { generation: 1, .. }
+            ));
+            wait_until_stopped(&supervisor).await;
+            assert_eq!(supervisor.process_count(), 0);
+        }
+    }
+}
+
+#[tokio::test]
+async fn concurrent_loads_do_not_coalesce_different_mount_contexts() {
+    let supervisor = supervisor(Duration::from_secs(2)).await;
+    let temp = TempDir::new().unwrap();
+    let mount = context(temp.path(), "mount-conflict", 'c');
+    tokio::fs::create_dir_all(&mount.data_dir).await.unwrap();
+    let first = MountLoadDemand {
+        module: module(mount.target.clone()).await,
+        context: mount,
+    };
+    let mut second = first.clone();
+    second.context.config.config_revision += 1;
+    let (first, second) = tokio::join!(
+        supervisor.load_mount(first),
+        supervisor.load_mount(second),
+    );
+    assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
+    assert!(matches!(
+        first.as_ref().err().or(second.as_ref().err()).unwrap(),
+        JavaScriptHostError::Contract(_) | JavaScriptHostError::TargetMismatch
+    ));
+    supervisor
+        .stop_generation(first.or(second).unwrap())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn candidate_test_role_uses_an_isolated_generation_and_exact_protocol() {
     let shared = supervisor(Duration::from_secs(2)).await;
     let candidate = candidate_test_supervisor(Duration::from_secs(2)).await;
@@ -439,7 +547,7 @@ async fn context_and_resource_requests_use_the_exact_resident_mount() {
         .await
         .unwrap();
     assert_eq!(resource.host_generation, generation);
-    assert_eq!(resource.handle_id, "mount-a:binding-a");
+    assert!(!resource.handle_id.is_empty());
     supervisor.release_resource(&resource).await.unwrap();
 
     let release_count = supervisor

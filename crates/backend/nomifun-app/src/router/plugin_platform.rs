@@ -1898,7 +1898,7 @@ impl PluginHostCoordinator for RuntimeBoundPluginHostCoordinator {
         let runtime = lease.fingerprint().clone();
         match self
             .host
-            .try_auto_apply_fence_for_mount(&PluginMountId::from(mount_id.to_owned()))
+            .try_auto_apply_fence_for_mount(&PluginMountId::from(mount_id.to_owned()), &lease)
             .await
             .map_err(PluginServiceError::from)?
         {

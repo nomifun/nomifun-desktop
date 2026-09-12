@@ -81,12 +81,7 @@ impl RuntimeBoundExtensionHost {
             if bound.runtime == resolved {
                 return Ok((lease, Arc::clone(&bound.supervisor)));
             }
-            if bound.supervisor.process_count() != 0 {
-                return Err(JavaScriptHostError::RuntimeVerification(
-                    "committed Runtime changed before the previous shared Host was stopped"
-                        .to_owned(),
-                ));
-            }
+            bound.supervisor.confirm_stopped().await?;
         }
         let supervisor = Arc::new(ExtensionHostSupervisor::new(
             JavaScriptHostConfig::for_host_module(
@@ -118,39 +113,18 @@ impl RuntimeBoundExtensionHost {
     pub(crate) async fn stop_for_runtime_switch(
         &self,
     ) -> Result<(), JavaScriptHostError> {
-        let bound = self.state.lock().await.take();
-        let Some(bound) = bound else {
+        // Keep the binding visible until proof succeeds, including when this
+        // future is cancelled. Runtime switch coordination owns the write
+        // lease that excludes demands for the duration of this operation.
+        let mut state = self.state.lock().await;
+        let Some(bound) = state.as_ref() else {
             return Ok(());
         };
-        let stop_result = match bound.supervisor.state() {
-            JavaScriptHostState::Running { generation, .. } => {
-                bound.supervisor.stop_generation(generation).await.map(|_| ())
-            }
-            JavaScriptHostState::Stopped => Ok(()),
-            JavaScriptHostState::Failed { generation, reason } => {
-                // A Failed state is not a process-tree proof. The supervisor
-                // only reports a commit fence after its managed child cleanup
-                // completed successfully; retain the binding and require
-                // explicit recovery instead of inferring emptiness from the
-                // public state bit.
-                Err(JavaScriptHostError::HostFailure {
-                    generation,
-                    reason,
-                })
-            }
-        };
-        if let Err(error) = stop_result {
-            self.state.lock().await.replace(bound);
-            return Err(error);
+        if let JavaScriptHostState::Running { generation, .. } = bound.supervisor.state() {
+            bound.supervisor.stop_generation(generation).await?;
         }
-        if bound.supervisor.process_count() != 0 {
-            self.state.lock().await.replace(bound);
-            return Err(JavaScriptHostError::HostFailure {
-                generation: 0,
-                reason: "shared Host process tree is not empty after stop"
-                    .to_owned(),
-            });
-        }
+        bound.supervisor.confirm_stopped().await?;
+        *state = None;
         Ok(())
     }
 
@@ -168,6 +142,14 @@ impl RuntimeBoundExtensionHost {
             .map_err(|error| {
                 JavaScriptHostError::RuntimeVerification(error.to_string())
             })?;
+        self.commit_fence_with_lease(mount_id, &lease).await
+    }
+
+    async fn commit_fence_with_lease(
+        &self,
+        mount_id: &PluginMountId,
+        lease: &RuntimeUseLease,
+    ) -> Result<PluginHostCommitFence, JavaScriptHostError> {
         let host = {
             let state = self.state.lock().await;
             let Some(bound) = state.as_ref() else {
@@ -193,36 +175,13 @@ impl RuntimeBoundExtensionHost {
     pub(crate) async fn try_auto_apply_fence_for_mount(
         &self,
         mount_id: &PluginMountId,
+        lease: &RuntimeUseLease,
     ) -> Result<Option<PluginHostCommitFence>, JavaScriptHostError> {
-        if self.state.lock().await.is_none() {
-            return Ok(Some(PluginHostCommitFence::NotResident));
-        }
-        let lease = self
-            .runtime
-            .acquire_use(JavaScriptWorkKind::SharedExtensionHost)
-            .await
-            .map_err(|error| JavaScriptHostError::RuntimeVerification(error.to_string()))?;
-        let host = {
-            let state = self.state.lock().await;
-            let Some(bound) = state.as_ref() else {
-                return Ok(Some(PluginHostCommitFence::NotResident));
-            };
-            if bound.runtime != *lease.runtime() {
-                return Err(JavaScriptHostError::RuntimeVerification(
-                    "shared Host Runtime differs from the committed selection".to_owned(),
-                ));
-            }
-            Arc::clone(&bound.supervisor)
-        };
-        match host.commit_fence_for_mount(mount_id).await {
+        // Auto-apply already owns a read lease through commit. Taking another
+        // can deadlock behind a queued Runtime writer waiting for the first.
+        match self.commit_fence_with_lease(mount_id, lease).await {
             Ok(fence) => Ok(Some(fence)),
-            Err(JavaScriptHostError::NotQuiescent { generation }) => {
-                match host.stop_generation(generation).await {
-                    Ok(fence) => Ok(Some(fence)),
-                    Err(JavaScriptHostError::NotQuiescent { .. }) => Ok(None),
-                    Err(error) => Err(error),
-                }
-            }
+            Err(JavaScriptHostError::NotQuiescent { .. }) => Ok(None),
             Err(error) => Err(error),
         }
     }
@@ -288,3 +247,7 @@ impl ExtensionHostDemandPort for RuntimeBoundExtensionHost {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "plugin_runtime_host_tests.rs"]
+mod tests;
