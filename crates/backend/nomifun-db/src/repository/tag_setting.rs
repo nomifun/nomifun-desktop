@@ -1,5 +1,5 @@
 use crate::error::DbError;
-use crate::models::TagSettingRow;
+use crate::models::{TagSettingPatch, TagSettingRow};
 
 /// Data access abstraction for the `tag_settings` table — per-tag config
 /// (bound webhook + description) layered over the implicit requirement tags.
@@ -8,9 +8,9 @@ pub trait ITagSettingRepository: Send + Sync {
     /// Return the settings row for `tag`, or `None` if none was ever written.
     async fn get(&self, tag: &str) -> Result<Option<TagSettingRow>, DbError>;
 
-    /// Insert-or-replace the settings for `tag` (keyed by tag name). Stamps
-    /// `updated_at` at the call site (passed in via the row).
-    async fn upsert(&self, row: &TagSettingRow) -> Result<(), DbError>;
+    /// Atomically insert/update supplied fields and return the persisted row.
+    /// A supplied webhook binding is checked in the same transaction.
+    async fn upsert(&self, tag: &str, patch: &TagSettingPatch) -> Result<TagSettingRow, DbError>;
 
     /// Return all tag settings rows.
     async fn list_all(&self) -> Result<Vec<TagSettingRow>, DbError>;

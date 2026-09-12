@@ -87,6 +87,49 @@ async fn create_list_update_delete_and_secret_is_hidden() {
 }
 
 #[tokio::test]
+async fn concurrent_partial_updates_preserve_independent_fields() {
+    let s = svc(Arc::new(MockSender::default())).await;
+    let wh = s.create(create_req()).await.unwrap();
+    let (rename, disable) = tokio::join!(
+        s.update(&wh.webhook_id, UpdateWebhookRequest {
+            name: Some("Renamed".into()), ..Default::default()
+        }),
+        s.update(&wh.webhook_id, UpdateWebhookRequest {
+            enabled: Some(false), secret: Some(None), ..Default::default()
+        }),
+    );
+    rename.unwrap();
+    disable.unwrap();
+    let saved = s.get(&wh.webhook_id).await.unwrap();
+    assert_eq!(saved.name, "Renamed");
+    assert!(!saved.enabled);
+    assert!(!saved.has_secret);
+}
+
+#[tokio::test]
+async fn concurrent_tag_patches_preserve_fields_on_insert_and_update() {
+    let s = svc(Arc::new(MockSender::default())).await;
+    let wh = s.create(create_req()).await.unwrap();
+    for description in ["first", "second"] {
+        let (describe, bind) = tokio::join!(
+            s.upsert_tag_setting("alpha", UpsertTagSettingRequest {
+                description: Some(description.into()), ..Default::default()
+            }),
+            s.upsert_tag_setting("alpha", UpsertTagSettingRequest {
+                webhook_id: Some(Some(wh.webhook_id.clone())),
+                notify_events: Some(vec![]), ..Default::default()
+            }),
+        );
+        describe.unwrap();
+        bind.unwrap();
+        let saved = s.get_tag_setting("alpha").await.unwrap();
+        assert_eq!(saved.description, description);
+        assert_eq!(saved.webhook_id.as_ref(), Some(&wh.webhook_id));
+        assert!(saved.notify_events.is_empty());
+    }
+}
+
+#[tokio::test]
 async fn create_validates_name_and_url() {
     let s = svc(Arc::new(MockSender::default())).await;
     let mut bad = create_req();

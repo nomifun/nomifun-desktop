@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use nomifun_api_types::WebhookPlatform;
-use nomifun_db::models::{RequirementRow, TagSettingRow, WebhookRow};
+use nomifun_db::models::{RequirementRow, TagSettingPatch, WebhookRow};
 use nomifun_db::{
     ITagSettingRepository, IWebhookRepository, SqliteTagSettingRepository, SqliteWebhookRepository,
     init_database_memory,
@@ -101,12 +101,9 @@ async fn add_webhook(ctx: &Ctx, enabled: bool) -> String {
 
 async fn bind_tag(ctx: &Ctx, tag: &str, webhook_id: Option<String>) {
     ctx.tags
-        .upsert(&TagSettingRow {
-            tag: tag.into(),
-            webhook_id,
-            description: String::new(),
-            notify_events: "done,failed,needs_review".into(),
-            updated_at: 0,
+        .upsert(tag, &TagSettingPatch {
+            webhook_id: Some(webhook_id),
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -156,9 +153,9 @@ async fn needs_review_is_not_reported_as_completed_and_respects_event_filter() {
     }
     assert_eq!(ctx.sender.titles.lock().unwrap()[0], "需求待审核 (needs_review): Build the thing");
 
-    let mut setting = ctx.tags.get("alpha").await.unwrap().unwrap();
-    setting.notify_events = "done,failed".into();
-    ctx.tags.upsert(&setting).await.unwrap();
+    ctx.tags.upsert("alpha", &TagSettingPatch {
+        notify_events: Some("done,failed".into()), ..Default::default()
+    }).await.unwrap();
     notifier(&ctx).notify_completion(&row).await;
     assert_eq!(ctx.sender.calls.lock().unwrap().len(), 1, "excluded events must not send");
 }

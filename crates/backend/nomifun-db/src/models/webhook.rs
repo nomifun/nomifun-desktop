@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 pub struct WebhookRow {
     pub webhook_id: String,
     pub name: String,
-    /// Platform discriminator; `lark` is the only supported value in v1.
+    /// Platform discriminator: lark, http, or slack.
     pub platform: String,
     pub url: String,
     /// Optional signing secret (Lark "加签"); never returned to clients.
@@ -18,6 +18,19 @@ pub struct WebhookRow {
     pub description: String,
     pub enabled: bool,
     pub created_at: TimestampMs,
+    pub updated_at: TimestampMs,
+}
+
+/// Atomically change only supplied columns. An omitted secret is kept;
+/// `Some(None)` clears it. Creation time and business identity are immutable.
+#[derive(Default)]
+pub struct WebhookPatch {
+    pub name: Option<String>,
+    pub platform: Option<String>,
+    pub url: Option<String>,
+    pub secret: Option<Option<String>>,
+    pub description: Option<String>,
+    pub enabled: Option<bool>,
     pub updated_at: TimestampMs,
 }
 
