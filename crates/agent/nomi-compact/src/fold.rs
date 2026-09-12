@@ -13,7 +13,7 @@ fn lines_are_similar(a: &str, b: &str) -> bool {
         return false;
     }
     let prefix = common_prefix_len(a, b);
-    let min_len = a.len().min(b.len());
+    let min_len = a.chars().count().min(b.chars().count());
     prefix as f64 / min_len as f64 >= MIN_PREFIX_RATIO
 }
 

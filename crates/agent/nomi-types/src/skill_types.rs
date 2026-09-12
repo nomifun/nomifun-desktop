@@ -79,47 +79,8 @@ mod tests {
         assert!(!cm.is_empty());
     }
 
-    #[test]
-    fn plan_mode_transition_enter_debug() {
-        let t = PlanModeTransition::Enter;
-        let dbg = format!("{:?}", t);
-        assert!(dbg.contains("Enter"));
-    }
-
-    #[test]
-    fn plan_mode_transition_exit_with_content() {
-        let t = PlanModeTransition::Exit {
-            plan_content: Some("# My Plan".to_string()),
-        };
-        let dbg = format!("{:?}", t);
-        assert!(dbg.contains("Exit"));
-        assert!(dbg.contains("My Plan"));
-    }
-
-    #[test]
-    fn plan_mode_transition_exit_without_content() {
-        let t = PlanModeTransition::Exit { plan_content: None };
-        let dbg = format!("{:?}", t);
-        assert!(dbg.contains("Exit"));
-        assert!(dbg.contains("None"));
-    }
-
-    #[test]
-    fn plan_mode_transition_equality() {
-        assert_eq!(PlanModeTransition::Enter, PlanModeTransition::Enter);
-        assert_ne!(
-            PlanModeTransition::Enter,
-            PlanModeTransition::Exit { plan_content: None }
-        );
-        assert_eq!(
-            PlanModeTransition::Exit {
-                plan_content: Some("x".into())
-            },
-            PlanModeTransition::Exit {
-                plan_content: Some("x".into())
-            }
-        );
-    }
+    // PlanModeTransition construction/Debug/equality are covered by the
+    // public integration tests in tests/plan_mode_transition_test.rs.
 
     #[test]
     fn context_modifier_existing_fields_unaffected() {
