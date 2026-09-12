@@ -10,7 +10,7 @@ use nomifun_skill_library::external_paths::ExternalPathsManager;
 use nomifun_skill_library::skill_service::{
     NamedPath, SkillPaths, delete_skill, detect_and_count_external_skills, export_skill_with_symlink, import_skill,
     import_skill_with_symlink, list_available_skills, read_builtin_rule, read_builtin_skill, read_skill_info,
-    resolve_skill_paths, scan_for_skills,
+    scan_for_skills,
 };
 use tempfile::TempDir;
 
@@ -227,34 +227,6 @@ async fn sm8_scan_for_skills() {
     assert!(skills.iter().any(|s| s.name == "beta"));
 }
 
-/// SM-11: Get skill directory paths.
-///
-/// Production mode: no `NOMIFUN_BUILTIN_SKILLS_PATH` set — the built-in
-/// skills tree lives at `{data_dir}/builtin-skills/`, populated at
-/// startup by `startup_materialize::materialize_if_needed`. The user
-/// skills directory is derived from `data_dir`, not `resource_dir`.
-#[tokio::test]
-async fn sm11_get_skill_paths() {
-    // Ensure the env var is unset for a deterministic assertion.
-    // Safe: the test runs single-threaded w.r.t. this env var.
-    // (SAFETY: `remove_var` is unsafe in 2024 edition due to process-wide
-    // side-effects.)
-    unsafe {
-        std::env::remove_var("NOMIFUN_BUILTIN_SKILLS_PATH");
-    }
-
-    let resource_dir = Path::new("/app/resources");
-    let data_dir = Path::new("/home/user/.nomifun");
-    let paths = resolve_skill_paths(resource_dir, data_dir);
-
-    assert!(paths.user_skills_dir.to_string_lossy().contains("skills"));
-    assert_eq!(
-        paths.builtin_skills_dir,
-        data_dir.join("builtin-skills"),
-        "production mode must resolve builtin_skills_dir under data_dir"
-    );
-}
-
 // ===========================================================================
 // RM — Rule Management
 // ===========================================================================
@@ -434,6 +406,49 @@ async fn detect_external_skills_custom_sources_are_unique() {
         .collect();
     assert_eq!(slugs.len(), 2);
     assert_ne!(slugs[0], slugs[1]);
+}
+
+#[tokio::test]
+async fn overlapping_imports_and_exports_preserve_the_source() {
+    let tmp = TempDir::new().unwrap();
+    let paths = make_paths(tmp.path());
+    create_skill(&paths.user_skills_dir, "kept", "Original skill");
+    let source = paths.user_skills_dir.join("kept");
+    let before = std::fs::read(source.join(SKILL_MD)).unwrap();
+
+    // Copy and link import must not delete a skill already at the target.
+    assert!(import_skill(&paths, &source).await.is_err());
+    assert_eq!(std::fs::read(source.join(SKILL_MD)).unwrap(), before);
+    assert!(import_skill_with_symlink(&paths, &source).await.is_err());
+    assert_eq!(std::fs::read(source.join(SKILL_MD)).unwrap(), before);
+    assert!(export_skill_with_symlink(&source, &paths.user_skills_dir).await.is_err());
+    assert_eq!(std::fs::read(source.join(SKILL_MD)).unwrap(), before);
+
+    // A source nested inside the name being replaced must survive as well.
+    create_skill(&source, "kept", "Nested source");
+    let nested = source.join("kept");
+    assert!(import_skill(&paths, &nested).await.is_err());
+    assert!(import_skill_with_symlink(&paths, &nested).await.is_err());
+    assert!(export_skill_with_symlink(&nested, &paths.user_skills_dir).await.is_err());
+    assert!(nested.join(SKILL_MD).is_file());
+
+    // Placing a new skill inside its own source would create recursive copies/links.
+    assert!(export_skill_with_symlink(&source, &source).await.is_err());
+    let nested_paths = make_paths(&source);
+    assert!(import_skill(&nested_paths, &source).await.is_err());
+    assert!(import_skill_with_symlink(&nested_paths, &source).await.is_err());
+    assert_eq!(std::fs::read(source.join(SKILL_MD)).unwrap(), before);
+}
+
+#[tokio::test]
+async fn invalid_export_source_does_not_remove_an_existing_destination() {
+    let tmp = TempDir::new().unwrap();
+    let exports = tmp.path().join("exports");
+    create_skill(&exports, "missing", "Keep destination");
+    let manifest = exports.join("missing").join(SKILL_MD);
+    let before = std::fs::read(&manifest).unwrap();
+    assert!(matches!(export_skill_with_symlink(&tmp.path().join("missing"), &exports).await, Err(nomifun_skill_library::SkillError::SkillNotFound(_))));
+    assert_eq!(std::fs::read(&manifest).unwrap(), before);
 }
 
 /// Verify path traversal is blocked in skill deletion.

@@ -1,4 +1,22 @@
-use nomifun_skill_library::{ResolvedAgentSkill, SkillError, sync_workspace_skills};
+use nomifun_skill_library::{ResolvedAgentSkill, SkillError, link_workspace_skills, sync_workspace_skills};
+
+#[tokio::test]
+async fn workspace_targets_are_all_validated_before_any_pruning_or_linking() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let skill_dir = workspace.join(".nomi/skills/kept");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(skill_dir.join("SKILL.md"), "keep skill").unwrap();
+    std::fs::write(workspace.join("project.txt"), "keep project").unwrap();
+
+    for invalid in ["", ".", "../outside", "/absolute"] {
+        let targets = [".nomi/skills", invalid];
+        assert!(matches!(sync_workspace_skills(&workspace, &targets, &[]).await, Err(SkillError::InvalidSkillPath(_))));
+        assert!(matches!(link_workspace_skills(&workspace, &targets, &[]).await, Err(SkillError::InvalidSkillPath(_))));
+        assert_eq!(std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap(), "keep skill");
+        assert_eq!(std::fs::read_to_string(workspace.join("project.txt")).unwrap(), "keep project");
+    }
+}
 
 #[tokio::test]
 async fn sync_workspace_skills_removes_deselected_entries_without_touching_sources() {

@@ -1,10 +1,6 @@
-use nomifun_skill_library::{resolve_skill_paths, skill_service};
+use nomifun_skill_library::{SkillPaths, skill_service};
 use tempfile::TempDir;
 
-/// `BUILTIN_SKILLS_ENV_VAR` is process-global; this test mutates it, so
-/// it must not run in parallel with other `skill_service` tests that
-/// touch the same env var. Vitest-style serialization inside a single
-/// test is sufficient here.
 #[tokio::test]
 async fn materialize_returns_only_listed_skill_source_paths() {
     let tmp = TempDir::new().unwrap();
@@ -24,11 +20,13 @@ async fn materialize_returns_only_listed_skill_source_paths() {
     )
     .unwrap();
 
-    // SAFETY: single-threaded test harness.
-    unsafe {
-        std::env::set_var(nomifun_skill_library::BUILTIN_SKILLS_ENV_VAR, &builtin_root);
-    }
-    let paths = resolve_skill_paths(tmp.path(), tmp.path());
+    let paths = SkillPaths {
+        data_dir: tmp.path().to_path_buf(),
+        user_skills_dir: tmp.path().join("skills"),
+        cron_skills_dir: tmp.path().join("cron/skills"),
+        builtin_skills_dir: builtin_root,
+        builtin_rules_dir: tmp.path().join("builtin-rules"),
+    };
 
     let resolved = skill_service::materialize_skills_for_agent(&paths, "conv-1", &["cron".to_owned()])
         .await
@@ -44,8 +42,4 @@ async fn materialize_returns_only_listed_skill_source_paths() {
     // disk. Nothing under data_dir should have been created.
     assert!(!tmp.path().join("agent-skills").exists());
     assert!(!tmp.path().join("conversations").exists());
-
-    unsafe {
-        std::env::remove_var(nomifun_skill_library::BUILTIN_SKILLS_ENV_VAR);
-    }
 }
