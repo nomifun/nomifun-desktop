@@ -5071,63 +5071,10 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn recovered_terminal_claim_never_reaches_the_pty_writer() {
-        let recorder = Arc::new(RecordingDriver::default());
-        let recovered_active = true;
-
-        // Recovered claims are parked before the admitted writer is reached.
-        assert!(recovered_active);
-        assert!(
-            recorder.writes.lock().unwrap().is_empty(),
-            "an already-injected/unsettled claim must produce zero PTY writes"
-        );
-    }
-
     // -- Terminal turn-end classification tests ------------------------------
     //
     // Any uncertainty after submission is absorbing; only an exact structured
     // completion may be clean.
-
-    #[test]
-    fn terminal_turn_end_is_eq_and_debug() {
-        let done = TerminalTurnEnd::AuthoritativeVerdict {
-            status: RequirementStatus::Done,
-            note: Some("done".to_owned()),
-        };
-        assert_eq!(done, done.clone());
-        assert_eq!(
-            TerminalTurnEnd::AmbiguousAfterSubmission,
-            TerminalTurnEnd::AmbiguousAfterSubmission
-        );
-        assert_ne!(
-            done,
-            TerminalTurnEnd::AmbiguousAfterSubmission
-        );
-        // Debug impl exists (used in error messages).
-        assert!(!format!("{:?}", TerminalTurnEnd::AmbiguousAfterSubmission).is_empty());
-    }
-
-    #[test]
-    fn terminal_expects_verdict_true_when_mcp_enabled() {
-        // The AutoWork runner passes `expects_verdict = true` when the requirement
-        // MCP is enabled (the tools are injected into the terminal). A clean turn
-        // where the agent did NOT call them -> needs_review (not silently done).
-        assert!(crate::prompt::terminal_expects_verdict(true));
-        assert!(!crate::prompt::terminal_expects_verdict(false));
-    }
-
-    #[test]
-    fn terminal_post_submission_ambiguity_is_not_a_retryable_error() {
-        let outcome = TerminalTurnEnd::AmbiguousAfterSubmission;
-        assert_ne!(
-            outcome,
-            TerminalTurnEnd::AuthoritativeVerdict {
-                status: RequirementStatus::Done,
-                note: None,
-            }
-        );
-    }
 
     #[tokio::test]
     async fn raw_lifecycle_turn_end_without_token_is_not_a_completion_verdict() {

@@ -20,18 +20,6 @@ pub fn has_native_requirement_tools(agent_type: AgentType) -> bool {
     matches!(agent_type, AgentType::Nomi)
 }
 
-/// Whether a terminal AutoWork turn should expect a structured verdict from the
-/// agent (via the injected `requirement_complete` / `requirement_update_status`
-/// MCP tools). True when the requirement MCP is enabled (Task 2 always injects
-/// it into agent terminals), so a clean turn where the agent did NOT call those
-/// tools → `needs_review` (not silently done).
-///
-/// Used by the AutoWork runner's terminal branch to set `expects_verdict = true`
-/// when finalizing a terminal turn.
-pub fn terminal_expects_verdict(requirement_mcp_enabled: bool) -> bool {
-    requirement_mcp_enabled
-}
-
 /// Render the attachments section appended to every requirement prompt
 /// variant. Empty input renders nothing. The model is explicitly told to view
 /// the images with its file-reading tool BEFORE starting — this is the
@@ -320,10 +308,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn terminal_expects_verdict_mirrors_mcp_enabled_flag() {
-        use crate::prompt::terminal_expects_verdict;
-        assert!(terminal_expects_verdict(true));
-        assert!(!terminal_expects_verdict(false));
-    }
 }
