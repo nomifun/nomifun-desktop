@@ -2,17 +2,17 @@ use std::sync::Arc;
 
 use nomi_config::compat::ProviderCompat;
 use nomi_protocol::events::{Capabilities, ErrorInfo, ProtocolEvent, Usage};
-use nomi_protocol::writer::{ProtocolEmitter, ProtocolWriter};
+use nomi_protocol::writer::ProtocolEmitter;
 
 use super::OutputSink;
 
 /// JSON stream protocol output sink
 pub struct ProtocolSink {
-    writer: Arc<ProtocolWriter>,
+    writer: Arc<dyn ProtocolEmitter>,
 }
 
 impl ProtocolSink {
-    pub fn new(writer: Arc<ProtocolWriter>) -> Self {
+    pub fn new(writer: Arc<dyn ProtocolEmitter>) -> Self {
         Self { writer }
     }
 
@@ -35,11 +35,6 @@ impl ProtocolSink {
         let _ = self.writer.emit(&ProtocolEvent::ConfigChanged {
             capabilities: Self::build_capabilities(compat, has_mcp),
         });
-    }
-
-    /// Access the underlying writer for custom events
-    pub fn writer(&self) -> &Arc<ProtocolWriter> {
-        &self.writer
     }
 
     fn build_capabilities(compat: &ProviderCompat, has_mcp: bool) -> Capabilities {

@@ -70,20 +70,51 @@ async fn session_init_failure_runs_shutdown_before_starting_the_reader() {
     assert!(temp.path().join("shutdown-proof.txt").is_file());
 }
 
-struct BrokenCliEmitter;
+struct FailingEmitter {
+    fails: fn(&ProtocolEvent) -> bool,
+    stream_ends: std::sync::atomic::AtomicUsize,
+}
 
-impl ProtocolEmitter for BrokenCliEmitter {
+impl FailingEmitter {
+    fn new(fails: fn(&ProtocolEvent) -> bool) -> Self {
+        Self { fails, stream_ends: std::sync::atomic::AtomicUsize::new(0) }
+    }
+}
+
+impl ProtocolEmitter for FailingEmitter {
     fn emit(&self, event: &ProtocolEvent) -> std::io::Result<()> {
-        if matches!(event, ProtocolEvent::Pong | ProtocolEvent::StreamEnd { .. }) {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "CLI output disconnected",
-            ))
+        if matches!(event, ProtocolEvent::StreamEnd { .. }) {
+            self.stream_ends.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        if (self.fails)(event) {
+            Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "output disconnected"))
         } else {
             Ok(())
         }
     }
 }
+
+#[tokio::test]
+async fn sink_ready_failure_stops_before_starting_input_and_runs_shutdown() {
+    let temp = tempfile::tempdir().unwrap();
+
+    let writer = Arc::new(FailingEmitter::new(|event| matches!(event, ProtocolEvent::Ready { .. })));
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        run_json_stream_mode_with_output(
+            session_config("http://127.0.0.1:1".into()),
+            temp.path().to_str().unwrap(),
+            None,
+            None,
+            || panic!("reader must not start after Ready write fails"),
+            writer,
+        ),
+    ).await.expect("ready failure cleanup timed out").expect_err("broken Ready must fail");
+    assert_eq!(error.downcast_ref::<std::io::Error>().unwrap().kind(), std::io::ErrorKind::BrokenPipe);
+    assert!(temp.path().join("shutdown-proof.txt").is_file());
+}
+
+
 
 #[tokio::test]
 async fn cli_owned_output_errors_run_shutdown_and_preserve_io_error() {
@@ -106,8 +137,7 @@ async fn cli_owned_output_errors_run_shutdown_and_preserve_io_error() {
                 None,
                 None,
                 || rx,
-                Arc::new(ProtocolSink::new(Arc::new(ProtocolWriter::new()))),
-                Arc::new(BrokenCliEmitter),
+                Arc::new(FailingEmitter::new(|event| matches!(event, ProtocolEvent::Pong | ProtocolEvent::StreamEnd { .. }))),
             ),
         )
         .await
@@ -125,44 +155,68 @@ async fn cli_owned_output_errors_run_shutdown_and_preserve_io_error() {
 }
 
 #[tokio::test]
-async fn cli_output_failure_cancels_an_active_request_and_runs_shutdown() {
-    let temp = tempfile::tempdir().unwrap();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let endpoint = format!("http://{}", listener.local_addr().unwrap());
-    let (tx, rx) = tokio::sync::mpsc::channel(2);
-    tx.send(ProtocolCommand::Message {
-        msg_id: "test".into(),
-        content: "hello".into(),
-    })
-    .await
-    .unwrap();
-    let session = run_json_stream_mode_with_output(
-        session_config(endpoint),
-        temp.path().to_str().unwrap(),
-        None,
-        None,
-        || rx,
-        Arc::new(ProtocolSink::new(Arc::new(ProtocolWriter::new()))),
-        Arc::new(BrokenCliEmitter),
-    );
-    let ping_during_request = async {
-        let (connection, _) = listener.accept().await.unwrap();
-        tx.send(ProtocolCommand::Ping).await.unwrap();
-        connection // No server response or input EOF to end the provider turn.
-    };
-    let (result, _connection) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        tokio::join!(session, ping_during_request)
-    })
-    .await
-    .expect("output failure did not cancel the active request");
+async fn sink_callback_failure_stops_idle_and_same_poll_completed_turns() {
+    for (command, fails) in [
+        (ProtocolCommand::SetConfig {
+            model: Some("other-model".into()), thinking: None, thinking_budget: None,
+            effort: None, compaction: None,
+        }, (|event: &ProtocolEvent| matches!(event, ProtocolEvent::ConfigChanged { .. })) as fn(&ProtocolEvent) -> bool),
+        (ProtocolCommand::Message { msg_id: "test".into(), content: "/help".into() },
+            |event: &ProtocolEvent| matches!(event, ProtocolEvent::Info { .. })),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        tx.send(command).await.unwrap();
+        let writer = Arc::new(FailingEmitter::new(fails));
+        let error = tokio::time::timeout(std::time::Duration::from_secs(10),
+            run_json_stream_mode_with_output(
+                session_config("http://127.0.0.1:1".into()), temp.path().to_str().unwrap(),
+                None, None, || rx, writer.clone(),
+            ),
+        ).await.expect("sink failure must wake command processing").expect_err("sink failure must propagate");
+        assert_eq!(error.downcast_ref::<std::io::Error>().unwrap().kind(), std::io::ErrorKind::BrokenPipe);
+        assert!(temp.path().join("shutdown-proof.txt").is_file());
+        assert!(tx.send(ProtocolCommand::Ping).await.is_err());
+        assert_eq!(writer.stream_ends.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+}
 
-    let error = result.expect_err("output failure must reach the caller");
-    assert_eq!(
-        error.downcast_ref::<std::io::Error>().unwrap().kind(),
-        std::io::ErrorKind::BrokenPipe,
-    );
-    assert!(temp.path().join("shutdown-proof.txt").is_file());
-    assert!(tx.send(ProtocolCommand::Ping).await.is_err());
+#[tokio::test]
+async fn cli_output_failure_cancels_an_active_request_and_runs_shutdown() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    for fails in [
+        (|event: &ProtocolEvent| matches!(event, ProtocolEvent::Pong)) as fn(&ProtocolEvent) -> bool,
+        |event: &ProtocolEvent| matches!(event, ProtocolEvent::TextDelta { .. }),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = tokio::sync::mpsc::channel(2);
+        tx.send(ProtocolCommand::Message { msg_id: "test".into(), content: "hello".into() }).await.unwrap();
+        let writer = Arc::new(FailingEmitter::new(fails));
+        let session = run_json_stream_mode_with_output(
+            session_config(endpoint), temp.path().to_str().unwrap(), None, None, || rx, writer.clone(),
+        );
+        let partial_response = async {
+            let (mut connection, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            assert!(connection.read(&mut request).await.unwrap() > 0);
+            let frame = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n";
+            connection.write_all(format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{frame}\r\n", frame.len()
+            ).as_bytes()).await.unwrap();
+            tx.send(ProtocolCommand::Ping).await.unwrap();
+            connection // Keep provider and command input open: only output failure may finish.
+        };
+        let (result, _connection) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(session, partial_response)
+        }).await.expect("output failure did not cancel the active request");
+        let error = result.expect_err("output failure must reach the caller");
+        assert_eq!(error.downcast_ref::<std::io::Error>().unwrap().kind(), std::io::ErrorKind::BrokenPipe);
+        assert!(temp.path().join("shutdown-proof.txt").is_file());
+        assert!(tx.send(ProtocolCommand::Ping).await.is_err());
+        assert_eq!(writer.stream_ends.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
 }
 
 #[tokio::test]
