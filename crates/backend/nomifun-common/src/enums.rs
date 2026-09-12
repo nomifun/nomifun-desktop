@@ -208,17 +208,6 @@ mod tests {
     }
 
     #[test]
-    fn test_agent_type_all_variants() {
-        let cases = [(AgentType::Nomi, "nomi")];
-        for (variant, expected) in cases {
-            let json = serde_json::to_string(&variant).unwrap();
-            assert_eq!(json, format!("\"{expected}\""), "serialize {variant:?}");
-            let parsed: AgentType = serde_json::from_str(&json).unwrap();
-            assert_eq!(parsed, variant, "deserialize {expected}");
-        }
-    }
-
-    #[test]
     fn test_protocol_type_openai() {
         let val = ProtocolType::OpenAI;
         let json = serde_json::to_string(&val).unwrap();

@@ -68,8 +68,11 @@ fn next_opener(text: &str) -> Option<(usize, char, char)> {
 ///   saves `[附录2]`, `[见图3]` and `[TODO 中文]`: any CJK, punctuation or symbol
 ///   means a human wrote it as content.
 fn is_stage_direction(inner: &str) -> bool {
+    can_be_stage_direction(inner) && inner.bytes().any(|byte| byte.is_ascii_alphabetic())
+}
+
+fn can_be_stage_direction(inner: &str) -> bool {
     inner.len() <= MAX_INNER_BYTES
-        && inner.bytes().any(|byte| byte.is_ascii_alphabetic())
         && inner
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'_' | b'-' | b':'))
@@ -82,29 +85,10 @@ fn is_stage_direction(inner: &str) -> bool {
 /// input ever loses text it did not consist of. Never swallows the rest of a
 /// line.
 pub fn strip_stage_directions(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    loop {
-        let Some((at, open, closer)) = next_opener(rest) else {
-            out.push_str(rest);
-            return out;
-        };
-        out.push_str(&rest[..at]);
-        // `at` and the opener's width are both char boundaries, so is this.
-        let after_open = &rest[at + open.len_utf8()..];
-        match after_open.find(closer) {
-            Some(end) if is_stage_direction(&after_open[..end]) => {
-                rest = &after_open[end + closer.len_utf8()..];
-            }
-            // Not a stage direction: the delimiter is literal text. Emit it and
-            // rescan from just behind it — the bytes it precedes may still hold
-            // a real one (`a[b[winking]`).
-            _ => {
-                out.push(open);
-                rest = after_open;
-            }
-        }
-    }
+    let mut filter = StageDirectionFilter::default();
+    let mut out = filter.push(text);
+    out.push_str(&filter.flush());
+    out
 }
 
 /// Streaming form of [`strip_stage_directions`] for token-level deltas.
@@ -148,7 +132,10 @@ impl StageDirectionFilter {
             out.push_str(&rest[..at]);
             let candidate = &rest[at..];
             let after_open = &rest[at + open.len_utf8()..];
-            match after_open.find(closer) {
+            // A valid candidate has at most 24 ASCII bytes before its closer.
+            let end = after_open.char_indices().take(MAX_INNER_BYTES + 1)
+                .find_map(|(at, ch)| (ch == closer).then_some(at));
+            match end {
                 // A complete stage direction: drop it and keep scanning.
                 Some(end) if is_stage_direction(&after_open[..end]) => {
                     rest = &after_open[end + closer.len_utf8()..];
@@ -159,11 +146,9 @@ impl StageDirectionFilter {
                     out.push(open);
                     rest = after_open;
                 }
-                // Unclosed so far, and already longer than any inner text that
-                // could qualify — so no closer arriving later can save it and
-                // the delimiter is text. Emit it and rescan, rather than
-                // buffering without bound.
-                None if after_open.len() > MAX_INNER_BYTES => {
+                // An invalid prefix cannot become a stage direction. Emit the
+                // opener and rescan, including any nested delimiter.
+                None if !can_be_stage_direction(after_open) => {
                     out.push(open);
                     rest = after_open;
                 }
@@ -223,6 +208,8 @@ mod tests {
         assert_eq!(strip_stage_directions("[laughs]真好玩"), "真好玩");
         assert_eq!(strip_stage_directions("[pause]然后呢"), "然后呢");
         assert_eq!(strip_stage_directions("[smiling softly]嗯"), "嗯");
+        assert_eq!(strip_stage_directions("[【winking】"), "[");
+        assert_eq!(strip_stage_directions("【[winking]"), "【");
     }
 
     /// The other half of the contract: real bracketed content is not ours to
@@ -393,6 +380,9 @@ mod tests {
             "[[winking]]",
             "a[b[c[winking]d",
             "[winking】混搭",
+            "[【winking】",
+            "【[winking]",
+            "[【winking】结束",
             &long,
             &format!("[{long}]"),
             &format!("[{long}[winking]hi"),
