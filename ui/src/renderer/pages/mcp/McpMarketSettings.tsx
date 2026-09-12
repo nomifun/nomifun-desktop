@@ -11,7 +11,7 @@ import { ipcBridge } from '@/common';
 import type { ISkillMarketItem } from '@/common/adapter/ipcBridge';
 import type { IMcpServer, IMcpServerTransport } from '@/common/config/storage';
 import { Alert, Message, Modal, Tag } from '@arco-design/web-react';
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import MarketSettingsPanel from '@/renderer/pages/settings/MarketSettingsPanel';
@@ -143,15 +143,36 @@ const McpMarketSettings: React.FC<McpMarketSettingsProps> = ({
 
   const [pendingServers, setPendingServers] = useState<ImportableMcpServer[] | null>(null);
   const [importing, setImporting] = useState(false);
+  const mounted = useRef(false);
+  const revision = useRef(0);
+  const importInFlight = useRef(false);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      revision.current += 1;
+    };
+  }, []);
+
+  const handleCancel = () => {
+    // Dismissing review invalidates UI completion, not an already sent import.
+    revision.current += 1;
+    setPendingServers(null);
+  };
 
   const handleAdd = useCallback(
     async (item: ISkillMarketItem) => {
+      if (!mounted.current || importInFlight.current) return;
+      const request = ++revision.current;
+      setPendingServers(null);
       try {
         const resolved = await ipcBridge.fs.resolveSkillMarketMcpConfig.invoke({
           source: item.source,
           id: item.id,
           url: item.url,
         });
+        if (!mounted.current || request !== revision.current) return;
         // Force every market server to import disabled — the user must review
         // the transport (especially stdio commands) before enabling anything.
         const servers = toImportableMcpServersFromConfig(resolved.config_json, false).map((server) => ({
@@ -167,6 +188,7 @@ const McpMarketSettings: React.FC<McpMarketSettingsProps> = ({
         // Import proceeds only after the user confirms the reviewed transports.
         setPendingServers(servers);
       } catch (error) {
+        if (!mounted.current || request !== revision.current) return;
         console.error('Failed to resolve MCP market config:', error);
         Message.error(t('settings.mcpMarket.addFailed', { defaultValue: 'Failed to add MCP server.' }));
       }
@@ -175,12 +197,15 @@ const McpMarketSettings: React.FC<McpMarketSettingsProps> = ({
   );
 
   const handleConfirmImport = useCallback(async () => {
-    if (!pendingServers || importing) return;
+    if (!mounted.current || !pendingServers || importInFlight.current) return;
+    importInFlight.current = true;
+    const request = ++revision.current;
     setImporting(true);
     try {
       // Servers stay disabled; deliberately NO connection test — testing an
       // stdio server would spawn its command on this machine.
       const imported = await handleBatchImportMcpServers(pendingServers);
+      if (!mounted.current || request !== revision.current) return;
       if (imported && imported.length > 0) {
         setPendingServers(null);
         Message.warning(
@@ -193,12 +218,14 @@ const McpMarketSettings: React.FC<McpMarketSettingsProps> = ({
         navigate('/mcp');
       }
     } catch (error) {
+      if (!mounted.current || request !== revision.current) return;
       console.error('Failed to import MCP market servers:', error);
       Message.error(t('settings.mcpMarket.addFailed', { defaultValue: 'Failed to add MCP server.' }));
     } finally {
-      setImporting(false);
+      importInFlight.current = false;
+      if (mounted.current) setImporting(false);
     }
-  }, [handleBatchImportMcpServers, importing, navigate, pendingServers, t]);
+  }, [handleBatchImportMcpServers, navigate, pendingServers, t]);
 
   const hasStdioServer = (pendingServers ?? []).some((server) => server.transport.type === 'stdio');
   const isAdded = useCallback(
@@ -221,14 +248,14 @@ const McpMarketSettings: React.FC<McpMarketSettingsProps> = ({
         emptyText={t('settings.mcpMarket.empty', { defaultValue: 'Refresh to load MCP market entries.' })}
         onAdd={handleAdd}
         isAdded={isAdded}
-        addedStateLoading={addedStateLoading}
+        addedStateLoading={addedStateLoading || importing}
         testIdPrefix='mcp-market'
       />
 
       <Modal
         title={t('settings.mcpMarket.confirmTitle', { defaultValue: 'Review MCP server before import' })}
         visible={pendingServers !== null}
-        onCancel={() => setPendingServers(null)}
+        onCancel={handleCancel}
         onOk={() => void handleConfirmImport()}
         okText={t('settings.mcpMarket.confirmOk', { defaultValue: 'Import disabled' })}
         cancelText={t('common.cancel', { defaultValue: 'Cancel' })}

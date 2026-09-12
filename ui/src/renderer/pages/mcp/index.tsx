@@ -5,7 +5,7 @@
  */
 
 import React from 'react';
-import { Tabs } from '@arco-design/web-react';
+import { Alert, Spin, Tabs } from '@arco-design/web-react';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
 import HubPageShell from '@/renderer/components/layout/HubPageShell';
@@ -57,15 +57,23 @@ const McpPage: React.FC = () => {
         className='flex flex-col flex-1 min-h-0 [&>.arco-tabs-content]:pt-0'
       >
         <Tabs.TabPane key='servers' title={t('settings.mcpPage.installedMcpTab', { defaultValue: 'Installed MCP' })}>
-          <ToolsModalContentWithState
-            mcpMessage={mcpMessage}
-            mcpMessageContext={mcpMessageContext}
-            mcpServers={mcpServers}
-            saveMcpServers={saveMcpServers}
-            setMcpServers={setMcpServers}
-          />
+          {isMcpServersLoading ? (
+            <Spin tip={t('common.loading')} />
+          ) : mcpServersLoadFailed ? (
+            <Alert type='error' content={t('settings.mcpPage.loadFailed', {
+              defaultValue: 'Failed to load MCP servers. Reopen this page to retry.',
+            })} />
+          ) : (
+            <ToolsModalContentWithState
+              mcpMessage={mcpMessage}
+              mcpMessageContext={mcpMessageContext}
+              mcpServers={mcpServers}
+              saveMcpServers={saveMcpServers}
+              setMcpServers={setMcpServers}
+            />
+          )}
         </Tabs.TabPane>
-        <Tabs.TabPane key='market' title={t('settings.mcpPage.mcpMarketTab', { defaultValue: 'MCP Market' })}>
+        <Tabs.TabPane key='market' destroyOnHide title={t('settings.mcpPage.mcpMarketTab', { defaultValue: 'MCP Market' })}>
           <McpMarketSettings
             saveMcpServers={saveMcpServers}
             mcpServers={mcpServers}
