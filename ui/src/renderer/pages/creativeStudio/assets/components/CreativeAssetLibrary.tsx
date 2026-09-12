@@ -30,7 +30,7 @@ import React, { useId, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import type { CreativeAsset, CreativeAssetKind } from '../types';
-import { creativeAssetDisplayTitle, creativeAssetTags, formatCreativeAssetBytes } from '../presentation';
+import { creativeAssetDisplayTitle, formatCreativeAssetBytes } from '../presentation';
 import CreativeAssetMedia, { creativeAssetKindIcon } from './CreativeAssetMedia';
 import CreativeAssetActionsMenu from './CreativeAssetActionsMenu';
 import CreativeAssetUploadQueue from './CreativeAssetUploadQueue';
@@ -159,13 +159,13 @@ const AssetItem: React.FC<AssetItemProps> = ({
   const updatedAt = formatUpdatedAt(asset.updatedAt, locale);
   const title = creativeAssetDisplayTitle(asset);
   const collection = asset.collection?.trim();
-  const tags = creativeAssetTags(asset);
   return (
     <article
       className={classNames(styles.assetItem, view === 'list' && styles.assetRow)}
       data-asset-id={asset.id}
       data-asset-kind={asset.kind}
       data-selected={selected || undefined}
+      data-selectable={selectable || undefined}
     >
       {selectable ? (
         <label className={styles.assetSelect} title={labels.select}>
@@ -177,7 +177,12 @@ const AssetItem: React.FC<AssetItemProps> = ({
         </label>
       ) : null}
 
-      <div className={styles.assetCover}>
+      <div className={styles.assetCover} data-asset-cover>
+        {collection ? (
+          <span className={styles.collectionBadge} data-asset-collection title={collection}>
+            {collection}
+          </span>
+        ) : null}
         <button
           type='button'
           className={styles.assetPreviewButton}
@@ -196,14 +201,8 @@ const AssetItem: React.FC<AssetItemProps> = ({
       <div className={styles.assetContent}>
         <div className={styles.assetTitleBlock}>
           <strong title={title}>{title}</strong>
-          {collection ? <span title={collection}>{collection}</span> : null}
         </div>
 
-        {tags.length ? (
-          <div className={styles.assetTags} aria-label={tags.join(', ')}>
-            {tags.slice(0, view === 'list' ? 4 : 3).map((tag) => <span key={tag} title={tag}>{tag}</span>)}
-          </div>
-        ) : null}
         {view === 'list' ? <time dateTime={updatedAt.dateTime}>{updatedAt.label}</time> : null}
       </div>
 

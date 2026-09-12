@@ -121,6 +121,17 @@ describe('CreativeAssetLibrary', () => {
     expect(html.includes('A reusable creative prompt')).toBe(true);
   });
 
+  test('shows the collection on the cover and omits asset tags from cards', () => {
+    const html = renderLibrary({ selectedIds: new Set() });
+    const imageCard = html.match(/<article\b[^>]*data-asset-id="asset-0"[\s\S]*?<\/article>/)?.[0] ?? '';
+    const cover = imageCard.match(/<div\b[^>]*data-asset-cover="true"[^>]*>[\s\S]*?<\/div>/)?.[0] ?? '';
+
+    expect(cover.includes('data-asset-collection="true"')).toBe(true);
+    expect(cover.includes('title="Campaign">Campaign</span>')).toBe(true);
+    expect(imageCard.includes('aria-label="hero, image"')).toBe(false);
+    expect(imageCard.includes('title="hero">hero</span>')).toBe(false);
+  });
+
   test('exposes selection and multi-action intent without owning selected state', () => {
     const html = renderLibrary();
 
@@ -274,5 +285,8 @@ describe('CreativeAssetLibrary', () => {
     expect(css.includes('@media (hover: none)')).toBe(true);
     expect(css.includes('@media (prefers-reduced-motion: reduce)')).toBe(true);
     expect(css.includes("[data-asset-appearance='source-page']")).toBe(true);
+    expect(css.includes('.collectionBadge {')).toBe(true);
+    expect(css.includes('left: 8px;')).toBe(true);
+    expect(css.includes('.assetTags')).toBe(false);
   });
 });
