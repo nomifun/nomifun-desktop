@@ -312,6 +312,9 @@ pub fn materialize_surface_entrypoint(
     let mut materialized =
         Vec::with_capacity(MINIAPP_SURFACE_BRIDGE_BOOTSTRAP.len() + source.len());
     materialized.extend_from_slice(MINIAPP_SURFACE_BRIDGE_BOOTSTRAP.as_bytes());
+    materialized.extend_from_slice(b"<script data-nomifun-product-sdk=\"1\">");
+    materialized.extend_from_slice(include_bytes!("../assets/product-sdk.js"));
+    materialized.extend_from_slice(b"</script>");
     materialized.extend_from_slice(source.as_bytes());
     Ok(materialized)
 }

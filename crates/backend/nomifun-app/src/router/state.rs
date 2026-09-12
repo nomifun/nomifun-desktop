@@ -1893,6 +1893,12 @@ pub fn build_miniapp_state(
     super::miniapp_m1::MiniAppM1RouterState::new(
         services.miniapp_application.clone(),
     )
+    .with_product(super::miniapp_product::MiniAppProductService::new(
+        nomifun_db::MiniAppProductDocuments::new(services.database.pool().clone()),
+        services.miniapp_application.clone(),
+        services.model_invoke_service.clone(),
+        services.data_dir.clone(),
+    ))
 }
 
 /// Build the 生成引擎 (creation) router state, reusing the singleton
