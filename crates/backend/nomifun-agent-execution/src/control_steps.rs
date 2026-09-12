@@ -11,6 +11,9 @@ use nomifun_api_types::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+// Model output and persisted plans must not control unbounded dense allocations.
+pub(crate) const MAX_JUDGE_CANDIDATES: usize = 1024;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(crate) struct LoopRuntimeState {
     pub iteration: usize,
@@ -123,9 +126,11 @@ fn parse_pass(output: &str) -> Option<bool> {
         .and_then(|value| value.get("pass").and_then(Value::as_bool))
         .or_else(|| {
             let normalized = output.trim().to_ascii_lowercase();
-            normalized.ends_with("pass").then_some(true).or_else(|| {
-                normalized.ends_with("fail").then_some(false)
-            })
+            match normalized.rsplit(|c: char| c.is_whitespace() || c == ':' || c == '：').next() {
+                Some("pass") => Some(true),
+                Some("fail") => Some(false),
+                _ => None,
+            }
         })
 }
 
@@ -149,7 +154,7 @@ fn evaluate_judge(
     let candidate_count = configured_candidates
         .or_else(|| raw_ballots.iter().map(Vec::len).max())
         .unwrap_or(0);
-    if candidate_count == 0 || raw_ballots.is_empty() {
+    if !(1..=MAX_JUDGE_CANDIDATES).contains(&candidate_count) || raw_ballots.is_empty() {
         return ControlResolution::Fail {
             summary: "裁决失败：没有有效选票".to_owned(),
             error: "no valid judge ballots".to_owned(),
@@ -204,7 +209,7 @@ fn evaluate_judge(
         .iter()
         .copied()
         .enumerate()
-        .filter(|(_, score)| score.is_finite())
+        .filter(|(index, score)| counts[*index] > 0 && score.is_finite())
         .max_by(|left, right| {
             left.1
                 .partial_cmp(&right.1)
@@ -238,9 +243,14 @@ fn evaluate_judge(
 fn parse_ballot(output: &str) -> Option<Vec<Option<f64>>> {
     let value: Value = serde_json::from_str(&first_json_object(output)?).ok()?;
     match value.get("scores")? {
-        Value::Array(scores) => Some(scores.iter().map(Value::as_f64).collect()),
+        Value::Array(scores) if scores.len() <= MAX_JUDGE_CANDIDATES => {
+            Some(scores.iter().map(Value::as_f64).collect())
+        }
         Value::Object(scores) => {
             let max_index = scores.keys().filter_map(|key| key.parse::<usize>().ok()).max()?;
+            if max_index >= MAX_JUDGE_CANDIDATES {
+                return None;
+            }
             let mut ballot = vec![None; max_index + 1];
             for (key, value) in scores {
                 if let Ok(index) = key.parse::<usize>() {
@@ -276,7 +286,7 @@ fn evaluate_loop(
         .and_then(|attempt| attempt.runtime_state.clone())
         .and_then(|value| serde_json::from_value::<LoopRuntimeState>(value).ok())
         .unwrap_or_default();
-    state.iteration += 1;
+    state.iteration = state.iteration.saturating_add(1);
     state.output_hashes.push(output_hash(output));
 
     let stop_now = state.iteration >= max_iterations.max(1)
@@ -290,9 +300,9 @@ fn evaluate_loop(
                         == Some(true)
             }
             LoopStopPolicy::Stable { quiet_rounds } => {
-                let required = (*quiet_rounds).max(1) + 1;
-                state.output_hashes.len() >= required
-                    && state.output_hashes[state.output_hashes.len() - required..]
+                let quiet_rounds = (*quiet_rounds).max(1);
+                state.output_hashes.len() > quiet_rounds
+                    && state.output_hashes[state.output_hashes.len() - quiet_rounds - 1..]
                         .windows(2)
                         .all(|window| window[0] == window[1])
             }
@@ -431,6 +441,54 @@ mod tests {
     fn ballot_parser_supports_array_and_index_object() {
         assert_eq!(parse_ballot("{\"scores\":[0.2,0.8]}").unwrap().len(), 2);
         assert_eq!(parse_ballot("{\"scores\":{\"1\":0.8}}").unwrap(), vec![None, Some(0.8)]);
+    }
+
+    #[test]
+    fn ballot_parser_rejects_oversized_sparse_indices() {
+        let output = format!(r#"{{"scores":{{"{}":0.8}}}}"#, usize::MAX);
+        assert!(parse_ballot(&output).is_none());
+        let output = serde_json::json!({"scores": vec![0; MAX_JUDGE_CANDIDATES + 1]}).to_string();
+        assert!(parse_ballot(&output).is_none());
+        assert!(parse_ballot(&format!(r#"{{"scores":{{"{}":1}}}}"#, MAX_JUDGE_CANDIDATES - 1)).is_some());
+    }
+
+    #[test]
+    fn borda_requires_a_scored_candidate_and_does_not_select_unscored_ties() {
+        let step = agent_step("judge");
+        for output in [r#"{"scores":[null,null]}"#, r#"{"scores":[]}"#] {
+            assert!(matches!(evaluate_judge(JudgeAggregation::Borda, Some(2), &[&step],
+                &[completed_attempt("judge", output)]), ControlResolution::Fail { .. }));
+        }
+        assert!(matches!(evaluate_judge(JudgeAggregation::Borda, Some(usize::MAX), &[&step],
+            &[completed_attempt("judge", r#"{"scores":[1]}"#)]), ControlResolution::Fail { .. }));
+        let result = evaluate_judge(JudgeAggregation::Borda, Some(2), &[&step],
+            &[completed_attempt("judge", r#"{"scores":[null,0.8]}"#)]);
+        match result {
+            ControlResolution::Complete { runtime_state: Some(state), .. } => assert_eq!(state["winner_index"], 1),
+            _ => panic!("the only scored candidate must win"),
+        }
+    }
+
+    #[test]
+    fn loop_counters_do_not_overflow_on_extreme_persisted_values() {
+        let body = agent_step("body");
+        let controller = agent_step("controller");
+        let mut attempts = vec![completed_attempt("body", "same")];
+        let stop = LoopStopPolicy::Stable { quiet_rounds: usize::MAX };
+        assert!(matches!(evaluate_loop(usize::MAX, &stop, &[&body], &attempts, &controller), ControlResolution::Repeat { .. }));
+        let mut previous = completed_attempt("controller", "");
+        previous.runtime_state = Some(serde_json::json!({"iteration": usize::MAX, "output_hashes": []}));
+        attempts.push(previous);
+        assert!(matches!(evaluate_loop(usize::MAX, &stop, &[&body], &attempts, &controller), ControlResolution::Complete { .. }));
+    }
+
+    #[test]
+    fn verdict_parser_does_not_accept_words_ending_in_markers() {
+        for output in ["bypass", "notpass", "prefail"] {
+            assert_eq!(parse_pass(output), None, "{output}");
+        }
+        assert_eq!(parse_pass("verification: PASS"), Some(true));
+        assert_eq!(parse_pass("verification: FAIL"), Some(false));
     }
 
     #[test]
