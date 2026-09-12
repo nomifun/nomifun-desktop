@@ -20,8 +20,11 @@ import {
 } from '@/common/types/ids';
 import { setBrowserStorageGeneration } from '@/common/utils/browserStorageKey';
 import type { ExecutableAgentPreset, GuidAgentSelection } from '../types';
-import type { OfficialPresetTemplate } from '@/common/types/agentPlatform';
-import type { AgentResourceSelection } from '@/common/types/agentPlatform';
+import type {
+  AgentResourceSelection,
+  AgentSessionCapabilitySelection,
+  OfficialPresetTemplate,
+} from '@/common/types/agentPlatform';
 import {
   useGuidSend,
   type GuidSendDeps,
@@ -144,6 +147,7 @@ const createDeps = ({
   workspaceEnabled = true,
   resourceResolutionReady = true,
   resourceSelections = [],
+  capabilitySelection,
   navigations = [],
 }: {
   selection: GuidAgentSelection;
@@ -154,6 +158,7 @@ const createDeps = ({
   workspaceEnabled?: boolean;
   resourceResolutionReady?: boolean;
   resourceSelections?: AgentResourceSelection[];
+  capabilitySelection?: AgentSessionCapabilitySelection;
   navigations?: string[];
 }): GuidSendDeps => ({
   input,
@@ -170,6 +175,7 @@ const createDeps = ({
   workspaceEnabled,
   resourceResolutionReady,
   resourceSelections,
+  capabilitySelection,
   autoWork: { enabled: false },
   setMentionOpen: noopDispatch<boolean>(),
   setMentionQuery: noopDispatch<string | null>(),
@@ -227,6 +233,7 @@ describe('useGuidSend HTTP behavior', () => {
         reuse_existing: true,
         model_route_refs: {},
         chat_route_records: {},
+        model: { provider_id: PROVIDER_ID, model: MODEL.use_model },
       },
     });
     expect(calls[1]).toEqual({
@@ -347,6 +354,26 @@ describe('useGuidSend HTTP behavior', () => {
       resource_selections: resourceSelections,
     });
     expect(Object.keys((calls[0].body as { resource_selections: object[] }).resource_selections[0])).toEqual(['resource_kind', 'resource_id']);
+  });
+
+  test('freezes the selected Skills and MCP servers into the new session request', async () => {
+    resetBrowserStorage();
+    const calls = installFetchRecorder();
+    const capabilitySelection = {
+      enabled_skills: ['pdf'],
+      excluded_auto_skills: ['cron'],
+      mcp_server_ids: ['0190f5fe-7c00-7a00-8000-000000000202'],
+    };
+    const hook = renderHook(() => useGuidSend(createDeps({
+      selection: { kind: 'preset', presetId: PRESET_ID },
+      selectedPreset: PRESET,
+      workspaceEnabled: false,
+      capabilitySelection,
+    })));
+
+    await act(async () => { await hook.result.current.handleSend(); });
+
+    expect(calls[0].body).toMatchObject({ capability_selection: capabilitySelection });
   });
 
   test('preset mode does not submit a workspace that the selected capabilities do not allow', async () => {

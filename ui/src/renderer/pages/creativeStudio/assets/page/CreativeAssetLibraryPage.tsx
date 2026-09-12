@@ -5,13 +5,11 @@
  */
 
 import { Button, Checkbox, Input, InputTag, Message, Modal } from '@arco-design/web-react';
-import type { TFunction } from 'i18next';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import { creativeAssetClient } from '../client';
-import CreativeVideoPlayer from '../components/CreativeVideoPlayer';
 import { subscribeCreativeAssetDeletion } from '../assetDeletion';
 import {
   CreateCreativeTextAssetModal,
@@ -24,6 +22,7 @@ import type {
 } from '../components';
 import { isCreativeAssetDeleted, type CreativeAsset, type CreativeAssetLibraryPort } from '../types';
 import { useCreativeAssets } from '../useCreativeAssets';
+import CreativeAssetPreviewModal from './CreativeAssetPreviewModal';
 import styles from './CreativeAssetLibraryPage.module.css';
 import {
   CREATIVE_ASSET_MANUAL_UPLOAD_ACCEPT,
@@ -60,19 +59,6 @@ const popupContainer = (): HTMLElement =>
 const errorText = (reason: unknown): string =>
   reason instanceof Error ? reason.message : String(reason);
 
-const assetKindLabel = (t: TFunction, kind: CreativeAsset['kind']): string => {
-  switch (kind) {
-    case 'image':
-      return t('creativeStudio.assets.kind.image', { defaultValue: '图片' });
-    case 'video':
-      return t('creativeStudio.assets.kind.video', { defaultValue: '视频' });
-    case 'audio':
-      return t('creativeStudio.assets.kind.audio', { defaultValue: '音频' });
-    case 'text':
-      return t('creativeStudio.assets.kind.text', { defaultValue: '文本' });
-  }
-};
-
 function useDebouncedValue<T>(value: T, delay: number): T {
   const [debounced, setDebounced] = useState(value);
   useEffect(() => {
@@ -89,95 +75,6 @@ const downloadAsset = (asset: CreativeAsset): void => {
   anchor.download = creativeAssetDownloadName(asset);
   anchor.rel = 'noopener noreferrer';
   anchor.click();
-};
-
-interface AssetPreviewModalProps {
-  asset: CreativeAsset | null;
-  onClose: () => void;
-}
-
-const AssetPreviewModal: React.FC<AssetPreviewModalProps> = ({ asset, onClose }) => {
-  const { t } = useTranslation();
-  return (
-    <Modal
-      visible={Boolean(asset)}
-      title={
-        asset?.title ??
-        t('creativeStudio.assets.preview.title', { defaultValue: '素材详情' })
-      }
-      footer={null}
-      autoFocus={false}
-      focusLock
-      unmountOnExit
-      className={styles.modalBody}
-      getPopupContainer={popupContainer}
-      onCancel={onClose}
-    >
-      {asset ? (
-        <div className={styles.previewBody} data-creative-asset-preview={asset.kind}>
-          <div className={styles.previewMedia}>
-            {isCreativeAssetDeleted(asset) ? (
-              <p role='status'>{t('creativeStudio.assets.deleted', { defaultValue: '素材已删除' })}</p>
-            ) : asset.kind === 'image' ? (
-              <img src={asset.originalUrl} alt={asset.title} />
-            ) : asset.kind === 'video' ? (
-              <div className={styles.previewVideo}>
-                <CreativeVideoPlayer src={asset.originalUrl} poster={asset.thumbnailUrl ?? undefined} label={asset.title} />
-              </div>
-            ) : asset.kind === 'audio' ? (
-              <audio src={asset.originalUrl} controls preload='metadata' aria-label={asset.title} />
-            ) : (
-              <pre className={styles.previewText}>{asset.textContent ?? ''}</pre>
-            )}
-          </div>
-          <div className={styles.previewMeta}>
-            <p>
-              {t('creativeStudio.assets.preview.kind', {
-                defaultValue: '类型：{{kind}}',
-                kind: assetKindLabel(t, asset.kind),
-              })}
-            </p>
-            <p>
-              {t('creativeStudio.assets.preview.collection', {
-                defaultValue: '合集：{{collection}}',
-                collection:
-                  asset.collection ||
-                  t('creativeStudio.assets.library.noCollection', { defaultValue: '未分组' }),
-              })}
-            </p>
-            {asset.mimeType ? (
-              <p>
-                {t('creativeStudio.assets.preview.mime', {
-                  defaultValue: 'MIME：{{mime}}',
-                  mime: asset.mimeType,
-                })}
-              </p>
-            ) : null}
-          </div>
-          {asset.tags.length ? (
-            <div
-              className={styles.previewTags}
-              aria-label={t('creativeStudio.assets.preview.tags', { defaultValue: '素材标签' })}
-            >
-              {asset.tags.map((tag) => <span key={tag}>{tag}</span>)}
-            </div>
-          ) : null}
-          <footer className={styles.previewFooter}>
-            {asset.kind !== 'text' ? (
-              <Button type='primary' disabled={isCreativeAssetDeleted(asset)} onClick={() => downloadAsset(asset)}>
-                {t('creativeStudio.assets.preview.downloadOriginal', {
-                  defaultValue: '下载原始文件',
-                })}
-              </Button>
-            ) : null}
-            <Button onClick={onClose}>
-              {t('creativeStudio.assets.preview.close', { defaultValue: '关闭' })}
-            </Button>
-          </footer>
-        </div>
-      ) : null}
-    </Modal>
-  );
 };
 
 interface EditAssetModalProps {
@@ -642,7 +539,12 @@ const CreativeAssetLibraryPage: React.FC<CreativeAssetLibraryPageProps> = ({
         onSubmit={() => void handleCreateText()}
       />
 
-      <AssetPreviewModal asset={previewAsset} onClose={() => setPreviewAsset(null)} />
+      <CreativeAssetPreviewModal
+        asset={previewAsset}
+        locale={locale}
+        onDownload={downloadAsset}
+        onClose={() => setPreviewAsset(null)}
+      />
 
       <EditAssetModal
         asset={editingAsset}

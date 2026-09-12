@@ -868,6 +868,20 @@ pub struct AgentResourceSelectionDto {
     pub resource_id: String,
 }
 
+/// Session-local runtime choices layered over an immutable AgentPreset.
+/// Auto skills use an explicit exclusion list so an empty selected set remains
+/// distinguishable from the installation defaults.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSessionCapabilitySelectionDto {
+    #[serde(default)]
+    pub enabled_skills: Vec<String>,
+    #[serde(default)]
+    pub excluded_auto_skills: Vec<String>,
+    #[serde(default)]
+    pub mcp_server_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateAgentSessionRequestDto {
@@ -882,6 +896,8 @@ pub struct CreateAgentSessionRequestDto {
     /// themselves resource permissions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resource_selections: Vec<AgentResourceSelectionDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_selection: Option<AgentSessionCapabilitySelectionDto>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -909,6 +925,20 @@ pub struct SwitchAgentSessionPresetResponseDto {
     pub agent_binding: AgentBindingValueDto,
     pub state: String,
     pub cursor: SessionCursorDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateAgentSessionCapabilitySelectionRequestDto {
+    pub capability_selection: AgentSessionCapabilitySelectionDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateAgentSessionCapabilitySelectionResponseDto {
+    pub agent_session_id: String,
+    pub capability_selection: AgentSessionCapabilitySelectionDto,
+    pub changed: bool,
 }
 
 /// Product selection only; route, protocol and credential facts are host-owned.

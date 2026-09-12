@@ -44,6 +44,10 @@ const MAX_INPUT_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 const IMAGE_TIMEOUT: Duration = Duration::from_secs(360);
 const VIDEO_SUBMIT_TIMEOUT: Duration = Duration::from_secs(180);
 const VIDEO_POLL_TIMEOUT: Duration = Duration::from_secs(60);
+/// Agnes throttles video status lookups independently of job submission. Its
+/// public examples use a five-second cadence; use a more conservative floor
+/// so concurrent desktop work does not sit on the provider's boundary.
+const VIDEO_POLL_INTERVAL: Duration = Duration::from_secs(10);
 const MAX_VIDEO_STATUS_BYTES: u64 = 1024 * 1024;
 
 // ---------------------------------------------------------------------------
@@ -196,14 +200,17 @@ fn build_image_body(call: &ResolvedCall) -> Result<(Value, usize), InvokeError> 
         "prompt": prompt,
         "n": count,
         "size": size.unwrap_or(DEFAULT_IMAGE_SIZE),
-        "extra_body": {
-            "response_format": if images.is_some() { "b64_json" } else { "url" },
-        },
     });
     if let Some(images) = images {
+        typed["extra_body"] = json!({"response_format": "b64_json"});
         typed["extra_body"]["image"] = Value::Array(
             images.into_iter().map(Value::String).collect(),
         );
+    } else {
+        // Agnes documents `return_base64` as the text-to-image switch. Inline
+        // output avoids a second, unauthenticated fetch of a short-lived URL
+        // and cannot race provider-side object publication.
+        typed["return_base64"] = Value::Bool(true);
     }
 
     let mut body = json_request_body(&call.model_params, extra, typed)?;
@@ -234,6 +241,10 @@ impl ProtocolAdapter for AgnesVideoJobsAdapter {
 
     fn supports(&self, task: ModelTask) -> bool {
         task == ModelTask::VideoGeneration
+    }
+
+    fn recommended_poll_interval(&self) -> Option<Duration> {
+        Some(VIDEO_POLL_INTERVAL)
     }
 
     async fn submit(
@@ -546,17 +557,22 @@ fn parse_video_status(value: &Value) -> Result<AgnesVideoState, InvokeError> {
             let url = value
                 .get("url")
                 .and_then(Value::as_str)
+                .or_else(|| value.get("video_url").and_then(Value::as_str))
                 .or_else(|| {
                     value
                         .get("metadata")
-                        .and_then(|metadata| metadata.get("url"))
+                        .and_then(|metadata| {
+                            metadata
+                                .get("url")
+                                .or_else(|| metadata.get("video_url"))
+                        })
                         .and_then(Value::as_str)
                 })
                 .map(str::trim)
                 .filter(|url| !url.is_empty())
                 .ok_or_else(|| {
                     InvokeError::parse(
-                        "Agnes video completed but response missing 'url' or 'metadata.url'",
+                        "Agnes video completed but response missing a result URL",
                     )
                 })?;
             Ok(AgnesVideoState::Done(url.to_owned()))
@@ -596,6 +612,10 @@ mod tests {
         }
     }
 
+    fn http() -> reqwest::Client {
+        reqwest::Client::builder().no_proxy().build().unwrap()
+    }
+
     fn image_call(server: &MockServer, request: TaskRequest) -> ResolvedCall {
         let mut call = call_with_endpoint(
             &format!("{}/v1", server.uri()),
@@ -625,7 +645,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn text_to_image_omits_quality_and_top_level_response_format() {
+    async fn text_to_image_requests_inline_base64_without_openai_only_fields() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/images/generations"))
@@ -635,10 +655,10 @@ mod tests {
                 "prompt": "a fox",
                 "n": 1,
                 "size": "1024x768",
-                "extra_body": {"response_format": "url"}
+                "return_base64": true
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "data": [{"url": "https://cdn.example/fox.png"}]
+                "data": [{"b64_json": "aGk="}]
             })))
             .expect(1)
             .mount(&server)
@@ -653,19 +673,20 @@ mod tests {
         });
         let call = image_call(&server, request);
         let outcome = AgnesImagesAdapter
-            .submit(&reqwest::Client::new(), &call)
+            .submit(&http(), &call)
             .await
             .unwrap();
         assert!(matches!(
             outcome,
             TaskOutcome::Done(TaskResult::Assets(ref assets))
-                if matches!(&assets[0].data, ProducedData::Url(url) if url.ends_with("fox.png"))
+                if matches!(&assets[0].data, ProducedData::Bytes(bytes) if bytes == b"hi")
         ));
 
         let requests = server.received_requests().await.unwrap();
         let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
         assert!(body.get("quality").is_none());
         assert!(body.get("response_format").is_none());
+        assert!(body.get("extra_body").is_none());
     }
 
     #[tokio::test]
@@ -697,7 +718,7 @@ mod tests {
             extra: json!({}),
         });
         let outcome = AgnesImagesAdapter
-            .submit(&reqwest::Client::new(), &image_call(&server, request))
+            .submit(&http(), &image_call(&server, request))
             .await
             .unwrap();
         assert!(matches!(
@@ -739,7 +760,7 @@ mod tests {
             extra: json!({}),
         });
         let outcome = AgnesVideoJobsAdapter
-            .submit(&reqwest::Client::new(), &video_call(&server, request))
+            .submit(&http(), &video_call(&server, request))
             .await
             .unwrap();
         let TaskOutcome::Pending(job) = outcome else {
@@ -782,7 +803,7 @@ mod tests {
             poll_state: json!({}),
         };
         let outcome = AgnesVideoJobsAdapter
-            .poll(&reqwest::Client::new(), &call, &job)
+            .poll(&http(), &call, &job)
             .await
             .unwrap();
         assert!(matches!(
@@ -803,6 +824,14 @@ mod tests {
     }
 
     #[test]
+    fn video_adapter_exposes_a_conservative_status_query_interval() {
+        assert_eq!(
+            AgnesVideoJobsAdapter.recommended_poll_interval(),
+            Some(Duration::from_secs(10))
+        );
+    }
+
+    #[test]
     fn video_status_handles_pending_failure_and_newer_metadata_url() {
         assert_eq!(
             parse_video_status(&json!({"status": "in_progress", "progress": 45})).unwrap(),
@@ -815,6 +844,10 @@ mod tests {
         assert_eq!(
             parse_video_status(&json!({"status": "completed", "metadata": {"url": "https://cdn/v.mp4"}})).unwrap(),
             AgnesVideoState::Done("https://cdn/v.mp4".into())
+        );
+        assert_eq!(
+            parse_video_status(&json!({"status": "completed", "video_url": "https://cdn/legacy.mp4"})).unwrap(),
+            AgnesVideoState::Done("https://cdn/legacy.mp4".into())
         );
         assert!(parse_video_status(&json!({"status": "completed"})).is_err());
     }

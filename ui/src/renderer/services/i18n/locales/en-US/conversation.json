@@ -426,6 +426,11 @@
     "tryAnotherAgent": "Try another agent:",
     "switchedToAgent": "Switched to {{agent}}",
     "switchAgentFailed": "Failed to switch agent",
+    "switchAgentWebSearchModelRequired": "This agent needs native web search. Choose an OpenAI Responses model with web_search support and try again.",
+    "switchAgentModelIncompatible": "The current model does not meet this agent's runtime requirements. Choose a compatible model and try again.",
+    "switchAgentResourcesUnavailable": "A resource required by this agent changed or is unavailable. Choose the resources again and retry.",
+    "switchAgentCapabilitiesUnavailable": "Some capabilities required by this agent are currently unavailable. Check the capability configuration and retry.",
+    "switchAgentResourcesTitle": "Switch to {{agent}}",
     "speech": {
       "recordTooltip": "Start voice input",
       "pickFileTooltip": "Select an audio file",
@@ -541,6 +546,24 @@
       "failed": "Failed",
       "unsupported": "Unsupported"
     }
+  },
+  "capabilityPicker": {
+    "ariaLabel": "Session capabilities",
+    "createApplyNote": "New session · applied on creation",
+    "nextSendApplyNote": "This session · applied on next send",
+    "loadFailed": "Failed to load",
+    "empty": "No items available",
+    "builtin": "Built in",
+    "installed": "Installed",
+    "available": "Available",
+    "disabled": "Disabled",
+    "error": "Unavailable",
+    "toolCount_one": "{{count}} tool",
+    "toolCount_other": "{{count}} tools",
+    "selectedCount_one": "{{count}} selected",
+    "selectedCount_other": "{{count}} selected",
+    "manageSkills": "Manage skills",
+    "manageMcp": "Manage MCP"
   },
   "sendbox": {
     "hint": "Type / for commands, @ to reference files"

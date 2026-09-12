@@ -10,6 +10,7 @@ import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import type { CreativeAsset } from '../types';
+import { creativeAssetDisplayTitle } from '../presentation';
 import type { CreativeAssetAction, CreativeAssetLibraryLabels } from './types';
 import styles from './CreativeAssetLibrary.module.css';
 
@@ -35,7 +36,7 @@ const CreativeAssetActionsMenu: React.FC<CreativeAssetActionsMenuProps> = ({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const focusLast = useRef(false);
   const menuId = useId();
-  const moreLabel = `${t('common.more', { defaultValue: '更多' })}：${asset.title}`;
+  const moreLabel = `${t('common.more', { defaultValue: '更多' })}：${creativeAssetDisplayTitle(asset)}`;
   const actions = [
     { key: 'open', label: labels.open, callback: onOpen, icon: <PreviewOpen {...iconProps} /> },
     { key: 'edit', label: labels.edit, callback: onEdit, icon: <EditTwo {...iconProps} /> },

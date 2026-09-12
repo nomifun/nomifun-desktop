@@ -91,6 +91,21 @@ const renderLibrary = (overrides: Partial<React.ComponentProps<typeof CreativeAs
   );
 
 describe('CreativeAssetLibrary', () => {
+  test('hides absent metadata and uses the same short default name for the card and actions', () => {
+    const prompt = '纯白色纸张破洞视角，洞边缘有撕纸纤维质感，蓝色头发的小女孩从洞中探出。';
+    for (const view of ['grid', 'list'] as const) {
+      const html = renderLibrary({
+        view,
+        selectedIds: new Set(),
+        state: state({ assets: [{ ...asset('unnamed', 'image'), title: prompt, origin: { prompt }, collection: '  ', tags: ['', '  '] }] }),
+      });
+      expect(html.includes('>纯白色纸张破洞视角，洞边缘有撕</strong>')).toBe(true);
+      expect(html.includes('aria-label="更多：纯白色纸张破洞视角，洞边缘有撕"')).toBe(true);
+      expect(html.includes(testLabels.noCollection)).toBe(false);
+      expect(html.includes(testLabels.noTags)).toBe(false);
+    }
+  });
+
   test('renders the controlled source-aligned library surface and every media kind', () => {
     const html = renderLibrary();
 
@@ -104,6 +119,17 @@ describe('CreativeAssetLibrary', () => {
     expect(html.includes('data-asset-media-state="audio"')).toBe(true);
     expect(html.includes('audio/example')).toBe(true);
     expect(html.includes('A reusable creative prompt')).toBe(true);
+  });
+
+  test('shows the collection on the cover and omits asset tags from cards', () => {
+    const html = renderLibrary({ selectedIds: new Set() });
+    const imageCard = html.match(/<article\b[^>]*data-asset-id="asset-0"[\s\S]*?<\/article>/)?.[0] ?? '';
+    const cover = imageCard.match(/<div\b[^>]*data-asset-cover="true"[^>]*>[\s\S]*?<\/div>/)?.[0] ?? '';
+
+    expect(cover.includes('data-asset-collection="true"')).toBe(true);
+    expect(cover.includes('title="Campaign">Campaign</span>')).toBe(true);
+    expect(imageCard.includes('aria-label="hero, image"')).toBe(false);
+    expect(imageCard.includes('title="hero">hero</span>')).toBe(false);
   });
 
   test('exposes selection and multi-action intent without owning selected state', () => {
@@ -259,5 +285,8 @@ describe('CreativeAssetLibrary', () => {
     expect(css.includes('@media (hover: none)')).toBe(true);
     expect(css.includes('@media (prefers-reduced-motion: reduce)')).toBe(true);
     expect(css.includes("[data-asset-appearance='source-page']")).toBe(true);
+    expect(css.includes('.collectionBadge {')).toBe(true);
+    expect(css.includes('left: 8px;')).toBe(true);
+    expect(css.includes('.assetTags')).toBe(false);
   });
 });

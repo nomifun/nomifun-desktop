@@ -426,6 +426,11 @@
     "tryAnotherAgent": "尝试其他 Agent：",
     "switchedToAgent": "已切换到 {{agent}}",
     "switchAgentFailed": "切换 Agent 失败",
+    "switchAgentWebSearchModelRequired": "该 Agent 需要原生网页搜索，请先切换到支持 web_search 的 OpenAI Responses 模型后重试。",
+    "switchAgentModelIncompatible": "当前模型不满足该 Agent 的运行要求，请先切换到兼容模型后重试。",
+    "switchAgentResourcesUnavailable": "该 Agent 所需的资源已变化或不可用，请重新选择后重试。",
+    "switchAgentCapabilitiesUnavailable": "该 Agent 的部分能力当前不可用，请检查能力配置后重试。",
+    "switchAgentResourcesTitle": "切换到 {{agent}}",
     "speech": {
       "recordTooltip": "开始语音输入",
       "pickFileTooltip": "选择音频文件",
@@ -541,6 +546,22 @@
       "failed": "失败",
       "unsupported": "不支持"
     }
+  },
+  "capabilityPicker": {
+    "ariaLabel": "会话能力",
+    "createApplyNote": "新会话 · 创建时应用",
+    "nextSendApplyNote": "本会话 · 下次发送时应用",
+    "loadFailed": "加载失败",
+    "empty": "暂无可用项目",
+    "builtin": "内置",
+    "installed": "已安装",
+    "available": "可用",
+    "disabled": "已停用",
+    "error": "异常",
+    "toolCount_other": "{{count}} 个工具",
+    "selectedCount_other": "已选 {{count}} 项",
+    "manageSkills": "管理技能",
+    "manageMcp": "管理 MCP"
   },
   "sendbox": {
     "hint": "输入 / 唤起命令，@ 引用文件"

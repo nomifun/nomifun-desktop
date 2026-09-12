@@ -132,11 +132,18 @@ describe('Nomi sendbox control layout', () => {
     const chatSource = readSource(new URL('../../components/ChatConversation.tsx', import.meta.url));
     const nomiChatSource = readSource(new URL('./NomiChat.tsx', import.meta.url));
     const sendBoxSource = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
+    const agentSwitchBlock = chatSource.slice(
+      chatSource.indexOf('const commitAgentSwitch'),
+      chatSource.indexOf('const currentAgentLabel'),
+    );
 
     expect(chatSource.includes('<GuidAgentSelector')).toBe(true);
     expect(chatSource.includes('useAgentPresets()')).toBe(true);
-    expect(chatSource.includes('sessions.switchPreset.invoke')).toBe(true);
-    expect(chatSource.includes('request: { preset_id: targetPresetId }')).toBe(true);
+    expect(agentSwitchBlock.includes('sessions.switchPreset.invoke')).toBe(true);
+    expect(agentSwitchBlock.includes('resource_selections: resolution.selections')).toBe(true);
+    expect(chatSource.includes('<AgentResourcePicker')).toBe(true);
+    expect(agentSwitchBlock.includes('refreshConversationCache(target.conversationId)')).toBe(true);
+    expect(agentSwitchBlock.includes('conversation.stop.invoke')).toBe(false);
     expect(nomiChatSource.includes('agentSelectorNode={agentSelectorNode}')).toBe(true);
     expect(sendBoxSource.includes('{agentSelectorNode}')).toBe(true);
     expect(sendBoxSource.includes("key: 'agent'")).toBe(true);
