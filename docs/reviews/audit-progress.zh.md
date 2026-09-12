@@ -6,9 +6,9 @@
 
 - 当前范围排除（用户2026-09-13追加）：Browser Use、小程序、插件均暂不审改。MiniApp/Plugin平台与服务、页面、专属打包/声明/契约/测试及正在重构的worktree由原负责人继续；共享模块只处理可独立证明不改变上述域契约的通用问题。跳过不计已验证，既有提交保留。
 
-- 当前批次：R122/R123/R124/R125/R126源码已验收至 `358a027e8`，上一已核实远端 `0335637b6`；R126写入helper已验收，R127终端创建页、R128需求后端、R129文件搜索独占继续。R115按小程序/插件排除要求撤回本人未提交补丁。
+- 当前批次：R127–R130及R133源码已验收至 `e1e406233`，上一已核实远端 `5769a0c34`；R131会话页/R132需求配置/R134截断独占继续。R115按小程序/插件排除要求撤回本人未提交补丁。
 - 后续集成：当前分支已包含 `dd35e01de` 的 MiniApp 分支合并；设计文档已跟踪。本批仅更新遗留路由测试，未修改 MiniApp 产品实现，模块仍待深审。
-- 全局覆盖：111 个模块边界中，7 个已验证、70 个部分完成、34 个待审、0 个整模块审计中；321 个唯一问题/任务。当前三个子范围正在继续；完整阅读与跨模块问题闭环分开登记，Browser Use仍暂跳过。
+- 全局覆盖：111 个模块边界中，7 个已验证、72 个部分完成、32 个待审、0 个整模块审计中；338 个唯一问题/任务。当前三个子范围正在继续；完整阅读与跨模块问题闭环分开登记，Browser Use仍暂跳过。
 - R1 证据：[首轮记录](2026-09-12-code-quality.zh.md)。R1–R39 各报告中的“未提交/dirty”描述是当时快照；当前提交状态以下方验收记录为准。
 - R2 证据：[运行时与测试边界记录](2026-09-12-runtime-and-test-boundaries.zh.md)，包含改动、失败尝试、验证及覆盖限制。
 - R3 证据：[生命周期与状态记录](2026-09-12-lifecycle-and-state.zh.md)，记录四个 Host 旧实现失败、Context falsy 初值及消息重放缺陷；保留待办，勿重复修复。
@@ -280,7 +280,7 @@ R106完整补读Common constants/vision_registry/paths/ansi/text_search/stage_di
 | R119 客服hooks | `4bc702596` | 真实旧1通过/11失败→12/0；主线客服目录33/0、完整UI typecheck通过 |
 | R121 启动探针 | `54de77a71` | App --lib筛选environment::tests::probe_及finalize_publishes_receipt_only_after_side_store_bootstrap_succeeds，前后7/0 |
 
-R116仅input/tool两文件修改：observe先清旧缓存，语义动作明确Stale/NotFound/Permission及worker错误不再回退到旧像素；保留既有Backend/Unsupported回退，不声称错误分类已完全闭环。引用/窗口ID/坐标检查式转换，scroll可选坐标必须成对有效，拖拽改i64插值并在移动失败后尝试释放按钮；删私有单层转发。新增5个测试，fallback注入不会操作桌面；没有旧实现运行红绿。主线复核补丁与安全测试，未跑真实输入、截图、examples、其他OS；原生超时后继续执行、跨会话缓存、launch等见R116-05。
+R116补交全文覆盖：10源码3881行（tool1477/input461/fallback_backend268/keys240/launch590/lib16/macos_main33/permissions310/scale191/screen295）及appresolve example26行；App/Agent装配和Tool契约仅片段追踪。仅input/tool两文件修改：observe先清旧缓存，语义动作明确Stale/NotFound/Permission及worker错误不再回退到旧像素；保留既有Backend/Unsupported回退，不声称错误分类已完全闭环。引用/窗口ID/坐标检查式转换，scroll可选坐标必须成对有效，拖拽改i64插值并在移动失败后尝试释放按钮；删私有单层转发。新增5个测试，fallback注入不会操作桌面；没有旧实现运行红绿。主线复核补丁与安全测试，未跑真实输入、截图、examples、其他OS；原生超时后继续执行、跨会话缓存、launch等见R116-05。
 
 R118完整读29源文件11013行（含内嵌测试）：agent_build_extra、agent_discovery、agent_error、agent_execution、agent_execution_template、auth、connection_test、cron、custom_agent、file、lib、lifecycle、managed_model、model_capability、model_protocol、model_task、office、provider、provider_connection、provider_model、requirement、response、serde_util、session_ops、shell、system、terminal、webhook、websocket。另全读auth_types/response_format/ts_export三个集成测试652行及conversation1–770，累计12435行；不是全crate完成。conversation771以后及idmm/knowledge/mcp/mcp_bridge/skill交R124；agent_platform/channel仅边界扫描，混合排除内容保守搁置；miniapp_platform/plugin_platform正文不读。注意ts_export的export_provider_domain_bindings会写生成产物，本轮未运行。
 
@@ -354,7 +354,7 @@ Git协作：R103–R106后普通merge远端99e8c2ddb（包含459f22bce MessageTi
 | R123 终端hooks | 6ef1bda6d | terminal目录32/0（7文件），完整UI typecheck通过 |
 | R124 通用DTO | 4ac360871 | cargo test --locked -p nomifun-api-types --lib agent_execution：16/0，514 filtered，4线程 |
 
-R122只改read/edit/write/cache及三个专属测试：Write复用既有helper、Read复用cwd解析；超预算项不缓存或驱逐无关项，裁剪结果不进入已完整可见去重；非法切片显式拒绝，cache锁poison时Edit/覆盖Write不得跳过guard。主线完整复核diff、新回归及helper调用，无旧实现运行红绿。helper的临时文件归属和任意rename失败直接写仍有问题，单独交R126；不把复用等同于安全原子发布。精确全文阅读证据待worker补交，不将其推断为全crate已读。
+R122只改read/edit/write/cache及三个专属测试：Write复用既有helper、Read复用cwd解析；超预算项不缓存或驱逐无关项，裁剪结果不进入已完整可见去重；非法切片显式拒绝，cache锁poison时Edit/覆盖Write不得跳过guard。主线完整复核diff、新回归及helper调用，无旧实现运行红绿。helper的临时文件归属和任意rename失败直接写仍有问题，单独交R126；不把复用等同于安全原子发布。补交确认完整读8文件3942行：path_guard195/file_cache463/read994/edit750/write590及三个集成file_cache326/read_dedup254/edit_write_cache370，均含既有测试；其他工具未全读。
 
 R123全文读两生产文件124行及新增测试183行，只读追踪TerminalCreatePage、SessionList、useVisibleConversationIds、KnowledgeControl、bridge/emitter及后端事件相关片段。当前请求归属防旧GET，按请求重放收到的事件/成功删除，完整updated可新增漏订阅项，卸载失效刷新与本地发布；recentLaunchCommands无需生产修改，保留三项存储回归。真实旧3通过/7失败→同用例10/0，主线目录32/0及typecheck；没有取消已发请求或解决服务端全局顺序。
 
@@ -378,7 +378,46 @@ R124续读conversation771–1478、idmm1161行、knowledge782、mcp661、mcp_bri
 
 截至本次五批R122–R126合计生产净减26行、测试净增340行、example0、总净增314行。测试增长单列，不声称项目总代码量下降。
 
-## 当前并行边界（R127 / R128 / R129）
+## R127 / R128 / R130 阶段验收
+
+| 批次 | 已提交源码 | 最终验证 |
+| --- | --- | --- |
+| R127 终端创建页 | 31cff5bda | terminal目录40/0（7文件），完整UI typecheck通过 |
+| R128 需求更新 | 018f73ad0 | cargo test --locked -p nomifun-requirement --lib service::tests：33/0、83 filtered，4线程 |
+| R130 多文件补丁 | 1ff2cb00a | nomi-tools --lib apply_patch::tests：12/0，4线程 |
+
+R127全文读原页面223行/专属测试30行，另全读launchPresets/detectFamily/ExtendedCapabilitiesPanel/WorkspaceFolderSelect；路由/侧栏和bridge只读调用追踪。按navigation归属同步防重、切换失效、await后阻止旧提示/后续配置/跳转，默认入口无cwd清空旧目录。主线将owner切换改layout effect，不新增架构；创建参数快照及IDMM→AutoWork最佳努力顺序保持。真实旧3通过/6失败→9/0，最终40/0；不取消服务端请求或回滚已创建终端。
+
+R128完整读lib40/routes348/service4024/convert25/order_key59/attachments3730/state10/events96/notifier9，共8341行；delete_owner_clearing134/notify124/tag_bindings172三个集成430行，总8771行。DTO、DB SQL、App安装所有者保护/UI/File仅片段核对。只补两个非空白校验，沿已有SQLite/上传fixture增强单个回归；主线移除6行guard运行旧实现，实际返回空title并写入新附件失败，恢复后service33/0。未跑附件恢复/平台句柄全套，不把metadata拒绝当成跨步骤事务。剩余7源文件7947行和静态问题见R128-02至06。
+
+R130主线全读apply_patch.rs基线521行及path_guard195行，追踪Agent bootstrap573–605及ToolResult::error既有实现；未改注册/域声明。poison锁不再通过Option短路放行，非法操作参数在计划阶段报错；删与ToolResult::error相同的私有err构造。两项新增参数化测试旧0/2失败（实际创建/覆盖或删除），修后全补丁工具12/0。多文件提交仍非事务，重复路径/别名等保留待办。
+
+这三批生产净增27行（+16/+6/+5），测试净增293行（+180/+60/+53），总+320，example0；没有新框架/依赖。
+
+## R129 / R133 阶段验收
+
+| 批次 | 已提交源码 | 最终验证 |
+| --- | --- | --- |
+| R129 文件搜索 | 15c697bd3 | nomi-tools --lib grep::tests glob::tests：26/0，4线程 |
+| R133 Web服务入口 | e1e406233 | cargo test --locked -p nomifun-web --bin nomifun-web：9/0，4线程 |
+
+R129全文读原grep304/glob1259，共1563行。搜索pattern与选项隔离，统一后端退出码处理；非法可选参数不再扩大搜索，findstr不支持的过滤条件显式拒绝。主线指出普通文件被拼成目录后，worker补目录/文件区分；Windows真实findstr回归绕过rg，覆盖带空格路径、递归隔离及--files、/?、two words模式。删搜索自身源码的重复测试；没有旧实现红绿记录，未运行Unix grep或取消/大输出压力测试。
+
+R133完整读Web main.rs基线561行、build.rs6行、Cargo.toml37行、共享ui_build_manifest110行，以及App commands/server.rs249行和mod.rs全文。Web接入App现有shutdown_signal，两条App服务删除没有消费者的watch channel；无第二套信号处理。9项是入口/CLI/静态路由回归，不是实际OS信号或长连接关闭端到端验证。共享bootstrap/auth及其他OS仍待审。
+
+两批生产净增10行（R129 +20、R133 -10），测试净增82行（+82/0），总+92；无新增依赖或框架。
+
+## 当前并行边界（R131 / R132 / R134）
+
+| 批次 / 负责人 | 独占写集 | 任务 |
+| --- | --- | --- |
+| R131 / Carver | TerminalSessionPage及专属测试 | 会话加载/订阅/resize生命周期，XtermView只读 |
+| R132 / Mencius | Requirement的autowork_config/prompt/sink/hooks及专属测试 | 四个未读文件续审，service/attachments及共享模块只读 |
+| R134 / Hypatia | nomi-tools/src/output_truncation.rs及专属测试 | 截断预算/UTF8边界；无确定问题可以零改动 |
+
+R127–R130及R133已验收提交，R129包含真实findstr/rg和Glob回归。所有已冻结写集不得回改，Rust串行、UI并行，排除域仍不审改。
+
+## 历史并行边界（R127 / R128 / R129）
 
 | 批次 / 负责人 | 独占写集 | 任务 |
 | --- | --- | --- |
@@ -1033,11 +1072,29 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | R122-02 | 已验证 | 超预算cache插入驱逐无关项并突破总量 | 超大项不缓存，替换时先去旧修订及无主refresh标记，减法比较避免溢出；零预算/大项回归通过 |
 | R122-03 | 已验证 | 裁剪后Read误认模型已见完整结果 | 将实际单项/批量输出预算纳入dedup_eligible，裁剪内容后续不得返回unchanged；保留已有Edit缓存用途 |
 | R122-04 | 已验证 | 非法Read切片参数静默变整文件读取 | 非整数/负数/usize溢出返回错误，复用path_guard解析cwd；参数回归通过，32位平台未运行 |
-| R122-05 | 已验证 | poisoned cache锁使Edit/Write静默绕过读前置条件 | 配置了cache却无法取锁时拒绝变更，保留None旧行为；真实poison夹具/文件不变回归通过 |
+| R122-05 | 已验证 | poisoned cache锁使文件变更绕过读前置条件 | R122 Edit/Write及R130 ApplyPatch均在锁失效时拒绝变更，保留None旧行为；ApplyPatch旧真实成功写入，最终12/0，不重复建问题号 |
 | R122-06 | 部分完成 | 文件工具剩余并发/路径与输出边界 | must-Read检查到写入仍有TOCTOU，mtime精度/共享cache归属/大文件全读、其他工具及跨引擎裁剪契约待续；本批非整体完成 |
 | R123-01 | 已验证 | 终端旧GET回写并提前结束loading | 当前请求数组独占结果/失败/loading，卸载使旧请求及刷新回调失效；旧hook7失败，最终目录32/0/typecheck |
 | R123-02 | 已验证 | GET快照冲掉终端在途事件/成功本地删除 | 请求期间重放即时更新，创建/完整updated统一upsert，保留会话所属过滤；非永久历史/撤销服务端操作 |
 | R123-03 | 部分完成 | 终端跨连接/持久化及剩余页面边界 | 未保证跨连接全局事件顺序或退出状态落盘失败后的新GET；其余页面和真实传输未闭环，创建页交R127 |
+
+| R127-01 | 已验证 | 终端创建的旧导航流程继续配置/提示/跳转 | 每次navigation持独立busy归属，await后核验；主线用layout effect在导航commit失效，旧3/6→9/0，目录40/0/typecheck |
+| R127-02 | 已验证 | 同路由默认cwd残留和同渲染重复提交 | 不携带cwd的新导航清空旧目录，同步busy拒重复、当前失败可重试；不重置普通输入，不取消服务端创建 |
+| R127-03 | 部分完成 | 创建服务端部分成功与附加配置边界 | 已发create/配置仍可在服务端成功，不删除创建结果或跨步骤回滚；真实PTY/桌面选择与附加能力编辑器未闭环 |
+| R128-01 | 已验证 | 需求更新绕过创建时title/tag非空约束 | 404之后、附件/DB写入之前拒绝空白，保留缺省/null和非空原值；真实旧返回空标题并落附件失败，service33/0 |
+| R128-02 | 待审 | 需求非法状态在元数据/附件更新后才拒绝 | update先写后set_status；in_progress等非法转移会部分成功，需统一预检及跨写入策略，不以局部字符串校验冒充事务 |
+| R128-03 | 待审 | order_key八位sort_seq编码溢出与空键哨兵冲突 | 8位为最小宽度，100000000排序先于99999998且99999999冲突；涉及旧sort_seq持久数据，不只改新写入 |
+| R128-04 | 待审 | 附件导入取消/当前失败副本清理与弱回归 | 492–627只处理收到的错误；中途失败测试以缺失源触发全量预检，没覆盖copy中途失败/async取消；需真实故障点验证 |
+| R128-05 | 待审 | 附件删除journal写入与读取容量不一致 | read拒绝超过16MiB而writer无相同界限，可能写出无法恢复的journal；静态证据，未运行大体积夹具 |
+| R128-06 | 部分完成 | Requirement其余七文件与跨边界续读 | R128全读9源文件8341行及3集成430行；auto_work_runner/mcp_server/conversation_port/prompt/sink/autowork_config/hooks未全读，后四交R132；通知沿R46-05，fixture数据库泄漏待整理 |
+| R129-01 | 已验证 | 搜索pattern被解析成选项、后端错误伪装无匹配 | rg/grep使用-e和--，findstr用/C保持模式整体；统一退出错误含backend/status/stderr，26/0 |
+| R129-02 | 已验证 | 非法选参或fallback静默丢条件扩大搜索 | path/glob/bool/context按类型拒绝；findstr不支持glob/context明确报错，目录递归与单文件隔离真实验证 |
+| R129-03 | 部分完成 | 搜索输出缓冲/取消和Glob剩余容量边界 | output全量缓冲后截断，取消不杀子进程；后端regex差异、任意rg启动错误fallback、Glob文本路径锁别名与容量仍待审 |
+| R133-01 | 已验证 | Web缺少优雅关停入口 | 复用App现有shutdown_signal，Web9/0；未模拟实际OS信号/长连接排空 |
+| R133-02 | 已验证 | App关停watch无业务消费者 | 两处只创建/发送却无人读取，删channel/clone/send，三文件生产净减10行 |
+| R133-03 | 部分完成 | 独立Web/共享App关闭及启动边界 | 长连接graceful drain无界、signal注册expect、其他OS/真实关停未验；共享bootstrap/auth继续，不扩大到排除域 |
+| R130-01 | 已验证 | ApplyPatch非法字段被忽略后执行破坏性操作 | content/edits/delete/replace_all按已声明类型校验，任一非法在所有写入前拒绝；真实旧成功创建/删除失败，补丁工具12/0 |
+| R130-02 | 部分完成 | 多文件补丁剩余预检/别名/提交边界 | 重复路径或别名的独立计划可互相覆盖，directory删除等预检不全；write/删除阶段仍可部分成功、路径TOCTOU和缓存mtime限制保留，无新事务框架 |
 
 ## 模块覆盖索引
 
@@ -1046,21 +1103,21 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | 模块目录 | 状态 | 已审范围 / 续接范围 |
 | --- | --- | --- |
 | `apps/desktop/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
-| `apps/web/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
+| `apps/web/` | 部分完成 | R133入口/build及共享build-support全读，复用关闭信号9/0；实际信号/长连接及共享bootstrap/auth未闭环 |
 | `crates/agent/nomi-a11y/` | 部分完成 | R109完整13源码4433行及2examples244行；Windows23/0、winsmoke check；Linux/macOS未运行及R109-06剩余边界保留 |
 | `crates/agent/nomi-agent/` | 部分完成 | R47 SkillTool 的 inline shell、副作用标记与完成证据消费链已核对；R48 ProtocolSink/CLI 共同输出入口已验证。其余 engine/builder/session/工具编排未完成全模块审计 |
 | `crates/agent/nomi-browser-engine/` | 待审 | 用户要求 Browser Use 暂跳过；不计作完成 |
 | `crates/agent/nomi-browser/` | 待审 | 用户要求 Browser Use 暂跳过；不计作完成 |
 | `crates/agent/nomi-cli/` | 部分完成 | R34/R41/R48 已审 CLI 生产文件和命令回归，JSON 所有输出入口失败清理 17/0；MCP connect_all 的取消及 bootstrap 跨 crate 归属等见 R30-02 |
 | `crates/agent/nomi-compact/` | 已验证 | R29 全文件及工具输出调用链；CRLF/JSON/TOON/Unicode 修复，54/0+Agent 8/0；Full 有损及首候选块限制见报告 |
-| `crates/agent/nomi-computer/` | 部分完成 | R116输入/元素fallback与缓存修复，离线44/0；真实桌面、跨会话及多阶段平台边界见R116-05 |
+| `crates/agent/nomi-computer/` | 部分完成 | R116补交全读10源码3881行及example26行，输入/元素fallback与缓存修复离线44/0；真实桌面/跨会话/多阶段平台边界R116-05保留 |
 | `crates/agent/nomi-config/` | 部分完成 | R32–R33 全生产文件已读；合并/hook/schema/旧 shell 清理验证 184/0；仅余硬迁移并发窗口、历史测试设计剩余核对 |
 | `crates/agent/nomi-mcp/` | 部分完成 | R36 HTTP/SSE 生产代码及定向测试已审；122/0、Agent/CLI check 通过。stdio、manager 后半部、tool_proxy 未完整审计；其他限制见 R36-04 |
 | `crates/agent/nomi-memory/` | 部分完成 | R35 全生产文件/现有测试及调用已读；150/0+Agent 17/0；路径碰撞/多文件写入和非协作边界 R35-07 保留 |
 | `crates/agent/nomi-protocol/` | 已验证 | R30 命令/事件/读写全文件及测试，49/0；stdin 有界、标准 stdout 整帧锁；OS stdin 阻塞与调用方 R30-02 不冒充已解决 |
 | `crates/agent/nomi-providers/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/agent/nomi-skills/` | 部分完成 | R38–R40 全生产与既有测试已读；R47 inline shell 副作用判断调用链已修（两项红→绿），本批 Agent 94/0 + Skills shell 53/0。剩余容量/加载/MCP 等见 R38-03 |
-| `crates/agent/nomi-tools/` | 部分完成 | R122文件读写/cache/path_guard独立批验收117/0，主线已复核补丁及helper调用；全文阅读证据待worker补交，其余工具未全审，R126/R129继续 |
+| `crates/agent/nomi-tools/` | 部分完成 | R122全读8文件3942行、117/0，R126共享发布44/0，R130补丁工具12/0；R129搜索26/0，其余工具和跨调用仍未全审 |
 | `crates/agent/nomi-types/` | 已验证 | R31 全模块及测试/四类 provider 调用已读；描述字符与 CRLF 修复、重复测试删除，70/0；provider 定向 2/0 |
 | `crates/backend/nomifun-agent-contracts/` | 部分完成 | R107基础15文件5305行全读、85/0；R113可选web_search schema6/0；R115声明按范围撤回跳过，miniapp_m1/plugin_n1/bin不审，R107通用剩余未闭环 |
 | `crates/backend/nomifun-agent-control-plane/` | 部分完成 | R90完整读10源文件，26/0及App/Platform各3/0；默认模型/重复映射/未用通用更新已处理，R90-03待闭环 |
@@ -1106,7 +1163,7 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | `crates/backend/nomifun-plugin-service/` | 待审 | 用户要求暂跳过、正在独立重构；既有commit_fence/auto_apply调用记录保留，未闭环项不计完成 |
 | `crates/backend/nomifun-public/` | 部分完成 | R45 全 5 个源文件/内联测试及相关调用已读；预检/取消占位/归属/refill 修复后 29/0；rmcp 在途处理容量、Host shutdown 与 observation 全量投影见 R45-04 |
 | `crates/backend/nomifun-realtime/` | 部分完成 | R53 全 9 Rust 文件及调用已读；socket/heartbeat 生命周期修复，102/0。认证用户有效状态、App shutdown、阻塞写入时 policy Close 和容量边界见 R53-03 |
-| `crates/backend/nomifun-requirement/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
+| `crates/backend/nomifun-requirement/` | 部分完成 | R128全读9源文件8341行及3集成430行，title/tag预检修复33/0；其余7文件7947行待续，跨写入/排序/journal等R128-02至06保留 |
 | `crates/backend/nomifun-robot/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-runtime/` | 部分完成 | R49 全 11 原始 Rust 文件及调用已读；R55 目录/解析重复缓存红→绿，38/0；删除无业务测试。构建缓存、非 Linux Unix 探针、版本排序和资产映射仍见 R49-05 |
 | `crates/backend/nomifun-shell/` | 部分完成 | R50全源文件及集成/调用已读；R65 Windows路径移出cmd命令文本，整包96/0；GUI/UNC未验、hand-off归属R50-04保留 |
