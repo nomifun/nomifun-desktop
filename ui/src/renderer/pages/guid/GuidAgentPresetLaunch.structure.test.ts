@@ -10,6 +10,9 @@ import { describe, expect, test } from 'bun:test';
 const readSource = (url: URL): string =>
   readFileSync(url, 'utf8').replace(/\r\n/g, '\n');
 
+const compactWhitespace = (source: string): string =>
+  source.replace(/\s+/g, ' ').trim();
+
 const extractObjectArgument = (source: string, call: string): string => {
   const callStart = source.indexOf(call);
   expect(callStart).toBeGreaterThan(-1);
@@ -112,8 +115,41 @@ describe('Guid workbench Agent launch behavior', () => {
     expect(send.includes('current_model')).toBe(true);
     expect(send.includes('provider_id: current_model.id')).toBe(true);
     expect(send.includes('model: current_model.use_model')).toBe(true);
-    expect(officialLaunch.includes('TProviderWithModel')).toBe(false);
-    expect(officialLaunch.includes('model: { provider_id:')).toBe(false);
+    expect(
+      send.match(/ipcBridge\.agentPlatform\.sessions\.create\.invoke\(/g)
+    ).toHaveLength(1);
+    expect(officialLaunch.includes('conversation.create')).toBe(false);
+
+    // Official preparation now needs the selected model for validation, but
+    // still prepares a stable preset for the same AgentSession launch path.
+    expect(compactWhitespace(send)).toContain(
+      'launchPreset = await prepareOfficialAgent( selectedTemplate, t(`agentSettings.template.${TEMPLATE_I18N_PATH[selection.templateKey]}.name`), current_model, );'
+    );
+    expect(officialLaunch).toContain(
+      "model?: Pick<TProviderWithModel, 'id' | 'use_model'>,"
+    );
+    expect(officialLaunch).toContain(
+      'createFromTemplate = agentPlatform.createFromTemplate.invoke,'
+    );
+    // Exact payload equality forbids forwarding provider configuration or
+    // credentials, including through a spread of the full selected model.
+    expect(
+      compactWhitespace(extractObjectArgument(officialLaunch, 'await createFromTemplate('))
+    ).toBe(compactWhitespace(`
+      template_id: template.template_key,
+      request: {
+        display_name: displayName,
+        model_route_refs: {},
+        chat_route_records: {},
+        reuse_existing: true,
+        ...(model
+          ? { model: { provider_id: model.id, model: model.use_model } }
+          : {}),
+      },
+    `));
+    expect(officialLaunch).toMatch(
+      /if \(!editor\.preset\.current_stable_revision\) \{\s*throw new Error\('AGENT_PRESET_REQUIRED'\);\s*\}\s*return editor\.preset as ExecutableAgentPreset;/
+    );
   });
 
   test('Agent launch submits Agent identity, title, model, and narrow product resource selections', () => {

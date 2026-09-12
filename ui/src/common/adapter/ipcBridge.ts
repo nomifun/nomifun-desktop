@@ -196,9 +196,6 @@ import type {
 import type {
   UpdateCheckRequest,
   UpdateCheckResult,
-  UpdateDownloadProgressEvent,
-  UpdateDownloadRequest,
-  UpdateDownloadResult,
   UpdateReleaseInfo,
 } from '../update/updateTypes';
 import {
@@ -1385,17 +1382,12 @@ export const application = {
 };
 
 // ---------------------------------------------------------------------------
-// Update — stays IPC (Electron-native auto-updater)
+// Update — native Tauri updater
 // ---------------------------------------------------------------------------
 
-// Tauri-native auto-update, backed by @tauri-apps/plugin-updater (see
-// ./tauriUpdater). The in-app UpdateModal drives this flow: it calls
-// `autoUpdate.check` then `update.check`, and — because the Tauri updater plugin
-// downloads + installs internally (no per-asset manual download, so
-// `recommendedAsset` is intentionally absent) — routes the download through
-// `autoUpdate.download`. The modal is shell-gated (About entry + startup check
-// only render under `isDesktopShell()`), and `shellProvider` additionally guards
-// each call with `isTauriRuntime()`, so the WebUI browser degrades to the safe fallback.
+// The modal displays release metadata through update.check and uses autoUpdate
+// for native verified-package download and installation. Both surfaces are
+// shell-gated; the WebUI receives only their safe fallbacks.
 
 /** Releases page shown in the modal's "go to release" affordance. */
 const GITHUB_RELEASES_PAGE = 'https://github.com/nomifun/nomifun-tauri/releases/latest';
@@ -1417,19 +1409,9 @@ export const update = {
       htmlUrl: GITHUB_RELEASES_PAGE,
       prerelease: false,
       draft: false,
-      assets: [],
-      // recommendedAsset intentionally omitted: the plugin handles download +
-      // install, so the modal routes through the autoUpdate.* channels below.
     };
     return { success: true, data: { currentVersion, updateAvailable: true, latest } };
   }, { success: false, msg: 'Updater is unavailable outside the desktop shell' }),
-  // Unused under Tauri (no recommendedAsset → the modal never takes the manual
-  // download path); kept for API compatibility with the modal's manual branch.
-  download: stubShellProvider<IBridgeResponse<UpdateDownloadResult>, UpdateDownloadRequest>({
-    success: false,
-    msg: 'Use the Tauri updater (auto path)',
-  }),
-  downloadProgress: noopEmitter<UpdateDownloadProgressEvent>(),
 };
 
 export const autoUpdate = {

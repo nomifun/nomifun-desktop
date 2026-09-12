@@ -4,16 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export interface GitHubReleaseAsset {
-  name: string;
-  /** Primary download URL — rewritten to CDN for faster download. */
-  url: string;
-  /** Original GitHub download URL — used as fallback when CDN fails. */
-  fallbackUrl?: string;
-  size: number;
-  contentType?: string;
-}
-
 export interface UpdateReleaseInfo {
   tagName: string;
   version: string;
@@ -23,8 +13,6 @@ export interface UpdateReleaseInfo {
   publishedAt?: string;
   prerelease: boolean;
   draft: boolean;
-  assets: GitHubReleaseAsset[];
-  recommendedAsset?: GitHubReleaseAsset;
 }
 
 export interface UpdateCheckResult {
@@ -39,32 +27,7 @@ export interface UpdateCheckRequest {
   repo?: string;
 }
 
-export interface UpdateDownloadRequest {
-  url: string;
-  /** Fallback URL tried when the primary URL fails (e.g. CDN down). */
-  fallbackUrl?: string;
-  file_name?: string;
-}
-
-export interface UpdateDownloadResult {
-  downloadId: string;
-  file_path: string;
-}
-
-export type UpdateDownloadStatus = 'starting' | 'downloading' | 'completed' | 'error' | 'cancelled';
-
-export interface UpdateDownloadProgressEvent {
-  downloadId: string;
-  status: UpdateDownloadStatus;
-  receivedBytes: number;
-  totalBytes?: number;
-  percent?: number;
-  bytesPerSecond?: number;
-  file_path?: string;
-  error?: string;
-}
-
-// Auto-updater status types (electron-updater)
+// Shared status payloads emitted by the Tauri updater adapter.
 export type AutoUpdateStatusType =
   | 'checking'
   | 'available'

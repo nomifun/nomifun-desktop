@@ -15,9 +15,8 @@
  *  - invoke(name, data):
  *      emits event `"subscribe-" + name` with body `{ id, data }`,
  *      then awaits a one-shot `"subscribe.callback-" + name + id`.
- *  - subscribe(name, handler):
- *      listens on `"subscribe-" + name`, runs the handler, then emits
- *      `"subscribe.callback-" + name + body.id` with the result.
+ *  - responders deliver the result on
+ *      `"subscribe.callback-" + name + body.id`.
  *
  * The id is concatenated to the name WITHOUT a delimiter — this matches the
  * original library and the consumers that hand-build the callback name
@@ -70,26 +69,18 @@ const randomSuffix = (): string => {
   return s;
 };
 
-const subscribe = <Data = any, Result = any>(name: string, callback: (data: Data) => Promise<Result>): (() => void) => {
-  return on('subscribe-' + name, (body: { id: string; data: Data }, ...rest: any[]) => {
-    Promise.resolve(callback(body.data)).then((result) => {
-      emit('subscribe.callback-' + name + body.id, result, ...rest);
-    });
-  });
-};
-
 const invoke = <Data = any>(name: string, data?: any): Promise<Data> => {
   const id = nextId(name);
-  return new Promise<Data>((resolve) => {
-    // Register the one-shot callback listener BEFORE emitting the request, so a
-    // synchronous responder (loopback / same-process provider) cannot deliver
-    // the result before we are listening. With an async transport the order is
-    // immaterial; this is correct in both cases.
-    const dispose = on('subscribe.callback-' + name + id, (result: Data) => {
-      resolve(result);
-      dispose();
-    });
-    emit('subscribe-' + name, { id, data });
+  const responseEvent = 'subscribe.callback-' + name + id;
+  return new Promise<Data>((resolve, reject) => {
+    // Listen before sending: a loopback responder can reply synchronously.
+    hub.once(responseEvent, resolve);
+    try {
+      emit('subscribe-' + name, { id, data });
+    } catch (error) {
+      hub.off(responseEvent, resolve);
+      reject(error);
+    }
   });
 };
 
@@ -106,4 +97,4 @@ const adapter = (config: Adapter): void => {
   });
 };
 
-export { adapter, on, off, emit, subscribe, invoke };
+export { adapter, on, off, emit, invoke };
