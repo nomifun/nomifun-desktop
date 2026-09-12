@@ -232,7 +232,16 @@ pub(crate) fn parse_images_response_limited(
     budget.ensure_additional_count(data.len(), "images response")?;
     let mut out = Vec::with_capacity(data.len());
     for (index, item) in data.iter().enumerate() {
-        if let Some(b64) = item.get("b64_json").and_then(|v| v.as_str()) {
+        let b64 = item
+            .get("b64_json")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let url = item
+            .get("url")
+            .and_then(Value::as_str)
+            .map(str::trim);
+        if let Some(b64) = b64 {
             let bytes = budget.decode_base64(b64, &format!("images data[{index}].b64_json"))?;
             out.push(ProducedAsset {
                 data: ProducedData::Bytes(bytes),
@@ -242,11 +251,13 @@ pub(crate) fn parse_images_response_limited(
                 // downstream verified artifact path sniff the bytes.
                 mime: response_image_mime(item),
             });
-        } else if let Some(url) = item.get("url").and_then(|v| v.as_str()) {
+        } else if let Some(url) = url {
             budget.accept_url("images response")?;
             out.push(ProducedAsset { data: ProducedData::Url(url.to_string()), mime: None });
         } else {
-            return Err(InvokeError::parse("images data item has neither b64_json nor url"));
+            return Err(InvokeError::parse(
+                "images data item has neither a non-empty b64_json nor URL field",
+            ));
         }
     }
     Ok(out)
@@ -322,11 +333,21 @@ mod tests {
     }
 
     #[test]
+    fn empty_base64_placeholder_does_not_hide_a_valid_url() {
+        let out = parse_images_response(&json!({
+            "data": [{"b64_json": "  ", "url": " https://cdn/x.png "}]
+        }))
+        .unwrap();
+        assert!(matches!(&out[0].data, ProducedData::Url(url) if url == "https://cdn/x.png"));
+    }
+
+    #[test]
     fn parse_errors_on_empty_or_missing() {
         for bad in [
             json!({}),
             json!({"data": []}),
             json!({"data": [{}]}),
+            json!({"data": [{"b64_json": ""}]}),
             json!({"data": [{"b64_json": "!!!not base64!!!"}]}),
         ] {
             let err = parse_images_response(&bad).unwrap_err();
