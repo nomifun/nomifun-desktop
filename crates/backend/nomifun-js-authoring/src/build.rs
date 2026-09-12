@@ -724,7 +724,11 @@ impl<'a> FixedEsmBundler<'a> {
                 AuthoringError::PackRejected(format!("lock graph is missing {key}"))
             })?;
             let package = cache.load(locked.archive_sha256())?;
-            if package.name() != locked.name() || package.version() != locked.version() {
+            if package.name() != locked.name()
+                || package.version() != locked.version()
+                || package.package_json_digest() != locked.package_json_sha256()
+                || package.registry_integrity() != locked.registry_integrity()
+            {
                 return Err(AuthoringError::Cache(format!(
                     "cache object does not match lock package {key}"
                 )));
@@ -1147,9 +1151,12 @@ fn parse_import(line: &str) -> Result<ParsedImport, AuthoringError> {
         });
     }
     if let Some(value) = clause.strip_prefix('{') {
+        let value = value
+            .strip_suffix('}')
+            .ok_or_else(|| unsupported_syntax("named import clause"))?;
         return Ok(ParsedImport {
             specifier,
-            kind: ImportKind::Named(parse_bindings(value.strip_suffix('}').unwrap_or_default())?),
+            kind: ImportKind::Named(parse_bindings(value)?),
         });
     }
     let Some((default_name, rest)) = clause.split_once(',') else {
@@ -1161,11 +1168,14 @@ fn parse_import(line: &str) -> Result<ParsedImport, AuthoringError> {
     let default_name = valid_binding(default_name.trim())?;
     let rest = rest.trim();
     if let Some(value) = rest.strip_prefix('{') {
+        let value = value
+            .strip_suffix('}')
+            .ok_or_else(|| unsupported_syntax("named import clause"))?;
         return Ok(ParsedImport {
             specifier,
             kind: ImportKind::DefaultAndNamed {
                 default_name,
-                bindings: parse_bindings(value.strip_suffix('}').unwrap_or_default())?,
+                bindings: parse_bindings(value)?,
             },
         });
     }
@@ -1182,7 +1192,7 @@ fn parse_export(
         let value = value
             .strip_suffix("};")
             .or_else(|| value.strip_suffix('}'))
-            .unwrap_or_default();
+            .ok_or_else(|| unsupported_syntax("named export declaration"))?;
         let bindings = parse_bindings(value)?;
         return Ok((String::new(), bindings
             .into_iter()
@@ -1626,4 +1636,131 @@ fn shutdown_build_process(
             node_executable.display()
         ))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        DependencyRequestSet, LockedNpmPackage, NeverCancel, NpmResolverIdentity,
+        RegistryPackageRelease,
+    };
+
+    #[test]
+    fn parser_rejects_unclosed_bindings_and_reexports() {
+        for source in [
+            "import { value from 'alpha';",
+            "import main, { value from 'alpha';",
+            "export { value;",
+            "export { value } from 'alpha';",
+            "export {} from 'alpha';",
+        ] {
+            assert!(
+                matches!(
+                    parse_module_source(source),
+                    Err(AuthoringError::PackRejected(_))
+                ),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn parser_preserves_supported_named_bindings() {
+        let parsed = parse_module_source(
+            "import { value as local } from 'alpha';\nexport { local as renamed };",
+        )
+        .unwrap();
+        assert!(
+            matches!(&parsed.imports[0].kind, ImportKind::Named(bindings)
+            if bindings == &vec![("value".to_owned(), "local".to_owned())])
+        );
+        assert_eq!(parsed.exports[0].local_name, "local");
+        assert_eq!(parsed.exports[0].export_name, "renamed");
+        let parsed = parse_module_source("import main, {} from 'alpha';\nexport {};").unwrap();
+        assert!(matches!(&parsed.imports[0].kind,
+            ImportKind::DefaultAndNamed { default_name, bindings }
+            if default_name == "main" && bindings.is_empty()));
+        assert!(parsed.exports.is_empty());
+    }
+
+    #[test]
+    fn bundler_requires_cache_metadata_to_match_exact_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = ContentAddressedNpmCache::new(temp.path().join("cache")).unwrap();
+        let release = RegistryPackageRelease::new(
+            "alpha",
+            "1.0.0",
+            "sha512-YWJjZA==",
+            [
+                (
+                    NormalizedSourcePath::parse("package.json").unwrap(),
+                    br#"{"name":"alpha","version":"1.0.0","type":"module","main":"index.js"}"#
+                        .to_vec(),
+                ),
+                (
+                    NormalizedSourcePath::parse("index.js").unwrap(),
+                    b"export const value = 1;".to_vec(),
+                ),
+            ],
+        )
+        .unwrap();
+        let cached = cache.store(&release, &NeverCancel).unwrap();
+        let requests = DependencyRequestSet::new([("alpha".into(), "1.0.0".into())]).unwrap();
+        for (package_json_digest, integrity, accepted) in [
+            (
+                cached.package_json_digest().clone(),
+                "sha512-YWJjZA==",
+                true,
+            ),
+            (
+                digest_bytes(b"different package.json"),
+                "sha512-YWJjZA==",
+                false,
+            ),
+            (
+                cached.package_json_digest().clone(),
+                "sha512-ZWZnaA==",
+                false,
+            ),
+        ] {
+            let package = LockedNpmPackage::new(
+                "alpha",
+                "1.0.0",
+                integrity,
+                cached.archive_digest().clone(),
+                package_json_digest,
+                [],
+            )
+            .unwrap();
+            let lock = ExactDependencyLock::new(
+                requests.digest().unwrap(),
+                NpmResolverIdentity::new("test", "1.0.0").unwrap(),
+                [("alpha".into(), package.key())],
+                [(package.key(), package)],
+            )
+            .unwrap();
+            let mut bundler = FixedEsmBundler {
+                source_root: temp.path(),
+                lock: &lock,
+                cache: Some(&cache),
+                source_files: BTreeSet::new(),
+                npm_cache: BTreeMap::new(),
+                npm_entrypoints: BTreeMap::new(),
+                visiting: BTreeSet::new(),
+                emitted: BTreeSet::new(),
+                modules: Vec::new(),
+                languages: BTreeSet::new(),
+                module_exports: BTreeMap::new(),
+                external_imports: Vec::new(),
+                external_counter: 0,
+            };
+            let result = bundler.package_cache("alpha@1.0.0");
+            if accepted {
+                assert!(result.is_ok());
+            } else {
+                assert!(matches!(result, Err(AuthoringError::Cache(_))));
+            }
+        }
+    }
 }

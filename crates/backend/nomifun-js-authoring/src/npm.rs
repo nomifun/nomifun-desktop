@@ -439,12 +439,27 @@ impl ContentAddressedNpmCache {
         let bytes = fs::read(&record_path).map_err(|error| io_error(&record_path, error))?;
         let record: NpmCacheRecord = strict_json_from_slice(&bytes)
             .map_err(|error| AuthoringError::Cache(error.to_string()))?;
+        let payload = NpmCacheDigestPayload {
+            format_version: CACHE_RECORD_VERSION,
+            name: &record.name,
+            version: &record.version,
+            registry_integrity: &record.registry_integrity,
+            files: &record.files,
+        };
         if canonical_json_bytes(&record)? != bytes
             || record.format_version != CACHE_RECORD_VERSION
             || record.archive_digest != *digest
+            || digest_bytes(&canonical_json_bytes(&payload)?) != *digest
         {
             return Err(AuthoringError::Cache(
                 "cache object record is non-canonical or mismatched".into(),
+            ));
+        }
+        if !record.files.iter().any(|file| {
+            file.path.as_str() == "package.json" && file.digest == record.package_json_digest
+        }) {
+            return Err(AuthoringError::Cache(
+                "cache package.json digest does not match the file record".into(),
             ));
         }
         let files_root = canonical.join(CACHE_FILES_DIRECTORY);
@@ -491,6 +506,10 @@ impl CachedNpmPackage {
 
     pub fn package_json_digest(&self) -> &DigestHex {
         &self.record.package_json_digest
+    }
+
+    pub(crate) fn registry_integrity(&self) -> &str {
+        &self.record.registry_integrity
     }
 
     pub fn name(&self) -> &str {
@@ -848,9 +867,9 @@ struct RegistryPackageJson {
     version: String,
     #[serde(default)]
     dependencies: BTreeMap<String, String>,
-    #[serde(default)]
+    #[serde(rename = "optionalDependencies", default)]
     optional_dependencies: Option<BTreeMap<String, String>>,
-    #[serde(default)]
+    #[serde(rename = "peerDependencies", default)]
     peer_dependencies: Option<BTreeMap<String, String>>,
     #[serde(
         rename = "bundledDependencies",
