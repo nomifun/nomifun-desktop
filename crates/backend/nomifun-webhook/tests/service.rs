@@ -39,7 +39,6 @@ async fn svc(sender: Arc<dyn WebhookSender>) -> WebhookService {
     let db = init_database_memory().await.unwrap();
     let webhooks: Arc<dyn IWebhookRepository> = Arc::new(SqliteWebhookRepository::new(db.pool().clone()));
     let tags: Arc<dyn ITagSettingRepository> = Arc::new(SqliteTagSettingRepository::new(db.pool().clone()));
-    Box::leak(Box::new(db));
     WebhookService::new(webhooks, tags, sender)
 }
 
@@ -96,6 +95,48 @@ async fn create_validates_name_and_url() {
     let mut bad = create_req();
     bad.url = "".into();
     assert!(s.create(bad).await.is_err());
+}
+
+#[tokio::test]
+async fn tag_events_reject_invalid_entries_without_changing_settings() {
+    let s = svc(Arc::new(MockSender::default())).await;
+    let events = vec!["done".to_string(), "needs_review".to_string()];
+    s.upsert_tag_setting(
+        "alpha",
+        UpsertTagSettingRequest {
+            description: Some("keep me".into()),
+            notify_events: Some(events.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    for invalid in ["done,failed", "", "unknown", " done"] {
+        let error = s.upsert_tag_setting(
+            "alpha",
+            UpsertTagSettingRequest {
+                description: Some("must not be saved".into()),
+                notify_events: Some(vec!["done".into(), invalid.into()]),
+                ..Default::default()
+            },
+        ).await.unwrap_err();
+        assert!(matches!(error, nomifun_common::AppError::BadRequest(_)));
+        let saved = s.get_tag_setting("alpha").await.unwrap();
+        assert_eq!(saved.notify_events, events);
+        assert_eq!(saved.description, "keep me");
+    }
+
+    let cleared = s.upsert_tag_setting(
+        "alpha",
+        UpsertTagSettingRequest {
+            notify_events: Some(vec![]),
+            ..Default::default()
+        },
+    ).await.unwrap();
+    assert!(cleared.notify_events.is_empty());
+    let kept = s.upsert_tag_setting("alpha", UpsertTagSettingRequest::default()).await.unwrap();
+    assert!(kept.notify_events.is_empty(), "omitted events must keep an explicit empty set");
 }
 
 #[tokio::test]
