@@ -2145,9 +2145,8 @@ mod tests {
     }
 
     async fn service_with_owners() -> (RequirementService, String, String) {
-        let (service, conversation_id, terminal_id, db) =
+        let (service, conversation_id, terminal_id, _) =
             service_with_owners_and_database().await;
-        Box::leak(Box::new(db));
         (service, conversation_id, terminal_id)
     }
 
@@ -2224,7 +2223,6 @@ mod tests {
             Arc::new(NoopBroadcaster),
             Arc::from(installation_owner.as_str()),
         );
-        Box::leak(Box::new(db));
 
         let data_dir = tempfile::tempdir().unwrap();
         let upload_root = tempfile::tempdir().unwrap();
@@ -3844,7 +3842,6 @@ mod tests {
             Arc::new(NoopBroadcaster),
             Arc::from(installation_owner.as_str()),
         );
-        Box::leak(Box::new(db));
         RequirementService::new(repo, emitter).with_terminal_driver(driver)
     }
 

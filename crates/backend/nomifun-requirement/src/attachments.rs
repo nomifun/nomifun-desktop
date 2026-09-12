@@ -2611,7 +2611,6 @@ mod tests {
         let pool = db.pool().clone();
         let repo: Arc<dyn nomifun_db::IAttachmentRepository> =
             Arc::new(SqliteAttachmentRepository::new(pool.clone()));
-        Box::leak(Box::new(db));
         let data_dir = tempfile::tempdir().unwrap();
         let upload_root = tempfile::tempdir().unwrap();
         let store = AttachmentStore::new(data_dir.path().to_path_buf(), repo)
