@@ -78,8 +78,9 @@ export function projectRuntimeCandidates(
         selectable:
           Boolean(probe.runtime) &&
           probe.compatibility !== 'incompatible' &&
-          !selected &&
-          !pending,
+          status.download.state !== 'downloading' &&
+          !status.pending_candidate &&
+          !selected,
       };
     })
     .sort((left, right) => {
@@ -154,12 +155,12 @@ export function requiresNonRecommendedConfirmation(
   );
 }
 
-export function managedOfferIsInstalled(
+export function probeForManagedOffer(
   status: JavaScriptRuntimeStatus
-): boolean {
+): JavaScriptRuntimeProbe | undefined {
   const offer = status.download_offer;
-  if (!offer) return false;
-  return status.probes.some(
+  if (!offer) return undefined;
+  return status.probes.find(
     (probe) =>
       probe.source === 'managed' &&
       probe.runtime?.node_version === offer.node_version &&

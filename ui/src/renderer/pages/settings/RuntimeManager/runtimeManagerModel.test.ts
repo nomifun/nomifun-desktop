@@ -13,7 +13,7 @@ import type {
 import {
   buildBeginRuntimeSwitchRequest,
   buildRuntimeSwitchDecisionRequest,
-  managedOfferIsInstalled,
+  probeForManagedOffer,
   probeForRuntime,
   projectRuntimeCandidates,
   requiresNonRecommendedConfirmation,
@@ -60,6 +60,18 @@ const status = (
 });
 
 describe('Runtime Manager model', () => {
+  test.each(['download', 'pending'] as const)('candidates cannot switch during %s', busy => {
+    const value = runtime('candidate', 'a');
+    const candidate = probe('manual_path', '/node', 'recommended', value);
+    const snapshot = status({
+      probes: [candidate],
+      ...(busy === 'download'
+        ? { download: { download_revision: 1, state: 'downloading' as const } }
+        : { pending_candidate: runtime('other', 'b') }),
+    });
+    expect(projectRuntimeCandidates(snapshot)[0]?.selectable).toBe(false);
+  });
+
   test('builds an exact switch CAS from selected and candidate identities', () => {
     const selected = runtime('node-selected', 'a');
     const candidate = probe(
@@ -171,7 +183,7 @@ describe('Runtime Manager model', () => {
       expected_candidate_executable_digest: 'd'.repeat(64),
       decision: 'abort_and_restore_selected',
     });
-    expect(managedOfferIsInstalled(snapshot)).toBe(true);
+    expect(probeForManagedOffer(snapshot)).toBe(snapshot.probes[0]);
     expect(runtimeStatusNeedsPolling(snapshot)).toBe(true);
   });
 });
