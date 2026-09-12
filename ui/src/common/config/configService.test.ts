@@ -153,6 +153,20 @@ describe('configService load ownership', () => {
     expect(seen).toEqual([['dark', undefined, true], ['language', undefined]]);
   });
 
+  test('successful reload resolves subscribed absent preferences after an offline start', async () => {
+    const { service, load } = fixture();
+    const seen: unknown[] = [];
+    service.subscribe('theme', (value) => seen.push([value, service.isInitialized()]));
+    const offline = await load();
+    offline.response.reject(new Error('test offline'));
+    await offline.done;
+    expect(seen).toEqual([]);
+    const ready = await load(true);
+    ready.response.resolve({});
+    await ready.done;
+    expect(seen).toEqual([[undefined, true]]);
+  });
+
   test('failed reload notifies subscribers that persisted values were cleared', async () => {
     const { service, load } = fixture();
     const first = await load();

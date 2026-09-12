@@ -189,8 +189,10 @@ export class ConfigServiceImpl {
       else next.delete(key); // Preserve removals as well as optimistic values.
     }
     this.cache = next;
-    for (const key of new Set([...previous.keys(), ...next.keys()])) {
-      if (!Object.is(previous.get(key), this.cache.get(key))) {
+    // A successful load also resolves absent preferences: consumers may have
+    // used a startup hint while the server settings were unavailable.
+    for (const key of new Set([...previous.keys(), ...next.keys(), ...this.subscribers.keys()])) {
+      if (!Object.is(previous.get(key), this.cache.get(key)) || (this.initialized && !this.cache.has(key))) {
         this.notify(key as ConfigKey, this.cache.get(key));
       }
     }

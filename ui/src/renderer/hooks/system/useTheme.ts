@@ -1,7 +1,7 @@
 // hooks/useTheme.ts
 import { configService } from '@/common/config/configService';
 import { broadcastThemeSync } from '@renderer/utils/theme/themeBroadcast';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useLayoutEffect, useRef, useState } from 'react';
 
 export type Theme = 'light' | 'dark';
 
@@ -23,78 +23,73 @@ const readCachedTheme = (): Theme => {
   return DEFAULT_THEME;
 };
 
-// Apply localStorage hint synchronously to avoid FOUC, then resolve to the
-// authoritative value from configService once it has loaded from the backend.
-const initTheme = async (): Promise<Theme> => {
-  const hint = readCachedTheme();
-  applyThemeToDom(hint);
+const readTheme = (config: typeof configService): Theme => {
+  const stored = config.get('theme');
+  if (stored === 'light' || stored === 'dark') return stored;
+  // HTML applies the same hint before the bundle loads. Once settings are
+  // available, an absent/invalid preference means the supported default.
+  return stored === undefined && !config.isInitialized() ? readCachedTheme() : DEFAULT_THEME;
+};
+
+const applyTheme = (theme: Theme) => {
+  applyThemeToDom(theme);
   try {
-    await configService.whenReady();
-    const theme = (configService.get('theme') as Theme) || hint;
-    applyThemeToDom(theme);
-    try {
-      localStorage.setItem(THEME_CACHE_KEY, theme);
-    } catch (_e) {
-      /* noop */
-    }
-    return theme;
-  } catch (error) {
-    console.error('Failed to load initial theme:', error);
-    return hint;
+    localStorage.setItem(THEME_CACHE_KEY, theme);
+  } catch (_e) {
+    /* noop */
   }
 };
 
-// Run theme initialization immediately
-let initialThemePromise: Promise<Theme> | null = null;
-if (typeof window !== 'undefined') {
-  initialThemePromise = initTheme();
-}
+const useTheme = (
+  config = configService,
+  broadcast = broadcastThemeSync
+): [Theme, (theme: Theme) => Promise<void>] => {
+  const [theme, setThemeState] = useState<Theme>(() => readTheme(config));
+  const revision = useRef(0);
 
-const useTheme = (): [Theme, (theme: Theme) => Promise<void>] => {
-  const [theme, setThemeState] = useState<Theme>(DEFAULT_THEME);
-
-  // Apply theme to document
-  const applyTheme = useCallback((newTheme: Theme) => {
-    applyThemeToDom(newTheme);
-    try {
-      localStorage.setItem(THEME_CACHE_KEY, newTheme);
-    } catch (_e) {
-      /* noop */
-    }
-  }, []);
+  useLayoutEffect(() => {
+    let active = true;
+    const sync = () => {
+      const current = readTheme(config);
+      setThemeState(current);
+      applyTheme(current);
+    };
+    const unsubscribe = config.subscribe('theme', () => {
+      revision.current++;
+      sync();
+    });
+    sync();
+    void config.whenReady().then(() => { if (active) sync(); });
+    return () => {
+      active = false;
+      revision.current++;
+      unsubscribe();
+    };
+  }, [config]);
 
   // Set theme with persistence
   const setTheme = useCallback(
     async (newTheme: Theme) => {
+      const previous = readTheme(config);
+      const writing = config.set('theme', newTheme);
+      const current = ++revision.current;
       try {
-        setThemeState(newTheme);
-        applyTheme(newTheme);
-        await configService.set('theme', newTheme);
+        await writing;
         // 仅在持久化成功后广播：失败会走 catch 回滚，避免给独立窗口（桌宠）
         // 广播一个最终被回滚的值导致跨窗短暂不一致。
-        broadcastThemeSync(newTheme);
+        if (revision.current === current && config.get('theme') === newTheme) broadcast(newTheme);
       } catch (error) {
         console.error('Failed to save theme:', error);
-        // Revert on error
-        setThemeState(theme);
-        applyTheme(theme);
+        if (revision.current === current && config.get('theme') === newTheme) {
+          config.setLocal('theme', previous);
+        }
+        // Reconcile even an older failure: its predecessor may also have been
+        // optimistic. ConfigService protects newer in-flight writes on reload.
+        await config.reload();
       }
     },
-    [theme, applyTheme]
+    [config, broadcast]
   );
-
-  // Initialize theme state from the early initialization
-  useEffect(() => {
-    if (initialThemePromise) {
-      initialThemePromise
-        .then((initialTheme) => {
-          setThemeState(initialTheme);
-        })
-        .catch((error) => {
-          console.error('Failed to initialize theme:', error);
-        });
-    }
-  }, []);
 
   return [theme, setTheme];
 };
