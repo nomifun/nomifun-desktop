@@ -4,9 +4,9 @@
 
 ## 续接位置
 
-- 当前批次：R92–R96已验收，源码截至 `9e4e7ad8c`，上一已核实远端 `68df6187b`；R97 Office、R98客服、R99 AutoWork按独占写集继续。Browser Use暂跳过。
+- 当前批次：R92–R96及R100/R101已验收，源码截至 `ba78b6a38`，上一已核实远端 `833df3fef`；R97 Office、R98客服、R99 AutoWork按独占写集继续。Browser Use暂跳过。
 - 后续集成：当前分支已包含 `dd35e01de` 的 MiniApp 分支合并；设计文档已跟踪。本批仅更新遗留路由测试，未修改 MiniApp 产品实现，模块仍待深审。
-- 全局覆盖：111 个模块边界中，7 个已验证、60 个部分完成、42 个待审、2 个整模块审计中；248 个唯一问题/任务。完整阅读与跨模块问题闭环分开登记，Browser Use仍暂跳过。
+- 全局覆盖：111 个模块边界中，7 个已验证、60 个部分完成、42 个待审、2 个整模块审计中；250 个唯一问题/任务。完整阅读与跨模块问题闭环分开登记，Browser Use仍暂跳过。
 - R1 证据：[首轮记录](2026-09-12-code-quality.zh.md)。R1–R39 各报告中的“未提交/dirty”描述是当时快照；当前提交状态以下方验收记录为准。
 - R2 证据：[运行时与测试边界记录](2026-09-12-runtime-and-test-boundaries.zh.md)，包含改动、失败尝试、验证及覆盖限制。
 - R3 证据：[生命周期与状态记录](2026-09-12-lifecycle-and-state.zh.md)，记录四个 Host 旧实现失败、Context falsy 初值及消息重放缺陷；保留待办，勿重复修复。
@@ -217,6 +217,19 @@ R95指定不存在revision不再返回空草稿，模型diff同时比较route re
 R96沿R90-03：clean正文的名称/描述保存实际旧失败；增加窄metadata方法，三存储只写展示字段，在写入时校验owner/current revision/未退休，不恢复任意整preset覆盖接口。服务测试保留revision不变后再创建revision2；三个存储复用退休测试验证owner/stale拒绝、session_only不可改及退休后拒绝。Rust均4线程；未跑全workspace、真实远端服务或其他OS。
 
 五批生产净增121行（R92 +8、R93 +44、R94 +29、R95 -34、R96 +74），测试净增511行（+102、+107、+186、+20、+96），总净增632行。没有新增框架/依赖；不把测试增长计成代码减量。
+
+## R100 / R101 阶段验收
+
+| 批次 | 已提交源码 | 最终验证 |
+| --- | --- | --- |
+| R100 InMemory binding | `96c067c36` | ControlPlane --lib26/0，4线程 |
+| R101 缓存精简 | `ba78b6a38` | JS authoring --lib --test build_and_resolver22/0、1网络ignored，4线程 |
+
+R100关闭R90-03内存store原owner/重复ID部分。复用既有退休测试，真实旧实现三个冲突写入全部成功（[false,false,false]），修复后全部拒绝并保留原owner，合法owner更新和退休仍通过。首次--exact短名筛选0测试，不计证据；去掉错误过滤后才得到有效旧失败。共享同锁内preset权限校验、合并Remote缺失错误；不改变SQLite/公开接口，也未关闭版本递增及快照问题。
+
+R101全仓查无materialize_into调用后删除该公开复制路径；缓存guard用已有Option路径模式解除清理权，使两个PathBuf正常释放，不再mem::forget。保留失败路径限定父目录/UUID名称的清理；没有添加新测试文件或新抽象，实际Node24构建/cache既有回归通过，未证明跨进程安装及文件TOCTOU安全。
+
+整理新增代码换行后的最终统计：R100生产+11、测试+25；R101生产-15、测试0；两批生产净减4、测试净增25、总净增21行。不通过压缩代码行掩盖增量。
 
 ## 当前并行边界（R97 / R98 / R99）
 
@@ -742,7 +755,7 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | R89-02 | 已验证 | Form校验期间重复提交及reset后旧草稿提交 | 同步saving与草稿version，旧校验丢弃；Agent五项红绿，主线最终回归 |
 | R90-01 | 已验证 | 创建默认路由覆盖显式模型选择 | 只填完全未指定的Chat选择；旧实现真实失败，ControlPlane26/0 |
 | R90-02 | 已验证 | 未用整preset覆盖接口/三实现及重复可用性映射 | 无调用update_preset删除，复用catalog映射；ControlPlane26/0、App/Platform各3/0 |
-| R90-03 | 部分完成 | ControlPlane完整阅读后元数据/快照/内存store契约 | R95关闭缺失revision/模型records差异，R96关闭元数据保存；InMemory绑定既有owner/ID碰撞弱于SQLite，版本溢出/输入next版本，clean快照未比Skill/MiniApp及环境、summary MiniApp计数、多查询快照/retire竞态及列表N+1仍待闭环 |
+| R90-03 | 部分完成 | ControlPlane完整阅读后元数据/快照/内存store契约 | R95关闭缺失revision/模型records差异，R96关闭元数据保存；R100关闭InMemory既有owner/ID碰撞；版本溢出/输入next版本，clean快照未比Skill/MiniApp及环境、summary MiniApp计数、多查询快照/retire竞态及列表N+1仍待闭环 |
 | R91-01 | 已验证 | App RemoteBinding检查与实际UPDATE之间并发覆盖 | UPDATE同时比较expected version/digest；真实SQLite交错旧成功覆写失败，修后3/0 |
 | R92-01 | 已验证 | 恢复pending锁重入/读取失败丢write fence | 临时guard提前释放、先snapshot后take；runtime25/0 |
 | R92-02 | 已验证 | 无缓存download offer时读写锁自锁 | match前克隆并释放读锁；缓存/非缓存回归通过 |
@@ -755,10 +768,12 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | R94-01 | 已验证 | npm optional/peer字段映射遗漏 | serde映射使非空拒绝生效，保留空集合对照；authoring49/0 |
 | R94-02 | 已验证 | 缓存自报digest及lock元数据未绑定 | 重算内容地址、核对package.json及integrity；协同篡改和有效对照回归 |
 | R94-03 | 已验证 | 畸形named声明/re-export静默变空 | 使用既有PackRejected，不扩建解析器；首次测试错误类型预期已纠正 |
-| R94-04 | 部分完成 | authoring完整阅读后路径/预算/事务边界 | SourceScope反序列化绕构造、Windows名称、祖先链接与root锚定、读取增长/导入先落盘再预算、ESM live binding、文件/DB head提交/回滚、async同步IO及取消、cache guard mem::forget/疑似无调用materialize/重复lock仍待办 |
+| R94-04 | 部分完成 | authoring完整阅读后路径/预算/事务边界 | SourceScope反序列化绕构造、Windows名称、祖先链接与root锚定、读取增长/导入先落盘再预算、ESM live binding、文件/DB head提交/回滚、async同步IO及取消、重复lock仍待办；R101已删无调用materialize并修guard mem::forget |
 | R95-01 | 已验证 | editor指定不存在revision返回空草稿 | 返回既有422错误；旧实际失败，ControlPlane26/0 |
 | R95-02 | 已验证 | model diff仅比较refs遗漏同ID record变化 | 比较完整records，复用贡献锁/MCP DTO映射去重；旧实际失败后通过 |
 | R96-01 | 已验证 | clean正文仅改展示元数据不保存 | 窄metadata更新跨三store，写时owner/revision/退休校验；旧失败，ControlPlane26/0、Platform/App各3/0 |
+| R100-01 | 已验证 | InMemory跨owner绑定覆盖和Remote ID碰撞 | 同锁核对既有owner、insert拒绝重复；有效旧三种写入均成功，修后26/0；合并重复检查 |
+| R101-01 | 已验证 | authoring无调用复制接口及cache guard泄漏 | 删除materialize_into；Option路径正常析构替代mem::forget，authoring22/0、1ignored |
 
 ## 模块覆盖索引
 
