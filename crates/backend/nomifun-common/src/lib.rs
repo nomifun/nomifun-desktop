@@ -3,6 +3,7 @@ pub mod ansi;
 pub mod constants;
 pub mod agent_execution;
 
+mod atomic_file;
 mod case_convert;
 mod crypto;
 pub mod dir_config;
