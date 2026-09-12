@@ -39,11 +39,16 @@ struct MiniAppSurfaceBridgeHttpRequest {
 #[derive(Clone)]
 pub struct MiniAppM1RouterState {
     application: Arc<MiniAppM1ApplicationService>,
+    pub(super) product: Option<Arc<super::miniapp_product::MiniAppProductService>>,
 }
 
 impl MiniAppM1RouterState {
     pub(crate) fn new(application: Arc<MiniAppM1ApplicationService>) -> Self {
-        Self { application }
+        Self { application, product: None }
+    }
+
+    pub(crate) fn with_product(mut self, product: super::miniapp_product::MiniAppProductService) -> Self {
+        self.product = Some(Arc::new(product)); self
     }
 }
 
@@ -52,6 +57,7 @@ pub(crate) fn miniapp_m1_read_routes(
 ) -> Router {
     Router::new()
         .route("/api/miniapps", get(list_miniapps))
+        .merge(super::miniapp_product::read_routes())
         .route(
             "/api/miniapps/{miniapp_id}/workshop",
             get(get_workshop),
@@ -64,6 +70,7 @@ pub(crate) fn miniapp_m1_write_routes(
 ) -> Router {
     Router::new()
         .route("/api/miniapps/projects", post(create_project))
+        .merge(super::miniapp_product::write_routes())
         .route(
             "/api/miniapps/{miniapp_id}/source/files/{*source_path}",
             get(get_source_file),
@@ -585,7 +592,7 @@ fn require_route_id(field: &'static str, route: &str, body: &str) -> Result<(), 
     }
 }
 
-fn application_error(error: MiniAppM1ApplicationError) -> AppError {
+pub(super) fn application_error(error: MiniAppM1ApplicationError) -> AppError {
     match error {
         MiniAppM1ApplicationError::Invalid(message) => {
             AppError::BadRequest(format!("MiniApp input is invalid: {message}"))

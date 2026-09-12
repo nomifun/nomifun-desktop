@@ -103,6 +103,7 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "miniapp_deletion_intents",
     "miniapp_kv",
     "miniapp_library_state",
+    "miniapp_product_documents",
     "miniapp_products",
     "miniapp_projects",
     "miniapp_publish_authorizations",
@@ -723,6 +724,7 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     // remains verbatim after Conversation deletion and is never resolved by a
     // production repository.
     text_ref!("miniapps", "source_conversation_id" => "conversations", "conversation_id", true, "idx_miniapps_source_conversation_id", KeepHistory),
+    text_ref!("miniapp_product_documents", "owner_user_id" => "users", "user_id", false, "idx_miniapp_product_documents_owner", Cascade),
     text_ref!("miniapp_library_state", "owner_user_id" => "users", "user_id", false, "idx_miniapp_library_state_owner_user_id", Cascade),
     text_ref!("miniapp_products", "owner_user_id" => "users", "user_id", false, "idx_miniapp_products_owner_user_id", Cascade),
     text_ref!("miniapp_products", "icon_asset_id" => "workshop_assets", "asset_id", true, "idx_miniapp_products_icon_asset_id", SetNull),

@@ -1,0 +1,463 @@
+.page {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-bg-1);
+  color: var(--color-text-1);
+}
+.header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 22px 26px;
+  border-bottom: 1px solid var(--color-border-2);
+}
+.header h1,
+.header h2 {
+  font-size: 20px;
+  line-height: 1.5;
+  margin: 0 auto 0 0;
+  font-weight: 600;
+}
+.body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+.collections {
+  width: 184px;
+  flex-shrink: 0;
+  padding: 20px 12px;
+  border-right: 1px solid var(--color-border-2);
+  overflow-y: auto;
+}
+.collection {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 10px;
+  border: 0;
+  border-radius: 8px;
+  color: var(--color-text-2);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+.collection span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.collection > span:first-child {
+  flex: 0 0 auto;
+}
+.collection small {
+  color: var(--color-text-3);
+  font-variant-numeric: tabular-nums;
+}
+.collection:hover {
+  background: var(--color-fill-2);
+}
+.collection[aria-current='page'] {
+  background: rgb(var(--primary-1));
+  color: rgb(var(--primary-6));
+}
+.collectionLabel {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin: 22px 8px 8px;
+  font-size: 12px;
+  color: var(--color-text-3);
+}
+.content {
+  min-width: 0;
+  flex: 1;
+  padding: 24px;
+  overflow-y: auto;
+}
+.title {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 18px;
+}
+.title h2 {
+  font-size: 20px;
+  margin: 0;
+}
+.muted {
+  color: var(--color-text-3);
+  font-size: 13px;
+}
+.toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 14px 0 20px;
+}
+.searchBox {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 8px;
+}
+.searchBox input {
+  min-width: 0;
+  width: 100%;
+  color: var(--color-text-1);
+  border: 0;
+  background: transparent;
+  font: inherit;
+}
+.select {
+  width: 100%;
+  padding: 10px;
+  color: var(--color-text-1);
+  background: var(--color-bg-2);
+  border: 1px solid var(--color-border-2);
+  border-radius: 8px;
+  font: inherit;
+}
+.end {
+  margin-left: auto;
+}
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(218px, 1fr));
+  gap: 14px;
+}
+.card {
+  min-width: 0;
+  border: 1px solid var(--color-border-2);
+  border-radius: 12px;
+  padding: 17px;
+  background: var(--color-bg-2);
+}
+.selected {
+  border-color: rgb(var(--primary-5));
+  background: rgb(var(--primary-1));
+}
+.cardTop {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.open {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: var(--color-text-1);
+  text-align: left;
+  cursor: pointer;
+}
+.open strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 15px;
+}
+.icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  background: rgb(var(--primary-1));
+  color: rgb(var(--primary-6));
+  border-radius: 9px;
+}
+.card p {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-3);
+  font-size: 13px;
+  margin: 14px 0;
+}
+.cardFooter {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--color-text-3);
+  font-size: 12px;
+}
+.list {
+  display: flex;
+  flex-direction: column;
+}
+.list .card {
+  border-width: 0 0 1px;
+  border-radius: 0;
+  display: grid;
+  align-items: center;
+  gap: 15px;
+  grid-template-columns: minmax(190px, 1fr) minmax(120px, 1fr) auto;
+  padding: 14px 0;
+}
+.list .card p {
+  margin: 0;
+}
+.batch {
+  background: rgb(var(--primary-1));
+  padding: 10px 14px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 9px;
+  margin-bottom: 15px;
+}
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 24px 0;
+  flex-wrap: wrap;
+}
+.empty {
+  padding: 64px 18px;
+  text-align: center;
+  grid-column: 1 / -1;
+}
+.empty h2,
+.empty h3 {
+  font-size: 19px;
+  margin: 0 0 12px;
+}
+.empty p {
+  color: var(--color-text-3);
+  margin-bottom: 20px;
+}
+.groupRow {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 13px 0;
+  border-bottom: 1px solid var(--color-border-2);
+}
+.groupRow strong {
+  flex: 1;
+  overflow-wrap: anywhere;
+  font-weight: 500;
+}
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.hero {
+  max-width: 680px;
+  padding: 60px 24px;
+  margin: 0 auto;
+}
+.firstCreate {
+  grid-column: 1 / -1;
+}
+.firstCreate .hero {
+  padding: 25px 0;
+}
+.hero h1 {
+  font-size: 30px;
+  line-height: 1.4;
+  margin: 0 0 16px;
+}
+.hero p {
+  color: var(--color-text-3);
+  margin-bottom: 26px;
+}
+.composer {
+  padding: 14px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 14px;
+  background: var(--color-bg-2);
+}
+.composer:focus-within {
+  border-color: rgb(var(--primary-5));
+}
+.composer textarea {
+  border: 0;
+  background: transparent;
+  resize: vertical;
+}
+.composerActions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+.examples {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+.editor {
+  display: grid;
+  grid-template-columns: minmax(270px, 34%) minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+}
+.chat {
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--color-border-2);
+}
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 100px;
+  padding-bottom: 20px;
+}
+.message {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.75;
+  padding: 12px 0;
+  margin-bottom: 12px;
+}
+.user {
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgb(var(--primary-1));
+}
+.preview {
+  padding: 18px;
+  background: var(--color-fill-1);
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.previewHeader {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 13px;
+}
+.frame {
+  flex: 1;
+  display: block;
+  width: 100%;
+  min-height: 360px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 12px;
+  background: var(--color-bg-2);
+}
+.previewOnly {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 20px;
+}
+.runner {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px 24px;
+}
+.notice {
+  padding: 12px 24px;
+  color: rgb(var(--primary-6));
+  background: rgb(var(--primary-1));
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.drop {
+  border: 1px dashed var(--color-border-3);
+  border-radius: 12px;
+  padding: 30px 18px;
+  text-align: center;
+}
+.drop p {
+  color: var(--color-text-3);
+  margin: 15px 0;
+}
+.importPreview {
+  height: 390px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.pins {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 0 7px 18px;
+}
+.pins button {
+  background: transparent;
+  color: var(--color-text-2);
+  border: 0;
+  text-align: left;
+  cursor: pointer;
+  padding: 6px 10px;
+  border-radius: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pins button:hover {
+  background: var(--color-fill-2);
+}
+@media (max-width: 1100px) {
+  .collections {
+    width: 156px;
+  }
+  .grid {
+    grid-template-columns: repeat(auto-fill, minmax(185px, 1fr));
+  }
+  .content {
+    padding: 18px;
+  }
+  .list .card {
+    grid-template-columns: minmax(180px, 1fr) auto;
+  }
+  .list .card p {
+    display: none;
+  }
+}
+@media (max-width: 800px) {
+  .editor {
+    grid-template-columns: 1fr;
+    overflow-y: auto;
+  }
+  .chat {
+    min-height: 330px;
+    border-right: 0;
+  }
+  .preview {
+    min-height: 450px;
+  }
+  .body {
+    overflow-y: auto;
+  }
+  .content {
+    overflow: visible;
+  }
+}

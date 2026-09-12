@@ -113,8 +113,9 @@ const CreativeStudioCanvasRoute = React.lazy(loadCreativeStudioCanvasRoute);
 const CreativeStudioImageWorkbenchRoute = React.lazy(loadCreativeStudioImageWorkbenchRoute);
 const CreativeStudioVideoWorkbenchRoute = React.lazy(loadCreativeStudioVideoWorkbenchRoute);
 const CreativeStudioTemplateRoute = React.lazy(loadCreativeStudioTemplateRoute);
-const MiniAppsListPage = React.lazy(() => import('@renderer/pages/miniApps'));
-const MiniAppRunnerPage = React.lazy(() => import('@renderer/pages/miniApps/RunnerPage'));
+const MiniAppsListPage = React.lazy(() => import('@renderer/pages/miniApps/MiniAppLibraryPage'));
+const MiniAppRunnerPage = React.lazy(() => import('@renderer/pages/miniApps/MiniAppRunPage'));
+const MiniAppCreatorPage = React.lazy(() => import('@renderer/pages/miniApps/MiniAppCreatorPage'));
 const CompanionPage = React.lazy(() => import('@renderer/pages/companion'));
 const ConversationShell = React.lazy(() => import('@renderer/pages/conversation/components/ConversationShell'));
 
@@ -267,6 +268,8 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
             <Route path='/knowledge/:id' element={withRouteFallback(KnowledgeDetailPage)} />
             {/* 小程序 (Mini-apps) — the solidified library and its full-page runner. */}
             <Route path='/mini-apps' element={withRouteFallback(MiniAppsListPage)} />
+            <Route path='/mini-apps/new' element={withRouteFallback(MiniAppCreatorPage)} />
+            <Route path='/mini-apps/create/:draftId' element={withRouteFallback(MiniAppCreatorPage)} />
             <Route path='/mini-apps/:id' element={withRouteFallback(MiniAppRunnerPage)} />
           </Route>
         </Route>

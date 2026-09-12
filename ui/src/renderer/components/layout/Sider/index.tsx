@@ -5,6 +5,7 @@
  */
 
 import React, { Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import MiniAppPinnedEntries from '@/renderer/pages/miniApps/MiniAppPinnedEntries';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
@@ -376,6 +377,7 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               siderTooltipProps={siderTooltipProps}
               onClick={handleMiniAppsClick}
             />
+            <MiniAppPinnedEntries collapsed={collapsed} />
             {/* 数据空间 — data & storage (文件管理 reserved for later) */}
             <SiderSectionHeader label={t('common.siderSection.data')} collapsed={collapsed} />
             {/* Knowledge base */}
