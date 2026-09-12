@@ -31,7 +31,7 @@ use uuid::Uuid;
 use crate::atomic_file::{publish_new_file, replace_file, sync_directory, write_new_and_publish};
 use crate::dataset_roots::{
     DatasetRootKind, WORK_ROOT_BINDING_FILE, WORK_ROOT_OWNER_FILE,
-    managed_dataset_roots, reset_managed_dataset_roots,
+    reset_managed_dataset_roots,
 };
 use crate::error::AppError;
 use crate::id::validate_uuidv7;
@@ -263,29 +263,6 @@ fn lifecycle_managed_roots(
         ])
 }
 
-fn dataset_managed_roots(
-    preserve_host_control: bool,
-) -> Vec<(&'static str, ManagedRootKind)> {
-    let roots: Box<
-        dyn Iterator<Item = &'static crate::dataset_roots::ManagedDatasetRoot>,
-    > = if preserve_host_control {
-        Box::new(reset_managed_dataset_roots())
-    } else {
-        Box::new(managed_dataset_roots())
-    };
-    roots
-        .map(|root| {
-            (
-                root.path,
-                match root.kind {
-                    DatasetRootKind::File => ManagedRootKind::File,
-                    DatasetRootKind::Directory => ManagedRootKind::Directory,
-                },
-            )
-        })
-        .collect()
-}
-
 /// Everything about a persisted plan that is fixed by its version.
 ///
 /// A plan is a durable contract with older builds, so each released version
@@ -334,9 +311,17 @@ fn released_plan_shape(version: u32) -> Result<ReleasedPlanShape, AppError> {
 /// just built against the frozen shape, so a drifted registry fails before any
 /// data is moved rather than persisting a plan no reader accepts.
 fn current_writer_managed_roots() -> Vec<(&'static str, ManagedRootKind)> {
-    let mut roots = lifecycle_managed_roots().collect::<Vec<_>>();
-    roots.extend(dataset_managed_roots(true));
-    roots
+    lifecycle_managed_roots()
+        .chain(reset_managed_dataset_roots().map(|root| {
+            (
+                root.path,
+                match root.kind {
+                    DatasetRootKind::File => ManagedRootKind::File,
+                    DatasetRootKind::Directory => ManagedRootKind::Directory,
+                },
+            )
+        }))
+        .collect()
 }
 
 /// Compare a persisted plan's root list against a frozen registry.
@@ -5921,7 +5906,7 @@ pub fn rebind_data_root_after_relocation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dataset_roots::AGENT_PROCESS_REGISTRY_FILE;
+    use crate::dataset_roots::{AGENT_PROCESS_REGISTRY_FILE, managed_dataset_roots};
 
     fn touch(path: &Path) {
         fs::write(path, b"x").unwrap();
