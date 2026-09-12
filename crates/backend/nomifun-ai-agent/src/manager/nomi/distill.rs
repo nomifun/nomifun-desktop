@@ -115,6 +115,7 @@ async fn prepare_distill(
 
     // Gate 2: redact every distilled field before it touches disk.
     for m in &mut out.memories {
+        m.name = redact_secrets_owned(std::mem::take(&mut m.name));
         m.content = redact_secrets_owned(std::mem::take(&mut m.content));
         m.description = redact_secrets_owned(std::mem::take(&mut m.description));
     }

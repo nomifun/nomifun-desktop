@@ -12,7 +12,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use crate::error::Result;
+use std::io::Result;
 use crate::index::{append_index_entry, read_index};
 use crate::paths::{ensure_memory_dir, memory_entrypoint};
 use crate::store::write_memory;
