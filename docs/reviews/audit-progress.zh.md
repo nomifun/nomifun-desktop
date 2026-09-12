@@ -4,9 +4,9 @@
 
 ## 续接位置
 
-- 当前批次：R88/R89/R90/R91已验收，源码截至 `e903dc311`，上一已核实远端 `d22945ecd`；R92 JS runtime、R93 Notify、R94 JS authoring已独占放写。Browser Use暂跳过。
+- 当前批次：R92–R96已验收，源码截至 `9e4e7ad8c`，上一已核实远端 `68df6187b`；R97 Office、R98客服、R99 AutoWork按独占写集继续。Browser Use暂跳过。
 - 后续集成：当前分支已包含 `dd35e01de` 的 MiniApp 分支合并；设计文档已跟踪。本批仅更新遗留路由测试，未修改 MiniApp 产品实现，模块仍待深审。
-- 全局覆盖：111 个模块边界中，7 个已验证、58 个部分完成、44 个待审、2 个整模块审计中；233 个唯一问题/任务。完整阅读与跨模块问题闭环分开登记，Browser Use仍暂跳过。
+- 全局覆盖：111 个模块边界中，7 个已验证、60 个部分完成、42 个待审、2 个整模块审计中；248 个唯一问题/任务。完整阅读与跨模块问题闭环分开登记，Browser Use仍暂跳过。
 - R1 证据：[首轮记录](2026-09-12-code-quality.zh.md)。R1–R39 各报告中的“未提交/dirty”描述是当时快照；当前提交状态以下方验收记录为准。
 - R2 证据：[运行时与测试边界记录](2026-09-12-runtime-and-test-boundaries.zh.md)，包含改动、失败尝试、验证及覆盖限制。
 - R3 证据：[生命周期与状态记录](2026-09-12-lifecycle-and-state.zh.md)，记录四个 Host 旧实现失败、Context falsy 初值及消息重放缺陷；保留待办，勿重复修复。
@@ -196,7 +196,40 @@ R91真实SQLite单连接FIFO控制交错；旧实现返回Stale writer成功覆�
 
 四批生产净减45行（R88 +31、R89 +14、R90 -93、R91 +3），测试净增362行（+105、+122、+43、+92），总净增317行，不称为总代码量下降。
 
-## 当前并行边界（R92 / R93 / R94）
+## R92 / R93 / R94 / R95 / R96 阶段验收
+
+| 批次 | 已提交源码 | 最终验证 |
+| --- | --- | --- |
+| R92 JS runtime | `bd58fd846` | cargo test --locked -p nomifun-js-runtime --lib：25/0，1网络ignored、1真实系统Node过滤 |
+| R93 Notify | `1261cf823` | Requirements70/0（17文件），完整UI typecheck通过 |
+| R94 JS authoring | `f24cf6a49` | cargo test --locked -p nomifun-js-authoring --lib --tests：49/0、1网络ignored，Node24.18.0 |
+| R95 ControlPlane preview | `67981d03f` | ControlPlane --lib26/0 |
+| R96 Preset元数据 | `9e4e7ad8c` | ControlPlane --lib26/0、Platform --lib fresh_sqlite3/0、App --lib nomi_core_control_plane3/0 |
+
+R92完整读8源文件及内嵌测试，基线5430行。先释放临时guard再处理pending/offer分支，防止重入同一异步锁；snapshot成功后才取走pending，读失败保留写fence；Commit才重探测候选，Abort仍验证持久化身份但不要求候选可执行文件存在。主线复核并运行离线测试，无旧实现运行红绿。MiniApp读lease与切换写fence顺序、取消/panic、下载/解压/探测容量及发布归属仍待办。
+
+R93完整读Notify原5文件，追踪backend默认DTO及更新契约。真实GET错误不伪装缺省配置，特殊tag键安全索引，合并重复保存handler并用局部operation排除完整DTO反序覆盖；校验前防重、draft归属和先关所属弹窗再刷新。Agent有效旧0/6、修后6/0；主线Requirements70/0及完整typecheck。首次按钮定位属于夹具问题，不计红绿；跨窗口同步和已发写入取消未解决，保留既有React/Arco警告。
+
+R94完整读17 Rust文件（src12、tests5，基线9382行）及112行build-host。npm正确映射optional/peerDependencies使既有拒绝分支生效；重算缓存内容地址、核对package.json摘要及exact-lock元数据；畸形named声明和不支持re-export显式拒绝，不扩建解析器。主线首轮新测试误期望LocalModuleUnsupported，改为既有PackRejected后全crate49/0；无旧运行证据。实际Node24执行构建测试，无公网下载。SourceScope反序列化、祖先链接、增长中读取/导入预算、ESM语义及跨DB/文件提交仍待办。
+
+R95指定不存在revision不再返回空草稿，模型diff同时比较route refs和records；复用wire_cast贡献锁DTO及既有MCP映射，删除重复手工构造。增强既有测试，旧实现12通过/2失败；修后首次错误期望404，按既有422/PRESET_REVISION_DIGEST_MISMATCH契约修正，最终26/0。不更改全局错误策略。
+
+R96沿R90-03：clean正文的名称/描述保存实际旧失败；增加窄metadata方法，三存储只写展示字段，在写入时校验owner/current revision/未退休，不恢复任意整preset覆盖接口。服务测试保留revision不变后再创建revision2；三个存储复用退休测试验证owner/stale拒绝、session_only不可改及退休后拒绝。Rust均4线程；未跑全workspace、真实远端服务或其他OS。
+
+五批生产净增121行（R92 +8、R93 +44、R94 +29、R95 -34、R96 +74），测试净增511行（+102、+107、+186、+20、+96），总净增632行。没有新增框架/依赖；不把测试增长计成代码减量。
+
+## 当前并行边界（R97 / R98 / R99）
+
+| 批次 / 负责人 | 独占写集 | 任务 |
+| --- | --- | --- |
+| R97 / Hypatia | nomifun-office/src/**及crate tests | App验收后放写，完整模块审计；JS/File旧批次冻结 |
+| R98 / Mencius | nomifun-customer-service/src/**及crate tests | App验收后放写，DB/AI/协议/UI只读 |
+| R99 / Carver | Requirements ExtensionsPage下AutoWork实现及专属测试 | R93 typecheck后放写；Notify/Workspace/共享接口只读 |
+| 主线程 | ControlPlane剩余契约、共享边界、台账/Git | 先验收推送R92–R96，再独立最小修复；Rust集中验证 |
+
+R92–R96已冻结；worker不得回改，Browser Use继续跳过。
+
+## 历史并行边界（R92 / R93 / R94）
 
 | 批次 / 负责人 | 独占写集 | 任务 |
 | --- | --- | --- |
@@ -709,8 +742,23 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | R89-02 | 已验证 | Form校验期间重复提交及reset后旧草稿提交 | 同步saving与草稿version，旧校验丢弃；Agent五项红绿，主线最终回归 |
 | R90-01 | 已验证 | 创建默认路由覆盖显式模型选择 | 只填完全未指定的Chat选择；旧实现真实失败，ControlPlane26/0 |
 | R90-02 | 已验证 | 未用整preset覆盖接口/三实现及重复可用性映射 | 无调用update_preset删除，复用catalog映射；ControlPlane26/0、App/Platform各3/0 |
-| R90-03 | 部分完成 | ControlPlane完整阅读后元数据/快照/内存store契约 | clean保存忽略名称/描述；editor指定不存在revision回空草稿；InMemory绑定既有owner/ID碰撞弱于SQLite；版本溢出/输入next版本、clean快照未比Skill/MiniApp及环境、summary MiniApp计数/模型diff仅refs需验证；多查询快照/retire竞态、列表N+1仍待闭环 |
+| R90-03 | 部分完成 | ControlPlane完整阅读后元数据/快照/内存store契约 | R95关闭缺失revision/模型records差异，R96关闭元数据保存；InMemory绑定既有owner/ID碰撞弱于SQLite，版本溢出/输入next版本，clean快照未比Skill/MiniApp及环境、summary MiniApp计数、多查询快照/retire竞态及列表N+1仍待闭环 |
 | R91-01 | 已验证 | App RemoteBinding检查与实际UPDATE之间并发覆盖 | UPDATE同时比较expected version/digest；真实SQLite交错旧成功覆写失败，修后3/0 |
+| R92-01 | 已验证 | 恢复pending锁重入/读取失败丢write fence | 临时guard提前释放、先snapshot后take；runtime25/0 |
+| R92-02 | 已验证 | 无缓存download offer时读写锁自锁 | match前克隆并释放读锁；缓存/非缓存回归通过 |
+| R92-03 | 已验证 | 候选文件失效阻断Abort | 仅Commit重探测；Abort仍核对revision/ID/digest，runtime25/0 |
+| R92-04 | 部分完成 | JS runtime完整阅读后的跨模块/资源边界 | 切换写fence先于MiniApp释放读lease可能互等；取消/panic/退出、下载全量读取及ZIP实际预算、probe输出/环境、并发安装发布/TOCTOU、inventory错误和offer精确匹配未闭环 |
+| R93-01 | 已验证 | tag加载错误变默认/特殊键崩溃 | 缺行由后端DTO处理，真实错误显示重试；Object.hasOwn/fromEntries安全索引 |
+| R93-02 | 已验证 | 规则完整DTO保存并发覆盖 | 合并handler、局部单operation排除重叠读写；有效旧失败后通过 |
+| R93-03 | 已验证 | 通知表单旧校验/保存/刷新干扰新编辑 | 校验前防重、draft归属、先关旧弹窗；Requirements70/0及typecheck |
+| R93-04 | 部分完成 | Notify其余同步/写入取消边界 | 跨窗口事件同步未接入，已发写入不撤销；刷新失败可能隐藏编辑，删除/测试全部重复与卸载组合未穷举 |
+| R94-01 | 已验证 | npm optional/peer字段映射遗漏 | serde映射使非空拒绝生效，保留空集合对照；authoring49/0 |
+| R94-02 | 已验证 | 缓存自报digest及lock元数据未绑定 | 重算内容地址、核对package.json及integrity；协同篡改和有效对照回归 |
+| R94-03 | 已验证 | 畸形named声明/re-export静默变空 | 使用既有PackRejected，不扩建解析器；首次测试错误类型预期已纠正 |
+| R94-04 | 部分完成 | authoring完整阅读后路径/预算/事务边界 | SourceScope反序列化绕构造、Windows名称、祖先链接与root锚定、读取增长/导入先落盘再预算、ESM live binding、文件/DB head提交/回滚、async同步IO及取消、cache guard mem::forget/疑似无调用materialize/重复lock仍待办 |
+| R95-01 | 已验证 | editor指定不存在revision返回空草稿 | 返回既有422错误；旧实际失败，ControlPlane26/0 |
+| R95-02 | 已验证 | model diff仅比较refs遗漏同ID record变化 | 比较完整records，复用贡献锁/MCP DTO映射去重；旧实际失败后通过 |
+| R96-01 | 已验证 | clean正文仅改展示元数据不保存 | 窄metadata更新跨三store，写时owner/revision/退休校验；旧失败，ControlPlane26/0、Platform/App各3/0 |
 
 ## 模块覆盖索引
 
@@ -761,20 +809,20 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | `crates/backend/nomifun-conversation/` | 部分完成 | R4 已核对 list_messages 的 owner 校验、游标解析和 keyset 排序契约；其余 service、运行时/发送/权限路径待审 |
 | `crates/backend/nomifun-creation/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-cron/` | 部分完成 | R68完整19文件/18737行已读；溢出、busy原子取消释放、终态shutdown、skill重试修复，全包260/0；生产-28测试-234，DB/文件/检测任务/embedded receipt剩余R68-06 |
-| `crates/backend/nomifun-customer-service/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
+| `crates/backend/nomifun-customer-service/` | 审计中 | R98独占src/tests，R96 App验收后放写；DB/AI/协议/UI只读 |
 | `crates/backend/nomifun-db/` | 部分完成 | R4分页、R52Webhook/tag_setting原子更新已验证；R66 settings trait/repo/tests完整已审并改原子patch/RETURNING，6/0；其余仓储/事务/配额/查询计划待审 |
 | `crates/backend/nomifun-file/` | 部分完成 | R75完整20文件11901行、348/0；R80单文件字面路径/错误传播已修，snapshot50/0。R75-08未闭环；Unix链接回归未跑 |
 | `crates/backend/nomifun-gateway/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-idmm/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
-| `crates/backend/nomifun-js-authoring/` | 审计中 | R94独占src/tests，App验收后已放写，接口/依赖保持只读 |
+| `crates/backend/nomifun-js-authoring/` | 部分完成 | R94完整读17Rust文件9382行及build-host，缓存/映射/声明修复49/0；路径/预算/提交/ESM剩余见R94-04 |
 | `crates/backend/nomifun-js-host/` | 部分完成 | R2–R13 已记录子范围验证，最新跨层 121/0；在途 Mount 查询已修复；提交后持续准入及 JS 其余入口待审 |
 | `crates/backend/nomifun-js-kernel-adapter/` | 部分完成 | Host 句柄实例/代际及 opaque lease 传递、release 已核对；删除构造后立即丢弃的 identity；R5 跨层 77/0；注册映射其余待审 |
-| `crates/backend/nomifun-js-runtime/` | 审计中 | R92独占src/tests，App验收后已放写，与R94不重叠 |
+| `crates/backend/nomifun-js-runtime/` | 部分完成 | R92完整读8源文件5430行，锁重入/pending保留/Abort修复，25/0；跨模块fence、下载/探测及取消风险见R92-04 |
 | `crates/backend/nomifun-knowledge/` | 部分完成 | R59/R60/R63 export.rs全文件及相关入口已读，ZIP/安全导出/流复制/导入临时归属修复，export13/0；其余service待审，未决R60-03 |
 | `crates/backend/nomifun-mcp/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-miniapp-platform/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-model-invoke/` | 部分完成 | R20 URL 去重/错误响应已验证；4 线程全量 396/0，默认并发热点 R20-02 未定位；调用/适配其余待审 |
-| `crates/backend/nomifun-office/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
+| `crates/backend/nomifun-office/` | 审计中 | R97独占src/tests，R96 App验收后放写；共享接口只读 |
 | `crates/backend/nomifun-plugin-platform/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-plugin-service/` | 待审 | 已追踪 commit_fence/auto_apply 调用；提交→注册发布→Kernel dispatch 全程准入仍待深审 |
 | `crates/backend/nomifun-public/` | 部分完成 | R45 全 5 个源文件/内联测试及相关调用已读；预检/取消占位/归属/refill 修复后 29/0；rmcp 在途处理容量、Host shutdown 与 observation 全量投影见 R45-04 |
