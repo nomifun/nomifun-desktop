@@ -28,6 +28,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::atomic_file::{publish_new_file, replace_file, sync_directory, write_new_and_publish};
 use crate::dataset_roots::{
     DatasetRootKind, WORK_ROOT_BINDING_FILE, WORK_ROOT_OWNER_FILE,
     managed_dataset_roots, reset_managed_dataset_roots,
@@ -2923,27 +2924,6 @@ fn sync_parent(path: &Path) -> std::io::Result<()> {
     sync_directory(parent)
 }
 
-#[cfg(unix)]
-fn sync_directory(path: &Path) -> std::io::Result<()> {
-    OpenOptions::new().read(true).open(path)?.sync_all()
-}
-
-#[cfg(windows)]
-fn sync_directory(path: &Path) -> std::io::Result<()> {
-    // Windows does not support opening a directory with ordinary
-    // `CreateFile` flags through `std::fs::OpenOptions`.  Directory metadata
-    // is nevertheless protected by the atomic rename itself; use a no-op for
-    // the directory fsync step while still syncing every written file.
-    let _ = path;
-    Ok(())
-}
-
-#[cfg(not(any(unix, windows)))]
-fn sync_directory(path: &Path) -> std::io::Result<()> {
-    let _ = path;
-    Ok(())
-}
-
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
@@ -2952,58 +2932,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         path.file_name().and_then(|n| n.to_str()).unwrap_or("state"),
         Uuid::now_v7()
     ));
-    let result = (|| -> std::io::Result<()> {
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&tmp)?;
-        use std::io::Write;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        drop(file);
-        replace_file(&tmp, path)?;
-        sync_parent(path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    result
-}
-
-#[cfg(not(windows))]
-fn replace_file(source: &Path, target: &Path) -> std::io::Result<()> {
-    fs::rename(source, target)
-}
-
-#[cfg(windows)]
-fn replace_file(source: &Path, target: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    };
-
-    let source: Vec<u16> = source
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let target: Vec<u16> = target
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    if unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            target.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    } == 0
-    {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
+    write_new_and_publish(&tmp, path, bytes, replace_file)
 }
 
 fn write_atomic_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -3015,152 +2944,7 @@ fn write_atomic_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
             .unwrap_or("state"),
         Uuid::now_v7()
     ));
-    let result = (|| -> std::io::Result<()> {
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&tmp)?;
-        use std::io::Write;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        drop(file);
-        publish_new_file(&tmp, path)?;
-        sync_parent(path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    result
-}
-
-#[cfg(target_os = "macos")]
-fn publish_new_file(source: &Path, target: &Path) -> std::io::Result<()> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-
-    let source = CString::new(source.as_os_str().as_bytes()).map_err(
-        |_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "source path contains a NUL byte",
-            )
-        },
-    )?;
-    let target = CString::new(target.as_os_str().as_bytes()).map_err(
-        |_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "target path contains a NUL byte",
-            )
-        },
-    )?;
-    if unsafe {
-        libc::renamex_np(
-            source.as_ptr(),
-            target.as_ptr(),
-            libc::RENAME_EXCL,
-        )
-    } == 0
-    {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn publish_new_file(source: &Path, target: &Path) -> std::io::Result<()> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-
-    let source = CString::new(source.as_os_str().as_bytes()).map_err(
-        |_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "source path contains a NUL byte",
-            )
-        },
-    )?;
-    let target = CString::new(target.as_os_str().as_bytes()).map_err(
-        |_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "target path contains a NUL byte",
-            )
-        },
-    )?;
-    if unsafe {
-        libc::syscall(
-            libc::SYS_renameat2,
-            libc::AT_FDCWD,
-            source.as_ptr(),
-            libc::AT_FDCWD,
-            target.as_ptr(),
-            libc::RENAME_NOREPLACE,
-        )
-    } == 0
-    {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
-#[cfg(all(
-    unix,
-    not(any(target_os = "linux", target_os = "macos"))
-))]
-fn publish_new_file(source: &Path, target: &Path) -> std::io::Result<()> {
-    fs::hard_link(source, target)?;
-    fs::remove_file(source)
-}
-
-#[cfg(not(any(unix, windows)))]
-fn publish_new_file(source: &Path, target: &Path) -> std::io::Result<()> {
-    fs::hard_link(source, target)?;
-    fs::remove_file(source)
-}
-
-#[cfg(windows)]
-fn publish_new_file(source: &Path, target: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    };
-
-    let source: Vec<u16> = source
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let target: Vec<u16> = target
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    if unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            target.as_ptr(),
-            MOVEFILE_WRITE_THROUGH,
-        )
-    } != 0
-    {
-        return Ok(());
-    }
-
-    let error = std::io::Error::last_os_error();
-    // MoveFileExW may report either ERROR_FILE_EXISTS (80) or
-    // ERROR_ALREADY_EXISTS (183), depending on the filesystem. Normalize both
-    // so callers retain the create_new-style conflict contract.
-    if matches!(error.raw_os_error(), Some(80 | 183)) {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            error,
-        ))
-    } else {
-        Err(error)
-    }
+    write_new_and_publish(&tmp, path, bytes, publish_new_file)
 }
 
 fn write_phase(data_dir: &Path, phase: &str) -> Result<(), AppError> {
