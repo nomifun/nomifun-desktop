@@ -226,9 +226,10 @@ impl Tool for EditTool {
         let path = Path::new(file_path);
 
         // Cache guard: "must Read first" + staleness detection.
-        if let Some(cache_arc) = &self.file_cache
-            && let Ok(mut cache) = cache_arc.write()
-        {
+        if let Some(cache_arc) = &self.file_cache {
+            let Ok(mut cache) = cache_arc.write() else {
+                return ToolResult::error("File state cache is unavailable; refusing to edit");
+            };
             let cached = cache.get(path);
             if cached.is_none() {
                 return ToolResult {

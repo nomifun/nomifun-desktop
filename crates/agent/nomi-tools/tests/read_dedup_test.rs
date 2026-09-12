@@ -23,6 +23,43 @@ fn make_cache() -> Arc<RwLock<FileStateCache>> {
 
 const UNCHANGED_MARKER: &str = "File unchanged since last read";
 
+#[tokio::test]
+async fn reads_over_output_budget_are_not_deduplicated() {
+    let dir = tempfile::tempdir().unwrap();
+    let large = dir.path().join("large.txt");
+    let small = dir.path().join("small.txt");
+    std::fs::write(&small, "small").unwrap();
+    for batch in [false, true] {
+        let content = format!(
+            "{}HIDDEN_MIDDLE{}",
+            "a".repeat(if batch { 30_000 } else { 60_000 }),
+            "z".repeat(60_000)
+        );
+        std::fs::write(&large, &content).unwrap();
+        let cache = make_cache();
+        let tool = ReadTool::new(Some(cache.clone()), None);
+        let single = json!({ "file_path": large.to_str().unwrap() });
+        let input = if batch {
+            json!({ "file_paths": [large.to_str().unwrap(), small.to_str().unwrap()] })
+        } else {
+            single.clone()
+        };
+        let first = tool.execute(input).await;
+        assert!(!first.is_error, "{}", first.content);
+        if batch {
+            assert!(!first.content.contains("HIDDEN_MIDDLE"));
+        }
+        assert!(!cache.write().unwrap().get(&large).unwrap().dedup_eligible);
+        let second = tool.execute(single.clone()).await;
+        assert!(!second.is_error);
+        assert!(second.content.contains("HIDDEN_MIDDLE"));
+        assert!(!second.content.contains(UNCHANGED_MARKER));
+        if batch {
+            assert!(tool.execute(single).await.content.contains(UNCHANGED_MARKER));
+        }
+    }
+}
+
 /// TC-5.3-01: First read returns full content with line numbers.
 #[tokio::test]
 async fn tc_5_3_01_first_read_returns_full_content() {
@@ -115,6 +152,14 @@ async fn tc_5_3_04_different_range_no_dedup() {
     let tool = ReadTool::new(Some(cache), None);
 
     let path_str = file.to_str().unwrap();
+
+    for name in ["offset", "limit"] {
+        for value in [json!(-1), json!(1.5), json!("1")] {
+            let result = tool.execute(json!({ "file_path": path_str, (name): value })).await;
+            assert!(result.is_error, "invalid {name} must not become a full read");
+            assert!(result.content.contains(name), "{}", result.content);
+        }
+    }
 
     // Read lines 0..10.
     let input1 = json!({ "file_path": path_str, "offset": 0, "limit": 10 });

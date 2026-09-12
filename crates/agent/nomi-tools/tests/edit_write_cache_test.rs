@@ -67,31 +67,43 @@ async fn tc_5_4_01_read_then_edit() {
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "goodbye world");
 }
 
-/// TC-5.4-02: Edit without prior Read returns "must Read first" error.
+/// TC-5.4-02: Missing or poisoned cache must not disable mutation guards.
 #[tokio::test]
-async fn tc_5_4_02_edit_without_read() {
+async fn tc_5_4_02_mutations_require_available_cache() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("no_read.txt");
     std::fs::write(&file, "content").unwrap();
 
-    let cache = make_cache();
-    let edit_tool = EditTool::new(Some(cache));
-
-    let input = json!({
-        "file_path": file.to_str().unwrap(),
-        "old_string": "content",
-        "new_string": "new"
-    });
-    let result = edit_tool.execute(input).await;
-
-    assert!(result.is_error, "Edit without Read should fail");
-    assert!(
-        result.content.contains("must Read"),
-        "Error should mention 'must Read': {}",
-        result.content
-    );
-    // File must be unchanged.
-    assert_eq!(std::fs::read_to_string(&file).unwrap(), "content");
+    for poisoned in [false, true] {
+        let cache = make_cache();
+        if poisoned {
+            read_file(&ReadTool::new(Some(cache.clone()), None), &file).await;
+            let cache_to_poison = cache.clone();
+            assert!(std::thread::spawn(move || {
+                let _guard = cache_to_poison.write().unwrap();
+                panic!("simulate a failed cache owner");
+            }).join().is_err());
+        }
+        let edit_tool = EditTool::new(Some(cache.clone()));
+        let write_tool = WriteTool::new(Some(cache));
+        let results = [
+            edit_tool.execute(json!({
+                "file_path": file.to_str().unwrap(),
+                "old_string": "content",
+                "new_string": "edited"
+            })).await,
+            write_tool.execute(json!({
+                "file_path": file.to_str().unwrap(),
+                "content": "overwritten"
+            })).await,
+        ];
+        for result in results {
+            assert!(result.is_error, "{}", result.content);
+            let marker = if poisoned { "cache is unavailable" } else { "must Read" };
+            assert!(result.content.contains(marker), "{}", result.content);
+        }
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "content");
+    }
 }
 
 /// TC-5.4-03: External modification after Read triggers staleness error.

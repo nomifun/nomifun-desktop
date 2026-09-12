@@ -127,16 +127,12 @@ impl ReadTool {
         offset: Option<usize>,
         limit: Option<usize>,
         batch_image_budget: Option<BatchImageBudget>,
+        max_text_bytes: usize,
     ) -> ToolResult {
         // Relative paths resolve against the session working directory when one
         // was injected (matching Grep/Glob/Bash). Everything below — including
         // the cache key — uses the resolved path so dedup stays consistent.
-        let resolved: String = match &self.cwd {
-            Some(cwd) if !Path::new(raw_path).is_absolute() => {
-                cwd.join(raw_path).to_string_lossy().into_owned()
-            }
-            _ => raw_path.to_owned(),
-        };
+        let resolved = crate::path_guard::resolve_against_cwd(raw_path, self.cwd.as_deref());
         let file_path = resolved.as_str();
 
         // Get file mtime for dedup and cache.
@@ -256,7 +252,9 @@ impl ReadTool {
                     mtime_ms: mtime,
                     offset,
                     limit,
-                    dedup_eligible: true,
+                    // A full cache entry is useful to Edit, but a cropped Read
+                    // must not claim that the model has seen the omitted text.
+                    dedup_eligible: result_content.len() <= max_text_bytes,
                 },
             );
         }
@@ -270,7 +268,7 @@ impl ReadTool {
 
     fn render_batch_with<F>(paths: &[String], mut read: F) -> ToolResult
     where
-        F: FnMut(&str, BatchImageBudget) -> ToolResult,
+        F: FnMut(&str, BatchImageBudget, usize) -> ToolResult,
     {
         let total = paths.len();
         let display_paths: Vec<String> = paths
@@ -309,6 +307,7 @@ impl ReadTool {
                     data_bytes: MAX_BATCH_IMAGE_DATA_BYTES.saturating_sub(image_data_bytes),
                     slots: MAX_BATCH_IMAGES.saturating_sub(images.len()),
                 },
+                body_budget,
             );
             let ToolResult {
                 content: mut body,
@@ -418,8 +417,18 @@ impl Tool for ReadTool {
     }
 
     async fn execute(&self, input: Value) -> ToolResult {
-        let offset = input["offset"].as_u64().map(|v| v as usize);
-        let limit = input["limit"].as_u64().map(|v| v as usize);
+        let parse_range = |name: &str| match input.get(name) {
+            None | Some(Value::Null) => Ok(None),
+            Some(value) => value
+                .as_u64()
+                .and_then(|value| usize::try_from(value).ok())
+                .map(Some)
+                .ok_or_else(|| format!("{name} must be a non-negative integer that fits usize")),
+        };
+        let (offset, limit) = match (parse_range("offset"), parse_range("limit")) {
+            (Ok(offset), Ok(limit)) => (offset, limit),
+            (Err(error), _) | (_, Err(error)) => return ToolResult::error(error),
+        };
 
         let paths = match Self::requested_paths(&input) {
             Ok(paths) => paths,
@@ -436,10 +445,10 @@ impl Tool for ReadTool {
         let worker = self.clone();
         match tokio::task::spawn_blocking(move || {
             if single {
-                return worker.read_one(&paths[0], offset, limit, None);
+                return worker.read_one(&paths[0], offset, limit, None, MAX_RESULT_BYTES);
             }
-            Self::render_batch_with(&paths, |path, image_budget| {
-                worker.read_one(path, offset, limit, Some(image_budget))
+            Self::render_batch_with(&paths, |path, image_budget, text_budget| {
+                worker.read_one(path, offset, limit, Some(image_budget), text_budget)
             })
         })
         .await
@@ -965,7 +974,7 @@ mod tests {
             .map(|(path, _)| path.clone())
             .collect::<Vec<_>>();
         let mut entries = entries.into_iter();
-        let result = ReadTool::render_batch_with(&paths, |_, _| {
+        let result = ReadTool::render_batch_with(&paths, |_, _, _| {
             entries.next().expect("one result per path").1
         });
 
