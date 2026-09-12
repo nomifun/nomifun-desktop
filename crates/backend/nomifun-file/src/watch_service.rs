@@ -175,6 +175,11 @@ impl crate::traits::IFileWatchService for FileWatchService {
         let canonical = std::fs::canonicalize(file_path).unwrap_or_else(|_| file_path.into());
         let key = canonical.to_string_lossy().into_owned();
 
+        // Serialize owner removal and OS unregistration with start_watch.
+        let mut watcher = self
+            .file_watcher
+            .lock()
+            .map_err(|e| AppError::Internal(format!("file watcher lock poisoned: {e}")))?;
         let remove_os_watch = match self.watched_files.get_mut(&key) {
             Some(mut owners) => {
                 owners.remove(owner_id);
@@ -187,10 +192,6 @@ impl crate::traits::IFileWatchService for FileWatchService {
         }
         self.watched_files.remove(&key);
 
-        let mut watcher = self
-            .file_watcher
-            .lock()
-            .map_err(|e| AppError::Internal(format!("file watcher lock poisoned: {e}")))?;
         // Ignore unwatch errors — the file may have been deleted.
         let _ = watcher.unwatch(&canonical);
         self.debounce.remove(&key);

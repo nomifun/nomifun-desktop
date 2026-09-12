@@ -318,7 +318,7 @@ pub fn create_directory(
     if name.is_empty() {
         return Err(AppError::BadRequest("folder name cannot be empty".into()));
     }
-    if name == "." || name == ".." || name.contains(['/', '\\', '\0']) {
+    if crate::path_safety::is_unsafe_path_segment(name) {
         return Err(AppError::BadRequest(
             "folder name must be a single path component".into(),
         ));
@@ -561,8 +561,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let roots = roots_from(&[tmp.path()]);
 
-        let traversal = create_directory(tmp.path().to_str().unwrap(), "../escape", &roots).unwrap_err();
-        assert!(matches!(traversal, AppError::BadRequest(_)));
+        for name in ["../escape", "C:escape", "nested\\child", "."] {
+            let error = create_directory(tmp.path().to_str().unwrap(), name, &roots).unwrap_err();
+            assert!(matches!(error, AppError::BadRequest(_)));
+        }
+        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 0);
 
         fs::create_dir(tmp.path().join("existing")).unwrap();
         let duplicate = create_directory(tmp.path().to_str().unwrap(), "existing", &roots).unwrap_err();

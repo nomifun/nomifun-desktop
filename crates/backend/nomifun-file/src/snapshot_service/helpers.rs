@@ -597,14 +597,25 @@ pub(super) fn discard_single_file(
     rel_path: &str,
     operation: FileChangeOperation,
 ) -> Result<(), AppError> {
+    validate_snapshot_relative_path(rel_path)?;
     match operation {
         FileChangeOperation::Create => {
             // New/untracked file: just delete it
             let abs_path = workspace.join(rel_path);
-            if abs_path.exists() {
-                std::fs::remove_file(&abs_path)
-                    .map_err(|e| AppError::Internal(format!("Failed to delete file {}: {}", abs_path.display(), e)))?;
+            match std::fs::symlink_metadata(&abs_path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => return Err(AppError::Internal(format!("Failed to inspect file: {error}"))),
+                Ok(_) => {}
             }
+            // Check parents, but do not resolve the last symlink: discarding a
+            // new symlink must remove the link itself, never its target.
+            let parent = crate::path_safety::validate_path(
+                &abs_path.parent().expect("validated relative file path").to_string_lossy(),
+                &[workspace],
+            )?;
+            let target = parent.join(abs_path.file_name().expect("validated relative file path"));
+            std::fs::remove_file(&target)
+                .map_err(|e| AppError::Internal(format!("Failed to delete file {}: {}", target.display(), e)))?;
             Ok(())
         }
         FileChangeOperation::Modify | FileChangeOperation::Delete => {
@@ -625,11 +636,25 @@ pub(super) fn reset_single_file(
     rel_path: &str,
     operation: FileChangeOperation,
 ) -> Result<(), AppError> {
+    // Validate before changing the index, not only before the working tree.
+    validate_snapshot_relative_path(rel_path)?;
     // Step 1: unstage (ignore errors for files not in index)
     let _ = unstage_single_file(repo, rel_path);
 
     // Step 2: restore working tree
     discard_single_file(repo, workspace, rel_path, operation)
+}
+
+fn validate_snapshot_relative_path(rel_path: &str) -> Result<(), AppError> {
+    use std::path::Component;
+    let path = Path::new(rel_path);
+    if rel_path.contains('\0')
+        || !path.components().any(|part| matches!(part, Component::Normal(_)))
+        || path.components().any(|part| !matches!(part, Component::Normal(_) | Component::CurDir))
+    {
+        return Err(AppError::BadRequest("snapshot file path must be workspace-relative without traversal".into()));
+    }
+    Ok(())
 }
 
 /// Checkout a single file from HEAD, restoring it in the working tree.
@@ -1056,12 +1081,50 @@ mod tests {
         let sig = Signature::now("test", "test@test.com").unwrap();
         repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
 
+        let outside = tempfile::tempdir().unwrap();
+        let protected = outside.path().join("protected.txt");
+        std::fs::write(&protected, "keep").unwrap();
+        let relative_escape = format!("../{}/protected.txt", outside.path().file_name().unwrap().to_str().unwrap());
+        for bad in [protected.to_str().unwrap(), relative_escape.as_str(), "", ".", "a/../../protected.txt"] {
+            assert!(matches!(
+                discard_single_file(&repo, tmp.path(), bad, FileChangeOperation::Create),
+                Err(AppError::BadRequest(_))
+            ));
+            assert!(matches!(
+                reset_single_file(&repo, tmp.path(), bad, FileChangeOperation::Create),
+                Err(AppError::BadRequest(_))
+            ));
+        }
+        assert_eq!(std::fs::read(&protected).unwrap(), b"keep");
+
         std::fs::write(tmp.path().join("new.txt"), "new").unwrap();
         assert!(tmp.path().join("new.txt").exists());
 
         discard_single_file(&repo, tmp.path(), "new.txt", FileChangeOperation::Create).unwrap();
 
         assert!(!tmp.path().join("new.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discard_new_link_removes_only_the_link_and_rejects_linked_parent() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let repo = Repository::init(workspace.path()).unwrap();
+        let target = outside.path().join("protected.txt");
+        std::fs::write(&target, "keep").unwrap();
+        std::os::unix::fs::symlink(outside.path(), workspace.path().join("parent")).unwrap();
+        assert!(matches!(
+            discard_single_file(&repo, workspace.path(), "parent/protected.txt", FileChangeOperation::Create),
+            Err(AppError::Forbidden(_))
+        ));
+        for target in [&target, &outside.path().join("missing.txt")] {
+            let link = workspace.path().join("link");
+            std::os::unix::fs::symlink(target, &link).unwrap();
+            discard_single_file(&repo, workspace.path(), "link", FileChangeOperation::Create).unwrap();
+            assert!(std::fs::symlink_metadata(link).is_err());
+        }
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep");
     }
 
     #[test]
