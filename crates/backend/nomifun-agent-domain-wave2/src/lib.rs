@@ -1032,9 +1032,7 @@ impl ContextContributionFactory for Wave2ContextFactory {
                 schema_ref: request.schema_ref,
             })
             .await
-            .map_err(|error| KernelError::CapabilityExecution {
-                reason: error.to_string(),
-            })
+            .map_err(wave2_host_error_to_kernel)
     }
 }
 
@@ -1066,14 +1064,16 @@ impl RoleToolHandler for Wave2OperationToolFactory {
             });
         }
         if !input.0.is_object() {
-            return Err(KernelError::CapabilityExecution {
-                reason: format!(
+            return Err(KernelError::capability_execution_failed(
+                INVALID_PAYLOAD,
+                format!(
                     "{} input must be a JSON object",
                     self.capability_id.as_ref()
                 ),
-            });
+            ));
         }
-        let operation = typed_operation_for(&self.capability_id, input)?;
+        let operation = typed_operation_for(&self.capability_id, input)
+            .map_err(wave2_input_error_to_kernel)?;
         self.host_port
             .invoke(Wave2OperationToolHostRequest {
                 context: request.context,
@@ -1082,9 +1082,7 @@ impl RoleToolHandler for Wave2OperationToolFactory {
                 idempotency_key: request.idempotency_key,
             })
             .await
-            .map_err(|error| KernelError::CapabilityExecution {
-                reason: error.to_string(),
-            })
+            .map_err(wave2_host_error_to_kernel)
     }
 }
 
@@ -1117,9 +1115,7 @@ impl ResourceProviderFactory for Wave2ResourceFactory {
                 operation,
             })
             .await
-            .map_err(|error| KernelError::CapabilityExecution {
-                reason: error.to_string(),
-            })
+            .map_err(wave2_host_error_to_kernel)
     }
 }
 
@@ -1256,7 +1252,7 @@ const WORKSPACE_EXECUTION_CAPABILITIES: &[CapabilityDefinition] = &[
     CapabilityDefinition::tool("fs.write", EffectClass::WriteDurable, WORKSPACE_RESOURCE),
     CapabilityDefinition::tool("fs.patch", EffectClass::WriteReversible, WORKSPACE_RESOURCE),
     CapabilityDefinition::tool("fs.delete", EffectClass::Destructive, WORKSPACE_RESOURCE),
-    CapabilityDefinition::event_source("fs.watch", &[]),
+    CapabilityDefinition::event_source("fs.watch", WORKSPACE_RESOURCE),
     CapabilityDefinition::tool("fs.snapshot", EffectClass::ReadLocal, WORKSPACE_RESOURCE),
     CapabilityDefinition::resource_provider(
         "workspace.bind",
@@ -1843,6 +1839,136 @@ fn build_capability(
     })
 }
 
+fn action_input_schema(capability_id: &str) -> StrictJsonValue {
+    let schema = match capability_id {
+        "fs.delete" => strict_object_schema(
+            serde_json::json!({
+                "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "\\S"
+                }
+            }),
+            &["path"],
+        ),
+        "fs.snapshot" => {
+            let mut schema = strict_object_schema(
+                serde_json::json!({
+                    "operation": {
+                        "type": "string",
+                        "enum": ["init", "compare", "baseline", "dispose"]
+                    },
+                    "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "pattern": "\\S"
+                    }
+                }),
+                &["operation"],
+            );
+            schema.0.as_object_mut().expect("strict object schema").insert(
+                "allOf".to_owned(),
+                serde_json::json!([{
+                    "if": {
+                        "properties": {"operation": {"const": "baseline"}},
+                        "required": ["operation"]
+                    },
+                    "then": {"required": ["path"]}
+                }]),
+            );
+            schema
+        }
+        "vcs.push" => strict_object_schema(
+            serde_json::json!({
+                "remote": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                },
+                "refspec": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024,
+                    "pattern": "^(HEAD|refs/heads/.+):refs/heads/.+$"
+                },
+                "force": {
+                    "const": false,
+                    "default": false
+                }
+            }),
+            &["remote", "refspec"],
+        ),
+        _ => open_object_schema(),
+    };
+    schema
+}
+
+fn canonical_schema(capability_id: &str, role: &str) -> StrictJsonValue {
+    match role {
+        "input" => action_input_schema(capability_id),
+        "request" => open_object_schema(),
+        "output" | "response" => output_schema(),
+        _ => object_schema(),
+    }
+}
+
+/// Resolve an action schema only when the capability, facet and digest match
+/// the exact schema used by this Wave 2 registration.
+pub fn resolve_action_schema(
+    capability_id: &str,
+    reference: &CanonicalSchemaRef,
+) -> Result<StrictJsonValue, String> {
+    let definition = definition_for(capability_id)
+        .filter(|definition| definition.is_tool())
+        .ok_or_else(|| format!("unknown Wave 2 action capability {capability_id}"))?;
+    debug_assert_eq!(definition.id, capability_id);
+    for role in ["input", "output"] {
+        let schema = canonical_schema(capability_id, role);
+        if schema_ref(capability_id, role)?.as_ref() == reference.as_ref() {
+            return Ok(schema);
+        }
+    }
+    Err(format!(
+        "schema {} is not owned by Wave 2 capability {capability_id}",
+        reference.as_ref()
+    ))
+}
+
+/// Validate an untrusted action payload against the same canonical input
+/// schema used to construct the capability manifest. Nomi's application host
+/// calls this before selecting an execution owner, so an invalid payload
+/// cannot reserve effect state or touch a filesystem/Git service.
+pub fn validate_action_input(
+    capability_id: &str,
+    input: &StrictJsonValue,
+) -> Result<(), String> {
+    let definition = definition_for(capability_id)
+        .filter(|definition| definition.is_tool())
+        .ok_or_else(|| format!("unknown Wave 2 action capability {capability_id}"))?;
+    debug_assert_eq!(definition.id, capability_id);
+    let schema = action_input_schema(capability_id);
+    let validator = jsonschema::options()
+        .build(&schema.0)
+        .map_err(|error| {
+            format!("compile {capability_id} canonical input schema: {error}")
+        })?;
+    validator.validate(&input.0).map_err(|error| {
+        format!("{capability_id} input does not match its canonical schema: {error}")
+    })
+}
+
+fn strict_object_schema(
+    properties: serde_json::Value,
+    required: &[&str],
+) -> StrictJsonValue {
+    StrictJsonValue(serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": properties,
+        "required": required,
+    }))
+}
+
 pub fn supported_consumers(capability_id: &str) -> BTreeSet<CapabilityConsumer> {
     match capability_id {
         "browser.render_content" => {
@@ -1922,10 +2048,21 @@ impl CapabilityHandler for Wave2CapabilityHandler {
                     operation,
                 })
                 .await
-                .map_err(|error| KernelError::CapabilityExecution {
-                    reason: error.to_string(),
-                })
+                .map_err(wave2_host_error_to_kernel)
         })
+    }
+}
+
+fn wave2_host_error_to_kernel(error: Wave2HostPortError) -> KernelError {
+    KernelError::capability_execution_failed(error.canonical_code(), error.message)
+}
+
+fn wave2_input_error_to_kernel(error: KernelError) -> KernelError {
+    match error {
+        KernelError::CapabilityExecution { reason } => {
+            KernelError::capability_execution_failed(INVALID_PAYLOAD, reason)
+        }
+        other => other,
     }
 }
 
@@ -1933,7 +2070,9 @@ fn operation_for(
     capability_id: &CapabilityId,
     input: StrictJsonValue,
 ) -> Result<Wave2CapabilityOperation, KernelError> {
-    Ok(typed_operation_for(capability_id, input)?.family())
+    Ok(typed_operation_for(capability_id, input)
+        .map_err(wave2_input_error_to_kernel)?
+        .family())
 }
 
 /// Map an action capability to its exact typed host operation.
@@ -2428,11 +2567,7 @@ fn target_constraint(targets: &[&str]) -> Vec<PlatformConstraint> {
 }
 
 fn schema_ref(capability_id: &str, role: &str) -> Result<CanonicalSchemaRef, String> {
-    let schema = match role {
-        "input" | "request" => open_object_schema(),
-        "output" | "response" => output_schema(),
-        _ => object_schema(),
-    };
+    let schema = canonical_schema(capability_id, role);
     let digest = digest_payload(&schema)
         .map_err(|error| format!("digest {capability_id} {role} schema: {error}"))?;
     Ok(CanonicalSchemaRef::from(format!(
@@ -3074,6 +3209,80 @@ mod tests {
                 .declared_host_ports
                 .contains(&HostPortId::from(WAVE2_CAPABILITY_HOST_PORT_ID)));
         }
+    }
+
+    #[test]
+    fn repaired_workspace_actions_publish_exact_resolvable_input_schemas() {
+        let capabilities = registrations()
+            .expect("Wave 2 registrations")
+            .into_iter()
+            .flat_map(|registration| {
+                registration
+                    .metadata
+                    .manifest
+                    .payload
+                    .contributions
+                    .capabilities
+            })
+            .map(|capability| (capability.id.as_ref().to_owned(), capability))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        for capability_id in ["fs.delete", "fs.snapshot", "vcs.push"] {
+            let action = capabilities[capability_id]
+                .contributions
+                .actions
+                .first()
+                .expect("repaired capability action");
+            let schema = resolve_action_schema(capability_id, &action.input_schema)
+                .expect("manifest input ref resolves from its canonical source");
+            assert_eq!(schema.0["additionalProperties"], serde_json::json!(false));
+            assert!(schema.0["required"].as_array().is_some_and(|fields| !fields.is_empty()));
+            assert!(schema.0["properties"].get("owner").is_none());
+            assert!(schema.0["properties"].get("session_id").is_none());
+            assert!(schema.0["properties"].get("workspace_root").is_none());
+            assert_eq!(
+                schema_ref(capability_id, "input").unwrap(),
+                action.input_schema,
+                "manifest and resolver must share one canonical schema reference"
+            );
+            assert!(
+                action
+                    .input_schema
+                    .as_ref()
+                    .ends_with(nomifun_agent_contracts::digest_payload(&schema).unwrap().as_ref())
+            );
+        }
+
+        assert!(validate_action_input("fs.delete", &StrictJsonValue(serde_json::json!({
+            "path": "src/lib.rs"
+        }))).is_ok());
+        assert!(validate_action_input("fs.delete", &StrictJsonValue(serde_json::json!({
+            "path": "src/lib.rs",
+            "workspace_root": "C:/spoof"
+        }))).is_err());
+        assert!(validate_action_input("fs.snapshot", &StrictJsonValue(serde_json::json!({
+            "operation": "baseline"
+        }))).is_err());
+        assert!(validate_action_input("fs.snapshot", &StrictJsonValue(serde_json::json!({
+            "operation": "compare"
+        }))).is_ok());
+        assert!(validate_action_input("vcs.push", &StrictJsonValue(serde_json::json!({
+            "remote": "origin",
+            "refspec": "HEAD:refs/heads/main",
+            "force": true
+        }))).is_err());
+    }
+
+    #[test]
+    fn fs_watch_requires_the_current_workspace_resource() {
+        assert_eq!(
+            required_resource_kinds("fs.watch"),
+            Some(BTreeSet::from([ResourceKind::from("workspace")]))
+        );
+        assert_eq!(
+            required_resource_operation(&CapabilityId::from("fs.watch")),
+            None,
+            "EventSource read authority is consumed by its lifecycle owner, not an action"
+        );
     }
 
     #[test]
@@ -3781,6 +3990,21 @@ mod tests {
             result.message,
             "no production host adapter is bound for fs.read"
         );
+
+        let kernel_error = wave2_host_error_to_kernel(Wave2HostPortError::new(
+            "VCS_OWNER_REJECTED",
+            "VCS owner rejected the request",
+        ));
+        let failure = kernel_error
+            .capability_execution_failure()
+            .expect("Wave 2 host errors cross the Kernel as a typed failure");
+        assert_eq!(failure.code.as_ref(), "VCS_OWNER_REJECTED");
+        assert_eq!(failure.message, "VCS owner rejected the request");
+
+        let invalid = wave2_input_error_to_kernel(KernelError::CapabilityExecution {
+            reason: "request body was invalid".to_owned(),
+        });
+        assert_eq!(invalid.canonical_code().as_ref(), INVALID_PAYLOAD);
     }
 
     #[test]

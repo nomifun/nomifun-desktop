@@ -5,6 +5,31 @@ use nomifun_agent_contracts::{
 };
 use thiserror::Error;
 
+/// Typed failure returned by a capability implementation after the Kernel has
+/// admitted the invocation.
+///
+/// `code` is the stable, machine-readable contract. `message` is diagnostic
+/// text for the trusted host boundary and must never be parsed to recover the
+/// code. Provider/model adapters are responsible for exposing only a safe,
+/// redacted projection of the message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CapabilityExecutionFailure {
+    pub code: CanonicalErrorCode,
+    pub message: String,
+}
+
+impl CapabilityExecutionFailure {
+    pub fn new(
+        code: impl Into<CanonicalErrorCode>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum KernelError {
     #[error("artifact envelope for package {package_id:?} failed digest verification")]
@@ -291,6 +316,15 @@ pub enum KernelError {
     ActivationGenerationExhausted,
     #[error("capability handler failed: {reason}")]
     CapabilityExecution { reason: String },
+    // Do not include the trusted host diagnostic in Display. Kernel errors are
+    // sometimes logged or converted by outer application layers; exposing the
+    // message here would silently recreate the string-leak boundary this typed
+    // variant is meant to remove. Trusted diagnostics remain available through
+    // `capability_execution_failure()` for explicit internal handling.
+    #[error("capability handler failed with {failure_code}", failure_code = .failure.code.as_ref())]
+    CapabilityExecutionFailed {
+        failure: CapabilityExecutionFailure,
+    },
     #[error("kernel registry lock is poisoned")]
     RegistryPoisoned,
     #[error(
@@ -328,8 +362,51 @@ impl KernelError {
             Self::InvalidPresetRevision { .. }
             | Self::Digest { .. }
             | Self::SnapshotValidation { .. } => PRESET_REVISION_DIGEST_MISMATCH,
+            Self::CapabilityExecutionFailed { failure } => {
+                return failure.code.clone();
+            }
             _ => CAPABILITY_NOT_MATERIALIZED,
         };
         CanonicalErrorCode::from(code)
+    }
+
+    /// Construct a typed capability failure without collapsing its canonical
+    /// code into display text.
+    pub fn capability_execution_failed(
+        code: impl Into<CanonicalErrorCode>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::CapabilityExecutionFailed {
+            failure: CapabilityExecutionFailure::new(code, message),
+        }
+    }
+
+    pub fn capability_execution_failure(
+        &self,
+    ) -> Option<&CapabilityExecutionFailure> {
+        match self {
+            Self::CapabilityExecutionFailed { failure } => Some(failure),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typed_capability_failure_preserves_canonical_code_without_string_parsing() {
+        let error = KernelError::capability_execution_failed(
+            "ROBOT_OFFLINE",
+            "the bound robot is offline; api_key=sk-private",
+        );
+
+        assert_eq!(error.canonical_code().as_ref(), "ROBOT_OFFLINE");
+        let failure = error.capability_execution_failure().unwrap();
+        assert_eq!(failure.code.as_ref(), "ROBOT_OFFLINE");
+        assert!(failure.message.contains("sk-private"));
+        assert_eq!(error.to_string(), "capability handler failed with ROBOT_OFFLINE");
+        assert!(!error.to_string().contains("sk-private"));
     }
 }

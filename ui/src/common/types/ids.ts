@@ -55,6 +55,7 @@ export type EntityKind =
   | 'companion-evolution-feedback'
   | 'cs-agent'
   | 'cs-dialogue'
+  | 'cs-handoff'
   | 'cs-message'
   | 'cs-note'
   | 'channel-plugin'
@@ -118,6 +119,7 @@ export type FigureId = EntityId<'figure'>;
 export type CompanionEvolutionFeedbackId = EntityId<'companion-evolution-feedback'>;
 export type CsAgentId = EntityId<'cs-agent'>;
 export type CsDialogueId = EntityId<'cs-dialogue'>;
+export type CsHandoffId = EntityId<'cs-handoff'>;
 export type CsMessageId = EntityId<'cs-message'>;
 export type CsNoteId = EntityId<'cs-note'>;
 export type ChannelPluginId = EntityId<'channel-plugin'>;
@@ -256,6 +258,8 @@ export const parseCsAgentId = (value: unknown): CsAgentId =>
   parseEntityId('cs-agent', value);
 export const parseCsDialogueId = (value: unknown): CsDialogueId =>
   parseEntityId('cs-dialogue', value);
+export const parseCsHandoffId = (value: unknown): CsHandoffId =>
+  parseEntityId('cs-handoff', value);
 export const parseCsMessageId = (value: unknown): CsMessageId =>
   parseEntityId('cs-message', value);
 export const parseCsNoteId = (value: unknown): CsNoteId =>

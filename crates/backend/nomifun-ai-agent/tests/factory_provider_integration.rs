@@ -8,7 +8,8 @@ use nomifun_db::{
     CreateProviderParams, IProviderConnectionRepository, IProviderModelCapabilityRepository,
     IProviderModelRepository, IProviderRepository, NewProviderModel, NewProviderModelCapability,
     SqliteProviderConnectionRepository, SqliteProviderModelCapabilityRepository,
-    SqliteProviderModelRepository, SqliteProviderRepository, init_database_memory,
+    SqliteProviderModelRepository, SqliteProviderRepository, UpdateProviderParams,
+    init_database_memory,
 };
 use nomifun_model_invoke::{AdapterRegistry, ModelInvokeService, default_adapters};
 
@@ -121,10 +122,12 @@ fn make_factory(
         companion_skill_sink: None,
         model_invoke,
         model_invoke_service: None,
+        provider_config_digest_resolver: None,
         encryption_key: test_encryption_key(),
         data_dir: PathBuf::from("/tmp/nomi-test"),
         work_dir: PathBuf::from("/tmp/nomi-test"),
         mcp_server_repo: None,
+        mcp_oauth_service: None,
         requirement_sink: None,
         companion_sink: None,
         knowledge_retrieval: None,
@@ -265,4 +268,54 @@ async fn nomi_factory_respects_use_model_override() {
 
     let result = factory(options).await;
     assert!(result.is_ok(), "Expected Ok, got: {:?}", result.err());
+}
+
+#[tokio::test]
+async fn exact_provider_revision_rejects_a_stale_agent_snapshot() {
+    let (provider_repo, provider_model_repo, model_invoke) = setup().await;
+    insert_test_provider(
+        provider_repo.as_ref(),
+        provider_model_repo.as_ref(),
+        PROVIDER_ID_1,
+        "openai",
+    )
+    .await;
+    let frozen_revision = provider_repo
+        .find_by_id(PROVIDER_ID_1)
+        .await
+        .unwrap()
+        .unwrap()
+        .config_revision;
+    let workspace = PathBuf::from("/tmp/test-workspace");
+    nomifun_ai_agent::resolve_provider_config_at_revision(
+        model_invoke.as_ref(),
+        PROVIDER_ID_1,
+        "gpt-4o",
+        frozen_revision,
+        workspace.as_path(),
+    )
+    .await
+    .expect("the frozen provider graph should resolve before it changes");
+
+    provider_repo
+        .update(
+            PROVIDER_ID_1,
+            frozen_revision,
+            UpdateProviderParams {
+                base_url: Some("https://changed.example.invalid/v1"),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let error = nomifun_ai_agent::resolve_provider_config_at_revision(
+        model_invoke.as_ref(),
+        PROVIDER_ID_1,
+        "gpt-4o",
+        frozen_revision,
+        workspace.as_path(),
+    )
+    .await
+    .expect_err("a stale Agent Snapshot must not adopt the updated provider graph");
+    assert!(matches!(error, nomifun_common::AppError::Conflict(_)));
 }

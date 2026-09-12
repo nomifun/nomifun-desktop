@@ -91,6 +91,7 @@ const DEFAULT_TEXT_MAX_TOKENS: u32 = 4096;
 pub struct CreationTextRequest {
     pub provider_id: String,
     pub model: String,
+    pub expected_config_revision: Option<i64>,
     pub system: String,
     pub prompt: String,
     pub max_tokens: u32,
@@ -258,6 +259,8 @@ fn request_extra(params: &Value, consumed: &[&str]) -> Value {
         "referenceHeight",
         "nomifunStandaloneWorkbench",
         "nomifunRetrySlot",
+        PINNED_CONNECTION_REF_PARAM,
+        PINNED_PROVIDER_REVISION_PARAM,
     ] {
         extra.remove(key);
     }
@@ -526,6 +529,34 @@ struct PreparedCreationTask {
     params_json: String,
     required_artifact_count: usize,
     inputs: Vec<CreationInput>,
+}
+
+const PINNED_CONNECTION_REF_PARAM: &str = "_nomifun_connection_config_ref";
+const PINNED_PROVIDER_REVISION_PARAM: &str = "_nomifun_provider_config_revision";
+
+fn pinned_provider_revision(
+    provider_id: &str,
+    params: &Value,
+) -> Result<Option<i64>, CreationError> {
+    let connection_ref = params.get(PINNED_CONNECTION_REF_PARAM);
+    let revision = params.get(PINNED_PROVIDER_REVISION_PARAM);
+    match (connection_ref, revision) {
+        (None, None) => Ok(None),
+        (Some(Value::String(connection_ref)), Some(Value::Number(revision))) => {
+            let revision = revision.as_i64().filter(|revision| *revision >= 0).ok_or_else(|| {
+                CreationError::config("pinned provider revision must be a non-negative integer")
+            })?;
+            if connection_ref != &format!("provider:{provider_id}@{revision}") {
+                return Err(CreationError::config(
+                    "pinned connection_config_ref does not match provider and revision",
+                ));
+            }
+            Ok(Some(revision))
+        }
+        _ => Err(CreationError::config(
+            "pinned provider revision and connection_config_ref must be supplied together",
+        )),
+    }
 }
 
 #[derive(Serialize)]
@@ -906,6 +937,8 @@ impl CreationService {
             )));
         }
         let params = canonical_json(req.params);
+        pinned_provider_revision(&provider_id, &params)
+            .map_err(|error| AppError::BadRequest(format!("{}: {}", error.kind, error.message)))?;
         let params_json = serde_json::to_string(&params)
             .map_err(|e| AppError::BadRequest(format!("invalid params json: {e}")))?;
 
@@ -1554,6 +1587,13 @@ impl CreationService {
             let request = CreationTextRequest {
                 provider_id: job.provider_id.clone(),
                 model: job.model.clone(),
+                expected_config_revision: match pinned_provider_revision(
+                    &job.provider_id,
+                    &job.params,
+                ) {
+                    Ok(revision) => revision,
+                    Err(error) => return ExecOutcome::Failed(error),
+                },
                 system: param_str(&job.params, "system").unwrap_or_default(),
                 prompt: param_prompt(&job.params),
                 max_tokens,
@@ -1605,9 +1645,19 @@ impl CreationService {
             return self.poll_loop(job, &invoke, &mref, &req, handle, token).await;
         }
 
+        let expected_config_revision = match pinned_provider_revision(&job.provider_id, &job.params)
+        {
+            Ok(revision) => revision,
+            Err(error) => return ExecOutcome::Failed(error),
+        };
         let outcome = tokio::select! {
             _ = token.cancelled() => return ExecOutcome::Canceled,
-            r = invoke.invoke(&mref, req) => r,
+            r = async {
+                match expected_config_revision {
+                    Some(revision) => invoke.invoke_at_config_revision(&mref, revision, req).await,
+                    None => invoke.invoke(&mref, req).await,
+                }
+            } => r,
         };
         match outcome {
             Err(e) => ExecOutcome::Failed(e.into()),
@@ -4386,7 +4436,9 @@ mod tests {
     fn cap_to_task_request_maps_every_media_capability() {
         let params = json!({
             "prompt": "a cat", "count": 2, "width": 512, "height": 512,
-            "quality": "high", "aspect": "1:1", "seconds": 4, "voice": "alloy", "system": "be brief"
+            "quality": "high", "aspect": "1:1", "seconds": 4, "voice": "alloy", "system": "be brief",
+            "_nomifun_connection_config_ref": "provider:0190f5fe-7c00-7000-8000-000000000001@4",
+            "_nomifun_provider_config_revision": 4
         });
         let input = InputAsset { id: None, role: "mask".into(), bytes: vec![1], mime: "image/png".into() };
 

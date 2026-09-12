@@ -115,6 +115,7 @@ fn convert_chat_route_candidate(
             ChatRouteFeature::StructuredOutput => ChatModelFeature::StructuredOutput,
             ChatRouteFeature::ProviderRoundState => ChatModelFeature::ProviderRoundState,
             ChatRouteFeature::NativeResponsesItems => ChatModelFeature::NativeResponsesItems,
+            ChatRouteFeature::WebSearch => ChatModelFeature::WebSearch,
         })
         .collect();
     let route = ResolvedChatRoute {

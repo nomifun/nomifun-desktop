@@ -3,8 +3,8 @@ use nomifun_common::text_search::NoteQueryTerms;
 
 use crate::error::DbError;
 use crate::models::{
-    CsAgentRow, CsAuditEventRow, CsChannelBindingRow, CsDialogueRow, CsMessageRow, CsNoteRow,
-    NewCsAgentRow,
+    CsAgentRow, CsAuditEventRow, CsChannelBindingRow, CsDialogueRow, CsHandoffRow,
+    CsMessageRow, CsNoteRow, NewCsAgentRow,
 };
 use crate::repository::customer_service_search::CsNoteSearchHit;
 
@@ -34,6 +34,35 @@ pub struct UpdateCsAgentParams {
     pub audit_retention_days: Option<i64>,
 }
 
+/// Result of the atomic handoff request operation.
+///
+/// `created=false` means the same idempotency key was replayed and `handoff`
+/// is the exact previously persisted queue row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CsHandoffRequestResult {
+    pub handoff: CsHandoffRow,
+    pub created: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum CsNoteWriteMutation {
+    Create { note: CsNoteRow },
+    Update {
+        cs_note_id: String,
+        kind: Option<String>,
+        content: Option<String>,
+        aliases: Option<String>,
+        enabled: Option<bool>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct CsNoteWriteReceipt {
+    pub cs_agent_capability_receipt_id: String,
+    pub note: CsNoteRow,
+    pub replayed: bool,
+}
+
 /// Data access abstraction for the customer-service (`cs_`) tables.
 ///
 /// Object-safe via `async_trait` to support `Arc<dyn ICustomerServiceRepository>`.
@@ -59,9 +88,10 @@ pub trait ICustomerServiceRepository: Send + Sync {
         now: TimestampMs,
     ) -> Result<CsAgentRow, DbError>;
 
-    /// Delete an agent and cascade its bindings, dialogues (with messages) and
-    /// private notes in one transaction. Shared notes (`cs_agent_id IS NULL`)
-    /// and audit events are retained. `DbError::NotFound` if absent.
+    /// Delete an agent and cascade its bindings, dialogues (with messages),
+    /// durable handoffs, Agent capability receipts and private notes in one transaction. Shared notes
+    /// (`cs_agent_id IS NULL`) and audit events are retained.
+    /// `DbError::NotFound` if absent.
     async fn delete_agent(&self, cs_agent_id: &str) -> Result<(), DbError>;
 
     // ── cs_channel_bindings ──────────────────────────────────────────
@@ -129,6 +159,42 @@ pub trait ICustomerServiceRepository: Send + Sync {
     /// Full transcript of a dialogue in chronological order.
     async fn list_messages(&self, cs_dialogue_id: &str) -> Result<Vec<CsMessageRow>, DbError>;
 
+    // ── cs_handoffs ─────────────────────────────────────────────────
+
+    /// Atomically enqueue one durable human handoff. Exact retries converge on
+    /// one row; a different request while the dialogue is already handed off
+    /// fails with a conflict instead of acknowledging an unrecorded key.
+    async fn request_handoff(
+        &self,
+        handoff: &CsHandoffRow,
+    ) -> Result<CsHandoffRequestResult, DbError>;
+
+    /// Active handoff for a dialogue (`pending` or `claimed`), if any.
+    async fn active_handoff_for_dialogue(
+        &self,
+        cs_dialogue_id: &str,
+    ) -> Result<Option<CsHandoffRow>, DbError>;
+
+    /// Handoffs for one customer-service Agent, newest first.
+    async fn list_handoffs(
+        &self,
+        cs_agent_id: &str,
+        status: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<CsHandoffRow>, DbError>;
+
+    /// Compare-and-set one handoff state transition.
+    async fn transition_handoff(
+        &self,
+        cs_handoff_id: &str,
+        expected_status: &str,
+        next_status: &str,
+        updated_by: &str,
+        claimed_by: Option<&str>,
+        resolution: &str,
+        now: TimestampMs,
+    ) -> Result<CsHandoffRow, DbError>;
+
     // ── cs_notes CRUD ────────────────────────────────────────────────
 
     /// Insert a note (private when `cs_agent_id` is set, shared when `None`).
@@ -177,6 +243,20 @@ pub trait ICustomerServiceRepository: Send + Sync {
 
     /// Delete a note by business ID. `DbError::NotFound` if absent.
     async fn delete_note(&self, cs_note_id: &str) -> Result<(), DbError>;
+
+    /// Execute one owner-scoped notes.write mutation and persist its immutable
+    /// replay result in the same transaction.
+    #[allow(clippy::too_many_arguments)]
+    async fn write_note_idempotent(
+        &self,
+        owner_user_id: &str,
+        cs_agent_id: &str,
+        capability_id: &str,
+        idempotency_key: &str,
+        request_digest: &str,
+        mutation: CsNoteWriteMutation,
+        now: TimestampMs,
+    ) -> Result<CsNoteWriteReceipt, DbError>;
 
     // ── cs_audit_events ──────────────────────────────────────────────
 

@@ -218,6 +218,7 @@
         "required_resource_kinds": [
           "mcp_server",
           "process_session",
+          "terminal",
           "workspace"
         ],
         "required_runtime_features": [
@@ -616,6 +617,7 @@
         "required_resource_kinds": [
           "mcp_server",
           "process_session",
+          "terminal",
           "workspace"
         ]
       },
@@ -715,7 +717,7 @@
           "editing",
           "generation",
           "miniapp",
-          "templates_director"
+          "templates"
         ],
         "required_capability_ids": [
           "creation.audio",
@@ -752,5 +754,5 @@
       "research.web"
     ]
   },
-  "payload_digest": "15529177c8acfa08f8d70c1386864d449b44bef34650cf7ad91f3c470bd97e2b"
+  "payload_digest": "d43fdbe85e0c6042dfcbe998c627a0e8541e016f79d4454bcb5f067797998af2"
 }

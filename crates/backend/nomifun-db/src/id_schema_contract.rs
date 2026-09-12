@@ -72,10 +72,12 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "cron_job_runs",
     "cron_run_reservations",
     "cron_jobs",
+    "cs_agent_capability_receipts",
     "cs_agents",
     "cs_audit_events",
     "cs_channel_bindings",
     "cs_dialogues",
+    "cs_handoffs",
     "cs_messages",
     "cs_notes",
     "idmm_action_reservations",
@@ -113,6 +115,8 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "miniapps",
     "nomi_remote_events",
     "nomi_remote_sessions",
+    "nomi_wave1_memory_action_receipts",
+    "nomi_wave4_action_receipts",
     "nomi_agent_bindings",
     "nomi_agent_preset_revisions",
     "nomi_agent_presets",
@@ -177,8 +181,13 @@ const UUIDV7_BUSINESS_COLUMNS: &[(&str, &str)] = &[
     ("cron_job_runs", "cron_job_run_id"),
     ("cron_run_reservations", "cron_job_run_id"),
     ("cron_jobs", "cron_job_id"),
+    (
+        "cs_agent_capability_receipts",
+        "cs_agent_capability_receipt_id",
+    ),
     ("cs_agents", "cs_agent_id"),
     ("cs_dialogues", "cs_dialogue_id"),
+    ("cs_handoffs", "cs_handoff_id"),
     ("cs_messages", "cs_message_id"),
     ("cs_notes", "cs_note_id"),
     ("idmm_action_reservations", "reservation_id"),
@@ -280,9 +289,22 @@ const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
     ("creative_studio_projects", "project_id"),
     ("creative_studio_template_runs", "template_run_id"),
     ("creative_studio_templates", "template_id"),
+    (
+        "cs_agent_capability_receipts",
+        "cs_agent_capability_receipt_id",
+    ),
+    ("cs_agent_capability_receipts", "capability_id"),
+    ("cs_agent_capability_receipts", "owner_user_id"),
+    ("cs_agent_capability_receipts", "cs_agent_id"),
     ("cs_agents", "cs_agent_id"),
     ("cs_dialogues", "cs_dialogue_id"),
     ("cs_dialogues", "chat_id"),
+    ("cs_handoffs", "cs_handoff_id"),
+    ("cs_handoffs", "cs_agent_id"),
+    ("cs_handoffs", "cs_dialogue_id"),
+    ("cs_handoffs", "requested_by"),
+    ("cs_handoffs", "claimed_by"),
+    ("cs_handoffs", "updated_by"),
     ("cs_messages", "cs_message_id"),
     ("cs_notes", "cs_note_id"),
     ("idmm_action_reservations", "reservation_id"),
@@ -306,6 +328,10 @@ const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
     ("miniapp_source_mutation_intents", "intent_id"),
     ("miniapp_surface_sessions", "surface_session_id"),
     ("miniapps", "miniapp_id"),
+    ("nomi_wave1_memory_action_receipts", "capability_id"),
+    ("nomi_wave1_memory_action_receipts", "process_lease_id"),
+    ("nomi_wave4_action_receipts", "capability_id"),
+    ("nomi_wave4_action_receipts", "process_lease_id"),
     ("nomi_agent_bindings", "target_id"),
     ("nomi_remote_events", "event_id"),
     ("nomi_agent_preset_revisions", "revision_id"),
@@ -873,6 +899,8 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     // Provider/KB references keep history on parent deletion: the runtime
     // resolves them per turn and degrades gracefully to "model/KB missing".
     text_ref!("cs_agents", "provider_id" => "providers", "provider_id", true, "idx_cs_agents_provider_id", KeepHistory),
+    text_ref!("cs_agent_capability_receipts", "owner_user_id" => "users", "user_id", false, "idx_cs_agent_capability_receipts_owner", KeepHistory),
+    text_ref!("cs_agent_capability_receipts", "cs_agent_id" => "cs_agents", "cs_agent_id", false, "idx_cs_agent_capability_receipts_agent", Cascade),
     text_ref!("cs_channel_bindings", "cs_agent_id" => "cs_agents", "cs_agent_id", false, "idx_cs_channel_bindings_agent", Cascade),
     text_ref!("cs_channel_bindings", "channel_plugin_id" => "channel_plugins", "channel_plugin_id", false, "idx_cs_channel_bindings_plugin", Cascade),
     text_ref!("cs_dialogues", "cs_agent_id" => "cs_agents", "cs_agent_id", false, "idx_cs_dialogues_agent", Cascade),
@@ -880,6 +908,11 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     text_ref!("cs_dialogues", "channel_plugin_id" => "channel_plugins", "channel_plugin_id", false, "idx_cs_dialogues_identity", KeepHistory),
     text_ref!("cs_dialogues", "channel_user_id" => "channel_users", "channel_user_id", false, "idx_cs_dialogues_channel_user", KeepHistory),
     text_ref!("cs_messages", "cs_dialogue_id" => "cs_dialogues", "cs_dialogue_id", false, "idx_cs_messages_dialogue", Cascade),
+    text_ref!("cs_handoffs", "cs_agent_id" => "cs_agents", "cs_agent_id", false, "idx_cs_handoffs_agent_status", Cascade),
+    text_ref!("cs_handoffs", "cs_dialogue_id" => "cs_dialogues", "cs_dialogue_id", false, "idx_cs_handoffs_dialogue", Cascade),
+    text_ref!("cs_handoffs", "requested_by" => "users", "user_id", false, "idx_cs_handoffs_requested_by", KeepHistory),
+    text_ref!("cs_handoffs", "claimed_by" => "users", "user_id", true, "idx_cs_handoffs_claimed_by", KeepHistory),
+    text_ref!("cs_handoffs", "updated_by" => "users", "user_id", false, "idx_cs_handoffs_updated_by", KeepHistory),
     text_ref!("cs_notes", "cs_agent_id" => "cs_agents", "cs_agent_id", true, "idx_cs_notes_agent", Cascade),
     // Audit events are retained after the agent is deleted; retention-days
     // cleanup is the only pruning authority.
@@ -1024,6 +1057,16 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     text_ref!("nomi_remote_sessions", "remote_binding_id" => "remote_bindings", "remote_binding_id", false, "idx_nomi_remote_sessions_remote_binding_id", KeepHistory)
         .with_aggregate_scope("parent.owner_user_id = child.owner_user_id"),
     text_ref!("nomi_remote_events", "agent_session_id" => "nomi_remote_sessions", "agent_session_id", false, "idx_nomi_remote_events_agent_session_id_seq", Cascade),
+    text_ref!("nomi_wave1_memory_action_receipts", "owner_user_id" => "users", "user_id", false, "idx_nomi_wave1_memory_receipts_owner_user_id", KeepHistory)
+        .with_orphan_audit_policy(OrphanAuditPolicy::AllowMissingHistoricalParent),
+    text_ref!("nomi_wave1_memory_action_receipts", "agent_session_id" => "conversations", "conversation_id", false, "idx_nomi_wave1_memory_receipts_agent_session_id", KeepHistory)
+        .with_orphan_audit_policy(OrphanAuditPolicy::AllowMissingHistoricalParent)
+        .with_aggregate_scope("parent.user_id = child.owner_user_id"),
+    text_ref!("nomi_wave4_action_receipts", "owner_user_id" => "users", "user_id", false, "idx_nomi_wave4_receipts_owner_user_id", KeepHistory)
+        .with_orphan_audit_policy(OrphanAuditPolicy::AllowMissingHistoricalParent),
+    text_ref!("nomi_wave4_action_receipts", "agent_session_id" => "conversations", "conversation_id", false, "idx_nomi_wave4_receipts_agent_session_id", KeepHistory)
+        .with_orphan_audit_policy(OrphanAuditPolicy::AllowMissingHistoricalParent)
+        .with_aggregate_scope("parent.user_id = child.owner_user_id"),
     text_ref!("nomi_agent_presets", "owner_user_id" => "users", "user_id", false, "idx_nomi_agent_presets_owner_user_id", Cascade),
     text_ref!("nomi_agent_preset_revisions", "preset_id" => "nomi_agent_presets", "preset_id", false, "idx_nomi_agent_preset_revisions_preset_id", Restrict),
     text_ref!("nomi_agent_preset_revisions", "created_by" => "users", "user_id", false, "idx_nomi_agent_preset_revisions_created_by", KeepHistory),

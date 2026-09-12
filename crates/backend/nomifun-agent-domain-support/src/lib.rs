@@ -160,11 +160,18 @@ impl CapabilitySpec {
     }
 
     pub const fn event_source(id: &'static str) -> Self {
+        Self::event_source_with_resources(id, &[])
+    }
+
+    pub const fn event_source_with_resources(
+        id: &'static str,
+        resource_kinds: &'static [&'static str],
+    ) -> Self {
         Self {
             id,
             kind: CapabilityKind::EventSource,
             effect_class: None,
-            resource_kinds: &[],
+            resource_kinds,
             presentation: ToolPresentationKind::Hidden,
             host_targets: &[],
             host_surfaces: &[],
@@ -1327,7 +1334,7 @@ const WORKSPACE_CAPABILITIES: [CapabilitySpec; 17] = [
     CapabilitySpec::tool("fs.write", EffectClass::WriteDurable, WORKSPACE),
     CapabilitySpec::tool("fs.patch", EffectClass::WriteReversible, WORKSPACE),
     CapabilitySpec::tool("fs.delete", EffectClass::Destructive, WORKSPACE),
-    CapabilitySpec::event_source("fs.watch"),
+    CapabilitySpec::event_source_with_resources("fs.watch", WORKSPACE),
     CapabilitySpec::tool("fs.snapshot", EffectClass::ReadLocal, WORKSPACE),
     CapabilitySpec::resource_provider("workspace.bind", WORKSPACE),
     CapabilitySpec::resource_provider("workspace.artifacts", WORKSPACE),

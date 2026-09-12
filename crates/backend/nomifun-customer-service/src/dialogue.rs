@@ -34,6 +34,10 @@ pub const WINDOW_MESSAGE_LIMIT: usize = 30;
 pub const WINDOW_CHAR_BUDGET: usize = 8000;
 /// Fixed visitor-facing failure notice (audit carries the real error).
 pub const FALLBACK_ERROR_NOTICE: &str = "暂时无法回复，请稍后再试";
+/// Stable visitor-facing reply while a durable human handoff is pending or
+/// claimed. The incoming text is still appended to the dialogue transcript,
+/// but no additional model turn is started until the handoff is terminal.
+pub const HANDOFF_PENDING_NOTICE: &str = "已转交人工处理，后续消息会保留在当前会话中。";
 /// Notes injected into the prompt from pre-retrieval on the visitor's message.
 ///
 /// Deliberately small: this is a safety net against a badly-chosen tool query,
@@ -154,6 +158,49 @@ impl CsDialogueEngine {
         if batch.is_empty() {
             // Own text was merged into a previous batch (已合并): no reply.
             return Ok(None);
+        }
+
+        let active_handoff = self
+            .repo
+            .active_handoff_for_dialogue(&dialogue.cs_dialogue_id)
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, "failed to inspect customer-service handoff state");
+                FALLBACK_ERROR_NOTICE.to_owned()
+            })?;
+        if let Some(handoff) = active_handoff {
+            // The queue is the authority once a handoff is active. Keep the
+            // complete visitor transcript for the human operator while
+            // preventing a second autonomous answer from racing the handoff.
+            for text in &batch {
+                self.repo
+                    .append_message(&dialogue.cs_dialogue_id, "visitor", text, now_ms())
+                    .await
+                    .map_err(|error| {
+                        tracing::error!(%error, "failed to persist handoff-waiting visitor text");
+                        FALLBACK_ERROR_NOTICE.to_owned()
+                    })?;
+            }
+            self.repo
+                .append_message(
+                    &dialogue.cs_dialogue_id,
+                    "system",
+                    HANDOFF_PENDING_NOTICE,
+                    now_ms(),
+                )
+                .await
+                .map_err(|error| {
+                    tracing::error!(%error, "failed to persist handoff-waiting notice");
+                    FALLBACK_ERROR_NOTICE.to_owned()
+                })?;
+            self.audit(
+                &agent.cs_agent_id,
+                "handoff_waiting",
+                &dialogue.cs_dialogue_id,
+                &handoff.cs_handoff_id,
+            )
+            .await;
+            return Ok(Some(HANDOFF_PENDING_NOTICE.to_owned()));
         }
 
         match self.run_turn(&agent, &dialogue.cs_dialogue_id, &batch).await {
@@ -349,6 +396,21 @@ fn build_system_prompt(agent: &CsAgentRow) -> String {
     prompt
 }
 
+/// Build the exact customer-service dialogue policy for a selected customer
+/// resource. The Agent capability adapter exposes this to Nomi-core so the
+/// `customer_service.dialogue` middleware uses the same policy as Channel
+/// ingress rather than inventing a second prompt contract.
+pub fn build_agent_dialogue_context(agent: &CsAgentRow) -> String {
+    let mut prompt = build_system_prompt(agent);
+    prompt.push_str(
+        "\n\n人工交接：当访客明确要求人工处理，或问题超出已绑定资料且继续自动回答可能误导时，\
+         使用客服交接能力，把当前 cs_dialogue_id、简明原因和已有事实写入持久交接队列。\
+         工具返回持久 handoff 记录后，再告知访客已转交；不得在没有成功回执时声称完成交接。\
+         客服笔记写入只用于主人明确要求维护的事实，不得把未经验证的访客陈述自动写成客服知识。",
+    );
+    prompt
+}
+
 /// [`build_system_prompt`] plus any notes pre-retrieved for the visitor's own
 /// words.
 ///
@@ -374,9 +436,9 @@ fn build_system_prompt_with_notes(agent: &CsAgentRow, notes: &[String]) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nomifun_common::{ChannelPluginId, ChannelUserId};
+    use nomifun_common::{ChannelPluginId, ChannelUserId, CsHandoffId, UserId};
     use nomifun_db::SqliteCustomerServiceRepository;
-    use nomifun_db::models::NewCsAgentRow;
+    use nomifun_db::models::{CS_HANDOFF_STATUS_PENDING, CsHandoffRow, NewCsAgentRow};
     use nomifun_realtime::UserEventSink;
     use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -684,6 +746,75 @@ mod tests {
             "tool whitelist must be exactly the three read-only tools"
         );
         assert_eq!(calls[0].timeout_secs, TURN_TIMEOUT_SECS);
+    }
+
+    #[tokio::test]
+    async fn active_handoff_persists_new_visitor_text_without_running_the_model() {
+        let fx = fixture().await;
+        let agent = create_agent(&fx.repo, 8).await;
+        let runner = StubRunner::new(None, 0);
+        let engine = CsDialogueEngine::new(
+            Arc::clone(&fx.repo),
+            Arc::clone(&fx.knowledge),
+            runner.clone(),
+        );
+        let (plugin, visitor) = ids();
+        let chat_id = "handoff-chat";
+        let dialogue = fx
+            .repo
+            .get_or_create_dialogue(
+                &agent.cs_agent_id,
+                &CsDialogueKey {
+                    channel_plugin_id: plugin.clone(),
+                    channel_user_id: visitor.clone(),
+                    chat_id: chat_id.into(),
+                },
+                1,
+            )
+            .await
+            .unwrap();
+        let owner = UserId::new().into_string();
+        fx.repo
+            .request_handoff(&CsHandoffRow {
+                cs_handoff_id: CsHandoffId::new().into_string(),
+                cs_agent_id: agent.cs_agent_id.clone(),
+                cs_dialogue_id: dialogue.cs_dialogue_id.clone(),
+                requested_by: owner.clone(),
+                idempotency_key: "handoff-waiting".into(),
+                reason: "human requested".into(),
+                summary: String::new(),
+                status: CS_HANDOFF_STATUS_PENDING.into(),
+                claimed_by: None,
+                updated_by: owner,
+                resolution: String::new(),
+                created_at: 2,
+                updated_at: 2,
+            })
+            .await
+            .unwrap();
+
+        let reply = engine
+            .handle_visitor_message(
+                &agent.cs_agent_id,
+                &plugin,
+                &visitor,
+                chat_id,
+                "Is anyone there?",
+            )
+            .await
+            .unwrap();
+        assert_eq!(reply.as_deref(), Some(HANDOFF_PENDING_NOTICE));
+        assert!(runner.calls.lock().unwrap().is_empty());
+        let messages = fx
+            .repo
+            .list_messages(&dialogue.cs_dialogue_id)
+            .await
+            .unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "visitor");
+        assert_eq!(messages[0].content, "Is anyone there?");
+        assert_eq!(messages[1].role, "system");
+        assert_eq!(messages[1].content, HANDOFF_PENDING_NOTICE);
     }
 
     /// 失败路径：runner 错误 → 固定失败提示 + turn_error 审计。

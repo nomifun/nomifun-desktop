@@ -43,6 +43,7 @@ pub(crate) struct ResolvedProviderFields {
     pub bedrock_config: Option<nomi_config::config::BedrockConfig>,
     pub context_limit: Option<i64>,
     pub output_limit: Option<i64>,
+    pub supports_web_search: bool,
 }
 
 /// The exact provider/model pair selected for one runtime admission.
@@ -123,6 +124,15 @@ pub(crate) async fn resolve_provider_fields(
     provider_id: &str,
     model: &str,
 ) -> Result<ResolvedProviderFields, AppError> {
+    resolve_provider_fields_at_revision(invoke, provider_id, model, None).await
+}
+
+async fn resolve_provider_fields_at_revision(
+    invoke: &ModelInvokeService,
+    provider_id: &str,
+    model: &str,
+    expected_config_revision: Option<i64>,
+) -> Result<ResolvedProviderFields, AppError> {
     ProviderId::try_from(provider_id).map_err(|_| {
         AppError::BadRequest("provider_id must be a canonical ProviderId".to_owned())
     })?;
@@ -142,6 +152,13 @@ pub(crate) async fn resolve_provider_fields(
         )
         .await
         .map_err(invoke_error_to_app_error)?;
+    if expected_config_revision.is_some_and(|expected| task.config_revision != expected) {
+        return Err(AppError::Conflict(format!(
+            "provider config revision changed: expected {}, found {}",
+            expected_config_revision.expect("checked"),
+            task.config_revision
+        )));
+    }
     let descriptor = protocol_task_descriptor(&task.protocol, ModelTask::Chat).ok_or_else(|| {
         AppError::BadRequest(format!("Unsupported Chat protocol {:?}", task.protocol))
     })?;
@@ -298,6 +315,7 @@ pub(crate) async fn resolve_provider_fields(
         bedrock_config,
         context_limit: task.context_limit,
         output_limit: task.output_limit,
+        supports_web_search: task.traits.contains(&ModelTrait::WebSearch),
     })
 }
 
@@ -319,6 +337,30 @@ pub async fn resolve_provider_config(
         model,
     )
     .await?;
+    provider_config_from_fields(fields, workspace)
+}
+
+pub async fn resolve_provider_config_at_revision(
+    invoke: &ModelInvokeService,
+    provider_id: &str,
+    model: &str,
+    expected_config_revision: i64,
+    workspace: &Path,
+) -> Result<Config, AppError> {
+    let fields = resolve_provider_fields_at_revision(
+        invoke,
+        provider_id,
+        model,
+        Some(expected_config_revision),
+    )
+    .await?;
+    provider_config_from_fields(fields, workspace)
+}
+
+fn provider_config_from_fields(
+    fields: ResolvedProviderFields,
+    workspace: &Path,
+) -> Result<Config, AppError> {
 
     let cli_args = CliArgs {
         provider: Some(fields.provider),
@@ -822,6 +864,7 @@ mod provider_resolution_tests {
         assert_eq!(fields.compat_overrides.require_reasoning_content, Some(true));
         assert_eq!(fields.context_limit, Some(131_072));
         assert_eq!(fields.compat_overrides.supports_image, Some(false));
+        assert!(!fields.supports_web_search);
     }
 
     #[tokio::test]
@@ -833,7 +876,7 @@ mod provider_resolution_tests {
             base_url: "https://api.openai.com/v1",
             base_url_override: None,
             endpoint: Some("/responses"),
-            traits: r#"["vision_input"]"#,
+            traits: r#"["vision_input","web_search"]"#,
             credentials: r#"{"api_keys":["test-secret"]}"#,
             provider_params: r#"{"chain_rounds":true,"temperature":0.2}"#,
             bedrock_config: None,
@@ -843,6 +886,7 @@ mod provider_resolution_tests {
         assert_eq!(fields.base_url.as_deref(), Some("https://api.openai.com/v1/responses"));
         assert_eq!(fields.compat_overrides.api_path.as_deref(), Some(""));
         assert_eq!(fields.compat_overrides.chain_rounds, Some(true));
+        assert!(fields.supports_web_search);
         assert_eq!(
             fields.compat_overrides.extra_body.as_ref().unwrap()["temperature"],
             serde_json::json!(0.2)

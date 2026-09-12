@@ -29,6 +29,7 @@ import type {
 } from '../types';
 import { isAutoWorkEntry, planGuidEntry } from './autoWorkEntry';
 import type { OfficialPresetTemplate } from '@/common/types/agentPlatform';
+import type { AgentResourceSelection } from '@/common/types/agentPlatform';
 import { TEMPLATE_I18N_PATH } from '../../agentSettings/model';
 import { officialAgentLaunchError, prepareOfficialAgent } from './officialAgentLaunch';
 
@@ -51,6 +52,8 @@ export type GuidSendDeps = {
   workspaceEnabled: boolean;
   /** Stable preset capability/resource resolution must finish before launch. */
   resourceResolutionReady: boolean;
+  /** Product-selected resources. The backend derives ownership and operations. */
+  resourceSelections: AgentResourceSelection[];
   setMentionOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setMentionQuery: React.Dispatch<React.SetStateAction<string | null>>;
   setMentionSelectorOpen: React.Dispatch<React.SetStateAction<boolean>>;
@@ -86,6 +89,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     autoWork,
     workspaceEnabled,
     resourceResolutionReady,
+    resourceSelections,
     setMentionOpen,
     setMentionQuery,
     setMentionSelectorOpen,
@@ -101,6 +105,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
   const handleSend = useCallback(async () => {
     const entryPlan = planGuidEntry(input, autoWork);
     if (!current_model) throw new Error('MODEL_REQUIRED');
+    if (!resourceResolutionReady) throw new Error('RESOURCE_SELECTION_REQUIRED');
     let conversationId: ConversationId;
     let conversation;
 
@@ -131,6 +136,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
         provider_id: current_model.id,
         model: current_model.use_model,
       },
+      ...(resourceSelections.length > 0 ? { resource_selections: resourceSelections } : {}),
     });
     conversationId = parseConversationId(session.agent_session_id);
     conversation = await ipcBridge.conversation.get.invoke({
@@ -191,6 +197,8 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     selection,
     selectedPreset,
     selectedTemplate,
+    resourceResolutionReady,
+    resourceSelections,
     t,
   ]);
 

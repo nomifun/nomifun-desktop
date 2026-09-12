@@ -392,7 +392,7 @@ impl WorkshopService {
     /// already applies the installation-owner middleware; keeping the same
     /// check in the domain prevents a directly-mounted router from widening
     /// the model invocation surface.
-    pub(crate) async fn require_creative_studio_owner(
+    pub async fn require_creative_studio_owner(
         &self,
         owner_id: &str,
     ) -> Result<(), AppError> {

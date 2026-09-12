@@ -211,7 +211,9 @@ impl PresetPreviewCompiler {
             transient_template_key,
             &self.official_templates,
             &payload,
-            catalog,
+            self.canonical_environment
+                .as_ref()
+                .map(|environment| &environment.available_runtime_features),
             &mut diagnostics,
         );
         if clean && current_snapshot.is_none() {
@@ -749,7 +751,9 @@ fn validate_template_baseline(
     template_key: Option<OfficialPresetKey>,
     templates: &OfficialTemplateCatalog,
     payload: &AgentPresetRevisionPayload,
-    catalog: &CatalogSnapshot,
+    available_runtime_features: Option<
+        &BTreeSet<nomifun_agent_contracts::RuntimeFeatureId>,
+    >,
     diagnostics: &mut Vec<PreviewDiagnosticDto>,
 ) {
     if template_key != Some(OfficialPresetKey::CodingCodex) {
@@ -767,19 +771,11 @@ fn validate_template_baseline(
         .difference(&selected)
         .map(|id| id.as_ref().to_owned())
         .collect::<Vec<_>>();
-    let available_features = selected
-        .iter()
-        .filter_map(|id| {
-            catalog
-                .capabilities
-                .iter()
-                .find(|capability| &capability.manifest.id == id)
-        })
-        .flat_map(|capability| {
-            capability.manifest.requires_runtime_features.iter()
-        })
-        .map(|feature| feature.id.clone())
-        .collect::<BTreeSet<_>>();
+    // Runtime availability belongs to the validated CompilerEnvironment.
+    // A capability manifest declares what that capability requires; aggregating
+    // those declarations here inverted the relationship and made a complete
+    // host look empty whenever the selected capabilities had no dependencies.
+    let available_features = available_runtime_features.cloned().unwrap_or_default();
     let missing_features = templates
         .required_runtime_features(OfficialPresetKey::CodingCodex)
         .unwrap_or_default()
@@ -1257,6 +1253,69 @@ mod tests {
         MaterializedCapability, MaterializedMcpTool, MaterializedSkill,
     };
     use std::collections::BTreeMap;
+
+    #[test]
+    fn coding_template_baseline_uses_the_validated_runtime_environment_inventory() {
+        let templates = OfficialTemplateCatalog::load().unwrap();
+        let seed = templates.seed(OfficialPresetKey::CodingCodex).unwrap();
+        let payload = AgentPresetRevisionPayload {
+            schema_version: VersionString::from("1.0.0"),
+            model_route_refs: BTreeMap::new(),
+            chat_route_records: BTreeMap::new(),
+            initial_capabilities: seed
+                .initial_capabilities
+                .iter()
+                .cloned()
+                .map(|capability| CapabilitySelection {
+                    capability,
+                    action_allowlist: BTreeSet::new(),
+                })
+                .collect(),
+            on_demand_capabilities: seed
+                .on_demand_capabilities
+                .iter()
+                .cloned()
+                .map(|capability| CapabilitySelection {
+                    capability,
+                    action_allowlist: BTreeSet::new(),
+                })
+                .collect(),
+            skill_bindings: seed.skill_bindings.clone(),
+            system_role_provider_overrides: BTreeMap::new(),
+            persona: String::new(),
+            instructions: String::new(),
+            starter_prompts: Vec::new(),
+        };
+        let available = templates
+            .required_runtime_features(OfficialPresetKey::CodingCodex)
+            .unwrap();
+        let mut diagnostics = Vec::new();
+        validate_template_baseline(
+            Some(OfficialPresetKey::CodingCodex),
+            &templates,
+            &payload,
+            Some(&available),
+            &mut diagnostics,
+        );
+        assert!(diagnostics.is_empty());
+
+        validate_template_baseline(
+            Some(OfficialPresetKey::CodingCodex),
+            &templates,
+            &payload,
+            Some(&BTreeSet::new()),
+            &mut diagnostics,
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "CODING_CODEX_NATIVE_INCOMPLETE");
+        assert_eq!(
+            diagnostics[0].details.as_ref().unwrap()["missing_runtime_features"]
+                .as_array()
+                .unwrap()
+                .len(),
+            available.len()
+        );
+    }
 
     #[test]
     fn coding_profile_survives_template_provenance_and_saved_snapshot_reloads() {

@@ -28,6 +28,12 @@ impl Wave4HostPort for Wave4ApplicationHost {
         >,
     > {
         Box::pin(async move {
+            // Preserve the canonical distinction between an implementation
+            // that is absent on this host and a real capability whose current
+            // target has not selected its Channel/Companion/etc. resource.
+            // The latter is a configurable PRESET_RESOURCE_NOT_BOUND result
+            // and must not be collapsed into host unavailability.
+            request.validate()?;
             Err(Wave4HostPortError::unavailable(format!(
                 "Fresh-v4 has no native owner for {} resource action",
                 request.context.capability_id.as_ref()
@@ -101,5 +107,47 @@ mod tests {
         assert_eq!(error.code, "WAVE4_HOST_PORT_UNAVAILABLE");
         assert!(!error.message.contains("accepted"));
         assert!(!error.message.contains("completed"));
+    }
+
+    #[tokio::test]
+    async fn unbound_wave4_resource_is_not_reported_as_a_missing_implementation() {
+        let host = Wave4ApplicationHost;
+        let error = host
+            .invoke(Wave4HostRequest {
+                context: Wave4HostContext {
+                    principal: PrincipalRef {
+                        principal_kind: "user".to_owned(),
+                        principal_id: "owner".to_owned(),
+                    },
+                    agent_session_id: AgentSessionId::from(
+                        nomifun_common::generate_id(),
+                    ),
+                    operation_id: OperationId::from("wave4-operation"),
+                    idempotency_key: IdempotencyKey::from("wave4-idempotency"),
+                    correlation_id: CorrelationId::from("wave4-correlation"),
+                    resolved_snapshot_ref: ResolvedSnapshotRef {
+                        snapshot_id: "wave4-snapshot".into(),
+                        snapshot_digest: "a".repeat(64).into(),
+                    },
+                    registry_generation: 1,
+                    capability_id: CapabilityId::from(CHANNEL_REPLY),
+                    action_id: ActionId::from(CHANNEL_REPLY_ACTION),
+                    state_scope_key: ScopeKey::from("session:wave4"),
+                    resource_bindings: Vec::new(),
+                },
+                operation: Wave4CapabilityOperation::ChannelReply {
+                    input: StrictJsonValue(serde_json::json!({
+                        "text": "hello"
+                    })),
+                },
+            })
+            .await
+            .expect_err("an unbound Wave 4 target must fail closed");
+
+        assert_eq!(
+            error.code,
+            nomifun_agent_domain_wave4::WAVE4_RESOURCE_NOT_BOUND
+        );
+        assert_ne!(error.code, "WAVE4_HOST_PORT_UNAVAILABLE");
     }
 }

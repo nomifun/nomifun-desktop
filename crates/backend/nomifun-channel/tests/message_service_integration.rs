@@ -707,6 +707,64 @@ async fn seed_companion_session(
     svc.create(installation_owner, req).await.unwrap().conversation_id
 }
 
+async fn seed_nomi_agent_session(
+    svc: &Arc<ConversationService>,
+    installation_owner: &str,
+    channel_plugin_id: &str,
+    companion_id: &str,
+) -> String {
+    let req = nomifun_api_types::CreateConversationRequest {
+        r#type: AgentType::Nomi,
+        name: Some("Companion AgentSession".to_owned()),
+        model: Some(nomifun_common::ProviderWithModel {
+            provider_id: COMPANION_PROVIDER.to_owned(),
+            model: "m".to_owned(),
+            use_model: Some("m".to_owned()),
+        }),
+        source: None,
+        channel_chat_id: None,
+        // The app-local Nomi-core adapter owns the compiled preset projection;
+        // this Channel-domain integration fixture supplies only its persisted
+        // metadata shape, so the generic Conversation create path must not try
+        // to compile a preset a second time.
+        preset_id: None,
+        delegation_policy: Default::default(),
+        execution_model_pool: None,
+        decision_policy: Default::default(),
+        execution_template_id: None,
+        extra: serde_json::json!({
+            "nomi_core_session": {
+                "version": 1,
+                "kind": "agent_session",
+                "binding": {
+                    "preset_revision_ref": {
+                        "preset_id": "companion.default",
+                        "revision": 1,
+                        "revision_digest": "test-revision"
+                    },
+                    "resolved_snapshot_ref": {
+                        "snapshot_id": "test-snapshot",
+                        "snapshot_digest": "test-snapshot-digest"
+                    },
+                    "typed_resource_bindings": [{
+                        "binding_id": "channel",
+                        "resource_kind": "channel",
+                        "resource_id": channel_plugin_id,
+                        "owner_id": installation_owner,
+                        "operations": ["receive", "reply", "send"],
+                        "typed_parameters": { "companion_id": companion_id }
+                    }],
+                    "binding_version": 1
+                }
+            }
+        }),
+    };
+    svc.create(installation_owner, req)
+        .await
+        .unwrap()
+        .conversation_id
+}
+
 async fn bind_channel_to_companion(
     repo: &Arc<SqliteChannelRepository>,
     companion_id: &str,
@@ -721,7 +779,7 @@ async fn bind_channel_to_companion(
         status: None,
         last_connected: None,
         companion_id: Some(companion_id.to_owned()),
-        bot_key: Some("42".to_owned()),
+        bot_key: Some(format!("test-bot-{companion_id}")),
         owner_domain: "companion".into(),
         group_access_mode: CHANNEL_GROUP_ACCESS_MODE_ALLOWLIST.to_owned(),
         created_at: now,
@@ -792,6 +850,190 @@ async fn channel_companion_turn_routes_into_companion_single_session() {
         .await
         .unwrap();
     assert_eq!(sent.conversation_id, conv_y);
+}
+
+#[tokio::test]
+async fn channel_receive_binding_routes_direct_turn_to_exact_agent_session_and_unbinds() {
+    let db = init_database_memory().await.unwrap();
+    let stack = build_stack(db.pool().clone()).await;
+    let companion_session = seed_companion_session(
+        &stack.conversation_svc,
+        &stack.installation_owner,
+        COMPANION_X,
+    )
+    .await;
+    let channel_plugin_id =
+        bind_channel_to_companion(&stack.channel_repo, COMPANION_X).await;
+    let first_agent_session = seed_nomi_agent_session(
+        &stack.conversation_svc,
+        &stack.installation_owner,
+        &channel_plugin_id,
+        COMPANION_X,
+    )
+    .await;
+    let second_agent_session = seed_nomi_agent_session(
+        &stack.conversation_svc,
+        &stack.installation_owner,
+        &channel_plugin_id,
+        COMPANION_X,
+    )
+    .await;
+    let profile = Arc::new(StubProfile::new(std::collections::HashMap::from([(
+        COMPANION_X.to_owned(),
+        companion_session.clone(),
+    )])));
+    let message_svc = stack
+        .message_svc
+        .with_channel_agent_profile(profile.clone());
+
+    message_svc
+        .bind_agent_session_ingress(
+            &channel_plugin_id,
+            COMPANION_X,
+            &first_agent_session,
+        )
+        .await
+        .unwrap();
+    message_svc
+        .bind_agent_session_ingress(
+            &channel_plugin_id,
+            COMPANION_X,
+            &second_agent_session,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        message_svc
+            .unbind_agent_session_ingress(&first_agent_session)
+            .await,
+        0,
+        "releasing an older Session must not clear a newer route"
+    );
+
+    let mut direct = make_session(None);
+    direct.channel_plugin_id = Some(channel_plugin_id.clone());
+    let sent = message_svc
+        .send_to_agent(
+            &direct,
+            "deliver to the AgentSession",
+            PluginType::Telegram,
+            "test:agent-session-ingress:bound",
+        )
+        .await
+        .unwrap();
+    assert_eq!(sent.conversation_id, second_agent_session);
+    assert!(
+        profile.calls.lock().unwrap().is_empty(),
+        "an active channel.receive route must bypass the companion-session fallback"
+    );
+    wait_until_idle(&stack.conversation_svc, &sent.conversation_id).await;
+
+    assert_eq!(
+        message_svc
+            .unbind_agent_session_ingress(&second_agent_session)
+            .await,
+        1
+    );
+    assert_eq!(
+        message_svc
+            .bound_agent_session_ingress(&channel_plugin_id)
+            .await,
+        None
+    );
+    let fallback = message_svc
+        .send_to_agent(
+            &direct,
+            "deliver after release",
+            PluginType::Telegram,
+            "test:agent-session-ingress:released",
+        )
+        .await
+        .unwrap();
+    assert_eq!(fallback.conversation_id, companion_session);
+    assert_eq!(profile.calls.lock().unwrap().as_slice(), [COMPANION_X]);
+}
+
+#[tokio::test]
+async fn channel_receive_binding_rejects_session_without_exact_resource_snapshot() {
+    let db = init_database_memory().await.unwrap();
+    let stack = build_stack(db.pool().clone()).await;
+    let channel_plugin_id =
+        bind_channel_to_companion(&stack.channel_repo, COMPANION_X).await;
+    let another_plugin_id =
+        bind_channel_to_companion(&stack.channel_repo, COMPANION_Y).await;
+    let stale_session = seed_nomi_agent_session(
+        &stack.conversation_svc,
+        &stack.installation_owner,
+        &another_plugin_id,
+        COMPANION_Y,
+    )
+    .await;
+
+    let error = stack
+        .message_svc
+        .bind_agent_session_ingress(
+            &channel_plugin_id,
+            COMPANION_X,
+            &stale_session,
+        )
+        .await
+        .expect_err("a different Session resource snapshot must fail closed");
+    assert!(matches!(
+        error,
+        nomifun_channel::error::ChannelError::InvalidConfig(_)
+    ));
+    assert_eq!(
+        stack
+            .message_svc
+            .bound_agent_session_ingress(&channel_plugin_id)
+            .await,
+        None
+    );
+
+    let live_session = seed_nomi_agent_session(
+        &stack.conversation_svc,
+        &stack.installation_owner,
+        &channel_plugin_id,
+        COMPANION_X,
+    )
+    .await;
+    let message_svc = stack
+        .message_svc
+        .with_channel_agent_profile(Arc::new(StubProfile::new(
+            std::collections::HashMap::new(),
+        )));
+    message_svc
+        .bind_agent_session_ingress(
+            &channel_plugin_id,
+            COMPANION_X,
+            &live_session,
+        )
+        .await
+        .unwrap();
+    let mut reassigned = stack
+        .channel_repo
+        .get_plugin(&channel_plugin_id)
+        .await
+        .unwrap()
+        .unwrap();
+    reassigned.companion_id = Some(COMPANION_Y.to_owned());
+    reassigned.updated_at = nomifun_common::now_ms();
+    stack.channel_repo.update_plugin(&reassigned).await.unwrap();
+    let mut direct = make_session(None);
+    direct.channel_plugin_id = Some(channel_plugin_id);
+    let error = message_svc
+        .send_to_agent(
+            &direct,
+            "must not cross the reassignment boundary",
+            PluginType::Telegram,
+            "test:agent-session-ingress:reassigned",
+        )
+        .await
+        .expect_err("a resource reassignment must fence the old Session route");
+    assert!(matches!(
+        error,
+        nomifun_channel::error::ChannelError::InvalidConfig(_)
+    ));
 }
 
 /// Two different IM chats bound to the SAME companion both land in that

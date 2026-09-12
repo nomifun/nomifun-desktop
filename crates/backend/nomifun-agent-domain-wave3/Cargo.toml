@@ -8,4 +8,5 @@ license.workspace = true
 async-trait.workspace = true
 nomifun-agent-contracts = { path = "../nomifun-agent-contracts" }
 nomifun-agent-kernel = { path = "../nomifun-agent-kernel" }
+serde.workspace = true
 serde_json.workspace = true

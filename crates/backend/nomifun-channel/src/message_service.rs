@@ -1,17 +1,22 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use nomifun_ai_agent::AgentStreamEvent;
 use nomifun_api_types::{
     CreateConversationRequest, ListMessagesQuery, MessageResponse, SendMessageRequest,
 };
-use nomifun_common::{AgentType, ConversationSource, MessagePosition, MessageType};
+use nomifun_common::{
+    AgentType, ChannelPluginId, CompanionId, ConversationId,
+    ConversationSource, MessagePosition, MessageType,
+};
 use nomifun_db::IChannelRepository;
 use nomifun_db::models::{
-    CHANNEL_CHAT_KIND_DIRECT, CHANNEL_CHAT_KIND_GROUP, CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE,
+    CHANNEL_CHAT_KIND_DIRECT, CHANNEL_CHAT_KIND_GROUP,
+    CHANNEL_OWNER_DOMAIN_COMPANION, CHANNEL_OWNER_DOMAIN_CUSTOMER_SERVICE,
     CHANNEL_USER_AUTHORIZATION_AUTO_GROUP, ChannelSessionRow,
 };
 use sha2::{Digest, Sha256};
-use tokio::sync::broadcast;
+use tokio::sync::{RwLock, broadcast};
 use tracing::{debug, info, warn};
 
 use crate::channel_settings::{ChannelSettingsService, resolved_model_to_provider};
@@ -85,6 +90,55 @@ pub trait AssetResolver: Send + Sync {
     async fn resolve(&self, asset_id: &str) -> Option<crate::types::OutgoingMedia>;
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AgentSessionIngressBinding {
+    companion_id: String,
+    agent_session_id: String,
+}
+
+fn session_has_exact_channel_ingress_binding(
+    extra: &serde_json::Value,
+    owner_user_id: &str,
+    channel_plugin_id: &str,
+    companion_id: &str,
+) -> bool {
+    let Some(metadata) = extra.get("nomi_core_session") else {
+        return false;
+    };
+    if metadata.get("version").and_then(serde_json::Value::as_u64) != Some(1)
+        || metadata.get("kind").and_then(serde_json::Value::as_str)
+            != Some("agent_session")
+    {
+        return false;
+    }
+    metadata
+        .pointer("/binding/typed_resource_bindings")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|bindings| {
+            bindings.iter().any(|binding| {
+                binding.get("resource_kind").and_then(serde_json::Value::as_str)
+                    == Some("channel")
+                    && binding.get("resource_id").and_then(serde_json::Value::as_str)
+                        == Some(channel_plugin_id)
+                    && binding.get("owner_id").and_then(serde_json::Value::as_str)
+                        == Some(owner_user_id)
+                    && binding
+                        .pointer("/typed_parameters/companion_id")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(companion_id)
+                    && binding.pointer("/typed_parameters/cs_agent_id").is_none()
+                    && binding
+                        .get("operations")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|operations| {
+                            operations.iter().any(|operation| {
+                                operation.as_str() == Some("receive")
+                            })
+                        })
+            })
+        })
+}
+
 /// Bridges channel messages to the conversation + AI agent layer.
 ///
 /// Responsibilities:
@@ -111,6 +165,13 @@ pub struct ChannelMessageService {
     /// outbound media.
     /// `None` (default / tests) disables channel image sending gracefully.
     asset_resolver: Option<Arc<dyn AssetResolver>>,
+    /// Live EventSource routing installed by `channel.receive` for one exact
+    /// Nomi AgentSession. The Channel message loop reads this map before the
+    /// ordinary companion-session fallback. Entries are process-lifecycle
+    /// leases: Session materialization recreates them after restart, and
+    /// Session release removes them without clearing a newer replacement.
+    agent_session_ingress:
+        Arc<RwLock<HashMap<String, AgentSessionIngressBinding>>>,
 }
 
 impl ChannelMessageService {
@@ -129,6 +190,7 @@ impl ChannelMessageService {
             cs_routing: None,
             stop_confirmations: crate::pending_decision::ChannelStopConfirmationStore::new(),
             asset_resolver: None,
+            agent_session_ingress: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -209,6 +271,168 @@ impl ChannelMessageService {
     /// identities. This value never comes from the provider payload.
     pub fn owner_user_id(&self) -> &str {
         &self.owner_user_id
+    }
+
+    /// Bind one companion-owned Channel EventSource to an exact live Nomi
+    /// AgentSession. A later materialization for the same bot replaces the
+    /// process lease; releasing the older Session cannot erase that newer
+    /// route because unbind compares the Session identity.
+    ///
+    /// The persisted Conversation metadata is re-read here and before every
+    /// inbound delivery. This makes a preset/resource switch fail closed:
+    /// retaining an old in-memory route cannot keep delivering after the
+    /// Session no longer owns the exact Channel binding.
+    pub async fn bind_agent_session_ingress(
+        &self,
+        channel_plugin_id: &str,
+        companion_id: &str,
+        agent_session_id: &str,
+    ) -> Result<(), ChannelError> {
+        ChannelPluginId::parse(channel_plugin_id).map_err(|error| {
+            ChannelError::InvalidConfig(format!(
+                "channel AgentSession ingress plugin id is invalid: {error}"
+            ))
+        })?;
+        CompanionId::parse(companion_id).map_err(|error| {
+            ChannelError::InvalidConfig(format!(
+                "channel AgentSession ingress companion id is invalid: {error}"
+            ))
+        })?;
+        ConversationId::parse(agent_session_id).map_err(|error| {
+            ChannelError::InvalidConfig(format!(
+                "channel AgentSession ingress Session id is invalid: {error}"
+            ))
+        })?;
+
+        let plugin = self
+            .repo
+            .get_plugin(channel_plugin_id)
+            .await?
+            .ok_or_else(|| ChannelError::PluginNotFound(channel_plugin_id.to_owned()))?;
+        if !plugin.enabled
+            || plugin.owner_domain != CHANNEL_OWNER_DOMAIN_COMPANION
+            || plugin.companion_id.as_deref() != Some(companion_id)
+        {
+            return Err(ChannelError::InvalidConfig(
+                "channel AgentSession ingress binding is stale or belongs to another domain"
+                    .to_owned(),
+            ));
+        }
+        self.verify_agent_session_ingress(
+            channel_plugin_id,
+            companion_id,
+            agent_session_id,
+        )
+        .await?;
+        self.agent_session_ingress.write().await.insert(
+            channel_plugin_id.to_owned(),
+            AgentSessionIngressBinding {
+                companion_id: companion_id.to_owned(),
+                agent_session_id: agent_session_id.to_owned(),
+            },
+        );
+        Ok(())
+    }
+
+    /// Release every live Channel EventSource route held by this exact
+    /// AgentSession. If the bot was rebound to a newer Session, that entry is
+    /// deliberately retained.
+    pub async fn unbind_agent_session_ingress(
+        &self,
+        agent_session_id: &str,
+    ) -> usize {
+        let mut bindings = self.agent_session_ingress.write().await;
+        let before = bindings.len();
+        bindings.retain(|_, binding| {
+            binding.agent_session_id != agent_session_id
+        });
+        before - bindings.len()
+    }
+
+    /// Read-only lifecycle evidence used by the app composition and tests.
+    pub async fn bound_agent_session_ingress(
+        &self,
+        channel_plugin_id: &str,
+    ) -> Option<String> {
+        self.agent_session_ingress
+            .read()
+            .await
+            .get(channel_plugin_id)
+            .map(|binding| binding.agent_session_id.clone())
+    }
+
+    async fn resolved_agent_session_ingress(
+        &self,
+        channel_plugin_id: &str,
+        companion_id: &str,
+    ) -> Result<Option<String>, ChannelError> {
+        let Some(binding) = self
+            .agent_session_ingress
+            .read()
+            .await
+            .get(channel_plugin_id)
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        if binding.companion_id != companion_id {
+            return Err(ChannelError::InvalidConfig(
+                "channel AgentSession ingress companion ownership changed after activation"
+                    .to_owned(),
+            ));
+        }
+        let plugin = self
+            .repo
+            .get_plugin(channel_plugin_id)
+            .await?
+            .ok_or_else(|| ChannelError::PluginNotFound(channel_plugin_id.to_owned()))?;
+        if !plugin.enabled
+            || plugin.owner_domain != CHANNEL_OWNER_DOMAIN_COMPANION
+            || plugin.companion_id.as_deref() != Some(companion_id)
+        {
+            return Err(ChannelError::InvalidConfig(
+                "channel AgentSession ingress resource ownership changed after activation"
+                    .to_owned(),
+            ));
+        }
+        self.verify_agent_session_ingress(
+            channel_plugin_id,
+            companion_id,
+            &binding.agent_session_id,
+        )
+        .await?;
+        Ok(Some(binding.agent_session_id))
+    }
+
+    async fn verify_agent_session_ingress(
+        &self,
+        channel_plugin_id: &str,
+        companion_id: &str,
+        agent_session_id: &str,
+    ) -> Result<(), ChannelError> {
+        let session = self
+            .sessions
+            .get(&self.owner_user_id, agent_session_id)
+            .await
+            .map_err(|error| match error {
+                nomifun_common::AppError::NotFound(_) => {
+                    ChannelError::SessionNotFound(agent_session_id.to_owned())
+                }
+                other => ChannelError::MessageSendFailed(other.to_string()),
+            })?;
+        if session.r#type != AgentType::Nomi
+            || !session_has_exact_channel_ingress_binding(
+                &session.extra,
+                &self.owner_user_id,
+                channel_plugin_id,
+                companion_id,
+            )
+        {
+            return Err(ChannelError::InvalidConfig(format!(
+                "Session '{agent_session_id}' no longer owns the exact Channel ingress binding"
+            )));
+        }
+        Ok(())
     }
 
     /// Whether the conversation's agent is currently working on a turn.
@@ -390,22 +614,33 @@ impl ChannelMessageService {
             let cid = companion_id
                 .as_deref()
                 .expect("shared companion session requires a companion id");
-            match self.channel_agent_profile.as_ref() {
-                Some(profile) => match profile.ensure_companion_session(cid).await {
-                    Some(id) => id,
-                    // Companion bound but no chat model → can't open its single
-                    // session. Refuse with a notice instead of silently minting a
-                    // leaking an unintended channel conversation (reintroducing the bug).
+            let bound_agent_session = match session.channel_plugin_id.as_deref() {
+                Some(channel_plugin_id) => {
+                    self.resolved_agent_session_ingress(channel_plugin_id, cid)
+                        .await?
+                }
+                None => None,
+            };
+            if let Some(agent_session_id) = bound_agent_session {
+                agent_session_id
+            } else {
+                match self.channel_agent_profile.as_ref() {
+                    Some(profile) => match profile.ensure_companion_session(cid).await {
+                        Some(id) => id,
+                        // Companion bound but no chat model → can't open its single
+                        // session. Refuse with a notice instead of silently minting a
+                        // leaking an unintended channel conversation (reintroducing the bug).
+                        None => {
+                            return Err(ChannelError::CompanionNotReady(
+                                "这个伙伴还没有配置对话模型，请先在桌面端为它选择模型后再聊天。".into(),
+                            ));
+                        }
+                    },
                     None => {
-                        return Err(ChannelError::CompanionNotReady(
-                            "这个伙伴还没有配置对话模型，请先在桌面端为它选择模型后再聊天。".into(),
+                        return Err(ChannelError::MessageSendFailed(
+                            "channel agent profile not configured".into(),
                         ));
                     }
-                },
-                None => {
-                    return Err(ChannelError::MessageSendFailed(
-                        "channel agent profile not configured".into(),
-                    ));
                 }
             }
         } else {

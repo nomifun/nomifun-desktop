@@ -141,6 +141,7 @@ fn project_internal(
     let route = exact_chat_route(input.revision, input.snapshot)?;
     let capability_tools = project_capabilities_with_dynamic(
         input.revision,
+        &route,
         |capability_id, deferred| {
             plugin_tools
                 .map(|tools| {
@@ -154,6 +155,11 @@ fn project_internal(
         input.title,
         route,
         capability_tools,
+        input
+            .snapshot
+            .content
+            .required_runtime_features
+            .contains(&nomifun_agent_contracts::RuntimeFeatureId::from("code_mode")),
         input
             .snapshot
             .content
@@ -176,9 +182,11 @@ fn project_revision_parts(
     title_input: Option<&str>,
     route: ChatRouteRecord,
     capability_tools: ProjectedCapabilityTools,
+    coding_profile: bool,
     required_resource_kinds: BTreeSet<String>,
     included_skills: Vec<String>,
 ) -> Result<NomiCoreAgentProjection, AppError> {
+    let runtime_profile = coding_profile.then_some("coding");
     let instructions = merge_instructions(
         &revision_document.payload.persona,
         &revision_document.payload.instructions,
@@ -228,11 +236,28 @@ fn project_revision_parts(
 
     let extra = json!({
         "system_prompt": instructions,
+        "chat_config_revision_digest": route.primary.config_revision_digest,
         "allowed_tools": capability_tools.allowed_tools,
         "enforce_tool_allowlist": true,
         "deferred_tools": capability_tools.deferred_tools,
         "browser_use": capability_tools.browser_use,
         "computer_use": capability_tools.computer_use,
+        // This is a subtractive runtime profile, not a capability grant. The
+        // Nomi factory accepts it only when the complete server-projected
+        // coding tool allowlist is already present.
+        "runtime_profile": runtime_profile,
+        // Vision is a message-context capability, not a model tool. The Nomi
+        // factory intersects this flag with the exact configured Chat model's
+        // `vision_input` trait before its attachment loader may emit an image
+        // content block.
+        "vision_input": capability_tools.vision_input,
+        "vision_on_demand": capability_tools.vision_on_demand,
+        "mcp_capabilities": {
+            "connect": capability_tools.mcp_connect,
+            "tool_proxy": capability_tools.mcp_tool_proxy,
+            "resource": capability_tools.mcp_resource,
+            "oauth": capability_tools.mcp_oauth,
+        },
     });
 
     Ok(NomiCoreAgentProjection {
@@ -339,6 +364,12 @@ struct ProjectedCapabilityTools {
     deferred_tools: Vec<String>,
     browser_use: bool,
     computer_use: bool,
+    vision_input: bool,
+    vision_on_demand: bool,
+    mcp_connect: bool,
+    mcp_tool_proxy: bool,
+    mcp_resource: bool,
+    mcp_oauth: bool,
 }
 
 impl ProjectedCapabilityTools {
@@ -358,8 +389,18 @@ impl ProjectedCapabilityTools {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NomiCapabilityProjection {
     Tools(&'static [&'static str]),
+    /// Exact provider names are materialized from the current Session's
+    /// server-owned Platform Builtin action set.
+    HostedTools,
     BrowserTools,
     ComputerTools,
+    /// Enables the bounded image-attachment -> multimodal-message path. This
+    /// is deliberately distinct from `HostOnly`: both the selected Chat route
+    /// and the runtime provider capability are checked before model delivery.
+    VisionContext,
+    /// Uses the exact OpenAI Responses route's provider-native web_search
+    /// owner. The route feature is checked before the tool is projected.
+    WebSearchTool,
     HostOnly {
         browser: bool,
         computer: bool,
@@ -380,25 +421,65 @@ pub(crate) fn nomi_capability_projection(
         "fs.search" => NomiCapabilityProjection::Tools(&["Grep", "Glob"]),
         "fs.write" => NomiCapabilityProjection::Tools(&["Write"]),
         "fs.patch" => NomiCapabilityProjection::Tools(&["Edit", "ApplyPatch"]),
+        "fs.delete" | "fs.snapshot" => NomiCapabilityProjection::HostedTools,
+        "fs.watch" => NomiCapabilityProjection::HostOnly {
+            browser: false,
+            computer: false,
+        },
 
         // Native process and VCS families.
         "process.exec" => {
             NomiCapabilityProjection::Tools(&["Bash", "exec_command", "write_stdin"])
         }
         "vcs.status" => NomiCapabilityProjection::Tools(&["vcs.status"]),
-        "vcs.diff" => NomiCapabilityProjection::Tools(&["vcs.diff"]),
+        "vcs.diff" => NomiCapabilityProjection::Tools(&["vcs.diff", "review.status"]),
         "vcs.stage" => NomiCapabilityProjection::Tools(&["vcs.stage"]),
         "vcs.commit" => NomiCapabilityProjection::Tools(&["vcs.commit"]),
+        "vcs.push" => NomiCapabilityProjection::HostedTools,
 
         // The plan checklist is always registered by the Nomi bootstrap. Its
         // deferred placement is applied by the host registry when requested.
         "agent.execution.plan" => NomiCapabilityProjection::Tools(&["update_plan"]),
-        "agent.delegate" => NomiCapabilityProjection::Tools(&["nomi_delegate"]),
+        "agent.execution.observe" => NomiCapabilityProjection::Tools(&[
+            nomifun_ai_agent::AGENT_EXECUTION_OBSERVE_TOOL_NAME,
+        ]),
+        "agent.execution.steer" => NomiCapabilityProjection::Tools(&[
+            nomifun_ai_agent::AGENT_EXECUTION_STEER_TOOL_NAME,
+        ]),
+        "agent.fork" => NomiCapabilityProjection::Tools(&[
+            nomifun_ai_agent::AGENT_FORK_TOOL_NAME,
+        ]),
+        "agent.delegate" => NomiCapabilityProjection::Tools(&[
+            "nomi_delegate",
+            nomifun_ai_agent::SUBAGENT_SEND_TOOL_NAME,
+            nomifun_ai_agent::SUBAGENT_WAIT_TOOL_NAME,
+        ]),
 
         // Bundled native adapters reuse the application's existing HTTP and
         // owner-scoped Cron services. No dynamic Plugin runtime is required.
         "web.fetch" => NomiCapabilityProjection::Tools(&[
             nomifun_ai_agent::web_fetch::WEB_FETCH_TOOL_NAME,
+        ]),
+        "web.search" => NomiCapabilityProjection::WebSearchTool,
+        "citation.render" => NomiCapabilityProjection::Tools(&[
+            nomifun_ai_agent::web_search::CITATION_RENDER_TOOL_NAME,
+        ]),
+        // MCP connection is an explicit Session-bound activation tool. It
+        // resolves the exact server-owned binding/config/credential only when
+        // called after ToolSearch; no server is contacted during bootstrap.
+        "mcp.connect" => NomiCapabilityProjection::Tools(&[
+            nomifun_ai_agent::MCP_CONNECT_TOOL_NAME,
+        ]),
+        "mcp.oauth" => NomiCapabilityProjection::HostOnly {
+            browser: false,
+            computer: false,
+        },
+        "mcp.tool_proxy" => NomiCapabilityProjection::Tools(&[
+            nomifun_ai_agent::MCP_GENERIC_PROXY_TOOL_NAME,
+        ]),
+        "mcp.resource" => NomiCapabilityProjection::Tools(&[
+            nomifun_ai_agent::MCP_RESOURCE_LIST_TOOL_NAME,
+            nomifun_ai_agent::MCP_RESOURCE_READ_TOOL_NAME,
         ]),
         "schedule.store" => NomiCapabilityProjection::Tools(&[
             "cron_create", "cron_list", "cron_delete",
@@ -410,6 +491,10 @@ pub(crate) fn nomi_capability_projection(
         "knowledge.read" => NomiCapabilityProjection::Tools(&["knowledge_read"]),
         "knowledge.write" => NomiCapabilityProjection::Tools(&["knowledge_write"]),
         "skill.invoke" => NomiCapabilityProjection::Tools(&["Skill"]),
+
+        // Image understanding is not a callable tool. It authorizes Nomi to
+        // turn supported local image attachments into multimodal user content.
+        "llm.vision" => NomiCapabilityProjection::VisionContext,
 
         // Project/session declarations are consumed outside the model tool
         // list. They do not freeze concrete resource identities.
@@ -518,6 +603,69 @@ pub(crate) fn validate_nomi_capability_projection(
                 selection.capability.id.as_ref(),
             )
         })?;
+    validate_vision_route(revision)?;
+    validate_web_search_route(revision)?;
+    Ok(())
+}
+
+fn validate_web_search_route(revision: &AgentPresetRevision) -> Result<(), AppError> {
+    let selected = revision
+        .payload
+        .initial_capabilities
+        .iter()
+        .chain(&revision.payload.on_demand_capabilities)
+        .any(|selection| selection.capability.id.as_ref() == "web.search");
+    if !selected {
+        return Ok(());
+    }
+    let route = revision
+        .payload
+        .chat_route_records
+        .get(CHAT_TASK)
+        .ok_or_else(|| unsupported("web.search", "agent_chat route record is required"))?;
+    if route.primary.protocol != nomifun_agent_contracts::ChatRouteProtocol::OpenaiResponses
+        || !route
+            .primary
+            .features
+            .contains(&nomifun_agent_contracts::ChatRouteFeature::WebSearch)
+    {
+        return Err(unsupported(
+            "web.search",
+            "the exact primary Chat route must use openai.responses and declare web_search",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_vision_route(revision: &AgentPresetRevision) -> Result<(), AppError> {
+    let vision_selected = revision
+        .payload
+        .initial_capabilities
+        .iter()
+        .chain(&revision.payload.on_demand_capabilities)
+        .any(|selection| selection.capability.id.as_ref() == "llm.vision");
+    if !vision_selected {
+        return Ok(());
+    }
+
+    let route = revision
+        .payload
+        .chat_route_records
+        .get(CHAT_TASK)
+        .ok_or_else(|| unsupported("llm.vision", "agent_chat route record is required"))?;
+    if !route
+        .primary
+        .features
+        .contains(&nomifun_agent_contracts::ChatRouteFeature::ImageInput)
+    {
+        return Err(unsupported(
+            "llm.vision",
+            format!(
+                "the exact primary Chat model {}/{} does not declare image_input",
+                route.primary.provider_id, route.primary.model
+            ),
+        ));
+    }
     Ok(())
 }
 
@@ -541,14 +689,27 @@ fn is_native_nomi_capability(capability_id: &str) -> bool {
             | "fs.search"
             | "fs.write"
             | "fs.patch"
+            | "fs.delete"
+            | "fs.watch"
+            | "fs.snapshot"
             | "process.exec"
             | "vcs.status"
             | "vcs.diff"
             | "vcs.stage"
             | "vcs.commit"
+            | "vcs.push"
             | "agent.execution.plan"
+            | "agent.execution.observe"
+            | "agent.execution.steer"
+            | "agent.fork"
             | "agent.delegate"
+            | "web.search"
             | "web.fetch"
+            | "citation.render"
+            | "mcp.connect"
+            | "mcp.tool_proxy"
+            | "mcp.resource"
+            | "mcp.oauth"
             | "schedule.store"
             | "knowledge.search"
             | "knowledge.read"
@@ -569,6 +730,7 @@ fn is_native_nomi_capability(capability_id: &str) -> bool {
             | "skill.hooks"
             | "memory.project.write"
             | "memory.project.distill"
+            | "llm.vision"
             | "browser.identity"
             | "browser.observe"
             | "browser.navigate"
@@ -586,12 +748,19 @@ fn is_native_nomi_capability(capability_id: &str) -> bool {
 
 fn project_capabilities_with_dynamic(
     revision: &AgentPresetRevision,
+    route: &ChatRouteRecord,
     mut dynamic_provider_names: impl FnMut(&str, bool) -> Vec<String>,
 ) -> Result<ProjectedCapabilityTools, AppError> {
     let mut initial_tools = BTreeSet::new();
     let mut deferred_tools = BTreeSet::new();
     let mut browser_use = false;
     let mut computer_use = false;
+    let mut vision_input = false;
+    let mut vision_on_demand = false;
+    let mut mcp_connect = false;
+    let mut mcp_tool_proxy = false;
+    let mut mcp_resource = false;
+    let mut mcp_oauth = false;
 
     let mut project = |
         selection: &nomifun_agent_contracts::CapabilitySelection,
@@ -599,6 +768,13 @@ fn project_capabilities_with_dynamic(
         deferred: bool,
     | -> Result<(), AppError> {
         let capability_id = selection.capability.id.as_ref();
+        match capability_id {
+            "mcp.connect" => mcp_connect = true,
+            "mcp.tool_proxy" => mcp_tool_proxy = true,
+            "mcp.resource" => mcp_resource = true,
+            "mcp.oauth" => mcp_oauth = true,
+            _ => {}
+        }
         let native = nomi_capability_projection(capability_id);
         let projection = match native {
             Ok(projection) => projection,
@@ -622,6 +798,18 @@ fn project_capabilities_with_dynamic(
             NomiCapabilityProjection::Tools(tools) => {
                 target.extend(tools.iter().map(|tool| (*tool).to_owned()));
             }
+            NomiCapabilityProjection::HostedTools => {
+                let hosted = dynamic_provider_names(capability_id, deferred);
+                if hosted.is_empty() {
+                    // Conversation creation happens before a concrete
+                    // AgentSession ID exists. The app-owned runtime provider
+                    // materializes the exact hosted routes from the persisted
+                    // Binding/Snapshot once that ID is known and extends the
+                    // same allowlist before Nomi builds its registry.
+                    return Ok(());
+                }
+                target.extend(hosted);
+            }
             NomiCapabilityProjection::BrowserTools => {
                 browser_use = true;
                 target.insert("Browser".to_owned());
@@ -629,6 +817,44 @@ fn project_capabilities_with_dynamic(
             NomiCapabilityProjection::ComputerTools => {
                 computer_use = true;
                 target.insert("Computer".to_owned());
+            }
+            NomiCapabilityProjection::VisionContext => {
+                if !route
+                    .primary
+                    .features
+                    .contains(&nomifun_agent_contracts::ChatRouteFeature::ImageInput)
+                {
+                    return Err(unsupported(
+                        "llm.vision",
+                        format!(
+                            "the exact primary Chat model {}/{} does not declare image_input",
+                            route.primary.provider_id, route.primary.model
+                        ),
+                    ));
+                }
+                if deferred {
+                    vision_on_demand = true;
+                    target.insert(
+                        nomifun_ai_agent::vision_activation::VISION_ACTIVATE_TOOL_NAME.to_owned(),
+                    );
+                } else {
+                    vision_input = true;
+                }
+            }
+            NomiCapabilityProjection::WebSearchTool => {
+                if route.primary.protocol
+                    != nomifun_agent_contracts::ChatRouteProtocol::OpenaiResponses
+                    || !route
+                        .primary
+                        .features
+                        .contains(&nomifun_agent_contracts::ChatRouteFeature::WebSearch)
+                {
+                    return Err(unsupported(
+                        "web.search",
+                        "the exact primary Chat route must use openai.responses and declare web_search",
+                    ));
+                }
+                target.insert(nomifun_ai_agent::web_search::WEB_SEARCH_TOOL_NAME.to_owned());
             }
             NomiCapabilityProjection::HostOnly { browser, computer } => {
                 browser_use |= browser;
@@ -668,6 +894,12 @@ fn project_capabilities_with_dynamic(
         deferred_tools: deferred_tools.into_iter().collect(),
         browser_use,
         computer_use,
+        vision_input,
+        vision_on_demand,
+        mcp_connect,
+        mcp_tool_proxy,
+        mcp_resource,
+        mcp_oauth,
     })
 }
 
@@ -1007,28 +1239,30 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_capability_does_not_require_a_native_projection() {
+    fn hosted_capability_defers_tool_name_until_session_materialization() {
         let mut fixture = fixture();
+        let baseline = project(input(&fixture))
+            .expect("baseline projection")
+            .request
+            .extra["allowed_tools"]
+            .clone();
         fixture
             .2
             .payload
             .initial_capabilities
             .push(capability("vcs.push", true));
         refresh_fixture_identity(&mut fixture);
-        let projected = project(input(&fixture))
-            .expect("dynamic capability is registered by the session provider");
-        assert!(
-            !projected.request.extra["allowed_tools"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|tool| tool == "vcs.push")
-        );
-        assert!(projected
+        let projection = project(input(&fixture))
+            .expect("pre-Session projection keeps the hosted capability ceiling");
+        assert!(projection
             .snapshot
             .initial_capabilities
-            .iter()
-            .any(|capability| capability == "vcs.push"));
+            .contains(&"vcs.push".to_owned()));
+        assert_eq!(projection.request.extra["allowed_tools"], baseline);
+        assert_eq!(
+            nomi_capability_projection("vcs.push").unwrap(),
+            NomiCapabilityProjection::HostedTools
+        );
     }
 
     #[test]
@@ -1084,8 +1318,83 @@ mod tests {
         assert_eq!(result.request.extra["allowed_tools"], json!([]));
         assert_eq!(result.request.extra["deferred_tools"], json!([]));
         assert_eq!(result.request.extra["enforce_tool_allowlist"], true);
+        assert_eq!(result.request.extra["vision_input"], false);
         assert!(result.snapshot.initial_capabilities.is_empty());
         assert!(result.snapshot.on_demand_capabilities.is_empty());
+    }
+
+    #[test]
+    fn vision_capability_projects_into_the_real_message_context_path() {
+        let mut fixture = fixture();
+        fixture.2.payload.initial_capabilities = vec![
+            capability("session.attachments.read", true),
+            capability("llm.vision", true),
+        ];
+        fixture
+            .2
+            .payload
+            .chat_route_records
+            .get_mut(CHAT_TASK)
+            .unwrap()
+            .primary
+            .features
+            .insert(ChatRouteFeature::ImageInput);
+        refresh_fixture_identity(&mut fixture);
+
+        validate_nomi_capability_projection(&fixture.2)
+            .expect("vision-capable exact Chat route owns llm.vision");
+        let result = project(input(&fixture)).expect("vision context projection");
+        assert_eq!(result.request.extra["vision_input"], true);
+        assert_eq!(result.request.extra["vision_on_demand"], false);
+        assert_eq!(result.request.extra["allowed_tools"], json!([]));
+        assert_eq!(
+            nomi_capability_projection("llm.vision").unwrap(),
+            NomiCapabilityProjection::VisionContext
+        );
+    }
+
+    #[test]
+    fn on_demand_vision_stays_inactive_until_its_deferred_tool_runs() {
+        let mut fixture = fixture();
+        fixture.2.payload.initial_capabilities.clear();
+        fixture.2.payload.on_demand_capabilities = vec![capability("llm.vision", false)];
+        fixture
+            .2
+            .payload
+            .chat_route_records
+            .get_mut(CHAT_TASK)
+            .unwrap()
+            .primary
+            .features
+            .insert(ChatRouteFeature::ImageInput);
+        refresh_fixture_identity(&mut fixture);
+
+        let result = project(input(&fixture)).expect("deferred vision projection");
+        assert_eq!(result.request.extra["vision_input"], false);
+        assert_eq!(result.request.extra["vision_on_demand"], true);
+        assert_eq!(
+            result.request.extra["deferred_tools"],
+            json!(["activate_vision_input"])
+        );
+        assert_eq!(
+            result.request.extra["allowed_tools"],
+            json!(["ToolSearch", "activate_vision_input"])
+        );
+    }
+
+    #[test]
+    fn vision_capability_rejects_a_text_only_exact_chat_route() {
+        let mut fixture = fixture();
+        fixture.2.payload.initial_capabilities = vec![capability("llm.vision", true)];
+        refresh_fixture_identity(&mut fixture);
+
+        let validation = validate_nomi_capability_projection(&fixture.2)
+            .expect_err("text-only route must fail capability validation");
+        assert!(validation.to_string().contains("image_input"));
+
+        let projection = project(input(&fixture))
+            .expect_err("text-only route must fail runtime projection");
+        assert!(projection.to_string().contains("image_input"));
     }
 
     #[test]
@@ -1110,7 +1419,15 @@ mod tests {
             .2
             .payload
             .initial_capabilities
-            .push(capability("vcs.status", true));
+            .extend([
+                capability("vcs.status", true),
+                capability("vcs.diff", true),
+            ]);
+        fixture
+            .3
+            .content
+            .required_runtime_features
+            .insert(RuntimeFeatureId::from("code_mode"));
         refresh_fixture_identity(&mut fixture);
 
         let result = project(input(&fixture)).expect("typed VCS projection");
@@ -1121,13 +1438,29 @@ mod tests {
             tools.iter().filter(|tool| *tool == "vcs.status").count(),
             1
         );
+        assert_eq!(
+            tools.iter().filter(|tool| *tool == "review.status").count(),
+            1,
+            "vcs.diff must carry the read-only review workflow tool"
+        );
+        assert_eq!(
+            result.request.extra["runtime_profile"],
+            "coding",
+            "coding.codex must select the explicit Nomi coding profile"
+        );
     }
 
     #[test]
     fn repaired_builtins_project_only_their_native_tools_in_both_placements() {
         for (id, names) in [
             ("web.fetch", vec!["web_fetch"]),
-            ("agent.delegate", vec!["nomi_delegate"]),
+            (
+                "agent.delegate",
+                vec!["nomi_delegate", "subagent_send", "subagent_wait"],
+            ),
+            ("agent.execution.observe", vec!["agent_execution_observe"]),
+            ("agent.execution.steer", vec!["agent_execution_steer"]),
+            ("agent.fork", vec!["agent_fork"]),
             ("schedule.store", vec!["cron_create", "cron_delete", "cron_list"]),
         ] {
             for deferred in [false, true] {
@@ -1152,24 +1485,139 @@ mod tests {
     }
 
     #[test]
-    fn projection_table_rejects_capabilities_without_a_nomi_owner() {
-        for capability_id in [
-            "fs.delete",
-            "fs.watch",
-            "fs.snapshot",
-            "vcs.push",
-            "web.search",
-            "agent.execution.observe",
-            "agent.execution.steer",
-            "llm.vision",
-        ] {
-            let error = nomi_capability_projection(capability_id)
-                .expect_err("unsupported capability must fail closed");
-            assert!(
-                error.to_string().contains(capability_id),
-                "error should identify {capability_id}: {error}"
+    fn web_search_requires_and_uses_an_exact_responses_search_route() {
+        let mut search_fixture = fixture();
+        search_fixture.2.payload.initial_capabilities = vec![capability("web.search", true)];
+        let route = search_fixture
+            .2
+            .payload
+            .chat_route_records
+            .get_mut(CHAT_TASK)
+            .unwrap();
+        route.primary.protocol = ChatRouteProtocol::OpenaiResponses;
+        route.primary.features.insert(ChatRouteFeature::WebSearch);
+        refresh_fixture_identity(&mut search_fixture);
+
+        validate_nomi_capability_projection(&search_fixture.2)
+            .expect("search-capable exact route");
+        let result = project(input(&search_fixture)).expect("web search projection");
+        assert_eq!(result.request.extra["allowed_tools"], json!(["web_search"]));
+
+        let mut unsupported = fixture();
+        unsupported.2.payload.initial_capabilities = vec![capability("web.search", true)];
+        refresh_fixture_identity(&mut unsupported);
+        assert!(validate_nomi_capability_projection(&unsupported.2).is_err());
+        assert!(project(input(&unsupported)).is_err());
+    }
+
+    #[test]
+    fn citation_render_is_deferred_and_resolves_only_session_search_results() {
+        let mut fixture = fixture();
+        fixture.2.payload.initial_capabilities.clear();
+        fixture.2.payload.on_demand_capabilities = vec![capability("citation.render", false)];
+        refresh_fixture_identity(&mut fixture);
+
+        let result = project(input(&fixture)).expect("citation context projection");
+        assert_eq!(
+            result.request.extra["allowed_tools"],
+            json!(["ToolSearch", "citation_render"])
+        );
+        assert_eq!(
+            result.request.extra["deferred_tools"],
+            json!(["citation_render"])
+        );
+        assert_eq!(
+            nomi_capability_projection("citation.render").unwrap(),
+            NomiCapabilityProjection::Tools(&["citation_render"])
+        );
+    }
+
+    #[test]
+    fn mcp_capabilities_project_the_exact_session_lifecycle_and_tools() {
+        let mut fixture = fixture();
+        fixture.2.payload.initial_capabilities.clear();
+        fixture.2.payload.on_demand_capabilities = [
+            "mcp.connect",
+            "mcp.tool_proxy",
+            "mcp.resource",
+            "mcp.oauth",
+        ]
+        .into_iter()
+        .map(|id| capability(id, false))
+        .collect();
+        refresh_fixture_identity(&mut fixture);
+
+        let result = project(input(&fixture)).expect("MCP Session projection");
+        assert_eq!(
+            result.request.extra["mcp_capabilities"],
+            json!({
+                "connect": true,
+                "tool_proxy": true,
+                "resource": true,
+                "oauth": true,
+            })
+        );
+        assert_eq!(
+            result.request.extra["allowed_tools"],
+            json!([
+                "ToolSearch",
+                "mcp_connect",
+                "mcp_resource_list",
+                "mcp_resource_read",
+                "mcp_tool_proxy",
+            ])
+        );
+        assert_eq!(
+            result.request.extra["deferred_tools"],
+            json!([
+                "mcp_connect",
+                "mcp_resource_list",
+                "mcp_resource_read",
+                "mcp_tool_proxy",
+            ])
+        );
+        assert_eq!(
+            nomi_capability_projection("mcp.connect").unwrap(),
+            NomiCapabilityProjection::Tools(&[nomifun_ai_agent::MCP_CONNECT_TOOL_NAME])
+        );
+        assert_eq!(
+            nomi_capability_projection("mcp.oauth").unwrap(),
+            NomiCapabilityProjection::HostOnly {
+                browser: false,
+                computer: false,
+            }
+        );
+        assert_eq!(
+            nomi_capability_projection("mcp.tool_proxy").unwrap(),
+            NomiCapabilityProjection::Tools(&[
+                nomifun_ai_agent::MCP_GENERIC_PROXY_TOOL_NAME,
+            ])
+        );
+        assert_eq!(
+            nomi_capability_projection("mcp.resource").unwrap(),
+            NomiCapabilityProjection::Tools(&[
+                nomifun_ai_agent::MCP_RESOURCE_LIST_TOOL_NAME,
+                nomifun_ai_agent::MCP_RESOURCE_READ_TOOL_NAME,
+            ])
+        );
+    }
+
+    #[test]
+    fn wave2_workspace_capabilities_use_hosted_tools_and_real_watch_context() {
+        for capability_id in ["fs.delete", "fs.snapshot", "vcs.push"] {
+            assert_eq!(
+                nomi_capability_projection(capability_id).unwrap(),
+                NomiCapabilityProjection::HostedTools,
+                "{capability_id}"
             );
         }
+        assert_eq!(
+            nomi_capability_projection("fs.watch").unwrap(),
+            NomiCapabilityProjection::HostOnly {
+                browser: false,
+                computer: false,
+            }
+        );
     }
 
     #[test]

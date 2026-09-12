@@ -379,13 +379,25 @@ impl nomifun_creation::CreationTextExecutor for AgentCreationTextExecutor {
         &self,
         request: nomifun_creation::CreationTextRequest,
     ) -> Result<String, nomifun_creation::CreationError> {
-        let config = nomifun_ai_agent::factory::provider_config::resolve_provider_config(
-            self.model_invoke.as_ref(),
-            &request.provider_id,
-            &request.model,
-            &self.workspace,
-        )
-        .await
+        let config = match request.expected_config_revision {
+            Some(revision) => {
+                nomifun_ai_agent::factory::provider_config::resolve_provider_config_at_revision(
+                    self.model_invoke.as_ref(),
+                    &request.provider_id,
+                    &request.model,
+                    revision,
+                    &self.workspace,
+                )
+                .await
+            }
+            None => nomifun_ai_agent::factory::provider_config::resolve_provider_config(
+                self.model_invoke.as_ref(),
+                &request.provider_id,
+                &request.model,
+                &self.workspace,
+            )
+            .await,
+        }
         .map_err(|error| nomifun_creation::CreationError::config(error.to_string()))?;
         nomifun_ai_agent::factory::provider_config::one_shot_completion(
             &config,
@@ -3552,10 +3564,29 @@ impl AppServices {
             }
         };
 
+        let provider_digest_pool = database.pool().clone();
+        let provider_config_digest_resolver: nomifun_ai_agent::factory::ProviderConfigDigestResolver =
+            Arc::new(move |provider_id: String| {
+                let pool = provider_digest_pool.clone();
+                Box::pin(async move {
+                    crate::router::chat_broker_host::provider_config_digest(
+                        &pool,
+                        &nomifun_chat_model_broker::ProviderIdRef::from(provider_id),
+                    )
+                    .await
+                    .map(|digest| digest.as_ref().to_owned())
+                    .map_err(|_| {
+                        nomifun_common::AppError::Conflict(
+                            "the canonical Chat provider configuration is unavailable".to_owned(),
+                        )
+                    })
+                })
+            });
         let factory = build_agent_factory(AgentFactoryDeps {
             authoritative_user_id: authoritative_user_id.clone(),
             model_invoke: model_invoke_service.clone(),
             model_invoke_service: Some(model_invoke_service.clone()),
+            provider_config_digest_resolver: Some(provider_config_digest_resolver),
             encryption_key,
             data_dir: data_dir.clone(),
             work_dir: work_dir.clone(),
@@ -3573,6 +3604,13 @@ impl AppServices {
                 database.pool().clone(),
             )) as Arc<dyn nomifun_db::ISettingsRepository>),
             mcp_server_repo: Some(mcp_server_repo),
+            mcp_oauth_service: Some(Arc::new(
+                nomifun_mcp::McpOAuthService::new_dynamic(Arc::new(
+                    nomifun_db::SqliteOAuthTokenRepository::new(
+                        database.pool().clone(),
+                    ),
+                )),
+            )),
             requirement_sink: Some(requirement_sink),
             // Native cron tools: agent schedules/lists/deletes its own recurring
             // prompts. The closure resolves the process CronService lazily (it is

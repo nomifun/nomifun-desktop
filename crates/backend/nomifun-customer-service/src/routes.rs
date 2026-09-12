@@ -5,13 +5,13 @@ use std::sync::Arc;
 use axum::Router;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Extension, Json, Path, Query, State};
-use axum::routing::get;
+use axum::routing::{get, post};
 
 use nomifun_api_types::ApiResponse;
 use nomifun_auth::CurrentUser;
 use nomifun_common::AppError;
 use nomifun_db::models::{
-    CsAgentRow, CsChannelBindingRow, CsDialogueRow, CsMessageRow, CsNoteRow,
+    CsAgentRow, CsChannelBindingRow, CsDialogueRow, CsHandoffRow, CsMessageRow, CsNoteRow,
 };
 use serde::Deserialize;
 
@@ -46,6 +46,19 @@ pub fn customer_service_routes(state: CustomerServiceRouterState) -> Router {
         .route(
             "/api/customer-service/dialogues/{cs_dialogue_id}/messages",
             get(list_dialogue_messages),
+        )
+        .route("/api/customer-service/handoffs", get(list_handoffs))
+        .route(
+            "/api/customer-service/handoffs/{cs_handoff_id}/claim",
+            post(claim_handoff),
+        )
+        .route(
+            "/api/customer-service/handoffs/{cs_handoff_id}/resolve",
+            post(resolve_handoff),
+        )
+        .route(
+            "/api/customer-service/handoffs/{cs_handoff_id}/cancel",
+            post(cancel_handoff),
         )
         .with_state(state)
 }
@@ -243,6 +256,102 @@ async fn list_dialogue_messages(
     )))
 }
 
+// ── durable human handoff queue ─────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct ListHandoffsQuery {
+    cs_agent_id: String,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default = "default_handoff_limit")]
+    limit: usize,
+}
+
+fn default_handoff_limit() -> usize {
+    100
+}
+
+async fn list_handoffs(
+    State(state): State<CustomerServiceRouterState>,
+    Extension(_user): Extension<CurrentUser>,
+    Query(query): Query<ListHandoffsQuery>,
+) -> Result<Json<ApiResponse<Vec<CsHandoffRow>>>, AppError> {
+    Ok(Json(ApiResponse::ok(
+        state
+            .service
+            .list_handoffs(
+                &query.cs_agent_id,
+                query.status.as_deref(),
+                query.limit,
+            )
+            .await?,
+    )))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HandoffTransitionRequest {
+    expected_status: String,
+    #[serde(default)]
+    resolution: String,
+}
+
+async fn claim_handoff(
+    State(state): State<CustomerServiceRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(cs_handoff_id): Path<String>,
+    Json(request): Json<HandoffTransitionRequest>,
+) -> Result<Json<ApiResponse<CsHandoffRow>>, AppError> {
+    Ok(Json(ApiResponse::ok(
+        state
+            .service
+            .claim_handoff(
+                &cs_handoff_id,
+                &request.expected_status,
+                user.id.as_str(),
+            )
+            .await?,
+    )))
+}
+
+async fn resolve_handoff(
+    State(state): State<CustomerServiceRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(cs_handoff_id): Path<String>,
+    Json(request): Json<HandoffTransitionRequest>,
+) -> Result<Json<ApiResponse<CsHandoffRow>>, AppError> {
+    Ok(Json(ApiResponse::ok(
+        state
+            .service
+            .resolve_handoff(
+                &cs_handoff_id,
+                &request.expected_status,
+                user.id.as_str(),
+                &request.resolution,
+            )
+            .await?,
+    )))
+}
+
+async fn cancel_handoff(
+    State(state): State<CustomerServiceRouterState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(cs_handoff_id): Path<String>,
+    Json(request): Json<HandoffTransitionRequest>,
+) -> Result<Json<ApiResponse<CsHandoffRow>>, AppError> {
+    Ok(Json(ApiResponse::ok(
+        state
+            .service
+            .cancel_handoff(
+                &cs_handoff_id,
+                &request.expected_status,
+                user.id.as_str(),
+                &request.resolution,
+            )
+            .await?,
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,5 +505,85 @@ mod tests {
                 .as_deref(),
             Some(agent_b.as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn handoff_routes_list_claim_and_resolve_the_durable_queue_row() {
+        let (_db, state) = setup().await;
+        let agent = seed_agent(&state).await;
+        let dialogue = state
+            .service
+            .repo()
+            .get_or_create_dialogue(
+                &agent,
+                &nomifun_db::CsDialogueKey {
+                    channel_plugin_id: nomifun_common::ChannelPluginId::new().into_string(),
+                    channel_user_id: nomifun_common::ChannelUserId::new().into_string(),
+                    chat_id: "handoff-route-chat".into(),
+                },
+                nomifun_common::now_ms(),
+            )
+            .await
+            .unwrap();
+        let requester = user();
+        let queued = state
+            .service
+            .request_handoff(crate::service::RequestCsHandoffInput {
+                cs_agent_id: agent.clone(),
+                cs_dialogue_id: dialogue.cs_dialogue_id,
+                requested_by: requester.id.to_string(),
+                idempotency_key: "handoff-route-idempotency".into(),
+                reason: "visitor asked for a person".into(),
+                summary: "account question".into(),
+            })
+            .await
+            .unwrap()
+            .handoff;
+
+        let listed = list_handoffs(
+            State(state.clone()),
+            Extension(user()),
+            Query(ListHandoffsQuery {
+                cs_agent_id: agent,
+                status: Some("pending".into()),
+                limit: 10,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(listed.0.data.as_ref().unwrap(), &[queued.clone()]);
+
+        let claimed = claim_handoff(
+            State(state.clone()),
+            Extension(user()),
+            Path(queued.cs_handoff_id.clone()),
+            Json(HandoffTransitionRequest {
+                expected_status: "pending".into(),
+                resolution: String::new(),
+            }),
+        )
+        .await
+        .unwrap()
+        .0
+        .data
+        .unwrap();
+        assert_eq!(claimed.status, "claimed");
+
+        let resolved = resolve_handoff(
+            State(state),
+            Extension(user()),
+            Path(queued.cs_handoff_id),
+            Json(HandoffTransitionRequest {
+                expected_status: "claimed".into(),
+                resolution: "owner answered the visitor".into(),
+            }),
+        )
+        .await
+        .unwrap()
+        .0
+        .data
+        .unwrap();
+        assert_eq!(resolved.status, "resolved");
+        assert_eq!(resolved.resolution, "owner answered the visitor");
     }
 }

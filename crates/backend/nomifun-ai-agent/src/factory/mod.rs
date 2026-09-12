@@ -8,6 +8,7 @@ pub(crate) mod nomi;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
 use nomi_agent::companion_tools::{CompanionMemorySink, CompanionSkillSink};
 use nomi_agent::requirement_tools::RequirementSink;
@@ -43,6 +44,12 @@ pub trait CompanionPromptProvider: Send + Sync {
     ) -> Option<String>;
 }
 
+/// Host-owned digest resolver for the complete provider invocation graph.
+/// The digest contains no plaintext credential; it lets a canonical Chat
+/// Snapshot fail closed if any provider/model/connection/credential row drifts.
+pub type ProviderConfigDigestResolver =
+    Arc<dyn Fn(String) -> BoxFuture<'static, Result<String, AppError>> + Send + Sync>;
+
 /// Dependencies needed by the agent factory to construct agents.
 pub struct AgentFactoryDeps {
     /// Canonical owner for installation-scoped tools. Every factory backend
@@ -56,6 +63,7 @@ pub struct AgentFactoryDeps {
     /// chat when this capability is enabled. `None` is reserved for
     /// lightweight tests and standalone hosts that must not expose the tool.
     pub model_invoke_service: Option<Arc<ModelInvokeService>>,
+    pub provider_config_digest_resolver: Option<ProviderConfigDigestResolver>,
     pub encryption_key: [u8; 32],
     pub data_dir: PathBuf,
     /// Root for auto-provisioned managed workspaces
@@ -93,6 +101,10 @@ pub struct AgentFactoryDeps {
     /// inject enabled servers into the session's MCP client set.
     /// `None` for tests/composition paths that do not need MCP injection.
     pub mcp_server_repo: Option<Arc<dyn IMcpServerRepository>>,
+    /// OAuth credential resolver for MCP servers selected through canonical
+    /// Agent resource bindings. The service returns tokens only for the exact
+    /// stored endpoint; secrets never enter Agent bindings or model input.
+    pub mcp_oauth_service: Option<Arc<nomifun_mcp::McpOAuthService>>,
     /// Optional sink enabling nomi native requirement tools. When `Some`,
     /// `requirement_complete` / `requirement_update_status` are registered into
     /// the in-process engine. `None` (e.g. standalone) leaves them unregistered.

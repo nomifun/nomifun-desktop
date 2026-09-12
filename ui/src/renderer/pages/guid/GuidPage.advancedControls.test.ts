@@ -15,8 +15,8 @@ describe('GuidPage advanced controls', () => {
 
     expect(source.includes('<AutoWorkControl')).toBe(true);
     expect(source.includes('<IdmmControl')).toBe(true);
-    expect(source.includes('<KnowledgeControl')).toBe(true);
-    expect(source.includes('knowledgeEnabled && (')).toBe(true);
+    expect(source.includes('<AgentResourcePicker')).toBe(true);
+    expect(source.includes('<KnowledgeControl')).toBe(false);
   });
 
   test('keeps the remaining draft API focused on session behavior', () => {
@@ -37,6 +37,8 @@ describe('GuidPage advanced controls', () => {
     expect(page.includes("presetResourceKinds.has('workspace')")).toBe(true);
     expect(page.includes("presetResourceKinds.has('knowledge_base')")).toBe(true);
     expect(page.includes('showWorkspace={workspaceEnabled}')).toBe(true);
+    expect(page.includes('resourceSelections: resourceSelectionResolution.selections')).toBe(true);
+    expect(page.includes('resourceSelectionResolution.missingKinds.length === 0')).toBe(true);
     expect(capabilityHook.includes('editor.revision?.document ?? editor.draft.document')).toBe(
       true
     );

@@ -547,7 +547,12 @@ robot.device_tools
 每个客户、群、伙伴和设备必须使用明确的业务 resource ID 与 owner。物理设备 Effect
 属于 Robot 领域服务，不进入通用 Effect 平台。
 
-#### Creation、Workshop、Office 与 MiniApp 候选
+#### Creation、Workshop 与 MiniApp：已接入 Nomi 生产主链（2026-09-12）
+
+以下能力已从候选合同升级为 host-backed Wave 3 Tool：Nomi composition 原子替换
+declarative registration，使用现有 `CreationService`、`WorkshopService` 和
+`MiniAppM1ApplicationService`，并经 Snapshot 冻结的 typed resource binding、精确 action
+schema、PlatformBuiltin admission 和同一 Plugin refresh 可用性策略进入 Session。
 
 ```text
 creation.text
@@ -561,12 +566,6 @@ workshop.canvas.edit
 workshop.asset.read
 workshop.asset.write
 workshop.template.run
-workshop.director
-
-office.preview
-office.document.edit
-office.sheet.edit
-office.slides.edit
 
 miniapp.read
 miniapp.edit
@@ -574,8 +573,21 @@ miniapp.publish
 miniapp.serve
 ```
 
-Canvas revision、Asset ownership、文档格式、发布产物和 iframe policy 由各自 Package
-拥有。只有真实业务模型和消费者存在后，才从候选目录提取最小 Capability 合同。
+`workshop.director` 已随产品功能退休，不得重新进入目录。模板运行对无需人工审阅的
+SingleImage 和 MultiImage 执行到 terminal；`review_required=true` 必须在写入运行记录前
+返回 `HUMAN_REVIEW_REQUIRED` 并转到 Creative Studio 人工审阅入口，不能自动批准。
+
+#### Office 候选
+
+```text
+office.preview
+office.document.edit
+office.sheet.edit
+office.slides.edit
+```
+
+Office 文档格式和产物仍由对应 Package 拥有；只有真实业务模型和消费者存在后，才从候选
+目录提取最小 Capability 合同。
 
 #### Notification 与其他 ingress 候选
 

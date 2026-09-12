@@ -1,7 +1,7 @@
 # 创意工坊：画布领域与独立工作台重构
 
 - 日期：2026-08-23
-- 状态：产品方向已确认；分阶段实施
+- 状态：画布领域设计仍有效；Director 部分已于 2026-09-11 退休
 - 本地 checkpoint：`main`（按用户要求不推送远程）
 
 ## 1. 用户确认的产品原则
@@ -67,7 +67,7 @@ TemplateStepTaskOwner
 
 - `/workshop/canvases`：画布库。
 - `/workshop/canvas/:canvasId`：无限画布。
-- `/workshop/director/:canvasId`：当前仍是画布的专用导演编辑模式。
+- `/workshop/director/:canvasId`：已退休；不得再作为页面入口或 Agent 能力发布。
 - `/workshop/image`：独立生图工作台，无画布参数。
 - `/workshop/video`：独立视频工作台，无画布参数。
 - `/workshop/prompts`：全局提示词。

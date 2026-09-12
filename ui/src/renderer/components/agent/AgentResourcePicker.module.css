@@ -1,0 +1,19 @@
+.picker { display: flex; flex-direction: column; gap: 12px; padding: 14px; border: 1px solid var(--color-border-2); border-radius: 12px; background: var(--color-fill-1); }
+.header { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.headerCopy { min-width: 0; }
+.headerCopy strong { display: block; color: var(--color-text-1); font-size: 13px; }
+.headerCopy span { display: block; margin-top: 3px; color: var(--color-text-3); font-size: 11px; line-height: 1.55; }
+.status { flex: 0 0 auto; border-radius: 999px; padding: 3px 8px; background: rgba(var(--orange-1), .75); color: rgb(var(--orange-7)); font-size: 11px; }
+.statusReady { background: rgba(var(--success-1), .8); color: rgb(var(--success-7)); }
+.fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.field { min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+.fieldLabel { color: var(--color-text-2); font-size: 11px; font-weight: 600; }
+.fieldControl { display: flex; align-items: center; gap: 7px; }
+.fieldControl :global(.arco-select) { min-width: 0; flex: 1; }
+.fieldHint { min-height: 16px; color: var(--color-text-3); font-size: 10px; line-height: 1.5; }
+.fieldError { color: rgb(var(--danger-6)); }
+.option { min-width: 0; display: flex; flex-direction: column; padding: 2px 0; }
+.option strong { overflow: hidden; color: var(--color-text-1); font-size: 12px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.option small { overflow: hidden; color: var(--color-text-3); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.emptyButton { flex: 0 0 auto; }
+@media (max-width: 760px) { .fields { grid-template-columns: minmax(0, 1fr); } }

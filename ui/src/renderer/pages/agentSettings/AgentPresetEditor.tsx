@@ -1,5 +1,6 @@
 import type {
   AgentCatalogResponse,
+  AgentResourceSelection,
   AgentPresetDraft,
   AgentPresetEditorResponse,
   AgentPresetSummary,
@@ -39,6 +40,12 @@ import { useTranslation } from 'react-i18next';
 import { modelDisplayLabel } from '@/common/utils/modelPresentation';
 import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
+import AgentResourcePicker from '@/renderer/components/agent/AgentResourcePicker';
+import {
+  resolveAgentResourceSelections,
+  selectedCapabilityIds,
+  type AgentResourceSelectionValue,
+} from '@/renderer/hooks/agent/agentResourceSelection';
 import AgentCapabilityWorkspace from './AgentCapabilityWorkspace';
 import { unavailableCapabilityReferences } from './capabilityGroups';
 import {
@@ -77,7 +84,8 @@ type AgentPresetEditorProps = {
   onSave: () => void;
   onDiscard?: () => void;
   onOpenModels?: () => void;
-  onTest: (input: string) => void;
+  onOpenResource?: (route: string) => void;
+  onTest: (input: string, resourceSelections: AgentResourceSelection[]) => void;
   onStartConversation: (preset: AgentPresetSummary) => void;
 };
 
@@ -153,11 +161,12 @@ const AgentChatModelPicker: React.FC<{
 const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
   editor, draft, catalog, preview, testResult, tokenState, sourceTemplate,
   busyAction, dirty, onDraftChange, onPreview, onSave, onDiscard, onOpenModels,
-  onTest, onStartConversation,
+  onOpenResource, onTest, onStartConversation,
 }) => {
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState('capabilities');
   const [testInput, setTestInput] = useState('');
+  const [resourceSelectionValue, setResourceSelectionValue] = useState<AgentResourceSelectionValue>({});
   const busy = busyAction !== null;
   const previewBlocked = preview?.status === 'blocked';
   const unavailableCount = unavailableCapabilityReferences(draft.document, catalog.capabilities).length;
@@ -165,6 +174,8 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
   const selectedSkills = new Set(draft.document.skill_bindings.map((skill) => skill.id));
   const catalogByReference = useMemo(() => new Map(catalog.capabilities.map((item) => [capabilityReferenceKey(item.capability), item])), [catalog.capabilities]);
   const requiredResourceKinds = useMemo(() => selectedRequiredResourceKinds(draft.document, catalog.capabilities), [draft.document, catalog.capabilities]);
+  const capabilityIds = useMemo(() => selectedCapabilityIds(draft.document.initial_capabilities, draft.document.on_demand_capabilities), [draft.document.initial_capabilities, draft.document.on_demand_capabilities]);
+  const resourceSelectionResolution = useMemo(() => resolveAgentResourceSelections(requiredResourceKinds, resourceSelectionValue), [requiredResourceKinds, resourceSelectionValue]);
   const patchDocument = (transform: Parameters<typeof updateDocument>[1]) => onDraftChange(updateDocument(draft, transform));
   const applyChatRouteRecord = (record: ChatRouteRecord) => patchDocument((document) => ({
     ...document,
@@ -372,6 +383,14 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
             <p>{t('agentSettings.sections.testHint')}</p>
           </div>
         </div>
+        <AgentResourcePicker
+          requiredKinds={requiredResourceKinds}
+          capabilityIds={capabilityIds}
+          value={resourceSelectionValue}
+          onChange={setResourceSelectionValue}
+          disabled={busy}
+          onNavigateToResource={onOpenResource}
+        />
         <Alert
           type='warning'
           showIcon
@@ -390,8 +409,8 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
             type='primary'
             icon={<PlayOne theme='outline' size='15' />}
             loading={busyAction === 'test'}
-            disabled={busy || !testInput.trim() || previewBlocked}
-            onClick={() => onTest(testInput.trim())}
+            disabled={busy || !testInput.trim() || previewBlocked || resourceSelectionResolution.missingKinds.length > 0}
+            onClick={() => onTest(testInput.trim(), resourceSelectionResolution.selections)}
           >
             {t('agentSettings.actions.test')}
           </Button>

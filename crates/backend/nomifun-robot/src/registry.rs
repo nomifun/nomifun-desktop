@@ -257,6 +257,11 @@ impl RobotRegistry {
     pub async fn list(&self) -> Vec<RobotRecord> {
         self.inner.read().await.values().cloned().collect()
     }
+
+    /// Resolve one installation-scoped robot resource by its canonical ID.
+    pub async fn get(&self, robot_id: &str) -> Option<RobotRecord> {
+        self.inner.read().await.get(robot_id).cloned()
+    }
 }
 
 #[cfg(test)]

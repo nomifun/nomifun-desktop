@@ -10,8 +10,22 @@ use nomi_agent::companion_tools::{
 };
 use nomi_agent::engine::{AgentEngine, CompletionEvidenceContext};
 use nomi_agent::knowledge_tools::{KnowledgeReadTool, KnowledgeSearchTool, KnowledgeWriteTool};
+use nomi_agent::lazy_mcp::{
+    GenericMcpToolProxy, LazyMcpResourceListTool, LazyMcpResourceReadTool,
+    LazyMcpRuntime, McpConnectTool,
+};
+use nomi_agent::mcp_capability_tools::{McpResourceListTool, McpResourceReadTool};
 use nomi_agent::output::OutputSink;
 use nomi_agent::requirement_tools::{RequirementCompleteTool, RequirementSink, RequirementUpdateStatusTool};
+use nomi_agent::session_control_tools::{
+    AGENT_EXECUTION_OBSERVE_TOOL_NAME, AGENT_EXECUTION_STEER_TOOL_NAME,
+    AGENT_FORK_TOOL_NAME, AgentExecutionObserveTool, AgentExecutionSteerTool,
+    AgentForkTool,
+};
+use nomi_agent::subagent_tools::{
+    DelegationHandleRecordingTool, ParentScopedSubagentRegistry, SUBAGENT_SEND_TOOL_NAME,
+    SUBAGENT_WAIT_TOOL_NAME, SubagentSendTool, SubagentWaitTool,
+};
 use nomi_agent::cron_tools::{CronCreateTool, CronDeleteTool, CronListTool, CronSink};
 use nomi_agent::session::Session;
 use nomi_config::config::{CliArgs, Config};
@@ -221,6 +235,9 @@ pub struct NomiAgentManager {
     /// and `runtime` are dropped. See the explicit `Drop` impl below.
     #[allow(dead_code)] // intentional: lifetime-extension only; see Drop impl
     mcp_managers: Vec<Arc<McpManager>>,
+    /// Canonical Agent MCP remains dormant until the deferred `mcp_connect`
+    /// tool is activated and called. This handle owns its bounded cleanup.
+    lazy_mcp_runtime: Option<LazyMcpRuntime>,
     /// Main-process backstop for renewable loopback MCP capabilities. Bridge
     /// children revoke on clean exit; this guard covers abrupt child/runtime
     /// teardown and construction failure.
@@ -274,6 +291,13 @@ pub struct NomiAgentManager {
     /// confined to their workspace, while a local desktop session (`None`)
     /// may choose any absolute local file through the OS file picker.
     image_read_root: Option<PathBuf>,
+    /// Explicit canonical Agent capability gate for image attachment loading.
+    /// Ordinary conversations use `None` and retain model-derived behavior.
+    vision_activation: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Exact Kernel active set shared with ToolSearch/lifecycle activation.
+    /// This handle is read-only at the manager boundary and is absent for
+    /// ordinary conversations that have no canonical Agent Snapshot.
+    capability_state: Option<Arc<nomifun_agent_kernel::SessionCapabilityState>>,
     /// Provider config snapshot reused by the exact post-turn distillation child.
     distill_cfg: Arc<nomi_config::config::Config>,
     /// One-shot knowledge reminder prepended to the FIRST user turn of a session
@@ -874,6 +898,16 @@ pub(crate) struct NomiHostWiring {
     pub image_generation_discovery_failed: bool,
     /// The app's normalized UI language captured on this runtime build.
     pub image_generation_response_in_chinese: bool,
+    /// Search tool backed by the exact authorized Chat route. `None` means the
+    /// selected route cannot satisfy `web.search`; no public fallback exists.
+    pub web_search_tool: Option<Box<dyn nomi_tools::Tool>>,
+    /// Renderer sharing this Session's bounded search-citation store.
+    pub citation_render_tool: Option<Box<dyn nomi_tools::Tool>>,
+    /// Session-local image-input activation state. `None` preserves ordinary
+    /// model-derived behavior; canonical Agents always provide an explicit gate.
+    pub vision_activation: Option<Arc<std::sync::atomic::AtomicBool>>,
+    pub vision_activation_tool: Option<Box<dyn nomi_tools::Tool>>,
+    pub lazy_mcp_runtime: Option<LazyMcpRuntime>,
     /// Exact ordinary Plugin Tool actions frozen for this Nomi Session.
     ///
     /// The app-owned provider resolves this from persisted Session/Binding
@@ -893,6 +927,11 @@ impl Default for NomiHostWiring {
             image_generation_entitled: true,
             image_generation_discovery_failed: false,
             image_generation_response_in_chinese: false,
+            web_search_tool: None,
+            citation_render_tool: None,
+            vision_activation: None,
+            vision_activation_tool: None,
+            lazy_mcp_runtime: None,
             plugin_tool_session: None,
         }
     }
@@ -981,7 +1020,34 @@ impl NomiAgentManager {
         };
         let image_generation_response_in_chinese =
             host_wiring.image_generation_response_in_chinese;
+        let web_search_tool = host_wiring.web_search_tool;
+        let citation_render_tool = host_wiring.citation_render_tool;
+        let vision_activation = host_wiring.vision_activation;
+        let vision_activation_tool = host_wiring.vision_activation_tool;
+        let lazy_mcp_runtime = host_wiring.lazy_mcp_runtime;
         let plugin_tool_session = host_wiring.plugin_tool_session;
+        let capability_state = plugin_tool_session
+            .as_ref()
+            .and_then(crate::NomiPluginToolSession::capability_state);
+        let hosted_context_contributors = plugin_tool_session
+            .as_ref()
+            .map(|session| session.context_contributors().to_vec())
+            .unwrap_or_default();
+        let session_control_sink = plugin_tool_session
+            .as_ref()
+            .and_then(crate::NomiPluginToolSession::session_control_sink);
+        let system_prompt = match plugin_tool_session.as_ref() {
+            Some(session) => session
+                .system_prompt_with_initial_context(
+                    config_extra.system_prompt.as_deref(),
+                )
+                .map_err(|error| {
+                    AppError::Internal(format!(
+                        "Nomi initial capability context projection failed: {error}"
+                    ))
+                })?,
+            None => config_extra.system_prompt.clone(),
+        };
         let image_read_root = config_extra
             .write_root
             .as_deref()
@@ -1017,7 +1083,7 @@ impl NomiAgentManager {
             // process-local CLI/TOML value become this model's hidden ceiling.
             max_tokens: None,
             max_turns: config_extra.max_turns,
-            system_prompt: config_extra.system_prompt.clone(),
+            system_prompt,
             profile: None,
             project_dir: Some(PathBuf::from(&workspace)),
         };
@@ -1043,9 +1109,9 @@ impl NomiAgentManager {
             config.compat.chain_rounds = Some(chain_rounds);
         }
         config.compat.extra_body = config_extra.compat_overrides.extra_body;
-        // 图片支持 override(主动剔除):工厂据 VisionUnsupportedRegistry 命中注入
-        // Some(false),灌进 compat.supports_image → build_messages 发送时剔图。
-        // None → 保持 Config::resolve 的默认(supports_image()==true),行为不变。
+        // 图片支持 override(主动剔除):工厂将精确模型 VisionInput trait、
+        // VisionUnsupportedRegistry 运行时降级与 canonical Agent 的 llm.vision
+        // 选择求交后注入。Some(false) 会阻止附件加载；None 仅保留给普通会话。
         if let Some(supports_image) = config_extra.compat_overrides.supports_image {
             config.compat.supports_image = Some(supports_image);
         }
@@ -1078,6 +1144,46 @@ impl NomiAgentManager {
         config.tools.builtin_allowlist = config_extra.allowed_tools.clone();
         config.tools.enforce_builtin_allowlist = config_extra.enforce_tool_allowlist;
         config.tools.deferred_allowlist = config_extra.deferred_tools.clone();
+        // `agent.delegate` is implemented by the exact Session-bound Gateway
+        // MCP owner. Its provider route is origin-qualified, while the
+        // capability projection retains `nomi_delegate` as its semantic
+        // marker. Admit only this known Gateway origin.
+        let gateway_delegate_provider_name =
+            crate::subagent_gateway::gateway_delegate_provider_name();
+        if config
+            .mcp
+            .servers
+            .contains_key(nomifun_api_types::GatewayMcpConfig::SERVER_NAME)
+            && config
+                .tools
+                .builtin_allowlist
+                .iter()
+                .any(|name| name == "nomi_delegate")
+            && !config
+                .tools
+                .builtin_allowlist
+                .contains(&gateway_delegate_provider_name)
+        {
+            config
+                .tools
+                .builtin_allowlist
+                .push(gateway_delegate_provider_name.clone());
+        }
+        if config
+            .tools
+            .deferred_allowlist
+            .iter()
+            .any(|name| name == "nomi_delegate")
+            && !config
+                .tools
+                .deferred_allowlist
+                .contains(&gateway_delegate_provider_name)
+        {
+            config
+                .tools
+                .deferred_allowlist
+                .push(gateway_delegate_provider_name.clone());
+        }
         if let Some(session) = plugin_tool_session.as_ref() {
             session.extend_tool_policy(
                 &mut config.tools.builtin_allowlist,
@@ -1179,10 +1285,210 @@ impl NomiAgentManager {
             .await
             .map_err(|e| AppError::Internal(format!("Agent bootstrap failed: {e}")))?;
 
+        let mcp_managers = result.mcp_managers.clone();
+        let mcp_proxy_selected = config_extra
+            .allowed_tools
+            .iter()
+            .any(|name| {
+                matches!(
+                    name.as_str(),
+                    "mcp.tool_proxy" | nomi_agent::lazy_mcp::MCP_GENERIC_PROXY_TOOL_NAME
+                )
+            });
+        let mcp_resource_selected = config_extra.allowed_tools.iter().any(|name| {
+            matches!(
+                name.as_str(),
+                nomi_agent::mcp_capability_tools::MCP_RESOURCE_LIST_TOOL_NAME
+                    | nomi_agent::mcp_capability_tools::MCP_RESOURCE_READ_TOOL_NAME
+            )
+        });
+        if !config_extra.extra_mcp_servers.is_empty()
+            && (mcp_proxy_selected || mcp_resource_selected)
+            && mcp_managers.is_empty()
+        {
+            return Err(AppError::UnprocessableEntity(
+                "the AgentSession's bound MCP server could not be connected".to_owned(),
+            ));
+        }
+        if lazy_mcp_runtime.is_none()
+            && mcp_resource_selected
+            && !mcp_managers.iter().any(|manager| {
+                manager
+                    .server_names()
+                    .iter()
+                    .any(|server| manager.server_supports_resources(server))
+            })
+        {
+            return Err(AppError::UnprocessableEntity(
+                "mcp.resource is selected, but the bound MCP server does not advertise resources"
+                    .to_owned(),
+            ));
+        }
         let mut engine = result.engine;
+        let delegate_selected = !config_extra.enforce_tool_allowlist
+            || config_extra
+                .allowed_tools
+                .iter()
+                .any(|name| name == "nomi_delegate");
+        let controls_selected = !config_extra.enforce_tool_allowlist
+            || config_extra.allowed_tools.iter().any(|name| {
+                matches!(
+                    name.as_str(),
+                    SUBAGENT_SEND_TOOL_NAME | SUBAGENT_WAIT_TOOL_NAME
+                )
+            });
+        if delegate_selected && controls_selected {
+            let gateway_manager = mcp_managers.iter().find(|manager| {
+                manager
+                    .server_names()
+                    .iter()
+                    .any(|name| name == nomifun_api_types::GatewayMcpConfig::SERVER_NAME)
+            });
+            if let Some(gateway_manager) = gateway_manager {
+                let registry = ParentScopedSubagentRegistry::new(Arc::new(
+                    crate::subagent_gateway::GatewaySubagentHost::new(Arc::clone(gateway_manager)),
+                ));
+                let delegate = engine
+                    .registry_mut()
+                    .take_registered(&gateway_delegate_provider_name)
+                    .ok_or_else(|| {
+                        AppError::Internal(
+                            "agent.delegate selected but its Session-bound Gateway route was not registered"
+                                .to_owned(),
+                        )
+                    })?;
+                if !engine.registry_mut().register(Box::new(
+                    DelegationHandleRecordingTool::new(delegate, registry.clone()),
+                )) {
+                    return Err(AppError::Internal(
+                        "agent.delegate Gateway route could not be decorated with child handles"
+                            .to_owned(),
+                    ));
+                }
+                for (name, tool) in [
+                    (
+                        SUBAGENT_SEND_TOOL_NAME,
+                        Box::new(SubagentSendTool::new(registry.clone()))
+                            as Box<dyn nomi_tools::Tool>,
+                    ),
+                    (
+                        SUBAGENT_WAIT_TOOL_NAME,
+                        Box::new(SubagentWaitTool::new(registry.clone()))
+                            as Box<dyn nomi_tools::Tool>,
+                    ),
+                ] {
+                    let expected = !config_extra.enforce_tool_allowlist
+                        || config_extra
+                            .allowed_tools
+                            .iter()
+                            .any(|allowed| allowed == name);
+                    let inserted = engine.registry_mut().register(tool);
+                    if expected && !inserted {
+                        return Err(AppError::Internal(format!(
+                            "Nomi parent-scoped subagent tool {name} was allowed but could not be registered"
+                        )));
+                    }
+                }
+            } else if config_extra.enforce_tool_allowlist {
+                return Err(AppError::Internal(
+                    "agent.delegate selected without a Session-bound Gateway AgentExecution owner"
+                        .to_owned(),
+                ));
+            }
+        }
+        if mcp_proxy_selected {
+            for manager in &mcp_managers {
+                for (server_name, tool) in manager.all_tools() {
+                    let provider_name = nomi_mcp::tool_proxy::canonical_mcp_display_name(
+                        server_name,
+                        &tool.name,
+                    );
+                    if engine.registry_mut().get(&provider_name).is_none() {
+                        return Err(AppError::Internal(format!(
+                            "Nomi MCP proxy {provider_name} was allowed but could not be registered"
+                        )));
+                    }
+                }
+            }
+        }
         // The registry retains the exact Preset ceiling and deferred placement
         // established by bootstrap, including deny-all for zero-tool Agents.
         engine.registry_mut().register(Box::new(crate::web_fetch::WebFetchTool::default()));
+        if let Some(tool) = web_search_tool {
+            let registered = engine.registry_mut().register(tool);
+            if config_extra.allowed_tools.iter().any(|name| name == "web_search")
+                && !registered
+            {
+                return Err(AppError::Internal(
+                    "authorized web_search tool could not be registered under the session policy"
+                        .to_owned(),
+                ));
+            }
+        }
+        if let Some(tool) = citation_render_tool {
+            let registered = engine.registry_mut().register(tool);
+            if config_extra
+                .allowed_tools
+                .iter()
+                .any(|name| name == crate::web_search::CITATION_RENDER_TOOL_NAME)
+                && !registered
+            {
+                return Err(AppError::Internal(
+                    "citation_render could not be registered under the session policy".to_owned(),
+                ));
+            }
+        }
+        if let Some(tool) = vision_activation_tool {
+            let registered = engine.registry_mut().register(tool);
+            if config_extra.allowed_tools.iter().any(|name| {
+                name == crate::vision_activation::VISION_ACTIVATE_TOOL_NAME
+            }) && !registered
+            {
+                return Err(AppError::Internal(
+                    "on-demand vision activation tool could not be registered".to_owned(),
+                ));
+            }
+        }
+        let mcp_tools: Vec<(&str, Box<dyn nomi_tools::Tool>)> = match lazy_mcp_runtime.as_ref() {
+            Some(runtime) => vec![
+                (
+                    nomi_agent::lazy_mcp::MCP_CONNECT_TOOL_NAME,
+                    Box::new(McpConnectTool::new(runtime.clone())),
+                ),
+                (
+                    nomi_agent::lazy_mcp::MCP_GENERIC_PROXY_TOOL_NAME,
+                    Box::new(GenericMcpToolProxy::new(runtime.clone())),
+                ),
+                (
+                    nomi_agent::mcp_capability_tools::MCP_RESOURCE_LIST_TOOL_NAME,
+                    Box::new(LazyMcpResourceListTool::new(runtime.clone())),
+                ),
+                (
+                    nomi_agent::mcp_capability_tools::MCP_RESOURCE_READ_TOOL_NAME,
+                    Box::new(LazyMcpResourceReadTool::new(runtime.clone())),
+                ),
+            ],
+            None => vec![
+                (
+                    nomi_agent::mcp_capability_tools::MCP_RESOURCE_LIST_TOOL_NAME,
+                    Box::new(McpResourceListTool::new(mcp_managers.clone())),
+                ),
+                (
+                    nomi_agent::mcp_capability_tools::MCP_RESOURCE_READ_TOOL_NAME,
+                    Box::new(McpResourceReadTool::new(mcp_managers.clone())),
+                ),
+            ],
+        };
+        for (name, tool) in mcp_tools {
+            let expected = !config_extra.enforce_tool_allowlist
+                || config_extra.allowed_tools.iter().any(|allowed| allowed == name);
+            let inserted = engine.registry_mut().register(tool);
+            if expected && !inserted {
+                return Err(AppError::Internal(format!(
+                    "Nomi MCP resource tool {name} was allowed but could not be registered"
+                )));
+            }
+        }
         if let Some(session) = plugin_tool_session {
             session.register_into(engine.registry_mut()).map_err(|error| {
                 AppError::Internal(format!(
@@ -1196,6 +1502,41 @@ impl NomiAgentManager {
                     miniapp_tool_count = session.miniapp_actions().len(),
                     "Registered exact Snapshot-bound hosted Tools"
                 );
+        }
+        for contributor in hosted_context_contributors {
+            engine.register_context_contributor(contributor);
+        }
+        if let Some(sink) = session_control_sink {
+            let controls: [(&str, Box<dyn nomi_tools::Tool>); 3] = [
+                (
+                    AGENT_EXECUTION_OBSERVE_TOOL_NAME,
+                    Box::new(AgentExecutionObserveTool::new(sink.clone())),
+                ),
+                (
+                    AGENT_EXECUTION_STEER_TOOL_NAME,
+                    Box::new(AgentExecutionSteerTool::new(sink.clone())),
+                ),
+                (AGENT_FORK_TOOL_NAME, Box::new(AgentForkTool::new(sink))),
+            ];
+            let mut registered = Vec::new();
+            for (name, tool) in controls {
+                let expected = !config_extra.enforce_tool_allowlist
+                    || config_extra.allowed_tools.iter().any(|allowed| allowed == name);
+                let inserted = engine.registry_mut().register(tool);
+                if expected && !inserted {
+                    return Err(AppError::Internal(format!(
+                        "Nomi current-session control tool {name} was allowed but could not be registered"
+                    )));
+                }
+                if inserted {
+                    registered.push(name);
+                }
+            }
+            debug!(
+                conversation_id = %conversation_id,
+                tools = ?registered,
+                "Registered host-bound AgentSession control tools"
+            );
         }
         if let Some(sink) = requirement_sink {
             engine
@@ -1319,7 +1660,8 @@ impl NomiAgentManager {
             process_supervisor,
             turn_teardown_fence: Arc::new(TurnTeardownFence::new()),
             slash_commands,
-            mcp_managers: result.mcp_managers,
+            mcp_managers,
+            lazy_mcp_runtime,
             loopback_capability_leases,
             #[cfg(feature = "browser-use")]
             browser_lane_binding,
@@ -1335,6 +1677,8 @@ impl NomiAgentManager {
             )),
             distill_dir,
             image_read_root,
+            vision_activation,
+            capability_state,
             distill_cfg,
             knowledge_prelude: std::sync::Mutex::new(knowledge_prelude),
             knowledge_auto_rag,
@@ -1549,6 +1893,28 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
         self.runtime.last_activity_at()
     }
 
+    fn capability_activation_snapshot(
+        &self,
+    ) -> Result<Option<crate::runtime_handle::AgentCapabilityActivationSnapshot>, AppError> {
+        let Some(state) = self.capability_state.as_ref() else {
+            return Ok(None);
+        };
+        let snapshot = state.snapshot().map_err(|_| {
+            AppError::Internal("Nomi capability activation state is unavailable".to_owned())
+        })?;
+        Ok(Some(
+            crate::runtime_handle::AgentCapabilityActivationSnapshot {
+                resolved_snapshot_ref: snapshot.resolved_snapshot_ref,
+                generation: snapshot.generation,
+                active_capability_ids: snapshot
+                    .active
+                    .into_iter()
+                    .map(|capability_id| capability_id.as_ref().to_owned())
+                    .collect(),
+            },
+        ))
+    }
+
     fn touch_activity(&self) {
         self.runtime.bump_activity();
     }
@@ -1632,6 +1998,7 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
             backend_output_sink: self.backend_output_sink.clone(),
             process_supervisor: process_supervisor.clone(),
             mcp_managers: self.mcp_managers.clone(),
+            lazy_mcp_runtime: self.lazy_mcp_runtime.clone(),
             turn_teardown_fence: Arc::clone(&self.turn_teardown_fence),
             accepted_turn_recovery_required: Arc::clone(
                 &accepted_turn_recovery_required,
@@ -1953,7 +2320,11 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                 // text turn unchanged. This capability lock and all attachment
                 // work remain cancellable.
                 let supports_image = self.engine.lock().await.compat().supports_image();
-                let image_blocks = if supports_image {
+                let capability_active = self
+                    .vision_activation
+                    .as_ref()
+                    .is_none_or(crate::vision_activation::is_active);
+                let image_blocks = if supports_image && capability_active {
                     load_image_blocks(&data.files, self.image_read_root.as_deref()).await?
                 } else {
                     Vec::new()
@@ -2622,6 +2993,7 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                 self.backend_output_sink.clone(),
                 self.process_supervisor.clone(),
                 self.mcp_managers.clone(),
+                self.lazy_mcp_runtime.clone(),
                 #[cfg(feature = "browser-use")]
                 self.browser_lane_binding.clone(),
             )?;
@@ -2645,6 +3017,7 @@ struct TurnTerminationGuard {
     backend_output_sink: Arc<BackendOutputSink>,
     process_supervisor: Option<Arc<nomi_process_runtime::ProcessSupervisor>>,
     mcp_managers: Vec<Arc<McpManager>>,
+    lazy_mcp_runtime: Option<LazyMcpRuntime>,
     turn_teardown_fence: Arc<TurnTeardownFence>,
     /// Set by the engine only after it has durably registered the accepted
     /// session root. If an unwind happens before the host terminal commits,
@@ -2854,7 +3227,14 @@ impl TurnTerminationGuard {
         // shutdown failure must not leave the process tree unquiesced, and
         // vice versa. The aggregated error preserves the first failure.
         let mut failures = NomiTeardownFailures::default();
-        failures.record("MCP", shutdown_mcp_managers_exact(&self.mcp_managers).await);
+        failures.record(
+            "MCP",
+            shutdown_mcp_runtimes_exact(
+                &self.mcp_managers,
+                self.lazy_mcp_runtime.as_ref(),
+            )
+            .await,
+        );
         if let Some(supervisor) = &self.process_supervisor {
             let report = supervisor.quiesce().await;
             if !report.is_exact() {
@@ -2906,6 +3286,7 @@ impl Drop for TurnTerminationGuard {
             let steering_inbox = Arc::clone(&self.steering_inbox);
             let process_supervisor = self.process_supervisor.clone();
             let mcp_managers = self.mcp_managers.clone();
+            let lazy_mcp_runtime = self.lazy_mcp_runtime.clone();
             let turn_teardown_fence = Arc::clone(&self.turn_teardown_fence);
             #[cfg(feature = "browser-use")]
             let browser_lane_binding = self.browser_lane_binding.clone();
@@ -2944,7 +3325,12 @@ impl Drop for TurnTerminationGuard {
                 // cleanup (or vice versa); only the terminal publication is
                 // conditioned on the aggregate proof.
                 let mut exact = true;
-                if let Err(error) = shutdown_mcp_managers_exact(&mcp_managers).await {
+                if let Err(error) = shutdown_mcp_runtimes_exact(
+                    &mcp_managers,
+                    lazy_mcp_runtime.as_ref(),
+                )
+                .await
+                {
                     error!(
                         conversation_id = %conversation_id,
                         error = %error,
@@ -3002,6 +3388,23 @@ async fn shutdown_mcp_managers_exact(
             failures.join(" | ")
         )))
     }
+}
+
+async fn shutdown_mcp_runtimes_exact(
+    managers: &[Arc<McpManager>],
+    lazy_runtime: Option<&LazyMcpRuntime>,
+) -> Result<(), AppError> {
+    let mut failures = NomiTeardownFailures::default();
+    failures.record("eager MCP", shutdown_mcp_managers_exact(managers).await);
+    if let Some(runtime) = lazy_runtime {
+        failures.record(
+            "lazy MCP",
+            runtime.shutdown().await.map_err(|_| {
+                AppError::Internal("Nomi lazy MCP shutdown was not exact".to_owned())
+            }),
+        );
+    }
+    failures.finish()
 }
 
 struct NomiTeardownResults {
@@ -3148,6 +3551,7 @@ fn schedule_nomi_cancelled_terminal_after_process_fence(
     backend_output_sink: Arc<BackendOutputSink>,
     process_supervisor: Option<Arc<nomi_process_runtime::ProcessSupervisor>>,
     mcp_managers: Vec<Arc<McpManager>>,
+    lazy_mcp_runtime: Option<LazyMcpRuntime>,
     #[cfg(feature = "browser-use")] browser_lane_binding: Option<crate::BrowserLaneBinding>,
 ) -> Result<(), AppError> {
     let terminalize = move || {
@@ -3180,7 +3584,11 @@ fn schedule_nomi_cancelled_terminal_after_process_fence(
     let has_browser_binding = browser_lane_binding.is_some();
     #[cfg(not(feature = "browser-use"))]
     let has_browser_binding = false;
-    if process_supervisor.is_none() && mcp_managers.is_empty() && !has_browser_binding {
+    if process_supervisor.is_none()
+        && mcp_managers.is_empty()
+        && lazy_mcp_runtime.is_none()
+        && !has_browser_binding
+    {
         terminalize();
         return Ok(());
     }
@@ -3193,7 +3601,9 @@ fn schedule_nomi_cancelled_terminal_after_process_fence(
         // Every fence is attempted unconditionally; only the terminal
         // publication is conditioned on the aggregate exactness proof.
         let mut exact = true;
-        if let Err(error) = shutdown_mcp_managers_exact(&mcp_managers).await {
+        if let Err(error) =
+            shutdown_mcp_runtimes_exact(&mcp_managers, lazy_mcp_runtime.as_ref()).await
+        {
             error!(
                 error = %error,
                 "Idle Nomi kill could not prove exact MCP teardown; retaining non-terminal quarantine"
@@ -3239,6 +3649,7 @@ impl NomiAgentManager {
         let runtime = self.runtime.clone();
         let process_supervisor = self.process_supervisor.clone();
         let mcp_managers = self.mcp_managers.clone();
+        let lazy_mcp_runtime = self.lazy_mcp_runtime.clone();
         #[cfg(feature = "browser-use")]
         let browser_lane_binding = self.browser_lane_binding.clone();
         let ssh_lease = self.ssh_lease.clone();
@@ -3247,7 +3658,8 @@ impl NomiAgentManager {
             // In particular, a synchronous `kill()` failure or an inexact MCP
             // / process fence must never skip the result-bearing Browser owner
             // lease shutdown below.
-            let mcp_result = shutdown_mcp_managers_exact(&mcp_managers).await;
+            let mcp_result =
+                shutdown_mcp_runtimes_exact(&mcp_managers, lazy_mcp_runtime.as_ref()).await;
             let process_result = if let Some(supervisor) = process_supervisor {
                 let report = supervisor.quiesce().await;
                 if !report.is_exact() {
@@ -4042,6 +4454,7 @@ mod tests {
                 backend_output_sink,
                 process_supervisor: None,
                 mcp_managers: Vec::new(),
+                lazy_mcp_runtime: None,
                 turn_teardown_fence: Arc::clone(&fence),
                 accepted_turn_recovery_required: Arc::new(AtomicBool::new(false)),
                 browser_lane_binding: Some(binding),
@@ -4096,6 +4509,7 @@ mod tests {
             backend_output_sink,
             process_supervisor: None,
             mcp_managers: Vec::new(),
+            lazy_mcp_runtime: None,
             turn_teardown_fence: Arc::new(TurnTeardownFence::new()),
             accepted_turn_recovery_required: Arc::new(AtomicBool::new(false)),
             browser_lane_binding: Some(binding),
@@ -4163,6 +4577,7 @@ mod tests {
             backend_output_sink,
             None,
             Vec::new(),
+            None,
             Some(binding),
         )
         .expect("idle-kill fence should schedule");
@@ -4207,6 +4622,7 @@ mod tests {
             backend_output_sink,
             None,
             Vec::new(),
+            None,
             Some(binding),
         )
         .expect("idle-kill fence should schedule");
@@ -4903,7 +5319,7 @@ mod tests {
         let output: Arc<dyn OutputSink> = backend_output_sink.clone();
         let mut config = make_test_engine_config();
         config.max_turns = max_turns;
-        let mut engine = AgentEngine::new_with_provider(
+        let engine = AgentEngine::new_with_provider(
             provider,
             config.clone(),
             ToolRegistry::new(),
@@ -4918,6 +5334,7 @@ mod tests {
             turn_teardown_fence: Arc::new(TurnTeardownFence::new()),
             slash_commands: Vec::new(),
             mcp_managers: Vec::new(),
+            lazy_mcp_runtime: None,
             loopback_capability_leases: Default::default(),
             #[cfg(feature = "browser-use")]
             browser_lane_binding: None,
@@ -4933,6 +5350,8 @@ mod tests {
             )),
             distill_dir: None,
             image_read_root: None,
+            vision_activation: None,
+            capability_state: None,
             distill_cfg: Arc::new(config),
             knowledge_prelude: std::sync::Mutex::new(None),
             knowledge_auto_rag: None,
@@ -5199,7 +5618,7 @@ mod tests {
         let output: Arc<dyn OutputSink> = backend_output_sink.clone();
         let mut config = make_test_engine_config();
         config.compat.supports_image = Some(false);
-        let mut engine = AgentEngine::new_with_provider(
+        let engine = AgentEngine::new_with_provider(
             provider.clone(),
             config.clone(),
             ToolRegistry::new(),
@@ -5214,6 +5633,7 @@ mod tests {
             turn_teardown_fence: Arc::new(TurnTeardownFence::new()),
             slash_commands: Vec::new(),
             mcp_managers: Vec::new(),
+            lazy_mcp_runtime: None,
             loopback_capability_leases: Default::default(),
             #[cfg(feature = "browser-use")]
             browser_lane_binding: None,
@@ -5229,6 +5649,8 @@ mod tests {
             )),
             distill_dir: None,
             image_read_root: None,
+            vision_activation: None,
+            capability_state: None,
             distill_cfg: Arc::new(config),
             knowledge_prelude: std::sync::Mutex::new(None),
             knowledge_auto_rag: None,
@@ -5268,6 +5690,42 @@ mod tests {
             &user.content[..],
             [ContentBlock::Text { text }] if text == "Answer using text only."
         ));
+    }
+
+    #[tokio::test]
+    async fn on_demand_vision_does_not_read_attachments_before_activation() {
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![LlmEvent::Done {
+            stop_reason: StopReason::EndTurn,
+            usage: Default::default(),
+        }]]));
+        let mut agent = make_agent_with_provider(provider.clone());
+        agent.vision_activation = Some(Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        let root = tempfile::tempdir().unwrap();
+        let missing = root
+            .path()
+            .join("not-read-before-activation.png")
+            .to_string_lossy()
+            .into_owned();
+
+        agent
+            .send_message(SendMessageData {
+                content: "Continue without vision.".into(),
+                msg_id: "msg-vision-deferred".into(),
+                source_message_id: None,
+                files: vec![missing],
+                inject_skills: Vec::new(),
+                origin: None,
+            })
+            .await
+            .expect("inactive on-demand vision must not touch attachment bytes");
+
+        let user = provider.requests()[0]
+            .messages
+            .iter()
+            .find(|message| message.role == Role::User)
+            .unwrap()
+            .clone();
+        assert!(matches!(&user.content[..], [ContentBlock::Text { .. }]));
     }
 
     /// The observed production shape: a long prose answer cut off at the output
@@ -6975,9 +7433,82 @@ mod tests {
         }
     }
 
+    struct FixedSearchProvider;
+
+    #[async_trait::async_trait]
+    impl crate::web_search::SearchProvider for FixedSearchProvider {
+        fn provider_id(&self) -> &str {
+            "test.authorized.search"
+        }
+
+        async fn search(
+            &self,
+            _query: &str,
+            _count: usize,
+        ) -> Result<
+            crate::web_search::SearchProviderResponse,
+            crate::web_search::SearchProviderError,
+        > {
+            Ok(crate::web_search::SearchProviderResponse {
+                answer: "Grounded answer".to_owned(),
+                results: vec![crate::web_search::SearchProviderResult {
+                    source_id: "source-1".to_owned(),
+                    title: "Source".to_owned(),
+                    url: "https://example.com/source".to_owned(),
+                    snippet: "Evidence".to_owned(),
+                }],
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn authorized_search_provider_registers_only_inside_the_session_policy() {
+        for selected in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let mut config = make_test_config();
+            config.session_directory = root.path().join("sessions");
+            config.enforce_tool_allowlist = true;
+            config.allowed_tools = selected
+                .then(|| vec!["web_search".to_owned()])
+                .unwrap_or_default();
+            let agent = NomiAgentManager::new_with_host_wiring(
+                "authorized-search-test".into(),
+                root.path().to_string_lossy().into_owned(),
+                config,
+                None,
+                None,
+                None,
+                None,
+                Vec::new(),
+                None,
+                None,
+                Vec::new(),
+                None,
+                NomiHostWiring {
+                    web_search_tool: Some(Box::new(crate::web_search::WebSearchTool::new(
+                        Arc::new(FixedSearchProvider),
+                    ))),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            let mut engine = agent.engine.lock().await;
+            assert_eq!(engine.registry_mut().get("web_search").is_some(), selected);
+            drop(engine);
+            agent.kill_and_wait(None).await.unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn repaired_builtins_register_and_execute_without_widening_preset_scope() {
-        let names = ["web_fetch", "nomi_delegate", "cron_create", "cron_list", "cron_delete"];
+        let names = [
+            "web_fetch",
+            "nomi_delegate",
+            "cron_create",
+            "cron_list",
+            "cron_delete",
+        ];
         for (selected, deferred) in [(false, false), (true, false), (true, true)] {
             let root = tempfile::tempdir().unwrap();
             let mut config = make_test_config();
@@ -7344,6 +7875,7 @@ mod tests {
                 backend_output_sink,
                 process_supervisor: None,
                 mcp_managers: Vec::new(),
+                lazy_mcp_runtime: None,
                 turn_teardown_fence: Arc::new(TurnTeardownFence::new()),
                 accepted_turn_recovery_required: Arc::new(AtomicBool::new(false)),
                 #[cfg(feature = "browser-use")]
@@ -7394,6 +7926,7 @@ mod tests {
                 backend_output_sink: Arc::new(BackendOutputSink::new(rt.event_sender())),
                 process_supervisor: None,
                 mcp_managers: Vec::new(),
+                lazy_mcp_runtime: None,
                 turn_teardown_fence: Arc::new(TurnTeardownFence::new()),
                 accepted_turn_recovery_required: recovery_required,
                 #[cfg(feature = "browser-use")]
@@ -7440,6 +7973,7 @@ mod tests {
                 backend_output_sink,
                 process_supervisor: None,
                 mcp_managers: Vec::new(),
+                lazy_mcp_runtime: None,
                 turn_teardown_fence: Arc::new(TurnTeardownFence::new()),
                 accepted_turn_recovery_required: Arc::new(AtomicBool::new(false)),
                 #[cfg(feature = "browser-use")]

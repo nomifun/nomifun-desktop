@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use nomifun_common::{AgentKillReason, AgentType, AppError, ConversationStatus, TimestampMs};
 use tokio::sync::broadcast;
+use nomifun_agent_contracts::ResolvedSnapshotRef;
 
 use crate::manager::nomi::NomiAgentManager;
 use crate::protocol::events::AgentStreamEvent;
@@ -34,6 +35,16 @@ use nomifun_api_types::{
 pub enum SystemResourceNoticeDelivery {
     ActiveTurn,
     NextModelCall,
+}
+
+/// Read-only view of the exact Kernel active set owned by a live runtime.
+/// Capability activation remains an engine operation; API routes may only
+/// observe this snapshot after resolving the runtime by its conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentCapabilityActivationSnapshot {
+    pub resolved_snapshot_ref: ResolvedSnapshotRef,
+    pub generation: u64,
+    pub active_capability_ids: Vec<String>,
 }
 
 /// Minimal public surface every agent type implements identically.
@@ -65,6 +76,15 @@ pub trait AgentRuntimeControl: Send + Sync {
 
     /// Timestamp (ms) of the last activity (message send, event received).
     fn last_activity_at(&self) -> TimestampMs;
+
+    /// Current canonical capability activation state. Runtimes without a
+    /// materialized Agent Snapshot return `None`; they must never synthesize a
+    /// generation or infer activation from tool registry membership.
+    fn capability_activation_snapshot(
+        &self,
+    ) -> Result<Option<AgentCapabilityActivationSnapshot>, AppError> {
+        Ok(None)
+    }
 
     /// Mark lifecycle admission for a new turn as activity.
     ///
@@ -226,6 +246,12 @@ impl AgentRuntimeHandle {
     /// Timestamp (ms) of the last activity.
     pub fn last_activity_at(&self) -> TimestampMs {
         self.as_runtime().last_activity_at()
+    }
+
+    pub fn capability_activation_snapshot(
+        &self,
+    ) -> Result<Option<AgentCapabilityActivationSnapshot>, AppError> {
+        self.as_runtime().capability_activation_snapshot()
     }
 
     /// Mark turn admission as runtime activity.

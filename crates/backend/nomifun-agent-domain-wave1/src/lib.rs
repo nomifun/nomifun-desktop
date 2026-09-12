@@ -322,6 +322,22 @@ pub struct Wave1HostContext {
     pub resource_bindings: TypedResourceBindings,
 }
 
+/// Invocation metadata for a Wave 1 context contribution. Context providers
+/// receive the same exact Snapshot/resource authority as action owners but no
+/// fabricated action or idempotency identity.
+#[derive(Clone)]
+pub struct Wave1ContextHostContext {
+    pub principal: PrincipalRef,
+    pub agent_session_id: AgentSessionId,
+    pub operation_id: OperationId,
+    pub correlation_id: CorrelationId,
+    pub resolved_snapshot_ref: ResolvedSnapshotRef,
+    pub registry_generation: u64,
+    pub capability_id: CapabilityId,
+    pub state_scope_key: ScopeKey,
+    pub resource_bindings: TypedResourceBindings,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Wave1SearchRequest {
     pub query: String,
@@ -369,6 +385,26 @@ pub struct Wave1MemoryMutationRequest {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct Wave1CompanionMemoryWriteRequest {
+    pub kind: String,
+    pub content: String,
+    pub tags: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Wave1CompanionMemoryMergeRequest {
+    pub memory_ids: Vec<String>,
+    pub merged_content: String,
+    pub kind: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Wave1CompanionMemoryEvolveRequest {
+    pub memory_id: String,
+    pub content: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Wave1SkillInvokeRequest {
     pub skill_id: String,
     pub arguments: Option<StrictJsonValue>,
@@ -391,9 +427,9 @@ pub enum Wave1CapabilityOperation {
     KnowledgeRerank(Wave1KnowledgeEmbeddingRequest),
     ProjectMemoryWrite(Wave1MemoryMutationRequest),
     ProjectMemoryDistill(Wave1MemoryMutationRequest),
-    CompanionMemoryWrite(Wave1MemoryMutationRequest),
-    CompanionMemoryMerge(Wave1MemoryMutationRequest),
-    CompanionMemoryEvolve(Wave1MemoryMutationRequest),
+    CompanionMemoryWrite(Wave1CompanionMemoryWriteRequest),
+    CompanionMemoryMerge(Wave1CompanionMemoryMergeRequest),
+    CompanionMemoryEvolve(Wave1CompanionMemoryEvolveRequest),
     SkillInvoke(Wave1SkillInvokeRequest),
 }
 
@@ -431,6 +467,11 @@ pub struct Wave1HostRequest {
     pub operation: Wave1CapabilityOperation,
 }
 
+#[derive(Clone)]
+pub struct Wave1ContextHostRequest {
+    pub context: Wave1ContextHostContext,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Wave1HostPortError {
     pub code: CanonicalErrorCode,
@@ -450,7 +491,7 @@ impl Wave1HostPortError {
     }
 
     pub fn invalid_request(message: impl Into<String>) -> Self {
-        Self::new(CAPABILITY_UNAVAILABLE_CODE, message)
+        Self::new("INVALID_PAYLOAD", message)
     }
 }
 
@@ -473,6 +514,16 @@ pub trait Wave1HostPort: Send + Sync {
         &self,
         request: Wave1HostRequest,
     ) -> Result<StrictJsonValue, Wave1HostPortError>;
+
+    async fn contribute_context(
+        &self,
+        request: Wave1ContextHostRequest,
+    ) -> Result<StrictJsonValue, Wave1HostPortError> {
+        Err(Wave1HostPortError::unavailable(format!(
+            "no production context owner is bound for {}",
+            request.context.capability_id.as_ref()
+        )))
+    }
 }
 
 /// Typed Research owner seam for the central composition root.
@@ -529,6 +580,10 @@ pub trait Wave1KnowledgeOwner: Send + Sync {
 /// those two resource domains distinct at the dispatch boundary.
 #[async_trait]
 pub trait Wave1MemoryOwner: Send + Sync {
+    async fn companion_memory_recall(
+        &self,
+        context: Wave1ContextHostContext,
+    ) -> Result<StrictJsonValue, Wave1HostPortError>;
     async fn project_memory_write(
         &self,
         context: Wave1HostContext,
@@ -542,17 +597,17 @@ pub trait Wave1MemoryOwner: Send + Sync {
     async fn companion_memory_write(
         &self,
         context: Wave1HostContext,
-        request: Wave1MemoryMutationRequest,
+        request: Wave1CompanionMemoryWriteRequest,
     ) -> Result<StrictJsonValue, Wave1HostPortError>;
     async fn companion_memory_merge(
         &self,
         context: Wave1HostContext,
-        request: Wave1MemoryMutationRequest,
+        request: Wave1CompanionMemoryMergeRequest,
     ) -> Result<StrictJsonValue, Wave1HostPortError>;
     async fn companion_memory_evolve(
         &self,
         context: Wave1HostContext,
-        request: Wave1MemoryMutationRequest,
+        request: Wave1CompanionMemoryEvolveRequest,
     ) -> Result<StrictJsonValue, Wave1HostPortError>;
 }
 
@@ -649,6 +704,21 @@ impl Wave1HostPort for Wave1HostPortAdapter {
                 self.skills.skill_invoke(context, request).await
             }
         }
+    }
+
+    async fn contribute_context(
+        &self,
+        request: Wave1ContextHostRequest,
+    ) -> Result<StrictJsonValue, Wave1HostPortError> {
+        if request.context.capability_id.as_ref() != MEMORY_COMPANION_RECALL {
+            return Err(Wave1HostPortError::unavailable(format!(
+                "no Wave 1 context owner is configured for {}",
+                request.context.capability_id.as_ref()
+            )));
+        }
+        self.memory
+            .companion_memory_recall(request.context)
+            .await
     }
 }
 
@@ -1003,6 +1073,39 @@ pub fn action_id(capability_id: &str) -> Option<ActionId> {
         _ => return None,
     };
     Some(ActionId::from(action))
+}
+
+/// Resolve a schema owned by the bundled Wave 1 registration. Hosts use this
+/// instead of a managed-Plugin artifact store when materializing first-party
+/// FunctionTools or context contributors for Nomi.
+pub fn resolve_canonical_schema(
+    capability_id: &str,
+    reference: &CanonicalSchemaRef,
+) -> Result<StrictJsonValue, String> {
+    let capability = capability_for(capability_id)
+        .ok_or_else(|| format!("unknown Wave 1 capability {capability_id}"))?;
+    let candidates = match capability.kind {
+        CapabilityKind::Tool => vec![
+            ("input", tool_input_schema(capability_id)),
+            ("output", tool_output_schema(capability_id)),
+        ],
+        CapabilityKind::ContextContributor | CapabilityKind::TurnMiddleware => {
+            vec![("context", context_schema(capability_id))]
+        }
+        CapabilityKind::EventSource | CapabilityKind::EventConsumer => {
+            vec![("event", event_schema())]
+        }
+        _ => Vec::new(),
+    };
+    for (facet, schema) in candidates {
+        if schema_ref(capability_id, facet, &schema)?.as_ref() == reference.as_ref() {
+            return Ok(StrictJsonValue(schema));
+        }
+    }
+    Err(format!(
+        "schema {} is not owned by Wave 1 capability {capability_id}",
+        reference.as_ref()
+    ))
 }
 
 /// Resolve a deletion-manifest family to the canonical IDs owned by this
@@ -1366,12 +1469,23 @@ fn registration_for(
     for capability in spec.capabilities {
         let capability_id = CapabilityId::from(capability.id);
         match capability.kind {
-            CapabilityKind::ContextContributor => registration
-                .add_capability_context_factory(
-                    capability_id.clone(),
-                    Arc::new(Wave1UnavailableContextFactory { capability_id }),
-                )
-                .map_err(|error| error.to_string())?,
+            CapabilityKind::ContextContributor => {
+                let factory: Arc<dyn CapabilityContextContributionFactory> =
+                    if capability.id == MEMORY_COMPANION_RECALL {
+                        Arc::new(Wave1HostContextFactory {
+                            capability_id: capability_id.clone(),
+                            requirements: capability.requirements,
+                            host_port: Arc::clone(&action_host),
+                        })
+                    } else {
+                        Arc::new(Wave1UnavailableContextFactory {
+                            capability_id: capability_id.clone(),
+                        })
+                    };
+                registration
+                    .add_capability_context_factory(capability_id, factory)
+                    .map_err(|error| error.to_string())?;
+            }
             CapabilityKind::ResourceProvider => registration
                 .add_capability_resource_factory(
                     capability_id.clone(),
@@ -1391,7 +1505,7 @@ fn capability_manifest(
     let contributions = match spec.kind {
         CapabilityKind::Tool => {
             let input = tool_input_schema(spec.id);
-            let output = tool_output_schema();
+            let output = tool_output_schema(spec.id);
             CapabilityContributions {
                 actions: vec![CapabilityActionDescriptor {
                     action_id: action_id(spec.id)
@@ -1407,7 +1521,7 @@ fn capability_manifest(
             }
         }
         CapabilityKind::ContextContributor | CapabilityKind::TurnMiddleware => {
-            let schema = context_schema();
+            let schema = context_schema(spec.id);
             CapabilityContributions {
                 context_schema_refs: vec![schema_ref(spec.id, "context", &schema)?],
                 resource_kinds: resource_kinds(spec),
@@ -1462,6 +1576,54 @@ pub fn supported_consumers(capability_id: &str) -> BTreeSet<CapabilityConsumer> 
 
 struct Wave1UnavailableContextFactory {
     capability_id: CapabilityId,
+}
+
+struct Wave1HostContextFactory {
+    capability_id: CapabilityId,
+    requirements: &'static [ResourceRequirement],
+    host_port: Arc<dyn Wave1HostPort>,
+}
+
+#[async_trait]
+impl CapabilityContextContributionFactory for Wave1HostContextFactory {
+    async fn contribute(
+        &self,
+        request: CapabilityContextContributionRequest,
+    ) -> Result<ContextContributionResult, KernelError> {
+        if request.context.resolved_capability.capability.id != self.capability_id {
+            return Err(KernelError::CapabilityExecution {
+                reason: format!(
+                    "{} context owner received authority for {}",
+                    self.capability_id.as_ref(),
+                    request.context.resolved_capability.capability.id.as_ref()
+                ),
+            });
+        }
+        let resource_bindings = validate_resource_bindings(
+            &self.capability_id,
+            &request.context.principal.principal_id,
+            self.requirements,
+            &request.context.resource_bindings,
+        )?;
+        let value = self
+            .host_port
+            .contribute_context(Wave1ContextHostRequest {
+                context: Wave1ContextHostContext {
+                    principal: request.context.principal,
+                    agent_session_id: request.context.agent_session_id,
+                    operation_id: request.context.operation_id,
+                    correlation_id: request.context.correlation_id,
+                    resolved_snapshot_ref: request.context.resolved_snapshot_ref,
+                    registry_generation: request.context.registry_generation,
+                    capability_id: self.capability_id.clone(),
+                    state_scope_key: request.context.state_scope_key,
+                    resource_bindings: resource_bindings.into_iter().cloned().collect(),
+                },
+            })
+            .await
+            .map_err(wave1_host_error_to_kernel)?;
+        Ok(ContextContributionResult { value: Some(value) })
+    }
 }
 
 #[async_trait]
@@ -1524,7 +1686,8 @@ impl CapabilityHandler for Wave1CapabilityHandler {
             self.requirements,
             &context.resource_bindings,
         )?;
-        let operation = operation_from_action(&self.action_id, input)?;
+        let operation = operation_from_action(&self.action_id, input)
+            .map_err(wave1_input_error_to_kernel)?;
         self.host_port
             .invoke(Wave1HostRequest {
                 context: Wave1HostContext {
@@ -1544,9 +1707,20 @@ impl CapabilityHandler for Wave1CapabilityHandler {
                 operation,
             })
             .await
-            .map_err(|error| KernelError::CapabilityExecution {
-                reason: error.to_string(),
-            })
+            .map_err(wave1_host_error_to_kernel)
+    }
+}
+
+fn wave1_host_error_to_kernel(error: Wave1HostPortError) -> KernelError {
+    KernelError::capability_execution_failed(error.code, error.message)
+}
+
+fn wave1_input_error_to_kernel(error: KernelError) -> KernelError {
+    match error {
+        KernelError::CapabilityExecution { reason } => {
+            KernelError::capability_execution_failed("INVALID_PAYLOAD", reason)
+        }
+        other => other,
     }
 }
 
@@ -1593,6 +1767,24 @@ fn operation_from_input(
             .and_then(Value::as_str)
             .map(str::to_owned)
             .filter(|value| !value.trim().is_empty())
+    };
+    let string_array = |field: &str| {
+        input
+            .get(field)
+            .and_then(Value::as_array)
+            .ok_or_else(|| KernelError::CapabilityExecution {
+                reason: format!("{id} requires array `{field}`"),
+            })?
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| KernelError::CapabilityExecution {
+                        reason: format!("{id} field `{field}` must contain only strings"),
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()
     };
 
     match id {
@@ -1657,11 +1849,7 @@ fn operation_from_input(
                 Ok(Wave1CapabilityOperation::KnowledgeEmbedding(request))
             }
         }
-        MEMORY_PROJECT_WRITE
-        | MEMORY_PROJECT_DISTILL
-        | MEMORY_COMPANION_WRITE
-        | MEMORY_COMPANION_MERGE
-        | MEMORY_COMPANION_EVOLVE => {
+        MEMORY_PROJECT_WRITE | MEMORY_PROJECT_DISTILL => {
             let request = Wave1MemoryMutationRequest {
                 content: optional("content"),
                 title: optional("title"),
@@ -1672,18 +1860,36 @@ fn operation_from_input(
                 MEMORY_PROJECT_DISTILL => {
                     Ok(Wave1CapabilityOperation::ProjectMemoryDistill(request))
                 }
-                MEMORY_COMPANION_WRITE => {
-                    Ok(Wave1CapabilityOperation::CompanionMemoryWrite(request))
-                }
-                MEMORY_COMPANION_MERGE => {
-                    Ok(Wave1CapabilityOperation::CompanionMemoryMerge(request))
-                }
-                MEMORY_COMPANION_EVOLVE => {
-                    Ok(Wave1CapabilityOperation::CompanionMemoryEvolve(request))
-                }
-                _ => unreachable!("all memory mutation capabilities are listed above"),
+                _ => unreachable!("all project-memory capabilities are listed above"),
             }
         }
+        MEMORY_COMPANION_WRITE => Ok(Wave1CapabilityOperation::CompanionMemoryWrite(
+            Wave1CompanionMemoryWriteRequest {
+                kind: required("kind")?,
+                content: required("content")?,
+                tags: if input.get("tags").is_some() {
+                    string_array("tags")?
+                        .into_iter()
+                        .map(|tag| tag.trim().to_owned())
+                        .collect()
+                } else {
+                    Vec::new()
+                },
+            },
+        )),
+        MEMORY_COMPANION_MERGE => Ok(Wave1CapabilityOperation::CompanionMemoryMerge(
+            Wave1CompanionMemoryMergeRequest {
+                memory_ids: string_array("memory_ids")?,
+                merged_content: required("merged_content")?,
+                kind: required("kind")?,
+            },
+        )),
+        MEMORY_COMPANION_EVOLVE => Ok(Wave1CapabilityOperation::CompanionMemoryEvolve(
+            Wave1CompanionMemoryEvolveRequest {
+                memory_id: required("memory_id")?,
+                content: required("content")?,
+            },
+        )),
         SKILL_INVOKE => Ok(Wave1CapabilityOperation::SkillInvoke(
             Wave1SkillInvokeRequest {
                 skill_id: required("skill_id")?,
@@ -1860,11 +2066,7 @@ fn tool_input_schema(capability_id: &str) -> Value {
                 {"required": ["query"]}
             ]
         }),
-        MEMORY_PROJECT_WRITE
-        | MEMORY_PROJECT_DISTILL
-        | MEMORY_COMPANION_WRITE
-        | MEMORY_COMPANION_MERGE
-        | MEMORY_COMPANION_EVOLVE => json!({
+        MEMORY_PROJECT_WRITE | MEMORY_PROJECT_DISTILL => json!({
             "type": "object",
             "additionalProperties": false,
             "properties": {
@@ -1876,6 +2078,52 @@ fn tool_input_schema(capability_id: &str) -> Value {
                 {"required": ["content"]},
                 {"required": ["items"]}
             ]
+        }),
+        MEMORY_COMPANION_WRITE => json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "kind": {
+                    "type": "string",
+                    "enum": ["profile", "preference", "knowledge", "episode", "task", "affective"]
+                },
+                "content": {"type": "string", "minLength": 1, "maxLength": 16384},
+                "tags": {
+                    "type": "array",
+                    "maxItems": 32,
+                    "uniqueItems": true,
+                    "items": {"type": "string", "minLength": 1, "maxLength": 64}
+                }
+            },
+            "required": ["kind", "content"]
+        }),
+        MEMORY_COMPANION_MERGE => json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "memory_ids": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 128,
+                    "uniqueItems": true,
+                    "items": {"type": "string", "minLength": 1, "maxLength": 128}
+                },
+                "merged_content": {"type": "string", "minLength": 1, "maxLength": 16384},
+                "kind": {
+                    "type": "string",
+                    "enum": ["profile", "preference", "knowledge", "episode", "task", "affective"]
+                }
+            },
+            "required": ["memory_ids", "merged_content", "kind"]
+        }),
+        MEMORY_COMPANION_EVOLVE => json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "memory_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                "content": {"type": "string", "minLength": 1, "maxLength": 16384}
+            },
+            "required": ["memory_id", "content"]
         }),
         SKILL_INVOKE => json!({
             "type": "object",
@@ -1905,7 +2153,7 @@ fn validate_action_input(capability_id: &str, input: &Value) -> Result<(), Kerne
         }
         match key.as_str() {
             "query" | "url" | "handle" | "base" | "rel_path" | "content" | "title"
-            | "text" | "skill_id" => {
+            | "text" | "skill_id" | "kind" | "merged_content" | "memory_id" => {
                 let Some(value) = value.as_str() else {
                     return Err(KernelError::CapabilityExecution {
                         reason: format!("{capability_id} field `{key}` must be a string"),
@@ -1918,12 +2166,19 @@ fn validate_action_input(capability_id: &str, input: &Value) -> Result<(), Kerne
                     });
                 }
                 let max_chars = match (capability_id, key.as_str()) {
+                    (
+                        MEMORY_COMPANION_WRITE | MEMORY_COMPANION_EVOLVE,
+                        "content",
+                    ) => 16_384,
+                    (MEMORY_COMPANION_MERGE, "merged_content") => 16_384,
                     (_, "content") => 65_536,
                     (_, "url") => 4_096,
                     (_, "rel_path") => 1_024,
                     (_, "base") => 256,
                     (_, "handle" | "title") => 512,
                     (_, "skill_id") => 256,
+                    (_, "memory_id") => 128,
+                    (_, "kind") => 16,
                     (KNOWLEDGE_EMBEDDING | KNOWLEDGE_RERANK, "text" | "query") => 16_384,
                     (_, "query") => 2_048,
                     _ => unreachable!("all string input fields are listed above"),
@@ -1969,6 +2224,84 @@ fn validate_action_input(capability_id: &str, input: &Value) -> Result<(), Kerne
                     });
                 }
             }
+            "memory_ids" => {
+                let Some(memory_ids) = value.as_array() else {
+                    return Err(KernelError::CapabilityExecution {
+                        reason: format!(
+                            "{capability_id} field `memory_ids` must be an array"
+                        ),
+                    });
+                };
+                if !(2..=128).contains(&memory_ids.len()) {
+                    return Err(KernelError::CapabilityExecution {
+                        reason: format!(
+                            "{capability_id} field `memory_ids` must contain between 2 and 128 entries"
+                        ),
+                    });
+                }
+                let mut unique = BTreeSet::new();
+                for memory_id in memory_ids {
+                    let Some(memory_id) = memory_id.as_str() else {
+                        return Err(KernelError::CapabilityExecution {
+                            reason: format!(
+                                "{capability_id} field `memory_ids` must contain only strings"
+                            ),
+                        });
+                    };
+                    if memory_id.trim().is_empty() || memory_id.chars().count() > 128 {
+                        return Err(KernelError::CapabilityExecution {
+                            reason: format!(
+                                "{capability_id} field `memory_ids` contains an invalid identity"
+                            ),
+                        });
+                    }
+                    if !unique.insert(memory_id) {
+                        return Err(KernelError::CapabilityExecution {
+                            reason: format!(
+                                "{capability_id} field `memory_ids` contains a duplicate identity"
+                            ),
+                        });
+                    }
+                }
+            }
+            "tags" => {
+                let Some(tags) = value.as_array() else {
+                    return Err(KernelError::CapabilityExecution {
+                        reason: format!("{capability_id} field `tags` must be an array"),
+                    });
+                };
+                if tags.len() > 32 {
+                    return Err(KernelError::CapabilityExecution {
+                        reason: format!(
+                            "{capability_id} field `tags` must not contain more than 32 entries"
+                        ),
+                    });
+                }
+                let mut unique = BTreeSet::new();
+                for tag in tags {
+                    let Some(tag) = tag.as_str() else {
+                        return Err(KernelError::CapabilityExecution {
+                            reason: format!(
+                                "{capability_id} field `tags` must contain only strings"
+                            ),
+                        });
+                    };
+                    if tag.trim().is_empty() || tag.chars().count() > 64 {
+                        return Err(KernelError::CapabilityExecution {
+                            reason: format!(
+                                "{capability_id} field `tags` contains an invalid tag"
+                            ),
+                        });
+                    }
+                    if !unique.insert(tag.trim()) {
+                        return Err(KernelError::CapabilityExecution {
+                            reason: format!(
+                                "{capability_id} field `tags` contains a duplicate tag"
+                            ),
+                        });
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -1990,11 +2323,7 @@ fn validate_action_input(capability_id: &str, input: &Value) -> Result<(), Kerne
                 });
             }
         }
-        MEMORY_PROJECT_WRITE
-        | MEMORY_PROJECT_DISTILL
-        | MEMORY_COMPANION_WRITE
-        | MEMORY_COMPANION_MERGE
-        | MEMORY_COMPANION_EVOLVE => {
+        MEMORY_PROJECT_WRITE | MEMORY_PROJECT_DISTILL => {
             if input.get("content").and_then(Value::as_str).is_none()
                 && input.get("items").and_then(Value::as_array).is_none()
             {
@@ -2003,10 +2332,41 @@ fn validate_action_input(capability_id: &str, input: &Value) -> Result<(), Kerne
                 });
             }
         }
+        MEMORY_COMPANION_WRITE => {
+            require_memory_kind(input, capability_id)?;
+            require_string(input, capability_id, "content")?;
+        }
+        MEMORY_COMPANION_MERGE => {
+            require_memory_kind(input, capability_id)?;
+            require_string(input, capability_id, "merged_content")?;
+            if input.get("memory_ids").and_then(Value::as_array).is_none() {
+                return Err(KernelError::CapabilityExecution {
+                    reason: format!("{capability_id} requires `memory_ids`"),
+                });
+            }
+        }
+        MEMORY_COMPANION_EVOLVE => {
+            require_string(input, capability_id, "memory_id")?;
+            require_string(input, capability_id, "content")?;
+        }
         SKILL_INVOKE => require_string(input, capability_id, "skill_id")?,
         _ => {}
     }
     Ok(())
+}
+
+fn require_memory_kind(input: &Value, capability_id: &str) -> Result<(), KernelError> {
+    let kind = input.get("kind").and_then(Value::as_str).unwrap_or_default();
+    if matches!(
+        kind,
+        "profile" | "preference" | "knowledge" | "episode" | "task" | "affective"
+    ) {
+        Ok(())
+    } else {
+        Err(KernelError::CapabilityExecution {
+            reason: format!("{capability_id} field `kind` is not a supported memory kind"),
+        })
+    }
 }
 
 fn require_string(input: &Value, capability_id: &str, field: &str) -> Result<(), KernelError> {
@@ -2031,24 +2391,78 @@ fn allowed_input_key(capability_id: &str, key: &str) -> bool {
         KNOWLEDGE_WRITE => matches!(key, "handle" | "base" | "rel_path" | "content" | "title"),
         KNOWLEDGE_AUTOGEN => key == "overwrite_readme",
         KNOWLEDGE_EMBEDDING | KNOWLEDGE_RERANK => matches!(key, "text" | "query"),
-        MEMORY_PROJECT_WRITE
-        | MEMORY_PROJECT_DISTILL
-        | MEMORY_COMPANION_WRITE
-        | MEMORY_COMPANION_MERGE
-        | MEMORY_COMPANION_EVOLVE => matches!(key, "content" | "title" | "items"),
+        MEMORY_PROJECT_WRITE | MEMORY_PROJECT_DISTILL => {
+            matches!(key, "content" | "title" | "items")
+        }
+        MEMORY_COMPANION_WRITE => matches!(key, "kind" | "content" | "tags"),
+        MEMORY_COMPANION_MERGE => {
+            matches!(key, "memory_ids" | "merged_content" | "kind")
+        }
+        MEMORY_COMPANION_EVOLVE => matches!(key, "memory_id" | "content"),
         SKILL_INVOKE => matches!(key, "skill_id" | "arguments"),
         _ => false,
     }
 }
 
-fn tool_output_schema() -> Value {
+fn companion_memory_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "memory_id": {"type": "string", "minLength": 1, "maxLength": 128},
+            "kind": {
+                "type": "string",
+                "enum": ["profile", "preference", "knowledge", "episode", "task", "affective"]
+            },
+            "content": {"type": "string", "minLength": 1},
+            "tags": {"type": "array", "items": {"type": "string"}},
+            "importance": {"type": "number"},
+            "strength": {"type": "number"},
+            "pinned": {"type": "boolean"},
+            "source": {"type": "string", "minLength": 1},
+            "status": {"type": "string", "enum": ["active", "archived"]},
+            "created_at": {"type": "integer"},
+            "updated_at": {"type": "integer"},
+            "last_reinforced_at": {"type": "integer"},
+            "companion_id": {"type": ["string", "null"]}
+        },
+        "required": [
+            "memory_id", "kind", "content", "tags", "importance", "strength",
+            "pinned", "source", "status", "created_at", "updated_at",
+            "last_reinforced_at", "companion_id"
+        ]
+    })
+}
+
+fn tool_output_schema(capability_id: &str) -> Value {
+    if matches!(
+        capability_id,
+        MEMORY_COMPANION_WRITE | MEMORY_COMPANION_MERGE | MEMORY_COMPANION_EVOLVE
+    ) {
+        return companion_memory_schema();
+    }
     // The owning service defines the operation result. The registration only
     // constrains the wire to a JSON object; it must not publish a synthetic
     // "accepted" or "deterministic" receipt.
     object_schema(true)
 }
 
-fn context_schema() -> Value {
+fn context_schema(capability_id: &str) -> Value {
+    if capability_id == MEMORY_COMPANION_RECALL {
+        return json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "companion_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                "memories": {
+                    "type": "array",
+                    "maxItems": 120,
+                    "items": companion_memory_schema()
+                }
+            },
+            "required": ["companion_id", "memories"]
+        });
+    }
     object_schema(true)
 }
 
@@ -2236,9 +2650,9 @@ mod tests {
         TypedResourceBinding, UserId,
     };
     use nomifun_agent_kernel::{
-        AgentPresetCompiler, CapabilityInvocationRequest, CompileRequest, CompilerEnvironment,
-        InMemoryPluginStatePersistence, KernelRegistry, MaterializationPolicy, Materializer,
-        SessionCapabilityState,
+        AgentPresetCompiler, CapabilityAccessRequest, CapabilityInvocationRequest,
+        CompileRequest, CompilerEnvironment, InMemoryPluginStatePersistence, KernelRegistry,
+        MaterializationPolicy, Materializer, SessionCapabilityState,
     };
 
     fn principal() -> PrincipalRef {
@@ -2296,6 +2710,25 @@ mod tests {
                 "capability_id": request.context.capability_id,
                 "query": search.query,
                 "limit": search.limit
+            })))
+        }
+
+        async fn contribute_context(
+            &self,
+            request: Wave1ContextHostRequest,
+        ) -> Result<StrictJsonValue, Wave1HostPortError> {
+            assert_eq!(
+                request.context.capability_id.as_ref(),
+                MEMORY_COMPANION_RECALL
+            );
+            let [binding] = request.context.resource_bindings.as_slice() else {
+                return Err(Wave1HostPortError::invalid_request(
+                    "test expects one Companion memory binding",
+                ));
+            };
+            Ok(StrictJsonValue(json!({
+                "companion_id": binding.resource_id,
+                "memories": [],
             })))
         }
     }
@@ -2369,7 +2802,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn knowledge_search_invocation_forwards_typed_request_to_host_port() {
+    async fn action_and_context_invocations_forward_typed_requests_to_the_host_port() {
         let registry = KernelRegistry::new(
             MaterializationPolicy::stable(CONTRACT_VERSION),
             Arc::new(InMemoryPluginStatePersistence::new()),
@@ -2391,19 +2824,37 @@ mod tests {
             connection_config_ref: None,
             typed_parameters: BTreeMap::new(),
         };
+        let companion_binding = TypedResourceBinding {
+            binding_id: ResourceBindingId::from("companion-memory"),
+            resource_kind: ResourceKind::from(COMPANION_MEMORY_RESOURCE_KIND),
+            resource_id: ResourceId::from("companion-1"),
+            owner_id: test_principal.principal_id.clone(),
+            operations: BTreeSet::from(["read".to_owned(), "write".to_owned()]),
+            connection_config_ref: None,
+            typed_parameters: BTreeMap::new(),
+        };
         let test_action_id =
             action_id("knowledge.search").expect("knowledge.search has an action identity");
         let payload = AgentPresetRevisionPayload {
             schema_version: VersionString::from(CONTRACT_VERSION),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),
-            initial_capabilities: vec![CapabilitySelection {
-                capability: CapabilityRef {
-                    id: CapabilityId::from("knowledge.search"),
-                    version: VersionString::from(CONTRACT_VERSION),
+            initial_capabilities: vec![
+                CapabilitySelection {
+                    capability: CapabilityRef {
+                        id: CapabilityId::from("knowledge.search"),
+                        version: VersionString::from(CONTRACT_VERSION),
+                    },
+                    action_allowlist: BTreeSet::from([test_action_id.clone()]),
                 },
-                action_allowlist: BTreeSet::from([test_action_id.clone()]),
-            }],
+                CapabilitySelection {
+                    capability: CapabilityRef {
+                        id: CapabilityId::from(MEMORY_COMPANION_RECALL),
+                        version: VersionString::from(CONTRACT_VERSION),
+                    },
+                    action_allowlist: BTreeSet::new(),
+                },
+            ],
             on_demand_capabilities: Vec::new(),
             skill_bindings: Vec::new(),
             system_role_provider_overrides: BTreeMap::new(),
@@ -2411,11 +2862,16 @@ mod tests {
             instructions: "Invoke the selected capability.".to_owned(),
             starter_prompts: Vec::new(),
         };
-        let contribution_locks = vec![materialized
-            .capability(&CapabilityId::from("knowledge.search"))
-            .expect("materialized knowledge.search capability")
-            .contribution_lock
-            .clone()];
+        let contribution_locks = [KNOWLEDGE_SEARCH, MEMORY_COMPANION_RECALL]
+            .into_iter()
+            .map(|capability_id| {
+                materialized
+                    .capability(&CapabilityId::from(capability_id))
+                    .expect("materialized Wave 1 capability")
+                    .contribution_lock
+                    .clone()
+            })
+            .collect();
         let mut revision = AgentPresetRevision {
             reference: PresetRevisionRef {
                 preset_id: AgentPresetId::from("wave1-test"),
@@ -2457,7 +2913,10 @@ mod tests {
             },
         )
         .expect("compile selected capability")
-        .with_target_resource_bindings(&test_principal, vec![binding.clone()])
+        .with_target_resource_bindings(
+            &test_principal,
+            vec![binding.clone(), companion_binding.clone()],
+        )
         .expect("bind selected target resource");
         let active = SessionCapabilityState::new(&snapshot)
             .snapshot()
@@ -2490,6 +2949,32 @@ mod tests {
         assert_eq!(first.0["capability_id"], json!("knowledge.search"));
         assert_eq!(first.0["query"], json!("rust"));
         assert_eq!(first.0["limit"], Value::Null);
+
+        let companion_context = registry
+            .contribute_context(
+                &snapshot,
+                &active,
+                CapabilityAccessRequest {
+                    principal: principal(),
+                    session_owner: principal(),
+                    agent_session_id: AgentSessionId::from("wave1-test-session"),
+                    operation_id: OperationId::from("wave1-context-operation"),
+                    correlation_id: CorrelationId::from("wave1-context-correlation"),
+                    resolved_snapshot_ref: snapshot.snapshot_ref().clone(),
+                    active_set_generation: active.generation,
+                    capability_id: CapabilityId::from(MEMORY_COMPANION_RECALL),
+                    resource_binding_ids: BTreeSet::from([
+                        companion_binding.binding_id.clone(),
+                    ]),
+                    state_scope_key: ScopeKey::from("session:wave1-test"),
+                },
+            )
+            .await
+            .expect("Companion context forwarded through Kernel");
+        assert_eq!(
+            companion_context.value.unwrap().0["companion_id"],
+            json!("companion-1")
+        );
 
         let invalid = CapabilityInvocationRequest {
             input: StrictJsonValue(json!("not-an-object")),
@@ -2526,9 +3011,22 @@ mod tests {
             (KNOWLEDGE_RERANK, json!({"query": "entry"})),
             (MEMORY_PROJECT_WRITE, json!({"content": "entry"})),
             (MEMORY_PROJECT_DISTILL, json!({"items": [{"text": "entry"}]})),
-            (MEMORY_COMPANION_WRITE, json!({"content": "entry"})),
-            (MEMORY_COMPANION_MERGE, json!({"items": [{"text": "entry"}]})),
-            (MEMORY_COMPANION_EVOLVE, json!({"content": "entry"})),
+            (
+                MEMORY_COMPANION_WRITE,
+                json!({"kind": "preference", "content": "entry", "tags": ["agent"]}),
+            ),
+            (
+                MEMORY_COMPANION_MERGE,
+                json!({
+                    "memory_ids": ["memory-1", "memory-2"],
+                    "merged_content": "merged entry",
+                    "kind": "preference"
+                }),
+            ),
+            (
+                MEMORY_COMPANION_EVOLVE,
+                json!({"memory_id": "memory-1", "content": "evolved entry"}),
+            ),
             (SKILL_INVOKE, json!({"skill_id": "skill.example"})),
         ];
         let mut operation_ids = BTreeSet::new();
@@ -2564,6 +3062,77 @@ mod tests {
         )
         .expect_err("knowledge.write rel_path must use its declared 1024 character limit");
         assert!(error.to_string().contains("exceeds 1024 characters"));
+
+        let error = operation_from_action(
+            &action_id(MEMORY_COMPANION_MERGE).unwrap(),
+            StrictJsonValue(json!({
+                "memory_ids": ["memory-1", "memory-1"],
+                "merged_content": "merged",
+                "kind": "preference"
+            })),
+        )
+        .expect_err("Companion merge must reject duplicate source identities");
+        assert!(error.to_string().contains("duplicate identity"));
+
+        let error = operation_from_action(
+            &action_id(MEMORY_COMPANION_WRITE).unwrap(),
+            StrictJsonValue(json!({
+                "kind": "unknown",
+                "content": "entry"
+            })),
+        )
+        .expect_err("Companion writes must use the durable memory taxonomy");
+        assert!(error.to_string().contains("supported memory kind"));
+    }
+
+    #[test]
+    fn companion_memory_schemas_are_strict_and_resolvable_by_the_host() {
+        let registrations = registrations().expect("Wave 1 registrations");
+        let companion = registrations
+            .iter()
+            .find(|registration| {
+                registration.metadata.manifest.payload.package_id.as_ref()
+                    == COMPANION_MEMORY_PACKAGE_ID
+            })
+            .expect("Companion memory registration");
+        for capability in &companion.metadata.manifest.payload.contributions.capabilities {
+            if capability.kind == CapabilityKind::Tool {
+                let action = capability
+                    .contributions
+                    .actions
+                    .first()
+                    .expect("Companion memory action");
+                let input = resolve_canonical_schema(
+                    capability.id.as_ref(),
+                    &action.input_schema,
+                )
+                .expect("canonical Companion input schema");
+                let output = resolve_canonical_schema(
+                    capability.id.as_ref(),
+                    &action.output_schema,
+                )
+                .expect("canonical Companion output schema");
+                assert_eq!(input.0["additionalProperties"], json!(false));
+                assert_eq!(output.0["additionalProperties"], json!(false));
+                assert!(
+                    resolve_canonical_schema(
+                        capability.id.as_ref(),
+                        &CanonicalSchemaRef::from("schema://foreign")
+                    )
+                    .is_err()
+                );
+            } else if capability.id.as_ref() == MEMORY_COMPANION_RECALL {
+                let reference = capability
+                    .contributions
+                    .context_schema_refs
+                    .first()
+                    .expect("Companion recall context schema");
+                let schema = resolve_canonical_schema(capability.id.as_ref(), reference)
+                    .expect("canonical Companion recall schema");
+                assert_eq!(schema.0["additionalProperties"], json!(false));
+                assert_eq!(schema.0["properties"]["memories"]["maxItems"], json!(120));
+            }
+        }
     }
 
     #[test]
@@ -2571,6 +3140,21 @@ mod tests {
         let error = Wave1HostPortError::unavailable("owner is not mounted");
         assert_eq!(error.code.as_ref(), "CAPABILITY_UNAVAILABLE");
         assert!(error.message.contains("not mounted"));
+
+        let kernel_error = wave1_host_error_to_kernel(Wave1HostPortError::new(
+            "KNOWLEDGE_OWNER_REJECTED",
+            "knowledge owner rejected the request",
+        ));
+        let failure = kernel_error
+            .capability_execution_failure()
+            .expect("Wave 1 host errors cross the Kernel as a typed failure");
+        assert_eq!(failure.code.as_ref(), "KNOWLEDGE_OWNER_REJECTED");
+        assert_eq!(failure.message, "knowledge owner rejected the request");
+
+        let invalid = wave1_input_error_to_kernel(KernelError::CapabilityExecution {
+            reason: "request body was invalid".to_owned(),
+        });
+        assert_eq!(invalid.canonical_code().as_ref(), "INVALID_PAYLOAD");
     }
 
     #[test]

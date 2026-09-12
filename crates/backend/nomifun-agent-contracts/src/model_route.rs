@@ -73,6 +73,9 @@ pub enum ChatRouteFeature {
     StructuredOutput,
     ProviderRoundState,
     NativeResponsesItems,
+    /// Exact Chat route supports provider-native web search with source
+    /// attribution (currently OpenAI Responses built-in `web_search`).
+    WebSearch,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

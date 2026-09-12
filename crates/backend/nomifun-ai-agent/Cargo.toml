@@ -14,6 +14,7 @@ nomi-process-runtime.workspace = true
 nomifun-knowledge.workspace = true
 nomifun-terminal.workspace = true
 nomifun-api-types.workspace = true
+nomifun-agent-domain-wave4.workspace = true
 nomifun-agent-contracts.workspace = true
 nomifun-agent-kernel.workspace = true
 nomifun-model-invoke.workspace = true

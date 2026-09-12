@@ -132,6 +132,12 @@ fn strip_server_owned_runtime_fields(extra: &mut serde_json::Value) {
             "allowed_tools",
             "enforce_tool_allowlist",
             "deferred_tools",
+            "vision_input",
+            "vision_on_demand",
+            "chat_config_revision_digest",
+            "citation_render",
+            "runtime_profile",
+            "mcp_capabilities",
             "knowledge_mounts",
             "knowledge_writeback",
             "knowledge_channel_write_enabled",
@@ -772,6 +778,12 @@ mod tests {
             "companion_session": true,
             "robot_session": true,
             "robot_id": "aa:bb:cc:dd:ee:ff",
+            "vision_input": true,
+            "vision_on_demand": true,
+            "chat_config_revision_digest": "a".repeat(64),
+            "citation_render": true,
+            "runtime_profile": "coding",
+            "mcp_capabilities": {"connect": true, "tool_proxy": true, "resource": true, "oauth": true},
             "backend": "claude",
         });
         strip_server_owned_runtime_fields(&mut extra);
@@ -783,6 +795,19 @@ mod tests {
             "robot_session gates relay text rewriting; open JSON cannot forge it"
         );
         assert!(extra.get("robot_id").is_none());
+        assert!(
+            extra.get("vision_input").is_none(),
+            "canonical Agent vision policy must be server-projected"
+        );
+        assert!(extra.get("vision_on_demand").is_none());
+        for key in [
+            "chat_config_revision_digest",
+            "citation_render",
+            "runtime_profile",
+            "mcp_capabilities",
+        ] {
+            assert!(extra.get(key).is_none(), "{key} must be server-projected");
+        }
         // Non-authority agent configuration survives.
         assert_eq!(extra["backend"], json!("claude"));
     }

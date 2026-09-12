@@ -131,6 +131,9 @@ describe('D-022 Agent Settings Test orchestration', () => {
       dirty: true,
       input: 'Inspect the workspace',
       idempotencyKey: 'editor-test-1',
+      resourceSelections: [
+        { resource_kind: 'workspace', resource_id: 'default-workspace' },
+      ],
       ports,
     });
 
@@ -139,6 +142,9 @@ describe('D-022 Agent Settings Test orchestration', () => {
       {
         preset_id: presetId,
         title: 'Coding Test',
+        resource_selections: [
+          { resource_kind: 'workspace', resource_id: 'default-workspace' },
+        ],
       },
     ]);
     expect('agent_binding' in sessionRequests[0]!).toBe(false);
@@ -169,6 +175,7 @@ describe('D-022 Agent Settings Test orchestration', () => {
         dirty: true,
         input: 'Run',
         idempotencyKey: 'editor-test-2',
+        resourceSelections: [],
         ports,
       });
     } catch (error) {

@@ -110,6 +110,7 @@ pub enum ChatModelFeature {
     StructuredOutput,
     ProviderRoundState,
     NativeResponsesItems,
+    WebSearch,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

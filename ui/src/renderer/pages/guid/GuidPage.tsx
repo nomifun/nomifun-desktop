@@ -12,8 +12,13 @@ import SpeechInputButton from '@/renderer/components/chat/SpeechInputButton';
 import FeedbackReportModal from '@/renderer/components/settings/SettingsModal/contents/FeedbackReportModal';
 import AutoWorkControl from '@/renderer/pages/conversation/components/AutoWorkControl';
 import IdmmControl from '@/renderer/pages/conversation/components/IdmmControl';
-import KnowledgeControl from '@/renderer/pages/conversation/components/KnowledgeControl';
 import { usePendingConversation } from '@/renderer/pages/conversation/components/ConversationShell/PendingConversationContext';
+import AgentResourcePicker from '@/renderer/components/agent/AgentResourcePicker';
+import {
+  resolveAgentResourceSelections,
+  type AgentResourceSelectionValue,
+} from '@/renderer/hooks/agent/agentResourceSelection';
+import { parseKnowledgeBaseId } from '@/common/types/ids';
 import { Alert, ConfigProvider } from '@arco-design/web-react';
 import React, {
   useCallback,
@@ -64,6 +69,7 @@ const GuidPage: React.FC = () => {
   const { activeBorderColor, inactiveBorderColor, activeShadow } =
     useInputFocusRing();
   const [showFeedbackModal, setShowFeedbackModal] = useState(false);
+  const [resourceSelectionValue, setResourceSelectionValue] = useState<AgentResourceSelectionValue>({});
 
   useEffect(() => {
     void import('@renderer/pages/conversation');
@@ -97,8 +103,14 @@ const GuidPage: React.FC = () => {
   const presetResourceKinds = agentSelection.selectedTemplate
     ? new Set(agentSelection.selectedTemplate.seed.required_resource_kinds)
     : presetCapabilities.requiredResourceKinds;
-  const knowledgeEnabled =
-    presetResourceResolutionReady && presetResourceKinds.has('knowledge_base');
+  const presetCapabilityIds = agentSelection.selectedTemplate
+    ? new Set([
+        ...agentSelection.selectedTemplate.seed.initial_capabilities,
+        ...agentSelection.selectedTemplate.seed.on_demand_capabilities,
+      ].map((capability) => capability.id))
+    : presetCapabilities.capabilityIds;
+  const resourceSelectionResolution = resolveAgentResourceSelections(presetResourceKinds, resourceSelectionValue);
+  const resourceSelectionsReady = presetResourceResolutionReady && resourceSelectionResolution.missingKinds.length === 0;
   const workspaceEnabled =
     presetResourceResolutionReady && presetResourceKinds.has('workspace');
   const hasAgentLaunchTarget = agentSelection.selection.kind === 'template'
@@ -108,6 +120,20 @@ const GuidPage: React.FC = () => {
           presetResourceResolutionReady
       );
   const hasLaunchTarget = hasAgentLaunchTarget && Boolean(modelSelection.current_model);
+  const selectedAgentResourceKey = agentSelection.selection.kind === 'template'
+    ? `template:${agentSelection.selection.templateKey}`
+    : `preset:${agentSelection.selection.presetId}`;
+
+  useEffect(() => {
+    setResourceSelectionValue({});
+    advancedConfig.setKnowledge({
+      enabled: false,
+      writeback: false,
+      writeback_eagerness: 'manual',
+      channel_write_enabled: false,
+      kb_ids: [],
+    });
+  }, [advancedConfig.setKnowledge, selectedAgentResourceKey]);
 
   const mention = useGuidMention({
     presets: agentSelection.presets,
@@ -133,11 +159,12 @@ const GuidPage: React.FC = () => {
     current_model: modelSelection.current_model,
     applyAdvancedConfig: (conversationId) =>
       advancedConfig.applyToConversation(conversationId, {
-        allowKnowledgeBinding: knowledgeEnabled,
+        allowKnowledgeBinding: presetResourceKinds.has('knowledge_base'),
       }),
     autoWork: advancedConfig.autoWork,
     workspaceEnabled,
-    resourceResolutionReady: presetResourceResolutionReady,
+    resourceResolutionReady: resourceSelectionsReady,
+    resourceSelections: resourceSelectionResolution.selections,
     setMentionOpen: mention.setMentionOpen,
     setMentionQuery: mention.setMentionQuery,
     setMentionSelectorOpen: mention.setMentionSelectorOpen,
@@ -292,6 +319,16 @@ const GuidPage: React.FC = () => {
     ]
   );
 
+  const handleResourceSelectionChange = useCallback((next: AgentResourceSelectionValue) => {
+    setResourceSelectionValue(next);
+    if (next.knowledge_base === resourceSelectionValue.knowledge_base) return;
+    advancedConfig.setKnowledge({
+      ...advancedConfig.knowledge,
+      enabled: Boolean(next.knowledge_base),
+      kb_ids: next.knowledge_base ? [parseKnowledgeBaseId(next.knowledge_base)] : [],
+    });
+  }, [advancedConfig.knowledge, advancedConfig.setKnowledge, resourceSelectionValue.knowledge_base]);
+
   const typewriterPlaceholder = useTypewriterPlaceholder(
     t('conversation.welcome.placeholder')
   );
@@ -307,6 +344,7 @@ const GuidPage: React.FC = () => {
       guidInput.setDir('');
     }
     advancedConfig.reset();
+    setResourceSelectionValue({});
   }, [
     advancedConfig.reset,
     guidInput.setDir,
@@ -379,16 +417,6 @@ const GuidPage: React.FC = () => {
         }}
         applyNote={t('guid.advanced.applyNote')}
       />
-      {knowledgeEnabled && (
-        <KnowledgeControl
-          key={`knowledge-${location.key}`}
-          draft={{
-            value: advancedConfig.knowledge,
-            onChange: advancedConfig.setKnowledge,
-          }}
-          applyNote={t('guid.advanced.applyNote')}
-        />
-      )}
     </>
   );
 
@@ -402,7 +430,7 @@ const GuidPage: React.FC = () => {
   );
 
   const autoWorkButtonDisabled =
-    !hasLaunchTarget ||
+    !hasLaunchTarget || !resourceSelectionsReady ||
     autoWorkStartDisabled(guidInput.loading, advancedConfig.autoWork);
   const actionRowNode = (
     <GuidActionRow
@@ -505,6 +533,14 @@ const GuidPage: React.FC = () => {
                   }
                 />
               }
+            />
+
+            <AgentResourcePicker
+              requiredKinds={presetResourceKinds}
+              capabilityIds={presetCapabilityIds}
+              value={resourceSelectionValue}
+              onChange={handleResourceSelectionChange}
+              disabled={guidInput.loading || !presetResourceResolutionReady}
             />
 
             <GuidResourceCards />

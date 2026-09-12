@@ -16,7 +16,7 @@ use std::sync::Arc;
 use nomifun_agent_contracts::{
     ActionId, AgentSessionId, ArtifactEnvelope, CancellationDescriptor, CanonicalSchemaRef,
     CapabilityActionDescriptor, CapabilityConsumer, CapabilityContributions, CapabilityId,
-    CapabilityKind, CapabilityManifest, CorrelationId, EffectClass,
+    CapabilityKind, CapabilityManifest, ConnectionConfigRef, CorrelationId, EffectClass,
     HostPortBindingDescriptor, HostPortId, HostPortRef, IdempotencyKey,
     InProcessEntrypointMetadata, LocalizedMetadata,
     OperationId, PackageContributions, PackageId, PackageManifest, PackageRef,
@@ -32,6 +32,7 @@ use nomifun_agent_contracts::{
 use nomifun_agent_kernel::{
     CapabilityHandler, CapabilityInvocationContext, KernelError, PluginRegistration,
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 pub const VERSION: &str = "1.0.0";
@@ -45,7 +46,13 @@ pub const MINIAPP_PACKAGE_ID: &str = "nomifun.miniapp";
 
 pub const CANVAS_RESOURCE_KIND: &str = "canvas";
 pub const ASSET_LIBRARY_RESOURCE_KIND: &str = "asset_library";
+pub const CREATIVE_ASSET_LIBRARY_RESOURCE_ID: &str = "creative-studio-assets";
 pub const GENERATION_PROVIDER_RESOURCE_KIND: &str = "generation_provider";
+/// Model selector frozen with a `generation_provider` resource binding. The
+/// resource ID is the canonical provider ID; the selected model is data of
+/// that exact provider resource rather than free-form action input.
+pub const GENERATION_PROVIDER_MODEL_PARAMETER: &str = "model";
+pub const GENERATION_PROVIDER_MODEL_PARAMETER_PREFIX: &str = "model.";
 pub const MINIAPP_RESOURCE_KIND: &str = "miniapp";
 
 pub const TARGET_PACKAGE_IDS: [&str; 4] = [
@@ -94,6 +101,134 @@ pub const WAVE3_RESOURCE_OWNER_MISMATCH: &str = "RESOURCE_OWNER_MISMATCH";
 pub const WAVE3_RESOURCE_NOT_BOUND: &str = "WAVE3_RESOURCE_NOT_BOUND";
 pub const WAVE3_INVALID_RESPONSE: &str = "WAVE3_INVALID_RESPONSE";
 
+const MAX_PROMPT_CHARS: usize = 65_536;
+const MAX_SYSTEM_CHARS: usize = 65_536;
+const MAX_CREATION_RESULTS: usize = 10;
+const MAX_IMAGE_EDIT_INPUTS: usize = 8;
+
+/// The durable Creative Studio aggregate that owns a generated task.
+///
+/// This is deliberately not inferred by the host. Creation tasks participate
+/// in Canvas/template/workbench cleanup and reconciliation, so every caller
+/// must name the exact aggregate used by `CreationService`.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CreationTaskTarget {
+    CanvasNode {
+        canvas_id: String,
+        node_id: String,
+    },
+    StandaloneWorkbench {
+        workbench_kind: CreationWorkbenchKind,
+    },
+    TemplateStep {
+        template_id: String,
+        template_run_id: String,
+        template_step_id: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CreationWorkbenchKind {
+    Image,
+    Video,
+    Audio,
+}
+
+impl CreationWorkbenchKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Video => "video",
+            Self::Audio => "audio",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CreationImageInputRole {
+    Reference,
+    Mask,
+}
+
+impl CreationImageInputRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Reference => "reference",
+            Self::Mask => "mask",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CreationImageInput {
+    pub asset_id: String,
+    pub role: CreationImageInputRole,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CreationTextRequest {
+    pub target: CreationTaskTarget,
+    pub prompt: String,
+    pub system: Option<String>,
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CreationImageRequest {
+    pub target: CreationTaskTarget,
+    pub prompt: String,
+    #[serde(default = "default_creation_count")]
+    pub count: u32,
+    pub size: Option<String>,
+    pub quality: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CreationImageEditRequest {
+    pub target: CreationTaskTarget,
+    pub prompt: String,
+    pub inputs: Vec<CreationImageInput>,
+    #[serde(default = "default_creation_count")]
+    pub count: u32,
+    pub size: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CreationVideoRequest {
+    pub target: CreationTaskTarget,
+    pub prompt: String,
+    pub seconds: Option<u32>,
+    pub size: Option<String>,
+    pub first_frame_asset_id: Option<String>,
+    pub last_frame_asset_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CreationAudioRequest {
+    pub target: CreationTaskTarget,
+    pub text: String,
+    pub voice: Option<String>,
+    pub format: Option<String>,
+}
+
+const fn default_max_tokens() -> u32 {
+    4_096
+}
+
+const fn default_creation_count() -> u32 {
+    1
+}
+
 /// The resource slots frozen by the creative-studio official preset.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TypedResourceDescriptor {
@@ -127,6 +262,104 @@ pub struct Wave3HostContext {
     pub resource_bindings: TypedResourceBindings,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GenerationProviderSelection {
+    pub provider_id: String,
+    pub model: String,
+    pub connection_config_ref: ConnectionConfigRef,
+    pub config_revision: i64,
+}
+
+/// Resolve the exact provider/model selected by the frozen resource binding.
+///
+/// Domain adapters must not accept provider identity from action input. This
+/// keeps retries on the same configured resource and prevents a model from
+/// escaping the Snapshot's authority by changing a payload field.
+pub fn generation_provider_selection(
+    context: &Wave3HostContext,
+) -> Result<GenerationProviderSelection, Wave3HostPortError> {
+    let bindings = context
+        .resource_bindings
+        .iter()
+        .filter(|binding| binding.resource_kind.as_ref() == GENERATION_PROVIDER_RESOURCE_KIND)
+        .collect::<Vec<_>>();
+    let [binding] = bindings.as_slice() else {
+        return Err(Wave3HostPortError::resource_binding_invalid(
+            "creation requires exactly one generation_provider resource binding",
+        ));
+    };
+    let accepted_capability_keys = [
+        "creation.text",
+        "creation.image",
+        "creation.image_edit",
+        "creation.video",
+        "creation.audio",
+    ]
+    .map(|capability_id| format!("{GENERATION_PROVIDER_MODEL_PARAMETER_PREFIX}{capability_id}"));
+    if binding.typed_parameters.keys().any(|key| {
+        key != GENERATION_PROVIDER_MODEL_PARAMETER
+            && !accepted_capability_keys.iter().any(|accepted| accepted == key)
+    }) {
+        return Err(Wave3HostPortError::resource_binding_invalid(
+            "generation_provider accepts only model or model.creation.* typed parameters",
+        ));
+    }
+    let capability_model_key = format!(
+        "{GENERATION_PROVIDER_MODEL_PARAMETER_PREFIX}{}",
+        context.capability_id.as_ref()
+    );
+    let model = binding
+        .typed_parameters
+        .get(&capability_model_key)
+        .or_else(|| {
+            binding
+                .typed_parameters
+                .get(GENERATION_PROVIDER_MODEL_PARAMETER)
+        })
+        .ok_or_else(|| {
+            Wave3HostPortError::resource_binding_invalid(
+                format!(
+                    "generation_provider requires {capability_model_key} or model"
+                ),
+            )
+        })?;
+    if model.trim().is_empty() || model.trim() != model {
+        return Err(Wave3HostPortError::resource_binding_invalid(
+            "generation_provider model must be non-empty and already trimmed",
+        ));
+    }
+    let connection_config_ref = binding.connection_config_ref.clone().ok_or_else(|| {
+        Wave3HostPortError::resource_binding_invalid(
+            "generation_provider requires a frozen connection_config_ref",
+        )
+    })?;
+    let expected_prefix = format!("provider:{}@", binding.resource_id.as_ref());
+    let revision = connection_config_ref
+        .as_ref()
+        .strip_prefix(&expected_prefix)
+        .ok_or_else(|| {
+            Wave3HostPortError::resource_binding_invalid(
+                "generation_provider connection_config_ref does not match its provider resource",
+            )
+        })?;
+    let config_revision = revision.parse::<i64>().map_err(|_| {
+        Wave3HostPortError::resource_binding_invalid(
+            "generation_provider connection_config_ref requires a canonical non-negative revision",
+        )
+    })?;
+    if config_revision < 0 || config_revision.to_string() != revision {
+        return Err(Wave3HostPortError::resource_binding_invalid(
+            "generation_provider connection_config_ref requires a canonical non-negative revision",
+        ));
+    }
+    Ok(GenerationProviderSelection {
+        provider_id: binding.resource_id.as_ref().to_owned(),
+        model: model.to_owned(),
+        connection_config_ref,
+        config_revision,
+    })
+}
+
 /// Typed domain-family operations accepted by the Wave 3 host.
 ///
 /// Payload schemas remain owned by each capability.  The enum prevents the
@@ -134,11 +367,11 @@ pub struct Wave3HostContext {
 /// domain to validate and interpret its input.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Wave3CapabilityOperation {
-    CreationText { input: StrictJsonValue },
-    CreationImage { input: StrictJsonValue },
-    CreationImageEdit { input: StrictJsonValue },
-    CreationVideo { input: StrictJsonValue },
-    CreationAudio { input: StrictJsonValue },
+    CreationText(CreationTextRequest),
+    CreationImage(CreationImageRequest),
+    CreationImageEdit(CreationImageEditRequest),
+    CreationVideo(CreationVideoRequest),
+    CreationAudio(CreationAudioRequest),
     WorkshopCanvasRead { input: StrictJsonValue },
     WorkshopCanvasEdit { input: StrictJsonValue },
     WorkshopAssetRead { input: StrictJsonValue },
@@ -164,11 +397,11 @@ impl Wave3CapabilityOperation {
     /// Return the canonical capability identity fixed by this typed variant.
     pub fn capability_id(&self) -> CapabilityId {
         CapabilityId::from(match self {
-            Self::CreationText { .. } => "creation.text",
-            Self::CreationImage { .. } => "creation.image",
-            Self::CreationImageEdit { .. } => "creation.image_edit",
-            Self::CreationVideo { .. } => "creation.video",
-            Self::CreationAudio { .. } => "creation.audio",
+            Self::CreationText(_) => "creation.text",
+            Self::CreationImage(_) => "creation.image",
+            Self::CreationImageEdit(_) => "creation.image_edit",
+            Self::CreationVideo(_) => "creation.video",
+            Self::CreationAudio(_) => "creation.audio",
             Self::WorkshopCanvasRead { .. } => "workshop.canvas.read",
             Self::WorkshopCanvasEdit { .. } => "workshop.canvas.edit",
             Self::WorkshopAssetRead { .. } => "workshop.asset.read",
@@ -194,11 +427,11 @@ impl Wave3CapabilityOperation {
     /// Return the first-party owner domain for the operation.
     pub fn owner_domain(&self) -> Wave3OwnerDomain {
         match self {
-            Self::CreationText { .. }
-            | Self::CreationImage { .. }
-            | Self::CreationImageEdit { .. }
-            | Self::CreationVideo { .. }
-            | Self::CreationAudio { .. } => Wave3OwnerDomain::Creation,
+            Self::CreationText(_)
+            | Self::CreationImage(_)
+            | Self::CreationImageEdit(_)
+            | Self::CreationVideo(_)
+            | Self::CreationAudio(_) => Wave3OwnerDomain::Creation,
             Self::WorkshopCanvasRead { .. }
             | Self::WorkshopCanvasEdit { .. }
             | Self::WorkshopAssetRead { .. }
@@ -215,14 +448,14 @@ impl Wave3CapabilityOperation {
         }
     }
 
-    fn input(&self) -> &StrictJsonValue {
+    pub fn validate(&self) -> Result<(), Wave3HostPortError> {
         match self {
-            Self::CreationText { input }
-            | Self::CreationImage { input }
-            | Self::CreationImageEdit { input }
-            | Self::CreationVideo { input }
-            | Self::CreationAudio { input }
-            | Self::WorkshopCanvasRead { input }
+            Self::CreationText(request) => validate_creation_text(request),
+            Self::CreationImage(request) => validate_creation_image(request),
+            Self::CreationImageEdit(request) => validate_creation_image_edit(request),
+            Self::CreationVideo(request) => validate_creation_video(request),
+            Self::CreationAudio(request) => validate_creation_audio(request),
+            Self::WorkshopCanvasRead { input }
             | Self::WorkshopCanvasEdit { input }
             | Self::WorkshopAssetRead { input }
             | Self::WorkshopAssetWrite { input }
@@ -234,7 +467,16 @@ impl Wave3CapabilityOperation {
             | Self::MiniAppRead { input }
             | Self::MiniAppEdit { input }
             | Self::MiniAppPublish { input }
-            | Self::MiniAppServe { input } => input,
+            | Self::MiniAppServe { input } => {
+                if input.0.is_object() {
+                    Ok(())
+                } else {
+                    Err(Wave3HostPortError::invalid_request(format!(
+                        "{} input must be a JSON object",
+                        self.capability_id().as_ref()
+                    )))
+                }
+            }
         }
     }
 }
@@ -262,12 +504,7 @@ impl Wave3HostRequest {
                 operation_action_id.as_ref()
             )));
         }
-        if !self.operation.input().0.is_object() {
-            return Err(Wave3HostPortError::invalid_request(format!(
-                "{} input must be a JSON object",
-                capability_id.as_ref()
-            )));
-        }
+        self.operation.validate()?;
         validate_host_context(&self.context)?;
         validate_resource_bindings_contract(
             capability_id,
@@ -712,7 +949,7 @@ const MINIAPP_CAPABILITIES: [CapabilitySpec; 4] = [
         description: "Read the selected published MiniApp for serving.",
         resource_kinds: MINIAPP_SERVE_RESOURCES,
         requirements: MINIAPP_SERVE_REQUIREMENTS,
-        effect_class: EffectClass::ExternalTransmit,
+        effect_class: EffectClass::ReadSensitive,
     },
 ];
 
@@ -1149,8 +1386,8 @@ fn capability_manifest(
     package: &PackageRef,
     spec: &CapabilitySpec,
 ) -> Result<CapabilityManifest, String> {
-    let input_schema = action_input_schema();
-    let output_schema = action_output_schema();
+    let input_schema = action_input_schema_for(spec.id)?.0;
+    let output_schema = action_output_schema_for(spec.id)?.0;
     let input_digest = digest_payload(&input_schema).map_err(|error| error.to_string())?;
     let output_digest = digest_payload(&output_schema).map_err(|error| error.to_string())?;
     Ok(CapabilityManifest {
@@ -1215,20 +1452,437 @@ fn capability_config_schema() -> StrictJsonValue {
     }))
 }
 
-fn action_input_schema() -> Value {
+/// Return the canonical input schema embedded in one Wave 3 action reference.
+///
+/// Application adapters use this same resolver as manifest generation, so a
+/// typed implementation cannot silently drift from the schema advertised to
+/// models and other consumers.
+pub fn action_input_schema_for(capability_id: &str) -> Result<StrictJsonValue, String> {
+    if find_capability(capability_id).is_none() {
+        return Err(format!("unknown Wave 3 capability {capability_id}"));
+    }
+    Ok(StrictJsonValue(match capability_id {
+        "creation.text" => strict_object_schema(
+            json!({
+                "target": creation_target_schema(None),
+                "prompt": bounded_string_schema(MAX_PROMPT_CHARS),
+                "system": {"type": "string", "maxLength": MAX_SYSTEM_CHARS},
+                "max_tokens": {"type": "integer", "minimum": 1, "maximum": 131072}
+            }),
+            &["target", "prompt"],
+        ),
+        "creation.image" => strict_object_schema(
+            json!({
+                "target": creation_target_schema(Some("image")),
+                "prompt": bounded_string_schema(MAX_PROMPT_CHARS),
+                "count": {"type": "integer", "minimum": 1, "maximum": MAX_CREATION_RESULTS},
+                "size": bounded_string_schema(128),
+                "quality": bounded_string_schema(128)
+            }),
+            &["target", "prompt"],
+        ),
+        "creation.image_edit" => strict_object_schema(
+            json!({
+                "target": creation_target_schema(Some("image")),
+                "prompt": bounded_string_schema(MAX_PROMPT_CHARS),
+                "inputs": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": MAX_IMAGE_EDIT_INPUTS,
+                    "items": strict_object_schema(
+                        json!({
+                            "asset_id": uuidv7_schema(),
+                            "role": {"enum": ["reference", "mask"]}
+                        }),
+                        &["asset_id", "role"],
+                    )
+                },
+                "count": {"type": "integer", "minimum": 1, "maximum": MAX_CREATION_RESULTS},
+                "size": bounded_string_schema(128)
+            }),
+            &["target", "prompt", "inputs"],
+        ),
+        "creation.video" => {
+            let mut schema = strict_object_schema(
+                json!({
+                "target": creation_target_schema(Some("video")),
+                "prompt": bounded_string_schema(MAX_PROMPT_CHARS),
+                "seconds": {"type": "integer", "minimum": 1, "maximum": 3600},
+                "size": bounded_string_schema(128),
+                "first_frame_asset_id": uuidv7_schema(),
+                "last_frame_asset_id": uuidv7_schema()
+                }),
+                &["target", "prompt"],
+            );
+            schema["dependentRequired"] = json!({
+                "last_frame_asset_id": ["first_frame_asset_id"]
+            });
+            schema
+        }
+        "creation.audio" => strict_object_schema(
+            json!({
+                "target": creation_target_schema(Some("audio")),
+                "text": bounded_string_schema(MAX_PROMPT_CHARS),
+                "voice": bounded_string_schema(256),
+                "format": bounded_string_schema(64)
+            }),
+            &["target", "text"],
+        ),
+        "workshop.canvas.read" => strict_object_schema(json!({}), &[]),
+        "workshop.canvas.edit" => strict_object_schema(
+            json!({
+                "expected_revision": revision_schema(),
+                "document": canvas_document_schema()
+            }),
+            &["expected_revision", "document"],
+        ),
+        "workshop.asset.read" => strict_object_schema(
+            json!({"asset_id": uuidv7_schema()}),
+            &["asset_id"],
+        ),
+        "workshop.asset.write" => strict_object_schema(
+            json!({
+                "asset_id": uuidv7_schema(),
+                "title": bounded_string_schema(1_000),
+                "collection": {"type": "string", "maxLength": 1_000},
+                "tags": {
+                    "type": "array",
+                    "maxItems": 100,
+                    "uniqueItems": true,
+                    "items": bounded_string_schema(120)
+                },
+                "in_library": {"type": "boolean"}
+            }),
+            &["asset_id"],
+        ),
+        "workshop.template.run" => strict_object_schema(
+            json!({
+                "templateId": uuidv7_schema(),
+                "templateRevision": {"type": "integer", "minimum": 1},
+                "inputs": {"type": "array", "maxItems": 100, "items": {"type": "object"}},
+                "referenceAssetIds": {
+                    "type": "array",
+                    "maxItems": 100,
+                    "uniqueItems": true,
+                    "items": uuidv7_schema()
+                }
+            }),
+            &["templateId", "templateRevision", "inputs", "referenceAssetIds"],
+        ),
+        "miniapp.read" => strict_object_schema(
+            json!({"path": bounded_string_schema(4_096)}),
+            &[],
+        ),
+        "miniapp.edit" => strict_object_schema(
+            json!({
+                "expected_product_revision": {"type": "integer", "minimum": 0},
+                "project_id": uuidv7_schema(),
+                "expected_project_revision": {"type": "integer", "minimum": 0},
+                "expected_build_generation": {"type": "integer", "minimum": 0},
+                "expected_source_snapshot_digest": digest_schema(),
+                "path": bounded_string_schema(4_096),
+                "content": {"type": "string", "maxLength": 4_194_304}
+            }),
+            &[
+                "expected_product_revision",
+                "project_id",
+                "expected_project_revision",
+                "expected_build_generation",
+                "expected_source_snapshot_digest",
+                "path",
+                "content",
+            ],
+        ),
+        "miniapp.publish" => strict_object_schema(
+            json!({
+                "expected_product_revision": {"type": "integer", "minimum": 0},
+                "expected_pointer_revision": {"type": "integer", "minimum": 0},
+                "expected_active_release_epoch": {"type": "integer", "minimum": 0},
+                "ready_release_id": uuidv7_schema(),
+                "expected_ready_release_digest": digest_schema(),
+                "expected_active_release_digest": digest_schema(),
+                "expected_service_test_receipt_id": uuidv7_schema(),
+                "acknowledge_test_warning": {"type": "boolean"}
+            }),
+            &[
+                "expected_product_revision",
+                "expected_pointer_revision",
+                "expected_active_release_epoch",
+                "ready_release_id",
+                "expected_ready_release_digest",
+                "acknowledge_test_warning",
+            ],
+        ),
+        "miniapp.serve" => strict_object_schema(json!({}), &[]),
+        _ => json!({
+            "type": "object",
+            "additionalProperties": true
+        }),
+    }))
+}
+
+/// Return the canonical output schema embedded in one Wave 3 action reference.
+pub fn action_output_schema_for(capability_id: &str) -> Result<StrictJsonValue, String> {
+    if find_capability(capability_id).is_none() {
+        return Err(format!("unknown Wave 3 capability {capability_id}"));
+    }
+    Ok(StrictJsonValue(match capability_id {
+        "creation.text"
+        | "creation.image"
+        | "creation.image_edit"
+        | "creation.video"
+        | "creation.audio" => strict_object_schema(
+            json!({
+                "creation_task_id": uuidv7_schema(),
+                "status": {"const": "succeeded"},
+                "result_asset_ids": {
+                    "type": "array",
+                    "maxItems": MAX_CREATION_RESULTS,
+                    "uniqueItems": true,
+                    "items": uuidv7_schema()
+                }
+            }),
+            &["creation_task_id", "status", "result_asset_ids"],
+        ),
+        "workshop.canvas.read" => strict_object_schema(
+            json!({
+                "canvas": canvas_summary_schema(),
+                "document": canvas_document_schema()
+            }),
+            &["canvas", "document"],
+        ),
+        "workshop.canvas.edit" => canvas_summary_schema(),
+        "workshop.asset.read" | "workshop.asset.write" => workshop_asset_schema(),
+        "workshop.template.run" => strict_object_schema(
+            json!({
+                "kind": {"const": "nomifun.creative-studio.template-run"},
+                "version": {"const": 1},
+                "revision": {"type": "integer", "minimum": 1},
+                "templateSnapshot": {"type": "object"},
+                "request": {"type": "object"},
+                "promptDrafts": {"type": "array"},
+                "record": strict_object_schema(
+                    json!({
+                        "requestId": uuidv7_schema(),
+                        "templateId": uuidv7_schema(),
+                        "status": {"const": "succeeded"},
+                        "promptDraftIds": {"type": "array", "items": uuidv7_schema()},
+                        "taskIds": {"type": "array", "items": uuidv7_schema()},
+                        "resultAssetIds": {"type": "array", "items": uuidv7_schema()},
+                        "historyReferenceIds": {"type": "array", "items": uuidv7_schema()},
+                        "queuedAt": {"type": "integer", "minimum": 0},
+                        "startedAt": {"type": "integer", "minimum": 0},
+                        "completedAt": {"type": "integer", "minimum": 0},
+                        "failure": {"type": "null"}
+                    }),
+                    &[
+                        "requestId", "templateId", "status", "promptDraftIds", "taskIds",
+                        "resultAssetIds", "historyReferenceIds", "queuedAt", "startedAt",
+                        "completedAt", "failure",
+                    ],
+                )
+            }),
+            &["kind", "version", "revision", "templateSnapshot", "request", "promptDrafts", "record"],
+        ),
+        "miniapp.read" => json!({
+            "oneOf": [miniapp_workshop_schema(), miniapp_source_file_schema()]
+        }),
+        "miniapp.edit" | "miniapp.publish" => miniapp_workshop_schema(),
+        "miniapp.serve" => miniapp_workshop_schema(),
+        _ => json!({
+            "type": "object",
+            "additionalProperties": true
+        }),
+    }))
+}
+
+/// Resolve a manifest schema reference only when its subject, role and digest
+/// exactly match the current canonical Wave 3 action contract.
+pub fn resolve_action_schema(
+    capability_id: &str,
+    reference: &CanonicalSchemaRef,
+) -> Result<StrictJsonValue, String> {
+    for (role, schema) in [
+        ("input", action_input_schema_for(capability_id)?),
+        ("output", action_output_schema_for(capability_id)?),
+    ] {
+        let expected = schema_ref(capability_id, role, &schema.0)?;
+        if expected == *reference {
+            return Ok(schema);
+        }
+    }
+    Err(format!(
+        "schema reference {} does not match {capability_id}'s canonical input or output schema",
+        reference.as_ref()
+    ))
+}
+
+fn strict_object_schema(properties: Value, required: &[&str]) -> Value {
     json!({
         "type": "object",
-        "additionalProperties": true
+        "additionalProperties": false,
+        "properties": properties,
+        "required": required
     })
 }
 
-fn action_output_schema() -> Value {
-    // The owning domain defines the operation result. The registration only
-    // constrains the wire to a JSON object; the host owns the result shape.
+fn bounded_string_schema(max_length: usize) -> Value {
+    json!({"type": "string", "minLength": 1, "maxLength": max_length})
+}
+
+fn uuidv7_schema() -> Value {
     json!({
-        "type": "object",
-        "additionalProperties": true
+        "type": "string",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
     })
+}
+
+fn digest_schema() -> Value {
+    json!({"type": "string", "pattern": "^[0-9a-f]{64}$"})
+}
+
+fn revision_schema() -> Value {
+    json!({"type": "string", "pattern": "^(0|[1-9][0-9]*)$"})
+}
+
+fn canvas_summary_schema() -> Value {
+    strict_object_schema(
+        json!({
+            "canvasId": uuidv7_schema(),
+            "title": {"type": "string"},
+            "revision": revision_schema(),
+            "nodeCount": {"type": "integer", "minimum": 0},
+            "connectionCount": {"type": "integer", "minimum": 0},
+            "createdAt": {"type": "integer", "minimum": 0},
+            "updatedAt": {"type": "integer", "minimum": 0}
+        }),
+        &["canvasId", "title", "revision", "nodeCount", "connectionCount", "createdAt", "updatedAt"],
+    )
+}
+
+fn canvas_document_schema() -> Value {
+    strict_object_schema(
+        json!({
+            "schema": {"type": "string"},
+            "canvasId": uuidv7_schema(),
+            "viewport": {"type": "object"},
+            "background": {"type": "object"},
+            "nodes": {"type": "array"},
+            "connections": {"type": "array"},
+            "chatSessions": {"type": "array"},
+            "activeChatId": {"type": ["string", "null"]},
+            "panels": {"type": "object"},
+            "pendingTaskIds": {"type": "array", "items": uuidv7_schema()}
+        }),
+        &[
+            "schema", "canvasId", "viewport", "background", "nodes", "connections",
+            "chatSessions", "activeChatId", "panels", "pendingTaskIds",
+        ],
+    )
+}
+
+fn workshop_asset_schema() -> Value {
+    strict_object_schema(
+        json!({
+            "asset_id": uuidv7_schema(),
+            "kind": {"type": "string"},
+            "title": {"type": "string"},
+            "collection": {"type": ["string", "null"]},
+            "tags": {"type": "array", "items": {"type": "string"}},
+            "mime": {"type": ["string", "null"]},
+            "width": {"type": ["integer", "null"]},
+            "height": {"type": ["integer", "null"]},
+            "bytes": {"type": ["integer", "null"]},
+            "in_library": {"type": "boolean"},
+            "deleted_at": {"type": ["integer", "null"]},
+            "text_content": {"type": ["string", "null"]},
+            "origin": {},
+            "url": {"type": "string"},
+            "thumb_url": {"type": ["string", "null"]},
+            "created_at": {"type": "integer"},
+            "updated_at": {"type": "integer"}
+        }),
+        &[
+            "asset_id", "kind", "title", "collection", "tags", "mime", "width", "height",
+            "bytes", "in_library", "deleted_at", "text_content", "origin", "url",
+            "thumb_url", "created_at", "updated_at",
+        ],
+    )
+}
+
+fn miniapp_workshop_schema() -> Value {
+    strict_object_schema(
+        json!({
+            "miniapp": {"type": "object"},
+            "service_lifecycle": {"type": "object"},
+            "active_service": {"type": "object"},
+            "publish_mode": {"type": "string"},
+            "project_id": uuidv7_schema(),
+            "project_revision": {"type": "integer", "minimum": 0},
+            "source_state": {"type": "string"},
+            "build_generation": {"type": "integer", "minimum": 0},
+            "source_snapshot_digest": digest_schema(),
+            "dependency_lock_digest": digest_schema(),
+            "ready": {"type": "object"},
+            "config_schema": {"type": "object"},
+            "config": {"type": "object"},
+            "credential_bindings_revision": {"type": "integer", "minimum": 0},
+            "credential_slots": {"type": "array"},
+            "capabilities": {"type": "array"},
+            "active_operation": {"type": "object"}
+        }),
+        &[
+            "miniapp", "publish_mode", "project_id", "project_revision", "source_state",
+            "build_generation", "config_schema", "config", "credential_bindings_revision",
+            "credential_slots", "capabilities",
+        ],
+    )
+}
+
+fn miniapp_source_file_schema() -> Value {
+    strict_object_schema(
+        json!({
+            "miniapp_id": uuidv7_schema(),
+            "project_id": uuidv7_schema(),
+            "path": {"type": "string"},
+            "content": {"type": "string"},
+            "source_snapshot_digest": digest_schema(),
+            "build_generation": {"type": "integer", "minimum": 0}
+        }),
+        &["miniapp_id", "project_id", "path", "content", "source_snapshot_digest", "build_generation"],
+    )
+}
+
+fn creation_target_schema(standalone_kind: Option<&str>) -> Value {
+    let mut targets = vec![
+        strict_object_schema(
+            json!({
+                "kind": {"const": "canvas_node"},
+                "canvas_id": uuidv7_schema(),
+                "node_id": uuidv7_schema()
+            }),
+            &["kind", "canvas_id", "node_id"],
+        ),
+        strict_object_schema(
+            json!({
+                "kind": {"const": "template_step"},
+                "template_id": uuidv7_schema(),
+                "template_run_id": uuidv7_schema(),
+                "template_step_id": uuidv7_schema()
+            }),
+            &["kind", "template_id", "template_run_id", "template_step_id"],
+        ),
+    ];
+    if let Some(workbench_kind) = standalone_kind {
+        targets.push(strict_object_schema(
+            json!({
+                "kind": {"const": "standalone_workbench"},
+                "workbench_kind": {"const": workbench_kind}
+            }),
+            &["kind", "workbench_kind"],
+        ));
+    }
+    json!({"oneOf": targets})
 }
 
 fn host_port(id: &str) -> HostPortRef {
@@ -1272,8 +1926,18 @@ fn resource_binding(
 }
 
 fn host_port_binding() -> Result<HostPortBindingDescriptor, String> {
-    let request_schema = action_input_schema();
-    let response_schema = action_output_schema();
+    let request_schema = json!({
+        "anyOf": ALL_CAPABILITY_IDS
+            .iter()
+            .map(|capability_id| action_input_schema_for(capability_id).map(|schema| schema.0))
+            .collect::<Result<Vec<_>, _>>()?
+    });
+    let response_schema = json!({
+        "anyOf": ALL_CAPABILITY_IDS
+            .iter()
+            .map(|capability_id| action_output_schema_for(capability_id).map(|schema| schema.0))
+            .collect::<Result<Vec<_>, _>>()?
+    });
     Ok(HostPortBindingDescriptor {
         port: host_port(WAVE3_CAPABILITY_HOST_PORT_ID),
         request_schema: schema_ref(
@@ -1346,28 +2010,27 @@ impl CapabilityHandler for Wave3CapabilityHandler {
             };
             request
                 .validate()
-                .map_err(|error| KernelError::CapabilityExecution {
-                    reason: error.to_string(),
-                })?;
+                .map_err(wave3_host_error_to_kernel)?;
             let result = self
                 .host_port
                 .invoke(request)
                 .await
-                .map_err(|error| KernelError::CapabilityExecution {
-                    reason: error.to_string(),
-                })?;
+                .map_err(wave3_host_error_to_kernel)?;
             if !result.0.is_object() {
-                return Err(KernelError::CapabilityExecution {
-                    reason: Wave3HostPortError::invalid_response(format!(
+                return Err(wave3_host_error_to_kernel(
+                    Wave3HostPortError::invalid_response(format!(
                         "{} host result must be a JSON object",
                         self.capability_id.as_ref()
-                    ))
-                    .to_string(),
-                });
+                    )),
+                ));
             }
             Ok(result)
         })
     }
+}
+
+fn wave3_host_error_to_kernel(error: Wave3HostPortError) -> KernelError {
+    KernelError::capability_execution_failed(error.code, error.message)
 }
 
 /// Convert a canonical capability ID and its object payload into the only
@@ -1377,11 +2040,21 @@ pub fn operation_from_input(
     input: StrictJsonValue,
 ) -> Result<Wave3CapabilityOperation, KernelError> {
     let operation = match capability_id.as_ref() {
-        "creation.text" => Wave3CapabilityOperation::CreationText { input },
-        "creation.image" => Wave3CapabilityOperation::CreationImage { input },
-        "creation.image_edit" => Wave3CapabilityOperation::CreationImageEdit { input },
-        "creation.video" => Wave3CapabilityOperation::CreationVideo { input },
-        "creation.audio" => Wave3CapabilityOperation::CreationAudio { input },
+        "creation.text" => Wave3CapabilityOperation::CreationText(
+            parse_creation_request(input.0, "creation.text")?,
+        ),
+        "creation.image" => Wave3CapabilityOperation::CreationImage(
+            parse_creation_request(input.0, "creation.image")?,
+        ),
+        "creation.image_edit" => Wave3CapabilityOperation::CreationImageEdit(
+            parse_creation_request(input.0, "creation.image_edit")?,
+        ),
+        "creation.video" => Wave3CapabilityOperation::CreationVideo(
+            parse_creation_request(input.0, "creation.video")?,
+        ),
+        "creation.audio" => Wave3CapabilityOperation::CreationAudio(
+            parse_creation_request(input.0, "creation.audio")?,
+        ),
         "workshop.canvas.read" => Wave3CapabilityOperation::WorkshopCanvasRead { input },
         "workshop.canvas.edit" => Wave3CapabilityOperation::WorkshopCanvasEdit { input },
         "workshop.asset.read" => Wave3CapabilityOperation::WorkshopAssetRead { input },
@@ -1401,7 +2074,215 @@ pub fn operation_from_input(
             });
         }
     };
+    operation
+        .validate()
+        .map_err(wave3_host_error_to_kernel)?;
     Ok(operation)
+}
+
+fn parse_creation_request<T: for<'de> Deserialize<'de>>(
+    input: Value,
+    capability_id: &str,
+) -> Result<T, KernelError> {
+    serde_json::from_value(input).map_err(|error| {
+        wave3_host_error_to_kernel(Wave3HostPortError::invalid_request(format!(
+            "invalid {capability_id} input: {error}"
+        )))
+    })
+}
+
+fn validate_creation_text(request: &CreationTextRequest) -> Result<(), Wave3HostPortError> {
+    validate_creation_target(&request.target, None)
+        .and_then(|_| require_bounded_text("prompt", &request.prompt, MAX_PROMPT_CHARS, false))
+        .and_then(|_| {
+            request.system.as_deref().map_or(Ok(()), |system| {
+                require_bounded_text("system", system, MAX_SYSTEM_CHARS, true)
+            })
+        })
+        .and_then(|_| {
+            if (1..=131_072).contains(&request.max_tokens) {
+                Ok(())
+            } else {
+                Err("max_tokens must be between 1 and 131072".to_owned())
+            }
+        })
+        .map_err(Wave3HostPortError::invalid_request)
+}
+
+fn validate_creation_image(request: &CreationImageRequest) -> Result<(), Wave3HostPortError> {
+    validate_creation_target(&request.target, Some(CreationWorkbenchKind::Image))
+        .and_then(|_| require_bounded_text("prompt", &request.prompt, MAX_PROMPT_CHARS, false))
+        .and_then(|_| validate_creation_count(request.count))
+        .and_then(|_| validate_optional_short("size", request.size.as_deref(), 128))
+        .and_then(|_| validate_optional_short("quality", request.quality.as_deref(), 128))
+        .map_err(Wave3HostPortError::invalid_request)
+}
+
+fn validate_creation_image_edit(
+    request: &CreationImageEditRequest,
+) -> Result<(), Wave3HostPortError> {
+    validate_creation_target(&request.target, Some(CreationWorkbenchKind::Image))
+        .and_then(|_| require_bounded_text("prompt", &request.prompt, MAX_PROMPT_CHARS, false))
+        .and_then(|_| validate_creation_count(request.count))
+        .and_then(|_| validate_optional_short("size", request.size.as_deref(), 128))
+        .and_then(|_| {
+            if request.inputs.is_empty() || request.inputs.len() > MAX_IMAGE_EDIT_INPUTS {
+                return Err(format!(
+                    "inputs must contain 1 to {MAX_IMAGE_EDIT_INPUTS} image references"
+                ));
+            }
+            let mut asset_ids = BTreeSet::new();
+            let mut masks = 0;
+            for input in &request.inputs {
+                require_uuidv7("inputs[].asset_id", &input.asset_id)?;
+                if !asset_ids.insert(input.asset_id.as_str()) {
+                    return Err(format!("duplicate image input {}", input.asset_id));
+                }
+                if input.role == CreationImageInputRole::Mask {
+                    masks += 1;
+                }
+            }
+            if masks > 1 {
+                return Err("inputs may contain at most one mask".to_owned());
+            }
+            if request
+                .inputs
+                .iter()
+                .all(|input| input.role == CreationImageInputRole::Mask)
+            {
+                return Err("inputs require at least one reference image".to_owned());
+            }
+            Ok(())
+        })
+        .map_err(Wave3HostPortError::invalid_request)
+}
+
+fn validate_creation_video(request: &CreationVideoRequest) -> Result<(), Wave3HostPortError> {
+    validate_creation_target(&request.target, Some(CreationWorkbenchKind::Video))
+        .and_then(|_| require_bounded_text("prompt", &request.prompt, MAX_PROMPT_CHARS, false))
+        .and_then(|_| {
+            if request.seconds.is_some_and(|seconds| seconds == 0 || seconds > 3_600) {
+                Err("seconds must be between 1 and 3600".to_owned())
+            } else {
+                Ok(())
+            }
+        })
+        .and_then(|_| validate_optional_short("size", request.size.as_deref(), 128))
+        .and_then(|_| {
+            for (label, asset_id) in [
+                ("first_frame_asset_id", request.first_frame_asset_id.as_deref()),
+                ("last_frame_asset_id", request.last_frame_asset_id.as_deref()),
+            ] {
+                if let Some(asset_id) = asset_id {
+                    require_uuidv7(label, asset_id)?;
+                }
+            }
+            if request.last_frame_asset_id.is_some() && request.first_frame_asset_id.is_none() {
+                return Err(
+                    "last_frame_asset_id requires first_frame_asset_id to preserve frame order"
+                        .to_owned(),
+                );
+            }
+            Ok(())
+        })
+        .map_err(Wave3HostPortError::invalid_request)
+}
+
+fn validate_creation_audio(request: &CreationAudioRequest) -> Result<(), Wave3HostPortError> {
+    validate_creation_target(&request.target, Some(CreationWorkbenchKind::Audio))
+        .and_then(|_| require_bounded_text("text", &request.text, MAX_PROMPT_CHARS, false))
+        .and_then(|_| validate_optional_short("voice", request.voice.as_deref(), 256))
+        .and_then(|_| validate_optional_short("format", request.format.as_deref(), 64))
+        .map_err(Wave3HostPortError::invalid_request)
+}
+
+fn validate_creation_target(
+    target: &CreationTaskTarget,
+    standalone_kind: Option<CreationWorkbenchKind>,
+) -> Result<(), String> {
+    match target {
+        CreationTaskTarget::CanvasNode { canvas_id, node_id } => {
+            require_uuidv7("target.canvas_id", canvas_id)?;
+            require_uuidv7("target.node_id", node_id)
+        }
+        CreationTaskTarget::StandaloneWorkbench { workbench_kind } => {
+            let expected = standalone_kind.ok_or_else(|| {
+                "this creation action has no standalone workbench owner".to_owned()
+            })?;
+            if *workbench_kind != expected {
+                return Err(format!(
+                    "standalone workbench kind {} cannot own this action; expected {}",
+                    workbench_kind.as_str(),
+                    expected.as_str()
+                ));
+            }
+            Ok(())
+        }
+        CreationTaskTarget::TemplateStep {
+            template_id,
+            template_run_id,
+            template_step_id,
+        } => {
+            require_uuidv7("target.template_id", template_id)?;
+            require_uuidv7("target.template_run_id", template_run_id)?;
+            require_uuidv7("target.template_step_id", template_step_id)
+        }
+    }
+}
+
+fn validate_creation_count(count: u32) -> Result<(), String> {
+    if (1..=MAX_CREATION_RESULTS as u32).contains(&count) {
+        Ok(())
+    } else {
+        Err(format!(
+            "count must be between 1 and {MAX_CREATION_RESULTS}"
+        ))
+    }
+}
+
+fn require_bounded_text(
+    label: &str,
+    value: &str,
+    max_chars: usize,
+    allow_empty: bool,
+) -> Result<(), String> {
+    if (!allow_empty && value.is_empty()) || value.chars().count() > max_chars {
+        return Err(format!(
+            "{label} must contain {} to {max_chars} characters",
+            if allow_empty { 0 } else { 1 }
+        ));
+    }
+    Ok(())
+}
+
+fn validate_optional_short(
+    label: &str,
+    value: Option<&str>,
+    max_chars: usize,
+) -> Result<(), String> {
+    if let Some(value) = value {
+        require_bounded_text(label, value, max_chars, false)?;
+        if value.trim() != value {
+            return Err(format!("{label} must be trimmed"));
+        }
+    }
+    Ok(())
+}
+
+fn require_uuidv7(label: &str, value: &str) -> Result<(), String> {
+    let bytes = value.as_bytes();
+    let canonical = bytes.len() == 36
+        && [8, 13, 18, 23].into_iter().all(|index| bytes[index] == b'-')
+        && bytes[14] == b'7'
+        && matches!(bytes[19], b'8' | b'9' | b'a' | b'b')
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            [8, 13, 18, 23].contains(&index) || byte.is_ascii_digit() || (b'a'..=b'f').contains(byte)
+        });
+    if canonical {
+        Ok(())
+    } else {
+        Err(format!("{label} must be a canonical lowercase UUIDv7"))
+    }
 }
 
 fn validate_resource_bindings(
@@ -1434,9 +2315,7 @@ fn validate_resource_bindings(
                     resource_kind,
                 }
             } else {
-                KernelError::CapabilityExecution {
-                    reason: error.to_string(),
-                }
+                wave3_host_error_to_kernel(error)
             }
         })
 }
@@ -1734,6 +2613,64 @@ mod tests {
     }
 
     #[test]
+    fn creative_agent_actions_export_exact_resolvable_schemas_without_director() {
+        let creative_ids = BTreeSet::from([
+            "creation.audio",
+            "creation.image",
+            "creation.image_edit",
+            "creation.text",
+            "creation.video",
+            "miniapp.edit",
+            "miniapp.publish",
+            "miniapp.read",
+            "miniapp.serve",
+            "workshop.asset.read",
+            "workshop.asset.write",
+            "workshop.canvas.edit",
+            "workshop.canvas.read",
+            "workshop.template.run",
+        ]);
+        assert!(!creative_ids.contains("workshop.director"));
+
+        let manifests = registrations()
+            .expect("registrations")
+            .into_iter()
+            .flat_map(|registration| registration.metadata.manifest.payload.contributions.capabilities)
+            .map(|manifest| (manifest.id.as_ref().to_owned(), manifest))
+            .collect::<BTreeMap<_, _>>();
+        for capability_id in creative_ids {
+            let manifest = manifests.get(capability_id).expect("creative manifest");
+            let action = manifest
+                .contributions
+                .actions
+                .first()
+                .expect("creative action");
+            for reference in [&action.input_schema, &action.output_schema] {
+                let schema = resolve_action_schema(capability_id, reference)
+                    .expect("manifest schema ref resolves from same source");
+                assert_ne!(
+                    schema.0.get("additionalProperties"),
+                    Some(&json!(true)),
+                    "{capability_id} must not publish the old permissive object schema"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn host_failures_preserve_their_canonical_code_in_kernel_results() {
+        let error = wave3_host_error_to_kernel(Wave3HostPortError::new(
+            "CREATION_OWNER_REJECTED",
+            "the bound owner was rejected",
+        ));
+        let failure = error
+            .capability_execution_failure()
+            .expect("typed capability failure");
+        assert_eq!(failure.code.as_ref(), "CREATION_OWNER_REJECTED");
+        assert_eq!(failure.message, "the bound owner was rejected");
+    }
+
+    #[test]
     fn creative_resource_descriptors_match_the_frozen_typed_slots() {
         let descriptors = typed_resource_descriptors();
         assert_eq!(descriptors.len(), 4);
@@ -1811,7 +2748,7 @@ mod tests {
         {
             let capability_id = CapabilityId::from(capability.id);
             assert!(
-                operation_from_input(&capability_id, StrictJsonValue(serde_json::json!({}))).is_ok(),
+                operation_from_input(&capability_id, valid_input(capability.id)).is_ok(),
                 "{} must have a host operation",
                 capability.id
             );
@@ -1830,7 +2767,7 @@ mod tests {
                 .into_iter()
                 .filter(|binding| expected_kinds.contains(&binding.resource_kind))
                 .collect::<Vec<_>>();
-            let operation = operation_from_input(&capability_id, StrictJsonValue(json!({})))
+            let operation = operation_from_input(&capability_id, valid_input(capability.id))
                 .expect("every Wave 3 capability has a typed operation");
             assert_eq!(operation.capability_id(), capability_id);
             assert_eq!(
@@ -1842,31 +2779,31 @@ mod tests {
                 "creation.text" => {
                     assert!(matches!(
                         operation,
-                        Wave3CapabilityOperation::CreationText { .. }
+                        Wave3CapabilityOperation::CreationText(_)
                     ));
                 }
                 "creation.image" => {
                     assert!(matches!(
                         operation,
-                        Wave3CapabilityOperation::CreationImage { .. }
+                        Wave3CapabilityOperation::CreationImage(_)
                     ));
                 }
                 "creation.image_edit" => {
                     assert!(matches!(
                         operation,
-                        Wave3CapabilityOperation::CreationImageEdit { .. }
+                        Wave3CapabilityOperation::CreationImageEdit(_)
                     ));
                 }
                 "creation.video" => {
                     assert!(matches!(
                         operation,
-                        Wave3CapabilityOperation::CreationVideo { .. }
+                        Wave3CapabilityOperation::CreationVideo(_)
                     ));
                 }
                 "creation.audio" => {
                     assert!(matches!(
                         operation,
-                        Wave3CapabilityOperation::CreationAudio { .. }
+                        Wave3CapabilityOperation::CreationAudio(_)
                     ));
                 }
                 "workshop.canvas.read" => {
@@ -2002,7 +2939,7 @@ mod tests {
 
         fn request_for(capability_id: &str) -> Wave3HostRequest {
             let capability_id = CapabilityId::from(capability_id);
-            let input = StrictJsonValue(json!({"request": capability_id.as_ref()}));
+            let input = valid_input(capability_id.as_ref());
             let operation =
                 operation_from_input(&capability_id, input).expect("known Wave 3 operation");
             let owner_id = "wave3-test-owner";
@@ -2084,7 +3021,7 @@ mod tests {
         let mut request = {
             let capability_id = CapabilityId::from("creation.text");
             let operation =
-                operation_from_input(&capability_id, StrictJsonValue(json!({}))).unwrap();
+                operation_from_input(&capability_id, valid_input("creation.text")).unwrap();
             let mut request = {
                 let owner_id = "wave3-test-owner";
                 Wave3HostRequest {
@@ -2161,9 +3098,15 @@ mod tests {
                     })
                     .collect(),
             },
-            operation: Wave3CapabilityOperation::CreationText {
-                input: StrictJsonValue(serde_json::json!({})),
-            },
+            operation: Wave3CapabilityOperation::CreationText(CreationTextRequest {
+                target: CreationTaskTarget::CanvasNode {
+                    canvas_id: "0190f5fe-7c00-7a00-8000-000000000001".to_owned(),
+                    node_id: "0190f5fe-7c00-7a00-8000-000000000002".to_owned(),
+                },
+                prompt: "hello".to_owned(),
+                system: None,
+                max_tokens: 4_096,
+            }),
         });
         let waker = Waker::noop();
         let mut context = Context::from_waker(waker);
@@ -2177,5 +3120,28 @@ mod tests {
             result.message,
             "no production host adapter is bound for creation.text"
         );
+    }
+
+    fn valid_input(capability_id: &str) -> StrictJsonValue {
+        const CANVAS_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
+        const NODE_ID: &str = "0190f5fe-7c00-7a00-8000-000000000002";
+        const ASSET_ID: &str = "0190f5fe-7c00-7a00-8000-000000000003";
+        let target = json!({
+            "kind": "canvas_node",
+            "canvas_id": CANVAS_ID,
+            "node_id": NODE_ID,
+        });
+        StrictJsonValue(match capability_id {
+            "creation.text" => json!({"target": target, "prompt": "hello"}),
+            "creation.image" => json!({"target": target, "prompt": "image"}),
+            "creation.image_edit" => json!({
+                "target": target,
+                "prompt": "edit",
+                "inputs": [{"asset_id": ASSET_ID, "role": "reference"}],
+            }),
+            "creation.video" => json!({"target": target, "prompt": "video"}),
+            "creation.audio" => json!({"target": target, "text": "speak"}),
+            _ => json!({}),
+        })
     }
 }

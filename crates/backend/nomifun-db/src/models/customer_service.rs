@@ -120,6 +120,58 @@ pub struct CsNoteRow {
     pub updated_at: TimestampMs,
 }
 
+pub const CS_HANDOFF_STATUS_PENDING: &str = "pending";
+pub const CS_HANDOFF_STATUS_CLAIMED: &str = "claimed";
+pub const CS_HANDOFF_STATUS_RESOLVED: &str = "resolved";
+pub const CS_HANDOFF_STATUS_CANCELLED: &str = "cancelled";
+
+/// Durable customer-service escalation queued for an installation owner.
+///
+/// `idempotency_key` is supplied by the Agent execution boundary. Replaying
+/// the same operation returns this exact row; it never creates a second human
+/// work item. `pending` and `claimed` are the only active states.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct CsHandoffRow {
+    pub cs_handoff_id: String,
+    pub cs_agent_id: String,
+    pub cs_dialogue_id: String,
+    pub requested_by: String,
+    pub idempotency_key: String,
+    pub reason: String,
+    pub summary: String,
+    pub status: String,
+    pub claimed_by: Option<String>,
+    pub updated_by: String,
+    pub resolution: String,
+    pub created_at: TimestampMs,
+    pub updated_at: TimestampMs,
+}
+
+impl CsHandoffRow {
+    pub fn is_active(&self) -> bool {
+        matches!(
+            self.status.as_str(),
+            CS_HANDOFF_STATUS_PENDING | CS_HANDOFF_STATUS_CLAIMED
+        )
+    }
+}
+
+/// Committed result of one exactly-once customer-service Agent capability
+/// action. The key is `(owner_user_id, capability_id, idempotency_key)`;
+/// `request_digest` rejects semantic key reuse and `result_json` is replayed
+/// after response loss or process restart.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct CsAgentCapabilityReceiptRow {
+    pub cs_agent_capability_receipt_id: String,
+    pub owner_user_id: String,
+    pub cs_agent_id: String,
+    pub capability_id: String,
+    pub idempotency_key: String,
+    pub request_digest: String,
+    pub result_json: String,
+    pub created_at: TimestampMs,
+}
+
 /// Row mapping for the `cs_audit_events` table — in-database audit trail
 /// (replaces the retired public-agent JSONL side store). Rows are pruned by
 /// `cs_agents.audit_retention_days`.

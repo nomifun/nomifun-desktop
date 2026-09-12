@@ -13,6 +13,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use nomi_protocol::events::ToolCategory;
 use nomi_types::tool::{JsonSchema, ToolResult};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
@@ -30,6 +31,7 @@ enum VcsOperation {
     Diff,
     Stage,
     Commit,
+    ReviewStatus,
 }
 
 impl VcsOperation {
@@ -39,6 +41,7 @@ impl VcsOperation {
             Self::Diff => "vcs.diff",
             Self::Stage => "vcs.stage",
             Self::Commit => "vcs.commit",
+            Self::ReviewStatus => "review.status",
         }
     }
 
@@ -60,12 +63,16 @@ impl VcsOperation {
                 "Commit the currently staged changes only when every staged path belongs to the \
                  session workspace. Git user.name and user.email must already be configured."
             }
+            Self::ReviewStatus => {
+                "Inspect the workspace's current review state through one bounded, structured \
+                 status and diff snapshot. This is a read-only review result, not an approval gate."
+            }
         }
     }
 
     const fn category(self) -> ToolCategory {
         match self {
-            Self::Status | Self::Diff => ToolCategory::Info,
+            Self::Status | Self::Diff | Self::ReviewStatus => ToolCategory::Info,
             Self::Stage | Self::Commit => ToolCategory::Edit,
         }
     }
@@ -101,6 +108,7 @@ pub fn local_vcs_tools(workspace: impl Into<PathBuf>) -> Vec<Box<dyn Tool>> {
         VcsOperation::Diff,
         VcsOperation::Stage,
         VcsOperation::Commit,
+        VcsOperation::ReviewStatus,
     ]
     .into_iter()
     .map(|operation| {
@@ -130,7 +138,7 @@ impl Tool for VcsTool {
                 "properties": {},
                 "additionalProperties": false
             }),
-            VcsOperation::Diff => json!({
+            VcsOperation::Diff | VcsOperation::ReviewStatus => json!({
                 "type": "object",
                 "properties": {
                     "path": {
@@ -201,6 +209,14 @@ impl Tool for VcsTool {
                 let workspace = self.workspace.clone();
                 run_blocking(move || vcs_commit(&workspace, &message)).await
             }
+            VcsOperation::ReviewStatus => {
+                let path = match optional_relative_path(&input, "path") {
+                    Ok(path) => path,
+                    Err(error) => return error.into_result(self.operation.name()),
+                };
+                let workspace = self.workspace.clone();
+                run_blocking(move || review_status(&workspace, path.as_deref())).await
+            }
         };
         match result {
             Ok(value) => ToolResult::text(
@@ -244,8 +260,41 @@ impl Tool for VcsTool {
                     .unwrap_or("<missing>");
                 format!("vcs.commit: {}", crate::truncate_utf8(message, 80))
             }
+            VcsOperation::ReviewStatus => format!(
+                "review.status: {}",
+                input
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .unwrap_or("entire workspace")
+            ),
         }
     }
+}
+
+/// Stable status returned by the Nomi coding review workflow.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewWorkflowStatus {
+    Clean,
+    ChangesPresent,
+    Incomplete,
+}
+
+/// One bounded, read-only review snapshot for the current session workspace.
+///
+/// Keeping status and diff together prevents callers from treating two reads
+/// taken across an intervening edit as one coherent review result. The result
+/// intentionally carries no approval or merge state: FullAuto remains the
+/// product execution policy.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewWorkflowResult {
+    pub schema_version: String,
+    pub status: ReviewWorkflowStatus,
+    pub change_count: usize,
+    pub truncated: bool,
+    pub status_snapshot: Value,
+    pub diff_snapshot: Value,
 }
 
 async fn run_blocking<F>(work: F) -> Result<Value, VcsToolError>
@@ -453,6 +502,44 @@ fn vcs_diff(workspace: &Path, path: Option<&str>) -> Result<Value, VcsToolError>
         "unstaged_patch": unstaged_patch,
         "truncated": truncated,
     }))
+}
+
+fn review_status(workspace: &Path, path: Option<&str>) -> Result<Value, VcsToolError> {
+    // Run both reads on the same blocking worker. Git may still change because
+    // another process owns the repository, so any truncation marks the result
+    // incomplete instead of overstating that the full change set was reviewed.
+    let status_snapshot = vcs_status(workspace)?;
+    let diff_snapshot = vcs_diff(workspace, path)?;
+    let change_count = status_snapshot
+        .get("entries")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let truncated = status_snapshot
+        .get("truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+        || diff_snapshot
+            .get("truncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+    let status = if truncated {
+        ReviewWorkflowStatus::Incomplete
+    } else if change_count == 0 {
+        ReviewWorkflowStatus::Clean
+    } else {
+        ReviewWorkflowStatus::ChangesPresent
+    };
+    serde_json::to_value(ReviewWorkflowResult {
+        schema_version: "1.0.0".to_owned(),
+        status,
+        change_count,
+        truncated,
+        status_snapshot,
+        diff_snapshot,
+    })
+    .map_err(|error| {
+        VcsToolError::unavailable(format!("could not encode review result: {error}"))
+    })
 }
 
 fn vcs_stage(workspace: &Path, path: &str) -> Result<Value, VcsToolError> {
@@ -927,6 +1014,38 @@ mod tests {
         assert!(!diff.is_error, "{}", diff.content);
         assert!(diff.content.contains("new.txt"), "{}", diff.content);
         assert!(diff.content.contains("+beta"), "{}", diff.content);
+    }
+
+    #[tokio::test]
+    async fn review_status_returns_one_typed_bounded_workspace_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let _repository = initialize_repository(directory.path());
+        std::fs::write(directory.path().join("tracked.txt"), "base\nreview me\n").unwrap();
+        let tools = local_vcs_tools(directory.path());
+
+        let review = invoke(tools[4].as_ref(), json!({})).await;
+        assert!(!review.is_error, "{}", review.content);
+        let result: ReviewWorkflowResult = serde_json::from_str(&review.content).unwrap();
+        assert_eq!(result.schema_version, "1.0.0");
+        assert_eq!(result.status, ReviewWorkflowStatus::ChangesPresent);
+        assert_eq!(result.change_count, 1);
+        assert!(!result.truncated);
+        assert_eq!(result.status_snapshot["repository"], "workspace");
+        assert!(result.diff_snapshot["patch"].as_str().unwrap().contains("review me"));
+    }
+
+    #[tokio::test]
+    async fn review_status_reports_clean_repository_without_approval_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let _repository = initialize_repository(directory.path());
+        let tools = local_vcs_tools(directory.path());
+
+        let review = invoke(tools[4].as_ref(), json!({})).await;
+        assert!(!review.is_error, "{}", review.content);
+        let value: Value = serde_json::from_str(&review.content).unwrap();
+        assert_eq!(value["status"], "clean");
+        assert_eq!(value["change_count"], 0);
+        assert!(value.get("approved").is_none());
     }
 
     #[tokio::test]

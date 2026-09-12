@@ -863,6 +863,13 @@ pub struct AgentPresetEditorTestPlanDto {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct AgentResourceSelectionDto {
+    pub resource_kind: String,
+    pub resource_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateAgentSessionRequestDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<AgentChatModelSelectionDto>,
@@ -870,6 +877,11 @@ pub struct CreateAgentSessionRequestDto {
     pub preset_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Product resource choices only. The host validates ownership and derives
+    /// typed operations; clients cannot submit an AgentBinding or grant
+    /// themselves resource permissions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resource_selections: Vec<AgentResourceSelectionDto>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -886,6 +898,8 @@ pub struct CreateAgentSessionResponseDto {
 pub struct SwitchAgentSessionPresetRequestDto {
     #[serde(deserialize_with = "crate::serde_util::deserialize_preset_id")]
     pub preset_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resource_selections: Vec<AgentResourceSelectionDto>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1138,6 +1152,36 @@ mod snapshot_tests {
         assert!(
             serde_json::from_value::<CreateAgentSessionRequestDto>(request).is_err(),
             "agent_binding must remain a server-owned output"
+        );
+    }
+
+    #[test]
+    fn create_agent_session_request_accepts_product_resource_selections_only() {
+        let request = serde_json::from_value::<CreateAgentSessionRequestDto>(json!({
+            "preset_id": PRESET_ID,
+            "title": "Companion Session",
+            "resource_selections": [
+                {"resource_kind": "companion", "resource_id": "companion-1"},
+                {"resource_kind": "channel", "resource_id": "channel-1"}
+            ]
+        }))
+        .expect("product resource selections are supported Session input");
+
+        assert_eq!(request.resource_selections.len(), 2);
+        assert_eq!(request.resource_selections[0].resource_kind, "companion");
+        assert_eq!(request.resource_selections[1].resource_id, "channel-1");
+
+        assert!(
+            serde_json::from_value::<CreateAgentSessionRequestDto>(json!({
+                "preset_id": PRESET_ID,
+                "resource_selections": [{
+                    "resource_kind": "companion",
+                    "resource_id": "companion-1",
+                    "operations": ["admin"]
+                }]
+            }))
+            .is_err(),
+            "clients must not be able to submit resource operations"
         );
     }
 

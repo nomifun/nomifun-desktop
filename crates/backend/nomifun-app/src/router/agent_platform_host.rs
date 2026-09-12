@@ -21,9 +21,9 @@ use nomifun_agent_contracts::{
 };
 use nomifun_agent_control_plane::CompilerReleaseInputs;
 use nomifun_agent_domain_wave1::{
-    Wave1CapabilityOperation, Wave1FetchRequest, Wave1HostPort, Wave1HostPortError,
-    Wave1HostRequest, Wave1KnowledgeReadRequest, Wave1MemoryMutationRequest,
-    Wave1SearchRequest,
+    Wave1CapabilityOperation, Wave1ContextHostRequest, Wave1FetchRequest, Wave1HostPort,
+    Wave1HostPortError, Wave1HostRequest, Wave1KnowledgeReadRequest,
+    Wave1MemoryMutationRequest, Wave1SearchRequest,
 };
 use nomifun_agent_kernel::{
     CompilerEnvironment, MaterializationPolicy, MAX_PLUGIN_STATE_BYTES,
@@ -52,6 +52,7 @@ use sqlx::SqlitePool;
 #[cfg(any(feature = "browser-use", feature = "computer-use"))]
 use super::agent_role_host::RoleHostPortAdapter;
 use super::agent_wave2_host::Wave2ApplicationHost;
+use super::agent_wave1_companion_host::Wave1CompanionMemoryHost;
 use super::agent_wave2_mcp::{
     McpOwnerAdapter, SqliteMcpRuntimeBindingSource,
 };
@@ -75,14 +76,26 @@ const RUNTIME_FEATURE_INVENTORY_JSON: &str = include_str!(
 /// The first concrete Wave 1 owner mounted by the Fresh-v4 host.
 ///
 /// URL fetching already has a standalone, SSRF-checked domain owner. This
-/// adapter exposes that real operation, binding-backed Knowledge reads, and a
-/// bounded first-party memory mutation owner backed by the Kernel PluginState
-/// API. Research search, Knowledge mutations, and Skill actions remain
-/// fail-closed until their v4 owners are available.
-#[derive(Clone, Default)]
+/// adapter exposes that real operation, binding-backed Knowledge reads,
+/// bounded project-memory coordination in Kernel PluginState, and—when the
+/// app supplies it—the persistent CompanionStore memory owner. Research
+/// search, Knowledge mutations, and Skill actions remain fail-closed until
+/// their v4 owners are available.
+#[derive(Clone)]
 struct Wave1ApplicationHost {
     fetcher: nomifun_knowledge::source_url::HttpFetcher,
     knowledge_reader: nomifun_knowledge::BoundKnowledgeReadService,
+    companion_memory: Option<Wave1CompanionMemoryHost>,
+}
+
+impl Default for Wave1ApplicationHost {
+    fn default() -> Self {
+        Self {
+            fetcher: nomifun_knowledge::source_url::HttpFetcher::default(),
+            knowledge_reader: nomifun_knowledge::BoundKnowledgeReadService::default(),
+            companion_memory: None,
+        }
+    }
 }
 
 const KNOWLEDGE_ROOT_PARAMETER: &str = "knowledge_root";
@@ -98,9 +111,6 @@ const MAX_MEMORY_CAS_ATTEMPTS: usize = 8;
 enum Wave1MemoryOperation {
     ProjectWrite,
     ProjectDistill,
-    CompanionWrite,
-    CompanionMerge,
-    CompanionEvolve,
 }
 
 impl Wave1MemoryOperation {
@@ -108,9 +118,6 @@ impl Wave1MemoryOperation {
         match self {
             Self::ProjectWrite => "project.write",
             Self::ProjectDistill => "project.distill",
-            Self::CompanionWrite => "companion.write",
-            Self::CompanionMerge => "companion.merge",
-            Self::CompanionEvolve => "companion.evolve",
         }
     }
 
@@ -118,9 +125,6 @@ impl Wave1MemoryOperation {
         match self {
             Self::ProjectWrite => nomifun_agent_domain_wave1::MEMORY_PROJECT_WRITE,
             Self::ProjectDistill => nomifun_agent_domain_wave1::MEMORY_PROJECT_DISTILL,
-            Self::CompanionWrite => nomifun_agent_domain_wave1::MEMORY_COMPANION_WRITE,
-            Self::CompanionMerge => nomifun_agent_domain_wave1::MEMORY_COMPANION_MERGE,
-            Self::CompanionEvolve => nomifun_agent_domain_wave1::MEMORY_COMPANION_EVOLVE,
         }
     }
 
@@ -128,9 +132,6 @@ impl Wave1MemoryOperation {
         match self {
             Self::ProjectWrite | Self::ProjectDistill => {
                 nomifun_agent_domain_wave1::PROJECT_MEMORY_PACKAGE_ID
-            }
-            Self::CompanionWrite | Self::CompanionMerge | Self::CompanionEvolve => {
-                nomifun_agent_domain_wave1::COMPANION_MEMORY_PACKAGE_ID
             }
         }
     }
@@ -140,9 +141,6 @@ impl Wave1MemoryOperation {
             Self::ProjectWrite | Self::ProjectDistill => {
                 nomifun_agent_domain_wave1::PROJECT_MEMORY_MOUNT_ID
             }
-            Self::CompanionWrite | Self::CompanionMerge | Self::CompanionEvolve => {
-                nomifun_agent_domain_wave1::COMPANION_MEMORY_MOUNT_ID
-            }
         }
     }
 
@@ -151,23 +149,13 @@ impl Wave1MemoryOperation {
             Self::ProjectWrite | Self::ProjectDistill => {
                 nomifun_agent_domain_wave1::PROJECT_MEMORY_RESOURCE_KIND
             }
-            Self::CompanionWrite | Self::CompanionMerge | Self::CompanionEvolve => {
-                nomifun_agent_domain_wave1::COMPANION_MEMORY_RESOURCE_KIND
-            }
         }
-    }
-
-    fn is_project(self) -> bool {
-        matches!(self, Self::ProjectWrite | Self::ProjectDistill)
     }
 
     fn from_label(label: &str) -> Option<Self> {
         match label {
             "project.write" => Some(Self::ProjectWrite),
             "project.distill" => Some(Self::ProjectDistill),
-            "companion.write" => Some(Self::CompanionWrite),
-            "companion.merge" => Some(Self::CompanionMerge),
-            "companion.evolve" => Some(Self::CompanionEvolve),
             _ => None,
         }
     }
@@ -217,38 +205,64 @@ impl Wave1HostPort for Wave1ApplicationHost {
                 .await
             }
             Wave1CapabilityOperation::CompanionMemoryWrite(request) => {
-                self.persist_memory(
-                    context,
-                    Wave1MemoryOperation::CompanionWrite,
-                    request,
-                )
-                .await
+                self.companion_memory()?
+                    .write(context, request)
+                    .await
             }
             Wave1CapabilityOperation::CompanionMemoryMerge(request) => {
-                self.persist_memory(
-                    context,
-                    Wave1MemoryOperation::CompanionMerge,
-                    request,
-                )
-                .await
+                self.companion_memory()?
+                    .merge(context, request)
+                    .await
             }
             Wave1CapabilityOperation::CompanionMemoryEvolve(request) => {
-                self.persist_memory(
-                    context,
-                    Wave1MemoryOperation::CompanionEvolve,
-                    request,
-                )
-                .await
+                self.companion_memory()?
+                    .evolve(context, request)
+                    .await
             }
             operation => Err(Wave1HostPortError::unavailable(format!(
-                "no Fresh-v4 Wave 1 owner is wired for {}",
+                "no Nomi Wave 1 owner is wired for {}",
                 operation.capability_id().as_ref()
             ))),
         }
     }
+
+    async fn contribute_context(
+        &self,
+        request: Wave1ContextHostRequest,
+    ) -> Result<nomifun_agent_contracts::StrictJsonValue, Wave1HostPortError> {
+        if request.context.capability_id.as_ref()
+            != nomifun_agent_domain_wave1::MEMORY_COMPANION_RECALL
+        {
+            return Err(Wave1HostPortError::unavailable(format!(
+                "no Nomi Wave 1 context owner is wired for {}",
+                request.context.capability_id.as_ref()
+            )));
+        }
+        self.companion_memory()?
+            .recall(request.context)
+            .await
+    }
 }
 
 impl Wave1ApplicationHost {
+    fn with_companion_memory(
+        service: Arc<nomifun_companion::CompanionService>,
+        receipt_pool: SqlitePool,
+    ) -> Self {
+        Self {
+            companion_memory: Some(Wave1CompanionMemoryHost::new(service, receipt_pool)),
+            ..Self::default()
+        }
+    }
+
+    fn companion_memory(&self) -> Result<&Wave1CompanionMemoryHost, Wave1HostPortError> {
+        self.companion_memory.as_ref().ok_or_else(|| {
+            Wave1HostPortError::unavailable(
+                "the persistent Companion memory owner is not configured",
+            )
+        })
+    }
+
     async fn search_knowledge(
         &self,
         context: nomifun_agent_domain_wave1::Wave1HostContext,
@@ -354,10 +368,10 @@ impl Wave1ApplicationHost {
             )));
         }
 
-        // Project/Companion memory is shared by the exact bound resource, not
-        // by a transient Session. A missing or ambiguous target is a wiring
-        // error and must fail closed rather than silently falling back to the
-        // session scope.
+        // Project memory is shared by the exact bound resource, not by a
+        // transient Session. Companion memory intentionally does not enter
+        // this PluginState path; it is owned by the persistent CompanionStore
+        // adapter above.
         let matching_bindings = context
             .resource_bindings
             .iter()
@@ -869,11 +883,6 @@ fn decode_memory_state(
                 "memory state entry {index} has an unknown operation"
             )));
         };
-        if entry_domain.is_project() != operation.is_project() {
-            return Err(Wave1HostPortError::unavailable(format!(
-                "memory state entry {index} crosses project/companion state domains"
-            )));
-        }
         let key = entry_object
             .get("idempotency_key")
             .and_then(serde_json::Value::as_str)
@@ -1259,6 +1268,20 @@ impl AgentDomainHostPorts {
             wave5: nomifun_agent_domain_wave5::unconfigured_host_port(),
         }
     }
+}
+
+/// Build only the real Wave 1 registrations for the current
+/// Conversation-backed Nomi core. Other Waves stay with their own Nomi-specific
+/// composition; this function deliberately does not construct Fresh-v4 MCP or
+/// pass the legacy application pool into a Fresh repository adapter.
+pub(crate) fn wave1_registrations_for_nomi_core(
+    companion_service: Arc<nomifun_companion::CompanionService>,
+    receipt_pool: SqlitePool,
+) -> anyhow::Result<Vec<nomifun_agent_kernel::PluginRegistration>> {
+    nomifun_agent_domain_wave1::registrations_with_host_port(Arc::new(
+        Wave1ApplicationHost::with_companion_memory(companion_service, receipt_pool),
+    ))
+    .map_err(anyhow::Error::msg)
 }
 
 /// Build the canonical Agent platform from an already-open Fresh-v4 pool and
@@ -2149,10 +2172,10 @@ mod tests {
         VersionString,
     };
     use nomifun_agent_kernel::{
-        ActiveCapabilitySetSnapshot, AgentPresetCompiler, CapabilityInvocationRequest,
-        CompileRequest, CompiledSnapshot, InMemoryPluginStatePersistence, KernelRegistry,
-        MaterializationPolicy, PluginStatePersistence, PluginStateSnapshot,
-        SessionCapabilityState, StateIdentity,
+        ActiveCapabilitySetSnapshot, AgentPresetCompiler, CapabilityAccessRequest,
+        CapabilityInvocationRequest, CompileRequest, CompiledSnapshot,
+        InMemoryPluginStatePersistence, KernelRegistry, MaterializationPolicy,
+        PluginStatePersistence, PluginStateSnapshot, SessionCapabilityState, StateIdentity,
     };
     use nomifun_chat_model_broker::{
         BrokerRetryPolicy, ChatCausality, ChatCausalityGate, ChatModelError,
@@ -2188,8 +2211,43 @@ mod tests {
     fn principal() -> nomifun_agent_contracts::PrincipalRef {
         nomifun_agent_contracts::PrincipalRef {
             principal_kind: "user".to_owned(),
-            principal_id: "wave1-memory-owner".to_owned(),
+            principal_id: "0199a000-0000-7000-8000-000000000000".to_owned(),
         }
+    }
+
+    struct NoopCompanionCompleter;
+
+    #[async_trait]
+    impl nomifun_companion::learner::CompanionCompleter for NoopCompanionCompleter {
+        async fn complete(
+            &self,
+            _provider_id: &str,
+            _model: &str,
+            _system: &str,
+            _user: &str,
+            _max_tokens: u32,
+        ) -> Result<String, nomifun_common::AppError> {
+            Ok("{}".to_owned())
+        }
+    }
+
+    async fn companion_service(
+        data_dir: &Path,
+    ) -> Arc<nomifun_companion::CompanionService> {
+        nomifun_companion::CompanionService::start(
+            data_dir,
+            Arc::new(nomifun_realtime::BroadcastEventBus::new(16)),
+            &principal().principal_id,
+            Arc::new(NoopCompanionCompleter),
+            Arc::new(
+                nomifun_skill_library::skill_service::resolve_skill_paths(
+                    data_dir,
+                    data_dir,
+                ),
+            ),
+        )
+        .await
+        .expect("Companion service")
     }
 
     struct KnowledgeKernelFixture {
@@ -2349,10 +2407,9 @@ mod tests {
                     id: capability_id.into(),
                     version: VersionString::from(CONTRACT_VERSION),
                 },
-                action_allowlist: BTreeSet::from([
-                    nomifun_agent_domain_wave1::action_id(capability_id)
-                        .expect("Wave 1 capability has an action"),
-                ]),
+                action_allowlist: nomifun_agent_domain_wave1::action_id(capability_id)
+                    .into_iter()
+                    .collect(),
             })
             .collect();
         let materialized = registry.snapshot().expect("registry snapshot");
@@ -2548,6 +2605,41 @@ mod tests {
             input: StrictJsonValue(serde_json::json!({
                 "content": content
             })),
+        }
+    }
+
+    fn companion_memory_invocation(
+        snapshot: &CompiledSnapshot,
+        active: &ActiveCapabilitySetSnapshot,
+        binding: &TypedResourceBinding,
+        capability_id: &str,
+        idempotency_key: &str,
+        input: serde_json::Value,
+    ) -> CapabilityInvocationRequest {
+        let owner = principal();
+        CapabilityInvocationRequest {
+            principal: owner.clone(),
+            session_owner: owner,
+            agent_session_id: AgentSessionId::from(
+                "0199a000-0000-7000-8000-000000000001",
+            ),
+            operation_id: OperationId::from(format!(
+                "wave1-companion-memory-{idempotency_key}"
+            )),
+            idempotency_key: IdempotencyKey::from(idempotency_key),
+            correlation_id: CorrelationId::from(format!(
+                "wave1-companion-memory-correlation-{idempotency_key}"
+            )),
+            resolved_snapshot_ref: snapshot.snapshot_ref().clone(),
+            active_set_generation: active.generation,
+            capability_id: CapabilityId::from(capability_id),
+            action_id: nomifun_agent_domain_wave1::action_id(capability_id)
+                .expect("Companion memory capability action"),
+            resource_binding_ids: BTreeSet::from([binding.binding_id.clone()]),
+            state_scope_key: ScopeKey::from(
+                "session:0199a000-0000-7000-8000-000000000001",
+            ),
+            input: StrictJsonValue(input),
         }
     }
 
@@ -4145,6 +4237,197 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wave1_companion_memory_kernel_path_uses_the_persistent_domain_owner() {
+        let directory = tempfile::tempdir().expect("Companion data root");
+        let database = nomifun_db::init_database_memory()
+            .await
+            .expect("receipt database");
+        let companion_service = companion_service(directory.path()).await;
+        let profile = companion_service
+            .create_companion("Kernel Companion", "ink")
+            .await
+            .expect("create Companion");
+        let registry = KernelRegistry::new(
+            MaterializationPolicy::stable(CONTRACT_VERSION),
+            Arc::new(InMemoryPluginStatePersistence::new()),
+        )
+        .expect("Kernel registry");
+        registry
+            .replace_all(
+                nomifun_agent_domain_wave1::registrations_with_host_port(Arc::new(
+                    Wave1ApplicationHost::with_companion_memory(Arc::clone(
+                        &companion_service,
+                    ), database.pool().clone()),
+                ))
+                .expect("Wave 1 registrations"),
+            )
+            .expect("publish Wave 1 registrations");
+
+        let invoke = |capability_id: &'static str,
+                      input: serde_json::Value,
+                      request_id: &'static str| {
+            let (snapshot, active, binding) = compile_memory_snapshot_for_registry(
+                &registry,
+                capability_id,
+                &profile.companion_id,
+            );
+            let registry = &registry;
+            async move {
+                registry
+                    .invoke(
+                        &snapshot,
+                        &active,
+                        companion_memory_invocation(
+                            &snapshot,
+                            &active,
+                            &binding,
+                            capability_id,
+                            request_id,
+                            input,
+                        ),
+                    )
+                    .await
+            }
+        };
+        let first = invoke(
+            nomifun_agent_domain_wave1::MEMORY_COMPANION_WRITE,
+            serde_json::json!({
+                "kind": "preference",
+                "content": "Prefer concrete verification evidence.",
+                "tags": ["verification"]
+            }),
+            "write-first",
+        )
+        .await
+        .expect("first durable Companion memory");
+        let first_replay = invoke(
+            nomifun_agent_domain_wave1::MEMORY_COMPANION_WRITE,
+            serde_json::json!({
+                "kind": "preference",
+                "content": "Prefer concrete verification evidence.",
+                "tags": ["verification"]
+            }),
+            "write-first",
+        )
+        .await
+        .expect("write replay returns its durable receipt");
+        assert_eq!(
+            first_replay, first,
+            "a write replay must not reinforce the memory a second time"
+        );
+        let second = invoke(
+            nomifun_agent_domain_wave1::MEMORY_COMPANION_WRITE,
+            serde_json::json!({
+                "kind": "preference",
+                "content": "Preserve unrelated changes.",
+                "tags": ["git"]
+            }),
+            "write-second",
+        )
+        .await
+        .expect("second durable Companion memory");
+        let first_id = first.0["memory_id"].as_str().unwrap().to_owned();
+        let second_id = second.0["memory_id"].as_str().unwrap().to_owned();
+
+        let merge_input = serde_json::json!({
+            "memory_ids": [first_id, second_id],
+            "merged_content": "Preserve unrelated changes and cite concrete verification evidence.",
+            "kind": "preference"
+        });
+        let merged = invoke(
+            nomifun_agent_domain_wave1::MEMORY_COMPANION_MERGE,
+            merge_input.clone(),
+            "merge",
+        )
+        .await
+        .expect("atomic Companion memory merge");
+        assert_eq!(merged.0["source"], serde_json::json!("merge"));
+        let merged_replay = invoke(
+            nomifun_agent_domain_wave1::MEMORY_COMPANION_MERGE,
+            merge_input,
+            "merge",
+        )
+        .await
+        .expect("merge replay succeeds after its source memories were archived");
+        assert_eq!(merged_replay, merged);
+        let merged_id = merged.0["memory_id"].as_str().unwrap().to_owned();
+
+        let evolve_input = serde_json::json!({
+            "memory_id": merged_id,
+            "content": "Preserve unrelated changes, cite checks, and name remaining blockers."
+        });
+        let evolved = invoke(
+            nomifun_agent_domain_wave1::MEMORY_COMPANION_EVOLVE,
+            evolve_input.clone(),
+            "evolve",
+        )
+        .await
+        .expect("in-place Companion memory evolution");
+        assert_eq!(evolved.0["memory_id"], merged.0["memory_id"]);
+        assert!(
+            evolved.0["content"]
+                .as_str()
+                .unwrap()
+                .contains("remaining blockers")
+        );
+        let evolved_replay = invoke(
+            nomifun_agent_domain_wave1::MEMORY_COMPANION_EVOLVE,
+            evolve_input,
+            "evolve",
+        )
+        .await
+        .expect("evolve replay returns the original durable result");
+        assert_eq!(evolved_replay, evolved);
+
+        let (snapshot, active, binding) = compile_memory_snapshot_for_registry(
+            &registry,
+            nomifun_agent_domain_wave1::MEMORY_COMPANION_RECALL,
+            &profile.companion_id,
+        );
+        let recalled = registry
+            .contribute_context(
+                &snapshot,
+                &active,
+                CapabilityAccessRequest {
+                    principal: principal(),
+                    session_owner: principal(),
+                    agent_session_id: AgentSessionId::from(
+                        "0199a000-0000-7000-8000-000000000001",
+                    ),
+                    operation_id: OperationId::from("wave1-companion-memory-recall"),
+                    correlation_id: CorrelationId::from(
+                        "wave1-companion-memory-recall-correlation",
+                    ),
+                    resolved_snapshot_ref: snapshot.snapshot_ref().clone(),
+                    active_set_generation: active.generation,
+                    capability_id: CapabilityId::from(
+                        nomifun_agent_domain_wave1::MEMORY_COMPANION_RECALL,
+                    ),
+                    resource_binding_ids: BTreeSet::from([binding.binding_id]),
+                    state_scope_key: ScopeKey::from(
+                        "session:0199a000-0000-7000-8000-000000000001",
+                    ),
+                },
+            )
+            .await
+            .expect("persistent Companion memory recall")
+            .value
+            .expect("Companion context value")
+            .0;
+        assert_eq!(
+            recalled["companion_id"],
+            serde_json::json!(profile.companion_id)
+        );
+        assert_eq!(recalled["memories"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            recalled["memories"][0]["memory_id"],
+            evolved.0["memory_id"]
+        );
+        assert_eq!(recalled["memories"][0]["content"], evolved.0["content"]);
+        database.close().await;
+    }
+
+    #[tokio::test]
     async fn wave1_memory_owner_persists_and_replays_by_request_identity() {
         let fixture = MemoryKernelFixture::new();
         let (snapshot, active, binding) = fixture
@@ -4241,7 +4524,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wave1_memory_owner_isolates_resources_and_package_mounts() {
+    async fn wave1_project_memory_owner_isolates_resources() {
         let fixture = MemoryKernelFixture::new();
         let (project_a, active_a, binding_a) = fixture
             .compile_memory_snapshot(
@@ -4253,12 +4536,6 @@ mod tests {
                 nomifun_agent_domain_wave1::MEMORY_PROJECT_WRITE,
                 "memory-b",
             );
-        let (companion, active_companion, companion_binding) = fixture
-            .compile_memory_snapshot(
-                nomifun_agent_domain_wave1::MEMORY_COMPANION_WRITE,
-                "memory-a",
-            );
-
         for (snapshot, active, binding, capability_id, content) in [
             (
                 project_a,
@@ -4273,13 +4550,6 @@ mod tests {
                 binding_b,
                 nomifun_agent_domain_wave1::MEMORY_PROJECT_WRITE,
                 "project b",
-            ),
-            (
-                companion,
-                active_companion,
-                companion_binding,
-                nomifun_agent_domain_wave1::MEMORY_COMPANION_WRITE,
-                "companion a",
             ),
         ] {
             fixture
@@ -4315,12 +4585,6 @@ mod tests {
                 "resource:memory-b",
                 "project b",
             ),
-            (
-                nomifun_agent_domain_wave1::COMPANION_MEMORY_PACKAGE_ID,
-                nomifun_agent_domain_wave1::COMPANION_MEMORY_MOUNT_ID,
-                "resource:memory-a",
-                "companion a",
-            ),
         ] {
             let entry = state
                 .entry(
@@ -4339,7 +4603,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wave1_memory_owner_dispatches_all_mutation_variants() {
+    async fn wave1_project_memory_owner_dispatches_both_mutation_variants() {
         let fixture = MemoryKernelFixture::new();
         for (index, (capability_id, resource_id, expected_operation)) in [
             (
@@ -4351,21 +4615,6 @@ mod tests {
                 nomifun_agent_domain_wave1::MEMORY_PROJECT_DISTILL,
                 "variant-project",
                 "project.distill",
-            ),
-            (
-                nomifun_agent_domain_wave1::MEMORY_COMPANION_WRITE,
-                "variant-companion",
-                "companion.write",
-            ),
-            (
-                nomifun_agent_domain_wave1::MEMORY_COMPANION_MERGE,
-                "variant-companion",
-                "companion.merge",
-            ),
-            (
-                nomifun_agent_domain_wave1::MEMORY_COMPANION_EVOLVE,
-                "variant-companion",
-                "companion.evolve",
             ),
         ]
         .into_iter()

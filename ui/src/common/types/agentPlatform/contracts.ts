@@ -502,6 +502,12 @@ export interface CreateAgentSessionRequest {
   model?: { provider_id: string; model: string };
   preset_id: AgentPresetId;
   title?: string;
+  resource_selections?: AgentResourceSelection[];
+}
+
+export interface AgentResourceSelection {
+  resource_kind: string;
+  resource_id: string;
 }
 
 export interface CreateAgentSessionResponse {
@@ -513,6 +519,7 @@ export interface CreateAgentSessionResponse {
 
 export interface SwitchAgentSessionPresetRequest {
   preset_id: AgentPresetId;
+  resource_selections?: AgentResourceSelection[];
 }
 
 export interface SwitchAgentSessionPresetResponse {

@@ -55,8 +55,9 @@ pub use models::{
     NomiRemoteEventPage, NomiRemoteEventRow, NomiRemoteSessionRow, RemoteBindingRow,
 };
 pub use models::{
-    CsAgentRow, CsAuditEventRow, CsChannelBindingRow, CsDialogueRow, CsMessageRow, CsNoteRow,
-    NewCsAgentRow,
+    CS_HANDOFF_STATUS_CANCELLED, CS_HANDOFF_STATUS_CLAIMED, CS_HANDOFF_STATUS_PENDING,
+    CS_HANDOFF_STATUS_RESOLVED, CsAgentCapabilityReceiptRow, CsAgentRow, CsAuditEventRow,
+    CsChannelBindingRow, CsDialogueRow, CsHandoffRow, CsMessageRow, CsNoteRow, NewCsAgentRow,
 };
 pub use models::{
     NewProviderModel, NewProviderModelCapability, ProviderConnectionRow,
@@ -65,7 +66,8 @@ pub use models::{
 };
 pub use repository::channel::UpdatePluginStatusParams;
 pub use repository::customer_service::{
-    CsDialogueKey, ICustomerServiceRepository, UpdateCsAgentParams,
+    CsDialogueKey, CsHandoffRequestResult, CsNoteWriteMutation, CsNoteWriteReceipt,
+    ICustomerServiceRepository, UpdateCsAgentParams,
 };
 pub use repository::customer_service_search::{
     CsNoteSearchHit, NoteMatchChannel, backfill_note_search_text, fts_rebuild, note_search_text,

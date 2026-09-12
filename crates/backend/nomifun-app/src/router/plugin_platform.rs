@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,8 +11,9 @@ use axum::routing::{delete, get, post, put};
 use axum::{Extension, Json, Router};
 use nomifun_agent_contracts::{
     CANDIDATE_TEST_CONTRACT_VERSION, CandidateTestCredentialMode, CandidateTestOutcome,
-    CandidateTestReceipt, CandidateTestReceiptId, CanonicalErrorCode, CapabilityConsumer,
-    CanonicalSchemaRef, CredentialId, CredentialSlotBinding, DigestHex,
+    CandidateTestReceipt, CandidateTestReceiptId, CanonicalErrorCode,
+    CapabilityConsumer, CapabilityId, CanonicalSchemaRef, CredentialId,
+    CredentialSlotBinding, DigestHex,
     JAVASCRIPT_HOST_PROTOCOL_VERSION, JAVASCRIPT_SDK_CONTRACT_VERSION,
     PLUGIN_PACKAGE_PROFILE_VERSION, PluginHostCommitFence, PluginMountId,
     PluginSourceLineage, ResolvedCapability,
@@ -415,6 +416,7 @@ pub(crate) async fn build_nomi_core_plugin_state(
     catalog: Arc<KernelCatalogProvider>,
     base_registrations: Vec<PluginRegistration>,
     runtime: Arc<dyn CommittedRuntimeProvider>,
+    approved_platform_builtin_capability_ids: BTreeSet<CapabilityId>,
 ) -> anyhow::Result<NomiCorePluginComposition> {
     let data_root = std::fs::canonicalize(&data_root)?;
     let platform_root = data_root.join(PLUGIN_PLATFORM_DIRECTORY);
@@ -458,6 +460,7 @@ pub(crate) async fn build_nomi_core_plugin_state(
         host: Arc::clone(&host),
         runtime: Arc::clone(&runtime),
         data_root: data_root.clone(),
+        approved_platform_builtin_capability_ids,
     });
     publisher.restore(owner_user_id).await?;
 
@@ -1541,6 +1544,7 @@ struct NomiCorePluginRegistryPublisher {
     host: Arc<dyn ExtensionHostDemandPort>,
     runtime: Arc<dyn CommittedRuntimeProvider>,
     data_root: PathBuf,
+    approved_platform_builtin_capability_ids: BTreeSet<CapabilityId>,
 }
 
 impl NomiCorePluginRegistryPublisher {
@@ -1679,7 +1683,10 @@ impl NomiCorePluginRegistryPublisher {
                             action.presentation
                                 == nomifun_agent_contracts::ToolPresentationKind::FunctionTool
                         });
-                (!native && (!dynamic || !runtime_available)).then(|| {
+                let builtin = self
+                    .approved_platform_builtin_capability_ids
+                    .contains(&capability.manifest.id);
+                (!native && !builtin && (!dynamic || !runtime_available)).then(|| {
                     (
                         capability.manifest.id.clone(),
                         CanonicalErrorCode::from(AGENT_EXECUTOR_UNAVAILABLE),
@@ -2094,6 +2101,7 @@ mod tests {
             Arc::clone(&catalog),
             Vec::new(),
             test_runtime_authority().await,
+            BTreeSet::new(),
         )
         .await
         .unwrap();
@@ -2574,6 +2582,7 @@ mod tests {
             restarted_catalog,
             Vec::new(),
             test_runtime_authority().await,
+            BTreeSet::new(),
         )
         .await
         .unwrap()

@@ -330,7 +330,14 @@ async fn nomi_core_catalog_exposes_native_nomi_capabilities() {
             "{capability_id} must retain its target resource-kind requirement"
         );
     }
-    for capability_id in ["web.fetch", "agent.delegate", "schedule.store"] {
+    for capability_id in [
+        "web.fetch",
+        "agent.delegate",
+        "agent.execution.observe",
+        "agent.execution.steer",
+        "agent.fork",
+        "schedule.store",
+    ] {
         let capability = capabilities.iter()
             .find(|item| item["capability"]["id"] == capability_id)
             .unwrap_or_else(|| panic!("missing repaired builtin {capability_id}"));
@@ -434,7 +441,15 @@ async fn nomi_core_accepts_on_demand_placement_without_widening_initial_tools() 
         .expect("placement preset id")
         .to_owned();
     let revision = created_value["data"]["revision"]["reference"].clone();
-    let deferred_ids = ["vcs.stage", "web.fetch", "agent.delegate", "schedule.store"];
+    let deferred_ids = [
+        "vcs.stage",
+        "web.fetch",
+        "agent.delegate",
+        "agent.execution.observe",
+        "agent.execution.steer",
+        "agent.fork",
+        "schedule.store",
+    ];
     created_value["data"]["draft"]["document"]["on_demand_capabilities"] = json!(
         deferred_ids.iter().map(|id| json!({
             "capability": {"id": id, "version": "1.0.0"},
@@ -1056,6 +1071,70 @@ async fn nomi_core_agent_session_projects_saved_chat_binding_without_internal_in
     assert_eq!(
         observation["data"]["session"]["agent_binding"]["resolved_snapshot_ref"],
         expected_snapshot
+    );
+
+    let fork_body = json!({
+        "target_agent_binding": session["data"]["agent_binding"],
+        "parent_through_seq": 0,
+        "title": "Session smoke child"
+    });
+    let fork_once = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/agent-sessions/{session_id}/forks"))
+                .header("x-nomi-local-trust", "agent-session-local-trust")
+                .header("content-type", "application/json")
+                .header("idempotency-key", "agent-session-fork-smoke")
+                .body(Body::from(serde_json::to_vec(&fork_body).unwrap()))
+                .expect("build Session fork request"),
+        )
+        .await
+        .expect("dispatch Session fork request");
+    assert_eq!(fork_once.status(), StatusCode::OK);
+    let fork_once: Value = serde_json::from_slice(
+        &axum::body::to_bytes(fork_once.into_body(), 4 * 1024 * 1024)
+            .await
+            .expect("read Session fork response"),
+    )
+    .expect("Session fork JSON");
+    let child_session_id = fork_once["data"]["child_agent_session_id"]
+        .as_str()
+        .expect("child Session id");
+    assert_ne!(child_session_id, session_id);
+    assert_eq!(fork_once["data"]["parent_agent_session_id"], session_id);
+    assert_eq!(fork_once["data"]["child_base_is_self_contained"], true);
+    assert_eq!(fork_once["data"]["migrates_runtime_private_handles"], false);
+    assert_eq!(fork_once["data"]["replays_tool_or_effect"], false);
+
+    let child_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/agent-sessions/{child_session_id}"))
+                .header("x-nomi-local-trust", "agent-session-local-trust")
+                .body(Body::empty())
+                .expect("build child Session observation request"),
+        )
+        .await
+        .expect("dispatch child Session observation request");
+    assert_eq!(child_response.status(), StatusCode::OK);
+    let child: Value = serde_json::from_slice(
+        &axum::body::to_bytes(child_response.into_body(), 4 * 1024 * 1024)
+            .await
+            .expect("read child Session observation"),
+    )
+    .expect("child Session observation JSON");
+    assert_eq!(
+        child["data"]["session"]["parent_session_id"],
+        session_id,
+        "the child must record the exact host-owned parent"
+    );
+    assert!(
+        child["data"]["session"]["fork_base_payload_id"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
     );
 
     let retired = router

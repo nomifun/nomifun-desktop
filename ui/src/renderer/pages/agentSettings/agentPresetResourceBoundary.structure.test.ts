@@ -5,7 +5,7 @@ const sourceFile = (name: string) =>
   readFileSync(new URL(`./${name}`, import.meta.url), 'utf8');
 
 describe('Agent Workbench capability and resource boundary', () => {
-  test('keeps concrete resource selection out of every authoring surface', () => {
+  test('keeps concrete resource bindings out of the saved preset authoring contract', () => {
     const sources = [
       sourceFile('AgentPresetEditor.tsx'),
       sourceFile('OfficialTemplateOverview.tsx'),
@@ -30,6 +30,18 @@ describe('Agent Workbench capability and resource boundary', () => {
     for (const token of forbidden) {
       expect(sources.includes(token)).toBe(false);
     }
+  });
+
+  test('uses product resource selections only for real Test session creation', () => {
+    const editor = sourceFile('AgentPresetEditor.tsx');
+    const controller = sourceFile('useAgentSettingsController.ts');
+
+    expect(editor.includes('<AgentResourcePicker')).toBe(true);
+    expect(editor.indexOf('<AgentResourcePicker')).toBeGreaterThan(editor.indexOf("activeTab === 'test'"));
+    expect(editor.includes('resourceSelectionResolution.missingKinds.length > 0')).toBe(true);
+    expect(editor.includes('resourceSelectionResolution.selections')).toBe(true);
+    expect(controller.includes('resourceSelections: AgentResourceSelection[]')).toBe(true);
+    expect(controller.includes('resourceSelections,')).toBe(true);
   });
 
   test('uses one shared capability list for templates and editable presets', () => {

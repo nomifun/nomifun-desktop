@@ -53,6 +53,10 @@ name = "agent_platform_e2e"
 path = "tests/agent_platform_e2e.rs"
 
 [[test]]
+name = "official_preset_catalog_integrity"
+path = "tests/official_preset_catalog_integrity.rs"
+
+[[test]]
 name = "remote_rest_e2e"
 path = "tests/remote_rest_e2e.rs"
 
@@ -212,6 +216,8 @@ nomifun-realtime.workspace = true
 nomifun-auth.workspace = true
 nomifun-system.workspace = true
 nomifun-file.workspace = true
+notify.workspace = true
+dunce.workspace = true
 nomifun-office.workspace = true
 nomifun-shell.workspace = true
 nomifun-model-invoke.workspace = true

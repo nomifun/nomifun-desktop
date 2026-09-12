@@ -15,11 +15,12 @@
 //! fail to deserialize).
 
 use std::collections::HashMap;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, timeout};
 
 use crate::link::Frame;
@@ -127,6 +128,20 @@ pub struct RobotMcpClient {
     pending: Mutex<HashMap<u64, oneshot::Sender<DeviceResponse>>>,
 }
 
+struct PendingRequestGuard<'a> {
+    pending: &'a Mutex<HashMap<u64, oneshot::Sender<DeviceResponse>>>,
+    id: u64,
+}
+
+impl Drop for PendingRequestGuard<'_> {
+    fn drop(&mut self) {
+        self.pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.id);
+    }
+}
+
 impl RobotMcpClient {
     pub fn new(out: mpsc::Sender<Frame>, session_id: String) -> Self {
         Self {
@@ -146,16 +161,43 @@ impl RobotMcpClient {
             // A notification or a malformed frame: nothing is waiting on it.
             return;
         };
-        if let Some(waiter) = self.pending.lock().await.remove(&id) {
+        if let Some(waiter) = self
+            .pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&id)
+        {
             let _ = waiter.send(response);
         }
+    }
+
+    /// Abort every host-side waiter when the device link is detached.
+    ///
+    /// This cannot undo a physical effect already accepted by firmware, but it
+    /// prevents a disconnected device from leaving Agent tasks blocked until
+    /// the ordinary 30-second timeout. The owning effect ledger must retain
+    /// such an outcome as unknown and must not retry it automatically.
+    pub fn cancel_pending(&self) {
+        self.pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
     }
 
     /// Send one request and await its reply.
     async fn request(&self, method: &str, params: Value) -> Result<Value, ToolCallError> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, tx);
+        self.pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(id, tx);
+        // Removal is cancellation-safe: dropping this async request at a Turn
+        // boundary cannot leak a pending sender in the long-lived device link.
+        let _pending = PendingRequestGuard {
+            pending: &self.pending,
+            id,
+        };
 
         // `id` is a number on purpose: the firmware silently drops string ids.
         let payload = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
@@ -164,17 +206,13 @@ impl RobotMcpClient {
             payload,
         }));
         if self.out.send(frame).await.is_err() {
-            self.pending.lock().await.remove(&id);
             return Err(ToolCallError::Offline);
         }
 
         let response = match timeout(Duration::from_secs(TOOL_CALL_TIMEOUT_SECS), rx).await {
             Ok(Ok(response)) => response,
             Ok(Err(_)) => return Err(ToolCallError::Offline),
-            Err(_) => {
-                self.pending.lock().await.remove(&id);
-                return Err(ToolCallError::Timeout);
-            }
+            Err(_) => return Err(ToolCallError::Timeout),
         };
         if let Some(error) = response.error {
             return Err(ToolCallError::Rejected(error.message));
@@ -526,6 +564,26 @@ mod tests {
             client.call_tool("self.gimbal.center", json!({})).await,
             Err(ToolCallError::Offline)
         ));
+    }
+
+    #[tokio::test]
+    async fn explicit_link_cancellation_releases_waiters_immediately() {
+        let (out_tx, mut out_rx) = mpsc::channel::<Frame>(1);
+        let client = Arc::new(RobotMcpClient::new(out_tx, "sess-1".to_owned()));
+        let call = tokio::spawn({
+            let client = Arc::clone(&client);
+            async move { client.call_tool("self.gimbal.center", json!({})).await }
+        });
+        let _sent = out_rx.recv().await.expect("physical request was dispatched");
+        client.cancel_pending();
+        assert!(matches!(call.await.unwrap(), Err(ToolCallError::Offline)));
+        assert!(
+            client
+                .pending
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty()
+        );
     }
 
     #[tokio::test]

@@ -453,6 +453,26 @@ impl ToolRegistry {
         true
     }
 
+    /// Remove and return one registered route without weakening the persistent
+    /// registration policy.
+    ///
+    /// Trusted hosts use this to decorate an already-authorized route while
+    /// preserving its exact schema, activation identity, and authority. The
+    /// returned route can only be registered again if the existing persistent
+    /// allow policy still permits its provider-visible name.
+    pub fn take_registered(&mut self, name: &str) -> Option<Box<dyn Tool>> {
+        let index = self.tools.iter().position(|tool| tool.name() == name)?;
+        let tool = self.tools.remove(index);
+        self.input_contracts.remove(name);
+        let retained_names = self
+            .tools
+            .iter()
+            .map(|tool| tool.name().to_owned())
+            .collect::<BTreeSet<_>>();
+        self.deferred_state.retain_definitions(&retained_names);
+        Some(tool)
+    }
+
     fn registration_policy_allows(&self, name: &str) -> bool {
         if self.registration_policy.allows(name) {
             return true;
@@ -2347,6 +2367,21 @@ mod tests {
         assert!(registry.get("refreshable").is_none());
         assert!(registry.register(make_tool("refreshable", "second generation")));
         assert!(!registry.register(make_tool("outside-policy", "must remain denied")));
+    }
+
+    #[test]
+    fn take_registered_returns_the_exact_route_without_weakening_policy() {
+        let mut registry = ToolRegistry::new();
+        assert!(registry.register(make_tool("decorated", "original")));
+        registry.retain_named(&["decorated".to_owned()]);
+
+        let tool = registry
+            .take_registered("decorated")
+            .expect("registered route");
+        assert_eq!(tool.description(), "original");
+        assert!(registry.get("decorated").is_none());
+        assert!(registry.register(tool));
+        assert!(!registry.register(make_tool("outside-policy", "denied")));
     }
 
     #[test]

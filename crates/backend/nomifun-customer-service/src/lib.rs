@@ -6,11 +6,18 @@
 //! engine session whose tool registry is fixed at construction time to three
 //! read-only tools.
 
+pub mod agent_capability;
 pub mod dialogue;
 pub mod routes;
 pub mod service;
 pub mod tools;
 
+pub use agent_capability::{
+    CustomerServiceAgentCapabilityOwner, CustomerServiceDialogueContext,
+    customer_service_action_input_schema,
+};
 pub use dialogue::{CsDialogueEngine, LiveTurnRunner, TurnRunner};
 pub use routes::{CustomerServiceRouterState, customer_service_routes};
-pub use service::CustomerServiceService;
+pub use service::{
+    AgentCsNoteWriteInput, CreateCsAgentInput, CustomerServiceService, RequestCsHandoffInput,
+};
