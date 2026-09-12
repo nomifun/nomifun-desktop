@@ -214,6 +214,7 @@ pub const WAVE5_HOST_PORT_UNAVAILABLE: &str = "WAVE5_HOST_PORT_UNAVAILABLE";
 pub const WAVE5_INVALID_REQUEST: &str = "WAVE5_INVALID_REQUEST";
 pub const WAVE5_ACTION_OPERATION_MISMATCH: &str = "WAVE5_ACTION_OPERATION_MISMATCH";
 pub const WAVE5_RESOURCE_BINDING_INVALID: &str = "WAVE5_RESOURCE_BINDING_INVALID";
+const WAVE5_INVALID_RESPONSE: &str = "WAVE5_INVALID_RESPONSE";
 
 /// Kernel-authorized invocation context projected to the application owner.
 ///
@@ -640,9 +641,9 @@ impl RemoteTransportDescriptor {
             && self.binding_fields == expected_binding_fields
             && self.forbidden_binding_fields
                 == remote_binding_protocol_fixture().forbidden_remote_binding_fields
-            && self.transport_port.id.as_ref() == REMOTE_TRANSPORT_PORT
-            && self.admission_port.id.as_ref() == REMOTE_ADMISSION_PORT
-            && self.drain_port.id.as_ref() == REMOTE_DRAIN_PORT
+            && self.transport_port == host_port(REMOTE_TRANSPORT_PORT)
+            && self.admission_port == host_port(REMOTE_ADMISSION_PORT)
+            && self.drain_port == host_port(REMOTE_DRAIN_PORT)
             && command_port_ids
                 == BTreeSet::from([
                     REMOTE_OPEN_PORT,
@@ -651,6 +652,9 @@ impl RemoteTransportDescriptor {
                     REMOTE_CANCEL_PORT,
                 ])
             && self.typed_command_ports.len() == REMOTE_OPERATION_IDS.len()
+            && self.typed_command_ports.iter().all(|port| {
+                *port == command_port(port.port.id.as_ref(), port.port.id.as_ref())
+            })
             && self.transport_only
             && !self.local_runtime_required
             && self.explicit_session_id_for_follow_up
@@ -858,27 +862,6 @@ where
         typed_parameters: BTreeMap::new(),
     }
 }
-
-pub fn typed_resource_bindings_for<'a>(
-    owner_id: &str,
-    entries: impl IntoIterator<Item = (&'a str, &'a str, &'a str, &'a [&'a str])>,
-) -> TypedResourceBindings {
-    entries
-        .into_iter()
-        .map(
-            |(binding_id, resource_kind, resource_id, operations)| {
-                typed_resource_binding(
-                    binding_id,
-                    resource_kind,
-                    resource_id,
-                    owner_id,
-                    operations.iter().copied(),
-                )
-            },
-        )
-        .collect()
-}
-
 pub fn capability_ids_by_package() -> BTreeMap<PackageId, BTreeSet<CapabilityId>> {
     BTreeMap::from([
         (
@@ -1743,7 +1726,7 @@ fn capability_manifest(
                 .host_ports
                 .iter()
                 .filter(|id| declared_port_ids.contains(&HostPortId::from(**id)))
-                .map(|id| host_port(*id).clone())
+                .map(|id| host_port(id))
                 .collect(),
         },
     }
@@ -1794,14 +1777,23 @@ impl CapabilityHandler for Wave5CapabilityHandler {
             };
             request
                 .validate()
-                .map_err(|error| KernelError::CapabilityExecution {
-                    reason: error.to_string(),
-                })?;
+                .map_err(|error| host_error_to_kernel(&request.context, error))?;
             let request_context = request.context.clone();
-            self.host_port
+            let result = self
+                .host_port
                 .invoke(request)
                 .await
-                .map_err(|error| host_error_to_kernel(&request_context, error))
+                .map_err(|error| host_error_to_kernel(&request_context, error))?;
+            if !result.0.is_object() {
+                return Err(KernelError::capability_execution_failed(
+                    WAVE5_INVALID_RESPONSE,
+                    format!(
+                        "{} host result must be a JSON object",
+                        self.capability_id.as_ref()
+                    ),
+                ));
+            }
+            Ok(result)
         })
     }
 }
@@ -1829,6 +1821,12 @@ pub fn operation_from_input(
             });
         }
     };
+    if !operation.input().0.is_object() {
+        return Err(KernelError::capability_execution_failed(
+            WAVE5_INVALID_REQUEST,
+            format!("{} input must be a JSON object", capability_id.as_ref()),
+        ));
+    }
     Ok(operation)
 }
 
@@ -1837,17 +1835,17 @@ fn host_error_to_kernel(
     error: Wave5HostPortError,
 ) -> KernelError {
     if error.code == nomifun_agent_contracts::RESOURCE_OWNER_MISMATCH {
-        let binding_id = context
+        if let Some(binding) = context
             .resource_bindings
             .iter()
             .find(|binding| binding.owner_id != context.principal.principal_id)
-            .map(|binding| binding.binding_id.clone())
-            .unwrap_or_else(|| ResourceBindingId::from("unknown"));
-        return KernelError::ResourceOwnerMismatch { binding_id };
+        {
+            return KernelError::ResourceOwnerMismatch {
+                binding_id: binding.binding_id.clone(),
+            };
+        }
     }
-    KernelError::CapabilityExecution {
-        reason: error.to_string(),
-    }
+    KernelError::capability_execution_failed(error.code, error.message)
 }
 
 fn validate_host_context(context: &Wave5HostContext) -> Result<(), Wave5HostPortError> {
@@ -2055,21 +2053,11 @@ fn object_schema(additional_properties: bool) -> StrictJsonValue {
         additional_properties.into(),
     );
     object.insert("type".to_owned(), "object".to_owned().into());
-    StrictJsonValue(value.0)
+    value
 }
 
 fn empty_object() -> StrictJsonValue {
-    let mut value = nomifun_agent_contracts::remote_binding_protocol_fixture()
-        .open
-        .request
-        .initial_input
-        .expect("the canonical Remote fixture supplies an object value")
-        .0;
-    value
-        .as_object_mut()
-        .expect("the canonical Remote fixture input is an object")
-        .clear();
-    StrictJsonValue(value)
+    StrictJsonValue(std::iter::empty::<(String, String)>().collect())
 }
 
 fn schema_ref(subject: &str, role: &str) -> CanonicalSchemaRef {
@@ -2369,21 +2357,16 @@ mod tests {
         }
     }
 
-    struct CanonicalErrorHost;
+    struct ResultHost(Result<StrictJsonValue, Wave5HostPortError>);
 
-    impl Wave5HostPort for CanonicalErrorHost {
+    impl Wave5HostPort for ResultHost {
         fn invoke<'a>(
             &'a self,
-            request: Wave5HostRequest,
+            _request: Wave5HostRequest,
         ) -> Pin<Box<dyn Future<Output = Result<StrictJsonValue, Wave5HostPortError>> + Send + 'a>>
         {
-            Box::pin(async move {
-                request.validate()?;
-                Err(Wave5HostPortError::new(
-                    REMOTE_AUTH_REQUIRED,
-                    "request-admission fence is closed",
-                ))
-            })
+            // No owner validation: the test must exercise the handler boundary.
+            Box::pin(async move { self.0.clone() })
         }
     }
 
@@ -2495,6 +2478,14 @@ mod tests {
         {
             let manifest = &registration.metadata.manifest.payload;
             assert_eq!(manifest.package_id.as_ref(), package_id);
+            assert_eq!(
+                manifest.config_schema.0,
+                serde_json::json!({"type": "object", "additionalProperties": false})
+            );
+            assert_eq!(
+                registration.metadata.context.validated_config.value.0,
+                serde_json::json!({})
+            );
             let actual = manifest
                 .contributions
                 .capabilities
@@ -2507,6 +2498,10 @@ mod tests {
             for capability in &manifest.contributions.capabilities {
                 if capability.kind == CapabilityKind::Tool {
                     assert_eq!(capability.contributions.actions.len(), 1);
+                    assert_eq!(
+                        capability.contributions.actions[0].action_id,
+                        action_id(capability.id.as_ref()).expect("action-bearing capability")
+                    );
                     assert!(registration.handler_ids().contains(&capability.id));
                     assert!(capability
                         .contributions
@@ -2644,11 +2639,28 @@ mod tests {
             .forbidden_binding_fields
             .iter()
             .all(|field| !descriptor.binding_fields.contains(field)));
-        assert!(operation_from_input(
-            &CapabilityId::from(REMOTE_MCP),
-            StrictJsonValue(serde_json::json!({}))
-        )
-        .is_err());
+        let mutations: [fn(&mut RemoteTransportDescriptor); 6] = [
+            |value| value.transport_port.version = "2.0.0".into(),
+            |value| value.admission_port.version = "2.0.0".into(),
+            |value| value.drain_port.version = "2.0.0".into(),
+            |value| value.typed_command_ports[0].port.version = "2.0.0".into(),
+            |value| value.typed_command_ports[0].command_schema = "schema://wrong/command".into(),
+            |value| value.typed_command_ports[0].receipt_schema = "schema://wrong/receipt".into(),
+        ];
+        for mutate in mutations {
+            let mut changed = descriptor.clone();
+            mutate(&mut changed);
+            assert!(
+                !changed.is_exact_contract(),
+                "changed port contract must be rejected"
+            );
+        }
+        let mut reordered = descriptor;
+        reordered.typed_command_ports.reverse();
+        assert!(
+            reordered.is_exact_contract(),
+            "port order is not part of the contract"
+        );
     }
 
     #[test]
@@ -2711,6 +2723,12 @@ mod tests {
             assert_eq!(operation.capability_id().as_ref(), capability_id);
             assert_eq!(operation.action_id().as_ref(), action);
             assert_eq!(operation.owner_domain(), owner_domain);
+            let error = operation_from_input(
+                &CapabilityId::from(capability_id),
+                StrictJsonValue(serde_json::json!([])),
+            )
+            .expect_err("direct operation conversion must reject non-object input");
+            assert_eq!(error.canonical_code().as_ref(), WAVE5_INVALID_REQUEST);
         }
         for capability_id in REMOTE_INGRESS_CAPABILITY_IDS {
             assert!(operation_from_input(
@@ -2789,35 +2807,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn handlers_are_registered_without_a_second_authority() {
-        let registrations = registrations().unwrap();
-        let agent_execution = &registrations[0];
-        let capability = agent_execution
-            .metadata
-            .manifest
-            .payload
-            .contributions
-            .capabilities
-            .iter()
-            .find(|capability| capability.id == CapabilityId::from(AGENT_DELEGATE))
-            .unwrap();
-        assert_eq!(
-            capability
-                .contributions
-                .actions
-                .iter()
-                .map(|action| action.action_id.as_ref())
-                .collect::<BTreeSet<_>>(),
-            BTreeSet::from([AGENT_DELEGATE_ACTION])
-        );
-        assert!(agent_execution
-            .handler_ids()
-            .contains(&CapabilityId::from(AGENT_DELEGATE)));
-        assert!(registrations[3].handler_ids().is_empty());
-        assert!(remote_drain_descriptor().is_exact_contract());
-    }
-
     #[tokio::test]
     async fn unconfigured_action_host_fails_closed_without_a_synthetic_receipt() {
         let registry = KernelRegistry::new(
@@ -2854,11 +2843,8 @@ mod tests {
             )
             .await
             .expect_err("unconfigured Wave 5 actions must fail closed");
-        assert!(matches!(
-            result,
-            KernelError::CapabilityExecution { ref reason }
-                if reason.starts_with("WAVE5_HOST_PORT_UNAVAILABLE:")
-        ));
+        assert_eq!(result.canonical_code().as_ref(), WAVE5_HOST_PORT_UNAVAILABLE);
+        assert!(result.capability_execution_failure().is_some());
         assert!(!result.to_string().contains("accepted"));
     }
 
@@ -2920,45 +2906,72 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn action_host_preserves_the_owner_canonical_error_code() {
-        let registry = KernelRegistry::new(
-            MaterializationPolicy::stable(VERSION),
-            Arc::new(InMemoryPluginStatePersistence::new()),
-        )
-        .expect("state persistence should initialize");
-        registry
-            .replace_all(materializable_registrations(Arc::new(
-                CanonicalErrorHost,
-            )))
-            .expect("Wave 5 metadata should materialize");
-        let owner = principal();
-        let (snapshot, active) = compiled_schedule(&registry, &owner);
-        let result = registry
-            .invoke(
-                &snapshot,
-                &active,
-                CapabilityInvocationRequest {
-                    principal: owner.clone(),
-                    session_owner: owner,
-                    agent_session_id: AgentSessionId::from("wave5-error-session"),
-                    operation_id: OperationId::from("wave5-error-operation"),
-                    idempotency_key: IdempotencyKey::from("wave5-error-idempotency"),
-                    correlation_id: CorrelationId::from("wave5-error-correlation"),
-                    resolved_snapshot_ref: snapshot.snapshot_ref().clone(),
-                    active_set_generation: active.generation,
-                    capability_id: CapabilityId::from(SCHEDULE_STORE),
-                    action_id: ActionId::from(SCHEDULE_STORE_ACTION),
-                    resource_binding_ids: BTreeSet::new(),
-                    state_scope_key: ScopeKey::from("session:wave5-error"),
-                    input: StrictJsonValue(serde_json::json!({})),
-                },
+    async fn action_handler_preserves_typed_errors_and_rejects_invalid_boundaries() {
+        use serde_json::json;
+
+        let diagnostic = "internal owner diagnostic";
+        let operation_id = "wave5-error-operation";
+        for (input, response, operation_id, expected_code) in [
+            (json!(null), Ok(json!({})), operation_id, WAVE5_INVALID_REQUEST),
+            (json!({}), Ok(json!({})), " ", WAVE5_INVALID_REQUEST),
+            (json!({}), Ok(json!(false)), operation_id, WAVE5_INVALID_RESPONSE),
+            (
+                json!({}),
+                Err(Wave5HostPortError::new(REMOTE_AUTH_REQUIRED, diagnostic)),
+                operation_id,
+                REMOTE_AUTH_REQUIRED,
+            ),
+            (
+                json!({}),
+                Err(Wave5HostPortError::new(
+                    nomifun_agent_contracts::RESOURCE_OWNER_MISMATCH,
+                    diagnostic,
+                )),
+                operation_id,
+                nomifun_agent_contracts::RESOURCE_OWNER_MISMATCH,
+            ),
+        ] {
+            let owner_error = response.is_err();
+            let registry = KernelRegistry::new(
+                MaterializationPolicy::stable(VERSION),
+                Arc::new(InMemoryPluginStatePersistence::new()),
             )
-            .await
-            .expect_err("owner error should propagate");
-        assert!(matches!(
-            result,
-            KernelError::CapabilityExecution { ref reason }
-                if reason.starts_with("REMOTE_AUTH_REQUIRED:")
-        ));
+            .expect("state persistence should initialize");
+            registry
+                .replace_all(materializable_registrations(Arc::new(ResultHost(
+                    response.map(StrictJsonValue),
+                ))))
+                .expect("Wave 5 metadata should materialize");
+            let owner = principal();
+            let (snapshot, active) = compiled_schedule(&registry, &owner);
+            let result = registry
+                .invoke(
+                    &snapshot,
+                    &active,
+                    CapabilityInvocationRequest {
+                        principal: owner.clone(),
+                        session_owner: owner,
+                        agent_session_id: AgentSessionId::from("wave5-error-session"),
+                        operation_id: OperationId::from(operation_id),
+                        idempotency_key: IdempotencyKey::from("wave5-error-idempotency"),
+                        correlation_id: CorrelationId::from("wave5-error-correlation"),
+                        resolved_snapshot_ref: snapshot.snapshot_ref().clone(),
+                        active_set_generation: active.generation,
+                        capability_id: CapabilityId::from(SCHEDULE_STORE),
+                        action_id: ActionId::from(SCHEDULE_STORE_ACTION),
+                        resource_binding_ids: BTreeSet::new(),
+                        state_scope_key: ScopeKey::from("session:wave5-error"),
+                        input: StrictJsonValue(input),
+                    },
+                )
+                .await
+                .expect_err("invalid boundary or owner error must reject");
+            assert_eq!(result.canonical_code().as_ref(), expected_code);
+            let failure = result.capability_execution_failure().expect("typed failure");
+            if owner_error {
+                assert_eq!(failure.message, diagnostic);
+            }
+            assert!(!result.to_string().contains(diagnostic));
+        }
     }
 }
