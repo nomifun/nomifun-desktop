@@ -22,6 +22,7 @@ use nomifun_common::{
 use nomifun_db::{IProviderModelRepository, ProviderModelRow};
 use nomifun_model_invoke::ModelInvokeService;
 
+use crate::control_steps::first_json_object;
 use crate::event_publisher::{AgentExecutionEventPublisher, LeadThinkingKind, LeadThinkingPhase};
 
 const PLAN_MAX_TOKENS: u32 = 8192;
@@ -446,7 +447,7 @@ fn parse_plan(raw: &str, goal: &str) -> PlannedExecution {
 }
 
 pub(crate) fn parse_plan_opt(raw: &str) -> Option<PlannedExecution> {
-    let plan: PlannedExecution = serde_json::from_str(&extract_json_object(raw)?).ok()?;
+    let plan: PlannedExecution = serde_json::from_str(first_json_object(raw)?).ok()?;
     (!plan.steps.is_empty()).then_some(plan)
 }
 
@@ -479,43 +480,6 @@ fn truncate_title(goal: &str) -> String {
     }
 }
 
-fn extract_json_object(raw: &str) -> Option<String> {
-    let cleaned = raw
-        .replace("```json", "")
-        .replace("```JSON", "")
-        .replace("```", "");
-    let bytes = cleaned.as_bytes();
-    let start = cleaned.find('{')?;
-    let mut depth = 0_i32;
-    let mut in_string = false;
-    let mut escaped = false;
-    for index in start..bytes.len() {
-        let current = bytes[index] as char;
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if current == '\\' {
-                escaped = true;
-            } else if current == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match current {
-            '"' => in_string = true,
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(cleaned[start..=index].to_owned());
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum AdjustedExecutionNode {
@@ -541,10 +505,10 @@ pub(crate) struct AdjustedExecutionPlan {
 }
 
 pub(crate) fn parse_adjusted_plan(raw: &str) -> Result<AdjustedExecutionPlan, AppError> {
-    let object = extract_json_object(raw).ok_or_else(|| {
+    let object = first_json_object(raw).ok_or_else(|| {
         AppError::BadRequest("主 Agent 的调整计划没有返回 JSON，执行未改动".to_owned())
     })?;
-    let plan: AdjustedExecutionPlan = serde_json::from_str(&object).map_err(|error| {
+    let plan: AdjustedExecutionPlan = serde_json::from_str(object).map_err(|error| {
         AppError::BadRequest(format!("主 Agent 的调整计划无效（{error}），执行未改动"))
     })?;
     if plan.steps.is_empty() {
@@ -604,6 +568,19 @@ mod tests {
 
         let removed = r#"{"steps":[{"title":"A","spec":"do A","kind":"agent","pattern_config":"{}","depends_on":[]}]}"#;
         assert!(parse_plan_opt(removed).is_none());
+    }
+
+    #[test]
+    fn fenced_plan_preserves_markdown_and_braces_inside_string_values() {
+        let spec = "Write this exact snippet: \n```json\n{\"key\":\"value\"}\n```";
+        let step = serde_json::json!({"title": "snippet", "spec": spec});
+        let raw = format!("preface\n```json\n{}\n```", serde_json::json!({"steps": [step.clone()]}));
+        assert_eq!(parse_plan_opt(&raw).unwrap().steps[0].spec, spec);
+        let adjusted = serde_json::json!({"steps": [{"type": "new", "step": step}]}).to_string();
+        match &parse_adjusted_plan(&adjusted).unwrap().steps[0] {
+            AdjustedExecutionNode::New { step, .. } => assert_eq!(step.spec, spec),
+            _ => panic!("expected new step"),
+        }
     }
 
     #[test]

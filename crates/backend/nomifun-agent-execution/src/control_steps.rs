@@ -122,7 +122,7 @@ fn evaluate_verify(
 
 fn parse_pass(output: &str) -> Option<bool> {
     first_json_object(output)
-        .and_then(|object| serde_json::from_str::<Value>(&object).ok())
+        .and_then(|object| serde_json::from_str::<Value>(object).ok())
         .and_then(|value| value.get("pass").and_then(Value::as_bool))
         .or_else(|| {
             let normalized = output.trim().to_ascii_lowercase();
@@ -241,7 +241,7 @@ fn evaluate_judge(
 }
 
 fn parse_ballot(output: &str) -> Option<Vec<Option<f64>>> {
-    let value: Value = serde_json::from_str(&first_json_object(output)?).ok()?;
+    let value: Value = serde_json::from_str(first_json_object(output)?).ok()?;
     match value.get("scores")? {
         Value::Array(scores) if scores.len() <= MAX_JUDGE_CANDIDATES => {
             Some(scores.iter().map(Value::as_f64).collect())
@@ -295,7 +295,7 @@ fn evaluate_loop(
             LoopStopPolicy::Predicate { done_marker } => {
                 output.contains(done_marker)
                     || first_json_object(output)
-                        .and_then(|object| serde_json::from_str::<Value>(&object).ok())
+                        .and_then(|object| serde_json::from_str::<Value>(object).ok())
                         .and_then(|value| value.get("done").and_then(Value::as_bool))
                         == Some(true)
             }
@@ -332,7 +332,7 @@ fn output_hash(output: &str) -> u64 {
     hasher.finish()
 }
 
-fn first_json_object(raw: &str) -> Option<String> {
+pub(crate) fn first_json_object(raw: &str) -> Option<&str> {
     let bytes = raw.as_bytes();
     let start = raw.find('{')?;
     let mut depth = 0_i32;
@@ -356,7 +356,7 @@ fn first_json_object(raw: &str) -> Option<String> {
             '}' => {
                 depth -= 1;
                 if depth == 0 {
-                    return Some(raw[start..=index].to_owned());
+                    return Some(&raw[start..=index]);
                 }
             }
             _ => {}

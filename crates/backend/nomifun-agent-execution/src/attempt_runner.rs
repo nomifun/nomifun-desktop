@@ -327,42 +327,27 @@ impl AgentSessionAttemptRunner {
             )
             .await?;
         let boundary_message_id = delivery.message_id.clone();
-        if delivery.completed {
+        let receipt = if delivery.completed {
+            Some(delivery)
+        } else {
+            self.await_delivery_receipt(owner_id, conversation_id, operation_id, timeout)
+                .await?
+        };
+        if let Some(receipt) = receipt {
             let projection = self
-                .output_files_for_turn(owner_id, conversation_id, &boundary_message_id)
+                .output_files_from_projection(
+                    owner_id, conversation_id,
+                    TurnArtifactProjection::for_boundary(&receipt.message_id),
+                )
                 .await;
-            return Ok(AttemptOutcome {
-                conversation_id: conversation_id.to_owned(),
-                text: delivery.result_text,
-                output_files: projection.files,
-                ok: delivery.result_ok.unwrap_or(false) && projection.integrity_ok,
-                tokens: self.session.take_turn_tokens(conversation_id),
-                error: delivery.result_error,
-                error_code: delivery.result_error_code,
-                error_retryable: delivery.result_error_retryable,
-            });
-        }
-        if let Some(receipt) = self
-            .await_delivery_receipt(owner_id, conversation_id, operation_id, timeout)
-            .await?
-        {
-            let projection = self
-                .output_files_for_turn(owner_id, conversation_id, &receipt.message_id)
-                .await;
-            return Ok(AttemptOutcome {
-                conversation_id: conversation_id.to_owned(),
-                text: receipt.result_text,
-                output_files: projection.files,
-                ok: receipt.result_ok.unwrap_or(false) && projection.integrity_ok,
-                tokens: self.session.take_turn_tokens(conversation_id),
-                error: receipt.result_error,
-                error_code: receipt.result_error_code,
-                error_retryable: receipt.result_error_retryable,
-            });
+            return Ok(completed_delivery_outcome(
+                conversation_id, receipt, projection,
+                self.session.take_turn_tokens(conversation_id),
+            ));
         }
         // Runtime state and transcript contents are not completion evidence.
         // Without the exact operation receipt, fail closed and let the
-        // scheduler retry/report the missing terminal delivery.
+        // scheduler report the ambiguous result without replaying its effects.
         tracing::warn!(
             conversation_id,
             operation_id,
@@ -382,30 +367,6 @@ impl AgentSessionAttemptRunner {
     /// `msg_id` and `content.turn_id`. We page newest-first to that user-row
     /// boundary, reset at any intervening user turn, require the tool ids to be
     /// self-consistent, and fail closed unless the boundary is found.
-    async fn output_files_for_turn(
-        &self,
-        owner_id: &str,
-        conversation_id: &str,
-        boundary_message_id: &str,
-    ) -> ArtifactProjectionResult {
-        self.output_files_from_projection(
-            owner_id,
-            conversation_id,
-            TurnArtifactProjection::for_boundary(boundary_message_id),
-        )
-        .await
-    }
-
-    async fn latest_output_files(&self, owner_id: &str, conversation_id: &str) -> Vec<String> {
-        self.output_files_from_projection(
-            owner_id,
-            conversation_id,
-            TurnArtifactProjection::for_latest_turn(),
-        )
-        .await
-        .files
-    }
-
     async fn output_files_from_projection(
         &self,
         owner_id: &str,
@@ -660,7 +621,11 @@ impl AttemptRunner for AgentSessionAttemptRunner {
         // Adoption has no stored delivery id, but the latest canonical
         // right-side boundary is reliable: only its immediately preceding
         // newest-first segment is considered, never the whole conversation.
-        self.latest_output_files(owner_id, conversation_id).await
+        self.output_files_from_projection(
+            owner_id, conversation_id, TurnArtifactProjection::for_latest_turn(),
+        )
+        .await
+        .files
     }
 
     async fn last_error_retryable(&self, owner_id: &str, conversation_id: &str) -> bool {
@@ -786,6 +751,31 @@ fn missing_delivery_receipt_outcome(
         ),
         error_code: Some(MISSING_DELIVERY_RECEIPT_CODE.to_owned()),
         error_retryable: Some(false),
+    }
+}
+
+fn completed_delivery_outcome(
+    conversation_id: &str,
+    mut receipt: AgentExecutionDelivery,
+    projection: ArtifactProjectionResult,
+    tokens: Option<i64>,
+) -> AttemptOutcome {
+    if receipt.result_ok == Some(true) && !projection.integrity_ok {
+        // The turn already completed. A missing/invalid artifact projection is
+        // not a provider timeout and must not replay its external effects.
+        receipt.result_error = Some("Agent artifact delivery could not be verified".to_owned());
+        receipt.result_error_code = Some("agent_artifact_verification_failed".to_owned());
+        receipt.result_error_retryable = Some(false);
+    }
+    AttemptOutcome {
+        conversation_id: conversation_id.to_owned(),
+        text: receipt.result_text,
+        output_files: projection.files,
+        ok: receipt.result_ok.unwrap_or(false) && projection.integrity_ok,
+        tokens,
+        error: receipt.result_error,
+        error_code: receipt.result_error_code,
+        error_retryable: receipt.result_error_retryable,
     }
 }
 
@@ -1246,6 +1236,34 @@ mod tests {
             Some(MISSING_DELIVERY_RECEIPT_CODE)
         );
         assert_eq!(outcome.error_retryable, Some(false));
+    }
+
+    #[test]
+    fn completed_receipt_with_invalid_artifacts_is_not_a_retryable_timeout() {
+        let mut receipt = AgentExecutionDelivery {
+            message_id: CURRENT_USER_TURN_ID.to_owned(), replayed: false, completed: true,
+            result_ok: Some(true), result_text: Some("done".to_owned()), result_error: None,
+            result_error_code: None, result_error_retryable: None,
+        };
+        let success = completed_delivery_outcome(CONVERSATION_ID, receipt.clone(),
+            ArtifactProjectionResult { files: vec!["verified".to_owned()], integrity_ok: true }, Some(7));
+        assert!(success.ok);
+        assert_eq!(success.output_files, ["verified"]);
+        assert_eq!(success.tokens, Some(7));
+        assert_eq!(success.error_code, None);
+        let invalid = completed_delivery_outcome(CONVERSATION_ID, receipt.clone(), ArtifactProjectionResult::failed(), Some(7));
+        assert!(!invalid.ok);
+        assert_eq!(invalid.error_code.as_deref(), Some("agent_artifact_verification_failed"));
+        assert_eq!(invalid.error_retryable, Some(false));
+        assert!(invalid.error.is_some());
+        receipt.result_ok = Some(false);
+        receipt.result_error = Some("provider failed".to_owned());
+        receipt.result_error_code = Some("USER_LLM_PROVIDER_RATE_LIMITED".to_owned());
+        receipt.result_error_retryable = Some(true);
+        let failure = completed_delivery_outcome(CONVERSATION_ID, receipt, ArtifactProjectionResult::failed(), None);
+        assert_eq!(failure.error.as_deref(), Some("provider failed"));
+        assert_eq!(failure.error_code.as_deref(), Some("USER_LLM_PROVIDER_RATE_LIMITED"));
+        assert_eq!(failure.error_retryable, Some(true));
     }
 
     #[test]
