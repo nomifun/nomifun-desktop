@@ -236,6 +236,7 @@ const EXPECTED_PRODUCT_TABLES: &[&str] = &[
     "miniapp_deletion_intents",
     "miniapp_kv",
     "miniapp_library_state",
+    "miniapp_product_documents",
     "miniapp_products",
     "miniapp_projects",
     "miniapp_publish_authorizations",

@@ -1,0 +1,67 @@
+.surfaceSection {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.surfaceHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 12px;
+}
+.surfaceHeading {
+  min-width: 0;
+}
+.sectionTitle {
+  font-size: 16px;
+  margin: 0;
+}
+.sectionHint {
+  font-size: 13px;
+  margin: 6px 0;
+  color: var(--color-text-3);
+}
+.surfaceActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.surfaceViewport {
+  position: relative;
+  min-width: 0;
+}
+.surfaceFrame {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  min-height: 480px;
+  border: 0;
+  background: var(--color-bg-1);
+}
+.surfaceLoading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  background: var(--color-bg-1);
+}
+.surfaceState {
+  min-height: 320px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+}
+.stateTitle {
+  font-size: 18px;
+  font-weight: 500;
+}
+.stateBody {
+  color: var(--color-text-3);
+  font-size: 13px;
+}
