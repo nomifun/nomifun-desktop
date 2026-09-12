@@ -32,7 +32,7 @@ pub(crate) struct MiniAppProductService {
     model: Arc<nomifun_model_invoke::ModelInvokeService>,
     root: PathBuf,
     mutations: Arc<Mutex<()>>,
-    jobs: Arc<Mutex<BTreeMap<String, CancellationToken>>>,
+    jobs: Arc<Mutex<BTreeMap<String, (CancellationToken, Option<String>)>>>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -101,6 +101,17 @@ pub(super) struct ExpectedRevision {
 }
 
 impl MiniAppProductService {
+    pub(super) async fn cancel_app_jobs(&self, owner: &str, miniapp_id: &str) {
+        let prefix = format!("{owner}:");
+        self.jobs.lock().await.retain(|key, (token, app)| {
+            if key.starts_with(&prefix) && app.as_deref() == Some(miniapp_id) {
+                token.cancel();
+                false
+            } else {
+                true
+            }
+        });
+    }
     pub(crate) fn new(
         documents: MiniAppProductDocuments,
         application: Arc<MiniAppM1ApplicationService>,
@@ -343,7 +354,7 @@ async fn cancel(
     if draft.status == "saving" {
         return Err(AppError::Conflict("Save is in progress".into()));
     }
-    if let Some(token) = service
+    if let Some((token, _)) = service
         .jobs
         .lock()
         .await
@@ -370,7 +381,7 @@ async fn discard(
     if draft.status == "saving" {
         return Err(AppError::Conflict("Save is in progress".into()));
     }
-    if let Some(token) = service
+    if let Some((token, _)) = service
         .jobs
         .lock()
         .await

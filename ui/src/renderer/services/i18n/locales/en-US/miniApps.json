@@ -529,6 +529,8 @@
     "enableOpen": "Enable and open",
     "trashedNotice": "This app is in Recently deleted. Restore it to use it again.",
     "trashHint": "The app and its data will be retained in Recently deleted and can be restored.",
+    "permanentDelete": "Delete permanently",
+    "permanentDeleteHint": "This permanently deletes the selected mini apps, their linked drafts and usage data. This cannot be undone.",
     "unsavedNotice": "This app has not been saved as a usable version yet. Continue creating it.",
     "openFailed": "The mini app could not be opened. Please retry.",
     "importTitle": "Import mini app",

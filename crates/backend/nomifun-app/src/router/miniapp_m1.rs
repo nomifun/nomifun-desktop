@@ -491,6 +491,9 @@ async fn delete_miniapp(
         .delete(user.id.as_str(), request)
         .await
         .map_err(application_error)?;
+    if let Some(product) = &state.product {
+        product.cancel_app_jobs(user.id.as_str(), &miniapp_id).await;
+    }
     Ok(Json(ApiResponse::ok(library)))
 }
 
@@ -506,6 +509,9 @@ async fn retry_delete_miniapp(
         .retry_delete(user.id.as_str(), request)
         .await
         .map_err(application_error)?;
+    if let Some(product) = &state.product {
+        product.cancel_app_jobs(user.id.as_str(), &miniapp_id).await;
+    }
     Ok(Json(ApiResponse::ok(library)))
 }
 

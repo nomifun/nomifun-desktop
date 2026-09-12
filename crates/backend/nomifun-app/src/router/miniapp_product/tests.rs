@@ -283,11 +283,10 @@ async fn cancel_retains_the_previous_preview_and_revokes_the_job() {
     value.status = "generating".into();
     service.put_draft(&owner, &mut value).await.unwrap();
     let token = CancellationToken::new();
-    service
-        .jobs
-        .lock()
-        .await
-        .insert(format!("{owner}:{}", value.id), token.clone());
+    service.jobs.lock().await.insert(
+        format!("{owner}:{}", value.id),
+        (token.clone(), value.miniapp_id.clone()),
+    );
     let state =
         MiniAppM1RouterState::new(service.application.clone()).with_product(service.clone());
     let user = CurrentUser {
@@ -411,4 +410,92 @@ async fn rejected_import_removes_only_its_temporary_copy() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn permanent_delete_removes_linked_drafts_membership_and_running_authoring() {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+    let (_db, _root, service, owner) = fixture().await;
+    let mut value = draft();
+    service.put_draft(&owner, &mut value).await.unwrap();
+    let saved = service.save_draft(&owner, &mut value).await.unwrap();
+    let id = saved.miniapp.miniapp_id.clone();
+    let workspace = Workspace {
+        revision: 1,
+        collections: vec![],
+        items: BTreeMap::from([(
+            id.clone(),
+            Item {
+                pinned: true,
+                ..Default::default()
+            },
+        )]),
+    };
+    service
+        .documents
+        .put(
+            &owner,
+            "library",
+            0,
+            &serde_json::to_string(&workspace).unwrap(),
+        )
+        .await
+        .unwrap();
+    let token = CancellationToken::new();
+    service.jobs.lock().await.insert(
+        format!("{owner}:{}", value.id),
+        (token.clone(), Some(id.clone())),
+    );
+    let trashed = service
+        .application
+        .trash(
+            &owner,
+            nomifun_api_types::TrashMiniAppRequest {
+                miniapp_id: id.clone(),
+                expected_product_revision: saved.miniapp.product_revision,
+                expected_pointer_revision: saved.miniapp.releases.pointer_revision,
+                expected_active_release_digest: saved
+                    .miniapp
+                    .releases
+                    .active
+                    .map(|r| r.release_digest),
+            },
+        )
+        .await
+        .unwrap();
+    let request = nomifun_api_types::DeleteMiniAppRequest {
+        miniapp_id: id.clone(),
+        expected_product_revision: trashed.miniapp.product_revision,
+        expected_lifecycle: nomifun_api_types::MiniAppLifecycleDto::Trashed,
+        expected_pointer_revision: trashed.miniapp.releases.pointer_revision,
+        expected_active_release_digest: trashed.miniapp.releases.active.map(|r| r.release_digest),
+    };
+    let state =
+        MiniAppM1RouterState::new(service.application.clone()).with_product(service.clone());
+    let router =
+        crate::router::miniapp_m1::miniapp_m1_write_routes(state).layer(Extension(CurrentUser {
+            id: nomifun_common::UserId::parse(owner.clone()).unwrap(),
+            username: "Owner".into(),
+        }));
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/miniapps/{id}/delete"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&request).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(service.draft(&owner, &value.id).await.is_err());
+    let organization = service.workspace(&owner).await.unwrap();
+    assert!(!organization.items.contains_key(&id));
+    assert_eq!(organization.revision, 2);
+    assert!(token.is_cancelled());
 }

@@ -32,7 +32,12 @@ import {
   libraryChanged,
   selectLibraryApps,
 } from './libraryState';
-import { miniAppTrashRequest, miniAppRestoreRequest } from './model';
+import {
+  miniAppTrashRequest,
+  miniAppRestoreRequest,
+  miniAppDeleteRequest,
+  miniAppRetryDeleteRequest,
+} from './model';
 import MiniAppImportDialog from './MiniAppImportDialog';
 import MiniAppCreatorPage from './MiniAppCreatorPage';
 import styles from './MiniAppProduct.module.css';
@@ -62,7 +67,7 @@ export default function MiniAppLibraryPage() {
   const [batch, setBatch] = useState(false),
     [selected, setSelected] = useState<Set<string>>(new Set());
   const [dialog, setDialog] = useState<
-    'groups' | 'name' | 'move' | 'trash' | 'delete-group' | null
+    'groups' | 'name' | 'move' | 'trash' | 'delete-group' | 'permanent' | null
   >(null);
   const [groupId, setGroupId] = useState<string | null>(null),
     [groupName, setGroupName] = useState(''),
@@ -192,7 +197,7 @@ export default function MiniAppLibraryPage() {
       <small>{count}</small>
     </button>
   );
-  const selectedAction = async (restore: boolean) => {
+  const selectedAction = async (restore: boolean, permanent = false) => {
     const completed: string[] = [];
     try {
       for (const id of selected) {
@@ -201,7 +206,17 @@ export default function MiniAppLibraryPage() {
         const detail = await ipcBridge.miniapps.getWorkshop.invoke({
           miniapp_id: app.miniapp_id,
         });
-        if (restore) {
+        if (permanent) {
+          if (detail.miniapp.lifecycle === 'deleting') {
+            const request = miniAppRetryDeleteRequest(detail);
+            if (!request) throw new Error('delete retry unavailable');
+            await ipcBridge.miniapps.retryDelete.invoke(request);
+          } else {
+            const request = miniAppDeleteRequest(detail);
+            if (!request) throw new Error('delete unavailable');
+            await ipcBridge.miniapps.delete.invoke(request);
+          }
+        } else if (restore) {
           const request = miniAppRestoreRequest(detail);
           if (!request) throw new Error('restore unavailable');
           await ipcBridge.miniapps.restore.invoke(request);
@@ -472,6 +487,16 @@ export default function MiniAppLibraryPage() {
                     : 'miniApps.product.moveToTrash',
                 )}
               </Button>
+              {filter === 'trash' && (
+                <Button
+                  size='small'
+                  status='danger'
+                  disabled={!selected.size || busy}
+                  onClick={() => setDialog('permanent')}
+                >
+                  {t('miniApps.product.permanentDelete')}
+                </Button>
+              )}
             </div>
           )}
           <div className={view === 'list' ? styles.list : styles.grid}>
@@ -659,9 +684,11 @@ export default function MiniAppLibraryPage() {
               ? 'miniApps.product.move'
               : dialog === 'trash'
                 ? 'miniApps.product.moveToTrash'
-                : dialog === 'delete-group'
-                  ? 'miniApps.product.deleteCollection'
-                  : 'miniApps.product.manageCollections',
+                : dialog === 'permanent'
+                  ? 'miniApps.product.permanentDelete'
+                  : dialog === 'delete-group'
+                    ? 'miniApps.product.deleteCollection'
+                    : 'miniApps.product.manageCollections',
         )}
         onCancel={busy ? undefined : () => setDialog(null)}
         footer={dialog === 'groups' ? null : undefined}
@@ -678,6 +705,8 @@ export default function MiniAppLibraryPage() {
             );
           else if (dialog === 'trash')
             void perform(() => selectedAction(false));
+          else if (dialog === 'permanent')
+            void perform(() => selectedAction(false, true));
           else if (dialog === 'delete-group')
             void perform(() =>
               updateMiniAppWorkspace((w) => {
@@ -715,6 +744,9 @@ export default function MiniAppLibraryPage() {
           </select>
         )}
         {dialog === 'trash' && <p>{t('miniApps.product.trashHint')}</p>}
+        {dialog === 'permanent' && (
+          <p>{t('miniApps.product.permanentDeleteHint')}</p>
+        )}
         {dialog === 'delete-group' && (
           <p>{t('miniApps.product.deleteCollectionHint')}</p>
         )}
