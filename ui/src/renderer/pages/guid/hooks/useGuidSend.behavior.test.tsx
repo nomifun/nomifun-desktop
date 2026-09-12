@@ -233,6 +233,7 @@ describe('useGuidSend HTTP behavior', () => {
         reuse_existing: true,
         model_route_refs: {},
         chat_route_records: {},
+        model: { provider_id: PROVIDER_ID, model: MODEL.use_model },
       },
     });
     expect(calls[1]).toEqual({

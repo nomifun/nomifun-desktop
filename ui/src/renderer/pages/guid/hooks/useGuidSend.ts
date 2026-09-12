@@ -121,6 +121,7 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
         launchPreset = await prepareOfficialAgent(
           selectedTemplate,
           t(`agentSettings.template.${TEMPLATE_I18N_PATH[selection.templateKey]}.name`),
+          current_model,
         );
       } catch (error) {
         throw new Error(officialAgentLaunchError(error, t));
