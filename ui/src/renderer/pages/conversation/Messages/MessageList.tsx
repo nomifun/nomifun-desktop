@@ -638,9 +638,11 @@ const MessageItem: React.FC<{ message: TMessage; highlighted?: boolean; hideActi
         data-message-type={message.type}
         data-message-position={message.position}
         className={classNames(
-          'min-w-0 flex items-start message-item [&>div]:max-w-full px-8px m-t-10px max-w-full md:max-w-780px mx-auto',
+          'min-w-0 flex items-start message-item [&>div]:max-w-full px-8px max-w-full md:max-w-780px mx-auto',
           message.type,
           {
+            'm-t-6px': message.type === 'tips' && message.content.type === 'error',
+            'm-t-10px': message.type !== 'tips' || message.content.type !== 'error',
             'justify-center': message.position === 'center',
             'justify-end': message.position === 'right',
             'justify-start': message.position === 'left',
