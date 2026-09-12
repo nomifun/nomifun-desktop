@@ -6,9 +6,9 @@
 
 - 当前范围排除（用户2026-09-13追加）：Browser Use、小程序、插件均暂不审改。MiniApp/Plugin平台与服务、页面、专属打包/声明/契约/测试及正在重构的worktree由原负责人继续；共享模块只处理可独立证明不改变上述域契约的通用问题。跳过不计已验证，既有提交保留。
 
-- 当前批次：R131/R132/R134/R135源码已验收至 `3fca59b55`，上一已核实远端 `60a3b43c2`；R136最终裁剪/R137需求MCP与会话端口/R139终端渲染独占继续，主线R138删除已确认无调用包装及弱测试。R115按小程序/插件排除要求撤回本人未提交补丁。
+- 当前批次：R136/R137/R138/R140源码已验收至 `a608b006e`，上一已核实远端 `9a5701f3d`；R139终端渲染、R141原生需求工具独占继续。R115按小程序/插件排除要求撤回本人未提交补丁。
 - 后续集成：当前分支已包含 `dd35e01de` 的 MiniApp 分支合并；设计文档已跟踪。本批仅更新遗留路由测试，未修改 MiniApp 产品实现，模块仍待深审。
-- 全局覆盖：111 个模块边界中，7 个已验证、72 个部分完成、32 个待审、0 个整模块审计中；347 个唯一问题/任务。当前三个子范围正在继续；完整阅读与跨模块问题闭环分开登记，Browser Use仍暂跳过。
+- 全局覆盖：111 个模块边界中，7 个已验证、72 个部分完成、32 个待审、0 个整模块审计中；354 个唯一问题/任务。当前两个子范围正在继续；完整阅读与跨模块问题闭环分开登记，Browser Use仍暂跳过。
 - R1 证据：[首轮记录](2026-09-12-code-quality.zh.md)。R1–R39 各报告中的“未提交/dirty”描述是当时快照；当前提交状态以下方验收记录为准。
 - R2 证据：[运行时与测试边界记录](2026-09-12-runtime-and-test-boundaries.zh.md)，包含改动、失败尝试、验证及覆盖限制。
 - R3 证据：[生命周期与状态记录](2026-09-12-lifecycle-and-state.zh.md)，记录四个 Host 旧实现失败、Context falsy 初值及消息重放缺陷；保留待办，勿重复修复。
@@ -426,7 +426,35 @@ R135沿R128-05，未重算R128已经全文读过的attachments覆盖。序列化
 
 四批生产净减36行（R131 +51、R132 -81、R134 -13、R135 +7），测试净增282行（+226/+24/-6/+38），总+246；没有新增依赖或通用框架，测试增长单列。
 
-## 当前并行边界（R136 / R137 / R138 / R139）
+## R136 / R137 / R138 / R140 阶段验收
+
+| 批次 | 已提交源码 | 最终验证 |
+| --- | --- | --- |
+| R136 Agent最终裁剪 | a680f6a96 | nomi-agent --lib tool_execution::tests：20/0，4线程 |
+| R137 需求MCP/会话端口 | 4c104b17e | requirement相关22/0中的mcp_server/conversation_port共13/0，4线程 |
+| R138 无调用包装/弱测试 | cd4aabe2e | 最终prompt/两条service领取/真实生命周期事件共8/0，4线程 |
+| R140 领取映射去重 | a608b006e | 与R138共享8/0，增强真实SQLite回归；随后只调整断言换行 |
+
+R136仅全读授权函数26行/相关测试22行及实际调用548–620、邻接925–967/1118–1152，Tool chars契约245–254；不是整个tool_execution全文。单一双向字符迭代器避免头尾重叠，按实际字符计数并消除half-1下溢；保留奇数预算两端各floor和原marker。原三个测试增强后旧0/3（含真实下溢）→调用模块20/0；marker仍不计预算，不保证字素簇不分割或后续压缩端到端。
+
+R137全文读mcp_server1038/conversation_port662，共1700行；累计Requirement15源文件11117行及3集成430行。拒绝数字/bool/数组/对象备注，主线保留缺失/null/空串到None的旧语义，六组真实SQLite+回环HTTP覆盖两工具的拒绝不变及合法完成。旧实现实际返回marked complete失败；修后两组13/0。删无必要Box::leak及仅被自身测试消费的三份test-only转换副本，保留runner兼容别名与真实lease测试；不将测试副本删除计为生产精简。原生工具同类输入继续R141，关闭/续租/撤销/host快照契约未闭环。
+
+R138全仓无生产调用的terminal_expects_verdict及两处恒等测试删除；另删runner两条仅测试派生枚举相等/Debug的用例，以及只检查新建空RecordingDriver、从未调用业务的假恢复测试。保留真实raw lifecycle/token回归，未改runner执行逻辑；不将通过空测试称恢复验证。runner未全文已读，删除块来自已完整核对的专属片段。
+
+R140对照service两个领取入口与DB RequirementClaim类型，合并相同token校验/DTO/事件映射至私有finish_runner_claim；保留owner解析、数据库入口、None、错误文本及事件顺序。增强现有SQLite测试验证recover不分配pending、两种入口恢复同一代次/令牌/尝试计数；无新测试文件/接口/框架。最新8/0替代22/0里重叠的旧领取/提示断言，R13713/0仍有效，去重后本波Requirement21/0。
+
+四批生产净减24行（R136 +3、R137 0、R138 -12、R140 -15），测试净减56行（+22/-29/-59/+10），总净减80行；无新增依赖。未运行全Rust workspace、真实CLI/外网或其他OS。
+
+## 当前并行边界（R139 / R141）
+
+| 批次 / 负责人 | 独占写集 | 任务 |
+| --- | --- | --- |
+| R139 / Carver | XtermView/TerminalSendBox及各自专属测试 | 订阅/回放/输入/resize生命周期，独立收口，不回改会话页面 |
+| R141 / Hypatia | nomi-agent/requirement_tools.rs及专属内嵌测试 | 原生输入与前置schema核对，局部拒绝非法类型或等价精简；后端/执行引擎只读 |
+
+R136/R137/R138/R140已冻结提交，Rust串行，其他模块只读；排除域约束不变。
+
+## 历史并行边界（R136 / R137 / R138 / R139）
 
 | 批次 / 负责人 | 独占写集 | 任务 |
 | --- | --- | --- |
@@ -1116,7 +1144,7 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | R128-03 | 待审 | order_key八位sort_seq编码溢出与空键哨兵冲突 | 8位为最小宽度，100000000排序先于99999998且99999999冲突；涉及旧sort_seq持久数据，不只改新写入 |
 | R128-04 | 待审 | 附件导入取消/当前失败副本清理与弱回归 | 492–627只处理收到的错误；中途失败测试以缺失源触发全量预检，没覆盖copy中途失败/async取消；需真实故障点验证 |
 | R128-05 | 已验证 | 附件删除journal写入与读取容量不一致 | R135序列化后/发布前同16MiB上限拒绝，read按take(limit+1)实读检查；规范条目边界旧失败，相关37/0；未证明序列化内存或跨DB事务有界 |
-| R128-06 | 部分完成 | Requirement剩余文件与跨边界续读 | R128/R132累计全读13源文件9417行及3集成430行；auto_work_runner/mcp_server/conversation_port共6871行未全读，后两交R137；通知沿R46-05，fixture数据库泄漏待整理 |
+| R128-06 | 部分完成 | Requirement剩余文件与跨边界续读 | R128/R132/R137累计全读15源文件11117行及3集成430行；auto_work_runner原5171行仅指定片段，R138删弱测试后5118行未全读；通知沿R46-05，其余fixture数据库泄漏待整理 |
 | R129-01 | 已验证 | 搜索pattern被解析成选项、后端错误伪装无匹配 | rg/grep使用-e和--，findstr用/C保持模式整体；统一退出错误含backend/status/stderr，26/0 |
 | R129-02 | 已验证 | 非法选参或fallback静默丢条件扩大搜索 | path/glob/bool/context按类型拒绝；findstr不支持glob/context明确报错，目录递归与单文件隔离真实验证 |
 | R129-03 | 部分完成 | 搜索输出缓冲/取消和Glob剩余容量边界 | output全量缓冲后截断，取消不杀子进程；后端regex差异、任意rg启动错误fallback、Glob文本路径锁别名与容量仍待审 |
@@ -1126,9 +1154,16 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | R131-04 | 部分完成 | 终端渲染及跨端顺序剩余边界 | Xterm回放/实时输出及输入继续R139；本地忽略不取消服务端操作，事件与响应无全局版本顺序 |
 | R132-01 | 已验证 | AutoWork读回时修改opaque operation_id破坏重放识别 | 保留身份原字符串，只用trim校验非空；tag仍归一化，旧roundtrip失败，相关37/0 |
 | R132-02 | 已验证 | 单一Nomi类型仍保留不可达无工具模板 | 穷尽match复用现有模板，删单层wrapper和过时注释，生产净减81行；公共签名/有效提示不变 |
-| R132-03 | 部分完成 | 需求工具注入和异步IDMM归属未闭环 | AgentType提示与实际is_instance_owner/Some(sink)注入需追完整准入，未证明可达故障；hooks detached ensure的取消关闭沿R125-04，恒等wrapper交R138 |
+| R132-03 | 部分完成 | 需求工具注入和异步IDMM归属未闭环 | AgentType提示与实际is_instance_owner/Some(sink)注入需追完整准入，未证明可达故障；hooks detached ensure的取消关闭沿R125-04，恒等wrapper已由R138删除 |
 | R134-01 | 已验证 | 头尾截断重复分支/无效后缀遍历与弱断言 | 等价简化并强化原8测试，8/0，生产-13测试-6；并非UTF8行为bug修复 |
-| R134-02 | 待审 | Agent最终裁剪混用bytes/chars及零一预算下溢 | tool_execution::truncate_result字节门槛/删除计数却字符切片，emoji可重复，half-1可下溢；调用方契约为chars，交R136，不改Tool字节裁剪契约 |
+| R134-02 | 已验证 | Agent最终裁剪混用bytes/chars及零一预算下溢 | R136按同一双向字符迭代器取头尾和删除计数，原3测试旧全部失败→tool_execution20/0；不改Tool字节裁剪或marker预算契约 |
+| R137-01 | 已验证 | MCP非法备注被忽略后仍执行完成/失败 | 两入口按类型拒绝，缺省/null/空串保持None；真实旧数字备注完成需求失败，两文件13/0 |
+| R137-02 | 已验证 | MCP测试夹具无必要Box::leak | pool克隆已维持所需生命周期，删永久泄漏包装；真实HTTP/SQLite测试通过 |
+| R137-03 | 已验证 | test-only会话转换副本仅被自身测试使用 | 删三转换/无效测试共81行，真实App映射未改、runner四兼容别名保留；不算生产减量 |
+| R137-04 | 部分完成 | 原生备注输入/MCP关闭及host准备快照剩余边界 | 原生工具静态降级交R141；abort serve不等待在途、capability续租/撤销竞态和host屏障覆盖未验证，不扩建生命周期框架 |
+| R138-01 | 已验证 | 无生产调用的terminal_expects_verdict恒等包装 | 全仓引用仅两处测试，删wrapper及调用测试，不改完成判定 |
+| R138-02 | 已验证 | runner派生枚举断言与未执行业务的假恢复测试 | 删除两条Eq/Debug断言和仅空RecordingDriver的恢复测试；保留真实raw lifecycle/token回归，最终相关8/0 |
+| R140-01 | 已验证 | 首次/恢复领取重复token校验及结果发布 | 私有helper统一Option/token/DTO/event映射，生产-15；现有SQLite增强覆盖不分配pending及两入口代次/令牌保持，8/0 |
 | R133-01 | 已验证 | Web缺少优雅关停入口 | 复用App现有shutdown_signal，Web9/0；未模拟实际OS信号/长连接排空 |
 | R133-02 | 已验证 | App关停watch无业务消费者 | 两处只创建/发送却无人读取，删channel/clone/send，三文件生产净减10行 |
 | R133-03 | 部分完成 | 独立Web/共享App关闭及启动边界 | 长连接graceful drain无界、signal注册expect、其他OS/真实关停未验；共享bootstrap/auth继续，不扩大到排除域 |
@@ -1202,7 +1237,7 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | `crates/backend/nomifun-plugin-service/` | 待审 | 用户要求暂跳过、正在独立重构；既有commit_fence/auto_apply调用记录保留，未闭环项不计完成 |
 | `crates/backend/nomifun-public/` | 部分完成 | R45 全 5 个源文件/内联测试及相关调用已读；预检/取消占位/归属/refill 修复后 29/0；rmcp 在途处理容量、Host shutdown 与 observation 全量投影见 R45-04 |
 | `crates/backend/nomifun-realtime/` | 部分完成 | R53 全 9 Rust 文件及调用已读；socket/heartbeat 生命周期修复，102/0。认证用户有效状态、App shutdown、阻塞写入时 policy Close 和容量边界见 R53-03 |
-| `crates/backend/nomifun-requirement/` | 部分完成 | R128/R132全读13源文件9417行及3集成430行；R135日志容量与配置/提示相关37/0；剩余3文件6871行及跨写入/排序等仍待续 |
+| `crates/backend/nomifun-requirement/` | 部分完成 | R128/R132/R137全读15源文件11117行及3集成430行；配置/日志37/0，MCP/端口13/0及领取/提示8/0；runner未全读及跨写入/排序等仍待续 |
 | `crates/backend/nomifun-robot/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-runtime/` | 部分完成 | R49 全 11 原始 Rust 文件及调用已读；R55 目录/解析重复缓存红→绿，38/0；删除无业务测试。构建缓存、非 Linux Unix 探针、版本排序和资产映射仍见 R49-05 |
 | `crates/backend/nomifun-shell/` | 部分完成 | R50全源文件及集成/调用已读；R65 Windows路径移出cmd命令文本，整包96/0；GUI/UNC未验、hand-off归属R50-04保留 |
