@@ -529,6 +529,8 @@
     "enableOpen": "启用并打开",
     "trashedNotice": "这个小程序在最近删除中，恢复后可以继续使用。",
     "trashHint": "小程序及其数据会保留在最近删除中，之后可以恢复。",
+    "permanentDelete": "永久删除",
+    "permanentDeleteHint": "这会永久删除选中的小程序、关联草稿及其使用数据，无法恢复。",
     "unsavedNotice": "这个小程序还没有保存为可用版本，可以继续创作。",
     "openFailed": "小程序暂时无法打开，请重试。",
     "importTitle": "导入小程序",

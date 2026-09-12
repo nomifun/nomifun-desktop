@@ -165,7 +165,7 @@ pub(super) async fn generate(
         .jobs
         .lock()
         .await
-        .insert(job_key.clone(), token.clone());
+        .insert(job_key.clone(), (token.clone(), draft.miniapp_id.clone()));
     let worker = service.clone();
     let snapshot = draft.clone();
     tokio::spawn(async move {

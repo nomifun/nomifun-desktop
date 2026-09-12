@@ -4142,6 +4142,8 @@ export type I18nKey =
   | 'miniApps.product.openFailed'
   | 'miniApps.product.operationFailed'
   | 'miniApps.product.organize'
+  | 'miniApps.product.permanentDelete'
+  | 'miniApps.product.permanentDeleteHint'
   | 'miniApps.product.pin'
   | 'miniApps.product.pinned'
   | 'miniApps.product.preview'
