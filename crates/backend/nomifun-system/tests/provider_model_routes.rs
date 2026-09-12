@@ -229,7 +229,9 @@ async fn mixed_case_ark_platforms_reject_invalid_video_models_before_persistence
 async fn full_save_list_update_and_query_delete_roundtrip() {
     let db = init_database_memory().await.unwrap();
     let provider_id = create_provider(&db, "stepfun", "StepFun").await;
-    let model = "future-user-model-2026-08-11";
+    // Saving permits long natural keys; they must remain deletable as well.
+    let model_name = format!("future-user-model-{}", "x".repeat(513));
+    let model = model_name.as_str();
 
     let save = json!({
         "provider_id": provider_id.clone(),

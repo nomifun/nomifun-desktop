@@ -1950,9 +1950,9 @@ impl WorkshopService {
         model: &str,
     ) -> Result<ProviderModelCleanupPlan, AppError> {
         let model = model.trim();
-        if model.is_empty() || model.chars().count() > 512 {
+        if model.is_empty() {
             return Err(AppError::BadRequest(
-                "provider model must contain 1 to 512 characters".into(),
+                "provider model must not be empty".into(),
             ));
         }
         self.build_provider_model_cleanup_plan(provider_id, Some(model))
@@ -5425,6 +5425,19 @@ mod tests {
             .expect("unrelated template planning binding must survive provider cleanup");
         assert_eq!(surviving_planning_binding.provider_id, other_provider_id);
         assert_eq!(surviving_planning_binding.model, "keep-me");
+    }
+
+    #[tokio::test]
+    async fn exact_model_cleanup_accepts_long_saved_keys_but_rejects_empty_keys() {
+        let barrier = Arc::new(ProviderLifecycleBarrier::new());
+        let (svc, _dir, _db) = service_with_database_and_lifecycle(Some(barrier.clone())).await;
+        let _write_guard = barrier.write().await;
+        let provider_id = "0190f5fe-7c00-7a00-8000-00000000008a";
+        let cleanup = svc.plan_provider_model_cleanup_under_lifecycle_write_guard(
+            provider_id, &"x".repeat(513),
+        ).await.unwrap();
+        assert!(cleanup.projects.is_empty() && cleanup.templates.is_empty());
+        assert!(svc.plan_provider_model_cleanup_under_lifecycle_write_guard(provider_id, "  ").await.is_err());
     }
 
     #[tokio::test]
