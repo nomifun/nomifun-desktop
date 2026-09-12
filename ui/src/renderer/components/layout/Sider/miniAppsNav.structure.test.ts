@@ -49,10 +49,31 @@ describe('mini-apps rail navigation', () => {
     expect(iconImportLine.includes('* ')).toBe(false);
   });
 
-  test('both mini-app routes are registered behind the route fallback', () => {
-    expect(routerSource.includes("path='/mini-apps' element={withRouteFallback(MiniAppsListPage)}")).toBe(true);
-    expect(routerSource.includes("path='/mini-apps/:id' element={withRouteFallback(MiniAppRunnerPage)}")).toBe(true);
-    expect(routerSource.includes("import('@renderer/pages/miniApps')")).toBe(true);
-    expect(routerSource.includes("import('@renderer/pages/miniApps/RunnerPage')")).toBe(true);
+  test('library, runner, and creator routes use their product pages behind the route fallback', () => {
+    const source = routerSource.replace(/\s+/g, ' ');
+    const routes = [
+      ['/mini-apps', 'MiniAppsListPage'],
+      ['/mini-apps/new', 'MiniAppCreatorPage'],
+      ['/mini-apps/create/:draftId', 'MiniAppCreatorPage'],
+      ['/mini-apps/:id', 'MiniAppRunnerPage'],
+    ];
+    for (const [path, component] of routes) {
+      expect(source).toContain(
+        `<Route path='${path}' element={withRouteFallback(${component})} />`
+      );
+    }
+
+    // Check the route component's lazy binding, not an unrelated import or
+    // the compatibility re-export left at the former page entry point.
+    const pages = [
+      ['MiniAppsListPage', 'MiniAppLibraryPage'],
+      ['MiniAppRunnerPage', 'MiniAppRunPage'],
+      ['MiniAppCreatorPage', 'MiniAppCreatorPage'],
+    ];
+    for (const [component, page] of pages) {
+      expect(source).toContain(
+        `const ${component} = React.lazy(() => import('@renderer/pages/miniApps/${page}'));`
+      );
+    }
   });
 });
