@@ -112,19 +112,20 @@ impl ProviderService {
         &self,
         req: CreateProviderRequest,
     ) -> Result<ProviderResponse, AppError> {
-        reject_managed_platform(&req.platform)?;
+        let platform = req.platform.trim();
+        reject_managed_platform(platform)?;
         validate_provider_id(req.provider_id.as_deref())?;
-        validate_required_text("platform", &req.platform)?;
+        validate_required_text("platform", platform)?;
         validate_required_text("name", &req.name)?;
         validate_sort_order(req.sort_order)?;
         let bedrock_config = normalize_bedrock_config(req.bedrock_config.as_ref());
         let auth_scheme = validate_provider_auth(
-            &req.platform,
+            platform,
             &req.auth_scheme,
             &req.credentials,
             bedrock_config.as_ref(),
         )?;
-        validate_provider_base_url(&req.platform, &req.base_url)?;
+        validate_provider_base_url(platform, &req.base_url)?;
 
         let prepared_connections = req
             .connections
@@ -134,13 +135,13 @@ impl ProviderService {
         let connection_targets = unique_connection_targets(&prepared_connections)?;
         for capability in &req.initial_model.capabilities {
             validate_known_provider_model_task(
-                &req.platform,
+                platform,
                 &req.initial_model.model,
                 capability.task,
             )?;
         }
         validate_capability_set(
-            &req.platform,
+            platform,
             &req.base_url,
             &auth_scheme,
             &connection_targets,
@@ -172,7 +173,7 @@ impl ProviderService {
         let bedrock_config = serialize_opt(&bedrock_config, "bedrock_config")?;
         let params = CreateProviderParams {
             provider_id: req.provider_id.as_deref(),
-            platform: req.platform.trim(),
+            platform,
             name: req.name.trim(),
             base_url: req.base_url.trim(),
             auth_scheme: &auth_scheme,
@@ -267,11 +268,11 @@ impl ProviderService {
             }
             _ => None,
         };
-        let bedrock_json = req
-            .bedrock_config
-            .as_ref()
-            .map(|config| serialize_json(config, "bedrock_config"))
-            .transpose()?;
+        let bedrock_json = if req.bedrock_config.is_some() {
+            serialize_opt(&next_bedrock, "bedrock_config")?
+        } else {
+            None
+        };
         let provider = self
             .repo
             .update(
@@ -590,10 +591,6 @@ pub(crate) fn validate_provider_base_url(platform: &str, base_url: &str) -> Resu
             ))
         };
     }
-    validate_base_url(base_url)
-}
-
-pub(crate) fn validate_base_url(base_url: &str) -> Result<(), AppError> {
     crate::provider_model::validate_base_url(base_url)
 }
 
