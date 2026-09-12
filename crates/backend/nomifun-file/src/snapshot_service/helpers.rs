@@ -533,6 +533,7 @@ pub(super) fn stage_all_with_deletions(repo: &Repository) -> Result<(), AppError
 /// For existing files, adds to the index. For deleted files, removes from
 /// the index (equivalent to `git add <deleted-file>`).
 pub(super) fn stage_single_file(repo: &Repository, rel_path: &str) -> Result<(), AppError> {
+    validate_snapshot_relative_path(rel_path)?;
     let workdir = repo
         .workdir()
         .ok_or_else(|| AppError::Internal("Repository has no workdir".into()))?;
@@ -542,7 +543,12 @@ pub(super) fn stage_single_file(repo: &Repository, rel_path: &str) -> Result<(),
         .index()
         .map_err(|e| AppError::Internal(format!("Failed to get index: {}", e)))?;
 
-    if abs_path.exists() {
+    let exists = match std::fs::symlink_metadata(&abs_path) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(AppError::Internal(format!("Failed to inspect file {}: {}", rel_path, error))),
+    };
+    if exists {
         index
             .add_path(Path::new(rel_path))
             .map_err(|e| AppError::Internal(format!("Failed to stage file {}: {}", rel_path, e)))?;
@@ -561,15 +567,48 @@ pub(super) fn stage_single_file(repo: &Repository, rel_path: &str) -> Result<(),
 
 /// Unstage a single file (reset it in the index to match HEAD).
 pub(super) fn unstage_single_file(repo: &Repository, rel_path: &str) -> Result<(), AppError> {
+    validate_snapshot_relative_path(rel_path)?;
     let head = repo
         .head()
         .map_err(|e| AppError::Internal(format!("Failed to get HEAD: {}", e)))?;
     let commit = head
         .peel_to_commit()
         .map_err(|e| AppError::Internal(format!("Failed to peel HEAD: {}", e)))?;
-    // reset_default expects a commit-ish object, not a tree
-    repo.reset_default(Some(commit.as_object()), [rel_path])
+    let tree = commit
+        .tree()
+        .map_err(|e| AppError::Internal(format!("Failed to get HEAD tree: {}", e)))?;
+    // reset_default interprets pathspecs. Read HEAD in memory to copy only the
+    // literal entry, retaining this index's case rules and the HEAD file mode.
+    let mut index = repo.index()
+        .map_err(|e| AppError::Internal(format!("Failed to get index: {}", e)))?;
+    index.read_tree(&tree)
+        .map_err(|e| AppError::Internal(format!("Failed to read HEAD tree: {}", e)))?;
+    // Normalize validated components: Index::get_path panics on a leading '.'.
+    let path: PathBuf = Path::new(rel_path).components()
+        .filter(|part| matches!(part, std::path::Component::Normal(_))).collect();
+    // get_path and find_prefix both use case-sensitive lookups. Honor the
+    // repository's case-folding rule without reintroducing glob matching.
+    let ignore_case = match repo.config().and_then(|config| config.get_bool("core.ignorecase")) {
+        Ok(value) => value,
+        Err(error) if error.code() == git2::ErrorCode::NotFound => false,
+        Err(error) => return Err(AppError::Internal(format!("Failed to read index case rules: {}", error))),
+    };
+    let literal = path.components().map(|part| part.as_os_str().to_str().unwrap())
+        .collect::<Vec<_>>().join("/");
+    let baseline = index.get_path(&path, 0).or_else(|| {
+        ignore_case.then(|| index.iter().find(|entry| entry.path.eq_ignore_ascii_case(literal.as_bytes()))).flatten()
+    });
+    // Reload all staged entries before editing; the HEAD index is never written.
+    index.read(true)
+        .map_err(|e| AppError::Internal(format!("Failed to reload index: {}", e)))?;
+    index.remove_path(&path)
         .map_err(|e| AppError::Internal(format!("Failed to unstage file {}: {}", rel_path, e)))?;
+    if let Some(entry) = baseline {
+        index.add(&entry)
+            .map_err(|e| AppError::Internal(format!("Failed to restore index entry {}: {}", rel_path, e)))?;
+    }
+    index.write()
+        .map_err(|e| AppError::Internal(format!("Failed to write index: {}", e)))?;
     Ok(())
 }
 
@@ -638,8 +677,8 @@ pub(super) fn reset_single_file(
 ) -> Result<(), AppError> {
     // Validate before changing the index, not only before the working tree.
     validate_snapshot_relative_path(rel_path)?;
-    // Step 1: unstage (ignore errors for files not in index)
-    let _ = unstage_single_file(repo, rel_path);
+    // Do not delete or overwrite the working file if resetting the index fails.
+    unstage_single_file(repo, rel_path)?;
 
     // Step 2: restore working tree
     discard_single_file(repo, workspace, rel_path, operation)
@@ -659,10 +698,19 @@ fn validate_snapshot_relative_path(rel_path: &str) -> Result<(), AppError> {
 
 /// Checkout a single file from HEAD, restoring it in the working tree.
 fn checkout_path_from_head(repo: &Repository, rel_path: &str) -> Result<(), AppError> {
+    let tree = repo.head().and_then(|head| head.peel_to_tree())
+        .map_err(|e| AppError::Internal(format!("Failed to get HEAD tree: {}", e)))?;
+    let entry = tree.get_path(Path::new(rel_path))
+        .map_err(|e| AppError::Internal(format!("Failed to find {} in HEAD: {}", rel_path, e)))?;
+    // A missing literal path must not succeed as a no-op, and a directory
+    // must not turn a single-file request into a recursive checkout.
+    if entry.kind() == Some(git2::ObjectType::Tree) {
+        return Err(AppError::BadRequest("snapshot checkout path must be a file".into()));
+    }
     let mut cb = git2::build::CheckoutBuilder::new();
-    cb.force().path(rel_path);
+    cb.force().disable_pathspec_match(true).path(rel_path);
 
-    repo.checkout_head(Some(&mut cb))
+    repo.checkout_tree(tree.as_object(), Some(&mut cb))
         .map_err(|e| AppError::Internal(format!("Failed to checkout {} from HEAD: {}", rel_path, e)))?;
     Ok(())
 }
