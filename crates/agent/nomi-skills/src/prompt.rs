@@ -365,25 +365,7 @@ mod tests {
             make_skill("skill-c", "Desc C", None, false, false),
         ];
         let result = format_skills_within_budget(&skills, None);
-        assert!(result.contains("- skill-a: Desc A"));
-        assert!(result.contains("- skill-b: Desc B"));
-        assert!(result.contains("- skill-c: Desc C"));
-        assert!(
-            !result.contains('\u{2026}'),
-            "full mode should not truncate"
-        );
-    }
-
-    #[test]
-    fn test_format_skills_within_budget_full_mode_line_count() {
-        let skills = vec![
-            make_skill("a", "Desc A", None, false, false),
-            make_skill("b", "Desc B", None, false, false),
-            make_skill("c", "Desc C", None, false, false),
-        ];
-        let result = format_skills_within_budget(&skills, None);
-        let lines: Vec<&str> = result.lines().collect();
-        assert_eq!(lines.len(), 3, "each skill should be on its own line");
+        assert_eq!(result, "- skill-a: Desc A\n- skill-b: Desc B\n- skill-c: Desc C");
     }
 
     #[test]
@@ -562,12 +544,11 @@ mod tests {
         // should not panic
         let result = format_skills_within_budget(&skills, Some(10_000));
         assert!(
-            result.contains('…') || !result.is_empty(),
-            "result should be non-empty and handle CJK without panic"
+            result.contains('…'),
+            "over-budget CJK descriptions must actually be truncated"
         );
-        assert!(
-            result.contains("bundled"),
-            "bundled skill must appear in result"
-        );
+        assert!(UnicodeWidthStr::width(result.as_str()) <= get_char_budget(Some(10_000)));
+        assert!(result.starts_with("- bundled: Bundled desc\n"));
+        assert_eq!(result.lines().count(), 4);
     }
 }

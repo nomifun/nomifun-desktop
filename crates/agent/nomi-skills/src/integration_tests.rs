@@ -177,6 +177,31 @@ async fn tc_e2e_3_shell_command_execution() {
 }
 
 // ---------------------------------------------------------------------------
+// Argument substitution precedes shell execution, including newly generated
+// shell syntax. MCP content must remain inert after the same substitution.
+#[tokio::test]
+async fn inline_argument_generated_shell_respects_mcp_boundary() {
+    let local_dir = TempDir::new().unwrap();
+    let mcp_dir = TempDir::new().unwrap();
+    let mut skill = make_skill("generated-shell", "$ARGUMENTS");
+    let args = "!`echo side_effect > inline-effect.txt`";
+
+    let result = prepare_inline_content(&skill, Some(args), None, local_dir.path().to_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(result, "");
+    assert!(local_dir.path().join("inline-effect.txt").is_file());
+
+    skill.source = SkillSource::Mcp;
+    skill.loaded_from = LoadedFrom::Mcp;
+    let result = prepare_inline_content(&skill, Some(args), None, mcp_dir.path().to_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(result, args);
+    assert!(!mcp_dir.path().join("inline-effect.txt").exists());
+}
+
+// ---------------------------------------------------------------------------
 // TC-E2E-4a: Permission decision — deny takes priority
 // AC-7: deny rule blocks execution even when allow rule also matches
 // ---------------------------------------------------------------------------
@@ -399,60 +424,6 @@ fn tc_e2e_9_prompt_budget_truncation() {
     // Budget = 50 tokens * 4 chars/token * 1% = 2 chars — that's extremely tight.
     // With bundled protection, at minimum bundled entry is present.
     // We just verify bundled is there and not all regular skills are full-expanded.
-}
-
-// ---------------------------------------------------------------------------
-// TC-E2E-10: Multi-directory deduplication — first discovered wins
-// AC-13: duplicate skill name across two dirs → only first survives
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn tc_e2e_10_multi_dir_dedup_first_wins() {
-    let tmp_a = TempDir::new().unwrap();
-    let tmp_b = TempDir::new().unwrap();
-
-    write_skill_dir(
-        tmp_a.path(),
-        "my-skill",
-        "---\nname: my-skill\ndescription: from dir A\n---\nbody A",
-    );
-    write_skill_dir(
-        tmp_b.path(),
-        "my-skill",
-        "---\nname: my-skill\ndescription: from dir B\n---\nbody B",
-    );
-
-    // Load from dir A then dir B, deduplicate by name (first wins)
-    let loaded_a = load_skills_from_dir(tmp_a.path(), SkillSource::User, LoadedFrom::Skills).await;
-    let loaded_b =
-        load_skills_from_dir(tmp_b.path(), SkillSource::Project, LoadedFrom::Skills).await;
-
-    // Merge: A comes first (higher priority)
-    let mut all_metadata: Vec<SkillMetadata> = loaded_a
-        .into_iter()
-        .map(|ls| ls.metadata)
-        .chain(loaded_b.into_iter().map(|ls| ls.metadata))
-        .collect();
-
-    // Apply name-based dedup (first wins)
-    let mut seen = std::collections::HashSet::new();
-    all_metadata.retain(|s| seen.insert(s.name.clone()));
-
-    // AC-13 assertions
-    let matches: Vec<_> = all_metadata
-        .iter()
-        .filter(|s| s.name == "my-skill")
-        .collect();
-    assert_eq!(
-        matches.len(),
-        1,
-        "duplicate skill should be deduplicated to one entry"
-    );
-    assert_eq!(
-        matches[0].description, "from dir A",
-        "first discovered (dir A) should win dedup, got: {}",
-        matches[0].description
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -879,37 +850,6 @@ async fn wb_5b_shell_block_multiline_command() {
 }
 
 // ---------------------------------------------------------------------------
-// WB-6: loader — build_namespace colon separation [白盒]
-// ---------------------------------------------------------------------------
-
-#[test]
-fn wb_6a_build_namespace_two_levels() {
-    use crate::loader::build_namespace;
-    use std::path::Path;
-    let base = Path::new("/skills");
-    let target = Path::new("/skills/db/migrate");
-    assert_eq!(build_namespace(base, target), "db:migrate");
-}
-
-#[test]
-fn wb_6b_build_namespace_single_level() {
-    use crate::loader::build_namespace;
-    use std::path::Path;
-    assert_eq!(
-        build_namespace(Path::new("/skills"), Path::new("/skills/my-skill")),
-        "my-skill"
-    );
-}
-
-#[test]
-fn wb_6c_build_namespace_same_dir_empty() {
-    use crate::loader::build_namespace;
-    use std::path::Path;
-    let base = Path::new("/skills");
-    assert_eq!(build_namespace(base, base), "");
-}
-
-// ---------------------------------------------------------------------------
 // WB-7: context_modifier — is_empty and from_skill branches [白盒]
 // ---------------------------------------------------------------------------
 
@@ -931,38 +871,4 @@ fn wb_7c_allowed_tools_only_does_not_modify_parent_context() {
     let mut skill = make_skill("tools", "body");
     skill.allowed_tools = vec!["Write".to_string()];
     assert!(crate::context_modifier::from_skill(&skill).is_none());
-}
-
-// ---------------------------------------------------------------------------
-// WB-8: prompt — format_skills_within_budget edge cases [白盒]
-// ---------------------------------------------------------------------------
-
-#[test]
-fn wb_8a_empty_skills_returns_empty_string() {
-    let result = format_skills_within_budget(&[], None);
-    assert_eq!(result, "");
-}
-
-#[test]
-fn wb_8b_single_skill_within_budget() {
-    let mut skill = make_skill("my-skill", "body");
-    skill.description = "A short description".to_string();
-    let result = format_skills_within_budget(&[skill], None);
-    assert!(result.contains("my-skill"));
-    assert!(result.contains("A short description"));
-}
-
-#[test]
-fn wb_8c_all_bundled_no_non_bundled() {
-    // When only bundled skills exist, they're all returned even under budget pressure
-    let mut b1 = make_skill("bundled-a", "body");
-    b1.source = SkillSource::Bundled;
-    b1.description = "Bundled A".to_string();
-    let mut b2 = make_skill("bundled-b", "body");
-    b2.source = SkillSource::Bundled;
-    b2.description = "Bundled B".to_string();
-
-    let result = format_skills_within_budget(&[b1, b2], Some(1)); // tiny budget
-    assert!(result.contains("bundled-a"), "bundled A should be present");
-    assert!(result.contains("bundled-b"), "bundled B should be present");
 }

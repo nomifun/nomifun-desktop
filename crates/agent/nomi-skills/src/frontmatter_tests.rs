@@ -109,6 +109,29 @@ fn tc_2_3_square_bracket_in_value() {
 }
 
 #[test]
+fn fallback_preserves_valid_collections_and_block_scalars() {
+    let input = "---\nargument-hint: [optional]\nallowed-tools: [Read, Write]\narguments: [query, limit]\npaths: [src/**, tests/**]\nhooks: {Stop: [{hooks: [{type: command, command: echo done}]}]}\ndescription: |\n  First line\n  Second line\n---\nbody";
+    let parsed = parse_frontmatter(input);
+    let meta = parse_skill_fields(
+        &parsed.frontmatter,
+        &parsed.content,
+        "fallback",
+        SkillSource::User,
+        LoadedFrom::Skills,
+        None,
+    );
+    assert_eq!(meta.argument_hint.as_deref(), Some("[optional]"));
+    assert_eq!(meta.allowed_tools, ["Read", "Write"]);
+    assert_eq!(meta.argument_names, ["query", "limit"]);
+    assert_eq!(meta.paths, ["src/**", "tests/**"]);
+    assert_eq!(meta.description, "First line\nSecond line");
+    assert_eq!(meta.content, "body");
+    let hooks = crate::hooks::parse_skill_hooks(meta.hooks_raw.as_ref(), &meta.name, meta.source)
+        .expect("fallback must preserve the hooks mapping");
+    assert_eq!(hooks.stop[0].command, "echo done");
+}
+
+#[test]
 fn tc_2_4_asterisk_in_value() {
     let input = "---\ndescription: Match *.rs files\n---\nbody";
     let parsed = parse_frontmatter(input);
@@ -453,8 +476,21 @@ fn tc_6_6_three_element_brace() {
 
 #[test]
 fn tc_6_7_empty_string_no_panic() {
-    // Must not panic
-    let _ = expand_braces("");
+    assert_eq!(expand_braces(""), [""]);
+}
+
+#[test]
+fn nested_braces_preserve_alternatives_and_suffixes() {
+    assert_eq!(
+        expand_braces("{src/{main,test},docs}/常用.{rs,md}"),
+        [
+            "src/main/常用.rs", "src/main/常用.md",
+            "src/test/常用.rs", "src/test/常用.md",
+            "docs/常用.rs", "docs/常用.md",
+        ]
+    );
+    assert_eq!(expand_braces("{,a{,b}, c}"), ["", "a", "ab", " c"]);
+    assert_eq!(expand_braces("unclosed/{a,{b,c}"), ["unclosed/{a,{b,c}"]);
 }
 
 // -----------------------------------------------------------------------
@@ -496,16 +532,8 @@ fn tc_8_3_multiple_paths_each_brace_expanded() {
 
 #[test]
 fn tc_8_4_comma_separated_paths_string() {
-    let mut result = split_paths(&Some(StringOrVec::Single("src/*.rs,tests/*.rs".into())));
-    result.sort();
-    assert_eq!(result, vec!["src/*.rs", "tests/*.rs"]);
-}
-
-#[test]
-fn tc_8_4b_comma_in_brace_not_split() {
-    let mut result = split_paths(&Some(StringOrVec::Single("src/*.{ts,tsx}".into())));
-    result.sort();
-    assert_eq!(result, vec!["src/*.ts", "src/*.tsx"]);
+    let result = split_paths(&Some(StringOrVec::Single(", src/{main,{test,bench}}.rs, , docs/** ,".into())));
+    assert_eq!(result, ["src/main.rs", "src/test.rs", "src/bench.rs", "docs/**"]);
 }
 
 #[test]
@@ -578,11 +606,11 @@ fn tc_11_3_no_special_chars_unchanged() {
 
 #[test]
 fn tc_11_5_only_problematic_lines_requoted() {
-    let yaml = "name: simple\ndescription: Use {x} to do y\nversion: \"1.0\"";
+    let yaml = "name: simple\ndescription: {x} does y\nversion: \"1.0\"";
     let fixed = quote_problematic_values(yaml);
     assert!(fixed.contains("name: simple"));
     assert!(fixed.contains("version: \"1.0\""));
-    assert!(fixed.contains("\"Use {x} to do y\""));
+    assert!(fixed.contains("\"{x} does y\""));
 }
 
 // -----------------------------------------------------------------------

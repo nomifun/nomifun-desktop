@@ -427,10 +427,7 @@ mod tests {
         let result = to_hook_defs(&config, "my-skill");
         assert_eq!(result.pre_tool_use.len(), 1);
         let def = &result.pre_tool_use[0];
-        assert!(
-            def.name.contains("my-skill"),
-            "TC-11.20: name must contain skill name"
-        );
+        assert_eq!(def.name, "skill:my-skill:pre_tool_use:0");
         assert_eq!(def.command, "echo x");
         assert_eq!(def.tool_match, vec!["Bash"]);
         assert_eq!(def.timeout_ms, 5_000);
@@ -475,38 +472,6 @@ mod tests {
             "TC-11.22: stop hook name must start with 'skill:my-stopper:', got: {}",
             result.stop[0].name
         );
-    }
-
-    // -----------------------------------------------------------------------
-    // TC-11.23: hook name includes skill name as prefix
-    // -----------------------------------------------------------------------
-    #[test]
-    fn tc_11_23_hook_name_starts_with_skill_name() {
-        let config = SkillHooksConfig {
-            pre_tool_use: vec![make_cmd("echo", None, None)],
-            post_tool_use: vec![],
-            stop: vec![],
-        };
-        let result = to_hook_defs(&config, "linter");
-        assert!(
-            result.pre_tool_use[0].name.starts_with("skill:linter"),
-            "TC-11.23: name must start with 'skill:linter', got: {}",
-            result.pre_tool_use[0].name
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // TC-11.24: timeout seconds converted to milliseconds (×1000)
-    // -----------------------------------------------------------------------
-    #[test]
-    fn tc_11_24_timeout_secs_to_ms() {
-        let config = SkillHooksConfig {
-            pre_tool_use: vec![make_cmd("echo", None, Some(10))],
-            post_tool_use: vec![],
-            stop: vec![],
-        };
-        let result = to_hook_defs(&config, "skill");
-        assert_eq!(result.pre_tool_use[0].timeout_ms, 10_000);
     }
 
     // -----------------------------------------------------------------------
@@ -617,18 +582,14 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn tc_11_53_large_timeout_no_overflow() {
-        let large_secs = u64::MAX / 1_000;
+        let large_secs = u64::MAX;
         let config = SkillHooksConfig {
             pre_tool_use: vec![make_cmd("echo", None, Some(large_secs))],
             post_tool_use: vec![],
             stop: vec![],
         };
-        // saturating_mul: (u64::MAX / 1000) * 1000 should not overflow
         let result = to_hook_defs(&config, "skill");
-        assert!(
-            result.pre_tool_use[0].timeout_ms > 0,
-            "TC-11.53: large timeout must not overflow to 0"
-        );
+        assert_eq!(result.pre_tool_use[0].timeout_ms, u64::MAX);
     }
 
     // -----------------------------------------------------------------------
