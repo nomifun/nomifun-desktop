@@ -1870,6 +1870,18 @@ fn validate_delete_journal(
     Ok(persisted_entries)
 }
 
+fn serialize_delete_journal(journal: &AttachmentDeleteJournal) -> io::Result<Vec<u8>> {
+    let bytes = serde_json::to_vec(journal).map_err(|error| {
+        invalid_attachment_data(format!("serialize attachment delete journal: {error}"))
+    })?;
+    if bytes.len() as u64 > MAX_DELETE_JOURNAL_BYTES {
+        return Err(invalid_attachment_data(
+            "attachment delete journal exceeds its maximum size",
+        ));
+    }
+    Ok(bytes)
+}
+
 fn read_delete_journal(
     requirement_root: &Path,
     requirement_id: &str,
@@ -1884,15 +1896,14 @@ fn read_delete_journal(
     else {
         return Ok(None);
     };
-    let mut file =
-        open_stable_regular_file(&journal_path, "attachment delete journal")?;
-    if file.metadata()?.len() > MAX_DELETE_JOURNAL_BYTES {
+    let file = open_stable_regular_file(&journal_path, "attachment delete journal")?;
+    let mut bytes = Vec::new();
+    file.take(MAX_DELETE_JOURNAL_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_DELETE_JOURNAL_BYTES {
         return Err(invalid_attachment_data(
             "attachment delete journal exceeds its maximum size",
         ));
     }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
     let journal = serde_json::from_slice::<AttachmentDeleteJournal>(&bytes)
         .map_err(|error| {
             invalid_attachment_data(format!(
@@ -2359,11 +2370,7 @@ fn prepare_delete_journal_blocking(
         entries,
     };
     validate_delete_journal(&journal, requirement_id, rows)?;
-    let bytes = serde_json::to_vec(&journal).map_err(|error| {
-        invalid_attachment_data(format!(
-            "serialize attachment delete journal: {error}"
-        ))
-    })?;
+    let bytes = serialize_delete_journal(&journal)?;
     publish_static_file(
         &requirement_root,
         DELETE_JOURNAL_FILE,
@@ -2652,6 +2659,44 @@ mod tests {
             status.success(),
             "create Windows directory junction with command: {command}"
         );
+    }
+
+    #[test]
+    fn delete_journal_size_limit_matches_serialization_and_recovery() {
+        let operation_id = AttachmentId::new().into_string();
+        let entry_for = |index| {
+            let attachment_id = format!("0190f5fe-7c00-7a00-8000-{index:012x}");
+            let disk_name = format!("{attachment_id}.png");
+            AttachmentDeleteJournalEntry {
+                attachment_id,
+                staged_name: expected_delete_staged_name(&disk_name, &operation_id),
+                disk_name,
+                identity_volume: 1,
+                identity_index: 1,
+            }
+        };
+        let mut journal = AttachmentDeleteJournal {
+            version: DELETE_JOURNAL_VERSION,
+            requirement_id: REQ_1.to_owned(),
+            operation_id: operation_id.clone(),
+            entries: Vec::new(),
+        };
+        let entry_bytes = serde_json::to_vec(&entry_for(0)).unwrap().len();
+        let base_bytes = serde_json::to_vec(&journal).unwrap().len();
+        let count = (MAX_DELETE_JOURNAL_BYTES as usize - base_bytes + 1) / (entry_bytes + 1);
+        journal.entries = (0..count).map(entry_for).collect();
+        validate_delete_journal(&journal, REQ_1, &[]).unwrap();
+        assert!(serialize_delete_journal(&journal).unwrap().len() as u64 <= MAX_DELETE_JOURNAL_BYTES);
+        journal.entries.push(entry_for(count));
+        let result = serialize_delete_journal(&journal);
+        assert!(result.is_err(), "oversized journal must be rejected before publication");
+        let error = result.err().unwrap();
+        assert!(error.to_string().contains("exceeds its maximum size"));
+
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join(DELETE_JOURNAL_FILE), serde_json::to_vec(&journal).unwrap()).unwrap();
+        let error = read_delete_journal(directory.path(), REQ_1, &[]).unwrap_err();
+        assert!(error.to_string().contains("exceeds its maximum size"));
     }
 
     #[tokio::test]
