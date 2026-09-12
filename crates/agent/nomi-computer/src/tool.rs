@@ -153,6 +153,8 @@ impl ComputerTool {
     /// Set-of-Marks overlay screenshot. Needs only the Accessibility grant for
     /// the element list; the overlay additionally needs Screen Recording.
     async fn do_observe(&self) -> ToolResult {
+        // A failed refresh must not leave old OCR/pixel targets actionable.
+        *self.last_snapshot.lock().unwrap_or_else(|p| p.into_inner()) = None;
         let engine = match self.engine() {
             Ok(e) => e,
             Err(msg) => {
@@ -346,17 +348,52 @@ impl ComputerTool {
         }
     }
 
+    /// Share semantic invocation and its fallback gate. Lost targets, denied
+    /// permission, or a failed task are not permission to click cached pixels.
+    async fn act_on_ax<F, Fut>(
+        &self,
+        r: u32,
+        generation: SnapshotGen,
+        action: ElementAction,
+        fallback: F,
+    ) -> ToolResult
+    where
+        F: FnOnce(A11yError) -> Fut,
+        Fut: std::future::Future<Output = ToolResult>,
+    {
+        let engine = match self.engine() {
+            Ok(engine) => engine,
+            Err(msg) => return ToolResult::error(format!("Accessibility engine unavailable: {msg}")),
+        };
+        let result = tokio::task::spawn_blocking(move || {
+            engine.invoke(&Target::Ref(r), generation, action)
+        })
+        .await;
+        let error = match result {
+            Ok(Ok(effect)) => return ToolResult::text(format!(
+                "{}. Run `observe` to verify the result.", effect.message
+            )),
+            Ok(Err(e @ (A11yError::Unsupported { .. } | A11yError::Backend(_)))) => {
+                return fallback(e).await;
+            }
+            Ok(Err(e)) => e.to_string(),
+            Err(e) => format!("invoke task failed: {e}"),
+        };
+        *self.last_snapshot.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        ToolResult::error(format!(
+            "Accessibility action on [{r}] failed: {error}. No pixel fallback was \
+             performed; re-run observe before using element refs."
+        ))
+    }
+
     /// Act on an element by its `[ref]` from the latest `observe` snapshot.
     /// Accessibility elements use AXPress with an automatic pixel-click
     /// fallback; OCR/pixel-only elements click their center directly.
     async fn do_click_element(&self, input: &Value) -> ToolResult {
-        let Some(r) = input.get("ref").and_then(|v| v.as_u64()) else {
-            return ToolResult::error(
-                "Missing required parameter `ref` for click_element (a number from the latest \
-                 observe snapshot).",
-            );
+        let r = match require_u32(input, "ref") {
+            Ok(r) => r,
+            Err(e) => return ToolResult::error(e),
         };
-        let r = r as u32;
         let (generation, entry) = match self.resolve_ref(r) {
             Ok(v) => v,
             Err(msg) => return ToolResult::error(msg),
@@ -367,24 +404,11 @@ impl ComputerTool {
                 engine_ref,
                 screen_center,
             } => {
-                let engine = match self.engine() {
-                    Ok(e) => e,
-                    Err(msg) => {
-                        return ToolResult::error(format!("Accessibility engine unavailable: {msg}"));
-                    }
-                };
-                let eng = engine.clone();
-                let result = tokio::task::spawn_blocking(move || {
-                    eng.invoke(&Target::Ref(engine_ref), generation, ElementAction::LeftClick)
-                })
-                .await
-                .unwrap_or_else(|e| Err(A11yError::Backend(format!("invoke task failed: {e}"))));
-                match result {
-                    Ok(eff) => ToolResult::text(format!(
-                        "{}. Run `observe` (or take a screenshot) to verify the result.",
-                        eff.message
-                    )),
-                    Err(e) => {
+                self.act_on_ax(
+                    engine_ref,
+                    generation,
+                    ElementAction::LeftClick,
+                    |e| async move {
                         let (sx, sy) = screen_center;
                         match input::click(sx, sy, enigo::Button::Left, 1).await {
                             Ok(()) => ToolResult::text(format!(
@@ -396,8 +420,8 @@ impl ComputerTool {
                                  also failed: {pe}"
                             )),
                         }
-                    }
-                }
+                    },
+                ).await
             }
             CachedTarget::Pixel { screen_center } => {
                 let (sx, sy) = screen_center;
@@ -415,51 +439,35 @@ impl ComputerTool {
     /// AXValue with a focus-then-type fallback; OCR/pixel-only elements click
     /// then type.
     async fn do_set_element_value(&self, input: &Value) -> ToolResult {
-        let Some(r) = input.get("ref").and_then(|v| v.as_u64()) else {
-            return ToolResult::error(
-                "Missing required parameter `ref` for set_element_value (from the latest observe).",
-            );
+        let r = match require_u32(input, "ref") {
+            Ok(r) => r,
+            Err(e) => return ToolResult::error(e),
         };
         let Some(text) = input.get("text").and_then(|v| v.as_str()) else {
             return ToolResult::error("Missing required parameter `text` for set_element_value.");
         };
-        let r = r as u32;
         let text = text.to_string();
         let (generation, entry) = match self.resolve_ref(r) {
             Ok(v) => v,
             Err(msg) => return ToolResult::error(msg),
         };
 
-        // For accessibility elements, try the semantic set-value first.
-        if let CachedTarget::Ax { engine_ref, .. } = entry.target {
-            let engine = match self.engine() {
-                Ok(e) => e,
-                Err(msg) => {
-                    return ToolResult::error(format!("Accessibility engine unavailable: {msg}"));
-                }
-            };
-            let eng = engine.clone();
-            let value = text.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                eng.invoke(
-                    &Target::Ref(engine_ref),
+        match entry.target {
+            CachedTarget::Ax { engine_ref, screen_center } => {
+                self.act_on_ax(
+                    engine_ref,
                     generation,
-                    ElementAction::SetValue(value),
-                )
-            })
-            .await
-            .unwrap_or_else(|e| Err(A11yError::Backend(format!("invoke task failed: {e}"))));
-            if let Ok(eff) = result {
-                return ToolResult::text(format!("{}. Run `observe` to verify the value.", eff.message));
+                    ElementAction::SetValue(text.clone()),
+                    |_| Self::set_value_by_typing(r, screen_center, text),
+                ).await
+            }
+            CachedTarget::Pixel { screen_center } => {
+                Self::set_value_by_typing(r, screen_center, text).await
             }
         }
+    }
 
-        // Fallback (OCR/pixel target, or AX set-value did not take): click the
-        // element to focus it, then type.
-        let (sx, sy) = match entry.target {
-            CachedTarget::Ax { screen_center, .. } => screen_center,
-            CachedTarget::Pixel { screen_center } => screen_center,
-        };
+    async fn set_value_by_typing(r: u32, (sx, sy): (i32, i32), text: String) -> ToolResult {
         if let Err(pe) = input::click(sx, sy, enigo::Button::Left, 1).await {
             return ToolResult::error(format!(
                 "Could not focus element [{r}] to type into it: {pe}"
@@ -493,13 +501,10 @@ impl ComputerTool {
         count: u32,
         verb: &str,
     ) -> ToolResult {
-        let Some(r) = input.get("ref").and_then(|v| v.as_u64()) else {
-            return ToolResult::error(format!(
-                "Missing required parameter `ref` for {verb} (a number from the latest observe \
-                 snapshot)."
-            ));
+        let r = match require_u32(input, "ref") {
+            Ok(r) => r,
+            Err(e) => return ToolResult::error(e),
         };
-        let r = r as u32;
         let (sx, sy) = match self.ref_screen_center(r) {
             Ok(v) => v,
             Err(msg) => return ToolResult::error(msg),
@@ -526,7 +531,11 @@ impl ComputerTool {
                  Browser tool, not launch.",
             );
         };
-        let app = input.get("app").and_then(|v| v.as_str());
+        let app = match input.get("app") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(app)) => Some(app.as_str()),
+            Some(_) => return ToolResult::error("Parameter `app` must be a string."),
+        };
         match crate::launch::launch(target, app).await {
             Ok(msg) => ToolResult::text(format!(
                 "{msg} Take a screenshot or run `observe` to see the result."
@@ -567,7 +576,10 @@ impl ComputerTool {
         let display = match input.get("display") {
             None | Some(Value::Null) => None,
             Some(v) => match v.as_u64() {
-                Some(d) => Some(d as usize),
+                Some(d) => match usize::try_from(d) {
+                    Ok(d) => Some(d),
+                    Err(_) => return ToolResult::error("Parameter `display` is out of range."),
+                },
                 None => {
                     return ToolResult::error(
                         "Parameter `display` must be a non-negative integer display index.",
@@ -731,17 +743,16 @@ impl ComputerTool {
             Ok(d) => d,
             Err(e) => return ToolResult::error(e),
         };
-        let amount = input
-            .get("amount")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(DEFAULT_SCROLL_AMOUNT)
-            .clamp(1, 100) as i32;
-        let at = match (
-            input.get("x").and_then(|v| v.as_i64()),
-            input.get("y").and_then(|v| v.as_i64()),
-        ) {
-            (Some(x), Some(y)) => Some(self.to_screen(x as i32, y as i32)),
-            _ => None,
+        let amount = match input.get("amount") {
+            None | Some(Value::Null) => DEFAULT_SCROLL_AMOUNT,
+            Some(v) => match v.as_i64() {
+                Some(amount) => amount,
+                None => return ToolResult::error("Parameter `amount` must be an integer."),
+            },
+        }.clamp(1, 100) as i32;
+        let at = match optional_xy(input) {
+            Ok(at) => at.map(|(x, y)| self.to_screen(x, y)),
+            Err(e) => return ToolResult::error(e),
         };
         match input::scroll(at, direction, amount).await {
             Ok(()) => ToolResult::text(format!(
@@ -752,13 +763,11 @@ impl ComputerTool {
     }
 
     async fn do_focus_window(&self, input: &Value) -> ToolResult {
-        let Some(window_id) = input.get("window_id").and_then(|v| v.as_u64()) else {
-            return ToolResult::error(
-                "Missing required parameter `window_id` for the focus_window action. \
-                 Use list_windows to get window ids.",
-            );
+        let window_id = match require_u32(input, "window_id") {
+            Ok(id) => id,
+            Err(e) => return ToolResult::error(e),
         };
-        match fallback_backend::focus_window(window_id as u32).await {
+        match fallback_backend::focus_window(window_id).await {
             Ok(msg) => ToolResult::text(msg),
             Err(e) => ToolResult::error(e),
         }
@@ -844,13 +853,29 @@ fn ax_rect_to_pixel(r: nomi_a11y::Rect, g: &CaptureGeometry) -> nomi_a11y::Rect 
     }
 }
 
+fn require_u32(input: &Value, name: &str) -> Result<u32, String> {
+    let value = input.get(name).and_then(Value::as_u64)
+        .ok_or_else(|| format!("Missing or invalid required parameter `{name}`: expected an unsigned integer."))?;
+    u32::try_from(value).map_err(|_| format!("Parameter `{name}` is out of range for a 32-bit id."))
+}
+
+fn optional_xy(input: &Value) -> Result<Option<(i32, i32)>, String> {
+    match (input.get("x"), input.get("y")) {
+        (None | Some(Value::Null), None | Some(Value::Null)) => Ok(None),
+        _ => require_xy(input, "x", "y").map(Some),
+    }
+}
+
 /// Extract a required (x, y)-style coordinate pair, naming the missing
 /// parameters in the error.
 fn require_xy(input: &Value, x_name: &str, y_name: &str) -> Result<(i32, i32), String> {
     let x = input.get(x_name).and_then(|v| v.as_i64());
     let y = input.get(y_name).and_then(|v| v.as_i64());
     match (x, y) {
-        (Some(x), Some(y)) => Ok((x as i32, y as i32)),
+        (Some(x), Some(y)) => Ok((
+            i32::try_from(x).map_err(|_| format!("Parameter `{x_name}` is out of range for a 32-bit coordinate."))?,
+            i32::try_from(y).map_err(|_| format!("Parameter `{y_name}` is out of range for a 32-bit coordinate."))?,
+        )),
         (None, Some(_)) => Err(format!("Missing required parameter `{x_name}`.")),
         (Some(_), None) => Err(format!("Missing required parameter `{y_name}`.")),
         (None, None) => Err(format!(
@@ -1052,8 +1077,116 @@ impl Tool for ComputerTool {
 mod tests {
     use super::*;
 
+    type AxOutcome = fn() -> Result<nomi_a11y::Effect, A11yError>;
+
+    struct FakeEngine(AxOutcome);
+
+    impl A11yEngine for FakeEngine {
+        fn capabilities(&self) -> nomi_a11y::Capabilities {
+            panic!("unexpected capability probe")
+        }
+        fn observe(&self, _: &ObserveOpts) -> Result<nomi_a11y::Snapshot, A11yError> {
+            Err(A11yError::Backend("simulated observe failure".into()))
+        }
+        fn invoke(&self, target: &Target, generation: SnapshotGen, _: ElementAction)
+            -> Result<nomi_a11y::Effect, A11yError>
+        {
+            assert!(matches!(target, Target::Ref(1)));
+            assert_eq!(generation, SnapshotGen(7));
+            (self.0)()
+        }
+        fn focus_window(&self, _: i32) -> Result<nomi_a11y::Effect, A11yError> {
+            panic!("unexpected window activation")
+        }
+    }
+
+    fn tool_with_snapshot(outcome: AxOutcome) -> ComputerTool {
+        let t = tool();
+        *t.a11y.lock().unwrap() = Some(Ok(Arc::new(FakeEngine(outcome))));
+        *t.last_snapshot.lock().unwrap() = Some(SnapshotCache {
+            generation: SnapshotGen(7),
+            entries: vec![CachedEntry {
+                display: ElementEntry {
+                    r#ref: 1,
+                    role: "text".into(),
+                    name: None,
+                    value: None,
+                    states: vec![],
+                    bounds: nomi_a11y::Rect { x: 1.0, y: 2.0, w: 3.0, h: 4.0 },
+                    source: Source::Ocr,
+                },
+                target: CachedTarget::Pixel { screen_center: (2, 4) },
+            }],
+        });
+        t
+    }
+
     fn tool() -> ComputerTool {
         ComputerTool::new(&ComputerConfig::default())
+    }
+
+    #[tokio::test]
+    async fn semantic_fallback_gate_preserves_target_and_task_errors() {
+        // The fallback is injected: even a regression cannot synthesize input.
+        let cases: [(AxOutcome, bool, bool); 7] = [
+            (|| Err(A11yError::Stale("stale".into())), false, true),
+            (|| Err(A11yError::NotFound("gone".into())), false, true),
+            (|| Err(A11yError::Permission("denied".into())), false, true),
+            (|| panic!("simulated worker failure"), false, true),
+            (|| Err(A11yError::Backend("unsupported pattern".into())), true, false),
+            (|| Err(A11yError::Unsupported { capability: "action".into(), hint: "".into() }), true, false),
+            (|| Ok(nomi_a11y::Effect { changed: true, message: "done".into() }), false, false),
+        ];
+        for (outcome, expect_fallback, expect_error) in cases {
+            for action in [ElementAction::LeftClick, ElementAction::SetValue("value".into())] {
+                let t = tool_with_snapshot(outcome);
+                let mut called = false;
+                let result = t.act_on_ax(1, SnapshotGen(7), action, |_| {
+                    called = true;
+                    std::future::ready(ToolResult::text("injected fallback"))
+                }).await;
+                assert_eq!(called, expect_fallback);
+                assert_eq!(result.is_error, expect_error, "{}", result.content);
+                assert_eq!(t.last_snapshot.lock().unwrap().is_none(), expect_error);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_observe_invalidates_old_pixel_refs() {
+        let t = tool_with_snapshot(|| panic!("observe must not invoke an element"));
+        assert!(t.resolve_ref(1).is_ok());
+        let result = t.execute(json!({"action": "observe"})).await;
+        assert!(result.is_error);
+        assert!(result.content.contains("simulated observe failure"));
+        assert!(t.resolve_ref(1).is_err());
+    }
+
+    #[test]
+    fn target_numbers_are_checked_before_narrowing() {
+        for name in ["ref", "window_id"] {
+            for value in [json!(u32::MAX as u64 + 1), json!(u64::MAX), json!(-1), json!("1")] {
+                let input = json!({(name): value});
+                assert!(require_u32(&input, name).is_err());
+            }
+            assert_eq!(require_u32(&json!({(name): u32::MAX}), name).unwrap(), u32::MAX);
+        }
+        for (x, y) in [(i64::MAX, 0), (0, i64::MIN), (i32::MAX as i64 + 1, 0)] {
+            assert!(require_xy(&json!({"x": x, "y": y}), "x", "y").is_err());
+        }
+        assert_eq!(require_xy(&json!({"x": i32::MIN, "y": i32::MAX}), "x", "y").unwrap(),
+            (i32::MIN, i32::MAX));
+    }
+
+    #[test]
+    fn optional_scroll_target_is_absent_or_a_complete_valid_pair() {
+        assert_eq!(optional_xy(&json!({})).unwrap(), None);
+        assert_eq!(optional_xy(&json!({"x": null, "y": null})).unwrap(), None);
+        assert_eq!(optional_xy(&json!({"x": -2, "y": 4})).unwrap(), Some((-2, 4)));
+        for input in [json!({"x": 1}), json!({"y": 1}), json!({"x": "1", "y": 2}),
+            json!({"x": 1, "y": null}), json!({"x": i64::MAX, "y": 1})] {
+            assert!(optional_xy(&input).is_err(), "{input}");
+        }
     }
 
     // --- schema ---
