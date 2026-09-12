@@ -1,8 +1,6 @@
 import loginLogo from '@renderer/assets/logos/brand/app.png';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { changeLanguage } from '@/renderer/services/i18n';
-import { useNavigate } from 'react-router-dom';
 import AppLoader from '@renderer/components/layout/AppLoader';
 import { useAuth } from '../../hooks/context/AuthContext';
 import './LoginPage.css';
@@ -33,7 +31,6 @@ const deobfuscate = (text: string): string => {
 
 const LoginPage: React.FC = () => {
   const { t, i18n } = useTranslation();
-  const navigate = useNavigate();
   const { status, login, setup, needsSetup } = useAuth();
 
   const [username, setUsername] = useState('');
@@ -44,14 +41,17 @@ const LoginPage: React.FC = () => {
   const [loading, setLoading] = useState(false);
 
   const usernameRef = useRef<HTMLInputElement | null>(null);
-  const passwordRef = useRef<HTMLInputElement | null>(null);
   const messageTimer = useRef<number | undefined>(undefined);
+  const mounted = useRef(false);
+  const submitting = useRef(false);
 
   useEffect(() => {
+    mounted.current = true;
     document.body.classList.add('login-page-active');
     return () => {
+      mounted.current = false;
       document.body.classList.remove('login-page-active');
-      if (messageTimer.current) {
+      if (messageTimer.current !== undefined) {
         window.clearTimeout(messageTimer.current);
       }
     };
@@ -66,33 +66,28 @@ const LoginPage: React.FC = () => {
   }, [i18n.language]);
 
   useEffect(() => {
-    const isRememberMe = localStorage.getItem(REMEMBER_ME_KEY) === 'true';
-    if (isRememberMe) {
-      const storedUsername = localStorage.getItem(REMEMBERED_USERNAME_KEY);
-      const storedPassword = localStorage.getItem(REMEMBERED_PASSWORD_KEY);
-      if (storedUsername) setUsername(deobfuscate(storedUsername));
-      if (storedPassword) setPassword(deobfuscate(storedPassword));
-      setRememberMe(true);
-    }
-    window.setTimeout(() => {
-      usernameRef.current?.focus();
-    }, 0);
-
-    return () => {
-      if (messageTimer.current) {
-        window.clearTimeout(messageTimer.current);
+    try {
+      if (localStorage.getItem(REMEMBER_ME_KEY) === 'true') {
+        const storedUsername = localStorage.getItem(REMEMBERED_USERNAME_KEY);
+        const storedPassword = localStorage.getItem(REMEMBERED_PASSWORD_KEY);
+        if (storedUsername) setUsername(deobfuscate(storedUsername));
+        if (storedPassword) setPassword(deobfuscate(storedPassword));
+        setRememberMe(true);
       }
-    };
+    } catch {
+      // Browser storage is optional; blocked storage must not block sign-in.
+      console.warn('Unable to read remembered login preferences');
+    }
   }, []);
 
   useEffect(() => {
-    if (status === 'authenticated') {
-      void navigate('/guid', { replace: true });
+    if (status === 'unauthenticated') {
+      usernameRef.current?.focus();
     }
-  }, [navigate, status]);
+  }, [status]);
 
   const clearMessageLater = useCallback(() => {
-    if (messageTimer.current) {
+    if (messageTimer.current !== undefined) {
       window.clearTimeout(messageTimer.current);
     }
     messageTimer.current = window.setTimeout(() => {
@@ -120,14 +115,20 @@ const LoginPage: React.FC = () => {
 
   const handleLanguageChange = useCallback((event: React.ChangeEvent<HTMLSelectElement>) => {
     const nextLanguage = event.target.value;
-    changeLanguage(nextLanguage).catch((error: Error) => {
-      console.error('Failed to change language:', error);
-    });
+    // The application entry owns i18n startup; this page only needs the
+    // persistence service when the user explicitly changes language.
+    import('@/renderer/services/i18n')
+      .then(({ changeLanguage }) => changeLanguage(nextLanguage))
+      .catch((error: Error) => {
+        console.error('Failed to change language:', error);
+      });
   }, []);
 
   const handleSubmit = useCallback(
     async (event: React.FormEvent) => {
       event.preventDefault();
+      // A disabled button does not guard two submissions in the same render.
+      if (submitting.current || status !== 'unauthenticated') return;
       const trimmedUsername = username.trim();
 
       if (!trimmedUsername || !password) {
@@ -135,55 +136,65 @@ const LoginPage: React.FC = () => {
         return;
       }
 
+      submitting.current = true;
       setLoading(true);
       setMessage(null);
 
-      // First run: the typed credentials BECOME the initial admin. Otherwise
-      // this is a normal sign-in.
-      const result = needsSetup
-        ? await setup({ username: trimmedUsername, password })
-        : await login({ username: trimmedUsername, password });
+      try {
+        // First run: the typed credentials BECOME the initial admin. Otherwise
+        // this is a normal sign-in. AuthProvider owns the session, not this page.
+        const result = needsSetup
+          ? await setup({ username: trimmedUsername, password })
+          : await login({ username: trimmedUsername, password });
+        if (!mounted.current) return;
 
-      if (result.success) {
-        if (!needsSetup && rememberMe) {
-          localStorage.setItem(REMEMBER_ME_KEY, 'true');
-          localStorage.setItem(REMEMBERED_USERNAME_KEY, obfuscate(trimmedUsername));
-          localStorage.setItem(REMEMBERED_PASSWORD_KEY, obfuscate(password));
-        } else if (!needsSetup) {
-          localStorage.removeItem(REMEMBER_ME_KEY);
-          localStorage.removeItem(REMEMBERED_USERNAME_KEY);
-          localStorage.removeItem(REMEMBERED_PASSWORD_KEY);
-        }
-
-        const successText = needsSetup ? t('login.setupSuccess') : t('login.success');
-        showMessage({ type: 'success', text: successText });
-
-        window.setTimeout(() => {
-          void navigate('/guid', { replace: true });
-        }, 600);
-      } else {
-        const errorText = (() => {
-          switch (result.code) {
-            case 'invalidCredentials':
-              return t('login.errors.invalidCredentials');
-            case 'tooManyAttempts':
-              return t('login.errors.tooManyAttempts');
-            case 'networkError':
-              return t('login.errors.networkError');
-            case 'serverError':
-              return t('login.errors.serverError');
-            case 'unknown':
-            default:
-              return result.message ?? t('login.errors.unknown');
+        if (result.success) {
+          try {
+            if (!needsSetup && rememberMe) {
+              localStorage.setItem(REMEMBERED_USERNAME_KEY, obfuscate(trimmedUsername));
+              localStorage.setItem(REMEMBERED_PASSWORD_KEY, obfuscate(password));
+              localStorage.setItem(REMEMBER_ME_KEY, 'true');
+            } else if (!needsSetup) {
+              localStorage.removeItem(REMEMBER_ME_KEY);
+              localStorage.removeItem(REMEMBERED_USERNAME_KEY);
+              localStorage.removeItem(REMEMBERED_PASSWORD_KEY);
+            }
+          } catch {
+            console.warn('Unable to save remembered login preferences');
           }
-        })();
 
-        showMessage({ type: 'error', text: errorText });
+          const successText = needsSetup ? t('login.setupSuccess') : t('login.success');
+          showMessage({ type: 'success', text: successText });
+
+          // Router already redirects on authenticated status. A delayed page
+          // redirect would outlive this page and overwrite later navigation.
+        } else {
+          const errorText = (() => {
+            switch (result.code) {
+              case 'invalidCredentials':
+                return t('login.errors.invalidCredentials');
+              case 'tooManyAttempts':
+                return t('login.errors.tooManyAttempts');
+              case 'networkError':
+                return t('login.errors.networkError');
+              case 'serverError':
+                return t('login.errors.serverError');
+              case 'unknown':
+              default:
+                return result.message ?? t('login.errors.unknown');
+            }
+          })();
+
+          showMessage({ type: 'error', text: errorText });
+        }
+      } catch {
+        if (mounted.current) showMessage({ type: 'error', text: t('login.errors.unknown') });
+      } finally {
+        submitting.current = false;
+        if (mounted.current) setLoading(false);
       }
-
-      setLoading(false);
     },
-    [login, setup, needsSetup, navigate, password, rememberMe, showMessage, t, username]
+    [login, setup, needsSetup, status, password, rememberMe, showMessage, t, username]
   );
 
   if (status === 'checking') {
@@ -192,16 +203,11 @@ const LoginPage: React.FC = () => {
 
   return (
     <div className='login-page'>
-      {/* <div className='login-page__background' aria-hidden='true'>
-        <div className='login-page__background-circle login-page__background-circle--lg' />
-        <div className='login-page__background-circle login-page__background-circle--md' />
-        <div className='login-page__background-circle login-page__background-circle--sm' />
-      </div> */}
-
       <div className='login-page__card'>
         <label className='login-page__lang-select-wrapper' htmlFor='lang-select'>
           <select
             id='lang-select'
+            aria-label={t('login.languageToggle')}
             className='login-page__lang-select'
             value={i18n.language}
             onChange={handleLanguageChange}
@@ -272,7 +278,6 @@ const LoginPage: React.FC = () => {
                 <path d='M7 11V7a5 5 0 0 1 10 0v4' />
               </svg>
               <input
-                ref={passwordRef}
                 id='password'
                 name='password'
                 type={passwordVisible ? 'text' : 'password'}
