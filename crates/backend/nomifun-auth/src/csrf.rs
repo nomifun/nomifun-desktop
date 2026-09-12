@@ -10,7 +10,7 @@ use nomifun_common::AppError;
 use nomifun_common::constants::{CSRF_COOKIE_NAME, CSRF_HEADER_NAME};
 
 use crate::cookie::CookieConfig;
-use crate::extract::extract_cookie_value;
+use crate::extract::{extract_bearer_token, extract_cookie_value};
 
 /// CSRF protection middleware using the Double Submit Cookie pattern.
 ///
@@ -63,12 +63,7 @@ pub async fn csrf_middleware(
     // Locally-trusted requests authenticate via the `X-Nomi-Local-Trust` header,
     // not an ambient cookie, so they are not a CSRF target — skip validation.
     let local_trusted = request.extensions().get::<crate::trust::LocalTrusted>().is_some();
-    let has_non_ambient_bearer = request
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .is_some_and(|token| !token.is_empty());
+    let has_non_ambient_bearer = extract_bearer_token(request.headers()).is_some();
 
     if needs_validation
         && !is_exempt
