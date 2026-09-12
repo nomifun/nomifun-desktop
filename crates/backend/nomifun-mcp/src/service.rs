@@ -94,19 +94,6 @@ impl McpConfigService {
             )));
         }
 
-        // Check name uniqueness if renaming
-        if let Some(ref new_name) = req.name
-            && let Some(existing) = self.repo.find_by_name_any(new_name).await?
-            && existing.mcp_server_id != mcp_server_id.as_str()
-        {
-            if existing.builtin {
-                return Err(McpError::Conflict(format!(
-                    "Builtin MCP server name '{new_name}' is reserved"
-                )));
-            }
-            return Err(McpError::Conflict(new_name.clone()));
-        }
-
         // Build transport fields if provided
         let transport = req
             .transport
@@ -748,20 +735,24 @@ mod tests {
     async fn edit_server_rejects_name_change() {
         let svc = make_service();
         let created = svc.add_server(stdio_create_req("old-name")).await.unwrap();
-        let err = svc
-            .edit_server(
-                &created.mcp_server_id,
-                UpdateMcpServerRequest {
-                    name: Some("new-name".into()),
-                    description: None,
-                    transport: None,
-                    original_json: None,
-                    builtin: None,
-                },
-            )
-            .await
-            .unwrap_err();
-        assert!(matches!(err, McpError::InvalidEdit(_)));
+        svc.add_server(stdio_create_req("existing-name")).await.unwrap();
+        for name in ["new-name", "existing-name"] {
+            let err = svc
+                .edit_server(
+                    &created.mcp_server_id,
+                    UpdateMcpServerRequest {
+                        name: Some(name.into()),
+                        description: None,
+                        transport: None,
+                        original_json: None,
+                        builtin: None,
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(err, McpError::InvalidEdit(_)));
+        }
+        assert_eq!(svc.get_server(&created.mcp_server_id).await.unwrap().name, "old-name");
     }
 
     #[tokio::test]
@@ -828,27 +819,6 @@ mod tests {
             )
             .await;
         assert!(matches!(result, Err(McpError::NotFound(_))));
-    }
-
-    #[tokio::test]
-    async fn edit_server_name_conflict() {
-        let svc = make_service();
-        svc.add_server(stdio_create_req("server-a")).await.unwrap();
-        let b = svc.add_server(stdio_create_req("server-b")).await.unwrap();
-
-        let result = svc
-            .edit_server(
-                &b.mcp_server_id,
-                UpdateMcpServerRequest {
-                    name: Some("server-a".into()), // conflict
-                    description: None,
-                    transport: None,
-                    original_json: None,
-                    builtin: None,
-                },
-            )
-            .await;
-        assert!(matches!(result, Err(McpError::InvalidEdit(_))));
     }
 
     #[tokio::test]
