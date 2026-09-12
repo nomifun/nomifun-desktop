@@ -358,6 +358,14 @@ impl ManagedChildProcess {
         self.child().id()
     }
 
+    /// Observe the attached whole-tree cleanup proof without taking ownership
+    /// of termination. Capture before shutdown; the receipt remains usable if
+    /// this managed process is dropped and cleanup moves to the existing relay.
+    /// None means this owner already completed shutdown or transferred authority.
+    pub fn cleanup_receipt(&self) -> Option<ChildProcessCleanup> {
+        self.cleanup.clone()
+    }
+
     pub async fn shutdown(&mut self) -> io::Result<()> {
         if self.shutdown_complete {
             return Ok(());
