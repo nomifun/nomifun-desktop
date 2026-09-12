@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
@@ -25,7 +25,7 @@ import {
 } from '@arco-design/web-react';
 import { DeleteOne, Down, EditOne, Left, More, Plus, PreviewOpen } from '@icon-park/react';
 import { ipcBridge } from '@/common';
-import type { ICsHandoff, ICsNote } from '@/common/adapter/ipcBridge';
+import type { ICsAgent, ICsAgentPatch, ICsHandoff, ICsNote } from '@/common/adapter/ipcBridge';
 import { parseCsAgentId, type CsAgentId, type KnowledgeBaseId, type ProviderId } from '@/common/types/ids';
 import NomiInput from '@/renderer/components/base/NomiInput';
 import NomiSelect from '@/renderer/components/base/NomiSelect';
@@ -56,8 +56,6 @@ const EMPTY_NOTE_DRAFT = { kind: 'faq', content: '', aliases: '', shared: false 
  * 渠道机器人绑定管理（复选全量替换）、客服笔记（cs_notes）简表 CRUD。
  */
 const CsAgentDetailPage: React.FC = () => {
-  const { t } = useTranslation();
-  const navigate = useNavigate();
   const params = useParams<{ cs_agent_id: string }>();
   const csAgentId = useMemo<CsAgentId | null>(() => {
     try {
@@ -67,6 +65,19 @@ const CsAgentDetailPage: React.FC = () => {
     }
   }, [params.cs_agent_id]);
 
+  return <CsAgentDetailContent key={csAgentId ?? 'invalid'} csAgentId={csAgentId} />;
+};
+
+const CsAgentDetailContent: React.FC<{ csAgentId: CsAgentId | null }> = ({ csAgentId }) => {
+  const { t } = useTranslation();
+  const navigate = useNavigate();
+  const active = useRef(false);
+  const busyRef = useRef({ identity: false, note: false, handoff: false, deleting: false });
+  const noteConfirmation = useRef<ReturnType<typeof Modal.confirm> | null>(null);
+  useLayoutEffect(() => {
+    active.current = true;
+    return () => { active.current = false; noteConfirmation.current?.close(); };
+  }, []);
   const { agent, loading, patch } = useCsAgent(csAgentId);
   // Task-filtered catalog (chat): providers with at least one chat-capable model.
   const { groups: chatGroups } = useModelsForTask('chat');
@@ -74,20 +85,16 @@ const CsAgentDetailPage: React.FC = () => {
   const { options: kbOptions } = useKnowledgeBaseOptions();
 
   // ── identity draft (explicit save; text fields shouldn't PATCH per keystroke) ──
-  const [draft, setDraft] = useState({ name: '', greeting: '', persona: '', service_policy: '' });
+  const [editedIdentity, setDraft] = useState<Pick<ICsAgent, 'name' | 'greeting' | 'persona' | 'service_policy'> | null>(null);
+  const draft = editedIdentity ?? {
+    name: agent?.name ?? '', greeting: agent?.greeting ?? '',
+    persona: agent?.persona ?? '', service_policy: agent?.service_policy ?? '',
+  };
   const [savingIdentity, setSavingIdentity] = useState(false);
-  useEffect(() => {
-    if (agent) {
-      setDraft({
-        name: agent.name,
-        greeting: agent.greeting,
-        persona: agent.persona,
-        service_policy: agent.service_policy,
-      });
-    }
-  }, [agent]);
 
   const saveIdentity = async () => {
+    if (!active.current || busyRef.current.identity || !draft.name.trim()) return;
+    busyRef.current.identity = true;
     setSavingIdentity(true);
     try {
       await patch({
@@ -96,11 +103,24 @@ const CsAgentDetailPage: React.FC = () => {
         persona: draft.persona,
         service_policy: draft.service_policy,
       });
+      if (!active.current) return;
+      // A response acknowledges only the submitted draft, not edits made while saving.
+      setDraft((current) => current === editedIdentity ? null : current);
       Message.success(t('customerService.detail.saved', { defaultValue: '已保存' }));
     } catch (error) {
-      Message.error(error instanceof Error ? error.message : String(error));
+      if (active.current) Message.error(error instanceof Error ? error.message : String(error));
     } finally {
-      setSavingIdentity(false);
+      busyRef.current.identity = false;
+      if (active.current) setSavingIdentity(false);
+    }
+  };
+
+  const patchSettings = async (fields: ICsAgentPatch) => {
+    if (!active.current) return;
+    try {
+      await patch(fields);
+    } catch (error) {
+      if (active.current) Message.error(error instanceof Error ? error.message : String(error));
     }
   };
 
@@ -112,13 +132,16 @@ const CsAgentDetailPage: React.FC = () => {
   const [noteDraft, setNoteDraft] = useState(EMPTY_NOTE_DRAFT);
   const [notePage, setNotePage] = useState(1);
   const [savingNote, setSavingNote] = useState(false);
+  const notesRequest = useRef(0);
 
   const refreshNotes = useCallback(async () => {
-    if (!csAgentId) return;
+    if (!csAgentId || !active.current) return;
+    const request = ++notesRequest.current;
     try {
-      setNotes((await ipcBridge.customerService.listNotes.invoke({ cs_agent_id: csAgentId })) ?? []);
+      const notes = (await ipcBridge.customerService.listNotes.invoke({ cs_agent_id: csAgentId })) ?? [];
+      if (active.current && request === notesRequest.current) setNotes(notes);
     } catch {
-      setNotes([]);
+      if (active.current && request === notesRequest.current) setNotes([]);
     }
   }, [csAgentId]);
 
@@ -132,6 +155,7 @@ const CsAgentDetailPage: React.FC = () => {
   }, [notes.length]);
 
   const openCreateNote = () => {
+    if (busyRef.current.note) return;
     setActiveNote(null);
     setNoteModalMode('create');
     setNoteDraft(EMPTY_NOTE_DRAFT);
@@ -139,6 +163,7 @@ const CsAgentDetailPage: React.FC = () => {
   };
 
   const openNote = (note: ICsNote, mode: Exclude<NoteModalMode, 'create'>) => {
+    if (busyRef.current.note) return;
     setActiveNote(note);
     setNoteModalMode(mode);
     setNoteDraft({
@@ -151,12 +176,13 @@ const CsAgentDetailPage: React.FC = () => {
   };
 
   const closeNoteModal = () => {
-    if (savingNote) return;
+    if (busyRef.current.note) return;
     setNoteModalOpen(false);
   };
 
   const saveNote = async () => {
-    if (!csAgentId || !noteDraft.content.trim() || noteModalMode === 'view') return;
+    if (!active.current || busyRef.current.note || !csAgentId || !noteDraft.content.trim() || noteModalMode === 'view') return;
+    busyRef.current.note = true;
     setSavingNote(true);
     try {
       if (noteModalMode === 'edit' && activeNote) {
@@ -166,6 +192,7 @@ const CsAgentDetailPage: React.FC = () => {
           content: noteDraft.content,
           aliases: noteDraft.aliases,
         });
+        if (!active.current) return;
         Message.success(t('customerService.notes.updated', { defaultValue: '笔记已更新' }));
       } else {
         await ipcBridge.customerService.createNote.invoke({
@@ -175,6 +202,7 @@ const CsAgentDetailPage: React.FC = () => {
           aliases: noteDraft.aliases,
           enabled: true,
         });
+        if (!active.current) return;
         Message.success(t('customerService.notes.created', { defaultValue: '笔记已创建' }));
       }
       setNoteModalOpen(false);
@@ -182,29 +210,49 @@ const CsAgentDetailPage: React.FC = () => {
       setNoteDraft(EMPTY_NOTE_DRAFT);
       await refreshNotes();
     } catch (error) {
-      Message.error(error instanceof Error ? error.message : String(error));
+      if (active.current) Message.error(error instanceof Error ? error.message : String(error));
     } finally {
-      setSavingNote(false);
+      busyRef.current.note = false;
+      if (active.current) setSavingNote(false);
     }
   };
 
   const removeNote = (note: ICsNote) => {
-    Modal.confirm({
+    if (!active.current) return;
+    let removing = false;
+    noteConfirmation.current?.close();
+    noteConfirmation.current = Modal.confirm({
       title: t('customerService.notes.deleteConfirm', { defaultValue: '删除该笔记？' }),
       okText: t('customerService.notes.delete', { defaultValue: '删除' }),
       cancelText: t('common.cancel', { defaultValue: '取消' }),
       okButtonProps: { status: 'danger' },
       onOk: async () => {
+        if (!active.current || removing) return;
+        removing = true;
         try {
           await ipcBridge.customerService.removeNote.invoke({ cs_note_id: note.cs_note_id });
+          if (!active.current) return;
           Message.success(t('customerService.notes.deleted', { defaultValue: '笔记已删除' }));
           await refreshNotes();
         } catch (error) {
+          if (!active.current) return;
           Message.error(error instanceof Error ? error.message : String(error));
           throw error;
+        } finally {
+          removing = false;
         }
       },
     });
+  };
+
+  const setNoteEnabled = async (note: ICsNote, enabled: boolean) => {
+    if (!active.current) return;
+    try {
+      await ipcBridge.customerService.patchNote.invoke({ cs_note_id: note.cs_note_id, enabled });
+      await refreshNotes();
+    } catch (error) {
+      if (active.current) Message.error(error instanceof Error ? error.message : String(error));
+    }
   };
 
   const handleNoteMenuAction = (key: string, note: ICsNote) => {
@@ -225,20 +273,26 @@ const CsAgentDetailPage: React.FC = () => {
   const [handoffBusyId, setHandoffBusyId] = useState<string | null>(null);
   const [resolvingHandoff, setResolvingHandoff] = useState<ICsHandoff | null>(null);
   const [handoffResolution, setHandoffResolution] = useState('');
+  const handoffsRequest = useRef(0);
 
   const refreshHandoffs = useCallback(async () => {
-    if (!csAgentId) return;
+    if (!csAgentId || !active.current) return;
+    const request = ++handoffsRequest.current;
+    const isCurrent = () => active.current && request === handoffsRequest.current;
     setHandoffsLoading(true);
     try {
-      setHandoffs(await ipcBridge.customerService.listHandoffs.invoke({
+      const handoffs = await ipcBridge.customerService.listHandoffs.invoke({
         cs_agent_id: csAgentId,
         limit: 100,
-      }));
+      });
+      if (isCurrent()) setHandoffs(handoffs);
     } catch (error) {
-      setHandoffs([]);
-      Message.error(error instanceof Error ? error.message : String(error));
+      if (isCurrent()) {
+        setHandoffs([]);
+        Message.error(error instanceof Error ? error.message : String(error));
+      }
     } finally {
-      setHandoffsLoading(false);
+      if (isCurrent()) setHandoffsLoading(false);
     }
   }, [csAgentId]);
 
@@ -246,59 +300,37 @@ const CsAgentDetailPage: React.FC = () => {
     void refreshHandoffs();
   }, [refreshHandoffs]);
 
-  const claimHandoff = async (handoff: ICsHandoff) => {
+  const updateHandoff = async (handoff: ICsHandoff, action: 'claim' | 'cancel' | 'resolve') => {
+    if (!active.current || busyRef.current.handoff || (action === 'resolve' && !handoffResolution.trim())) return;
+    busyRef.current.handoff = true;
     setHandoffBusyId(handoff.cs_handoff_id);
     try {
-      await ipcBridge.customerService.claimHandoff.invoke({
-        cs_handoff_id: handoff.cs_handoff_id,
-        expected_status: 'pending',
-      });
-      Message.success(t('customerService.handoffs.claimed', { defaultValue: '已认领人工交接' }));
-      await refreshHandoffs();
+      if (action === 'claim') {
+        await ipcBridge.customerService.claimHandoff.invoke({ cs_handoff_id: handoff.cs_handoff_id, expected_status: 'pending' });
+      } else if (action === 'cancel') {
+        await ipcBridge.customerService.cancelHandoff.invoke({
+          cs_handoff_id: handoff.cs_handoff_id,
+          expected_status: handoff.status === 'claimed' ? 'claimed' : 'pending',
+          resolution: t('customerService.handoffs.cancelledByOwner', { defaultValue: '由主人取消' }),
+        });
+      } else {
+        await ipcBridge.customerService.resolveHandoff.invoke({
+          cs_handoff_id: handoff.cs_handoff_id, expected_status: 'claimed', resolution: handoffResolution.trim(),
+        });
+      }
+      if (!active.current) return;
+      if (action === 'resolve') { setResolvingHandoff(null); setHandoffResolution(''); }
+      Message.success(action === 'claim'
+        ? t('customerService.handoffs.claimed', { defaultValue: '已认领人工交接' })
+        : action === 'cancel'
+          ? t('customerService.handoffs.cancelled', { defaultValue: '交接已取消' })
+          : t('customerService.handoffs.resolved', { defaultValue: '交接已完成' }));
     } catch (error) {
-      Message.error(error instanceof Error ? error.message : String(error));
-      await refreshHandoffs();
+      if (active.current) Message.error(error instanceof Error ? error.message : String(error));
     } finally {
-      setHandoffBusyId(null);
-    }
-  };
-
-  const cancelHandoff = async (handoff: ICsHandoff) => {
-    setHandoffBusyId(handoff.cs_handoff_id);
-    try {
-      await ipcBridge.customerService.cancelHandoff.invoke({
-        cs_handoff_id: handoff.cs_handoff_id,
-        expected_status: handoff.status === 'claimed' ? 'claimed' : 'pending',
-        resolution: t('customerService.handoffs.cancelledByOwner', { defaultValue: '由主人取消' }),
-      });
-      Message.success(t('customerService.handoffs.cancelled', { defaultValue: '交接已取消' }));
-      await refreshHandoffs();
-    } catch (error) {
-      Message.error(error instanceof Error ? error.message : String(error));
-      await refreshHandoffs();
-    } finally {
-      setHandoffBusyId(null);
-    }
-  };
-
-  const resolveHandoff = async () => {
-    if (!resolvingHandoff || !handoffResolution.trim()) return;
-    setHandoffBusyId(resolvingHandoff.cs_handoff_id);
-    try {
-      await ipcBridge.customerService.resolveHandoff.invoke({
-        cs_handoff_id: resolvingHandoff.cs_handoff_id,
-        expected_status: 'claimed',
-        resolution: handoffResolution.trim(),
-      });
-      setResolvingHandoff(null);
-      setHandoffResolution('');
-      Message.success(t('customerService.handoffs.resolved', { defaultValue: '交接已完成' }));
-      await refreshHandoffs();
-    } catch (error) {
-      Message.error(error instanceof Error ? error.message : String(error));
-      await refreshHandoffs();
-    } finally {
-      setHandoffBusyId(null);
+      if (active.current) await refreshHandoffs();
+      busyRef.current.handoff = false;
+      if (active.current) setHandoffBusyId(null);
     }
   };
 
@@ -311,13 +343,17 @@ const CsAgentDetailPage: React.FC = () => {
 
   // ── delete agent ─────────────────────────────────────────────────────
   const deleteAgent = async () => {
-    if (!csAgentId) return;
+    if (!csAgentId || !active.current || busyRef.current.deleting) return;
+    busyRef.current.deleting = true;
     try {
       await ipcBridge.customerService.removeAgent.invoke({ cs_agent_id: csAgentId });
+      if (!active.current) return;
       Message.success(t('customerService.detail.deleted', { defaultValue: '客服已删除' }));
       void navigate('/customer-service');
     } catch (error) {
-      Message.error(error instanceof Error ? error.message : String(error));
+      if (active.current) Message.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      busyRef.current.deleting = false;
     }
   };
 
@@ -365,7 +401,7 @@ const CsAgentDetailPage: React.FC = () => {
             </span>
             <Switch
               checked={agent.enabled}
-              onChange={(checked: boolean) => void patch({ enabled: checked })}
+              onChange={(checked: boolean) => void patchSettings({ enabled: checked })}
             />
             <Popconfirm
               title={t('customerService.detail.deleteConfirm', {
@@ -395,7 +431,7 @@ const CsAgentDetailPage: React.FC = () => {
                     value={agent.provider_id ?? undefined}
                     placeholder={t('customerService.fields.provider', { defaultValue: '模型服务商' })}
                     allowClear
-                    onChange={(value) => void patch({ provider_id: (value as ProviderId | undefined) ?? null, model: null })}
+                    onChange={(value) => void patchSettings({ provider_id: (value as ProviderId | undefined) ?? null, model: null })}
                   >
                     {providers.map((p) => (
                       <NomiSelect.Option key={p.id} value={p.id}>
@@ -411,7 +447,7 @@ const CsAgentDetailPage: React.FC = () => {
                     value={agent.model ?? undefined}
                     placeholder={t('customerService.fields.model', { defaultValue: '对话模型' })}
                     allowClear
-                    onChange={(value) => void patch({ model: (value as string | undefined) ?? null })}
+                    onChange={(value) => void patchSettings({ model: (value as string | undefined) ?? null })}
                   >
                     {modelOptions.map((m) => (
                       <NomiSelect.Option key={m} value={m}>
@@ -444,7 +480,7 @@ const CsAgentDetailPage: React.FC = () => {
                         <Down theme='outline' size='13' fill='currentColor' className='shrink-0' />
                       </Button>
                     }
-                    onChange={(value) => void patch({ knowledge_base_ids: (value ?? []) as KnowledgeBaseId[] })}
+                    onChange={(value) => void patchSettings({ knowledge_base_ids: (value ?? []) as KnowledgeBaseId[] })}
                   >
                     {kbOptions.map((kb) => (
                       <Select.Option key={kb.value} value={kb.value}>
@@ -465,7 +501,7 @@ const CsAgentDetailPage: React.FC = () => {
                         closable
                         className={styles.knowledgeTag}
                         onClose={() => {
-                          void patch({
+                          void patchSettings({
                             knowledge_base_ids: agent.knowledge_base_ids.filter((id) => id !== knowledgeBase.id),
                           });
                         }}
@@ -485,9 +521,10 @@ const CsAgentDetailPage: React.FC = () => {
                   className={styles.concurrencyControl}
                   min={1}
                   max={64}
+                  precision={0}
                   value={agent.max_concurrent}
                   onChange={(value) => {
-                    if (typeof value === 'number') void patch({ max_concurrent: value });
+                    if (typeof value === 'number' && Number.isInteger(value)) void patchSettings({ max_concurrent: value });
                   }}
                 />
               </div>
@@ -497,7 +534,7 @@ const CsAgentDetailPage: React.FC = () => {
             <Section
               title={t('customerService.sections.identity', { defaultValue: '身份与话术' })}
               extra={
-                <Button type='primary' size='small' loading={savingIdentity} onClick={() => void saveIdentity()}>
+                <Button type='primary' size='small' loading={savingIdentity} disabled={!draft.name.trim()} onClick={() => void saveIdentity()}>
                   {t('customerService.detail.save', { defaultValue: '保存' })}
                 </Button>
               }
@@ -510,22 +547,22 @@ const CsAgentDetailPage: React.FC = () => {
                   contentMaxWidth={360}
                   className={styles.nameControl}
                   value={draft.name}
-                  onChange={(value) => setDraft((d) => ({ ...d, name: value }))}
+                  onChange={(value) => setDraft((d) => ({ ...(d ?? draft), name: value }))}
                 />
               </div>
               <div className={styles.divider} />
               <div className={styles.identityFields}>
                 <div>
                   <div className={styles.fieldLabel}>{t('customerService.fields.greeting', { defaultValue: '问候语' })}</div>
-                  <Input.TextArea rows={2} value={draft.greeting} onChange={(value) => setDraft((d) => ({ ...d, greeting: value }))} />
+                  <Input.TextArea rows={2} value={draft.greeting} onChange={(value) => setDraft((d) => ({ ...(d ?? draft), greeting: value }))} />
                 </div>
                 <div>
                   <div className={styles.fieldLabel}>{t('customerService.fields.persona', { defaultValue: '人设话术' })}</div>
-                  <Input.TextArea rows={2} value={draft.persona} onChange={(value) => setDraft((d) => ({ ...d, persona: value }))} />
+                  <Input.TextArea rows={2} value={draft.persona} onChange={(value) => setDraft((d) => ({ ...(d ?? draft), persona: value }))} />
                 </div>
                 <div>
                   <div className={styles.fieldLabel}>{t('customerService.fields.servicePolicy', { defaultValue: '服务策略' })}</div>
-                  <Input.TextArea rows={2} value={draft.service_policy} onChange={(value) => setDraft((d) => ({ ...d, service_policy: value }))} />
+                  <Input.TextArea rows={2} value={draft.service_policy} onChange={(value) => setDraft((d) => ({ ...(d ?? draft), service_policy: value }))} />
                 </div>
               </div>
             </Section>
@@ -594,16 +631,16 @@ const CsAgentDetailPage: React.FC = () => {
                           return (
                             <span className='inline-flex items-center gap-6px'>
                               {handoff.status === 'pending' && (
-                                <Button size='mini' type='primary' loading={busy} onClick={() => void claimHandoff(handoff)}>
+                                <Button size='mini' type='primary' loading={busy} disabled={Boolean(handoffBusyId)} onClick={() => void updateHandoff(handoff, 'claim')}>
                                   {t('customerService.handoffs.claim', { defaultValue: '认领' })}
                                 </Button>
                               )}
                               {handoff.status === 'claimed' && (
-                                <Button size='mini' type='primary' loading={busy} onClick={() => { setResolvingHandoff(handoff); setHandoffResolution(''); }}>
+                                <Button size='mini' type='primary' loading={busy} disabled={Boolean(handoffBusyId)} onClick={() => { if (!busyRef.current.handoff) { setResolvingHandoff(handoff); setHandoffResolution(''); } }}>
                                   {t('customerService.handoffs.resolve', { defaultValue: '完成' })}
                                 </Button>
                               )}
-                              <Button size='mini' status='danger' disabled={busy} onClick={() => void cancelHandoff(handoff)}>
+                              <Button size='mini' status='danger' disabled={Boolean(handoffBusyId)} onClick={() => void updateHandoff(handoff, 'cancel')}>
                                 {t('customerService.handoffs.cancel', { defaultValue: '取消' })}
                               </Button>
                             </span>
@@ -677,12 +714,7 @@ const CsAgentDetailPage: React.FC = () => {
                           <Switch
                             size='small'
                             checked={note.enabled}
-                            onChange={(checked: boolean) => {
-                              void ipcBridge.customerService.patchNote
-                                .invoke({ cs_note_id: note.cs_note_id, enabled: checked })
-                                .then(() => refreshNotes())
-                                .catch((error) => Message.error(String(error)));
-                            }}
+                            onChange={(checked: boolean) => void setNoteEnabled(note, checked)}
                           />
                         ),
                       },
@@ -741,15 +773,16 @@ const CsAgentDetailPage: React.FC = () => {
       <Modal
         visible={Boolean(resolvingHandoff)}
         title={t('customerService.handoffs.resolveTitle', { defaultValue: '完成人工交接' })}
-        onCancel={() => { if (!handoffBusyId) { setResolvingHandoff(null); setHandoffResolution(''); } }}
-        onOk={() => void resolveHandoff()}
+        onCancel={() => { if (!busyRef.current.handoff) { setResolvingHandoff(null); setHandoffResolution(''); } }}
+        onOk={() => { if (resolvingHandoff) void updateHandoff(resolvingHandoff, 'resolve'); }}
         confirmLoading={Boolean(resolvingHandoff && handoffBusyId === resolvingHandoff.cs_handoff_id)}
-        okButtonProps={{ disabled: !handoffResolution.trim() }}
+        okButtonProps={{ disabled: !handoffResolution.trim() || Boolean(handoffBusyId) }}
         unmountOnExit
       >
         <Input.TextArea
           rows={4}
           value={handoffResolution}
+          readOnly={Boolean(handoffBusyId)}
           maxLength={12000}
           showWordLimit
           placeholder={t('customerService.handoffs.resolutionPlaceholder', { defaultValue: '记录处理结果，完成后自动客服将恢复接待后续消息。' })}
@@ -784,7 +817,7 @@ const CsAgentDetailPage: React.FC = () => {
         <div className='flex flex-col gap-10px'>
           <Select
             value={noteDraft.kind}
-            disabled={noteModalMode === 'view'}
+            disabled={noteModalMode === 'view' || savingNote}
             onChange={(value) => setNoteDraft((d) => ({ ...d, kind: value as string }))}
           >
             <Select.Option value='faq'>{t('customerService.notes.kindFaq', { defaultValue: 'FAQ' })}</Select.Option>
@@ -795,7 +828,7 @@ const CsAgentDetailPage: React.FC = () => {
             autoSize={{ minRows: 4, maxRows: 12 }}
             value={noteDraft.content}
             placeholder={t('customerService.notes.contentPlaceholder', { defaultValue: '写下 FAQ / 话术 / 业务事实…' })}
-            readOnly={noteModalMode === 'view'}
+            readOnly={noteModalMode === 'view' || savingNote}
             onChange={(value) => setNoteDraft((d) => ({ ...d, content: value }))}
           />
           <Input.TextArea
@@ -804,7 +837,7 @@ const CsAgentDetailPage: React.FC = () => {
             placeholder={t('customerService.notes.aliasesPlaceholder', {
               defaultValue: '其他问法，每行一个，例如：这个软件\n多少钱',
             })}
-            readOnly={noteModalMode === 'view'}
+            readOnly={noteModalMode === 'view' || savingNote}
             onChange={(value) => setNoteDraft((d) => ({ ...d, aliases: value }))}
           />
           <span className='text-12px text-t-tertiary'>
@@ -815,7 +848,7 @@ const CsAgentDetailPage: React.FC = () => {
           <label className='flex items-center gap-8px text-13px text-t-secondary'>
             <Checkbox
               checked={noteDraft.shared}
-              disabled={noteModalMode !== 'create'}
+              disabled={noteModalMode !== 'create' || savingNote}
               onChange={(checked: boolean) => setNoteDraft((d) => ({ ...d, shared: checked }))}
             />
             {t('customerService.notes.sharedHint', { defaultValue: '共享给全部客服（不勾选则仅本客服可用）' })}
