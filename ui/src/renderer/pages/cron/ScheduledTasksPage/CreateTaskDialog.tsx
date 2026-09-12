@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Form, Input, Select, Message, TimePicker, Radio, Switch } from '@arco-design/web-react';
 import { ipcBridge } from '@/common';
@@ -62,7 +62,7 @@ interface CreateTaskDialogProps {
   lockInitialTarget?: boolean;
 }
 
-type FrequencyType = 'manual' | 'hourly' | 'daily' | 'weekdays' | 'weekly' | 'custom';
+type FrequencyType = 'manual' | 'hourly' | 'daily' | 'weekdays' | 'weekly' | 'custom' | 'preserve';
 // UI-level execution mode. 'specified' is a frontend affordance that maps to the
 // backend `existing` mode bound to a user-picked conversation_id.
 const WEEKDAYS = [
@@ -80,11 +80,11 @@ const WEEKDAYS = [
  * for edit mode. Returns 'custom' for non-preset (incl. sub-minute) schedules.
  */
 function parseCronExpr(expr: string): { frequency: FrequencyType; time: string; weekday: string } {
-  if (!expr) return { frequency: 'manual', time: '09:00', weekday: 'MON' };
+  if (!expr.trim()) return { frequency: 'manual', time: '09:00', weekday: 'MON' };
 
   let parts = expr.trim().split(/\s+/);
   if (parts.length === 5) parts = ['0', ...parts];
-  if (parts.length < 6) return { frequency: 'daily', time: '09:00', weekday: 'MON' };
+  if (parts.length !== 6) return { frequency: 'custom', time: '09:00', weekday: 'MON' };
 
   const [seconds, min, hour, dayRaw, month, dowRaw] = parts;
   if (seconds !== '0') return { frequency: 'custom', time: '09:00', weekday: 'MON' };
@@ -93,6 +93,9 @@ function parseCronExpr(expr: string): { frequency: FrequencyType; time: string; 
 
   if (hour === '*' && min === '0' && day === '*' && month === '*' && dow === '*') {
     return { frequency: 'hourly', time: '09:00', weekday: 'MON' };
+  }
+  if (!/^\d+$/.test(hour) || !/^\d+$/.test(min) || Number(hour) > 23 || Number(min) > 59) {
+    return { frequency: 'custom', time: '09:00', weekday: 'MON' };
   }
   if (dow === 'MON-FRI' && day === '*' && month === '*') {
     const hh = String(hour).padStart(2, '0');
@@ -107,7 +110,7 @@ function parseCronExpr(expr: string): { frequency: FrequencyType; time: string; 
       const mm = String(min).padStart(2, '0');
       return { frequency: 'weekly', time: `${hh}:${mm}`, weekday: dayUpper };
     }
-    return { frequency: 'daily', time: '09:00', weekday: 'MON' };
+    return { frequency: 'custom', time: '09:00', weekday: 'MON' };
   }
   if (day === '*' && month === '*' && dow === '*') {
     const hourNum = Number(hour);
@@ -136,6 +139,9 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
   const { t, i18n } = useTranslation();
   const [form] = Form.useForm();
   const [submitting, setSubmitting] = useState(false);
+  const sessionRef = useRef(0);
+  const submittingRef = useRef(false);
+  const [scheduleChanged, setScheduleChanged] = useState(false);
   const { cliAgents, agentPresets, isLoading: identitiesLoading } = useConversationAgents();
   // Provider/model groups with an exact enabled Chat capability.
   const { groups: chatGroups } = useModelsForTask('chat');
@@ -213,13 +219,19 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
     return agentId;
   }, [identitiesLoading, cliAgents, editJob?.metadata.agent_config]);
 
-  // Populate form when entering edit mode
+  // A session owns its draft and submission; live updates to the same job do
+  // not reinitialize the form. Closing/switching invalidates UI continuations,
+  // not a backend write that was already dispatched.
   useEffect(() => {
+    sessionRef.current += 1;
+    submittingRef.current = false;
+    setSubmitting(false);
+    setScheduleChanged(false);
     if (!visible) return;
     if (editJob) {
       const cronExpr = editJob.schedule.kind === 'cron' ? editJob.schedule.expr : '';
       const parsed = parseCronExpr(cronExpr);
-      setFrequency(parsed.frequency);
+      setFrequency(editJob.schedule.kind === 'cron' ? parsed.frequency : 'preserve');
       setTime(parsed.time);
       setWeekday(parsed.weekday);
       setCustomCronExpr(parsed.frequency === 'custom' ? cronExpr : '');
@@ -254,7 +266,8 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
       setSelectedAgent(undefined);
       setClearContextEachRun(false);
     }
-  }, [visible, editJob, form, initialSpecifiedConversationId]);
+    return () => { sessionRef.current += 1; };
+  }, [visible, editJob?.cron_job_id, form, initialSpecifiedConversationId]);
 
   // Legacy rows do not carry custom_agent_id, so their unique backend fallback
   // can only be restored after AgentRegistry metadata has arrived.
@@ -329,6 +342,8 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
   const isSpecifiedMode = execution_mode === 'specified';
   const showTimePicker = frequency === 'daily' || frequency === 'weekdays' || frequency === 'weekly';
   const showWeekdayPicker = frequency === 'weekly';
+  const scheduleTimeZone =
+    (editJob?.schedule.kind === 'cron' && editJob.schedule.tz) || getCurrentCronTimeZone();
 
   // Build a 6-field (seconds-first) cron expression from frequency settings.
   const scheduleInfo = useMemo(() => {
@@ -389,6 +404,7 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
   const showModelSelector = Boolean(!isPresetSelection && resolvedBackend && isProviderModelMode);
 
   const handleFrequencyChange = (value: FrequencyType) => {
+    setScheduleChanged(value !== 'preserve');
     setFrequency(value);
     if (value === 'custom') {
       setCustomCronExpr((prev) => prev || '0 0 9 * * ?');
@@ -469,15 +485,20 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
   };
 
   const handleSubmit = async () => {
+    if (!visible || submittingRef.current) return;
+    submittingRef.current = true;
+    const session = sessionRef.current;
+    const isCurrent = () => session === sessionRef.current;
     try {
       const values = await form.validate();
+      if (!isCurrent()) return;
 
-      if (frequency !== 'manual' && !validateCronExpression(scheduleInfo.expr, getCurrentCronTimeZone()).valid) {
+      if ((!isEditMode || scheduleChanged) && frequency !== 'manual' && !validateCronExpression(scheduleInfo.expr, scheduleTimeZone).valid) {
         Message.error(t('cron.page.cronExpression.invalid'));
         return;
       }
 
-      const schedule = createCronSchedule(scheduleInfo.expr, scheduleInfo.description);
+      const schedule = { ...createCronSchedule(scheduleInfo.expr, scheduleInfo.description), tz: scheduleTimeZone };
       const conversationTarget = resolveCronConversationTarget(execution_mode, specifiedConversationId);
 
       if (!conversationTarget) {
@@ -514,6 +535,7 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
           ...buildCronConversationRequestFields(conversationTarget),
         };
         await ipcBridge.cron.addJob.invoke(params);
+        if (!isCurrent()) return;
         Message.success(t('cron.page.createSuccess'));
         onClose();
         return;
@@ -544,11 +566,12 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
           updates: {
             name: values.name,
             description: values.description,
-            schedule,
+            ...(scheduleChanged ? { schedule } : {}),
             message: values.prompt,
             ...(agentConfigChanged ? { agent_config } : {}),
           },
         });
+        if (!isCurrent()) return;
         Message.success(t('cron.page.updateSuccess'));
       } else {
         const { agent_config, resolvedAgentType } = resolveAgentConfig(agentValue);
@@ -563,14 +586,18 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
           ...buildCronConversationRequestFields(conversationTarget),
         };
         await ipcBridge.cron.addJob.invoke(params);
+        if (!isCurrent()) return;
         Message.success(t('cron.page.createSuccess'));
       }
 
       onClose();
     } catch (err) {
-      Message.error(getConversationCreateErrorMessage(err, t));
+      if (isCurrent()) Message.error(getConversationCreateErrorMessage(err, t));
     } finally {
-      setSubmitting(false);
+      if (isCurrent()) {
+        submittingRef.current = false;
+        setSubmitting(false);
+      }
     }
   };
 
@@ -914,6 +941,9 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
           {/* Frequency */}
           <FormItem label={t('cron.page.form.frequency')}>
             <Select value={frequency} onChange={handleFrequencyChange}>
+              {editJob && editJob.schedule.kind !== 'cron' && (
+                <Option value='preserve'>{editJob.schedule.description || t('cron.page.freq.customCron')}</Option>
+              )}
               <Option value='manual'>{t('cron.page.freq.manual')}</Option>
               <Option value='hourly'>{t('cron.page.freq.hourly')}</Option>
               <Option value='daily'>{t('cron.page.freq.daily')}</Option>
@@ -923,7 +953,10 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
             </Select>
             {frequency === 'custom' && (
               <div className='mt-10px'>
-                <CronExpressionBuilder value={customCronExpr} onChange={setCustomCronExpr} tz={getCurrentCronTimeZone()} />
+                <CronExpressionBuilder value={customCronExpr} onChange={(expr) => {
+                  setScheduleChanged(true);
+                  setCustomCronExpr(expr);
+                }} tz={scheduleTimeZone} />
               </div>
             )}
           </FormItem>
@@ -934,7 +967,10 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
                 format='HH:mm'
                 value={dayjs(`2000-01-01 ${time}`)}
                 onChange={(_timeStr, pickedTime) => {
-                  if (pickedTime) setTime(pickedTime.format('HH:mm'));
+                  if (pickedTime) {
+                    setScheduleChanged(true);
+                    setTime(pickedTime.format('HH:mm'));
+                  }
                 }}
                 allowClear={false}
                 className='w-120px'
@@ -944,7 +980,7 @@ const CreateTaskDialog: React.FC<CreateTaskDialogProps> = ({
 
           {showWeekdayPicker && (
             <div className='mb-16px'>
-              <Select value={weekday} onChange={setWeekday}>
+              <Select value={weekday} onChange={(value) => { setScheduleChanged(true); setWeekday(value); }}>
                 {WEEKDAYS.map((d) => (
                   <Option key={d.value} value={d.value}>
                     {t(`cron.page.weekday.${d.label}`)}
