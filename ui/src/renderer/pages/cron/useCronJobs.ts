@@ -21,6 +21,18 @@ const isJobErrorLike = (job: ICronJob): boolean => {
   return job.state.last_status === 'error' || job.state.last_status === 'missed';
 };
 
+// Only retain events received during the current GET (including timezone
+// repair). A deletion must override the snapshot without dropping other jobs.
+type CronJobChanges = Map<CronJobId, ICronJob | null>;
+function mergeCronSnapshot(jobs: ICronJob[], changes: CronJobChanges): ICronJob[] {
+  const merged = new Map(jobs.map((job) => [job.cron_job_id, job]));
+  for (const [id, job] of changes) {
+    if (job) merged.set(id, job);
+    else merged.delete(id);
+  }
+  return [...merged.values()];
+}
+
 /**
  * Common cron job actions
  */
@@ -114,11 +126,17 @@ export function useCronJobs(conversation_id?: ConversationId) {
   const [jobs, setJobs] = useState<ICronJob[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
+  const pendingRef = useRef<CronJobChanges | null>(null);
 
   // Fetch jobs for the conversation
   const fetchJobs = useCallback(async () => {
+    const changes: CronJobChanges = new Map();
+    pendingRef.current = changes;
     if (conversation_id == null) {
+      pendingRef.current = null;
       setJobs([]);
+      setError(null);
+      setLoading(false);
       return;
     }
 
@@ -127,18 +145,26 @@ export function useCronJobs(conversation_id?: ConversationId) {
 
     try {
       const result = await ipcBridge.cron.listJobsByConversation.invoke({ conversation_id });
-      setJobs(await repairCronJobTimeZones(result || []));
+      if (pendingRef.current !== changes) return;
+      const repaired = await repairCronJobTimeZones(mergeCronSnapshot(result || [], changes));
+      if (pendingRef.current !== changes) return;
+      setJobs(mergeCronSnapshot(repaired, changes).filter((job) => job.metadata.conversation_id === conversation_id));
     } catch (err) {
+      if (pendingRef.current !== changes) return;
       setError(err instanceof Error ? err : new Error('Failed to fetch cron jobs'));
-      setJobs([]);
     } finally {
-      setLoading(false);
+      if (pendingRef.current === changes) {
+        pendingRef.current = null;
+        setLoading(false);
+      }
     }
   }, [conversation_id]);
 
   // Initial fetch
   useEffect(() => {
+    setJobs([]);
     void fetchJobs();
+    return () => { pendingRef.current = null; };
   }, [fetchJobs]);
 
   // Event handlers
@@ -146,14 +172,17 @@ export function useCronJobs(conversation_id?: ConversationId) {
     () => ({
       onJobCreated: (job: ICronJob) => {
         if (conversation_id && job.metadata.conversation_id === conversation_id) {
+          pendingRef.current?.set(job.cron_job_id, job);
           setJobs((prev) => (prev.some((j) => j.cron_job_id === job.cron_job_id) ? prev : [...prev, job]));
         }
       },
       onJobUpdated: (job: ICronJob) => {
         if (!conversation_id) return;
+        pendingRef.current?.set(job.cron_job_id, job.metadata.conversation_id === conversation_id ? job : null);
         setJobs((prev) => reconcileCronJobsForConversation(prev, conversation_id, job));
       },
       onJobRemoved: ({ cron_job_id }: { cron_job_id: CronJobId }) => {
+        pendingRef.current?.set(cron_job_id, null);
         setJobs((prev) => prev.filter((j) => j.cron_job_id !== cron_job_id));
       },
     }),
@@ -188,35 +217,48 @@ export function useCronJobs(conversation_id?: ConversationId) {
 export function useAllCronJobs() {
   const [jobs, setJobs] = useState<ICronJob[]>([]);
   const [loading, setLoading] = useState(true);
+  const pendingRef = useRef<CronJobChanges | null>(null);
 
   // Fetch all jobs
   const fetchJobs = useCallback(async () => {
+    const changes: CronJobChanges = new Map();
+    pendingRef.current = changes;
     setLoading(true);
     try {
       const allJobs = await ipcBridge.cron.listJobs.invoke();
-      setJobs(await repairCronJobTimeZones(allJobs || []));
+      if (pendingRef.current !== changes) return;
+      const repaired = await repairCronJobTimeZones(mergeCronSnapshot(allJobs || [], changes));
+      if (pendingRef.current !== changes) return;
+      setJobs(mergeCronSnapshot(repaired, changes));
     } catch (err) {
-      console.error('[useAllCronJobs] Failed to fetch jobs:', err);
+      if (pendingRef.current === changes) console.error('[useAllCronJobs] Failed to fetch jobs:', err);
     } finally {
-      setLoading(false);
+      if (pendingRef.current === changes) {
+        pendingRef.current = null;
+        setLoading(false);
+      }
     }
   }, []);
 
   // Initial fetch
   useEffect(() => {
     void fetchJobs();
+    return () => { pendingRef.current = null; };
   }, [fetchJobs]);
 
   // Event handlers
   const eventHandlers = useMemo<CronJobEventHandlers>(
     () => ({
       onJobCreated: (job: ICronJob) => {
+        pendingRef.current?.set(job.cron_job_id, job);
         setJobs((prev) => (prev.some((j) => j.cron_job_id === job.cron_job_id) ? prev : [...prev, job]));
       },
       onJobUpdated: (job: ICronJob) => {
-        setJobs((prev) => prev.map((j) => (j.cron_job_id === job.cron_job_id ? job : j)));
+        pendingRef.current?.set(job.cron_job_id, job);
+        setJobs((prev) => mergeCronSnapshot(prev, new Map([[job.cron_job_id, job]])));
       },
       onJobRemoved: ({ cron_job_id }: { cron_job_id: CronJobId }) => {
+        pendingRef.current?.set(cron_job_id, null);
         setJobs((prev) => prev.filter((j) => j.cron_job_id !== cron_job_id));
       },
     }),
@@ -227,10 +269,12 @@ export function useAllCronJobs() {
 
   // Actions with local state updates
   const handleJobUpdated = useCallback((cron_job_id: CronJobId, job: ICronJob) => {
+    pendingRef.current?.set(cron_job_id, job);
     setJobs((prev) => prev.map((j) => (j.cron_job_id === cron_job_id ? job : j)));
   }, []);
 
   const handleJobDeleted = useCallback((cron_job_id: CronJobId) => {
+    pendingRef.current?.set(cron_job_id, null);
     setJobs((prev) => prev.filter((j) => j.cron_job_id !== cron_job_id));
   }, []);
 
@@ -257,6 +301,7 @@ export function useAllCronJobs() {
 export function useCronJobsMap() {
   const [jobsMap, setJobsMap] = useState<Map<ConversationId, ICronJob[]>>(new Map());
   const [loading, setLoading] = useState(true);
+  const pendingRef = useRef<CronJobChanges | null>(null);
   const unreadStorageKey = browserStorageGenerationKey('cron-unread');
   // Track conversations with unread cron executions (red dot indicator)
   const [unreadConversations, setUnreadConversations] = useState<Set<ConversationId>>(() => {
@@ -298,12 +343,18 @@ export function useCronJobsMap() {
 
   // Fetch all jobs and group by conversation
   const fetchAllJobs = useCallback(async () => {
+    const changes: CronJobChanges = new Map();
+    pendingRef.current = changes;
     setLoading(true);
     try {
-      const allJobs = await repairCronJobTimeZones(await ipcBridge.cron.listJobs.invoke());
-      const jobs = allJobs || [];
+      const allJobs = await ipcBridge.cron.listJobs.invoke();
+      if (pendingRef.current !== changes) return;
+      const repaired = await repairCronJobTimeZones(mergeCronSnapshot(allJobs || [], changes));
+      if (pendingRef.current !== changes) return;
+      const jobs = mergeCronSnapshot(repaired, changes);
       const map = indexCronJobsByConversation(jobs);
 
+      lastRunAtMapRef.current.clear();
       for (const job of jobs) {
         // Initialize lastRunAtMap for detecting new executions
         if (job.state.last_run_at_ms) {
@@ -313,21 +364,26 @@ export function useCronJobsMap() {
 
       setJobsMap(map);
     } catch (err) {
-      console.error('[useCronJobsMap] Failed to fetch jobs:', err);
+      if (pendingRef.current === changes) console.error('[useCronJobsMap] Failed to fetch jobs:', err);
     } finally {
-      setLoading(false);
+      if (pendingRef.current === changes) {
+        pendingRef.current = null;
+        setLoading(false);
+      }
     }
   }, []);
 
   // Initial fetch
   useEffect(() => {
     void fetchAllJobs();
+    return () => { pendingRef.current = null; };
   }, [fetchAllJobs]);
 
   // Event handlers
   const eventHandlers = useMemo<CronJobEventHandlers>(
     () => ({
       onJobCreated: (job: ICronJob) => {
+        pendingRef.current?.set(job.cron_job_id, job);
         const convId = job.metadata.conversation_id;
         if (!convId) return;
         setJobsMap((prev) => upsertCronJobByConversation(prev, job));
@@ -336,6 +392,7 @@ export function useCronJobsMap() {
         emitter.emit('chat.history.refresh');
       },
       onJobUpdated: (job: ICronJob) => {
+        pendingRef.current?.set(job.cron_job_id, job);
         const convId = job.metadata.conversation_id;
 
         // Check if this is a new execution (last_run_at_ms changed)
@@ -362,6 +419,8 @@ export function useCronJobsMap() {
         setJobsMap((prev) => upsertCronJobByConversation(prev, job));
       },
       onJobRemoved: ({ cron_job_id }: { cron_job_id: CronJobId }) => {
+        pendingRef.current?.set(cron_job_id, null);
+        lastRunAtMapRef.current.delete(cron_job_id);
         setJobsMap((prev) => {
           const newMap = new Map(prev);
           for (const [convId, convJobs] of newMap.entries()) {
@@ -477,28 +536,35 @@ export function useCronJobsMap() {
 export function useCronJobRuns(cron_job_id: CronJobId | undefined) {
   const [runs, setRuns] = useState<ICronJobRun[]>([]);
   const [loading, setLoading] = useState(false);
+  const requestRef = useRef(0);
 
   const fetchRuns = useCallback(async () => {
+    const request = ++requestRef.current;
     if (!cron_job_id) {
       setRuns([]);
+      setLoading(false);
       return;
     }
 
     setLoading(true);
     try {
       const result = await ipcBridge.cron.listRuns.invoke({ cron_job_id: cron_job_id });
+      if (request !== requestRef.current) return;
       setRuns(result || []);
     } catch (err) {
+      if (request !== requestRef.current) return;
       console.error('[useCronJobRuns] Failed to fetch:', err);
       setRuns([]);
     } finally {
-      setLoading(false);
+      if (request === requestRef.current) setLoading(false);
     }
   }, [cron_job_id]);
 
   // Initial fetch
   useEffect(() => {
+    setRuns([]);
     void fetchRuns();
+    return () => { requestRef.current += 1; };
   }, [fetchRuns]);
 
   // Refetch when this job executes. WebSocket delivery has no replay: also
