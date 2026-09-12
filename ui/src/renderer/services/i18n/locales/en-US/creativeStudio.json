@@ -227,6 +227,11 @@
     },
     "preview": {
       "close": "Close",
+      "createdAt": "Created",
+      "dimensions": "Dimensions",
+      "fileSize": "File size",
+      "format": "File format",
+      "updatedAt": "Updated",
       "collection": "Collection: {{collection}}",
       "downloadOriginal": "Download original file",
       "kind": "Type: {{kind}}",

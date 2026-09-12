@@ -91,6 +91,21 @@ const renderLibrary = (overrides: Partial<React.ComponentProps<typeof CreativeAs
   );
 
 describe('CreativeAssetLibrary', () => {
+  test('hides absent metadata and uses the same short default name for the card and actions', () => {
+    const prompt = '纯白色纸张破洞视角，洞边缘有撕纸纤维质感，蓝色头发的小女孩从洞中探出。';
+    for (const view of ['grid', 'list'] as const) {
+      const html = renderLibrary({
+        view,
+        selectedIds: new Set(),
+        state: state({ assets: [{ ...asset('unnamed', 'image'), title: prompt, origin: { prompt }, collection: '  ', tags: ['', '  '] }] }),
+      });
+      expect(html.includes('>纯白色纸张破洞视角，洞边缘有撕</strong>')).toBe(true);
+      expect(html.includes('aria-label="更多：纯白色纸张破洞视角，洞边缘有撕"')).toBe(true);
+      expect(html.includes(testLabels.noCollection)).toBe(false);
+      expect(html.includes(testLabels.noTags)).toBe(false);
+    }
+  });
+
   test('renders the controlled source-aligned library surface and every media kind', () => {
     const html = renderLibrary();
 
