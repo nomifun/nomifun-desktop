@@ -26,14 +26,6 @@ pub struct ApplyPatchTool {
     cwd: Option<std::path::PathBuf>,
 }
 
-fn err(msg: impl Into<String>) -> ToolResult {
-    ToolResult {
-        content: msg.into(),
-        is_error: true,
-        images: Vec::new(),
-    }
-}
-
 impl ApplyPatchTool {
     pub fn new(file_cache: Option<Arc<RwLock<FileStateCache>>>) -> Self {
         Self {
@@ -60,7 +52,9 @@ impl ApplyPatchTool {
     /// `Some(error)` if rejected, `None` if OK or no cache is wired.
     fn cache_guard(&self, path: &Path) -> Option<String> {
         let cache_arc = self.file_cache.as_ref()?;
-        let mut cache = cache_arc.write().ok()?;
+        let Ok(mut cache) = cache_arc.write() else {
+            return Some("File state cache is unavailable; refusing to patch".into());
+        };
         let cached = cache.get(path);
         if cached.is_none() {
             return Some(format!(
@@ -147,10 +141,10 @@ impl Tool for ApplyPatchTool {
 
     async fn execute(&self, input: Value) -> ToolResult {
         let Some(files) = input["files"].as_array() else {
-            return err("Missing required parameter: files (array)");
+            return ToolResult::error("Missing required parameter: files (array)");
         };
         if files.is_empty() {
-            return err("files array must not be empty");
+            return ToolResult::error("files array must not be empty");
         }
 
         // PHASE 1 — validate + compute the new content for every file. No writes.
@@ -160,7 +154,7 @@ impl Tool for ApplyPatchTool {
         let mut created = 0usize;
         for (i, f) in files.iter().enumerate() {
             let Some(file_path) = f["file_path"].as_str() else {
-                return err(format!("file #{}: missing file_path", i + 1));
+                return ToolResult::error(format!("file #{}: missing file_path", i + 1));
             };
             // Resolve a relative file_path against the session working directory
             // (matching ReadTool/Grep/Glob/Bash) before validating/writing.
@@ -170,7 +164,15 @@ impl Tool for ApplyPatchTool {
             // before validating/writing anything (keeps the all-or-nothing
             // guarantee — a single out-of-root file aborts the whole patch).
             if let Some(msg) = crate::path_guard::ensure_within_root(file_path, self.write_root.as_deref()) {
-                return err(msg);
+                return ToolResult::error(msg);
+            }
+            if f.get("content").is_some_and(|v| !v.is_string())
+                || f.get("edits").is_some_and(|v| !v.is_array())
+                || f.get("delete").is_some_and(|v| !v.is_boolean())
+            {
+                return ToolResult::error(format!(
+                    "{file_path}: content must be a string, edits an array, and delete a boolean"
+                ));
             }
             let content_field = f.get("content").and_then(|v| v.as_str());
             let edits_field = f.get("edits").and_then(|v| v.as_array());
@@ -180,17 +182,17 @@ impl Tool for ApplyPatchTool {
             // exist, and (with a cache wired) must have been read first.
             if delete_field {
                 if content_field.is_some() || edits_field.is_some() {
-                    return err(format!(
+                    return ToolResult::error(format!(
                         "{}: `delete` cannot be combined with `content` or `edits`",
                         file_path
                     ));
                 }
                 let path = Path::new(file_path);
                 if !path.exists() {
-                    return err(format!("{}: cannot delete — file does not exist", file_path));
+                    return ToolResult::error(format!("{}: cannot delete — file does not exist", file_path));
                 }
                 if let Some(msg) = self.cache_guard(path) {
-                    return err(msg);
+                    return ToolResult::error(msg);
                 }
                 to_delete.push(file_path.to_string());
                 continue;
@@ -198,13 +200,13 @@ impl Tool for ApplyPatchTool {
 
             match (content_field, edits_field) {
                 (Some(_), Some(_)) => {
-                    return err(format!(
+                    return ToolResult::error(format!(
                         "{}: specify either `content` (create/replace whole file) or `edits` (patch existing), not both",
                         file_path
                     ));
                 }
                 (None, None) => {
-                    return err(format!("{}: each file needs either `content` or `edits`", file_path));
+                    return ToolResult::error(format!("{}: each file needs either `content` or `edits`", file_path));
                 }
                 // Create or replace the whole file with `content`.
                 (Some(content), None) => {
@@ -215,7 +217,7 @@ impl Tool for ApplyPatchTool {
                     if path.exists()
                         && let Some(msg) = self.cache_guard(path)
                     {
-                        return err(msg);
+                        return ToolResult::error(msg);
                     }
                     if !path.exists() {
                         created += 1;
@@ -225,14 +227,17 @@ impl Tool for ApplyPatchTool {
                 // Patch an existing file with `edits`.
                 (None, Some(edits_arr)) => {
                     if edits_arr.is_empty() {
-                        return err(format!("{}: edits array must not be empty", file_path));
+                        return ToolResult::error(format!("{}: edits array must not be empty", file_path));
                     }
                     let mut ops = Vec::with_capacity(edits_arr.len());
                     for e in edits_arr {
                         let (Some(o), Some(n)) = (e["old_string"].as_str(), e["new_string"].as_str())
                         else {
-                            return err(format!("{}: each edit needs old_string and new_string", file_path));
+                            return ToolResult::error(format!("{}: each edit needs old_string and new_string", file_path));
                         };
+                        if e.get("replace_all").is_some_and(|v| !v.is_boolean()) {
+                            return ToolResult::error(format!("{file_path}: replace_all must be a boolean"));
+                        }
                         ops.push(EditOp {
                             old_string: o.to_string(),
                             new_string: n.to_string(),
@@ -241,11 +246,11 @@ impl Tool for ApplyPatchTool {
                     }
                     let path = Path::new(file_path);
                     if let Some(msg) = self.cache_guard(path) {
-                        return err(msg);
+                        return ToolResult::error(msg);
                     }
                     let content = match std::fs::read_to_string(file_path) {
                         Ok(c) => c,
-                        Err(e) => return err(format!("Failed to read {}: {}", file_path, e)),
+                        Err(e) => return ToolResult::error(format!("Failed to read {}: {}", file_path, e)),
                     };
                     match apply_edits(&content, &ops) {
                         Ok((new_content, n)) => {
@@ -253,7 +258,7 @@ impl Tool for ApplyPatchTool {
                             planned.push((file_path.to_string(), new_content));
                         }
                         // Abort: a hunk did not apply — leave ALL files untouched.
-                        Err(msg) => return err(format!("{}: {}", file_path, msg)),
+                        Err(msg) => return ToolResult::error(format!("{}: {}", file_path, msg)),
                     }
                 }
             }
@@ -269,7 +274,7 @@ impl Tool for ApplyPatchTool {
                 let _ = std::fs::create_dir_all(parent);
             }
             if let Err(e) = crate::atomic_write(path_str, new_content) {
-                return err(format!("Failed to write {}: {}", path_str, e));
+                return ToolResult::error(format!("Failed to write {}: {}", path_str, e));
             }
             if let Some(cache_arc) = &self.file_cache {
                 update_cache_after_write(cache_arc, Path::new(path_str), new_content);
@@ -279,7 +284,7 @@ impl Tool for ApplyPatchTool {
         // PHASE 2b — deletions (after writes; independent paths, order-agnostic).
         for path_str in &to_delete {
             if let Err(e) = std::fs::remove_file(path_str) {
-                return err(format!("Failed to delete {}: {}", path_str, e));
+                return ToolResult::error(format!("Failed to delete {}: {}", path_str, e));
             }
             if let Some(cache_arc) = &self.file_cache
                 && let Ok(mut cache) = cache_arc.write()
@@ -324,6 +329,59 @@ mod tests {
     use super::*;
     use serde_json::json;
     use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn apply_patch_rejects_poisoned_cache_before_any_mutation() {
+        let dir = tempdir().unwrap();
+        let existing = dir.path().join("existing.txt");
+        let created = dir.path().join("created.txt");
+        std::fs::write(&existing, "original").unwrap();
+        let cache = Arc::new(RwLock::new(FileStateCache::new(&Default::default())));
+        let poison = cache.clone();
+        assert!(std::thread::spawn(move || {
+            let _guard = poison.write().unwrap();
+            panic!("failed cache owner");
+        }).join().is_err());
+        let tool = ApplyPatchTool::new(Some(cache));
+        for mutation in [
+            json!({ "content": "replacement" }),
+            json!({ "edits": [{ "old_string": "original", "new_string": "replacement" }] }),
+            json!({ "delete": true }),
+        ] {
+            let mut entry = mutation;
+            entry["file_path"] = json!(existing);
+            let result = tool.execute(json!({ "files": [
+                { "file_path": created, "content": "must not be created" }, entry,
+            ] })).await;
+            assert!(result.is_error, "{}", result.content);
+            assert!(result.content.contains("cache is unavailable"));
+            assert!(!created.exists());
+            assert_eq!(std::fs::read_to_string(&existing).unwrap(), "original");
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_patch_rejects_invalid_operation_types_before_writing() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("target.txt");
+        let created = dir.path().join("created.txt");
+        std::fs::write(&target, "original").unwrap();
+        let tool = ApplyPatchTool::new(None);
+        for mut entry in [
+            json!({ "delete": true, "content": 7 }),
+            json!({ "delete": true, "edits": {} }),
+            json!({ "delete": "true", "content": "wrong" }),
+            json!({ "edits": [{ "old_string": "original", "new_string": "wrong", "replace_all": "true" }] }),
+        ] {
+            entry["file_path"] = json!(target);
+            let result = tool.execute(json!({ "files": [
+                { "file_path": created, "content": "must not be created" }, entry,
+            ] })).await;
+            assert!(result.is_error, "{}", result.content);
+            assert!(!created.exists());
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
+        }
+    }
 
     #[tokio::test]
     async fn apply_patch_resolves_relative_path_against_cwd() {
