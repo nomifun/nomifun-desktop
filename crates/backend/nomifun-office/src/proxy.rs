@@ -215,6 +215,8 @@ impl From<ProxyError> for nomifun_common::AppError {
 }
 
 fn build_target_url(port: u16, path: &str) -> String {
+    // The path includes the still-encoded path and raw query from the router.
+    // Append to the fixed loopback origin; URL joining could replace its host.
     let normalized = if path.starts_with('/') {
         path.to_owned()
     } else {
@@ -238,12 +240,18 @@ fn rewrite_location(location: &str, port: u16, proxy_base: &str) -> String {
     let pattern = format!("http://localhost:{port}");
     let pattern_ip = format!("http://127.0.0.1:{port}");
 
-    let rewritten = if location.starts_with(&pattern) {
-        format!("{proxy_base}{}", &location[pattern.len()..])
-    } else if location.starts_with(&pattern_ip) {
-        format!("{proxy_base}{}", &location[pattern_ip.len()..])
-    } else {
-        location.to_owned()
+    let suffix = location
+        .strip_prefix(&pattern)
+        .or_else(|| location.strip_prefix(&pattern_ip))
+        .filter(|suffix| {
+            suffix.is_empty()
+                || suffix.starts_with('/')
+                || suffix.starts_with('?')
+                || suffix.starts_with('#')
+        });
+    let rewritten = match suffix {
+        Some(suffix) => format!("{proxy_base}{suffix}"),
+        None => location.to_owned(),
     };
 
     if rewritten == "/"
@@ -374,20 +382,32 @@ mod tests {
 
     #[test]
     fn rewrite_location_external_url_unchanged() {
-        let result = rewrite_location("https://example.com/path", 8080, "/api/ppt-proxy/8080");
-        assert_eq!(result, "https://example.com/path");
+        for location in ["https://example.com/path", "//example.com/path", "relative/path", "?q=1", "#slide"] {
+            assert_eq!(rewrite_location(location, 8080, "/api/ppt-proxy/8080"), location);
+        }
     }
 
     #[test]
     fn rewrite_location_different_port_unchanged() {
-        let result = rewrite_location("http://localhost:9999/path", 8080, "/api/ppt-proxy/8080");
-        assert_eq!(result, "http://localhost:9999/path");
+        for host in ["localhost", "127.0.0.1"] {
+            for suffix in ["9999/path", "30001/path", "3000@other.invalid/path", "3000.other.invalid/path"] {
+                let location = format!("http://{host}:{suffix}");
+                assert_eq!(rewrite_location(&location, 3000, "/api/ppt-proxy/3000"), location);
+            }
+        }
     }
 
     #[test]
     fn rewrite_location_localhost_root() {
-        let result = rewrite_location("http://localhost:3000", 3000, "/api/office-watch-proxy/3000");
-        assert_eq!(result, "/api/office-watch-proxy/3000");
+        for host in ["localhost", "127.0.0.1"] {
+            for suffix in ["", "/", "?q=a%2Bb&x=1&x=2", "#slide", "/a%3Fb?q=%23#slide"] {
+                let location = format!("http://{host}:3000{suffix}");
+                assert_eq!(
+                    rewrite_location(&location, 3000, "/api/office-watch-proxy/3000"),
+                    format!("/api/office-watch-proxy/3000{suffix}")
+                );
+            }
+        }
     }
 
     #[test]

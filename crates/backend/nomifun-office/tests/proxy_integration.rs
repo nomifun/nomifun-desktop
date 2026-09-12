@@ -2,12 +2,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use nomifun_api_types::WebSocketMessage;
-use nomifun_office::{OfficeError, PreviewAccess};
+use nomifun_office::{OfficeError, OfficeRouterState, PreviewAccess, SnapshotService, office_proxy_routes};
 use nomifun_office::proxy::{ProxyError, ProxyService};
 use nomifun_office::types::DocType;
 use nomifun_office::watch_manager::{OfficecliWatchManager, ProcessHandle, ProcessSpawner};
 use nomifun_realtime::UserEventSink;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 
 // ---------------------------------------------------------------------------
@@ -41,6 +41,7 @@ impl ProcessHandle for MockProcessHandle {
 
 struct HttpMockSpawner {
     response_template: String,
+    request_targets: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 #[async_trait::async_trait]
@@ -52,14 +53,22 @@ impl ProcessSpawner for HttpMockSpawner {
         _doc_type: DocType,
     ) -> Result<Box<dyn ProcessHandle>, OfficeError> {
         let resp = self.response_template.replace("__PORT__", &port.to_string());
+        let request_targets = Arc::clone(&self.request_targets);
         tokio::spawn(async move {
             let listener = TcpListener::bind(format!("127.0.0.1:{port}")).await.unwrap();
             for _ in 0..10 {
                 if let Ok((mut stream, _)) = listener.accept().await {
                     let resp = resp.clone();
+                    let request_targets = Arc::clone(&request_targets);
                     tokio::spawn(async move {
-                        let mut buf = vec![0u8; 4096];
-                        let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await;
+                        let mut line = String::new();
+                        if BufReader::new(&mut stream).read_line(&mut line).await.is_err() {
+                            return;
+                        }
+                        let Some(target) = line.split_whitespace().nth(1) else {
+                            return; // The readiness probe connects without sending HTTP.
+                        };
+                        request_targets.lock().unwrap().push(target.to_owned());
                         let _ = stream.write_all(resp.as_bytes()).await;
                         let _ = stream.shutdown().await;
                     });
@@ -134,6 +143,7 @@ async fn setup_proxy(
 ) -> (ProxyService, PreviewAccess, tempfile::TempDir) {
     let spawner = HttpMockSpawner {
         response_template: response_template.to_owned(),
+        request_targets: Default::default(),
     };
     let mgr = Arc::new(OfficecliWatchManager::new(Arc::new(spawner), Arc::new(NoopBroadcaster)));
 
@@ -533,4 +543,67 @@ async fn proxy_forwards_404_status() {
         .unwrap();
 
     assert_eq!(result.status, 404);
+}
+
+#[tokio::test]
+async fn proxy_routes_preserve_encoded_path_and_raw_query() {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let cases = [
+        ("", "/"),
+        ("/", "/"),
+        ("?x=1&x=2&plus=a+b&escaped=%2B", "/?x=1&x=2&plus=a+b&escaped=%2B"),
+        ("/?", "/?"),
+        (
+            "/assets/a%3Fb%23c%2Fd%2520%5C.txt?x=%26%3D+&x=2",
+            "/assets/a%3Fb%23c%2Fd%2520%5C.txt?x=%26%3D+&x=2",
+        ),
+        ("/assets/%E4%B8%AD%20name.svg", "/assets/%E4%B8%AD%20name.svg"),
+        ("//assets/icon.svg", "//assets/icon.svg"),
+    ];
+
+    for doc_type in [DocType::Word, DocType::Excel, DocType::Ppt] {
+        let request_targets = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let spawner = HttpMockSpawner {
+            response_template: build_http_response(200, &[], "ok"),
+            request_targets: Arc::clone(&request_targets),
+        };
+        let mgr = Arc::new(OfficecliWatchManager::new(Arc::new(spawner), Arc::new(NoopBroadcaster)));
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.docx");
+        std::fs::write(&file, b"test").unwrap();
+        let access = mgr
+            .start("0190f5fe-7c00-7a00-8abc-012345678901", file.to_str().unwrap(), doc_type)
+            .await
+            .unwrap();
+        let state = OfficeRouterState {
+            proxy_service: Arc::new(ProxyService::new(Arc::clone(&mgr))),
+            watch_manager: mgr,
+            snapshot_service: Arc::new(SnapshotService::new(dir.path())),
+            allowed_roots: Vec::new(),
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, office_proxy_routes(state)).await.unwrap();
+        });
+
+        for (suffix, _) in cases {
+            let response = client
+                .get(format!("http://{address}/api/{}/{}{suffix}", doc_type.proxy_prefix(), access.capability))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), 200, "{doc_type}: {suffix}");
+            assert_eq!(response.text().await.unwrap(), "ok");
+        }
+        let expected: Vec<String> = cases.iter().map(|(_, target)| (*target).to_owned()).collect();
+        assert_eq!(*request_targets.lock().unwrap(), expected, "{doc_type}");
+        server.abort();
+        let _ = server.await;
+    }
 }
