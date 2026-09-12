@@ -654,25 +654,22 @@ async fn import_bundle_inner(
     // Extraction temp lives under the shared dir (same volume as the events
     // destination), namespaced to avoid collisions.
     let tmp_root = shared_dir.join(".import-tmp");
-    let extract_dir = tmp_root.join(format!("companion-{}-{}", std::process::id(), now_ms()));
-    tokio::fs::create_dir_all(&extract_dir)
-        .await
+    tokio::fs::create_dir_all(&tmp_root).await
+        .map_err(|e| AppError::Internal(format!("failed to create import temp root: {e}")))?;
+    let extract_dir = tempfile::Builder::new().prefix("companion-").tempdir_in(&tmp_root)
         .map_err(|e| AppError::Internal(format!("failed to create import temp dir: {e}")))?;
 
-    let result = import_extracted(
+    import_extracted(
         store,
         roster,
         skill_paths,
         shared_dir,
         src_path,
-        &extract_dir,
+        Arc::new(extract_dir),
         event_store_lock.as_ref(),
         config.as_ref(),
     )
-    .await;
-    let _ = tokio::fs::remove_dir_all(&extract_dir).await;
-    let _ = tokio::fs::remove_dir(&tmp_root).await; // best-effort, only when empty
-    result
+    .await
 }
 
 async fn import_extracted(
@@ -681,13 +678,14 @@ async fn import_extracted(
     skill_paths: &SkillPaths,
     shared_dir: &Path,
     src_path: &Path,
-    extract_dir: &Path,
+    extract_dir: Arc<tempfile::TempDir>,
     event_store_lock: Option<&crate::collector::SharedEventStoreLock>,
     config: Option<&crate::collector::SharedConfig>,
 ) -> Result<ImportOutcome, AppError> {
     let src = src_path.to_path_buf();
-    let dest = extract_dir.to_path_buf();
-    let kind = tokio::task::spawn_blocking(move || extract_zip_validated(&src, &dest))
+    // Blocking work keeps the directory alive if its async caller is cancelled.
+    let dest = Arc::clone(&extract_dir);
+    let kind = tokio::task::spawn_blocking(move || extract_zip_validated(&src, dest.path()))
         .await
         .map_err(|e| AppError::Internal(format!("import task join error: {e}")))??;
 
@@ -697,13 +695,13 @@ async fn import_extracted(
                 store,
                 roster,
                 shared_dir,
-                extract_dir,
+                extract_dir.path(),
                 event_store_lock,
                 config,
             )
             .await
         }
-        EXPORT_KIND_COMPANION => import_companion_bundle(store, roster, skill_paths, extract_dir).await,
+        EXPORT_KIND_COMPANION => import_companion_bundle(store, roster, skill_paths, extract_dir.path()).await,
         other => Err(AppError::BadRequest(format!("导入包类型不支持: {other}"))),
     }
 }
