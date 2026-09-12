@@ -69,7 +69,7 @@ impl ShellService {
     pub async fn check_tool_installed(&self, tool: ToolType) -> bool {
         match tool {
             ToolType::Terminal | ToolType::Explorer => true,
-            ToolType::Vscode => self.detect_vscode(),
+            ToolType::Vscode => self.detect_vscode().is_some(),
         }
     }
 
@@ -82,22 +82,21 @@ impl ShellService {
         }
     }
 
-    fn detect_vscode(&self) -> bool {
+    fn detect_vscode(&self) -> Option<&'static str> {
         if self.opener.is_tool_available("code") {
-            return true;
+            return Some("code");
         }
         if cfg!(target_os = "macos") {
             let app_path = "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code";
-            return Path::new(app_path).exists();
+            return self.opener.is_tool_available(app_path).then_some(app_path);
         }
-        false
+        None
     }
 
     async fn open_folder_vscode(&self, path: &Path) -> Result<(), ShellError> {
-        if !self.detect_vscode() {
-            return Err(ShellError::ToolNotInstalled("vscode".to_owned()));
-        }
-        self.opener.run_command("code", &[&path.to_string_lossy()]).await
+        let program = self.detect_vscode()
+            .ok_or_else(|| ShellError::ToolNotInstalled("vscode".to_owned()))?;
+        self.opener.run_command(program, &[&path.to_string_lossy()]).await
     }
 
     async fn open_folder_terminal(&self, path: &Path) -> Result<(), ShellError> {
@@ -385,6 +384,60 @@ mod tests {
     use super::*;
     use crate::opener::NoopSystemOpener;
     use std::fs;
+
+    struct RecordingOpener {
+        installed_program: Option<&'static str>,
+        commands: std::sync::Mutex<Vec<(String, Vec<String>)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ISystemOpener for RecordingOpener {
+        fn open_detached(&self, _: &str) -> Result<(), ShellError> {
+            panic!("VS Code must use the detected executable")
+        }
+
+        fn open_with_detached(&self, _: &str, _: &str) -> Result<(), ShellError> {
+            panic!("VS Code must use the detected executable")
+        }
+
+        async fn run_command(&self, program: &str, args: &[&str]) -> Result<(), ShellError> {
+            self.commands.lock().unwrap().push((
+                program.to_owned(), args.iter().map(|arg| (*arg).to_owned()).collect(),
+            ));
+            Ok(())
+        }
+
+        fn is_tool_available(&self, program: &str) -> bool {
+            self.installed_program == Some(program)
+        }
+    }
+
+    #[tokio::test]
+    async fn vscode_launch_uses_the_detected_program_or_fails_without_spawning() {
+        let programs = [
+            Some("code"),
+            None,
+            #[cfg(target_os = "macos")]
+            Some("/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"),
+        ];
+        for program in programs {
+            let opener = Arc::new(RecordingOpener {
+                installed_program: program,
+                commands: std::sync::Mutex::new(Vec::new()),
+            });
+            let service = ShellService::new(opener.clone());
+            assert_eq!(service.check_tool_installed(ToolType::Vscode).await, program.is_some());
+            let result = service.open_folder_vscode(Path::new("folder with spaces")).await;
+            let commands = opener.commands.lock().unwrap();
+            if let Some(program) = program {
+                result.unwrap();
+                assert_eq!(*commands, [(program.to_owned(), vec!["folder with spaces".to_owned()])]);
+            } else {
+                assert!(matches!(result, Err(ShellError::ToolNotInstalled(_))));
+                assert!(commands.is_empty());
+            }
+        }
+    }
 
     #[test]
     fn validate_file_exists_succeeds_for_real_file() {
