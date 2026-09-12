@@ -25,6 +25,7 @@ import type {
 } from '@/common/types/provider/managedModelService';
 import { useFreeModels } from './useFreeModels';
 import ModelHubPageHeader from './ModelHubPageHeader';
+import { isHealthResultStale } from './freeModelHealth';
 
 const availabilityColor = (availability: ManagedModelServiceAvailability): string => {
   if (availability === 'ready') return 'green';
@@ -63,23 +64,6 @@ const healthDotClass = (status: ManagedModelHealthResult['status'] | 'checking')
   return 'bg-[var(--color-fill-4)]';
 };
 
-/**
- * A probe result older than this no longer describes whether the model can carry
- * an agent task right now.
- *
- * The probe is a single short request; a real turn can be rate-limited seconds
- * later, and nothing writes that failure back into the stored health. A model
- * observed once as healthy therefore stayed green indefinitely — one was still
- * showing "available / 1770ms" after repeated real rate limits. Ageing the badge
- * does not invent a status it cannot know; it stops presenting a stale
- * observation as a current capability.
- */
-const HEALTH_FRESHNESS_MS = 5 * 60 * 1000;
-
-const isHealthResultStale = (result: ManagedModelHealthResult | undefined, now: number): boolean =>
-  result?.status === 'healthy' &&
-  typeof result.checkedAt === 'number' &&
-  now - result.checkedAt > HEALTH_FRESHNESS_MS;
 
 /**
  * FreeModelsContent — management surface for the built-in

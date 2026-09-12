@@ -4,102 +4,81 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test';
+import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
+import { createElement, type PropsWithChildren } from 'react';
+import { ipcBridge } from '@/common';
+import { BackendHttpError } from '@/common/adapter/httpBridge';
+import type { IResponseMessage } from '@/common/adapter/ipcBridge';
+import { parseConversationId, parseMessageId } from '@/common/types/ids';
+import { MessageListProvider } from '../Messages/hooks';
+import * as localCron from '../platforms/nomi/localCronCommands';
+import { NomiMessageBufferStore } from '../platforms/nomi/nomiMessageBuffer';
+import { useNomiMessage } from '../platforms/nomi/useNomiMessage';
 
-/**
- * Behavioural cover for the read-only execution transcript.
- *
- * The sibling structure test asserted a verbatim source line and broke when
- * `startLegacyPostProcess` gained extra conditions around an unchanged
- * `readOnly` short-circuit — a false alarm that could equally have masked a real
- * regression. These tests exercise the guard predicates themselves, so they fail
- * only when a read-only transcript would genuinely cause a side effect.
- */
+const conversationId = parseConversationId('0190f5fe-7c00-7a00-8000-000000000971');
+const messageId = parseMessageId('0190f5fe-7c00-7a00-8000-000000000972');
+const wrapper = ({ children }: PropsWithChildren) =>
+  createElement(MessageListProvider, { initialValue: [] }, children);
 
-/** Mirrors the `startLegacyPostProcess` early-return in useNomiMessage.ts. */
-const wouldRunLegacyPostProcess = (args: {
-  readOnly: boolean;
-  terminalId?: string;
-  conversationId: string;
-  activeConversationId: string;
-  generation: number;
-  activeGeneration: number;
-  knownTerminalIds?: Set<string>;
-}): boolean => {
-  const known = args.knownTerminalIds ?? new Set<string>();
-  if (
-    args.readOnly ||
-    !args.terminalId ||
-    args.conversationId !== args.activeConversationId ||
-    args.generation !== args.activeGeneration ||
-    known.has(args.terminalId)
-  ) {
-    return false;
+afterEach(() => {
+  cleanup();
+  mock.restore();
+});
+
+// Exercise the actual hook and capture its transport callback; do not restate
+// its read-only predicates in the test. Both modes receive the same live events.
+async function mountTranscript(readOnly: boolean) {
+  let onStream: ((message: IResponseMessage) => void) | undefined;
+  spyOn(ipcBridge.conversation.responseStream, 'on').mockImplementation((listener) => {
+    onStream = listener;
+    return () => { onStream = undefined; };
+  });
+  for (const event of ['turnStarted', 'turnCompleted', 'userCreated', 'reconnected'] as const) {
+    spyOn(ipcBridge.conversation[event], 'on').mockImplementation(() => () => {});
   }
-  return true;
-};
-
-const liveRequest = {
-  readOnly: false,
-  terminalId: 'term-1',
-  conversationId: 'conv-1',
-  activeConversationId: 'conv-1',
-  generation: 3,
-  activeGeneration: 3,
-};
+  // Missing conversation is an authoritative idle hydration, with no network.
+  spyOn(ipcBridge.conversation.get, 'invoke').mockRejectedValue(new BackendHttpError({
+    method: 'GET', path: '/api/conversations/fixture', status: 404, body: { code: 'NOT_FOUND' },
+  }));
+  const persist = spyOn(ipcBridge.conversation.update, 'invoke').mockResolvedValue(true);
+  const process = spyOn(localCron, 'processLocalCronResponse').mockResolvedValue({
+    systemResponses: [],
+  });
+  const append = spyOn(NomiMessageBufferStore.prototype, 'append');
+  const replace = spyOn(NomiMessageBufferStore.prototype, 'replace');
+  const hook = renderHook(() => useNomiMessage(conversationId, { readOnly }), { wrapper });
+  await waitFor(() => expect(hook.result.current.hasHydratedRunningState).toBe(true));
+  await act(async () => { hook.result.current.setWaitingResponse(true); });
+  const emit = async (message: Pick<IResponseMessage, 'type' | 'data'>) => {
+    await act(async () => {
+      onStream!({ ...message, conversation_id: conversationId, msg_id: messageId });
+      // Drain the message-list batch timer while React is still inside act.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  };
+  return { hook, emit, persist, process, append, replace };
+}
 
 describe('read-only execution transcript side effects', () => {
-  test('a live conversation still runs local post-process', () => {
-    // Guards the guard: if this were false the other assertions would pass
-    // trivially and prove nothing.
-    expect(wouldRunLegacyPostProcess(liveRequest)).toBe(true);
-  });
+  for (const readOnly of [false, true]) {
+    test('readOnly=' + readOnly + ': live metrics render but only writable transcripts persist', async () => {
+      const { hook, emit, persist } = await mountTranscript(readOnly);
+      await emit({ type: 'turn_metrics', data: { input_tokens: 3, output_tokens: 5 } });
+      expect(hook.result.current.tokenUsage?.total_tokens).toBe(8);
+      expect(persist).toHaveBeenCalledTimes(readOnly ? 0 : 1);
+      if (!readOnly) expect(persist.mock.calls[0]?.[0].conversation_id).toBe(conversationId);
+    });
 
-  test('read-only blocks local command post-process regardless of other conditions', () => {
-    expect(wouldRunLegacyPostProcess({ ...liveRequest, readOnly: true })).toBe(false);
-  });
-
-  test('read-only wins even when every other condition is satisfiable', () => {
-    // readOnly must short-circuit first, so no combination of valid terminal,
-    // conversation, and generation can re-enable the side effect.
-    for (const generation of [3, 4]) {
-      for (const terminalId of ['term-1', 'term-2']) {
-        expect(
-          wouldRunLegacyPostProcess({
-            ...liveRequest,
-            readOnly: true,
-            generation,
-            activeGeneration: 3,
-            terminalId,
-          })
-        ).toBe(false);
-      }
-    }
-  });
-
-  test('token usage is persisted only when not read-only', () => {
-    // Mirrors the `if (!readOnly)` guard around
-    // ipcBridge.conversation.update.invoke: read-only viewing must not write
-    // last_token_usage back onto the conversation row.
-    const persistCalls: string[] = [];
-    const applyMetrics = (readOnly: boolean) => {
-      if (!readOnly) persistCalls.push('conversation.update');
-    };
-
-    applyMetrics(true);
-    expect(persistCalls).toEqual([]);
-
-    applyMetrics(false);
-    expect(persistCalls).toEqual(['conversation.update']);
-  });
-
-  test('read-only suppresses text stream buffering', () => {
-    // Mirrors `!readOnly && (type === 'content' || type === 'text')`.
-    const isTextStreamMessage = (readOnly: boolean, type: string, msgId?: string) =>
-      !readOnly && (type === 'content' || type === 'text') && Boolean(msgId);
-
-    expect(isTextStreamMessage(false, 'content', 'm1')).toBe(true);
-    expect(isTextStreamMessage(true, 'content', 'm1')).toBe(false);
-    expect(isTextStreamMessage(true, 'text', 'm1')).toBe(false);
-  });
+    test('readOnly=' + readOnly + ': text buffering and legacy post-process respect mode', async () => {
+      const { emit, append, replace, process } = await mountTranscript(readOnly);
+      await emit({ type: 'content', data: 'legacy response' });
+      await emit({ type: 'text', data: { content: 'replacement', replace: true } });
+      await emit({ type: 'finish', data: undefined });
+      expect(append).toHaveBeenCalledTimes(readOnly ? 0 : 1);
+      expect(replace).toHaveBeenCalledTimes(readOnly ? 0 : 1);
+      expect(process).toHaveBeenCalledTimes(readOnly ? 0 : 1);
+      if (!readOnly) expect(process).toHaveBeenCalledWith(conversationId, 'replacement');
+    });
+  }
 });

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import { customDeskSpec, FIGURE_HEIGHTS, MAX_WINDOW_WIDTH, MIN_WINDOW_WIDTH, SIZE_MIN, SIZE_MAX } from './customDesk';
 
 describe('customDeskSpec', () => {

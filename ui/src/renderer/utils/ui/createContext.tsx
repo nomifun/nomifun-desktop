@@ -4,46 +4,31 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { FunctionComponent, PropsWithChildren } from 'react';
-import React, { useEffect, useRef, useState } from 'react';
+import type { Dispatch, PropsWithChildren, SetStateAction } from 'react';
+import React, { useMemo, useState } from 'react';
 
-type FN<P> = FunctionComponent<PropsWithChildren<P>>;
-
-type F2D<T> = T | ((data: T) => T);
-
-export const createContext = <T extends any>(value: T): [() => T, FN<{ value: T }>, () => (value: F2D<T>) => void] => {
+/** Local state shared by a provider's descendants, not a controlled context.
+ * The factory creates a fresh default for each mount. initialValue is used only
+ * on mount; later prop changes must not overwrite updates from descendants.
+ */
+export function createContext<T>(initialize: () => T) {
   const Context = React.createContext<{
     value: T;
-    // The stored setter is the React useState dispatcher, which accepts both a
-    // bare value and a functional updater (F2D<T>). Type it accordingly so
-    // useUpdateContext exposes the full setter contract.
-    setValue: (value: F2D<T>) => void;
+    setValue: Dispatch<SetStateAction<T>>;
   }>({
-    value,
+    value: initialize(),
     setValue() {
-      console.warn('');
+      console.warn('State context updated outside its provider');
     },
   });
 
-  const useContext = () => {
-    return React.useContext(Context).value;
+  const useValue = () => React.useContext(Context).value;
+  const useUpdate = () => React.useContext(Context).setValue;
+  const Provider = ({ initialValue, children }: PropsWithChildren<{ initialValue?: T }>) => {
+    const [value, setValue] = useState<T>(() => initialValue === undefined ? initialize() : initialValue);
+    const context = useMemo(() => ({ value, setValue }), [value]);
+    return <Context.Provider value={context}>{children}</Context.Provider>;
   };
 
-  const useUpdateContext = () => {
-    return React.useContext(Context).setValue;
-  };
-
-  const DefaultValue = value;
-  const ContextComponent: FN<{ value: T }> = (props) => {
-    const [value, setValue] = useState(props.value || JSON.parse(JSON.stringify(DefaultValue)));
-    const isFirst = useRef(true);
-    useEffect(() => {
-      if (isFirst.current) return;
-      setValue(props.value);
-      isFirst.current = false;
-    }, [props.value]);
-    return <Context.Provider value={{ value, setValue }}>{props.children}</Context.Provider>;
-  };
-
-  return [useContext, ContextComponent, useUpdateContext];
-};
+  return [useValue, Provider, useUpdate] as const;
+}

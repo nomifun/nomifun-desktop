@@ -32,15 +32,13 @@ import {
   preferTextMessageVersion,
   transformKnowledgeWritebackEvent,
 } from '@/common/chat/chatLib';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createContext } from '@renderer/utils/ui/createContext';
 import { addEventListener } from '@/renderer/utils/emitter';
 import { isAuthoritativeCompletionRuntimeIdle } from '../platforms/authoritativeTurnLifecyclePolicy';
 
-const [useMessageList, MessageListProvider, useUpdateMessageList] = createContext([] as TMessage[]);
-const [useMessageListLoading, MessageListLoadingProvider, useUpdateMessageListLoading] = createContext(false);
-
-const beforeUpdateMessageListStack: Array<(list: TMessage[]) => TMessage[]> = [];
+const [useMessageList, MessageListProvider, useUpdateMessageList] = createContext<TMessage[]>(() => []);
+const [useMessageListLoading, MessageListLoadingProvider, useUpdateMessageListLoading] = createContext(() => false);
 
 // 消息索引缓存类型定义
 // Message index cache type definitions
@@ -85,10 +83,6 @@ export function mergeThinkingStreamContent(existing: unknown, incoming: unknown)
   return existingText + incomingText;
 }
 
-// 使用 WeakMap 缓存索引，当列表被 GC 时自动清理
-// Use WeakMap to cache index, auto-cleanup when list is GC'd
-const indexCache = new WeakMap<TMessage[], MessageIndex>();
-
 export function logDroppedToolCallWithoutCallId(message: TMessage | undefined): boolean {
   if (!message) return false;
   if (message.type !== 'tool_call' || message.content?.call_id) return false;
@@ -120,17 +114,6 @@ function buildMessageIndex(list: TMessage[]): MessageIndex {
   }
 
   return { msgIdIndex, call_idIndex };
-}
-
-// 获取或构建索引（带缓存）
-// Get or build index with caching
-function getOrBuildIndex(list: TMessage[]): MessageIndex {
-  let cached = indexCache.get(list);
-  if (!cached) {
-    cached = buildMessageIndex(list);
-    indexCache.set(list, cached);
-  }
-  return cached;
 }
 
 // 使用索引优化的消息合并函数
@@ -430,7 +413,9 @@ export function drainPendingMessageUpdates(
   pendingRef.current = [];
 
   update((list) => {
-    const index = getOrBuildIndex(list);
+    // This index mutates as the batch evolves. Keep it local to each updater
+    // evaluation: React may replay against the same uncommitted list snapshot.
+    const index = buildMessageIndex(list);
     let newList = list;
 
     for (const item of pending) {
@@ -453,10 +438,6 @@ export function drainPendingMessageUpdates(
         newList = newList.concat(msg);
       } else {
         newList = composeMessageWithIndex(item.message, newList, index);
-      }
-
-      while (beforeUpdateMessageListStack.length) {
-        newList = beforeUpdateMessageListStack.shift()!(newList);
       }
     }
     return newList;
@@ -931,190 +912,123 @@ export const mergeFetchedMessagesForConversation = (
 };
 
 /**
- * Loads a conversation's message history into the shared message-list store.
- *
- * Two modes:
- *  - default: one shot of up to 10000 messages.
- *  - `windowed: true`: keyset pagination — load only the newest
- *    `HISTORY_WINDOW_SIZE` on mount and expose `loadOlder()` to prepend older
- *    windows on scroll-up. Used by the nomi chat surfaces (incl. the companion's
- *    single session, which now also absorbs every IM-channel turn and can grow
- *    without bound) so an enormous transcript never crushes the API/DB or the
- *    DOM. The returned `{ loadOlder, hasMore, loadingOlder }` is consumed by
- *    `MessageList` to drive the scroll-up trigger + a prepend scroll-anchor.
+ * Loads a bounded newest window, then pages older history on scroll-up.
+ * All chat surfaces (including the companion's long-lived session) use keyset
+ * pagination; an unbounded transcript must not be fetched in one request.
  */
-export const useMessageLstCache = (key: ConversationId, opts?: { windowed?: boolean }) => {
-  const windowed = opts?.windowed ?? false;
+export const useMessageLstCache = (key: ConversationId) => {
   const update = useUpdateMessageList();
   const setLoading = useUpdateMessageListLoading();
-  const [hasMore, setHasMore] = useState(false);
-  const [loadingOlder, setLoadingOlder] = useState(false);
-  // Oldest message currently loaded (drives the next "load older" cursor); ref
-  // mirrors so the event-driven callbacks read the latest without re-binding.
-  const oldestCursorRef = useRef<string | null>(null);
-  const hasMoreRef = useRef(false);
-  const loadingOlderRef = useRef(false);
-  const newestLoadSequenceRef = useRef(0);
-  const activeConversationRef = useRef<ConversationId>(key);
+  // A new committed scope never inherits an earlier visit's requests or cursor,
+  // even for A → B → A. The revision also invalidates old pages on refresh.
+  const scope = useMemo(() => ({
+    active: false, revision: 0, cursor: null as string | null,
+    hasMore: false, loadingNewest: false, older: null as object | null,
+  }), [key]);
+  const [paging, setPaging] = useState({ scope, hasMore: false, loadingOlder: false });
+  const publishPaging = useCallback(() => {
+    setPaging({
+      scope, hasMore: scope.hasMore && !scope.loadingNewest, loadingOlder: scope.older !== null,
+    });
+  }, [scope]);
 
-  // Providers are shared by the mounted chat surface. Invalidate outstanding
-  // fetches synchronously when routing to another conversation so a slower old
-  // request can never replace the new conversation's transcript.
-  if (activeConversationRef.current !== key) {
-    newestLoadSequenceRef.current += 1;
-    activeConversationRef.current = key;
-  }
+  useLayoutEffect(() => {
+    scope.active = true;
+    return () => {
+      scope.active = false;
+      scope.revision += 1;
+      scope.older = null;
+      setLoading(false);
+    };
+  }, [scope, setLoading]);
 
-  // Merge a freshly fetched DB page (newest window or full list) with any
-  // in-flight streaming messages for this conversation. During streaming the DB
-  // may hold an older snapshot (2000ms save debounce), so we keep whichever
-  // version has more content and build a stable chronological union.
-  const mergeIntoList = useCallback(
-    (messages: TMessage[]) => {
-      update((currentList) => {
-        return mergeFetchedMessagesForConversation(currentList, messages, key);
-      });
-    },
-    [key, update]
-  );
+  const mergeIntoList = useCallback((messages: TMessage[], revision: number) => {
+    // React may evaluate this updater after navigation/refresh. Check ownership
+    // here as well as after the await; merely guarding the enqueue is too early.
+    update((currentList) => scope.active && scope.revision === revision
+      ? mergeFetchedMessagesForConversation(currentList, messages, key)
+      : currentList);
+  }, [key, scope, update]);
 
-  const loadMessages = useCallback(async (): Promise<TMessage[]> => {
-    const loadSequence = newestLoadSequenceRef.current + 1;
-    newestLoadSequenceRef.current = loadSequence;
-    const result = await ipcBridge.database.getConversationMessages.invoke(
-      windowed
-        ? { conversation_id: key, cursor: '', page_size: HISTORY_WINDOW_SIZE, content_mode: 'compact' }
-        : { conversation_id: key, page: 0, page_size: 10000, content_mode: 'compact' }
-    );
-    const messages = result?.items?.map(normalizeDbMessage);
-    if (
-      activeConversationRef.current !== key ||
-      newestLoadSequenceRef.current !== loadSequence
-    ) {
-      return [];
-    }
-    if (windowed) {
-      hasMoreRef.current = Boolean(result?.has_more);
-      setHasMore(hasMoreRef.current);
-      // Keyset path returns the window oldest-first, so messages[0] is the oldest.
-      oldestCursorRef.current =
-        messages && messages.length ? messageCursorOf(messages[0]) : null;
-    }
-    if (messages && Array.isArray(messages)) {
-      mergeIntoList(messages);
-      return messages;
-    }
-    return [];
-  }, [key, mergeIntoList, windowed]);
-
-  // Prepend the next older window (scroll-up). Older rows never overlap the live
-  // streaming tail, so an id-dedup prepend suffices (no content merge needed).
-  const loadOlder = useCallback(async (): Promise<void> => {
-    if (!windowed || loadingOlderRef.current || !hasMoreRef.current) return;
-    const cursor = oldestCursorRef.current;
-    if (!cursor) return;
-    loadingOlderRef.current = true;
-    setLoadingOlder(true);
+  const loadMessages = useCallback(async (): Promise<void> => {
+    if (!scope.active) return;
+    const revision = ++scope.revision;
+    const isCurrent = () => scope.active && scope.revision === revision;
+    scope.loadingNewest = true;
+    scope.older = null;
+    publishPaging();
+    setLoading(true);
     try {
       const result = await ipcBridge.database.getConversationMessages.invoke({
-        conversation_id: key,
-        cursor,
-        page_size: HISTORY_WINDOW_SIZE,
-        content_mode: 'compact',
+        conversation_id: key, cursor: '', page_size: HISTORY_WINDOW_SIZE, content_mode: 'compact',
       });
-      const older = result?.items?.map(normalizeDbMessage) ?? [];
-      if (activeConversationRef.current !== key) return;
-      hasMoreRef.current = Boolean(result?.has_more);
-      setHasMore(hasMoreRef.current);
-      if (older.length) {
-        oldestCursorRef.current = messageCursorOf(older[0]);
-        update((currentList) => {
-          const existingIds = new Set(
-            currentList
-              .map((message) => message.message_id)
-              .filter((messageId): messageId is MessageId => messageId !== undefined)
-          );
-          const fresh = older.filter((message) => !existingIds.has(getPersistedMessageId(message)));
-          return fresh.length ? [...fresh, ...currentList] : currentList;
-        });
-      }
+      if (!isCurrent()) return;
+      const messages = result.items.map(normalizeDbMessage);
+      scope.cursor = messages.length ? messageCursorOf(messages[0]) : null;
+      scope.hasMore = Boolean(result.has_more) && scope.cursor !== null;
+      mergeIntoList(messages, revision);
     } catch (error) {
-      console.error('[useMessageLstCache] Failed to load older messages:', error);
+      if (isCurrent()) console.error('[useMessageLstCache] Failed to load messages from database:', error);
     } finally {
-      loadingOlderRef.current = false;
-      setLoadingOlder(false);
-    }
-  }, [key, update, windowed]);
-
-  useEffect(() => {
-    if (!key) return;
-    // Reset windowed paging state on conversation switch.
-    oldestCursorRef.current = null;
-    hasMoreRef.current = false;
-    setHasMore(false);
-    let cancelled = false;
-    setLoading(true);
-    void loadMessages()
-      .catch((error) => {
-        console.error('[useMessageLstCache] Failed to load messages from database:', error);
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setLoading(false);
-        }
-      });
-    return () => {
-      cancelled = true;
-      newestLoadSequenceRef.current += 1;
-    };
-  }, [key, loadMessages, setLoading]);
-
-  // Plan rows are finalized in the database when the authoritative turn
-  // completes, but that status-only write does not need another plan stream
-  // fragment. Refresh the current window so terminal plan state is reflected
-  // immediately instead of waiting for a remount/manual history refresh.
-  useEffect(() => {
-    if (!key) return;
-    return ipcBridge.conversation.turnCompleted.on((event) => {
-      if (
-        event.conversation_id !== key ||
-        !isAuthoritativeCompletionRuntimeIdle(event.runtime)
-      ) {
-        return;
+      if (isCurrent()) {
+        scope.loadingNewest = false;
+        publishPaging();
+        setLoading(false);
       }
-      void loadMessages().catch((error) => {
-        console.warn('[useMessageLstCache] Failed to refresh terminal message state:', error);
-      });
-    });
-  }, [key, loadMessages]);
+    }
+  }, [key, mergeIntoList, publishPaging, scope, setLoading]);
 
-  // Knowledge write-back finishes after the turn and WebSocket delivery has no
-  // replay. Reload the durable projection after reconnect so a frame lost while
-  // offline cannot leave the message stuck at "writing".
+  const loadOlder = useCallback(async (): Promise<void> => {
+    if (!scope.active || scope.loadingNewest || scope.older || !scope.hasMore || !scope.cursor) return;
+    const revision = scope.revision;
+    const request = {};
+    const isCurrent = () => scope.active && scope.revision === revision && scope.older === request;
+    scope.older = request;
+    publishPaging();
+    try {
+      const result = await ipcBridge.database.getConversationMessages.invoke({
+        conversation_id: key, cursor: scope.cursor,
+        page_size: HISTORY_WINDOW_SIZE, content_mode: 'compact',
+      });
+      if (!isCurrent()) return;
+      const messages = result.items.map(normalizeDbMessage);
+      scope.hasMore = Boolean(result.has_more) && messages.length > 0;
+      if (messages.length) scope.cursor = messageCursorOf(messages[0]);
+      // A refresh can leave previously loaded older pages in the list. Merge
+      // chronologically instead of prepending a page into the wrong position.
+      mergeIntoList(messages, revision);
+    } catch (error) {
+      if (isCurrent()) console.error('[useMessageLstCache] Failed to load older messages:', error);
+    } finally {
+      if (isCurrent()) {
+        scope.older = null;
+        publishPaging();
+      }
+    }
+  }, [key, mergeIntoList, publishPaging, scope]);
+
+  useEffect(() => { void loadMessages(); }, [loadMessages]);
+
   useEffect(() => {
-    if (!key) return;
-    return ipcBridge.conversation.reconnected.on(() => {
-      void loadMessages().catch((error) => {
-        console.warn('[useMessageLstCache] Failed to refresh messages after WebSocket reconnect:', error);
-      });
+    // These are three delivery paths for the same durable-history refresh:
+    // authoritative terminal state, WebSocket recovery and HTTP-poll settle.
+    const offCompleted = ipcBridge.conversation.turnCompleted.on((event) => {
+      if (event.conversation_id === key && isAuthoritativeCompletionRuntimeIdle(event.runtime)) {
+        void loadMessages();
+      }
     });
+    const offReconnect = ipcBridge.conversation.reconnected.on(() => { void loadMessages(); });
+    const offSettled = addEventListener('conversation.turn.settled', (conversationId) => {
+      if (conversationId === key) void loadMessages();
+    });
+    return () => { offCompleted(); offReconnect(); offSettled(); };
   }, [key, loadMessages]);
 
-  // The HTTP GET-poll fallback announces an authoritative idle settle locally
-  // (conversation.turn.settled) when it detects a completed turn whose WS
-  // frames were all lost. Reload the transcript window so the final assistant
-  // message appears without a remount/manual refresh.
-  useEffect(() => {
-    if (!key) return;
-    return addEventListener('conversation.turn.settled', (settledConversationId) => {
-      if (settledConversationId !== key) return;
-      void loadMessages().catch((error) => {
-        console.warn('[useMessageLstCache] Failed to refresh messages after turn settle:', error);
-      });
-    });
-  }, [key, loadMessages]);
-
-  return { loadOlder, hasMore, loadingOlder };
+  return {
+    loadOlder,
+    hasMore: paging.scope === scope && paging.hasMore,
+    loadingOlder: paging.scope === scope && paging.loadingOlder,
+  };
 };
 
 export {

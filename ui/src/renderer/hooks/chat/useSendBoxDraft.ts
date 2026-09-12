@@ -5,98 +5,42 @@ import type { FileOrFolderItem } from '@/renderer/utils/file/fileTypes';
 import type { ConversationId } from '@/common/types/ids';
 export type { FileOrFolderItem } from '@/renderer/utils/file/fileTypes';
 
-type Draft =
-  | {
-      _type: 'claude';
-      content: unknown;
-    }
-  | {
-      _type: 'nomi';
-      content: string;
-      atPath: Array<string | FileOrFolderItem>;
-      uploadFile: string[];
-    };
-
-/**
- * 当前支持的对话类型以及对应的草稿对象
- */
-type SendBoxDraftStore = {
-  [K in TChatConversation['type']]: Map<ConversationId, Extract<Draft, { _type: K }>>;
+type Draft = {
+  _type: 'nomi';
+  content: string;
+  atPath: Array<string | FileOrFolderItem>;
+  uploadFile: string[];
 };
 
-const store: SendBoxDraftStore = {
-  nomi: new Map(),
-};
+const store = new Map<ConversationId, Draft>();
 
-const setDraft = <K extends TChatConversation['type']>(
-  type: K,
-  conversation_id: ConversationId,
-  draft: Extract<Draft, { _type: K }> | undefined
-) => {
-  // TODO import ts-pattern for exhaustive check
-  switch (type) {
-    case 'nomi':
-      if (draft) {
-        store.nomi.set(conversation_id, draft as Extract<Draft, { _type: 'nomi' }>);
-      } else {
-        store.nomi.delete(conversation_id);
-      }
-      break;
-    default:
-      break;
-  }
-};
-
-const getDraft = <K extends TChatConversation['type']>(
-  type: K,
-  conversation_id: ConversationId
-): Extract<Draft, { _type: K }> | undefined => {
-  // TODO import ts-pattern for exhaustive check
-  switch (type) {
-    case 'nomi':
-      return store.nomi.get(conversation_id) as Extract<Draft, { _type: K }>;
-    default:
-      return undefined;
-  }
-};
-
-/**
- * 获得一种类型下的会话草稿操作的 React Hook
- */
-export const getSendBoxDraftHook = <K extends TChatConversation['type']>(
-  type: K,
-  initialValue: Extract<Draft, { _type: K }>
+/** Keep each conversation's composer draft across unmounts. */
+export const getSendBoxDraftHook = (
+  type: TChatConversation['type'],
+  initialValue: Draft
 ) => {
   function useDraft(conversation_id: ConversationId) {
-    const swrRet = useSWR([`/send-box/${type}/draft/${conversation_id}`, conversation_id], ([_, id]) => {
-      return getDraft(type, id);
-    });
-
-    const mutateDraft = useCallback(
-      (draft: (k: Extract<Draft, { _type: K }>) => typeof k | undefined): void => {
-        swrRet
-          .mutate(
-            (prev) => {
-              const newDraft = draft(prev ?? initialValue);
-              setDraft(type, conversation_id, newDraft);
-              return newDraft;
-            },
-            { revalidate: false }
-          )
-          .catch((error) => {
-            console.error('Failed to mutate draft:', error);
-          });
-      },
-      [conversation_id]
+    const { data, mutate } = useSWR(
+      [`/send-box/${type}/draft/${conversation_id}`, conversation_id],
+      ([_, id]) => store.get(id)
     );
-
-    return {
-      get data() {
-        return swrRet.data;
+    const mutateDraft = useCallback(
+      (update: (previous: Draft) => Draft | undefined): void => {
+        void mutate(
+          (previous) => {
+            const next = update(previous ?? initialValue);
+            if (next) store.set(conversation_id, next);
+            else store.delete(conversation_id);
+            return next;
+          },
+          { revalidate: false }
+        ).catch((error) => {
+          console.error('Failed to mutate draft:', error);
+        });
       },
-      mutate: mutateDraft,
-    };
+      [conversation_id, mutate]
+    );
+    return { data, mutate: mutateDraft };
   }
-
   return useDraft;
 };

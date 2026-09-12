@@ -4,100 +4,56 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, mock, test } from 'bun:test';
+import { steerOrQueue } from './steerOrQueue';
 
-/**
- * Steering has no durable channel of its own: the request either reaches the
- * running turn or the interjection is gone. The draft is cleared before the
- * request resolves (so an in-flight steer cannot overwrite newer typing), and
- * the failure used to be swallowed — so an offline click destroyed the text with
- * only an error toast. The observed loss was
- * `DRAFT_SHOULD_SURVIVE_OFFLINE_20260816`.
- *
- * The fix diverts a failed interjection into the same persisted command queue
- * the normal send path uses when busy. These tests model that contract.
- */
-
-interface QueuedCommand {
-  input: string;
-  files: string[];
-}
-
-interface SteerBox {
-  input: string;
-  files: string[];
-  queue: QueuedCommand[];
-}
-
-/** Mirrors onSteerHandler: clear eagerly, enqueue on failure. */
-const runSteer = async (
-  box: SteerBox,
-  steer: () => Promise<void>,
-  typeWhileInFlight?: string
-): Promise<SteerBox> => {
-  const state: SteerBox = { ...box, queue: [...box.queue] };
-  const sent = { input: state.input, files: state.files };
-
-  state.input = '';
-  state.files = [];
-
-  const pending = steer();
-  if (typeWhileInFlight !== undefined) state.input = typeWhileInFlight;
-
-  try {
-    await pending;
-  } catch {
-    state.queue.push({ input: sent.input, files: sent.files });
-  }
-  return state;
-};
-
-const box = (): SteerBox => ({
+const command = () => ({
   input: 'DRAFT_SHOULD_SURVIVE_OFFLINE_20260816',
   files: ['a.ts', 'b.ts'],
-  queue: [],
 });
 
-const offline = async () => {
-  throw new Error('Failed to fetch');
-};
-
-describe('steer draft survival', () => {
-  test('a successful steer clears the box and queues nothing', async () => {
-    const state = await runSteer(box(), async () => {});
-    expect(state.input).toBe('');
-    expect(state.files).toEqual([]);
-    expect(state.queue).toEqual([]);
+describe('steer draft survival through the production delivery boundary', () => {
+  test('a successful steer sends the snapshot and queues nothing', async () => {
+    const sent = command();
+    const steer = mock(async () => {});
+    const enqueue = mock(() => {});
+    expect(await steerOrQueue(sent, steer, enqueue)).toBe(true);
+    expect(steer).toHaveBeenCalledWith(sent);
+    expect(enqueue).not.toHaveBeenCalled();
   });
 
-  test('a failed steer preserves the text and attachments in the queue', async () => {
-    const state = await runSteer(box(), offline);
-    expect(state.queue).toEqual([
-      { input: 'DRAFT_SHOULD_SURVIVE_OFFLINE_20260816', files: ['a.ts', 'b.ts'] },
-    ]);
+  test('an in-flight failure queues the submitted text and attachments', async () => {
+    let draft = command();
+    const sent = { input: draft.input, files: [...draft.files] };
+    let reject!: (error: Error) => void;
+    const delivery = new Promise<void>((_, fail) => { reject = fail; });
+    const enqueue = mock(() => {});
+    const pending = steerOrQueue(sent, () => delivery, enqueue);
+    expect(enqueue).not.toHaveBeenCalled();
+    draft = { input: 'new typing', files: ['new.ts'] };
+    reject(new Error('Failed to fetch'));
+    expect(await pending).toBe(false);
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(enqueue).toHaveBeenCalledWith(command());
+    expect(enqueue).not.toHaveBeenCalledWith(draft);
   });
 
-  test('the queued copy is what was sent, not what the box holds afterwards', async () => {
-    // The box is cleared before the request resolves, so reading current state
-    // at failure time would queue an empty message.
-    const state = await runSteer(box(), offline, 'text typed after clicking');
-    expect(state.queue[0]?.input).toBe('DRAFT_SHOULD_SURVIVE_OFFLINE_20260816');
-    expect(state.input).toBe('text typed after clicking');
-  });
-
-  test('every failure mode is covered, not just offline', async () => {
-    for (const failure of [
-      new Error('Failed to fetch'),
-      new Error('timeout'),
-      Object.assign(new Error('conflict'), { status: 409 }),
-      Object.assign(new Error('unavailable'), { status: 503 }),
-      Object.assign(new Error('attachment rejected'), { status: 413 }),
+  test('all delivery failures retain the snapshot, not only offline errors', async () => {
+    for (const error of [
+      new Error('Failed to fetch'), new Error('timeout'),
+      ...[409, 503, 413].map((status) => Object.assign(new Error('request failed'), { status })),
     ]) {
-      const state = await runSteer(box(), async () => {
-        throw failure;
-      });
-      expect(state.queue).toHaveLength(1);
-      expect(state.queue[0]?.input).toBe('DRAFT_SHOULD_SURVIVE_OFFLINE_20260816');
+      const enqueue = mock(() => {});
+      expect(await steerOrQueue(command(), async () => { throw error; }, enqueue)).toBe(false);
+      expect(enqueue).toHaveBeenCalledTimes(1);
+      expect(enqueue).toHaveBeenCalledWith(command());
     }
+  });
+
+  test('a queue failure remains visible to the caller', async () => {
+    const error = new Error('queue storage unavailable');
+    await expect(steerOrQueue(command(), async () => { throw new Error('offline'); }, () => {
+      throw error;
+    })).rejects.toBe(error);
   });
 });

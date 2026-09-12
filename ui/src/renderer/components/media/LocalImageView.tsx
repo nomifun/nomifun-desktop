@@ -5,7 +5,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { createContext } from '@renderer/utils/ui/createContext';
 import { iconColors } from '@/renderer/styles/colors';
 
-const [useLocalImage, LocalImageProvider, useUpdateLocalImage] = createContext({ root: '' });
+const [useLocalImage, LocalImageProvider, useUpdateLocalImage] = createContext(() => ({ root: '' }));
 
 type ImageLoadState = {
   key: string;

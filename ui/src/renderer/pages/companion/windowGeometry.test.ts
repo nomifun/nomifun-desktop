@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'bun:test';
 import { placeResizedWindow } from './windowGeometry';
 
 const MON = { x: 0, y: 0, width: 2880, height: 1800 };

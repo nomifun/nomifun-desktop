@@ -7,10 +7,6 @@ import {
   resolveVerifiedAuthoritativeTurnStart,
 } from './authoritativeTurnLifecyclePolicy';
 import {
-  getAuthoritativeHydrationFence,
-  shouldAcceptAuthoritativeStreamActivity,
-} from './useAuthoritativeTurnLifecycle';
-import {
   getNomiHydrationLifecycleFence,
   shouldApplyNomiStreamEventToTurn,
 } from './nomi/nomiLifecycleFence';
@@ -52,18 +48,9 @@ describe('Finished conversation remount authority', () => {
       })
     ).toBe(false);
 
-    const simpleFence = getAuthoritativeHydrationFence(false);
     const nomiFence = getNomiHydrationLifecycleFence(false);
 
-    // Delayed old output cannot raise the authoritative or Nomi fence.
-    expect(
-      shouldAcceptAuthoritativeStreamActivity({
-        closed: simpleFence.closed,
-        awaitingBackendTurn: false,
-        activeTurnId: null,
-        eventTurnId: completedTurnId,
-      })
-    ).toBe(false);
+    // Delayed old output cannot raise the active runtime's lifecycle fence.
     expect(
       shouldApplyNomiStreamEventToTurn({
         eventTurnId: completedTurnId,
