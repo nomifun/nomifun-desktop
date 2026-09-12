@@ -656,7 +656,7 @@ async fn validate_materialization(
         let runtime_mismatch = actual
             .as_ref()
             .and_then(|value| runtime_package_mismatch(value, row));
-        if actual != wanted && runtime_mismatch.is_some() {
+        if actual.is_none() || (actual != wanted && runtime_mismatch.is_some()) {
             return Err(FreshV4RootError::State(format!(
                 "bundled package materialization mismatch for {}@{}: {}",
                 row.package_id,
@@ -838,7 +838,9 @@ fn runtime_capability_matches(
     let Ok(manifest) = serde_json::from_str::<CapabilityManifest>(&actual.2) else {
         return false;
     };
-    if manifest.id.as_ref() != expected.capability_id
+    if actual.0 != expected.package_id
+        || actual.1 != expected.package_version
+        || manifest.id.as_ref() != expected.capability_id
         || manifest.version.as_ref() != expected.capability_version
         || manifest.kind != expected.kind
         || manifest.package.id.as_ref() != expected.package_id
@@ -858,7 +860,9 @@ fn runtime_skill_matches(
     let Ok(skill) = serde_json::from_str::<SkillDefinition>(&actual.2) else {
         return false;
     };
-    if skill.id.as_ref() != expected.skill_id
+    if actual.0 != expected.package_id
+        || actual.1 != expected.package_version
+        || skill.id.as_ref() != expected.skill_id
         || skill.version.as_ref() != expected.skill_version
         || skill.package.id.as_ref() != expected.package_id
         || skill.package.version.as_ref() != expected.package_version
@@ -961,4 +965,46 @@ fn canonical_json_string<T: Serialize>(value: &T) -> Result<String, FreshV4RootE
 
 fn digest_string<T: Serialize>(value: &T) -> Result<String, FreshV4RootError> {
     Ok(digest_payload(value)?.as_ref().to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_skill_requires_matching_sql_owner_and_digest() {
+        // The current bundled inventory has no skills. Exercise its supported
+        // runtime representation directly without expanding the frozen seed.
+        let skill: SkillDefinition = serde_json::from_value(serde_json::json!({
+            "id": "r82.skill", "version": "1.0.0",
+            "package": {"id": "r82.package", "version": "1.0.0"},
+            "display": {"name": "R82 fixture", "description": "", "localized_names": {}, "localized_descriptions": {}},
+            "body_ref": {"artifact_id": "r82.body", "normalized_relative_path": "body.md", "digest": "0".repeat(64)},
+            "resources": [], "requires_capabilities": [], "supported_surfaces": []
+        })).unwrap();
+        let expected = ExpectedSkill {
+            skill_id: skill.id.as_ref().to_owned(),
+            skill_version: skill.version.as_ref().to_owned(),
+            package_id: skill.package.id.as_ref().to_owned(),
+            package_version: skill.package.version.as_ref().to_owned(),
+            definition_json: canonical_json_string(&skill).unwrap(),
+            definition_digest: digest_string(&skill).unwrap(),
+        };
+        let actual = (
+            expected.package_id.clone(),
+            expected.package_version.clone(),
+            expected.definition_json.clone(),
+            expected.definition_digest.clone(),
+        );
+        assert!(runtime_skill_matches(&actual, &expected));
+        let mut wrong_package = actual.clone();
+        wrong_package.0 = "other.package".to_owned();
+        assert!(!runtime_skill_matches(&wrong_package, &expected));
+        let mut wrong_version = actual.clone();
+        wrong_version.1 = "9.9.9".to_owned();
+        assert!(!runtime_skill_matches(&wrong_version, &expected));
+        let mut wrong_digest = actual;
+        wrong_digest.3 = "0".repeat(64);
+        assert!(!runtime_skill_matches(&wrong_digest, &expected));
+    }
 }

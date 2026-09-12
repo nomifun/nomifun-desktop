@@ -525,3 +525,176 @@ async fn quiesce_failure_performs_no_filesystem_access() {
     assert!(audit.accesses().is_empty());
     assert!(!root.exists());
 }
+
+#[tokio::test]
+async fn missing_bundled_package_is_reported_before_foreign_key_validation() {
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("NomiFun");
+    let coordinator = production_test_coordinator();
+    coordinator
+        .bootstrap(&root, BUILD_IDENTITY, &[])
+        .await
+        .unwrap();
+    // Simulate externally corrupted storage, not a supported package deletion.
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(root.join(crate::FRESH_V4_DATABASE_FILE))
+                .foreign_keys(false),
+        )
+        .await
+        .unwrap();
+    let deleted = sqlx::query("DELETE FROM plugin_packages WHERE package_id = 'nomifun.chat'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(deleted.rows_affected(), 1);
+    pool.close().await;
+
+    let error = coordinator
+        .bootstrap(&root, BUILD_IDENTITY, &[])
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, FreshV4RootError::State(ref message)
+        if message.contains("bundled package materialization mismatch for nomifun.chat@")
+            && message.contains("package row is missing")),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn ready_root_rejects_runtime_capability_sql_owner_drift() {
+    use nomifun_agent_contracts::{CapabilityManifest, canonical_json_bytes, digest_payload};
+
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("NomiFun");
+    let coordinator = production_test_coordinator();
+    coordinator
+        .bootstrap(&root, BUILD_IDENTITY, &[])
+        .await
+        .unwrap();
+    let inputs = crate::inputs::FrozenRootInputs::load().unwrap();
+    let package = inputs
+        .target_inventory
+        .packages
+        .iter()
+        .find(|package| package.package.id.as_ref() == "nomifun.chat")
+        .unwrap();
+    let capability = &package.capabilities[0];
+    let manifest: CapabilityManifest = serde_json::from_value(serde_json::json!({
+        "id": capability.capability.id,
+        "version": capability.capability.version,
+        "kind": capability.kind,
+        "package": package.package,
+        "contribution_id": "r82-runtime-capability",
+        "display": {"name": "R82 fixture", "description": "", "localized_names": {}, "localized_descriptions": {}},
+        "requires": [], "conflicts": [], "supported_surfaces": [],
+        "requires_runtime_features": [], "supported_platforms": [],
+        "config_schema": {"type": "object"},
+        "contributions": {"actions": [], "context_schema_refs": [], "event_schema_refs": [], "resource_kinds": [], "host_ports": []}
+    })).unwrap();
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(root.join(crate::FRESH_V4_DATABASE_FILE))
+        .foreign_keys(true);
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options.clone())
+        .await
+        .unwrap();
+    let updated = sqlx::query(
+        "UPDATE capability_definitions SET manifest_json = ?, manifest_digest = ? WHERE capability_id = ?",
+    )
+    .bind(String::from_utf8(canonical_json_bytes(&manifest).unwrap()).unwrap())
+    .bind(digest_payload(&manifest).unwrap().as_ref())
+    .bind(manifest.id.as_ref())
+    .execute(&pool).await.unwrap();
+    assert_eq!(updated.rows_affected(), 1);
+    pool.close().await;
+    coordinator
+        .bootstrap(&root, BUILD_IDENTITY, &[])
+        .await
+        .expect("matching runtime representation must remain restartable");
+
+    // Both alternate owners exist, so SQLite foreign keys remain satisfied.
+    // The second variant also keeps package_id but changes package_version.
+    for (package_id, package_version) in [("nomifun.skills", "1.0.0"), ("nomifun.chat", "9.9.9")] {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options.clone())
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO plugin_packages (package_id, package_version, manifest_json, manifest_digest, display_json) \
+             SELECT package_id, '9.9.9', manifest_json, manifest_digest, display_json FROM plugin_packages \
+             WHERE package_id = 'nomifun.chat' AND package_version = '1.0.0' ON CONFLICT DO NOTHING",
+        ).execute(&pool).await.unwrap();
+        let updated = sqlx::query(
+            "UPDATE capability_definitions SET package_id = ?, package_version = ? WHERE capability_id = ?",
+        )
+        .bind(package_id).bind(package_version).bind(manifest.id.as_ref())
+        .execute(&pool).await.unwrap();
+        assert_eq!(updated.rows_affected(), 1);
+        pool.close().await;
+
+        let error = coordinator
+            .bootstrap(&root, BUILD_IDENTITY, &[])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, FreshV4RootError::State(ref message)
+            if message.contains("capability materialization mismatch")),
+            "{error}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn recovery_rejects_replaced_root_before_inspecting_descendants() {
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("NomiFun");
+    let interrupted = FreshV4Coordinator::with_ports(
+        PreServiceQuiesced,
+        OneShotFault::at(FreshV4FaultPoint::AfterInitializingMarkerDurable),
+        NoAccessAudit,
+        FixedClock,
+    );
+    assert!(matches!(
+        interrupted.bootstrap(&root, BUILD_IDENTITY, &[]).await,
+        Err(FreshV4RootError::Fault(_))
+    ));
+    let displaced = parent.path().join("displaced");
+    std::fs::rename(&root, &displaced).unwrap();
+    std::os::unix::fs::symlink(&displaced, &root).unwrap();
+    let audit = Arc::new(RecordingAudit::default());
+    let normalized_root = std::fs::canonicalize(parent.path())
+        .unwrap()
+        .join("NomiFun");
+    let coordinator = FreshV4Coordinator::with_ports(
+        PreServiceQuiesced,
+        NoFaults,
+        Arc::clone(&audit),
+        FixedClock,
+    );
+
+    let error = coordinator
+        .bootstrap(&root, BUILD_IDENTITY, &[])
+        .await
+        .unwrap_err();
+    assert!(matches!(error, FreshV4RootError::State(_)), "{error}");
+    assert!(
+        audit
+            .accesses()
+            .iter()
+            .all(|(_, path)| path == &normalized_root || !path.starts_with(&normalized_root)),
+        "recovery must reject a linked root before probing its descendants"
+    );
+    assert!(parent.path().join(FRESH_V4_PARENT_MARKER_FILE).is_file());
+    assert!(
+        displaced
+            .join(crate::FRESH_V4_INITIALIZING_MARKER_FILE)
+            .is_file()
+    );
+}

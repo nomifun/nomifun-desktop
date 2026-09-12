@@ -317,6 +317,15 @@ where
         build_digest: &nomifun_agent_contracts::DigestHex,
     ) -> Result<FreshV4BootstrapOutcome, FreshV4RootError> {
         self.validate_parent_marker_binding(paths, &guard.marker, inputs)?;
+        // Recovery inspects marker descendants and may open SQLite before
+        // ensure_initializing_root runs. Reject a replaced root first.
+        if entry_kind(&paths.canonical_root, &self.audit)? != EntryKind::Missing {
+            require_real_directory(
+                &paths.canonical_root,
+                "recovering canonical root",
+                &self.audit,
+            )?;
+        }
         let operation_kind = guard.marker.operation_kind;
         let recovered_from =
             self.recovery_phase(paths, &guard.marker).await?;
@@ -800,7 +809,11 @@ fn directory_is_empty(
     audit.record(FreshV4AccessKind::Metadata, path)?;
     let mut entries = std::fs::read_dir(path)
         .map_err(|error| FreshV4RootError::io("inspect canonical root entries", path, error))?;
-    Ok(entries.next().is_none())
+    Ok(entries
+        .next()
+        .transpose()
+        .map_err(|error| FreshV4RootError::io("inspect canonical root entry", path, error))?
+        .is_none())
 }
 
 struct ParentMarkerGuard {
