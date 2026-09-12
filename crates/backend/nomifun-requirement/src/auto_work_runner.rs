@@ -2292,7 +2292,6 @@ async fn inject_and_wait(
     recovered_active: bool,
     build_lease: AutoWorkRuntimeBuildLease,
 ) -> Result<(TurnEnd, Option<String>, bool), AppError> {
-    let conv_id = conversation_id;
     build_lease.ensure_scope(&deps.authoritative_user_id, conversation_id)?;
     build_lease.ensure_active()?;
     let preparation = deps
@@ -2314,9 +2313,7 @@ async fn inject_and_wait(
 
     // Plan without creating the workspace. This yields the exact prompt paths
     // needed for full-payload receipt preflight before runtime/KB activation.
-    let workspace_for_stage = workspace.clone();
-    let ws_path = (!workspace_for_stage.is_empty())
-        .then(|| std::path::Path::new(workspace_for_stage.as_str()));
+    let ws_path = (!workspace.is_empty()).then(|| std::path::Path::new(workspace.as_str()));
     let attachment_plan = deps
         .service
         .plan_attachments_for_prompt(&req.requirement_id, ws_path)
@@ -2440,6 +2437,7 @@ async fn inject_and_wait(
         conversation_id,
         &operation_id,
         delivery,
+        CONVERSATION_RECEIPT_RECONCILIATION_TIMEOUT,
     )
     .await
     {
@@ -2480,7 +2478,6 @@ async fn inject_and_wait(
         deps.service.as_ref(),
         deps.conversation.as_ref(),
         conversation_id,
-        conv_id,
         &req.requirement_id,
         claim_generation,
         claim_token,
@@ -2488,6 +2485,7 @@ async fn inject_and_wait(
         &operation_id,
         &delivery.message_id,
         expects_verdict,
+        ConversationReceiptWaitTiming::PRODUCTION,
     )
     .await;
     Ok((
@@ -2547,27 +2545,7 @@ fn authorize_accepted_receipt_wait(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn reconcile_accepted_autowork_delivery(
-    conversation: &dyn AutoWorkSessionPort,
-    user_id: &str,
-    conversation_id: &str,
-    idempotency_key: &str,
-    delivery: AutoWorkMessageDelivery,
-) -> Result<ReconciledAutoWorkDelivery, AppError> {
-    reconcile_accepted_autowork_delivery_timed(
-        conversation,
-        user_id,
-        conversation_id,
-        idempotency_key,
-        delivery,
-        CONVERSATION_RECEIPT_RECONCILIATION_TIMEOUT,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn reconcile_accepted_autowork_delivery_timed(
     conversation: &dyn AutoWorkSessionPort,
     user_id: &str,
     conversation_id: &str,
@@ -2752,38 +2730,6 @@ async fn wait_for_conversation_receipt_with_renewal(
     service: &RequirementService,
     conversation: &dyn AutoWorkSessionPort,
     conversation_id: &str,
-    conv_id: &str,
-    req_id: &str,
-    claim_generation: i64,
-    claim_token: &str,
-    user_id: &str,
-    operation_id: &str,
-    expected_message_id: &str,
-    expects_verdict: bool,
-) -> (TurnEnd, Option<String>, bool) {
-    wait_for_conversation_receipt_with_renewal_timed(
-        service,
-        conversation,
-        conversation_id,
-        conv_id,
-        req_id,
-        claim_generation,
-        claim_token,
-        user_id,
-        operation_id,
-        expected_message_id,
-        expects_verdict,
-        ConversationReceiptWaitTiming::PRODUCTION,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn wait_for_conversation_receipt_with_renewal_timed(
-    service: &RequirementService,
-    conversation: &dyn AutoWorkSessionPort,
-    conversation_id: &str,
-    conv_id: &str,
     req_id: &str,
     claim_generation: i64,
     claim_token: &str,
@@ -2803,7 +2749,7 @@ async fn wait_for_conversation_receipt_with_renewal_timed(
                     match service
                         .renew_lease(
                             req_id,
-                            conv_id,
+                            conversation_id,
                             AutoWorkTargetKind::Conversation,
                             claim_generation,
                             claim_token,
@@ -2933,15 +2879,11 @@ fn finalize_note(buf: &str) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
-    if trimmed.chars().count() <= MAX_NOTE_CHARS {
-        return Some(trimmed.to_string());
+    // Find the retained tail without counting or allocating the entire note.
+    match trimmed.char_indices().rev().nth(MAX_NOTE_CHARS - 1) {
+        Some((start, _)) if start > 0 => Some(format!("…{}", &trimmed[start..])),
+        _ => Some(trimmed.to_owned()),
     }
-    // Keep the tail (agents usually put the completion summary at the end).
-    let tail: String = {
-        let chars: Vec<char> = trimmed.chars().collect();
-        chars[chars.len() - MAX_NOTE_CHARS..].iter().collect()
-    };
-    Some(format!("…{tail}"))
 }
 
 /// How a terminal turn ended (structured completion via lifecycle / error).
@@ -3379,7 +3321,7 @@ async fn inject_and_wait_terminal(
     // every idle poll —same churn fix as the conversation path. Idempotent + a
     // no-op when IDMM is disabled for the terminal.
     if let Some(idmm) = &deps.idmm {
-        idmm.ensure_supervising(AutoWorkTargetKind::Terminal, &terminal_id.to_string());
+        idmm.ensure_supervising(AutoWorkTargetKind::Terminal, terminal_id);
     }
 
     Ok(wait_terminal_turn_end(deps, driver, &key, lifecycle_rx).await)
@@ -3553,6 +3495,21 @@ mod tests {
     use nomifun_terminal::error::TerminalError;
 
     #[test]
+    fn completion_note_preserves_trim_and_unicode_tail_at_the_character_limit() {
+        assert_eq!(finalize_note(" \n\t"), None);
+        assert_eq!(finalize_note("  中文🙂  ").as_deref(), Some("中文🙂"));
+        for count in [MAX_NOTE_CHARS - 1, MAX_NOTE_CHARS, MAX_NOTE_CHARS + 1] {
+            let text = "界".repeat(count - 1) + "🙂";
+            let expected = if count > MAX_NOTE_CHARS {
+                "…".to_owned() + &"界".repeat(MAX_NOTE_CHARS - 1) + "🙂"
+            } else {
+                text.clone()
+            };
+            assert_eq!(finalize_note(&format!(" {text} ")), Some(expected));
+        }
+    }
+
+    #[test]
     fn failure_backoff_escalates_and_caps() {
         // 1-based consecutive failures -> 1s, 2s, 4s, 8s, 16s, then capped at 30s.
         assert_eq!(failure_backoff(1), Duration::from_secs(1));
@@ -3564,45 +3521,6 @@ mod tests {
         assert_eq!(failure_backoff(100), Duration::from_secs(30), "stays capped");
         // Never zero —a failure must always insert some delay before re-claim.
         assert!(failure_backoff(1) > Duration::ZERO);
-    }
-
-    #[test]
-    fn autowork_multiline_prompt_uses_paste_then_separate_cr() {
-        use nomifun_terminal::{encode_submit_chunks, SubmitChunks};
-        let prompt = "requirement #1\ndo the thing\ncall requirement_complete when done";
-        match encode_submit_chunks(prompt, true) {
-            SubmitChunks::PasteThenCr { paste, cr } => {
-                assert!(paste.starts_with(b"\x1b[200~"));
-                assert!(paste.ends_with(b"\x1b[201~"));
-                assert_eq!(cr, b"\r".to_vec());
-            }
-            other => panic!("expected PasteThenCr, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn terminal_submit_chunks_keeps_cr_out_of_the_paste_burst() {
-        // Root-cause guard: the submit CR must NOT ride in the same byte burst as
-        // the bracketed-paste body. Modern agent TUIs (claude/codex/gemini) use
-        // paste-burst detection and SUPPRESS auto-submit for a CR that arrives in
-        // the same read() as the paste-end marker —the requirement text would
-        // then sit unsubmitted in the input box (the reported bug). The CR is
-        // therefore returned as a SEPARATE chunk, written after a beat. Now backed
-        // by the shared encoder (`nomifun_terminal::encode_submit_chunks`).
-        use nomifun_terminal::{encode_submit_chunks, SubmitChunks};
-        match encode_submit_chunks("line one\nline two", true) {
-            SubmitChunks::PasteThenCr { paste, cr } => {
-                assert!(paste.starts_with(b"\x1b[200~"), "paste must open with ESC[200~");
-                assert!(paste.ends_with(b"\x1b[201~"), "paste must close with ESC[201~");
-                assert!(
-                    paste.windows(8).any(|w| w == b"line one"),
-                    "paste must contain the prompt body"
-                );
-                assert!(!paste.contains(&b'\r'), "the CR must never be inside the paste burst");
-                assert_eq!(cr, b"\r", "submit chunk must be a lone carriage return (a real Enter)");
-            }
-            other => panic!("expected PasteThenCr for a multi-line agent-TUI prompt, got {other:?}"),
-        }
     }
 
     struct RecordingDriver {
@@ -3734,17 +3652,11 @@ mod tests {
             .await
             .expect("submit must succeed");
         assert_eq!(effects, TerminalTurnEffectsStart::Started);
-        let writes = recorder.writes.lock().unwrap().clone();
-        assert_eq!(writes.len(), 2, "expected exactly two PTY writes (paste, then CR)");
-        assert!(
-            writes[0].starts_with(b"\x1b[200~") && writes[0].ends_with(b"\x1b[201~"),
-            "first write is the bracketed-paste body"
+        assert_eq!(
+            *recorder.writes.lock().unwrap(),
+            [b"\x1b[200~do the thing\nthen stop\x1b[201~".to_vec(), b"\r".to_vec()],
+            "the complete paste body and submit CR must be separate ordered writes"
         );
-        assert!(
-            !writes[0].contains(&b'\r'),
-            "first write must NOT contain the CR (it would be swallowed by paste-burst detection)"
-        );
-        assert_eq!(writes[1], b"\r", "second write is the lone submit CR");
     }
 
     #[tokio::test]
@@ -3770,12 +3682,6 @@ mod tests {
             );
         }
     }
-
-    // -- C4 (spec §2.2): cross-domain loop-registry isolation ----------------
-    //
-    // The AutoWork loop registry keys on `TargetKey = (AutoWorkTargetKind,
-    // canonical entity ID)`. The explicit kind keeps dispatch and lookup
-    // domain-scoped even when two domains happen to carry equal UUID text.
 
     #[tokio::test]
     async fn authority_loss_after_body_write_emits_zero_submit_cr() {
@@ -4840,10 +4746,9 @@ mod tests {
             },
             BackgroundTurnReconciliationDisposition::LiveExactOwnerWait,
         ));
-        let wait = wait_for_conversation_receipt_with_renewal_timed(
+        let wait = wait_for_conversation_receipt_with_renewal(
             &service,
             port.as_ref(),
-            &conversation_id,
             &conversation_id,
             &requirement_id,
             generation,
@@ -4900,10 +4805,9 @@ mod tests {
             PublicTurnDeliveryState::Missing,
             BackgroundTurnReconciliationDisposition::LiveExactOwnerWait,
         );
-        let outcome = wait_for_conversation_receipt_with_renewal_timed(
+        let outcome = wait_for_conversation_receipt_with_renewal(
             &service,
             &port,
-            &conversation_id,
             &conversation_id,
             &requirement_id,
             generation,
@@ -4935,10 +4839,9 @@ mod tests {
             PublicTurnDeliveryState::Accepted { message_id: message_id.clone() },
             BackgroundTurnReconciliationDisposition::LiveExactOwnerWait,
         );
-        let outcome = wait_for_conversation_receipt_with_renewal_timed(
+        let outcome = wait_for_conversation_receipt_with_renewal(
             &service,
             &port,
-            &conversation_id,
             &conversation_id,
             &requirement_id,
             generation,
@@ -4986,6 +4889,7 @@ mod tests {
             "conversation",
             "autowork:key",
             delivery,
+            CONVERSATION_RECEIPT_RECONCILIATION_TIMEOUT,
         )
         .await
         .expect("accepted typed state should remain waitable");
@@ -5009,6 +4913,7 @@ mod tests {
             "conversation",
             "autowork:key",
             reconciled.delivery,
+            CONVERSATION_RECEIPT_RECONCILIATION_TIMEOUT,
         )
         .await
         .expect("completed typed state should be returned");
@@ -5028,7 +4933,7 @@ mod tests {
         );
         let result = timeout(
             Duration::from_secs(1),
-            reconcile_accepted_autowork_delivery_timed(
+            reconcile_accepted_autowork_delivery(
                 &port,
                 "user",
                 "conversation",
@@ -5065,43 +4970,17 @@ mod tests {
     // Any uncertainty after submission is absorbing; only an exact structured
     // completion may be clean.
 
-    #[tokio::test]
-    async fn raw_lifecycle_turn_end_without_token_is_not_a_completion_verdict() {
-        use nomifun_terminal::TerminalLifecycleEvent;
-
-        let (tx, rx) = broadcast::channel::<TerminalLifecycleEvent>(4);
-        // Send a TurnEnd BEFORE any consumer picks it up —the broadcast
-        // channel buffers it.
-        tx.send(TerminalLifecycleEvent {
-            terminal_id: nomifun_common::TerminalId::new(),
-            kind: LifecycleKind::TurnEnd,
-            payload: serde_json::json!({}),
-        })
-        .unwrap();
-
-        // Simulate the inner select logic directly (without AutoWorkRunnerDeps):
-        // recv from the channel, match TurnEnd -> Clean.
-        let mut rx = rx;
-        let ev = rx.recv().await.unwrap();
-        assert_eq!(ev.kind, LifecycleKind::TurnEnd);
-        assert_eq!(ev.turn_token(), None);
-        assert_eq!(
-            terminal_outcome_from_status(RequirementStatus::InProgress),
-            None,
-            "a raw no-token TurnEnd can only wake a Requirement recheck"
-        );
-    }
-
-    #[tokio::test]
-    async fn lifecycle_closed_channel_resolves_as_errored() {
-        use nomifun_terminal::TerminalLifecycleEvent;
-
-        let (tx, rx) = broadcast::channel::<TerminalLifecycleEvent>(4);
-        drop(tx); // Simulate lifecycle server disappearing.
-
-        let mut rx = rx;
-        let ev = rx.recv().await;
-        assert!(matches!(ev, Err(broadcast::error::RecvError::Closed)));
-        // wait_terminal_turn_end maps this to post-submission ambiguity.
+    #[test]
+    fn only_terminal_requirement_statuses_map_to_terminal_outcomes() {
+        for (status, outcome) in [
+            (RequirementStatus::Pending, None),
+            (RequirementStatus::InProgress, None),
+            (RequirementStatus::Done, Some(TerminalTurnOutcome::Done)),
+            (RequirementStatus::Failed, Some(TerminalTurnOutcome::Failed)),
+            (RequirementStatus::NeedsReview, Some(TerminalTurnOutcome::NeedsReview)),
+            (RequirementStatus::Cancelled, Some(TerminalTurnOutcome::Cancelled)),
+        ] {
+            assert_eq!(terminal_outcome_from_status(status), outcome);
+        }
     }
 }
