@@ -693,7 +693,11 @@ impl Tool for GlobTool {
             };
         };
 
-        let root = input["path"].as_str().unwrap_or(".");
+        let root = match input.get("path") {
+            None | Some(Value::Null) => ".",
+            Some(Value::String(path)) => path.as_str(),
+            _ => return ToolResult::error("Glob path must be a string"),
+        };
         if root.len() > MAX_PATH_BYTES {
             return ToolResult::error(format!(
                 "Glob path exceeds the {MAX_PATH_BYTES} byte safety limit"
@@ -950,6 +954,11 @@ mod tests {
         fs::write(tmp.path().join("marker.txt"), "hello").unwrap();
 
         let tool = GlobTool::new(tmp.path().to_path_buf());
+        for path in [json!(false), json!(42), json!(["."])] {
+            let result = tool.execute(json!({"pattern": "marker.txt", "path": path})).await;
+            assert!(result.is_error, "invalid path must not search the default cwd");
+            assert!(result.content.contains("path must be a string"));
+        }
         let input = json!({"pattern": "marker.txt"});
         let result = tool.execute(input).await;
         assert!(!result.is_error, "unexpected error: {}", result.content);

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -79,18 +79,29 @@ impl Tool for GrepTool {
             };
         };
 
+        for name in ["path", "glob"] {
+            if input.get(name).is_some_and(|value| !value.is_null() && !value.is_string()) {
+                return ToolResult::error(format!("{name} must be a string"));
+            }
+        }
         let raw_path = input["path"].as_str().unwrap_or(".");
-        let path = if std::path::Path::new(raw_path).is_relative() {
-            self.cwd.join(raw_path).to_string_lossy().into_owned()
-        } else {
-            raw_path.to_owned()
-        };
+        let path = crate::path_guard::resolve_against_cwd(raw_path, Some(&self.cwd));
 
         tracing::debug!(cwd = %self.cwd.display(), resolved_path = %path, pattern = %pattern, "GrepTool searching");
 
         let glob_pattern = input["glob"].as_str();
-        let case_insensitive = input["case_insensitive"].as_bool().unwrap_or(false);
-        let context_lines = input["context_lines"].as_u64().unwrap_or(0) as usize;
+        let case_insensitive = match input.get("case_insensitive") {
+            None | Some(Value::Null) => false,
+            Some(Value::Bool(value)) => *value,
+            _ => return ToolResult::error("case_insensitive must be a boolean"),
+        };
+        let context_lines = match input.get("context_lines") {
+            None | Some(Value::Null) => 0,
+            Some(value) => match value.as_u64().and_then(|value| usize::try_from(value).ok()) {
+                Some(value) => value,
+                None => return ToolResult::error("context_lines must be a non-negative integer that fits usize"),
+            },
+        };
 
         // Try ripgrep first, fallback to grep
         let result = try_ripgrep(pattern, &path, glob_pattern, case_insensitive, context_lines).await;
@@ -131,23 +142,22 @@ fn format_grep_output(stdout: &str, max_lines: usize) -> String {
     }
     let shown: Vec<&str> = stdout.lines().take(max_lines).collect();
     format!(
-        "{}\n... [truncated: showing first {} of {} matching lines — narrow your pattern or set a `glob` filter]",
+        "{}\n... [truncated: showing first {} of {} output lines — narrow your pattern or set a `glob` filter]",
         shown.join("\n"),
         max_lines,
         total
     )
 }
 
-async fn try_ripgrep(
+fn ripgrep_command(
     pattern: &str,
     path: &str,
     glob_pattern: Option<&str>,
     case_insensitive: bool,
     context_lines: usize,
-) -> Result<ToolResult, std::io::Error> {
+) -> Command {
     let mut cmd = Command::new("rg");
-    cmd.arg(pattern).arg(path).arg("-n");
-
+    cmd.arg("-n");
     if let Some(g) = glob_pattern {
         cmd.arg("--glob").arg(g);
     }
@@ -157,34 +167,87 @@ async fn try_ripgrep(
     if context_lines > 0 {
         cmd.arg("-C").arg(context_lines.to_string());
     }
+    // Patterns and paths are data, including values beginning with a dash.
+    cmd.arg("-e").arg(pattern).arg("--").arg(path);
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    cmd
+}
 
-    let output = cmd.output().await?;
+fn fallback_command(
+    pattern: &str,
+    path: &str,
+    glob_pattern: Option<&str>,
+    case_insensitive: bool,
+    context_lines: usize,
+) -> Result<Command, String> {
+    let cmd = if cfg!(windows) {
+        if glob_pattern.is_some() || context_lines > 0 {
+            return Err("findstr fallback cannot honor glob or context_lines; install ripgrep to use these options".to_string());
+        }
+        let mut c = Command::new("findstr");
+        let is_dir = Path::new(path).is_dir();
+        if is_dir {
+            c.arg("/S");
+        }
+        c.arg("/N").arg("/R");
+        if case_insensitive {
+            c.arg("/I");
+        }
+        c.arg(format!("/C:{pattern}"));
+        if is_dir {
+            c.arg(format!("{}\\*", path.trim_end_matches(['\\', '/'])));
+        } else {
+            c.arg(path);
+        }
+        #[cfg(windows)]
+        c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        c
+    } else {
+        let mut c = Command::new("grep");
+        c.arg("-rn");
+        if case_insensitive {
+            c.arg("-i");
+        }
+        if let Some(g) = glob_pattern {
+            c.arg(format!("--include={g}"));
+        }
+        if context_lines > 0 {
+            c.arg("-C").arg(context_lines.to_string());
+        }
+        c.arg("-e").arg(pattern).arg("--").arg(path);
+        c
+    };
+    Ok(cmd)
+}
+
+fn render_search_output(program: &str, output: std::process::Output) -> ToolResult {
+    if !matches!(output.status.code(), Some(0 | 1)) {
+        return ToolResult::error(format!(
+            "{program} error ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    if output.status.code() == Some(1) && stdout.is_empty() {
-        return Ok(ToolResult {
-            content: "No matches found".to_string(),
-            is_error: false,
-            images: Vec::new(),
-        });
+    if stdout.is_empty() {
+        ToolResult::text("No matches found")
+    } else {
+        ToolResult::text(format_grep_output(&stdout, GREP_MAX_LINES))
     }
+}
 
-    if !output.status.success() && output.status.code() != Some(1) {
-        return Ok(ToolResult {
-            content: format!("rg error: {}", stderr),
-            is_error: true,
-            images: Vec::new(),
-        });
-    }
-
-    Ok(ToolResult {
-        content: format_grep_output(&stdout, GREP_MAX_LINES),
-        is_error: false,
-        images: Vec::new(),
-    })
+async fn try_ripgrep(
+    pattern: &str,
+    path: &str,
+    glob_pattern: Option<&str>,
+    case_insensitive: bool,
+    context_lines: usize,
+) -> Result<ToolResult, std::io::Error> {
+    let output = ripgrep_command(pattern, path, glob_pattern, case_insensitive, context_lines)
+        .output()
+        .await?;
+    Ok(render_search_output("rg", output))
 }
 
 async fn try_grep(
@@ -194,61 +257,14 @@ async fn try_grep(
     case_insensitive: bool,
     context_lines: usize,
 ) -> ToolResult {
-    let mut cmd = if cfg!(windows) {
-        // findstr has no glob-include or context-line support; those refinements
-        // are silently unavailable on the Windows fallback path.
-        let mut c = Command::new("findstr");
-        c.arg("/S")
-            .arg("/N")
-            .arg("/R")
-            .arg(pattern)
-            .arg(format!("{}\\*", path.trim_end_matches(['\\', '/'])));
-        if case_insensitive {
-            c.arg("/I");
-        }
-        c
-    } else {
-        let mut c = Command::new("grep");
-        c.arg("-rn").arg(pattern).arg(path);
-        if case_insensitive {
-            c.arg("-i");
-        }
-        // Honour the glob filter on the fallback path too (previously ignored,
-        // so the model got matches from unintended file types).
-        if let Some(g) = glob_pattern {
-            c.arg(format!("--include={}", g));
-        }
-        if context_lines > 0 {
-            c.arg("-C").arg(context_lines.to_string());
-        }
-        c
+    let mut cmd = match fallback_command(pattern, path, glob_pattern, case_insensitive, context_lines) {
+        Ok(cmd) => cmd,
+        Err(error) => return ToolResult::error(error),
     };
-    // CREATE_NO_WINDOW (covers the Windows `findstr` branch above).
-    #[cfg(windows)]
-    cmd.creation_flags(0x0800_0000);
-
+    let program = if cfg!(windows) { "findstr" } else { "grep" };
     match cmd.output().await {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if stdout.is_empty() {
-                ToolResult {
-                    content: "No matches found".to_string(),
-                    is_error: false,
-                    images: Vec::new(),
-                }
-            } else {
-                ToolResult {
-                    content: format_grep_output(&stdout, GREP_MAX_LINES),
-                    is_error: false,
-                    images: Vec::new(),
-                }
-            }
-        }
-        Err(e) => ToolResult {
-            content: format!("grep failed: {}", e),
-            is_error: true,
-            images: Vec::new(),
-        },
+        Ok(output) => render_search_output(program, output),
+        Err(error) => ToolResult::error(format!("{program} failed: {error}")),
     }
 }
 
@@ -262,7 +278,7 @@ mod tests {
         let lines: String = (0..300).map(|i| format!("line{i}\n")).collect();
         let out = super::format_grep_output(&lines, 250);
         assert!(out.contains("truncated"), "must announce truncation: {out}");
-        assert!(out.contains("300"), "must report the true total match count");
+        assert!(out.contains("300 output lines"), "must count output lines, including context");
         // 250 shown lines + 1 notice line
         assert_eq!(out.lines().count(), 251);
     }
@@ -273,25 +289,99 @@ mod tests {
         assert_eq!(out, "a\nb\nc");
     }
 
+    #[test]
+    fn search_commands_keep_patterns_separate_from_options() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("search file.txt");
+        std::fs::write(&file, "").unwrap();
+        let path = file.to_str().unwrap();
+        for pattern in ["--files", "/?", "two words"] {
+            let cmd = ripgrep_command(pattern, path, Some("*.rs"), true, 2);
+            let args = cmd.as_std().get_args().map(|arg| arg.to_str().unwrap()).collect::<Vec<_>>();
+            assert_eq!(args, ["-n", "--glob", "*.rs", "-i", "-C", "2", "-e", pattern, "--", path]);
+
+            let cmd = fallback_command(pattern, path, None, true, 0).unwrap();
+            let args = cmd.as_std().get_args().map(|arg| arg.to_str().unwrap()).collect::<Vec<_>>();
+            #[cfg(windows)]
+            assert_eq!(args, ["/N", "/R", "/I", &format!("/C:{pattern}"), path]);
+            #[cfg(not(windows))]
+            assert_eq!(args, ["-rn", "-i", "-e", pattern, "--", path]);
+        }
+        #[cfg(windows)]
+        for (glob, context) in [(Some("*.rs"), 0), (None, 2)] {
+            assert!(fallback_command("pattern", path, glob, false, context).is_err());
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn search_exit_errors_are_not_reported_as_no_matches() {
+        #[cfg(unix)]
+        use std::os::unix::process::ExitStatusExt;
+        #[cfg(windows)]
+        use std::os::windows::process::ExitStatusExt;
+
+        for program in ["rg", "grep", "findstr"] {
+            for (code, stdout) in [(0, "one\n"), (1, ""), (2, ""), (2, "partial\n")] {
+                let raw_status = if cfg!(unix) { code << 8 } else { code };
+                let result = render_search_output(program, std::process::Output {
+                    status: std::process::ExitStatus::from_raw(raw_status),
+                    stdout: stdout.as_bytes().to_vec(),
+                    stderr: b"simulated search failure".to_vec(),
+                });
+                assert_eq!(result.is_error, code == 2);
+                if code == 2 {
+                    assert!(result.content.contains(program));
+                    assert!(result.content.contains("simulated search failure"));
+                    assert!(!result.content.contains("No matches"));
+                } else {
+                    assert_eq!(result.content, if code == 1 { "No matches found" } else { "one" });
+                }
+            }
+        }
+    }
+
+    #[cfg(windows)]
     #[tokio::test]
-    async fn grep_tool_finds_pattern_in_own_source() {
-        let tool = GrepTool::new(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-        let input = json!({
-            "pattern": "GrepTool",
-            "path": env!("CARGO_MANIFEST_DIR")
-        });
-        let result = tool.execute(input).await;
-        assert!(!result.is_error, "grep failed: {}", result.content);
-        assert!(result.content.contains("GrepTool"));
+    async fn try_grep_searches_files_and_spaced_directories_with_literal_patterns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let directory = tmp.path().join("search root");
+        let nested = directory.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let file = directory.join("search file.txt");
+        std::fs::write(&file, "--files primary_match\r\n/? primary_match\r\ntwo words primary_match\r\n").unwrap();
+        std::fs::write(nested.join("search file.txt"), "--files nested_match\r\n/? nested_match\r\ntwo words nested_match\r\n").unwrap();
+
+        for pattern in ["--files", "/?", "two words"] {
+            for (path, recursive) in [(&file, false), (&directory, true)] {
+                // Call the fallback directly even when ripgrep is installed.
+                let result = try_grep(pattern, path.to_str().unwrap(), None, false, 0).await;
+                assert!(!result.is_error, "{}", result.content);
+                assert!(result.content.contains(&format!("{pattern} primary_match")), "{}", result.content);
+                assert_eq!(result.content.contains("nested_match"), recursive, "{}", result.content);
+                assert_eq!(result.content.lines().count(), if recursive { 2 } else { 1 }, "{}", result.content);
+            }
+        }
     }
 
     #[tokio::test]
     async fn execute_uses_cwd_for_relative_path() {
         use std::fs;
         let tmp = tempfile::tempdir().unwrap();
-        fs::write(tmp.path().join("searchable.txt"), "unique_grep_marker_xyz").unwrap();
+        fs::write(tmp.path().join("searchable.txt"), "unique_grep_marker_xyz\n--files\n").unwrap();
 
         let tool = GrepTool::new(tmp.path().to_path_buf());
+        for (name, value) in [
+            ("path", json!(false)),
+            ("glob", json!(["*.txt"])),
+            ("case_insensitive", json!("false")),
+            ("context_lines", json!(-1)),
+            ("context_lines", json!(1.5)),
+        ] {
+            let result = tool.execute(json!({"pattern": "marker", (name): value})).await;
+            assert!(result.is_error, "invalid {name} must not broaden the search");
+            assert!(result.content.contains(name), "{}", result.content);
+        }
         let input = json!({"pattern": "unique_grep_marker_xyz", "path": "."});
         let result = tool.execute(input).await;
         assert!(!result.is_error, "unexpected error: {}", result.content);
@@ -300,5 +390,8 @@ mod tests {
             "should find pattern, got: {}",
             result.content
         );
+        let result = tool.execute(json!({"pattern": "--files", "path": "."})).await;
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result.content.contains("--files"), "pattern must not become an option: {}", result.content);
     }
 }
