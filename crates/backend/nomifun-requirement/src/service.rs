@@ -408,6 +408,12 @@ impl RequirementService {
             .get_by_requirement_id(id)
             .await?
             .ok_or_else(|| AppError::NotFound(format!("requirement {id}")))?;
+        if req.title.as_deref().is_some_and(|title| title.trim().is_empty()) {
+            return Err(AppError::BadRequest("title must not be empty".into()));
+        }
+        if req.tag.as_deref().is_some_and(|tag| tag.trim().is_empty()) {
+            return Err(AppError::BadRequest("tag must not be empty".into()));
+        }
 
         // Attachment changes first —ingest BEFORE remove. Ingest is the only
         // high-failure-probability step (validation, the temp source may already
@@ -2406,6 +2412,66 @@ mod tests {
             original.attachment_id
         );
         assert!(std::path::Path::new(&original.abs_path).exists());
+    }
+
+    #[tokio::test]
+    async fn update_rejects_blank_metadata_before_any_writes() {
+        let (service, _data_dir, upload_root) = service_with_attachments().await;
+        let created = create_req(&service, "metadata-guard").await;
+        let original = serde_json::to_value(&created).unwrap();
+        let source_path = upload_file(upload_root.path(), "new.png");
+
+        for field in ["title", "tag"] {
+            for blank in ["", " \t\r\n", "\u{3000}"] {
+                let mut raw = serde_json::json!({
+                    "title": "Changed title",
+                    "tag": "changed-tag",
+                    "content": "Changed content",
+                    "add_attachments": [{
+                        "source_path": source_path,
+                        "file_name": "new.png"
+                    }]
+                });
+                raw[field] = serde_json::json!(blank);
+                let error = service
+                    .update(&created.requirement_id, serde_json::from_value(raw).unwrap())
+                    .await
+                    .unwrap_err();
+                assert!(matches!(
+                    error,
+                    AppError::BadRequest(message) if message == format!("{field} must not be empty")
+                ));
+                let after = service.get(&created.requirement_id).await.unwrap();
+                assert_eq!(serde_json::to_value(after).unwrap(), original);
+            }
+        }
+
+        // Optional metadata remains optional; accepted values are not normalized.
+        for raw in [
+            serde_json::json!({ "content": "" }),
+            serde_json::json!({ "title": null, "tag": null }),
+        ] {
+            let updated = service
+                .update(&created.requirement_id, serde_json::from_value(raw).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(updated.title, created.title);
+            assert_eq!(updated.tag, created.tag);
+            assert!(updated.content.is_empty());
+        }
+        let updated = service
+            .update(
+                &created.requirement_id,
+                serde_json::from_value(serde_json::json!({
+                    "title": " Updated ",
+                    "tag": " new-tag "
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.title, " Updated ");
+        assert_eq!(updated.tag, " new-tag ");
     }
 
     #[tokio::test]
