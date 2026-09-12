@@ -2,11 +2,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
-use reqwest::header::{HeaderMap, HeaderValue};
+use reqwest::header::HeaderMap;
 use tokio::sync::oneshot;
 
-use super::{McpError, McpTransport, find_sse_event_boundary};
+use super::{McpError, McpTransport, find_sse_event_boundary, http_headers, parse_sse_event};
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
+
+type PendingResponses = Arc<StdMutex<Option<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>>;
 
 /// SSE transport: connects to an SSE endpoint for server→client events,
 /// sends requests via POST to the endpoint URL received from the SSE stream
@@ -16,7 +18,7 @@ pub struct SseTransport {
     post_url: String,
     headers: HeaderMap,
     /// Pending request-response channels, keyed by JSON-RPC id
-    pending: Arc<StdMutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>,
+    pending: PendingResponses,
     /// Handle to the background SSE listener task
     _listener: tokio::task::JoinHandle<()>,
 }
@@ -24,14 +26,7 @@ pub struct SseTransport {
 impl SseTransport {
     /// Connect to an SSE MCP server
     pub async fn connect(url: &str, headers: &HashMap<String, String>) -> Result<Self, McpError> {
-        let mut header_map = HeaderMap::new();
-        for (k, v) in headers {
-            let name = reqwest::header::HeaderName::from_bytes(k.as_bytes())
-                .map_err(|e| McpError::Transport(format!("Invalid header name '{}': {}", k, e)))?;
-            let value = HeaderValue::from_str(v)
-                .map_err(|e| McpError::Transport(format!("Invalid header value '{}': {}", v, e)))?;
-            header_map.insert(name, value);
-        }
+        let header_map = http_headers(headers)?;
 
         let client = super::bounded_http_client()?;
 
@@ -42,47 +37,43 @@ impl SseTransport {
             .header("Accept", "text/event-stream")
             .send()
             .await
-            .map_err(|e| McpError::Transport(format!("SSE connection failed: {}", e)))?;
+            .map_err(|e| McpError::Transport(format!("SSE connection failed: {}", e.without_url())))?;
 
-        if !response.status().is_success() {
-            return Err(McpError::Transport(format!(
-                "SSE connection returned status: {}",
-                response.status()
-            )));
-        }
+        let response = super::check_http_status(response)?;
 
-        let pending: Arc<StdMutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>> =
-            Arc::new(StdMutex::new(HashMap::new()));
+        let pending: PendingResponses = Arc::new(StdMutex::new(Some(HashMap::new())));
 
         // Parse the SSE stream to find the endpoint URL
         // The server sends an "endpoint" event with the POST URL
-        let base_url = extract_base_url(url);
+        let base_url = response.url().clone();
         let mut bytes_stream = response.bytes_stream();
-        let mut buffer = String::new();
+        let mut buffer = Vec::new();
         let mut post_url: Option<String> = None;
 
         use futures::StreamExt;
         // Read initial events to get the endpoint URL
         while let Some(chunk) = bytes_stream.next().await {
-            let chunk = chunk.map_err(|e| McpError::Transport(format!("SSE read error: {}", e)))?;
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            let chunk = chunk.map_err(|e| McpError::Transport(format!("SSE read error: {}", e.without_url())))?;
+            buffer.extend_from_slice(&chunk);
 
             // Parse SSE events from buffer. Events may be framed with LF, CRLF
             // (new-api / one-api proxies), or bare CR — see find_sse_event_boundary.
             while let Some((event_end, delim_len)) = find_sse_event_boundary(&buffer) {
-                let event_block = buffer[..event_end].to_string();
-                buffer = buffer[event_end + delim_len..].to_string();
+                let event_block = String::from_utf8_lossy(&buffer[..event_end]).into_owned();
+                buffer.drain(..event_end + delim_len);
 
                 let (event_type, event_data) = parse_sse_event(&event_block);
 
                 if event_type == "endpoint" {
                     // The endpoint might be relative or absolute
-                    let endpoint = if event_data.starts_with("http") {
-                        event_data.clone()
-                    } else {
-                        format!("{}{}", base_url, event_data)
-                    };
-                    post_url = Some(endpoint);
+                    let endpoint = base_url.join(&event_data)
+                        .map_err(|_| McpError::Transport("Invalid SSE endpoint URL".into()))?;
+                    if endpoint.origin() != base_url.origin()
+                        || !endpoint.username().is_empty() || endpoint.password().is_some()
+                    {
+                        return Err(McpError::Transport("SSE endpoint must stay on the configured origin".into()));
+                    }
+                    post_url = Some(endpoint.to_string());
                     break;
                 }
             }
@@ -99,13 +90,10 @@ impl SseTransport {
         let pending_clone = pending.clone();
         let listener = tokio::spawn(async move {
             let mut buf = buffer; // carry over remaining buffer
-            while let Some(chunk) = bytes_stream.next().await {
-                let Ok(chunk) = chunk else { break };
-                buf.push_str(&String::from_utf8_lossy(&chunk));
-
+            loop {
                 while let Some((event_end, delim_len)) = find_sse_event_boundary(&buf) {
-                    let event_block = buf[..event_end].to_string();
-                    buf = buf[event_end + delim_len..].to_string();
+                    let event_block = String::from_utf8_lossy(&buf[..event_end]).into_owned();
+                    buf.drain(..event_end + delim_len);
 
                     let (event_type, event_data) = parse_sse_event(&event_block);
 
@@ -116,11 +104,13 @@ impl SseTransport {
                         let mut map = pending_clone
                             .lock()
                             .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        if let Some(sender) = map.remove(&id) {
+                        if let Some(sender) = map.as_mut().and_then(|map| map.remove(&id)) {
                             let _ = sender.send(response);
                         }
                     }
                 }
+                let Some(Ok(chunk)) = bytes_stream.next().await else { break };
+                buf.extend_from_slice(&chunk);
             }
             // A closed or failed SSE listener can no longer deliver any
             // correlated response. Drop every sender so callers fail
@@ -128,7 +118,7 @@ impl SseTransport {
             pending_clone
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clear();
+                .take();
         });
 
         Ok(Self {
@@ -142,11 +132,18 @@ impl SseTransport {
 
 }
 
+impl Drop for SseTransport {
+    fn drop(&mut self) {
+        self._listener.abort();
+        self.pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
+    }
+}
+
 /// Removes an unanswered request from the correlation map even when the
 /// caller is cancelled by the manager deadline.  A `tokio::sync::Mutex` cannot
 /// be used here because `Drop` cannot await it.
 struct PendingRequestGuard {
-    pending: Arc<StdMutex<HashMap<u64, oneshot::Sender<JsonRpcResponse>>>>,
+    pending: PendingResponses,
     request_id: u64,
     armed: bool,
 }
@@ -163,7 +160,7 @@ impl Drop for PendingRequestGuard {
             self.pending
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .remove(&self.request_id);
+                .as_mut().map(|map| map.remove(&self.request_id));
         }
     }
 }
@@ -182,6 +179,10 @@ impl McpTransport for SseTransport {
                 .pending
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let map = map.as_mut().ok_or_else(|| McpError::Transport("SSE listener is closed".into()))?;
+            if map.contains_key(&req_id) {
+                return Err(McpError::Transport("Duplicate in-flight JSON-RPC request id".into()));
+            }
             map.insert(req_id, tx);
         }
         let mut pending_guard = PendingRequestGuard {
@@ -202,25 +203,18 @@ impl McpTransport for SseTransport {
             .body(body)
             .send()
             .await
-            .map_err(|e| McpError::Transport(format!("POST request failed: {}", e)))?;
+            .map_err(|e| McpError::Transport(format!("POST request failed: {}", e.without_url())))?;
 
-        if !response.status().is_success() {
-            // Clean up pending
-            self.pending
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .remove(&req_id);
-            return Err(McpError::Transport(format!(
-                "POST returned status: {}",
-                response.status()
-            )));
-        }
+        super::check_http_status(response)?;
 
         // Wait for response from SSE stream
         let rpc_response = rx
             .await
             .map_err(|_| McpError::Transport("Response channel closed unexpectedly".into()))?;
         pending_guard.disarm();
+        if rpc_response.jsonrpc != "2.0" {
+            return Err(McpError::Transport("Invalid JSON-RPC response version".into()));
+        }
 
         if let Some(err) = &rpc_response.error {
             return Err(McpError::JsonRpc {
@@ -233,6 +227,9 @@ impl McpTransport for SseTransport {
     }
 
     async fn notify(&self, req: &JsonRpcRequest) -> Result<(), McpError> {
+        if self.pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).is_none() {
+            return Err(McpError::Transport("SSE listener is closed".into()));
+        }
         let body = serde_json::to_string(req)
             .map_err(|e| McpError::Transport(format!("JSON serialize error: {}", e)))?;
 
@@ -243,7 +240,8 @@ impl McpTransport for SseTransport {
             .body(body)
             .send()
             .await
-            .map_err(|e| McpError::Transport(format!("Notification POST failed: {}", e)))?;
+            .map_err(|e| McpError::Transport(format!("Notification POST failed: {}", e.without_url())))
+            .and_then(super::check_http_status)?;
 
         Ok(())
     }
@@ -253,37 +251,9 @@ impl McpTransport for SseTransport {
         self.pending
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
+            .take();
         Ok(())
     }
-}
-
-/// Parse a single SSE event block into (event_type, data)
-fn parse_sse_event(block: &str) -> (String, String) {
-    let mut event_type = String::new();
-    let mut data_lines = Vec::new();
-
-    for line in block.lines() {
-        if let Some(value) = line.strip_prefix("event:") {
-            event_type = value.trim().to_string();
-        } else if let Some(value) = line.strip_prefix("data:") {
-            data_lines.push(value.trim().to_string());
-        }
-    }
-
-    (event_type, data_lines.join("\n"))
-}
-
-/// Extract base URL (scheme + host + port) from a full URL
-fn extract_base_url(url: &str) -> String {
-    // Find the position after "://"
-    if let Some(scheme_end) = url.find("://") {
-        let rest = &url[scheme_end + 3..];
-        if let Some(path_start) = rest.find('/') {
-            return url[..scheme_end + 3 + path_start].to_string();
-        }
-    }
-    url.to_string()
 }
 
 #[cfg(test)]
@@ -386,7 +356,7 @@ mod tests {
                 .pending
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .is_empty()
+                .is_none()
         );
         transport.close().await.unwrap();
         server.await.unwrap();
