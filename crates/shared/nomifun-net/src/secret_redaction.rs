@@ -6,7 +6,7 @@
 //! form/percent-encoded representations are covered without relying on secret
 //! prefixes such as `sk-` or `AKIA`.
 
-use std::sync::Arc;
+use std::{borrow::Cow, ops::Range, sync::Arc};
 
 const REDACTED: &str = "[REDACTED]";
 
@@ -16,7 +16,7 @@ const REDACTED: &str = "[REDACTED]";
 /// live credential material.
 #[derive(Clone, Default)]
 pub struct SecretRedactor {
-    variants: Arc<Vec<String>>,
+    variants: Arc<Vec<Vec<u8>>>,
 }
 
 impl SecretRedactor {
@@ -33,8 +33,8 @@ impl SecretRedactor {
             if trimmed.is_empty() {
                 continue;
             }
-            push_variant(&mut variants, secret.to_owned());
-            push_variant(&mut variants, trimmed.to_owned());
+            variants.push(secret.to_owned());
+            variants.push(trimmed.to_owned());
 
             // Query encoders use two common space representations: HTML-form
             // encoding uses `+`, while RFC 3986 component encoding uses
@@ -44,27 +44,27 @@ impl SecretRedactor {
             let form_encoded = encode_component(trimmed, true, true);
             let percent_encoded = encode_component(trimmed, false, false);
             for encoded in [&form_encoded, &percent_encoded] {
-                push_encoded_variants(&mut variants, encoded);
+                variants.push(encoded.to_owned());
 
                 // A gateway may quote an already encoded query value in JSON
                 // and encode it once more. Cover both form and RFC spellings.
-                let double_form = encode_component(encoded, true, true);
-                let double_percent = encode_component(encoded, false, false);
-                push_encoded_variants(&mut variants, &double_form);
-                push_encoded_variants(&mut variants, &double_percent);
+                variants.push(encode_component(encoded, true, true));
+                variants.push(encode_component(encoded, false, false));
             }
         }
+        let mut variants: Vec<Vec<u8>> = variants.into_iter()
+            .map(|value| canonical_percent_hex(value.as_bytes()).into_owned())
+            .collect();
         variants.sort_unstable();
         variants.dedup();
-        variants.sort_unstable_by_key(|value| std::cmp::Reverse(value.len()));
         Self {
             variants: Arc::new(variants),
         }
     }
 
     /// Whether no exact credential representations were configured. Even when
-    /// this is true, [`Self::redact`] still removes query strings from embedded
-    /// HTTP(S) URLs because an upstream may mint credentials unknown to us.
+    /// this is true, [`Self::redact`] still removes embedded URL credentials
+    /// because an upstream may mint credentials unknown to us.
     pub fn is_empty(&self) -> bool {
         self.variants.is_empty()
     }
@@ -78,25 +78,93 @@ impl SecretRedactor {
     /// fragment. This method conservatively removes the longest such suffix;
     /// complete variants remain intact for [`Self::redact`] to replace.
     pub fn redaction_safe_truncation_boundary(&self, input: &[u8]) -> usize {
+        let canonical = canonical_percent_hex(input);
         let unsafe_suffix = self
             .variants
             .iter()
-            .map(|variant| longest_proper_prefix_suffix(input, variant.as_bytes()))
+            .map(|variant| longest_proper_prefix_suffix(&canonical, variant))
             .max()
             .unwrap_or(0);
-        input.len().saturating_sub(unsafe_suffix)
+        let boundary = input.len().saturating_sub(unsafe_suffix);
+        if unsafe_suffix == 0 {
+            return boundary;
+        }
+        // Removing a partial credential may cut through a complete overlapping
+        // credential. Remove that whole connected match too, not its suffix only.
+        self.matching_ranges(&canonical)
+            .into_iter()
+            .find(|range| range.start < boundary && range.end > boundary)
+            .map_or(boundary, |range| range.start)
     }
 
     /// Replace every exact raw or encoded secret representation.
     pub fn redact(&self, input: &str) -> String {
-        let mut output = input.to_owned();
-        for variant in self.variants.iter() {
-            if output.contains(variant) {
-                output = output.replace(variant, REDACTED);
-            }
+        let canonical = canonical_percent_hex(input.as_bytes());
+        let mut output = String::with_capacity(input.len());
+        let mut cursor = 0;
+        for range in self.matching_ranges(&canonical) {
+            output.push_str(&input[cursor..range.start]);
+            output.push_str(REDACTED);
+            cursor = range.end;
         }
+        output.push_str(&input[cursor..]);
         redact_url_queries(&output)
     }
+
+    /// Match original bytes only, including overlaps. Coalesce per pattern
+    /// before sorting so repeated/overlapping secrets do not build a list of
+    /// every occurrence. UTF-8 patterns always match on valid string boundaries.
+    fn matching_ranges(&self, input: &[u8]) -> Vec<Range<usize>> {
+        let mut ranges: Vec<Range<usize>> = Vec::new();
+        for variant in self.variants.iter().filter(|value| value.len() <= input.len()) {
+            let pattern = variant.as_slice();
+            let failure = prefix_failure_table(pattern);
+            let mut matched = 0;
+            let first_range = ranges.len();
+            for (index, byte) in input.iter().enumerate() {
+                while matched > 0 && *byte != pattern[matched] {
+                    matched = failure[matched - 1];
+                }
+                if *byte == pattern[matched] {
+                    matched += 1;
+                }
+                if matched == pattern.len() {
+                    let range = index + 1 - matched..index + 1;
+                    if ranges.len() > first_range && ranges.last().unwrap().end > range.start {
+                        ranges.last_mut().unwrap().end = range.end;
+                    } else {
+                        ranges.push(range);
+                    }
+                    matched = failure[matched - 1];
+                }
+            }
+        }
+        ranges.sort_unstable_by_key(|range| range.start);
+        let mut merged: Vec<Range<usize>> = Vec::new();
+        for range in ranges {
+            if let Some(last) = merged.last_mut().filter(|last| last.end > range.start) {
+                last.end = last.end.max(range.end);
+            } else {
+                merged.push(range);
+            }
+        }
+        merged
+    }
+}
+
+fn prefix_failure_table(pattern: &[u8]) -> Vec<usize> {
+    let mut failure = vec![0usize; pattern.len()];
+    for index in 1..pattern.len() {
+        let mut matched = failure[index - 1];
+        while matched > 0 && pattern[index] != pattern[matched] {
+            matched = failure[matched - 1];
+        }
+        if pattern[index] == pattern[matched] {
+            matched += 1;
+        }
+        failure[index] = matched;
+    }
+    failure
 }
 
 /// Find the longest suffix of `input` that is a proper prefix of `pattern`.
@@ -111,17 +179,7 @@ fn longest_proper_prefix_suffix(input: &[u8], pattern: &[u8]) -> usize {
     }
     let relevant_len = pattern.len().min(input.len().saturating_add(1));
     let relevant = &pattern[..relevant_len];
-    let mut failure = vec![0usize; relevant.len()];
-    for index in 1..relevant.len() {
-        let mut matched = failure[index - 1];
-        while matched > 0 && relevant[index] != relevant[matched] {
-            matched = failure[matched - 1];
-        }
-        if relevant[index] == relevant[matched] {
-            matched += 1;
-        }
-        failure[index] = matched;
-    }
+    let failure = prefix_failure_table(relevant);
 
     let mut matched = 0usize;
     for (index, byte) in input.iter().copied().enumerate() {
@@ -142,48 +200,74 @@ fn longest_proper_prefix_suffix(input: &[u8], pattern: &[u8]) -> usize {
     matched.min(pattern.len() - 1)
 }
 
-/// Remove query strings from every HTTP(S) URL embedded in an untrusted
-/// diagnostic. Upstream gateways frequently quote their own outbound URL in
-/// an error body (for example `Post "https://host/path?token=...": EOF`).
-/// Exact credential redaction cannot know credentials minted by that gateway,
-/// so query values are always treated as sensitive before the body is logged,
-/// persisted, or returned to a caller.
+/// Remove query strings and other URL credentials from untrusted diagnostics.
+///
+/// All explicit `scheme://` URLs are covered, including proxy/WebSocket URLs.
+/// Userinfo, query values and fragments may carry credentials unknown to the
+/// caller. Keep hosts/routes and surrounding reasons, but not sensitive tails.
+/// The historical function name is retained for existing callers.
 pub fn redact_url_queries(input: &str) -> String {
-    fn next_url_start(input: &str, from: usize) -> Option<usize> {
-        let bytes = input.as_bytes();
-        (from..bytes.len()).find(|&index| {
-            bytes[index..]
-                .get(..7)
-                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(b"http://"))
-                || bytes[index..]
-                    .get(..8)
-                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(b"https://"))
-        })
+    const MARKER: &str = "<redacted>";
+
+    fn next_authority(input: &str, mut from: usize) -> Option<usize> {
+        while let Some(offset) = input[from..].find("://") {
+            let colon = from + offset;
+            let start = input[..colon].as_bytes().iter().rposition(|byte| {
+                !byte.is_ascii_alphanumeric() && !matches!(byte, b'+' | b'-' | b'.')
+            }).map_or(0, |index| index + 1);
+            if start < colon && input.as_bytes()[start].is_ascii_alphabetic() {
+                return Some(colon + 3);
+            }
+            from = colon + 3;
+        }
+        None
     }
 
     fn url_end(input: &str, start: usize) -> usize {
-        input[start..]
-            .char_indices()
-            .find_map(|(offset, ch)| {
-                (ch.is_whitespace()
-                    || matches!(ch, '"' | '\'' | '<' | '>' | ')' | '}'))
-                .then_some(start + offset)
-            })
-            .unwrap_or(input.len())
+        let mut skip_until = start;
+        for (offset, ch) in input[start..].char_indices() {
+            let index = start + offset;
+            if index < skip_until {
+                continue;
+            }
+            // Our own marker may appear in userinfo or a query on a second
+            // pass. Treat it as one token, not an HTML delimiter.
+            if input[index..].starts_with(MARKER) {
+                skip_until = index + MARKER.len();
+                continue;
+            }
+            if ch.is_whitespace() || matches!(ch, '"' | '\'' | '<' | '>') {
+                return index;
+            }
+        }
+        input.len()
     }
 
     let mut output = String::with_capacity(input.len());
     let mut cursor = 0;
-    while let Some(start) = next_url_start(input, cursor) {
-        let end = url_end(input, start);
-        let Some(query_offset) = input[start..end].find('?') else {
-            output.push_str(&input[cursor..end]);
-            cursor = end;
-            continue;
+    while let Some(authority) = next_authority(input, cursor) {
+        let end = url_end(input, authority);
+        let authority_end = input[authority..end].find(['/', '?', '#'])
+            .map_or(end, |offset| authority + offset);
+        output.push_str(&input[cursor..authority]);
+        let rest = if let Some(at) = input[authority..authority_end].rfind('@') {
+            output.push_str(MARKER);
+            output.push('@');
+            authority + at + 1
+        } else {
+            authority
         };
-        let query = start + query_offset;
-        output.push_str(&input[cursor..=query]);
-        output.push_str("<redacted>");
+        if let Some(offset) = input[authority_end..end].find(['?', '#']) {
+            let sensitive = authority_end + offset;
+            output.push_str(&input[rest..=sensitive]);
+            output.push_str(MARKER);
+            // Parentheses inside a query are legal: never stop at the first
+            // one and expose its suffix. Preserve only surrounding end punctuation.
+            let tail = input[sensitive + 1..end].trim_end_matches([')', '}']);
+            output.push_str(&input[sensitive + 1 + tail.len()..end]);
+        } else {
+            output.push_str(&input[rest..end]);
+        }
         cursor = end;
     }
     output.push_str(&input[cursor..]);
@@ -211,42 +295,38 @@ fn encode_component(input: &str, space_as_plus: bool, form_safe_star: bool) -> S
     output
 }
 
-fn push_encoded_variants(target: &mut Vec<String>, value: &str) {
-    if value.is_empty() {
-        return;
+/// A same-length view with only percent-escape hex digits uppercased. Keeping
+/// offsets unchanged lets matches and truncation boundaries index the original
+/// UTF-8/byte input. Follow escaped '%' (%25) into a second encoding layer too;
+/// never lowercase ordinary credential characters or decode untrusted bytes.
+fn canonical_percent_hex(input: &[u8]) -> Cow<'_, [u8]> {
+    if !input.contains(&b'%') {
+        return Cow::Borrowed(input);
     }
-    push_variant(target, value.to_owned());
-    push_variant(target, percent_hex_case(value, true));
-    push_variant(target, percent_hex_case(value, false));
-}
-
-fn push_variant(target: &mut Vec<String>, value: String) {
-    if !value.is_empty() && !target.iter().any(|existing| existing == &value) {
-        target.push(value);
-    }
-}
-
-fn percent_hex_case(value: &str, uppercase: bool) -> String {
-    let bytes = value.as_bytes();
-    let mut output = String::with_capacity(value.len());
+    let mut output = input.to_vec();
     let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
-            output.push('%');
-            for byte in &bytes[index + 1..=index + 2] {
-                output.push(if uppercase {
-                    (*byte as char).to_ascii_uppercase()
-                } else {
-                    (*byte as char).to_ascii_lowercase()
-                });
-            }
-            index += 3;
-        } else {
-            output.push(bytes[index] as char);
+    while index < output.len() {
+        if output[index] != b'%' {
             index += 1;
+            continue;
+        }
+        index += 1;
+        loop {
+            let end = (index + 2).min(output.len());
+            let digits = &mut output[index..end];
+            if digits.is_empty() || !digits.iter().all(u8::is_ascii_hexdigit) {
+                break;
+            }
+            // A single final hex digit is a truncated escape prefix.
+            digits.make_ascii_uppercase();
+            let escaped_percent = digits == b"25";
+            index = end;
+            if !escaped_percent {
+                break;
+            }
         }
     }
-    output
+    Cow::Owned(output)
 }
 
 #[cfg(test)]
@@ -297,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn redacts_all_keys_and_longest_variant_first() {
+    fn redacts_all_keys_including_nested_variants() {
         let redactor = SecretRedactor::new(["token", "token-long"]);
         assert_eq!(
             redactor.redact("token-long then token"),
@@ -327,6 +407,126 @@ mod tests {
             ordinary.len(),
             "an unrelated diagnostic tail must not be removed"
         );
+    }
+
+    #[test]
+    fn overlapping_credentials_redact_the_union_of_original_matches() {
+        let redactor = SecretRedactor::new(["abcd", "bcdef"]);
+        assert_eq!(redactor.redact("before abcdef after"), "before [REDACTED] after");
+    }
+
+    #[test]
+    fn self_overlapping_credentials_do_not_leave_a_suffix() {
+        let redactor = SecretRedactor::new(["ababa", "密钥密"]);
+        assert_eq!(redactor.redact("abababa 密钥密钥密"), "[REDACTED] [REDACTED]");
+    }
+
+    #[test]
+    fn replacement_markers_are_not_input_to_later_secret_matches() {
+        let redactor = SecretRedactor::new(["long-secret-value", "REDACTED"]);
+        assert_eq!(redactor.redact("long-secret-value then REDACTED"), "[REDACTED] then [REDACTED]");
+        assert_eq!(SecretRedactor::new(["x"]).redact("xx"), "[REDACTED][REDACTED]");
+    }
+
+    #[test]
+    fn truncating_an_overlapping_secret_does_not_expose_another_secret_prefix() {
+        let redactor = SecretRedactor::new(["abcdef", "defghi"]);
+        let input = b"error: abcdef";
+        let boundary = redactor.redaction_safe_truncation_boundary(input);
+        assert_eq!(&input[..boundary], b"error: ");
+    }
+
+    #[test]
+    fn overlapping_match_ranges_agree_with_a_small_exhaustive_byte_oracle() {
+        fn word(bits: usize, len: usize) -> String {
+            (0..len).map(|index| if bits & (1 << index) == 0 { 'a' } else { 'b' }).collect()
+        }
+        for len in 1..=4 {
+            for bits in 0..1 << len {
+                let pattern = word(bits, len);
+                let second: String = pattern.chars().rev().collect();
+                let redactor = SecretRedactor::new([&pattern, &second]);
+                for input_len in 0..=7 {
+                    for input_bits in 0..1 << input_len {
+                        let input = word(input_bits, input_len);
+                        let mut expected = vec![false; input.len()];
+                        for variant in [&pattern, &second] {
+                            for start in 0..input.len() {
+                                if input[start..].starts_with(variant.as_str()) {
+                                    expected[start..start + variant.len()].fill(true);
+                                }
+                            }
+                        }
+                        let mut actual = vec![false; input.len()];
+                        for range in redactor.matching_ranges(input.as_bytes()) {
+                            actual[range].fill(true);
+                        }
+                        assert_eq!(actual, expected, "pattern={pattern}, input={input}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn url_query_parentheses_do_not_expose_gateway_credentials() {
+        assert_eq!(redact_url_queries("error (https://host/path?cb=f(x)&token=SECRET) failed"),
+            "error (https://host/path?<redacted>) failed");
+    }
+
+    #[test]
+    fn url_diagnostics_remove_userinfo_fragments_and_non_http_credentials() {
+        for (input, expected) in [
+            ("https://user:SECRET@host/path", "https://<redacted>@host/path"),
+            ("wss://host/path?token=SECRET", "wss://host/path?<redacted>"),
+            ("https://host/path#token=SECRET", "https://host/path#<redacted>"),
+            ("socks5h://user:SECRET@[::1]:7890", "socks5h://<redacted>@[::1]:7890"),
+        ] {
+            assert_eq!(redact_url_queries(input), expected);
+        }
+    }
+
+    #[test]
+    fn repeated_url_redaction_is_stable_and_keeps_surrounding_diagnostics() {
+        let input = "原因 (HTTPS://user:pass@host/路径?token=secret) and 'wss://[::1]/rt#secret': EOF";
+        let expected = "原因 (HTTPS://<redacted>@host/路径?<redacted>) and 'wss://[::1]/rt#<redacted>': EOF";
+        assert_eq!(redact_url_queries(input), expected);
+        assert_eq!(redact_url_queries(expected), expected);
+        assert_eq!(redact_url_queries("https://host/?<redacted>"), "https://host/?<redacted>");
+    }
+
+    #[test]
+    fn mixed_percent_hex_case_is_redacted_outside_urls() {
+        let redactor = SecretRedactor::new(["é/+?"]);
+        assert_eq!(redactor.redact("echo=%c3%A9%2f%2B%3f"), "echo=[REDACTED]");
+    }
+
+    #[test]
+    fn double_encoding_preserves_case_insensitive_inner_escapes() {
+        let redactor = SecretRedactor::new(["é/+?"]);
+        assert_eq!(redactor.redact("echo=%25c3%25A9%252f%252B%253f"), "echo=[REDACTED]");
+    }
+
+    #[test]
+    fn truncated_mixed_encoding_does_not_leave_a_credential_prefix() {
+        let redactor = SecretRedactor::new(["é/+?"]);
+        for encoded in ["é/+?", "%c3%A9%2f%2B%3f", "%25c3%25A9%252f%252B%253f"] {
+            let input = format!("echo={encoded}");
+            for length in 1..encoded.len() {
+                let partial = &input.as_bytes()[..5 + length];
+                let boundary = redactor.redaction_safe_truncation_boundary(partial);
+                assert_eq!(&partial[..boundary], b"echo=", "encoding={encoded}, length={length}");
+            }
+        }
+    }
+
+    #[test]
+    fn percent_canonicalization_does_not_change_ordinary_case_or_unicode() {
+        let text = "中文 AbCd %zz";
+        assert_eq!(canonical_percent_hex(text.as_bytes()).as_ref(), text.as_bytes());
+        assert!(matches!(canonical_percent_hex(b"plain text"), Cow::Borrowed(_)));
+        let redactor = SecretRedactor::new(["AbCd"]);
+        assert_eq!(redactor.redact("abcd ABCD AbCd 中文"), "abcd ABCD [REDACTED] 中文");
     }
 
     #[test]

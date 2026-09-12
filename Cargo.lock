@@ -6950,7 +6950,9 @@ dependencies = [
 name = "nomifun-net"
 version = "0.7.6"
 dependencies = [
+ "nomi-process-runtime",
  "reqwest 0.12.28",
+ "tempfile",
  "tokio",
  "tracing",
  "url",

@@ -3,6 +3,7 @@ use nomifun_api_types::{
     AgentStreamErrorData,
 };
 use nomifun_common::AppError;
+use nomifun_net::secret_redaction::redact_url_queries;
 
 const MAX_DETAIL_CHARS: usize = 1000;
 
@@ -898,10 +899,15 @@ fn is_sensitive_header_line(line: &str) -> bool {
 }
 
 fn redact_secret_words(line: &str) -> String {
+    let mut redact_bearer_value = false;
     line.split_whitespace()
         .map(|word| {
             let lower = word.to_ascii_lowercase();
-            if lower.starts_with("bearer ")
+            let follows_bearer = redact_bearer_value;
+            // Whitespace has already been consumed by the iterator. The
+            // credential is the next token, not a suffix of this one.
+            redact_bearer_value = lower.trim_matches(['"', '\'', '(', ')', '[', ']']) == "bearer";
+            if follows_bearer
                 || lower.starts_with("sk-")
                 || lower.contains("api_key=")
                 || lower.contains("apikey=")
@@ -915,10 +921,6 @@ fn redact_secret_words(line: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-fn redact_url_queries(input: &str) -> String {
-    nomifun_net::secret_redaction::redact_url_queries(input)
 }
 
 fn truncate_chars(value: &str, max: usize) -> String {
@@ -936,6 +938,28 @@ fn truncate_chars(value: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use nomifun_api_types::{AgentErrorResolutionKind, AgentErrorResolutionTarget};
+
+    #[test]
+    fn sanitize_error_detail_redacts_bearer_values_after_tokenization() {
+        for input in [
+            "upstream replied: Bearer unknown-secret and failed",
+            "upstream replied: bEaReR\tunknown-secret and failed",
+            "<b>upstream replied:</b> Bearer unknown-secret and failed",
+            "upstream replied: \"Bearer unknown-secret\" and failed",
+            "upstream replied: (Bearer unknown-secret) and failed",
+        ] {
+            let detail = sanitize_error_detail(input);
+            assert!(!detail.contains("unknown-secret"), "credential escaped: {detail}");
+            assert!(detail.contains("and failed"));
+            assert!(detail.contains("<redacted>"));
+        }
+    }
+
+    #[test]
+    fn bearer_without_a_value_does_not_consume_other_lines() {
+        assert_eq!(sanitize_error_detail("Bearer\nconnection refused"), "Bearer\nconnection refused");
+        assert_eq!(sanitize_error_detail("bearer-like ordinary message"), "bearer-like ordinary message");
+    }
 
     fn assert_classification(
         detail: &str,

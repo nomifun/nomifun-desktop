@@ -7,28 +7,28 @@ use std::{
 // Subprocess primitives are only needed by the macOS/Linux detection path (and
 // the cross-platform timeout test). Windows reads the registry natively, so
 // gating these keeps a Windows release build free of unused-import warnings.
+#[cfg(test)]
+use std::process::Stdio;
+
 #[cfg(any(test, target_os = "macos", target_os = "linux"))]
-use std::{
-    io::Read,
-    process::{Command, Stdio},
-    thread,
-};
+use nomi_process_runtime::ChildProcessBuilder;
+
+#[cfg(any(test, target_os = "macos", target_os = "linux"))]
+#[path = "proxy_command.rs"]
+mod command;
+#[cfg(any(test, target_os = "macos", target_os = "linux"))]
+use command::command_stdout_with_timeout;
 
 use tracing::{debug, warn};
 
 const SYSTEM_PROXY_CACHE_TTL: Duration = Duration::from_millis(250);
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 const SYSTEM_PROXY_COMMAND_TIMEOUT: Duration = Duration::from_millis(750);
-#[cfg(any(test, target_os = "macos", target_os = "linux"))]
-const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 const PROXY_ENV_KEYS: &[&str] = &[
     "HTTP_PROXY",
     "HTTPS_PROXY",
     "ALL_PROXY",
-    "http_proxy",
-    "https_proxy",
-    "all_proxy",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,6 +37,25 @@ struct SystemProxyConfig {
     https_proxy: Option<String>,
     all_proxy: Option<String>,
     no_proxy: Option<String>,
+}
+
+impl SystemProxyConfig {
+    fn detected(
+        http_proxy: Option<String>,
+        https_proxy: Option<String>,
+        socks_proxy: Option<String>,
+        exceptions: Vec<String>,
+    ) -> Option<Self> {
+        let all_proxy = if http_proxy.is_none() && https_proxy.is_none() {
+            socks_proxy
+        } else {
+            None
+        };
+        if http_proxy.is_none() && https_proxy.is_none() && all_proxy.is_none() {
+            return None;
+        }
+        Some(Self { http_proxy, https_proxy, all_proxy, no_proxy: build_no_proxy(exceptions) })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -204,20 +223,27 @@ fn system_proxy_config() -> Option<SystemProxyConfig> {
 }
 
 fn system_proxy_config_with_cache_ttl(ttl: Duration) -> Option<SystemProxyConfig> {
-    let now = Instant::now();
-    if let Some(entry) = SYSTEM_PROXY_CACHE
-        .lock()
-        .expect("system proxy cache lock")
+    cached_system_proxy_config(&SYSTEM_PROXY_CACHE, ttl, detect_system_proxy)
+}
+
+fn cached_system_proxy_config(
+    cache: &Mutex<Option<CachedSystemProxyConfig>>,
+    ttl: Duration,
+    detect: impl FnOnce() -> Option<SystemProxyConfig>,
+) -> Option<SystemProxyConfig> {
+    // Detection is synchronous already. Keep one owner through publication so
+    // concurrent misses cannot spawn duplicate probes or publish out of order.
+    let mut cached = cache.lock().expect("system proxy cache lock");
+    if let Some(entry) = cached
         .as_ref()
-        .filter(|entry| now.duration_since(entry.detected_at) < ttl)
-        .cloned()
+        .filter(|entry| entry.detected_at.elapsed() < ttl)
     {
-        return entry.config;
+        return entry.config.clone();
     }
 
-    let config = detect_system_proxy();
-    *SYSTEM_PROXY_CACHE.lock().expect("system proxy cache lock") = Some(CachedSystemProxyConfig {
-        detected_at: now,
+    let config = detect();
+    *cached = Some(CachedSystemProxyConfig {
+        detected_at: Instant::now(),
         config: config.clone(),
     });
     config
@@ -229,52 +255,17 @@ fn clear_system_proxy_cache() {
 }
 
 #[cfg(any(test, target_os = "macos", target_os = "linux"))]
-fn command_stdout_with_timeout(command: &mut Command, timeout: Duration) -> Option<String> {
-    // CREATE_NO_WINDOW: these detection helpers spawn console-subsystem CLIs
-    // (`reg`/`scutil`/`gsettings`/`kreadconfig`). The packaged desktop build is a
-    // GUI-subsystem app with no attached console, so without this flag Windows
-    // allocates a fresh console that flashes on screen for each spawn. Matches the
-    // repo-wide convention (nomi-computer, nomi-tools, nomi-mcp, nomi-config, …).
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000);
-    }
-
-    let mut child = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let started_at = Instant::now();
-
-    loop {
-        if let Some(status) = child.try_wait().ok()? {
-            let mut stdout = Vec::new();
-            if let Some(mut pipe) = child.stdout.take() {
-                pipe.read_to_end(&mut stdout).ok()?;
-            }
-            if !status.success() {
-                return None;
-            }
-            return Some(String::from_utf8_lossy(&stdout).into_owned());
-        }
-
-        if started_at.elapsed() >= timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            return None;
-        }
-
-        thread::sleep(COMMAND_POLL_INTERVAL);
-    }
+fn proxy_cli(program: &str, args: &[&str]) -> ChildProcessBuilder {
+    let mut command = ChildProcessBuilder::new(program);
+    command.args(args);
+    command
 }
 
 #[cfg(test)]
 static TEST_SYSTEM_PROXY_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 #[cfg(test)]
-fn test_system_proxy_lock() -> std::sync::MutexGuard<'static, ()> {
+pub(super) fn test_system_proxy_lock() -> std::sync::MutexGuard<'static, ()> {
     TEST_SYSTEM_PROXY_LOCK
         .lock()
         .expect("test system proxy lock")
@@ -285,16 +276,16 @@ fn process_has_proxy_env() -> bool {
 }
 
 fn process_env_proxy_names() -> HashSet<String> {
-    std::env::vars()
-        .filter(|(_, value)| !value.trim().is_empty())
-        .map(|(name, _)| name.to_ascii_uppercase())
+    std::env::vars_os()
+        .filter(|(_, value)| value.to_str().is_some_and(|value| !value.trim().is_empty()))
+        .filter_map(|(name, _)| name.to_str().map(str::to_ascii_uppercase))
         .collect()
 }
 
 fn has_proxy_name(names: &HashSet<String>) -> bool {
     PROXY_ENV_KEYS
         .iter()
-        .any(|key| names.contains(&key.to_ascii_uppercase()))
+        .any(|key| names.contains(*key))
 }
 
 fn has_env_name(names: &HashSet<String>, key: &str) -> bool {
@@ -435,12 +426,12 @@ fn take_test_system_proxy_config() -> Option<Option<SystemProxyConfig>> {
 #[cfg(target_os = "macos")]
 fn detect_platform_proxy() -> Option<SystemProxyConfig> {
     let stdout = command_stdout_with_timeout(
-        Command::new("/usr/sbin/scutil").arg("--proxy"),
+        proxy_cli("/usr/sbin/scutil", &["--proxy"]),
         SYSTEM_PROXY_COMMAND_TIMEOUT,
     )
     .or_else(|| {
         command_stdout_with_timeout(
-            Command::new("scutil").arg("--proxy"),
+            proxy_cli("scutil", &["--proxy"]),
             SYSTEM_PROXY_COMMAND_TIMEOUT,
         )
     })?;
@@ -508,7 +499,7 @@ fn detect_linux_kde_proxy() -> Option<SystemProxyConfig> {
 #[cfg(target_os = "linux")]
 fn read_gsettings_value(schema: &str, key: &str) -> Option<String> {
     let stdout = command_stdout_with_timeout(
-        Command::new("gsettings").args(["get", schema, key]),
+        proxy_cli("gsettings", &["get", schema, key]),
         SYSTEM_PROXY_COMMAND_TIMEOUT,
     )?;
     non_empty(&stdout)
@@ -518,7 +509,7 @@ fn read_gsettings_value(schema: &str, key: &str) -> Option<String> {
 fn read_kde_proxy_value(key: &str) -> Option<String> {
     for command in ["kreadconfig6", "kreadconfig5"] {
         let output = command_stdout_with_timeout(
-            Command::new(command).args([
+            proxy_cli(command, &[
                 "--file",
                 "kioslaverc",
                 "--group",
@@ -544,7 +535,7 @@ fn detect_platform_proxy() -> Option<SystemProxyConfig> {
     None
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 fn parse_scutil_proxy(text: &str) -> Option<SystemProxyConfig> {
     let mut http_enable = false;
     let mut https_enable = false;
@@ -596,22 +587,8 @@ fn parse_scutil_proxy(text: &str) -> Option<SystemProxyConfig> {
 
     let http_proxy = enabled_proxy_url(http_enable, "http", http_host.as_deref(), http_port);
     let https_proxy = enabled_proxy_url(https_enable, "http", https_host.as_deref(), https_port);
-    let all_proxy = if http_proxy.is_none() && https_proxy.is_none() && socks_enable {
-        enabled_proxy_url(true, "socks5h", socks_host.as_deref(), socks_port)
-    } else {
-        None
-    };
-
-    if http_proxy.is_none() && https_proxy.is_none() && all_proxy.is_none() {
-        return None;
-    }
-
-    Some(SystemProxyConfig {
-        http_proxy,
-        https_proxy,
-        all_proxy,
-        no_proxy: build_no_proxy(exceptions),
-    })
+    let socks_proxy = enabled_proxy_url(socks_enable, "socks5h", socks_host.as_deref(), socks_port);
+    SystemProxyConfig::detected(http_proxy, https_proxy, socks_proxy, exceptions)
 }
 
 #[cfg(any(test, target_os = "macos", target_os = "linux"))]
@@ -634,7 +611,7 @@ fn non_empty(value: &str) -> Option<String> {
 }
 
 fn parse_port(value: &str) -> Option<u16> {
-    value.trim().parse().ok()
+    value.trim().parse().ok().filter(|port| *port > 0)
 }
 
 fn proxy_url(scheme: &str, host: &str, port: u16) -> Option<String> {
@@ -650,7 +627,7 @@ fn proxy_url(scheme: &str, host: &str, port: u16) -> Option<String> {
     Some(format!("{scheme}://{host}:{port}"))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 fn parse_exception_values(value: &str) -> Vec<String> {
     value
         .split(',')
@@ -682,7 +659,7 @@ fn build_no_proxy(exceptions: Vec<String>) -> Option<String> {
     items.sort();
     items.dedup();
 
-    (!items.is_empty()).then(|| items.join(","))
+    Some(items.join(","))
 }
 
 fn normalize_no_proxy_item(item: &str) -> Option<String> {
@@ -777,22 +754,9 @@ fn parse_windows_proxy_settings(
         }
     }
 
-    let all_proxy = if http_proxy.is_none() && https_proxy.is_none() {
-        socks_proxy
-    } else {
-        None
-    };
-
-    if http_proxy.is_none() && https_proxy.is_none() && all_proxy.is_none() {
-        return None;
-    }
-
-    Some(SystemProxyConfig {
-        http_proxy,
-        https_proxy,
-        all_proxy,
-        no_proxy: build_no_proxy(parse_windows_proxy_override(proxy_override)),
-    })
+    SystemProxyConfig::detected(
+        http_proxy, https_proxy, socks_proxy, parse_windows_proxy_override(proxy_override),
+    )
 }
 
 #[cfg(any(test, target_os = "windows"))]
@@ -888,28 +852,13 @@ fn parse_linux_gsettings_proxy(settings: LinuxGSettingsProxy) -> Option<SystemPr
             .as_deref()
             .and_then(parse_gsettings_port),
     );
-    let all_proxy = if http_proxy.is_none() && https_proxy.is_none() {
-        socks_proxy
-    } else {
-        None
-    };
-
-    if http_proxy.is_none() && https_proxy.is_none() && all_proxy.is_none() {
-        return None;
-    }
-
     let exceptions = settings
         .ignore_hosts
         .as_deref()
         .map(parse_gsettings_list)
         .unwrap_or_default();
 
-    Some(SystemProxyConfig {
-        http_proxy,
-        https_proxy,
-        all_proxy,
-        no_proxy: build_no_proxy(exceptions),
-    })
+    SystemProxyConfig::detected(http_proxy, https_proxy, socks_proxy, exceptions)
 }
 
 #[cfg(any(test, target_os = "linux"))]
@@ -930,22 +879,9 @@ fn parse_linux_kde_proxy(settings: LinuxKdeProxy) -> Option<SystemProxyConfig> {
         .socks_proxy
         .as_deref()
         .and_then(|value| normalize_linux_kde_proxy_url("socks5h", value));
-    let all_proxy = if http_proxy.is_none() && https_proxy.is_none() {
-        socks_proxy
-    } else {
-        None
-    };
-
-    if http_proxy.is_none() && https_proxy.is_none() && all_proxy.is_none() {
-        return None;
-    }
-
-    Some(SystemProxyConfig {
-        http_proxy,
-        https_proxy,
-        all_proxy,
-        no_proxy: build_no_proxy(parse_linux_kde_no_proxy(settings.no_proxy.as_deref())),
-    })
+    SystemProxyConfig::detected(
+        http_proxy, https_proxy, socks_proxy, parse_linux_kde_no_proxy(settings.no_proxy.as_deref()),
+    )
 }
 
 #[cfg(any(test, target_os = "linux"))]
@@ -969,12 +905,10 @@ fn parse_gsettings_string(value: &str) -> Option<String> {
 
 #[cfg(any(test, target_os = "linux"))]
 fn parse_gsettings_port(value: &str) -> Option<u16> {
-    let port = value
+    value
         .split_whitespace()
         .last()
         .and_then(parse_port)
-        .filter(|port| *port > 0)?;
-    Some(port)
 }
 
 #[cfg(any(test, target_os = "linux"))]
@@ -1067,7 +1001,6 @@ fn normalize_proxy_scheme(scheme: &str, default_scheme: &str) -> String {
         "http" => "http".to_owned(),
         "https" => "https".to_owned(),
         "socks" | "socks5" | "socks5h" => "socks5h".to_owned(),
-        "" => default_scheme.to_ascii_lowercase(),
         _ => default_scheme.to_ascii_lowercase(),
     }
 }
@@ -1081,11 +1014,13 @@ fn split_proxy_endpoint(endpoint: &str) -> Option<(&str, Option<u16>)> {
     }
     if let Some(rest) = endpoint.strip_prefix('[') {
         let end = rest.find(']')?;
+        rest[..end].parse::<std::net::Ipv6Addr>().ok()?;
         let host = &endpoint[..=end + 1];
         let after = &rest[end + 1..];
-        let port = match after.strip_prefix(':') {
-            Some(port) => Some(parse_port(port)?),
-            None => None,
+        let port = if after.is_empty() {
+            None
+        } else {
+            Some(parse_port(after.strip_prefix(':')?)?)
         };
         return Some((host, port));
     }
@@ -1103,9 +1038,55 @@ fn split_proxy_endpoint(endpoint: &str) -> Option<(&str, Option<u16>)> {
 }
 
 #[cfg(test)]
+#[path = "proxy_command_tests.rs"]
+mod command_tests;
+
+#[cfg(test)]
+#[path = "proxy_cache_tests.rs"]
+mod cache_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn proxy_endpoints_reject_invalid_ipv6_suffixes_and_zero_ports() {
+        for endpoint in ["[::1]garbage", "[::1]:0", "proxy.example:0", "[not-ip]:8080"] {
+            assert!(split_proxy_endpoint(endpoint).is_none(), "invalid endpoint admitted: {endpoint}");
+        }
+    }
+
+    #[test]
+    #[cfg(any(windows, unix))]
+    fn unrelated_nonunicode_environment_values_do_not_panic() {
+        const CHILD_MARKER: &str = "NOMIFUN_PROXY_NONUNICODE_TEST_CHILD";
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            let _ = process_env_proxy_names();
+            return;
+        }
+        #[cfg(windows)]
+        let invalid = {
+            use std::os::windows::ffi::OsStringExt;
+            std::ffi::OsString::from_wide(&[0xd800])
+        };
+        #[cfg(unix)]
+        let invalid = {
+            use std::os::unix::ffi::OsStringExt;
+            std::ffi::OsString::from_vec(vec![0xff])
+        };
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child.args(["--exact", "proxy::tests::unrelated_nonunicode_environment_values_do_not_panic", "--nocapture"])
+            .env(CHILD_MARKER, "1")
+            .env("NOMIFUN_UNRELATED_NONUNICODE_TEST_VALUE", invalid);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            child.creation_flags(0x0800_0000);
+        }
+        let output = child.output().unwrap();
+        assert!(output.status.success(), "child proxy lookup panicked: {}", String::from_utf8_lossy(&output.stdout));
+    }
 
     #[test]
     fn system_proxy_config_reads_current_detection_when_cache_ttl_is_zero() {
@@ -1179,10 +1160,10 @@ mod tests {
 
     #[test]
     fn command_stdout_with_timeout_returns_none_for_slow_commands() {
-        let mut command = slow_command();
+        let command = slow_command();
         let started = Instant::now();
 
-        let output = command_stdout_with_timeout(&mut command, Duration::from_millis(50));
+        let output = command_stdout_with_timeout(command, Duration::from_millis(50));
 
         assert_eq!(output, None);
         assert!(
@@ -1192,17 +1173,13 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn slow_command() -> std::process::Command {
-        let mut command = std::process::Command::new("sh");
-        command.args(["-c", "sleep 2; printf late"]);
-        command
+    fn slow_command() -> ChildProcessBuilder {
+        proxy_cli("sh", &["-c", "sleep 2; printf late"])
     }
 
     #[cfg(windows)]
-    fn slow_command() -> std::process::Command {
-        let mut command = std::process::Command::new("cmd");
-        command.args(["/C", "ping -n 3 127.0.0.1 > nul & echo late"]);
-        command
+    fn slow_command() -> ChildProcessBuilder {
+        proxy_cli("cmd", &["/C", "ping -n 3 127.0.0.1 > nul & echo late"])
     }
 
     #[test]
@@ -1340,7 +1317,6 @@ mod tests {
         clear_system_proxy_cache();
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn parse_scutil_proxy_extracts_http_https_and_exceptions() {
         let input = r#"<dictionary> {
@@ -1370,7 +1346,6 @@ mod tests {
         assert!(no_proxy.contains("192.168.0.0/16"));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn parse_scutil_proxy_uses_socks_when_http_is_absent() {
         let input = r#"<dictionary> {
