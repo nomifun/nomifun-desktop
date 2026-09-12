@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ipcBridge } from '@/common';
 import type { ICsAgent, ICsAgentPatch } from '@/common/adapter/ipcBridge';
 import type { CsAgentId } from '@/common/types/ids';
@@ -18,21 +18,28 @@ import type { CsAgentId } from '@/common/types/ids';
 export const useCsAgents = () => {
   const [agents, setAgents] = useState<ICsAgent[]>([]);
   const [loading, setLoading] = useState(true);
+  const requests = useRef({ active: false, latest: 0 }).current;
 
   const refresh = useCallback(async () => {
+    if (!requests.active) return;
+    const request = ++requests.latest;
+    const isCurrent = () => requests.active && request === requests.latest;
     setLoading(true);
     try {
-      setAgents((await ipcBridge.customerService.listAgents.invoke()) ?? []);
+      const agents = (await ipcBridge.customerService.listAgents.invoke()) ?? [];
+      if (isCurrent()) setAgents(agents);
     } catch {
-      setAgents([]);
+      if (isCurrent()) setAgents([]);
     } finally {
-      setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
-  }, []);
+  }, [requests]);
 
   useEffect(() => {
+    requests.active = true;
     void refresh();
-  }, [refresh]);
+    return () => { requests.active = false; requests.latest++; };
+  }, [refresh, requests]);
 
   const create = useCallback(
     async (input: { name: string } & ICsAgentPatch): Promise<ICsAgent> => {
@@ -52,37 +59,52 @@ export const useCsAgents = () => {
 export const useCsAgent = (csAgentId: CsAgentId | null) => {
   const [agent, setAgent] = useState<ICsAgent | null>(null);
   const [loading, setLoading] = useState(true);
+  // Each visit owns its callbacks, including an A -> B -> A route change.
+  const requests = useMemo(() => ({ active: false, latest: 0 }), [csAgentId]);
 
   const load = useCallback(async () => {
+    if (!requests.active) return;
     if (!csAgentId) {
       setAgent(null);
       setLoading(false);
       return;
     }
+    const request = ++requests.latest;
+    const isCurrent = () => requests.active && request === requests.latest;
     setLoading(true);
     try {
-      setAgent(await ipcBridge.customerService.getAgent.invoke({ cs_agent_id: csAgentId }));
+      const agent = await ipcBridge.customerService.getAgent.invoke({ cs_agent_id: csAgentId });
+      if (isCurrent()) setAgent(agent);
     } catch {
-      setAgent(null);
+      if (isCurrent()) setAgent(null);
     } finally {
-      setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
-  }, [csAgentId]);
+  }, [csAgentId, requests]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    requests.active = true;
+    setAgent(null);
     void load();
-  }, [load]);
+    return () => { requests.active = false; requests.latest++; };
+  }, [load, requests]);
 
   const patch = useCallback(
     async (p: ICsAgentPatch): Promise<ICsAgent | undefined> => {
-      if (!csAgentId) return undefined;
+      if (!csAgentId || !requests.active) return undefined;
+      requests.latest++;
       setAgent((prev) => (prev ? { ...prev, ...p } as ICsAgent : prev));
       try {
         const updated = await ipcBridge.customerService.patchAgent.invoke({
           cs_agent_id: csAgentId,
           patch: p,
         });
-        setAgent(updated);
+        if (requests.active) {
+          // A GET begun before this write settled cannot undo its response.
+          requests.latest++;
+          setAgent(updated);
+          setLoading(false);
+        }
         return updated;
       } catch (e) {
         // Re-sync to the authoritative record so the UI never lies after a failed save.
@@ -90,7 +112,7 @@ export const useCsAgent = (csAgentId: CsAgentId | null) => {
         throw e;
       }
     },
-    [csAgentId, load]
+    [csAgentId, load, requests]
   );
 
   return { agent, loading, reload: load, patch };
