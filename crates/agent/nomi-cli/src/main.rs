@@ -407,7 +407,14 @@ async fn main() -> anyhow::Result<()> {
     let mut engine = result.engine;
 
     if cli.resume.is_none() {
-        engine.init_session(&provider_name, &cwd, cli.session_id.as_deref())?;
+        init_session_or_shutdown(
+            &mut engine,
+            &provider_name,
+            &cwd,
+            cli.session_id.as_deref(),
+            &result.mcp_managers,
+        )
+        .await?;
     }
 
     let prompt = cli.prompt.join(" ");
@@ -427,13 +434,12 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    shutdown_runtime(&mut engine, result.mcp_managers.iter()).await?;
-
-    if let Some(failure) = turn_failure {
-        return Err(failure);
-    }
-
-    Ok(())
+    shutdown_runtime(
+        &mut engine,
+        result.mcp_managers.iter(),
+        turn_failure.map_or(Ok(()), Err),
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -801,6 +807,29 @@ async fn run_json_stream_mode_with_reader(
 ) -> anyhow::Result<()> {
     let writer = Arc::new(ProtocolWriter::new());
     let protocol_sink = Arc::new(ProtocolSink::new(writer.clone()));
+    run_json_stream_mode_with_output(
+        config,
+        cwd,
+        resume,
+        session_id,
+        read_commands,
+        protocol_sink,
+        writer,
+    )
+    .await
+}
+
+// Keep the shared sink unchanged. The emitter seam covers only CLI-owned
+// writes (and the engine's explicit protocol events), not OutputSink callbacks.
+async fn run_json_stream_mode_with_output(
+    config: Config,
+    cwd: &str,
+    resume: Option<String>,
+    session_id: Option<String>,
+    read_commands: impl FnOnce() -> tokio::sync::mpsc::Receiver<ProtocolCommand>,
+    protocol_sink: Arc<ProtocolSink>,
+    writer: Arc<dyn ProtocolEmitter>,
+) -> anyhow::Result<()> {
     let output: Arc<dyn OutputSink> = protocol_sink.clone();
 
     let provider_name = config.provider_label.clone();
@@ -828,7 +857,14 @@ async fn run_json_stream_mode_with_reader(
     let initial_has_mcp = result.has_mcp;
 
     if resume.is_none() {
-        engine.init_session(&provider_name, cwd, session_id.as_deref())?;
+        init_session_or_shutdown(
+            &mut engine,
+            &provider_name,
+            cwd,
+            session_id.as_deref(),
+            &result.mcp_managers,
+        )
+        .await?;
     }
 
     let sid = engine.current_session_id();
@@ -842,162 +878,206 @@ async fn run_json_stream_mode_with_reader(
     let mut has_mcp = initial_has_mcp;
     let mut message_started = false;
 
-    'commands: while let Some(cmd) = cmd_rx.recv().await {
-        match cmd {
-            ProtocolCommand::AddMcpServer {
-                name,
-                transport,
-                command,
-                args,
-                env,
-                url,
-                headers,
-            } if !message_started => {
-                if connected_mcp_server_names.contains(&name) {
-                    output.emit_error(&format!(
-                        "AddMcpServer '{name}': rejected — a connected MCP server already uses this name"
-                    ));
-                    continue;
-                }
-                tracing::info!(target: "nomi_mcp", %name, %transport, ?command, "AddMcpServer received");
-                let config =
-                    match to_mcp_server_config(&transport, command, args, env, url, headers) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            output.emit_error(&format!("AddMcpServer '{name}': {e}"));
-                            continue;
-                        }
-                    };
-
-                let mut single_configs = HashMap::new();
-                single_configs.insert(name.clone(), config.clone());
-                tracing::info!(target: "nomi_mcp", %name, "connecting to mcp server");
-                match McpManager::connect_all(&single_configs).await {
-                    Ok(mgr) => {
-                        if !mgr.server_names().iter().any(|server| server == &name) {
-                            output.emit_error(&format!(
-                                "AddMcpServer '{name}' failed: the server did not connect"
-                            ));
-                            continue;
-                        }
-                        let advertised_tool_names: Vec<String> = mgr
-                            .all_tools()
-                            .iter()
-                            .map(|(_, t)| t.name.clone())
-                            .collect();
-                        tracing::info!(target: "nomi_mcp", %name, tools = advertised_tool_names.len(), "mcp server connected");
-                        let mgr_arc = Arc::new(mgr);
-                        let registrations = match register_single_server_tools(
-                            engine.registry_mut(),
-                            &mgr_arc,
-                            &name,
-                            config.deferred.unwrap_or(true),
-                        ) {
-                            Ok(registrations) => registrations,
-                            Err(error) => {
-                                let cleanup_error = mgr_arc.shutdown().await.err();
-                                if let Some(cleanup_error) = cleanup_error {
-                                    // Retain the manager so the common shutdown
-                                    // fence retries and verifies its cleanup
-                                    // before JSON-stream mode can exit.
-                                    dynamic_managers.push(mgr_arc);
-                                    output.emit_error(&format!(
-                                        "AddMcpServer '{name}' rejected: {error}; \
-                                         process cleanup remains pending: {cleanup_error}"
-                                    ));
-                                } else {
-                                    output.emit_error(&format!(
-                                        "AddMcpServer '{name}' rejected: {error}"
-                                    ));
-                                }
+    let command_result: anyhow::Result<()> = async {
+        'commands: while let Some(cmd) = cmd_rx.recv().await {
+            match cmd {
+                ProtocolCommand::AddMcpServer {
+                    name,
+                    transport,
+                    command,
+                    args,
+                    env,
+                    url,
+                    headers,
+                } if !message_started => {
+                    if connected_mcp_server_names.contains(&name) {
+                        output.emit_error(&format!(
+                            "AddMcpServer '{name}': rejected — a connected MCP server already uses this name"
+                        ));
+                        continue;
+                    }
+                    tracing::info!(target: "nomi_mcp", %name, %transport, ?command, "AddMcpServer received");
+                    let config =
+                        match to_mcp_server_config(&transport, command, args, env, url, headers) {
+                            Ok(c) => c,
+                            Err(e) => {
+                                output.emit_error(&format!("AddMcpServer '{name}': {e}"));
                                 continue;
                             }
                         };
-                        let newly_recorded = connected_mcp_server_names.record_success(name.clone());
-                        debug_assert!(newly_recorded);
-                        let tool_names = registrations
-                            .iter()
-                            .map(|registration| registration.original_name.clone())
-                            .collect();
-                        let provider_tools: BTreeMap<String, String> = registrations
-                            .into_iter()
-                            .map(|registration| {
-                                (registration.original_name, registration.provider_name)
-                            })
-                            .collect();
-                        dynamic_managers.push(mgr_arc);
-                        has_mcp = true;
-                        let _ = writer.emit(&ProtocolEvent::McpReady {
-                            name,
-                            tools: tool_names,
-                            provider_tools,
-                        });
-                    }
-                    Err(e) => {
-                        tracing::warn!(target: "nomi_mcp", %name, error = %e, "mcp server connection failed");
-                        output.emit_error(&format!("AddMcpServer '{name}' failed: {e}"));
+
+                    let mut single_configs = HashMap::new();
+                    single_configs.insert(name.clone(), config.clone());
+                    tracing::info!(target: "nomi_mcp", %name, "connecting to mcp server");
+                    match McpManager::connect_all(&single_configs).await {
+                        Ok(mgr) => {
+                            let mgr_arc = Arc::new(mgr);
+                            if !mgr_arc.server_names().iter().any(|server| server == &name) {
+                                let mut message = format!(
+                                    "AddMcpServer '{name}' failed: the server did not connect"
+                                );
+                                // Empty managers can own failed construction
+                                // receipts too. Release only after exact cleanup.
+                                if let Err(error) = mgr_arc.shutdown().await {
+                                    dynamic_managers.push(mgr_arc);
+                                    message.push_str(&format!(
+                                        "; process cleanup remains pending: {error}"
+                                    ));
+                                }
+                                output.emit_error(&message);
+                                continue;
+                            }
+                            let advertised_tool_names: Vec<String> = mgr_arc
+                                .all_tools()
+                                .iter()
+                                .map(|(_, t)| t.name.clone())
+                                .collect();
+                            tracing::info!(target: "nomi_mcp", %name, tools = advertised_tool_names.len(), "mcp server connected");
+                            let registrations = match register_single_server_tools(
+                                engine.registry_mut(),
+                                &mgr_arc,
+                                &name,
+                                config.deferred.unwrap_or(true),
+                            ) {
+                                Ok(registrations) => registrations,
+                                Err(error) => {
+                                    let cleanup_error = mgr_arc.shutdown().await.err();
+                                    if let Some(cleanup_error) = cleanup_error {
+                                        // Retain the manager so the common shutdown
+                                        // fence retries and verifies its cleanup
+                                        // before JSON-stream mode can exit.
+                                        dynamic_managers.push(mgr_arc);
+                                        output.emit_error(&format!(
+                                            "AddMcpServer '{name}' rejected: {error}; \
+                                             process cleanup remains pending: {cleanup_error}"
+                                        ));
+                                    } else {
+                                        output.emit_error(&format!(
+                                            "AddMcpServer '{name}' rejected: {error}"
+                                        ));
+                                    }
+                                    continue;
+                                }
+                            };
+                            let newly_recorded = connected_mcp_server_names.record_success(name.clone());
+                            debug_assert!(newly_recorded);
+                            let tool_names = registrations
+                                .iter()
+                                .map(|registration| registration.original_name.clone())
+                                .collect();
+                            let provider_tools: BTreeMap<String, String> = registrations
+                                .into_iter()
+                                .map(|registration| {
+                                    (registration.original_name, registration.provider_name)
+                                })
+                                .collect();
+                            dynamic_managers.push(mgr_arc);
+                            has_mcp = true;
+                            writer.emit(&ProtocolEvent::McpReady {
+                                name,
+                                tools: tool_names,
+                                provider_tools,
+                            })?;
+                        }
+                        Err(e) => {
+                            tracing::warn!(target: "nomi_mcp", %name, error = %e, "mcp server connection failed");
+                            output.emit_error(&format!("AddMcpServer '{name}' failed: {e}"));
+                        }
                     }
                 }
-            }
-            ProtocolCommand::Message { msg_id, content } => {
-                message_started = true;
-                let mut stopped = false;
-                let mut pending_config = Vec::new();
+                ProtocolCommand::Message { msg_id, content } => {
+                    message_started = true;
+                    let mut stopped = false;
+                    let mut pending_config = Vec::new();
 
-                {
-                    let turn_execution = engine.execute_turn(&content, &msg_id);
-                    tokio::pin!(turn_execution);
+                    {
+                        let turn_execution = engine.execute_turn(&content, &msg_id);
+                        tokio::pin!(turn_execution);
 
-                    loop {
-                        tokio::select! {
-                            result = &mut turn_execution => {
-                                match result {
-                                    Ok(result) => {
-                                        let retire_runtime = emit_json_turn_result(
-                                            writer.as_ref(),
-                                            &msg_id,
-                                            &result,
-                                        )
-                                        .unwrap_or(true);
-                                        if retire_runtime {
-                                            break 'commands;
+                        loop {
+                            tokio::select! {
+                                result = &mut turn_execution => {
+                                    match result {
+                                        Ok(result) => {
+                                            let retire_runtime = emit_json_turn_result(
+                                                writer.as_ref(),
+                                                &msg_id,
+                                                &result,
+                                            )?;
+                                            if retire_runtime {
+                                                break 'commands;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            emit_json_engine_error(output.as_ref(), &e.to_string());
                                         }
                                     }
-                                    Err(e) => {
-                                        emit_json_engine_error(output.as_ref(), &e.to_string());
-                                    }
+                                    break;
                                 }
-                                break;
-                            }
-                            sub_cmd = cmd_rx.recv() => {
-                                match sub_cmd {
-                                    None | Some(ProtocolCommand::Stop) => {
-                                        stopped = true;
-                                        break;
-                                    }
-                                    Some(ProtocolCommand::SetConfig { model, thinking, thinking_budget, effort, compaction }) => {
-                                        if !queue_config_update(&mut pending_config, (model, thinking, thinking_budget, effort, compaction)) {
-                                            output.emit_error("set_config: too many pending updates; update rejected");
-                                            continue;
+                                sub_cmd = cmd_rx.recv() => {
+                                    match sub_cmd {
+                                        None | Some(ProtocolCommand::Stop) => {
+                                            stopped = true;
+                                            break;
                                         }
-                                        let _ = writer.emit(&nomi_protocol::events::ProtocolEvent::Info {
-                                            msg_id: String::new(),
-                                            message: "set_config: queued, will apply after current response".to_string(),
-                                        });
-                                    }
-                                    Some(ProtocolCommand::Ping) => {
-                                        let _ = writer.emit(&nomi_protocol::events::ProtocolEvent::Pong);
-                                    }
-                                    _ => {
-                                        tracing::debug!(target: "nomi_protocol", "ignoring command during active message processing");
+                                        Some(ProtocolCommand::SetConfig { model, thinking, thinking_budget, effort, compaction }) => {
+                                            if !queue_config_update(&mut pending_config, (model, thinking, thinking_budget, effort, compaction)) {
+                                                output.emit_error("set_config: too many pending updates; update rejected");
+                                                continue;
+                                            }
+                                            writer.emit(&nomi_protocol::events::ProtocolEvent::Info {
+                                                msg_id: String::new(),
+                                                message: "set_config: queued, will apply after current response".to_string(),
+                                            })?;
+                                        }
+                                        Some(ProtocolCommand::Ping) => {
+                                            writer.emit(&nomi_protocol::events::ProtocolEvent::Pong)?;
+                                        }
+                                        _ => {
+                                            tracing::debug!(target: "nomi_protocol", "ignoring command during active message processing");
+                                        }
                                     }
                                 }
                             }
                         }
                     }
-                }
 
-                for (model, thinking, thinking_budget, effort, compaction) in pending_config {
+                    for (model, thinking, thinking_budget, effort, compaction) in pending_config {
+                        let changes = engine.apply_config_update(
+                            model,
+                            thinking,
+                            thinking_budget,
+                            effort,
+                            compaction,
+                        );
+                        if !changes.is_empty() {
+                            writer.emit(&nomi_protocol::events::ProtocolEvent::Info {
+                                msg_id: String::new(),
+                                message: format!("config applied: {}", changes.join(", ")),
+                            })?;
+                        }
+                        protocol_sink.emit_config_changed(
+                            engine.compat(),
+                            has_mcp,
+                        );
+                    }
+                    if stopped {
+                        break;
+                    }
+                }
+                ProtocolCommand::Stop => {
+                    break;
+                }
+                ProtocolCommand::InitHistory { text } => {
+                    tracing::debug!(target: "nomi_protocol", chars = text.len(), "InitHistory received");
+                }
+                ProtocolCommand::SetConfig {
+                    model,
+                    thinking,
+                    thinking_budget,
+                    effort,
+                    compaction,
+                } => {
                     let changes = engine.apply_config_update(
                         model,
                         thinking,
@@ -1005,71 +1085,56 @@ async fn run_json_stream_mode_with_reader(
                         effort,
                         compaction,
                     );
-                    if !changes.is_empty() {
-                        let _ = writer.emit(&nomi_protocol::events::ProtocolEvent::Info {
-                            msg_id: String::new(),
-                            message: format!("config applied: {}", changes.join(", ")),
-                        });
-                    }
-                    protocol_sink.emit_config_changed(
-                        engine.compat(),
-                        has_mcp,
-                    );
+                    let message = if changes.is_empty() {
+                        "set_config: no changes".to_string()
+                    } else {
+                        format!("config updated: {}", changes.join(", "))
+                    };
+                    writer.emit(&nomi_protocol::events::ProtocolEvent::Info {
+                        msg_id: String::new(),
+                        message,
+                    })?;
+                    protocol_sink.emit_config_changed(engine.compat(), has_mcp);
                 }
-                if stopped {
-                    break;
+                ProtocolCommand::AddMcpServer { name, .. } => {
+                    output.emit_error(&format!(
+                        "AddMcpServer '{name}': rejected — only allowed before first Message"
+                    ));
                 }
-            }
-            ProtocolCommand::Stop => {
-                break;
-            }
-            ProtocolCommand::InitHistory { text } => {
-                tracing::debug!(target: "nomi_protocol", chars = text.len(), "InitHistory received");
-            }
-            ProtocolCommand::SetConfig {
-                model,
-                thinking,
-                thinking_budget,
-                effort,
-                compaction,
-            } => {
-                let changes = engine.apply_config_update(
-                    model,
-                    thinking,
-                    thinking_budget,
-                    effort,
-                    compaction,
-                );
-                let message = if changes.is_empty() {
-                    "set_config: no changes".to_string()
-                } else {
-                    format!("config updated: {}", changes.join(", "))
-                };
-                let _ = writer.emit(&nomi_protocol::events::ProtocolEvent::Info {
-                    msg_id: String::new(),
-                    message,
-                });
-                protocol_sink.emit_config_changed(engine.compat(), has_mcp);
-            }
-            ProtocolCommand::AddMcpServer { name, .. } => {
-                output.emit_error(&format!(
-                    "AddMcpServer '{name}': rejected — only allowed before first Message"
-                ));
-            }
-            ProtocolCommand::Ping => {
-                let _ = writer.emit(&nomi_protocol::events::ProtocolEvent::Pong);
+                ProtocolCommand::Ping => {
+                    writer.emit(&nomi_protocol::events::ProtocolEvent::Pong)?;
+                }
             }
         }
+        Ok(())
     }
+    .await;
 
-    shutdown_runtime(&mut engine, result.mcp_managers.iter().chain(dynamic_managers.iter())).await?;
+    shutdown_runtime(
+        &mut engine,
+        result.mcp_managers.iter().chain(dynamic_managers.iter()),
+        command_result,
+    )
+    .await
+}
 
-    Ok(())
+async fn init_session_or_shutdown(
+    engine: &mut nomi_agent::engine::AgentEngine,
+    provider: &str,
+    cwd: &str,
+    session_id: Option<&str>,
+    managers: &[Arc<McpManager>],
+) -> anyhow::Result<()> {
+    match engine.init_session(provider, cwd, session_id) {
+        Ok(()) => Ok(()),
+        Err(error) => shutdown_runtime(engine, managers.iter(), Err(error)).await,
+    }
 }
 
 async fn shutdown_runtime<'a>(
     engine: &mut nomi_agent::engine::AgentEngine,
     managers: impl IntoIterator<Item = &'a Arc<McpManager>>,
+    outcome: anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     engine.run_stop_hooks().await;
     let mut failures = Vec::new();
@@ -1088,8 +1153,15 @@ async fn shutdown_runtime<'a>(
         }
     }
     if failures.is_empty() {
-        Ok(())
+        outcome
     } else {
-        anyhow::bail!("runtime shutdown could not prove exact process cleanup: {}", failures.join(" | "))
+        let cleanup_error = format!(
+            "runtime shutdown could not prove exact process cleanup: {}",
+            failures.join(" | ")
+        );
+        match outcome {
+            Ok(()) => Err(anyhow::anyhow!(cleanup_error)),
+            Err(error) => Err(error.context(cleanup_error)),
+        }
     }
 }

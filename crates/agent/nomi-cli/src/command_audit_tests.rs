@@ -44,6 +44,128 @@ fn session_config(endpoint: String) -> Config {
 }
 
 #[tokio::test]
+async fn session_init_failure_runs_shutdown_before_starting_the_reader() {
+    let temp = tempfile::tempdir().unwrap();
+    let blocked_directory = temp.path().join("not-a-directory");
+    std::fs::write(&blocked_directory, b"occupied").unwrap();
+    let mut config = session_config("http://127.0.0.1:1".into());
+    config.session.enabled = true;
+    config.session.directory = blocked_directory.to_str().unwrap().into();
+
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        run_json_stream_mode_with_reader(
+            config,
+            temp.path().to_str().unwrap(),
+            None,
+            None,
+            || panic!("reader must not start after session initialization fails"),
+        ),
+    )
+    .await
+    .expect("initialization cleanup timed out")
+    .expect_err("session directory is a file");
+
+    assert!(error.downcast_ref::<std::io::Error>().is_some());
+    assert!(temp.path().join("shutdown-proof.txt").is_file());
+}
+
+struct BrokenCliEmitter;
+
+impl ProtocolEmitter for BrokenCliEmitter {
+    fn emit(&self, event: &ProtocolEvent) -> std::io::Result<()> {
+        if matches!(event, ProtocolEvent::Pong | ProtocolEvent::StreamEnd { .. }) {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "CLI output disconnected",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[tokio::test]
+async fn cli_owned_output_errors_run_shutdown_and_preserve_io_error() {
+    for command in [
+        ProtocolCommand::Ping,
+        ProtocolCommand::Message {
+            msg_id: "test".into(),
+            // A real successful AgentResult without a model/HTTP fixture.
+            content: "/help".into(),
+        },
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let (tx, rx) = tokio::sync::mpsc::channel(2);
+        tx.send(command).await.unwrap();
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            run_json_stream_mode_with_output(
+                session_config("http://127.0.0.1:1".into()),
+                temp.path().to_str().unwrap(),
+                None,
+                None,
+                || rx,
+                Arc::new(ProtocolSink::new(Arc::new(ProtocolWriter::new()))),
+                Arc::new(BrokenCliEmitter),
+            ),
+        )
+        .await
+        .expect("output failure did not stop the command loop")
+        .expect_err("broken output must not become a successful exit");
+
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::BrokenPipe,
+        );
+        assert!(temp.path().join("shutdown-proof.txt").is_file());
+        // Keep input open until after exit: EOF cannot account for shutdown.
+        assert!(tx.send(ProtocolCommand::Ping).await.is_err());
+    }
+}
+
+#[tokio::test]
+async fn cli_output_failure_cancels_an_active_request_and_runs_shutdown() {
+    let temp = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (tx, rx) = tokio::sync::mpsc::channel(2);
+    tx.send(ProtocolCommand::Message {
+        msg_id: "test".into(),
+        content: "hello".into(),
+    })
+    .await
+    .unwrap();
+    let session = run_json_stream_mode_with_output(
+        session_config(endpoint),
+        temp.path().to_str().unwrap(),
+        None,
+        None,
+        || rx,
+        Arc::new(ProtocolSink::new(Arc::new(ProtocolWriter::new()))),
+        Arc::new(BrokenCliEmitter),
+    );
+    let ping_during_request = async {
+        let (connection, _) = listener.accept().await.unwrap();
+        tx.send(ProtocolCommand::Ping).await.unwrap();
+        connection // No server response or input EOF to end the provider turn.
+    };
+    let (result, _connection) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::join!(session, ping_during_request)
+    })
+    .await
+    .expect("output failure did not cancel the active request");
+
+    let error = result.expect_err("output failure must reach the caller");
+    assert_eq!(
+        error.downcast_ref::<std::io::Error>().unwrap().kind(),
+        std::io::ErrorKind::BrokenPipe,
+    );
+    assert!(temp.path().join("shutdown-proof.txt").is_file());
+    assert!(tx.send(ProtocolCommand::Ping).await.is_err());
+}
+
+#[tokio::test]
 async fn stop_before_first_message_runs_the_common_shutdown() {
     let temp = tempfile::tempdir().unwrap();
     let (tx, rx) = tokio::sync::mpsc::channel(2);
