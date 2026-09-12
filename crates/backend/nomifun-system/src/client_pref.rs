@@ -105,7 +105,6 @@ mod tests {
     async fn setup() -> ClientPrefService {
         let db = init_database_memory().await.unwrap();
         let repo = Arc::new(SqliteClientPreferenceRepository::new(db.pool().clone()));
-        std::mem::forget(db);
         ClientPrefService::new(repo)
     }
 
@@ -174,36 +173,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_and_get_boolean() {
+    async fn scalar_preferences_round_trip() {
         let svc = setup().await;
-        let mut req = UpdateClientPreferencesRequest::new();
-        req.insert("system.closeToTray".into(), json!(true));
-        svc.update_preferences(req).await.unwrap();
-
-        let prefs = svc.get_preferences(None).await.unwrap();
-        assert_eq!(prefs["system.closeToTray"], json!(true));
-    }
-
-    #[tokio::test]
-    async fn update_and_get_number() {
-        let svc = setup().await;
-        let mut req = UpdateClientPreferencesRequest::new();
-        req.insert("companion.size".into(), json!(360));
-        svc.update_preferences(req).await.unwrap();
-
-        let prefs = svc.get_preferences(None).await.unwrap();
-        assert_eq!(prefs["companion.size"], json!(360));
-    }
-
-    #[tokio::test]
-    async fn update_and_get_string() {
-        let svc = setup().await;
-        let mut req = UpdateClientPreferencesRequest::new();
-        req.insert("theme".into(), json!("dark"));
-        svc.update_preferences(req).await.unwrap();
-
-        let prefs = svc.get_preferences(None).await.unwrap();
-        assert_eq!(prefs["theme"], json!("dark"));
+        let req: UpdateClientPreferencesRequest = serde_json::from_value(json!({
+            "system.closeToTray": true, "companion.size": 360, "theme": "dark"
+        })).unwrap();
+        svc.update_preferences(req.clone()).await.unwrap();
+        assert_eq!(svc.get_preferences(None).await.unwrap(), req);
     }
 
     #[tokio::test]
