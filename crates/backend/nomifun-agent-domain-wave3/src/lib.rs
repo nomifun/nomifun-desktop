@@ -1237,7 +1237,7 @@ fn registration_for(
 ) -> Result<PluginRegistration, String> {
     validate_capability_specs(spec)?;
     let package = package_ref(spec.id);
-    let config_schema = package_config_schema();
+    let config_schema = empty_config_schema();
     let capabilities = spec
         .capabilities
         .iter()
@@ -1408,7 +1408,7 @@ fn capability_manifest(
         ),
         requires_runtime_features: Vec::new(),
         supported_platforms: vec![PlatformConstraint::Any],
-        config_schema: capability_config_schema(),
+        config_schema: empty_config_schema(),
         contributions: CapabilityContributions {
             actions: vec![CapabilityActionDescriptor {
                 action_id: action_id(spec.id)
@@ -1438,14 +1438,7 @@ fn capability_manifest(
     })
 }
 
-fn package_config_schema() -> StrictJsonValue {
-    StrictJsonValue(json!({
-        "type": "object",
-        "additionalProperties": false
-    }))
-}
-
-fn capability_config_schema() -> StrictJsonValue {
+fn empty_config_schema() -> StrictJsonValue {
     StrictJsonValue(json!({
         "type": "object",
         "additionalProperties": false
@@ -1979,19 +1972,13 @@ impl CapabilityHandler for Wave3CapabilityHandler {
                     action_id: context.action_id,
                 });
             }
-            if !input.0.is_object() {
-                return Err(KernelError::CapabilityExecution {
-                    reason: format!("{} input must be a JSON object", self.capability_id.as_ref()),
-                });
-            }
-
+            let operation = operation_from_input(&self.capability_id, input)?;
             validate_resource_bindings(
                 &self.capability_id,
                 &context.principal.principal_id,
                 self.requirements,
                 &context.resource_bindings,
             )?;
-            let operation = operation_from_input(&self.capability_id, input)?;
             let request = Wave3HostRequest {
                 context: Wave3HostContext {
                     principal: context.principal,
@@ -2039,6 +2026,11 @@ pub fn operation_from_input(
     capability_id: &CapabilityId,
     input: StrictJsonValue,
 ) -> Result<Wave3CapabilityOperation, KernelError> {
+    if !input.0.is_object() {
+        return Err(wave3_host_error_to_kernel(Wave3HostPortError::invalid_request(
+            format!("{} input must be a JSON object", capability_id.as_ref()),
+        )));
+    }
     let operation = match capability_id.as_ref() {
         "creation.text" => Wave3CapabilityOperation::CreationText(
             parse_creation_request(input.0, "creation.text")?,
@@ -2555,6 +2547,27 @@ mod tests {
                     capability.contributions.actions[0].action_id.as_ref(),
                     format!("{}.invoke", capability.id.as_ref())
                 );
+                let expected_effect = match capability.id.as_ref() {
+                    "creation.text" | "creation.image" | "creation.image_edit"
+                    | "creation.video" | "creation.audio" | "workshop.asset.write" => {
+                        EffectClass::WriteDurable
+                    }
+                    "workshop.canvas.read" | "workshop.asset.read" | "office.preview"
+                    | "miniapp.read" | "miniapp.serve" => EffectClass::ReadSensitive,
+                    "workshop.canvas.edit" | "office.document.edit" | "office.sheet.edit"
+                    | "office.slides.edit" | "miniapp.edit" => EffectClass::WriteReversible,
+                    "workshop.template.run" => EffectClass::ExecuteLocal,
+                    "miniapp.publish" => EffectClass::ExternalTransmit,
+                    other => panic!("unexpected Wave 3 capability {other}"),
+                };
+                assert_eq!(
+                    capability.contributions.actions[0].effect_class,
+                    expected_effect
+                );
+                assert_eq!(
+                    capability.contributions.actions[0].presentation,
+                    ToolPresentationKind::FunctionTool
+                );
                 assert_eq!(
                     capability.contributions.host_ports,
                     vec![host_port(WAVE3_CAPABILITY_HOST_PORT_ID)]
@@ -2718,40 +2731,25 @@ mod tests {
     }
 
     #[test]
-    fn every_action_preserves_its_effect_class_in_metadata() {
-        let registrations = registrations().expect("registrations");
-        let actions = registrations
-            .iter()
-            .flat_map(|registration| {
-                registration
-                    .metadata
-                    .manifest
-                    .payload
-                    .contributions
-                    .capabilities
-                    .iter()
-                    .flat_map(|capability| capability.contributions.actions.iter())
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(actions.len(), ALL_CAPABILITY_IDS.len());
-        assert!(actions.iter().all(|action| {
-            !matches!(action.effect_class, EffectClass::Pure)
-                || action.presentation == ToolPresentationKind::FunctionTool
-        }));
-    }
-
-    #[test]
-    fn every_action_capability_maps_to_a_typed_host_operation() {
-        for capability in PACKAGE_SPECS
-            .iter()
-            .flat_map(|package| package.capabilities.iter())
-        {
-            let capability_id = CapabilityId::from(capability.id);
-            assert!(
-                operation_from_input(&capability_id, valid_input(capability.id)).is_ok(),
-                "{} must have a host operation",
-                capability.id
-            );
+    fn operation_input_rejects_non_objects_with_the_canonical_request_error() {
+        let target = valid_input("creation.text").0["target"].clone();
+        for capability_id in ALL_CAPABILITY_IDS {
+            for input in [
+                json!(null),
+                json!(true),
+                json!(42),
+                json!("prompt"),
+                json!([]),
+                // Serde can otherwise decode this positional array as CreationTextRequest.
+                json!([target, "prompt", null, 4096]),
+            ] {
+                let error = operation_from_input(
+                    &CapabilityId::from(capability_id),
+                    StrictJsonValue(input),
+                )
+                .expect_err("Wave 3 action inputs must be objects");
+                assert_eq!(error.canonical_code().as_ref(), WAVE3_INVALID_REQUEST);
+            }
         }
     }
 
