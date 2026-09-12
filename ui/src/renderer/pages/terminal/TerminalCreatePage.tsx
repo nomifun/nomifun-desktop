@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Button, Input, Message, Select } from '@arco-design/web-react';
 import { useTranslation } from 'react-i18next';
@@ -35,6 +35,7 @@ const TerminalCreatePage: React.FC = () => {
   const [cwd, setCwd] = useState('');
   const [commandPreview, setCommandPreview] = useState('');
   const [creating, setCreating] = useState(false);
+  const launchOwner = useRef<{ busy: boolean } | null>(null);
   // Recent custom launch commands (read once on mount; the page unmounts on launch).
   const [recentCommands] = useState<string[]>(() => getRecentLaunchCommands());
   // Optional knowledge bases bound at creation (mounted into {cwd}/.nomi/knowledge/).
@@ -46,12 +47,15 @@ const TerminalCreatePage: React.FC = () => {
   const [autowork, setAutowork] = useState<AutoWorkDraftValue>({ enabled: false });
 
   // Preset working directory passed via navigation state (sidebar workpath
-  // drawer → "new terminal session"). One-shot per navigation: the effect only
-  // re-runs when location.state changes, so it never clobbers a manual pick.
-  useEffect(() => {
+  // drawer → "new terminal session"). Each navigation owns its launch, even
+  // when the same route stays mounted; ordinary edits never reset the draft.
+  useLayoutEffect(() => {
+    launchOwner.current = { busy: false };
+    setCreating(false);
     const presetCwd = (location.state as { cwd?: string } | null)?.cwd;
-    if (typeof presetCwd === 'string' && presetCwd) setCwd(presetCwd);
-  }, [location.state]);
+    setCwd(typeof presetCwd === 'string' ? presetCwd : '');
+    return () => { launchOwner.current = null; };
+  }, [location.key, location.state]);
 
   useEffect(() => {
     let cancelled = false;
@@ -76,11 +80,15 @@ const TerminalCreatePage: React.FC = () => {
   }, [presetId]);
 
   const handleLaunch = async () => {
+    const owner = launchOwner.current;
+    if (!owner || owner.busy) return;
+    const isCurrent = () => launchOwner.current === owner;
     const { command, args } = parseCommandPreview(commandPreview);
     if (!command) {
       Message.warning(t('terminal.create.commandRequired'));
       return;
     }
+    owner.busy = true;
     setCreating(true);
     try {
       const session = await ipcBridge.terminal.create.invoke({
@@ -95,6 +103,7 @@ const TerminalCreatePage: React.FC = () => {
         defer_spawn: true,
         knowledge_base_ids: kbIds.length > 0 ? kbIds : undefined,
       });
+      if (!isCurrent()) return;
       // Remember the launched command for quick reuse — only for the custom preset.
       if (presetId === 'shell') addRecentLaunchCommand(commandPreview);
       // Apply smart-decision before AutoWork starts driving requirements.
@@ -106,6 +115,7 @@ const TerminalCreatePage: React.FC = () => {
             ...idmm,
           });
         } catch {
+          if (!isCurrent()) return;
           Message.warning(
             t('terminal.extended.idmmApplyFailed', {
               defaultValue: '终端已创建，但智能决策启用失败，可在终端内重试',
@@ -113,6 +123,7 @@ const TerminalCreatePage: React.FC = () => {
           );
         }
       }
+      if (!isCurrent()) return;
       // Best-effort: apply AutoWork draft. Capability is resolved from the
       // command/args/backend the same way the backend gate does — so a wrapper
       // (`stepcode claude`) or a bare custom command also qualifies.
@@ -125,6 +136,7 @@ const TerminalCreatePage: React.FC = () => {
             tag: autowork.tag,
           });
         } catch {
+          if (!isCurrent()) return;
           Message.warning(
             t('terminal.extended.autoworkApplyFailed', {
               defaultValue: '终端已创建，但自动工作启用失败，可在终端内重试',
@@ -132,12 +144,16 @@ const TerminalCreatePage: React.FC = () => {
           );
         }
       }
+      if (!isCurrent()) return;
       emitter.emit('terminal.list.refresh');
       navigate(`/terminal/${session.terminal_id}`);
     } catch (err) {
-      Message.error(err instanceof Error ? err.message : String(err));
+      if (isCurrent()) Message.error(err instanceof Error ? err.message : String(err));
     } finally {
-      setCreating(false);
+      if (isCurrent()) {
+        owner.busy = false;
+        setCreating(false);
+      }
     }
   };
 
