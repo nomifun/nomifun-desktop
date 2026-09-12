@@ -258,15 +258,19 @@ impl TenantAdmission {
             self.last_refill = now;
             return;
         }
-        let refill = elapsed.as_nanos() / interval;
-        if refill == 0 {
-            return;
-        }
+        let refill = u32::try_from(elapsed.as_nanos() / interval).unwrap_or(u32::MAX);
         self.initialize_tokens = self
             .initialize_tokens
-            .saturating_add(u32::try_from(refill).unwrap_or(u32::MAX))
+            .saturating_add(refill)
             .min(limits.initialize_burst_per_tenant);
-        self.last_refill = now;
+        if self.initialize_tokens == limits.initialize_burst_per_tenant {
+            // A full bucket cannot bank credit, even a partial interval.
+            self.last_refill = now;
+        } else {
+            // Credit only whole intervals and retain the fractional remainder.
+            // This duration is at most elapsed, so the multiplication fits.
+            self.last_refill += limits.initialize_refill_interval * refill;
+        }
     }
 }
 
@@ -418,7 +422,7 @@ impl RemoteSessionAdmission {
     }
 
     fn release(&mut self, id: &SessionId, manager_id: u64, now: Instant) {
-        self.provisionals.remove(id);
+        self.finish_provisional(id, manager_id);
         let Some(reservation) = self
             .reservations
             .get(id)
@@ -765,13 +769,16 @@ impl SessionManager for RemoteSessionManager {
         &self,
     ) -> Result<(SessionId, Self::Transport), Self::Error> {
         let id = session_id();
+        // Acquire the transport map before reserving capacity. No await may
+        // separate the reservation from publication: cancellation or the
+        // provisional sweeper could otherwise retire an unpublished session.
+        let mut sessions = self.inner.sessions.write().await;
         self.admission
             .lock()
             .await
             .reserve_provisional(&id, self.manager_id, Instant::now())?;
         let (handle, worker) =
             create_local_session(id.clone(), self.inner.session_config.clone());
-        let mut sessions = self.inner.sessions.write().await;
         sessions.insert(id.clone(), handle);
         drop(sessions);
         Ok((id, WorkerTransport::spawn(worker)))
@@ -884,6 +891,78 @@ mod tests {
         assert!(limits.max_active_per_tenant <= limits.max_active_global);
     }
 
+    #[test]
+    fn tenant_refill_preserves_partial_intervals_until_full() {
+        let start = Instant::now();
+        let limits = RemoteSessionLimits::for_resources(1, 0);
+        let mut tenant = TenantAdmission::new(start, limits);
+        tenant.initialize_tokens = 0;
+
+        // Production refills every 500 ms. Repeated fractional observations
+        // must produce the same credit as one observation at the final time.
+        for (elapsed_ms, tokens, credited_ms) in [
+            (499, 0, 0),
+            (750, 1, 500),
+            (999, 1, 500),
+            (1000, 2, 1000),
+            (1750, 3, 1500),
+            (2000, 4, 2000),
+        ] {
+            tenant.refill(start + Duration::from_millis(elapsed_ms), limits);
+            assert_eq!(tenant.initialize_tokens, tokens, "at {elapsed_ms} ms");
+            assert_eq!(tenant.last_refill, start + Duration::from_millis(credited_ms));
+        }
+        let mut single_refill = TenantAdmission::new(start, limits);
+        single_refill.initialize_tokens = 0;
+        single_refill.refill(start + Duration::from_secs(2), limits);
+        assert_eq!(tenant.initialize_tokens, single_refill.initialize_tokens);
+        assert_eq!(tenant.last_refill, single_refill.last_refill);
+    }
+
+    #[test]
+    fn tenant_refill_discards_credit_when_full() {
+        let start = Instant::now();
+        let limits = RemoteSessionLimits::for_resources(1, 0);
+        let burst = limits.initialize_burst_per_tenant;
+        for (initial_tokens, elapsed) in [
+            (burst, Duration::from_millis(250)),
+            (burst - 1, Duration::from_millis(750)),
+            (0, Duration::from_secs(u64::from(u32::MAX))),
+        ] {
+            let mut tenant = TenantAdmission::new(start, limits);
+            tenant.initialize_tokens = initial_tokens;
+            let now = start + elapsed;
+            tenant.refill(now, limits);
+            assert_eq!(tenant.initialize_tokens, burst);
+            assert_eq!(tenant.last_refill, now);
+
+            // Consuming from a full bucket starts a fresh refill interval;
+            // neither fractional credit nor long-idle surplus survives.
+            tenant.initialize_tokens -= 1;
+            tenant.refill(
+                now + limits.initialize_refill_interval - Duration::from_nanos(1),
+                limits,
+            );
+            assert_eq!(tenant.initialize_tokens, burst - 1);
+            assert_eq!(tenant.last_refill, now);
+            tenant.refill(now + limits.initialize_refill_interval, limits);
+            assert_eq!(tenant.initialize_tokens, burst);
+            assert_eq!(tenant.last_refill, now + limits.initialize_refill_interval);
+        }
+    }
+
+    #[test]
+    fn tenant_refill_zero_interval_restores_full_bucket() {
+        let start = Instant::now();
+        let mut limits = RemoteSessionLimits::for_resources(1, 0);
+        limits.initialize_refill_interval = Duration::ZERO;
+        let mut tenant = TenantAdmission::new(start, limits);
+        tenant.initialize_tokens = 0;
+        tenant.refill(start, limits);
+        assert_eq!(tenant.initialize_tokens, limits.initialize_burst_per_tenant);
+        assert_eq!(tenant.last_refill, start);
+    }
+
     #[tokio::test]
     async fn request_budget_reserves_a_slot_and_refunds_on_drop() {
         let budget = RemoteHttpRequestBudget::new(1);
@@ -891,5 +970,125 @@ mod tests {
         assert!(budget.try_acquire().is_none());
         drop(permit);
         assert!(budget.try_acquire().is_some());
+    }
+
+    #[test]
+    fn session_budget_keeps_teardown_capacity_and_holds_streaming_response_slot() {
+        let budget = RemoteHttpRequestBudget::new(2);
+        let permit = budget.try_acquire_session(false).unwrap();
+        let response = crate::router::response_with_request_permit(
+            axum::response::Response::new(axum::body::Body::from_stream(
+                futures::stream::pending::<Result<axum::body::Bytes, std::io::Error>>(),
+            )),
+            permit,
+        );
+        assert!(budget.try_acquire_session(false).is_none());
+        let teardown = budget.try_acquire_session(true).unwrap();
+        assert!(budget.try_acquire_session(true).is_none());
+        drop(response);
+        drop(teardown);
+        assert_eq!(budget.active(), 0);
+        assert!(budget.try_acquire_session(false).is_some());
+    }
+
+    #[test]
+    fn release_preserves_another_managers_provisional_and_reservation() {
+        let now = Instant::now();
+        let owner = UserId::new();
+        let id = session_id();
+        let mut admission = RemoteSessionAdmission::new(
+            RemoteSessionLimits::for_resources(1, 0),
+        );
+        admission.reserve_provisional(&id, 1, now).unwrap();
+        admission.release(&id, 2, now);
+        assert_eq!(admission.provisionals.get(&id).unwrap().manager_id, 1);
+
+        admission.reserve(&id, 1, &owner, 256, now).unwrap();
+        admission.release(&id, 2, now);
+        assert!(admission.reservations.contains_key(&id));
+        assert_eq!(admission.total_retained_bytes, 256);
+        admission.release(&id, 1, now);
+        admission.release(&id, 1, now);
+        assert!(admission.reservations.is_empty());
+        assert_eq!(admission.total_retained_bytes, 0);
+        assert_eq!(
+            admission
+                .tenants
+                .get(&admission.tenant(&owner))
+                .unwrap()
+                .active_sessions,
+            0,
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_session_creation_does_not_reserve_unpublished_capacity() {
+        let owner = UserId::new();
+        let manager = RemoteSessionManager::with_owner_admission_authority(
+            owner.clone(),
+            RemoteMcpSessionAdmissionAuthority::for_owner(&owner),
+        );
+        let sessions = manager.inner.sessions.write().await;
+        {
+            let creation = manager.create_session();
+            tokio::pin!(creation);
+            assert!(creation.as_mut().now_or_never().is_none());
+            assert!(manager.admission.lock().await.provisionals.is_empty());
+        }
+        drop(sessions);
+
+        let (id, transport) = manager.create_session().await.unwrap();
+        assert!(manager.has_session(&id).await.unwrap());
+        assert!(manager.admission.lock().await.provisionals.contains_key(&id));
+        manager.close_session(&id).await.unwrap();
+        assert!(!manager.has_session(&id).await.unwrap());
+        assert!(manager.admission.lock().await.provisionals.is_empty());
+        drop(transport);
+    }
+
+    #[tokio::test]
+    async fn cancelled_close_still_releases_pinned_identity_and_admission() {
+        let owner = UserId::new();
+        let manager = RemoteSessionManager::with_owner_admission_authority(
+            owner.clone(),
+            RemoteMcpSessionAdmissionAuthority::for_owner(&owner),
+        );
+        let (id, transport) = manager.create_session().await.unwrap();
+        let mut message: ClientJsonRpcMessage = serde_json::from_value(serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "ping"
+        }))
+        .unwrap();
+        let (mut parts, _) = axum::http::Request::new(()).into_parts();
+        parts
+            .extensions
+            .insert(crate::router::RemoteInstanceOwner(owner));
+        message.insert_extension(parts);
+        manager
+            .inject_identity(&id, &mut message, true)
+            .await
+            .unwrap();
+
+        let sessions = manager.inner.sessions.read().await;
+        {
+            let close = manager.close_session(&id);
+            tokio::pin!(close);
+            assert!(close.as_mut().now_or_never().is_none());
+        }
+        drop(sessions);
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if !manager.admission.lock().await.reservations.contains_key(&id) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached finalizer must complete after caller cancellation");
+        assert!(!manager.has_session(&id).await.unwrap());
+        assert!(!manager.bindings.read().await.contains_key(&id));
+        assert_eq!(manager.admission.lock().await.total_retained_bytes, 0);
+        drop(transport);
     }
 }
