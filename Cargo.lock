@@ -5773,13 +5773,11 @@ version = "0.7.6"
 dependencies = [
  "chrono",
  "nomi-config",
- "rstest",
  "serde",
  "serde_json",
  "serde_yaml",
  "serial_test",
  "tempfile",
- "thiserror 2.0.19",
  "tracing",
 ]
 

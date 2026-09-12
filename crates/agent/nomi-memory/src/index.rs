@@ -8,9 +8,10 @@
 // The index has hard caps (lines and bytes) to prevent unbounded growth.
 
 use std::fs;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-use crate::error::Result;
+use std::io::Result;
 use crate::types::IndexTruncation;
 
 /// Maximum number of lines before truncation.
@@ -57,8 +58,7 @@ pub fn truncate_index(raw: &str) -> IndexTruncation {
         };
     }
 
-    let lines: Vec<&str> = trimmed.split('\n').collect();
-    let line_count = lines.len();
+    let line_count = trimmed.split('\n').count();
     let byte_count = trimmed.len();
 
     let was_line_truncated = line_count > MAX_INDEX_LINES;
@@ -77,17 +77,16 @@ pub fn truncate_index(raw: &str) -> IndexTruncation {
 
     // Step 1: line truncation
     let mut truncated = if was_line_truncated {
-        lines[..MAX_INDEX_LINES].join("\n")
+        let end = trimmed.match_indices('\n').nth(MAX_INDEX_LINES - 1).unwrap().0;
+        trimmed[..end].to_owned()
     } else {
         trimmed.to_owned()
     };
 
     // Step 2: byte truncation (on the possibly line-truncated result)
     if truncated.len() > MAX_INDEX_BYTES {
-        let cut_at = truncated[..MAX_INDEX_BYTES]
-            .rfind('\n')
-            .filter(|&pos| pos > 0);
-        let boundary = cut_at.unwrap_or(MAX_INDEX_BYTES);
+        let limit = truncated.floor_char_boundary(MAX_INDEX_BYTES);
+        let boundary = truncated[..limit].rfind('\n').unwrap_or(limit);
         truncated.truncate(boundary);
     }
 
@@ -132,16 +131,21 @@ pub fn append_index_entry(path: &Path, title: &str, filename: &str, summary: &st
         fs::create_dir_all(parent)?;
     }
 
-    let entry = format!("- [{title}]({filename}) \u{2014} {summary}");
-
-    let mut content = fs::read_to_string(path).unwrap_or_default();
-    if !content.is_empty() && !content.ends_with('\n') {
-        content.push('\n');
+    let mut file = fs::OpenOptions::new().create(true).read(true).append(true).open(path)?;
+    // Serialize cooperating appenders; never truncate or re-encode existing bytes.
+    // The OS releases the file lock on drop, including error paths.
+    file.lock()?;
+    let mut entry = String::new();
+    if file.metadata()?.len() > 0 {
+        file.seek(SeekFrom::End(-1))?;
+        let mut last = [0];
+        file.read_exact(&mut last)?;
+        if last[0] != b'\n' {
+            entry.push('\n');
+        }
     }
-    content.push_str(&entry);
-    content.push('\n');
-
-    fs::write(path, content)?;
+    entry.push_str(&format!("- [{title}]({filename}) \u{2014} {summary}\n"));
+    file.write_all(entry.as_bytes())?;
     Ok(())
 }
 
