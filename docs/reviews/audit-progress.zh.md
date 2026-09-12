@@ -4,9 +4,9 @@
 
 ## 续接位置
 
-- 当前批次：R103–R106已验收，源码截至 `b174dad92`，上一已核实远端 `51061de15`；R107 Contracts基础、R108 Workspace交互、R109 a11y按独占写集继续。Browser Use暂跳过。
+- 当前批次：R107–R113已验收，源码截至 `85135e27e`，上一已核实远端 `a976c6bd1`；R114客服UI、R115 Contracts声明、R116 Computer按独占写集继续。Browser Use暂跳过。
 - 后续集成：当前分支已包含 `dd35e01de` 的 MiniApp 分支合并；设计文档已跟踪。本批仅更新遗留路由测试，未修改 MiniApp 产品实现，模块仍待深审。
-- 全局覆盖：111 个模块边界中，7 个已验证、62 个部分完成、42 个待审、0 个整模块审计中；272 个唯一问题/任务。当前三个子范围正在继续；完整阅读与跨模块问题闭环分开登记，Browser Use仍暂跳过。
+- 全局覆盖：111 个模块边界中，7 个已验证、64 个部分完成、40 个待审、0 个整模块审计中；288 个唯一问题/任务。当前三个子范围正在继续；完整阅读与跨模块问题闭环分开登记，Browser Use仍暂跳过。
 - R1 证据：[首轮记录](2026-09-12-code-quality.zh.md)。R1–R39 各报告中的“未提交/dirty”描述是当时快照；当前提交状态以下方验收记录为准。
 - R2 证据：[运行时与测试边界记录](2026-09-12-runtime-and-test-boundaries.zh.md)，包含改动、失败尝试、验证及覆盖限制。
 - R3 证据：[生命周期与状态记录](2026-09-12-lifecycle-and-state.zh.md)，记录四个 Host 旧实现失败、Context falsy 初值及消息重放缺陷；保留待办，勿重复修复。
@@ -269,7 +269,47 @@ R106完整补读Common constants/vision_registry/paths/ansi/text_search/stage_di
 
 四批生产净增20行（+21、+4、+10、-15），测试净增187行（+85、+20、+88、-6），总净增207行；R106本身总净减21行。Rust均4线程，无新依赖/框架，无全workspace/真实Officecli/设备验证；UI既存act/ref警告未称清零。
 
-## 当前并行边界（R107 / R108 / R109）
+## R107–R113 阶段验收
+
+| 批次 | 已提交源码 | 最终验证 |
+| --- | --- | --- |
+| R107 Contracts基础 | `c64073698` | cargo test --locked -p nomifun-agent-contracts --lib：85/0 |
+| R108 Workspace交互 | `e823c2067` | Requirements84/0，合并远端MessageTips9/0，共93/0；完整UI typecheck通过 |
+| R109 a11y | `85135e27e` | Windows lib23/0，跳过实际系统OCR；winsmoke仅cargo check通过，未运行 |
+| R110 目录配置 | `70908da7c` | Common dir_config/dataset_roots/agent_execution定向20/0 |
+| R111 Scoped auth阅读 | 无源码改动 | Common scoped_auth定向21/0 |
+| R112 原子文件去重 | `a4bbc720b` | Common dir_config及5项临时目录factory_reset回归16/0 |
+| R113 可选能力schema | `993daf8cd` | Contracts schema定向6/0；不声明和显式声明web_search均合法 |
+
+R107完整读基础15文件5305行：lib/closure/primitives/digest/manifest/session/root/schema/model_route/remote/event/impact/deletion/runtime/validation及30项原内嵌测试。activation commit的u8累计改saturating_add，避免debug溢出及release回绕成1；0/1/2/255/256/257沿用规范registry回归，保留公开actual:u8类型。无旧运行红绿，当前生产调用来自嵌入规范表，不宣称远程可利用。catalog/preset/package由R115继续，miniapp_m1/plugin_n1/bin仍未全读。
+
+R108两处局部交互：tag菜单真实键加前缀，保留合法__all_tags__及含前缀tag；行自身Enter才打开，删除按钮支持Enter/Space。Agent真实旧0/3→3/0；主线Requirements84/0、MessageTips9/0和typecheck。R105其余后端部分成功/旧query刷新及已发写入不撤销保留。
+
+R109完整读13源文件4433行及2 examples244行，只读追踪Computer调用不算其全审。Overlay先裁剪再迭代、忽略非有限bounds，矩形先转f64再相减；Linux拒绝未支持的显式PID并检查AT-SPI false；macOS缓存匹配pid/depth/budget，订阅全失败时不用缓存；winsmoke不回退写前台窗口、只清理自己创建的资源。Windows23/0，winsmoke只编译；无旧运行红绿、无真实GUI操作，Linux/macOS分支仅源码/API核对未编译运行。跨层fallback/取消/遍历/通知/COM等见R109-06，不能标整模块完成。
+
+R110完整读dir_config/dataset_roots/agent_execution及tests/common_test；两处相同写入提取为私有helper，create_new失败不得清理别人的temp。先同构提取但保留旧清理逻辑后回归真实失败（既存temp被删除），修正后20/0；不声称未改原文件运行。原目标不覆盖、创建失败保留temp及自己创建后发布失败清理均覆盖。工作根策略、兼容读取与重置流程未重写。
+
+R111完整读scoped_auth.rs1845行，核对HMAC分隔/绑定、claims、registry准入锁、budget/Weak和Drop；21/0，无源码修改。Gateway verify_access_and_acquire及Knowledge两路verify_access入口仅片段追踪。renew/revoke竞态不会恢复已撤销registry权限，不为静态疑点加锁/框架；服务端permit/取消生命周期仍待跨模块检查。
+
+R112将dir_config/factory_reset相同的write_new_and_publish/replace_file/publish_new_file/sync_directory合到私有atomic_file.rs，无公共API/依赖变化。保持Windows flags、Linux/macOS no-replace、其他OS hardlink fallback和各调用方临时命名；复用R110归属修复。factory_reset只完整读原2910–3177底层操作及指定临时夹具测试，4840–4875/6060–6090仅调用片段；没有全读重置流程。dir_config及atomic_new_publication、interrupted_fresh_bootstrap、v2_reset_preserves_work_dir、validated_plan_recovers、pending_plan_repairs五项回归16/0，仅临时目录，无真实重置/其他OS验证。
+
+R113沿用R107-02：Rust枚举/App转换支持可选web_search，但手工JSON schema遗漏。旧schema真实0/1失败，补允许枚举后6/0。按用户要求保留无web_search的原合法记录，并另验显式声明合法；没有把它放入required/contains，也没有要求安装或真实联网搜索能力。
+
+七批生产净减183行（R107 0、R108 0、R109 +31、R110 -5、R111 0、R112 -210、R113 +1），测试净增267行（38、103、102、18、0、0、6），example净增31行，总净增115行。R110+R112自身总净减197行。无新框架/依赖；不把测试增长或其他agent文档算生产删减。
+
+Git协作：R103–R106后普通merge远端99e8c2ddb（包含459f22bce MessageTips布局），已push并核实a976c6bd1；无强推或改历史。并行agent另提交05bcea045的Plugin/MiniApp分析文档，保留但不计本审计成果。
+
+## 当前并行边界（R114 / R115 / R116）
+
+| 批次 / 负责人 | 独占写集 | 任务 |
+| --- | --- | --- |
+| R114 / Carver | ui/src/renderer/pages/customerService及专属测试 | 客服页面完整阅读和局部输入/生命周期整改；共享adapter只读 |
+| R115 / Mencius | Contracts catalog.rs/preset.rs/package.rs及内嵌测试 | R107基础提交后继续；schema/miniapp_m1/plugin_n1/bin只读 |
+| R116 / Hypatia | nomi-computer/src及专属tests/examples | 承接a11y调用归属；Browser和a11y只读，不操作真实桌面 |
+
+主线负责Common剩余子范围、跨模块契约、验证队列、台账及Git。R107–R113已冻结，worker不得回改；Rust验证串行、UI可并行。web_search是可选能力，不得新增必选要求。
+
+## 历史并行边界（R107 / R108 / R109）
 
 | 批次 / 负责人 | 独占写集 | 任务 |
 | --- | --- | --- |
@@ -850,10 +890,27 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | R105-01 | 已验证 | Workspace批删完成清空期间新增选择 | 仅移除本批提交ID，真实组件旧失败，主线Requirements81/0 |
 | R105-02 | 已验证 | Workspace写错误只有console且卸载后发布 | 三种写失败可见、卸载后隔离迟到提示/更新，旧失败，typecheck通过 |
 | R105-03 | 已验证 | Workspace当前页删空导致分页出口消失 | total非零仍显示分页，旧失败，保留手动导航 |
-| R105-04 | 部分完成 | Workspace完整阅读后剩余交互与服务端语义 | 行内键盘冒泡及合法__all_tags__冲突交R108；批删部分成功/旧query刷新及已发写入不撤销保留 |
+| R105-04 | 部分完成 | Workspace完整阅读后剩余交互与服务端语义 | R108已关闭行内键盘冒泡及合法__all_tags__冲突；批删部分成功/旧query刷新及已发写入不撤销保留 |
 | R106-01 | 已验证 | 混合括号末尾标记在流式过滤中泄漏 | 旧真实失败；合并两套扫描，非法前缀重扫、候选查找有界，Common56/0及Robot8/0 |
 | R106-02 | 已验证 | AgentType重复serde回归 | 删除与现有roundtrip完全重复的单变体测试，保留原契约验证 |
 | R106-03 | 部分完成 | Common文本/ANSI/路径及ID剩余调用契约 | 8文件2126行完整已读，精确列表见验收；ANSI无界行及OSC异常序列、查询展开中间容量、vision清理和真实consumer边界待核对 |
+
+| R107-01 | 已验证 | Activation commit的u8计数溢出及回绕 | saturating_add保留公开字段类型，极值回归及Contracts85/0；无旧运行红绿 |
+| R107-02 | 已验证 | ChatRoute JSON schema拒绝可选web_search | R113旧schema真实失败，补允许枚举；有/无能力都通过，schema6/0，不改为必选 |
+| R107-03 | 待审 | Digest非有限数值的序列化策略 | serde_json可能在检查前转NaN/Infinity为null；未证实生产可达，不按安全漏洞盲改 |
+| R107-04 | 待审 | Validation point与check平台关联 | 基础类型未强校验，但发布gate已有精确校验；需核实所有调用，不称发布绕过 |
+| R108-01 | 已验证 | Workspace合法tag与全部标签哨兵冲突 | 真实键前缀隔离，包含前缀tag也覆盖；旧失败，Requirements84/0 |
+| R108-02 | 已验证 | Workspace子按钮键盘误开详情/删除无Space | 区分事件来源，删除支持Enter/Space；旧失败，UI typecheck通过 |
+| R109-01 | 已验证 | Overlay极值bounds长循环/算术溢出 | 裁剪后迭代、非有限值忽略；Windows定向23/0 |
+| R109-02 | 部分完成 | Linux显式PID被忽略且false动作被当成功 | 入队前拒绝未支持PID、检查AT-SPI返回值；仅静态/API核对，待Linux运行 |
+| R109-03 | 部分完成 | macOS缓存忽略ObserveOpts及无订阅observer | 匹配pid/depth/budget，全订阅失败不用缓存；待macOS运行及完整通知语义 |
+| R109-04 | 已验证 | Windows矩形端点相减发生i32溢出 | 先转f64相减，极值/零宽/反向回归；23/0 |
+| R109-05 | 部分完成 | winsmoke失败后可能写入无关前台窗口 | 仅目标PID快照执行、create_new及归属清理；check通过未run，重父化/外部替换风险保留 |
+| R109-06 | 待审 | a11y全读后跨模块与系统生命周期 | Computer fallback/取消交R116；actor超时、预算/部分错误、mac通知完整性、Linux能力声明、Windows COM仍待审 |
+| R110-01 | 已验证 | 配置临时文件创建失败仍清理别人的文件 | 创建成功后才获得清理权；提取后旧逻辑真实失败，dir/dataset/execution20/0 |
+| R110-02 | 部分完成 | Common目录和执行配置剩余契约 | 三文件及common_test完整阅读；父路径TOCTOU、兼容/未来字段策略及真实并发全流程未闭环 |
+| R111-01 | 部分完成 | Scoped auth源码/消费端生命周期 | 1845行全读、21/0，无改动；Gateway/Knowledge仅调用片段，permit/取消等需后续模块核对 |
+| R112-01 | 已验证 | 配置与factory_reset重复平台原子文件发布 | 四helper合并到私有atomic_file，生产-210；临时目录16/0，未声称整个reset完成 |
 
 ## 模块覆盖索引
 
@@ -863,7 +920,7 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | --- | --- | --- |
 | `apps/desktop/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `apps/web/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
-| `crates/agent/nomi-a11y/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
+| `crates/agent/nomi-a11y/` | 部分完成 | R109完整13源码4433行及2examples244行；Windows23/0、winsmoke check；Linux/macOS未运行及R109-06剩余边界保留 |
 | `crates/agent/nomi-agent/` | 部分完成 | R47 SkillTool 的 inline shell、副作用标记与完成证据消费链已核对；R48 ProtocolSink/CLI 共同输出入口已验证。其余 engine/builder/session/工具编排未完成全模块审计 |
 | `crates/agent/nomi-browser-engine/` | 待审 | 用户要求 Browser Use 暂跳过；不计作完成 |
 | `crates/agent/nomi-browser/` | 待审 | 用户要求 Browser Use 暂跳过；不计作完成 |
@@ -878,7 +935,7 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | `crates/agent/nomi-skills/` | 部分完成 | R38–R40 全生产与既有测试已读；R47 inline shell 副作用判断调用链已修（两项红→绿），本批 Agent 94/0 + Skills shell 53/0。剩余容量/加载/MCP 等见 R38-03 |
 | `crates/agent/nomi-tools/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/agent/nomi-types/` | 已验证 | R31 全模块及测试/四类 provider 调用已读；描述字符与 CRLF 修复、重复测试删除，70/0；provider 定向 2/0 |
-| `crates/backend/nomifun-agent-contracts/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
+| `crates/backend/nomifun-agent-contracts/` | 部分完成 | R107基础15文件5305行全读、85/0；R113可选web_search schema6/0；R115声明继续，miniapp_m1/plugin_n1/bin及R107剩余未闭环 |
 | `crates/backend/nomifun-agent-control-plane/` | 部分完成 | R90完整读10源文件，26/0及App/Platform各3/0；默认模型/重复映射/未用通用更新已处理，R90-03待闭环 |
 | `crates/backend/nomifun-agent-domain-support/` | 已验证 | R37 全生产文件、C7 表、8 项现有测试及 App 两套装配已审；Kernel 按 role/mount/capability 校验绑定，不重复造校验层。假成功/重复构造/无调用辅助函数已清理；8/0、App check 通过，未新增完整调用夹具 |
 | `crates/backend/nomifun-agent-domain-wave1/` | 部分完成 | R57 唯一 lib.rs 全部生产/测试、6 包/25 capability/14 operation 和 App/Kernel 调用已读；8/0，生产净减37行；Gateway声明/宿主未装配/预算等见 R57-03 |
@@ -899,7 +956,7 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | `crates/backend/nomifun-channel/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-chat-model-broker/` | 部分完成 | R84完整读8源文件+conformance/6fixtures，27/0；静默流释放/claim顺序及无效分支已修，R84-03保留 |
 | `crates/backend/nomifun-codex-runtime/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
-| `crates/backend/nomifun-common/` | 部分完成 | R59 zip_safe已读；R102补13文件1350行46/0，R106补8文件2126行并修过滤/去重56/0、Robot8/0；其他文件及跨模块风险待审 |
+| `crates/backend/nomifun-common/` | 部分完成 | R59/R102/R106原范围；R110目录/执行配置20/0、R111 scoped_auth全读21/0；R112原子文件去重16/0；factory_reset只读底层/部分调用，跨模块契约未闭环 |
 | `crates/backend/nomifun-companion/` | 部分完成 | R59/R63 export.rs解压预算及临时目录所有权已修，定向26/0；其余export/全模块未深审，后续业务取消事务见R60-03 |
 | `crates/backend/nomifun-conversation/` | 部分完成 | R4 已核对 list_messages 的 owner 校验、游标解析和 keyset 排序契约；其余 service、运行时/发送/权限路径待审 |
 | `crates/backend/nomifun-creation/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
@@ -969,7 +1026,7 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | `ui/src/renderer/pages/nomi/` | 待审 | 未深审 |
 | `ui/src/renderer/pages/openCapabilities/` | 待审 | 未深审 |
 | `ui/src/renderer/pages/plugins/` | 待审 | 未深审 |
-| `ui/src/renderer/pages/requirements/` | 部分完成 | R83原38文件全读；R89 Drawer/R93 Notify/R99 AutoWork/R105 Workspace接续，最新81/0及typecheck；R108交互继续，后端/跨窗口等未闭环 |
+| `ui/src/renderer/pages/requirements/` | 部分完成 | R83原38文件全读；R89/R93/R99/R105/R108接续，最新84/0及typecheck；Workspace键盘/tag已修，后端/跨窗口等未闭环 |
 | `ui/src/renderer/pages/settings/` | 待审 | 未深审 |
 | `ui/src/renderer/pages/terminal/` | 待审 | 未深审 |
 
