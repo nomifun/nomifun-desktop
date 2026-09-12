@@ -126,38 +126,20 @@ impl Tool for RequirementCompleteTool {
     async fn execute(&self, input: Value) -> ToolResult {
         let id = match input.get("id").and_then(Value::as_str) {
             Some(id) if RequirementId::parse(id).is_ok() => id,
-            _ => {
-                return ToolResult {
-                    content: "Missing or invalid canonical UUIDv7 'id'".to_string(),
-                    is_error: true,
-                    images: Vec::new(),
-                };
-            }
+            _ => return ToolResult::error("Missing or invalid canonical UUIDv7 'id'"),
         };
         let claim_generation = match input.get("claim_generation").and_then(Value::as_i64) {
             Some(generation) if generation > 0 => generation,
-            _ => {
-                return ToolResult {
-                    content: "Missing or invalid positive integer 'claim_generation'".to_string(),
-                    is_error: true,
-                    images: Vec::new(),
-                };
-            }
+            _ => return ToolResult::error("Missing or invalid positive integer 'claim_generation'"),
         };
         let claim_token = match claim_token(&input) {
             Some(token) => token,
-            None => {
-                return ToolResult {
-                    content: "Missing or invalid opaque 'claim_token'".to_string(),
-                    is_error: true,
-                    images: Vec::new(),
-                };
-            }
+            None => return ToolResult::error("Missing or invalid opaque 'claim_token'"),
         };
-        let note = input
-            .get("completion_note")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let note = match input.get("completion_note").and_then(Value::as_str) {
+            Some(note) => note,
+            None => return ToolResult::error("Missing or invalid string 'completion_note'"),
+        };
         match self
             .sink
             .complete(
@@ -169,16 +151,8 @@ impl Tool for RequirementCompleteTool {
             )
             .await
         {
-            Ok(()) => ToolResult {
-                content: format!("Requirement {id} marked done."),
-                is_error: false,
-                images: Vec::new(),
-            },
-            Err(e) => ToolResult {
-                content: format!("Failed to complete requirement {id}: {e}"),
-                is_error: true,
-                images: Vec::new(),
-            },
+            Ok(()) => ToolResult::text(format!("Requirement {id} marked done.")),
+            Err(e) => ToolResult::error(format!("Failed to complete requirement {id}: {e}")),
         }
     }
 
@@ -264,45 +238,25 @@ impl Tool for RequirementUpdateStatusTool {
     async fn execute(&self, input: Value) -> ToolResult {
         let id = match input.get("id").and_then(Value::as_str) {
             Some(id) if RequirementId::parse(id).is_ok() => id,
-            _ => {
-                return ToolResult {
-                    content: "Missing or invalid canonical UUIDv7 'id'".to_string(),
-                    is_error: true,
-                    images: Vec::new(),
-                };
-            }
+            _ => return ToolResult::error("Missing or invalid canonical UUIDv7 'id'"),
         };
         let claim_generation = match input.get("claim_generation").and_then(Value::as_i64) {
             Some(generation) if generation > 0 => generation,
-            _ => {
-                return ToolResult {
-                    content: "Missing or invalid positive integer 'claim_generation'".to_string(),
-                    is_error: true,
-                    images: Vec::new(),
-                };
-            }
+            _ => return ToolResult::error("Missing or invalid positive integer 'claim_generation'"),
         };
         let claim_token = match claim_token(&input) {
             Some(token) => token,
-            None => {
-                return ToolResult {
-                    content: "Missing or invalid opaque 'claim_token'".to_string(),
-                    is_error: true,
-                    images: Vec::new(),
-                };
-            }
+            None => return ToolResult::error("Missing or invalid opaque 'claim_token'"),
         };
         let status = match input.get("status").and_then(|v| v.as_str()) {
             Some(s @ ("in_progress" | "done" | "failed")) => s,
-            _ => {
-                return ToolResult {
-                    content: "Invalid 'status' (expected in_progress|done|failed)".to_string(),
-                    is_error: true,
-                    images: Vec::new(),
-                };
-            }
+            _ => return ToolResult::error("Invalid 'status' (expected in_progress|done|failed)"),
         };
-        let note = input.get("note").and_then(|v| v.as_str());
+        let note = match input.get("note") {
+            None => None,
+            Some(Value::String(note)) => Some(note.as_str()),
+            Some(_) => return ToolResult::error("Invalid 'note' (expected a string)"),
+        };
         match self
             .sink
             .update_status(
@@ -315,16 +269,8 @@ impl Tool for RequirementUpdateStatusTool {
             )
             .await
         {
-            Ok(()) => ToolResult {
-                content: format!("Requirement {id} status set to {status}."),
-                is_error: false,
-                images: Vec::new(),
-            },
-            Err(e) => ToolResult {
-                content: format!("Failed to update requirement {id}: {e}"),
-                is_error: true,
-                images: Vec::new(),
-            },
+            Ok(()) => ToolResult::text(format!("Requirement {id} status set to {status}.")),
+            Err(e) => ToolResult::error(format!("Failed to update requirement {id}: {e}")),
         }
     }
 
@@ -398,38 +344,65 @@ mod tests {
         }
     }
 
-    #[test]
-    fn native_tool_schemas_require_generation_and_opaque_token() {
-        let sink: Arc<dyn RequirementSink> = Arc::new(FakeSink::default());
-        let schemas = [
-            RequirementCompleteTool::new(sink.clone(), OWNER_CONVERSATION_ID)
-                .input_schema(),
-            RequirementUpdateStatusTool::new(sink, OWNER_CONVERSATION_ID)
-                .input_schema(),
+    #[tokio::test]
+    async fn native_tool_schemas_require_generation_token_and_typed_notes() {
+        let sink = Arc::new(FakeSink::default());
+        let mut registry = nomi_tools::registry::ToolRegistry::new();
+        let tools: [Box<dyn Tool>; 2] = [
+            Box::new(RequirementCompleteTool::new(sink.clone(), OWNER_CONVERSATION_ID)),
+            Box::new(RequirementUpdateStatusTool::new(sink.clone(), OWNER_CONVERSATION_ID)),
         ];
+        let id = RequirementId::new().into_string();
 
-        for schema in schemas {
+        for tool in tools {
+            let name = tool.name().to_string();
+            let note_field = if name == "requirement_complete" { "completion_note" } else { "note" };
+            let schema = tool.input_schema();
             let required = schema
                 .get("required")
                 .and_then(Value::as_array)
                 .expect("required fields");
-            assert!(
-                required
-                    .iter()
-                    .any(|field| field.as_str() == Some("claim_generation"))
-            );
-            assert!(
-                required
-                    .iter()
-                    .any(|field| field.as_str() == Some("claim_token"))
-            );
+            for name in ["claim_generation", "claim_token"] {
+                assert!(required.iter().any(|field| field.as_str() == Some(name)));
+            }
             assert_eq!(
                 schema
                     .pointer("/properties/claim_token/pattern")
                     .and_then(Value::as_str),
                 Some("^[0-9a-f]{64}$")
             );
+            assert!(registry.register(tool));
+            for note in [
+                None, Some(Value::Null), Some(json!(42)), Some(json!(false)),
+                Some(json!([])), Some(json!({})), Some(json!("")), Some(json!("finished")),
+            ] {
+                let valid = note.as_ref().map_or(note_field == "note", Value::is_string);
+                let mut input = json!({
+                    "id": id,
+                    "claim_generation": 1,
+                    "claim_token": CLAIM_TOKEN,
+                    "status": "done"
+                });
+                if let Some(note) = note {
+                    input[note_field] = note;
+                }
+                assert_eq!(registry.validate_input(&name, &input).is_ok(), valid, "{name}: {input}");
+                // Execute directly: schema preflight must not be the only guard.
+                let result = registry.get(&name).unwrap().execute(input).await;
+                assert_eq!(!result.is_error, valid, "{name}: {}", result.content);
+                if !valid {
+                    assert!(result.content.contains(note_field), "{}", result.content);
+                }
+            }
         }
+        assert_eq!(
+            sink.completed.lock().unwrap().iter().map(|row| row.4.clone()).collect::<Vec<_>>(),
+            ["", "finished"]
+        );
+        assert_eq!(
+            sink.statuses.lock().unwrap().iter().map(|row| row.5.clone()).collect::<Vec<_>>(),
+            [None, Some(String::new()), Some("finished".to_string())]
+        );
     }
 
     #[tokio::test]
