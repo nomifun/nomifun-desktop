@@ -158,6 +158,7 @@ fn parse_yaml_with_fallback(yaml_text: &str) -> FrontmatterData {
 /// Only touches lines of the form `key: value` where:
 /// - the line is not already quoted (`"` or `'` as first value char)
 /// - the value contains at least one YAML special character
+/// - the line cannot already be deserialized as a valid frontmatter field
 /// - the line has no leading whitespace (top-level only — nested structures
 ///   like hooks blocks are left untouched to preserve their syntax)
 fn quote_problematic_values(yaml_text: &str) -> String {
@@ -187,7 +188,9 @@ fn quote_problematic_values(yaml_text: &str) -> String {
                 continue;
             }
 
-            if value.contains(SPECIAL_CHARS) {
+            if value.contains(SPECIAL_CHARS)
+                && serde_yaml::from_str::<FrontmatterData>(line).is_err()
+            {
                 // Escape any existing double quotes inside the value
                 let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
                 result.push_str(key);
@@ -245,46 +248,26 @@ fn split_paths(value: &Option<StringOrVec>) -> Vec<String> {
         Some(StringOrVec::Single(s)) => {
             // Split on commas that are NOT inside {} braces, then brace-expand each part
             split_respecting_braces(s)
-                .into_iter()
-                .flat_map(|p| expand_braces(&p))
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .flat_map(expand_braces)
                 .collect()
         }
     }
 }
 
 /// Split a string on top-level commas (commas not inside `{...}` groups).
-fn split_respecting_braces(s: &str) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut current = String::new();
+fn split_respecting_braces(s: &str) -> impl Iterator<Item = &str> {
     let mut depth: usize = 0;
-
-    for ch in s.chars() {
+    s.split(move |ch| {
         match ch {
-            '{' => {
-                depth += 1;
-                current.push(ch);
-            }
-            '}' => {
-                depth = depth.saturating_sub(1);
-                current.push(ch);
-            }
-            ',' if depth == 0 => {
-                let trimmed = current.trim().to_owned();
-                if !trimmed.is_empty() {
-                    parts.push(trimmed);
-                }
-                current.clear();
-            }
-            _ => current.push(ch),
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => return true,
+            _ => {}
         }
-    }
-
-    let trimmed = current.trim().to_owned();
-    if !trimmed.is_empty() {
-        parts.push(trimmed);
-    }
-
-    parts
+        false
+    })
 }
 
 /// Expand a single brace pattern into all combinations.
@@ -295,8 +278,16 @@ fn split_respecting_braces(s: &str) -> Vec<String> {
 /// - No braces → returns the original pattern unchanged.
 fn expand_braces(pattern: &str) -> Vec<String> {
     // Find the first `{` that has a matching `}`
+    let mut depth = 0usize;
     if let Some(open) = pattern.find('{')
-        && let Some(close_rel) = pattern[open..].find('}')
+        && let Some(close_rel) = pattern[open..].find(|ch| {
+            match ch {
+                '{' => depth += 1,
+                '}' => depth -= 1,
+                _ => {}
+            }
+            depth == 0
+        })
     {
         let close = open + close_rel;
         let prefix = &pattern[..open];
@@ -304,7 +295,7 @@ fn expand_braces(pattern: &str) -> Vec<String> {
         let alternatives = &pattern[open + 1..close];
 
         let mut results = Vec::new();
-        for alt in alternatives.split(',') {
+        for alt in split_respecting_braces(alternatives) {
             let expanded = format!("{}{}{}", prefix, alt, suffix);
             // Recursively expand in case there are more brace groups
             results.extend(expand_braces(&expanded));
@@ -459,12 +450,12 @@ Do the thing.
     #[test]
     fn test_parse_frontmatter_special_chars_in_value() {
         // Description contains { } which would fail unquoted YAML
-        let input = "---\ndescription: Use {arg} to specify the value\n---\nbody";
+        let input = "---\ndescription: {arg} specifies the value\n---\nbody";
         let parsed = parse_frontmatter(input);
         // Second-pass auto-quoting should rescue this
         assert_eq!(
             parsed.frontmatter.description.as_deref(),
-            Some("Use {arg} to specify the value")
+            Some("{arg} specifies the value")
         );
     }
 
@@ -599,9 +590,9 @@ Do the thing.
 
     #[test]
     fn test_quote_curly_braces() {
-        let yaml = "description: Use {arg} here";
+        let yaml = "description: {arg} goes here";
         let fixed = quote_problematic_values(yaml);
-        assert!(fixed.contains("\"Use {arg} here\""));
+        assert_eq!(fixed, "description: \"{arg} goes here\"");
     }
 
     #[test]
