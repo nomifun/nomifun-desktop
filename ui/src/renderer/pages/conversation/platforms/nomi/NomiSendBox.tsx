@@ -9,6 +9,14 @@ import { sessionStorageKey } from '@/common/utils/browserStorageKey';
 import { ipcBridge } from '@/common';
 import { uuid, uuidv7 } from '@/common/utils';
 import CommandQueuePanel from '@/renderer/components/chat/CommandQueuePanel';
+import SessionCapabilityPicker, {
+  SessionCapabilityComposerLayout,
+  buildSessionCapabilitySelection,
+  draftFromSessionCapabilitySelection,
+  sessionCapabilitySelectionKey,
+  useSessionCapabilityCatalog,
+  type SessionCapabilityDraft,
+} from '@/renderer/components/chat/SessionCapabilityPicker';
 import MobileActionSheet, {
   type MobileActionSheetEntry,
   type MobileActionSheetOption,
@@ -64,8 +72,8 @@ import { emitter, useAddEventListener } from '@/renderer/utils/emitter';
 import { mergeFileSelectionItems } from '@/renderer/utils/file/fileSelection';
 import { buildDisplayMessage, collectSelectedFiles } from '@/renderer/utils/file/messageFiles';
 import { Message, Tag } from '@arco-design/web-react';
-import { Brain, MagicHat, Robot, Shield } from '@icon-park/react';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { Brain, Robot } from '@icon-park/react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { NomiMessageRuntime } from './useNomiMessage';
 import NomiModelSelector from './NomiModelSelector';
@@ -158,10 +166,102 @@ const NomiSendBox: React.FC<{
   const conversationContext = useConversationContextSafe();
   const loadedSkills = conversationContext?.loadedSkills ?? [];
   const loadedMcpStatuses = conversationContext?.loadedMcpStatuses ?? [];
+  const capabilityCatalog = useSessionCapabilityCatalog();
+  const [capabilityDraft, setCapabilityDraft] = useState<SessionCapabilityDraft>({
+    skillNames: [],
+    mcpServerIds: [],
+  });
+  const initializedCapabilityConversation = useRef<string | undefined>(undefined);
+  const serverCapabilitySnapshot = useRef<{ conversationId: string; key: string } | undefined>(undefined);
+  const appliedCapabilityKey = useRef<string | undefined>(undefined);
+  const lastAppliedCapabilityKey = useRef<string | undefined>(undefined);
   const { t } = useTranslation();
   const providerLabel = useModelSelectorProviderLabel();
   const { checkAndUpdateTitle } = useAutoTitle();
   const { current_model } = modelSelection;
+
+  useEffect(() => {
+    if (capabilityCatalog.loading || capabilityCatalog.error) return;
+    const availableSkillNames = new Set(capabilityCatalog.catalog.skills.map((skill) => skill.name));
+    const selectableMcpIds = new Set(
+      capabilityCatalog.catalog.mcpServers
+        .filter((server) => server.enabled)
+        .map((server) => server.mcp_server_id)
+    );
+    const serverDraft = {
+      skillNames: Array.from(new Set(loadedSkills.filter((name) => availableSkillNames.has(name)))),
+      mcpServerIds: Array.from(new Set(
+        loadedMcpStatuses
+          .map((item) => item.mcp_server_id)
+          .filter((id) => selectableMcpIds.has(id))
+      )),
+    };
+    const serverKey = sessionCapabilitySelectionKey(
+      buildSessionCapabilitySelection(serverDraft, capabilityCatalog.catalog.autoSkillNames)
+    );
+    const previousServer = serverCapabilitySnapshot.current;
+    if (previousServer?.conversationId === conversation_id && previousServer.key === serverKey) {
+      if (lastAppliedCapabilityKey.current === serverKey) {
+        lastAppliedCapabilityKey.current = undefined;
+      }
+      return;
+    }
+    serverCapabilitySnapshot.current = { conversationId: conversation_id, key: serverKey };
+    appliedCapabilityKey.current = serverKey;
+    initializedCapabilityConversation.current = conversation_id;
+
+    const currentKey = sessionCapabilitySelectionKey(
+      buildSessionCapabilitySelection(capabilityDraft, capabilityCatalog.catalog.autoSkillNames)
+    );
+    if (lastAppliedCapabilityKey.current === serverKey && currentKey !== serverKey) {
+      // The server refresh acknowledges the just-sent message. Preserve edits
+      // the user made for the following message while that send was in flight.
+      lastAppliedCapabilityKey.current = undefined;
+      return;
+    }
+    lastAppliedCapabilityKey.current = undefined;
+    setCapabilityDraft(serverDraft);
+  }, [
+    capabilityCatalog.catalog,
+    capabilityCatalog.error,
+    capabilityCatalog.loading,
+    conversation_id,
+    capabilityDraft,
+    loadedMcpStatuses,
+    loadedSkills,
+  ]);
+
+  const capabilitySelectionReady =
+    !hideAdvancedControls &&
+    initializedCapabilityConversation.current === conversation_id &&
+    !capabilityCatalog.loading &&
+    !capabilityCatalog.error;
+  const currentCapabilitySelection = useMemo(
+    () => capabilitySelectionReady
+      ? buildSessionCapabilitySelection(
+          capabilityDraft,
+          capabilityCatalog.catalog.autoSkillNames
+        )
+      : undefined,
+    [
+      capabilityCatalog.catalog.autoSkillNames,
+      capabilityDraft,
+      capabilitySelectionReady,
+    ]
+  );
+  const applyCapabilitySelection = useCallback(async (
+    selection: NonNullable<typeof currentCapabilitySelection>
+  ) => {
+    const selectionKey = sessionCapabilitySelectionKey(selection);
+    if (appliedCapabilityKey.current === selectionKey) return;
+    await ipcBridge.agentPlatform.sessions.updateCapabilitySelection.invoke({
+      agent_session_id: conversation_id,
+      request: { capability_selection: selection },
+    });
+    appliedCapabilityKey.current = selectionKey;
+    lastAppliedCapabilityKey.current = selectionKey;
+    emitter.emit('chat.history.refresh');
+  }, [conversation_id]);
 
   const {
     data: providerGraph,
@@ -306,9 +406,10 @@ const NomiSendBox: React.FC<{
         id = uuidv7(),
         input,
         files,
+        capability_selection,
         initialOnly = false,
       }: Pick<ConversationCommandQueueItem, 'input' | 'files'> &
-        Partial<Pick<ConversationCommandQueueItem, 'id'>> & {
+        Partial<Pick<ConversationCommandQueueItem, 'id' | 'capability_selection'>> & {
           initialOnly?: boolean;
         },
       execution?: ConversationCommandQueueExecution,
@@ -329,6 +430,9 @@ const NomiSendBox: React.FC<{
       const displayMessage = buildDisplayMessage(input, files, workspacePath);
       let msg_id: MessageId | null = null;
       try {
+        if (capability_selection) {
+          await applyCapabilitySelection(capability_selection);
+        }
         if (!deferLocalTurnUntilFresh) {
           void checkAndUpdateTitle(conversation_id, input);
         }
@@ -387,6 +491,7 @@ const NomiSendBox: React.FC<{
     },
     [
       addOrUpdateMessage,
+      applyCapabilitySelection,
       checkAndUpdateTitle,
       canSendFiles,
       conversation_id,
@@ -503,11 +608,15 @@ const NomiSendBox: React.FC<{
         hasPendingCommands,
       })
     ) {
-      enqueue({ input: message, files: filesToSend });
+      enqueue({ input: message, files: filesToSend, capability_selection: currentCapabilitySelection });
       return;
     }
 
-    await executeCommand({ input: message, files: filesToSend });
+    await executeCommand({
+      input: message,
+      files: filesToSend,
+      capability_selection: currentCapabilitySelection,
+    });
   };
 
   // 编辑最近一条用户消息并截断重跑。请求成功前保留旧消息和附件；成功后只移除
@@ -524,6 +633,9 @@ const NomiSendBox: React.FC<{
       setWaitingResponse(true);
       const displayMessage = buildDisplayMessage(message, filesToSend, workspacePath);
       try {
+        if (currentCapabilitySelection) {
+          await applyCapabilitySelection(currentCapabilitySelection);
+        }
         const res = await ipcBridge.conversation.editResubmit.invoke({
           conversation_id,
           msg_id: msgId,
@@ -564,10 +676,12 @@ const NomiSendBox: React.FC<{
     },
     [
       atPath,
+      applyCapabilitySelection,
       conversation_id,
       uploadFile,
       workspacePath,
       clearFiles,
+      currentCapabilitySelection,
       markTurnAccepted,
       canSendFiles,
       reconcilePublicDeliveryReplay,
@@ -662,7 +776,7 @@ const NomiSendBox: React.FC<{
       // attachments instead of losing them to an error toast. This is the
       // fallback the catch in executeSteer has always claimed to perform, and
       // conversation.steer.fallbackQueued is the message written for it.
-      enqueue({ input: message, files: filesToSend });
+      enqueue({ input: message, files: filesToSend, capability_selection: currentCapabilitySelection });
       Message.info(t('conversation.steer.fallbackQueued'));
     }
   };
@@ -673,9 +787,17 @@ const NomiSendBox: React.FC<{
       setContent(item.input);
       setUploadFile(Array.from(new Set(item.files)));
       setAtPath([]);
+      if (item.capability_selection) {
+        setCapabilityDraft(
+          draftFromSessionCapabilitySelection(
+            item.capability_selection,
+            capabilityCatalog.catalog.autoSkillNames
+          )
+        );
+      }
       emitter.emit('nomi.selected.file.clear');
     },
-    [remove, setAtPath, setContent, setUploadFile]
+    [capabilityCatalog.catalog.autoSkillNames, remove, setAtPath, setContent, setUploadFile]
   );
 
   const appendSelectedFiles = useCallback(
@@ -754,52 +876,6 @@ const NomiSendBox: React.FC<{
       ...attachEntries,
     ];
 
-    if (loadedSkills.length > 0) {
-      const skillOptions: MobileActionSheetOption[] = loadedSkills.map((name) => ({
-        key: name,
-        label: `/${name}`,
-      }));
-      entries.push({
-        key: 'skills',
-        icon: <MagicHat theme='outline' size='16' />,
-        label: t('common.skills', { defaultValue: 'Skills' }),
-        variant: 'muted',
-        submenu: {
-          title: t('common.skills', { defaultValue: 'Skills' }),
-          selectable: false,
-          options: skillOptions,
-          onSelect: (name) => {
-            setContent(`/${name} `);
-          },
-        },
-      });
-    }
-
-    if (loadedMcpStatuses.length > 0) {
-      const mcpOptions: MobileActionSheetOption[] = loadedMcpStatuses.map((item) => ({
-        key: item.name,
-        label: item.name,
-        description:
-          item.status === 'loaded'
-            ? undefined
-            : item.reason
-              ? `${t(`conversation.mcp.status.${item.status}` as const)} · ${item.reason}`
-              : t(`conversation.mcp.status.${item.status}` as const),
-      }));
-      entries.push({
-        key: 'mcp',
-        icon: <Shield theme='outline' size='16' />,
-        label: t('conversation.mcp.loaded', { defaultValue: 'Loaded MCP' }),
-        variant: 'muted',
-        submenu: {
-          title: t('conversation.mcp.loaded', { defaultValue: 'Loaded MCP' }),
-          selectable: false,
-          options: mcpOptions,
-          onSelect: () => undefined,
-        },
-      });
-    }
-
     return entries;
   }, [
     attachEntries,
@@ -807,11 +883,8 @@ const NomiSendBox: React.FC<{
     handleSheetModelSelect,
     hideAdvancedControls,
     isMobile,
-    loadedMcpStatuses,
-    loadedSkills,
     modelSelection,
     providerLabel,
-    setContent,
     t,
   ]);
 
@@ -905,119 +978,135 @@ const NomiSendBox: React.FC<{
         onRemove={remove}
         onClear={clear}
       />
-      <SendBox
-        key={conversation_id}
-        data-testid='nomi-sendbox'
-        showPinnedPlan
-        onMobilePlusClick={isMobile ? () => setIsMobileSheetOpen(true) : undefined}
-        value={content}
-        onChange={handleContentChange}
-        selectedWorkspaceItems={atPath}
-        onSelectedWorkspaceItemsChange={(items) => {
-          emitter.emit('nomi.selected.file', items);
-          setAtPath(items);
-        }}
-        loading={isBusy}
-        disabled={!current_model?.use_model}
-        placeholder={
-          current_model?.use_model
-            ? t('agent.sendbox.placeholder', {
-                backend: agent_name || 'Nomi',
-                defaultValue: `Send message to {{backend}}...`,
-              })
-            : t('conversation.chat.noModelSelected')
-        }
-        onStop={handleStop}
-        onClearContext={handleClearContext}
-        className='z-10'
-        onFilesAdded={handleFilesAdded}
-        hasPendingAttachments={uploadFile.length > 0 || atPath.length > 0}
-        supportedExts={allSupportedExts}
-        defaultMultiLine={!isMobile}
-        lockMultiLine={!isMobile}
-        tools={
-          <FileAttachButton
-            openFileSelector={openFileSelector}
-            onLocalFilesAdded={handleFilesAdded}
-            loadedMcpStatuses={loadedMcpStatuses}
-          />
-        }
-        rightTools={
-          hideAdvancedControls ? undefined : (
-            <div
-              className='sendbox-responsive-config-group flex flex-1 items-center justify-end gap-2 min-w-0'
-              data-testid='nomi-sendbox-config-group'
-            >
-              {hasContextUsage && (
-                <ContextUsageRing
-                  used={tokenUsage?.context_tokens}
-                  max={tokenUsage?.context_window}
-                  inputTokens={tokenUsage?.input_tokens}
-                  outputTokens={tokenUsage?.output_tokens}
-                  reasoningTokens={tokenUsage?.reasoning_tokens}
-                />
-              )}
-              <NomiModelSelector
-                selection={modelSelection}
-                className='nomi-sendbox-model-btn'
-              />
-              {agentSelectorNode}
-              {collaboratorSelectorNode}
-              {extraRightTools}
-            </div>
+      <SessionCapabilityComposerLayout
+        picker={
+          hideAdvancedControls ? null : (
+            <SessionCapabilityPicker
+              catalog={capabilityCatalog.catalog}
+              draft={capabilityDraft}
+              onChange={setCapabilityDraft}
+              loading={capabilityCatalog.loading}
+              loadFailed={Boolean(capabilityCatalog.error)}
+              onRetry={capabilityCatalog.retry}
+              applyMode='next-send'
+            />
           )
         }
-        prefix={
-          <>
-            {uploadFile.length > 0 && (
-              <HorizontalFileList>
-                {uploadFile.map((path) => (
-                  <FilePreview
-                    key={path}
-                    data-testid={`nomi-file-tag-${uploadFile.indexOf(path)}`}
-                    path={path}
-                    onRemove={() => setUploadFile(uploadFile.filter((v) => v !== path))}
+      >
+        <SendBox
+          key={conversation_id}
+          data-testid='nomi-sendbox'
+          showPinnedPlan
+          onMobilePlusClick={isMobile ? () => setIsMobileSheetOpen(true) : undefined}
+          value={content}
+          onChange={handleContentChange}
+          selectedWorkspaceItems={atPath}
+          onSelectedWorkspaceItemsChange={(items) => {
+            emitter.emit('nomi.selected.file', items);
+            setAtPath(items);
+          }}
+          loading={isBusy}
+          disabled={!current_model?.use_model}
+          placeholder={
+            current_model?.use_model
+              ? t('agent.sendbox.placeholder', {
+                  backend: agent_name || 'Nomi',
+                  defaultValue: `Send message to {{backend}}...`,
+                })
+              : t('conversation.chat.noModelSelected')
+          }
+          onStop={handleStop}
+          onClearContext={handleClearContext}
+          className='z-10'
+          onFilesAdded={handleFilesAdded}
+          hasPendingAttachments={uploadFile.length > 0 || atPath.length > 0}
+          supportedExts={allSupportedExts}
+          defaultMultiLine={!isMobile}
+          lockMultiLine={!isMobile}
+          tools={
+            <FileAttachButton
+              openFileSelector={openFileSelector}
+              onLocalFilesAdded={handleFilesAdded}
+              showLoadedCapabilities={false}
+            />
+          }
+          rightTools={
+            hideAdvancedControls ? undefined : (
+              <div
+                className='sendbox-responsive-config-group flex flex-1 items-center justify-end gap-2 min-w-0'
+                data-testid='nomi-sendbox-config-group'
+              >
+                {hasContextUsage && (
+                  <ContextUsageRing
+                    used={tokenUsage?.context_tokens}
+                    max={tokenUsage?.context_window}
+                    inputTokens={tokenUsage?.input_tokens}
+                    outputTokens={tokenUsage?.output_tokens}
+                    reasoningTokens={tokenUsage?.reasoning_tokens}
                   />
-                ))}
-              </HorizontalFileList>
-            )}
-            {atPath.some((item) => (typeof item === 'string' ? false : !item.isFile)) && (
-              <div className='flex flex-wrap items-center gap-8px mb-8px'>
-                {atPath.map((item) => {
-                  if (typeof item === 'string') return null;
-                  if (!item.isFile) {
-                    const folderIndex = atPath.filter((v) => typeof v !== 'string' && !v.isFile).indexOf(item);
-                    return (
-                      <Tag
-                        key={item.path}
-                        data-testid={`nomi-folder-tag-${folderIndex}`}
-                        bordered={false}
-                        className='!bg-primary-1 !text-primary-6'
-                        closable
-                        onClose={() => {
-                          const newAtPath = atPath.filter((v) => (typeof v === 'string' ? true : v.path !== item.path));
-                          emitter.emit('nomi.selected.file', newAtPath);
-                          setAtPath(newAtPath);
-                        }}
-                      >
-                        {item.name}
-                      </Tag>
-                    );
-                  }
-                  return null;
-                })}
+                )}
+                <NomiModelSelector
+                  selection={modelSelection}
+                  className='nomi-sendbox-model-btn'
+                />
+                {agentSelectorNode}
+                {collaboratorSelectorNode}
+                {extraRightTools}
               </div>
-            )}
-          </>
-        }
-        onSend={onSendHandler}
-        onSteer={onSteerHandler}
-        steerAvailable
-        onEditResubmit={handleEditResubmit}
-        slash_commands={slash_commands}
-        onSlashBuiltinCommand={onSlashBuiltinCommand}
-        allowSendWhileLoading
-      />
+            )
+          }
+          prefix={
+            <>
+              {uploadFile.length > 0 && (
+                <HorizontalFileList>
+                  {uploadFile.map((path) => (
+                    <FilePreview
+                      key={path}
+                      data-testid={`nomi-file-tag-${uploadFile.indexOf(path)}`}
+                      path={path}
+                      onRemove={() => setUploadFile(uploadFile.filter((v) => v !== path))}
+                    />
+                  ))}
+                </HorizontalFileList>
+              )}
+              {atPath.some((item) => (typeof item === 'string' ? false : !item.isFile)) && (
+                <div className='flex flex-wrap items-center gap-8px mb-8px'>
+                  {atPath.map((item) => {
+                    if (typeof item === 'string') return null;
+                    if (!item.isFile) {
+                      const folderIndex = atPath.filter((v) => typeof v !== 'string' && !v.isFile).indexOf(item);
+                      return (
+                        <Tag
+                          key={item.path}
+                          data-testid={`nomi-folder-tag-${folderIndex}`}
+                          bordered={false}
+                          className='!bg-primary-1 !text-primary-6'
+                          closable
+                          onClose={() => {
+                            const newAtPath = atPath.filter((v) => (typeof v === 'string' ? true : v.path !== item.path));
+                            emitter.emit('nomi.selected.file', newAtPath);
+                            setAtPath(newAtPath);
+                          }}
+                        >
+                          {item.name}
+                        </Tag>
+                      );
+                    }
+                    return null;
+                  })}
+                </div>
+              )}
+            </>
+          }
+          onSend={onSendHandler}
+          onSteer={onSteerHandler}
+          steerAvailable
+          onEditResubmit={handleEditResubmit}
+          slash_commands={slash_commands}
+          onSlashBuiltinCommand={onSlashBuiltinCommand}
+          allowSendWhileLoading
+        />
+      </SessionCapabilityComposerLayout>
       {isMobile && (
         <>
           <MobileActionSheet

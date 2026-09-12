@@ -9,6 +9,13 @@ import { useInputFocusRing } from '@/renderer/hooks/chat/useInputFocusRing';
 import { isSubmitGesture } from '@/renderer/hooks/chat/useCompositionInput';
 import { appendSpeechTranscript } from '@/renderer/hooks/system/useSpeechInput';
 import SpeechInputButton from '@/renderer/components/chat/SpeechInputButton';
+import SessionCapabilityPicker, {
+  SessionCapabilityComposerLayout,
+  buildSessionCapabilitySelection,
+  defaultSessionCapabilityDraft,
+  useSessionCapabilityCatalog,
+  type SessionCapabilityDraft,
+} from '@/renderer/components/chat/SessionCapabilityPicker';
 import FeedbackReportModal from '@/renderer/components/settings/SettingsModal/contents/FeedbackReportModal';
 import AutoWorkControl from '@/renderer/pages/conversation/components/AutoWorkControl';
 import IdmmControl from '@/renderer/pages/conversation/components/IdmmControl';
@@ -24,6 +31,7 @@ import React, {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from 'react';
@@ -70,6 +78,11 @@ const GuidPage: React.FC = () => {
     useInputFocusRing();
   const [showFeedbackModal, setShowFeedbackModal] = useState(false);
   const [resourceSelectionValue, setResourceSelectionValue] = useState<AgentResourceSelectionValue>({});
+  const [capabilityDraft, setCapabilityDraft] = useState<SessionCapabilityDraft>({
+    skillNames: [],
+    mcpServerIds: [],
+  });
+  const capabilityCatalog = useSessionCapabilityCatalog();
 
   useEffect(() => {
     void import('@renderer/pages/conversation');
@@ -123,6 +136,50 @@ const GuidPage: React.FC = () => {
   const selectedAgentResourceKey = agentSelection.selection.kind === 'template'
     ? `template:${agentSelection.selection.templateKey}`
     : `preset:${agentSelection.selection.presetId}`;
+  const presetSkillNames = agentSelection.selectedTemplate
+    ? new Set(agentSelection.selectedTemplate.seed.skill_bindings.map((skill) => skill.id))
+    : presetCapabilities.skillNames;
+  const presetSkillNamesKey = Array.from(presetSkillNames).sort().join('\u0000');
+  const requiredMcpServerId = presetResourceKinds.has('mcp_server')
+    ? resourceSelectionValue.mcp_server
+    : undefined;
+  const effectiveCapabilityDraft = useMemo<SessionCapabilityDraft>(() => ({
+    skillNames: capabilityDraft.skillNames,
+    mcpServerIds: requiredMcpServerId
+      ? Array.from(new Set([...capabilityDraft.mcpServerIds, requiredMcpServerId]))
+      : capabilityDraft.mcpServerIds,
+  }), [capabilityDraft, requiredMcpServerId]);
+  const lockedMcpServerIds = useMemo(
+    () => new Set(requiredMcpServerId ? [requiredMcpServerId] : []),
+    [requiredMcpServerId]
+  );
+  const handleCapabilityDraftChange = useCallback((next: SessionCapabilityDraft) => {
+    setCapabilityDraft({
+      skillNames: next.skillNames,
+      mcpServerIds: requiredMcpServerId
+        ? next.mcpServerIds.filter((id) => id !== requiredMcpServerId)
+        : next.mcpServerIds,
+    });
+  }, [requiredMcpServerId]);
+
+  useEffect(() => {
+    if (capabilityCatalog.loading || capabilityCatalog.error) return;
+    setCapabilityDraft(
+      defaultSessionCapabilityDraft(capabilityCatalog.catalog, presetSkillNames)
+    );
+  }, [
+    capabilityCatalog.catalog,
+    capabilityCatalog.error,
+    capabilityCatalog.loading,
+    presetSkillNamesKey,
+    selectedAgentResourceKey,
+  ]);
+
+  const capabilitySelection = buildSessionCapabilitySelection(
+    effectiveCapabilityDraft,
+    capabilityCatalog.catalog.autoSkillNames
+  );
+  const capabilitySelectionReady = !capabilityCatalog.loading && !capabilityCatalog.error;
 
   useEffect(() => {
     setResourceSelectionValue({});
@@ -165,6 +222,7 @@ const GuidPage: React.FC = () => {
     workspaceEnabled,
     resourceResolutionReady: resourceSelectionsReady,
     resourceSelections: resourceSelectionResolution.selections,
+    capabilitySelection: capabilitySelectionReady ? capabilitySelection : undefined,
     setMentionOpen: mention.setMentionOpen,
     setMentionQuery: mention.setMentionQuery,
     setMentionSelectorOpen: mention.setMentionSelectorOpen,
@@ -483,57 +541,73 @@ const GuidPage: React.FC = () => {
               />
             )}
 
-            <GuidInputCard
-              input={guidInput.input}
-              onInputChange={handleInputChange}
-              onKeyDown={handleInputKeyDown}
-              onPaste={guidInput.onPaste}
-              onFocus={guidInput.handleTextareaFocus}
-              onBlur={guidInput.handleTextareaBlur}
-              placeholder={normalPlaceholder}
-              isInputActive={guidInput.isInputFocused}
-              isFileDragging={guidInput.isFileDragging}
-              activeBorderColor={activeBorderColor}
-              inactiveBorderColor={inactiveBorderColor}
-              activeShadow={activeShadow}
-              dragHandlers={guidInput.dragHandlers}
-              mentionOpen={mention.mentionOpen}
-              mentionSelectorBadge={
-                <MentionSelectorBadge
-                  visible={mention.mentionSelectorVisible}
-                  open={mention.mentionSelectorOpen}
-                  onOpenChange={mention.setMentionSelectorOpen}
-                  agentLabel={mention.selectedAgentLabel}
-                  mentionMenu={mentionDropdownNode}
-                  onResetQuery={() => mention.setMentionQuery(null)}
+            <SessionCapabilityComposerLayout
+              picker={
+                <SessionCapabilityPicker
+                  catalog={capabilityCatalog.catalog}
+                  draft={effectiveCapabilityDraft}
+                  onChange={handleCapabilityDraftChange}
+                  loading={capabilityCatalog.loading}
+                  loadFailed={Boolean(capabilityCatalog.error)}
+                  onRetry={capabilityCatalog.retry}
+                  applyMode='create'
+                  disabled={guidInput.loading}
+                  lockedMcpServerIds={lockedMcpServerIds}
                 />
               }
-              mentionDropdown={mentionDropdownNode}
-              files={guidInput.files}
-              onRemoveFile={guidInput.handleRemoveFile}
-              actionRow={actionRowNode}
-              showWorkspace={workspaceEnabled}
-              workspaceDir={guidInput.dir}
-              onSelectWorkspace={guidInput.setDir}
-              onClearWorkspace={() => guidInput.setDir('')}
-              agentSelector={
-                <GuidAgentSelector
-                  presets={agentSelection.presets}
-                  draftPresets={agentSelection.draftPresets}
-                  officialTemplates={agentSelection.officialTemplates}
-                  selection={agentSelection.selection}
-                  isLoading={agentSelection.isLoading}
-                  loadError={agentSelection.loadError}
-                  onRetry={agentSelection.refreshPresets}
-                  onSelectPreset={(presetId) =>
-                    handleSelectAgent({ kind: 'preset', presetId })
-                  }
-                  onSelectTemplate={(templateKey) =>
-                    handleSelectAgent({ kind: 'template', templateKey })
-                  }
-                />
-              }
-            />
+            >
+              <GuidInputCard
+                input={guidInput.input}
+                onInputChange={handleInputChange}
+                onKeyDown={handleInputKeyDown}
+                onPaste={guidInput.onPaste}
+                onFocus={guidInput.handleTextareaFocus}
+                onBlur={guidInput.handleTextareaBlur}
+                placeholder={normalPlaceholder}
+                isInputActive={guidInput.isInputFocused}
+                isFileDragging={guidInput.isFileDragging}
+                activeBorderColor={activeBorderColor}
+                inactiveBorderColor={inactiveBorderColor}
+                activeShadow={activeShadow}
+                dragHandlers={guidInput.dragHandlers}
+                mentionOpen={mention.mentionOpen}
+                mentionSelectorBadge={
+                  <MentionSelectorBadge
+                    visible={mention.mentionSelectorVisible}
+                    open={mention.mentionSelectorOpen}
+                    onOpenChange={mention.setMentionSelectorOpen}
+                    agentLabel={mention.selectedAgentLabel}
+                    mentionMenu={mentionDropdownNode}
+                    onResetQuery={() => mention.setMentionQuery(null)}
+                  />
+                }
+                mentionDropdown={mentionDropdownNode}
+                files={guidInput.files}
+                onRemoveFile={guidInput.handleRemoveFile}
+                actionRow={actionRowNode}
+                showWorkspace={workspaceEnabled}
+                workspaceDir={guidInput.dir}
+                onSelectWorkspace={guidInput.setDir}
+                onClearWorkspace={() => guidInput.setDir('')}
+                agentSelector={
+                  <GuidAgentSelector
+                    presets={agentSelection.presets}
+                    draftPresets={agentSelection.draftPresets}
+                    officialTemplates={agentSelection.officialTemplates}
+                    selection={agentSelection.selection}
+                    isLoading={agentSelection.isLoading}
+                    loadError={agentSelection.loadError}
+                    onRetry={agentSelection.refreshPresets}
+                    onSelectPreset={(presetId) =>
+                      handleSelectAgent({ kind: 'preset', presetId })
+                    }
+                    onSelectTemplate={(templateKey) =>
+                      handleSelectAgent({ kind: 'template', templateKey })
+                    }
+                  />
+                }
+              />
+            </SessionCapabilityComposerLayout>
 
             <AgentResourcePicker
               requiredKinds={presetResourceKinds}

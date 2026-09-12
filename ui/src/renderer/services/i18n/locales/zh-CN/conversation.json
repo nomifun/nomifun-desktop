@@ -542,6 +542,22 @@
       "unsupported": "不支持"
     }
   },
+  "capabilityPicker": {
+    "ariaLabel": "会话能力",
+    "createApplyNote": "新会话 · 创建时应用",
+    "nextSendApplyNote": "本会话 · 下次发送时应用",
+    "loadFailed": "加载失败",
+    "empty": "暂无可用项目",
+    "builtin": "内置",
+    "installed": "已安装",
+    "available": "可用",
+    "disabled": "已停用",
+    "error": "异常",
+    "toolCount_other": "{{count}} 个工具",
+    "selectedCount_other": "已选 {{count}} 项",
+    "manageSkills": "管理技能",
+    "manageMcp": "管理 MCP"
+  },
   "sendbox": {
     "hint": "输入 / 唤起命令，@ 引用文件"
   },

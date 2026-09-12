@@ -22,6 +22,7 @@ interface FileAttachButtonProps {
   onLocalFilesAdded?: (files: FileMetadata[]) => void;
   loadedSkills?: string[];
   loadedMcpStatuses?: IConversationMcpStatus[];
+  showLoadedCapabilities?: boolean;
 }
 
 const MenuItem: React.FC<{
@@ -60,6 +61,7 @@ const FileAttachButton: React.FC<FileAttachButtonProps> = ({
   onLocalFilesAdded,
   loadedSkills,
   loadedMcpStatuses,
+  showLoadedCapabilities = true,
 }) => {
   const conversationContext = useConversationContextSafe();
   const { t } = useTranslation();
@@ -70,8 +72,12 @@ const FileAttachButton: React.FC<FileAttachButtonProps> = ({
   const [skillsOpen, setSkillsOpen] = useState(false);
   const [mcpOpen, setMcpOpen] = useState(false);
 
-  const skillNames = loadedSkills ?? conversationContext?.loadedSkills ?? [];
-  const mcpStatuses = loadedMcpStatuses ?? conversationContext?.loadedMcpStatuses ?? [];
+  const skillNames = showLoadedCapabilities
+    ? loadedSkills ?? conversationContext?.loadedSkills ?? []
+    : [];
+  const mcpStatuses = showLoadedCapabilities
+    ? loadedMcpStatuses ?? conversationContext?.loadedMcpStatuses ?? []
+    : [];
 
   const handleSkillClick = useCallback((name: string) => {
     setOpen(false);

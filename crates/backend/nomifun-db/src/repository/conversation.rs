@@ -1039,6 +1039,28 @@ pub trait IConversationRepository: Send + Sync {
         Ok(())
     }
 
+    /// Atomically replaces the runtime capability snapshot stored across the
+    /// Conversation row and its MCP junction. Production repositories must
+    /// keep these two representations in one transaction.
+    async fn replace_capability_selection_snapshot(
+        &self,
+        conversation_id: &str,
+        extra: &str,
+        mcp_server_ids: &[String],
+        updated_at: TimestampMs,
+    ) -> Result<(), DbError> {
+        self.update(
+            conversation_id,
+            &ConversationRowUpdate {
+                extra: Some(extra.to_owned()),
+                updated_at: Some(updated_at),
+                ..Default::default()
+            },
+        )
+        .await?;
+        self.set_mcp_server_ids(conversation_id, mcp_server_ids).await
+    }
+
     // ── Message operations ──────────────────────────────────────────
 
     /// Returns paginated messages for a conversation, ordered by `created_at`.

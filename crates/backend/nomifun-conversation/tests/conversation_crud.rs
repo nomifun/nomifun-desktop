@@ -951,6 +951,74 @@ async fn replace_agent_preset_snapshot_keeps_conversation_identity_model_and_wor
 }
 
 #[tokio::test]
+async fn session_capability_selection_updates_runtime_snapshot_without_rewriting_preset() {
+    let (svc, _, _) = setup().await;
+    let original_snapshot = make_preset_snapshot("gpt-4o");
+    let conv = svc
+        .create_from_agent_snapshot(USER_ID, make_create_req(), original_snapshot)
+        .await
+        .unwrap();
+
+    let (updated, changed) = svc
+        .replace_agent_session_capability_selection(
+            USER_ID,
+            &conv.conversation_id,
+            &["pdf".to_owned(), "skill-creator".to_owned()],
+            &[],
+            &[],
+        )
+        .await
+        .unwrap();
+
+    assert!(changed);
+    assert_eq!(updated.extra["skills"], json!(["pdf", "skill-creator"]));
+    assert_eq!(updated.extra["mcp_server_ids"], json!([]));
+    assert_eq!(updated.agent_snapshot, conv.agent_snapshot);
+    assert_eq!(updated.preset_id, conv.preset_id);
+    assert_eq!(updated.preset_revision, conv.preset_revision);
+
+    let (_, changed_again) = svc
+        .replace_agent_session_capability_selection(
+            USER_ID,
+            &conv.conversation_id,
+            &["skill-creator".to_owned(), "pdf".to_owned()],
+            &[],
+            &[],
+        )
+        .await
+        .unwrap();
+    assert!(!changed_again, "equivalent selections must not rebuild an idle runtime");
+}
+
+#[tokio::test]
+async fn session_skill_override_is_consumed_without_mutating_the_preset_snapshot() {
+    let (svc, _, _) = setup().await;
+    let mut original_snapshot = make_preset_snapshot("gpt-4o");
+    original_snapshot.included_skills = vec!["preset-only".to_owned()];
+    let mut request = make_create_req();
+    request.extra["session_enabled_skills"] = json!(["pdf"]);
+    request.extra["session_excluded_auto_skills"] = json!([]);
+
+    let created = svc
+        .create_from_agent_snapshot(USER_ID, request, original_snapshot.clone())
+        .await
+        .unwrap();
+
+    assert_eq!(created.extra["skills"], json!(["pdf"]));
+    assert!(created.extra.get("session_enabled_skills").is_none());
+    assert!(created.extra.get("session_excluded_auto_skills").is_none());
+    assert_eq!(
+        created.agent_snapshot.as_ref().unwrap().included_skills,
+        original_snapshot.included_skills
+    );
+
+    let mut untrusted_request = make_create_req();
+    untrusted_request.extra["session_enabled_skills"] = json!(["pdf"]);
+    let error = svc.create(USER_ID, untrusted_request).await.unwrap_err();
+    assert!(matches!(error, AppError::BadRequest(_)));
+}
+
+#[tokio::test]
 async fn update_preset_nomi_allows_conversation_collaboration_and_resource_changes() {
     let (svc, _, runtime_registry) = setup().await;
     let snapshot = make_preset_snapshot("gpt-4o");

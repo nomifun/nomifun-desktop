@@ -503,6 +503,17 @@ export interface CreateAgentSessionRequest {
   preset_id: AgentPresetId;
   title?: string;
   resource_selections?: AgentResourceSelection[];
+  capability_selection?: AgentSessionCapabilitySelection;
+}
+
+/**
+ * Conversation-scoped runtime choices. AgentPreset revisions stay immutable;
+ * this overlay is frozen into the Session before its next turn starts.
+ */
+export interface AgentSessionCapabilitySelection {
+  enabled_skills: string[];
+  excluded_auto_skills: string[];
+  mcp_server_ids: string[];
 }
 
 export interface AgentResourceSelection {
@@ -527,6 +538,16 @@ export interface SwitchAgentSessionPresetResponse {
   agent_binding: AgentBindingValue;
   state: string;
   cursor: SessionCursor;
+}
+
+export interface UpdateAgentSessionCapabilitySelectionRequest {
+  capability_selection: AgentSessionCapabilitySelection;
+}
+
+export interface UpdateAgentSessionCapabilitySelectionResponse {
+  agent_session_id: AgentSessionId;
+  capability_selection: AgentSessionCapabilitySelection;
+  changed: boolean;
 }
 
 export interface CreateAgentSessionTurnRequest {
