@@ -17,6 +17,16 @@ pub struct TagSettingRow {
     pub updated_at: TimestampMs,
 }
 
+/// Partial insert/update. Omitted fields retain their stored value or use
+/// the initial defaults; `Some(None)` explicitly clears the webhook binding.
+#[derive(Default)]
+pub struct TagSettingPatch {
+    pub webhook_id: Option<Option<String>>,
+    pub description: Option<String>,
+    pub notify_events: Option<String>,
+    pub updated_at: TimestampMs,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

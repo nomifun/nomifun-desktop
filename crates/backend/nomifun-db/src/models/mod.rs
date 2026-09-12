@@ -117,11 +117,11 @@ pub use requirement::{NewRequirementRow, RequirementRow, RequirementRowUpdate, R
 pub use skill_tag::{SkillTagRow, UpsertSkillTagParams};
 pub use ssh_host::SshHostRow;
 pub use system_settings::SystemSettings;
-pub use tag_setting::TagSettingRow;
+pub use tag_setting::{TagSettingPatch, TagSettingRow};
 pub use terminal_session::TerminalSessionRow;
 pub use terminal_turn::TerminalTurnAdmissionRow;
 pub use user::User;
-pub use webhook::WebhookRow;
+pub use webhook::{WebhookPatch, WebhookRow};
 pub use workshop::{
     CreationTaskRow, CreativeStudioAgentProposalReceiptRow, CreativeStudioProjectRow,
     CreativeStudioTemplateRow, CreativeStudioTemplateRunRow, WorkshopAssetRow,

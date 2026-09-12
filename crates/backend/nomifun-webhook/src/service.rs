@@ -7,7 +7,7 @@ use nomifun_api_types::{
     WebhookId, WebhookPlatform,
 };
 use nomifun_common::{AppError, now_ms};
-use nomifun_db::models::{TagSettingRow, WebhookRow};
+use nomifun_db::models::{TagSettingPatch, TagSettingRow, WebhookPatch, WebhookRow};
 use nomifun_db::{ITagSettingRepository, IWebhookRepository};
 
 use crate::sender::WebhookSender;
@@ -108,38 +108,21 @@ impl WebhookService {
     }
 
     pub async fn update(&self, webhook_id: &WebhookId, req: UpdateWebhookRequest) -> Result<Webhook, AppError> {
-        let mut row = self
-            .webhooks
-            .get_by_webhook_id(webhook_id.as_str())
-            .await?
-            .ok_or_else(|| AppError::NotFound(format!("webhook {webhook_id}")))?;
-        if let Some(name) = req.name {
-            if name.trim().is_empty() {
-                return Err(AppError::BadRequest("name must not be empty".into()));
-            }
-            row.name = name;
+        if req.name.as_ref().is_some_and(|name| name.trim().is_empty()) {
+            return Err(AppError::BadRequest("name must not be empty".into()));
         }
-        if let Some(url) = req.url {
-            if url.trim().is_empty() {
-                return Err(AppError::BadRequest("url must not be empty".into()));
-            }
-            row.url = url;
+        if req.url.as_ref().is_some_and(|url| url.trim().is_empty()) {
+            return Err(AppError::BadRequest("url must not be empty".into()));
         }
-        if let Some(platform) = req.platform {
-            row.platform = platform.as_db().to_string();
-        }
-        if let Some(description) = req.description {
-            row.description = description;
-        }
-        // `Some(Some(v))` sets, `Some(None)` clears, `None` keeps current.
-        if let Some(secret) = req.secret {
-            row.secret = secret.filter(|s| !s.is_empty());
-        }
-        if let Some(enabled) = req.enabled {
-            row.enabled = enabled;
-        }
-        row.updated_at = now_ms();
-        self.webhooks.update(&row).await?;
+        let row = self.webhooks.update(webhook_id.as_str(), &WebhookPatch {
+            name: req.name,
+            url: req.url,
+            platform: req.platform.map(|platform| platform.as_db().to_owned()),
+            description: req.description,
+            secret: req.secret.map(|secret| secret.filter(|s| !s.is_empty())),
+            enabled: req.enabled,
+            updated_at: now_ms(),
+        }).await?;
         Ok(row_to_dto(&row))
     }
 
@@ -199,49 +182,17 @@ impl WebhookService {
                 "notify_events must contain only done, failed or needs_review".into(),
             ));
         }
-        // Merge onto the existing row so a partial update keeps other fields.
-        let existing = self.tag_settings.get(tag).await?;
-        let webhook_id = match req.webhook_id {
-            Some(v) => v, // Some(Some)=bind, Some(None)=clear
-            None => existing
-                .as_ref()
-                .and_then(|r| r.webhook_id.as_deref())
-                .map(WebhookId::parse)
-                .transpose()
-                .map_err(|error| AppError::Internal(format!(
-                    "invalid persisted webhook_id for tag '{tag}': {error}"
-                )))?,
-        };
-        // If binding a webhook, verify it exists (clean 400 vs a dangling id).
-        if let Some(wh_id) = webhook_id.as_ref()
-            && self
-                .webhooks
-                .get_by_webhook_id(wh_id.as_str())
-                .await?
-                .is_none()
-        {
-            return Err(AppError::BadRequest(format!("webhook {wh_id} does not exist")));
-        }
-        let description = req
-            .description
-            .or_else(|| existing.as_ref().map(|r| r.description.clone()))
-            .unwrap_or_default();
-        let events = req
-            .notify_events
-            .or_else(|| {
-                existing
-                    .as_ref()
-                    .map(|r| r.notify_events.split(',').filter(|s| !s.is_empty()).map(str::to_string).collect())
-            })
-            .unwrap_or_else(default_events);
-        let row = TagSettingRow {
-            tag: tag.to_string(),
-            webhook_id: webhook_id.map(WebhookId::into_string),
-            description,
-            notify_events: events.join(","),
+        let row = self.tag_settings.upsert(tag, &TagSettingPatch {
+            webhook_id: req.webhook_id.map(|id| id.map(WebhookId::into_string)),
+            description: req.description,
+            notify_events: req.notify_events.map(|events| events.join(",")),
             updated_at: now_ms(),
-        };
-        self.tag_settings.upsert(&row).await?;
+        }).await.map_err(|error| match error {
+            // The repository checks the parent under the same write lock as
+            // the patch, preserving the API's invalid-binding response.
+            nomifun_db::DbError::Conflict(message) => AppError::BadRequest(message),
+            error => error.into(),
+        })?;
         Ok(tag_setting_to_dto(&row))
     }
 }
