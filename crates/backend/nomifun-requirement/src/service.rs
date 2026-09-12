@@ -12,7 +12,7 @@ use nomifun_common::{
 use nomifun_db::models::RequirementRowUpdate;
 use nomifun_db::{
     IConversationRepository, IRequirementRepository, ITerminalRepository, ListRequirementsParams,
-    RequirementClaimResolution,
+    RequirementClaim, RequirementClaimResolution,
 };
 use nomifun_terminal::TerminalDriver;
 use tracing::warn;
@@ -636,7 +636,7 @@ impl RequirementService {
             AutoWorkTargetKind::Conversation => (Some(parse_conversation_id(owner_id)?), None),
             AutoWorkTargetKind::Terminal => (None, Some(parse_terminal_id(owner_id)?)),
         };
-        let Some(claim) = self
+        let claim = self
             .repo
             .claim_next_for_runner(
                 tag,
@@ -645,30 +645,8 @@ impl RequirementService {
                 lease_ms,
                 now_ms(),
             )
-            .await?
-        else {
-            return Ok(None);
-        };
-        let claim_token = claim.row.claim_token.clone().ok_or_else(|| {
-            AppError::Internal(format!(
-                "active Requirement {} has no durable claim capability",
-                claim.row.requirement_id
-            ))
-        })?;
-        validate_claim_token(&claim_token).map_err(|_| {
-            AppError::Internal(format!(
-                "active Requirement {} has an invalid durable claim capability",
-                claim.row.requirement_id
-            ))
-        })?;
-        let requirement = row_to_dto(&claim.row);
-        self.emitter.emit_status_changed(&requirement);
-        Ok(Some(AutoWorkClaim {
-            requirement,
-            claim_generation: claim.row.claim_generation,
-            claim_token,
-            recovered_active: claim.recovered_active,
-        }))
+            .await?;
+        self.finish_runner_claim(claim)
     }
 
     /// Recover only an existing active claim. Unlike
@@ -687,7 +665,7 @@ impl RequirementService {
             AutoWorkTargetKind::Conversation => (Some(parse_conversation_id(owner_id)?), None),
             AutoWorkTargetKind::Terminal => (None, Some(parse_terminal_id(owner_id)?)),
         };
-        let Some(claim) = self
+        let claim = self
             .repo
             .recover_active_claim_for_runner(
                 tag,
@@ -696,8 +674,15 @@ impl RequirementService {
                 lease_ms,
                 now_ms(),
             )
-            .await?
-        else {
+            .await?;
+        self.finish_runner_claim(claim)
+    }
+
+    fn finish_runner_claim(
+        &self,
+        claim: Option<RequirementClaim>,
+    ) -> Result<Option<AutoWorkClaim>, AppError> {
+        let Some(claim) = claim else {
             return Ok(None);
         };
         let claim_token = claim.row.claim_token.clone().ok_or_else(|| {
@@ -2731,6 +2716,19 @@ mod tests {
     async fn runner_reentry_renews_the_same_active_claim_generation() {
         let (service, conversation_id, _terminal_id) = service_with_owners().await;
         let requirement = create_req(&service, "restart-safe").await;
+        assert!(
+            service
+                .recover_active_claim_for_runner(
+                    "restart-safe",
+                    &conversation_id,
+                    AutoWorkTargetKind::Conversation,
+                    DEFAULT_LEASE_MS,
+                )
+                .await
+                .unwrap()
+                .is_none(),
+            "recovery must not allocate pending work"
+        );
 
         let first = service
             .claim_next_for_runner(
@@ -2753,28 +2751,25 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert!(
-            !first.recovered_active,
-            "a pending row allocates a fresh delivery generation"
-        );
-        assert!(
-            replay_after_runner_restart.recovered_active,
-            "runner re-entry must be explicitly distinguished from fresh work"
-        );
-        assert_eq!(
-            replay_after_runner_restart.requirement.requirement_id,
-            requirement.requirement_id
-        );
-        assert_eq!(first.claim_generation, 1);
-        assert_eq!(
-            replay_after_runner_restart.claim_generation,
-            first.claim_generation,
-            "a still-live durable claim is one logical delivery attempt"
-        );
-        assert_eq!(
-            replay_after_runner_restart.requirement.attempt_count, 1,
-            "restart re-entry renews the lease without burning retry budget"
-        );
+        assert!(!first.recovered_active, "a pending row allocates a fresh delivery generation");
+        let recovered = service
+            .recover_active_claim_for_runner(
+                "restart-safe",
+                &conversation_id,
+                AutoWorkTargetKind::Conversation,
+                DEFAULT_LEASE_MS,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        for replay in [replay_after_runner_restart, recovered] {
+            assert!(replay.recovered_active, "re-entry is distinguished from fresh work");
+            assert_eq!(replay.requirement.requirement_id, requirement.requirement_id);
+            assert_eq!(first.claim_generation, 1);
+            assert_eq!(replay.claim_generation, first.claim_generation);
+            assert_eq!(replay.claim_token, first.claim_token);
+            assert_eq!(replay.requirement.attempt_count, 1, "recovery must not burn retry budget");
+        }
     }
 
     #[tokio::test]
