@@ -4,6 +4,7 @@
 //! lifecycle. Product identity and execution are delegated to the canonical
 //! AgentPlatform adapter in `canonical.rs`.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -86,7 +87,7 @@ pub(crate) struct McpAuthState {
 #[derive(serde::Deserialize)]
 struct InitializePreflight<'a> {
     #[serde(borrow)]
-    method: &'a str,
+    method: Cow<'a, str>,
 }
 
 fn presented_mcp_session_id(headers: &HeaderMap) -> Result<Option<&str>, ()> {
@@ -137,12 +138,21 @@ pub(crate) async fn initialize_preflight_middleware(
             )
                 .into_response();
         }
-        Ok(Err(_)) => {
-            return (
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "Remote MCP request body exceeds its byte limit",
-            )
-                .into_response();
+        Ok(Err(error)) => {
+            let exceeds_limit = std::error::Error::source(&error)
+                .is_some_and(|source| source.is::<http_body_util::LengthLimitError>());
+            let (status, message) = if exceeds_limit {
+                (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "Remote MCP request body exceeds its byte limit",
+                )
+            } else {
+                (
+                    StatusCode::BAD_REQUEST,
+                    "Remote MCP request body could not be read",
+                )
+            };
+            return (status, message).into_response();
         }
         Ok(Ok(bytes)) => bytes,
     };
@@ -300,6 +310,65 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(downstream_calls.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn initialize_preflight_accepts_json_escaped_method_without_rewriting_body() {
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"\u0069nitialize","params":{}}"#;
+        let app = Router::new()
+            .route("/mcp", axum::routing::post(|body: String| async move { body }))
+            .layer(from_fn(initialize_preflight_middleware));
+        let response = app
+            .oneshot(HttpRequest::post("/mcp").body(Body::from(body)).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(to_bytes(response.into_body(), 1024).await.unwrap(), body);
+    }
+
+    #[tokio::test]
+    async fn preflight_distinguishes_body_read_failure_size_limit_and_timeout() {
+        let app = Router::new()
+            .route("/mcp", axum::routing::post(|| async { "unexpected" }))
+            .layer(from_fn(initialize_preflight_middleware));
+        for session_header in [false, true] {
+            let cases = [
+                (
+                    Body::from_stream(futures::stream::once(async {
+                        Err::<axum::body::Bytes, _>(std::io::Error::other(
+                            "private transport diagnostic",
+                        ))
+                    })),
+                    StatusCode::BAD_REQUEST,
+                    "Remote MCP request body could not be read",
+                ),
+                (
+                    Body::from(vec![b'x'; nomifun_common::constants::BODY_LIMIT + 1]),
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "Remote MCP request body exceeds its byte limit",
+                ),
+                (
+                    Body::from_stream(futures::stream::pending::<
+                        Result<axum::body::Bytes, std::io::Error>,
+                    >()),
+                    StatusCode::REQUEST_TIMEOUT,
+                    "Remote MCP request body read timed out",
+                ),
+            ];
+            for (body, status, message) in cases {
+                let mut request = HttpRequest::post("/mcp");
+                if session_header {
+                    request = request.header("mcp-session-id", "existing-session");
+                }
+                let response = app
+                    .clone()
+                    .oneshot(request.body(body).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), status);
+                assert_eq!(to_bytes(response.into_body(), 1024).await.unwrap(), message);
+            }
+        }
     }
 
     #[tokio::test]
