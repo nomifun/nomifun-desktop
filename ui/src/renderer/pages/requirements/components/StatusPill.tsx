@@ -19,6 +19,13 @@ const STATUS_ORDER: RequirementStatus[] = [
   'cancelled',
 ];
 
+/** Manual transitions accepted by the requirement service; execution owns claims. */
+export function canChangeRequirementStatus(current: RequirementStatus, next: RequirementStatus): boolean {
+  if (current === next || current === 'in_progress' || next === 'in_progress') return false;
+  if (next === 'pending') return current === 'failed' || current === 'needs_review';
+  return current === 'pending' || current === 'needs_review';
+}
+
 /**
  * Per-status accent color, expressed as Arco palette / theme tokens (never hex).
  * `in_progress` follows the theme primary so it doesn't clash with the rose theme,
@@ -35,7 +42,7 @@ const STATUS_ACCENT: Record<RequirementStatus, string> = {
 
 interface StatusPillProps {
   status: RequirementStatus;
-  /** When provided, the pill becomes a clickable dropdown to pick any of the 6 statuses. */
+  /** When provided, offer the current status's permitted manual transitions. */
   onChange?: (next: RequirementStatus) => void;
   size?: 'sm' | 'md';
 }
@@ -44,7 +51,8 @@ const StatusPill: React.FC<StatusPillProps> = ({ status, onChange, size = 'md' }
   const { t } = useTranslation();
 
   const accent = STATUS_ACCENT[status];
-  const interactive = typeof onChange === 'function';
+  const interactive =
+    typeof onChange === 'function' && STATUS_ORDER.some((next) => canChangeRequirementStatus(status, next));
 
   const sizing =
     size === 'sm'
@@ -73,10 +81,11 @@ const StatusPill: React.FC<StatusPillProps> = ({ status, onChange, size = 'md' }
     return (
       <Menu
         onClickMenuItem={(key) => {
-          onChange?.(key as RequirementStatus);
+          const next = key as RequirementStatus;
+          if (canChangeRequirementStatus(status, next)) onChange?.(next);
         }}
       >
-        {STATUS_ORDER.map((s) => (
+        {STATUS_ORDER.filter((next) => canChangeRequirementStatus(status, next)).map((s) => (
           <Menu.Item key={s}>
             <span className='inline-flex items-center gap-8px min-w-120px'>
               <span
@@ -89,7 +98,7 @@ const StatusPill: React.FC<StatusPillProps> = ({ status, onChange, size = 'md' }
         ))}
       </Menu>
     );
-  }, [interactive, onChange, t]);
+  }, [interactive, onChange, status, t]);
 
   if (!interactive || !droplist) {
     return pill;

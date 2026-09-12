@@ -25,7 +25,7 @@
 import React, { useCallback, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
-import { Button } from '@arco-design/web-react';
+import { Button, Result, Spin } from '@arco-design/web-react';
 import { ipcBridge } from '@/common';
 import type { ITagSummary, RequirementOrderBy, RequirementStatus } from '@/common/adapter/ipcBridge';
 import { useArcoMessage } from '@renderer/utils/ui/useArcoMessage';
@@ -41,8 +41,8 @@ import { tryParseEntityId, type RequirementId } from '@/common/types/ids';
 type ViewMode = 'list' | 'board';
 
 const DEFAULT_PAGE_SIZE = 20;
-// Board groups ALL matching items by status client-side, so fetch a large page.
-const BOARD_PAGE_SIZE = 500;
+// The server caps each page at 200; the board follows has_more for all matches.
+const BOARD_PAGE_SIZE = 200;
 
 const WorkspacePage: React.FC = () => {
   const { t } = useTranslation();
@@ -104,17 +104,19 @@ const WorkspacePage: React.FC = () => {
   const clearSelection = useCallback(() => setSelectedIds(new Set()), []);
 
   // ---- Data ----------------------------------------------------------------
-  // Board groups all matching items client-side → fetch a large page and pin
-  // page=1. List uses the paginated page/pageSize.
-  const { items, total, loading, error, refresh } = useRequirements({
-    tag,
-    status,
-    q: search || undefined,
-    order_by: view === 'board' ? undefined : orderBy,
-    order: view === 'board' ? undefined : orderBy ? order : undefined,
-    page: view === 'board' ? 1 : page,
-    page_size: view === 'board' ? BOARD_PAGE_SIZE : pageSize,
-  });
+  // Board collects every matching page. List uses the paginated page/pageSize.
+  const { items, total, loading, error, refresh } = useRequirements(
+    {
+      tag,
+      status,
+      q: search || undefined,
+      order_by: view === 'board' ? undefined : orderBy,
+      order: view === 'board' ? undefined : orderBy ? order : undefined,
+      page: view === 'board' ? 1 : page,
+      page_size: view === 'board' ? BOARD_PAGE_SIZE : pageSize,
+    },
+    view === 'board'
+  );
   const { tags } = useWorkspaceTags();
   const tagOptions: ITagSummary[] = tags;
 
@@ -324,7 +326,19 @@ const WorkspacePage: React.FC = () => {
       {/* The view */}
       <div className={view === 'board' ? 'mt-10px flex flex-1 min-h-0' : 'mt-10px'}>
         {view === 'board' ? (
-          <RequirementBoardView items={items} onOpenDetail={openDetail} onStatusChange={handleRowStatusChange} />
+          loading ? (
+            <div className='flex w-full justify-center py-32px'>
+              <Spin />
+            </div>
+          ) : error ? (
+            <Result
+              status='error'
+              title={t('requirements.loadError')}
+              extra={<Button onClick={() => void refresh()}>{t('requirements.retry')}</Button>}
+            />
+          ) : (
+            <RequirementBoardView items={items} onOpenDetail={openDetail} onStatusChange={handleRowStatusChange} />
+          )
         ) : (
           <RequirementListView
             items={items}
