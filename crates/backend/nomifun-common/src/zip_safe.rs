@@ -18,6 +18,7 @@
 //! validation only — it never writes, so its raw entry names are not paths).
 
 use std::ffi::{OsStr, OsString};
+use std::io::{Read, Write};
 use std::path::{Component, MAIN_SEPARATOR_STR, Path, PathBuf};
 
 /// How `':'` bytes in entry names are treated by [`safe_zip_entry_path`].
@@ -146,6 +147,16 @@ impl std::fmt::Display for ZipBudgetExceeded {
     }
 }
 
+impl std::error::Error for ZipBudgetExceeded {}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ZipCopyError {
+    #[error(transparent)]
+    Budget(#[from] ZipBudgetExceeded),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+
 /// Decompression-bomb budget for one archive extraction: an entry-count cap
 /// checked up front and a cumulative cap on bytes *actually written* — never
 /// trust an entry's self-declared size, bomb archives lie about it.
@@ -191,16 +202,36 @@ impl ZipExtractionBudget {
         Ok(())
     }
 
-    /// Record the bytes actually written for one entry (`io::copy`'s return)
-    /// and fail once the cumulative total passes the cap.
+    /// Charge bytes before writing (or after a separately bounded read).
+    /// A rejected charge leaves the budget unchanged.
     pub fn record_written(&mut self, written: u64) -> Result<(), ZipBudgetExceeded> {
-        self.total_written = self.total_written.saturating_add(written);
-        if self.total_written > self.max_total_uncompressed_bytes {
+        if written > self.max_total_uncompressed_bytes - self.total_written {
             return Err(ZipBudgetExceeded::TotalBytes {
                 max_total_uncompressed_bytes: self.max_total_uncompressed_bytes,
             });
         }
+        self.total_written += written;
         Ok(())
+    }
+
+    /// Copy one entry using actual decompressed bytes, charged before each
+    /// write. Abort extraction on any error; failed writes retain their charge.
+    pub fn copy_entry(
+        &mut self,
+        reader: &mut impl Read,
+        writer: &mut impl Write,
+    ) -> Result<(), ZipCopyError> {
+        let mut buffer = [0_u8; 8192];
+        loop {
+            let read = match reader.read(&mut buffer) {
+                Ok(0) => return Ok(()),
+                Ok(read) => read,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error.into()),
+            };
+            self.record_written(read as u64)?;
+            writer.write_all(&buffer[..read])?;
+        }
     }
 }
 
@@ -374,6 +405,48 @@ mod tests {
         assert!(!zip_entry_is_symlink(Some(0o100644)));
         assert!(!zip_entry_is_symlink(Some(0o040755)));
         assert!(!zip_entry_is_symlink(None));
+    }
+
+    #[test]
+    fn copy_entry_enforces_cumulative_budget_before_writing() {
+        let mut budget = ZipExtractionBudget::new(3, 4);
+        let mut output = Vec::new();
+        budget.copy_entry(&mut &b"ab"[..], &mut output).unwrap();
+        budget.copy_entry(&mut &b"c"[..], &mut output).unwrap();
+        budget.copy_entry(&mut &b""[..], &mut output).unwrap();
+        assert!(matches!(
+            budget.copy_entry(&mut &b"d"[..], &mut output),
+            Err(ZipCopyError::Budget(ZipBudgetExceeded::TotalBytes { .. }))
+        ));
+        assert_eq!(output, b"abc");
+
+        let mut budget = ZipExtractionBudget::new(4096, 4);
+        output.clear();
+        assert!(budget.copy_entry(&mut std::io::repeat(0), &mut output).is_err());
+        assert!(output.len() <= 4096);
+
+        let mut budget = ZipExtractionBudget::new(u64::MAX, 4);
+        budget.record_written(u64::MAX).unwrap();
+        assert!(budget.record_written(1).is_err(), "overflow must not erase the limit");
+    }
+
+    #[test]
+    fn copy_entry_retries_interruption_and_preserves_io_errors() {
+        struct Reader(bool);
+        impl Read for Reader {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if !std::mem::replace(&mut self.0, true) {
+                    return Err(std::io::ErrorKind::Interrupted.into());
+                }
+                buffer[0] = b'x';
+                Ok(1)
+            }
+        }
+        let mut budget = ZipExtractionBudget::new(2, 4);
+        let mut output = [0_u8; 1];
+        let error = budget.copy_entry(&mut Reader(false), &mut output.as_mut_slice()).unwrap_err();
+        assert!(matches!(error, ZipCopyError::Io(ref error) if error.kind() == std::io::ErrorKind::WriteZero));
+        assert_eq!(output, [b'x']);
     }
 
     #[test]

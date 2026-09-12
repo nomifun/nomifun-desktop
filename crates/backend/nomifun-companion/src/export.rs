@@ -1469,12 +1469,19 @@ fn sha256_bytes(bytes: &[u8]) -> String {
 /// bound the extraction.
 /// Returns the manifest `kind` after the format/version checks passed.
 fn extract_zip_validated(archive_path: &Path, destination: &Path) -> Result<String, AppError> {
+    extract_zip_with_budget(archive_path, destination, zip_safe::ZipExtractionBudget::default())
+}
+
+fn extract_zip_with_budget(
+    archive_path: &Path,
+    destination: &Path,
+    mut budget: zip_safe::ZipExtractionBudget,
+) -> Result<String, AppError> {
     let file = std::fs::File::open(archive_path)
         .map_err(|e| AppError::BadRequest(format!("failed to open import file: {e}")))?;
     let mut archive =
         zip::ZipArchive::new(file).map_err(|_| AppError::BadRequest("不是 NomiFun 导出包".into()))?;
 
-    let mut budget = zip_safe::ZipExtractionBudget::default();
     budget
         .check_entry_count(archive.len())
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
@@ -1532,11 +1539,10 @@ fn extract_zip_validated(archive_path: &Path, destination: &Path) -> Result<Stri
         }
         let mut output = std::fs::File::create(&output_path)
             .map_err(|e| AppError::Internal(format!("failed to extract file: {e}")))?;
-        let written = std::io::copy(&mut entry, &mut output)
-            .map_err(|e| AppError::Internal(format!("failed to extract file: {e}")))?;
-        budget
-            .record_written(written)
-            .map_err(|e| AppError::BadRequest(e.to_string()))?;
+        budget.copy_entry(&mut entry, &mut output).map_err(|error| match error {
+            zip_safe::ZipCopyError::Budget(error) => AppError::BadRequest(error.to_string()),
+            zip_safe::ZipCopyError::Io(error) => AppError::Internal(format!("failed to extract file: {error}")),
+        })?;
     }
 
     let manifest_bytes = std::fs::read(destination.join("manifest.json"))
@@ -1695,6 +1701,19 @@ mod tests {
             last_reinforced_at: 3_333,
             companion_id: None,
         }
+    }
+
+    #[test]
+    fn extraction_budget_stops_writes_before_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("large.zip");
+        write_test_zip(&archive, &[("memories.jsonl", &"x".repeat(64 * 1024))]);
+        let destination = tmp.path().join("output");
+        let error = extract_zip_with_budget(
+            &archive, &destination, zip_safe::ZipExtractionBudget::new(4096, 4),
+        ).unwrap_err();
+        assert!(matches!(error, AppError::BadRequest(ref message) if message.contains("decompression bomb")));
+        assert!(std::fs::metadata(destination.join("memories.jsonl")).unwrap().len() <= 4096);
     }
 
     fn write_test_zip(path: &Path, entries: &[(&str, &str)]) {
