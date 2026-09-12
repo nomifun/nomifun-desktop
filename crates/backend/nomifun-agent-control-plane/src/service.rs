@@ -628,10 +628,9 @@ impl AgentControlPlane {
     ) -> Result<AgentPresetEditorResponse, ControlPlaneError> {
         let stored = self.owned_preset(owner, preset_id).await?;
         let revision = match revision_number {
-            Some(number) => self
-                .store
+            Some(number) => Some(self.store
                 .get_revision_number(&stored.preset.preset_id, number)
-                .await?,
+                .await?.ok_or_else(|| not_found("AgentPresetRevision"))?),
             None => match stored.preset.current_stable_revision.as_ref() {
                 Some(reference) => self.store.get_revision(reference).await?,
                 None => None,
@@ -1804,6 +1803,13 @@ mod tests {
                 }).await.unwrap();
                 let revision = control.get_revision(&owner, &created.preset.preset_id, 1).await.unwrap();
                 assert_eq!(revision.document.chat_route_records[CHAT_MODEL_TASK]["primary"]["model"], "explicit-model");
+                let mut draft = created.draft;
+                draft.document.chat_route_records.get_mut(CHAT_MODEL_TASK).unwrap()["primary"]["model"] = json!("edited-model");
+                let preview = control.preview(&owner, &created.preset.preset_id, ResolveAgentPresetPreviewRequest {
+                    expected_current_revision: Some(revision.reference), draft,
+                    scene: SETTINGS_SCENE.into(), surface: SETTINGS_SURFACE.into(), audience: SETTINGS_AUDIENCE.into(),
+                }).await.unwrap();
+                assert!(preview.revision_diff.model_routes_changed);
             }
         }
     }
@@ -2371,6 +2377,10 @@ mod tests {
             .await
             .unwrap();
         let revision = created.revision.as_ref().expect("initial Revision");
+        let missing = control_plane.editor(&owner, &created.preset.preset_id, Some(2))
+            .await.expect_err("an explicit missing Revision must not open a blank draft");
+        assert_eq!(missing.status(), axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(missing.code().as_ref(), "PRESET_REVISION_DIGEST_MISMATCH");
 
         let binding = control_plane
             .resolve_agent_session_binding(&owner, &created.preset.preset_id)
