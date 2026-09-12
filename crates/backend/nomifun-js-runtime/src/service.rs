@@ -229,7 +229,8 @@ impl JavaScriptRuntimeService {
         let selection = self.manager.snapshot().await?;
         require_revision(&selection, request.expected_selection_revision)?;
 
-        let offer = match self.inventory.read().await.offer.clone() {
+        let cached_offer = self.inventory.read().await.offer.clone();
+        let offer = match cached_offer {
             Some(offer) => offer,
             None => {
                 let offer = self.managed.resolve_offer().await?;
@@ -361,13 +362,19 @@ impl JavaScriptRuntimeService {
             .pending_candidate_executable_path
             .clone()
             .ok_or(JavaScriptRuntimeError::CandidateStale)?;
-        let candidate = self
-            .reprobe_exact(&RuntimeCandidate {
-                fingerprint: candidate.clone(),
-                executable_path,
-                disposition: candidate_disposition(candidate),
-            })
-            .await?;
+        let candidate = RuntimeCandidate {
+            fingerprint: candidate.clone(),
+            executable_path,
+            disposition: candidate_disposition(candidate),
+        };
+        // Aborting restores the old selection and must still work when the
+        // pending executable has disappeared or changed since validation.
+        let candidate = match decision {
+            RuntimeSwitchDecision::CommitCandidate => {
+                self.reprobe_exact(&candidate).await?
+            }
+            RuntimeSwitchDecision::AbortAndRestoreSelected => candidate,
+        };
         let switch = Arc::clone(&self.switch);
         let expected_revision = request.expected_selection_revision;
         let saved = tokio::spawn(async move {
@@ -1357,23 +1364,82 @@ mod tests {
             candidate,
             RuntimeSwitchParticipantOutcome::NotCovered,
         );
+        // The first call resolves an uncached offer; the second reuses it.
+        for _ in 0..2 {
+            let error = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                service.confirm_download(ConfirmJavascriptRuntimeDownloadRequest {
+                    expected_selection_revision: 0,
+                    expected_offer_digest: "e".repeat(64),
+                }),
+            )
+            .await
+            .expect("resolving an uncached offer must release the inventory read lock")
+            .unwrap_err();
+            assert!(matches!(error, JavaScriptRuntimeError::DownloadOfferStale));
+            let inventory = service.inventory.read().await;
+            assert!(inventory.offer.is_some());
+            assert_eq!(
+                inventory.download.state,
+                JavascriptRuntimeDownloadStateDto::NotInstalled
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn changed_pending_executable_blocks_commit_but_not_abort() {
+        let candidate = candidate(NodeRuntimeSourceKind::ProcessPath, 24);
+        let runtime_id = candidate.fingerprint.runtime_installation_id.as_ref().to_owned();
+        let digest = candidate.fingerprint.executable_digest.as_ref().to_owned();
+        let mut service = service(
+            candidate.clone(),
+            RuntimeSwitchParticipantOutcome::NotCovered,
+        );
         service
             .probe(ProbeJavascriptRuntimeRequest::AutoDiscover {
                 expected_selection_revision: 0,
             })
             .await
             .unwrap();
-        let error = service
-            .confirm_download(ConfirmJavascriptRuntimeDownloadRequest {
+        let pending = service
+            .begin_switch("owner", BeginJavascriptRuntimeSwitchRequest {
                 expected_selection_revision: 0,
-                expected_offer_digest: "e".repeat(64),
+                expected_selected_runtime_id: None,
+                expected_selected_executable_digest: None,
+                candidate_runtime_id: runtime_id.clone(),
+                expected_candidate_executable_digest: digest.clone(),
+                acknowledge_non_recommended_runtime: false,
             })
             .await
-            .unwrap_err();
-        assert!(matches!(
-            error,
-            JavaScriptRuntimeError::DownloadOfferStale
-        ));
+            .unwrap();
+
+        let mut changed_candidate = candidate.clone();
+        changed_candidate.fingerprint.executable_digest = DigestHex::from("f".repeat(64));
+        Arc::get_mut(&mut service).unwrap().probe = Arc::new(FakeProbe {
+            candidate: changed_candidate,
+            reprobe_path: None,
+        });
+        let request = DecideJavascriptRuntimeSwitchRequest {
+            expected_selection_revision: pending.selection_revision,
+            candidate_runtime_id: runtime_id,
+            expected_candidate_executable_digest: digest,
+            decision: RuntimeSwitchDecisionDto::CommitCandidate,
+        };
+        let error = service.decide_switch(request.clone()).await.unwrap_err();
+        assert!(matches!(error, JavaScriptRuntimeError::CandidateStale));
+        let aborted = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            service.decide_switch(DecideJavascriptRuntimeSwitchRequest {
+                decision: RuntimeSwitchDecisionDto::AbortAndRestoreSelected,
+                ..request
+            }),
+        )
+        .await
+        .expect("abort must not require an executable candidate")
+        .unwrap();
+        assert_eq!(aborted.selection_revision, pending.selection_revision + 1);
+        assert_eq!(aborted.selected, pending.selected);
+        assert!(aborted.pending_candidate.is_none());
     }
 
     #[tokio::test]
