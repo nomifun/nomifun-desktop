@@ -19,11 +19,10 @@ use crate::sender::WebhookSender;
 const MAX_CONTENT_CHARS: usize = 500;
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
+    match s.char_indices().nth(max) {
+        Some((end, _)) => format!("{}…", &s[..end]),
+        None => s.to_string(),
     }
-    let truncated: String = s.chars().take(max).collect();
-    format!("{truncated}…")
 }
 
 /// Human-readable completion status for the 【完成状态】 field.
@@ -31,6 +30,7 @@ fn status_label(status: &str) -> &'static str {
     match status {
         "done" => "已完成 (done)",
         "failed" => "失败 (failed)",
+        "needs_review" => "待审核 (needs_review)",
         "cancelled" => "已取消 (cancelled)",
         _ => "完成 (completed)",
     }
@@ -97,7 +97,7 @@ impl CompletionNotifier for CompletionNotifierImpl {
 
         // Template: 【需求id】【需求名】【需求内容】【完成状态】【完成记录(报告)】
         let fields = vec![
-            ("需求id".to_string(), requirement.id.to_string()),
+            ("需求id".to_string(), requirement.requirement_id.clone()),
             ("需求名".to_string(), requirement.title.clone()),
             (
                 "需求内容".to_string(),
@@ -130,7 +130,7 @@ impl CompletionNotifier for CompletionNotifierImpl {
             // requirement state (and this runs on a detached task anyway).
             tracing::warn!(
                 webhook_id = %webhook.webhook_id,
-                requirement_id = %requirement.id,
+                requirement_id = %requirement.requirement_id,
                 error = %e,
                 "completion webhook delivery failed"
             );

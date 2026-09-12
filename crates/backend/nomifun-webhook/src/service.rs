@@ -192,6 +192,13 @@ impl WebhookService {
         if tag.trim().is_empty() {
             return Err(AppError::BadRequest("tag must not be empty".into()));
         }
+        if req.notify_events.as_ref().is_some_and(|events| {
+            events.iter().any(|event| !matches!(event.as_str(), "done" | "failed" | "needs_review"))
+        }) {
+            return Err(AppError::BadRequest(
+                "notify_events must contain only done, failed or needs_review".into(),
+            ));
+        }
         // Merge onto the existing row so a partial update keeps other fields.
         let existing = self.tag_settings.get(tag).await?;
         let webhook_id = match req.webhook_id {

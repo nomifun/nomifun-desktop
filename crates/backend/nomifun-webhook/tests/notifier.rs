@@ -16,6 +16,7 @@ use nomifun_webhook::{CompletionNotifierImpl, WebhookSender};
 #[derive(Default)]
 struct RecordingSender {
     calls: Mutex<Vec<Vec<(String, String)>>>, // fields per call
+    titles: Mutex<Vec<String>>,
 }
 
 #[async_trait::async_trait]
@@ -25,10 +26,11 @@ impl WebhookSender for RecordingSender {
         _platform: WebhookPlatform,
         _url: &str,
         _secret: Option<&str>,
-        _title: &str,
+        title: &str,
         fields: &[(String, String)],
     ) -> Result<(), nomifun_webhook::WebhookError> {
         self.calls.lock().unwrap().push(fields.to_vec());
+        self.titles.lock().unwrap().push(title.to_string());
         Ok(())
     }
 }
@@ -37,7 +39,7 @@ fn requirement(tag: &str) -> RequirementRow {
     RequirementRow {
         id: 17,
         requirement_id: "0190f5fe-7c00-7a00-8000-000000000017".into(),
-        display_no: 17,
+        display_no: 42,
         title: "Build the thing".into(),
         content: "Implement feature X".into(),
         tag: tag.into(),
@@ -72,7 +74,6 @@ async fn ctx() -> Ctx {
     let db = init_database_memory().await.unwrap();
     let webhooks: Arc<dyn IWebhookRepository> = Arc::new(SqliteWebhookRepository::new(db.pool().clone()));
     let tags: Arc<dyn ITagSettingRepository> = Arc::new(SqliteTagSettingRepository::new(db.pool().clone()));
-    Box::leak(Box::new(db));
     Ctx {
         webhooks,
         tags,
@@ -132,6 +133,34 @@ async fn notifies_bound_enabled_webhook_with_template_fields() {
     assert!(labels.contains(&"需求内容"));
     assert!(labels.contains(&"完成状态"));
     assert!(labels.contains(&"完成记录(报告)"));
+    let id = calls[0].iter().find(|(label, _)| label == "需求id").unwrap();
+    assert_eq!(id.1, requirement("alpha").requirement_id);
+}
+
+#[tokio::test]
+async fn needs_review_is_not_reported_as_completed_and_respects_event_filter() {
+    let ctx = ctx().await;
+    let wh_id = add_webhook(&ctx, true).await;
+    bind_tag(&ctx, "alpha", Some(wh_id)).await;
+    let mut row = requirement("alpha");
+    row.status = "needs_review".into();
+    row.content = "界".repeat(501);
+    row.completion_note = Some("🙂".repeat(500));
+    notifier(&ctx).notify_completion(&row).await;
+    {
+        let calls = ctx.sender.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].contains(&("完成状态".into(), "待审核 (needs_review)".into())));
+        assert!(calls[0].contains(&("需求内容".into(), format!("{}…", "界".repeat(500)))));
+        assert!(calls[0].contains(&("完成记录(报告)".into(), "🙂".repeat(500))));
+    }
+    assert_eq!(ctx.sender.titles.lock().unwrap()[0], "需求待审核 (needs_review): Build the thing");
+
+    let mut setting = ctx.tags.get("alpha").await.unwrap().unwrap();
+    setting.notify_events = "done,failed".into();
+    ctx.tags.upsert(&setting).await.unwrap();
+    notifier(&ctx).notify_completion(&row).await;
+    assert_eq!(ctx.sender.calls.lock().unwrap().len(), 1, "excluded events must not send");
 }
 
 #[tokio::test]
