@@ -16,10 +16,17 @@ import {
   Refresh,
   Time,
 } from '@icon-park/react';
-import { Button, Checkbox, Modal, Progress, Tag } from '@arco-design/web-react';
+import { Button, Checkbox, Progress, Tag } from '@arco-design/web-react';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import CopyIconButton from '@/renderer/components/base/CopyIconButton';
+import {
+  CreativeDetailFacts,
+  CreativeDetailLayout,
+  CreativeDetailModal,
+  CreativeDetailSection,
+  CreativeDetailText,
+} from '../../components/CreativeDetailLayout';
 import { CreativeAssetUnavailable } from '../../assets/components/CreativeAssetUnavailable';
 import {
   nextImageWorkbenchSelection,
@@ -303,116 +310,106 @@ export const ImageResultDetails: React.FC<{ result: ImageWorkbenchResult }> = ({
   const { t } = useTranslation();
   const status = resultStatusLabel(t, result);
   return (
-    <div className={styles.resultDetails} data-image-result-details={result.status}>
-      <div className={styles.detailVisualColumn}>
-        <ResultDetailsVisual result={result} />
-      </div>
-      <div className={styles.detailInfoColumn}>
-        <div className={styles.detailTags}>
+    <CreativeDetailLayout
+      data-image-result-details={result.status}
+      visual={<ResultDetailsVisual result={result} />}
+      badges={(
+        <>
           <Tag color={result.status === 'failed' ? 'red' : result.status === 'succeeded' ? 'green' : 'gray'}>
             {status}
           </Tag>
           <Tag>{result.modelLabel}</Tag>
+        </>
+      )}
+    >
+      <CreativeDetailSection
+        label={t('creativeStudio.image.results.detailPrompt', { defaultValue: '完整提示词' })}
+        action={result.prompt ? (
+          <CopyIconButton
+            text={result.prompt}
+            tooltip={t('creativeStudio.image.results.copyPrompt', {
+              defaultValue: '复制提示词',
+            })}
+            successMessage={t('creativeStudio.image.results.promptCopied', {
+              defaultValue: '提示词已复制',
+            })}
+            size={14}
+          />
+        ) : null}
+      >
+        <CreativeDetailText>{result.prompt || '—'}</CreativeDetailText>
+      </CreativeDetailSection>
+
+      <CreativeDetailFacts>
+        <div>
+          <dt>{t('creativeStudio.image.results.detailStatus', { defaultValue: '状态' })}</dt>
+          <dd>{status}</dd>
         </div>
-
-        <section className={styles.detailSection}>
-          <div className={styles.detailSectionHeading}>
-            <span className={styles.detailSectionLabel}>
-              {t('creativeStudio.image.results.detailPrompt', { defaultValue: '完整提示词' })}
-            </span>
-            {result.prompt ? (
-              <CopyIconButton
-                text={result.prompt}
-                tooltip={t('creativeStudio.image.results.copyPrompt', {
-                  defaultValue: '复制提示词',
-                })}
-                successMessage={t('creativeStudio.image.results.promptCopied', {
-                  defaultValue: '提示词已复制',
-                })}
-                size={14}
-              />
-            ) : null}
-          </div>
-          <p className={styles.detailPrompt}>{result.prompt || '—'}</p>
-        </section>
-
-        <dl className={styles.detailFacts}>
+        <div>
+          <dt>{t('creativeStudio.image.results.detailProvider', { defaultValue: '提供商' })}</dt>
+          <dd>{result.model.providerId}</dd>
+        </div>
+        <div>
+          <dt>{t('creativeStudio.image.results.detailModel', { defaultValue: '模型' })}</dt>
+          <dd>{result.model.model}</dd>
+        </div>
+        {result.createdAtLabel ? (
           <div>
-            <dt>{t('creativeStudio.image.results.detailStatus', { defaultValue: '状态' })}</dt>
-            <dd>{status}</dd>
+            <dt>{t('creativeStudio.image.results.detailCreatedAt', { defaultValue: '生成时间' })}</dt>
+            <dd>{result.createdAtLabel}</dd>
           </div>
+        ) : null}
+        {result.durationLabel ? (
           <div>
-            <dt>{t('creativeStudio.image.results.detailProvider', { defaultValue: '提供商' })}</dt>
-            <dd>{result.model.providerId}</dd>
+            <dt>{t('creativeStudio.image.results.detailDuration', { defaultValue: '耗时' })}</dt>
+            <dd>{result.durationLabel}</dd>
           </div>
+        ) : null}
+        {result.status === 'succeeded' ? (
           <div>
-            <dt>{t('creativeStudio.image.results.detailModel', { defaultValue: '模型' })}</dt>
-            <dd>{result.model.model}</dd>
+            <dt>{t('creativeStudio.image.results.detailOutputCount', { defaultValue: '作品数量' })}</dt>
+            <dd>{result.outputs.length}</dd>
           </div>
-          {result.createdAtLabel ? (
-            <div>
-              <dt>{t('creativeStudio.image.results.detailCreatedAt', { defaultValue: '生成时间' })}</dt>
-              <dd>{result.createdAtLabel}</dd>
-            </div>
-          ) : null}
-          {result.durationLabel ? (
-            <div>
-              <dt>{t('creativeStudio.image.results.detailDuration', { defaultValue: '耗时' })}</dt>
-              <dd>{result.durationLabel}</dd>
-            </div>
-          ) : null}
-          {result.status === 'succeeded' ? (
-            <div>
-              <dt>{t('creativeStudio.image.results.detailOutputCount', { defaultValue: '作品数量' })}</dt>
-              <dd>{result.outputs.length}</dd>
-            </div>
-          ) : null}
-        </dl>
-
-        {result.status === 'succeeded' && result.outputs.length > 0 ? (
-          <section className={styles.detailSection}>
-            <span className={styles.detailSectionLabel}>
-              {t('creativeStudio.image.results.detailFiles', { defaultValue: '图片信息' })}
-            </span>
-            <div className={styles.detailFiles}>
-              {result.outputs.map((output, index) => (
-                <div key={output.assetId}>
-                  <span>
-                    {t('creativeStudio.image.results.detailImageIndex', {
-                      defaultValue: '图片 {{index}}',
-                      index: index + 1,
-                    })}
-                  </span>
-                  <strong>
-                    {output.width && output.height ? `${output.width} × ${output.height}` : '—'}
-                    {output.sizeLabel ? ` · ${output.sizeLabel}` : ''}
-                  </strong>
-                </div>
-              ))}
-            </div>
-          </section>
         ) : null}
+      </CreativeDetailFacts>
 
-        {result.hasDeletedInputs ? (
-          <p className={styles.detailNotice} role='status'>
-            {t('creativeStudio.assets.deletedReference', { defaultValue: '引用素材已删除，请重新选择后再生成。' })}
-          </p>
-        ) : null}
+      {result.status === 'succeeded' && result.outputs.length > 0 ? (
+        <CreativeDetailSection label={t('creativeStudio.image.results.detailFiles', { defaultValue: '图片信息' })}>
+          <div className={styles.detailFiles}>
+            {result.outputs.map((output, index) => (
+              <div key={output.assetId}>
+                <span>
+                  {t('creativeStudio.image.results.detailImageIndex', {
+                    defaultValue: '图片 {{index}}',
+                    index: index + 1,
+                  })}
+                </span>
+                <strong>
+                  {output.width && output.height ? `${output.width} × ${output.height}` : '—'}
+                  {output.sizeLabel ? ` · ${output.sizeLabel}` : ''}
+                </strong>
+              </div>
+            ))}
+          </div>
+        </CreativeDetailSection>
+      ) : null}
 
-        {result.status === 'failed' ? (
-          <section className={styles.detailSection}>
-            <span className={styles.detailSectionLabel}>
-              {t('creativeStudio.image.results.detailError', { defaultValue: '错误详情' })}
-            </span>
-            <pre className={styles.detailError}>
-              {result.errorDetail
-                ? `${result.errorMessage}\n${result.errorDetail}`
-                : result.errorMessage}
-            </pre>
-          </section>
-        ) : null}
-      </div>
-    </div>
+      {result.hasDeletedInputs ? (
+        <p className={styles.detailNotice} role='status'>
+          {t('creativeStudio.assets.deletedReference', { defaultValue: '引用素材已删除，请重新选择后再生成。' })}
+        </p>
+      ) : null}
+
+      {result.status === 'failed' ? (
+        <CreativeDetailSection label={t('creativeStudio.image.results.detailError', { defaultValue: '错误详情' })}>
+          <CreativeDetailText error>
+            {result.errorDetail
+              ? `${result.errorMessage}\n${result.errorDetail}`
+              : result.errorMessage}
+          </CreativeDetailText>
+        </CreativeDetailSection>
+      ) : null}
+    </CreativeDetailLayout>
   );
 };
 
@@ -649,20 +646,13 @@ const ImageWorkbenchResults: React.FC<ImageWorkbenchResultsProps> = ({
           </Button>
         </div>
       ) : null}
-      <Modal
+      <CreativeDetailModal
         visible={openedResult !== null}
         title={t('creativeStudio.image.results.detailTitle', { defaultValue: '作品详情' })}
-        footer={null}
-        style={{ width: 900, maxWidth: 'calc(100vw - 32px)' }}
-        autoFocus={false}
-        unmountOnExit
-        getPopupContainer={() =>
-          document.getElementById('creative-studio-portal-root') ?? document.body
-        }
-        onCancel={() => setOpenedResultId(null)}
+        onClose={() => setOpenedResultId(null)}
       >
         {openedResult ? <ImageResultDetails result={openedResult} /> : null}
-      </Modal>
+      </CreativeDetailModal>
     </section>
   );
 };

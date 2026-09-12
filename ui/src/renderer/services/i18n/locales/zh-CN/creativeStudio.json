@@ -227,6 +227,11 @@
     },
     "preview": {
       "close": "关闭",
+      "createdAt": "创建时间",
+      "dimensions": "尺寸",
+      "fileSize": "文件大小",
+      "format": "文件格式",
+      "updatedAt": "更新时间",
       "collection": "合集：{{collection}}",
       "downloadOriginal": "下载原始文件",
       "kind": "类型：{{kind}}",

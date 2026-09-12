@@ -317,12 +317,14 @@ describe('ImageWorkbench visual states', () => {
     expect(html.includes('复制提示词')).toBe(false);
     const css = readFileSync(new URL('./ImageWorkbench.module.css', import.meta.url), 'utf8');
     expect(/\.resultMedia\s*\{[\s\S]*?width:\s*100%;[\s\S]*?height:\s*auto;/.test(css)).toBe(true);
-    expect(/\.detailInfoColumn\s*\{[\s\S]*?max-height:\s*min\(70vh, 720px\);[\s\S]*?scrollbar-width:\s*none;/.test(css)).toBe(true);
-    expect(/\.detailInfoColumn::-webkit-scrollbar\s*\{[\s\S]*?display:\s*none;/.test(css)).toBe(true);
-    expect(/\.detailFacts\s*\{[\s\S]*?grid-auto-rows:\s*max-content;[\s\S]*?overflow:\s*visible;/.test(css)).toBe(true);
-    expect(/\.detailFacts > div\s*\{[^}]*grid-auto-rows:\s*max-content;[^}]*align-content:\s*start;/.test(css)).toBe(true);
-    expect(/\.detailFacts > div\s*\{[^}]*min-height:/.test(css)).toBe(false);
-    expect(/\.detailFacts dd\s*\{[\s\S]*?overflow:\s*visible;[\s\S]*?white-space:\s*normal;/.test(css)).toBe(true);
+    expect(detailsHtml.includes('data-creative-detail-layout="true"')).toBe(true);
+    const detailCss = readFileSync(new URL('../../components/CreativeDetailLayout.module.css', import.meta.url), 'utf8');
+    expect(/\.detailInfoColumn\s*\{[\s\S]*?max-height:\s*min\(70vh, 720px\);[\s\S]*?scrollbar-width:\s*none;/.test(detailCss)).toBe(true);
+    expect(/\.detailInfoColumn::-webkit-scrollbar\s*\{[\s\S]*?display:\s*none;/.test(detailCss)).toBe(true);
+    expect(/\.detailFacts\s*\{[\s\S]*?grid-auto-rows:\s*max-content;[\s\S]*?overflow:\s*visible;/.test(detailCss)).toBe(true);
+    expect(/\.detailFacts > div\s*\{[^}]*grid-auto-rows:\s*max-content;[^}]*align-content:\s*start;/.test(detailCss)).toBe(true);
+    expect(/\.detailFacts > div\s*\{[^}]*min-height:/.test(detailCss)).toBe(false);
+    expect(/\.detailFacts dd\s*\{[\s\S]*?overflow:\s*visible;[\s\S]*?white-space:\s*normal;/.test(detailCss)).toBe(true);
     expect(html.includes('data:image')).toBe(false);
   });
 
