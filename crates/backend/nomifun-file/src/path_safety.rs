@@ -51,8 +51,9 @@ pub fn validate_path_with_extra_root(
 /// Like [`validate_path`] but the target does not need to exist yet.
 ///
 /// Canonicalizes the *parent directory* and verifies it is within the sandbox,
-/// then appends the file name component. Useful for write/create operations
-/// where the file itself may not exist yet.
+/// then appends the file name component. Existing targets are resolved and
+/// checked too, so a final symlink cannot redirect a write outside the roots.
+/// Dangling links fail closed. This is not a lock against concurrent renames.
 ///
 /// # Errors
 ///
@@ -99,7 +100,13 @@ pub fn validate_path_for_write(path: &str, allowed_roots: &[&Path]) -> Result<Pa
             path
         )));
     }
-    Ok(joined)
+    match std::fs::symlink_metadata(&joined) {
+        Ok(_) => validate_path(path, allowed_roots),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(joined),
+        Err(error) => Err(AppError::BadRequest(format!(
+            "cannot inspect write target '{}': {}", path, error
+        ))),
+    }
 }
 
 /// Reject a file-name component that `Path::join` would not treat as a plain
