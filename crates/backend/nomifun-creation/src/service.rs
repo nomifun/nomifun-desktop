@@ -53,6 +53,9 @@ const DEFAULT_PER_PROVIDER_LIMIT: usize = 3;
 const DEFAULT_GLOBAL_LIMIT: usize = 10;
 /// Default poll interval for async submit→poll protocols.
 const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(2500);
+/// Bound exponential status-query backoff while still allowing an adapter to
+/// declare a longer provider-mandated base interval.
+const MAX_POLL_BACKOFF: Duration = Duration::from_secs(120);
 /// Default total budget for an async task before it is failed as `timeout`.
 const DEFAULT_TASK_TIMEOUT: Duration = Duration::from_secs(600);
 /// Timeout for fetching a URL-form artifact the adapter returned.
@@ -78,6 +81,24 @@ fn checked_creation_input_bytes(current: usize, next: usize) -> Result<usize, Cr
         ));
     }
     Ok(total)
+}
+
+fn rate_limit_poll_backoff(
+    base: Duration,
+    consecutive_rate_limits: u32,
+    retry_after_ms: Option<u64>,
+) -> Duration {
+    // The first 429 doubles the already-safe base cadence. Subsequent 429s
+    // continue exponentially, bounded so a transient throttle cannot make a
+    // healthy job appear hung for the rest of its ten-minute task budget.
+    let multiplier = 1_u32
+        .checked_shl(consecutive_rate_limits.min(30))
+        .unwrap_or(u32::MAX);
+    let fallback = base.saturating_mul(multiplier);
+    let provider_hint = retry_after_ms.map(Duration::from_millis).unwrap_or_default();
+    fallback
+        .max(provider_hint)
+        .min(MAX_POLL_BACKOFF.max(base))
 }
 
 /// The MIME stamped on produced text artifacts (the bridge keys its text-asset
@@ -1711,6 +1732,13 @@ impl CreationService {
         } else {
             job.submitted_at + self.task_timeout.as_millis() as i64
         };
+        let base_poll_interval = invoke
+            .recommended_poll_interval(&handle, req.task())
+            .map_or(self.poll_interval, |provider_interval| {
+                self.poll_interval.max(provider_interval)
+            });
+        let mut next_poll_delay = base_poll_interval;
+        let mut consecutive_rate_limits = 0_u32;
         loop {
             if token.is_cancelled() {
                 return ExecOutcome::Canceled;
@@ -1720,9 +1748,14 @@ impl CreationService {
                     "async task exceeded its poll deadline",
                 ));
             }
+            let remaining_ms = u64::try_from(deadline.saturating_sub(now_ms())).unwrap_or(0);
+            let sleep_delay = next_poll_delay.min(Duration::from_millis(remaining_ms));
             tokio::select! {
                 _ = token.cancelled() => return ExecOutcome::Canceled,
-                _ = tokio::time::sleep(self.poll_interval) => {}
+                _ = tokio::time::sleep(sleep_delay) => {}
+            }
+            if now_ms() >= deadline {
+                continue;
             }
             let poll = tokio::select! {
                 _ = token.cancelled() => return ExecOutcome::Canceled,
@@ -1731,11 +1764,34 @@ impl CreationService {
             match poll {
                 Ok(TaskOutcome::Pending(next)) => {
                     handle = next;
+                    next_poll_delay = base_poll_interval;
+                    consecutive_rate_limits = 0;
                     continue;
                 }
                 Ok(TaskOutcome::Done(result)) => return self.persist_or_fail(job, result).await,
                 Err(e) => {
-                    // Terminal: an upstream 4xx (bad job id / auth), a
+                    // A status-query 429 is transient by definition: retain
+                    // the accepted remote job and retry with Retry-After-aware
+                    // exponential backoff. Treating it as a terminal 4xx loses
+                    // a billable generation that may still complete normally.
+                    if e.kind == InvokeErrorKind::RateLimited || e.http_status == Some(429) {
+                        consecutive_rate_limits = consecutive_rate_limits.saturating_add(1);
+                        next_poll_delay = rate_limit_poll_backoff(
+                            base_poll_interval,
+                            consecutive_rate_limits,
+                            e.retry_after_ms,
+                        );
+                        tracing::warn!(
+                            id = %job.creation_task_id,
+                            error = %e.message,
+                            retry_after_ms = next_poll_delay.as_millis(),
+                            "creation poll rate limited; backing off"
+                        );
+                        continue;
+                    }
+                    next_poll_delay = base_poll_interval;
+                    consecutive_rate_limits = 0;
+                    // Terminal: an upstream non-429 4xx (bad job id / auth), a
                     // JobFailed (the remote job reached a terminal failure
                     // state — the old PollResult::Failed leg), or a catalog
                     // kind (provider/model deleted or retagged mid-poll must
@@ -2297,6 +2353,8 @@ mod tests {
         SubmitError(String),
         /// Pending on submit; return Pending for `pending_polls` polls, then Done.
         AsyncDone { pending_polls: usize },
+        /// First status query is throttled; the next one completes normally.
+        AsyncRateLimitedThenDone,
         /// Pending on submit; never completes (each poll returns Pending).
         AsyncNever,
     }
@@ -2372,7 +2430,9 @@ mod tests {
                 MockBehavior::SubmitError(m) => {
                     Err(InvokeError::new(nomifun_model_invoke::InvokeErrorKind::ProviderError, m.clone()))
                 }
-                MockBehavior::AsyncDone { .. } | MockBehavior::AsyncNever => {
+                MockBehavior::AsyncDone { .. }
+                | MockBehavior::AsyncRateLimitedThenDone
+                | MockBehavior::AsyncNever => {
                     Ok(TaskOutcome::Pending(self.pending_handle()))
                 }
             }
@@ -2394,6 +2454,19 @@ mod tests {
                             mime: Some("video/mp4".into()),
                         }])))
                     }
+                }
+                MockBehavior::AsyncRateLimitedThenDone if n == 0 => Err(
+                    InvokeError::new(
+                        InvokeErrorKind::RateLimited,
+                        "provider returned 429 Too Many Requests: too many video status queries",
+                    )
+                    .with_http_status(429),
+                ),
+                MockBehavior::AsyncRateLimitedThenDone => {
+                    Ok(TaskOutcome::Done(TaskResult::Assets(vec![ProducedAsset {
+                        data: ProducedData::Bytes(valid_mp4()),
+                        mime: Some("video/mp4".into()),
+                    }])))
                 }
                 _ => Ok(TaskOutcome::Pending(job.clone())),
             }
@@ -3615,6 +3688,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn async_task_recovers_from_status_query_rate_limit() {
+        let adapter = MockAdapter::with(
+            "openai.videos",
+            vec![ModelTask::VideoGeneration],
+            MockBehavior::AsyncRateLimitedThenDone,
+        );
+        let h = harness(adapter.clone(), "openai").await;
+        let created = h.svc.create_test_task(new_task(&h.provider_id, "t2v")).await.unwrap();
+        let done = wait_terminal(&h.svc, &created.creation_task_id).await;
+
+        assert_eq!(done.status, "succeeded", "error={:?}", done.error);
+        assert_eq!(done.result_asset_ids.len(), 1);
+        assert_eq!(adapter.poll_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
     async fn submit_error_fails_task() {
         let adapter = MockAdapter::with(
             "openai.images",
@@ -3805,6 +3894,20 @@ mod tests {
         assert_eq!(excessive.kind, "input_batch_too_large");
         let overflow = checked_creation_input_bytes(usize::MAX, 1).unwrap_err();
         assert_eq!(overflow.kind, "input_batch_too_large");
+    }
+
+    #[test]
+    fn poll_rate_limit_backoff_is_exponential_honors_retry_after_and_is_bounded() {
+        let base = Duration::from_secs(10);
+        assert_eq!(rate_limit_poll_backoff(base, 1, None), Duration::from_secs(20));
+        assert_eq!(
+            rate_limit_poll_backoff(base, 2, Some(75_000)),
+            Duration::from_secs(75)
+        );
+        assert_eq!(
+            rate_limit_poll_backoff(base, 30, None),
+            MAX_POLL_BACKOFF
+        );
     }
 
     #[tokio::test]

@@ -214,6 +214,20 @@ impl ModelInvokeService {
         &self.provider_model_capability_repo
     }
 
+    /// Return the owning protocol adapter's minimum status-query interval.
+    /// Unknown or no-longer-compatible jobs deliberately return no hint; the
+    /// subsequent poll still performs the authoritative resume validation.
+    pub fn recommended_poll_interval(
+        &self,
+        job: &JobHandle,
+        task: ModelTask,
+    ) -> Option<Duration> {
+        self.registry
+            .get(&job.adapter_id, task)
+            .ok()
+            .and_then(|adapter| adapter.recommended_poll_interval())
+    }
+
     /// Resolve and validate a catalog model locally without making an upstream
     /// request.  This is the capability-discovery counterpart to [`Self::invoke`]:
     /// it shares the exact provider/model/task/adapter/connection resolver, then
