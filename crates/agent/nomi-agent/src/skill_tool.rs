@@ -298,7 +298,19 @@ impl Tool for SkillTool {
         input["skill"]
             .as_str()
             .and_then(|name| self.find_skill(name))
-            .is_some_and(|skill| skill.execution_context == ExecutionContext::Fork)
+            .is_some_and(|skill| {
+                skill.execution_context == ExecutionContext::Fork
+                    || nomi_skills::shell::has_shell_commands(
+                        &nomi_skills::substitution::substitute_arguments(
+                            &skill.content,
+                            input["args"].as_str(),
+                            &skill.argument_names,
+                            skill.skill_root.as_deref(),
+                            self.session_id.as_deref(),
+                        ),
+                        skill.loaded_from,
+                    )
+            })
     }
 
     fn context_modifier_for(&self, input: &serde_json::Value) -> Option<ContextModifier> {
@@ -320,8 +332,8 @@ impl Tool for SkillTool {
     }
 
     fn category(&self) -> ToolCategory {
-        // Inline mode returns skill content for the model to act on — categorised
-        // as Info since it does not directly modify files or run commands.
+        // Preserve approval/UI categorization. Embedded shell and fork effects
+        // are tracked independently by may_have_workspace_side_effects.
         ToolCategory::Info
     }
 
@@ -443,6 +455,51 @@ mod tests {
         assert!(!tool.may_have_workspace_side_effects(&json!({ "skill": "inline" })));
         assert!(tool.may_have_workspace_side_effects(&json!({ "skill": "fork" })));
         assert_eq!(tool.category(), ToolCategory::Info);
+    }
+
+    #[test]
+    fn inline_side_effect_detection_follows_substitution_and_mcp_boundary() {
+        for (content, args, expected) in [
+            ("plain content", None, false),
+            ("!`echo ok`", None, true),
+            ("```!\necho ok\n```", None, true),
+            ("$ARGUMENTS", Some("!`echo ok`"), true),
+            ("plain content", Some("!`echo ok`"), true),
+            ("x!`echo ok`", None, false),
+            ("!`unterminated", None, false),
+        ] {
+            let mut skill = make_skill("inline", content);
+            let input = json!({"skill": "/inline", "args": args});
+            let tool = tool_with(vec![skill.clone()]);
+            assert_eq!(tool.may_have_workspace_side_effects(&input), expected, "{content:?}");
+            assert_eq!(tool.category_for(&input), ToolCategory::Info);
+            skill.loaded_from = LoadedFrom::Mcp;
+            assert!(!tool_with(vec![skill]).may_have_workspace_side_effects(&input));
+        }
+        let tool = tool_with(vec![]);
+        assert!(!tool.may_have_workspace_side_effects(&json!({"skill": "missing"})));
+    }
+
+    #[tokio::test]
+    async fn inline_side_effects_are_reported_even_when_shell_fails_after_writing() {
+        for fail in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let tool = SkillTool::new(
+                Arc::new(vec![make_skill("inline", "$ARGUMENTS")]),
+                temp.path().to_str().unwrap().into(),
+                SkillPermissionChecker::new(vec![]),
+            );
+            let suffix = if fail { "; exit 7" } else { "" };
+            let input = json!({
+                "skill": "inline",
+                "args": format!("!`echo changed > effect.txt{suffix}`"),
+            });
+            let result = tool.execute(input.clone()).await;
+            assert_eq!(result.is_error, fail, "{}", result.content);
+            assert!(temp.path().join("effect.txt").is_file());
+            // The engine queries this after execution, including failed results.
+            assert!(tool.may_have_workspace_side_effects(&input));
+        }
     }
 
     #[test]
