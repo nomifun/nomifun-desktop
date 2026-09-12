@@ -398,9 +398,21 @@ fn first_requested_protocol(headers: &HeaderMap) -> Option<&str> {
         .filter(|protocol| !protocol.is_empty())
 }
 
+/// Remove the registration even when the upgrade future is cancelled.
+struct SocketRegistration<'a> {
+    manager: &'a WebSocketManager,
+    conn_id: ConnectionId,
+}
+
+impl Drop for SocketRegistration<'_> {
+    fn drop(&mut self) {
+        self.manager.remove_client(self.conn_id);
+    }
+}
+
 /// Post-upgrade connection handler.
 ///
-/// Validates the token, registers the client, spawns send/recv loops.
+/// Validates the token, registers the client, and owns both socket loops.
 async fn handle_socket(socket: WebSocket, token: Option<String>, state: WsHandlerState) {
     let Some(token) = token else {
         send_close_no_token(socket).await;
@@ -413,44 +425,33 @@ async fn handle_socket(socket: WebSocket, token: Option<String>, state: WsHandle
     };
 
     let (tx, rx) = mpsc::channel::<WsOutbound>(PER_CONNECTION_BUFFER);
-    let conn_id = state.manager.add_client(user_id, token, tx);
-    let cancellation = state
-        .manager
-        .connection_cancellation(conn_id)
-        .expect("newly registered websocket has a cancellation signal");
+    let (conn_id, cancellation) = state.manager.register_client(user_id, token, tx);
+    let registration = SocketRegistration {
+        manager: &state.manager,
+        conn_id,
+    };
 
     info!(%conn_id, "websocket connection established");
 
-    let (ws_sender, ws_receiver) = socket.split();
-
-    let mut send_handle = tokio::spawn(send_loop(
-        conn_id,
-        rx,
-        ws_sender,
-        cancellation.clone(),
-    ));
-    let mut send_loop_finished = false;
-    let server_close = tokio::select! {
-        _ = recv_loop(conn_id, ws_receiver, &state) => false,
-        _ = cancellation.cancelled() => true,
-        _ = &mut send_handle => {
-            // A heartbeat policy close is queued before its manager entry is
-            // removed. Once that queue drains, the send loop ending must also
-            // terminate an otherwise-idle receive loop.
-            send_loop_finished = true;
-            false
-        },
-    };
-
-    if server_close {
-        // Let the send loop put a real close frame on the wire. A bounded wait
-        // avoids a stalled socket sink retaining the task indefinitely.
-        let _ = tokio::time::timeout(Duration::from_secs(1), &mut send_handle).await;
+    let (mut ws_sender, ws_receiver) = socket.split();
+    {
+        // Keep both futures in this task: cancelling the upgrade cannot detach
+        // a writer that still owns the socket and outbound queue.
+        let send = send_loop(conn_id, rx, &mut ws_sender, cancellation.clone());
+        tokio::pin!(send);
+        tokio::select! {
+            _ = recv_loop(conn_id, ws_receiver, &state) => {}
+            _ = cancellation.cancelled() => {
+                // Preserve the existing bounded opportunity to send a resync close.
+                let _ = tokio::time::timeout(Duration::from_secs(1), &mut send).await;
+            }
+            _ = &mut send => {}
+        }
     }
-    if !send_loop_finished {
-        send_handle.abort();
-    }
-    state.manager.remove_client(conn_id);
+    // A received Close queues its acknowledgement in tungstenite. Flush it
+    // before dropping the socket, but never wait indefinitely on a slow peer.
+    let _ = tokio::time::timeout(Duration::from_secs(1), ws_sender.close()).await;
+    drop(registration);
     info!(%conn_id, "websocket connection closed");
 }
 
@@ -485,7 +486,7 @@ async fn send_auth_expired_and_close(mut socket: WebSocket) {
 async fn send_loop(
     conn_id: ConnectionId,
     mut rx: mpsc::Receiver<WsOutbound>,
-    mut sender: futures_util::stream::SplitSink<WebSocket, Message>,
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
     cancellation: CancellationToken,
 ) {
     loop {
@@ -504,6 +505,7 @@ async fn send_loop(
                 None => break,
             },
         };
+        let is_close = matches!(&outbound, WsOutbound::Close(..));
         let msg = match outbound {
             WsOutbound::Text(text) => Message::Text(text.into()),
             WsOutbound::Close(code, reason) => Message::Close(Some(CloseFrame {
@@ -513,6 +515,9 @@ async fn send_loop(
         };
         if sender.send(msg).await.is_err() {
             debug!(%conn_id, "send loop: socket write failed, exiting");
+            break;
+        }
+        if is_close {
             break;
         }
     }
@@ -1029,17 +1034,29 @@ mod tests {
         }
     }
 
-    #[test]
-    fn text_message_pong_updates_last_ping() {
+    #[tokio::test]
+    async fn cancelled_connection_future_removes_its_registration() {
         let manager = Arc::new(WebSocketManager::new());
-        let (tx, _rx) = mpsc::channel(PER_CONNECTION_BUFFER);
-        let conn_id = manager.add_client("user".into(), "tok".into(), tx);
-        let state = test_state(manager);
+        let connection_manager = manager.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let (tx, _rx) = mpsc::channel(PER_CONNECTION_BUFFER);
+            let (conn_id, cancellation) = connection_manager.register_client("user".into(), "tok".into(), tx);
+            let _registration = SocketRegistration {
+                manager: &connection_manager,
+                conn_id,
+            };
+            started_tx.send(cancellation).unwrap();
+            std::future::pending::<()>().await;
+        });
+        let cancellation = started_rx.await.unwrap();
+        assert_eq!(manager.client_count(), 1);
 
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        handle.abort();
+        assert!(handle.await.unwrap_err().is_cancelled());
 
-        handle_text_message(conn_id, r#"{"name":"pong","data":{}}"#, &state);
-        // No panic = success (update_last_ping was called)
+        assert_eq!(manager.client_count(), 0);
+        assert!(cancellation.is_cancelled());
     }
 
     #[test]
