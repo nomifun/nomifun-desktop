@@ -26,12 +26,11 @@ use nomifun_system::{ClientPrefService, ProviderService};
 const TEST_KEY: [u8; 32] = [0x42; 32];
 
 /// Real in-memory DB + production adapters + provider/preference services
-/// behind the shell router. The `Database` handle is forgotten (not dropped)
-/// so the in-memory pool stays alive for the test.
+/// behind the shell router. The returned pool and repositories retain the
+/// shared pool without leaking the Database wrapper.
 async fn setup() -> (axum::Router, nomifun_db::SqlitePool) {
     let db = init_database_memory().await.unwrap();
     let pool = db.pool().clone();
-    std::mem::forget(db);
 
     let invoke = Arc::new(ModelInvokeService::new(
         Arc::new(SqliteProviderRepository::new(pool.clone())),

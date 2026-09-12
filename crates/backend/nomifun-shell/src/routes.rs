@@ -20,6 +20,8 @@ use crate::stt::CloudSttRoute;
 /// Hard ceiling on `/api/tts` input length (characters). Mirrors the OpenAI
 /// `/audio/speech` contract's own 4096-character input cap.
 const MAX_TTS_TEXT_CHARS: usize = 4096;
+const MAX_STT_AUDIO_BYTES: usize = 30 * 1024 * 1024;
+const MAX_STT_REQUEST_BYTES: usize = MAX_STT_AUDIO_BYTES + 1024 * 1024;
 
 pub fn shell_routes(state: ShellRouterState) -> Router {
     let shell = Router::new()
@@ -31,10 +33,10 @@ pub fn shell_routes(state: ShellRouterState) -> Router {
         .route("/api/tts", post(text_to_speech));
     let stt = Router::new()
         .route("/api/stt", post(speech_to_text))
-        // Disable the application's 10 MiB extractor default, then make the
-        // transport layer the sole cap: 30 MiB audio plus multipart overhead.
+        // Override the application's 10 MiB extractor default. The transport
+        // caps the whole request; extraction separately caps the audio at 30 MiB.
         .layer(DefaultBodyLimit::disable())
-        .layer(RequestBodyLimitLayer::new(31 * 1024 * 1024));
+        .layer(RequestBodyLimitLayer::new(MAX_STT_REQUEST_BYTES));
     shell.merge(stt).with_state(state)
 }
 
@@ -146,7 +148,20 @@ struct SttMultipartFields {
     language_hint: Option<String>,
 }
 
-async fn extract_stt_multipart(mut multipart: Multipart) -> Result<SttMultipartFields, AppError> {
+fn stt_multipart_error(error: axum::extract::multipart::MultipartError) -> (StatusCode, AppError) {
+    let status = error.status();
+    let message = format!("multipart error: {error}");
+    let error = if status.is_server_error() {
+        AppError::Internal(message)
+    } else {
+        AppError::BadRequest(message)
+    };
+    (status, error)
+}
+
+async fn extract_stt_multipart(
+    mut multipart: Multipart,
+) -> Result<SttMultipartFields, (StatusCode, AppError)> {
     let mut file_data: Option<Vec<u8>> = None;
     let mut file_name: Option<String> = None;
     let mut mime_type: Option<String> = None;
@@ -155,40 +170,28 @@ async fn extract_stt_multipart(mut multipart: Multipart) -> Result<SttMultipartF
     while let Some(field) = multipart
         .next_field()
         .await
-        .map_err(|e| AppError::BadRequest(format!("multipart error: {e}")))?
+        .map_err(stt_multipart_error)?
     {
         let name = field.name().unwrap_or("").to_owned();
         match name.as_str() {
             "file" => {
-                file_data = Some(
-                    field
-                        .bytes()
-                        .await
-                        .map_err(|e| AppError::BadRequest(format!("failed to read file: {e}")))?
-                        .to_vec(),
-                );
+                let bytes = field.bytes().await.map_err(stt_multipart_error)?;
+                if bytes.len() > MAX_STT_AUDIO_BYTES {
+                    return Err((
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        AppError::BadRequest("audio file must not exceed 30 MiB".into()),
+                    ));
+                }
+                file_data = Some(bytes.to_vec());
             }
             "fileName" => {
-                file_name = Some(
-                    field
-                        .text()
-                        .await
-                        .map_err(|e| AppError::BadRequest(format!("failed to read fileName: {e}")))?,
-                );
+                file_name = Some(field.text().await.map_err(stt_multipart_error)?);
             }
             "mimeType" => {
-                mime_type = Some(
-                    field
-                        .text()
-                        .await
-                        .map_err(|e| AppError::BadRequest(format!("failed to read mimeType: {e}")))?,
-                );
+                mime_type = Some(field.text().await.map_err(stt_multipart_error)?);
             }
             "languageHint" => {
-                let text = field
-                    .text()
-                    .await
-                    .map_err(|e| AppError::BadRequest(format!("failed to read languageHint: {e}")))?;
+                let text = field.text().await.map_err(stt_multipart_error)?;
                 if !text.is_empty() {
                     language_hint = Some(text);
                 }
@@ -197,12 +200,15 @@ async fn extract_stt_multipart(mut multipart: Multipart) -> Result<SttMultipartF
         }
     }
 
-    let file_data = file_data.ok_or_else(|| AppError::BadRequest("missing 'file' field".to_owned()))?;
+    let missing_field = |name| {
+        (StatusCode::BAD_REQUEST, AppError::BadRequest(format!("missing '{name}' field")))
+    };
+    let file_data = file_data.ok_or_else(|| missing_field("file"))?;
     // `fileName` stays a required wire field for compatibility, but the invoke
     // layer derives the upload filename from the MIME type, so only presence
     // is validated here.
-    file_name.ok_or_else(|| AppError::BadRequest("missing 'fileName' field".to_owned()))?;
-    let mime_type = mime_type.ok_or_else(|| AppError::BadRequest("missing 'mimeType' field".to_owned()))?;
+    file_name.ok_or_else(|| missing_field("fileName"))?;
+    let mime_type = mime_type.ok_or_else(|| missing_field("mimeType"))?;
 
     Ok(SttMultipartFields {
         file_data,
@@ -215,12 +221,15 @@ async fn speech_to_text(
     State(state): State<ShellRouterState>,
     multipart: Multipart,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<serde_json::Value>)> {
-    let fields = extract_stt_multipart(multipart).await.map_err(|e| {
-        let status = e.status_code();
+    let fields = extract_stt_multipart(multipart).await.map_err(|(status, e)| {
         let body = serde_json::json!({
             "success": false,
             "error": e.to_string(),
-            "code": e.error_code(),
+            "code": if status == StatusCode::PAYLOAD_TOO_LARGE {
+                "PAYLOAD_TOO_LARGE"
+            } else {
+                e.error_code()
+            },
         });
         (status, Json(body))
     })?;
@@ -491,18 +500,35 @@ mod tests {
 
     #[tokio::test]
     async fn stt_route_accepts_body_larger_than_global_ten_mib_limit() {
-        let response = make_router()
-            .oneshot(multipart_request(10 * 1024 * 1024 + 1))
-            .await
-            .unwrap();
-        assert_ne!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-        // The lazy in-memory preference repository used by this unit test can
-        // return 500 before configuration lookup; reaching that handler is the
-        // contract under test (the transport did not reject at 10 MiB).
-        assert!(matches!(
-            response.status(),
-            StatusCode::BAD_REQUEST | StatusCode::INTERNAL_SERVER_ERROR
-        ));
+        for size in [10 * 1024 * 1024 + 1, MAX_STT_AUDIO_BYTES] {
+            let response = make_router().oneshot(multipart_request(size)).await.unwrap();
+            // The lazy database lacks preference tables. Its error proves the
+            // entire multipart body passed validation, including exactly 30 MiB.
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            let body = body_json(response).await;
+            assert_eq!(body["code"], "INTERNAL_ERROR");
+            assert!(body["error"].as_str().unwrap().contains("Failed to get preferences"));
+        }
+    }
+
+    #[tokio::test]
+    async fn stt_oversized_audio_and_chunked_request_both_return_413() {
+        for size in [MAX_STT_AUDIO_BYTES + 1, MAX_STT_REQUEST_BYTES + 1] {
+            let request = multipart_request(size);
+            assert!(!request.headers().contains_key("content-length"));
+            let response = make_router().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+            assert_eq!(body_json(response).await["code"], "PAYLOAD_TOO_LARGE");
+        }
+    }
+
+    #[tokio::test]
+    async fn stt_malformed_multipart_remains_bad_request() {
+        let mut request = multipart_request(1);
+        *request.body_mut() = Body::from("--nomifun-stt-limit-test\r\ninvalid headers");
+        let response = make_router().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body_json(response).await["code"], "BAD_REQUEST");
     }
 
     #[tokio::test]
@@ -525,12 +551,13 @@ mod tests {
             .method("POST")
             .uri("/api/shell/open-file")
             .header("content-type", "application/json")
-            .body(Body::from(r#"{"filePath":"/nonexistent/file.txt"}"#))
+            .body(Body::from(r#"{"file_path":"/nonexistent/file.txt"}"#))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let json = body_json(resp).await;
         assert_eq!(json["success"], false);
+        assert_eq!(json["error"], "Bad request: file not found: /nonexistent/file.txt");
     }
 
     #[tokio::test]
@@ -598,10 +625,11 @@ mod tests {
             .method("POST")
             .uri("/api/shell/open-folder-with")
             .header("content-type", "application/json")
-            .body(Body::from(r#"{"folderPath":"/nonexistent/dir","tool":"explorer"}"#))
+            .body(Body::from(r#"{"folder_path":"/nonexistent/dir","tool":"explorer"}"#))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body_json(resp).await["error"], "Bad request: directory not found: /nonexistent/dir");
     }
 
     #[tokio::test]
@@ -611,9 +639,10 @@ mod tests {
             .method("POST")
             .uri("/api/shell/show-item-in-folder")
             .header("content-type", "application/json")
-            .body(Body::from(r#"{"filePath":"/nonexistent/path"}"#))
+            .body(Body::from(r#"{"file_path":"/nonexistent/path"}"#))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body_json(resp).await["error"], "Bad request: file not found: /nonexistent/path");
     }
 }

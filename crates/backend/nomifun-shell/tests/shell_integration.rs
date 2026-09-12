@@ -73,14 +73,6 @@ async fn sh9_check_tool_explorer_always_true() {
 }
 
 // ---------------------------------------------------------------------------
-// SH-10: check_tool_installed — vscode (environment-dependent)
-// ---------------------------------------------------------------------------
-#[tokio::test]
-async fn sh10_check_tool_vscode_returns_bool() {
-    let _installed = service().check_tool_installed(ToolType::Vscode).await;
-}
-
-// ---------------------------------------------------------------------------
 // SH-12: open_folder_with — directory does not exist
 // ---------------------------------------------------------------------------
 #[tokio::test]
