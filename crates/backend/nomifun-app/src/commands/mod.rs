@@ -28,5 +28,5 @@ pub use open_stdio::run_open_stdio;
 pub use plugin::{run_miniapp, run_plugin};
 pub use remote_cli::run_remote;
 pub use requirement_stdio::run_requirement_stdio;
-pub use server::{run_canonical_server, run_nomi_core_server};
+pub use server::{run_canonical_server, run_nomi_core_server, shutdown_signal};
 pub use terminal_hook::run_terminal_hook;

@@ -367,6 +367,7 @@ async fn serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
+    .with_graceful_shutdown(nomifun_app::commands::shutdown_signal())
     .await
     {
         return Err(match application.close().await {
