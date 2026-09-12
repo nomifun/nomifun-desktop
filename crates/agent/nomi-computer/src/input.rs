@@ -24,6 +24,7 @@ const INPUT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Pause between press and release (and between repeated clicks) so target
 /// apps register distinct events.
 const CLICK_PAUSE: Duration = Duration::from_millis(20);
+const DRAG_STEPS: i64 = 8;
 
 /// Scroll direction accepted by the `scroll` action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,20 +178,12 @@ fn new_enigo() -> Result<Enigo, String> {
     })
 }
 
-fn run_input_task_blocking<T, F>(task: F) -> Result<T, String>
-where
-    T: Send + 'static,
-    F: FnOnce() -> Result<T, String> + Send + 'static,
-{
-    crate::macos_main::run_blocking(task)
-}
-
 fn run_enigo_operation_blocking<T, F>(op: F) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce(&mut Enigo) -> Result<T, String> + Send + 'static,
 {
-    run_input_task_blocking(move || {
+    crate::macos_main::run_blocking(move || {
         let mut enigo = new_enigo()?;
         op(&mut enigo)
     })
@@ -243,6 +236,10 @@ pub async fn click(x: i32, y: i32, button: Button, count: u32) -> Result<(), Str
     .await
 }
 
+fn drag_axis(start: i32, end: i32, step: i64) -> i32 {
+    (i64::from(start) + (i64::from(end) - i64::from(start)) * step / DRAG_STEPS) as i32
+}
+
 /// Press at (start), drag to (end), release. Includes intermediate moves so
 /// apps that track motion register the drag.
 pub async fn drag(start_x: i32, start_y: i32, end_x: i32, end_y: i32) -> Result<(), String> {
@@ -252,18 +249,19 @@ pub async fn drag(start_x: i32, start_y: i32, end_x: i32, end_y: i32) -> Result<
             .button(Button::Left, Direction::Press)
             .map_err(input_err)?;
         std::thread::sleep(CLICK_PAUSE);
-        // A few intermediate steps make drags more reliable than a teleport.
-        const STEPS: i32 = 8;
-        for i in 1..=STEPS {
-            let ix = start_x + (end_x - start_x) * i / STEPS;
-            let iy = start_y + (end_y - start_y) * i / STEPS;
-            move_abs(enigo, ix, iy)?;
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        enigo
+        let movement = (|| {
+            // A few intermediate steps make drags more reliable than a teleport.
+            for i in 1..=DRAG_STEPS {
+                move_abs(enigo, drag_axis(start_x, end_x, i), drag_axis(start_y, end_y, i))?;
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(())
+        })();
+        // Even a failed intermediate move must release the button we pressed.
+        let release = enigo
             .button(Button::Left, Direction::Release)
-            .map_err(input_err)?;
-        Ok(())
+            .map_err(input_err);
+        movement.and(release)
     })
     .await
 }
@@ -335,6 +333,16 @@ pub fn main_display_size_blocking() -> Result<(i32, i32), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drag_interpolation_handles_full_coordinate_range() {
+        assert_eq!(drag_axis(i32::MIN, i32::MAX, 0), i32::MIN);
+        assert_eq!(drag_axis(i32::MIN, i32::MAX, DRAG_STEPS), i32::MAX);
+        assert_eq!(drag_axis(i32::MIN, i32::MAX, DRAG_STEPS / 2), -1);
+        assert_eq!(drag_axis(i32::MAX, i32::MIN, DRAG_STEPS), i32::MIN);
+        assert_eq!(drag_axis(10, 90, 1), 20);
+        assert_eq!(drag_axis(90, 10, 1), 80);
+    }
 
     #[test]
     fn scroll_direction_parses_all_variants() {
