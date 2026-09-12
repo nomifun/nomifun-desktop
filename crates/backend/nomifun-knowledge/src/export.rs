@@ -25,6 +25,7 @@
 use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use nomifun_common::{AppError, KnowledgeBaseId, TimestampMs, now_ms, zip_safe};
 use serde::{Deserialize, Serialize};
@@ -202,25 +203,22 @@ pub async fn import_base(service: &KnowledgeService, src_path: &Path) -> Result<
     // Extraction temp lives next to the managed bases (same volume → the
     // final move is a cheap rename), namespaced to avoid collisions.
     let tmp_root = service.data_dir().join(KB_MANAGED_REL_DIR).join(".import-tmp");
-    let extract_dir = tmp_root.join(format!("kb-{}-{}", std::process::id(), now_ms()));
-    tokio::fs::create_dir_all(&extract_dir)
-        .await
+    tokio::fs::create_dir_all(&tmp_root).await
+        .map_err(|e| AppError::Internal(format!("failed to create import temp root: {e}")))?;
+    let extract_dir = tempfile::Builder::new().prefix("kb-").tempdir_in(&tmp_root)
         .map_err(|e| AppError::Internal(format!("failed to create import temp dir: {e}")))?;
-
-    let result = import_extracted(service, src_path, &extract_dir).await;
-    let _ = tokio::fs::remove_dir_all(&extract_dir).await;
-    let _ = tokio::fs::remove_dir(&tmp_root).await; // best-effort, only when empty
-    result
+    import_extracted(service, src_path, Arc::new(extract_dir)).await
 }
 
 async fn import_extracted(
     service: &KnowledgeService,
     src_path: &Path,
-    extract_dir: &Path,
+    extract_dir: Arc<tempfile::TempDir>,
 ) -> Result<ImportSummary, AppError> {
     let src = src_path.to_path_buf();
-    let dest = extract_dir.to_path_buf();
-    let meta = tokio::task::spawn_blocking(move || extract_zip_validated(&src, &dest))
+    // Blocking work keeps the directory alive if its async caller is cancelled.
+    let dest = Arc::clone(&extract_dir);
+    let meta = tokio::task::spawn_blocking(move || extract_zip_validated(&src, dest.path()))
         .await
         .map_err(|e| AppError::Internal(format!("import task join error: {e}")))??;
 
@@ -241,9 +239,10 @@ async fn import_extracted(
     // source — `extra` starts empty.)
     let info = service.create_base(&final_name, &meta.description, None, None).await?;
 
-    let files_src = extract_dir.join("files");
     let files_dest = PathBuf::from(&info.root_path);
-    let moved = tokio::task::spawn_blocking(move || move_file_tree(&files_src, &files_dest))
+    let moved = tokio::task::spawn_blocking(move || {
+        move_file_tree(&extract_dir.path().join("files"), &files_dest)
+    })
         .await
         .map_err(|e| AppError::Internal(format!("import move task join error: {e}")));
     let file_count = match moved {
@@ -607,6 +606,63 @@ mod tests {
         let err = import_base(&service, &zip_path).await.unwrap_err();
         assert!(matches!(err, AppError::BadRequest(_)), "{err:?}");
         assert!(service.list_bases().await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn cancelled_import_keeps_queued_extraction_alive_until_cleanup() {
+        use futures_util::FutureExt;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all().max_blocking_threads(1).build().unwrap();
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let service = make_service(&dir.path().join("data"));
+            let archive = dir.path().join("input.zip");
+            write_test_zip(&archive, &[("manifest.json", &manifest_json(1, EXPORT_KIND))]);
+            let extraction = Arc::new(tempfile::tempdir_in(dir.path()).unwrap());
+            let output = extraction.path().to_owned();
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            let blocker = tokio::task::spawn_blocking(move || {
+                let _ = started_tx.send(());
+                let _ = release_rx.recv(); // Dropping the sender also releases on test failure.
+            });
+            started_rx.await.unwrap();
+            let mut import = Box::pin(import_extracted(&service, &archive, extraction));
+            assert!(import.as_mut().now_or_never().is_none());
+            drop(import);
+            assert!(output.exists(), "queued extraction must retain its directory");
+            drop(release_tx);
+            blocker.await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while output.exists() { tokio::task::yield_now().await; }
+            }).await.expect("completed extraction must clean up after cancellation");
+            assert!(service.list_bases().await.unwrap().is_empty());
+        });
+    }
+
+    #[tokio::test]
+    async fn concurrent_imports_keep_each_archive_in_its_own_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = make_service(&dir.path().join("data"));
+        let archives: Vec<_> = (0..16).map(|index| {
+            let path = dir.path().join(format!("input-{index}.zip"));
+            let content = format!("document-{index}");
+            write_test_zip(&path, &[
+                ("manifest.json", &manifest_json(1, EXPORT_KIND)),
+                ("meta.json", &serde_json::json!({"name": format!("import-{index}")}).to_string()),
+                ("files/document.md", &content),
+            ]);
+            (path, content)
+        }).collect();
+        let results = futures_util::future::join_all(archives.iter().map(|(path, _)| {
+            import_base(&service, path)
+        })).await;
+        for ((_, expected), imported) in archives.iter().zip(results) {
+            let imported = imported.expect("concurrent import must not share or remove another import's files");
+            assert_eq!(service.read_file(&imported.kb_id, "document.md").await.unwrap().content, *expected);
+        }
+        let tmp_root = service.data_dir().join(KB_MANAGED_REL_DIR).join(".import-tmp");
+        assert_eq!(std::fs::read_dir(tmp_root).unwrap().count(), 0);
     }
 
     #[tokio::test]
