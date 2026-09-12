@@ -158,40 +158,55 @@ impl IMcpServerRepository for SqliteMcpServerRepository {
         mcp_server_id: &str,
         params: UpdateMcpServerParams<'_>,
     ) -> Result<McpServerRow, DbError> {
-        let existing = self
-            .find_by_id_any(mcp_server_id)
-            .await?
-            .ok_or_else(|| DbError::NotFound(format!("MCP server '{mcp_server_id}' not found")))?;
-        let merged = merge_update(existing, params);
+        let mut query = QueryBuilder::new("UPDATE mcp_servers SET updated_at = ");
+        query.push_bind(nomifun_common::now_ms());
+        if let Some(name) = params.name {
+            query.push(", name = ").push_bind(name);
+        }
+        if let Some(description) = params.description {
+            query.push(", description = ").push_bind(description);
+        }
+        if let Some(enabled) = params.enabled {
+            query.push(", enabled = ").push_bind(enabled);
+        }
+        if let Some(transport_type) = params.transport_type {
+            query.push(", transport_type = ").push_bind(transport_type);
+        }
+        if let Some(transport_config) = params.transport_config {
+            query.push(", transport_config = ").push_bind(transport_config);
+        }
+        if let Some(tools) = params.tools {
+            query.push(", tools = ").push_bind(tools);
+        }
+        if let Some(original_json) = params.original_json {
+            query.push(", original_json = ").push_bind(original_json);
+        }
+        if let Some(builtin) = params.builtin {
+            query.push(", builtin = ").push_bind(builtin);
+        }
+        if let Some(deleted_at) = params.deleted_at {
+            query.push(", deleted_at = ").push_bind(deleted_at);
+        }
+        query
+            .push(" WHERE mcp_server_id = ")
+            .push_bind(mcp_server_id)
+            .push(" RETURNING ")
+            .push(MCP_SERVER_COLUMNS);
 
-        sqlx::query(
-            "UPDATE mcp_servers SET \
-                name = ?, description = ?, enabled = ?, transport_type = ?, \
-                transport_config = ?, tools = ?, original_json = ?, \
-                builtin = ?, deleted_at = ?, updated_at = ? \
-             WHERE mcp_server_id = ?",
-        )
-        .bind(&merged.name)
-        .bind(&merged.description)
-        .bind(merged.enabled)
-        .bind(&merged.transport_type)
-        .bind(&merged.transport_config)
-        .bind(&merged.tools)
-        .bind(&merged.original_json)
-        .bind(merged.builtin)
-        .bind(merged.deleted_at)
-        .bind(merged.updated_at)
-        .bind(mcp_server_id)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| match &e {
-            sqlx::Error::Database(db_err) if is_unique_violation(db_err.as_ref()) => {
-                DbError::Conflict(format!("MCP server name '{}' already exists", merged.name))
-            }
-            _ => DbError::Query(e),
-        })?;
-
-        Ok(merged)
+        query
+            .build_query_as::<McpServerRow>()
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| match &e {
+                sqlx::Error::Database(db_err) if is_unique_violation(db_err.as_ref()) => {
+                    DbError::Conflict(params.name.map_or_else(
+                        || "MCP server name already exists".to_owned(),
+                        |name| format!("MCP server name '{name}' already exists"),
+                    ))
+                }
+                _ => DbError::Query(e),
+            })?
+            .ok_or_else(|| DbError::NotFound(format!("MCP server '{mcp_server_id}' not found")))
     }
 
     async fn delete(&self, mcp_server_id: &str) -> Result<(), DbError> {
@@ -296,31 +311,6 @@ impl IMcpServerRepository for SqliteMcpServerRepository {
     }
 }
 
-fn merge_update(existing: McpServerRow, params: UpdateMcpServerParams<'_>) -> McpServerRow {
-    let now = nomifun_common::now_ms();
-    McpServerRow {
-        mcp_server_id: existing.mcp_server_id,
-        name: params.name.unwrap_or(&existing.name).to_string(),
-        description: params.description.map_or(existing.description, |v| v.map(String::from)),
-        enabled: params.enabled.unwrap_or(existing.enabled),
-        transport_type: params.transport_type.unwrap_or(&existing.transport_type).to_string(),
-        transport_config: params
-            .transport_config
-            .unwrap_or(&existing.transport_config)
-            .to_string(),
-        tools: params.tools.map_or(existing.tools, |v| v.map(String::from)),
-        last_test_status: existing.last_test_status,
-        last_connected: existing.last_connected,
-        original_json: params
-            .original_json
-            .map_or(existing.original_json, |v| v.map(String::from)),
-        builtin: params.builtin.unwrap_or(existing.builtin),
-        deleted_at: params.deleted_at.unwrap_or(existing.deleted_at),
-        created_at: existing.created_at,
-        updated_at: now,
-    }
-}
-
 fn is_unique_violation(err: &dyn sqlx::error::DatabaseError) -> bool {
     err.code().is_some_and(|c| c == "2067")
 }
@@ -329,6 +319,8 @@ fn is_unique_violation(err: &dyn sqlx::error::DatabaseError) -> bool {
 mod tests {
     use super::*;
     use crate::init_database_memory;
+    use std::future::poll_fn;
+    use std::task::Poll;
 
     async fn setup() -> (SqliteMcpServerRepository, crate::Database) {
         let db = init_database_memory().await.unwrap();
@@ -446,21 +438,68 @@ mod tests {
         let (repo, _db) = setup().await;
         let created = repo.create(stdio_params()).await.unwrap();
 
-        let updated = repo
-            .update(
-                &created.mcp_server_id,
-                UpdateMcpServerParams {
-                    enabled: Some(true),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
+        let held = repo.pool.acquire().await.unwrap();
+        let mut enable = repo.update(
+            &created.mcp_server_id,
+            UpdateMcpServerParams {
+                enabled: Some(true),
+                ..Default::default()
+            },
+        );
+        let mut describe = repo.update(
+            &created.mcp_server_id,
+            UpdateMcpServerParams {
+                description: Some(Some("concurrent description")),
+                ..Default::default()
+            },
+        );
+        // Queue both operations on the single connection before releasing it.
+        // FIFO acquisition forces the old implementation to read both stale
+        // snapshots before either UPDATE. Disable cooperative early yielding
+        // so Pending here means waiting for the held connection.
+        tokio::task::unconstrained(poll_fn(|cx| {
+            assert!(enable.as_mut().poll(cx).is_pending());
+            assert!(describe.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        }))
+        .await;
+        drop(held);
+        let (updated, described) = tokio::join!(enable, describe);
+        let updated = updated.unwrap();
+        let described = described.unwrap();
 
         assert!(updated.enabled);
+        assert!(described.enabled);
+        assert_eq!(described.description.as_deref(), Some("concurrent description"));
         assert_eq!(updated.name, "test-mcp");
         assert_eq!(updated.transport_type, "stdio");
         assert!(updated.updated_at >= created.updated_at);
+        let found = repo.find_by_id(&created.mcp_server_id).await.unwrap().unwrap();
+        assert!(found.enabled);
+        assert_eq!(found.description, described.description);
+    }
+
+    #[tokio::test]
+    async fn update_empty_patch_refreshes_timestamp() {
+        let (repo, _db) = setup().await;
+        let created = repo.create(stdio_params()).await.unwrap();
+        sqlx::query("UPDATE mcp_servers SET updated_at = 1 WHERE mcp_server_id = ?")
+            .bind(&created.mcp_server_id)
+            .execute(&repo.pool)
+            .await
+            .unwrap();
+
+        let updated = repo
+            .update(&created.mcp_server_id, UpdateMcpServerParams::default())
+            .await
+            .unwrap();
+        assert!(updated.updated_at > 1);
+        assert_eq!(updated.created_at, created.created_at);
+        assert_eq!(updated.description, created.description);
+        assert_eq!(
+            repo.find_by_id(&created.mcp_server_id).await.unwrap().unwrap().updated_at,
+            updated.updated_at
+        );
     }
 
     #[tokio::test]
@@ -479,7 +518,8 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(matches!(err, DbError::Conflict(_)));
+        assert!(matches!(err, DbError::Conflict(ref message)
+            if message == "MCP server name 'test-mcp' already exists"));
     }
 
     #[tokio::test]
@@ -488,12 +528,32 @@ mod tests {
         let created = repo.create(stdio_params()).await.unwrap();
         assert!(created.description.is_some());
 
+        let populated = repo
+            .update(
+                &created.mcp_server_id,
+                UpdateMcpServerParams {
+                    description: Some(Some("changed description")),
+                    tools: Some(Some("[]")),
+                    original_json: Some(Some("{}")),
+                    deleted_at: Some(Some(1234)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(populated.description.as_deref(), Some("changed description"));
+        assert_eq!(populated.tools.as_deref(), Some("[]"));
+        assert_eq!(populated.original_json.as_deref(), Some("{}"));
+        assert_eq!(populated.deleted_at, Some(1234));
+
         let updated = repo
             .update(
                 &created.mcp_server_id,
                 UpdateMcpServerParams {
                     description: Some(None),
+                    tools: Some(None),
                     original_json: Some(None),
+                    deleted_at: Some(None),
                     ..Default::default()
                 },
             )
@@ -501,7 +561,9 @@ mod tests {
             .unwrap();
 
         assert!(updated.description.is_none());
+        assert!(updated.tools.is_none());
         assert!(updated.original_json.is_none());
+        assert!(updated.deleted_at.is_none());
     }
 
     #[tokio::test]
@@ -517,10 +579,61 @@ mod tests {
     #[tokio::test]
     async fn delete_existing() {
         let (repo, _db) = setup().await;
-        let created = repo.create(stdio_params()).await.unwrap();
+        let created = repo.create(http_params()).await.unwrap();
 
-        repo.delete(&created.mcp_server_id).await.unwrap();
+        let held = repo.pool.acquire().await.unwrap();
+        let mut update = repo.update(
+            &created.mcp_server_id,
+            UpdateMcpServerParams {
+                description: Some(Some("edited before deletion")),
+                ..Default::default()
+            },
+        );
+        let mut delete = repo.delete(&created.mcp_server_id);
+        // With the old read/merge/write path, FIFO puts the complete delete
+        // transaction between update's SELECT and its stale full-row UPDATE.
+        tokio::task::unconstrained(poll_fn(|cx| {
+            assert!(update.as_mut().poll(cx).is_pending());
+            assert!(delete.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        }))
+        .await;
+        drop(held);
+        let (updated, deleted) = tokio::join!(update, delete);
+        updated.unwrap();
+        deleted.unwrap();
         assert!(repo.find_by_id(&created.mcp_server_id).await.unwrap().is_none());
+        let deleted = repo.find_by_id_any(&created.mcp_server_id).await.unwrap().unwrap();
+        assert!(deleted.deleted_at.is_some());
+        assert!(!deleted.enabled);
+
+        let edited = repo
+            .update(
+                &created.mcp_server_id,
+                UpdateMcpServerParams {
+                    description: Some(Some("edited while deleted")),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(edited.deleted_at, deleted.deleted_at);
+        assert!(!edited.enabled);
+
+        let restored = repo
+            .update(
+                &created.mcp_server_id,
+                UpdateMcpServerParams {
+                    deleted_at: Some(None),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(restored.deleted_at.is_none());
+        assert!(!restored.enabled);
+        assert_eq!(restored.description, edited.description);
+        assert!(repo.find_by_id(&created.mcp_server_id).await.unwrap().is_some());
     }
 
     #[tokio::test]
