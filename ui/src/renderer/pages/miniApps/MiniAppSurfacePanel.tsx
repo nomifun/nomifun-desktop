@@ -24,9 +24,10 @@ import React, {
 } from 'react';
 import { useTranslation } from 'react-i18next';
 import { miniAppSurfaceAssetPath, shortMiniAppIdentity } from './model';
-import styles from './MiniAppWorkbench.module.css';
+import styles from './MiniAppSurface.module.css';
 
 interface MiniAppSurfacePanelProps {
+  compact?: boolean;
   descriptor: MiniAppSurfaceLaunchDescriptor;
   displayName: string;
   reloading: boolean;
@@ -140,6 +141,7 @@ function bridgeFailure(error: unknown): { code: string; message: string } {
 }
 
 const MiniAppSurfacePanel: React.FC<MiniAppSurfacePanelProps> = ({
+  compact = false,
   descriptor,
   displayName,
   reloading,
@@ -439,11 +441,12 @@ const MiniAppSurfacePanel: React.FC<MiniAppSurfacePanelProps> = ({
   return (
     <section
       className={styles.surfaceSection}
-      aria-labelledby='miniapp-surface-title'
-      aria-describedby='miniapp-surface-hint'
+      aria-labelledby={compact ? undefined : 'miniapp-surface-title'}
+      aria-label={compact ? displayName : undefined}
+      aria-describedby={compact ? undefined : 'miniapp-surface-hint'}
       aria-busy={reloading || closing || frameLoading || undefined}
     >
-      <header className={styles.surfaceHeader}>
+      {!compact && <header className={styles.surfaceHeader}>
         <div className={styles.surfaceHeading}>
           <h3 id='miniapp-surface-title' className={styles.sectionTitle}>
             {t('miniApps.surface.title')}
@@ -462,12 +465,12 @@ const MiniAppSurfacePanel: React.FC<MiniAppSurfacePanelProps> = ({
           <Button
             size='small'
             icon={<Refresh theme='outline' size='14' />}
-            aria-label={`${t('miniApps.actions.reloadSurface')}: ${displayName}`}
+            aria-label={`${t(compact ? 'miniApps.product.retry' : 'miniApps.actions.reloadSurface')}: ${displayName}`}
             loading={reloading}
             disabled={reloading || closing}
             onClick={handleReload}
           >
-            {t('miniApps.actions.reloadSurface')}
+            {t(compact ? 'miniApps.product.retry' : 'miniApps.actions.reloadSurface')}
           </Button>
           <Button
             size='small'
@@ -480,7 +483,7 @@ const MiniAppSurfacePanel: React.FC<MiniAppSurfacePanelProps> = ({
             {t('miniApps.actions.closeSurface')}
           </Button>
         </div>
-      </header>
+      </header>}
 
       <div className={styles.surfaceViewport}>
         {!source || frameFailed ? (
@@ -490,20 +493,20 @@ const MiniAppSurfacePanel: React.FC<MiniAppSurfacePanelProps> = ({
             aria-live='assertive'
           >
             <span className={styles.stateTitle}>
-              {t('miniApps.errors.surfaceFrameTitle')}
+              {t(compact ? 'miniApps.product.openFailed' : 'miniApps.errors.surfaceFrameTitle')}
             </span>
             <span className={styles.stateBody}>
-              {t('miniApps.errors.surfaceFrameBody')}
+              {t(compact ? 'miniApps.product.operationFailed' : 'miniApps.errors.surfaceFrameBody')}
             </span>
             <Button
               size='small'
               icon={<Refresh theme='outline' size='14' />}
-              aria-label={`${t('miniApps.actions.reloadSurface')}: ${displayName}`}
+              aria-label={`${t(compact ? 'miniApps.product.retry' : 'miniApps.actions.reloadSurface')}: ${displayName}`}
               loading={reloading}
               disabled={reloading || closing}
               onClick={handleReload}
             >
-              {t('miniApps.actions.reloadSurface')}
+              {t(compact ? 'miniApps.product.retry' : 'miniApps.actions.reloadSurface')}
             </Button>
           </div>
         ) : (
@@ -518,6 +521,7 @@ const MiniAppSurfacePanel: React.FC<MiniAppSurfacePanelProps> = ({
               ref={iframeRef}
               key={`${bridgeDescriptorKey}:${frameGeneration}`}
               className={styles.surfaceFrame}
+              style={compact ? { minHeight: 'calc(100dvh - 190px)' } : undefined}
               src={source}
               sandbox='allow-scripts allow-forms'
               referrerPolicy='no-referrer'

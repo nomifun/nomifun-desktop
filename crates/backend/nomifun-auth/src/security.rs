@@ -47,6 +47,28 @@ macro_rules! app_frame_ancestor_sources {
 
 const OFFICE_FRAME_ANCESTORS: &str = concat!("frame-ancestors ", app_frame_ancestor_sources!());
 
+/// Isolated debug worktrees may use a different Vite port. Only an explicitly
+/// configured loopback HTTP origin can extend the debug frame policy.
+#[cfg(debug_assertions)]
+fn debug_frame_origin(value: &str) -> Option<&str> {
+    let uri: axum::http::Uri = value.parse().ok()?;
+    (uri.scheme_str() == Some("http")
+        && matches!(uri.host(), Some("localhost" | "127.0.0.1"))
+        && uri.port_u16().is_some_and(|port| port > 0)
+        && uri.path() == "/" && uri.query().is_none())
+        .then_some(value.trim_end_matches('/'))
+}
+
+fn frame_ancestors() -> String {
+    #[cfg(debug_assertions)]
+    if let Ok(value) = std::env::var("NOMIFUN_DEV_ORIGIN") {
+        if let Some(origin) = debug_frame_origin(&value) {
+            return format!("{OFFICE_FRAME_ANCESTORS} {origin}");
+        }
+    }
+    OFFICE_FRAME_ANCESTORS.to_owned()
+}
+
 fn is_office_preview_capability_path(path: &str) -> bool {
     let mut segments = path.split('/');
     matches!(
@@ -71,6 +93,7 @@ fn is_miniapp_surface_capability_path(path: &str) -> bool {
 }
 
 fn replace_frame_ancestors(policy: &str) -> String {
+    let ancestors = frame_ancestors();
     let mut directives: Vec<&str> = policy
         .split(';')
         .map(str::trim)
@@ -82,7 +105,7 @@ fn replace_frame_ancestors(policy: &str) -> String {
                 .is_some_and(|name| name.eq_ignore_ascii_case("frame-ancestors"))
         })
         .collect();
-    directives.push(OFFICE_FRAME_ANCESTORS);
+    directives.push(&ancestors);
     directives.join("; ")
 }
 
@@ -103,7 +126,7 @@ fn apply_office_frame_policy(headers: &mut HeaderMap) {
     if upstream_policies.is_empty() {
         headers.insert(
             CONTENT_SECURITY_POLICY.clone(),
-            HeaderValue::from_static(OFFICE_FRAME_ANCESTORS),
+            HeaderValue::from_str(&frame_ancestors()).expect("validated frame origins"),
         );
         return;
     }
@@ -117,7 +140,7 @@ fn apply_office_frame_policy(headers: &mut HeaderMap) {
     if !headers.contains_key(&CONTENT_SECURITY_POLICY) {
         headers.insert(
             CONTENT_SECURITY_POLICY.clone(),
-            HeaderValue::from_static(OFFICE_FRAME_ANCESTORS),
+            HeaderValue::from_str(&frame_ancestors()).expect("validated frame origins"),
         );
     }
 }
@@ -165,6 +188,15 @@ pub async fn security_headers_middleware(request: Request, next: Next) -> Respon
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[cfg(debug_assertions)]
+    fn isolated_debug_origin_requires_an_explicit_loopback_http_port() {
+        assert_eq!(debug_frame_origin("http://127.0.0.1:5197"), Some("http://127.0.0.1:5197"));
+        assert_eq!(debug_frame_origin("http://localhost:5197/"), Some("http://localhost:5197"));
+        for origin in ["https://evil.example", "http://127.0.0.1.evil.example:5197", "http://localhost", "http://localhost:0", "http://localhost:5197/path", "http://localhost:5197/?x=1", "http://localhost:5197\r\nX-Test: injected"] {
+            assert!(debug_frame_origin(origin).is_none(), "{origin:?}");
+        }
+    }
     use axum::body::Body;
     use axum::routing::get;
     use axum::{Router, middleware};

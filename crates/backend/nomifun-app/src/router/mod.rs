@@ -42,6 +42,7 @@ mod health;
 mod javascript_runtime;
 mod knowledge_registration;
 mod miniapp_m1;
+mod miniapp_product;
 mod model_failover;
 mod routes;
 mod state;
