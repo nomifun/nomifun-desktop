@@ -615,18 +615,22 @@ impl LlmProvider for OpenAIResponsesProvider {
         }
 
         let (tx, rx) = mpsc::channel(64);
-        let client = client.clone();
-        let url_clone = url.clone();
         let redactor = nomifun_net::secret_redaction::SecretRedactor::new(&self.api_keys);
         tokio::spawn(async move {
-            let outcome = process_sse_stream(response, &tx, retain).await;
+            let Some(outcome) = crate::retry::until_receiver_closed(
+                &tx,
+                process_sse_stream(response, &tx, retain),
+            )
+            .await else {
+                return;
+            };
             crate::retry::finish_stream_with_retry(
                 outcome,
                 &tx,
                 || {
                     crate::retry::send_and_check(
                         &client,
-                        &url_clone,
+                        &url,
                         &headers,
                         &body,
                         &redactor,
