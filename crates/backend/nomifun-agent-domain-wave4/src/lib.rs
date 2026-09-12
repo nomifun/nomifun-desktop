@@ -1258,40 +1258,40 @@ pub fn resource_descriptors() -> Vec<TypedResourceDescriptor> {
 pub fn canonical_resource_bindings(owner_id: impl Into<String>) -> Vec<TypedResourceBinding> {
     let owner_id = owner_id.into();
     vec![
-        resource_binding(
+        typed_resource_binding(
             "wave4-channel",
             CHANNEL_RESOURCE_KIND,
             "channel",
-            &["manage", "receive", "reply", "send"],
             &owner_id,
+            ["manage", "receive", "reply", "send"],
         ),
-        resource_binding(
+        typed_resource_binding(
             "wave4-companion",
             COMPANION_RESOURCE_KIND,
             "companion",
-            &["read", "write"],
             &owner_id,
+            ["read", "write"],
         ),
-        resource_binding(
+        typed_resource_binding(
             "wave4-companion-memory",
             COMPANION_MEMORY_RESOURCE_KIND,
             "companion-memory",
-            &["read", "write"],
             &owner_id,
+            ["read", "write"],
         ),
-        resource_binding(
+        typed_resource_binding(
             "wave4-customer",
             CUSTOMER_RESOURCE_KIND,
             "customer",
-            &["read", "write"],
             &owner_id,
+            ["read", "write"],
         ),
-        resource_binding(
+        typed_resource_binding(
             "wave4-robot",
             ROBOT_RESOURCE_KIND,
             "robot",
-            &["audio", "display", "link", "motion", "vision"],
             &owner_id,
+            ["audio", "display", "link", "motion", "vision"],
         ),
     ]
 }
@@ -1323,25 +1323,6 @@ where
         connection_config_ref: None,
         typed_parameters: BTreeMap::new(),
     }
-}
-
-/// Build multiple typed bindings from caller-owned slot metadata.
-pub fn typed_resource_bindings_for<'a>(
-    owner_id: &str,
-    entries: impl IntoIterator<Item = (&'a str, &'a str, &'a str, &'a [&'a str])>,
-) -> TypedResourceBindings {
-    entries
-        .into_iter()
-        .map(|(binding_id, resource_kind, resource_id, operations)| {
-            typed_resource_binding(
-                binding_id,
-                resource_kind,
-                resource_id,
-                owner_id,
-                operations.iter().copied(),
-            )
-        })
-        .collect()
 }
 
 /// Return the resource kinds required by one target capability.
@@ -1832,27 +1813,6 @@ fn action_id_for(capability_id: &str) -> ActionId {
     ActionId::from(format!("{capability_id}.invoke"))
 }
 
-fn resource_binding(
-    binding_id: &str,
-    resource_kind: &str,
-    resource_id: &str,
-    operations: &[&str],
-    owner_id: &str,
-) -> TypedResourceBinding {
-    TypedResourceBinding {
-        binding_id: ResourceBindingId::from(binding_id),
-        resource_kind: ResourceKind::from(resource_kind),
-        resource_id: ResourceId::from(resource_id),
-        owner_id: owner_id.to_owned(),
-        operations: operations
-            .iter()
-            .map(|operation| (*operation).to_owned())
-            .collect(),
-        connection_config_ref: None,
-        typed_parameters: BTreeMap::new(),
-    }
-}
-
 fn descriptor<const N: usize>(
     slot_key: &'static str,
     resource_kind: &'static str,
@@ -2020,31 +1980,14 @@ fn context_output_schema(capability_id: &str) -> StrictJsonValue {
 }
 
 fn object_schema(additional_properties: bool) -> StrictJsonValue {
-    let mut value = empty_object();
-    let object = value
-        .0
-        .as_object_mut()
-        .expect("empty_object always returns a JSON object");
-    object.insert("type".to_owned(), "object".to_owned().into());
-    object.insert(
-        "additionalProperties".to_owned(),
-        additional_properties.into(),
-    );
-    StrictJsonValue(value.0)
+    StrictJsonValue(serde_json::json!({
+        "type": "object",
+        "additionalProperties": additional_properties,
+    }))
 }
 
 fn empty_object() -> StrictJsonValue {
-    let mut value = nomifun_agent_contracts::remote_binding_protocol_fixture()
-        .open
-        .request
-        .initial_input
-        .expect("the canonical Remote fixture supplies an object value")
-        .0;
-    value
-        .as_object_mut()
-        .expect("the canonical Remote fixture input is an object")
-        .clear();
-    StrictJsonValue(value)
+    StrictJsonValue(serde_json::json!({}))
 }
 
 fn schema_ref(
@@ -2271,11 +2214,7 @@ impl CapabilityHandler for Wave4CapabilityHandler {
                     action_id: context.action_id,
                 });
             }
-            if !input.0.is_object() {
-                return Err(KernelError::CapabilityExecution {
-                    reason: format!("{} input must be a JSON object", self.capability_id.as_ref()),
-                });
-            }
+            let operation = operation_from_input(&self.capability_id, input)?;
 
             validate_resource_bindings(
                 &self.capability_id,
@@ -2283,7 +2222,6 @@ impl CapabilityHandler for Wave4CapabilityHandler {
                 self.requirements,
                 &context.resource_bindings,
             )?;
-            let operation = operation_from_input(&self.capability_id, input)?;
             let request = Wave4HostRequest {
                 context: Wave4HostContext {
                     principal: context.principal,
@@ -2339,6 +2277,11 @@ pub fn operation_from_input(
             });
         }
     };
+    if !operation.input().0.is_object() {
+        return Err(wave4_host_error_to_kernel(Wave4HostPortError::invalid_request(
+            format!("{} input must be a JSON object", capability_id.as_ref()),
+        )));
+    }
     Ok(operation)
 }
 
@@ -2872,7 +2815,13 @@ mod tests {
         assert!(bindings.iter().all(|binding| {
             descriptors
                 .iter()
-                .any(|descriptor| descriptor.resource_kind == binding.resource_kind)
+                .any(|descriptor| {
+                    descriptor.resource_kind == binding.resource_kind
+                        && descriptor.operations == binding.operations
+                })
+        }));
+        assert!(bindings.iter().all(|binding| {
+            binding.connection_config_ref.is_none() && binding.typed_parameters.is_empty()
         }));
 
         let custom = typed_resource_binding(
@@ -2990,9 +2939,11 @@ mod tests {
         ];
 
         for (capability_id, action_id, owner_domain) in cases {
+            let input = object_with_message();
             let operation =
-                operation_from_input(&CapabilityId::from(capability_id), empty_object())
+                operation_from_input(&CapabilityId::from(capability_id), input.clone())
                     .expect("canonical action capability");
+            assert_eq!(operation.input(), &input);
             assert_eq!(operation.capability_id().as_ref(), capability_id);
             assert_eq!(operation.action_id().as_ref(), action_id);
             assert_eq!(operation.owner_domain(), owner_domain);
@@ -3554,6 +3505,16 @@ mod tests {
 
     #[test]
     fn context_capabilities_use_the_typed_context_host_and_export_exact_schemas() {
+        assert_eq!(empty_object().0, serde_json::json!({}));
+        for additional_properties in [false, true] {
+            assert_eq!(
+                object_schema(additional_properties).0,
+                serde_json::json!({
+                    "type": "object",
+                    "additionalProperties": additional_properties,
+                })
+            );
+        }
         for registration in registrations().expect("Wave 4 registrations") {
             for capability in &registration
                 .metadata
@@ -3630,74 +3591,36 @@ mod tests {
     }
 
     #[test]
-    fn action_operation_projection_is_typed_and_has_no_pairing_branch() {
-        assert!(matches!(
-            operation_from_input(
-                &CapabilityId::from(CHANNEL_REPLY),
-                empty_object(),
-            ),
-            Ok(Wave4CapabilityOperation::ChannelReply { .. })
-        ));
-        assert!(matches!(
-            operation_from_input(
-                &CapabilityId::from(ROBOT_DEVICE_TOOLS),
-                empty_object(),
-            ),
-            Ok(Wave4CapabilityOperation::RobotDeviceTools { .. })
-        ));
-        assert!(operation_from_input(
-            &CapabilityId::from(CHANNEL_PAIRING),
-            empty_object()
-        )
-        .is_err());
+    fn action_decoder_rejects_non_object_input_with_typed_invalid_request() {
+        for capability in all_capabilities().filter(|capability| capability.effect_class.is_some()) {
+            for input in [
+                serde_json::json!(null),
+                serde_json::json!(true),
+                serde_json::json!(42),
+                serde_json::json!("text"),
+                serde_json::json!([]),
+            ] {
+                let error = operation_from_input(
+                    &CapabilityId::from(capability.id),
+                    StrictJsonValue(input),
+                )
+                .expect_err("every action requires an object payload before owner dispatch");
+                assert_eq!(error.canonical_code().as_ref(), WAVE4_INVALID_REQUEST);
+            }
+        }
     }
 
     #[test]
     fn unconfigured_host_port_fails_closed_without_a_success_projection() {
-        struct NoopWaker;
-
-        impl Wake for NoopWaker {
-            fn wake(self: Arc<Self>) {}
-        }
-
-        fn poll_ready<F: Future>(future: F) -> F::Output {
-            let waker = Waker::from(Arc::new(NoopWaker));
-            let mut context = Context::from_waker(&waker);
-            let mut future = Box::pin(future);
-            match future.as_mut().poll(&mut context) {
-                Poll::Ready(value) => value,
-                Poll::Pending => panic!("unconfigured host port must settle immediately"),
-            }
-        }
-
         let host_port = unconfigured_host_port();
-        let result = poll_ready(host_port.invoke(Wave4HostRequest {
-            context: Wave4HostContext {
-                principal: PrincipalRef {
-                    principal_kind: "user".to_owned(),
-                    principal_id: "wave4-test-owner".to_owned(),
-                },
-                agent_session_id: AgentSessionId::from("wave4-test-session"),
-                operation_id: OperationId::from("wave4-test-operation"),
-                idempotency_key: IdempotencyKey::from("wave4-test-idempotency"),
-                correlation_id: CorrelationId::from("wave4-test-correlation"),
-                resolved_snapshot_ref: ResolvedSnapshotRef {
-                    snapshot_id: "snapshot".into(),
-                    snapshot_digest: "digest".into(),
-                },
-                registry_generation: 1,
-                capability_id: CapabilityId::from(CHANNEL_REPLY),
-                action_id: ActionId::from(CHANNEL_REPLY_ACTION),
-                state_scope_key: ScopeKey::from("session:wave4-test"),
-                resource_bindings: canonical_resource_bindings("wave4-test-owner")
-                    .into_iter()
-                    .filter(|binding| binding.resource_kind.as_ref() == CHANNEL_RESOURCE_KIND)
-                    .collect(),
-            },
-            operation: Wave4CapabilityOperation::ChannelReply {
+        let result = poll_ready(host_port.invoke(valid_request(
+            CHANNEL_REPLY,
+            CHANNEL_REPLY_ACTION,
+            CHANNEL_RESOURCE_KIND,
+            Wave4CapabilityOperation::ChannelReply {
                 input: empty_object(),
             },
-        }));
+        )));
         let error = result.expect_err("unconfigured host port must reject the action");
         assert_eq!(error.code, "WAVE4_HOST_PORT_UNAVAILABLE");
     }
