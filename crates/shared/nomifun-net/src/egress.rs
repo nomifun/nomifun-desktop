@@ -12,6 +12,8 @@ use std::time::Duration;
 use reqwest::header::{HeaderMap, LOCATION};
 use url::{Host, Url};
 
+const DNS_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Why an untrusted outbound request was rejected or failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SafeHttpErrorKind {
@@ -118,7 +120,14 @@ impl SafeHttpClient {
     }
 
     pub async fn get(&self, raw_url: &str) -> Result<SafeHttpResponse, SafeHttpError> {
-        let mut url = parse_untrusted_url(raw_url)?;
+        let url = parse_untrusted_url(raw_url)?;
+        // One budget covers DNS, every redirect and the complete bounded body.
+        tokio::time::timeout(self.timeout, self.get_url(url))
+            .await
+            .map_err(|_| SafeHttpError::new(SafeHttpErrorKind::Timeout, "safe HTTP request timed out"))?
+    }
+
+    async fn get_url(&self, mut url: Url) -> Result<SafeHttpResponse, SafeHttpError> {
         for hop in 0..=self.max_redirects {
             let addrs = resolve_validated(&url, self.allow_private).await?;
             let response = self.send(&url, &addrs).await?;
@@ -194,8 +203,7 @@ impl SafeHttpClient {
         // Untrusted fetches therefore always connect directly.
         let mut builder = reqwest::Client::builder()
             .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(self.timeout);
+            .redirect(reqwest::redirect::Policy::none());
         if let Some(host) = url.host_str() {
             builder = builder.resolve_to_addrs(host, addrs);
         }
@@ -317,6 +325,7 @@ fn validate_url(url: Url) -> Result<Url, SafeHttpError> {
 }
 
 /// Validate syntax and resolve all addresses without opening a connection.
+/// Standalone DNS validation is bounded to 15 seconds.
 pub async fn validate_untrusted_url(
     raw: &str,
     allow_private: bool,
@@ -337,15 +346,20 @@ async fn resolve_validated(
         SafeHttpError::new(SafeHttpErrorKind::InvalidUrl, "URL has no usable port")
     })?;
 
-    if !allow_private
-        && let Some(literal) = url.host().and_then(host_ip)
-        && forbidden_ip(literal)
-    {
-        return Err(forbidden_target(host, literal));
+    if let Some(literal) = url.host().and_then(host_ip) {
+        if !allow_private && forbidden_ip(literal) {
+            return Err(forbidden_target(host, literal));
+        }
+        // IP literals need neither DNS nor platform-specific handling of the
+        // brackets returned by Url::host_str for IPv6.
+        return Ok(vec![SocketAddr::new(literal, port)]);
     }
 
-    let mut addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
+    let mut addrs: Vec<SocketAddr> = tokio::time::timeout(
+        DNS_TIMEOUT, tokio::net::lookup_host((host, port)),
+    )
         .await
+        .map_err(|_| SafeHttpError::new(SafeHttpErrorKind::Timeout, "DNS resolution timed out"))?
         .map_err(|error| {
             SafeHttpError::new(
                 SafeHttpErrorKind::Dns,
@@ -412,22 +426,17 @@ fn forbidden_ipv4(ip: Ipv4Addr) -> bool {
 }
 
 fn forbidden_ipv6(ip: Ipv6Addr) -> bool {
+    if let Some(ipv4) = ip.to_ipv4_mapped() {
+        return forbidden_ipv4(ipv4);
+    }
     let segments = ip.segments();
-    let ipv4_compatible = segments[..6].iter().all(|segment| *segment == 0);
-    ip.is_unspecified()
-        || ip.is_loopback()
-        || ip.is_multicast()
-        || (segments[0] & 0xfe00) == 0xfc00 // unique-local fc00::/7
-        || (segments[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
-        || (segments[0] & 0xffc0) == 0xfec0 // deprecated site-local fec0::/10
-        || ipv4_compatible // deprecated ::a.b.c.d form, including private IPv4
-        || (segments[0] == 0x0064 && segments[1] == 0xff9b) // NAT64 well-known/local-use
-        || (segments[0] == 0x0100 && segments[1] == 0 && segments[2] == 0 && segments[3] == 0)
-        || (segments[0] == 0x2001 && segments[1] == 0x0002) // benchmarking
+    // Global unicast is 2000::/3. Everything outside it is special/reserved,
+    // including local, multicast, NAT64 and deprecated IPv4-compatible forms.
+    (segments[0] & 0xe000) != 0x2000
+        || (segments[0] == 0x2001 && segments[1] < 0x0200) // IETF special-purpose /23 (including Teredo)
+        || segments[0] == 0x2002 // deprecated 6to4 can embed non-public IPv4
         || (segments[0] == 0x2001 && segments[1] == 0x0db8) // documentation
-        || ip
-            .to_ipv4_mapped()
-            .is_some_and(forbidden_ipv4)
+        || (segments[0] == 0x3fff && (segments[1] & 0xf000) == 0) // documentation 3fff::/20
 }
 
 #[cfg(test)]
@@ -436,6 +445,53 @@ mod tests {
     use reqwest::StatusCode;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn literal_addresses_are_resolved_without_domain_syntax() {
+        for (raw, expected) in [
+            ("https://8.8.8.8/", "8.8.8.8:443"),
+            ("https://[2606:4700:4700::1111]/", "[2606:4700:4700::1111]:443"),
+            ("http://[::1]:8080/", "[::1]:8080"),
+        ] {
+            let url = Url::parse(raw).unwrap();
+            assert_eq!(resolve_validated(&url, true).await.unwrap(), vec![expected.parse::<SocketAddr>().unwrap()]);
+        }
+    }
+
+    #[test]
+    fn reserved_and_transition_ipv6_ranges_are_not_public_egress() {
+        let allowed: Vec<_> = [
+            "4000::1", "2001::1", "2001:20::1", "2002:7f00:1::", "3fff::1",
+        ].into_iter().filter(|raw| !forbidden_ip(raw.parse().unwrap())).collect();
+        assert!(allowed.is_empty(), "special IPv6 ranges were permitted: {allowed:?}");
+    }
+
+    #[tokio::test]
+    async fn redirects_share_one_request_timeout_budget() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for response in [
+                b"HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".as_slice(),
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".as_slice(),
+            ] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buffer = [0; 2048];
+                stream.read(&mut buffer).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                let _ = stream.write_all(response).await;
+            }
+        });
+        let result = SafeHttpClient::new(Duration::from_millis(400), 32)
+            .allow_private_for_tests()
+            .get(&format!("http://{address}/start?token=fixture-secret"))
+            .await;
+        server.abort();
+        let _ = server.await;
+        let error = result.expect_err("redirects must not reset the total timeout");
+        assert_eq!(error.kind(), SafeHttpErrorKind::Timeout);
+        assert!(!error.to_string().contains("fixture-secret"));
+    }
 
     async fn one_response(response: &'static [u8]) -> (String, tokio::task::JoinHandle<usize>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

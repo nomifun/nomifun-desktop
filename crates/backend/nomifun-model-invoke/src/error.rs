@@ -6,6 +6,7 @@
 //! failover, retry) can branch on semantics instead of parsing strings.
 
 use serde::Serialize;
+use nomifun_net::secret_redaction::redact_url_queries as transport_cause_detail;
 
 /// Machine-readable classification of an invocation failure.
 /// Wire values are snake_case (serialized into API error payloads/logs).
@@ -86,80 +87,6 @@ fn transport_detail(e: &reqwest::Error) -> Option<String> {
     (!detail.trim().is_empty()).then_some(detail)
 }
 
-/// Strip credentials from a rendered cause chain.
-///
-/// `redact_url_queries` handles the common `?key=…` case on http(s) URLs, but a
-/// transport cause can also carry credentials that it does not touch:
-/// `scheme://user:pass@host` userinfo, and `wss://…?token=…` (it only scans
-/// http/https). Both appear here because reqwest/hyper render the URL they were
-/// given and a proxy URL may itself embed credentials. Anything that still
-/// looks like a secret is dropped rather than trimmed.
-fn transport_cause_detail(rendered: &str) -> String {
-    let stripped = strip_url_userinfo(rendered);
-    let stripped = strip_non_http_url_queries(&stripped);
-    nomifun_net::secret_redaction::redact_url_queries(&stripped)
-}
-
-/// Replace `scheme://user:pass@` with `scheme://<redacted>@`, for any scheme.
-fn strip_url_userinfo(input: &str) -> String {
-    let mut output = String::with_capacity(input.len());
-    let mut rest = input;
-    while let Some(scheme_end) = rest.find("://") {
-        let after_scheme = scheme_end + 3;
-        // The authority runs to the first delimiter; userinfo must precede it.
-        let authority_end = rest[after_scheme..]
-            .find(|ch: char| ch.is_whitespace() || matches!(ch, '/' | '?' | '#' | '"' | '\'' | ')' | '}' | '>' | ','))
-            .map_or(rest.len(), |offset| after_scheme + offset);
-        let authority = &rest[after_scheme..authority_end];
-        match authority.rfind('@') {
-            Some(at) => {
-                output.push_str(&rest[..after_scheme]);
-                output.push_str("<redacted>@");
-                output.push_str(&authority[at + 1..]);
-            }
-            None => output.push_str(&rest[..authority_end]),
-        }
-        rest = &rest[authority_end..];
-    }
-    output.push_str(rest);
-    output
-}
-
-/// Drop the query of any `scheme://` URL, for every scheme.
-///
-/// Runs before `redact_url_queries` and is deliberately more aggressive about
-/// where a URL ends: that helper stops at the first `)` or `}`, so a query
-/// containing one (`?cb=f(x)&api_key=…`) kept everything after it verbatim.
-/// Here only whitespace and quotes terminate the URL, so the whole query goes.
-fn strip_non_http_url_queries(input: &str) -> String {
-    let mut output = String::with_capacity(input.len());
-    for (index, segment) in input.split("://").enumerate() {
-        if index == 0 {
-            output.push_str(segment);
-            continue;
-        }
-        output.push_str("://");
-        let url_end = segment
-            .find(|ch: char| ch.is_whitespace() || matches!(ch, '"' | '\'' | '<' | '>'))
-            .unwrap_or(segment.len());
-        let (url, tail) = segment.split_at(url_end);
-        match url.find('?') {
-            Some(query) => {
-                output.push_str(&url[..=query]);
-                output.push_str("<redacted>");
-                // A trailing bracket is punctuation from the surrounding
-                // message, not part of the secret — keep it so the rendered
-                // text stays balanced.
-                if url.ends_with(')') || url.ends_with('}') {
-                    output.push(url.as_bytes()[url.len() - 1] as char);
-                }
-            }
-            None => output.push_str(url),
-        }
-        output.push_str(tail);
-    }
-    output
-}
 
 impl InvokeError {
     /// Build an error of `kind` with no HTTP status / retry hint.
@@ -479,11 +406,10 @@ mod tests {
         assert!(detail.contains("dns error"), "the reason is the whole point: {detail}");
     }
 
-    /// `redact_url_queries` alone covers only `?…` on http(s) URLs. A transport
-    /// cause can also carry userinfo credentials, a `wss://` query, or a query
-    /// that follows a bracket — each of those leaked before these were added.
+    /// The shared boundary must cover userinfo, WebSocket queries and queries
+    /// containing parentheses while preserving diagnostic hosts.
     #[test]
-    fn transport_cause_strips_credentials_redact_url_queries_alone_would_miss() {
+    fn transport_cause_uses_the_shared_url_credential_boundary() {
         for (input, secret) in [
             ("https://user:PASSWD@host/v1 failed", "PASSWD"),
             ("proxy http://user:PROXYPASS@127.0.0.1:7897 refused", "PROXYPASS"),
