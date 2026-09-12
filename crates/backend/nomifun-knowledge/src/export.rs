@@ -78,7 +78,7 @@ struct ExportMeta {
 // ── Export ──────────────────────────────────────────────────────────
 
 /// Package the base `kb_id` into a zip at `dest_path` (written atomically
-/// via `{dest}.tmp` + rename).
+/// via a securely-created same-directory tempfile).
 pub async fn export_base(
     service: &KnowledgeService,
     kb_id: &str,
@@ -113,38 +113,31 @@ pub async fn export_base(
 }
 
 /// Blocking core of the export: walk `root` for `.md` files and write the
-/// package to `dest` via a `.tmp` sibling. Returns `(file_count, total_bytes)`.
+/// package to `dest` via a unique tempfile. Returns `(file_count, total_bytes)`.
 fn build_zip(root: &Path, meta: &ExportMeta, dest: &Path) -> Result<(u64, u64), AppError> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| AppError::Internal(format!("failed to create export dir: {e}")))?;
     }
-    let mut tmp_name = dest.as_os_str().to_owned();
-    tmp_name.push(".tmp");
-    let tmp = PathBuf::from(tmp_name);
-
-    let counts = match write_zip_to(root, meta, &tmp) {
-        Ok(counts) => counts,
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(e);
-        }
-    };
-    if let Err(e) = std::fs::rename(&tmp, dest) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(AppError::Internal(format!("failed to finalize export file: {e}")));
-    }
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".nomifun-export.")
+        .tempfile_in(dest.parent().unwrap_or_else(|| Path::new(".")))
+        .map_err(|e| AppError::Internal(format!("failed to create export tempfile: {e}")))?;
+    let counts = write_zip_to(root, meta, tmp.as_file_mut())?;
+    tmp.as_file().sync_all()
+        .map_err(|e| AppError::Internal(format!("failed to sync export file: {e}")))?;
+    tmp.persist(dest)
+        .map_err(|e| AppError::Internal(format!("failed to finalize export file: {}", e.error)))?;
     Ok(counts)
 }
 
-fn write_zip_to(root: &Path, meta: &ExportMeta, tmp: &Path) -> Result<(u64, u64), AppError> {
+fn write_zip_to(root: &Path, meta: &ExportMeta, file: &mut std::fs::File) -> Result<(u64, u64), AppError> {
     let io_err = |what: &str| {
         let what = what.to_owned();
         move |e: std::io::Error| AppError::Internal(format!("{what}: {e}"))
     };
     let zip_err = |e: zip::result::ZipError| AppError::Internal(format!("failed to write zip: {e}"));
 
-    let file = std::fs::File::create(tmp).map_err(io_err("failed to create export file"))?;
     let mut zip = zip::ZipWriter::new(file);
     let options = zip::write::SimpleFileOptions::default();
 
@@ -163,28 +156,28 @@ fn write_zip_to(root: &Path, meta: &ExportMeta, tmp: &Path) -> Result<(u64, u64)
         .map_err(io_err("failed to write meta"))?;
 
     // Sorted relative paths → deterministic packages (friendlier diffing).
-    let mut rels: Vec<String> = walkdir::WalkDir::new(root)
+    let mut rels = Vec::new();
+    for entry in walkdir::WalkDir::new(root)
         .into_iter()
         .filter_entry(|entry| !crate::service::is_machinery_dir(entry))
-        .flatten()
-        .filter(|e| e.file_type().is_file() && is_md(e.path()))
-        .filter_map(|e| {
-            e.path()
-                .strip_prefix(root)
-                .ok()
-                .map(|rel| rel.to_string_lossy().replace('\\', "/"))
-        })
-        .collect();
+    {
+        let entry = entry.map_err(|e| AppError::Internal(format!("failed to walk export files: {e}")))?;
+        if entry.file_type().is_file() && is_md(entry.path()) {
+            let rel = entry.path().strip_prefix(root)
+                .map_err(|e| AppError::Internal(format!("failed to relativize export file: {e}")))?;
+            rels.push(rel.to_string_lossy().replace('\\', "/"));
+        }
+    }
     rels.sort();
 
     let mut file_count = 0u64;
     let mut total_bytes = 0u64;
     for rel in rels {
-        let bytes = std::fs::read(root.join(&rel)).map_err(io_err(&format!("failed to read {rel}")))?;
+        let mut input = std::fs::File::open(root.join(&rel)).map_err(io_err(&format!("failed to read {rel}")))?;
         zip.start_file(format!("files/{rel}"), options).map_err(zip_err)?;
-        zip.write_all(&bytes).map_err(io_err(&format!("failed to package {rel}")))?;
+        total_bytes += std::io::copy(&mut input, &mut zip)
+            .map_err(io_err(&format!("failed to package {rel}")))?;
         file_count += 1;
-        total_bytes += bytes.len() as u64;
     }
 
     zip.finish().map_err(zip_err)?;
@@ -439,6 +432,30 @@ fn dedup_name(existing: &HashSet<String>, name: &str) -> String {
 mod tests {
     use super::*;
     use crate::testutil::make_service;
+
+    #[test]
+    fn export_does_not_overwrite_a_preexisting_tmp_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("note.md"), "note").unwrap();
+        let dest = dir.path().join("bundle.zip");
+        let sibling = dir.path().join("bundle.zip.tmp");
+        std::fs::write(&sibling, "unrelated work").unwrap();
+        assert_eq!(build_zip(&source, &ExportMeta::default(), &dest).unwrap(), (1, 4));
+        assert_eq!(std::fs::read(&sibling).unwrap(), b"unrelated work");
+        assert!(zip::ZipArchive::new(std::fs::File::open(dest).unwrap()).is_ok());
+    }
+
+    #[test]
+    fn export_walk_error_preserves_the_previous_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("bundle.zip");
+        std::fs::write(&dest, "previous package").unwrap();
+        assert!(build_zip(&dir.path().join("missing"), &ExportMeta::default(), &dest).is_err());
+        assert_eq!(std::fs::read(dest).unwrap(), b"previous package");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
 
     #[test]
     fn extraction_budget_stops_writes_before_limit() {
