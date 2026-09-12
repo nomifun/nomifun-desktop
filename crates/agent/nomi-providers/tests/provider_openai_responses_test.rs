@@ -127,6 +127,52 @@ async fn collect(mut receiver: tokio::sync::mpsc::Receiver<LlmEvent>) -> Vec<Llm
 }
 
 #[tokio::test]
+async fn dropping_receiver_closes_a_stalled_initial_response() {
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::TcpListener;
+    use tokio::time::timeout;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut socket = BufReader::new(socket);
+        let mut content_length = None;
+        loop {
+            let mut line = String::new();
+            assert_ne!(socket.read_line(&mut line).await.unwrap(), 0);
+            if line == "\r\n" {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':') {
+                if name.eq_ignore_ascii_case("content-length") {
+                    content_length = Some(value.trim().parse::<usize>().unwrap());
+                }
+            }
+        }
+        let mut body = vec![0; content_length.expect("request must have a body length")];
+        socket.read_exact(&mut body).await.unwrap();
+        socket.get_mut().write_all(
+            b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: 100\r\nconnection: close\r\n\r\n",
+        ).await.unwrap();
+        // Keep the HTTP body pending. Closing the downstream must release it
+        // without requiring another SSE event or waiting for a request timeout.
+        timeout(Duration::from_secs(2), socket.read(&mut [0]))
+            .await
+            .expect("stalled response stayed open after receiver drop")
+            .unwrap()
+    });
+    let provider = OpenAIResponsesProvider::new("key", &url, compat(false));
+    let receiver = timeout(Duration::from_secs(2), provider.stream(&request(false)))
+        .await
+        .unwrap()
+        .unwrap();
+    drop(receiver);
+    assert_eq!(server.await.unwrap(), 0);
+}
+
+#[tokio::test]
 async fn retention_requires_both_gates_and_uses_responses_wire() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
