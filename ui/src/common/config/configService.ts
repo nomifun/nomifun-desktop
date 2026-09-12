@@ -73,11 +73,17 @@ async function fetchJson<T>(method: string, path: string, body?: unknown): Promi
   return json as T;
 }
 
-class ConfigServiceImpl {
+export class ConfigServiceImpl {
   private cache = new Map<string, unknown>();
   private subscribers = new Map<string, Set<Subscriber>>();
   private initialized = false;
   private initPromise: Promise<void> | null = null;
+  // The set itself is also the identity of the current load. A reload/reset
+  // invalidates older responses without cancelling callers waiting on them.
+  private loadingKeys: Set<string> | null = null;
+  private pendingWrites = new Set<string[]>();
+
+  constructor(private readonly request: typeof fetchJson = fetchJson) {}
 
   // Idempotent: concurrent callers share the same in-flight promise, and a
   // resolved init returns immediately. Modules that need persisted settings on
@@ -89,25 +95,31 @@ class ConfigServiceImpl {
   // must still render (the login page!) with empty/default config. On failure we
   // resolve with an empty cache and leave `initialized = false` + clear the
   // in-flight promise so a later call (e.g. right after login via `reload()`)
-  // re-fetches the authenticated settings.
+  // re-fetches the authenticated settings. Local edits overlapping a load are
+  // preserved on both success and failure; callers still own PUT rollback.
   initialize(): Promise<void> {
     if (this.initPromise) return this.initPromise;
-    this.initPromise = (async () => {
+    const loadingKeys = new Set([...this.pendingWrites].flat());
+    this.loadingKeys = loadingKeys;
+    // Publish initPromise before invoking the transport, including a transport
+    // that throws synchronously. A reset before dispatch also skips the GET.
+    this.initPromise = Promise.resolve().then(async () => {
+      if (this.loadingKeys !== loadingKeys) return;
       try {
-        const data = await fetchJson<Record<string, unknown>>('GET', '/api/settings/client');
-        this.cache.clear();
-        if (data) {
-          for (const [key, value] of Object.entries(data)) {
-            this.cache.set(key, value);
-          }
-        }
+        const data = await this.request<Record<string, unknown>>('GET', '/api/settings/client');
+        if (this.loadingKeys !== loadingKeys) return;
         this.initialized = true;
+        this.loadingKeys = null;
+        this.replaceCache(data ?? {}, loadingKeys);
       } catch (error) {
+        if (this.loadingKeys !== loadingKeys) return;
         console.warn('[configService] settings unavailable (pre-login or offline); using empty config:', error);
-        this.cache.clear();
+        this.initialized = false;
         this.initPromise = null;
+        this.loadingKeys = null;
+        this.replaceCache({}, loadingKeys);
       }
-    })();
+    });
     return this.initPromise;
   }
 
@@ -128,37 +140,31 @@ class ConfigServiceImpl {
   }
 
   async set<K extends ConfigKey>(key: K, value: ConfigKeyMap[K]): Promise<void> {
-    this.cache.set(key, value);
-    this.notify(key, value);
-    await fetchJson<void>('PUT', '/api/settings/client', { [key]: value });
+    await this.write({ [key]: value });
   }
 
   setLocal<K extends ConfigKey>(key: K, value: ConfigKeyMap[K]): void {
+    this.loadingKeys?.add(key);
     this.cache.set(key, value);
     this.notify(key, value);
   }
 
   async remove(key: ConfigKey): Promise<void> {
-    this.cache.delete(key);
-    this.notify(key, undefined);
-    await fetchJson<void>('PUT', '/api/settings/client', { [key]: null });
+    await this.write({ [key]: null });
   }
 
   async setBatch(entries: Partial<{ [K in ConfigKey]: ConfigKeyMap[K] }>): Promise<void> {
-    for (const [key, value] of Object.entries(entries)) {
-      this.cache.set(key, value);
-      this.notify(key as ConfigKey, value);
-    }
-    await fetchJson<void>('PUT', '/api/settings/client', entries);
+    await this.write(entries);
   }
 
   subscribe(key: ConfigKey, callback: Subscriber): () => void {
     if (!this.subscribers.has(key)) {
       this.subscribers.set(key, new Set());
     }
-    this.subscribers.get(key)!.add(callback);
+    const subscribers = this.subscribers.get(key)!;
+    subscribers.add(callback);
     return () => {
-      this.subscribers.get(key)?.delete(callback);
+      subscribers.delete(callback);
     };
   }
 
@@ -171,13 +177,53 @@ class ConfigServiceImpl {
     this.subscribers.clear();
     this.initialized = false;
     this.initPromise = null;
+    this.loadingKeys = null;
+    this.pendingWrites.clear();
+  }
+
+  private replaceCache(data: Record<string, unknown>, loadingKeys: Set<string>): void {
+    const previous = this.cache;
+    const next = new Map(Object.entries(data));
+    for (const key of loadingKeys) {
+      if (previous.has(key)) next.set(key, previous.get(key));
+      else next.delete(key); // Preserve removals as well as optimistic values.
+    }
+    this.cache = next;
+    for (const key of new Set([...previous.keys(), ...next.keys()])) {
+      if (!Object.is(previous.get(key), this.cache.get(key))) {
+        this.notify(key as ConfigKey, this.cache.get(key));
+      }
+    }
+  }
+
+  private async write(entries: Record<string, unknown>): Promise<void> {
+    const keys = Object.keys(entries);
+    // One identity per request: completion of an older PUT (even after reset)
+    // cannot untrack a newer PUT touching the same key.
+    this.pendingWrites.add(keys);
+    try {
+      for (const [key, value] of Object.entries(entries)) {
+        this.loadingKeys?.add(key);
+        if (value === null) this.cache.delete(key);
+        else this.cache.set(key, value);
+      }
+      // Publish the whole batch before any subscriber reads related keys.
+      for (const key of keys) this.notify(key as ConfigKey, this.cache.get(key));
+      await this.request<void>('PUT', '/api/settings/client', entries);
+    } finally {
+      this.pendingWrites.delete(keys);
+    }
   }
 
   private notify(key: ConfigKey, value: unknown): void {
     const subs = this.subscribers.get(key);
     if (subs) {
-      for (const cb of subs) {
-        cb(value);
+      for (const cb of [...subs]) {
+        try {
+          cb(value);
+        } catch (error) {
+          console.error('[configService] subscriber failed:', error);
+        }
       }
     }
   }
