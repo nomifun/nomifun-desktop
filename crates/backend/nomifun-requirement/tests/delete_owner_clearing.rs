@@ -129,6 +129,4 @@ async fn deleting_terminal_parks_active_requirement_and_preserves_claim_evidence
     assert_eq!(internal.claim_token.as_deref(), Some(claim_token.as_str()));
     assert_eq!(internal.active_turn_started_at, claimed.active_turn_started_at);
     assert_eq!(internal.lease_expires_at, None);
-
-    Box::leak(Box::new(db));
 }

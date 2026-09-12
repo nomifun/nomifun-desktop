@@ -146,7 +146,6 @@ async fn groups_enabled_conversation_and_terminal_bindings_by_tag() {
             },
         ])))
         .with_terminal_repo(term_repo);
-    Box::leak(Box::new(db));
 
     let groups = svc.tag_bindings(&installation_owner).await.unwrap();
 
