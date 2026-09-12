@@ -316,8 +316,9 @@ fn split_stdio_command(command: &str) -> Result<Option<(String, Vec<String>)>, M
 fn shell_split(input: &str) -> Result<Vec<String>, String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
-    let mut chars = input.chars().peekable();
+    let mut chars = input.chars();
     let mut quote: Option<char> = None;
+    let mut token_started = false;
 
     while let Some(ch) = chars.next() {
         match quote {
@@ -333,18 +334,26 @@ fn shell_split(input: &str) -> Result<Vec<String>, String> {
                 }
             }
             None => match ch {
-                '"' | '\'' => quote = Some(ch),
+                '"' | '\'' => {
+                    quote = Some(ch);
+                    token_started = true;
+                }
                 '\\' => {
                     if let Some(next) = chars.next() {
                         current.push(next);
+                        token_started = true;
                     }
                 }
                 c if c.is_whitespace() => {
-                    if !current.is_empty() {
+                    if token_started {
                         tokens.push(std::mem::take(&mut current));
+                        token_started = false;
                     }
                 }
-                _ => current.push(ch),
+                _ => {
+                    current.push(ch);
+                    token_started = true;
+                }
             },
         }
     }
@@ -352,7 +361,7 @@ fn shell_split(input: &str) -> Result<Vec<String>, String> {
     if quote.is_some() {
         return Err("Unterminated quoted command string".to_owned());
     }
-    if !current.is_empty() {
+    if token_started {
         tokens.push(current);
     }
     Ok(tokens)
@@ -1096,27 +1105,40 @@ mod tests {
     #[tokio::test]
     async fn add_server_normalizes_shell_style_stdio_command() {
         let svc = make_service();
-        let created = svc
-            .add_server(CreateMcpServerRequest {
-                name: "sentry".into(),
-                description: None,
-                transport: McpTransport::Stdio {
-                    command: "npx @sentry/mcp-server@latest --organization-slug=demo".into(),
-                    args: vec![],
-                    env: HashMap::new(),
-                },
-                original_json: None,
-                builtin: false,
-            })
-            .await
-            .unwrap();
+        for (input, expected_args) in [
+            (
+                "npx @sentry/mcp-server@latest --organization-slug=demo",
+                vec!["@sentry/mcp-server@latest", "--organization-slug=demo"],
+            ),
+            (r#"npx """#, vec![""]),
+            ("npx ''", vec![""]),
+            (
+                r#"npx  "" script.js '' " " a""b "中文 路径" ""  "#,
+                vec!["", "script.js", "", " ", "ab", "中文 路径", ""],
+            ),
+        ] {
+            let created = svc
+                .add_server(CreateMcpServerRequest {
+                    name: "sentry".into(),
+                    description: None,
+                    transport: McpTransport::Stdio {
+                        command: input.into(),
+                        args: vec![],
+                        env: HashMap::new(),
+                    },
+                    original_json: None,
+                    builtin: false,
+                })
+                .await
+                .unwrap();
 
-        match created.transport {
-            McpTransport::Stdio { command, args, .. } => {
-                assert_eq!(command, "npx");
-                assert_eq!(args, vec!["@sentry/mcp-server@latest", "--organization-slug=demo"]);
+            match created.transport {
+                McpTransport::Stdio { command, args, .. } => {
+                    assert_eq!(command, "npx");
+                    assert_eq!(args, expected_args, "input: {input}");
+                }
+                _ => panic!("expected stdio transport"),
             }
-            _ => panic!("expected stdio transport"),
         }
     }
 

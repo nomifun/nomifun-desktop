@@ -370,19 +370,28 @@ pub(super) fn build_tools_list_request(id: u64) -> JsonRpcRequest {
 // ---------------------------------------------------------------------------
 
 pub(super) fn success_result(tools_value: Option<serde_json::Value>) -> McpConnectionTestResult {
-    let tools = tools_value
-        .and_then(|v| serde_json::from_value::<ToolsListResult>(v).ok())
-        .map(|r| {
-            r.tools
-                .into_iter()
-                .map(|t| McpToolResponse {
-                    name: t.name,
-                    description: t.description,
-                    input_schema: t.input_schema,
-                })
-                .collect()
+    let Some(result) = tools_value
+        .filter(|value| {
+            value.get("tools").and_then(serde_json::Value::as_array)
+                .is_some_and(|tools| tools.iter().all(serde_json::Value::is_object))
         })
-        .unwrap_or_default();
+        .and_then(|v| serde_json::from_value::<ToolsListResult>(v).ok())
+    else {
+        return error_result(
+            McpConnectionTestErrorCode::ProtocolError,
+            "tools/list response has a missing or invalid result".into(),
+            Some(serde_json::json!({ "stage": "tools_list_response" })),
+        );
+    };
+    let tools = result
+        .tools
+        .into_iter()
+        .map(|t| McpToolResponse {
+            name: t.name,
+            description: t.description,
+            input_schema: t.input_schema,
+        })
+        .collect();
 
     McpConnectionTestResult {
         success: true,
@@ -685,17 +694,37 @@ mod tests {
     }
 
     #[test]
-    fn success_result_none_gives_empty_tools() {
+    fn success_result_none_is_protocol_error() {
         let result = success_result(None);
-        assert!(result.success);
-        assert!(result.tools.unwrap().is_empty());
+        assert!(!result.success);
+        assert_eq!(result.code, Some(McpConnectionTestErrorCode::ProtocolError));
+        assert!(result.tools.is_none());
+        assert_eq!(result.details.unwrap()["stage"], "tools_list_response");
     }
 
     #[test]
-    fn success_result_malformed_gives_empty_tools() {
-        let result = success_result(Some(serde_json::json!("not an object")));
-        assert!(result.success);
-        assert!(result.tools.unwrap().is_empty());
+    fn success_result_malformed_is_protocol_error() {
+        for value in [
+            serde_json::json!([[]]),
+            serde_json::json!({ "tools": [["tool", null, {}]] }),
+            serde_json::json!(null),
+            serde_json::json!("not an object"),
+            serde_json::json!({}),
+            serde_json::json!({ "tools": null }),
+            serde_json::json!({ "tools": "not an array" }),
+            serde_json::json!({ "tools": [{}] }),
+            serde_json::json!({ "tools": [{ "name": 1 }] }),
+            serde_json::json!({ "tools": [{ "name": "valid" }, null] }),
+        ] {
+            let result = success_result(Some(value));
+            assert!(!result.success);
+            assert_eq!(result.code, Some(McpConnectionTestErrorCode::ProtocolError));
+            assert!(result.tools.is_none());
+            assert_eq!(
+                result.error.as_deref(),
+                Some("tools/list response has a missing or invalid result")
+            );
+        }
     }
 
     #[test]
