@@ -129,7 +129,20 @@ pub async fn auth_middleware(
     });
 
     let mut response = next.run(request).await;
+    // An explicit session update from the handler (especially logout) wins
+    // over opportunistic renewal. Inspect every field: unrelated cookies may
+    // precede the session cookie.
+    let session_cookie_set = response.headers().get_all(header::SET_COOKIE).iter()
+        .any(|value| {
+            value.to_str().ok().is_some_and(|cookie| {
+                cookie.split_once('=').is_some_and(|(name, _)| name.trim() == COOKIE_NAME)
+            })
+        });
     if let Some(cookie) = renewed
+        && !session_cookie_set
+        // A downstream password change or revocation may invalidate the
+        // session while the handler runs; do not publish its stale renewal.
+        && state.jwt_service.verify(&token).is_ok()
         && let Ok(value) = HeaderValue::from_str(&cookie)
     {
         response.headers_mut().append(header::SET_COOKIE, value);
