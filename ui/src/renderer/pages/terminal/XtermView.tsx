@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useEffect, useRef } from 'react';
+import React, { useLayoutEffect, useRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
@@ -93,7 +93,7 @@ const XtermView: React.FC<XtermViewProps> = ({
   const onResizeFailureRef = useRef(onResizeFailure);
   onResizeFailureRef.current = onResizeFailure;
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
@@ -129,6 +129,7 @@ const XtermView: React.FC<XtermViewProps> = ({
     }
 
     let disposed = false;
+    let running = isRunning;
     let lastCols = 0;
     let lastRows = 0;
     let desiredResize: { cols: number; rows: number } | null = null;
@@ -151,6 +152,7 @@ const XtermView: React.FC<XtermViewProps> = ({
     const failInputPipeline = (error: Error, notify = true): void => {
       if (inputPipelineError) return;
       inputPipelineError = error;
+      activeInputItem?.reject(error);
       const queued = inputQueue;
       inputQueue = [];
       queuedInputBytes = 0;
@@ -175,6 +177,7 @@ const XtermView: React.FC<XtermViewProps> = ({
           });
           item.resolve();
         } catch (caught: unknown) {
+          if (disposed || !running) return;
           const error = caught instanceof Error ? caught : new Error(String(caught));
           item.reject(error);
           console.error('[XtermView] Failed to write terminal input:', error);
@@ -188,7 +191,7 @@ const XtermView: React.FC<XtermViewProps> = ({
 
     const sendInput = (text: string): Promise<void> => {
       if (disposed) return Promise.reject(new Error('Terminal view has been disposed'));
-      if (!isRunning) return Promise.reject(new Error('Terminal process is not running'));
+      if (!running) return Promise.reject(new Error('Terminal process is not running'));
       if (inputPipelineError) return Promise.reject(inputPipelineError);
 
       const byteLength = new TextEncoder().encode(text).byteLength;
@@ -239,7 +242,7 @@ const XtermView: React.FC<XtermViewProps> = ({
     // the backend accepts them, coalesce concurrent layout notifications, and
     // retry short transient failures without creating unhandled rejections.
     const flushResize = async (): Promise<void> => {
-      if (disposed || resizeInFlight || !desiredResize) return;
+      if (disposed || !running || resizeInFlight || !desiredResize) return;
 
       const next = desiredResize;
       if (next.cols === lastCols && next.rows === lastRows) return;
@@ -247,14 +250,14 @@ const XtermView: React.FC<XtermViewProps> = ({
       resizeInFlight = true;
       try {
         await ipcBridge.terminal.resize.invoke({ terminal_id: sessionId, cols: next.cols, rows: next.rows });
-        if (!disposed) {
+        if (!disposed && running) {
           markActivationReady();
           lastCols = next.cols;
           lastRows = next.rows;
           resizeFailureCount = 0;
         }
       } catch (error) {
-        if (!disposed) {
+        if (!disposed && running) {
           const failedSizeIsStillDesired =
             desiredResize?.cols === next.cols && desiredResize?.rows === next.rows;
           if (!failedSizeIsStillDesired) {
@@ -275,7 +278,8 @@ const XtermView: React.FC<XtermViewProps> = ({
               console.error('[XtermView] Failed to resize terminal after retries:', error);
               desiredResize = null;
               resizeFailureCount = 0;
-              onResizeFailureRef.current?.(error);
+              if (!activationReady) failInputPipeline(error instanceof Error ? error : new Error(String(error)));
+              else onResizeFailureRef.current?.(error);
             }
           }
         }
@@ -283,7 +287,7 @@ const XtermView: React.FC<XtermViewProps> = ({
         resizeInFlight = false;
         const desiredIsAcknowledged =
           desiredResize?.cols === lastCols && desiredResize?.rows === lastRows;
-        if (!disposed && desiredResize && !desiredIsAcknowledged && !resizeRetryTimer) {
+        if (!disposed && running && desiredResize && !desiredIsAcknowledged && !resizeRetryTimer) {
           void flushResize();
         }
       }
@@ -318,9 +322,7 @@ const XtermView: React.FC<XtermViewProps> = ({
       // An exited session is a read-only scrollback viewer. Resizing a missing
       // PTY returns 404 and used to be misreported as an activation failure.
       if (!isRunning) return;
-      if (term.cols !== lastCols || term.rows !== lastRows) {
-        requestResize(term.cols, term.rows);
-      }
+      requestResize(term.cols, term.rows);
     };
 
     // Initial fit: defer past layout with a double rAF, and refit once the
@@ -343,7 +345,7 @@ const XtermView: React.FC<XtermViewProps> = ({
       void sendInput(data).catch(() => {});
     };
     const dataDisposable = term.onData((data) => {
-      if (!isRunning) return;
+      if (disposed || !running) return;
       queueRawInput(data);
       if (isCtrlC(data)) {
         const r = bumpCtrlC(ctrlCState, Date.now(), 1500, 3);
@@ -399,26 +401,36 @@ const XtermView: React.FC<XtermViewProps> = ({
     // across WS messages is buffered, not corrupted into U+FFFD. Reassignable so
     // a reconnect can start a fresh decoder for the re-replay (see below).
     let decodeStream = createStreamingDecoder();
+    let pendingReplay: Array<() => void> | null = null;
+    const writeLive = (write: () => void) => {
+      if (pendingReplay) pendingReplay.push(write);
+      else write();
+    };
 
     // Fetch the current scrollback snapshot and write it through `decodeStream`.
     const replayScrollback = () => {
+      if (pendingReplay) pendingReplay.length = 0;
+      const pending: Array<() => void> = [];
+      pendingReplay = pending;
       void ipcBridge.terminal.get
         .invoke({ terminal_id: sessionId })
         .then((session) => {
-          if (disposed || !session?.scrollback_b64) return;
+          if (disposed || pendingReplay !== pending || !session?.scrollback_b64) return;
           term.write(decodeStream(session.scrollback_b64));
         })
         .catch(() => {
           /* session may have been removed; ignore */
+        })
+        .finally(() => {
+          if (disposed || pendingReplay !== pending) return;
+          pendingReplay = null;
+          for (const write of pending) write();
         });
     };
 
-    // Replay scrollback, then subscribe to live output.
-    replayScrollback();
-
     const unsubscribeOutput = ipcBridge.terminal.onOutput.on((evt) => {
       if (disposed || evt.terminal_id !== sessionId) return;
-      term.write(decodeStream(evt.data_b64));
+      writeLive(() => term.write(decodeStream(evt.data_b64)));
     });
 
     // On WS reconnect the server does NOT replay the frames emitted while the
@@ -434,9 +446,16 @@ const XtermView: React.FC<XtermViewProps> = ({
 
     const unsubscribeExit = ipcBridge.terminal.onExit.on((evt) => {
       if (disposed || evt.terminal_id !== sessionId) return;
+      running = false;
+      failInputPipeline(new Error('Terminal process is not running'), false);
+      if (resizeRetryTimer) clearTimeout(resizeRetryTimer);
       const code = evt.exit_code ?? 0;
-      term.write(`\r\n\x1b[2m[process exited with code ${code}]\x1b[0m\r\n`);
+      writeLive(() => term.write(`\r\n\x1b[2m[process exited with code ${code}]\x1b[0m\r\n`));
     });
+
+    // Subscribe before GET; retain stream order until the current replay settles.
+    // The API has no output cursor, so snapshot/live overlap cannot be deduped here.
+    replayScrollback();
 
     // Debounce reflow-heavy resizes to the next frame.
     let rafId = 0;
@@ -456,9 +475,8 @@ const XtermView: React.FC<XtermViewProps> = ({
 
     return () => {
       disposed = true;
+      if (pendingReplay) pendingReplay.length = 0;
       const disposeError = new Error('Terminal view was disposed before queued input was written');
-      activeInputItem?.reject(disposeError);
-      activeInputItem = null;
       failInputPipeline(disposeError, false);
       if (rafId) cancelAnimationFrame(rafId);
       cancelAnimationFrame(initialFitRaf);
