@@ -114,15 +114,16 @@ mod tests {
         std::fs::write(
             &shell,
             format!(
-                "#!/bin/sh\n/bin/sleep 2 &\n{}\n",
-                super::super::PATH_PROBE_SNIPPET
+                "#!/bin/sh\n/bin/sleep 2 &\nprintf '%s' '{}/synthetic/bin{}'\n",
+                super::super::PATH_PROBE_BEGIN,
+                super::super::PATH_PROBE_END
             ),
         )
         .unwrap();
         std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o700)).unwrap();
         let start = Instant::now();
         let result = super::super::run_login_shell_path(shell.to_str().unwrap(), None);
-        assert!(result.is_some());
+        assert_eq!(result.as_deref(), Some("/synthetic/bin"));
         assert!(
             start.elapsed() < Duration::from_secs(1),
             "a descendant retained stdout after the shell exited: {:?}",
@@ -187,9 +188,10 @@ mod tests {
         std::fs::write(
             &shell,
             format!(
-                "#!/bin/sh\nprintf '%s' '{}'\n{}\n",
+                "#!/bin/sh\nprintf '%s' '{}'\nprintf '%s' '{}/synthetic/bin{}'\n",
                 "x".repeat(super::MAX_OUTPUT_BYTES + 1),
-                super::super::PATH_PROBE_SNIPPET
+                super::super::PATH_PROBE_BEGIN,
+                super::super::PATH_PROBE_END
             ),
         )
         .unwrap();

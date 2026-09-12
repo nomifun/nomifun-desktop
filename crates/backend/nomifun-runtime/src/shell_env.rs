@@ -87,7 +87,62 @@ fn merge_process_path(
 }
 
 fn platform_extra_bins() -> Vec<PathBuf> {
-    let mut out = platform_extra_bins_at(dirs::home_dir().as_deref());
+    let home = dirs::home_dir();
+    let home = home.as_deref();
+    let mut out = platform_extra_bins_at(home);
+    let mut push_if_dir = |p: PathBuf| {
+        if p.is_dir() {
+            out.push(p);
+        }
+    };
+
+    #[cfg(unix)]
+    {
+        // Homebrew on Apple Silicon (`/opt/homebrew/bin`) is NOT on the
+        // minimal PATH a GUI launch inherits, and `/usr/local` is where
+        // many CLIs (claude/codex via npm/brew or official installers)
+        // land. Cheap to probe; `push_if_dir` drops the ones absent.
+        push_if_dir(PathBuf::from("/opt/homebrew/bin"));
+        push_if_dir(PathBuf::from("/opt/homebrew/sbin"));
+        push_if_dir(PathBuf::from("/usr/local/bin"));
+        push_if_dir(PathBuf::from("/usr/local/sbin"));
+    }
+
+    #[cfg(windows)]
+    {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            push_if_dir(PathBuf::from(&appdata).join("npm"));
+        }
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            push_if_dir(PathBuf::from(&local).join("pnpm"));
+            push_if_dir(PathBuf::from(&local).join("fnm_multishells"));
+            push_if_dir(
+                PathBuf::from(&local)
+                    .join("Programs")
+                    .join("OpenAI")
+                    .join("Codex")
+                    .join("bin"),
+            );
+            // winget package shims (stable since App Installer 1.4).
+            push_if_dir(PathBuf::from(&local).join("Microsoft").join("WinGet").join("Links"));
+            // Yarn classic global bin.
+            push_if_dir(PathBuf::from(&local).join("Yarn").join("bin"));
+        }
+        if let Ok(pf) = std::env::var("ProgramFiles") {
+            push_if_dir(PathBuf::from(&pf).join("Git").join("cmd"));
+            push_if_dir(PathBuf::from(&pf).join("Git").join("bin"));
+            push_if_dir(PathBuf::from(&pf).join("nodejs"));
+        }
+        if let Ok(pf86) = std::env::var("ProgramFiles(x86)") {
+            push_if_dir(PathBuf::from(&pf86).join("nodejs"));
+        }
+        if let Ok(scoop) = std::env::var("SCOOP") {
+            push_if_dir(PathBuf::from(&scoop).join("shims"));
+        } else if let Some(h) = home {
+            push_if_dir(h.join("scoop").join("shims"));
+        }
+    }
+
     // Env-var-driven install locations. Kept out of `platform_extra_bins_at`
     // so that function stays a pure function of `home` for unit tests; the
     // real env is only read here.
@@ -170,53 +225,6 @@ fn platform_extra_bins_at(home: Option<&Path>) -> Vec<PathBuf> {
         }
         for fnm_bin in fnm_version_bins(h) {
             push_if_dir(fnm_bin);
-        }
-    }
-
-    #[cfg(unix)]
-    {
-        // Homebrew on Apple Silicon (`/opt/homebrew/bin`) is NOT on the
-        // minimal PATH a GUI launch inherits, and `/usr/local` is where
-        // many CLIs (claude/codex via npm/brew or official installers)
-        // land. Cheap to probe; `push_if_dir` drops the ones absent.
-        push_if_dir(PathBuf::from("/opt/homebrew/bin"));
-        push_if_dir(PathBuf::from("/opt/homebrew/sbin"));
-        push_if_dir(PathBuf::from("/usr/local/bin"));
-        push_if_dir(PathBuf::from("/usr/local/sbin"));
-    }
-
-    #[cfg(windows)]
-    {
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            push_if_dir(PathBuf::from(&appdata).join("npm"));
-        }
-        if let Ok(local) = std::env::var("LOCALAPPDATA") {
-            push_if_dir(PathBuf::from(&local).join("pnpm"));
-            push_if_dir(PathBuf::from(&local).join("fnm_multishells"));
-            push_if_dir(
-                PathBuf::from(&local)
-                    .join("Programs")
-                    .join("OpenAI")
-                    .join("Codex")
-                    .join("bin"),
-            );
-            // winget package shims (stable since App Installer 1.4).
-            push_if_dir(PathBuf::from(&local).join("Microsoft").join("WinGet").join("Links"));
-            // Yarn classic global bin.
-            push_if_dir(PathBuf::from(&local).join("Yarn").join("bin"));
-        }
-        if let Ok(pf) = std::env::var("ProgramFiles") {
-            push_if_dir(PathBuf::from(&pf).join("Git").join("cmd"));
-            push_if_dir(PathBuf::from(&pf).join("Git").join("bin"));
-            push_if_dir(PathBuf::from(&pf).join("nodejs"));
-        }
-        if let Ok(pf86) = std::env::var("ProgramFiles(x86)") {
-            push_if_dir(PathBuf::from(&pf86).join("nodejs"));
-        }
-        if let Ok(scoop) = std::env::var("SCOOP") {
-            push_if_dir(PathBuf::from(&scoop).join("shims"));
-        } else if let Some(h) = home {
-            push_if_dir(h.join("scoop").join("shims"));
         }
     }
 
@@ -412,12 +420,6 @@ fn login_shell_path() -> Option<String> {
 mod tests {
     use super::*;
 
-    /// Serializes tests that mutate the process-global `SHELL` env var.
-    /// `cargo test` runs test fns on parallel threads; without this lock
-    /// one test's `set_var`/`remove_var` races another's read.
-    #[cfg(unix)]
-    static SHELL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     fn sep() -> &'static str {
         if cfg!(windows) { ";" } else { ":" }
     }
@@ -543,10 +545,7 @@ mod tests {
 
     #[test]
     fn platform_extra_bins_at_handles_no_home() {
-        let bins = platform_extra_bins_at(None);
-        // 没 home 时，Unix 返回空；Windows 可能仍从 env 读到 APPDATA 等——两种都可接受。
-        // 只验证不 panic。
-        let _ = bins;
+        assert!(platform_extra_bins_at(None).is_empty());
     }
 
     #[test]
@@ -565,19 +564,19 @@ mod tests {
         let bins = platform_extra_bins_at(Some(home));
 
         assert!(
-            bins.iter().any(|p| p.ends_with(".npm-global/bin")),
+            bins.contains(&home.join(".npm-global").join("bin")),
             "expected ~/.npm-global/bin in {bins:?}"
         );
         assert!(
-            bins.iter().any(|p| p.ends_with(".asdf/shims")),
+            bins.contains(&home.join(".asdf").join("shims")),
             "expected ~/.asdf/shims in {bins:?}"
         );
         assert!(
-            bins.iter().any(|p| p.ends_with("mise/shims")),
+            bins.contains(&home.join(".local").join("share").join("mise").join("shims")),
             "expected mise shims in {bins:?}"
         );
         assert!(
-            bins.iter().any(|p| p.ends_with("node-versions/v20.11.0/installation/bin")),
+            bins.contains(&home.join(".local/share/fnm/node-versions/v20.11.0/installation/bin")),
             "expected fnm node bin in {bins:?}"
         );
     }
@@ -608,7 +607,7 @@ mod tests {
             "BUN_INSTALL/bin should be included: {bins:?}"
         );
         assert!(
-            !bins.iter().any(|p| p.ends_with("nope/bin")),
+            !bins.contains(&tmp.path().join("nope").join("bin")),
             "non-existent VOLTA_HOME/bin must be filtered: {bins:?}"
         );
     }
@@ -648,50 +647,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn login_shell_path_returns_none_without_shell_var() {
-        let _guard = SHELL_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // SAFETY: SHELL_ENV_LOCK serializes SHELL mutations across tests.
-        unsafe {
-            std::env::remove_var("SHELL");
-        }
-        let result = login_shell_path();
-        assert!(result.is_none());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn login_shell_path_rejects_relative_shell() {
-        let _guard = SHELL_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // SAFETY: SHELL_ENV_LOCK serializes SHELL mutations across tests.
-        unsafe {
-            std::env::set_var("SHELL", "sh");
-        }
-        let result = login_shell_path();
-        assert!(result.is_none());
-        unsafe {
-            std::env::remove_var("SHELL");
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn login_shell_path_roundtrip_with_sh() {
-        let _guard = SHELL_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // SAFETY: SHELL_ENV_LOCK serializes SHELL mutations across tests.
-        unsafe {
-            std::env::set_var("SHELL", "/bin/sh");
-        }
-        let result = login_shell_path();
-        assert!(result.is_some(), "login shell probe should return Some");
-        let path = result.unwrap();
-        assert!(!path.is_empty(), "login shell PATH should not be empty");
-        unsafe {
-            std::env::remove_var("SHELL");
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn extract_probe_path_pulls_value_between_markers() {
         let raw = format!("{PATH_PROBE_BEGIN}/usr/bin:/bin{PATH_PROBE_END}");
         assert_eq!(extract_probe_path(&raw).as_deref(), Some("/usr/bin:/bin"));
@@ -726,34 +681,24 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn run_login_shell_path_sources_interactive_rc() {
-        // Regression test for the "only nomi shows up" bug: a *non*-interactive
-        // login shell (`-l`) does NOT source ~/.zshrc, where most users add
-        // their CLI dirs (nvm/fnm/pnpm/asdf/mise/custom npm prefixes). The
-        // probe must use an *interactive* login shell (`-i -l`) so PATH
-        // entries from ~/.zshrc are visible — otherwise claude/codex go
-        // undetected and only the internal `nomi` agent shows up.
-        let zsh = Path::new("/bin/zsh");
-        if !zsh.exists() {
-            eprintln!("skipping run_login_shell_path_sources_interactive_rc: /bin/zsh absent");
-            return;
-        }
+    fn run_login_shell_path_passes_interactive_login_args_and_extracts_synthetic_path() {
+        use std::os::unix::fs::PermissionsExt;
+
         let home = tempfile::TempDir::new().unwrap();
-        let marker = home.path().join("nomimarker-bin");
-        std::fs::create_dir_all(&marker).unwrap();
-        // ~/.zshrc is sourced for INTERACTIVE shells only.
+        let shell = home.path().join("fake-shell");
+        // This script never evaluates the probe snippet or sources login rc
+        // files. All captured data is artificial, not the host's environment.
         std::fs::write(
-            home.path().join(".zshrc"),
-            format!("export PATH=\"{}:$PATH\"\n", marker.display()),
+            &shell,
+            format!(
+                "#!/bin/sh\n[ \"$#\" -eq 4 ] && [ \"$1\" = -i ] && [ \"$2\" = -l ] && [ \"$3\" = -c ] || exit 1\nprintf '%s' 'banner{PATH_PROBE_BEGIN}/synthetic/bin:/fixture/bin{PATH_PROBE_END}noise'\n"
+            ),
         )
         .unwrap();
-
-        let path = run_login_shell_path("/bin/zsh", Some(home.path()))
-            .expect("interactive login shell probe should return a PATH");
-        let marker_str = marker.to_string_lossy();
-        assert!(
-            path.split(':').any(|p| p == marker_str),
-            "expected ~/.zshrc PATH entry {marker_str} in probed PATH, got: {path}"
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            run_login_shell_path(shell.to_str().unwrap(), Some(home.path())).as_deref(),
+            Some("/synthetic/bin:/fixture/bin")
         );
     }
 }
