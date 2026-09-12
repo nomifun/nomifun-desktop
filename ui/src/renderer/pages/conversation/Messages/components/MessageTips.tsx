@@ -8,11 +8,11 @@ import type { IMessageTips } from '@/common/chat/chatLib';
 import { ipcBridge } from '@/common';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import { toDisplayText } from '@/common/chat/displayText';
-import { Collapse, Message, Tag } from '@arco-design/web-react';
-import { Attention, CheckOne } from '@icon-park/react';
+import { Message, Tooltip } from '@arco-design/web-react';
+import { Attention, CheckOne, Down, Refresh } from '@icon-park/react';
 import { theme } from '@/platform';
 import classNames from 'classnames';
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useId, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import MarkdownView from '@renderer/components/Markdown';
 import FeedbackButton from '@renderer/components/base/FeedbackButton';
@@ -163,8 +163,14 @@ const MessageTips: React.FC<{ message: IMessageTips }> = ({ message }) => {
   const { json, data } = useFormatContent(content);
   const retry = useErrorRetry(message);
   const continuation = useTruncatedContinuation(message);
+  const [detailsExpanded, setDetailsExpanded] = useState(false);
+  const detailsId = useId();
+  const detailsLabel = t(
+    detailsExpanded ? 'conversation.agentError.collapseDetails' : 'conversation.agentError.expandDetails'
+  );
   const retryButton = retry ? (
     <button type='button' className='message-error-note__retry' data-testid='message-error-retry' onClick={retry}>
+      <Refresh theme='outline' size='14' fill='currentColor' aria-hidden='true' />
       {t('common.retry', { defaultValue: 'Retry' })}
     </button>
   ) : null;
@@ -182,11 +188,9 @@ const MessageTips: React.FC<{ message: IMessageTips }> = ({ message }) => {
   const recoveryButton = continueButton ?? retryButton;
 
   const displayContent = json ? '' : content;
-  const shouldShowFeedback = type === 'error';
-
-  if (structuredError) {
-    const code = structuredError.code;
-    const ownership = structuredError.ownership;
+  if (type === 'error') {
+    const code = structuredError?.code;
+    const ownership = structuredError?.ownership;
     const title = code
       ? t(`conversation.agentError.codes.${code}.title`, {
           defaultValue: t('conversation.agentError.fallbackTitle'),
@@ -194,91 +198,77 @@ const MessageTips: React.FC<{ message: IMessageTips }> = ({ message }) => {
       : t('conversation.agentError.fallbackTitle');
     const body = code
       ? t(
-          structuredError.workspacePath
+          structuredError?.workspacePath
             ? `conversation.agentError.codes.${code}.bodyWithPath`
             : `conversation.agentError.codes.${code}.body`,
           {
-            workspacePath: structuredError.workspacePath,
-            defaultValue: structuredError.message || content,
+            workspacePath: structuredError?.workspacePath,
+            defaultValue: structuredError?.message || content,
           }
         )
-      : structuredError.message || content;
+      : structuredError?.message || (json ? '' : content);
     const ownershipLabel = ownership
       ? t(`conversation.agentError.ownership.${ownership}`, {
           defaultValue: t('conversation.agentError.ownership.unknown_upstream'),
         })
       : null;
     const retryHint =
-      structuredError.retryable === undefined
+      structuredError?.retryable === undefined
         ? null
         : structuredError.retryable
           ? t('conversation.agentError.retryable')
           : t('conversation.agentError.notRetryable');
-    const resolutionText = structuredError.resolution
+    const resolutionText = structuredError?.resolution
       ? t(`conversation.agentError.resolution.${structuredError.resolution.kind}`)
       : null;
     const detailParts = [
       code ? `${t('conversation.agentError.errorCode')}: ${code}` : '',
-      structuredError.detail || structuredError.message,
+      structuredError?.detail || structuredError?.message || (json ? JSON.stringify(data, null, 2) : ''),
     ].filter(Boolean);
 
     return (
-      <div className='w-full'>
-        <div className={classNames('message-error-note', ownership && `message-error-note--${ownership}`)}>
-          <div className='message-error-note__rail' aria-hidden='true' />
-          <div className='message-error-note__content'>
-            <div className='message-error-note__header'>
-              <div className='message-error-note__status'>
-                <span className='message-error-note__icon'>{icon.error}</span>
-                {ownershipLabel && <span className='message-error-note__owner'>{ownershipLabel}</span>}
-              </div>
-              <div className='message-error-note__meta'>
-                {retryHint && (
-                  <Tag
-                    size='small'
-                    color={structuredError.retryable ? 'green' : 'gray'}
-                    className='message-error-note__tag'
-                  >
-                    {retryHint}
-                  </Tag>
-                )}
-                {code && <span className='message-error-note__code'>{code}</span>}
-              </div>
+      <div className='message-error-note'>
+        <div className='message-error-note__summary'>
+          <span className='message-error-note__icon' aria-hidden='true'>
+            <Attention theme='outline' size='16' fill='currentColor' />
+          </span>
+          <span className='message-error-note__title' role='alert'>
+            {title}
+          </span>
+          <div className='message-error-note__controls'>
+            <Tooltip content={detailsLabel}>
+              <button
+                type='button'
+                className='message-error-note__toggle'
+                aria-label={detailsLabel}
+                aria-expanded={detailsExpanded}
+                aria-controls={detailsId}
+                onClick={() => setDetailsExpanded((expanded) => !expanded)}
+              >
+                <Down theme='outline' size='14' fill='currentColor' aria-hidden='true' />
+              </button>
+            </Tooltip>
+            {recoveryButton && <div className='message-error-note__recovery'>{recoveryButton}</div>}
+          </div>
+        </div>
+        <div id={detailsId} className='message-error-note__details' hidden={!detailsExpanded}>
+          {body && <div className='message-error-note__body'>{body}</div>}
+          {resolutionText && (
+            <div className='message-error-note__body'>
+              {t('conversation.agentError.resolutionPrefix')}
+              {resolutionText}
             </div>
-            <div className='message-error-note__main'>
-              <div className='message-error-note__title'>{title}</div>
-              <div className='message-error-note__body'>{body}</div>
-              {resolutionText && (
-                <div className='message-error-note__resolution'>
-                  <span className='message-error-note__resolution-label'>
-                    {t('conversation.agentError.resolutionPrefix')}
-                  </span>
-                  <span>{resolutionText}</span>
-                </div>
-              )}
-              <div className='message-error-note__footer'>
-                <div className='message-error-note__footer-main'>
-                  {detailParts.length > 0 && (
-                    <Collapse bordered={false} className='message-error-note__details'>
-                      <Collapse.Item
-                        name='technical-details'
-                        header={
-                          <span className='message-error-note__details-label'>{t('common.technical_details')}</span>
-                        }
-                      >
-                        <div className='message-error-note__detail-body'>{detailParts.join('\n')}</div>
-                      </Collapse.Item>
-                    </Collapse>
-                  )}
-                  {shouldShowFeedback && (
-                    <div className='message-error-note__actions'>
-                      {recoveryButton}
-                      <FeedbackButton className='message-error-note__feedback' />
-                    </div>
-                  )}
-                </div>
-              </div>
+          )}
+          {(ownershipLabel || retryHint) && (
+            <div className='message-error-note__meta'>
+              {[ownershipLabel, retryHint].filter(Boolean).join(' · ')}
             </div>
+          )}
+          {detailParts.length > 0 && (
+            <div className='message-error-note__detail-body'>{detailParts.join('\n')}</div>
+          )}
+          <div className='message-error-note__actions'>
+            <FeedbackButton className='message-error-note__feedback' />
           </div>
         </div>
       </div>
@@ -297,12 +287,6 @@ const MessageTips: React.FC<{ message: IMessageTips }> = ({ message }) => {
               </MarkdownView>
             </div>
           </div>
-          {type === 'error' && (
-            <div className='flex justify-end items-center gap-8px'>
-              {recoveryButton}
-              <FeedbackButton />
-            </div>
-          )}
         </div>
       </div>
     );
@@ -317,12 +301,6 @@ const MessageTips: React.FC<{ message: IMessageTips }> = ({ message }) => {
             </CollapsibleContent>
           </div>
         </div>
-        {shouldShowFeedback && (
-          <div className='flex justify-end items-center gap-8px'>
-            {recoveryButton}
-            <FeedbackButton />
-          </div>
-        )}
       </div>
     </div>
   );

@@ -110,6 +110,8 @@
     }
   },
   "agentError": {
+    "expandDetails": "展开错误详情",
+    "collapseDetails": "收起错误详情",
     "fallbackTitle": "Agent 未能回复",
     "errorCode": "错误码",
     "retryable": "可重试",
@@ -155,7 +157,7 @@
         "body": "当前没有可用的模型供应商，请到「模型&Agent」添加并启用一个模型后重试。"
       },
       "NOMIFUN_STREAM_BROKEN": {
-        "title": "响应流异常中断",
+        "title": "回复中断",
         "body": "消息已发送，但响应流异常结束。请先重试；如果反复出现，可以提交反馈。"
       },
       "NOMIFUN_STATE_INCONSISTENT": {
