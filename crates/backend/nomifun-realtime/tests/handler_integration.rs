@@ -8,7 +8,10 @@ use axum::http::{HeaderValue, header};
 use axum::routing::get;
 use futures_util::{SinkExt, StreamExt};
 use nomifun_api_types::WebSocketMessage;
-use nomifun_realtime::{ConnectionId, WebSocketManager, WsHandlerState, ws_upgrade_handler};
+use nomifun_realtime::{
+    ConnectionId, PER_CONNECTION_BUFFER, WebSocketCloseCode, WebSocketManager, WsHandlerState,
+    WsOutbound, ws_upgrade_handler,
+};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite;
@@ -215,6 +218,16 @@ where
 
 fn send_json(text: &str) -> tungstenite::Message {
     tungstenite::Message::Text(text.into())
+}
+
+async fn wait_for_client_count(manager: &WebSocketManager, expected: usize) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while manager.client_count() != expected {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("expected {expected} clients, got {}", manager.client_count()));
 }
 
 // ---------------------------------------------------------------------------
@@ -631,15 +644,74 @@ async fn client_disconnect_removes_from_manager() {
     let (state, manager) = default_state();
     let addr = start_server(state).await;
 
-    let (mut tx, _rx) = connect_with_token(addr, "valid-token").await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert_eq!(manager.client_count(), 1);
+    let (mut tx, mut rx) = connect_with_token(addr, "valid-token").await;
+    wait_for_client_count(&manager, 1).await;
 
-    // Send close frame
-    tx.send(tungstenite::Message::Close(None)).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tx.send(tungstenite::Message::Close(Some(tungstenite::protocol::CloseFrame {
+        code: 1000.into(),
+        reason: "fixture close".into(),
+    }))).await.unwrap();
+
+    assert_eq!(read_close(&mut rx).await, Some(1000), "the peer close must be acknowledged");
+    wait_for_client_count(&manager, 0).await;
+}
+
+#[tokio::test]
+async fn server_close_terminates_registration_without_waiting_for_peer_reply() {
+    let (state, manager) = default_state();
+    let addr = start_server(state).await;
+    let (_tx, mut rx) = connect_with_token(addr, "valid-token").await;
+    wait_for_client_count(&manager, 1).await;
+
+    manager.send_raw_to(
+        ConnectionId(1),
+        WsOutbound::Close(WebSocketCloseCode::NormalClosure, "done".into()),
+    );
+
+    assert_eq!(read_close(&mut rx).await, Some(1000));
+    // Do not flush the client's automatic close reply or send another frame.
+    // A queued Close must end the server writer even while its tx is retained
+    // in the manager, rather than waiting forever for another outbound item.
+    wait_for_client_count(&manager, 0).await;
+}
+
+#[tokio::test]
+async fn outbound_overflow_closes_real_socket_for_resync() {
+    let (state, manager) = default_state();
+    let addr = start_server(state).await;
+    let (_tx, mut rx) = connect_with_token(addr, "valid-token").await;
+    wait_for_client_count(&manager, 1).await;
+
+    // This current-thread test deliberately does not yield while filling the
+    // real connection queue, so the writer cannot drain it before overflow.
+    for seq in 0..=PER_CONNECTION_BUFFER {
+        manager.broadcast_all(WebSocketMessage::new("burst", json!({"seq": seq})));
+    }
 
     assert_eq!(manager.client_count(), 0);
+    assert_eq!(read_close(&mut rx).await, Some(1000));
+}
+
+#[tokio::test]
+async fn aged_handshake_closes_real_socket_with_4409_and_no_logout_event() {
+    let (state, manager) = default_state();
+    let addr = start_server(state).await;
+    let (_tx, mut rx) = connect_with_token(addr, "valid-token").await;
+    wait_for_client_count(&manager, 1).await;
+    let heartbeat = manager.start_heartbeat(Arc::new(|_| None));
+
+    let first = tokio::time::timeout(Duration::from_secs(2), rx.next())
+        .await
+        .expect("aged token close must arrive")
+        .expect("socket must send a close frame")
+        .unwrap();
+    match first {
+        tungstenite::Message::Close(Some(frame)) => assert_eq!(u16::from(frame.code), 4409),
+        other => panic!("expected only a 4409 close, not a logout event: {other:?}"),
+    }
+    wait_for_client_count(&manager, 0).await;
+    heartbeat.abort();
+    let _ = heartbeat.await;
 }
 
 #[tokio::test]
