@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use crate::adapter::{ChatProtocolAdapter, ProviderWireStream};
 use crate::contracts::{
     ChatContractError, ChatModelError, ChatModelErrorCode, ChatModelEvent, ChatProtocol,
-    ChatRetryDirective, ChatToolCall, ChatUsage, ResolvedChatRoute, ToolCallId,
+    ChatRetryDirective, ChatToolCall, ResolvedChatRoute, ToolCallId,
 };
 use crate::ports::{
     ChatCausalityGate, ChatRouteResolver, CredentialTarget, ProviderCredentialStore,
@@ -164,11 +164,6 @@ impl ChatModelBroker {
         routes
             .validate_for(&request.route)
             .map_err(contract_error_to_model_error)?;
-        // Resolve and validate the immutable route plan before the gate claims
-        // the operation. A malformed/missing route must not permanently
-        // consume an operation id in the Session facts.
-        self.causality_gate.authorize(&request.causality).await?;
-
         let required = request.input.required_features();
         let mut candidates = Vec::new();
         for route in routes.candidates() {
@@ -194,6 +189,10 @@ impl ChatModelBroker {
                 ChatRetryDirective::Never,
             ));
         }
+        // Validate route identity and feature support before the gate claims
+        // the operation. An unusable route plan must not permanently consume
+        // an operation id in the Session facts.
+        self.causality_gate.authorize(&request.causality).await?;
         Ok(candidates)
     }
 
@@ -246,6 +245,9 @@ async fn run_broker(
     let mut last_error = None;
 
     while route_index < routes.len() && total_attempt < retry_policy.max_total_attempts {
+        if sender.is_closed() {
+            return;
+        }
         let route = &routes[route_index];
         route_attempt = route_attempt.saturating_add(1);
         total_attempt = total_attempt.saturating_add(1);
@@ -384,7 +386,13 @@ async fn consume_attempt_stream(
     let mut buffered = Vec::new();
     let mut semantic_output_committed = false;
 
-    while let Some(frame) = wire_stream.next().await {
+    loop {
+        let frame = tokio::select! {
+            biased;
+            _ = sender.closed() => return AttemptOutcome::ReceiverDropped,
+            frame = wire_stream.next() => frame,
+        };
+        let Some(frame) = frame else { break; };
         let frame = match frame {
             Ok(frame) => frame,
             Err(error) => {
@@ -531,13 +539,12 @@ impl EventSequence {
             ChatModelEvent::ToolCallCompleted { call } => {
                 validate_completed_tool(call, &mut self.tool_names)?;
             }
-            ChatModelEvent::Usage { usage } => {
+            ChatModelEvent::Usage { .. } => {
                 if self.usage_seen {
                     return Err(ChatModelError::protocol_violation(
                         "provider emitted canonical usage more than once",
                     ));
                 }
-                validate_usage(usage)?;
                 self.usage_seen = true;
             }
             ChatModelEvent::Completed { .. } => {
@@ -621,10 +628,6 @@ fn validate_completed_tool(
     call.validate()
         .map_err(|error| ChatModelError::protocol_violation(error.to_string()))?;
     validate_tool_identity(&call.call_id, &call.name, tool_names)
-}
-
-fn validate_usage(_usage: &ChatUsage) -> Result<(), ChatModelError> {
-    Ok(())
 }
 
 fn contract_error_to_model_error(error: ChatContractError) -> ChatModelError {

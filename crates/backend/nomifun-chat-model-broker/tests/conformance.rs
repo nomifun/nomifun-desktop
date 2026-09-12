@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::{StreamExt, stream};
+use futures::{Stream, StreamExt, stream};
 use nomifun_agent_contracts::{
     AgentSessionId, ChatRouteIdentity, ConnectionConfigRef, DigestHex, EventId, ModelRouteId,
     OperationId, ResolvedSnapshotId, ResolvedSnapshotRef, VersionString,
@@ -11,7 +13,7 @@ use nomifun_agent_contracts::{
 use nomifun_chat_model_broker::{
     AnthropicAdapter, BedrockAdapter, BrokerRetryPolicy, ChatBrokerPort, ChatCausality,
     ChatCausalityGate, ChatContentPart, ChatFinishReason, ChatMessage, ChatModelBroker,
-    ChatModelError, ChatModelErrorCode, ChatModelEvent, ChatModelInput, ChatModelRequest,
+    ChatModelError, ChatModelErrorCode, ChatModelEvent, ChatModelFeature, ChatModelInput, ChatModelRequest,
     ChatModality, ChatProtocol, ChatProtocolAdapter, ChatResponseFormat, ChatRetryDirective,
     ChatRole, ChatRouteResolver, ChatRouteSelection, ChatToolChoice,
     CredentialLease, CredentialTarget, GeminiAdapter, OpenAiChatAdapter,
@@ -22,10 +24,23 @@ use nomifun_chat_model_broker::{
     ResponsesRole, ResolvedChatRoute, ResolvedChatRouteSet, VertexAdapter,
     protocol_features, recorded_conformance_fixtures,
 };
+use tokio::sync::Notify;
 
 enum TransportScript {
     OpenError(ChatModelError),
     Frames(Vec<Result<ProviderWireFrame, ChatModelError>>),
+    PendingStream {
+        started: Arc<Notify>,
+        dropped: Arc<Notify>,
+    },
+}
+
+struct NotifyOnDrop(Arc<Notify>);
+
+impl Drop for NotifyOnDrop {
+    fn drop(&mut self) {
+        self.0.notify_one();
+    }
 }
 
 struct ScriptedTransport {
@@ -83,6 +98,13 @@ impl ProviderTransport for ScriptedTransport {
         match script {
             TransportScript::OpenError(error) => Err(error),
             TransportScript::Frames(frames) => Ok(Box::pin(stream::iter(frames))),
+            TransportScript::PendingStream { started, dropped } => {
+                Ok(Box::pin(stream::once(async move {
+                    let _guard = NotifyOnDrop(dropped);
+                    started.notify_one();
+                    std::future::pending::<Result<ProviderWireFrame, ChatModelError>>().await
+                })))
+            }
         }
     }
 }
@@ -1044,6 +1066,79 @@ async fn broker_owns_bounded_same_route_retry() {
             .filter_map(|item| item.as_ref().ok())
             .all(|event| event.total_attempt == 2 && event.route_attempt == 2)
     );
+}
+
+#[tokio::test]
+async fn unsupported_features_do_not_claim_the_operation() {
+    for route_advertises_audio in [false, true] {
+        let mut primary_route = route(ChatProtocol::Anthropic, "unsupported-audio", 1);
+        if route_advertises_audio {
+            primary_route.features.insert(ChatModelFeature::AudioOutput);
+        }
+        let mut request = basic_request(&primary_route);
+        request.input.requested_output_modalities.insert(ChatModality::Audio);
+        let gate = StaticCausalityGate::allow();
+        let transport = ScriptedTransport::new([]);
+        let transports = transport_map([(
+            ChatProtocol::Anthropic,
+            provider_transport(&transport),
+        )]);
+        let broker = broker(
+            gate.clone(),
+            ResolvedChatRouteSet { primary: primary_route, failovers: Vec::new() },
+            Arc::new(StaticCredentialStore { mismatch: false }),
+            &transports,
+            BrokerRetryPolicy::default(),
+        );
+        let error = match broker.open_stream(request).await {
+            Ok(_) => panic!("unsupported audio must be rejected before stream creation"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, ChatModelErrorCode::UnsupportedFeature);
+        assert_eq!(gate.calls.load(Ordering::Acquire), 0);
+        assert_eq!(transport.calls(), 0);
+    }
+}
+
+#[tokio::test]
+async fn dropping_broker_or_bridge_stream_releases_pending_provider_stream() {
+    for through_bridge in [false, true] {
+        let primary_route = route(ChatProtocol::Anthropic, "cancelled-stream", 1);
+        let started = Arc::new(Notify::new());
+        let dropped = Arc::new(Notify::new());
+        let transport = ScriptedTransport::new([TransportScript::PendingStream {
+            started: started.clone(),
+            dropped: dropped.clone(),
+        }]);
+        let transports = transport_map([(
+            ChatProtocol::Anthropic,
+            provider_transport(&transport),
+        )]);
+        let broker = broker(
+            StaticCausalityGate::allow(),
+            ResolvedChatRouteSet {
+                primary: primary_route.clone(),
+                failovers: vec![route(ChatProtocol::Anthropic, "unused-failover", 1)],
+            },
+            Arc::new(StaticCredentialStore { mismatch: false }),
+            &transports,
+            BrokerRetryPolicy::default(),
+        );
+        let output: Pin<Box<dyn Stream<Item = ()> + Send>> = if through_bridge {
+            Box::pin(ResponsesBridge::new(broker)
+                .open_stream(responses_request(&primary_route))
+                .await.unwrap().map(|_| ()))
+        } else {
+            Box::pin(broker.open_stream(basic_request(&primary_route))
+                .await.unwrap().map(|_| ()))
+        };
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await.expect("provider stream must be polled before cancellation");
+        drop(output);
+        tokio::time::timeout(Duration::from_secs(2), dropped.notified())
+            .await.expect("dropping output must release the pending provider stream");
+        assert_eq!(transport.calls(), 1, "cancellation must not retry or fail over");
+    }
 }
 
 #[tokio::test]
