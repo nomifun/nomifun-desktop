@@ -187,7 +187,7 @@ where
         .map_err(serde::de::Error::custom)
 }
 
-fn deserialize_optional_uuidv7<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+pub(crate) fn deserialize_optional_uuidv7<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
