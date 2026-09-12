@@ -1194,7 +1194,7 @@ impl ExecutionScheduler {
             ))
         })?;
         let effect = effects.pending_conversation_effects.remove(0);
-        match effect {
+        let (operation_id, effect_name) = match effect {
             PendingConversationEffect::StopTurn { operation_id } => {
                 self.inner
                     .deps
@@ -1206,34 +1206,7 @@ impl ExecutionScheduler {
                             "durable turn stop {operation_id} failed: {error}"
                         ))
                     })?;
-                let runtime_state = if effects.pending_conversation_effects.is_empty() {
-                    None
-                } else {
-                    Some(effects.encode()?)
-                };
-                self.inner
-                    .deps
-                    .repository
-                    .acknowledge_attempt_conversation_effect(
-                        owner_id,
-                        execution_id,
-                        &step.step_id,
-                        &attempt.attempt_id,
-                        attempt.version,
-                        &AttemptConversationEffectParams { runtime_state },
-                        &system_event(
-                            AgentExecutionEventKind::StepChanged,
-                            Some(&step.step_id),
-                            Some(&attempt.attempt_id),
-                            json!({
-                                "change":"conversation_effect_delivered",
-                                "effect":"stop_turn",
-                                "operation_id":operation_id,
-                            }),
-                        ),
-                    )
-                    .await?;
-                self.publish().await;
+                (operation_id, "stop_turn")
             }
             PendingConversationEffect::DecisionInput {
                 operation_id,
@@ -1281,6 +1254,7 @@ impl ExecutionScheduler {
                     Some(lease),
                 )
                 .await?;
+                return Ok(true);
             }
             PendingConversationEffect::Steer {
                 operation_id,
@@ -1296,36 +1270,37 @@ impl ExecutionScheduler {
                             "durable steer delivery {operation_id} failed: {error}"
                         ))
                     })?;
-                let runtime_state = if effects.pending_conversation_effects.is_empty() {
-                    None
-                } else {
-                    Some(effects.encode()?)
-                };
-                self.inner
-                    .deps
-                    .repository
-                    .acknowledge_attempt_conversation_effect(
-                        owner_id,
-                        execution_id,
-                        &step.step_id,
-                        &attempt.attempt_id,
-                        attempt.version,
-                        &AttemptConversationEffectParams { runtime_state },
-                        &system_event(
-                            AgentExecutionEventKind::StepChanged,
-                            Some(&step.step_id),
-                            Some(&attempt.attempt_id),
-                            json!({
-                                "change":"conversation_effect_delivered",
-                                "effect":"steer",
-                                "operation_id":operation_id,
-                            }),
-                        ),
-                    )
-                    .await?;
-                self.publish().await;
+                (operation_id, "steer")
             }
-        }
+        };
+        let runtime_state = if effects.pending_conversation_effects.is_empty() {
+            None
+        } else {
+            Some(effects.encode()?)
+        };
+        self.inner
+            .deps
+            .repository
+            .acknowledge_attempt_conversation_effect(
+                owner_id,
+                execution_id,
+                &step.step_id,
+                &attempt.attempt_id,
+                attempt.version,
+                &AttemptConversationEffectParams { runtime_state },
+                &system_event(
+                    AgentExecutionEventKind::StepChanged,
+                    Some(&step.step_id),
+                    Some(&attempt.attempt_id),
+                    json!({
+                        "change":"conversation_effect_delivered",
+                        "effect":effect_name,
+                        "operation_id":operation_id,
+                    }),
+                ),
+            )
+            .await?;
+        self.publish().await;
         Ok(true)
     }
 
@@ -3509,6 +3484,8 @@ mod tests {
     struct NoopConversationEffects {
         fail_report_once: AtomicBool,
         report_operations: Mutex<Vec<String>>,
+        fail_stop_once: AtomicBool,
+        conversation_operations: Mutex<Vec<String>>,
     }
 
     #[async_trait]
@@ -3525,9 +3502,10 @@ mod tests {
             &self,
             _owner_id: &str,
             _conversation_id: &str,
-            _operation_id: &str,
+            operation_id: &str,
             _text: &str,
         ) -> Result<(), AppError> {
+            self.conversation_operations.lock().unwrap().push(operation_id.to_owned());
             Ok(())
         }
 
@@ -3535,8 +3513,12 @@ mod tests {
             &self,
             _owner_id: &str,
             _conversation_id: &str,
-            _operation_id: &str,
+            operation_id: &str,
         ) -> Result<(), AppError> {
+            self.conversation_operations.lock().unwrap().push(operation_id.to_owned());
+            if self.fail_stop_once.swap(false, Ordering::SeqCst) {
+                return Err(AppError::Timeout("fixture stop failed".into()));
+            }
             Ok(())
         }
 
@@ -4048,6 +4030,61 @@ mod tests {
             scheduler.shutdown().await.unwrap();
             pool.close().await;
         }
+
+    #[tokio::test]
+    async fn durable_stop_and_steer_acknowledge_only_successful_delivery() {
+        let runner = Arc::new(HarnessAttemptRunner::parallel());
+        let (mut scheduler, repository, execution_id, data_dir, owner) = make_scheduler_harness(
+            runner, &["fixture-step"], &[], 1, AdaptationPolicy::Fixed, None,
+        ).await;
+        let effects = Arc::new(NoopConversationEffects::default());
+        effects.fail_stop_once.store(true, Ordering::SeqCst);
+        Arc::get_mut(&mut scheduler.inner).unwrap().deps.conversation_effects = effects.clone();
+        let detail = scheduler.detail(&owner, &execution_id).await.unwrap();
+        let step = &detail.steps[0];
+        let pending = AttemptConversationEffects {
+            pending_conversation_effects: vec![
+                PendingConversationEffect::StopTurn { operation_id: "stop-id".into() },
+                PendingConversationEffect::Steer { operation_id: "steer-id".into(), content: "next".into() },
+            ],
+            ..Default::default()
+        };
+        let created = repository.create_attempt(
+            &owner, &execution_id, &step.step_id, step.version, None,
+            &CreateAgentExecutionAttemptParams {
+                participant_id: step.assigned_participant_id.clone(), start_immediately: false,
+                trigger_reason: "test".into(), effective_config: "{}".into(), retry_after: None,
+                runtime_state: Some(pending.encode().unwrap()),
+            },
+            &system_event(AgentExecutionEventKind::AttemptChanged, Some(&step.step_id), None, json!({})),
+        ).await.unwrap();
+        let attempt_id = &created.current_attempt.as_ref().unwrap().attempt.attempt_id;
+        let pool = sqlx::SqlitePool::connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new().filename(data_dir.path().join("harness.sqlite")),
+        ).await.unwrap();
+        let conversation_id = generate_id();
+        sqlx::query("INSERT INTO conversations (conversation_id, user_id, name, type, created_at, updated_at) VALUES (?, ?, 'effect', 'nomi', 1, 1)")
+            .bind(&conversation_id).bind(&owner).execute(&pool).await.unwrap();
+        repository.start_attempt(
+            &owner, &execution_id, &step.step_id, created.step.version,
+            attempt_id, created.current_attempt.as_ref().unwrap().attempt.version,
+            &conversation_id, None,
+            &system_event(AgentExecutionEventKind::AttemptChanged, Some(&step.step_id), Some(attempt_id), json!({})),
+        ).await.unwrap();
+        let lease = AgentExecutionLeaseToken::new("effects-test".into());
+        assert!(scheduler.process_one_pending_conversation_effect(&owner, &execution_id, &lease).await.is_err());
+        for expected in ["stop_turn", "steer"] {
+            assert!(scheduler.process_one_pending_conversation_effect(&owner, &execution_id, &lease).await.unwrap());
+            let events = repository.list_events(&owner, &execution_id, 0, 100).await.unwrap();
+            let event: serde_json::Value = serde_json::from_str(&events.last().unwrap().payload).unwrap();
+            assert_eq!(event["effect"], expected);
+        }
+        assert!(!scheduler.process_one_pending_conversation_effect(&owner, &execution_id, &lease).await.unwrap());
+        assert_eq!(*effects.conversation_operations.lock().unwrap(), ["stop-id", "stop-id", "steer-id"]);
+        assert!(scheduler.detail(&owner, &execution_id).await.unwrap().attempts[0].runtime_state.is_none());
+        scheduler.shutdown().await.unwrap();
+        pool.close().await;
+    }
 
     async fn wait_for_terminal(
         repository: &SqliteAgentExecutionRepository,
