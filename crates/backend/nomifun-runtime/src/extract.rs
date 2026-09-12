@@ -49,11 +49,13 @@ pub fn node_filename() -> &'static str {
     if cfg!(windows) { "node.exe" } else { "node" }
 }
 
-/// Returns true when `<dir>/bun[.exe]` exists and `<dir>/bun.stamp`
+/// Returns true when bun and its aliases exist and `<dir>/bun.stamp`
 /// records the expected sha256 + version.
 pub fn is_fresh(dir: &Path, expected_sha: &str, expected_version: &str) -> bool {
-    let bun = dir.join(bun_filename());
-    if !bun.is_file() {
+    if [bun_filename(), bunx_filename(), node_filename()]
+        .iter()
+        .any(|name| !dir.join(name).is_file())
+    {
         return false;
     }
     let stamp_path = dir.join("bun.stamp");
@@ -85,8 +87,9 @@ pub fn extract_into(dir: &Path, blob: &[u8], expected_sha: &str, version: &str) 
         return Ok(dir.join(bun_filename()));
     }
 
+    let tmp_path = dir.join("bun.tmp");
+    let stamp_tmp = dir.join("bun.stamp.tmp");
     let result = (|| -> Result<PathBuf, ExtractError> {
-        let tmp_path = dir.join("bun.tmp");
         let _ = fs::remove_file(&tmp_path);
 
         // Decompress zstd -> tmp file.
@@ -101,7 +104,6 @@ pub fn extract_into(dir: &Path, blob: &[u8], expected_sha: &str, version: &str) 
         // Verify sha256.
         let actual_sha = sha256_file(&tmp_path)?;
         if actual_sha != expected_sha {
-            let _ = fs::remove_file(&tmp_path);
             return Err(ExtractError::ChecksumMismatch {
                 expected: expected_sha.into(),
                 actual: actual_sha,
@@ -117,37 +119,27 @@ pub fn extract_into(dir: &Path, blob: &[u8], expected_sha: &str, version: &str) 
             fs::set_permissions(&tmp_path, perms)?;
         }
 
-        // Atomic rename into place.
+        // Invalidate the commit marker before publishing any changed files.
+        // A failed alias copy must not leave a partial cache marked fresh.
+        match fs::remove_file(dir.join("bun.stamp")) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+
+        // Rename replaces the destination without deleting a usable binary first.
         let bun_path = dir.join(bun_filename());
-        let _ = fs::remove_file(&bun_path);
         fs::rename(&tmp_path, &bun_path)?;
 
-        // bunx: symlink (Unix) or copy (Windows).
-        let bunx_path = dir.join(bunx_filename());
-        let _ = fs::remove_file(&bunx_path);
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(&bun_path, &bunx_path)?;
-        }
-        #[cfg(windows)]
-        {
-            fs::copy(&bun_path, &bunx_path)?;
-        }
-
-        // node: symlink (Unix) or copy (Windows).
-        // Many npm packages use `#!/usr/bin/env node` shebangs; placing a
-        // `node` alias in the bundled bun directory ensures they resolve
-        // to bun (which is Node-compatible) even when no standalone Node
-        // installation exists on the host.
-        let node_path = dir.join(node_filename());
-        let _ = fs::remove_file(&node_path);
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(&bun_path, &node_path)?;
-        }
-        #[cfg(windows)]
-        {
-            fs::copy(&bun_path, &node_path)?;
+        // bunx and node (for npm shebangs): sibling symlinks on Unix,
+        // copies on Windows. Sibling targets also work with a relative dir.
+        for name in [bunx_filename(), node_filename()] {
+            let alias_path = dir.join(name);
+            let _ = fs::remove_file(&alias_path);
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(bun_filename(), &alias_path)?;
+            #[cfg(windows)]
+            fs::copy(&bun_path, &alias_path)?;
         }
 
         // Stamp.
@@ -157,7 +149,6 @@ pub fn extract_into(dir: &Path, blob: &[u8], expected_sha: &str, version: &str) 
             extracted_at: chrono_utc_now(),
         };
         let stamp_bytes = serde_json::to_vec_pretty(&stamp)?;
-        let stamp_tmp = dir.join("bun.stamp.tmp");
         {
             let mut f = File::create(&stamp_tmp)?;
             f.write_all(&stamp_bytes)?;
@@ -168,6 +159,11 @@ pub fn extract_into(dir: &Path, blob: &[u8], expected_sha: &str, version: &str) 
         Ok(bun_path)
     })();
 
+    if result.is_err() {
+        // Clean only our staging files, while still holding the cache lock.
+        let _ = fs::remove_file(&tmp_path);
+        let _ = fs::remove_file(&stamp_tmp);
+    }
     let _ = FileExt::unlock(&lock_file);
     result
 }
@@ -241,11 +237,10 @@ mod tests {
         let dir = tmp.path().join("bun-1.0-aaaa");
 
         extract_into(&dir, &blob, &sha, "1.0").unwrap();
-        // Remove bun temp to prove re-extraction isn't happening.
         assert!(is_fresh(&dir, &sha, "1.0"));
 
-        // Second call should early-return via is_fresh after lock reacquire.
-        extract_into(&dir, &blob, &sha, "1.0").unwrap();
+        // Invalid input would fail if the second call decompressed again.
+        extract_into(&dir, b"not zstd", &sha, "1.0").unwrap();
         assert!(is_fresh(&dir, &sha, "1.0"));
     }
 
@@ -263,6 +258,80 @@ mod tests {
             e => panic!("expected ChecksumMismatch, got {e:?}"),
         }
         assert!(!dir.join(bun_filename()).exists());
+        assert!(!dir.join("bun.tmp").exists());
+    }
+
+    #[test]
+    fn extract_repairs_missing_aliases() {
+        let payload = b"fake-bun";
+        let blob = make_blob(payload);
+        let sha = sha_hex(payload);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("bun-cache");
+        extract_into(&dir, &blob, &sha, "1.0").unwrap();
+
+        for name in [bunx_filename(), node_filename()] {
+            fs::remove_file(dir.join(name)).unwrap();
+            assert!(!is_fresh(&dir, &sha, "1.0"));
+            extract_into(&dir, &blob, &sha, "1.0").unwrap();
+            assert!(is_fresh(&dir, &sha, "1.0"));
+            assert_eq!(fs::read(dir.join(name)).unwrap(), payload);
+        }
+    }
+
+    #[test]
+    fn failed_decode_or_checksum_preserves_existing_runtime() {
+        let payload = b"old-bun";
+        let blob = make_blob(payload);
+        let sha = sha_hex(payload);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("bun-cache");
+        extract_into(&dir, &blob, &sha, "1.0").unwrap();
+        fs::write(dir.join("unrelated"), b"keep").unwrap();
+
+        for invalid_blob in [b"not zstd".as_slice(), blob.as_slice()] {
+            assert!(extract_into(&dir, invalid_blob, "wrong-sha", "2.0").is_err());
+            assert!(is_fresh(&dir, &sha, "1.0"));
+            assert_eq!(fs::read(dir.join(bun_filename())).unwrap(), payload);
+            assert_eq!(fs::read(dir.join("unrelated")).unwrap(), b"keep");
+            assert!(!dir.join("bun.tmp").exists());
+            assert!(!dir.join("bun.stamp.tmp").exists());
+        }
+    }
+
+    #[test]
+    fn failed_alias_publication_invalidates_stamp_and_can_retry() {
+        let payload = b"fake-bun";
+        let blob = make_blob(payload);
+        let sha = sha_hex(payload);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("bun-cache");
+        extract_into(&dir, &blob, &sha, "1.0").unwrap();
+        let alias = dir.join(node_filename());
+        fs::remove_file(&alias).unwrap();
+        fs::create_dir(&alias).unwrap();
+
+        assert!(extract_into(&dir, &blob, &sha, "1.0").is_err());
+        assert!(!dir.join("bun.stamp").exists());
+        assert!(!dir.join("bun.tmp").exists());
+        fs::remove_dir(&alias).unwrap();
+        extract_into(&dir, &blob, &sha, "1.0").unwrap();
+        assert!(is_fresh(&dir, &sha, "1.0"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_cache_dir_uses_working_sibling_aliases() {
+        let tmp = tempfile::tempdir_in(".").unwrap();
+        let dir = Path::new(".").join(tmp.path().file_name().unwrap()).join("bun-cache");
+        assert!(dir.is_relative());
+        let payload = b"fake-bun";
+        extract_into(&dir, &make_blob(payload), &sha_hex(payload), "1.0").unwrap();
+
+        for name in [bunx_filename(), node_filename()] {
+            assert_eq!(fs::read_link(dir.join(name)).unwrap(), Path::new(bun_filename()));
+            assert_eq!(fs::read(dir.join(name)).unwrap(), payload);
+        }
     }
 
     #[test]

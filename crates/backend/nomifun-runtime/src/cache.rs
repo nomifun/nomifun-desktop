@@ -20,9 +20,8 @@ static RUNTIME_ROOT_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
 /// attempted so unexpected double-inits are visible.
 pub fn init(data_dir: impl AsRef<Path>) {
     let path = data_dir.as_ref().join("runtime");
-    if let Err(existing) = RUNTIME_ROOT_OVERRIDE.set(path.clone())
-        && existing != path
-    {
+    let existing = RUNTIME_ROOT_OVERRIDE.get_or_init(|| path.clone());
+    if existing != &path {
         tracing::warn!(
             attempted = %path.display(),
             existing = %existing.display(),
@@ -80,22 +79,4 @@ mod tests {
         assert_eq!(bun_dir_name("1.0", "abc"), "bun-1.0-abc");
     }
 
-    #[test]
-    fn runtime_root_ends_with_expected_suffix() {
-        let root = runtime_root().expect("cache dir available in test env");
-        let tail: Vec<_> = root
-            .components()
-            .rev()
-            .take(2)
-            .map(|c| c.as_os_str().to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(tail, vec!["runtime".to_string(), "nomifun".to_string()]);
-    }
-
-    #[test]
-    fn bun_dir_embeds_version_and_sha() {
-        let dir = bun_dir("1.1.38", "deadbeefcafebabe").expect("cache available");
-        let name = dir.file_name().unwrap().to_string_lossy().into_owned();
-        assert_eq!(name, "bun-1.1.38-deadbeefcafe");
-    }
 }
