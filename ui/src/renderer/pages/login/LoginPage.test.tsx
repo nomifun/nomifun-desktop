@@ -288,10 +288,9 @@ describe('LoginPage with real AuthProvider and route transitions', () => {
     const logging = spyOn(console, 'error').mockImplementation(() => {});
     restore.push(() => logging.mockRestore());
     v.fill(); v.submit();
-    // AuthProvider maps Error to networkError; a null rejection currently
-    // escapes its own catch. The page must recover from either contract path.
+    // Both Error and non-Error rejections must preserve the network-error contract.
     await act(async () => { f.requests[0]!.reply.reject(unexpected ? null : new Error('fixture offline')); });
-    expect(v.getByRole('alert').textContent).toBe(unexpected ? loginStrings.errors.unknown : loginStrings.errors.networkError);
+    expect(v.getByRole('alert').textContent).toBe(loginStrings.errors.networkError);
     v.submit();
     expect(f.requests).toHaveLength(2);
     await v.finish(401, { success: false });

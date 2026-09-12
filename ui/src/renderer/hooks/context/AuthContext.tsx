@@ -155,7 +155,7 @@ export async function fetchCurrentUser(signal?: AbortSignal): Promise<CurrentUse
     // A well-formed 200 without a user is an authoritative "no session".
     return { kind: 'unauthenticated' };
   } catch (error) {
-    if ((error as Error).name === 'AbortError') {
+    if (error instanceof Error && error.name === 'AbortError') {
       return { kind: 'transient' };
     }
     console.error('Failed to fetch current user:', error);
@@ -199,7 +199,7 @@ async function fetchNeedsSetup(signal?: AbortSignal): Promise<boolean> {
     // needs_setup (mirrors the data.success check fetchCurrentUser already does).
     return data.success === true && Boolean(data.needs_setup);
   } catch (error) {
-    if ((error as Error).name === 'AbortError') return false;
+    if (error instanceof Error && error.name === 'AbortError') return false;
     console.error('Failed to fetch auth status:', error);
     return false;
   }
@@ -246,9 +246,12 @@ export const AuthProvider: React.FC<React.PropsWithChildren> = ({ children }) =>
 
     // Probe first-run status (also seeds the CSRF cookie) before the login
     // screen decides between "sign in" and "create admin".
-    setNeedsSetup(await fetchNeedsSetup(controller.signal));
+    const setupNeeded = await fetchNeedsSetup(controller.signal);
+    if (controller.signal.aborted) return;
+    setNeedsSetup(setupNeeded);
 
     const probe = await fetchCurrentUserWithRetry(controller.signal);
+    if (controller.signal.aborted) return;
     if (probe.kind === 'user') {
       hadSessionRef.current = true;
       setUser(probe.user);
@@ -365,7 +368,7 @@ export const AuthProvider: React.FC<React.PropsWithChildren> = ({ children }) =>
       console.error('Login request failed:', error);
 
       // Check if error is related to CSRF token parsing
-      const errorMessage = (error as Error).message;
+      const errorMessage = error instanceof Error ? error.message : undefined;
       if (errorMessage?.includes('parse') || errorMessage?.includes('csrf') || errorMessage?.includes('cookie')) {
         // CSRF or cookie parsing error - clear cache
         clearAuthCache();
