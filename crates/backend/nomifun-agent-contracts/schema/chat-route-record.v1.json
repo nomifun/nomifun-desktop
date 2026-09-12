@@ -89,7 +89,8 @@
               "prompt_cache",
               "structured_output",
               "provider_round_state",
-              "native_responses_items"
+              "native_responses_items",
+              "web_search"
             ]
           }
         }
