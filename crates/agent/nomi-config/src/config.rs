@@ -94,19 +94,6 @@ pub struct ProjectInstructionsConfigFile {
 }
 
 impl ProjectInstructionsConfigFile {
-    pub fn merge(global: Self, project: Self) -> Self {
-        Self {
-            project_doc_fallback_filenames: project
-                .project_doc_fallback_filenames
-                .or(global.project_doc_fallback_filenames),
-            project_doc_max_bytes: project
-                .project_doc_max_bytes
-                .or(global.project_doc_max_bytes),
-            project_root_markers: project
-                .project_root_markers
-                .or(global.project_root_markers),
-        }
-    }
 
     pub fn resolve(self) -> ProjectInstructionsConfig {
         ProjectInstructionsConfig {
@@ -562,8 +549,12 @@ pub struct CliArgs {
 impl Config {
     /// Load and merge config from all sources
     pub fn resolve(cli: &CliArgs) -> anyhow::Result<Self> {
+        Self::resolve_with_global(cli, &global_config_path())
+    }
+
+    fn resolve_with_global(cli: &CliArgs, global_path: &Path) -> anyhow::Result<Self> {
         // 1. Load global config
-        let global = load_config_file(&global_config_path())?;
+        let global = load_config_file(global_path)?;
 
         // 2. Load project config (from project_dir if specified, else CWD)
         let project_path = cli
@@ -574,7 +565,7 @@ impl Config {
         let project = load_config_file(&project_path)?;
 
         // 3. Merge: global <- project
-        let mut merged = merge_config_files(global, project);
+let mut merged = merge_config_files(global, project)?;
 
         // 4. If --profile specified, overlay profile settings
         if let Some(profile_name) = &cli.profile {
@@ -960,7 +951,7 @@ fn persist_config_migration(path: &Path, expected: &str, migrated: &str) -> io::
     Ok(())
 }
 
-fn load_config_file(path: &Path) -> anyhow::Result<ConfigFile> {
+fn load_config_file(path: &Path) -> anyhow::Result<toml::Table> {
     load_config_file_with_persist(path, persist_config_migration)
 }
 
@@ -970,19 +961,14 @@ fn load_config_file(path: &Path) -> anyhow::Result<ConfigFile> {
 /// document must first be atomically replaced and read back from disk. If that
 /// write fails, configuration resolution fails visibly instead of keeping a
 /// permanent runtime alias alive.
-fn load_config_file_with_persist<F>(path: &Path, persist: F) -> anyhow::Result<ConfigFile>
+fn load_config_file_with_persist<F>(path: &Path, persist: F) -> anyhow::Result<toml::Table>
 where
     F: FnOnce(&Path, &str, &str) -> io::Result<()>,
 {
     match std::fs::read_to_string(path) {
         Ok(content) => {
-            let canonical = match canonicalize_legacy_agent_delegation_settings(&content) {
-                Ok(canonical) => canonical,
-                Err(error) => {
-                    tracing::warn!(target: "nomi_config", path = %path.display(), error = %error, "failed to inspect config for legacy Agent delegation settings");
-                    None
-                }
-            };
+            let canonical = canonicalize_legacy_agent_delegation_settings(&content)
+                .with_context(|| format!("failed to parse config file {}", path.display()))?;
             let source = if let Some(migrated) = canonical {
                 // Validate before replacing the user's file. This preserves the
                 // previous fail-safe for malformed legacy values without ever
@@ -1017,233 +1003,84 @@ where
             } else {
                 content
             };
-            match parse_config_file_content(&source) {
-                Ok(config) => Ok(config),
-                Err(error) => {
-                    tracing::warn!(target: "nomi_config", path = %path.display(), error = %error, "failed to parse config file");
-                    Ok(ConfigFile::default())
-                }
+            // Validate each source independently, but retain explicit fields
+            // until layering is complete. An overlay must not hide bad config.
+            parse_config_file_content(&source)
+                .with_context(|| format!("failed to parse config file {}", path.display()))?;
+            toml::from_str(&source)
+                .with_context(|| format!("failed to parse config file {}", path.display()))
+        }
+Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(toml::Table::new()),
+        Err(error) => Err(error)
+            .with_context(|| format!("failed to read config file {}", path.display())),
+    }
+}
+
+/// Merge explicit file fields before deserialization fills in defaults.
+/// Ordinary scalars/arrays override; the existing additive policies below are
+/// intentionally retained (notably sandbox and tool authorization settings).
+fn merge_config_files(mut global: toml::Table, project: toml::Table) -> anyhow::Result<ConfigFile> {
+    merge_config_tables(&mut global, project, &[]);
+    global.try_into().context("failed to deserialize merged config")
+}
+
+fn merge_config_tables(global: &mut toml::Table, project: toml::Table, path: &[&str]) {
+    use toml::Value;
+
+    // Named profiles and MCP servers are complete per-name replacements.
+    if matches!(path, ["profiles"] | ["mcp", "servers"]) {
+        global.extend(project);
+        return;
+    }
+    for (key, incoming) in project {
+        let mut field = path.to_vec();
+        field.push(&key);
+        match (field.as_slice(), global.get_mut(&key), incoming) {
+            (["bedrock" | "vertex"] | ["providers", _, "compat", "extra_body"], _, incoming) => {
+                global.insert(key, incoming);
+            }
+            (["tools", "skills", "deny"] | ["tools", "lsp_servers"]
+                | ["hooks", "pre_tool_use" | "post_tool_use" | "stop"],
+                Some(Value::Array(base)), Value::Array(overlay)) => base.extend(overlay),
+            (["tools", "bash_sandbox"] | ["tools", "computer", "enabled"]
+                | ["tools", "browser", _],
+                Some(Value::Boolean(base)), Value::Boolean(overlay)) => *base |= overlay,
+            (["session", "enabled"], Some(Value::Boolean(base)), Value::Boolean(overlay)) => {
+                *base &= overlay;
+            }
+            (["tools", "write_root"], Some(_), Value::String(overlay)) if overlay.is_empty() => {}
+            (["tools", "builtin_allowlist"], Some(_), Value::Array(overlay)) if overlay.is_empty() => {}
+            (_, Some(Value::Table(base)), Value::Table(overlay)) => {
+                merge_config_tables(base, overlay, &field);
+            }
+            (_, _, incoming) => {
+                global.insert(key, incoming);
             }
         }
-        Err(_) => Ok(ConfigFile::default()),
     }
 }
 
-/// Merge two config files. Project overrides global.
-fn merge_config_files(global: ConfigFile, project: ConfigFile) -> ConfigFile {
-    let project_instructions = ProjectInstructionsConfigFile::merge(
-        global.project_instructions,
-        project.project_instructions,
-    );
-
-    let default = DefaultConfig {
-        provider: if project.default.provider != default_provider() {
-            project.default.provider
-        } else {
-            global.default.provider
-        },
-        model: project.default.model.or(global.default.model),
-        max_tokens: project.default.max_tokens.or(global.default.max_tokens),
-        max_turns: project.default.max_turns.or(global.default.max_turns),
-        system_prompt: project
-            .default
-            .system_prompt
-            .or(global.default.system_prompt),
-    };
-
-    // Merge providers: global as base, project overrides
-    let mut providers = global.providers;
-    for (k, v) in project.providers {
-        let base = providers.remove(&k).unwrap_or_default();
-        providers.insert(k, merge_provider_configs(base, v));
-    }
-
-    // Merge profiles: global as base, project overrides
-    let mut profiles = global.profiles;
-    profiles.extend(project.profiles);
-
-    // Tools: project overrides global for scalar fields; skills deny/allow are concatenated
-    // (global first, then project) — consistent with the hooks merge strategy.
-    // Computer/browser: enabling in either scope enables; project non-default scalars win.
-    let computer = ComputerConfig {
-        enabled: global.tools.computer.enabled || project.tools.computer.enabled,
-        max_screenshot_edge: if project.tools.computer.max_screenshot_edge != default_max_screenshot_edge() {
-            project.tools.computer.max_screenshot_edge
-        } else {
-            global.tools.computer.max_screenshot_edge
-        },
-    };
-    let browser = BrowserConfig {
-        enabled: global.tools.browser.enabled || project.tools.browser.enabled,
-        headless: global.tools.browser.headless || project.tools.browser.headless,
-        // F1-sec: 全权模式——任一层开启即开（与 enabled/headless 同 OR 合并语义）。运行时由 backend
-        // factory 经 client_preferences LIVE 覆写（config.tools.browser.full_power），这里只是 toml 合并。
-        full_power: global.tools.browser.full_power || project.tools.browser.full_power,
-        // SD-6: 持久登录——任一层开启即开（与 full_power 同 OR 合并语义）。运行时由 backend factory 经
-        // client_preferences LIVE 覆写，这里只是 toml 合并。
-        persistent_login: global.tools.browser.persistent_login || project.tools.browser.persistent_login,
-        // P7A site-memory——任一层开启即开（与 full_power 同 OR 合并语义）。运行时由 backend factory 经
-        // client_preferences LIVE 覆写（host_default=false），这里只是 toml 合并。
-        site_memory: global.tools.browser.site_memory || project.tools.browser.site_memory,
-        // P7B visual-fallback——任一层开启即开（与 full_power 同 OR 合并语义）。运行时由 backend factory 经
-        // client_preferences LIVE 覆写（host_default=false），这里只是 toml 合并。
-        visual_fallback: global.tools.browser.visual_fallback || project.tools.browser.visual_fallback,
-        // 浏览器来源——project 非默认（显式设了 "system"/其它）则覆盖 global，否则用 global（与
-        // write_root 同「project 非默认优先」语义）。运行时由 backend factory 经 client_preferences
-        // LIVE 覆写（config.tools.browser.source），这里只是 toml 合并。
-        source: if project.tools.browser.source != default_browser_source() {
-            project.tools.browser.source
-        } else {
-            global.tools.browser.source
-        },
-    };
-    let max_recent_images = if project.tools.max_recent_images != default_max_recent_images() {
-        project.tools.max_recent_images
-    } else {
-        global.tools.max_recent_images
-    };
-    let tools = ToolsConfig {
-        skills: SkillsPermissionConfig {
-            deny: [global.tools.skills.deny, project.tools.skills.deny].concat(),
-        },
-        max_recent_images,
-        computer,
-        browser,
-        write_root: if !project.tools.write_root.is_empty() {
-            project.tools.write_root
-        } else {
-            global.tools.write_root
-        },
-        lsp_servers: [global.tools.lsp_servers, project.tools.lsp_servers].concat(),
-        delegation_token_budget: project
-            .tools
-            .delegation_token_budget
-            .or(global.tools.delegation_token_budget),
-        bash_sandbox: global.tools.bash_sandbox || project.tools.bash_sandbox,
-        // 项目层非空则覆盖全局（与 write_root 同模式）。
-        builtin_allowlist: if !project.tools.builtin_allowlist.is_empty() {
-            project.tools.builtin_allowlist
-        } else {
-            global.tools.builtin_allowlist
-        },
-        enforce_builtin_allowlist: false,
-        deferred_allowlist: Vec::new(),
-    };
-
-    // Session: project overrides global
-    let session = if project.session.directory != default_session_dir() {
-        project.session
-    } else {
-        SessionConfig {
-            enabled: global.session.enabled && project.session.enabled,
-            directory: if project.session.directory != default_session_dir() {
-                project.session.directory
-            } else {
-                global.session.directory
-            },
-            max_sessions: if project.session.max_sessions != default_max_sessions() {
-                project.session.max_sessions
-            } else {
-                global.session.max_sessions
-            },
-        }
-    };
-
-    // Hooks: combine hooks from both configs (project hooks appended after global)
-    let hooks = HooksConfig {
-        pre_tool_use: [global.hooks.pre_tool_use, project.hooks.pre_tool_use].concat(),
-        post_tool_use: [global.hooks.post_tool_use, project.hooks.post_tool_use].concat(),
-        stop: [global.hooks.stop, project.hooks.stop].concat(),
-    };
-
-    // MCP: merge servers from both configs, project overrides global
-    let mut mcp_servers = global.mcp.servers;
-    mcp_servers.extend(project.mcp.servers);
-    let mcp = McpConfig {
-        servers: mcp_servers,
-    };
-
-    // Plan: project overrides global if any field differs from default
-    let plan = if !project.plan.enabled
-        || project.plan.plan_directory != PlanConfig::default().plan_directory
-    {
-        project.plan
-    } else {
-        global.plan
-    };
-
-    // File cache: project overrides global if any field differs from default.
-    let file_cache = if !project.file_cache.enabled
-        || project.file_cache.max_entries != FileCacheConfig::default().max_entries
-        || project.file_cache.max_size_bytes != FileCacheConfig::default().max_size_bytes
-    {
-        project.file_cache
-    } else {
-        global.file_cache
-    };
-
-    // Bedrock/Vertex: project overrides global
-    let bedrock = project.bedrock.or(global.bedrock);
-    let vertex = project.vertex.or(global.vertex);
-
-    // Compact: project overrides global for any non-default field.
-    // Since CompactConfig uses serde defaults, a fully-default project config
-    // is indistinguishable from "absent". We use project if its context_window
-    // differs from the default, otherwise fall back to global.
-    let compact = if project.compact.context_window != CompactConfig::default().context_window
-        || !project.compact.enabled
-    {
-        project.compact
-    } else {
-        global.compact
-    };
-
-    let logging = LoggingConfig::merge(global.logging, project.logging);
-
-    ConfigFile {
-        project_instructions,
-        default,
-        providers,
-        profiles,
-        tools,
-        session,
-        compact,
-        plan,
-        file_cache,
-        hooks,
-        bedrock,
-        vertex,
-        mcp,
-        logging,
-    }
-}
-
-/// Resolve a profile with inheritance chain (with cycle detection)
+/// Resolve inheritance iteratively so a long acyclic chain cannot exhaust the stack.
 fn resolve_profile(
     profiles: &HashMap<String, ProfileConfig>,
     name: &str,
-    visited: &mut Vec<String>,
 ) -> anyhow::Result<ProfileConfig> {
-    if visited.contains(&name.to_string()) {
-        anyhow::bail!(
-            "Circular profile inheritance detected: {} -> {}",
-            visited.join(" -> "),
-            name
-        );
+    let mut visited = std::collections::HashSet::new();
+    let mut chain = Vec::new();
+    let mut current = name;
+    loop {
+        if !visited.insert(current) {
+            anyhow::bail!("Circular profile inheritance detected at '{}'", current);
+        }
+        let profile = profiles.get(current)
+            .ok_or_else(|| anyhow::anyhow!("Profile '{}' not found in config", current))?;
+        chain.push(profile);
+        match profile.extends.as_deref() {
+            Some(parent) => current = parent,
+            None => break,
+        }
     }
-    visited.push(name.to_string());
-
-    let profile = profiles
-        .get(name)
-        .ok_or_else(|| anyhow::anyhow!("Profile '{}' not found in config", name))?
-        .clone();
-
-    if let Some(parent_name) = &profile.extends {
-        let parent = resolve_profile(profiles, parent_name, visited)?;
-        Ok(merge_profiles(parent, profile))
-    } else {
-        Ok(profile)
-    }
+    Ok(chain.into_iter().rev().cloned().fold(ProfileConfig::default(), merge_profiles))
 }
 
 /// Merge two profiles: overlay takes precedence over base
@@ -1257,19 +1094,21 @@ fn merge_profiles(base: ProfileConfig, overlay: ProfileConfig) -> ProfileConfig 
         max_turns: overlay.max_turns.or(base.max_turns),
         extends: None, // already resolved
         mcp_servers: overlay.mcp_servers.or(base.mcp_servers),
-        compat: overlay.compat.or(base.compat),
+        compat: match (base.compat, overlay.compat) {
+            (Some(base), Some(overlay)) => Some(ProviderCompat::merge(base, overlay)),
+            (base, overlay) => overlay.or(base),
+        },
     }
 }
 
 fn apply_profile(mut config: ConfigFile, profile_name: &str) -> anyhow::Result<ConfigFile> {
-    let mut visited = Vec::new();
-    let profile = resolve_profile(&config.profiles, profile_name, &mut visited)?;
+    let profile = resolve_profile(&config.profiles, profile_name)?;
 
     if let Some(provider) = profile.provider {
         config.default.provider = provider;
     }
-    if let Some(model) = profile.model {
-        config.default.model = Some(model);
+    if let Some(model) = &profile.model {
+        config.default.model = Some(model.clone());
     }
     if let Some(max_tokens) = profile.max_tokens {
         config.default.max_tokens = Some(max_tokens);
@@ -1278,9 +1117,12 @@ fn apply_profile(mut config: ConfigFile, profile_name: &str) -> anyhow::Result<C
         config.default.max_turns = Some(max_turns);
     }
 
-    // Profile can override api_key, base_url, and compat for the active provider
+    // Profile overrides the active provider's own defaults, including its model.
     let provider_name = config.default.provider.clone();
     let entry = config.providers.entry(provider_name).or_default();
+    if let Some(model) = profile.model {
+        entry.model = Some(model);
+    }
     if let Some(api_key) = profile.api_key {
         entry.api_key = Some(api_key);
     }
@@ -1308,16 +1150,22 @@ fn apply_profile(mut config: ConfigFile, profile_name: &str) -> anyhow::Result<C
 // --- Init config command ---
 
 pub fn init_config() -> anyhow::Result<()> {
-    let path = global_config_path();
-    if path.exists() {
-        tracing::info!(target: "nomi_config", path = %path.display(), "config file already exists");
-        return Ok(());
+    init_config_at(&global_config_path())
+}
+
+fn init_config_at(path: &Path) -> anyhow::Result<()> {
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary.write_all(DEFAULT_CONFIG_TEMPLATE.as_bytes())?;
+    temporary.as_file().sync_all()?;
+    match temporary.persist_noclobber(path) {
+        Ok(_) => tracing::info!(target: "nomi_config", path = %path.display(), "config file created"),
+        Err(error) if error.error.kind() == io::ErrorKind::AlreadyExists => {
+            tracing::info!(target: "nomi_config", path = %path.display(), "config file already exists");
+        }
+        Err(error) => return Err(error.error.into()),
     }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&path, DEFAULT_CONFIG_TEMPLATE)?;
-    tracing::info!(target: "nomi_config", path = %path.display(), "config file created");
     Ok(())
 }
 
@@ -1426,13 +1274,13 @@ max_sessions = 20                # auto-cleanup oldest
 # name = "rustfmt"
 # tool_match = ["Write", "Edit"]
 # file_match = ["*.rs"]
-# command = "rustfmt ${TOOL_INPUT_FILE_PATH}"
+# command = 'rustfmt "${TOOL_INPUT_FILE_PATH}"'
 
 # [[hooks.post_tool_use]]
 # name = "prettier"
 # tool_match = ["Write", "Edit"]
 # file_match = ["*.ts", "*.tsx"]
-# command = "npx prettier --write ${TOOL_INPUT_FILE_PATH}"
+# command = 'npx prettier --write "${TOOL_INPUT_FILE_PATH}"'
 
 # [[hooks.stop]]
 # name = "final-lint"
@@ -1442,7 +1290,7 @@ max_sessions = 20                # auto-cleanup oldest
 # [logging]
 # enabled = true                   # enable file logging (default: false)
 # level = "info"                   # log level filter (default: "info")
-# dir = "~/Library/Logs/nomi"    # log directory (default: platform-specific)
+# dir = "/path/to/logs"        # log directory (default: platform-specific)
 
 # MCP (Model Context Protocol) servers
 # [mcp.servers.filesystem]
@@ -1465,6 +1313,10 @@ max_sessions = 20                # auto-cleanup oldest
 # url = "https://tools.example.com/mcp"
 # headers = { Authorization = "Bearer xxx" }
 "#;
+
+#[cfg(test)]
+#[path = "config_audit_tests.rs"]
+mod audit_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1647,30 +1499,18 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
-    fn test_merge_config_cli_overrides_file() {
-        // Project config sets a non-default provider; it should win over global.
-        let global = ConfigFile {
-            default: DefaultConfig {
-                provider: "anthropic".to_string(),
-                model: Some("global-model".to_string()),
-                max_tokens: Some(4096),
-                max_turns: Some(10),
-                system_prompt: Some("global prompt".to_string()),
-            },
-            ..Default::default()
-        };
-        let project = ConfigFile {
-            default: DefaultConfig {
-                provider: "openai".to_string(), // non-default -> overrides global
-                model: Some("project-model".to_string()),
-                max_tokens: Some(2048), // explicit -> overrides global
-                max_turns: Some(5), // non-default -> overrides global
-                system_prompt: Some("project prompt".to_string()),
-            },
-            ..Default::default()
-        };
-
-        let merged = merge_config_files(global, project);
+    fn test_merge_config_project_overrides_global() {
+        let merged = audit_tests::merge_sources(r#"[default]
+provider = "anthropic"
+model = "global-model"
+max_tokens = 4096
+max_turns = 10
+system_prompt = "global prompt""#, r#"[default]
+provider = "openai"
+model = "project-model"
+max_tokens = 2048
+max_turns = 5
+system_prompt = "project prompt""#);
 
         assert_eq!(merged.default.provider, "openai");
         assert_eq!(merged.default.model, Some("project-model".to_string()));
@@ -1684,23 +1524,14 @@ mod tests {
 
     #[test]
     fn test_merge_config_file_provides_defaults() {
-        // Project config is default; global values should be preserved.
-        let global = ConfigFile {
-            default: DefaultConfig {
-                provider: "openai".to_string(),
-                model: Some("global-model".to_string()),
-                max_tokens: Some(1024),
-                max_turns: Some(5),
-                system_prompt: Some("global prompt".to_string()),
-            },
-            ..Default::default()
-        };
-        // Project stays at built-in defaults (provider = "anthropic", max_tokens = None).
-        let project = ConfigFile::default();
+        let merged = audit_tests::merge_sources(r#"[default]
+provider = "openai"
+model = "global-model"
+max_tokens = 1024
+max_turns = 5
+system_prompt = "global prompt""#, r#""#);
 
-        let merged = merge_config_files(global, project);
-
-        // provider: project default "anthropic" == default_provider() -> use global "openai"
+        // An omitted provider preserves the explicit global setting.
         assert_eq!(merged.default.provider, "openai");
         assert_eq!(merged.default.model, Some("global-model".to_string()));
         assert_eq!(merged.default.max_tokens, Some(1024));
@@ -1713,8 +1544,7 @@ mod tests {
 
     #[test]
     fn test_merge_config_empty_file() {
-        // Two default ConfigFiles merged should yield defaults.
-        let merged = merge_config_files(ConfigFile::default(), ConfigFile::default());
+        let merged = audit_tests::merge_sources(r#""#, r#""#);
 
         assert_eq!(merged.default.provider, default_provider());
         assert_eq!(merged.default.max_tokens, None);
@@ -1735,18 +1565,14 @@ mod tests {
 
     #[test]
     fn project_instruction_project_layer_can_clear_global_values() {
-        let global = ProjectInstructionsConfigFile {
-            project_doc_fallback_filenames: Some(vec!["TEAM.md".into()]),
-            project_doc_max_bytes: Some(65_536),
-            project_root_markers: Some(vec![".git".into(), ".hg".into()]),
-        };
-        let project = ProjectInstructionsConfigFile {
-            project_doc_fallback_filenames: Some(Vec::new()),
-            project_doc_max_bytes: Some(0),
-            project_root_markers: Some(Vec::new()),
-        };
-
-        let resolved = ProjectInstructionsConfigFile::merge(global, project).resolve();
+        let resolved = audit_tests::merge_sources(
+            r#"project_doc_fallback_filenames = ["TEAM.md"]
+project_doc_max_bytes = 65536
+project_root_markers = [".git", ".hg"]"#,
+            r#"project_doc_fallback_filenames = []
+project_doc_max_bytes = 0
+project_root_markers = []"#,
+        ).project_instructions.resolve();
 
         assert!(resolved.project_doc_fallback_filenames.is_empty());
         assert_eq!(resolved.project_doc_max_bytes, 0);
@@ -1799,8 +1625,7 @@ project_root_markers = [".git", ".hg"]
             },
         );
 
-        let mut visited = Vec::new();
-        let result = resolve_profile(&profiles, "child", &mut visited).unwrap();
+        let result = resolve_profile(&profiles, "child").unwrap();
 
         // Child's model wins
         assert_eq!(result.model, Some("claude-4".to_string()));
@@ -1831,8 +1656,7 @@ project_root_markers = [".git", ".hg"]
             },
         );
 
-        let mut visited = Vec::new();
-        let result = resolve_profile(&profiles, "a", &mut visited);
+        let result = resolve_profile(&profiles, "a");
 
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
@@ -1842,8 +1666,7 @@ project_root_markers = [".git", ".hg"]
     #[test]
     fn test_profile_not_found() {
         let profiles: HashMap<String, ProfileConfig> = HashMap::new();
-        let mut visited = Vec::new();
-        let result = resolve_profile(&profiles, "nonexistent", &mut visited);
+        let result = resolve_profile(&profiles, "nonexistent");
 
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
@@ -1935,27 +1758,9 @@ deny = ["dangerous-skill", "admin:*"]
 
     #[test]
     fn p5_14_merge_skills_concat() {
-        // global and project skills lists are concatenated.
-        let global = ConfigFile {
-            tools: ToolsConfig {
-                skills: SkillsPermissionConfig {
-                    deny: vec!["global-deny".to_string()],
-                },
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let project = ConfigFile {
-            tools: ToolsConfig {
-                skills: SkillsPermissionConfig {
-                    deny: vec!["project-deny".to_string()],
-                },
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let merged = merge_config_files(global, project);
+        let merged = audit_tests::merge_sources(r#"[tools.skills]
+deny = ["global-deny"]"#, r#"[tools.skills]
+deny = ["project-deny"]"#);
         assert_eq!(
             merged.tools.skills.deny,
             vec!["global-deny".to_string(), "project-deny".to_string()]
@@ -2367,23 +2172,11 @@ enabled = false
 
     #[test]
     fn merge_file_cache_project_overrides_global() {
-        let global = ConfigFile {
-            file_cache: FileCacheConfig {
-                max_entries: 200,
-                max_size_bytes: 50 * 1024 * 1024,
-                enabled: true,
-            },
-            ..Default::default()
-        };
-        let project = ConfigFile {
-            file_cache: FileCacheConfig {
-                max_entries: 50,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let merged = merge_config_files(global, project);
+        let merged = audit_tests::merge_sources(r#"[file_cache]
+max_entries = 200
+max_size_bytes = 52428800
+enabled = true"#, r#"[file_cache]
+max_entries = 50"#);
         assert_eq!(
             merged.file_cache.max_entries, 50,
             "project non-default max_entries should override global"
@@ -2392,17 +2185,10 @@ enabled = false
 
     #[test]
     fn merge_file_cache_global_preserved_when_project_default() {
-        let global = ConfigFile {
-            file_cache: FileCacheConfig {
-                max_entries: 200,
-                max_size_bytes: 50 * 1024 * 1024,
-                enabled: true,
-            },
-            ..Default::default()
-        };
-        let project = ConfigFile::default();
-
-        let merged = merge_config_files(global, project);
+        let merged = audit_tests::merge_sources(r#"[file_cache]
+max_entries = 200
+max_size_bytes = 52428800
+enabled = true"#, r#""#);
         assert_eq!(
             merged.file_cache.max_entries, 200,
             "global should be preserved when project is all-default"
@@ -2412,25 +2198,11 @@ enabled = false
 
     #[test]
     fn merge_file_cache_project_max_size_bytes_overrides_global() {
-        // R-5.5-01: project changes only max_size_bytes (enabled=true, max_entries=default).
-        let global = ConfigFile {
-            file_cache: FileCacheConfig {
-                max_entries: 100,
-                max_size_bytes: 50 * 1024 * 1024,
-                enabled: true,
-            },
-            ..Default::default()
-        };
-        let project = ConfigFile {
-            file_cache: FileCacheConfig {
-                max_entries: 100,                 // default
-                max_size_bytes: 10 * 1024 * 1024, // non-default
-                enabled: true,                    // default
-            },
-            ..Default::default()
-        };
-
-        let merged = merge_config_files(global, project);
+        let merged = audit_tests::merge_sources(r#"[file_cache]
+max_entries = 100
+max_size_bytes = 52428800
+enabled = true"#, r#"[file_cache]
+max_size_bytes = 10485760"#);
         assert_eq!(
             merged.file_cache.max_size_bytes,
             10 * 1024 * 1024,
@@ -2440,22 +2212,9 @@ enabled = false
 
     #[test]
     fn merge_file_cache_disabled_overrides_global() {
-        let global = ConfigFile {
-            file_cache: FileCacheConfig {
-                enabled: true,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let project = ConfigFile {
-            file_cache: FileCacheConfig {
-                enabled: false,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let merged = merge_config_files(global, project);
+        let merged = audit_tests::merge_sources(r#"[file_cache]
+enabled = true"#, r#"[file_cache]
+enabled = false"#);
         assert!(
             !merged.file_cache.enabled,
             "project enabled=false should override global"
@@ -2491,7 +2250,7 @@ max_tokens = 1234
             project_dir: Some(tmp.path().to_path_buf()),
         };
 
-        let config = Config::resolve(&cli_args).unwrap();
+        let config = Config::resolve_with_global(&cli_args, &tmp.path().join("global.toml")).unwrap();
         assert_eq!(config.output_max_tokens, Some(1234));
         assert_eq!(
             config.project_instructions.project_doc_fallback_filenames,
@@ -2505,21 +2264,9 @@ max_tokens = 1234
     }
 
     #[test]
-    fn test_resolve_without_project_dir_uses_cwd() {
-        let cli_args = CliArgs {
-            provider: Some("anthropic".into()),
-            api_key: Some("test-key".into()),
-            base_url: None,
-            model: None,
-            max_tokens: None,
-            max_turns: None,
-            system_prompt: None,
-            profile: None,
-            project_dir: None,
-        };
-
-        let config = Config::resolve(&cli_args);
-        assert!(config.is_ok());
+    fn default_project_config_path_uses_cwd() {
+        // The filesystem resolves this relative path against the caller CWD.
+        assert_eq!(project_config_path(), PathBuf::from(".nomi.toml"));
     }
 
     #[test]
@@ -2624,7 +2371,7 @@ in_process_spawn = false
         )
         .unwrap();
 
-        let config = load_config_file(&path).unwrap();
+let config: ConfigFile = load_config_file(&path).unwrap().try_into().unwrap();
         assert_eq!(config.tools.delegation_token_budget, Some(4321));
 
         let persisted = std::fs::read_to_string(&path).unwrap();
@@ -2640,7 +2387,7 @@ in_process_spawn = false
             "a second load must not have another migration to perform"
         );
 
-        let second = load_config_file(&path).unwrap();
+let second: ConfigFile = load_config_file(&path).unwrap().try_into().unwrap();
         assert_eq!(second.tools.delegation_token_budget, Some(4321));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), persisted);
     }

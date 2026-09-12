@@ -27,7 +27,8 @@ pub struct HookDef {
     /// File path patterns to match (glob). Empty = match all.
     #[serde(default)]
     pub file_match: Vec<String>,
-    /// Shell command to execute. Supports ${VAR} interpolation.
+    /// Shell command to execute. Read hook data via double-quoted "${VAR}"
+    /// environment references; values are never evaluated as shell source.
     pub command: String,
     /// Timeout in ms (default 30000)
     #[serde(default = "default_hook_timeout")]
@@ -83,12 +84,11 @@ impl HookEngine {
         tool_name: &str,
         tool_input: &serde_json::Value,
     ) -> Result<(), HookError> {
-        let matching: Vec<_> = self
+        let matching = self
             .config
             .pre_tool_use
             .iter()
-            .filter(|h| matches_tool(h, tool_name, tool_input))
-            .collect();
+            .filter(|h| matches_tool(h, tool_name, tool_input));
 
         for hook in matching {
             let env = build_env_vars(tool_name, tool_input);
@@ -117,12 +117,11 @@ impl HookEngine {
         tool_input: &serde_json::Value,
         tool_output: &str,
     ) -> Vec<String> {
-        let matching: Vec<_> = self
+        let matching = self
             .config
             .post_tool_use
             .iter()
-            .filter(|h| matches_tool(h, tool_name, tool_input))
-            .collect();
+            .filter(|h| matches_tool(h, tool_name, tool_input));
 
         let mut messages = Vec::new();
         for hook in matching {
@@ -258,11 +257,15 @@ fn glob_match(pattern: &str, value: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Interpolate ${VAR} in a command string with provided env vars
-fn interpolate_command(command: &str, env_vars: &HashMap<String, String>) -> String {
-    let mut result = command.to_string();
-    for (key, value) in env_vars {
-        result = result.replace(&format!("${{{}}}", key), value);
+/// Hook values travel through the process environment, never shell source.
+/// Keep the portable ${VAR} spelling by mapping references to PowerShell's
+/// environment syntax on Windows; POSIX shells already expand that spelling.
+fn hook_command(command: &str, env_vars: &HashMap<String, String>) -> String {
+    let mut result = command.to_owned();
+    if cfg!(windows) {
+        for key in env_vars.keys() {
+            result = result.replace(&format!("${{{}}}", key), &format!("${{env:{}}}", key));
+        }
     }
     result
 }
@@ -279,13 +282,13 @@ async fn run_hook_command(
     timeout_ms: u64,
     cwd: &Path,
 ) -> Result<HookResult, HookError> {
-    let interpolated = interpolate_command(command, env_vars);
+    let command = hook_command(command, env_vars);
     let timeout = Duration::from_millis(timeout_ms);
 
-    tracing::debug!(cwd = %cwd.display(), command = %interpolated, "hook executing");
+    tracing::debug!(cwd = %cwd.display(), "hook executing");
 
     match shell
-        .output(&interpolated, cwd, env_vars, Some(timeout))
+        .output(&command, cwd, env_vars, Some(timeout))
         .await
     {
         Ok(output) => {
@@ -318,6 +321,10 @@ pub enum HookError {
     #[error("Hook timed out after {0}ms")]
     Timeout(u64),
 }
+
+#[cfg(test)]
+#[path = "hooks_audit_tests.rs"]
+mod audit_tests;
 
 #[cfg(test)]
 mod tests {
