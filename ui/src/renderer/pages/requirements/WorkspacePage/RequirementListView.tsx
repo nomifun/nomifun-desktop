@@ -79,8 +79,9 @@ const RequirementListView: React.FC<RequirementListViewProps> = ({
     );
   }
 
-  // Settled-and-empty → invitation, not a bare "no data" line.
-  if (!loading && items.length === 0) {
+  // A deletion can empty the current page while other pages still have rows.
+  // Keep the pager available; only an empty result set gets the create CTA.
+  if (!loading && items.length === 0 && total === 0) {
     return <WorkspaceEmptyState onCreate={onCreate} />;
   }
 

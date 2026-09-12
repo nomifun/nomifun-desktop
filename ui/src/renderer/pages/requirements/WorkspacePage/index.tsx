@@ -22,11 +22,12 @@
  * it only uses `refresh` for imperative post-mutation refetches.
  */
 
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
 import { Button, Result, Spin } from '@arco-design/web-react';
 import { ipcBridge } from '@/common';
+import { isHandledAuthExpiredHttpError } from '@/common/adapter/httpBridge';
 import type { ITagSummary, RequirementOrderBy, RequirementStatus } from '@/common/adapter/ipcBridge';
 import { useArcoMessage } from '@renderer/utils/ui/useArcoMessage';
 import SegmentedTabs, { type SegmentedTabItem } from '@/renderer/components/base/SegmentedTabs';
@@ -46,7 +47,15 @@ const BOARD_PAGE_SIZE = 200;
 
 const WorkspacePage: React.FC = () => {
   const { t } = useTranslation();
-  const [, messageCtx] = useArcoMessage();
+  const [message, messageCtx] = useArcoMessage();
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  const reportWriteError = useCallback((error: unknown) => {
+    if (mounted.current && !isHandledAuthExpiredHttpError(error)) message.error(String(error));
+  }, [message]);
   const [searchParams, setSearchParams] = useSearchParams();
 
   // ---- View mode (?view=board|list, default list) -------------------------
@@ -102,6 +111,10 @@ const WorkspacePage: React.FC = () => {
   }, []);
 
   const clearSelection = useCallback(() => setSelectedIds(new Set()), []);
+  const removeSelection = useCallback((ids: RequirementId[]) => {
+    const removed = new Set(ids);
+    setSelectedIds((prev) => new Set([...prev].filter((id) => !removed.has(id))));
+  }, []);
 
   // ---- Data ----------------------------------------------------------------
   // Board collects every matching page. List uses the paginated page/pageSize.
@@ -225,31 +238,26 @@ const WorkspacePage: React.FC = () => {
           requirement_id: requirementId,
           updates: { status: next },
         });
-        void refresh();
+        if (mounted.current) void refresh();
       } catch (e) {
-        // useArcoMessage is host-scoped; surface failures inline.
-        console.error('Failed to update requirement status', e);
+        reportWriteError(e);
       }
     },
-    [refresh]
+    [refresh, reportWriteError]
   );
 
   const handleDelete = useCallback(
     async (requirementId: RequirementId) => {
       try {
         await ipcBridge.requirements.remove.invoke({ requirement_id: requirementId });
-        setSelectedIds((prev) => {
-          if (!prev.has(requirementId)) return prev;
-          const nextSet = new Set(prev);
-          nextSet.delete(requirementId);
-          return nextSet;
-        });
+        if (!mounted.current) return;
+        removeSelection([requirementId]);
         void refresh();
       } catch (e) {
-        console.error('Failed to delete requirement', e);
+        reportWriteError(e);
       }
     },
-    [refresh]
+    [refresh, removeSelection, reportWriteError]
   );
 
   const handleBatchDelete = useCallback(async () => {
@@ -259,12 +267,13 @@ const WorkspacePage: React.FC = () => {
       await ipcBridge.requirements.batchDelete.invoke({
         requirement_ids: requirementIds,
       });
-      setSelectedIds(new Set());
+      if (!mounted.current) return;
+      removeSelection(requirementIds);
       void refresh();
     } catch (e) {
-      console.error('Failed to batch-delete requirements', e);
+      reportWriteError(e);
     }
-  }, [selectedIds, refresh]);
+  }, [selectedIds, refresh, removeSelection, reportWriteError]);
 
   // ---- View toggle items ---------------------------------------------------
   const viewItems: SegmentedTabItem[] = useMemo(
