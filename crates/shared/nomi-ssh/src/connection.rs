@@ -154,9 +154,10 @@ impl client::Handler for ClientHandler {
 }
 
 /// An authenticated SSH session. Clone-cheap channel handle lives inside; open
-/// shells / SFTP off it. Dropping it closes the transport.
+/// shells / SFTP off it. SFTP retains the handle for channel recovery; the
+/// transport is released after the connection and its SFTP owners are dropped.
 pub struct SshConnection {
-    handle: Handle<ClientHandler>,
+    handle: Arc<Handle<ClientHandler>>,
     /// SHA256 fingerprint observed at connect, for UI display.
     pub fingerprint: Option<String>,
 }
@@ -224,7 +225,7 @@ impl SshConnection {
         Self::authenticate(&mut handle, cred).await?;
 
         let fingerprint = state.lock().unwrap().fingerprint.clone();
-        Ok(SshConnection { handle, fingerprint })
+        Ok(SshConnection { handle: Arc::new(handle), fingerprint })
     }
 
     async fn authenticate(
@@ -286,7 +287,7 @@ impl SshConnection {
     }
 
     /// Borrow the authenticated handle for opening channels (shell / SFTP).
-    pub(crate) fn handle(&self) -> &Handle<ClientHandler> {
+    pub(crate) fn handle(&self) -> &Arc<Handle<ClientHandler>> {
         &self.handle
     }
 

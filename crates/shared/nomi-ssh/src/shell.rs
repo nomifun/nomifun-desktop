@@ -18,8 +18,8 @@
 //! reconnect). Input echo is disabled (`stty -echo`) and prompts are blanked at
 //! init so captured output is only the command's own stdout/stderr. This is the
 //! standard technique used by persistent-shell coding tools; detection is exact,
-//! not heuristic. `find_sentinel` skips the first occurrence so an echoed
-//! command line can never be mistaken for the real marker.
+//! not heuristic. `find_sentinel` skips non-numeric format strings in echoed
+//! commands; only a marker with a parseable status and cwd terminates a read.
 //!
 //! The shell is line-oriented and we control its command line fully. To avoid
 //! quoting/injection and multi-line-prompt bugs, callers should upload a script
@@ -28,13 +28,19 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::FutureExt;
 use russh::ChannelMsg;
 use russh::client::Msg;
 use tokio::sync::Mutex;
+use tokio::time::{Instant, timeout_at};
 
 use crate::connection::{SshConnection, SshError};
-use crate::limits::{MAX_SSH_OUTPUT_BYTES, validate_command, validate_output_size};
+use crate::limits::{MAX_SSH_OUTPUT_BYTES, validate_command};
 use crate::responder::AnswerRule;
+
+#[path = "shell_output.rs"]
+mod output;
+use output::ShellOutput;
 
 /// Ctrl-C (ETX): interrupts the foreground command on a PTY.
 const CTRL_C: u8 = 0x03;
@@ -100,15 +106,9 @@ impl ShellCloseProof {
 /// interleave commands), so this is cheap to share via `Arc`.
 pub struct RemoteShell {
     seq: std::sync::atomic::AtomicU64,
-    /// Taken for the duration of an operation. If the operation is cancelled
-    /// or loses synchronization, the channel is dropped instead of being
-    /// returned to the pool in an unknown state.
-    channel: Mutex<Option<russh::Channel<Msg>>>,
-    /// Preserve why the channel was retired. A caller-cancelled command has an
-    /// unknown outcome and must return Protocol on reuse, while a channel that
-    /// observably closed remains Disconnected for every later probe so the
-    /// pool redials instead of treating a dead shell as desynchronised.
-    unavailable: Mutex<ChannelUnavailable>,
+    /// Taken for the duration of an operation. Cancellation retires the channel
+    /// from command reuse but preserves its receiver for explicit close proof.
+    channel: ChannelSlot,
     operation: Mutex<()>,
     /// Prompt-driven auto-answers (sudo password, apt y/n, ...). Injected during
     /// `run`; answers are written to input only, never captured.
@@ -134,15 +134,24 @@ impl ChannelUnavailable {
     }
 }
 
-struct OperationChannel {
+/// Ownership and availability are one atomic state update. A retired channel
+/// stays here only for close evidence; it can never be leased by run again.
+struct ShellChannelState {
     channel: Option<russh::Channel<Msg>>,
+    reusable: bool,
+    unavailable: ChannelUnavailable,
 }
 
-impl OperationChannel {
-    fn new(channel: russh::Channel<Msg>) -> Self {
-        Self {
-            channel: Some(channel),
-        }
+type ChannelSlot = std::sync::Mutex<ShellChannelState>;
+
+struct OperationChannel<'a> {
+    channel: Option<russh::Channel<Msg>>,
+    retired: Option<&'a ChannelSlot>,
+}
+
+impl<'a> OperationChannel<'a> {
+    fn new(channel: russh::Channel<Msg>, retired: Option<&'a ChannelSlot>) -> Self {
+        Self { channel: Some(channel), retired }
     }
 
     fn get_mut(&mut self) -> &mut russh::Channel<Msg> {
@@ -158,17 +167,17 @@ impl OperationChannel {
     }
 }
 
-impl Drop for OperationChannel {
+impl Drop for OperationChannel<'_> {
     fn drop(&mut self) {
         let Some(channel) = self.channel.take() else {
             return;
         };
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
-        runtime.spawn(async move {
-            retire_channel(channel).await;
-        });
+        retire_channel(&channel);
+        if let Some(retired) = self.retired {
+            let mut slot = retired.lock().unwrap();
+            slot.channel = Some(channel);
+            slot.reusable = false;
+        }
     }
 }
 
@@ -189,7 +198,20 @@ impl SshConnection {
         answer_rules: Vec<AnswerRule>,
     ) -> Result<Arc<RemoteShell>, SshError> {
         crate::limits::validate_path(cwd).map_err(limit_error)?;
-        let channel = self.handle().channel_open_session().await?;
+        let deadline = Instant::now() + INIT_READY_TIMEOUT;
+        timeout_at(deadline, self.initialize_shell(cwd, answer_rules, deadline))
+            .await
+            .map_err(|_| SshError::TimedOut("remote shell initialization exceeded its budget".into()))?
+    }
+
+    async fn initialize_shell(
+        &self,
+        cwd: &str,
+        answer_rules: Vec<AnswerRule>,
+        deadline: Instant,
+    ) -> Result<Arc<RemoteShell>, SshError> {
+        let mut leased = OperationChannel::new(self.handle().channel_open_session().await?, None);
+        let channel = leased.get_mut();
         channel
             .request_pty(true, "xterm-256color", 200, 50, 0, 0, &[])
             .await?;
@@ -215,25 +237,29 @@ impl SshConnection {
         // terminal with `isatty`, not from `TERM`.
         let init = format!(
             "exec /bin/sh\nstty -echo 2>/dev/null; PS1=''; PS2=''; unset PROMPT_COMMAND 2>/dev/null; \
-             export PAGER=cat GIT_PAGER=cat SYSTEMD_PAGER=cat TERM=dumb; cd {} 2>/dev/null\n",
-            shell_quote(cwd)
+             export PAGER=cat GIT_PAGER=cat SYSTEMD_PAGER=cat TERM=dumb; {} 2>/dev/null\n",
+            change_directory_command(cwd)
         );
-        let mut channel = channel;
         channel.data_bytes(init.into_bytes()).await?;
         channel.data_bytes(sentinel_command(0).into_bytes()).await?;
-        let mut sink = String::new();
+        let mut sink = ShellOutput::default();
         match collect_until_sentinel(
-            &mut channel,
+            channel,
             &sentinel_prefix(0),
-            INIT_READY_TIMEOUT,
+            deadline,
             &mut sink,
             &[],
         )
         .await
         {
-            SentinelEnd::Found { .. } => {}
+            SentinelEnd::Found { exit_code: 0, .. } => {}
+            SentinelEnd::Found { exit_code, .. } => {
+                return Err(SshError::InvalidInput(format!(
+                    "cannot enter SSH working directory {cwd:?}: cd exited with status {exit_code}"
+                )));
+            }
             SentinelEnd::TimedOut => {
-                return Err(SshError::Protocol(
+                return Err(SshError::TimedOut(
                     "remote shell did not become ready".into(),
                 ));
             }
@@ -250,8 +276,11 @@ impl SshConnection {
         }
         let shell = RemoteShell {
             seq: std::sync::atomic::AtomicU64::new(1),
-            channel: Mutex::new(Some(channel)),
-            unavailable: Mutex::new(ChannelUnavailable::UnknownOutcome),
+            channel: std::sync::Mutex::new(ShellChannelState {
+                channel: Some(leased.take_reusable()),
+                reusable: true,
+                unavailable: ChannelUnavailable::UnknownOutcome,
+            }),
             operation: Mutex::new(()),
             answer_rules,
         };
@@ -261,19 +290,25 @@ impl SshConnection {
 
 impl RemoteShell {
     /// Run `submission` (typically `bash <uploaded-script>`), returning output,
-    /// exit code, and post-command cwd. cwd/env mutations persist. On timeout the
-    /// foreground command is interrupted (Ctrl-C → SIGINT → SIGTERM); if the
-    /// aborted command's sentinel can be resynced, `timed_out` is set with the
-    /// real code, else `exit_code = 124`.
+    /// exit code, and post-command cwd. cwd/env mutations persist. The budget
+    /// covers admission, writing and output/answers. A read timeout adds at most
+    /// DRAIN_TIMEOUT for interruption/resync and returns exit_code 124. Partial
+    /// submission timeout is an error with unknown outcome, never retried.
     pub async fn run(&self, submission: &str, timeout: Duration) -> Result<ShellOutcome, SshError> {
         validate_command(submission).map_err(limit_error)?;
-        let _operation = self.operation.lock().await;
-        let channel = match self.channel.lock().await.take() {
-            Some(channel) => channel,
-            None => return Err(self.unavailable.lock().await.error()),
+        let deadline = Instant::now() + timeout;
+        let _operation = timeout_at(deadline, self.operation.lock()).await
+            .map_err(|_| SshError::TimedOut("waiting for the shell command slot".into()))?;
+        let channel = {
+            let mut slot = self.channel.lock().unwrap();
+            if !slot.reusable {
+                return Err(slot.unavailable.error());
+            }
+            slot.reusable = false;
+            slot.unavailable = ChannelUnavailable::UnknownOutcome;
+            slot.channel.take().expect("reusable shell owns a channel")
         };
-        *self.unavailable.lock().await = ChannelUnavailable::UnknownOutcome;
-        let mut leased = OperationChannel::new(channel);
+        let mut leased = OperationChannel::new(channel, Some(&self.channel));
         let nonce = self.seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let prefix = sentinel_prefix(nonce);
 
@@ -285,22 +320,21 @@ impl RemoteShell {
         let payload = format!("{submission}; {}", sentinel_command(nonce));
         // russh only fails this send once its session task is gone, i.e. the
         // link is dead — that is a disconnect, not a protocol violation.
-        if let Err(error) = leased
-            .get_mut()
-            .data_bytes(payload.into_bytes())
+        let sent = timeout_at(deadline, leased.get_mut().data_bytes(payload.into_bytes()))
             .await
-        {
-            *self.unavailable.lock().await = ChannelUnavailable::Disconnected;
+            .map_err(|_| SshError::TimedOut("shell submission was not fully written; outcome unknown".into()))?;
+        if let Err(error) = sent {
+            self.channel.lock().unwrap().unavailable = ChannelUnavailable::Disconnected;
             return Err(SshError::Disconnected(format!(
                 "shell channel write failed: {error}"
             )));
         }
 
-        let mut buf = String::new();
+        let mut buf = ShellOutput::default();
         let result = match collect_until_sentinel(
             leased.get_mut(),
             &prefix,
-            timeout,
+            deadline,
             &mut buf,
             &self.answer_rules,
         )
@@ -333,61 +367,36 @@ impl RemoteShell {
                 // next submission. Matches how mature persistent-shell tools
                 // recover from an interrupt.
                 let partial = extract_output(&buf, &prefix);
-                leased.get_mut().data_bytes(vec![CTRL_C]).await.ok();
-                // A PTY Ctrl-C does not reliably interrupt a shell builtin that
-                // is already blocked reading the tty (`read`, a password
-                // prompt). When it does not, the next line we write is consumed
-                // as that read's *input* — swallowing the drain probe below and
-                // leaving the shell desynchronized for every later command.
-                // Feeding one bare newline first satisfies any pending read with
-                // an empty line; if the interrupt did land, it is merely an
-                // empty command line against an already-blank prompt.
-                leased.get_mut().data_bytes(vec![b'\n']).await.ok();
-
                 let drain_nonce = self.seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let drain_prefix = sentinel_prefix(drain_nonce);
-                leased
-                    .get_mut()
-                    .data_bytes(sentinel_command(drain_nonce).into_bytes())
-                    .await
-                    .ok();
-
-                let mut drain = String::new();
-                match collect_until_sentinel(
-                    leased.get_mut(),
-                    &drain_prefix,
-                    DRAIN_TIMEOUT,
-                    &mut drain,
-                    &[],
-                )
-                .await
-                {
-                    // Interrupt succeeded and the shell is resynchronized.
+                let drain_deadline = Instant::now() + DRAIN_TIMEOUT;
+                let mut drain = ShellOutput::default();
+                // The recovery allowance includes every write, not only reads.
+                let recovered = timeout_at(drain_deadline, async {
+                    leased.get_mut().data_bytes(vec![CTRL_C]).await.ok();
+                    // Satisfy a pending tty read if Ctrl-C did not interrupt it.
+                    leased.get_mut().data_bytes(vec![b'\n']).await.ok();
+                    leased.get_mut().data_bytes(sentinel_command(drain_nonce).into_bytes()).await.ok();
+                    collect_until_sentinel(leased.get_mut(), &drain_prefix, drain_deadline, &mut drain, &[]).await
+                }).await.unwrap_or(SentinelEnd::TimedOut);
+                match recovered {
                     SentinelEnd::Found { cwd, .. } => Ok(ShellOutcome {
                         output: partial,
-                        exit_code: 124, // conventional timeout code
+                        exit_code: 124,
                         cwd,
                         timed_out: true,
                     }),
-                    // The channel died while we were recovering: report the lost
-                    // link rather than a cwd-less timeout the caller cannot act on.
                     SentinelEnd::Closed => Err(SshError::Disconnected(
                         "remote shell channel closed while recovering from a timeout".into(),
                     )),
-                    // Drain failed but the channel is still open: the shell is
-                    // unrecoverable. Escalate signals so the remote process is
-                    // asked to die, and report an honest, cwd-less timeout — the
-                    // pool recycles the shell on an empty cwd.
-                    SentinelEnd::TimedOut => {
-                        leased.get_mut().signal(russh::Sig::INT).await.ok();
-                        leased.get_mut().signal(russh::Sig::TERM).await.ok();
-                        Ok(ShellOutcome {
-                            output: partial,
-                            exit_code: 124,
-                            cwd: String::new(),
-                            timed_out: true,
-                        })
-                    }
+                    // The lease retires an unrecoverable channel; do not add
+                    // unbounded signal writes after the recovery deadline.
+                    SentinelEnd::TimedOut => Ok(ShellOutcome {
+                        output: partial,
+                        exit_code: 124,
+                        cwd: String::new(),
+                        timed_out: true,
+                    }),
                     SentinelEnd::OutputLimitExceeded { actual } => Err(SshError::InvalidInput(
                         format!("SSH output is {actual} bytes; maximum is {MAX_SSH_OUTPUT_BYTES}"),
                     )),
@@ -399,9 +408,11 @@ impl RemoteShell {
             .as_ref()
             .is_ok_and(|outcome| !outcome.timed_out || !outcome.cwd.is_empty());
         if reusable {
-            *self.channel.lock().await = Some(leased.take_reusable());
+            let mut slot = self.channel.lock().unwrap();
+            slot.channel = Some(leased.take_reusable());
+            slot.reusable = true;
         } else if matches!(&result, Err(SshError::Disconnected(_))) {
-            *self.unavailable.lock().await = ChannelUnavailable::Disconnected;
+            self.channel.lock().unwrap().unavailable = ChannelUnavailable::Disconnected;
         }
         result
     }
@@ -409,84 +420,70 @@ impl RemoteShell {
     /// Whether this shell has a synchronized channel ready for another explicit
     /// command. False after cancellation or failed recovery until it is replaced.
     pub async fn is_reusable(&self) -> bool {
-        self.channel.lock().await.is_some()
+        self.channel.lock().unwrap().reusable
     }
 
     /// Close the shell and collect evidence of what happened to it. Never fails:
     /// the returned proof either shows the channel closed with an exit status /
     /// signal (reaped) or records why no proof could be obtained (lost).
     ///
-    /// `budget` bounds both halves — acquiring the command lock and draining the
-    /// channel's closing messages — so a shell wedged in a long command cannot
-    /// stall process shutdown.
+    /// One `budget` covers lock admission, exit/EOF writes, closing messages and
+    /// the final close request; no phase restarts the deadline.
     pub async fn close(&self, budget: Duration) -> ShellCloseProof {
         let mut proof = ShellCloseProof::default();
-        let Ok(_operation) = tokio::time::timeout(budget, self.operation.lock()).await else {
-            proof
-                .errors
-                .push("shell busy; close proof unavailable".into());
-            return proof;
-        };
-        let Some(mut ch) = self.channel.lock().await.take() else {
-            proof
-                .errors
-                .push("shell channel already unavailable".into());
-            return proof;
-        };
-
-        // Ask the shell to exit on its own so the server reports an exit-status,
-        // then EOF so it closes the channel even if the shell ignored us.
-        if let Err(e) = ch.data_bytes(b"exit\n".to_vec()).await {
-            proof.errors.push(format!("exit write failed: {e}"));
-        }
-        match ch.eof().await {
-            Ok(()) => proof.eof_sent = true,
-            Err(e) => proof.errors.push(format!("eof failed: {e}")),
-        }
-
-        let deadline = tokio::time::Instant::now() + budget;
-        loop {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-                proof
-                    .errors
-                    .push("timed out awaiting the channel close".into());
-                break;
+        let deadline = Instant::now() + budget;
+        let closing = async {
+            let _operation = self.operation.lock().await;
+            let taken = {
+                let mut slot = self.channel.lock().unwrap();
+                let synchronized = slot.reusable;
+                slot.reusable = false;
+                slot.channel.take().map(|channel| (channel, synchronized))
+            };
+            let Some((channel, synchronized)) = taken else {
+                proof.errors.push("shell channel already unavailable".into());
+                return;
+            };
+            let mut leased = OperationChannel::new(channel, Some(&self.channel));
+            let ch = leased.get_mut();
+            if synchronized {
+                if let Err(e) = ch.data_bytes(b"exit\n".to_vec()).await {
+                    proof.errors.push(format!("exit write failed: {e}"));
+                }
+            } else if let Err(e) = ch.signal(russh::Sig::TERM).await {
+                // Never append shell text to a partially submitted command.
+                proof.errors.push(format!("termination signal failed: {e}"));
             }
-            match tokio::time::timeout(remaining, ch.wait()).await {
-                Ok(Some(ChannelMsg::ExitStatus { exit_status })) => {
-                    proof.exit_status = Some(exit_status);
-                }
-                Ok(Some(ChannelMsg::ExitSignal { signal_name, .. })) => {
-                    proof.exit_signal = Some(format!("{signal_name:?}"));
-                }
-                Ok(Some(ChannelMsg::Close)) => {
-                    proof.channel_closed = true;
-                    break;
-                }
-                // Output and other traffic while closing is expected; keep reading.
-                Ok(Some(_)) => continue,
-                // The message stream ended without an explicit close. The channel
-                // is certainly gone, but that is a weaker observation than a real
-                // close message, so it is recorded as such.
-                Ok(None) => {
-                    proof.channel_closed = true;
-                    proof
-                        .errors
-                        .push("channel stream ended without a close message".into());
-                    break;
-                }
-                Err(_) => {
-                    proof
-                        .errors
-                        .push("timed out awaiting the channel close".into());
-                    break;
+            match ch.eof().await {
+                Ok(()) => proof.eof_sent = true,
+                Err(e) => proof.errors.push(format!("eof failed: {e}")),
+            }
+            loop {
+                match ch.wait().await {
+                    Some(ChannelMsg::ExitStatus { exit_status }) => proof.exit_status = Some(exit_status),
+                    Some(ChannelMsg::ExitSignal { signal_name, .. }) => {
+                        proof.exit_signal = Some(format!("{signal_name:?}"));
+                    }
+                    Some(ChannelMsg::Close) => {
+                        proof.channel_closed = true;
+                        break;
+                    }
+                    Some(_) => continue,
+                    None => {
+                        proof.channel_closed = true;
+                        proof.errors.push("channel stream ended without a close message".into());
+                        break;
+                    }
                 }
             }
-        }
-
-        if let Err(e) = ch.close().await {
-            proof.errors.push(format!("channel close failed: {e}"));
+            if let Err(e) = ch.close().await {
+                proof.errors.push(format!("channel close failed: {e}"));
+            }
+            // Explicit close finished; do not repeat the retirement requests.
+            drop(leased.take_reusable());
+        };
+        if timeout_at(deadline, closing).await.is_err() {
+            proof.errors.push("shell close exceeded its total budget".into());
         }
         proof
     }
@@ -514,48 +511,45 @@ fn sentinel_prefix(nonce: u64) -> String {
 async fn collect_until_sentinel(
     ch: &mut russh::Channel<Msg>,
     prefix: &str,
-    timeout: Duration,
-    sink: &mut String,
+    deadline: Instant,
+    sink: &mut ShellOutput,
     answer_rules: &[AnswerRule],
 ) -> SentinelEnd {
     if let Some((_, exit_code, cwd)) = find_sentinel(sink, prefix) {
         return SentinelEnd::Found { exit_code, cwd };
     }
     let mut fired = vec![false; answer_rules.len()];
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
+    let end = loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
-            return SentinelEnd::TimedOut;
+            break SentinelEnd::TimedOut;
         }
         match tokio::time::timeout(remaining, ch.wait()).await {
-            Ok(Some(ChannelMsg::Data { data })) => {
-                if let Err(actual) = append_output(sink, &data) {
-                    return SentinelEnd::OutputLimitExceeded { actual };
+            Ok(Some(ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. })) => {
+                if let Err(actual) = sink.append(&data) {
+                    break SentinelEnd::OutputLimitExceeded { actual };
                 }
                 if let Some((_, exit_code, cwd)) = find_sentinel(sink, prefix) {
-                    return SentinelEnd::Found { exit_code, cwd };
+                    break SentinelEnd::Found { exit_code, cwd };
                 }
-                maybe_inject_answers(ch, sink, answer_rules, &mut fired).await;
-            }
-            Ok(Some(ChannelMsg::ExtendedData { data, .. })) => {
-                // A PTY normally folds stderr into Data, but be tolerant.
-                if let Err(actual) = append_output(sink, &data) {
-                    return SentinelEnd::OutputLimitExceeded { actual };
+                if timeout_at(deadline, maybe_inject_answers(ch, sink, answer_rules, &mut fired))
+                    .await.is_err()
+                {
+                    break SentinelEnd::TimedOut;
                 }
-                if let Some((_, exit_code, cwd)) = find_sentinel(sink, prefix) {
-                    return SentinelEnd::Found { exit_code, cwd };
-                }
-                maybe_inject_answers(ch, sink, answer_rules, &mut fired).await;
             }
             // The server closed the channel: the shell is gone, and no sentinel
             // will ever arrive. Reported distinctly so the caller does not treat
             // a dead link as a slow command.
-            Ok(Some(ChannelMsg::Close)) | Ok(None) => return SentinelEnd::Closed,
+            Ok(Some(ChannelMsg::Close)) | Ok(None) => break SentinelEnd::Closed,
             // Non-output messages (WindowAdjusted, Success, ...) — keep waiting.
             Ok(Some(_)) => continue,
-            Err(_) => return SentinelEnd::TimedOut,
+            Err(_) => break SentinelEnd::TimedOut,
         }
+    };
+    match sink.finish() {
+        Ok(()) => end,
+        Err(actual) => SentinelEnd::OutputLimitExceeded { actual },
     }
 }
 
@@ -618,28 +612,42 @@ fn extract_output(buf: &str, prefix: &str) -> String {
 
 /// Strip carriage returns and a single trailing newline from captured output.
 fn clean(s: &str) -> String {
-    let s = s.replace('\r', "");
-    s.strip_suffix('\n').unwrap_or(&s).to_owned()
+    let mut output = s.replace('\r', "");
+    if output.ends_with('\n') {
+        output.pop();
+    }
+    output
 }
 
-fn append_output(sink: &mut String, data: &[u8]) -> Result<(), usize> {
-    let decoded = String::from_utf8_lossy(data);
-    let actual = sink.len().saturating_add(decoded.len());
-    validate_output_size(actual).map_err(|_| actual)?;
-    sink.push_str(&decoded);
-    Ok(())
-}
 
 fn limit_error(error: crate::limits::LimitError) -> SshError {
     SshError::InvalidInput(error.to_string())
 }
 
-async fn retire_channel(channel: russh::Channel<Msg>) {
-    channel.data_bytes(vec![CTRL_C]).await.ok();
-    channel.signal(russh::Sig::INT).await.ok();
-    channel.signal(russh::Sig::TERM).await.ok();
-    channel.eof().await.ok();
-    channel.close().await.ok();
+/// Drop cannot await or establish a remote exit proof. Try control requests
+/// directly (they do not need a data window), without spawning detached work.
+/// A full transport queue may reject these attempts; explicit close retries
+/// within its budget and is the only path that reports a reaping proof.
+fn retire_channel(channel: &russh::Channel<Msg>) {
+    let _ = channel.signal(russh::Sig::INT).now_or_never();
+    let _ = channel.signal(russh::Sig::TERM).now_or_never();
+    let _ = channel.eof().now_or_never();
+    let _ = channel.close().now_or_never();
+}
+
+impl Drop for RemoteShell {
+    fn drop(&mut self) {
+        if let Some(channel) = self.channel.get_mut().unwrap().channel.take() {
+            retire_channel(&channel);
+        }
+    }
+}
+
+fn change_directory_command(cwd: &str) -> String {
+    // A relative operand must start with ./ so neither cd options / OLDPWD nor
+    // inherited CDPATH can redirect it. Absolute paths keep their POSIX form.
+    let cwd = if cwd.starts_with('/') { cwd.to_owned() } else { format!("./{cwd}") };
+    format!("cd {}", shell_quote(&cwd))
 }
 
 /// Minimal single-quote shell quoting for the init `cd` path.
@@ -648,8 +656,28 @@ fn shell_quote(s: &str) -> String {
 }
 
 #[cfg(test)]
+#[path = "shell_output_tests.rs"]
+mod output_tests;
+
+#[cfg(test)]
+#[path = "shell_protocol_tests.rs"]
+mod protocol_tests;
+
+#[cfg(test)]
+#[path = "shell_directory_tests.rs"]
+mod directory_tests;
+
+#[cfg(test)]
+#[path = "shell_budget_tests.rs"]
+mod budget_tests;
+
+#[cfg(test)]
+#[path = "shell_retirement_tests.rs"]
+mod retirement_tests;
+
+#[cfg(test)]
 mod tests {
-    use super::{append_output, limit_error};
+    use super::{ShellOutput, limit_error};
     use crate::connection::SshError;
     use crate::limits::{
         MAX_SSH_COMMAND_BYTES, MAX_SSH_OUTPUT_BYTES, validate_command,
@@ -663,9 +691,10 @@ mod tests {
             .expect_err("oversized command must be rejected");
         assert!(matches!(error, SshError::InvalidInput(_)));
 
-        let mut output = "x".repeat(MAX_SSH_OUTPUT_BYTES);
+        let mut output = ShellOutput::default();
+        output.append(&vec![b'x'; MAX_SSH_OUTPUT_BYTES]).unwrap();
         assert_eq!(
-            append_output(&mut output, b"x"),
+            output.append(b"x"),
             Err(MAX_SSH_OUTPUT_BYTES + 1)
         );
         assert_eq!(output.len(), MAX_SSH_OUTPUT_BYTES);

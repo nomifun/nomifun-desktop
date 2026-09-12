@@ -253,7 +253,7 @@ impl SshLinkBackend {
     async fn run(&self, command: &str, timeout_ms: u64) -> Result<RemoteCommandOutput, String> {
         let handle = self.handle().await?;
         let shell = Arc::clone(handle.shell());
-        match run_with_budget(&shell, command, timeout_ms).await {
+        match shell.run(command, std::time::Duration::from_millis(timeout_ms)).await {
             Ok(outcome) => {
                 if outcome.timed_out && outcome.cwd.is_empty() {
                     // `RemoteShell::run` only withholds the cwd on a timeout it
@@ -324,13 +324,13 @@ impl SshBackend for SshLinkBackend {
         let out = self
             .run(&grep_command(pattern, path), GREP_TIMEOUT_MS)
             .await?;
-        Ok(out.stdout)
+        command_stdout(out, "search")
     }
 
     async fn list_files(&self, glob: &str) -> Result<Vec<String>, String> {
         validate_backend_path(glob)?;
         let out = self.run(&list_command(glob), LIST_TIMEOUT_MS).await?;
-        Ok(list_lines(&out.stdout))
+        command_stdout(out, "listing").map(|stdout| list_lines(&stdout))
     }
 
     async fn stat(&self, path: &str) -> Result<RemoteFileStat, String> {
@@ -351,18 +351,9 @@ impl SshBackend for SshLinkBackend {
 /// Budget for a `grep` submission — the tool has no timeout parameter, so this
 /// is the ceiling on a recursive search over a big tree.
 const GREP_TIMEOUT_MS: u64 = 30_000;
-/// Budget for a `ls -1d` submission.
+/// Budget for one POSIX glob expansion/listing submission.
 const LIST_TIMEOUT_MS: u64 = 15_000;
 
-async fn run_with_budget(
-    shell: &Arc<RemoteShell>,
-    command: &str,
-    timeout_ms: u64,
-) -> Result<ShellOutcome, SshError> {
-    shell
-        .run(command, std::time::Duration::from_millis(timeout_ms))
-        .await
-}
 
 fn remote_output(outcome: ShellOutcome) -> RemoteCommandOutput {
     RemoteCommandOutput {
@@ -372,25 +363,42 @@ fn remote_output(outcome: ShellOutcome) -> RemoteCommandOutput {
     }
 }
 
+/// Operations without an outcome field must not present partial/failed output
+/// as a complete result. run_command keeps its explicit status-bearing API.
+fn command_stdout(out: RemoteCommandOutput, operation: &str) -> Result<String, String> {
+    if out.timed_out {
+        Err(format!("SSH {operation} timed out; no complete result is available"))
+    } else if out.exit_code != 0 {
+        Err(format!("SSH {operation} failed with exit status {}:\n{}", out.exit_code, out.stdout))
+    } else {
+        Ok(out.stdout)
+    }
+}
+
 fn validate_backend_path(path: &str) -> Result<(), String> {
     validate_path(path).map_err(|error| SshError::InvalidInput(error.to_string()).to_string())
 }
 
-/// ripgrep if present, else `grep -rn`. Pattern and path are single-quoted to
-/// keep them off the shell's parsing surface; `--color=never` keeps ANSI escapes
-/// out of the captured output.
+/// Select one engine by availability, never retry errors/no-match with another
+/// regex dialect. Normalize only no-match (1); preserve diagnostics and errors.
+/// All temporary positional parameters/status live in a subshell.
 fn grep_command(pattern: &str, path: &str) -> String {
+    let path = if path == "-" { "./-" } else { path };
     format!(
-        "rg --color=never -n -- {p} {d} 2>/dev/null || grep --color=never -rn -- {p} {d} 2>/dev/null || true",
+        "(if command -v rg >/dev/null 2>&1; then set -- rg --color=never -n; else set -- grep --color=never -rnE; fi; if \"$@\" -- {p} {d}; then :; else _nomi_search_status=$?; [ \"$_nomi_search_status\" -eq 1 ] || exit \"$_nomi_search_status\"; fi)",
         p = sh_quote(pattern),
         d = sh_quote(path),
     )
 }
 
-/// Rely on the remote shell's glob expansion; unmatched globs yield nothing
-/// (nullglob-ish via the `2>/dev/null` + filtering).
+/// A subshell keeps its loop variable out of the persistent session. printf
+/// emits literal names without ls's option or terminal-dependent quoting rules.
+/// Include broken symlinks, and skip patterns that match no existing entry.
 fn list_command(glob: &str) -> String {
-    format!("ls -1d {} 2>/dev/null || true", sh_quote_glob(glob))
+    format!(
+        "(for _nomi_glob_path in {}; do [ -e \"$_nomi_glob_path\" ] || [ -L \"$_nomi_glob_path\" ] || continue; printf '%s\\n' \"$_nomi_glob_path\"; done)",
+        sh_quote_glob(glob),
+    )
 }
 
 fn list_lines(output: &str) -> Vec<String> {
@@ -470,17 +478,25 @@ fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// Glob patterns must NOT be single-quoted (that would disable expansion), but
-/// we still guard against shell metacharacters beyond glob wildcards by
-/// rejecting quotes/backticks/`$`/`;`. Anything suspicious is single-quoted
-/// (treated literally) instead.
+/// Leave glob operators and bracket-class characters active, while quoting
+/// everything that could start shell syntax, expansion, or another word.
+/// Tilde and backslash are literal characters, not extra shell expressions.
 fn sh_quote_glob(s: &str) -> String {
-    if s.contains(['\'', '`', '$', ';', '|', '&', '\n', '"']) {
-        sh_quote(s)
-    } else {
-        s.to_string()
+    let mut quoted = String::with_capacity(s.len());
+    for ch in s.chars() {
+        if !(ch.is_ascii_alphanumeric()
+            || matches!(ch, '/' | '.' | '_' | '-' | '*' | '?' | '[' | ']' | '!' | '^' | ':'))
+        {
+            quoted.push('\\');
+        }
+        quoted.push(ch);
     }
+    quoted
 }
+
+#[cfg(test)]
+#[path = "sink_command_tests.rs"]
+mod command_tests;
 
 #[cfg(test)]
 mod tests {
@@ -543,14 +559,16 @@ mod tests {
     }
 
     #[test]
-    fn glob_and_pattern_quoting_is_unchanged() {
+    fn glob_and_pattern_quoting_preserves_only_intended_shell_syntax() {
         // Pinned because these strings are what actually runs on the operator's
         // host; a "harmless" tidy-up here is a command-injection change.
         assert_eq!(sh_quote("a'b"), r#"'a'\''b'"#);
         assert_eq!(sh_quote_glob("*.rs"), "*.rs");
-        assert_eq!(sh_quote_glob("$(id)"), r#"'$(id)'"#);
-        assert!(grep_command("x", "/srv").starts_with("rg --color=never -n -- 'x' '/srv'"));
-        assert_eq!(list_command("*.rs"), "ls -1d *.rs 2>/dev/null || true");
+        assert_eq!(sh_quote_glob("$(id)"), r"\$\(id\)");
+        assert!(!grep_command("x", "/srv").contains('\n'), "one line for the persistent shell protocol");
+        let listing = list_command("*.rs");
+        assert!(listing.starts_with("(for _nomi_glob_path in *.rs;"));
+        assert!(!listing.contains('\n'), "one line for the persistent shell protocol");
     }
 
     #[test]

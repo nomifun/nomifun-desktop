@@ -5876,12 +5876,14 @@ name = "nomi-ssh"
 version = "0.7.6"
 dependencies = [
  "async-trait",
+ "futures-util",
  "regex",
  "russh",
  "russh-sftp",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "tokio-util",
  "tracing",
  "zeroize",
 ]
