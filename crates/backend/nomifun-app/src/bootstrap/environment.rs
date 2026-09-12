@@ -395,58 +395,24 @@ async fn probe_v3_database_pool(pool: &SqlitePool) -> Result<ExistingV3DatabaseP
         }
     }
 
-    let schema_matches = table_has_column_contract(pool, "users", "id", "INTEGER", false, true)
-        .await?
-        && table_has_column_contract(pool, "users", "user_id", "TEXT", true, false).await?
-        && table_has_column_contract(
-            pool,
-            "installation_identity",
-            "id",
-            "INTEGER",
-            false,
-            true,
+    for (table, column, declared_type, not_null, primary_key) in [
+        ("users", "id", "INTEGER", false, true),
+        ("users", "user_id", "TEXT", true, false),
+        ("installation_identity", "id", "INTEGER", false, true),
+        ("installation_identity", "singleton_key", "TEXT", true, false),
+        ("installation_identity", "owner_user_id", "TEXT", true, false),
+        ("agent_metadata", "id", "INTEGER", false, true),
+        ("agent_metadata", "agent_id", "TEXT", true, false),
+    ] {
+        if !table_has_column_contract(
+            pool, table, column, declared_type, not_null, primary_key,
         )
         .await?
-        && table_has_column_contract(
-            pool,
-            "installation_identity",
-            "singleton_key",
-            "TEXT",
-            true,
-            false,
-        )
-        .await?
-        && table_has_column_contract(
-            pool,
-            "installation_identity",
-            "owner_user_id",
-            "TEXT",
-            true,
-            false,
-        )
-        .await?
-        && table_has_column_contract(
-            pool,
-            "agent_metadata",
-            "id",
-            "INTEGER",
-            false,
-            true,
-        )
-        .await?
-        && table_has_column_contract(
-            pool,
-            "agent_metadata",
-            "agent_id",
-            "TEXT",
-            true,
-            false,
-        )
-        .await?;
-    if !schema_matches {
-        return Ok(ExistingV3DatabaseProbe::RequiresRepair(
-            "core database identity columns do not match the v3 schema".into(),
-        ));
+        {
+            return Ok(ExistingV3DatabaseProbe::RequiresRepair(
+                "core database identity columns do not match the v3 schema".into(),
+            ));
+        }
     }
 
     let identities: Vec<(String, String)> = nomifun_db::sqlx::query_as(
@@ -709,10 +675,6 @@ fn install_storage_generation_environment(config: &AppConfig) -> Result<()> {
             &config.work_dir,
             &storage_generation,
         )?;
-    }
-    if receipt_status
-        != nomifun_common::factory_reset::DatasetReceiptStatus::Current
-    {
         nomifun_common::factory_reset::write_v3_dataset_bootstrap_binding(
             &config.data_dir,
             &config.work_dir,
