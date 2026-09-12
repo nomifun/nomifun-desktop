@@ -1,7 +1,18 @@
 use nomi_config::logging::{ResolvedLogging, create_file_layer};
 use tracing::info;
 use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
+
+#[test]
+fn invalid_log_filter_does_not_create_files_or_workers() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = ResolvedLogging {
+        enabled: true,
+        level: "nomi=invalid-level".into(),
+        dir: temp.path().join("not-created"),
+    };
+    assert!(create_file_layer::<tracing_subscriber::Registry>(&config).is_err());
+    assert!(!config.dir.exists());
+}
 
 #[test]
 fn create_file_layer_writes_json_to_file() {
@@ -14,9 +25,10 @@ fn create_file_layer_writes_json_to_file() {
 
     let (layer, _guard) = create_file_layer(&config).unwrap();
 
-    tracing_subscriber::registry().with(layer).init();
-
-    info!(target: "nomi_test", key = "value", "test message");
+    let subscriber = tracing_subscriber::registry().with(layer);
+    tracing::subscriber::with_default(subscriber, || {
+        info!(target: "nomi_test", key = "value", "test message");
+    });
 
     drop(_guard);
 

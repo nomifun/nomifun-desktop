@@ -283,8 +283,7 @@ pub fn sanitize_json_schema(schema: &Value) -> Value {
         });
     }
 
-    strip_additional_properties(&mut schema);
-    normalize_array_types(&mut schema);
+    normalize_schema(&mut schema);
     schema
 }
 
@@ -872,37 +871,37 @@ fn resolve_local_schema_ref<'a>(root: &'a Value, schema: &Value) -> Option<&'a V
     root.pointer(reference.strip_prefix('#')?)
 }
 
-fn strip_additional_properties(val: &mut Value) {
-    if let Some(obj) = val.as_object_mut() {
-        obj.remove("additionalProperties");
-        for v in obj.values_mut() {
-            strip_additional_properties(v);
+// Visit schema positions only. Property names and literal instance data in
+// const/enum/examples are not schema keywords and must survive unchanged.
+fn normalize_schema(schema: &mut Value) {
+    let Some(object) = schema.as_object_mut() else { return; };
+    object.remove("additionalProperties");
+    if let Some(types) = object.get("type").and_then(Value::as_array) {
+        let mut non_null = types.iter().filter(|value| value.as_str() != Some("null"));
+        if let Some(single) = non_null.next()
+            && non_null.next().is_none()
+        {
+            object.insert("type".to_owned(), single.clone());
         }
-    } else if let Some(arr) = val.as_array_mut() {
-        for v in arr.iter_mut() {
-            strip_additional_properties(v);
+    }
+    for (key, child) in object {
+        if is_named_schema_map_keyword(key) || matches!(key.as_str(), "$defs" | "definitions") {
+            if let Some(schemas) = child.as_object_mut() {
+                for schema in schemas.values_mut() { normalize_schema(schema); }
+            }
+        } else if is_schema_array_keyword(key) || (key == "items" && child.is_array()) {
+            if let Some(schemas) = child.as_array_mut() {
+                for schema in schemas { normalize_schema(schema); }
+            }
+        } else if is_schema_value_keyword(key) {
+            normalize_schema(child);
         }
     }
 }
 
-fn normalize_array_types(val: &mut Value) {
-    if let Some(obj) = val.as_object_mut() {
-        // Normalize ["string", "null"] → "string"
-        if let Some(arr) = obj.get("type").and_then(Value::as_array) {
-            let non_null: Vec<&Value> = arr.iter().filter(|v| v.as_str() != Some("null")).collect();
-            if non_null.len() == 1 {
-                obj.insert("type".to_string(), non_null[0].clone());
-            }
-        }
-        for v in obj.values_mut() {
-            normalize_array_types(v);
-        }
-    } else if let Some(arr) = val.as_array_mut() {
-        for v in arr.iter_mut() {
-            normalize_array_types(v);
-        }
-    }
-}
+#[cfg(test)]
+#[path = "compat_audit_tests.rs"]
+mod audit_tests;
 
 #[cfg(test)]
 mod tests {

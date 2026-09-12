@@ -76,6 +76,11 @@ pub fn create_file_layer<S>(
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
+    let filter = EnvFilter::try_new(&config.level).map_err(|e| LoggingError::InvalidFilter {
+        filter: config.level.clone(),
+        reason: e.to_string(),
+    })?;
+
     std::fs::create_dir_all(&config.dir).map_err(|source| LoggingError::CreateDir {
         path: config.dir.clone(),
         source,
@@ -89,10 +94,6 @@ where
 
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
-    let filter = EnvFilter::try_new(&config.level).map_err(|e| LoggingError::InvalidFilter {
-        filter: config.level.clone(),
-        reason: e.to_string(),
-    })?;
 
     let layer = fmt::layer()
         .json()
@@ -105,13 +106,6 @@ where
 }
 
 impl LoggingConfig {
-    pub fn merge(global: Self, project: Self) -> Self {
-        Self {
-            enabled: project.enabled.or(global.enabled),
-            level: project.level.or(global.level),
-            dir: project.dir.or(global.dir),
-        }
-    }
 
     pub fn resolve(
         &self,
@@ -172,42 +166,6 @@ dir = "/tmp/nomi-logs"
         assert!(cfg.dir.is_none());
     }
 
-    #[test]
-    fn merge_project_overrides_global() {
-        let global = LoggingConfig {
-            enabled: Some(false),
-            level: Some("warn".into()),
-            dir: Some("/global/logs".into()),
-        };
-        let project = LoggingConfig {
-            enabled: Some(true),
-            level: Some("debug".into()),
-            dir: None,
-        };
-        let merged = LoggingConfig::merge(global, project);
-        assert_eq!(merged.enabled, Some(true));
-        assert_eq!(merged.level.as_deref(), Some("debug"));
-        assert_eq!(merged.dir.as_deref(), Some("/global/logs"));
-    }
-
-    #[test]
-    fn merge_falls_back_to_global() {
-        let global = LoggingConfig {
-            level: Some("info".into()),
-            ..Default::default()
-        };
-        let project = LoggingConfig::default();
-        let merged = LoggingConfig::merge(global, project);
-        assert_eq!(merged.level.as_deref(), Some("info"));
-    }
-
-    #[test]
-    fn merge_two_empty_configs() {
-        let merged = LoggingConfig::merge(LoggingConfig::default(), LoggingConfig::default());
-        assert!(merged.enabled.is_none());
-        assert!(merged.level.is_none());
-        assert!(merged.dir.is_none());
-    }
 
     #[test]
     fn resolve_dir_set_implies_enabled() {
