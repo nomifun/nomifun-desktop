@@ -354,14 +354,19 @@ impl ResponsesBridge {
                 return;
             }
 
-            let mut terminal = false;
-            while let Some(item) = broker_stream.next().await {
+            loop {
+                let item = tokio::select! {
+                    biased;
+                    _ = sender.closed() => return,
+                    item = broker_stream.next() => item,
+                };
+                let Some(item) = item else { break; };
                 match item {
                     Ok(envelope) => {
                         let Some(event) = map_broker_event(response_id.clone(), envelope) else {
                             continue;
                         };
-                        terminal = matches!(event, ResponsesBridgeEvent::Completed { .. });
+                        let terminal = matches!(event, ResponsesBridgeEvent::Completed { .. });
                         if sender.send(event).await.is_err() || terminal {
                             return;
                         }
@@ -378,18 +383,16 @@ impl ResponsesBridge {
                 }
             }
 
-            if !terminal {
-                let _ = sender
-                    .send(ResponsesBridgeEvent::Failed {
-                        response_id,
-                        error: ChatModelError::new(
-                            ChatModelErrorCode::StreamInterrupted,
-                            "broker stream ended without a terminal event",
-                            ChatRetryDirective::Never,
-                        ),
-                    })
-                    .await;
-            }
+            let _ = sender
+                .send(ResponsesBridgeEvent::Failed {
+                    response_id,
+                    error: ChatModelError::new(
+                        ChatModelErrorCode::StreamInterrupted,
+                        "broker stream ended without a terminal event",
+                        ChatRetryDirective::Never,
+                    ),
+                })
+                .await;
         });
 
         Ok(ResponsesBridgeStream { receiver })
