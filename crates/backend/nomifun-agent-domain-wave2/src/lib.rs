@@ -219,8 +219,6 @@ const MCP_RESOURCE: &[&str] = &["mcp_server"];
 const SSH_RESOURCE: &[&str] = &["ssh_host"];
 const BROWSER_RESOURCE: &[&str] = &["browser"];
 const COMPUTER_RESOURCE: &[&str] = &["computer"];
-const ARTIFACT_RESOURCES: &[&str] = &["workspace"];
-const CONNECTOR_RESOURCES: &[&str] = &["mcp_server"];
 // Keep this composite grant aligned with the canonical MCP owner contract.
 const MCP_TOOL_PROXY_REQUIRED_OPERATIONS: &[&str] = &["connect", "invoke"];
 
@@ -1261,7 +1259,7 @@ const WORKSPACE_EXECUTION_CAPABILITIES: &[CapabilityDefinition] = &[
     ),
     CapabilityDefinition::resource_provider(
         "workspace.artifacts",
-        ARTIFACT_RESOURCES,
+        WORKSPACE_RESOURCE,
         PlatformScope::Any,
     ),
     CapabilityDefinition::tool("vcs.status", EffectClass::ReadLocal, WORKSPACE_RESOURCE),
@@ -1306,12 +1304,12 @@ const MCP_CONNECTORS_CAPABILITIES: &[CapabilityDefinition] = &[
     CapabilityDefinition::tool(
         "connector.data.read",
         EffectClass::ReadSensitive,
-        CONNECTOR_RESOURCES,
+        MCP_RESOURCE,
     ),
     CapabilityDefinition::tool(
         "connector.data.write",
         EffectClass::WriteDurable,
-        CONNECTOR_RESOURCES,
+        MCP_RESOURCE,
     ),
 ];
 
@@ -2008,6 +2006,13 @@ impl CapabilityHandler for Wave2CapabilityHandler {
                     capability_id: context.capability_id,
                     action_id: context.action_id,
                 });
+            }
+            if matches!(self.capability_id.as_ref(), "fs.delete" | "fs.snapshot" | "vcs.push") {
+                // These actions publish strict schemas; every Kernel host must
+                // enforce them before dispatch, not only the Nomi wrapper.
+                validate_action_input(self.capability_id.as_ref(), &input).map_err(|reason| {
+                    KernelError::capability_execution_failed(INVALID_PAYLOAD, reason)
+                })?;
             }
             if !input.0.is_object() {
                 return Err(KernelError::CapabilityExecution {
@@ -2938,6 +2943,24 @@ mod tests {
 
     fn capture_state_handle() -> Wave2StateHandle {
         let captured = Arc::new(Mutex::new(None));
+        invoke_workspace_action(
+            "fs.read",
+            empty_object(),
+            Arc::new(StateCaptureHostPort { captured: Arc::clone(&captured) }),
+        )
+        .expect("state projection invocation");
+        captured
+            .lock()
+            .expect("state capture mutex")
+            .take()
+            .expect("host adapter received the state handle")
+    }
+
+    fn invoke_workspace_action(
+        capability_id: &str,
+        input: StrictJsonValue,
+        host_port: Arc<dyn Wave2HostPort>,
+    ) -> Result<StrictJsonValue, KernelError> {
         let registry = KernelRegistry::new(
             MaterializationPolicy::stable(CONTRACT_VERSION),
             Arc::new(InMemoryPluginStatePersistence::new()),
@@ -2945,10 +2968,7 @@ mod tests {
         .expect("kernel registry");
         let materialized = registry
             .replace_all(
-                registrations_with_host_port(Arc::new(StateCaptureHostPort {
-                    captured: Arc::clone(&captured),
-                }))
-                .expect("Wave 2 registrations"),
+                registrations_with_host_port(host_port).expect("Wave 2 registrations"),
             )
             .expect("publish Wave 2 registrations");
 
@@ -2961,18 +2981,22 @@ mod tests {
             resource_kind: nomifun_agent_contracts::ResourceKind::from("workspace"),
             resource_id: nomifun_agent_contracts::ResourceId::from("wave2-state-resource"),
             owner_id: principal.principal_id.clone(),
-            operations: BTreeSet::from(["read".to_owned()]),
+            operations: BTreeSet::from([
+                required_resource_operation(&CapabilityId::from(capability_id))
+                    .expect("workspace action requires an operation")
+                    .to_owned(),
+            ]),
             connection_config_ref: None,
             typed_parameters: BTreeMap::new(),
         };
-        let action = action_id("fs.read").expect("fs.read action");
+        let action = action_id(capability_id).expect("workspace action");
         let payload = AgentPresetRevisionPayload {
             schema_version: VersionString::from(CONTRACT_VERSION),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),
             initial_capabilities: vec![CapabilitySelection {
                 capability: CapabilityRef {
-                    id: CapabilityId::from("fs.read"),
+                    id: CapabilityId::from(capability_id),
                     version: VersionString::from(CONTRACT_VERSION),
                 },
                 action_allowlist: BTreeSet::from([action.clone()]),
@@ -2985,8 +3009,8 @@ mod tests {
             starter_prompts: Vec::new(),
         };
         let contribution_locks = vec![materialized
-            .capability(&CapabilityId::from("fs.read"))
-            .expect("materialized fs.read capability")
+            .capability(&CapabilityId::from(capability_id))
+            .expect("materialized workspace capability")
             .contribution_lock
             .clone()];
         let mut revision = AgentPresetRevision {
@@ -3035,7 +3059,7 @@ mod tests {
         let active = SessionCapabilityState::new(&snapshot)
             .snapshot()
             .expect("initial active set");
-        let result = poll_ready(registry.invoke(
+        poll_ready(registry.invoke(
             &snapshot,
             &active,
             CapabilityInvocationRequest {
@@ -3047,21 +3071,15 @@ mod tests {
                 correlation_id: CorrelationId::from("wave2-state-correlation"),
                 resolved_snapshot_ref: snapshot.snapshot_ref().clone(),
                 active_set_generation: active.generation,
-                capability_id: CapabilityId::from("fs.read"),
+                capability_id: CapabilityId::from(capability_id),
                 action_id: action,
                 resource_binding_ids: BTreeSet::from([ResourceBindingId::from(
                     "wave2-state-workspace",
                 )]),
                 state_scope_key: ScopeKey::from("package:wave2-state-test"),
-                input: empty_object(),
+                input,
             },
-        ));
-        result.expect("state projection invocation");
-        captured
-            .lock()
-            .expect("state capture mutex")
-            .take()
-            .expect("host adapter received the state handle")
+        ))
     }
 
     #[test]
@@ -3270,6 +3288,37 @@ mod tests {
             "refspec": "HEAD:refs/heads/main",
             "force": true
         }))).is_err());
+    }
+
+    #[test]
+    fn strict_workspace_inputs_are_rejected_before_kernel_owner_dispatch() {
+        for (capability_id, invalid, valid) in [
+            ("fs.delete", json!({"path": " \t"}), json!({"path": "src/lib.rs"})),
+            ("fs.snapshot", json!({"operation": "baseline"}), json!({"operation": "compare"})),
+            (
+                "vcs.push",
+                json!({"remote": "origin", "refspec": "HEAD:refs/heads/main", "force": true}),
+                json!({"remote": "origin", "refspec": "HEAD:refs/heads/main", "force": false}),
+            ),
+        ] {
+            let captured = Arc::new(Mutex::new(None));
+            let host: Arc<dyn Wave2HostPort> = Arc::new(StateCaptureHostPort {
+                captured: Arc::clone(&captured),
+            });
+            for input in [json!(null), json!([]), invalid] {
+                let error = invoke_workspace_action(
+                    capability_id,
+                    StrictJsonValue(input),
+                    Arc::clone(&host),
+                )
+                .expect_err("invalid input must not reach the owner");
+                assert_eq!(error.canonical_code().as_ref(), INVALID_PAYLOAD);
+                assert!(captured.lock().unwrap().is_none());
+            }
+            invoke_workspace_action(capability_id, StrictJsonValue(valid), host)
+                .expect("valid input with the declared resource grant reaches the owner");
+            assert!(captured.lock().unwrap().is_some());
+        }
     }
 
     #[test]
@@ -3817,9 +3866,6 @@ mod tests {
 
     #[test]
     fn composed_typed_adapter_receives_exact_operation_and_authorization_projection() {
-        use std::sync::Mutex;
-        use std::task::{Context, Poll, Waker};
-
         let seen = Arc::new(Mutex::new(None));
         let seen_by_adapter = Arc::clone(&seen);
         let adapter = typed_operation_adapter(
@@ -3877,14 +3923,7 @@ mod tests {
                 input: empty_object(),
             },
         };
-        let future = dispatcher.invoke(request);
-        let waker = Waker::noop();
-        let mut context = Context::from_waker(waker);
-        let mut future = std::pin::pin!(future);
-        assert!(matches!(
-            future.as_mut().poll(&mut context),
-            Poll::Ready(Ok(_))
-        ));
+        poll_ready(dispatcher.invoke(request.clone())).expect("configured adapter succeeds");
         assert_eq!(
             *seen.lock().expect("test adapter mutex"),
             Some((
@@ -3898,59 +3937,17 @@ mod tests {
         );
 
         let empty_dispatcher = Wave2HostPortDispatcher::empty();
-        let unavailable_future = empty_dispatcher.invoke(Wave2HostRequest {
-                context: Wave2HostContext {
-                    capability_id: CapabilityId::from("fs.write"),
-                    action_id: ActionId::from("fs.write.invoke"),
-                    resource_bindings: vec![nomifun_agent_contracts::TypedResourceBinding {
-                        binding_id: "binding".into(),
-                        resource_kind: "workspace".into(),
-                        resource_id: "resource".into(),
-                        owner_id: "owner".to_owned(),
-                        operations: BTreeSet::from(["write".to_owned()]),
-                        connection_config_ref: None,
-                        typed_parameters: Default::default(),
-                    }],
-                    ..Wave2HostContext {
-                        principal: PrincipalRef {
-                            principal_kind: "user".to_owned(),
-                            principal_id: "owner".to_owned(),
-                        },
-                        agent_session_id: AgentSessionId::from("session"),
-                        operation_id: OperationId::from("operation"),
-                        idempotency_key: IdempotencyKey::from("idempotency"),
-                        correlation_id: CorrelationId::from("correlation"),
-                        resolved_snapshot_ref: ResolvedSnapshotRef {
-                            snapshot_id: "snapshot".into(),
-                            snapshot_digest: "digest".into(),
-                        },
-                        registry_generation: 11,
-                        capability_id: CapabilityId::from("fs.write"),
-                        action_id: ActionId::from("fs.write.invoke"),
-                        role_provider: None,
-                        state: test_state_handle(),
-                        resource_bindings: Vec::new(),
-                        mcp_tool_lock: None,
-                    }
-                },
-                operation: Wave2CapabilityOperation::WorkspaceExecution {
-                    input: empty_object(),
-                },
-            });
-        let waker = Waker::noop();
-        let mut context = Context::from_waker(waker);
-        let mut unavailable_future = std::pin::pin!(unavailable_future);
-        let unavailable = match unavailable_future.as_mut().poll(&mut context) {
-            Poll::Ready(result) => result.expect_err("unsupported owner-backed action must fail closed"),
-            Poll::Pending => panic!("unsupported owner-backed action must fail immediately"),
-        };
+        let mut unsupported = request;
+        unsupported.context.capability_id = CapabilityId::from("fs.write");
+        unsupported.context.action_id = ActionId::from("fs.write.invoke");
+        unsupported.context.resource_bindings[0].operations = BTreeSet::from(["write".to_owned()]);
+        let unavailable = poll_ready(empty_dispatcher.invoke(unsupported))
+            .expect_err("unsupported owner-backed action must fail closed");
         assert_eq!(unavailable.code, CAPABILITY_UNAVAILABLE);
     }
 
     #[test]
     fn unconfigured_action_host_returns_a_typed_unavailable_error() {
-        use std::task::{Context, Poll, Waker};
-
         let host_port = unconfigured_host_port();
         let future = host_port.invoke(Wave2HostRequest {
                 context: Wave2HostContext {
@@ -3978,13 +3975,7 @@ mod tests {
                     input: empty_object(),
                 },
             });
-        let waker = Waker::noop();
-        let mut context = Context::from_waker(waker);
-        let mut future = std::pin::pin!(future);
-        let result = match future.as_mut().poll(&mut context) {
-            Poll::Ready(result) => result.expect_err("unconfigured Wave 2 actions must fail closed"),
-            Poll::Pending => panic!("unconfigured Wave 2 adapter must fail immediately"),
-        };
+        let result = poll_ready(future).expect_err("unconfigured Wave 2 actions must fail closed");
         assert_eq!(result.code, CAPABILITY_UNAVAILABLE);
         assert_eq!(
             result.message,
