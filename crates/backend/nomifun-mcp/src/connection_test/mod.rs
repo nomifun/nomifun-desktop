@@ -72,7 +72,7 @@ impl McpConnectionTestService {
     /// Dispatches to the appropriate transport handler.  Always returns
     /// a result (never errors) -- failures are encoded in the struct.
     pub async fn test_connection(&self, name: &str, transport: &McpServerTransport) -> McpConnectionTestResult {
-        debug!(name, ?transport, "starting MCP connection test");
+        debug!(name, transport = transport.transport_type(), "starting MCP connection test");
         match transport {
             McpServerTransport::Stdio { command, args, env } => self.test_stdio(command, args, env).await,
             McpServerTransport::Http { url, headers } => self.test_http(url, headers).await,
@@ -83,15 +83,6 @@ impl McpConnectionTestService {
     // -- Stdio transport --------------------------------------------------
 
     async fn test_stdio(
-        &self,
-        command: &str,
-        args: &[String],
-        env: &HashMap<String, String>,
-    ) -> McpConnectionTestResult {
-        self.test_stdio_inner(command, args, env).await
-    }
-
-    async fn test_stdio_inner(
         &self,
         command: &str,
         args: &[String],
