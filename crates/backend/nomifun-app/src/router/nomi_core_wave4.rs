@@ -1099,6 +1099,12 @@ impl NomiCoreChannelWave4Owner {
             )
         })?;
         let plugin_id = binding.resource_id.as_ref();
+        // The policy snapshot must be read after any in-flight writer commits.
+        let _policy = if request.capability_id.as_ref() == CHANNEL_GROUP_POLICY {
+            Some(runtime.group_policy_fence.read(plugin_id).await)
+        } else {
+            None
+        };
         let plugin = load_channel_resource(runtime, binding).await?;
         match request.capability_id.as_ref() {
             CHANNEL_RECEIVE => {
@@ -1159,7 +1165,6 @@ impl NomiCoreChannelWave4Owner {
                 })))
             }
             CHANNEL_GROUP_POLICY => {
-                let _permit = runtime.group_policy_fence.read(plugin_id).await;
                 Ok(StrictJsonValue(serde_json::json!({
                     "kind": "channel_group_policy",
                     "channel_plugin_id": plugin_id,
@@ -2465,6 +2470,21 @@ mod tests {
             group.0["mode"],
             nomifun_db::models::CHANNEL_GROUP_ACCESS_MODE_ALLOWLIST
         );
+        let fence = &owner.runtime.get().unwrap().group_policy_fence;
+        let writer = fence.write(&plugin.channel_plugin_id).await;
+        let mut waiting = Box::pin(owner.activate_lifecycle(channel_lifecycle_request(
+            CHANNEL_GROUP_POLICY, &plugin.channel_plugin_id, &companion_id,
+        )));
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(50), &mut waiting).await.is_err());
+        repository.update_plugin_group_access_mode_and_clear_non_direct_sessions(
+            &plugin.channel_plugin_id, nomifun_db::models::CHANNEL_GROUP_ACCESS_MODE_DISABLED,
+        ).await.unwrap();
+        assert_eq!(repository.get_plugin(&plugin.channel_plugin_id).await.unwrap().unwrap().group_access_mode,
+            nomifun_db::models::CHANNEL_GROUP_ACCESS_MODE_DISABLED);
+        drop(writer);
+        let observed = tokio::time::timeout(std::time::Duration::from_secs(2), waiting)
+            .await.unwrap().unwrap();
+        assert_eq!(observed.0["mode"], nomifun_db::models::CHANNEL_GROUP_ACCESS_MODE_DISABLED);
         let pairing = owner
             .activate_lifecycle(channel_lifecycle_request(
                 CHANNEL_PAIRING,
