@@ -4223,6 +4223,23 @@ impl ConversationService {
             .controls_host()
             .then_some(trusted_snapshot)
             .flatten();
+        let session_skill_override = match extra.as_object_mut() {
+            Some(object)
+                if object.contains_key("session_enabled_skills")
+                    || object.contains_key("session_excluded_auto_skills") =>
+            {
+                if resolved_agent_snapshot.is_none() {
+                    return Err(AppError::BadRequest(
+                        "Session Skill overrides require a trusted Agent snapshot".to_owned(),
+                    ));
+                }
+                Some((
+                    take_string_array(object, "session_enabled_skills")?,
+                    take_string_array(object, "session_excluded_auto_skills")?,
+                ))
+            }
+            _ => None,
+        };
         // Snapshot/lineage are server-owned first-class columns. Never trust a
         // similarly named value hidden in the open-ended `extra` bag.
         if let Some(object) = extra.as_object_mut() {
@@ -4298,6 +4315,10 @@ impl ConversationService {
                 obj.remove("preset_context");
                 obj.insert("agent_enabled_skills".into(), serde_json::to_value(&snapshot.included_skills).unwrap_or_default());
                 obj.insert("exclude_auto_inject_skills".into(), serde_json::to_value(&snapshot.excluded_auto_skills).unwrap_or_default());
+                if let Some((enabled, excluded_auto)) = session_skill_override.as_ref() {
+                    obj.insert("agent_enabled_skills".into(), serde_json::to_value(enabled).unwrap_or_default());
+                    obj.insert("exclude_auto_inject_skills".into(), serde_json::to_value(excluded_auto).unwrap_or_default());
+                }
             }
         }
 
@@ -5460,6 +5481,189 @@ impl ConversationService {
         )
         .await
         .map(|_| true)
+    }
+
+    /// Replace the Session-local Skill and MCP runtime snapshot at an idle
+    /// admission boundary. The immutable AgentPreset snapshot and binding are
+    /// untouched. The preparation gate prevents a turn from starting between
+    /// runtime teardown and the atomic Conversation/junction update.
+    pub async fn replace_agent_session_capability_selection(
+        &self,
+        user_id: &str,
+        id: &str,
+        enabled_skills: &[String],
+        excluded_auto_skills: &[String],
+        mcp_server_ids: &[String],
+    ) -> Result<(ConversationResponse, bool), AppError> {
+        if !self.execution_authority(user_id).controls_host() {
+            return Err(AppError::Forbidden(
+                "AgentSession capability selection requires the installation owner".to_owned(),
+            ));
+        }
+        let conversation_id = parse_conv_id(id)?;
+        let lease = self.begin_public_runtime_preparation(id, user_id)?;
+        let cancellation = lease.cancellation_token();
+        let _guard = self
+            .runtime_state
+            .acquire_preparation_gate(conversation_id, &cancellation)
+            .await?;
+        lease.ensure_active()?;
+        self.ensure_not_retained_execution_attempt(user_id, &conversation_id)
+            .await?;
+
+        let existing = self
+            .conversation_repo
+            .get(conversation_id)
+            .await?
+            .filter(|row| row.user_id == user_id)
+            .ok_or_else(|| AppError::NotFound(format!("Conversation {id} not found")))?;
+        if string_to_enum::<AgentType>(&existing.r#type)? != AgentType::Nomi {
+            return Err(AppError::BadRequest(
+                "Session capability selection is supported only for Nomi conversations".to_owned(),
+            ));
+        }
+        let admission = self
+            .conversation_repo
+            .get_turn_admission_state(user_id, id)
+            .await?;
+        let registered_runtime = self.runtime_registry.has_registered_runtime(id);
+        let runtime = self.runtime_registry.get_runtime(id);
+        if existing.status.as_deref() == Some("running")
+            || admission.active_operation_id.is_some()
+            || self.runtime_state.has_active_turn(id)
+            || runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.status() == Some(ConversationStatus::Running))
+            || (registered_runtime && runtime.is_none())
+        {
+            return Err(AppError::Conflict(
+                "AgentSession capability selection waits for the current turn to finish".to_owned(),
+            ));
+        }
+
+        let auto_inject_names = self.skill_resolver.auto_inject_names().await;
+        let mut desired_skills = compute_initial_skills(
+            &auto_inject_names,
+            enabled_skills,
+            excluded_auto_skills,
+        );
+        desired_skills.sort();
+        desired_skills.dedup();
+        let mut desired_mcp_ids = Vec::with_capacity(mcp_server_ids.len());
+        let mut desired_mcp_names = Vec::with_capacity(mcp_server_ids.len());
+        let mut desired_mcp_statuses = Vec::with_capacity(mcp_server_ids.len());
+        let mut seen_mcp_ids = HashSet::with_capacity(mcp_server_ids.len());
+        let mcp_repo = if mcp_server_ids.is_empty() {
+            None
+        } else {
+            Some(
+                self.mcp_server_repo
+                    .read()
+                    .ok()
+                    .and_then(|guard| guard.as_ref().cloned())
+                    .ok_or_else(|| AppError::Internal("MCP repository is unavailable".to_owned()))?,
+            )
+        };
+        for id in mcp_server_ids {
+            let canonical_id = McpServerId::parse(id.clone())
+                .map_err(|error| AppError::BadRequest(format!("invalid MCP server ID: {error}")))?
+                .into_string();
+            if !seen_mcp_ids.insert(canonical_id.clone()) {
+                return Err(AppError::BadRequest(format!(
+                    "MCP server '{canonical_id}' appears more than once"
+                )));
+            }
+            let row = mcp_repo
+                .as_ref()
+                .expect("non-empty MCP selection resolved a repository")
+                .find_by_id(&canonical_id)
+                .await
+                .map_err(|error| AppError::Internal(format!("Failed to load MCP server: {error}")))?
+                .ok_or_else(|| AppError::NotFound(format!("MCP server '{canonical_id}' not found")))?;
+            if row.builtin {
+                return Err(AppError::BadRequest(format!(
+                    "Built-in MCP server '{}' is not a conversation-selectable server",
+                    row.name
+                )));
+            }
+            if !row.enabled {
+                return Err(AppError::BadRequest(format!(
+                    "MCP server '{}' is disabled",
+                    row.name
+                )));
+            }
+            desired_mcp_ids.push(canonical_id);
+            desired_mcp_names.push(row.name.clone());
+            desired_mcp_statuses.push(classify_repo_mcp_status(&row, McpSupportPolicy::NOMI));
+        }
+
+        let mut extra: serde_json::Value = serde_json::from_str(&existing.extra).map_err(|error| {
+            AppError::Internal(format!("Conversation {id} has invalid extra JSON: {error}"))
+        })?;
+        let object = extra.as_object_mut().ok_or_else(|| {
+            AppError::Internal(format!("Conversation {id} extra must be a JSON object"))
+        })?;
+        let mut current_skills = object
+            .get("skills")
+            .and_then(|value| serde_json::from_value::<Vec<String>>(value.clone()).ok())
+            .unwrap_or_default();
+        current_skills.sort();
+        current_skills.dedup();
+        let current_mcp_ids = self
+            .conversation_repo
+            .list_mcp_server_ids(id)
+            .await?;
+        let changed = current_skills != desired_skills || current_mcp_ids != desired_mcp_ids;
+        if !changed {
+            let mut response = row_to_response(existing, &self.workspace_root)?;
+            self.project_execution_relation(user_id, &mut response).await?;
+            return Ok((response, false));
+        }
+
+        Self::terminate_runtime_with_proof(
+            &self.runtime_registry,
+            id,
+            AgentKillReason::ConfigurationChanged,
+            "AgentSession capability selection update",
+        )
+        .await?;
+        lease.ensure_active()?;
+
+        object.insert("skills".to_owned(), serde_json::to_value(&desired_skills).map_err(|error| {
+            AppError::Internal(format!("Failed to serialize Skill snapshot: {error}"))
+        })?);
+        object.insert("mcp_server_ids".to_owned(), serde_json::to_value(&desired_mcp_ids).map_err(|error| {
+            AppError::Internal(format!("Failed to serialize MCP IDs: {error}"))
+        })?);
+        object.insert("mcp_servers".to_owned(), serde_json::to_value(&desired_mcp_names).map_err(|error| {
+            AppError::Internal(format!("Failed to serialize MCP names: {error}"))
+        })?);
+        object.insert("mcp_statuses".to_owned(), serde_json::to_value(&desired_mcp_statuses).map_err(|error| {
+            AppError::Internal(format!("Failed to serialize MCP statuses: {error}"))
+        })?);
+        let extra_json = serde_json::to_string(&extra).map_err(|error| {
+            AppError::Internal(format!("Failed to serialize capability snapshot: {error}"))
+        })?;
+        lease.ensure_active()?;
+        self.conversation_repo
+            .replace_capability_selection_snapshot(
+                id,
+                &extra_json,
+                &desired_mcp_ids,
+                now_ms(),
+            )
+            .await?;
+        self.runtime_state.clear_knowledge_signature(id);
+
+        let updated = self
+            .conversation_repo
+            .get(conversation_id)
+            .await?
+            .ok_or_else(|| AppError::Internal("Conversation vanished after capability update".into()))?;
+        let mut response = row_to_response(updated, &self.workspace_root)?;
+        self.project_execution_relation(user_id, &mut response).await?;
+        self.broadcast_list_changed(user_id, id, "updated", response.source.as_ref());
+        Ok((response, true))
     }
 
     fn spawn_conversation_delete_owner(
@@ -12433,7 +12637,6 @@ impl ConversationService {
                     "Creative Studio Agent injected Skill snapshot is empty".to_owned(),
                 ));
             }
-            return Ok(());
         }
 
         let Some(rel_dirs) = native_skills_dirs(&runtime_options.agent_type) else {
@@ -12471,15 +12674,16 @@ impl ConversationService {
                 )));
             }
         }
-        if resolved.is_empty() {
-            return Ok(());
-        }
-
         let rel_dirs_refs: Vec<&str> = rel_dirs.iter().map(String::as_str).collect();
         let n = self
             .skill_resolver
-            .link_workspace_skills(&workspace, &rel_dirs_refs, &resolved)
-            .await;
+            .sync_workspace_skills(&workspace, &rel_dirs_refs, &resolved)
+            .await
+            .map_err(|error| {
+                AppError::Internal(format!(
+                    "Failed to synchronize managed workspace Skills: {error}"
+                ))
+            })?;
         if !required_skills.is_empty() {
             for rel_dir in &rel_dirs {
                 for skill in required_skills {
@@ -12498,7 +12702,7 @@ impl ConversationService {
             conversation_id = %row.conversation_id,
             workspace = %workspace.display(),
             links = n,
-            "ensured skill symlinks in auto workspace"
+            "synchronized skill links in auto workspace"
         );
         Ok(())
     }

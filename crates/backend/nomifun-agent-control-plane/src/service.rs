@@ -4,8 +4,9 @@ use std::sync::Arc;
 use nomifun_agent_contracts::{
     CapabilityConsumer, CapabilityOperationLock, CapabilityRef,
     AgentBindingValue, AgentPreset, AgentPresetId, AgentPresetRevision, AgentPresetSource,
-    CapabilitySelection, ChatRouteFeature, ExactVersionRef, OfficialPresetKey, PresetRevisionRef,
-    RemoteBinding, RemoteBindingId, UserId, compare_revision_contribution_locks,
+    CapabilitySelection, ChatRouteFeature, ChatRouteProtocol, ExactVersionRef, OfficialPresetKey,
+    PresetRevisionRef, RemoteBinding, RemoteBindingId, UserId,
+    compare_revision_contribution_locks,
 };
 use nomifun_api_types::{
     AgentBindingRecordDto, AgentBindingSummaryDto, AgentBindingTargetDto, AgentBindingValueDto,
@@ -49,6 +50,41 @@ fn required_chat_features<'a>(
             _ => None,
         })
         .collect()
+}
+
+fn chat_route_candidate_supports(
+    candidate: &nomifun_agent_contracts::ChatRouteCandidate,
+    required: &BTreeSet<ChatRouteFeature>,
+) -> bool {
+    required.is_subset(&candidate.features)
+        && (!required.contains(&ChatRouteFeature::WebSearch)
+            || candidate.protocol == ChatRouteProtocol::OpenaiResponses)
+}
+
+fn ensure_chat_route_supports(
+    route: &nomifun_agent_contracts::ChatRouteRecord,
+    required: &BTreeSet<ChatRouteFeature>,
+) -> Result<(), ControlPlaneError> {
+    if chat_route_candidate_supports(&route.primary, required) {
+        return Ok(());
+    }
+    let missing_features = required
+        .difference(&route.primary.features)
+        .map(|feature| format!("{feature:?}"))
+        .collect::<Vec<_>>();
+    Err(ControlPlaneError::with_details(
+        "MODEL_ROUTE_FEATURES_MISSING",
+        axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+        "the selected Chat model cannot satisfy this Agent's required model features",
+        serde_json::json!({
+            "provider_id": route.primary.provider_id,
+            "model": route.primary.model,
+            "missing_features": missing_features,
+            "required_protocol": required
+                .contains(&ChatRouteFeature::WebSearch)
+                .then_some("openai.responses"),
+        }),
+    ))
 }
 
 /// Host-owned source for the initial Chat route shown by the product editor.
@@ -352,7 +388,10 @@ impl AgentControlPlane {
         if uses_default_route
             && let Some(record) =
                 match request.model.as_ref() {
-                    Some(model) => Some(self.resolve_selected_chat_route(owner, model).await?),
+                    Some(model) => Some(
+                        self.resolve_selected_chat_route(owner, model, &required_chat_features)
+                            .await?,
+                    ),
                     None => {
                         self.resolve_default_chat_route_for_features(
                             owner,
@@ -429,6 +468,7 @@ impl AgentControlPlane {
         &self,
         owner: &UserId,
         model: &nomifun_api_types::AgentChatModelSelectionDto,
+        required: &BTreeSet<ChatRouteFeature>,
     ) -> Result<nomifun_agent_contracts::ChatRouteRecord, ControlPlaneError> {
         let unavailable = || ControlPlaneError::canonical("MODEL_ROUTE_NOT_FOUND",
             axum::http::StatusCode::UNPROCESSABLE_ENTITY, "the selected provider/model has no enabled Chat capability");
@@ -438,6 +478,7 @@ impl AgentControlPlane {
         if route.primary.provider_id != model.provider_id || route.primary.model != model.model {
             return Err(unavailable());
         }
+        ensure_chat_route_supports(&route, required)?;
         Ok(route)
     }
 
@@ -458,7 +499,17 @@ impl AgentControlPlane {
             return Err(ControlPlaneError::canonical("CAPABILITY_NOT_MATERIALIZED",
                 axum::http::StatusCode::UNPROCESSABLE_ENTITY, "the saved Agent has no compiled Snapshot"));
         }
-        let route = self.resolve_selected_chat_route(owner, model).await?;
+        let required = required_chat_features(
+            revision
+                .payload
+                .initial_capabilities
+                .iter()
+                .chain(&revision.payload.on_demand_capabilities)
+                .map(|selection| selection.capability.id.as_ref()),
+        );
+        let route = self
+            .resolve_selected_chat_route(owner, model, &required)
+            .await?;
         let mut payload = revision.payload.clone();
         payload.model_route_refs.insert(CHAT_MODEL_TASK.into(), route.primary.model_route_id.clone());
         payload.chat_route_records.insert(CHAT_MODEL_TASK.into(), route);
@@ -520,7 +571,7 @@ impl AgentControlPlane {
             .collect::<Vec<_>>();
         let Some(primary) = candidates
             .iter()
-            .find(|candidate| required.is_subset(&candidate.features))
+            .find(|candidate| chat_route_candidate_supports(candidate, required))
             .cloned()
         else {
             return Ok(None);
@@ -530,7 +581,7 @@ impl AgentControlPlane {
             .into_iter()
             .filter(|candidate| {
                 candidate.model_route_id != primary.model_route_id
-                    && required.is_subset(&candidate.features)
+                    && chat_route_candidate_supports(candidate, required)
             })
             .collect();
         Ok(Some(route))
@@ -1681,6 +1732,53 @@ mod tests {
         let templates = OfficialTemplateCatalog::load().unwrap();
         let compiler = test_compiler(&templates);
         AgentControlPlane::new(store, catalog, templates, compiler)
+    }
+
+    fn chat_route_with(
+        protocol: ChatRouteProtocol,
+        features: impl IntoIterator<Item = ChatRouteFeature>,
+    ) -> nomifun_agent_contracts::ChatRouteRecord {
+        nomifun_agent_contracts::ChatRouteRecord {
+            schema: nomifun_agent_contracts::ChatRouteRecordSchema::V1,
+            task: nomifun_agent_contracts::ChatRouteTask::AgentChat,
+            primary: nomifun_agent_contracts::ChatRouteCandidate {
+                model_route_id: nomifun_agent_contracts::ModelRouteId::from(
+                    "0190f5fe-7c00-7a00-8000-000000000010",
+                ),
+                model_route_revision: 1,
+                provider_id: "provider-a".into(),
+                model: "model-a".into(),
+                protocol,
+                connection_config_ref: nomifun_agent_contracts::ConnectionConfigRef::from(
+                    "default",
+                ),
+                config_revision_digest: DigestHex::from("a".repeat(64)),
+                credential_ref: "credential-a".into(),
+                features: features.into_iter().collect(),
+            },
+            failovers: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn selected_chat_route_must_satisfy_agent_model_features_and_protocol() {
+        let required = BTreeSet::from([ChatRouteFeature::WebSearch]);
+        let wrong_protocol = chat_route_with(
+            ChatRouteProtocol::OpenaiChat,
+            [ChatRouteFeature::WebSearch],
+        );
+        let error = ensure_chat_route_supports(&wrong_protocol, &required).unwrap_err();
+        assert_eq!(error.code().as_ref(), "MODEL_ROUTE_FEATURES_MISSING");
+
+        let missing_feature = chat_route_with(ChatRouteProtocol::OpenaiResponses, []);
+        let error = ensure_chat_route_supports(&missing_feature, &required).unwrap_err();
+        assert_eq!(error.code().as_ref(), "MODEL_ROUTE_FEATURES_MISSING");
+
+        let compatible = chat_route_with(
+            ChatRouteProtocol::OpenaiResponses,
+            [ChatRouteFeature::WebSearch],
+        );
+        ensure_chat_route_supports(&compatible, &required).unwrap();
     }
 
     #[tokio::test]

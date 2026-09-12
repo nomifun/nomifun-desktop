@@ -1,5 +1,6 @@
 import { ipcBridge } from '@/common';
 import type { ConversationId } from '@/common/types/ids';
+import type { AgentSessionCapabilitySelection } from '@/common/types/agentPlatform';
 import { conversationTarget } from '@/common/types/ids';
 import { sessionStorageKey } from '@/common/utils/browserStorageKey';
 import { uuidv7 } from '@/common/utils';
@@ -32,6 +33,7 @@ export type ConversationCommandQueueItem = {
   input: string;
   files: string[];
   created_at: number;
+  capability_selection?: AgentSessionCapabilitySelection;
 };
 
 export type ConversationCommandQueueState = {
@@ -129,11 +131,42 @@ const normalizeQueueItem = (item: unknown): ConversationCommandQueueItem | null 
     return null;
   }
 
+  const capabilitySelection = candidate.capability_selection;
+  if (
+    capabilitySelection !== undefined &&
+    (!capabilitySelection ||
+      typeof capabilitySelection !== 'object' ||
+      !['enabled_skills', 'excluded_auto_skills', 'mcp_server_ids'].every((field) => {
+        const value = (capabilitySelection as Record<string, unknown>)[field];
+        return Array.isArray(value) && value.every((entry) => typeof entry === 'string');
+      }))
+  ) {
+    return null;
+  }
+  const normalizedCapabilitySelection = capabilitySelection as AgentSessionCapabilitySelection | undefined;
+  if (
+    normalizedCapabilitySelection &&
+    (normalizedCapabilitySelection.enabled_skills.length > 128 ||
+      normalizedCapabilitySelection.excluded_auto_skills.length > 128 ||
+      normalizedCapabilitySelection.mcp_server_ids.length > 64)
+  ) {
+    return null;
+  }
+
   const normalizedItem: ConversationCommandQueueItem = {
     id: candidate.id,
     input: candidate.input,
     files: uniqueFiles(candidate.files),
     created_at: candidate.created_at,
+    ...(normalizedCapabilitySelection
+      ? {
+          capability_selection: {
+            enabled_skills: Array.from(new Set(normalizedCapabilitySelection.enabled_skills)),
+            excluded_auto_skills: Array.from(new Set(normalizedCapabilitySelection.excluded_auto_skills)),
+            mcp_server_ids: Array.from(new Set(normalizedCapabilitySelection.mcp_server_ids)),
+          },
+        }
+      : {}),
   };
 
   if (
@@ -181,13 +214,16 @@ export const normalizeQueueState = (state: unknown): ConversationCommandQueueSta
 export const createQueuedCommandItem = ({
   input,
   files,
-}: Pick<ConversationCommandQueueItem, 'input' | 'files'>): ConversationCommandQueueItem => ({
+  capability_selection,
+}: Pick<ConversationCommandQueueItem, 'input' | 'files'> &
+  Partial<Pick<ConversationCommandQueueItem, 'capability_selection'>>): ConversationCommandQueueItem => ({
   // This identifier is also the durable HTTP idempotency key. It must survive
   // dequeue restoration, remounts, and accepted-response loss unchanged.
   id: uuidv7(),
   input,
   files: uniqueFiles(files),
   created_at: Date.now(),
+  ...(capability_selection ? { capability_selection } : {}),
 });
 
 const getQueueValidationFailureReason = (state: ConversationCommandQueueState): QueueValidationFailureReason | null => {
@@ -360,7 +396,8 @@ export type ConversationCommandQueueExecution = {
   isCurrent: () => boolean;
 };
 
-type EnqueueCommandInput = Pick<ConversationCommandQueueItem, 'input' | 'files'>;
+type EnqueueCommandInput = Pick<ConversationCommandQueueItem, 'input' | 'files'> &
+  Partial<Pick<ConversationCommandQueueItem, 'capability_selection'>>;
 type UpdateCommandInput = Pick<ConversationCommandQueueItem, 'input'>;
 
 const getQueueValidationMessage = (
@@ -660,13 +697,13 @@ export const useConversationCommandQueue = ({
   );
 
   const enqueue = useCallback(
-    ({ input, files }: EnqueueCommandInput) => {
+    (input: EnqueueCommandInput) => {
       if (!enabled) {
         return null;
       }
 
       const currentState = normalizeQueueState(stateRef.current);
-      const item = createQueuedCommandItem({ input, files });
+      const item = createQueuedCommandItem(input);
       const validation = validateQueuedCommandItem(item, currentState);
 
       if (isQueueValidationFailure(validation)) {

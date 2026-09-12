@@ -904,7 +904,7 @@ async fn remove_path_entry(path: &Path) -> Result<bool, SkillError> {
         Err(error) => return Err(SkillError::Io(error)),
     };
 
-    if metadata.file_type().is_symlink() {
+    if metadata_is_link_or_reparse(&metadata) {
         match tokio::fs::remove_dir(path).await {
             Ok(()) => return Ok(true),
             Err(error) if error.kind() == std::io::ErrorKind::NotADirectory => {
@@ -1097,6 +1097,80 @@ pub async fn link_workspace_skills(
         }
     }
     Ok(created)
+}
+
+/// Make the native Skill directories in a backend-managed workspace match an
+/// exact resolved selection. Stale entries are removed before missing links
+/// are created, so a Skill deselected between turns cannot remain discoverable
+/// through an older workspace link.
+///
+/// Every traversed directory must be a plain directory. In particular, this
+/// rejects symlinks, junctions and other Windows reparse points before pruning
+/// children, preventing a replaced `.nomi/skills` directory from redirecting
+/// deletion outside the managed workspace.
+pub async fn sync_workspace_skills(
+    workspace: &Path,
+    skills_rel_dirs: &[&str],
+    skills: &[ResolvedAgentSkill],
+) -> Result<usize, SkillError> {
+    ensure_plain_skill_directory(workspace).await?;
+    for skill in skills {
+        validate_filename(&skill.name)?;
+    }
+
+    for rel in skills_rel_dirs {
+        let mut target_skills_dir = workspace.to_path_buf();
+        for component in Path::new(rel).components() {
+            let std::path::Component::Normal(component) = component else {
+                return Err(SkillError::InvalidSkillPath((*rel).to_owned()));
+            };
+            target_skills_dir.push(component);
+            ensure_plain_skill_directory(&target_skills_dir).await?;
+        }
+
+        let mut entries = tokio::fs::read_dir(&target_skills_dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            entry.file_name().into_string().map_err(|_| {
+                SkillError::InvalidSkillPath(entry.path().display().to_string())
+            })?;
+            // Replace even still-selected entries. This prevents a workspace
+            // process from retargeting a retained name and also picks up a
+            // Skill that was reinstalled at a new source path.
+            remove_path_entry(&entry.path()).await?;
+        }
+    }
+
+    link_workspace_skills(workspace, skills_rel_dirs, skills).await
+}
+
+async fn ensure_plain_skill_directory(path: &Path) -> Result<(), SkillError> {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) => {
+            if metadata_is_link_or_reparse(&metadata) || !metadata.is_dir() {
+                return Err(SkillError::InvalidSkillPath(path.display().to_string()));
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            tokio::fs::create_dir(path).await?;
+            Ok(())
+        }
+        Err(error) => Err(SkillError::Io(error)),
+    }
+}
+
+fn metadata_is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+        return metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+    }
+    #[cfg(not(windows))]
+    false
 }
 
 /// Resolve a skill name to its on-disk source directory using the same

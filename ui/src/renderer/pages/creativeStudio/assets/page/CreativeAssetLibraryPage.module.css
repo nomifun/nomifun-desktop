@@ -16,8 +16,7 @@
 }
 
 .modalForm,
-.modalBody,
-.previewBody {
+.modalBody {
   display: flex;
   min-width: 0;
   flex-direction: column;
@@ -26,9 +25,7 @@
 
 .modalDescription,
 .modalError,
-.deleteText,
-.previewText,
-.previewMeta p {
+.deleteText {
   margin: 0;
 }
 
@@ -59,74 +56,10 @@
   line-height: 1.5;
 }
 
-.modalFooter,
-.previewFooter {
+.modalFooter {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
-}
-
-.previewMedia {
-  display: grid;
-  min-height: 220px;
-  max-height: min(55vh, 560px);
-  place-items: center;
-  overflow: auto;
-  border: 1px solid var(--color-border-2);
-  border-radius: 12px;
-  background: var(--color-fill-1);
-}
-
-.previewMedia img {
-  display: block;
-  max-width: 100%;
-  max-height: min(55vh, 560px);
-  object-fit: contain;
-}
-
-.previewVideo {
-  width: 100%;
-  height: min(55vh, 460px);
-  min-width: 0;
-}
-
-.previewMedia audio {
-  width: min(520px, calc(100% - 40px));
-}
-
-.previewText {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 20px;
-  color: var(--color-text-1);
-  font-family: inherit;
-  font-size: 13px;
-  line-height: 1.75;
-  text-align: left;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.previewMeta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 16px;
-  color: var(--color-text-3);
-  font-size: 12px;
-}
-
-.previewTags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.previewTags span {
-  padding: 2px 7px;
-  border-radius: 6px;
-  background: var(--color-fill-2);
-  color: var(--color-text-2);
-  font-size: 11px;
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -181,6 +181,8 @@ import type {
   SkillCatalogItem,
   SwitchAgentSessionPresetRequest,
   SwitchAgentSessionPresetResponse,
+  UpdateAgentSessionCapabilitySelectionRequest,
+  UpdateAgentSessionCapabilitySelectionResponse,
   UpdateRemoteBindingRequest,
 } from '../types/agentPlatform';
 import type {
@@ -776,6 +778,17 @@ export const agentPlatform = {
     >(
       (params) =>
         `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/preset`,
+      (params) => params.request
+    ),
+    updateCapabilitySelection: httpPut<
+      UpdateAgentSessionCapabilitySelectionResponse,
+      {
+        agent_session_id: string;
+        request: UpdateAgentSessionCapabilitySelectionRequest;
+      }
+    >(
+      (params) =>
+        `/api/agent-sessions/${encodeURIComponent(params.agent_session_id)}/capability-selection`,
       (params) => params.request
     ),
     createTurn: httpPost<

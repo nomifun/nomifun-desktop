@@ -20,6 +20,6 @@ pub use skill_service::{
     builtin_skills_materialize_version, delete_skill, detect_and_count_external_skills, detect_common_skill_paths,
     export_skill_with_symlink, get_skill_paths, import_skill, import_skill_with_symlink, link_workspace_skills,
     list_available_skills, list_builtin_auto_skills, materialize_skills_for_agent, read_builtin_rule,
-    read_builtin_skill, read_skill_info, resolve_skill_paths, scan_for_skills,
+    read_builtin_skill, read_skill_info, resolve_skill_paths, scan_for_skills, sync_workspace_skills,
 };
 pub use startup_materialize::materialize_if_needed;

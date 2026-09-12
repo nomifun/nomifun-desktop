@@ -30,6 +30,7 @@ import React, { useId, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import type { CreativeAsset, CreativeAssetKind } from '../types';
+import { creativeAssetDisplayTitle, formatCreativeAssetBytes } from '../presentation';
 import CreativeAssetMedia, { creativeAssetKindIcon } from './CreativeAssetMedia';
 import CreativeAssetActionsMenu from './CreativeAssetActionsMenu';
 import CreativeAssetUploadQueue from './CreativeAssetUploadQueue';
@@ -106,22 +107,9 @@ export function submitCreativeAssetLibrarySearch(
   onSearchSubmit?.(search);
 }
 
-const formatBytes = (bytes: number | null): string => {
-  if (bytes == null || bytes < 0 || !Number.isFinite(bytes)) return '—';
-  if (bytes < 1024) return `${bytes} B`;
-  const units = ['KB', 'MB', 'GB', 'TB'];
-  let value = bytes / 1024;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
-};
-
 const assetDetails = (asset: CreativeAsset): string => {
   const dimensions = asset.width && asset.height ? `${asset.width} × ${asset.height}` : null;
-  return [dimensions, formatBytes(asset.bytes), asset.mimeType].filter(Boolean).join(' · ');
+  return [dimensions, formatCreativeAssetBytes(asset.bytes), asset.mimeType].filter(Boolean).join(' · ');
 };
 
 const kindLabel = (kind: CreativeAssetKind, labels: CreativeAssetLibraryLabels) => labels[kind];
@@ -169,12 +157,15 @@ const AssetItem: React.FC<AssetItemProps> = ({
   onRemove,
 }) => {
   const updatedAt = formatUpdatedAt(asset.updatedAt, locale);
+  const title = creativeAssetDisplayTitle(asset);
+  const collection = asset.collection?.trim();
   return (
     <article
       className={classNames(styles.assetItem, view === 'list' && styles.assetRow)}
       data-asset-id={asset.id}
       data-asset-kind={asset.kind}
       data-selected={selected || undefined}
+      data-selectable={selectable || undefined}
     >
       {selectable ? (
         <label className={styles.assetSelect} title={labels.select}>
@@ -186,12 +177,17 @@ const AssetItem: React.FC<AssetItemProps> = ({
         </label>
       ) : null}
 
-      <div className={styles.assetCover}>
+      <div className={styles.assetCover} data-asset-cover>
+        {collection ? (
+          <span className={styles.collectionBadge} data-asset-collection title={collection}>
+            {collection}
+          </span>
+        ) : null}
         <button
           type='button'
           className={styles.assetPreviewButton}
           disabled={!onOpen || disabled}
-          aria-label={`${labels.open}: ${asset.title}`}
+          aria-label={`${labels.open}: ${title}`}
           onClick={() => onOpen?.(asset)}
         >
           <CreativeAssetMedia asset={asset} unavailableLabel={labels.mediaUnavailable} compact={view === 'list'} />
@@ -204,17 +200,9 @@ const AssetItem: React.FC<AssetItemProps> = ({
 
       <div className={styles.assetContent}>
         <div className={styles.assetTitleBlock}>
-          <strong title={asset.title}>{asset.title}</strong>
-          <span title={asset.collection || labels.noCollection}>{asset.collection || labels.noCollection}</span>
+          <strong title={title}>{title}</strong>
         </div>
 
-        <div className={styles.assetTags} aria-label={asset.tags.length ? asset.tags.join(', ') : labels.noTags}>
-          {asset.tags.length ? (
-            asset.tags.slice(0, view === 'list' ? 4 : 3).map((tag) => <span key={tag} title={tag}>{tag}</span>)
-          ) : (
-            <span>{labels.noTags}</span>
-          )}
-        </div>
         {view === 'list' ? <time dateTime={updatedAt.dateTime}>{updatedAt.label}</time> : null}
       </div>
 

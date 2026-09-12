@@ -34,7 +34,7 @@
   width: min(360px, calc(100vw - 24px));
   max-height: min(520px, calc(100dvh - 24px));
   overflow: hidden;
-  padding-top: 14px;
+  padding-top: 10px;
   border: 1px solid var(--color-border-3);
   border-radius: 14px;
   background: var(--bg-base);
@@ -47,10 +47,10 @@
   display: flex;
   align-items: center;
   flex-shrink: 0;
-  gap: 9px;
-  margin: 0 14px 8px;
-  padding: 0 11px;
-  min-height: 40px;
+  gap: 8px;
+  margin: 0 12px 6px;
+  padding: 0 10px;
+  min-height: 34px;
   border: 1px solid var(--color-border-2);
   border-radius: 9px;
   color: var(--text-secondary);
@@ -60,7 +60,7 @@
 .searchInput {
   width: 100%;
   min-width: 0;
-  padding: 8px 0;
+  padding: 5px 0;
   border: 0;
   outline: 0;
   color: var(--text-primary);
@@ -69,15 +69,15 @@
   font-size: 14px;
 }
 .searchInput::placeholder { color: var(--text-secondary); }
-.results { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 10px 10px; }
-.heading { margin: 10px 10px 5px; font-size: 12px; font-weight: 500; line-height: 20px; color: var(--text-secondary); }
+.results { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 10px 6px; }
+.heading { margin: 7px 10px 3px; font-size: 12px; font-weight: 500; line-height: 18px; color: var(--text-secondary); }
 .row {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
   width: 100%;
-  min-height: 44px;
-  padding: 10px;
+  min-height: 36px;
+  padding: 6px 10px;
   border: 0;
   border-radius: 9px;
   text-align: left;
@@ -88,15 +88,16 @@
 }
 .row:hover { background: var(--color-fill-2); }
 .row.selected { background: rgba(var(--primary-6), 0.07); }
-.rowIcon { display: flex; flex: 0 0 24px; justify-content: center; }
-.rowCopy { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 3px; }
+.rowIcon { display: flex; height: 24px; flex: 0 0 24px; align-items: center; justify-content: center; line-height: 0; }
+.rowIcon > svg { display: block; }
+.rowCopy { display: flex; flex: 1; min-width: 0; flex-direction: column; justify-content: center; gap: 1px; }
 .rowName { font-size: 14px; font-weight: 500; line-height: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rowDescription { font-size: 12px; line-height: 18px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rowDescription { font-size: 12px; line-height: 16px; color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rowStatus { flex-shrink: 0; font-size: 11px; color: var(--text-secondary); }
-.check { flex-shrink: 0; color: rgb(var(--primary-6)); }
-.arrow { flex-shrink: 0; color: var(--text-secondary); }
-.templateSection { border-top: 1px solid var(--color-border-2); margin: 8px 0 0; padding-top: 2px; }
-.footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-shrink: 0; padding: 11px 18px; border-top: 1px solid var(--color-border-2); }
+.check { display: block; flex-shrink: 0; color: rgb(var(--primary-6)); }
+.arrow { display: block; flex-shrink: 0; color: var(--text-secondary); }
+.templateSection { border-top: 1px solid var(--color-border-2); margin: 4px 0 0; padding-top: 2px; }
+.footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-shrink: 0; padding: 8px 18px; border-top: 1px solid var(--color-border-2); }
 .textAction, .manageLink { border: 0; background: transparent; padding: 4px 0; font: inherit; font-size: 13px; line-height: 20px; cursor: pointer; text-decoration: none; }
 .textAction { color: rgb(var(--primary-6)); }
 .manageLink { color: var(--text-secondary); }

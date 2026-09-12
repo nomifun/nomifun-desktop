@@ -157,6 +157,7 @@ async fn canonical_agent_routes_use_the_fresh_v4_platform() {
             preset_id: preset_id.clone(),
             title: Some("Route session".to_owned()),
             resource_selections: Vec::new(),
+            capability_selection: None,
         })
         .unwrap(),
     )
