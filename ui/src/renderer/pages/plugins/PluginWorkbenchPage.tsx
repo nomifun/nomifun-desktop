@@ -5,6 +5,7 @@
  */
 
 import { ipcBridge } from '@/common';
+import { agentPlatform } from '@/common/adapter/ipcBridge';
 import type {
   ConfigurePluginRequest,
   ApplyPluginSourceEditRequest,
@@ -13,45 +14,50 @@ import type {
   PluginMountId,
   PluginProjectDetail,
   PluginProjectId,
-  CreatePluginProjectRequest,
+  GeneratedPluginDraft,
   ImportPluginRequest,
   SharePluginRequest,
   UpdatePluginDependenciesRequest,
 } from '@/common/types/pluginPlatform';
-import { Alert, Button, Input, Modal } from '@arco-design/web-react';
-import { AddOne, Code, Refresh, Search, Plug, Upload } from '@icon-park/react';
+import { Alert, Button, Modal } from '@arco-design/web-react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import HubPageShell from '@/renderer/components/layout/HubPageShell';
-import SegmentedTabs from '@/renderer/components/base/SegmentedTabs';
 import { isDesktopShell } from '@/renderer/utils/platform';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
-import PluginLibraryView, {
-  type PluginMountBusyAction,
-} from './PluginLibraryView';
+import { useGuidModelSelection } from '@/renderer/pages/guid/hooks/useGuidModelSelection';
+import type { PluginMountBusyAction } from './PluginLibraryView';
 import PluginConfigurationDialog from './PluginConfigurationDialog';
-import PluginWorkshopView, {
-  type PluginProjectBusyAction,
-} from './PluginWorkshopView';
+import type { PluginProjectBusyAction } from './PluginWorkshopView';
 import {
   PluginCandidateApplyModal,
   PluginCandidateTestModal,
-  PluginPrebuiltImportModal,
-  PluginProjectCreateModal,
 } from './PluginWorkbenchDialogs';
 import PluginSourceEditDialog from './PluginSourceEditDialog';
 import PluginDependencyDialog from './PluginDependencyDialog';
 import PluginShareExportDialog from './PluginShareExportDialog';
+import PluginProductHome from './PluginProductHome';
+import PluginCreatorSurface, {
+  type PluginAiBusyStep,
+  type PluginCreatorMessage,
+} from './PluginCreatorSurface';
+import PluginProductDetail from './PluginProductDetail';
+import PluginSmartImportDialog from './PluginSmartImportDialog';
+import {
+  pluginDraftSourceEdits,
+  pluginPackageId,
+  pluginProductItems,
+  pluginProductMatches,
+  type PluginProductItem,
+} from './pluginProductModel';
 import {
   applyPluginCandidateRequest,
   buildPluginProjectRequest,
   deletePluginDataRequest,
-  deletePluginProjectRequest,
   pluginLoadFailure,
   restorePluginRequest,
   retryPluginRequest,
-  setPluginAutoApplyRequest,
   setPluginEnabledRequest,
   testPluginCandidateRequest,
   uninstallPluginRequest,
@@ -64,9 +70,13 @@ import { PluginStatePanel } from './PluginWorkbenchState';
 import styles from './PluginWorkbenchPage.module.css';
 
 type WorkbenchTab = 'library' | 'workshop';
+type PluginProductSurface = 'home' | 'creator' | 'detail';
+type PluginAgentUsage = { presetId: string; displayName: string; capabilityCount: number };
 
 const PluginWorkbenchPage: React.FC = () => {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
+  const navigate = useNavigate();
+  const { current_model } = useGuidModelSelection('nomi');
   const [message, messageContext] = useArcoMessage({ maxCount: 8 });
   const [searchParams, setSearchParams] = useSearchParams();
   const activeTab: WorkbenchTab =
@@ -89,7 +99,6 @@ const PluginWorkbenchPage: React.FC = () => {
   const [projectBusyAction, setProjectBusyAction] =
     useState<PluginProjectBusyAction>(null);
   const [searchQuery, setSearchQuery] = useState('');
-  const [createDialogVisible, setCreateDialogVisible] = useState(false);
   const [importDialogVisible, setImportDialogVisible] = useState(false);
   const [testDialogVisible, setTestDialogVisible] = useState(false);
   const [applyDialogVisible, setApplyDialogVisible] = useState(false);
@@ -97,6 +106,12 @@ const PluginWorkbenchPage: React.FC = () => {
   const [dependencyDialogVisible, setDependencyDialogVisible] = useState(false);
   const [shareDialogVisible, setShareDialogVisible] = useState(false);
   const [configureDialogVisible, setConfigureDialogVisible] = useState(false);
+  const [surface, setSurface] = useState<PluginProductSurface>('home');
+  const [aiDraft, setAiDraft] = useState<GeneratedPluginDraft | null>(null);
+  const [aiBusyStep, setAiBusyStep] = useState<PluginAiBusyStep>(null);
+  const [creatorMessages, setCreatorMessages] = useState<PluginCreatorMessage[]>([]);
+  const [homeBusyMountId, setHomeBusyMountId] = useState<string | null>(null);
+  const [agentUsage, setAgentUsage] = useState<PluginAgentUsage[]>([]);
   const mountLoadSequence = useRef(0);
   const projectLoadSequence = useRef(0);
   const desktop = isDesktopShell();
@@ -209,6 +224,49 @@ const PluginWorkbenchPage: React.FC = () => {
     void loadProjectDetail(selectedProjectId);
   }, [activeTab, loadProjectDetail, selectedProjectId]);
 
+  useEffect(() => {
+    let canceled = false;
+    const loadAgentUsage = async () => {
+      if (!mountDetail?.capabilities.length) {
+        setAgentUsage([]);
+        return;
+      }
+      const capabilityKeys = new Set(
+        mountDetail.capabilities.map((capability) => `${capability.capability_id}@${capability.capability_version}`)
+      );
+      try {
+        const library = await agentPlatform.library.invoke();
+        const editors = await Promise.all(
+          library.user_presets.map(async (preset) => ({
+            preset,
+            editor: await agentPlatform.getEditor.invoke({ preset_id: preset.preset_id }),
+          }))
+        );
+        if (canceled) return;
+        setAgentUsage(editors.flatMap(({ preset, editor }) => {
+          const selected = [
+            ...editor.draft.document.initial_capabilities,
+            ...editor.draft.document.on_demand_capabilities,
+          ].filter((selection) =>
+            capabilityKeys.has(`${selection.capability.id}@${selection.capability.version}`)
+          );
+          return selected.length ? [{
+            presetId: preset.preset_id,
+            displayName: preset.display_name,
+            capabilityCount: selected.length,
+          }] : [];
+        }));
+      } catch (error) {
+        if (!canceled) {
+          console.warn('[plugins] failed to resolve Agent usage', error);
+          setAgentUsage([]);
+        }
+      }
+    };
+    void loadAgentUsage();
+    return () => { canceled = true; };
+  }, [mountDetail?.capabilities]);
+
   const refreshVisible = useCallback(async () => {
     const tasks: Promise<unknown>[] = [refreshLibrary()];
     if (activeTab === 'library' && selectedMountId) {
@@ -223,59 +281,6 @@ const PluginWorkbenchPage: React.FC = () => {
     loadMountDetail,
     loadProjectDetail,
     refreshLibrary,
-    selectedMountId,
-    selectedProjectId,
-  ]);
-
-  const filteredPlugins = useMemo(() => {
-    const plugins = library?.plugins ?? [];
-    const query = searchQuery.trim().toLowerCase();
-    if (!query) return plugins;
-    return plugins.filter((plugin) =>
-      `${plugin.display_name} ${plugin.description ?? ''} ${plugin.current?.package_id ?? ''}`
-        .toLowerCase()
-        .includes(query)
-    );
-  }, [library?.plugins, searchQuery]);
-
-  const filteredProjects = useMemo(() => {
-    const projects = library?.projects ?? [];
-    const query = searchQuery.trim().toLowerCase();
-    if (!query) return projects;
-    return projects.filter((project) =>
-      `${project.display_name} ${project.description ?? ''} ${project.project_id}`
-        .toLowerCase()
-        .includes(query)
-    );
-  }, [library?.projects, searchQuery]);
-
-  const hasSearchQuery = searchQuery.trim().length > 0;
-
-  useEffect(() => {
-    if (activeTab === 'library') {
-      if (selectedMountId && filteredPlugins.some((plugin) => plugin.mount_id === selectedMountId)) {
-        return;
-      }
-      const nextMountId = filteredPlugins[0]?.mount_id ?? null;
-      if (nextMountId !== selectedMountId) {
-        setSelectedMountId(nextMountId);
-        setMountDetail(null);
-      }
-      return;
-    }
-
-    if (selectedProjectId && filteredProjects.some((project) => project.project_id === selectedProjectId)) {
-      return;
-    }
-    const nextProjectId = filteredProjects[0]?.project_id ?? null;
-    if (nextProjectId !== selectedProjectId) {
-      setSelectedProjectId(nextProjectId);
-      setProjectDetail(null);
-    }
-  }, [
-    activeTab,
-    filteredPlugins,
-    filteredProjects,
     selectedMountId,
     selectedProjectId,
   ]);
@@ -399,29 +404,6 @@ const PluginWorkbenchPage: React.FC = () => {
       : undefined;
   }, [library?.plugins, projectDetail?.summary.linked_mount_id]);
 
-  const handleCreateProject = useCallback(
-    async (request: CreatePluginProjectRequest) => {
-      if (projectBusyAction) return;
-      setProjectBusyAction('create');
-      setProjectMutationFailure(null);
-      try {
-        const next = await ipcBridge.plugins.createProject.invoke(request);
-        setCreateDialogVisible(false);
-        setActiveTab('workshop');
-        await refreshLibrary();
-        setSelectedProjectId(next.summary.project_id);
-        setProjectDetail(next);
-        message.success(t('pluginWorkbench.messages.projectCreated'));
-      } catch (error) {
-        console.error('[plugins] creating Project failed', error);
-        setProjectMutationFailure(pluginLoadFailure(error, 'resource'));
-      } finally {
-        setProjectBusyAction(null);
-      }
-    },
-    [message, projectBusyAction, refreshLibrary, setActiveTab, t]
-  );
-
   const handleImportPrebuilt = useCallback(
     async (request: ImportPluginRequest) => {
       if (projectBusyAction) return;
@@ -429,12 +411,26 @@ const PluginWorkbenchPage: React.FC = () => {
       setProjectMutationFailure(null);
       try {
         const next = await ipcBridge.plugins.importPrebuilt.invoke(request);
+        const nextLibrary = await ipcBridge.plugins.list.invoke();
+        const installed = await ipcBridge.plugins.applyCandidate.invoke(
+          applyPluginCandidateRequest(
+            next,
+            nextLibrary.library_revision,
+            'initial_install',
+            false,
+            true,
+            undefined
+          )
+        );
         setImportDialogVisible(false);
-        setActiveTab('workshop');
+        setActiveTab('library');
         await refreshLibrary();
         setSelectedProjectId(next.summary.project_id);
         setProjectDetail(next);
-        message.success(t('pluginWorkbench.messages.artifactImported'));
+        setSelectedMountId(installed.summary.mount_id);
+        setMountDetail(installed);
+        setSurface('detail');
+        message.success(t('pluginWorkbench.messages.candidateApplied'));
       } catch (error) {
         console.error('[plugins] importing prebuilt Artifact failed', error);
         setProjectMutationFailure(pluginLoadFailure(error, 'resource'));
@@ -504,65 +500,6 @@ const PluginWorkbenchPage: React.FC = () => {
       }
     },
     [message, projectBusyAction, refreshLibrary, t]
-  );
-
-  const handleSetAutoApply = useCallback(
-    (enabled: boolean) => {
-      if (!projectDetail || projectBusyAction) return;
-      const execute = async () => {
-        const mount = linkedProjectMount;
-        if (enabled && (!mount?.current || !projectDetail.summary.linked_mount_id)) {
-          setProjectMutationFailure({
-            kind: 'error',
-            message: t('pluginWorkbench.autoApply.linkedMountUnavailable'),
-          });
-          return;
-        }
-        const request = setPluginAutoApplyRequest(projectDetail, enabled, mount);
-        setProjectBusyAction('auto_apply');
-        setProjectMutationFailure(null);
-        try {
-          const next = await ipcBridge.plugins.setAutoApply.invoke(request);
-          setProjectDetail(next);
-          await refreshLibrary();
-          message.success(
-            t(
-              enabled
-                ? projectDetail.ready && !next.ready
-                  ? 'pluginWorkbench.messages.autoApplied'
-                  : next.ready
-                    ? 'pluginWorkbench.messages.autoApplyWaiting'
-                    : 'pluginWorkbench.messages.autoApplyEnabled'
-                : 'pluginWorkbench.messages.autoApplyDisabled'
-            )
-          );
-        } catch (error) {
-          console.error('[plugins] updating auto Apply authorization failed', error);
-          setProjectMutationFailure(pluginLoadFailure(error, 'resource'));
-        } finally {
-          setProjectBusyAction(null);
-        }
-      };
-      if (enabled && projectDetail.summary.apply_mode !== 'auto_compatible_when_idle') {
-        Modal.confirm({
-          title: t('pluginWorkbench.autoApply.confirmTitle'),
-          content: t('pluginWorkbench.autoApply.confirmBody'),
-          okText: t('pluginWorkbench.actions.enableAutoApply'),
-          cancelText: t('pluginWorkbench.actions.cancel'),
-          onOk: execute,
-        });
-      } else {
-        void execute();
-      }
-    },
-    [
-      linkedProjectMount,
-      message,
-      projectBusyAction,
-      projectDetail,
-      refreshLibrary,
-      t,
-    ]
   );
 
   const handleShareExport = useCallback(
@@ -658,6 +595,7 @@ const PluginWorkbenchPage: React.FC = () => {
         setMountDetail(next);
         setSelectedMountId(next.summary.mount_id);
         setActiveTab('library');
+        setSurface('detail');
         await refreshLibrary();
         message.success(t('pluginWorkbench.messages.candidateApplied'));
       } catch (error) {
@@ -679,79 +617,190 @@ const PluginWorkbenchPage: React.FC = () => {
     ]
   );
 
-  const handleCancelProjectOperation = useCallback(async () => {
-    const operation = projectDetail?.active_operation;
-    if (!operation || projectBusyAction) return;
-    setProjectBusyAction('cancel_operation');
-    setProjectMutationFailure(null);
-    try {
-      await ipcBridge.plugins.cancelOperation.invoke({
-        operation_id: operation.operation_id,
-        expected_operation_revision: operation.operation_revision,
-      });
-      if (selectedProjectId) {
-        await loadProjectDetail(selectedProjectId);
+  const productItems = useMemo(
+    () => (library ? pluginProductItems(library).filter((item) => pluginProductMatches(item, searchQuery)) : []),
+    [library, searchQuery]
+  );
+
+  const openProductItem = useCallback((item: PluginProductItem) => {
+    if (item.mount) {
+      setSurface('detail');
+      setActiveTab('library');
+      if (selectedMountId !== item.mount.mount_id) {
+        setMountDetail(null);
       }
+      setSelectedMountId(item.mount.mount_id);
+      return;
+    }
+    if (item.project) {
+      setSurface('creator');
+      setActiveTab('workshop');
+      setSelectedProjectId(item.project.project_id);
+      setProjectDetail(null);
+      setCreatorMessages([]);
+      setAiDraft(null);
+    }
+  }, [selectedMountId, setActiveTab]);
+
+  const runAiAuthoringRef = useRef<((requirement: string) => Promise<void>) | null>(null);
+
+  const openFreshCreator = useCallback((requirement = '') => {
+    setSurface('creator');
+    setActiveTab('workshop');
+    setSelectedProjectId(null);
+    setProjectDetail(null);
+    setProjectMutationFailure(null);
+    setAiDraft(null);
+    setCreatorMessages([]);
+    if (requirement.trim()) {
+      window.setTimeout(() => void runAiAuthoringRef.current?.(requirement.trim()), 0);
+    }
+  }, [setActiveTab]);
+
+  const runAiAuthoring = useCallback(async (requirement: string) => {
+    const normalized = requirement.trim();
+    if (!normalized) return;
+    setSurface('creator');
+    setActiveTab('workshop');
+    setCreatorMessages((current) => [...current, { role: 'user', content: normalized }]);
+    setProjectMutationFailure(null);
+    if (!current_model) {
+      setProjectMutationFailure({
+        kind: 'unavailable',
+        message: t('pluginWorkbench.product.modelRequired'),
+      });
+      return;
+    }
+    setAiBusyStep('writing');
+    try {
+      const currentContext = projectDetail && !aiDraft
+        ? await ipcBridge.plugins.getAuthoringContext.invoke({
+            project_id: projectDetail.summary.project_id,
+          })
+        : null;
+      const packageId = aiDraft?.package_id ?? currentContext?.package_id ?? pluginPackageId();
+      const packageVersion = aiDraft?.package_version ?? currentContext?.package_version ?? '0.1.0';
+      const generated = await ipcBridge.plugins.generateDraft.invoke({
+        provider_id: String(current_model.id),
+        model: current_model.use_model,
+        requirement: normalized,
+        package_id: packageId,
+        package_version: packageVersion,
+        current_source: aiDraft?.source_content ?? currentContext?.source_content,
+      });
+      setAiDraft(generated);
+
+      let nextProject = projectDetail;
+      if (!nextProject) {
+        if (!library) throw new Error('PLUGIN_LIBRARY_UNAVAILABLE');
+        nextProject = await ipcBridge.plugins.createProject.invoke({
+          expected_library_revision: library.library_revision,
+          package_id: generated.package_id,
+          package_version: generated.package_version,
+          display_name: generated.display_name,
+          description: generated.description,
+          language: generated.language,
+        });
+        setSelectedProjectId(nextProject.summary.project_id);
+      }
+
+      setAiBusyStep('dependencies');
+      for (const edit of pluginDraftSourceEdits(generated)) {
+        if (!nextProject.source_snapshot_digest) {
+          throw new Error('PLUGIN_SOURCE_SNAPSHOT_UNAVAILABLE');
+        }
+        nextProject = await ipcBridge.plugins.applySourceEdit.invoke({
+          project_id: nextProject.summary.project_id,
+          expected_source_snapshot_digest: nextProject.source_snapshot_digest,
+          edit: { kind: 'replace', path: edit.path, content: edit.content },
+        });
+      }
+      if (!nextProject.source_snapshot_digest || !nextProject.dependency_lock_digest) {
+        throw new Error('PLUGIN_DEPENDENCY_STATE_UNAVAILABLE');
+      }
+      nextProject = await ipcBridge.plugins.updateDependencies.invoke({
+        project_id: nextProject.summary.project_id,
+        expected_project_revision: nextProject.summary.project_revision,
+        expected_build_generation: nextProject.summary.build_generation,
+        expected_source_snapshot_digest: nextProject.source_snapshot_digest,
+        expected_dependency_lock_digest: nextProject.dependency_lock_digest,
+        dependencies: generated.dependencies,
+      });
+
+      setAiBusyStep('building');
+      nextProject = await ipcBridge.plugins.buildProject.invoke(
+        buildPluginProjectRequest(nextProject)
+      );
+      setProjectDetail(nextProject);
+      setCreatorMessages((current) => [
+        ...current,
+        { role: 'assistant', content: generated.assistant_message },
+      ]);
+      message.success(
+        t(projectDetail ? 'pluginWorkbench.product.aiUpdated' : 'pluginWorkbench.product.aiGenerated')
+      );
       await refreshLibrary();
-      message.success(t('pluginWorkbench.messages.operationCanceled'));
     } catch (error) {
-      console.error('[plugins] canceling Project Operation failed', error);
-      setProjectMutationFailure(pluginLoadFailure(error, 'resource'));
+      console.error('[plugins] AI authoring failed', error);
+      setProjectMutationFailure({
+        kind: 'error',
+        message: t('pluginWorkbench.product.aiTemporaryFailure'),
+      });
+      setCreatorMessages((current) => [
+        ...current,
+        { role: 'assistant', content: t('pluginWorkbench.product.aiFailed') },
+      ]);
     } finally {
-      setProjectBusyAction(null);
+      setAiBusyStep(null);
     }
   }, [
-    loadProjectDetail,
+    aiDraft,
+    current_model,
+    library,
     message,
-    projectBusyAction,
-    projectDetail?.active_operation,
+    projectDetail,
     refreshLibrary,
-    selectedProjectId,
+    setActiveTab,
     t,
   ]);
 
-  const handleDeleteProject = useCallback(() => {
-    if (!projectDetail || projectBusyAction) return;
-    Modal.confirm({
-      title: t('pluginWorkbench.confirm.deleteProjectTitle'),
-      content: t('pluginWorkbench.confirm.deleteProjectBody'),
-      okText: t('pluginWorkbench.actions.deleteProject'),
-      cancelText: t('pluginWorkbench.actions.cancel'),
-      okButtonProps: { status: 'danger' },
-      onOk: async () => {
-        setProjectBusyAction('delete');
-        setProjectMutationFailure(null);
-        try {
-          await ipcBridge.plugins.deleteProject.invoke(
-            deletePluginProjectRequest(projectDetail)
-          );
-          setProjectDetail(null);
-          setSelectedProjectId(null);
-          await refreshLibrary();
-          message.success(t('pluginWorkbench.messages.projectDeleted'));
-        } catch (error) {
-          console.error('[plugins] deleting Project failed', error);
-          setProjectMutationFailure(pluginLoadFailure(error, 'resource'));
-        } finally {
-          setProjectBusyAction(null);
-        }
-      },
-    });
-  }, [message, projectBusyAction, projectDetail, refreshLibrary, t]);
+  runAiAuthoringRef.current = runAiAuthoring;
 
-  const tabItems = [
-    {
-      key: 'library',
-      label: t('pluginWorkbench.tabs.library'),
-      icon: <Plug theme='outline' size='15' />,
-    },
-    {
-      key: 'workshop',
-      label: t('pluginWorkbench.tabs.workshop'),
-      icon: <Code theme='outline' size='15' />,
-      dot: (library?.projects.length ?? 0) > 0 && (library?.plugins.length ?? 0) === 0,
-    },
-  ];
+  const toggleProductItem = useCallback(async (item: PluginProductItem, enabled: boolean) => {
+    if (!item.mount || homeBusyMountId) return;
+    setHomeBusyMountId(item.mount.mount_id);
+    try {
+      const detail = await ipcBridge.plugins.getMount.invoke({ mount_id: item.mount.mount_id });
+      await ipcBridge.plugins.setEnabled.invoke(setPluginEnabledRequest(detail, enabled));
+      message.success(t(enabled ? 'pluginWorkbench.messages.enabled' : 'pluginWorkbench.messages.disabled'));
+      await refreshLibrary();
+    } catch (error) {
+      setMutationFailure(pluginLoadFailure(error, 'resource'));
+    } finally {
+      setHomeBusyMountId(null);
+    }
+  }, [homeBusyMountId, message, refreshLibrary, t]);
+
+  const continueLinkedProject = useCallback(() => {
+    const projectId = mountDetail?.summary.linked_project_id;
+    if (!projectId) return;
+    setSurface('creator');
+    setActiveTab('workshop');
+    setSelectedProjectId(projectId);
+    setProjectDetail(null);
+  }, [mountDetail?.summary.linked_project_id, setActiveTab]);
+
+  const openAgentCapability = useCallback((capabilityId?: string, presetId?: string) => {
+    const query = new URLSearchParams({ source: 'plugin' });
+    if (capabilityId) query.set('capability', capabilityId);
+    if (presetId) query.set('preset', presetId);
+    void navigate(`/agent?${query.toString()}`);
+  }, [navigate]);
+
+  const backToPluginHome = useCallback(() => {
+    setSurface('home');
+    setActiveTab('library');
+  }, [setActiveTab]);
 
   const desktopOnlyState = !desktop ? (
     <PluginStatePanel
@@ -762,64 +811,10 @@ const PluginWorkbenchPage: React.FC = () => {
 
   return (
     <HubPageShell
-      title={t('pluginWorkbench.title')}
-      subtitle={t('pluginWorkbench.subtitle')}
+      title={t('pluginWorkbench.product.title')}
+      hideHeading
       maxWidthClass='md:max-w-1440px'
       className={styles.pageShell}
-      toolbar={
-        <div className={styles.toolbar}>
-          <SegmentedTabs
-            items={tabItems}
-            activeKey={activeTab}
-            onChange={(key) => {
-              if (key === 'library' || key === 'workshop') setActiveTab(key);
-            }}
-            size='sm'
-          />
-          <div className={styles.toolbarMeta}>
-            <Button
-              size='small'
-              icon={<AddOne size={14} fill='currentColor' />}
-              disabled={loading || projectBusyAction !== null}
-              onClick={() => {
-                setProjectMutationFailure(null);
-                setCreateDialogVisible(true);
-              }}
-            >
-              {t('pluginWorkbench.actions.createProject')}
-            </Button>
-            <Button
-              size='small'
-              icon={<Upload size={14} fill='currentColor' />}
-              disabled={loading || projectBusyAction !== null}
-              onClick={() => {
-                setProjectMutationFailure(null);
-                setImportDialogVisible(true);
-              }}
-            >
-              {t('pluginWorkbench.actions.importArtifact')}
-            </Button>
-            <Input
-              value={searchQuery}
-              onChange={setSearchQuery}
-              placeholder={t('pluginWorkbench.actions.search')}
-              className='!w-220px'
-              size='small'
-              prefix={<Search size={13} fill='currentColor' />}
-              allowClear
-            />
-            <Button
-              type='text'
-              size='small'
-              icon={<Refresh size={15} fill='currentColor' />}
-              loading={loading}
-              onClick={() => void refreshVisible()}
-              title={t('pluginWorkbench.actions.refresh')}
-              aria-label={t('pluginWorkbench.actions.refresh')}
-            />
-          </div>
-        </div>
-      }
     >
       {messageContext}
       {!desktop ? (
@@ -847,84 +842,34 @@ const PluginWorkbenchPage: React.FC = () => {
           {loading && !library ? (
             <PluginStatePanel loading body={t('pluginWorkbench.states.loadingLibrary')} />
           ) : library ? (
-            activeTab === 'library' ? (
-              <PluginLibraryView
-                plugins={filteredPlugins}
-                selectedMountId={selectedMountId}
-                detail={mountDetail ?? undefined}
-                detailLoading={mountDetailLoading}
-                detailFailure={mountFailure}
-                mutationFailure={mutationFailure}
-                busyAction={busyAction}
-                locale={i18n.resolvedLanguage ?? i18n.language}
-                onSelect={(mountId) => {
-                  setSelectedMountId(mountId);
-                  setMountDetail(null);
+            surface === 'home' ? (
+              <PluginProductHome
+                items={productItems}
+                loading={loading}
+                search={searchQuery}
+                busyMountId={homeBusyMountId}
+                onSearch={setSearchQuery}
+                onCreate={openFreshCreator}
+                onImport={() => {
+                  setProjectMutationFailure(null);
+                  setImportDialogVisible(true);
                 }}
-                onRetryDetail={() => {
-                  if (selectedMountId) void loadMountDetail(selectedMountId);
-                }}
-                onConfigure={() => {
-                  setMutationFailure(null);
-                  setConfigureDialogVisible(true);
-                }}
-                onEnable={() =>
-                  void runMountMutation(
-                    'enable',
-                    (detail) =>
-                      ipcBridge.plugins.setEnabled.invoke(setPluginEnabledRequest(detail, true)),
-                    'pluginWorkbench.messages.enabled'
-                  )
-                }
-                onDisable={() =>
-                  void runMountMutation(
-                    'disable',
-                    (detail) =>
-                      ipcBridge.plugins.setEnabled.invoke(setPluginEnabledRequest(detail, false)),
-                    'pluginWorkbench.messages.disabled'
-                  )
-                }
-                onRetryMount={() =>
-                  void runMountMutation(
-                    'retry',
-                    (detail) => ipcBridge.plugins.retryMount.invoke(retryPluginRequest(detail)),
-                    'pluginWorkbench.messages.retried'
-                  )
-                }
-                onRestore={() =>
-                  void runMountMutation(
-                    'restore',
-                    (detail) =>
-                      ipcBridge.plugins.restorePrevious.invoke(restorePluginRequest(detail)),
-                    'pluginWorkbench.messages.restored'
-                  )
-                }
-                onUninstall={handleUninstall}
-                onDeleteData={handleDeleteData}
+                onOpen={openProductItem}
+                onToggleEnabled={(item, enabled) => void toggleProductItem(item, enabled)}
               />
-            ) : (
-              <PluginWorkshopView
-                projects={filteredProjects}
-                hasQuery={hasSearchQuery}
-                selectedProjectId={selectedProjectId}
-                detail={projectDetail ?? undefined}
-                detailLoading={projectDetailLoading}
-                detailFailure={projectFailure}
-                mutationFailure={projectMutationFailure}
-                busyAction={projectBusyAction}
-                locale={i18n.resolvedLanguage ?? i18n.language}
-                onSelect={(projectId) => {
-                  setSelectedProjectId(projectId);
-                  setProjectDetail(null);
-                }}
-                onRetryDetail={() => {
-                  if (selectedProjectId) void loadProjectDetail(selectedProjectId);
-                }}
-                onOpenMount={(mountId) => {
-                  setActiveTab('library');
-                  setSelectedMountId(mountId);
-                  setMountDetail(null);
-                }}
+            ) : surface === 'creator' ? (
+              <PluginCreatorSurface
+                title={aiDraft?.display_name ?? projectDetail?.summary.display_name ?? ''}
+                messages={creatorMessages}
+                draft={aiDraft}
+                project={projectDetail}
+                busyStep={aiBusyStep}
+                failure={projectMutationFailure ?? projectFailure}
+                modelAvailable={Boolean(current_model)}
+                projectBusy={projectBusyAction !== null || projectDetailLoading}
+                onBack={backToPluginHome}
+                onSend={(value) => void runAiAuthoring(value)}
+                onOpenModels={() => void navigate('/models?section=models')}
                 onBuild={() => void handleBuildProject()}
                 onEditSource={() => {
                   setProjectMutationFailure(null);
@@ -934,16 +879,56 @@ const PluginWorkbenchPage: React.FC = () => {
                   setProjectMutationFailure(null);
                   setDependencyDialogVisible(true);
                 }}
-                onSetAutoApply={handleSetAutoApply}
-                onExportShare={() => {
+                onExport={() => {
                   setProjectMutationFailure(null);
                   setShareDialogVisible(true);
                 }}
                 onTest={() => setTestDialogVisible(true)}
                 onApply={() => setApplyDialogVisible(true)}
-                onDelete={handleDeleteProject}
-                onCancelOperation={() => void handleCancelProjectOperation()}
               />
+            ) : mountDetail ? (
+              <PluginProductDetail
+                detail={mountDetail}
+                agentUsage={agentUsage}
+                failure={mutationFailure ?? mountFailure}
+                busyAction={busyAction}
+                onBack={backToPluginHome}
+                onContinueCreating={continueLinkedProject}
+                onOpenAgent={openAgentCapability}
+                onConfigure={() => {
+                  setMutationFailure(null);
+                  setConfigureDialogVisible(true);
+                }}
+                onEnable={() => void runMountMutation(
+                  'enable',
+                  (detail) => ipcBridge.plugins.setEnabled.invoke(setPluginEnabledRequest(detail, true)),
+                  'pluginWorkbench.messages.enabled'
+                )}
+                onDisable={() => void runMountMutation(
+                  'disable',
+                  (detail) => ipcBridge.plugins.setEnabled.invoke(setPluginEnabledRequest(detail, false)),
+                  'pluginWorkbench.messages.disabled'
+                )}
+                onRetry={() => void runMountMutation(
+                  'retry',
+                  (detail) => ipcBridge.plugins.retryMount.invoke(retryPluginRequest(detail)),
+                  'pluginWorkbench.messages.retried'
+                )}
+                onRestore={() => void runMountMutation(
+                  'restore',
+                  (detail) => ipcBridge.plugins.restorePrevious.invoke(restorePluginRequest(detail)),
+                  'pluginWorkbench.messages.restored'
+                )}
+                onUninstall={handleUninstall}
+                onDeleteData={handleDeleteData}
+              />
+            ) : mountDetailLoading ? (
+              <PluginStatePanel loading body={t('pluginWorkbench.states.loadingMount')} />
+            ) : (
+              <PluginStatePanel failure={mountFailure ?? {
+                kind: 'error',
+                message: t('pluginWorkbench.states.errorBody'),
+              }} onRetry={() => selectedMountId && void loadMountDetail(selectedMountId)} />
             )
           ) : failure ? (
             <PluginStatePanel
@@ -953,14 +938,6 @@ const PluginWorkbenchPage: React.FC = () => {
           ) : null}
         </>
       )}
-      <PluginProjectCreateModal
-        visible={createDialogVisible}
-        libraryRevision={library?.library_revision ?? 0}
-        loading={projectBusyAction === 'create'}
-        failure={createDialogVisible ? projectMutationFailure : null}
-        onCancel={() => setCreateDialogVisible(false)}
-        onSubmit={handleCreateProject}
-      />
       <PluginConfigurationDialog
         visible={configureDialogVisible}
         detail={mountDetail}
@@ -972,7 +949,7 @@ const PluginWorkbenchPage: React.FC = () => {
         }}
         onSubmit={handleConfigure}
       />
-      <PluginPrebuiltImportModal
+      <PluginSmartImportDialog
         visible={importDialogVisible}
         libraryRevision={library?.library_revision ?? 0}
         loading={projectBusyAction === 'import'}

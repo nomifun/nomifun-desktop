@@ -16,8 +16,12 @@ import type {
   DurablePluginOperationDetail,
   DurablePluginOperationOwner,
   DurablePluginOperationSummary,
+  GeneratePluginDraftRequest,
+  GeneratedPluginDraft,
   ImportPluginRequest,
   PluginCandidateRef,
+  PluginAuthoringContext,
+  PluginImportInspection,
   PluginCapabilityContribution,
   PluginDetail,
   PluginLibraryResponse,
@@ -161,6 +165,9 @@ const deleteWithBody = <Data, Params>(
 });
 
 export const plugins = {
+  generateDraft: httpPost<GeneratedPluginDraft, GeneratePluginDraftRequest>(
+    '/api/plugin-authoring/generate'
+  ),
   list: withResponseMap(
     httpGet<PluginLibraryResponse, void>('/api/plugins'),
     mapLibrary
@@ -171,6 +178,9 @@ export const plugins = {
     ),
     mapProjectDetail
   ),
+  getAuthoringContext: httpGet<PluginAuthoringContext, { project_id: string }>(
+    (request) => `/api/plugin-projects/${encodeURIComponent(request.project_id)}/authoring-context`
+  ),
   createProject: withResponseMap(
     httpPost<PluginProjectDetail, CreatePluginProjectRequest>('/api/plugin-projects'),
     mapProjectDetail
@@ -178,6 +188,9 @@ export const plugins = {
   importPrebuilt: withResponseMap(
     httpPost<PluginProjectDetail, ImportPluginRequest>('/api/plugin-imports'),
     mapProjectDetail
+  ),
+  inspectImport: httpPost<PluginImportInspection, { source_path: string }>(
+    '/api/plugin-imports/inspect'
   ),
   exportShare: withResponseMap(
     httpPost<DurablePluginOperationDetail, SharePluginRequest>(

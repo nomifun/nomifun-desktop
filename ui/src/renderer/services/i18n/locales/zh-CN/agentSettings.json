@@ -295,6 +295,8 @@
     "configureAtUse": "使用时配置",
     "unavailableCode": "故障代码",
     "missingSource": "来源缺失",
+    "pluginUnavailable": "插件未启用",
+    "pluginCapabilityFallback": "插件能力：{{name}}",
     "missingReason": "这项能力的来源已不存在。可以将它移除，或恢复对应的插件后再使用。",
     "builtinReason": "官方内置能力未正确接入，属于当前版本的发布完整性故障。请更新或修复系统版本；如需继续编辑其他配置，也可以先移除这项能力。",
     "pluginReason": "请检查对应插件或连接是否已启用、配置完整，并具备可用的运行环境。",
