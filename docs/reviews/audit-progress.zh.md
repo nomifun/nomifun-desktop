@@ -4,9 +4,9 @@
 
 ## 续接位置
 
-- 当前批次：R44–R47 进行中。R40–R43 已按 5 个提交正常推送，远端核实为 `cdb55ea6d`，新批次从干净工作区开始。Browser Use 仍暂跳过；已验证项不重复审。
+- 当前批次：R45/R49/R50/R52 已复核、验证并按模块提交，随本台账正常推送；R51/R53/R54 独立审计中。上一检查点已核实远端为 `2b5d7035e`，本批四个源码提交见下方验收。Browser Use 仍暂跳过；已验证项不重复审。
 - 后续集成：当前分支已包含 `dd35e01de` 的 MiniApp 分支合并；设计文档已跟踪。本批仅更新遗留路由测试，未修改 MiniApp 产品实现，模块仍待深审。
-- 全局覆盖：111 个模块边界中，7 个已验证、32 个部分完成、72 个待审；110 个唯一问题/任务。R45/R49/R50 尚在集成或审计，不提前计完成；Browser Use 待审边界仍暂跳过。
+- 全局覆盖：111 个模块边界中，7 个已验证、35 个部分完成、66 个待审、3 个审计中；123 个唯一问题/任务。完整阅读与跨模块问题闭环分开登记；Browser Use 待审边界仍暂跳过。
 - R1 证据：[首轮记录](2026-09-12-code-quality.zh.md)。R1–R39 各报告中的“未提交/dirty”描述是当时快照；当前提交状态以下方验收记录为准。
 - R2 证据：[运行时与测试边界记录](2026-09-12-runtime-and-test-boundaries.zh.md)，包含改动、失败尝试、验证及覆盖限制。
 - R3 证据：[生命周期与状态记录](2026-09-12-lifecycle-and-state.zh.md)，记录四个 Host 旧实现失败、Context falsy 初值及消息重放缺陷；保留待办，勿重复修复。
@@ -39,12 +39,40 @@
 - R32–R33 证据：[配置/Hook/schema 记录](2026-09-12-config-hooks-schema.zh.md)，config 最终 184/0、provider 7/0、Agent hook 2/0。
 - R34 证据：[CLI 生命周期记录](2026-09-12-cli-command-lifecycle.zh.md)，CLI 12/0；Stop/EOF/配置队列及共享清理已修复，输出失败等仍属 R30-02。
 - R35 证据：[记忆存储记录](2026-09-12-memory-storage.zh.md)，九项红→绿，memory 150/0、Agent 17/0；路径命名/多文件写入等 R35-07 保留。
-- 下一检查点：R30-02 的 ProtocolSink 输出失败与 MCP 连接取消归属、R38-03 的 inline 副作用标记/brace 上限、R42-04 的认证路由与信任边界；这些跨模块契约由主线程统一判断，其他独立模块仍可并行。R40 已读完的 frontmatter/hooks/prompt/integration 测试不重复审。R36-04、R32-03、R35-07 及 SSH/PluginService 待办保留。
+- 下一检查点：R30-02 的 MCP 连接取消/bootstrap 归属、R38-03 的 brace/loader/MCP 容量、R42-04 的认证并发/密码持久化/代理信任仍未解决；ProtocolSink 输出失败和 inline shell 副作用已在 R47/R48 修复，勿重复做。R45/R49/R50 的剩余边界见新问题行；R36-04、R32-03、R35-07、SSH/PluginService 旧待办保留。
 - 本地钩子收尾（2026-09-12）：用户明确授权检查后，确认 `.githooks/` 的 4 个未跟踪脚本仅是标准 Git LFS 钩子；仓库没有 LFS 跟踪规则，`git lfs ls-files` 为空。已删除脚本及空目录，并移除本地 `core.hooksPath=.githooks`；未修改全局 Git 配置或贡献者身份。默认 `.git/hooks` 只有未启用的 sample，另两个注册临时 worktree 无自定义钩子。以后启用 LFS 时可用 `git lfs install --local` 重新生成标准钩子。
 - 钩子收尾验证（历史批次）：当时清单为 111 边界/90 唯一问题；仅钩子和记录变动，未重复代码测试。R40–R43 的最新结果见下方并行批次验收。
 - 完成定义：列清子模块→核对生产入口及跨模块调用→检查并发、错误、权限和关闭路径→记录问题及证据→修改→对应回归通过。没有证据不能标记完成。
 
-## 后续并行边界（R44–R47）
+## R45 / R49 / R50 / R52 阶段验收
+
+| 批次 | 已提交源码 | 最终验证 |
+| --- | --- | --- |
+| R45 Public | `0da0f03` | `cargo test --locked -p nomifun-public --lib -- --test-threads=4`：29/0 |
+| R49 Runtime | `2e42d8fa8` | `cargo test --locked -p nomifun-runtime -p nomifun-shell -- --test-threads=4` 中 Runtime 37/0 |
+| R50 Shell | `f3ceb978e` | 同上 Shell 94/0 |
+| R52 Webhook/DB | `fc4299cf3` | `-p nomifun-db --test webhook_repo` 6/0；`-p nomifun-webhook` 25/0（均 cargo test --locked、4 线程） |
+
+本检查点 191 项定向 Rust 测试通过。R52 两项真实数据库并发回归先失败（名称/标签描述被覆盖），原子 SQL 后通过；随后全 Webhook 编译发现 notifier 测试尚有一处旧 upsert 调用，迁移后全包重新通过。未以这次调用迁移编译错误充当行为红→绿证据。其他 R45/R49/R50 新回归未在修复前执行。
+
+四批源码/测试共 +928/-669，净增 259 行：生产 +300/-304（净减 4），测试 +628/-365（净增 263），不含台账。Runtime 自身净减 106 行，R52 生产净减 20 行；Public 新增 9 项回归是本检查点测试增长的主要来源。没有新增依赖/框架/后台服务。R52 仅两个明确的字段补丁参数替代整行写接口，无数据库迁移、全局锁或重试框架。
+
+R49 删除的 `tests/extract_integration.rs` 只测试 zstd/tempfile、未调用 runtime；真实 extract_into 内容/校验/别名/失败恢复回归保留。另清理环境写入/泄漏和无断言测试，Git 历史可恢复删除文件。人工 shell 回归仅检查参数/合成 PATH，不替代真实登录 rc；Windows 上未执行 Unix 链接/macOS 探针及 VS Code fallback，未验证真实发布包/30 秒超时/外部 MCP/原生应用启动。
+
+剩余 Public R45-04、Runtime R49-05、Shell R50-04 和 Webhook R46-05 都保留，模块不因读完或测试通过而标记全完成。本次按明确白名单提交，R51/R53/R54 未完成写集不混入；Browser Use 未改。
+
+## 当前并行边界（R51–R54）
+
+| 批次 / 负责人 | 独占写集 | 任务 |
+| --- | --- | --- |
+| R51 / 原 Public agent | `ui/src/common/config/**` | 配置初始化/重载及写入竞态、订阅失败隔离；其他 UI 和后端只读 |
+| R52 / 主线程 | Webhook service/tests；DB webhook/tag_setting models、repository 和相应测试 | 接续 R46-05：数据库原子字段更新与调用迁移；无 schema/依赖变更 |
+| R53 / 原 Runtime agent | `crates/backend/nomifun-realtime/src/**`、tests | WebSocket 身份、广播背压、任务及关闭 |
+| R54 / 原 Shell agent | `crates/backend/nomifun-skill-library/src/**`、tests | 导入导出/路径、加载、并发写入和错误归属 |
+
+原 R45/R49/R50 写集已冻结转交主线程；worker 不回改原目录。共享接口由主线程统一处理，其他 agent 只读；Rust 测试集中排队，UI agent 只跑定向测试。此表不代表审计完成。
+
+## 历史并行边界（R44–R47）
 
 | 批次 / 负责人 | 独占写集 | 任务 |
 | --- | --- | --- |
@@ -293,8 +321,21 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | R46-02 | 已验证 | Webhook 网络/远端错误回显端点凭据和响应正文 | 使用错误类别、HTTP 状态、数值飞书错误码；不回显 URL/正文，合成凭据回归通过 |
 | R46-03 | 已验证 | 通知使用 SQLite 行号且待审核被报告完成 | 改为稳定 requirement_id、needs_review 明确状态；Unicode 截断只扫描前缀；删除两处测试 Box::leak |
 | R46-04 | 已验证 | notify_events 元素带逗号经存储往返变成多个事件 | 校验既有 done/failed/needs_review 集合，保留空/省略语义；非法更新不落库回归通过 |
-| R46-05 | 待审 | Webhook 与仓储/需求通知的跨模块契约 | 部分更新先读再全字段写可能覆盖并发修改；Requirement 通知为 detached spawn；cancelled 触发集合不一致；owner 任意端点/重定向策略需统一核对，不以发送超时冒充生命周期闭环 |
+| R46-05 | 部分完成 | Webhook 与仓储/需求通知的跨模块契约 | R52 两项真实并发丢更新回归红→绿；以原子字段 SQL/RETURNING 取代先读再整行写，父绑定同事务校验。Requirement detached 通知、cancelled 触发集合不一致、owner 任意端点/重定向策略仍待处理 |
 | R47-01 | 已验证 | inline 技能实际执行 shell 却不使旧完成证据失效 | 同一替换及 shell regex 判定，MCP/纯文本保持非副作用；成功/写后失败实文件与分类两回归红→绿，已有证据测试补成功 opaque 分支；不改审批类别/执行语义 |
+| R45-01 | 已验证 | Public 预检拒绝合法 JSON 转义方法且读取错误误报超限 | Cow 接受转义方法且保留原始 body；400/413/408 分流，不暴露读取诊断；29/0 中包含两项新预检回归 |
+| R45-02 | 已验证 | Public 创建在 map 锁等待时取消遗留占位、跨 manager 释放占位 | 先取 map 锁，再无 await 地预留并发布；释放复用归属检查；取消/重复释放/流 body 配额/关闭回归通过 |
+| R45-03 | 已验证 | 初始化 token refill 丢失不足整间隔的时间 | 未满桶保留小数间隔；满桶丢弃剩余信用；3 项时间边界回归通过，无新计时器 |
+| R45-04 | 待审 | Remote rmcp 处理生命周期与 Host/session 跨模块资源边界 | HTTP body 配额不约束 detached handler/product operation，context.ct 未消费；Host shutdown 未接 transport cancellation；session store observation 即使取 1 条仍加载全量投影 |
+| R49-01 | 已验证 | Runtime 重复 init 告警误用 OnceLock::set 的被拒新值 | 比较实际首次保存路径；first-init-wins 不变，37/0；未捕获 tracing 告警作运行断言 |
+| R49-02 | 已验证 | 解压缺别名误命中新鲜缓存、失败遗留 staging 与锁外无效删目录重试 | freshness 检查 bun/bunx/node；stamp 最后发布，Unix 同级链接；锁内清 staging，删除相同 blob 重试和递归清缓存；Windows 回归通过 |
+| R49-03 | 已验证 | embed→stub 构建仍包含旧 blob、ZIP 后缀匹配误取文件 | stub 使用空字节常量；ZIP 精确末级文件名；移除空 write；stub 元数据回归通过，未运行真实发布下载 |
+| R49-04 | 已验证 | Runtime 测试依赖宿主环境、全局环境写入及无业务测试 | 显式人工 override/home/PATH fixture，去除泄漏/环境写入；删仅测 zstd/tempfile 的 extract_integration.rs，真实 extract_into 及失效/修复回归保留；37/0 |
+| R49-05 | 待审 | Runtime 构建缓存发布、跨平台探针及解析策略仍未闭环 | build.rs 存在即复用且直接写最终 exe/blob；非 Linux Unix reader join 可被持 stdout 后代拖住（既有 LNX-04）；nvm/fnm 逆字典序不是版本序；BUN_DIR 失败永久缓存与 RESOLVED_BUN 分离；musl/arm64 baseline 资产映射待真实包核对 |
+| R50-01 | 已验证 | macOS VS Code fallback 检测命中但仍执行裸 code | 检测返回具体程序并由 opener 启动；记录器检查 argv/未安装不执行；Windows 通过，macOS 条件分支未运行 |
+| R50-02 | 已验证 | STT 未落实音频 30 MiB 上限且 multipart 超限变成 400 | 总请求 31 MiB、音频 30 MiB 分层校验，保留 413/400；大于 10 MiB、恰好 30 MiB、音频/流式总量超限及畸形 body 回归通过 |
+| R50-03 | 已验证 | Shell 路由测试误字段、无断言及语音夹具不必要泄漏 | snake_case+具体业务错误；TTS 合并无上游配置的 Unicode 边界；删除两处 mem::forget 和无断言 VS Code 测试；整包 94/0 |
+| R50-04 | 待审 | Windows terminal cmd 解释及 opener hand-off 生命周期 | cmd /c start 的目录参数仍受 cmd 元字符/展开语义影响，未利用验证；hand_off 后仍等退出/收 stderr 且共享 builder 保留 kill_on_drop，可能占请求/取消误杀/无界 stderr；须主线程统一进程契约 |
 
 ## 模块覆盖索引
 
@@ -346,7 +387,7 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | `crates/backend/nomifun-creation/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-cron/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-customer-service/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
-| `crates/backend/nomifun-db/` | 部分完成 | R4-01 会话五种分页及需求/素材列表数值边界已修复验证；creation_task limit 已核对有界；其余仓储、事务、资源限额和查询计划待审 |
+| `crates/backend/nomifun-db/` | 部分完成 | R4-01 分页边界已验证；R52 webhook/tag_setting 两仓储/模型与服务调用已审，原子字段更新及父绑定事务 6/0 + Webhook 25/0；其余仓储、事务、资源限额和查询计划待审 |
 | `crates/backend/nomifun-file/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-gateway/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-idmm/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
@@ -361,18 +402,18 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | `crates/backend/nomifun-office/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-plugin-platform/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-plugin-service/` | 待审 | 已追踪 commit_fence/auto_apply 调用；提交→注册发布→Kernel dispatch 全程准入仍待深审 |
-| `crates/backend/nomifun-public/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
-| `crates/backend/nomifun-realtime/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
+| `crates/backend/nomifun-public/` | 部分完成 | R45 全 5 个源文件/内联测试及相关调用已读；预检/取消占位/归属/refill 修复后 29/0；rmcp 在途处理容量、Host shutdown 与 observation 全量投影见 R45-04 |
+| `crates/backend/nomifun-realtime/` | 审计中 | R53 agent 独占；全模块 WebSocket/manager/broadcaster 审计中，尚未验收 |
 | `crates/backend/nomifun-requirement/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-robot/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
-| `crates/backend/nomifun-runtime/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
-| `crates/backend/nomifun-shell/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
-| `crates/backend/nomifun-skill-library/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
+| `crates/backend/nomifun-runtime/` | 部分完成 | R49 全 11 个原始 Rust 文件、调用/平台边界已读；37/0，删除无业务调用的 extract_integration.rs；构建缓存、非 Linux Unix 探针、版本/解析缓存和资产映射见 R49-05 |
+| `crates/backend/nomifun-shell/` | 部分完成 | R50 全 7 源文件与 3 集成测试及 UI/App/模型调用已读；94/0。STT/Vscode/测试修复；Windows cmd 解释及 hand-off 归属见 R50-04 |
+| `crates/backend/nomifun-skill-library/` | 审计中 | R54 agent 独占；导入导出/路径与文件写入审计中，尚未验收 |
 | `crates/backend/nomifun-ssh/` | 部分完成 | R25 glob 与搜索/列表错误语义已验证，后端单元 30/0；R25-03 名称协议、pool/service/routes 等仍待审 |
 | `crates/backend/nomifun-system/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-terminal/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-v4-root/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
-| `crates/backend/nomifun-webhook/` | 部分完成 | R46 全 7 源文件与 2 集成测试、App/DB/Requirement/API/UI 调用边界已读；整包 23/0 + 需求通知 3/0。跨仓储并发更新、通知归属与取消事件契约见 R46-05 |
+| `crates/backend/nomifun-webhook/` | 部分完成 | R46 全 7 源文件与 2 集成测试/调用边界已读；R52 原子部分更新与父项检查红→绿，Webhook 25/0 + DB webhook_repo 6/0；通知归属与取消/出站策略仍见 R46-05 |
 | `crates/backend/nomifun-workshop/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/shared/nomi-process-runtime/` | 部分完成 | R11 只读清理凭据 accessor 和关联 Drop/shutdown 边界已核对，23 项边界验证；平台/会话/输出等其余仍待深审 |
 | `crates/shared/nomi-redact/` | 已验证 | R14 完整公共模式脱敏模块；6 项红→绿，模块 16/0、浏览器调用方 20/0；阈值与 best-effort 限制见报告 |
@@ -381,7 +422,7 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | `ui/src/common/adapter/` | 部分完成 | R43 只追踪桥接/dialog 及 ipcBridge 更新接口，删除失效下载 stub/noop；原生更新 helper 回归包含于 UI 3304/0。其余适配入口、请求取消/超时仍待审 |
 | `ui/src/common/browser/` | 待审 | 未深审 |
 | `ui/src/common/chat/` | 待审 | R2-06 仅统一测试导入并回归；业务未深审 |
-| `ui/src/common/config/` | 待审 | 未深审 |
+| `ui/src/common/config/` | 审计中 | R51 agent 独占；初始化/重载/订阅和在途写入审计中，尚未验收 |
 | `ui/src/common/protocolBindings/` | 待审 | 生成代码：审计生成源与契约，不手删生成产物 |
 | `ui/src/common/types/` | 部分完成 | R1-07 弃用类型删除；R2-06 测试类型整合已验证；其余类型/契约未深审 |
 | `ui/src/common/update/` | 部分完成 | R43 已读唯一 updateTypes.ts 及更新 UI/adapter 调用，删无生产来源的手动下载类型。includePrerelease/repo 请求字段与 native provider 的实际支持范围、非 Tauri 路径仍待核对，不冒充整体更新策略已验证 |
