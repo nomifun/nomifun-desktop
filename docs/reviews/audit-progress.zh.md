@@ -4,9 +4,9 @@
 
 ## 续接位置
 
-- 当前批次：R1–R39 已完成 15 批阶段提交，明细见下方“阶段性提交验收”。本轮仅复核未完成项、清理无用本地钩子；全局覆盖状态不变。下方验收中的工作区状态是提交当时的快照。
-- 后续集成：本轮起点 `a64493310` 已包含 `dd35e01de` 的 MiniApp 分支合并；MiniApp 设计文档也已跟踪。本轮不改动这些后续成果，MiniApp 模块仍待深审。
-- 全局覆盖：111 个模块边界中，7 个已验证、26 个部分完成、78 个待审；90 个唯一问题/任务。下一轮从 R38-03 剩余范围续接，不重做 R1–R39。
+- 当前批次：R40–R43 并行整改已集成、验证并分模块提交，用户已授权正常推送和继续后续批次。起点 `2e5834c6e1`。Browser Use 暂跳过（nomi-browser、nomi-browser-engine、nomifun-browser-platform、UI browser 页面），不把普通 WebUI 适配层等同于浏览器自动化。
+- 后续集成：当前分支已包含 `dd35e01de` 的 MiniApp 分支合并；设计文档已跟踪。本批仅更新遗留路由测试，未修改 MiniApp 产品实现，模块仍待深审。
+- 全局覆盖：111 个模块边界中，7 个已验证、30 个部分完成、74 个待审；100 个唯一问题/任务。待审数包含上述暂跳过的 Browser Use 边界，不将跳过计作完成。
 - R1 证据：[首轮记录](2026-09-12-code-quality.zh.md)。R1–R39 各报告中的“未提交/dirty”描述是当时快照；当前提交状态以下方验收记录为准。
 - R2 证据：[运行时与测试边界记录](2026-09-12-runtime-and-test-boundaries.zh.md)，包含改动、失败尝试、验证及覆盖限制。
 - R3 证据：[生命周期与状态记录](2026-09-12-lifecycle-and-state.zh.md)，记录四个 Host 旧实现失败、Context falsy 初值及消息重放缺陷；保留待办，勿重复修复。
@@ -39,10 +39,44 @@
 - R32–R33 证据：[配置/Hook/schema 记录](2026-09-12-config-hooks-schema.zh.md)，config 最终 184/0、provider 7/0、Agent hook 2/0。
 - R34 证据：[CLI 生命周期记录](2026-09-12-cli-command-lifecycle.zh.md)，CLI 12/0；Stop/EOF/配置队列及共享清理已修复，输出失败等仍属 R30-02。
 - R35 证据：[记忆存储记录](2026-09-12-memory-storage.zh.md)，九项红→绿，memory 150/0、Agent 17/0；路径命名/多文件写入等 R35-07 保留。
-- 下一检查点：R38-03 skills 的 frontmatter 补充、hooks/prompt/integration 测试，以及 brace 展开、参数生成 shell 与 inline 副作用契约；loader/substitution/executor/MCP/permissions 测试已读，勿重做 R39。R36-04 MCP、R30-02、R32-03、R35-07 及 SSH/PluginService 待办保留。
+- 下一检查点：R30-02 的 ProtocolSink 输出失败与 MCP 连接取消归属、R38-03 的 inline 副作用标记/brace 上限、R42-04 的认证路由与信任边界；这些跨模块契约由主线程统一判断，其他独立模块仍可并行。R40 已读完的 frontmatter/hooks/prompt/integration 测试不重复审。R36-04、R32-03、R35-07 及 SSH/PluginService 待办保留。
 - 本地钩子收尾（2026-09-12）：用户明确授权检查后，确认 `.githooks/` 的 4 个未跟踪脚本仅是标准 Git LFS 钩子；仓库没有 LFS 跟踪规则，`git lfs ls-files` 为空。已删除脚本及空目录，并移除本地 `core.hooksPath=.githooks`；未修改全局 Git 配置或贡献者身份。默认 `.git/hooks` 只有未启用的 sample，另两个注册临时 worktree 无自定义钩子。以后启用 LFS 时可用 `git lfs install --local` 重新生成标准钩子。
-- 本轮验证：模块清单仍为 111 边界/90 唯一问题；仅钩子和记录变动，检查 Git 配置、工作区及文档空白，不重复代码测试。后续提交仍需明确范围并检查暂存区，不自动推送。
+- 钩子收尾验证（历史批次）：当时清单为 111 边界/90 唯一问题；仅钩子和记录变动，未重复代码测试。R40–R43 的最新结果见下方并行批次验收。
 - 完成定义：列清子模块→核对生产入口及跨模块调用→检查并发、错误、权限和关闭路径→记录问题及证据→修改→对应回归通过。没有证据不能标记完成。
+
+## 本轮并行边界（R40–R43）
+
+| 批次 / 负责人 | 独占写入范围 | 本轮目标 |
+| --- | --- | --- |
+| R40 / Skills agent | `crates/agent/nomi-skills/src/**` | 接续 R38-03，保持对外 API 不变 |
+| R41 / CLI agent | `crates/agent/nomi-cli/src/**` | 接续 R30-02，只修 crate 内可闭环问题 |
+| R42 / Auth agent | auth 的 cookie/csrf/jwt/password/rate_limit 五个源文件与 `tests/core_audit.rs` | 核对认证核心，其他入口只读 |
+| R43 / 主线程 | `ui/src/platform/**`、`ui/src/common/update/updateTypes.ts`、`ui/src/common/adapter/ipcBridge.ts`、`ui/src/renderer/components/settings/UpdateModal.tsx` 及必要调用测试 | 平台桥接及失效手动更新分支清理 |
+| R43 / 测试 agent | `GuidAgentPresetLaunch.structure.test.ts`、`miniAppsNav.structure.test.ts` | 只修确认与 HEAD 产品逻辑脱节的断言；生产代码只读 |
+
+共享接口、依赖清单、锁文件和本台账仅由主线程处理；worker 不提交、不推送、不运行 Cargo，Rust 验证集中排队。发现跨写集问题先交主线程判断，不抢改。此表是任务分配，不代表完成审计。
+
+## R40–R43 并行批次验收（2026-09-12）
+
+- 基线 `2e5834c6e1`，20 个变更文件（19 个源码/测试 + 本台账）；源码已提交为 `2594cb595`（Skills）、`dea4e445f`（CLI）、`e58b04442`（Auth）、`c8b935071`（UI），本记录随后提交并统一推送。三个 Rust agent 与一个独立测试 agent 已结束；主线程逐份复核补丁和跨模块调用，依赖清单/锁文件未变，无并发编辑同一文件。
+- R40：补完 frontmatter/hooks/prompt/integration 的剩余测试阅读，修复 YAML 回退和嵌套 brace；删去重复和自我实现逻辑的测试。参数替换生成 shell 是既有行为，真实临时文件测试确认 MCP 不执行它；并未改变执行/审批策略。
+- R41：接续同一 R30-02，而非新增重复问题编号。session 初始化失败、CLI-owned 协议写失败、结束输出失败统一进入既有 shutdown；优先保留原错误并附加清理失败上下文。空 MCP manager 也显式清理，失败时保留到最后重试。没有修改共享 OutputSink 或完成证据框架。
+- R42：吊销令牌保留到验证宽限期结束；限流使用单调时钟，合并窗口重置，避免溢出及后台强引用；密码生成拒绝采样并去掉 shuffle 临时数组；CSRF 复用相同 Bearer 提取规则。认证剩余路由/信任/兼容策略记为 R42-04，未将其标成安全审计完成。
+- R43：平台 invoke 同步发送失败解绑一次性响应监听；移除无调用 subscribe 和颜色 token；沿更新生产调用链删除失效手动下载实现、状态和专用类型，保留 native updater 与手动外链。这里只删除 UI 死路径，后端 version.rs 的 release asset API 仍有独立生产用途，未一并删除。
+- 集成修复：第一次 UI 全量为 3302/2；两项失败对应 HEAD 中早已合入的模型引用与 MiniApp 页面路由变化。独立测试 agent 只改两份结构测试，核对 commit 祖先和生产逻辑后更新精准断言；未修改 MiniApp 产品实现。
+
+| 最终验证 | 结果 |
+| --- | --- |
+| `cargo test --locked -p nomi-skills -p nomifun-auth -- --test-threads=4` | Skills 384/0；Auth 161 单元 + 85 集成 = 246/0 |
+| `cargo test --locked -p nomi-cli --bin nomi -- --test-threads=4` | 15/0 |
+| `cargo test --locked -p nomi-agent skill_tool -- --test-threads=4` | 59 单元 + 1 plan-mode 集成 = 60/0 |
+| `bun test --cwd ui`（全部 UI 修改后） | 3304/0，611 文件 |
+| `bun run check`、`bun run build:ui`（更新死路径删除后） | 通过；既有大 chunk 警告仍列 R2-04 |
+| 清单与差异检查 | 111 模块/100 唯一问题；`git diff --check` 通过 |
+
+桥接新回归有修复前失败证据，其余本批 Rust 回归只记录修改后通过，不倒推红→绿。未运行全 Rust workspace、真实 broken stdout/外部 MCP、原生其他操作系统或桌面发布/真实升级；测试不等于这些集成已验证。
+
+本批源码/测试（含新增 bridge.test.ts，不含文档）为 +844/-692，净增 152 行：生产代码 +385/-481，净减 96 行；测试 +459/-211，净增 248 行。Rust 行内测试按测试区段归类，CLI 大 diff 包含命令循环缩进，不作为新增功能计数。Skills 净减 133 行，UI 源码与测试合计净减 56 行；新增量主要是 CLI 异常清理及认证回归，没有新增依赖/通用框架。全项目仍未完成 code review，不承诺“无冗余/无缺陷”。
 
 ## 阶段性提交验收（2026-09-12）
 
@@ -182,7 +216,7 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | R29-03 | 已验证 | TOON 类型/字段引用歧义、转义及括号边界错误 | 三项红→绿，使用 serde、保留外围文本，见 R29 |
 | R29-04 | 已验证 | 相似行字符/字节单位混用导致 Unicode 不折叠 | 中文相同行红→绿，统一字符数 |
 | R30-01 | 已验证 | stdin 行/队列无界及接收方关闭；stdout 重复锁/缓冲 | 三项红→绿、六项读取回归，protocol 49/0；OS stdin 限制见报告 |
-| R30-02 | 部分完成 | CLI Stop/EOF/局部配置覆盖与清理返回已修复；输出失败等待办 | R34 CLI 12/0，完整剩余范围见报告；不扩展协议框架 |
+| R30-02 | 部分完成 | CLI 生命周期、初始化失败和 CLI-owned 输出失败清理已修复 | R41 CLI 15/0；保留原始 I/O 错误并附加清理错误，失败 MCP manager 显式回收。ProtocolSink 的 Ready/ConfigChanged/流式回调仍吞错误，connect_all 内 Stop/EOF 不能即时取消；未验真实断 stdout/外部 MCP 清理失败 |
 | R31-01 | 已验证 | 工具描述按字节截断及 CRLF 段落遗漏；共享类型测试重复 | 两项红→绿，types 70/0、provider 定向 2/0，见 R31 |
 | R32-01 | 已验证 | 存在的非法/不可读配置静默退回默认 | 两项红→绿，仅 NotFound 可选；config 定向 66/0 |
 | R32-02 | 已验证 | profile 模型优先级失效、继承 compat 字段丢失 | 两项红→绿，复用字段合并；config 定向 66/0 |
@@ -205,12 +239,22 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | R37-02 | 已验证 | domain-support 构造重复及无调用资源辅助函数 | 共享私有 const 默认构造，删除全仓无引用的 typed_resource_bindings_for；不改 wave 私有实现，不改 C7 元数据；模块净减 100 行 |
 | R38-01 | 已验证 | skills shell 非零退出因有输出而被报告成功；重复包装错误 | 现有测试改正断言后旧实现失败；按退出状态失败并保留诊断，删去嵌套错误文本。skills 407/0、Agent skill_tool 59/0 |
 | R38-02 | 已验证 | skills 空引号参数丢失/位置错位、换行不分词；解析及测试冗余 | 空参数红→绿，保留 token 起始标记并用 mem::take；简化 frontmatter 行偏移与 YAML→JSON，删除 paths 8 项/substitution 15 项重复测试、修正恒真断言；407/0 |
-| R38-03 | 部分完成 | skills 剩余测试、解析和跨层副作用边界 | R39 已完成 loader/substitution/executor/MCP/permissions 测试核对；目录防环及替换/基目录修复见 R39-01–03。未完整读 frontmatter 补充、hooks/prompt/integration 测试；brace 展开无界且嵌套语义待核对；参数生成 shell、inline 副作用标记、MCP 分页/命名碰撞及软预算仍待审。目录深度/文件大小及 SKILL.md 文件链接未改 |
+| R38-03 | 部分完成 | skills 剩余解析容量、跨层副作用和 MCP 边界 | R40 已读完 frontmatter 补充、hooks/prompt/integration 测试，嵌套 brace/YAML 回退修复见 R40-01/02。参数生成 shell 是现有契约且已有真实文件回归；Agent skill_tool.rs 的副作用标记仅识别 fork，需结合 engine 完成证据失效契约续审。brace 输出/递归深度、MCP 分页/命名碰撞/软预算、loader 深度/大小/SKILL.md 文件链接仍待审 |
 | R39-01 | 已验证 | skills 目录环重复加载，两套遍历及重复 metadata 查询 | 真实 Windows junction 旧实现加载同一技能 64 次；统一遍历、祖先 canonical 路径防环、排序稳定优先级；正常目录链接/旧命令格式均通过，未运行原生 Unix symlink 分支 |
 | R39-02 | 已验证 | 相邻占位符漏替换、参数/环境值被重扫、全文参数误匹配及错误追加 | 三项新测试旧失败；单次扫描原文，保留任意非数字命名参数及边界语义；按消费标记决定 fallback，替换值不再当模板解析 |
 | R39-03 | 已验证 | 旧平铺命令基目录不存在；基目录说明被当模板解释 | 两项既有测试补断言后旧失败；根目录取真实文件父目录，说明在替换及 shell 执行后添加；没有改变正文参数→shell 的现有契约 |
 | R39-04 | 已验证 | skills 测试重复及权限补充文件独立重复夹具 | 删除 loader 10 项、executor 6 项重复/无有效断言用例；权限 3 组独有断言合并入原用例后删除补充文件；复用加载写文件辅助函数，无新增依赖/框架 |
 | R20-02 | 待审 | model-invoke 默认并发全量测试持续高 CPU 未完成 | 单例 1/0（1.27s）、4 线程全量 396/0（37.04s），尚未定位默认高并发资源热点；未把降低并发当根因修复 |
+| R40-01 | 已验证 | YAML 回退为问题字段补引号时破坏其他合法集合/块标量 | 仅补引号给无法独立反序列化的顶层行；数组、hooks map、block scalar 组合回归通过；未声称多行集合/anchor 已覆盖 |
+| R40-02 | 已验证 | brace 嵌套匹配与顶层逗号拆分错误、重复字符串分配 | 按深度匹配括号并借用切片拆分；嵌套/后缀/Unicode/空分支/未闭合回归通过，上限问题留 R38-03 |
+| R40-03 | 已验证 | Skills 重复/弱断言及只验证自写去重的假集成测试 | 合并同义用例、改精确输出/饱和上限断言；删除不调用生产去重逻辑的用例，保留 loader 原有回归；Skills 净减 133 行 |
+| R42-01 | 已验证 | JWT 黑名单在 exp 清除会在时钟宽限期重新接受已吊销令牌 | 保留至 exp + 默认 validation leeway（含边界），维持验证策略；过期宽限内/外回归通过，未新增调度器 |
+| R42-02 | 已验证 | 限流墙钟跳变、计数溢出/零配额与清理任务持有对象不释放 | 用 Instant、共享窗口重置、饱和计数和 Weak 清理所有权；并发配额及 Drop 等六项回归通过 |
+| R42-03 | 已验证 | 密码抽样有模偏差且 shuffle 下标限于 256；CSRF Bearer 解析重复 | 拒绝采样现有随机数，保留长度/类别约束，去掉 shuffle 临时 Vec；CSRF 复用与原规则等价的 extractor；认证包 246/0 |
+| R42-04 | 待审 | 认证跨路由、代理信任及令牌/密码兼容策略 | API 允许 128 字节但 bcrypt 仅使用前 72；私网/loopback peer 信任转发头；登录完成失败才计费可被并发穿透；同用户同秒可生成同 token；黑名单清理未找到生产调用。需读完整 routes/middleware/trust 及部署契约后局部修复，不直接改兼容策略 |
+| R43-01 | 已验证 | 平台 invoke 同步发送抛错后保留响应监听器 | 新回归旧实现 1 失败，改 once + catch 中解绑后定向 3/0；同步 falsy 响应与重复响应边界一并覆盖 |
+| R43-02 | 已验证 | UI 旧手动更新分支无生产实现及平台无调用导出 | update.download 恒为错误 stub、progress 为 noop、recommendedAsset 无提供方；删除专用状态/类型/监听及无调用 subscribe/颜色 token，保留 Tauri 原生下载/安装与外链；未删后端独立 release API 的资产类型 |
+| R43-03 | 已验证 | 已合入产品变更与 Guid/MiniApp 结构测试断言脱节 | git show HEAD 确认窄模型引用/稳定 preset 和四条路由均已存在；仅更新两测试，保留禁止 plain-Nomi、完整 fallback 和不传配置凭据的约束；定向 10/0、最终 UI 3304/0 |
 
 ## 模块覆盖索引
 
@@ -222,9 +266,9 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | `apps/web/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/agent/nomi-a11y/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/agent/nomi-agent/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
-| `crates/agent/nomi-browser-engine/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
-| `crates/agent/nomi-browser/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
-| `crates/agent/nomi-cli/` | 部分完成 | R34 全生产文件/清单/测试已读，Stop/EOF/配置队列和共享清理已验证 12/0；输出失败、初始化清理、MCP 连接时取消等见 R30-02 |
+| `crates/agent/nomi-browser-engine/` | 待审 | 用户要求 Browser Use 暂跳过；不计作完成 |
+| `crates/agent/nomi-browser/` | 待审 | 用户要求 Browser Use 暂跳过；不计作完成 |
+| `crates/agent/nomi-cli/` | 部分完成 | R34/R41 全生产文件及命令回归已核对；Stop/EOF/配置、初始化与 CLI-owned 输出失败共用清理，15/0。共享 ProtocolSink 回调与 MCP 连接取消的剩余范围见 R30-02 |
 | `crates/agent/nomi-compact/` | 已验证 | R29 全文件及工具输出调用链；CRLF/JSON/TOON/Unicode 修复，54/0+Agent 8/0；Full 有损及首候选块限制见报告 |
 | `crates/agent/nomi-computer/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/agent/nomi-config/` | 部分完成 | R32–R33 全生产文件已读；合并/hook/schema/旧 shell 清理验证 184/0；仅余硬迁移并发窗口、历史测试设计剩余核对 |
@@ -232,7 +276,7 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | `crates/agent/nomi-memory/` | 部分完成 | R35 全生产文件/现有测试及调用已读；150/0+Agent 17/0；路径碰撞/多文件写入和非协作边界 R35-07 保留 |
 | `crates/agent/nomi-protocol/` | 已验证 | R30 命令/事件/读写全文件及测试，49/0；stdin 有界、标准 stdout 整帧锁；OS stdin 阻塞与调用方 R30-02 不冒充已解决 |
 | `crates/agent/nomi-providers/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
-| `crates/agent/nomi-skills/` | 部分完成 | R38 全生产文件已读；R39 补完 loader/executor/MCP/permissions 测试阅读，目录环/单次替换/基目录已修复，删重及合并权限测试后 392/0、Agent 59/0；剩余具体范围见 R38-03，不视为全模块完成 |
+| `crates/agent/nomi-skills/` | 部分完成 | R38–R40 已读全生产代码及既有测试；YAML 回退/嵌套 brace 修复、重复测试删除后 384/0，Agent skill_tool 59/0。inline 副作用/容量/MCP 等剩余具体范围见 R38-03 |
 | `crates/agent/nomi-tools/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/agent/nomi-types/` | 已验证 | R31 全模块及测试/四类 provider 调用已读；描述字符与 CRLF 修复、重复测试删除，70/0；provider 定向 2/0 |
 | `crates/backend/nomifun-agent-contracts/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
@@ -251,8 +295,8 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | `crates/backend/nomifun-api-types/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-app/` | 部分完成 | R12 停止取消/物理清理确认、R13 自动应用嵌套租约已验证（App 3/0）；其余入口/路由/业务待审 |
 | `crates/backend/nomifun-assets/` | 已验证 | R28 全部生产文件/测试及 App/URL 调用核对；删除 state 包装、修复缓存，10/0+App 2/0；静态 SVG 仅危险标记扫描，见报告 |
-| `crates/backend/nomifun-auth/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
-| `crates/backend/nomifun-browser-platform/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
+| `crates/backend/nomifun-auth/` | 部分完成 | R42 已审 cookie/csrf/jwt/password/rate_limit 及其测试；复核 extract 的 Bearer 契约，认证包 246/0。routes/middleware/trust/令牌生命周期等未完成深审，策略与并发问题见 R42-04 |
+| `crates/backend/nomifun-browser-platform/` | 待审 | 用户要求 Browser Use 暂跳过；不计作完成 |
 | `crates/backend/nomifun-channel/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-chat-model-broker/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-codex-runtime/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
@@ -294,30 +338,30 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | `crates/shared/nomi-redact/` | 已验证 | R14 完整公共模式脱敏模块；6 项红→绿，模块 16/0、浏览器调用方 20/0；阈值与 best-effort 限制见报告 |
 | `crates/shared/nomi-ssh/` | 部分完成 | R24/R27 文件发布与流边界、R26 解码/目录/预算/已取得通道归属已验证，56/0；connection 认证/transport/channel-open 取消及测试支持仍待审；真实 sshd 未验 |
 | `crates/shared/nomifun-net/` | 已验证 | R15–R22 完整模块审计，net 66/0、1 子进程夹具 ignored；原生 macOS/Linux 未运行及支持范围限制见报告 |
-| `ui/src/common/adapter/` | 待审 | 未深审 |
+| `ui/src/common/adapter/` | 部分完成 | R43 只追踪桥接/dialog 及 ipcBridge 更新接口，删除失效下载 stub/noop；原生更新 helper 回归包含于 UI 3304/0。其余适配入口、请求取消/超时仍待审 |
 | `ui/src/common/browser/` | 待审 | 未深审 |
 | `ui/src/common/chat/` | 待审 | R2-06 仅统一测试导入并回归；业务未深审 |
 | `ui/src/common/config/` | 待审 | 未深审 |
 | `ui/src/common/protocolBindings/` | 待审 | 生成代码：审计生成源与契约，不手删生成产物 |
 | `ui/src/common/types/` | 部分完成 | R1-07 弃用类型删除；R2-06 测试类型整合已验证；其余类型/契约未深审 |
-| `ui/src/common/update/` | 待审 | 未深审 |
+| `ui/src/common/update/` | 部分完成 | R43 已读唯一 updateTypes.ts 及更新 UI/adapter 调用，删无生产来源的手动下载类型。includePrerelease/repo 请求字段与 native provider 的实际支持范围、非 Tauri 路径仍待核对，不冒充整体更新策略已验证 |
 | `ui/src/common/utils/` | 部分完成 | R1-07：部分弃用类型/工具删除验证；其他实现待审 |
-| `ui/src/platform/` | 待审 | 平台 IPC/HTTP 适配与边界待审 |
+| `ui/src/platform/` | 部分完成 | R43 三个生产文件及桥接调用已读；同步发送抛错监听器泄漏红→绿，定向 3/0；删无调用 subscribe/颜色 token。异步 transport 未响应、adapter 替换及并发 dialog 所有权仍待跨层审计 |
 | `ui/src/renderer/assets/` | 待审 | 未深审 |
-| `ui/src/renderer/components/` | 部分完成 | R1-07 弃用组件清理；R2-05 LocalImageView 的 state Provider 初始化已核对迁移；IconParkHOC 有构建注入保留；图片加载等其余路径待审 |
+| `ui/src/renderer/components/` | 部分完成 | R1-07/R2-05 旧组件与 Provider 已核对；R43 删除 UpdateModal 的失效手动下载/完成状态，保留 Tauri 下载/安装和外链。侧栏仅修旧路由断言，不计 MiniApp 深审；其余组件仍待审 |
 | `ui/src/renderer/hooks/` | 部分完成 | R1-08：chat/useSendBoxDraft 简化及真实 hook 测试；其余待审 |
 | `ui/src/renderer/services/` | 部分完成 | R1-07 旧 TtsService 删除；R2-06 matting 仅统一测试导入；其他服务待审 |
 | `ui/src/renderer/styles/` | 待审 | 未深审 |
 | `ui/src/renderer/utils/` | 部分完成 | R2-05 createContext 已审并验证，核对 HOC 装配但未改写 HOC；其他工具模块待审 |
 | `ui/src/renderer/pages/agentSession/` | 待审 | 未深审 |
 | `ui/src/renderer/pages/agentSettings/` | 待审 | 未深审 |
-| `ui/src/renderer/pages/browser/` | 待审 | 未深审 |
+| `ui/src/renderer/pages/browser/` | 待审 | 用户要求 Browser Use 暂跳过；不计作完成 |
 | `ui/src/renderer/pages/companion/` | 待审 | R2-06 仅统一测试导入并回归；业务未深审 |
 | `ui/src/renderer/pages/conversation/` | 部分完成 | R1-07 旧订阅/fence 删除；R2-02 只读 hook/steering、R2-05 Provider、R3-02 批处理、R3-03 历史分页已验证；发送/流/其余状态待审 |
 | `ui/src/renderer/pages/creativeStudio/` | 部分完成 | R1-05/07 CAS 撤销保存修复、旧 Projects 删除；R2-06 部分测试导入统一；Canvas 路由/资产/执行待审 |
 | `ui/src/renderer/pages/cron/` | 待审 | 未深审 |
 | `ui/src/renderer/pages/customerService/` | 待审 | 未深审 |
-| `ui/src/renderer/pages/guid/` | 待审 | 未深审 |
+| `ui/src/renderer/pages/guid/` | 待审 | R43 仅对照 HEAD 核对官方 Agent 发起链并修旧结构断言，不计完整模块审计 |
 | `ui/src/renderer/pages/knowledge/` | 待审 | 未深审 |
 | `ui/src/renderer/pages/login/` | 待审 | 未深审 |
 | `ui/src/renderer/pages/mcp/` | 待审 | 未深审 |
