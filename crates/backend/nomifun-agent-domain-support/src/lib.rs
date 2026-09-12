@@ -24,7 +24,7 @@ use nomifun_agent_contracts::{
     PluginRegistrarOperation, PluginRegistrationMetadata, PluginSourceKind,
     PluginSourceMetadata, PluginStateHandleDescriptor, PluginStateMethod, ResourceKind, ScopeKey,
     RuntimeTarget, SkillDefinition, StrictJsonValue, ToolPresentationKind,
-    TypedResourceBindings, ValidatedPluginConfig, VersionString,
+    ValidatedPluginConfig, VersionString,
     capability_surface_declarations, digest_payload,
 };
 use nomifun_agent_kernel::{
@@ -68,16 +68,20 @@ pub struct CapabilitySpec {
 }
 
 impl CapabilitySpec {
-    pub const fn context(id: &'static str) -> Self {
+    const fn new(id: &'static str, kind: CapabilityKind) -> Self {
         Self {
             id,
-            kind: CapabilityKind::ContextContributor,
+            kind,
             effect_class: None,
             resource_kinds: &[],
             presentation: ToolPresentationKind::Hidden,
             host_targets: &[],
             host_surfaces: &[],
         }
+    }
+
+    pub const fn context(id: &'static str) -> Self {
+        Self::new(id, CapabilityKind::ContextContributor)
     }
 
     pub const fn tool(
@@ -86,13 +90,10 @@ impl CapabilitySpec {
         resource_kinds: &'static [&'static str],
     ) -> Self {
         Self {
-            id,
-            kind: CapabilityKind::Tool,
             effect_class: Some(effect_class),
             resource_kinds,
             presentation: ToolPresentationKind::FunctionTool,
-            host_targets: &[],
-            host_surfaces: &[],
+            ..Self::new(id, CapabilityKind::Tool)
         }
     }
 
@@ -100,63 +101,23 @@ impl CapabilitySpec {
         id: &'static str,
         resource_kinds: &'static [&'static str],
     ) -> Self {
-        Self {
-            id,
-            kind: CapabilityKind::ResourceProvider,
-            effect_class: None,
-            resource_kinds,
-            presentation: ToolPresentationKind::Hidden,
-            host_targets: &[],
-            host_surfaces: &[],
-        }
+        Self { resource_kinds, ..Self::new(id, CapabilityKind::ResourceProvider) }
     }
 
     pub const fn scheduler(id: &'static str) -> Self {
-        Self {
-            id,
-            kind: CapabilityKind::Scheduler,
-            effect_class: None,
-            resource_kinds: &[],
-            presentation: ToolPresentationKind::Hidden,
-            host_targets: &[],
-            host_surfaces: &[],
-        }
+        Self::new(id, CapabilityKind::Scheduler)
     }
 
     pub const fn middleware(id: &'static str) -> Self {
-        Self {
-            id,
-            kind: CapabilityKind::TurnMiddleware,
-            effect_class: None,
-            resource_kinds: &[],
-            presentation: ToolPresentationKind::Hidden,
-            host_targets: &[],
-            host_surfaces: &[],
-        }
+        Self::new(id, CapabilityKind::TurnMiddleware)
     }
 
     pub const fn transport(id: &'static str) -> Self {
-        Self {
-            id,
-            kind: CapabilityKind::Transport,
-            effect_class: None,
-            resource_kinds: &[],
-            presentation: ToolPresentationKind::Hidden,
-            host_targets: &[],
-            host_surfaces: &[],
-        }
+        Self::new(id, CapabilityKind::Transport)
     }
 
     pub const fn background(id: &'static str) -> Self {
-        Self {
-            id,
-            kind: CapabilityKind::BackgroundService,
-            effect_class: None,
-            resource_kinds: &[],
-            presentation: ToolPresentationKind::Hidden,
-            host_targets: &[],
-            host_surfaces: &[],
-        }
+        Self::new(id, CapabilityKind::BackgroundService)
     }
 
     pub const fn event_source(id: &'static str) -> Self {
@@ -167,27 +128,11 @@ impl CapabilitySpec {
         id: &'static str,
         resource_kinds: &'static [&'static str],
     ) -> Self {
-        Self {
-            id,
-            kind: CapabilityKind::EventSource,
-            effect_class: None,
-            resource_kinds,
-            presentation: ToolPresentationKind::Hidden,
-            host_targets: &[],
-            host_surfaces: &[],
-        }
+        Self { resource_kinds, ..Self::new(id, CapabilityKind::EventSource) }
     }
 
     pub const fn event_consumer(id: &'static str) -> Self {
-        Self {
-            id,
-            kind: CapabilityKind::EventConsumer,
-            effect_class: None,
-            resource_kinds: &[],
-            presentation: ToolPresentationKind::Hidden,
-            host_targets: &[],
-            host_surfaces: &[],
-        }
+        Self::new(id, CapabilityKind::EventConsumer)
     }
 
     /// Mark a capability as available only on an explicit host target/surface
@@ -217,19 +162,12 @@ pub struct PackageSpec {
     pub supported_surfaces: &'static [&'static str],
 }
 
-#[derive(Clone)]
-struct DeclarativeCapabilityHandler {
-    capability_id: CapabilityId,
-    action_id: ActionId,
-}
-
-#[derive(Clone)]
-struct UnavailableContextFactory {
+struct UnavailableCapability {
     capability_id: CapabilityId,
 }
 
 #[async_trait]
-impl CapabilityContextContributionFactory for UnavailableContextFactory {
+impl CapabilityContextContributionFactory for UnavailableCapability {
     async fn contribute(
         &self,
         _request: CapabilityContextContributionRequest,
@@ -243,13 +181,8 @@ impl CapabilityContextContributionFactory for UnavailableContextFactory {
     }
 }
 
-#[derive(Clone)]
-struct UnavailableResourceFactory {
-    capability_id: CapabilityId,
-}
-
 #[async_trait]
-impl CapabilityResourceProviderFactory for UnavailableResourceFactory {
+impl CapabilityResourceProviderFactory for UnavailableCapability {
     async fn acquire(
         &self,
         _request: CapabilityResourceProviderRequest,
@@ -264,28 +197,18 @@ impl CapabilityResourceProviderFactory for UnavailableResourceFactory {
 }
 
 #[async_trait]
-impl CapabilityHandler for DeclarativeCapabilityHandler {
+impl CapabilityHandler for UnavailableCapability {
     async fn invoke(
         &self,
-        context: CapabilityInvocationContext,
-        input: StrictJsonValue,
+        _context: CapabilityInvocationContext,
+        _input: StrictJsonValue,
     ) -> Result<StrictJsonValue, KernelError> {
-        // This is intentionally a deterministic host boundary, not a fake
-        // domain implementation. Real domain crates replace this handler with
-        // their typed resource/port implementation while preserving the same
-        // registration metadata and invocation contract.
-        Ok(StrictJsonValue(json!({
-            "accepted": true,
-            "capability_id": self.capability_id,
-            "action_id": self.action_id,
-            "registry_generation": context.registry_generation,
-            "resource_binding_ids": context
-                .resource_bindings
-                .iter()
-                .map(|binding| binding.binding_id.as_ref())
-                .collect::<Vec<_>>(),
-            "input": input.0,
-        })))
+        Err(KernelError::CapabilityExecution {
+            reason: format!(
+                "bundled Tool capability {} has no configured owner",
+                self.capability_id.as_ref()
+            ),
+        })
     }
 }
 
@@ -341,7 +264,7 @@ pub fn registration(spec: PackageSpec) -> Result<PluginRegistration, DomainRegis
         let actions = match (capability.has_action(), capability.effect_class) {
             (true, Some(effect_class)) => {
                 let action_id = ActionId::from(format!("{}.invoke", capability.id));
-                handler_specs.push((capability_id.clone(), action_id.clone()));
+                handler_specs.push(capability_id.clone());
                 vec![CapabilityActionDescriptor {
                     action_id,
                     input_schema: schema_ref(capability.id, "input", &input_digest),
@@ -533,25 +456,22 @@ pub fn registration(spec: PackageSpec) -> Result<PluginRegistration, DomainRegis
     };
 
     let mut registration = PluginRegistration::new(metadata);
-    for (capability_id, action_id) in handler_specs {
+    for capability_id in handler_specs {
         registration.add_capability_handler(
             capability_id.clone(),
-            Arc::new(DeclarativeCapabilityHandler {
-                capability_id,
-                action_id,
-            }),
+            Arc::new(UnavailableCapability { capability_id }),
         )?;
     }
     for capability_id in context_factory_specs {
         registration.add_capability_context_factory(
             capability_id.clone(),
-            Arc::new(UnavailableContextFactory { capability_id }),
+            Arc::new(UnavailableCapability { capability_id }),
         )?;
     }
     for capability_id in resource_factory_specs {
         registration.add_capability_resource_factory(
             capability_id.clone(),
-            Arc::new(UnavailableResourceFactory { capability_id }),
+            Arc::new(UnavailableCapability { capability_id }),
         )?;
     }
     Ok(registration)
@@ -941,26 +861,6 @@ fn required_registrar_operations(
         operations.insert(PluginRegistrarOperation::BindHostPort);
     }
     operations
-}
-
-pub fn typed_resource_bindings_for<'a>(
-    owner_id: &str,
-    entries: impl IntoIterator<Item = (&'a str, &'a str, &'a str, &'a [&'a str])>,
-) -> TypedResourceBindings {
-    entries
-        .into_iter()
-        .map(|(binding_id, resource_kind, resource_id, operations)| {
-            nomifun_agent_contracts::TypedResourceBinding {
-                binding_id: binding_id.into(),
-                resource_kind: resource_kind.into(),
-                resource_id: resource_id.into(),
-                owner_id: owner_id.to_owned(),
-                operations: operations.iter().map(|operation| (*operation).to_owned()).collect(),
-                connection_config_ref: None,
-                typed_parameters: BTreeMap::new(),
-            }
-        })
-        .collect()
 }
 
 fn localized(name: &str, description: &str) -> LocalizedMetadata {
