@@ -768,7 +768,7 @@ fn catalog_invalid(message: impl Into<String>) -> ControlPlaneError {
     )
 }
 
-fn availability_code(
+pub(crate) fn availability_code(
     availability: &CatalogAvailability,
 ) -> Option<CanonicalErrorCode> {
     match availability {

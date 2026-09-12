@@ -24,7 +24,7 @@ use nomifun_api_types::{
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::catalog::{CatalogSnapshot, OfficialTemplateCatalog};
+use crate::catalog::{availability_code, CatalogSnapshot, OfficialTemplateCatalog};
 use crate::error::ControlPlaneError;
 use crate::wire::{wire_cast, wire_name};
 
@@ -454,7 +454,7 @@ fn validate_direct_catalog_availability(
             .and_then(|entry| {
                 entry
                     .availability_for(CapabilityConsumer::Agent)
-                    .and_then(catalog_unavailable_code)
+                    .and_then(availability_code)
             });
         if let Some(code) = unavailable_code {
             diagnostics.push(error_diagnostic(
@@ -784,26 +784,6 @@ fn contribution_locks_for_payload(
 
     locks.sort();
     Ok(locks)
-}
-
-fn catalog_unavailable_code(
-    availability: &nomifun_agent_contracts::CatalogAvailability,
-) -> Option<CanonicalErrorCode> {
-    match availability {
-        nomifun_agent_contracts::CatalogAvailability::Active => None,
-        nomifun_agent_contracts::CatalogAvailability::Unavailable { reason }
-        | nomifun_agent_contracts::CatalogAvailability::Disabled { reason } => {
-            Some(CanonicalErrorCode::from(reason.clone()))
-        }
-        nomifun_agent_contracts::CatalogAvailability::NeedsRuntime { .. } => {
-            Some(CanonicalErrorCode::from("CAPABILITY_NEEDS_RUNTIME"))
-        }
-        nomifun_agent_contracts::CatalogAvailability::ContractMismatch { .. } => {
-            Some(CanonicalErrorCode::from(
-                "CAPABILITY_CONTRACT_MISMATCH",
-            ))
-        }
-    }
 }
 
 fn validate_template_baseline(

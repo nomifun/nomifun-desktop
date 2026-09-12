@@ -592,6 +592,11 @@ impl AgentControlPlane {
         owner: &UserId,
         mut document: nomifun_api_types::AgentPresetDocumentDto,
     ) -> Result<nomifun_api_types::AgentPresetDocumentDto, ControlPlaneError> {
+        if document.model_route_refs.contains_key(CHAT_MODEL_TASK)
+            || document.chat_route_records.contains_key(CHAT_MODEL_TASK)
+        {
+            return Ok(document);
+        }
         let required = required_chat_features(
             document
                 .initial_capabilities
@@ -1757,6 +1762,49 @@ mod tests {
                 features: features.into_iter().collect(),
             },
             failovers: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn default_chat_route_only_fills_an_unspecified_selection() {
+        struct DefaultRoute(nomifun_agent_contracts::ChatRouteRecord);
+        #[async_trait::async_trait]
+        impl DefaultChatRouteResolver for DefaultRoute {
+            async fn resolve_default_chat_route(&self, _: &UserId)
+                -> Result<Option<nomifun_agent_contracts::ChatRouteRecord>, ControlPlaneError>
+            {
+                Ok(Some(self.0.clone()))
+            }
+        }
+        let store = Arc::new(InMemoryControlPlaneStore::new());
+        let mut default = chat_route_with(ChatRouteProtocol::OpenaiChat,
+            [ChatRouteFeature::TextInput, ChatRouteFeature::TextOutput]);
+        default.primary.provider_id = "0190f5fe-7c00-7a00-8000-000000000001".into();
+        let mut selected = default.clone();
+        selected.primary.model = "explicit-model".into();
+        let control = test_control_plane(store.clone())
+            .with_default_chat_route_resolver(Arc::new(DefaultRoute(default.clone())));
+        let owner = UserId::from("0190f5fe-7c00-7a00-8000-000000000002");
+        let empty = control.materialize_default_chat_route(&owner, empty_document()).await.unwrap();
+        assert_eq!(empty.chat_route_records[CHAT_MODEL_TASK], serde_json::to_value(default).unwrap());
+        for (has_ref, has_record) in [(true, true), (true, false), (false, true)] {
+            let mut document = empty_document();
+            if has_ref {
+                document.model_route_refs.insert(CHAT_MODEL_TASK.into(), selected.primary.model_route_id.as_ref().into());
+            }
+            if has_record {
+                document.chat_route_records.insert(CHAT_MODEL_TASK.into(), serde_json::to_value(&selected).unwrap());
+            }
+            let resolved = control.materialize_default_chat_route(&owner, document.clone()).await.unwrap();
+            assert_eq!(serde_json::to_value(&resolved).unwrap(), serde_json::to_value(&document).unwrap());
+            if has_ref && has_record {
+                let created = control.create_preset(&owner, CreateAgentPresetRequest {
+                    display_name: "Explicit".into(), description: None,
+                    document: Some(document), fork_from_revision: None,
+                }).await.unwrap();
+                let revision = control.get_revision(&owner, &created.preset.preset_id, 1).await.unwrap();
+                assert_eq!(revision.document.chat_route_records[CHAT_MODEL_TASK]["primary"]["model"], "explicit-model");
+            }
         }
     }
 

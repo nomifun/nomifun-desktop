@@ -43,7 +43,7 @@ pub trait ControlPlaneStore: Send + Sync {
         revision: AgentPresetRevision,
         snapshot: ResolvedSnapshotEnvelope,
     ) -> Result<StoredPreset, ControlPlaneError>;
-    async fn update_preset(&self, preset: StoredPreset) -> Result<(), ControlPlaneError>;
+
     async fn retire_preset(
         &self,
         owner: &UserId,
@@ -198,18 +198,6 @@ impl ControlPlaneStore for InMemoryControlPlaneStore {
         state.snapshots.insert(key, snapshot);
         state.presets.insert(preset_id, preset.clone());
         Ok(preset)
-    }
-
-    async fn update_preset(&self, preset: StoredPreset) -> Result<(), ControlPlaneError> {
-        let mut state = self.state.write().await;
-        let preset_id = &preset.preset.preset_id;
-        if !state.presets.contains_key(preset_id)
-            || state.retired_presets.contains_key(preset_id)
-        {
-            return Err(agent_preset_not_found());
-        }
-        state.presets.insert(preset_id.clone(), preset);
-        Ok(())
     }
 
     async fn retire_preset(
