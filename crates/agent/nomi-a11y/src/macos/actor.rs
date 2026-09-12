@@ -421,6 +421,11 @@ unsafe fn register_observer(
             notifications.push(cf);
         }
     }
+    if notifications.is_empty() {
+        // A created observer without subscriptions cannot invalidate a cache.
+        CFRelease(obs as *const c_void);
+        return None;
+    }
     let src = AXObserverGetRunLoopSource(obs);
     if src.is_null() {
         CFRelease(obs as *const c_void);
@@ -439,11 +444,20 @@ unsafe fn register_observer(
 /// The last walk, kept so repeated `observe`s on an unchanged window re-serve
 /// instead of re-walking the tree.
 struct CachedWalk {
+    opts: ObserveOpts,
     entries: Vec<ElementEntry>,
     app_name: Option<String>,
     window_title: Option<String>,
     pid: Option<i32>,
     truncated: bool,
+}
+
+impl CachedWalk {
+    fn matches(&self, opts: &ObserveOpts) -> bool {
+        self.opts.pid == opts.pid
+            && self.opts.max_depth == opts.max_depth
+            && self.opts.node_budget == opts.node_budget
+    }
 }
 
 struct State {
@@ -502,7 +516,7 @@ fn do_observe(opts: &ObserveOpts, state: &mut State) -> Result<Snapshot, A11yErr
             && state.observer.is_some()
             && !state.dirty.load(Ordering::Relaxed)
         {
-            if let Some(c) = &state.cached {
+            if let Some(c) = state.cached.as_ref().filter(|c| c.matches(opts)) {
                 return Ok(Snapshot {
                     generation: state.current_gen,
                     entries: c.entries.clone(),
@@ -565,6 +579,7 @@ fn do_observe(opts: &ObserveOpts, state: &mut State) -> Result<Snapshot, A11yErr
 
         let text = format_entries(&entries);
         state.cached = Some(CachedWalk {
+            opts: opts.clone(),
             entries: entries.clone(),
             app_name: app_name.clone(),
             window_title: window_title.clone(),
@@ -784,5 +799,30 @@ impl ActorHandle {
         self.send(Cmd::Focus(pid, tx))?;
         rx.recv()
             .map_err(|_| A11yError::Backend("AX actor dropped the reply".to_string()))?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cached_walk_requires_the_same_observe_options() {
+        let cached = CachedWalk {
+            opts: ObserveOpts::default(),
+            entries: Vec::new(),
+            app_name: None,
+            window_title: None,
+            pid: Some(7),
+            truncated: false,
+        };
+        assert!(cached.matches(&ObserveOpts::default()));
+        for opts in [
+            ObserveOpts { max_depth: 1, ..Default::default() },
+            ObserveOpts { node_budget: 1, ..Default::default() },
+            ObserveOpts { pid: Some(7), ..Default::default() },
+        ] {
+            assert!(!cached.matches(&opts));
+        }
     }
 }

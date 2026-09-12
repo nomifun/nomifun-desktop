@@ -359,13 +359,13 @@ async fn do_invoke(
                 .build()
                 .await
                 .map_err(|e| A11yError::Backend(format!("component proxy: {e}")))?;
-            match comp.grab_focus().await {
-                Ok(_) => Ok(Effect {
-                    changed: true,
-                    message: format!("focused element [{r}]"),
-                }),
-                Err(e) => Err(A11yError::Backend(format!("grab_focus on [{r}] failed: {e}"))),
-            }
+            let succeeded = comp.grab_focus().await
+                .map_err(|e| A11yError::Backend(format!("grab_focus on [{r}] failed: {e}")))?;
+            require_action_success(succeeded, "grab_focus", r)?;
+            Ok(Effect {
+                changed: true,
+                message: format!("focused element [{r}]"),
+            })
         }
         ElementAction::SetValue(v) => {
             let et = EditableTextProxy::builder(zconn)
@@ -375,16 +375,24 @@ async fn do_invoke(
                 .build()
                 .await
                 .map_err(|e| A11yError::Backend(format!("editable-text proxy: {e}")))?;
-            match et.set_text_contents(v).await {
-                Ok(_) => Ok(Effect {
-                    changed: true,
-                    message: format!("set value of element [{r}]"),
-                }),
-                Err(e) => Err(A11yError::Backend(format!(
+            let succeeded = et.set_text_contents(v).await
+                .map_err(|e| A11yError::Backend(format!(
                     "set_text_contents on [{r}] failed ({e}); fall back to focus + type"
-                ))),
-            }
+                )))?;
+            require_action_success(succeeded, "set_text_contents", r)?;
+            Ok(Effect {
+                changed: true,
+                message: format!("set value of element [{r}]"),
+            })
         }
+    }
+}
+
+fn require_action_success(succeeded: bool, operation: &str, r: u32) -> Result<(), A11yError> {
+    if succeeded {
+        Ok(())
+    } else {
+        Err(A11yError::Backend(format!("{operation} on [{r}] returned false")))
     }
 }
 
@@ -485,6 +493,14 @@ impl ActorHandle {
     }
 
     pub fn observe(&self, opts: ObserveOpts) -> Result<Snapshot, A11yError> {
+        // Never silently substitute an unrelated active window for an explicit PID.
+        if opts.pid.is_some() {
+            return Err(A11yError::Unsupported {
+                capability: "observe by pid".to_string(),
+                hint: "The AT-SPI backend currently supports only active-window observation."
+                    .to_string(),
+            });
+        }
         let (tx, rx) = channel();
         self.send(Cmd::Observe(opts, tx))?;
         rx.recv()
@@ -508,5 +524,41 @@ impl ActorHandle {
         self.send(Cmd::Focus(pid, tx))?;
         rx.recv()
             .map_err(|_| A11yError::Backend("AT-SPI actor dropped the reply".to_string()))?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn false_action_results_are_errors() {
+        for operation in ["grab_focus", "set_text_contents"] {
+            assert!(require_action_success(true, operation, 7).is_ok());
+            let err = require_action_success(false, operation, 7).unwrap_err();
+            assert!(matches!(&err, A11yError::Backend(_)));
+            assert!(err.to_string().contains(&format!("{operation} on [7] returned false")));
+        }
+    }
+
+    #[test]
+    fn explicit_pid_is_rejected_before_sending_to_actor() {
+        let (tx, rx) = channel();
+        let actor = ActorHandle { tx: Mutex::new(tx) };
+        // An in-memory responder keeps the old (incorrectly enqueued) path
+        // from hanging, without starting AT-SPI or reading a desktop.
+        let responder = std::thread::spawn(move || match rx.recv() {
+            Ok(Cmd::Observe(_, reply)) => {
+                let _ = reply.send(Err(A11yError::Backend("unexpected observe command".into())));
+                true
+            }
+            Ok(_) => panic!("unexpected actor command"),
+            Err(_) => false,
+        });
+        let result = actor.observe(ObserveOpts { pid: Some(7), ..Default::default() });
+        drop(actor);
+        let sent = responder.join().unwrap();
+        assert!(matches!(result, Err(A11yError::Unsupported { .. })));
+        assert!(!sent);
     }
 }
