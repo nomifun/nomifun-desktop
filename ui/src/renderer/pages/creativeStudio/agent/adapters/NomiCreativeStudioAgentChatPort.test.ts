@@ -6,6 +6,7 @@
 
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import i18n from 'i18next';
 
 import type {
   IConversationTurnCompletedEvent,
@@ -351,7 +352,12 @@ describe('NomiCreativeStudioAgentChatPort', () => {
     );
 
     expect(events).toEqual([
-      { type: 'activity', label: 'Synchronizing connection; Agent has started' },
+      {
+        type: 'activity',
+        label: i18n.t('creativeStudio.agent.activity.connectionSyncing', {
+          defaultValue: 'Synchronizing connection; Agent has started',
+        }) || 'Synchronizing connection; Agent has started',
+      },
       { type: 'history-reconciled', history: recoveredHistory },
       { type: 'completed', assistantMessageId },
     ]);
