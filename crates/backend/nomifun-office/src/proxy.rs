@@ -273,7 +273,9 @@ fn inject_navigation_guard(body: &[u8], proxy_base: &str) -> Vec<u8> {
 }
 
 fn find_head_tag_end(html: &str) -> Option<usize> {
-    let lower = html.to_lowercase();
+    // These offsets slice the original UTF-8 string; Unicode case folding can
+    // change byte lengths, while HTML tag names only need ASCII folding.
+    let lower = html.to_ascii_lowercase();
     let head_start = lower.find("<head")?;
     let tag_end = lower[head_start..].find('>')?;
     Some(head_start + tag_end + 1)
@@ -420,11 +422,15 @@ mod tests {
 
     #[test]
     fn inject_guard_uppercase_head() {
-        let html = b"<HTML><HEAD><TITLE>Test</TITLE></HEAD></HTML>";
-        let result = inject_navigation_guard(html, "/api/ppt-proxy/8080");
-        let result_str = String::from_utf8(result).unwrap();
+        for prefix in ["", "\u{0130}", "\u{212a}"] {
+            let html = format!("{prefix}<HTML><HEAD>\u{1f600}<TITLE>Test</TITLE></HEAD></HTML>");
+            let result = inject_navigation_guard(html.as_bytes(), "/api/ppt-proxy/8080");
+            let result_str = String::from_utf8(result).unwrap();
+            let guard = NAVIGATION_GUARD_TEMPLATE.replace("PROXY_BASE_PLACEHOLDER", "/api/ppt-proxy/8080");
 
-        assert!(result_str.contains("<HEAD><script>"));
+            assert!(result_str.contains("<HEAD><script>"));
+            assert_eq!(result_str.replace(&guard, ""), html);
+        }
     }
 
     #[test]
