@@ -9,6 +9,15 @@ use crate::types::LoadedFrom;
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Whether content can execute embedded shell commands. Uses the execution
+/// patterns themselves, so callers do not maintain a second shell grammar.
+pub fn has_shell_commands(content: &str, loaded_from: LoadedFrom) -> bool {
+    loaded_from != LoadedFrom::Mcp
+        && (block_regex().is_match(content)
+            || inline_line_start_regex().is_match(content)
+            || inline_whitespace_regex().is_match(content))
+}
+
 /// Parse and execute shell commands embedded in skill content.
 ///
 /// Block pattern:  ```!\n<commands>\n```

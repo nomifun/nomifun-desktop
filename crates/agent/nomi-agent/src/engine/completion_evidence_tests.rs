@@ -713,29 +713,31 @@ async fn missing_pre_effect_baseline_never_turns_path_presence_into_change_proof
 
 #[test]
 fn failed_or_opaque_mutation_invalidates_every_older_terminal_receipt() {
-    let mut context = CompletionEvidenceContext::default();
-    let mut ledger = crate::round::RoundLedger::default();
-    apply_terminal_effect_evidence(
-        &mut context,
-        &mut ledger,
-        true,
-        false,
-        vec!["miniapp.html".to_owned()],
-        Vec::new(),
-    );
-    assert_eq!(context.terminal_exact_receipts, ["miniapp.html"]);
+    for is_error in [false, true] {
+        let mut context = CompletionEvidenceContext::default();
+        let mut ledger = crate::round::RoundLedger::default();
+        apply_terminal_effect_evidence(
+            &mut context,
+            &mut ledger,
+            true,
+            false,
+            vec!["miniapp.html".to_owned()],
+            Vec::new(),
+        );
+        assert_eq!(context.terminal_exact_receipts, ["miniapp.html"]);
 
-    apply_terminal_effect_evidence(
-        &mut context,
-        &mut ledger,
-        true,
-        true,
-        Vec::new(),
-        Vec::new(),
-    );
-    assert!(context.terminal_exact_receipts.is_empty());
-    assert!(context.prior_durable_effect_targets.is_empty());
-    assert!(ledger.durable_effect_targets.is_empty());
+        apply_terminal_effect_evidence(
+            &mut context,
+            &mut ledger,
+            true,
+            is_error,
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(context.terminal_exact_receipts.is_empty());
+        assert!(context.prior_durable_effect_targets.is_empty());
+        assert!(ledger.durable_effect_targets.is_empty());
+    }
 }
 
 #[cfg(windows)]
