@@ -19,14 +19,14 @@ import {
   FolderOpen,
   Refresh,
 } from '@icon-park/react';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { javascriptRuntime } from '@/common/adapter/javascriptRuntimeBridge';
 import { isDesktopShell } from '@/renderer/utils/platform';
 import {
   buildBeginRuntimeSwitchRequest,
   buildRuntimeSwitchDecisionRequest,
-  managedOfferIsInstalled,
+  probeForManagedOffer,
   probeForRuntime,
   projectRuntimeCandidates,
   requiresNonRecommendedConfirmation,
@@ -277,66 +277,82 @@ const RuntimeManager: React.FC = () => {
   const { t } = useTranslation();
   const desktop = isDesktopShell();
   const [status, setStatus] = useState<JavaScriptRuntimeStatus | null>(null);
-  const [loading, setLoading] = useState(desktop);
   const [failure, setFailure] = useState<string | null>(null);
-  const [action, setAction] = useState<RuntimeAction>(null);
+  const [action, setAction] = useState<RuntimeAction>(desktop ? 'refresh' : null);
   const [switchingRuntimeId, setSwitchingRuntimeId] = useState<string | null>(null);
   const autoSwitchKey = useRef<string | null>(null);
+  const active = useRef(false);
+  const busy = useRef(false);
+  const requestVersion = useRef(0);
+  const confirmation = useRef<ReturnType<typeof Modal.confirm> | null>(null);
+  const loading = action === 'refresh';
 
-  const loadStatus = useCallback(async () => {
-    if (!desktop) return;
-    setLoading(true);
-    try {
-      const next = await javascriptRuntime.status.invoke();
-      setStatus(next);
-      setFailure(null);
-    } catch (error) {
-      console.error('[runtime-manager] failed to load status', error);
-      setFailure(errorText(error));
-    } finally {
-      setLoading(false);
-    }
-  }, [desktop]);
-
-  useEffect(() => {
-    void loadStatus();
-  }, [loadStatus]);
+  useLayoutEffect(() => {
+    active.current = true;
+    return () => {
+      active.current = false;
+      busy.current = false;
+      requestVersion.current++;
+      confirmation.current?.close();
+    };
+  }, []);
 
   const applyStatus = useCallback((next: JavaScriptRuntimeStatus) => {
     setStatus(next);
     setFailure(null);
   }, []);
 
-  const beginSwitch = useCallback(
-    async (
-      candidate: JavaScriptRuntimeProbe,
-      acknowledge: boolean,
-      sourceStatus: JavaScriptRuntimeStatus
-    ) => {
-      setAction('switch');
-      setSwitchingRuntimeId(candidate.runtime?.runtime_installation_id ?? null);
-      setFailure(null);
-      try {
-        const next = await javascriptRuntime.beginSwitch.invoke(
-          buildBeginRuntimeSwitchRequest(sourceStatus, candidate, acknowledge)
-        );
-        applyStatus(next);
-      } catch (error) {
-        console.error('[runtime-manager] failed to switch Runtime', error);
+  // One foreground operation at a time; an older background poll cannot undo it.
+  const runAction = useCallback(async (
+    kind: Exclude<RuntimeAction, null>,
+    request: () => Promise<JavaScriptRuntimeStatus | undefined>
+  ) => {
+    if (!desktop || !active.current || busy.current) return;
+    busy.current = true;
+    const version = ++requestVersion.current;
+    const isCurrent = () => active.current && version === requestVersion.current;
+    setAction(kind);
+    setFailure(null);
+    try {
+      const next = await request();
+      if (next && isCurrent()) applyStatus(next);
+    } catch (error) {
+      if (isCurrent()) {
+        console.error('[runtime-manager] ' + kind + ' failed', error);
         setFailure(errorText(error));
-      } finally {
+      }
+    } finally {
+      if (isCurrent()) {
+        busy.current = false;
         setAction(null);
         setSwitchingRuntimeId(null);
       }
-    },
-    [applyStatus]
+    }
+  }, [applyStatus, desktop]);
+
+  const loadStatus = useCallback(() => runAction('refresh', () => javascriptRuntime.status.invoke()), [runAction]);
+
+  useEffect(() => {
+    void loadStatus();
+  }, [loadStatus]);
+
+  const beginSwitch = useCallback(
+    (candidate: JavaScriptRuntimeProbe, acknowledge: boolean, sourceStatus: JavaScriptRuntimeStatus) =>
+      runAction('switch', () => {
+        setSwitchingRuntimeId(candidate.runtime?.runtime_installation_id ?? null);
+        return javascriptRuntime.beginSwitch.invoke(
+          buildBeginRuntimeSwitchRequest(sourceStatus, candidate, acknowledge)
+        );
+      }),
+    [runAction]
   );
 
   const handleUseCandidate = useCallback(
     (candidate: JavaScriptRuntimeProbe) => {
-      if (!status || !candidate.runtime) return;
+      if (!active.current || busy.current || !status || !candidate.runtime) return;
       if (requiresNonRecommendedConfirmation(status, candidate)) {
-        Modal.confirm({
+        confirmation.current?.close();
+        confirmation.current = Modal.confirm({
           title: t('settings.runtimeManager.confirm.nonRecommendedTitle'),
           content: t('settings.runtimeManager.confirm.nonRecommendedBody', {
             version: candidate.runtime.node_version,
@@ -352,72 +368,44 @@ const RuntimeManager: React.FC = () => {
     [beginSwitch, status, t]
   );
 
-  const probe = useCallback(
-    async (request: Parameters<typeof javascriptRuntime.probe.invoke>[0]) => {
-      setAction('probe');
-      setFailure(null);
-      try {
-        applyStatus(await javascriptRuntime.probe.invoke(request));
-      } catch (error) {
-        console.error('[runtime-manager] Runtime probe failed', error);
-        setFailure(errorText(error));
-      } finally {
-        setAction(null);
-      }
-    },
-    [applyStatus]
-  );
-
   const handleAutoDiscover = useCallback(() => {
     if (!status) return;
-    void probe({
+    void runAction('probe', () => javascriptRuntime.probe.invoke({
       source: 'auto_discover',
       expected_selection_revision: status.selection_revision,
-    });
-  }, [probe, status]);
+    }));
+  }, [runAction, status]);
 
   const handleChoosePath = useCallback(async () => {
-    if (!status || !desktop) return;
-    try {
-      const paths = await ipcBridge.dialog.showOpen.invoke({
-        properties: ['openFile'],
-      });
+    if (!status) return;
+    await runAction('probe', async () => {
+      const paths = await ipcBridge.dialog.showOpen.invoke({ properties: ['openFile'] });
       const executablePath = paths?.[0];
-      if (!executablePath) return;
-      await probe({
+      if (!active.current || !executablePath) return;
+      return javascriptRuntime.probe.invoke({
         source: 'manual_path',
         expected_selection_revision: status.selection_revision,
         executable_path: executablePath,
       });
-    } catch (error) {
-      console.error('[runtime-manager] Node path picker failed', error);
-      setFailure(errorText(error));
-    }
-  }, [desktop, probe, status]);
+    });
+  }, [runAction, status]);
 
   const handleDownload = useCallback(async () => {
-    if (!status?.download_offer) return;
-    setAction('download');
-    autoSwitchKey.current = null;
-    setFailure(null);
-    try {
-      applyStatus(
-        await javascriptRuntime.download.invoke({
-          expected_selection_revision: status.selection_revision,
-          expected_offer_digest: status.download_offer.offer_digest,
-        })
-      );
-    } catch (error) {
-      console.error('[runtime-manager] managed Node download failed', error);
-      setFailure(errorText(error));
-    } finally {
-      setAction(null);
-    }
-  }, [applyStatus, status]);
+    const offer = status?.download_offer;
+    if (!status || !offer) return;
+    await runAction('download', () => {
+      autoSwitchKey.current = null;
+      return javascriptRuntime.download.invoke({
+        expected_selection_revision: status.selection_revision,
+        expected_offer_digest: offer.offer_digest,
+      });
+    });
+  }, [runAction, status]);
 
   const confirmDownload = useCallback(() => {
-    if (!status?.download_offer) return;
-    Modal.confirm({
+    if (!active.current || busy.current || !status?.download_offer) return;
+    confirmation.current?.close();
+    confirmation.current = Modal.confirm({
       title: t('settings.runtimeManager.confirm.downloadTitle'),
       content: t('settings.runtimeManager.confirm.downloadBody', {
         version: status.download_offer.node_version,
@@ -432,35 +420,27 @@ const RuntimeManager: React.FC = () => {
   const handleDecision = useCallback(
     async (decision: RuntimeSwitchDecision) => {
       if (!status) return;
-      setAction('decision');
-      setFailure(null);
-      try {
-        applyStatus(
-          await javascriptRuntime.decideSwitch.invoke(
-            buildRuntimeSwitchDecisionRequest(status, decision)
-          )
-        );
-      } catch (error) {
-        console.error('[runtime-manager] Runtime switch decision failed', error);
-        setFailure(errorText(error));
-      } finally {
-        setAction(null);
-      }
+      await runAction('decision', () => javascriptRuntime.decideSwitch.invoke(
+        buildRuntimeSwitchDecisionRequest(status, decision)
+      ));
     },
-    [applyStatus, status]
+    [runAction, status]
   );
 
   const downloadPolling = runtimeStatusNeedsPolling(status);
 
   useEffect(() => {
-    if (!desktop || !downloadPolling) return undefined;
+    if (!desktop || !downloadPolling || action !== null) return undefined;
     let cancelled = false;
     let timer: number | undefined;
 
     const poll = async (): Promise<void> => {
+      const version = requestVersion.current;
+      const isCurrent = () => !cancelled && active.current && !busy.current && version === requestVersion.current;
+      if (!isCurrent()) return;
       try {
         const next = await javascriptRuntime.status.invoke();
-        if (cancelled) return;
+        if (!isCurrent()) return;
         applyStatus(next);
         if (next.download.state === 'downloading') {
           timer = window.setTimeout(() => void poll(), 1500);
@@ -469,8 +449,12 @@ const RuntimeManager: React.FC = () => {
         const downloadedRuntime = next.download.runtime;
         const downloadedProbe = probeForRuntime(next, downloadedRuntime);
         if (
+          next.download.state === 'ready' &&
           downloadedRuntime &&
           downloadedProbe &&
+          downloadedProbe.compatibility !== 'incompatible' &&
+          !next.pending_candidate &&
+          !runtimeRefMatches(downloadedRuntime, next.selected) &&
           autoSwitchKey.current !==
             `${downloadedRuntime.runtime_installation_id}:${downloadedRuntime.executable_digest}`
         ) {
@@ -478,7 +462,7 @@ const RuntimeManager: React.FC = () => {
           await beginSwitch(downloadedProbe, false, next);
         }
       } catch (error) {
-        if (!cancelled) {
+        if (isCurrent()) {
           console.error('[runtime-manager] managed Node status poll failed', error);
           setFailure(errorText(error));
           timer = window.setTimeout(() => void poll(), 3000);
@@ -491,7 +475,7 @@ const RuntimeManager: React.FC = () => {
       cancelled = true;
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [applyStatus, beginSwitch, desktop, downloadPolling]);
+  }, [action, applyStatus, beginSwitch, desktop, downloadPolling]);
 
   const candidates = useMemo(
     () => (status ? projectRuntimeCandidates(status) : []),
@@ -501,17 +485,8 @@ const RuntimeManager: React.FC = () => {
   const pendingProbe = status
     ? probeForRuntime(status, status.pending_candidate)
     : undefined;
-  const managedInstalled = status ? managedOfferIsInstalled(status) : false;
-  const managedProbe = status?.probes.find((candidate) => {
-    const runtime = candidate.runtime;
-    return Boolean(
-      runtime &&
-        candidate.source === 'managed' &&
-        runtime.node_version === status.download_offer?.node_version &&
-        runtime.runtime_target === status.download_offer?.runtime_target &&
-        candidate.compatibility !== 'incompatible'
-    );
-  });
+  const managedProbe = status ? probeForManagedOffer(status) : undefined;
+  const managedInstalled = Boolean(managedProbe);
   const managedIsSelected = runtimeRefMatches(managedProbe?.runtime, status?.selected);
   const managedIsPending = runtimeRefMatches(
     managedProbe?.runtime,
@@ -556,12 +531,9 @@ const RuntimeManager: React.FC = () => {
           <Button
             size='small'
             icon={<Refresh theme='outline' size='14' />}
-            loading={action === 'refresh' || loading}
-            disabled={loading || action !== null}
-            onClick={() => {
-              setAction('refresh');
-              void loadStatus().finally(() => setAction(null));
-            }}
+            loading={loading}
+            disabled={action !== null}
+            onClick={() => void loadStatus()}
           >
             {t('settings.runtimeManager.actions.refresh')}
           </Button>
@@ -699,8 +671,8 @@ const RuntimeManager: React.FC = () => {
                 disabled={
                   action !== null ||
                   status.download.state === 'downloading' ||
-                  managedIsSelected ||
-                  managedIsPending
+                  (managedInstalled && Boolean(status.pending_candidate)) ||
+                  managedIsSelected
                 }
                 onClick={() => {
                   if (managedInstalled && managedProbe) {
