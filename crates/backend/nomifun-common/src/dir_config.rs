@@ -268,20 +268,30 @@ fn write_atomic_replace(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
             .unwrap_or("dir-config"),
         uuid::Uuid::now_v7()
     ));
+    write_new_and_publish(&temp, path, bytes, replace_file)
+}
+
+fn write_new_and_publish(
+    temp: &Path,
+    path: &Path,
+    bytes: &[u8],
+    publish: fn(&Path, &Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    // Cleanup authority starts only after exclusive creation succeeds.
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(temp)?;
     let result = (|| -> std::io::Result<()> {
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temp)?;
         use std::io::Write;
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
-        replace_file(&temp, path)?;
-        sync_parent_directory(parent)
+        publish(temp, path)?;
+        sync_parent_directory(path.parent().unwrap_or_else(|| Path::new(".")))
     })();
     if result.is_err() {
-        let _ = std::fs::remove_file(&temp);
+        let _ = std::fs::remove_file(temp);
     }
     result
 }
@@ -346,22 +356,7 @@ pub fn install_work_dir_if_absent(
         ".{DIR_CONFIG_FILE}.repair-{}",
         uuid::Uuid::now_v7()
     ));
-    let result = (|| -> std::io::Result<()> {
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temp)?;
-        use std::io::Write;
-        file.write_all(&json)?;
-        file.sync_all()?;
-        drop(file);
-        publish_new_file(&temp, &path)?;
-        sync_parent_directory(data_dir)
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temp);
-    }
-    result.map_err(|error| {
+    write_new_and_publish(&temp, &path, &json, publish_new_file).map_err(|error| {
         AppError::Internal(format!(
             "atomically install recovered dir-config {}: {error}",
             path.display()
@@ -515,6 +510,24 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nomifun-dircfg-{tag}-{}", now_ms()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn atomic_publish_only_cleans_up_its_own_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let temp = dir.path().join("staging");
+        let target = dir.path().join("config");
+        std::fs::write(&temp, b"other writer").unwrap();
+        let error = write_new_and_publish(&temp, &target, b"new", publish_new_file).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&temp).unwrap(), b"other writer");
+        assert!(!target.exists());
+
+        let owned_temp = dir.path().join("owned-staging");
+        std::fs::write(&target, b"existing config").unwrap();
+        assert!(write_new_and_publish(&owned_temp, &target, b"new", publish_new_file).is_err());
+        assert!(!owned_temp.exists());
+        assert_eq!(std::fs::read(&target).unwrap(), b"existing config");
     }
 
     #[test]
