@@ -43,6 +43,8 @@ pub trait ControlPlaneStore: Send + Sync {
         revision: AgentPresetRevision,
         snapshot: ResolvedSnapshotEnvelope,
     ) -> Result<StoredPreset, ControlPlaneError>;
+    /// Update presentation only if owner and current immutable Revision still match.
+    async fn update_preset_metadata(&self, preset: &StoredPreset) -> Result<(), ControlPlaneError>;
 
     async fn retire_preset(
         &self,
@@ -198,6 +200,29 @@ impl ControlPlaneStore for InMemoryControlPlaneStore {
         state.snapshots.insert(key, snapshot);
         state.presets.insert(preset_id, preset.clone());
         Ok(preset)
+    }
+
+    async fn update_preset_metadata(&self, preset: &StoredPreset) -> Result<(), ControlPlaneError> {
+        let mut state = self.state.write().await;
+        if state.retired_presets.contains_key(&preset.preset.preset_id) {
+            return Err(agent_preset_not_found());
+        }
+        let current = state
+            .presets
+            .get_mut(&preset.preset.preset_id)
+            .ok_or_else(agent_preset_not_found)?;
+        if current.preset.owner_user_id != preset.preset.owner_user_id
+            || current.preset.current_stable_revision != preset.preset.current_stable_revision
+        {
+            return Err(ControlPlaneError::canonical(
+                "PRESET_REVISION_DIGEST_MISMATCH",
+                axum::http::StatusCode::CONFLICT,
+                "Preset owner or current Revision changed",
+            ));
+        }
+        current.preset.display_name.clone_from(&preset.preset.display_name);
+        current.preset.description.clone_from(&preset.preset.description);
+        Ok(())
     }
 
     async fn retire_preset(
@@ -585,6 +610,32 @@ mod tests {
             .await
             .unwrap();
 
+        let mut metadata = store.get_preset(&preset_id).await.unwrap().unwrap();
+        metadata.preset.display_name = "Renamed".into();
+        metadata.preset.description = Some("Details".into());
+        metadata.session_only = true;
+        store.update_preset_metadata(&metadata).await.unwrap();
+        let saved = store.get_preset(&preset_id).await.unwrap().unwrap();
+        assert_eq!(saved.preset.display_name, "Renamed");
+        assert_eq!(saved.preset.description, metadata.preset.description);
+        assert!(!saved.session_only, "metadata cannot change admission scope");
+        for wrong_owner in [false, true] {
+            let mut stale = metadata.clone();
+            stale.preset.display_name = "Must not overwrite".into();
+            if wrong_owner {
+                stale.preset.owner_user_id = Some(other_owner.clone());
+            } else {
+                stale.preset.current_stable_revision = Some(PresetRevisionRef {
+                    preset_id: preset_id.clone(),
+                    revision: 99,
+                    revision_digest: "a".repeat(64).into(),
+                });
+            }
+            assert!(store.update_preset_metadata(&stale).await.is_err());
+        }
+        let unchanged = store.get_preset(&preset_id).await.unwrap().unwrap();
+        assert_eq!(unchanged.preset.display_name, "Renamed");
+
         let other_error = store
             .retire_preset(&other_owner, &preset_id)
             .await
@@ -594,6 +645,7 @@ mod tests {
         assert!(store.get_preset(&preset_id).await.unwrap().is_some());
 
         store.retire_preset(&owner, &preset_id).await.unwrap();
+        assert!(store.update_preset_metadata(&metadata).await.is_err());
         assert!(store.get_preset(&preset_id).await.unwrap().is_none());
         assert!(store.list_presets(&owner).await.unwrap().is_empty());
 
