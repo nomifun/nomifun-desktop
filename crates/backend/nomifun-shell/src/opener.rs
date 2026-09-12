@@ -1,4 +1,5 @@
 use nomi_process_runtime::ChildProcessBuilder as CmdBuilder;
+use std::path::Path;
 
 use crate::error::ShellError;
 
@@ -9,7 +10,7 @@ pub trait ISystemOpener: Send + Sync {
     /// browser). On Windows this is ShellExecute via the registered app, which
     /// avoids the `cmd /c start` window-title argument quirk.
     fn open_with_detached(&self, target: &str, app: &str) -> Result<(), ShellError>;
-    async fn run_command(&self, program: &str, args: &[&str]) -> Result<(), ShellError>;
+    async fn run_command(&self, program: &str, args: &[&str], cwd: Option<&Path>) -> Result<(), ShellError>;
     fn is_tool_available(&self, tool_name: &str) -> bool;
 }
 
@@ -28,8 +29,11 @@ impl ISystemOpener for DefaultSystemOpener {
         Ok(())
     }
 
-    async fn run_command(&self, program: &str, args: &[&str]) -> Result<(), ShellError> {
+    async fn run_command(&self, program: &str, args: &[&str], cwd: Option<&Path>) -> Result<(), ShellError> {
         let mut builder = CmdBuilder::clean_cli(program);
+        if let Some(cwd) = cwd {
+            builder.current_dir(cwd);
+        }
         builder
             .args(args)
             // Everything launched here is handed off to the user (a terminal
@@ -78,7 +82,7 @@ impl ISystemOpener for NoopSystemOpener {
         Ok(())
     }
 
-    async fn run_command(&self, _program: &str, _args: &[&str]) -> Result<(), ShellError> {
+    async fn run_command(&self, _program: &str, _args: &[&str], _cwd: Option<&Path>) -> Result<(), ShellError> {
         Ok(())
     }
 
@@ -90,6 +94,19 @@ impl ISystemOpener for NoopSystemOpener {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(windows)]
+    fn command_runs_in_a_directory_with_shell_metacharacters() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("folder & %PATH% ! ^ (test)");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("sentinel"), "present").unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(DefaultSystemOpener.run_command(
+            "cmd", &["/d", "/c", "if not exist sentinel exit /b 7"], Some(&target.canonicalize().unwrap()),
+        )).unwrap();
+    }
 
     #[test]
     fn default_opener_detects_nonexistent_tool() {
@@ -106,7 +123,7 @@ mod tests {
     #[tokio::test]
     async fn noop_opener_run_command_succeeds() {
         let opener = NoopSystemOpener;
-        assert!(opener.run_command("fake-program", &["arg1"]).await.is_ok());
+        assert!(opener.run_command("fake-program", &["arg1"], None).await.is_ok());
     }
 
     #[test]

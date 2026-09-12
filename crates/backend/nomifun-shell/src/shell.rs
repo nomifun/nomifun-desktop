@@ -25,10 +25,10 @@ impl ShellService {
     pub async fn show_item_in_folder(&self, file_path: &str) -> Result<(), ShellError> {
         let path = validate_path_exists(file_path)?;
         if cfg!(target_os = "macos") {
-            self.opener.run_command("open", &["-R", &path.to_string_lossy()]).await
+            self.opener.run_command("open", &["-R", &path.to_string_lossy()], None).await
         } else if cfg!(target_os = "windows") {
             let parent = path.parent().unwrap_or(&path);
-            self.opener.run_command("explorer", &[&parent.to_string_lossy()]).await
+            self.opener.run_command("explorer", &[&parent.to_string_lossy()], None).await
         } else {
             let parent = path.parent().unwrap_or(&path);
             self.open_linux_path(parent).await
@@ -96,21 +96,18 @@ impl ShellService {
     async fn open_folder_vscode(&self, path: &Path) -> Result<(), ShellError> {
         let program = self.detect_vscode()
             .ok_or_else(|| ShellError::ToolNotInstalled("vscode".to_owned()))?;
-        self.opener.run_command(program, &[&path.to_string_lossy()]).await
+        self.opener.run_command(program, &[&path.to_string_lossy()], None).await
     }
 
     async fn open_folder_terminal(&self, path: &Path) -> Result<(), ShellError> {
         let path_str = path.to_string_lossy();
         if cfg!(target_os = "macos") {
-            self.opener.run_command("open", &["-a", "Terminal", &path_str]).await
+            self.opener.run_command("open", &["-a", "Terminal", &path_str], None).await
         } else if cfg!(target_os = "windows") {
-            // `start "" /D <dir> cmd`: the empty first argument is the window
-            // title — without it, `start` treats a quoted path (any path with
-            // spaces) as the title instead of the command. `/D` sets the
-            // startup directory as a discrete argument, so no `cd /d` string
-            // splicing is needed.
+            // Keep the directory out of cmd's command text: even a quoted
+            // argument undergoes percent expansion. Both shells disable AutoRun.
             self.opener
-                .run_command("cmd", &["/c", "start", "", "/D", &path_str, "cmd"])
+                .run_command("cmd", &["/d", "/c", "start", "", "cmd", "/d"], Some(path))
                 .await
         } else {
             self.try_linux_terminal(&path_str).await
@@ -120,9 +117,9 @@ impl ShellService {
     async fn open_folder_explorer(&self, path: &Path) -> Result<(), ShellError> {
         let path_str = path.to_string_lossy();
         if cfg!(target_os = "macos") {
-            self.opener.run_command("open", &[&path_str]).await
+            self.opener.run_command("open", &[&path_str], None).await
         } else if cfg!(target_os = "windows") {
-            self.opener.run_command("explorer", &[&path_str]).await
+            self.opener.run_command("explorer", &[&path_str], None).await
         } else {
             self.open_linux_path(path).await
         }
@@ -135,7 +132,7 @@ impl ShellService {
         for (term, args) in candidates {
             if self.opener.is_tool_available(term) {
                 let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-                match self.opener.run_command(term, &arg_refs).await {
+                match self.opener.run_command(term, &arg_refs, None).await {
                     Ok(()) => return Ok(()),
                     Err(error) => last_error = Some(error),
                 }
@@ -159,7 +156,7 @@ impl ShellService {
             }
 
             let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-            match self.opener.run_command(program, &arg_refs).await {
+            match self.opener.run_command(program, &arg_refs, None).await {
                 Ok(()) => return Ok(()),
                 Err(error) => last_error = Some(error),
             }
@@ -387,7 +384,7 @@ mod tests {
 
     struct RecordingOpener {
         installed_program: Option<&'static str>,
-        commands: std::sync::Mutex<Vec<(String, Vec<String>)>>,
+        commands: std::sync::Mutex<Vec<(String, Vec<String>, Option<std::path::PathBuf>)>>,
     }
 
     #[async_trait::async_trait]
@@ -400,9 +397,9 @@ mod tests {
             panic!("VS Code must use the detected executable")
         }
 
-        async fn run_command(&self, program: &str, args: &[&str]) -> Result<(), ShellError> {
+        async fn run_command(&self, program: &str, args: &[&str], cwd: Option<&Path>) -> Result<(), ShellError> {
             self.commands.lock().unwrap().push((
-                program.to_owned(), args.iter().map(|arg| (*arg).to_owned()).collect(),
+                program.to_owned(), args.iter().map(|arg| (*arg).to_owned()).collect(), cwd.map(Path::to_path_buf),
             ));
             Ok(())
         }
@@ -410,6 +407,25 @@ mod tests {
         fn is_tool_available(&self, program: &str) -> bool {
             self.installed_program == Some(program)
         }
+    }
+
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn terminal_directory_is_native_data_not_cmd_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("folder & %PATH% ! ^ (test)");
+        std::fs::create_dir(&target).unwrap();
+        let opener = Arc::new(RecordingOpener {
+            installed_program: None,
+            commands: std::sync::Mutex::new(Vec::new()),
+        });
+        ShellService::new(opener.clone())
+            .open_folder_with(target.to_str().unwrap(), ToolType::Terminal).await.unwrap();
+        let commands = opener.commands.lock().unwrap();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].0, "cmd");
+        assert_eq!(commands[0].1, ["/d", "/c", "start", "", "cmd", "/d"]);
+        assert_eq!(commands[0].2, Some(target.canonicalize().unwrap()));
     }
 
     #[tokio::test]
@@ -431,7 +447,7 @@ mod tests {
             let commands = opener.commands.lock().unwrap();
             if let Some(program) = program {
                 result.unwrap();
-                assert_eq!(*commands, [(program.to_owned(), vec!["folder with spaces".to_owned()])]);
+                assert_eq!(*commands, [(program.to_owned(), vec!["folder with spaces".to_owned()], None)]);
             } else {
                 assert!(matches!(result, Err(ShellError::ToolNotInstalled(_))));
                 assert!(commands.is_empty());
