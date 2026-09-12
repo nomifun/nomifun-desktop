@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use reqwest::header::{HeaderMap, HeaderValue};
+use reqwest::header::HeaderMap;
 use tokio::sync::Mutex;
 
-use super::{McpError, McpTransport, find_sse_event_boundary};
+use super::{McpError, McpTransport, find_sse_event_boundary, http_headers, parse_sse_event};
 use crate::protocol::{JsonRpcRequest, JsonRpcResponse};
 
 /// Streamable HTTP transport: uses HTTP POST for both requests and responses
@@ -19,14 +19,7 @@ pub struct StreamableHttpTransport {
 impl StreamableHttpTransport {
     /// Create a new Streamable HTTP transport
     pub async fn connect(url: &str, headers: &HashMap<String, String>) -> Result<Self, McpError> {
-        let mut header_map = HeaderMap::new();
-        for (k, v) in headers {
-            let name = reqwest::header::HeaderName::from_bytes(k.as_bytes())
-                .map_err(|e| McpError::Transport(format!("Invalid header name '{}': {}", k, e)))?;
-            let value = HeaderValue::from_str(v)
-                .map_err(|e| McpError::Transport(format!("Invalid header value '{}': {}", v, e)))?;
-            header_map.insert(name, value);
-        }
+        let header_map = http_headers(headers)?;
 
         Ok(Self {
             client: super::bounded_http_client()?,
@@ -56,6 +49,7 @@ impl StreamableHttpTransport {
     async fn parse_response(
         &self,
         response: reqwest::Response,
+        request_id: u64,
     ) -> Result<JsonRpcResponse, McpError> {
         // Capture session ID from response headers
         if let Some(sid) = response.headers().get("mcp-session-id")
@@ -73,15 +67,15 @@ impl StreamableHttpTransport {
 
         if content_type.contains("text/event-stream") {
             // SSE response: parse events to find the JSON-RPC response
-            self.parse_sse_response(response).await
+            self.parse_sse_response(response, request_id).await
         } else {
             // Direct JSON response
             let text = response
                 .text()
                 .await
-                .map_err(|e| McpError::Transport(format!("Read response body failed: {}", e)))?;
+                .map_err(|e| McpError::Transport(format!("Read response body failed: {}", e.without_url())))?;
             serde_json::from_str(&text).map_err(|e| {
-                McpError::Transport(format!("Parse JSON response failed: {} — raw: {}", e, text))
+                McpError::Transport(format!("Invalid JSON-RPC response at line {}, column {}", e.line(), e.column()))
             })
         }
     }
@@ -90,33 +84,27 @@ impl StreamableHttpTransport {
     async fn parse_sse_response(
         &self,
         response: reqwest::Response,
+        request_id: u64,
     ) -> Result<JsonRpcResponse, McpError> {
         use futures::StreamExt;
 
         let mut stream = response.bytes_stream();
-        let mut buffer = String::new();
+        let mut buffer = Vec::new();
 
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| McpError::Transport(format!("SSE read error: {}", e)))?;
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            let chunk = chunk.map_err(|e| McpError::Transport(format!("SSE read error: {}", e.without_url())))?;
+            buffer.extend_from_slice(&chunk);
 
             // Parse SSE events. Events may be framed with LF, CRLF (new-api /
             // one-api proxies), or bare CR — see find_sse_event_boundary.
             while let Some((event_end, delim_len)) = find_sse_event_boundary(&buffer) {
-                let event_block = buffer[..event_end].to_string();
-                buffer = buffer[event_end + delim_len..].to_string();
+                let event_block = String::from_utf8_lossy(&buffer[..event_end]).into_owned();
+                buffer.drain(..event_end + delim_len);
 
-                // Extract data lines
-                let mut data_lines = Vec::new();
-                for line in event_block.lines() {
-                    if let Some(value) = line.strip_prefix("data:") {
-                        data_lines.push(value.trim().to_string());
-                    }
-                }
-
-                let data = data_lines.join("\n");
+                let (_, data) = parse_sse_event(&event_block);
                 if !data.is_empty()
                     && let Ok(rpc_response) = serde_json::from_str::<JsonRpcResponse>(&data)
+                    && rpc_response.id == Some(request_id)
                 {
                     return Ok(rpc_response);
                 }
@@ -132,6 +120,7 @@ impl StreamableHttpTransport {
 #[async_trait]
 impl McpTransport for StreamableHttpTransport {
     async fn request(&self, req: &JsonRpcRequest) -> Result<JsonRpcResponse, McpError> {
+        let request_id = req.id.ok_or_else(|| McpError::Transport("Request must have an id".into()))?;
         let body = serde_json::to_string(req)
             .map_err(|e| McpError::Transport(format!("JSON serialize error: {}", e)))?;
 
@@ -139,16 +128,14 @@ impl McpTransport for StreamableHttpTransport {
         let response = http_req
             .send()
             .await
-            .map_err(|e| McpError::Transport(format!("HTTP request failed: {}", e)))?;
+            .map_err(|e| McpError::Transport(format!("HTTP request failed: {}", e.without_url())))?;
 
-        if !response.status().is_success() {
-            return Err(McpError::Transport(format!(
-                "HTTP request returned status: {}",
-                response.status()
-            )));
+        let response = super::check_http_status(response)?;
+
+        let rpc_response = self.parse_response(response, request_id).await?;
+        if rpc_response.id != Some(request_id) || rpc_response.jsonrpc != "2.0" {
+            return Err(McpError::Transport("Invalid JSON-RPC response version or request id".into()));
         }
-
-        let rpc_response = self.parse_response(response).await?;
 
         if let Some(err) = &rpc_response.error {
             return Err(McpError::JsonRpc {
@@ -168,7 +155,8 @@ impl McpTransport for StreamableHttpTransport {
         http_req
             .send()
             .await
-            .map_err(|e| McpError::Transport(format!("Notification request failed: {}", e)))?;
+            .map_err(|e| McpError::Transport(format!("Notification request failed: {}", e.without_url())))
+            .and_then(super::check_http_status)?;
 
         Ok(())
     }
