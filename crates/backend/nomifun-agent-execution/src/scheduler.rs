@@ -373,21 +373,6 @@ impl ExecutionScheduler {
         }
     }
 
-    pub async fn cancel_conversations(&self, _owner_id: &str, detail: &AgentExecutionDetail) {
-        self.reconcile_conversation_cleanup(Some(&detail.execution.execution_id))
-            .await;
-    }
-
-    pub async fn cancel_conversations_for_steps(
-        &self,
-        _owner_id: &str,
-        detail: &AgentExecutionDetail,
-        _step_ids: &HashSet<String>,
-    ) {
-        self.reconcile_conversation_cleanup(Some(&detail.execution.execution_id))
-            .await;
-    }
-
     /// Drain the durable cleanup outbox encoded by inactive attempt links.
     /// Cancellation and acknowledgement are deliberately separate: a crash
     /// between them repeats an idempotent cancel instead of losing cleanup.
@@ -569,41 +554,21 @@ impl ExecutionScheduler {
         });
     }
 
+    /// Reopen commands must deliver the previous terminal epoch before mutation.
+    /// Errors retain the durable operation for the existing background retry.
     pub async fn reconcile_lead_report(
         &self,
         owner_id: &str,
         detail: &AgentExecutionDetail,
     ) -> Result<(), AppError> {
-        if !self.reconcile_lead_report_once(owner_id, detail).await? {
+        let result = self.reconcile_lead_report_once(owner_id, detail).await;
+        if result.is_err() {
             self.schedule_lead_report_reconciliation(
                 owner_id.to_owned(),
                 detail.execution.execution_id.clone(),
             );
         }
-        Ok(())
-    }
-
-    /// Reopen commands must serialize terminal epochs into the lead
-    /// Conversation before mutating the aggregate back to Running. With direct
-    /// assistant projection there is no accepted/in-progress state: success
-    /// means the durable row exists and its delivered event is committed.
-    pub async fn ensure_terminal_projection_delivered(
-        &self,
-        owner_id: &str,
-        detail: &AgentExecutionDetail,
-    ) -> Result<(), AppError> {
-        if !detail.execution.status.is_terminal()
-            || detail.execution.lead_conversation_id.is_none()
-        {
-            return Ok(());
-        }
-        if self.reconcile_lead_report_once(owner_id, detail).await? {
-            Ok(())
-        } else {
-            Err(AppError::Conflict(
-                "terminal Agent Execution result is still being projected".to_owned(),
-            ))
-        }
+        result
     }
 
     /// One post-commit path for every terminal transition. It publishes the
@@ -627,11 +592,11 @@ impl ExecutionScheduler {
         &self,
         owner_id: &str,
         detail: &AgentExecutionDetail,
-    ) -> Result<bool, AppError> {
+    ) -> Result<(), AppError> {
         if !detail.execution.status.is_terminal()
             || detail.execution.lead_conversation_id.is_none()
         {
-            return Ok(true);
+            return Ok(());
         }
         let mut after_sequence = 0;
         let mut requested_operation_id: Option<String> = None;
@@ -675,10 +640,10 @@ impl ExecutionScheduler {
             }
         }
         let Some(operation_id) = requested_operation_id else {
-            return Ok(true);
+            return Ok(());
         };
         if delivered_operation_ids.contains(&operation_id) {
-            return Ok(true);
+            return Ok(());
         }
         self.inner
             .deps
@@ -705,7 +670,7 @@ impl ExecutionScheduler {
             )
             .await?;
         self.publish().await;
-        Ok(true)
+        Ok(())
     }
 
     fn schedule_lead_report_reconciliation(&self, owner_id: String, execution_id: String) {
@@ -733,7 +698,7 @@ impl ExecutionScheduler {
                         .reconcile_lead_report_once(&owner_id, &detail)
                         .await
                     {
-                        Ok(completed) => completed,
+                        Ok(()) => true,
                         Err(error) => {
                             tracing::warn!(
                                 %execution_id,
@@ -3540,7 +3505,11 @@ mod tests {
         fn send_to_user(&self, _user_id: &str, _event: WebSocketMessage<serde_json::Value>) {}
     }
 
-    struct NoopConversationEffects;
+    #[derive(Default)]
+    struct NoopConversationEffects {
+        fail_report_once: AtomicBool,
+        report_operations: Mutex<Vec<String>>,
+    }
 
     #[async_trait]
     impl ConversationEffects for NoopConversationEffects {
@@ -3575,8 +3544,12 @@ mod tests {
             &self,
             _owner_id: &str,
             _detail: &AgentExecutionDetail,
-            _operation_id: &str,
+            operation_id: &str,
         ) -> Result<(), AppError> {
+            self.report_operations.lock().unwrap().push(operation_id.to_owned());
+            if self.fail_report_once.swap(false, Ordering::SeqCst) {
+                return Err(AppError::Internal("fixture projection temporarily unavailable".into()));
+            }
             Ok(())
         }
     }
@@ -4016,7 +3989,7 @@ mod tests {
         let mut deps = ExecutionSchedulerDeps::new(
             repository.clone(),
             runner,
-            Arc::new(NoopConversationEffects),
+            Arc::new(NoopConversationEffects::default()),
             publisher,
             data_dir.path().to_path_buf(),
         );
@@ -4029,6 +4002,52 @@ mod tests {
             owner,
         )
     }
+
+        #[tokio::test]
+        async fn failed_lead_projection_retries_and_marks_the_same_operation_delivered() {
+            let runner = Arc::new(HarnessAttemptRunner::parallel());
+            let (mut scheduler, repository, _, data_dir, owner) = make_scheduler_harness(
+                runner, &["fixture-step"], &[], 1, AdaptationPolicy::Fixed, None,
+            ).await;
+            let effects = Arc::new(NoopConversationEffects::default());
+            effects.fail_report_once.store(true, Ordering::SeqCst);
+            Arc::get_mut(&mut scheduler.inner).unwrap().deps.conversation_effects = effects.clone();
+            let pool = sqlx::SqlitePool::connect_with(
+                sqlx::sqlite::SqliteConnectOptions::new().filename(data_dir.path().join("harness.sqlite")),
+            ).await.unwrap();
+            let lead = generate_id();
+            sqlx::query("INSERT INTO conversations (conversation_id, user_id, name, type, created_at, updated_at) VALUES (?, ?, 'lead', 'nomi', 1, 1)")
+                .bind(&lead).bind(&owner).execute(&pool).await.unwrap();
+            let execution = repository.create_execution_with_participants(
+                &owner,
+                &CreateAgentExecutionParams {
+                    goal: "report retry".into(), status: AgentExecutionStatus::Completed,
+                    adaptation_policy: AdaptationPolicy::Fixed, decision_policy: DecisionPolicy::Automatic,
+                    delegation_policy: DelegationPolicy::Automatic, max_parallel: 1,
+                    work_dir: None, lead_conversation_id: Some(lead), initial_plan_input: r#"{"mode":"explicit"}"#.into(),
+                },
+                &[harness_participant(generate_id())],
+                &system_event(AgentExecutionEventKind::Created, None, None, json!({"lead_report_operation_id":"report-retry"})),
+            ).await.unwrap();
+            let detail = scheduler.detail(&owner, &execution.execution_id).await.unwrap();
+            assert!(scheduler.reconcile_lead_report(&owner, &detail).await.is_err());
+            assert!(scheduler.inner.pending_lead_reports.contains_key(&execution.execution_id), "a failed projection must own a retry task");
+            tokio::time::timeout(Duration::from_secs(4), async {
+                while scheduler.inner.pending_lead_reports.contains_key(&execution.execution_id) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.expect("retry settles");
+            assert_eq!(*effects.report_operations.lock().unwrap(), ["report-retry", "report-retry"]);
+            let events = repository.list_events(&owner, &execution.execution_id, 0, 100).await.unwrap();
+            assert!(events.iter().any(|event| {
+                let payload: serde_json::Value = serde_json::from_str(&event.payload).unwrap();
+                payload["change"] == "lead_report_delivered" && payload["operation_id"] == "report-retry"
+            }));
+            scheduler.reconcile_lead_report(&owner, &detail).await.unwrap();
+            assert_eq!(effects.report_operations.lock().unwrap().len(), 2, "delivered operation is not reprojected");
+            scheduler.shutdown().await.unwrap();
+            pool.close().await;
+        }
 
     async fn wait_for_terminal(
         repository: &SqliteAgentExecutionRepository,

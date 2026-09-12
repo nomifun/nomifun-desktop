@@ -1237,7 +1237,7 @@ impl AgentExecutionEngine {
             .await?;
         self.scheduler.stop(execution_id);
         self.scheduler
-            .cancel_conversations(owner_id, &current)
+            .reconcile_conversation_cleanup(Some(execution_id))
             .await;
         self.publish().await;
         domain_mapper::execution(row, current.execution.lead_conversation_id)
@@ -1329,7 +1329,7 @@ impl AgentExecutionEngine {
             )
             .await?;
         self.scheduler.stop(execution_id);
-        self.scheduler.cancel_conversations(owner_id, &before).await;
+        self.scheduler.reconcile_conversation_cleanup(Some(execution_id)).await;
         // An explicit cancel is already part of the caller's synchronous turn.
         // Publishing its durable state is required, but projecting another
         // assistant result into the lead Conversation would duplicate the
@@ -1374,7 +1374,7 @@ impl AgentExecutionEngine {
         }
         self.scheduler.stop(execution_id);
         self.scheduler
-            .cancel_conversations(owner_id, &before)
+            .reconcile_conversation_cleanup(Some(execution_id))
             .await;
         self.publish().await;
         Ok(())
@@ -1489,7 +1489,7 @@ impl AgentExecutionEngine {
             )
             .await?;
         self.scheduler.stop(execution_id);
-        self.scheduler.cancel_conversations(owner_id, &before).await;
+        self.scheduler.reconcile_conversation_cleanup(Some(execution_id)).await;
         self.publish().await;
         let detail = domain_mapper::detail(rows)?;
         self.scheduler
@@ -1524,13 +1524,7 @@ impl AgentExecutionEngine {
             AgentExecutionStatus::Paused => AgentExecutionStatus::Paused,
             _ => AgentExecutionStatus::Running,
         };
-        let superseded: HashSet<String> = before
-            .steps
-            .iter()
-            .filter(|step| step.superseded_in_revision.is_none())
-            .map(|step| step.step_id.clone())
-            .filter(|id| !keep_step_ids.contains(id))
-            .collect();
+
         let rows = self
             .repository
             .reconcile_plan(
@@ -1560,7 +1554,7 @@ impl AgentExecutionEngine {
             .await?;
         self.scheduler.stop(execution_id);
         self.scheduler
-            .cancel_conversations_for_steps(owner_id, &before, &superseded)
+            .reconcile_conversation_cleanup(Some(execution_id))
             .await;
         self.publish().await;
         let detail = domain_mapper::detail(rows)?;
@@ -1600,7 +1594,7 @@ impl AgentExecutionEngine {
         }
         if before.execution.status.is_terminal() {
             self.scheduler
-                .ensure_terminal_projection_delivered(owner_id, &before)
+                .reconcile_lead_report(owner_id, &before)
                 .await?;
             before = self.detail(owner_id, execution_id).await?;
         }
@@ -1971,7 +1965,7 @@ impl AgentExecutionEngine {
         }
         if detail.execution.status.is_terminal() {
             self.scheduler
-                .ensure_terminal_projection_delivered(owner_id, &detail)
+                .reconcile_lead_report(owner_id, &detail)
                 .await?;
             detail = self.detail(owner_id, execution_id).await?;
         }
@@ -2024,7 +2018,7 @@ impl AgentExecutionEngine {
         }
         if detail.execution.status.is_terminal() {
             self.scheduler
-                .ensure_terminal_projection_delivered(owner_id, &detail)
+                .reconcile_lead_report(owner_id, &detail)
                 .await?;
             detail = self.detail(owner_id, execution_id).await?;
         }
