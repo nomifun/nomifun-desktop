@@ -90,15 +90,9 @@ pub async fn run_nomi_core_server(
         "Nomi-core server listening"
     );
 
-    let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
-    let signal_shutdown_tx = shutdown_tx.clone();
     let serve_result = axum::serve(listener, application.router())
-        .with_graceful_shutdown(async move {
-            shutdown_signal().await;
-            let _ = signal_shutdown_tx.send(true);
-        })
+        .with_graceful_shutdown(shutdown_signal())
         .await;
-    let _ = shutdown_tx.send(true);
     let cleanup_result = application.close().await;
     drop(env);
 
@@ -183,15 +177,9 @@ pub async fn run_canonical_server(
         "Fresh-v4 server listening"
     );
 
-    let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
-    let signal_shutdown_tx = shutdown_tx.clone();
     let serve_result = axum::serve(listener, application.router())
-        .with_graceful_shutdown(async move {
-            shutdown_signal().await;
-            let _ = signal_shutdown_tx.send(true);
-        })
+        .with_graceful_shutdown(shutdown_signal())
         .await;
-    let _ = shutdown_tx.send(true);
     let cleanup_result = application.close().await;
     drop(env);
 
@@ -220,7 +208,8 @@ fn merge_canonical_cleanup_error(
     }
 }
 
-async fn shutdown_signal() {
+/// Wait for the process shutdown signal shared by standalone HTTP hosts.
+pub async fn shutdown_signal() {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
             .await
