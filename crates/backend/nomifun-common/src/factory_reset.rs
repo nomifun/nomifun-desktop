@@ -29,6 +29,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::atomic_file::{publish_new_file, replace_file, sync_directory, write_new_and_publish};
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+use crate::atomic_file::rename_noreplace;
 use crate::dataset_roots::{
     DatasetRootKind, WORK_ROOT_BINDING_FILE, WORK_ROOT_OWNER_FILE,
     reset_managed_dataset_roots,
@@ -3868,7 +3870,7 @@ pub fn write_v3_dataset_receipt(
     // data directory.  During a pending reset the immutable plan contains
     // the authoritative resolved work root, so use it when available; a
     // standalone data-only dataset naturally binds to data_dir itself.
-    let work_dir = pending_plan_work_dir(data_dir)?.unwrap_or_else(|| data_dir.to_path_buf());
+    let work_dir = pending_v3_reset_work_dir(data_dir)?.unwrap_or_else(|| data_dir.to_path_buf());
     write_v3_dataset_receipt_for_work_dir(data_dir, &work_dir, generation)
 }
 
@@ -4147,10 +4149,6 @@ pub fn finalize_v3_dataset_reset(
         "v3 managed dataset reset finalized"
     );
     Ok(true)
-}
-
-fn pending_plan_work_dir(data_dir: &Path) -> Result<Option<PathBuf>, AppError> {
-    pending_v3_reset_work_dir(data_dir)
 }
 
 pub fn write_v3_dataset_bootstrap_binding(
@@ -5532,128 +5530,6 @@ fn archive_reset_request(
             "sync archived legacy reset request: {error}"
         ))
     })
-}
-
-#[cfg(target_os = "macos")]
-fn rename_noreplace(
-    source: &Path,
-    destination: &Path,
-) -> std::io::Result<()> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-
-    let source = CString::new(source.as_os_str().as_bytes()).map_err(
-        |_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "source path contains a NUL byte",
-            )
-        },
-    )?;
-    let destination =
-        CString::new(destination.as_os_str().as_bytes()).map_err(
-            |_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "destination path contains a NUL byte",
-                )
-            },
-        )?;
-    if unsafe {
-        libc::renamex_np(
-            source.as_ptr(),
-            destination.as_ptr(),
-            libc::RENAME_EXCL,
-        )
-    } == 0
-    {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn rename_noreplace(
-    source: &Path,
-    destination: &Path,
-) -> std::io::Result<()> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-
-    let source = CString::new(source.as_os_str().as_bytes()).map_err(
-        |_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "source path contains a NUL byte",
-            )
-        },
-    )?;
-    let destination =
-        CString::new(destination.as_os_str().as_bytes()).map_err(
-            |_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "destination path contains a NUL byte",
-                )
-            },
-        )?;
-    if unsafe {
-        libc::syscall(
-            libc::SYS_renameat2,
-            libc::AT_FDCWD,
-            source.as_ptr(),
-            libc::AT_FDCWD,
-            destination.as_ptr(),
-            libc::RENAME_NOREPLACE,
-        )
-    } == 0
-    {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
-
-#[cfg(windows)]
-fn rename_noreplace(
-    source: &Path,
-    destination: &Path,
-) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    };
-
-    let source: Vec<u16> = source
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let destination: Vec<u16> = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    if unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            destination.as_ptr(),
-            MOVEFILE_WRITE_THROUGH,
-        )
-    } != 0
-    {
-        return Ok(());
-    }
-    let error = std::io::Error::last_os_error();
-    if matches!(error.raw_os_error(), Some(80 | 183)) {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            error,
-        ))
-    } else {
-        Err(error)
-    }
 }
 
 #[cfg(not(any(
