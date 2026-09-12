@@ -4,9 +4,9 @@
 
 ## 续接位置
 
-- 当前批次：R92–R96及R100/R101已验收，源码截至 `ba78b6a38`，上一已核实远端 `833df3fef`；R97 Office、R98客服、R99 AutoWork按独占写集继续。Browser Use暂跳过。
+- 当前批次：R97/R98/R99及R102已验收，源码截至 `eff3cd822`，上一已核实远端 `c8afa0532`；R103 Office代理、R104客服输入、R105 Workspace按独占写集继续。Browser Use暂跳过。
 - 后续集成：当前分支已包含 `dd35e01de` 的 MiniApp 分支合并；设计文档已跟踪。本批仅更新遗留路由测试，未修改 MiniApp 产品实现，模块仍待深审。
-- 全局覆盖：111 个模块边界中，7 个已验证、60 个部分完成、42 个待审、2 个整模块审计中；250 个唯一问题/任务。完整阅读与跨模块问题闭环分开登记，Browser Use仍暂跳过。
+- 全局覆盖：111 个模块边界中，7 个已验证、62 个部分完成、42 个待审、0 个整模块审计中；262 个唯一问题/任务。当前三个子范围正在继续；完整阅读与跨模块问题闭环分开登记，Browser Use仍暂跳过。
 - R1 证据：[首轮记录](2026-09-12-code-quality.zh.md)。R1–R39 各报告中的“未提交/dirty”描述是当时快照；当前提交状态以下方验收记录为准。
 - R2 证据：[运行时与测试边界记录](2026-09-12-runtime-and-test-boundaries.zh.md)，包含改动、失败尝试、验证及覆盖限制。
 - R3 证据：[生命周期与状态记录](2026-09-12-lifecycle-and-state.zh.md)，记录四个 Host 旧实现失败、Context falsy 初值及消息重放缺陷；保留待办，勿重复修复。
@@ -231,7 +231,35 @@ R101全仓查无materialize_into调用后删除该公开复制路径；缓存gua
 
 整理新增代码换行后的最终统计：R100生产+11、测试+25；R101生产-15、测试0；两批生产净减4、测试净增25、总净增21行。不通过压缩代码行掩盖增量。
 
-## 当前并行边界（R97 / R98 / R99）
+## R97 / R98 / R99 / R102 阶段验收
+
+| 批次 | 已提交源码 | 最终验证 |
+| --- | --- | --- |
+| R97 Office | `36e56b1a9` | cargo test --locked -p nomifun-office --lib --tests：126/0（86lib、18proxy、13snapshot、9watch） |
+| R98 客服 | `eff3cd822` | cargo test --locked -p nomifun-customer-service --lib：28/0 |
+| R99 AutoWork | `3cb108645` | Requirements76/0（18文件）、完整UI typecheck通过 |
+| R102 Common小模块 | 无源码变动 | Common定向6/0+40/0，见下方精确覆盖 |
+
+R97完整读12Rust文件3846行。复制capability binding后释放DashMap guard再读sessions，避免反向锁顺序；HTML ASCII折叠保留原UTF-8字节位置；快照仅NotFound当空历史，损坏/IO错误传播并在写内容前读取索引。删除永不失败Result包装、错误端口不复用断言和无断言重复测试，fake监听器由handle持有取代mem::forget。主线126/0；没有旧Rust运行红绿，不把agent字节算术复核当旧测试。快照并发/原子写、进程退出、代理及iframe隔离仍待办。
+
+R98完整读6源码及内嵌测试3604行。取得并发permit后重读Agent，停用/删除不调用，模型/提示/知识库工具使用当前配置；复用SQLite/StubRunner定位已入lane排队而不依赖固定睡眠。删除只断言本地三元素数组的白名单测试，保留真实runner工具表验证。主线28/0，无旧运行证据；App installation-owner gate和DB既有CAS已核对，不重复判越权。动态并发限额/handoff/重绑/发送与取消仍待办。
+
+R99完整读AutoWork实现及原测试，追踪tags/tagBindings/Resume/管理员解绑。请求序号/卸载归属、补需求变化和重连刷新、合并重复action处理；保留没有需求的tag绑定，缺失pause元数据不伪造。Agent有效旧0/6→6/0；主线76/0及typecheck。两个GET不是一致性快照、已发写入不撤销，未引入节流框架或扩大Workspace。
+
+R102完整读Common的lib、idempotency、pagination、provider_usage、provider_lifecycle、execution_authority、case_convert、crypto、timestamp、fsname、types、hooks、error，共13文件1350行。只读核对Creation的UUID幂等键和Agent authority入口；保留不同校验语义，未为去重改错误契约。两个定向命令覆盖idempotency/pagination/authority6项及case/crypto/timestamp/fsname/types/error40项，全通过。本批无源码修改；不声明密钥管理、Hook取消、provider barrier全部调用方已闭环。墙钟回拨/极值、JSON键归一化碰撞、AppError原文跨HTTP边界仍需结合真实调用续查，其余Common文件继续。
+
+R97/R98/R99生产净增38行（0、+10、+28），测试净增247行（+90、+56、+101），总净增285行。Rust均4线程；无新依赖/框架，无全workspace/真实Officecli或外网验证。
+
+## 当前并行边界（R103 / R104 / R105）
+
+| 批次 / 负责人 | 独占写集 | 任务 |
+| --- | --- | --- |
+| R103 / Hypatia | Office proxy.rs/routes.rs及proxy专属测试 | R97提交后放写，URL/path/query/Location最小修复，其他只读 |
+| R104 / Mencius | CustomerService agent_capability.rs及内嵌测试 | R98提交后放写，非字符串dialogue ID校验，DB/Channel只读 |
+| R105 / Carver | Requirements Workspace实现及专属测试 | R99 typecheck及提交后放写，AutoWork/Notify/shared只读 |
+| 主线程 | 全局边界、其他Common子模块、台账/Git | 复核并串行Rust验收；Browser Use继续跳过 |
+
+## 历史并行边界（R97 / R98 / R99）
 
 | 批次 / 负责人 | 独占写集 | 任务 |
 | --- | --- | --- |
@@ -774,6 +802,18 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | R96-01 | 已验证 | clean正文仅改展示元数据不保存 | 窄metadata更新跨三store，写时owner/revision/退休校验；旧失败，ControlPlane26/0、Platform/App各3/0 |
 | R100-01 | 已验证 | InMemory跨owner绑定覆盖和Remote ID碰撞 | 同锁核对既有owner、insert拒绝重复；有效旧三种写入均成功，修后26/0；合并重复检查 |
 | R101-01 | 已验证 | authoring无调用复制接口及cache guard泄漏 | 删除materialize_into；Option路径正常析构替代mem::forget，authoring22/0、1ignored |
+| R97-01 | 已验证 | Office capability/session反向锁顺序 | 复制binding后释放capability guard；非阻塞锁探针通过，Office126/0 |
+| R97-02 | 已验证 | HTML Unicode折叠偏移导致错误切片 | ASCII折叠保持UTF-8位置，既有测试覆盖İ/K/emoji及原文保留 |
+| R97-03 | 已验证 | 快照索引损坏/IO错误被当空而覆盖 | 仅NotFound为空，写前读索引，list/content统一错误；fake listener归属和无效测试清理 |
+| R97-04 | 部分完成 | Office完整阅读后的持久化/进程/代理边界 | 无锁快照读改写/直接index写/trim先删、target NUL哈希兼容；进程try_lock/退出确认/端口竞争、npm非零安装和后台更新生命周期；代理URL/query/Location/响应预算/headers和同源iframe隔离待办，R103先接URL |
+| R98-01 | 已验证 | 客服排队期间配置失效仍调用旧模型 | permit后重读当前enabled Agent并构建请求，排队停用/模型修改回归；28/0 |
+| R98-02 | 已验证 | 客服白名单测试只断言本地常量 | 删除无效测试，保留真实runner工具构造/超时回归 |
+| R98-03 | 部分完成 | 客服完整阅读后并发/跨模块边界 | 动态max_concurrent未调整现有semaphore；handoff等待竞态、渠道重绑历史归属、lane/输入容量、drain落库取消、Channel发送/幂等、audit清理生命周期及已删除Agent覆盖；非字符串dialogue ID降级交R104，部分旧测试等待无界 |
+| R99-01 | 已验证 | AutoWork旧GET覆盖/漏需求和重连刷新 | 序号和卸载归属，合并订阅生命周期并增加重试，Requirements76/0 |
+| R99-02 | 已验证 | 零需求tag的有效绑定被漏显 | 合并binding-only行，保留target身份；未知pause元数据不伪造 |
+| R99-03 | 已验证 | AutoWork动作重复/卸载后提示与刷新 | 合并单action槽、同步防重及卸载检查，有效旧失败后通过 |
+| R99-04 | 部分完成 | AutoWork两个GET一致性及服务端动作归属 | 非一致性快照、binding-only缺pause元数据、已发写入不撤销、事件频率和其他失败时序未穷举 |
+| R102-01 | 部分完成 | Common基础子模块阅读覆盖与边界 | 13文件1350行完整已读、46/0，无源码改动；未读其余文件，墙钟/JSON键碰撞/错误原文HTTP边界和provider/Hook全部调用方待查 |
 
 ## 模块覆盖索引
 
@@ -819,12 +859,12 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | `crates/backend/nomifun-channel/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-chat-model-broker/` | 部分完成 | R84完整读8源文件+conformance/6fixtures，27/0；静默流释放/claim顺序及无效分支已修，R84-03保留 |
 | `crates/backend/nomifun-codex-runtime/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
-| `crates/backend/nomifun-common/` | 部分完成 | R59 完整 zip_safe.rs及预算所有调用已读；合并三导入器写前预算，11/0，调用方回归52/0；其余common文件仍待审 |
+| `crates/backend/nomifun-common/` | 部分完成 | R59 zip_safe已读及调用方验证；R102补读13文件1350行（精确列表见验收），定向46/0、无源码变动；其他文件及跨模块风险待审 |
 | `crates/backend/nomifun-companion/` | 部分完成 | R59/R63 export.rs解压预算及临时目录所有权已修，定向26/0；其余export/全模块未深审，后续业务取消事务见R60-03 |
 | `crates/backend/nomifun-conversation/` | 部分完成 | R4 已核对 list_messages 的 owner 校验、游标解析和 keyset 排序契约；其余 service、运行时/发送/权限路径待审 |
 | `crates/backend/nomifun-creation/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-cron/` | 部分完成 | R68完整19文件/18737行已读；溢出、busy原子取消释放、终态shutdown、skill重试修复，全包260/0；生产-28测试-234，DB/文件/检测任务/embedded receipt剩余R68-06 |
-| `crates/backend/nomifun-customer-service/` | 审计中 | R98独占src/tests，R96 App验收后放写；DB/AI/协议/UI只读 |
+| `crates/backend/nomifun-customer-service/` | 部分完成 | R98完整读6源码3604行，排队重读配置和删无效白名单测试28/0；输入R104继续，跨DB/Channel等见R98-03 |
 | `crates/backend/nomifun-db/` | 部分完成 | R4分页、R52Webhook/tag_setting原子更新已验证；R66 settings trait/repo/tests完整已审并改原子patch/RETURNING，6/0；其余仓储/事务/配额/查询计划待审 |
 | `crates/backend/nomifun-file/` | 部分完成 | R75完整20文件11901行、348/0；R80单文件字面路径/错误传播已修，snapshot50/0。R75-08未闭环；Unix链接回归未跑 |
 | `crates/backend/nomifun-gateway/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
@@ -837,7 +877,7 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | `crates/backend/nomifun-mcp/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-miniapp-platform/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-model-invoke/` | 部分完成 | R20 URL 去重/错误响应已验证；4 线程全量 396/0，默认并发热点 R20-02 未定位；调用/适配其余待审 |
-| `crates/backend/nomifun-office/` | 审计中 | R97独占src/tests，R96 App验收后放写；共享接口只读 |
+| `crates/backend/nomifun-office/` | 部分完成 | R97完整读12Rust文件3846行，126/0；锁/Unicode/index修复，代理R103继续，进程/快照原子性/iframe隔离见R97-04 |
 | `crates/backend/nomifun-plugin-platform/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-plugin-service/` | 待审 | 已追踪 commit_fence/auto_apply 调用；提交→注册发布→Kernel dispatch 全程准入仍待深审 |
 | `crates/backend/nomifun-public/` | 部分完成 | R45 全 5 个源文件/内联测试及相关调用已读；预检/取消占位/归属/refill 修复后 29/0；rmcp 在途处理容量、Host shutdown 与 observation 全量投影见 R45-04 |
@@ -889,7 +929,7 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | `ui/src/renderer/pages/nomi/` | 待审 | 未深审 |
 | `ui/src/renderer/pages/openCapabilities/` | 待审 | 未深审 |
 | `ui/src/renderer/pages/plugins/` | 待审 | 未深审 |
-| `ui/src/renderer/pages/requirements/` | 部分完成 | R83原38文件全读，59/0及typecheck；R89接续R83-05，尚未完成全部错误生命周期闭环 |
+| `ui/src/renderer/pages/requirements/` | 部分完成 | R83原38文件全读；R89 Drawer/R93 Notify/R99 AutoWork接续，最新76/0及typecheck；Workspace R105继续，后端/跨窗口等未闭环 |
 | `ui/src/renderer/pages/settings/` | 待审 | 未深审 |
 | `ui/src/renderer/pages/terminal/` | 待审 | 未深审 |
 
