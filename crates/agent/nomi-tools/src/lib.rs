@@ -90,30 +90,21 @@ pub fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
-/// Write `content` to `file_path` atomically: write to a uniquely-named temp
-/// file in the same directory, then rename it over the target. Rename is atomic
-/// on the same filesystem, so a crash or a concurrent reader never observes a
-/// half-written file. Falls back to a direct write only if the rename fails
-/// (e.g. cross-device). Shared by the Edit and Write tools so both get the same
-/// crash-safety guarantee.
+/// Publish a complete file from an exclusively created sibling temporary file.
+/// A failed rename is an error, never permission to truncate the target directly.
+/// This provides atomic replacement, not fsync/crash-durability guarantees.
 pub(crate) fn atomic_write(file_path: &str, content: &str) -> std::io::Result<()> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+    use std::io::Write;
 
-    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp_path = format!("{}.tmp.{}.{}", file_path, std::process::id(), seq);
-
-    if let Err(e) = std::fs::write(&tmp_path, content) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(e);
-    }
-    if std::fs::rename(&tmp_path, file_path).is_err() {
-        // Cross-device rename (temp and target on different filesystems) cannot
-        // be atomic; clean up the temp and fall back to a direct write.
-        let _ = std::fs::remove_file(&tmp_path);
-        std::fs::write(file_path, content)?;
-    }
-    Ok(())
+    let target = std::path::Path::new(file_path);
+    let parent = target.parent().filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let mut temp = tempfile::Builder::new().prefix(".nomi-write-").make_in(parent, |path| {
+        // Preserve normal file creation permissions (subject to umask on Unix).
+        std::fs::OpenOptions::new().write(true).create_new(true).open(path)
+    })?;
+    temp.write_all(content.as_bytes())?;
+    temp.persist(target).map(|_| ()).map_err(|error| error.error)
 }
 
 /// Trusted identity of one provider-emitted tool invocation.
@@ -315,6 +306,44 @@ pub trait Tool: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn atomic_write_keeps_existing_siblings_and_cleans_failed_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.txt");
+        let sibling = dir.path().join(format!("target.txt.tmp.{}.0", std::process::id()));
+        std::fs::write(&sibling, "unrelated").unwrap();
+        atomic_write(target.to_str().unwrap(), "new content").unwrap();
+        assert_eq!(std::fs::read_to_string(&sibling).unwrap(), "unrelated");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "new content");
+
+        let blocked = dir.path().join("directory");
+        std::fs::create_dir(&blocked).unwrap();
+        std::fs::write(blocked.join("keep"), "untouched").unwrap();
+        assert!(atomic_write(blocked.to_str().unwrap(), "not a file").is_err());
+        assert_eq!(std::fs::read_to_string(blocked.join("keep")).unwrap(), "untouched");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn atomic_write_rejects_failed_rename_without_direct_overwrite() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.txt");
+        std::fs::write(&target, "original").unwrap();
+        // Permit reads/writes but deny DELETE sharing, so rename fails while a
+        // direct truncate/write would succeed. Keep the handle alive throughout.
+        let _held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0x1 | 0x2)
+            .open(&target)
+            .unwrap();
+        assert!(atomic_write(target.to_str().unwrap(), "replacement").is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
 
     #[test]
     fn tool_execution_context_is_stable_bounded_and_turn_scoped() {
