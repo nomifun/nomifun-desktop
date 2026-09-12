@@ -853,6 +853,26 @@ impl ControlPlaneStore for SqliteControlPlaneStore {
         Ok(preset)
     }
 
+    async fn update_preset_metadata(&self, preset: &StoredPreset) -> Result<(), ControlPlaneError> {
+        let changed = sqlx::query(
+            "UPDATE agent_presets SET display_json = json_set(display_json, \
+             '$.display_name', ?, '$.description', json(?)) \
+             WHERE preset_id = ? AND owner_ref_json = ? AND retired_at_ms IS NULL \
+             AND current_stable_revision IS ?",
+        )
+        .bind(&preset.preset.display_name)
+        .bind(encode_control_json(&preset.preset.description)?)
+        .bind(preset.preset.preset_id.as_ref())
+        .bind(encode_control_json(&preset_owner_ref(&preset.preset))?)
+        .bind(preset.preset.current_stable_revision.as_ref()
+            .map(|r| i64_from_u64(r.revision, "revision")).transpose()?)
+        .execute(&self.pool).await.map_err(control_sql)?;
+        if changed.rows_affected() != 1 {
+            return Err(control_conflict("Preset owner or current Revision changed"));
+        }
+        Ok(())
+    }
+
     async fn retire_preset(
         &self,
         owner: &UserId,
@@ -5316,6 +5336,32 @@ mod control_plane_store_tests {
         .await
         .unwrap();
 
+        let mut metadata = store.get_preset(&preset_id).await.unwrap().unwrap();
+        metadata.preset.display_name = "Renamed".into();
+        metadata.preset.description = Some("Details".into());
+        metadata.session_only = true;
+        store.update_preset_metadata(&metadata).await.unwrap();
+        let saved = store.get_preset(&preset_id).await.unwrap().unwrap();
+        assert_eq!(saved.preset.display_name, "Renamed");
+        assert_eq!(saved.preset.description, metadata.preset.description);
+        assert!(!saved.session_only, "metadata cannot change admission scope");
+        for wrong_owner in [false, true] {
+            let mut stale = metadata.clone();
+            stale.preset.display_name = "Must not overwrite".into();
+            if wrong_owner {
+                stale.preset.owner_user_id = Some(other_owner.clone());
+            } else {
+                stale.preset.current_stable_revision = Some(PresetRevisionRef {
+                    preset_id: preset_id.clone(),
+                    revision: 99,
+                    revision_digest: "a".repeat(64).into(),
+                });
+            }
+            assert!(store.update_preset_metadata(&stale).await.is_err());
+        }
+        let unchanged = store.get_preset(&preset_id).await.unwrap().unwrap();
+        assert_eq!(unchanged.preset.display_name, "Renamed");
+
         let owner_error = store
             .retire_preset(&other_owner, &preset_id)
             .await
@@ -5324,6 +5370,7 @@ mod control_plane_store_tests {
         assert_eq!(owner_error.code().as_ref(), "AGENT_PRESET_NOT_FOUND");
 
         store.retire_preset(&owner, &preset_id).await.unwrap();
+        assert!(store.update_preset_metadata(&metadata).await.is_err());
         assert!(store.get_preset(&preset_id).await.unwrap().is_none());
         assert!(store.list_presets(&owner).await.unwrap().is_empty());
         let retired_at_ms: Option<i64> = sqlx::query_scalar(

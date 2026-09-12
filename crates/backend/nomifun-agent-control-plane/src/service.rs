@@ -744,6 +744,14 @@ impl AgentControlPlane {
             .is_some_and(|revision| revision.reference == compilation.candidate_revision_ref)
         {
             let current = current.expect("clean compilation has a current Revision");
+            let mut stored = stored;
+            if stored.preset.display_name != request.draft.display_name
+                || stored.preset.description != request.draft.description
+            {
+                stored.preset.display_name = request.draft.display_name;
+                stored.preset.description = request.draft.description;
+                self.store.update_preset_metadata(&stored).await?;
+            }
             return Ok(SaveAgentPresetRevisionResponse {
                 preset: preset_summary(
                     &stored,
@@ -2416,6 +2424,21 @@ mod tests {
             .await
             .unwrap()
             .draft;
+        next_draft.display_name = "Renamed without a new Revision".into();
+        next_draft.description = Some("Updated metadata".into());
+        let rename_preview = control_plane.preview(&owner, &created.preset.preset_id, ResolveAgentPresetPreviewRequest {
+            expected_current_revision: Some(revision.reference.clone()), draft: next_draft.clone(),
+            scene: SETTINGS_SCENE.into(), surface: SETTINGS_SURFACE.into(), audience: SETTINGS_AUDIENCE.into(),
+        }).await.unwrap();
+        let renamed = control_plane.save_revision(&owner, &created.preset.preset_id, SaveAgentPresetRevisionRequest {
+            expected_current_revision: Some(revision.reference.clone()), preview_digest: rename_preview.preview_digest,
+            draft: next_draft.clone(), reason: None,
+        }).await.unwrap();
+        assert_eq!(renamed.revision.reference, revision.reference);
+        assert_eq!(renamed.preset.display_name, next_draft.display_name);
+        let reloaded = control_plane.editor(&owner, &created.preset.preset_id, None).await.unwrap();
+        assert_eq!(reloaded.draft.display_name, next_draft.display_name);
+        assert_eq!(reloaded.draft.description, next_draft.description);
         next_draft.document.instructions = "Revision two".into();
         let next_preview_request = ResolveAgentPresetPreviewRequest {
             expected_current_revision: Some(revision.reference.clone()),
