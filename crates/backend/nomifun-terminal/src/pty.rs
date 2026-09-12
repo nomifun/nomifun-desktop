@@ -328,6 +328,11 @@ impl PtyHandle {
         }
     }
 
+    /// Retry a failed persistence pass even if the child produces no more output.
+    pub(crate) fn mark_scrollback_dirty(&self) {
+        self.dirty.store(true, Ordering::Relaxed);
+    }
+
     pub fn subscribe_output(&self) -> broadcast::Receiver<Vec<u8>> {
         self.out_tx.subscribe()
     }
