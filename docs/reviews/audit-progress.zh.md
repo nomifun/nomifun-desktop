@@ -6,9 +6,9 @@
 
 - 当前范围排除（用户2026-09-13追加）：Browser Use、小程序、插件均暂不审改。MiniApp/Plugin平台与服务、页面、专属打包/声明/契约/测试及正在重构的worktree由原负责人继续；共享模块只处理可独立证明不改变上述域契约的通用问题。跳过不计已验证，既有提交保留。
 
-- 当前批次：R146 runner精简已验收至 `a8835ef6f`，上一已核实远端 `632a498a0`；R143客服详情、R145/R147/R148后端MCP独占继续。R115按小程序/插件排除要求撤回本人未提交补丁。
+- 当前批次：R143/R145/R146/R147/R148/R149已验收至 `e48e96d62`，上一已核实远端 `ea4460033`；R150运行时UI、R151 MCP服务独占继续。R115按小程序/插件排除要求撤回本人未提交补丁。
 - 后续集成：当前分支已包含 `dd35e01de` 的 MiniApp 分支合并；设计文档已跟踪。本批仅更新遗留路由测试，未修改 MiniApp 产品实现，模块仍待深审。
-- 全局覆盖：111 个模块边界中，7 个已验证、73 个部分完成、31 个待审、0 个整模块审计中；371 个唯一问题/任务。当前四个子范围正在继续；完整阅读与跨模块问题闭环分开登记，Browser Use仍暂跳过。
+- 全局覆盖：111 个模块边界中，7 个已验证、73 个部分完成、31 个待审、0 个整模块审计中；374 个唯一问题/任务。当前两个子范围正在继续；完整阅读与跨模块问题闭环分开登记，Browser Use仍暂跳过。
 - R1 证据：[首轮记录](2026-09-12-code-quality.zh.md)。R1–R39 各报告中的“未提交/dirty”描述是当时快照；当前提交状态以下方验收记录为准。
 - R2 证据：[运行时与测试边界记录](2026-09-12-runtime-and-test-boundaries.zh.md)，包含改动、失败尝试、验证及覆盖限制。
 - R3 证据：[生命周期与状态记录](2026-09-12-lifecycle-and-state.zh.md)，记录四个 Host 旧实现失败、Context falsy 初值及消息重放缺陷；保留待办，勿重复修复。
@@ -481,7 +481,32 @@ R144新增阅读基于改前快照：runner1–2285（声明、启停/恢复/清
 
 基线21源文件9294行（含内嵌测试）及8集成1832行。20源全文：lib/adapter/error/routes/service/types/sync_service/oauth_service/owner、connection_test/{mod,protocol}、adapters/{mod,cli_helpers,codebuddy,codex,gemini,nomi,nomifun,opencode,qwen}。claude.rs仅1–78、80–122、126–189、198–236，按用户要求跳过插件段，不记无排除全文。8集成全文：adapter/connection_test/connection_test_path_resolution/file_adapter/oauth/service/sync/types_integration。此为静态阅读证据，修复与验证分批登记，不把连接成功或全文阅读计整模块完成。
 
-## 当前并行边界（R143 / R145 / R147 / R148）
+## R143 客服详情验收
+
+源码 `59d715dd2`；主线customerService目录46/0（5文件）、完整UI typecheck通过。沿R114-05推进，不重复建立同一问题。按客服ID重建详情本地状态，编辑稿不再被无关PATCH覆盖，保存响应只确认当次草稿；列表请求序号、访问存活标记与提交锁分别约束笔记/交接、删除及设置错误。合并claim/cancel/resolve重复流程；插件渠道子组件和共享hooks未改，渠道入口仅核对保留。
+
+原详情834行（除535–540渠道入口仅定位）、最终867行逐段读完，新测试206行全文；另全文读创建测试193/结构测试115（其中渠道测试不计功能审计）、useCsAgents119/KB options44/models hook70。Router/列表导航、IPC Agent/Note/Handoff声明与调用、后端名称/并发上限和Arco句柄只读片段。worker旧0/11、修复同组11/0、后补最终详情13/0；主线核对红日志后46/0和typecheck。生产+33、测试+206，总+239。未解决同ID并发服务端PATCH排序、GET失败展示及已发写请求回滚，剩余沿R114-05。
+
+## R145 / R147 / R148 / R149 MCP阶段验收
+
+| 批次 | 源码提交 | 主线验证 |
+| --- | --- | --- |
+| R145 配置/连接 | e48e96d62 | service30、protocol40、connection单元2；连接集成10/0 |
+| R147 OAuth | d1c43bae1 | OAuth单元26/0、真实SQLite集成13/0 |
+| R148 OpenCode JSONC | c271af5b9 | 解析17/0；保留的公开适配器集成2/0（其余7项过滤） |
+| R149 冗余mock测试 | fd7be6bba | 真实sync service4/0、集成2/0保留 |
+
+共同验证：cargo test --locked -p nomifun-mcp --lib -- service::tests connection_test:: adapters::opencode:: --test-threads=4：119/0（含OAuth/sync）；五个相关集成目标共42/0（connection10/oauth13/service17/sync2），Unix-only路径解析目标Windows为0测试，不算已验证；补对象形状后复跑119/0和connection10/0；另只运行公开OpenCode集成2/0，相关集成合计44/0。没有测试真实外部MCP/OAuth登录或要求web_search可用，未运行排除域专属测试。
+
+主线保留新测试临时恢复五个旧生产函数（OAuth仅适配私有时长参数避免120秒等待），得到11通过/12失败：R145三项、R147六项、R148三项；立即恢复全部补丁后验证通过。R145初版仍接受serde序列形式为结构体，主线新增数组输入确认失败，再以tools数组/工具项对象形状过滤补齐。空tools仍成功，不额外强制名称/schema/分页/JSON-RPC版本策略。transport日志只保留名称/种类，不再输出env/headers/URL/命令；stdio主体不变，仅去单层转发。三个写集原2614行及直接routes/types/相关三集成全文；App装配1401–1440、DB仓储1–155只读片段。
+
+R147直接timeout callback future，取消/超时同步drop监听资源，生产仍120秒；url_decode先收集字节再UTF8，畸形百分号保留，无效UTF8按替换字符处理。删测试mem::forget，服务单独持仓储/SqlitePool仍可读取。两个写集及lib/error、OAuth仓储trait/实现全文；routes/owner凭据适配、App构造、Database与SQLx Clone/Drop只读定位。未解决pending覆盖、refresh/logout竞态或单次读取callback的既有策略。
+
+R148将注释字节置为空白，保留字符串原字节及CR/LF，未闭合块明确报错；不引入解析依赖，删除strip/parse重复包装。原467行及adapter/error全文，公共集成仅OpenCode段。R149全文核对adapter172、其独立mock集成124、sync_service191、sync集成95，删除两套仅自测mock的10个用例；未删除实际配置发现回归，可从Git恢复。主线另只读owner300–498/756–1100确认调用/清理边界，不计新增完整模块阅读。
+
+四批增减（物理行含注释/空行）：生产-24（R145 +9、R147 -7、R148 -23、R149 -3），测试-151（+33/+45/+3/-232），总-175；无新框架/依赖。结合R143和R146，本轮六批生产-49、测试-8，总-57，不含台账。
+
+## 历史并行边界（R143 / R145 / R147 / R148）
 
 | 批次 / 负责人 | 独占写集 | 任务 |
 | --- | --- | --- |
@@ -489,8 +514,18 @@ R144新增阅读基于改前快照：runner1–2285（声明、启停/恢复/清
 | R145 / Hypatia | backend/nomifun-mcp/src/service.rs、connection_test/{mod,protocol}.rs | 空参数保留、tools/list验证、连接日志和单层转发精简 |
 | R147 / Hume | backend/nomifun-mcp/src/oauth_service.rs、tests/oauth_integration.rs | callback取消/超时归属、UTF8解码及测试数据库泄漏 |
 | R148 / 主线 | backend/nomifun-mcp/src/adapters/opencode.rs | JSONC保留UTF8/注释分隔及畸形输入拒绝 |
+| R149 / 主线 | backend/nomifun-mcp/src/adapter.rs、tests/adapter_integration.rs | 删除纯mock自测，sync_service及其真实服务测试只读保留 |
 
 R146已提交冻结后才放行MCP三个不相交写集。Rust依赖链全部冻结后集中串行验证，UI独立；共享类型/接口不随意修改，排除域不变。
+
+## 当前并行边界（R150 / R151）
+
+| 批次 / 负责人 | 独占写集 | 任务 |
+| --- | --- | --- |
+| R150 / Carver | ui/src/renderer/pages/settings/RuntimeManager/** | 本地模型/请求/安装事件生命周期及冗余；共享hooks/adapter和排除域只读 |
+| R151 / 主线 | backend/nomifun-mcp/src/service.rs及既有专属测试 | R145提交后核对禁止重命名分支后的冗余查询，先读DB唯一约束再收口 |
+
+R143/R145/R147/R148/R149源码冻结；R150在R143完整typecheck后开始。R151在MCP验证结束后再改，Rust继续串行。
 
 ## 历史并行边界（R141 / R142 / R143 / R144）
 
@@ -1163,7 +1198,7 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | R114-02 | 已验证 | 客服旧创建影响关闭重开的新草稿 | 版本隔离校验/请求/回调/finally，旧失败；不撤销已发请求 |
 | R114-03 | 已验证 | 客服provider重复状态不随表单重置 | 复用Form.useWatch，删除重复状态；真实选项回归旧失败 |
 | R114-04 | 已验证 | 客服创建可提交空白名与小数并发 | 沿原契约补非空白/整数输入；旧失败，不改后端范围 |
-| R114-05 | 部分完成 | 客服UI全读后的数据归属与详情生命周期 | R119已修hooks旧请求归属；同Agent并发PATCH服务端顺序、详情草稿/笔记/交接及拒绝通知待续审；插件渠道边界跳过 |
+| R114-05 | 部分完成 | 客服UI全读后的数据归属与详情生命周期 | R143按访问隔离详情草稿/笔记/交接和迟到操作，合并交接重复流程，目录46/0/typecheck；同Agent并发PATCH服务端顺序、GET失败展示语义及在途写取消/回滚仍未闭环；插件渠道边界跳过 |
 | R115-01 | 待审 | Contracts声明批次按新范围排除 | catalog/preset本人未提交改动已准确撤回；不计已修复/已完成，不继续插件小程序契约审计 |
 | R120-01 | 已验证 | factory_reset残留原生no-replace实现重复 | 接R112统一三平台原生操作、保留其他平台目录Unsupported及文件fallback，生产-128、Common15/0 |
 
@@ -1233,12 +1268,15 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | R144-03 | 部分完成 | runner其余执行/错误收敛及关闭边界 | R146补完runner全文；部分finalize/暂停错误只日志后继续、cap保存失败仍发disabled、cleanup panic后归属及transitions回收需跨调用验证 |
 | R146-01 | 已验证 | 回执单层转发、重复参数及备注全量分配 | 合并私有函数、借用现有ID与workspace、反向字符边界保留尾部，25/0；生产-58 |
 | R146-02 | 已验证 | 重复编码器/纯broadcast测试及误导性覆盖 | 实际提交完整字节断言和六状态映射替代重复/库自测，补Unicode边界，测试-63 |
-| R145-01 | 审计中 | shell_split丢显式空参数 | 静态确认引号内空token被非空过滤吞掉，独占修复中 |
-| R145-02 | 审计中 | 畸形tools/list被当成功与连接日志暴露配置 | 校验结果形状、只记录transport类型，合并stdio转发；待定向验证 |
+| R145-01 | 已验证 | shell_split丢显式空参数 | 区分token存在与内容非空；真实add_server旧npx空参数用例失败，最终service30/0 |
+| R145-02 | 已验证 | 畸形tools/list被当成功与连接日志暴露配置 | 拒缺失/畸形/数组伪结构体，合法空工具成功；初版两项旧失败，主线再补数组形状红→绿；只记transport类型并合并stdio转发，protocol40/0+连接10/0 |
 | R145-03 | 部分完成 | MCP跨存储/协议流及CLI兼容剩余边界 | stdio/HTTP/SSE容量、跨块UTF8/CRLF、响应ID和状态校验、reader/进程树/session清理；toggle/upsert读写与状态/tools写入非原子、配置版本归属和真实CLI未闭环 |
-| R147-01 | 审计中 | OAuth callback取消后监听任务存活及UTF8解码错误 | 独占修复中，删除无必要测试DB泄漏；未验证 |
+| R147-01 | 已验证 | OAuth callback取消后监听任务存活及UTF8解码错误 | timeout直接持有callback future，删spawn/oneshot；字节解码保留UTF8及非法尾转义；六项旧失败，OAuth26/0+集成13/0，删测试mem::forget |
 | R147-02 | 部分完成 | OAuth pending及token并发归属 | prepare覆盖pending、clear/exchange无身份、refresh/logout竞态及过期token回退策略另续，不擅改现有策略 |
-| R148-01 | 审计中 | OpenCode JSONC破坏UTF8/拼接token | 独占修复注释扫描与畸形块注释拒绝，待回归 |
+| R148-01 | 已验证 | OpenCode JSONC破坏UTF8/拼接token | 字节副本将注释置空白、保留换行，拒未闭合块；合并解析包装和两个重复接口测试，三项旧失败，解析17/0 |
+| R149-01 | 已验证 | adapter两套测试仅验证各自mock | 删除adapter.rs测试模块与adapter_integration.rs，真实sync_service4/0+集成2/0保留；纠正同步锁文档为每service实例；生产-3测试-232 |
+| R150-01 | 审计中 | RuntimeManager局部请求/安装状态及重复逻辑 | 已划独占UI目录，先完整阅读再处理确定性缺陷，共享接口不改 |
+| R151-01 | 审计中 | 禁止MCP重命名后仍执行重命名查重 | 核对DB唯一约束和调用语义后精简，未验证 |
 | R133-01 | 已验证 | Web缺少优雅关停入口 | 复用App现有shutdown_signal，Web9/0；未模拟实际OS信号/长连接排空 |
 | R133-02 | 已验证 | App关停watch无业务消费者 | 两处只创建/发送却无人读取，删channel/clone/send，三文件生产净减10行 |
 | R133-03 | 部分完成 | 独立Web/共享App关闭及启动边界 | 长连接graceful drain无界、signal注册expect、其他OS/真实关停未验；共享bootstrap/auth继续，不扩大到排除域 |
@@ -1304,7 +1342,7 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | `crates/backend/nomifun-js-kernel-adapter/` | 部分完成 | Host 句柄实例/代际及 opaque lease 传递、release 已核对；删除构造后立即丢弃的 identity；R5 跨层 77/0；注册映射其余待审 |
 | `crates/backend/nomifun-js-runtime/` | 部分完成 | R92完整读8源文件5430行，锁重入/pending保留/Abort修复，25/0；跨模块fence、下载/探测及取消风险见R92-04 |
 | `crates/backend/nomifun-knowledge/` | 部分完成 | R59/R60/R63 export.rs全文件及相关入口已读，ZIP/安全导出/流复制/导入临时归属修复，export13/0；其余service待审，未决R60-03 |
-| `crates/backend/nomifun-mcp/` | 部分完成 | R145读20源全文、claude跳过插件段、8集成全文（基线9294+1832行）；R145/R147/R148局部修复进行中，OAuth归属/协议流容量/跨存储并发等未闭环 |
+| `crates/backend/nomifun-mcp/` | 部分完成 | R145读20源全文、claude跳过插件段、8集成全文（基线9294+1832行）；R145/R147/R148/R149局部修复与精简通过119单元+44集成，路径解析Unix用例Windows未运行；OAuth归属/协议流容量/跨存储并发等未闭环 |
 | `crates/backend/nomifun-miniapp-platform/` | 待审 | 用户要求暂跳过，正在独立重构，不计作完成 |
 | `crates/backend/nomifun-model-invoke/` | 部分完成 | R20 URL 去重/错误响应已验证；4 线程全量 396/0，默认并发热点 R20-02 未定位；调用/适配其余待审 |
 | `crates/backend/nomifun-office/` | 部分完成 | R97完整读12Rust文件3846行、126/0；R103代理修复105/0，进程/快照原子性/iframe隔离见R97-04 |
@@ -1349,7 +1387,7 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | `ui/src/renderer/pages/conversation/` | 部分完成 | R1-07 旧订阅/fence 删除；R2-02 只读 hook/steering、R2-05 Provider、R3-02 批处理、R3-03 历史分页已验证；发送/流/其余状态待审 |
 | `ui/src/renderer/pages/creativeStudio/` | 部分完成 | R1-05/07 CAS 撤销保存修复、旧 Projects 删除；R2-06 部分测试导入统一；Canvas 路由/资产/执行待审 |
 | `ui/src/renderer/pages/cron/` | 部分完成 | R74完整32文件4491行；R78列表/runs归属及事件合并已修，Cron97/0及typecheck；R74-05其余未闭环 |
-| `ui/src/renderer/pages/customerService/` | 部分完成 | R114原11文件2477行全读，创建弹窗旧0/7→7/0，目录21/0/typecheck；R119 hooks旧1/11→12/0、目录33/0/typecheck，详情剩余见R114-05；插件渠道边界跳过 |
+| `ui/src/renderer/pages/customerService/` | 部分完成 | R114原11文件2477行全读，创建弹窗旧0/7→7/0，目录21/0/typecheck；R119 hooks旧1/11→12/0；R143详情旧0/11→13/0，目录46/0/typecheck，剩余见R114-05；插件渠道边界跳过 |
 | `ui/src/renderer/pages/guid/` | 待审 | R43 仅对照 HEAD 核对官方 Agent 发起链并修旧结构断言，不计完整模块审计 |
 | `ui/src/renderer/pages/knowledge/` | 待审 | 未深审 |
 | `ui/src/renderer/pages/login/` | 部分完成 | R64页面/CSS/测试完整已读；提交/卸载/重定向/存储失败修复，UI3381/0；R71同步非Error网络错误断言，Auth/Login32/0/typecheck；R64-03仍保留 |
