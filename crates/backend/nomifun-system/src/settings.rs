@@ -43,25 +43,14 @@ impl SettingsService {
             validate_language(lang)?;
         }
 
-        // Merge with current settings (or defaults)
-        let current = self.get_settings().await?;
-
-        let language = req.language.unwrap_or(current.language);
-        let notification_enabled = req.notification_enabled.unwrap_or(current.notification_enabled);
-        let cron_notification_enabled = req
-            .cron_notification_enabled
-            .unwrap_or(current.cron_notification_enabled);
-        let command_queue_enabled = req.command_queue_enabled.unwrap_or(current.command_queue_enabled);
-        let save_upload_to_workspace = req.save_upload_to_workspace.unwrap_or(current.save_upload_to_workspace);
-
         let row = self
             .repo
             .upsert_settings(
-                &language,
-                notification_enabled,
-                cron_notification_enabled,
-                command_queue_enabled,
-                save_upload_to_workspace,
+                req.language.as_deref(),
+                req.notification_enabled,
+                req.cron_notification_enabled,
+                req.command_queue_enabled,
+                req.save_upload_to_workspace,
             )
             .await
             .map_err(|e| AppError::Internal(format!("Failed to update settings: {e}")))?;
@@ -92,8 +81,6 @@ mod tests {
     async fn setup() -> SettingsService {
         let db = init_database_memory().await.unwrap();
         let repo = Arc::new(SqliteSettingsRepository::new(db.pool().clone()));
-        // Leak the db handle so the pool stays alive for the test
-        std::mem::forget(db);
         SettingsService::new(repo)
     }
 
@@ -117,6 +104,21 @@ mod tests {
         let svc = setup().await;
         let settings = svc.get_settings().await.unwrap();
         assert_eq!(settings, SystemSettingsResponse::default());
+    }
+
+    #[tokio::test]
+    async fn concurrent_partial_updates_preserve_both_fields() {
+        let svc = setup().await;
+        let other = svc.clone();
+        let (language, notification) = tokio::join!(
+            svc.update_settings(UpdateSettingsRequest { language: Some("zh-CN".into()), ..Default::default() }),
+            other.update_settings(UpdateSettingsRequest { notification_enabled: Some(false), ..Default::default() }),
+        );
+        language.unwrap();
+        notification.unwrap();
+        let stored = svc.get_settings().await.unwrap();
+        assert_eq!(stored.language, "zh-CN");
+        assert!(!stored.notification_enabled);
     }
 
     #[tokio::test]

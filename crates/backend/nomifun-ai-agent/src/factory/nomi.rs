@@ -2296,11 +2296,11 @@ mod tests {
         }
         async fn upsert_settings(
             &self,
-            _language: &str,
-            _notification_enabled: bool,
-            _cron_notification_enabled: bool,
-            _command_queue_enabled: bool,
-            _save_upload_to_workspace: bool,
+            _language: Option<&str>,
+            _notification_enabled: Option<bool>,
+            _cron_notification_enabled: Option<bool>,
+            _command_queue_enabled: Option<bool>,
+            _save_upload_to_workspace: Option<bool>,
         ) -> Result<nomifun_db::models::SystemSettings, nomifun_db::DbError> {
             unimplemented!("not exercised by the language tests")
         }

@@ -21,6 +21,7 @@ async fn get_settings_returns_v3_baseline_defaults() {
         .await
         .unwrap()
         .expect("v3 baseline seeds the settings singleton");
+    assert_eq!(settings.singleton_key, "system");
     assert_eq!(settings.language, "en-US");
     assert!(settings.notification_enabled);
     assert!(!settings.cron_notification_enabled);
@@ -32,11 +33,15 @@ async fn get_settings_returns_v3_baseline_defaults() {
 
 #[tokio::test]
 async fn upsert_creates_settings_with_given_values() {
-    let r = repo().await;
-    let s = r.upsert_settings("zh-CN", false, true, true, false).await.unwrap();
+    let db = init_database_memory().await.unwrap();
+    sqlx::query("DELETE FROM system_settings").execute(db.pool()).await.unwrap();
+    let r = SqliteSettingsRepository::new(db.pool().clone());
+    let s = r.upsert_settings(None, None, Some(true), Some(true), None).await.unwrap();
 
-    assert_eq!(s.language, "zh-CN");
-    assert!(!s.notification_enabled);
+    assert_eq!(s.singleton_key, "system");
+    assert!(s.id > 0);
+    assert_eq!(s.language, "en-US");
+    assert!(s.notification_enabled);
     assert!(s.cron_notification_enabled);
     assert!(s.command_queue_enabled);
     assert!(!s.save_upload_to_workspace);
@@ -48,7 +53,7 @@ async fn upsert_creates_settings_with_given_values() {
 #[tokio::test]
 async fn upsert_then_get_returns_consistent_data() {
     let r = repo().await;
-    r.upsert_settings("en-US", true, false, false, true).await.unwrap();
+    r.upsert_settings(Some("en-US"), Some(true), Some(false), Some(false), Some(true)).await.unwrap();
 
     let s = r.get_settings().await.unwrap().unwrap();
     assert_eq!(s.language, "en-US");
@@ -63,8 +68,8 @@ async fn upsert_then_get_returns_consistent_data() {
 #[tokio::test]
 async fn upsert_overwrites_previous_settings() {
     let r = repo().await;
-    r.upsert_settings("en-US", true, false, false, false).await.unwrap();
-    r.upsert_settings("zh-CN", false, true, true, true).await.unwrap();
+    r.upsert_settings(Some("en-US"), Some(true), Some(false), Some(false), Some(false)).await.unwrap();
+    r.upsert_settings(Some("zh-CN"), Some(false), Some(true), Some(true), Some(true)).await.unwrap();
 
     let s = r.get_settings().await.unwrap().unwrap();
     assert_eq!(s.language, "zh-CN");
@@ -74,13 +79,31 @@ async fn upsert_overwrites_previous_settings() {
     assert!(s.save_upload_to_workspace);
 }
 
+#[tokio::test]
+async fn partial_and_empty_updates_preserve_unspecified_fields() {
+    let r = repo().await;
+    let original = r.upsert_settings(Some("zh-CN"), Some(false), Some(true), Some(true), Some(true)).await.unwrap();
+    let patched = r.upsert_settings(None, Some(true), None, Some(false), None).await.unwrap();
+    assert_eq!(patched.id, original.id);
+    assert_eq!(patched.language, "zh-CN");
+    assert!(patched.notification_enabled);
+    assert!(patched.cron_notification_enabled);
+    assert!(!patched.command_queue_enabled);
+    assert!(patched.save_upload_to_workspace);
+    let unchanged = r.upsert_settings(None, None, None, None, None).await.unwrap();
+    let mut expected = serde_json::to_value(patched).unwrap();
+    expected["updated_at"] = serde_json::json!(unchanged.updated_at);
+    assert_eq!(serde_json::to_value(unchanged).unwrap(), expected);
+    assert_eq!(serde_json::to_value(r.get_settings().await.unwrap().unwrap()).unwrap(), expected);
+}
+
 // -- updated_at advances on each upsert --
 
 #[tokio::test]
 async fn upsert_advances_updated_at() {
     let r = repo().await;
-    let first = r.upsert_settings("en-US", true, false, false, false).await.unwrap();
-    let second = r.upsert_settings("en-US", true, false, false, false).await.unwrap();
+    let first = r.upsert_settings(Some("en-US"), Some(true), Some(false), Some(false), Some(false)).await.unwrap();
+    let second = r.upsert_settings(Some("en-US"), Some(true), Some(false), Some(false), Some(false)).await.unwrap();
 
     assert!(second.updated_at >= first.updated_at);
 }
