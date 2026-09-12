@@ -93,9 +93,24 @@ fn fill_random(buf: &mut [u8]) {
 
 /// Pick a random byte from the given charset.
 fn random_from(charset: &[u8]) -> u8 {
-    let mut buf = [0u8; 1];
+    charset[random_index(charset.len(), random_usize)]
+}
+
+fn random_usize() -> usize {
+    let mut buf = [0u8; std::mem::size_of::<usize>()];
     fill_random(&mut buf);
-    charset[buf[0] as usize % charset.len()]
+    usize::from_ne_bytes(buf)
+}
+
+/// Rejection sampling avoids modulo bias for non-power-of-two bounds.
+fn random_index(upper_bound: usize, mut sample: impl FnMut() -> usize) -> usize {
+    let limit = usize::MAX - usize::MAX % upper_bound;
+    loop {
+        let value = sample();
+        if value < limit {
+            return value % upper_bound;
+        }
+    }
 }
 
 /// Generate a strong password with guaranteed character variety.
@@ -114,10 +129,8 @@ fn generate_strong_password(len: usize) -> String {
     }
 
     // Fisher-Yates shuffle
-    let mut shuffle_bytes = vec![0u8; chars.len()];
-    fill_random(&mut shuffle_bytes);
     for i in (1..chars.len()).rev() {
-        let j = shuffle_bytes[i] as usize % (i + 1);
+        let j = random_index(i + 1, random_usize);
         chars.swap(i, j);
     }
 
@@ -127,6 +140,41 @@ fn generate_strong_password(len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn core_audit_random_index_rejects_biased_tail() {
+        for upper_bound in [UPPER.len(), LOWER.len(), DIGITS.len(), SPECIAL.len(), ALL_PASSWORD_CHARS.len()] {
+            let limit = usize::MAX - usize::MAX % upper_bound;
+            let mut samples = [usize::MAX, limit, limit - 1].into_iter();
+            assert_eq!(random_index(upper_bound, || samples.next().unwrap()), upper_bound - 1);
+            assert!(samples.next().is_none());
+        }
+    }
+
+    #[test]
+    fn core_audit_shuffle_index_supports_more_than_256_positions() {
+        assert_eq!(random_index(512, || 511), 511);
+    }
+
+    #[test]
+    fn core_audit_generated_password_preserves_length_and_categories() {
+        for len in [0, 1, 4, 16, 20, 512] {
+            let password = generate_password(len);
+            assert_eq!(password.len(), len.max(4));
+            assert!(password.bytes().all(|byte| ALL_PASSWORD_CHARS.contains(&byte)));
+            for category in [LOWER, UPPER, DIGITS, SPECIAL] {
+                assert!(password.bytes().any(|byte| category.contains(&byte)));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn core_audit_invalid_hash_fails_with_minimum_delay() {
+        let start = Instant::now();
+        let result = verify_password_timed("synthetic-password", "invalid-bcrypt-hash").await;
+        assert!(matches!(result, Err(AuthError::HashError(_))));
+        assert!(start.elapsed() >= MIN_VERIFY_DURATION);
+    }
 
     #[test]
     fn hash_and_verify_correct_password() {

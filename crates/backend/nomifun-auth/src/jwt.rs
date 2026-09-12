@@ -170,7 +170,11 @@ impl JwtService {
     /// Remove expired entries from the blacklist.
     pub fn cleanup_blacklist(&self) {
         let now = now_secs().unwrap_or(0);
-        self.blacklist.retain(|_, exp| *exp > now);
+        // Verification accepts tokens through exp + leeway (inclusive).
+        // Removing a revocation at exp would make it usable again during
+        // that clock-skew allowance. Keep the existing validation policy.
+        let leeway = Validation::default().leeway;
+        self.blacklist.retain(|_, exp| exp.saturating_add(leeway) >= now);
     }
 
     /// Number of entries in the blacklist (for monitoring/testing).
@@ -489,6 +493,40 @@ mod tests {
         let (secret, generated) = resolve_jwt_secret(Some("env_secret"), Some("db_secret"));
         assert_eq!(secret, "env_secret");
         assert!(!generated);
+    }
+
+    #[test]
+    fn core_audit_cleanup_keeps_revocations_during_expiration_leeway() {
+        let service = test_service();
+        let now = now_secs().unwrap();
+        let token = service
+            .sign_with_window(TEST_USER_ID, "admin", now - 120, now - 1)
+            .unwrap();
+        // This token is still accepted by the existing clock-skew policy.
+        assert!(service.verify(&token).is_ok());
+
+        service.blacklist_token(&token);
+        service.cleanup_blacklist();
+
+        assert_eq!(service.blacklist_size(), 1);
+        assert!(matches!(service.verify(&token), Err(AuthError::TokenBlacklisted)));
+    }
+
+    #[test]
+    fn core_audit_cleanup_removes_revocations_after_expiration_leeway() {
+        let service = test_service();
+        let now = now_secs().unwrap();
+        let exp = now - Validation::default().leeway - 1;
+        let token = service
+            .sign_with_window(TEST_USER_ID, "admin", exp - 120, exp)
+            .unwrap();
+        assert!(matches!(service.verify(&token), Err(AuthError::TokenExpired)));
+
+        service.blacklist_token(&token);
+        service.cleanup_blacklist();
+
+        assert_eq!(service.blacklist_size(), 0);
+        assert!(matches!(service.verify(&token), Err(AuthError::TokenExpired)));
     }
 
     #[test]

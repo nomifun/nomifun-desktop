@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::{Request, State};
 use axum::middleware::Next;
@@ -14,12 +14,30 @@ use crate::middleware::CurrentUser;
 /// Rate limit entry tracking request count within a fixed time window.
 struct RateLimitEntry {
     count: u32,
-    reset_time_ms: u64,
+    window_start: Instant,
+}
+
+impl RateLimitEntry {
+    fn new() -> Self {
+        Self {
+            count: 0,
+            window_start: Instant::now(),
+        }
+    }
+
+    fn reset_if_expired(&mut self, window: Duration) {
+        let now = Instant::now();
+        if now.duration_since(self.window_start) >= window {
+            self.count = 0;
+            self.window_start = now;
+        }
+    }
 }
 
 /// Fixed-window rate limiter backed by a concurrent `DashMap`.
 ///
-/// Thread-safe for use across multiple request handlers.
+/// Thread-safe for use across multiple request handlers. Windows use a
+/// monotonic clock, so wall-clock adjustments cannot refill or extend them.
 pub struct RateLimiter {
     entries: DashMap<String, RateLimitEntry>,
     max_requests: u32,
@@ -56,9 +74,11 @@ impl RateLimiter {
     /// For the auth rate limiter: check first, record failure later
     /// via [`record_attempt`](Self::record_attempt).
     pub fn check(&self, key: &str) -> Result<(), AppError> {
-        let now = now_ms();
+        if self.max_requests == 0 {
+            return Err(AppError::RateLimited);
+        }
         if let Some(entry) = self.entries.get(key)
-            && now < entry.reset_time_ms
+            && entry.window_start.elapsed() < self.window
             && entry.count >= self.max_requests
         {
             return Err(AppError::RateLimited);
@@ -70,18 +90,8 @@ impl RateLimiter {
     ///
     /// For API and authenticated-action rate limiters.
     pub fn check_and_increment(&self, key: &str) -> Result<(), AppError> {
-        let now = now_ms();
-        let window_ms = self.window.as_millis() as u64;
-
-        let mut entry = self.entries.entry(key.to_owned()).or_insert(RateLimitEntry {
-            count: 0,
-            reset_time_ms: now + window_ms,
-        });
-
-        if now >= entry.reset_time_ms {
-            entry.count = 0;
-            entry.reset_time_ms = now + window_ms;
-        }
+        let mut entry = self.entries.entry(key.to_owned()).or_insert_with(RateLimitEntry::new);
+        entry.reset_if_expired(self.window);
 
         if entry.count >= self.max_requests {
             return Err(AppError::RateLimited);
@@ -95,35 +105,27 @@ impl RateLimiter {
     ///
     /// Used by the auth rate limiter after a failed login response.
     pub fn record_attempt(&self, key: &str) {
-        let now = now_ms();
-        let window_ms = self.window.as_millis() as u64;
-
-        let mut entry = self.entries.entry(key.to_owned()).or_insert(RateLimitEntry {
-            count: 0,
-            reset_time_ms: now + window_ms,
-        });
-
-        if now >= entry.reset_time_ms {
-            entry.count = 0;
-            entry.reset_time_ms = now + window_ms;
-        }
-
-        entry.count += 1;
+        let mut entry = self.entries.entry(key.to_owned()).or_insert_with(RateLimitEntry::new);
+        entry.reset_if_expired(self.window);
+        entry.count = entry.count.saturating_add(1);
     }
 
     /// Remove expired entries to prevent unbounded memory growth.
     pub fn cleanup(&self) {
-        let now = now_ms();
-        self.entries.retain(|_, entry| now < entry.reset_time_ms);
+        self.entries.retain(|_, entry| entry.window_start.elapsed() < self.window);
     }
 
     /// Start a background task that cleans up expired entries periodically.
+    /// Stops on the next tick after the last owner drops the limiter.
     pub fn start_cleanup_task(self: &Arc<Self>, interval: Duration) {
-        let limiter = Arc::clone(self);
+        let limiter = Arc::downgrade(self);
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
             loop {
                 ticker.tick().await;
+                let Some(limiter) = limiter.upgrade() else {
+                    break;
+                };
                 limiter.cleanup();
             }
         });
@@ -133,13 +135,6 @@ impl RateLimiter {
     pub fn entry_count(&self) -> usize {
         self.entries.len()
     }
-}
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
 }
 
 /// Client identity for rate limiting.
@@ -257,6 +252,77 @@ pub async fn authenticated_action_rate_limit_middleware(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn core_audit_zero_capacity_rejects_without_recorded_attempts() {
+        let limiter = RateLimiter::new(0, Duration::from_secs(60));
+        assert!(matches!(limiter.check("key"), Err(AppError::RateLimited)));
+        assert!(matches!(limiter.check_and_increment("key"), Err(AppError::RateLimited)));
+    }
+
+    #[test]
+    fn core_audit_large_window_does_not_overflow() {
+        let limiter = RateLimiter::new(1, Duration::MAX);
+        assert!(limiter.check_and_increment("key").is_ok());
+        assert!(limiter.check("key").is_err());
+        limiter.record_attempt("other");
+        assert!(limiter.check("other").is_err());
+        limiter.cleanup();
+        assert_eq!(limiter.entry_count(), 2);
+    }
+
+    #[test]
+    fn core_audit_record_attempt_saturates_instead_of_wrapping() {
+        let limiter = RateLimiter::auth();
+        limiter.record_attempt("key");
+        limiter.entries.get_mut("key").unwrap().count = u32::MAX;
+        limiter.record_attempt("key");
+        assert_eq!(limiter.entries.get("key").unwrap().count, u32::MAX);
+        assert!(matches!(limiter.check("key"), Err(AppError::RateLimited)));
+    }
+
+    #[test]
+    fn core_audit_record_attempt_restarts_only_expired_windows() {
+        let window = Duration::from_secs(60);
+        let limiter = RateLimiter::new(2, window);
+        limiter.record_attempt("key");
+        let start = limiter.entries.get("key").unwrap().window_start;
+        limiter.record_attempt("key");
+        assert_eq!(limiter.entries.get("key").unwrap().window_start, start);
+        assert!(limiter.check("key").is_err());
+
+        limiter.entries.get_mut("key").unwrap().window_start = Instant::now() - window;
+        assert!(limiter.check("key").is_ok());
+        limiter.record_attempt("key");
+        assert_eq!(limiter.entries.get("key").unwrap().count, 1);
+        assert!(limiter.check("key").is_ok());
+    }
+
+    #[test]
+    fn core_audit_concurrent_increment_never_exceeds_quota() {
+        let limiter = RateLimiter::new(4, Duration::from_secs(60));
+        let barrier = std::sync::Barrier::new(16);
+        let accepted = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..16)
+                .map(|_| scope.spawn(|| {
+                    barrier.wait();
+                    limiter.check_and_increment("key").is_ok()
+                }))
+                .collect();
+            handles.into_iter().map(|handle| usize::from(handle.join().unwrap())).sum::<usize>()
+        });
+        assert_eq!(accepted, 4);
+    }
+
+    #[tokio::test]
+    async fn core_audit_cleanup_task_does_not_keep_limiter_alive() {
+        let limiter = Arc::new(RateLimiter::api());
+        let weak = Arc::downgrade(&limiter);
+        limiter.start_cleanup_task(Duration::from_secs(60));
+        tokio::task::yield_now().await;
+        drop(limiter);
+        assert!(weak.upgrade().is_none());
+    }
 
     #[test]
     fn new_limiter_allows_requests() {
