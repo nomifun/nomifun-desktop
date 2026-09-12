@@ -3,7 +3,7 @@ use serial_test::serial;
 use std::fs;
 use tempfile::TempDir;
 
-fn write_skill(dir: &Path, rel_path: &str, content: &str) {
+pub(super) fn write_skill(dir: &Path, rel_path: &str, content: &str) {
     let full = dir.join(rel_path);
     fs::create_dir_all(full.parent().unwrap()).unwrap();
     fs::write(full, content).unwrap();
@@ -128,6 +128,66 @@ fn test_deduplicate_different_paths_preserved() {
 
 // --- load_skills_from_dir ---
 
+#[cfg(any(unix, windows))]
+#[tokio::test]
+async fn test_directory_links_are_followed_without_cycles() {
+    for cycle in [true, false] {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path().join("skills");
+        write_skill(&base, "valid/SKILL.md", "---\n---\n");
+        let target = if cycle {
+            base.clone()
+        } else {
+            tmp.path().join("external")
+        };
+        if !cycle {
+            write_skill(&target, "other/SKILL.md", "---\n---\n");
+        }
+        let link = base.join("link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        #[cfg(windows)]
+        {
+            // Junctions do not require Windows Developer Mode or symlink privileges.
+            let output = std::process::Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-Command",
+                    "$ErrorActionPreference = 'Stop'; New-Item -ItemType Junction -Path $env:NOMI_TEST_LINK -Target $env:NOMI_TEST_TARGET | Out-Null"])
+                .env("NOMI_TEST_LINK", &link)
+                .env("NOMI_TEST_TARGET", &target)
+                .output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let skills = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            load_skills_from_dir(&base, SkillSource::User, LoadedFrom::Skills),
+        )
+        .await;
+        let commands = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            load_skills_from_commands_dir(&base, SkillSource::User),
+        )
+        .await;
+        // Remove only the link before TempDir cleans up the fixture.
+        #[cfg(windows)]
+        fs::remove_dir(&link).unwrap();
+        #[cfg(unix)]
+        fs::remove_file(&link).unwrap();
+        let expected = if cycle {
+            vec!["valid"]
+        } else {
+            vec!["link:other", "valid"]
+        };
+        for loaded in [skills.unwrap(), commands.unwrap()] {
+            let names: Vec<_> = loaded.iter().map(|s| s.metadata.name.as_str()).collect();
+            assert_eq!(names, expected);
+        }
+    }
+}
+
 #[tokio::test]
 async fn test_load_skills_from_dir_basic() {
     let tmp = TempDir::new().unwrap();
@@ -213,6 +273,8 @@ async fn test_load_commands_flat_format() {
 
     let skills = load_skills_from_commands_dir(tmp.path(), SkillSource::User).await;
     assert_eq!(skills.len(), 1);
+    assert_eq!(skills[0].metadata.name, "simple");
+    assert_eq!(skills[0].metadata.skill_root.as_deref(), Some(tmp.path().to_str().unwrap()));
     assert_eq!(
         skills[0].metadata.loaded_from,
         LoadedFrom::CommandsDeprecated

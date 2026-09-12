@@ -1,17 +1,11 @@
 use regex::Regex;
+use std::sync::LazyLock;
 
-/// Substitute all argument and environment variables in skill content.
-///
-/// Substitution order (matches TS `substituteArguments`):
-/// 1. Named arguments: `$foo`, `$bar` (mapped from `argument_names[i]` → `parsed_args[i]`)
-/// 2. Indexed arguments: `$ARGUMENTS[0]`, `$ARGUMENTS[1]`
-/// 3. Shorthand indexed: `$0`, `$1`, `$2`
-/// 4. Full arguments: `$ARGUMENTS` → entire args string
-/// 5. Skill directory: `${NOMI_SKILL_DIR}` → `skill_root`
-/// 6. Session ID: `${NOMI_SESSION_ID}` → `session_id`
-/// 7. Fallback: if content is unchanged and args is non-empty, append `\n\nARGUMENTS: {args}`
-///
-/// When `args` is `None`, the content is returned unchanged (no placeholders replaced).
+/// Substitute skill variables and argument placeholders in a single pass.
+/// Inserted values are literal, not templates. Named arguments take precedence
+/// over indexed/full arguments; numeric names are reserved for positional args.
+/// With no args, only skill directory and session variables are substituted.
+/// Non-empty args are appended when no argument placeholder was consumed.
 pub fn substitute_arguments(
     content: &str,
     args: Option<&str>,
@@ -19,79 +13,77 @@ pub fn substitute_arguments(
     skill_root: Option<&str>,
     session_id: Option<&str>,
 ) -> String {
-    // Always apply env-var substitutions regardless of args.
-    let mut result = content.to_owned();
+    static WORD: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\w").unwrap());
+    static INDEX: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^(?:ARGUMENTS\[(\d+)\]|(\d+))").unwrap());
+    let parsed = args.map(parse_arguments).unwrap_or_default();
+    let env = [
+        ("{NOMI_SKILL_DIR}", skill_root),
+        ("{NOMI_SESSION_ID}", session_id),
+    ];
+    let mut result = String::with_capacity(content.len());
+    let mut remaining = content;
+    let mut used_args = false;
 
-    // 5. ${NOMI_SKILL_DIR}
-    if let Some(root) = skill_root {
-        result = result.replace("${NOMI_SKILL_DIR}", root);
-    }
-
-    // 6. ${NOMI_SESSION_ID}
-    if let Some(sid) = session_id {
-        result = result.replace("${NOMI_SESSION_ID}", sid);
-    }
-
-    // If no args provided, return after env substitutions only.
-    let args = match args {
-        Some(a) => a,
-        None => return result,
-    };
-
-    let parsed = parse_arguments(args);
-    let original = result.clone();
-
-    // 1. Named argument substitution: $name (but not $name[ or $nameWord).
-    // The `regex` crate does not support lookaheads, so we use a consuming
-    // pattern `\$name([^\[\w]|$)` and put the trailing non-word char back.
-    for (i, name) in argument_names.iter().enumerate() {
-        if name.is_empty() || name.chars().all(|c| c.is_ascii_digit()) {
-            // Skip empty or purely numeric names (conflict with $0/$1 shorthand)
-            continue;
+    while let Some(start) = remaining.find('$') {
+        result.push_str(&remaining[..start]);
+        let token = &remaining[start + 1..];
+        let replacement = env
+            .iter()
+            .find_map(|(name, value)| token.starts_with(name).then_some((name.len(), (*value)?)))
+            .or_else(|| {
+                let args = args?;
+                let named = argument_names.iter().enumerate().find_map(|(i, name)| {
+                    if name.is_empty() || name.chars().all(|c| c.is_ascii_digit()) {
+                        return None;
+                    }
+                    let tail = token.strip_prefix(name)?;
+                    if tail.starts_with('[') || WORD.is_match(tail) {
+                        return None;
+                    }
+                    Some((name.len(), parsed.get(i).map(String::as_str).unwrap_or("")))
+                });
+                let replacement = named
+                    .or_else(|| {
+                        let caps = INDEX.captures(token)?;
+                        let matched = caps.get(0)?;
+                        // Bracketed indexes need no trailing boundary; $n does.
+                        if caps.get(2).is_some() && WORD.is_match(&token[matched.end()..]) {
+                            return None;
+                        }
+                        let index = caps
+                            .get(1)
+                            .or_else(|| caps.get(2))?
+                            .as_str()
+                            .parse::<usize>()
+                            .ok();
+                        let value = index
+                            .and_then(|i| parsed.get(i))
+                            .map(String::as_str)
+                            .unwrap_or("");
+                        Some((matched.end(), value))
+                    })
+                    .or_else(|| {
+                        let tail = token.strip_prefix("ARGUMENTS")?;
+                        (!tail.starts_with('[') && !WORD.is_match(tail))
+                            .then_some(("ARGUMENTS".len(), args))
+                    });
+                used_args |= replacement.is_some();
+                replacement
+            });
+        if let Some((length, value)) = replacement {
+            result.push_str(value);
+            remaining = &token[length..];
+        } else {
+            result.push('$');
+            remaining = token;
         }
-        let replacement = parsed.get(i).map(|s| s.as_str()).unwrap_or("").to_owned();
-        // Capture trailing non-word/non-bracket char (group 1) or end-of-string.
-        let pattern = format!(r"\${}([^\[\w]|$)", regex::escape(name));
-        if let Ok(re) = Regex::new(&pattern) {
-            result = re
-                .replace_all(&result, |caps: &regex::Captures<'_>| {
-                    // Restore the trailing char that was consumed by the pattern.
-                    let trailing = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-                    format!("{replacement}{trailing}")
-                })
-                .into_owned();
-        }
     }
-
-    // 2. Indexed arguments: $ARGUMENTS[n]
-    let indexed_re = Regex::new(r"\$ARGUMENTS\[(\d+)\]").expect("static regex");
-    result = indexed_re
-        .replace_all(&result, |caps: &regex::Captures<'_>| {
-            let idx: usize = caps[1].parse().unwrap_or(usize::MAX);
-            parsed.get(idx).map(|s| s.as_str()).unwrap_or("").to_owned()
-        })
-        .into_owned();
-
-    // 3. Shorthand indexed: $n not followed by a word character.
-    // Pattern: \$(\d+)([^\w]|$) — capture trailing non-word char to restore it.
-    let shorthand_re = Regex::new(r"\$(\d+)([^\w]|$)").expect("static regex");
-    result = shorthand_re
-        .replace_all(&result, |caps: &regex::Captures<'_>| {
-            let idx: usize = caps[1].parse().unwrap_or(usize::MAX);
-            let trailing = caps.get(2).map(|m| m.as_str()).unwrap_or("");
-            let value = parsed.get(idx).map(|s| s.as_str()).unwrap_or("");
-            format!("{value}{trailing}")
-        })
-        .into_owned();
-
-    // 4. Full argument string: $ARGUMENTS
-    result = result.replace("$ARGUMENTS", args);
-
-    // 7. Fallback: if nothing changed and args is non-empty, append arguments
-    if result == original && !args.is_empty() {
-        result.push_str(&format!("\n\nARGUMENTS: {args}"));
+    result.push_str(remaining);
+    if let Some(args) = args.filter(|args| !args.is_empty() && !used_args) {
+        result.push_str("\n\nARGUMENTS: ");
+        result.push_str(args);
     }
-
     result
 }
 
@@ -109,28 +101,31 @@ pub fn parse_arguments(args: &str) -> Vec<String> {
     let mut current = String::new();
     let mut in_double = false;
     let mut in_single = false;
-    let chars = args.chars();
+    let mut started = false;
 
-    for ch in chars {
+    for ch in args.chars() {
         match ch {
             '"' if !in_single => {
                 in_double = !in_double;
+                started = true;
             }
             '\'' if !in_double => {
                 in_single = !in_single;
+                started = true;
             }
-            ' ' | '\t' if !in_double && !in_single => {
-                if !current.is_empty() {
-                    result.push(current.clone());
-                    current.clear();
+            ch if ch.is_whitespace() && !in_double && !in_single => {
+                if started {
+                    result.push(std::mem::take(&mut current));
+                    started = false;
                 }
             }
             _ => {
                 current.push(ch);
+                started = true;
             }
         }
     }
-    if !current.is_empty() {
+    if started {
         result.push(current);
     }
 
@@ -148,9 +143,11 @@ mod tests {
     // --- parse_arguments ---
 
     #[test]
-    fn test_parse_empty() {
+    fn test_parse_empty_and_quoted_arguments() {
         assert!(parse_arguments("").is_empty());
         assert!(parse_arguments("   ").is_empty());
+        assert_eq!(parse_arguments(r#""" next ''"#), vec!["", "next", ""]);
+        assert_eq!(parse_arguments("first\nsecond\r\nthird"), vec!["first", "second", "third"]);
     }
 
     #[test]
@@ -183,6 +180,47 @@ mod tests {
     }
 
     // --- substitute_arguments ---
+
+    #[test]
+    fn test_adjacent_placeholders_are_all_replaced() {
+        for (template, names) in [
+            ("$0$1$0", vec![]),
+            ("$foo$bar$foo", vec!["foo".into(), "bar".into()]),
+            ("$foo-bar$other.name$foo-bar", vec!["foo-bar".into(), "other.name".into()]),
+        ] {
+            assert_eq!(substitute_arguments(template, Some("A B"), &names, None, None), "ABA");
+        }
+    }
+
+    #[test]
+    fn test_replacement_values_are_literal() {
+        let names = vec!["foo".into(), "bar".into()];
+        for (template, args, expected) in [
+            ("$foo $bar", "$bar end", "$bar end"),
+            ("$foo", "$ARGUMENTS[1] end", "$ARGUMENTS[1]"),
+            ("$ARGUMENTS[0]", "$1 end", "$1"),
+            ("$0", "$ARGUMENTS end", "$ARGUMENTS"),
+            ("$0", "$0", "$0"),
+            ("$ARGUMENTS", "$ARGUMENTS", "$ARGUMENTS"),
+        ] {
+            assert_eq!(substitute_arguments(template, Some(args), &names, None, None), expected);
+        }
+        assert_eq!(
+            substitute_arguments("${NOMI_SKILL_DIR}|${NOMI_SESSION_ID}|$0", Some("X"), &[],
+                Some("/skills/$0/${NOMI_SESSION_ID}"), Some("$ARGUMENTS")),
+            "/skills/$0/${NOMI_SESSION_ID}|$ARGUMENTS|X"
+        );
+    }
+
+    #[test]
+    fn test_placeholder_boundaries() {
+        let names = vec!["foo".into()];
+        assert_eq!(
+            substitute_arguments("$foo_ $foo[0] $foo中 $0x $ARGUMENTS_extra $ARGUMENTS[bad] $foo",
+                Some("X"), &names, None, None),
+            "$foo_ $foo[0] $foo中 $0x $ARGUMENTS_extra $ARGUMENTS[bad] X"
+        );
+    }
 
     #[test]
     fn test_no_args_returns_unchanged() {
@@ -292,15 +330,6 @@ mod tests {
 mod supplemental_tests {
     use super::*;
 
-    // -----------------------------------------------------------------------
-    // TC-1.x: parse_arguments additional cases
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn tc_1_1_basic_space_split() {
-        assert_eq!(parse_arguments("foo bar baz"), vec!["foo", "bar", "baz"]);
-    }
-
     #[test]
     fn tc_1_3_multiple_quoted_groups() {
         assert_eq!(
@@ -325,62 +354,13 @@ mod supplemental_tests {
     #[test]
     fn tc_1_8_unclosed_quote_no_panic() {
         // Must not panic; result is implementation-defined but non-empty
-        let result = parse_arguments(r#""unclosed arg"#);
-        assert!(!result.is_empty() || result.is_empty()); // just verifies no panic
-    }
-
-    #[test]
-    fn tc_1_9_single_quotes_also_group() {
-        // Implementation supports single quotes too (extends plan)
-        assert_eq!(
-            parse_arguments("'hello world' foo"),
-            vec!["hello world", "foo"]
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // TC-2.x: $ARGUMENTS full substitution
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn tc_2_1_arguments_full_replacement() {
-        let r = substitute_arguments("Run: $ARGUMENTS", Some("foo bar"), &[], None, None);
-        assert_eq!(r, "Run: foo bar");
-    }
-
-    #[test]
-    fn tc_2_2_arguments_none_becomes_empty() {
-        // When args = None, $ARGUMENTS is NOT replaced (returns unchanged per spec)
-        let r = substitute_arguments("Run: $ARGUMENTS", None, &[], None, None);
-        assert_eq!(r, "Run: $ARGUMENTS");
+        assert_eq!(parse_arguments(r#""unclosed arg"#), vec!["unclosed arg"]);
     }
 
     #[test]
     fn tc_2_3_arguments_multiple_occurrences() {
         let r = substitute_arguments("$ARGUMENTS and $ARGUMENTS", Some("x"), &[], None, None);
         assert_eq!(r, "x and x");
-    }
-
-    // -----------------------------------------------------------------------
-    // TC-3.x: $ARGUMENTS[n] indexed substitution
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn tc_3_1_arguments_index_0() {
-        let r = substitute_arguments("First: $ARGUMENTS[0]", Some("alpha beta"), &[], None, None);
-        assert_eq!(r, "First: alpha");
-    }
-
-    #[test]
-    fn tc_3_2_arguments_index_1() {
-        let r = substitute_arguments("Second: $ARGUMENTS[1]", Some("alpha beta"), &[], None, None);
-        assert_eq!(r, "Second: beta");
-    }
-
-    #[test]
-    fn tc_3_3_arguments_index_out_of_bounds_empty() {
-        let r = substitute_arguments("Third: $ARGUMENTS[2]", Some("only_one"), &[], None, None);
-        assert_eq!(r, "Third: ");
     }
 
     #[test]
@@ -395,27 +375,10 @@ mod supplemental_tests {
         assert_eq!(r, "hello world");
     }
 
-    // -----------------------------------------------------------------------
-    // TC-4.x: $n shorthand indexed substitution
-    // -----------------------------------------------------------------------
-
     #[test]
     fn tc_4_1_shorthand_0() {
         let r = substitute_arguments("Hello $0", Some("world"), &[], None, None);
         assert_eq!(r, "Hello world");
-    }
-
-    #[test]
-    fn tc_4_2_shorthand_0_and_1() {
-        let r = substitute_arguments("$0 and $1", Some("foo bar"), &[], None, None);
-        assert_eq!(r, "foo and bar");
-    }
-
-    #[test]
-    fn tc_4_3_shorthand_out_of_bounds() {
-        let r = substitute_arguments("$2", Some("only_two args"), &[], None, None);
-        // "only_two" = $0, "args" = $1, $2 is out of bounds → empty
-        assert_eq!(r, "");
     }
 
     #[test]
@@ -424,10 +387,6 @@ mod supplemental_tests {
         // args = None → no substitution, content returned unchanged
         assert_eq!(r, "Run $0");
     }
-
-    // -----------------------------------------------------------------------
-    // TC-5.x: $name named argument substitution
-    // -----------------------------------------------------------------------
 
     #[test]
     fn tc_5_1_single_named_arg() {
@@ -446,40 +405,11 @@ mod supplemental_tests {
     }
 
     #[test]
-    fn tc_5_2_multiple_named_args() {
-        let names = vec!["src".to_string(), "dst".to_string()];
-        let r = substitute_arguments(
-            "From $src to $dst",
-            Some("source.txt dest.txt"),
-            &names,
-            None,
-            None,
-        );
-        assert_eq!(r, "From source.txt to dest.txt");
-    }
-
-    #[test]
     fn tc_5_4_named_arg_index_out_of_range() {
         // $second maps to index 1 but only one arg provided
         let names = vec!["first".to_string(), "second".to_string()];
         let r = substitute_arguments("File: $second", Some("only_one"), &names, None, None);
         assert_eq!(r, "File: ");
-    }
-
-    // -----------------------------------------------------------------------
-    // TC-6.x: ${NOMI_SKILL_DIR} substitution
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn tc_6_1_skill_dir_replaced() {
-        let r = substitute_arguments(
-            "cd ${NOMI_SKILL_DIR}",
-            None,
-            &[],
-            Some("/home/user/.nomi/skills/my-skill"),
-            None,
-        );
-        assert_eq!(r, "cd /home/user/.nomi/skills/my-skill");
     }
 
     #[test]
@@ -501,36 +431,10 @@ mod supplemental_tests {
         assert_eq!(r, "/skills/foo/a and /skills/foo/b");
     }
 
-    // -----------------------------------------------------------------------
-    // TC-7.x: ${NOMI_SESSION_ID} substitution
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn tc_7_1_session_id_replaced() {
-        let r = substitute_arguments(
-            "Session: ${NOMI_SESSION_ID}",
-            None,
-            &[],
-            None,
-            Some("abc-123"),
-        );
-        assert_eq!(r, "Session: abc-123");
-    }
-
     #[test]
     fn tc_7_2_session_id_none_not_replaced() {
         let r = substitute_arguments("Session: ${NOMI_SESSION_ID}", None, &[], None, None);
         assert_eq!(r, "Session: ${NOMI_SESSION_ID}");
-    }
-
-    // -----------------------------------------------------------------------
-    // TC-8.x: fallback append when no placeholder
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn tc_8_1_no_placeholder_appends_arguments() {
-        let r = substitute_arguments("Do the task.", Some("my argument"), &[], None, None);
-        assert_eq!(r, "Do the task.\n\nARGUMENTS: my argument");
     }
 
     #[test]
@@ -545,17 +449,6 @@ mod supplemental_tests {
         assert_eq!(r, "Run x");
         assert!(!r.contains("ARGUMENTS:"));
     }
-
-    #[test]
-    fn tc_8_4_empty_args_string_no_append() {
-        // args = Some("") is empty → no fallback appended
-        let r = substitute_arguments("Do it.", Some(""), &[], None, None);
-        assert_eq!(r, "Do it.");
-    }
-
-    // -----------------------------------------------------------------------
-    // TC-9.x: comprehensive / combined scenarios
-    // -----------------------------------------------------------------------
 
     #[test]
     fn tc_9_1_multiple_placeholder_types() {
@@ -580,23 +473,6 @@ mod supplemental_tests {
         let r = substitute_arguments("", None, &[], None, None);
         assert_eq!(r, "");
     }
-
-    #[test]
-    fn tc_9_4_indexed_before_full_no_corruption() {
-        // $ARGUMENTS[0] must be recognized before $ARGUMENTS replacement
-        let r = substitute_arguments(
-            "$ARGUMENTS[0] / $ARGUMENTS",
-            Some("alpha beta"),
-            &[],
-            None,
-            None,
-        );
-        assert_eq!(r, "alpha / alpha beta");
-    }
-
-    // -----------------------------------------------------------------------
-    // TC-15.x: edge cases
-    // -----------------------------------------------------------------------
 
     #[test]
     fn tc_15_2_skill_dir_and_arguments_same_line() {

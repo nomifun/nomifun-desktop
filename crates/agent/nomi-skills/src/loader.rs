@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use futures::future::join_all;
@@ -124,17 +124,30 @@ pub(crate) async fn load_skills_from_dir(
     loaded_from: LoadedFrom,
 ) -> Vec<LoadedSkill> {
     let mut results = Vec::new();
-    collect_skill_md(base_dir, base_dir, source, loaded_from, &mut results).await;
+    collect_skills(
+        base_dir,
+        base_dir,
+        source,
+        loaded_from,
+        &mut HashSet::new(),
+        &mut results,
+    )
+    .await;
     results
 }
 
-/// Recursively scan `dir` for `SKILL.md` files.
-// This is a recursive async function — we use a Box::pin to satisfy the compiler.
-fn collect_skill_md<'a>(
+/// Load legacy commands: directory skills take precedence over flat Markdown.
+async fn load_skills_from_commands_dir(base_dir: &Path, source: SkillSource) -> Vec<LoadedSkill> {
+    load_skills_from_dir(base_dir, source, LoadedFrom::CommandsDeprecated).await
+}
+
+/// Share traversal and cycle detection between skills and legacy commands.
+fn collect_skills<'a>(
     base_dir: &'a Path,
     dir: &'a Path,
     source: SkillSource,
     loaded_from: LoadedFrom,
+    ancestors: &'a mut HashSet<PathBuf>,
     results: &'a mut Vec<LoadedSkill>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
     Box::pin(async move {
@@ -142,143 +155,58 @@ fn collect_skill_md<'a>(
             Ok(rd) => rd,
             Err(_) => return,
         };
-
-        while let Ok(Some(entry)) = read_dir.next_entry().await {
-            let path = entry.path();
-            // Follow symlinks: entry.file_type() does NOT traverse symlinks,
-            // so use tokio::fs::metadata() which resolves the target type.
-            let is_dir = match tokio::fs::metadata(&path).await {
-                Ok(meta) => meta.is_dir(),
-                Err(_) => continue,
-            };
-
-            if is_dir {
-                // Check for SKILL.md directly inside this subdirectory using an
-                // exact case-sensitive name comparison (important on case-insensitive
-                // filesystems like macOS APFS).
-                if let Some(skill_file) = find_exact_file(&path, "SKILL.md").await {
-                    if let Some(skill) =
-                        load_skill_file(&skill_file, base_dir, &path, source, loaded_from).await
-                    {
-                        results.push(skill);
-                    }
-                } else {
-                    // Recurse into subdirectory (namespace nesting)
-                    collect_skill_md(base_dir, &path, source, loaded_from, results).await;
-                }
-            }
+        let Ok(canonical) = tokio::fs::canonicalize(dir).await else {
+            return;
+        };
+        if !ancestors.insert(canonical.clone()) {
+            return;
         }
-    })
-}
 
-// ---------------------------------------------------------------------------
-// Internal: load from commands/ directory (legacy flat + directory format)
-// ---------------------------------------------------------------------------
-
-/// Load skills from a legacy `commands/` directory.
-///
-/// Supports two formats:
-/// - Directory format: `<name>/SKILL.md` (takes precedence over flat `.md`)
-/// - Flat format: `<name>.md` or `<subdir>/<name>.md`
-async fn load_skills_from_commands_dir(base_dir: &Path, source: SkillSource) -> Vec<LoadedSkill> {
-    let mut results = Vec::new();
-    collect_commands(base_dir, base_dir, source, &mut results).await;
-    results
-}
-
-fn collect_commands<'a>(
-    base_dir: &'a Path,
-    dir: &'a Path,
-    source: SkillSource,
-    results: &'a mut Vec<LoadedSkill>,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
-    Box::pin(async move {
-        let mut read_dir = match tokio::fs::read_dir(dir).await {
-            Ok(rd) => rd,
-            Err(_) => return,
-        };
-
-        // Collect all entries first so we can check for directory/flat conflicts
         let mut entries = Vec::new();
         while let Ok(Some(entry)) = read_dir.next_entry().await {
-            entries.push(entry);
-        }
-
-        // Track names that have a directory format (to skip their flat counterpart)
-        let mut dir_names: HashSet<String> = HashSet::new();
-
-        // First pass: handle directory format
-        for entry in &entries {
             let path = entry.path();
-            // Follow symlinks: use metadata() which resolves symlink targets.
-            let is_dir = match tokio::fs::metadata(&path).await {
-                Ok(meta) => meta.is_dir(),
-                Err(_) => continue,
-            };
-
-            if is_dir {
-                // Use exact case-sensitive lookup to avoid false positives on
-                // case-insensitive filesystems (e.g., macOS APFS).
-                if let Some(skill_file) = find_exact_file(&path, "SKILL.md").await {
-                    // Directory format — load it
-                    if let Some(skill) = load_skill_file(
-                        &skill_file,
-                        base_dir,
-                        &path,
-                        source,
-                        LoadedFrom::CommandsDeprecated,
-                    )
-                    .await
-                    {
-                        let name = path
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        dir_names.insert(name);
-                        results.push(skill);
-                    }
-                } else {
-                    // Recurse: this is a namespace subdirectory (e.g., db/migrate.md)
-                    collect_commands(base_dir, &path, source, results).await;
+            // Resolve links once, preserving linked skills and namespace directories.
+            if let Ok(metadata) = tokio::fs::metadata(&path).await {
+                entries.push((path, metadata));
+            }
+        }
+        // First-wins dedup must not depend on filesystem enumeration order.
+        entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+        let mut dir_names = HashSet::new();
+        for (path, metadata) in &entries {
+            if !metadata.is_dir() {
+                continue;
+            }
+            if let Some(skill_file) = find_exact_file(path, "SKILL.md").await {
+                if let Some(skill) =
+                    load_skill_file(&skill_file, base_dir, path, source, loaded_from).await
+                {
+                    dir_names.insert(path.file_name().unwrap_or_default());
+                    results.push(skill);
                 }
+            } else {
+                collect_skills(base_dir, path, source, loaded_from, ancestors, results).await;
             }
         }
 
-        // Second pass: handle flat .md files (skip if directory version exists)
-        for entry in &entries {
-            let path = entry.path();
-            // Follow symlinks: use metadata() to check if this is a file (not a dir symlink).
-            let is_file = match tokio::fs::metadata(&path).await {
-                Ok(meta) => meta.is_file(),
-                Err(_) => continue,
-            };
-
-            if is_file && path.extension().and_then(|e| e.to_str()) == Some("md") {
-                let stem = path
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-
-                // Skip if a directory format was already loaded for this name
-                if dir_names.contains(&stem) {
+        if loaded_from == LoadedFrom::CommandsDeprecated {
+            for (path, metadata) in &entries {
+                if !metadata.is_file() || path.extension().and_then(|e| e.to_str()) != Some("md") {
                     continue;
                 }
-
-                // The "skill directory" for flat files is their parent dir + stem
-                let pseudo_dir = path.parent().unwrap_or(base_dir).join(&stem);
-                if let Some(skill) = load_skill_file(
-                    &path,
-                    base_dir,
-                    &pseudo_dir,
-                    source,
-                    LoadedFrom::CommandsDeprecated,
-                )
-                .await
+                let stem = path.file_stem().unwrap_or_default();
+                if dir_names.contains(stem) {
+                    continue;
+                }
+                let pseudo_dir = dir.join(stem);
+                if let Some(skill) =
+                    load_skill_file(path, base_dir, &pseudo_dir, source, loaded_from).await
                 {
                     results.push(skill);
                 }
             }
         }
+        ancestors.remove(&canonical);
     })
 }
 
@@ -299,9 +227,8 @@ async fn load_skill_file(
     let parsed = parse_frontmatter(&content);
 
     let resolved_name = build_namespace(base_dir, skill_dir);
-    // skill_root is the directory containing SKILL.md (i.e., skill_dir itself),
-    // used for ${NOMI_SKILL_DIR} variable substitution in skill content.
-    let skill_root = Some(skill_dir.to_string_lossy().into_owned());
+    // Flat legacy commands have no physical directory named after their stem.
+    let skill_root = file_path.parent().map(|dir| dir.to_string_lossy().into_owned());
 
     let metadata = parse_skill_fields(
         &parsed.frontmatter,
@@ -366,11 +293,11 @@ fn deduplicate(skills: Vec<LoadedSkill>) -> Vec<SkillMetadata> {
 /// Called after path-based dedup to enforce priority between bundled, MCP,
 /// and filesystem skills that share the same name but have different paths.
 fn deduplicate_by_name(skills: Vec<SkillMetadata>) -> Vec<SkillMetadata> {
-    let mut seen: HashMap<String, ()> = HashMap::new();
+    let mut seen = HashSet::new();
     let mut result = Vec::new();
 
     for skill in skills {
-        if seen.insert(skill.name.clone(), ()).is_none() {
+        if seen.insert(skill.name.clone()) {
             result.push(skill);
         }
     }

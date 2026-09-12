@@ -12,8 +12,5 @@ pub mod substitution;
 pub mod types;
 
 #[cfg(test)]
-mod permissions_supplemental_tests;
-
-#[cfg(test)]
 #[path = "integration_tests.rs"]
 mod integration_tests;

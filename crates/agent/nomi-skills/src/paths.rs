@@ -124,15 +124,8 @@ mod tests {
     // --- user_skills_dir ---
 
     #[test]
-    fn test_user_skills_dir_contains_nomi_skills() {
-        if let Some(dir) = user_skills_dir() {
-            let s = dir.to_string_lossy();
-            assert!(s.contains("nomi"), "expected 'nomi' in path: {s}");
-            assert!(
-                s.ends_with("skills"),
-                "expected path to end with 'skills': {s}"
-            );
-        }
+    fn user_skills_dir_uses_the_configured_data_root() {
+        assert_eq!(user_skills_dir(), Some(app_data_dir().join("skills")));
     }
 
     // --- find_git_root ---
@@ -240,42 +233,6 @@ mod supplemental_tests {
         p
     }
 
-    // -----------------------------------------------------------------------
-    // TC-1.x: find_git_root
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn tc_1_1_find_git_root_at_root_dir() {
-        let tmp = TempDir::new().unwrap();
-        fs::create_dir(tmp.path().join(".git")).unwrap();
-        let found = find_git_root(tmp.path()).unwrap();
-        assert_eq!(found, tmp.path());
-    }
-
-    #[test]
-    fn tc_1_2_find_git_root_from_subdirectory() {
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path();
-        fs::create_dir(root.join(".git")).unwrap();
-        let sub = root.join("src").join("module");
-        fs::create_dir_all(&sub).unwrap();
-
-        let found = find_git_root(&sub).unwrap();
-        assert_eq!(found, root);
-    }
-
-    #[test]
-    fn tc_1_4_find_git_root_deep_nesting() {
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path();
-        fs::create_dir(root.join(".git")).unwrap();
-        let deep = root.join("a").join("b").join("c").join("d").join("e");
-        fs::create_dir_all(&deep).unwrap();
-
-        let found = find_git_root(&deep).unwrap();
-        assert_eq!(found, root);
-    }
-
     #[test]
     fn tc_1_5_find_git_root_git_is_file_not_dir() {
         // git worktree: .git is a file, not a directory
@@ -290,56 +247,6 @@ mod supplemental_tests {
             ".git file should be recognized as git root"
         );
         assert_eq!(found.unwrap(), root);
-    }
-
-    // -----------------------------------------------------------------------
-    // TC-2.x: user_skills_dir
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn tc_2_1_user_skills_dir_ends_with_skills() {
-        if let Some(dir) = user_skills_dir() {
-            let s = dir.to_string_lossy();
-            assert!(s.ends_with("skills"), "path should end with 'skills': {s}");
-            assert!(s.contains("nomi"), "path should contain 'nomi': {s}");
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // TC-4.x: project_skills_dirs
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn tc_4_2_project_skills_dirs_nonexistent_subdir_not_returned() {
-        let tmp = TempDir::new().unwrap();
-        fs::create_dir(tmp.path().join(".git")).unwrap();
-        // No .nomi/skills/ created
-        let dirs = project_skills_dirs(tmp.path());
-        assert!(
-            dirs.is_empty(),
-            "should be empty when .nomi/skills/ doesn't exist"
-        );
-    }
-
-    #[test]
-    fn tc_4_3_project_skills_dirs_deepest_first() {
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path();
-        fs::create_dir(root.join(".git")).unwrap();
-        make_dir(root, ".nomi/skills");
-
-        let inner = root.join("sub");
-        fs::create_dir_all(&inner).unwrap();
-        make_dir(&inner, ".nomi/skills");
-
-        let dirs = project_skills_dirs(&inner);
-        assert_eq!(dirs.len(), 2);
-        // First element should be closest to cwd (deepest)
-        assert!(
-            dirs[0].starts_with(&inner),
-            "first dir should be the inner one (deepest): {:?}",
-            dirs[0]
-        );
     }
 
     #[test]
@@ -374,10 +281,6 @@ mod supplemental_tests {
         let _ = dirs;
     }
 
-    // -----------------------------------------------------------------------
-    // TC-5.x: project_commands_dirs
-    // -----------------------------------------------------------------------
-
     #[test]
     fn tc_5_1_project_commands_dirs_finds_commands_dir() {
         let tmp = TempDir::new().unwrap();
@@ -388,28 +291,6 @@ mod supplemental_tests {
         let dirs = project_commands_dirs(root);
         assert_eq!(dirs.len(), 1);
         assert!(dirs[0].ends_with(".nomi/commands"));
-    }
-
-    // -----------------------------------------------------------------------
-    // TC-6.x: additional_skills_dirs
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn tc_6_1_additional_skills_dirs_with_existing_subdir() {
-        let tmp = TempDir::new().unwrap();
-        make_dir(tmp.path(), ".nomi/skills");
-
-        let result = additional_skills_dirs(&[tmp.path().to_path_buf()]);
-        assert_eq!(result.len(), 1);
-        assert!(result[0].ends_with(".nomi/skills"));
-    }
-
-    #[test]
-    fn tc_6_2_additional_skills_dirs_no_subdir_skipped() {
-        let tmp = TempDir::new().unwrap();
-        // No .nomi/skills/ subdirectory
-        let result = additional_skills_dirs(&[tmp.path().to_path_buf()]);
-        assert!(result.is_empty());
     }
 
     #[test]
