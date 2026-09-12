@@ -498,6 +498,8 @@ fn registry_package_source(
         "type": "module",
         "main": "index.js",
         "dependencies": dependency_json,
+        "optionalDependencies": {},
+        "peerDependencies": {},
         "license": "MIT",
         "author": {"name": "Registry fixture"},
         "repository": {"type": "git", "url": "https://example.invalid/fixture.git"},
@@ -647,6 +649,45 @@ fn offline_resolver_uses_content_addressed_cache_and_exact_lock() {
 }
 
 #[test]
+fn cache_rejects_coordinated_file_and_record_tampering() {
+    for tamper_file in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = ContentAddressedNpmCache::new(temp.path().join("cache")).unwrap();
+        let cached = cache
+            .store(&registry_package("alpha", "1.0.0", &[]), &NeverCancel)
+            .unwrap();
+        assert!(cache.load(cached.archive_digest()).is_ok());
+        let record_path = cached.object_root().join("object.json");
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
+        let tampered = b"export const value = 99;\n";
+        let digest = nomifun_js_authoring::digest_bytes(tampered);
+        if tamper_file {
+            fs::write(cached.object_root().join("files/index.js"), tampered).unwrap();
+            let file = record["files"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|file| file["path"] == "index.js")
+                .unwrap();
+            file["digest"] = json!(digest);
+            file["size_bytes"] = json!(tampered.len());
+        } else {
+            record["package_json_digest"] = json!(digest);
+        }
+        fs::write(
+            record_path,
+            nomifun_agent_contracts::canonical_json_bytes(&record).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            cache.load(cached.archive_digest()),
+            Err(AuthoringError::Cache(_))
+        ));
+    }
+}
+
+#[test]
 fn resolver_rejects_a_transitive_graph_beyond_the_fixed_depth_budget() {
     let temp = tempfile::tempdir().unwrap();
     let cache = ContentAddressedNpmCache::new(temp.path().join("cache")).unwrap();
@@ -754,6 +795,24 @@ fn registry_rejects_commonjs_lifecycle_and_native_addon_inputs() {
                 "version": "1.0.0",
                 "type": "module",
                 "scripts": {"postinstall": "evil"}
+            }),
+            "index.js",
+        ),
+        (
+            serde_json::json!({
+                "name": "bad",
+                "version": "1.0.0",
+                "type": "module",
+                "optionalDependencies": {"optional": "1.0.0"}
+            }),
+            "index.js",
+        ),
+        (
+            serde_json::json!({
+                "name": "bad",
+                "version": "1.0.0",
+                "type": "module",
+                "peerDependencies": {"peer": "1.0.0"}
             }),
             "index.js",
         ),

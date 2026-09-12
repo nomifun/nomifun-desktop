@@ -514,22 +514,7 @@ impl CatalogSnapshot {
             .filter(|mcp| {
                 mcp.source.source_kind != PluginSourceKind::TestFixture
             })
-            .map(|mcp| {
-                let mapping = &mcp.mapping;
-                McpToolCatalogItemDto {
-                server_id: mapping.server_id.as_ref().to_owned(),
-                canonical_tool_key: mapping.canonical_tool_key.as_ref().to_owned(),
-                capability: ExactCatalogRefDto {
-                    id: mapping.capability.id.as_ref().to_owned(),
-                    version: mapping.capability.version.as_ref().to_owned(),
-                },
-                source_package: ExactCatalogRefDto {
-                    id: mapping.package.id.as_ref().to_owned(),
-                    version: mapping.package.version.as_ref().to_owned(),
-                },
-                schema_digest: mapping.schema_digest.as_ref().to_owned(),
-                materialization_version: mapping.materialization_version.as_ref().to_owned(),
-            }})
+            .map(|mcp| mcp_mapping_api(&mcp.mapping))
             .collect();
 
         Ok(AgentCatalogResponse {
@@ -610,6 +595,23 @@ fn capability_catalog_item(
             .context_schema_refs
             .len() as u32,
     })
+}
+
+pub(crate) fn mcp_mapping_api(mapping: &nomifun_agent_contracts::McpToolCapabilityMapping) -> McpToolCatalogItemDto {
+    McpToolCatalogItemDto {
+        server_id: mapping.server_id.as_ref().to_owned(),
+        canonical_tool_key: mapping.canonical_tool_key.as_ref().to_owned(),
+        capability: nomifun_api_types::ExactCatalogRefDto {
+            id: mapping.capability.id.as_ref().to_owned(),
+            version: mapping.capability.version.as_ref().to_owned(),
+        },
+        source_package: nomifun_api_types::ExactCatalogRefDto {
+            id: mapping.package.id.as_ref().to_owned(),
+            version: mapping.package.version.as_ref().to_owned(),
+        },
+        schema_digest: mapping.schema_digest.as_ref().to_owned(),
+        materialization_version: mapping.materialization_version.as_ref().to_owned(),
+    }
 }
 
 fn capability_reference(capability: &MaterializedCapability) -> CapabilityRef {

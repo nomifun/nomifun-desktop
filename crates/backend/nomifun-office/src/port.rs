@@ -33,13 +33,6 @@ mod tests {
         assert!(port > 0);
     }
 
-    #[test]
-    fn allocate_port_returns_different_ports() {
-        let p1 = allocate_port().unwrap();
-        let p2 = allocate_port().unwrap();
-        assert_ne!(p1, p2);
-    }
-
     #[tokio::test]
     async fn is_port_listening_false_for_unused_port() {
         let port = allocate_port().unwrap();

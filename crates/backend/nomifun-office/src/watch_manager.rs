@@ -120,7 +120,7 @@ impl OfficecliWatchManager {
         doc_type: DocType,
     ) -> Result<PreviewAccess, OfficeError> {
         require_owner(owner_id)?;
-        let resolved = resolve_path(file_path)?;
+        let resolved = resolve_path(file_path);
         let key = session_key(&resolved, doc_type);
         // Startup contains awaits. Serializing this transition prevents two
         // concurrent callers from spawning duplicate processes and losing an
@@ -328,7 +328,9 @@ impl OfficecliWatchManager {
             return None;
         }
 
-        let binding = self.capabilities.get(capability)?;
+        // Start/stop lock sessions before capabilities. Release this guard
+        // before reading sessions to avoid the opposite lock order here.
+        let binding = self.capabilities.get(capability)?.value().clone();
         let session = self.sessions.get(&binding.session_key)?;
         let owner_matches = session
             .capabilities
@@ -519,10 +521,10 @@ impl ProcessSpawner for DefaultProcessSpawner {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn resolve_path(file_path: &str) -> Result<String, OfficeError> {
+fn resolve_path(file_path: &str) -> String {
     let path = std::path::Path::new(file_path);
     let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    Ok(resolved.to_string_lossy().into_owned())
+    resolved.to_string_lossy().into_owned()
 }
 
 fn session_key(resolved_path: &str, doc_type: DocType) -> String {
@@ -546,14 +548,14 @@ mod tests {
 
     struct MockProcessHandle {
         alive: AtomicBool,
-        killed: AtomicBool,
+        listener: std::sync::Mutex<Option<std::net::TcpListener>>,
     }
 
     impl MockProcessHandle {
-        fn new() -> Self {
+        fn new(listener: Option<std::net::TcpListener>) -> Self {
             Self {
                 alive: AtomicBool::new(true),
-                killed: AtomicBool::new(false),
+                listener: std::sync::Mutex::new(listener),
             }
         }
     }
@@ -561,7 +563,7 @@ mod tests {
     impl ProcessHandle for MockProcessHandle {
         fn kill(&self) {
             self.alive.store(false, Ordering::SeqCst);
-            self.killed.store(true, Ordering::SeqCst);
+            drop(self.listener.lock().unwrap().take());
         }
 
         fn is_alive(&self) -> bool {
@@ -609,13 +611,15 @@ mod tests {
                 return Err(OfficeError::OfficecliNotFound);
             }
 
-            if self.start_listener.load(Ordering::SeqCst) {
+            let listener = if self.start_listener.load(Ordering::SeqCst) {
                 let listener = std::net::TcpListener::bind(format!("127.0.0.1:{port}"))
                     .map_err(|e| OfficeError::StartFailed(e.to_string()))?;
-                std::mem::forget(listener);
-            }
+                Some(listener)
+            } else {
+                None
+            };
 
-            Ok(Box::new(MockProcessHandle::new()))
+            Ok(Box::new(MockProcessHandle::new(listener)))
         }
 
         async fn install_officecli(&self) -> Result<(), OfficeError> {
@@ -872,6 +876,66 @@ mod tests {
         );
     }
 
+    #[test]
+    fn capability_resolution_does_not_hold_capability_lock_during_session_check() {
+        struct LockProbe {
+            manager: std::sync::Weak<OfficecliWatchManager>,
+            capability: String,
+        }
+
+        impl ProcessHandle for LockProbe {
+            fn kill(&self) {}
+
+            fn is_alive(&self) -> bool {
+                let manager = self.manager.upgrade().unwrap();
+                // A nonblocking probe fails the assertion below on the old
+                // lock order, without leaving a deadlocked test thread.
+                let available = matches!(
+                    manager.capabilities.try_get_mut(&self.capability),
+                    dashmap::try_result::TryResult::Present(_)
+                );
+                available
+            }
+        }
+
+        let mgr = Arc::new(make_manager(
+            Arc::new(MockSpawner::new()),
+            Arc::new(RecordingBroadcaster::new()),
+        ));
+        let capability = "a".repeat(64);
+        let owner = "0190f5fe-7c00-7a00-8abc-012345678901".to_owned();
+        let key = session_key("test.docx", DocType::Word);
+        mgr.capabilities.insert(
+            capability.clone(),
+            PreviewCapabilityBinding {
+                session_key: key.clone(),
+                owner_id: owner.clone(),
+                port: 8080,
+                doc_type: DocType::Word,
+            },
+        );
+        mgr.sessions.insert(
+            key,
+            WatchSession {
+                port: 8080,
+                process: Box::new(LockProbe {
+                    manager: Arc::downgrade(&mgr),
+                    capability: capability.clone(),
+                }),
+                file_path: "test.docx".into(),
+                doc_type: DocType::Word,
+                capabilities: HashMap::from([(capability.clone(), owner)]),
+            },
+        );
+        assert_eq!(
+            mgr.resolve_capability(&capability),
+            Some(PreviewProxyTarget {
+                port: 8080,
+                doc_type: DocType::Word,
+            })
+        );
+    }
+
     #[tokio::test]
     async fn stop_requires_exact_owner_and_capability() {
         let spawner = Arc::new(MockSpawner::new());
@@ -1005,7 +1069,7 @@ mod tests {
         let file = dir.path().join("test.docx");
         std::fs::write(&file, b"test").unwrap();
 
-        let resolved = resolve_path(file.to_str().unwrap()).unwrap();
+        let resolved = resolve_path(file.to_str().unwrap());
         let port = allocate_port().unwrap();
         let result = mgr.poll_port_ready(port, &resolved).await;
         assert!(matches!(result, Err(OfficeError::PortTimeout(_))));
@@ -1065,13 +1129,13 @@ mod tests {
         let file = dir.path().join("test.docx");
         std::fs::write(&file, b"test").unwrap();
 
-        let resolved = resolve_path(file.to_str().unwrap()).unwrap();
+        let resolved = resolve_path(file.to_str().unwrap());
         assert!(!resolved.is_empty());
     }
 
     #[test]
     fn resolve_path_nonexistent_returns_original() {
-        let result = resolve_path("/nonexistent/path/test.docx").unwrap();
+        let result = resolve_path("/nonexistent/path/test.docx");
         assert_eq!(result, "/nonexistent/path/test.docx");
     }
 }

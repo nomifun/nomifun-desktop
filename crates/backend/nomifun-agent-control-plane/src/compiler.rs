@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use nomifun_agent_contracts::{
     AgentPresetRevision, AgentPresetRevisionPayload, CanonicalErrorCode,
     CapabilityCatalogPublication, CapabilityConsumer, CapabilityRef, ContributionId,
-    ContributionLock, ContributionSourceKind, DigestHex, McpToolCapabilityMapping,
+    ContributionLock, ContributionSourceKind, DigestHex,
     MiniAppCapabilityCatalogPublication, OfficialPresetKey, OperationId, PluginMountId,
     PresetRevisionRef, PrincipalRef, ResolvedCapability, ResolvedMiniAppCapability,
     ResolvedSnapshotEnvelope, PluginSourceKind, PluginSourceMetadata, SkillRef,
@@ -16,7 +16,7 @@ use nomifun_agent_kernel::{
     KernelError, KernelRegistry, MaterializedRegistry,
 };
 use nomifun_api_types::{
-    AgentPresetRevisionDto, ContributionLockDto, McpToolCatalogItemDto, PreviewCapabilityDto, PreviewDiagnosticDto,
+    AgentPresetRevisionDto, PreviewCapabilityDto, PreviewDiagnosticDto,
     PreviewDiagnosticSeverityDto, PreviewStatusDto, PreviewSummaryDto,
     ResolveAgentPresetPreviewRequest, ResolveAgentPresetPreviewResponse, RevisionDiffDto,
     SnapshotInspectorDto,
@@ -24,7 +24,7 @@ use nomifun_api_types::{
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::catalog::{availability_code, CatalogSnapshot, OfficialTemplateCatalog};
+use crate::catalog::{availability_code, mcp_mapping_api, CatalogSnapshot, OfficialTemplateCatalog};
 use crate::error::ControlPlaneError;
 use crate::wire::{wire_cast, wire_name};
 
@@ -1145,23 +1145,6 @@ fn preview_capability(
     }
 }
 
-fn mcp_mapping_api(mapping: &McpToolCapabilityMapping) -> McpToolCatalogItemDto {
-    McpToolCatalogItemDto {
-        server_id: mapping.server_id.as_ref().to_owned(),
-        canonical_tool_key: mapping.canonical_tool_key.as_ref().to_owned(),
-        capability: nomifun_api_types::ExactCatalogRefDto {
-            id: mapping.capability.id.as_ref().to_owned(),
-            version: mapping.capability.version.as_ref().to_owned(),
-        },
-        source_package: nomifun_api_types::ExactCatalogRefDto {
-            id: mapping.package.id.as_ref().to_owned(),
-            version: mapping.package.version.as_ref().to_owned(),
-        },
-        schema_digest: mapping.schema_digest.as_ref().to_owned(),
-        materialization_version: mapping.materialization_version.as_ref().to_owned(),
-    }
-}
-
 fn revision_diff(
     current: Option<&AgentPresetRevision>,
     payload: &AgentPresetRevisionPayload,
@@ -1191,8 +1174,10 @@ fn revision_diff(
             .collect(),
         added_skills: after_skills.difference(&before_skills).cloned().collect(),
         removed_skills: before_skills.difference(&after_skills).cloned().collect(),
-        model_routes_changed: current
-            .is_none_or(|revision| revision.payload.model_route_refs != payload.model_route_refs),
+        model_routes_changed: current.is_none_or(|revision| {
+            revision.payload.model_route_refs != payload.model_route_refs
+                || revision.payload.chat_route_records != payload.chat_route_records
+        }),
         instructions_changed: current.is_none_or(|revision| {
             revision.payload.persona != payload.persona
                 || revision.payload.instructions != payload.instructions
@@ -1244,27 +1229,7 @@ pub fn revision_api(
     Ok(AgentPresetRevisionDto {
         reference: wire_cast(&revision.reference)?,
         document: wire_cast(&revision.payload)?,
-        contribution_locks: revision
-            .contribution_locks
-            .iter()
-            .map(|lock| {
-                Ok(ContributionLockDto {
-                    source_kind: wire_name(&lock.source_kind)?,
-                    source_identity: lock.source_identity.as_ref().to_owned(),
-                    mount_id: lock.mount_id.as_ref().map(|value| value.as_ref().to_owned()),
-                    miniapp_id: lock
-                        .miniapp_id
-                        .as_ref()
-                        .map(|value| value.as_ref().to_owned()),
-                    mcp_binding_id: lock
-                        .mcp_binding_id
-                        .as_ref()
-                        .map(|value| value.as_ref().to_owned()),
-                    contribution_id: lock.contribution_id.as_ref().to_owned(),
-                    contract_digest: lock.contract_digest.as_ref().to_owned(),
-                })
-            })
-            .collect::<Result<Vec<_>, ControlPlaneError>>()?,
+        contribution_locks: wire_cast(&revision.contribution_locks)?,
         created_by: revision.created_by.as_ref().to_owned(),
         created_at_ms: revision.created_at_ms,
         reason: revision.reason.clone(),
@@ -1609,6 +1574,15 @@ mod tests {
         assert_eq!(locks.len(), 2);
         assert!(locks.contains(&capability_lock));
         assert!(locks.contains(&skill_lock));
+        let api = revision_api(&AgentPresetRevision {
+            reference: PresetRevisionRef { preset_id: "preset".into(), revision: 1, revision_digest: "a".repeat(64).into() },
+            payload: payload.clone(), contribution_locks: locks.clone(),
+            created_by: "owner".into(), created_at_ms: 1, reason: None,
+        }).unwrap();
+        assert_eq!(serde_json::to_value(api.contribution_locks).unwrap(), serde_json::to_value(&locks).unwrap());
+        let catalog_api = catalog.as_api().unwrap();
+        assert_eq!(catalog_api.mcp_tools[0].canonical_tool_key, mapping.canonical_tool_key.as_ref());
+        assert_eq!(catalog_api.mcp_tools[0].source_package.id, mapping.package.id.as_ref());
 
         registry
             .skills

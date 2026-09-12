@@ -565,12 +565,14 @@ impl RuntimeSwitchCoordinator for CoordinatedRuntimeSwitch {
         &self,
     ) -> Result<VersionedRuntimeSelection, JavaScriptRuntimeError> {
         let _operation = self.operation.lock().await;
-        if let Some(pending) = self.pending.lock().await.take() {
+        // A failed load must not drop the pending switch and its write fence.
+        let current = self.authority.manager().snapshot().await?;
+        let pending = self.pending.lock().await.take();
+        if let Some(pending) = pending {
             if pending.phase == PendingRuntimeSwitchPhase::AwaitingDecision {
                 *self.pending.lock().await = Some(pending);
-                return self.authority.manager().snapshot().await;
+                return Ok(current);
             }
-            let current = self.authority.manager().snapshot().await?;
             return self
                 .restore_and_abort(
                     &current,
@@ -581,7 +583,6 @@ impl RuntimeSwitchCoordinator for CoordinatedRuntimeSwitch {
                 )
                 .await;
         }
-        let current = self.authority.manager().snapshot().await?;
         let Some(candidate) = current.selection.pending_candidate.as_ref() else {
             return Ok(current);
         };
@@ -665,12 +666,14 @@ mod tests {
 
     struct MemoryStore {
         value: Mutex<VersionedRuntimeSelection>,
+        fail_load: AtomicBool,
     }
 
     impl Default for MemoryStore {
         fn default() -> Self {
             Self {
                 value: Mutex::new(VersionedRuntimeSelection::empty()),
+                fail_load: AtomicBool::new(false),
             }
         }
     }
@@ -680,6 +683,11 @@ mod tests {
         async fn load(
             &self,
         ) -> Result<VersionedRuntimeSelection, RuntimeSelectionStoreError> {
+            if self.fail_load.load(Ordering::Acquire) {
+                return Err(RuntimeSelectionStoreError::Unavailable(
+                    "injected load failure".into(),
+                ));
+            }
             Ok(self.value.lock().await.clone())
         }
 
@@ -917,6 +925,15 @@ mod tests {
         assert_eq!(pending.revision, 2);
         assert!(pending.selection.validation_result.is_some());
 
+        let observed = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            coordinator.recover_interrupted_switch(),
+        )
+        .await
+        .expect("status recovery must not self-deadlock while awaiting a decision")
+        .unwrap();
+        assert_eq!(observed, pending);
+
         let aborted = coordinator
             .decide_switch(DecideRuntimeSwitchCommand {
                 expected_revision: pending.revision,
@@ -968,9 +985,8 @@ mod tests {
 
     #[tokio::test]
     async fn failed_restore_retains_the_write_fence_until_recovery() {
-        let manager = Arc::new(NodeRuntimeManager::new(Arc::new(
-            MemoryStore::default(),
-        )));
+        let store = Arc::new(MemoryStore::default());
+        let manager = Arc::new(NodeRuntimeManager::new(store.clone()));
         let selected_candidate = candidate('a');
         let selected = manager
             .select_initial(
@@ -1015,6 +1031,34 @@ mod tests {
             error,
             JavaScriptRuntimeError::SwitchNotCovered(_)
         ));
+
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            coordinator.recover_interrupted_switch(),
+        )
+        .await
+        .expect("repeated restore failure must return without locking pending twice")
+        .unwrap_err();
+        assert!(matches!(error, JavaScriptRuntimeError::SwitchNotCovered(_)));
+
+        store.fail_load.store(true, Ordering::Release);
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            coordinator.recover_interrupted_switch(),
+        )
+        .await
+        .expect("failed selection load must return")
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            JavaScriptRuntimeError::SelectionStore(RuntimeSelectionStoreError::Unavailable(_))
+        ));
+        assert!(coordinator.pending.lock().await.is_some());
+        store.fail_load.store(false, Ordering::Release);
+        assert_eq!(
+            coordinator.authority.manager().snapshot().await.unwrap(),
+            pending
+        );
 
         let blocked = tokio::time::timeout(
             std::time::Duration::from_millis(20),

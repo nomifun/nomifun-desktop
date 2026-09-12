@@ -628,10 +628,9 @@ impl AgentControlPlane {
     ) -> Result<AgentPresetEditorResponse, ControlPlaneError> {
         let stored = self.owned_preset(owner, preset_id).await?;
         let revision = match revision_number {
-            Some(number) => self
-                .store
+            Some(number) => Some(self.store
                 .get_revision_number(&stored.preset.preset_id, number)
-                .await?,
+                .await?.ok_or_else(|| not_found("AgentPresetRevision"))?),
             None => match stored.preset.current_stable_revision.as_ref() {
                 Some(reference) => self.store.get_revision(reference).await?,
                 None => None,
@@ -745,6 +744,14 @@ impl AgentControlPlane {
             .is_some_and(|revision| revision.reference == compilation.candidate_revision_ref)
         {
             let current = current.expect("clean compilation has a current Revision");
+            let mut stored = stored;
+            if stored.preset.display_name != request.draft.display_name
+                || stored.preset.description != request.draft.description
+            {
+                stored.preset.display_name = request.draft.display_name;
+                stored.preset.description = request.draft.description;
+                self.store.update_preset_metadata(&stored).await?;
+            }
             return Ok(SaveAgentPresetRevisionResponse {
                 preset: preset_summary(
                     &stored,
@@ -1804,6 +1811,13 @@ mod tests {
                 }).await.unwrap();
                 let revision = control.get_revision(&owner, &created.preset.preset_id, 1).await.unwrap();
                 assert_eq!(revision.document.chat_route_records[CHAT_MODEL_TASK]["primary"]["model"], "explicit-model");
+                let mut draft = created.draft;
+                draft.document.chat_route_records.get_mut(CHAT_MODEL_TASK).unwrap()["primary"]["model"] = json!("edited-model");
+                let preview = control.preview(&owner, &created.preset.preset_id, ResolveAgentPresetPreviewRequest {
+                    expected_current_revision: Some(revision.reference), draft,
+                    scene: SETTINGS_SCENE.into(), surface: SETTINGS_SURFACE.into(), audience: SETTINGS_AUDIENCE.into(),
+                }).await.unwrap();
+                assert!(preview.revision_diff.model_routes_changed);
             }
         }
     }
@@ -2371,6 +2385,10 @@ mod tests {
             .await
             .unwrap();
         let revision = created.revision.as_ref().expect("initial Revision");
+        let missing = control_plane.editor(&owner, &created.preset.preset_id, Some(2))
+            .await.expect_err("an explicit missing Revision must not open a blank draft");
+        assert_eq!(missing.status(), axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(missing.code().as_ref(), "PRESET_REVISION_DIGEST_MISMATCH");
 
         let binding = control_plane
             .resolve_agent_session_binding(&owner, &created.preset.preset_id)
@@ -2406,6 +2424,21 @@ mod tests {
             .await
             .unwrap()
             .draft;
+        next_draft.display_name = "Renamed without a new Revision".into();
+        next_draft.description = Some("Updated metadata".into());
+        let rename_preview = control_plane.preview(&owner, &created.preset.preset_id, ResolveAgentPresetPreviewRequest {
+            expected_current_revision: Some(revision.reference.clone()), draft: next_draft.clone(),
+            scene: SETTINGS_SCENE.into(), surface: SETTINGS_SURFACE.into(), audience: SETTINGS_AUDIENCE.into(),
+        }).await.unwrap();
+        let renamed = control_plane.save_revision(&owner, &created.preset.preset_id, SaveAgentPresetRevisionRequest {
+            expected_current_revision: Some(revision.reference.clone()), preview_digest: rename_preview.preview_digest,
+            draft: next_draft.clone(), reason: None,
+        }).await.unwrap();
+        assert_eq!(renamed.revision.reference, revision.reference);
+        assert_eq!(renamed.preset.display_name, next_draft.display_name);
+        let reloaded = control_plane.editor(&owner, &created.preset.preset_id, None).await.unwrap();
+        assert_eq!(reloaded.draft.display_name, next_draft.display_name);
+        assert_eq!(reloaded.draft.description, next_draft.description);
         next_draft.document.instructions = "Revision two".into();
         let next_preview_request = ResolveAgentPresetPreviewRequest {
             expected_current_revision: Some(revision.reference.clone()),

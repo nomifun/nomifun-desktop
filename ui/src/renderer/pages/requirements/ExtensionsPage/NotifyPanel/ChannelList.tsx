@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Empty, Popconfirm, Switch, Table, Tag } from '@arco-design/web-react';
 import { useContainerWidth } from '@renderer/hooks/ui/useContainerWidth';
@@ -34,13 +34,19 @@ const ChannelList: React.FC<ChannelListProps> = ({ channels, loading, error, rel
   const { ref, width } = useContainerWidth<HTMLDivElement>();
   const [modalVisible, setModalVisible] = useState(false);
   const [editing, setEditing] = useState<IWebhook | null>(null);
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   const handleTest = async (webhook_id: WebhookId) => {
     try {
       await ipcBridge.webhook.test.invoke({ webhook_id });
+      if (!mounted.current) return;
       message.success(t('webhook.messages.testOk'));
     } catch (e) {
-      if (isHandledAuthExpiredHttpError(e)) return;
+      if (!mounted.current || isHandledAuthExpiredHttpError(e)) return;
       message.error(t('webhook.messages.testError', { error: String(e) }));
     }
   };
@@ -48,10 +54,11 @@ const ChannelList: React.FC<ChannelListProps> = ({ channels, loading, error, rel
   const handleDelete = async (webhook_id: WebhookId) => {
     try {
       await ipcBridge.webhook.remove.invoke({ webhook_id });
+      if (!mounted.current) return;
       message.success(t('webhook.messages.deleteOk'));
       await reloadChannels();
     } catch (e) {
-      if (isHandledAuthExpiredHttpError(e)) return;
+      if (!mounted.current || isHandledAuthExpiredHttpError(e)) return;
       message.error(String(e));
     }
   };
@@ -72,8 +79,9 @@ const ChannelList: React.FC<ChannelListProps> = ({ channels, loading, error, rel
   };
 
   const handleModalSuccess = async () => {
-    await reloadChannels();
+    if (!mounted.current) return;
     handleModalClose();
+    await reloadChannels();
   };
 
   const columns = [
