@@ -66,18 +66,20 @@ impl ExternalPathsManager {
     /// If a path with the same value already exists, it is updated with the new name.
     pub async fn add_custom_external_path(&self, name: &str, path: &str) -> Result<(), SkillError> {
         let mut paths = self.paths.write().await;
+        let mut updated = paths.clone();
 
         // Update existing or add new
-        if let Some(existing) = paths.iter_mut().find(|p| p.path == path) {
+        if let Some(existing) = updated.iter_mut().find(|p| p.path == path) {
             existing.name = name.to_string();
         } else {
-            paths.push(PersistedNamedPath {
+            updated.push(PersistedNamedPath {
                 name: name.to_string(),
                 path: path.to_string(),
             });
         }
 
-        save_to_file(&self.file_path, &paths).await?;
+        save_to_file(&self.file_path, &updated).await?;
+        *paths = updated;
         debug!(name = %name, path = %path, "added custom external path");
         Ok(())
     }
@@ -85,11 +87,12 @@ impl ExternalPathsManager {
     /// Remove a custom external path by its path value.
     pub async fn remove_custom_external_path(&self, path: &str) -> Result<(), SkillError> {
         let mut paths = self.paths.write().await;
-        let before_len = paths.len();
-        paths.retain(|p| p.path != path);
+        let mut updated = paths.clone();
+        updated.retain(|p| p.path != path);
 
-        if paths.len() < before_len {
-            save_to_file(&self.file_path, &paths).await?;
+        if updated.len() < paths.len() {
+            save_to_file(&self.file_path, &updated).await?;
+            *paths = updated;
             debug!(path = %path, "removed custom external path");
         }
 
@@ -246,6 +249,32 @@ mod tests {
             assert_eq!(paths[0].name, "A");
             assert_eq!(paths[1].name, "B");
         }
+    }
+
+    #[tokio::test]
+    async fn failed_saves_do_not_publish_add_update_or_remove() {
+        let tmp = TempDir::new().unwrap();
+        let file = tmp.path().join(CUSTOM_SKILL_PATHS_FILE);
+        let mgr = ExternalPathsManager::with_file(file.clone()).await;
+        mgr.add_custom_external_path("Original", "/kept").await.unwrap();
+        let before = mgr.get_custom_external_paths().await;
+        let saved = std::fs::read(&file).unwrap();
+
+        // A directory at the persistence path fails writes on every platform.
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        assert!(mgr.add_custom_external_path("New", "/new").await.is_err());
+        assert_eq!(mgr.get_custom_external_paths().await, before);
+        assert!(mgr.add_custom_external_path("Changed", "/kept").await.is_err());
+        assert_eq!(mgr.get_custom_external_paths().await, before);
+        assert!(mgr.remove_custom_external_path("/kept").await.is_err());
+        assert_eq!(mgr.get_custom_external_paths().await, before);
+
+        std::fs::remove_dir(&file).unwrap();
+        std::fs::write(&file, saved).unwrap();
+        mgr.add_custom_external_path("New", "/new").await.unwrap();
+        let reloaded = ExternalPathsManager::with_file(file).await;
+        assert_eq!(reloaded.get_custom_external_paths().await, mgr.get_custom_external_paths().await);
     }
 
     #[tokio::test]

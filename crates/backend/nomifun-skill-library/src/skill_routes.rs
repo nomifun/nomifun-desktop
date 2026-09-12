@@ -496,7 +496,7 @@ mod tests {
         }
     }
 
-    async fn make_state() -> SkillRouterState {
+    async fn make_state() -> (tempfile::TempDir, SkillRouterState) {
         let tmp = tempfile::TempDir::new().unwrap();
         let paths = SkillPaths {
             data_dir: tmp.path().to_path_buf(),
@@ -506,18 +506,18 @@ mod tests {
             builtin_rules_dir: tmp.path().join("builtin-rules"),
         };
         let ext_mgr = Arc::new(ExternalPathsManager::with_file(tmp.path().join("paths.json")).await);
-        std::mem::forget(tmp);
-        SkillRouterState {
+        let state = SkillRouterState {
             skill_paths: paths,
             external_paths_manager: ext_mgr,
             skill_tag_repo: std::sync::Arc::new(InMemorySkillTagRepo::default()),
             builtin_skill_tags: std::sync::Arc::new(std::collections::HashMap::new()),
-        }
+        };
+        (tmp, state)
     }
 
     #[tokio::test]
     async fn skill_routes_builds_router() {
-        let state = make_state().await;
+        let (_tmp, state) = make_state().await;
         let _router = skill_routes(state);
     }
 
@@ -533,7 +533,8 @@ mod tests {
         ];
 
         for (method, uri) in routes {
-            let response = skill_routes(make_state().await)
+            let (_tmp, state) = make_state().await;
+            let response = skill_routes(state)
                 .oneshot(
                     Request::builder()
                         .method(method)

@@ -7,7 +7,7 @@
 //! [`nomifun_common::zip_safe`] hardening also used by the knowledge and
 //! companion importers.
 
-use std::io;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use nomifun_common::zip_safe::{self, ZipColonPolicy, ZipExtractionBudget};
@@ -55,12 +55,19 @@ fn extract_zip_archive_with_budget(
             std::fs::create_dir_all(parent)?;
         }
         let mut output = std::fs::File::create(&output_path)?;
-        // The budget tracks ACTUAL bytes written (io::copy's return), not the
-        // entry's self-declared size — bomb archives lie about their sizes.
-        let written = io::copy(&mut entry, &mut output)?;
-        budget
-            .record_written(written)
-            .map_err(|e| SkillError::InvalidSkillPath(e.to_string()))?;
+        // Reserve actual decompressed bytes before each write. Checking only
+        // after io::copy would let one oversized entry exhaust the disk first.
+        let mut buffer = [0_u8; 8192];
+        loop {
+            let read = entry.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            budget
+                .record_written(read as u64)
+                .map_err(|e| SkillError::InvalidSkillPath(e.to_string()))?;
+            output.write_all(&buffer[..read])?;
+        }
     }
 
     Ok(())
@@ -162,16 +169,17 @@ mod tests {
             err.to_string().contains("decompression bomb"),
             "unexpected error: {err}"
         );
+        assert!(std::fs::metadata(dest.join("big.bin")).unwrap().len() <= 4 * 1024);
 
-        // ...while a sufficient cap extracts the same archive fine.
+        // ...while an exact-size cap extracts the same archive in full.
         let dest_ok = tmp.path().join("out-ok");
         extract_zip_archive_with_budget(
             &zip_path,
             &dest_ok,
-            ZipExtractionBudget::new(128 * 1024, ZipExtractionBudget::DEFAULT_MAX_ENTRIES),
+            ZipExtractionBudget::new(64 * 1024, ZipExtractionBudget::DEFAULT_MAX_ENTRIES),
         )
         .unwrap();
-        assert!(dest_ok.join("big.bin").is_file());
+        assert_eq!(std::fs::metadata(dest_ok.join("big.bin")).unwrap().len(), 64 * 1024);
     }
 
     /// Entry-count guard: too many entries are refused before extraction.
