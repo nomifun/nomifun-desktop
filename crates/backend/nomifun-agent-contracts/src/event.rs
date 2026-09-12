@@ -146,7 +146,7 @@ impl SessionEventRegistryPayload {
                         SessionEventRegistryValidationError::ActivationCommitMustBePersistent,
                     );
                 }
-                persistent_activation_commits += 1;
+                persistent_activation_commits = persistent_activation_commits.saturating_add(1);
             }
 
             if entry.persistence == SessionEventPersistence::Persistent
@@ -375,4 +375,42 @@ fn is_upper_snake_case(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn activation_commit_count_rejects_overflow_without_changing_the_contract() {
+        let canonical: SessionEventRegistryPayload = serde_json::from_str(include_str!(
+            "../contracts/events/session-event-registry.json"
+        ))
+        .unwrap();
+        canonical.validate().unwrap();
+        let commit = canonical
+            .entries
+            .iter()
+            .find(|entry| entry.kind.0 == ACTIVE_SET_COMMITTED)
+            .unwrap();
+        for count in [0_u32, 1, 2, 255, 256, 257] {
+            let mut registry = canonical.clone();
+            registry.entries.retain(|entry| entry.kind.0 != ACTIVE_SET_COMMITTED);
+            registry.entries.extend((1..=count).map(|version| {
+                SessionEventRegistryEntry { version, ..commit.clone() }
+            }));
+            let result = registry.validate();
+            if count == 1 {
+                assert_eq!(result, Ok(()));
+            } else {
+                assert_eq!(
+                    result,
+                    Err(SessionEventRegistryValidationError::PersistentActivationCommitCount {
+                        actual: count.min(u32::from(u8::MAX)) as u8,
+                    }),
+                    "accepted or miscounted {count} persistent activation commits",
+                );
+            }
+        }
+    }
 }
