@@ -1,7 +1,12 @@
-//! Private durable file publication shared by directory config and reset control.
+//! Private durable publication and native no-replace renames for config and reset.
 
 use std::fs::OpenOptions;
 use std::path::Path;
+
+// These native operations support both files and directories. The fallback
+// below is file-only; directory resets on other platforms remain unsupported.
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+pub(crate) use rename_noreplace as publish_new_file;
 
 pub(crate) fn write_new_and_publish(
     temp: &Path,
@@ -65,7 +70,7 @@ pub(crate) fn replace_file(source: &Path, target: &Path) -> std::io::Result<()> 
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn publish_new_file(source: &Path, target: &Path) -> std::io::Result<()> {
+pub(crate) fn rename_noreplace(source: &Path, target: &Path) -> std::io::Result<()> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
@@ -100,7 +105,7 @@ pub(crate) fn publish_new_file(source: &Path, target: &Path) -> std::io::Result<
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn publish_new_file(source: &Path, target: &Path) -> std::io::Result<()> {
+pub(crate) fn rename_noreplace(source: &Path, target: &Path) -> std::io::Result<()> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
 
@@ -137,23 +142,14 @@ pub(crate) fn publish_new_file(source: &Path, target: &Path) -> std::io::Result<
     }
 }
 
-#[cfg(all(
-    unix,
-    not(any(target_os = "linux", target_os = "macos"))
-))]
-pub(crate) fn publish_new_file(source: &Path, target: &Path) -> std::io::Result<()> {
-    std::fs::hard_link(source, target)?;
-    std::fs::remove_file(source)
-}
-
-#[cfg(not(any(unix, windows)))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub(crate) fn publish_new_file(source: &Path, target: &Path) -> std::io::Result<()> {
     std::fs::hard_link(source, target)?;
     std::fs::remove_file(source)
 }
 
 #[cfg(windows)]
-pub(crate) fn publish_new_file(source: &Path, target: &Path) -> std::io::Result<()> {
+pub(crate) fn rename_noreplace(source: &Path, target: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
         MOVEFILE_WRITE_THROUGH, MoveFileExW,
