@@ -6,9 +6,9 @@
 
 - 当前范围排除（用户2026-09-13追加）：Browser Use、小程序、插件均暂不审改。MiniApp/Plugin平台与服务、页面、专属打包/声明/契约/测试及正在重构的worktree由原负责人继续；共享模块只处理可独立证明不改变上述域契约的通用问题。跳过不计已验证，既有提交保留。
 
-- 当前批次：R143/R145/R146/R147/R148/R149已验收至 `e48e96d62`，上一已核实远端 `ea4460033`；R150运行时UI、R151 MCP服务独占继续。R115按小程序/插件排除要求撤回本人未提交补丁。
+- 当前批次：R151 MCP服务精简 `773819b66`、R153 provider retry精简 `4e8bf19fa` 已验收；上一已核实远端 `2d1fbca96`。R150运行时UI、R152 MCP仓储独占继续，主线接续provider初次流取消。R115按小程序/插件排除要求撤回本人未提交补丁。
 - 后续集成：当前分支已包含 `dd35e01de` 的 MiniApp 分支合并；设计文档已跟踪。本批仅更新遗留路由测试，未修改 MiniApp 产品实现，模块仍待深审。
-- 全局覆盖：111 个模块边界中，7 个已验证、73 个部分完成、31 个待审、0 个整模块审计中；374 个唯一问题/任务。当前两个子范围正在继续；完整阅读与跨模块问题闭环分开登记，Browser Use仍暂跳过。
+- 全局覆盖：111 个模块边界中，7 个已验证、74 个部分完成、30 个待审、0 个整模块审计中；377 个唯一问题/任务。当前三个子范围正在继续；完整阅读与跨模块问题闭环分开登记，Browser Use仍暂跳过。
 - R1 证据：[首轮记录](2026-09-12-code-quality.zh.md)。R1–R39 各报告中的“未提交/dirty”描述是当时快照；当前提交状态以下方验收记录为准。
 - R2 证据：[运行时与测试边界记录](2026-09-12-runtime-and-test-boundaries.zh.md)，包含改动、失败尝试、验证及覆盖限制。
 - R3 证据：[生命周期与状态记录](2026-09-12-lifecycle-and-state.zh.md)，记录四个 Host 旧实现失败、Context falsy 初值及消息重放缺陷；保留待办，勿重复修复。
@@ -518,14 +518,21 @@ R148将注释字节置为空白，保留字符串原字节及CR/LF，未闭合�
 
 R146已提交冻结后才放行MCP三个不相交写集。Rust依赖链全部冻结后集中串行验证，UI独立；共享类型/接口不随意修改，排除域不变。
 
-## 当前并行边界（R150 / R151）
+## R151 / R153 精简验收
+
+R151源码 `773819b66`：edit_server已禁止改名，删除不可达的改名唯一性查询；baseline.sql 896–917及MCP仓储全文只读核对。合并同义拒绝改名测试并保留原名不变断言；编辑单元7/0、实际SQLite集成5/0，验证后仅删两处空行。生产-13、测试-17，总-30。跨存储更新仍沿R145-03。
+
+R153源码 `4e8bf19fa`：全仓引用检索确认backoff_sleep仅自测使用，删除并将两项旧测试合成现用可取消backoff的时长/上限测试；tx.send自身在receiver关闭时解除等待，删除无人读取返回值的emit_if_open包装。retry原654行及manifest全文、六provider调用段和OpenAI既有两项parser/retry回归已读；不是所有provider全文。retry16/0、OpenAI空body重试与部分EOF不重放2/0；nomi-providers依赖树确认不含活动DB写集，构建无交叉。生产-16、测试-12，总-28，无新依赖/框架。加此前六批共生产-78、测试-37，总-115，不含台账。
+
+## 当前并行边界（R150 / R152 / R154）
 
 | 批次 / 负责人 | 独占写集 | 任务 |
 | --- | --- | --- |
 | R150 / Carver | ui/src/renderer/pages/settings/RuntimeManager/** | 本地模型/请求/安装事件生命周期及冗余；共享hooks/adapter和排除域只读 |
-| R151 / 主线 | backend/nomifun-mcp/src/service.rs及既有专属测试 | R145提交后核对禁止重命名分支后的冗余查询，先读DB唯一约束再收口 |
+| R152 / Hypatia | backend/nomifun-db/src/repository/sqlite_mcp_server.rs | 原子部分更新，保留nullable三态及显式恢复；禁止Cargo，由主线集中验证 |
+| R154 / 主线 | agent/nomi-providers/src/openai_responses.rs及专属测试 | 初次静默HTTP流下游取消，复用现有until_receiver_closed；不改API策略 |
 
-R143/R145/R147/R148/R149源码冻结；R150在R143完整typecheck后开始。R151在MCP验证结束后再改，Rust继续串行。
+R143/R145/R147/R148/R149/R151/R153源码已提交冻结；R150在R143完整typecheck后开始。R152与provider不在同一构建依赖链，Rust继续串行；共享接口和排除域不改。
 
 ## 历史并行边界（R141 / R142 / R143 / R144）
 
@@ -1276,7 +1283,10 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | R148-01 | 已验证 | OpenCode JSONC破坏UTF8/拼接token | 字节副本将注释置空白、保留换行，拒未闭合块；合并解析包装和两个重复接口测试，三项旧失败，解析17/0 |
 | R149-01 | 已验证 | adapter两套测试仅验证各自mock | 删除adapter.rs测试模块与adapter_integration.rs，真实sync_service4/0+集成2/0保留；纠正同步锁文档为每service实例；生产-3测试-232 |
 | R150-01 | 审计中 | RuntimeManager局部请求/安装状态及重复逻辑 | 已划独占UI目录，先完整阅读再处理确定性缺陷，共享接口不改 |
-| R151-01 | 审计中 | 禁止MCP重命名后仍执行重命名查重 | 核对DB唯一约束和调用语义后精简，未验证 |
+| R151-01 | 已验证 | 禁止MCP重命名后仍执行重命名查重 | 删除不可达查询和同义测试，7单元+5SQLite集成通过，生产-13/测试-17 |
+| R152-01 | 审计中 | MCP仓储先读合并整行更新会丢失并发patch及复活删除 | 独占仓储原子字段UPDATE，保留三态和显式恢复，待冻结验证 |
+| R153-01 | 已验证 | provider旧backoff无生产调用，错误send重复取消包装 | 删除两层冗余，合并为现用backoff测试；retry16/0、实际OpenAI parser/retry2/0 |
+| R154-01 | 审计中 | Responses初次静默流未在下游关闭时退出 | 调用方未使用已有until_receiver_closed，先核对生产流测试夹具再最小修复 |
 | R133-01 | 已验证 | Web缺少优雅关停入口 | 复用App现有shutdown_signal，Web9/0；未模拟实际OS信号/长连接排空 |
 | R133-02 | 已验证 | App关停watch无业务消费者 | 两处只创建/发送却无人读取，删channel/clone/send，三文件生产净减10行 |
 | R133-03 | 部分完成 | 独立Web/共享App关闭及启动边界 | 长连接graceful drain无界、signal注册expect、其他OS/真实关停未验；共享bootstrap/auth继续，不扩大到排除域 |
@@ -1302,7 +1312,7 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | `crates/agent/nomi-mcp/` | 部分完成 | R36 HTTP/SSE 生产代码及定向测试已审；122/0、Agent/CLI check 通过。stdio、manager 后半部、tool_proxy 未完整审计；其他限制见 R36-04 |
 | `crates/agent/nomi-memory/` | 部分完成 | R35 全生产文件/现有测试及调用已读；150/0+Agent 17/0；路径碰撞/多文件写入和非协作边界 R35-07 保留 |
 | `crates/agent/nomi-protocol/` | 已验证 | R30 命令/事件/读写全文件及测试，49/0；stdin 有界、标准 stdout 整帧锁；OS stdin 阻塞与调用方 R30-02 不冒充已解决 |
-| `crates/agent/nomi-providers/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
+| `crates/agent/nomi-providers/` | 部分完成 | R153全读retry654行及六调用段，删冗余后16+2定向回归通过；R154接续Responses初次流取消，其余provider未全读 |
 | `crates/agent/nomi-skills/` | 部分完成 | R38–R40 全生产与既有测试已读；R47 inline shell 副作用判断调用链已修（两项红→绿），本批 Agent 94/0 + Skills shell 53/0。剩余容量/加载/MCP 等见 R38-03 |
 | `crates/agent/nomi-tools/` | 部分完成 | R122全读8文件3942行、117/0，R126共享发布44/0，R130补丁工具12/0；R129搜索26/0、R134截断8/0；其余工具和跨调用仍未全审 |
 | `crates/agent/nomi-types/` | 已验证 | R31 全模块及测试/四类 provider 调用已读；描述字符与 CRLF 修复、重复测试删除，70/0；provider 定向 2/0 |
