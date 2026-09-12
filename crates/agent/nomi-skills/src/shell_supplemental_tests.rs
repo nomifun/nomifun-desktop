@@ -184,7 +184,7 @@ async fn tc_4_3_stderr_captured_and_formatted() {
     assert!(result.contains("stderr_msg"));
 }
 
-// TC-4.4: 命令失败且无输出 → Err（D-3 偏离：有输出时仍返回 Ok）
+// TC-4.4: 命令失败且无输出 → Err
 #[tokio::test]
 async fn tc_4_4_command_fail_no_output_returns_err() {
     // `exit 1` exits with code 1 and produces no output (cross-platform)
@@ -196,22 +196,21 @@ async fn tc_4_4_command_fail_no_output_returns_err() {
     );
 }
 
-// TC-4.4b: 命令失败但有输出 → Ok（D-3 偏离验证）
+// Non-zero exit must fail even when a diagnostic was written.
 #[tokio::test]
-async fn tc_4_4b_command_fail_with_output_returns_ok() {
-    // exits non-zero but still has stdout
-    let content = if cfg!(windows) {
-        "!`Write-Output output; exit 1`"
-    } else {
-        "!`echo output; exit 1`"
-    };
-    let result = run(content).await;
-    assert!(
-        result.is_ok(),
-        "command with exit 1 but with output should return Ok, got: {:?}",
-        result.err()
-    );
-    assert!(result.unwrap().contains("output"));
+async fn command_fail_with_output_returns_err() {
+    for content in [
+        "!`echo output; exit 1`",
+        if cfg!(windows) {
+            "!`[Console]::Error.WriteLine('output'); exit 1`"
+        } else {
+            "!`echo output >&2; exit 1`"
+        },
+    ] {
+        let error = run(content).await.unwrap_err().to_string();
+        assert!(error.contains("exit code 1"), "{error}");
+        assert!(error.contains("output"), "{error}");
+    }
 }
 
 // TC-4.5: cwd 参数生效
@@ -247,9 +246,7 @@ async fn tc_4_6_empty_output() {
 #[tokio::test]
 async fn tc_4_7_nonexistent_command_returns_err() {
     let content = "!`not_a_real_command_xyz_12345`";
-    let result = run(content).await.unwrap();
-    // Nonexistent commands write a diagnostic to stderr. Per D-3, non-empty
-    // stderr is returned as Ok content even when the shell exits non-zero.
+    let result = run(content).await.unwrap_err().to_string();
     assert!(result.contains("[stderr]"), "got: {result}");
     assert!(
         result.contains("not_a_real_command_xyz_12345"),

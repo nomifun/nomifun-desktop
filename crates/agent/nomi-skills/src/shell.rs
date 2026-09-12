@@ -54,9 +54,8 @@ pub async fn execute_shell_commands_with_shell(
     // Pair matches with outputs; fail-fast on first error
     let mut pairs: Vec<(usize, usize, String)> = Vec::with_capacity(matches.len());
     for (m, result) in matches.iter().zip(outputs) {
-        let output = result.map_err(|e| ShellExecutionError::CommandFailed {
-            pattern: m.full_match.clone(),
-            output: e.to_string(),
+        let output = result.map_err(|ShellExecutionError::CommandFailed { output, .. }| {
+            ShellExecutionError::CommandFailed { pattern: m.full_match.clone(), output }
         })?;
         pairs.push((m.start, m.end, output));
     }
@@ -215,14 +214,15 @@ async fn execute_command(
     let stdout = output.stdout;
     let stderr = output.stderr;
 
-    if !output.success && stdout.is_empty() && stderr.is_empty() {
+    let text = format_output(stdout.trim_end(), stderr.trim_end());
+    if !output.success {
         return Err(ShellExecutionError::CommandFailed {
             pattern: command.to_owned(),
-            output: format!("exit code {}", output.code.unwrap_or(-1)),
+            output: format!("exit code {}\n{text}", output.code.unwrap_or(-1)),
         });
     }
 
-    Ok(format_output(stdout.trim_end(), stderr.trim_end()))
+    Ok(text)
 }
 
 /// Format stdout and stderr into a single string.

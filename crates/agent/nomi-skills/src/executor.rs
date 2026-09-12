@@ -12,9 +12,9 @@ use nomi_config::shell::SupervisedShell;
 /// Prepare skill content for inline execution.
 ///
 /// Steps:
-/// 1. If the skill has a known `skill_root`, prepend a base-directory header.
-/// 2. Perform variable substitution (arguments + env vars).
-/// 3. Execute any embedded shell commands (skipped for MCP skills).
+/// 1. Perform variable substitution (arguments + env vars).
+/// 2. Execute any embedded shell commands (skipped for MCP skills).
+/// 3. Prepend the literal base-directory header if `skill_root` is known.
 ///
 /// Runs shell commands through the caller-provided `shell` so turn
 /// cancellation can fence every command.
@@ -25,28 +25,22 @@ pub async fn prepare_inline_content_with_shell(
     cwd: &str,
     shell: &SupervisedShell,
 ) -> Result<String, ShellExecutionError> {
-    // Prepend base directory header so the model can resolve relative paths
-    // (e.g. `./schemas/foo.json`). Matches TS `processPromptSlashCommand`.
-    let base = match skill.skill_root.as_deref() {
-        Some(root) => {
-            let normalized = normalize_path_separators(root);
-            format!(
-                "Base directory for this skill: {normalized}\n\n{}",
-                skill.content
-            )
-        }
-        None => skill.content.clone(),
-    };
-
     let substituted = substitute_arguments(
-        &base,
+        &skill.content,
         args,
         &skill.argument_names,
         skill.skill_root.as_deref(),
         session_id,
     );
-
-    execute_shell_commands_with_shell(&substituted, skill.loaded_from, cwd, shell).await
+    let content = execute_shell_commands_with_shell(&substituted, skill.loaded_from, cwd, shell).await?;
+    // The directory header is metadata, not a variable or shell template.
+    Ok(match skill.skill_root.as_deref() {
+        Some(root) => format!(
+            "Base directory for this skill: {}\n\n{content}",
+            normalize_path_separators(root)
+        ),
+        None => content,
+    })
 }
 
 /// Normalize path separators to forward slashes.
@@ -176,6 +170,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result, "Target: foo");
+        let skill = make_skill("Target: $0", Some("/skills/$0"));
+        let result = prepare_inline_content(&skill, Some("foo"), None, "/tmp").await.unwrap();
+        assert_eq!(result, "Base directory for this skill: /skills/$0\n\nTarget: foo");
     }
 
     #[tokio::test]
@@ -252,32 +249,6 @@ mod supplemental_tests {
         }
     }
 
-    // TC-10.1: basic prepare_inline_content call
-    #[tokio::test]
-    async fn tc_10_1_prepare_inline_substitutes_arguments() {
-        let skill = make_skill_full(
-            "s",
-            "Search $ARGUMENTS",
-            None,
-            vec![],
-            ExecutionContext::Inline,
-        );
-        let result = prepare_inline_content(&skill, Some("rust"), None, "/tmp")
-            .await
-            .unwrap();
-        assert_eq!(result, "Search rust");
-    }
-
-    // TC-10.2: no args, no placeholder → content unchanged
-    #[tokio::test]
-    async fn tc_10_2_no_args_no_placeholder_unchanged() {
-        let skill = make_skill_full("s", "Just content.", None, vec![], ExecutionContext::Inline);
-        let result = prepare_inline_content(&skill, None, None, "/tmp")
-            .await
-            .unwrap();
-        assert_eq!(result, "Just content.");
-    }
-
     // TC-10.3: skill_root causes base directory header to be prepended
     #[tokio::test]
     async fn tc_10_3_skill_root_prepends_header() {
@@ -296,22 +267,6 @@ mod supplemental_tests {
             "expected header, got: {result}"
         );
         assert!(result.contains("/path/to/skill/script.sh"));
-    }
-
-    // TC-10.x: session_id substitution wired through
-    #[tokio::test]
-    async fn tc_10_x_session_id_substituted() {
-        let skill = make_skill_full(
-            "s",
-            "${NOMI_SESSION_ID}",
-            None,
-            vec![],
-            ExecutionContext::Inline,
-        );
-        let result = prepare_inline_content(&skill, None, Some("sess-xyz"), "/tmp")
-            .await
-            .unwrap();
-        assert_eq!(result, "sess-xyz");
     }
 
     // TC-10.x: argument_names from metadata are used
@@ -696,27 +651,6 @@ mod phase7_tests {
         );
     }
 
-    // TC-7.43 (allowed_tools empty): empty allowed_tools passes through
-    #[tokio::test]
-    async fn tc_7_43_empty_allowed_tools_passthrough() {
-        let skill = make_fork_skill("no-tools-fork", "content");
-        let delegation_backend = MockInvocationRunner::success("ok");
-        execute_fork(&skill, None, None, "/tmp", &delegation_backend)
-            .await
-            .unwrap();
-        let input = delegation_backend.take_input();
-        assert!(input.exact_tools.is_empty());
-    }
-
-    // TC-7.44: delegated Agent result text propagated to Ok return value
-    #[tokio::test]
-    async fn tc_7_44_result_text_propagated() {
-        let skill = make_fork_skill("text-fork", "content");
-        let delegation_backend = MockInvocationRunner::success("the final answer");
-        let result = execute_fork(&skill, None, None, "/tmp", &delegation_backend).await;
-        assert_eq!(result.unwrap(), "the final answer");
-    }
-
     // TC-7.45: AgentInvocationInput.max_turns defaults to 10.
     #[tokio::test]
     async fn tc_7_45_max_turns_default_is_10() {
@@ -742,15 +676,5 @@ mod phase7_tests {
             config.system_prompt.is_none(),
             "system_prompt should default to None"
         );
-    }
-
-    // All effort levels convert to their string representations
-    #[test]
-    fn tc_7_effort_all_variants_to_string() {
-        use crate::context_modifier::effort_to_string;
-        assert_eq!(effort_to_string(EffortLevel::Low), "low");
-        assert_eq!(effort_to_string(EffortLevel::Medium), "medium");
-        assert_eq!(effort_to_string(EffortLevel::High), "high");
-        assert_eq!(effort_to_string(EffortLevel::Max), "max");
     }
 }

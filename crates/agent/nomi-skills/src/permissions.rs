@@ -100,6 +100,10 @@ mod tests {
         assert_eq!(rule, PermissionRule::Exact("commit".to_string()));
         assert!(rule.matches("commit"));
         assert!(!rule.matches("commit-all"));
+        let empty = PermissionRule::parse("");
+        assert_eq!(empty, PermissionRule::Exact(String::new()));
+        assert!(empty.matches(""));
+        assert!(!empty.matches("anything"));
     }
 
     #[test]
@@ -110,6 +114,11 @@ mod tests {
         assert!(rule.matches("db:"));
         assert!(!rule.matches("db"));
         assert!(!rule.matches("database"));
+        let colon = PermissionRule::parse(":*");
+        assert_eq!(colon, PermissionRule::Prefix(":".to_string()));
+        assert!(colon.matches(":something"));
+        assert!(!colon.matches("something"));
+        assert!(!colon.matches(""));
     }
 
     #[test]
@@ -119,6 +128,13 @@ mod tests {
             checker.check(&make_skill("dangerous")),
             SkillPermission::Deny
         );
+        let checker = SkillPermissionChecker::new(vec!["admin:*".to_string()]);
+        for name in ["admin:create-user", "admin:delete-all"] {
+            assert_eq!(checker.check(&make_skill(name)), SkillPermission::Deny);
+        }
+        for name in ["admins", "admin"] {
+            assert_eq!(checker.check(&make_skill(name)), SkillPermission::Allow);
+        }
     }
 
     #[test]

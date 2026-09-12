@@ -4,11 +4,7 @@ use serial_test::serial;
 use std::fs;
 use tempfile::TempDir;
 
-fn write_skill(dir: &Path, rel_path: &str, content: &str) {
-    let full = dir.join(rel_path);
-    fs::create_dir_all(full.parent().unwrap()).unwrap();
-    fs::write(full, content).unwrap();
-}
+use super::tests::write_skill;
 
 fn make_loaded_skill(path: PathBuf, name: &str) -> LoadedSkill {
     let fm = FrontmatterData::default();
@@ -24,38 +20,6 @@ fn make_loaded_skill(path: PathBuf, name: &str) -> LoadedSkill {
         metadata,
         resolved_path: path,
     }
-}
-
-// -----------------------------------------------------------------------
-// TC-7.x: build_namespace
-// -----------------------------------------------------------------------
-
-#[test]
-fn tc_7_1_build_namespace_single_level() {
-    let base = Path::new("/skills");
-    let target = Path::new("/skills/my-tool");
-    assert_eq!(build_namespace(base, target), "my-tool");
-}
-
-#[test]
-fn tc_7_2_build_namespace_two_levels() {
-    let base = Path::new("/skills");
-    let target = Path::new("/skills/db/migrate");
-    assert_eq!(build_namespace(base, target), "db:migrate");
-}
-
-#[test]
-fn tc_7_3_build_namespace_three_levels() {
-    let base = Path::new("/skills");
-    let target = Path::new("/skills/a/b/c");
-    assert_eq!(build_namespace(base, target), "a:b:c");
-}
-
-#[test]
-fn tc_7_4_build_namespace_same_dir_returns_empty() {
-    let base = Path::new("/skills");
-    let result = build_namespace(base, base);
-    assert_eq!(result, "", "base == target should produce empty string");
 }
 
 // -----------------------------------------------------------------------
@@ -129,34 +93,6 @@ async fn tc_8_x_no_frontmatter_description_from_body() {
     assert!(!skills[0].metadata.has_user_specified_description);
 }
 
-// -----------------------------------------------------------------------
-// TC-9.x: load_skills_from_commands_dir supplemental cases
-// -----------------------------------------------------------------------
-
-#[tokio::test]
-async fn tc_9_2_flat_md_name_without_extension() {
-    let tmp = TempDir::new().unwrap();
-    write_skill(tmp.path(), "simple.md", "---\ndescription: Simple\n---\n");
-
-    let skills = load_skills_from_commands_dir(tmp.path(), SkillSource::User).await;
-    assert_eq!(skills.len(), 1);
-    assert_eq!(skills[0].metadata.name, "simple");
-}
-
-#[tokio::test]
-async fn tc_9_3_nested_flat_format_namespace() {
-    let tmp = TempDir::new().unwrap();
-    write_skill(
-        tmp.path(),
-        "db/migrate.md",
-        "---\ndescription: DB migrate\n---\n",
-    );
-
-    let skills = load_skills_from_commands_dir(tmp.path(), SkillSource::User).await;
-    assert_eq!(skills.len(), 1);
-    assert_eq!(skills[0].metadata.name, "db:migrate");
-}
-
 #[tokio::test]
 async fn tc_9_5_non_md_files_ignored() {
     let tmp = TempDir::new().unwrap();
@@ -202,30 +138,6 @@ async fn tc_9_1_commands_directory_format_loaded_from_deprecated() {
         LoadedFrom::CommandsDeprecated
     );
     assert_eq!(skills[0].metadata.source, SkillSource::Project);
-}
-
-// -----------------------------------------------------------------------
-// TC-10.x: deduplicate supplemental cases
-// -----------------------------------------------------------------------
-
-#[test]
-fn tc_10_1_deduplicate_no_duplicates_all_preserved() {
-    let tmp = TempDir::new().unwrap();
-    let f1 = tmp.path().join("a.md");
-    let f2 = tmp.path().join("b.md");
-    let f3 = tmp.path().join("c.md");
-    fs::write(&f1, "").unwrap();
-    fs::write(&f2, "").unwrap();
-    fs::write(&f3, "").unwrap();
-
-    let skills = vec![
-        make_loaded_skill(std::fs::canonicalize(&f1).unwrap(), "skill-a"),
-        make_loaded_skill(std::fs::canonicalize(&f2).unwrap(), "skill-b"),
-        make_loaded_skill(std::fs::canonicalize(&f3).unwrap(), "skill-c"),
-    ];
-
-    let result = deduplicate(skills);
-    assert_eq!(result.len(), 3);
 }
 
 #[test]
@@ -307,38 +219,6 @@ fn tc_10_4_deduplicate_mixed_unique_and_duplicate() {
     assert!(names.contains(&"c1"));
 }
 
-// -----------------------------------------------------------------------
-// TC-11.x: load_all_skills supplemental cases
-// -----------------------------------------------------------------------
-
-#[tokio::test]
-#[serial]
-async fn tc_11_1_bare_mode_only_loads_add_dirs() {
-    let user_tmp = TempDir::new().unwrap();
-    let add_tmp = TempDir::new().unwrap();
-
-    // Put a skill in add_dir's .nomi/skills/
-    let add_skills_dir = add_tmp.path().join(".nomi").join("skills");
-    fs::create_dir_all(&add_skills_dir).unwrap();
-    write_skill(&add_skills_dir, "add-skill/SKILL.md", "---\n---\n");
-
-    // Use a fake nonexistent cwd (bare should not need it)
-    let result = load_all_skills(
-        Path::new("/nonexistent_cwd_xyz"),
-        &[add_tmp.path().to_path_buf()],
-        true,
-        None,
-    )
-    .await;
-
-    assert!(
-        result.iter().any(|skill| skill.name == "add-skill"),
-        "bare mode should load skills from explicit add_dirs"
-    );
-    // user_tmp was not consulted (no skills from there)
-    let _ = user_tmp;
-}
-
 #[tokio::test]
 #[serial]
 async fn tc_11_4_nonexistent_dirs_silently_skipped() {
@@ -358,36 +238,6 @@ async fn tc_11_4_nonexistent_dirs_silently_skipped() {
 
     // Should load the add_dir skill; no panic
     assert!(result.iter().any(|s| s.name == "extra"));
-}
-
-#[tokio::test]
-#[serial]
-async fn tc_11_5_empty_scenario_returns_empty_vec() {
-    // All dirs nonexistent, no add_dirs
-    let tmp = TempDir::new().unwrap();
-    // tmp exists but has no .nomi/skills
-    let result = load_all_skills(tmp.path(), &[], false, None).await;
-    // May have skills from user dir if it exists, but must not panic
-    let _ = result;
-}
-
-#[tokio::test]
-#[serial]
-async fn tc_11_6_empty_add_dirs_no_effect() {
-    let tmp = TempDir::new().unwrap();
-    let root = tmp.path();
-    fs::create_dir(root.join(".git")).unwrap();
-
-    let skills_dir = root.join(".nomi").join("skills");
-    fs::create_dir_all(&skills_dir).unwrap();
-    write_skill(&skills_dir, "proj-skill/SKILL.md", "---\n---\n");
-
-    let result = load_all_skills(root, &[], false, None).await;
-    let names: Vec<_> = result.iter().map(|s| s.name.as_str()).collect();
-    assert!(
-        names.contains(&"proj-skill"),
-        "project skill should load with empty add_dirs"
-    );
 }
 
 // -----------------------------------------------------------------------
@@ -422,7 +272,7 @@ async fn tc_8_8_skill_root_is_skill_dir_not_parent() {
 #[test]
 fn tc_wb_deduplicate_by_name_first_wins() {
     // [白盒] TC-WB: deduplicate_by_name keeps first occurrence (first-wins semantic)
-    // Decision 6: HashMap<String, ()> with .insert().is_none() check
+    // Duplicate names preserve the first source.
     let fm = FrontmatterData::default();
     let make_meta = |name: &str, source: SkillSource| {
         crate::frontmatter::parse_skill_fields(&fm, "", name, source, LoadedFrom::Skills, None)

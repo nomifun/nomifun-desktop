@@ -104,44 +104,22 @@ pub fn parse_skill_fields(
 /// line that is exactly `---` as the closing fence. Handles empty frontmatter,
 /// CRLF line endings, and closing fence at end-of-file.
 fn extract_frontmatter_bounds(input: &str) -> Option<(&str, &str)> {
-    // Normalise CRLF → LF for consistent processing
-    // We work on the original bytes but accept both endings at fence lines.
-
-    // Opening fence must be the very first line
     let after_open = input
         .strip_prefix("---\n")
         .or_else(|| input.strip_prefix("---\r\n"))?;
-
-    // Scan line by line for the closing fence
     let mut pos = 0;
-    for line in after_open.lines() {
-        let line_with_ending_len = {
-            // Compute byte length including the line ending
-            let raw = &after_open[pos..];
-            let trimmed = line.len();
-            if raw[trimmed..].starts_with("\r\n") {
-                trimmed + 2
-            } else if raw[trimmed..].starts_with('\n') {
-                trimmed + 1
-            } else {
-                trimmed // last line with no newline
-            }
-        };
-
-        if line == "---" {
+    for line in after_open.split_inclusive('\n') {
+        let fence = line.strip_suffix("\r\n")
+            .or_else(|| line.strip_suffix('\n'))
+            .unwrap_or(line);
+        if fence == "---" {
             let yaml_text = &after_open[..pos];
-            // Strip leading newline from yaml_text if present (empty frontmatter)
-            let yaml_text = yaml_text.strip_suffix('\n').unwrap_or(yaml_text);
-            let body_start = pos + line_with_ending_len;
-            let body = if body_start <= after_open.len() {
-                &after_open[body_start..]
-            } else {
-                ""
-            };
-            return Some((yaml_text, body));
+            return Some((
+                yaml_text.strip_suffix('\n').unwrap_or(yaml_text),
+                &after_open[pos + line.len()..],
+            ));
         }
-
-        pos += line_with_ending_len;
+        pos += line.len();
     }
 
     None
@@ -238,9 +216,7 @@ fn quote_problematic_values(yaml_text: &str) -> String {
 // ---------------------------------------------------------------------------
 
 fn yaml_value_to_json(v: &serde_yaml::Value) -> Option<serde_json::Value> {
-    // Round-trip through JSON string to convert between the two Value types
-    let json_str = serde_json::to_string(v).ok()?;
-    serde_json::from_str(&json_str).ok()
+    serde_json::to_value(v).ok()
 }
 
 // ---------------------------------------------------------------------------
