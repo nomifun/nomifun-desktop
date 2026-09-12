@@ -245,7 +245,7 @@ async fn run_supervisor_for_owner(
     };
     let idle = Duration::from_secs(interval_secs.max(1) as u64);
     let mut rx = probe.observe(idle);
-    let mut policy = PolicyState::with_kind(cfg.clone(), kind);
+    let mut policy = PolicyState::new(cfg.clone());
 
     // A target may expose a current option/open-question decision that became live
     // before the event subscription. Revalidate the exact turn scope before

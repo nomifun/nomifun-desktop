@@ -9,7 +9,7 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use nomifun_api_types::{
-    BlockedBehavior, BudgetConfig, CategoryMode, DecisionWatchConfig, FaultWatchConfig, IdmmConfig, IdmmTargetKind,
+    BlockedBehavior, BudgetConfig, CategoryMode, DecisionWatchConfig, FaultWatchConfig, IdmmConfig,
     Tendency, WatchBase, WatchTier,
 };
 
@@ -87,11 +87,6 @@ const CONFIDENCE_FLOOR: f32 = 0.4;
 pub struct PolicyState {
     fault_watch: FaultWatchConfig,
     decision_watch: DecisionWatchConfig,
-    /// Which kind of session this state supervises. Stored for diagnostics and
-    /// the public `with_kind` constructor contract; idle gating uses the shared
-    /// `work_in_progress` rule for both kinds (see `idle_is_standby`).
-    #[allow(dead_code)]
-    kind: IdmmTargetKind,
     /// Per-watch budget runtime (fault / decision).
     fault_rt: WatchRuntime,
     decision_rt: WatchRuntime,
@@ -118,16 +113,11 @@ pub struct PolicyState {
 }
 
 impl PolicyState {
-    /// Construct a policy for a conversation target.
+    /// Both target kinds share the same progress and intervention policy.
     pub fn new(cfg: IdmmConfig) -> Self {
-        Self::with_kind(cfg, IdmmTargetKind::Conversation)
-    }
-
-    pub fn with_kind(cfg: IdmmConfig, kind: IdmmTargetKind) -> Self {
         Self {
             fault_watch: cfg.fault_watch,
             decision_watch: cfg.decision_watch,
-            kind,
             fault_rt: WatchRuntime::default(),
             decision_rt: WatchRuntime::default(),
             retries: std::collections::HashMap::new(),
@@ -439,7 +429,7 @@ impl PolicyState {
             return SidecarStep::Halt("destructive_withheld".into());
         }
 
-        if dec.confidence < CONFIDENCE_FLOOR {
+        if !(CONFIDENCE_FLOOR..=1.0).contains(&dec.confidence) {
             return SidecarStep::Fallback;
         }
 
@@ -513,7 +503,10 @@ impl PolicyState {
                 if dp.kind == DecisionKind::OpenQuestion {
                     return WakeAction::Stop("open_question_unanswerable_fallback".into());
                 }
-                if let Some(rec) = &dp.recommended {
+                if let Some(rec) = &dp.recommended
+                    && !is_cancel_option(rec)
+                    && !is_destructive(rec)
+                {
                     return WakeAction::AnswerChoice(rec.clone());
                 }
                 if let Some(pick) = first_safe_option(&dp.options, false) {
@@ -790,30 +783,6 @@ mod tests {
             p.on_stall(Instant::now(), &provider_err(Some(true))),
             PolicyStep::Rule(WakeAction::Retry)
         );
-    }
-
-    #[test]
-    fn terminal_idle_after_working_now_nudges() {
-        let mut p = PolicyState::with_kind(sidecar_cfg(), IdmmTargetKind::Terminal);
-        p.on_progress(&SessionSignal::Working);
-        assert_eq!(
-            p.on_stall(Instant::now(), &SessionSignal::Idle),
-            PolicyStep::Rule(WakeAction::SendText("continue".into()))
-        );
-    }
-
-    #[test]
-    fn terminal_idle_after_done_is_standby() {
-        let mut p = PolicyState::with_kind(sidecar_cfg(), IdmmTargetKind::Terminal);
-        p.on_progress(&SessionSignal::Working);
-        p.on_progress(&SessionSignal::Done);
-        assert_eq!(p.on_stall(Instant::now(), &SessionSignal::Idle), PolicyStep::Standby);
-    }
-
-    #[test]
-    fn terminal_idle_without_working_is_standby() {
-        let mut p = PolicyState::with_kind(sidecar_cfg(), IdmmTargetKind::Terminal);
-        assert_eq!(p.on_stall(Instant::now(), &SessionSignal::Idle), PolicyStep::Standby);
     }
 
     #[test]
@@ -1109,6 +1078,24 @@ mod tests {
             PolicyState::conservative_fallback(&decision_with(&["1) 取消"], None)),
             WakeAction::Stop(_)
         ));
+        for recommended in ["1) rm -rf /data", "1) 取消"] {
+            assert_eq!(
+                PolicyState::conservative_fallback(&decision_with(
+                    &[recommended, "2) 安全迁移"], Some(recommended),
+                )),
+                WakeAction::AnswerChoice("2) 安全迁移".into()),
+            );
+            assert!(matches!(
+                PolicyState::conservative_fallback(&decision_with(&[recommended], Some(recommended))),
+                WakeAction::Stop(_)
+            ));
+        }
+        assert_eq!(
+            PolicyState::conservative_fallback(&decision_with(
+                &["1) Canvas", "2) DOM"], Some("2) DOM"),
+            )),
+            WakeAction::AnswerChoice("2) DOM".into()),
+        );
     }
 
     // ── D6: open-question handling ──
@@ -1313,7 +1300,13 @@ mod tests {
             confidence: CONFIDENCE_FLOOR - 0.01,
             reason: String::new(),
         };
-        assert_eq!(p.on_sidecar(&dec), SidecarStep::Fallback);
+        for confidence in [f32::NEG_INFINITY, -1.0, 0.0, dec.confidence, 1.1, f32::INFINITY, f32::NAN] {
+            assert_eq!(
+                p.on_sidecar(&SidecarDecision { confidence, ..dec.clone() }),
+                SidecarStep::Fallback,
+                "invalid/low confidence must not authorize an action: {confidence}",
+            );
+        }
 
         // At exactly the floor the decision is applied (floor is exclusive).
         let at_floor = SidecarDecision {
