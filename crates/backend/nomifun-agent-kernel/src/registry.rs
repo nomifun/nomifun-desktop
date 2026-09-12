@@ -1048,36 +1048,12 @@ impl KernelRegistry {
         context: &ResolvedRoleMemberContext,
         result: ResourceProviderResult,
     ) -> Result<ResourceProviderResult, KernelError> {
-        let identity = result.handle.identity();
-        let Some(binding) = context
-            .resource_bindings
-            .iter()
-            .find(|binding| binding.binding_id == identity.binding_id)
-        else {
-            return Err(KernelError::CapabilityExecution {
-                reason: "resource provider returned a handle for an unbound resource"
-                    .to_owned(),
-            });
-        };
-        if binding.resource_kind != identity.resource_kind
-            || binding.resource_id != identity.resource_id
-        {
-            return Err(KernelError::CapabilityExecution {
-                reason: "resource provider returned a handle with mismatched resource identity"
-                    .to_owned(),
-            });
-        }
-        let key = resource_handle_key(context)?;
-        let mut handles = self.resource_handles.lock().await;
-        if let Some(existing) = handles.get(&key).cloned() {
-            drop(handles);
-            if !Arc::ptr_eq(&existing, &result.handle) {
-                result.handle.release().await?;
-            }
-            return Ok(ResourceProviderResult { handle: existing });
-        }
-        handles.insert(key, Arc::clone(&result.handle));
-        Ok(result)
+        self.retain_bound_resource_handle(
+            resource_handle_key(context)?,
+            &context.resource_bindings,
+            result,
+        )
+        .await
     }
 
     async fn retain_direct_resource_handle(
@@ -1085,26 +1061,43 @@ impl KernelRegistry {
         context: &ResolvedCapabilityContext,
         result: ResourceProviderResult,
     ) -> Result<ResourceProviderResult, KernelError> {
+        self.retain_bound_resource_handle(
+            direct_resource_handle_key(context)?,
+            &context.resource_bindings,
+            result,
+        )
+        .await
+    }
+
+    async fn retain_bound_resource_handle(
+        &self,
+        key: ResourceHandleKey,
+        bindings: &[TypedResourceBinding],
+        result: ResourceProviderResult,
+    ) -> Result<ResourceProviderResult, KernelError> {
         let identity = result.handle.identity();
-        let Some(binding) = context
-            .resource_bindings
+        let binding = bindings
             .iter()
-            .find(|binding| binding.binding_id == identity.binding_id)
-        else {
-            return Err(KernelError::CapabilityExecution {
-                reason: "resource provider returned a handle for an unbound resource"
-                    .to_owned(),
-            });
+            .find(|binding| binding.binding_id == identity.binding_id);
+        let invalid_reason = match binding {
+            None => Some("resource provider returned a handle for an unbound resource"),
+            Some(binding)
+                if binding.resource_kind != identity.resource_kind
+                    || binding.resource_id != identity.resource_id =>
+            {
+                Some("resource provider returned a handle with mismatched resource identity")
+            }
+            Some(_) => None,
         };
-        if binding.resource_kind != identity.resource_kind
-            || binding.resource_id != identity.resource_id
-        {
-            return Err(KernelError::CapabilityExecution {
-                reason: "resource provider returned a handle with mismatched resource identity"
-                    .to_owned(),
-            });
+        if let Some(reason) = invalid_reason {
+            // The factory has already acquired the resource. Rejecting its
+            // identity must not orphan the handle outside the registry.
+            let reason = match result.handle.release().await {
+                Ok(()) => reason.to_owned(),
+                Err(error) => format!("{reason}; releasing rejected handle failed: {error}"),
+            };
+            return Err(KernelError::CapabilityExecution { reason });
         }
-        let key = direct_resource_handle_key(context)?;
         let mut handles = self.resource_handles.lock().await;
         if let Some(existing) = handles.get(&key).cloned() {
             drop(handles);
@@ -1233,57 +1226,52 @@ impl KernelRegistry {
         &self,
         scope_key: &ScopeKey,
     ) -> Result<(), KernelError> {
-        let handles = {
-            let mut guard = self.resource_handles.lock().await;
-            let keys = guard
-                .keys()
-                .filter(|key| &key.scope_key == scope_key)
-                .cloned()
-                .collect::<Vec<_>>();
-            keys.into_iter()
-                .filter_map(|key| guard.remove(&key))
-                .collect::<Vec<_>>()
-        };
-        for handle in handles {
-            handle.release().await?;
-        }
-        Ok(())
+        self.release_matching_resources(|key| &key.scope_key == scope_key)
+            .await
     }
 
     pub async fn release_resources_for_mount(
         &self,
         mount_id: &PluginMountId,
     ) -> Result<(), KernelError> {
+        self.release_matching_resources(|key| &key.mount_id == mount_id)
+            .await
+    }
+
+    pub async fn release_all_resources(&self) -> Result<(), KernelError> {
+        self.release_matching_resources(|_| true).await
+    }
+
+    async fn release_matching_resources(
+        &self,
+        matches: impl Fn(&ResourceHandleKey) -> bool,
+    ) -> Result<(), KernelError> {
         let handles = {
             let mut guard = self.resource_handles.lock().await;
             let keys = guard
                 .keys()
-                .filter(|key| &key.mount_id == mount_id)
+                .filter(|key| matches(key))
                 .cloned()
                 .collect::<Vec<_>>();
             keys.into_iter()
                 .filter_map(|key| guard.remove(&key))
                 .collect::<Vec<_>>()
         };
+        // Release outside the registry lock, and attempt every handle even if
+        // a provider fails. All of these handles have already been removed.
+        let mut first_error = None;
         for handle in handles {
-            handle.release().await?;
+            if let Err(error) = handle.release().await {
+                first_error.get_or_insert(error);
+            }
         }
-        Ok(())
-    }
-
-    pub async fn release_all_resources(&self) -> Result<(), KernelError> {
-        let handles = {
-            let mut guard = self.resource_handles.lock().await;
-            std::mem::take(&mut *guard)
-                .into_values()
-                .collect::<Vec<_>>()
-        };
-        for handle in handles {
-            handle.release().await?;
-        }
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 }
+
+#[cfg(test)]
+#[path = "registry_resource_tests.rs"]
+mod resource_tests;
 
 fn validate_exact_capability_target(
     published: &PublishedRegistry,

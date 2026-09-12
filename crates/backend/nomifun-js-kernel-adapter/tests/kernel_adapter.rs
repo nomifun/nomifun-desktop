@@ -301,6 +301,7 @@ async fn host() -> Arc<ExtensionHostSupervisor> {
                 shutdown_timeout: Duration::from_secs(5),
                 max_frame_bytes: 1024 * 1024,
                 command_queue_capacity: 32,
+                ..JavaScriptHostLimits::default()
             },
         })
         .unwrap(),

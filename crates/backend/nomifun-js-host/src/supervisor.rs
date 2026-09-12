@@ -1,11 +1,11 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use nomi_process_runtime::{ChildProcessBuilder, ManagedChildProcess};
+use nomi_process_runtime::{ChildProcessBuilder, ChildProcessCleanup, ManagedChildProcess};
 use nomifun_agent_contracts::{
     ActionId, CanonicalErrorCode, CanonicalSchemaRef, CorrelationId, DigestHex,
     JAVASCRIPT_HOST_PROTOCOL_VERSION, JavaScriptHostHello, JavaScriptHostKind,
@@ -21,18 +21,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::io::{
-    AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader,
+    AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader,
 };
-use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
+use tokio::process::{ChildStdin, ChildStdout};
 use tokio::sync::{Mutex, RwLock, mpsc, oneshot, watch};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{Instant, MissedTickBehavior};
 use tracing::warn;
 use uuid::Uuid;
 
 use crate::JavaScriptHostError;
+use crate::outbound::OutboundQueue;
 
-const HOST_FAILURE_CODE: &str = "JAVASCRIPT_HOST_UNAVAILABLE";
 const HOST_SERVICE_UNAVAILABLE: &str = "HOST_SERVICE_UNAVAILABLE";
 const BUNDLED_EXTENSION_HOST: &[u8] =
     include_bytes!("../assets/extension-host.mjs");
@@ -42,8 +42,17 @@ pub struct JavaScriptHostLimits {
     pub hello_timeout: Duration,
     pub request_timeout: Duration,
     pub shutdown_timeout: Duration,
+    /// Maximum encoded frame size in either direction, including the newline.
     pub max_frame_bytes: usize,
+    /// Capacity of each command, inbound, and outbound queue. Outbound overflow
+    /// rejects an unsent caller request; an undeliverable service reply fails
+    /// the generation rather than silently dropping a completed service result.
     pub command_queue_capacity: usize,
+    /// Maximum admitted work callers, including coalesced Mount loads.
+    /// One additional in-flight cancellation is reserved independently.
+    pub max_pending_requests: usize,
+    /// Maximum service requests, from admission through response flush.
+    pub max_service_requests: usize,
 }
 
 impl Default for JavaScriptHostLimits {
@@ -54,6 +63,8 @@ impl Default for JavaScriptHostLimits {
             shutdown_timeout: Duration::from_secs(5),
             max_frame_bytes: 4 * 1024 * 1024,
             command_queue_capacity: 256,
+            max_pending_requests: 256,
+            max_service_requests: 256,
         }
     }
 }
@@ -65,9 +76,11 @@ impl JavaScriptHostLimits {
             || self.shutdown_timeout.is_zero()
             || self.max_frame_bytes == 0
             || self.command_queue_capacity == 0
+            || self.max_pending_requests == 0
+            || self.max_service_requests == 0
         {
             return Err(JavaScriptHostError::InvalidConfiguration(
-                "timeouts, frame size, and queue capacity must be non-zero".into(),
+                "timeouts, frame size, and request/queue capacities must be non-zero".into(),
             ));
         }
         Ok(())
@@ -121,76 +134,55 @@ impl JavaScriptHostConfig {
     }
 }
 
+/// Publish the bundled entrypoint into an application-owned directory.
+/// Concurrent publishers never expose a partially written destination; existing
+/// files are verified, never overwritten. The directory must not be writable
+/// by untrusted actors (this is not a sandbox against local filesystem mutation).
 pub fn materialize_bundled_extension_host(
     directory: impl AsRef<Path>,
 ) -> Result<PathBuf, JavaScriptHostError> {
+    use std::io::{Read, Write};
+
     let directory = directory.as_ref();
     fs_create_dir_all(directory)?;
-    let directory = std::fs::canonicalize(directory).map_err(|error| {
+    let io_error = |error: std::io::Error| {
         JavaScriptHostError::InvalidConfiguration(format!(
-            "cannot canonicalize JavaScript Host directory {}: {error}",
+            "cannot materialize bundled JavaScript Host in {}: {error}",
             directory.display()
         ))
-    })?;
+    };
+    let directory = std::fs::canonicalize(directory).map_err(io_error)?;
     let digest = hex::encode(Sha256::digest(BUNDLED_EXTENSION_HOST));
     let path = directory.join(format!("extension-host-{digest}.mjs"));
-    match std::fs::symlink_metadata(&path) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
-                return Err(JavaScriptHostError::InvalidConfiguration(
-                    "bundled JavaScript Host path is not a regular file".into(),
-                ));
-            }
-            let observed = std::fs::read(&path).map_err(|error| {
-                JavaScriptHostError::InvalidConfiguration(format!(
-                    "cannot read bundled JavaScript Host {}: {error}",
-                    path.display()
-                ))
-            })?;
-            if observed != BUNDLED_EXTENSION_HOST {
-                return Err(JavaScriptHostError::InvalidConfiguration(
-                    "bundled JavaScript Host content differs from its digest path".into(),
-                ));
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            use std::io::Write;
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-                .map_err(|error| {
-                    JavaScriptHostError::InvalidConfiguration(format!(
-                        "cannot create bundled JavaScript Host {}: {error}",
-                        path.display()
-                    ))
-                })?;
-            file.write_all(BUNDLED_EXTENSION_HOST).map_err(|error| {
-                JavaScriptHostError::InvalidConfiguration(format!(
-                    "cannot write bundled JavaScript Host {}: {error}",
-                    path.display()
-                ))
-            })?;
-            file.sync_all().map_err(|error| {
-                JavaScriptHostError::InvalidConfiguration(format!(
-                    "cannot sync bundled JavaScript Host {}: {error}",
-                    path.display()
-                ))
-            })?;
-        }
-        Err(error) => {
-            return Err(JavaScriptHostError::InvalidConfiguration(format!(
-                "cannot inspect bundled JavaScript Host {}: {error}",
-                path.display()
-            )));
+    if !path.try_exists().map_err(io_error)? {
+        // The temporary is on the same filesystem. Only complete, synced bytes
+        // are published, without replacing another publisher's destination.
+        let mut file = tempfile::NamedTempFile::new_in(&directory).map_err(io_error)?;
+        file.write_all(BUNDLED_EXTENSION_HOST).map_err(io_error)?;
+        file.as_file().sync_all().map_err(io_error)?;
+        match file.persist_noclobber(&path) {
+            Ok(_) => {}
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(io_error(error.error)),
         }
     }
-    let canonical = std::fs::canonicalize(&path).map_err(|error| {
-        JavaScriptHostError::InvalidConfiguration(format!(
-            "cannot canonicalize bundled JavaScript Host {}: {error}",
-            path.display()
-        ))
-    })?;
+    let metadata = std::fs::symlink_metadata(&path).map_err(io_error)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(JavaScriptHostError::InvalidConfiguration(
+            "bundled JavaScript Host path is not a regular file".into(),
+        ));
+    }
+    // Do not allocate based on the size of a corrupt existing cache file.
+    let mut observed = Vec::new();
+    std::fs::File::open(&path).map_err(io_error)?
+        .take(BUNDLED_EXTENSION_HOST.len() as u64 + 1)
+        .read_to_end(&mut observed).map_err(io_error)?;
+    if observed != BUNDLED_EXTENSION_HOST {
+        return Err(JavaScriptHostError::InvalidConfiguration(
+            "bundled JavaScript Host content differs from its digest path".into(),
+        ));
+    }
+    let canonical = std::fs::canonicalize(&path).map_err(io_error)?;
     if !canonical.starts_with(&directory) {
         return Err(JavaScriptHostError::InvalidConfiguration(
             "bundled JavaScript Host escaped its managed directory".into(),
@@ -278,6 +270,10 @@ pub struct BoundHostServiceRequest {
 
 #[async_trait]
 pub trait ExtensionHostServices: Send + Sync {
+    /// The generation owns this future and cancels it on failure or timeout.
+    /// Handlers must yield cooperatively and must not detach work that can keep
+    /// mutating state after the future is dropped. Cancellation does not roll
+    /// back effects already committed by a handler.
     async fn handle(
         &self,
         request: BoundHostServiceRequest,
@@ -333,6 +329,8 @@ impl HostRequestHandle {
 pub struct JavaScriptResourceHandle {
     pub host_instance_id: JavaScriptHostInstanceId,
     pub host_generation: u64,
+    /// Opaque acquisition lease, not the plugin's local resource ID. Never parse
+    /// or reconstruct it; a reacquired resource receives a different lease.
     pub handle_id: String,
 }
 
@@ -390,6 +388,7 @@ pub struct ExtensionHostSupervisor {
 struct SupervisorState {
     next_generation: u64,
     current: Option<GenerationHandle>,
+    cleanup: Option<ChildProcessCleanup>,
 }
 
 #[derive(Clone)]
@@ -457,6 +456,7 @@ impl ExtensionHostSupervisor {
             state: Mutex::new(SupervisorState {
                 next_generation: 0,
                 current: None,
+                cleanup: None,
             }),
             public_state,
         })
@@ -491,18 +491,6 @@ impl ExtensionHostSupervisor {
             .map_err(|error| JavaScriptHostError::Contract(error.to_string()))?;
         let module_path = demand.module.verify_for(&demand.context.target).await?;
         let handle = self.ensure_generation().await?;
-        if let Some(resident) = handle
-            .mounts
-            .read()
-            .await
-            .get(&demand.context.target.mount_id)
-        {
-            return if resident == &demand.context {
-                Ok(handle.generation)
-            } else {
-                Err(JavaScriptHostError::TargetMismatch)
-            };
-        }
         let request = PluginHostRequest::MountLoad {
             context: demand.context,
         };
@@ -520,6 +508,9 @@ impl ExtensionHostSupervisor {
         Ok(handle.generation)
     }
 
+    /// Unload an idle Mount, releasing its resources and draining cleanup SDK
+    /// calls before Ack. Concurrent work is rejected, not silently discarded.
+    /// A failed disposal leaves unknown plugin state and fails the generation.
     pub async fn unload_mount(
         &self,
         target: PluginHostTargetLock,
@@ -757,20 +748,30 @@ impl ExtensionHostSupervisor {
         &self,
         mount_id: &PluginMountId,
     ) -> Result<PluginHostCommitFence, JavaScriptHostError> {
-        let state = self.state.lock().await;
-        let Some(current) = &state.current else {
-            return Ok(PluginHostCommitFence::NotResident);
-        };
-        if !matches!(
-            current.state.borrow().clone(),
-            JavaScriptHostState::Running { .. }
-        ) || !current.mounts.read().await.contains_key(mount_id)
+        let mut state = self.state.lock().await;
+        if let Some(current) = &state.current
+            && matches!(current.state.borrow().clone(), JavaScriptHostState::Running { .. })
         {
-            return Ok(PluginHostCommitFence::NotResident);
+            return current.commit_fence_for_mount(
+                mount_id.clone(), self.config.limits.shutdown_timeout,
+            ).await;
         }
-        Err(JavaScriptHostError::NotQuiescent {
-            generation: current.generation,
-        })
+        self.confirm_previous_cleanup(&mut state).await?;
+        Ok(PluginHostCommitFence::NotResident)
+    }
+
+    /// Confirm that no generation is running and its process-tree cleanup has
+    /// completed. This observes cleanup; it neither stops a live generation nor
+    /// permanently closes admission. Replacement callers must exclude new
+    /// demands separately (for example with the Runtime switch write lease).
+    pub async fn confirm_stopped(&self) -> Result<(), JavaScriptHostError> {
+        let mut state = self.state.lock().await;
+        if let Some(current) = &state.current
+            && matches!(current.state.borrow().clone(), JavaScriptHostState::Running { .. })
+        {
+            return Err(JavaScriptHostError::NotQuiescent { generation: current.generation });
+        }
+        self.confirm_previous_cleanup(&mut state).await
     }
 
     pub async fn stop_generation(
@@ -778,8 +779,9 @@ impl ExtensionHostSupervisor {
         expected_generation: u64,
     ) -> Result<PluginHostCommitFence, JavaScriptHostError> {
         let handle = {
-            let state = self.state.lock().await;
+            let mut state = self.state.lock().await;
             let Some(current) = &state.current else {
+                self.confirm_previous_cleanup(&mut state).await?;
                 return Ok(PluginHostCommitFence::NotResident);
             };
             if current.generation != expected_generation {
@@ -790,7 +792,10 @@ impl ExtensionHostSupervisor {
             }
             current.clone()
         };
-        let _admission = handle.admission.write().await;
+        let deadline = Instant::now() + self.config.limits.shutdown_timeout;
+        let _admission = tokio::time::timeout_at(deadline, handle.admission.write())
+            .await
+            .map_err(|_| JavaScriptHostError::AdmissionTimeout)?;
         if !matches!(
             handle.state.borrow().clone(),
             JavaScriptHostState::Running { .. }
@@ -801,17 +806,14 @@ impl ExtensionHostSupervisor {
             });
         }
         let (reply, response) = oneshot::channel();
-        handle
-            .commands
-            .send(ActorCommand::Stop {
-                expected_generation,
-                reply,
-            })
+        let permit = tokio::time::timeout_at(deadline, handle.commands.reserve())
             .await
+            .map_err(|_| JavaScriptHostError::AdmissionTimeout)?
             .map_err(|_| JavaScriptHostError::HostFailure {
                 generation: expected_generation,
                 reason: "Host command queue is closed".into(),
             })?;
+        permit.send(ActorCommand::Stop { expected_generation, reply });
         response
             .await
             .unwrap_or(Err(JavaScriptHostError::RequestChannelClosed))
@@ -860,6 +862,26 @@ impl ExtensionHostSupervisor {
         Ok(current.clone())
     }
 
+    async fn confirm_previous_cleanup(
+        &self,
+        state: &mut SupervisorState,
+    ) -> Result<(), JavaScriptHostError> {
+        let Some(receipt) = state.cleanup.clone() else { return Ok(()); };
+        if !matches!(tokio::time::timeout(
+            self.config.limits.shutdown_timeout, receipt.wait(),
+        ).await, Ok(Ok(()))) {
+            // Retain the same receipt on timeout, error or caller cancellation.
+            // The managed process/relay owns termination; this gate only waits
+            // for proof and never treats a public Failed state as that proof.
+            return Err(JavaScriptHostError::HostFailure {
+                generation: state.next_generation,
+                reason: "previous Host process-tree cleanup is not confirmed".into(),
+            });
+        }
+        state.cleanup = None;
+        Ok(())
+    }
+
     async fn ensure_generation(
         &self,
     ) -> Result<GenerationHandle, JavaScriptHostError> {
@@ -873,6 +895,8 @@ impl ExtensionHostSupervisor {
             return Ok(current.clone());
         }
 
+        self.confirm_previous_cleanup(&mut state).await?;
+
         state.next_generation = state
             .next_generation
             .checked_add(1)
@@ -882,15 +906,23 @@ impl ExtensionHostSupervisor {
                 )
             })?;
         let generation = state.next_generation;
-        let handle = spawn_generation(
+        let result = spawn_generation(
             generation,
             &self.config,
             &self.contract,
             self.host_kind,
             Arc::clone(&self.services),
             self.public_state.clone(),
+            &mut state.cleanup,
         )
-        .await?;
+        .await;
+        let handle = result.map_err(|error| {
+            self.public_state.send_replace(JavaScriptHostState::Failed {
+                generation,
+                reason: error.to_string(),
+            });
+            error
+        })?;
         state.current = Some(handle.clone());
         Ok(handle)
     }
@@ -958,6 +990,30 @@ impl ExtensionHostDemandPort for ExtensionHostSupervisor {
 }
 
 impl GenerationHandle {
+    async fn commit_fence_for_mount(
+        &self,
+        mount_id: PluginMountId,
+        timeout: Duration,
+    ) -> Result<PluginHostCommitFence, JavaScriptHostError> {
+        let deadline = Instant::now() + timeout;
+        // Drain submitters into the FIFO before querying the Actor's pending
+        // and resident state. This is a point-in-time check, not a permanent
+        // fence against demands admitted after this method returns.
+        let _admission = tokio::time::timeout_at(deadline, self.admission.write())
+            .await
+            .map_err(|_| JavaScriptHostError::AdmissionTimeout)?;
+        let (reply, response) = oneshot::channel();
+        let permit = tokio::time::timeout_at(deadline, self.commands.reserve())
+            .await
+            .map_err(|_| JavaScriptHostError::AdmissionTimeout)?
+            .map_err(|_| JavaScriptHostError::RequestChannelClosed)?;
+        permit.send(ActorCommand::MountFence { mount_id, reply });
+        tokio::time::timeout_at(deadline, response)
+            .await
+            .map_err(|_| JavaScriptHostError::AdmissionTimeout)?
+            .unwrap_or(Err(JavaScriptHostError::RequestChannelClosed))
+    }
+
     async fn request(
         &self,
         contract: &PluginN1ContractManifest,
@@ -965,7 +1021,10 @@ impl GenerationHandle {
         module_path: Option<PathBuf>,
         timeout: Duration,
     ) -> Result<HostRequestHandle, JavaScriptHostError> {
-        let _admission = self.admission.read().await;
+        let deadline = Instant::now() + timeout;
+        let _admission = tokio::time::timeout_at(deadline, self.admission.read())
+            .await
+            .map_err(|_| JavaScriptHostError::AdmissionTimeout)?;
         if !matches!(
             self.state.borrow().clone(),
             JavaScriptHostState::Running { .. }
@@ -990,18 +1049,19 @@ impl GenerationHandle {
             .validate(contract)
             .map_err(|error| JavaScriptHostError::Contract(error.to_string()))?;
         let (reply, response) = oneshot::channel();
-        self.commands
-            .send(ActorCommand::Submit {
-                envelope: Box::new(envelope),
-                module_path,
-                deadline: Instant::now() + timeout,
-                reply,
-            })
+        let permit = tokio::time::timeout_at(deadline, self.commands.reserve())
             .await
+            .map_err(|_| JavaScriptHostError::AdmissionTimeout)?
             .map_err(|_| JavaScriptHostError::HostFailure {
                 generation: self.generation,
                 reason: "Host command queue is closed".into(),
             })?;
+        permit.send(ActorCommand::Submit {
+            envelope: Box::new(envelope),
+            module_path,
+            deadline,
+            reply,
+        });
         Ok(HostRequestHandle {
             host_generation: self.generation,
             request_id,
@@ -1051,6 +1111,10 @@ enum ReaderEvent {
 }
 
 enum ActorCommand {
+    MountFence {
+        mount_id: PluginMountId,
+        reply: oneshot::Sender<Result<PluginHostCommitFence, JavaScriptHostError>>,
+    },
     Submit {
         envelope: Box<PluginHostRequestEnvelope>,
         module_path: Option<PathBuf>,
@@ -1067,12 +1131,8 @@ enum ActorCommand {
     },
 }
 
-enum InternalEvent {
-    HostServiceCompleted {
-        request: PluginHostRequestEnvelope,
-        response: PluginHostResponseBody,
-    },
-}
+type HostServiceResult =
+    Result<(PluginHostRequestEnvelope, PluginHostResponseBody, Instant), String>;
 
 struct PendingRequest {
     envelope: PluginHostRequestEnvelope,
@@ -1081,9 +1141,12 @@ struct PendingRequest {
 }
 
 enum PendingReply {
-    Request(
-        oneshot::Sender<Result<PluginHostSuccess, JavaScriptHostError>>,
-    ),
+    Request {
+        reply: oneshot::Sender<Result<PluginHostSuccess, JavaScriptHostError>>,
+        coalesced: Vec<
+            oneshot::Sender<Result<PluginHostSuccess, JavaScriptHostError>>,
+        >,
+    },
     Stop(
         oneshot::Sender<
             Result<PluginHostCommitFence, JavaScriptHostError>,
@@ -1097,11 +1160,13 @@ struct GenerationActor {
     process_id: u32,
     process: ManagedChildProcess,
     stdin: ChildStdin,
+    outbound: OutboundQueue,
     reader_events: mpsc::Receiver<ReaderEvent>,
     commands: mpsc::Receiver<ActorCommand>,
-    internal_events: mpsc::Receiver<InternalEvent>,
-    internal_sender: mpsc::Sender<InternalEvent>,
+    service_tasks: JoinSet<HostServiceResult>,
+    service_requests: HashSet<CorrelationId>,
     pending: HashMap<CorrelationId, PendingRequest>,
+    resource_mounts: HashMap<String, PluginMountId>,
     mounts: Arc<RwLock<BTreeMap<PluginMountId, PluginMountRuntimeContext>>>,
     services: Arc<dyn ExtensionHostServices>,
     contract: PluginN1ContractManifest,
@@ -1109,7 +1174,7 @@ struct GenerationActor {
     state: watch::Sender<JavaScriptHostState>,
     public_state: watch::Sender<JavaScriptHostState>,
     reader_task: JoinHandle<()>,
-    stderr_task: JoinHandle<StderrSummary>,
+    stderr_tasks: JoinSet<StderrSummary>,
     accepting: bool,
 }
 
@@ -1129,6 +1194,7 @@ async fn spawn_generation(
     host_kind: JavaScriptHostKind,
     services: Arc<dyn ExtensionHostServices>,
     public_state: watch::Sender<JavaScriptHostState>,
+    cleanup: &mut Option<ChildProcessCleanup>,
 ) -> Result<GenerationHandle, JavaScriptHostError> {
     verify_runtime(config).await?;
     let supported_methods = contract
@@ -1167,6 +1233,9 @@ async fn spawn_generation(
     let mut process = builder
         .spawn_managed()
         .map_err(|error| JavaScriptHostError::Spawn(error.to_string()))?;
+    // Record synchronously before the first post-spawn await. If startup is
+    // cancelled, SupervisorState keeps this receipt while Drop owns cleanup.
+    *cleanup = process.cleanup_receipt();
     let process_id = process.id().ok_or_else(|| {
         JavaScriptHostError::Spawn("Node process did not expose a process id".into())
     })?;
@@ -1176,50 +1245,39 @@ async fn spawn_generation(
     let stdout = process.stdout.take().ok_or_else(|| {
         JavaScriptHostError::Spawn("Node stdout was not captured".into())
     })?;
-    let mut stderr = process.stderr.take().ok_or_else(|| {
+    let stderr = process.stderr.take().ok_or_else(|| {
         JavaScriptHostError::Spawn("Node stderr was not captured".into())
     })?;
+    // Start before Hello: a peer may await a stderr write before handshaking.
+    // JoinSet aborts the collector if startup is cancelled; process ownership
+    // stays with ManagedChildProcess and its existing Drop cleanup relay.
+    let mut stderr_tasks = JoinSet::new();
+    stderr_tasks.spawn(drain_stderr(stderr));
 
     let mut reader = BufReader::new(stdout);
-    let hello = match tokio::time::timeout(
-        config.limits.hello_timeout,
-        read_json_line::<JavaScriptHostHello>(&mut reader, config.limits.max_frame_bytes),
-    )
-    .await
-    {
-        Ok(Ok(hello)) => hello,
-        Ok(Err(error)) => {
-            let detail =
-                startup_failure_detail(&mut process, &mut stderr).await;
-            return Err(JavaScriptHostError::HelloRejected(format!(
-                "{error}{detail}"
-            )));
+    let handshake = async {
+        let hello = tokio::time::timeout(
+            config.limits.hello_timeout,
+            read_json_line::<JavaScriptHostHello>(&mut reader, config.limits.max_frame_bytes),
+        ).await.map_err(|_| "Hello timed out")?
+            // serde errors can quote arbitrary peer input, including secrets.
+            .map_err(|_| "Hello frame is invalid or exceeds the configured limit")?;
+        hello.validate(contract).map_err(|_| "Hello violates the Host protocol contract")?;
+        if hello.host_kind != host_kind
+            || hello.host_generation != generation
+            || hello.process_id != process_id
+            || hello.runtime != config.runtime
+        {
+            return Err("Hello does not bind the selected Runtime, role, generation, and process");
         }
-        Err(_) => {
-            let detail =
-                startup_failure_detail(&mut process, &mut stderr).await;
-            return Err(JavaScriptHostError::HelloRejected(format!(
-                "Hello timed out{detail}"
-            )));
-        }
-    };
-    if let Err(error) = hello.validate(contract) {
-        let detail = startup_failure_detail(&mut process, &mut stderr).await;
-        return Err(JavaScriptHostError::HelloRejected(format!(
-            "{error}{detail}"
-        )));
-    }
-    if hello.host_kind != host_kind
-        || hello.host_generation != generation
-        || hello.process_id != process_id
-        || hello.runtime != config.runtime
-    {
-        let detail = startup_failure_detail(&mut process, &mut stderr).await;
-        return Err(JavaScriptHostError::HelloRejected(
-            format!(
-                "Hello does not bind the selected Runtime, role, generation, and process{detail}"
-            ),
-        ));
+        Ok(())
+    }.await;
+    if let Err(reason) = handshake {
+        let (cleanup_error, stderr) = cleanup_process(
+            &mut process, &mut stderr_tasks, config.limits.shutdown_timeout,
+        ).await;
+        let cleanup = cleanup_error.map(|error| format!("; cleanup failed: {error}")).unwrap_or_default();
+        return Err(JavaScriptHostError::HelloRejected(format!("{reason}{cleanup}{stderr}")));
     }
 
     let (reader_sender, reader_events) =
@@ -1229,10 +1287,7 @@ async fn spawn_generation(
         reader_sender,
         config.limits.max_frame_bytes,
     ));
-    let stderr_task = tokio::spawn(drain_stderr(stderr));
     let (command_sender, commands) =
-        mpsc::channel(config.limits.command_queue_capacity);
-    let (internal_sender, internal_events) =
         mpsc::channel(config.limits.command_queue_capacity);
     let running = JavaScriptHostState::Running {
         generation,
@@ -1249,11 +1304,13 @@ async fn spawn_generation(
         process_id,
         process,
         stdin,
+        outbound: OutboundQueue::new(config.limits.command_queue_capacity, config.limits.max_frame_bytes),
         reader_events,
         commands,
-        internal_events,
-        internal_sender,
+        service_tasks: JoinSet::new(),
+        service_requests: HashSet::new(),
         pending: HashMap::new(),
+        resource_mounts: HashMap::new(),
         mounts: Arc::clone(&mounts),
         services,
         contract: contract.clone(),
@@ -1261,7 +1318,7 @@ async fn spawn_generation(
         state,
         public_state,
         reader_task,
-        stderr_task,
+        stderr_tasks,
         accepting: true,
     };
     tokio::spawn(actor.run());
@@ -1300,22 +1357,31 @@ async fn verify_runtime(
     }
 }
 
-async fn startup_failure_detail(
+async fn cleanup_process(
     process: &mut ManagedChildProcess,
-    stderr: &mut ChildStderr,
-) -> String {
-    let _ = process.shutdown().await;
-    let mut bytes = Vec::new();
-    let _ = tokio::time::timeout(
-        Duration::from_secs(1),
-        stderr.take(4096).read_to_end(&mut bytes),
-    )
-    .await;
-    let detail = String::from_utf8_lossy(&bytes).trim().to_owned();
-    if detail.is_empty() {
-        String::new()
-    } else {
-        format!("; stderr: {detail}")
+    stderr: &mut JoinSet<StderrSummary>,
+    timeout: Duration,
+) -> (Option<String>, String) {
+    let deadline = Instant::now() + timeout;
+    let cleanup_error = match tokio::time::timeout_at(deadline, process.shutdown()).await {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(error.to_string()),
+        Err(_) => Some("process-tree shutdown timed out".into()),
+    };
+    (cleanup_error, finish_stderr(stderr, deadline).await)
+}
+
+async fn finish_stderr(tasks: &mut JoinSet<StderrSummary>, deadline: Instant) -> String {
+    match tokio::time::timeout_at(deadline, tasks.join_next()).await {
+        Ok(Some(Ok(summary))) if summary.bytes > 0 => format!(
+            "; stderr contained {} bytes across {} lines", summary.bytes, summary.lines,
+        ),
+        Ok(Some(Err(_))) => "; stderr collector failed".into(),
+        Err(_) => {
+            tasks.shutdown().await;
+            "; stderr drain timed out".into()
+        }
+        _ => String::new(),
     }
 }
 
@@ -1332,21 +1398,19 @@ impl GenerationActor {
                 generation: self.generation,
             },
         };
+        self.commands.close();
         self.fail_all(failure.clone());
-        let cleanup = tokio::time::timeout(
+        // The public terminal state and commit fence must not precede service
+        // cancellation: a new generation may be admitted as soon as published.
+        self.service_tasks.shutdown().await;
+        let (cleanup_error, stderr) = cleanup_process(
+            &mut self.process,
+            &mut self.stderr_tasks,
             self.limits.shutdown_timeout,
-            self.process.shutdown(),
-        )
-        .await;
-        let cleanup_error = match cleanup {
-            Ok(Ok(())) => None,
-            Ok(Err(error)) => Some(error.to_string()),
-            Err(_) => Some("process-tree shutdown timed out".into()),
-        };
+        ).await;
         let fence = self.commit_fence();
         self.reader_task.abort();
         let _ = self.reader_task.await;
-        let stderr = self.stderr_task.await.unwrap_or_default();
 
         match exit {
             ActorExit::Stopped { stop_reply } if cleanup_error.is_none() => {
@@ -1371,14 +1435,9 @@ impl GenerationActor {
             }
             ActorExit::Failed(reason) => {
                 let reason = if let Some(cleanup) = cleanup_error {
-                    format!("{reason}; cleanup failed: {cleanup}")
-                } else if stderr.bytes > 0 {
-                    format!(
-                        "{reason}; stderr contained {} bytes across {} lines",
-                        stderr.bytes, stderr.lines
-                    )
+                    format!("{reason}; cleanup failed: {cleanup}{stderr}")
                 } else {
-                    reason
+                    format!("{reason}{stderr}")
                 };
                 let failed = JavaScriptHostState::Failed {
                     generation: self.generation,
@@ -1394,12 +1453,20 @@ impl GenerationActor {
         let tick_period = self
             .limits
             .request_timeout
+            .min(self.limits.shutdown_timeout)
             .min(Duration::from_millis(50));
         let mut watchdog = tokio::time::interval(tick_period);
         watchdog.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         loop {
             tokio::select! {
+                result = self.outbound.write_next(&mut self.stdin), if !self.outbound.is_empty() => {
+                    match result {
+                        Ok(Some(request_id)) => { self.service_requests.remove(&request_id); }
+                        Ok(None) => {}
+                        Err(reason) => return ActorExit::Failed(reason),
+                    }
+                }
                 command = self.commands.recv() => {
                     let Some(command) = command else {
                         return ActorExit::Failed("all Host command senders were dropped".into());
@@ -1425,11 +1492,25 @@ impl GenerationActor {
                         }
                     }
                 }
-                event = self.internal_events.recv() => {
-                    if let Some(event) = event
-                        && let Err(reason) = self.handle_internal(event).await
-                    {
-                        return ActorExit::Failed(reason);
+                result = self.service_tasks.join_next(), if !self.service_tasks.is_empty() => {
+                    if let Some(result) = result {
+                        let result = result
+                            // A handler's panic payload can contain credentials.
+                            // Report the failure kind, not the arbitrary payload.
+                            .map_err(|error| if error.is_panic() {
+                                "Host service task panicked".to_owned()
+                            } else {
+                                "Host service task was cancelled".to_owned()
+                            })
+                            .and_then(|result| result);
+                        match result {
+                            Ok((request, response, deadline)) => {
+                                if let Err(reason) = self.respond_to_service(request, response, deadline) {
+                                    return ActorExit::Failed(reason);
+                                }
+                            }
+                            Err(reason) => return ActorExit::Failed(reason),
+                        }
                     }
                 }
                 _ = watchdog.tick() => {
@@ -1439,6 +1520,9 @@ impl GenerationActor {
                         ));
                     }
                     let now = Instant::now();
+                    if self.outbound.has_expired(now) {
+                        return ActorExit::Failed("Host IPC write timed out".into());
+                    }
                     if let Some(expired) = self.pending.values().find(|pending| pending.deadline <= now) {
                         return ActorExit::Failed(format!(
                             "watchdog timed out request {}",
@@ -1455,6 +1539,21 @@ impl GenerationActor {
         command: ActorCommand,
     ) -> Option<ActorExit> {
         match command {
+            ActorCommand::MountFence { mount_id, reply } => {
+                let result = if !self.accepting {
+                    Err(JavaScriptHostError::HostStopping { generation: self.generation })
+                } else if self.mounts.read().await.contains_key(&mount_id)
+                    || self.pending.values().any(|pending| {
+                        self.request_mount_id(&pending.envelope.request) == Some(&mount_id)
+                    })
+                {
+                    Err(JavaScriptHostError::NotQuiescent { generation: self.generation })
+                } else {
+                    Ok(PluginHostCommitFence::NotResident)
+                };
+                let _ = reply.send(result);
+                None
+            }
             ActorCommand::Submit {
                 envelope,
                 module_path,
@@ -1467,6 +1566,10 @@ impl GenerationActor {
                     }));
                     return None;
                 }
+                if deadline <= Instant::now() {
+                    let _ = reply.send(Err(JavaScriptHostError::AdmissionTimeout));
+                    return None;
+                }
                 if envelope.host_generation != self.generation {
                     let observed = envelope.host_generation;
                     let _ = reply.send(Err(
@@ -1477,14 +1580,57 @@ impl GenerationActor {
                     ));
                     return None;
                 }
+                if let Some(mount_id) = self.request_mount_id(&envelope.request) {
+                    let unloading = self.pending.values().any(|pending| matches!(
+                        &pending.envelope.request,
+                        PluginHostRequest::MountUnload { target }
+                            if &target.mount_id == mount_id
+                    ));
+                    let busy_unload = matches!(&envelope.request, PluginHostRequest::MountUnload { .. })
+                        && self.pending.values().any(|pending| {
+                            self.request_mount_id(&pending.envelope.request) == Some(mount_id)
+                        });
+                    if unloading || busy_unload {
+                        let _ = reply.send(Err(JavaScriptHostError::NotQuiescent {
+                            generation: self.generation,
+                        }));
+                        return None;
+                    }
+                }
                 if let PluginHostRequest::MountLoad { context } = &envelope.request
-                    && self.mount_identity_is_reserved(context).await
                 {
-                    let _ = reply.send(Err(JavaScriptHostError::Contract(
-                        "Mount ID and mount_handle_id must be unique within one Host generation"
-                            .into(),
-                    )));
+                    // The caller's resident check can race another load. Make
+                    // idempotency authoritative here, where admission is serial.
+                    if self.mounts.read().await.get(&context.target.mount_id)
+                        == Some(context)
+                    {
+                        let _ = reply.send(Ok(PluginHostSuccess::Ack));
+                        return None;
+                    }
+                }
+                if !self.has_request_capacity(&envelope.request) {
+                    let _ = reply.send(Err(JavaScriptHostError::QueueFull));
                     return None;
+                }
+                if let PluginHostRequest::MountLoad { context } = &envelope.request
+                {
+                    if let Some(pending) = self.pending.values_mut().find(|pending| {
+                        pending.envelope.request == envelope.request
+                    }) && let PendingReply::Request { coalesced, .. } = &mut pending.reply
+                    {
+                        // Identical first demands share activation and its result,
+                        // without serializing independent Mounts or weakening
+                        // identity checks.
+                        coalesced.push(reply);
+                        return None;
+                    }
+                    if self.mount_identity_is_reserved(context).await {
+                        let _ = reply.send(Err(JavaScriptHostError::Contract(
+                            "Mount ID and mount_handle_id must be unique within one Host generation"
+                                .into(),
+                        )));
+                        return None;
+                    }
                 }
                 let request_id = envelope.request_id.clone();
                 let frame = PrivateRequestFrame {
@@ -1492,20 +1638,20 @@ impl GenerationActor {
                     envelope: envelope.as_ref(),
                     module_path: module_path.as_deref(),
                 };
-                if let Err(error) = write_json_line(&mut self.stdin, &frame).await
+                if let Err(error) = self.outbound.enqueue(&frame, deadline, None)
                 {
-                    let _ = reply.send(Err(JavaScriptHostError::HostFailure {
-                        generation: self.generation,
-                        reason: error.clone(),
-                    }));
-                    return Some(ActorExit::Failed(error));
+                    let _ = reply.send(Err(error));
+                    return None;
                 }
                 self.pending.insert(
                     request_id,
                     PendingRequest {
                         envelope: *envelope,
                         deadline,
-                        reply: PendingReply::Request(reply),
+                        reply: PendingReply::Request {
+                            reply,
+                            coalesced: Vec::new(),
+                        },
                     },
                 );
                 None
@@ -1523,7 +1669,7 @@ impl GenerationActor {
                     ));
                     return None;
                 }
-                if !self.pending.is_empty() {
+                if !self.pending.is_empty() || !self.service_tasks.is_empty() || !self.outbound.is_empty() {
                     let _ = reply.send(Err(JavaScriptHostError::NotQuiescent {
                         generation: self.generation,
                     }));
@@ -1547,8 +1693,10 @@ impl GenerationActor {
                     envelope: &envelope,
                     module_path: None,
                 };
-                if let Err(reason) = write_json_line(&mut self.stdin, &frame).await
+                let deadline = Instant::now() + self.limits.shutdown_timeout;
+                if let Err(error) = self.outbound.enqueue(&frame, deadline, None)
                 {
+                    let reason = error.to_string();
                     let _ = reply.send(Err(JavaScriptHostError::HostFailure {
                         generation: self.generation,
                         reason: reason.clone(),
@@ -1559,7 +1707,7 @@ impl GenerationActor {
                     request_id,
                     PendingRequest {
                         envelope,
-                        deadline: Instant::now() + self.limits.shutdown_timeout,
+                        deadline,
                         reply: PendingReply::Stop(reply),
                     },
                 );
@@ -1582,61 +1730,59 @@ impl GenerationActor {
                 }
                 let pending = self
                     .pending
-                    .remove(&response.request_id)
-                    .ok_or_else(|| {
-                        format!(
-                            "rejected unknown or late response {}",
-                            response.request_id.as_ref()
-                        )
-                    })?;
+                    .get(&response.request_id)
+                    .ok_or("rejected unknown or late response")?;
                 response
                     .validate_for(&pending.envelope)
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|_| "Host response violates the request contract")?;
+                if matches!(&pending.envelope.request,
+                    PluginHostRequest::MountUnload { .. } | PluginHostRequest::ResourceAcquire { .. })
+                    && matches!(&response.response, PluginHostResponseBody::Failure(error)
+                        if error.code.as_ref() == "PLUGIN_CLEANUP_FAILED")
+                {
+                    // Cleanup may have partially disposed the Mount. Fail closed
+                    // through the normal generation teardown, including services.
+                    return Err("Plugin cleanup failed".into());
+                }
+                // Only remove a validated response. On a protocol failure all
+                // original/coalesced waiters remain available to fail_all.
+                let pending = self.pending.remove(&response.request_id)
+                    .expect("response was validated against this pending request");
                 match pending.reply {
-                    PendingReply::Request(reply) => {
+                    PendingReply::Request { reply, coalesced } => {
                         let result = response_result(
                             &pending.envelope.request_id,
                             response.response,
                         );
-                        if result.is_ok() {
-                            self.apply_residency_change(&pending.envelope).await;
+                        if let Ok(success) = &result {
+                            self.apply_success(&pending.envelope, success).await;
+                        }
+                        for follower in coalesced {
+                            let _ = follower.send(result.clone());
                         }
                         let _ = reply.send(result);
                         Ok(None)
                     }
-                    PendingReply::Stop(reply) => match response.response {
-                        PluginHostResponseBody::Success(
-                            PluginHostSuccess::Ack,
-                        ) => Ok(Some(ActorExit::Stopped {
+                    PendingReply::Stop(reply) => match response_result(
+                        &pending.envelope.request_id, response.response,
+                    ) {
+                        Ok(_) => Ok(Some(ActorExit::Stopped {
                             stop_reply: reply,
                         })),
-                        body => {
-                            let error = response_result(
-                                &pending.envelope.request_id,
-                                body,
-                            )
-                            .err()
-                            .unwrap_or_else(|| {
-                                JavaScriptHostError::Contract(
-                                    "HostShutdown did not return Ack".into(),
-                                )
-                            });
-                            let _ = reply.send(Err(error.clone()));
-                            Err(error.to_string())
+                        Err(error) => {
+                            let _ = reply.send(Err(error));
+                            Err("HostShutdown was rejected by the peer".into())
                         }
                     },
                 }
             }
             JavaScriptFrame::Request(request) => {
-                if request.host_generation != self.generation {
-                    return Err(format!(
-                        "rejected Host service request from generation {}",
-                        request.host_generation
-                    ));
+                if request.host_generation != self.generation || request.host_kind != self.host_kind {
+                    return Err("Host service role or generation mismatch".into());
                 }
                 request
                     .validate(&self.contract)
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|_| "Host service request violates the protocol contract")?;
                 if request.direction
                     != JavaScriptHostMessageDirection::JavaScriptToHost
                 {
@@ -1657,57 +1803,112 @@ impl GenerationActor {
                     .values()
                     .find(|mount| mount.mount_handle_id == mount_handle)
                     .cloned()
+                    // Activation receives the SDK before Ack. Only the exact
+                    // reserved MountLoad context may supply its early binding.
+                    .or_else(|| self.pending.values().find_map(|pending| {
+                        match &pending.envelope.request {
+                            PluginHostRequest::MountLoad { context }
+                                if context.mount_handle_id == mount_handle => Some(context.clone()),
+                            _ => None,
+                        }
+                    }))
                     .ok_or_else(|| {
                         "JavaScript requested Host service for an unknown Mount handle"
                             .to_owned()
                     })?;
+                // IDs remain reserved through response flush, not merely until
+                // the handler future completes. Do not duplicate side effects
+                // while the first response is still backpressured.
+                if self.service_requests.contains(&request.request_id) {
+                    return Err("duplicate outstanding Host service request".into());
+                }
+                if self.service_requests.len() >= self.limits.max_service_requests {
+                    return Err("Host service request capacity exceeded".into());
+                }
+                self.service_requests.insert(request.request_id.clone());
+                if !self.accepting {
+                    self.respond_to_service(
+                        request,
+                        PluginHostResponseBody::Failure(PluginHostWireError {
+                            code: CanonicalErrorCode::from(HOST_SERVICE_UNAVAILABLE),
+                            message: "Host generation is stopping".into(),
+                            retryable: false,
+                        }),
+                        Instant::now() + self.limits.shutdown_timeout,
+                    )?;
+                    return Ok(None);
+                }
                 let services = Arc::clone(&self.services);
-                let sender = self.internal_sender.clone();
-                tokio::spawn(async move {
-                    let response = services
-                        .handle(BoundHostServiceRequest {
+                let deadline = Instant::now() + self.limits.request_timeout;
+                self.service_tasks.spawn(async move {
+                    let response = tokio::time::timeout_at(
+                        deadline,
+                        services.handle(BoundHostServiceRequest {
                             mount,
                             envelope: request.clone(),
-                        })
-                        .await;
-                    let _ = sender
-                        .send(InternalEvent::HostServiceCompleted {
-                            request,
-                            response,
-                        })
-                        .await;
+                        }),
+                    )
+                    .await
+                    .map_err(|_| "Host service timed out".to_owned())?;
+                    Ok((request, response, deadline))
                 });
                 Ok(None)
             }
         }
     }
 
-    async fn handle_internal(
+    fn respond_to_service(
         &mut self,
-        event: InternalEvent,
+        request: PluginHostRequestEnvelope,
+        response: PluginHostResponseBody,
+        deadline: Instant,
     ) -> Result<(), String> {
-        match event {
-            InternalEvent::HostServiceCompleted { request, response } => {
-                let envelope = PluginHostResponseEnvelope {
-                    protocol_version: VersionString::from(
-                        JAVASCRIPT_HOST_PROTOCOL_VERSION,
-                    ),
-                    host_kind: self.host_kind,
-                    host_generation: self.generation,
-                    request_id: request.request_id.clone(),
-                    response,
-                };
-                envelope
-                    .validate_for(&request)
-                    .map_err(|error| error.to_string())?;
-                write_json_line(&mut self.stdin, &envelope).await
-            }
+        let envelope = PluginHostResponseEnvelope {
+            protocol_version: VersionString::from(
+                JAVASCRIPT_HOST_PROTOCOL_VERSION,
+            ),
+            host_kind: self.host_kind,
+            host_generation: self.generation,
+            request_id: request.request_id.clone(),
+            response,
+        };
+        envelope
+            .validate_for(&request)
+            .map_err(|_| "Host service response violates the request contract")?;
+        self.outbound.enqueue(&envelope, deadline, Some(request.request_id)).map_err(|error| error.to_string())
+    }
+
+    fn has_request_capacity(&self, request: &PluginHostRequest) -> bool {
+        let cancellation = matches!(request, PluginHostRequest::RequestCancel { .. });
+        let limit = if cancellation { 1 } else { self.limits.max_pending_requests };
+        // Derive occupancy from owned replies instead of maintaining a second
+        // counter across every completion/failure path. Coalescing saves wire
+        // work, but each waiter still owns memory until completion.
+        self.pending.values().filter(|pending| {
+            matches!(pending.envelope.request, PluginHostRequest::RequestCancel { .. })
+                == cancellation
+        }).map(|pending| match &pending.reply {
+            PendingReply::Request { coalesced, .. } => 1 + coalesced.len(),
+            PendingReply::Stop(_) => 0,
+        }).sum::<usize>() < limit
+    }
+
+    fn request_mount_id<'a>(&'a self, request: &'a PluginHostRequest) -> Option<&'a PluginMountId> {
+        match request {
+            PluginHostRequest::MountLoad { context } => Some(&context.target.mount_id),
+            PluginHostRequest::MountUnload { target } => Some(&target.mount_id),
+            PluginHostRequest::CapabilityInvoke { contribution, .. }
+            | PluginHostRequest::ContextContribute { contribution, .. }
+            | PluginHostRequest::ResourceAcquire { contribution, .. } => Some(&contribution.target.mount_id),
+            PluginHostRequest::ResourceRelease { handle_id } => self.resource_mounts.get(handle_id),
+            _ => None,
         }
     }
 
-    async fn apply_residency_change(
-        &self,
+    async fn apply_success(
+        &mut self,
         envelope: &PluginHostRequestEnvelope,
+        success: &PluginHostSuccess,
     ) {
         match &envelope.request {
             PluginHostRequest::MountLoad { context } => {
@@ -1718,6 +1919,15 @@ impl GenerationActor {
             }
             PluginHostRequest::MountUnload { target } => {
                 self.mounts.write().await.remove(&target.mount_id);
+                self.resource_mounts.retain(|_, owner| owner != &target.mount_id);
+            }
+            PluginHostRequest::ResourceAcquire { contribution, .. } => {
+                if let PluginHostSuccess::ResourceAcquired { handle_id } = success {
+                    self.resource_mounts.insert(handle_id.clone(), contribution.target.mount_id.clone());
+                }
+            }
+            PluginHostRequest::ResourceRelease { handle_id } => {
+                self.resource_mounts.remove(handle_id);
             }
             _ => {}
         }
@@ -1746,7 +1956,10 @@ impl GenerationActor {
     fn fail_all(&mut self, error: JavaScriptHostError) {
         for (_, pending) in self.pending.drain() {
             match pending.reply {
-                PendingReply::Request(reply) => {
+                PendingReply::Request { reply, coalesced } => {
+                    for follower in coalesced {
+                        let _ = follower.send(Err(error.clone()));
+                    }
                     let _ = reply.send(Err(error.clone()));
                 }
                 PendingReply::Stop(reply) => {
@@ -1759,7 +1972,7 @@ impl GenerationActor {
                 ActorCommand::Submit { reply, .. } => {
                     let _ = reply.send(Err(error.clone()));
                 }
-                ActorCommand::Stop { reply, .. } => {
+                ActorCommand::Stop { reply, .. } | ActorCommand::MountFence { reply, .. } => {
                     let _ = reply.send(Err(error.clone()));
                 }
             }
@@ -1824,23 +2037,6 @@ fn host_service_mount_handle(request: &PluginHostRequest) -> Option<&str> {
     }
 }
 
-async fn write_json_line<T: Serialize>(
-    stdin: &mut ChildStdin,
-    value: &T,
-) -> Result<(), String> {
-    let mut encoded =
-        serde_json::to_vec(value).map_err(|error| error.to_string())?;
-    encoded.push(b'\n');
-    stdin
-        .write_all(&encoded)
-        .await
-        .map_err(|error| format!("Host IPC write failed: {error}"))?;
-    stdin
-        .flush()
-        .await
-        .map_err(|error| format!("Host IPC flush failed: {error}"))
-}
-
 async fn read_json_line<T: for<'de> Deserialize<'de>>(
     reader: &mut (impl AsyncBufRead + Unpin),
     max_frame_bytes: usize,
@@ -1899,7 +2095,7 @@ struct StderrSummary {
     lines: u64,
 }
 
-async fn drain_stderr(mut stderr: ChildStderr) -> StderrSummary {
+async fn drain_stderr(mut stderr: impl AsyncRead + Unpin) -> StderrSummary {
     let mut summary = StderrSummary::default();
     let mut buffer = [0_u8; 8192];
     loop {
@@ -1927,10 +2123,12 @@ async fn drain_stderr(mut stderr: ChildStderr) -> StderrSummary {
     }
 }
 
-pub fn host_failure_response(reason: impl Into<String>) -> PluginHostResponseBody {
-    PluginHostResponseBody::Failure(PluginHostWireError {
-        code: CanonicalErrorCode::from(HOST_FAILURE_CODE),
-        message: reason.into(),
-        retryable: true,
-    })
-}
+#[cfg(test)]
+#[path = "admission_tests.rs"]
+mod admission_tests;
+#[cfg(test)]
+#[path = "diagnostics_tests.rs"]
+mod diagnostics_tests;
+#[cfg(test)]
+#[path = "cleanup_gate_tests.rs"]
+mod cleanup_gate_tests;

@@ -23,6 +23,7 @@ const resourceHandles = new Map();
 const activeRequests = new Map();
 const hostRequests = new Map();
 let nextHostRequest = 1;
+let nextResourceHandle = 1n;
 let shuttingDown = false;
 let writeChain = Promise.resolve();
 
@@ -85,16 +86,52 @@ function targetKey(target) {
   return JSON.stringify(target);
 }
 
+class CleanupError extends Error {
+  constructor() { super("Plugin cleanup failed"); }
+}
+
 function requireMount(target) {
   const mount = mounts.get(target.mount_id);
   if (!mount) throw new Error(`Mount ${target.mount_id} is not loaded`);
   if (mount.targetKey !== targetKey(target)) {
     throw new Error("contribution target does not match the loaded Mount");
   }
+  if (mount.phase !== "active") throw new Error("Mount is not accepting requests");
   return mount;
 }
 
-function hostCall(mount, request) {
+async function runMountRequest(mount, action) {
+  if (mount.phase !== "active") throw new Error("Mount is not accepting requests");
+  mount.activeRequests += 1;
+  try {
+    return await action();
+  } finally {
+    mount.activeRequests -= 1;
+  }
+}
+
+async function closeMount(mount) {
+  // Retained SDK closures must not bind to a later activation with the same
+  // mount_handle_id. Drain calls already sent before publishing MountLoad or
+  // MountUnload completion; Rust still owns their exact context until then.
+  mount.phase = "closed";
+  await Promise.allSettled([...mount.services]);
+  mounts.delete(mount.context.target.mount_id);
+}
+
+async function releaseResource(resource) {
+  if (!resource.releasing) {
+    resource.releasing = (async () => {
+      if (typeof resource.release === "function") await resource.release();
+      resourceHandles.delete(resource.handleId);
+      resource.mount.resources.delete(resource.localId);
+    })().finally(() => { resource.releasing = null; });
+  }
+  await resource.releasing;
+}
+
+async function hostCall(mount, request) {
+  if (mount.phase === "closed") throw new Error("Mount SDK is no longer active");
   const requestId = `js-${generation}-${nextHostRequest++}`;
   const envelope = {
     protocol_version: protocolVersion,
@@ -104,27 +141,30 @@ function hostCall(mount, request) {
     direction: "java_script_to_host",
     request,
   };
-  return new Promise((resolve, reject) => {
+  const pending = new Promise((resolve, reject) => {
     hostRequests.set(requestId, { resolve, reject });
     writeFrame(envelope).catch((error) => {
       hostRequests.delete(requestId);
       reject(error);
     });
   });
+  mount.services.add(pending);
+  try {
+    return await pending;
+  } finally {
+    mount.services.delete(pending);
+  }
 }
 
-function sdkFor(context) {
-  const mount = {
-    mountHandleId: context.mount_handle_id,
-    target: structuredClone(context.target),
-  };
+function sdkFor(mount) {
+  const mountHandleId = mount.context.mount_handle_id;
   return Object.freeze({
     credential: Object.freeze({
       resolve: async (slotKey) => {
         const value = await hostCall(mount, {
           method: "credential_resolve",
           params: {
-            mount_handle_id: mount.mountHandleId,
+            mount_handle_id: mountHandleId,
             slot_key: slotKey,
           },
         });
@@ -135,22 +175,22 @@ function sdkFor(context) {
       get: (request) =>
         hostCall(mount, {
           method: "state_get",
-          params: { mount_handle_id: mount.mountHandleId, request },
+          params: { mount_handle_id: mountHandleId, request },
         }),
       set: (request) =>
         hostCall(mount, {
           method: "state_set",
-          params: { mount_handle_id: mount.mountHandleId, request },
+          params: { mount_handle_id: mountHandleId, request },
         }),
       delete: (request) =>
         hostCall(mount, {
           method: "state_delete",
-          params: { mount_handle_id: mount.mountHandleId, request },
+          params: { mount_handle_id: mountHandleId, request },
         }),
       compareAndSwap: (request) =>
         hostCall(mount, {
           method: "state_compare_and_swap",
-          params: { mount_handle_id: mount.mountHandleId, request },
+          params: { mount_handle_id: mountHandleId, request },
         }),
     }),
   });
@@ -175,41 +215,50 @@ async function dispatch(frame) {
       if (!frame.module_path || mounts.has(context.target.mount_id)) {
         throw new Error("MountLoad requires one new immutable module path");
       }
-      const moduleUrl = pathToFileURL(frame.module_path);
-      moduleUrl.searchParams.set(
-        "artifact",
-        context.target.artifact_digest,
-      );
-      const imported = await import(moduleUrl.href);
-      if (typeof imported.activate !== "function") {
-        throw new Error("main.mjs must export activate(context)");
+      const mount = {
+        context, targetKey: targetKey(context.target), phase: "loading",
+        activeRequests: 0, services: new Set(), resources: new Map(), extension: null,
+      };
+      mounts.set(context.target.mount_id, mount);
+      try {
+        const moduleUrl = pathToFileURL(frame.module_path);
+        moduleUrl.searchParams.set("artifact", context.target.artifact_digest);
+        const imported = await import(moduleUrl.href);
+        if (typeof imported.activate !== "function") {
+          throw new Error("main.mjs must export activate(context)");
+        }
+        const extension = await imported.activate(Object.freeze({
+          mount: structuredClone(context), sdk: sdkFor(mount),
+        }));
+        if (!extension || typeof extension !== "object") {
+          throw new Error("activate(context) must return an extension object");
+        }
+        mount.extension = extension;
+        mount.phase = "active";
+      } catch (error) {
+        await closeMount(mount);
+        throw error;
       }
-      const extension = await imported.activate(
-        Object.freeze({
-          mount: structuredClone(context),
-          sdk: sdkFor(context),
-        }),
-      );
-      if (!extension || typeof extension !== "object") {
-        throw new Error("activate(context) must return an extension object");
-      }
-      mounts.set(context.target.mount_id, {
-        context,
-        extension,
-        targetKey: targetKey(context.target),
-      });
       return { kind: "ack" };
     }
     case "mount_unload": {
       const mount = requireMount(params.target);
-      if (typeof mount.extension.deactivate === "function") {
-        await mount.extension.deactivate();
+      if (mount.activeRequests || mount.services.size) {
+        throw new Error("Mount has outstanding requests or SDK calls");
       }
-      mounts.delete(params.target.mount_id);
-      for (const [handle, owner] of resourceHandles) {
-        if (owner.mountId === params.target.mount_id) {
-          resourceHandles.delete(handle);
-        }
+      mount.phase = "unloading";
+      let failures = 0;
+      for (const resource of mount.resources.values()) {
+        try { await releaseResource(resource); } catch { failures += 1; }
+      }
+      try {
+        if (typeof mount.extension.deactivate === "function") await mount.extension.deactivate();
+      } catch { failures += 1; }
+      await closeMount(mount);
+      if (failures) {
+        // Disposal may have partially mutated the extension. Do not advertise
+        // a usable Mount or retry callbacks against unknown state.
+        throw new CleanupError();
       }
       return { kind: "ack" };
     }
@@ -220,21 +269,21 @@ async function dispatch(frame) {
       if (!capability || typeof capability.invoke !== "function") {
         throw new Error("capability contribution is not implemented");
       }
-      const controller = new AbortController();
-      activeRequests.set(requestId, controller);
-      try {
-        const value = await capability.invoke(
-          Object.freeze({
+      return runMountRequest(mount, async () => {
+        const controller = new AbortController();
+        activeRequests.set(requestId, controller);
+        try {
+          const value = await capability.invoke(Object.freeze({
             actionId: params.action_id,
             input: structuredClone(params.input),
             contribution: structuredClone(params.contribution),
             signal: controller.signal,
-          }),
-        );
-        return { kind: "value", payload: value ?? null };
-      } finally {
-        activeRequests.delete(requestId);
-      }
+          }));
+          return { kind: "value", payload: value ?? null };
+        } finally {
+          activeRequests.delete(requestId);
+        }
+      });
     }
     case "context_contribute": {
       const mount = requireMount(params.contribution.target);
@@ -243,11 +292,13 @@ async function dispatch(frame) {
       if (!capability || typeof capability.contributeContext !== "function") {
         throw new Error("context contribution is not implemented");
       }
-      const value = await capability.contributeContext({
-        schemaRef: params.schema_ref,
-        contribution: structuredClone(params.contribution),
+      return runMountRequest(mount, async () => {
+        const value = await capability.contributeContext({
+          schemaRef: params.schema_ref,
+          contribution: structuredClone(params.contribution),
+        });
+        return { kind: "value", payload: value ?? null };
       });
-      return { kind: "value", payload: value ?? null };
     }
     case "resource_acquire": {
       const mount = requireMount(params.contribution.target);
@@ -256,36 +307,40 @@ async function dispatch(frame) {
       if (!capability || typeof capability.acquireResource !== "function") {
         throw new Error("resource contribution is not implemented");
       }
-      const acquired = await capability.acquireResource({
-        bindingId: params.binding_id,
-        resourceKind: params.resource_kind,
-        parameters: structuredClone(params.parameters),
+      return runMountRequest(mount, async () => {
+        const acquired = await capability.acquireResource({
+          bindingId: params.binding_id,
+          resourceKind: params.resource_kind,
+          parameters: structuredClone(params.parameters),
+        });
+        const release = typeof acquired?.release === "function" ? acquired.release.bind(acquired) : undefined;
+        const rejection = !acquired || typeof acquired.handleId !== "string" || !acquired.handleId.length
+          ? "resource acquisition must return handleId"
+          : mount.resources.has(acquired.handleId) ? "resource handle ID is already active in this Mount" : null;
+        if (rejection) {
+          // Even a rejected acquisition transfers cleanup responsibility to us.
+          // Dispose that returned value, never the already registered owner.
+          try { await release?.(); } catch { throw new CleanupError(); }
+          throw new Error(rejection);
+        }
+        // The plugin ID is local to an acquisition, not a durable release
+        // capability. Wire IDs never repeat, even after release or remount.
+        const handleId = "resource-" + generation + "-" + nextResourceHandle++;
+        const resource = {
+          mount, handleId, localId: acquired.handleId, release, releasing: null,
+        };
+        mount.resources.set(acquired.handleId, resource);
+        resourceHandles.set(handleId, resource);
+        return { kind: "resource_acquired", payload: { handle_id: handleId } };
       });
-      if (
-        !acquired ||
-        typeof acquired.handleId !== "string" ||
-        acquired.handleId.length === 0
-      ) {
-        throw new Error("resource acquisition must return handleId");
-      }
-      if (resourceHandles.has(acquired.handleId)) {
-        throw new Error("resource handle ID is already active");
-      }
-      resourceHandles.set(acquired.handleId, {
-        mountId: params.contribution.target.mount_id,
-        release: acquired.release,
-      });
-      return {
-        kind: "resource_acquired",
-        payload: { handle_id: acquired.handleId },
-      };
     }
     case "resource_release": {
       const resource = resourceHandles.get(params.handle_id);
-      if (!resource) throw new Error("resource handle is not active");
-      if (typeof resource.release === "function") await resource.release();
-      resourceHandles.delete(params.handle_id);
-      return { kind: "ack" };
+      if (!resource) return { kind: "ack" };
+      return runMountRequest(resource.mount, async () => {
+        await releaseResource(resource);
+        return { kind: "ack" };
+      });
     }
     case "request_cancel": {
       activeRequests.get(params.target_request_id)?.abort();
@@ -349,9 +404,11 @@ lines.on("line", (line) => {
       writeFrame(
         failure(
           frame.envelope?.request_id ?? "invalid-request",
-          error?.name === "AbortError"
-            ? "REQUEST_CANCELED"
-            : "PLUGIN_INVOCATION_FAILED",
+          error instanceof CleanupError
+            ? "PLUGIN_CLEANUP_FAILED"
+            : error?.name === "AbortError"
+              ? "REQUEST_CANCELED"
+              : "PLUGIN_INVOCATION_FAILED",
           error?.message ?? String(error),
           false,
         ),

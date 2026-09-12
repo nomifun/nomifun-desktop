@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 mod error;
+mod outbound;
 mod supervisor;
 
 pub use error::*;

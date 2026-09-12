@@ -130,10 +130,6 @@ impl JsKernelPluginAdapter {
             artifact_digest: input.artifact.artifact_digest.clone(),
             manifest_digest: input.artifact.manifest.payload_digest.clone(),
         };
-        let identity = PluginIdentityDescriptor {
-            package: package.clone(),
-            mount_id: input.mount_id.clone(),
-        };
         let state = PluginStateHandleDescriptor {
             package_id: package.id.clone(),
             mount_id: input.mount_id.clone(),
@@ -155,7 +151,6 @@ impl JsKernelPluginAdapter {
             entrypoint.module_digest.clone(),
             target,
         );
-        let _ = identity;
         Ok(Self {
             artifact: input.artifact,
             mount_id: input.mount_id,

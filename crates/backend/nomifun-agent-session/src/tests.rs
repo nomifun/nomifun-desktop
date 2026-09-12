@@ -466,6 +466,61 @@ async fn runtime_admission_boundary_is_atomic_and_cannot_revive_open_failed() {
 }
 
 #[tokio::test]
+async fn observations_keep_session_head_events_and_messages_in_one_committed_snapshot() {
+    let store = AgentSessionStore::open_in_memory().await.unwrap();
+    let (session, ready_event) = create_ready(&store, "observation-snapshot").await;
+    let turn = append(
+        &session.agent_session_id,
+        "observation-turn", "session-api", "observation-turn", "turn/started",
+        "observation-turn", Some(ready_event), json!({}),
+    );
+    store.append_event(&turn).await.unwrap();
+
+    // One pool connection makes competing acquisitions interleave predictably.
+    // An observation that reacquires between fields can combine old session
+    // metadata with a newer head, event page, or message projection.
+    let writer = async {
+        for index in 0..32 {
+            let id = format!("observation-part-{index}");
+            let event = append(
+                &session.agent_session_id,
+                &id, "runtime-supervisor", &id, "message/content-part",
+                "observation-message", Some(turn.event_id.clone()),
+                json!({"content": "part"}),
+            );
+            store.append_event(&event).await.unwrap();
+        }
+    };
+    let reader = async {
+        let mut observations = Vec::new();
+        for _ in 0..32 {
+            observations.push(store.observe(&session.agent_session_id, None, 500).await.unwrap());
+        }
+        observations
+    };
+    let ((), observations) = tokio::join!(writer, reader);
+    for observation in observations {
+        assert_eq!(observation.session.next_seq, observation.head.last_seq + 1);
+        assert_eq!(observation.next_cursor.seq, observation.head.last_seq);
+        assert_eq!(observation.events.last().unwrap().seq, observation.head.last_seq);
+        assert!(observation.messages.iter().all(|message| message.last_seq <= observation.head.last_seq));
+    }
+
+    let page = store.observe(&session.agent_session_id, None, 1).await.unwrap();
+    assert_eq!(page.events.len(), 1);
+    assert_eq!(page.next_cursor.seq, page.events[0].seq);
+    assert!(page.next_cursor.seq < page.head.last_seq);
+    let ahead = nomifun_agent_contracts::SessionEventCursor {
+        agent_session_id: session.agent_session_id.clone(),
+        seq: page.head.last_seq + 1,
+    };
+    assert!(matches!(
+        store.observe(&session.agent_session_id, Some(&ahead), 10).await,
+        Err(SessionStoreError::InvalidEvent(_))
+    ));
+}
+
+#[tokio::test]
 async fn append_projection_cursor_and_rebuild_are_one_deterministic_chain() {
     let store = AgentSessionStore::open_in_memory().await.unwrap();
     let (session, ready_event) = create_ready(&store, "projection").await;
