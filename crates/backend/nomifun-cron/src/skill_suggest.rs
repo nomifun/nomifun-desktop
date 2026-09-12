@@ -112,7 +112,6 @@ impl SkillSuggestDetector {
             return Ok(true);
         }
 
-        self.set_last_hash(job_id, hash);
         self.persist_and_emit(
             owner_id,
             conversation_id,
@@ -121,7 +120,8 @@ impl SkillSuggestDetector {
             &validated.description,
             &content,
         )
-        .await;
+        .await?;
+        self.set_last_hash(job_id, hash);
         Ok(true)
     }
 
@@ -133,45 +133,19 @@ impl SkillSuggestDetector {
         name: &str,
         description: &str,
         skill_content: &str,
-    ) {
-        let row = match build_skill_suggest_artifact(
+    ) -> Result<(), CronError> {
+        let row = build_skill_suggest_artifact(
             conversation_id,
             job_id,
             name,
             description,
             skill_content,
             now_ms(),
-        ) {
-            Ok(row) => row,
-            Err(err) => {
-                warn!(conversation_id, job_id, error = %err, "Refusing invalid cron skill suggestion artifact");
-                return;
-            }
-        };
-
-        let row = match self.conversation_repo.upsert_artifact(&row).await {
-            Ok(row) => row,
-            Err(err) => {
-                warn!(
-                    conversation_id,
-                    job_id,
-                    error = %err,
-                    "Failed persisting cron skill suggestion artifact"
-                );
-                return;
-            }
-        };
-
-        if let Err(err) = emit_artifact(self.user_events.as_ref(), owner_id, &row) {
-            warn!(
-                conversation_id,
-                job_id,
-                error = %err,
-                "Failed emitting cron skill suggestion artifact"
-            );
-            return;
-        }
+        )?;
+        let row = self.conversation_repo.upsert_artifact(&row).await?;
+        emit_artifact(self.user_events.as_ref(), owner_id, &row)?;
         debug!(conversation_id, job_id, owner_id, "Emitted cron skill suggestion artifact");
+        Ok(())
     }
 
     fn last_hash(&self, job_id: &str) -> Option<String> {
@@ -198,7 +172,6 @@ mod tests {
     use tempfile::tempdir;
     use tokio::sync::broadcast;
 
-    const JOB_ID: &str = "0190f5fe-7c00-7a00-8abc-012345678901";
     const CONVERSATION_ID: &str = "0190f5fe-7c00-7a00-8000-000000000001";
     const CONVERSATION_ID_2: &str = "0190f5fe-7c00-7a00-8000-000000000002";
 
@@ -402,10 +375,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn does_not_emit_when_cron_job_does_not_exist() {
-        // The artifact layer is the authority: a suggestion for a cron job that
-        // is not in the database fails closed at `upsert_artifact`, so no event
-        // reaches the user even though the workspace file itself is valid.
+    async fn failed_persistence_does_not_suppress_retry() {
         let temp = tempdir().unwrap();
         let workspace = temp.path().join("workspace");
         tokio::fs::create_dir_all(&workspace).await.unwrap();
@@ -418,27 +388,72 @@ mod tests {
 
         let db = init_database_memory().await.unwrap();
         let installation_owner = nomifun_db::installation_owner_id(db.pool()).await.unwrap();
-        let repo: Arc<dyn IConversationRepository> = Arc::new(SqliteConversationRepository::new(db.pool().clone()));
-        repo.create(&make_conversation(CONVERSATION_ID, &installation_owner)).await.unwrap();
+        let repo: Arc<dyn IConversationRepository> =
+            Arc::new(SqliteConversationRepository::new(db.pool().clone()));
+        let job_id = seed_cron_job(db.pool(), &installation_owner).await;
 
         let bus = Arc::new(TestUserEventBus::new(16));
         let detector = SkillSuggestDetector::new(bus.clone(), repo.clone());
         let mut rx = bus.subscribe();
 
-        // JOB_ID was never seeded: the check itself succeeds (the file is a
-        // valid suggestion) but persistence refuses the orphan artifact.
-        let emitted = detector
+        // A real repository failure must not mark this content as processed.
+        let error = detector
             .check_and_emit(
                 &installation_owner,
                 CONVERSATION_ID,
-                JOB_ID,
+                &job_id,
                 &workspace.to_string_lossy(),
             )
             .await
-            .unwrap();
+            .unwrap_err();
 
-        assert!(emitted);
+        assert!(matches!(
+            error,
+            CronError::Database(nomifun_db::DbError::Conflict(_))
+        ));
+        assert!(detector.last_hash(&job_id).is_none());
         assert!(rx.try_recv().is_err());
-        assert!(repo.list_artifacts(CONVERSATION_ID).await.unwrap().is_empty());
+        assert!(
+            repo.list_artifacts(CONVERSATION_ID)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        repo.create(&make_conversation(CONVERSATION_ID, &installation_owner))
+            .await
+            .unwrap();
+        assert!(
+            detector
+                .check_and_emit(
+                    &installation_owner,
+                    CONVERSATION_ID,
+                    &job_id,
+                    &workspace.to_string_lossy()
+                )
+                .await
+                .unwrap()
+        );
+        assert_eq!(repo.list_artifacts(CONVERSATION_ID).await.unwrap().len(), 1);
+        assert_eq!(rx.try_recv().unwrap().name, "conversation.artifact");
+        assert!(rx.try_recv().is_err());
+        assert!(detector.last_hash(&job_id).is_some());
+
+        // Keep the orphan-job boundary covered as well as the recoverable failure.
+        let missing_job_id = nomifun_common::CronJobId::new().into_string();
+        assert!(matches!(
+            detector
+                .check_and_emit(
+                    &installation_owner,
+                    CONVERSATION_ID,
+                    &missing_job_id,
+                    &workspace.to_string_lossy()
+                )
+                .await,
+            Err(CronError::Database(nomifun_db::DbError::Conflict(_)))
+        ));
+        assert!(detector.last_hash(&missing_job_id).is_none());
+        assert!(rx.try_recv().is_err());
+        assert_eq!(repo.list_artifacts(CONVERSATION_ID).await.unwrap().len(), 1);
     }
 }

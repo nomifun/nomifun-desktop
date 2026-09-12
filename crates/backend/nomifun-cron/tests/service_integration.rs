@@ -3085,42 +3085,56 @@ async fn sc6_cron_with_timezone() {
     assert!(job.next_run_at.unwrap() > now);
 }
 
-// ── SC-7: Every zero interval ─────────────────────────────────────
+// ── SC-7/8: Invalid intervals fail before persistence ────────────
 
 #[tokio::test]
-async fn sc7_every_zero_interval() {
+async fn sc7_invalid_every_intervals_do_not_change_jobs() {
     let (svc, _, _) = setup().await;
-    let req = make_create_req(
-        "Zero Interval",
-        CronScheduleDto::Every {
-            every_ms: 0,
+    let job = svc
+        .add_job(TEST_USER_ID, make_create_req("Unchanged", every_60s()))
+        .await
+        .unwrap();
+    for every_ms in [0, -1000, i64::MAX] {
+        let schedule = CronScheduleDto::Every {
+            every_ms,
             description: None,
-        },
-    );
-    let err = svc.add_job(TEST_USER_ID, req).await.unwrap_err();
-    assert!(matches!(
-        err,
-        nomifun_cron::error::CronError::InvalidSchedule(_)
-    ));
-}
-
-// ── SC-8: Every negative interval ─────────────────────────────────
-
-#[tokio::test]
-async fn sc8_every_negative_interval() {
-    let (svc, _, _) = setup().await;
-    let req = make_create_req(
-        "Negative Interval",
-        CronScheduleDto::Every {
-            every_ms: -1000,
-            description: None,
-        },
-    );
-    let err = svc.add_job(TEST_USER_ID, req).await.unwrap_err();
-    assert!(matches!(
-        err,
-        nomifun_cron::error::CronError::InvalidSchedule(_)
-    ));
+        };
+        assert!(matches!(
+            svc.add_job(
+                TEST_USER_ID,
+                make_create_req("Invalid Interval", schedule.clone())
+            )
+            .await,
+            Err(nomifun_cron::error::CronError::InvalidSchedule(_))
+        ));
+        assert!(matches!(
+            svc.update_job(
+                TEST_USER_ID,
+                &job.cron_job_id,
+                UpdateCronJobRequest {
+                    name: Some("Must Not Change".into()),
+                    description: None,
+                    enabled: None,
+                    schedule: Some(schedule),
+                    message: None,
+                    agent_config: None,
+                    conversation_title: None,
+                    max_retries: None,
+                }
+            )
+            .await,
+            Err(nomifun_cron::error::CronError::InvalidSchedule(_))
+        ));
+    }
+    let jobs = svc
+        .list_jobs(TEST_USER_ID, &ListCronJobsQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].name, job.name);
+    assert_eq!(jobs[0].schedule_revision, job.schedule_revision);
+    assert_eq!(jobs[0].next_run_at, job.next_run_at);
+    assert_eq!(jobs[0].schedule, job.schedule);
 }
 
 // ── OC-1: Init preserves lazy-bind "existing" jobs with empty conversation_id ─────
