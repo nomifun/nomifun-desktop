@@ -4,9 +4,9 @@
 
 ## 续接位置
 
-- 当前批次：R74/R75/R76/R77已验证并按模块提交，本台账随检查点统一推送。R78 Cron列表hook、R79 provider_model、R80 snapshot单文件操作已独立放写；主线程继续Execution回执/产物边界与未读范围。上一已核实远端为 `f47ddd0bc`，本次源码截至 `e528829`。Browser Use暂跳过，已验证项不重复审。
+- 当前批次：R78/R79/R80/R81已验证并按模块提交，本台账随检查点统一推送；源码截至 `616495a97`，上一已核实远端为 `a98933ab2`。R82 v4-root、R83需求页面、R84 chat-model-broker独立放写；主线程继续Execution engine未读范围与scheduler局部去重。Browser Use暂跳过，已验证项不重复审。
 - 后续集成：当前分支已包含 `dd35e01de` 的 MiniApp 分支合并；设计文档已跟踪。本批仅更新遗留路由测试，未修改 MiniApp 产品实现，模块仍待深审。
-- 全局覆盖：111 个模块边界中，7 个已验证、53 个部分完成、51 个待审、0 个整模块审计中；197 个唯一问题/任务。三个部分完成模块的子范围正并行续审；完整阅读与跨模块问题闭环分开登记，Browser Use仍暂跳过。
+- 全局覆盖：111 个模块边界中，7 个已验证、53 个部分完成、48 个待审、3 个整模块审计中；207 个唯一问题/任务。完整阅读与跨模块问题闭环分开登记，Browser Use仍暂跳过。
 - R1 证据：[首轮记录](2026-09-12-code-quality.zh.md)。R1–R39 各报告中的“未提交/dirty”描述是当时快照；当前提交状态以下方验收记录为准。
 - R2 证据：[运行时与测试边界记录](2026-09-12-runtime-and-test-boundaries.zh.md)，包含改动、失败尝试、验证及覆盖限制。
 - R3 证据：[生命周期与状态记录](2026-09-12-lifecycle-and-state.zh.md)，记录四个 Host 旧实现失败、Context falsy 初值及消息重放缺陷；保留待办，勿重复修复。
@@ -124,7 +124,37 @@ R77完整补读control_steps、plan_materializer、domain_mapper、participant_r
 
 四批生产净增143行（R74 +36、R75 +99、R76 -3、R77 +11），测试净增536行（+142、+181、+154、+59），总净增679行。无新依赖、通用框架或新后台服务；本批不是总代码量下降。只为已确认错误补局部检查和回归；未运行全Rust workspace/真实服务/其他OS。
 
-## 当前并行边界（R78 / R79 / R80）
+## R78 / R79 / R80 / R81 阶段验收
+
+| 批次 | 已提交源码 | 最终验证 |
+| --- | --- | --- |
+| R78 Cron列表 | `938d93132` | 主线程Cron目录97/0（13文件）、完整UI typecheck通过 |
+| R79 Provider model | `616495a97` | cargo test --locked -p nomifun-system --lib --test provider_model_routes --test provider_routes：166+7+14=187/0，4线程 |
+| R80 Snapshot单文件 | `e9e525561` | cargo test --locked -p nomifun-file --test snapshot：50/0，4线程 |
+| R81 Execution回执/解析 | `98149318b` | cargo test --locked -p nomifun-agent-execution --lib：95/0，4线程 |
+
+R78完整读原hook521行；三个列表和run history以当前请求所有权管理loading/错误/结果，GET期间按ID合并事件与本地成功操作，修复前后检查时区修复归属。39项新增行为回归中首34项旧2通过/32失败，后5项无旧运行证据。未撤销已发PUT、未解决服务端事件/写响应全局排序；共享时区修复、详情和SessionList仍在R74-05。
+
+R79完整读provider_model及专属routes，调用追踪DB/DTO/UI/Workshop/ModelInvoke不算相邻模块全审。Ark型号校验与协议平台匹配统一忽略大小写，WebSocket根URL复用已有解析并保留query禁令；真实SQLite验证拒绝不落库/有效型号能解析。无旧运行证据；保存/删除长度不一致登记R79-03，其他跨事务问题沿用R76-04。
+
+R80字面单文件stage/unstage/discard/reset不再扩大到glob邻居；直接恢复HEAD index条目保留mode和邻居冲突，checkout禁pathspec且拒绝缺失/目录，reset不再吞index/HEAD错误，stage区分NotFound与其他metadata错误。主线程snapshot两次49通过/1失败：get_path和find_prefix均不能以不同大小写取得HEAD条目；核对libgit2源码后按core.ignorecase字面回退，最终50/0。Unix特殊文件名和新增链接用例未运行；没有把本批失败称为全部旧实现红绿。未重跑整个File，R75-08和取消/路径并发风险保留。
+
+R81合并立即/轮询完成回执，产物验证失败携带明确错误和retryable=false，保留真实provider失败；共享借用JSON扫描器替代会删除字符串内代码围栏的重复扫描；删除无效标签参数和单层转发，快照替换后参与者连续排序。新增两个生产映射/解析测试并增强已有排序/能力回归，无旧运行证据；未模拟真实会话投递及外部副作用。补读planner、resolver、artifact_contract全文件，scheduler生产1146–3028已续读；engine本轮补读243–804，其余与既有R73范围合并后继续，不声明全Execution完成。
+
+四批生产净增48行（R78 +66、R79 -5、R80 +48、R81 -61），测试净增579行（+275、+74、+186、+44），总净增627行。无新依赖/公共框架；未跑全Rust workspace、真实模型/外网、其他OS；仅相关UI范围完整typecheck。
+
+## 当前并行边界（R82 / R83 / R84）
+
+| 批次 / 负责人 | 独占写集 | 任务 |
+| --- | --- | --- |
+| R82 / Mencius | nomifun-v4-root/src/**及crate tests | 根目录初始化/恢复/持久状态，先完整阅读再局部修复；不在当前Rust验证依赖链，已放写 |
+| R83 / Carver | ui/src/renderer/pages/requirements/** | 需求页面入口/状态/CRUD/错误生命周期；R78 typecheck后放写 |
+| R84 / Hypatia | nomifun-chat-model-broker/src/**及tests/** | 模型代理协议/请求/响应生命周期，只读追踪App/平台；不在当前验证依赖链，已放写 |
+| 主线程 | Execution其余src/tests、共享接口、台账/Git | 继续engine未读段及scheduler局部去重；Rust串行验收，不修改R82/R83/R84写集 |
+
+R78–R81均已冻结提交，worker不回改冻结范围，不修改共享依赖/台账/Git；Browser Use暂跳过。
+
+## 历史并行边界（R78 / R79 / R80）
 
 | 批次 / 负责人 | 独占写集 | 任务 |
 | --- | --- | --- |
@@ -556,12 +586,12 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | R72-04 | 待审 | 版本响应容量/重定向、资产优先级和sysinfo嵌入契约 | 五页非正文硬限；缓存/ETag/并发合并未加；client决定重定向；未覆盖所有资产及签名安装；env目录/nonUnicode/uninitialized嵌入边界未改，UI native updater独立 |
 | R73-01 | 已验证 | Execution结果汇报错误绕过已有重试worker | 无效Ok(false)分支改为错误安排重试并返回原错；真实SQLite+失败一次效果端口红→绿、相同operation与delivered验证，执行层88/0 |
 | R73-02 | 已验证 | Execution取消封装和未消费step集合、冗余ensure/bool契约 | 直接复用真实cleanup/lead reconciliation；生产-41，无新重试框架 |
-| R73-03 | 待审 | Execution剩余范围与已读未闭环错误/关闭边界 | R77补读范围见验收；attempt产物校验失败未带明确错误可能被当超时重试、历史消息回退、同步文件验证/分页容量，loop历史体积、router long-context未约束；任务准入/非取消DB await/副作用、坏outbox头事件、generation取消仍待核对；不以93/0代替全审 |
+| R73-03 | 部分完成 | Execution剩余范围与已读未闭环错误/关闭边界 | R81已修产物校验失败缺少非重试错误、计划字符串代码围栏丢失；历史消息回退、同步文件验证/分页容量，loop历史体积、router long-context、任务准入/非取消DB await/副作用、坏outbox头事件、generation取消仍待核对；不以95/0代替全审 |
 | R74-01 | 已验证 | 普通Cron任务编辑重写at/every和已存时区 | 未改调度省略schedule，显式cron修改保留时区；真实弹窗回归 |
 | R74-02 | 已验证 | 复杂表达式误识别预设且实时更新覆盖草稿 | 非精确预设保持custom，表单按可见性/任务ID初始化；旧失败后通过 |
 | R74-03 | 已验证 | 异步校验前重复提交与旧弹窗结果污染 | 同步ref锁及弹窗session检查，未撤销已发后端写入；58/0及typecheck |
 | R74-04 | 已验证 | Cron页面完整静态覆盖与回归核对 | 32文件全部已读，12测试文件58/0；相邻模块只读跟踪不算全审 |
-| R74-05 | 待审 | Cron列表/详情请求归属、表达式方言、时区repair与会话映射 | R78续修useCronJobs；详情删除/重连/轮询导航，Builder截补六字段/年份与显示，旧快照补时区需DB契约；SessionList active ref/映射清理未修 |
+| R74-05 | 部分完成 | Cron列表/详情请求归属、表达式方言、时区repair与会话映射 | R78已修列表及runs请求归属/事件覆盖；详情删除/重连/轮询导航，Builder截补六字段/年份与显示，旧快照补时区需DB契约；SessionList active ref/映射清理未修 |
 | R75-01 | 已验证 | File写入/复制最终链接越界与目录名单组件校验不一致 | 现有写目标resolve、最近存在复制父路径检查、统一单组件校验；Windows348/0，Unix链接测试未跑 |
 | R75-02 | 已验证 | snapshot新文件删除可传绝对路径/父遍历 | 相对路径检查先于index变更；删除验证父路径且只删末端link；glob等仍见R75-08 |
 | R75-03 | 已验证 | patch临时名冲突时误删他人文件 | create_new成功后才进入清理域，真实碰撞回归保留临时文件及原目标 |
@@ -569,15 +599,26 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | R75-05 | 已验证 | ZIP整文件读取、取消登记泄漏/覆盖和输入即输出 | 64KiB分块、已打开文件长度上限、Drop取消与身份清理、同ID冲突；不代表输出路径排他或副作用回滚 |
 | R75-06 | 已验证 | File watch停止与开始竞态及重复实现 | stop共用watcher锁；复用事件发送、删除无效collect及无行为常量测试 |
 | R75-07 | 已验证 | File完整静态覆盖与平台验证记录 | 20 Rust文件11901基线行，348/0；三个Unix链接用例未运行，无修复前行为证据 |
-| R75-08 | 待审 | File路径TOCTOU/ZIP发布与snapshot字面路径契约 | R80续修checkout/reset_default glob；取消Drop早于blocking结束、同输出路径互删截断、不同路径hardlink别名未隔离；DNS重绑定/跨平台和真实I/O失效未验证 |
+| R75-08 | 部分完成 | File路径TOCTOU/ZIP发布与snapshot生命周期 | R80已修单文件glob/错误吞掉；取消Drop早于blocking结束、同输出路径互删截断、不同路径hardlink别名未隔离；snapshot共享临时目录/清理与并发index更新、路径TOCTOU/DNS重绑定/其他OS和真实I/O失效仍待闭环 |
 | R76-01 | 已验证 | Provider创建校验原始平台但保存trim平台 | 全程同一trim值，Ark展示名空白绕过与Bedrock空白拒绝修复；routes14/0 |
 | R76-02 | 已验证 | Bedrock更新校验规范值却保存原配置 | 保存next_bedrock，省略不写；三认证方式等价/region变更health-revision真实SQLite回归 |
 | R76-03 | 已验证 | Provider无调用的URL单层转发封装 | 全仓确认后直接用已有provider_model校验，生产净减3行；provider单元5/0 |
-| R76-04 | 待审 | Provider创建/删除跨事务和列表/历史配置边界 | display_name在图事务后、软引用先删DB后删；列表分次查询/单损坏行使全列表失败；Ark大小写一致性与历史Bedrock配置未自动修 |
+| R76-04 | 部分完成 | Provider创建/删除跨事务和列表/历史配置边界 | display_name在图事务后、软引用先删DB后删；列表分次查询/单损坏行使全列表失败，历史Bedrock配置未自动修；Ark大小写校验R79已闭环 |
 | R77-01 | 已验证 | 模型选票极大索引/候选数直接控制数组分配 | 1024候选本地硬限覆盖入口/解析/执行；usize::MAX旧溢出后通过 |
 | R77-02 | 已验证 | Borda全空票或未打分候选可胜出 | 仅有有效分数的候选参与赢家比较；旧无分数成功回归失败后修复 |
 | R77-03 | 已验证 | 验证标记后缀误将bypass/notpass当PASS | 明确末尾独立标记，保留JSON与冒号文本；旧bypass回归失败后通过 |
 | R77-04 | 已验证 | Loop iteration及quiet_rounds极值溢出 | iteration饱和终止、长度先比较后计算窗口；新极值回归，最终Execution93/0 |
+
+| R78-01 | 已验证 | Cron列表/runs旧请求或空身份污染数据/loading | 当前请求所有权、切换清数据/空身份idle；实际hooks回归，Cron97/0 |
+| R78-02 | 已验证 | Cron GET快照覆盖期间事件和本地成功操作 | 当前GET的按ID变更合并，保留其他任务及运行时间；时区修复前后归属检查 |
+| R79-01 | 已验证 | 大小写平台可绕过Ark无效型号校验 | eq_ignore_ascii_case与协议一致；真实SQLite及运行解析回归 |
+| R79-02 | 已验证 | WebSocket根URL重复通用解析校验 | 复用parse_realtime_url、保留专属query限制，增强已有回归 |
+| R79-03 | 待审 | Provider模型保存允许超过删除入口的512字符限制 | System/Workshop删除限制一致但保存DTO/DB无相应上限，需兼顾已存长ID；未仅改单入口冒充闭环 |
+| R80-01 | 已验证 | Git单文件pathspec扩大范围且大小写索引恢复丢条目 | 字面index/checkout、保留mode和邻居冲突、缺失/目录拒绝；Windows50/0 |
+| R80-02 | 已验证 | reset吞index失败继续改工作树，stage将metadata失败当删除 | 错误先返回，symlink_metadata保留dangling link；Windows锁/HEAD回归通过，Unix链接回归未运行 |
+| R81-01 | 已验证 | 已完成回执产物校验失败被当无标记超时重试 | 明确agent_artifact_verification_failed且非重试；成功/原provider错误映射回归，Execution95/0 |
+| R81-02 | 已验证 | planner全局删除代码围栏破坏步骤文本且重复JSON扫描 | 复用control_steps借用扫描器，普通/调整计划保留字符串内容 |
+| R81-03 | 已验证 | resolver无效标签参数/分配及快照替换排序间隙 | 全仓无有效tag调用，保留description能力推导；连续排序回归，删除产物单层转发 |
 
 ## 模块覆盖索引
 
@@ -610,7 +651,7 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | `crates/backend/nomifun-agent-domain-wave3/` | 部分完成 | R58 全3147行lib.rs及五个App适配器已读，4包/18action；10/0，统一对象输入和错误码，schema/helper及弱测试去重；输入/目标/provider权限契约 R58-03 保留 |
 | `crates/backend/nomifun-agent-domain-wave4/` | 部分完成 | R61完整已读、20/0；输入/重复构造生产-57。R70修App Channel policy锁顺序，App17/0；Robot激活/其余资源Context契约R61-03仍待办 |
 | `crates/backend/nomifun-agent-domain-wave5/` | 部分完成 | R62唯一文件和全测试、五包21capabilities十action已读，11/0；typed error/对象边界/Remote descriptor已修，生产-12；宿主未接线与运行时关闭保证R62-03保留 |
-| `crates/backend/nomifun-agent-execution/` | 部分完成 | R73装配/HTTP/lifecycle/event_publisher；R77 control/materializer/mapper/router/attempt/delivery/effect完整已读，resolver部分；93/0。engine/scheduler其余、planner/artifact及已读未闭环R73-03仍待续审 |
+| `crates/backend/nomifun-agent-execution/` | 部分完成 | R73/R77范围及R81 planner/resolver/artifact完整；scheduler生产后半已续读，engine243–804新增覆盖，95/0。engine其余和已读未闭环R73-03仍待续审 |
 | `crates/backend/nomifun-agent-kernel/` | 部分完成 | R1-01/02：registry 释放与句柄校验已修复验证；获取/关闭并发、其余注册/解析待审 |
 | `crates/backend/nomifun-agent-platform/` | 待审 | R1 仅回归通过；本轮将追踪 shutdown 与资源回收 |
 | `crates/backend/nomifun-agent-session/` | 部分完成 | R1-03：store 观察快照已修复验证；其余写入/迁移/压缩待审 |
@@ -621,7 +662,7 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | `crates/backend/nomifun-auth/` | 部分完成 | R42/R44 全 16 个生产文件及大部分测试已读；续期/QR/Conflict/CSP 修复后 251/0。认证并发、密码事务和信任策略等 R42-04 尚未闭环 |
 | `crates/backend/nomifun-browser-platform/` | 待审 | 用户要求 Browser Use 暂跳过；不计作完成 |
 | `crates/backend/nomifun-channel/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
-| `crates/backend/nomifun-chat-model-broker/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
+| `crates/backend/nomifun-chat-model-broker/` | 审计中 | R84 Hypatia独占src/tests，主线程验收共享调用边界 |
 | `crates/backend/nomifun-codex-runtime/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-common/` | 部分完成 | R59 完整 zip_safe.rs及预算所有调用已读；合并三导入器写前预算，11/0，调用方回归52/0；其余common文件仍待审 |
 | `crates/backend/nomifun-companion/` | 部分完成 | R59/R63 export.rs解压预算及临时目录所有权已修，定向26/0；其余export/全模块未深审，后续业务取消事务见R60-03 |
@@ -630,7 +671,7 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | `crates/backend/nomifun-cron/` | 部分完成 | R68完整19文件/18737行已读；溢出、busy原子取消释放、终态shutdown、skill重试修复，全包260/0；生产-28测试-234，DB/文件/检测任务/embedded receipt剩余R68-06 |
 | `crates/backend/nomifun-customer-service/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-db/` | 部分完成 | R4分页、R52Webhook/tag_setting原子更新已验证；R66 settings trait/repo/tests完整已审并改原子patch/RETURNING，6/0；其余仓储/事务/配额/查询计划待审 |
-| `crates/backend/nomifun-file/` | 部分完成 | R75完整20文件11901行、348/0；路径/临时文件/图片/ZIP/watch局部修复。R75-08未闭环，R80独占snapshot两文件续审；Unix链接回归未跑 |
+| `crates/backend/nomifun-file/` | 部分完成 | R75完整20文件11901行、348/0；R80单文件字面路径/错误传播已修，snapshot50/0。R75-08未闭环；Unix链接回归未跑 |
 | `crates/backend/nomifun-gateway/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-idmm/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/backend/nomifun-js-authoring/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
@@ -652,9 +693,9 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | `crates/backend/nomifun-shell/` | 部分完成 | R50全源文件及集成/调用已读；R65 Windows路径移出cmd命令文本，整包96/0；GUI/UNC未验、hand-off归属R50-04保留 |
 | `crates/backend/nomifun-skill-library/` | 部分完成 | R54 全 17 Rust 文件/7463 行及外部调用已读；传输重叠/预检/链接冲突/ZIP预算/配置发布修复，160/0、2 外网 ignored；资产未逐个审，跨模块/原子发布限制 R54-05 保留 |
 | `crates/backend/nomifun-ssh/` | 部分完成 | R25 glob 与搜索/列表错误语义已验证，后端单元 30/0；R25-03 名称协议、pool/service/routes 等仍待审 |
-| `crates/backend/nomifun-system/` | 部分完成 | R66settings/client_pref50/0；R72version/sysinfo/routes46/0；R76provider/专属routes19/0。R79 provider_model续审，R72-04/R76-04未决保留 |
+| `crates/backend/nomifun-system/` | 部分完成 | R66/R72/R76已读范围；R79 provider_model及routes完整已读，System lib166+HTTP21=187/0。R72-04/R76-04/R79-03未决及其他源码仍待审 |
 | `crates/backend/nomifun-terminal/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
-| `crates/backend/nomifun-v4-root/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
+| `crates/backend/nomifun-v4-root/` | 审计中 | R82 Mencius独占src/tests，主线程验收共享调用边界 |
 | `crates/backend/nomifun-webhook/` | 部分完成 | R46 全 7 源文件与 2 集成测试/调用边界已读；R52 原子部分更新与父项检查红→绿，Webhook 25/0 + DB webhook_repo 6/0；通知归属与取消/出站策略仍见 R46-05 |
 | `crates/backend/nomifun-workshop/` | 待审 | 未深审；按入口→状态归属→调用方→错误/关闭路径检查 |
 | `crates/shared/nomi-process-runtime/` | 部分完成 | R11 只读清理凭据 accessor 和关联 Drop/shutdown 边界已核对，23 项边界验证；平台/会话/输出等其余仍待深审 |
@@ -682,7 +723,7 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | `ui/src/renderer/pages/companion/` | 待审 | R2-06 仅统一测试导入并回归；业务未深审 |
 | `ui/src/renderer/pages/conversation/` | 部分完成 | R1-07 旧订阅/fence 删除；R2-02 只读 hook/steering、R2-05 Provider、R3-02 批处理、R3-03 历史分页已验证；发送/流/其余状态待审 |
 | `ui/src/renderer/pages/creativeStudio/` | 部分完成 | R1-05/07 CAS 撤销保存修复、旧 Projects 删除；R2-06 部分测试导入统一；Canvas 路由/资产/执行待审 |
-| `ui/src/renderer/pages/cron/` | 部分完成 | R74完整32文件4491行；弹窗修复、Cron58/0及typecheck；R74-05已读未闭环，R78列表hook独立续审 |
+| `ui/src/renderer/pages/cron/` | 部分完成 | R74完整32文件4491行；R78列表/runs归属及事件合并已修，Cron97/0及typecheck；R74-05其余未闭环 |
 | `ui/src/renderer/pages/customerService/` | 待审 | 未深审 |
 | `ui/src/renderer/pages/guid/` | 待审 | R43 仅对照 HEAD 核对官方 Agent 发起链并修旧结构断言，不计完整模块审计 |
 | `ui/src/renderer/pages/knowledge/` | 待审 | 未深审 |
@@ -693,7 +734,7 @@ cargo test --offline -p nomi-types -p nomi-compact -p nomi-config -p nomi-protoc
 | `ui/src/renderer/pages/nomi/` | 待审 | 未深审 |
 | `ui/src/renderer/pages/openCapabilities/` | 待审 | 未深审 |
 | `ui/src/renderer/pages/plugins/` | 待审 | 未深审 |
-| `ui/src/renderer/pages/requirements/` | 待审 | 未深审 |
+| `ui/src/renderer/pages/requirements/` | 审计中 | R83 Carver独占页面目录，主线程验收共享调用边界 |
 | `ui/src/renderer/pages/settings/` | 待审 | 未深审 |
 | `ui/src/renderer/pages/terminal/` | 待审 | 未深审 |
 
