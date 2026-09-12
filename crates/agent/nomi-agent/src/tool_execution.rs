@@ -930,28 +930,31 @@ fn block_is_error(block: &ContentBlock) -> bool {
 }
 
 fn truncate_result(content: &str, max_chars: usize) -> String {
-    if content.len() <= max_chars {
+    // Preserve equal head/tail shares, including for odd budgets.
+    let half = max_chars / 2;
+    let mut chars = content.char_indices();
+    let head_end = chars
+        .by_ref()
+        .take(half)
+        .last()
+        .map_or(0, |(i, ch)| i + ch.len_utf8());
+    let tail_start = chars
+        .by_ref()
+        .rev()
+        .take(half)
+        .last()
+        .map_or(content.len(), |(i, _)| i);
+    let removed_chars = chars.count();
+    // One remaining character still fits the unused slot of an odd budget.
+    if removed_chars == 0 || (max_chars % 2 == 1 && removed_chars == 1) {
         return content.to_string();
     }
-    let half = max_chars / 2;
-    // Find char boundaries to avoid panicking on multi-byte characters
-    let head_end = content
-        .char_indices()
-        .nth(half)
-        .map(|(i, _)| i)
-        .unwrap_or(content.len());
-    let tail_start = content
-        .char_indices()
-        .rev()
-        .nth(half - 1)
-        .map(|(i, _)| i)
-        .unwrap_or(0);
     let head = &content[..head_end];
     let tail = &content[tail_start..];
     format!(
         "{}\n\n... [truncated {} chars] ...\n\n{}",
         head,
-        content.len() - max_chars,
+        removed_chars,
         tail
     )
 }
@@ -1126,22 +1129,44 @@ mod tests {
 
     #[test]
     fn truncate_result_short_unchanged() {
-        let s = "short content";
-        assert_eq!(truncate_result(s, 1000), s);
+        for (content, budget) in [
+            ("short content", 1000),
+            ("", 0),
+            ("", 1),
+            ("🦀", 1),
+            ("🦀", 2),
+            ("你好", 2),
+            ("a🦀中", 3),
+            ("hello", 5),
+            ("a", usize::MAX),
+        ] {
+            assert_eq!(truncate_result(content, budget), content, "budget={budget}");
+        }
     }
 
     #[test]
     fn truncate_result_cjk_does_not_panic() {
-        let cjk: String = "这是一段较长的中文内容用于测试截断功能".repeat(50);
-        let result = truncate_result(&cjk, 100);
-        assert!(result.contains("truncated"));
+        for budget in [4, 5] {
+            assert_eq!(
+                truncate_result("甲乙丙丁戊己庚辛壬癸", budget),
+                "甲乙\n\n... [truncated 6 chars] ...\n\n壬癸",
+                "budget={budget}"
+            );
+        }
     }
 
     #[test]
     fn truncate_result_mixed_cjk_ascii_does_not_panic() {
-        let mixed = "Hello你好World世界Test测试".repeat(100);
-        let result = truncate_result(&mixed, 200);
-        assert!(result.contains("truncated"));
+        for (content, budget, expected) in [
+            ("a中🦀éz", 2, "a\n\n... [truncated 3 chars] ...\n\nz"),
+            ("a中🦀éz", 3, "a\n\n... [truncated 3 chars] ...\n\nz"),
+            ("a中🦀éz", 0, "\n\n... [truncated 5 chars] ...\n\n"),
+            ("a中🦀éz", 1, "\n\n... [truncated 5 chars] ...\n\n"),
+            ("abc", 2, "a\n\n... [truncated 1 chars] ...\n\nc"),
+            ("abcd", 3, "a\n\n... [truncated 2 chars] ...\n\nd"),
+        ] {
+            assert_eq!(truncate_result(content, budget), expected, "budget={budget}");
+        }
     }
 
     // -- execute_single integration tests (deferred tool activation) ----------
