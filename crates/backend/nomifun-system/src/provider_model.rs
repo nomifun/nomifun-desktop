@@ -271,7 +271,9 @@ pub(crate) fn validate_known_provider_model_task(
     model: &str,
     task: ModelTask,
 ) -> Result<(), AppError> {
-    if matches!(platform, "ark" | "volcengine") && task == ModelTask::VideoGeneration {
+    if (platform.eq_ignore_ascii_case("ark") || platform.eq_ignore_ascii_case("volcengine"))
+        && task == ModelTask::VideoGeneration
+    {
         let normalized = model.trim().to_ascii_lowercase().replace('_', "-");
         let model_id = match normalized.as_str() {
             "doubao-seedance-1.5-pro" => Some("doubao-seedance-1-5-pro-251215"),
@@ -603,14 +605,7 @@ fn parse_realtime_url(value: &str, field: &str) -> Result<Url, AppError> {
 }
 
 fn parse_websocket_base_url(value: &str, field: &str) -> Result<Url, AppError> {
-    let url = Url::parse(value.trim())
-        .map_err(|error| AppError::BadRequest(format!("{field} is not a valid URL: {error}")))?;
-    if !matches!(url.scheme(), "http" | "https" | "ws" | "wss") || url.host_str().is_none() {
-        return Err(AppError::BadRequest(format!(
-            "{field} must be an absolute http(s) or ws(s) URL with a host"
-        )));
-    }
-    validate_safe_url(&url, field)?;
+    let url = parse_realtime_url(value, field)?;
     if url.query().is_some() {
         return Err(AppError::BadRequest(format!(
             "{field} must not contain a query; put task-specific query parameters on realtime_endpoint"
@@ -1078,6 +1073,15 @@ mod tests {
         );
         realtime.realtime_endpoint = Some("/realtime?model={model}".into());
         validate_capability_urls(&realtime, "https://api.stepfun.com/v1").unwrap();
+        for invalid_base in [
+            "https://api.stepfun.com/v1?tenant=one",
+            "wss://api.stepfun.com/v1?tenant=one",
+            "wss://api.stepfun.com/v1#fragment",
+            "wss://user@api.stepfun.com/v1",
+            "ftp://api.stepfun.com/v1",
+        ] {
+            assert!(validate_capability_urls(&realtime, invalid_base).is_err());
+        }
 
         realtime.base_url_override = Some("wss://api.stepfun.com/v1".into());
         validate_capability_urls(&realtime, "https://api.stepfun.com/v1").unwrap();

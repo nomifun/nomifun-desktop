@@ -161,6 +161,71 @@ async fn duplicate_traits_fail_at_save_and_unique_traits_resolve_unchanged() {
 }
 
 #[tokio::test]
+async fn mixed_case_ark_platforms_reject_invalid_video_models_before_persistence() {
+    let db = init_database_memory().await.unwrap();
+    let app = system_routes(build_state(&db));
+    for platform in ["ArK", "VOLCENGINE"] {
+        let provider_id = create_provider(&db, platform, "Ark model validation").await;
+        let save = |model: &str| {
+            json!({
+                "provider_id": provider_id,
+                "model": {
+                    "model": model,
+                    "capabilities": [{
+                        "task": "video_generation",
+                        "protocol": "ark.video_jobs",
+                        "connection_role": "default"
+                    }]
+                }
+            })
+        };
+        for (model, expected_error) in [
+            ("doubao-seedance-1.5-pro", "console display name"),
+            ("doubao-seed-2-0-mini-260428", "Seed and Seedance"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(request("PUT", "/api/provider-models", Some(save(model))))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{platform}/{model}");
+            let error = body_json(response).await;
+            assert!(error.to_string().contains(expected_error), "{error}");
+        }
+        let listed = app
+            .clone()
+            .oneshot(request(
+                "GET",
+                &format!("/api/provider-models?provider_id={provider_id}"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(listed.status(), StatusCode::OK);
+        let listed = body_json(listed).await;
+        assert_eq!(listed["data"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["data"][0]["model"], "seed-chat");
+
+        let model = "doubao-seedance-2-0-mini-260615";
+        let response = app
+            .clone()
+            .oneshot(request("PUT", "/api/provider-models", Some(save(model))))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let resolved = build_invoke(&db)
+            .resolve_task_config(
+                &ModelRef { provider_id, model: model.to_owned() },
+                ModelTask::VideoGeneration,
+            )
+            .await
+            .unwrap();
+        assert_eq!(resolved.protocol, "ark.video_jobs");
+        assert_eq!(resolved.model, model);
+    }
+}
+
+#[tokio::test]
 async fn full_save_list_update_and_query_delete_roundtrip() {
     let db = init_database_memory().await.unwrap();
     let provider_id = create_provider(&db, "stepfun", "StepFun").await;
