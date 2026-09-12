@@ -15,8 +15,7 @@ use crate::attachments::PromptAttachment;
 ///
 /// Keep this in lock-step with the registration site if engines ever change.
 /// A prompt must never name a tool the session lacks: the agent would try to
-/// call a missing tool and break the turn, the exact failure the tool-free
-/// prompt variant was written to avoid.
+/// call a missing tool and break the turn.
 pub fn has_native_requirement_tools(agent_type: AgentType) -> bool {
     matches!(agent_type, AgentType::Nomi)
 }
@@ -63,12 +62,8 @@ fn render_attachments_section(attachments: &[PromptAttachment]) -> String {
 /// Tells the agent exactly what to do and how to report completion. The agent
 /// must NOT pick the next requirement — the platform hands it the next one.
 ///
-/// The instruction text is session-aware: only sessions that actually expose
-/// the `requirement_complete` / `requirement_update_status` tools (Nomi
-/// natively, or ACP with the requirement MCP injected) are told to call those
-/// tools. Every other session is given a tool-free contract — it just does the
-/// work and ends the turn, and the platform records completion automatically
-/// via `RequirementService::finalize_if_needed` on a clean Finish.
+/// The current chat engine is Nomi, whose native requirement tools are expected
+/// to be registered by host wiring. Terminal MCP prompts are built separately.
 pub fn build_requirement_prompt(
     tag: &str,
     req: &Requirement,
@@ -77,42 +72,16 @@ pub fn build_requirement_prompt(
     agent_type: AgentType,
     attachments: &[PromptAttachment],
 ) -> String {
-    if has_native_requirement_tools(agent_type) {
-        build_requirement_prompt_with_native_tools(
-            tag,
+    match agent_type {
+        AgentType::Nomi => build_native_tools_prompt(
+            &format!("[AutoWork] You are working through requirements in tag \"{tag}\"."),
             req,
             claim_generation,
             claim_token,
             attachments,
-        )
-    } else {
-        build_requirement_prompt_no_native_tools(
-            tag,
-            req,
-            claim_generation,
-            claim_token,
-            attachments,
-        )
+            "",
+        ),
     }
-}
-
-/// Native-tool variant: the engine has `requirement_complete` /
-/// `requirement_update_status` registered, so we tell the model to call them.
-fn build_requirement_prompt_with_native_tools(
-    tag: &str,
-    req: &Requirement,
-    claim_generation: i64,
-    claim_token: &str,
-    attachments: &[PromptAttachment],
-) -> String {
-    build_native_tools_prompt(
-        &format!("[AutoWork] You are working through requirements in tag \"{tag}\"."),
-        req,
-        claim_generation,
-        claim_token,
-        attachments,
-        "",
-    )
 }
 
 /// Single source of truth for the native-tools prompt shape. The chat and
@@ -154,56 +123,6 @@ fn build_native_tools_prompt(
         content = req.content,
         attachments_section = render_attachments_section(attachments),
         extra_sections = extra_sections,
-    )
-}
-
-/// Tool-free variant: the engine does NOT have the native requirement tools
-/// registered. The model must NOT try to call `requirement_complete` —
-/// invoking a tool the session does not expose just produces an apologetic
-/// "我无法调用 requirement_complete" message and breaks the turn.
-///
-/// Instead the contract is simple: do the work, then end the turn with a
-/// brief completion note in plain text. The platform records `done`
-/// automatically when the turn finishes cleanly (see
-/// `RequirementService::finalize_if_needed`); if the turn errors out the
-/// platform retries / marks it failed on its own. To clearly signal an
-/// inability to complete, the model is asked to surface the failure plainly
-/// in its final message — humans reading the conversation see a real reason,
-/// and downstream automation has unambiguous text to grep.
-fn build_requirement_prompt_no_native_tools(
-    tag: &str,
-    req: &Requirement,
-    claim_generation: i64,
-    claim_token: &str,
-    attachments: &[PromptAttachment],
-) -> String {
-    format!(
-        "[AutoWork] You are working through requirements in tag \"{tag}\".\n\n\
-         ## Current requirement\n\
-         id: {id}\n\
-         claim_generation: {claim_generation}\n\
-         claim_token: {claim_token}\n\
-         title: {title}\n\
-         order: {order}\n\n\
-         {content}\n\
-         {attachments_section}\n\
-         ## When finished\n\
-         - Do the work, then end your turn with a brief plain-text completion note describing what \
-         you did. This session has no requirement-management tools registered, so do NOT attempt \
-         any tool call to record completion — the platform records it automatically when your turn \
-         ends cleanly.\n\
-         - If you cannot complete this requirement, end your turn with a plain-text message that \
-         clearly states the failure and the reason (for example, start the final line with \
-         \"Requirement failed:\" followed by the reason). Do not retry silently.\n\
-         Do not pick the next requirement yourself — the platform will hand you the next one.",
-        tag = tag,
-        id = req.requirement_id,
-        claim_generation = claim_generation,
-        claim_token = claim_token,
-        title = req.title,
-        order = req.order_key,
-        content = req.content,
-        attachments_section = render_attachments_section(attachments),
     )
 }
 

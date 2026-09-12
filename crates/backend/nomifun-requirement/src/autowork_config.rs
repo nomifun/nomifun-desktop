@@ -203,8 +203,8 @@ fn optional_string(
     match object.get(field) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(value)) => {
-            let value = value.trim();
-            if value.is_empty() {
+            // Operation identities are opaque; only tags are normalized later.
+            if value.trim().is_empty() {
                 Err(invalid_field(target_id, field, "a non-empty string"))
             } else {
                 Ok(Some(value.to_owned()))
@@ -279,20 +279,44 @@ mod tests {
         let second = decode_terminal_autowork_config(Some(&raw), "terminal").unwrap();
         assert_eq!(first.snapshot, second.snapshot);
         assert_eq!(first.snapshot.config.tag.as_deref(), Some("release"));
+        assert_eq!(first.snapshot.operation_id, None);
         assert!(first.snapshot.revision.starts_with("terminal:legacy:"));
     }
 
     #[test]
     fn terminal_envelope_roundtrips_revision_and_operation_identity() {
         let config = AutoWorkConfig::normalize(true, Some("alpha"), Some(5)).unwrap();
-        let raw = encode_terminal_autowork_config(&config, 9, Some("gateway:op"));
-        let decoded = decode_terminal_autowork_config(Some(&raw), "terminal").unwrap();
-        assert_eq!(decoded.sequence, 9);
-        assert_eq!(decoded.snapshot.config, config);
-        assert_eq!(decoded.snapshot.revision, "terminal:9");
-        assert_eq!(
-            decoded.snapshot.operation_id.as_deref(),
-            Some("gateway:op")
-        );
+        for operation_id in [
+            None,
+            Some("gateway:op"),
+            Some(" gateway:op "),
+            Some("\t gateway:op\n"),
+            Some("\u{3000}gateway:op\u{3000}"),
+        ] {
+            let raw = encode_terminal_autowork_config(&config, 9, operation_id);
+            let decoded = decode_terminal_autowork_config(Some(&raw), "terminal").unwrap();
+            assert_eq!(decoded.sequence, 9);
+            assert_eq!(decoded.snapshot.config, config);
+            assert_eq!(decoded.snapshot.revision, "terminal:9");
+            assert_eq!(decoded.snapshot.operation_id.as_deref(), operation_id);
+        }
+    }
+
+    #[test]
+    fn terminal_operation_identity_rejects_blank_and_non_string_values() {
+        for (operation_id, expected) in [
+            (serde_json::json!(""), "a non-empty string"),
+            (serde_json::json!(" \t\n\u{3000}"), "a non-empty string"),
+            (serde_json::json!(42), "a string"),
+            (serde_json::json!(false), "a string"),
+            (serde_json::json!([]), "a string"),
+            (serde_json::json!({}), "a string"),
+        ] {
+            let raw = serde_json::json!({ (OPERATION_ID_FIELD): operation_id });
+            let error = decode_terminal_autowork_config(Some(&raw), "terminal").unwrap_err();
+            assert!(matches!(error, AppError::Internal(message) if message == format!(
+                "AutoWork config for terminal terminal field '_operation_id' must be {expected}"
+            )));
+        }
     }
 }
