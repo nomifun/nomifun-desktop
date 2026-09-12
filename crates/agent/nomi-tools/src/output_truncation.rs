@@ -11,7 +11,8 @@
 /// How much output to retain before the middle is elided.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TruncationBudget {
-    /// Retain at most this many bytes (split across head/tail).
+    /// Retain at most this many input bytes (split across head/tail).
+    /// The inserted truncation marker is not included in this budget.
     Bytes(usize),
 }
 
@@ -31,13 +32,6 @@ impl TruncationBudget {
 pub fn truncate_middle(s: &str, budget: TruncationBudget) -> String {
     let max_bytes = budget.byte_budget();
 
-    if s.is_empty() {
-        return String::new();
-    }
-    if max_bytes == 0 {
-        let total_chars = s.chars().count();
-        return marker(u64::try_from(total_chars).unwrap_or(u64::MAX));
-    }
     if s.len() <= max_bytes {
         return s.to_string();
     }
@@ -68,7 +62,6 @@ fn split_string(s: &str, beginning_bytes: usize, end_bytes: usize) -> (usize, &s
     let mut prefix_end = 0usize;
     let mut suffix_start = len;
     let mut removed_chars = 0usize;
-    let mut suffix_started = false;
 
     for (idx, ch) in s.char_indices() {
         let char_end = idx + ch.len_utf8();
@@ -77,18 +70,12 @@ fn split_string(s: &str, beginning_bytes: usize, end_bytes: usize) -> (usize, &s
             continue;
         }
         if idx >= tail_start_target {
-            if !suffix_started {
-                suffix_start = idx;
-                suffix_started = true;
-            }
-            continue;
+            suffix_start = idx;
+            break;
         }
         removed_chars = removed_chars.saturating_add(1);
     }
 
-    if suffix_start < prefix_end {
-        suffix_start = prefix_end;
-    }
     (removed_chars, &s[..prefix_end], &s[suffix_start..])
 }
 
@@ -135,25 +122,20 @@ mod tests {
     fn utf8_boundary_safe_multibyte() {
         let input = "é".repeat(100); // 2 bytes each => 200 bytes
         let result = truncate_middle(&input, TruncationBudget::Bytes(21)); // odd budget
-        assert!(std::str::from_utf8(result.as_bytes()).is_ok());
-        assert!(!result.contains('\u{FFFD}'), "no replacement chars");
-        // every byte index that starts a slice must be a char boundary (no panic implies it)
+        assert_eq!(result, format!("{}\n…90 chars truncated…\n{}", "é".repeat(5), "é".repeat(5)));
     }
 
     #[test]
     fn utf8_boundary_safe_emoji() {
         let input = "🦀".repeat(50); // 4 bytes each => 200 bytes
         let result = truncate_middle(&input, TruncationBudget::Bytes(10));
-        assert!(std::str::from_utf8(result.as_bytes()).is_ok());
-        assert!(result.starts_with('🦀'), "head crab intact: {result}");
-        assert!(result.ends_with('🦀'), "tail crab intact: {result}");
+        assert_eq!(result, "🦀\n…48 chars truncated…\n🦀");
     }
 
     #[test]
     fn budget_zero_returns_only_marker() {
         let result = truncate_middle("hello world", TruncationBudget::Bytes(0));
-        assert!(result.contains("chars truncated"));
-        assert!(!result.contains("hello"));
+        assert_eq!(result, "\n…11 chars truncated…\n");
     }
 
     #[test]
@@ -161,7 +143,6 @@ mod tests {
         let input = "abcdefghij";
         let result = truncate_middle(input, TruncationBudget::Bytes(1));
         // head gets 0 bytes (1/2), tail gets 1 byte; no overlap, valid utf8
-        assert!(std::str::from_utf8(result.as_bytes()).is_ok());
-        assert!(result.contains("chars truncated"));
+        assert_eq!(result, "\n…9 chars truncated…\nj");
     }
 }
