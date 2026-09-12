@@ -27,15 +27,18 @@
  * Messages go through `useArcoMessage` (render `{ctx}`); clickable affordances
  * are Arco `Button`s; theme tokens only.
  */
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Table, Tag, Tooltip } from '@arco-design/web-react';
 import { ipcBridge } from '@/common';
+import { isHandledAuthExpiredHttpError } from '@/common/adapter/httpBridge';
 import type { ITagBinding, ITagBindings, ITagSummary } from '@/common/adapter/ipcBridge';
 import { shortSessionId } from '@renderer/utils/ui/shortId';
 import { useArcoMessage } from '@renderer/utils/ui/useArcoMessage';
 
-type TagRowData = ITagSummary & {
+type TagRowData = Pick<ITagSummary, 'tag' | 'done' | 'total'> & {
+  paused?: boolean;
+  paused_reason?: string | null;
   bindings: ITagBindings['bindings'];
 };
 
@@ -45,9 +48,17 @@ const AutoWorkPanel: React.FC = () => {
   const [tags, setTags] = useState<ITagSummary[]>([]);
   const [bindings, setBindings] = useState<ITagBindings[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+  const [acting, setActing] = useState(false);
+  const mounted = useRef(false);
+  const latestRequest = useRef(0);
+  const actionPending = useRef(false);
 
   const loadData = useCallback(async () => {
+    if (!mounted.current) return;
+    const request = ++latestRequest.current;
     setLoading(true);
+    setLoadError(false);
     try {
       // Tags + bindings are the whole of this panel now that the webhook picker
       // has moved out — load them together.
@@ -55,65 +66,76 @@ const AutoWorkPanel: React.FC = () => {
         ipcBridge.requirements.tags.invoke(),
         ipcBridge.requirements.tagBindings.invoke(),
       ]);
+      if (request !== latestRequest.current) return;
       setTags(tagList);
       setBindings(bindingList);
     } catch (e) {
+      if (request !== latestRequest.current) return;
+      setLoadError(true);
+      if (isHandledAuthExpiredHttpError(e)) return;
       message.error(String(e));
     } finally {
-      setLoading(false);
+      if (request === latestRequest.current) setLoading(false);
     }
   }, [message]);
 
   useEffect(() => {
-    void loadData();
-  }, [loadData]);
-
-  // Live updates: refresh when AutoWork state changes (so paused/active dots
-  // and the per-tag `paused` badge stay in sync without a manual reload).
-  useEffect(() => {
+    mounted.current = true;
     const unsubs = [
       ipcBridge.requirements.onTagPaused.on(() => void loadData()),
       ipcBridge.requirements.onAutoWork.on(() => void loadData()),
+      ipcBridge.requirements.onCreated.on(() => void loadData()),
+      ipcBridge.requirements.onUpdated.on(() => void loadData()),
+      ipcBridge.requirements.onStatusChanged.on(() => void loadData()),
+      ipcBridge.requirements.onDeleted.on(() => void loadData()),
+      ipcBridge.conversation.reconnected.on(() => void loadData()),
     ];
-    return () => unsubs.forEach((u) => u());
+    void loadData();
+    return () => {
+      mounted.current = false;
+      latestRequest.current++;
+      unsubs.forEach((u) => u());
+    };
   }, [loadData]);
 
-  // Forward the binding's own kind + stable target UUID verbatim. Passing the
-  // binding through avoids re-asserting its type here (the type lives on
-  // ITagBinding / the setAutoWork param, owned by ipcBridge).
-  const handleUnbind = async (binding: ITagBinding) => {
+  const runAction = async (action: () => Promise<unknown>, successKey: string, errorKey?: string) => {
+    if (!mounted.current || actionPending.current) return;
+    actionPending.current = true;
+    setActing(true);
     try {
-      await ipcBridge.requirements.setAutoWork.invoke({
-        kind: binding.kind,
-        target_id: binding.target_id,
-        enabled: false,
-        from_admin: true,
-      });
-      message.success(t('autowork.tagSessions.unbindOk'));
+      await action();
+      if (!mounted.current) return;
+      message.success(t(successKey));
       void loadData();
     } catch (e) {
-      message.error(t('autowork.tagSessions.unbindError', { error: String(e) }));
+      if (!mounted.current || isHandledAuthExpiredHttpError(e)) return;
+      message.error(errorKey ? t(errorKey, { error: String(e) }) : String(e));
+    } finally {
+      actionPending.current = false;
+      if (mounted.current) setActing(false);
     }
   };
 
-  const handleResume = async (tag: string) => {
-    try {
-      await ipcBridge.requirements.resumeTag.invoke({ tag, requeue_failed: true });
-      message.success(t('autowork.tagSessions.resumeSuccess'));
-      void loadData();
-    } catch (e) {
-      message.error(String(e));
-    }
-  };
+  // Preserve the binding's typed target and the backend's active-session guard.
+  const handleUnbind = (binding: ITagBinding) => runAction(
+    () => ipcBridge.requirements.setAutoWork.invoke({
+      kind: binding.kind, target_id: binding.target_id, enabled: false, from_admin: true,
+    }),
+    'autowork.tagSessions.unbindOk', 'autowork.tagSessions.unbindError'
+  );
+  const handleResume = (tag: string) => runAction(
+    () => ipcBridge.requirements.resumeTag.invoke({ tag, requeue_failed: true }),
+    'autowork.tagSessions.resumeSuccess'
+  );
 
-  // Merge tag summaries with bindings
-  const tableData: TagRowData[] = tags.map((tg) => {
-    const tagBinding = bindings.find((b) => b.tag === tg.tag);
-    return {
-      ...tg,
-      bindings: tagBinding?.bindings ?? [],
-    };
-  });
+  const bindingsByTag = new Map(bindings.map((group) => [group.tag, group.bindings]));
+  const tableData: TagRowData[] = tags.map((tg) => ({ ...tg, bindings: bindingsByTag.get(tg.tag) ?? [] }));
+  const knownTags = new Set(tags.map((tg) => tg.tag));
+  // The tags endpoint omits tags without requirements. Keep their bindings
+  // manageable; that endpoint supplies no pause metadata for these rows.
+  for (const group of bindings) {
+    if (!knownTags.has(group.tag)) tableData.push({ tag: group.tag, done: 0, total: 0, bindings: group.bindings });
+  }
 
   const runStateColor = (state: string): string => {
     switch (state) {
@@ -156,7 +178,7 @@ const AutoWorkPanel: React.FC = () => {
                   reason: pausedReasonLabel(row.paused_reason),
                 })}
               </Tag>
-              <Button size='mini' type='primary' onClick={() => void handleResume(row.tag)}>
+              <Button size='mini' type='primary' disabled={acting} onClick={() => void handleResume(row.tag)}>
                 {t('autowork.tagSessions.resume')}
               </Button>
             </>
@@ -227,7 +249,7 @@ const AutoWorkPanel: React.FC = () => {
                 <Button
                   size='mini'
                   status='warning'
-                  disabled={isActive}
+                  disabled={isActive || acting}
                   onClick={() => void handleUnbind(binding)}
                 >
                   {t('autowork.tagSessions.unbind')}
@@ -243,6 +265,12 @@ const AutoWorkPanel: React.FC = () => {
   return (
     <>
       {ctx}
+      {loadError && (
+        <div className='mb-12px text-t-secondary' role='alert'>
+          {t('requirements.loadError')}
+          <Button className='ml-8px' onClick={() => void loadData()}>{t('requirements.retry')}</Button>
+        </div>
+      )}
       <Table
         rowKey='tag'
         loading={loading}
