@@ -433,7 +433,6 @@ const CsAgentDetailContent: React.FC<{ csAgentId: CsAgentId | null }> = ({ csAge
                     id: agent.provider_id,
                     use_model: agent.model,
                   } : undefined}
-                  disabled={!agent.provider_id || !agent.model}
                 />
               </div>
 

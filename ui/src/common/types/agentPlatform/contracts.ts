@@ -341,8 +341,32 @@ export interface PutAgentBindingRequest {
 }
 
 export interface SelectProductAgentBindingRequest {
-  preset_id: AgentPresetId;
+  selection: ProductAgentSelection;
+  model?: { provider_id: string; model: string };
   conversation_id?: string;
+}
+
+export type ProductAgentSelection =
+  | { kind: 'template'; template_key: OfficialPresetKey }
+  | { kind: 'preset'; preset_id: string };
+
+export type ProductAgentUnavailableReason = 'web_search' | 'vision' | 'model' | 'capability' | 'removed';
+
+export interface ProductAgentOptions {
+  selection: ProductAgentSelection;
+  needs_model: boolean;
+  options: Array<{
+    selection: ProductAgentSelection;
+    display_name: string;
+    available: boolean;
+    reason: ProductAgentUnavailableReason | null;
+  }>;
+}
+
+export interface ProductAgentSelectionResult {
+  selection: ProductAgentSelection;
+  needs_model: boolean;
+  agent_binding?: AgentBindingValue;
 }
 
 export interface RemoteBinding {

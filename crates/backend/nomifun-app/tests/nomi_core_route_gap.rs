@@ -580,6 +580,74 @@ async fn official_template_creation_requires_explicit_persistence_intent() {
 }
 
 #[tokio::test]
+async fn product_agent_selection_precedes_models_and_preflights_incompatible_choices() {
+    const TRUST: &str = "product-selection-preflight";
+    async fn call(router: axum::Router, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
+        let response = router.oneshot(Request::builder().method(method).uri(path)
+            .header("x-nomi-local-trust", TRUST).header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+    let (router, services) = common::build_local_trust_app(TRUST).await;
+    let (_, created) = call(router.clone(), "POST", "/api/companion/companions", json!({ "name": "Choose Agent first", "character": "ink" })).await;
+    let companion_id = created["data"]["companion_id"].as_str().unwrap();
+    let chosen = json!({ "kind": "template", "template_key": "chat.minimal" });
+    let mut paths = Vec::new();
+    for kind in ["companion", "robot", "customer", "creative_studio_canvas"] {
+        let path = format!("/api/product-agent-bindings/{kind}/{companion_id}");
+        let (status, saved) = call(router.clone(), "PUT", &path, json!({ "selection": chosen })).await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        assert_eq!(saved["data"]["needs_model"], true);
+        let (status, reloaded) = call(router.clone(), "GET", &path, json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{reloaded}");
+        assert_eq!(reloaded["data"]["selection"], chosen);
+        paths.push(path);
+    }
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nomi_agent_presets").fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(count, 0, "model-free selection must not allocate executable presets or select a default model");
+    let upstream = wiremock::MockServer::start().await;
+    let (status, provider) = call(router.clone(), "POST", "/api/providers", json!({
+        "platform": "stepfun-plan", "name": "Preflight StepFun",
+        "base_url": format!("{}/step_plan/v1", upstream.uri()),
+        "auth_scheme": "bearer", "credentials": { "api_keys": ["test-only"] }, "enabled": true,
+        "initial_model": { "model": "step-3.7-flash", "enabled": true,
+            "capabilities": [{ "task": "chat", "traits": ["function_calling", "reasoning", "streaming"],
+                "protocol": "openai.chat_text", "connection_role": "default", "provider_params": {} }] }
+    })).await;
+    assert_eq!(status, StatusCode::CREATED, "{provider}");
+    let model = json!({ "provider_id": provider["data"]["provider_id"], "model": "step-3.7-flash" });
+    for path in &paths {
+        let query = format!("{path}?provider_id={}&model=step-3.7-flash", model["provider_id"].as_str().unwrap());
+        let (status, options) = call(router.clone(), "GET", &query, json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{options}");
+        let general = options["data"]["options"].as_array().unwrap().iter().find(|item| item["selection"]["template_key"] == "assistant.general").unwrap();
+        assert_eq!(general["available"], false);
+        assert_eq!(general["reason"], "web_search");
+        let (status, rejected) = call(router.clone(), "PUT", path, json!({
+            "selection": { "kind": "template", "template_key": "assistant.general" }, "model": model,
+        })).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
+        let (_, after) = call(router.clone(), "GET", path, json!({})).await;
+        assert_eq!(after["data"]["selection"], chosen, "a stale/invalid selection cannot change the saved Agent");
+    }
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nomi_agent_presets").fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(count, 0, "availability checks and failed selections must be read-only");
+    let (status, patched) = call(router.clone(), "PATCH", &format!("/api/companion/companions/{companion_id}"), json!({ "model": model })).await;
+    assert_eq!(status, StatusCode::OK, "{patched}");
+    let (status, thread) = call(router.clone(), "POST", &format!("/api/companion/companions/{companion_id}/companion/threads"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{thread}");
+    let snapshot: String = sqlx::query_scalar("SELECT agent_snapshot FROM conversations WHERE conversation_id = ?")
+        .bind(thread["data"]["conversation_id"].as_str().unwrap()).fetch_one(services.database.pool()).await.unwrap();
+    let snapshot: Value = serde_json::from_str(&snapshot).unwrap();
+    assert_eq!(snapshot["enabled_capabilities"], json!([]), "configuring a model must retain the Agent chosen earlier");
+    assert!(upstream.received_requests().await.unwrap().is_empty());
+    services.shutdown_browser_platform().await.unwrap();
+    services.database.close().await;
+}
+
+#[tokio::test]
 async fn creative_studio_entry_uses_its_official_agent() {
     const TRUST: &str = "creative-product-agent";
     async fn call(router: axum::Router, path: &str, body: Value) -> (StatusCode, Value) {
@@ -695,6 +763,11 @@ async fn companion_entry_uses_its_official_agent_and_can_switch_to_minimal() {
     assert!(snapshot["enabled_capabilities"].as_array().unwrap().iter()
         .any(|capability| capability == "companion.persona"));
     assert_eq!(snapshot["preset_name"], "companion.default");
+    let (status, options) = call(router.clone(), "GET",
+        &format!("/api/product-agent-bindings/companion/{companion_id}"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{options}");
+    assert_eq!(options["data"]["selection"], json!({ "kind": "template", "template_key": "companion.default" }),
+        "old internal official bindings must not appear as duplicate personal Agents");
     let target_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM nomi_agent_bindings WHERE target_kind = 'companion' AND target_id = ?")
         .bind(companion_id).fetch_one(services.database.pool()).await.unwrap();

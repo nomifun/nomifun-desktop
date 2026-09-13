@@ -226,13 +226,16 @@ const RobotConnectSection: React.FC<RobotConnectSectionProps> = ({
                 ].join(' · ')}
                 controls={
                   <>
-                    <ProductAgentBindingSelect
-                      targetKind='robot'
-                      targetId={row.robot_id}
-                      defaultTemplateKey='robot.default'
-                      model={model}
-                      disabled={!model || busyRobotId === row.robot_id}
-                    />
+                    <div className='flex flex-col gap-4px'>
+                      <span className='text-12px text-t-secondary'>{t('nomi.robot.agentLabel')}</span>
+                      <ProductAgentBindingSelect
+                        targetKind='robot'
+                        targetId={row.robot_id}
+                        defaultTemplateKey='robot.default'
+                        model={model}
+                        disabled={busyRobotId === row.robot_id}
+                      />
+                    </div>
                     <Button
                       size='small'
                       loading={busyRobotId === row.robot_id}
@@ -258,9 +261,9 @@ const RobotConnectSection: React.FC<RobotConnectSectionProps> = ({
         visible={addOpen}
         companionId={companionId}
         companionName={companionName}
+        model={model}
         onCancel={() => setAddOpen(false)}
         onClaimed={() => {
-          setAddOpen(false);
           void refresh();
         }}
       />
