@@ -378,6 +378,19 @@
         ]
       },
       {
+        "operation_id": "product_agent_bindings.put",
+        "method": "PUT",
+        "path": "/api/product-agent-bindings/{target_kind}/{target_id}",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": [
+          "AGENT_PRESET_NOT_FOUND",
+          "CAPABILITY_UNAVAILABLE_ON_PLATFORM",
+          "PRESET_RESOURCE_NOT_BOUND",
+          "RESOURCE_OWNER_MISMATCH"
+        ]
+      },
+      {
         "operation_id": "agent_bindings.put",
         "method": "PUT",
         "path": "/api/agent-bindings/{target_kind}/{target_id}",
@@ -436,5 +449,5 @@
       "/v1/tools?profile"
     ]
   },
-  "payload_digest": "b9e2b950ea0922c20279d1a6146675a3037242685884615d33541af590357443"
+  "payload_digest": "702c3278890dd8f5af1999e197987f18e91b0d0b15b4adba32fd7e3369f13b0b"
 }

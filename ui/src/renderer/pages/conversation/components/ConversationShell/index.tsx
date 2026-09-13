@@ -102,7 +102,9 @@ const ConversationShell: React.FC = () => {
       addProjectWorkpath(projectPath);
       addRecentWorkspace(projectPath);
       void navigate('/guid', {
-        state: { workspace: projectPath, resetAgentSelection: true },
+        // A project is a workspace context, not an instruction to downgrade
+        // the user's Agent to chat.minimal. Keep the current Agent choice.
+        state: { workspace: projectPath },
       });
       Message.success(t('sessionList.createProjectSuccess'));
     } catch (error) {

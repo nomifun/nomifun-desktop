@@ -175,6 +175,13 @@ pub struct NomiBuildExtra {
     /// `None` means there is no companion binding.
     #[serde(default, deserialize_with = "deserialize_companion_id")]
     pub companion_id: Option<String>,
+    /// Server-projected product Agent ceiling. `None` preserves legacy
+    /// Companion sessions; `Some(false)` suppresses the corresponding native
+    /// capability family for a selected Agent that did not grant it.
+    #[serde(default)]
+    pub companion_memory_enabled: Option<bool>,
+    #[serde(default)]
+    pub companion_skills_enabled: Option<bool>,
     /// Knowledge bases mounted into this session's workspace, computed when
     /// the Agent runtime is created. The Nomi factory renders
     /// these into a system-prompt section so the agent knows what extended

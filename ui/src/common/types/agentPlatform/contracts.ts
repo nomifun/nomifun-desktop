@@ -417,6 +417,11 @@ export interface PutAgentBindingRequest {
   agent_binding: AgentBindingValue;
 }
 
+export interface SelectProductAgentBindingRequest {
+  preset_id: AgentPresetId;
+  conversation_id?: string;
+}
+
 export interface RemoteBinding {
   remote_binding_id: RemoteBindingId;
   owner_user_id: string;

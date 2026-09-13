@@ -993,6 +993,8 @@ pub(super) async fn build(
         // Per-session 工具白名单（受限角色的 Agent attempt；普通会话恒空）。
         allowed_tools: overrides.allowed_tools.clone(),
         enforce_tool_allowlist: overrides.enforce_tool_allowlist,
+        companion_memory_enabled: overrides.companion_memory_enabled.unwrap_or(overrides.companion),
+        companion_skills_enabled: overrides.companion_skills_enabled.unwrap_or(overrides.companion),
         deferred_tools: overrides.deferred_tools.clone(),
         // 原生文件工具写根：本地桌面全权（None），渠道会话收窄到工作区。
         // 与 gateway file-service 的 PathAuthority 同一信任模型（file-access spec）。

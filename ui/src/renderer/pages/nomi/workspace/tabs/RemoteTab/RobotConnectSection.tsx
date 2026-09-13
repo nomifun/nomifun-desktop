@@ -21,10 +21,13 @@ import { ROBOT_STATUS_COLOR } from '@/renderer/components/capability/capabilityS
 import type { I18nKey } from '@/renderer/services/i18n/i18n-keys';
 import AddRobotModal from './AddRobotModal';
 import { useRobotStatuses } from './useRobotStatuses';
+import ProductAgentBindingSelect from '@/renderer/components/agent/ProductAgentBindingSelect';
+import type { TProviderWithModel } from '@/common/config/storage';
 
 interface RobotConnectSectionProps {
   companionId: CompanionId;
   companionName: string;
+  model?: Pick<TProviderWithModel, 'id' | 'use_model'>;
   onAttentionChange?: (hasAttention: boolean) => void;
 }
 
@@ -46,6 +49,7 @@ const PHASE_LABEL_KEY: Record<IApiRobotPhase, I18nKey> = {
 const RobotConnectSection: React.FC<RobotConnectSectionProps> = ({
   companionId,
   companionName,
+  model,
   onAttentionChange,
 }) => {
   const { t } = useTranslation();
@@ -222,6 +226,13 @@ const RobotConnectSection: React.FC<RobotConnectSectionProps> = ({
                 ].join(' · ')}
                 controls={
                   <>
+                    <ProductAgentBindingSelect
+                      targetKind='robot'
+                      targetId={row.robot_id}
+                      defaultTemplateKey='robot.default'
+                      model={model}
+                      disabled={!model || busyRobotId === row.robot_id}
+                    />
                     <Button
                       size='small'
                       loading={busyRobotId === row.robot_id}

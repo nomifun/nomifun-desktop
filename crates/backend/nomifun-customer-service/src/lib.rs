@@ -16,7 +16,10 @@ pub use agent_capability::{
     CustomerServiceAgentCapabilityOwner, CustomerServiceDialogueContext,
     customer_service_action_input_schema,
 };
-pub use dialogue::{CsDialogueEngine, LiveTurnRunner, TurnRunner};
+pub use dialogue::{
+    CsDialogueEngine, CustomerServiceAgentPolicy, CustomerServiceAgentPolicyResolver,
+    LiveTurnRunner, TurnRunner,
+};
 pub use routes::{CustomerServiceRouterState, customer_service_routes};
 pub use service::{
     AgentCsNoteWriteInput, CreateCsAgentInput, CustomerServiceService, RequestCsHandoffInput,

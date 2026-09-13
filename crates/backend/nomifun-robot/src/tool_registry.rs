@@ -17,6 +17,7 @@ use crate::mcp_bridge::{RobotMcpClient, RobotToolDescriptor, ToolCallError};
 pub enum RobotToolCapability {
     Display,
     Motion,
+    Vision,
     DeviceTools,
 }
 
@@ -25,6 +26,7 @@ impl RobotToolCapability {
         match self {
             Self::Display => "robot.display",
             Self::Motion => "robot.motion",
+            Self::Vision => "robot.vision",
             Self::DeviceTools => "robot.device_tools",
         }
     }
@@ -46,6 +48,7 @@ pub fn tool_capability(device_name: &str) -> RobotToolCapability {
             RobotToolCapability::Display
         }
         "head" | "gimbal" | "motion" | "servo" => RobotToolCapability::Motion,
+        "camera" | "vision" => RobotToolCapability::Vision,
         _ => RobotToolCapability::DeviceTools,
     }
 }
@@ -266,11 +269,10 @@ mod tests {
         ] {
             assert_eq!(tool_capability(name), RobotToolCapability::Motion, "{name}");
         }
-        for name in [
-            "self.audio_speaker.set_volume",
-            "self.camera.take_photo",
-            "get_device_status",
-        ] {
+        for name in ["self.camera.take_photo", "self.vision.describe"] {
+            assert_eq!(tool_capability(name), RobotToolCapability::Vision, "{name}");
+        }
+        for name in ["self.audio_speaker.set_volume", "get_device_status"] {
             assert_eq!(
                 tool_capability(name),
                 RobotToolCapability::DeviceTools,

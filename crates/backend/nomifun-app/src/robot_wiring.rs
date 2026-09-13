@@ -387,15 +387,29 @@ pub struct AppRobotBackend {
 impl AppRobotBackend {
     /// The session MCP registration for this robot's toolset, or `None` when the
     /// loopback proxy is not running (the thread then simply has no robot tools).
-    fn session_mcp_servers(&self, robot_id: &str) -> Option<Vec<SessionMcpServer>> {
+    fn session_mcp_servers(
+        &self,
+        robot_id: &str,
+        capabilities: Option<&[String]>,
+    ) -> Option<Vec<SessionMcpServer>> {
         let proxy = self.mcp_proxy.as_ref()?;
+        let mut url = proxy.url_for(robot_id);
+        if let Some(capabilities) = capabilities {
+            let allowed = capabilities
+                .iter()
+                .filter(|capability| capability.starts_with("robot."))
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(",");
+            url.push_str(&format!("?capabilities={allowed}"));
+        }
         let mcp_server_id = nomifun_api_types::McpServerId::parse(robot_mcp_server_id(robot_id))
             .expect("a derived v7 uuid is a valid McpServerId");
         Some(vec![SessionMcpServer {
             mcp_server_id,
             name: MCP_PROXY_SERVER_NAME.to_owned(),
             transport: SessionMcpTransport::StreamableHttp {
-                url: proxy.url_for(robot_id),
+                url,
                 headers: proxy
                     .headers()
                     .into_iter()
@@ -600,7 +614,7 @@ impl AppRobotBackend {
 #[async_trait::async_trait]
 impl nomifun_robot::wiring::RobotConversationBackend for AppRobotBackend {
     async fn ensure_thread(&self, robot_id: &str, companion_id: &str) -> anyhow::Result<String> {
-        let session_mcp = self.session_mcp_servers(robot_id);
+        let session_mcp = self.session_mcp_servers(robot_id, None);
         let system_prompt = self.robot_system_prompt(companion_id).await;
 
         // Reuse the thread recorded for this pair, refreshing both per-boot
@@ -609,6 +623,20 @@ impl nomifun_robot::wiring::RobotConversationBackend for AppRobotBackend {
         // `update_extra` merges, and it writes the already-resolved
         // `session_mcp_servers` key that the agent build reads.
         if let Some(existing) = self.lookup_thread(robot_id, companion_id).await? {
+            self.conversations
+                .refresh_product_agent_for_existing(self.owner_user_id.as_ref(), &existing)
+                .await?;
+            let existing_session = self
+                .conversations
+                .get(self.owner_user_id.as_ref(), &existing)
+                .await?;
+            let session_mcp = self.session_mcp_servers(
+                robot_id,
+                existing_session
+                    .agent_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.enabled_capabilities.as_slice()),
+            );
             let mut patch = json!({ "system_prompt": system_prompt });
             if let Some(servers) = &session_mcp {
                 patch["session_mcp_servers"] = serde_json::to_value(servers)?;

@@ -3360,8 +3360,8 @@ impl AppServices {
         // 客服独立域 (customer-service domain): agents/notes/bindings CRUD
         // service + the stateless concurrent dialogue engine. The engine's
         // LLM turns go through the generic one-shot entry whose tool table is
-        // fixed at construction to three read-only tools — no workspace mount,
-        // no runtime registry, no Conversation.
+        // restricted to the selected Agent's subset of three read-only tools —
+        // no workspace mount, no runtime registry, no Conversation.
         let customer_service_repo: Arc<dyn nomifun_db::ICustomerServiceRepository> =
             Arc::new(nomifun_db::SqliteCustomerServiceRepository::new(
                 database.pool().clone(),

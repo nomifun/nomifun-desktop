@@ -588,6 +588,156 @@ async fn official_template_creation_requires_explicit_persistence_intent() {
 }
 
 #[tokio::test]
+async fn creative_studio_entry_uses_its_official_agent() {
+    const TRUST: &str = "creative-product-agent";
+    async fn call(router: axum::Router, path: &str, body: Value) -> (StatusCode, Value) {
+        let response = router.oneshot(Request::builder().method("POST").uri(path)
+            .header("x-nomi-local-trust", TRUST).header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+    let (router, services) = common::build_local_trust_app(TRUST).await;
+    let upstream = wiremock::MockServer::start().await;
+    let (status, provider) = call(router.clone(), "/api/providers", json!({
+        "platform": "stepfun-plan", "name": "Creative Agent regression",
+        "base_url": format!("{}/step_plan/v1", upstream.uri()),
+        "auth_scheme": "bearer", "credentials": { "api_keys": ["test-only"] },
+        "enabled": true, "initial_model": {
+            "model": "step-3.7-flash", "enabled": true,
+            "capabilities": [{ "task": "chat", "traits": ["function_calling", "reasoning", "streaming"],
+                "protocol": "openai.chat_text", "connection_role": "default", "provider_params": {} }]
+        }
+    })).await;
+    assert_eq!(status, StatusCode::CREATED, "{provider}");
+    let provider_id = provider["data"]["provider_id"].as_str().unwrap();
+    let (status, canvas) = call(router.clone(), "/api/creative-studio/canvases",
+        json!({
+            "title": "Agent-bound canvas",
+            "agentKickoff": {
+                "prompt": "plan",
+                "model": { "providerId": provider_id, "model": "step-3.7-flash" }
+            }
+        })).await;
+    assert_eq!(status, StatusCode::CREATED, "{canvas}");
+    let canvas_id = canvas["data"]["canvas"]["canvasId"].as_str().unwrap();
+    let document_json: String = sqlx::query_scalar(
+        "SELECT document_json FROM creative_studio_projects WHERE project_id = ?")
+        .bind(canvas_id).fetch_one(services.database.pool()).await.unwrap();
+    let document: Value = serde_json::from_str(&document_json).unwrap();
+    let session_id = document["chatSessions"][0]["id"].as_str().unwrap();
+    let pending_key = document["chatSessions"][0]["pendingTurn"]["idempotencyKey"]
+        .as_str().unwrap();
+    let (status, session) = call(router.clone(),
+        "/api/creative-studio/canvas-agent-sessions/resolve", json!({
+            "canvas_id": canvas_id,
+            "session_id": session_id,
+            "model": { "provider_id": provider_id, "model": "step-3.7-flash" },
+            "pending_turn_idempotency_key": pending_key
+        })).await;
+    assert_eq!(status, StatusCode::CREATED, "{session}");
+    let conversation_id = session["data"]["binding"]["conversation_id"].as_str().unwrap();
+    let snapshot_json: String = sqlx::query_scalar(
+        "SELECT agent_snapshot FROM conversations WHERE conversation_id = ?")
+        .bind(conversation_id).fetch_one(services.database.pool()).await.unwrap();
+    let snapshot: Value = serde_json::from_str(&snapshot_json).unwrap();
+    assert_eq!(snapshot["preset_name"], "creative-studio.default");
+    assert!(snapshot["enabled_capabilities"].as_array().unwrap().iter()
+        .any(|capability| capability == "workshop.canvas.edit"));
+    let target_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM nomi_agent_bindings WHERE target_kind = 'creative_studio_canvas' AND target_id = ?")
+        .bind(canvas_id).fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(target_count, 1);
+    assert!(upstream.received_requests().await.unwrap().is_empty());
+    services.shutdown_browser_platform().await.unwrap();
+    services.database.close().await;
+}
+
+#[tokio::test]
+async fn companion_entry_uses_its_official_agent_and_can_switch_to_minimal() {
+    const TRUST: &str = "companion-product-agent";
+    async fn call(
+        router: axum::Router,
+        method: &str,
+        path: &str,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        let response = router.oneshot(Request::builder().method(method).uri(path)
+            .header("x-nomi-local-trust", TRUST).header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+    let (router, services) = common::build_local_trust_app(TRUST).await;
+    let upstream = wiremock::MockServer::start().await;
+    let (status, provider) = call(router.clone(), "POST", "/api/providers", json!({
+        "platform": "stepfun-plan", "name": "Companion Agent regression",
+        "base_url": format!("{}/step_plan/v1", upstream.uri()),
+        "auth_scheme": "bearer", "credentials": { "api_keys": ["test-only"] },
+        "enabled": true, "initial_model": {
+            "model": "step-3.7-flash", "enabled": true,
+            "capabilities": [{ "task": "chat", "traits": ["function_calling", "reasoning", "streaming"],
+                "protocol": "openai.chat_text", "connection_role": "default", "provider_params": {} }]
+        }
+    })).await;
+    assert_eq!(status, StatusCode::CREATED, "{provider}");
+    let provider_id = provider["data"]["provider_id"].as_str().unwrap();
+    let (status, companion) = call(router.clone(), "POST", "/api/companion/companions",
+        json!({ "name": "Agent-bound companion", "character": "ink" })).await;
+    assert_eq!(status, StatusCode::CREATED, "{companion}");
+    let companion_id = companion["data"]["companion_id"].as_str().unwrap();
+    let (status, patched) = call(router.clone(), "PATCH",
+        &format!("/api/companion/companions/{companion_id}"),
+        json!({ "model": { "provider_id": provider_id, "model": "step-3.7-flash" } })).await;
+    assert_eq!(status, StatusCode::OK, "{patched}");
+    let (status, thread) = call(router.clone(), "POST",
+        &format!("/api/companion/companions/{companion_id}/companion/threads"), json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{thread}");
+    let conversation_id = thread["data"]["conversation_id"].as_str().unwrap();
+    let (preset_id, snapshot_json, _extra_json): (String, String, String) = sqlx::query_as(
+        "SELECT preset_id, agent_snapshot, extra FROM conversations WHERE conversation_id = ?")
+        .bind(conversation_id).fetch_one(services.database.pool()).await.unwrap();
+    let snapshot: Value = serde_json::from_str(&snapshot_json).unwrap();
+    assert!(snapshot["enabled_capabilities"].as_array().unwrap().iter()
+        .any(|capability| capability == "companion.persona"));
+    assert_eq!(snapshot["preset_name"], "companion.default");
+    let target_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM nomi_agent_bindings WHERE target_kind = 'companion' AND target_id = ?")
+        .bind(companion_id).fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(target_count, 1);
+
+    let (status, minimal) = call(router.clone(), "POST",
+        "/api/agent-presets/from-template/chat.minimal", json!({
+            "display_name": "chat.minimal", "reuse_existing": true,
+            "model": { "provider_id": provider_id, "model": "step-3.7-flash" }
+        })).await;
+    assert_eq!(status, StatusCode::OK, "{minimal}");
+    let minimal_id = minimal["data"]["preset"]["preset_id"].as_str().unwrap();
+    let (status, selected) = call(router.clone(), "PUT",
+        &format!("/api/product-agent-bindings/companion/{companion_id}"), json!({
+            "preset_id": minimal_id,
+            "conversation_id": conversation_id
+        })).await;
+    assert_eq!(status, StatusCode::OK, "{selected}");
+    let (new_preset_id, snapshot_json, extra_json): (String, String, String) = sqlx::query_as(
+        "SELECT preset_id, agent_snapshot, extra FROM conversations WHERE conversation_id = ?")
+        .bind(conversation_id).fetch_one(services.database.pool()).await.unwrap();
+    assert_ne!(new_preset_id, preset_id);
+    let snapshot: Value = serde_json::from_str(&snapshot_json).unwrap();
+    let extra: Value = serde_json::from_str(&extra_json).unwrap();
+    assert_eq!(snapshot["enabled_capabilities"], json!([]));
+    assert_eq!(extra["companion_memory_enabled"], false);
+    assert_eq!(extra["companion_skills_enabled"], false);
+    assert!(extra.get("system_prompt").is_none());
+    assert_eq!(extra["product_agent_target_kind"], "companion");
+    assert!(upstream.received_requests().await.unwrap().is_empty());
+    services.shutdown_browser_platform().await.unwrap();
+    services.database.close().await;
+}
+
+#[tokio::test]
 async fn official_agent_direct_launch_reuses_configuration_and_creates_sessions() {
     const TRUST: &str = "official-agent-direct-launch";
     async fn call(router: axum::Router, path: &str, body: Value) -> Value {
