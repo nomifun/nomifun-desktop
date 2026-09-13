@@ -1,4 +1,4 @@
-//! Configure the isolated product-test model. Read its credential from stdin;
+//! Configure the isolated plugin product-test model. Read its credential from stdin;
 //! never pass it in argv, print it, or persist plaintext credential files.
 use nomifun_db::{
     IClientPreferenceRepository, SqliteClientPreferenceRepository,

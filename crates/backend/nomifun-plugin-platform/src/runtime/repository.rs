@@ -3,8 +3,8 @@ use std::sync::RwLock;
 
 use async_trait::async_trait;
 use nomifun_agent_contracts::{
-    CanonicalErrorCode, DigestHex, MiniAppDeletingIntent, MiniAppId, MiniAppProductLifecycleState,
-    MiniAppPublishRequest, MiniAppRollbackRequest, MiniAppUiOnlyAutoPublishAuthorization,
+    CanonicalErrorCode, DigestHex, PluginProductDeletingIntent, PluginProductId, PluginProductLifecycleState,
+    PluginPublishRequest, PluginRollbackRequest, PluginUiOnlyAutoPublishAuthorization,
     OperationId,
 };
 
@@ -16,11 +16,11 @@ use crate::runtime::{
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PluginRuntimeMutationExpectation {
-    pub miniapp_id: MiniAppId,
+    pub plugin_product_id: PluginProductId,
     pub product_revision: u64,
     pub pointer_revision: u64,
     pub active_release_epoch: u64,
-    pub lifecycle: MiniAppProductLifecycleState,
+    pub lifecycle: PluginProductLifecycleState,
     pub ready_release_digest: Option<DigestHex>,
     pub active_release_digest: Option<DigestHex>,
     pub previous_release_digest: Option<DigestHex>,
@@ -30,7 +30,7 @@ impl PluginRuntimeMutationExpectation {
     pub fn from_snapshot(snapshot: &PluginRuntimeRepositorySnapshot) -> Self {
         let product = &snapshot.root.product;
         Self {
-            miniapp_id: product.miniapp_id.clone(),
+            plugin_product_id: product.plugin_product_id.clone(),
             product_revision: product.product_revision,
             pointer_revision: product.pointers.pointer_revision,
             active_release_epoch: product.pointers.active_release_epoch,
@@ -79,8 +79,8 @@ pub struct CompleteReadyReleaseCommit {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PluginRuntimeReleaseCommand {
-    Publish(MiniAppPublishRequest),
-    Rollback(MiniAppRollbackRequest),
+    Publish(PluginPublishRequest),
+    Rollback(PluginRollbackRequest),
 }
 
 #[derive(Clone, Debug)]
@@ -108,7 +108,7 @@ pub struct CommitPluginRuntimeLifecycle {
 #[derive(Clone, Debug)]
 pub struct CommitPluginRuntimeAutoPublish {
     pub expected: PluginRuntimeMutationExpectation,
-    pub authorization: Option<MiniAppUiOnlyAutoPublishAuthorization>,
+    pub authorization: Option<PluginUiOnlyAutoPublishAuthorization>,
     pub now_ms: i64,
 }
 
@@ -121,7 +121,7 @@ pub struct BeginPluginRuntimeDelete {
 
 #[derive(Clone, Debug)]
 pub struct FailPluginRuntimeDelete {
-    pub miniapp_id: MiniAppId,
+    pub plugin_product_id: PluginProductId,
     pub operation_id: OperationId,
     pub expected_operation_revision: u64,
     pub error: CanonicalErrorCode,
@@ -130,7 +130,7 @@ pub struct FailPluginRuntimeDelete {
 
 #[derive(Clone, Debug)]
 pub struct RestartPluginRuntimeDelete {
-    pub miniapp_id: MiniAppId,
+    pub plugin_product_id: PluginProductId,
     pub expected_operation_id: OperationId,
     pub operation_id: OperationId,
     pub now_ms: i64,
@@ -138,7 +138,7 @@ pub struct RestartPluginRuntimeDelete {
 
 #[derive(Clone, Debug)]
 pub struct FinalizePluginRuntimeDelete {
-    pub miniapp_id: MiniAppId,
+    pub plugin_product_id: PluginProductId,
     pub operation_id: OperationId,
     pub expected_operation_revision: u64,
     pub now_ms: i64,
@@ -148,13 +148,13 @@ pub struct FinalizePluginRuntimeDelete {
 ///
 /// Implementations must execute each mutating method in one database
 /// transaction. `commit_release` and `commit_lifecycle` also own the Catalog
-/// rows for that MiniApp, so product state and published capabilities cannot
+/// rows for that Plugin, so product state and published capabilities cannot
 /// become half-committed.
 #[async_trait]
 pub trait PluginRuntimeRepository: Send + Sync {
     async fn library_revision(&self) -> PluginRuntimePlatformResult<u64>;
     async fn list(&self) -> PluginRuntimePlatformResult<Vec<PluginRuntimeRepositorySnapshot>>;
-    async fn get(&self, miniapp_id: &MiniAppId) -> PluginRuntimePlatformResult<PluginRuntimeRepositorySnapshot>;
+    async fn get(&self, plugin_product_id: &PluginProductId) -> PluginRuntimePlatformResult<PluginRuntimeRepositorySnapshot>;
 
     async fn create(
         &self,
@@ -207,16 +207,16 @@ pub trait PluginRuntimeRepository: Send + Sync {
     ) -> PluginRuntimePlatformResult<DurablePluginRuntimeOperation>;
     async fn list_operations(
         &self,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
     ) -> PluginRuntimePlatformResult<Vec<DurablePluginRuntimeOperation>>;
 }
 
 #[derive(Default)]
 struct MemoryState {
     library_revision: u64,
-    roots: BTreeMap<MiniAppId, PluginRuntimeDataRoot>,
-    catalog: BTreeMap<MiniAppId, PluginRuntimeCatalogRecord>,
-    deleting_intents: BTreeMap<MiniAppId, MiniAppDeletingIntent>,
+    roots: BTreeMap<PluginProductId, PluginRuntimeDataRoot>,
+    catalog: BTreeMap<PluginProductId, PluginRuntimeCatalogRecord>,
+    deleting_intents: BTreeMap<PluginProductId, PluginProductDeletingIntent>,
     operations: BTreeMap<OperationId, DurablePluginRuntimeOperation>,
 }
 
@@ -254,13 +254,13 @@ impl PluginRuntimeRepository for InMemoryPluginRuntimeRepository {
         state
             .roots
             .keys()
-            .map(|miniapp_id| snapshot(&state, miniapp_id))
+            .map(|plugin_product_id| snapshot(&state, plugin_product_id))
             .collect()
     }
 
-    async fn get(&self, miniapp_id: &MiniAppId) -> PluginRuntimePlatformResult<PluginRuntimeRepositorySnapshot> {
+    async fn get(&self, plugin_product_id: &PluginProductId) -> PluginRuntimePlatformResult<PluginRuntimeRepositorySnapshot> {
         let state = self.read_state()?;
-        snapshot(&state, miniapp_id)
+        snapshot(&state, plugin_product_id)
     }
 
     async fn create(
@@ -268,24 +268,24 @@ impl PluginRuntimeRepository for InMemoryPluginRuntimeRepository {
         commit: CreatePluginRuntimeCommit,
     ) -> PluginRuntimePlatformResult<PluginRuntimeRepositorySnapshot> {
         commit.root.validate_structure()?;
-        if commit.root.product.lifecycle != MiniAppProductLifecycleState::Disabled
+        if commit.root.product.lifecycle != PluginProductLifecycleState::Disabled
             || commit.root.product.pointers.active_release.is_some()
         {
             return Err(PluginRuntimePlatformError::InvalidState(
                 "new Plugin data root must start disabled without an Active Release".into(),
             ));
         }
-        let miniapp_id = commit.root.product.miniapp_id.clone();
+        let plugin_product_id = commit.root.product.plugin_product_id.clone();
         let mut state = self.write_state()?;
         if state.library_revision != commit.expected_library_revision {
             return Err(PluginRuntimePlatformError::CompareAndSwapConflict);
         }
-        if state.roots.contains_key(&miniapp_id) {
-            return Err(PluginRuntimePlatformError::AlreadyExists(miniapp_id.0));
+        if state.roots.contains_key(&plugin_product_id) {
+            return Err(PluginRuntimePlatformError::AlreadyExists(plugin_product_id.0));
         }
-        state.roots.insert(miniapp_id.clone(), commit.root);
+        state.roots.insert(plugin_product_id.clone(), commit.root);
         increment_library_revision(&mut state)?;
-        let result = snapshot(&state, &miniapp_id)?;
+        let result = snapshot(&state, &plugin_product_id)?;
         result.validate()?;
         Ok(result)
     }
@@ -303,11 +303,11 @@ impl PluginRuntimeRepository for InMemoryPluginRuntimeRepository {
         let mut state = self.write_state()?;
         let root = state
             .roots
-            .get(&operation.miniapp_id)
-            .ok_or_else(|| PluginRuntimePlatformError::NotFound(operation.miniapp_id.0.clone()))?;
+            .get(&operation.plugin_product_id)
+            .ok_or_else(|| PluginRuntimePlatformError::NotFound(operation.plugin_product_id.0.clone()))?;
         if matches!(
             root.product.lifecycle,
-            MiniAppProductLifecycleState::Trashed | MiniAppProductLifecycleState::Deleting
+            PluginProductLifecycleState::Trashed | PluginProductLifecycleState::Deleting
         ) || operation.kind == PluginRuntimeOperationKind::PermanentDelete
         {
             return Err(PluginRuntimePlatformError::LifecycleConflict(format!(
@@ -315,7 +315,7 @@ impl PluginRuntimeRepository for InMemoryPluginRuntimeRepository {
                 root.product.lifecycle
             )));
         }
-        ensure_owner_idle(&state, &operation.miniapp_id, None)?;
+        ensure_owner_idle(&state, &operation.plugin_product_id, None)?;
         if state.operations.contains_key(&operation.operation_id) {
             return Err(PluginRuntimePlatformError::AlreadyExists(
                 operation.operation_id.0,
@@ -362,8 +362,8 @@ impl PluginRuntimeRepository for InMemoryPluginRuntimeRepository {
         ) || commit.completed_operation.state != PluginRuntimeOperationState::Succeeded
             || commit.release.ready.origin_operation_id
                 != commit.completed_operation.operation_id
-            || commit.release.miniapp_id != commit.expected.miniapp_id
-            || commit.completed_operation.miniapp_id != commit.expected.miniapp_id
+            || commit.release.plugin_product_id != commit.expected.plugin_product_id
+            || commit.completed_operation.plugin_product_id != commit.expected.plugin_product_id
             || !commit
                 .completed_operation
                 .result_artifact_digests
@@ -377,11 +377,11 @@ impl PluginRuntimeRepository for InMemoryPluginRuntimeRepository {
         }
 
         let mut state = self.write_state()?;
-        let current = snapshot(&state, &commit.expected.miniapp_id)?;
+        let current = snapshot(&state, &commit.expected.plugin_product_id)?;
         commit.expected.validate(&current)?;
         ensure_owner_idle(
             &state,
-            &commit.expected.miniapp_id,
+            &commit.expected.plugin_product_id,
             Some(&commit.completed_operation.operation_id),
         )?;
         let observed_operation = state
@@ -400,13 +400,13 @@ impl PluginRuntimeRepository for InMemoryPluginRuntimeRepository {
 
         let mut root = current.root;
         root.replace_ready(commit.release, commit.now_ms)?;
-        state.roots.insert(commit.expected.miniapp_id.clone(), root);
+        state.roots.insert(commit.expected.plugin_product_id.clone(), root);
         state.operations.insert(
             commit.completed_operation.operation_id.clone(),
             commit.completed_operation,
         );
         increment_library_revision(&mut state)?;
-        let result = snapshot(&state, &commit.expected.miniapp_id)?;
+        let result = snapshot(&state, &commit.expected.plugin_product_id)?;
         result.validate()?;
         Ok(result)
     }
@@ -415,17 +415,17 @@ impl PluginRuntimeRepository for InMemoryPluginRuntimeRepository {
         &self,
         commit: CommitPluginRuntimeRelease,
     ) -> PluginRuntimePlatformResult<PluginRuntimeRepositorySnapshot> {
-        let miniapp_id = commit.expected.miniapp_id.clone();
+        let plugin_product_id = commit.expected.plugin_product_id.clone();
         let mut state = self.write_state()?;
-        let current = snapshot(&state, &miniapp_id)?;
+        let current = snapshot(&state, &plugin_product_id)?;
         commit.expected.validate(&current)?;
-        ensure_owner_idle(&state, &miniapp_id, None)?;
+        ensure_owner_idle(&state, &plugin_product_id, None)?;
         current.root.ensure_release_mutable()?;
 
         let mut root = current.root;
         let next = match &commit.command {
             PluginRuntimeReleaseCommand::Publish(request) => {
-                if request.miniapp_id != miniapp_id {
+                if request.plugin_product_id != plugin_product_id {
                     return Err(PluginRuntimePlatformError::InvalidState(
                         "Publish request belongs to another Plugin".into(),
                     ));
@@ -437,7 +437,7 @@ impl PluginRuntimeRepository for InMemoryPluginRuntimeRepository {
                 request.next_state(&root.product.pointers)?
             }
             PluginRuntimeReleaseCommand::Rollback(request) => {
-                if request.miniapp_id != miniapp_id {
+                if request.plugin_product_id != plugin_product_id {
                     return Err(PluginRuntimePlatformError::InvalidState(
                         "Rollback request belongs to another Plugin".into(),
                     ));
@@ -450,10 +450,10 @@ impl PluginRuntimeRepository for InMemoryPluginRuntimeRepository {
             }
         };
         root.apply_pointer_state(next, commit.now_ms)?;
-        state.roots.insert(miniapp_id.clone(), root);
-        synchronize_catalog(&mut state, &miniapp_id)?;
+        state.roots.insert(plugin_product_id.clone(), root);
+        synchronize_catalog(&mut state, &plugin_product_id)?;
         increment_library_revision(&mut state)?;
-        let result = snapshot(&state, &miniapp_id)?;
+        let result = snapshot(&state, &plugin_product_id)?;
         result.validate()?;
         Ok(result)
     }
@@ -462,19 +462,19 @@ impl PluginRuntimeRepository for InMemoryPluginRuntimeRepository {
         &self,
         commit: CommitPluginRuntimeLifecycle,
     ) -> PluginRuntimePlatformResult<PluginRuntimeRepositorySnapshot> {
-        let miniapp_id = commit.expected.miniapp_id.clone();
+        let plugin_product_id = commit.expected.plugin_product_id.clone();
         let mut state = self.write_state()?;
-        let current = snapshot(&state, &miniapp_id)?;
+        let current = snapshot(&state, &plugin_product_id)?;
         commit.expected.validate(&current)?;
-        ensure_owner_idle(&state, &miniapp_id, None)?;
+        ensure_owner_idle(&state, &plugin_product_id, None)?;
         let target = lifecycle_target(current.root.product.lifecycle, commit.command)?;
 
         let mut root = current.root;
         root.apply_lifecycle(target, commit.now_ms)?;
-        state.roots.insert(miniapp_id.clone(), root);
-        synchronize_catalog(&mut state, &miniapp_id)?;
+        state.roots.insert(plugin_product_id.clone(), root);
+        synchronize_catalog(&mut state, &plugin_product_id)?;
         increment_library_revision(&mut state)?;
-        let result = snapshot(&state, &miniapp_id)?;
+        let result = snapshot(&state, &plugin_product_id)?;
         result.validate()?;
         Ok(result)
     }
@@ -483,16 +483,16 @@ impl PluginRuntimeRepository for InMemoryPluginRuntimeRepository {
         &self,
         commit: CommitPluginRuntimeAutoPublish,
     ) -> PluginRuntimePlatformResult<PluginRuntimeRepositorySnapshot> {
-        let miniapp_id = commit.expected.miniapp_id.clone();
+        let plugin_product_id = commit.expected.plugin_product_id.clone();
         let mut state = self.write_state()?;
-        let current = snapshot(&state, &miniapp_id)?;
+        let current = snapshot(&state, &plugin_product_id)?;
         commit.expected.validate(&current)?;
-        ensure_owner_idle(&state, &miniapp_id, None)?;
+        ensure_owner_idle(&state, &plugin_product_id, None)?;
         let mut root = current.root;
         root.set_auto_publish(commit.authorization, commit.now_ms)?;
-        state.roots.insert(miniapp_id.clone(), root);
+        state.roots.insert(plugin_product_id.clone(), root);
         increment_library_revision(&mut state)?;
-        let result = snapshot(&state, &miniapp_id)?;
+        let result = snapshot(&state, &plugin_product_id)?;
         result.validate()?;
         Ok(result)
     }
@@ -501,18 +501,18 @@ impl PluginRuntimeRepository for InMemoryPluginRuntimeRepository {
         &self,
         command: BeginPluginRuntimeDelete,
     ) -> PluginRuntimePlatformResult<PluginRuntimeRepositorySnapshot> {
-        let miniapp_id = command.expected.miniapp_id.clone();
+        let plugin_product_id = command.expected.plugin_product_id.clone();
         let mut state = self.write_state()?;
-        let current = snapshot(&state, &miniapp_id)?;
+        let current = snapshot(&state, &plugin_product_id)?;
         command.expected.validate(&current)?;
-        ensure_owner_idle(&state, &miniapp_id, None)?;
-        if current.root.product.lifecycle != MiniAppProductLifecycleState::Trashed {
+        ensure_owner_idle(&state, &plugin_product_id, None)?;
+        if current.root.product.lifecycle != PluginProductLifecycleState::Trashed {
             return Err(PluginRuntimePlatformError::LifecycleConflict(format!(
                 "{:?}",
                 current.root.product.lifecycle
             )));
         }
-        if state.deleting_intents.contains_key(&miniapp_id)
+        if state.deleting_intents.contains_key(&plugin_product_id)
             || state.operations.contains_key(&command.operation_id)
         {
             return Err(PluginRuntimePlatformError::AlreadyExists(
@@ -521,20 +521,20 @@ impl PluginRuntimeRepository for InMemoryPluginRuntimeRepository {
         }
 
         let deletion =
-            new_delete_record(miniapp_id.clone(), command.operation_id, command.now_ms)?;
+            new_delete_record(plugin_product_id.clone(), command.operation_id, command.now_ms)?;
         let mut root = current.root;
-        root.apply_lifecycle(MiniAppProductLifecycleState::Deleting, command.now_ms)?;
-        state.roots.insert(miniapp_id.clone(), root);
+        root.apply_lifecycle(PluginProductLifecycleState::Deleting, command.now_ms)?;
+        state.roots.insert(plugin_product_id.clone(), root);
         state
             .deleting_intents
-            .insert(miniapp_id.clone(), deletion.intent);
+            .insert(plugin_product_id.clone(), deletion.intent);
         state.operations.insert(
             deletion.operation.operation_id.clone(),
             deletion.operation,
         );
-        state.catalog.remove(&miniapp_id);
+        state.catalog.remove(&plugin_product_id);
         increment_library_revision(&mut state)?;
-        let result = snapshot(&state, &miniapp_id)?;
+        let result = snapshot(&state, &plugin_product_id)?;
         result.validate()?;
         Ok(result)
     }
@@ -544,7 +544,7 @@ impl PluginRuntimeRepository for InMemoryPluginRuntimeRepository {
         command: FailPluginRuntimeDelete,
     ) -> PluginRuntimePlatformResult<PluginRuntimeRepositorySnapshot> {
         let mut state = self.write_state()?;
-        require_deleting_operation(&state, &command.miniapp_id, &command.operation_id)?;
+        require_deleting_operation(&state, &command.plugin_product_id, &command.operation_id)?;
         let mut operation = state
             .operations
             .get(&command.operation_id)
@@ -560,11 +560,11 @@ impl PluginRuntimeRepository for InMemoryPluginRuntimeRepository {
             .insert(command.operation_id.clone(), operation);
         state
             .deleting_intents
-            .get_mut(&command.miniapp_id)
+            .get_mut(&command.plugin_product_id)
             .expect("deleting operation was checked above")
             .last_error = Some(command.error);
         increment_library_revision(&mut state)?;
-        let result = snapshot(&state, &command.miniapp_id)?;
+        let result = snapshot(&state, &command.plugin_product_id)?;
         result.validate()?;
         Ok(result)
     }
@@ -576,7 +576,7 @@ impl PluginRuntimeRepository for InMemoryPluginRuntimeRepository {
         let mut state = self.write_state()?;
         require_deleting_operation(
             &state,
-            &command.miniapp_id,
+            &command.plugin_product_id,
             &command.expected_operation_id,
         )?;
         let observed = state
@@ -592,19 +592,19 @@ impl PluginRuntimeRepository for InMemoryPluginRuntimeRepository {
             ));
         }
         let deletion = new_delete_record(
-            command.miniapp_id.clone(),
+            command.plugin_product_id.clone(),
             command.operation_id,
             command.now_ms,
         )?;
         state
             .deleting_intents
-            .insert(command.miniapp_id.clone(), deletion.intent);
+            .insert(command.plugin_product_id.clone(), deletion.intent);
         state.operations.insert(
             deletion.operation.operation_id.clone(),
             deletion.operation,
         );
         increment_library_revision(&mut state)?;
-        let result = snapshot(&state, &command.miniapp_id)?;
+        let result = snapshot(&state, &command.plugin_product_id)?;
         result.validate()?;
         Ok(result)
     }
@@ -614,7 +614,7 @@ impl PluginRuntimeRepository for InMemoryPluginRuntimeRepository {
         command: FinalizePluginRuntimeDelete,
     ) -> PluginRuntimePlatformResult<u64> {
         let mut state = self.write_state()?;
-        require_deleting_operation(&state, &command.miniapp_id, &command.operation_id)?;
+        require_deleting_operation(&state, &command.plugin_product_id, &command.operation_id)?;
         let mut operation = state
             .operations
             .get(&command.operation_id)
@@ -628,9 +628,9 @@ impl PluginRuntimeRepository for InMemoryPluginRuntimeRepository {
         state
             .operations
             .insert(command.operation_id.clone(), operation);
-        state.roots.remove(&command.miniapp_id);
-        state.catalog.remove(&command.miniapp_id);
-        state.deleting_intents.remove(&command.miniapp_id);
+        state.roots.remove(&command.plugin_product_id);
+        state.catalog.remove(&command.plugin_product_id);
+        state.deleting_intents.remove(&command.plugin_product_id);
         increment_library_revision(&mut state)?;
         Ok(state.library_revision)
     }
@@ -648,13 +648,13 @@ impl PluginRuntimeRepository for InMemoryPluginRuntimeRepository {
 
     async fn list_operations(
         &self,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
     ) -> PluginRuntimePlatformResult<Vec<DurablePluginRuntimeOperation>> {
         Ok(self
             .read_state()?
             .operations
             .values()
-            .filter(|operation| &operation.miniapp_id == miniapp_id)
+            .filter(|operation| &operation.plugin_product_id == plugin_product_id)
             .cloned()
             .collect())
     }
@@ -662,14 +662,14 @@ impl PluginRuntimeRepository for InMemoryPluginRuntimeRepository {
 
 fn snapshot(
     state: &MemoryState,
-    miniapp_id: &MiniAppId,
+    plugin_product_id: &PluginProductId,
 ) -> PluginRuntimePlatformResult<PluginRuntimeRepositorySnapshot> {
     let root = state
         .roots
-        .get(miniapp_id)
+        .get(plugin_product_id)
         .cloned()
-        .ok_or_else(|| PluginRuntimePlatformError::NotFound(miniapp_id.0.clone()))?;
-    let deletion = match state.deleting_intents.get(miniapp_id) {
+        .ok_or_else(|| PluginRuntimePlatformError::NotFound(plugin_product_id.0.clone()))?;
+    let deletion = match state.deleting_intents.get(plugin_product_id) {
         Some(intent) => {
             let operation = state
                 .operations
@@ -690,7 +690,7 @@ fn snapshot(
     let value = PluginRuntimeRepositorySnapshot {
         library_revision: state.library_revision,
         root,
-        catalog: state.catalog.get(miniapp_id).cloned(),
+        catalog: state.catalog.get(plugin_product_id).cloned(),
         deletion,
     };
     value.validate()?;
@@ -698,22 +698,22 @@ fn snapshot(
 }
 
 fn lifecycle_target(
-    current: MiniAppProductLifecycleState,
+    current: PluginProductLifecycleState,
     command: PluginRuntimeLifecycleCommand,
-) -> PluginRuntimePlatformResult<MiniAppProductLifecycleState> {
+) -> PluginRuntimePlatformResult<PluginProductLifecycleState> {
     match (current, command) {
-        (MiniAppProductLifecycleState::Disabled, PluginRuntimeLifecycleCommand::Enable) => {
-            Ok(MiniAppProductLifecycleState::Enabled)
+        (PluginProductLifecycleState::Disabled, PluginRuntimeLifecycleCommand::Enable) => {
+            Ok(PluginProductLifecycleState::Enabled)
         }
-        (MiniAppProductLifecycleState::Enabled, PluginRuntimeLifecycleCommand::Disable) => {
-            Ok(MiniAppProductLifecycleState::Disabled)
+        (PluginProductLifecycleState::Enabled, PluginRuntimeLifecycleCommand::Disable) => {
+            Ok(PluginProductLifecycleState::Disabled)
         }
         (
-            MiniAppProductLifecycleState::Enabled | MiniAppProductLifecycleState::Disabled,
+            PluginProductLifecycleState::Enabled | PluginProductLifecycleState::Disabled,
             PluginRuntimeLifecycleCommand::Trash,
-        ) => Ok(MiniAppProductLifecycleState::Trashed),
-        (MiniAppProductLifecycleState::Trashed, PluginRuntimeLifecycleCommand::Restore) => {
-            Ok(MiniAppProductLifecycleState::Disabled)
+        ) => Ok(PluginProductLifecycleState::Trashed),
+        (PluginProductLifecycleState::Trashed, PluginRuntimeLifecycleCommand::Restore) => {
+            Ok(PluginProductLifecycleState::Disabled)
         }
         _ => Err(PluginRuntimePlatformError::LifecycleConflict(format!(
             "{current:?}"
@@ -723,18 +723,18 @@ fn lifecycle_target(
 
 fn synchronize_catalog(
     state: &mut MemoryState,
-    miniapp_id: &MiniAppId,
+    plugin_product_id: &PluginProductId,
 ) -> PluginRuntimePlatformResult<()> {
     let root = state
         .roots
-        .get(miniapp_id)
-        .ok_or_else(|| PluginRuntimePlatformError::NotFound(miniapp_id.0.clone()))?;
-    if root.product.lifecycle == MiniAppProductLifecycleState::Enabled {
+        .get(plugin_product_id)
+        .ok_or_else(|| PluginRuntimePlatformError::NotFound(plugin_product_id.0.clone()))?;
+    if root.product.lifecycle == PluginProductLifecycleState::Enabled {
         state
             .catalog
-            .insert(miniapp_id.clone(), PluginRuntimeCatalogRecord::for_root(root)?);
+            .insert(plugin_product_id.clone(), PluginRuntimeCatalogRecord::for_root(root)?);
     } else {
-        state.catalog.remove(miniapp_id);
+        state.catalog.remove(plugin_product_id);
     }
     Ok(())
 }
@@ -747,7 +747,7 @@ fn validate_operation_transition(
     if observed.revision != expected_revision
         || observed.state != PluginRuntimeOperationState::Running
         || observed.operation_id != next.operation_id
-        || observed.miniapp_id != next.miniapp_id
+        || observed.plugin_product_id != next.plugin_product_id
         || observed.kind != next.kind
         || observed.cancelable != next.cancelable
         || next.revision != expected_revision.saturating_add(1)
@@ -759,18 +759,18 @@ fn validate_operation_transition(
 
 fn require_deleting_operation(
     state: &MemoryState,
-    miniapp_id: &MiniAppId,
+    plugin_product_id: &PluginProductId,
     operation_id: &OperationId,
 ) -> PluginRuntimePlatformResult<()> {
     let root = state
         .roots
-        .get(miniapp_id)
-        .ok_or_else(|| PluginRuntimePlatformError::NotFound(miniapp_id.0.clone()))?;
+        .get(plugin_product_id)
+        .ok_or_else(|| PluginRuntimePlatformError::NotFound(plugin_product_id.0.clone()))?;
     let intent = state
         .deleting_intents
-        .get(miniapp_id)
+        .get(plugin_product_id)
         .ok_or_else(|| PluginRuntimePlatformError::InvalidState("deleting intent is missing".into()))?;
-    if root.product.lifecycle != MiniAppProductLifecycleState::Deleting
+    if root.product.lifecycle != PluginProductLifecycleState::Deleting
         || &intent.operation_id != operation_id
     {
         return Err(PluginRuntimePlatformError::OperationConflict);
@@ -788,11 +788,11 @@ fn increment_library_revision(state: &mut MemoryState) -> PluginRuntimePlatformR
 
 fn ensure_owner_idle(
     state: &MemoryState,
-    miniapp_id: &MiniAppId,
+    plugin_product_id: &PluginProductId,
     allowed_operation: Option<&OperationId>,
 ) -> PluginRuntimePlatformResult<()> {
     if let Some(operation) = state.operations.values().find(|operation| {
-        &operation.miniapp_id == miniapp_id
+        &operation.plugin_product_id == plugin_product_id
             && operation.state == PluginRuntimeOperationState::Running
             && allowed_operation != Some(&operation.operation_id)
     }) {

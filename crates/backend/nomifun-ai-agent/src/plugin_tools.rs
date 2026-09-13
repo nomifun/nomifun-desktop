@@ -25,7 +25,7 @@ use nomifun_agent_contracts::{
     CanonicalSchemaRef, ContributionSourceKind,
     CorrelationId, DigestHex, EffectClass, IdempotencyKey, OperationId,
     PluginSourceKind, PrincipalRef, ResolvedCapability,
-    ResolvedMiniAppCapability, ResolvedSnapshotRef, ScopeKey,
+    ResolvedSnapshotRef, ScopeKey,
     StrictJsonValue, ToolPresentationKind, canonical_json_bytes,
     digest_payload,
 };
@@ -562,17 +562,17 @@ fn validate_platform_builtin_tool_target(
     Ok(())
 }
 
-/// Host-owned resolver for schemas exported by a MiniApp Active Release.
+/// Host-owned resolver for schemas exported by a Plugin Product Active Release.
 ///
-/// The owner is passed separately because MiniApp release storage is
+/// The owner is passed separately because Plugin Product release storage is
 /// owner-scoped. The resolver must verify the exact release/catalog facts in
 /// the supplied snapshot projection before returning schema bytes.
 #[async_trait]
-pub trait NomiMiniAppToolSchemaResolver: Send + Sync {
+pub trait NomiPluginProductToolSchemaResolver: Send + Sync {
     async fn resolve(
         &self,
         owner: &PrincipalRef,
-        capability: &ResolvedMiniAppCapability,
+        capability: &ResolvedCapability,
         reference: &CanonicalSchemaRef,
     ) -> Result<StrictJsonValue, String>;
 }
@@ -629,9 +629,9 @@ struct NomiPluginToolActionIdentity {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
-struct NomiMiniAppToolActionIdentity {
+struct NomiPluginProductToolActionIdentity {
     resolved_snapshot_ref: ResolvedSnapshotRef,
-    resolved_capability: ResolvedMiniAppCapability,
+    resolved_capability: ResolvedCapability,
     action: CapabilityActionDescriptor,
     input_schema_digest: DigestHex,
 }
@@ -682,20 +682,20 @@ impl NomiPluginToolAction {
     }
 }
 
-/// One provider-visible action derived from an exact MiniApp Active Release
-/// capability.
+/// One provider-visible action derived from an exact Plugin Product Active
+/// Release capability.
 #[derive(Clone, Debug, PartialEq)]
-pub struct NomiMiniAppToolAction {
+pub struct NomiPluginProductToolAction {
     provider_name: String,
     activation_identity: String,
     artifact_identity: String,
     description: String,
     input_schema: StrictJsonValue,
-    identity: NomiMiniAppToolActionIdentity,
+    identity: NomiPluginProductToolActionIdentity,
     deferred: bool,
 }
 
-impl NomiMiniAppToolAction {
+impl NomiPluginProductToolAction {
     pub fn provider_name(&self) -> &str {
         &self.provider_name
     }
@@ -745,8 +745,8 @@ pub trait NomiPluginToolInvoker: Send + Sync {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct NomiMiniAppToolInvocation {
-    identity: NomiMiniAppToolActionIdentity,
+pub struct NomiPluginProductToolInvocation {
+    identity: NomiPluginProductToolActionIdentity,
     operation_id: OperationId,
     idempotency_key: IdempotencyKey,
     correlation_id: CorrelationId,
@@ -754,8 +754,8 @@ pub struct NomiMiniAppToolInvocation {
     input: StrictJsonValue,
 }
 
-impl NomiMiniAppToolInvocation {
-    pub fn capability(&self) -> &ResolvedMiniAppCapability {
+impl NomiPluginProductToolInvocation {
+    pub fn capability(&self) -> &ResolvedCapability {
         &self.identity.resolved_capability
     }
 
@@ -785,10 +785,10 @@ impl NomiMiniAppToolInvocation {
 }
 
 #[async_trait]
-pub trait NomiMiniAppToolInvoker: Send + Sync {
+pub trait NomiPluginProductToolInvoker: Send + Sync {
     async fn invoke(
         &self,
-        request: NomiMiniAppToolInvocation,
+        request: NomiPluginProductToolInvocation,
     ) -> Result<StrictJsonValue, NomiPluginToolError>;
 }
 
@@ -1007,8 +1007,8 @@ pub struct NomiPluginToolSession {
         Arc<[nomifun_agent_contracts::TypedResourceBinding]>,
     actions: Arc<[NomiPluginToolAction]>,
     invoker: Arc<dyn NomiPluginToolInvoker>,
-    miniapp_actions: Arc<[NomiMiniAppToolAction]>,
-    miniapp_invoker: Option<Arc<dyn NomiMiniAppToolInvoker>>,
+    plugin_product_actions: Arc<[NomiPluginProductToolAction]>,
+    plugin_product_invoker: Option<Arc<dyn NomiPluginProductToolInvoker>>,
     initial_context_contributions: Arc<[NomiInitialContextContribution]>,
     deferred_context_actions: Arc<[NomiDeferredContextAction]>,
     context_invoker: Option<Arc<KernelNomiContextInvoker>>,
@@ -1032,7 +1032,7 @@ impl fmt::Debug for NomiPluginToolSession {
             .debug_struct("NomiPluginToolSession")
             .field("resolved_snapshot_ref", &self.resolved_snapshot_ref)
             .field("actions", &self.actions)
-            .field("miniapp_actions", &self.miniapp_actions)
+            .field("plugin_product_actions", &self.plugin_product_actions)
             .field(
                 "initial_context_contributions",
                 &self.initial_context_contributions,
@@ -1095,8 +1095,8 @@ impl NomiPluginToolSession {
             ),
             actions: Arc::from(actions),
             invoker,
-            miniapp_actions: Arc::from(Vec::<NomiMiniAppToolAction>::new()),
-            miniapp_invoker: None,
+            plugin_product_actions: Arc::from(Vec::<NomiPluginProductToolAction>::new()),
+            plugin_product_invoker: None,
             initial_context_contributions: Arc::from(
                 Vec::<NomiInitialContextContribution>::new(),
             ),
@@ -1154,13 +1154,13 @@ impl NomiPluginToolSession {
         self.session_control_sink.clone()
     }
 
-    /// Add exact MiniApp Active Release actions to this same Nomi Tool
-    /// session. Plugin and MiniApp actions share one registry/policy surface,
-    /// while their invokers remain separate execution adapters.
-    pub fn with_miniapp_actions(
+    /// Add exact Plugin Product Active Release actions to this same Nomi Tool
+    /// session. Plugin and Plugin Product actions share one registry/policy
+    /// surface, while their invokers remain separate execution adapters.
+    pub fn with_plugin_product_actions(
         mut self,
-        mut actions: Vec<NomiMiniAppToolAction>,
-        invoker: Arc<dyn NomiMiniAppToolInvoker>,
+        mut actions: Vec<NomiPluginProductToolAction>,
+        invoker: Arc<dyn NomiPluginProductToolInvoker>,
     ) -> Result<Self, NomiPluginToolError> {
         actions.sort_by(|left, right| {
             (
@@ -1199,8 +1199,8 @@ impl NomiPluginToolSession {
                 )));
             }
         }
-        self.miniapp_actions = Arc::from(actions);
-        self.miniapp_invoker = Some(invoker);
+        self.plugin_product_actions = Arc::from(actions);
+        self.plugin_product_invoker = Some(invoker);
         Ok(self)
     }
 
@@ -1218,8 +1218,8 @@ impl NomiPluginToolSession {
         &self.actions
     }
 
-    pub fn miniapp_actions(&self) -> &[NomiMiniAppToolAction] {
-        &self.miniapp_actions
+    pub fn plugin_product_actions(&self) -> &[NomiPluginProductToolAction] {
+        &self.plugin_product_actions
     }
 
     pub fn initial_context_contributions(
@@ -1255,7 +1255,7 @@ impl NomiPluginToolSession {
             .actions
             .iter()
             .map(|action| action.provider_name.clone())
-            .chain(self.miniapp_actions.iter().map(|action| action.provider_name.clone()))
+            .chain(self.plugin_product_actions.iter().map(|action| action.provider_name.clone()))
             .chain(self.deferred_context_actions.iter().map(|action| action.provider_name.clone()))
             .chain(self.deferred_lifecycle_actions.iter().map(|action| action.provider_name.clone()))
             .collect::<BTreeSet<_>>();
@@ -1333,7 +1333,7 @@ impl NomiPluginToolSession {
 
     pub fn tool_count(&self) -> usize {
         self.actions.len()
-            + self.miniapp_actions.len()
+            + self.plugin_product_actions.len()
             + self.deferred_context_actions.len()
             + self.deferred_lifecycle_actions.len()
             + self.host_dynamic_actions.len()
@@ -1352,7 +1352,7 @@ impl NomiPluginToolSession {
             })
             .map(|action| action.provider_name.clone())
             .chain(
-                self.miniapp_actions
+                self.plugin_product_actions
                     .iter()
                     .filter(|action| {
                         action.capability_id().as_ref() == capability_id
@@ -1403,7 +1403,7 @@ impl NomiPluginToolSession {
                 push_unique(deferred_tools, &action.provider_name);
             }
         }
-        for action in self.miniapp_actions.iter() {
+        for action in self.plugin_product_actions.iter() {
             push_unique(allowed_tools, &action.provider_name);
             if action.deferred {
                 push_unique(deferred_tools, &action.provider_name);
@@ -1435,7 +1435,7 @@ impl NomiPluginToolSession {
         registry: &mut ToolRegistry,
     ) -> Result<(), NomiPluginToolError> {
         if self.actions.is_empty()
-            && self.miniapp_actions.is_empty()
+            && self.plugin_product_actions.is_empty()
             && self.deferred_context_actions.is_empty()
             && self.deferred_lifecycle_actions.is_empty()
             && self.host_dynamic_actions.is_empty()
@@ -1455,17 +1455,17 @@ impl NomiPluginToolSession {
                 }) as Box<dyn Tool>
             })
             .collect();
-        if let Some(invoker) = &self.miniapp_invoker {
-            tools.extend(self.miniapp_actions.iter().cloned().map(|action| {
-                Box::new(NomiMiniAppTool {
+        if let Some(invoker) = &self.plugin_product_invoker {
+            tools.extend(self.plugin_product_actions.iter().cloned().map(|action| {
+                Box::new(NomiPluginProductTool {
                     action,
                     invoker: Arc::clone(invoker),
                     deferred_state: deferred_state.clone(),
                 }) as Box<dyn Tool>
             }));
-        } else if !self.miniapp_actions.is_empty() {
+        } else if !self.plugin_product_actions.is_empty() {
             return Err(NomiPluginToolError::Contract(
-                "MiniApp actions are present without an execution adapter".to_owned(),
+                "Plugin Product actions are present without an execution adapter".to_owned(),
             ));
         }
         if let Some(invoker) = &self.context_invoker {
@@ -1519,7 +1519,7 @@ impl NomiPluginToolSession {
             .iter()
             .map(|action| action.provider_name.clone())
             .chain(
-                self.miniapp_actions
+                self.plugin_product_actions
                     .iter()
                     .map(|action| action.provider_name.clone()),
             )
@@ -2048,20 +2048,21 @@ impl KernelNomiPluginToolSession {
         Ok(session)
     }
 
-    /// Materialize the MiniApp portion of the same frozen Nomi Tool session.
+    /// Materialize the Plugin Product portion of the same frozen Nomi Tool
+    /// session.
     ///
-    /// MiniApp capabilities are intentionally not looked up in the Kernel
-    /// Plugin Registry. Their exact release/provenance projection is already
-    /// frozen in the Snapshot and schema bytes come from the owner-scoped
-    /// MiniApp release resolver.
+    /// Plugin Product capabilities are intentionally not looked up in the
+    /// Kernel Plugin Registry. Their exact release/provenance projection is
+    /// already frozen in the Snapshot and schema bytes come from the
+    /// owner-scoped Plugin Product release resolver.
     #[allow(clippy::too_many_arguments)]
-    pub async fn materialize_miniapp_actions(
+    pub async fn materialize_plugin_product_actions(
         compiled: &CompiledSnapshot,
         owner: &PrincipalRef,
         agent_session_id: &AgentSessionId,
         state_scope_key: &ScopeKey,
-        schema_resolver: Arc<dyn NomiMiniAppToolSchemaResolver>,
-    ) -> Result<Vec<NomiMiniAppToolAction>, NomiPluginToolError> {
+        schema_resolver: Arc<dyn NomiPluginProductToolSchemaResolver>,
+    ) -> Result<Vec<NomiPluginProductToolAction>, NomiPluginToolError> {
         validate_session_identity(
             compiled,
             owner,
@@ -2070,36 +2071,33 @@ impl KernelNomiPluginToolSession {
         )?;
         let initial = compiled
             .content()
-            .initial_miniapp_capabilities
+            .initial_capabilities
             .iter()
-            .map(|capability| capability.capability.id.clone())
-            .collect::<BTreeSet<_>>();
+            .filter(|capability| {
+                capability.contribution_lock.source_kind
+                    == ContributionSourceKind::PluginProductActiveRelease
+            });
         let on_demand = compiled
             .content()
-            .on_demand_miniapp_capabilities
+            .on_demand_capabilities
             .iter()
-            .map(|capability| capability.capability.id.clone())
-            .collect::<BTreeSet<_>>();
+            .filter(|capability| {
+                capability.contribution_lock.source_kind
+                    == ContributionSourceKind::PluginProductActiveRelease
+            });
         let mut actions = Vec::new();
-        for resolved in compiled
-            .content()
-            .initial_miniapp_capabilities
-            .iter()
-            .chain(&compiled.content().on_demand_miniapp_capabilities)
+        for (resolved, deferred) in initial
+            .map(|capability| (capability, false))
+            .chain(on_demand.map(|capability| (capability, true)))
         {
             resolved
                 .validate()
                 .map_err(|error| NomiPluginToolError::Contract(error.message))?;
-            let deferred = if initial.contains(&resolved.capability.id) {
-                false
-            } else if on_demand.contains(&resolved.capability.id) {
-                true
-            } else {
-                return Err(NomiPluginToolError::Contract(format!(
-                    "MiniApp capability {} is in neither Snapshot set",
-                    resolved.capability.id.as_ref()
-                )));
-            };
+            let display_name = resolved
+                .display_name
+                .clone()
+                .unwrap_or_else(|| resolved.capability.id.as_ref().to_owned());
+            let description = resolved.description.clone().unwrap_or_default();
             for action in &resolved.actions {
                 if (!resolved.action_allowlist.is_empty()
                     && !resolved.action_allowlist.contains(&action.action_id))
@@ -2114,12 +2112,12 @@ impl KernelNomiPluginToolSession {
                         reference: action.input_schema.clone(),
                         reason,
                     })?;
-                actions.push(build_miniapp_action(
+                actions.push(build_plugin_product_action(
                     compiled.snapshot_ref().clone(),
                     resolved.clone(),
                     action.clone(),
-                    resolved.display_name.clone(),
-                    resolved.description.clone(),
+                    display_name.clone(),
+                    description.clone(),
                     input_schema,
                     deferred,
                 )?);
@@ -3100,9 +3098,9 @@ struct NomiPluginTool {
     deferred_state: DeferredToolState,
 }
 
-struct NomiMiniAppTool {
-    action: NomiMiniAppToolAction,
-    invoker: Arc<dyn NomiMiniAppToolInvoker>,
+struct NomiPluginProductTool {
+    action: NomiPluginProductToolAction,
+    invoker: Arc<dyn NomiPluginProductToolInvoker>,
     deferred_state: DeferredToolState,
 }
 
@@ -3381,7 +3379,7 @@ impl Tool for NomiDeferredContextTool {
 }
 
 #[async_trait]
-impl Tool for NomiMiniAppTool {
+impl Tool for NomiPluginProductTool {
     fn name(&self) -> &str {
         &self.action.provider_name
     }
@@ -3424,7 +3422,7 @@ impl Tool for NomiMiniAppTool {
 
     async fn execute(&self, _input: Value) -> ToolResult {
         ToolResult::error(
-            "MiniApp Tool invocation requires an engine-owned execution context",
+            "Plugin Product Tool invocation requires an engine-owned execution context",
         )
     }
 
@@ -3439,20 +3437,20 @@ impl Tool for NomiMiniAppTool {
                 .is_activated(&self.action.activation_identity);
         if !deferred_activation_proven {
             return ToolResult::error(format!(
-                "MiniApp Tool '{}' is deferred; activate it through ToolSearch before invoking it",
+                "Plugin Product Tool '{}' is deferred; activate it through ToolSearch before invoking it",
                 self.action.provider_name
             ));
         }
         let operation_identity = context.operation_id();
         let operation_id =
-            OperationId::from(format!("nomi-miniapp:{operation_identity}"));
-        let request = NomiMiniAppToolInvocation {
+            OperationId::from(format!("nomi-plugin-product:{operation_identity}"));
+        let request = NomiPluginProductToolInvocation {
             identity: self.action.identity.clone(),
             idempotency_key: IdempotencyKey::from(format!(
-                "nomi-miniapp:{operation_identity}"
+                "nomi-plugin-product:{operation_identity}"
             )),
             correlation_id: CorrelationId::from(format!(
-                "nomi-miniapp:{operation_identity}"
+                "nomi-plugin-product:{operation_identity}"
             )),
             operation_id,
             deferred_activation_proven,
@@ -3462,7 +3460,7 @@ impl Tool for NomiMiniAppTool {
             Ok(output) => match serde_json::to_string_pretty(&output.0) {
                 Ok(content) => ToolResult::text(content),
                 Err(error) => ToolResult::error(format!(
-                    "MiniApp Tool output could not be serialized: {error}"
+                    "Plugin Product Tool output could not be serialized: {error}"
                 )),
             },
             Err(error) => model_safe_tool_error(&error),
@@ -3625,18 +3623,18 @@ fn build_action(
     })
 }
 
-fn build_miniapp_action(
+fn build_plugin_product_action(
     resolved_snapshot_ref: ResolvedSnapshotRef,
-    resolved_capability: ResolvedMiniAppCapability,
+    resolved_capability: ResolvedCapability,
     action: CapabilityActionDescriptor,
     display_name: String,
     description: String,
     input_schema: StrictJsonValue,
     deferred: bool,
-) -> Result<NomiMiniAppToolAction, NomiPluginToolError> {
+) -> Result<NomiPluginProductToolAction, NomiPluginToolError> {
     let input_schema_digest =
         validate_canonical_input_schema(&action.input_schema, &input_schema)?;
-    let identity = NomiMiniAppToolActionIdentity {
+    let identity = NomiPluginProductToolActionIdentity {
         resolved_snapshot_ref,
         resolved_capability,
         action,
@@ -3644,17 +3642,17 @@ fn build_miniapp_action(
     };
     let canonical_identity = canonical_json_bytes(&identity).map_err(|error| {
         NomiPluginToolError::Contract(format!(
-            "MiniApp Tool activation identity could not be encoded: {error}"
+            "Plugin Product Tool activation identity could not be encoded: {error}"
         ))
     })?;
     let activation_identity =
         String::from_utf8(canonical_identity.clone()).map_err(|error| {
             NomiPluginToolError::Contract(format!(
-                "MiniApp Tool activation identity is not UTF-8: {error}"
+                "Plugin Product Tool activation identity is not UTF-8: {error}"
             ))
         })?;
     let provider_name = provider_tool_name_with_prefix(
-        "miniapp__",
+        "plugin_product__",
         identity.resolved_capability.capability.id.as_ref(),
         identity.action.action_id.as_ref(),
         &canonical_identity,
@@ -3672,7 +3670,7 @@ fn build_miniapp_action(
             identity.action.action_id.as_ref()
         )
     };
-    Ok(NomiMiniAppToolAction {
+    Ok(NomiPluginProductToolAction {
         provider_name,
         activation_identity,
         artifact_identity,
@@ -3736,7 +3734,7 @@ fn validate_exact_target(
         || current.manifest.package != resolved.source_package
         || current.contribution_id != resolved.contribution_id
         || current.contribution_lock != resolved.contribution_lock
-        || current.mount_id != resolved.resolved_mount_id
+        || resolved.resolved_mount_id.as_ref() != Some(&current.mount_id)
         || current.source != resolved.resolved_source
         || current.target_artifact_digest != resolved.target_artifact_digest
         || current.schema_digest != resolved.schema_digest

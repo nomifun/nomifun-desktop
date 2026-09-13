@@ -1,4 +1,4 @@
-use nomifun_agent_contracts::MiniAppM1ContractError;
+use nomifun_agent_contracts::PluginRuntimeContractError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -34,11 +34,11 @@ pub enum PluginRuntimePlatformError {
     #[error("Plugin Service Host crashed: {0}")]
     ServiceCrashed(String),
     #[error(
-        "Plugin Service Host capacity exhausted: max_active={max_active}, active={active_miniapps:?}"
+        "Plugin Service Host capacity exhausted: max_active={max_active}, active={active_plugins:?}"
     )]
     ServiceCapacityExhausted {
         max_active: usize,
-        active_miniapps: Vec<String>,
+        active_plugins: Vec<String>,
     },
     #[error("Plugin KV revision overflow")]
     KvRevisionOverflow,
@@ -63,7 +63,7 @@ pub enum PluginRuntimePlatformError {
     #[error("Plugin owner is busy: {0}")]
     OwnerBusy(String),
     #[error(transparent)]
-    Contract(#[from] MiniAppM1ContractError),
+    Contract(#[from] PluginRuntimeContractError),
 }
 
 pub type PluginRuntimePlatformResult<T> = Result<T, PluginRuntimePlatformError>;

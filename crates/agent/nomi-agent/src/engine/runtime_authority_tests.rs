@@ -56,7 +56,7 @@ impl LlmProvider for RaceTailFalseCompletionProvider {
         let text = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
             "The current status is available."
         } else {
-            "Created miniapp.html."
+            "Created plugin.html."
         };
         let (tx, rx) = tokio::sync::mpsc::channel(2);
         tx.try_send(LlmEvent::TextDelta(text.to_owned())).unwrap();
@@ -310,7 +310,7 @@ async fn a2_verdict_retracts_every_authority_the_turn_granted_itself() {
     grant_skill_authority(&mut engine);
     assert_ne!(surface(&engine), root, "the fixture must actually mutate authority");
 
-    let second_requirement = requirement("Create miniapp.html.");
+    let second_requirement = requirement("Create plugin.html.");
     context.requirement.extend(second_requirement.clone());
     let second = engine
         .execute_turn_with_completion_evidence_context(
@@ -347,7 +347,7 @@ async fn a2_rollback_leaves_the_runtime_equivalent_to_a_fresh_reload() {
 
     let mut context = run_first_pass(&mut engine, "source-root").await;
     grant_skill_authority(&mut engine);
-    let second_requirement = requirement("Create miniapp.html.");
+    let second_requirement = requirement("Create plugin.html.");
     context.requirement.extend(second_requirement.clone());
     engine
         .execute_turn_with_completion_evidence_context(

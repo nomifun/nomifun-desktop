@@ -3,18 +3,18 @@ use std::collections::BTreeMap;
 use nomifun_agent_contracts::{
     canonical_release_artifact_digest, canonical_ui_tree_digest, digest_bytes,
     digest_payload, ArtifactId, CredentialSlotDeclaration, CredentialSlotKey,
-    CredentialSlotKind, DigestHex, LocalizedMetadata, MiniAppResourceContract,
-    MiniAppServiceLifecycle, PackageId, PackageRef, ResourceKind, StrictJsonValue,
+    CredentialSlotKind, DigestHex, LocalizedMetadata, PluginResourceContract,
+    PluginServiceLifecycle, PackageId, PackageRef, ResourceKind, StrictJsonValue,
     VersionString,
 };
 use nomifun_plugin_platform::runtime::{
-    build_miniapp_static_bundle, validate_no_custom_scripts,
+    build_plugin_static_bundle, validate_no_custom_scripts,
     validate_service_source, validate_static_bundle_path,
     materialize_service_release, PluginRuntimeStaticBundleBuildError,
     PluginRuntimeStaticBundleBuilder, PluginRuntimeStaticBundleFile,
     PluginRuntimeStaticBundleInput, PluginRuntimeStaticServiceInput,
-    materialize_surface_entrypoint, MINIAPP_SERVICE_ENTRYPOINT,
-    MINIAPP_SURFACE_BRIDGE_BOOTSTRAP_MARKER,
+    materialize_surface_entrypoint, PLUGIN_SERVICE_ENTRYPOINT,
+    PLUGIN_SURFACE_BRIDGE_BOOTSTRAP_MARKER,
 };
 use serde_json::json;
 
@@ -51,11 +51,11 @@ fn base_input() -> PluginRuntimeStaticBundleInput {
             "type": "object"
         })),
         credential_slots: Vec::new(),
-        resource_contract: MiniAppResourceContract::default(),
+        resource_contract: PluginResourceContract::default(),
         schemas: BTreeMap::new(),
         bridge_contract_digest: digest(b"bridge-contract"),
         contribution_package: PackageRef {
-            id: PackageId::from("miniapp.example.static"),
+            id: PackageId::from("plugin.example.static"),
             version: VersionString::from("1.0.0"),
         },
         contributions: Default::default(),
@@ -79,7 +79,7 @@ fn ui_only_build_is_deterministic_and_declares_no_node_runtime() {
 
     assert_eq!(
         PluginRuntimeStaticBundleBuilder::build_profile(),
-        nomifun_agent_contracts::JavaScriptBuildProfile::MiniAppReleaseV1
+        nomifun_agent_contracts::JavaScriptBuildProfile::PluginReleaseV1
     );
     assert!(!PluginRuntimeStaticBundleBuilder::ui_only_requires_node());
     assert!(manifest.service.is_none());
@@ -118,7 +118,7 @@ fn service_bytes_are_packaged_as_a_declared_module_without_starting_runtime() {
     let service_digest = digest(&service_bytes);
     input.service = Some(PluginRuntimeStaticServiceInput {
         main_mjs: service_bytes,
-        lifecycle: MiniAppServiceLifecycle::OnDemand,
+        lifecycle: PluginServiceLifecycle::OnDemand,
         uses_files: false,
         uses_private_database: false,
         service_contract_digest: digest(b"service-contract"),
@@ -133,7 +133,7 @@ fn service_bytes_are_packaged_as_a_declared_module_without_starting_runtime() {
     input.resource_contract.required_resource_kinds =
         [ResourceKind::from("knowledge.base")].into_iter().collect();
 
-    let artifact = build_miniapp_static_bundle(input).unwrap();
+    let artifact = build_plugin_static_bundle(input).unwrap();
     let manifest = &artifact.manifest.payload;
     let service = manifest.service.as_ref().unwrap();
 
@@ -155,7 +155,7 @@ fn service_bytes_are_packaged_as_a_declared_module_without_starting_runtime() {
     assert!(artifact
         .files
         .iter()
-        .any(|file| file.normalized_relative_path == MINIAPP_SERVICE_ENTRYPOINT));
+        .any(|file| file.normalized_relative_path == PLUGIN_SERVICE_ENTRYPOINT));
 }
 
 #[test]
@@ -165,19 +165,19 @@ fn service_release_does_not_require_a_dummy_page() {
     input.ui_assets.clear();
     input.service = Some(PluginRuntimeStaticServiceInput {
         main_mjs: b"export async function start() { return { async invoke() { return {}; } }; }".to_vec(),
-        lifecycle: MiniAppServiceLifecycle::Continuous,
+        lifecycle: PluginServiceLifecycle::Continuous,
         uses_files: false,
         uses_private_database: false,
         service_contract_digest: digest(b"service-contract"),
         runtime_requirements_digest: digest(b"runtime-requirements"),
     });
-    let artifact = build_miniapp_static_bundle(input.clone()).unwrap();
+    let artifact = build_plugin_static_bundle(input.clone()).unwrap();
     assert!(artifact.manifest.payload.ui.is_none());
     assert!(artifact.manifest.payload.service.is_some());
     assert_eq!(artifact.files.len(), 1);
     artifact.validate().unwrap();
     input.ui_assets.push(PluginRuntimeStaticBundleFile::new("ui/orphan.js", b"orphan".to_vec()));
-    assert!(build_miniapp_static_bundle(input).is_err());
+    assert!(build_plugin_static_bundle(input).is_err());
 }
 
 #[test]
@@ -185,7 +185,7 @@ fn service_materialization_binds_descriptor_and_file_to_the_same_bytes() {
     let service_bytes = b"export async function start() {}\n".to_vec();
     let materialized = materialize_service_release(PluginRuntimeStaticServiceInput {
         main_mjs: service_bytes.clone(),
-        lifecycle: MiniAppServiceLifecycle::Continuous,
+        lifecycle: PluginServiceLifecycle::Continuous,
         uses_files: true,
         uses_private_database: true,
         service_contract_digest: digest(b"service-contract"),
@@ -195,12 +195,12 @@ fn service_materialization_binds_descriptor_and_file_to_the_same_bytes() {
 
     assert_eq!(
         materialized.file.normalized_relative_path,
-        MINIAPP_SERVICE_ENTRYPOINT
+        PLUGIN_SERVICE_ENTRYPOINT
     );
     assert_eq!(materialized.file.bytes, service_bytes);
     assert_eq!(
         materialized.descriptor.entrypoint,
-        MINIAPP_SERVICE_ENTRYPOINT
+        PLUGIN_SERVICE_ENTRYPOINT
     );
     assert_eq!(
         materialized.descriptor.module_digest,
@@ -208,7 +208,7 @@ fn service_materialization_binds_descriptor_and_file_to_the_same_bytes() {
     );
     assert_eq!(
         materialized.descriptor.lifecycle,
-        MiniAppServiceLifecycle::Continuous
+        PluginServiceLifecycle::Continuous
     );
     assert!(materialized.descriptor.uses_files);
     assert!(materialized.descriptor.uses_private_database);
@@ -219,7 +219,7 @@ fn service_source_validation_rejects_empty_invalid_utf8_and_nul() {
     assert!(matches!(
         validate_service_source(&[]),
         Err(PluginRuntimeStaticBundleBuildError::EmptyFile { path })
-            if path == MINIAPP_SERVICE_ENTRYPOINT
+            if path == PLUGIN_SERVICE_ENTRYPOINT
     ));
     assert!(matches!(
         validate_service_source(&[0xff, 0xfe]),
@@ -243,7 +243,7 @@ fn empty_files_and_unsafe_paths_fail_before_artifact_creation() {
     let mut empty_service = base_input();
     empty_service.service = Some(PluginRuntimeStaticServiceInput {
         main_mjs: Vec::new(),
-        lifecycle: MiniAppServiceLifecycle::OnDemand,
+        lifecycle: PluginServiceLifecycle::OnDemand,
         uses_files: false,
         uses_private_database: false,
         service_contract_digest: digest(b"service-contract"),
@@ -295,7 +295,7 @@ fn ui_only_entrypoint_rejects_service_input() {
     let mut input = base_input();
     input.service = Some(PluginRuntimeStaticServiceInput {
         main_mjs: b"export default {};\n".to_vec(),
-        lifecycle: MiniAppServiceLifecycle::Continuous,
+        lifecycle: PluginServiceLifecycle::Continuous,
         uses_files: false,
         uses_private_database: false,
         service_contract_digest: digest(b"service-contract"),
@@ -316,7 +316,7 @@ fn every_release_entrypoint_gets_one_host_bridge_bootstrap() {
     assert_eq!(first, second);
     assert_eq!(
         String::from_utf8_lossy(&first)
-            .matches(MINIAPP_SURFACE_BRIDGE_BOOTSTRAP_MARKER)
+            .matches(PLUGIN_SURFACE_BRIDGE_BOOTSTRAP_MARKER)
             .count(),
         1
     );

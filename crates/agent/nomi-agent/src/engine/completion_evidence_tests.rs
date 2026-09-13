@@ -183,7 +183,7 @@ impl LlmProvider for FalseCompletionProvider {
         _request: &LlmRequest,
     ) -> Result<tokio::sync::mpsc::Receiver<LlmEvent>, ProviderError> {
         let (tx, rx) = tokio::sync::mpsc::channel(2);
-        tx.try_send(LlmEvent::TextDelta("Created miniapp.html.".to_owned()))
+        tx.try_send(LlmEvent::TextDelta("Created plugin.html.".to_owned()))
             .unwrap();
         tx.try_send(LlmEvent::Done {
             stop_reason: nomi_types::message::StopReason::EndTurn,
@@ -208,7 +208,7 @@ impl LlmProvider for RaceTailFalseCompletionProvider {
         let text = if call == 0 {
             "The current status is available."
         } else {
-            "Created miniapp.html."
+            "Created plugin.html."
         };
         let (tx, rx) = tokio::sync::mpsc::channel(2);
         tx.try_send(LlmEvent::TextDelta(text.to_owned())).unwrap();
@@ -378,53 +378,53 @@ fn adjudicated(
 fn explicit_current_file_commands_and_claims_enter_the_narrow_gate() {
     let root = tempfile::tempdir().unwrap();
     for (request, answer) in [
-        ("Create miniapp.html.", "Created miniapp.html."),
-        ("Can you create miniapp.html?", "I created miniapp.html."),
-        ("可以帮我创建miniapp.html吗？", "已创建miniapp.html。"),
+        ("Create plugin.html.", "Created plugin.html."),
+        ("Can you create plugin.html?", "I created plugin.html."),
+        ("可以帮我创建plugin.html吗？", "已创建plugin.html。"),
         ("Please fix `src/lib.rs`.", "Fixed `src/lib.rs`."),
         ("Create [my app.html](https://example.invalid).", "Created [my app.html](https://example.invalid)."),
         ("Create .env.", "Created .env."),
         ("Create Dockerfile.", "Created Dockerfile."),
         ("先创建a.html。", "已创建a.html。"),
-        ("Create miniapp.html.", "Created \"miniapp.html\"."),
-        ("Create miniapp.html.", "miniapp.html is ready."),
-        ("Create miniapp.html.", "miniapp.html is now ready."),
+        ("Create plugin.html.", "Created \"plugin.html\"."),
+        ("Create plugin.html.", "plugin.html is ready."),
+        ("Create plugin.html.", "plugin.html is now ready."),
         (
-            "Create miniapp.html.",
-            "miniapp.html now contains the implementation.",
+            "Create plugin.html.",
+            "plugin.html now contains the implementation.",
         ),
-        ("Create miniapp.html.", "Task complete — see miniapp.html."),
+        ("Create plugin.html.", "Task complete — see plugin.html."),
         (
-            "Create miniapp.html.",
-            "I created miniapp.html, but couldn't run the tests.",
-        ),
-        (
-            "Create miniapp.html.",
-            "Created miniapp.html, but deleted temp.txt.",
+            "Create plugin.html.",
+            "I created plugin.html, but couldn't run the tests.",
         ),
         (
-            "Create miniapp.html.",
-            "已创建miniapp.html，但未生成预览图。",
+            "Create plugin.html.",
+            "Created plugin.html, but deleted temp.txt.",
         ),
         (
-            "Create miniapp.html.",
-            "Created miniapp.html — would you like anything else?",
+            "Create plugin.html.",
+            "已创建plugin.html，但未生成预览图。",
         ),
         (
-            "Create miniapp.html.",
-            "Created miniapp.html successfully.",
+            "Create plugin.html.",
+            "Created plugin.html — would you like anything else?",
         ),
         (
-            "Create miniapp.html.",
-            "I created miniapp.html as requested.",
+            "Create plugin.html.",
+            "Created plugin.html successfully.",
         ),
         (
-            "Create miniapp.html.",
-            "miniapp.html has been created successfully.",
+            "Create plugin.html.",
+            "I created plugin.html as requested.",
         ),
         (
-            "Create miniapp.html.",
-            "已创建miniapp.html，已按要求完成。",
+            "Create plugin.html.",
+            "plugin.html has been created successfully.",
+        ),
+        (
+            "Create plugin.html.",
+            "已创建plugin.html，已按要求完成。",
         ),
     ] {
         assert!(
@@ -439,8 +439,8 @@ fn ascii_case_folding_preserves_unicode_span_boundaries() {
     let root = tempfile::tempdir().unwrap();
     assert!(!adjudicated(
         root.path(),
-        "Create İİİİİ miniapp.html.",
-        "Created İİİİİ miniapp.html.",
+        "Create İİİİİ plugin.html.",
+        "Created İİİİİ plugin.html.",
         &[],
     ));
 }
@@ -466,16 +466,16 @@ fn exact_generic_completion_claims_bind_every_required_target() {
 fn read_only_historical_quoted_and_hypothetical_prose_never_enters_the_gate() {
     let root = tempfile::tempdir().unwrap();
     for (request, answer) in [
-        ("Explain how to create miniapp.html; do not modify files.", "Created miniapp.html."),
-        ("Review miniapp.html and report whether it is fixed.", "miniapp.html is not fixed."),
-        ("Show code that would create miniapp.html.", "This would create miniapp.html."),
+        ("Explain how to create plugin.html; do not modify files.", "Created plugin.html."),
+        ("Review plugin.html and report whether it is fixed.", "plugin.html is not fixed."),
+        ("Show code that would create plugin.html.", "This would create plugin.html."),
         ("Generate a report about src/lib.rs.", "Generated a report about src/lib.rs."),
         ("生成一份关于src/lib.rs的分析。", "已生成一份关于src/lib.rs的分析。"),
-        ("请确认是否创建miniapp.html。", "已创建miniapp.html。"),
-        ("请比较创建miniapp.html与修改src/lib.rs的区别。", "已创建miniapp.html。"),
-        ("请不要创建miniapp.html。", "已创建miniapp.html。"),
+        ("请确认是否创建plugin.html。", "已创建plugin.html。"),
+        ("请比较创建plugin.html与修改src/lib.rs的区别。", "已创建plugin.html。"),
+        ("请不要创建plugin.html。", "已创建plugin.html。"),
         ("麻烦你不要修改src/lib.rs。", "已修改src/lib.rs。"),
-        ("The prior task said:\n> Create miniapp.html\nWhy?", "Created miniapp.html."),
+        ("The prior task said:\n> Create plugin.html\nWhy?", "Created plugin.html."),
         ("Update Node to v1.2.3.", "Updated v1.2.3."),
         ("Create a link to https://example.com in README.md.", "Created example.com."),
         ("Explain 3.14.", "Updated 3.14."),
@@ -490,21 +490,21 @@ fn read_only_historical_quoted_and_hypothetical_prose_never_enters_the_gate() {
 #[test]
 fn negative_modal_historical_and_unsaved_answers_are_not_positive_claims() {
     let root = tempfile::tempdir().unwrap();
-    let request = "Create miniapp.html.";
+    let request = "Create plugin.html.";
     for answer in [
-        "I did not create miniapp.html.",
-        "miniapp.html is still missing.",
-        "I could not create miniapp.html: permission denied.",
-        "I will create miniapp.html next.",
-        "The log says \"Created miniapp.html\", but the file is missing.",
-        "Previously, I created miniapp.html.",
-        "I created miniapp.html in a previous run.",
-        "'Created miniapp.html'",
-        "`Created miniapp.html`",
-        "Created miniapp.html was the model's final answer.",
-        "Created miniapp.html draft, but did not save it.",
-        "已创建miniapp.html草稿，但未保存、未落盘。",
-        "上一轮已创建miniapp.html。",
+        "I did not create plugin.html.",
+        "plugin.html is still missing.",
+        "I could not create plugin.html: permission denied.",
+        "I will create plugin.html next.",
+        "The log says \"Created plugin.html\", but the file is missing.",
+        "Previously, I created plugin.html.",
+        "I created plugin.html in a previous run.",
+        "'Created plugin.html'",
+        "`Created plugin.html`",
+        "Created plugin.html was the model's final answer.",
+        "Created plugin.html draft, but did not save it.",
+        "已创建plugin.html草稿，但未保存、未落盘。",
+        "上一轮已创建plugin.html。",
     ] {
         assert!(
             !adjudicated(root.path(), request, answer, &[]),
@@ -516,18 +516,18 @@ fn negative_modal_historical_and_unsaved_answers_are_not_positive_claims() {
 #[test]
 fn action_target_binding_does_not_assign_source_paths_to_mutation() {
     let root = tempfile::tempdir().unwrap();
-    let request = "Read docs/spec.md and then create miniapp.html.";
+    let request = "Read docs/spec.md and then create plugin.html.";
     assert!(adjudicated(
         root.path(),
         request,
-        "Created miniapp.html.",
+        "Created plugin.html.",
         &[]
     ));
     assert!(!adjudicated(
         root.path(),
         request,
-        "Created miniapp.html.",
-        &["miniapp.html"]
+        "Created plugin.html.",
+        &["plugin.html"]
     ));
     assert!(adjudicated(
         root.path(),
@@ -542,14 +542,14 @@ fn later_directives_cancel_and_can_readd_the_exact_target() {
     let root = tempfile::tempdir().unwrap();
     assert!(!adjudicated(
         root.path(),
-        "Create miniapp.html.\nPlease do not create miniapp.html.",
-        "Created miniapp.html.",
+        "Create plugin.html.\nPlease do not create plugin.html.",
+        "Created plugin.html.",
         &[]
     ));
     assert!(adjudicated(
         root.path(),
-        "Create miniapp.html.\nPlease do not create miniapp.html.\nPlease create miniapp.html.",
-        "Created miniapp.html.",
+        "Create plugin.html.\nPlease do not create plugin.html.\nPlease create plugin.html.",
+        "Created plugin.html.",
         &[]
     ));
 }
@@ -596,15 +596,15 @@ fn fingerprint_identity_binds_the_open_handle_to_the_terminal_path() {
 #[tokio::test]
 async fn final_fingerprint_requires_both_a_real_delta_and_this_turns_mutation() {
     let root = tempfile::tempdir().unwrap();
-    let mut context = CompletionEvidenceContext::new(requirement("Create miniapp.html."));
+    let mut context = CompletionEvidenceContext::new(requirement("Create plugin.html."));
     context
         .ensure_target_baselines(root.path(), CompletionEvidenceMode::LocalFingerprint)
         .await;
-    std::fs::write(root.path().join("miniapp.html"), "hello").unwrap();
+    std::fs::write(root.path().join("plugin.html"), "hello").unwrap();
 
     let without_mutation = context
         .supported_targets(
-            "Created miniapp.html.",
+            "Created plugin.html.",
             root.path(),
             CompletionEvidenceMode::LocalFingerprint,
             &[],
@@ -615,21 +615,21 @@ async fn final_fingerprint_requires_both_a_real_delta_and_this_turns_mutation() 
     context.successful_mutation_observed = true;
     let with_mutation = context
         .supported_targets(
-            "Created miniapp.html.",
+            "Created plugin.html.",
             root.path(),
             CompletionEvidenceMode::LocalFingerprint,
             &[],
         )
         .await;
-    assert_eq!(with_mutation, vec!["miniapp.html"]);
+    assert_eq!(with_mutation, vec!["plugin.html"]);
 
-    std::fs::remove_file(root.path().join("miniapp.html")).unwrap();
+    std::fs::remove_file(root.path().join("plugin.html")).unwrap();
     let deleted_again = context
         .supported_targets(
-            "Created miniapp.html.",
+            "Created plugin.html.",
             root.path(),
             CompletionEvidenceMode::LocalFingerprint,
-            &["miniapp.html".to_owned()],
+            &["plugin.html".to_owned()],
         )
         .await;
     assert!(deleted_again.is_empty(), "a stale receipt cannot prove final presence");
@@ -692,17 +692,17 @@ async fn resource_limited_files_need_a_known_absent_baseline_for_exact_creation(
 #[tokio::test]
 async fn missing_pre_effect_baseline_never_turns_path_presence_into_change_proof() {
     let root = tempfile::tempdir().unwrap();
-    std::fs::write(root.path().join("miniapp.html"), "original").unwrap();
-    let mut context = CompletionEvidenceContext::new(requirement("Create miniapp.html."));
+    std::fs::write(root.path().join("plugin.html"), "original").unwrap();
+    let mut context = CompletionEvidenceContext::new(requirement("Create plugin.html."));
     context
         .unfingerprinted_targets
-        .insert("miniapp.html".to_owned());
+        .insert("plugin.html".to_owned());
     let supported = context
         .supported_targets(
-            "Created miniapp.html.",
+            "Created plugin.html.",
             root.path(),
             CompletionEvidenceMode::LocalFingerprint,
-            &["miniapp.html".to_owned()],
+            &["plugin.html".to_owned()],
         )
         .await;
     assert!(
@@ -721,10 +721,10 @@ fn failed_or_opaque_mutation_invalidates_every_older_terminal_receipt() {
             &mut ledger,
             true,
             false,
-            vec!["miniapp.html".to_owned()],
+            vec!["plugin.html".to_owned()],
             Vec::new(),
         );
-        assert_eq!(context.terminal_exact_receipts, ["miniapp.html"]);
+        assert_eq!(context.terminal_exact_receipts, ["plugin.html"]);
 
         apply_terminal_effect_evidence(
             &mut context,
@@ -806,11 +806,11 @@ async fn typed_verdict_restores_and_persists_the_exact_seeded_turn_root() {
     let sessions = tempfile::tempdir().unwrap();
     let (mut engine, prior_messages, prior_checkpoint) =
         seeded_persistent_engine(workspace.path(), sessions.path(), "rollback-seeded");
-    let mut context = CompletionEvidenceContext::new(requirement("Create miniapp.html."));
+    let mut context = CompletionEvidenceContext::new(requirement("Create plugin.html."));
 
     let result = engine
         .execute_turn_with_completion_evidence_context(
-            requirement("Create miniapp.html."),
+            requirement("Create plugin.html."),
             "attempt-msg",
             "new-source",
             None,
@@ -880,7 +880,7 @@ async fn race_tail_terminal_adjudication_discards_the_whole_accepted_turn() {
         .unwrap();
     assert!(first.completion_adjudication.is_none());
 
-    let second_requirement = requirement("Create miniapp.html.");
+    let second_requirement = requirement("Create plugin.html.");
     context.requirement.extend(second_requirement.clone());
     let second = engine
         .execute_turn_with_completion_evidence_context(
@@ -919,11 +919,11 @@ async fn checked_root_persistence_failure_becomes_state_inconsistent() {
         "rollback-failure",
         provider,
     );
-    let mut context = CompletionEvidenceContext::new(requirement("Create miniapp.html."));
+    let mut context = CompletionEvidenceContext::new(requirement("Create plugin.html."));
 
     let result = engine
         .execute_turn_with_completion_evidence_context(
-            requirement("Create miniapp.html."),
+            requirement("Create plugin.html."),
             "attempt-msg",
             "new-source",
             None,

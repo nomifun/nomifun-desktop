@@ -43,12 +43,11 @@ interface BridgeLoadState {
 }
 
 const BRIDGE_VERSION = '1.0.0';
-// These v1 transport identifiers are embedded in immutable release HTML.
-// Product/API names can change independently; changing these breaks saved pages.
-const BRIDGE_CHALLENGE_EVENT = 'nomifun-miniapp-bridge-challenge-v1';
-const BRIDGE_HANDSHAKE_EVENT = 'nomifun-miniapp-bridge-handshake-v1';
-const BRIDGE_CONNECT_EVENT = 'nomifun-miniapp-bridge-connect-v1';
-const BRIDGE_RESULT_EVENT = 'nomifun-miniapp-bridge-result-v1';
+// These v1 transport identifiers are embedded in immutable Plugin release HTML.
+const BRIDGE_CHALLENGE_EVENT = 'nomifun-plugin-bridge-challenge-v1';
+const BRIDGE_HANDSHAKE_EVENT = 'nomifun-plugin-bridge-handshake-v1';
+const BRIDGE_CONNECT_EVENT = 'nomifun-plugin-bridge-connect-v1';
+const BRIDGE_RESULT_EVENT = 'nomifun-plugin-bridge-result-v1';
 const BRIDGE_HANDSHAKE_TIMEOUT_MS = 10_000;
 
 function createBridgeNonce(): string {
@@ -132,12 +131,12 @@ function parseBridgeRequest(value: unknown): PluginRuntimeBridgeRequest | null {
 function bridgeFailure(error: unknown): { code: string; message: string } {
   if (isBackendHttpError(error)) {
     return {
-      code: error.code || 'MINIAPP_BRIDGE_FAILED',
+      code: error.code || 'PLUGIN_BRIDGE_FAILED',
       message: error.backendMessage || error.message,
     };
   }
   return {
-    code: 'MINIAPP_BRIDGE_FAILED',
+    code: 'PLUGIN_BRIDGE_FAILED',
     message: error instanceof Error ? error.message : String(error),
   };
 }
@@ -227,7 +226,7 @@ const PluginRuntimeSurfacePanel: React.FC<PluginRuntimeSurfacePanelProps> = ({
             call_id: rawCallId,
             ok: false,
             error: {
-              code: 'MINIAPP_BRIDGE_REQUEST_INVALID',
+              code: 'PLUGIN_BRIDGE_REQUEST_INVALID',
               message: 'PluginRuntime Bridge request is invalid',
             },
           });
@@ -239,7 +238,7 @@ const PluginRuntimeSurfacePanel: React.FC<PluginRuntimeSurfacePanelProps> = ({
             call_id: request.call_id,
             ok: false,
             error: {
-              code: 'MINIAPP_BRIDGE_CLOSING',
+              code: 'PLUGIN_BRIDGE_CLOSING',
               message: 'PluginRuntime Surface is closing',
             },
           });
@@ -251,7 +250,7 @@ const PluginRuntimeSurfacePanel: React.FC<PluginRuntimeSurfacePanelProps> = ({
             call_id: request.call_id,
             ok: false,
             error: {
-              code: 'MINIAPP_BRIDGE_CALL_DUPLICATE',
+              code: 'PLUGIN_BRIDGE_CALL_DUPLICATE',
               message: 'PluginRuntime Bridge call_id is already in flight',
             },
           });

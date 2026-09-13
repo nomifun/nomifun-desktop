@@ -1978,7 +1978,7 @@ pub struct AppServices {
     /// Phase M1 Plugin application facade over the clean-start, owner-scoped
     /// Product/Project/Release data root.
     pub plugin_runtime:
-        Arc<nomifun_plugin_platform::runtime::PluginRuntimeM1ApplicationService>,
+        Arc<nomifun_plugin_platform::runtime::PluginRuntimeApplicationService>,
     /// Singleton generation service — the Creative Studio media task queue.
     /// Shared by the `/api/creative-studio/tasks*` routes and Gateway tools.
     pub creation_service: Arc<nomifun_creation::CreationService>,
@@ -2520,7 +2520,7 @@ impl AppServices {
             .shutdown_service_runtime(self.authoritative_user_id.as_ref())
             .await
         {
-            errors.push(format!("MiniApp Service cleanup failed: {error}"));
+            errors.push(format!("Plugin Service cleanup failed: {error}"));
         }
         if let Err(error) = self.shutdown_auto_work_runner().await {
             errors.push(format!("AutoWork cleanup failed: {error:#}"));
@@ -2632,7 +2632,7 @@ impl AppServices {
         {
             tracing::error!(
                 %error,
-                "MiniApp Service cleanup failed during startup failure cleanup"
+                "Plugin Service cleanup failed during startup failure cleanup"
             );
         }
         if let Err(cleanup_error) = self.shutdown_auto_work_runner().await {
@@ -3473,49 +3473,49 @@ impl AppServices {
         // Plugin M1 starts from its own owner-scoped Product/Project/Release
         // data root. Legacy HTML snapshots and conversation workspaces are not
         // migrated, read, or dual-written.
-        let miniapp_repository =
-            Arc::new(nomifun_db::SqliteMiniAppM1Repository::new(
+        let plugin_runtime_repository =
+            Arc::new(nomifun_db::SqlitePluginRuntimeRepository::new(
                 database.pool().clone(),
             ));
-        nomifun_db::IMiniAppM1Repository::revoke_all_surface_sessions_on_startup(
-            miniapp_repository.as_ref(),
+        nomifun_db::IPluginRuntimeRepository::revoke_all_surface_sessions_on_startup(
+            plugin_runtime_repository.as_ref(),
         )
             .await
             .map_err(|error| {
                 anyhow::anyhow!(
-                    "failed to revoke stale MiniApp Surface sessions: {error}"
+                    "failed to revoke stale Plugin Surface sessions: {error}"
                 )
             })?;
-        let miniapp_repository: Arc<dyn nomifun_db::IMiniAppM1Repository> =
-            miniapp_repository;
-        let miniapp_store_root = data_dir.join("miniapp-m1");
-        let miniapp_source_store = Arc::new(
+        let plugin_runtime_repository: Arc<dyn nomifun_db::IPluginRuntimeRepository> =
+            plugin_runtime_repository;
+        let plugin_runtime_store_root = data_dir.join("plugin-m1");
+        let plugin_runtime_source_store = Arc::new(
             nomifun_plugin_platform::runtime::PluginRuntimeSourceStore::new(
-                miniapp_store_root.join("source"),
+                plugin_runtime_store_root.join("source"),
             )
             .map_err(|error| {
                 anyhow::anyhow!(
-                    "failed to initialize MiniApp Source Store under {}: {error}",
-                    miniapp_store_root.display()
+                    "failed to initialize Plugin Source Store under {}: {error}",
+                    plugin_runtime_store_root.display()
                 )
             })?,
         );
-        let miniapp_release_store = Arc::new(
+        let plugin_runtime_release_store = Arc::new(
             nomifun_plugin_platform::runtime::PluginRuntimeReleaseStore::new(
-                miniapp_store_root.join("release"),
+                plugin_runtime_store_root.join("release"),
             )
             .map_err(|error| {
                 anyhow::anyhow!(
-                    "failed to initialize MiniApp Release Store under {}: {error}",
-                    miniapp_store_root.display()
+                    "failed to initialize Plugin Release Store under {}: {error}",
+                    plugin_runtime_store_root.display()
                 )
             })?,
         );
         let plugin_runtime = Arc::new(
-            nomifun_plugin_platform::runtime::PluginRuntimeM1ApplicationService::new_with_stores(
-                miniapp_repository,
-                miniapp_source_store,
-                miniapp_release_store,
+            nomifun_plugin_platform::runtime::PluginRuntimeApplicationService::new_with_stores(
+                plugin_runtime_repository,
+                plugin_runtime_source_store,
+                plugin_runtime_release_store,
             )?,
         );
 
@@ -5718,8 +5718,8 @@ mod tests {
         let services = AppServices::from_config(db, &config).await.unwrap();
 
         assert!(!tmp.path().join("local-ai").exists());
-        assert!(tmp.path().join("miniapp-m1/source").is_dir());
-        assert!(tmp.path().join("miniapp-m1/release").is_dir());
+        assert!(tmp.path().join("plugin-m1/source").is_dir());
+        assert!(tmp.path().join("plugin-m1/release").is_dir());
         assert_eq!(
             services
                 .agent_runtime_registry

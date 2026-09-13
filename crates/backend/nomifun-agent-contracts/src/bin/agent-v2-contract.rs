@@ -15,11 +15,11 @@ use nomifun_agent_contracts::{
     D027TerminalSequenceMatrix, D028PlatformMatrix, DeletionManifest, DigestHex,
     FRESH_V4_BASELINE_SQL, FreshV4ParentOperationMarker, FreshV4ReadyMarker,
     FreshV4SchemaMetadata, JavaScriptHostHello, N1CohortLock, N1PlatformValidationRecord,
-    MiniAppBridgeRequest, MiniAppBridgeSession, MiniAppM1ContractManifest,
-    MiniAppMigration, MiniAppProductLifecycleRecord, MiniAppPublishRequest,
-    MiniAppReadyRelease, MiniAppReleaseArtifactV1, MiniAppReleasePointerState,
-    MiniAppReleaseV1Manifest, MiniAppRollbackRequest, MiniAppServiceTestReceipt,
-    MiniAppShareBundleV1, MiniAppWholeAppBackupMetadataV1,
+    PluginBridgeRequest, PluginBridgeSession, PluginRuntimeContractManifest,
+    PluginMigration, PluginProductLifecycleRecord, PluginPublishRequest,
+    PluginReadyRelease, PluginReleaseArtifactV1, PluginReleasePointerState,
+    PluginReleaseV1Manifest, PluginRollbackRequest, PluginServiceTestReceipt,
+    PluginShareBundleV1, PluginProductBackupMetadataV1,
     NodeRuntimeFingerprint, NodeRuntimeProbeResult, OfficialPresetKey,
     OfficialPresetSeedManifestPayload, PackageManifest, PlatformValidationManifestPayload,
     PluginApplyRequest, PluginApplyResult, PluginAutoApplyEligibility,
@@ -27,7 +27,7 @@ use nomifun_agent_contracts::{
     PluginN1ContractManifest, PluginPackageArtifactV1, PluginPackageV1Manifest,
     PluginProjectRecord, PluginReadyCandidate, PluginRegistrationMetadata,
     PluginRestorePreviousRequest, PluginRestorePreviousResult, PluginShareBundleManifest,
-    ProductOperationRecord, RemoteBinding, ResolvedMiniAppServiceSpec,
+    ProductOperationRecord, RemoteBinding, ResolvedPluginServiceSpec,
     ResolvedSnapshotEnvelope, RuntimeCommand, RuntimeHelloPayload, RuntimeSelectionRecord,
     RuntimeSwitchValidationResult, SessionEventRegistryPayload, TargetPackageInventoryPayload,
     VersionString, digest_bytes, digest_payload,
@@ -84,8 +84,8 @@ fn run() -> Result<(), Box<dyn Error>> {
         contracts.join("validation/platform-validation-manifest.payload.json");
     let plugin_n1_contract_path =
         contracts.join("plugin-n1/plugin-n1-contract.v1.json");
-    let miniapp_m1_contract_path =
-        contracts.join("miniapp-m1/miniapp-m1-contract.v1.json");
+    let plugin_runtime_contract_path =
+        contracts.join("plugin-runtime/plugin-runtime-contract.v1.json");
 
     let closure: ContractClosurePayload = read_json(&closure_path)?;
     validate_closure(&closure)?;
@@ -96,10 +96,10 @@ fn run() -> Result<(), Box<dyn Error>> {
     plugin_n1_contract.validate()?;
     let plugin_n1_contract_digest = digest_payload(&plugin_n1_contract)?;
 
-    let miniapp_m1_contract: MiniAppM1ContractManifest =
-        read_json(&miniapp_m1_contract_path)?;
-    miniapp_m1_contract.validate()?;
-    let miniapp_m1_contract_digest = digest_payload(&miniapp_m1_contract)?;
+    let plugin_runtime_contract: PluginRuntimeContractManifest =
+        read_json(&plugin_runtime_contract_path)?;
+    plugin_runtime_contract.validate()?;
+    let plugin_runtime_contract_digest = digest_payload(&plugin_runtime_contract)?;
 
     let inventory: TargetPackageInventoryPayload = read_json(&inventory_path)?;
     validate_target_inventory(&inventory)?;
@@ -222,24 +222,24 @@ fn run() -> Result<(), Box<dyn Error>> {
             "runtime_switch_validation_result",
         ],
     ))?;
-    let miniapp_m1_schema_digest = digest_payload(&schema_subset(
+    let plugin_runtime_schema_digest = digest_payload(&schema_subset(
         &schemas,
         &[
-            "miniapp_bridge_request",
-            "miniapp_bridge_session",
-            "miniapp_m1_contract_manifest",
-            "miniapp_migration",
-            "miniapp_product_lifecycle_record",
-            "miniapp_publish_request",
-            "miniapp_ready_release",
-            "miniapp_release_artifact_v1",
-            "miniapp_release_pointer_state",
-            "miniapp_release_v1_manifest",
-            "miniapp_rollback_request",
-            "miniapp_service_spec",
-            "miniapp_service_test_receipt",
-            "miniapp_share_bundle_v1",
-            "miniapp_whole_app_backup_metadata_v1",
+            "plugin_bridge_request",
+            "plugin_bridge_session",
+            "plugin_runtime_contract_manifest",
+            "plugin_migration",
+            "plugin_product_lifecycle_record",
+            "plugin_publish_request",
+            "plugin_ready_release",
+            "plugin_release_artifact_v1",
+            "plugin_release_pointer_state",
+            "plugin_release_v1_manifest",
+            "plugin_rollback_request",
+            "plugin_service_spec",
+            "plugin_service_test_receipt",
+            "plugin_share_bundle_v1",
+            "plugin_product_backup_metadata_v1",
         ],
     ))?;
 
@@ -332,12 +332,12 @@ fn run() -> Result<(), Box<dyn Error>> {
     digest_map.insert("official_preset_seed_manifest".to_owned(), seed_digest);
     digest_map.insert("package_schema".to_owned(), package_schema_digest);
     digest_map.insert(
-        "miniapp_m1_contract".to_owned(),
-        miniapp_m1_contract_digest,
+        "plugin_runtime_contract".to_owned(),
+        plugin_runtime_contract_digest,
     );
     digest_map.insert(
-        "miniapp_m1_schema".to_owned(),
-        miniapp_m1_schema_digest,
+        "plugin_runtime_schema".to_owned(),
+        plugin_runtime_schema_digest,
     );
     digest_map.insert(
         "platform_validation_contract".to_owned(),
@@ -428,8 +428,8 @@ fn run() -> Result<(), Box<dyn Error>> {
             pretty_json(&platform_envelope)?,
         ),
         (
-            "miniapp-m1-contract.envelope.json".to_owned(),
-            pretty_json(&ArtifactEnvelope::new(miniapp_m1_contract.clone())?)?,
+            "plugin-runtime-contract.envelope.json".to_owned(),
+            pretty_json(&ArtifactEnvelope::new(plugin_runtime_contract.clone())?)?,
         ),
         (
             "plugin-n1-contract.envelope.json".to_owned(),
@@ -445,7 +445,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         write_json(&d025_payload_path, &d025_payload)?;
         write_json(&d025_reference_path, &d025_reference)?;
         write_json(&plugin_n1_contract_path, &plugin_n1_contract)?;
-        write_json(&miniapp_m1_contract_path, &miniapp_m1_contract)?;
+        write_json(&plugin_runtime_contract_path, &plugin_runtime_contract)?;
         fs::write(&d025_envelope_path, &d025_envelope_contents)?;
         for (name, contents) in &outputs {
             fs::write(generated.join(name), contents)?;
@@ -457,7 +457,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         check_json(&d025_payload_path, &d025_payload)?;
         check_json(&d025_reference_path, &d025_reference)?;
         check_json(&plugin_n1_contract_path, &plugin_n1_contract)?;
-        check_json(&miniapp_m1_contract_path, &miniapp_m1_contract)?;
+        check_json(&plugin_runtime_contract_path, &plugin_runtime_contract)?;
         if fs::read_to_string(&d025_envelope_path)? != d025_envelope_contents {
             return Err(format!(
                 "generated artifact drift: {}; run agent-v2-contract write",
@@ -831,41 +831,41 @@ fn generated_schemas() -> Result<BTreeMap<String, Value>, Box<dyn Error>> {
         "n1_platform_validation_record",
     )?;
     add_schema::<N1CohortLock>(&mut schemas, "n1_cohort_lock")?;
-    add_schema::<MiniAppM1ContractManifest>(
+    add_schema::<PluginRuntimeContractManifest>(
         &mut schemas,
-        "miniapp_m1_contract_manifest",
+        "plugin_runtime_contract_manifest",
     )?;
-    add_schema::<MiniAppReleaseV1Manifest>(
+    add_schema::<PluginReleaseV1Manifest>(
         &mut schemas,
-        "miniapp_release_v1_manifest",
+        "plugin_release_v1_manifest",
     )?;
-    add_schema::<MiniAppReleaseArtifactV1>(
+    add_schema::<PluginReleaseArtifactV1>(
         &mut schemas,
-        "miniapp_release_artifact_v1",
+        "plugin_release_artifact_v1",
     )?;
-    add_schema::<MiniAppMigration>(&mut schemas, "miniapp_migration")?;
-    add_schema::<MiniAppReadyRelease>(&mut schemas, "miniapp_ready_release")?;
-    add_schema::<MiniAppReleasePointerState>(
+    add_schema::<PluginMigration>(&mut schemas, "plugin_migration")?;
+    add_schema::<PluginReadyRelease>(&mut schemas, "plugin_ready_release")?;
+    add_schema::<PluginReleasePointerState>(
         &mut schemas,
-        "miniapp_release_pointer_state",
+        "plugin_release_pointer_state",
     )?;
-    add_schema::<MiniAppPublishRequest>(&mut schemas, "miniapp_publish_request")?;
-    add_schema::<MiniAppRollbackRequest>(&mut schemas, "miniapp_rollback_request")?;
-    add_schema::<ResolvedMiniAppServiceSpec>(&mut schemas, "miniapp_service_spec")?;
-    add_schema::<MiniAppBridgeSession>(&mut schemas, "miniapp_bridge_session")?;
-    add_schema::<MiniAppBridgeRequest>(&mut schemas, "miniapp_bridge_request")?;
-    add_schema::<MiniAppServiceTestReceipt>(
+    add_schema::<PluginPublishRequest>(&mut schemas, "plugin_publish_request")?;
+    add_schema::<PluginRollbackRequest>(&mut schemas, "plugin_rollback_request")?;
+    add_schema::<ResolvedPluginServiceSpec>(&mut schemas, "plugin_service_spec")?;
+    add_schema::<PluginBridgeSession>(&mut schemas, "plugin_bridge_session")?;
+    add_schema::<PluginBridgeRequest>(&mut schemas, "plugin_bridge_request")?;
+    add_schema::<PluginServiceTestReceipt>(
         &mut schemas,
-        "miniapp_service_test_receipt",
+        "plugin_service_test_receipt",
     )?;
-    add_schema::<MiniAppShareBundleV1>(&mut schemas, "miniapp_share_bundle_v1")?;
-    add_schema::<MiniAppWholeAppBackupMetadataV1>(
+    add_schema::<PluginShareBundleV1>(&mut schemas, "plugin_share_bundle_v1")?;
+    add_schema::<PluginProductBackupMetadataV1>(
         &mut schemas,
-        "miniapp_whole_app_backup_metadata_v1",
+        "plugin_product_backup_metadata_v1",
     )?;
-    add_schema::<MiniAppProductLifecycleRecord>(
+    add_schema::<PluginProductLifecycleRecord>(
         &mut schemas,
-        "miniapp_product_lifecycle_record",
+        "plugin_product_lifecycle_record",
     )?;
     Ok(schemas)
 }
@@ -891,13 +891,13 @@ fn validate_generated_schemas(
         "plugin_restore_previous_request",
         "n1_platform_validation_record",
         "n1_cohort_lock",
-        "miniapp_m1_contract_manifest",
-        "miniapp_release_v1_manifest",
-        "miniapp_release_artifact_v1",
-        "miniapp_publish_request",
-        "miniapp_service_spec",
-        "miniapp_bridge_request",
-        "miniapp_product_lifecycle_record",
+        "plugin_runtime_contract_manifest",
+        "plugin_release_v1_manifest",
+        "plugin_release_artifact_v1",
+        "plugin_publish_request",
+        "plugin_service_spec",
+        "plugin_bridge_request",
+        "plugin_product_lifecycle_record",
     ];
     for name in required {
         if !schemas.contains_key(name) {
@@ -1000,23 +1000,23 @@ fn validate_generated_schemas(
     if !package_manifest.contains("\"contribution_id\"") {
         return Err("CapabilityManifest must own explicit contribution_id".into());
     }
-    let miniapp_release = serde_json::to_string(
+    let plugin_release = serde_json::to_string(
         schemas
-            .get("miniapp_release_v1_manifest")
-            .expect("MiniApp Release schema is generated"),
+            .get("plugin_release_v1_manifest")
+            .expect("Plugin Release schema is generated"),
     )?;
-    if miniapp_release.contains("\"capability_contribution_ids\"") {
+    if plugin_release.contains("\"capability_contribution_ids\"") {
         return Err(
-            "MiniApp Release must not duplicate Capability contribution identity".into(),
+            "Plugin Release must not duplicate Capability contribution identity".into(),
         );
     }
-    let miniapp_bridge = serde_json::to_string(
+    let plugin_bridge = serde_json::to_string(
         schemas
-            .get("miniapp_bridge_request")
-            .expect("MiniApp Bridge schema is generated"),
+            .get("plugin_bridge_request")
+            .expect("Plugin Bridge schema is generated"),
     )?;
     for forbidden in [
-        "miniapp_id",
+        "plugin_product_id",
         "active_release_id",
         "active_release_digest",
         "active_release_epoch",
@@ -1025,9 +1025,9 @@ fn validate_generated_schemas(
         "localhost",
         "port",
     ] {
-        if miniapp_bridge.contains(&format!("\"{forbidden}\"")) {
+        if plugin_bridge.contains(&format!("\"{forbidden}\"")) {
             return Err(format!(
-                "MiniApp Bridge request must not trust caller-supplied {forbidden}"
+                "Plugin Bridge request must not trust caller-supplied {forbidden}"
             )
             .into());
         }

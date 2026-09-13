@@ -1,0 +1,9 @@
+-- Clean-start concept boundary.
+--
+-- The former single-document product store was retired before the current
+-- Plugin Runtime schema.  The final product root is created by migration 072
+-- and is intentionally not represented by a second `plugins` table.
+--
+-- This migration number is retained only so a fresh database preserves the
+-- published migration ordering.  Existing databases are outside the
+-- destructive-refactor compatibility boundary and must be recreated.

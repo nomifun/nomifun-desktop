@@ -29,7 +29,7 @@ use nomifun_agent_contracts::{
     PackageId, PackageManifest, PackageRef, PlatformConstraint,
     PluginBootCriticality, PluginBootState, PluginContextDescriptor,
     PluginDesiredState, PluginEffectiveState, PluginIdentityDescriptor,
-    MiniAppId, MiniAppReleaseId, MiniAppReleaseRef, PluginMountId,
+    PluginProductId, PluginReleaseId, PluginReleaseRef, PluginMountId,
     PluginRegistrarDescriptor, PluginRegistrarOperation,
     PluginRegistrationMetadata, PluginSourceKind, PluginSourceMetadata,
     PluginStateHandleDescriptor, PluginStateMethod, PresetRevisionRef,
@@ -49,8 +49,8 @@ use nomifun_agent_kernel::{
 use nomifun_ai_agent::{
     KernelNomiPluginToolSession, NomiHostDynamicToolDescriptor,
     NomiHostDynamicToolError, NomiHostDynamicToolInvocation,
-    NomiHostDynamicToolInvoker, NomiMiniAppToolInvoker,
-    NomiMiniAppToolInvocation, NomiMiniAppToolSchemaResolver,
+    NomiHostDynamicToolInvoker, NomiPluginProductToolInvoker,
+    NomiPluginProductToolInvocation, NomiPluginProductToolSchemaResolver,
     NomiPlatformBuiltinToolAdmission,
     NomiPlatformBuiltinLifecycleAdmission,
     NomiPlatformBuiltinLifecycleInvocation,
@@ -143,27 +143,27 @@ struct SchemaMap {
 }
 
 #[derive(Default)]
-struct MiniAppSchemaMap {
+struct PluginProductSchemaMap {
     schemas: BTreeMap<CanonicalSchemaRef, StrictJsonValue>,
 }
 
 #[async_trait]
-impl NomiMiniAppToolSchemaResolver for MiniAppSchemaMap {
+impl NomiPluginProductToolSchemaResolver for PluginProductSchemaMap {
     async fn resolve(
         &self,
         _owner: &PrincipalRef,
-        _capability: &nomifun_agent_contracts::ResolvedMiniAppCapability,
+        _capability: &nomifun_agent_contracts::ResolvedCapability,
         reference: &CanonicalSchemaRef,
     ) -> Result<StrictJsonValue, String> {
         self.schemas
             .get(reference)
             .cloned()
-            .ok_or_else(|| format!("MiniApp schema {} is missing", reference.as_ref()))
+            .ok_or_else(|| format!("Plugin Product schema {} is missing", reference.as_ref()))
     }
 }
 
 #[derive(Default)]
-struct CapturingMiniAppInvoker {
+struct CapturingPluginProductInvoker {
     calls: AtomicUsize,
     action_ids: Mutex<Vec<String>>,
 }
@@ -185,10 +185,10 @@ impl NomiHostDynamicToolInvoker for CountingHostDynamicInvoker {
 }
 
 #[async_trait]
-impl NomiMiniAppToolInvoker for CapturingMiniAppInvoker {
+impl NomiPluginProductToolInvoker for CapturingPluginProductInvoker {
     async fn invoke(
         &self,
-        request: NomiMiniAppToolInvocation,
+        request: NomiPluginProductToolInvocation,
     ) -> Result<StrictJsonValue, NomiPluginToolError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.action_ids
@@ -196,7 +196,7 @@ impl NomiMiniAppToolInvoker for CapturingMiniAppInvoker {
             .unwrap()
             .push(request.action().action_id.as_ref().to_owned());
         Ok(StrictJsonValue(json!({
-            "miniapp": request.capability().miniapp_id.as_ref(),
+            "plugin": request.capability().plugin_product_id.as_ref(),
             "action": request.action().action_id.as_ref(),
             "input": request.input().0,
         })))
@@ -800,7 +800,7 @@ fn compile_with_deferred_capabilities(
             availability_evidence_revision: "plugin-tool-test".to_owned(),
         },
         CompileRequest {
-            miniapp_capabilities: Vec::new(),
+            plugin_product_capabilities: Vec::new(),
             revision: revision_with_deferred_capabilities(
                 materialized,
                 deferred_tool,
@@ -876,7 +876,7 @@ fn compile_single_bundled_capability(
             availability_evidence_revision: "lifecycle-test".to_owned(),
         },
         CompileRequest {
-            miniapp_capabilities: Vec::new(),
+            plugin_product_capabilities: Vec::new(),
             revision,
             principal: owner(),
             scene: "chat".to_owned(),
@@ -1874,9 +1874,9 @@ async fn deferred_tool_search_activates_then_invokes_kernel() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
-fn miniapp_fixture() -> (
-    nomifun_agent_contracts::ResolvedMiniAppCapability,
-    Arc<MiniAppSchemaMap>,
+fn plugin_product_fixture() -> (
+    nomifun_agent_contracts::ResolvedCapability,
+    Arc<PluginProductSchemaMap>,
 ) {
     let input_schema = json!({
         "type": "object",
@@ -1890,67 +1890,77 @@ fn miniapp_fixture() -> (
         "type": "object",
         "additionalProperties": false,
         "properties": {
-            "miniapp": {"type": "string"},
+            "plugin": {"type": "string"},
             "action": {"type": "string"},
             "input": {"type": "object"}
         },
-        "required": ["miniapp", "action", "input"]
+        "required": ["plugin", "action", "input"]
     });
-    let input_ref = schema_ref("miniapp.fixture/input", &input_schema);
-    let output_ref = schema_ref("miniapp.fixture/output", &output_schema);
+    let input_ref = schema_ref("plugin.fixture/input", &input_schema);
+    let output_ref = schema_ref("plugin.fixture/output", &output_schema);
     let action = CapabilityActionDescriptor {
-        action_id: ActionId::from("miniapp.fixture.echo.invoke"),
+        action_id: ActionId::from("plugin.fixture.echo.invoke"),
         input_schema: input_ref.clone(),
         output_schema: output_ref,
         effect_class: EffectClass::Pure,
         presentation: ToolPresentationKind::FunctionTool,
     };
-    let miniapp_id = MiniAppId::from("miniapp-fixture");
-    let capability_id = CapabilityId::from("miniapp.fixture.echo");
+    let plugin_product_id = PluginProductId::from("plugin-fixture");
+    let capability_id = CapabilityId::from("plugin.fixture.echo");
     let contribution_id =
-        nomifun_agent_contracts::ContributionId::from("capability:miniapp.fixture.echo");
-    let capability = nomifun_agent_contracts::ResolvedMiniAppCapability {
+        nomifun_agent_contracts::ContributionId::from("capability:plugin.fixture.echo");
+    let capability = nomifun_agent_contracts::ResolvedCapability {
         capability: CapabilityRef {
             id: capability_id,
             version: VersionString::from(VERSION),
         },
         source_package: PackageRef {
-            id: PackageId::from("miniapp.fixture"),
+            id: PackageId::from("plugin.fixture"),
             version: VersionString::from(VERSION),
         },
         contribution_id: contribution_id.clone(),
         contribution_lock: ContributionLock {
-            source_kind: ContributionSourceKind::MiniAppActiveRelease,
-            source_identity: format!("miniapp:{}", miniapp_id.as_ref()).into(),
+            source_kind: ContributionSourceKind::PluginProductActiveRelease,
+            source_identity: format!("plugin-product:{}", plugin_product_id.as_ref()).into(),
             mount_id: None,
-            miniapp_id: Some(miniapp_id.clone()),
+            plugin_product_id: Some(plugin_product_id.clone()),
             mcp_binding_id: None,
             contribution_id,
             contract_digest: DigestHex::from("a".repeat(64)),
         },
-        miniapp_id: miniapp_id.clone(),
-        active_release: MiniAppReleaseRef {
-            release_id: MiniAppReleaseId::from("release-fixture"),
+        resolved_mount_id: None,
+        resolved_source: PluginSourceMetadata {
+            source_kind: PluginSourceKind::ManagedLocal,
+            source_identity: format!("plugin-product:{}", plugin_product_id.as_ref()),
+            source_digest: Some(DigestHex::from("b".repeat(64))),
+        },
+        target_artifact_digest: DigestHex::from("b".repeat(64)),
+        schema_digest: DigestHex::from("a".repeat(64)),
+        dependency_path: vec![CapabilityId::from("plugin.fixture.echo")],
+        required_runtime_features: BTreeSet::new(),
+        plugin_product_id: Some(plugin_product_id.clone()),
+        active_release: Some(PluginReleaseRef {
+            release_id: PluginReleaseId::from("release-fixture"),
             artifact_id: ArtifactId::from("artifact-fixture"),
             release_digest: DigestHex::from("b".repeat(64)),
             manifest_digest: DigestHex::from("c".repeat(64)),
-        },
-        active_release_epoch: 3,
-        catalog_digest: DigestHex::from("d".repeat(64)),
-        display_name: "MiniApp Fixture".to_owned(),
-        description: "MiniApp fixture action".to_owned(),
+        }),
+        active_release_epoch: Some(3),
+        catalog_digest: Some(DigestHex::from("d".repeat(64))),
+        display_name: Some("Plugin Fixture".to_owned()),
+        description: Some("Plugin fixture action".to_owned()),
         actions: vec![action],
         required_resource_kinds: BTreeSet::new(),
         action_allowlist: BTreeSet::new(),
     };
-    let schemas = Arc::new(MiniAppSchemaMap {
+    let schemas = Arc::new(PluginProductSchemaMap {
         schemas: BTreeMap::from([(input_ref, StrictJsonValue(input_schema))]),
     });
     (capability, schemas)
 }
 
-fn compile_miniapp_fixture(
-    capability: &nomifun_agent_contracts::ResolvedMiniAppCapability,
+fn compile_plugin_product_fixture(
+    capability: &nomifun_agent_contracts::ResolvedCapability,
 ) -> nomifun_agent_kernel::CompiledSnapshot {
     let selection = CapabilitySelection {
         capability: capability.capability.clone(),
@@ -1964,13 +1974,13 @@ fn compile_miniapp_fixture(
         on_demand_capabilities: Vec::new(),
         skill_bindings: Vec::new(),
         system_role_provider_overrides: BTreeMap::new(),
-        persona: "MiniApp fixture".to_owned(),
-        instructions: "Use the MiniApp fixture.".to_owned(),
+        persona: "Plugin fixture".to_owned(),
+        instructions: "Use the Plugin fixture.".to_owned(),
         starter_prompts: Vec::new(),
     };
     let mut revision = AgentPresetRevision {
         reference: PresetRevisionRef {
-            preset_id: AgentPresetId::from("miniapp.fixture.preset"),
+            preset_id: AgentPresetId::from("plugin.fixture.preset"),
             revision: 1,
             revision_digest: DigestHex::from(""),
         },
@@ -1994,26 +2004,26 @@ fn compile_miniapp_fixture(
             target_contribution_manifest_digest: DigestHex::from("3".repeat(64)),
             host_target: RuntimeTarget::from("x86_64-pc-windows-msvc"),
             host_surface: "desktop".to_owned(),
-            availability_evidence_revision: "miniapp-tool-test".to_owned(),
+            availability_evidence_revision: "plugin-tool-test".to_owned(),
         },
         CompileRequest {
-            miniapp_capabilities: vec![capability.clone()],
+            plugin_product_capabilities: vec![capability.clone()],
             revision,
             principal: owner(),
             scene: "chat".to_owned(),
             surface: "desktop".to_owned(),
             audience: "owner".to_owned(),
             created_at_ms: 2,
-            resolver_run_id: OperationId::from("miniapp-tool-test"),
+            resolver_run_id: OperationId::from("plugin-tool-test"),
         },
     )
     .unwrap()
 }
 
 #[tokio::test]
-async fn miniapp_active_release_action_joins_the_same_nomi_tool_session() {
-    let (capability, schemas) = miniapp_fixture();
-    let compiled = compile_miniapp_fixture(&capability);
+async fn plugin_product_active_release_action_joins_the_same_nomi_tool_session() {
+    let (capability, schemas) = plugin_product_fixture();
+    let compiled = compile_plugin_product_fixture(&capability);
     let kernel = Arc::new(
         KernelRegistry::new(
             policy(),
@@ -2031,7 +2041,7 @@ async fn miniapp_active_release_action_joins_the_same_nomi_tool_session() {
     )
     .await
     .unwrap();
-    let actions = KernelNomiPluginToolSession::materialize_miniapp_actions(
+    let actions = KernelNomiPluginToolSession::materialize_plugin_product_actions(
         &compiled,
         &owner(),
         &AgentSessionId::from(SESSION),
@@ -2041,26 +2051,26 @@ async fn miniapp_active_release_action_joins_the_same_nomi_tool_session() {
     .await
     .unwrap();
     assert_eq!(actions.len(), 1);
-    assert!(actions[0].provider_name().starts_with("miniapp__"));
+    assert!(actions[0].provider_name().starts_with("plugin_product__"));
 
-    let invoker = Arc::new(CapturingMiniAppInvoker::default());
+    let invoker = Arc::new(CapturingPluginProductInvoker::default());
     let session = base
-        .with_miniapp_actions(actions, invoker.clone())
+        .with_plugin_product_actions(actions, invoker.clone())
         .unwrap();
     assert_eq!(session.actions().len(), 0);
-    assert_eq!(session.miniapp_actions().len(), 1);
+    assert_eq!(session.plugin_product_actions().len(), 1);
 
     let mut registry = ToolRegistry::new();
     session.register_into(&mut registry).unwrap();
-    let action = &session.miniapp_actions()[0];
+    let action = &session.plugin_product_actions()[0];
     assert_eq!(
         action.artifact_identity(),
-        "miniapp.fixture.echo miniapp.fixture.echo.invoke"
+        "plugin.fixture.echo plugin.fixture.echo.invoke"
     );
     assert!(
         nomi_agent::output::artifact_contract(action.artifact_identity())
             .is_none(),
-        "ordinary MiniApp Tools must not inherit artifact obligations from release provenance"
+        "ordinary Plugin Product Tools must not inherit artifact obligations from release provenance"
     );
     let result = registry
         .get(action.provider_name())
@@ -2068,18 +2078,18 @@ async fn miniapp_active_release_action_joins_the_same_nomi_tool_session() {
         .execute_with_context(
             json!({"message": "hello"}),
             &ToolExecutionContext::from_scoped_tool_call(
-                "turn-miniapp",
-                "call-miniapp",
+                "turn-plugin",
+                "call-plugin",
             ),
         )
         .await;
     assert!(!result.is_error, "{}", result.content);
     let output: Value = serde_json::from_str(&result.content).unwrap();
-    assert_eq!(output["miniapp"], "miniapp-fixture");
-    assert_eq!(output["action"], "miniapp.fixture.echo.invoke");
+    assert_eq!(output["plugin"], "plugin-fixture");
+    assert_eq!(output["action"], "plugin.fixture.echo.invoke");
     assert_eq!(invoker.calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         invoker.action_ids.lock().unwrap().as_slice(),
-        &["miniapp.fixture.echo.invoke".to_owned()]
+        &["plugin.fixture.echo.invoke".to_owned()]
     );
 }

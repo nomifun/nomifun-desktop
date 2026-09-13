@@ -69,7 +69,7 @@ async fn verify_main_upgrade(head: i64) {
         .bind(&asset).fetch_one(db.pool()).await.unwrap();
     assert_eq!(row, ("pending deletion history".into(), "workshop/keep-until-cleanup.png".into(), 15, None));
     assert!(sqlx::query("UPDATE workshop_assets SET deleted_at = NULL WHERE asset_id = ?").bind(&asset).execute(db.pool()).await.is_err());
-    for table in ["remote_bindings", "nomi_agent_presets", "plugin_artifacts", "miniapp_products"] {
+    for table in ["remote_bindings", "nomi_agent_presets", "plugin_artifacts", "plugin_products"] {
         let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name=?")
             .bind(table).fetch_one(db.pool()).await.unwrap();
         assert_eq!(exists, 1, "refactor table {table} must exist after main upgrade");

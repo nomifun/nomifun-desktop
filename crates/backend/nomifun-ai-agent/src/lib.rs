@@ -99,9 +99,9 @@ pub use plugin_tools::{
     NomiPlatformBuiltinLifecycleInvocation,
     NomiPlatformBuiltinLifecycleInvoker,
     NomiPluginToolSession, NomiPluginToolSessionProvider,
-    NomiPluginToolSessionRequest, NomiMiniAppToolAction,
-    NomiMiniAppToolInvocation, NomiMiniAppToolInvoker,
-    NomiMiniAppToolSchemaResolver,
+    NomiPluginToolSessionRequest, NomiPluginProductToolAction,
+    NomiPluginProductToolInvocation, NomiPluginProductToolInvoker,
+    NomiPluginProductToolSchemaResolver,
 };
 pub use factory::{
     AgentFactoryDeps, CompanionPromptProvider,

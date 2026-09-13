@@ -280,7 +280,7 @@ async fn fetch_bindings(
     mount_id: &str,
 ) -> Result<Vec<PluginCredentialBindingRow>, DbError> {
     sqlx::query_as(
-        "SELECT * FROM plugin_credential_bindings
+        "SELECT * FROM plugin_mount_credential_bindings
          WHERE mount_id = ? ORDER BY slot ASC",
     )
     .bind(mount_id)
@@ -291,7 +291,7 @@ async fn fetch_bindings(
 
 fn validate_operation_owner(kind: ProductOperationKind, owner_kind: &str) -> Result<(), DbError> {
     let valid = match kind {
-        ProductOperationKind::MiniappPermanentDelete => false,
+        ProductOperationKind::PluginPermanentDelete => false,
         ProductOperationKind::Build => owner_kind == "plugin_project",
         ProductOperationKind::Import | ProductOperationKind::Export => {
             matches!(owner_kind, "plugin_project" | "plugin_mount")
@@ -1020,11 +1020,11 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
             return Err(conflict("product operation started_at_ms must be positive"));
         }
         validate_operation_owner(params.kind, &params.owner_kind)?;
-        if params.kind == ProductOperationKind::MiniappPermanentDelete
+        if params.kind == ProductOperationKind::PluginPermanentDelete
             && params.progress_percent.is_some()
         {
             return Err(conflict(
-                "miniapp permanent delete does not persist progress_percent",
+                "plugin permanent delete does not persist progress_percent",
             ));
         }
         let bounded_log_tail_json = validate_log_tail(&params.bounded_log_tail)?;
@@ -1145,9 +1145,9 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
                 .fetch_optional(&mut *tx)
                 .await?
                 .ok_or_else(|| DbError::NotFound(format!("operation {}", params.operation_id)))?;
-        if current.owner_kind == "miniapp" {
+        if current.owner_kind == "plugin" {
             return Err(conflict(
-                "MiniApp operations must use the MiniApp repository",
+                "Plugin operations must use the Plugin repository",
             ));
         }
         if current.state != ProductOperationState::Running.as_str() {
@@ -1161,19 +1161,19 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
                 "operation terminal timestamp predates started_at_ms",
             ));
         }
-        if current.kind == ProductOperationKind::MiniappPermanentDelete.as_str()
+        if current.kind == ProductOperationKind::PluginPermanentDelete.as_str()
             && params.state == ProductOperationState::Canceled
         {
-            return Err(conflict("miniapp permanent delete cannot be canceled"));
+            return Err(conflict("plugin permanent delete cannot be canceled"));
         }
-        if current.kind == ProductOperationKind::MiniappPermanentDelete.as_str()
+        if current.kind == ProductOperationKind::PluginPermanentDelete.as_str()
             && params.progress_percent.is_some()
         {
             return Err(conflict(
-                "miniapp permanent delete does not persist progress_percent",
+                "plugin permanent delete does not persist progress_percent",
             ));
         }
-        if current.kind != ProductOperationKind::MiniappPermanentDelete.as_str()
+        if current.kind != ProductOperationKind::PluginPermanentDelete.as_str()
             && params.state == ProductOperationState::Succeeded
             && params.progress_percent != Some(100)
         {
@@ -1811,7 +1811,7 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
         .execute(&mut *tx)
         .await
         .map_err(query_error)?;
-        sqlx::query("DELETE FROM plugin_credential_bindings WHERE mount_id = ?")
+        sqlx::query("DELETE FROM plugin_mount_credential_bindings WHERE mount_id = ?")
             .bind(mount_id)
             .execute(&mut *tx)
             .await
@@ -1821,7 +1821,7 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
             .execute(&mut *tx)
             .await
             .map_err(query_error)?;
-        sqlx::query("DELETE FROM plugin_kv WHERE mount_id = ?")
+        sqlx::query("DELETE FROM plugin_mount_kv WHERE mount_id = ?")
             .bind(mount_id)
             .execute(&mut *tx)
             .await
@@ -1973,14 +1973,14 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
         .execute(&mut *tx)
         .await
         .map_err(query_error)?;
-        sqlx::query("DELETE FROM plugin_credential_bindings WHERE mount_id = ?")
+        sqlx::query("DELETE FROM plugin_mount_credential_bindings WHERE mount_id = ?")
             .bind(&params.mount_id)
             .execute(&mut *tx)
             .await
             .map_err(query_error)?;
         for binding in &params.bindings {
             sqlx::query(
-                "INSERT INTO plugin_credential_bindings (
+                "INSERT INTO plugin_mount_credential_bindings (
                     mount_id, slot, credential_id, created_at, updated_at
                  ) VALUES (?, ?, ?, ?, ?)",
             )
@@ -2072,7 +2072,7 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
         }
         let changed = if let Some(expected_revision) = params.expected_revision {
             sqlx::query(
-                "UPDATE plugin_kv
+                "UPDATE plugin_mount_kv
                  SET value_json = ?, revision = revision + 1, updated_at = ?
                  WHERE mount_id = ? AND namespace = ? AND key = ?
                    AND revision = ? AND updated_at <= ?",
@@ -2090,7 +2090,7 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
             .rows_affected()
         } else {
             sqlx::query(
-                "INSERT INTO plugin_kv (
+                "INSERT INTO plugin_mount_kv (
                     mount_id, namespace, key, value_json, revision, created_at, updated_at
                  ) VALUES (?, ?, ?, ?, 1, ?, ?)
                  ON CONFLICT(mount_id, namespace, key) DO NOTHING",
@@ -2110,7 +2110,7 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
             return Err(conflict("plugin KV revision CAS failed"));
         }
         let row = sqlx::query_as(
-            "SELECT * FROM plugin_kv WHERE mount_id = ? AND namespace = ? AND key = ?",
+            "SELECT * FROM plugin_mount_kv WHERE mount_id = ? AND namespace = ? AND key = ?",
         )
         .bind(&params.mount_id)
         .bind(&params.namespace)
@@ -2140,7 +2140,7 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
             params.expected_current_artifact_digest.as_deref(),
         )?;
         let value = sqlx::query_as(
-            "SELECT * FROM plugin_kv WHERE mount_id = ? AND namespace = ? AND key = ?",
+            "SELECT * FROM plugin_mount_kv WHERE mount_id = ? AND namespace = ? AND key = ?",
         )
         .bind(&params.mount_id)
         .bind(&params.namespace)
@@ -2170,7 +2170,7 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
             return Err(conflict("plugin KV timestamp predates the Mount state"));
         }
         let deleted = sqlx::query(
-            "DELETE FROM plugin_kv
+            "DELETE FROM plugin_mount_kv
              WHERE mount_id = ? AND namespace = ? AND key = ?
                AND revision = ? AND updated_at <= ?",
         )
@@ -2185,7 +2185,7 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
         .rows_affected();
         if deleted == 0 {
             let current: Option<i64> = sqlx::query_scalar(
-                "SELECT revision FROM plugin_kv
+                "SELECT revision FROM plugin_mount_kv
                  WHERE mount_id = ? AND namespace = ? AND key = ?",
             )
             .bind(&params.mount_id)

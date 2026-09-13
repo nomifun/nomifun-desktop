@@ -533,7 +533,7 @@ mod tests {
             state_changing_tools_advertised: false,
             completion_adjudication: adjudicated.then(|| {
                 CompletionAdjudication::UnbackedStateChangeClaim {
-                    target: "miniapp.html".to_owned(),
+                    target: "plugin.html".to_owned(),
                 }
             }),
         }
@@ -560,7 +560,7 @@ mod tests {
         let failure = emit_terminal_turn_result(&sink, "turn-1", &completed_result(true))
             .expect_err("an adjudicated completion must fail");
 
-        assert!(failure.message.contains("miniapp.html"));
+        assert!(failure.message.contains("plugin.html"));
         assert_eq!(*sink.events.lock().unwrap(), vec!["error"]);
     }
 
@@ -645,7 +645,7 @@ mod tests {
         let emitter = RecordingEmitter::default();
         let mut result = completed_result(true);
         result.completion_adjudication = Some(CompletionAdjudication::HistoryRollbackFailed {
-            target: "miniapp.html".to_owned(),
+            target: "plugin.html".to_owned(),
         });
 
         assert!(emit_json_turn_result(&emitter, "turn-1", &result).unwrap());

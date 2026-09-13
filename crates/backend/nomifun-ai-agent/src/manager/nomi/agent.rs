@@ -1499,7 +1499,7 @@ impl NomiAgentManager {
                     conversation_id = %conversation_id,
                     tool_count = session.tool_count(),
                     plugin_tool_count = session.actions().len(),
-                    miniapp_tool_count = session.miniapp_actions().len(),
+                    plugin_product_tool_count = session.plugin_product_actions().len(),
                     "Registered exact Snapshot-bound hosted Tools"
                 );
         }
@@ -5790,7 +5790,7 @@ mod tests {
     #[tokio::test]
     async fn unbacked_file_completion_emits_metrics_then_one_error_and_never_finish() {
         let provider = Arc::new(ScriptedProvider::new(vec![vec![
-            LlmEvent::TextDelta("Created miniapp.html.".into()),
+            LlmEvent::TextDelta("Created plugin.html.".into()),
             LlmEvent::Done {
                 stop_reason: StopReason::EndTurn,
                 usage: nomi_types::message::TokenUsage {
@@ -5810,7 +5810,7 @@ mod tests {
 
         let error = agent
             .send_message(SendMessageData {
-                content: "Create miniapp.html.".into(),
+                content: "Create plugin.html.".into(),
                 msg_id: "msg-unbacked-completion".into(),
                 source_message_id: Some("root-unbacked-completion".into()),
                 files: Vec::new(),

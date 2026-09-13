@@ -237,7 +237,7 @@
     "identity": {
       "title": "Identity and source",
       "hint": "Product and Project are separate facts; a Release consumes only frozen Source and dependency lock inputs.",
-      "miniappId": "Plugin ID",
+      "pluginId": "Plugin ID",
       "projectId": "Project ID",
       "productRevision": "Product revision",
       "projectRevision": "Project revision",
@@ -337,7 +337,7 @@
         "remote": "Remote",
         "automation": "Automation",
         "ui": "UI",
-        "miniappService": "Plugin Service"
+        "pluginService": "Plugin Service"
       },
       "availability": {
         "active": "Available",

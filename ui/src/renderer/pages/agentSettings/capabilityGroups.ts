@@ -13,7 +13,7 @@ export function capabilityCategory(reference: CapabilityReference): CapabilityCa
   if (['fs', 'vcs', 'process', 'terminal', 'workspace', 'ssh'].includes(family)) return 'development';
   if (['web', 'browser', 'computer', 'a11y', 'citation'].includes(family)) return 'web';
   if (['agent', 'companion', 'channel', 'customer_service', 'robot'].includes(family)) return 'collaboration';
-  if (['creation', 'workshop', 'office', 'miniapp'].includes(family)) return 'creation';
+  if (['creation', 'workshop', 'office', 'plugin'].includes(family)) return 'creation';
   if (['requirements', 'autowork', 'schedule', 'idmm', 'notification', 'remote', 'ingress'].includes(family)) return 'automation';
   if (family === 'llm') return 'models';
   return 'integrations';

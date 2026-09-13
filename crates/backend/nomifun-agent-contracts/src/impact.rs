@@ -2,7 +2,7 @@
 //! the current formal contribution catalog.
 //!
 //! Matching is deliberately source-exact. A contribution with the same public
-//! ID from another Mount, MiniApp, MCP binding, or built-in source is reported
+//! ID from another Mount, Plugin Product, MCP binding, or built-in source is reported
 //! only as an ignored alternative and is never selected as a fallback.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -13,7 +13,7 @@ use thiserror::Error;
 
 use crate::{
     CanonicalErrorCode, ContributionId, ContributionLock, ContributionSourceKind, DigestHex,
-    McpBindingId, MiniAppId, PluginMountId, StableSourceIdentity, digest_payload,
+    McpBindingId, PluginProductId, PluginMountId, StableSourceIdentity, digest_payload,
 };
 
 #[derive(
@@ -43,9 +43,9 @@ pub enum CurrentContributionLifecycle {
         reason: String,
     },
     /// The current formal entry was published by a different Active Release
-    /// of the same MiniApp. Compatibility is still decided exclusively from
+    /// of the same Plugin Product. Compatibility is still decided exclusively from
     /// the frozen and current contract digests.
-    MiniAppActiveReleaseChanged {
+    PluginProductActiveReleaseChanged {
         release_id: String,
         release_digest: DigestHex,
     },
@@ -69,7 +69,7 @@ pub struct CurrentContribution {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mount_id: Option<PluginMountId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub miniapp_id: Option<MiniAppId>,
+    pub plugin_product_id: Option<PluginProductId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_binding_id: Option<McpBindingId>,
     pub contribution_id: ContributionId,
@@ -83,7 +83,7 @@ impl CurrentContribution {
             source_kind: self.source_kind,
             source_identity: self.source_identity.clone(),
             mount_id: self.mount_id.clone(),
-            miniapp_id: self.miniapp_id.clone(),
+            plugin_product_id: self.plugin_product_id.clone(),
             mcp_binding_id: self.mcp_binding_id.clone(),
             contribution_id: self.contribution_id.clone(),
             contract_digest: self.contract_digest.clone(),
@@ -108,15 +108,15 @@ impl CurrentContribution {
                 validate_non_empty(code.as_ref(), &self.contribution_id, "code")?;
                 validate_non_empty(reason, &self.contribution_id, "reason")?;
             }
-            CurrentContributionLifecycle::MiniAppActiveReleaseChanged {
+            CurrentContributionLifecycle::PluginProductActiveReleaseChanged {
                 release_id,
                 release_digest,
             } => {
-                if self.source_kind != ContributionSourceKind::MiniAppActiveRelease {
+                if self.source_kind != ContributionSourceKind::PluginProductActiveRelease {
                     return Err(RevisionImpactError::InvalidCurrentContribution {
                         contribution_id: self.contribution_id.clone(),
                         reason:
-                            "miniapp_active_release_changed requires a miniapp_active_release source"
+                            "plugin_product_active_release_changed requires a plugin_product_active_release source"
                                 .into(),
                     });
                 }
@@ -136,7 +136,7 @@ impl CurrentContribution {
             source_kind: self.source_kind,
             source_identity: self.source_identity.clone(),
             mount_id: self.mount_id.clone(),
-            miniapp_id: self.miniapp_id.clone(),
+            plugin_product_id: self.plugin_product_id.clone(),
             mcp_binding_id: self.mcp_binding_id.clone(),
             contribution_id: self.contribution_id.clone(),
         }
@@ -159,7 +159,7 @@ pub enum ContributionLifecycleImpact {
         reason: String,
     },
     Uninstalled,
-    MiniAppActiveReleaseChanged {
+    PluginProductActiveReleaseChanged {
         release_id: String,
         release_digest: DigestHex,
     },
@@ -360,10 +360,10 @@ fn compare_one(
                 reason: reason.clone(),
             }
         }
-        CurrentContributionLifecycle::MiniAppActiveReleaseChanged {
+        CurrentContributionLifecycle::PluginProductActiveReleaseChanged {
             release_id,
             release_digest,
-        } => ContributionLifecycleImpact::MiniAppActiveReleaseChanged {
+        } => ContributionLifecycleImpact::PluginProductActiveReleaseChanged {
             release_id: release_id.clone(),
             release_digest: release_digest.clone(),
         },
@@ -371,7 +371,7 @@ fn compare_one(
     let contract = if digest_matches {
         match current.lifecycle {
             CurrentContributionLifecycle::Replaced { .. }
-            | CurrentContributionLifecycle::MiniAppActiveReleaseChanged { .. } => {
+            | CurrentContributionLifecycle::PluginProductActiveReleaseChanged { .. } => {
                 ContributionContractImpact::Compatible
             }
             _ => ContributionContractImpact::Exact,
@@ -386,7 +386,7 @@ fn compare_one(
         current.lifecycle,
         CurrentContributionLifecycle::Active
             | CurrentContributionLifecycle::Replaced { .. }
-            | CurrentContributionLifecycle::MiniAppActiveReleaseChanged { .. }
+            | CurrentContributionLifecycle::PluginProductActiveReleaseChanged { .. }
     );
     let new_use = if lifecycle_ready && digest_matches {
         RevisionUseReadiness::Ready
@@ -451,7 +451,7 @@ fn summarize(contributions: &[ContributionImpact]) -> RevisionImpactSummary {
             ContributionLifecycleImpact::Disabled { .. } => summary.disabled += 1,
             ContributionLifecycleImpact::Unavailable { .. } => summary.unavailable += 1,
             ContributionLifecycleImpact::Uninstalled => summary.uninstalled += 1,
-            ContributionLifecycleImpact::MiniAppActiveReleaseChanged { .. } => {
+            ContributionLifecycleImpact::PluginProductActiveReleaseChanged { .. } => {
                 if impact.contract == ContributionContractImpact::Compatible {
                     summary.active_release_change_compatible += 1;
                 } else if matches!(
@@ -477,7 +477,7 @@ struct ContributionSourceKey {
     source_kind: ContributionSourceKind,
     source_identity: StableSourceIdentity,
     mount_id: Option<PluginMountId>,
-    miniapp_id: Option<MiniAppId>,
+    plugin_product_id: Option<PluginProductId>,
     mcp_binding_id: Option<McpBindingId>,
     contribution_id: ContributionId,
 }
@@ -487,7 +487,7 @@ fn source_key_for_lock(lock: &ContributionLock) -> ContributionSourceKey {
         source_kind: lock.source_kind,
         source_identity: lock.source_identity.clone(),
         mount_id: lock.mount_id.clone(),
-        miniapp_id: lock.miniapp_id.clone(),
+        plugin_product_id: lock.plugin_product_id.clone(),
         mcp_binding_id: lock.mcp_binding_id.clone(),
         contribution_id: lock.contribution_id.clone(),
     }
@@ -563,7 +563,7 @@ mod tests {
             source_kind: ContributionSourceKind::PluginMount,
             source_identity: StableSourceIdentity::from("plugin.example"),
             mount_id: Some(PluginMountId::from(mount)),
-            miniapp_id: None,
+            plugin_product_id: None,
             mcp_binding_id: None,
             contribution_id: ContributionId::from("capability:example.run"),
             contract_digest: digest(contract),
@@ -579,7 +579,7 @@ mod tests {
             source_kind: lock.source_kind,
             source_identity: lock.source_identity.clone(),
             mount_id: lock.mount_id.clone(),
-            miniapp_id: lock.miniapp_id.clone(),
+            plugin_product_id: lock.plugin_product_id.clone(),
             mcp_binding_id: lock.mcp_binding_id.clone(),
             contribution_id: lock.contribution_id.clone(),
             contract_digest: digest(contract),
@@ -670,18 +670,18 @@ mod tests {
     }
 
     #[test]
-    fn miniapp_active_release_change_is_compatible_or_breaking_without_mutating_lock() {
+    fn plugin_product_active_release_change_is_compatible_or_breaking_without_mutating_lock() {
         let lock = ContributionLock {
-            source_kind: ContributionSourceKind::MiniAppActiveRelease,
-            source_identity: StableSourceIdentity::from("miniapp.example"),
+            source_kind: ContributionSourceKind::PluginProductActiveRelease,
+            source_identity: StableSourceIdentity::from("plugin.example"),
             mount_id: None,
-            miniapp_id: Some(MiniAppId::from("miniapp-1")),
+            plugin_product_id: Some(PluginProductId::from("plugin-1")),
             mcp_binding_id: None,
-            contribution_id: ContributionId::from("capability:miniapp.run"),
+            contribution_id: ContributionId::from("capability:plugin.run"),
             contract_digest: digest('a'),
         };
         let original = lock.clone();
-        let lifecycle = CurrentContributionLifecycle::MiniAppActiveReleaseChanged {
+        let lifecycle = CurrentContributionLifecycle::PluginProductActiveReleaseChanged {
             release_id: "release-2".into(),
             release_digest: digest('2'),
         };

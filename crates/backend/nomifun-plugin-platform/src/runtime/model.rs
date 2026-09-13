@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use nomifun_agent_contracts::{
-    CredentialId, DigestHex, MiniAppDeletingIntent, MiniAppId, MiniAppProductLifecycleRecord,
-    MiniAppProductLifecycleState, MiniAppProjectId, MiniAppReadyRelease,
-    MiniAppReleaseArtifactV1, MiniAppReleasePointerState, MiniAppReleaseRef,
-    MiniAppServiceStorageDescriptor, MiniAppUiOnlyAutoPublishAuthorization, OperationId,
+    CredentialId, DigestHex, PluginProductDeletingIntent, PluginProductId, PluginProductLifecycleRecord,
+    PluginProductLifecycleState, PluginProjectId, PluginReadyRelease,
+    PluginReleaseArtifactV1, PluginReleasePointerState, PluginReleaseRef,
+    PluginServiceStorageDescriptor, PluginUiOnlyAutoPublishAuthorization, OperationId,
     StrictJsonValue, digest_payload,
 };
 use serde::{Deserialize, Serialize};
@@ -14,13 +14,18 @@ use crate::runtime::{
     PluginRuntimePlatformResult,
 };
 
-const EMPTY_CATALOG_DIGEST_SEED: &str = "miniapp-m1-empty-catalog";
+const EMPTY_CATALOG_DIGEST_SEED: &str = "plugin-m1-empty-catalog";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginRuntimeKind {
-    UiOnly,
-    Service,
+    Plugin,
+}
+
+impl PluginRuntimeKind {
+    pub const fn as_str(self) -> &'static str {
+        "plugin"
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,7 +38,7 @@ pub enum PluginRuntimeProjectSourceState {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginRuntimeProject {
-    pub project_id: MiniAppProjectId,
+    pub project_id: PluginProjectId,
     pub project_revision: u64,
     pub source_state: PluginRuntimeProjectSourceState,
     pub build_generation: u64,
@@ -42,7 +47,7 @@ pub struct PluginRuntimeProject {
 }
 
 impl PluginRuntimeProject {
-    pub fn empty(project_id: MiniAppProjectId) -> Self {
+    pub fn empty(project_id: PluginProjectId) -> Self {
         Self {
             project_id,
             project_revision: 1,
@@ -122,29 +127,29 @@ pub enum PluginRuntimeImportProvenance {
     Native,
     ShareBundle {
         bundle_digest: DigestHex,
-        source_miniapp_id: Option<MiniAppId>,
+        source_plugin_product_id: Option<PluginProductId>,
     },
     WholeAppBackup {
         metadata_digest: DigestHex,
-        source_miniapp_id: MiniAppId,
+        source_plugin_product_id: PluginProductId,
     },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StoredPluginRuntimeRelease {
-    pub miniapp_id: MiniAppId,
-    pub artifact: MiniAppReleaseArtifactV1,
-    pub ready: MiniAppReadyRelease,
+    pub plugin_product_id: PluginProductId,
+    pub artifact: PluginReleaseArtifactV1,
+    pub ready: PluginReadyRelease,
 }
 
 impl StoredPluginRuntimeRelease {
     pub fn new(
-        miniapp_id: MiniAppId,
-        artifact: MiniAppReleaseArtifactV1,
-        ready: MiniAppReadyRelease,
+        plugin_product_id: PluginProductId,
+        artifact: PluginReleaseArtifactV1,
+        ready: PluginReadyRelease,
     ) -> PluginRuntimePlatformResult<Self> {
         let value = Self {
-            miniapp_id,
+            plugin_product_id,
             artifact,
             ready,
         };
@@ -152,12 +157,12 @@ impl StoredPluginRuntimeRelease {
         Ok(value)
     }
 
-    pub fn release_ref(&self) -> &MiniAppReleaseRef {
+    pub fn release_ref(&self) -> &PluginReleaseRef {
         &self.ready.release
     }
 
     pub fn validate(&self) -> PluginRuntimePlatformResult<()> {
-        if self.ready.miniapp_id != self.miniapp_id {
+        if self.ready.plugin_product_id != self.plugin_product_id {
             return Err(PluginRuntimePlatformError::InvalidState(
                 "release provenance belongs to another Plugin".into(),
             ));
@@ -169,15 +174,15 @@ impl StoredPluginRuntimeRelease {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PluginRuntimeProduct {
-    pub miniapp_id: MiniAppId,
+    pub plugin_product_id: PluginProductId,
     pub product_revision: u64,
     pub display_name: String,
     pub description: Option<String>,
     pub icon_asset_id: Option<String>,
     pub kind: PluginRuntimeKind,
-    pub lifecycle: MiniAppProductLifecycleState,
-    pub pointers: MiniAppReleasePointerState,
-    pub auto_publish: Option<MiniAppUiOnlyAutoPublishAuthorization>,
+    pub lifecycle: PluginProductLifecycleState,
+    pub pointers: PluginReleasePointerState,
+    pub auto_publish: Option<PluginUiOnlyAutoPublishAuthorization>,
     pub updated_at_ms: i64,
 }
 
@@ -188,34 +193,34 @@ pub struct PluginRuntimeDataRoot {
     pub releases: BTreeMap<DigestHex, StoredPluginRuntimeRelease>,
     pub config: PluginRuntimeConfigState,
     pub credential_bindings: PluginRuntimeCredentialBindings,
-    pub storage: MiniAppServiceStorageDescriptor,
+    pub storage: PluginServiceStorageDescriptor,
     pub import_provenance: PluginRuntimeImportProvenance,
 }
 
 impl PluginRuntimeDataRoot {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        miniapp_id: MiniAppId,
-        project_id: MiniAppProjectId,
+        plugin_product_id: PluginProductId,
+        project_id: PluginProjectId,
         display_name: String,
         description: Option<String>,
         kind: PluginRuntimeKind,
-        storage: MiniAppServiceStorageDescriptor,
+        storage: PluginServiceStorageDescriptor,
         now_ms: i64,
     ) -> PluginRuntimePlatformResult<Self> {
         let empty_digest = digest_payload(&EMPTY_CATALOG_DIGEST_SEED)
             .map_err(|error| PluginRuntimePlatformError::InvalidState(error.to_string()))?;
         let value = Self {
             product: PluginRuntimeProduct {
-                miniapp_id: miniapp_id.clone(),
+                plugin_product_id: plugin_product_id.clone(),
                 product_revision: 1,
                 display_name,
                 description,
                 icon_asset_id: None,
                 kind,
-                lifecycle: MiniAppProductLifecycleState::Disabled,
-                pointers: MiniAppReleasePointerState {
-                    miniapp_id,
+                lifecycle: PluginProductLifecycleState::Disabled,
+                pointers: PluginReleasePointerState {
+                    plugin_product_id,
                     pointer_revision: 1,
                     active_release_epoch: 0,
                     ready_release: None,
@@ -249,7 +254,7 @@ impl PluginRuntimeDataRoot {
 
     pub fn validate_structure(&self) -> PluginRuntimePlatformResult<()> {
         let product = &self.product;
-        if product.miniapp_id.as_ref().trim().is_empty()
+        if product.plugin_product_id.as_ref().trim().is_empty()
             || product.product_revision == 0
             || product.display_name.trim().is_empty()
             || product.updated_at_ms <= 0
@@ -260,7 +265,7 @@ impl PluginRuntimeDataRoot {
         }
         self.project.validate()?;
         product.pointers.validate()?;
-        if product.pointers.miniapp_id != product.miniapp_id {
+        if product.pointers.plugin_product_id != product.plugin_product_id {
             return Err(PluginRuntimePlatformError::InvalidState(
                 "pointer state belongs to another Plugin".into(),
             ));
@@ -287,7 +292,7 @@ impl PluginRuntimeDataRoot {
         }
         if let Some(authorization) = &product.auto_publish
             && (authorization.authorization_id.as_ref().trim().is_empty()
-                || authorization.miniapp_id != product.miniapp_id
+                || authorization.plugin_product_id != product.plugin_product_id
                 || authorization.authorization_revision == 0
                 || authorization.user_authorized_at_ms <= 0)
         {
@@ -318,7 +323,7 @@ impl PluginRuntimeDataRoot {
 
         for (digest, release) in &self.releases {
             release.validate()?;
-            if release.miniapp_id != product.miniapp_id
+            if release.plugin_product_id != product.plugin_product_id
                 || digest != &release.artifact.artifact_digest
             {
                 return Err(PluginRuntimePlatformError::InvalidState(
@@ -337,7 +342,7 @@ impl PluginRuntimeDataRoot {
         }
         self.validate_pointer_targets()?;
 
-        if product.lifecycle == MiniAppProductLifecycleState::Enabled
+        if product.lifecycle == PluginProductLifecycleState::Enabled
             && product.pointers.active_release.is_none()
         {
             return Err(PluginRuntimePlatformError::InvalidState(
@@ -394,7 +399,7 @@ impl PluginRuntimeDataRoot {
     pub fn ensure_release_mutable(&self) -> PluginRuntimePlatformResult<()> {
         if matches!(
             self.product.lifecycle,
-            MiniAppProductLifecycleState::Trashed | MiniAppProductLifecycleState::Deleting
+            PluginProductLifecycleState::Trashed | PluginProductLifecycleState::Deleting
         ) {
             return Err(PluginRuntimePlatformError::LifecycleConflict(format!(
                 "{:?}",
@@ -411,7 +416,7 @@ impl PluginRuntimeDataRoot {
     ) -> PluginRuntimePlatformResult<()> {
         self.ensure_release_mutable()?;
         release.validate()?;
-        if release.miniapp_id != self.product.miniapp_id {
+        if release.plugin_product_id != self.product.plugin_product_id {
             return Err(PluginRuntimePlatformError::InvalidState(
                 "Ready Release belongs to another Plugin".into(),
             ));
@@ -438,7 +443,7 @@ impl PluginRuntimeDataRoot {
         self.product.pointers.pointer_revision =
             checked_increment(self.product.pointers.pointer_revision, "pointer revision")?;
         self.product.pointers.ready_release =
-            Some(nomifun_agent_contracts::MiniAppReadyReleaseRef::from(&release.ready));
+            Some(nomifun_agent_contracts::PluginReadyReleaseRef::from(&release.ready));
         self.releases.insert(digest, release);
         self.retain_pointer_releases();
         self.bump(now_ms)?;
@@ -447,11 +452,11 @@ impl PluginRuntimeDataRoot {
 
     pub(crate) fn apply_pointer_state(
         &mut self,
-        next: MiniAppReleasePointerState,
+        next: PluginReleasePointerState,
         now_ms: i64,
     ) -> PluginRuntimePlatformResult<()> {
         self.ensure_release_mutable()?;
-        if next.miniapp_id != self.product.miniapp_id {
+        if next.plugin_product_id != self.product.plugin_product_id {
             return Err(PluginRuntimePlatformError::InvalidState(
                 "next pointer state belongs to another Plugin".into(),
             ));
@@ -465,7 +470,7 @@ impl PluginRuntimeDataRoot {
 
     pub(crate) fn apply_lifecycle(
         &mut self,
-        lifecycle: MiniAppProductLifecycleState,
+        lifecycle: PluginProductLifecycleState,
         now_ms: i64,
     ) -> PluginRuntimePlatformResult<()> {
         self.product.lifecycle = lifecycle;
@@ -475,7 +480,7 @@ impl PluginRuntimeDataRoot {
 
     pub(crate) fn set_auto_publish(
         &mut self,
-        authorization: Option<MiniAppUiOnlyAutoPublishAuthorization>,
+        authorization: Option<PluginUiOnlyAutoPublishAuthorization>,
         now_ms: i64,
     ) -> PluginRuntimePlatformResult<()> {
         self.ensure_release_mutable()?;
@@ -485,9 +490,9 @@ impl PluginRuntimeDataRoot {
     }
 
     fn validate_storage(&self) -> PluginRuntimePlatformResult<()> {
-        let miniapp_id = &self.product.miniapp_id;
+        let plugin_product_id = &self.product.plugin_product_id;
         if self.storage.kv.handle_id.as_ref().trim().is_empty()
-            || self.storage.kv.miniapp_id != *miniapp_id
+            || self.storage.kv.plugin_product_id != *plugin_product_id
             || self.storage.kv.namespace_revision == 0
         {
             return Err(PluginRuntimePlatformError::InvalidState(
@@ -496,7 +501,7 @@ impl PluginRuntimeDataRoot {
         }
         if self.storage.files_dir.as_ref().is_some_and(|files| {
             files.handle_id.as_ref().trim().is_empty()
-                || files.miniapp_id != *miniapp_id
+                || files.plugin_product_id != *plugin_product_id
                 || files.absolute_path.trim().is_empty()
         }) {
             return Err(PluginRuntimePlatformError::InvalidState(
@@ -505,7 +510,7 @@ impl PluginRuntimeDataRoot {
         }
         if self.storage.private_database.as_ref().is_some_and(|database| {
             database.handle_id.as_ref().trim().is_empty()
-                || database.miniapp_id != *miniapp_id
+                || database.plugin_product_id != *plugin_product_id
                 || database.schema_epoch == 0
                 || !is_digest(&database.migration_ledger_digest)
         }) {
@@ -513,38 +518,22 @@ impl PluginRuntimeDataRoot {
                 "Private SQLite handle must be revisioned and owned by the Plugin".into(),
             ));
         }
-        if self.product.kind == PluginRuntimeKind::UiOnly
-            && (self.storage.files_dir.is_some() || self.storage.private_database.is_some())
-        {
-            return Err(PluginRuntimePlatformError::InvalidState(
-                "UI-only Plugin can own Host KV only".into(),
-            ));
-        }
         Ok(())
     }
 
     fn validate_release_shape(&self, release: &StoredPluginRuntimeRelease) -> PluginRuntimePlatformResult<()> {
         let service = release.artifact.manifest.payload.service.as_ref();
-        match (self.product.kind, service) {
-            (PluginRuntimeKind::UiOnly, None) => Ok(()),
-            (PluginRuntimeKind::UiOnly, Some(_)) => Err(PluginRuntimePlatformError::InvalidState(
-                "UI-only Plugin cannot stage a Service Release".into(),
-            )),
-            (PluginRuntimeKind::Service, None) => Err(PluginRuntimePlatformError::InvalidState(
-                "Service Plugin requires exactly one service/main.mjs".into(),
-            )),
-            (PluginRuntimeKind::Service, Some(service)) => {
-                if self.storage.files_dir.is_some() != service.uses_files
-                    || self.storage.private_database.is_some() != service.uses_private_database
-                {
-                    return Err(PluginRuntimePlatformError::InvalidState(
-                        "Service Release storage contract differs from the managed data root"
-                            .into(),
-                    ));
-                }
-                Ok(())
+        if let Some(service) = service {
+            if (service.uses_files && self.storage.files_dir.is_none())
+                || (service.uses_private_database && self.storage.private_database.is_none())
+            {
+                return Err(PluginRuntimePlatformError::InvalidState(
+                    "Service Release storage contract differs from the managed data root"
+                        .into(),
+                ));
             }
         }
+        Ok(())
     }
 
     fn validate_pointer_targets(&self) -> PluginRuntimePlatformResult<()> {
@@ -622,8 +611,8 @@ impl PluginRuntimeDataRoot {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginRuntimeCatalogRecord {
-    pub miniapp_id: MiniAppId,
-    pub active_release: MiniAppReleaseRef,
+    pub plugin_product_id: PluginProductId,
+    pub active_release: PluginReleaseRef,
     pub active_release_epoch: u64,
     pub catalog_digest: DigestHex,
 }
@@ -636,7 +625,7 @@ impl PluginRuntimeCatalogRecord {
             )
         })?;
         Ok(Self {
-            miniapp_id: root.product.miniapp_id.clone(),
+            plugin_product_id: root.product.plugin_product_id.clone(),
             active_release,
             active_release_epoch: root.product.pointers.active_release_epoch,
             catalog_digest: root
@@ -648,7 +637,7 @@ impl PluginRuntimeCatalogRecord {
     }
 
     fn validate_for(&self, root: &PluginRuntimeDataRoot) -> PluginRuntimePlatformResult<()> {
-        if self.miniapp_id != root.product.miniapp_id
+        if self.plugin_product_id != root.product.plugin_product_id
             || root.product.pointers.active_release.as_ref() != Some(&self.active_release)
             || self.active_release_epoch != root.product.pointers.active_release_epoch
             || self.catalog_digest != root.product.pointers.materialized_catalog_digest
@@ -663,14 +652,14 @@ impl PluginRuntimeCatalogRecord {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginRuntimeDeletionRecord {
-    pub intent: MiniAppDeletingIntent,
+    pub intent: PluginProductDeletingIntent,
     pub operation: DurablePluginRuntimeOperation,
 }
 
 impl PluginRuntimeDeletionRecord {
-    pub fn validate_for(&self, miniapp_id: &MiniAppId) -> PluginRuntimePlatformResult<()> {
-        if self.intent.miniapp_id != *miniapp_id
-            || self.operation.miniapp_id != *miniapp_id
+    pub fn validate_for(&self, plugin_product_id: &PluginProductId) -> PluginRuntimePlatformResult<()> {
+        if self.intent.plugin_product_id != *plugin_product_id
+            || self.operation.plugin_product_id != *plugin_product_id
             || self.intent.operation_id != self.operation.operation_id
             || self.operation.kind != PluginRuntimeOperationKind::PermanentDelete
             || self.operation.cancelable
@@ -703,14 +692,14 @@ impl PluginRuntimeRepositorySnapshot {
             catalog.validate_for(&self.root)?;
         }
         if let Some(deletion) = &self.deletion {
-            deletion.validate_for(&self.root.product.miniapp_id)?;
+            deletion.validate_for(&self.root.product.plugin_product_id)?;
         }
-        let lifecycle = MiniAppProductLifecycleRecord {
-            miniapp_id: self.root.product.miniapp_id.clone(),
+        let lifecycle = PluginProductLifecycleRecord {
+            plugin_product_id: self.root.product.plugin_product_id.clone(),
             state: self.root.product.lifecycle,
             pointer_state: self.root.product.pointers.clone(),
             surface_available: self.root.product.lifecycle
-                == MiniAppProductLifecycleState::Enabled,
+                == PluginProductLifecycleState::Enabled,
             catalog_published: self.catalog.is_some(),
             deleting_intent: self
                 .deletion
@@ -721,8 +710,8 @@ impl PluginRuntimeRepositorySnapshot {
         Ok(())
     }
 
-    pub fn miniapp_id(&self) -> &MiniAppId {
-        &self.root.product.miniapp_id
+    pub fn plugin_product_id(&self) -> &PluginProductId {
+        &self.root.product.plugin_product_id
     }
 }
 
@@ -748,26 +737,26 @@ fn is_digest(value: &DigestHex) -> bool {
 }
 
 pub(crate) fn new_delete_record(
-    miniapp_id: MiniAppId,
+    plugin_product_id: PluginProductId,
     operation_id: OperationId,
     now_ms: i64,
 ) -> PluginRuntimePlatformResult<PluginRuntimeDeletionRecord> {
     let operation = DurablePluginRuntimeOperation::running(
         operation_id.clone(),
-        miniapp_id.clone(),
+        plugin_product_id.clone(),
         PluginRuntimeOperationKind::PermanentDelete,
         false,
         now_ms,
     )?;
     let value = PluginRuntimeDeletionRecord {
-        intent: MiniAppDeletingIntent {
-            miniapp_id,
+        intent: PluginProductDeletingIntent {
+            plugin_product_id,
             operation_id,
             started_at_ms: now_ms,
             last_error: None,
         },
         operation,
     };
-    value.validate_for(&value.intent.miniapp_id)?;
+    value.validate_for(&value.intent.plugin_product_id)?;
     Ok(value)
 }

@@ -8,27 +8,27 @@ use nomifun_agent_contracts::{
     CapabilityCatalogMaterialization, CapabilityCatalogMaterializer,
     CapabilityCatalogPublication, CapabilityOwner, CapabilityProvenance,
     CapabilityConsumer, CapabilityReleaseState, CatalogAvailability,
-    ContributionSourceKind, MiniAppCapabilityCatalogPublication,
-    MiniAppCapabilityCatalogPublicationUpdate,
-    MiniAppCapabilityCatalogSink,
-    JavaScriptBuildProfile, LocalizedMetadata, MiniAppBridgeKvRequest,
-    MiniAppBridgeCallId, MiniAppBridgeRequest, MiniAppBridgeSession,
-    MiniAppBridgeSessionId,
-    MiniAppBridgeTarget, MiniAppId, MiniAppKvResponse,
-    MiniAppNonUiReleaseFingerprint, MiniAppProjectId,
-    MiniAppPublishAuthorization,
-    MiniAppPublishRequest as MiniAppPublishContract,
-    MiniAppPointerExpectation, MiniAppReadyOrigin, MiniAppReadyRelease,
-    MiniAppReadyReleaseRef, MiniAppReleaseId, MiniAppReleasePointerState,
-    MiniAppReleaseRef, MiniAppSourceLineage, OperationId,
-    MiniAppServiceLifecycle, MiniAppServiceStorageDescriptor, MiniAppSourceBundle,
-    MiniAppDatabaseHandleId,
-    MiniAppServiceTestOutcome, MiniAppServiceTestReceipt, MiniAppServiceTestReceiptId,
+    ContributionSourceKind, PluginProductCapabilityCatalogPublication,
+    PluginProductCapabilityCatalogPublicationUpdate,
+    PluginProductCapabilityCatalogSink,
+    JavaScriptBuildProfile, LocalizedMetadata, PluginBridgeKvRequest,
+    PluginBridgeCallId, PluginBridgeRequest, PluginBridgeSession,
+    PluginBridgeSessionId,
+    PluginBridgeTarget, PluginProductId, PluginKvResponse,
+    PluginNonUiReleaseFingerprint, PluginProjectId,
+    PluginPublishAuthorization,
+    PluginPublishRequest as PluginPublishContract,
+    PluginPointerExpectation, PluginReadyOrigin, PluginReadyRelease,
+    PluginReadyReleaseRef, PluginReleaseId, PluginReleasePointerState,
+    PluginReleaseRef, PluginReleaseSourceLineage, OperationId,
+    PluginServiceLifecycle, PluginServiceStorageDescriptor, PluginSourceBundle,
+    PluginDatabaseHandleId,
+    PluginServiceTestOutcome, PluginServiceTestReceipt, PluginServiceTestReceiptId,
     CredentialSlotDeclaration, PackageContributions, PackageId, PackageRef, StrictJsonValue,
-    MiniAppSurfaceSessionId, MiniAppUiOnlyAutoPublishAuthorization,
-    MiniAppUiOnlyAutoPublishProof, MiniAppUserAuthorizationId, VersionString,
-    MiniAppBridgeTransport, MINIAPP_BRIDGE_CONTRACT_VERSION,
-    MINIAPP_RELEASE_PROFILE_VERSION, MINIAPP_SERVICE_HOST_PROTOCOL_VERSION,
+    PluginSurfaceSessionId, PluginUiOnlyAutoPublishAuthorization,
+    PluginUiOnlyAutoPublishProof, PluginUserAuthorizationId, VersionString,
+    PluginBridgeTransport, PLUGIN_BRIDGE_CONTRACT_VERSION,
+    PLUGIN_RELEASE_PROFILE_VERSION, PLUGIN_SERVICE_HOST_PROTOCOL_VERSION,
 };
 use nomifun_api_types::{
     BuildPluginRuntimeRequest, CapabilityCatalogItemDto, CatalogMaterializationStateDto,
@@ -43,41 +43,41 @@ use nomifun_api_types::{
     DeletePluginRuntimeRequest, ImportPluginRuntimeArtifactRequest, ImportPluginRuntimeShareRequest,
     PluginRuntimeShareContentDto, PluginRuntimeWorkshopDto, PluginConfigSchemaDto, PluginConfigStateDto,
     ExportPluginRuntimeBackupRequest, ImportPluginRuntimeBackupRequest,
-    PublishPluginRuntimeRequest as PublishMiniAppRequestDto, RestorePluginRuntimeRequest,
+    PublishPluginRuntimeRequest as PublishPluginRequestDto, RestorePluginRuntimeRequest,
     RetryPluginRuntimeDeleteRequest, RetryPluginRuntimeServiceRequest,
-    RollbackPluginRuntimeRequest as RollbackMiniAppRequestDto,
+    RollbackPluginRuntimeRequest as RollbackPluginRequestDto,
     SetPluginRuntimeEnabledRequest, SetPluginRuntimePublishModeRequest,
     SetPluginRuntimeServiceRunningRequest, SharePluginRuntimeRequest, TestPluginRuntimeReleaseRequest,
     TrashPluginRuntimeRequest, ReplacePluginRuntimeSourceFileRequest,
 };
 use nomifun_db::{
-    AbortMiniAppSourceMutationParams, BeginMiniAppM1ImportAsNewParams,
-    BeginMiniAppSourceMutationParams, CancelMiniAppM1BuildOperationParams,
-    CloseMiniAppM1SurfaceSessionParams,
-    CreateMiniAppM1Params, CreateMiniAppM1WithSourceParams,
-    ExecuteMiniAppM1SurfaceKvParams,
-    FailMiniAppM1ExportOperationParams, FailMiniAppM1ImportParams,
-    FinalizeMiniAppSourceMutationParams, FinishMiniAppM1BuildAndRecordReadyParams,
-    FinishMiniAppM1BuildOperationParams,
-    FinishMiniAppM1ExportOperationParams, FinishMiniAppM1ImportReadyParams,
-    FinishMiniAppM1BackupImportParams, MiniAppM1BackupExportSnapshot,
-    MiniAppM1BackupImportRelease, MiniAppM1BackupReleaseSlot, MiniAppKvRow,
-    IMiniAppM1Repository, MiniAppM1AutoPublishGuard, MiniAppM1ImportSource, MiniAppM1Kind,
-    MiniAppM1ManagedSourceLineage, MiniAppM1Snapshot, MiniAppM1SurfaceKvOperation,
-    MiniAppM1SurfaceKvResult, MiniAppProductRow,
-    MiniAppReleaseArtifactRow, MiniAppReleaseRow, MiniAppSurfaceSessionRow,
-    MiniAppServiceTestReceiptRow, MiniAppSourceMutationIntentRow,
-    OpenMiniAppM1SurfaceSessionParams,
-    ProductOperationRow, ProductOperationState, PublishMiniAppM1ReadyParams,
-    RecordMiniAppM1ServiceTestReceiptParams,
-    ResolveMiniAppM1SurfaceSessionParams, RollbackMiniAppM1PreviousParams,
-    SetMiniAppM1AutoPublishParams,
-    BeginMiniAppM1DeleteParams, CommitMiniAppM1LifecycleParams,
-    FailMiniAppM1DeleteParams, FinalizeMiniAppM1DeleteParams,
-    RestartMiniAppM1DeleteParams, RestoreMiniAppM1Params,
-    StartMiniAppM1BuildOperationParams, StartMiniAppM1ExportOperationParams,
-    StartMiniAppM1BackupExportParams,
-    TrashMiniAppM1Params,
+    AbortPluginSourceMutationParams, BeginPluginRuntimeImportAsNewParams,
+    BeginPluginSourceMutationParams, CancelPluginRuntimeBuildOperationParams,
+    ClosePluginRuntimeSurfaceSessionParams,
+    CreatePluginRuntimeParams, CreatePluginRuntimeWithSourceParams,
+    ExecutePluginRuntimeSurfaceKvParams,
+    FailPluginRuntimeExportOperationParams, FailPluginRuntimeImportParams,
+    FinalizePluginSourceMutationParams, FinishPluginRuntimeBuildAndRecordReadyParams,
+    FinishPluginRuntimeBuildOperationParams,
+    FinishPluginRuntimeExportOperationParams, FinishPluginRuntimeImportReadyParams,
+    FinishPluginRuntimeBackupImportParams, PluginRuntimeBackupExportSnapshot,
+    PluginRuntimeBackupImportRelease, PluginRuntimeBackupReleaseSlot, PluginRuntimeKvRow,
+    IPluginRuntimeRepository, PluginRuntimeAutoPublishGuard, PluginRuntimeImportSource, PluginRuntimeKind,
+    PluginRuntimeManagedSourceLineage, PluginRuntimeSnapshot, PluginRuntimeSurfaceKvOperation,
+    PluginRuntimeSurfaceKvResult, PluginRuntimeProductRow,
+    PluginRuntimeReleaseArtifactRow, PluginRuntimeReleaseRow, PluginRuntimeSurfaceSessionRow,
+    PluginRuntimeServiceTestReceiptRow, PluginRuntimeSourceMutationIntentRow,
+    OpenPluginRuntimeSurfaceSessionParams,
+    ProductOperationRow, ProductOperationState, PublishPluginRuntimeReadyParams,
+    RecordPluginRuntimeServiceTestReceiptParams,
+    ResolvePluginRuntimeSurfaceSessionParams, RollbackPluginRuntimePreviousParams,
+    SetPluginRuntimeAutoPublishParams,
+    BeginPluginRuntimeDeleteParams, CommitPluginRuntimeLifecycleParams,
+    FailPluginRuntimeDeleteParams, FinalizePluginRuntimeDeleteParams,
+    RestartPluginRuntimeDeleteParams, RestorePluginRuntimeParams,
+    StartPluginRuntimeBuildOperationParams, StartPluginRuntimeExportOperationParams,
+    StartPluginRuntimeBackupExportParams,
+    TrashPluginRuntimeParams,
 };
 use nomifun_js_runtime::ResolvedNodeRuntime;
 use serde::Serialize;
@@ -107,7 +107,7 @@ use crate::runtime::{
 };
 
 #[derive(Debug, Error)]
-pub enum PluginRuntimeM1ApplicationError {
+pub enum PluginRuntimeApplicationError {
     #[error("Plugin input is invalid: {0}")]
     Invalid(String),
     #[error("Plugin runtime failed: {0}")]
@@ -127,15 +127,15 @@ pub struct PluginRuntimeSurfaceAsset {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PluginRuntimeAgentCapabilityInvocation {
     pub owner_user_id: String,
-    pub miniapp_id: MiniAppId,
+    pub plugin_product_id: PluginProductId,
     pub capability: nomifun_agent_contracts::CapabilityRef,
     pub action_id: nomifun_agent_contracts::ActionId,
     pub action_allowlist: BTreeSet<nomifun_agent_contracts::ActionId>,
-    pub active_release: MiniAppReleaseRef,
+    pub active_release: PluginReleaseRef,
     pub active_release_epoch: u64,
     pub catalog_digest: DigestHex,
     pub operation_id: OperationId,
-    pub call_id: MiniAppBridgeCallId,
+    pub call_id: PluginBridgeCallId,
     pub payload: StrictJsonValue,
 }
 
@@ -144,13 +144,13 @@ pub trait PluginRuntimeAgentCapabilityPort: Send + Sync {
     async fn invoke_agent_capability(
         &self,
         request: PluginRuntimeAgentCapabilityInvocation,
-    ) -> Result<StrictJsonValue, PluginRuntimeM1ApplicationError>;
+    ) -> Result<StrictJsonValue, PluginRuntimeApplicationError>;
 }
 
 #[derive(Clone, Debug, Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BackupProductMetadata {
-    miniapp_id: String,
+    plugin_product_id: String,
     product_revision: i64,
     display_name: String,
     description: Option<String>,
@@ -187,7 +187,7 @@ struct BackupReleaseMetadata {
 #[derive(Clone, Debug, Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BackupProjectMetadata {
-    miniapp_id: String,
+    plugin_product_id: String,
     project_id: String,
     project_revision: i64,
     source_state: String,
@@ -230,33 +230,33 @@ struct PreparedApplicationBackup {
 }
 
 #[derive(Clone)]
-struct PluginRuntimeM1Stores {
+struct PluginRuntimeStores {
     source: Arc<PluginRuntimeSourceStore>,
     release: Arc<PluginRuntimeReleaseStore>,
 }
 
 #[derive(Clone)]
-pub struct PluginRuntimeM1ApplicationService {
-    repository: Arc<dyn IMiniAppM1Repository>,
-    stores: PluginRuntimeM1Stores,
+pub struct PluginRuntimeApplicationService {
+    repository: Arc<dyn IPluginRuntimeRepository>,
+    stores: PluginRuntimeStores,
     source_mutation_lock: Arc<Mutex<()>>,
     service_runtime: Arc<RwLock<Arc<dyn PluginRuntimeServiceRuntimeBinding>>>,
-    catalog_sink: Arc<RwLock<Option<Arc<dyn MiniAppCapabilityCatalogSink>>>>,
+    catalog_sink: Arc<RwLock<Option<Arc<dyn PluginProductCapabilityCatalogSink>>>>,
 }
 
-impl std::fmt::Debug for PluginRuntimeM1ApplicationService {
+impl std::fmt::Debug for PluginRuntimeApplicationService {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("PluginRuntimeM1ApplicationService")
+            .debug_struct("PluginRuntimeApplicationService")
             .finish_non_exhaustive()
     }
 }
 
-impl PluginRuntimeM1ApplicationService {
+impl PluginRuntimeApplicationService {
     pub fn new_with_root(
-        repository: Arc<dyn IMiniAppM1Repository>,
+        repository: Arc<dyn IPluginRuntimeRepository>,
         root: impl AsRef<Path>,
-    ) -> Result<Self, PluginRuntimeM1ApplicationError> {
+    ) -> Result<Self, PluginRuntimeApplicationError> {
         let root = root.as_ref().to_path_buf();
         let source = Arc::new(
             PluginRuntimeSourceStore::new(root.join("source"))
@@ -270,10 +270,10 @@ impl PluginRuntimeM1ApplicationService {
     }
 
     pub fn new_with_stores(
-        repository: Arc<dyn IMiniAppM1Repository>,
+        repository: Arc<dyn IPluginRuntimeRepository>,
         source: Arc<PluginRuntimeSourceStore>,
         release: Arc<PluginRuntimeReleaseStore>,
-    ) -> Result<Self, PluginRuntimeM1ApplicationError> {
+    ) -> Result<Self, PluginRuntimeApplicationError> {
         source
             .cleanup_failed_staging()
             .map_err(|error| store_error("Source Store cleanup", error))?;
@@ -282,7 +282,7 @@ impl PluginRuntimeM1ApplicationService {
             .map_err(|error| store_error("Release Store cleanup", error))?;
         Ok(Self {
             repository,
-            stores: PluginRuntimeM1Stores { source, release },
+            stores: PluginRuntimeStores { source, release },
             source_mutation_lock: Arc::new(Mutex::new(())),
             service_runtime: Arc::new(RwLock::new(Arc::new(NoopPluginRuntimeServiceRuntime))),
             catalog_sink: Arc::new(RwLock::new(None)),
@@ -298,12 +298,12 @@ impl PluginRuntimeM1ApplicationService {
 
     pub async fn install_catalog_sink(
         &self,
-        sink: Arc<dyn MiniAppCapabilityCatalogSink>,
+        sink: Arc<dyn PluginProductCapabilityCatalogSink>,
     ) {
         *self.catalog_sink.write().await = Some(sink);
     }
 
-    async fn catalog_sink(&self) -> Option<Arc<dyn MiniAppCapabilityCatalogSink>> {
+    async fn catalog_sink(&self) -> Option<Arc<dyn PluginProductCapabilityCatalogSink>> {
         self.catalog_sink.read().await.clone()
     }
 
@@ -313,12 +313,12 @@ impl PluginRuntimeM1ApplicationService {
     pub async fn hydrate_catalog_publications(
         &self,
         owner_user_id: &str,
-    ) -> Result<(), PluginRuntimeM1ApplicationError> {
+    ) -> Result<(), PluginRuntimeApplicationError> {
         let library = self.repository.library(owner_user_id).await?;
         for product in library.products {
             if let Some(snapshot) = self
                 .repository
-                .get(owner_user_id, &product.miniapp_id)
+                .get(owner_user_id, &product.plugin_product_id)
                 .await?
             {
                 self.sync_catalog_publication(owner_user_id, &snapshot)
@@ -331,16 +331,16 @@ impl PluginRuntimeM1ApplicationService {
     async fn sync_catalog_publication(
         &self,
         owner_user_id: &str,
-        snapshot: &MiniAppM1Snapshot,
-    ) -> Result<(), PluginRuntimeM1ApplicationError> {
+        snapshot: &PluginRuntimeSnapshot,
+    ) -> Result<(), PluginRuntimeApplicationError> {
         let Some(sink) = self.catalog_sink().await else {
             return Ok(());
         };
-        let miniapp_id = MiniAppId::from(snapshot.product.miniapp_id.clone());
+        let plugin_product_id = PluginProductId::from(snapshot.product.plugin_product_id.clone());
         let publication = self.catalog_publication_for_snapshot(owner_user_id, snapshot)?;
-        let update = MiniAppCapabilityCatalogPublicationUpdate {
+        let update = PluginProductCapabilityCatalogPublicationUpdate {
             owner_user_id: owner_user_id.to_owned().into(),
-            miniapp_id,
+            plugin_product_id,
             product_revision: positive_u64(
                 snapshot.product.product_revision,
                 "Plugin product revision",
@@ -355,15 +355,15 @@ impl PluginRuntimeM1ApplicationService {
             )?,
             publication,
         };
-        sink.replace_miniapp_publication(update)
-            .map_err(PluginRuntimeM1ApplicationError::Invalid)
+        sink.replace_plugin_product_publication(update)
+            .map_err(PluginRuntimeApplicationError::Invalid)
     }
 
     fn catalog_publication_for_snapshot(
         &self,
         owner_user_id: &str,
-        snapshot: &MiniAppM1Snapshot,
-    ) -> Result<Option<MiniAppCapabilityCatalogPublication>, PluginRuntimeM1ApplicationError> {
+        snapshot: &PluginRuntimeSnapshot,
+    ) -> Result<Option<PluginProductCapabilityCatalogPublication>, PluginRuntimeApplicationError> {
         if snapshot.product.lifecycle != "enabled" {
             return Ok(None);
         }
@@ -371,7 +371,7 @@ impl PluginRuntimeM1ApplicationService {
             .active_release
             .as_ref()
             .ok_or_else(|| {
-                PluginRuntimeM1ApplicationError::Invalid(
+                PluginRuntimeApplicationError::Invalid(
                     "enabled Plugin has no Active Release for Catalog publication".into(),
                 )
             })?;
@@ -380,8 +380,8 @@ impl PluginRuntimeM1ApplicationService {
             &snapshot.project.project_id,
             active,
         )?;
-        let mut publication = build_miniapp_catalog_publication(
-            MiniAppId::from(snapshot.product.miniapp_id.clone()),
+        let mut publication = build_plugin_catalog_publication(
+            PluginProductId::from(snapshot.product.plugin_product_id.clone()),
             release_contract_ref(active),
             &stored.artifact.manifest.payload.contributions,
         )?;
@@ -392,14 +392,14 @@ impl PluginRuntimeM1ApplicationService {
         if publication.catalog_digest.as_ref()
             != snapshot.product.materialized_catalog_digest.as_str()
         {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
+            return Err(PluginRuntimeApplicationError::Invalid(
                 "Plugin Product Catalog digest does not match the materialized publication"
                     .into(),
             ));
         }
         publication
             .validate()
-            .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
+            .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
         Ok(Some(publication))
     }
 
@@ -407,57 +407,80 @@ impl PluginRuntimeM1ApplicationService {
         self.service_runtime.read().await.clone()
     }
 
-    /// Resolve one exact input/output schema owned by a frozen MiniApp
+    /// Resolve one exact input/output schema owned by a frozen Plugin
     /// capability projection. The lookup is intentionally application-owned:
-    /// MiniApp releases are not Kernel Plugin artifacts and their schema bytes
+    /// Plugin releases are not Kernel Plugin artifacts and their schema bytes
     /// must remain behind the owner-scoped Release Store boundary.
     pub async fn resolve_agent_capability_schema(
         &self,
         owner_user_id: &str,
-        capability: &nomifun_agent_contracts::ResolvedMiniAppCapability,
+        capability: &nomifun_agent_contracts::ResolvedCapability,
         reference: &nomifun_agent_contracts::CanonicalSchemaRef,
-    ) -> Result<StrictJsonValue, PluginRuntimeM1ApplicationError> {
+    ) -> Result<StrictJsonValue, PluginRuntimeApplicationError> {
         validate_request_identity(owner_user_id, "owner_user_id")?;
         capability
             .validate()
-            .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.message))?;
+            .map_err(|error| PluginRuntimeApplicationError::Invalid(error.message))?;
+        let plugin_product_id = capability
+            .plugin_product_id
+            .as_ref()
+            .ok_or_else(|| {
+                PluginRuntimeApplicationError::Invalid(
+                    "Plugin Product capability is missing plugin_product_id".into(),
+                )
+            })?;
+        let active_release = capability.active_release.as_ref().ok_or_else(|| {
+            PluginRuntimeApplicationError::Invalid(
+                "Plugin Product capability is missing active_release".into(),
+            )
+        })?;
+        let active_release_epoch = capability.active_release_epoch.ok_or_else(|| {
+            PluginRuntimeApplicationError::Invalid(
+                "Plugin Product capability is missing active_release_epoch".into(),
+            )
+        })?;
+        let catalog_digest = capability.catalog_digest.as_ref().ok_or_else(|| {
+            PluginRuntimeApplicationError::Invalid(
+                "Plugin Product capability is missing catalog_digest".into(),
+            )
+        })?;
         let snapshot = self
             .repository
-            .get(owner_user_id, capability.miniapp_id.as_ref())
+            .get(owner_user_id, plugin_product_id.as_ref())
             .await?
-            .ok_or(PluginRuntimeM1ApplicationError::NotFound)?;
+            .ok_or(PluginRuntimeApplicationError::NotFound)?;
         if snapshot.product.lifecycle != "enabled"
             || snapshot.product.active_release_epoch
-                != i64::try_from(capability.active_release_epoch).map_err(|_| {
-                    PluginRuntimeM1ApplicationError::Invalid(
+                != i64::try_from(active_release_epoch).map_err(|_| {
+                    PluginRuntimeApplicationError::Invalid(
                         "Active Release epoch exceeds SQLite range".into(),
                     )
                 })?
             || snapshot.active_release.as_ref().is_none_or(|release| {
-                release_contract_ref(release) != capability.active_release
+                release_contract_ref(release) != *active_release
             })
-            || snapshot.product.materialized_catalog_digest != capability.catalog_digest.as_ref()
+            || snapshot.product.materialized_catalog_digest != catalog_digest.as_ref()
         {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
+            return Err(PluginRuntimeApplicationError::Invalid(
                 "Plugin Agent schema request is stale against the Active Release".into(),
             ));
         }
         let active = snapshot
             .active_release
             .as_ref()
-            .ok_or_else(|| PluginRuntimeM1ApplicationError::Invalid("no Active Release".into()))?;
+            .ok_or_else(|| PluginRuntimeApplicationError::Invalid("no Active Release".into()))?;
         let stored = self.load_verified_release(
             owner_user_id,
             &snapshot.project.project_id,
             active,
         )?;
-        let publication = build_miniapp_catalog_publication(
-            capability.miniapp_id.clone(),
-            capability.active_release.clone(),
+        let publication = build_plugin_catalog_publication(
+            plugin_product_id.clone(),
+            active_release.clone(),
             &stored.artifact.manifest.payload.contributions,
         )?;
-        if publication.catalog_digest != capability.catalog_digest {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
+        if publication.catalog_digest != *catalog_digest {
+            return Err(PluginRuntimeApplicationError::Invalid(
                 "Plugin Agent schema request has a stale Catalog publication".into(),
             ));
         }
@@ -466,7 +489,7 @@ impl PluginRuntimeM1ApplicationService {
             .iter()
             .find(|item| item.entry.capability == capability.capability)
             .ok_or_else(|| {
-                PluginRuntimeM1ApplicationError::Invalid(
+                PluginRuntimeApplicationError::Invalid(
                     "Plugin Agent schema capability is not in the Active Release".into(),
                 )
             })?;
@@ -478,11 +501,11 @@ impl PluginRuntimeM1ApplicationService {
             || published
                 .entry
                 .operation_lock(CapabilityConsumer::Agent)
-                .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?
+                .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?
                 .contribution
                 != capability.contribution_lock
         {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
+            return Err(PluginRuntimeApplicationError::Invalid(
                 "Plugin Agent schema capability provenance drifted".into(),
             ));
         }
@@ -495,7 +518,7 @@ impl PluginRuntimeM1ApplicationService {
                         || capability.action_allowlist.contains(&action.action_id))
             })
         {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
+            return Err(PluginRuntimeApplicationError::Invalid(
                 "Plugin Agent schema ref is not declared by the frozen action allowlist".into(),
             ));
         }
@@ -507,7 +530,7 @@ impl PluginRuntimeM1ApplicationService {
             .get(reference)
             .cloned()
             .ok_or_else(|| {
-                PluginRuntimeM1ApplicationError::Invalid(format!(
+                PluginRuntimeApplicationError::Invalid(format!(
                     "Plugin Release is missing canonical schema {}",
                     reference.as_ref()
                 ))
@@ -517,62 +540,62 @@ impl PluginRuntimeM1ApplicationService {
     async fn invoke_agent_capability_inner(
         &self,
         request: PluginRuntimeAgentCapabilityInvocation,
-    ) -> Result<StrictJsonValue, PluginRuntimeM1ApplicationError> {
+    ) -> Result<StrictJsonValue, PluginRuntimeApplicationError> {
         validate_request_identity(request.owner_user_id.as_str(), "owner_user_id")?;
-        validate_request_identity(request.miniapp_id.as_ref(), "miniapp_id")?;
+        validate_request_identity(request.plugin_product_id.as_ref(), "plugin_product_id")?;
         request
             .active_release
             .validate()
-            .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
+            .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
         validate_digest_string(request.catalog_digest.as_ref(), "catalog digest")?;
         if request.active_release_epoch == 0 {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
+            return Err(PluginRuntimeApplicationError::Invalid(
                 "Agent capability invocation requires a positive Active Release epoch".into(),
             ));
         }
 
         let snapshot = self
             .repository
-            .get(&request.owner_user_id, request.miniapp_id.as_ref())
+            .get(&request.owner_user_id, request.plugin_product_id.as_ref())
             .await?
-            .ok_or(PluginRuntimeM1ApplicationError::NotFound)?;
+            .ok_or(PluginRuntimeApplicationError::NotFound)?;
         if snapshot.product.lifecycle != "enabled"
             || snapshot.active_release.as_ref().is_none_or(|active| {
                 release_contract_ref(active) != request.active_release
             })
             || snapshot.product.active_release_epoch
                 != i64::try_from(request.active_release_epoch).map_err(|_| {
-                    PluginRuntimeM1ApplicationError::Invalid(
+                    PluginRuntimeApplicationError::Invalid(
                         "Active Release epoch exceeds SQLite range".into(),
                     )
                 })?
         {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
+            return Err(PluginRuntimeApplicationError::Invalid(
                 "Plugin Agent capability invocation is stale against the Active Release"
                     .into(),
             ));
         }
         if snapshot.product.materialized_catalog_digest != request.catalog_digest.as_ref() {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
+            return Err(PluginRuntimeApplicationError::Invalid(
                 "Plugin Agent capability invocation has a stale Catalog digest".into(),
             ));
         }
         let active = snapshot
             .active_release
             .as_ref()
-            .ok_or_else(|| PluginRuntimeM1ApplicationError::Invalid("no Active Release".into()))?;
+            .ok_or_else(|| PluginRuntimeApplicationError::Invalid("no Active Release".into()))?;
         let stored = self.load_verified_release(
             &request.owner_user_id,
             &snapshot.project.project_id,
             active,
         )?;
-        let publication = build_miniapp_catalog_publication(
-            request.miniapp_id.clone(),
+        let publication = build_plugin_catalog_publication(
+            request.plugin_product_id.clone(),
             request.active_release.clone(),
             &stored.artifact.manifest.payload.contributions,
         )?;
         if publication.catalog_digest != request.catalog_digest {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
+            return Err(PluginRuntimeApplicationError::Invalid(
                 "Plugin Agent capability invocation publication digest is invalid".into(),
             ));
         }
@@ -581,7 +604,7 @@ impl PluginRuntimeM1ApplicationService {
             .iter()
             .find(|capability| capability.entry.capability == request.capability)
             .ok_or_else(|| {
-                PluginRuntimeM1ApplicationError::Invalid(
+                PluginRuntimeApplicationError::Invalid(
                     "Plugin Agent capability is not in the Active Release".into(),
                 )
             })?;
@@ -589,15 +612,15 @@ impl PluginRuntimeM1ApplicationService {
             .manifest
             .supports_consumer(CapabilityConsumer::Agent)
         {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
+            return Err(PluginRuntimeApplicationError::Invalid(
                 "Plugin capability does not support the Agent consumer".into(),
             ));
         }
         if !capability
             .manifest
-            .supports_consumer(CapabilityConsumer::MiniAppService)
+            .supports_consumer(CapabilityConsumer::PluginService)
         {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
+            return Err(PluginRuntimeApplicationError::Invalid(
                 "Plugin capability does not support the Plugin Service consumer".into(),
             ));
         }
@@ -607,7 +630,7 @@ impl PluginRuntimeM1ApplicationService {
             .resource_kinds
             .is_empty()
         {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
+            return Err(PluginRuntimeApplicationError::Invalid(
                 "CAPABILITY_RESOURCE_BINDING_UNAVAILABLE".into(),
             ));
         }
@@ -618,14 +641,14 @@ impl PluginRuntimeM1ApplicationService {
             .iter()
             .any(|action| action.action_id == request.action_id)
         {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
+            return Err(PluginRuntimeApplicationError::Invalid(
                 "CAPABILITY_ACTION_NOT_DECLARED".into(),
             ));
         }
         if !request.action_allowlist.is_empty()
             && !request.action_allowlist.contains(&request.action_id)
         {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
+            return Err(PluginRuntimeApplicationError::Invalid(
                 "CAPABILITY_ACTION_NOT_ALLOWED".into(),
             ));
         }
@@ -638,7 +661,7 @@ impl PluginRuntimeM1ApplicationService {
             )
             .await?
             .ok_or_else(|| {
-                PluginRuntimeM1ApplicationError::Invalid(
+                PluginRuntimeApplicationError::Invalid(
                     "Plugin Agent capability requires an Active Service".into(),
                 )
             })?;
@@ -653,16 +676,16 @@ impl PluginRuntimeM1ApplicationService {
                 positive_now_ms(),
             )
             .await
-            .map_err(|error| PluginRuntimeM1ApplicationError::Runtime(error.to_string()))
+            .map_err(|error| PluginRuntimeApplicationError::Runtime(error.to_string()))
     }
 
     async fn resolve_service_spec(
         &self,
-        snapshot: &MiniAppM1Snapshot,
-        release: &MiniAppReleaseRow,
+        snapshot: &PluginRuntimeSnapshot,
+        release: &PluginRuntimeReleaseRow,
         active_release_epoch: u64,
         owner_user_id: &str,
-    ) -> Result<Option<nomifun_agent_contracts::ResolvedMiniAppServiceSpec>, PluginRuntimeM1ApplicationError>
+    ) -> Result<Option<nomifun_agent_contracts::ResolvedPluginServiceSpec>, PluginRuntimeApplicationError>
     {
         self.resolve_service_spec_with_storage(
             snapshot,
@@ -676,12 +699,12 @@ impl PluginRuntimeM1ApplicationService {
 
     async fn resolve_service_spec_with_storage(
         &self,
-        snapshot: &MiniAppM1Snapshot,
-        release: &MiniAppReleaseRow,
+        snapshot: &PluginRuntimeSnapshot,
+        release: &PluginRuntimeReleaseRow,
         active_release_epoch: u64,
         owner_user_id: &str,
-        storage_override: Option<MiniAppServiceStorageDescriptor>,
-    ) -> Result<Option<nomifun_agent_contracts::ResolvedMiniAppServiceSpec>, PluginRuntimeM1ApplicationError>
+        storage_override: Option<PluginServiceStorageDescriptor>,
+    ) -> Result<Option<nomifun_agent_contracts::ResolvedPluginServiceSpec>, PluginRuntimeApplicationError>
     {
         let stored = self.load_verified_release(
             owner_user_id,
@@ -692,24 +715,24 @@ impl PluginRuntimeM1ApplicationService {
             return Ok(None);
         };
         let config: Value = serde_json::from_str(&snapshot.product.config_json)
-            .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
+            .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
         let runtime = self.service_runtime().await;
         let storage = match storage_override {
             Some(storage) => storage,
             None => runtime
                 .resolve_storage(
                     owner_user_id,
-                    &MiniAppId::from(snapshot.product.miniapp_id.clone()),
+                    &PluginProductId::from(snapshot.product.plugin_product_id.clone()),
                     descriptor.uses_files,
                     descriptor.uses_private_database,
                 )
                 .await
-                .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?
+                .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?
                 .descriptor,
         };
         runtime
             .register_module(
-                MiniAppId::from(snapshot.product.miniapp_id.clone()),
+                PluginProductId::from(snapshot.product.plugin_product_id.clone()),
                 DigestHex::from(release.release_digest.clone()),
                 stored
                     .artifact_root
@@ -718,16 +741,16 @@ impl PluginRuntimeM1ApplicationService {
                     .join("main.mjs"),
             )
             .await
-            .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
+            .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
         let spec = runtime
             .resolve_spec(PluginRuntimeServiceSpecInput {
-                miniapp_id: MiniAppId::from(snapshot.product.miniapp_id.clone()),
+                plugin_product_id: PluginProductId::from(snapshot.product.plugin_product_id.clone()),
                 release: release_contract_ref(release),
                 active_release_epoch,
                 descriptor: descriptor.clone(),
                 config_schema_digest: stored.artifact.manifest.payload.config_schema_digest.clone(),
                 config_snapshot_digest: digest_payload(&config)
-                    .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?,
+                    .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?,
                 credential_slots_digest: stored
                     .artifact
                     .manifest
@@ -741,7 +764,7 @@ impl PluginRuntimeM1ApplicationService {
                     .resource_contract_digest
                     .clone(),
                 resource_bindings_digest: digest_payload(&BTreeMap::<String, String>::new())
-                .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?,
+                .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?,
                 bridge_contract_digest: stored
                     .artifact
                     .manifest
@@ -753,31 +776,80 @@ impl PluginRuntimeM1ApplicationService {
                     .manifest
                     .payload
                     .contribution_set_digest()
-                .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?,
+                .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?,
                 storage,
             })
             .await
-            .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
+            .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
         Ok(Some(spec))
+    }
+
+    fn release_service_descriptor(
+        &self,
+        owner_user_id: &str,
+        project_id: &str,
+        release: &PluginRuntimeReleaseRow,
+    ) -> Result<
+        Option<nomifun_agent_contracts::PluginServiceReleaseDescriptor>,
+        PluginRuntimeApplicationError,
+    > {
+        Ok(self
+            .load_verified_release(owner_user_id, project_id, release)?
+            .artifact
+            .manifest
+            .payload
+            .service
+            .clone())
+    }
+
+    fn snapshot_active_service_descriptor(
+        &self,
+        snapshot: &PluginRuntimeSnapshot,
+    ) -> Result<
+        Option<nomifun_agent_contracts::PluginServiceReleaseDescriptor>,
+        PluginRuntimeApplicationError,
+    > {
+        let Some(active) = snapshot.active_release.as_ref() else {
+            return Ok(None);
+        };
+        self.release_service_descriptor(
+            &snapshot.product.owner_user_id,
+            &snapshot.project.project_id,
+            active,
+        )
     }
 
     async fn reconcile_service_runtime(
         &self,
         owner_user_id: &str,
-        snapshot: &MiniAppM1Snapshot,
-    ) -> Result<(), PluginRuntimeM1ApplicationError> {
+        snapshot: &PluginRuntimeSnapshot,
+    ) -> Result<(), PluginRuntimeApplicationError> {
         let Some(active) = snapshot.active_release.as_ref() else {
             return Ok(());
         };
-        if snapshot.product.kind != MiniAppM1Kind::Service.as_str() {
+        let runtime = self.service_runtime().await;
+        if self
+            .release_service_descriptor(
+                owner_user_id,
+                &snapshot.project.project_id,
+                active,
+            )?
+            .is_none()
+        {
+            // A unified Plugin may stop exposing its Service role in a later
+            // Release.  The persisted product kind cannot be used to decide
+            // whether a host belongs to this Release.
+            runtime
+                .stop(&PluginProductId::from(snapshot.product.plugin_product_id.clone()))
+                .await
+                .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
             return Ok(());
         }
-        let runtime = self.service_runtime().await;
         if snapshot.product.lifecycle != "enabled" {
             runtime
-                .stop(&MiniAppId::from(snapshot.product.miniapp_id.clone()))
+                .stop(&PluginProductId::from(snapshot.product.plugin_product_id.clone()))
                 .await
-                .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
+                .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
             return Ok(());
         }
         let spec = self
@@ -785,7 +857,7 @@ impl PluginRuntimeM1ApplicationService {
                 snapshot,
                 active,
                 u64::try_from(snapshot.product.active_release_epoch).map_err(|_| {
-                    PluginRuntimeM1ApplicationError::Invalid(
+                    PluginRuntimeApplicationError::Invalid(
                         "Plugin active release epoch is negative".into(),
                     )
                 })?,
@@ -793,59 +865,73 @@ impl PluginRuntimeM1ApplicationService {
             )
             .await?
             .ok_or_else(|| {
-                PluginRuntimeM1ApplicationError::Invalid(
+                PluginRuntimeApplicationError::Invalid(
                     "Service Active Release has no Service descriptor".into(),
                 )
             })?;
         runtime
             .bind_active(spec, true)
             .await
-            .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))
+            .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))
     }
 
     async fn prepare_service_cutover(
         &self,
         owner_user_id: &str,
-        snapshot: &MiniAppM1Snapshot,
-        target_release: &MiniAppReleaseRow,
+        snapshot: &PluginRuntimeSnapshot,
+        target_release: &PluginRuntimeReleaseRow,
         target_active_release_epoch: u64,
         apply_migrations: bool,
     ) -> Result<
         (
-            Option<nomifun_agent_contracts::ResolvedMiniAppServiceSpec>,
-            Option<nomifun_agent_contracts::ResolvedMiniAppServiceSpec>,
+            Option<nomifun_agent_contracts::ResolvedPluginServiceSpec>,
+            Option<nomifun_agent_contracts::ResolvedPluginServiceSpec>,
         ),
-        PluginRuntimeM1ApplicationError,
+        PluginRuntimeApplicationError,
     > {
-        if snapshot.product.kind != MiniAppM1Kind::Service.as_str() {
-            return Ok((None, None));
-        }
         let runtime = self.service_runtime().await;
-        let miniapp_id = MiniAppId::from(snapshot.product.miniapp_id.clone());
-        let mut current = if snapshot.product.lifecycle == "enabled" {
-            let active = snapshot.active_release.as_ref().ok_or_else(|| {
-                PluginRuntimeM1ApplicationError::Invalid(
-                    "enabled Service Plugin has no Active Release".into(),
+        let plugin_product_id = PluginProductId::from(snapshot.product.plugin_product_id.clone());
+        let current_has_service = snapshot
+            .active_release
+            .as_ref()
+            .map(|release| {
+                self.release_service_descriptor(
+                    owner_user_id,
+                    &snapshot.project.project_id,
+                    release,
                 )
-            })?;
-            Some(
-                self.resolve_service_spec(
-                    snapshot,
-                    active,
-                    u64::try_from(snapshot.product.active_release_epoch).map_err(|_| {
-                        PluginRuntimeM1ApplicationError::Invalid(
-                            "Plugin active release epoch is negative".into(),
+            })
+            .transpose()?
+            .flatten()
+            .is_some();
+        let mut current = if snapshot.product.lifecycle == "enabled" {
+            if current_has_service {
+                let active = snapshot.active_release.as_ref().ok_or_else(|| {
+                    PluginRuntimeApplicationError::Invalid(
+                        "enabled Plugin with a Service role has no Active Release".into(),
+                    )
+                })?;
+                Some(
+                    self.resolve_service_spec(
+                        snapshot,
+                        active,
+                        u64::try_from(snapshot.product.active_release_epoch).map_err(|_| {
+                            PluginRuntimeApplicationError::Invalid(
+                                "Plugin active release epoch is negative".into(),
+                            )
+                        })?,
+                        owner_user_id,
+                    )
+                    .await?
+                    .ok_or_else(|| {
+                        PluginRuntimeApplicationError::Invalid(
+                            "Active Release Service descriptor disappeared".into(),
                         )
                     })?,
-                    owner_user_id,
                 )
-                .await?
-                .ok_or_else(|| {
-                    PluginRuntimeM1ApplicationError::Invalid(
-                        "Active Service Release has no Service descriptor".into(),
-                    )
-                })?,
-            )
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -859,59 +945,71 @@ impl PluginRuntimeM1ApplicationService {
             .manifest
             .payload
             .service
-            .clone()
-            .ok_or_else(|| {
-                PluginRuntimeM1ApplicationError::Invalid(
-                    "target Service Release has no Service descriptor".into(),
-                )
-            })?;
-        let target_storage = runtime
-            .resolve_storage(
-                owner_user_id,
-                &miniapp_id,
-                target_descriptor.uses_files,
-                target_descriptor.uses_private_database,
-            )
-            .await
-            .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
-        let mut target = if snapshot.product.lifecycle == "enabled" {
+            .clone();
+        let target_storage = if let Some(descriptor) = target_descriptor.as_ref() {
             Some(
-                self.resolve_service_spec(
-                    snapshot,
-                    target_release,
-                    target_active_release_epoch,
-                    owner_user_id,
-                )
-                .await?
-                .ok_or_else(|| {
-                    PluginRuntimeM1ApplicationError::Invalid(
-                        "target Service Release has no Service descriptor".into(),
+                runtime
+                    .resolve_storage(
+                        owner_user_id,
+                        &plugin_product_id,
+                        descriptor.uses_files,
+                        descriptor.uses_private_database,
                     )
-                })?,
+                    .await
+                    .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?,
             )
         } else {
             None
         };
-        runtime
-            .stop(&miniapp_id)
-            .await
-            .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
+        let mut target = if snapshot.product.lifecycle == "enabled" {
+            if target_descriptor.is_some() {
+                Some(
+                    self.resolve_service_spec(
+                        snapshot,
+                        target_release,
+                        target_active_release_epoch,
+                        owner_user_id,
+                    )
+                    .await?
+                    .ok_or_else(|| {
+                        PluginRuntimeApplicationError::Invalid(
+                            "target Release Service descriptor disappeared".into(),
+                        )
+                    })?,
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if current_has_service || target_descriptor.is_some() {
+            runtime
+                .stop(&plugin_product_id)
+                .await
+                .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
+        }
         let migrations = target_stored.artifact.manifest.payload.migrations.clone();
-        if apply_migrations && !migrations.is_empty() {
+        if apply_migrations && target_descriptor.is_some() && !migrations.is_empty() {
             let database = target_storage
+                .as_ref()
+                .expect("target Service storage was resolved")
                 .descriptor
                 .private_database
                 .as_ref()
                 .ok_or_else(|| {
-                    PluginRuntimeM1ApplicationError::Invalid(
+                    PluginRuntimeApplicationError::Invalid(
                         "Service migrations require the target Private Database".into(),
                     )
                 })?;
             if let Err(error) = runtime
                 .apply_storage_migrations(
                     owner_user_id,
-                    &miniapp_id,
-                    &target_storage.descriptor,
+                    &plugin_product_id,
+                    &target_storage
+                        .as_ref()
+                        .expect("target Service storage was resolved")
+                        .descriptor,
                     &database.migration_ledger_digest,
                     &release_contract_ref(target_release),
                     &migrations,
@@ -927,14 +1025,14 @@ impl PluginRuntimeM1ApplicationService {
                     )
                     .await?;
                 }
-                return Err(PluginRuntimeM1ApplicationError::Invalid(format!(
+                return Err(PluginRuntimeApplicationError::Invalid(format!(
                     "Service migration failed before Publish commit: {error}"
                 )));
             }
             if current.is_some() {
                 let active = snapshot.active_release.as_ref().ok_or_else(|| {
-                    PluginRuntimeM1ApplicationError::Invalid(
-                        "enabled Service has no Active Release while restoring its storage"
+                    PluginRuntimeApplicationError::Invalid(
+                        "enabled Plugin has no Active Release while restoring its Service storage"
                             .into(),
                     )
                 })?;
@@ -943,7 +1041,7 @@ impl PluginRuntimeM1ApplicationService {
                         snapshot,
                         active,
                         u64::try_from(snapshot.product.active_release_epoch).map_err(|_| {
-                            PluginRuntimeM1ApplicationError::Invalid(
+                            PluginRuntimeApplicationError::Invalid(
                                 "Plugin active release epoch is negative".into(),
                             )
                         })?,
@@ -959,7 +1057,7 @@ impl PluginRuntimeM1ApplicationService {
                             "current Service descriptor disappeared after migration",
                         )
                         .await?;
-                        return Err(PluginRuntimeM1ApplicationError::Invalid(
+                        return Err(PluginRuntimeApplicationError::Invalid(
                             "current Service Release has no Service descriptor after migration"
                                 .into(),
                         ));
@@ -993,11 +1091,11 @@ impl PluginRuntimeM1ApplicationService {
                             self.restore_current_service(
                                 owner_user_id,
                                 snapshot,
-                                "target Service storage migrated but target descriptor disappeared",
+                            "target Service storage migrated but target descriptor disappeared",
                             )
                             .await?;
                         }
-                        return Err(PluginRuntimeM1ApplicationError::Invalid(
+                        return Err(PluginRuntimeApplicationError::Invalid(
                             "target Service Release has no Service descriptor after migration"
                                 .into(),
                         ));
@@ -1026,7 +1124,7 @@ impl PluginRuntimeM1ApplicationService {
                     )
                     .await?;
                 }
-                return Err(PluginRuntimeM1ApplicationError::Invalid(format!(
+                return Err(PluginRuntimeApplicationError::Invalid(format!(
                     "target Service failed readiness before Release commit: {error}"
                 )));
             }
@@ -1037,9 +1135,9 @@ impl PluginRuntimeM1ApplicationService {
     async fn restore_service_after_failed_cutover(
         &self,
         owner_user_id: &str,
-        snapshot: &MiniAppM1Snapshot,
-        current: Option<nomifun_agent_contracts::ResolvedMiniAppServiceSpec>,
-    ) -> Result<(), PluginRuntimeM1ApplicationError> {
+        snapshot: &PluginRuntimeSnapshot,
+        current: Option<nomifun_agent_contracts::ResolvedPluginServiceSpec>,
+    ) -> Result<(), PluginRuntimeApplicationError> {
         let Some(current) = current else {
             return Ok(());
         };
@@ -1055,11 +1153,11 @@ impl PluginRuntimeM1ApplicationService {
     async fn restore_current_service(
         &self,
         owner_user_id: &str,
-        snapshot: &MiniAppM1Snapshot,
+        snapshot: &PluginRuntimeSnapshot,
         reason: &str,
-    ) -> Result<(), PluginRuntimeM1ApplicationError> {
+    ) -> Result<(), PluginRuntimeApplicationError> {
         let active = snapshot.active_release.as_ref().ok_or_else(|| {
-            PluginRuntimeM1ApplicationError::Invalid(
+            PluginRuntimeApplicationError::Invalid(
                 "cannot restore a Service without its current Active Release".into(),
             )
         })?;
@@ -1068,7 +1166,7 @@ impl PluginRuntimeM1ApplicationService {
                 snapshot,
                 active,
                 u64::try_from(snapshot.product.active_release_epoch).map_err(|_| {
-                    PluginRuntimeM1ApplicationError::Invalid(
+                    PluginRuntimeApplicationError::Invalid(
                         "Plugin active release epoch is negative".into(),
                     )
                 })?,
@@ -1076,7 +1174,7 @@ impl PluginRuntimeM1ApplicationService {
             )
             .await?
             .ok_or_else(|| {
-                PluginRuntimeM1ApplicationError::Invalid(
+                PluginRuntimeApplicationError::Invalid(
                     "current Active Release has no Service descriptor".into(),
                 )
             })?;
@@ -1084,45 +1182,44 @@ impl PluginRuntimeM1ApplicationService {
             .await
             .bind_active(current, true)
             .await
-            .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(format!(
+            .map_err(|error| PluginRuntimeApplicationError::Invalid(format!(
                 "{reason}; restoring the previous Service failed for {}: {error}",
-                snapshot.product.miniapp_id
+                snapshot.product.plugin_product_id
             )))
     }
 
     async fn complete_service_cutover(
         &self,
-        committed: &MiniAppM1Snapshot,
-        target: Option<nomifun_agent_contracts::ResolvedMiniAppServiceSpec>,
-    ) -> Result<(), PluginRuntimeM1ApplicationError> {
+        committed: &PluginRuntimeSnapshot,
+        target: Option<nomifun_agent_contracts::ResolvedPluginServiceSpec>,
+    ) -> Result<(), PluginRuntimeApplicationError> {
         let runtime = self.service_runtime().await;
-        if committed.product.kind != MiniAppM1Kind::Service.as_str()
-            || committed.product.lifecycle != "enabled"
-        {
+        if committed.product.lifecycle != "enabled" {
             runtime
-                .stop(&MiniAppId::from(committed.product.miniapp_id.clone()))
+                .stop(&PluginProductId::from(committed.product.plugin_product_id.clone()))
                 .await
-                .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
+                .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
             return Ok(());
         }
-        let target = target.ok_or_else(|| {
-            PluginRuntimeM1ApplicationError::Invalid(
-                "committed enabled Service has no resolved target spec".into(),
-            )
-        })?;
-        runtime
-            .bind_active(target, true)
-            .await
-            .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(format!(
-                "Service Release committed but Host reconciliation failed: {error}"
-            )))
+        match target {
+            Some(target) => runtime
+                .bind_active(target, true)
+                .await
+                .map_err(|error| PluginRuntimeApplicationError::Invalid(format!(
+                    "Plugin Service Release committed but Host reconciliation failed: {error}"
+                ))),
+            None => runtime
+                .stop(&PluginProductId::from(committed.product.plugin_product_id.clone()))
+                .await
+                .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string())),
+        }
     }
 
     async fn service_observation(
         &self,
-        snapshot: &MiniAppM1Snapshot,
-    ) -> Result<Option<PluginRuntimeServiceObservation>, PluginRuntimeM1ApplicationError> {
-        if snapshot.product.kind != MiniAppM1Kind::Service.as_str() {
+        snapshot: &PluginRuntimeSnapshot,
+    ) -> Result<Option<PluginRuntimeServiceObservation>, PluginRuntimeApplicationError> {
+        if self.snapshot_active_service_descriptor(snapshot)?.is_none() {
             return Ok(None);
         }
         let Some(active) = snapshot.active_release.as_ref() else {
@@ -1132,7 +1229,7 @@ impl PluginRuntimeM1ApplicationService {
         let state = self
             .service_runtime()
             .await
-            .state(&MiniAppId::from(snapshot.product.miniapp_id.clone()))
+            .state(&PluginProductId::from(snapshot.product.plugin_product_id.clone()))
             .await;
         Ok(Some(match state {
             Some(crate::runtime::PluginRuntimeServiceHostState::Starting { .. }) => {
@@ -1159,8 +1256,8 @@ impl PluginRuntimeM1ApplicationService {
 
     async fn summary_projection(
         &self,
-        snapshot: &MiniAppM1Snapshot,
-    ) -> Result<PluginRuntimeSummaryDto, PluginRuntimeM1ApplicationError> {
+        snapshot: &PluginRuntimeSnapshot,
+    ) -> Result<PluginRuntimeSummaryDto, PluginRuntimeApplicationError> {
         let observation = self.service_observation(snapshot).await?;
         let mut summary = summary_from_snapshot_with_observation(
             snapshot,
@@ -1172,7 +1269,13 @@ impl PluginRuntimeM1ApplicationService {
         Ok(summary)
     }
 
-    fn snapshot_features(&self, snapshot: &MiniAppM1Snapshot) -> Result<(bool, u32), PluginRuntimeM1ApplicationError> {
+    fn release_has_service(&self, snapshot: &PluginRuntimeSnapshot, release: Option<&PluginRuntimeReleaseRow>) -> Result<bool, PluginRuntimeApplicationError> {
+        let Some(release) = release else { return Ok(false); };
+        let stored = self.load_verified_release(&snapshot.product.owner_user_id, &snapshot.project.project_id, release)?;
+        Ok(stored.artifact.manifest.payload.service.is_some())
+    }
+
+    fn snapshot_features(&self, snapshot: &PluginRuntimeSnapshot) -> Result<(bool, u32), PluginRuntimeApplicationError> {
         let Some(active) = &snapshot.active_release else { return Ok((false, 0)); };
         let stored = self.load_verified_release(&snapshot.product.owner_user_id, &snapshot.project.project_id, active)?;
         Ok((stored.artifact.manifest.payload.ui.is_some(), stored.artifact.manifest.payload.contributions.capabilities.len() as u32))
@@ -1181,15 +1284,15 @@ impl PluginRuntimeM1ApplicationService {
     async fn workshop_projection(
         &self,
         owner_user_id: &str,
-        snapshot: &MiniAppM1Snapshot,
+        snapshot: &PluginRuntimeSnapshot,
         active_operation: Option<DurableOperationSummaryDto>,
-    ) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeM1ApplicationError> {
+    ) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeApplicationError> {
         let active_operation = match active_operation {
             Some(operation) => Some(operation),
             None => {
-                self.latest_miniapp_operation(
+                self.latest_plugin_operation(
                     owner_user_id,
-                    &snapshot.product.miniapp_id,
+                    &snapshot.product.plugin_product_id,
                 )
                 .await?
             }
@@ -1198,15 +1301,15 @@ impl PluginRuntimeM1ApplicationService {
         let mut workshop =
             workshop_from_snapshot_with_observation(snapshot, active_operation, observation.as_ref())?;
         let (has_surface, contribution_count) = self.snapshot_features(snapshot)?;
-        workshop.miniapp.surface_available &= has_surface;
-        workshop.miniapp.contribution_count = contribution_count;
+        workshop.plugin.surface_available &= has_surface;
+        workshop.plugin.contribution_count = contribution_count;
         if let Some(publication) =
             self.catalog_publication_for_snapshot(owner_user_id, snapshot)?
         {
             workshop.capabilities = publication
                 .capabilities
                 .iter()
-                .map(miniapp_capability_catalog_item)
+                .map(plugin_capability_catalog_item)
                 .collect::<Result<Vec<_>, _>>()?;
         }
         if let Some(ready) = snapshot.ready_release.as_ref() {
@@ -1216,20 +1319,20 @@ impl PluginRuntimeM1ApplicationService {
                 ready,
             )?;
             if let Some(service) = stored.artifact.manifest.payload.service.as_ref() {
-                let ready_record: MiniAppReadyRelease =
+                let ready_record: PluginReadyRelease =
                     serde_json::from_str(&ready.release_record_json).map_err(|error| {
-                        PluginRuntimeM1ApplicationError::Runtime(format!(
+                        PluginRuntimeApplicationError::Runtime(format!(
                             "stored Ready Release record is invalid: {error}"
                         ))
                     })?;
                 ready_record
                     .validate_for_artifact(&stored.artifact)
-                    .map_err(|error| PluginRuntimeM1ApplicationError::Runtime(error.to_string()))?;
+                    .map_err(|error| PluginRuntimeApplicationError::Runtime(error.to_string()))?;
                 let receipt = self
                     .repository
                     .get_ready_service_test_receipt(
                         owner_user_id,
-                        &snapshot.product.miniapp_id,
+                        &snapshot.product.plugin_product_id,
                     )
                     .await?;
                 let test = self
@@ -1263,6 +1366,7 @@ impl PluginRuntimeM1ApplicationService {
                 ready_projection.migration_count =
                     stored.artifact.manifest.payload.migrations.len() as u32;
                 ready_projection.can_publish = true;
+                ready_projection.can_auto_publish = false;
                 ready_projection.blocking_reasons = blocking_reasons;
             }
         }
@@ -1279,8 +1383,8 @@ impl PluginRuntimeM1ApplicationService {
                 .service
                 .as_ref()
                 .map(|service| match service.lifecycle {
-                    MiniAppServiceLifecycle::OnDemand => PluginRuntimeServiceLifecycleDto::OnDemand,
-                    MiniAppServiceLifecycle::Continuous => PluginRuntimeServiceLifecycleDto::Continuous,
+                    PluginServiceLifecycle::OnDemand => PluginRuntimeServiceLifecycleDto::OnDemand,
+                    PluginServiceLifecycle::Continuous => PluginRuntimeServiceLifecycleDto::Continuous,
                 })
         } else {
             None
@@ -1313,10 +1417,10 @@ impl PluginRuntimeM1ApplicationService {
 
     async fn service_test_projection(
         &self,
-        ready: &MiniAppReleaseRow,
-        reference: Option<&nomifun_agent_contracts::MiniAppServiceTestReceiptRef>,
-        row: Option<&MiniAppServiceTestReceiptRow>,
-    ) -> Result<PluginRuntimeReleaseTestDto, PluginRuntimeM1ApplicationError> {
+        ready: &PluginRuntimeReleaseRow,
+        reference: Option<&nomifun_agent_contracts::PluginServiceTestReceiptRef>,
+        row: Option<&PluginRuntimeServiceTestReceiptRow>,
+    ) -> Result<PluginRuntimeReleaseTestDto, PluginRuntimeApplicationError> {
         let mut projection = PluginRuntimeReleaseTestDto {
             status: PluginRuntimeTestStatusDto::NotRun,
             release_id: ready.release_id.clone(),
@@ -1333,9 +1437,9 @@ impl PluginRuntimeM1ApplicationService {
             }
             return Ok(projection);
         };
-        let receipt: MiniAppServiceTestReceipt =
+        let receipt: PluginServiceTestReceipt =
             serde_json::from_str(&row.receipt_json).map_err(|error| {
-                PluginRuntimeM1ApplicationError::Runtime(format!(
+                PluginRuntimeApplicationError::Runtime(format!(
                     "stored Service Test receipt is invalid: {error}"
                 ))
             })?;
@@ -1345,13 +1449,13 @@ impl PluginRuntimeM1ApplicationService {
             .current_runtime_fingerprint()
             .await
             .map_err(|error| {
-                PluginRuntimeM1ApplicationError::Runtime(format!(
+                PluginRuntimeApplicationError::Runtime(format!(
                     "cannot resolve current Runtime for Service Test receipt: {error}"
                 ))
             })?;
         let runtime_matches = match current_runtime {
             Some(runtime) => digest_payload(&runtime)
-                .map_err(|error| PluginRuntimeM1ApplicationError::Runtime(error.to_string()))?
+                .map_err(|error| PluginRuntimeApplicationError::Runtime(error.to_string()))?
                 .as_ref()
                 == row.runtime_fingerprint_digest,
             None => false,
@@ -1364,9 +1468,9 @@ impl PluginRuntimeM1ApplicationService {
             PluginRuntimeTestStatusDto::Stale
         } else {
             match receipt.outcome {
-                MiniAppServiceTestOutcome::Passed => PluginRuntimeTestStatusDto::Passed,
-                MiniAppServiceTestOutcome::Failed => PluginRuntimeTestStatusDto::Failed,
-                MiniAppServiceTestOutcome::NeedsTestInput => {
+                PluginServiceTestOutcome::Passed => PluginRuntimeTestStatusDto::Passed,
+                PluginServiceTestOutcome::Failed => PluginRuntimeTestStatusDto::Failed,
+                PluginServiceTestOutcome::NeedsTestInput => {
                     PluginRuntimeTestStatusDto::NeedsTestInput
                 }
             }
@@ -1377,46 +1481,46 @@ impl PluginRuntimeM1ApplicationService {
     pub async fn library(
         &self,
         owner_user_id: &str,
-    ) -> Result<PluginRuntimeLibraryResponseDto, PluginRuntimeM1ApplicationError> {
+    ) -> Result<PluginRuntimeLibraryResponseDto, PluginRuntimeApplicationError> {
         self.reconcile_source_mutations().await?;
         let library = self.repository.library(owner_user_id).await?;
-        let mut miniapps = Vec::with_capacity(library.products.len());
+        let mut plugins = Vec::with_capacity(library.products.len());
         for product in &library.products {
             let snapshot = self
                 .repository
-                .get(owner_user_id, &product.miniapp_id)
+                .get(owner_user_id, &product.plugin_product_id)
                 .await?
                 .ok_or_else(|| {
-                    PluginRuntimeM1ApplicationError::Invalid(format!(
+                    PluginRuntimeApplicationError::Invalid(format!(
                         "Plugin {} disappeared from its owner-scoped Library",
-                        product.miniapp_id
+                        product.plugin_product_id
                     ))
                 })?;
-            miniapps.push(self.summary_projection(&snapshot).await?);
+            plugins.push(self.summary_projection(&snapshot).await?);
         }
         Ok(PluginRuntimeLibraryResponseDto {
             library_revision: nonnegative_u64(
                 library.library.revision,
                 "Plugin library revision",
             )?,
-            miniapps,
+            plugins,
         })
     }
 
     pub async fn source_file(
         &self,
         owner_user_id: &str,
-        miniapp_id: &str,
+        plugin_product_id: &str,
         path: &str,
-    ) -> Result<PluginRuntimeSourceFileDto, PluginRuntimeM1ApplicationError> {
+    ) -> Result<PluginRuntimeSourceFileDto, PluginRuntimeApplicationError> {
         self.reconcile_source_mutations().await?;
         let snapshot = self
             .repository
-            .get(owner_user_id, miniapp_id)
+            .get(owner_user_id, plugin_product_id)
             .await?
-            .ok_or(PluginRuntimeM1ApplicationError::NotFound)?;
+            .ok_or(PluginRuntimeApplicationError::NotFound)?;
         if snapshot.project.source_state != "editable" {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
+            return Err(PluginRuntimeApplicationError::Invalid(
                 "Plugin Project Source is not editable".into(),
             ));
         }
@@ -1425,21 +1529,21 @@ impl PluginRuntimeM1ApplicationService {
             .source
             .current_snapshot(
                 owner_user_id,
-                miniapp_id,
+                plugin_product_id,
                 &snapshot.project.project_id,
             )
             .map_err(|error| store_error("Source Store", error))?;
         require_source_matches_project(&source, &snapshot)?;
         let content = source.file(path).ok_or_else(|| {
-            PluginRuntimeM1ApplicationError::NotFound
+            PluginRuntimeApplicationError::NotFound
         })?;
         let content = String::from_utf8(content.to_vec()).map_err(|_| {
-            PluginRuntimeM1ApplicationError::Invalid(
+            PluginRuntimeApplicationError::Invalid(
                 "Plugin Source editor supports UTF-8 text files only".into(),
             )
         })?;
         Ok(PluginRuntimeSourceFileDto {
-            miniapp_id: miniapp_id.to_owned(),
+            plugin_id: plugin_product_id.to_owned(),
             project_id: snapshot.project.project_id,
             path: path.to_owned(),
             content,
@@ -1452,14 +1556,14 @@ impl PluginRuntimeM1ApplicationService {
         &self,
         owner_user_id: &str,
         request: ReplacePluginRuntimeSourceFileRequest,
-    ) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeM1ApplicationError> {
+    ) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeApplicationError> {
         let _mutation_guard = self.source_mutation_lock.lock().await;
         self.reconcile_source_mutations_locked().await?;
         let snapshot = self
             .repository
-            .get(owner_user_id, &request.miniapp_id)
+            .get(owner_user_id, &request.plugin_id)
             .await?
-            .ok_or(PluginRuntimeM1ApplicationError::NotFound)?;
+            .ok_or(PluginRuntimeApplicationError::NotFound)?;
         if snapshot.product.product_revision
             != to_i64(request.expected_product_revision, "product revision")?
             || snapshot.project.project_id != request.project_id
@@ -1472,7 +1576,7 @@ impl PluginRuntimeM1ApplicationService {
             || snapshot.project.source_state != "editable"
             || matches!(snapshot.product.lifecycle.as_str(), "trashed" | "deleting")
         {
-            return Err(PluginRuntimeM1ApplicationError::Database(
+            return Err(PluginRuntimeApplicationError::Database(
                 nomifun_db::DbError::Conflict(
                     "Plugin Source edit is stale against the exact Product/Project head".into(),
                 ),
@@ -1481,7 +1585,7 @@ impl PluginRuntimeM1ApplicationService {
         require_no_running_build(
             &*self.repository,
             owner_user_id,
-            &request.miniapp_id,
+            &request.plugin_id,
         )
         .await?;
         let prepared = self
@@ -1489,7 +1593,7 @@ impl PluginRuntimeM1ApplicationService {
             .source
             .prepare_file_replace(
                 owner_user_id,
-                &request.miniapp_id,
+                &request.plugin_id,
                 &request.project_id,
                 &request.expected_source_snapshot_digest,
                 &request.path,
@@ -1497,7 +1601,7 @@ impl PluginRuntimeM1ApplicationService {
             )
             .map_err(|error| store_error("Source Store", error))?;
         if prepared.expected_build_generation != request.expected_build_generation {
-            return Err(PluginRuntimeM1ApplicationError::Database(
+            return Err(PluginRuntimeApplicationError::Database(
                 nomifun_db::DbError::Conflict(
                     "Plugin Source Store generation differs from the Project".into(),
                 ),
@@ -1509,10 +1613,10 @@ impl PluginRuntimeM1ApplicationService {
         let intent_id = Uuid::now_v7().to_string();
         let created_at = positive_now_ms().max(snapshot.project.updated_at);
         self.repository
-            .begin_source_mutation(&BeginMiniAppSourceMutationParams {
+            .begin_source_mutation(&BeginPluginSourceMutationParams {
                 intent_id: intent_id.clone(),
                 owner_user_id: owner_user_id.to_owned(),
-                miniapp_id: request.miniapp_id.clone(),
+                plugin_product_id: request.plugin_id.clone(),
                 project_id: request.project_id.clone(),
                 expected_product_revision: snapshot.product.product_revision,
                 expected_project_revision: snapshot.project.project_revision,
@@ -1534,10 +1638,10 @@ impl PluginRuntimeM1ApplicationService {
             .await?;
         if let Err(error) = self.stores.source.commit_prepared_source(&prepared) {
             self.repository
-                .abort_source_mutation(&AbortMiniAppSourceMutationParams {
+                .abort_source_mutation(&AbortPluginSourceMutationParams {
                     intent_id,
                     owner_user_id: owner_user_id.to_owned(),
-                    miniapp_id: request.miniapp_id,
+                    plugin_product_id: request.plugin_id,
                     project_id: request.project_id,
                 })
                 .await?;
@@ -1548,10 +1652,10 @@ impl PluginRuntimeM1ApplicationService {
             .max(snapshot.project.updated_at.saturating_add(1));
         let committed = match self
             .repository
-            .finalize_source_mutation(&FinalizeMiniAppSourceMutationParams {
+            .finalize_source_mutation(&FinalizePluginSourceMutationParams {
                 intent_id: intent_id.clone(),
                 owner_user_id: owner_user_id.to_owned(),
-                miniapp_id: request.miniapp_id.clone(),
+                plugin_product_id: request.plugin_id.clone(),
                 project_id: request.project_id.clone(),
                 updated_at,
             })
@@ -1563,7 +1667,7 @@ impl PluginRuntimeM1ApplicationService {
                     .repository
                     .get_source_mutation_intent(
                         owner_user_id,
-                        &request.miniapp_id,
+                        &request.plugin_id,
                         &request.project_id,
                     )
                     .await?
@@ -1571,22 +1675,22 @@ impl PluginRuntimeM1ApplicationService {
                     self.reconcile_source_mutation(&intent)
                         .await
                         .map_err(|recovery| {
-                            PluginRuntimeM1ApplicationError::Runtime(format!(
+                            PluginRuntimeApplicationError::Runtime(format!(
                                 "Plugin Source was committed but database finalize failed ({error}); recovery failed ({recovery})"
                             ))
                         })?;
                 }
                 let recovered = self
                     .repository
-                    .get(owner_user_id, &request.miniapp_id)
+                    .get(owner_user_id, &request.plugin_id)
                     .await?
-                    .ok_or(PluginRuntimeM1ApplicationError::NotFound)?;
+                    .ok_or(PluginRuntimeApplicationError::NotFound)?;
                 if recovered.project.source_head_digest.as_deref()
                     != Some(prepared.next_source_snapshot_digest.as_ref())
                     || recovered.project.build_generation
                         != to_i64(prepared.next_build_generation, "next build generation")?
                 {
-                    return Err(PluginRuntimeM1ApplicationError::Runtime(format!(
+                    return Err(PluginRuntimeApplicationError::Runtime(format!(
                         "Plugin Source database finalize failed without a recoverable commit: {error}"
                     )));
                 }
@@ -1599,14 +1703,14 @@ impl PluginRuntimeM1ApplicationService {
 
     pub async fn reconcile_source_mutations(
         &self,
-    ) -> Result<(), PluginRuntimeM1ApplicationError> {
+    ) -> Result<(), PluginRuntimeApplicationError> {
         let _mutation_guard = self.source_mutation_lock.lock().await;
         self.reconcile_source_mutations_locked().await
     }
 
     async fn reconcile_source_mutations_locked(
         &self,
-    ) -> Result<(), PluginRuntimeM1ApplicationError> {
+    ) -> Result<(), PluginRuntimeApplicationError> {
         for intent in self.repository.list_source_mutation_intents().await? {
             self.reconcile_source_mutation(&intent).await?;
         }
@@ -1615,14 +1719,14 @@ impl PluginRuntimeM1ApplicationService {
 
     async fn reconcile_source_mutation(
         &self,
-        intent: &MiniAppSourceMutationIntentRow,
-    ) -> Result<(), PluginRuntimeM1ApplicationError> {
+        intent: &PluginRuntimeSourceMutationIntentRow,
+    ) -> Result<(), PluginRuntimeApplicationError> {
         let source = self
             .stores
             .source
             .current_snapshot(
                 &intent.owner_user_id,
-                &intent.miniapp_id,
+                &intent.plugin_product_id,
                 &intent.project_id,
             )
             .map_err(|error| store_error("Source recovery", error))?;
@@ -1632,10 +1736,10 @@ impl PluginRuntimeM1ApplicationService {
             && generation == intent.expected_build_generation
         {
             self.repository
-                .abort_source_mutation(&AbortMiniAppSourceMutationParams {
+                .abort_source_mutation(&AbortPluginSourceMutationParams {
                     intent_id: intent.intent_id.clone(),
                     owner_user_id: intent.owner_user_id.clone(),
-                    miniapp_id: intent.miniapp_id.clone(),
+                    plugin_product_id: intent.plugin_product_id.clone(),
                     project_id: intent.project_id.clone(),
                 })
                 .await?;
@@ -1645,17 +1749,17 @@ impl PluginRuntimeM1ApplicationService {
             && generation == intent.next_build_generation
         {
             self.repository
-                .finalize_source_mutation(&FinalizeMiniAppSourceMutationParams {
+                .finalize_source_mutation(&FinalizePluginSourceMutationParams {
                     intent_id: intent.intent_id.clone(),
                     owner_user_id: intent.owner_user_id.clone(),
-                    miniapp_id: intent.miniapp_id.clone(),
+                    plugin_product_id: intent.plugin_product_id.clone(),
                     project_id: intent.project_id.clone(),
                     updated_at: positive_now_ms().max(intent.created_at.saturating_add(1)),
                 })
                 .await?;
             return Ok(());
         }
-        Err(PluginRuntimeM1ApplicationError::Runtime(
+        Err(PluginRuntimeApplicationError::Runtime(
             "Plugin Source mutation recovery found neither the exact old nor new Source head"
                 .into(),
         ))
@@ -1665,44 +1769,37 @@ impl PluginRuntimeM1ApplicationService {
         &self,
         owner_user_id: &str,
         request: CreatePluginRuntimeProjectRequest,
-    ) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeM1ApplicationError> {
+    ) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeApplicationError> {
         let expected_library_revision = to_i64(
             request.expected_library_revision,
             "library revision",
         )?;
         let stores = &self.stores;
-        let miniapp_id = Uuid::now_v7().to_string();
+        let plugin_product_id = Uuid::now_v7().to_string();
         let project_id = Uuid::now_v7().to_string();
-        let source = match request.kind {
-            PluginRuntimeKindDto::UiOnly => stores.source.create_project(
+        let source = match request.service_source {
+            Some(service_source) => stores.source.create_service_project(
+                owner_user_id, &plugin_product_id, &project_id,
+                request.display_name.clone(), service_source.into_bytes(),
+            ),
+            None => stores.source.create_project(
                 owner_user_id,
-                &miniapp_id,
+                &plugin_product_id,
                 &project_id,
                 request.display_name.clone(),
             ),
-            PluginRuntimeKindDto::Service => stores.source.create_service_project(
-                owner_user_id,
-                &miniapp_id,
-                &project_id,
-                request.display_name.clone(),
-                default_service_module(),
-            ),
-        }
-            .map_err(|error| store_error("Source Store", error))?;
-        let create = CreateMiniAppM1Params {
+        }.map_err(|error| store_error("Source Store", error))?;
+        let create = CreatePluginRuntimeParams {
             owner_user_id: owner_user_id.to_owned(),
-            miniapp_id: miniapp_id.clone(),
+            plugin_product_id: plugin_product_id.clone(),
             project_id: project_id.clone(),
             expected_library_revision,
             display_name: request.display_name,
             description: request.description,
             icon_asset_id: None,
-            kind: match request.kind {
-                PluginRuntimeKindDto::UiOnly => MiniAppM1Kind::UiOnly,
-                PluginRuntimeKindDto::Service => MiniAppM1Kind::Service,
-            },
+            kind: PluginRuntimeKind::Plugin,
             materialized_catalog_digest: nomifun_agent_contracts::digest_bytes(
-                b"miniapp-m1-empty-catalog",
+                b"plugin-m1-empty-catalog",
             )
             .as_ref()
             .to_owned(),
@@ -1710,7 +1807,7 @@ impl PluginRuntimeM1ApplicationService {
             config_json: "{}".to_owned(),
             created_at: nomifun_common::now_ms(),
         };
-        let source_lineage = MiniAppM1ManagedSourceLineage {
+        let source_lineage = PluginRuntimeManagedSourceLineage {
             managed_source_path: source.managed_relative_path,
             source_head_digest: source.source_snapshot_digest.as_ref().to_owned(),
             dependency_lock_digest: source.dependency_lock_digest.as_ref().to_owned(),
@@ -1719,7 +1816,7 @@ impl PluginRuntimeM1ApplicationService {
         };
         let snapshot = match self
             .repository
-            .create_with_source(&CreateMiniAppM1WithSourceParams {
+            .create_with_source(&CreatePluginRuntimeWithSourceParams {
                 create,
                 source: source_lineage,
             })
@@ -1729,12 +1826,12 @@ impl PluginRuntimeM1ApplicationService {
             Err(database_error) => {
                 match stores.source.delete_project(
                     owner_user_id,
-                    &miniapp_id,
+                    &plugin_product_id,
                     &project_id,
                 ) {
                     Ok(()) => return Err(database_error.into()),
                     Err(cleanup_error) => {
-                        return Err(PluginRuntimeM1ApplicationError::Invalid(format!(
+                        return Err(PluginRuntimeApplicationError::Invalid(format!(
                             "database create failed ({database_error}); Source cleanup also failed ({cleanup_error})"
                         )));
                     }
@@ -1749,23 +1846,23 @@ impl PluginRuntimeM1ApplicationService {
         &self,
         owner_user_id: &str,
         request: BuildPluginRuntimeRequest,
-    ) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeM1ApplicationError> {
+    ) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeApplicationError> {
         self.reconcile_source_mutations().await?;
         let stores = &self.stores;
         let snapshot = self
             .repository
-            .get(owner_user_id, &request.miniapp_id)
+            .get(owner_user_id, &request.plugin_id)
             .await?
-            .ok_or(PluginRuntimeM1ApplicationError::NotFound)?;
+            .ok_or(PluginRuntimeApplicationError::NotFound)?;
         validate_build_request(&snapshot, &request)?;
         let source = read_exact_source(&stores.source, owner_user_id, &snapshot, &request)?;
         let source_lineage = managed_source_lineage(&snapshot)?;
         let operation_id = Uuid::now_v7().to_string();
         let started_at_ms = positive_now_ms();
         self.repository
-            .start_build_operation(&StartMiniAppM1BuildOperationParams {
+            .start_build_operation(&StartPluginRuntimeBuildOperationParams {
                 owner_user_id: owner_user_id.to_owned(),
-                miniapp_id: request.miniapp_id.clone(),
+                plugin_product_id: request.plugin_id.clone(),
                 project_id: request.project_id.clone(),
                 operation_id: operation_id.clone(),
                 expected_project_revision: to_i64(
@@ -1774,11 +1871,7 @@ impl PluginRuntimeM1ApplicationService {
                 )?,
                 expected_source: source_lineage,
                 bounded_log_tail: vec![
-                    if snapshot.product.kind == MiniAppM1Kind::Service.as_str() {
-                        "Service Build started".to_owned()
-                    } else {
-                        "UI-only Build started".to_owned()
-                    },
+                    "Plugin Build started".to_owned(),
                 ],
                 started_at_ms,
             })
@@ -1798,7 +1891,7 @@ impl PluginRuntimeM1ApplicationService {
                 return Err(self
                     .finish_failed_build(
                         owner_user_id,
-                        &request.miniapp_id,
+                        &request.plugin_id,
                         &operation_id,
                         error,
                     )
@@ -1810,7 +1903,7 @@ impl PluginRuntimeM1ApplicationService {
                 .service_runtime()
                 .await
                 .register_module(
-                    MiniAppId::from(request.miniapp_id.clone()),
+                    PluginProductId::from(request.plugin_id.clone()),
                     DigestHex::from(prepared.release.release_digest.clone()),
                     module_path.clone(),
                 )
@@ -1819,24 +1912,24 @@ impl PluginRuntimeM1ApplicationService {
                 return Err(self
                     .finish_failed_build(
                         owner_user_id,
-                        &request.miniapp_id,
+                        &request.plugin_id,
                         &operation_id,
-                        PluginRuntimeM1ApplicationError::Invalid(error.to_string()),
+                        PluginRuntimeApplicationError::Invalid(error.to_string()),
                     )
                     .await);
             }
         }
         let operation = self
             .repository
-            .get_build_operation(owner_user_id, &request.miniapp_id, &operation_id)
+            .get_build_operation(owner_user_id, &request.plugin_id, &operation_id)
             .await?
             .ok_or_else(|| {
-                PluginRuntimeM1ApplicationError::Invalid(format!(
+                PluginRuntimeApplicationError::Invalid(format!(
                     "Build operation {operation_id} disappeared before Ready commit"
                 ))
             })?;
         if operation.state != ProductOperationState::Running.as_str() {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(format!(
+            return Err(PluginRuntimeApplicationError::Invalid(format!(
                 "Build operation {operation_id} is already {}; Ready was not changed",
                 operation.state
             )));
@@ -1844,9 +1937,9 @@ impl PluginRuntimeM1ApplicationService {
 
         let completed = self
             .repository
-            .finish_build_and_record_ready(&FinishMiniAppM1BuildAndRecordReadyParams {
+            .finish_build_and_record_ready(&FinishPluginRuntimeBuildAndRecordReadyParams {
                 owner_user_id: owner_user_id.to_owned(),
-                miniapp_id: request.miniapp_id.clone(),
+                plugin_product_id: request.plugin_id.clone(),
                 project_id: request.project_id.clone(),
                 operation_id: operation_id.clone(),
                 expected_product_revision: to_i64(
@@ -1865,11 +1958,7 @@ impl PluginRuntimeM1ApplicationService {
                 artifact: prepared.artifact,
                 release: prepared.release,
                 bounded_log_tail: vec![
-                    if snapshot.product.kind == MiniAppM1Kind::Service.as_str() {
-                        "Service Release admitted".to_owned()
-                    } else {
-                        "UI-only Release admitted".to_owned()
-                    },
+                    "Plugin Release admitted".to_owned(),
                     "Ready Release committed atomically".to_owned(),
                 ],
                 finished_at_ms: prepared.finished_at_ms,
@@ -1892,11 +1981,11 @@ impl PluginRuntimeM1ApplicationService {
                         Err(error) => {
                             let observed = self
                                 .repository
-                                .get(owner_user_id, &request.miniapp_id)
+                                .get(owner_user_id, &request.plugin_id)
                                 .await?
-                                .ok_or(PluginRuntimeM1ApplicationError::NotFound)?;
+                                .ok_or(PluginRuntimeApplicationError::NotFound)?;
                             tracing::warn!(
-                                miniapp_id = %request.miniapp_id,
+                                plugin_product_id = %request.plugin_id,
                                 error = %error,
                                 ready_release_id = ?observed.product.ready_release_id,
                                 active_release_id = ?observed.product.active_release_id,
@@ -1912,11 +2001,11 @@ impl PluginRuntimeM1ApplicationService {
                     .await
             }
             Err(database_error) => {
-                let original = PluginRuntimeM1ApplicationError::Database(database_error);
+                let original = PluginRuntimeApplicationError::Database(database_error);
                 Err(self
                     .finish_failed_build(
                         owner_user_id,
-                        &request.miniapp_id,
+                        &request.plugin_id,
                         &operation_id,
                         original,
                     )
@@ -1928,15 +2017,15 @@ impl PluginRuntimeM1ApplicationService {
     pub async fn cancel_build(
         &self,
         owner_user_id: &str,
-        miniapp_id: &str,
+        plugin_product_id: &str,
         operation_id: &str,
         expected_operation_revision: u64,
-    ) -> Result<DurableOperationSummaryDto, PluginRuntimeM1ApplicationError> {
+    ) -> Result<DurableOperationSummaryDto, PluginRuntimeApplicationError> {
         let current = self
             .repository
-            .get_build_operation(owner_user_id, miniapp_id, operation_id)
+            .get_build_operation(owner_user_id, plugin_product_id, operation_id)
             .await?
-            .ok_or(PluginRuntimeM1ApplicationError::NotFound)?;
+            .ok_or(PluginRuntimeApplicationError::NotFound)?;
         let current_summary = operation_summary(&current)?;
         if current_summary.operation_revision != expected_operation_revision
             || current.state != ProductOperationState::Running.as_str()
@@ -1949,11 +2038,11 @@ impl PluginRuntimeM1ApplicationService {
         }
         match self
             .repository
-            .cancel_build_operation(&CancelMiniAppM1BuildOperationParams {
+            .cancel_build_operation(&CancelPluginRuntimeBuildOperationParams {
                 owner_user_id: owner_user_id.to_owned(),
-                miniapp_id: miniapp_id.to_owned(),
+                plugin_product_id: plugin_product_id.to_owned(),
                 operation_id: operation_id.to_owned(),
-                bounded_log_tail: vec!["UI-only Build canceled".to_owned()],
+                 bounded_log_tail: vec!["Plugin Build canceled".to_owned()],
                 finished_at_ms: positive_now_ms().max(current.started_at_ms),
             })
             .await
@@ -1962,7 +2051,7 @@ impl PluginRuntimeM1ApplicationService {
             Err(error) => {
                 let observed = self
                     .repository
-                    .get_build_operation(owner_user_id, miniapp_id, operation_id)
+                    .get_build_operation(owner_user_id, plugin_product_id, operation_id)
                     .await?;
                 if let Some(observed) = observed
                     && observed.state == ProductOperationState::Canceled.as_str()
@@ -1978,8 +2067,8 @@ impl PluginRuntimeM1ApplicationService {
         &self,
         owner_user_id: &str,
         request: TestPluginRuntimeReleaseRequest,
-    ) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeM1ApplicationError> {
-        validate_request_identity(&request.miniapp_id, "miniapp_id")?;
+    ) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeApplicationError> {
+        validate_request_identity(&request.plugin_id, "plugin_product_id")?;
         validate_request_identity(&request.project_id, "project_id")?;
         validate_request_identity(&request.release_id, "release_id")?;
         validate_digest_string(
@@ -1992,20 +2081,15 @@ impl PluginRuntimeM1ApplicationService {
         )?;
         let snapshot = self
             .repository
-            .get(owner_user_id, &request.miniapp_id)
+            .get(owner_user_id, &request.plugin_id)
             .await?
-            .ok_or(PluginRuntimeM1ApplicationError::NotFound)?;
+            .ok_or(PluginRuntimeApplicationError::NotFound)?;
         require_release_mutation(&snapshot)?;
-        require_no_running_build(&*self.repository, owner_user_id, &request.miniapp_id).await?;
-        if snapshot.product.kind != MiniAppM1Kind::Service.as_str() {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
-                "Service Test requires a Service Plugin".into(),
-            ));
-        }
+        require_no_running_build(&*self.repository, owner_user_id, &request.plugin_id).await?;
         let ready = snapshot
             .ready_release
             .as_ref()
-            .ok_or_else(|| PluginRuntimeM1ApplicationError::Invalid("no Ready Release".into()))?;
+            .ok_or_else(|| PluginRuntimeApplicationError::Invalid("no Ready Release".into()))?;
         if snapshot.product.product_revision
             != to_i64(request.expected_product_revision, "product revision")?
             || snapshot.product.pointer_revision
@@ -2025,7 +2109,7 @@ impl PluginRuntimeM1ApplicationService {
             || ready.release_id != request.release_id
             || ready.release_digest != request.expected_release_digest
         {
-            return Err(PluginRuntimeM1ApplicationError::Database(
+            return Err(PluginRuntimeApplicationError::Database(
                 nomifun_db::DbError::Conflict(
                     "Plugin Service Test request is stale against the exact Ready state"
                         .into(),
@@ -2044,38 +2128,38 @@ impl PluginRuntimeM1ApplicationService {
             .service
             .clone()
             .ok_or_else(|| {
-                PluginRuntimeM1ApplicationError::Invalid(
+                PluginRuntimeApplicationError::Invalid(
                     "Ready Release has no Service descriptor".into(),
                 )
             })?;
-        let ready_contract: MiniAppReadyRelease =
+        let ready_contract: PluginReadyRelease =
             serde_json::from_str(&ready.release_record_json).map_err(|error| {
-                PluginRuntimeM1ApplicationError::Runtime(format!(
+                PluginRuntimeApplicationError::Runtime(format!(
                     "Ready Release record is invalid: {error}"
                 ))
             })?;
         ready_contract
             .validate_for_artifact(&stored.artifact)
-            .map_err(|error| PluginRuntimeM1ApplicationError::Runtime(error.to_string()))?;
+            .map_err(|error| PluginRuntimeApplicationError::Runtime(error.to_string()))?;
         let prospective_epoch = nonnegative_u64(
             snapshot.product.active_release_epoch,
             "Plugin active release epoch",
         )?
         .checked_add(1)
         .ok_or_else(|| {
-            PluginRuntimeM1ApplicationError::Invalid(
+            PluginRuntimeApplicationError::Invalid(
                 "Plugin active release epoch overflow".into(),
             )
         })?;
         let runtime = self.service_runtime().await;
-        let miniapp_id = MiniAppId::from(request.miniapp_id.clone());
+        let plugin_product_id = PluginProductId::from(request.plugin_id.clone());
         let restore_running = matches!(
-            runtime.state(&miniapp_id).await,
+            runtime.state(&plugin_product_id).await,
             Some(crate::runtime::PluginRuntimeServiceHostState::Running { .. })
                 | Some(crate::runtime::PluginRuntimeServiceHostState::Starting { .. })
         );
-        runtime.stop(&miniapp_id).await.map_err(|error| {
-            PluginRuntimeM1ApplicationError::Runtime(format!(
+        runtime.stop(&plugin_product_id).await.map_err(|error| {
+            PluginRuntimeApplicationError::Runtime(format!(
                 "cannot stop production Service before Test: {error}"
             ))
         })?;
@@ -2085,14 +2169,14 @@ impl PluginRuntimeM1ApplicationService {
             let mut storage = runtime
                 .create_service_test_storage(
                     owner_user_id,
-                    &miniapp_id,
+                    &plugin_product_id,
                     &receipt_id,
                     descriptor.uses_files,
                     descriptor.uses_private_database,
                 )
                 .await
                 .map_err(|error| {
-                    PluginRuntimeM1ApplicationError::Runtime(format!(
+                    PluginRuntimeApplicationError::Runtime(format!(
                         "cannot create Service Test storage: {error}"
                     ))
                 })?;
@@ -2103,14 +2187,14 @@ impl PluginRuntimeM1ApplicationService {
                     .private_database
                     .as_ref()
                     .ok_or_else(|| {
-                        PluginRuntimeM1ApplicationError::Runtime(
+                        PluginRuntimeApplicationError::Runtime(
                             "Service Test migrations require a Private Database".into(),
                         )
                     })?;
                 let ledger = runtime
                     .apply_storage_migrations(
                         owner_user_id,
-                        &miniapp_id,
+                        &plugin_product_id,
                         &storage.descriptor,
                         &database.migration_ledger_digest,
                         &release_contract_ref(ready),
@@ -2119,7 +2203,7 @@ impl PluginRuntimeM1ApplicationService {
                     )
                     .await
                     .map_err(|error| {
-                        PluginRuntimeM1ApplicationError::Runtime(format!(
+                        PluginRuntimeApplicationError::Runtime(format!(
                             "Service Test migration failed: {error}"
                         ))
                     })?;
@@ -2142,14 +2226,14 @@ impl PluginRuntimeM1ApplicationService {
                 )
                 .await?
                 .ok_or_else(|| {
-                    PluginRuntimeM1ApplicationError::Runtime(
+                    PluginRuntimeApplicationError::Runtime(
                         "Ready Release lost its Service descriptor".into(),
                     )
                 })?;
             let contributions = &stored.artifact.manifest.payload.contributions;
             runtime
                 .run_service_test(PluginRuntimeServiceTestRunInput {
-                    receipt_id: MiniAppServiceTestReceiptId::from(receipt_id.clone()),
+                    receipt_id: PluginServiceTestReceiptId::from(receipt_id.clone()),
                     ready: ready_contract,
                     spec,
                     resolved_test_input_digest: DigestHex::from(
@@ -2167,7 +2251,7 @@ impl PluginRuntimeM1ApplicationService {
                 })
                 .await
                 .map_err(|error| {
-                    PluginRuntimeM1ApplicationError::Runtime(format!(
+                    PluginRuntimeApplicationError::Runtime(format!(
                         "Service Test Host failed: {error}"
                     ))
                 })
@@ -2175,33 +2259,33 @@ impl PluginRuntimeM1ApplicationService {
         .await;
 
         let cleanup_result = runtime
-            .purge_service_test_storage(owner_user_id, &miniapp_id, &receipt_id)
+            .purge_service_test_storage(owner_user_id, &plugin_product_id, &receipt_id)
             .await;
         let restore_result = self
             .restore_service_after_test(owner_user_id, &snapshot, restore_running)
             .await;
         if let Err(error) = cleanup_result {
-            return Err(PluginRuntimeM1ApplicationError::Runtime(format!(
+            return Err(PluginRuntimeApplicationError::Runtime(format!(
                 "Service Test storage cleanup failed: {error}"
             )));
         }
         restore_result?;
         let receipt = test_result?;
         let receipt_json = serde_json::to_value(&receipt).map_err(|error| {
-            PluginRuntimeM1ApplicationError::Runtime(format!(
+            PluginRuntimeApplicationError::Runtime(format!(
                 "Service Test receipt serialization failed: {error}"
             ))
         })?;
         let receipt_digest = digest_payload(&receipt)
-            .map_err(|error| PluginRuntimeM1ApplicationError::Runtime(error.to_string()))?;
+            .map_err(|error| PluginRuntimeApplicationError::Runtime(error.to_string()))?;
         let runtime_digest = digest_payload(&receipt.runtime)
-            .map_err(|error| PluginRuntimeM1ApplicationError::Runtime(error.to_string()))?;
+            .map_err(|error| PluginRuntimeApplicationError::Runtime(error.to_string()))?;
         let committed = self
             .repository
             .record_service_test_receipt_cas(
-                &RecordMiniAppM1ServiceTestReceiptParams {
+                &RecordPluginRuntimeServiceTestReceiptParams {
                     owner_user_id: owner_user_id.to_owned(),
-                    miniapp_id: request.miniapp_id,
+                    plugin_product_id: request.plugin_id,
                     expected_product_revision: snapshot.product.product_revision,
                     expected_pointer_revision: snapshot.product.pointer_revision,
                     expected_config_revision: snapshot.product.config_revision,
@@ -2234,14 +2318,14 @@ impl PluginRuntimeM1ApplicationService {
     async fn restore_service_after_test(
         &self,
         owner_user_id: &str,
-        snapshot: &MiniAppM1Snapshot,
+        snapshot: &PluginRuntimeSnapshot,
         restore_running: bool,
-    ) -> Result<(), PluginRuntimeM1ApplicationError> {
+    ) -> Result<(), PluginRuntimeApplicationError> {
         if snapshot.product.lifecycle != "enabled" {
             return Ok(());
         }
         let active = snapshot.active_release.as_ref().ok_or_else(|| {
-            PluginRuntimeM1ApplicationError::Runtime(
+            PluginRuntimeApplicationError::Runtime(
                 "enabled Service Plugin lost its Active Release during Test".into(),
             )
         })?;
@@ -2257,7 +2341,7 @@ impl PluginRuntimeM1ApplicationService {
             )
             .await?
             .ok_or_else(|| {
-                PluginRuntimeM1ApplicationError::Runtime(
+                PluginRuntimeApplicationError::Runtime(
                     "Active Release lost its Service descriptor during Test".into(),
                 )
             })?;
@@ -2266,13 +2350,13 @@ impl PluginRuntimeM1ApplicationService {
             .bind_active(spec.clone(), true)
             .await
             .map_err(|error| {
-                PluginRuntimeM1ApplicationError::Runtime(format!(
+                PluginRuntimeApplicationError::Runtime(format!(
                     "cannot restore Active Service after Test: {error}"
                 ))
             })?;
         if restore_running {
             runtime.start(spec).await.map_err(|error| {
-                PluginRuntimeM1ApplicationError::Runtime(format!(
+                PluginRuntimeApplicationError::Runtime(format!(
                     "cannot restart Active Service after Test: {error}"
                 ))
             })?;
@@ -2284,13 +2368,13 @@ impl PluginRuntimeM1ApplicationService {
         &self,
         owner_user_id: &str,
         request: SharePluginRuntimeRequest,
-    ) -> Result<DurableOperationSummaryDto, PluginRuntimeM1ApplicationError> {
-        validate_request_identity(&request.miniapp_id, "miniapp_id")?;
+    ) -> Result<DurableOperationSummaryDto, PluginRuntimeApplicationError> {
+        validate_request_identity(&request.plugin_id, "plugin_product_id")?;
         let snapshot = self
             .repository
-            .get(owner_user_id, &request.miniapp_id)
+            .get(owner_user_id, &request.plugin_id)
             .await?
-            .ok_or(PluginRuntimeM1ApplicationError::NotFound)?;
+            .ok_or(PluginRuntimeApplicationError::NotFound)?;
         require_release_mutation(&snapshot)?;
         if snapshot.product.product_revision
             != to_i64(request.expected_product_revision, "product revision")?
@@ -2307,7 +2391,7 @@ impl PluginRuntimeM1ApplicationService {
             PluginRuntimeShareContentDto::ActiveRelease => snapshot.active_release.as_ref(),
         }
         .ok_or_else(|| {
-            PluginRuntimeM1ApplicationError::Invalid(
+            PluginRuntimeApplicationError::Invalid(
                 "selected Plugin Share Release is unavailable".into(),
             )
         })?;
@@ -2326,12 +2410,12 @@ impl PluginRuntimeM1ApplicationService {
         )?;
         let source_snapshot = if request.include_source {
             let project_id = release.project_id.as_deref().ok_or_else(|| {
-                PluginRuntimeM1ApplicationError::Invalid(
+                PluginRuntimeApplicationError::Invalid(
                     "selected Release has no Project lineage".into(),
                 )
             })?;
             let source_digest = release.source_snapshot_digest.as_deref().ok_or_else(|| {
-                PluginRuntimeM1ApplicationError::Invalid(
+                PluginRuntimeApplicationError::Invalid(
                     "selected Release has no editable Source lineage".into(),
                 )
             })?;
@@ -2340,7 +2424,7 @@ impl PluginRuntimeM1ApplicationService {
                     .source
                     .read_snapshot(
                         owner_user_id,
-                        &request.miniapp_id,
+                        &request.plugin_id,
                         project_id,
                         source_digest,
                     )
@@ -2352,9 +2436,9 @@ impl PluginRuntimeM1ApplicationService {
         let operation_id = Uuid::now_v7().to_string();
         let started_at_ms = positive_now_ms().max(snapshot.product.updated_at);
         self.repository
-            .start_export_operation(&StartMiniAppM1ExportOperationParams {
+            .start_export_operation(&StartPluginRuntimeExportOperationParams {
                 owner_user_id: owner_user_id.to_owned(),
-                miniapp_id: request.miniapp_id.clone(),
+                plugin_product_id: request.plugin_id.clone(),
                 operation_id: operation_id.clone(),
                 expected_product_revision: snapshot.product.product_revision,
                 expected_pointer_revision: snapshot.product.pointer_revision,
@@ -2365,7 +2449,7 @@ impl PluginRuntimeM1ApplicationService {
         let exported = PluginRuntimeShareBundleFilesystem::default().export(
             PluginRuntimeShareBundleExport {
                 bundle_id: Uuid::now_v7().to_string().into(),
-                source_miniapp_id: Some(MiniAppId::from(request.miniapp_id.clone())),
+                source_plugin_product_id: Some(PluginProductId::from(request.plugin_id.clone())),
                 release: &stored,
                 source: source_snapshot.as_ref().map(|snapshot| PluginRuntimeShareSourceExport {
                     snapshot,
@@ -2379,9 +2463,9 @@ impl PluginRuntimeM1ApplicationService {
         let operation = match exported {
             Ok(bundle) => {
                 self.repository
-                    .finish_export_operation(&FinishMiniAppM1ExportOperationParams {
+                    .finish_export_operation(&FinishPluginRuntimeExportOperationParams {
                         owner_user_id: owner_user_id.to_owned(),
-                        miniapp_id: request.miniapp_id,
+                        plugin_product_id: request.plugin_id,
                         operation_id,
                         bounded_log_tail: vec![format!(
                             "Plugin Share Bundle {} exported",
@@ -2394,17 +2478,17 @@ impl PluginRuntimeM1ApplicationService {
             Err(error) => {
                 let _ = self
                     .repository
-                    .fail_export_operation(&FailMiniAppM1ExportOperationParams {
+                    .fail_export_operation(&FailPluginRuntimeExportOperationParams {
                         owner_user_id: owner_user_id.to_owned(),
-                        miniapp_id: request.miniapp_id,
+                        plugin_product_id: request.plugin_id,
                         operation_id,
                         progress_percent: 0,
-                        error_code: "miniapp_share_export_failed".into(),
+                        error_code: "plugin_share_export_failed".into(),
                         bounded_log_tail: vec![bounded_log_line(&error.to_string())],
                         finished_at_ms: positive_now_ms().max(started_at_ms),
                     })
                     .await;
-                return Err(PluginRuntimeM1ApplicationError::Runtime(error.to_string()));
+                return Err(PluginRuntimeApplicationError::Runtime(error.to_string()));
             }
         };
         operation_summary(&operation)
@@ -2414,40 +2498,40 @@ impl PluginRuntimeM1ApplicationService {
         &self,
         owner_user_id: &str,
         request: ExportPluginRuntimeBackupRequest,
-    ) -> Result<DurableOperationSummaryDto, PluginRuntimeM1ApplicationError> {
-        validate_request_identity(&request.miniapp_id, "miniapp_id")?;
+    ) -> Result<DurableOperationSummaryDto, PluginRuntimeApplicationError> {
+        validate_request_identity(&request.plugin_id, "plugin_product_id")?;
         if request.expected_lifecycle != PluginRuntimeLifecycleDto::Disabled
             || request.destination_path.trim().is_empty()
         {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
+            return Err(PluginRuntimeApplicationError::Invalid(
                 "Whole-App Backup requires an explicit disabled lifecycle and destination"
                     .into(),
             ));
         }
         let initial = self
             .repository
-            .get(owner_user_id, &request.miniapp_id)
+            .get(owner_user_id, &request.plugin_id)
             .await?
-            .ok_or(PluginRuntimeM1ApplicationError::NotFound)?;
+            .ok_or(PluginRuntimeApplicationError::NotFound)?;
         if initial.product.lifecycle != "disabled" {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
+            return Err(PluginRuntimeApplicationError::Invalid(
                 "Whole-App Backup requires a disabled Plugin".into(),
             ));
         }
-        let miniapp_id = MiniAppId::from(request.miniapp_id.clone());
+        let plugin_product_id = PluginProductId::from(request.plugin_id.clone());
         let runtime = self.service_runtime().await;
-        if initial.product.kind == MiniAppM1Kind::Service.as_str() {
-            runtime.stop(&miniapp_id).await.map_err(|error| {
-                PluginRuntimeM1ApplicationError::Runtime(format!(
+        if self.snapshot_active_service_descriptor(&initial)?.is_some() {
+            runtime.stop(&plugin_product_id).await.map_err(|error| {
+                PluginRuntimeApplicationError::Runtime(format!(
                     "cannot stop Plugin Service before Whole-App Backup: {error}"
                 ))
             })?;
             if runtime
-                .state(&miniapp_id)
+                .state(&plugin_product_id)
                 .await
                 .is_some_and(|state| state != crate::runtime::PluginRuntimeServiceHostState::Stopped)
             {
-                return Err(PluginRuntimeM1ApplicationError::Invalid(
+                return Err(PluginRuntimeApplicationError::Invalid(
                     "Whole-App Backup owner is still busy".into(),
                 ));
             }
@@ -2457,9 +2541,9 @@ impl PluginRuntimeM1ApplicationService {
         let started_at_ms = positive_now_ms().max(initial.product.updated_at);
         let captured = self
             .repository
-            .start_backup_export(&StartMiniAppM1BackupExportParams {
+            .start_backup_export(&StartPluginRuntimeBackupExportParams {
                 owner_user_id: owner_user_id.to_owned(),
-                miniapp_id: request.miniapp_id.clone(),
+                plugin_product_id: request.plugin_id.clone(),
                 operation_id: operation_id.clone(),
                 expected_product_revision: to_i64(
                     request.expected_product_revision,
@@ -2488,7 +2572,7 @@ impl PluginRuntimeM1ApplicationService {
                 .export(
                     PluginRuntimeWholeAppBackupExport {
                         backup_id: Uuid::now_v7().to_string().into(),
-                        source_miniapp_id: miniapp_id,
+                        source_plugin_product_id: plugin_product_id,
                         owner_quiescent: true,
                         created_at_ms: positive_now_ms().max(started_at_ms),
                         product: &prepared.product,
@@ -2501,20 +2585,20 @@ impl PluginRuntimeM1ApplicationService {
                     },
                     &request.destination_path,
                 )
-                .map_err(|error| PluginRuntimeM1ApplicationError::Runtime(error.to_string()))
+                .map_err(|error| PluginRuntimeApplicationError::Runtime(error.to_string()))
         }
         .await;
         let operation = match result {
             Ok(metadata) => {
                 self.repository
-                    .finish_export_operation(&FinishMiniAppM1ExportOperationParams {
+                    .finish_export_operation(&FinishPluginRuntimeExportOperationParams {
                         owner_user_id: owner_user_id.to_owned(),
-                        miniapp_id: request.miniapp_id,
+                        plugin_product_id: request.plugin_id,
                         operation_id,
                         bounded_log_tail: vec![format!(
                             "Plugin Whole-App Backup {} exported",
                             metadata.metadata_digest().map_err(|error| {
-                                PluginRuntimeM1ApplicationError::Invalid(error.to_string())
+                                PluginRuntimeApplicationError::Invalid(error.to_string())
                             })?.as_ref()
                         )],
                         finished_at_ms: positive_now_ms().max(started_at_ms),
@@ -2524,12 +2608,12 @@ impl PluginRuntimeM1ApplicationService {
             Err(error) => {
                 let _ = self
                     .repository
-                    .fail_export_operation(&FailMiniAppM1ExportOperationParams {
+                    .fail_export_operation(&FailPluginRuntimeExportOperationParams {
                         owner_user_id: owner_user_id.to_owned(),
-                        miniapp_id: request.miniapp_id,
+                        plugin_product_id: request.plugin_id,
                         operation_id,
                         progress_percent: 0,
-                        error_code: "miniapp_backup_export_failed".into(),
+                        error_code: "plugin_backup_export_failed".into(),
                         bounded_log_tail: vec![bounded_log_line(&error.to_string())],
                         finished_at_ms: positive_now_ms().max(started_at_ms),
                     })
@@ -2543,11 +2627,11 @@ impl PluginRuntimeM1ApplicationService {
     async fn prepare_backup_export(
         &self,
         owner_user_id: &str,
-        captured: &MiniAppM1BackupExportSnapshot,
-    ) -> Result<PreparedApplicationBackup, PluginRuntimeM1ApplicationError> {
+        captured: &PluginRuntimeBackupExportSnapshot,
+    ) -> Result<PreparedApplicationBackup, PluginRuntimeApplicationError> {
         let snapshot = &captured.snapshot;
         let mut product_metadata = BackupProductMetadata {
-            miniapp_id: snapshot.product.miniapp_id.clone(),
+            plugin_product_id: snapshot.product.plugin_product_id.clone(),
             product_revision: snapshot.product.product_revision,
             display_name: snapshot.product.display_name.clone(),
             description: snapshot.product.description.clone(),
@@ -2569,7 +2653,7 @@ impl PluginRuntimeM1ApplicationService {
             release_lineage: BTreeMap::new(),
         };
         let project = serde_json::to_value(BackupProjectMetadata {
-            miniapp_id: snapshot.project.miniapp_id.clone(),
+            plugin_product_id: snapshot.project.plugin_product_id.clone(),
             project_id: snapshot.project.project_id.clone(),
             project_revision: snapshot.project.project_revision,
             source_state: snapshot.project.source_state.clone(),
@@ -2578,21 +2662,21 @@ impl PluginRuntimeM1ApplicationService {
             dependency_lock_digest: snapshot.project.dependency_lock_digest.clone(),
             build_profile_version: snapshot.project.build_profile_version.clone(),
         })
-        .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
+        .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
         let schema: Value = serde_json::from_str(&snapshot.product.config_schema_json)
-            .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
+            .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
         let values: Value = serde_json::from_str(&snapshot.product.config_json)
-            .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
+            .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
         let config = serde_json::to_value(BackupConfigMetadata {
             config_revision: snapshot.product.config_revision,
             schema_digest: digest_payload(&schema)
-                .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?
+                .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?
                 .as_ref()
                 .to_owned(),
             schema,
             values,
         })
-        .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
+        .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
 
         let mut releases = BTreeMap::new();
         let mut credential_slots = BTreeMap::<String, CredentialSlotDeclaration>::new();
@@ -2609,7 +2693,7 @@ impl PluginRuntimeM1ApplicationService {
         };
         for release in &captured.releases {
             let slot = slot_for(&release.release_id).ok_or_else(|| {
-                PluginRuntimeM1ApplicationError::Invalid(
+                PluginRuntimeApplicationError::Invalid(
                     "Whole-App Backup captured a Release outside the retained pointers".into(),
                 )
             })?;
@@ -2636,7 +2720,7 @@ impl PluginRuntimeM1ApplicationService {
             for declaration in &stored.artifact.manifest.payload.credential_slots {
                 match credential_slots.get(declaration.slot_key.as_ref()) {
                     Some(existing) if existing != declaration => {
-                        return Err(PluginRuntimeM1ApplicationError::Invalid(format!(
+                        return Err(PluginRuntimeApplicationError::Invalid(format!(
                             "Credential slot {} changed across retained Releases",
                             declaration.slot_key.as_ref()
                         )));
@@ -2669,18 +2753,18 @@ impl PluginRuntimeM1ApplicationService {
             );
         }
         let product = serde_json::to_value(&product_metadata)
-            .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
+            .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
         let credential_slots = serde_json::to_value(
             credential_slots.into_values().collect::<Vec<_>>(),
         )
-        .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
+        .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
         let source = if snapshot.project.source_state == "editable" {
             let digest = snapshot
                 .project
                 .source_head_digest
                 .as_deref()
                 .ok_or_else(|| {
-                    PluginRuntimeM1ApplicationError::Invalid(
+                    PluginRuntimeApplicationError::Invalid(
                         "editable Backup Project has no Source digest".into(),
                     )
                 })?;
@@ -2689,13 +2773,13 @@ impl PluginRuntimeM1ApplicationService {
                 .source
                 .read_snapshot(
                     owner_user_id,
-                    &snapshot.product.miniapp_id,
+                    &snapshot.product.plugin_product_id,
                     &snapshot.project.project_id,
                     digest,
                 )
                 .map_err(|error| store_error("Backup Source", error))?;
             Some(PluginRuntimeBackupSource {
-                source: MiniAppSourceBundle {
+                source: PluginSourceBundle {
                     project_id: source.project.project_id.clone(),
                     source_archive_artifact_id: Uuid::now_v7().to_string().into(),
                     source_snapshot_digest: source.source_snapshot_digest.clone(),
@@ -2736,48 +2820,40 @@ impl PluginRuntimeM1ApplicationService {
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?,
+                .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?,
             files: Vec::new(),
             private_database: None,
             migration_ledger: None,
         };
-        if snapshot.product.kind == MiniAppM1Kind::Service.as_str() {
-            let retained = snapshot
-                .active_release
-                .as_ref()
-                .or(snapshot.ready_release.as_ref())
-                .or(snapshot.previous_release.as_ref());
-            let (uses_files, uses_private_database) = match retained {
-                Some(release) => {
-                    let stored = self.load_verified_release(
-                        owner_user_id,
-                        &snapshot.project.project_id,
-                        release,
-                    )?;
-                    stored
-                        .artifact
-                        .manifest
-                        .payload
-                        .service
-                        .as_ref()
-                        .map(|service| {
-                            (service.uses_files, service.uses_private_database)
-                        })
-                        .unwrap_or((false, false))
-                }
-                None => (false, false),
-            };
+        let mut has_service = false;
+        let (mut uses_files, mut uses_private_database) = (false, false);
+        for release in [
+            snapshot.active_release.as_ref(),
+            snapshot.ready_release.as_ref(),
+            snapshot.previous_release.as_ref(),
+        ].into_iter().flatten() {
+            if let Some(service) = self.release_service_descriptor(
+                owner_user_id,
+                &snapshot.project.project_id,
+                release,
+            )? {
+                has_service = true;
+                uses_files |= service.uses_files;
+                uses_private_database |= service.uses_private_database;
+            }
+        }
+        if has_service {
             let mut managed = self
                 .service_runtime()
                 .await
                 .export_backup_storage(
                     owner_user_id,
-                    &MiniAppId::from(snapshot.product.miniapp_id.clone()),
+                    &PluginProductId::from(snapshot.product.plugin_product_id.clone()),
                     uses_files,
                     uses_private_database,
                 )
                 .await
-                .map_err(|error| PluginRuntimeM1ApplicationError::Runtime(error.to_string()))?;
+                .map_err(|error| PluginRuntimeApplicationError::Runtime(error.to_string()))?;
             managed.kv = storage.kv;
             storage = managed;
         }
@@ -2802,7 +2878,7 @@ impl PluginRuntimeM1ApplicationService {
                     entry.release.manifest_digest.as_ref(),
                 ))
             }) {
-                return Err(PluginRuntimeM1ApplicationError::Invalid(
+                return Err(PluginRuntimeApplicationError::Invalid(
                     "Whole-App Backup migration ledger references a non-retained Release".into(),
                 ));
             }
@@ -2823,15 +2899,15 @@ impl PluginRuntimeM1ApplicationService {
         &self,
         owner_user_id: &str,
         request: ImportPluginRuntimeShareRequest,
-    ) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeM1ApplicationError> {
+    ) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeApplicationError> {
         let imported = PluginRuntimeShareBundleFilesystem::default()
             .import_share_bundle(&request.source_path)
-            .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
+            .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
         if imported.bundle.bundle_digest.as_ref() != request.expected_bundle_digest
             || imported.release.artifact.artifact_digest.as_ref()
                 != request.expected_release_digest
         {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
+            return Err(PluginRuntimeApplicationError::Invalid(
                 "Share Bundle digest expectations do not match".into(),
             ));
         }
@@ -2849,12 +2925,12 @@ impl PluginRuntimeM1ApplicationService {
         &self,
         owner_user_id: &str,
         request: ImportPluginRuntimeArtifactRequest,
-    ) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeM1ApplicationError> {
+    ) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeApplicationError> {
         let release = PluginRuntimeShareBundleFilesystem::default()
             .import_prebuilt_release(&request.source_path)
-            .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
+            .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
         if release.artifact.artifact_digest.as_ref() != request.expected_artifact_digest {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
+            return Err(PluginRuntimeApplicationError::Invalid(
                 "prebuilt Release digest expectation does not match".into(),
             ));
         }
@@ -2872,49 +2948,49 @@ impl PluginRuntimeM1ApplicationService {
         &self,
         owner_user_id: &str,
         request: ImportPluginRuntimeBackupRequest,
-    ) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeM1ApplicationError> {
+    ) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeApplicationError> {
         validate_digest_string(
             &request.expected_backup_metadata_digest,
             "Whole-App Backup metadata digest",
         )?;
         if request.display_name.trim().is_empty() {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
+            return Err(PluginRuntimeApplicationError::Invalid(
                 "Plugin display name is required".into(),
             ));
         }
         let imported = PluginRuntimeWholeAppBackupFilesystem::new()
             .import(&request.source_path)
-            .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
+            .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
         let metadata_digest = imported
             .metadata
             .metadata_digest()
-            .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
+            .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
         if metadata_digest.as_ref() != request.expected_backup_metadata_digest {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
+            return Err(PluginRuntimeApplicationError::Invalid(
                 "Whole-App Backup metadata digest expectation does not match".into(),
             ));
         }
         let product: BackupProductMetadata =
             serde_json::from_value(imported.product.clone()).map_err(|error| {
-                PluginRuntimeM1ApplicationError::Invalid(format!(
+                PluginRuntimeApplicationError::Invalid(format!(
                     "Whole-App Backup product metadata is invalid: {error}"
                 ))
             })?;
         let project: BackupProjectMetadata =
             serde_json::from_value(imported.project.clone()).map_err(|error| {
-                PluginRuntimeM1ApplicationError::Invalid(format!(
+                PluginRuntimeApplicationError::Invalid(format!(
                     "Whole-App Backup project metadata is invalid: {error}"
                 ))
             })?;
         let config: BackupConfigMetadata =
             serde_json::from_value(imported.config.clone()).map_err(|error| {
-                PluginRuntimeM1ApplicationError::Invalid(format!(
+                PluginRuntimeApplicationError::Invalid(format!(
                     "Whole-App Backup config metadata is invalid: {error}"
                 ))
             })?;
         let credential_slots: Vec<CredentialSlotDeclaration> =
             serde_json::from_value(imported.credential_slots.clone()).map_err(|error| {
-                PluginRuntimeM1ApplicationError::Invalid(format!(
+                PluginRuntimeApplicationError::Invalid(format!(
                     "Whole-App Backup credential slots are invalid: {error}"
                 ))
             })?;
@@ -2923,7 +2999,7 @@ impl PluginRuntimeM1ApplicationService {
             .map(|slot| slot.slot_key.as_ref().to_owned())
             .collect::<BTreeSet<_>>();
         if credential_slot_keys != imported.metadata.credential_slot_keys {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
+            return Err(PluginRuntimeApplicationError::Invalid(
                 "Whole-App Backup credential slot inventory does not match metadata".into(),
             ));
         }
@@ -2938,15 +3014,15 @@ impl PluginRuntimeM1ApplicationService {
         .collect::<BTreeSet<_>>();
         let actual_release_slots = imported.releases.keys().map(String::as_str).collect();
         if expected_release_slots != actual_release_slots {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
+            return Err(PluginRuntimeApplicationError::Invalid(
                 "Whole-App Backup Release inventory does not match Product pointers".into(),
             ));
         }
-        if product.miniapp_id != imported.metadata.source_miniapp_id.as_ref()
-            || project.miniapp_id != product.miniapp_id
+        if product.plugin_product_id != imported.metadata.source_plugin_product_id.as_ref()
+            || project.plugin_product_id != product.plugin_product_id
             || project.project_id.trim().is_empty()
             || product.lifecycle != "disabled"
-            || !matches!(product.kind.as_str(), "ui_only" | "service")
+            || product.kind != "plugin"
             || (project.source_state == "editable") != imported.source.is_some()
             || (project.source_state != "editable"
                 && project.source_state != "runtime_only"
@@ -2957,37 +3033,33 @@ impl PluginRuntimeM1ApplicationService {
             || project.project_revision < 1
             || (project.source_state == "editable" && project.build_generation < 1)
         {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
+            return Err(PluginRuntimeApplicationError::Invalid(
                 "Whole-App Backup identity, lifecycle, or Source state is inconsistent".into(),
             ));
         }
         if config.schema_digest
             != digest_payload(&config.schema)
-                .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?
+                .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?
                 .as_ref()
         {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
+            return Err(PluginRuntimeApplicationError::Invalid(
                 "Whole-App Backup configuration schema digest is invalid".into(),
             ));
         }
         if !config.schema.is_object() || !config.values.is_object() {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
+            return Err(PluginRuntimeApplicationError::Invalid(
                 "Whole-App Backup configuration must contain JSON objects".into(),
             ));
         }
-        let kind = if product.kind == "service" {
-            MiniAppM1Kind::Service
-        } else {
-            MiniAppM1Kind::UiOnly
-        };
-        let miniapp_id = Uuid::now_v7().to_string();
+        let kind = PluginRuntimeKind::Plugin;
+        let plugin_product_id = Uuid::now_v7().to_string();
         let project_id = Uuid::now_v7().to_string();
         let operation_id = Uuid::now_v7().to_string();
         let started_at_ms = positive_now_ms();
         let source_lineage = imported.source.as_ref().map(|source| {
-            MiniAppM1ImportSource::Managed(MiniAppM1ManagedSourceLineage {
+            PluginRuntimeImportSource::Managed(PluginRuntimeManagedSourceLineage {
                 managed_source_path: format!(
-                    "sources/{owner_user_id}/miniapps/{miniapp_id}/projects/{project_id}/source"
+                    "sources/{owner_user_id}/plugins/{plugin_product_id}/projects/{project_id}/source"
                 ),
                 source_head_digest: source.source.source_snapshot_digest.as_ref().to_owned(),
                 dependency_lock_digest: source.source.dependency_lock_digest.as_ref().to_owned(),
@@ -2997,10 +3069,10 @@ impl PluginRuntimeM1ApplicationService {
         });
         let begun = self
             .repository
-            .begin_import_as_new(&BeginMiniAppM1ImportAsNewParams {
-                create: CreateMiniAppM1Params {
+            .begin_import_as_new(&BeginPluginRuntimeImportAsNewParams {
+                create: CreatePluginRuntimeParams {
                     owner_user_id: owner_user_id.to_owned(),
-                    miniapp_id: miniapp_id.clone(),
+                    plugin_product_id: plugin_product_id.clone(),
                     project_id: project_id.clone(),
                     expected_library_revision: to_i64(
                         request.expected_library_revision,
@@ -3010,7 +3082,7 @@ impl PluginRuntimeM1ApplicationService {
                     description: product.description.clone(),
                     icon_asset_id: None,
                     kind,
-                    materialized_catalog_digest: digest_bytes(b"miniapp-m1-empty-catalog")
+                    materialized_catalog_digest: digest_bytes(b"plugin-m1-empty-catalog")
                         .as_ref()
                         .to_owned(),
                     config_schema_json: canonical_json_string(&config.schema)?,
@@ -3020,7 +3092,7 @@ impl PluginRuntimeM1ApplicationService {
                 operation_id: operation_id.clone(),
                 source: source_lineage
                     .clone()
-                    .unwrap_or(MiniAppM1ImportSource::RuntimeOnly),
+                    .unwrap_or(PluginRuntimeImportSource::RuntimeOnly),
                 bounded_log_tail: vec!["Plugin Whole-App Backup import started".into()],
                 started_at_ms,
             })
@@ -3038,12 +3110,12 @@ impl PluginRuntimeM1ApplicationService {
                     .import_project_exact(PluginRuntimeSourceExactImportRequest {
                         scope: PluginRuntimeSourceScope::new(
                             owner_user_id,
-                            &miniapp_id,
+                            &plugin_product_id,
                             &project_id,
                         )
                         .map_err(|error| store_error("Backup Source scope", error))?,
                         display_name: request.display_name.trim().to_owned(),
-                        content_kind: if kind == MiniAppM1Kind::Service {
+                        content_kind: if source.files.iter().any(|file| file.relative_path == "service/main.mjs") {
                             PluginRuntimeSourceContentKind::Service
                         } else {
                             PluginRuntimeSourceContentKind::UiOnly
@@ -3068,31 +3140,31 @@ impl PluginRuntimeM1ApplicationService {
             let mut release_items = Vec::with_capacity(imported_releases.len());
             for (slot, release) in &imported_releases {
                 let slot = match slot.as_str() {
-                    "ready" => MiniAppM1BackupReleaseSlot::Ready,
-                    "active" => MiniAppM1BackupReleaseSlot::Active,
-                    "previous" => MiniAppM1BackupReleaseSlot::Previous,
+                    "ready" => PluginRuntimeBackupReleaseSlot::Ready,
+                    "active" => PluginRuntimeBackupReleaseSlot::Active,
+                    "previous" => PluginRuntimeBackupReleaseSlot::Previous,
                     _ => {
-                        return Err(PluginRuntimeM1ApplicationError::Invalid(
+                        return Err(PluginRuntimeApplicationError::Invalid(
                             "Whole-App Backup contains an unsupported Release slot".into(),
                         ));
                     }
                 };
                 let old_id = match slot {
-                    MiniAppM1BackupReleaseSlot::Ready => product.ready_release_id.as_deref(),
-                    MiniAppM1BackupReleaseSlot::Active => product.active_release_id.as_deref(),
-                    MiniAppM1BackupReleaseSlot::Previous => {
+                    PluginRuntimeBackupReleaseSlot::Ready => product.ready_release_id.as_deref(),
+                    PluginRuntimeBackupReleaseSlot::Active => product.active_release_id.as_deref(),
+                    PluginRuntimeBackupReleaseSlot::Previous => {
                         product.previous_release_id.as_deref()
                     }
                 }
                 .ok_or_else(|| {
-                    PluginRuntimeM1ApplicationError::Invalid(
+                    PluginRuntimeApplicationError::Invalid(
                         "Whole-App Backup Release slot is not referenced by Product metadata"
                             .into(),
                     )
                 })?;
                 let slot_name = slot.as_str();
                 let release_metadata = product.release_lineage.get(slot_name).ok_or_else(|| {
-                    PluginRuntimeM1ApplicationError::Invalid(format!(
+                    PluginRuntimeApplicationError::Invalid(format!(
                         "Whole-App Backup is missing lineage metadata for Release slot {slot_name}"
                     ))
                 })?;
@@ -3103,15 +3175,8 @@ impl PluginRuntimeM1ApplicationService {
                     || release_metadata.manifest_digest
                         != artifact.manifest.payload_digest.as_ref()
                 {
-                    return Err(PluginRuntimeM1ApplicationError::Invalid(
+                    return Err(PluginRuntimeApplicationError::Invalid(
                         "Whole-App Backup Release lineage does not match its Artifact".into(),
-                    ));
-                }
-                if (kind == MiniAppM1Kind::Service)
-                    != artifact.manifest.payload.service.is_some()
-                {
-                    return Err(PluginRuntimeM1ApplicationError::Invalid(
-                        "Whole-App Backup Release kind differs from Product kind".into(),
                     ));
                 }
                 let release_id = Uuid::now_v7().to_string();
@@ -3121,7 +3186,7 @@ impl PluginRuntimeM1ApplicationService {
                             .source_snapshot_digest
                             .clone()
                             .ok_or_else(|| {
-                                PluginRuntimeM1ApplicationError::Invalid(
+                                PluginRuntimeApplicationError::Invalid(
                                     "managed Backup Release has no Source digest".into(),
                                 )
                             })?;
@@ -3129,46 +3194,46 @@ impl PluginRuntimeM1ApplicationService {
                             .dependency_lock_digest
                             .clone()
                             .ok_or_else(|| {
-                                PluginRuntimeM1ApplicationError::Invalid(
+                                PluginRuntimeApplicationError::Invalid(
                                     "managed Backup Release has no dependency lock digest".into(),
                                 )
                             })?;
                         let build_generation = release_metadata.build_generation.ok_or_else(|| {
-                            PluginRuntimeM1ApplicationError::Invalid(
+                            PluginRuntimeApplicationError::Invalid(
                                 "managed Backup Release has no build generation".into(),
                             )
                         })?;
                         if release_metadata.project_id.as_deref() != Some(
                             project.project_id.as_str(),
                         ) || release_metadata.build_profile_version.as_deref()
-                            != Some(MINIAPP_RELEASE_PROFILE_VERSION)
+                            != Some(PLUGIN_RELEASE_PROFILE_VERSION)
                         {
-                            return Err(PluginRuntimeM1ApplicationError::Invalid(
+                            return Err(PluginRuntimeApplicationError::Invalid(
                                 "managed Backup Release Project lineage is invalid".into(),
                             ));
                         }
-                        MiniAppSourceLineage::Managed {
-                            project_id: MiniAppProjectId::from(project_id.clone()),
+                        PluginReleaseSourceLineage::Managed {
+                            project_id: PluginProjectId::from(project_id.clone()),
                             source_snapshot_digest: DigestHex::from(source_digest),
                             dependency_lock_digest: DigestHex::from(lock_digest),
-                            build_profile_version: MINIAPP_RELEASE_PROFILE_VERSION.into(),
+                            build_profile_version: PLUGIN_RELEASE_PROFILE_VERSION.into(),
                             build_generation: u64::try_from(build_generation).map_err(|_| {
-                                PluginRuntimeM1ApplicationError::Invalid(
+                                PluginRuntimeApplicationError::Invalid(
                                     "Backup Release build generation is invalid".into(),
                                 )
                             })?,
                         }
                     }
-                    "runtime_only" => MiniAppSourceLineage::RuntimeOnly,
+                    "runtime_only" => PluginReleaseSourceLineage::RuntimeOnly,
                     _ => {
-                        return Err(PluginRuntimeM1ApplicationError::Invalid(
+                        return Err(PluginRuntimeApplicationError::Invalid(
                             "Whole-App Backup Release source kind is invalid".into(),
                         ));
                     }
                 };
                 let is_managed = matches!(
                     managed_lineage,
-                    MiniAppSourceLineage::Managed { .. }
+                    PluginReleaseSourceLineage::Managed { .. }
                 );
                 let release_source_digest = release_metadata
                     .source_snapshot_digest
@@ -3189,31 +3254,31 @@ impl PluginRuntimeM1ApplicationService {
                     .build_generation
                     .and_then(|value| u64::try_from(value).ok())
                     .unwrap_or(1);
-                let ready = MiniAppReadyRelease {
-                    miniapp_id: MiniAppId::from(miniapp_id.clone()),
-                    release: MiniAppReleaseRef {
-                        release_id: MiniAppReleaseId::from(release_id.clone()),
+                let ready = PluginReadyRelease {
+                    plugin_product_id: PluginProductId::from(plugin_product_id.clone()),
+                    release: PluginReleaseRef {
+                        release_id: PluginReleaseId::from(release_id.clone()),
                         artifact_id: artifact.artifact_id.clone(),
                         release_digest: artifact.artifact_digest.clone(),
                         manifest_digest: artifact.manifest.payload_digest.clone(),
                     },
                     origin_operation_id: OperationId::from(operation_id.clone()),
-                    origin: MiniAppReadyOrigin::Import,
+                    origin: PluginReadyOrigin::Import,
                     source_lineage: managed_lineage.clone(),
                     matching_service_test_receipt: None,
                     created_at_ms: positive_now_ms().max(started_at_ms),
                 };
                 ready
                     .validate_for_artifact(artifact)
-                    .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
+                    .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
                 let published = self
                     .stores
                     .release
-                    .publish(if kind == MiniAppM1Kind::Service {
+                    .publish(if artifact.manifest.payload.service.is_some() {
                         PluginRuntimeReleasePublishRequest::service(
                             PluginRuntimeSourceScope::new(
                                 owner_user_id,
-                                &miniapp_id,
+                                &plugin_product_id,
                                 &project_id,
                             )
                             .map_err(|error| store_error("Backup Release scope", error))?,
@@ -3236,7 +3301,7 @@ impl PluginRuntimeM1ApplicationService {
                         PluginRuntimeReleasePublishRequest::ui_only(
                             PluginRuntimeSourceScope::new(
                                 owner_user_id,
-                                &miniapp_id,
+                                &plugin_product_id,
                                 &project_id,
                             )
                             .map_err(|error| store_error("Backup Release scope", error))?,
@@ -3262,9 +3327,9 @@ impl PluginRuntimeM1ApplicationService {
                 release_ref.artifact_id = artifact.artifact_id.clone();
                 release_ref.manifest_digest = artifact.manifest.payload_digest.clone();
                 release_refs.insert(old_id.to_owned(), release_ref.clone());
-                release_items.push(MiniAppM1BackupImportRelease {
+                release_items.push(PluginRuntimeBackupImportRelease {
                     slot,
-                    artifact: MiniAppReleaseArtifactRow {
+                    artifact: PluginRuntimeReleaseArtifactRow {
                         id: 0,
                         artifact_id: artifact.artifact_id.as_ref().to_owned(),
                         owner_user_id: owner_user_id.to_owned(),
@@ -3274,10 +3339,10 @@ impl PluginRuntimeM1ApplicationService {
                         managed_path: published.stored.managed_relative_path,
                         created_at: ready.created_at_ms,
                     },
-                    release: MiniAppReleaseRow {
+                    release: PluginRuntimeReleaseRow {
                         id: 0,
                         release_id,
-                        miniapp_id: miniapp_id.clone(),
+                        plugin_product_id: plugin_product_id.clone(),
                         owner_user_id: owner_user_id.to_owned(),
                         artifact_id: artifact.artifact_id.as_ref().to_owned(),
                         artifact_digest: artifact.artifact_digest.as_ref().to_owned(),
@@ -3287,7 +3352,7 @@ impl PluginRuntimeM1ApplicationService {
                         origin_operation_id: operation_id.clone(),
                         source_kind: if matches!(
                             ready.source_lineage,
-                            MiniAppSourceLineage::Managed { .. }
+                            PluginReleaseSourceLineage::Managed { .. }
                         ) {
                             "managed".into()
                         } else {
@@ -3295,7 +3360,7 @@ impl PluginRuntimeM1ApplicationService {
                         },
                         project_id: if matches!(
                             ready.source_lineage,
-                            MiniAppSourceLineage::Managed { .. }
+                            PluginReleaseSourceLineage::Managed { .. }
                         ) {
                             Some(project_id.clone())
                         } else {
@@ -3312,7 +3377,7 @@ impl PluginRuntimeM1ApplicationService {
                             None
                         },
                         build_profile_version: if is_managed {
-                            Some(MINIAPP_RELEASE_PROFILE_VERSION.into())
+                            Some(PLUGIN_RELEASE_PROFILE_VERSION.into())
                         } else {
                             None
                         },
@@ -3330,95 +3395,78 @@ impl PluginRuntimeM1ApplicationService {
                 Some(old_active_release_id) => {
                     let active = release_items
                         .iter()
-                        .find(|item| item.slot == MiniAppM1BackupReleaseSlot::Active)
+                        .find(|item| item.slot == PluginRuntimeBackupReleaseSlot::Active)
                         .ok_or_else(|| {
-                            PluginRuntimeM1ApplicationError::Invalid(
+                            PluginRuntimeApplicationError::Invalid(
                                 "Whole-App Backup Active Release is missing".into(),
                             )
                         })?;
                     let active_ref = release_refs
                         .get(old_active_release_id)
                         .ok_or_else(|| {
-                            PluginRuntimeM1ApplicationError::Invalid(
+                            PluginRuntimeApplicationError::Invalid(
                                 "Whole-App Backup Active Release identity is missing".into(),
                             )
                         })?;
-                    let active_artifact: nomifun_agent_contracts::MiniAppReleaseArtifactV1 =
+                    let active_artifact: nomifun_agent_contracts::PluginReleaseArtifactV1 =
                         serde_json::from_str(&active.artifact.artifact_record_json).map_err(
                             |error| {
-                                PluginRuntimeM1ApplicationError::Invalid(format!(
+                                PluginRuntimeApplicationError::Invalid(format!(
                                     "imported Active Release Artifact is invalid: {error}"
                                 ))
                             },
                         )?;
-                    miniapp_catalog_digest(
-                        &miniapp_id,
+                    plugin_catalog_digest(
+                        &plugin_product_id,
                         active_ref,
                         &active_artifact.manifest.payload.contributions,
                     )?
                     .as_ref()
                     .to_owned()
                 }
-                None => digest_bytes(b"miniapp-m1-empty-catalog").as_ref().to_owned(),
+                None => digest_bytes(b"plugin-m1-empty-catalog").as_ref().to_owned(),
             };
             let mut ledger = imported_storage.migration_ledger.take();
             if let Some(ledger_value) = ledger.as_mut() {
                 *ledger_value = rebind_migration_ledger_for_target_with_releases(
                     ledger_value,
-                    MiniAppId::from(miniapp_id.clone()),
-                    MiniAppDatabaseHandleId::from(format!("miniapp-db-{miniapp_id}")),
+                    PluginProductId::from(plugin_product_id.clone()),
+                    PluginDatabaseHandleId::from(format!("plugin-db-{plugin_product_id}")),
                     &release_refs,
                 )
-                .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
+                .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
             }
             let mut storage = imported_storage;
             storage.migration_ledger = ledger;
             storage.kv.clear();
-            if kind == MiniAppM1Kind::Service {
-                let active_artifact = release_items
-                    .iter()
-                    .find(|item| item.slot == MiniAppM1BackupReleaseSlot::Active)
-                    .or_else(|| {
-                        release_items
-                            .iter()
-                            .find(|item| item.slot == MiniAppM1BackupReleaseSlot::Ready)
-                    })
-                    .map(|item| item.artifact.artifact_record_json.clone());
-                let (uses_files, uses_private_database) = active_artifact
-                    .as_deref()
-                    .map(|value| {
-                        serde_json::from_str::<nomifun_agent_contracts::MiniAppReleaseArtifactV1>(
-                            value,
-                        )
-                        .ok()
-                        .and_then(|artifact| {
-                            artifact.manifest.payload.service.map(|service| {
-                                (service.uses_files, service.uses_private_database)
-                            })
-                        })
-                        .unwrap_or((false, false))
-                    })
-                    .unwrap_or((false, false));
+            if imported_releases.values().any(|release| release.artifact.manifest.payload.service.is_some()) {
+                // Retained Releases may have different roles; preserve the union of
+                // their storage needs so rollback does not discard managed data.
+                let (uses_files, uses_private_database) = imported_releases.values()
+                    .filter_map(|release| release.artifact.manifest.payload.service.as_ref())
+                    .fold((false, false), |(files, database), service| {
+                        (files || service.uses_files, database || service.uses_private_database)
+                    });
                 self.service_runtime()
                     .await
                     .import_backup_storage(
                         owner_user_id,
-                        &MiniAppId::from(miniapp_id.clone()),
+                        &PluginProductId::from(plugin_product_id.clone()),
                         storage,
                         uses_files,
                         uses_private_database,
                     )
                     .await
-                    .map_err(|error| PluginRuntimeM1ApplicationError::Runtime(error.to_string()))?;
+                    .map_err(|error| PluginRuntimeApplicationError::Runtime(error.to_string()))?;
             }
             let kv = kv_payloads
                 .iter()
                 .map(|value| {
                     let row: BackupKvMetadata = serde_json::from_value(value.clone())
-                        .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
-                    Ok(MiniAppKvRow {
+                        .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
+                    Ok(PluginRuntimeKvRow {
                         id: 0,
-                        miniapp_id: miniapp_id.clone(),
+                        plugin_product_id: plugin_product_id.clone(),
                         owner_user_id: owner_user_id.to_owned(),
                         namespace: row.namespace,
                         key: row.key,
@@ -3430,11 +3478,11 @@ impl PluginRuntimeM1ApplicationService {
                         updated_at: row.updated_at,
                     })
                 })
-                .collect::<Result<Vec<_>, PluginRuntimeM1ApplicationError>>()?;
+                .collect::<Result<Vec<_>, PluginRuntimeApplicationError>>()?;
             self.repository
-                .finish_backup_import(&FinishMiniAppM1BackupImportParams {
+                .finish_backup_import(&FinishPluginRuntimeBackupImportParams {
                     owner_user_id: owner_user_id.to_owned(),
-                    miniapp_id: miniapp_id.clone(),
+                    plugin_product_id: plugin_product_id.clone(),
                     project_id: project_id.clone(),
                     operation_id: operation_id.clone(),
                     expected_library_revision: begun.snapshot.library_revision,
@@ -3447,7 +3495,7 @@ impl PluginRuntimeM1ApplicationService {
                     finished_at_ms: positive_now_ms().max(started_at_ms),
                 })
                 .await
-                .map_err(PluginRuntimeM1ApplicationError::from)
+                .map_err(PluginRuntimeApplicationError::from)
         }
         .await;
         match result {
@@ -3455,16 +3503,16 @@ impl PluginRuntimeM1ApplicationService {
             Err(error) => {
                 let _ = self
                     .repository
-                    .fail_import(&FailMiniAppM1ImportParams {
+                    .fail_import(&FailPluginRuntimeImportParams {
                         owner_user_id: owner_user_id.to_owned(),
-                        miniapp_id: miniapp_id.clone(),
+                        plugin_product_id: plugin_product_id.clone(),
                         project_id: project_id.clone(),
                         operation_id,
                         expected_product_revision: begun.snapshot.product.product_revision,
                         expected_pointer_revision: begun.snapshot.product.pointer_revision,
                         expected_project_revision: begun.snapshot.project.project_revision,
                         progress_percent: 0,
-                        error_code: "miniapp_backup_import_failed".into(),
+                        error_code: "plugin_backup_import_failed".into(),
                         bounded_log_tail: vec![bounded_log_line(&error.to_string())],
                         finished_at_ms: positive_now_ms().max(started_at_ms),
                     })
@@ -3474,17 +3522,17 @@ impl PluginRuntimeM1ApplicationService {
                     .await
                     .purge_storage(
                         owner_user_id,
-                        &MiniAppId::from(miniapp_id.clone()),
+                        &PluginProductId::from(plugin_product_id.clone()),
                     )
                     .await;
                 let _ = self
                     .stores
                     .source
-                    .purge_project(owner_user_id, &miniapp_id, &project_id);
+                    .purge_project(owner_user_id, &plugin_product_id, &project_id);
                 let _ = self
                     .stores
                     .release
-                    .purge_project(owner_user_id, &miniapp_id, &project_id);
+                    .purge_project(owner_user_id, &plugin_product_id, &project_id);
                 Err(error)
             }
         }
@@ -3497,23 +3545,20 @@ impl PluginRuntimeM1ApplicationService {
         display_name: String,
         imported: PluginRuntimeImportedRelease,
         source: Option<PluginRuntimeImportedSource>,
-    ) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeM1ApplicationError> {
-        let miniapp_id = Uuid::now_v7().to_string();
+    ) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeApplicationError> {
+        let plugin_product_id = Uuid::now_v7().to_string();
         let project_id = Uuid::now_v7().to_string();
         let operation_id = Uuid::now_v7().to_string();
         let started_at_ms = positive_now_ms();
-        let kind = if imported.artifact.manifest.payload.service.is_some() {
-            MiniAppM1Kind::Service
-        } else {
-            MiniAppM1Kind::UiOnly
-        };
+        let kind = PluginRuntimeKind::Plugin;
+        let is_service = imported.artifact.manifest.payload.service.is_some();
         let managed_path = format!(
-            "sources/{owner_user_id}/miniapps/{miniapp_id}/projects/{project_id}/source"
+            "sources/{owner_user_id}/plugins/{plugin_product_id}/projects/{project_id}/source"
         );
         let import_source = source.as_ref().map_or(
-            MiniAppM1ImportSource::RuntimeOnly,
+            PluginRuntimeImportSource::RuntimeOnly,
             |source| {
-                MiniAppM1ImportSource::Managed(MiniAppM1ManagedSourceLineage {
+                PluginRuntimeImportSource::Managed(PluginRuntimeManagedSourceLineage {
                     managed_source_path: managed_path.clone(),
                     source_head_digest: source
                         .source
@@ -3536,10 +3581,10 @@ impl PluginRuntimeM1ApplicationService {
         );
         let begun = self
             .repository
-            .begin_import_as_new(&BeginMiniAppM1ImportAsNewParams {
-                create: CreateMiniAppM1Params {
+            .begin_import_as_new(&BeginPluginRuntimeImportAsNewParams {
+                create: CreatePluginRuntimeParams {
                     owner_user_id: owner_user_id.to_owned(),
-                    miniapp_id: miniapp_id.clone(),
+                    plugin_product_id: plugin_product_id.clone(),
                     project_id: project_id.clone(),
                     expected_library_revision: to_i64(
                         expected_library_revision,
@@ -3552,9 +3597,9 @@ impl PluginRuntimeM1ApplicationService {
                     icon_asset_id: None,
                     kind,
                     materialized_catalog_digest: digest_payload(
-                        &"miniapp-m1-empty-catalog",
+                        &"plugin-m1-empty-catalog",
                     )
-                    .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?
+                    .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?
                     .as_ref()
                     .to_owned(),
                     config_schema_json: canonical_json_string(
@@ -3576,12 +3621,12 @@ impl PluginRuntimeM1ApplicationService {
                     .import_project_exact(PluginRuntimeSourceExactImportRequest {
                         scope: PluginRuntimeSourceScope::new(
                             owner_user_id,
-                            &miniapp_id,
+                            &plugin_product_id,
                             &project_id,
                         )
                         .map_err(|error| store_error("Import Source scope", error))?,
                         display_name: display_name.clone(),
-                        content_kind: if kind == MiniAppM1Kind::Service {
+                        content_kind: if source.files.iter().any(|file| file.normalized_relative_path == "service/main.mjs") {
                             crate::runtime::PluginRuntimeSourceContentKind::Service
                         } else {
                             crate::runtime::PluginRuntimeSourceContentKind::UiOnly
@@ -3608,7 +3653,7 @@ impl PluginRuntimeM1ApplicationService {
                     })
                     .map_err(|error| store_error("Import Source", error))?;
             }
-            let scope = PluginRuntimeSourceScope::new(owner_user_id, &miniapp_id, &project_id)
+            let scope = PluginRuntimeSourceScope::new(owner_user_id, &plugin_product_id, &project_id)
                 .map_err(|error| store_error("Import Release scope", error))?;
             let source_digest = begun
                 .snapshot
@@ -3633,7 +3678,7 @@ impl PluginRuntimeM1ApplicationService {
             let published = self
                 .stores
                 .release
-                .publish(if kind == MiniAppM1Kind::Service {
+                .publish(if is_service {
                     PluginRuntimeReleasePublishRequest::service(
                         scope,
                         source_digest.clone().into(),
@@ -3657,44 +3702,44 @@ impl PluginRuntimeM1ApplicationService {
             let release_id = Uuid::now_v7().to_string();
             let finished_at_ms = positive_now_ms().max(started_at_ms);
             let source_lineage = if begun.snapshot.project.source_state == "editable" {
-                MiniAppSourceLineage::Managed {
+                PluginReleaseSourceLineage::Managed {
                     project_id: project_id.clone().into(),
                     source_snapshot_digest: source_digest.clone().into(),
                     dependency_lock_digest: lock_digest.clone().into(),
-                    build_profile_version: MINIAPP_RELEASE_PROFILE_VERSION.into(),
+                    build_profile_version: PLUGIN_RELEASE_PROFILE_VERSION.into(),
                     build_generation: 1,
                 }
             } else {
-                MiniAppSourceLineage::RuntimeOnly
+                PluginReleaseSourceLineage::RuntimeOnly
             };
-            let ready = MiniAppReadyRelease {
-                miniapp_id: miniapp_id.clone().into(),
-                release: MiniAppReleaseRef {
+            let ready = PluginReadyRelease {
+                plugin_product_id: plugin_product_id.clone().into(),
+                release: PluginReleaseRef {
                     release_id: release_id.clone().into(),
                     artifact_id: artifact.artifact_id.clone(),
                     release_digest: artifact.artifact_digest.clone(),
                     manifest_digest: artifact.manifest.payload_digest.clone(),
                 },
                 origin_operation_id: operation_id.clone().into(),
-                origin: MiniAppReadyOrigin::Import,
+                origin: PluginReadyOrigin::Import,
                 source_lineage,
                 matching_service_test_receipt: None,
                 created_at_ms: finished_at_ms,
             };
             ready
                 .validate_for_artifact(&artifact)
-                .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
+                .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
             self.repository
-                .finish_import_ready(&FinishMiniAppM1ImportReadyParams {
+                .finish_import_ready(&FinishPluginRuntimeImportReadyParams {
                     owner_user_id: owner_user_id.to_owned(),
-                    miniapp_id: miniapp_id.clone(),
+                    plugin_product_id: plugin_product_id.clone(),
                     project_id: project_id.clone(),
                     operation_id: operation_id.clone(),
                     expected_library_revision: begun.snapshot.library_revision,
                     expected_product_revision: begun.snapshot.product.product_revision,
                     expected_pointer_revision: begun.snapshot.product.pointer_revision,
                     expected_project_revision: begun.snapshot.project.project_revision,
-                    artifact: MiniAppReleaseArtifactRow {
+                    artifact: PluginRuntimeReleaseArtifactRow {
                         id: 0,
                         artifact_id: artifact.artifact_id.as_ref().to_owned(),
                         owner_user_id: owner_user_id.to_owned(),
@@ -3704,10 +3749,10 @@ impl PluginRuntimeM1ApplicationService {
                         managed_path: published.stored.managed_relative_path,
                         created_at: finished_at_ms,
                     },
-                    release: MiniAppReleaseRow {
+                    release: PluginRuntimeReleaseRow {
                         id: 0,
                         release_id,
-                        miniapp_id: miniapp_id.clone(),
+                        plugin_product_id: plugin_product_id.clone(),
                         owner_user_id: owner_user_id.to_owned(),
                         artifact_id: artifact.artifact_id.as_ref().to_owned(),
                         artifact_digest: artifact.artifact_digest.as_ref().to_owned(),
@@ -3730,7 +3775,7 @@ impl PluginRuntimeM1ApplicationService {
                             .then_some(lock_digest),
                         build_profile_version: (begun.snapshot.project.source_state
                             == "editable")
-                            .then_some(MINIAPP_RELEASE_PROFILE_VERSION.into()),
+                            .then_some(PLUGIN_RELEASE_PROFILE_VERSION.into()),
                         build_generation: (begun.snapshot.project.source_state == "editable")
                             .then_some(1),
                         release_record_json: canonical_json_string(&ready)?,
@@ -3740,7 +3785,7 @@ impl PluginRuntimeM1ApplicationService {
                     finished_at_ms,
                 })
                 .await
-                .map_err(PluginRuntimeM1ApplicationError::from)
+                .map_err(PluginRuntimeApplicationError::from)
         }
         .await;
         match result {
@@ -3748,16 +3793,16 @@ impl PluginRuntimeM1ApplicationService {
             Err(error) => {
                 let _ = self
                     .repository
-                    .fail_import(&FailMiniAppM1ImportParams {
+                    .fail_import(&FailPluginRuntimeImportParams {
                         owner_user_id: owner_user_id.to_owned(),
-                        miniapp_id: miniapp_id.clone(),
+                        plugin_product_id: plugin_product_id.clone(),
                         project_id: project_id.clone(),
                         operation_id,
                         expected_product_revision: begun.snapshot.product.product_revision,
                         expected_pointer_revision: begun.snapshot.product.pointer_revision,
                         expected_project_revision: begun.snapshot.project.project_revision,
                         progress_percent: 0,
-                        error_code: "miniapp_import_failed".into(),
+                        error_code: "plugin_import_failed".into(),
                         bounded_log_tail: vec![bounded_log_line(&error.to_string())],
                         finished_at_ms: positive_now_ms().max(started_at_ms),
                     })
@@ -3765,11 +3810,11 @@ impl PluginRuntimeM1ApplicationService {
                 let _ = self
                     .stores
                     .source
-                    .purge_project(owner_user_id, &miniapp_id, &project_id);
+                    .purge_project(owner_user_id, &plugin_product_id, &project_id);
                 let _ = self
                     .stores
                     .release
-                    .purge_project(owner_user_id, &miniapp_id, &project_id);
+                    .purge_project(owner_user_id, &plugin_product_id, &project_id);
                 Err(error)
             }
         }
@@ -3778,51 +3823,50 @@ impl PluginRuntimeM1ApplicationService {
     pub async fn publish(
         &self,
         owner_user_id: &str,
-        request: PublishMiniAppRequestDto,
-    ) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeM1ApplicationError> {
+        request: PublishPluginRequestDto,
+    ) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeApplicationError> {
         let snapshot = self
             .repository
-            .get(owner_user_id, &request.miniapp_id)
+            .get(owner_user_id, &request.plugin_id)
             .await?
-            .ok_or(PluginRuntimeM1ApplicationError::NotFound)?;
+            .ok_or(PluginRuntimeApplicationError::NotFound)?;
         require_release_mutation(&snapshot)?;
-        require_no_running_build(&*self.repository, owner_user_id, &request.miniapp_id).await?;
+        require_no_running_build(&*self.repository, owner_user_id, &request.plugin_id).await?;
         validate_publish_request(&snapshot, &request)?;
 
         let ready = snapshot
             .ready_release
             .as_ref()
-            .ok_or_else(|| PluginRuntimeM1ApplicationError::Invalid("no Ready Release".to_owned()))?;
+            .ok_or_else(|| PluginRuntimeApplicationError::Invalid("no Ready Release".to_owned()))?;
         let stored = self.load_verified_release(
             owner_user_id,
             &snapshot.project.project_id,
             ready,
         )?;
-        if snapshot.product.kind == MiniAppM1Kind::UiOnly.as_str()
-            && !stored.artifact.manifest.payload.is_ui_only()
-        {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
-                "UI-only Plugin cannot publish a Service Release".to_owned(),
+        if stored.artifact.manifest.payload.service.is_none()
+            && (request.expected_service_test_receipt_id.is_some() || request.acknowledge_test_warning) {
+            return Err(PluginRuntimeApplicationError::Invalid(
+                "UI-only Publish does not accept Service Test warnings or receipts".to_owned(),
             ));
         }
         self.validate_service_publish_receipt(owner_user_id, &snapshot, &request)
             .await?;
 
         let target = release_contract_ref(ready);
-        let target_catalog_digest = miniapp_catalog_digest(
-            &request.miniapp_id,
+        let target_catalog_digest = plugin_catalog_digest(
+            &request.plugin_id,
             &target,
             &stored.artifact.manifest.payload.contributions,
         )?;
         let target_epoch = u64::try_from(snapshot.product.active_release_epoch)
             .map_err(|_| {
-                PluginRuntimeM1ApplicationError::Invalid(
+                PluginRuntimeApplicationError::Invalid(
                     "Plugin active Release epoch is negative".to_owned(),
                 )
             })?
             .checked_add(1)
             .ok_or_else(|| {
-                PluginRuntimeM1ApplicationError::Invalid(
+                PluginRuntimeApplicationError::Invalid(
                     "Plugin active Release epoch overflow".to_owned(),
                 )
             })?;
@@ -3831,9 +3875,9 @@ impl PluginRuntimeM1ApplicationService {
             .await?;
         let committed = self
             .repository
-            .publish_ready_cas(&PublishMiniAppM1ReadyParams {
+            .publish_ready_cas(&PublishPluginRuntimeReadyParams {
                 owner_user_id: owner_user_id.to_owned(),
-                miniapp_id: request.miniapp_id.clone(),
+                plugin_product_id: request.plugin_id.clone(),
                 expected_product_revision: to_i64(
                     request.expected_product_revision,
                     "product revision",
@@ -3876,10 +3920,10 @@ impl PluginRuntimeM1ApplicationService {
     async fn validate_service_publish_receipt(
         &self,
         owner_user_id: &str,
-        snapshot: &MiniAppM1Snapshot,
-        request: &PublishMiniAppRequestDto,
-    ) -> Result<(), PluginRuntimeM1ApplicationError> {
-        if snapshot.product.kind != MiniAppM1Kind::Service.as_str() {
+        snapshot: &PluginRuntimeSnapshot,
+        request: &PublishPluginRequestDto,
+    ) -> Result<(), PluginRuntimeApplicationError> {
+        if !self.release_has_service(snapshot, snapshot.ready_release.as_ref())? {
             return Ok(());
         }
         let Some(expected_receipt_id) =
@@ -3888,7 +3932,7 @@ impl PluginRuntimeM1ApplicationService {
             if request.acknowledge_test_warning {
                 return Ok(());
             }
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
+            return Err(PluginRuntimeApplicationError::Invalid(
                 "Service Publish requires a current passed receipt or explicit Test warning acknowledgement"
                     .into(),
             ));
@@ -3897,11 +3941,11 @@ impl PluginRuntimeM1ApplicationService {
             .repository
             .get_ready_service_test_receipt(
                 owner_user_id,
-                &snapshot.product.miniapp_id,
+                &snapshot.product.plugin_product_id,
             )
             .await?
             .ok_or_else(|| {
-                PluginRuntimeM1ApplicationError::Database(
+                PluginRuntimeApplicationError::Database(
                     nomifun_db::DbError::Conflict(
                         "Service Test receipt is stale for the current Ready state".into(),
                     ),
@@ -3911,7 +3955,7 @@ impl PluginRuntimeM1ApplicationService {
             || row.release_id != request.ready_release_id
             || row.release_digest != request.expected_ready_release_digest
         {
-            return Err(PluginRuntimeM1ApplicationError::Database(
+            return Err(PluginRuntimeApplicationError::Database(
                 nomifun_db::DbError::Conflict(
                     "Service Publish does not bind the current Ready Test receipt".into(),
                 ),
@@ -3923,43 +3967,43 @@ impl PluginRuntimeM1ApplicationService {
             .current_runtime_fingerprint()
             .await
             .map_err(|error| {
-                PluginRuntimeM1ApplicationError::Runtime(format!(
+                PluginRuntimeApplicationError::Runtime(format!(
                     "cannot resolve current Runtime for Service Publish: {error}"
                 ))
             })?
             .ok_or_else(|| {
-                PluginRuntimeM1ApplicationError::Database(
+                PluginRuntimeApplicationError::Database(
                     nomifun_db::DbError::Conflict(
                         "Service Test receipt is stale because no Runtime is selected".into(),
                     ),
                 )
             })?;
         let runtime_digest = digest_payload(&current_runtime)
-            .map_err(|error| PluginRuntimeM1ApplicationError::Runtime(error.to_string()))?;
+            .map_err(|error| PluginRuntimeApplicationError::Runtime(error.to_string()))?;
         if runtime_digest.as_ref() != row.runtime_fingerprint_digest {
-            return Err(PluginRuntimeM1ApplicationError::Database(
+            return Err(PluginRuntimeApplicationError::Database(
                 nomifun_db::DbError::Conflict(
                     "Service Test receipt Runtime no longer matches the committed Runtime".into(),
                 ),
             ));
         }
-        let receipt: MiniAppServiceTestReceipt =
+        let receipt: PluginServiceTestReceipt =
             serde_json::from_str(&row.receipt_json).map_err(|error| {
-                PluginRuntimeM1ApplicationError::Runtime(format!(
+                PluginRuntimeApplicationError::Runtime(format!(
                     "stored Service Test receipt is invalid: {error}"
                 ))
             })?;
         match receipt.outcome {
-            MiniAppServiceTestOutcome::Passed => Ok(()),
-            MiniAppServiceTestOutcome::Failed
-            | MiniAppServiceTestOutcome::NeedsTestInput
+            PluginServiceTestOutcome::Passed => Ok(()),
+            PluginServiceTestOutcome::Failed
+            | PluginServiceTestOutcome::NeedsTestInput
                 if request.acknowledge_test_warning =>
             {
                 Ok(())
             }
-            MiniAppServiceTestOutcome::Failed
-            | MiniAppServiceTestOutcome::NeedsTestInput => {
-                Err(PluginRuntimeM1ApplicationError::Invalid(
+            PluginServiceTestOutcome::Failed
+            | PluginServiceTestOutcome::NeedsTestInput => {
+                Err(PluginRuntimeApplicationError::Invalid(
                     "Service Publish requires explicit acknowledgement for a non-passed Test receipt"
                         .into(),
                 ))
@@ -3970,25 +4014,25 @@ impl PluginRuntimeM1ApplicationService {
     pub async fn rollback(
         &self,
         owner_user_id: &str,
-        request: RollbackMiniAppRequestDto,
-    ) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeM1ApplicationError> {
+        request: RollbackPluginRequestDto,
+    ) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeApplicationError> {
         let snapshot = self
             .repository
-            .get(owner_user_id, &request.miniapp_id)
+            .get(owner_user_id, &request.plugin_id)
             .await?
-            .ok_or(PluginRuntimeM1ApplicationError::NotFound)?;
+            .ok_or(PluginRuntimeApplicationError::NotFound)?;
         require_release_mutation(&snapshot)?;
-        require_no_running_build(&*self.repository, owner_user_id, &request.miniapp_id).await?;
+        require_no_running_build(&*self.repository, owner_user_id, &request.plugin_id).await?;
         validate_rollback_request(&snapshot, &request)?;
 
         let active = snapshot
             .active_release
             .as_ref()
-            .ok_or_else(|| PluginRuntimeM1ApplicationError::Invalid("no Active Release".to_owned()))?;
+            .ok_or_else(|| PluginRuntimeApplicationError::Invalid("no Active Release".to_owned()))?;
         let previous = snapshot
             .previous_release
             .as_ref()
-            .ok_or_else(|| PluginRuntimeM1ApplicationError::Invalid("no Previous Release".to_owned()))?;
+            .ok_or_else(|| PluginRuntimeApplicationError::Invalid("no Previous Release".to_owned()))?;
         self.load_verified_release(
             owner_user_id,
             &snapshot.project.project_id,
@@ -3999,29 +4043,22 @@ impl PluginRuntimeM1ApplicationService {
             &snapshot.project.project_id,
             previous,
         )?;
-        if snapshot.product.kind == MiniAppM1Kind::UiOnly.as_str()
-            && !target.artifact.manifest.payload.is_ui_only()
-        {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
-                "UI-only Plugin cannot roll back to a Service Release".to_owned(),
-            ));
-        }
 
         let rollback_target = release_contract_ref(previous);
-        let target_catalog_digest = miniapp_catalog_digest(
-            &request.miniapp_id,
+        let target_catalog_digest = plugin_catalog_digest(
+            &request.plugin_id,
             &rollback_target,
             &target.artifact.manifest.payload.contributions,
         )?;
         let target_epoch = u64::try_from(snapshot.product.active_release_epoch)
             .map_err(|_| {
-                PluginRuntimeM1ApplicationError::Invalid(
+                PluginRuntimeApplicationError::Invalid(
                     "Plugin active Release epoch is negative".to_owned(),
                 )
             })?
             .checked_add(1)
             .ok_or_else(|| {
-                PluginRuntimeM1ApplicationError::Invalid(
+                PluginRuntimeApplicationError::Invalid(
                     "Plugin active Release epoch overflow".to_owned(),
                 )
             })?;
@@ -4030,9 +4067,9 @@ impl PluginRuntimeM1ApplicationService {
             .await?;
         let committed = self
             .repository
-            .rollback_previous_cas(&RollbackMiniAppM1PreviousParams {
+            .rollback_previous_cas(&RollbackPluginRuntimePreviousParams {
                 owner_user_id: owner_user_id.to_owned(),
-                miniapp_id: request.miniapp_id,
+                plugin_product_id: request.plugin_id,
                 expected_product_revision: to_i64(
                     request.expected_product_revision,
                     "product revision",
@@ -4076,13 +4113,13 @@ impl PluginRuntimeM1ApplicationService {
         &self,
         owner_user_id: &str,
         request: SetPluginRuntimeEnabledRequest,
-    ) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeM1ApplicationError> {
-        validate_request_identity(&request.miniapp_id, "miniapp_id")?;
+    ) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeApplicationError> {
+        validate_request_identity(&request.plugin_id, "plugin_product_id")?;
         let snapshot = self
             .repository
-            .get(owner_user_id, &request.miniapp_id)
+            .get(owner_user_id, &request.plugin_id)
             .await?
-            .ok_or(PluginRuntimeM1ApplicationError::NotFound)?;
+            .ok_or(PluginRuntimeApplicationError::NotFound)?;
         require_release_mutation(&snapshot)?;
         if snapshot.product.product_revision
             != to_i64(request.expected_product_revision, "product revision")?
@@ -4091,7 +4128,7 @@ impl PluginRuntimeM1ApplicationService {
             || snapshot.product.active_release_digest.as_deref()
                 != request.expected_active_release_digest.as_deref()
         {
-            return Err(PluginRuntimeM1ApplicationError::Database(
+            return Err(PluginRuntimeApplicationError::Database(
                 nomifun_db::DbError::Conflict(
                     "Plugin lifecycle request is stale against the exact Product pointers"
                         .to_owned(),
@@ -4099,7 +4136,7 @@ impl PluginRuntimeM1ApplicationService {
             ));
         }
         if request.enabled && snapshot.product.active_release_id.is_none() {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
+            return Err(PluginRuntimeApplicationError::Invalid(
                 "Plugin Enable requires an Active Release".to_owned(),
             ));
         }
@@ -4109,16 +4146,16 @@ impl PluginRuntimeM1ApplicationService {
             "enabled"
         };
         if snapshot.product.lifecycle != expected_lifecycle {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(format!(
+            return Err(PluginRuntimeApplicationError::Invalid(format!(
                 "Plugin is already {}",
                 snapshot.product.lifecycle
             )));
         }
         let committed = self
             .repository
-            .commit_lifecycle_cas(&CommitMiniAppM1LifecycleParams {
+            .commit_lifecycle_cas(&CommitPluginRuntimeLifecycleParams {
                 owner_user_id: owner_user_id.to_owned(),
-                miniapp_id: request.miniapp_id,
+                plugin_product_id: request.plugin_id,
                 expected_product_revision: to_i64(
                     request.expected_product_revision,
                     "product revision",
@@ -4144,13 +4181,13 @@ impl PluginRuntimeM1ApplicationService {
         &self,
         owner_user_id: &str,
         request: TrashPluginRuntimeRequest,
-    ) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeM1ApplicationError> {
-        validate_request_identity(&request.miniapp_id, "miniapp_id")?;
+    ) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeApplicationError> {
+        validate_request_identity(&request.plugin_id, "plugin_product_id")?;
         let snapshot = self
             .repository
-            .get(owner_user_id, &request.miniapp_id)
+            .get(owner_user_id, &request.plugin_id)
             .await?
-            .ok_or(PluginRuntimeM1ApplicationError::NotFound)?;
+            .ok_or(PluginRuntimeApplicationError::NotFound)?;
         if snapshot.product.product_revision
             != to_i64(request.expected_product_revision, "product revision")?
             || snapshot.product.pointer_revision
@@ -4158,7 +4195,7 @@ impl PluginRuntimeM1ApplicationService {
             || snapshot.product.active_release_digest.as_deref()
                 != request.expected_active_release_digest.as_deref()
         {
-            return Err(PluginRuntimeM1ApplicationError::Database(
+            return Err(PluginRuntimeApplicationError::Database(
                 nomifun_db::DbError::Conflict(
                     "Plugin Trash request is stale against the exact Product pointers"
                         .to_owned(),
@@ -4166,7 +4203,7 @@ impl PluginRuntimeM1ApplicationService {
             ));
         }
         if !matches!(snapshot.product.lifecycle.as_str(), "enabled" | "disabled") {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(format!(
+            return Err(PluginRuntimeApplicationError::Invalid(format!(
                 "Plugin cannot be trashed while lifecycle is {}",
                 snapshot.product.lifecycle
             )));
@@ -4174,9 +4211,9 @@ impl PluginRuntimeM1ApplicationService {
         let updated_at = positive_now_ms().max(snapshot.product.updated_at);
         let committed = self
             .repository
-            .trash_cas(&TrashMiniAppM1Params {
+            .trash_cas(&TrashPluginRuntimeParams {
                 owner_user_id: owner_user_id.to_owned(),
-                miniapp_id: request.miniapp_id.clone(),
+                plugin_product_id: request.plugin_id.clone(),
                 expected_product_revision: snapshot.product.product_revision,
                 expected_pointer_revision: snapshot.product.pointer_revision,
                 expected_active_release_digest: snapshot
@@ -4186,17 +4223,16 @@ impl PluginRuntimeM1ApplicationService {
                 updated_at,
             })
             .await?;
-        if committed.product.kind == MiniAppM1Kind::Service.as_str() {
+        // Retire any retained host binding, even after its Release lost the Service role.
             self.service_runtime()
                 .await
-                .stop(&MiniAppId::from(request.miniapp_id.clone()))
+                .stop(&PluginProductId::from(request.plugin_id.clone()))
                 .await
                 .map_err(|error| {
-                    PluginRuntimeM1ApplicationError::Invalid(format!(
+                    PluginRuntimeApplicationError::Invalid(format!(
                         "Plugin was trashed but its Service Host could not stop: {error}"
                     ))
                 })?;
-        }
         self.sync_catalog_publication(owner_user_id, &committed)
             .await?;
         self.workshop_projection(owner_user_id, &committed, None)
@@ -4207,23 +4243,23 @@ impl PluginRuntimeM1ApplicationService {
         &self,
         owner_user_id: &str,
         request: RestorePluginRuntimeRequest,
-    ) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeM1ApplicationError> {
-        validate_request_identity(&request.miniapp_id, "miniapp_id")?;
+    ) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeApplicationError> {
+        validate_request_identity(&request.plugin_id, "plugin_product_id")?;
         if request.expected_lifecycle != PluginRuntimeLifecycleDto::Trashed {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
+            return Err(PluginRuntimeApplicationError::Invalid(
                 "Plugin Restore requires expected_lifecycle=trashed".into(),
             ));
         }
         let snapshot = self
             .repository
-            .get(owner_user_id, &request.miniapp_id)
+            .get(owner_user_id, &request.plugin_id)
             .await?
-            .ok_or(PluginRuntimeM1ApplicationError::NotFound)?;
+            .ok_or(PluginRuntimeApplicationError::NotFound)?;
         let committed = self
             .repository
-            .restore_cas(&RestoreMiniAppM1Params {
+            .restore_cas(&RestorePluginRuntimeParams {
                 owner_user_id: owner_user_id.to_owned(),
-                miniapp_id: request.miniapp_id,
+                plugin_product_id: request.plugin_id,
                 expected_product_revision: to_i64(
                     request.expected_product_revision,
                     "product revision",
@@ -4246,24 +4282,24 @@ impl PluginRuntimeM1ApplicationService {
         &self,
         owner_user_id: &str,
         request: DeletePluginRuntimeRequest,
-    ) -> Result<PluginRuntimeLibraryResponseDto, PluginRuntimeM1ApplicationError> {
-        validate_request_identity(&request.miniapp_id, "miniapp_id")?;
+    ) -> Result<PluginRuntimeLibraryResponseDto, PluginRuntimeApplicationError> {
+        validate_request_identity(&request.plugin_id, "plugin_product_id")?;
         if request.expected_lifecycle != PluginRuntimeLifecycleDto::Trashed {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
+            return Err(PluginRuntimeApplicationError::Invalid(
                 "Plugin Delete requires expected_lifecycle=trashed".into(),
             ));
         }
         let snapshot = self
             .repository
-            .get(owner_user_id, &request.miniapp_id)
+            .get(owner_user_id, &request.plugin_id)
             .await?
-            .ok_or(PluginRuntimeM1ApplicationError::NotFound)?;
+            .ok_or(PluginRuntimeApplicationError::NotFound)?;
         let operation_id = Uuid::now_v7().to_string();
         let deleting = self
             .repository
-            .begin_delete(&BeginMiniAppM1DeleteParams {
+            .begin_delete(&BeginPluginRuntimeDeleteParams {
                 owner_user_id: owner_user_id.to_owned(),
-                miniapp_id: request.miniapp_id.clone(),
+                plugin_product_id: request.plugin_id.clone(),
                 expected_product_revision: to_i64(
                     request.expected_product_revision,
                     "product revision",
@@ -4293,19 +4329,19 @@ impl PluginRuntimeM1ApplicationService {
         &self,
         owner_user_id: &str,
         request: RetryPluginRuntimeDeleteRequest,
-    ) -> Result<PluginRuntimeLibraryResponseDto, PluginRuntimeM1ApplicationError> {
-        validate_request_identity(&request.miniapp_id, "miniapp_id")?;
+    ) -> Result<PluginRuntimeLibraryResponseDto, PluginRuntimeApplicationError> {
+        validate_request_identity(&request.plugin_id, "plugin_product_id")?;
         validate_request_identity(&request.failed_operation_id, "failed_operation_id")?;
         let operation = self
             .repository
-            .get_miniapp_operation(
+            .get_plugin_operation(
                 owner_user_id,
-                &request.miniapp_id,
+                &request.plugin_id,
                 &request.failed_operation_id,
             )
             .await?
-            .ok_or(PluginRuntimeM1ApplicationError::NotFound)?;
-        if operation.kind != "miniapp_permanent_delete"
+            .ok_or(PluginRuntimeApplicationError::NotFound)?;
+        if operation.kind != "plugin_permanent_delete"
             || operation.state != ProductOperationState::Failed.as_str()
             || operation_revision(&operation)
                 != request.expected_operation_revision
@@ -4318,15 +4354,15 @@ impl PluginRuntimeM1ApplicationService {
         }
         let snapshot = self
             .repository
-            .get(owner_user_id, &request.miniapp_id)
+            .get(owner_user_id, &request.plugin_id)
             .await?
-            .ok_or(PluginRuntimeM1ApplicationError::NotFound)?;
+            .ok_or(PluginRuntimeApplicationError::NotFound)?;
         let operation_id = Uuid::now_v7().to_string();
         let restarted = self
             .repository
-            .restart_delete(&RestartMiniAppM1DeleteParams {
+            .restart_delete(&RestartPluginRuntimeDeleteParams {
                 owner_user_id: owner_user_id.to_owned(),
-                miniapp_id: request.miniapp_id.clone(),
+                plugin_product_id: request.plugin_id.clone(),
                 expected_failed_operation_id: request.failed_operation_id,
                 new_operation_id: operation_id.clone(),
                 started_at_ms: positive_now_ms().max(snapshot.product.updated_at),
@@ -4340,26 +4376,26 @@ impl PluginRuntimeM1ApplicationService {
     async fn run_delete_cleanup(
         &self,
         owner_user_id: &str,
-        snapshot: &MiniAppM1Snapshot,
+        snapshot: &PluginRuntimeSnapshot,
         operation_id: &str,
         expected_operation_revision: i64,
-    ) -> Result<(), PluginRuntimeM1ApplicationError> {
+    ) -> Result<(), PluginRuntimeApplicationError> {
         let cleanup = async {
-            let miniapp_id = MiniAppId::from(snapshot.product.miniapp_id.clone());
+            let plugin_product_id = PluginProductId::from(snapshot.product.plugin_product_id.clone());
             let runtime = self.service_runtime().await;
             runtime
-                .stop(&miniapp_id)
+                .stop(&plugin_product_id)
                 .await
                 .map_err(|error| {
-                    PluginRuntimeM1ApplicationError::Runtime(format!(
+                    PluginRuntimeApplicationError::Runtime(format!(
                         "Service stop during permanent delete failed: {error}"
                     ))
                 })?;
             runtime
-                .purge_storage(owner_user_id, &miniapp_id)
+                .purge_storage(owner_user_id, &plugin_product_id)
                 .await
                 .map_err(|error| {
-                    PluginRuntimeM1ApplicationError::Runtime(format!(
+                    PluginRuntimeApplicationError::Runtime(format!(
                         "managed storage purge failed: {error}"
                     ))
                 })?;
@@ -4367,11 +4403,11 @@ impl PluginRuntimeM1ApplicationService {
                 .source
                 .purge_project(
                     owner_user_id,
-                    &snapshot.product.miniapp_id,
+                    &snapshot.product.plugin_product_id,
                     &snapshot.project.project_id,
                 )
                 .map_err(|error| {
-                    PluginRuntimeM1ApplicationError::Runtime(format!(
+                    PluginRuntimeApplicationError::Runtime(format!(
                         "Source purge failed: {error}"
                     ))
                 })?;
@@ -4379,40 +4415,40 @@ impl PluginRuntimeM1ApplicationService {
                 .release
                 .purge_project(
                     owner_user_id,
-                    &snapshot.product.miniapp_id,
+                    &snapshot.product.plugin_product_id,
                     &snapshot.project.project_id,
                 )
                 .map_err(|error| {
-                    PluginRuntimeM1ApplicationError::Runtime(format!(
+                    PluginRuntimeApplicationError::Runtime(format!(
                         "Release purge failed: {error}"
                     ))
                 })?;
-            Ok::<(), PluginRuntimeM1ApplicationError>(())
+            Ok::<(), PluginRuntimeApplicationError>(())
         }
         .await;
         if let Err(error) = cleanup {
             let fail = self
                 .repository
-                .fail_delete(&FailMiniAppM1DeleteParams {
+                .fail_delete(&FailPluginRuntimeDeleteParams {
                     owner_user_id: owner_user_id.to_owned(),
-                    miniapp_id: snapshot.product.miniapp_id.clone(),
+                    plugin_product_id: snapshot.product.plugin_product_id.clone(),
                     operation_id: operation_id.to_owned(),
                     expected_operation_revision,
-                    error_code: "miniapp_delete_cleanup_failed".to_owned(),
+                    error_code: "plugin_delete_cleanup_failed".to_owned(),
                     updated_at: positive_now_ms(),
                 })
                 .await;
             return match fail {
                 Ok(_) => Err(error),
-                Err(record_error) => Err(PluginRuntimeM1ApplicationError::Runtime(format!(
+                Err(record_error) => Err(PluginRuntimeApplicationError::Runtime(format!(
                     "Plugin Delete cleanup failed ({error}); recording its durable failure failed: {record_error}"
                 ))),
             };
         }
         self.repository
-            .finalize_delete(&FinalizeMiniAppM1DeleteParams {
+            .finalize_delete(&FinalizePluginRuntimeDeleteParams {
                 owner_user_id: owner_user_id.to_owned(),
-                miniapp_id: snapshot.product.miniapp_id.clone(),
+                plugin_product_id: snapshot.product.plugin_product_id.clone(),
                 operation_id: operation_id.to_owned(),
                 expected_operation_revision,
                 finished_at_ms: positive_now_ms(),
@@ -4425,13 +4461,13 @@ impl PluginRuntimeM1ApplicationService {
         &self,
         owner_user_id: &str,
         request: SetPluginRuntimeServiceRunningRequest,
-    ) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeM1ApplicationError> {
-        validate_request_identity(&request.miniapp_id, "miniapp_id")?;
+    ) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeApplicationError> {
+        validate_request_identity(&request.plugin_id, "plugin_product_id")?;
         let snapshot = self
             .repository
-            .get(owner_user_id, &request.miniapp_id)
+            .get(owner_user_id, &request.plugin_id)
             .await?
-            .ok_or(PluginRuntimeM1ApplicationError::NotFound)?;
+            .ok_or(PluginRuntimeApplicationError::NotFound)?;
         validate_service_runtime_request(
             &snapshot,
             request.expected_product_revision,
@@ -4443,7 +4479,7 @@ impl PluginRuntimeM1ApplicationService {
             .active_release
             .as_ref()
             .ok_or_else(|| {
-                PluginRuntimeM1ApplicationError::Invalid(
+                PluginRuntimeApplicationError::Invalid(
                     "Service Start/Stop requires an Active Release".to_owned(),
                 )
             })?;
@@ -4457,7 +4493,7 @@ impl PluginRuntimeM1ApplicationService {
                 )
                 .await?
                 .ok_or_else(|| {
-                    PluginRuntimeM1ApplicationError::Invalid(
+                    PluginRuntimeApplicationError::Invalid(
                         "Active Release has no Service descriptor".to_owned(),
                     )
                 })?;
@@ -4465,13 +4501,13 @@ impl PluginRuntimeM1ApplicationService {
                 .await
                 .start(spec)
                 .await
-                .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
+                .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
         } else {
             self.service_runtime()
                 .await
-                .stop(&MiniAppId::from(request.miniapp_id.clone()))
+                .stop(&PluginProductId::from(request.plugin_id.clone()))
                 .await
-                .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
+                .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
         }
         self.workshop_projection(owner_user_id, &snapshot, None)
             .await
@@ -4481,13 +4517,13 @@ impl PluginRuntimeM1ApplicationService {
         &self,
         owner_user_id: &str,
         request: RetryPluginRuntimeServiceRequest,
-    ) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeM1ApplicationError> {
-        validate_request_identity(&request.miniapp_id, "miniapp_id")?;
+    ) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeApplicationError> {
+        validate_request_identity(&request.plugin_id, "plugin_product_id")?;
         let snapshot = self
             .repository
-            .get(owner_user_id, &request.miniapp_id)
+            .get(owner_user_id, &request.plugin_id)
             .await?
-            .ok_or(PluginRuntimeM1ApplicationError::NotFound)?;
+            .ok_or(PluginRuntimeApplicationError::NotFound)?;
         validate_service_runtime_request(
             &snapshot,
             request.expected_product_revision,
@@ -4499,7 +4535,7 @@ impl PluginRuntimeM1ApplicationService {
             .active_release
             .as_ref()
             .ok_or_else(|| {
-                PluginRuntimeM1ApplicationError::Invalid(
+                PluginRuntimeApplicationError::Invalid(
                     "Service Retry requires an Active Release".to_owned(),
                 )
             })?;
@@ -4512,7 +4548,7 @@ impl PluginRuntimeM1ApplicationService {
             )
             .await?
             .ok_or_else(|| {
-                PluginRuntimeM1ApplicationError::Invalid(
+                PluginRuntimeApplicationError::Invalid(
                     "Active Release has no Service descriptor".to_owned(),
                 )
             })?;
@@ -4520,7 +4556,7 @@ impl PluginRuntimeM1ApplicationService {
             .await
             .start(spec)
             .await
-            .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
+            .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
         self.workshop_projection(owner_user_id, &snapshot, None)
             .await
     }
@@ -4528,16 +4564,14 @@ impl PluginRuntimeM1ApplicationService {
     pub async fn shutdown_service_runtime(
         &self,
         owner_user_id: &str,
-    ) -> Result<(), PluginRuntimeM1ApplicationError> {
+    ) -> Result<(), PluginRuntimeApplicationError> {
         let library = self.repository.library(owner_user_id).await?;
         let runtime = self.service_runtime().await;
         for product in library.products {
-            if product.kind == MiniAppM1Kind::Service.as_str() {
                 runtime
-                    .stop(&MiniAppId::from(product.miniapp_id))
+                    .stop(&PluginProductId::from(product.plugin_product_id))
                     .await
-                    .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
-            }
+                    .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
         }
         Ok(())
     }
@@ -4546,17 +4580,16 @@ impl PluginRuntimeM1ApplicationService {
         &self,
         owner_user_id: &str,
         candidate: &ResolvedNodeRuntime,
-    ) -> Result<(), PluginRuntimeM1ApplicationError> {
+    ) -> Result<(), PluginRuntimeApplicationError> {
         let library = self.repository.library(owner_user_id).await?;
-        let mut expected = library
-            .products
-            .iter()
-            .filter(|product| {
-                product.kind == MiniAppM1Kind::Service.as_str()
-                    && product.lifecycle == "enabled"
-            })
-            .map(|product| MiniAppId::from(product.miniapp_id.clone()))
-            .collect::<Vec<_>>();
+        let mut expected = Vec::new();
+        for product in library.products.iter().filter(|product| product.lifecycle == "enabled") {
+            let snapshot = self.repository.get(owner_user_id, &product.plugin_product_id).await?
+                .ok_or(PluginRuntimeApplicationError::NotFound)?;
+            if self.release_has_service(&snapshot, snapshot.active_release.as_ref())? {
+                expected.push(PluginProductId::from(product.plugin_product_id.clone()));
+            }
+        }
         expected.sort();
         if expected.is_empty() {
             return Ok(());
@@ -4566,10 +4599,10 @@ impl PluginRuntimeM1ApplicationService {
             .await
             .validate_candidate(candidate)
             .await
-            .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
+            .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
         observed.sort();
         if observed != expected {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(format!(
+            return Err(PluginRuntimeApplicationError::Invalid(format!(
                 "Plugin Service Runtime candidate identities {observed:?} do not match enabled Services {expected:?}"
             )));
         }
@@ -4579,12 +4612,12 @@ impl PluginRuntimeM1ApplicationService {
     pub async fn reconcile_all_service_runtime(
         &self,
         owner_user_id: &str,
-    ) -> Result<(), PluginRuntimeM1ApplicationError> {
+    ) -> Result<(), PluginRuntimeApplicationError> {
         let library = self.repository.library(owner_user_id).await?;
         for product in library.products {
             let Some(snapshot) = self
                 .repository
-                .get(owner_user_id, &product.miniapp_id)
+                .get(owner_user_id, &product.plugin_product_id)
                 .await?
             else {
                 continue;
@@ -4594,7 +4627,7 @@ impl PluginRuntimeM1ApplicationService {
                 .await
             {
                 tracing::warn!(
-                    miniapp_id = %product.miniapp_id,
+                    plugin_product_id = %product.plugin_product_id,
                     error = %error,
                     "Plugin Service startup reconciliation failed; keeping the persisted Product authoritative"
                 );
@@ -4606,7 +4639,7 @@ impl PluginRuntimeM1ApplicationService {
     pub async fn reconcile_pending_deletions(
         &self,
         owner_user_id: &str,
-    ) -> Result<(), PluginRuntimeM1ApplicationError> {
+    ) -> Result<(), PluginRuntimeApplicationError> {
         let library = self.repository.library(owner_user_id).await?;
         let mut failures = Vec::new();
         for product in library
@@ -4617,15 +4650,15 @@ impl PluginRuntimeM1ApplicationService {
             let result = async {
                 let snapshot = self
                     .repository
-                    .get(owner_user_id, &product.miniapp_id)
+                    .get(owner_user_id, &product.plugin_product_id)
                     .await?
-                    .ok_or(PluginRuntimeM1ApplicationError::NotFound)?;
+                    .ok_or(PluginRuntimeApplicationError::NotFound)?;
                 let mut operations = self
                     .repository
-                    .list_miniapp_operations(owner_user_id, &product.miniapp_id)
+                    .list_plugin_operations(owner_user_id, &product.plugin_product_id)
                     .await?
                     .into_iter()
-                    .filter(|operation| operation.kind == "miniapp_permanent_delete")
+                    .filter(|operation| operation.kind == "plugin_permanent_delete")
                     .collect::<Vec<_>>();
                 operations.sort_by(|left, right| {
                     left.started_at_ms
@@ -4633,9 +4666,9 @@ impl PluginRuntimeM1ApplicationService {
                         .then_with(|| left.operation_id.cmp(&right.operation_id))
                 });
                 let operation = operations.pop().ok_or_else(|| {
-                    PluginRuntimeM1ApplicationError::Invalid(format!(
+                    PluginRuntimeApplicationError::Invalid(format!(
                         "deleting Plugin {} has no durable Delete operation",
-                        product.miniapp_id
+                        product.plugin_product_id
                     ))
                 })?;
                 match operation.state.as_str() {
@@ -4652,9 +4685,9 @@ impl PluginRuntimeM1ApplicationService {
                         let operation_id = Uuid::now_v7().to_string();
                         let restarted = self
                             .repository
-                            .restart_delete(&RestartMiniAppM1DeleteParams {
+                            .restart_delete(&RestartPluginRuntimeDeleteParams {
                                 owner_user_id: owner_user_id.to_owned(),
-                                miniapp_id: product.miniapp_id.clone(),
+                                plugin_product_id: product.plugin_product_id.clone(),
                                 expected_failed_operation_id: operation.operation_id,
                                 new_operation_id: operation_id.clone(),
                                 started_at_ms: positive_now_ms()
@@ -4669,26 +4702,26 @@ impl PluginRuntimeM1ApplicationService {
                         )
                         .await
                     }
-                    state => Err(PluginRuntimeM1ApplicationError::Invalid(format!(
+                    state => Err(PluginRuntimeApplicationError::Invalid(format!(
                         "deleting Plugin {} references terminal operation state {state}",
-                        product.miniapp_id
+                        product.plugin_product_id
                     ))),
                 }
             }
             .await;
             if let Err(error) = result {
                 tracing::warn!(
-                    miniapp_id = %product.miniapp_id,
+                    plugin_product_id = %product.plugin_product_id,
                     error = %error,
                     "Plugin permanent-delete startup reconciliation failed; durable intent remains"
                 );
-                failures.push(format!("{}: {error}", product.miniapp_id));
+                failures.push(format!("{}: {error}", product.plugin_product_id));
             }
         }
         if failures.is_empty() {
             Ok(())
         } else {
-            Err(PluginRuntimeM1ApplicationError::Invalid(format!(
+            Err(PluginRuntimeApplicationError::Invalid(format!(
                 "Plugin deletion reconciliation left durable failures: {}",
                 failures.join("; ")
             )))
@@ -4699,20 +4732,20 @@ impl PluginRuntimeM1ApplicationService {
         &self,
         owner_user_id: &str,
         request: SetPluginRuntimePublishModeRequest,
-    ) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeM1ApplicationError> {
-        validate_request_identity(&request.miniapp_id, "miniapp_id")?;
+    ) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeApplicationError> {
+        validate_request_identity(&request.plugin_id, "plugin_product_id")?;
         let snapshot = self
             .repository
-            .get(owner_user_id, &request.miniapp_id)
+            .get(owner_user_id, &request.plugin_id)
             .await?
-            .ok_or(PluginRuntimeM1ApplicationError::NotFound)?;
-        require_ui_only_release_mutation(&snapshot)?;
+            .ok_or(PluginRuntimeApplicationError::NotFound)?;
+        require_release_mutation(&snapshot)?;
         if snapshot.product.product_revision
             != to_i64(request.expected_product_revision, "product revision")?
             || snapshot.product.pointer_revision
                 != to_i64(request.expected_pointer_revision, "pointer revision")?
         {
-            return Err(PluginRuntimeM1ApplicationError::Database(
+            return Err(PluginRuntimeApplicationError::Database(
                 nomifun_db::DbError::Conflict(
                     "Plugin Publish mode request is stale against the exact Product pointers"
                         .to_owned(),
@@ -4721,7 +4754,7 @@ impl PluginRuntimeM1ApplicationService {
         }
         let enabled = request.mode == PluginRuntimePublishModeDto::AutoUiOnly;
         if enabled && snapshot.active_release.is_none() {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
+            return Err(PluginRuntimeApplicationError::Invalid(
                 "auto Publish can be enabled only after the first manual Publish".to_owned(),
             ));
         }
@@ -4741,9 +4774,9 @@ impl PluginRuntimeM1ApplicationService {
             };
         let committed = self
             .repository
-            .set_auto_publish_cas(&SetMiniAppM1AutoPublishParams {
+            .set_auto_publish_cas(&SetPluginRuntimeAutoPublishParams {
                 owner_user_id: owner_user_id.to_owned(),
-                miniapp_id: request.miniapp_id,
+                plugin_product_id: request.plugin_id,
                 expected_product_revision: to_i64(
                     request.expected_product_revision,
                     "product revision",
@@ -4761,7 +4794,7 @@ impl PluginRuntimeM1ApplicationService {
             .await?;
         let active_operation = latest_running_build(
             self.repository
-                .list_build_operations(owner_user_id, &committed.product.miniapp_id)
+                .list_build_operations(owner_user_id, &committed.product.plugin_product_id)
                 .await?,
         )?;
         self.workshop_projection(owner_user_id, &committed, active_operation)
@@ -4771,13 +4804,13 @@ impl PluginRuntimeM1ApplicationService {
     async fn auto_publish_ready(
         &self,
         owner_user_id: &str,
-        snapshot: MiniAppM1Snapshot,
-    ) -> Result<MiniAppM1Snapshot, PluginRuntimeM1ApplicationError> {
+        snapshot: PluginRuntimeSnapshot,
+    ) -> Result<PluginRuntimeSnapshot, PluginRuntimeApplicationError> {
         let authorization = snapshot
             .auto_publish_authorization
             .as_ref()
             .ok_or_else(|| {
-                PluginRuntimeM1ApplicationError::Invalid(
+                PluginRuntimeApplicationError::Invalid(
                     "auto Publish authorization disappeared before Build completion".to_owned(),
                 )
             })?;
@@ -4788,14 +4821,14 @@ impl PluginRuntimeM1ApplicationService {
             .active_release
             .as_ref()
             .ok_or_else(|| {
-                PluginRuntimeM1ApplicationError::Invalid(
+                PluginRuntimeApplicationError::Invalid(
                     "first Publish must remain manual".to_owned(),
                 )
             })?;
         let ready = snapshot
             .ready_release
             .as_ref()
-            .ok_or_else(|| PluginRuntimeM1ApplicationError::Invalid("no Ready Release".to_owned()))?;
+            .ok_or_else(|| PluginRuntimeApplicationError::Invalid("no Ready Release".to_owned()))?;
         let current_stored = self.load_verified_release(
             owner_user_id,
             &snapshot.project.project_id,
@@ -4826,7 +4859,7 @@ impl PluginRuntimeM1ApplicationService {
             .source
             .read_revision_files(
                 owner_user_id,
-                &snapshot.product.miniapp_id,
+                &snapshot.product.plugin_product_id,
                 project_id,
                 current_source_digest.unwrap_or_default(),
             )
@@ -4836,7 +4869,7 @@ impl PluginRuntimeM1ApplicationService {
             .source
             .read_revision_files(
                 owner_user_id,
-                &snapshot.product.miniapp_id,
+                &snapshot.product.plugin_product_id,
                 project_id,
                 target_source_digest.unwrap_or_default(),
             )
@@ -4867,7 +4900,7 @@ impl PluginRuntimeM1ApplicationService {
         {
             return Ok(snapshot);
         }
-        let proof = MiniAppUiOnlyAutoPublishProof {
+        let proof = PluginUiOnlyAutoPublishProof {
             current_release: current_ref.clone(),
             target_release: target_ref.clone(),
             current_ui_tree_digest: current_ui.ui_tree_digest.clone(),
@@ -4880,30 +4913,30 @@ impl PluginRuntimeM1ApplicationService {
             static_validation_passed: true,
             no_unknown_changes,
         };
-        let contract_authorization = MiniAppUiOnlyAutoPublishAuthorization {
-            authorization_id: MiniAppUserAuthorizationId::from(
+        let contract_authorization = PluginUiOnlyAutoPublishAuthorization {
+            authorization_id: PluginUserAuthorizationId::from(
                 authorization.authorization_id.clone(),
             ),
-            miniapp_id: MiniAppId::from(snapshot.product.miniapp_id.clone()),
+            plugin_product_id: PluginProductId::from(snapshot.product.plugin_product_id.clone()),
             enabled: authorization.enabled,
             authorization_revision: u64::try_from(authorization.revision).map_err(|_| {
-                PluginRuntimeM1ApplicationError::Invalid(
+                PluginRuntimeApplicationError::Invalid(
                     "auto Publish authorization revision is negative".to_owned(),
                 )
             })?,
             user_authorized_at_ms: authorization.user_authorized_at_ms,
         };
-        let catalog_digest = miniapp_catalog_digest(
-            &snapshot.product.miniapp_id,
+        let catalog_digest = plugin_catalog_digest(
+            &snapshot.product.plugin_product_id,
             &target_ref,
             &target_stored.artifact.manifest.payload.contributions,
         )?;
-        let contract = MiniAppPublishContract {
-            miniapp_id: MiniAppId::from(snapshot.product.miniapp_id.clone()),
+        let contract = PluginPublishContract {
+            plugin_product_id: PluginProductId::from(snapshot.product.plugin_product_id.clone()),
             expected: pointer_expectation_from_snapshot(&snapshot)?,
             target_ready_release: target_ref,
             target_catalog_digest: catalog_digest.clone(),
-            authorization: MiniAppPublishAuthorization::AutoUiOnly {
+            authorization: PluginPublishAuthorization::AutoUiOnly {
                 authorization: contract_authorization,
                 proof: Box::new(proof),
             },
@@ -4914,9 +4947,9 @@ impl PluginRuntimeM1ApplicationService {
         }
         let committed = self
             .repository
-            .publish_ready_cas(&PublishMiniAppM1ReadyParams {
+            .publish_ready_cas(&PublishPluginRuntimeReadyParams {
                 owner_user_id: owner_user_id.to_owned(),
-                miniapp_id: snapshot.product.miniapp_id.clone(),
+                plugin_product_id: snapshot.product.plugin_product_id.clone(),
                 expected_product_revision: snapshot.product.product_revision,
                 expected_pointer_revision: snapshot.product.pointer_revision,
                 expected_active_release_epoch: snapshot.product.active_release_epoch,
@@ -4924,7 +4957,7 @@ impl PluginRuntimeM1ApplicationService {
                 expected_ready_release_digest: ready.release_digest.clone(),
                 expected_active_release_digest: snapshot.product.active_release_digest.clone(),
                 target_catalog_digest: catalog_digest.as_ref().to_owned(),
-                auto_publish_guard: Some(MiniAppM1AutoPublishGuard {
+                auto_publish_guard: Some(PluginRuntimeAutoPublishGuard {
                     authorization_id: authorization.authorization_id.clone(),
                     authorization_revision: authorization.revision,
                     project_id: snapshot.project.project_id.clone(),
@@ -4934,7 +4967,7 @@ impl PluginRuntimeM1ApplicationService {
                         .source_head_digest
                         .clone()
                         .ok_or_else(|| {
-                            PluginRuntimeM1ApplicationError::Invalid(
+                            PluginRuntimeApplicationError::Invalid(
                                 "auto Publish requires an exact Project Source head".to_owned(),
                             )
                         })?,
@@ -4943,7 +4976,7 @@ impl PluginRuntimeM1ApplicationService {
                         .dependency_lock_digest
                         .clone()
                         .ok_or_else(|| {
-                            PluginRuntimeM1ApplicationError::Invalid(
+                            PluginRuntimeApplicationError::Invalid(
                                 "auto Publish requires an exact dependency lock".to_owned(),
                             )
                         })?,
@@ -4952,7 +4985,7 @@ impl PluginRuntimeM1ApplicationService {
                         .build_profile_version
                         .clone()
                         .ok_or_else(|| {
-                            PluginRuntimeM1ApplicationError::Invalid(
+                            PluginRuntimeApplicationError::Invalid(
                                 "auto Publish requires an exact Build profile".to_owned(),
                             )
                         })?,
@@ -4970,32 +5003,32 @@ impl PluginRuntimeM1ApplicationService {
     pub async fn open_surface(
         &self,
         owner_user_id: &str,
-        miniapp_id: &str,
-    ) -> Result<PluginRuntimeSurfaceLaunchDescriptorDto, PluginRuntimeM1ApplicationError> {
-        validate_request_identity(miniapp_id, "miniapp_id")?;
+        plugin_product_id: &str,
+    ) -> Result<PluginRuntimeSurfaceLaunchDescriptorDto, PluginRuntimeApplicationError> {
+        validate_request_identity(plugin_product_id, "plugin_product_id")?;
         let snapshot = self
             .repository
-            .get(owner_user_id, miniapp_id)
+            .get(owner_user_id, plugin_product_id)
             .await?
-            .ok_or(PluginRuntimeM1ApplicationError::NotFound)?;
+            .ok_or(PluginRuntimeApplicationError::NotFound)?;
         if snapshot.product.lifecycle != "enabled" {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
+            return Err(PluginRuntimeApplicationError::Invalid(
                 "Plugin Surface is available only while enabled".to_owned(),
             ));
         }
         let active = snapshot
             .active_release
             .as_ref()
-            .ok_or_else(|| PluginRuntimeM1ApplicationError::Invalid("no Active Release".to_owned()))?;
+            .ok_or_else(|| PluginRuntimeApplicationError::Invalid("no Active Release".to_owned()))?;
         let stored = self.load_verified_release(
             owner_user_id,
             &snapshot.project.project_id,
             active,
         )?;
         let entrypoint = stored.artifact.manifest.payload.ui.as_ref()
-            .ok_or_else(|| PluginRuntimeM1ApplicationError::Invalid("This plugin does not provide a page".into()))?
+            .ok_or_else(|| PluginRuntimeApplicationError::Invalid("This plugin does not provide a page".into()))?
             .entrypoint.clone();
-        if snapshot.product.kind == MiniAppM1Kind::Service.as_str() {
+        if stored.artifact.manifest.payload.service.is_some() {
             let spec = self
                 .resolve_service_spec(
                     &snapshot,
@@ -5008,7 +5041,7 @@ impl PluginRuntimeM1ApplicationService {
                 )
                 .await?
                 .ok_or_else(|| {
-                    PluginRuntimeM1ApplicationError::Invalid(
+                    PluginRuntimeApplicationError::Invalid(
                         "Service Active Release has no Service descriptor".to_owned(),
                     )
                 })?;
@@ -5016,14 +5049,14 @@ impl PluginRuntimeM1ApplicationService {
                 .await
                 .bind_active(spec, true)
                 .await
-                .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
+                .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
         }
         if stored
             .files
             .iter()
             .all(|file| file.normalized_relative_path != entrypoint)
         {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
+            return Err(PluginRuntimeApplicationError::Invalid(
                 "Active Release is missing its UI entrypoint bytes".to_owned(),
             ));
         }
@@ -5031,9 +5064,9 @@ impl PluginRuntimeM1ApplicationService {
         let capability_digest = surface_capability_digest(&capability)?;
         let session = self
             .repository
-            .open_surface_session_cas(&OpenMiniAppM1SurfaceSessionParams {
+            .open_surface_session_cas(&OpenPluginRuntimeSurfaceSessionParams {
                 owner_user_id: owner_user_id.to_owned(),
-                miniapp_id: miniapp_id.to_owned(),
+                plugin_product_id: plugin_product_id.to_owned(),
                 surface_session_id: Uuid::now_v7().to_string(),
                 capability_digest,
                 expected_product_revision: snapshot.product.product_revision,
@@ -5045,7 +5078,7 @@ impl PluginRuntimeM1ApplicationService {
             })
             .await?;
         Ok(PluginRuntimeSurfaceLaunchDescriptorDto {
-            miniapp_id: miniapp_id.to_owned(),
+            plugin_id: plugin_product_id.to_owned(),
             product_revision: positive_u64(
                 snapshot.product.product_revision,
                 "Plugin product revision",
@@ -5070,17 +5103,17 @@ impl PluginRuntimeM1ApplicationService {
     pub async fn close_surface(
         &self,
         owner_user_id: &str,
-        miniapp_id: &str,
+        plugin_product_id: &str,
         surface_session_id: &str,
         capability: &str,
-    ) -> Result<bool, PluginRuntimeM1ApplicationError> {
-        validate_request_identity(miniapp_id, "miniapp_id")?;
+    ) -> Result<bool, PluginRuntimeApplicationError> {
+        validate_request_identity(plugin_product_id, "plugin_product_id")?;
         validate_request_identity(surface_session_id, "surface_session_id")?;
         let capability_digest = surface_capability_digest(capability)?;
         self.repository
-            .close_surface_session_cas(&CloseMiniAppM1SurfaceSessionParams {
+            .close_surface_session_cas(&ClosePluginRuntimeSurfaceSessionParams {
                 owner_user_id: owner_user_id.to_owned(),
-                miniapp_id: miniapp_id.to_owned(),
+                plugin_product_id: plugin_product_id.to_owned(),
                 surface_session_id: surface_session_id.to_owned(),
                 capability_digest,
             })
@@ -5090,15 +5123,15 @@ impl PluginRuntimeM1ApplicationService {
 
     pub async fn surface_asset(
         &self,
-        miniapp_id: &str,
+        plugin_product_id: &str,
         capability: &str,
         active_release_epoch: u64,
         expected_release_digest: &str,
         asset_path: &str,
-    ) -> Result<PluginRuntimeSurfaceAsset, PluginRuntimeM1ApplicationError> {
+    ) -> Result<PluginRuntimeSurfaceAsset, PluginRuntimeApplicationError> {
         let session = self
             .resolve_surface_session(
-                miniapp_id,
+                plugin_product_id,
                 capability,
                 active_release_epoch,
                 expected_release_digest,
@@ -5106,9 +5139,9 @@ impl PluginRuntimeM1ApplicationService {
             .await?;
         let snapshot = self
             .repository
-            .get(&session.owner_user_id, miniapp_id)
+            .get(&session.owner_user_id, plugin_product_id)
             .await?
-            .ok_or(PluginRuntimeM1ApplicationError::NotFound)?;
+            .ok_or(PluginRuntimeApplicationError::NotFound)?;
         if snapshot.product.lifecycle != "enabled"
             || nonnegative_u64(
                 snapshot.product.active_release_epoch,
@@ -5117,14 +5150,14 @@ impl PluginRuntimeM1ApplicationService {
             || snapshot.product.active_release_digest.as_deref()
                 != Some(expected_release_digest)
         {
-            return Err(PluginRuntimeM1ApplicationError::NotFound);
+            return Err(PluginRuntimeApplicationError::NotFound);
         }
         let active = snapshot
             .active_release
             .as_ref()
-            .ok_or(PluginRuntimeM1ApplicationError::NotFound)?;
+            .ok_or(PluginRuntimeApplicationError::NotFound)?;
         if active.release_id != session.active_release_id {
-            return Err(PluginRuntimeM1ApplicationError::NotFound);
+            return Err(PluginRuntimeApplicationError::NotFound);
         }
         let stored = self.load_verified_release(
             &session.owner_user_id,
@@ -5135,10 +5168,10 @@ impl PluginRuntimeM1ApplicationService {
             .files
             .into_iter()
             .find(|file| file.normalized_relative_path == asset_path)
-            .ok_or(PluginRuntimeM1ApplicationError::NotFound)?;
+            .ok_or(PluginRuntimeApplicationError::NotFound)?;
         let observed = self
             .resolve_surface_session(
-                miniapp_id,
+                plugin_product_id,
                 capability,
                 active_release_epoch,
                 expected_release_digest,
@@ -5147,7 +5180,7 @@ impl PluginRuntimeM1ApplicationService {
         if observed.surface_session_id != session.surface_session_id
             || observed.generation != session.generation
         {
-            return Err(PluginRuntimeM1ApplicationError::NotFound);
+            return Err(PluginRuntimeApplicationError::NotFound);
         }
         Ok(PluginRuntimeSurfaceAsset {
             normalized_relative_path: file.normalized_relative_path,
@@ -5158,28 +5191,28 @@ impl PluginRuntimeM1ApplicationService {
     pub async fn surface_bridge_request(
         &self,
         owner_user_id: &str,
-        miniapp_id: &str,
+        plugin_product_id: &str,
         capability: &str,
         active_release_epoch: u64,
         expected_release_digest: &str,
-        request: MiniAppBridgeRequest,
-    ) -> Result<StrictJsonValue, PluginRuntimeM1ApplicationError> {
+        request: PluginBridgeRequest,
+    ) -> Result<StrictJsonValue, PluginRuntimeApplicationError> {
         let surface_session = self
             .resolve_surface_session(
-                miniapp_id,
+                plugin_product_id,
                 capability,
                 active_release_epoch,
                 expected_release_digest,
             )
             .await?;
         if surface_session.owner_user_id != owner_user_id {
-            return Err(PluginRuntimeM1ApplicationError::NotFound);
+            return Err(PluginRuntimeApplicationError::NotFound);
         }
         let snapshot = self
             .repository
-            .get(owner_user_id, miniapp_id)
+            .get(owner_user_id, plugin_product_id)
             .await?
-            .ok_or(PluginRuntimeM1ApplicationError::NotFound)?;
+            .ok_or(PluginRuntimeApplicationError::NotFound)?;
         if snapshot.product.lifecycle != "enabled"
             || positive_u64(
                 snapshot.product.active_release_epoch,
@@ -5188,14 +5221,14 @@ impl PluginRuntimeM1ApplicationService {
             || snapshot.product.active_release_digest.as_deref()
                 != Some(expected_release_digest)
         {
-            return Err(PluginRuntimeM1ApplicationError::NotFound);
+            return Err(PluginRuntimeApplicationError::NotFound);
         }
         let active = snapshot
             .active_release
             .as_ref()
-            .ok_or(PluginRuntimeM1ApplicationError::NotFound)?;
+            .ok_or(PluginRuntimeApplicationError::NotFound)?;
         if active.release_id != surface_session.active_release_id {
-            return Err(PluginRuntimeM1ApplicationError::NotFound);
+            return Err(PluginRuntimeApplicationError::NotFound);
         }
         self.load_verified_release(
             owner_user_id,
@@ -5203,57 +5236,42 @@ impl PluginRuntimeM1ApplicationService {
             active,
         )?;
         let pointer = pointer_state_from_snapshot(&snapshot)?;
-        let service_spec = if snapshot.product.kind == MiniAppM1Kind::Service.as_str() {
-            Some(
-                self.resolve_service_spec(
-                    &snapshot,
-                    active,
-                    active_release_epoch,
-                    owner_user_id,
-                )
-                .await?
-                .ok_or_else(|| {
-                    PluginRuntimeM1ApplicationError::Invalid(
-                        "Service Active Release has no Service descriptor".to_owned(),
-                    )
-                })?,
-            )
-        } else {
-            None
-        };
-        let session = MiniAppBridgeSession {
-            bridge_contract_version: MINIAPP_BRIDGE_CONTRACT_VERSION.into(),
-            bridge_session_id: MiniAppBridgeSessionId::from(
+        let service_spec = self.resolve_service_spec(
+            &snapshot, active, active_release_epoch, owner_user_id,
+        ).await?;
+        let session = PluginBridgeSession {
+            bridge_contract_version: PLUGIN_BRIDGE_CONTRACT_VERSION.into(),
+            bridge_session_id: PluginBridgeSessionId::from(
                 surface_session.surface_session_id.clone(),
             ),
-            surface_session_id: MiniAppSurfaceSessionId::from(
+            surface_session_id: PluginSurfaceSessionId::from(
                 surface_session.surface_session_id.clone(),
             ),
-            miniapp_id: MiniAppId::from(miniapp_id),
+            plugin_product_id: PluginProductId::from(plugin_product_id),
             active_release: release_contract_ref(active),
             active_release_epoch,
-            transport: MiniAppBridgeTransport::MessageChannelV1,
+            transport: PluginBridgeTransport::MessageChannelV1,
             service_run_key: service_spec
                 .as_ref()
                 .map(|spec| spec.service_run_key.clone()),
         };
         request
             .validate_for(&session, &pointer)
-            .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
+            .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
         let call_id = request.call_id.clone();
         match request.target {
-            MiniAppBridgeTarget::HostKv { request } => {
+            PluginBridgeTarget::HostKv { request } => {
                 self.execute_surface_kv(
                     owner_user_id,
-                    miniapp_id,
+                    plugin_product_id,
                         &surface_session,
                         request,
                 )
                 .await
             }
-            MiniAppBridgeTarget::Service { method, payload } => {
+            PluginBridgeTarget::Service { method, payload } => {
                 let spec = service_spec.ok_or_else(|| {
-                    PluginRuntimeM1ApplicationError::Invalid(
+                    PluginRuntimeApplicationError::Invalid(
                         "Plugin has no Active Service specification".to_owned(),
                     )
                 })?;
@@ -5268,7 +5286,7 @@ impl PluginRuntimeM1ApplicationService {
                         positive_now_ms(),
                     )
                     .await
-                    .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))
+                    .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))
             }
         }
     }
@@ -5276,35 +5294,35 @@ impl PluginRuntimeM1ApplicationService {
     pub async fn workshop(
         &self,
         owner_user_id: &str,
-        miniapp_id: &str,
-    ) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeM1ApplicationError> {
+        plugin_product_id: &str,
+    ) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeApplicationError> {
         self.reconcile_source_mutations().await?;
         let snapshot = self
             .repository
-            .get(owner_user_id, miniapp_id)
+            .get(owner_user_id, plugin_product_id)
             .await?
-            .ok_or(PluginRuntimeM1ApplicationError::NotFound)?;
+            .ok_or(PluginRuntimeApplicationError::NotFound)?;
         let active_operation = self
-            .latest_miniapp_operation(owner_user_id, miniapp_id)
+            .latest_plugin_operation(owner_user_id, plugin_product_id)
             .await?;
         self.workshop_projection(owner_user_id, &snapshot, active_operation)
             .await
     }
 
-    async fn latest_miniapp_operation(
+    async fn latest_plugin_operation(
         &self,
         owner_user_id: &str,
-        miniapp_id: &str,
-    ) -> Result<Option<DurableOperationSummaryDto>, PluginRuntimeM1ApplicationError> {
+        plugin_product_id: &str,
+    ) -> Result<Option<DurableOperationSummaryDto>, PluginRuntimeApplicationError> {
         let operations = self
             .repository
-            .list_miniapp_operations(owner_user_id, miniapp_id)
+            .list_plugin_operations(owner_user_id, plugin_product_id)
             .await?;
         let mut active = operations
             .into_iter()
             .filter(|operation| {
                 operation.state == ProductOperationState::Running.as_str()
-                    || (operation.kind == "miniapp_permanent_delete"
+                    || (operation.kind == "plugin_permanent_delete"
                         && operation.state == ProductOperationState::Failed.as_str())
             })
             .collect::<Vec<_>>();
@@ -5320,7 +5338,7 @@ impl PluginRuntimeM1ApplicationService {
             other.state == ProductOperationState::Running.as_str()
                 && operation.state == ProductOperationState::Running.as_str()
         }) {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
+            return Err(PluginRuntimeApplicationError::Invalid(
                 "Plugin has more than one active owner operation".into(),
             ));
         }
@@ -5331,10 +5349,10 @@ impl PluginRuntimeM1ApplicationService {
         &self,
         owner_user_id: &str,
         storage_project_id: &str,
-        release: &MiniAppReleaseRow,
-    ) -> Result<PluginRuntimeStoredRelease, PluginRuntimeM1ApplicationError> {
+        release: &PluginRuntimeReleaseRow,
+    ) -> Result<PluginRuntimeStoredRelease, PluginRuntimeApplicationError> {
         let project_id = release.project_id.as_deref().unwrap_or(storage_project_id);
-        let scope = PluginRuntimeSourceScope::new(owner_user_id, &release.miniapp_id, project_id)
+        let scope = PluginRuntimeSourceScope::new(owner_user_id, &release.plugin_product_id, project_id)
             .map_err(|error| store_error("Release scope", error))?;
         let expected_artifact_identity = PluginRuntimeReleaseArtifactIdentity {
             artifact_id: ArtifactId::from(release.artifact_id.clone()),
@@ -5351,40 +5369,40 @@ impl PluginRuntimeM1ApplicationService {
             || stored.artifact.manifest.payload_digest.as_ref() != release.manifest_digest
             || release.release_digest != release.artifact_digest
         {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
+            return Err(PluginRuntimeApplicationError::Invalid(
                 "Release Store bytes do not match the exact database Release".to_owned(),
             ));
         }
-        let record: MiniAppReadyRelease =
+        let record: PluginReadyRelease =
             serde_json::from_str(&release.release_record_json).map_err(|error| {
-                PluginRuntimeM1ApplicationError::Invalid(format!(
+                PluginRuntimeApplicationError::Invalid(format!(
                     "database Release record cannot be decoded: {error}"
                 ))
             })?;
         record
             .validate_for_artifact(&stored.artifact)
-            .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
-        if record.miniapp_id.as_ref() != release.miniapp_id
+            .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
+        if record.plugin_product_id.as_ref() != release.plugin_product_id
             || record.release.release_id.as_ref() != release.release_id
             || record.release.artifact_id.as_ref() != release.artifact_id
             || record.release.release_digest.as_ref() != release.release_digest
             || record.release.manifest_digest.as_ref() != release.manifest_digest
             || record.origin
                 != if release.origin_kind == "build" {
-                    MiniAppReadyOrigin::Build
+                    PluginReadyOrigin::Build
                 } else {
-                    MiniAppReadyOrigin::Import
+                    PluginReadyOrigin::Import
                 }
             || record.origin_operation_id.as_ref() != release.origin_operation_id
             || record.created_at_ms != release.created_at
         {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(
+            return Err(PluginRuntimeApplicationError::Invalid(
                 "database Release row does not match its canonical Release record".to_owned(),
             ));
         }
         match (&record.source_lineage, release.source_kind.as_str()) {
             (
-                MiniAppSourceLineage::Managed {
+                PluginReleaseSourceLineage::Managed {
                     project_id: record_project_id,
                     source_snapshot_digest,
                     dependency_lock_digest,
@@ -5400,14 +5418,14 @@ impl PluginRuntimeM1ApplicationService {
                 && build_profile_version.as_ref()
                     == release.build_profile_version.as_deref().unwrap_or_default()
                 && i64::try_from(*build_generation).ok() == release.build_generation => {}
-            (MiniAppSourceLineage::RuntimeOnly, "runtime_only")
+            (PluginReleaseSourceLineage::RuntimeOnly, "runtime_only")
                 if release.project_id.is_none()
                     && release.source_snapshot_digest.is_none()
                     && release.dependency_lock_digest.is_none()
                     && release.build_profile_version.is_none()
                     && release.build_generation.is_none() => {}
             _ => {
-                return Err(PluginRuntimeM1ApplicationError::Invalid(
+                return Err(PluginRuntimeApplicationError::Invalid(
                     "database Release lineage does not match its canonical Release record".into(),
                 ));
             }
@@ -5417,17 +5435,17 @@ impl PluginRuntimeM1ApplicationService {
 
     async fn resolve_surface_session(
         &self,
-        miniapp_id: &str,
+        plugin_product_id: &str,
         capability: &str,
         active_release_epoch: u64,
         expected_release_digest: &str,
-    ) -> Result<MiniAppSurfaceSessionRow, PluginRuntimeM1ApplicationError> {
-        validate_request_identity(miniapp_id, "miniapp_id")?;
+    ) -> Result<PluginRuntimeSurfaceSessionRow, PluginRuntimeApplicationError> {
+        validate_request_identity(plugin_product_id, "plugin_product_id")?;
         validate_digest_string(expected_release_digest, "expected Release digest")?;
         let capability_digest = surface_capability_digest(capability)?;
         self.repository
-            .resolve_surface_session(&ResolveMiniAppM1SurfaceSessionParams {
-                miniapp_id: miniapp_id.to_owned(),
+            .resolve_surface_session(&ResolvePluginRuntimeSurfaceSessionParams {
+                plugin_product_id: plugin_product_id.to_owned(),
                 capability_digest,
                 expected_active_release_digest: expected_release_digest.to_owned(),
                 expected_active_release_epoch: to_i64(
@@ -5436,33 +5454,33 @@ impl PluginRuntimeM1ApplicationService {
                 )?,
             })
             .await?
-            .ok_or(PluginRuntimeM1ApplicationError::NotFound)
+            .ok_or(PluginRuntimeApplicationError::NotFound)
     }
 
     async fn execute_surface_kv(
         &self,
         owner_user_id: &str,
-        miniapp_id: &str,
-        session: &MiniAppSurfaceSessionRow,
-        request: MiniAppBridgeKvRequest,
-    ) -> Result<StrictJsonValue, PluginRuntimeM1ApplicationError> {
+        plugin_product_id: &str,
+        session: &PluginRuntimeSurfaceSessionRow,
+        request: PluginBridgeKvRequest,
+    ) -> Result<StrictJsonValue, PluginRuntimeApplicationError> {
         const NAMESPACE: &str = "surface";
         let (key, operation) = match request {
-            MiniAppBridgeKvRequest::Get { key } => (key, MiniAppM1SurfaceKvOperation::Get),
-            MiniAppBridgeKvRequest::Set { key, value } => (
+            PluginBridgeKvRequest::Get { key } => (key, PluginRuntimeSurfaceKvOperation::Get),
+            PluginBridgeKvRequest::Set { key, value } => (
                 key,
-                MiniAppM1SurfaceKvOperation::Set { value: value.0 },
+                PluginRuntimeSurfaceKvOperation::Set { value: value.0 },
             ),
-            MiniAppBridgeKvRequest::Delete { key } => {
-                (key, MiniAppM1SurfaceKvOperation::Delete)
+            PluginBridgeKvRequest::Delete { key } => {
+                (key, PluginRuntimeSurfaceKvOperation::Delete)
             }
-            MiniAppBridgeKvRequest::CompareAndSwap {
+            PluginBridgeKvRequest::CompareAndSwap {
                 key,
                 expected_revision,
                 value,
             } => (
                 key,
-                MiniAppM1SurfaceKvOperation::CompareAndSwap {
+                PluginRuntimeSurfaceKvOperation::CompareAndSwap {
                     expected_revision: expected_revision
                         .map(|revision| to_i64(revision, "Plugin KV revision"))
                         .transpose()?,
@@ -5472,9 +5490,9 @@ impl PluginRuntimeM1ApplicationService {
         };
         let response = match self
             .repository
-            .execute_surface_kv(&ExecuteMiniAppM1SurfaceKvParams {
+            .execute_surface_kv(&ExecutePluginRuntimeSurfaceKvParams {
                 owner_user_id: owner_user_id.to_owned(),
-                miniapp_id: miniapp_id.to_owned(),
+                plugin_product_id: plugin_product_id.to_owned(),
                 surface_session_id: session.surface_session_id.clone(),
                 expected_surface_generation: session.generation,
                 expected_capability_digest: session.capability_digest.clone(),
@@ -5487,24 +5505,24 @@ impl PluginRuntimeM1ApplicationService {
             })
             .await?
         {
-            MiniAppM1SurfaceKvResult::Value { value, revision } => MiniAppKvResponse::Value {
+            PluginRuntimeSurfaceKvResult::Value { value, revision } => PluginKvResponse::Value {
                 value: value.map(StrictJsonValue),
                 revision: revision
                     .map(|value| positive_u64(value, "Plugin KV revision"))
                     .transpose()?,
             },
-            MiniAppM1SurfaceKvResult::Written { revision } => {
-                MiniAppKvResponse::Written {
+            PluginRuntimeSurfaceKvResult::Written { revision } => {
+                PluginKvResponse::Written {
                     revision: positive_u64(revision, "Plugin KV revision")?,
                 }
             }
-            MiniAppM1SurfaceKvResult::Deleted { existed } => {
-                MiniAppKvResponse::Deleted { existed }
+            PluginRuntimeSurfaceKvResult::Deleted { existed } => {
+                PluginKvResponse::Deleted { existed }
             }
-            MiniAppM1SurfaceKvResult::CompareAndSwap {
+            PluginRuntimeSurfaceKvResult::CompareAndSwap {
                 applied,
                 current_revision,
-            } => MiniAppKvResponse::CompareAndSwap {
+            } => PluginKvResponse::CompareAndSwap {
                 applied,
                 current_revision: current_revision
                     .map(|value| positive_u64(value, "Plugin KV revision"))
@@ -5514,7 +5532,7 @@ impl PluginRuntimeM1ApplicationService {
         serde_json::to_value(response)
             .map(StrictJsonValue)
             .map_err(|error| {
-                PluginRuntimeM1ApplicationError::Invalid(format!(
+                PluginRuntimeApplicationError::Invalid(format!(
                     "Plugin KV response cannot be serialized: {error}"
                 ))
             })
@@ -5523,16 +5541,16 @@ impl PluginRuntimeM1ApplicationService {
     async fn finish_failed_build(
         &self,
         owner_user_id: &str,
-        miniapp_id: &str,
+        plugin_product_id: &str,
         operation_id: &str,
-        original: PluginRuntimeM1ApplicationError,
-    ) -> PluginRuntimeM1ApplicationError {
+        original: PluginRuntimeApplicationError,
+    ) -> PluginRuntimeApplicationError {
         let finished_at_ms = positive_now_ms();
         let result = self
             .repository
-            .finish_build_operation(&FinishMiniAppM1BuildOperationParams {
+            .finish_build_operation(&FinishPluginRuntimeBuildOperationParams {
                 owner_user_id: owner_user_id.to_owned(),
-                miniapp_id: miniapp_id.to_owned(),
+                plugin_product_id: plugin_product_id.to_owned(),
                 operation_id: operation_id.to_owned(),
                 state: ProductOperationState::Failed,
                 progress_percent: 0,
@@ -5543,7 +5561,7 @@ impl PluginRuntimeM1ApplicationService {
             .await;
         match result {
             Ok(_) => original,
-            Err(finish_error) => PluginRuntimeM1ApplicationError::Invalid(format!(
+            Err(finish_error) => PluginRuntimeApplicationError::Invalid(format!(
                 "{original}; failed to record terminal Build state: {finish_error}"
             )),
         }
@@ -5551,34 +5569,34 @@ impl PluginRuntimeM1ApplicationService {
 }
 
 struct PreparedBuildRelease {
-    artifact: MiniAppReleaseArtifactRow,
-    release: MiniAppReleaseRow,
+    artifact: PluginRuntimeReleaseArtifactRow,
+    release: PluginRuntimeReleaseRow,
     finished_at_ms: i64,
     service_module_path: Option<PathBuf>,
 }
 
 fn prepare_build_release(
     owner_user_id: &str,
-    snapshot: &MiniAppM1Snapshot,
+    snapshot: &PluginRuntimeSnapshot,
     request: &BuildPluginRuntimeRequest,
     source: &PluginRuntimeSourceSnapshot,
     operation_id: &str,
     started_at_ms: i64,
     release_store: &PluginRuntimeReleaseStore,
-) -> Result<PreparedBuildRelease, PluginRuntimeM1ApplicationError> {
+) -> Result<PreparedBuildRelease, PluginRuntimeApplicationError> {
     let lock: PluginRuntimeDependencyLockV1 =
         serde_json::from_slice(&source.dependency_lock).map_err(|error| {
-            PluginRuntimeM1ApplicationError::Invalid(format!(
+            PluginRuntimeApplicationError::Invalid(format!(
                 "canonical dependency lock cannot be decoded: {error}"
             ))
         })?;
     if !lock.dependencies.is_empty() {
-        return Err(PluginRuntimeM1ApplicationError::Invalid(
+        return Err(PluginRuntimeApplicationError::Invalid(
             "M1-1-01 accepts only the empty Plugin dependency lock".to_owned(),
         ));
     }
 
-    let is_service = snapshot.product.kind == MiniAppM1Kind::Service.as_str();
+    let is_service = source.service_main_mjs().is_some();
     let mut source_files = source
         .files
         .iter()
@@ -5592,20 +5610,20 @@ fn prepare_build_release(
     let mut source_manifest = source_files.remove(crate::runtime::PLUGIN_RUNTIME_MANIFEST_PATH)
         .map(|bytes| crate::runtime::PluginRuntimeSourceManifest::parse(&bytes))
         .transpose()
-        .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(format!("Invalid plugin manifest: {error}")))?
+        .map_err(|error| PluginRuntimeApplicationError::Invalid(format!("Invalid plugin manifest: {error}")))?
         .unwrap_or_default();
     let contribution_package = PackageRef {
-        id: PackageId::from(format!("plugin.{}", request.miniapp_id)),
+        id: PackageId::from(format!("plugin.{}", request.plugin_id)),
         version: VersionString::from("1.0.0"),
     };
-    source_manifest.materialize_actions(&contribution_package).map_err(PluginRuntimeM1ApplicationError::Invalid)?;
+    source_manifest.materialize_actions(&contribution_package).map_err(PluginRuntimeApplicationError::Invalid)?;
     if !is_service && (source_manifest.uses_files || source_manifest.uses_private_database) {
-        return Err(PluginRuntimeM1ApplicationError::Invalid("Managed files and database require a service declaration".into()));
+        return Err(PluginRuntimeApplicationError::Invalid("Managed files and database require a service declaration".into()));
     }
     let ui_index_html = source_files.remove("ui/index.html").unwrap_or_default();
     let service_main_mjs = if is_service {
         Some(source_files.remove("service/main.mjs").ok_or_else(|| {
-            PluginRuntimeM1ApplicationError::Invalid(
+            PluginRuntimeApplicationError::Invalid(
                 "Service Source must contain service/main.mjs".to_owned(),
             )
         })?)
@@ -5614,7 +5632,7 @@ fn prepare_build_release(
     };
     let materialized_ui_index_html = if ui_index_html.is_empty() { Vec::new() } else { materialize_surface_entrypoint(&ui_index_html)
         .map_err(|error| {
-            PluginRuntimeM1ApplicationError::Invalid(format!(
+            PluginRuntimeApplicationError::Invalid(format!(
                 "UI-only Surface Bridge bootstrap failed: {error}"
             ))
         })? };
@@ -5624,7 +5642,7 @@ fn prepare_build_release(
         .collect();
     let config_schema: Value = serde_json::from_str(&snapshot.product.config_schema_json)
         .map_err(|error| {
-            PluginRuntimeM1ApplicationError::Invalid(format!(
+            PluginRuntimeApplicationError::Invalid(format!(
                 "Plugin config schema is invalid: {error}"
             ))
         })?;
@@ -5649,22 +5667,22 @@ fn prepare_build_release(
                 lifecycle: service_lifecycle,
                 uses_files: source_manifest.uses_files,
                 uses_private_database: source_manifest.uses_private_database,
-                service_contract_digest: digest_payload(&MINIAPP_SERVICE_HOST_PROTOCOL_VERSION)
-                    .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))
-                    .unwrap_or_else(|_| digest_bytes(b"miniapp-service-contract")),
-                runtime_requirements_digest: digest_bytes(b"miniapp-service-runtime"),
+                service_contract_digest: digest_payload(&PLUGIN_SERVICE_HOST_PROTOCOL_VERSION)
+                    .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))
+                    .unwrap_or_else(|_| digest_bytes(b"plugin-service-contract")),
+                runtime_requirements_digest: digest_bytes(b"plugin-service-runtime"),
             }),
             package_json: None,
             dependency_lock_digest: source.dependency_lock_digest.clone(),
             dependency_graph_digest: digest_payload(&lock.dependencies).map_err(|error| {
-                PluginRuntimeM1ApplicationError::Invalid(error.to_string())
+                PluginRuntimeApplicationError::Invalid(error.to_string())
             })?,
             config_schema: StrictJsonValue(config_schema),
             credential_slots: source_manifest.credential_slots,
             resource_contract: source_manifest.resource_contract,
             schemas: source_manifest.schemas,
-            bridge_contract_digest: digest_payload(&MINIAPP_BRIDGE_CONTRACT_VERSION)
-                .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?,
+            bridge_contract_digest: digest_payload(&PLUGIN_BRIDGE_CONTRACT_VERSION)
+                .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?,
             contribution_package,
             contributions: source_manifest.contributions,
             migrations: source_manifest.migrations,
@@ -5672,7 +5690,7 @@ fn prepare_build_release(
     let artifact = PluginRuntimeStaticBundleBuilder::new()
         .build(artifact_input)
         .map_err(|error| {
-            PluginRuntimeM1ApplicationError::Invalid(format!("Plugin Build failed: {error}"))
+            PluginRuntimeApplicationError::Invalid(format!("Plugin Build failed: {error}"))
         })?;
     let file_bytes = artifact
         .files
@@ -5684,7 +5702,7 @@ fn prepare_build_release(
                 source
                     .file(&file.normalized_relative_path)
                     .ok_or_else(|| {
-                        PluginRuntimeM1ApplicationError::Invalid(format!(
+                        PluginRuntimeApplicationError::Invalid(format!(
                             "captured Source file disappeared: {}",
                             file.normalized_relative_path
                         ))
@@ -5696,10 +5714,10 @@ fn prepare_build_release(
                 bytes,
             ))
         })
-        .collect::<Result<Vec<_>, PluginRuntimeM1ApplicationError>>()?;
+        .collect::<Result<Vec<_>, PluginRuntimeApplicationError>>()?;
     let scope = crate::runtime::PluginRuntimeSourceScope::new(
         owner_user_id,
-        &request.miniapp_id,
+        &request.plugin_id,
         &request.project_id,
     )
     .map_err(|error| store_error("Source scope", error))?;
@@ -5727,21 +5745,21 @@ fn prepare_build_release(
     let artifact = published.stored.artifact;
     let finished_at_ms = positive_now_ms().max(started_at_ms);
     let release_id = Uuid::now_v7().to_string();
-    let ready = MiniAppReadyRelease {
-        miniapp_id: MiniAppId::from(request.miniapp_id.clone()),
-        release: MiniAppReleaseRef {
-            release_id: MiniAppReleaseId::from(release_id.clone()),
+    let ready = PluginReadyRelease {
+        plugin_product_id: PluginProductId::from(request.plugin_id.clone()),
+        release: PluginReleaseRef {
+            release_id: PluginReleaseId::from(release_id.clone()),
             artifact_id: artifact.artifact_id.clone(),
             release_digest: artifact.artifact_digest.clone(),
             manifest_digest: artifact.manifest.payload_digest.clone(),
         },
         origin_operation_id: OperationId::from(operation_id.to_owned()),
-        origin: MiniAppReadyOrigin::Build,
-        source_lineage: MiniAppSourceLineage::Managed {
-            project_id: MiniAppProjectId::from(request.project_id.clone()),
+        origin: PluginReadyOrigin::Build,
+        source_lineage: PluginReleaseSourceLineage::Managed {
+            project_id: PluginProjectId::from(request.project_id.clone()),
             source_snapshot_digest: source.source_snapshot_digest.clone(),
             dependency_lock_digest: source.dependency_lock_digest.clone(),
-            build_profile_version: MINIAPP_RELEASE_PROFILE_VERSION.into(),
+            build_profile_version: PLUGIN_RELEASE_PROFILE_VERSION.into(),
             build_generation: request.expected_build_generation,
         },
         matching_service_test_receipt: None,
@@ -5749,9 +5767,9 @@ fn prepare_build_release(
     };
     ready
         .validate_for_artifact(&artifact)
-        .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
+        .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
     Ok(PreparedBuildRelease {
-        artifact: MiniAppReleaseArtifactRow {
+        artifact: PluginRuntimeReleaseArtifactRow {
             id: 0,
             artifact_id: artifact.artifact_id.as_ref().to_owned(),
             owner_user_id: owner_user_id.to_owned(),
@@ -5761,10 +5779,10 @@ fn prepare_build_release(
             managed_path: published.stored.managed_relative_path,
             created_at: finished_at_ms,
         },
-        release: MiniAppReleaseRow {
+        release: PluginRuntimeReleaseRow {
             id: 0,
             release_id,
-            miniapp_id: request.miniapp_id.clone(),
+            plugin_product_id: request.plugin_id.clone(),
             owner_user_id: owner_user_id.to_owned(),
             artifact_id: artifact.artifact_id.as_ref().to_owned(),
             artifact_digest: artifact.artifact_digest.as_ref().to_owned(),
@@ -5776,7 +5794,7 @@ fn prepare_build_release(
             project_id: Some(request.project_id.clone()),
             source_snapshot_digest: Some(source.source_snapshot_digest.as_ref().to_owned()),
             dependency_lock_digest: Some(source.dependency_lock_digest.as_ref().to_owned()),
-            build_profile_version: Some(MINIAPP_RELEASE_PROFILE_VERSION.to_owned()),
+            build_profile_version: Some(PLUGIN_RELEASE_PROFILE_VERSION.to_owned()),
             build_generation: Some(to_i64(
                 request.expected_build_generation,
                 "build generation",
@@ -5797,9 +5815,9 @@ fn prepare_build_release(
 }
 
 fn validate_build_request(
-    snapshot: &MiniAppM1Snapshot,
+    snapshot: &PluginRuntimeSnapshot,
     request: &BuildPluginRuntimeRequest,
-) -> Result<(), PluginRuntimeM1ApplicationError> {
+) -> Result<(), PluginRuntimeApplicationError> {
     validate_digest_string(
         &request.expected_source_snapshot_digest,
         "expected source snapshot digest",
@@ -5808,30 +5826,22 @@ fn validate_build_request(
         &request.expected_dependency_lock_digest,
         "expected dependency lock digest",
     )?;
-    if snapshot.product.miniapp_id != request.miniapp_id
+    if snapshot.product.plugin_product_id != request.plugin_id
         || snapshot.project.project_id != request.project_id
     {
-        return Err(PluginRuntimeM1ApplicationError::Invalid(
+        return Err(PluginRuntimeApplicationError::Invalid(
             "Build identity does not match the owner-scoped Product/Project".to_owned(),
         ));
     }
-    if snapshot.product.kind != MiniAppM1Kind::UiOnly.as_str()
-        && snapshot.product.kind != MiniAppM1Kind::Service.as_str()
+    if snapshot.product.kind != PluginRuntimeKind::Plugin.as_str()
     {
-        return Err(PluginRuntimeM1ApplicationError::Invalid(
+        return Err(PluginRuntimeApplicationError::Invalid(
             "Plugin product kind is invalid".to_owned(),
         ));
     }
-    if snapshot.product.kind == MiniAppM1Kind::UiOnly.as_str()
-        && request.service_lifecycle.is_some()
-    {
-        return Err(PluginRuntimeM1ApplicationError::Invalid(
-            "UI-only Build cannot declare a Service lifecycle".to_owned(),
-        ));
-    }
     if matches!(snapshot.product.lifecycle.as_str(), "trashed" | "deleting") {
-        return Err(PluginRuntimeM1ApplicationError::Invalid(
-            "trashed or deleting MiniApps cannot be built".to_owned(),
+        return Err(PluginRuntimeApplicationError::Invalid(
+            "trashed or deleting Plugins cannot be built".to_owned(),
         ));
     }
     if snapshot.product.product_revision
@@ -5846,9 +5856,9 @@ fn validate_build_request(
         || snapshot.project.dependency_lock_digest.as_deref()
             != Some(request.expected_dependency_lock_digest.as_str())
         || snapshot.project.build_profile_version.as_deref()
-            != Some(MINIAPP_RELEASE_PROFILE_VERSION)
+            != Some(PLUGIN_RELEASE_PROFILE_VERSION)
     {
-        return Err(PluginRuntimeM1ApplicationError::Invalid(
+        return Err(PluginRuntimeApplicationError::Invalid(
             "Build request is stale against the exact Product/Project/Source head".to_owned(),
         ));
     }
@@ -5866,7 +5876,7 @@ fn validate_build_request(
                 && release.build_generation
                     == Some(i64::try_from(request.expected_build_generation).unwrap_or(i64::MIN))
         }) {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(format!(
+            return Err(PluginRuntimeApplicationError::Invalid(format!(
                 "the current {label} Release already represents this exact Source generation"
             )));
         }
@@ -5877,26 +5887,26 @@ fn validate_build_request(
 fn read_exact_source(
     store: &PluginRuntimeSourceStore,
     owner_user_id: &str,
-    snapshot: &MiniAppM1Snapshot,
+    snapshot: &PluginRuntimeSnapshot,
     request: &BuildPluginRuntimeRequest,
-) -> Result<PluginRuntimeSourceSnapshot, PluginRuntimeM1ApplicationError> {
+) -> Result<PluginRuntimeSourceSnapshot, PluginRuntimeApplicationError> {
     let source = store
         .read_snapshot(
             owner_user_id,
-            &request.miniapp_id,
+            &request.plugin_id,
             &request.project_id,
             &request.expected_source_snapshot_digest,
         )
         .map_err(|error| store_error("Source Store", error))?;
     if source.dependency_lock_digest.as_ref() != request.expected_dependency_lock_digest
         || source.project.build_generation != request.expected_build_generation
-        || source.project.build_profile != JavaScriptBuildProfile::MiniAppReleaseV1
+        || source.project.build_profile != JavaScriptBuildProfile::PluginReleaseV1
         || source.project.build_profile_version.as_ref()
-            != MINIAPP_RELEASE_PROFILE_VERSION
+            != PLUGIN_RELEASE_PROFILE_VERSION
         || snapshot.project.managed_source_path.as_deref()
             != Some(source.project.managed_relative_path.as_str())
     {
-        return Err(PluginRuntimeM1ApplicationError::Invalid(
+        return Err(PluginRuntimeApplicationError::Invalid(
             "Source Store head does not match the exact DB Project lineage".to_owned(),
         ));
     }
@@ -5905,8 +5915,8 @@ fn read_exact_source(
 
 fn require_source_matches_project(
     source: &PluginRuntimeSourceSnapshot,
-    snapshot: &MiniAppM1Snapshot,
-) -> Result<(), PluginRuntimeM1ApplicationError> {
+    snapshot: &PluginRuntimeSnapshot,
+) -> Result<(), PluginRuntimeApplicationError> {
     if snapshot.project.source_head_digest.as_deref()
         != Some(source.source_snapshot_digest.as_ref())
         || snapshot.project.dependency_lock_digest.as_deref()
@@ -5915,11 +5925,11 @@ fn require_source_matches_project(
             != to_i64(source.project.build_generation, "Source build generation")?
         || snapshot.project.managed_source_path.as_deref()
             != Some(source.project.managed_relative_path.as_str())
-        || source.project.build_profile != JavaScriptBuildProfile::MiniAppReleaseV1
+        || source.project.build_profile != JavaScriptBuildProfile::PluginReleaseV1
         || source.project.build_profile_version.as_ref()
-            != MINIAPP_RELEASE_PROFILE_VERSION
+            != PLUGIN_RELEASE_PROFILE_VERSION
     {
-        return Err(PluginRuntimeM1ApplicationError::Invalid(
+        return Err(PluginRuntimeApplicationError::Invalid(
             "Source Store head does not match the exact DB Project lineage".into(),
         ));
     }
@@ -5927,15 +5937,15 @@ fn require_source_matches_project(
 }
 
 fn managed_source_lineage(
-    snapshot: &MiniAppM1Snapshot,
-) -> Result<MiniAppM1ManagedSourceLineage, PluginRuntimeM1ApplicationError> {
-    Ok(MiniAppM1ManagedSourceLineage {
+    snapshot: &PluginRuntimeSnapshot,
+) -> Result<PluginRuntimeManagedSourceLineage, PluginRuntimeApplicationError> {
+    Ok(PluginRuntimeManagedSourceLineage {
         managed_source_path: snapshot
             .project
             .managed_source_path
             .clone()
             .ok_or_else(|| {
-                PluginRuntimeM1ApplicationError::Invalid(
+                PluginRuntimeApplicationError::Invalid(
                     "UI-only Build requires a managed Source path".to_owned(),
                 )
             })?,
@@ -5944,7 +5954,7 @@ fn managed_source_lineage(
             .source_head_digest
             .clone()
             .ok_or_else(|| {
-                PluginRuntimeM1ApplicationError::Invalid(
+                PluginRuntimeApplicationError::Invalid(
                     "UI-only Build requires a Source digest".to_owned(),
                 )
             })?,
@@ -5953,7 +5963,7 @@ fn managed_source_lineage(
             .dependency_lock_digest
             .clone()
             .ok_or_else(|| {
-                PluginRuntimeM1ApplicationError::Invalid(
+                PluginRuntimeApplicationError::Invalid(
                     "UI-only Build requires a dependency lock digest".to_owned(),
                 )
             })?,
@@ -5962,7 +5972,7 @@ fn managed_source_lineage(
             .build_profile_version
             .clone()
             .ok_or_else(|| {
-                PluginRuntimeM1ApplicationError::Invalid(
+                PluginRuntimeApplicationError::Invalid(
                     "UI-only Build requires a build profile".to_owned(),
                 )
             })?,
@@ -5971,17 +5981,17 @@ fn managed_source_lineage(
 }
 
 async fn require_no_running_build(
-    repository: &dyn IMiniAppM1Repository,
+    repository: &dyn IPluginRuntimeRepository,
     owner_user_id: &str,
-    miniapp_id: &str,
-) -> Result<(), PluginRuntimeM1ApplicationError> {
+    plugin_product_id: &str,
+) -> Result<(), PluginRuntimeApplicationError> {
     if repository
-        .list_build_operations(owner_user_id, miniapp_id)
+        .list_build_operations(owner_user_id, plugin_product_id)
         .await?
         .into_iter()
         .any(|operation| operation.state == ProductOperationState::Running.as_str())
     {
-        return Err(PluginRuntimeM1ApplicationError::Database(
+        return Err(PluginRuntimeApplicationError::Database(
             nomifun_db::DbError::Conflict(
                 "Plugin Release pointers cannot change while a Build is running".to_owned(),
             ),
@@ -5990,41 +6000,28 @@ async fn require_no_running_build(
     Ok(())
 }
 
-fn require_ui_only_release_mutation(
-    snapshot: &MiniAppM1Snapshot,
-) -> Result<(), PluginRuntimeM1ApplicationError> {
-    require_release_mutation(snapshot)?;
-    if snapshot.product.kind != MiniAppM1Kind::UiOnly.as_str() {
-        return Err(PluginRuntimeM1ApplicationError::Invalid(
-            "auto Publish mode is available only for UI-only MiniApps".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
 fn require_release_mutation(
-    snapshot: &MiniAppM1Snapshot,
-) -> Result<(), PluginRuntimeM1ApplicationError> {
-    if snapshot.product.kind != MiniAppM1Kind::UiOnly.as_str()
-        && snapshot.product.kind != MiniAppM1Kind::Service.as_str()
+    snapshot: &PluginRuntimeSnapshot,
+) -> Result<(), PluginRuntimeApplicationError> {
+    if snapshot.product.kind != PluginRuntimeKind::Plugin.as_str()
     {
-        return Err(PluginRuntimeM1ApplicationError::Invalid(
+        return Err(PluginRuntimeApplicationError::Invalid(
             "Plugin product kind is invalid".to_owned(),
         ));
     }
     if matches!(snapshot.product.lifecycle.as_str(), "trashed" | "deleting") {
-        return Err(PluginRuntimeM1ApplicationError::Invalid(
-            "trashed or deleting MiniApps cannot change Release pointers".to_owned(),
+        return Err(PluginRuntimeApplicationError::Invalid(
+            "trashed or deleting Plugins cannot change Release pointers".to_owned(),
         ));
     }
     Ok(())
 }
 
 fn validate_publish_request(
-    snapshot: &MiniAppM1Snapshot,
-    request: &PublishMiniAppRequestDto,
-) -> Result<(), PluginRuntimeM1ApplicationError> {
-    validate_request_identity(&request.miniapp_id, "miniapp_id")?;
+    snapshot: &PluginRuntimeSnapshot,
+    request: &PublishPluginRequestDto,
+) -> Result<(), PluginRuntimeApplicationError> {
+    validate_request_identity(&request.plugin_id, "plugin_product_id")?;
     validate_digest_string(
         &request.expected_ready_release_digest,
         "expected Ready Release digest",
@@ -6032,20 +6029,11 @@ fn validate_publish_request(
     if let Some(active) = &request.expected_active_release_digest {
         validate_digest_string(active, "expected Active Release digest")?;
     }
-    let is_service = snapshot.product.kind == MiniAppM1Kind::Service.as_str();
-    if !is_service
-        && (request.expected_service_test_receipt_id.is_some()
-            || request.acknowledge_test_warning)
-    {
-        return Err(PluginRuntimeM1ApplicationError::Invalid(
-            "UI-only Publish does not accept Service Test warnings or receipts".to_owned(),
-        ));
-    }
     let ready = snapshot
         .ready_release
         .as_ref()
-        .ok_or_else(|| PluginRuntimeM1ApplicationError::Invalid("no Ready Release".to_owned()))?;
-    if snapshot.product.miniapp_id != request.miniapp_id
+        .ok_or_else(|| PluginRuntimeApplicationError::Invalid("no Ready Release".to_owned()))?;
+    if snapshot.product.plugin_product_id != request.plugin_id
         || positive_u64(snapshot.product.product_revision, "Plugin product revision")?
             != request.expected_product_revision
         || positive_u64(snapshot.product.pointer_revision, "Plugin pointer revision")?
@@ -6059,7 +6047,7 @@ fn validate_publish_request(
         || snapshot.product.active_release_digest.as_deref()
             != request.expected_active_release_digest.as_deref()
     {
-        return Err(PluginRuntimeM1ApplicationError::Database(
+        return Err(PluginRuntimeApplicationError::Database(
             nomifun_db::DbError::Conflict(
                 "Plugin Publish request is stale against the exact Release pointers".to_owned(),
             ),
@@ -6069,10 +6057,10 @@ fn validate_publish_request(
 }
 
 fn validate_rollback_request(
-    snapshot: &MiniAppM1Snapshot,
-    request: &RollbackMiniAppRequestDto,
-) -> Result<(), PluginRuntimeM1ApplicationError> {
-    validate_request_identity(&request.miniapp_id, "miniapp_id")?;
+    snapshot: &PluginRuntimeSnapshot,
+    request: &RollbackPluginRequestDto,
+) -> Result<(), PluginRuntimeApplicationError> {
+    validate_request_identity(&request.plugin_id, "plugin_product_id")?;
     validate_digest_string(
         &request.expected_current_release_digest,
         "expected current Release digest",
@@ -6084,12 +6072,12 @@ fn validate_rollback_request(
     let active = snapshot
         .active_release
         .as_ref()
-        .ok_or_else(|| PluginRuntimeM1ApplicationError::Invalid("no Active Release".to_owned()))?;
+        .ok_or_else(|| PluginRuntimeApplicationError::Invalid("no Active Release".to_owned()))?;
     let previous = snapshot
         .previous_release
         .as_ref()
-        .ok_or_else(|| PluginRuntimeM1ApplicationError::Invalid("no Previous Release".to_owned()))?;
-    if snapshot.product.miniapp_id != request.miniapp_id
+        .ok_or_else(|| PluginRuntimeApplicationError::Invalid("no Previous Release".to_owned()))?;
+    if snapshot.product.plugin_product_id != request.plugin_id
         || positive_u64(snapshot.product.product_revision, "Plugin product revision")?
             != request.expected_product_revision
         || positive_u64(snapshot.product.pointer_revision, "Plugin pointer revision")?
@@ -6102,7 +6090,7 @@ fn validate_rollback_request(
         || previous.release_id != request.previous_release_id
         || previous.release_digest != request.expected_previous_release_digest
     {
-        return Err(PluginRuntimeM1ApplicationError::Database(
+        return Err(PluginRuntimeApplicationError::Database(
             nomifun_db::DbError::Conflict(
                 "Plugin Rollback request is stale against the exact Release pointers".to_owned(),
             ),
@@ -6112,17 +6100,12 @@ fn validate_rollback_request(
 }
 
 fn validate_service_runtime_request(
-    snapshot: &MiniAppM1Snapshot,
+    snapshot: &PluginRuntimeSnapshot,
     expected_product_revision: u64,
     expected_pointer_revision: u64,
     expected_active_release_epoch: u64,
     expected_active_release_digest: &str,
-) -> Result<(), PluginRuntimeM1ApplicationError> {
-    if snapshot.product.kind != MiniAppM1Kind::Service.as_str() {
-        return Err(PluginRuntimeM1ApplicationError::Invalid(
-            "Service lifecycle operations require a Service Plugin".to_owned(),
-        ));
-    }
+) -> Result<(), PluginRuntimeApplicationError> {
     validate_digest_string(expected_active_release_digest, "expected Active Release digest")?;
     if snapshot.product.product_revision
         != to_i64(expected_product_revision, "product revision")?
@@ -6133,7 +6116,7 @@ fn validate_service_runtime_request(
         || snapshot.product.active_release_digest.as_deref()
             != Some(expected_active_release_digest)
     {
-        return Err(PluginRuntimeM1ApplicationError::Database(
+        return Err(PluginRuntimeApplicationError::Database(
             nomifun_db::DbError::Conflict(
                 "Plugin Service lifecycle request is stale against the exact Active Release"
                     .to_owned(),
@@ -6141,7 +6124,7 @@ fn validate_service_runtime_request(
         ));
     }
     if snapshot.product.lifecycle != "enabled" {
-        return Err(PluginRuntimeM1ApplicationError::Invalid(
+        return Err(PluginRuntimeApplicationError::Invalid(
             "Plugin Service must be enabled before it can start or retry".to_owned(),
         ));
     }
@@ -6151,25 +6134,25 @@ fn validate_service_runtime_request(
 fn validate_request_identity(
     value: &str,
     label: &str,
-) -> Result<(), PluginRuntimeM1ApplicationError> {
+) -> Result<(), PluginRuntimeApplicationError> {
     nomifun_common::validate_uuidv7(value)
         .map(|_| ())
         .map_err(|error| {
-            PluginRuntimeM1ApplicationError::Invalid(format!(
+            PluginRuntimeApplicationError::Invalid(format!(
                 "{label} must be canonical UUIDv7: {error}"
             ))
         })
 }
 
 fn pointer_state_from_snapshot(
-    snapshot: &MiniAppM1Snapshot,
-) -> Result<MiniAppReleasePointerState, PluginRuntimeM1ApplicationError> {
+    snapshot: &PluginRuntimeSnapshot,
+) -> Result<PluginReleasePointerState, PluginRuntimeApplicationError> {
     validate_digest_string(
         &snapshot.product.materialized_catalog_digest,
         "materialized Catalog digest",
     )?;
-    let state = MiniAppReleasePointerState {
-        miniapp_id: MiniAppId::from(snapshot.product.miniapp_id.clone()),
+    let state = PluginReleasePointerState {
+        plugin_product_id: PluginProductId::from(snapshot.product.plugin_product_id.clone()),
         pointer_revision: positive_u64(
             snapshot.product.pointer_revision,
             "Plugin pointer revision",
@@ -6179,8 +6162,8 @@ fn pointer_state_from_snapshot(
             "Plugin active release epoch",
         )?,
         ready_release: snapshot.ready_release.as_ref().map(|release| {
-            MiniAppReadyReleaseRef {
-                release_id: MiniAppReleaseId::from(release.release_id.clone()),
+            PluginReadyReleaseRef {
+                release_id: PluginReleaseId::from(release.release_id.clone()),
                 release_digest: DigestHex::from(release.release_digest.clone()),
             }
         }),
@@ -6195,63 +6178,63 @@ fn pointer_state_from_snapshot(
     };
     state
         .validate()
-        .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
+        .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
     Ok(state)
 }
 
 fn pointer_expectation_from_snapshot(
-    snapshot: &MiniAppM1Snapshot,
-) -> Result<MiniAppPointerExpectation, PluginRuntimeM1ApplicationError> {
-    Ok(MiniAppPointerExpectation::from_state(
+    snapshot: &PluginRuntimeSnapshot,
+) -> Result<PluginPointerExpectation, PluginRuntimeApplicationError> {
+    Ok(PluginPointerExpectation::from_state(
         &pointer_state_from_snapshot(snapshot)?,
     ))
 }
 
 fn ui_only_non_ui_fingerprint(
     release: &PluginRuntimeStoredRelease,
-) -> Result<MiniAppNonUiReleaseFingerprint, PluginRuntimeM1ApplicationError> {
+) -> Result<PluginNonUiReleaseFingerprint, PluginRuntimeApplicationError> {
     let manifest = &release.artifact.manifest.payload;
     if !manifest.is_ui_only() {
-        return Err(PluginRuntimeM1ApplicationError::Invalid(
+        return Err(PluginRuntimeApplicationError::Invalid(
             "UI-only auto Publish proof received a Service Release".to_owned(),
         ));
     }
-    Ok(MiniAppNonUiReleaseFingerprint {
+    Ok(PluginNonUiReleaseFingerprint {
         manifest_without_ui_digest: ui_only_non_ui_manifest_digest(release)?,
         service_run_key: None,
         migration_set_digest: manifest
             .migration_set_digest()
-            .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?,
+            .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?,
         contribution_set_digest: manifest
             .contribution_set_digest()
-            .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?,
+            .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?,
         bridge_contract_digest: manifest.bridge_contract_digest.clone(),
         config_schema_digest: manifest.config_schema_digest.clone(),
         credential_slots_digest: manifest.credential_slots_digest.clone(),
         resource_contract_digest: manifest.resource_contract_digest.clone(),
-        runtime_requirements_digest: digest_bytes(b"miniapp-ui-only-no-runtime"),
+        runtime_requirements_digest: digest_bytes(b"plugin-ui-only-no-runtime"),
         dependency_lock_digest: manifest.dependency_lock_digest.clone(),
     })
 }
 
 fn ui_only_non_ui_manifest_digest(
     release: &PluginRuntimeStoredRelease,
-) -> Result<DigestHex, PluginRuntimeM1ApplicationError> {
+) -> Result<DigestHex, PluginRuntimeApplicationError> {
     let mut manifest = release.artifact.manifest.payload.clone();
     if let Some(ui) = &mut manifest.ui {
         ui.entrypoint_digest = digest_bytes(b"normalized-ui-entrypoint-content");
         ui.ui_tree_digest = digest_bytes(b"normalized-ui-tree-content");
     }
     digest_payload(&manifest)
-        .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))
+        .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))
 }
 
 #[async_trait]
-impl PluginRuntimeAgentCapabilityPort for PluginRuntimeM1ApplicationService {
+impl PluginRuntimeAgentCapabilityPort for PluginRuntimeApplicationService {
     async fn invoke_agent_capability(
         &self,
         request: PluginRuntimeAgentCapabilityInvocation,
-    ) -> Result<StrictJsonValue, PluginRuntimeM1ApplicationError> {
+    ) -> Result<StrictJsonValue, PluginRuntimeApplicationError> {
         self.invoke_agent_capability_inner(request).await
     }
 }
@@ -6361,40 +6344,40 @@ fn source_matches_artifact(
             .collect::<BTreeMap<_, _>>()
 }
 
-fn release_contract_ref(release: &MiniAppReleaseRow) -> MiniAppReleaseRef {
-    MiniAppReleaseRef {
-        release_id: MiniAppReleaseId::from(release.release_id.clone()),
+fn release_contract_ref(release: &PluginRuntimeReleaseRow) -> PluginReleaseRef {
+    PluginReleaseRef {
+        release_id: PluginReleaseId::from(release.release_id.clone()),
         artifact_id: ArtifactId::from(release.artifact_id.clone()),
         release_digest: DigestHex::from(release.release_digest.clone()),
         manifest_digest: DigestHex::from(release.manifest_digest.clone()),
     }
 }
 
-pub fn miniapp_catalog_digest(
-    miniapp_id: &str,
-    active_release: &MiniAppReleaseRef,
+pub fn plugin_catalog_digest(
+    plugin_product_id: &str,
+    active_release: &PluginReleaseRef,
     contributions: &PackageContributions,
-) -> Result<DigestHex, PluginRuntimeM1ApplicationError> {
-    let publication = build_miniapp_catalog_publication(
-        MiniAppId::from(miniapp_id),
+) -> Result<DigestHex, PluginRuntimeApplicationError> {
+    let publication = build_plugin_catalog_publication(
+        PluginProductId::from(plugin_product_id),
         active_release.clone(),
         contributions,
     )?;
     Ok(publication.catalog_digest)
 }
 
-fn build_miniapp_catalog_publication(
-    miniapp_id: MiniAppId,
-    active_release: MiniAppReleaseRef,
+fn build_plugin_catalog_publication(
+    plugin_product_id: PluginProductId,
+    active_release: PluginReleaseRef,
     contributions: &PackageContributions,
-) -> Result<MiniAppCapabilityCatalogPublication, PluginRuntimeM1ApplicationError> {
+) -> Result<PluginProductCapabilityCatalogPublication, PluginRuntimeApplicationError> {
     let mut capabilities = Vec::with_capacity(contributions.capabilities.len());
     for manifest in &contributions.capabilities {
         let consumers = manifest
             .supported_consumers()
-            .map_err(PluginRuntimeM1ApplicationError::Invalid)?;
+            .map_err(PluginRuntimeApplicationError::Invalid)?;
         let service_dispatch_available =
-            consumers.contains(&CapabilityConsumer::MiniAppService);
+            consumers.contains(&CapabilityConsumer::PluginService);
         let availability = consumers
             .iter()
             .copied()
@@ -6405,14 +6388,14 @@ fn build_miniapp_catalog_publication(
                         && matches!(
                             consumer,
                             CapabilityConsumer::Agent
-                                | CapabilityConsumer::MiniAppService
+                                | CapabilityConsumer::PluginService
                         )
                     {
                         CatalogAvailability::Active
                     } else {
                         CatalogAvailability::Unavailable {
                             reason: format!(
-                                "CAPABILITY_MINIAPP_{}_DISPATCH_UNAVAILABLE",
+                                "CAPABILITY_PLUGIN_{}_DISPATCH_UNAVAILABLE",
                                 consumer.as_str().to_ascii_uppercase()
                             ),
                         }
@@ -6427,10 +6410,10 @@ fn build_miniapp_catalog_publication(
                     owner: CapabilityOwner::Package {
                         package: manifest.package.clone(),
                     },
-                    source_kind: ContributionSourceKind::MiniAppActiveRelease,
-                    source_identity: format!("miniapp:{}", miniapp_id.as_ref()).into(),
+                    source_kind: ContributionSourceKind::PluginProductActiveRelease,
+                    source_identity: format!("plugin:{}", plugin_product_id.as_ref()).into(),
                     mount_id: None,
-                    miniapp_id: Some(miniapp_id.clone()),
+                    plugin_product_id: Some(plugin_product_id.clone()),
                     mcp_binding_id: None,
                     artifact_digest: Some(active_release.release_digest.clone()),
                 },
@@ -6438,14 +6421,14 @@ fn build_miniapp_catalog_publication(
                 availability,
             },
         )
-        .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
+        .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
         capabilities.push(CapabilityCatalogPublication {
             manifest: manifest.clone(),
             entry,
         });
     }
-    let mut publication = MiniAppCapabilityCatalogPublication {
-        miniapp_id,
+    let mut publication = PluginProductCapabilityCatalogPublication {
+        plugin_product_id,
         active_release,
         active_release_epoch: 1,
         catalog_digest: DigestHex::from("0".repeat(64)),
@@ -6453,13 +6436,13 @@ fn build_miniapp_catalog_publication(
     };
     publication.catalog_digest = publication
         .computed_catalog_digest()
-        .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
+        .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
     Ok(publication)
 }
 
-fn miniapp_capability_catalog_item(
+fn plugin_capability_catalog_item(
     publication: &CapabilityCatalogPublication,
-) -> Result<CapabilityCatalogItemDto, PluginRuntimeM1ApplicationError> {
+) -> Result<CapabilityCatalogItemDto, PluginRuntimeApplicationError> {
     let manifest = &publication.manifest;
     let unavailable_code = match publication
         .entry
@@ -6506,7 +6489,7 @@ fn miniapp_capability_catalog_item(
             id: manifest.package.id.as_ref().to_owned(),
             version: manifest.package.version.as_ref().to_owned(),
         },
-        source_kind: "miniapp_active_release".to_owned(),
+        source_kind: "plugin_active_release".to_owned(),
         materialization_state: if unavailable_code.is_some() {
             CatalogMaterializationStateDto::Unavailable
         } else {
@@ -6552,13 +6535,13 @@ fn miniapp_capability_catalog_item(
 fn validate_backup_credential_slot_union(
     credential_slots: &[CredentialSlotDeclaration],
     releases: &BTreeMap<String, PluginRuntimeBackupRelease>,
-) -> Result<(), PluginRuntimeM1ApplicationError> {
+) -> Result<(), PluginRuntimeApplicationError> {
     let declared = credential_slots
         .iter()
         .map(|slot| (slot.slot_key.as_ref().to_owned(), slot))
         .collect::<BTreeMap<_, _>>();
     if declared.len() != credential_slots.len() {
-        return Err(PluginRuntimeM1ApplicationError::Invalid(
+        return Err(PluginRuntimeApplicationError::Invalid(
             "Whole-App Backup credential slots contain duplicates".into(),
         ));
     }
@@ -6567,7 +6550,7 @@ fn validate_backup_credential_slot_union(
         for slot in &release.artifact.manifest.payload.credential_slots {
             match observed.get(slot.slot_key.as_ref()) {
                 Some(existing) if existing != slot => {
-                    return Err(PluginRuntimeM1ApplicationError::Invalid(format!(
+                    return Err(PluginRuntimeApplicationError::Invalid(format!(
                         "Whole-App Backup credential slot {} changes across Releases",
                         slot.slot_key.as_ref()
                     )));
@@ -6584,7 +6567,7 @@ fn validate_backup_credential_slot_union(
         .map(|(key, slot)| (key, slot.clone()))
         .collect::<BTreeMap<_, _>>()
     {
-        return Err(PluginRuntimeM1ApplicationError::Invalid(
+        return Err(PluginRuntimeApplicationError::Invalid(
             "Whole-App Backup credential slots do not match the retained Release union".into(),
         ));
     }
@@ -6592,8 +6575,8 @@ fn validate_backup_credential_slot_union(
 }
 
 fn summary_from_product(
-    product: &MiniAppProductRow,
-) -> Result<PluginRuntimeSummaryDto, PluginRuntimeM1ApplicationError> {
+    product: &PluginRuntimeProductRow,
+) -> Result<PluginRuntimeSummaryDto, PluginRuntimeApplicationError> {
     let kind = kind_dto(&product.kind)?;
     let lifecycle = lifecycle_dto(&product.lifecycle)?;
     let product_revision =
@@ -6605,7 +6588,7 @@ fn summary_from_product(
         "Plugin active release epoch",
     )?;
     Ok(PluginRuntimeSummaryDto {
-        miniapp_id: product.miniapp_id.clone(),
+        plugin_id: product.plugin_product_id.clone(),
         product_revision,
         display_name: product.display_name.clone(),
         description: product.description.clone(),
@@ -6619,11 +6602,7 @@ fn summary_from_product(
             active: None,
             previous: None,
         },
-        service_health: if kind == PluginRuntimeKindDto::UiOnly {
-            PluginRuntimeServiceHealthDto::NotApplicable
-        } else {
-            PluginRuntimeServiceHealthDto::Stopped
-        },
+        service_health: PluginRuntimeServiceHealthDto::NotApplicable,
         surface_available: lifecycle == PluginRuntimeLifecycleDto::Enabled
             && product.active_release_id.is_some(),
         updated_at_ms: product.updated_at,
@@ -6632,9 +6611,9 @@ fn summary_from_product(
 }
 
 fn summary_from_snapshot_with_observation(
-    snapshot: &MiniAppM1Snapshot,
+    snapshot: &PluginRuntimeSnapshot,
     observation: Option<&PluginRuntimeServiceObservation>,
-) -> Result<PluginRuntimeSummaryDto, PluginRuntimeM1ApplicationError> {
+) -> Result<PluginRuntimeSummaryDto, PluginRuntimeApplicationError> {
     let mut summary = summary_from_product(&snapshot.product)?;
     summary.releases.ready = snapshot
         .ready_release
@@ -6650,7 +6629,6 @@ fn summary_from_snapshot_with_observation(
         .map(release_ref_from_row);
     if let Some(observation) = observation {
         summary.service_health = service_health_dto_from_observation(
-            &snapshot.product.kind,
             observation,
         )?;
     }
@@ -6658,10 +6636,10 @@ fn summary_from_snapshot_with_observation(
 }
 
 fn workshop_from_snapshot_with_observation(
-    snapshot: &MiniAppM1Snapshot,
+    snapshot: &PluginRuntimeSnapshot,
     active_operation: Option<DurableOperationSummaryDto>,
     observation: Option<&PluginRuntimeServiceObservation>,
-) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeM1ApplicationError> {
+) -> Result<PluginRuntimeWorkshopDto, PluginRuntimeApplicationError> {
     let product = &snapshot.product;
     let project = &snapshot.project;
     let summary = summary_from_snapshot_with_observation(snapshot, observation)?;
@@ -6670,7 +6648,7 @@ fn workshop_from_snapshot_with_observation(
         "editable" => PluginRuntimeProjectSourceStateDto::Editable,
         "runtime_only" => PluginRuntimeProjectSourceStateDto::RuntimeOnly,
         value => {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(format!(
+            return Err(PluginRuntimeApplicationError::Invalid(format!(
                 "unknown Plugin source_state {value}"
             )));
         }
@@ -6678,7 +6656,7 @@ fn workshop_from_snapshot_with_observation(
     let ready = snapshot
         .ready_release
         .as_ref()
-        .map(|release| -> Result<_, PluginRuntimeM1ApplicationError> {
+        .map(|release| -> Result<_, PluginRuntimeApplicationError> {
             let release_ref = release_ref_from_row(release);
             Ok(PluginRuntimeReadyReleaseDto {
                 release: release_ref.clone(),
@@ -6712,15 +6690,15 @@ fn workshop_from_snapshot_with_observation(
         })
         .transpose()?;
     let schema: Value = serde_json::from_str(&product.config_schema_json)
-        .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
+        .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
     let values: Value = serde_json::from_str(&product.config_json)
-        .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
+        .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
     let config_schema_digest =
         nomifun_agent_contracts::digest_payload(&schema).map_err(|error| {
-            PluginRuntimeM1ApplicationError::Invalid(error.to_string())
+            PluginRuntimeApplicationError::Invalid(error.to_string())
         })?;
     Ok(PluginRuntimeWorkshopDto {
-        miniapp: summary,
+        plugin: summary,
         service_lifecycle: None,
         active_service: None,
         publish_mode: if snapshot
@@ -6781,17 +6759,17 @@ fn workshop_from_snapshot_with_observation(
 
 fn latest_running_build(
     operations: Vec<ProductOperationRow>,
-) -> Result<Option<DurableOperationSummaryDto>, PluginRuntimeM1ApplicationError> {
+) -> Result<Option<DurableOperationSummaryDto>, PluginRuntimeApplicationError> {
     let mut running = operations.into_iter().filter(|operation| {
         operation.kind == "build"
-            && operation.owner_kind == "miniapp"
+            && operation.owner_kind == "plugin"
             && operation.state == ProductOperationState::Running.as_str()
     });
     let Some(operation) = running.next() else {
         return Ok(None);
     };
     if running.next().is_some() {
-        return Err(PluginRuntimeM1ApplicationError::Invalid(
+        return Err(PluginRuntimeApplicationError::Invalid(
             "Plugin has more than one running Build operation".to_owned(),
         ));
     }
@@ -6800,9 +6778,9 @@ fn latest_running_build(
 
 fn operation_summary(
     operation: &ProductOperationRow,
-) -> Result<DurableOperationSummaryDto, PluginRuntimeM1ApplicationError> {
-    if operation.owner_kind != "miniapp" {
-        return Err(PluginRuntimeM1ApplicationError::Invalid(
+) -> Result<DurableOperationSummaryDto, PluginRuntimeApplicationError> {
+    if operation.owner_kind != "plugin" {
+        return Err(PluginRuntimeApplicationError::Invalid(
             "Plugin operation is not owner-scoped".to_owned(),
         ));
     }
@@ -6810,9 +6788,9 @@ fn operation_summary(
         "build" => DurableOperationKindDto::Build,
         "import" => DurableOperationKindDto::Import,
         "export" => DurableOperationKindDto::Export,
-        "miniapp_permanent_delete" => DurableOperationKindDto::MiniappPermanentDelete,
+        "plugin_permanent_delete" => DurableOperationKindDto::PluginPermanentDelete,
         value => {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(format!(
+            return Err(PluginRuntimeApplicationError::Invalid(format!(
                 "unknown Plugin operation kind {value}"
             )));
         }
@@ -6823,7 +6801,7 @@ fn operation_summary(
         "failed" => DurableOperationStateDto::Failed,
         "canceled" => DurableOperationStateDto::Canceled,
         value => {
-            return Err(PluginRuntimeM1ApplicationError::Invalid(format!(
+            return Err(PluginRuntimeApplicationError::Invalid(format!(
                 "unknown Plugin Build operation state {value}"
             )));
         }
@@ -6832,7 +6810,7 @@ fn operation_summary(
         .progress_percent
         .map(|value| {
             u8::try_from(value).map_err(|_| {
-                PluginRuntimeM1ApplicationError::Invalid(
+                PluginRuntimeApplicationError::Invalid(
                     "Plugin operation progress is outside u8 range".to_owned(),
                 )
             })
@@ -6842,8 +6820,8 @@ fn operation_summary(
         operation_id: operation.operation_id.clone(),
         operation_revision: operation_revision(operation),
         kind,
-        owner: DurableOperationOwnerDto::Miniapp {
-            miniapp_id: operation.owner_id.clone(),
+        owner: DurableOperationOwnerDto::PluginRuntime {
+            plugin_id: operation.owner_id.clone(),
         },
         state,
         cancelable: matches!(
@@ -6870,8 +6848,8 @@ fn operation_conflict(
     operation_id: &str,
     observed_state: &str,
     reason: &str,
-) -> PluginRuntimeM1ApplicationError {
-    PluginRuntimeM1ApplicationError::Database(nomifun_db::DbError::Conflict(format!(
+) -> PluginRuntimeApplicationError {
+    PluginRuntimeApplicationError::Database(nomifun_db::DbError::Conflict(format!(
         "Plugin Build operation {operation_id} conflict: {reason}; observed state {observed_state}"
     )))
 }
@@ -6879,19 +6857,19 @@ fn operation_conflict(
 fn nonnegative_u64(
     value: i64,
     label: &str,
-) -> Result<u64, PluginRuntimeM1ApplicationError> {
+) -> Result<u64, PluginRuntimeApplicationError> {
     u64::try_from(value).map_err(|_| {
-        PluginRuntimeM1ApplicationError::Invalid(format!("{label} is negative"))
+        PluginRuntimeApplicationError::Invalid(format!("{label} is negative"))
     })
 }
 
 fn positive_u64(
     value: i64,
     label: &str,
-) -> Result<u64, PluginRuntimeM1ApplicationError> {
+) -> Result<u64, PluginRuntimeApplicationError> {
     let value = nonnegative_u64(value, label)?;
     if value == 0 {
-        Err(PluginRuntimeM1ApplicationError::Invalid(format!(
+        Err(PluginRuntimeApplicationError::Invalid(format!(
             "{label} must be positive"
         )))
     } else {
@@ -6899,16 +6877,16 @@ fn positive_u64(
     }
 }
 
-fn to_i64(value: u64, label: &str) -> Result<i64, PluginRuntimeM1ApplicationError> {
+fn to_i64(value: u64, label: &str) -> Result<i64, PluginRuntimeApplicationError> {
     i64::try_from(value).map_err(|_| {
-        PluginRuntimeM1ApplicationError::Invalid(format!("{label} exceeds SQLite range"))
+        PluginRuntimeApplicationError::Invalid(format!("{label} exceeds SQLite range"))
     })
 }
 
 fn validate_digest_string(
     value: &str,
     label: &str,
-) -> Result<(), PluginRuntimeM1ApplicationError> {
+) -> Result<(), PluginRuntimeApplicationError> {
     if value.len() == 64
         && value
             .bytes()
@@ -6916,17 +6894,16 @@ fn validate_digest_string(
     {
         Ok(())
     } else {
-        Err(PluginRuntimeM1ApplicationError::Invalid(format!(
+        Err(PluginRuntimeApplicationError::Invalid(format!(
             "{label} must be a lowercase SHA-256 digest"
         )))
     }
 }
 
-fn kind_dto(value: &str) -> Result<PluginRuntimeKindDto, PluginRuntimeM1ApplicationError> {
+fn kind_dto(value: &str) -> Result<PluginRuntimeKindDto, PluginRuntimeApplicationError> {
     match value {
-        "ui_only" => Ok(PluginRuntimeKindDto::UiOnly),
-        "service" => Ok(PluginRuntimeKindDto::Service),
-        value => Err(PluginRuntimeM1ApplicationError::Invalid(format!(
+        "plugin" => Ok(PluginRuntimeKindDto::Plugin),
+        value => Err(PluginRuntimeApplicationError::Invalid(format!(
             "unknown Plugin kind {value}"
         ))),
     }
@@ -6934,29 +6911,29 @@ fn kind_dto(value: &str) -> Result<PluginRuntimeKindDto, PluginRuntimeM1Applicat
 
 fn service_lifecycle_from_request(
     value: Option<PluginRuntimeServiceLifecycleDto>,
-) -> Result<MiniAppServiceLifecycle, PluginRuntimeM1ApplicationError> {
+) -> Result<PluginServiceLifecycle, PluginRuntimeApplicationError> {
     match value.unwrap_or(PluginRuntimeServiceLifecycleDto::OnDemand) {
-        PluginRuntimeServiceLifecycleDto::OnDemand => Ok(MiniAppServiceLifecycle::OnDemand),
-        PluginRuntimeServiceLifecycleDto::Continuous => Ok(MiniAppServiceLifecycle::Continuous),
+        PluginRuntimeServiceLifecycleDto::OnDemand => Ok(PluginServiceLifecycle::OnDemand),
+        PluginRuntimeServiceLifecycleDto::Continuous => Ok(PluginServiceLifecycle::Continuous),
     }
 }
 
 fn lifecycle_dto(
     value: &str,
-) -> Result<PluginRuntimeLifecycleDto, PluginRuntimeM1ApplicationError> {
+) -> Result<PluginRuntimeLifecycleDto, PluginRuntimeApplicationError> {
     match value {
         "enabled" => Ok(PluginRuntimeLifecycleDto::Enabled),
         "disabled" => Ok(PluginRuntimeLifecycleDto::Disabled),
         "trashed" => Ok(PluginRuntimeLifecycleDto::Trashed),
         "deleting" => Ok(PluginRuntimeLifecycleDto::Deleting),
-        value => Err(PluginRuntimeM1ApplicationError::Invalid(format!(
+        value => Err(PluginRuntimeApplicationError::Invalid(format!(
             "unknown Plugin lifecycle {value}"
         ))),
     }
 }
 
 fn release_ref_from_row(
-    release: &nomifun_db::MiniAppReleaseRow,
+    release: &nomifun_db::PluginRuntimeReleaseRow,
 ) -> PluginRuntimeReleaseRefDto {
     PluginRuntimeReleaseRefDto {
         release_id: release.release_id.clone(),
@@ -6968,11 +6945,11 @@ fn release_ref_from_row(
 
 fn canonical_json_string<T: Serialize>(
     value: &T,
-) -> Result<String, PluginRuntimeM1ApplicationError> {
+) -> Result<String, PluginRuntimeApplicationError> {
     let bytes = canonical_json_bytes(value)
-        .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))?;
+        .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))?;
     String::from_utf8(bytes)
-        .map_err(|error| PluginRuntimeM1ApplicationError::Invalid(error.to_string()))
+        .map_err(|error| PluginRuntimeApplicationError::Invalid(error.to_string()))
 }
 
 fn positive_now_ms() -> i64 {
@@ -6982,22 +6959,22 @@ fn positive_now_ms() -> i64 {
 fn store_error(
     label: &str,
     error: impl std::fmt::Display,
-) -> PluginRuntimeM1ApplicationError {
-    PluginRuntimeM1ApplicationError::Invalid(format!("{label}: {error}"))
+) -> PluginRuntimeApplicationError {
+    PluginRuntimeApplicationError::Invalid(format!("{label}: {error}"))
 }
 
-fn build_error_code(error: &PluginRuntimeM1ApplicationError) -> &'static str {
+fn build_error_code(error: &PluginRuntimeApplicationError) -> &'static str {
     match error {
-        PluginRuntimeM1ApplicationError::NotFound => "MINIAPP_NOT_FOUND",
-        PluginRuntimeM1ApplicationError::Database(_) => "MINIAPP_DATABASE_ERROR",
-        PluginRuntimeM1ApplicationError::Runtime(_) => "MINIAPP_RUNTIME_ERROR",
-        PluginRuntimeM1ApplicationError::Invalid(message) if message.contains("Source Store") => {
-            "MINIAPP_SOURCE_REJECTED"
+        PluginRuntimeApplicationError::NotFound => "PLUGIN_NOT_FOUND",
+        PluginRuntimeApplicationError::Database(_) => "PLUGIN_DATABASE_ERROR",
+        PluginRuntimeApplicationError::Runtime(_) => "PLUGIN_RUNTIME_ERROR",
+        PluginRuntimeApplicationError::Invalid(message) if message.contains("Source Store") => {
+            "PLUGIN_SOURCE_REJECTED"
         }
-        PluginRuntimeM1ApplicationError::Invalid(message) if message.contains("Release Store") => {
-            "MINIAPP_RELEASE_REJECTED"
+        PluginRuntimeApplicationError::Invalid(message) if message.contains("Release Store") => {
+            "PLUGIN_RELEASE_REJECTED"
         }
-        PluginRuntimeM1ApplicationError::Invalid(_) => "MINIAPP_BUILD_REJECTED",
+        PluginRuntimeApplicationError::Invalid(_) => "PLUGIN_BUILD_REJECTED",
     }
 }
 
@@ -7015,12 +6992,12 @@ fn bounded_error_code(value: &str) -> String {
 }
 
 fn service_descriptor_dto(
-    service: &nomifun_agent_contracts::MiniAppServiceReleaseDescriptor,
+    service: &nomifun_agent_contracts::PluginServiceReleaseDescriptor,
 ) -> PluginRuntimeServiceDescriptorDto {
     PluginRuntimeServiceDescriptorDto {
         lifecycle: match service.lifecycle {
-            MiniAppServiceLifecycle::OnDemand => PluginRuntimeServiceLifecycleDto::OnDemand,
-            MiniAppServiceLifecycle::Continuous => PluginRuntimeServiceLifecycleDto::Continuous,
+            PluginServiceLifecycle::OnDemand => PluginRuntimeServiceLifecycleDto::OnDemand,
+            PluginServiceLifecycle::Continuous => PluginRuntimeServiceLifecycleDto::Continuous,
         },
         uses_files: service.uses_files,
         uses_private_database: service.uses_private_database,
@@ -7029,12 +7006,8 @@ fn service_descriptor_dto(
 }
 
 fn service_health_dto_from_observation(
-    kind: &str,
     observation: &PluginRuntimeServiceObservation,
-) -> Result<PluginRuntimeServiceHealthDto, PluginRuntimeM1ApplicationError> {
-    if kind != MiniAppM1Kind::Service.as_str() {
-        return Ok(PluginRuntimeServiceHealthDto::NotApplicable);
-    }
+) -> Result<PluginRuntimeServiceHealthDto, PluginRuntimeApplicationError> {
     Ok(match observation {
         PluginRuntimeServiceObservation::Stopped => PluginRuntimeServiceHealthDto::Stopped,
         PluginRuntimeServiceObservation::Starting { release } => {
@@ -7060,18 +7033,4 @@ fn service_health_dto_from_observation(
             error_code: error_code.clone(),
         },
     })
-}
-
-fn default_service_module() -> Vec<u8> {
-    br#"export async function start(context) {
-  return {
-    async invoke({ method, payload }) {
-      if (method === "echo") return payload;
-      throw new Error(`Unknown Plugin Service method: ${method}`);
-    },
-    async dispose() {},
-  };
-}
-"#
-    .to_vec()
 }

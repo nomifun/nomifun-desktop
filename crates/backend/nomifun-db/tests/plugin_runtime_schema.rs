@@ -1,4 +1,4 @@
-use nomifun_agent_contracts::MINIAPP_RELEASE_PROFILE_VERSION;
+use nomifun_agent_contracts::PLUGIN_RELEASE_PROFILE_VERSION;
 use nomifun_db::{
     init_database, installation_owner_id, validate_id_data_contract,
 };
@@ -48,10 +48,10 @@ async fn migrated_pool(maximum_version: i64) -> nomifun_db::SqlitePool {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn insert_succeeded_miniapp_build(
+async fn insert_succeeded_plugin_build(
     pool: &nomifun_db::SqlitePool,
     owner: &str,
-    miniapp_id: &str,
+    plugin_product_id: &str,
     project_id: &str,
     operation_id: &str,
     project_revision: i64,
@@ -66,18 +66,18 @@ async fn insert_succeeded_miniapp_build(
             operation_id, kind, owner_kind, owner_id, state,
             progress_percent, bounded_log_tail_json,
             started_at_ms, finished_at_ms
-         ) VALUES (?, 'build', 'miniapp', ?, 'succeeded', 100, '[]', ?, ?)",
+         ) VALUES (?, 'build', 'plugin', ?, 'succeeded', 100, '[]', ?, ?)",
     )
     .bind(operation_id)
-    .bind(miniapp_id)
+    .bind(plugin_product_id)
     .bind(started_at_ms)
     .bind(finished_at_ms)
     .execute(pool)
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO miniapp_build_operation_lineage (
-            operation_id, owner_user_id, miniapp_id, project_id,
+        "INSERT INTO plugin_build_operation_lineage (
+            operation_id, owner_user_id, plugin_product_id, project_id,
             project_revision, source_snapshot_digest,
             dependency_lock_digest, build_profile_version,
             build_generation, started_at_ms
@@ -85,12 +85,12 @@ async fn insert_succeeded_miniapp_build(
     )
     .bind(operation_id)
     .bind(owner)
-    .bind(miniapp_id)
+    .bind(plugin_product_id)
     .bind(project_id)
     .bind(project_revision)
     .bind(source_snapshot_digest)
     .bind(dependency_lock_digest)
-    .bind(MINIAPP_RELEASE_PROFILE_VERSION)
+    .bind(PLUGIN_RELEASE_PROFILE_VERSION)
     .bind(build_generation)
     .bind(started_at_ms)
     .execute(pool)
@@ -100,7 +100,7 @@ async fn insert_succeeded_miniapp_build(
 
 #[allow(clippy::too_many_arguments)]
 fn release_record_json(
-    miniapp_id: &str,
+    plugin_product_id: &str,
     project_id: &str,
     artifact_id: &str,
     release_id: &str,
@@ -113,7 +113,7 @@ fn release_record_json(
     created_at_ms: i64,
 ) -> String {
     json!({
-        "miniapp_id": miniapp_id,
+        "plugin_product_id": plugin_product_id,
         "release": {
             "release_id": release_id,
             "artifact_id": artifact_id,
@@ -127,7 +127,7 @@ fn release_record_json(
             "project_id": project_id,
             "source_snapshot_digest": source_snapshot_digest,
             "dependency_lock_digest": dependency_lock_digest,
-            "build_profile_version": MINIAPP_RELEASE_PROFILE_VERSION,
+            "build_profile_version": PLUGIN_RELEASE_PROFILE_VERSION,
             "build_generation": build_generation
         },
         "created_at_ms": created_at_ms
@@ -136,24 +136,24 @@ fn release_record_json(
 }
 
 #[tokio::test]
-async fn migration_072_is_additive_and_starts_with_an_empty_new_root() {
+async fn migration_072_starts_with_only_the_unified_plugin_root() {
     let pool = migrated_pool(75).await;
 
     let old_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM miniapps")
+        sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'plugins'")
             .fetch_one(&pool)
             .await
             .unwrap();
     assert_eq!(old_count, 0);
 
     for table in [
-        "miniapp_library_state",
-        "miniapp_products",
-        "miniapp_projects",
-        "miniapp_release_artifacts",
-        "miniapp_releases",
-        "miniapp_credential_bindings",
-        "miniapp_kv",
+        "plugin_library_state",
+        "plugin_products",
+        "plugin_projects",
+        "plugin_release_artifacts",
+        "plugin_releases",
+        "plugin_credential_bindings",
+        "plugin_kv",
     ] {
         let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
             .fetch_one(&pool)
@@ -162,26 +162,26 @@ async fn migration_072_is_additive_and_starts_with_an_empty_new_root() {
         assert_eq!(count, 0, "new M1 table {table} must start empty");
     }
 
-    let migration = include_str!("../migrations/072_miniapp_m1_data_root.sql");
-    assert!(!migration.contains("FROM miniapps"));
-    assert!(!migration.contains("INSERT INTO miniapps"));
-    assert!(!migration.contains("UPDATE miniapps"));
+    let migration = include_str!("../migrations/072_plugin_runtime_data_root.sql");
+    assert!(!migration.contains("FROM plugins"));
+    assert!(!migration.contains("INSERT INTO plugins"));
+    assert!(!migration.contains("UPDATE plugins"));
 }
 
 #[tokio::test]
 async fn new_root_preserves_owner_and_pointer_shape_checks() {
     let database = migrated_pool(75).await;
     let owner = installation_owner_id(&database).await.unwrap();
-    let miniapp_id = "0190f5fe-7c00-7000-8000-000000000001";
-    let invalid_miniapp_id = "not-a-uuid";
+    let plugin_product_id = "0190f5fe-7c00-7000-8000-000000000001";
+    let invalid_plugin_product_id = "not-a-uuid";
 
     let invalid = sqlx::query(
-        "INSERT INTO miniapp_products (
-            miniapp_id, owner_user_id, display_name, kind,
+        "INSERT INTO plugin_products (
+            plugin_product_id, owner_user_id, display_name, kind,
             materialized_catalog_digest, created_at, updated_at
-         ) VALUES (?, ?, 'Invalid', 'ui_only', ?, 1, 1)",
+         ) VALUES (?, ?, 'Invalid', 'plugin', ?, 1, 1)",
     )
-    .bind(invalid_miniapp_id)
+    .bind(invalid_plugin_product_id)
     .bind(&owner)
     .bind("a".repeat(64))
     .execute(&database)
@@ -189,12 +189,12 @@ async fn new_root_preserves_owner_and_pointer_shape_checks() {
     assert!(invalid.is_err());
 
     sqlx::query(
-        "INSERT INTO miniapp_products (
-            miniapp_id, owner_user_id, display_name, kind,
+        "INSERT INTO plugin_products (
+            plugin_product_id, owner_user_id, display_name, kind,
             materialized_catalog_digest, created_at, updated_at
-         ) VALUES (?, ?, 'Valid', 'ui_only', ?, 1, 1)",
+         ) VALUES (?, ?, 'Valid', 'plugin', ?, 1, 1)",
     )
-    .bind(miniapp_id)
+    .bind(plugin_product_id)
     .bind(&owner)
     .bind("a".repeat(64))
     .execute(&database)
@@ -202,91 +202,47 @@ async fn new_root_preserves_owner_and_pointer_shape_checks() {
     .unwrap();
 
     let row = sqlx::query(
-        "SELECT miniapp_id, owner_user_id, lifecycle, active_release_epoch
-         FROM miniapp_products WHERE miniapp_id = ?",
+        "SELECT plugin_product_id, owner_user_id, lifecycle, active_release_epoch
+         FROM plugin_products WHERE plugin_product_id = ?",
     )
-    .bind(miniapp_id)
+    .bind(plugin_product_id)
     .fetch_one(&database)
     .await
     .unwrap();
-    assert_eq!(row.get::<String, _>("miniapp_id"), miniapp_id);
+    assert_eq!(row.get::<String, _>("plugin_product_id"), plugin_product_id);
     assert_eq!(row.get::<String, _>("owner_user_id"), owner);
     assert_eq!(row.get::<String, _>("lifecycle"), "disabled");
     assert_eq!(row.get::<i64, _>("active_release_epoch"), 0);
 }
 
 #[tokio::test]
-async fn migration_072_preserves_existing_legacy_miniapp_rows_byte_for_byte() {
-    let database = nomifun_db::SqlitePool::connect("sqlite::memory:")
-        .await
-        .unwrap();
-    migrate_through(&database, 71).await;
-    let owner = "0190f5fe-7c00-7000-8000-000000000201";
-    sqlx::query(
-        "INSERT INTO users (
-            user_id, username, password_hash, jwt_secret, created_at, updated_at
-         ) VALUES (?, ?, '', '', 1, 1)",
-    )
-    .bind(owner)
-    .bind(owner)
-    .execute(&database)
-    .await
-    .unwrap();
-    let legacy_id = "0190f5fe-7c00-7000-8000-000000000202";
-    sqlx::query(
-        "INSERT INTO miniapps (
-            miniapp_id, user_id, name, description, html, html_size,
-            created_at, updated_at
-         ) VALUES (?, ?, 'legacy', 'old', '<p>old</p>', 10, 2, 3)",
-    )
-    .bind(legacy_id)
-    .bind(owner)
-    .execute(&database)
-    .await
-    .unwrap();
-    let before: (String, String, String, i64, i64) = sqlx::query_as(
-        "SELECT name, description, html, created_at, updated_at
-         FROM miniapps WHERE miniapp_id = ?",
-    )
-    .bind(legacy_id)
-    .fetch_one(&database)
-    .await
-    .unwrap();
-
-    let mut connection = database.acquire().await.unwrap();
-    let migration = MIGRATOR
-        .iter()
-        .find(|migration| migration.version == 72)
-        .unwrap();
-    connection.apply(migration).await.unwrap();
-    drop(connection);
-
-    let after: (String, String, String, i64, i64) = sqlx::query_as(
-        "SELECT name, description, html, created_at, updated_at
-         FROM miniapps WHERE miniapp_id = ?",
-    )
-    .bind(legacy_id)
-    .fetch_one(&database)
-    .await
-    .unwrap();
-    assert_eq!(after, before);
-    let new_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM miniapp_products")
-            .fetch_one(&database)
-            .await
-            .unwrap();
-    assert_eq!(new_count, 0);
+async fn migration_072_does_not_create_the_retired_document_store() {
+    let database = migrated_pool(71).await;
+    for version in [71, 72] {
+        if version == 72 {
+            let mut connection = database.acquire().await.unwrap();
+            connection.apply(MIGRATOR.iter().find(|m| m.version == 72).unwrap())
+                .await.unwrap();
+        }
+        let retired_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'plugins'",
+        ).fetch_one(&database).await.unwrap();
+        assert_eq!(retired_count, 0);
+    }
+    let product_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM plugin_products")
+        .fetch_one(&database).await.unwrap();
+    assert_eq!(product_count, 0);
 }
 
 #[tokio::test]
 async fn migration_075_adds_only_owner_scoped_host_kv_without_runtime_sidecars() {
     let database = migrated_pool(75).await;
-    let migration = include_str!("../migrations/075_miniapp_m1_runtime_state.sql");
+    let migration = include_str!("../migrations/075_plugin_runtime_runtime_state.sql");
     for forbidden in [
-        "FROM miniapps",
-        "INSERT INTO miniapps",
-        "UPDATE miniapps",
-        "DELETE FROM miniapps",
+        "FROM plugins",
+        "INSERT INTO plugins",
+        "UPDATE plugins",
+        "DELETE FROM plugins",
         "FOREIGN KEY",
         "REFERENCES",
         "CREATE TRIGGER",
@@ -300,7 +256,7 @@ async fn migration_075_adds_only_owner_scoped_host_kv_without_runtime_sidecars()
         );
     }
 
-    let columns = sqlx::query("PRAGMA table_info('miniapp_kv')")
+    let columns = sqlx::query("PRAGMA table_info('plugin_kv')")
         .fetch_all(&database)
         .await
         .unwrap();
@@ -312,7 +268,7 @@ async fn migration_075_adds_only_owner_scoped_host_kv_without_runtime_sidecars()
         names,
         [
             "id",
-            "miniapp_id",
+            "plugin_product_id",
             "owner_user_id",
             "namespace",
             "key",
@@ -323,7 +279,7 @@ async fn migration_075_adds_only_owner_scoped_host_kv_without_runtime_sidecars()
         ]
     );
     let foreign_keys: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM pragma_foreign_key_list('miniapp_kv')",
+        "SELECT COUNT(*) FROM pragma_foreign_key_list('plugin_kv')",
     )
     .fetch_one(&database)
     .await
@@ -331,7 +287,7 @@ async fn migration_075_adds_only_owner_scoped_host_kv_without_runtime_sidecars()
     assert_eq!(foreign_keys, 0);
     let triggers: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_schema
-         WHERE type = 'trigger' AND tbl_name = 'miniapp_kv'",
+         WHERE type = 'trigger' AND tbl_name = 'plugin_kv'",
     )
     .fetch_one(&database)
     .await
@@ -340,15 +296,15 @@ async fn migration_075_adds_only_owner_scoped_host_kv_without_runtime_sidecars()
 }
 
 #[tokio::test]
-async fn migration_075_preserves_existing_072_and_legacy_rows_byte_for_byte() {
+async fn migration_075_preserves_existing_plugin_rows_byte_for_byte() {
     let database = nomifun_db::SqlitePool::connect("sqlite::memory:")
         .await
         .unwrap();
     migrate_through(&database, 74).await;
     let owner = "0190f5fe-7c00-7000-8000-000000000201";
-    let miniapp_id = "0190f5fe-7c00-7000-8000-000000000202";
+    let plugin_product_id = "0190f5fe-7c00-7000-8000-000000000202";
     let project_id = "0190f5fe-7c00-7000-8000-000000000203";
-    let legacy_id = "0190f5fe-7c00-7000-8000-000000000204";
+
     sqlx::query(
         "INSERT INTO users (
             user_id, username, password_hash, jwt_secret, created_at, updated_at
@@ -359,34 +315,24 @@ async fn migration_075_preserves_existing_072_and_legacy_rows_byte_for_byte() {
     .execute(&database)
     .await
     .unwrap();
+
     sqlx::query(
-        "INSERT INTO miniapps (
-            miniapp_id, user_id, name, description, html, html_size,
-            created_at, updated_at
-         ) VALUES (?, ?, 'legacy', 'old', '<p>old</p>', 10, 2, 3)",
-    )
-    .bind(legacy_id)
-    .bind(owner)
-    .execute(&database)
-    .await
-    .unwrap();
-    sqlx::query(
-        "INSERT INTO miniapp_library_state
+        "INSERT INTO plugin_library_state
          (singleton_key, owner_user_id, revision, updated_at)
-         VALUES ('miniapp_m1', ?, 1, 10)",
+         VALUES ('plugin_runtime', ?, 1, 10)",
     )
     .bind(owner)
     .execute(&database)
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO miniapp_products (
-            miniapp_id, owner_user_id, display_name, kind,
+        "INSERT INTO plugin_products (
+            plugin_product_id, owner_user_id, display_name, kind,
             materialized_catalog_digest, config_schema_json, config_json,
             created_at, updated_at
-         ) VALUES (?, ?, 'M1', 'ui_only', ?, ?, ?, 10, 10)",
+         ) VALUES (?, ?, 'M1', 'plugin', ?, ?, ?, 10, 10)",
     )
-    .bind(miniapp_id)
+    .bind(plugin_product_id)
     .bind(owner)
     .bind("a".repeat(64))
     .bind(r#"{"type":"object"}"#)
@@ -395,49 +341,43 @@ async fn migration_075_preserves_existing_072_and_legacy_rows_byte_for_byte() {
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO miniapp_projects
-         (project_id, miniapp_id, owner_user_id, created_at, updated_at)
-         VALUES (?, ?, ?, 10, 10)",
+        "INSERT INTO plugin_projects
+         (project_id, plugin_product_id, owner_user_id, source_state,
+          created_at, updated_at)
+         VALUES (?, ?, ?, 'runtime_only', 10, 10)",
     )
     .bind(project_id)
-    .bind(miniapp_id)
+    .bind(plugin_product_id)
     .bind(owner)
     .execute(&database)
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO miniapp_credential_bindings
-         (miniapp_id, owner_user_id, slot_key, credential_id, created_at, updated_at)
+        "INSERT INTO plugin_credential_bindings
+         (plugin_product_id, owner_user_id, slot_key, credential_id, created_at, updated_at)
          VALUES (?, ?, 'primary', 'credential-primary', 10, 10)",
     )
-    .bind(miniapp_id)
+    .bind(plugin_product_id)
     .bind(owner)
     .execute(&database)
     .await
     .unwrap();
 
-    let legacy_before: (String, String, String, i64, i64) = sqlx::query_as(
-        "SELECT name, description, html, created_at, updated_at
-         FROM miniapps WHERE miniapp_id = ?",
-    )
-    .bind(legacy_id)
-    .fetch_one(&database)
-    .await
-    .unwrap();
+
     let product_before: (i64, String, String, i64, i64, i64) = sqlx::query_as(
         "SELECT product_revision, config_schema_json, config_json,
                 config_revision, credential_bindings_revision, updated_at
-         FROM miniapp_products WHERE miniapp_id = ?",
+         FROM plugin_products WHERE plugin_product_id = ?",
     )
-    .bind(miniapp_id)
+    .bind(plugin_product_id)
     .fetch_one(&database)
     .await
     .unwrap();
     let binding_before: (String, String, i64, i64) = sqlx::query_as(
         "SELECT slot_key, credential_id, created_at, updated_at
-         FROM miniapp_credential_bindings WHERE miniapp_id = ?",
+         FROM plugin_credential_bindings WHERE plugin_product_id = ?",
     )
-    .bind(miniapp_id)
+    .bind(plugin_product_id)
     .fetch_one(&database)
     .await
     .unwrap();
@@ -449,35 +389,28 @@ async fn migration_075_preserves_existing_072_and_legacy_rows_byte_for_byte() {
         .unwrap();
     drop(connection);
 
-    let legacy_after: (String, String, String, i64, i64) = sqlx::query_as(
-        "SELECT name, description, html, created_at, updated_at
-         FROM miniapps WHERE miniapp_id = ?",
-    )
-    .bind(legacy_id)
-    .fetch_one(&database)
-    .await
-    .unwrap();
+
     let product_after: (i64, String, String, i64, i64, i64) = sqlx::query_as(
         "SELECT product_revision, config_schema_json, config_json,
                 config_revision, credential_bindings_revision, updated_at
-         FROM miniapp_products WHERE miniapp_id = ?",
+         FROM plugin_products WHERE plugin_product_id = ?",
     )
-    .bind(miniapp_id)
+    .bind(plugin_product_id)
     .fetch_one(&database)
     .await
     .unwrap();
     let binding_after: (String, String, i64, i64) = sqlx::query_as(
         "SELECT slot_key, credential_id, created_at, updated_at
-         FROM miniapp_credential_bindings WHERE miniapp_id = ?",
+         FROM plugin_credential_bindings WHERE plugin_product_id = ?",
     )
-    .bind(miniapp_id)
+    .bind(plugin_product_id)
     .fetch_one(&database)
     .await
     .unwrap();
-    assert_eq!(legacy_after, legacy_before);
+
     assert_eq!(product_after, product_before);
     assert_eq!(binding_after, binding_before);
-    let kv_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM miniapp_kv")
+    let kv_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM plugin_kv")
         .fetch_one(&database)
         .await
         .unwrap();
@@ -485,14 +418,14 @@ async fn migration_075_preserves_existing_072_and_legacy_rows_byte_for_byte() {
 }
 
 #[tokio::test]
-async fn migration_077_adds_only_immutable_miniapp_build_lineage() {
+async fn migration_077_adds_only_immutable_plugin_build_lineage() {
     let database = migrated_pool(77).await;
-    let migration = include_str!("../migrations/077_miniapp_build_operation_lineage.sql");
+    let migration = include_str!("../migrations/077_plugin_build_operation_lineage.sql");
     for forbidden in [
-        "FROM miniapps",
-        "INSERT INTO miniapps",
-        "UPDATE miniapps",
-        "DELETE FROM miniapps",
+        "FROM plugins",
+        "INSERT INTO plugins",
+        "UPDATE plugins",
+        "DELETE FROM plugins",
         "FOREIGN KEY",
         "REFERENCES",
         "CREATE TRIGGER",
@@ -505,7 +438,7 @@ async fn migration_077_adds_only_immutable_miniapp_build_lineage() {
         );
     }
 
-    let columns = sqlx::query("PRAGMA table_info('miniapp_build_operation_lineage')")
+    let columns = sqlx::query("PRAGMA table_info('plugin_build_operation_lineage')")
         .fetch_all(&database)
         .await
         .unwrap();
@@ -519,7 +452,7 @@ async fn migration_077_adds_only_immutable_miniapp_build_lineage() {
             "id",
             "operation_id",
             "owner_user_id",
-            "miniapp_id",
+            "plugin_product_id",
             "project_id",
             "project_revision",
             "source_snapshot_digest",
@@ -530,7 +463,7 @@ async fn migration_077_adds_only_immutable_miniapp_build_lineage() {
         ]
     );
     let foreign_keys: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM pragma_foreign_key_list('miniapp_build_operation_lineage')",
+        "SELECT COUNT(*) FROM pragma_foreign_key_list('plugin_build_operation_lineage')",
     )
     .fetch_one(&database)
     .await
@@ -541,14 +474,14 @@ async fn migration_077_adds_only_immutable_miniapp_build_lineage() {
 #[tokio::test]
 async fn migration_078_adds_authorization_and_catalog_projection_tables() {
     let database = migrated_pool(78).await;
-    let migration = include_str!("../migrations/078_miniapp_publish_authorizations.sql");
-    assert!(!migration.contains("FROM miniapps"));
+    let migration = include_str!("../migrations/078_plugin_publish_authorizations.sql");
+    assert!(!migration.contains("FROM plugins"));
     assert!(!migration.contains("FOREIGN KEY"));
     assert!(!migration.contains("CREATE TRIGGER"));
 
     for table in [
-        "miniapp_publish_authorizations",
-        "miniapp_catalog_publications",
+        "plugin_publish_authorizations",
+        "plugin_catalog_publications",
     ] {
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = ?",
@@ -571,12 +504,12 @@ async fn migration_078_adds_authorization_and_catalog_projection_tables() {
 #[tokio::test]
 async fn migration_079_allows_release_content_reuse_without_weakening_release_identity() {
     let database = migrated_pool(79).await;
-    let migration = include_str!("../migrations/079_miniapp_release_digest_reuse.sql");
-    assert!(!migration.contains("FROM miniapps"));
+    let migration = include_str!("../migrations/079_plugin_release_digest_reuse.sql");
+    assert!(!migration.contains("FROM plugins"));
     assert!(!migration.contains("FOREIGN KEY"));
     assert!(!migration.contains("CREATE TRIGGER"));
 
-    let indexes = sqlx::query("PRAGMA index_list('miniapp_releases')")
+    let indexes = sqlx::query("PRAGMA index_list('plugin_releases')")
         .fetch_all(&database)
         .await
         .unwrap();
@@ -615,13 +548,13 @@ async fn migration_079_allows_release_content_reuse_without_weakening_release_id
 #[tokio::test]
 async fn migration_080_adds_digest_only_surface_session_authority() {
     let database = migrated_pool(80).await;
-    let migration = include_str!("../migrations/080_miniapp_surface_sessions.sql");
-    assert!(!migration.contains("FROM miniapps"));
+    let migration = include_str!("../migrations/080_plugin_surface_sessions.sql");
+    assert!(!migration.contains("FROM plugins"));
     assert!(!migration.contains("FOREIGN KEY"));
     assert!(!migration.contains("CREATE TRIGGER"));
     assert!(!migration.contains("raw_capability"));
 
-    let columns = sqlx::query("PRAGMA table_info('miniapp_surface_sessions')")
+    let columns = sqlx::query("PRAGMA table_info('plugin_surface_sessions')")
         .fetch_all(&database)
         .await
         .unwrap()
@@ -633,7 +566,7 @@ async fn migration_080_adds_digest_only_surface_session_authority() {
         [
             "id",
             "surface_session_id",
-            "miniapp_id",
+            "plugin_product_id",
             "owner_user_id",
             "generation",
             "capability_digest",
@@ -652,12 +585,12 @@ async fn migration_080_adds_digest_only_surface_session_authority() {
 #[tokio::test]
 async fn migration_081_adds_monotonic_host_kv_tombstone_columns() {
     let database = migrated_pool(81).await;
-    let migration = include_str!("../migrations/081_miniapp_kv_tombstones.sql");
-    assert!(!migration.contains("FROM miniapps"));
+    let migration = include_str!("../migrations/081_plugin_kv_tombstones.sql");
+    assert!(!migration.contains("FROM plugins"));
     assert!(!migration.contains("FOREIGN KEY"));
     assert!(!migration.contains("CREATE TRIGGER"));
 
-    let columns = sqlx::query("PRAGMA table_info('miniapp_kv')")
+    let columns = sqlx::query("PRAGMA table_info('plugin_kv')")
         .fetch_all(&database)
         .await
         .unwrap()
@@ -668,7 +601,7 @@ async fn migration_081_adds_monotonic_host_kv_tombstone_columns() {
         columns,
         [
             "id",
-            "miniapp_id",
+            "plugin_product_id",
             "owner_user_id",
             "namespace",
             "key",
@@ -685,7 +618,7 @@ async fn migration_081_adds_monotonic_host_kv_tombstone_columns() {
         ("is_tombstone", "0"),
     ] {
         let default_value: Option<String> = sqlx::query_scalar(&format!(
-            "SELECT dflt_value FROM pragma_table_info('miniapp_kv') WHERE name = ?"
+            "SELECT dflt_value FROM pragma_table_info('plugin_kv') WHERE name = ?"
         ))
         .bind(column)
         .fetch_optional(&database)
@@ -697,17 +630,17 @@ async fn migration_081_adds_monotonic_host_kv_tombstone_columns() {
 }
 
 #[tokio::test]
-async fn migration_082_adds_owner_scoped_miniapp_deletion_intents() {
+async fn migration_082_adds_owner_scoped_plugin_deletion_intents() {
     let database = migrated_pool(82).await;
-    let migration = include_str!("../migrations/082_miniapp_deletion_intents.sql");
-    for forbidden in ["FROM miniapps", "FOREIGN KEY", "REFERENCES", "CREATE TRIGGER"] {
+    let migration = include_str!("../migrations/082_plugin_deletion_intents.sql");
+    for forbidden in ["FROM plugins", "FOREIGN KEY", "REFERENCES", "CREATE TRIGGER"] {
         assert!(
             !migration.contains(forbidden),
             "migration 082 must not contain {forbidden}"
         );
     }
 
-    let columns = sqlx::query("PRAGMA table_info('miniapp_deletion_intents')")
+    let columns = sqlx::query("PRAGMA table_info('plugin_deletion_intents')")
         .fetch_all(&database)
         .await
         .unwrap()
@@ -718,7 +651,7 @@ async fn migration_082_adds_owner_scoped_miniapp_deletion_intents() {
         columns,
         [
             "id",
-            "miniapp_id",
+            "plugin_product_id",
             "owner_user_id",
             "operation_id",
             "started_at_ms",
@@ -726,7 +659,7 @@ async fn migration_082_adds_owner_scoped_miniapp_deletion_intents() {
         ]
     );
     let foreign_keys: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM pragma_foreign_key_list('miniapp_deletion_intents')",
+        "SELECT COUNT(*) FROM pragma_foreign_key_list('plugin_deletion_intents')",
     )
     .fetch_one(&database)
     .await
@@ -734,16 +667,16 @@ async fn migration_082_adds_owner_scoped_miniapp_deletion_intents() {
     assert_eq!(foreign_keys, 0);
     let triggers: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_schema
-         WHERE type = 'trigger' AND tbl_name = 'miniapp_deletion_intents'",
+         WHERE type = 'trigger' AND tbl_name = 'plugin_deletion_intents'",
     )
     .fetch_one(&database)
     .await
     .unwrap();
     assert_eq!(triggers, 0);
     for index in [
-        "idx_miniapp_deletion_intents_owner_user_id",
-        "idx_miniapp_deletion_intents_miniapp_id",
-        "idx_miniapp_deletion_intents_operation_id",
+        "idx_plugin_deletion_intents_owner_user_id",
+        "idx_plugin_deletion_intents_plugin_product_id",
+        "idx_plugin_deletion_intents_operation_id",
     ] {
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' AND name = ?",
@@ -759,15 +692,15 @@ async fn migration_082_adds_owner_scoped_miniapp_deletion_intents() {
 #[tokio::test]
 async fn migration_083_adds_immutable_owner_scoped_service_test_receipt_history() {
     let database = migrated_pool(83).await;
-    let migration = include_str!("../migrations/083_miniapp_service_test_receipts.sql");
-    for forbidden in ["FROM miniapps", "FOREIGN KEY", "REFERENCES", "CREATE TRIGGER"] {
+    let migration = include_str!("../migrations/083_plugin_service_test_receipts.sql");
+    for forbidden in ["FROM plugins", "FOREIGN KEY", "REFERENCES", "CREATE TRIGGER"] {
         assert!(
             !migration.contains(forbidden),
             "migration 083 must not contain {forbidden}"
         );
     }
 
-    let columns = sqlx::query("PRAGMA table_info('miniapp_service_test_receipts')")
+    let columns = sqlx::query("PRAGMA table_info('plugin_service_test_receipts')")
         .fetch_all(&database)
         .await
         .unwrap()
@@ -780,7 +713,7 @@ async fn migration_083_adds_immutable_owner_scoped_service_test_receipt_history(
             "id",
             "receipt_id",
             "owner_user_id",
-            "miniapp_id",
+            "plugin_product_id",
             "release_id",
             "release_digest",
             "service_run_key",
@@ -798,7 +731,7 @@ async fn migration_083_adds_immutable_owner_scoped_service_test_receipt_history(
         ]
     );
     let foreign_keys: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM pragma_foreign_key_list('miniapp_service_test_receipts')",
+        "SELECT COUNT(*) FROM pragma_foreign_key_list('plugin_service_test_receipts')",
     )
     .fetch_one(&database)
     .await
@@ -806,17 +739,17 @@ async fn migration_083_adds_immutable_owner_scoped_service_test_receipt_history(
     assert_eq!(foreign_keys, 0);
     let triggers: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_schema
-         WHERE type = 'trigger' AND tbl_name = 'miniapp_service_test_receipts'",
+         WHERE type = 'trigger' AND tbl_name = 'plugin_service_test_receipts'",
     )
     .fetch_one(&database)
     .await
     .unwrap();
     assert_eq!(triggers, 0);
     for index in [
-        "idx_miniapp_service_test_receipts_owner_user_id",
-        "idx_miniapp_service_test_receipts_miniapp_id",
-        "idx_miniapp_service_test_receipts_release_id",
-        "idx_miniapp_service_test_receipts_current",
+        "idx_plugin_service_test_receipts_owner_user_id",
+        "idx_plugin_service_test_receipts_plugin_product_id",
+        "idx_plugin_service_test_receipts_release_id",
+        "idx_plugin_service_test_receipts_current",
     ] {
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' AND name = ?",
@@ -829,8 +762,8 @@ async fn migration_083_adds_immutable_owner_scoped_service_test_receipt_history(
     }
 
     let invalid_receipt_id = sqlx::query(
-        "INSERT INTO miniapp_service_test_receipts (
-            receipt_id, owner_user_id, miniapp_id, release_id,
+        "INSERT INTO plugin_service_test_receipts (
+            receipt_id, owner_user_id, plugin_product_id, release_id,
             release_digest, service_run_key, outcome, receipt_digest,
             runtime_fingerprint_digest, resolved_test_input_digest,
             tested_product_revision, tested_pointer_revision,
@@ -851,8 +784,8 @@ async fn migration_083_adds_immutable_owner_scoped_service_test_receipt_history(
     assert!(invalid_receipt_id.is_err());
 
     let invalid_outcome = sqlx::query(
-        "INSERT INTO miniapp_service_test_receipts (
-            receipt_id, owner_user_id, miniapp_id, release_id,
+        "INSERT INTO plugin_service_test_receipts (
+            receipt_id, owner_user_id, plugin_product_id, release_id,
             release_digest, service_run_key, outcome, receipt_digest,
             runtime_fingerprint_digest, resolved_test_input_digest,
             tested_product_revision, tested_pointer_revision,
@@ -877,7 +810,7 @@ async fn migration_083_adds_immutable_owner_scoped_service_test_receipt_history(
 #[tokio::test]
 async fn migrations_after_077_upgrade_existing_release_state_in_place() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("miniapp-v077-upgrade.db");
+    let path = directory.path().join("plugin-v077-upgrade.db");
     let database = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(
@@ -890,7 +823,7 @@ async fn migrations_after_077_upgrade_existing_release_state_in_place() {
     migrate_through(&database, 77).await;
 
     let owner = "0190f5fe-7c00-7000-8000-000000000201";
-    let miniapp_id = "0190f5fe-7c00-7000-8000-000000000301";
+    let plugin_product_id = "0190f5fe-7c00-7000-8000-000000000301";
     let project_id = "0190f5fe-7c00-7000-8000-000000000302";
     let artifact_id = "0190f5fe-7c00-7000-8000-000000000303";
     let release_id = "0190f5fe-7c00-7000-8000-000000000304";
@@ -930,24 +863,24 @@ async fn migrations_after_077_upgrade_existing_release_state_in_place() {
     .unwrap();
 
     sqlx::query(
-        "INSERT INTO miniapp_library_state
+        "INSERT INTO plugin_library_state
          (singleton_key, owner_user_id, revision, updated_at)
-         VALUES ('miniapp_m1', ?, 4, 40)",
+         VALUES ('plugin_runtime', ?, 4, 40)",
     )
     .bind(&owner)
     .execute(&database)
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO miniapp_products (
-            miniapp_id, owner_user_id, product_revision, display_name, kind,
+        "INSERT INTO plugin_products (
+            plugin_product_id, owner_user_id, product_revision, display_name, kind,
             lifecycle, pointer_revision, active_release_epoch,
             active_release_id, active_release_digest, materialized_catalog_digest,
             created_at, updated_at
-         ) VALUES (?, ?, 4, 'Upgraded App', 'ui_only', 'enabled', 4, 1,
+         ) VALUES (?, ?, 4, 'Upgraded App', 'plugin', 'enabled', 4, 1,
                    ?, ?, ?, 10, 40)",
     )
-    .bind(miniapp_id)
+    .bind(plugin_product_id)
     .bind(owner)
     .bind(release_id)
     .bind(&artifact_digest)
@@ -956,27 +889,27 @@ async fn migrations_after_077_upgrade_existing_release_state_in_place() {
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO miniapp_projects (
-            project_id, miniapp_id, owner_user_id, project_revision,
+        "INSERT INTO plugin_projects (
+            project_id, plugin_product_id, owner_user_id, project_revision,
             source_state, managed_source_path, source_head_digest,
             dependency_lock_digest, build_profile_version, build_generation,
             created_at, updated_at
          ) VALUES (?, ?, ?, 2, 'editable', ?, ?, ?, ?, 2, 10, 40)",
     )
     .bind(project_id)
-    .bind(miniapp_id)
+    .bind(plugin_product_id)
     .bind(owner)
-    .bind("sources/owner/miniapp/project")
+    .bind("sources/owner/plugin/project")
     .bind(&retired_source_digest)
     .bind(&dependency_digest)
-    .bind(MINIAPP_RELEASE_PROFILE_VERSION)
+    .bind(PLUGIN_RELEASE_PROFILE_VERSION)
     .execute(&database)
     .await
     .unwrap();
-    insert_succeeded_miniapp_build(
+    insert_succeeded_plugin_build(
         &database,
         owner,
-        miniapp_id,
+        plugin_product_id,
         project_id,
         operation_id,
         1,
@@ -987,10 +920,10 @@ async fn migrations_after_077_upgrade_existing_release_state_in_place() {
         30,
     )
     .await;
-    insert_succeeded_miniapp_build(
+    insert_succeeded_plugin_build(
         &database,
         owner,
-        miniapp_id,
+        plugin_product_id,
         project_id,
         retired_operation_id,
         2,
@@ -1002,7 +935,7 @@ async fn migrations_after_077_upgrade_existing_release_state_in_place() {
     )
     .await;
     sqlx::query(
-        "INSERT INTO miniapp_release_artifacts (
+        "INSERT INTO plugin_release_artifacts (
             artifact_id, owner_user_id, artifact_digest, manifest_digest,
             artifact_record_json, managed_path, created_at
          ) VALUES (?, ?, ?, ?, ?, ?, 20)",
@@ -1019,7 +952,7 @@ async fn migrations_after_077_upgrade_existing_release_state_in_place() {
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO miniapp_release_artifacts (
+        "INSERT INTO plugin_release_artifacts (
             artifact_id, owner_user_id, artifact_digest, manifest_digest,
             artifact_record_json, managed_path, created_at
          ) VALUES (?, ?, ?, ?, ?, ?, 21)",
@@ -1036,8 +969,8 @@ async fn migrations_after_077_upgrade_existing_release_state_in_place() {
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO miniapp_releases (
-            release_id, miniapp_id, owner_user_id, artifact_id,
+        "INSERT INTO plugin_releases (
+            release_id, plugin_product_id, owner_user_id, artifact_id,
             artifact_digest, manifest_digest, release_digest, origin_kind,
             origin_operation_id, source_kind, project_id, source_snapshot_digest,
             dependency_lock_digest, build_profile_version, build_generation,
@@ -1046,7 +979,7 @@ async fn migrations_after_077_upgrade_existing_release_state_in_place() {
                    ?, 1, ?, 30)",
     )
     .bind(release_id)
-    .bind(miniapp_id)
+    .bind(plugin_product_id)
     .bind(owner)
     .bind(artifact_id)
     .bind(&artifact_digest)
@@ -1056,9 +989,9 @@ async fn migrations_after_077_upgrade_existing_release_state_in_place() {
     .bind(project_id)
     .bind(&source_digest)
     .bind(&dependency_digest)
-    .bind(MINIAPP_RELEASE_PROFILE_VERSION)
+    .bind(PLUGIN_RELEASE_PROFILE_VERSION)
     .bind(release_record_json(
-        miniapp_id,
+        plugin_product_id,
         project_id,
         artifact_id,
         release_id,
@@ -1074,8 +1007,8 @@ async fn migrations_after_077_upgrade_existing_release_state_in_place() {
     .await
     .unwrap();
     sqlx::query(
-        "INSERT INTO miniapp_releases (
-            id, release_id, miniapp_id, owner_user_id, artifact_id,
+        "INSERT INTO plugin_releases (
+            id, release_id, plugin_product_id, owner_user_id, artifact_id,
             artifact_digest, manifest_digest, release_digest, origin_kind,
             origin_operation_id, source_kind, project_id, source_snapshot_digest,
             dependency_lock_digest, build_profile_version, build_generation,
@@ -1085,7 +1018,7 @@ async fn migrations_after_077_upgrade_existing_release_state_in_place() {
     )
     .bind(old_sequence)
     .bind(retired_release_id)
-    .bind(miniapp_id)
+    .bind(plugin_product_id)
     .bind(owner)
     .bind(retired_artifact_id)
     .bind(&retired_artifact_digest)
@@ -1095,9 +1028,9 @@ async fn migrations_after_077_upgrade_existing_release_state_in_place() {
     .bind(project_id)
     .bind(&retired_source_digest)
     .bind(&dependency_digest)
-    .bind(MINIAPP_RELEASE_PROFILE_VERSION)
+    .bind(PLUGIN_RELEASE_PROFILE_VERSION)
     .bind(release_record_json(
-        miniapp_id,
+        plugin_product_id,
         project_id,
         retired_artifact_id,
         retired_release_id,
@@ -1112,14 +1045,14 @@ async fn migrations_after_077_upgrade_existing_release_state_in_place() {
     .execute(&database)
     .await
     .unwrap();
-    sqlx::query("DELETE FROM miniapp_releases WHERE release_id = ?")
+    sqlx::query("DELETE FROM plugin_releases WHERE release_id = ?")
         .bind(retired_release_id)
         .execute(&database)
         .await
         .unwrap();
 
     let sequence_before: i64 =
-        sqlx::query_scalar("SELECT seq FROM sqlite_sequence WHERE name = 'miniapp_releases'")
+        sqlx::query_scalar("SELECT seq FROM sqlite_sequence WHERE name = 'plugin_releases'")
             .fetch_one(&database)
             .await
             .unwrap();
@@ -1139,7 +1072,7 @@ async fn migrations_after_077_upgrade_existing_release_state_in_place() {
         "SELECT id, release_id, artifact_id, artifact_digest, release_digest,
                 source_snapshot_digest, build_generation, release_record_json,
                 created_at
-         FROM miniapp_releases WHERE release_id = ?",
+         FROM plugin_releases WHERE release_id = ?",
     )
     .bind(release_id)
     .fetch_one(&database)
@@ -1186,7 +1119,7 @@ async fn migrations_after_077_upgrade_existing_release_state_in_place() {
         "SELECT id, release_id, artifact_id, artifact_digest, release_digest,
                 source_snapshot_digest, build_generation, release_record_json,
                 created_at
-         FROM miniapp_releases WHERE release_id = ?",
+         FROM plugin_releases WHERE release_id = ?",
     )
     .bind(release_id)
     .fetch_one(upgraded.pool())
@@ -1197,11 +1130,11 @@ async fn migrations_after_077_upgrade_existing_release_state_in_place() {
     let catalog: (String, String, i64, String) = sqlx::query_as(
         "SELECT active_release_id, active_release_digest,
                 active_release_epoch, catalog_digest
-         FROM miniapp_catalog_publications
-         WHERE owner_user_id = ? AND miniapp_id = ?",
+         FROM plugin_catalog_publications
+         WHERE owner_user_id = ? AND plugin_product_id = ?",
     )
     .bind(owner)
-    .bind(miniapp_id)
+    .bind(plugin_product_id)
     .fetch_one(upgraded.pool())
     .await
     .unwrap();
@@ -1216,7 +1149,7 @@ async fn migrations_after_077_upgrade_existing_release_state_in_place() {
     );
 
     let sequence_after_upgrade: i64 =
-        sqlx::query_scalar("SELECT seq FROM sqlite_sequence WHERE name = 'miniapp_releases'")
+        sqlx::query_scalar("SELECT seq FROM sqlite_sequence WHERE name = 'plugin_releases'")
             .fetch_one(upgraded.pool())
             .await
             .unwrap();
@@ -1226,7 +1159,7 @@ async fn migrations_after_077_upgrade_existing_release_state_in_place() {
     );
     let helper_table_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_schema
-         WHERE type = 'table' AND name = 'miniapp_releases_v079_sequence'",
+         WHERE type = 'table' AND name = 'plugin_releases_v079_sequence'",
     )
     .fetch_one(upgraded.pool())
     .await
@@ -1234,22 +1167,22 @@ async fn migrations_after_077_upgrade_existing_release_state_in_place() {
     assert_eq!(helper_table_count, 0);
 
     sqlx::query(
-        "UPDATE miniapp_projects
+        "UPDATE plugin_projects
          SET project_revision = 3, source_head_digest = ?,
              build_generation = 3, updated_at = 50
-         WHERE owner_user_id = ? AND miniapp_id = ? AND project_id = ?",
+         WHERE owner_user_id = ? AND plugin_product_id = ? AND project_id = ?",
     )
     .bind(&reused_source_digest)
     .bind(owner)
-    .bind(miniapp_id)
+    .bind(plugin_product_id)
     .bind(project_id)
     .execute(upgraded.pool())
     .await
     .unwrap();
-    insert_succeeded_miniapp_build(
+    insert_succeeded_plugin_build(
         upgraded.pool(),
         owner,
-        miniapp_id,
+        plugin_product_id,
         project_id,
         reused_operation_id,
         3,
@@ -1261,8 +1194,8 @@ async fn migrations_after_077_upgrade_existing_release_state_in_place() {
     )
     .await;
     sqlx::query(
-        "INSERT INTO miniapp_releases (
-            release_id, miniapp_id, owner_user_id, artifact_id,
+        "INSERT INTO plugin_releases (
+            release_id, plugin_product_id, owner_user_id, artifact_id,
             artifact_digest, manifest_digest, release_digest, origin_kind,
             origin_operation_id, source_kind, project_id, source_snapshot_digest,
             dependency_lock_digest, build_profile_version, build_generation,
@@ -1271,7 +1204,7 @@ async fn migrations_after_077_upgrade_existing_release_state_in_place() {
                    ?, 3, ?, 60)",
     )
     .bind(reused_release_id)
-    .bind(miniapp_id)
+    .bind(plugin_product_id)
     .bind(owner)
     .bind(artifact_id)
     .bind(&artifact_digest)
@@ -1281,9 +1214,9 @@ async fn migrations_after_077_upgrade_existing_release_state_in_place() {
     .bind(project_id)
     .bind(&reused_source_digest)
     .bind(&dependency_digest)
-    .bind(MINIAPP_RELEASE_PROFILE_VERSION)
+    .bind(PLUGIN_RELEASE_PROFILE_VERSION)
     .bind(release_record_json(
-        miniapp_id,
+        plugin_product_id,
         project_id,
         artifact_id,
         reused_release_id,
@@ -1301,12 +1234,12 @@ async fn migrations_after_077_upgrade_existing_release_state_in_place() {
 
     let releases: Vec<(i64, String, String, i64)> = sqlx::query_as(
         "SELECT id, release_id, source_snapshot_digest, build_generation
-         FROM miniapp_releases
-         WHERE owner_user_id = ? AND miniapp_id = ? AND release_digest = ?
+         FROM plugin_releases
+         WHERE owner_user_id = ? AND plugin_product_id = ? AND release_digest = ?
          ORDER BY id",
     )
     .bind(owner)
-    .bind(miniapp_id)
+    .bind(plugin_product_id)
     .bind(&artifact_digest)
     .fetch_all(upgraded.pool())
     .await

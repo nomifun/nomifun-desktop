@@ -23,7 +23,7 @@ use nomifun_agent_contracts::{
 };
 use nomifun_agent_control_plane::{
     AgentControlPlane, CompilerReleaseInputs, OfficialTemplateCatalog,
-    PresetPreviewCompiler, SharedMiniAppCatalogPublications,
+    PresetPreviewCompiler, SharedPluginProductCatalogPublications,
 };
 use nomifun_agent_kernel::{
     CompilerEnvironment, InMemoryPluginStatePersistence, KernelRegistry,
@@ -115,8 +115,8 @@ pub struct ModuleStates {
     pub customer_service: nomifun_customer_service::CustomerServiceRouterState,
     /// Creative Studio project, asset, template, and archive domain.
     pub workshop: WorkshopRouterState,
-    /// Phase M1 MiniApp Library and Workshop.
-    pub miniapp: super::plugin_runtime::PluginRuntimeM1RouterState,
+    /// Plugin Library and Workshop state.
+    pub plugin_runtime: super::plugin_runtime::PluginRuntimeM1RouterState,
     /// Phase N1 Plugin Library and lifecycle product state. Capability
     /// execution remains owned by the shared Kernel registry.
     pub plugin: nomifun_plugin_platform::application::PluginRouterState,
@@ -558,7 +558,7 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
         });
     let service_registry = Arc::new(
         nomifun_plugin_platform::runtime::PluginRuntimeServiceModuleRegistry::new(
-            services.data_dir.join("miniapp-m1").join("release"),
+            services.data_dir.join("plugin-m1").join("release"),
         )
         .unwrap_or_else(|error| {
             panic!("Plugin Service module registry composition failed: {error}")
@@ -566,7 +566,7 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
     );
     let service_storage = Arc::new(
         nomifun_plugin_platform::runtime::SqlitePluginRuntimeManagedStorage::new(
-            services.data_dir.join("miniapp-m1").join("managed"),
+            services.data_dir.join("plugin-m1").join("managed"),
             services.database.pool().clone(),
         )
         .unwrap_or_else(|error| {
@@ -749,7 +749,7 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
             )),
         },
         workshop: build_workshop_state(services),
-        miniapp: build_miniapp_state(services),
+        plugin_runtime: build_plugin_runtime_state(services),
         plugin: plugin_state,
         javascript_runtime,
         creation: build_creation_state(services),
@@ -817,7 +817,7 @@ async fn build_nomi_core_agent_api_state(
     policy.available_runtime_features =
         feature_inventory.runtime_features.clone();
     // Kernel PluginState is an in-process capability-state cache. Durable
-    // owner data belongs to the Plugin repository/KV and MiniApp data roots;
+    // owner data belongs to the Plugin repository/KV and Plugin data roots;
     // this NomiCore composition does not own the Fresh-v4 `plugin_states`
     // table and must not open it from the legacy application database.
     let state_persistence = Arc::new(InMemoryPluginStatePersistence::new());
@@ -878,10 +878,10 @@ async fn build_nomi_core_agent_api_state(
             Arc::clone(&builtin_plan.lifecycle_invoker),
         )?,
     );
-    let miniapp_catalog = Arc::new(SharedMiniAppCatalogPublications::new());
+    let plugin_catalog = Arc::new(SharedPluginProductCatalogPublications::new());
     services
         .plugin_runtime
-        .install_catalog_sink(miniapp_catalog.clone())
+        .install_catalog_sink(plugin_catalog.clone())
         .await;
     services
         .plugin_runtime
@@ -917,7 +917,7 @@ async fn build_nomi_core_agent_api_state(
     let catalog = Arc::new(
         KernelCatalogProvider::new(Arc::clone(&kernel))
             .with_unavailable_capabilities(unavailable_capabilities)
-            .with_miniapp_publication_source(miniapp_catalog),
+            .with_plugin_product_publication_source(plugin_catalog),
     );
     let plugin = super::plugin_platform::build_nomi_core_plugin_state(
         services.database.pool().clone(),
@@ -1885,15 +1885,15 @@ pub fn build_workshop_state(services: &AppServices) -> WorkshopRouterState {
     )
 }
 
-/// Build the Phase M1 MiniApp router state from the clean-start application
+/// Build the Plugin router state from the clean-start application
 /// facade composed by `AppServices`.
-pub fn build_miniapp_state(
+pub fn build_plugin_runtime_state(
     services: &AppServices,
 ) -> super::plugin_runtime::PluginRuntimeM1RouterState {
     super::plugin_runtime::PluginRuntimeM1RouterState::new(
         services.plugin_runtime.clone(),
     )
-    .with_product(super::plugin_product::PluginRuntimeProductService::new(
+    .with_product(super::plugin_product::PluginProductService::new(
         nomifun_db::PluginProductDocuments::new(services.database.pool().clone()),
         services.plugin_runtime.clone(),
         services.model_invoke_service.clone(),

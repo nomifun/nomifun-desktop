@@ -174,7 +174,7 @@ pub enum ProductOperationKind {
     Build,
     Import,
     Export,
-    MiniappPermanentDelete,
+    PluginPermanentDelete,
 }
 
 impl ProductOperationKind {
@@ -183,7 +183,7 @@ impl ProductOperationKind {
             Self::Build => "build",
             Self::Import => "import",
             Self::Export => "export",
-            Self::MiniappPermanentDelete => "miniapp_permanent_delete",
+            Self::PluginPermanentDelete => "plugin_permanent_delete",
         }
     }
 }

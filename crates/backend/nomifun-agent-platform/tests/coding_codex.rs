@@ -80,15 +80,15 @@ fn resolved_capability(reference: &CapabilityRef) -> ResolvedCapability {
                 source_package.id.as_ref().to_owned(),
             ),
             mount_id: None,
-            miniapp_id: None,
+            plugin_product_id: None,
             mcp_binding_id: None,
             contribution_id,
             contract_digest: schema_digest.clone(),
         },
-        resolved_mount_id: PluginMountId::from(format!(
+        resolved_mount_id: Some(PluginMountId::from(format!(
             "fixture.{}",
             reference.id.as_ref()
-        )),
+        ))),
         resolved_source: PluginSourceMetadata {
             source_kind: PluginSourceKind::Bundled,
             source_identity: source_package.id.as_ref().to_owned(),
@@ -98,6 +98,15 @@ fn resolved_capability(reference: &CapabilityRef) -> ResolvedCapability {
         schema_digest,
         dependency_path: vec![reference.id.clone()],
         required_runtime_features: BTreeSet::new(),
+        plugin_product_id: None,
+        active_release: None,
+        active_release_epoch: None,
+        catalog_digest: None,
+        display_name: None,
+        description: None,
+        actions: Vec::new(),
+        required_resource_kinds: BTreeSet::new(),
+        action_allowlist: BTreeSet::new(),
     }
 }
 
@@ -159,8 +168,6 @@ fn resolved_content(contract: &CodingCodexContract) -> ResolvedSnapshotContent {
             .iter()
             .map(resolved_capability)
             .collect(),
-        initial_miniapp_capabilities: Vec::new(),
-        on_demand_miniapp_capabilities: Vec::new(),
         required_resource_kinds: BTreeSet::from([ResourceKind::from("workspace")]),
         on_demand_activation_plans: activation_plans,
         compact_on_demand_index,

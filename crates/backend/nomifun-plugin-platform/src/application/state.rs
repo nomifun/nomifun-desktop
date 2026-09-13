@@ -20,7 +20,7 @@ pub trait PluginAuthoringCompletionPort: Send + Sync {
 #[derive(Clone)]
 pub struct PluginRouterState {
     pub service: Arc<PluginApplicationService>,
-    pub runtime: Option<Arc<crate::runtime::PluginRuntimeM1ApplicationService>>,
+    pub runtime: Option<Arc<crate::runtime::PluginRuntimeApplicationService>>,
     authoring_completion: Option<Arc<dyn PluginAuthoringCompletionPort>>,
 }
 
@@ -33,7 +33,7 @@ impl PluginRouterState {
         }
     }
 
-    pub fn with_runtime(mut self, runtime: Arc<crate::runtime::PluginRuntimeM1ApplicationService>) -> Self {
+    pub fn with_runtime(mut self, runtime: Arc<crate::runtime::PluginRuntimeApplicationService>) -> Self {
         self.runtime = Some(runtime);
         self
     }

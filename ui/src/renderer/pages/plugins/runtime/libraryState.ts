@@ -9,7 +9,7 @@ import {
 } from '@/common/adapter/pluginRuntimeProductBridge';
 import type { PluginRuntimeSummary } from '@/common/types/pluginRuntimePlatform';
 
-export const MINIAPP_LIBRARY_CHANGED = 'nomifun:plugin-library-changed';
+export const PLUGIN_LIBRARY_CHANGED = 'nomifun:plugin-library-changed';
 export const emptyItem = (): PluginRuntimeLibraryItem => ({
   collection_id: null,
   pinned: false,
@@ -17,7 +17,7 @@ export const emptyItem = (): PluginRuntimeLibraryItem => ({
   name: null,
 });
 export const libraryChanged = () =>
-  window.dispatchEvent(new Event(MINIAPP_LIBRARY_CHANGED));
+  window.dispatchEvent(new Event(PLUGIN_LIBRARY_CHANGED));
 let mutationQueue: Promise<unknown> = Promise.resolve();
 
 /** Serialize local writes and reapply the user's operation to authoritative state after CAS conflicts. */
@@ -78,8 +78,8 @@ export function usePluginRuntimeLibrary() {
   }, []);
   useEffect(() => {
     void refresh();
-    window.addEventListener(MINIAPP_LIBRARY_CHANGED, refresh);
-    return () => window.removeEventListener(MINIAPP_LIBRARY_CHANGED, refresh);
+    window.addEventListener(PLUGIN_LIBRARY_CHANGED, refresh);
+    return () => window.removeEventListener(PLUGIN_LIBRARY_CHANGED, refresh);
   }, [refresh]);
   return { apps, drafts, workspace, loading, failed, refresh };
 }

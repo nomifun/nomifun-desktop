@@ -5,9 +5,10 @@ use nomifun_agent_contracts::{
     CanonicalErrorCode, CapabilityCatalogEntry,
     CapabilityConsumer, CapabilityId, CapabilityOwner, CapabilityRef,
     CatalogAvailability, ContributionSourceKind, McpBindingId, McpServerId,
-    McpToolKey, MiniAppCapabilityCatalogPublication, MiniAppCapabilityCatalogSink,
-    MiniAppCapabilityCatalogPublicationUpdate, MiniAppId, OfficialPresetKey,
-    OfficialPresetSeedManifestPayload,
+    McpToolKey, OfficialPresetKey, OfficialPresetSeedManifestPayload,
+    PluginProductCapabilityCatalogPublication,
+    PluginProductCapabilityCatalogPublicationUpdate,
+    PluginProductCapabilityCatalogSink, PluginProductId,
     PluginSourceKind, SkillRef, digest_payload,
     official_preset_seed_manifest_payload,
 };
@@ -27,62 +28,62 @@ use crate::wire::{wire_cast, wire_name};
 pub struct CatalogSnapshot {
     pub capabilities: Vec<MaterializedCapability>,
     pub formal_capability_entries: BTreeMap<CapabilityRef, CapabilityCatalogEntry>,
-    pub miniapp_publications:
-        BTreeMap<MiniAppId, MiniAppCapabilityCatalogPublication>,
+    pub plugin_product_publications:
+        BTreeMap<PluginProductId, PluginProductCapabilityCatalogPublication>,
     pub skills: Vec<MaterializedSkill>,
     pub mcp_tools: Vec<MaterializedMcpTool>,
     pub unavailable_capabilities: BTreeMap<CapabilityId, CanonicalErrorCode>,
     pub service_key_diagnostics: Vec<String>,
 }
 
-/// Read-side source for durable MiniApp Active Release publications.
+/// Read-side source for durable Plugin Product Active Release publications.
 ///
 /// The source is deliberately narrower than `CatalogProvider`: it contributes
-/// only MiniApp publications, while `KernelCatalogProvider` remains the single
-/// assembled Catalog provider used by all consumers.
-pub trait MiniAppCatalogPublicationSource: Send + Sync {
+/// only Plugin Product publications, while `KernelCatalogProvider` remains the
+/// single assembled Catalog provider used by all consumers.
+pub trait PluginProductCatalogPublicationSource: Send + Sync {
     fn publications(
         &self,
-    ) -> Result<Vec<MiniAppCapabilityCatalogPublication>, ControlPlaneError>;
+    ) -> Result<Vec<PluginProductCapabilityCatalogPublication>, ControlPlaneError>;
 }
 
 /// Shared in-process publication index used by the Desktop composition.
 ///
-/// Each MiniApp is replaced as one immutable publication. This prevents a
-/// consumer snapshot from observing capabilities from two different Active
+/// Each Plugin Product is replaced as one immutable publication. This prevents
+/// a consumer snapshot from observing capabilities from two different Active
 /// Release identities.
 #[derive(Clone, Default)]
-pub struct SharedMiniAppCatalogPublications {
+pub struct SharedPluginProductCatalogPublications {
     publications:
-        Arc<RwLock<BTreeMap<(nomifun_agent_contracts::UserId, MiniAppId), MiniAppCapabilityCatalogPublicationUpdate>>>,
+        Arc<RwLock<BTreeMap<(nomifun_agent_contracts::UserId, PluginProductId), PluginProductCapabilityCatalogPublicationUpdate>>>,
 }
 
-impl SharedMiniAppCatalogPublications {
+impl SharedPluginProductCatalogPublications {
     pub fn new() -> Self {
         Self::default()
     }
 }
 
-impl MiniAppCapabilityCatalogSink for SharedMiniAppCatalogPublications {
-    fn replace_miniapp_publication(
+impl PluginProductCapabilityCatalogSink for SharedPluginProductCatalogPublications {
+    fn replace_plugin_product_publication(
         &self,
-        update: MiniAppCapabilityCatalogPublicationUpdate,
+        update: PluginProductCapabilityCatalogPublicationUpdate,
     ) -> Result<(), String> {
         update.validate().map_err(|error| error.to_string())?;
         let mut publications = self
             .publications
             .write()
-            .map_err(|_| "MiniApp Catalog publication index is poisoned".to_owned())?;
-        let key = (update.owner_user_id.clone(), update.miniapp_id.clone());
+            .map_err(|_| "Plugin Product Catalog publication index is poisoned".to_owned())?;
+        let key = (update.owner_user_id.clone(), update.plugin_product_id.clone());
         if let Some(current) = publications.get(&key) {
-            let ordering = miniapp_publication_version(current)
-                .cmp(&miniapp_publication_version(&update));
+            let ordering = plugin_product_publication_version(current)
+                .cmp(&plugin_product_publication_version(&update));
             match ordering {
                 std::cmp::Ordering::Greater => return Ok(()),
                 std::cmp::Ordering::Equal if current == &update => return Ok(()),
                 std::cmp::Ordering::Equal => {
                     return Err(
-                        "MiniApp Catalog update reuses a version with different publication facts"
+                        "Plugin Product Catalog update reuses a version with different publication facts"
                             .to_owned(),
                     );
                 }
@@ -94,23 +95,25 @@ impl MiniAppCapabilityCatalogSink for SharedMiniAppCatalogPublications {
     }
 }
 
-impl MiniAppCatalogPublicationSource for SharedMiniAppCatalogPublications {
+impl PluginProductCatalogPublicationSource for SharedPluginProductCatalogPublications {
     fn publications(
         &self,
-    ) -> Result<Vec<MiniAppCapabilityCatalogPublication>, ControlPlaneError> {
+    ) -> Result<Vec<PluginProductCapabilityCatalogPublication>, ControlPlaneError> {
         self.publications
             .read()
-            .map_err(|_| catalog_invalid("MiniApp Catalog publication index is poisoned"))
+            .map_err(|_| {
+                catalog_invalid("Plugin Product Catalog publication index is poisoned")
+            })
             .and_then(|publications| {
                 let mut active = BTreeMap::new();
                 for update in publications.values() {
                     if let Some(publication) = &update.publication {
                         if active
-                            .insert(publication.miniapp_id.clone(), publication.clone())
+                            .insert(publication.plugin_product_id.clone(), publication.clone())
                             .is_some()
                         {
                             return Err(catalog_invalid(
-                                "multiple owner-scoped MiniApp publications share one MiniApp identity",
+                                "multiple owner-scoped Plugin Product publications share one Plugin Product identity",
                             ));
                         }
                     }
@@ -120,8 +123,8 @@ impl MiniAppCatalogPublicationSource for SharedMiniAppCatalogPublications {
     }
 }
 
-fn miniapp_publication_version(
-    update: &MiniAppCapabilityCatalogPublicationUpdate,
+fn plugin_product_publication_version(
+    update: &PluginProductCapabilityCatalogPublicationUpdate,
 ) -> (u64, u64, u64) {
     (
         update.product_revision,
@@ -176,13 +179,13 @@ impl CatalogSnapshot {
                 )));
             }
         }
-        for (miniapp_id, publication) in &self.miniapp_publications {
-        publication
-            .validate()
-            .map_err(|error| catalog_invalid(error.to_string()))?;
-            if miniapp_id != &publication.miniapp_id {
+        for (plugin_product_id, publication) in &self.plugin_product_publications {
+            publication
+                .validate()
+                .map_err(|error| catalog_invalid(error.to_string()))?;
+            if plugin_product_id != &publication.plugin_product_id {
                 return Err(catalog_invalid(
-                    "MiniApp Catalog publication map key differs from its payload identity",
+                    "Plugin Product Catalog publication map key differs from its payload identity",
                 ));
             }
             for capability in &publication.capabilities {
@@ -205,14 +208,14 @@ impl CatalogSnapshot {
                     .get(&reference)
                     .ok_or_else(|| {
                         catalog_invalid(format!(
-                            "MiniApp capability {}@{} has no formal Catalog entry",
+                            "Plugin Product capability {}@{} has no formal Catalog entry",
                             reference.id.as_ref(),
                             reference.version.as_ref()
                         ))
                     })?;
                 if entry != &capability.entry {
                     return Err(catalog_invalid(format!(
-                        "MiniApp capability {}@{} differs from its formal Catalog entry",
+                        "Plugin Product capability {}@{} differs from its formal Catalog entry",
                         reference.id.as_ref(),
                         reference.version.as_ref()
                     )));
@@ -344,7 +347,7 @@ impl CatalogSnapshot {
             }
             return Some(&capability.manifest);
         }
-        self.miniapp_publications
+        self.plugin_product_publications
             .values()
             .flat_map(|publication| publication.capabilities.iter())
             .find(|publication| {
@@ -378,7 +381,7 @@ impl CatalogSnapshot {
             return Ok(Some(entry.clone()));
         }
         Ok(self
-            .miniapp_publications
+            .plugin_product_publications
             .values()
             .flat_map(|publication| publication.capabilities.iter())
             .find(|publication| publication.entry.capability == *reference)
@@ -454,7 +457,7 @@ impl CatalogSnapshot {
             })
             .collect::<Result<Vec<_>, ControlPlaneError>>()?;
         let mut capabilities = capabilities;
-        for publication in self.miniapp_publications.values() {
+        for publication in self.plugin_product_publications.values() {
             for capability in &publication.capabilities {
                 if capability
                     .entry
@@ -646,8 +649,8 @@ fn validate_capability_entry(
             != capability.contribution_lock.source_identity
         || entry.provenance.mount_id
             != capability.contribution_lock.mount_id
-        || entry.provenance.miniapp_id
-            != capability.contribution_lock.miniapp_id
+        || entry.provenance.plugin_product_id
+            != capability.contribution_lock.plugin_product_id
         || entry.provenance.mcp_binding_id
             != capability.contribution_lock.mcp_binding_id
         || entry.provenance.artifact_digest.as_ref()
@@ -693,7 +696,7 @@ fn validate_skill(skill: &MaterializedSkill) -> Result<(), ControlPlaneError> {
         || skill.contribution_lock.source_identity.as_ref()
             != skill.source.source_identity
         || skill.contribution_lock.mcp_binding_id.is_some()
-        || skill.contribution_lock.miniapp_id.is_some()
+        || skill.contribution_lock.plugin_product_id.is_some()
         || skill
             .source
             .source_digest

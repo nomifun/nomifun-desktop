@@ -1411,7 +1411,7 @@ mod phase7_tests {
         state_changing_tools_advertised: bool,
     ) -> Result<Result<AgentResult, AgentError>, tokio::time::error::Elapsed> {
         Ok(Ok(AgentResult {
-            text: "Created miniapp.html.".to_string(),
+            text: "Created plugin.html.".to_string(),
             stop_reason: StopReason::EndTurn,
             usage: TokenUsage::default(),
             turns: 1,
@@ -1435,7 +1435,7 @@ mod phase7_tests {
             "text: {}",
             r.text
         );
-        assert!(r.text.contains("Created miniapp.html."), "partial text is evidence and is kept");
+        assert!(r.text.contains("Created plugin.html."), "partial text is evidence and is kept");
     }
 
     #[test]
@@ -1471,20 +1471,20 @@ mod phase7_tests {
     fn a_restarted_delegate_with_terminally_verified_target_is_not_judged() {
         let outcome: Result<Result<AgentResult, AgentError>, tokio::time::error::Elapsed> =
             Ok(Ok(AgentResult {
-                text: "Created miniapp.html.".to_owned(),
+                text: "Created plugin.html.".to_owned(),
                 stop_reason: StopReason::EndTurn,
                 usage: TokenUsage::default(),
                 turns: 1,
                 rounds: 2,
                 effects_ok: 0,
-                durable_effect_targets: vec!["miniapp.html".to_owned()],
+                durable_effect_targets: vec!["plugin.html".to_owned()],
                 cutoff_state_changing: 1,
                 state_changing_tools_advertised: true,
                 completion_adjudication: None,
             }));
         let result = map_agent_invocation_outcome("a".to_owned(), outcome, 300);
         assert!(!result.is_error, "text: {}", result.text);
-        assert_eq!(result.durable_effect_targets, ["miniapp.html"]);
+        assert_eq!(result.durable_effect_targets, ["plugin.html"]);
     }
 
     #[test]

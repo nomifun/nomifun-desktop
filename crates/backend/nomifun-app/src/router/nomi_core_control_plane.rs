@@ -965,7 +965,6 @@ mod tests {
             compiled_runtime_profile_digest: "a".repeat(64).into(),
             model_route_refs: Default::default(), chat_route_identity: None,
             initial_capabilities: Vec::new(), on_demand_capabilities: Vec::new(),
-            initial_miniapp_capabilities: Vec::new(), on_demand_miniapp_capabilities: Vec::new(),
             required_resource_kinds: Default::default(), on_demand_activation_plans: Default::default(),
             compact_on_demand_index: Vec::new(), capability_allowlist: Default::default(),
             skill_locks: Vec::new(), mcp_tool_locks: Vec::new(), resolved_role_providers: Default::default(),

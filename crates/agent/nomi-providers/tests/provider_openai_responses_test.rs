@@ -525,7 +525,7 @@ async fn incomplete_function_call_is_never_executable_or_chainable() {
 #[tokio::test]
 async fn completed_function_call_commits_atomically_with_cursor_then_done() {
     let server = MockServer::start().await;
-    let arguments = r#"{"path":"miniapp.html"}"#;
+    let arguments = r#"{"path":"plugin.html"}"#;
     let function = json!({
         "id": "fc_complete",
         "type": "function_call",
@@ -586,7 +586,7 @@ async fn completed_function_call_commits_atomically_with_cursor_then_done() {
     assert!(events.iter().any(|event| matches!(
         event,
         LlmEvent::ToolUse { id, name, input, .. }
-            if id == "call_complete" && name == "Write" && input["path"] == "miniapp.html"
+            if id == "call_complete" && name == "Write" && input["path"] == "plugin.html"
     )));
     let cursor = events
         .iter()

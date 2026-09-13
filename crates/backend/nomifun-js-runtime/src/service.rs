@@ -835,8 +835,8 @@ fn participant_dto(
             RuntimeSwitchParticipantKind::PluginMount => {
                 RuntimeSwitchParticipantKindDto::PluginMount
             }
-            RuntimeSwitchParticipantKind::MiniappService => {
-                RuntimeSwitchParticipantKindDto::MiniappService
+            RuntimeSwitchParticipantKind::PluginService => {
+                RuntimeSwitchParticipantKindDto::PluginService
             }
             RuntimeSwitchParticipantKind::BuildFoundation => {
                 RuntimeSwitchParticipantKindDto::BuildFoundation

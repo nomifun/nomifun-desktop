@@ -146,13 +146,13 @@ fn terminal_dimensions_preserve_each_typed_adjudication_kind() {
     for (issue, expected) in [
         (
             CompletionAdjudication::UnbackedStateChangeClaim {
-                target: "miniapp.html".to_owned(),
+                target: "plugin.html".to_owned(),
             },
             "unbacked_state_change_claim",
         ),
         (
             CompletionAdjudication::HistoryRollbackFailed {
-                target: "miniapp.html".to_owned(),
+                target: "plugin.html".to_owned(),
             },
             "completion_history_rollback_failed",
         ),

@@ -1,4 +1,4 @@
-//! Phase M1 MiniApp machine contracts.
+//! Canonical Plugin Product runtime machine contracts.
 //!
 //! This module freezes immutable Release, Service, Bridge, storage, publish,
 //! sharing, backup, and deletion shapes. It intentionally contains no runtime,
@@ -13,26 +13,30 @@ use thiserror::Error;
 use crate::plugin_n1::CredentialSlotDeclaration;
 use crate::{
     ArtifactEnvelope, ArtifactId, CanonicalErrorCode, CanonicalSchemaRef,
-    DigestHex, JavaScriptBuildProfile, LocalizedMetadata, MiniAppId,
-    MiniAppReleaseId, OperationId, PackageContributions, PackageRef,
-    ResourceKind, RuntimeInstallationId, RuntimeTarget, StrictJsonValue,
-    VersionString, digest_payload,
+    DigestHex, JavaScriptBuildProfile, LocalizedMetadata, OperationId,
+    PackageContributions, PackageRef, PluginBackupId, PluginBridgeCallId,
+    PluginBridgeSessionId, PluginDatabaseHandleId, PluginFilesHandleId,
+    PluginKvHandleId, PluginMigrationId, PluginProductId, PluginProjectId,
+    PluginReleaseId, PluginServiceTestReceiptId, PluginShareBundleId,
+    PluginSurfaceSessionId, PluginUserAuthorizationId, ResourceKind,
+    RuntimeInstallationId, RuntimeTarget, StrictJsonValue, VersionString,
+    digest_payload,
 };
 
-pub const MINIAPP_M1_SCHEMA_VERSION: &str = "1.0.0";
-pub const MINIAPP_RELEASE_PROFILE_VERSION: &str = "1.0.0";
-pub const MINIAPP_SERVICE_HOST_PROTOCOL_VERSION: &str = "1.0.0";
-pub const MINIAPP_SERVICE_SDK_CONTRACT_VERSION: &str = "1.0.0";
-pub const MINIAPP_BRIDGE_CONTRACT_VERSION: &str = "1.0.0";
-pub const MINIAPP_SERVICE_TEST_CONTRACT_VERSION: &str = "1.0.0";
-pub const MINIAPP_SHARE_BUNDLE_VERSION: &str = "1.0.0";
-pub const MINIAPP_WHOLE_APP_BACKUP_VERSION: &str = "1.0.0";
+pub const PLUGIN_RUNTIME_SCHEMA_VERSION: &str = "1.0.0";
+pub const PLUGIN_RELEASE_PROFILE_VERSION: &str = "1.0.0";
+pub const PLUGIN_SERVICE_HOST_PROTOCOL_VERSION: &str = "1.0.0";
+pub const PLUGIN_SERVICE_SDK_CONTRACT_VERSION: &str = "1.0.0";
+pub const PLUGIN_BRIDGE_CONTRACT_VERSION: &str = "1.0.0";
+pub const PLUGIN_SERVICE_TEST_CONTRACT_VERSION: &str = "1.0.0";
+pub const PLUGIN_SHARE_BUNDLE_VERSION: &str = "1.0.0";
+pub const PLUGIN_PRODUCT_BACKUP_VERSION: &str = "1.0.0";
 
-pub type MiniAppM1ContractArtifact = ArtifactEnvelope<MiniAppM1ContractManifest>;
+pub type PluginRuntimeContractArtifact = ArtifactEnvelope<PluginRuntimeContractManifest>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppM1ContractManifest {
+pub struct PluginRuntimeContractManifest {
     pub schema_version: VersionString,
     pub release_profile_version: VersionString,
     pub service_host_protocol_version: VersionString,
@@ -40,115 +44,65 @@ pub struct MiniAppM1ContractManifest {
     pub bridge_contract_version: VersionString,
     pub service_test_contract_version: VersionString,
     pub share_bundle_version: VersionString,
-    pub whole_app_backup_version: VersionString,
-    pub service_lifecycles: BTreeSet<MiniAppServiceLifecycle>,
-    pub bridge_transports: BTreeSet<MiniAppBridgeTransport>,
-    pub max_services_per_miniapp: u8,
+    pub product_backup_version: VersionString,
+    pub service_lifecycles: BTreeSet<PluginServiceLifecycle>,
+    pub bridge_transports: BTreeSet<PluginBridgeTransport>,
+    pub max_services_per_plugin_product: u8,
     pub ui_only_starts_node: bool,
     pub exposes_localhost_bridge: bool,
 }
 
-impl MiniAppM1ContractManifest {
+impl PluginRuntimeContractManifest {
     pub fn canonical() -> Self {
         Self {
-            schema_version: MINIAPP_M1_SCHEMA_VERSION.into(),
-            release_profile_version: MINIAPP_RELEASE_PROFILE_VERSION.into(),
-            service_host_protocol_version: MINIAPP_SERVICE_HOST_PROTOCOL_VERSION.into(),
-            service_sdk_contract_version: MINIAPP_SERVICE_SDK_CONTRACT_VERSION.into(),
-            bridge_contract_version: MINIAPP_BRIDGE_CONTRACT_VERSION.into(),
-            service_test_contract_version: MINIAPP_SERVICE_TEST_CONTRACT_VERSION.into(),
-            share_bundle_version: MINIAPP_SHARE_BUNDLE_VERSION.into(),
-            whole_app_backup_version: MINIAPP_WHOLE_APP_BACKUP_VERSION.into(),
+            schema_version: PLUGIN_RUNTIME_SCHEMA_VERSION.into(),
+            release_profile_version: PLUGIN_RELEASE_PROFILE_VERSION.into(),
+            service_host_protocol_version: PLUGIN_SERVICE_HOST_PROTOCOL_VERSION.into(),
+            service_sdk_contract_version: PLUGIN_SERVICE_SDK_CONTRACT_VERSION.into(),
+            bridge_contract_version: PLUGIN_BRIDGE_CONTRACT_VERSION.into(),
+            service_test_contract_version: PLUGIN_SERVICE_TEST_CONTRACT_VERSION.into(),
+            share_bundle_version: PLUGIN_SHARE_BUNDLE_VERSION.into(),
+            product_backup_version: PLUGIN_PRODUCT_BACKUP_VERSION.into(),
             service_lifecycles: BTreeSet::from([
-                MiniAppServiceLifecycle::OnDemand,
-                MiniAppServiceLifecycle::Continuous,
+                PluginServiceLifecycle::OnDemand,
+                PluginServiceLifecycle::Continuous,
             ]),
             bridge_transports: BTreeSet::from([
-                MiniAppBridgeTransport::MessageChannelV1,
+                PluginBridgeTransport::MessageChannelV1,
             ]),
-            max_services_per_miniapp: 1,
+            max_services_per_plugin_product: 1,
             ui_only_starts_node: false,
             exposes_localhost_bridge: false,
         }
     }
 
-    pub fn validate(&self) -> Result<(), MiniAppM1ContractError> {
+    pub fn validate(&self) -> Result<(), PluginRuntimeContractError> {
         if self != &Self::canonical() {
             return Err(invalid(
-                "miniapp_m1_contract",
-                "manifest differs from the frozen Phase M1 exact set",
+                "plugin_runtime_contract",
+                "manifest differs from the frozen Plugin runtime exact set",
             ));
         }
         Ok(())
     }
 }
 
-macro_rules! local_string_newtype {
-    ($name:ident) => {
-        #[derive(
-            Clone,
-            Debug,
-            PartialEq,
-            Eq,
-            PartialOrd,
-            Ord,
-            Hash,
-            Serialize,
-            Deserialize,
-            JsonSchema,
-        )]
-        #[serde(transparent)]
-        pub struct $name(pub String);
-
-        impl From<&str> for $name {
-            fn from(value: &str) -> Self {
-                Self(value.to_owned())
-            }
-        }
-
-        impl From<String> for $name {
-            fn from(value: String) -> Self {
-                Self(value)
-            }
-        }
-
-        impl AsRef<str> for $name {
-            fn as_ref(&self) -> &str {
-                &self.0
-            }
-        }
-    };
-}
-
-local_string_newtype!(MiniAppProjectId);
-local_string_newtype!(MiniAppServiceTestReceiptId);
-local_string_newtype!(MiniAppBridgeSessionId);
-local_string_newtype!(MiniAppSurfaceSessionId);
-local_string_newtype!(MiniAppBridgeCallId);
-local_string_newtype!(MiniAppKvHandleId);
-local_string_newtype!(MiniAppFilesHandleId);
-local_string_newtype!(MiniAppDatabaseHandleId);
-local_string_newtype!(MiniAppMigrationId);
-local_string_newtype!(MiniAppBackupId);
-local_string_newtype!(MiniAppShareBundleId);
-local_string_newtype!(MiniAppUserAuthorizationId);
-
-pub type MiniAppReleaseManifestArtifact = ArtifactEnvelope<MiniAppReleaseV1Manifest>;
+pub type PluginReleaseManifestArtifact = ArtifactEnvelope<PluginReleaseV1Manifest>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppUiReleaseDescriptor {
+pub struct PluginUiReleaseDescriptor {
     pub entrypoint: String,
     pub entrypoint_digest: DigestHex,
     pub ui_tree_digest: DigestHex,
 }
 
-impl MiniAppUiReleaseDescriptor {
-    fn validate(&self) -> Result<(), MiniAppM1ContractError> {
+impl PluginUiReleaseDescriptor {
+    fn validate(&self) -> Result<(), PluginRuntimeContractError> {
         if self.entrypoint != "ui/index.html" {
             return Err(invalid(
                 "ui.entrypoint",
-                "MiniApp UI entrypoint must be ui/index.html",
+                "Plugin Product UI entrypoint must be ui/index.html",
             ));
         }
         validate_digest(&self.entrypoint_digest, "ui.entrypoint_digest")?;
@@ -170,17 +124,17 @@ impl MiniAppUiReleaseDescriptor {
     JsonSchema,
 )]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum MiniAppServiceLifecycle {
+pub enum PluginServiceLifecycle {
     OnDemand,
     Continuous,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppServiceReleaseDescriptor {
+pub struct PluginServiceReleaseDescriptor {
     pub entrypoint: String,
     pub module_digest: DigestHex,
-    pub lifecycle: MiniAppServiceLifecycle,
+    pub lifecycle: PluginServiceLifecycle,
     pub uses_files: bool,
     pub uses_private_database: bool,
     pub service_contract_digest: DigestHex,
@@ -189,12 +143,12 @@ pub struct MiniAppServiceReleaseDescriptor {
     pub runtime_requirements_digest: DigestHex,
 }
 
-impl MiniAppServiceReleaseDescriptor {
-    fn validate(&self) -> Result<(), MiniAppM1ContractError> {
+impl PluginServiceReleaseDescriptor {
+    fn validate(&self) -> Result<(), PluginRuntimeContractError> {
         if self.entrypoint != "service/main.mjs" {
             return Err(invalid(
                 "service.entrypoint",
-                "MiniApp Service entrypoint must be service/main.mjs",
+                "Plugin Product Service entrypoint must be service/main.mjs",
             ));
         }
         validate_digest(&self.module_digest, "service.module_digest")?;
@@ -204,12 +158,12 @@ impl MiniAppServiceReleaseDescriptor {
         )?;
         require_version(
             &self.host_protocol_version,
-            MINIAPP_SERVICE_HOST_PROTOCOL_VERSION,
+            PLUGIN_SERVICE_HOST_PROTOCOL_VERSION,
             "service.host_protocol_version",
         )?;
         require_version(
             &self.sdk_contract_version,
-            MINIAPP_SERVICE_SDK_CONTRACT_VERSION,
+            PLUGIN_SERVICE_SDK_CONTRACT_VERSION,
             "service.sdk_contract_version",
         )?;
         validate_digest(
@@ -221,7 +175,7 @@ impl MiniAppServiceReleaseDescriptor {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppMigrationColumn {
+pub struct PluginMigrationColumn {
     pub name: String,
     pub declared_type: String,
     pub nullable: bool,
@@ -229,8 +183,8 @@ pub struct MiniAppMigrationColumn {
     pub default_literal: Option<String>,
 }
 
-impl MiniAppMigrationColumn {
-    fn validate(&self) -> Result<(), MiniAppM1ContractError> {
+impl PluginMigrationColumn {
+    fn validate(&self) -> Result<(), PluginRuntimeContractError> {
         validate_sql_identifier(&self.name, "migration.column.name")?;
         validate_nonempty(&self.declared_type, "migration.column.declared_type")?;
         reject_sql_control_tokens(
@@ -250,10 +204,10 @@ impl MiniAppMigrationColumn {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum MiniAppAdditiveMigrationAction {
+pub enum PluginAdditiveMigrationAction {
     CreateTable {
         table_name: String,
-        columns: Vec<MiniAppMigrationColumn>,
+        columns: Vec<PluginMigrationColumn>,
         primary_key_columns: Vec<String>,
     },
     CreateIndex {
@@ -264,12 +218,12 @@ pub enum MiniAppAdditiveMigrationAction {
     },
     AddColumn {
         table_name: String,
-        column: MiniAppMigrationColumn,
+        column: PluginMigrationColumn,
     },
 }
 
-impl MiniAppAdditiveMigrationAction {
-    fn validate(&self) -> Result<(), MiniAppM1ContractError> {
+impl PluginAdditiveMigrationAction {
+    fn validate(&self) -> Result<(), PluginRuntimeContractError> {
         match self {
             Self::CreateTable {
                 table_name,
@@ -333,25 +287,25 @@ impl MiniAppAdditiveMigrationAction {
 }
 
 #[derive(Serialize)]
-struct MiniAppMigrationDigestInput<'a> {
-    migration_id: &'a MiniAppMigrationId,
-    actions: &'a [MiniAppAdditiveMigrationAction],
+struct PluginMigrationDigestInput<'a> {
+    migration_id: &'a PluginMigrationId,
+    actions: &'a [PluginAdditiveMigrationAction],
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppMigration {
-    pub migration_id: MiniAppMigrationId,
+pub struct PluginMigration {
+    pub migration_id: PluginMigrationId,
     pub migration_digest: DigestHex,
-    pub actions: Vec<MiniAppAdditiveMigrationAction>,
+    pub actions: Vec<PluginAdditiveMigrationAction>,
 }
 
-impl MiniAppMigration {
+impl PluginMigration {
     pub fn new(
-        migration_id: MiniAppMigrationId,
-        actions: Vec<MiniAppAdditiveMigrationAction>,
-    ) -> Result<Self, MiniAppM1ContractError> {
-        let migration_digest = digest_payload(&MiniAppMigrationDigestInput {
+        migration_id: PluginMigrationId,
+        actions: Vec<PluginAdditiveMigrationAction>,
+    ) -> Result<Self, PluginRuntimeContractError> {
+        let migration_digest = digest_payload(&PluginMigrationDigestInput {
             migration_id: &migration_id,
             actions: &actions,
         })?;
@@ -364,7 +318,7 @@ impl MiniAppMigration {
         Ok(value)
     }
 
-    pub fn validate(&self) -> Result<(), MiniAppM1ContractError> {
+    pub fn validate(&self) -> Result<(), PluginRuntimeContractError> {
         validate_machine_key(self.migration_id.as_ref(), "migration_id")?;
         validate_digest(&self.migration_digest, "migration_digest")?;
         if self.actions.is_empty() {
@@ -376,12 +330,12 @@ impl MiniAppMigration {
         for action in &self.actions {
             action.validate()?;
         }
-        let expected = digest_payload(&MiniAppMigrationDigestInput {
+        let expected = digest_payload(&PluginMigrationDigestInput {
             migration_id: &self.migration_id,
             actions: &self.actions,
         })?;
         if expected != self.migration_digest {
-            return Err(MiniAppM1ContractError::DigestMismatch {
+            return Err(PluginRuntimeContractError::DigestMismatch {
                 field: "migration_digest",
             });
         }
@@ -391,12 +345,12 @@ impl MiniAppMigration {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppResourceContract {
+pub struct PluginResourceContract {
     pub required_resource_kinds: BTreeSet<ResourceKind>,
 }
 
-impl MiniAppResourceContract {
-    pub fn validate(&self) -> Result<(), MiniAppM1ContractError> {
+impl PluginResourceContract {
+    pub fn validate(&self) -> Result<(), PluginRuntimeContractError> {
         for resource_kind in &self.required_resource_kinds {
             validate_machine_key(
                 resource_kind.as_ref(),
@@ -409,46 +363,46 @@ impl MiniAppResourceContract {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppReleaseV1Manifest {
+pub struct PluginReleaseV1Manifest {
     pub schema_version: VersionString,
     pub build_profile: JavaScriptBuildProfile,
     pub build_profile_version: VersionString,
     pub display: LocalizedMetadata,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ui: Option<MiniAppUiReleaseDescriptor>,
+    pub ui: Option<PluginUiReleaseDescriptor>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub service: Option<MiniAppServiceReleaseDescriptor>,
+    pub service: Option<PluginServiceReleaseDescriptor>,
     pub dependency_lock_digest: DigestHex,
     pub dependency_graph_digest: DigestHex,
     pub config_schema: StrictJsonValue,
     pub config_schema_digest: DigestHex,
     pub credential_slots: Vec<CredentialSlotDeclaration>,
     pub credential_slots_digest: DigestHex,
-    pub resource_contract: MiniAppResourceContract,
+    pub resource_contract: PluginResourceContract,
     pub resource_contract_digest: DigestHex,
     pub schemas: BTreeMap<CanonicalSchemaRef, StrictJsonValue>,
     pub bridge_contract_digest: DigestHex,
     pub contribution_package: PackageRef,
     pub contributions: PackageContributions,
-    pub migrations: Vec<MiniAppMigration>,
+    pub migrations: Vec<PluginMigration>,
 }
 
-impl MiniAppReleaseV1Manifest {
-    pub fn validate(&self) -> Result<(), MiniAppM1ContractError> {
+impl PluginReleaseV1Manifest {
+    pub fn validate(&self) -> Result<(), PluginRuntimeContractError> {
         require_version(
             &self.schema_version,
-            MINIAPP_M1_SCHEMA_VERSION,
+            PLUGIN_RUNTIME_SCHEMA_VERSION,
             "schema_version",
         )?;
-        if self.build_profile != JavaScriptBuildProfile::MiniAppReleaseV1 {
+        if self.build_profile != JavaScriptBuildProfile::PluginReleaseV1 {
             return Err(invalid(
                 "build_profile",
-                "MiniApp Release must use miniapp_release_v1",
+                "Plugin Product Release must use plugin_release_v1",
             ));
         }
         require_version(
             &self.build_profile_version,
-            MINIAPP_RELEASE_PROFILE_VERSION,
+            PLUGIN_RELEASE_PROFILE_VERSION,
             "build_profile_version",
         )?;
         validate_display(&self.display)?;
@@ -462,7 +416,7 @@ impl MiniAppReleaseV1Manifest {
             if !self.migrations.is_empty() && !service.uses_private_database {
                 return Err(invalid(
                     "migrations",
-                    "MiniApp migrations require the managed Private Database",
+                    "Plugin Product migrations require the managed Private Database",
                 ));
             }
         } else if !self.migrations.is_empty()
@@ -475,7 +429,7 @@ impl MiniAppReleaseV1Manifest {
         {
             return Err(invalid(
                 "service",
-                "UI-only MiniApps cannot declare Service migrations, executable contributions, Credential slots, or typed Resource requirements",
+                "UI-only Plugins cannot declare Service migrations, executable contributions, Credential slots, or typed Resource requirements",
             ));
         }
         validate_digest(&self.dependency_lock_digest, "dependency_lock_digest")?;
@@ -484,7 +438,7 @@ impl MiniAppReleaseV1Manifest {
         validate_digest(&self.config_schema_digest, "config_schema_digest")?;
         let expected_config_schema_digest = digest_payload(&self.config_schema.0)?;
         if expected_config_schema_digest != self.config_schema_digest {
-            return Err(MiniAppM1ContractError::DigestMismatch {
+            return Err(PluginRuntimeContractError::DigestMismatch {
                 field: "config_schema_digest",
             });
         }
@@ -492,7 +446,7 @@ impl MiniAppReleaseV1Manifest {
         validate_digest(&self.credential_slots_digest, "credential_slots_digest")?;
         let expected_credential_slots_digest = digest_payload(&self.credential_slots)?;
         if expected_credential_slots_digest != self.credential_slots_digest {
-            return Err(MiniAppM1ContractError::DigestMismatch {
+            return Err(PluginRuntimeContractError::DigestMismatch {
                 field: "credential_slots_digest",
             });
         }
@@ -500,7 +454,7 @@ impl MiniAppReleaseV1Manifest {
         validate_digest(&self.resource_contract_digest, "resource_contract_digest")?;
         let expected_resource_contract_digest = digest_payload(&self.resource_contract)?;
         if expected_resource_contract_digest != self.resource_contract_digest {
-            return Err(MiniAppM1ContractError::DigestMismatch {
+            return Err(PluginRuntimeContractError::DigestMismatch {
                 field: "resource_contract_digest",
             });
         }
@@ -561,25 +515,25 @@ impl MiniAppReleaseV1Manifest {
         self.service.is_none()
     }
 
-    pub fn migration_set_digest(&self) -> Result<DigestHex, MiniAppM1ContractError> {
+    pub fn migration_set_digest(&self) -> Result<DigestHex, PluginRuntimeContractError> {
         Ok(digest_payload(&self.migrations)?)
     }
 
-    pub fn contribution_set_digest(&self) -> Result<DigestHex, MiniAppM1ContractError> {
+    pub fn contribution_set_digest(&self) -> Result<DigestHex, PluginRuntimeContractError> {
         Ok(digest_payload(&self.contributions)?)
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppReleaseFile {
+pub struct PluginReleaseFile {
     pub normalized_relative_path: String,
     pub digest: DigestHex,
     pub size_bytes: u64,
 }
 
-impl MiniAppReleaseFile {
-    fn validate(&self) -> Result<(), MiniAppM1ContractError> {
+impl PluginReleaseFile {
+    fn validate(&self) -> Result<(), PluginRuntimeContractError> {
         validate_relative_path(
             &self.normalized_relative_path,
             "files.normalized_relative_path",
@@ -589,26 +543,26 @@ impl MiniAppReleaseFile {
 }
 
 #[derive(Serialize)]
-struct MiniAppReleaseArtifactDigestInput<'a> {
-    manifest: &'a MiniAppReleaseManifestArtifact,
-    files: &'a [MiniAppReleaseFile],
+struct PluginReleaseArtifactDigestInput<'a> {
+    manifest: &'a PluginReleaseManifestArtifact,
+    files: &'a [PluginReleaseFile],
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppReleaseArtifactV1 {
+pub struct PluginReleaseArtifactV1 {
     pub artifact_id: ArtifactId,
     pub artifact_digest: DigestHex,
-    pub manifest: MiniAppReleaseManifestArtifact,
-    pub files: Vec<MiniAppReleaseFile>,
+    pub manifest: PluginReleaseManifestArtifact,
+    pub files: Vec<PluginReleaseFile>,
 }
 
-impl MiniAppReleaseArtifactV1 {
+impl PluginReleaseArtifactV1 {
     pub fn new(
         artifact_id: ArtifactId,
-        manifest: MiniAppReleaseV1Manifest,
-        mut files: Vec<MiniAppReleaseFile>,
-    ) -> Result<Self, MiniAppM1ContractError> {
+        manifest: PluginReleaseV1Manifest,
+        mut files: Vec<PluginReleaseFile>,
+    ) -> Result<Self, PluginRuntimeContractError> {
         manifest.validate()?;
         files.sort_by(|left, right| {
             left.normalized_relative_path
@@ -626,11 +580,11 @@ impl MiniAppReleaseArtifactV1 {
         Ok(value)
     }
 
-    pub fn validate(&self) -> Result<(), MiniAppM1ContractError> {
+    pub fn validate(&self) -> Result<(), PluginRuntimeContractError> {
         validate_nonempty(self.artifact_id.as_ref(), "artifact_id")?;
         validate_digest(&self.artifact_digest, "artifact_digest")?;
         if !self.manifest.verify()? {
-            return Err(MiniAppM1ContractError::DigestMismatch {
+            return Err(PluginRuntimeContractError::DigestMismatch {
                 field: "manifest.payload_digest",
             });
         }
@@ -638,7 +592,7 @@ impl MiniAppReleaseArtifactV1 {
         if self.files.is_empty() {
             return Err(invalid(
                 "files",
-                "MiniApp Release must contain ui/index.html",
+                "Plugin Product Release must contain ui/index.html",
             ));
         }
         let mut previous: Option<&str> = None;
@@ -658,7 +612,7 @@ impl MiniAppReleaseArtifactV1 {
                     if file.size_bytes == 0 {
                         return Err(invalid(
                             "files.ui/index.html",
-                            "MiniApp UI entrypoint must not be empty",
+                            "Plugin Product UI entrypoint must not be empty",
                         ));
                     }
                     ui_entrypoint_digest = Some(&file.digest);
@@ -667,24 +621,24 @@ impl MiniAppReleaseArtifactV1 {
                 if file.size_bytes == 0 {
                     return Err(invalid(
                         "files.service/main.mjs",
-                        "MiniApp Service entrypoint must not be empty",
+                        "Plugin Product Service entrypoint must not be empty",
                     ));
                 }
                 service_digest = Some(&file.digest);
             } else {
                 return Err(invalid(
                     "files.normalized_relative_path",
-                    "miniapp-release-v1 permits ui/** and optional service/main.mjs only",
+                    "plugin-release-v1 permits ui/** and optional service/main.mjs only",
                 ));
             }
             previous = Some(path);
         }
         if let Some(ui) = &self.manifest.payload.ui {
             if ui_entrypoint_digest != Some(&ui.entrypoint_digest) {
-                return Err(MiniAppM1ContractError::DigestMismatch { field: "ui.entrypoint_digest" });
+                return Err(PluginRuntimeContractError::DigestMismatch { field: "ui.entrypoint_digest" });
             }
             if canonical_ui_tree_digest(&self.files)? != ui.ui_tree_digest {
-                return Err(MiniAppM1ContractError::DigestMismatch { field: "ui.ui_tree_digest" });
+                return Err(PluginRuntimeContractError::DigestMismatch { field: "ui.ui_tree_digest" });
             }
         } else if self.files.iter().any(|file| file.normalized_relative_path.starts_with("ui/")) {
             return Err(invalid("files", "UI files require a declared plugin surface"));
@@ -705,14 +659,14 @@ impl MiniAppReleaseArtifactV1 {
                 ));
             }
             (Some(_), Some(_)) => {
-                return Err(MiniAppM1ContractError::DigestMismatch {
+                return Err(PluginRuntimeContractError::DigestMismatch {
                     field: "service.module_digest",
                 });
             }
         }
         let expected = canonical_release_artifact_digest(&self.manifest, &self.files)?;
         if expected != self.artifact_digest {
-            return Err(MiniAppM1ContractError::DigestMismatch {
+            return Err(PluginRuntimeContractError::DigestMismatch {
                 field: "artifact_digest",
             });
         }
@@ -721,18 +675,18 @@ impl MiniAppReleaseArtifactV1 {
 }
 
 pub fn canonical_release_artifact_digest(
-    manifest: &MiniAppReleaseManifestArtifact,
-    files: &[MiniAppReleaseFile],
-) -> Result<DigestHex, MiniAppM1ContractError> {
-    Ok(digest_payload(&MiniAppReleaseArtifactDigestInput {
+    manifest: &PluginReleaseManifestArtifact,
+    files: &[PluginReleaseFile],
+) -> Result<DigestHex, PluginRuntimeContractError> {
+    Ok(digest_payload(&PluginReleaseArtifactDigestInput {
         manifest,
         files,
     })?)
 }
 
 pub fn canonical_ui_tree_digest(
-    files: &[MiniAppReleaseFile],
-) -> Result<DigestHex, MiniAppM1ContractError> {
+    files: &[PluginReleaseFile],
+) -> Result<DigestHex, PluginRuntimeContractError> {
     let mut ui_files = files
         .iter()
         .filter(|file| file.normalized_relative_path.starts_with("ui/"))
@@ -746,15 +700,15 @@ pub fn canonical_ui_tree_digest(
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppReleaseRef {
-    pub release_id: MiniAppReleaseId,
+pub struct PluginReleaseRef {
+    pub release_id: PluginReleaseId,
     pub artifact_id: ArtifactId,
     pub release_digest: DigestHex,
     pub manifest_digest: DigestHex,
 }
 
-impl MiniAppReleaseRef {
-    pub fn validate(&self) -> Result<(), MiniAppM1ContractError> {
+impl PluginReleaseRef {
+    pub fn validate(&self) -> Result<(), PluginRuntimeContractError> {
         validate_nonempty(self.release_id.as_ref(), "release_id")?;
         validate_nonempty(self.artifact_id.as_ref(), "artifact_id")?;
         validate_digest(&self.release_digest, "release_digest")?;
@@ -763,8 +717,8 @@ impl MiniAppReleaseRef {
 
     pub fn validate_artifact(
         &self,
-        artifact: &MiniAppReleaseArtifactV1,
-    ) -> Result<(), MiniAppM1ContractError> {
+        artifact: &PluginReleaseArtifactV1,
+    ) -> Result<(), PluginRuntimeContractError> {
         self.validate()?;
         artifact.validate()?;
         if self.artifact_id != artifact.artifact_id
@@ -782,9 +736,9 @@ impl MiniAppReleaseRef {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum MiniAppSourceLineage {
+pub enum PluginReleaseSourceLineage {
     Managed {
-        project_id: MiniAppProjectId,
+        project_id: PluginProjectId,
         source_snapshot_digest: DigestHex,
         dependency_lock_digest: DigestHex,
         build_profile_version: VersionString,
@@ -793,8 +747,8 @@ pub enum MiniAppSourceLineage {
     RuntimeOnly,
 }
 
-impl MiniAppSourceLineage {
-    fn validate(&self) -> Result<(), MiniAppM1ContractError> {
+impl PluginReleaseSourceLineage {
+    fn validate(&self) -> Result<(), PluginRuntimeContractError> {
         match self {
             Self::Managed {
                 project_id,
@@ -808,7 +762,7 @@ impl MiniAppSourceLineage {
                 validate_digest(dependency_lock_digest, "dependency_lock_digest")?;
                 require_version(
                     build_profile_version,
-                    MINIAPP_RELEASE_PROFILE_VERSION,
+                    PLUGIN_RELEASE_PROFILE_VERSION,
                     "build_profile_version",
                 )?;
                 if *build_generation == 0 {
@@ -842,22 +796,22 @@ impl MiniAppSourceLineage {
     JsonSchema,
 )]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum MiniAppReadyOrigin {
+pub enum PluginReadyOrigin {
     Build,
     Import,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppServiceTestReceiptRef {
-    pub receipt_id: MiniAppServiceTestReceiptId,
-    pub release_id: MiniAppReleaseId,
+pub struct PluginServiceTestReceiptRef {
+    pub receipt_id: PluginServiceTestReceiptId,
+    pub release_id: PluginReleaseId,
     pub release_digest: DigestHex,
     pub service_run_key: DigestHex,
 }
 
-impl MiniAppServiceTestReceiptRef {
-    fn validate(&self) -> Result<(), MiniAppM1ContractError> {
+impl PluginServiceTestReceiptRef {
+    fn validate(&self) -> Result<(), PluginRuntimeContractError> {
         validate_nonempty(self.receipt_id.as_ref(), "test_receipt.receipt_id")?;
         validate_nonempty(self.release_id.as_ref(), "test_receipt.release_id")?;
         validate_digest(&self.release_digest, "test_receipt.release_digest")?;
@@ -867,42 +821,42 @@ impl MiniAppServiceTestReceiptRef {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppReadyRelease {
-    pub miniapp_id: MiniAppId,
-    pub release: MiniAppReleaseRef,
+pub struct PluginReadyRelease {
+    pub plugin_product_id: PluginProductId,
+    pub release: PluginReleaseRef,
     pub origin_operation_id: OperationId,
-    pub origin: MiniAppReadyOrigin,
-    pub source_lineage: MiniAppSourceLineage,
+    pub origin: PluginReadyOrigin,
+    pub source_lineage: PluginReleaseSourceLineage,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub matching_service_test_receipt: Option<MiniAppServiceTestReceiptRef>,
+    pub matching_service_test_receipt: Option<PluginServiceTestReceiptRef>,
     pub created_at_ms: i64,
 }
 
-impl MiniAppReadyRelease {
+impl PluginReadyRelease {
     pub fn validate_for_artifact(
         &self,
-        artifact: &MiniAppReleaseArtifactV1,
-    ) -> Result<(), MiniAppM1ContractError> {
-        validate_nonempty(self.miniapp_id.as_ref(), "miniapp_id")?;
+        artifact: &PluginReleaseArtifactV1,
+    ) -> Result<(), PluginRuntimeContractError> {
+        validate_nonempty(self.plugin_product_id.as_ref(), "plugin_product_id")?;
         validate_nonempty(
             self.origin_operation_id.as_ref(),
             "origin_operation_id",
         )?;
         self.release.validate_artifact(artifact)?;
         self.source_lineage.validate()?;
-        if self.origin == MiniAppReadyOrigin::Build && !self.source_lineage.is_managed() {
+        if self.origin == PluginReadyOrigin::Build && !self.source_lineage.is_managed() {
             return Err(invalid(
                 "source_lineage",
                 "Build Ready Releases require managed source lineage",
             ));
         }
-        if let MiniAppSourceLineage::Managed {
+        if let PluginReleaseSourceLineage::Managed {
             dependency_lock_digest,
             ..
         } = &self.source_lineage
             && dependency_lock_digest != &artifact.manifest.payload.dependency_lock_digest
         {
-            return Err(MiniAppM1ContractError::DigestMismatch {
+            return Err(PluginRuntimeContractError::DigestMismatch {
                 field: "dependency_lock_digest",
             });
         }
@@ -935,20 +889,20 @@ impl MiniAppReadyRelease {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppReadyReleaseRef {
-    pub release_id: MiniAppReleaseId,
+pub struct PluginReadyReleaseRef {
+    pub release_id: PluginReleaseId,
     pub release_digest: DigestHex,
 }
 
-impl MiniAppReadyReleaseRef {
-    fn validate(&self) -> Result<(), MiniAppM1ContractError> {
+impl PluginReadyReleaseRef {
+    fn validate(&self) -> Result<(), PluginRuntimeContractError> {
         validate_nonempty(self.release_id.as_ref(), "ready_release.release_id")?;
         validate_digest(&self.release_digest, "ready_release.release_digest")
     }
 }
 
-impl From<&MiniAppReadyRelease> for MiniAppReadyReleaseRef {
-    fn from(value: &MiniAppReadyRelease) -> Self {
+impl From<&PluginReadyRelease> for PluginReadyReleaseRef {
+    fn from(value: &PluginReadyRelease) -> Self {
         Self {
             release_id: value.release.release_id.clone(),
             release_digest: value.release.release_digest.clone(),
@@ -958,22 +912,22 @@ impl From<&MiniAppReadyRelease> for MiniAppReadyReleaseRef {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppReleasePointerState {
-    pub miniapp_id: MiniAppId,
+pub struct PluginReleasePointerState {
+    pub plugin_product_id: PluginProductId,
     pub pointer_revision: u64,
     pub active_release_epoch: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub ready_release: Option<MiniAppReadyReleaseRef>,
+    pub ready_release: Option<PluginReadyReleaseRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub active_release: Option<MiniAppReleaseRef>,
+    pub active_release: Option<PluginReleaseRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub previous_release: Option<MiniAppReleaseRef>,
+    pub previous_release: Option<PluginReleaseRef>,
     pub materialized_catalog_digest: DigestHex,
 }
 
-impl MiniAppReleasePointerState {
-    pub fn validate(&self) -> Result<(), MiniAppM1ContractError> {
-        validate_nonempty(self.miniapp_id.as_ref(), "miniapp_id")?;
+impl PluginReleasePointerState {
+    pub fn validate(&self) -> Result<(), PluginRuntimeContractError> {
+        validate_nonempty(self.plugin_product_id.as_ref(), "plugin_product_id")?;
         if self.pointer_revision == 0 {
             return Err(invalid(
                 "pointer_revision",
@@ -1028,20 +982,20 @@ impl MiniAppReleasePointerState {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppPointerExpectation {
+pub struct PluginPointerExpectation {
     pub pointer_revision: u64,
     pub active_release_epoch: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub ready_release: Option<MiniAppReadyReleaseRef>,
+    pub ready_release: Option<PluginReadyReleaseRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub active_release: Option<MiniAppReleaseRef>,
+    pub active_release: Option<PluginReleaseRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub previous_release: Option<MiniAppReleaseRef>,
+    pub previous_release: Option<PluginReleaseRef>,
     pub materialized_catalog_digest: DigestHex,
 }
 
-impl MiniAppPointerExpectation {
-    pub fn from_state(state: &MiniAppReleasePointerState) -> Self {
+impl PluginPointerExpectation {
+    pub fn from_state(state: &PluginReleasePointerState) -> Self {
         Self {
             pointer_revision: state.pointer_revision,
             active_release_epoch: state.active_release_epoch,
@@ -1052,7 +1006,7 @@ impl MiniAppPointerExpectation {
         }
     }
 
-    fn matches(&self, state: &MiniAppReleasePointerState) -> bool {
+    fn matches(&self, state: &PluginReleasePointerState) -> bool {
         self.pointer_revision == state.pointer_revision
             && self.active_release_epoch == state.active_release_epoch
             && self.ready_release == state.ready_release
@@ -1064,7 +1018,7 @@ impl MiniAppPointerExpectation {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppNonUiReleaseFingerprint {
+pub struct PluginNonUiReleaseFingerprint {
     pub manifest_without_ui_digest: DigestHex,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_run_key: Option<DigestHex>,
@@ -1078,8 +1032,8 @@ pub struct MiniAppNonUiReleaseFingerprint {
     pub dependency_lock_digest: DigestHex,
 }
 
-impl MiniAppNonUiReleaseFingerprint {
-    pub fn validate(&self) -> Result<(), MiniAppM1ContractError> {
+impl PluginNonUiReleaseFingerprint {
+    pub fn validate(&self) -> Result<(), PluginRuntimeContractError> {
         if let Some(service_run_key) = &self.service_run_key {
             validate_digest(service_run_key, "service_run_key")?;
         }
@@ -1108,21 +1062,21 @@ impl MiniAppNonUiReleaseFingerprint {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppUiOnlyAutoPublishAuthorization {
-    pub authorization_id: MiniAppUserAuthorizationId,
-    pub miniapp_id: MiniAppId,
+pub struct PluginUiOnlyAutoPublishAuthorization {
+    pub authorization_id: PluginUserAuthorizationId,
+    pub plugin_product_id: PluginProductId,
     pub enabled: bool,
     pub authorization_revision: u64,
     pub user_authorized_at_ms: i64,
 }
 
-impl MiniAppUiOnlyAutoPublishAuthorization {
-    fn validate_for(&self, miniapp_id: &MiniAppId) -> Result<(), MiniAppM1ContractError> {
+impl PluginUiOnlyAutoPublishAuthorization {
+    fn validate_for(&self, plugin_product_id: &PluginProductId) -> Result<(), PluginRuntimeContractError> {
         validate_nonempty(self.authorization_id.as_ref(), "authorization_id")?;
-        if &self.miniapp_id != miniapp_id || !self.enabled {
+        if &self.plugin_product_id != plugin_product_id || !self.enabled {
             return Err(invalid(
                 "authorization",
-                "auto Publish requires enabled user authorization for the exact MiniApp",
+                "auto Publish requires enabled user authorization for the exact Plugin Product",
             ));
         }
         if self.authorization_revision == 0 || self.user_authorized_at_ms <= 0 {
@@ -1137,13 +1091,13 @@ impl MiniAppUiOnlyAutoPublishAuthorization {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppUiOnlyAutoPublishProof {
-    pub current_release: MiniAppReleaseRef,
-    pub target_release: MiniAppReleaseRef,
+pub struct PluginUiOnlyAutoPublishProof {
+    pub current_release: PluginReleaseRef,
+    pub target_release: PluginReleaseRef,
     pub current_ui_tree_digest: DigestHex,
     pub target_ui_tree_digest: DigestHex,
-    pub current_non_ui: MiniAppNonUiReleaseFingerprint,
-    pub target_non_ui: MiniAppNonUiReleaseFingerprint,
+    pub current_non_ui: PluginNonUiReleaseFingerprint,
+    pub target_non_ui: PluginNonUiReleaseFingerprint,
     pub changed_source_paths: BTreeSet<String>,
     pub changed_output_paths: BTreeSet<String>,
     pub project_head_matches_ready_source: bool,
@@ -1151,8 +1105,8 @@ pub struct MiniAppUiOnlyAutoPublishProof {
     pub no_unknown_changes: bool,
 }
 
-impl MiniAppUiOnlyAutoPublishProof {
-    fn validate(&self) -> Result<(), MiniAppM1ContractError> {
+impl PluginUiOnlyAutoPublishProof {
+    fn validate(&self) -> Result<(), PluginRuntimeContractError> {
         self.current_release.validate()?;
         self.target_release.validate()?;
         validate_digest(&self.current_ui_tree_digest, "current_ui_tree_digest")?;
@@ -1212,36 +1166,36 @@ impl MiniAppUiOnlyAutoPublishProof {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum MiniAppPublishAuthorization {
+pub enum PluginPublishAuthorization {
     ManualUser { actor_id: String },
     AutoUiOnly {
-        authorization: MiniAppUiOnlyAutoPublishAuthorization,
-        proof: Box<MiniAppUiOnlyAutoPublishProof>,
+        authorization: PluginUiOnlyAutoPublishAuthorization,
+        proof: Box<PluginUiOnlyAutoPublishProof>,
     },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppPublishRequest {
-    pub miniapp_id: MiniAppId,
-    pub expected: MiniAppPointerExpectation,
-    pub target_ready_release: MiniAppReleaseRef,
+pub struct PluginPublishRequest {
+    pub plugin_product_id: PluginProductId,
+    pub expected: PluginPointerExpectation,
+    pub target_ready_release: PluginReleaseRef,
     pub target_catalog_digest: DigestHex,
-    pub authorization: MiniAppPublishAuthorization,
+    pub authorization: PluginPublishAuthorization,
 }
 
-impl MiniAppPublishRequest {
+impl PluginPublishRequest {
     pub fn validate_for(
         &self,
-        state: &MiniAppReleasePointerState,
-    ) -> Result<(), MiniAppM1ContractError> {
+        state: &PluginReleasePointerState,
+    ) -> Result<(), PluginRuntimeContractError> {
         state.validate()?;
-        if self.miniapp_id != state.miniapp_id || !self.expected.matches(state) {
-            return Err(MiniAppM1ContractError::CompareAndSwapConflict);
+        if self.plugin_product_id != state.plugin_product_id || !self.expected.matches(state) {
+            return Err(PluginRuntimeContractError::CompareAndSwapConflict);
         }
         self.target_ready_release.validate()?;
         validate_digest(&self.target_catalog_digest, "target_catalog_digest")?;
-        let target_ready = MiniAppReadyReleaseRef {
+        let target_ready = PluginReadyReleaseRef {
             release_id: self.target_ready_release.release_id.clone(),
             release_digest: self.target_ready_release.release_digest.clone(),
         };
@@ -1252,14 +1206,14 @@ impl MiniAppPublishRequest {
             ));
         }
         match &self.authorization {
-            MiniAppPublishAuthorization::ManualUser { actor_id } => {
+            PluginPublishAuthorization::ManualUser { actor_id } => {
                 validate_nonempty(actor_id, "authorization.actor_id")
             }
-            MiniAppPublishAuthorization::AutoUiOnly {
+            PluginPublishAuthorization::AutoUiOnly {
                 authorization,
                 proof,
             } => {
-                authorization.validate_for(&self.miniapp_id)?;
+                authorization.validate_for(&self.plugin_product_id)?;
                 proof.validate()?;
                 let active = state.active_release.as_ref().ok_or_else(|| {
                     invalid(
@@ -1282,11 +1236,11 @@ impl MiniAppPublishRequest {
 
     pub fn next_state(
         &self,
-        state: &MiniAppReleasePointerState,
-    ) -> Result<MiniAppReleasePointerState, MiniAppM1ContractError> {
+        state: &PluginReleasePointerState,
+    ) -> Result<PluginReleasePointerState, PluginRuntimeContractError> {
         self.validate_for(state)?;
-        Ok(MiniAppReleasePointerState {
-            miniapp_id: state.miniapp_id.clone(),
+        Ok(PluginReleasePointerState {
+            plugin_product_id: state.plugin_product_id.clone(),
             pointer_revision: state
                 .pointer_revision
                 .checked_add(1)
@@ -1305,22 +1259,22 @@ impl MiniAppPublishRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppRollbackRequest {
-    pub miniapp_id: MiniAppId,
-    pub expected: MiniAppPointerExpectation,
-    pub rollback_target: MiniAppReleaseRef,
+pub struct PluginRollbackRequest {
+    pub plugin_product_id: PluginProductId,
+    pub expected: PluginPointerExpectation,
+    pub rollback_target: PluginReleaseRef,
     pub target_catalog_digest: DigestHex,
     pub actor_id: String,
 }
 
-impl MiniAppRollbackRequest {
+impl PluginRollbackRequest {
     pub fn validate_for(
         &self,
-        state: &MiniAppReleasePointerState,
-    ) -> Result<(), MiniAppM1ContractError> {
+        state: &PluginReleasePointerState,
+    ) -> Result<(), PluginRuntimeContractError> {
         state.validate()?;
-        if self.miniapp_id != state.miniapp_id || !self.expected.matches(state) {
-            return Err(MiniAppM1ContractError::CompareAndSwapConflict);
+        if self.plugin_product_id != state.plugin_product_id || !self.expected.matches(state) {
+            return Err(PluginRuntimeContractError::CompareAndSwapConflict);
         }
         validate_nonempty(&self.actor_id, "actor_id")?;
         self.rollback_target.validate()?;
@@ -1342,11 +1296,11 @@ impl MiniAppRollbackRequest {
 
     pub fn next_state(
         &self,
-        state: &MiniAppReleasePointerState,
-    ) -> Result<MiniAppReleasePointerState, MiniAppM1ContractError> {
+        state: &PluginReleasePointerState,
+    ) -> Result<PluginReleasePointerState, PluginRuntimeContractError> {
         self.validate_for(state)?;
-        Ok(MiniAppReleasePointerState {
-            miniapp_id: state.miniapp_id.clone(),
+        Ok(PluginReleasePointerState {
+            plugin_product_id: state.plugin_product_id.clone(),
             pointer_revision: state
                 .pointer_revision
                 .checked_add(1)
@@ -1365,15 +1319,15 @@ impl MiniAppRollbackRequest {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppPointerCasCommit {
-    pub miniapp_id: MiniAppId,
-    pub before: MiniAppPointerExpectation,
-    pub after: MiniAppReleasePointerState,
+pub struct PluginPointerCasCommit {
+    pub plugin_product_id: PluginProductId,
+    pub before: PluginPointerExpectation,
+    pub after: PluginReleasePointerState,
     pub committed_at_ms: i64,
 }
 
-impl MiniAppPointerCasCommit {
-    pub fn validate(&self) -> Result<(), MiniAppM1ContractError> {
+impl PluginPointerCasCommit {
+    pub fn validate(&self) -> Result<(), PluginRuntimeContractError> {
         self.after.validate()?;
         let expected_revision = self
             .before
@@ -1385,14 +1339,14 @@ impl MiniAppPointerCasCommit {
             .active_release_epoch
             .checked_add(1)
             .ok_or_else(|| invalid("before.active_release_epoch", "Release epoch overflow"))?;
-        if self.miniapp_id != self.after.miniapp_id
+        if self.plugin_product_id != self.after.plugin_product_id
             || self.after.pointer_revision != expected_revision
             || self.after.active_release_epoch != expected_epoch
             || self.committed_at_ms <= 0
         {
             return Err(invalid(
                 "pointer_commit",
-                "commit must advance the exact MiniApp pointer revision and active epoch once",
+                "commit must advance the exact Plugin Product pointer revision and active epoch once",
             ));
         }
         Ok(())
@@ -1401,9 +1355,9 @@ impl MiniAppPointerCasCommit {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
-pub enum MiniAppPointerCasOutcome {
+pub enum PluginPointerCasOutcome {
     Committed {
-        commit: Box<MiniAppPointerCasCommit>,
+        commit: Box<PluginPointerCasCommit>,
     },
     Conflict {
         observed_pointer_revision: u64,
@@ -1413,16 +1367,16 @@ pub enum MiniAppPointerCasOutcome {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppKvHandleDescriptor {
-    pub handle_id: MiniAppKvHandleId,
-    pub miniapp_id: MiniAppId,
+pub struct PluginKvHandleDescriptor {
+    pub handle_id: PluginKvHandleId,
+    pub plugin_product_id: PluginProductId,
     pub namespace_revision: u64,
 }
 
-impl MiniAppKvHandleDescriptor {
-    fn validate(&self) -> Result<(), MiniAppM1ContractError> {
+impl PluginKvHandleDescriptor {
+    fn validate(&self) -> Result<(), PluginRuntimeContractError> {
         validate_nonempty(self.handle_id.as_ref(), "kv.handle_id")?;
-        validate_nonempty(self.miniapp_id.as_ref(), "kv.miniapp_id")?;
+        validate_nonempty(self.plugin_product_id.as_ref(), "kv.plugin_product_id")?;
         if self.namespace_revision == 0 {
             return Err(invalid(
                 "kv.namespace_revision",
@@ -1435,22 +1389,22 @@ impl MiniAppKvHandleDescriptor {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
-pub enum MiniAppKvRequest {
+pub enum PluginKvRequest {
     Get {
-        handle: MiniAppKvHandleDescriptor,
+        handle: PluginKvHandleDescriptor,
         key: String,
     },
     Set {
-        handle: MiniAppKvHandleDescriptor,
+        handle: PluginKvHandleDescriptor,
         key: String,
         value: StrictJsonValue,
     },
     Delete {
-        handle: MiniAppKvHandleDescriptor,
+        handle: PluginKvHandleDescriptor,
         key: String,
     },
     CompareAndSwap {
-        handle: MiniAppKvHandleDescriptor,
+        handle: PluginKvHandleDescriptor,
         key: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         expected_revision: Option<u64>,
@@ -1459,8 +1413,8 @@ pub enum MiniAppKvRequest {
     },
 }
 
-impl MiniAppKvRequest {
-    pub fn validate_for(&self, miniapp_id: &MiniAppId) -> Result<(), MiniAppM1ContractError> {
+impl PluginKvRequest {
+    pub fn validate_for(&self, plugin_product_id: &PluginProductId) -> Result<(), PluginRuntimeContractError> {
         let (handle, key) = match self {
             Self::Get { handle, key }
             | Self::Set { handle, key, .. }
@@ -1468,10 +1422,10 @@ impl MiniAppKvRequest {
             | Self::CompareAndSwap { handle, key, .. } => (handle, key),
         };
         handle.validate()?;
-        if &handle.miniapp_id != miniapp_id {
+        if &handle.plugin_product_id != plugin_product_id {
             return Err(invalid(
-                "kv.miniapp_id",
-                "Host KV handle belongs to another MiniApp",
+                "kv.plugin_product_id",
+                "Host KV handle belongs to another Plugin Product",
             ));
         }
         validate_state_key(key, "kv.key")
@@ -1480,7 +1434,7 @@ impl MiniAppKvRequest {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
-pub enum MiniAppKvResponse {
+pub enum PluginKvResponse {
     Value {
         #[serde(skip_serializing_if = "Option::is_none")]
         value: Option<StrictJsonValue>,
@@ -1502,33 +1456,33 @@ pub enum MiniAppKvResponse {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppFilesDirDescriptor {
-    pub handle_id: MiniAppFilesHandleId,
-    pub miniapp_id: MiniAppId,
+pub struct PluginFilesDirDescriptor {
+    pub handle_id: PluginFilesHandleId,
+    pub plugin_product_id: PluginProductId,
     pub absolute_path: String,
 }
 
-impl MiniAppFilesDirDescriptor {
-    fn validate(&self) -> Result<(), MiniAppM1ContractError> {
+impl PluginFilesDirDescriptor {
+    fn validate(&self) -> Result<(), PluginRuntimeContractError> {
         validate_nonempty(self.handle_id.as_ref(), "files_dir.handle_id")?;
-        validate_nonempty(self.miniapp_id.as_ref(), "files_dir.miniapp_id")?;
+        validate_nonempty(self.plugin_product_id.as_ref(), "files_dir.plugin_product_id")?;
         validate_absolute_path(&self.absolute_path, "files_dir.absolute_path")
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppPrivateDatabaseDescriptor {
-    pub handle_id: MiniAppDatabaseHandleId,
-    pub miniapp_id: MiniAppId,
+pub struct PluginPrivateDatabaseDescriptor {
+    pub handle_id: PluginDatabaseHandleId,
+    pub plugin_product_id: PluginProductId,
     pub schema_epoch: u64,
     pub migration_ledger_digest: DigestHex,
 }
 
-impl MiniAppPrivateDatabaseDescriptor {
-    fn validate(&self) -> Result<(), MiniAppM1ContractError> {
+impl PluginPrivateDatabaseDescriptor {
+    fn validate(&self) -> Result<(), PluginRuntimeContractError> {
         validate_nonempty(self.handle_id.as_ref(), "database.handle_id")?;
-        validate_nonempty(self.miniapp_id.as_ref(), "database.miniapp_id")?;
+        validate_nonempty(self.plugin_product_id.as_ref(), "database.plugin_product_id")?;
         if self.schema_epoch == 0 {
             return Err(invalid(
                 "database.schema_epoch",
@@ -1544,16 +1498,16 @@ impl MiniAppPrivateDatabaseDescriptor {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppServiceStorageDescriptor {
-    pub kv: MiniAppKvHandleDescriptor,
+pub struct PluginServiceStorageDescriptor {
+    pub kv: PluginKvHandleDescriptor,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub files_dir: Option<MiniAppFilesDirDescriptor>,
+    pub files_dir: Option<PluginFilesDirDescriptor>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub private_database: Option<MiniAppPrivateDatabaseDescriptor>,
+    pub private_database: Option<PluginPrivateDatabaseDescriptor>,
 }
 
-impl MiniAppServiceStorageDescriptor {
-    fn validate_for(&self, miniapp_id: &MiniAppId) -> Result<(), MiniAppM1ContractError> {
+impl PluginServiceStorageDescriptor {
+    fn validate_for(&self, plugin_product_id: &PluginProductId) -> Result<(), PluginRuntimeContractError> {
         self.kv.validate()?;
         if let Some(files_dir) = &self.files_dir {
             files_dir.validate()?;
@@ -1561,19 +1515,19 @@ impl MiniAppServiceStorageDescriptor {
         if let Some(private_database) = &self.private_database {
             private_database.validate()?;
         }
-        if &self.kv.miniapp_id != miniapp_id
+        if &self.kv.plugin_product_id != plugin_product_id
             || self
                 .files_dir
                 .as_ref()
-                .is_some_and(|descriptor| &descriptor.miniapp_id != miniapp_id)
+                .is_some_and(|descriptor| &descriptor.plugin_product_id != plugin_product_id)
             || self
                 .private_database
                 .as_ref()
-                .is_some_and(|descriptor| &descriptor.miniapp_id != miniapp_id)
+                .is_some_and(|descriptor| &descriptor.plugin_product_id != plugin_product_id)
         {
             return Err(invalid(
-                "storage.miniapp_id",
-                "all Service storage handles must belong to the exact MiniApp",
+                "storage.plugin_product_id",
+                "all Service storage handles must belong to the exact Plugin Product",
             ));
         }
         Ok(())
@@ -1582,15 +1536,15 @@ impl MiniAppServiceStorageDescriptor {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppServiceRuntimeFingerprint {
+pub struct PluginServiceRuntimeFingerprint {
     pub runtime_installation_id: RuntimeInstallationId,
     pub runtime_target: RuntimeTarget,
     pub runtime_executable_digest: DigestHex,
     pub node_version: VersionString,
 }
 
-impl MiniAppServiceRuntimeFingerprint {
-    fn validate(&self) -> Result<(), MiniAppM1ContractError> {
+impl PluginServiceRuntimeFingerprint {
+    fn validate(&self) -> Result<(), PluginRuntimeContractError> {
         validate_nonempty(
             self.runtime_installation_id.as_ref(),
             "runtime.runtime_installation_id",
@@ -1605,13 +1559,13 @@ impl MiniAppServiceRuntimeFingerprint {
 }
 
 #[derive(Serialize)]
-struct ResolvedMiniAppServiceSpecDigestInput<'a> {
-    miniapp_id: &'a MiniAppId,
+struct ResolvedPluginServiceSpecDigestInput<'a> {
+    plugin_product_id: &'a PluginProductId,
     service_module_digest: &'a DigestHex,
-    lifecycle: MiniAppServiceLifecycle,
+    lifecycle: PluginServiceLifecycle,
     host_protocol_version: &'a VersionString,
     sdk_contract_version: &'a VersionString,
-    runtime: &'a MiniAppServiceRuntimeFingerprint,
+    runtime: &'a PluginServiceRuntimeFingerprint,
     config_schema_digest: &'a DigestHex,
     config_snapshot_digest: &'a DigestHex,
     credential_slots_digest: &'a DigestHex,
@@ -1620,20 +1574,20 @@ struct ResolvedMiniAppServiceSpecDigestInput<'a> {
     runtime_requirements_digest: &'a DigestHex,
     bridge_contract_digest: &'a DigestHex,
     contribution_set_digest: &'a DigestHex,
-    storage: &'a MiniAppServiceStorageDescriptor,
+    storage: &'a PluginServiceStorageDescriptor,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct ResolvedMiniAppServiceSpecInputs {
-    pub miniapp_id: MiniAppId,
-    pub release: MiniAppReleaseRef,
+pub struct ResolvedPluginServiceSpecInputs {
+    pub plugin_product_id: PluginProductId,
+    pub release: PluginReleaseRef,
     pub active_release_epoch: u64,
     pub service_module_digest: DigestHex,
-    pub lifecycle: MiniAppServiceLifecycle,
+    pub lifecycle: PluginServiceLifecycle,
     pub host_protocol_version: VersionString,
     pub sdk_contract_version: VersionString,
-    pub runtime: MiniAppServiceRuntimeFingerprint,
+    pub runtime: PluginServiceRuntimeFingerprint,
     pub config_schema_digest: DigestHex,
     pub config_snapshot_digest: DigestHex,
     pub credential_slots_digest: DigestHex,
@@ -1642,20 +1596,20 @@ pub struct ResolvedMiniAppServiceSpecInputs {
     pub runtime_requirements_digest: DigestHex,
     pub bridge_contract_digest: DigestHex,
     pub contribution_set_digest: DigestHex,
-    pub storage: MiniAppServiceStorageDescriptor,
+    pub storage: PluginServiceStorageDescriptor,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct ResolvedMiniAppServiceSpec {
-    pub miniapp_id: MiniAppId,
-    pub release: MiniAppReleaseRef,
+pub struct ResolvedPluginServiceSpec {
+    pub plugin_product_id: PluginProductId,
+    pub release: PluginReleaseRef,
     pub active_release_epoch: u64,
     pub service_module_digest: DigestHex,
-    pub lifecycle: MiniAppServiceLifecycle,
+    pub lifecycle: PluginServiceLifecycle,
     pub host_protocol_version: VersionString,
     pub sdk_contract_version: VersionString,
-    pub runtime: MiniAppServiceRuntimeFingerprint,
+    pub runtime: PluginServiceRuntimeFingerprint,
     pub config_schema_digest: DigestHex,
     pub config_snapshot_digest: DigestHex,
     pub credential_slots_digest: DigestHex,
@@ -1664,16 +1618,16 @@ pub struct ResolvedMiniAppServiceSpec {
     pub runtime_requirements_digest: DigestHex,
     pub bridge_contract_digest: DigestHex,
     pub contribution_set_digest: DigestHex,
-    pub storage: MiniAppServiceStorageDescriptor,
+    pub storage: PluginServiceStorageDescriptor,
     pub service_run_key: DigestHex,
 }
 
-impl ResolvedMiniAppServiceSpec {
+impl ResolvedPluginServiceSpec {
     pub fn new(
-        inputs: ResolvedMiniAppServiceSpecInputs,
-    ) -> Result<Self, MiniAppM1ContractError> {
+        inputs: ResolvedPluginServiceSpecInputs,
+    ) -> Result<Self, PluginRuntimeContractError> {
         let service_run_key = canonical_service_run_key(
-            &inputs.miniapp_id,
+            &inputs.plugin_product_id,
             &inputs.service_module_digest,
             inputs.lifecycle,
             &inputs.host_protocol_version,
@@ -1689,8 +1643,8 @@ impl ResolvedMiniAppServiceSpec {
             &inputs.contribution_set_digest,
             &inputs.storage,
         )?;
-        let ResolvedMiniAppServiceSpecInputs {
-            miniapp_id,
+        let ResolvedPluginServiceSpecInputs {
+            plugin_product_id,
             release,
             active_release_epoch,
             service_module_digest,
@@ -1709,7 +1663,7 @@ impl ResolvedMiniAppServiceSpec {
             storage,
         } = inputs;
         let value = Self {
-            miniapp_id,
+            plugin_product_id,
             release,
             active_release_epoch,
             service_module_digest,
@@ -1732,8 +1686,8 @@ impl ResolvedMiniAppServiceSpec {
         Ok(value)
     }
 
-    pub fn validate(&self) -> Result<(), MiniAppM1ContractError> {
-        validate_nonempty(self.miniapp_id.as_ref(), "miniapp_id")?;
+    pub fn validate(&self) -> Result<(), PluginRuntimeContractError> {
+        validate_nonempty(self.plugin_product_id.as_ref(), "plugin_product_id")?;
         self.release.validate()?;
         if self.active_release_epoch == 0 {
             return Err(invalid(
@@ -1744,12 +1698,12 @@ impl ResolvedMiniAppServiceSpec {
         validate_digest(&self.service_module_digest, "service_module_digest")?;
         require_version(
             &self.host_protocol_version,
-            MINIAPP_SERVICE_HOST_PROTOCOL_VERSION,
+            PLUGIN_SERVICE_HOST_PROTOCOL_VERSION,
             "host_protocol_version",
         )?;
         require_version(
             &self.sdk_contract_version,
-            MINIAPP_SERVICE_SDK_CONTRACT_VERSION,
+            PLUGIN_SERVICE_SDK_CONTRACT_VERSION,
             "sdk_contract_version",
         )?;
         self.runtime.validate()?;
@@ -1773,10 +1727,10 @@ impl ResolvedMiniAppServiceSpec {
         )?;
         validate_digest(&self.bridge_contract_digest, "bridge_contract_digest")?;
         validate_digest(&self.contribution_set_digest, "contribution_set_digest")?;
-        self.storage.validate_for(&self.miniapp_id)?;
+        self.storage.validate_for(&self.plugin_product_id)?;
         validate_digest(&self.service_run_key, "service_run_key")?;
         let expected = canonical_service_run_key(
-            &self.miniapp_id,
+            &self.plugin_product_id,
             &self.service_module_digest,
             self.lifecycle,
             &self.host_protocol_version,
@@ -1793,7 +1747,7 @@ impl ResolvedMiniAppServiceSpec {
             &self.storage,
         )?;
         if expected != self.service_run_key {
-            return Err(MiniAppM1ContractError::DigestMismatch {
+            return Err(PluginRuntimeContractError::DigestMismatch {
                 field: "service_run_key",
             });
         }
@@ -1802,8 +1756,8 @@ impl ResolvedMiniAppServiceSpec {
 
     pub fn validate_for_release(
         &self,
-        manifest: &MiniAppReleaseV1Manifest,
-    ) -> Result<(), MiniAppM1ContractError> {
+        manifest: &PluginReleaseV1Manifest,
+    ) -> Result<(), PluginRuntimeContractError> {
         self.validate()?;
         manifest.validate()?;
         let service = manifest.service.as_ref().ok_or_else(|| {
@@ -1837,12 +1791,12 @@ impl ResolvedMiniAppServiceSpec {
 
 #[allow(clippy::too_many_arguments)]
 pub fn canonical_service_run_key(
-    miniapp_id: &MiniAppId,
+    plugin_product_id: &PluginProductId,
     service_module_digest: &DigestHex,
-    lifecycle: MiniAppServiceLifecycle,
+    lifecycle: PluginServiceLifecycle,
     host_protocol_version: &VersionString,
     sdk_contract_version: &VersionString,
-    runtime: &MiniAppServiceRuntimeFingerprint,
+    runtime: &PluginServiceRuntimeFingerprint,
     config_schema_digest: &DigestHex,
     config_snapshot_digest: &DigestHex,
     credential_slots_digest: &DigestHex,
@@ -1851,10 +1805,10 @@ pub fn canonical_service_run_key(
     runtime_requirements_digest: &DigestHex,
     bridge_contract_digest: &DigestHex,
     contribution_set_digest: &DigestHex,
-    storage: &MiniAppServiceStorageDescriptor,
-) -> Result<DigestHex, MiniAppM1ContractError> {
-    Ok(digest_payload(&ResolvedMiniAppServiceSpecDigestInput {
-        miniapp_id,
+    storage: &PluginServiceStorageDescriptor,
+) -> Result<DigestHex, PluginRuntimeContractError> {
+    Ok(digest_payload(&ResolvedPluginServiceSpecDigestInput {
+        plugin_product_id,
         service_module_digest,
         lifecycle,
         host_protocol_version,
@@ -1886,34 +1840,34 @@ pub fn canonical_service_run_key(
     JsonSchema,
 )]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum MiniAppBridgeTransport {
+pub enum PluginBridgeTransport {
     MessageChannelV1,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppBridgeSession {
+pub struct PluginBridgeSession {
     pub bridge_contract_version: VersionString,
-    pub bridge_session_id: MiniAppBridgeSessionId,
-    pub surface_session_id: MiniAppSurfaceSessionId,
-    pub miniapp_id: MiniAppId,
-    pub active_release: MiniAppReleaseRef,
+    pub bridge_session_id: PluginBridgeSessionId,
+    pub surface_session_id: PluginSurfaceSessionId,
+    pub plugin_product_id: PluginProductId,
+    pub active_release: PluginReleaseRef,
     pub active_release_epoch: u64,
-    pub transport: MiniAppBridgeTransport,
+    pub transport: PluginBridgeTransport,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_run_key: Option<DigestHex>,
 }
 
-impl MiniAppBridgeSession {
-    pub fn validate(&self) -> Result<(), MiniAppM1ContractError> {
+impl PluginBridgeSession {
+    pub fn validate(&self) -> Result<(), PluginRuntimeContractError> {
         require_version(
             &self.bridge_contract_version,
-            MINIAPP_BRIDGE_CONTRACT_VERSION,
+            PLUGIN_BRIDGE_CONTRACT_VERSION,
             "bridge_contract_version",
         )?;
         validate_nonempty(self.bridge_session_id.as_ref(), "bridge_session_id")?;
         validate_nonempty(self.surface_session_id.as_ref(), "surface_session_id")?;
-        validate_nonempty(self.miniapp_id.as_ref(), "miniapp_id")?;
+        validate_nonempty(self.plugin_product_id.as_ref(), "plugin_product_id")?;
         self.active_release.validate()?;
         if self.active_release_epoch == 0 {
             return Err(invalid(
@@ -1930,9 +1884,9 @@ impl MiniAppBridgeSession {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "target", rename_all = "snake_case", deny_unknown_fields)]
-pub enum MiniAppBridgeTarget {
+pub enum PluginBridgeTarget {
     HostKv {
-        request: MiniAppBridgeKvRequest,
+        request: PluginBridgeKvRequest,
     },
     Service {
         method: String,
@@ -1942,7 +1896,7 @@ pub enum MiniAppBridgeTarget {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
-pub enum MiniAppBridgeKvRequest {
+pub enum PluginBridgeKvRequest {
     Get {
         key: String,
     },
@@ -1962,8 +1916,8 @@ pub enum MiniAppBridgeKvRequest {
     },
 }
 
-impl MiniAppBridgeKvRequest {
-    fn validate(&self) -> Result<(), MiniAppM1ContractError> {
+impl PluginBridgeKvRequest {
+    fn validate(&self) -> Result<(), PluginRuntimeContractError> {
         let key = match self {
             Self::Get { key }
             | Self::Set { key, .. }
@@ -1976,33 +1930,33 @@ impl MiniAppBridgeKvRequest {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppBridgeRequest {
-    pub call_id: MiniAppBridgeCallId,
-    pub target: MiniAppBridgeTarget,
+pub struct PluginBridgeRequest {
+    pub call_id: PluginBridgeCallId,
+    pub target: PluginBridgeTarget,
 }
 
-impl MiniAppBridgeRequest {
+impl PluginBridgeRequest {
     pub fn validate_for(
         &self,
-        session: &MiniAppBridgeSession,
-        current: &MiniAppReleasePointerState,
-    ) -> Result<(), MiniAppM1ContractError> {
+        session: &PluginBridgeSession,
+        current: &PluginReleasePointerState,
+    ) -> Result<(), PluginRuntimeContractError> {
         session.validate()?;
         current.validate()?;
         validate_nonempty(self.call_id.as_ref(), "call_id")?;
-        if session.miniapp_id != current.miniapp_id
+        if session.plugin_product_id != current.plugin_product_id
             || current.active_release.as_ref() != Some(&session.active_release)
             || current.active_release_epoch != session.active_release_epoch
         {
-            return Err(MiniAppM1ContractError::StaleBridgeSession);
+            return Err(PluginRuntimeContractError::StaleBridgeSession);
         }
         match &self.target {
-            MiniAppBridgeTarget::HostKv { request } => request.validate(),
-            MiniAppBridgeTarget::Service { method, payload } => {
+            PluginBridgeTarget::HostKv { request } => request.validate(),
+            PluginBridgeTarget::Service { method, payload } => {
                 if session.service_run_key.is_none() {
                     return Err(invalid(
                         "target",
-                        "UI-only MiniApp Bridge cannot target a Node Service",
+                        "UI-only Plugin Product Bridge cannot target a Node Service",
                     ));
                 }
                 validate_machine_key(method, "service.method")?;
@@ -2032,7 +1986,7 @@ impl MiniAppBridgeRequest {
     JsonSchema,
 )]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum MiniAppServiceTestOutcome {
+pub enum PluginServiceTestOutcome {
     Passed,
     Failed,
     NeedsTestInput,
@@ -2052,22 +2006,22 @@ pub enum MiniAppServiceTestOutcome {
     JsonSchema,
 )]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum MiniAppServiceTestCredentialMode {
+pub enum PluginServiceTestCredentialMode {
     None,
     OneShotCurrentBindings,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppServiceTestReceipt {
-    pub receipt_id: MiniAppServiceTestReceiptId,
-    pub miniapp_id: MiniAppId,
-    pub release: MiniAppReleaseRef,
+pub struct PluginServiceTestReceipt {
+    pub receipt_id: PluginServiceTestReceiptId,
+    pub plugin_product_id: PluginProductId,
+    pub release: PluginReleaseRef,
     pub service_run_key: DigestHex,
-    pub outcome: MiniAppServiceTestOutcome,
+    pub outcome: PluginServiceTestOutcome,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<CanonicalErrorCode>,
-    pub runtime: MiniAppServiceRuntimeFingerprint,
+    pub runtime: PluginServiceRuntimeFingerprint,
     pub host_target: RuntimeTarget,
     pub host_protocol_version: VersionString,
     pub sdk_contract_version: VersionString,
@@ -2080,26 +2034,26 @@ pub struct MiniAppServiceTestReceipt {
     pub empty_files_dir: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub migration_ledger_digest: Option<DigestHex>,
-    pub credential_mode: MiniAppServiceTestCredentialMode,
+    pub credential_mode: PluginServiceTestCredentialMode,
     pub host_generation: u64,
     pub issued_at_ms: i64,
 }
 
-impl MiniAppServiceTestReceipt {
+impl PluginServiceTestReceipt {
     pub fn validate_for(
         &self,
-        ready: &MiniAppReadyRelease,
-        resolved_spec: &ResolvedMiniAppServiceSpec,
-    ) -> Result<(), MiniAppM1ContractError> {
+        ready: &PluginReadyRelease,
+        resolved_spec: &ResolvedPluginServiceSpec,
+    ) -> Result<(), PluginRuntimeContractError> {
         validate_nonempty(self.receipt_id.as_ref(), "receipt_id")?;
-        validate_nonempty(self.miniapp_id.as_ref(), "miniapp_id")?;
+        validate_nonempty(self.plugin_product_id.as_ref(), "plugin_product_id")?;
         self.release.validate()?;
         validate_digest(&self.service_run_key, "service_run_key")?;
         match (self.outcome, self.error_code.as_ref()) {
-            (MiniAppServiceTestOutcome::Failed, Some(error_code)) => {
+            (PluginServiceTestOutcome::Failed, Some(error_code)) => {
                 validate_machine_key(error_code.as_ref(), "error_code")?;
             }
-            (MiniAppServiceTestOutcome::Failed, None) => {
+            (PluginServiceTestOutcome::Failed, None) => {
                 return Err(invalid(
                     "error_code",
                     "failed Service Test receipts require an error code",
@@ -2123,17 +2077,17 @@ impl MiniAppServiceTestReceipt {
         }
         require_version(
             &self.host_protocol_version,
-            MINIAPP_SERVICE_HOST_PROTOCOL_VERSION,
+            PLUGIN_SERVICE_HOST_PROTOCOL_VERSION,
             "host_protocol_version",
         )?;
         require_version(
             &self.sdk_contract_version,
-            MINIAPP_SERVICE_SDK_CONTRACT_VERSION,
+            PLUGIN_SERVICE_SDK_CONTRACT_VERSION,
             "sdk_contract_version",
         )?;
         require_version(
             &self.test_contract_version,
-            MINIAPP_SERVICE_TEST_CONTRACT_VERSION,
+            PLUGIN_SERVICE_TEST_CONTRACT_VERSION,
             "test_contract_version",
         )?;
         for (field, digest) in [
@@ -2161,9 +2115,9 @@ impl MiniAppServiceTestReceipt {
             ));
         }
         resolved_spec.validate()?;
-        if self.miniapp_id != ready.miniapp_id
+        if self.plugin_product_id != ready.plugin_product_id
             || self.release != ready.release
-            || self.miniapp_id != resolved_spec.miniapp_id
+            || self.plugin_product_id != resolved_spec.plugin_product_id
             || self.release != resolved_spec.release
             || self.service_run_key != resolved_spec.service_run_key
             || self.runtime != resolved_spec.runtime
@@ -2187,8 +2141,8 @@ impl MiniAppServiceTestReceipt {
         Ok(())
     }
 
-    pub fn reference(&self) -> MiniAppServiceTestReceiptRef {
-        MiniAppServiceTestReceiptRef {
+    pub fn reference(&self) -> PluginServiceTestReceiptRef {
+        PluginServiceTestReceiptRef {
             receipt_id: self.receipt_id.clone(),
             release_id: self.release.release_id.clone(),
             release_digest: self.release.release_digest.clone(),
@@ -2199,8 +2153,8 @@ impl MiniAppServiceTestReceipt {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppSourceBundle {
-    pub project_id: MiniAppProjectId,
+pub struct PluginSourceBundle {
+    pub project_id: PluginProjectId,
     pub source_archive_artifact_id: ArtifactId,
     pub source_snapshot_digest: DigestHex,
     pub dependency_lock_artifact_id: ArtifactId,
@@ -2208,8 +2162,8 @@ pub struct MiniAppSourceBundle {
     pub build_profile_version: VersionString,
 }
 
-impl MiniAppSourceBundle {
-    fn validate(&self) -> Result<(), MiniAppM1ContractError> {
+impl PluginSourceBundle {
+    fn validate(&self) -> Result<(), PluginRuntimeContractError> {
         validate_nonempty(self.project_id.as_ref(), "source.project_id")?;
         validate_nonempty(
             self.source_archive_artifact_id.as_ref(),
@@ -2229,7 +2183,7 @@ impl MiniAppSourceBundle {
         )?;
         require_version(
             &self.build_profile_version,
-            MINIAPP_RELEASE_PROFILE_VERSION,
+            PLUGIN_RELEASE_PROFILE_VERSION,
             "source.build_profile_version",
         )
     }
@@ -2237,8 +2191,8 @@ impl MiniAppSourceBundle {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppImportedTestProvenance {
-    pub outcome: MiniAppServiceTestOutcome,
+pub struct PluginImportedTestProvenance {
+    pub outcome: PluginServiceTestOutcome,
     pub release_digest: DigestHex,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_run_key: Option<DigestHex>,
@@ -2248,8 +2202,8 @@ pub struct MiniAppImportedTestProvenance {
     pub issued_at_ms: i64,
 }
 
-impl MiniAppImportedTestProvenance {
-    fn validate(&self) -> Result<(), MiniAppM1ContractError> {
+impl PluginImportedTestProvenance {
+    fn validate(&self) -> Result<(), PluginRuntimeContractError> {
         validate_digest(&self.release_digest, "test.release_digest")?;
         if let Some(service_run_key) = &self.service_run_key {
             validate_digest(service_run_key, "test.service_run_key")?;
@@ -2258,7 +2212,7 @@ impl MiniAppImportedTestProvenance {
         validate_digest(&self.runtime_digest, "test.runtime_digest")?;
         require_version(
             &self.test_contract_version,
-            MINIAPP_SERVICE_TEST_CONTRACT_VERSION,
+            PLUGIN_SERVICE_TEST_CONTRACT_VERSION,
             "test.test_contract_version",
         )?;
         if self.issued_at_ms <= 0 {
@@ -2272,51 +2226,51 @@ impl MiniAppImportedTestProvenance {
 }
 
 #[derive(Serialize)]
-struct MiniAppShareBundleDigestInput<'a> {
-    bundle_id: &'a MiniAppShareBundleId,
-    source_miniapp_id: &'a Option<MiniAppId>,
-    release: &'a MiniAppReleaseArtifactV1,
-    source: &'a Option<MiniAppSourceBundle>,
-    test_provenance: &'a Option<MiniAppImportedTestProvenance>,
+struct PluginShareBundleDigestInput<'a> {
+    bundle_id: &'a PluginShareBundleId,
+    source_plugin_product_id: &'a Option<PluginProductId>,
+    release: &'a PluginReleaseArtifactV1,
+    source: &'a Option<PluginSourceBundle>,
+    test_provenance: &'a Option<PluginImportedTestProvenance>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppShareBundleV1 {
+pub struct PluginShareBundleV1 {
     pub schema_version: VersionString,
     pub bundle_version: VersionString,
-    pub bundle_id: MiniAppShareBundleId,
+    pub bundle_id: PluginShareBundleId,
     pub bundle_digest: DigestHex,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub source_miniapp_id: Option<MiniAppId>,
-    pub release: MiniAppReleaseArtifactV1,
+    pub source_plugin_product_id: Option<PluginProductId>,
+    pub release: PluginReleaseArtifactV1,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub source: Option<MiniAppSourceBundle>,
+    pub source: Option<PluginSourceBundle>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub test_provenance: Option<MiniAppImportedTestProvenance>,
+    pub test_provenance: Option<PluginImportedTestProvenance>,
 }
 
-impl MiniAppShareBundleV1 {
+impl PluginShareBundleV1 {
     pub fn new(
-        bundle_id: MiniAppShareBundleId,
-        source_miniapp_id: Option<MiniAppId>,
-        release: MiniAppReleaseArtifactV1,
-        source: Option<MiniAppSourceBundle>,
-        test_provenance: Option<MiniAppImportedTestProvenance>,
-    ) -> Result<Self, MiniAppM1ContractError> {
-        let bundle_digest = digest_payload(&MiniAppShareBundleDigestInput {
+        bundle_id: PluginShareBundleId,
+        source_plugin_product_id: Option<PluginProductId>,
+        release: PluginReleaseArtifactV1,
+        source: Option<PluginSourceBundle>,
+        test_provenance: Option<PluginImportedTestProvenance>,
+    ) -> Result<Self, PluginRuntimeContractError> {
+        let bundle_digest = digest_payload(&PluginShareBundleDigestInput {
             bundle_id: &bundle_id,
-            source_miniapp_id: &source_miniapp_id,
+            source_plugin_product_id: &source_plugin_product_id,
             release: &release,
             source: &source,
             test_provenance: &test_provenance,
         })?;
         let value = Self {
-            schema_version: MINIAPP_M1_SCHEMA_VERSION.into(),
-            bundle_version: MINIAPP_SHARE_BUNDLE_VERSION.into(),
+            schema_version: PLUGIN_RUNTIME_SCHEMA_VERSION.into(),
+            bundle_version: PLUGIN_SHARE_BUNDLE_VERSION.into(),
             bundle_id,
             bundle_digest,
-            source_miniapp_id,
+            source_plugin_product_id,
             release,
             source,
             test_provenance,
@@ -2325,22 +2279,22 @@ impl MiniAppShareBundleV1 {
         Ok(value)
     }
 
-    pub fn validate(&self) -> Result<(), MiniAppM1ContractError> {
+    pub fn validate(&self) -> Result<(), PluginRuntimeContractError> {
         require_version(
             &self.schema_version,
-            MINIAPP_M1_SCHEMA_VERSION,
+            PLUGIN_RUNTIME_SCHEMA_VERSION,
             "schema_version",
         )?;
         require_version(
             &self.bundle_version,
-            MINIAPP_SHARE_BUNDLE_VERSION,
+            PLUGIN_SHARE_BUNDLE_VERSION,
             "bundle_version",
         )?;
         validate_nonempty(self.bundle_id.as_ref(), "bundle_id")?;
         validate_digest(&self.bundle_digest, "bundle_digest")?;
         self.release.validate()?;
-        if let Some(source_miniapp_id) = &self.source_miniapp_id {
-            validate_nonempty(source_miniapp_id.as_ref(), "source_miniapp_id")?;
+        if let Some(source_plugin_product_id) = &self.source_plugin_product_id {
+            validate_nonempty(source_plugin_product_id.as_ref(), "source_plugin_product_id")?;
         }
         if let Some(source) = &self.source {
             source.validate()?;
@@ -2364,15 +2318,15 @@ impl MiniAppShareBundleV1 {
                 ));
             }
         }
-        let expected = digest_payload(&MiniAppShareBundleDigestInput {
+        let expected = digest_payload(&PluginShareBundleDigestInput {
             bundle_id: &self.bundle_id,
-            source_miniapp_id: &self.source_miniapp_id,
+            source_plugin_product_id: &self.source_plugin_product_id,
             release: &self.release,
             source: &self.source,
             test_provenance: &self.test_provenance,
         })?;
         if expected != self.bundle_digest {
-            return Err(MiniAppM1ContractError::DigestMismatch {
+            return Err(PluginRuntimeContractError::DigestMismatch {
                 field: "bundle_digest",
             });
         }
@@ -2382,20 +2336,20 @@ impl MiniAppShareBundleV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppShareImportAsNewRequest {
-    pub bundle_id: MiniAppShareBundleId,
+pub struct PluginShareImportAsNewRequest {
+    pub bundle_id: PluginShareBundleId,
     pub bundle_digest: DigestHex,
-    pub new_miniapp_id: MiniAppId,
+    pub new_plugin_product_id: PluginProductId,
     pub expected_release_digest: DigestHex,
 }
 
-impl MiniAppShareImportAsNewRequest {
+impl PluginShareImportAsNewRequest {
     pub fn validate_for(
         &self,
-        bundle: &MiniAppShareBundleV1,
-    ) -> Result<(), MiniAppM1ContractError> {
+        bundle: &PluginShareBundleV1,
+    ) -> Result<(), PluginRuntimeContractError> {
         bundle.validate()?;
-        validate_nonempty(self.new_miniapp_id.as_ref(), "new_miniapp_id")?;
+        validate_nonempty(self.new_plugin_product_id.as_ref(), "new_plugin_product_id")?;
         validate_digest(&self.bundle_digest, "bundle_digest")?;
         validate_digest(
             &self.expected_release_digest,
@@ -2410,10 +2364,10 @@ impl MiniAppShareImportAsNewRequest {
                 "import must bind the exact Share Bundle and Release",
             ));
         }
-        if bundle.source_miniapp_id.as_ref() == Some(&self.new_miniapp_id) {
+        if bundle.source_plugin_product_id.as_ref() == Some(&self.new_plugin_product_id) {
             return Err(invalid(
-                "new_miniapp_id",
-                "Share import always creates a new MiniApp identity",
+                "new_plugin_product_id",
+                "Share import always creates a new Plugin Product identity",
             ));
         }
         Ok(())
@@ -2434,18 +2388,18 @@ impl MiniAppShareImportAsNewRequest {
     JsonSchema,
 )]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum MiniAppBackupSourceState {
+pub enum PluginBackupSourceState {
     Disabled,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppWholeAppBackupMetadataV1 {
+pub struct PluginProductBackupMetadataV1 {
     pub schema_version: VersionString,
     pub backup_version: VersionString,
-    pub backup_id: MiniAppBackupId,
-    pub source_miniapp_id: MiniAppId,
-    pub source_state: MiniAppBackupSourceState,
+    pub backup_id: PluginBackupId,
+    pub source_plugin_product_id: PluginProductId,
+    pub source_state: PluginBackupSourceState,
     pub owner_quiescent: bool,
     pub product_metadata_digest: DigestHex,
     pub source_archive_digest: DigestHex,
@@ -2459,24 +2413,24 @@ pub struct MiniAppWholeAppBackupMetadataV1 {
     pub created_at_ms: i64,
 }
 
-impl MiniAppWholeAppBackupMetadataV1 {
-    pub fn validate(&self) -> Result<(), MiniAppM1ContractError> {
+impl PluginProductBackupMetadataV1 {
+    pub fn validate(&self) -> Result<(), PluginRuntimeContractError> {
         require_version(
             &self.schema_version,
-            MINIAPP_M1_SCHEMA_VERSION,
+            PLUGIN_RUNTIME_SCHEMA_VERSION,
             "schema_version",
         )?;
         require_version(
             &self.backup_version,
-            MINIAPP_WHOLE_APP_BACKUP_VERSION,
+            PLUGIN_PRODUCT_BACKUP_VERSION,
             "backup_version",
         )?;
         validate_nonempty(self.backup_id.as_ref(), "backup_id")?;
-        validate_nonempty(self.source_miniapp_id.as_ref(), "source_miniapp_id")?;
+        validate_nonempty(self.source_plugin_product_id.as_ref(), "source_plugin_product_id")?;
         if !self.owner_quiescent {
             return Err(invalid(
                 "owner_quiescent",
-                "Whole-App Backup requires zero Service, Build, Test, Migration, and owner writers",
+                "Plugin Product Backup requires zero Service, Build, Test, Migration, and owner writers",
             ));
         }
         for (field, digest) in [
@@ -2503,7 +2457,7 @@ impl MiniAppWholeAppBackupMetadataV1 {
         Ok(())
     }
 
-    pub fn metadata_digest(&self) -> Result<DigestHex, MiniAppM1ContractError> {
+    pub fn metadata_digest(&self) -> Result<DigestHex, PluginRuntimeContractError> {
         self.validate()?;
         Ok(digest_payload(self)?)
     }
@@ -2511,19 +2465,19 @@ impl MiniAppWholeAppBackupMetadataV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppBackupImportAsNewRequest {
-    pub backup_id: MiniAppBackupId,
+pub struct PluginBackupImportAsNewRequest {
+    pub backup_id: PluginBackupId,
     pub backup_metadata_digest: DigestHex,
-    pub new_miniapp_id: MiniAppId,
+    pub new_plugin_product_id: PluginProductId,
 }
 
-impl MiniAppBackupImportAsNewRequest {
+impl PluginBackupImportAsNewRequest {
     pub fn validate_for(
         &self,
-        metadata: &MiniAppWholeAppBackupMetadataV1,
-    ) -> Result<(), MiniAppM1ContractError> {
+        metadata: &PluginProductBackupMetadataV1,
+    ) -> Result<(), PluginRuntimeContractError> {
         metadata.validate()?;
-        validate_nonempty(self.new_miniapp_id.as_ref(), "new_miniapp_id")?;
+        validate_nonempty(self.new_plugin_product_id.as_ref(), "new_plugin_product_id")?;
         validate_digest(
             &self.backup_metadata_digest,
             "backup_metadata_digest",
@@ -2533,13 +2487,13 @@ impl MiniAppBackupImportAsNewRequest {
         {
             return Err(invalid(
                 "backup_import",
-                "import must bind the exact Whole-App Backup metadata",
+                "import must bind the exact Plugin Product Backup metadata",
             ));
         }
-        if self.new_miniapp_id == metadata.source_miniapp_id {
+        if self.new_plugin_product_id == metadata.source_plugin_product_id {
             return Err(invalid(
-                "new_miniapp_id",
-                "Whole-App Backup import always creates a new MiniApp identity",
+                "new_plugin_product_id",
+                "Plugin Product Backup import always creates a new Plugin Product identity",
             ));
         }
         Ok(())
@@ -2560,7 +2514,7 @@ impl MiniAppBackupImportAsNewRequest {
     JsonSchema,
 )]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub enum MiniAppProductLifecycleState {
+pub enum PluginProductLifecycleState {
     Enabled,
     Disabled,
     Trashed,
@@ -2569,17 +2523,17 @@ pub enum MiniAppProductLifecycleState {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppDeletingIntent {
-    pub miniapp_id: MiniAppId,
+pub struct PluginProductDeletingIntent {
+    pub plugin_product_id: PluginProductId,
     pub operation_id: OperationId,
     pub started_at_ms: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<CanonicalErrorCode>,
 }
 
-impl MiniAppDeletingIntent {
-    fn validate(&self) -> Result<(), MiniAppM1ContractError> {
-        validate_nonempty(self.miniapp_id.as_ref(), "deleting.miniapp_id")?;
+impl PluginProductDeletingIntent {
+    fn validate(&self) -> Result<(), PluginRuntimeContractError> {
+        validate_nonempty(self.plugin_product_id.as_ref(), "deleting.plugin_product_id")?;
         validate_nonempty(self.operation_id.as_ref(), "deleting.operation_id")?;
         if self.started_at_ms <= 0 {
             return Err(invalid(
@@ -2596,37 +2550,37 @@ impl MiniAppDeletingIntent {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct MiniAppProductLifecycleRecord {
-    pub miniapp_id: MiniAppId,
-    pub state: MiniAppProductLifecycleState,
-    pub pointer_state: MiniAppReleasePointerState,
+pub struct PluginProductLifecycleRecord {
+    pub plugin_product_id: PluginProductId,
+    pub state: PluginProductLifecycleState,
+    pub pointer_state: PluginReleasePointerState,
     pub surface_available: bool,
     pub catalog_published: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub deleting_intent: Option<MiniAppDeletingIntent>,
+    pub deleting_intent: Option<PluginProductDeletingIntent>,
 }
 
-impl MiniAppProductLifecycleRecord {
-    pub fn validate(&self) -> Result<(), MiniAppM1ContractError> {
-        validate_nonempty(self.miniapp_id.as_ref(), "miniapp_id")?;
+impl PluginProductLifecycleRecord {
+    pub fn validate(&self) -> Result<(), PluginRuntimeContractError> {
+        validate_nonempty(self.plugin_product_id.as_ref(), "plugin_product_id")?;
         self.pointer_state.validate()?;
-        if self.pointer_state.miniapp_id != self.miniapp_id {
+        if self.pointer_state.plugin_product_id != self.plugin_product_id {
             return Err(invalid(
-                "pointer_state.miniapp_id",
-                "pointer state belongs to another MiniApp",
+                "pointer_state.plugin_product_id",
+                "pointer state belongs to another Plugin Product",
             ));
         }
         match (&self.state, &self.deleting_intent) {
-            (MiniAppProductLifecycleState::Deleting, Some(intent)) => {
+            (PluginProductLifecycleState::Deleting, Some(intent)) => {
                 intent.validate()?;
-                if intent.miniapp_id != self.miniapp_id {
+                if intent.plugin_product_id != self.plugin_product_id {
                     return Err(invalid(
-                        "deleting_intent.miniapp_id",
-                        "deleting intent belongs to another MiniApp",
+                        "deleting_intent.plugin_product_id",
+                        "deleting intent belongs to another Plugin Product",
                     ));
                 }
             }
-            (MiniAppProductLifecycleState::Deleting, None) => {
+            (PluginProductLifecycleState::Deleting, None) => {
                 return Err(invalid(
                     "deleting_intent",
                     "Deleting state requires a durable deleting intent",
@@ -2641,24 +2595,24 @@ impl MiniAppProductLifecycleRecord {
             (_, None) => {}
         }
         match self.state {
-            MiniAppProductLifecycleState::Enabled => {
+            PluginProductLifecycleState::Enabled => {
                 if self.pointer_state.active_release.is_none()
                     || !self.surface_available
                     || !self.catalog_published
                 {
                     return Err(invalid(
                         "enabled_state",
-                        "enabled MiniApp requires Active Release, Surface, and materialized Catalog",
+                        "enabled Plugin Product requires Active Release, Surface, and materialized Catalog",
                     ));
                 }
             }
-            MiniAppProductLifecycleState::Disabled
-            | MiniAppProductLifecycleState::Trashed
-            | MiniAppProductLifecycleState::Deleting => {
+            PluginProductLifecycleState::Disabled
+            | PluginProductLifecycleState::Trashed
+            | PluginProductLifecycleState::Deleting => {
                 if self.surface_available || self.catalog_published {
                     return Err(invalid(
                         "inactive_state",
-                        "disabled, trashed, or deleting MiniApp cannot expose Surface or Catalog",
+                        "disabled, trashed, or deleting Plugin Product cannot expose Surface or Catalog",
                     ));
                 }
             }
@@ -2668,7 +2622,7 @@ impl MiniAppProductLifecycleRecord {
 }
 
 #[derive(Debug, Error)]
-pub enum MiniAppM1ContractError {
+pub enum PluginRuntimeContractError {
     #[error("{field}: {reason}")]
     InvalidField {
         field: &'static str,
@@ -2689,15 +2643,15 @@ pub enum MiniAppM1ContractError {
     Digest(#[from] crate::CanonicalDigestError),
 }
 
-fn invalid(field: &'static str, reason: impl Into<String>) -> MiniAppM1ContractError {
-    MiniAppM1ContractError::InvalidField {
+fn invalid(field: &'static str, reason: impl Into<String>) -> PluginRuntimeContractError {
+    PluginRuntimeContractError::InvalidField {
         field,
         reason: reason.into(),
     }
 }
 
-fn duplicate(field: &'static str, value: &str) -> MiniAppM1ContractError {
-    MiniAppM1ContractError::DuplicateIdentity {
+fn duplicate(field: &'static str, value: &str) -> PluginRuntimeContractError {
+    PluginRuntimeContractError::DuplicateIdentity {
         field,
         value: value.to_owned(),
     }
@@ -2707,7 +2661,7 @@ fn require_version(
     value: &VersionString,
     expected: &str,
     field: &'static str,
-) -> Result<(), MiniAppM1ContractError> {
+) -> Result<(), PluginRuntimeContractError> {
     if value.as_ref() == expected {
         Ok(())
     } else {
@@ -2718,7 +2672,7 @@ fn require_version(
     }
 }
 
-fn validate_nonempty(value: &str, field: &'static str) -> Result<(), MiniAppM1ContractError> {
+fn validate_nonempty(value: &str, field: &'static str) -> Result<(), PluginRuntimeContractError> {
     if value.is_empty() || value.trim() != value {
         Err(invalid(field, "value must be non-empty and trimmed"))
     } else {
@@ -2726,7 +2680,7 @@ fn validate_nonempty(value: &str, field: &'static str) -> Result<(), MiniAppM1Co
     }
 }
 
-fn validate_display(value: &LocalizedMetadata) -> Result<(), MiniAppM1ContractError> {
+fn validate_display(value: &LocalizedMetadata) -> Result<(), PluginRuntimeContractError> {
     validate_nonempty(&value.name, "display.name")?;
     validate_nonempty(&value.description, "display.description")
 }
@@ -2734,7 +2688,7 @@ fn validate_display(value: &LocalizedMetadata) -> Result<(), MiniAppM1ContractEr
 fn validate_digest(
     digest: &DigestHex,
     field: &'static str,
-) -> Result<(), MiniAppM1ContractError> {
+) -> Result<(), PluginRuntimeContractError> {
     let value = digest.as_ref();
     if value.len() != 64
         || !value
@@ -2753,7 +2707,7 @@ fn validate_digest(
 fn validate_relative_path(
     value: &str,
     field: &'static str,
-) -> Result<(), MiniAppM1ContractError> {
+) -> Result<(), PluginRuntimeContractError> {
     validate_nonempty(value, field)?;
     if value.starts_with('/')
         || value.starts_with('\\')
@@ -2775,7 +2729,7 @@ fn validate_relative_path(
 fn validate_absolute_path(
     value: &str,
     field: &'static str,
-) -> Result<(), MiniAppM1ContractError> {
+) -> Result<(), PluginRuntimeContractError> {
     validate_nonempty(value, field)?;
     let bytes = value.as_bytes();
     let windows_drive = bytes.len() >= 3
@@ -2794,7 +2748,7 @@ fn validate_absolute_path(
 fn validate_machine_key(
     value: &str,
     field: &'static str,
-) -> Result<(), MiniAppM1ContractError> {
+) -> Result<(), PluginRuntimeContractError> {
     validate_nonempty(value, field)?;
     if value.len() > 128
         || !value.bytes().all(|byte| {
@@ -2814,7 +2768,7 @@ fn validate_machine_key(
 fn validate_state_key(
     value: &str,
     field: &'static str,
-) -> Result<(), MiniAppM1ContractError> {
+) -> Result<(), PluginRuntimeContractError> {
     validate_nonempty(value, field)?;
     if value.len() > 512 || value.bytes().any(|byte| byte.is_ascii_control()) {
         Err(invalid(
@@ -2829,7 +2783,7 @@ fn validate_state_key(
 fn validate_sql_identifier(
     value: &str,
     field: &'static str,
-) -> Result<(), MiniAppM1ContractError> {
+) -> Result<(), PluginRuntimeContractError> {
     validate_nonempty(value, field)?;
     let mut bytes = value.bytes();
     if !bytes
@@ -2850,7 +2804,7 @@ fn validate_sql_identifier(
 fn reject_sql_control_tokens(
     value: &str,
     field: &'static str,
-) -> Result<(), MiniAppM1ContractError> {
+) -> Result<(), PluginRuntimeContractError> {
     let uppercase = value.to_ascii_uppercase();
     if value.contains(';')
         || value.contains("--")
@@ -2878,20 +2832,20 @@ fn reject_sql_control_tokens(
 
 fn validate_config_schema(
     config_schema: &StrictJsonValue,
-) -> Result<(), MiniAppM1ContractError> {
+) -> Result<(), PluginRuntimeContractError> {
     if config_schema.0.is_object() {
         Ok(())
     } else {
         Err(invalid(
             "config_schema",
-            "MiniApp config schema must be a JSON object",
+            "Plugin Product config schema must be a JSON object",
         ))
     }
 }
 
 fn validate_credential_slots(
     credential_slots: &[CredentialSlotDeclaration],
-) -> Result<(), MiniAppM1ContractError> {
+) -> Result<(), PluginRuntimeContractError> {
     let mut previous: Option<&str> = None;
     for slot in credential_slots {
         validate_machine_key(
@@ -2913,7 +2867,7 @@ fn validate_credential_slots(
 pub fn validate_release_schema_registry(
     contributions: &PackageContributions,
     schemas: &BTreeMap<CanonicalSchemaRef, StrictJsonValue>,
-) -> Result<(), MiniAppM1ContractError> {
+) -> Result<(), PluginRuntimeContractError> {
     let referenced = contributions
         .capabilities
         .iter()
@@ -2986,7 +2940,7 @@ pub fn validate_release_schema_registry(
         )?;
         let observed = digest_payload(&schema.0)?;
         if observed.as_ref() != expected_digest {
-            return Err(MiniAppM1ContractError::DigestMismatch {
+            return Err(PluginRuntimeContractError::DigestMismatch {
                 field: "schemas.value",
             });
         }
@@ -2997,14 +2951,14 @@ pub fn validate_release_schema_registry(
 fn validate_contributions(
     package: &PackageRef,
     contributions: &PackageContributions,
-) -> Result<(), MiniAppM1ContractError> {
+) -> Result<(), PluginRuntimeContractError> {
     if !contributions.skills.is_empty()
         || !contributions.role_contracts.is_empty()
         || !contributions.role_providers.is_empty()
     {
         return Err(invalid(
             "contributions",
-            "MiniApp M1 publishes executable Capability or MCP contributions only",
+            "Plugin runtime publishes executable Capability or MCP contributions only",
         ));
     }
     let mut capability_ids = BTreeSet::new();
@@ -3071,8 +3025,8 @@ mod tests {
         digest_bytes(seed.as_bytes())
     }
 
-    fn release_file(path: &str, seed: &str) -> MiniAppReleaseFile {
-        MiniAppReleaseFile {
+    fn release_file(path: &str, seed: &str) -> PluginReleaseFile {
+        PluginReleaseFile {
             normalized_relative_path: path.into(),
             digest: digest(seed),
             size_bytes: seed.len() as u64,
@@ -3101,8 +3055,8 @@ mod tests {
             .collect()
     }
 
-    fn resource_contract(with_service: bool) -> MiniAppResourceContract {
-        MiniAppResourceContract {
+    fn resource_contract(with_service: bool) -> PluginResourceContract {
+        PluginResourceContract {
             required_resource_kinds: with_service
                 .then(|| ResourceKind::from("knowledge.base"))
                 .into_iter()
@@ -3110,7 +3064,7 @@ mod tests {
         }
     }
 
-    fn manifest(files: &[MiniAppReleaseFile], with_service: bool) -> MiniAppReleaseV1Manifest {
+    fn manifest(files: &[PluginReleaseFile], with_service: bool) -> PluginReleaseV1Manifest {
         let entrypoint = files
             .iter()
             .find(|file| file.normalized_relative_path == "ui/index.html")
@@ -3120,32 +3074,32 @@ mod tests {
                 .iter()
                 .find(|file| file.normalized_relative_path == "service/main.mjs")
                 .unwrap();
-            MiniAppServiceReleaseDescriptor {
+            PluginServiceReleaseDescriptor {
                 entrypoint: "service/main.mjs".into(),
                 module_digest: service.digest.clone(),
-                lifecycle: MiniAppServiceLifecycle::OnDemand,
+                lifecycle: PluginServiceLifecycle::OnDemand,
                 uses_files: true,
                 uses_private_database: true,
                 service_contract_digest: digest("service-contract"),
-                host_protocol_version: MINIAPP_SERVICE_HOST_PROTOCOL_VERSION.into(),
-                sdk_contract_version: MINIAPP_SERVICE_SDK_CONTRACT_VERSION.into(),
+                host_protocol_version: PLUGIN_SERVICE_HOST_PROTOCOL_VERSION.into(),
+                sdk_contract_version: PLUGIN_SERVICE_SDK_CONTRACT_VERSION.into(),
                 runtime_requirements_digest: digest("runtime-requirements"),
             }
         });
         let config_schema = config_schema();
         let credential_slots = credential_slots(with_service);
         let resource_contract = resource_contract(with_service);
-        MiniAppReleaseV1Manifest {
-            schema_version: MINIAPP_M1_SCHEMA_VERSION.into(),
-            build_profile: JavaScriptBuildProfile::MiniAppReleaseV1,
-            build_profile_version: MINIAPP_RELEASE_PROFILE_VERSION.into(),
+        PluginReleaseV1Manifest {
+            schema_version: PLUGIN_RUNTIME_SCHEMA_VERSION.into(),
+        build_profile: JavaScriptBuildProfile::PluginReleaseV1,
+            build_profile_version: PLUGIN_RELEASE_PROFILE_VERSION.into(),
             display: LocalizedMetadata {
                 name: "Example".into(),
-                description: "Example MiniApp".into(),
+                description: "Example Plugin Product".into(),
                 localized_names: BTreeMap::new(),
                 localized_descriptions: BTreeMap::new(),
             },
-            ui: Some(MiniAppUiReleaseDescriptor {
+            ui: Some(PluginUiReleaseDescriptor {
                 entrypoint: "ui/index.html".into(),
                 entrypoint_digest: entrypoint.digest.clone(),
                 ui_tree_digest: canonical_ui_tree_digest(files).unwrap(),
@@ -3162,7 +3116,7 @@ mod tests {
             schemas: BTreeMap::new(),
             bridge_contract_digest: digest("bridge"),
             contribution_package: PackageRef {
-                id: PackageId::from("miniapp.example.release"),
+                id: PackageId::from("plugin.example.release"),
                 version: VersionString::from("1.0.0"),
             },
             contributions: PackageContributions::default(),
@@ -3171,8 +3125,8 @@ mod tests {
     }
 
     fn manifest_with_tool(
-        files: &[MiniAppReleaseFile],
-    ) -> MiniAppReleaseV1Manifest {
+        files: &[PluginReleaseFile],
+    ) -> PluginReleaseV1Manifest {
         let mut manifest = manifest(files, true);
         let input_schema = StrictJsonValue(json!({
             "additionalProperties": false,
@@ -3187,16 +3141,16 @@ mod tests {
             "type": "object"
         }));
         let input_ref = CanonicalSchemaRef::from(format!(
-            "schema://miniapp.example/search-input@1#{}",
+            "schema://plugin.example/search-input@1#{}",
             digest_payload(&input_schema.0).unwrap().as_ref()
         ));
         let output_ref = CanonicalSchemaRef::from(format!(
-            "schema://miniapp.example/search-output@1#{}",
+            "schema://plugin.example/search-output@1#{}",
             digest_payload(&output_schema.0).unwrap().as_ref()
         ));
         let capability = CapabilityManifest {
-            id: CapabilityId::from("miniapp.example.search"),
-            contribution_id: "capability:miniapp.example.search".into(),
+            id: CapabilityId::from("plugin.example.search"),
+            contribution_id: "capability:plugin.example.search".into(),
             version: "1.0.0".into(),
             kind: CapabilityKind::Tool,
             package: manifest.contribution_package.clone(),
@@ -3210,14 +3164,14 @@ mod tests {
             conflicts: Vec::new(),
             supported_surfaces: capability_surface_declarations(
                 ["desktop"],
-                [CapabilityConsumer::Agent, CapabilityConsumer::MiniAppService],
+                [CapabilityConsumer::Agent, CapabilityConsumer::PluginService],
             ),
             requires_runtime_features: Vec::new(),
             supported_platforms: vec![PlatformConstraint::Any],
             config_schema: StrictJsonValue(json!({"type": "object"})),
             contributions: CapabilityContributions {
                 actions: vec![CapabilityActionDescriptor {
-                    action_id: ActionId::from("miniapp.example.search.invoke"),
+                    action_id: ActionId::from("plugin.example.search.invoke"),
                     input_schema: input_ref.clone(),
                     output_schema: output_ref.clone(),
                     effect_class: EffectClass::ReadSensitive,
@@ -3238,7 +3192,7 @@ mod tests {
         manifest
     }
 
-    fn artifact(with_service: bool) -> MiniAppReleaseArtifactV1 {
+    fn artifact(with_service: bool) -> PluginReleaseArtifactV1 {
         let mut files = vec![
             release_file("ui/index.html", "index"),
             release_file("ui/app.js", "app"),
@@ -3246,7 +3200,7 @@ mod tests {
         if with_service {
             files.push(release_file("service/main.mjs", "service"));
         }
-        MiniAppReleaseArtifactV1::new(
+        PluginReleaseArtifactV1::new(
             ArtifactId::from("artifact-1"),
             manifest(&files, with_service),
             files,
@@ -3254,13 +3208,13 @@ mod tests {
         .unwrap()
     }
 
-    fn artifact_with_tool() -> MiniAppReleaseArtifactV1 {
+    fn artifact_with_tool() -> PluginReleaseArtifactV1 {
         let files = vec![
             release_file("ui/index.html", "index"),
             release_file("ui/app.js", "app"),
             release_file("service/main.mjs", "service"),
         ];
-        MiniAppReleaseArtifactV1::new(
+        PluginReleaseArtifactV1::new(
             ArtifactId::from("artifact-tool"),
             manifest_with_tool(&files),
             files,
@@ -3268,22 +3222,22 @@ mod tests {
         .unwrap()
     }
 
-    fn release_ref(seed: &str) -> MiniAppReleaseRef {
-        MiniAppReleaseRef {
-            release_id: MiniAppReleaseId::from(format!("release-{seed}")),
+    fn release_ref(seed: &str) -> PluginReleaseRef {
+        PluginReleaseRef {
+            release_id: PluginReleaseId::from(format!("release-{seed}")),
             artifact_id: ArtifactId::from(format!("artifact-{seed}")),
             release_digest: digest(&format!("release-{seed}")),
             manifest_digest: digest(&format!("manifest-{seed}")),
         }
     }
 
-    fn pointer_state() -> MiniAppReleasePointerState {
-        MiniAppReleasePointerState {
-            miniapp_id: MiniAppId::from("miniapp-1"),
+    fn pointer_state() -> PluginReleasePointerState {
+        PluginReleasePointerState {
+            plugin_product_id: PluginProductId::from("plugin-1"),
             pointer_revision: 7,
             active_release_epoch: 3,
-            ready_release: Some(MiniAppReadyReleaseRef {
-                release_id: MiniAppReleaseId::from("release-ready"),
+            ready_release: Some(PluginReadyReleaseRef {
+                release_id: PluginReleaseId::from("release-ready"),
                 release_digest: digest("release-ready"),
             }),
             active_release: Some(release_ref("active")),
@@ -3292,8 +3246,8 @@ mod tests {
         }
     }
 
-    fn runtime() -> MiniAppServiceRuntimeFingerprint {
-        MiniAppServiceRuntimeFingerprint {
+    fn runtime() -> PluginServiceRuntimeFingerprint {
+        PluginServiceRuntimeFingerprint {
             runtime_installation_id: RuntimeInstallationId::from("runtime-1"),
             runtime_target: RuntimeTarget::from("windows-x86_64"),
             runtime_executable_digest: digest("node"),
@@ -3301,36 +3255,36 @@ mod tests {
         }
     }
 
-    fn storage() -> MiniAppServiceStorageDescriptor {
-        MiniAppServiceStorageDescriptor {
-            kv: MiniAppKvHandleDescriptor {
-                handle_id: MiniAppKvHandleId::from("kv-1"),
-                miniapp_id: MiniAppId::from("miniapp-1"),
+    fn storage() -> PluginServiceStorageDescriptor {
+        PluginServiceStorageDescriptor {
+            kv: PluginKvHandleDescriptor {
+                handle_id: PluginKvHandleId::from("kv-1"),
+                plugin_product_id: PluginProductId::from("plugin-1"),
                 namespace_revision: 1,
             },
-            files_dir: Some(MiniAppFilesDirDescriptor {
-                handle_id: MiniAppFilesHandleId::from("files-1"),
-                miniapp_id: MiniAppId::from("miniapp-1"),
-                absolute_path: "C:\\NomiFun\\miniapps\\miniapp-1\\files".into(),
+            files_dir: Some(PluginFilesDirDescriptor {
+                handle_id: PluginFilesHandleId::from("files-1"),
+                plugin_product_id: PluginProductId::from("plugin-1"),
+                absolute_path: "C:\\NomiFun\\plugins\\plugin-1\\files".into(),
             }),
-            private_database: Some(MiniAppPrivateDatabaseDescriptor {
-                handle_id: MiniAppDatabaseHandleId::from("db-1"),
-                miniapp_id: MiniAppId::from("miniapp-1"),
+            private_database: Some(PluginPrivateDatabaseDescriptor {
+                handle_id: PluginDatabaseHandleId::from("db-1"),
+                plugin_product_id: PluginProductId::from("plugin-1"),
                 schema_epoch: 2,
                 migration_ledger_digest: digest("ledger"),
             }),
         }
     }
 
-    fn resolved_spec() -> ResolvedMiniAppServiceSpec {
-        ResolvedMiniAppServiceSpec::new(ResolvedMiniAppServiceSpecInputs {
-            miniapp_id: MiniAppId::from("miniapp-1"),
+    fn resolved_spec() -> ResolvedPluginServiceSpec {
+        ResolvedPluginServiceSpec::new(ResolvedPluginServiceSpecInputs {
+            plugin_product_id: PluginProductId::from("plugin-1"),
             release: release_ref("ready"),
             active_release_epoch: 4,
             service_module_digest: digest("service"),
-            lifecycle: MiniAppServiceLifecycle::OnDemand,
-            host_protocol_version: MINIAPP_SERVICE_HOST_PROTOCOL_VERSION.into(),
-            sdk_contract_version: MINIAPP_SERVICE_SDK_CONTRACT_VERSION.into(),
+            lifecycle: PluginServiceLifecycle::OnDemand,
+            host_protocol_version: PLUGIN_SERVICE_HOST_PROTOCOL_VERSION.into(),
+            sdk_contract_version: PLUGIN_SERVICE_SDK_CONTRACT_VERSION.into(),
             runtime: runtime(),
             config_schema_digest: digest("config"),
             config_snapshot_digest: digest("config-snapshot"),
@@ -3345,8 +3299,8 @@ mod tests {
         .unwrap()
     }
 
-    fn non_ui_fingerprint() -> MiniAppNonUiReleaseFingerprint {
-        MiniAppNonUiReleaseFingerprint {
+    fn non_ui_fingerprint() -> PluginNonUiReleaseFingerprint {
+        PluginNonUiReleaseFingerprint {
             manifest_without_ui_digest: digest("manifest-without-ui"),
             service_run_key: Some(digest("run-key")),
             migration_set_digest: digest("migrations"),
@@ -3361,16 +3315,16 @@ mod tests {
     }
 
     #[test]
-    fn canonical_contract_freezes_independent_m1_boundaries() {
-        let contract = MiniAppM1ContractManifest::canonical();
+    fn canonical_contract_freezes_independent_runtime_boundaries() {
+        let contract = PluginRuntimeContractManifest::canonical();
         contract.validate().unwrap();
-        assert_eq!(contract.max_services_per_miniapp, 1);
+        assert_eq!(contract.max_services_per_plugin_product, 1);
         assert!(!contract.ui_only_starts_node);
         assert!(!contract.exposes_localhost_bridge);
         assert_eq!(contract.service_lifecycles.len(), 2);
         assert_eq!(
             contract.bridge_transports,
-            BTreeSet::from([MiniAppBridgeTransport::MessageChannelV1])
+            BTreeSet::from([PluginBridgeTransport::MessageChannelV1])
         );
     }
 
@@ -3403,7 +3357,7 @@ mod tests {
         assert!(encoded.pointer("/manifest/payload/schemas").is_some());
         assert!(encoded.get("source").is_none());
 
-        let restored: MiniAppReleaseArtifactV1 =
+        let restored: PluginReleaseArtifactV1 =
             serde_json::from_value(encoded).unwrap();
         restored.validate().unwrap();
         let manifest = &restored.manifest.payload;
@@ -3425,7 +3379,7 @@ mod tests {
             StrictJsonValue(json!({"type": "object", "properties": {}}));
         assert!(matches!(
             config_tamper.validate(),
-            Err(MiniAppM1ContractError::DigestMismatch {
+            Err(PluginRuntimeContractError::DigestMismatch {
                 field: "config_schema_digest"
             })
         ));
@@ -3435,7 +3389,7 @@ mod tests {
             "Changed credential".into();
         assert!(matches!(
             credential_tamper.validate(),
-            Err(MiniAppM1ContractError::DigestMismatch {
+            Err(PluginRuntimeContractError::DigestMismatch {
                 field: "credential_slots_digest"
             })
         ));
@@ -3447,7 +3401,7 @@ mod tests {
             .insert(ResourceKind::from("workspace"));
         assert!(matches!(
             resource_tamper.validate(),
-            Err(MiniAppM1ContractError::DigestMismatch {
+            Err(PluginRuntimeContractError::DigestMismatch {
                 field: "resource_contract_digest"
             })
         ));
@@ -3463,7 +3417,7 @@ mod tests {
         missing.schemas.remove(&removed);
         assert!(matches!(
             missing.validate(),
-            Err(MiniAppM1ContractError::InvalidField {
+            Err(PluginRuntimeContractError::InvalidField {
                 field: "schemas",
                 ..
             })
@@ -3471,14 +3425,14 @@ mod tests {
 
         let extra_schema = StrictJsonValue(json!({"type": "string"}));
         let extra_ref = CanonicalSchemaRef::from(format!(
-            "schema://miniapp.example/unused@1#{}",
+            "schema://plugin.example/unused@1#{}",
             digest_payload(&extra_schema.0).unwrap().as_ref()
         ));
         let mut extra = valid.clone();
         extra.schemas.insert(extra_ref, extra_schema);
         assert!(matches!(
             extra.validate(),
-            Err(MiniAppM1ContractError::InvalidField {
+            Err(PluginRuntimeContractError::InvalidField {
                 field: "schemas",
                 ..
             })
@@ -3489,7 +3443,7 @@ mod tests {
             StrictJsonValue(json!({"type": "null"}));
         assert!(matches!(
             tampered.validate(),
-            Err(MiniAppM1ContractError::DigestMismatch {
+            Err(PluginRuntimeContractError::DigestMismatch {
                 field: "schemas.value"
             })
         ));
@@ -3511,7 +3465,7 @@ mod tests {
             let mut missing = encoded.clone();
             missing.as_object_mut().unwrap().remove(field);
             assert!(
-                serde_json::from_value::<MiniAppReleaseV1Manifest>(missing)
+                serde_json::from_value::<PluginReleaseV1Manifest>(missing)
                     .is_err(),
                 "missing {field} must fail closed"
             );
@@ -3523,7 +3477,7 @@ mod tests {
             .unwrap()
             .insert("source_contracts".into(), json!({}));
         assert!(
-            serde_json::from_value::<MiniAppReleaseV1Manifest>(extra).is_err()
+            serde_json::from_value::<PluginReleaseV1Manifest>(extra).is_err()
         );
     }
 
@@ -3557,11 +3511,11 @@ mod tests {
 
     #[test]
     fn migration_digest_and_additive_allowlist_are_enforced() {
-        let migration = MiniAppMigration::new(
-            MiniAppMigrationId::from("001_create_notes"),
-            vec![MiniAppAdditiveMigrationAction::CreateTable {
+        let migration = PluginMigration::new(
+            PluginMigrationId::from("001_create_notes"),
+            vec![PluginAdditiveMigrationAction::CreateTable {
                 table_name: "notes".into(),
-                columns: vec![MiniAppMigrationColumn {
+                columns: vec![PluginMigrationColumn {
                     name: "id".into(),
                     declared_type: "TEXT".into(),
                     nullable: false,
@@ -3574,9 +3528,9 @@ mod tests {
         migration.validate().unwrap();
 
         let mut tampered = migration.clone();
-        tampered.actions.push(MiniAppAdditiveMigrationAction::AddColumn {
+        tampered.actions.push(PluginAdditiveMigrationAction::AddColumn {
             table_name: "notes".into(),
-            column: MiniAppMigrationColumn {
+            column: PluginMigrationColumn {
                 name: "title".into(),
                 declared_type: "TEXT".into(),
                 nullable: true,
@@ -3585,10 +3539,10 @@ mod tests {
         });
         assert!(matches!(
             tampered.validate(),
-            Err(MiniAppM1ContractError::DigestMismatch { .. })
+            Err(PluginRuntimeContractError::DigestMismatch { .. })
         ));
 
-        let destructive_fragment = MiniAppMigrationColumn {
+        let destructive_fragment = PluginMigrationColumn {
             name: "payload".into(),
             declared_type: "TEXT; DROP TABLE notes".into(),
             nullable: true,
@@ -3602,15 +3556,15 @@ mod tests {
         let spec = resolved_spec();
         spec.validate().unwrap();
         let mut changed = spec.clone();
-        changed.lifecycle = MiniAppServiceLifecycle::Continuous;
+        changed.lifecycle = PluginServiceLifecycle::Continuous;
         assert!(matches!(
             changed.validate(),
-            Err(MiniAppM1ContractError::DigestMismatch {
+            Err(PluginRuntimeContractError::DigestMismatch {
                 field: "service_run_key"
             })
         ));
-        let changed = ResolvedMiniAppServiceSpec::new(ResolvedMiniAppServiceSpecInputs {
-            miniapp_id: spec.miniapp_id.clone(),
+        let changed = ResolvedPluginServiceSpec::new(ResolvedPluginServiceSpecInputs {
+            plugin_product_id: spec.plugin_product_id.clone(),
             release: release_ref("ui-only-change"),
             active_release_epoch: spec.active_release_epoch + 1,
             service_module_digest: spec.service_module_digest.clone(),
@@ -3637,10 +3591,10 @@ mod tests {
         let artifact = artifact(true);
         let manifest = &artifact.manifest.payload;
         let service = manifest.service.as_ref().unwrap();
-        let spec = ResolvedMiniAppServiceSpec::new(ResolvedMiniAppServiceSpecInputs {
-            miniapp_id: MiniAppId::from("miniapp-1"),
-            release: MiniAppReleaseRef {
-                release_id: MiniAppReleaseId::from("release-1"),
+        let spec = ResolvedPluginServiceSpec::new(ResolvedPluginServiceSpecInputs {
+            plugin_product_id: PluginProductId::from("plugin-1"),
+            release: PluginReleaseRef {
+                release_id: PluginReleaseId::from("release-1"),
                 artifact_id: artifact.artifact_id.clone(),
                 release_digest: artifact.artifact_digest.clone(),
                 manifest_digest: artifact.manifest.payload_digest.clone(),
@@ -3671,22 +3625,22 @@ mod tests {
 
     #[test]
     fn bridge_rejects_old_epoch_and_ui_only_service_calls() {
-        let session = MiniAppBridgeSession {
-            bridge_contract_version: MINIAPP_BRIDGE_CONTRACT_VERSION.into(),
-            bridge_session_id: MiniAppBridgeSessionId::from("bridge-1"),
-            surface_session_id: MiniAppSurfaceSessionId::from("surface-1"),
-            miniapp_id: MiniAppId::from("miniapp-1"),
+        let session = PluginBridgeSession {
+            bridge_contract_version: PLUGIN_BRIDGE_CONTRACT_VERSION.into(),
+            bridge_session_id: PluginBridgeSessionId::from("bridge-1"),
+            surface_session_id: PluginSurfaceSessionId::from("surface-1"),
+            plugin_product_id: PluginProductId::from("plugin-1"),
             active_release: release_ref("active"),
             active_release_epoch: 4,
-            transport: MiniAppBridgeTransport::MessageChannelV1,
+            transport: PluginBridgeTransport::MessageChannelV1,
             service_run_key: None,
         };
         let mut current = pointer_state();
         current.active_release = Some(session.active_release.clone());
         current.active_release_epoch = session.active_release_epoch;
-        let request = MiniAppBridgeRequest {
-            call_id: MiniAppBridgeCallId::from("call-1"),
-            target: MiniAppBridgeTarget::Service {
+        let request = PluginBridgeRequest {
+            call_id: PluginBridgeCallId::from("call-1"),
+            target: PluginBridgeTarget::Service {
                 method: "notes.list".into(),
                 payload: StrictJsonValue(json!({})),
             },
@@ -3695,16 +3649,16 @@ mod tests {
         current.active_release_epoch -= 1;
         assert!(matches!(
             request.validate_for(&session, &current),
-            Err(MiniAppM1ContractError::StaleBridgeSession)
+            Err(PluginRuntimeContractError::StaleBridgeSession)
         ));
     }
 
     #[test]
     fn bridge_wire_contains_only_call_and_payload() {
-        let request = MiniAppBridgeRequest {
-            call_id: MiniAppBridgeCallId::from("call-1"),
-            target: MiniAppBridgeTarget::HostKv {
-                request: MiniAppBridgeKvRequest::Get {
+        let request = PluginBridgeRequest {
+            call_id: PluginBridgeCallId::from("call-1"),
+            target: PluginBridgeTarget::HostKv {
+                request: PluginBridgeKvRequest::Get {
                     key: "notes/current".into(),
                 },
             },
@@ -3716,7 +3670,7 @@ mod tests {
         );
         let wire = value.to_string();
         for forbidden in [
-            "miniapp_id",
+            "plugin_product_id",
             "active_release",
             "bridge_session_id",
             "surface_session_id",
@@ -3728,29 +3682,29 @@ mod tests {
 
     #[test]
     fn host_kv_handle_cannot_cross_owner() {
-        let request = MiniAppKvRequest::Get {
-            handle: MiniAppKvHandleDescriptor {
-                handle_id: MiniAppKvHandleId::from("kv-1"),
-                miniapp_id: MiniAppId::from("miniapp-other"),
+        let request = PluginKvRequest::Get {
+            handle: PluginKvHandleDescriptor {
+                handle_id: PluginKvHandleId::from("kv-1"),
+                plugin_product_id: PluginProductId::from("plugin-other"),
                 namespace_revision: 1,
             },
             key: "notes/current".into(),
         };
         assert!(request
-            .validate_for(&MiniAppId::from("miniapp-1"))
+            .validate_for(&PluginProductId::from("plugin-1"))
             .is_err());
     }
 
     #[test]
     fn strict_auto_publish_rejects_first_publish_and_non_ui_change() {
         let state = pointer_state();
-        let target = MiniAppReleaseRef {
-            release_id: MiniAppReleaseId::from("release-ready"),
+        let target = PluginReleaseRef {
+            release_id: PluginReleaseId::from("release-ready"),
             artifact_id: ArtifactId::from("artifact-ready"),
             release_digest: digest("release-ready"),
             manifest_digest: digest("manifest-ready"),
         };
-        let proof = MiniAppUiOnlyAutoPublishProof {
+        let proof = PluginUiOnlyAutoPublishProof {
             current_release: state.active_release.clone().unwrap(),
             target_release: target.clone(),
             current_ui_tree_digest: digest("ui-old"),
@@ -3763,15 +3717,15 @@ mod tests {
             static_validation_passed: true,
             no_unknown_changes: true,
         };
-        let request = MiniAppPublishRequest {
-            miniapp_id: state.miniapp_id.clone(),
-            expected: MiniAppPointerExpectation::from_state(&state),
+        let request = PluginPublishRequest {
+            plugin_product_id: state.plugin_product_id.clone(),
+            expected: PluginPointerExpectation::from_state(&state),
             target_ready_release: target,
             target_catalog_digest: digest("catalog-ready"),
-            authorization: MiniAppPublishAuthorization::AutoUiOnly {
-                authorization: MiniAppUiOnlyAutoPublishAuthorization {
-                    authorization_id: MiniAppUserAuthorizationId::from("auth-1"),
-                    miniapp_id: state.miniapp_id.clone(),
+            authorization: PluginPublishAuthorization::AutoUiOnly {
+                authorization: PluginUiOnlyAutoPublishAuthorization {
+                    authorization_id: PluginUserAuthorizationId::from("auth-1"),
+                    plugin_product_id: state.plugin_product_id.clone(),
                     enabled: true,
                     authorization_revision: 1,
                     user_authorized_at_ms: 1,
@@ -3786,11 +3740,11 @@ mod tests {
         first.previous_release = None;
         first.active_release_epoch = 0;
         let mut first_request = request.clone();
-        first_request.expected = MiniAppPointerExpectation::from_state(&first);
+        first_request.expected = PluginPointerExpectation::from_state(&first);
         assert!(first_request.validate_for(&first).is_err());
 
         let mut changed_service = request;
-        let MiniAppPublishAuthorization::AutoUiOnly { proof, .. } =
+        let PluginPublishAuthorization::AutoUiOnly { proof, .. } =
             &mut changed_service.authorization
         else {
             unreachable!()
@@ -3802,18 +3756,18 @@ mod tests {
     #[test]
     fn publish_and_rollback_use_exact_pointer_cas() {
         let state = pointer_state();
-        let target = MiniAppReleaseRef {
-            release_id: MiniAppReleaseId::from("release-ready"),
+        let target = PluginReleaseRef {
+            release_id: PluginReleaseId::from("release-ready"),
             artifact_id: ArtifactId::from("artifact-ready"),
             release_digest: digest("release-ready"),
             manifest_digest: digest("manifest-ready"),
         };
-        let publish = MiniAppPublishRequest {
-            miniapp_id: state.miniapp_id.clone(),
-            expected: MiniAppPointerExpectation::from_state(&state),
+        let publish = PluginPublishRequest {
+            plugin_product_id: state.plugin_product_id.clone(),
+            expected: PluginPointerExpectation::from_state(&state),
             target_ready_release: target.clone(),
             target_catalog_digest: digest("catalog-ready"),
-            authorization: MiniAppPublishAuthorization::ManualUser {
+            authorization: PluginPublishAuthorization::ManualUser {
                 actor_id: "user-1".into(),
             },
         };
@@ -3822,9 +3776,9 @@ mod tests {
         assert_eq!(published.previous_release, state.active_release);
         assert!(published.ready_release.is_none());
 
-        let rollback = MiniAppRollbackRequest {
-            miniapp_id: published.miniapp_id.clone(),
-            expected: MiniAppPointerExpectation::from_state(&published),
+        let rollback = PluginRollbackRequest {
+            plugin_product_id: published.plugin_product_id.clone(),
+            expected: PluginPointerExpectation::from_state(&published),
             rollback_target: published.previous_release.clone().unwrap(),
             target_catalog_digest: digest("catalog-rollback"),
             actor_id: "user-1".into(),
@@ -3837,46 +3791,46 @@ mod tests {
         stale.expected.pointer_revision -= 1;
         assert!(matches!(
             stale.validate_for(&state),
-            Err(MiniAppM1ContractError::CompareAndSwapConflict)
+            Err(PluginRuntimeContractError::CompareAndSwapConflict)
         ));
     }
 
     #[test]
     fn service_test_receipt_binds_exact_ready_and_spec() {
         let spec = resolved_spec();
-        let ready = MiniAppReadyRelease {
-            miniapp_id: spec.miniapp_id.clone(),
+        let ready = PluginReadyRelease {
+            plugin_product_id: spec.plugin_product_id.clone(),
             release: spec.release.clone(),
             origin_operation_id: OperationId::from("build-1"),
-            origin: MiniAppReadyOrigin::Build,
-            source_lineage: MiniAppSourceLineage::Managed {
-                project_id: MiniAppProjectId::from("project-1"),
+            origin: PluginReadyOrigin::Build,
+            source_lineage: PluginReleaseSourceLineage::Managed {
+                project_id: PluginProjectId::from("project-1"),
                 source_snapshot_digest: digest("source"),
                 dependency_lock_digest: digest("lock"),
-                build_profile_version: MINIAPP_RELEASE_PROFILE_VERSION.into(),
+                build_profile_version: PLUGIN_RELEASE_PROFILE_VERSION.into(),
                 build_generation: 1,
             },
             matching_service_test_receipt: None,
             created_at_ms: 1,
         };
-        let mut receipt = MiniAppServiceTestReceipt {
-            receipt_id: MiniAppServiceTestReceiptId::from("receipt-1"),
-            miniapp_id: spec.miniapp_id.clone(),
+        let mut receipt = PluginServiceTestReceipt {
+            receipt_id: PluginServiceTestReceiptId::from("receipt-1"),
+            plugin_product_id: spec.plugin_product_id.clone(),
             release: spec.release.clone(),
             service_run_key: spec.service_run_key.clone(),
-            outcome: MiniAppServiceTestOutcome::Passed,
+            outcome: PluginServiceTestOutcome::Passed,
             error_code: None,
             runtime: spec.runtime.clone(),
             host_target: spec.runtime.runtime_target.clone(),
-            host_protocol_version: MINIAPP_SERVICE_HOST_PROTOCOL_VERSION.into(),
-            sdk_contract_version: MINIAPP_SERVICE_SDK_CONTRACT_VERSION.into(),
-            test_contract_version: MINIAPP_SERVICE_TEST_CONTRACT_VERSION.into(),
+            host_protocol_version: PLUGIN_SERVICE_HOST_PROTOCOL_VERSION.into(),
+            sdk_contract_version: PLUGIN_SERVICE_SDK_CONTRACT_VERSION.into(),
+            test_contract_version: PLUGIN_SERVICE_TEST_CONTRACT_VERSION.into(),
             resolved_test_input_digest: digest("inputs"),
             copied_kv_digest: digest("kv"),
             copied_private_database_digest: Some(digest("db")),
             empty_files_dir: Some(true),
             migration_ledger_digest: Some(digest("ledger")),
-            credential_mode: MiniAppServiceTestCredentialMode::None,
+            credential_mode: PluginServiceTestCredentialMode::None,
             host_generation: 1,
             issued_at_ms: 1,
         };
@@ -3888,45 +3842,45 @@ mod tests {
     #[test]
     fn share_bundle_has_exact_source_chain_and_imports_as_new() {
         let release = artifact(false);
-        let source = MiniAppSourceBundle {
-            project_id: MiniAppProjectId::from("project-1"),
+        let source = PluginSourceBundle {
+            project_id: PluginProjectId::from("project-1"),
             source_archive_artifact_id: ArtifactId::from("source-1"),
             source_snapshot_digest: digest("source"),
             dependency_lock_artifact_id: ArtifactId::from("lock-1"),
             dependency_lock_digest: release.manifest.payload.dependency_lock_digest.clone(),
             build_profile_version: release.manifest.payload.build_profile_version.clone(),
         };
-        let bundle = MiniAppShareBundleV1::new(
-            MiniAppShareBundleId::from("share-1"),
-            Some(MiniAppId::from("miniapp-source")),
+        let bundle = PluginShareBundleV1::new(
+            PluginShareBundleId::from("share-1"),
+            Some(PluginProductId::from("plugin-source")),
             release,
             Some(source),
             None,
         )
         .unwrap();
-        let request = MiniAppShareImportAsNewRequest {
+        let request = PluginShareImportAsNewRequest {
             bundle_id: bundle.bundle_id.clone(),
             bundle_digest: bundle.bundle_digest.clone(),
-            new_miniapp_id: MiniAppId::from("miniapp-new"),
+            new_plugin_product_id: PluginProductId::from("plugin-new"),
             expected_release_digest: bundle.release.artifact_digest.clone(),
         };
         request.validate_for(&bundle).unwrap();
 
-        let same_identity = MiniAppShareImportAsNewRequest {
-            new_miniapp_id: MiniAppId::from("miniapp-source"),
+        let same_identity = PluginShareImportAsNewRequest {
+            new_plugin_product_id: PluginProductId::from("plugin-source"),
             ..request
         };
         assert!(same_identity.validate_for(&bundle).is_err());
     }
 
     #[test]
-    fn whole_app_backup_is_separate_disabled_quiescent_metadata() {
-        let mut metadata = MiniAppWholeAppBackupMetadataV1 {
-            schema_version: MINIAPP_M1_SCHEMA_VERSION.into(),
-            backup_version: MINIAPP_WHOLE_APP_BACKUP_VERSION.into(),
-            backup_id: MiniAppBackupId::from("backup-1"),
-            source_miniapp_id: MiniAppId::from("miniapp-1"),
-            source_state: MiniAppBackupSourceState::Disabled,
+    fn plugin_product_backup_is_separate_disabled_quiescent_metadata() {
+        let mut metadata = PluginProductBackupMetadataV1 {
+            schema_version: PLUGIN_RUNTIME_SCHEMA_VERSION.into(),
+            backup_version: PLUGIN_PRODUCT_BACKUP_VERSION.into(),
+            backup_id: PluginBackupId::from("backup-1"),
+            source_plugin_product_id: PluginProductId::from("plugin-1"),
+            source_state: PluginBackupSourceState::Disabled,
             owner_quiescent: true,
             product_metadata_digest: digest("product"),
             source_archive_digest: digest("source"),
@@ -3948,14 +3902,14 @@ mod tests {
     fn deleting_intent_revokes_surface_and_catalog() {
         let mut state = pointer_state();
         state.ready_release = None;
-        let record = MiniAppProductLifecycleRecord {
-            miniapp_id: state.miniapp_id.clone(),
-            state: MiniAppProductLifecycleState::Deleting,
+        let record = PluginProductLifecycleRecord {
+            plugin_product_id: state.plugin_product_id.clone(),
+            state: PluginProductLifecycleState::Deleting,
             pointer_state: state,
             surface_available: false,
             catalog_published: false,
-            deleting_intent: Some(MiniAppDeletingIntent {
-                miniapp_id: MiniAppId::from("miniapp-1"),
+            deleting_intent: Some(PluginProductDeletingIntent {
+                plugin_product_id: PluginProductId::from("plugin-1"),
                 operation_id: OperationId::from("delete-1"),
                 started_at_ms: 1,
                 last_error: None,
@@ -3975,8 +3929,8 @@ mod tests {
             "ui_tree_digest": digest("tree"),
             "localhost_port": 3211
         });
-        assert!(serde_json::from_value::<MiniAppUiReleaseDescriptor>(value).is_err());
-        let schema = schema_for!(MiniAppReleaseV1Manifest);
+        assert!(serde_json::from_value::<PluginUiReleaseDescriptor>(value).is_err());
+        let schema = schema_for!(PluginReleaseV1Manifest);
         assert!(serde_json::to_value(schema).unwrap().is_object());
     }
 }

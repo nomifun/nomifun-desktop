@@ -1,7 +1,7 @@
-//! Production-oriented MiniApp Service process adapter.
+//! Production-oriented Plugin Service process adapter.
 //!
 //! This module is intentionally kept separate from the in-memory Service Host
-//! coordinator. It owns one Node process, speaks the dedicated MiniApp Service
+//! coordinator. It owns one Node process, speaks the dedicated Plugin Service
 //! NDJSON protocol, and turns process-tree failure into a generation-scoped
 //! `PluginRuntimeServiceProcessError::Crashed`.
 //!
@@ -20,8 +20,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use nomi_process_runtime::{ChildProcessBuilder, ManagedChildProcess};
 use nomifun_agent_contracts::{
-    DigestHex, MiniAppReleaseRef, MiniAppServiceRuntimeFingerprint,
-    MINIAPP_SERVICE_HOST_PROTOCOL_VERSION, ResolvedMiniAppServiceSpec, StrictJsonValue,
+    DigestHex, PluginReleaseRef, PluginServiceRuntimeFingerprint,
+    PLUGIN_SERVICE_HOST_PROTOCOL_VERSION, ResolvedPluginServiceSpec, StrictJsonValue,
     digest_bytes,
 };
 use nomifun_js_runtime::{
@@ -44,8 +44,8 @@ use crate::runtime::{
     PluginRuntimeServiceStoragePort, PluginRuntimeServiceStorageRequest,
 };
 
-const SERVICE_HOST_ROLE: &str = "miniapp_service";
-const SERVICE_PROTOCOL_VERSION: &str = MINIAPP_SERVICE_HOST_PROTOCOL_VERSION;
+const SERVICE_HOST_ROLE: &str = "plugin_service";
+const SERVICE_PROTOCOL_VERSION: &str = PLUGIN_SERVICE_HOST_PROTOCOL_VERSION;
 const SERVICE_HOST_SCRIPT: &str = r#"
 import { AsyncLocalStorage } from "node:async_hooks";
 import readline from "node:readline";
@@ -56,14 +56,14 @@ const bootstrap = JSON.parse(
 );
 
 if (
-  bootstrap.host_role !== "miniapp_service" ||
+  bootstrap.host_role !== "plugin_service" ||
   bootstrap.protocol_version !== "1.0.0" ||
   !Number.isSafeInteger(bootstrap.host_generation) ||
   bootstrap.host_generation <= 0 ||
   typeof bootstrap.module_path !== "string" ||
   bootstrap.module_path.length === 0
 ) {
-  throw new Error("invalid MiniApp Service Host bootstrap");
+  throw new Error("invalid Plugin Service Host bootstrap");
 }
 
 const generation = bootstrap.host_generation;
@@ -259,7 +259,7 @@ if (typeof imported.start !== "function") {
 
 service = await imported.start(
   Object.freeze({
-    miniappId: bootstrap.miniapp_id,
+    pluginId: bootstrap.plugin_product_id,
     release: structuredClone(bootstrap.release),
     activeReleaseEpoch: bootstrap.active_release_epoch,
     serviceRunKey: bootstrap.service_run_key,
@@ -278,7 +278,7 @@ await writeFrame({
   protocol_version: protocolVersion,
   host_generation: generation,
   process_id: process.pid,
-  miniapp_id: bootstrap.miniapp_id,
+  plugin_product_id: bootstrap.plugin_product_id,
   release: structuredClone(bootstrap.release),
   active_release_epoch: bootstrap.active_release_epoch,
   service_run_key: bootstrap.service_run_key,
@@ -323,7 +323,7 @@ async function dispatch(frame) {
     typeof frame.call_id !== "string" ||
     typeof frame.method !== "string"
   ) {
-    throw new Error("unsupported MiniApp Service request");
+    throw new Error("unsupported Plugin Service request");
   }
 
   const controller = new AbortController();
@@ -528,11 +528,11 @@ impl PluginRuntimeServiceProcessFactory for RuntimeAwarePluginRuntimeServiceProc
         self.limits.validate()?;
         let lease = self
             .authority
-            .acquire_use(JavaScriptWorkKind::MiniappServiceHost)
+            .acquire_use(JavaScriptWorkKind::PluginServiceHost)
             .await
             .map_err(|error| PluginRuntimePlatformError::Runtime(error.to_string()))?;
         let runtime = lease.runtime();
-        let expected_runtime = MiniAppServiceRuntimeFingerprint {
+        let expected_runtime = PluginServiceRuntimeFingerprint {
             runtime_installation_id: runtime.fingerprint.runtime_installation_id.clone(),
             runtime_target: runtime.fingerprint.runtime_target.clone(),
             runtime_executable_digest: runtime.fingerprint.executable_digest.clone(),
@@ -639,7 +639,7 @@ impl NodePluginRuntimeServiceProcessFactory {
 
     async fn verify_runtime(
         &self,
-        spec: &ResolvedMiniAppServiceSpec,
+        spec: &ResolvedPluginServiceSpec,
     ) -> Result<(), PluginRuntimePlatformError> {
         self.validate_node_executable()?;
         let bytes = tokio::fs::read(&self.node_executable)
@@ -734,7 +734,7 @@ impl PluginRuntimeServiceProcessFactory for NodePluginRuntimeServiceProcessFacto
             .await?;
 
         let fence = PluginRuntimeServiceGenerationFence {
-            miniapp_id: launch.spec.miniapp_id.clone(),
+            plugin_product_id: launch.spec.plugin_product_id.clone(),
             release: launch.spec.release.clone(),
             active_release_epoch: launch.spec.active_release_epoch,
             service_run_key: launch.spec.service_run_key.clone(),
@@ -744,7 +744,7 @@ impl PluginRuntimeServiceProcessFactory for NodePluginRuntimeServiceProcessFacto
             host_role: SERVICE_HOST_ROLE.to_owned(),
             protocol_version: SERVICE_PROTOCOL_VERSION.to_owned(),
             host_generation: launch.host_generation,
-            miniapp_id: launch.spec.miniapp_id.as_ref().to_owned(),
+            plugin_product_id: launch.spec.plugin_product_id.as_ref().to_owned(),
             release: launch.spec.release.clone(),
             active_release_epoch: launch.spec.active_release_epoch,
             service_run_key: launch.spec.service_run_key.clone(),
@@ -907,14 +907,14 @@ struct ServiceBootstrap {
     host_role: String,
     protocol_version: String,
     host_generation: u64,
-    miniapp_id: String,
-    release: MiniAppReleaseRef,
+    plugin_product_id: String,
+    release: PluginReleaseRef,
     active_release_epoch: u64,
     service_run_key: DigestHex,
     module_path: String,
     module_digest: DigestHex,
-    runtime: MiniAppServiceRuntimeFingerprint,
-    storage: nomifun_agent_contracts::MiniAppServiceStorageDescriptor,
+    runtime: PluginServiceRuntimeFingerprint,
+    storage: nomifun_agent_contracts::PluginServiceStorageDescriptor,
 }
 
 #[derive(Debug, Deserialize)]
@@ -925,12 +925,12 @@ struct ServiceHello {
     protocol_version: String,
     host_generation: u64,
     process_id: u32,
-    miniapp_id: String,
-    release: MiniAppReleaseRef,
+    plugin_product_id: String,
+    release: PluginReleaseRef,
     active_release_epoch: u64,
     service_run_key: DigestHex,
     module_digest: DigestHex,
-    runtime: MiniAppServiceRuntimeFingerprint,
+    runtime: PluginServiceRuntimeFingerprint,
 }
 
 fn validate_hello(
@@ -944,7 +944,7 @@ fn validate_hello(
         || hello.protocol_version != SERVICE_PROTOCOL_VERSION
         || hello.host_generation != fence.host_generation
         || hello.process_id != process_id
-        || hello.miniapp_id != fence.miniapp_id.as_ref()
+        || hello.plugin_product_id != fence.plugin_product_id.as_ref()
         || hello.release != fence.release
         || hello.active_release_epoch != fence.active_release_epoch
         || hello.service_run_key != fence.service_run_key
@@ -1117,7 +1117,7 @@ struct ServiceProcessActor {
     reader_task: JoinHandle<()>,
     stderr_task: JoinHandle<StderrSummary>,
     fence: PluginRuntimeServiceGenerationFence,
-    storage_descriptor: nomifun_agent_contracts::MiniAppServiceStorageDescriptor,
+    storage_descriptor: nomifun_agent_contracts::PluginServiceStorageDescriptor,
     storage: Option<Arc<dyn PluginRuntimeServiceStoragePort>>,
     limits: PluginRuntimeServiceProcessLimits,
     accepting: bool,
@@ -1494,7 +1494,7 @@ impl ServiceProcessActor {
         };
         let request_id = frame.request_id;
         let storage = self.storage.clone();
-        let miniapp_id = self.fence.miniapp_id.clone();
+        let plugin_product_id = self.fence.plugin_product_id.clone();
         let storage_descriptor = self.storage_descriptor.clone();
         let command_sender = self.command_sender.clone();
         let request_timeout = self.limits.request_timeout;
@@ -1511,7 +1511,7 @@ impl ServiceProcessActor {
                 Some(storage) => match tokio::time::timeout(
                     request_timeout,
                     storage.handle_service_request(
-                        &miniapp_id,
+                        &plugin_product_id,
                         &storage_descriptor,
                         request,
                         operation_cancellation.clone(),
@@ -1801,7 +1801,7 @@ async fn read_service_frames(
 async fn read_service_hello(
     reader: &mut BufReader<ChildStdout>,
     stdin: &mut ChildStdin,
-    spec: &ResolvedMiniAppServiceSpec,
+    spec: &ResolvedPluginServiceSpec,
     host_generation: u64,
     storage: Option<Arc<dyn PluginRuntimeServiceStoragePort>>,
     limits: &PluginRuntimeServiceProcessLimits,
@@ -1828,7 +1828,7 @@ async fn read_service_hello(
                 let result = match storage.as_ref() {
                     Some(storage) => storage
                         .handle_service_request(
-                            &spec.miniapp_id,
+                            &spec.plugin_product_id,
                             &spec.storage,
                             request,
                             PluginRuntimeCallCancellation::default(),

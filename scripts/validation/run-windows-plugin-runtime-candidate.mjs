@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 /**
- * Installed Windows MiniApp M1 product acceptance for the current commit.
+ * Installed Windows Plugin M1 runtime acceptance for the current commit.
  * Reuses the hardened NSIS candidate harness and the common product/CDP
  * helpers exercised by the Plugin N1 candidate.
  */
@@ -31,8 +31,8 @@ import {
   waitForPageSelector,
 } from './run-windows-plugin-product-candidate.mjs';
 
-const UI_NAME = 'Installed UI MiniApp';
-const SERVICE_NAME = 'Installed Service MiniApp';
+const UI_NAME = 'Installed UI Plugin';
+const SERVICE_NAME = 'Installed Service Plugin';
 const EMPTY_INPUT_DIGEST = sha256('');
 const PRODUCT_TIMEOUT_MS = 6 * 60 * 1000;
 const POLL_INTERVAL_MS = 250;
@@ -62,15 +62,15 @@ function readJson(path) {
 
 async function library(context, phase) {
   const value = await productApi(context, '/api/plugins/runtimes', { phase });
-  requireInteger(value?.library_revision, 'miniapp_library_revision_missing', 'MiniApp Library revision is missing');
-  if (!Array.isArray(value?.miniapps)) failure('miniapp_library_invalid', 'MiniApp Library items are invalid');
+  requireInteger(value?.library_revision, 'plugin_library_revision_missing', 'Plugin Library revision is missing');
+  if (!Array.isArray(value?.plugins)) failure('plugin_library_invalid', 'Plugin Library items are invalid');
   return value;
 }
 
-async function workshop(context, miniappId, phase) {
+async function workshop(context, pluginId, phase) {
   return productApi(
     context,
-    `/api/plugins/runtimes/${encodeURIComponent(miniappId)}/workshop`,
+    `/api/plugins/runtimes/${encodeURIComponent(pluginId)}/workshop`,
     { phase },
   );
 }
@@ -79,33 +79,33 @@ async function editUiSource(context, current) {
   const path = 'ui/index.html';
   const source = await productApi(
     context,
-    `/api/plugins/runtimes/${encodeURIComponent(current.miniapp.miniapp_id)}/source/files/${encodeURIComponent(path)}`,
-    { phase: 'miniapp.ui.source.read' },
+    `/api/plugins/runtimes/${encodeURIComponent(current.plugin.plugin_id)}/source/files/${encodeURIComponent(path)}`,
+    { phase: 'plugin.ui.source.read' },
   );
   const previousDigest = requireString(
     source?.source_snapshot_digest,
-    'miniapp_source_file_digest_missing',
-    'MiniApp Source file response omitted its exact snapshot digest',
+    'plugin_source_file_digest_missing',
+    'Plugin Source file response omitted its exact snapshot digest',
   );
   const previousGeneration = requireInteger(
     source?.build_generation,
-    'miniapp_source_file_generation_missing',
-    'MiniApp Source file response omitted its build generation',
+    'plugin_source_file_generation_missing',
+    'Plugin Source file response omitted its build generation',
   );
   const content = requireString(
     source?.content,
-    'miniapp_source_file_content_missing',
-    'MiniApp Source file response omitted its text content',
+    'plugin_source_file_content_missing',
+    'Plugin Source file response omitted its text content',
   );
   const edited = await productApi(
     context,
-    `/api/plugins/runtimes/${encodeURIComponent(current.miniapp.miniapp_id)}/source/edit`,
+    `/api/plugins/runtimes/${encodeURIComponent(current.plugin.plugin_id)}/source/edit`,
     {
       method: 'POST',
-      phase: 'miniapp.ui.source.edit',
+      phase: 'plugin.ui.source.edit',
       body: {
-        miniapp_id: current.miniapp.miniapp_id,
-        expected_product_revision: current.miniapp.product_revision,
+        plugin_id: current.plugin.plugin_id,
+        expected_product_revision: current.plugin.product_revision,
         project_id: current.project_id,
         expected_project_revision: current.project_revision,
         expected_build_generation: previousGeneration,
@@ -119,26 +119,26 @@ async function editUiSource(context, current) {
     edited.build_generation !== previousGeneration + 1 ||
     edited.source_snapshot_digest === previousDigest
   ) {
-    failure('miniapp_source_edit_not_committed', 'Source edit did not advance the exact Project generation and digest');
+    failure('plugin_source_edit_not_committed', 'Source edit did not advance the exact Project generation and digest');
   }
   return edited;
 }
 
-async function createMiniApp(context, kind, displayName) {
+async function createPlugin(context, kind, displayName) {
   let created = null;
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     const current = await library(
       context,
-      `miniapp.${kind}.library_before_create.${attempt}`,
+      `plugin.${kind}.library_before_create.${attempt}`,
     );
     try {
       created = await productApi(context, '/api/plugins/runtimes/projects', {
         method: 'POST',
-        phase: `miniapp.${kind}.create`,
+        phase: `plugin.${kind}.create`,
         body: {
           expected_library_revision: current.library_revision,
           display_name: displayName,
-          description: `Installed ${kind} MiniApp Candidate fixture.`,
+          description: `Installed ${kind} Plugin Candidate fixture.`,
           kind,
         },
       });
@@ -154,48 +154,48 @@ async function createMiniApp(context, kind, displayName) {
     }
   }
   if (!created) {
-    failure('miniapp_create_retry_exhausted', `Could not create ${kind} MiniApp after an exact Library refresh`);
+    failure('plugin_create_retry_exhausted', `Could not create ${kind} Plugin after an exact Library refresh`);
   }
   if (
-    created?.miniapp?.kind !== kind ||
+    created?.plugin?.kind !== kind ||
     created?.source_state !== 'editable' ||
     created?.build_generation !== 1
   ) {
-    failure('miniapp_create_projection_invalid', `Created ${kind} MiniApp projection is invalid`);
+    failure('plugin_create_projection_invalid', `Created ${kind} Plugin projection is invalid`);
   }
   return created;
 }
 
-async function buildMiniApp(context, current, serviceLifecycle = null) {
+async function buildPlugin(context, current, serviceLifecycle = null) {
   const built = await productApi(
     context,
-    `/api/plugins/runtimes/${encodeURIComponent(current.miniapp.miniapp_id)}/build`,
+    `/api/plugins/runtimes/${encodeURIComponent(current.plugin.plugin_id)}/build`,
     {
       method: 'POST',
       timeoutMs: 180_000,
-      phase: `miniapp.${current.miniapp.kind}.build`,
+      phase: `plugin.${current.plugin.kind}.build`,
       body: {
-        miniapp_id: current.miniapp.miniapp_id,
-        expected_product_revision: current.miniapp.product_revision,
+        plugin_id: current.plugin.plugin_id,
+        expected_product_revision: current.plugin.product_revision,
         project_id: current.project_id,
         expected_project_revision: current.project_revision,
         expected_build_generation: current.build_generation,
         expected_source_snapshot_digest: requireString(
           current.source_snapshot_digest,
-          'miniapp_source_digest_missing',
-          'MiniApp Source digest is missing before Build',
+          'plugin_source_digest_missing',
+          'Plugin Source digest is missing before Build',
         ),
         expected_dependency_lock_digest: requireString(
           current.dependency_lock_digest,
-          'miniapp_lock_digest_missing',
-          'MiniApp dependency lock digest is missing before Build',
+          'plugin_lock_digest_missing',
+          'Plugin dependency lock digest is missing before Build',
         ),
         ...(serviceLifecycle ? { service_lifecycle: serviceLifecycle } : {}),
       },
     },
   );
-  if (!built.ready?.release || built.miniapp.releases.ready?.release_id !== built.ready.release.release_id) {
-    failure('miniapp_ready_release_missing', 'MiniApp Build did not publish the exact Ready Release');
+  if (!built.ready?.release || built.plugin.releases.ready?.release_id !== built.ready.release.release_id) {
+    failure('plugin_ready_release_missing', 'Plugin Build did not publish the exact Ready Release');
   }
   return built;
 }
@@ -204,15 +204,15 @@ async function testServiceReady(context, current) {
   const ready = current.ready;
   const tested = await productApi(
     context,
-    `/api/plugins/runtimes/${encodeURIComponent(current.miniapp.miniapp_id)}/test`,
+    `/api/plugins/runtimes/${encodeURIComponent(current.plugin.plugin_id)}/test`,
     {
       method: 'POST',
       timeoutMs: 180_000,
-      phase: 'miniapp.service.test',
+      phase: 'plugin.service.test',
       body: {
-        miniapp_id: current.miniapp.miniapp_id,
-        expected_product_revision: current.miniapp.product_revision,
-        expected_pointer_revision: current.miniapp.releases.pointer_revision,
+        plugin_id: current.plugin.plugin_id,
+        expected_product_revision: current.plugin.product_revision,
+        expected_pointer_revision: current.plugin.releases.pointer_revision,
         project_id: current.project_id,
         expected_project_revision: current.project_revision,
         expected_build_generation: current.build_generation,
@@ -225,7 +225,7 @@ async function testServiceReady(context, current) {
     },
   );
   if (tested.ready?.test?.status !== 'passed' || !tested.ready.test.receipt_id) {
-    failure('miniapp_service_test_failed', 'Default Service Ready Test did not pass', {
+    failure('plugin_service_test_failed', 'Default Plugin Service Ready Test did not pass', {
       status: tested.ready?.test?.status ?? null,
       error_code: tested.ready?.test?.error_code ?? null,
     });
@@ -235,35 +235,35 @@ async function testServiceReady(context, current) {
 
 async function publishReady(context, current) {
   const ready = current.ready;
-  const active = current.miniapp.releases.active;
+  const active = current.plugin.releases.active;
   const published = await productApi(
     context,
-    `/api/plugins/runtimes/${encodeURIComponent(current.miniapp.miniapp_id)}/publish`,
+    `/api/plugins/runtimes/${encodeURIComponent(current.plugin.plugin_id)}/publish`,
     {
       method: 'POST',
       timeoutMs: 180_000,
-      phase: `miniapp.${current.miniapp.kind}.publish`,
+      phase: `plugin.${current.plugin.kind}.publish`,
       body: {
-        miniapp_id: current.miniapp.miniapp_id,
-        expected_product_revision: current.miniapp.product_revision,
-        expected_pointer_revision: current.miniapp.releases.pointer_revision,
-        expected_active_release_epoch: current.miniapp.releases.active_release_epoch,
+        plugin_id: current.plugin.plugin_id,
+        expected_product_revision: current.plugin.product_revision,
+        expected_pointer_revision: current.plugin.releases.pointer_revision,
+        expected_active_release_epoch: current.plugin.releases.active_release_epoch,
         ready_release_id: ready.release.release_id,
         expected_ready_release_digest: ready.release.release_digest,
         ...(active ? { expected_active_release_digest: active.release_digest } : {}),
-        ...(current.miniapp.kind === 'service' && ready.test.receipt_id
+        ...(ready.service && ready.test.receipt_id
           ? { expected_service_test_receipt_id: ready.test.receipt_id }
           : {}),
         acknowledge_test_warning:
-          current.miniapp.kind === 'service' && ready.test.status !== 'passed',
+          Boolean(ready.service) && ready.test.status !== 'passed',
       },
     },
   );
   if (
-    published.miniapp.releases.active?.release_id !== ready.release.release_id ||
-    published.miniapp.releases.ready !== undefined
+    published.plugin.releases.active?.release_id !== ready.release.release_id ||
+    published.plugin.releases.ready !== undefined
   ) {
-    failure('miniapp_publish_rotation_failed', 'MiniApp Publish did not move Ready to Active exactly');
+    failure('plugin_publish_rotation_failed', 'Plugin Publish did not move Ready to Active exactly');
   }
   return published;
 }
@@ -271,19 +271,19 @@ async function publishReady(context, current) {
 async function openSurface(context, current, phase) {
   const descriptor = await productApi(
     context,
-    `/api/plugins/runtimes/${encodeURIComponent(current.miniapp.miniapp_id)}/surface/open`,
+    `/api/plugins/runtimes/${encodeURIComponent(current.plugin.plugin_id)}/surface/open`,
     {
       method: 'POST',
       phase,
-      body: { miniapp_id: current.miniapp.miniapp_id },
+      body: { plugin_id: current.plugin.plugin_id },
     },
   );
   if (
-    descriptor.miniapp_id !== current.miniapp.miniapp_id ||
-    descriptor.release_id !== current.miniapp.releases.active?.release_id ||
-    descriptor.active_release_epoch !== current.miniapp.releases.active_release_epoch
+    descriptor.plugin_id !== current.plugin.plugin_id ||
+    descriptor.release_id !== current.plugin.releases.active?.release_id ||
+    descriptor.active_release_epoch !== current.plugin.releases.active_release_epoch
   ) {
-    failure('miniapp_surface_descriptor_mismatch', 'Surface descriptor does not bind the exact Active Release');
+    failure('plugin_surface_descriptor_mismatch', 'Surface descriptor does not bind the exact Active Release');
   }
   return descriptor;
 }
@@ -296,9 +296,9 @@ function surfaceAssetPath(descriptor) {
     entrypoint.includes('\\') ||
     segments.some((segment) => !segment || segment === '.' || segment === '..')
   ) {
-    failure('miniapp_surface_entrypoint_invalid', 'Surface entrypoint is not a canonical relative path');
+    failure('plugin_surface_entrypoint_invalid', 'Surface entrypoint is not a canonical relative path');
   }
-  return `/api/plugins/runtimes/${encodeURIComponent(descriptor.miniapp_id)}/surface/assets/${encodeURIComponent(
+  return `/api/plugins/runtimes/${encodeURIComponent(descriptor.plugin_id)}/surface/assets/${encodeURIComponent(
     descriptor.surface_capability,
   )}/${descriptor.active_release_epoch}/${encodeURIComponent(
     descriptor.expected_release_digest,
@@ -313,7 +313,7 @@ async function surfaceAsset(context, descriptor, expectedStatus = 200) {
   });
   const body = await response.text();
   if (response.status !== expectedStatus) {
-    failure('miniapp_surface_asset_status', 'Surface asset returned an unexpected status', {
+    failure('plugin_surface_asset_status', 'Surface asset returned an unexpected status', {
       status_code: response.status,
       body_sha256: sha256(body),
     });
@@ -324,7 +324,7 @@ async function surfaceAsset(context, descriptor, expectedStatus = 200) {
 async function surfaceBridge(context, descriptor, callId, target, phase, expected = [200]) {
   return productApi(
     context,
-    `/api/plugins/runtimes/${encodeURIComponent(descriptor.miniapp_id)}/surface/bridge`,
+    `/api/plugins/runtimes/${encodeURIComponent(descriptor.plugin_id)}/surface/bridge`,
     {
       method: 'POST',
       phase,
@@ -343,33 +343,33 @@ async function surfaceBridge(context, descriptor, callId, target, phase, expecte
 async function closeSurface(context, descriptor, phase) {
   const closed = await productApi(
     context,
-    `/api/plugins/runtimes/${encodeURIComponent(descriptor.miniapp_id)}/surface/close`,
+    `/api/plugins/runtimes/${encodeURIComponent(descriptor.plugin_id)}/surface/close`,
     {
       method: 'POST',
       phase,
       body: {
-        miniapp_id: descriptor.miniapp_id,
+        plugin_id: descriptor.plugin_id,
         surface_session_id: descriptor.surface_session_id,
         surface_capability: descriptor.surface_capability,
       },
     },
   );
-  if (closed !== true) failure('miniapp_surface_close_failed', 'Surface session did not close exactly');
+  if (closed !== true) failure('plugin_surface_close_failed', 'Surface session did not close exactly');
 }
 
 async function setEnabled(context, current, enabled) {
   return productApi(
     context,
-    `/api/plugins/runtimes/${encodeURIComponent(current.miniapp.miniapp_id)}/enabled`,
+    `/api/plugins/runtimes/${encodeURIComponent(current.plugin.plugin_id)}/enabled`,
     {
       method: 'POST',
-      phase: `miniapp.lifecycle.${enabled ? 'enable' : 'disable'}`,
+      phase: `plugin.lifecycle.${enabled ? 'enable' : 'disable'}`,
       body: {
-        miniapp_id: current.miniapp.miniapp_id,
-        expected_product_revision: current.miniapp.product_revision,
-        expected_pointer_revision: current.miniapp.releases.pointer_revision,
-        ...(current.miniapp.releases.active
-          ? { expected_active_release_digest: current.miniapp.releases.active.release_digest }
+        plugin_id: current.plugin.plugin_id,
+        expected_product_revision: current.plugin.product_revision,
+        expected_pointer_revision: current.plugin.releases.pointer_revision,
+        ...(current.plugin.releases.active
+          ? { expected_active_release_digest: current.plugin.releases.active.release_digest }
           : {}),
         enabled,
       },
@@ -380,16 +380,16 @@ async function setEnabled(context, current, enabled) {
 async function trash(context, current) {
   return productApi(
     context,
-    `/api/plugins/runtimes/${encodeURIComponent(current.miniapp.miniapp_id)}/trash`,
+    `/api/plugins/runtimes/${encodeURIComponent(current.plugin.plugin_id)}/trash`,
     {
       method: 'POST',
-      phase: 'miniapp.lifecycle.trash',
+      phase: 'plugin.lifecycle.trash',
       body: {
-        miniapp_id: current.miniapp.miniapp_id,
-        expected_product_revision: current.miniapp.product_revision,
-        expected_pointer_revision: current.miniapp.releases.pointer_revision,
-        ...(current.miniapp.releases.active
-          ? { expected_active_release_digest: current.miniapp.releases.active.release_digest }
+        plugin_id: current.plugin.plugin_id,
+        expected_product_revision: current.plugin.product_revision,
+        expected_pointer_revision: current.plugin.releases.pointer_revision,
+        ...(current.plugin.releases.active
+          ? { expected_active_release_digest: current.plugin.releases.active.release_digest }
           : {}),
       },
     },
@@ -399,209 +399,209 @@ async function trash(context, current) {
 async function restore(context, current) {
   return productApi(
     context,
-    `/api/plugins/runtimes/${encodeURIComponent(current.miniapp.miniapp_id)}/restore`,
+    `/api/plugins/runtimes/${encodeURIComponent(current.plugin.plugin_id)}/restore`,
     {
       method: 'POST',
-      phase: 'miniapp.lifecycle.restore',
+      phase: 'plugin.lifecycle.restore',
       body: {
-        miniapp_id: current.miniapp.miniapp_id,
-        expected_product_revision: current.miniapp.product_revision,
+        plugin_id: current.plugin.plugin_id,
+        expected_product_revision: current.plugin.product_revision,
         expected_lifecycle: 'trashed',
-        expected_pointer_revision: current.miniapp.releases.pointer_revision,
+        expected_pointer_revision: current.plugin.releases.pointer_revision,
       },
     },
   );
 }
 
 async function checkUiLifecycleTransfer(context, state) {
-  let current = await createMiniApp(context, 'ui_only', UI_NAME);
-  current = await buildMiniApp(context, current);
+  let current = await createPlugin(context, 'ui_only', UI_NAME);
+  current = await buildPlugin(context, current);
   const first = structuredClone(current.ready.release);
   current = await publishReady(context, current);
-  if (current.miniapp.lifecycle === 'disabled') {
+  if (current.plugin.lifecycle === 'disabled') {
     current = await setEnabled(context, current, true);
   }
 
-  const descriptor = await openSurface(context, current, 'miniapp.ui.surface.open');
+  const descriptor = await openSurface(context, current, 'plugin.ui.surface.open');
   const asset = await surfaceAsset(context, descriptor);
   if (!asset.body.includes(UI_NAME)) {
-    failure('miniapp_surface_content_missing', 'UI Surface entrypoint did not contain the Project display name');
+    failure('plugin_surface_content_missing', 'UI Surface entrypoint did not contain the Project display name');
   }
   await surfaceBridge(
     context,
     descriptor,
     'candidate-ui-kv-set',
     { target: 'host_kv', request: { operation: 'set', key: 'candidate-key', value: { marker: 'ui-kv-ok' } } },
-    'miniapp.ui.bridge.kv_set',
+    'plugin.ui.bridge.kv_set',
   );
   const kv = await surfaceBridge(
     context,
     descriptor,
     'candidate-ui-kv-get',
     { target: 'host_kv', request: { operation: 'get', key: 'candidate-key' } },
-    'miniapp.ui.bridge.kv_get',
+    'plugin.ui.bridge.kv_get',
   );
   if (!JSON.stringify(kv).includes('ui-kv-ok')) {
-    failure('miniapp_surface_kv_failed', 'UI Surface Host KV did not round-trip the exact value');
+    failure('plugin_surface_kv_failed', 'UI Surface Host KV did not round-trip the exact value');
   }
-  await closeSurface(context, descriptor, 'miniapp.ui.surface.close');
+  await closeSurface(context, descriptor, 'plugin.ui.surface.close');
   await surfaceAsset(context, descriptor, 404);
 
-  current = await workshop(context, current.miniapp.miniapp_id, 'miniapp.ui.before_second_build');
+  current = await workshop(context, current.plugin.plugin_id, 'plugin.ui.before_second_build');
   current = await editUiSource(context, current);
-  current = await buildMiniApp(context, current);
+  current = await buildPlugin(context, current);
   const second = structuredClone(current.ready.release);
   if (second.release_id === first.release_id) {
-    failure('miniapp_second_release_identity_reused', 'Second Build reused the first Release identity');
+    failure('plugin_second_release_identity_reused', 'Second Build reused the first Release identity');
   }
   current = await publishReady(context, current);
-  if (current.miniapp.releases.previous?.release_id !== first.release_id) {
-    failure('miniapp_previous_release_missing', 'Second Publish did not retain the first Release as Previous');
+  if (current.plugin.releases.previous?.release_id !== first.release_id) {
+    failure('plugin_previous_release_missing', 'Second Publish did not retain the first Release as Previous');
   }
 
-  const transferRoot = join(context.dataRoot, 'candidate-miniapp-transfer');
+  const transferRoot = join(context.dataRoot, 'candidate-plugin-transfer');
   mkdirSync(transferRoot, { recursive: true });
   const shareRoot = join(transferRoot, 'ui-share');
   const shareOperation = await productApi(
     context,
-    `/api/plugins/runtimes/${encodeURIComponent(current.miniapp.miniapp_id)}/share`,
+    `/api/plugins/runtimes/${encodeURIComponent(current.plugin.plugin_id)}/share`,
     {
       method: 'POST',
-      phase: 'miniapp.ui.share_export',
+      phase: 'plugin.ui.share_export',
       body: {
-        miniapp_id: current.miniapp.miniapp_id,
-        expected_product_revision: current.miniapp.product_revision,
-        expected_pointer_revision: current.miniapp.releases.pointer_revision,
+        plugin_id: current.plugin.plugin_id,
+        expected_product_revision: current.plugin.product_revision,
+        expected_pointer_revision: current.plugin.releases.pointer_revision,
         content: 'active_release',
-        release_id: current.miniapp.releases.active.release_id,
-        expected_release_digest: current.miniapp.releases.active.release_digest,
+        release_id: current.plugin.releases.active.release_id,
+        expected_release_digest: current.plugin.releases.active.release_digest,
         destination_path: shareRoot,
         include_source: true,
       },
     },
   );
-  if (shareOperation.state !== 'succeeded') failure('miniapp_share_export_failed', 'Share Export did not succeed');
+  if (shareOperation.state !== 'succeeded') failure('plugin_share_export_failed', 'Share Export did not succeed');
   const bundle = readJson(join(shareRoot, 'bundle.json'));
-  const beforeShareImport = await library(context, 'miniapp.ui.library_before_share_import');
+  const beforeShareImport = await library(context, 'plugin.ui.library_before_share_import');
   const importedShare = await productApi(context, '/api/plugins/runtimes/import/share', {
     method: 'POST',
-    phase: 'miniapp.ui.share_import',
+    phase: 'plugin.ui.share_import',
     body: {
       expected_library_revision: beforeShareImport.library_revision,
       source_path: shareRoot,
       expected_bundle_digest: bundle.bundle_digest,
       expected_release_digest: bundle.release.artifact_digest,
-      display_name: 'Imported UI MiniApp Share',
+      display_name: 'Imported UI Plugin Share',
     },
   });
   if (
-    importedShare.miniapp.miniapp_id === current.miniapp.miniapp_id ||
-    importedShare.miniapp.lifecycle !== 'disabled'
+    importedShare.plugin.plugin_id === current.plugin.plugin_id ||
+    importedShare.plugin.lifecycle !== 'disabled'
   ) {
-    failure('miniapp_share_import_identity_invalid', 'Share Import did not create a new disabled identity');
+    failure('plugin_share_import_identity_invalid', 'Share Import did not create a new disabled identity');
   }
 
   current = await productApi(
     context,
-    `/api/plugins/runtimes/${encodeURIComponent(current.miniapp.miniapp_id)}/rollback`,
+    `/api/plugins/runtimes/${encodeURIComponent(current.plugin.plugin_id)}/rollback`,
     {
       method: 'POST',
       timeoutMs: 180_000,
-      phase: 'miniapp.ui.rollback',
+      phase: 'plugin.ui.rollback',
       body: {
-        miniapp_id: current.miniapp.miniapp_id,
-        expected_product_revision: current.miniapp.product_revision,
-        expected_pointer_revision: current.miniapp.releases.pointer_revision,
-        expected_active_release_epoch: current.miniapp.releases.active_release_epoch,
-        expected_current_release_digest: current.miniapp.releases.active.release_digest,
-        previous_release_id: current.miniapp.releases.previous.release_id,
-        expected_previous_release_digest: current.miniapp.releases.previous.release_digest,
+        plugin_id: current.plugin.plugin_id,
+        expected_product_revision: current.plugin.product_revision,
+        expected_pointer_revision: current.plugin.releases.pointer_revision,
+        expected_active_release_epoch: current.plugin.releases.active_release_epoch,
+        expected_current_release_digest: current.plugin.releases.active.release_digest,
+        previous_release_id: current.plugin.releases.previous.release_id,
+        expected_previous_release_digest: current.plugin.releases.previous.release_digest,
       },
     },
   );
-  if (current.miniapp.releases.active?.release_id !== first.release_id) {
-    failure('miniapp_rollback_failed', 'Rollback did not restore the first Release identity');
+  if (current.plugin.releases.active?.release_id !== first.release_id) {
+    failure('plugin_rollback_failed', 'Rollback did not restore the first Release identity');
   }
 
   current = await setEnabled(context, current, false);
   const backupRoot = join(transferRoot, 'ui-backup');
   const backupOperation = await productApi(
     context,
-    `/api/plugins/runtimes/${encodeURIComponent(current.miniapp.miniapp_id)}/backup`,
+    `/api/plugins/runtimes/${encodeURIComponent(current.plugin.plugin_id)}/backup`,
     {
       method: 'POST',
       timeoutMs: 180_000,
-      phase: 'miniapp.ui.backup_export',
+      phase: 'plugin.ui.backup_export',
       body: {
-        miniapp_id: current.miniapp.miniapp_id,
-        expected_product_revision: current.miniapp.product_revision,
+        plugin_id: current.plugin.plugin_id,
+        expected_product_revision: current.plugin.product_revision,
         expected_lifecycle: 'disabled',
-        expected_pointer_revision: current.miniapp.releases.pointer_revision,
+        expected_pointer_revision: current.plugin.releases.pointer_revision,
         expected_config_revision: current.config.config_revision,
         expected_credential_bindings_revision: current.credential_bindings_revision,
         destination_path: backupRoot,
       },
     },
   );
-  if (backupOperation.state !== 'succeeded') failure('miniapp_backup_export_failed', 'Backup Export did not succeed');
+  if (backupOperation.state !== 'succeeded') failure('plugin_backup_export_failed', 'Backup Export did not succeed');
   const metadata = readJson(join(backupRoot, 'metadata.json'));
   const metadataDigest = sha256(canonicalJson(metadata));
-  const beforeBackupImport = await library(context, 'miniapp.ui.library_before_backup_import');
+  const beforeBackupImport = await library(context, 'plugin.ui.library_before_backup_import');
   const importedBackup = await productApi(context, '/api/plugins/runtimes/import/backup', {
     method: 'POST',
     timeoutMs: 180_000,
-    phase: 'miniapp.ui.backup_import',
+    phase: 'plugin.ui.backup_import',
     body: {
       expected_library_revision: beforeBackupImport.library_revision,
       source_path: backupRoot,
       expected_backup_metadata_digest: metadataDigest,
-      display_name: 'Imported UI MiniApp Backup',
+      display_name: 'Imported UI Plugin Backup',
     },
   });
   if (
-    importedBackup.miniapp.miniapp_id === current.miniapp.miniapp_id ||
-    importedBackup.miniapp.lifecycle !== 'disabled'
+    importedBackup.plugin.plugin_id === current.plugin.plugin_id ||
+    importedBackup.plugin.lifecycle !== 'disabled'
   ) {
-    failure('miniapp_backup_import_identity_invalid', 'Backup Import did not create a new disabled identity');
+    failure('plugin_backup_import_identity_invalid', 'Backup Import did not create a new disabled identity');
   }
 
   current = await trash(context, current);
-  if (current.miniapp.lifecycle !== 'trashed') failure('miniapp_trash_failed', 'MiniApp did not enter Trash');
+  if (current.plugin.lifecycle !== 'trashed') failure('plugin_trash_failed', 'Plugin did not enter Trash');
   current = await restore(context, current);
-  if (current.miniapp.lifecycle !== 'disabled') failure('miniapp_restore_failed', 'Restored MiniApp did not return disabled');
+  if (current.plugin.lifecycle !== 'disabled') failure('plugin_restore_failed', 'Restored Plugin did not return disabled');
   current = await setEnabled(context, current, true);
 
   let disposable = await trash(context, importedShare);
   const afterDelete = await productApi(
     context,
-    `/api/plugins/runtimes/${encodeURIComponent(disposable.miniapp.miniapp_id)}/delete`,
+    `/api/plugins/runtimes/${encodeURIComponent(disposable.plugin.plugin_id)}/delete`,
     {
       method: 'POST',
       timeoutMs: 180_000,
-      phase: 'miniapp.ui.permanent_delete',
+      phase: 'plugin.ui.permanent_delete',
       body: {
-        miniapp_id: disposable.miniapp.miniapp_id,
-        expected_product_revision: disposable.miniapp.product_revision,
+        plugin_id: disposable.plugin.plugin_id,
+        expected_product_revision: disposable.plugin.product_revision,
         expected_lifecycle: 'trashed',
-        expected_pointer_revision: disposable.miniapp.releases.pointer_revision,
-        ...(disposable.miniapp.releases.active
-          ? { expected_active_release_digest: disposable.miniapp.releases.active.release_digest }
+        expected_pointer_revision: disposable.plugin.releases.pointer_revision,
+        ...(disposable.plugin.releases.active
+          ? { expected_active_release_digest: disposable.plugin.releases.active.release_digest }
           : {}),
       },
     },
   );
-  if (afterDelete.miniapps.some((item) => item.miniapp_id === disposable.miniapp.miniapp_id)) {
-    failure('miniapp_permanent_delete_failed', 'Permanently deleted MiniApp remains in the Library');
+  if (afterDelete.plugins.some((item) => item.plugin_id === disposable.plugin.plugin_id)) {
+    failure('plugin_permanent_delete_failed', 'Permanently deleted Plugin remains in the Library');
   }
 
-  state.uiMiniAppId = current.miniapp.miniapp_id;
+  state.uiPluginId = current.plugin.plugin_id;
   state.uiName = UI_NAME;
-  state.backupMiniAppId = importedBackup.miniapp.miniapp_id;
+  state.backupPluginId = importedBackup.plugin.plugin_id;
   return {
-    miniapp_id_sha256: sha256(current.miniapp.miniapp_id),
+    plugin_id_sha256: sha256(current.plugin.plugin_id),
     first_release_id_sha256: sha256(first.release_id),
     second_release_id_sha256: sha256(second.release_id),
-    active_release_digest: current.miniapp.releases.active.release_digest,
+    active_release_digest: current.plugin.releases.active.release_digest,
     surface_asset_sha256: asset.body_sha256,
     host_kv_round_trip: true,
     share_import_as_new: true,
@@ -663,7 +663,7 @@ async function descendantProcesses(rootPid) {
     await sleep(200 * attempt);
   }
   failure(
-    'miniapp_service_process_snapshot_failed',
+    'plugin_service_process_snapshot_failed',
     'Could not snapshot Service process descendants after bounded retries',
     { attempts },
   );
@@ -675,7 +675,7 @@ async function serviceNodeProcess(context) {
     String(process.command_line || '').includes('--input-type=module'),
   );
   if (candidates.length !== 1) {
-    failure('miniapp_service_process_identity_ambiguous', 'Expected exactly one resident MiniApp Service Node process', {
+    failure('plugin_service_process_identity_ambiguous', 'Expected exactly one resident Plugin Service Node process', {
       observed_count: candidates.length,
     });
   }
@@ -690,37 +690,37 @@ function terminateProcess(pid) {
     timeout: 10_000,
   });
   if (result.status !== 0 || result.error) {
-    failure('miniapp_service_fault_injection_failed', 'Could not terminate the exact Service Node process');
+    failure('plugin_service_fault_injection_failed', 'Could not terminate the exact Service Node process');
   }
 }
 
-async function waitForServiceHealth(context, miniappId, state, timeoutMs) {
+async function waitForServiceHealth(context, pluginId, state, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   let observed = null;
   while (Date.now() < deadline) {
-    observed = await workshop(context, miniappId, `miniapp.service.health.${state}`);
-    if (observed.miniapp.service_health?.state === state) return observed;
+    observed = await workshop(context, pluginId, `plugin.service.health.${state}`);
+    if (observed.plugin.service_health?.state === state) return observed;
     await sleep(POLL_INTERVAL_MS);
   }
-  failure('miniapp_service_health_timeout', `Service did not reach ${state}`, {
-    observed_state: observed?.miniapp?.service_health?.state ?? null,
+  failure('plugin_service_health_timeout', `Service did not reach ${state}`, {
+    observed_state: observed?.plugin?.service_health?.state ?? null,
   });
 }
 
 async function setServiceRunning(context, current, running) {
-  const active = current.miniapp.releases.active;
+  const active = current.plugin.releases.active;
   return productApi(
     context,
-    `/api/plugins/runtimes/${encodeURIComponent(current.miniapp.miniapp_id)}/service/running`,
+    `/api/plugins/runtimes/${encodeURIComponent(current.plugin.plugin_id)}/service/running`,
     {
       method: 'POST',
       timeoutMs: 180_000,
-      phase: `miniapp.service.${running ? 'start' : 'stop'}`,
+      phase: `plugin.service.${running ? 'start' : 'stop'}`,
       body: {
-        miniapp_id: current.miniapp.miniapp_id,
-        expected_product_revision: current.miniapp.product_revision,
-        expected_pointer_revision: current.miniapp.releases.pointer_revision,
-        expected_active_release_epoch: current.miniapp.releases.active_release_epoch,
+        plugin_id: current.plugin.plugin_id,
+        expected_product_revision: current.plugin.product_revision,
+        expected_pointer_revision: current.plugin.releases.pointer_revision,
+        expected_active_release_epoch: current.plugin.releases.active_release_epoch,
         expected_active_release_digest: active.release_digest,
         running,
       },
@@ -729,91 +729,91 @@ async function setServiceRunning(context, current, running) {
 }
 
 async function checkServiceLifecycleFault(context, state) {
-  let current = await createMiniApp(context, 'service', SERVICE_NAME);
-  current = await buildMiniApp(context, current, 'on_demand');
+  let current = await createPlugin(context, 'service', SERVICE_NAME);
+  current = await buildPlugin(context, current, 'on_demand');
   current = await testServiceReady(context, current);
   current = await publishReady(context, current);
-  if (current.miniapp.lifecycle === 'disabled') {
+  if (current.plugin.lifecycle === 'disabled') {
     current = await setEnabled(context, current, true);
   }
   current = await setServiceRunning(context, current, true);
-  if (current.miniapp.service_health?.state !== 'ready') {
-    failure('miniapp_service_start_failed', 'Published Service did not become ready');
+  if (current.plugin.service_health?.state !== 'ready') {
+    failure('plugin_service_start_failed', 'Published Service did not become ready');
   }
 
-  const descriptor = await openSurface(context, current, 'miniapp.service.surface.open');
+  const descriptor = await openSurface(context, current, 'plugin.service.surface.open');
   const echo = await surfaceBridge(
     context,
     descriptor,
     'candidate-service-echo',
     { target: 'service', method: 'echo', payload: { marker: 'service-bridge-ok' } },
-    'miniapp.service.bridge.echo',
+    'plugin.service.bridge.echo',
   );
   if (echo?.marker !== 'service-bridge-ok') {
-    failure('miniapp_service_bridge_failed', 'Service Bridge did not return the exact payload');
+    failure('plugin_service_bridge_failed', 'Service Bridge did not return the exact payload');
   }
 
   const crashed = await serviceNodeProcess(context);
   terminateProcess(crashed.process_id);
   current = await waitForServiceHealth(
     context,
-    current.miniapp.miniapp_id,
+    current.plugin.plugin_id,
     'failed',
     30_000,
   );
   current = await productApi(
     context,
-    `/api/plugins/runtimes/${encodeURIComponent(current.miniapp.miniapp_id)}/service/retry`,
+    `/api/plugins/runtimes/${encodeURIComponent(current.plugin.plugin_id)}/service/retry`,
     {
       method: 'POST',
       timeoutMs: 180_000,
-      phase: 'miniapp.service.retry',
+      phase: 'plugin.service.retry',
       body: {
-        miniapp_id: current.miniapp.miniapp_id,
-        expected_product_revision: current.miniapp.product_revision,
-        expected_pointer_revision: current.miniapp.releases.pointer_revision,
-        expected_active_release_epoch: current.miniapp.releases.active_release_epoch,
-        expected_active_release_digest: current.miniapp.releases.active.release_digest,
+        plugin_id: current.plugin.plugin_id,
+        expected_product_revision: current.plugin.product_revision,
+        expected_pointer_revision: current.plugin.releases.pointer_revision,
+        expected_active_release_epoch: current.plugin.releases.active_release_epoch,
+        expected_active_release_digest: current.plugin.releases.active.release_digest,
       },
     },
   );
-  if (current.miniapp.service_health?.state !== 'ready') {
-    failure('miniapp_service_retry_failed', 'Service Retry did not start a fresh Host');
+  if (current.plugin.service_health?.state !== 'ready') {
+    failure('plugin_service_retry_failed', 'Service Retry did not start a fresh Host');
   }
   const restarted = await serviceNodeProcess(context);
   if (restarted.process_id === crashed.process_id) {
-    failure('miniapp_service_generation_reused', 'Service Retry reused the crashed process identity');
+    failure('plugin_service_generation_reused', 'Service Retry reused the crashed process identity');
   }
 
   current = await setServiceRunning(context, current, false);
-  if (current.miniapp.service_health?.state !== 'stopped') {
-    failure('miniapp_service_stop_failed', 'Service Stop did not reach stopped');
+  if (current.plugin.service_health?.state !== 'stopped') {
+    failure('plugin_service_stop_failed', 'Service Stop did not reach stopped');
   }
-  await closeSurface(context, descriptor, 'miniapp.service.surface.close');
+  await closeSurface(context, descriptor, 'plugin.service.surface.close');
   const staleBridge = await surfaceBridge(
     context,
     descriptor,
     'candidate-service-stale',
     { target: 'service', method: 'echo', payload: { marker: 'must-not-run' } },
-    'miniapp.service.bridge.stale',
+    'plugin.service.bridge.stale',
     [404],
   );
-  if (staleBridge.status !== 404) failure('miniapp_stale_bridge_not_rejected', 'Closed Surface Bridge was not rejected');
+  if (staleBridge.status !== 404) failure('plugin_stale_bridge_not_rejected', 'Closed Surface Bridge was not rejected');
 
-  const beforeRestartRelease = current.miniapp.releases.active;
+  const beforeRestartRelease = current.plugin.releases.active;
   const restart = await context.restart();
-  current = await workshop(context, current.miniapp.miniapp_id, 'miniapp.service.after_restart');
+  current = await workshop(context, current.plugin.plugin_id, 'plugin.service.after_restart');
   if (
-    current.miniapp.releases.active?.release_id !== beforeRestartRelease.release_id ||
-    current.miniapp.service_health?.state !== 'stopped'
+    current.plugin.releases.active?.release_id !== beforeRestartRelease.release_id ||
+    current.plugin.service_health?.state !== 'stopped'
   ) {
-    failure('miniapp_service_restart_state_invalid', 'Service Active Release or stopped state did not survive restart');
+    failure('plugin_service_restart_state_invalid', 'Service Active Release or stopped state did not survive restart');
   }
-  state.serviceMiniAppId = current.miniapp.miniapp_id;
+  state.servicePluginId = current.plugin.plugin_id;
   state.serviceName = SERVICE_NAME;
   return {
-    miniapp_id_sha256: sha256(current.miniapp.miniapp_id),
-    release_digest: current.miniapp.releases.active.release_digest,
+    plugin_id_sha256: sha256(current.plugin.plugin_id),
+    release_digest: current.plugin.releases.active.release_digest,
     test_status: 'passed',
     service_bridge_round_trip: true,
     crashed_process_id_sha256: sha256(String(crashed.process_id)),
@@ -824,28 +824,10 @@ async function checkServiceLifecycleFault(context, state) {
   };
 }
 
-async function clickSurfaceButton(client, displayName, action) {
-  const clicked = await client.evaluate(`(() => {
-    const displayName = ${JSON.stringify(displayName)};
-    const action = ${JSON.stringify(action)};
-    const button = [...document.querySelectorAll('button')].find((candidate) => {
-      const label = candidate.getAttribute('aria-label') ?? '';
-      if (!label.includes(displayName) || !label.includes('Surface')) return false;
-      return action === 'open'
-        ? !label.includes('Close') && !label.includes('关闭') && !label.includes('Reload') && !label.includes('重新加载')
-        : label.includes('Close') || label.includes('关闭');
-    });
-    if (!button) return false;
-    button.click();
-    return true;
-  })()`);
-  if (!clicked) failure('miniapp_surface_ui_action_missing', `Could not ${action} Surface through the Desktop UI`);
-}
-
 async function auditPage(client, rootSelector, phase) {
   const audit = await auditInteractiveNames(client, rootSelector);
   if (audit.interactive_count === 0 || audit.missing.length > 0) {
-    failure('miniapp_desktop_a11y_failed', `${phase} has unnamed interactive controls`, {
+    failure('plugin_desktop_a11y_failed', `${phase} has unnamed interactive controls`, {
       phase,
       interactive_count: audit.interactive_count,
       missing: audit.missing,
@@ -875,7 +857,7 @@ async function auditPage(client, rootSelector, phase) {
     layout.page_scroll_width > layout.page_client_width + 1 ||
     layout.page_scroll_left !== 0
   ) {
-    failure('miniapp_desktop_horizontal_overflow', `${phase} drifted outside the Desktop content viewport`, {
+    failure('plugin_desktop_horizontal_overflow', `${phase} drifted outside the Desktop content viewport`, {
       phase,
       layout,
     });
@@ -914,8 +896,8 @@ async function captureSettledPage(client, outputPath) {
 }
 
 async function checkDesktopA11y(context, state) {
-  if (!state.uiMiniAppId || !state.serviceMiniAppId) {
-    failure('miniapp_a11y_fixture_missing', 'MiniApp product fixtures are missing before Desktop audit');
+  if (!state.uiPluginId || !state.servicePluginId) {
+    failure('plugin_a11y_fixture_missing', 'Plugin product fixtures are missing before Desktop audit');
   }
   const client = await connectToProductPage(context);
   try {
@@ -925,53 +907,46 @@ async function checkDesktopA11y(context, state) {
     await waitForPageSelector(
       client,
       '/plugins',
-      'section[aria-labelledby="miniapp-library-title"]',
+      'main',
       30_000,
       state.uiName,
     );
     await settleDesktopPaint(client);
-    const libraryAudit = await auditPage(client, 'body', 'MiniApp Library');
+    const libraryAudit = await auditPage(client, 'body', 'Plugin Library');
     const libraryScreenshot = await captureSettledPage(
       client,
-      join(evidenceRoot, 'miniapp-library.png'),
+      join(evidenceRoot, 'plugin-library.png'),
     );
 
     await waitForPageSelector(
       client,
-      `/plugins/run/${state.uiMiniAppId}`,
-      'ol[aria-label]',
-      30_000,
-      state.uiName,
-    );
-    await clickSurfaceButton(client, state.uiName, 'open');
-    await waitForPageSelector(
-      client,
-      `/plugins/run/${state.uiMiniAppId}`,
-      'section[aria-labelledby="miniapp-surface-title"]:not([aria-busy]) iframe[title*="Surface"]',
+      `/plugins/run/${state.uiPluginId}`,
+      'section[aria-label]:not([aria-busy]) iframe[sandbox="allow-scripts allow-forms"]',
       30_000,
       state.uiName,
     );
     await settleDesktopPaint(client);
-    const surfaceAudit = await auditPage(client, 'body', 'MiniApp Workshop/Surface');
+    const surfaceAudit = await auditPage(client, 'body', 'Plugin Workshop/Surface');
     const surfaceScreenshot = await captureSettledPage(
       client,
-      join(evidenceRoot, 'miniapp-workshop-surface.png'),
+      join(evidenceRoot, 'plugin-workshop-surface.png'),
     );
-    await clickSurfaceButton(client, state.uiName, 'close');
+    await waitForPageSelector(client, '/plugins', 'main', 30_000, state.uiName);
 
     await waitForPageSelector(
       client,
-      `/plugins/run/${state.serviceMiniAppId}`,
-      'ol[aria-label]',
+      `/plugins/run/${state.servicePluginId}`,
+      'section[aria-label]:not([aria-busy]) iframe[sandbox="allow-scripts allow-forms"]',
       30_000,
       state.serviceName,
     );
     await settleDesktopPaint(client);
-    const serviceAudit = await auditPage(client, 'body', 'MiniApp Service Workshop');
+    const serviceAudit = await auditPage(client, 'body', 'Plugin Service Workshop');
     const serviceScreenshot = await captureSettledPage(
       client,
-      join(evidenceRoot, 'miniapp-service-workshop.png'),
+      join(evidenceRoot, 'plugin-service-workshop.png'),
     );
+    await waitForPageSelector(client, '/plugins', 'main', 30_000, state.uiName);
     return {
       library: { ...libraryAudit, screenshot: libraryScreenshot },
       workshop_surface: { ...surfaceAudit, screenshot: surfaceScreenshot },
@@ -984,7 +959,7 @@ async function checkDesktopA11y(context, state) {
 
 export function assertSelfTest() {
   const descriptor = {
-    miniapp_id: 'miniapp-id',
+    plugin_id: 'plugin-id',
     surface_capability: 'surface-capability',
     active_release_epoch: 3,
     expected_release_digest: 'a'.repeat(64),
@@ -1005,7 +980,7 @@ export function assertSelfTest() {
     schema_version: '1.0.0',
     status: 'pass',
     suite: {
-      name: 'windows-miniapp-product-candidate-self-test',
+      name: 'windows-plugin-runtime-candidate-self-test',
       checks: ['surface-path', 'backup-canonical-json', 'empty-input-digest'],
     },
   };
@@ -1017,20 +992,20 @@ async function runCurrentCandidate() {
   return runCandidateSmoke({
     installer: candidate.installer,
     sourceCommit: candidate.sourceCommit,
-    workRoot: candidate.workRoot.replace('product-runs', 'miniapp-product-runs'),
+    workRoot: candidate.workRoot.replace('product-runs', 'plugin-runtime-runs'),
     productChecks: [
       {
-        id: 'miniapp-ui-release-surface-transfer',
+        id: 'plugin-ui-release-surface-transfer',
         timeoutMs: PRODUCT_TIMEOUT_MS,
         run: (context) => checkUiLifecycleTransfer(context, state),
       },
       {
-        id: 'miniapp-service-test-bridge-fault',
+        id: 'plugin-service-test-bridge-fault',
         timeoutMs: PRODUCT_TIMEOUT_MS,
         run: (context) => checkServiceLifecycleFault(context, state),
       },
       {
-        id: 'miniapp-desktop-a11y',
+        id: 'plugin-desktop-a11y',
         timeoutMs: 180_000,
         run: (context) => checkDesktopA11y(context, state),
       },

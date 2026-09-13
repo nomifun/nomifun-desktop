@@ -83,8 +83,8 @@ BEGIN
     SELECT RAISE(ABORT, 'plugin mount config schema requires a positive config revision');
 END;
 
-CREATE TRIGGER trg_plugin_credential_binding_insert_guard
-BEFORE INSERT ON plugin_credential_bindings
+CREATE TRIGGER trg_plugin_mount_credential_binding_insert_guard
+BEFORE INSERT ON plugin_mount_credential_bindings
 WHEN NOT EXISTS (
     SELECT 1
     FROM plugin_mounts mount
@@ -104,8 +104,8 @@ BEGIN
     SELECT RAISE(ABORT, 'plugin credential binding insert requires a whole-group CAS');
 END;
 
-CREATE TRIGGER trg_plugin_credential_binding_update_guard
-BEFORE UPDATE ON plugin_credential_bindings
+CREATE TRIGGER trg_plugin_mount_credential_binding_update_guard
+BEFORE UPDATE ON plugin_mount_credential_bindings
 WHEN NOT EXISTS (
     SELECT 1
     FROM plugin_mounts mount
@@ -125,8 +125,8 @@ BEGIN
     SELECT RAISE(ABORT, 'plugin credential binding update requires a whole-group CAS');
 END;
 
-CREATE TRIGGER trg_plugin_credential_binding_delete_guard
-BEFORE DELETE ON plugin_credential_bindings
+CREATE TRIGGER trg_plugin_mount_credential_binding_delete_guard
+BEFORE DELETE ON plugin_mount_credential_bindings
 WHEN NOT EXISTS (
     SELECT 1
     FROM plugin_mounts mount
@@ -180,15 +180,15 @@ BEGIN
      WHERE mount_id = NEW.mount_id;
 END;
 
-CREATE TRIGGER trg_plugin_credential_binding_updated_at_monotonic
-BEFORE UPDATE OF updated_at ON plugin_credential_bindings
+CREATE TRIGGER trg_plugin_mount_credential_binding_updated_at_monotonic
+BEFORE UPDATE OF updated_at ON plugin_mount_credential_bindings
 WHEN NEW.updated_at < OLD.updated_at
 BEGIN
     SELECT RAISE(ABORT, 'plugin credential binding updated_at cannot move backwards');
 END;
 
-CREATE TRIGGER trg_plugin_kv_updated_at_monotonic
-BEFORE UPDATE OF updated_at ON plugin_kv
+CREATE TRIGGER trg_plugin_mount_kv_updated_at_monotonic
+BEFORE UPDATE OF updated_at ON plugin_mount_kv
 WHEN NEW.updated_at < OLD.updated_at
 BEGIN
     SELECT RAISE(ABORT, 'plugin KV updated_at cannot move backwards');

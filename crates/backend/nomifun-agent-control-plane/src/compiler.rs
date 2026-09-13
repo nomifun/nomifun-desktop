@@ -6,8 +6,8 @@ use nomifun_agent_contracts::{
     AgentPresetRevision, AgentPresetRevisionPayload, CanonicalErrorCode,
     CapabilityCatalogPublication, CapabilityConsumer, CapabilityRef, ContributionId,
     ContributionLock, ContributionSourceKind, DigestHex,
-    MiniAppCapabilityCatalogPublication, OfficialPresetKey, OperationId, PluginMountId,
-    PresetRevisionRef, PrincipalRef, ResolvedCapability, ResolvedMiniAppCapability,
+    OfficialPresetKey, OperationId, PluginProductCapabilityCatalogPublication,
+    PresetRevisionRef, PrincipalRef, ResolvedCapability,
     ResolvedSnapshotEnvelope, PluginSourceKind, PluginSourceMetadata, SkillRef,
     StableSourceIdentity, UserId, VersionString, digest_payload,
 };
@@ -163,10 +163,10 @@ impl PresetPreviewCompiler {
         } else {
             Some(self.canonical_inputs()?)
         };
-        let miniapp_capabilities = if clean {
+        let plugin_product_capabilities = if clean {
             Vec::new()
         } else {
-            resolved_miniapp_capabilities_for_payload(&payload, catalog)?
+            resolved_plugin_product_capabilities_for_payload(&payload, catalog)?
         };
         let contribution_locks = if clean {
             current_revision
@@ -273,7 +273,7 @@ impl PresetPreviewCompiler {
                 audience: request.audience.clone(),
                 created_at_ms: now_ms(),
                 resolver_run_id: OperationId::from(Uuid::now_v7().to_string()),
-                miniapp_capabilities,
+                plugin_product_capabilities,
             };
             match KernelAgentPresetCompiler::compile(&registry, &environment, request) {
                 Ok(snapshot) => Some(snapshot),
@@ -375,6 +375,11 @@ fn snapshot_matches_registry(
         .iter()
         .chain(&snapshot.content.on_demand_capabilities)
     {
+        if resolved.contribution_lock.source_kind
+            == ContributionSourceKind::PluginProductActiveRelease
+        {
+            continue;
+        }
         let Some(current) = registry.capability(&resolved.capability.id) else {
             return Ok(false);
         };
@@ -385,7 +390,7 @@ fn snapshot_matches_registry(
             || current.manifest.package != resolved.source_package
             || current.contribution_id != resolved.contribution_id
             || current.contribution_lock != resolved.contribution_lock
-            || current.mount_id != resolved.resolved_mount_id
+            || resolved.resolved_mount_id.as_ref() != Some(&current.mount_id)
             || current.source != resolved.resolved_source
             || current.target_artifact_digest != resolved.target_artifact_digest
             || current.schema_digest != resolved.schema_digest
@@ -480,10 +485,10 @@ fn validate_direct_catalog_availability(
     }
 }
 
-fn resolved_miniapp_capabilities_for_payload(
+fn resolved_plugin_product_capabilities_for_payload(
     payload: &AgentPresetRevisionPayload,
     catalog: &CatalogSnapshot,
-) -> Result<Vec<ResolvedMiniAppCapability>, ControlPlaneError> {
+) -> Result<Vec<ResolvedCapability>, ControlPlaneError> {
     let mut capabilities = Vec::new();
     for selection in payload
         .initial_capabilities
@@ -491,7 +496,7 @@ fn resolved_miniapp_capabilities_for_payload(
         .chain(&payload.on_demand_capabilities)
     {
         if let Some(capability) =
-            resolved_miniapp_capability_for_selection(selection, catalog)?
+            resolved_plugin_product_capability_for_selection(selection, catalog)?
         {
             capabilities.push(capability);
         }
@@ -500,53 +505,63 @@ fn resolved_miniapp_capabilities_for_payload(
     Ok(capabilities)
 }
 
-fn resolved_miniapp_capability_for_selection(
+fn resolved_plugin_product_capability_for_selection(
     selection: &nomifun_agent_contracts::CapabilitySelection,
     catalog: &CatalogSnapshot,
-) -> Result<Option<ResolvedMiniAppCapability>, ControlPlaneError> {
+) -> Result<Option<ResolvedCapability>, ControlPlaneError> {
     let Some((publication, capability)) =
-        miniapp_publication_for(catalog, &selection.capability)?
+        plugin_product_publication_for(catalog, &selection.capability)?
     else {
         return Ok(None);
     };
-    let operation_lock = miniapp_catalog_operation_lock(publication, capability)?;
+    let operation_lock = plugin_product_catalog_operation_lock(publication, capability)?;
     let manifest = &capability.manifest;
     let required_resource_kinds = capability.entry.typed_resource_kinds.clone();
     if required_resource_kinds != manifest.contributions.resource_kinds {
-        return Err(miniapp_catalog_error(format!(
-            "MiniApp capability {}@{} has inconsistent typed resource requirements",
+        return Err(plugin_product_catalog_error(format!(
+            "Plugin Product capability {}@{} has inconsistent typed resource requirements",
             selection.capability.id.as_ref(),
             selection.capability.version.as_ref()
         )));
     }
 
-    let resolved = ResolvedMiniAppCapability {
+    let resolved = ResolvedCapability {
         capability: capability.entry.capability.clone(),
         source_package: manifest.package.clone(),
         contribution_id: capability.entry.contribution_id.clone(),
         contribution_lock: operation_lock.contribution,
-        miniapp_id: publication.miniapp_id.clone(),
-        active_release: publication.active_release.clone(),
-        active_release_epoch: publication.active_release_epoch,
-        catalog_digest: publication.catalog_digest.clone(),
-        display_name: manifest.display.name.clone(),
-        description: manifest.display.description.clone(),
+        resolved_mount_id: None,
+        resolved_source: PluginSourceMetadata {
+            source_kind: PluginSourceKind::ManagedLocal,
+            source_identity: capability.entry.provenance.source_identity.as_ref().to_owned(),
+            source_digest: Some(publication.active_release.release_digest.clone()),
+        },
+        target_artifact_digest: publication.active_release.release_digest.clone(),
+        schema_digest: capability.entry.contract_digest.clone(),
+        dependency_path: vec![capability.entry.capability.id.clone()],
+        required_runtime_features: capability.entry.required_runtime_features.clone(),
+        plugin_product_id: Some(publication.plugin_product_id.clone()),
+        active_release: Some(publication.active_release.clone()),
+        active_release_epoch: Some(publication.active_release_epoch),
+        catalog_digest: Some(publication.catalog_digest.clone()),
+        display_name: Some(manifest.display.name.clone()),
+        description: Some(manifest.display.description.clone()),
         actions: manifest.contributions.actions.clone(),
         required_resource_kinds,
         action_allowlist: selection.action_allowlist.clone(),
     };
     resolved
         .validate()
-        .map_err(|error| miniapp_catalog_error(error.message))?;
+        .map_err(|error| plugin_product_catalog_error(error.message))?;
     Ok(Some(resolved))
 }
 
-fn miniapp_publication_for<'a>(
+fn plugin_product_publication_for<'a>(
     catalog: &'a CatalogSnapshot,
     reference: &CapabilityRef,
 ) -> Result<
     Option<(
-        &'a MiniAppCapabilityCatalogPublication,
+        &'a PluginProductCapabilityCatalogPublication,
         &'a CapabilityCatalogPublication,
     )>,
     ControlPlaneError,
@@ -554,14 +569,14 @@ fn miniapp_publication_for<'a>(
     let has_kernel_materialization =
         catalog.materialized_capability(reference).is_some();
     let mut match_value = None;
-    for publication in catalog.miniapp_publications.values() {
+    for publication in catalog.plugin_product_publications.values() {
         for capability in &publication.capabilities {
             if capability.entry.capability != *reference {
                 continue;
             }
             if match_value.is_some() {
-                return Err(miniapp_catalog_error(format!(
-                    "MiniApp capability {}@{} appears in multiple publications",
+                return Err(plugin_product_catalog_error(format!(
+                    "Plugin Product capability {}@{} appears in multiple publications",
                     reference.id.as_ref(),
                     reference.version.as_ref()
                 )));
@@ -570,8 +585,8 @@ fn miniapp_publication_for<'a>(
         }
     }
     if has_kernel_materialization && match_value.is_some() {
-        return Err(miniapp_catalog_error(format!(
-            "capability {}@{} is present in both the Kernel registry and a MiniApp publication",
+        return Err(plugin_product_catalog_error(format!(
+            "capability {}@{} is present in both the Kernel registry and a Plugin Product publication",
             reference.id.as_ref(),
             reference.version.as_ref()
         )));
@@ -579,16 +594,16 @@ fn miniapp_publication_for<'a>(
     Ok(match_value)
 }
 
-fn miniapp_catalog_operation_lock(
-    publication: &MiniAppCapabilityCatalogPublication,
+fn plugin_product_catalog_operation_lock(
+    publication: &PluginProductCapabilityCatalogPublication,
     capability: &CapabilityCatalogPublication,
 ) -> Result<nomifun_agent_contracts::CapabilityOperationLock, ControlPlaneError> {
     publication
         .validate()
-        .map_err(|error| miniapp_catalog_error(error.to_string()))?;
+        .map_err(|error| plugin_product_catalog_error(error.to_string()))?;
     capability
         .validate()
-        .map_err(|error| miniapp_catalog_error(error.to_string()))?;
+        .map_err(|error| plugin_product_catalog_error(error.to_string()))?;
     let operation_lock = capability
         .entry
         .operation_lock(CapabilityConsumer::Agent)
@@ -601,11 +616,11 @@ fn miniapp_catalog_operation_lock(
         })?;
     operation_lock
         .validate()
-        .map_err(|error| miniapp_catalog_error(error.to_string()))?;
+        .map_err(|error| plugin_product_catalog_error(error.to_string()))?;
     let contribution = &operation_lock.contribution;
     if operation_lock.capability != capability.entry.capability
-        || contribution.source_kind != ContributionSourceKind::MiniAppActiveRelease
-        || contribution.miniapp_id.as_ref() != Some(&publication.miniapp_id)
+        || contribution.source_kind != ContributionSourceKind::PluginProductActiveRelease
+        || contribution.plugin_product_id.as_ref() != Some(&publication.plugin_product_id)
         || contribution.mount_id.is_some()
         || contribution.mcp_binding_id.is_some()
         || contribution.contribution_id != capability.entry.contribution_id
@@ -613,8 +628,8 @@ fn miniapp_catalog_operation_lock(
         || operation_lock.target_artifact_digest.as_ref()
             != Some(&publication.active_release.release_digest)
     {
-        return Err(miniapp_catalog_error(format!(
-            "Catalog operation lock for MiniApp capability {}@{} does not bind the exact Active Release",
+        return Err(plugin_product_catalog_error(format!(
+            "Catalog operation lock for Plugin Product capability {}@{} does not bind the exact Active Release",
             capability.entry.capability.id.as_ref(),
             capability.entry.capability.version.as_ref()
         )));
@@ -622,7 +637,7 @@ fn miniapp_catalog_operation_lock(
     Ok(operation_lock)
 }
 
-fn miniapp_catalog_error(message: impl Into<String>) -> ControlPlaneError {
+fn plugin_product_catalog_error(message: impl Into<String>) -> ControlPlaneError {
     ControlPlaneError::canonical(
         "CAPABILITY_CATALOG_INVALID",
         axum::http::StatusCode::UNPROCESSABLE_ENTITY,
@@ -643,12 +658,12 @@ fn contribution_locks_for_payload(
         .iter()
         .chain(payload.on_demand_capabilities.iter())
     {
-        if let Some(miniapp_capability) =
-            resolved_miniapp_capability_for_selection(selection, catalog)?
+        if let Some(plugin_product_capability) =
+            resolved_plugin_product_capability_for_selection(selection, catalog)?
         {
-            let contribution_id = miniapp_capability.contribution_id.clone();
+            let contribution_id = plugin_product_capability.contribution_id.clone();
             if seen.insert(contribution_id.as_ref().to_owned()) {
-                locks.push(miniapp_capability.contribution_lock);
+                locks.push(plugin_product_capability.contribution_lock);
             }
             continue;
         }
@@ -958,12 +973,12 @@ fn preview_resolved_capability(
             source_kind: ContributionSourceKind::PlatformBuiltin,
             source_identity: StableSourceIdentity::from("unmaterialized"),
             mount_id: None,
-            miniapp_id: None,
+            plugin_product_id: None,
             mcp_binding_id: None,
             contribution_id,
             contract_digest: DigestHex::from("0".repeat(64)),
         },
-        resolved_mount_id: PluginMountId::from("unmaterialized"),
+        resolved_mount_id: None,
         resolved_source: PluginSourceMetadata {
             source_kind: PluginSourceKind::Bundled,
             source_identity: "unmaterialized".to_owned(),
@@ -973,6 +988,15 @@ fn preview_resolved_capability(
         schema_digest: DigestHex::from("0".repeat(64)),
         dependency_path: vec![selection.capability.id.clone()],
         required_runtime_features: BTreeSet::new(),
+        plugin_product_id: None,
+        active_release: None,
+        active_release_epoch: None,
+        catalog_digest: None,
+        display_name: None,
+        description: None,
+        actions: Vec::new(),
+        required_resource_kinds: BTreeSet::new(),
+        action_allowlist: BTreeSet::new(),
     }
 }
 
@@ -1247,8 +1271,8 @@ mod tests {
         CapabilityRef, CapabilityReleaseState, CapabilitySelection,
         CanonicalSchemaRef, CatalogAvailability, EffectClass, LocalizedMetadata,
         LogicalArtifactRef, McpBindingId, McpServerId, McpToolCapabilityMapping,
-        McpToolKey, MiniAppId, MiniAppReleaseId, MiniAppReleaseRef, PackageId,
-        PackageRef, PlatformConstraint, PluginSourceMetadata, ResourceKind,
+        McpToolKey, PackageId, PackageRef, PlatformConstraint, PluginMountId,
+        PluginProductId, PluginReleaseId, PluginReleaseRef, PluginSourceMetadata, ResourceKind,
         RuntimeProfileKind, SkillDefinition, SkillId, StrictJsonValue,
         ToolPresentationKind,
         capability_surface_declarations,
@@ -1420,7 +1444,7 @@ mod tests {
                 "mcp:managed.server",
             ),
             mount_id: Some(mount_id.clone()),
-            miniapp_id: None,
+            plugin_product_id: None,
             mcp_binding_id: Some(binding_id.clone()),
             contribution_id: capability_manifest.contribution_id.clone(),
             contract_digest: capability_digest.clone(),
@@ -1447,7 +1471,7 @@ mod tests {
                             .source_identity
                             .clone(),
                         mount_id: capability_lock.mount_id.clone(),
-                        miniapp_id: None,
+                        plugin_product_id: None,
                         mcp_binding_id: Some(binding_id.clone()),
                         artifact_digest: Some(artifact_digest.clone()),
                     },
@@ -1487,7 +1511,7 @@ mod tests {
                 source.source_identity.clone(),
             ),
             mount_id: Some(mount_id.clone()),
-            miniapp_id: None,
+            plugin_product_id: None,
             mcp_binding_id: None,
             contribution_id: ContributionId::from(
                 "skill:managed.example.skill",
@@ -1525,7 +1549,7 @@ mod tests {
                 catalog_entry.capability.clone(),
                 catalog_entry,
             )]),
-            miniapp_publications: BTreeMap::new(),
+            plugin_product_publications: BTreeMap::new(),
             skills: vec![materialized_skill.clone()],
             mcp_tools: vec![materialized_mcp.clone()],
             unavailable_capabilities: BTreeMap::new(),
@@ -1597,33 +1621,33 @@ mod tests {
     }
 
     #[test]
-    fn miniapp_contribution_lock_uses_catalog_without_kernel_materialization() {
+    fn plugin_product_contribution_lock_uses_catalog_without_kernel_materialization() {
         let package = PackageRef {
-            id: PackageId::from("miniapp.example"),
+            id: PackageId::from("plugin.example"),
             version: VersionString::from("1.0.0"),
         };
-        let miniapp_id = MiniAppId::from("miniapp.example");
+        let plugin_product_id = PluginProductId::from("plugin-example");
         let capability_ref = CapabilityRef {
-            id: CapabilityId::from("miniapp.example.search"),
+            id: CapabilityId::from("plugin.example.search"),
             version: VersionString::from("1.0.0"),
         };
         let action = CapabilityActionDescriptor {
-            action_id: ActionId::from("miniapp.example.search.invoke"),
-            input_schema: CanonicalSchemaRef::from("schema://miniapp.example/search-input@1"),
+            action_id: ActionId::from("plugin.example.search.invoke"),
+            input_schema: CanonicalSchemaRef::from("schema://plugin.example/search-input@1"),
             output_schema: CanonicalSchemaRef::from(
-                "schema://miniapp.example/search-output@1",
+                "schema://plugin.example/search-output@1",
             ),
             effect_class: EffectClass::ReadSensitive,
             presentation: ToolPresentationKind::FunctionTool,
         };
         let manifest = CapabilityManifest {
             id: capability_ref.id.clone(),
-            contribution_id: ContributionId::from("capability:miniapp.example.search"),
+            contribution_id: ContributionId::from("capability:plugin.example.search"),
             version: capability_ref.version.clone(),
             kind: CapabilityKind::Tool,
             package: package.clone(),
             display: LocalizedMetadata {
-                name: "MiniApp Search".to_owned(),
+                name: "Plugin Search".to_owned(),
                 description: "Search through the selected resource.".to_owned(),
                 localized_names: BTreeMap::new(),
                 localized_descriptions: BTreeMap::new(),
@@ -1643,8 +1667,8 @@ mod tests {
                 ..Default::default()
             },
         };
-        let active_release = MiniAppReleaseRef {
-            release_id: MiniAppReleaseId::from("release-1"),
+        let active_release = PluginReleaseRef {
+            release_id: PluginReleaseId::from("release-1"),
             artifact_id: ArtifactId::from("artifact-1"),
             release_digest: DigestHex::from("a".repeat(64)),
             manifest_digest: DigestHex::from("b".repeat(64)),
@@ -1656,10 +1680,12 @@ mod tests {
                     owner: CapabilityOwner::Package {
                         package: package.clone(),
                     },
-                    source_kind: ContributionSourceKind::MiniAppActiveRelease,
-                    source_identity: StableSourceIdentity::from("miniapp:miniapp.example"),
+                    source_kind: ContributionSourceKind::PluginProductActiveRelease,
+                    source_identity: StableSourceIdentity::from(
+                        "plugin-product:plugin-example",
+                    ),
                     mount_id: None,
-                    miniapp_id: Some(miniapp_id.clone()),
+                    plugin_product_id: Some(plugin_product_id.clone()),
                     mcp_binding_id: None,
                     artifact_digest: Some(active_release.release_digest.clone()),
                 },
@@ -1671,8 +1697,8 @@ mod tests {
             },
         )
         .unwrap();
-        let mut publication = MiniAppCapabilityCatalogPublication {
-            miniapp_id: miniapp_id.clone(),
+        let mut publication = PluginProductCapabilityCatalogPublication {
+            plugin_product_id: plugin_product_id.clone(),
             active_release: active_release.clone(),
             active_release_epoch: 7,
             catalog_digest: DigestHex::from("0".repeat(64)),
@@ -1690,8 +1716,8 @@ mod tests {
                 entry.capability.clone(),
                 entry.clone(),
             )]),
-            miniapp_publications: BTreeMap::from([(
-                miniapp_id.clone(),
+            plugin_product_publications: BTreeMap::from([(
+                plugin_product_id.clone(),
                 publication.clone(),
             )]),
             skills: Vec::new(),
@@ -1713,7 +1739,7 @@ mod tests {
             on_demand_capabilities: Vec::new(),
             skill_bindings: Vec::new(),
             system_role_provider_overrides: BTreeMap::new(),
-            persona: "MiniApp fixture".to_owned(),
+            persona: "Plugin fixture".to_owned(),
             instructions: "Use the exact Catalog lock.".to_owned(),
             starter_prompts: Vec::new(),
         };
@@ -1721,24 +1747,26 @@ mod tests {
         let registry = MaterializedRegistry::empty();
         let locks = contribution_locks_for_payload(&payload, &catalog, &registry).unwrap();
         assert_eq!(locks, vec![ContributionLock {
-            source_kind: ContributionSourceKind::MiniAppActiveRelease,
-            source_identity: StableSourceIdentity::from("miniapp:miniapp.example"),
+            source_kind: ContributionSourceKind::PluginProductActiveRelease,
+            source_identity: StableSourceIdentity::from(
+                "plugin-product:plugin-example",
+            ),
             mount_id: None,
-            miniapp_id: Some(miniapp_id.clone()),
+            plugin_product_id: Some(plugin_product_id.clone()),
             mcp_binding_id: None,
             contribution_id: entry.contribution_id.clone(),
             contract_digest: entry.contract_digest.clone(),
         }]);
 
         let resolved =
-            resolved_miniapp_capability_for_selection(&payload.initial_capabilities[0], &catalog)
+            resolved_plugin_product_capability_for_selection(&payload.initial_capabilities[0], &catalog)
                 .unwrap()
                 .unwrap();
         assert_eq!(resolved.capability, capability_ref);
-        assert_eq!(resolved.miniapp_id, miniapp_id);
-        assert_eq!(resolved.active_release, active_release);
-        assert_eq!(resolved.active_release_epoch, 7);
-        assert_eq!(resolved.catalog_digest, publication.catalog_digest);
+        assert_eq!(resolved.plugin_product_id, Some(plugin_product_id));
+        assert_eq!(resolved.active_release, Some(active_release));
+        assert_eq!(resolved.active_release_epoch, Some(7));
+        assert_eq!(resolved.catalog_digest, Some(publication.catalog_digest));
         assert_eq!(resolved.source_package, package);
         assert_eq!(resolved.actions, vec![action]);
         assert_eq!(resolved.required_resource_kinds, BTreeSet::from([

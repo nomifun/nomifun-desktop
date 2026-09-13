@@ -10,14 +10,14 @@ import { InvalidEntityIdError } from '@/common/types/ids';
 import { pluginRuntimes } from './ipcBridge';
 
 const source = readFileSync(new URL('./ipcBridge.ts', import.meta.url), 'utf8');
-const MINIAPP_ID = '0190f5fe-7c00-7a00-8000-0000000000b1';
+const PLUGIN_ID = '0190f5fe-7c00-7a00-8000-0000000000b1';
 const realFetch = globalThis.fetch;
 
-const rawSummary = (miniappId: unknown = MINIAPP_ID) => ({
-  plugin_id: miniappId,
+const rawSummary = (pluginId: unknown = PLUGIN_ID) => ({
+  plugin_id: pluginId,
   product_revision: 1,
   display_name: 'Status Board',
-  kind: 'ui_only',
+  kind: 'plugin',
   lifecycle: 'enabled',
   releases: {
     pointer_revision: 1,
@@ -28,8 +28,8 @@ const rawSummary = (miniappId: unknown = MINIAPP_ID) => ({
   updated_at_ms: 1_780_000_000_000,
 });
 
-const rawWorkshop = (miniappId: unknown = MINIAPP_ID) => ({
-  plugin: rawSummary(miniappId),
+const rawWorkshop = (pluginId: unknown = PLUGIN_ID) => ({
+  plugin: rawSummary(pluginId),
   project_id: '0190f5fe-7c00-7a00-8000-0000000000b2',
   project_revision: 1,
   publish_mode: 'manual',
@@ -53,7 +53,7 @@ const rawWorkshop = (miniappId: unknown = MINIAPP_ID) => ({
     operation_id: '0190f5fe-7c00-7a00-8000-0000000000b3',
     operation_revision: 1,
     kind: 'build',
-    owner: { owner: 'plugin_runtime', plugin_id: miniappId },
+    owner: { owner: 'plugin_runtime', plugin_id: pluginId },
     state: 'running',
     cancelable: true,
     started_at_ms: 1_780_000_000_000,
@@ -133,11 +133,11 @@ describe('PluginRuntime M1 HTTP bridge', () => {
     respondWith({ library_revision: 2, plugins: [rawSummary()] });
     const library = await pluginRuntimes.library.invoke();
     expect(library.library_revision).toBe(2);
-    expect(library.plugins[0]?.plugin_id).toBe(MINIAPP_ID);
+    expect(library.plugins[0]?.plugin_id).toBe(PLUGIN_ID);
 
     respondWith({
       library_revision: 2,
-      plugins: [rawSummary(`miniapp_${MINIAPP_ID}`)],
+      plugins: [rawSummary(`plugin_${PLUGIN_ID}`)],
     });
     let caught: unknown;
     try {
@@ -151,12 +151,12 @@ describe('PluginRuntime M1 HTTP bridge', () => {
   test('brands nested Workshop and operation-owner identities', async () => {
     respondWith(rawWorkshop());
     const workshop = await pluginRuntimes.getWorkshop.invoke({
-      plugin_id: MINIAPP_ID as never,
+      plugin_id: PLUGIN_ID as never,
     });
-    expect(workshop.plugin.plugin_id).toBe(MINIAPP_ID);
+    expect(workshop.plugin.plugin_id).toBe(PLUGIN_ID);
     expect(workshop.active_operation?.owner).toEqual({
       owner: 'plugin_runtime',
-      plugin_id: MINIAPP_ID,
+      plugin_id: PLUGIN_ID,
     });
   });
 
@@ -178,15 +178,13 @@ describe('PluginRuntime M1 HTTP bridge', () => {
       expected_library_revision: 7,
       display_name: 'Status Board',
       description: 'Tracks delivery state',
-      kind: 'ui_only',
     });
     expect(requestBody).toEqual({
       expected_library_revision: 7,
       display_name: 'Status Board',
       description: 'Tracks delivery state',
-      kind: 'ui_only',
     });
-    expect(workshop.plugin.plugin_id).toBe(MINIAPP_ID);
+    expect(workshop.plugin.plugin_id).toBe(PLUGIN_ID);
   });
 
   test('Source read and replace preserve the encoded path and exact CAS body', async () => {
@@ -200,7 +198,7 @@ describe('PluginRuntime M1 HTTP bridge', () => {
         init?.method === 'POST'
           ? rawWorkshop()
           : {
-              plugin_id: MINIAPP_ID,
+              plugin_id: PLUGIN_ID,
               project_id: '0190f5fe-7c00-7a00-8000-0000000000b2',
               path: 'ui/index.html',
               content: '<main>v1</main>',
@@ -214,17 +212,17 @@ describe('PluginRuntime M1 HTTP bridge', () => {
     }) as typeof fetch;
 
     const sourceFile = await pluginRuntimes.getSourceFile.invoke({
-      plugin_id: MINIAPP_ID as never,
+      plugin_id: PLUGIN_ID as never,
       path: 'ui/index.html',
     });
     expect(requestPath).toBe(
-      `/api/plugins/runtimes/${MINIAPP_ID}/source/files/ui%2Findex.html`
+      `/api/plugins/runtimes/${PLUGIN_ID}/source/files/ui%2Findex.html`
     );
-    expect(sourceFile.plugin_id).toBe(MINIAPP_ID);
+    expect(sourceFile.plugin_id).toBe(PLUGIN_ID);
     expect(sourceFile.content).toBe('<main>v1</main>');
 
     await pluginRuntimes.replaceSourceFile.invoke({
-      plugin_id: MINIAPP_ID as never,
+      plugin_id: PLUGIN_ID as never,
       expected_product_revision: 4,
       project_id: '0190f5fe-7c00-7a00-8000-0000000000b2',
       expected_project_revision: 5,
@@ -233,9 +231,9 @@ describe('PluginRuntime M1 HTTP bridge', () => {
       path: 'ui/index.html',
       content: '<main>v2</main>',
     });
-    expect(requestPath).toBe(`/api/plugins/runtimes/${MINIAPP_ID}/source/edit`);
+    expect(requestPath).toBe(`/api/plugins/runtimes/${PLUGIN_ID}/source/edit`);
     expect(requestBody).toEqual({
-      plugin_id: MINIAPP_ID,
+      plugin_id: PLUGIN_ID,
       expected_product_revision: 4,
       project_id: '0190f5fe-7c00-7a00-8000-0000000000b2',
       expected_project_revision: 5,
@@ -254,12 +252,12 @@ describe('PluginRuntime M1 HTTP bridge', () => {
       requestBody =
         typeof init?.body === 'string' ? JSON.parse(init.body) : init?.body;
       const responseData =
-        requestPath === `/api/plugins/runtimes/${MINIAPP_ID}/share`
+        requestPath === `/api/plugins/runtimes/${PLUGIN_ID}/share`
           ? {
               operation_id: '0190f5fe-7c00-7a00-8000-0000000000b5',
               operation_revision: 1,
               kind: 'export',
-              owner: { owner: 'plugin_runtime', plugin_id: MINIAPP_ID },
+              owner: { owner: 'plugin_runtime', plugin_id: PLUGIN_ID },
               state: 'succeeded',
               cancelable: false,
               progress_percent: 100,
@@ -277,7 +275,7 @@ describe('PluginRuntime M1 HTTP bridge', () => {
     }) as typeof fetch;
 
     const share = {
-      plugin_id: MINIAPP_ID as never,
+      plugin_id: PLUGIN_ID as never,
       expected_product_revision: 4,
       expected_pointer_revision: 7,
       content: 'ready_release' as const,
@@ -287,11 +285,11 @@ describe('PluginRuntime M1 HTTP bridge', () => {
       include_source: true,
     };
     const operation = await pluginRuntimes.share.invoke(share);
-    expect(requestPath).toBe(`/api/plugins/runtimes/${MINIAPP_ID}/share`);
+    expect(requestPath).toBe(`/api/plugins/runtimes/${PLUGIN_ID}/share`);
     expect(requestBody).toEqual(share);
     expect(operation.owner).toEqual({
       owner: 'plugin_runtime',
-      plugin_id: MINIAPP_ID,
+      plugin_id: PLUGIN_ID,
     });
 
     const importShare = {
@@ -324,12 +322,12 @@ describe('PluginRuntime M1 HTTP bridge', () => {
       requestBody =
         typeof init?.body === 'string' ? JSON.parse(init.body) : init?.body;
       const responseData =
-        requestPath === `/api/plugins/runtimes/${MINIAPP_ID}/backup`
+        requestPath === `/api/plugins/runtimes/${PLUGIN_ID}/backup`
           ? {
               operation_id: '0190f5fe-7c00-7a00-8000-0000000000b6',
               operation_revision: 1,
               kind: 'export',
-              owner: { owner: 'plugin_runtime', plugin_id: MINIAPP_ID },
+              owner: { owner: 'plugin_runtime', plugin_id: PLUGIN_ID },
               state: 'succeeded',
               cancelable: false,
               progress_percent: 100,
@@ -344,7 +342,7 @@ describe('PluginRuntime M1 HTTP bridge', () => {
     }) as typeof fetch;
 
     const exportRequest = {
-      plugin_id: MINIAPP_ID as never,
+      plugin_id: PLUGIN_ID as never,
       expected_product_revision: 4,
       expected_lifecycle: 'disabled' as const,
       expected_pointer_revision: 7,
@@ -353,11 +351,11 @@ describe('PluginRuntime M1 HTTP bridge', () => {
       destination_path: 'C:\\exports\\status-board.backup',
     };
     const operation = await pluginRuntimes.exportBackup.invoke(exportRequest);
-    expect(requestPath).toBe(`/api/plugins/runtimes/${MINIAPP_ID}/backup`);
+    expect(requestPath).toBe(`/api/plugins/runtimes/${PLUGIN_ID}/backup`);
     expect(requestBody).toEqual(exportRequest);
     expect(operation.owner).toEqual({
       owner: 'plugin_runtime',
-      plugin_id: MINIAPP_ID,
+      plugin_id: PLUGIN_ID,
     });
 
     const importRequest = {
@@ -388,7 +386,7 @@ describe('PluginRuntime M1 HTTP bridge', () => {
     }) as typeof fetch;
 
     const publish = {
-      plugin_id: MINIAPP_ID as never,
+      plugin_id: PLUGIN_ID as never,
       expected_product_revision: 4,
       expected_pointer_revision: 5,
       expected_active_release_epoch: 6,
@@ -398,11 +396,11 @@ describe('PluginRuntime M1 HTTP bridge', () => {
       acknowledge_test_warning: false,
     };
     await pluginRuntimes.publish.invoke(publish);
-    expect(requestPath).toBe(`/api/plugins/runtimes/${MINIAPP_ID}/publish`);
+    expect(requestPath).toBe(`/api/plugins/runtimes/${PLUGIN_ID}/publish`);
     expect(requestBody).toEqual(publish);
 
     const rollback = {
-      plugin_id: MINIAPP_ID as never,
+      plugin_id: PLUGIN_ID as never,
       expected_product_revision: 5,
       expected_pointer_revision: 6,
       expected_active_release_epoch: 7,
@@ -411,32 +409,32 @@ describe('PluginRuntime M1 HTTP bridge', () => {
       expected_previous_release_digest: 'c'.repeat(64),
     };
     await pluginRuntimes.rollback.invoke(rollback);
-    expect(requestPath).toBe(`/api/plugins/runtimes/${MINIAPP_ID}/rollback`);
+    expect(requestPath).toBe(`/api/plugins/runtimes/${PLUGIN_ID}/rollback`);
     expect(requestBody).toEqual(rollback);
 
     const enabled = {
-      plugin_id: MINIAPP_ID as never,
+      plugin_id: PLUGIN_ID as never,
       expected_product_revision: 6,
       expected_pointer_revision: 7,
       expected_active_release_digest: 'c'.repeat(64),
       enabled: true,
     };
     await pluginRuntimes.setEnabled.invoke(enabled);
-    expect(requestPath).toBe(`/api/plugins/runtimes/${MINIAPP_ID}/enabled`);
+    expect(requestPath).toBe(`/api/plugins/runtimes/${PLUGIN_ID}/enabled`);
     expect(requestBody).toEqual(enabled);
 
     const publishMode = {
-      plugin_id: MINIAPP_ID as never,
+      plugin_id: PLUGIN_ID as never,
       expected_product_revision: 7,
       expected_pointer_revision: 8,
       mode: 'auto_ui_only' as const,
     };
     await pluginRuntimes.setPublishMode.invoke(publishMode);
-    expect(requestPath).toBe(`/api/plugins/runtimes/${MINIAPP_ID}/publish-mode`);
+    expect(requestPath).toBe(`/api/plugins/runtimes/${PLUGIN_ID}/publish-mode`);
     expect(requestBody).toEqual(publishMode);
 
     const bridge = {
-      plugin_id: MINIAPP_ID as never,
+      plugin_id: PLUGIN_ID as never,
       surface_capability: 'surface-capability',
       active_release_epoch: 9,
       expected_release_digest: 'd'.repeat(64),
@@ -453,7 +451,7 @@ describe('PluginRuntime M1 HTTP bridge', () => {
       },
     };
     await pluginRuntimes.bridge.invoke(bridge);
-    expect(requestPath).toBe(`/api/plugins/runtimes/${MINIAPP_ID}/surface/bridge`);
+    expect(requestPath).toBe(`/api/plugins/runtimes/${PLUGIN_ID}/surface/bridge`);
     expect(requestPath.includes(bridge.surface_capability)).toBe(false);
     expect(requestBody).toEqual({
       surface_capability: bridge.surface_capability,
@@ -482,7 +480,7 @@ describe('PluginRuntime M1 HTTP bridge', () => {
     });
 
     const serviceLifecycle = {
-      plugin_id: MINIAPP_ID as never,
+      plugin_id: PLUGIN_ID as never,
       expected_product_revision: 10,
       expected_pointer_revision: 11,
       expected_active_release_epoch: 12,
@@ -490,18 +488,18 @@ describe('PluginRuntime M1 HTTP bridge', () => {
       running: true,
     };
     await pluginRuntimes.setServiceRunning.invoke(serviceLifecycle);
-    expect(requestPath).toBe(`/api/plugins/runtimes/${MINIAPP_ID}/service/running`);
+    expect(requestPath).toBe(`/api/plugins/runtimes/${PLUGIN_ID}/service/running`);
     expect(requestBody).toEqual(serviceLifecycle);
 
     const retryService = {
-      plugin_id: MINIAPP_ID as never,
+      plugin_id: PLUGIN_ID as never,
       expected_product_revision: 11,
       expected_pointer_revision: 12,
       expected_active_release_epoch: 13,
       expected_active_release_digest: 'f'.repeat(64),
     };
     await pluginRuntimes.retryService.invoke(retryService);
-    expect(requestPath).toBe(`/api/plugins/runtimes/${MINIAPP_ID}/service/retry`);
+    expect(requestPath).toBe(`/api/plugins/runtimes/${PLUGIN_ID}/service/retry`);
     expect(requestBody).toEqual(retryService);
   });
 
@@ -518,7 +516,7 @@ describe('PluginRuntime M1 HTTP bridge', () => {
         JSON.stringify({
           success: true,
           data: {
-            plugin_id: MINIAPP_ID,
+            plugin_id: PLUGIN_ID,
             product_revision: 8,
             release_id: 'active-release',
             expected_release_digest: 'a'.repeat(64),
@@ -527,7 +525,7 @@ describe('PluginRuntime M1 HTTP bridge', () => {
             surface_generation: 3,
             surface_capability: 'temporary-capability',
             ui_entrypoint: 'ui/index.html',
-            kind: 'ui_only',
+            kind: 'plugin',
           },
         }),
         {
@@ -538,13 +536,13 @@ describe('PluginRuntime M1 HTTP bridge', () => {
     }) as typeof fetch;
 
     const request = {
-      plugin_id: MINIAPP_ID as never,
+      plugin_id: PLUGIN_ID as never,
     };
     const descriptor = await pluginRuntimes.openSurface.invoke(request);
     expect(requestMethod).toBe('POST');
-    expect(requestPath).toBe(`/api/plugins/runtimes/${MINIAPP_ID}/surface/open`);
+    expect(requestPath).toBe(`/api/plugins/runtimes/${PLUGIN_ID}/surface/open`);
     expect(requestBody).toEqual(request);
-    expect(descriptor.plugin_id).toBe(MINIAPP_ID);
+    expect(descriptor.plugin_id).toBe(PLUGIN_ID);
     expect(descriptor.surface_generation).toBe(3);
     expect(descriptor.surface_capability).toBe('temporary-capability');
     expect(source.includes('/surface/assets/')).toBe(false);
@@ -562,12 +560,12 @@ describe('PluginRuntime M1 HTTP bridge', () => {
       });
     }) as typeof fetch;
     const request = {
-      plugin_id: MINIAPP_ID as never,
+      plugin_id: PLUGIN_ID as never,
       surface_session_id: '0190f5fe-7c00-7a00-8000-0000000000b4',
       surface_capability: 'surface-capability',
     };
     expect(await pluginRuntimes.closeSurface.invoke(request)).toBe(true);
-    expect(requestPath).toBe(`/api/plugins/runtimes/${MINIAPP_ID}/surface/close`);
+    expect(requestPath).toBe(`/api/plugins/runtimes/${PLUGIN_ID}/surface/close`);
     expect(JSON.parse(requestBody)).toEqual(request);
   });
 });

@@ -1,8 +1,8 @@
-//! Nomi-owned Wave 3 MiniApp capability adapter.
+//! Nomi-owned Wave 3 Plugin capability adapter.
 //!
-//! These four capabilities operate on one exact owner-scoped MiniApp selected
-//! by the frozen `miniapp` resource binding. They deliberately do not proxy a
-//! caller-supplied MiniApp id and they do not reuse an Active Release's dynamic
+//! These four capabilities operate on one exact owner-scoped Plugin selected
+//! by the frozen `plugin` resource binding. They deliberately do not proxy a
+//! caller-supplied Plugin id and they do not reuse an Active Release's dynamic
 //! Agent actions as a substitute for the first-party lifecycle operations.
 
 use std::future::Future;
@@ -11,26 +11,25 @@ use std::sync::Arc;
 
 use nomifun_agent_contracts::StrictJsonValue;
 use nomifun_agent_domain_wave3::{
-    MINIAPP_RESOURCE_KIND, Wave3CapabilityOperation, Wave3HostPort, Wave3HostPortError,
-    Wave3HostRequest,
+    Wave3CapabilityOperation, Wave3HostPort, Wave3HostPortError, Wave3HostRequest,
 };
 use nomifun_api_types::{
     PublishPluginRuntimeRequest, ReplacePluginRuntimeSourceFileRequest,
 };
-use nomifun_plugin_platform::runtime::{PluginRuntimeM1ApplicationError, PluginRuntimeM1ApplicationService};
+use nomifun_plugin_platform::runtime::{PluginRuntimeApplicationError, PluginRuntimeApplicationService};
 use serde::Deserialize;
 
-pub(crate) const WAVE3_MINIAPP_NOT_FOUND: &str = "WAVE3_MINIAPP_NOT_FOUND";
-pub(crate) const WAVE3_MINIAPP_CONFLICT: &str = "WAVE3_MINIAPP_CONFLICT";
-pub(crate) const WAVE3_MINIAPP_RUNTIME_FAILED: &str = "WAVE3_MINIAPP_RUNTIME_FAILED";
+pub(crate) const WAVE3_PLUGIN_NOT_FOUND: &str = "WAVE3_PLUGIN_NOT_FOUND";
+pub(crate) const WAVE3_PLUGIN_CONFLICT: &str = "WAVE3_PLUGIN_CONFLICT";
+pub(crate) const WAVE3_PLUGIN_RUNTIME_FAILED: &str = "WAVE3_PLUGIN_RUNTIME_FAILED";
 
 #[derive(Clone)]
-pub(crate) struct NomiWave3MiniAppHost {
-    application: Arc<PluginRuntimeM1ApplicationService>,
+pub(crate) struct NomiWave3PluginHost {
+    application: Arc<PluginRuntimeApplicationService>,
 }
 
-impl NomiWave3MiniAppHost {
-    pub(crate) fn new(application: Arc<PluginRuntimeM1ApplicationService>) -> Self {
+impl NomiWave3PluginHost {
+    pub(crate) fn new(application: Arc<PluginRuntimeApplicationService>) -> Self {
         Self { application }
     }
 
@@ -41,14 +40,14 @@ impl NomiWave3MiniAppHost {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct MiniAppReadInput {
+struct PluginReadInput {
     #[serde(default)]
     path: Option<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct MiniAppEditInput {
+struct PluginEditInput {
     expected_product_revision: u64,
     project_id: String,
     expected_project_revision: u64,
@@ -60,7 +59,7 @@ struct MiniAppEditInput {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct MiniAppPublishInput {
+struct PluginPublishInput {
     expected_product_revision: u64,
     expected_pointer_revision: u64,
     expected_active_release_epoch: u64,
@@ -77,7 +76,7 @@ struct MiniAppPublishInput {
 #[serde(deny_unknown_fields)]
 struct EmptyInput {}
 
-impl Wave3HostPort for NomiWave3MiniAppHost {
+impl Wave3HostPort for NomiWave3PluginHost {
     fn invoke<'a>(
         &'a self,
         request: Wave3HostRequest,
@@ -86,33 +85,33 @@ impl Wave3HostPort for NomiWave3MiniAppHost {
         Box::pin(async move {
             request.validate()?;
             let owner_id = request.context.principal.principal_id.clone();
-            let miniapp_id = bound_resource_id(&request, MINIAPP_RESOURCE_KIND)?;
+            let plugin_id = bound_resource_id(&request, "plugin")?;
             let result = match request.operation {
-                Wave3CapabilityOperation::MiniAppRead { input } => {
-                    let input: MiniAppReadInput = parse_input(input)?;
+                Wave3CapabilityOperation::PluginRead { input } => {
+                    let input: PluginReadInput = parse_input(input)?;
                     match input.path {
                         Some(path) => serde_json::to_value(
                             self.application
-                                .source_file(&owner_id, &miniapp_id, &path)
+                                .source_file(&owner_id, &plugin_id, &path)
                                 .await
-                                .map_err(map_miniapp_error)?,
+                                .map_err(map_plugin_error)?,
                         ),
                         None => serde_json::to_value(
                             self.application
-                                .workshop(&owner_id, &miniapp_id)
+                                .workshop(&owner_id, &plugin_id)
                                 .await
-                                .map_err(map_miniapp_error)?,
+                                .map_err(map_plugin_error)?,
                         ),
                     }
                 }
-                Wave3CapabilityOperation::MiniAppEdit { input } => {
-                    let input: MiniAppEditInput = parse_input(input)?;
+                Wave3CapabilityOperation::PluginEdit { input } => {
+                    let input: PluginEditInput = parse_input(input)?;
                     serde_json::to_value(
                         self.application
                             .replace_source_file(
                                 &owner_id,
                                 ReplacePluginRuntimeSourceFileRequest {
-                                    miniapp_id,
+                                    plugin_id,
                                     expected_product_revision: input.expected_product_revision,
                                     project_id: input.project_id,
                                     expected_project_revision: input.expected_project_revision,
@@ -124,17 +123,17 @@ impl Wave3HostPort for NomiWave3MiniAppHost {
                                 },
                             )
                             .await
-                            .map_err(map_miniapp_error)?,
+                            .map_err(map_plugin_error)?,
                     )
                 }
-                Wave3CapabilityOperation::MiniAppPublish { input } => {
-                    let input: MiniAppPublishInput = parse_input(input)?;
+                Wave3CapabilityOperation::PluginPublish { input } => {
+                    let input: PluginPublishInput = parse_input(input)?;
                     serde_json::to_value(
                         self.application
                             .publish(
                                 &owner_id,
                                 PublishPluginRuntimeRequest {
-                                    miniapp_id,
+                                    plugin_id,
                                     expected_product_revision: input.expected_product_revision,
                                     expected_pointer_revision: input.expected_pointer_revision,
                                     expected_active_release_epoch: input
@@ -150,20 +149,20 @@ impl Wave3HostPort for NomiWave3MiniAppHost {
                                 },
                             )
                             .await
-                            .map_err(map_miniapp_error)?,
+                            .map_err(map_plugin_error)?,
                     )
                 }
-                Wave3CapabilityOperation::MiniAppServe { input } => {
+                Wave3CapabilityOperation::PluginServe { input } => {
                     let _: EmptyInput = parse_input(input)?;
                     // Agent callers may inspect the exact published serving
                     // projection but must not receive a bearer-like Surface
                     // capability or create an orphan UI session.
                     let workshop = self
                         .application
-                        .workshop(&owner_id, &miniapp_id)
+                        .workshop(&owner_id, &plugin_id)
                         .await
-                        .map_err(map_miniapp_error)?;
-                    if !workshop.miniapp.surface_available {
+                        .map_err(map_plugin_error)?;
+                    if !workshop.plugin.surface_available {
                         return Err(Wave3HostPortError::invalid_request(
                             "bound Plugin has no enabled Active Release to serve",
                         ));
@@ -179,7 +178,7 @@ impl Wave3HostPort for NomiWave3MiniAppHost {
             }
             .map_err(|error| {
                 Wave3HostPortError::new(
-                    "WAVE3_MINIAPP_SERIALIZATION_FAILED",
+                    "WAVE3_PLUGIN_SERIALIZATION_FAILED",
                     format!("Plugin result serialization failed: {error}"),
                 )
             })?;
@@ -214,23 +213,23 @@ fn parse_input<T: for<'de> Deserialize<'de>>(
     })
 }
 
-fn map_miniapp_error(error: PluginRuntimeM1ApplicationError) -> Wave3HostPortError {
+fn map_plugin_error(error: PluginRuntimeApplicationError) -> Wave3HostPortError {
     match error {
-        PluginRuntimeM1ApplicationError::NotFound => {
-            Wave3HostPortError::new(WAVE3_MINIAPP_NOT_FOUND, "bound Plugin was not found")
+        PluginRuntimeApplicationError::NotFound => {
+            Wave3HostPortError::new(WAVE3_PLUGIN_NOT_FOUND, "bound Plugin was not found")
         }
-        PluginRuntimeM1ApplicationError::Invalid(message) => {
+        PluginRuntimeApplicationError::Invalid(message) => {
             Wave3HostPortError::invalid_request(message)
         }
-        PluginRuntimeM1ApplicationError::Runtime(message) => {
-            Wave3HostPortError::new(WAVE3_MINIAPP_RUNTIME_FAILED, message)
+        PluginRuntimeApplicationError::Runtime(message) => {
+            Wave3HostPortError::new(WAVE3_PLUGIN_RUNTIME_FAILED, message)
         }
-        PluginRuntimeM1ApplicationError::Database(error) => {
+        PluginRuntimeApplicationError::Database(error) => {
             let message = error.to_string();
             let code = if message.to_ascii_lowercase().contains("conflict") {
-                WAVE3_MINIAPP_CONFLICT
+                WAVE3_PLUGIN_CONFLICT
             } else {
-                WAVE3_MINIAPP_RUNTIME_FAILED
+                WAVE3_PLUGIN_RUNTIME_FAILED
             };
             Wave3HostPortError::new(code, message)
         }
@@ -243,15 +242,16 @@ mod tests {
 
     use nomifun_agent_contracts::{
         ActionId, AgentSessionId, CapabilityId, CorrelationId, DigestHex, IdempotencyKey,
-        MiniAppId, OperationId, PrincipalRef, ResolvedSnapshotId, ResolvedSnapshotRef,
+        PluginProductId, OperationId, PrincipalRef, ResolvedSnapshotId, ResolvedSnapshotRef,
         ResourceBindingId, ResourceId, ResourceKind, ScopeKey, TypedResourceBinding,
     };
+    use nomifun_agent_domain_wave3::PLUGIN_RESOURCE_KIND;
     use nomifun_api_types::{
-        BuildPluginRuntimeRequest, CreatePluginRuntimeProjectRequest, PluginRuntimeKindDto, PluginRuntimeWorkshopDto,
+        BuildPluginRuntimeRequest, CreatePluginRuntimeProjectRequest, PluginRuntimeWorkshopDto,
         SetPluginRuntimeEnabledRequest,
     };
     use nomifun_db::{
-        IMiniAppM1Repository, SqliteMiniAppM1Repository, init_database_memory,
+        IPluginRuntimeRepository, SqlitePluginRuntimeRepository, init_database_memory,
         installation_owner_id,
     };
     use serde_json::json;
@@ -260,7 +260,7 @@ mod tests {
 
     fn request(
         owner_id: &str,
-        miniapp_id: &str,
+        plugin_id: &str,
         capability_id: &str,
         operation: Wave3CapabilityOperation,
     ) -> Wave3HostRequest {
@@ -270,22 +270,22 @@ mod tests {
                     principal_kind: "user".into(),
                     principal_id: owner_id.to_owned(),
                 },
-                agent_session_id: AgentSessionId::from("miniapp-wave3-session"),
-                operation_id: OperationId::from("miniapp-wave3-operation"),
-                idempotency_key: IdempotencyKey::from("miniapp-wave3-idempotency"),
-                correlation_id: CorrelationId::from("miniapp-wave3-correlation"),
+                agent_session_id: AgentSessionId::from("plugin-wave3-session"),
+                operation_id: OperationId::from("plugin-wave3-operation"),
+                idempotency_key: IdempotencyKey::from("plugin-wave3-idempotency"),
+                correlation_id: CorrelationId::from("plugin-wave3-correlation"),
                 resolved_snapshot_ref: ResolvedSnapshotRef {
-                    snapshot_id: ResolvedSnapshotId::from("miniapp-wave3-snapshot"),
+                    snapshot_id: ResolvedSnapshotId::from("plugin-wave3-snapshot"),
                     snapshot_digest: DigestHex::from("a".repeat(64)),
                 },
                 registry_generation: 1,
                 capability_id: CapabilityId::from(capability_id),
                 action_id: ActionId::from(format!("{capability_id}.invoke")),
-                state_scope_key: ScopeKey::from("session:miniapp-wave3"),
+                state_scope_key: ScopeKey::from("session:plugin-wave3"),
                 resource_bindings: vec![TypedResourceBinding {
-                    binding_id: ResourceBindingId::from("miniapp-binding"),
-                    resource_kind: ResourceKind::from(MINIAPP_RESOURCE_KIND),
-                    resource_id: ResourceId::from(miniapp_id.to_owned()),
+                    binding_id: ResourceBindingId::from("plugin-binding"),
+                    resource_kind: ResourceKind::from(PLUGIN_RESOURCE_KIND),
+                    resource_id: ResourceId::from(plugin_id.to_owned()),
                     owner_id: owner_id.to_owned(),
                     operations: BTreeSet::from([
                         "read".into(),
@@ -302,14 +302,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn miniapp_actions_use_bound_identity_and_persist_edit_publish_and_serve_state() {
+    async fn plugin_actions_use_bound_identity_and_persist_edit_publish_and_serve_state() {
         let database = init_database_memory().await.expect("database");
         let owner_id = installation_owner_id(database.pool()).await.expect("owner");
-        let repository: Arc<dyn IMiniAppM1Repository> =
-            Arc::new(SqliteMiniAppM1Repository::new(database.pool().clone()));
+        let repository: Arc<dyn IPluginRuntimeRepository> =
+            Arc::new(SqlitePluginRuntimeRepository::new(database.pool().clone()));
         let root = tempfile::tempdir().expect("root");
         let application = Arc::new(
-            PluginRuntimeM1ApplicationService::new_with_root(repository, root.path())
+            PluginRuntimeApplicationService::new_with_root(repository, root.path())
                 .expect("application"),
         );
         let created = application
@@ -319,26 +319,26 @@ mod tests {
                     expected_library_revision: 0,
                     display_name: "Wave3 Plugin".into(),
                     description: None,
-                    kind: PluginRuntimeKindDto::UiOnly,
+                    service_source: None,
                 },
             )
             .await
             .expect("create Plugin");
-        let miniapp_id = created.miniapp.miniapp_id.clone();
+        let plugin_id = created.plugin.plugin_id.clone();
         let source_digest = created
             .source_snapshot_digest
             .clone()
             .expect("source digest");
-        let host = NomiWave3MiniAppHost::new(Arc::clone(&application));
+        let host = NomiWave3PluginHost::new(Arc::clone(&application));
 
         let output = host
             .invoke(request(
                 &owner_id,
-                &miniapp_id,
-                "miniapp.edit",
-                Wave3CapabilityOperation::MiniAppEdit {
+                &plugin_id,
+                "plugin.edit",
+                Wave3CapabilityOperation::PluginEdit {
                     input: StrictJsonValue(json!({
-                        "expected_product_revision": created.miniapp.product_revision,
+                        "expected_product_revision": created.plugin.product_revision,
                         "project_id": created.project_id,
                         "expected_project_revision": created.project_revision,
                         "expected_build_generation": created.build_generation,
@@ -350,12 +350,12 @@ mod tests {
             ))
             .await
             .expect("edit through Wave3");
-        assert_eq!(output.0["miniapp"]["miniapp_id"], miniapp_id);
+        assert_eq!(output.0["plugin"]["plugin_id"], plugin_id);
         let edited: PluginRuntimeWorkshopDto =
             serde_json::from_value(output.0.clone()).expect("edited workshop");
 
         let saved = application
-            .source_file(&owner_id, &miniapp_id, "ui/index.html")
+            .source_file(&owner_id, &plugin_id, "ui/index.html")
             .await
             .expect("saved source");
         assert_eq!(
@@ -366,23 +366,23 @@ mod tests {
         let read = host
             .invoke(request(
                 &owner_id,
-                &miniapp_id,
-                "miniapp.read",
-                Wave3CapabilityOperation::MiniAppRead {
+                &plugin_id,
+                "plugin.read",
+                Wave3CapabilityOperation::PluginRead {
                     input: StrictJsonValue(json!({ "path": "ui/index.html" })),
                 },
             ))
             .await
             .expect("read through Wave3");
         assert_eq!(read.0["content"], saved.content);
-        assert_eq!(MiniAppId::from(miniapp_id).as_ref(), read.0["miniapp_id"]);
+        assert_eq!(PluginProductId::from(plugin_id).as_ref(), read.0["plugin_id"]);
 
         let built = application
             .build(
                 &owner_id,
                 BuildPluginRuntimeRequest {
-                    miniapp_id: edited.miniapp.miniapp_id.clone(),
-                    expected_product_revision: edited.miniapp.product_revision,
+                    plugin_id: edited.plugin.plugin_id.clone(),
+                    expected_product_revision: edited.plugin.product_revision,
                     project_id: edited.project_id.clone(),
                     expected_project_revision: edited.project_revision,
                     expected_build_generation: edited.build_generation,
@@ -403,13 +403,13 @@ mod tests {
         let published = host
             .invoke(request(
                 &owner_id,
-                &built.miniapp.miniapp_id,
-                "miniapp.publish",
-                Wave3CapabilityOperation::MiniAppPublish {
+                &built.plugin.plugin_id,
+                "plugin.publish",
+                Wave3CapabilityOperation::PluginPublish {
                     input: StrictJsonValue(json!({
-                        "expected_product_revision": built.miniapp.product_revision,
-                        "expected_pointer_revision": built.miniapp.releases.pointer_revision,
-                        "expected_active_release_epoch": built.miniapp.releases.active_release_epoch,
+                        "expected_product_revision": built.plugin.product_revision,
+                        "expected_pointer_revision": built.plugin.releases.pointer_revision,
+                        "expected_active_release_epoch": built.plugin.releases.active_release_epoch,
                         "ready_release_id": ready.release.release_id,
                         "expected_ready_release_digest": ready.release.release_digest,
                         "acknowledge_test_warning": false
@@ -421,7 +421,7 @@ mod tests {
         let published: PluginRuntimeWorkshopDto =
             serde_json::from_value(published.0).expect("published workshop");
         let active_digest = published
-            .miniapp
+            .plugin
             .releases
             .active
             .as_ref()
@@ -430,29 +430,29 @@ mod tests {
             .set_enabled(
                 &owner_id,
                 SetPluginRuntimeEnabledRequest {
-                    miniapp_id: published.miniapp.miniapp_id.clone(),
-                    expected_product_revision: published.miniapp.product_revision,
-                    expected_pointer_revision: published.miniapp.releases.pointer_revision,
+                    plugin_id: published.plugin.plugin_id.clone(),
+                    expected_product_revision: published.plugin.product_revision,
+                    expected_pointer_revision: published.plugin.releases.pointer_revision,
                     expected_active_release_digest: active_digest,
                     enabled: true,
                 },
             )
             .await
             .expect("enable published Plugin");
-        assert!(enabled.miniapp.surface_available);
+        assert!(enabled.plugin.surface_available);
 
         let serving = host
             .invoke(request(
                 &owner_id,
-                &enabled.miniapp.miniapp_id,
-                "miniapp.serve",
-                Wave3CapabilityOperation::MiniAppServe {
+                &enabled.plugin.plugin_id,
+                "plugin.serve",
+                Wave3CapabilityOperation::PluginServe {
                     input: StrictJsonValue(json!({})),
                 },
             ))
             .await
             .expect("read serving projection through Wave3");
-        assert_eq!(serving.0["miniapp"]["surface_available"], true);
+        assert_eq!(serving.0["plugin"]["surface_available"], true);
         assert!(serving.0.get("surface_capability").is_none());
     }
 }

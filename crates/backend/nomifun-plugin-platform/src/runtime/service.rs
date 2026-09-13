@@ -2,10 +2,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use nomifun_agent_contracts::{
-    CanonicalErrorCode, DigestHex, MiniAppId, MiniAppPointerExpectation,
-    MiniAppProductLifecycleState, MiniAppProjectId, MiniAppPublishAuthorization,
-    MiniAppPublishRequest, MiniAppRollbackRequest, MiniAppServiceStorageDescriptor,
-    MiniAppUiOnlyAutoPublishAuthorization, OperationId, ResolvedMiniAppServiceSpec,
+    CanonicalErrorCode, DigestHex, PluginProductId, PluginPointerExpectation,
+    PluginProductLifecycleState, PluginProjectId, PluginPublishAuthorization,
+    PluginPublishRequest, PluginRollbackRequest, PluginServiceStorageDescriptor,
+    PluginUiOnlyAutoPublishAuthorization, OperationId, ResolvedPluginServiceSpec,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use uuid::Uuid;
@@ -22,7 +22,7 @@ use crate::runtime::{
 
 #[derive(Default)]
 pub struct PluginRuntimeOwnerMutationCoordinator {
-    locks: Mutex<BTreeMap<MiniAppId, Arc<Mutex<()>>>>,
+    locks: Mutex<BTreeMap<PluginProductId, Arc<Mutex<()>>>>,
 }
 
 impl PluginRuntimeOwnerMutationCoordinator {
@@ -30,11 +30,11 @@ impl PluginRuntimeOwnerMutationCoordinator {
         Self::default()
     }
 
-    pub async fn acquire(&self, miniapp_id: &MiniAppId) -> OwnedMutexGuard<()> {
+    pub async fn acquire(&self, plugin_product_id: &PluginProductId) -> OwnedMutexGuard<()> {
         let lock = {
             let mut locks = self.locks.lock().await;
             locks
-                .entry(miniapp_id.clone())
+                .entry(plugin_product_id.clone())
                 .or_insert_with(|| Arc::new(Mutex::new(())))
                 .clone()
         };
@@ -42,7 +42,7 @@ impl PluginRuntimeOwnerMutationCoordinator {
     }
 }
 
-pub struct PluginRuntimeApplicationService {
+pub struct PluginRuntimeMutationService {
     repository: Arc<dyn PluginRuntimeRepository>,
     runtime: Arc<dyn PluginRuntimeRuntimePort>,
     managed_data: Arc<dyn PluginRuntimeManagedDataPort>,
@@ -59,22 +59,22 @@ pub struct PluginRuntimeApplicationDependencies {
 #[derive(Clone, Debug)]
 pub struct CreatePluginRuntime {
     pub expected_library_revision: u64,
-    pub miniapp_id: MiniAppId,
-    pub project_id: MiniAppProjectId,
+    pub plugin_product_id: PluginProductId,
+    pub project_id: PluginProjectId,
     pub display_name: String,
     pub description: Option<String>,
     pub kind: PluginRuntimeKind,
-    pub storage: MiniAppServiceStorageDescriptor,
+    pub storage: PluginServiceStorageDescriptor,
     pub now_ms: i64,
 }
 
 #[derive(Clone, Debug)]
 pub struct PublishPluginRuntime {
     pub expected: PluginRuntimeMutationExpectation,
-    pub authorization: MiniAppPublishAuthorization,
+    pub authorization: PluginPublishAuthorization,
     pub target_catalog_digest: DigestHex,
-    pub current_service_spec: Option<ResolvedMiniAppServiceSpec>,
-    pub target_service_spec: Option<ResolvedMiniAppServiceSpec>,
+    pub current_service_spec: Option<ResolvedPluginServiceSpec>,
+    pub target_service_spec: Option<ResolvedPluginServiceSpec>,
     pub now_ms: i64,
 }
 
@@ -83,8 +83,8 @@ pub struct RollbackPluginRuntime {
     pub expected: PluginRuntimeMutationExpectation,
     pub actor_id: String,
     pub target_catalog_digest: DigestHex,
-    pub current_service_spec: Option<ResolvedMiniAppServiceSpec>,
-    pub target_service_spec: Option<ResolvedMiniAppServiceSpec>,
+    pub current_service_spec: Option<ResolvedPluginServiceSpec>,
+    pub target_service_spec: Option<ResolvedPluginServiceSpec>,
     pub now_ms: i64,
 }
 
@@ -92,14 +92,14 @@ pub struct RollbackPluginRuntime {
 pub struct ChangePluginRuntimeLifecycle {
     pub expected: PluginRuntimeMutationExpectation,
     pub command: PluginRuntimeLifecycleCommand,
-    pub active_service_spec: Option<ResolvedMiniAppServiceSpec>,
+    pub active_service_spec: Option<ResolvedPluginServiceSpec>,
     pub now_ms: i64,
 }
 
 #[derive(Clone, Debug)]
 pub struct SetPluginRuntimeAutoPublish {
     pub expected: PluginRuntimeMutationExpectation,
-    pub authorization: Option<MiniAppUiOnlyAutoPublishAuthorization>,
+    pub authorization: Option<PluginUiOnlyAutoPublishAuthorization>,
     pub now_ms: i64,
 }
 
@@ -112,7 +112,7 @@ pub struct BeginPermanentDelete {
 
 #[derive(Clone, Debug)]
 pub struct RunPermanentDelete {
-    pub miniapp_id: MiniAppId,
+    pub plugin_product_id: PluginProductId,
     pub operation_id: OperationId,
     pub expected_operation_revision: u64,
     pub now_ms: i64,
@@ -120,13 +120,13 @@ pub struct RunPermanentDelete {
 
 #[derive(Clone, Debug)]
 pub struct RetryPermanentDelete {
-    pub miniapp_id: MiniAppId,
+    pub plugin_product_id: PluginProductId,
     pub failed_operation_id: OperationId,
     pub operation_id: Option<OperationId>,
     pub now_ms: i64,
 }
 
-impl PluginRuntimeApplicationService {
+impl PluginRuntimeMutationService {
     pub fn new(dependencies: PluginRuntimeApplicationDependencies) -> Self {
         Self {
             repository: dependencies.repository,
@@ -142,18 +142,18 @@ impl PluginRuntimeApplicationService {
 
     pub async fn get(
         &self,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
     ) -> PluginRuntimePlatformResult<PluginRuntimeRepositorySnapshot> {
-        self.repository.get(miniapp_id).await
+        self.repository.get(plugin_product_id).await
     }
 
     pub async fn create(
         &self,
         command: CreatePluginRuntime,
     ) -> PluginRuntimePlatformResult<PluginRuntimeRepositorySnapshot> {
-        let _guard = self.mutations.acquire(&command.miniapp_id).await;
+        let _guard = self.mutations.acquire(&command.plugin_product_id).await;
         let root = PluginRuntimeDataRoot::new(
-            command.miniapp_id,
+            command.plugin_product_id,
             command.project_id,
             command.display_name,
             command.description,
@@ -171,12 +171,12 @@ impl PluginRuntimeApplicationService {
 
     pub async fn start_operation(
         &self,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
         operation_id: OperationId,
         kind: PluginRuntimeOperationKind,
         now_ms: i64,
     ) -> PluginRuntimePlatformResult<DurablePluginRuntimeOperation> {
-        let _guard = self.mutations.acquire(miniapp_id).await;
+        let _guard = self.mutations.acquire(plugin_product_id).await;
         if kind == PluginRuntimeOperationKind::PermanentDelete {
             return Err(PluginRuntimePlatformError::InvalidState(
                 "Permanent Delete must start through begin_delete".into(),
@@ -185,7 +185,7 @@ impl PluginRuntimeApplicationService {
         self.repository
             .start_operation(DurablePluginRuntimeOperation::running(
                 operation_id,
-                miniapp_id.clone(),
+                plugin_product_id.clone(),
                 kind,
                 true,
                 now_ms,
@@ -197,7 +197,7 @@ impl PluginRuntimeApplicationService {
         &self,
         commit: CompleteReadyReleaseCommit,
     ) -> PluginRuntimePlatformResult<PluginRuntimeRepositorySnapshot> {
-        let _guard = self.mutations.acquire(&commit.expected.miniapp_id).await;
+        let _guard = self.mutations.acquire(&commit.expected.plugin_product_id).await;
         self.repository.complete_ready_release(commit).await
     }
 
@@ -205,9 +205,9 @@ impl PluginRuntimeApplicationService {
         &self,
         command: PublishPluginRuntime,
     ) -> PluginRuntimePlatformResult<PluginRuntimeRepositorySnapshot> {
-        let _guard = self.mutations.acquire(&command.expected.miniapp_id).await;
+        let _guard = self.mutations.acquire(&command.expected.plugin_product_id).await;
         let current = self.load_expected(&command.expected).await?;
-        if let MiniAppPublishAuthorization::AutoUiOnly { authorization, .. } =
+        if let PluginPublishAuthorization::AutoUiOnly { authorization, .. } =
             &command.authorization
             && current.root.product.auto_publish.as_ref() != Some(authorization)
         {
@@ -216,9 +216,9 @@ impl PluginRuntimeApplicationService {
             ));
         }
         let target = current.root.ready_release()?.clone();
-        let request = MiniAppPublishRequest {
-            miniapp_id: command.expected.miniapp_id.clone(),
-            expected: MiniAppPointerExpectation::from_state(&current.root.product.pointers),
+        let request = PluginPublishRequest {
+            plugin_product_id: command.expected.plugin_product_id.clone(),
+            expected: PluginPointerExpectation::from_state(&current.root.product.pointers),
             target_ready_release: target.release_ref().clone(),
             target_catalog_digest: command.target_catalog_digest,
             authorization: command.authorization,
@@ -238,7 +238,7 @@ impl PluginRuntimeApplicationService {
         &self,
         command: SetPluginRuntimeAutoPublish,
     ) -> PluginRuntimePlatformResult<PluginRuntimeRepositorySnapshot> {
-        let _guard = self.mutations.acquire(&command.expected.miniapp_id).await;
+        let _guard = self.mutations.acquire(&command.expected.plugin_product_id).await;
         self.load_expected(&command.expected).await?;
         self.repository
             .commit_auto_publish(CommitPluginRuntimeAutoPublish {
@@ -253,12 +253,12 @@ impl PluginRuntimeApplicationService {
         &self,
         command: RollbackPluginRuntime,
     ) -> PluginRuntimePlatformResult<PluginRuntimeRepositorySnapshot> {
-        let _guard = self.mutations.acquire(&command.expected.miniapp_id).await;
+        let _guard = self.mutations.acquire(&command.expected.plugin_product_id).await;
         let current = self.load_expected(&command.expected).await?;
         let target = current.root.previous_release()?.clone();
-        let request = MiniAppRollbackRequest {
-            miniapp_id: command.expected.miniapp_id.clone(),
-            expected: MiniAppPointerExpectation::from_state(&current.root.product.pointers),
+        let request = PluginRollbackRequest {
+            plugin_product_id: command.expected.plugin_product_id.clone(),
+            expected: PluginPointerExpectation::from_state(&current.root.product.pointers),
             rollback_target: target.release_ref().clone(),
             target_catalog_digest: command.target_catalog_digest,
             actor_id: command.actor_id,
@@ -278,7 +278,7 @@ impl PluginRuntimeApplicationService {
         &self,
         command: ChangePluginRuntimeLifecycle,
     ) -> PluginRuntimePlatformResult<PluginRuntimeRepositorySnapshot> {
-        let _guard = self.mutations.acquire(&command.expected.miniapp_id).await;
+        let _guard = self.mutations.acquire(&command.expected.plugin_product_id).await;
         let current = self.load_expected(&command.expected).await?;
         let target = lifecycle_target(current.root.product.lifecycle, command.command)?;
         let active_release = current
@@ -290,7 +290,7 @@ impl PluginRuntimeApplicationService {
             .map(|_| current.root.active_release().cloned())
             .transpose()?;
         let plan = PluginRuntimeLifecyclePlan {
-            miniapp_id: command.expected.miniapp_id.clone(),
+            plugin_product_id: command.expected.plugin_product_id.clone(),
             from: current.root.product.lifecycle,
             to: target,
             active_release_epoch: current.root.product.pointers.active_release_epoch,
@@ -335,9 +335,9 @@ impl PluginRuntimeApplicationService {
         &self,
         command: BeginPermanentDelete,
     ) -> PluginRuntimePlatformResult<PluginRuntimeRepositorySnapshot> {
-        let _guard = self.mutations.acquire(&command.expected.miniapp_id).await;
+        let _guard = self.mutations.acquire(&command.expected.plugin_product_id).await;
         let current = self.load_expected(&command.expected).await?;
-        if current.root.product.lifecycle != MiniAppProductLifecycleState::Trashed {
+        if current.root.product.lifecycle != PluginProductLifecycleState::Trashed {
             return Err(PluginRuntimePlatformError::LifecycleConflict(format!(
                 "{:?}",
                 current.root.product.lifecycle
@@ -349,14 +349,14 @@ impl PluginRuntimeApplicationService {
                 expected: command.expected,
                 operation_id: command
                     .operation_id
-                    .unwrap_or_else(|| new_operation_id("miniapp-delete")),
+                    .unwrap_or_else(|| new_operation_id("plugin-delete")),
                 now_ms: command.now_ms,
             })
             .await
     }
 
     pub async fn run_delete(&self, command: RunPermanentDelete) -> PluginRuntimePlatformResult<u64> {
-        let _guard = self.mutations.acquire(&command.miniapp_id).await;
+        let _guard = self.mutations.acquire(&command.plugin_product_id).await;
         self.run_delete_locked(command).await
     }
 
@@ -364,8 +364,8 @@ impl PluginRuntimeApplicationService {
         &self,
         command: RetryPermanentDelete,
     ) -> PluginRuntimePlatformResult<u64> {
-        let _guard = self.mutations.acquire(&command.miniapp_id).await;
-        let snapshot = self.repository.get(&command.miniapp_id).await?;
+        let _guard = self.mutations.acquire(&command.plugin_product_id).await;
+        let snapshot = self.repository.get(&command.plugin_product_id).await?;
         let failed = snapshot
             .deletion
             .as_ref()
@@ -377,11 +377,11 @@ impl PluginRuntimeApplicationService {
         }
         let operation_id = command
             .operation_id
-            .unwrap_or_else(|| new_operation_id("miniapp-delete"));
+            .unwrap_or_else(|| new_operation_id("plugin-delete"));
         let restarted = self
             .repository
             .restart_delete(RestartPluginRuntimeDelete {
-                miniapp_id: command.miniapp_id.clone(),
+                plugin_product_id: command.plugin_product_id.clone(),
                 expected_operation_id: command.failed_operation_id,
                 operation_id: operation_id.clone(),
                 now_ms: command.now_ms,
@@ -393,7 +393,7 @@ impl PluginRuntimeApplicationService {
             .expect("restart_delete returns a deleting snapshot")
             .operation;
         self.run_delete_locked(RunPermanentDelete {
-            miniapp_id: command.miniapp_id,
+            plugin_product_id: command.plugin_product_id,
             operation_id,
             expected_operation_revision: operation.revision,
             now_ms: command.now_ms,
@@ -446,7 +446,7 @@ impl PluginRuntimeApplicationService {
         &self,
         command: RunPermanentDelete,
     ) -> PluginRuntimePlatformResult<u64> {
-        let snapshot = self.repository.get(&command.miniapp_id).await?;
+        let snapshot = self.repository.get(&command.plugin_product_id).await?;
         let deletion = snapshot
             .deletion
             .as_ref()
@@ -466,10 +466,10 @@ impl PluginRuntimeApplicationService {
         if let Err(error) = cleanup {
             self.repository
                 .fail_delete(FailPluginRuntimeDelete {
-                    miniapp_id: command.miniapp_id,
+                    plugin_product_id: command.plugin_product_id,
                     operation_id: command.operation_id,
                     expected_operation_revision: command.expected_operation_revision,
-                    error: CanonicalErrorCode::from("miniapp_delete_failed"),
+                    error: CanonicalErrorCode::from("plugin_delete_failed"),
                     now_ms: command.now_ms,
                 })
                 .await
@@ -482,7 +482,7 @@ impl PluginRuntimeApplicationService {
         }
         self.repository
             .finalize_delete(FinalizePluginRuntimeDelete {
-                miniapp_id: command.miniapp_id,
+                plugin_product_id: command.plugin_product_id,
                 operation_id: command.operation_id,
                 expected_operation_revision: command.expected_operation_revision,
                 now_ms: command.now_ms,
@@ -494,7 +494,7 @@ impl PluginRuntimeApplicationService {
         &self,
         expected: &PluginRuntimeMutationExpectation,
     ) -> PluginRuntimePlatformResult<PluginRuntimeRepositorySnapshot> {
-        let snapshot = self.repository.get(&expected.miniapp_id).await?;
+        let snapshot = self.repository.get(&expected.plugin_product_id).await?;
         expected.validate(&snapshot)?;
         Ok(snapshot)
     }
@@ -503,8 +503,8 @@ impl PluginRuntimeApplicationService {
 fn release_cutover_plan(
     snapshot: &PluginRuntimeRepositorySnapshot,
     command: &PluginRuntimeReleaseCommand,
-    current_service_spec: Option<ResolvedMiniAppServiceSpec>,
-    target_service_spec: Option<ResolvedMiniAppServiceSpec>,
+    current_service_spec: Option<ResolvedPluginServiceSpec>,
+    target_service_spec: Option<ResolvedPluginServiceSpec>,
 ) -> PluginRuntimePlatformResult<PluginRuntimeReleaseCutoverPlan> {
     let current_release = snapshot
         .root
@@ -536,7 +536,7 @@ fn release_cutover_plan(
     };
     Ok(PluginRuntimeReleaseCutoverPlan {
         kind,
-        miniapp_id: snapshot.root.product.miniapp_id.clone(),
+        plugin_product_id: snapshot.root.product.plugin_product_id.clone(),
         lifecycle: snapshot.root.product.lifecycle,
         current_release,
         target_release,
@@ -557,22 +557,22 @@ fn release_cutover_plan(
 }
 
 fn lifecycle_target(
-    current: MiniAppProductLifecycleState,
+    current: PluginProductLifecycleState,
     command: PluginRuntimeLifecycleCommand,
-) -> PluginRuntimePlatformResult<MiniAppProductLifecycleState> {
+) -> PluginRuntimePlatformResult<PluginProductLifecycleState> {
     match (current, command) {
-        (MiniAppProductLifecycleState::Disabled, PluginRuntimeLifecycleCommand::Enable) => {
-            Ok(MiniAppProductLifecycleState::Enabled)
+        (PluginProductLifecycleState::Disabled, PluginRuntimeLifecycleCommand::Enable) => {
+            Ok(PluginProductLifecycleState::Enabled)
         }
-        (MiniAppProductLifecycleState::Enabled, PluginRuntimeLifecycleCommand::Disable) => {
-            Ok(MiniAppProductLifecycleState::Disabled)
+        (PluginProductLifecycleState::Enabled, PluginRuntimeLifecycleCommand::Disable) => {
+            Ok(PluginProductLifecycleState::Disabled)
         }
         (
-            MiniAppProductLifecycleState::Enabled | MiniAppProductLifecycleState::Disabled,
+            PluginProductLifecycleState::Enabled | PluginProductLifecycleState::Disabled,
             PluginRuntimeLifecycleCommand::Trash,
-        ) => Ok(MiniAppProductLifecycleState::Trashed),
-        (MiniAppProductLifecycleState::Trashed, PluginRuntimeLifecycleCommand::Restore) => {
-            Ok(MiniAppProductLifecycleState::Disabled)
+        ) => Ok(PluginProductLifecycleState::Trashed),
+        (PluginProductLifecycleState::Trashed, PluginRuntimeLifecycleCommand::Restore) => {
+            Ok(PluginProductLifecycleState::Disabled)
         }
         _ => Err(PluginRuntimePlatformError::LifecycleConflict(format!(
             "{current:?}"

@@ -1,4 +1,4 @@
-//! End-to-end coverage for the clean-start MiniApp M1 HTTP surface.
+//! End-to-end coverage for the clean-start Plugin M1 HTTP surface.
 
 mod common;
 
@@ -6,19 +6,17 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use nomifun_db::{
-    IMiniAppM1Repository, MiniAppM1ProjectSourceState, SqliteMiniAppM1Repository,
-    UpdateMiniAppM1ProjectSourceParams,
+    IPluginRuntimeRepository, PluginRuntimeProjectSourceState, SqlitePluginRuntimeRepository,
+    UpdatePluginRuntimeProjectSourceParams,
 };
 use nomifun_plugin_platform::runtime::{PluginRuntimeSourceFileInput, PluginRuntimeSourceStore};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-const LOCAL_TRUST: &str = "miniapp-m1-local-trust";
-const LEGACY_MINIAPP_ID: &str =
-    "0190f5fe-7c00-7000-8000-000000000451";
+const LOCAL_TRUST: &str = "plugin-m1-local-trust";
 
 #[tokio::test]
-async fn m1_routes_replace_the_legacy_product_chain() {
+async fn plugin_routes_expose_the_clean_start_runtime_chain() {
     let (router, services) = common::build_local_trust_app(LOCAL_TRUST).await;
     let owner_id = services.authoritative_user_id.to_string();
     let owner_jwt = services
@@ -26,17 +24,14 @@ async fn m1_routes_replace_the_legacy_product_chain() {
         .sign(&owner_id, "admin")
         .expect("owner JWT");
 
-    nomifun_db::sqlx::query(
-        "INSERT INTO miniapps (
-            miniapp_id, user_id, name, description, html, html_size,
-            created_at, updated_at
-         ) VALUES (?, ?, 'retired', '', '<p>retired</p>', 14, 1, 1)",
+    let retired_tables: i64 = nomifun_db::sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_schema
+         WHERE type = 'table' AND name IN ('miniapps', 'plugins')",
     )
-    .bind(LEGACY_MINIAPP_ID)
-    .bind(&owner_id)
-    .execute(services.database.pool())
+    .fetch_one(services.database.pool())
     .await
-    .expect("legacy audit row");
+    .expect("retired product tables");
+    assert_eq!(retired_tables, 0, "the clean-start schema must not recreate retired roots");
 
     let response = request(&router, Method::GET, "/api/plugins/runtimes", None)
         .header("authorization", format!("Bearer {owner_jwt}"))
@@ -51,7 +46,7 @@ async fn m1_routes_replace_the_legacy_product_chain() {
         "expected_library_revision": 0,
         "display_name": "M1 Notes",
         "description": "clean-start project",
-        "kind": "ui_only"
+        "service_source": null
     });
     let response = request(
         &router,
@@ -79,11 +74,11 @@ async fn m1_routes_replace_the_legacy_product_chain() {
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     let created = response_json(response).await;
-    let miniapp_id = created["data"]["plugin"]["plugin_id"]
+    let plugin_id = created["data"]["plugin"]["plugin_id"]
         .as_str()
-        .expect("created miniapp_id")
+        .expect("created plugin_id")
         .to_owned();
-    nomifun_common::MiniAppId::parse(miniapp_id.clone())
+    nomifun_common::PluginProductId::parse(plugin_id.clone())
         .expect("canonical Plugin UUIDv7");
     assert_eq!(created["data"]["plugin"]["display_name"], "M1 Notes");
     assert_eq!(created["data"]["source_state"], "editable");
@@ -96,13 +91,13 @@ async fn m1_routes_replace_the_legacy_product_chain() {
         .send().await;
     assert_eq!(unified.status(), StatusCode::OK);
     let unified = response_json(unified).await;
-    assert_eq!(unified["data"]["runtimes"][0]["plugin_id"], miniapp_id);
+    assert_eq!(unified["data"]["runtimes"][0]["plugin_id"], plugin_id);
     assert!(unified["data"]["runtimes"][0].get("miniapp_id").is_none());
 
     let response = request(
         &router,
         Method::GET,
-        &format!("/api/plugins/runtimes/{miniapp_id}/workshop"),
+        &format!("/api/plugins/runtimes/{plugin_id}/workshop"),
         None,
     )
     .header("authorization", format!("Bearer {owner_jwt}"))
@@ -116,40 +111,32 @@ async fn m1_routes_replace_the_legacy_product_chain() {
     assert_eq!(response_json(response).await["data"], created["data"]);
 
     let product_owner: String = nomifun_db::sqlx::query_scalar(
-        "SELECT owner_user_id FROM miniapp_products WHERE miniapp_id = ?",
+        "SELECT owner_user_id FROM plugin_products WHERE plugin_product_id = ?",
     )
-    .bind(&miniapp_id)
+    .bind(&plugin_id)
     .fetch_one(services.database.pool())
     .await
     .expect("M1 product owner");
     assert_eq!(product_owner, owner_id);
-    let legacy_name: String = nomifun_db::sqlx::query_scalar(
-        "SELECT name FROM miniapps WHERE miniapp_id = ?",
-    )
-    .bind(LEGACY_MINIAPP_ID)
-    .fetch_one(services.database.pool())
-    .await
-    .expect("legacy row remains frozen");
-    assert_eq!(legacy_name, "retired");
 
     for (method, path) in [
         (Method::POST, "/api/plugins/runtimes".to_owned()),
-        (Method::GET, format!("/api/plugins/runtimes/{miniapp_id}")),
+        (Method::GET, format!("/api/plugins/runtimes/{plugin_id}")),
         (
             Method::PUT,
-            format!("/api/plugins/runtimes/{miniapp_id}"),
+            format!("/api/plugins/runtimes/{plugin_id}"),
         ),
         (
             Method::DELETE,
-            format!("/api/plugins/runtimes/{miniapp_id}"),
+            format!("/api/plugins/runtimes/{plugin_id}"),
         ),
         (
             Method::GET,
-            format!("/api/plugins/runtimes/{miniapp_id}/serve"),
+            format!("/api/plugins/runtimes/{plugin_id}/serve"),
         ),
         (
             Method::POST,
-            format!("/api/plugins/runtimes/{miniapp_id}/workspace"),
+            format!("/api/plugins/runtimes/{plugin_id}/workspace"),
         ),
         (Method::POST, "/api/plugins/runtimes/validate".to_owned()),
         (Method::POST, "/api/plugins/runtimes/import".to_owned()),
@@ -176,7 +163,7 @@ async fn m1_routes_replace_the_legacy_product_chain() {
 }
 
 #[tokio::test]
-async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
+async fn ui_only_plugin_completes_publish_enable_surface_and_rollback_chain() {
     let (router, services) = common::build_local_trust_app(LOCAL_TRUST).await;
     let owner_id = services.authoritative_user_id.to_string();
     let owner_jwt = services
@@ -191,7 +178,7 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
             "expected_library_revision": 0,
             "display_name": "Surface Notes",
             "description": "UI-only lifecycle",
-            "kind": "ui_only"
+            "service_source": null
         })),
     )
     .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
@@ -199,13 +186,13 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
     .await;
     assert_eq!(create.status(), StatusCode::OK);
     let created = response_json(create).await["data"].clone();
-    let miniapp_id = created["plugin"]["plugin_id"]
+    let plugin_id = created["plugin"]["plugin_id"]
         .as_str()
         .unwrap()
         .to_owned();
 
     let build_body = json!({
-        "plugin_id": miniapp_id,
+        "plugin_id": plugin_id,
         "expected_product_revision": created["plugin"]["product_revision"],
         "project_id": created["project_id"],
         "expected_project_revision": created["project_revision"],
@@ -216,7 +203,7 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
     let build = request(
         &router,
         Method::POST,
-        &format!("/api/plugins/runtimes/{miniapp_id}/build"),
+        &format!("/api/plugins/runtimes/{plugin_id}/build"),
         Some(build_body),
     )
     .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
@@ -230,9 +217,9 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
     let premature_auto = request(
         &router,
         Method::POST,
-        &format!("/api/plugins/runtimes/{miniapp_id}/publish-mode"),
+        &format!("/api/plugins/runtimes/{plugin_id}/publish-mode"),
         Some(json!({
-            "plugin_id": miniapp_id,
+            "plugin_id": plugin_id,
             "expected_product_revision": ready["plugin"]["product_revision"],
             "expected_pointer_revision": ready["plugin"]["releases"]["pointer_revision"],
             "mode": "auto_ui_only"
@@ -244,7 +231,7 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
     assert_eq!(premature_auto.status(), StatusCode::BAD_REQUEST);
 
     let publish_body = json!({
-        "plugin_id": miniapp_id,
+        "plugin_id": plugin_id,
         "expected_product_revision": ready["plugin"]["product_revision"],
         "expected_pointer_revision": ready["plugin"]["releases"]["pointer_revision"],
         "expected_active_release_epoch": ready["plugin"]["releases"]["active_release_epoch"],
@@ -255,7 +242,7 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
     let publish = request(
         &router,
         Method::POST,
-        &format!("/api/plugins/runtimes/{miniapp_id}/publish"),
+        &format!("/api/plugins/runtimes/{plugin_id}/publish"),
         Some(publish_body),
     )
     .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
@@ -269,7 +256,7 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
     assert!(published["ready"].is_null());
 
     let enable_body = json!({
-        "plugin_id": miniapp_id,
+        "plugin_id": plugin_id,
         "expected_product_revision": published["plugin"]["product_revision"],
         "expected_pointer_revision": published["plugin"]["releases"]["pointer_revision"],
         "expected_active_release_digest": published["plugin"]["releases"]["active"]["release_digest"],
@@ -278,7 +265,7 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
     let enable = request(
         &router,
         Method::POST,
-        &format!("/api/plugins/runtimes/{miniapp_id}/enabled"),
+        &format!("/api/plugins/runtimes/{plugin_id}/enabled"),
         Some(enable_body),
     )
     .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
@@ -296,7 +283,7 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
     let old_surface_get = request(
         &router,
         Method::GET,
-        &format!("/api/plugins/runtimes/{miniapp_id}/surface"),
+        &format!("/api/plugins/runtimes/{plugin_id}/surface"),
         None,
     )
     .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
@@ -307,7 +294,7 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
     let wrong_method = request(
         &router,
         Method::GET,
-        &format!("/api/plugins/runtimes/{miniapp_id}/surface/open"),
+        &format!("/api/plugins/runtimes/{plugin_id}/surface/open"),
         None,
     )
     .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
@@ -318,8 +305,8 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
     let owner_only = request(
         &router,
         Method::POST,
-        &format!("/api/plugins/runtimes/{miniapp_id}/surface/open"),
-        Some(json!({ "plugin_id": miniapp_id })),
+        &format!("/api/plugins/runtimes/{plugin_id}/surface/open"),
+        Some(json!({ "plugin_id": plugin_id })),
     )
     .header("authorization", format!("Bearer {owner_jwt}"))
     .send()
@@ -333,7 +320,7 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
     let mismatched_open = request(
         &router,
         Method::POST,
-        &format!("/api/plugins/runtimes/{miniapp_id}/surface/open"),
+        &format!("/api/plugins/runtimes/{plugin_id}/surface/open"),
         Some(json!({
             "plugin_id": "0190f5fe-7c00-7000-8000-000000000452"
         })),
@@ -343,7 +330,7 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
     .await;
     assert_eq!(mismatched_open.status(), StatusCode::BAD_REQUEST);
     let open_session_count: i64 =
-        nomifun_db::sqlx::query_scalar("SELECT COUNT(*) FROM miniapp_surface_sessions")
+        nomifun_db::sqlx::query_scalar("SELECT COUNT(*) FROM plugin_surface_sessions")
             .fetch_one(services.database.pool())
             .await
             .unwrap();
@@ -355,8 +342,8 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
     let surface = request(
         &router,
         Method::POST,
-        &format!("/api/plugins/runtimes/{miniapp_id}/surface/open"),
-        Some(json!({ "plugin_id": miniapp_id })),
+        &format!("/api/plugins/runtimes/{plugin_id}/surface/open"),
+        Some(json!({ "plugin_id": plugin_id })),
     )
     .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
     .send()
@@ -371,7 +358,7 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
         &router,
         Method::GET,
         &format!(
-            "/api/plugins/runtimes/{miniapp_id}/surface/assets/{capability}/{epoch}/{digest}/{entrypoint}"
+            "/api/plugins/runtimes/{plugin_id}/surface/assets/{capability}/{epoch}/{digest}/{entrypoint}"
         ),
         None,
     )
@@ -390,7 +377,7 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
         .to_bytes();
     assert!(String::from_utf8_lossy(&asset_body).contains("Surface Notes"));
 
-    let bridge_path = format!("/api/plugins/runtimes/{miniapp_id}/surface/bridge");
+    let bridge_path = format!("/api/plugins/runtimes/{plugin_id}/surface/bridge");
     let bridge_set = request(
         &router,
         Method::POST,
@@ -480,7 +467,7 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
     assert_eq!(bridge_cas["data"]["current_revision"], 2);
 
     let second_build_body = json!({
-        "plugin_id": miniapp_id,
+        "plugin_id": plugin_id,
         "expected_product_revision": enabled["plugin"]["product_revision"],
         "project_id": enabled["project_id"],
         "expected_project_revision": enabled["project_revision"],
@@ -491,7 +478,7 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
     let unchanged_build = request(
         &router,
         Method::POST,
-        &format!("/api/plugins/runtimes/{miniapp_id}/build"),
+        &format!("/api/plugins/runtimes/{plugin_id}/build"),
         Some(second_build_body.clone()),
     )
     .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
@@ -499,19 +486,19 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
     .await;
     assert_eq!(unchanged_build.status(), StatusCode::BAD_REQUEST);
 
-    let repository = SqliteMiniAppM1Repository::new(services.database.pool().clone());
+    let repository = SqlitePluginRuntimeRepository::new(services.database.pool().clone());
     let before_edit = repository
-        .get(&owner_id, &miniapp_id)
+        .get(&owner_id, &plugin_id)
         .await
         .unwrap()
         .unwrap();
     let source_store =
-        PluginRuntimeSourceStore::new(services.data_dir.join("miniapp-m1").join("source"))
+        PluginRuntimeSourceStore::new(services.data_dir.join("plugin-m1").join("source"))
             .unwrap();
     let source = source_store
         .replace_source(
             &owner_id,
-            &miniapp_id,
+            &plugin_id,
             &before_edit.project.project_id,
             before_edit.project.source_head_digest.as_deref().unwrap(),
             vec![PluginRuntimeSourceFileInput::new(
@@ -522,12 +509,12 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
         )
         .unwrap();
     repository
-        .update_project_source_cas(&UpdateMiniAppM1ProjectSourceParams {
+        .update_project_source_cas(&UpdatePluginRuntimeProjectSourceParams {
             owner_user_id: owner_id.clone(),
-            miniapp_id: miniapp_id.clone(),
+            plugin_product_id: plugin_id.clone(),
             project_id: before_edit.project.project_id.clone(),
             expected_project_revision: before_edit.project.project_revision,
-            source_state: MiniAppM1ProjectSourceState::Editable,
+            source_state: PluginRuntimeProjectSourceState::Editable,
             managed_source_path: Some(source.managed_relative_path),
             source_head_digest: Some(source.source_snapshot_digest.0),
             dependency_lock_digest: Some(source.dependency_lock_digest.0),
@@ -542,7 +529,7 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
     let refreshed = request(
         &router,
         Method::GET,
-        &format!("/api/plugins/runtimes/{miniapp_id}/workshop"),
+        &format!("/api/plugins/runtimes/{plugin_id}/workshop"),
         None,
     )
     .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
@@ -551,7 +538,7 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
     assert_eq!(refreshed.status(), StatusCode::OK);
     let edited = response_json(refreshed).await["data"].clone();
     let second_build_body = json!({
-        "plugin_id": miniapp_id,
+        "plugin_id": plugin_id,
         "expected_product_revision": edited["plugin"]["product_revision"],
         "project_id": edited["project_id"],
         "expected_project_revision": edited["project_revision"],
@@ -562,7 +549,7 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
     let second_build = request(
         &router,
         Method::POST,
-        &format!("/api/plugins/runtimes/{miniapp_id}/build"),
+        &format!("/api/plugins/runtimes/{plugin_id}/build"),
         Some(second_build_body),
     )
     .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
@@ -573,7 +560,7 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
     assert!(second_ready["ready"].is_object());
 
     let second_publish_body = json!({
-        "plugin_id": miniapp_id,
+        "plugin_id": plugin_id,
         "expected_product_revision": second_ready["plugin"]["product_revision"],
         "expected_pointer_revision": second_ready["plugin"]["releases"]["pointer_revision"],
         "expected_active_release_epoch": second_ready["plugin"]["releases"]["active_release_epoch"],
@@ -585,7 +572,7 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
     let second_publish = request(
         &router,
         Method::POST,
-        &format!("/api/plugins/runtimes/{miniapp_id}/publish"),
+        &format!("/api/plugins/runtimes/{plugin_id}/publish"),
         Some(second_publish_body),
     )
     .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
@@ -603,7 +590,7 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
         &router,
         Method::GET,
         &format!(
-            "/api/plugins/runtimes/{miniapp_id}/surface/assets/{capability}/{epoch}/{digest}/{entrypoint}"
+            "/api/plugins/runtimes/{plugin_id}/surface/assets/{capability}/{epoch}/{digest}/{entrypoint}"
         ),
         None,
     )
@@ -636,7 +623,7 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
     assert_eq!(old_bridge.status(), StatusCode::NOT_FOUND);
 
     let rollback_body = json!({
-        "plugin_id": miniapp_id,
+        "plugin_id": plugin_id,
         "expected_product_revision": second_published["plugin"]["product_revision"],
         "expected_pointer_revision": second_published["plugin"]["releases"]["pointer_revision"],
         "expected_active_release_epoch": second_published["plugin"]["releases"]["active_release_epoch"],
@@ -647,7 +634,7 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
     let rollback = request(
         &router,
         Method::POST,
-        &format!("/api/plugins/runtimes/{miniapp_id}/rollback"),
+        &format!("/api/plugins/runtimes/{plugin_id}/rollback"),
         Some(rollback_body),
     )
     .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
@@ -668,9 +655,9 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
     let auto_mode = request(
         &router,
         Method::POST,
-        &format!("/api/plugins/runtimes/{miniapp_id}/publish-mode"),
+        &format!("/api/plugins/runtimes/{plugin_id}/publish-mode"),
         Some(json!({
-            "plugin_id": miniapp_id,
+            "plugin_id": plugin_id,
             "expected_product_revision": rolled_back["plugin"]["product_revision"],
             "expected_pointer_revision": rolled_back["plugin"]["releases"]["pointer_revision"],
             "mode": "auto_ui_only"
@@ -686,8 +673,8 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
     let pre_auto_surface = request(
         &router,
         Method::POST,
-        &format!("/api/plugins/runtimes/{miniapp_id}/surface/open"),
-        Some(json!({ "plugin_id": miniapp_id })),
+        &format!("/api/plugins/runtimes/{plugin_id}/surface/open"),
+        Some(json!({ "plugin_id": plugin_id })),
     )
     .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
     .send()
@@ -696,14 +683,14 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
     let pre_auto_descriptor = response_json(pre_auto_surface).await["data"].clone();
 
     let before_auto_edit = repository
-        .get(&owner_id, &miniapp_id)
+        .get(&owner_id, &plugin_id)
         .await
         .unwrap()
         .unwrap();
     let auto_source = source_store
         .replace_source(
             &owner_id,
-            &miniapp_id,
+            &plugin_id,
             &before_auto_edit.project.project_id,
             before_auto_edit
                 .project
@@ -718,12 +705,12 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
         )
         .unwrap();
     repository
-        .update_project_source_cas(&UpdateMiniAppM1ProjectSourceParams {
+        .update_project_source_cas(&UpdatePluginRuntimeProjectSourceParams {
             owner_user_id: owner_id.clone(),
-            miniapp_id: miniapp_id.clone(),
+            plugin_product_id: plugin_id.clone(),
             project_id: before_auto_edit.project.project_id.clone(),
             expected_project_revision: before_auto_edit.project.project_revision,
-            source_state: MiniAppM1ProjectSourceState::Editable,
+            source_state: PluginRuntimeProjectSourceState::Editable,
             managed_source_path: Some(auto_source.managed_relative_path),
             source_head_digest: Some(auto_source.source_snapshot_digest.0),
             dependency_lock_digest: Some(auto_source.dependency_lock_digest.0),
@@ -738,7 +725,7 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
     let auto_edited = request(
         &router,
         Method::GET,
-        &format!("/api/plugins/runtimes/{miniapp_id}/workshop"),
+        &format!("/api/plugins/runtimes/{plugin_id}/workshop"),
         None,
     )
     .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
@@ -749,9 +736,9 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
     let auto_build = request(
         &router,
         Method::POST,
-        &format!("/api/plugins/runtimes/{miniapp_id}/build"),
+        &format!("/api/plugins/runtimes/{plugin_id}/build"),
         Some(json!({
-            "plugin_id": miniapp_id,
+            "plugin_id": plugin_id,
             "expected_product_revision": auto_edited["plugin"]["product_revision"],
             "project_id": auto_edited["project_id"],
             "expected_project_revision": auto_edited["project_revision"],
@@ -779,7 +766,7 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
         &router,
         Method::GET,
         &format!(
-            "/api/plugins/runtimes/{miniapp_id}/surface/assets/{}/{}/{}/{}",
+            "/api/plugins/runtimes/{plugin_id}/surface/assets/{}/{}/{}/{}",
             pre_auto_descriptor["surface_capability"].as_str().unwrap(),
             pre_auto_descriptor["active_release_epoch"].as_u64().unwrap(),
             pre_auto_descriptor["expected_release_digest"].as_str().unwrap(),
@@ -794,8 +781,8 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
     let current_surface = request(
         &router,
         Method::POST,
-        &format!("/api/plugins/runtimes/{miniapp_id}/surface/open"),
-        Some(json!({ "plugin_id": miniapp_id })),
+        &format!("/api/plugins/runtimes/{plugin_id}/surface/open"),
+        Some(json!({ "plugin_id": plugin_id })),
     )
     .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
     .send()
@@ -804,21 +791,21 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
     let current_descriptor = response_json(current_surface).await["data"].clone();
 
     let before_non_ui_edit = repository
-        .get(&owner_id, &miniapp_id)
+        .get(&owner_id, &plugin_id)
         .await
         .unwrap()
         .unwrap();
     let renamed_at = nomifun_common::now_ms().max(before_non_ui_edit.product.updated_at);
     nomifun_db::sqlx::query(
-        "UPDATE miniapp_products
+        "UPDATE plugin_products
          SET product_revision = product_revision + 1,
              display_name = 'Surface Notes renamed', updated_at = ?
-         WHERE owner_user_id = ? AND miniapp_id = ?
+         WHERE owner_user_id = ? AND plugin_product_id = ?
            AND product_revision = ? AND updated_at <= ?",
     )
     .bind(renamed_at)
     .bind(&owner_id)
-    .bind(&miniapp_id)
+    .bind(&plugin_id)
     .bind(before_non_ui_edit.product.product_revision)
     .bind(renamed_at)
     .execute(services.database.pool())
@@ -827,7 +814,7 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
     let non_ui_source = source_store
         .replace_source(
             &owner_id,
-            &miniapp_id,
+            &plugin_id,
             &before_non_ui_edit.project.project_id,
             before_non_ui_edit
                 .project
@@ -842,12 +829,12 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
         )
         .unwrap();
     repository
-        .update_project_source_cas(&UpdateMiniAppM1ProjectSourceParams {
+        .update_project_source_cas(&UpdatePluginRuntimeProjectSourceParams {
             owner_user_id: owner_id.clone(),
-            miniapp_id: miniapp_id.clone(),
+            plugin_product_id: plugin_id.clone(),
             project_id: before_non_ui_edit.project.project_id.clone(),
             expected_project_revision: before_non_ui_edit.project.project_revision,
-            source_state: MiniAppM1ProjectSourceState::Editable,
+            source_state: PluginRuntimeProjectSourceState::Editable,
             managed_source_path: Some(non_ui_source.managed_relative_path),
             source_head_digest: Some(non_ui_source.source_snapshot_digest.0),
             dependency_lock_digest: Some(non_ui_source.dependency_lock_digest.0),
@@ -862,7 +849,7 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
     let non_ui_edited = request(
         &router,
         Method::GET,
-        &format!("/api/plugins/runtimes/{miniapp_id}/workshop"),
+        &format!("/api/plugins/runtimes/{plugin_id}/workshop"),
         None,
     )
     .header(nomifun_auth::LOCAL_TRUST_HEADER, LOCAL_TRUST)
@@ -873,9 +860,9 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
     let ready_only_build = request(
         &router,
         Method::POST,
-        &format!("/api/plugins/runtimes/{miniapp_id}/build"),
+        &format!("/api/plugins/runtimes/{plugin_id}/build"),
         Some(json!({
-            "plugin_id": miniapp_id,
+            "plugin_id": plugin_id,
             "expected_product_revision": non_ui_edited["plugin"]["product_revision"],
             "project_id": non_ui_edited["project_id"],
             "expected_project_revision": non_ui_edited["project_revision"],
@@ -902,7 +889,7 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
         &router,
         Method::GET,
         &format!(
-            "/api/plugins/runtimes/{miniapp_id}/surface/assets/{}/{}/{}/{}",
+            "/api/plugins/runtimes/{plugin_id}/surface/assets/{}/{}/{}/{}",
             current_descriptor["surface_capability"].as_str().unwrap(),
             current_descriptor["active_release_epoch"].as_u64().unwrap(),
             current_descriptor["expected_release_digest"].as_str().unwrap(),
@@ -919,10 +906,10 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
     );
     let latest_operation_state: String = nomifun_db::sqlx::query_scalar(
         "SELECT state FROM product_operations
-         WHERE owner_kind = 'miniapp' AND owner_id = ? AND kind = 'build'
+         WHERE owner_kind = 'plugin' AND owner_id = ? AND kind = 'build'
          ORDER BY started_at_ms DESC, operation_id DESC LIMIT 1",
     )
-    .bind(&miniapp_id)
+    .bind(&plugin_id)
     .fetch_one(services.database.pool())
     .await
     .unwrap();
@@ -931,9 +918,9 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
     let manual_mode = request(
         &router,
         Method::POST,
-        &format!("/api/plugins/runtimes/{miniapp_id}/publish-mode"),
+        &format!("/api/plugins/runtimes/{plugin_id}/publish-mode"),
         Some(json!({
-            "plugin_id": miniapp_id,
+            "plugin_id": plugin_id,
             "expected_product_revision": ready_only["plugin"]["product_revision"],
             "expected_pointer_revision": ready_only["plugin"]["releases"]["pointer_revision"],
             "mode": "manual"
@@ -948,9 +935,9 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
     let close_surface = request(
         &router,
         Method::POST,
-        &format!("/api/plugins/runtimes/{miniapp_id}/surface/close"),
+        &format!("/api/plugins/runtimes/{plugin_id}/surface/close"),
         Some(json!({
-            "plugin_id": miniapp_id,
+            "plugin_id": plugin_id,
             "surface_session_id": current_descriptor["surface_session_id"],
             "surface_capability": current_descriptor["surface_capability"]
         })),
@@ -964,7 +951,7 @@ async fn ui_only_miniapp_completes_publish_enable_surface_and_rollback_chain() {
         &router,
         Method::GET,
         &format!(
-            "/api/plugins/runtimes/{miniapp_id}/surface/assets/{}/{}/{}/{}",
+            "/api/plugins/runtimes/{plugin_id}/surface/assets/{}/{}/{}/{}",
             current_descriptor["surface_capability"].as_str().unwrap(),
             current_descriptor["active_release_epoch"].as_u64().unwrap(),
             current_descriptor["expected_release_digest"].as_str().unwrap(),

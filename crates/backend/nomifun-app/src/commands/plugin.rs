@@ -1,4 +1,4 @@
-//! Small product-facing headless clients for the Plugin and MiniApp APIs.
+//! Small product-facing headless clients for the Plugin APIs.
 //!
 //! This module deliberately stays an HTTP adapter. The desktop/server process
 //! remains the sole owner of AppServices, SQLite, Runtime, Host, and lifecycle
@@ -45,7 +45,7 @@ async fn run_plugin_inner(
     operation: &PluginCommand,
 ) -> Result<Value, CliFailure> {
     match operation {
-        PluginCommand::Runtime { operation } => run_miniapp_inner(operation).await,
+        PluginCommand::Runtime { operation } => run_plugin_runtime_inner(operation).await,
         PluginCommand::List(args) => run_plugin_list(args).await,
         PluginCommand::Show(args) => run_plugin_show(args).await,
         PluginCommand::Project { operation } => match operation {
@@ -80,12 +80,12 @@ async fn run_plugin_inner(
     }
 }
 
-async fn run_miniapp_inner(
+async fn run_plugin_runtime_inner(
     operation: &PluginRuntimeCommand,
 ) -> Result<Value, CliFailure> {
     match operation {
-        PluginRuntimeCommand::List(args) => run_miniapp_list(args).await,
-        PluginRuntimeCommand::Show(args) => run_miniapp_show(args).await,
+        PluginRuntimeCommand::List(args) => run_plugin_runtime_list(args).await,
+        PluginRuntimeCommand::Show(args) => run_plugin_runtime_show(args).await,
     }
 }
 
@@ -567,18 +567,22 @@ async fn run_delete_mount_data(args: &PluginMountArgs) -> Result<Value, CliFailu
     to_value(response)
 }
 
-async fn run_miniapp_list(args: &PluginRuntimeListArgs) -> Result<Value, CliFailure> {
+async fn run_plugin_runtime_list(
+    args: &PluginRuntimeListArgs,
+) -> Result<Value, CliFailure> {
     let client = HeadlessClient::new(&args.connection)?;
     let response: ApiResponse<PluginRuntimeLibraryResponseDto> =
         client.get_api("/api/plugins/runtimes").await?;
     to_value(response)
 }
 
-async fn run_miniapp_show(args: &PluginRuntimeShowArgs) -> Result<Value, CliFailure> {
-    let miniapp_id = checked_segment(&args.plugin_id, "plugin_id")?;
+async fn run_plugin_runtime_show(
+    args: &PluginRuntimeShowArgs,
+) -> Result<Value, CliFailure> {
+    let plugin_id = checked_segment(&args.plugin_id, "plugin_id")?;
     let client = HeadlessClient::new(&args.connection)?;
     let response: ApiResponse<PluginRuntimeWorkshopDto> = client
-        .get_api(&format!("/api/plugins/runtimes/{miniapp_id}/workshop"))
+        .get_api(&format!("/api/plugins/runtimes/{plugin_id}/workshop"))
         .await?;
     to_value(response)
 }

@@ -5,11 +5,11 @@
   let resolveReady;
   const ready = new Promise(resolve => { resolveReady = resolve; });
   function connect() {
-    if (port || !window.__nomifunMiniAppBridge) return;
-    port = window.__nomifunMiniAppBridge;
+    if (port || !window.__nomifunPluginBridge) return;
+    port = window.__nomifunPluginBridge;
     port.addEventListener('message', event => {
       const result = event.data;
-      if (!result || result.type !== 'nomifun-miniapp-bridge-result-v1') return;
+      if (!result || result.type !== 'nomifun-plugin-bridge-result-v1') return;
       const operation = pending.get(result.call_id);
       if (!operation) return;
       pending.delete(result.call_id);
@@ -20,7 +20,7 @@
     port.start();
     resolveReady();
   }
-  window.addEventListener('nomifun-miniapp-bridge-ready', connect);
+  window.addEventListener('nomifun-plugin-bridge-ready', connect);
   connect();
   async function callTarget(target) {
     let timer;

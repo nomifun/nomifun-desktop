@@ -2379,7 +2379,7 @@ export const pluginRuntimes = {
     httpPost<PluginRuntimeOperationSummary, CancelPluginRuntimeBuildRequest>(
       ({ plugin_id, operation_id }) =>
         `/api/plugins/runtimes/${encodeURIComponent(plugin_id)}/operations/${encodeURIComponent(operation_id)}/cancel`,
-      ({ operation_id: _operationId, plugin_id: _miniappId, ...request }) =>
+      ({ operation_id: _operationId, plugin_id: _pluginId, ...request }) =>
         request
     ),
     fromApiPluginRuntimeOperation
@@ -2468,7 +2468,7 @@ export const pluginRuntimes = {
   bridge: httpPost<PluginRuntimeKvResponse, PluginRuntimeSurfaceBridgeRequest>(
     ({ plugin_id }) =>
       `/api/plugins/runtimes/${encodeURIComponent(plugin_id)}/surface/bridge`,
-    ({ plugin_id: _miniappId, ...request }) => request
+    ({ plugin_id: _pluginId, ...request }) => request
   ),
 };
 

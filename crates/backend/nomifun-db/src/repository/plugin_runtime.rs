@@ -2,18 +2,18 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use nomifun_agent_contracts::{
-    MiniAppReadyOrigin, MiniAppReadyRelease, MiniAppReleaseArtifactV1,
-    MiniAppServiceTestOutcome, MiniAppSourceLineage, MINIAPP_RELEASE_PROFILE_VERSION,
-    canonical_json_bytes,
+    PluginReadyOrigin, PluginReadyRelease, PluginReleaseArtifactV1,
+    PluginReleaseSourceLineage, PluginServiceTestOutcome,
+    PLUGIN_RELEASE_PROFILE_VERSION, canonical_json_bytes,
 };
 
 use crate::error::DbError;
-pub use crate::models::MiniAppKvRow;
+pub use crate::models::PluginRuntimeKvRow;
 use crate::models::{
-    MiniAppM1Kind, MiniAppM1LibrarySnapshot, MiniAppM1ProjectSourceState,
-    MiniAppM1ReleaseOrigin, MiniAppM1ReleaseSourceKind, MiniAppM1Snapshot,
-    MiniAppProjectRow, MiniAppReleaseArtifactRow, MiniAppReleaseRow,
-    MiniAppSourceMutationIntentRow, MiniAppSurfaceSessionRow, ProductOperationRow,
+    PluginRuntimeKind, PluginRuntimeLibrarySnapshot, PluginRuntimeProjectSourceState,
+    PluginRuntimeReleaseOrigin, PluginRuntimeReleaseSourceKind, PluginRuntimeSnapshot,
+    PluginRuntimeProjectRow, PluginRuntimeReleaseArtifactRow, PluginRuntimeReleaseRow,
+    PluginRuntimeSourceMutationIntentRow, PluginRuntimeSurfaceSessionRow, ProductOperationRow,
     ProductOperationState,
 };
 use crate::repository::plugin_n1::{
@@ -21,15 +21,15 @@ use crate::repository::plugin_n1::{
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CreateMiniAppM1Params {
+pub struct CreatePluginRuntimeParams {
     pub owner_user_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub project_id: String,
     pub expected_library_revision: i64,
     pub display_name: String,
     pub description: Option<String>,
     pub icon_asset_id: Option<String>,
-    pub kind: MiniAppM1Kind,
+    pub kind: PluginRuntimeKind,
     pub materialized_catalog_digest: String,
     pub config_schema_json: String,
     pub config_json: String,
@@ -37,7 +37,7 @@ pub struct CreateMiniAppM1Params {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MiniAppM1ManagedSourceLineage {
+pub struct PluginRuntimeManagedSourceLineage {
     pub managed_source_path: String,
     pub source_head_digest: String,
     pub dependency_lock_digest: String,
@@ -46,52 +46,52 @@ pub struct MiniAppM1ManagedSourceLineage {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CreateMiniAppM1WithSourceParams {
-    pub create: CreateMiniAppM1Params,
-    pub source: MiniAppM1ManagedSourceLineage,
+pub struct CreatePluginRuntimeWithSourceParams {
+    pub create: CreatePluginRuntimeParams,
+    pub source: PluginRuntimeManagedSourceLineage,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum MiniAppM1ImportSource {
-    Managed(MiniAppM1ManagedSourceLineage),
+pub enum PluginRuntimeImportSource {
+    Managed(PluginRuntimeManagedSourceLineage),
     RuntimeOnly,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BeginMiniAppM1ImportAsNewParams {
-    pub create: CreateMiniAppM1Params,
+pub struct BeginPluginRuntimeImportAsNewParams {
+    pub create: CreatePluginRuntimeParams,
     pub operation_id: String,
-    pub source: MiniAppM1ImportSource,
+    pub source: PluginRuntimeImportSource,
     pub bounded_log_tail: Vec<String>,
     pub started_at_ms: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BeginMiniAppM1ImportAsNewResult {
-    pub snapshot: MiniAppM1Snapshot,
+pub struct BeginPluginRuntimeImportAsNewResult {
+    pub snapshot: PluginRuntimeSnapshot,
     pub operation: ProductOperationRow,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FinishMiniAppM1ImportReadyParams {
+pub struct FinishPluginRuntimeImportReadyParams {
     pub owner_user_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub project_id: String,
     pub operation_id: String,
     pub expected_library_revision: i64,
     pub expected_product_revision: i64,
     pub expected_pointer_revision: i64,
     pub expected_project_revision: i64,
-    pub artifact: MiniAppReleaseArtifactRow,
-    pub release: MiniAppReleaseRow,
+    pub artifact: PluginRuntimeReleaseArtifactRow,
+    pub release: PluginRuntimeReleaseRow,
     pub bounded_log_tail: Vec<String>,
     pub finished_at_ms: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FailMiniAppM1ImportParams {
+pub struct FailPluginRuntimeImportParams {
     pub owner_user_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub project_id: String,
     pub operation_id: String,
     pub expected_product_revision: i64,
@@ -104,9 +104,9 @@ pub struct FailMiniAppM1ImportParams {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CancelMiniAppM1ImportParams {
+pub struct CancelPluginRuntimeImportParams {
     pub owner_user_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub project_id: String,
     pub operation_id: String,
     pub expected_product_revision: i64,
@@ -117,9 +117,9 @@ pub struct CancelMiniAppM1ImportParams {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StartMiniAppM1ExportOperationParams {
+pub struct StartPluginRuntimeExportOperationParams {
     pub owner_user_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub operation_id: String,
     pub expected_product_revision: i64,
     pub expected_pointer_revision: i64,
@@ -128,9 +128,9 @@ pub struct StartMiniAppM1ExportOperationParams {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StartMiniAppM1BackupExportParams {
+pub struct StartPluginRuntimeBackupExportParams {
     pub owner_user_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub operation_id: String,
     pub expected_product_revision: i64,
     pub expected_pointer_revision: i64,
@@ -140,22 +140,22 @@ pub struct StartMiniAppM1BackupExportParams {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MiniAppM1BackupExportSnapshot {
-    pub snapshot: MiniAppM1Snapshot,
-    pub releases: Vec<MiniAppReleaseRow>,
-    pub artifacts: Vec<MiniAppReleaseArtifactRow>,
-    pub kv: Vec<MiniAppKvRow>,
+pub struct PluginRuntimeBackupExportSnapshot {
+    pub snapshot: PluginRuntimeSnapshot,
+    pub releases: Vec<PluginRuntimeReleaseRow>,
+    pub artifacts: Vec<PluginRuntimeReleaseArtifactRow>,
+    pub kv: Vec<PluginRuntimeKvRow>,
     pub operation: ProductOperationRow,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum MiniAppM1BackupReleaseSlot {
+pub enum PluginRuntimeBackupReleaseSlot {
     Ready,
     Active,
     Previous,
 }
 
-impl MiniAppM1BackupReleaseSlot {
+impl PluginRuntimeBackupReleaseSlot {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Ready => "ready",
@@ -166,41 +166,41 @@ impl MiniAppM1BackupReleaseSlot {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MiniAppM1BackupImportRelease {
-    pub slot: MiniAppM1BackupReleaseSlot,
-    pub artifact: MiniAppReleaseArtifactRow,
-    pub release: MiniAppReleaseRow,
+pub struct PluginRuntimeBackupImportRelease {
+    pub slot: PluginRuntimeBackupReleaseSlot,
+    pub artifact: PluginRuntimeReleaseArtifactRow,
+    pub release: PluginRuntimeReleaseRow,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FinishMiniAppM1BackupImportParams {
+pub struct FinishPluginRuntimeBackupImportParams {
     pub owner_user_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub project_id: String,
     pub operation_id: String,
     pub expected_library_revision: i64,
     pub expected_product_revision: i64,
     pub expected_pointer_revision: i64,
     pub expected_project_revision: i64,
-    pub releases: Vec<MiniAppM1BackupImportRelease>,
-    pub kv: Vec<MiniAppKvRow>,
+    pub releases: Vec<PluginRuntimeBackupImportRelease>,
+    pub kv: Vec<PluginRuntimeKvRow>,
     pub target_catalog_digest: String,
     pub finished_at_ms: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FinishMiniAppM1ExportOperationParams {
+pub struct FinishPluginRuntimeExportOperationParams {
     pub owner_user_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub operation_id: String,
     pub bounded_log_tail: Vec<String>,
     pub finished_at_ms: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FailMiniAppM1ExportOperationParams {
+pub struct FailPluginRuntimeExportOperationParams {
     pub owner_user_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub operation_id: String,
     pub progress_percent: u8,
     pub error_code: String,
@@ -209,21 +209,21 @@ pub struct FailMiniAppM1ExportOperationParams {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CancelMiniAppM1ExportOperationParams {
+pub struct CancelPluginRuntimeExportOperationParams {
     pub owner_user_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub operation_id: String,
     pub bounded_log_tail: Vec<String>,
     pub finished_at_ms: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UpdateMiniAppM1ProjectSourceParams {
+pub struct UpdatePluginRuntimeProjectSourceParams {
     pub owner_user_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub project_id: String,
     pub expected_project_revision: i64,
-    pub source_state: MiniAppM1ProjectSourceState,
+    pub source_state: PluginRuntimeProjectSourceState,
     pub managed_source_path: Option<String>,
     pub source_head_digest: Option<String>,
     pub dependency_lock_digest: Option<String>,
@@ -233,10 +233,10 @@ pub struct UpdateMiniAppM1ProjectSourceParams {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BeginMiniAppSourceMutationParams {
+pub struct BeginPluginSourceMutationParams {
     pub intent_id: String,
     pub owner_user_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub project_id: String,
     pub expected_product_revision: i64,
     pub expected_project_revision: i64,
@@ -248,38 +248,38 @@ pub struct BeginMiniAppSourceMutationParams {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FinalizeMiniAppSourceMutationParams {
+pub struct FinalizePluginSourceMutationParams {
     pub intent_id: String,
     pub owner_user_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub project_id: String,
     pub updated_at: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AbortMiniAppSourceMutationParams {
+pub struct AbortPluginSourceMutationParams {
     pub intent_id: String,
     pub owner_user_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub project_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StartMiniAppM1BuildOperationParams {
+pub struct StartPluginRuntimeBuildOperationParams {
     pub owner_user_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub project_id: String,
     pub operation_id: String,
     pub expected_project_revision: i64,
-    pub expected_source: MiniAppM1ManagedSourceLineage,
+    pub expected_source: PluginRuntimeManagedSourceLineage,
     pub bounded_log_tail: Vec<String>,
     pub started_at_ms: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FinishMiniAppM1BuildOperationParams {
+pub struct FinishPluginRuntimeBuildOperationParams {
     pub owner_user_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub operation_id: String,
     pub state: ProductOperationState,
     pub progress_percent: u8,
@@ -289,48 +289,48 @@ pub struct FinishMiniAppM1BuildOperationParams {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CancelMiniAppM1BuildOperationParams {
+pub struct CancelPluginRuntimeBuildOperationParams {
     pub owner_user_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub operation_id: String,
     pub bounded_log_tail: Vec<String>,
     pub finished_at_ms: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FinishMiniAppM1BuildAndRecordReadyParams {
+pub struct FinishPluginRuntimeBuildAndRecordReadyParams {
     pub owner_user_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub project_id: String,
     pub operation_id: String,
     pub expected_product_revision: i64,
     pub expected_pointer_revision: i64,
     pub expected_project_revision: i64,
     pub expected_build_generation: i64,
-    pub artifact: MiniAppReleaseArtifactRow,
-    pub release: MiniAppReleaseRow,
+    pub artifact: PluginRuntimeReleaseArtifactRow,
+    pub release: PluginRuntimeReleaseRow,
     pub bounded_log_tail: Vec<String>,
     pub finished_at_ms: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RecordMiniAppM1ReadyReleaseParams {
+pub struct RecordPluginRuntimeReadyReleaseParams {
     pub owner_user_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub project_id: String,
     pub expected_product_revision: i64,
     pub expected_pointer_revision: i64,
     pub expected_project_revision: i64,
     pub expected_build_generation: i64,
-    pub artifact: MiniAppReleaseArtifactRow,
-    pub release: MiniAppReleaseRow,
+    pub artifact: PluginRuntimeReleaseArtifactRow,
+    pub release: PluginRuntimeReleaseRow,
     pub updated_at: i64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct RecordMiniAppM1ServiceTestReceiptParams {
+pub struct RecordPluginRuntimeServiceTestReceiptParams {
     pub owner_user_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub expected_product_revision: i64,
     pub expected_pointer_revision: i64,
     pub expected_config_revision: i64,
@@ -339,7 +339,7 @@ pub struct RecordMiniAppM1ServiceTestReceiptParams {
     pub expected_ready_release_digest: String,
     pub receipt_id: String,
     pub service_run_key: String,
-    pub outcome: MiniAppServiceTestOutcome,
+    pub outcome: PluginServiceTestOutcome,
     pub error_code: Option<String>,
     pub receipt_digest: String,
     pub runtime_fingerprint_digest: String,
@@ -349,11 +349,11 @@ pub struct RecordMiniAppM1ServiceTestReceiptParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, sqlx::FromRow)]
-pub struct MiniAppServiceTestReceiptRow {
+pub struct PluginRuntimeServiceTestReceiptRow {
     pub id: i64,
     pub receipt_id: String,
     pub owner_user_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub release_id: String,
     pub release_digest: String,
     pub service_run_key: String,
@@ -371,7 +371,7 @@ pub struct MiniAppServiceTestReceiptRow {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MiniAppM1AutoPublishGuard {
+pub struct PluginRuntimeAutoPublishGuard {
     pub authorization_id: String,
     pub authorization_revision: i64,
     pub project_id: String,
@@ -383,9 +383,9 @@ pub struct MiniAppM1AutoPublishGuard {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PublishMiniAppM1ReadyParams {
+pub struct PublishPluginRuntimeReadyParams {
     pub owner_user_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub expected_product_revision: i64,
     pub expected_pointer_revision: i64,
     pub expected_active_release_epoch: i64,
@@ -393,14 +393,14 @@ pub struct PublishMiniAppM1ReadyParams {
     pub expected_ready_release_digest: String,
     pub expected_active_release_digest: Option<String>,
     pub target_catalog_digest: String,
-    pub auto_publish_guard: Option<MiniAppM1AutoPublishGuard>,
+    pub auto_publish_guard: Option<PluginRuntimeAutoPublishGuard>,
     pub updated_at: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RollbackMiniAppM1PreviousParams {
+pub struct RollbackPluginRuntimePreviousParams {
     pub owner_user_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub expected_product_revision: i64,
     pub expected_pointer_revision: i64,
     pub expected_active_release_epoch: i64,
@@ -413,9 +413,9 @@ pub struct RollbackMiniAppM1PreviousParams {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CommitMiniAppM1LifecycleParams {
+pub struct CommitPluginRuntimeLifecycleParams {
     pub owner_user_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub expected_product_revision: i64,
     pub expected_pointer_revision: i64,
     pub expected_active_release_digest: Option<String>,
@@ -424,9 +424,9 @@ pub struct CommitMiniAppM1LifecycleParams {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TrashMiniAppM1Params {
+pub struct TrashPluginRuntimeParams {
     pub owner_user_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub expected_product_revision: i64,
     pub expected_pointer_revision: i64,
     pub expected_active_release_digest: Option<String>,
@@ -434,9 +434,9 @@ pub struct TrashMiniAppM1Params {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RestoreMiniAppM1Params {
+pub struct RestorePluginRuntimeParams {
     pub owner_user_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub expected_product_revision: i64,
     pub expected_pointer_revision: i64,
     pub expected_lifecycle: String,
@@ -444,9 +444,9 @@ pub struct RestoreMiniAppM1Params {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BeginMiniAppM1DeleteParams {
+pub struct BeginPluginRuntimeDeleteParams {
     pub owner_user_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub expected_product_revision: i64,
     pub expected_pointer_revision: i64,
     pub expected_active_release_digest: Option<String>,
@@ -455,9 +455,9 @@ pub struct BeginMiniAppM1DeleteParams {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FailMiniAppM1DeleteParams {
+pub struct FailPluginRuntimeDeleteParams {
     pub owner_user_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub operation_id: String,
     pub expected_operation_revision: i64,
     pub error_code: String,
@@ -465,27 +465,27 @@ pub struct FailMiniAppM1DeleteParams {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RestartMiniAppM1DeleteParams {
+pub struct RestartPluginRuntimeDeleteParams {
     pub owner_user_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub expected_failed_operation_id: String,
     pub new_operation_id: String,
     pub started_at_ms: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FinalizeMiniAppM1DeleteParams {
+pub struct FinalizePluginRuntimeDeleteParams {
     pub owner_user_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub operation_id: String,
     pub expected_operation_revision: i64,
     pub finished_at_ms: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SetMiniAppM1AutoPublishParams {
+pub struct SetPluginRuntimeAutoPublishParams {
     pub owner_user_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub expected_product_revision: i64,
     pub expected_pointer_revision: i64,
     pub expected_authorization_revision: Option<i64>,
@@ -496,9 +496,9 @@ pub struct SetMiniAppM1AutoPublishParams {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OpenMiniAppM1SurfaceSessionParams {
+pub struct OpenPluginRuntimeSurfaceSessionParams {
     pub owner_user_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub surface_session_id: String,
     pub capability_digest: String,
     pub expected_product_revision: i64,
@@ -510,23 +510,23 @@ pub struct OpenMiniAppM1SurfaceSessionParams {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ResolveMiniAppM1SurfaceSessionParams {
-    pub miniapp_id: String,
+pub struct ResolvePluginRuntimeSurfaceSessionParams {
+    pub plugin_product_id: String,
     pub capability_digest: String,
     pub expected_active_release_digest: String,
     pub expected_active_release_epoch: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CloseMiniAppM1SurfaceSessionParams {
+pub struct ClosePluginRuntimeSurfaceSessionParams {
     pub owner_user_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub surface_session_id: String,
     pub capability_digest: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum MiniAppM1SurfaceKvOperation {
+pub enum PluginRuntimeSurfaceKvOperation {
     Get,
     Set { value: serde_json::Value },
     Delete,
@@ -537,9 +537,9 @@ pub enum MiniAppM1SurfaceKvOperation {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct ExecuteMiniAppM1SurfaceKvParams {
+pub struct ExecutePluginRuntimeSurfaceKvParams {
     pub owner_user_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub surface_session_id: String,
     pub expected_surface_generation: i64,
     pub expected_capability_digest: String,
@@ -547,12 +547,12 @@ pub struct ExecuteMiniAppM1SurfaceKvParams {
     pub expected_active_release_digest: String,
     pub namespace: String,
     pub key: String,
-    pub operation: MiniAppM1SurfaceKvOperation,
+    pub operation: PluginRuntimeSurfaceKvOperation,
     pub updated_at: i64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum MiniAppM1SurfaceKvResult {
+pub enum PluginRuntimeSurfaceKvResult {
     Value {
         value: Option<serde_json::Value>,
         revision: Option<i64>,
@@ -570,234 +570,234 @@ pub enum MiniAppM1SurfaceKvResult {
 }
 
 #[async_trait::async_trait]
-pub trait IMiniAppM1Repository: Send + Sync {
+pub trait IPluginRuntimeRepository: Send + Sync {
     async fn library(
         &self,
         owner_user_id: &str,
-    ) -> Result<MiniAppM1LibrarySnapshot, DbError>;
+    ) -> Result<PluginRuntimeLibrarySnapshot, DbError>;
 
     async fn get(
         &self,
         owner_user_id: &str,
-        miniapp_id: &str,
-    ) -> Result<Option<MiniAppM1Snapshot>, DbError>;
+        plugin_product_id: &str,
+    ) -> Result<Option<PluginRuntimeSnapshot>, DbError>;
 
     async fn create(
         &self,
-        params: &CreateMiniAppM1Params,
-    ) -> Result<MiniAppM1Snapshot, DbError>;
+        params: &CreatePluginRuntimeParams,
+    ) -> Result<PluginRuntimeSnapshot, DbError>;
 
     async fn create_with_source(
         &self,
-        params: &CreateMiniAppM1WithSourceParams,
-    ) -> Result<MiniAppM1Snapshot, DbError>;
+        params: &CreatePluginRuntimeWithSourceParams,
+    ) -> Result<PluginRuntimeSnapshot, DbError>;
 
     async fn begin_import_as_new(
         &self,
-        params: &BeginMiniAppM1ImportAsNewParams,
-    ) -> Result<BeginMiniAppM1ImportAsNewResult, DbError>;
+        params: &BeginPluginRuntimeImportAsNewParams,
+    ) -> Result<BeginPluginRuntimeImportAsNewResult, DbError>;
 
     async fn finish_import_ready(
         &self,
-        params: &FinishMiniAppM1ImportReadyParams,
-    ) -> Result<MiniAppM1Snapshot, DbError>;
+        params: &FinishPluginRuntimeImportReadyParams,
+    ) -> Result<PluginRuntimeSnapshot, DbError>;
 
     async fn fail_import(
         &self,
-        params: &FailMiniAppM1ImportParams,
+        params: &FailPluginRuntimeImportParams,
     ) -> Result<ProductOperationRow, DbError>;
 
     async fn cancel_import(
         &self,
-        params: &CancelMiniAppM1ImportParams,
+        params: &CancelPluginRuntimeImportParams,
     ) -> Result<ProductOperationRow, DbError>;
 
     async fn start_export_operation(
         &self,
-        params: &StartMiniAppM1ExportOperationParams,
+        params: &StartPluginRuntimeExportOperationParams,
     ) -> Result<ProductOperationRow, DbError>;
 
     async fn start_backup_export(
         &self,
-        params: &StartMiniAppM1BackupExportParams,
-    ) -> Result<MiniAppM1BackupExportSnapshot, DbError>;
+        params: &StartPluginRuntimeBackupExportParams,
+    ) -> Result<PluginRuntimeBackupExportSnapshot, DbError>;
 
     async fn finish_backup_import(
         &self,
-        params: &FinishMiniAppM1BackupImportParams,
-    ) -> Result<MiniAppM1Snapshot, DbError>;
+        params: &FinishPluginRuntimeBackupImportParams,
+    ) -> Result<PluginRuntimeSnapshot, DbError>;
 
     async fn finish_export_operation(
         &self,
-        params: &FinishMiniAppM1ExportOperationParams,
+        params: &FinishPluginRuntimeExportOperationParams,
     ) -> Result<ProductOperationRow, DbError>;
 
     async fn fail_export_operation(
         &self,
-        params: &FailMiniAppM1ExportOperationParams,
+        params: &FailPluginRuntimeExportOperationParams,
     ) -> Result<ProductOperationRow, DbError>;
 
     async fn cancel_export_operation(
         &self,
-        params: &CancelMiniAppM1ExportOperationParams,
+        params: &CancelPluginRuntimeExportOperationParams,
     ) -> Result<ProductOperationRow, DbError>;
 
     async fn update_project_source_cas(
         &self,
-        params: &UpdateMiniAppM1ProjectSourceParams,
-    ) -> Result<MiniAppProjectRow, DbError>;
+        params: &UpdatePluginRuntimeProjectSourceParams,
+    ) -> Result<PluginRuntimeProjectRow, DbError>;
 
     async fn begin_source_mutation(
         &self,
-        params: &BeginMiniAppSourceMutationParams,
-    ) -> Result<MiniAppSourceMutationIntentRow, DbError>;
+        params: &BeginPluginSourceMutationParams,
+    ) -> Result<PluginRuntimeSourceMutationIntentRow, DbError>;
 
     async fn finalize_source_mutation(
         &self,
-        params: &FinalizeMiniAppSourceMutationParams,
-    ) -> Result<MiniAppM1Snapshot, DbError>;
+        params: &FinalizePluginSourceMutationParams,
+    ) -> Result<PluginRuntimeSnapshot, DbError>;
 
     async fn abort_source_mutation(
         &self,
-        params: &AbortMiniAppSourceMutationParams,
+        params: &AbortPluginSourceMutationParams,
     ) -> Result<(), DbError>;
 
     async fn list_source_mutation_intents(
         &self,
-    ) -> Result<Vec<MiniAppSourceMutationIntentRow>, DbError>;
+    ) -> Result<Vec<PluginRuntimeSourceMutationIntentRow>, DbError>;
 
     async fn get_source_mutation_intent(
         &self,
         owner_user_id: &str,
-        miniapp_id: &str,
+        plugin_product_id: &str,
         project_id: &str,
-    ) -> Result<Option<MiniAppSourceMutationIntentRow>, DbError>;
+    ) -> Result<Option<PluginRuntimeSourceMutationIntentRow>, DbError>;
 
     async fn start_build_operation(
         &self,
-        params: &StartMiniAppM1BuildOperationParams,
+        params: &StartPluginRuntimeBuildOperationParams,
     ) -> Result<ProductOperationRow, DbError>;
 
     async fn finish_build_operation(
         &self,
-        params: &FinishMiniAppM1BuildOperationParams,
+        params: &FinishPluginRuntimeBuildOperationParams,
     ) -> Result<ProductOperationRow, DbError>;
 
     async fn get_build_operation(
         &self,
         owner_user_id: &str,
-        miniapp_id: &str,
+        plugin_product_id: &str,
         operation_id: &str,
     ) -> Result<Option<ProductOperationRow>, DbError>;
 
     async fn list_build_operations(
         &self,
         owner_user_id: &str,
-        miniapp_id: &str,
+        plugin_product_id: &str,
     ) -> Result<Vec<ProductOperationRow>, DbError>;
 
     async fn cancel_build_operation(
         &self,
-        params: &CancelMiniAppM1BuildOperationParams,
+        params: &CancelPluginRuntimeBuildOperationParams,
     ) -> Result<ProductOperationRow, DbError>;
 
     async fn finish_build_and_record_ready(
         &self,
-        params: &FinishMiniAppM1BuildAndRecordReadyParams,
-    ) -> Result<MiniAppM1Snapshot, DbError>;
+        params: &FinishPluginRuntimeBuildAndRecordReadyParams,
+    ) -> Result<PluginRuntimeSnapshot, DbError>;
 
     async fn record_ready_release(
         &self,
-        params: &RecordMiniAppM1ReadyReleaseParams,
-    ) -> Result<MiniAppM1Snapshot, DbError>;
+        params: &RecordPluginRuntimeReadyReleaseParams,
+    ) -> Result<PluginRuntimeSnapshot, DbError>;
 
     async fn record_service_test_receipt_cas(
         &self,
-        params: &RecordMiniAppM1ServiceTestReceiptParams,
-    ) -> Result<MiniAppM1Snapshot, DbError>;
+        params: &RecordPluginRuntimeServiceTestReceiptParams,
+    ) -> Result<PluginRuntimeSnapshot, DbError>;
 
     async fn get_ready_service_test_receipt(
         &self,
         owner_user_id: &str,
-        miniapp_id: &str,
-    ) -> Result<Option<MiniAppServiceTestReceiptRow>, DbError>;
+        plugin_product_id: &str,
+    ) -> Result<Option<PluginRuntimeServiceTestReceiptRow>, DbError>;
 
     async fn publish_ready_cas(
         &self,
-        params: &PublishMiniAppM1ReadyParams,
-    ) -> Result<MiniAppM1Snapshot, DbError>;
+        params: &PublishPluginRuntimeReadyParams,
+    ) -> Result<PluginRuntimeSnapshot, DbError>;
 
     async fn rollback_previous_cas(
         &self,
-        params: &RollbackMiniAppM1PreviousParams,
-    ) -> Result<MiniAppM1Snapshot, DbError>;
+        params: &RollbackPluginRuntimePreviousParams,
+    ) -> Result<PluginRuntimeSnapshot, DbError>;
 
     async fn commit_lifecycle_cas(
         &self,
-        params: &CommitMiniAppM1LifecycleParams,
-    ) -> Result<MiniAppM1Snapshot, DbError>;
+        params: &CommitPluginRuntimeLifecycleParams,
+    ) -> Result<PluginRuntimeSnapshot, DbError>;
 
     async fn trash_cas(
         &self,
-        params: &TrashMiniAppM1Params,
-    ) -> Result<MiniAppM1Snapshot, DbError>;
+        params: &TrashPluginRuntimeParams,
+    ) -> Result<PluginRuntimeSnapshot, DbError>;
 
     async fn restore_cas(
         &self,
-        params: &RestoreMiniAppM1Params,
-    ) -> Result<MiniAppM1Snapshot, DbError>;
+        params: &RestorePluginRuntimeParams,
+    ) -> Result<PluginRuntimeSnapshot, DbError>;
 
     async fn begin_delete(
         &self,
-        params: &BeginMiniAppM1DeleteParams,
-    ) -> Result<MiniAppM1Snapshot, DbError>;
+        params: &BeginPluginRuntimeDeleteParams,
+    ) -> Result<PluginRuntimeSnapshot, DbError>;
 
     async fn fail_delete(
         &self,
-        params: &FailMiniAppM1DeleteParams,
-    ) -> Result<MiniAppM1Snapshot, DbError>;
+        params: &FailPluginRuntimeDeleteParams,
+    ) -> Result<PluginRuntimeSnapshot, DbError>;
 
     async fn restart_delete(
         &self,
-        params: &RestartMiniAppM1DeleteParams,
-    ) -> Result<MiniAppM1Snapshot, DbError>;
+        params: &RestartPluginRuntimeDeleteParams,
+    ) -> Result<PluginRuntimeSnapshot, DbError>;
 
     async fn finalize_delete(
         &self,
-        params: &FinalizeMiniAppM1DeleteParams,
+        params: &FinalizePluginRuntimeDeleteParams,
     ) -> Result<i64, DbError>;
 
-    async fn get_miniapp_operation(
+    async fn get_plugin_operation(
         &self,
         owner_user_id: &str,
-        miniapp_id: &str,
+        plugin_product_id: &str,
         operation_id: &str,
     ) -> Result<Option<ProductOperationRow>, DbError>;
 
-    async fn list_miniapp_operations(
+    async fn list_plugin_operations(
         &self,
         owner_user_id: &str,
-        miniapp_id: &str,
+        plugin_product_id: &str,
     ) -> Result<Vec<ProductOperationRow>, DbError>;
 
     async fn set_auto_publish_cas(
         &self,
-        params: &SetMiniAppM1AutoPublishParams,
-    ) -> Result<MiniAppM1Snapshot, DbError>;
+        params: &SetPluginRuntimeAutoPublishParams,
+    ) -> Result<PluginRuntimeSnapshot, DbError>;
 
     async fn open_surface_session_cas(
         &self,
-        params: &OpenMiniAppM1SurfaceSessionParams,
-    ) -> Result<MiniAppSurfaceSessionRow, DbError>;
+        params: &OpenPluginRuntimeSurfaceSessionParams,
+    ) -> Result<PluginRuntimeSurfaceSessionRow, DbError>;
 
     async fn resolve_surface_session(
         &self,
-        params: &ResolveMiniAppM1SurfaceSessionParams,
-    ) -> Result<Option<MiniAppSurfaceSessionRow>, DbError>;
+        params: &ResolvePluginRuntimeSurfaceSessionParams,
+    ) -> Result<Option<PluginRuntimeSurfaceSessionRow>, DbError>;
 
     async fn close_surface_session_cas(
         &self,
-        params: &CloseMiniAppM1SurfaceSessionParams,
+        params: &ClosePluginRuntimeSurfaceSessionParams,
     ) -> Result<bool, DbError>;
 
     async fn revoke_all_surface_sessions_on_startup(&self) -> Result<u64, DbError>;
@@ -806,57 +806,57 @@ pub trait IMiniAppM1Repository: Send + Sync {
     async fn update_config_cas(
         &self,
         owner_user_id: &str,
-        miniapp_id: &str,
+        plugin_product_id: &str,
         expected_product_revision: i64,
         expected_pointer_revision: i64,
         expected_config_revision: i64,
         expected_config_schema_json: &str,
         config_json: &str,
         updated_at: i64,
-    ) -> Result<MiniAppM1Snapshot, DbError>;
+    ) -> Result<PluginRuntimeSnapshot, DbError>;
 
     #[allow(clippy::too_many_arguments)]
     async fn replace_credential_bindings_cas(
         &self,
         owner_user_id: &str,
-        miniapp_id: &str,
+        plugin_product_id: &str,
         expected_product_revision: i64,
         expected_pointer_revision: i64,
         expected_bindings_revision: i64,
         bindings: &BTreeMap<String, String>,
         updated_at: i64,
-    ) -> Result<MiniAppM1Snapshot, DbError>;
+    ) -> Result<PluginRuntimeSnapshot, DbError>;
 
     async fn get_kv(
         &self,
         owner_user_id: &str,
-        miniapp_id: &str,
+        plugin_product_id: &str,
         namespace: &str,
         key: &str,
-    ) -> Result<Option<MiniAppKvRow>, DbError>;
+    ) -> Result<Option<PluginRuntimeKvRow>, DbError>;
 
     async fn execute_surface_kv(
         &self,
-        params: &ExecuteMiniAppM1SurfaceKvParams,
-    ) -> Result<MiniAppM1SurfaceKvResult, DbError>;
+        params: &ExecutePluginRuntimeSurfaceKvParams,
+    ) -> Result<PluginRuntimeSurfaceKvResult, DbError>;
 
     #[allow(clippy::too_many_arguments)]
     async fn put_kv_cas(
         &self,
         owner_user_id: &str,
-        miniapp_id: &str,
+        plugin_product_id: &str,
         namespace: &str,
         key: &str,
         value: &serde_json::Value,
         expected_revision: Option<i64>,
         updated_at: i64,
-    ) -> Result<MiniAppKvRow, DbError>;
+    ) -> Result<PluginRuntimeKvRow, DbError>;
 
     #[allow(clippy::too_many_arguments)]
     async fn delete_kv_cas(
         &self,
         owner_user_id: &str,
-        miniapp_id: &str,
+        plugin_product_id: &str,
         namespace: &str,
         key: &str,
         expected_revision: i64,
@@ -918,26 +918,26 @@ pub(crate) fn validate_visible_ascii_key(
     Ok(())
 }
 
-pub(crate) fn validate_kv_row(row: &MiniAppKvRow) -> Result<(), DbError> {
+pub(crate) fn validate_kv_row(row: &PluginRuntimeKvRow) -> Result<(), DbError> {
     if row.revision < 1
         || row.key_generation < 1
         || row.key_generation > row.revision
         || (row.is_tombstone && row.value_json != "null")
     {
         return Err(conflict(
-            "MiniApp KV row violates the monotonic tombstone contract",
+            "Plugin KV row violates the monotonic tombstone contract",
         ));
     }
     serde_json::from_str::<serde_json::Value>(&row.value_json)
-        .map_err(|error| conflict(format!("MiniApp KV value is invalid JSON: {error}")))?;
+        .map_err(|error| conflict(format!("Plugin KV value is invalid JSON: {error}")))?;
     Ok(())
 }
 
 pub(crate) fn validate_managed_source_lineage(
-    source: &MiniAppM1ManagedSourceLineage,
+    source: &PluginRuntimeManagedSourceLineage,
 ) -> Result<(), DbError> {
     validate_project_source(
-        MiniAppM1ProjectSourceState::Editable,
+        PluginRuntimeProjectSourceState::Editable,
         Some(&source.managed_source_path),
         Some(&source.source_head_digest),
         Some(&source.dependency_lock_digest),
@@ -1001,7 +1001,7 @@ pub(crate) fn validate_relative_path(value: Option<&str>, label: &str) -> Result
 }
 
 pub(crate) fn validate_project_source(
-    source_state: MiniAppM1ProjectSourceState,
+    source_state: PluginRuntimeProjectSourceState,
     managed_source_path: Option<&str>,
     source_head_digest: Option<&str>,
     dependency_lock_digest: Option<&str>,
@@ -1015,15 +1015,15 @@ pub(crate) fn validate_project_source(
         return Err(conflict("build_generation must be non-negative"));
     }
     let valid = match source_state {
-        MiniAppM1ProjectSourceState::Empty
-        | MiniAppM1ProjectSourceState::RuntimeOnly => {
+        PluginRuntimeProjectSourceState::Empty
+        | PluginRuntimeProjectSourceState::RuntimeOnly => {
             managed_source_path.is_none()
                 && source_head_digest.is_none()
                 && dependency_lock_digest.is_none()
                 && build_profile_version.is_none()
                 && build_generation == 0
         }
-        MiniAppM1ProjectSourceState::Editable => {
+        PluginRuntimeProjectSourceState::Editable => {
             managed_source_path.is_some()
                 && source_head_digest.is_some()
                 && dependency_lock_digest.is_some()
@@ -1033,7 +1033,7 @@ pub(crate) fn validate_project_source(
     };
     if !valid {
         return Err(conflict(
-            "MiniApp Project source state and lineage fields are inconsistent",
+            "Plugin Project source state and lineage fields are inconsistent",
         ));
     }
     if build_profile_version.is_some_and(|value| {
@@ -1045,9 +1045,9 @@ pub(crate) fn validate_project_source(
             "build_profile_version must be visible ASCII with at most 64 bytes",
         ));
     }
-    if build_profile_version.is_some_and(|value| value != MINIAPP_RELEASE_PROFILE_VERSION) {
+    if build_profile_version.is_some_and(|value| value != PLUGIN_RELEASE_PROFILE_VERSION) {
         return Err(conflict(
-            "MiniApp Project must use the canonical release profile version",
+            "Plugin Project must use the canonical release profile version",
         ));
     }
     Ok(())
@@ -1075,7 +1075,7 @@ where
     Ok(parsed)
 }
 
-fn validate_artifact_row_shape(artifact: &MiniAppReleaseArtifactRow) -> Result<(), DbError> {
+fn validate_artifact_row_shape(artifact: &PluginRuntimeReleaseArtifactRow) -> Result<(), DbError> {
     validate_uuid(&artifact.artifact_id, "artifact.artifact_id")?;
     validate_uuid(&artifact.owner_user_id, "artifact.owner_user_id")?;
     validate_digest(&artifact.artifact_digest, "artifact.artifact_digest")?;
@@ -1088,8 +1088,8 @@ fn validate_artifact_row_shape(artifact: &MiniAppReleaseArtifactRow) -> Result<(
 }
 
 pub(crate) fn normalize_incoming_artifact(
-    artifact: &MiniAppReleaseArtifactRow,
-) -> Result<(MiniAppReleaseArtifactRow, MiniAppReleaseArtifactV1), DbError> {
+    artifact: &PluginRuntimeReleaseArtifactRow,
+) -> Result<(PluginRuntimeReleaseArtifactRow, PluginReleaseArtifactV1), DbError> {
     let payload = validate_artifact(artifact)?;
     let mut normalized = artifact.clone();
     normalized.artifact_record_json = canonical_json_string(
@@ -1100,10 +1100,10 @@ pub(crate) fn normalize_incoming_artifact(
 }
 
 pub(crate) fn validate_artifact(
-    artifact: &MiniAppReleaseArtifactRow,
-) -> Result<MiniAppReleaseArtifactV1, DbError> {
+    artifact: &PluginRuntimeReleaseArtifactRow,
+) -> Result<PluginReleaseArtifactV1, DbError> {
     validate_artifact_row_shape(artifact)?;
-    let payload: MiniAppReleaseArtifactV1 =
+    let payload: PluginReleaseArtifactV1 =
         parse_canonical_json(&artifact.artifact_record_json, "artifact.artifact_record_json")?;
     payload
         .validate()
@@ -1121,31 +1121,20 @@ pub(crate) fn validate_artifact(
 
 pub(crate) fn validate_product_artifact_contract(
     product_kind: &str,
-    artifact: &MiniAppReleaseArtifactV1,
+    artifact: &PluginReleaseArtifactV1,
 ) -> Result<(), DbError> {
-    match product_kind {
-        "ui_only" if artifact.manifest.payload.is_ui_only() => Ok(()),
-        "service" => {
-            if artifact.manifest.payload.service.is_none() {
-                return Err(conflict(
-                    "Service MiniApp Release must declare service/main.mjs",
-                ));
-            }
-            Ok(())
-        }
-        "ui_only" => Err(conflict(
-            "UI-only MiniApp Release cannot declare a Service",
-        )),
-        _ => Err(conflict("MiniApp product kind is invalid")),
+    if product_kind != "plugin" {
+        return Err(conflict("Plugin product kind is invalid"));
     }
+    artifact.validate().map_err(|error| conflict(format!("Plugin Release contract is invalid: {error}")))
 }
 
 pub(crate) fn validate_release(
-    release: &MiniAppReleaseRow,
-    artifact: &MiniAppReleaseArtifactV1,
-) -> Result<MiniAppReadyRelease, DbError> {
+    release: &PluginRuntimeReleaseRow,
+    artifact: &PluginReleaseArtifactV1,
+) -> Result<PluginReadyRelease, DbError> {
     validate_uuid(&release.release_id, "release.release_id")?;
-    validate_uuid(&release.miniapp_id, "release.miniapp_id")?;
+    validate_uuid(&release.plugin_product_id, "release.plugin_product_id")?;
     validate_uuid(&release.owner_user_id, "release.owner_user_id")?;
     validate_uuid(&release.artifact_id, "release.artifact_id")?;
     validate_uuid(&release.origin_operation_id, "release.origin_operation_id")?;
@@ -1167,17 +1156,17 @@ pub(crate) fn validate_release(
         )?;
     }
     let source_kind = match release.source_kind.as_str() {
-        "managed" => MiniAppM1ReleaseSourceKind::Managed,
-        "runtime_only" => MiniAppM1ReleaseSourceKind::RuntimeOnly,
+        "managed" => PluginRuntimeReleaseSourceKind::Managed,
+        "runtime_only" => PluginRuntimeReleaseSourceKind::RuntimeOnly,
         _ => return Err(conflict("release.source_kind is invalid")),
     };
     let origin = match release.origin_kind.as_str() {
-        "build" => MiniAppM1ReleaseOrigin::Build,
-        "import" => MiniAppM1ReleaseOrigin::Import,
+        "build" => PluginRuntimeReleaseOrigin::Build,
+        "import" => PluginRuntimeReleaseOrigin::Import,
         _ => return Err(conflict("release.origin_kind is invalid")),
     };
     match source_kind {
-        MiniAppM1ReleaseSourceKind::Managed => {
+        PluginRuntimeReleaseSourceKind::Managed => {
             if release.project_id.is_none()
                 || release.source_snapshot_digest.is_none()
                 || release.dependency_lock_digest.is_none()
@@ -1190,14 +1179,14 @@ pub(crate) fn validate_release(
                 ));
             }
             if release.build_profile_version.as_deref()
-                != Some(MINIAPP_RELEASE_PROFILE_VERSION)
+                != Some(PLUGIN_RELEASE_PROFILE_VERSION)
             {
                 return Err(conflict(
                     "managed Release must use the canonical release profile version",
                 ));
             }
         }
-        MiniAppM1ReleaseSourceKind::RuntimeOnly => {
+        PluginRuntimeReleaseSourceKind::RuntimeOnly => {
             if release.project_id.is_some()
                 || release.source_snapshot_digest.is_some()
                 || release.dependency_lock_digest.is_some()
@@ -1210,24 +1199,24 @@ pub(crate) fn validate_release(
             }
         }
     }
-    if origin == MiniAppM1ReleaseOrigin::Build
-        && source_kind != MiniAppM1ReleaseSourceKind::Managed
+    if origin == PluginRuntimeReleaseOrigin::Build
+        && source_kind != PluginRuntimeReleaseSourceKind::Managed
     {
         return Err(conflict("built Release must use managed source lineage"));
     }
     if release.created_at < 0 {
         return Err(conflict("release.created_at must be non-negative"));
     }
-    let record: MiniAppReadyRelease =
+    let record: PluginReadyRelease =
         parse_canonical_json(&release.release_record_json, "release.release_record_json")?;
     record
         .validate_for_artifact(artifact)
         .map_err(|error| conflict(format!("Release record contract is invalid: {error}")))?;
     let expected_origin = match origin {
-        MiniAppM1ReleaseOrigin::Build => MiniAppReadyOrigin::Build,
-        MiniAppM1ReleaseOrigin::Import => MiniAppReadyOrigin::Import,
+        PluginRuntimeReleaseOrigin::Build => PluginReadyOrigin::Build,
+        PluginRuntimeReleaseOrigin::Import => PluginReadyOrigin::Import,
     };
-    if record.miniapp_id.as_ref() != release.miniapp_id
+    if record.plugin_product_id.as_ref() != release.plugin_product_id
         || record.release.release_id.as_ref() != release.release_id
         || record.release.artifact_id.as_ref() != release.artifact_id
         || record.release.release_digest.as_ref() != release.release_digest
@@ -1242,14 +1231,14 @@ pub(crate) fn validate_release(
     }
     match (&record.source_lineage, source_kind) {
         (
-            MiniAppSourceLineage::Managed {
+            PluginReleaseSourceLineage::Managed {
                 project_id,
                 source_snapshot_digest,
                 dependency_lock_digest,
                 build_profile_version,
                 build_generation,
             },
-            MiniAppM1ReleaseSourceKind::Managed,
+            PluginRuntimeReleaseSourceKind::Managed,
         ) if project_id.as_ref() == release.project_id.as_deref().unwrap_or_default()
             && source_snapshot_digest.as_ref()
                 == release
@@ -1267,7 +1256,7 @@ pub(crate) fn validate_release(
                     .as_deref()
                     .unwrap_or_default()
             && i64::try_from(*build_generation).ok() == release.build_generation => {}
-        (MiniAppSourceLineage::RuntimeOnly, MiniAppM1ReleaseSourceKind::RuntimeOnly) => {}
+        (PluginReleaseSourceLineage::RuntimeOnly, PluginRuntimeReleaseSourceKind::RuntimeOnly) => {}
         _ => {
             return Err(conflict(
                 "Release row lineage does not match its typed Release record",
@@ -1280,7 +1269,7 @@ pub(crate) fn validate_release(
 pub(crate) fn query_error(error: sqlx::Error) -> DbError {
     match &error {
         sqlx::Error::Database(database_error) => {
-            conflict(format!("MiniApp M1 SQLite mutation was rejected: {}", database_error.message()))
+            conflict(format!("Plugin M1 SQLite mutation was rejected: {}", database_error.message()))
         }
         _ => DbError::Query(error),
     }

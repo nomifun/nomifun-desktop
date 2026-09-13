@@ -185,7 +185,7 @@ async fn omitted_ceiling_cannot_be_revived_and_length_keeps_reasoning_usage() {
     let mut engine = engine(&cfg, ToolRegistry::new(), dir.path());
 
     let result = engine
-        .execute_turn("produce miniapp.html", "m-output-ceiling-e2e")
+        .execute_turn("produce plugin.html", "m-output-ceiling-e2e")
         .await
         .expect("a token ceiling is a terminal outcome, not a transport error");
 
@@ -274,7 +274,7 @@ async fn a_truncated_tool_call_restarts_against_the_original_requirement() {
         json!({
             "plan": [
                 { "step": "scaffold the toolbox layout", "status": "completed" },
-                { "step": "write miniapp.html", "status": "in_progress" }
+                { "step": "write plugin.html", "status": "in_progress" }
             ]
         }),
     );
@@ -284,7 +284,7 @@ async fn a_truncated_tool_call_restarts_against_the_original_requirement() {
             "index": 0,
             "id": "call-write",
             "type": "function",
-            "function": { "name": "Write", "arguments": "{\"file_path\":\"miniapp.html\",\"content\":\"<html><body>" }
+            "function": { "name": "Write", "arguments": "{\"file_path\":\"plugin.html\",\"content\":\"<html><body>" }
         }] }, "finish_reason": null }] }),
         json!({ "choices": [{ "delta": {}, "finish_reason": "length" }] }),
     ]);
@@ -297,7 +297,7 @@ async fn a_truncated_tool_call_restarts_against_the_original_requirement() {
     registry.register(Box::new(nomi_tools::write::WriteTool::new(None)));
     let mut engine = engine(&cfg, registry, dir.path());
 
-    let requirement = "produce miniapp.html for the toolbox";
+    let requirement = "produce plugin.html for the toolbox";
     let result = engine
         .execute_turn(requirement, "m-b1-resumable")
         .await
@@ -324,7 +324,7 @@ async fn a_truncated_tool_call_restarts_against_the_original_requirement() {
     assert!(system.contains("[resumable round 2/3]"), "system: {system}");
     assert!(system.contains("ALREADY DECLARED"));
     assert!(system.contains("[x] scaffold the toolbox layout"));
-    assert!(system.contains("[>] write miniapp.html"));
+    assert!(system.contains("[>] write plugin.html"));
     assert!(system.contains("WHAT WAS CUT OFF"));
     assert!(system.contains("Write ("), "the cutoff names the tool: {system}");
     assert!(

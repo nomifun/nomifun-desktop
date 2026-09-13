@@ -1,12 +1,12 @@
--- Immutable owner-scoped MiniApp Service Test receipt history.
+-- Immutable owner-scoped Plugin Service Test receipt history.
 --
 -- Each receipt freezes the exact Ready Release and Product/config/credential
 -- revisions tested by one transient Service Host run. Retests append a new
 -- row; the repository replaces only the current Ready record's receipt
--- reference. Permanent MiniApp deletion removes the aggregate's receipt
+-- reference. Permanent Plugin deletion removes the aggregate's receipt
 -- history explicitly. No physical foreign keys or triggers are used.
 
-CREATE TABLE miniapp_service_test_receipts (
+CREATE TABLE plugin_service_test_receipts (
     id                                  INTEGER PRIMARY KEY AUTOINCREMENT,
     receipt_id                          TEXT NOT NULL UNIQUE CHECK (
         length(receipt_id) = 36
@@ -20,11 +20,11 @@ CREATE TABLE miniapp_service_test_receipts (
         AND owner_user_id GLOB '????????-????-7???-[89ab]???-????????????'
         AND replace(owner_user_id, '-', '') NOT GLOB '*[^0-9a-f]*'
     ),
-    miniapp_id                          TEXT NOT NULL CHECK (
-        length(miniapp_id) = 36
-        AND lower(miniapp_id) = miniapp_id
-        AND miniapp_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(miniapp_id, '-', '') NOT GLOB '*[^0-9a-f]*'
+    plugin_product_id                          TEXT NOT NULL CHECK (
+        length(plugin_product_id) = 36
+        AND lower(plugin_product_id) = plugin_product_id
+        AND plugin_product_id GLOB '????????-????-7???-[89ab]???-????????????'
+        AND replace(plugin_product_id, '-', '') NOT GLOB '*[^0-9a-f]*'
     ),
     release_id                          TEXT NOT NULL CHECK (
         length(release_id) = 36
@@ -83,19 +83,19 @@ CREATE TABLE miniapp_service_test_receipts (
         AND json_type(receipt_json) = 'object'
     ),
     issued_at_ms                        INTEGER NOT NULL CHECK (issued_at_ms > 0),
-    UNIQUE (owner_user_id, miniapp_id, receipt_id)
+    UNIQUE (owner_user_id, plugin_product_id, receipt_id)
 );
 
-CREATE INDEX idx_miniapp_service_test_receipts_owner_user_id
-    ON miniapp_service_test_receipts(owner_user_id);
-CREATE INDEX idx_miniapp_service_test_receipts_miniapp_id
-    ON miniapp_service_test_receipts(miniapp_id);
-CREATE INDEX idx_miniapp_service_test_receipts_release_id
-    ON miniapp_service_test_receipts(release_id);
-CREATE INDEX idx_miniapp_service_test_receipts_current
-    ON miniapp_service_test_receipts(
+CREATE INDEX idx_plugin_service_test_receipts_owner_user_id
+    ON plugin_service_test_receipts(owner_user_id);
+CREATE INDEX idx_plugin_service_test_receipts_plugin_product_id
+    ON plugin_service_test_receipts(plugin_product_id);
+CREATE INDEX idx_plugin_service_test_receipts_release_id
+    ON plugin_service_test_receipts(release_id);
+CREATE INDEX idx_plugin_service_test_receipts_current
+    ON plugin_service_test_receipts(
         owner_user_id,
-        miniapp_id,
+        plugin_product_id,
         release_id,
         release_digest,
         issued_at_ms DESC

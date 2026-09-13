@@ -1,11 +1,11 @@
--- Immutable lineage captured when a MiniApp Build Operation starts.
+-- Immutable lineage captured when a Plugin Build Operation starts.
 --
 -- This table is deliberately separate from the shared Plugin operation rows:
--- MiniApp Build success is only valid through the MiniApp repository's
+-- Plugin Build success is only valid through the Plugin repository's
 -- atomic Artifact/Release/Ready commit. No foreign keys or triggers are used;
 -- the repository owns the logical reference checks.
 
-CREATE TABLE miniapp_build_operation_lineage (
+CREATE TABLE plugin_build_operation_lineage (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     operation_id TEXT NOT NULL UNIQUE CHECK (
         length(operation_id) = 36
@@ -19,11 +19,11 @@ CREATE TABLE miniapp_build_operation_lineage (
         AND owner_user_id GLOB '????????-????-7???-[89ab]???-????????????'
         AND replace(owner_user_id, '-', '') NOT GLOB '*[^0-9a-f]*'
     ),
-    miniapp_id TEXT NOT NULL CHECK (
-        length(miniapp_id) = 36
-        AND lower(miniapp_id) = miniapp_id
-        AND miniapp_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(miniapp_id, '-', '') NOT GLOB '*[^0-9a-f]*'
+    plugin_product_id TEXT NOT NULL CHECK (
+        length(plugin_product_id) = 36
+        AND lower(plugin_product_id) = plugin_product_id
+        AND plugin_product_id GLOB '????????-????-7???-[89ab]???-????????????'
+        AND replace(plugin_product_id, '-', '') NOT GLOB '*[^0-9a-f]*'
     ),
     project_id TEXT NOT NULL CHECK (
         length(project_id) = 36
@@ -48,14 +48,14 @@ CREATE TABLE miniapp_build_operation_lineage (
     ),
     build_generation INTEGER NOT NULL CHECK (build_generation >= 1),
     started_at_ms INTEGER NOT NULL CHECK (started_at_ms > 0),
-    UNIQUE (owner_user_id, operation_id, miniapp_id, project_id)
+    UNIQUE (owner_user_id, operation_id, plugin_product_id, project_id)
 );
 
-CREATE INDEX idx_miniapp_build_operation_lineage_owner
-    ON miniapp_build_operation_lineage(owner_user_id, miniapp_id, started_at_ms DESC);
-CREATE INDEX idx_miniapp_build_operation_lineage_miniapp_id
-    ON miniapp_build_operation_lineage(miniapp_id);
-CREATE INDEX idx_miniapp_build_operation_lineage_project
-    ON miniapp_build_operation_lineage(project_id, owner_user_id, build_generation);
-CREATE INDEX idx_miniapp_build_operation_lineage_operation_id
-    ON miniapp_build_operation_lineage(operation_id);
+CREATE INDEX idx_plugin_build_operation_lineage_owner
+    ON plugin_build_operation_lineage(owner_user_id, plugin_product_id, started_at_ms DESC);
+CREATE INDEX idx_plugin_build_operation_lineage_plugin_product_id
+    ON plugin_build_operation_lineage(plugin_product_id);
+CREATE INDEX idx_plugin_build_operation_lineage_project
+    ON plugin_build_operation_lineage(project_id, owner_user_id, build_generation);
+CREATE INDEX idx_plugin_build_operation_lineage_operation_id
+    ON plugin_build_operation_lineage(operation_id);

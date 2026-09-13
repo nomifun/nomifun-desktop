@@ -3043,7 +3043,7 @@ mod tests {
                 availability_evidence_revision: "wave2-state-test".to_owned(),
             },
             CompileRequest {
-                miniapp_capabilities: Vec::new(),
+                plugin_product_capabilities: Vec::new(),
                 revision,
                 principal: principal.clone(),
                 scene: "wave2-state-test".to_owned(),
@@ -3486,7 +3486,7 @@ mod tests {
                 &materialized,
                 &environment,
                 CompileRequest {
-                    miniapp_capabilities: Vec::new(),
+                    plugin_product_capabilities: Vec::new(),
                     revision: revision(BTreeMap::new()),
                     principal: principal.clone(),
                     scene: "test".to_owned(),
@@ -3510,7 +3510,7 @@ mod tests {
             &materialized,
             &environment,
             CompileRequest {
-                miniapp_capabilities: Vec::new(),
+                plugin_product_capabilities: Vec::new(),
                 revision: revision(BTreeMap::from([(role_id.clone(), selected)])),
                 principal: principal.clone(),
                 scene: "test".to_owned(),

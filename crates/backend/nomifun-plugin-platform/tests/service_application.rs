@@ -10,14 +10,14 @@ use nomifun_agent_contracts::{
     capability_surface_declarations, digest_payload, ActionId, CapabilityActionDescriptor,
     CapabilityContributions, CapabilityConsumer, CapabilityId, CapabilityKind, CapabilityManifest,
     CapabilityRef, CanonicalSchemaRef, DigestHex, EffectClass, LocalizedMetadata,
-    MiniAppBridgeCallId, MiniAppBridgeTarget, MiniAppId, MiniAppReleaseRef,
-    MiniAppResourceContract, MiniAppServiceLifecycle, MiniAppShareBundleId,
+    PluginBridgeCallId, PluginBridgeTarget, PluginProductId, PluginReleaseRef,
+    PluginResourceContract, PluginServiceLifecycle, PluginShareBundleId,
     PackageContributions, PackageId, PackageRef, PlatformConstraint,
-    MiniAppServiceRuntimeFingerprint, MiniAppServiceTestCredentialMode,
-    MiniAppServiceTestOutcome, MiniAppServiceTestReceipt, ResolvedMiniAppServiceSpec,
-    ResolvedMiniAppServiceSpecInputs, RuntimeInstallationId, RuntimeTarget, StrictJsonValue,
-    ToolPresentationKind, VersionString, MINIAPP_SERVICE_HOST_PROTOCOL_VERSION,
-    MINIAPP_SERVICE_SDK_CONTRACT_VERSION, MINIAPP_SERVICE_TEST_CONTRACT_VERSION, digest_bytes,
+    PluginServiceRuntimeFingerprint, PluginServiceTestCredentialMode,
+    PluginServiceTestOutcome, PluginServiceTestReceipt, ResolvedPluginServiceSpec,
+    ResolvedPluginServiceSpecInputs, RuntimeInstallationId, RuntimeTarget, StrictJsonValue,
+    ToolPresentationKind, VersionString, PLUGIN_SERVICE_HOST_PROTOCOL_VERSION,
+    PLUGIN_SERVICE_SDK_CONTRACT_VERSION, PLUGIN_SERVICE_TEST_CONTRACT_VERSION, digest_bytes,
 };
 use nomifun_api_types::{
     BuildPluginRuntimeRequest, CreatePluginRuntimeProjectRequest, ImportPluginRuntimeArtifactRequest, PluginRuntimeKindDto,
@@ -25,13 +25,13 @@ use nomifun_api_types::{
     TestPluginRuntimeReleaseRequest,
 };
 use nomifun_db::{
-    IMiniAppM1Repository, SqliteMiniAppM1Repository, init_database_memory,
+    IPluginRuntimeRepository, SqlitePluginRuntimeRepository, init_database_memory,
     installation_owner_id,
 };
 use nomifun_plugin_platform::runtime::{
     InMemoryPluginRuntimeManagedStorage, InMemoryPluginRuntimeServiceHost, PluginRuntimeCallCancellation,
     PluginRuntimeAgentCapabilityInvocation, PluginRuntimeAgentCapabilityPort,
-    PluginRuntimeM1ApplicationService, PluginRuntimePlatformResult, PluginRuntimeServiceHostPort,
+    PluginRuntimeApplicationService, PluginRuntimePlatformResult, PluginRuntimeServiceHostPort,
     PluginRuntimeServiceInvocation, PluginRuntimeServiceProcess, PluginRuntimeServiceProcessError,
     PluginRuntimeServiceProcessFactory, PluginRuntimeServiceRuntimeBinding, PluginRuntimeServiceSpecInput,
     PluginRuntimeServiceStoragePort, PluginRuntimeServiceTestRunInput,
@@ -45,8 +45,8 @@ use serde_json::json;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-const CALLABLE_CAPABILITY_ID: &str = "miniapp.callable.echo";
-const CALLABLE_ACTION_ID: &str = "miniapp.callable.echo.invoke";
+const CALLABLE_CAPABILITY_ID: &str = "plugin.callable.echo";
+const CALLABLE_ACTION_ID: &str = "plugin.callable.echo.invoke";
 
 #[derive(Default)]
 struct TestProcessFactory;
@@ -88,7 +88,7 @@ impl PluginRuntimeServiceProcessFactory for TestProcessFactory {
 struct TestRuntime {
     host: Arc<InMemoryPluginRuntimeServiceHost>,
     storage: Arc<InMemoryPluginRuntimeManagedStorage>,
-    started: Mutex<Vec<MiniAppId>>,
+    started: Mutex<Vec<PluginProductId>>,
 }
 
 impl TestRuntime {
@@ -102,8 +102,8 @@ impl TestRuntime {
         }
     }
 
-    fn runtime_fingerprint() -> MiniAppServiceRuntimeFingerprint {
-        MiniAppServiceRuntimeFingerprint {
+    fn runtime_fingerprint() -> PluginServiceRuntimeFingerprint {
+        PluginServiceRuntimeFingerprint {
             runtime_installation_id: RuntimeInstallationId::from("test-runtime"),
             runtime_target: RuntimeTarget::from("windows-x86_64"),
             runtime_executable_digest: digest("runtime"),
@@ -117,11 +117,11 @@ impl PluginRuntimeServiceRuntimeBinding for TestRuntime {
     async fn resolve_spec(
         &self,
         input: PluginRuntimeServiceSpecInput,
-    ) -> PluginRuntimePlatformResult<ResolvedMiniAppServiceSpec> {
+    ) -> PluginRuntimePlatformResult<ResolvedPluginServiceSpec> {
         input.validate()?;
         let runtime = Self::runtime_fingerprint();
-        ResolvedMiniAppServiceSpec::new(ResolvedMiniAppServiceSpecInputs {
-            miniapp_id: input.miniapp_id,
+        ResolvedPluginServiceSpec::new(ResolvedPluginServiceSpecInputs {
+            plugin_product_id: input.plugin_product_id,
             release: input.release,
             active_release_epoch: input.active_release_epoch,
             service_module_digest: input.descriptor.module_digest,
@@ -144,7 +144,7 @@ impl PluginRuntimeServiceRuntimeBinding for TestRuntime {
 
     async fn bind_active(
         &self,
-        spec: ResolvedMiniAppServiceSpec,
+        spec: ResolvedPluginServiceSpec,
         enabled: bool,
     ) -> PluginRuntimePlatformResult<()> {
         self.host.bind_active(spec, enabled).await
@@ -152,24 +152,24 @@ impl PluginRuntimeServiceRuntimeBinding for TestRuntime {
 
     async fn start(
         &self,
-        spec: ResolvedMiniAppServiceSpec,
+        spec: ResolvedPluginServiceSpec,
     ) -> PluginRuntimePlatformResult<()> {
-        let miniapp_id = spec.miniapp_id.clone();
+        let plugin_product_id = spec.plugin_product_id.clone();
         self.host.bind_active(spec, true).await?;
         if !matches!(
-            self.host.state(&miniapp_id).await,
+            self.host.state(&plugin_product_id).await,
             Some(nomifun_plugin_platform::runtime::PluginRuntimeServiceHostState::Running { .. })
         ) {
-            self.host.retry(&miniapp_id).await?;
+            self.host.retry(&plugin_product_id).await?;
         }
-        self.started.lock().await.push(miniapp_id);
+        self.started.lock().await.push(plugin_product_id);
         Ok(())
     }
 
     async fn invoke(
         &self,
-        spec: &ResolvedMiniAppServiceSpec,
-        call_id: MiniAppBridgeCallId,
+        spec: &ResolvedPluginServiceSpec,
+        call_id: PluginBridgeCallId,
         method: String,
         payload: StrictJsonValue,
         cancellation: PluginRuntimeCallCancellation,
@@ -180,23 +180,23 @@ impl PluginRuntimeServiceRuntimeBinding for TestRuntime {
             .await
     }
 
-    async fn cancel(&self, miniapp_id: &MiniAppId, call_id: &MiniAppBridgeCallId) {
-        self.host.cancel(miniapp_id, call_id).await;
+    async fn cancel(&self, plugin_product_id: &PluginProductId, call_id: &PluginBridgeCallId) {
+        self.host.cancel(plugin_product_id, call_id).await;
     }
 
-    async fn stop(&self, miniapp_id: &MiniAppId) -> PluginRuntimePlatformResult<()> {
-        self.host.stop(miniapp_id).await
+    async fn stop(&self, plugin_product_id: &PluginProductId) -> PluginRuntimePlatformResult<()> {
+        self.host.stop(plugin_product_id).await
     }
 
-    async fn retry(&self, miniapp_id: &MiniAppId) -> PluginRuntimePlatformResult<()> {
-        self.host.retry(miniapp_id).await
+    async fn retry(&self, plugin_product_id: &PluginProductId) -> PluginRuntimePlatformResult<()> {
+        self.host.retry(plugin_product_id).await
     }
 
     async fn state(
         &self,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
     ) -> Option<nomifun_plugin_platform::runtime::PluginRuntimeServiceHostState> {
-        self.host.state(miniapp_id).await
+        self.host.state(plugin_product_id).await
     }
 
     async fn maintain(&self, now_ms: i64) -> PluginRuntimePlatformResult<()> {
@@ -206,7 +206,7 @@ impl PluginRuntimeServiceRuntimeBinding for TestRuntime {
 
     async fn register_module(
         &self,
-        _miniapp_id: MiniAppId,
+        _plugin_product_id: PluginProductId,
         _release_digest: DigestHex,
         _module_path: std::path::PathBuf,
     ) -> PluginRuntimePlatformResult<()> {
@@ -216,7 +216,7 @@ impl PluginRuntimeServiceRuntimeBinding for TestRuntime {
     async fn create_service_test_storage(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
         test_id: &str,
         uses_files: bool,
         uses_private_database: bool,
@@ -224,7 +224,7 @@ impl PluginRuntimeServiceRuntimeBinding for TestRuntime {
         self.storage
             .create_service_test_storage(
                 owner_user_id,
-                miniapp_id,
+                plugin_product_id,
                 test_id,
                 uses_files,
                 uses_private_database,
@@ -235,40 +235,40 @@ impl PluginRuntimeServiceRuntimeBinding for TestRuntime {
     async fn purge_service_test_storage(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
         test_id: &str,
     ) -> PluginRuntimePlatformResult<()> {
         self.storage
-            .purge_service_test_storage(owner_user_id, miniapp_id, test_id)
+            .purge_service_test_storage(owner_user_id, plugin_product_id, test_id)
             .await
     }
 
     async fn run_service_test(
         &self,
         input: PluginRuntimeServiceTestRunInput,
-    ) -> PluginRuntimePlatformResult<MiniAppServiceTestReceipt> {
-        let receipt = MiniAppServiceTestReceipt {
+    ) -> PluginRuntimePlatformResult<PluginServiceTestReceipt> {
+        let receipt = PluginServiceTestReceipt {
             receipt_id: input.receipt_id,
-            miniapp_id: input.spec.miniapp_id.clone(),
+            plugin_product_id: input.spec.plugin_product_id.clone(),
             release: input.spec.release.clone(),
             service_run_key: input.spec.service_run_key.clone(),
             outcome: if input.requires_managed_input {
-                MiniAppServiceTestOutcome::NeedsTestInput
+                PluginServiceTestOutcome::NeedsTestInput
             } else {
-                MiniAppServiceTestOutcome::Passed
+                PluginServiceTestOutcome::Passed
             },
             error_code: None,
             runtime: input.spec.runtime.clone(),
             host_target: input.spec.runtime.runtime_target.clone(),
-            host_protocol_version: MINIAPP_SERVICE_HOST_PROTOCOL_VERSION.into(),
-            sdk_contract_version: MINIAPP_SERVICE_SDK_CONTRACT_VERSION.into(),
-            test_contract_version: MINIAPP_SERVICE_TEST_CONTRACT_VERSION.into(),
+            host_protocol_version: PLUGIN_SERVICE_HOST_PROTOCOL_VERSION.into(),
+            sdk_contract_version: PLUGIN_SERVICE_SDK_CONTRACT_VERSION.into(),
+            test_contract_version: PLUGIN_SERVICE_TEST_CONTRACT_VERSION.into(),
             resolved_test_input_digest: input.resolved_test_input_digest,
             copied_kv_digest: input.copied_kv_digest,
             copied_private_database_digest: input.copied_private_database_digest,
             empty_files_dir: input.empty_files_dir,
             migration_ledger_digest: input.migration_ledger_digest,
-            credential_mode: MiniAppServiceTestCredentialMode::None,
+            credential_mode: PluginServiceTestCredentialMode::None,
             host_generation: 1,
             issued_at_ms: nomifun_common::now_ms().max(1),
         };
@@ -280,7 +280,7 @@ impl PluginRuntimeServiceRuntimeBinding for TestRuntime {
 
     async fn current_runtime_fingerprint(
         &self,
-    ) -> PluginRuntimePlatformResult<Option<MiniAppServiceRuntimeFingerprint>> {
+    ) -> PluginRuntimePlatformResult<Option<PluginServiceRuntimeFingerprint>> {
         Ok(Some(Self::runtime_fingerprint()))
     }
 }
@@ -289,7 +289,7 @@ fn digest(seed: &str) -> DigestHex {
     digest_bytes(seed.as_bytes())
 }
 
-fn callable_service_artifact() -> nomifun_agent_contracts::MiniAppReleaseArtifactV1 {
+fn callable_service_artifact() -> nomifun_agent_contracts::PluginReleaseArtifactV1 {
     let input_schema = StrictJsonValue(json!({
         "additionalProperties": false,
         "properties": {
@@ -309,20 +309,20 @@ fn callable_service_artifact() -> nomifun_agent_contracts::MiniAppReleaseArtifac
         "type": "object"
     }));
     let input_schema_ref = CanonicalSchemaRef::from(format!(
-        "schema://miniapp.callable/echo-input@1#{}",
+        "schema://plugin.callable/echo-input@1#{}",
         digest_payload(&input_schema.0).unwrap().as_ref()
     ));
     let output_schema_ref = CanonicalSchemaRef::from(format!(
-        "schema://miniapp.callable/echo-output@1#{}",
+        "schema://plugin.callable/echo-output@1#{}",
         digest_payload(&output_schema.0).unwrap().as_ref()
     ));
     let package = PackageRef {
-        id: PackageId::from("miniapp.callable"),
+        id: PackageId::from("plugin.callable"),
         version: VersionString::from("1.0.0"),
     };
     let capability = CapabilityManifest {
         id: CapabilityId::from(CALLABLE_CAPABILITY_ID),
-        contribution_id: "contribution:miniapp.callable.echo".into(),
+        contribution_id: "contribution:plugin.callable.echo".into(),
         version: VersionString::from("1.0.0"),
         kind: CapabilityKind::Tool,
         package: package.clone(),
@@ -336,7 +336,7 @@ fn callable_service_artifact() -> nomifun_agent_contracts::MiniAppReleaseArtifac
         conflicts: Vec::new(),
         supported_surfaces: capability_surface_declarations(
             ["desktop"],
-            [CapabilityConsumer::Agent, CapabilityConsumer::MiniAppService],
+            [CapabilityConsumer::Agent, CapabilityConsumer::PluginService],
         ),
         requires_runtime_features: Vec::new(),
         supported_platforms: vec![PlatformConstraint::Any],
@@ -370,7 +370,7 @@ fn callable_service_artifact() -> nomifun_agent_contracts::MiniAppReleaseArtifac
             service: Some(PluginRuntimeStaticServiceInput {
                 main_mjs: b"export async function start() { return { async invoke() { return null; } }; }\n"
                     .to_vec(),
-                lifecycle: MiniAppServiceLifecycle::OnDemand,
+                lifecycle: PluginServiceLifecycle::OnDemand,
                 uses_files: false,
                 uses_private_database: false,
                 service_contract_digest: digest("service-contract"),
@@ -386,7 +386,7 @@ fn callable_service_artifact() -> nomifun_agent_contracts::MiniAppReleaseArtifac
                 "type": "object"
             })),
             credential_slots: Vec::new(),
-            resource_contract: MiniAppResourceContract::default(),
+            resource_contract: PluginResourceContract::default(),
             schemas: BTreeMap::from([
                 (input_schema_ref, input_schema),
                 (output_schema_ref, output_schema),
@@ -403,7 +403,7 @@ fn callable_service_artifact() -> nomifun_agent_contracts::MiniAppReleaseArtifac
 }
 
 fn release_files(
-    artifact: &nomifun_agent_contracts::MiniAppReleaseArtifactV1,
+    artifact: &nomifun_agent_contracts::PluginReleaseArtifactV1,
 ) -> Vec<PluginRuntimeReleaseFileBytes> {
     artifact
         .files
@@ -450,8 +450,8 @@ fn copy_tree(source: &Path, destination: &Path) {
 
 fn contract_release_ref(
     release: &nomifun_api_types::PluginRuntimeReleaseRefDto,
-) -> MiniAppReleaseRef {
-    MiniAppReleaseRef {
+) -> PluginReleaseRef {
+    PluginReleaseRef {
         release_id: release.release_id.clone().into(),
         artifact_id: release.artifact_id.clone().into(),
         release_digest: release.release_digest.clone().into(),
@@ -461,7 +461,7 @@ fn contract_release_ref(
 
 fn agent_invocation(
     owner: &str,
-    miniapp_id: &str,
+    plugin_product_id: &str,
     release: &nomifun_api_types::PluginRuntimeReleaseRefDto,
     active_release_epoch: u64,
     catalog_digest: DigestHex,
@@ -470,7 +470,7 @@ fn agent_invocation(
 ) -> PluginRuntimeAgentCapabilityInvocation {
     PluginRuntimeAgentCapabilityInvocation {
         owner_user_id: owner.to_owned(),
-        miniapp_id: MiniAppId::from(miniapp_id),
+        plugin_product_id: PluginProductId::from(plugin_product_id),
         capability: CapabilityRef {
             id: CapabilityId::from(CALLABLE_CAPABILITY_ID),
             version: VersionString::from("1.0.0"),
@@ -481,7 +481,7 @@ fn agent_invocation(
         active_release_epoch,
         catalog_digest,
         operation_id: format!("operation-{call_id}").into(),
-        call_id: MiniAppBridgeCallId::from(call_id),
+        call_id: PluginBridgeCallId::from(call_id),
         payload: StrictJsonValue(json!({"value": 7})),
     }
 }
@@ -490,12 +490,12 @@ fn agent_invocation(
 async fn service_product_runs_the_application_surface_bridge_lifecycle() {
     let database = init_database_memory().await.unwrap();
     let owner = installation_owner_id(database.pool()).await.unwrap();
-    let repository: Arc<dyn IMiniAppM1Repository> = Arc::new(
-        SqliteMiniAppM1Repository::new(database.pool().clone()),
+    let repository: Arc<dyn IPluginRuntimeRepository> = Arc::new(
+        SqlitePluginRuntimeRepository::new(database.pool().clone()),
     );
     let store_root = tempfile::tempdir().unwrap();
     let application = Arc::new(
-        PluginRuntimeM1ApplicationService::new_with_root(repository, store_root.path()).unwrap(),
+        PluginRuntimeApplicationService::new_with_root(repository, store_root.path()).unwrap(),
     );
     let runtime = Arc::new(TestRuntime::new());
     application.install_service_runtime(runtime.clone()).await;
@@ -507,19 +507,19 @@ async fn service_product_runs_the_application_surface_bridge_lifecycle() {
                 expected_library_revision: 0,
                 display_name: "Service Board".into(),
                 description: Some("application service lifecycle".into()),
-                kind: PluginRuntimeKindDto::Service,
+                service_source: Some("export async function start() { return { async invoke({ payload }) { return payload; }, async dispose() {} }; }".into()),
             },
         )
         .await
         .unwrap_or_else(|error| panic!("Service Bridge failed: {error:?}"));
-    assert_eq!(created.miniapp.kind, PluginRuntimeKindDto::Service);
+    assert_eq!(created.plugin.kind, PluginRuntimeKindDto::Plugin);
 
     let built = application
         .build(
             &owner,
             BuildPluginRuntimeRequest {
-                miniapp_id: created.miniapp.miniapp_id.clone(),
-                expected_product_revision: created.miniapp.product_revision,
+                plugin_id: created.plugin.plugin_id.clone(),
+                expected_product_revision: created.plugin.product_revision,
                 project_id: created.project_id.clone(),
                 expected_project_revision: created.project_revision,
                 expected_build_generation: created.build_generation,
@@ -537,7 +537,7 @@ async fn service_product_runs_the_application_surface_bridge_lifecycle() {
         .await
         .unwrap_or_else(|error| panic!("Service Bridge failed: {error:?}"));
     let ready = built.ready.as_ref().unwrap();
-    assert_eq!(ready.kind, PluginRuntimeKindDto::Service);
+    assert_eq!(ready.kind, PluginRuntimeKindDto::Plugin);
     assert_eq!(
         ready.service.as_ref().unwrap().lifecycle,
         PluginRuntimeServiceLifecycleDto::OnDemand
@@ -551,9 +551,9 @@ async fn service_product_runs_the_application_surface_bridge_lifecycle() {
         .test_ready_service(
             &owner,
             TestPluginRuntimeReleaseRequest {
-                miniapp_id: created.miniapp.miniapp_id.clone(),
-                expected_product_revision: built.miniapp.product_revision,
-                expected_pointer_revision: built.miniapp.releases.pointer_revision,
+                plugin_id: created.plugin.plugin_id.clone(),
+                expected_product_revision: built.plugin.product_revision,
+                expected_pointer_revision: built.plugin.releases.pointer_revision,
                 project_id: built.project_id.clone(),
                 expected_project_revision: built.project_revision,
                 expected_build_generation: built.build_generation,
@@ -580,10 +580,10 @@ async fn service_product_runs_the_application_surface_bridge_lifecycle() {
         .publish(
             &owner,
             PublishPluginRuntimeRequest {
-                miniapp_id: created.miniapp.miniapp_id.clone(),
-                expected_product_revision: tested.miniapp.product_revision,
-                expected_pointer_revision: tested.miniapp.releases.pointer_revision,
-                expected_active_release_epoch: tested.miniapp.releases.active_release_epoch,
+                plugin_id: created.plugin.plugin_id.clone(),
+                expected_product_revision: tested.plugin.product_revision,
+                expected_pointer_revision: tested.plugin.releases.pointer_revision,
+                expected_active_release_epoch: tested.plugin.releases.active_release_epoch,
                 ready_release_id: ready.release.release_id.clone(),
                 expected_ready_release_digest: ready.release.release_digest.clone(),
                 expected_active_release_digest: None,
@@ -593,15 +593,15 @@ async fn service_product_runs_the_application_surface_bridge_lifecycle() {
         )
         .await
         .unwrap();
-    let active = published.miniapp.releases.active.as_ref().unwrap();
+    let active = published.plugin.releases.active.as_ref().unwrap();
 
     let enabled = application
         .set_enabled(
             &owner,
             SetPluginRuntimeEnabledRequest {
-                miniapp_id: created.miniapp.miniapp_id.clone(),
-                expected_product_revision: published.miniapp.product_revision,
-                expected_pointer_revision: published.miniapp.releases.pointer_revision,
+                plugin_id: created.plugin.plugin_id.clone(),
+                expected_product_revision: published.plugin.product_revision,
+                expected_pointer_revision: published.plugin.releases.pointer_revision,
                 expected_active_release_digest: Some(active.release_digest.clone()),
                 enabled: true,
             },
@@ -609,18 +609,18 @@ async fn service_product_runs_the_application_surface_bridge_lifecycle() {
         .await
         .unwrap();
     assert_eq!(
-        enabled.miniapp.service_health,
+        enabled.plugin.service_health,
         nomifun_api_types::PluginRuntimeServiceHealthDto::Stopped
     );
     let started = application
         .set_service_running(
             &owner,
             nomifun_api_types::SetPluginRuntimeServiceRunningRequest {
-                miniapp_id: created.miniapp.miniapp_id.clone(),
-                expected_product_revision: enabled.miniapp.product_revision,
-                expected_pointer_revision: enabled.miniapp.releases.pointer_revision,
+                plugin_id: created.plugin.plugin_id.clone(),
+                expected_product_revision: enabled.plugin.product_revision,
+                expected_pointer_revision: enabled.plugin.releases.pointer_revision,
                 expected_active_release_epoch: enabled
-                    .miniapp
+                    .plugin
                     .releases
                     .active_release_epoch,
                 expected_active_release_digest: active.release_digest.clone(),
@@ -630,34 +630,34 @@ async fn service_product_runs_the_application_surface_bridge_lifecycle() {
         .await
         .unwrap();
     assert_eq!(
-        started.miniapp.service_health,
+        started.plugin.service_health,
         nomifun_api_types::PluginRuntimeServiceHealthDto::Ready {
             release_id: active.release_id.clone(),
             expected_release_digest: active.release_digest.clone(),
-            started_at_ms: started.miniapp.updated_at_ms,
+            started_at_ms: started.plugin.updated_at_ms,
         }
     );
 
     let stale_catalog = application
         .invoke_agent_capability(PluginRuntimeAgentCapabilityInvocation {
             owner_user_id: owner.clone(),
-            miniapp_id: created.miniapp.miniapp_id.clone().into(),
+                plugin_product_id: created.plugin.plugin_id.clone().into(),
             capability: CapabilityRef {
-                id: CapabilityId::from("miniapp.missing"),
+                id: CapabilityId::from("plugin.missing"),
                 version: VersionString::from("1.0.0"),
             },
-            action_id: ActionId::from("miniapp.missing.invoke"),
+            action_id: ActionId::from("plugin.missing.invoke"),
             action_allowlist: std::collections::BTreeSet::new(),
-            active_release: nomifun_agent_contracts::MiniAppReleaseRef {
+            active_release: nomifun_agent_contracts::PluginReleaseRef {
                 release_id: active.release_id.clone().into(),
                 artifact_id: active.artifact_id.clone().into(),
                 release_digest: active.release_digest.clone().into(),
                 manifest_digest: active.manifest_digest.clone().into(),
             },
-            active_release_epoch: started.miniapp.releases.active_release_epoch,
+            active_release_epoch: started.plugin.releases.active_release_epoch,
             catalog_digest: digest("stale-catalog"),
             operation_id: "operation-stale-catalog".into(),
-            call_id: MiniAppBridgeCallId::from("agent-call-stale-catalog"),
+            call_id: PluginBridgeCallId::from("agent-call-stale-catalog"),
             payload: StrictJsonValue(json!({})),
         })
         .await
@@ -667,20 +667,20 @@ async fn service_product_runs_the_application_surface_bridge_lifecycle() {
         .contains("stale Catalog digest"));
 
     let surface = application
-        .open_surface(&owner, &created.miniapp.miniapp_id)
+        .open_surface(&owner, &created.plugin.plugin_id)
         .await
         .unwrap();
-    assert_eq!(surface.kind, PluginRuntimeKindDto::Service);
+    assert_eq!(surface.kind, PluginRuntimeKindDto::Plugin);
     let result = application
         .surface_bridge_request(
             &owner,
-            &created.miniapp.miniapp_id,
+            &created.plugin.plugin_id,
             &surface.surface_capability,
             surface.active_release_epoch,
             &surface.expected_release_digest,
-            nomifun_agent_contracts::MiniAppBridgeRequest {
-                call_id: MiniAppBridgeCallId::from("service-call-1"),
-                target: MiniAppBridgeTarget::Service {
+            nomifun_agent_contracts::PluginBridgeRequest {
+                call_id: PluginBridgeCallId::from("service-call-1"),
+                target: PluginBridgeTarget::Service {
                     method: "echo".into(),
                     payload: StrictJsonValue(json!({"value": 7})),
                 },
@@ -695,11 +695,11 @@ async fn service_product_runs_the_application_surface_bridge_lifecycle() {
         .set_service_running(
             &owner,
             nomifun_api_types::SetPluginRuntimeServiceRunningRequest {
-                miniapp_id: created.miniapp.miniapp_id.clone(),
-                expected_product_revision: started.miniapp.product_revision,
-                expected_pointer_revision: started.miniapp.releases.pointer_revision,
+                plugin_id: created.plugin.plugin_id.clone(),
+                expected_product_revision: started.plugin.product_revision,
+                expected_pointer_revision: started.plugin.releases.pointer_revision,
                 expected_active_release_epoch: started
-                    .miniapp
+                    .plugin
                     .releases
                     .active_release_epoch,
                 expected_active_release_digest: active.release_digest.clone(),
@@ -709,7 +709,7 @@ async fn service_product_runs_the_application_surface_bridge_lifecycle() {
         .await
         .unwrap();
     assert_eq!(
-        stopped.miniapp.service_health,
+        stopped.plugin.service_health,
         nomifun_api_types::PluginRuntimeServiceHealthDto::Stopped
     );
     assert!(!runtime.started.lock().await.is_empty());
@@ -719,18 +719,18 @@ async fn service_product_runs_the_application_surface_bridge_lifecycle() {
 async fn callable_service_release_runs_build_publish_enable_start_and_agent_invoke() {
     let database = init_database_memory().await.unwrap();
     let owner = installation_owner_id(database.pool()).await.unwrap();
-    let repository: Arc<dyn IMiniAppM1Repository> = Arc::new(
-        SqliteMiniAppM1Repository::new(database.pool().clone()),
+    let repository: Arc<dyn IPluginRuntimeRepository> = Arc::new(
+        SqlitePluginRuntimeRepository::new(database.pool().clone()),
     );
     let root = tempfile::tempdir().unwrap();
     let application = Arc::new(
-        PluginRuntimeM1ApplicationService::new_with_root(repository, root.path()).unwrap(),
+        PluginRuntimeApplicationService::new_with_root(repository, root.path()).unwrap(),
     );
     let runtime = Arc::new(TestRuntime::new());
     application.install_service_runtime(runtime.clone()).await;
 
     // Build a real immutable Service Release with one Agent-callable
-    // contribution using the same MiniAppReleaseV1 builder as M1 builds.
+    // contribution using the same PluginReleaseV1 builder as M1 builds.
     let artifact = callable_service_artifact();
     assert!(artifact.manifest.payload.service.is_some());
     assert_eq!(
@@ -744,7 +744,7 @@ async fn callable_service_release_runs_build_publish_enable_start_and_agent_invo
         .publish(PluginRuntimeReleasePublishRequest::service(
             PluginRuntimeSourceScope::new(
                 "fixture-owner",
-                "fixture-miniapp",
+                "fixture-plugin",
                 "fixture-project",
             )
             .unwrap(),
@@ -764,8 +764,8 @@ async fn callable_service_release_runs_build_publish_enable_start_and_agent_invo
     let bundle = PluginRuntimeShareBundleFilesystem::default()
         .export(
             PluginRuntimeShareBundleExport {
-                bundle_id: MiniAppShareBundleId::from("callable-service-bundle"),
-                source_miniapp_id: Some(MiniAppId::from("fixture-miniapp")),
+                bundle_id: PluginShareBundleId::from("callable-service-bundle"),
+                source_plugin_product_id: Some(PluginProductId::from("fixture-plugin")),
                 release: &stored,
                 source: None,
                 test_provenance: None,
@@ -788,18 +788,18 @@ async fn callable_service_release_runs_build_publish_enable_start_and_agent_invo
         )
         .await
         .unwrap();
-    assert_eq!(imported.miniapp.kind, PluginRuntimeKindDto::Service);
+    assert_eq!(imported.plugin.kind, PluginRuntimeKindDto::Plugin);
     let ready = imported.ready.as_ref().expect("prebuilt Service is Ready");
 
     let published = application
         .publish(
             &owner,
             PublishPluginRuntimeRequest {
-                miniapp_id: imported.miniapp.miniapp_id.clone(),
-                expected_product_revision: imported.miniapp.product_revision,
-                expected_pointer_revision: imported.miniapp.releases.pointer_revision,
+                plugin_id: imported.plugin.plugin_id.clone(),
+                expected_product_revision: imported.plugin.product_revision,
+                expected_pointer_revision: imported.plugin.releases.pointer_revision,
                 expected_active_release_epoch: imported
-                    .miniapp
+                    .plugin
                     .releases
                     .active_release_epoch,
                 ready_release_id: ready.release.release_id.clone(),
@@ -812,14 +812,14 @@ async fn callable_service_release_runs_build_publish_enable_start_and_agent_invo
         .await
         .unwrap();
     let active = published
-        .miniapp
+        .plugin
         .releases
         .active
         .clone()
         .expect("published Service has an Active Release");
     let active_ref = contract_release_ref(&active);
-    let catalog_digest = nomifun_plugin_platform::runtime::miniapp_catalog_digest(
-        &published.miniapp.miniapp_id,
+    let catalog_digest = nomifun_plugin_platform::runtime::plugin_catalog_digest(
+        &published.plugin.plugin_id,
         &active_ref,
         &contributions,
     )
@@ -829,9 +829,9 @@ async fn callable_service_release_runs_build_publish_enable_start_and_agent_invo
         .set_enabled(
             &owner,
             SetPluginRuntimeEnabledRequest {
-                miniapp_id: published.miniapp.miniapp_id.clone(),
-                expected_product_revision: published.miniapp.product_revision,
-                expected_pointer_revision: published.miniapp.releases.pointer_revision,
+                plugin_id: published.plugin.plugin_id.clone(),
+                expected_product_revision: published.plugin.product_revision,
+                expected_pointer_revision: published.plugin.releases.pointer_revision,
                 expected_active_release_digest: Some(active.release_digest.clone()),
                 enabled: true,
             },
@@ -839,7 +839,7 @@ async fn callable_service_release_runs_build_publish_enable_start_and_agent_invo
         .await
         .unwrap();
     assert_eq!(
-        enabled.miniapp.service_health,
+        enabled.plugin.service_health,
         nomifun_api_types::PluginRuntimeServiceHealthDto::Stopped
     );
 
@@ -847,11 +847,11 @@ async fn callable_service_release_runs_build_publish_enable_start_and_agent_invo
         .set_service_running(
             &owner,
             nomifun_api_types::SetPluginRuntimeServiceRunningRequest {
-                miniapp_id: enabled.miniapp.miniapp_id.clone(),
-                expected_product_revision: enabled.miniapp.product_revision,
-                expected_pointer_revision: enabled.miniapp.releases.pointer_revision,
+                plugin_id: enabled.plugin.plugin_id.clone(),
+                expected_product_revision: enabled.plugin.product_revision,
+                expected_pointer_revision: enabled.plugin.releases.pointer_revision,
                 expected_active_release_epoch: enabled
-                    .miniapp
+                    .plugin
                     .releases
                     .active_release_epoch,
                 expected_active_release_digest: active.release_digest.clone(),
@@ -861,7 +861,7 @@ async fn callable_service_release_runs_build_publish_enable_start_and_agent_invo
         .await
         .unwrap();
     assert!(matches!(
-        started.miniapp.service_health,
+        started.plugin.service_health,
         nomifun_api_types::PluginRuntimeServiceHealthDto::Ready { .. }
     ));
 
@@ -869,9 +869,9 @@ async fn callable_service_release_runs_build_publish_enable_start_and_agent_invo
     let result = application
         .invoke_agent_capability(agent_invocation(
             &owner,
-            &started.miniapp.miniapp_id,
+            &started.plugin.plugin_id,
             &active,
-            started.miniapp.releases.active_release_epoch,
+            started.plugin.releases.active_release_epoch,
             catalog_digest.clone(),
             allowed.clone(),
             "agent-call-success",
@@ -885,11 +885,11 @@ async fn callable_service_release_runs_build_publish_enable_start_and_agent_invo
     let denied = application
         .invoke_agent_capability(agent_invocation(
             &owner,
-            &started.miniapp.miniapp_id,
+            &started.plugin.plugin_id,
             &active,
-            started.miniapp.releases.active_release_epoch,
+            started.plugin.releases.active_release_epoch,
             catalog_digest.clone(),
-            BTreeSet::from([ActionId::from("miniapp.callable.other")]),
+            BTreeSet::from([ActionId::from("plugin.callable.other")]),
             "agent-call-denied",
         ))
         .await
@@ -902,9 +902,9 @@ async fn callable_service_release_runs_build_publish_enable_start_and_agent_invo
     let stale_catalog = application
         .invoke_agent_capability(agent_invocation(
             &owner,
-            &started.miniapp.miniapp_id,
+            &started.plugin.plugin_id,
             &active,
-            started.miniapp.releases.active_release_epoch,
+            started.plugin.releases.active_release_epoch,
             digest("stale-catalog"),
             allowed.clone(),
             "agent-call-stale-catalog",
@@ -919,9 +919,9 @@ async fn callable_service_release_runs_build_publish_enable_start_and_agent_invo
     let stale_epoch = application
         .invoke_agent_capability(agent_invocation(
             &owner,
-            &started.miniapp.miniapp_id,
+            &started.plugin.plugin_id,
             &active,
-            started.miniapp.releases.active_release_epoch + 1,
+            started.plugin.releases.active_release_epoch + 1,
             catalog_digest,
             allowed,
             "agent-call-stale-epoch",
@@ -939,11 +939,11 @@ async fn callable_service_release_runs_build_publish_enable_start_and_agent_invo
         .set_service_running(
             &owner,
             nomifun_api_types::SetPluginRuntimeServiceRunningRequest {
-                miniapp_id: started.miniapp.miniapp_id.clone(),
-                expected_product_revision: started.miniapp.product_revision,
-                expected_pointer_revision: started.miniapp.releases.pointer_revision,
+                plugin_id: started.plugin.plugin_id.clone(),
+                expected_product_revision: started.plugin.product_revision,
+                expected_pointer_revision: started.plugin.releases.pointer_revision,
                 expected_active_release_epoch: started
-                    .miniapp
+                    .plugin
                     .releases
                     .active_release_epoch,
                 expected_active_release_digest: active.release_digest,
@@ -953,7 +953,7 @@ async fn callable_service_release_runs_build_publish_enable_start_and_agent_invo
         .await
         .unwrap();
     assert_eq!(
-        stopped.miniapp.service_health,
+        stopped.plugin.service_health,
         nomifun_api_types::PluginRuntimeServiceHealthDto::Stopped
     );
     assert!(!runtime.started.lock().await.is_empty());
