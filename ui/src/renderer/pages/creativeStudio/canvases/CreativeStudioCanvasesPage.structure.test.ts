@@ -47,8 +47,6 @@ describe('Creative Studio Canvas library product contract', () => {
     expect(
       css.includes('grid-template-columns: repeat(2, minmax(0, 1fr))')
     ).toBe(true);
-    expect(css.includes('@media (max-width: 639px)')).toBe(true);
-    expect(css.includes('grid-template-columns: minmax(0, 1fr)')).toBe(true);
   });
 
   test('uses shared theme tokens instead of fixed light-only controls', () => {

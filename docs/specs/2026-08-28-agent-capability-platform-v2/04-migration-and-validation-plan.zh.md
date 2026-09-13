@@ -67,7 +67,7 @@ Effect 或 Provider 选择事实。业务能力不能继续进入 legacy Convers
 
 ### 2.2 Canonical source 只有一份
 
-- Preview、Save 和 Test 共用一个纯函数 Compiler；
+- Save 使用唯一的纯函数 Compiler；
 - Session Open 读取已保存 Snapshot，只做当前执行兼容检查，不重新编译另一份结果；
 - Manifest 是声明事实源，Registration 从真实 handler/service exports 派生；
 - Event Log 保存语义事实，Projection 只保存可重建的当前视图；
@@ -261,9 +261,9 @@ owner 接入中央组合图；Sidecar 协议未由 upstream spike 证明前，�
 目标：
 
 - 普通 Agent 编辑器只显示用户可理解的产品语言；
-- Save/Test 自动调用内部 Preview；
+- Save 在服务端完成配置校验和 Snapshot 生成；
 - Workspace、Knowledge 和 Connector 使用 picker；
-- 从模板创建、修改保存、选择资源试用、在新 Session 继续四条流程可验收；
+- 从模板创建、修改保存、从首页使用、在新 Session 继续四条流程可验收；
 - `bun run dev` 启动后 Desktop 不崩溃，用户不需要填写 UUID、operation 或 raw JSON。
 
 S4 可以在 S2 DTO 稳定后并行开发界面骨架，但完整退出依赖 S3 的真实 owner 和 Runtime。
@@ -317,7 +317,7 @@ S0 -> S1 -> S2
 
 | 上游边界 | 允许进入的下游 | 进入条件 |
 |---|---|---|
-| Canonical Compiler / Snapshot | Editor Save/Test、Session Open | Preview/Save/Test 同结果；Session 不二次编译 |
+| Canonical Compiler / Snapshot | Editor Save、Session Open | Save 生成冻结 Snapshot；Session 不二次编译 |
 | AgentSession command/query + Runtime lifecycle | Chat、Coding、automation、Remote | `open/turn/cancel/dispose` 可真实执行并有终止路径 |
 | Role contract + Provider Resolver | Browser/Computer first-party owner、Knowledge render | exact Provider lock 生效；缺失时 typed failure；无 fallback |
 | Plugin/owner slice | UI/API/background direct consumers | owner、repository/handler 和资源清理已存在，不是占位 registration |
@@ -339,12 +339,12 @@ S0 -> S1 -> S2
 - diagnostics；
 - deterministic digest。
 
-Preview、Save 和 Test 只能调用它。Control Plane 只映射 diagnostics，不复制 closure、
+Save 只能调用它。Control Plane 只映射 diagnostics，不复制 closure、
 profile 或 digest 算法。Session Open 不重新编译，只读取保存结果并做结构兼容检查。
 
 最小验证：
 
-- 同一输入经 Preview、Save、Test 产生相同 Snapshot 内容和 digest；
+- 同一输入经 Save 产生确定的 Snapshot 内容和 digest；
 - 输入变化只影响实际执行闭包；
 - 缺依赖、资源或 Provider 时返回同一 typed diagnostic；
 - 不存在第二个可生产 Snapshot 的入口。

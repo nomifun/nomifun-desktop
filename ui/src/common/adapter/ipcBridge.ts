@@ -172,8 +172,9 @@ import type {
   RemoteOpenRequest,
   RemoteOpenResponse,
   RemoteTurnRequest,
-  ResolveAgentPresetPreviewRequest,
-  ResolveAgentPresetPreviewResponse,
+  SelectProductAgentBindingRequest,
+  ProductAgentOptions,
+  ProductAgentSelectionResult,
   RevokeInstallationTokenResponse,
   RotateInstallationTokenResponse,
   SaveAgentPresetRevisionRequest,
@@ -482,14 +483,8 @@ export interface IAgentSessionCapabilityState {
     snapshot_digest: string;
   };
   generation: number;
-  initial_capabilities: string[];
-  on_demand_capabilities: string[];
+  enabled_capabilities: string[];
   active_capabilities: string[];
-  compact_on_demand_index: Array<{
-    capability_id: string;
-    display_name: string;
-    short_description: string;
-  }>;
 }
 
 export interface IAgentSessionEventPage {
@@ -583,16 +578,10 @@ const fromApiAgentSessionCapabilities = (raw: unknown): IAgentSessionCapabilityS
   return {
     resolved_snapshot_ref: value.resolved_snapshot_ref as IAgentSessionCapabilityState['resolved_snapshot_ref'],
     generation: Number(value.generation ?? value.active_set_generation ?? 0),
-    initial_capabilities: Array.isArray(value.initial_capabilities)
-      ? (value.initial_capabilities as string[])
-      : [],
-    on_demand_capabilities: Array.isArray(value.on_demand_capabilities)
-      ? (value.on_demand_capabilities as string[])
+    enabled_capabilities: Array.isArray(value.enabled_capabilities)
+      ? (value.enabled_capabilities as string[])
       : [],
     active_capabilities: active as string[],
-    compact_on_demand_index: Array.isArray(value.compact_on_demand_index)
-      ? (value.compact_on_demand_index as IAgentSessionCapabilityState['compact_on_demand_index'])
-      : [],
   };
 };
 
@@ -674,14 +663,6 @@ export const agentPlatform = {
     const query = params.revision == null ? '' : `?revision=${params.revision}`;
     return `/api/agent-presets/${encodeURIComponent(params.preset_id)}/editor${query}`;
   }),
-  resolvePreview: httpPost<
-    ResolveAgentPresetPreviewResponse,
-    { preset_id: string; request: ResolveAgentPresetPreviewRequest }
-  >(
-    (params) =>
-      `/api/agent-presets/${encodeURIComponent(params.preset_id)}/resolve-preview`,
-    (params) => params.request
-  ),
   saveRevision: httpPost<
     SaveAgentPresetRevisionResponse,
     { preset_id: string; request: SaveAgentPresetRevisionRequest }
@@ -696,20 +677,6 @@ export const agentPlatform = {
     (params) =>
       `/api/agent-presets/${encodeURIComponent(params.preset_id)}/revisions/${params.revision}`
   ),
-  resolveRevisionPreview: httpPost<
-    ResolveAgentPresetPreviewResponse,
-    {
-      preset_id: string;
-      revision: number;
-      scene: string;
-      surface: string;
-      audience: string;
-    }
-  >(
-    (params) =>
-      `/api/agent-presets/${encodeURIComponent(params.preset_id)}/revisions/${params.revision}/resolve-preview`,
-    ({ scene, surface, audience }) => ({ scene, surface, audience })
-  ),
   getBinding: httpGet<
     AgentBindingRecord | null,
     { target_kind: string; target_id: string }
@@ -723,6 +690,21 @@ export const agentPlatform = {
   >(
     (params) =>
       `/api/agent-bindings/${encodeURIComponent(params.target_kind)}/${encodeURIComponent(params.target_id)}`,
+    (params) => params.request
+  ),
+  productBindingOptions: httpGet<
+    ProductAgentOptions,
+    { target_kind: string; target_id: string; model?: { provider_id: string; model: string } }
+  >((params) => {
+    const query = params.model ? `?${new URLSearchParams({ provider_id: params.model.provider_id, model: params.model.model })}` : '';
+    return `/api/product-agent-bindings/${encodeURIComponent(params.target_kind)}/${encodeURIComponent(params.target_id)}${query}`;
+  }),
+  selectProductBinding: httpPut<
+    ProductAgentSelectionResult,
+    { target_kind: string; target_id: string; request: SelectProductAgentBindingRequest }
+  >(
+    (params) =>
+      `/api/product-agent-bindings/${encodeURIComponent(params.target_kind)}/${encodeURIComponent(params.target_id)}`,
     (params) => params.request
   ),
   remoteBindings: {

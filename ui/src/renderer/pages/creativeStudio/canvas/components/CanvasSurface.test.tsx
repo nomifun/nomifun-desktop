@@ -73,17 +73,15 @@ describe('Creative Studio canvas surface', () => {
     }
   });
 
-  test('keeps the full-screen chrome responsive down to the compact focus shell', () => {
+  test('keeps the full-screen chrome responsive across desktop widths', () => {
     const css = readFileSync(new URL('./CanvasSurface.module.css', import.meta.url), 'utf8');
     const zoomCss = readFileSync(new URL('./CanvasZoomControls.module.css', import.meta.url), 'utf8');
 
     expect(css.includes('@media (max-width: 1280px)')).toBe(true);
     expect(css.includes('@media (max-width: 1024px)')).toBe(true);
-    expect(css.includes('@media (max-width: 640px)')).toBe(true);
     expect(css.includes('position: fixed')).toBe(false);
     expect(css.includes('left: 16px')).toBe(true);
     expect(css.includes('bottom: 18px')).toBe(true);
-    expect(zoomCss.includes('@media (max-width: 640px)')).toBe(true);
     expect(zoomCss.includes('.zoomMenu')).toBe(true);
     expect(zoomCss.includes('.zoomStepper')).toBe(true);
     expect(zoomCss.includes('.slider')).toBe(false);

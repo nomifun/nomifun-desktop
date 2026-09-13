@@ -12,15 +12,11 @@ const readSource = (url: URL) => readFileSync(url, 'utf8');
 describe('settings navigation', () => {
   test('exposes execution engines as a first-level settings page', () => {
     const siderSource = readSource(new URL('./SettingsSider.tsx', import.meta.url));
-    const pageWrapperSource = readSource(new URL('./SettingsPageWrapper.tsx', import.meta.url));
-
     for (const id of ['system', 'execution-engines', 'computer-use', 'about']) {
       expect(siderSource.includes(`'${id}'`)).toBe(true);
-      expect(pageWrapperSource.includes(`id: '${id}'`)).toBe(true);
     }
 
     expect(siderSource.includes("'browser-use'")).toBe(false);
-    expect(pageWrapperSource.includes("id: 'browser-use'")).toBe(false);
     expect(siderSource.indexOf("'system'")).toBeLessThan(siderSource.indexOf("'execution-engines'"));
     expect(siderSource.indexOf("'execution-engines'")).toBeLessThan(siderSource.indexOf("'computer-use'"));
     expect(siderSource.indexOf("'computer-use'")).toBeLessThan(siderSource.indexOf("'about'"));

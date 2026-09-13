@@ -264,6 +264,7 @@ const EXPECTED_PRODUCT_TABLES: &[&str] = &[
     "plugin_source_mutation_commits",
     "plugin_source_mutation_intents",
     "plugin_surface_sessions",
+    "product_agent_selections",
     "product_operations",
     "provider_connections",
     "provider_model_capabilities",

@@ -23,7 +23,7 @@ export type GuidAdvancedConfig = {
   setIdmm: (next: IIdmmConfig) => void;
   applyToConversation: (
     conversationId: ConversationId,
-    options?: { allowKnowledgeBinding?: boolean }
+    options?: { allowKnowledgeBinding?: boolean; allowAutomation?: boolean }
   ) => Promise<void>;
   reset: () => void;
 };
@@ -48,7 +48,7 @@ export const useGuidAdvancedConfig = (): GuidAdvancedConfig => {
   const applyToConversation = useCallback(
     async (
       conversationId: ConversationId,
-      options?: { allowKnowledgeBinding?: boolean }
+      options?: { allowKnowledgeBinding?: boolean; allowAutomation?: boolean }
     ) => {
       const { knowledge: kb, autoWork: aw, idmm: idm } = draftsRef.current;
       const tasks: Array<{ label: string; run: () => Promise<unknown> }> = [];
@@ -70,7 +70,7 @@ export const useGuidAdvancedConfig = (): GuidAdvancedConfig => {
             }),
         });
       }
-      if (idm.fault_watch.enabled || idm.decision_watch.enabled) {
+      if (options?.allowAutomation !== false && (idm.fault_watch.enabled || idm.decision_watch.enabled)) {
         tasks.push({
           label: t('idmm.label'),
           run: () =>
@@ -104,7 +104,7 @@ export const useGuidAdvancedConfig = (): GuidAdvancedConfig => {
         report(tasks, await Promise.allSettled(tasks.map((task) => task.run())));
       }
 
-      if (aw.enabled && aw.tag) {
+      if (options?.allowAutomation !== false && aw.enabled && aw.tag) {
         const autoWorkTask = {
           label: t('requirements.autowork.label'),
           run: () =>

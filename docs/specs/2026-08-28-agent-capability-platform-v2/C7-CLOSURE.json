@@ -5,7 +5,7 @@
   "closed_at": "2026-08-30",
   "branch": "rf/agent-capability-platform-v2",
   "candidate_source_sha": "c5e1015f948cf1fd12ee3bc7dbea2d297f3e0ab6",
-  "confirmed_decision_contract_digest": "b3c32f0579a36c1f720a906b785b76cea58e8c8a1e4b07df6416f0d7410d78d5",
+  "confirmed_decision_contract_digest": "c1eeb87b010954fa19324fb59d63c9d8722d6704fe1121ea63f41d4d06d14643",
   "implementation_commit": "c5e1015f948cf1fd12ee3bc7dbea2d297f3e0ab6",
   "canonical_inputs": {
     "target_first_party_inventory": "crates/backend/nomifun-agent-contracts/contracts/generated/target-first-party-contributions.envelope.json",

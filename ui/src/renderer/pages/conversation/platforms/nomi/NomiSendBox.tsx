@@ -10,24 +10,17 @@ import { ipcBridge } from '@/common';
 import { uuid, uuidv7 } from '@/common/utils';
 import CommandQueuePanel from '@/renderer/components/chat/CommandQueuePanel';
 import SessionCapabilityPicker, {
-  SessionCapabilityComposerLayout,
   buildSessionCapabilitySelection,
   draftFromSessionCapabilitySelection,
   sessionCapabilitySelectionKey,
   useSessionCapabilityCatalog,
   type SessionCapabilityDraft,
 } from '@/renderer/components/chat/SessionCapabilityPicker';
-import MobileActionSheet, {
-  type MobileActionSheetEntry,
-  type MobileActionSheetOption,
-  useAttachEntry,
-} from '@/renderer/components/chat/MobileActionSheet';
 import SendBox from '@/renderer/components/chat/SendBox';
 import FileAttachButton from '@/renderer/components/media/FileAttachButton';
 import FilePreview from '@/renderer/components/media/FilePreview';
 import HorizontalFileList from '@/renderer/components/media/HorizontalFileList';
 import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
-import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { useAutoTitle } from '@/renderer/hooks/chat/useAutoTitle';
 import { getSendBoxDraftHook, type FileOrFolderItem } from '@/renderer/hooks/chat/useSendBoxDraft';
 import { createSetUploadFile, useSendBoxFiles } from '@/renderer/hooks/chat/useSendBoxFiles';
@@ -72,14 +65,12 @@ import { emitter, useAddEventListener } from '@/renderer/utils/emitter';
 import { mergeFileSelectionItems } from '@/renderer/utils/file/fileSelection';
 import { buildDisplayMessage, collectSelectedFiles } from '@/renderer/utils/file/messageFiles';
 import { Message, Tag } from '@arco-design/web-react';
-import { Brain, Robot } from '@icon-park/react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { NomiMessageRuntime } from './useNomiMessage';
 import NomiModelSelector from './NomiModelSelector';
 import { ContextUsageRing } from './ContextUsageRing';
 import type { NomiModelSelection } from './useNomiModelSelection';
-import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
 import { evaluateNomiVisionSend } from './nomiVisionSendGuard';
 import { steerOrQueue } from './steerOrQueue';
@@ -131,29 +122,21 @@ const NomiSendBox: React.FC<{
   conversation_id: ConversationId;
   modelSelection: NomiModelSelection;
   agentSelectorNode?: React.ReactNode;
-  agentSelection?: {
-    label: string;
-    options: MobileActionSheetOption[];
-    onSelect: (key: string) => void;
-    disabled?: boolean;
-  };
   agent_name?: string;
   turnActivity: NomiMessageRuntime;
   /** Hide model and other editable controls on locked surfaces. */
   hideAdvancedControls?: boolean;
-  /** Conversation collaborator-model control, rendered after the main model. */
+  /** Existing collaboration control, rendered in the composer side rail. */
   collaboratorSelectorNode?: React.ReactNode;
   /**
-   * Extra node(s) rendered in the right-tools group after the collaborator
-   * selector. A projected task uses this to surface its task-requirement
-   * control inside the participant conversation.
+   * Extra node(s) rendered in the bottom right-tools group. A projected task
+   * uses this to surface its task-requirement control inside the participant conversation.
    */
   extraRightTools?: React.ReactNode;
 }> = ({
   conversation_id,
   modelSelection,
   agentSelectorNode,
-  agentSelection,
   agent_name,
   turnActivity,
   hideAdvancedControls,
@@ -161,9 +144,6 @@ const NomiSendBox: React.FC<{
   extraRightTools,
 }) => {
   const [workspacePath, setWorkspacePath] = useState('');
-  const [isMobileSheetOpen, setIsMobileSheetOpen] = useState(false);
-  const layout = useLayoutContext();
-  const isMobile = Boolean(layout?.isMobile);
   const conversationContext = useConversationContextSafe();
   const loadedSkills = conversationContext?.loadedSkills ?? [];
   const loadedMcpStatuses = conversationContext?.loadedMcpStatuses ?? [];
@@ -177,7 +157,6 @@ const NomiSendBox: React.FC<{
   const appliedCapabilityKey = useRef<string | undefined>(undefined);
   const lastAppliedCapabilityKey = useRef<string | undefined>(undefined);
   const { t } = useTranslation();
-  const providerLabel = useModelSelectorProviderLabel();
   const { checkAndUpdateTitle } = useAutoTitle();
   const { current_model } = modelSelection;
 
@@ -812,84 +791,6 @@ const NomiSendBox: React.FC<{
     onFilesSelected: appendSelectedFiles,
   });
 
-  const { entries: attachEntries, hiddenFileInput: attachHiddenInput } = useAttachEntry({
-    openFileSelector,
-    onLocalFilesAdded: handleFilesAdded,
-    dividerBefore: true,
-  });
-
-  const handleSheetModelSelect = useCallback(
-    (value: string) => {
-      // value format: `${providerId}::${modelName}`
-      const [providerId, modelName] = value.split('::');
-      const provider = modelSelection.providers.find((p) => p.id === providerId);
-      if (!provider || !modelName) return;
-      void modelSelection.handleSelectModel(provider, modelName);
-    },
-    [modelSelection]
-  );
-
-  const sheetEntries = useMemo<MobileActionSheetEntry[]>(() => {
-    if (!isMobile) return [];
-
-    const modelOptions: MobileActionSheetOption[] = modelSelection.providers.flatMap((provider) =>
-      modelSelection.getAvailableModels(provider).map((modelName) => ({
-        key: `${provider.id}::${modelName}`,
-        label: modelName,
-        description: providerLabel(provider),
-        active:
-          modelSelection.current_model?.id === provider.id && modelSelection.current_model?.use_model === modelName,
-      }))
-    );
-
-    const currentModelLabel = modelSelection.current_model?.use_model || t('conversation.welcome.selectModel');
-
-    const entries: MobileActionSheetEntry[] = [
-      ...(agentSelection
-        ? [{
-            key: 'agent',
-            icon: <Robot theme='outline' size='16' />,
-            label: t('common.agent', { defaultValue: 'Agent' }),
-            meta: agentSelection.label,
-            disabled: agentSelection.disabled,
-            submenu: {
-              title: t('common.agent', { defaultValue: 'Agent' }),
-              options: agentSelection.options,
-              onSelect: agentSelection.onSelect,
-            },
-          }]
-        : []),
-      ...(hideAdvancedControls
-        ? []
-        : [
-            {
-              key: 'model',
-              icon: <Brain theme='outline' size='16' />,
-              label: t('common.model', { defaultValue: 'Model' }),
-              meta: currentModelLabel,
-              submenu: {
-                title: t('common.model', { defaultValue: 'Model' }),
-                options: modelOptions,
-                onSelect: handleSheetModelSelect,
-                emptyText: t('conversation.welcome.selectModel'),
-              },
-            },
-          ]),
-      ...attachEntries,
-    ];
-
-    return entries;
-  }, [
-    attachEntries,
-    agentSelection,
-    handleSheetModelSelect,
-    hideAdvancedControls,
-    isMobile,
-    modelSelection,
-    providerLabel,
-    t,
-  ]);
-
   useAddEventListener('nomi.selected.file', setAtPath);
   useAddEventListener('nomi.selected.file.append', (selectedItems: Array<string | FileOrFolderItem>) => {
     const merged = mergeFileSelectionItems(atPathRef.current, selectedItems);
@@ -980,8 +881,9 @@ const NomiSendBox: React.FC<{
         onRemove={remove}
         onClear={clear}
       />
-      <SessionCapabilityComposerLayout
-        picker={
+      <SendBox
+        key={conversation_id}
+        sideTools={
           hideAdvancedControls ? null : (
             <SessionCapabilityPicker
               catalog={capabilityCatalog.catalog}
@@ -991,135 +893,120 @@ const NomiSendBox: React.FC<{
               loadFailed={Boolean(capabilityCatalog.error)}
               onRetry={capabilityCatalog.retry}
               applyMode='next-send'
-            />
+            >
+              {collaboratorSelectorNode}
+            </SessionCapabilityPicker>
           )
         }
-      >
-        <SendBox
-          key={conversation_id}
-          data-testid='nomi-sendbox'
-          showPinnedPlan
-          onMobilePlusClick={isMobile ? () => setIsMobileSheetOpen(true) : undefined}
-          value={content}
-          onChange={handleContentChange}
-          selectedWorkspaceItems={atPath}
-          onSelectedWorkspaceItemsChange={(items) => {
-            emitter.emit('nomi.selected.file', items);
-            setAtPath(items);
-          }}
-          loading={isBusy}
-          disabled={!current_model?.use_model}
-          placeholder={
-            current_model?.use_model
-              ? t('agent.sendbox.placeholder', {
-                  backend: agent_name || 'Nomi',
-                  defaultValue: `Send message to {{backend}}...`,
-                })
-              : t('conversation.chat.noModelSelected')
-          }
-          onStop={handleStop}
-          onClearContext={handleClearContext}
-          className='z-10'
-          onFilesAdded={handleFilesAdded}
-          hasPendingAttachments={uploadFile.length > 0 || atPath.length > 0}
-          supportedExts={allSupportedExts}
-          defaultMultiLine={!isMobile}
-          lockMultiLine={!isMobile}
-          tools={
-            <FileAttachButton
-              openFileSelector={openFileSelector}
-              onLocalFilesAdded={handleFilesAdded}
-              showLoadedCapabilities={false}
-            />
-          }
-          rightTools={
-            hideAdvancedControls ? undefined : (
-              <div
-                className='sendbox-responsive-config-group flex flex-1 items-center justify-end gap-2 min-w-0'
-                data-testid='nomi-sendbox-config-group'
-              >
-                {hasContextUsage && (
-                  <ContextUsageRing
-                    used={tokenUsage?.context_tokens}
-                    max={tokenUsage?.context_window}
-                    inputTokens={tokenUsage?.input_tokens}
-                    outputTokens={tokenUsage?.output_tokens}
-                    reasoningTokens={tokenUsage?.reasoning_tokens}
-                  />
-                )}
-                <NomiModelSelector
-                  selection={modelSelection}
-                  className='nomi-sendbox-model-btn'
-                />
-                {agentSelectorNode}
-                {collaboratorSelectorNode}
-                {extraRightTools}
-              </div>
-            )
-          }
-          prefix={
-            <>
-              {uploadFile.length > 0 && (
-                <HorizontalFileList>
-                  {uploadFile.map((path) => (
-                    <FilePreview
-                      key={path}
-                      data-testid={`nomi-file-tag-${uploadFile.indexOf(path)}`}
-                      path={path}
-                      onRemove={() => setUploadFile(uploadFile.filter((v) => v !== path))}
-                    />
-                  ))}
-                </HorizontalFileList>
-              )}
-              {atPath.some((item) => (typeof item === 'string' ? false : !item.isFile)) && (
-                <div className='flex flex-wrap items-center gap-8px mb-8px'>
-                  {atPath.map((item) => {
-                    if (typeof item === 'string') return null;
-                    if (!item.isFile) {
-                      const folderIndex = atPath.filter((v) => typeof v !== 'string' && !v.isFile).indexOf(item);
-                      return (
-                        <Tag
-                          key={item.path}
-                          data-testid={`nomi-folder-tag-${folderIndex}`}
-                          bordered={false}
-                          className='!bg-primary-1 !text-primary-6'
-                          closable
-                          onClose={() => {
-                            const newAtPath = atPath.filter((v) => (typeof v === 'string' ? true : v.path !== item.path));
-                            emitter.emit('nomi.selected.file', newAtPath);
-                            setAtPath(newAtPath);
-                          }}
-                        >
-                          {item.name}
-                        </Tag>
-                      );
-                    }
-                    return null;
-                  })}
-                </div>
-              )}
-            </>
-          }
-          onSend={onSendHandler}
-          onSteer={onSteerHandler}
-          steerAvailable
-          onEditResubmit={handleEditResubmit}
-          slash_commands={slash_commands}
-          onSlashBuiltinCommand={onSlashBuiltinCommand}
-          allowSendWhileLoading
-        />
-      </SessionCapabilityComposerLayout>
-      {isMobile && (
-        <>
-          <MobileActionSheet
-            open={isMobileSheetOpen}
-            onClose={() => setIsMobileSheetOpen(false)}
-            title={t('common.more', { defaultValue: 'More' })}
-            entries={sheetEntries}
+        data-testid='nomi-sendbox'
+        showPinnedPlan
+        value={content}
+        onChange={handleContentChange}
+        selectedWorkspaceItems={atPath}
+        onSelectedWorkspaceItemsChange={(items) => {
+          emitter.emit('nomi.selected.file', items);
+          setAtPath(items);
+        }}
+        loading={isBusy}
+        disabled={!current_model?.use_model}
+        placeholder={
+          current_model?.use_model
+            ? t('agent.sendbox.placeholder', {
+                backend: agent_name || 'Nomi',
+                defaultValue: `Send message to {{backend}}...`,
+              })
+            : t('conversation.chat.noModelSelected')
+        }
+        onStop={handleStop}
+        onClearContext={handleClearContext}
+        className='z-10'
+        onFilesAdded={handleFilesAdded}
+        hasPendingAttachments={uploadFile.length > 0 || atPath.length > 0}
+        supportedExts={allSupportedExts}
+        defaultMultiLine
+        lockMultiLine
+        tools={
+          <FileAttachButton
+            openFileSelector={openFileSelector}
+            onLocalFilesAdded={handleFilesAdded}
+            showLoadedCapabilities={false}
           />
-          {attachHiddenInput}
-        </>
-      )}
+        }
+        rightTools={
+          hideAdvancedControls ? undefined : (
+            <div
+              className='sendbox-responsive-config-group flex flex-1 items-center justify-end gap-2 min-w-0'
+              data-testid='nomi-sendbox-config-group'
+            >
+              {hasContextUsage && (
+                <ContextUsageRing
+                  used={tokenUsage?.context_tokens}
+                  max={tokenUsage?.context_window}
+                  inputTokens={tokenUsage?.input_tokens}
+                  outputTokens={tokenUsage?.output_tokens}
+                  reasoningTokens={tokenUsage?.reasoning_tokens}
+                />
+              )}
+              {agentSelectorNode}
+              <NomiModelSelector
+                selection={modelSelection}
+                className='nomi-sendbox-model-btn'
+              />
+              {extraRightTools}
+            </div>
+          )
+        }
+        prefix={
+          <>
+            {uploadFile.length > 0 && (
+              <HorizontalFileList>
+                {uploadFile.map((path) => (
+                  <FilePreview
+                    key={path}
+                    data-testid={`nomi-file-tag-${uploadFile.indexOf(path)}`}
+                    path={path}
+                    onRemove={() => setUploadFile(uploadFile.filter((v) => v !== path))}
+                  />
+                ))}
+              </HorizontalFileList>
+            )}
+            {atPath.some((item) => (typeof item === 'string' ? false : !item.isFile)) && (
+              <div className='flex flex-wrap items-center gap-8px mb-8px'>
+                {atPath.map((item) => {
+                  if (typeof item === 'string') return null;
+                  if (!item.isFile) {
+                    const folderIndex = atPath.filter((v) => typeof v !== 'string' && !v.isFile).indexOf(item);
+                    return (
+                      <Tag
+                        key={item.path}
+                        data-testid={`nomi-folder-tag-${folderIndex}`}
+                        bordered={false}
+                        className='!bg-primary-1 !text-primary-6'
+                        closable
+                        onClose={() => {
+                          const newAtPath = atPath.filter((v) => (typeof v === 'string' ? true : v.path !== item.path));
+                          emitter.emit('nomi.selected.file', newAtPath);
+                          setAtPath(newAtPath);
+                        }}
+                      >
+                        {item.name}
+                      </Tag>
+                    );
+                  }
+                  return null;
+                })}
+              </div>
+            )}
+          </>
+        }
+        onSend={onSendHandler}
+        onSteer={onSteerHandler}
+        steerAvailable
+        onEditResubmit={handleEditResubmit}
+        slash_commands={slash_commands}
+        onSlashBuiltinCommand={onSlashBuiltinCommand}
+        allowSendWhileLoading
+      />
     </div>
   );
 };

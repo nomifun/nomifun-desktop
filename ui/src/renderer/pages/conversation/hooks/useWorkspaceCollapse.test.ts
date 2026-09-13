@@ -16,7 +16,6 @@ describe('resolveWorkspaceCollapseAfterHasFiles', () => {
       resolveWorkspaceCollapseAfterHasFiles({
         currentCollapsed: true,
         detail: { target: conversation, hasFiles: true, isInitial: true },
-        isMobile: false,
         autoExpandOnFiles: false,
         isTemporaryWorkspace: false,
         userPreference: null,
@@ -30,7 +29,6 @@ describe('resolveWorkspaceCollapseAfterHasFiles', () => {
       resolveWorkspaceCollapseAfterHasFiles({
         currentCollapsed: true,
         detail: { target: conversation, hasFiles: true, isInitial: false },
-        isMobile: false,
         autoExpandOnFiles: false,
         isTemporaryWorkspace: true,
         userPreference: null,
@@ -44,7 +42,6 @@ describe('resolveWorkspaceCollapseAfterHasFiles', () => {
       resolveWorkspaceCollapseAfterHasFiles({
         currentCollapsed: true,
         detail: { target: conversation, hasFiles: true, isInitial: true },
-        isMobile: false,
         autoExpandOnFiles: false,
         isTemporaryWorkspace: false,
         userPreference: 'expanded',
@@ -59,7 +56,6 @@ describe('resolveWorkspaceCollapseAfterHasFiles', () => {
       resolveWorkspaceCollapseAfterHasFiles({
         currentCollapsed: true,
         detail: { target: terminal, hasFiles: true, isInitial: true },
-        isMobile: false,
         autoExpandOnFiles: true,
         isTemporaryWorkspace: false,
         userPreference: null,
@@ -77,7 +73,6 @@ describe('resolveWorkspaceCollapseAfterHasFiles', () => {
           hasFiles: true,
           isInitial: true,
         },
-        isMobile: false,
         autoExpandOnFiles: true,
         isTemporaryWorkspace: false,
         userPreference: null,
@@ -95,7 +90,6 @@ describe('resolveWorkspaceCollapseAfterHasFiles', () => {
           hasFiles: true,
           isInitial: true,
         },
-        isMobile: false,
         autoExpandOnFiles: true,
         isTemporaryWorkspace: false,
         userPreference: null,

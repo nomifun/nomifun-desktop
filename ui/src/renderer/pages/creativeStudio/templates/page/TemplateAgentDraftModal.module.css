@@ -142,13 +142,3 @@
   gap: 10px;
   margin-top: 18px;
 }
-
-@media (max-width: 760px) {
-  .layout {
-    grid-template-columns: 1fr;
-  }
-
-  .previewEmpty {
-    min-height: 120px;
-  }
-}

@@ -17,6 +17,7 @@ import * as idmm from '@/renderer/pages/conversation/components/IdmmControl';
 import * as autowork from '@/renderer/pages/conversation/components/AutoWorkControl';
 import * as xterm from './XtermView';
 import * as composer from './TerminalSendBox';
+import * as workspaceRail from './TerminalWorkspaceRail';
 import TerminalSessionPage from './TerminalSessionPage';
 
 const i18n = createInstance();
@@ -70,6 +71,7 @@ function fixture() {
   const context = spyOn(preview, 'usePreviewContext').mockReturnValue({ isOpen: false } as ReturnType<typeof preview.usePreviewContext>);
   const tabs = spyOn(knowledgeTab, 'useSessionKnowledgeTab').mockReturnValue([]);
   const sendBox = spyOn(composer, 'default').mockImplementation(props => <button data-testid='composer' disabled={props.disabled} />);
+  const rail = spyOn(workspaceRail, 'default').mockImplementation(() => <div data-testid='workspace-rail' />);
   const frames: Array<ComponentProps<typeof xterm.default>> = [];
   const api = { clear: mock(), reset: mock(), focus: mock(), writeToPty: mock(async () => {}), isBracketedPaste: () => false };
   const terminal = spyOn(xterm, 'default').mockImplementation(props => {
@@ -80,7 +82,7 @@ function fixture() {
     }, [props.apiRef]);
     return <div data-testid='terminal' data-running={String(props.isRunning)} />;
   });
-  for (const spy of [provider, context, tabs, sendBox, terminal]) restore.push(() => spy.mockRestore());
+  for (const spy of [provider, context, tabs, sendBox, rail, terminal]) restore.push(() => spy.mockRestore());
   const previous = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
   Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: () => null, setItem: () => {} } });
   restore.push(() => {
@@ -90,7 +92,7 @@ function fixture() {
   let navigate!: NavigateFunction;
   function Navigation() { navigate = useNavigate(); return null; }
   const view = render(<I18nextProvider i18n={i18n}>
-    <LayoutContext.Provider value={{ isMobile: true, siderCollapsed: true, setSiderCollapsed: () => {} }}>
+    <LayoutContext.Provider value={{ siderCollapsed: true, setSiderCollapsed: () => {} }}>
       <MemoryRouter initialEntries={['/terminal/' + session().terminal_id]}>
         <Navigation /><Routes><Route path='/terminal/:id' element={<TerminalSessionPage />} /></Routes>
       </MemoryRouter>
@@ -103,7 +105,7 @@ function fixture() {
     click: (name: string) => fireEvent.click(view.getByRole('button', { name })),
     edit: (name: string) => {
       fireEvent.click(view.getByTitle('terminal.action.rename'));
-      fireEvent.change(view.getByRole('textbox'), { target: { value: name } });
+      fireEvent.change(view.getByDisplayValue('terminal 1'), { target: { value: name } });
     },
     switchTo: (n: number) => act(() => { void navigate('/terminal/' + session(n).terminal_id); }),
   };
@@ -152,7 +154,7 @@ test.each(['relaunch', 'fallback', 'rename'] as const)('late %s completion after
   const f = fixture();
   await f.load(session(1, 'exited'));
   if (action === 'rename') {
-    f.edit('new name'); fireEvent.keyDown(f.view.getByRole('textbox'), { key: 'Enter', keyCode: 13 });
+    f.edit('new name'); fireEvent.keyDown(f.view.getByDisplayValue('new name'), { key: 'Enter', keyCode: 13 });
   } else f.click(action === 'relaunch' ? 'terminal.relaunch' : 'terminal.fallbackShell');
   f.switchTo(2);
   await act(async () => { f.loads[1]!.resolve(session(2)); });
@@ -184,7 +186,7 @@ test('Escape does not suppress the next edit blur, and rename response cannot un
   const f = fixture();
   await f.load();
   f.edit('cancelled');
-  fireEvent.keyDown(f.view.getByRole('textbox'), { key: 'Escape' });
+  fireEvent.keyDown(f.view.getByDisplayValue('cancelled'), { key: 'Escape' });
   f.edit('  renamed  ');
   fireEvent.blur(f.view.getByRole('textbox'));
   expect(f.rename).toHaveBeenCalledTimes(1);
@@ -200,7 +202,7 @@ test('a successful rename invalidates a pending reconnect snapshot even without 
   await f.load();
   act(() => f.reconnected.emit());
   f.edit('renamed');
-  fireEvent.blur(f.view.getByRole('textbox'));
+  fireEvent.blur(f.view.getByDisplayValue('renamed'));
   await act(async () => { f.renames[0]!.resolve({ ...session(), name: 'renamed' }); });
   await act(async () => { f.loads[1]!.resolve(session()); });
   expect(f.view.getByText('renamed')).not.toBeNull();

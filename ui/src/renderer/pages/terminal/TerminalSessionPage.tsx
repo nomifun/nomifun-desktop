@@ -18,7 +18,6 @@ import IdmmControl from '@/renderer/pages/conversation/components/IdmmControl';
 import KnowledgeControl from '@/renderer/pages/conversation/components/KnowledgeControl';
 import { useResizableSplit } from '@/renderer/hooks/ui/useResizableSplit';
 import { PreviewPanel, PreviewProvider, usePreviewContext } from '@/renderer/pages/conversation/Preview';
-import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { isDesktopShell, isMacOS, isWindows } from '@/renderer/utils/platform';
 import { useWorkspaceCollapse } from '@/renderer/pages/conversation/hooks/useWorkspaceCollapse';
 import WorkspacePanelHeader from '@/renderer/pages/conversation/components/ChatLayout/WorkspacePanelHeader';
@@ -59,10 +58,7 @@ type TerminalLoadError = 'not-found' | 'request-failed';
  * The workspace rail mirrors the conversation right sider EXACTLY for toggle
  * parity (the user wants identical position/interaction):
  *  - {@link useWorkspaceCollapse} drives collapse, so the SAME global
- *    `WORKSPACE_TOGGLE_EVENT` toggles it — dispatched by the titlebar workspace
- *    button on mac/Windows (see Layout `workspaceAvailable`, now extended to
- *    `/terminal/`) or by the in-panel/floating toggle on Linux/web — and
- *    `WORKSPACE_STATE_EVENT` keeps the titlebar icon in sync.
+ *    `WORKSPACE_TOGGLE_EVENT` toggles it from the panel or persistent tool rail.
  *  - {@link WorkspacePanelHeader} is the header, with the in-panel toggle gated
  *    to non-mac/Windows desktop (identical to ChatLayout).
  *  - The rail collapses to width 0 while the persistent vertical tool strip
@@ -74,13 +70,8 @@ type TerminalLoadError = 'not-found' | 'request-failed';
  */
 const TerminalRightRegion: React.FC<{ session: ITerminalSession }> = ({ session }) => {
   const { t } = useTranslation();
-  const layout = useLayoutContext();
-  const isMobile = Boolean(layout?.isMobile);
-  const isDesktop = !isMobile;
-  // Desktop-shell mac/win runtime — gate on isDesktopShell() first (matching
-  // ChatLayout/Titlebar): on mac/Windows the titlebar drives the toggle, so the
-  // in-panel toggle + floating expand button are hidden there; everyone else
-  // (Linux desktop, WebUI browser) keeps the in-panel toggle.
+  // Native macOS/Windows shells omit the redundant in-panel toggle; the
+  // persistent far-right tool rail remains available. Desktop WebUI keeps it.
   const isDesktopRuntime = isDesktopShell();
   const isMacRuntime = isDesktopRuntime && isMacOS();
   const isWindowsRuntime = isDesktopRuntime && isWindows();
@@ -88,14 +79,11 @@ const TerminalRightRegion: React.FC<{ session: ITerminalSession }> = ({ session 
   // Preview panel open state (the terminal's own provider, not the conversation's).
   const { isOpen: isPreviewOpen } = usePreviewContext();
 
-  // Rail collapse — the SAME hook the conversation rail uses, so the titlebar
-  // workspace button (WORKSPACE_TOGGLE_EVENT) toggles it and the titlebar icon
-  // stays in sync (WORKSPACE_STATE_EVENT). Per-session preference key; not a
-  // temp workspace, so it auto-expands once the cwd's files load.
+  // Rail collapse uses the same event and persistence hook as conversations.
+  // This is a per-session preference and auto-expands once cwd files load.
   const workspaceTarget = terminalTarget(session.terminal_id);
   const { rightSiderCollapsed, persistRightSiderCollapsed } = useWorkspaceCollapse({
     workspaceEnabled: true,
-    isMobile,
     target: workspaceTarget,
     isTemporaryWorkspace: false,
     autoExpandOnFiles: true,
@@ -181,8 +169,7 @@ const TerminalRightRegion: React.FC<{ session: ITerminalSession }> = ({ session 
       {/* Workspace panel — mirrors the conversation right sider: collapses to
           width 0, WorkspacePanelHeader on top (in-panel toggle gated to
           non-mac/Windows), left-edge resize handle when expanded. */}
-      {!isMobile && (
-        <div
+      <div
           className='!bg-1 relative layout-sider'
           style={{
             flexGrow: 0,
@@ -194,14 +181,13 @@ const TerminalRightRegion: React.FC<{ session: ITerminalSession }> = ({ session 
             borderLeft: rightSiderCollapsed ? 'none' : '1px solid var(--bg-3)',
           }}
         >
-          {isDesktop &&
-            !rightSiderCollapsed &&
+          {!rightSiderCollapsed &&
             createRailDragHandle({ className: 'absolute left-0 top-0 bottom-0', reverse: true })}
           <WorkspacePanelHeader
             showToggle={!isMacRuntime && !isWindowsRuntime}
             collapsed={rightSiderCollapsed}
             onToggle={() => dispatchWorkspaceToggleEvent(workspaceTarget)}
-            togglePlacement={isMobile ? 'left' : 'right'}
+            togglePlacement='right'
             workspacePath={session.cwd}
             activeTab={activeWorkspaceTab}
           >
@@ -216,10 +202,8 @@ const TerminalRightRegion: React.FC<{ session: ITerminalSession }> = ({ session 
             <TerminalWorkspaceRail session={session} extraTabs={workspaceExtraTabs} />
           </div>
         </div>
-      )}
 
-      {!isMobile && (
-        <WorkspaceToolRail
+      <WorkspaceToolRail
           t={t}
           activeTab={activeWorkspaceTab}
           expanded={!rightSiderCollapsed}
@@ -236,8 +220,7 @@ const TerminalRightRegion: React.FC<{ session: ITerminalSession }> = ({ session 
               {rightSiderCollapsed ? <span>‹</span> : <span>›</span>}
             </button>
           }
-        />
-      )}
+      />
     </>
   );
 };

@@ -32,16 +32,15 @@ describe('Agent Workbench capability and resource boundary', () => {
     }
   });
 
-  test('uses product resource selections only for real Test session creation', () => {
+  test('does not expose a test-session path from the Agent editor', () => {
     const editor = sourceFile('AgentPresetEditor.tsx');
     const controller = sourceFile('useAgentSettingsController.ts');
 
-    expect(editor.includes('<AgentResourcePicker')).toBe(true);
-    expect(editor.indexOf('<AgentResourcePicker')).toBeGreaterThan(editor.indexOf("activeTab === 'test'"));
-    expect(editor.includes('resourceSelectionResolution.missingKinds.length > 0')).toBe(true);
-    expect(editor.includes('resourceSelectionResolution.selections')).toBe(true);
-    expect(controller.includes('resourceSelections: AgentResourceSelection[]')).toBe(true);
-    expect(controller.includes('resourceSelections,')).toBe(true);
+    expect(editor.includes('<AgentResourcePicker')).toBe(false);
+    expect(editor.includes("activeTab === 'test'")).toBe(false);
+    expect(editor.includes('onTest')).toBe(false);
+    expect(controller.includes('runAgentPresetTest')).toBe(false);
+    expect(controller.includes('createTurn')).toBe(false);
   });
 
   test('uses one shared capability list for templates and editable presets', () => {
@@ -51,10 +50,9 @@ describe('Agent Workbench capability and resource boundary', () => {
 
     expect(editor.includes('<AgentCapabilityWorkspace')).toBe(true);
     expect(overview.match(/<AgentCapabilityWorkspace/g)?.length).toBe(1);
-    expect(capabilityList.includes("<Select")).toBe(true);
-    expect(capabilityList.includes("value: 'none'")).toBe(true);
-    expect(capabilityList.includes("value: 'initial'")).toBe(true);
-    expect(capabilityList.includes("value: 'on_demand'")).toBe(true);
+    expect(capabilityList.includes('<Select')).toBe(false);
+    expect(capabilityList.includes('on_demand')).toBe(false);
+    expect(capabilityList.includes('planCapabilityChange')).toBe(true);
     expect(capabilityList.includes('required_resource_kinds')).toBe(true);
   });
 
@@ -69,12 +67,4 @@ describe('Agent Workbench capability and resource boundary', () => {
     expect(forkBlock.includes('resource_bindings')).toBe(false);
   });
 
-  test('reads requirement counts and kinds from the corrected preview contract', () => {
-    const inspector = sourceFile('PreviewInspector.tsx');
-
-    expect(inspector.includes('preview.summary.required_resource_kind_count')).toBe(true);
-    expect(inspector.includes('preview.inspector.required_resource_kinds')).toBe(true);
-    expect(inspector.includes('resource_binding_count')).toBe(false);
-    expect(inspector.includes('typed_resource_bindings')).toBe(false);
-  });
 });

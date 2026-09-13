@@ -5,25 +5,17 @@ import type {
   AgentPresetDocument,
   AgentPresetEditorResponse,
   AgentPresetLibraryResponse,
-  AgentResourceSelection,
   AgentPresetSummary,
   ChatRouteRecord,
-  InstallationTokenStateResponse,
   OfficialPresetKey,
   OfficialPresetTemplate,
-  ResolveAgentPresetPreviewResponse,
 } from '@/common/types/agentPlatform';
 import {
   AGENT_CHAT_MODEL_TASK,
   cloneDraft,
   isDraftDirty,
-  runAgentPresetTest,
-  type RunAgentPresetTestResult,
 } from '@/common/types/agentPlatform';
-import {
-  agentUiErrorMessage,
-  saveDraftRevisionWithPreview,
-} from './model';
+import { agentUiErrorMessage } from './model';
 import { AGENT_PRESET_LIBRARY_SWR_KEY } from '@/renderer/hooks/agent/useAgentPresets';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { mutate } from 'swr';
@@ -34,24 +26,13 @@ type Selection =
   | { kind: 'preset'; preset: AgentPresetSummary }
   | null;
 
-type BusyAction = 'preview' | 'save' | 'test' | 'fork' | 'create' | 'open' | 'delete' | null;
+type BusyAction = 'save' | 'fork' | 'create' | 'open' | 'delete' | null;
 
 const emptyCatalog: AgentCatalogResponse = {
   capabilities: [],
   skills: [],
   mcp_tools: [],
 };
-
-const previewRequest = (draft: AgentPresetDraft) => ({
-  expected_current_revision: draft.current_revision,
-  draft,
-  scene: 'agent_settings' as const,
-  surface: 'desktop' as const,
-  audience: 'owner' as const,
-});
-
-const idempotencyKey = (): string =>
-  `agent-settings-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
 export function useAgentSettingsController() {
   const { t } = useTranslation();
@@ -61,9 +42,6 @@ export function useAgentSettingsController() {
   const [editor, setEditor] = useState<AgentPresetEditorResponse | null>(null);
   const [draft, setDraftState] = useState<AgentPresetDraft | null>(null);
   const [savedDraft, setSavedDraft] = useState<AgentPresetDraft | null>(null);
-  const [preview, setPreview] = useState<ResolveAgentPresetPreviewResponse | null>(null);
-  const [testResult, setTestResult] = useState<RunAgentPresetTestResult | null>(null);
-  const [tokenState, setTokenState] = useState<InstallationTokenStateResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
   const [openingPresetId, setOpeningPresetId] = useState<string | null>(null);
@@ -74,26 +52,22 @@ export function useAgentSettingsController() {
     setEditor(null);
     setDraftState(null);
     setSavedDraft(null);
-    setPreview(null);
-    setTestResult(null);
   }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const [nextLibrary, capabilities, skills, mcpTools, nextTokenState] =
+      const [nextLibrary, capabilities, skills, mcpTools] =
         await Promise.all([
           agentPlatform.library.invoke(),
           agentPlatform.capabilities.invoke(),
           agentPlatform.skills.invoke(),
           agentPlatform.mcpTools.invoke(),
-          agentPlatform.installationToken.status.invoke().catch(() => null),
         ]);
       const nextCatalog = { capabilities, skills, mcp_tools: mcpTools };
       setLibrary(nextLibrary);
       setCatalog(nextCatalog);
-      setTokenState(nextTokenState);
       setSelection((current) => {
         if (current?.kind === 'template') {
           const currentTemplate = nextLibrary.official_templates.find(
@@ -143,8 +117,6 @@ export function useAgentSettingsController() {
     setDraftState(nextDraft);
     setSavedDraft(response.revision ? cloneDraft(nextDraft) : null);
     setSelection({ kind: 'preset', preset: response.preset });
-    setPreview(null);
-    setTestResult(null);
   }, []);
 
   const openPreset = useCallback(
@@ -200,6 +172,7 @@ export function useAgentSettingsController() {
         const response = await agentPlatform.createFromTemplate.invoke({
           template_id: templateKey,
           request: {
+            reuse_existing: false,
             display_name: displayName,
             model_route_refs: modelRouteRefs,
             chat_route_records: chatRouteRecords,
@@ -238,8 +211,6 @@ export function useAgentSettingsController() {
   const discardChanges = useCallback(() => {
     if (savedDraft) setDraftState(cloneDraft(savedDraft));
     else if (editor) setDraftState(cloneDraft(editor.draft));
-    setPreview(null);
-    setTestResult(null);
   }, [savedDraft, editor]);
 
   const deletePreset = useCallback(
@@ -270,55 +241,20 @@ export function useAgentSettingsController() {
 
   const setDraft = useCallback((next: AgentPresetDraft) => {
     setDraftState(next);
-    setPreview(null);
-    setTestResult(null);
   }, []);
-
-  const resolveDraftPreview = useCallback(
-    (nextDraft: AgentPresetDraft) =>
-      agentPlatform.resolvePreview.invoke({
-        preset_id: nextDraft.preset_id,
-        request: previewRequest(nextDraft),
-      }),
-    []
-  );
-
-  const runPreview = useCallback(async (): Promise<ResolveAgentPresetPreviewResponse | null> => {
-    if (!draft) return null;
-    setBusyAction('preview');
-    setError(null);
-    try {
-      const response = await resolveDraftPreview(draft);
-      setPreview(response);
-      return response;
-    } catch (previewError) {
-      setError(agentUiErrorMessage(previewError, 'preview'));
-      return null;
-    } finally {
-      setBusyAction(null);
-    }
-  }, [draft, resolveDraftPreview]);
 
   const saveRevision = useCallback(async () => {
     if (!draft) return null;
     setBusyAction('save');
     setError(null);
     try {
-      const result = await saveDraftRevisionWithPreview(draft, {
-        preview: resolveDraftPreview,
-        save: async (nextDraft, freshPreview) =>
-          agentPlatform.saveRevision.invoke({
-            preset_id: nextDraft.preset_id,
-            request: {
-              expected_current_revision: nextDraft.current_revision,
-              preview_digest: freshPreview.preview_digest,
-              draft: nextDraft,
-            },
-          }),
+      const saved = await agentPlatform.saveRevision.invoke({
+        preset_id: draft.preset_id,
+        request: {
+          expected_current_revision: draft.current_revision,
+          draft,
+        },
       });
-      setPreview(result.preview);
-      if (!result.saved) return null;
-      const saved = result.saved;
       const nextDraft: AgentPresetDraft = {
         ...draft,
         current_revision: saved.revision.reference,
@@ -343,64 +279,7 @@ export function useAgentSettingsController() {
     } finally {
       setBusyAction(null);
     }
-  }, [draft, refreshPresetLibraries, resolveDraftPreview]);
-
-  const runTest = useCallback(
-    async (input: string, resourceSelections: AgentResourceSelection[]) => {
-      if (!draft) return;
-      setBusyAction('test');
-      setError(null);
-      try {
-        const dirty = isDraftDirty(savedDraft, draft);
-        const result = await runAgentPresetTest({
-          draft,
-          dirty,
-          input,
-          idempotencyKey: idempotencyKey(),
-          resourceSelections,
-          ports: {
-            preview: async (nextDraft) => resolveDraftPreview(nextDraft),
-            save: async (request) =>
-              agentPlatform.saveRevision.invoke({
-                preset_id: request.draft.preset_id,
-                request,
-              }),
-            createSession: async (request) => agentPlatform.sessions.create.invoke(request),
-            createTurn: async (agentSessionId, content, key) =>
-              agentPlatform.sessions.createTurn.invoke({
-                agent_session_id: agentSessionId,
-                request: {
-                  input: { content },
-                  idempotency_key: key,
-                },
-              }),
-          },
-        });
-        setPreview(result.preview);
-        setTestResult(result);
-        if (result.savedRevision) {
-          const nextDraft = {
-            ...draft,
-            current_revision: result.savedRevision.revision.reference,
-          };
-          setDraftState(nextDraft);
-          setSavedDraft(cloneDraft(nextDraft));
-          setEditor({
-            preset: result.savedRevision.preset,
-            revision: result.savedRevision.revision,
-            draft: nextDraft,
-          });
-          await refreshPresetLibraries();
-          setSelection({ kind: 'preset', preset: result.savedRevision.preset });
-        }
-      } catch (testError) {
-        setError(agentUiErrorMessage(testError, 'test'));
-      } finally {
-        setBusyAction(null);
-      }
-    },
-    [draft, refreshPresetLibraries, resolveDraftPreview, savedDraft]
-  );
+  }, [draft, refreshPresetLibraries]);
 
   const dirty = useMemo(
     () => (draft ? isDraftDirty(savedDraft, draft) : false),
@@ -413,9 +292,6 @@ export function useAgentSettingsController() {
     selection,
     editor,
     draft,
-    preview,
-    testResult,
-    tokenState,
     loading,
     busyAction,
     openingPresetId,
@@ -431,8 +307,6 @@ export function useAgentSettingsController() {
     forkTemplate,
     deletePreset,
     setDraft,
-    runPreview,
     saveRevision,
-    runTest,
   };
 }

@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use futures::{StreamExt, stream};
 use nomifun_agent_contracts::{
-    ActionId, AgentBindingValue, AgentPresetId, AgentSessionId, AgentSessionLiveRecord,
+    ActionId, AgentBindingValue, AgentSessionId, AgentSessionLiveRecord,
     AgentSessionMetadata, ArtifactEnvelope, ArtifactId, CapabilityActionDescriptor,
     CapabilityConsumer, CapabilityContributions, CapabilityId, CapabilityKind,
     CapabilityManifest, CapabilityRef,
@@ -35,9 +35,9 @@ use nomifun_agent_contracts::{
     capability_surface_declarations, digest_bytes, digest_payload,
 };
 use nomifun_agent_control_plane::{
-    AgentControlPlane, CatalogSnapshot, CompilerReleaseInputs, ControlPlaneError,
-    ControlPlaneStore, InMemoryControlPlaneStore, OfficialTemplateCatalog,
-    PresetPreviewCompiler, StaticCatalogProvider,
+    AgentControlPlane, CatalogSnapshot, ControlPlaneError, ControlPlaneStore,
+    InMemoryControlPlaneStore, OfficialTemplateCatalog, PresetRevisionCompiler,
+    StaticCatalogProvider,
 };
 use nomifun_agent_kernel::{
     AgentPresetCompiler, CapabilityHandler, CapabilityInvocationContext,
@@ -51,9 +51,8 @@ use nomifun_agent_session::{
     RuntimeAppendContext, SessionStoreError,
 };
 use nomifun_api_types::{
-    AgentPresetDocumentDto, AgentPresetDraftDto, CapabilitySelectionDto,
-    CreateAgentPresetRequest, EditorDraftStateDto, EditorRevisionActionDto,
-    ExactCatalogRefDto, ResolveAgentPresetPreviewRequest, TypedResourceBindingDto,
+    AgentPresetDocumentDto, CapabilitySelectionDto, CreateAgentPresetRequest,
+    ExactCatalogRefDto, SaveAgentPresetRevisionRequest, TypedResourceBindingDto,
 };
 use nomifun_chat_model_broker::{
     AnthropicAdapter, BedrockAdapter, BrokerRetryPolicy, ChatCausality, ChatCausalityGate,
@@ -219,8 +218,6 @@ pub struct SampleEchoGateConfig {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SampleEchoFaultReport {
-    pub save_failure_created_revision: bool,
-    pub save_failure_created_session: bool,
     pub materialization_failure_published_generation: bool,
     pub panic_effect_became_failed: bool,
     pub panic_retried_effect: bool,
@@ -245,8 +242,6 @@ pub struct SampleEchoGateReport {
     pub skill_materialized: bool,
     pub mcp_materialized: bool,
     pub config_validated: bool,
-    pub clean_revision_action: String,
-    pub dirty_revision_action: String,
     pub clean_revision: u64,
     pub dirty_revision: u64,
     pub clean_session: SampleEchoSessionReport,
@@ -701,14 +696,14 @@ fn sample_document(_owner_id: &str, instructions: &str) -> AgentPresetDocumentDt
                 "failovers": []
             }),
         )]),
-        initial_capabilities: vec![CapabilitySelectionDto {
+        enabled_capabilities: vec![CapabilitySelectionDto {
             capability: ExactCatalogRefDto {
                 id: SAMPLE_CAPABILITY.to_owned(),
                 version: VERSION.to_owned(),
             },
             action_allowlist: BTreeSet::from([SAMPLE_ACTION.to_owned()]),
         }],
-        on_demand_capabilities: Vec::new(),
+
         skill_bindings: vec![ExactCatalogRefDto {
             id: SAMPLE_SKILL.to_owned(),
             version: VERSION.to_owned(),
@@ -744,16 +739,21 @@ fn catalog_from_registry(registry: &MaterializedRegistry) -> CatalogSnapshot {
     }
 }
 
-fn compiler_release_inputs(
+fn compiler_environment(
     registry: &MaterializedRegistry,
-) -> Result<CompilerReleaseInputs, SampleEchoGateError> {
-    Ok(CompilerReleaseInputs {
+) -> Result<CompilerEnvironment, SampleEchoGateError> {
+    Ok(CompilerEnvironment {
         resolver_version: VersionString::from(VERSION),
-        runtime_protocol_version: VersionString::from(VERSION),
+        required_runtime_protocol_version: VersionString::from(VERSION),
+        required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
         runtime_feature_inventory_digest: digest_payload(&BTreeSet::<RuntimeFeatureId>::new())
             .map_err(digest_error)?,
+        available_runtime_features: BTreeSet::new(),
+        installation_role_bindings: BTreeMap::new(),
         canonical_schema_manifest_digest: canonical_schema_manifest_digest()?,
         target_contribution_manifest_digest: registry.registry_digest.clone(),
+        host_target: RuntimeTarget::from(native_target_id()),
+        host_surface: "desktop".to_owned(),
         availability_evidence_revision: BUILD_IDENTITY.to_owned(),
     })
 }
@@ -765,9 +765,6 @@ struct RevisionSet {
     clean_snapshot: ResolvedSnapshotEnvelope,
     dirty_revision: nomifun_agent_contracts::AgentPresetRevision,
     dirty_snapshot: ResolvedSnapshotEnvelope,
-    clean_action: EditorRevisionActionDto,
-    dirty_action: EditorRevisionActionDto,
-    save_fault_rejected: bool,
 }
 
 async fn build_revisions(
@@ -775,38 +772,15 @@ async fn build_revisions(
     owner_id: &UserId,
 ) -> Result<RevisionSet, SampleEchoGateError> {
     let store = Arc::new(InMemoryControlPlaneStore::new());
-    let catalog_snapshot = catalog_from_registry(registry);
-    let catalog = Arc::new(StaticCatalogProvider::new(catalog_snapshot.clone()));
+    let catalog = Arc::new(StaticCatalogProvider::new(catalog_from_registry(registry)));
     let templates = OfficialTemplateCatalog::load()?;
-    let release = compiler_release_inputs(registry)?;
-    let compiler = PresetPreviewCompiler::new(release.clone(), templates.clone())
-        .with_materialized_registry(
-            Arc::new(registry.clone()),
-            CompilerEnvironment {
-                resolver_version: release.resolver_version.clone(),
-                required_runtime_protocol_version: release.runtime_protocol_version.clone(),
-                required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
-                runtime_feature_inventory_digest: release
-                    .runtime_feature_inventory_digest
-                    .clone(),
-                available_runtime_features: BTreeSet::new(),
-                installation_role_bindings: BTreeMap::new(),
-                canonical_schema_manifest_digest: release
-                    .canonical_schema_manifest_digest
-                    .clone(),
-                target_contribution_manifest_digest: release
-                    .target_contribution_manifest_digest
-                    .clone(),
-                host_target: RuntimeTarget::from(native_target_id()),
-                host_surface: "desktop".to_owned(),
-                availability_evidence_revision: BUILD_IDENTITY.to_owned(),
-            },
-        );
+    let compiler = PresetRevisionCompiler::new(templates.clone())
+        .with_materialized_registry(Arc::new(registry.clone()), compiler_environment(registry)?);
     let control_plane = Arc::new(AgentControlPlane::new(
         store.clone(),
         catalog,
         templates,
-        compiler.clone(),
+        compiler,
     ));
     let created = control_plane
         .create_preset(
@@ -823,129 +797,38 @@ async fn build_revisions(
     let mut initial_draft = created.draft;
     initial_draft.document =
         sample_document(owner_id.as_ref(), "Use sample.echo for the requested value.");
-    let initial_request = preview_request(initial_draft.clone());
-    let initial_compilation = compiler.compile(
-        owner_id,
-        &initial_request,
-        None,
-        None,
-        None,
-        &catalog_snapshot,
-    )?;
-    invariant(
-        initial_compilation.response.can_create_session,
-        "initial Preview was blocked",
-    )?;
-    let initial_plan = control_plane.build_editor_test_plan(
-        EditorDraftStateDto::Dirty,
-        initial_compilation.response.clone(),
-        initial_draft.clone(),
-        Some("C6 initial sample.echo Revision".to_owned()),
-    )?;
-    let _initial_save = initial_plan.save_request.clone().ok_or_else(|| {
-        SampleEchoGateError::Invariant("dirty Test plan omitted ordinary save request".to_owned())
-    })?;
-    let initial_snapshot = initial_compilation.snapshot.clone().ok_or_else(|| {
-        SampleEchoGateError::Invariant("initial Preview omitted Snapshot".to_owned())
-    })?;
-    let initial_revision = nomifun_agent_contracts::AgentPresetRevision {
-        reference: initial_compilation.candidate_revision_ref,
-        payload: initial_compilation.payload,
-        contribution_locks: initial_compilation.contribution_locks,
-        created_by: owner_id.clone(),
-        created_at_ms: initial_snapshot.created_at_ms,
-        reason: Some("C6 initial sample.echo Revision".to_owned()),
-    };
-    initial_revision
-        .validate()
-        .map_err(|error| SampleEchoGateError::Invariant(error.message))?;
-    store
-        .append_revision(
-            None,
-            initial_revision.clone(),
-            initial_snapshot.clone(),
-            initial_draft.display_name,
-            initial_draft.description,
-        )
-        .await?;
-
-    let clean_editor = control_plane.editor(owner_id, &preset_id, None).await?;
-    let clean_preview = control_plane
-        .preview(
+    let initial_saved = control_plane
+        .save_revision(
             owner_id,
             &preset_id,
-            preview_request(clean_editor.draft.clone()),
+            SaveAgentPresetRevisionRequest {
+                expected_current_revision: None,
+                draft: initial_draft,
+                reason: Some("C6 initial sample.echo Revision".to_owned()),
+            },
         )
         .await?;
-    let clean_plan = control_plane.build_editor_test_plan(
-        EditorDraftStateDto::Clean,
-        clean_preview,
-        clean_editor.draft.clone(),
-        None,
-    )?;
-    invariant(clean_plan.save_request.is_none(), "clean Test attempted a save")?;
-
+    let initial_ref: nomifun_agent_contracts::PresetRevisionRef =
+        serde_json::from_value(serde_json::to_value(&initial_saved.revision.reference)?)?;
+    let clean_editor = control_plane.editor(owner_id, &preset_id, None).await?;
     let mut dirty_draft = clean_editor.draft;
     dirty_draft.document.instructions =
         "Use sample.echo and preserve the returned receipt.".to_owned();
-    let dirty_request = preview_request(dirty_draft.clone());
-    let dirty_compilation = compiler.compile(
-        owner_id,
-        &dirty_request,
-        Some(&initial_revision),
-        Some(&initial_snapshot),
-        None,
-        &catalog_snapshot,
-    )?;
-    let dirty_plan = control_plane.build_editor_test_plan(
-        EditorDraftStateDto::Dirty,
-        dirty_compilation.response.clone(),
-        dirty_draft.clone(),
-        Some("C6 dirty sample.echo Revision".to_owned()),
-    )?;
-    let valid_save = dirty_plan.save_request.clone().ok_or_else(|| {
-        SampleEchoGateError::Invariant("dirty Test plan omitted save request".to_owned())
-    })?;
-    let mut stale_save = valid_save.clone();
-    stale_save.preview_digest = "stale-preview-digest".to_owned();
-    let save_fault_rejected = control_plane
-        .save_revision(owner_id, &preset_id, stale_save)
-        .await
-        .is_err();
-    invariant(save_fault_rejected, "stale Preview save unexpectedly succeeded")?;
-    invariant(
-        store
-            .get_revision_number(&AgentPresetId::from(preset_id.clone()), 2)
-            .await?
-            .is_none(),
-        "failed save published Revision 2",
-    )?;
-    let dirty_snapshot = dirty_compilation.snapshot.clone().ok_or_else(|| {
-        SampleEchoGateError::Invariant("dirty Preview omitted Snapshot".to_owned())
-    })?;
-    let dirty_revision = nomifun_agent_contracts::AgentPresetRevision {
-        reference: dirty_compilation.candidate_revision_ref,
-        payload: dirty_compilation.payload,
-        contribution_locks: dirty_compilation.contribution_locks,
-        created_by: owner_id.clone(),
-        created_at_ms: dirty_snapshot.created_at_ms,
-        reason: valid_save.reason,
-    };
-    dirty_revision
-        .validate()
-        .map_err(|error| SampleEchoGateError::Invariant(error.message))?;
-    store
-        .append_revision(
-            Some(&initial_revision.reference),
-            dirty_revision.clone(),
-            dirty_snapshot.clone(),
-            dirty_draft.display_name,
-            dirty_draft.description,
+    let dirty_saved = control_plane
+        .save_revision(
+            owner_id,
+            &preset_id,
+            SaveAgentPresetRevisionRequest {
+                expected_current_revision: dirty_draft.current_revision.clone(),
+                draft: dirty_draft,
+                reason: Some("C6 dirty sample.echo Revision".to_owned()),
+            },
         )
         .await?;
+    let dirty_ref: nomifun_agent_contracts::PresetRevisionRef =
+        serde_json::from_value(serde_json::to_value(&dirty_saved.revision.reference)?)?;
 
-    let clean_ref = initial_revision.reference.clone();
-    let dirty_ref = dirty_revision.reference.clone();
+    let clean_ref = initial_ref;
     let clean_revision = store
         .get_revision(&clean_ref)
         .await?
@@ -969,20 +852,7 @@ async fn build_revisions(
         clean_snapshot,
         dirty_revision,
         dirty_snapshot,
-        clean_action: clean_plan.revision_action,
-        dirty_action: dirty_plan.revision_action,
-        save_fault_rejected,
     })
-}
-
-fn preview_request(draft: AgentPresetDraftDto) -> ResolveAgentPresetPreviewRequest {
-    ResolveAgentPresetPreviewRequest {
-        expected_current_revision: draft.current_revision.clone(),
-        draft,
-        scene: "agent_settings".to_owned(),
-        surface: "desktop".to_owned(),
-        audience: "owner".to_owned(),
-    }
 }
 
 fn compile_kernel_snapshot(
@@ -1033,31 +903,18 @@ fn bind_canonical_snapshot(
 ) -> Result<CompiledSnapshot, SampleEchoGateError> {
     let compiled_initial = compiled
         .content()
-        .initial_capabilities
+        .enabled_capabilities
         .iter()
         .map(|capability| capability.capability.id.clone())
         .collect::<BTreeSet<_>>();
     let canonical_initial = canonical
         .content
-        .initial_capabilities
-        .iter()
-        .map(|capability| capability.capability.id.clone())
-        .collect::<BTreeSet<_>>();
-    let compiled_on_demand = compiled
-        .content()
-        .on_demand_capabilities
-        .iter()
-        .map(|capability| capability.capability.id.clone())
-        .collect::<BTreeSet<_>>();
-    let canonical_on_demand = canonical
-        .content
-        .on_demand_capabilities
+        .enabled_capabilities
         .iter()
         .map(|capability| capability.capability.id.clone())
         .collect::<BTreeSet<_>>();
     invariant(
         compiled_initial == canonical_initial
-            && compiled_on_demand == canonical_on_demand
             && compiled.content().capability_allowlist == canonical.content.capability_allowlist
             && compiled.content().skill_locks == canonical.content.skill_locks
             && compiled.content().mcp_tool_locks == canonical.content.mcp_tool_locks,
@@ -1626,7 +1483,7 @@ async fn open_persistent_session(
     );
     create_request.initial_active_capability_ids = compiled
         .content()
-        .initial_capabilities
+        .enabled_capabilities
         .iter()
         .map(|capability| capability.capability.id.as_ref().to_owned())
         .collect();
@@ -1679,15 +1536,9 @@ async fn open_persistent_session(
             .compiled_runtime_profile_digest
             .clone(),
         enabled_runtime_features: compiled.content().required_runtime_features.clone(),
-        initial_capabilities: compiled
+        enabled_capabilities: compiled
             .content()
-            .initial_capabilities
-            .iter()
-            .map(|capability| capability.capability.id.clone())
-            .collect(),
-        on_demand_capabilities: compiled
-            .content()
-            .on_demand_capabilities
+            .enabled_capabilities
             .iter()
             .map(|capability| capability.capability.id.clone())
             .collect(),
@@ -1729,15 +1580,9 @@ async fn open_persistent_session(
                 context,
                 profile_kind: RuntimeProfileKind::ManagedMinimal,
                 full_auto: FullAutoExecutionWire::fixed(),
-                initial_capabilities: compiled
+                enabled_capabilities: compiled
                     .content()
-                    .initial_capabilities
-                    .iter()
-                    .map(|capability| capability.capability.id.clone())
-                    .collect(),
-                on_demand_capabilities: compiled
-                    .content()
-                    .on_demand_capabilities
+                    .enabled_capabilities
                     .iter()
                     .map(|capability| capability.capability.id.clone())
                     .collect(),
@@ -2500,8 +2345,6 @@ pub async fn run_sample_echo_gate(
         skill_materialized,
         mcp_materialized,
         config_validated,
-        clean_revision_action: revision_action_name(revisions.clean_action),
-        dirty_revision_action: revision_action_name(revisions.dirty_action),
         clean_revision: revisions.clean_revision.reference.revision,
         dirty_revision: revisions.dirty_revision.reference.revision,
         clean_session: clean_report,
@@ -2518,24 +2361,12 @@ pub async fn run_sample_echo_gate(
         plugin_state_survived_restart,
         plugin_state_survived_session_delete,
         faults: SampleEchoFaultReport {
-            save_failure_created_revision: !revisions.save_fault_rejected,
-            save_failure_created_session: false,
             materialization_failure_published_generation,
             panic_effect_became_failed,
             panic_retried_effect,
             dispose_timeout_forced_tree_cleanup,
         },
     })
-}
-
-fn revision_action_name(action: EditorRevisionActionDto) -> String {
-    match action {
-        EditorRevisionActionDto::ReuseCurrentRevision => "reuse_current_revision",
-        EditorRevisionActionDto::SaveOrdinaryVisibleRevision => {
-            "save_ordinary_visible_revision"
-        }
-    }
-    .to_owned()
 }
 
 fn invariant(condition: bool, message: &str) -> Result<(), SampleEchoGateError> {

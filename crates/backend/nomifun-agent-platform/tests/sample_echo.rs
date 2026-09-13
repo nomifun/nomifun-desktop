@@ -20,11 +20,6 @@ async fn compiled_sample_echo_runs_the_final_stack_and_fault_gate() {
     assert!(report.mcp_materialized);
     assert!(report.config_validated);
 
-    assert_eq!(report.clean_revision_action, "reuse_current_revision");
-    assert_eq!(
-        report.dirty_revision_action,
-        "save_ordinary_visible_revision"
-    );
     assert_eq!(report.clean_revision, 1);
     assert_eq!(report.dirty_revision, 2);
     assert!(report.clean_session.persistent_session);
@@ -43,8 +38,6 @@ async fn compiled_sample_echo_runs_the_final_stack_and_fault_gate() {
     assert!(report.plugin_state_survived_restart);
     assert!(report.plugin_state_survived_session_delete);
 
-    assert!(!report.faults.save_failure_created_revision);
-    assert!(!report.faults.save_failure_created_session);
     assert!(!report.faults.materialization_failure_published_generation);
     assert!(report.faults.panic_effect_became_failed);
     assert!(!report.faults.panic_retried_effect);

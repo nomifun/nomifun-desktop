@@ -646,7 +646,7 @@ fn check_json<T: Serialize>(path: &Path, value: &T) -> Result<(), Box<dyn Error>
 }
 
 fn validate_closure(payload: &ContractClosurePayload) -> Result<(), Box<dyn Error>> {
-    if payload.decisions.len() != 28
+    if payload.decisions.len() != 27
         || !payload.unresolved_decisions.is_empty()
         || payload.production_behavior_included
         || payload.canonical_sources.len() != 3
@@ -659,10 +659,11 @@ fn validate_closure(payload: &ContractClosurePayload) -> Result<(), Box<dyn Erro
         .map(|decision| decision.decision_id.as_str())
         .collect::<BTreeSet<_>>();
     let expected = (1..=28)
+        .filter(|index| *index != 22)
         .map(|index| format!("D-{index:03}"))
         .collect::<BTreeSet<_>>();
     if ids != expected.iter().map(String::as_str).collect() {
-        return Err("confirmed decision exact-set is not D-001 through D-028".into());
+        return Err("confirmed decision exact-set is not the active D-001 through D-028 set".into());
     }
     Ok(())
 }

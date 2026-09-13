@@ -5,7 +5,6 @@
  */
 import { ipcBridge } from '@/common';
 import MarkdownView from '@/renderer/components/Markdown';
-import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import type { SkillInfo } from '@/common/types/skill';
 import { Button, Drawer, Spin } from '@arco-design/web-react';
 import { Code, FileText, FolderOpen, Lightning, Refresh } from '@icon-park/react';
@@ -32,7 +31,6 @@ const SkillDetailDrawer: React.FC<SkillDetailDrawerProps> = ({
   onClose,
 }) => {
   const { t } = useTranslation();
-  const isMobile = useLayoutContext()?.isMobile ?? false;
   const [content, setContent] = useState('');
   const [loading, setLoading] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
@@ -88,7 +86,7 @@ const SkillDetailDrawer: React.FC<SkillDetailDrawerProps> = ({
       visible={visible}
       onCancel={onClose}
       placement='right'
-      width={isMobile ? '100%' : 760}
+      width={760}
       zIndex={1250}
       autoFocus={false}
       getPopupContainer={() => document.body}

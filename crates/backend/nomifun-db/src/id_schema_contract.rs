@@ -117,6 +117,7 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "nomi_wave1_memory_action_receipts",
     "nomi_wave4_action_receipts",
     "nomi_agent_bindings",
+    "product_agent_selections",
     "nomi_agent_preset_revisions",
     "nomi_agent_presets",
     "oauth_tokens",
@@ -329,6 +330,7 @@ const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
     ("nomi_wave4_action_receipts", "capability_id"),
     ("nomi_wave4_action_receipts", "process_lease_id"),
     ("nomi_agent_bindings", "target_id"),
+    ("product_agent_selections", "target_id"),
     ("nomi_remote_events", "event_id"),
     ("nomi_agent_preset_revisions", "revision_id"),
     ("nomi_agent_presets", "preset_id"),
@@ -1066,6 +1068,7 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     text_ref!("nomi_agent_preset_revisions", "preset_id" => "nomi_agent_presets", "preset_id", false, "idx_nomi_agent_preset_revisions_preset_id", Restrict),
     text_ref!("nomi_agent_preset_revisions", "created_by" => "users", "user_id", false, "idx_nomi_agent_preset_revisions_created_by", KeepHistory),
     text_ref!("nomi_agent_bindings", "owner_user_id" => "users", "user_id", false, "idx_nomi_agent_bindings_owner_user_id", Cascade),
+    text_ref!("product_agent_selections", "owner_user_id" => "users", "user_id", false, "idx_product_agent_selections_owner_user_id", Cascade),
 ];
 
 /// Stable JSON paths that carry Provider or business identifiers. The SQL for

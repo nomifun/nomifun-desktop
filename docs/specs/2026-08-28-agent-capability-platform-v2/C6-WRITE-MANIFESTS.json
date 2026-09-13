@@ -5,7 +5,7 @@
   "code_base_sha": "6e1b7338ae3c3181d14366cc3d52d30f64b45285",
   "branch": "rf/agent-capability-platform-v2",
   "status": "closed",
-  "confirmed_decision_contract_digest": "b3c32f0579a36c1f720a906b785b76cea58e8c8a1e4b07df6416f0d7410d78d5",
+  "confirmed_decision_contract_digest": "c1eeb87b010954fa19324fb59d63c9d8722d6704fe1121ea63f41d4d06d14643",
   "shared_cargo_policy": "agents-must-not-run-workspace-cargo-test-or-edit-root-lockfiles; central-validation-owner-only",
   "required_final_gates": [
     "gate-chat-minimal-final",
@@ -76,7 +76,7 @@
         "crates/backend/nomifun-agent-platform/src/sample_echo.rs",
         "crates/backend/nomifun-agent-platform/tests/sample_echo.rs"
       ],
-      "deliverable": "Compiled sample.echo same-chain Preview/save-or-reuse Revision/persistent Session/real Runtime invoke/Event/Effect/PluginState CAS/restart/delete/fault gate",
+      "deliverable": "Compiled sample.echo same-chain save-or-reuse Revision/persistent Session/real Runtime invoke/Event/Effect/PluginState CAS/restart/delete/fault gate",
       "forbidden_paths": [
         "Cargo.toml",
         "Cargo.lock",

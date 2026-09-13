@@ -2,12 +2,12 @@
   "digest_algorithm": "sorted-json-sha256-v1",
   "payload": {
     "manifest_version": "1.0.0",
-    "confirmed_decision_contract_digest": "b3c32f0579a36c1f720a906b785b76cea58e8c8a1e4b07df6416f0d7410d78d5",
-    "canonical_schema_manifest_digest": "54f449c2e298a73e880b46edc9248de89d554ec0aeda27f9d5ac56d90a977a3b",
+    "confirmed_decision_contract_digest": "c1eeb87b010954fa19324fb59d63c9d8722d6704fe1121ea63f41d4d06d14643",
+    "canonical_schema_manifest_digest": "8bd9b6e2fdf11732925f2f3e9bea9c9cd4b5e0f707a236975abbf6b034f7cebb",
     "cargo_lock_digest": "af61a985aa0cec19be89830dc329207603d3ac7bb761cd906740e8533f958651",
-    "official_preset_seed_manifest_digest": "70b7a2a6c256e977df54f6298a902487344993abdb6720b5803d68f01ccc6560",
+    "official_preset_seed_manifest_digest": "2319c767aadbbbcadba78f80e32b627e7fe8567baeee109fe047b4cd5e4c22a6",
     "capability_availability_manifest_digest": "70ab40f20452974594d897cbf32bcbcb3b030a77b9708534aa5e93c1b76eaa8c",
-    "coding_codex_native_contract_digest": "732a3f9c0e776e2f1e25755b9668b748911d29151649c68ea3866f08e7d6119c",
+    "coding_codex_native_contract_digest": "baea06819d3d6e8bab3336ac1a4f0882745a35ad34c04546411165498bfc7bfa",
     "platform_matrix": {
       "target_cells": {
         "windows_desktop_x64": {
@@ -160,5 +160,5 @@
       }
     }
   },
-  "payload_digest": "3b21ca2d9599eb95f40a20727fab6344781ecb8581f123304e7b64b3b1786587"
+  "payload_digest": "bf150451fd468f6b180504025a8322c52756ac2d5cc7a299706e16199b783b59"
 }

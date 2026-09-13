@@ -201,11 +201,6 @@
   line-height: 14px;
 }
 
-@media (max-width: 420px) {
-  .entryLabel {
-    display: none;
-  }
-}
 
 @container (max-width: 390px) {
   .entryLabel {

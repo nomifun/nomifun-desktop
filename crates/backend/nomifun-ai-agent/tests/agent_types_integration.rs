@@ -45,6 +45,8 @@ fn make_nomi_config() -> NomiResolvedConfig {
         install_embedded_agent_execution: true,
         allowed_tools: Vec::new(),
         enforce_tool_allowlist: false,
+        companion_memory_enabled: true,
+        companion_skills_enabled: true,
         deferred_tools: Vec::new(),
         write_root: None,
     }
