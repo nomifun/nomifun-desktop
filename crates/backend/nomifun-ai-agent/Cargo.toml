@@ -13,6 +13,9 @@ nomifun-runtime.workspace = true
 nomi-process-runtime.workspace = true
 nomifun-extension.workspace = true
 nomifun-knowledge.workspace = true
+# Backend impl of the agent-facing `ComputerHistorySink` (same shape as the
+# knowledge adapters: trait in nomi-agent, impl over the domain service here).
+nomifun-computer-history.workspace = true
 nomifun-terminal.workspace = true
 nomifun-api-types.workspace = true
 nomifun-model-invoke.workspace = true

@@ -2474,6 +2474,88 @@ export const computerPermissions = {
 };
 
 // ---------------------------------------------------------------------------
+// Computer history — local activity capture (foreground app / window / URL
+// segments). Read surface mirrors the backend `computer_history_*` capability
+// family (design draft §5): status, segment list, per-app usage rollup, the
+// feature toggle (a `feature.computer_history` client preference) and a
+// destructive purge that needs explicit user confirmation in the UI.
+// ---------------------------------------------------------------------------
+
+export type ComputerHistoryState = 'stopped' | 'running' | 'paused';
+export type ComputerHistoryPermission = 'granted' | 'denied' | 'unknown';
+
+export interface IComputerHistoryStorageStatus {
+  segments: number;
+  approx_bytes: number;
+  path: string;
+}
+
+/** Chat.db analytics availability (optional field — may be absent on older builds). */
+export interface IComputerHistoryChatAnalytics {
+  available: boolean;
+  db_path: string;
+}
+
+export interface IComputerHistoryStatus {
+  enabled: boolean;
+  state: ComputerHistoryState;
+  permission: ComputerHistoryPermission;
+  paused_until: string | null;
+  storage: IComputerHistoryStorageStatus;
+  chat_analytics?: IComputerHistoryChatAnalytics | null;
+}
+
+export interface IComputerHistorySegment {
+  event_id: string;
+  app_name: string;
+  window_title: string | null;
+  browser_url: string | null;
+  started_at_ms: number;
+  ended_at_ms: number;
+  source: string;
+}
+
+export interface IComputerHistoryListParams {
+  from_ms?: number;
+  to_ms?: number;
+  limit?: number;
+}
+
+export interface IComputerHistoryAppUsageRow {
+  app_name: string;
+  total_ms: number;
+  segment_count: number;
+}
+
+export type ComputerHistoryWindow = 'today' | 'yesterday' | 'last_7_days' | 'this_week';
+
+export const computerHistory = {
+  status: httpGet<IComputerHistoryStatus, void>('/api/computer-history/status'),
+  list: httpGet<IComputerHistorySegment[], IComputerHistoryListParams>((p) => {
+    const query = new URLSearchParams();
+    if (p.from_ms != null) query.set('from_ms', String(p.from_ms));
+    if (p.to_ms != null) query.set('to_ms', String(p.to_ms));
+    if (p.limit != null) query.set('limit', String(p.limit));
+    const qs = query.toString();
+    return `/api/computer-history/segments${qs ? `?${qs}` : ''}`;
+  }),
+  appUsage: httpGet<IComputerHistoryAppUsageRow[], IComputerHistoryListParams>((p) => {
+    const query = new URLSearchParams();
+    if (p.from_ms != null) query.set('from_ms', String(p.from_ms));
+    if (p.to_ms != null) query.set('to_ms', String(p.to_ms));
+    if (p.limit != null) query.set('limit', String(p.limit));
+    const qs = query.toString();
+    return `/api/computer-history/app-usage${qs ? `?${qs}` : ''}`;
+  }),
+  setEnabled: httpPost<{ ok: boolean }, { enabled: boolean }>('/api/computer-history/settings', (p) => ({
+    enabled: p.enabled,
+  })),
+  purge: httpDelete<{ deleted: number }, { before_ms?: number }>((p) =>
+    p && p.before_ms != null ? `/api/computer-history/segments?before_ms=${p.before_ms}` : '/api/computer-history/segments'
+  ),
+};
+
+// ---------------------------------------------------------------------------
 // System events — global WS broadcasts owned by the backend
 // ---------------------------------------------------------------------------
 

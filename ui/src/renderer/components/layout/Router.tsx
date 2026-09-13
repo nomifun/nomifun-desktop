@@ -22,6 +22,7 @@ const SystemSettings = React.lazy(() => import('@renderer/pages/settings/SystemS
 const ExecutionEngineSettings = React.lazy(() => import('@renderer/pages/settings/AgentSettings'));
 const SshHostSettings = React.lazy(() => import('@renderer/pages/settings/SshHostSettings'));
 const ExtensionSettingsPage = React.lazy(() => import('@renderer/pages/settings/ExtensionSettingsPage'));
+const ComputerHistorySettings = React.lazy(() => import('@renderer/pages/settings/ComputerHistorySettings'));
 const LoginPage = React.lazy(() => import('@renderer/pages/login'));
 const ComponentsShowcase = React.lazy(() => import('@renderer/pages/TestShowcase'));
 const ScheduledTasksPage = React.lazy(() => import('@renderer/pages/cron/ScheduledTasksPage'));
@@ -267,6 +268,7 @@ const PanelRoute: React.FC<{ layout: React.ReactElement }> = ({ layout }) => {
             <Route path='/settings/agent-runtime' element={<Navigate to='/settings/execution-engines' replace />} />
             <Route path='/settings/browser-use' element={<Navigate to='/browser?tab=settings' replace />} />
             <Route path='/settings/computer-use' element={withRouteFallback(SystemSettings)} />
+            <Route path='/settings/computer-history' element={withRouteFallback(ComputerHistorySettings)} />
             <Route path='/settings/about' element={withRouteFallback(SystemSettings)} />
             <Route path='/settings/ext/:tabId' element={withRouteFallback(ExtensionSettingsPage)} />
             <Route path='/settings/webhook' element={<Navigate to='/requirements/extensions?tab=notify' replace />} />

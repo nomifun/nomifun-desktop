@@ -127,6 +127,7 @@ fn make_factory_with_summon(
         companion_summon,
         ssh_provider: None,
         companion_skill_sink: None,
+        computer_history_sink: None,
         model_invoke,
         model_invoke_service: None,
         encryption_key: test_encryption_key(),

@@ -547,6 +547,7 @@ impl DesktopKeepAlive {
     pub async fn shutdown_after_startup_failure(&self) -> anyhow::Result<()> {
         match &self.inner.cleanup {
             DesktopStartupCleanupAuthority::Services(services) => {
+                services.shutdown_computer_history().await;
                 services.shutdown_browser_platform().await?;
                 services.database.close().await;
                 Ok(())

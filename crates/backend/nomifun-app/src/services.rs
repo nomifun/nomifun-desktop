@@ -1663,6 +1663,13 @@ pub struct AppServices {
     /// factory so the factory can register the companion memory tools for
     /// companion_session conversations; the router reuses this same instance.
     pub companion_service: Arc<nomifun_companion::CompanionService>,
+    /// Singleton computer-history service (privacy-filtered activity
+    /// observation). `None` when the feature-local store failed to open this
+    /// boot — every `computer_history_*` surface then reports unavailable
+    /// instead of refusing the boot. The observer loop is only running while
+    /// the user has explicitly enabled capture; its cancellation token is
+    /// cancelled in the shutdown sequence so the open segment flushes.
+    pub computer_history: Option<Arc<nomifun_computer_history::ComputerHistoryService>>,
     /// 客服独立域 CRUD service (agents / notes / bindings).
     pub customer_service_service: Arc<nomifun_customer_service::CustomerServiceService>,
     /// 客服无状态并发回合执行器 (channel seam target).
@@ -2107,6 +2114,17 @@ impl AppServices {
     /// `Drop` is insufficient even when `browser-use` is disabled.
     pub async fn shutdown_browser_platform(&self) -> anyhow::Result<()> {
         self.browser_platform_shutdown.shutdown().await
+    }
+
+    /// Stop the computer-history observer (if running) so the open activity
+    /// segment is flushed before the feature-local SQLite file closes with the
+    /// database. Idempotent; a service that failed to open this boot is a no-op.
+    pub async fn shutdown_computer_history(&self) {
+        if let Some(service) = &self.computer_history {
+            if let Err(error) = service.stop().await {
+                tracing::warn!(%error, "computer history shutdown failed");
+            }
+        }
     }
 
     /// Close browser resources and the database after a startup-stage failure,
@@ -2811,6 +2829,30 @@ impl AppServices {
         .await
         .map_err(|e| anyhow::anyhow!("companion service start failed: {e}"))?;
 
+        // Computer history (privacy-filtered activity observation). The
+        // feature ships DISABLED — the service is always assembled so the
+        // agent sink + gateway capabilities exist, but nothing is sampled
+        // until the user explicitly enables it (set_enabled → start). A
+        // domain-local failure (disk, sqlite) must not refuse the boot: the
+        // handle goes `None` and every computer-history surface then reports
+        // itself unavailable, the same degradation the robot gateway uses.
+        let computer_history = match nomifun_computer_history::ComputerHistoryService::open(
+            nomifun_computer_history::ComputerHistoryConfig {
+                data_dir: data_dir.join("computer-history"),
+                ..Default::default()
+            },
+            nomifun_computer_history::observer::default_backend(),
+            authoritative_user_id.to_string(),
+        )
+        .await
+        {
+            Ok(service) => Some(Arc::new(service)),
+            Err(error) => {
+                tracing::error!(%error, "computer history service unavailable this boot");
+                None
+            }
+        };
+
         // 客服独立域 (customer-service domain): agents/notes/bindings CRUD
         // service + the stateless concurrent dialogue engine. The engine's
         // LLM turns go through the generic one-shot entry whose tool table is
@@ -3022,6 +3064,16 @@ impl AppServices {
             // Companion self-evolved skill auto-use (`companion_skill` tool + per-turn
             // when_to_use injection). Only registered for companion sessions (factory gates).
             companion_skill_sink: Some(companion_service.skill_sink()),
+            // Computer-history native tools (`computer_history_*`). The sink
+            // wraps the SAME service the gateway capabilities use, so a
+            // `computer_history_status` call and the settings page can never
+            // disagree about recorder state. `None` (service failed to open)
+            // keeps every tool unregistered.
+            computer_history_sink: computer_history.clone().map(|service| {
+                Arc::new(nomifun_ai_agent::computer_history_sink::LiveComputerHistorySink {
+                    service,
+                }) as Arc<dyn nomifun_ai_agent::ComputerHistorySink>
+            }),
             // Live knowledge_search sink: registers the retrieval tool over the
             // shared KnowledgeService. The field's declared type
             // `Option<Arc<dyn KnowledgeRetrievalSink>>` drives the unsized
@@ -3109,6 +3161,7 @@ impl AppServices {
             _gateway_mcp_server: gateway_mcp_server,
             _knowledge_mcp_server: knowledge_mcp_server,
             companion_service,
+            computer_history,
             customer_service_service,
             cs_dialogue_engine,
             workshop_service,

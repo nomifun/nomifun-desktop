@@ -1,0 +1,31 @@
+[package]
+name = "nomifun-computer-history"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nomifun-common.workspace = true
+nomi-redact.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+# --- macOS backend: NSWorkspace frontmost app (AppKit needs the main queue,
+#     pattern: nomi-computer/src/macos_main.rs) + AX window/URL reads (same
+#     framework-linking shape as nomi-a11y/src/macos/actor.rs) + Secure Input
+#     and TCC preflight (nomi-computer/src/permissions.rs). macOS only. ---
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+dispatch2 = "0.3"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSRunningApplication", "NSApplication"] }
+objc2-foundation = { version = "0.3", features = ["NSString"] }
