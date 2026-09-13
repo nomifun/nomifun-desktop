@@ -16,7 +16,6 @@ import React, { useCallback, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button, Message, Modal, Popconfirm, Tooltip } from '@arco-design/web-react';
 import { Close } from '@icon-park/react';
-import { useLayoutContext } from '@renderer/hooks/context/LayoutContext';
 import { ipcBridge } from '@/common';
 import type { IKnowledgeBase } from '@/common/adapter/ipcBridge';
 import { isAutogenNoProviderError, knowledgeErrorText, notifySourceFetchResult } from '../useKnowledge';
@@ -67,9 +66,6 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
   onCreated,
 }) => {
   const { t } = useTranslation();
-  const layoutCtx = useLayoutContext();
-  const isMobile = layoutCtx?.isMobile ?? false;
-
   // ─── State ──────────────────────────────────────────────────────────────────
 
   const [sourceType, setSourceType] = useState<StudioSourceType>(() => normalizeStudioInitialKind(initialKind));
@@ -298,15 +294,11 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
     }
   };
 
-  // ─── Modal width / fullscreen ─────────────────────────────────────────────
+  // ─── Modal dimensions ─────────────────────────────────────────────────────
 
-  const modalStyle: React.CSSProperties = isMobile
-    ? { width: '100vw', maxWidth: '100vw', top: 0, padding: 0, borderRadius: 0 }
-    : { width: 1000, maxWidth: '92vw', borderRadius: 16 };
+  const modalStyle: React.CSSProperties = { width: 1000, maxWidth: '92vw', borderRadius: 16 };
 
-  const studioViewportHeight = isMobile
-    ? 'calc(100dvh - 48px)'
-    : 'min(760px, calc(100dvh - 80px))';
+  const studioViewportHeight = 'min(760px, calc(100vh - 80px))';
 
   // ─── Render ───────────────────────────────────────────────────────────────
 
@@ -321,7 +313,7 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
       mountOnEnter
       unmountOnExit
       style={modalStyle}
-      className={[styles.modal, isMobile ? styles.mobileModal : ''].filter(Boolean).join(' ')}
+      className={styles.modal}
       maskClosable
     >
       <div
@@ -348,12 +340,12 @@ const CreateStudio: React.FC<CreateStudioProps> = ({
 
         {/* ─── Body: Rail + Config ─────────────────────────────────────────── */}
         <div
-          className={`flex min-h-0 flex-1 ${isMobile ? 'flex-col' : ''}`}
-          style={!isMobile ? {
+          className='flex min-h-0 flex-1'
+          style={{
             display: 'grid',
             gridTemplateColumns: '236px minmax(0, 1fr)',
             gridTemplateRows: 'minmax(0, 1fr)',
-          } : undefined}
+          }}
         >
           {/* Left rail */}
           <TypeRail value={sourceType} onChange={setSourceType} />

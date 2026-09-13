@@ -8,15 +8,14 @@ import { IconCheckCircle } from '@arco-design/web-react/icon';
 import { Loading } from '@icon-park/react';
 import React, { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useLayoutContext } from '@renderer/hooks/context/LayoutContext';
 import { useMessageList } from '@renderer/pages/conversation/Messages/hooks';
 import { derivePinnedPlan, type PinnedPlanData } from './pinnedPlanModel';
 
 /**
  * Pinned plan bar: centered above the composer, it surfaces the conversation's
  * current plan (the latest `plan` message) without competing with the command
- * queue. It shows the checklist on desktop hover or keyboard focus, and after
- * explicit activation on mobile. Renders nothing when there is no active plan.
+ * queue. It shows the checklist on hover or keyboard focus. Renders nothing
+ * when there is no active plan.
  */
 const PinnedPlan: React.FC<{ plan?: PinnedPlanData | null; active?: boolean; className?: string }> = ({
   plan: suppliedPlan,
@@ -24,8 +23,6 @@ const PinnedPlan: React.FC<{ plan?: PinnedPlanData | null; active?: boolean; cla
   className = 'w-fit max-w-[calc(100vw-32px)]',
 }) => {
   const { t } = useTranslation();
-  const layout = useLayoutContext();
-  const isMobile = layout?.isMobile ?? false;
   const list = useMessageList();
   const derivedPlan = useMemo(
     () => (suppliedPlan === undefined ? derivePinnedPlan(list) : null),
@@ -38,16 +35,10 @@ const PinnedPlan: React.FC<{ plan?: PinnedPlanData | null; active?: boolean; cla
 
   const { entries, done, total } = plan;
   const active = suppliedActive ?? plan.active;
-  const handleSummaryClick = () => {
-    if (!isMobile) return;
-    setExpanded((value) => !value);
-  };
-  const handleDesktopOpen = () => {
-    if (isMobile) return;
+  const handleOpen = () => {
     setExpanded(true);
   };
-  const handleDesktopClose = () => {
-    if (isMobile) return;
+  const handleClose = () => {
     setExpanded(false);
   };
   const handleSummaryKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
@@ -60,10 +51,10 @@ const PinnedPlan: React.FC<{ plan?: PinnedPlanData | null; active?: boolean; cla
     <div
       data-testid='pinned-plan-bar'
       className={`relative ${className}`}
-      onMouseEnter={handleDesktopOpen}
-      onMouseLeave={handleDesktopClose}
-      onFocus={handleDesktopOpen}
-      onBlur={handleDesktopClose}
+      onMouseEnter={handleOpen}
+      onMouseLeave={handleClose}
+      onFocus={handleOpen}
+      onBlur={handleClose}
     >
       {/* Summary row — toggles expand/collapse */}
       <div
@@ -78,7 +69,6 @@ const PinnedPlan: React.FC<{ plan?: PinnedPlanData | null; active?: boolean; cla
           boxShadow: 'none',
           color: 'var(--text-secondary)',
         }}
-        onClick={handleSummaryClick}
         onKeyDown={handleSummaryKeyDown}
       >
         {active && done < total && (

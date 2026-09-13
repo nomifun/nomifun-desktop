@@ -16,7 +16,6 @@ import {
 } from '@/common/browser/browserTypes';
 import BrowserUseSettingsContent from '@/renderer/components/settings/SettingsModal/contents/BrowserUseSettingsContent';
 import { useConversationHistoryContext } from '@/renderer/hooks/context/ConversationHistoryContext';
-import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import BrowserInventoryTree from './BrowserInventoryTree';
 import BrowserLaneDetails from './BrowserLaneDetails';
 import BrowserPageHeader from './BrowserPageHeader';
@@ -57,7 +56,6 @@ const BrowserPage: React.FC = () => {
   const { t, i18n } = useTranslation();
   const [searchParams, setSearchParams] = useSearchParams();
   const location = useLocation();
-  const layout = useLayoutContext();
   const { conversations } = useConversationHistoryContext();
   const { lanes, overview, loading, refreshing, error, refresh } = useBrowserInventory();
   const [selectedLaneId, setSelectedLaneId] = useState<string | null>(null);
@@ -449,18 +447,10 @@ const BrowserPage: React.FC = () => {
               </div>
             ) : (
               <div
-                className={
-                  layout?.isMobile
-                    ? 'flex-1 min-h-0 flex flex-col gap-12px overflow-y-auto'
-                    : 'flex-1 min-h-0 grid grid-cols-[320px_minmax(0,1fr)] gap-12px'
-                }
+                className='flex-1 min-h-0 grid grid-cols-[320px_minmax(0,1fr)] gap-12px'
               >
                 <aside
-                  className={
-                    layout?.isMobile
-                      ? 'shrink-0 rd-14px border border-solid border-[color:color-mix(in_srgb,var(--color-border-2)_72%,transparent)] bg-[color:color-mix(in_srgb,var(--color-bg-1)_76%,transparent)] p-8px'
-                      : 'min-h-0 overflow-y-auto rd-14px border border-solid border-[color:color-mix(in_srgb,var(--color-border-2)_72%,transparent)] bg-[color:color-mix(in_srgb,var(--color-bg-1)_76%,transparent)] p-8px pr-6px shadow-[0_6px_20px_rgba(15,23,42,0.025)]'
-                  }
+                  className='min-h-0 overflow-y-auto rd-14px border border-solid border-[color:color-mix(in_srgb,var(--color-border-2)_72%,transparent)] bg-[color:color-mix(in_srgb,var(--color-bg-1)_76%,transparent)] p-8px pr-6px shadow-[0_6px_20px_rgba(15,23,42,0.025)]'
                   aria-label={t('browser.page.inventoryAria')}
                 >
                   <BrowserInventoryTree
@@ -475,7 +465,7 @@ const BrowserPage: React.FC = () => {
                     onCloseConversation={handleCloseConversation}
                   />
                 </aside>
-                <main className={layout?.isMobile ? 'min-h-0' : 'min-h-0 overflow-y-auto pr-2px'}>
+                <main className='min-h-0 overflow-y-auto pr-2px'>
                   {selectedLane ? (
                     <BrowserLaneDetails
                       lane={selectedLane}

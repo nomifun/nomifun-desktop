@@ -474,15 +474,6 @@
   color: var(--color-text-4);
 }
 
-@media (max-width: 720px) {
-  .historySummary {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .historyActions {
-    grid-column: 1 / -1;
-  }
-}
 
 @media (prefers-reduced-motion: reduce) {
   .outlineItem,

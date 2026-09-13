@@ -8,13 +8,11 @@ import React, { useCallback, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Message, Modal, Spin } from '@arco-design/web-react';
-import { AddOne, Left, Pic } from '@icon-park/react';
+import { AddOne, Left } from '@icon-park/react';
 import classNames from 'classnames';
 import { ipcBridge } from '@/common';
 import { useResizableSplit } from '@/renderer/hooks/ui/useResizableSplit';
 import { useContainerWidth } from '@/renderer/hooks/ui/useContainerWidth';
-import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
-import NomiSelect from '@/renderer/components/base/NomiSelect';
 import CompanionSidebar from './CompanionSidebar';
 import CreateCompanionModal from './CompanionSidebar/CreateCompanionModal';
 import FigureLibraryPage from './FigureLibraryPage';
@@ -62,8 +60,6 @@ const TAB_COMPONENTS: Record<WorkspaceTabKey, React.ComponentType<import('./work
 const NomiWorkspacePage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const layout = useLayoutContext();
-  const isMobile = layout?.isMobile ?? false;
   const [searchParams, setSearchParams] = useSearchParams();
   const { companions, loading, refresh } = useCompanions();
 
@@ -280,8 +276,8 @@ const NomiWorkspacePage: React.FC = () => {
 
   const workspace = figuresActive ? (
     <>
-      {/* 形象库 takes over the workspace rather than opening a route of its own, so
-          it needs its own way back — on mobile there is no sidebar to click. */}
+      {/* 形象库 takes over the workspace rather than opening a route of its own,
+          so it keeps an explicit way back. */}
       <div className={classNames('shrink-0 pt-20px pb-12px', panePadX)}>
         <div className='mx-auto w-full max-w-1100px box-border flex items-center gap-8px'>
           <div
@@ -312,43 +308,6 @@ const NomiWorkspacePage: React.FC = () => {
     <>
       <div className={classNames('shrink-0 pt-20px pb-12px', panePadX)}>
         <div className='mx-auto w-full max-w-1100px box-border'>
-          {isMobile && (
-            <div className='mb-12px flex items-center gap-8px'>
-              {companions.length > 1 && (
-                <NomiSelect
-                  className='flex-1 min-w-0'
-                  value={selectedCompanionId}
-                  onChange={(id: CompanionId) => selectCompanion(id)}
-                >
-                  {companions.map((c) => (
-                    <NomiSelect.Option key={c.companion_id} value={c.companion_id}>
-                      {c.name}
-                    </NomiSelect.Option>
-                  ))}
-                </NomiSelect>
-              )}
-              {/* The sidebar is hidden on mobile, so its two entries need to exist
-                  here or 新建伙伴 / 形象库 become unreachable. */}
-              <div
-                role='button'
-                tabIndex={0}
-                aria-label={t('nomi.companions.create')}
-                onClick={() => setCreateOpen(true)}
-                className='shrink-0 flex items-center justify-center w-32px h-32px rd-8px cursor-pointer text-t-secondary hover:text-t-primary hover:bg-fill-2 transition-colors outline-none'
-              >
-                <AddOne theme='outline' size='16' fill='currentColor' strokeWidth={3} />
-              </div>
-              <div
-                role='button'
-                tabIndex={0}
-                aria-label={t('nomi.customFigure.libraryTitle')}
-                onClick={openFigures}
-                className='shrink-0 flex items-center justify-center w-32px h-32px rd-8px cursor-pointer text-t-secondary hover:text-t-primary hover:bg-fill-2 transition-colors outline-none'
-              >
-                <Pic theme='outline' size='16' fill='currentColor' strokeWidth={3} />
-              </div>
-            </div>
-          )}
           <WorkspaceHeader
             companion={companion}
             activeTab={activeTab}
@@ -405,20 +364,18 @@ const NomiWorkspacePage: React.FC = () => {
           detail pane becomes a third column rather than a sibling of the row. */}
       <div className='relative flex size-full min-h-0'>
         <AsideHost>
-          {!isMobile && (
-            <CompanionSidebar
-              companions={companions}
-              selectedId={selectedCompanionId}
-              figuresActive={figuresActive}
-              width={resize.splitRatio}
-              onSelect={selectCompanion}
-              onOpenFigures={openFigures}
-              onCreate={() => setCreateOpen(true)}
-              onRequestDelete={requestDelete}
-              onReorder={handleReorder}
-              resizeHandle={resize.createDragHandle({ className: 'right-0' })}
-            />
-          )}
+          <CompanionSidebar
+            companions={companions}
+            selectedId={selectedCompanionId}
+            figuresActive={figuresActive}
+            width={resize.splitRatio}
+            onSelect={selectCompanion}
+            onOpenFigures={openFigures}
+            onCreate={() => setCreateOpen(true)}
+            onRequestDelete={requestDelete}
+            onReorder={handleReorder}
+            resizeHandle={resize.createDragHandle({ className: 'right-0' })}
+          />
           <div ref={paneRef} className='flex-1 min-w-0 min-h-0 flex flex-col'>
             {workspace}
           </div>

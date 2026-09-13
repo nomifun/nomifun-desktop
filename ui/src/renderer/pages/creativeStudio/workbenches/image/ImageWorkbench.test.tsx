@@ -166,11 +166,6 @@ describe('ImageWorkbench visual states', () => {
     const css = readFileSync(new URL('./ImageWorkbench.module.css', import.meta.url), 'utf8');
     const resultsSource = readFileSync(new URL('./ImageWorkbenchResults.tsx', import.meta.url), 'utf8');
 
-    expect(
-      /@media \(max-width:\s*820px\)\s*\{[\s\S]*?\.sideLayout\s*\{[\s\S]*?flex-direction:\s*column;/.test(
-        css
-      )
-    ).toBe(true);
     expect(css.includes('@media (max-width: 900px)')).toBe(false);
     expect(/\.resultsPanel\s*\{[\s\S]*?overflow:\s*hidden;/.test(css)).toBe(true);
     expect(/\.resultGrid\s*\{[\s\S]*?overflow-y:\s*auto;/.test(css)).toBe(true);
@@ -512,6 +507,5 @@ describe('ImageWorkbench controlled contract', () => {
     expect(componentSource.includes('useModelsForTask')).toBe(false);
     expect(css.includes('.bottomComposerDock {\n  position: absolute;')).toBe(true);
     expect(css.includes('position: fixed')).toBe(false);
-    expect(css.includes('@media (max-width: 560px)')).toBe(true);
   });
 });

@@ -35,7 +35,7 @@
   display: flex;
   flex-direction: column;
   width: min(360px, calc(100vw - 24px));
-  max-height: min(520px, calc(100dvh - 24px));
+  max-height: min(520px, calc(100vh - 24px));
   overflow: hidden;
   padding-top: 10px;
   border: 1px solid var(--color-border-3);
@@ -124,9 +124,4 @@
 .compactTrigger:disabled {
   cursor: wait;
   opacity: 0.6;
-}
-
-@media (max-width: 480px) {
-  .trigger:not(.compactTrigger) { font-size: 14px; }
-  .panel { border-radius: 12px; }
 }

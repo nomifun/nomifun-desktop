@@ -241,7 +241,6 @@ describe('CreativeCanvasAudioComposer', () => {
     expect(shellCss.includes('height: 92px')).toBe(true);
     expect(shellCss.includes('min-width: 48px')).toBe(true);
     expect(shellCss.includes('.retrySubmitButton')).toBe(true);
-    expect(shellCss.includes('@media (max-width: 760px)')).toBe(true);
     expect(shellCss.includes('.popoverSettingsPanel')).toBe(true);
     expect(shellCss.includes('.settingsControl')).toBe(true);
   });

@@ -16,17 +16,11 @@ import SessionCapabilityPicker, {
   useSessionCapabilityCatalog,
   type SessionCapabilityDraft,
 } from '@/renderer/components/chat/SessionCapabilityPicker';
-import MobileActionSheet, {
-  type MobileActionSheetEntry,
-  type MobileActionSheetOption,
-  useAttachEntry,
-} from '@/renderer/components/chat/MobileActionSheet';
 import SendBox from '@/renderer/components/chat/SendBox';
 import FileAttachButton from '@/renderer/components/media/FileAttachButton';
 import FilePreview from '@/renderer/components/media/FilePreview';
 import HorizontalFileList from '@/renderer/components/media/HorizontalFileList';
 import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
-import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { useAutoTitle } from '@/renderer/hooks/chat/useAutoTitle';
 import { getSendBoxDraftHook, type FileOrFolderItem } from '@/renderer/hooks/chat/useSendBoxDraft';
 import { createSetUploadFile, useSendBoxFiles } from '@/renderer/hooks/chat/useSendBoxFiles';
@@ -71,14 +65,12 @@ import { emitter, useAddEventListener } from '@/renderer/utils/emitter';
 import { mergeFileSelectionItems } from '@/renderer/utils/file/fileSelection';
 import { buildDisplayMessage, collectSelectedFiles } from '@/renderer/utils/file/messageFiles';
 import { Message, Tag } from '@arco-design/web-react';
-import { Brain, Robot } from '@icon-park/react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { NomiMessageRuntime } from './useNomiMessage';
 import NomiModelSelector from './NomiModelSelector';
 import { ContextUsageRing } from './ContextUsageRing';
 import type { NomiModelSelection } from './useNomiModelSelection';
-import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
 import { useProvidersQuery } from '@/renderer/hooks/agent/useModelProviderList';
 import { evaluateNomiVisionSend } from './nomiVisionSendGuard';
 import { steerOrQueue } from './steerOrQueue';
@@ -130,12 +122,6 @@ const NomiSendBox: React.FC<{
   conversation_id: ConversationId;
   modelSelection: NomiModelSelection;
   agentSelectorNode?: React.ReactNode;
-  agentSelection?: {
-    label: string;
-    options: MobileActionSheetOption[];
-    onSelect: (key: string) => void;
-    disabled?: boolean;
-  };
   agent_name?: string;
   turnActivity: NomiMessageRuntime;
   /** Hide model and other editable controls on locked surfaces. */
@@ -151,7 +137,6 @@ const NomiSendBox: React.FC<{
   conversation_id,
   modelSelection,
   agentSelectorNode,
-  agentSelection,
   agent_name,
   turnActivity,
   hideAdvancedControls,
@@ -159,9 +144,6 @@ const NomiSendBox: React.FC<{
   extraRightTools,
 }) => {
   const [workspacePath, setWorkspacePath] = useState('');
-  const [isMobileSheetOpen, setIsMobileSheetOpen] = useState(false);
-  const layout = useLayoutContext();
-  const isMobile = Boolean(layout?.isMobile);
   const conversationContext = useConversationContextSafe();
   const loadedSkills = conversationContext?.loadedSkills ?? [];
   const loadedMcpStatuses = conversationContext?.loadedMcpStatuses ?? [];
@@ -175,7 +157,6 @@ const NomiSendBox: React.FC<{
   const appliedCapabilityKey = useRef<string | undefined>(undefined);
   const lastAppliedCapabilityKey = useRef<string | undefined>(undefined);
   const { t } = useTranslation();
-  const providerLabel = useModelSelectorProviderLabel();
   const { checkAndUpdateTitle } = useAutoTitle();
   const { current_model } = modelSelection;
 
@@ -810,84 +791,6 @@ const NomiSendBox: React.FC<{
     onFilesSelected: appendSelectedFiles,
   });
 
-  const { entries: attachEntries, hiddenFileInput: attachHiddenInput } = useAttachEntry({
-    openFileSelector,
-    onLocalFilesAdded: handleFilesAdded,
-    dividerBefore: true,
-  });
-
-  const handleSheetModelSelect = useCallback(
-    (value: string) => {
-      // value format: `${providerId}::${modelName}`
-      const [providerId, modelName] = value.split('::');
-      const provider = modelSelection.providers.find((p) => p.id === providerId);
-      if (!provider || !modelName) return;
-      void modelSelection.handleSelectModel(provider, modelName);
-    },
-    [modelSelection]
-  );
-
-  const sheetEntries = useMemo<MobileActionSheetEntry[]>(() => {
-    if (!isMobile) return [];
-
-    const modelOptions: MobileActionSheetOption[] = modelSelection.providers.flatMap((provider) =>
-      modelSelection.getAvailableModels(provider).map((modelName) => ({
-        key: `${provider.id}::${modelName}`,
-        label: modelName,
-        description: providerLabel(provider),
-        active:
-          modelSelection.current_model?.id === provider.id && modelSelection.current_model?.use_model === modelName,
-      }))
-    );
-
-    const currentModelLabel = modelSelection.current_model?.use_model || t('conversation.welcome.selectModel');
-
-    const entries: MobileActionSheetEntry[] = [
-      ...(agentSelection
-        ? [{
-            key: 'agent',
-            icon: <Robot theme='outline' size='16' />,
-            label: t('common.agent', { defaultValue: 'Agent' }),
-            meta: agentSelection.label,
-            disabled: agentSelection.disabled,
-            submenu: {
-              title: t('common.agent', { defaultValue: 'Agent' }),
-              options: agentSelection.options,
-              onSelect: agentSelection.onSelect,
-            },
-          }]
-        : []),
-      ...(hideAdvancedControls
-        ? []
-        : [
-            {
-              key: 'model',
-              icon: <Brain theme='outline' size='16' />,
-              label: t('common.model', { defaultValue: 'Model' }),
-              meta: currentModelLabel,
-              submenu: {
-                title: t('common.model', { defaultValue: 'Model' }),
-                options: modelOptions,
-                onSelect: handleSheetModelSelect,
-                emptyText: t('conversation.welcome.selectModel'),
-              },
-            },
-          ]),
-      ...attachEntries,
-    ];
-
-    return entries;
-  }, [
-    attachEntries,
-    agentSelection,
-    handleSheetModelSelect,
-    hideAdvancedControls,
-    isMobile,
-    modelSelection,
-    providerLabel,
-    t,
-  ]);
-
   useAddEventListener('nomi.selected.file', setAtPath);
   useAddEventListener('nomi.selected.file.append', (selectedItems: Array<string | FileOrFolderItem>) => {
     const merged = mergeFileSelectionItems(atPathRef.current, selectedItems);
@@ -997,7 +900,6 @@ const NomiSendBox: React.FC<{
         }
         data-testid='nomi-sendbox'
         showPinnedPlan
-        onMobilePlusClick={isMobile ? () => setIsMobileSheetOpen(true) : undefined}
         value={content}
         onChange={handleContentChange}
         selectedWorkspaceItems={atPath}
@@ -1021,8 +923,8 @@ const NomiSendBox: React.FC<{
         onFilesAdded={handleFilesAdded}
         hasPendingAttachments={uploadFile.length > 0 || atPath.length > 0}
         supportedExts={allSupportedExts}
-        defaultMultiLine={!isMobile}
-        lockMultiLine={!isMobile}
+        defaultMultiLine
+        lockMultiLine
         tools={
           <FileAttachButton
             openFileSelector={openFileSelector}
@@ -1105,17 +1007,6 @@ const NomiSendBox: React.FC<{
         onSlashBuiltinCommand={onSlashBuiltinCommand}
         allowSendWhileLoading
       />
-      {isMobile && (
-        <>
-          <MobileActionSheet
-            open={isMobileSheetOpen}
-            onClose={() => setIsMobileSheetOpen(false)}
-            title={t('common.more', { defaultValue: 'More' })}
-            entries={sheetEntries}
-          />
-          {attachHiddenInput}
-        </>
-      )}
     </div>
   );
 };

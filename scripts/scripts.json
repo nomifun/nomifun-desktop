@@ -29,6 +29,10 @@
       "group": "check",
       "desc": "Enforce the single BrowserSessionHub ownership boundary and reject private browser launch paths."
     },
+    "check:desktop-ui-boundary": {
+      "group": "check",
+      "desc": "校验 Renderer 仅支持 880x600 及以上桌面窗口，阻止手机分支、低宽度断点和移动浏览器兼容代码回流"
+    },
     "check:automation-session-boundary": {
       "group": "check",
       "desc": "审计 Cron、AutoWork、AgentExecution、Channel、Companion、IDMM 的旧 Session/runtime 依赖与迁移边界"
@@ -69,7 +73,7 @@
     "test:browser":  { "group": "test",  "desc": "运行 browser-use 门控的 Rust 测试（browser-platform 全量 + gateway/ai-agent/nomi-agent/app 开启 --features browser-use；crate/core 车道会静默跳过这些）" },
     "test:ui":       { "group": "test",  "desc": "运行前端单元测试（bun test，收集 ui/src 下全部 *.test.ts/tsx）" },
     "test:nomi-core-live-provider": { "group": "test", "desc": "Run the credential-isolated Nomi-core Coding, Cron, and Remote product smoke against a configured live Provider." },
-    "check":         { "group": "check", "desc": "聚合静态检查：typecheck + i18n + 主题/图标/dead-CSS + Windows 安装器 + 创意工坊退役 + 进程/浏览器边界 + Agent 词汇 + 脚本登记" },
+    "check":         { "group": "check", "desc": "聚合静态检查：typecheck + 桌面 UI 边界 + i18n + 主题/图标/dead-CSS + Windows 安装器 + 创意工坊退役 + 进程/浏览器边界 + Agent 词汇 + 脚本登记" },
     "typecheck":     { "group": "check", "desc": "前端 TypeScript 类型检查（tsc --noEmit）" },
     "check:i18n":    { "group": "check", "desc": "校验 i18n 类型与 locale 键是否一致" },
     "check:theme":   { "group": "check", "desc": "校验预设 CSS 主题契约" },

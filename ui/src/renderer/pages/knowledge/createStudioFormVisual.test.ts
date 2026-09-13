@@ -18,7 +18,7 @@ describe('CreateStudio form visual design', () => {
   });
 
   test('keeps the dialog and configuration cards compact without changing the form structure', () => {
-    expect(studioSource.includes("className={[styles.modal, isMobile ? styles.mobileModal : ''].filter(Boolean).join(' ')}")).toBe(true);
+    expect(studioSource.includes('className={styles.modal}')).toBe(true);
     // Compact padding is expressed through the shared modal contract now,
     // not a literal value duplicated per modal.
     expect(studioStyles.includes('var(--nomi-modal-block-padding)')).toBe(true);

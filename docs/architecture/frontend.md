@@ -5,6 +5,12 @@ shell and the `nomifun-web` host load the same Vite build from `ui/dist`; the
 renderer talks to the backend through HTTP and WebSocket, with a small Tauri
 adapter only for desktop shell operations.
 
+The shared renderer targets desktop-class surfaces only: the Tauri window and
+desktop WebUI browsers, with a minimum supported viewport of 880x600. Phone and
+tablet layouts, touch-only fallbacks, safe-area handling, and sub-880px viewport
+breakpoints are outside this repository's UI contract. Narrow content panes
+within a supported desktop window should adapt with container-aware layout.
+
 ## Stack
 
 | Concern | Current choice |

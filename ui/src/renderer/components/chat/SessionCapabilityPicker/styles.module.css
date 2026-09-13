@@ -424,39 +424,6 @@
   font-size: 12px;
 }
 
-@media (pointer: coarse) {
-  .composerLayout .composerMain :global(button.arco-btn[data-composer-action]) {
-    width: 44px;
-    min-width: 44px;
-    height: 44px;
-  }
-
-  .rail {
-    width: 48px;
-    flex-basis: 48px;
-  }
-
-  .railButton {
-    width: 44px;
-    height: 44px;
-  }
-
-  .badge {
-    top: 4px;
-    right: 4px;
-  }
-
-  .row,
-  .header :global(.arco-btn),
-  .footer :global(.arco-btn) {
-    min-height: 44px;
-  }
-
-  .header :global(.arco-btn) {
-    min-width: 44px;
-  }
-}
-
 @media (prefers-reduced-motion: reduce) {
   .railButton,
   .railButton::before {

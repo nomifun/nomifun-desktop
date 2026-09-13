@@ -1,20 +1,13 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import classNames from 'classnames';
-import { ArrowCircleLeft, ArrowLeft, ArrowRight, ExpandLeft, ExpandRight, Plus, Terminal } from '@icon-park/react';
+import { ArrowLeft, ArrowRight, ExpandLeft, ExpandRight, Plus, Terminal } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
 
 import { ipcBridge } from '@/common';
-import {
-  isSameSessionTarget,
-  type SessionTarget,
-} from '@/common/types/ids';
 import InstantHoverTooltip from '@renderer/components/base/InstantHoverTooltip';
-import MobileConversationBrand from './MobileConversationBrand';
 import TitlebarLanguageMenu from './TitlebarLanguageMenu';
 import WindowControls from '../WindowControls';
-import { WORKSPACE_STATE_EVENT, dispatchWorkspaceToggleEvent } from '@renderer/utils/workspace/workspaceEvents';
-import type { WorkspaceStateDetail } from '@renderer/utils/workspace/workspaceEvents';
 import {
   SESSION_SIDER_STATE_EVENT,
   dispatchSessionSiderToggleEvent,
@@ -24,13 +17,8 @@ import { AGENT_SIDER_STATE_EVENT, dispatchAgentSiderToggleEvent } from '@rendere
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { useNavigationHistory } from '@/renderer/hooks/context/NavigationHistoryContext';
 import { isDesktopShell, isMacOS } from '@/renderer/utils/platform';
-import { parseSessionRoute } from '@/renderer/utils/routes/sessionRoute';
 import { requestCreativeStudioBeforeLeave } from '@renderer/pages/creativeStudio/app/beforeLeave';
 import './titlebar.css';
-
-interface TitlebarProps {
-  workspaceAvailable: boolean;
-}
 
 type TitlebarIconButtonOptions = {
   tooltip: string;
@@ -69,10 +57,9 @@ const SidebarIcon: React.FC<{ size?: number; strokeWidth?: number }> = ({ size =
   </svg>
 );
 
-const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
+const Titlebar: React.FC = () => {
   const { t } = useTranslation();
   const appTitle = useMemo(() => 'NomiFun', []);
-  const [workspaceCollapsed, setWorkspaceCollapsed] = useState(true);
   const [sessionSiderCollapsed, setSessionSiderCollapsed] = useState(false);
   const [agentSiderCollapsed, setAgentSiderCollapsed] = useState(false);
   useEffect(() => {
@@ -80,44 +67,10 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
     window.addEventListener(AGENT_SIDER_STATE_EVENT, handler);
     return () => window.removeEventListener(AGENT_SIDER_STATE_EVENT, handler);
   }, []);
-  const [mobileCenterTitle, setMobileCenterTitle] = useState(appTitle);
-  const [mobileCenterOffset, setMobileCenterOffset] = useState(0);
   const layout = useLayoutContext();
   const navigationHistory = useNavigationHistory();
   const location = useLocation();
   const navigate = useNavigate();
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const menuRef = useRef<HTMLDivElement | null>(null);
-  const toolbarRef = useRef<HTMLDivElement | null>(null);
-  const lastNonSettingsPathRef = useRef('/guid');
-  const activeWorkspaceTarget = useMemo<SessionTarget | null>(() => {
-    return parseSessionRoute(location.pathname);
-  }, [location.pathname]);
-  const activeConversationId =
-    activeWorkspaceTarget?.kind === 'conversation' ? activeWorkspaceTarget.id : null;
-
-  // 监听工作空间折叠状态，保持按钮图标一致 / Sync workspace collapsed state for toggle button
-  useEffect(() => {
-    if (typeof window === 'undefined') {
-      return undefined;
-    }
-    const handler = (event: Event) => {
-      const customEvent = event as CustomEvent<WorkspaceStateDetail>;
-      if (
-        activeWorkspaceTarget &&
-        customEvent.detail?.target &&
-        isSameSessionTarget(customEvent.detail.target, activeWorkspaceTarget) &&
-        typeof customEvent.detail.collapsed === 'boolean'
-      ) {
-        setWorkspaceCollapsed(customEvent.detail.collapsed);
-      }
-    };
-    window.addEventListener(WORKSPACE_STATE_EVENT, handler as EventListener);
-    return () => {
-      window.removeEventListener(WORKSPACE_STATE_EVENT, handler as EventListener);
-    };
-  }, [activeWorkspaceTarget]);
-
   // 同步会话二级侧栏折叠状态，使标题栏开关图标保持一致
   // Sync session secondary-sidebar collapsed state for the titlebar toggle icon
   useEffect(() => {
@@ -140,33 +93,17 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
   const isMacRuntime = isDesktopRuntime && isMacOS();
   // Windows/Linux 显示自定义窗口按钮。
   const showWindowControls = isDesktopRuntime && !isMacRuntime;
-  // Desktop workspace surfaces use the persistent far-right tool rail as their
-  // single toggle. Mobile keeps the titlebar entry because the rail is hidden.
-  const showWorkspaceButton = workspaceAvailable && Boolean(layout?.isMobile);
-
-  const workspaceTooltip = workspaceCollapsed
-    ? t('common.expandMore', { defaultValue: 'Expand workspace' })
-    : t('common.collapse', { defaultValue: 'Collapse workspace' });
-  const backToChatTooltip = t('common.back', { defaultValue: 'Back to Chat' });
-  const isSettingsRoute = location.pathname.startsWith('/settings');
   const iconSize = 18;
-  // Desktop uses slimmer strokes to match macOS-native chrome aesthetics;
-  // mobile keeps the default weight so icons stay legible at larger sizes.
-  const desktopIconStroke = layout?.isMobile ? undefined : 2.5;
+  const desktopIconStroke = 2.5;
   // 统一在标题栏左侧展示主侧栏开关 / Always expose sidebar toggle on titlebar left side
-  const showSiderToggle = Boolean(layout?.setSiderCollapsed) && !(layout?.isMobile && isSettingsRoute);
-  const showBackToChatButton = Boolean(layout?.isMobile && isSettingsRoute);
+  const showSiderToggle = Boolean(layout?.setSiderCollapsed);
   const siderTooltip = layout?.siderCollapsed
     ? t('common.expandMore', { defaultValue: 'Expand sidebar' })
     : t('common.collapse', { defaultValue: 'Collapse sidebar' });
-  // 前进/后退仅在桌面端显示（移动端空间有限，保留原有的返回到聊天按钮）
-  // Show back/forward on desktop only; mobile keeps the existing back-to-chat button.
-  const showHistoryNav = Boolean(navigationHistory) && !layout?.isMobile;
+  const showHistoryNav = Boolean(navigationHistory);
   const historyBackTooltip = t('common.historyBack', { defaultValue: 'Back' });
   const historyForwardTooltip = t('common.forward', { defaultValue: 'Forward' });
-  // 会话二级侧栏开关：仅在会话区路由显示，桌面与移动端都给一个稳定的开/合入口
-  // Session secondary-sidebar toggle: shown on session routes only; a stable
-  // open/close entry on both desktop and mobile (mirrors the workspace toggle).
+  // The session secondary-sidebar toggle is shown on session routes only.
   const isSessionRoute =
     location.pathname === '/guid' ||
     location.pathname.startsWith('/conversation/') ||
@@ -186,29 +123,11 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
     layout.setSiderCollapsed(!layout.siderCollapsed);
   };
 
-  const handleWorkspaceToggle = () => {
-    if (!workspaceAvailable || !activeWorkspaceTarget) {
-      return;
-    }
-    dispatchWorkspaceToggleEvent(activeWorkspaceTarget);
-  };
-
   const navigateAfterCreativeStudioFlush = (action: () => void) => {
     void (async () => {
       if (!(await requestCreativeStudioBeforeLeave())) return;
       action();
     })();
-  };
-
-  const handleBackToChat = () => {
-    navigateAfterCreativeStudioFlush(() => {
-      const target = lastNonSettingsPathRef.current;
-      if (target && !target.startsWith('/settings')) {
-        void navigate(target);
-        return;
-      }
-      void navigate(-1);
-    });
   };
 
   // Windows/Linux: double-clicking the titlebar drag region toggles maximize,
@@ -225,98 +144,13 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
     void ipcBridge.windowControls.toggleMaximize.invoke();
   };
 
-  useEffect(() => {
-    if (!isSettingsRoute) {
-      const path = `${location.pathname}${location.search}${location.hash}`;
-      lastNonSettingsPathRef.current = path;
-      try {
-        sessionStorage.setItem('nomi:last-non-settings-path', path);
-      } catch {
-        // ignore
-      }
-      return;
-    }
-    try {
-      const stored = sessionStorage.getItem('nomi:last-non-settings-path');
-      if (stored) {
-        lastNonSettingsPathRef.current = stored;
-      }
-    } catch {
-      // ignore
-    }
-  }, [isSettingsRoute, location.pathname, location.search, location.hash]);
-
-  useEffect(() => {
-    if (!layout?.isMobile) {
-      setMobileCenterTitle(appTitle);
-      return;
-    }
-
-    // Single agent mode: show conversation name
-    if (!activeConversationId) {
-      setMobileCenterTitle(appTitle);
-      return;
-    }
-
-    let cancelled = false;
-    void ipcBridge.conversation.get
-      .invoke({ conversation_id: activeConversationId })
-      .then((conversation) => {
-        if (cancelled) return;
-        setMobileCenterTitle(conversation?.name || appTitle);
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setMobileCenterTitle(appTitle);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [activeConversationId, appTitle, layout?.isMobile]);
-
-  useEffect(() => {
-    if (!layout?.isMobile) {
-      setMobileCenterOffset(0);
-      return;
-    }
-
-    const updateOffset = () => {
-      const leftWidth = menuRef.current?.offsetWidth || 0;
-      const rightWidth = toolbarRef.current?.offsetWidth || 0;
-      setMobileCenterOffset((leftWidth - rightWidth) / 2);
-    };
-
-    updateOffset();
-
-    if (typeof ResizeObserver === 'undefined') {
-      window.addEventListener('resize', updateOffset);
-      return () => window.removeEventListener('resize', updateOffset);
-    }
-
-    const observer = new ResizeObserver(() => updateOffset());
-    if (containerRef.current) observer.observe(containerRef.current);
-    if (menuRef.current) observer.observe(menuRef.current);
-    if (toolbarRef.current) observer.observe(toolbarRef.current);
-
-    return () => observer.disconnect();
-  }, [layout?.isMobile, showBackToChatButton, showWorkspaceButton, mobileCenterTitle]);
-
-  const mobileCenterStyle = layout?.isMobile
-    ? ({
-        '--app-titlebar-mobile-center-offset': `${workspaceAvailable ? mobileCenterOffset : 0}px`,
-      } as React.CSSProperties)
-    : undefined;
-
   const menuStyle: React.CSSProperties = useMemo(() => {
     if (!isMacRuntime || !showSiderToggle) return {};
     // macOS: sit the menu buttons right next to the traffic lights (which occupy ~70px).
-    // Mobile keeps its own layout (no traffic lights).
-    const marginLeft = layout?.isMobile ? '0px' : '76px';
     return {
-      marginLeft,
+      marginLeft: '76px',
     };
-  }, [isMacRuntime, showSiderToggle, layout?.isMobile]);
+  }, [isMacRuntime, showSiderToggle]);
 
   const renderIconButton = ({ tooltip, className, children, disabled, onClick }: TitlebarIconButtonOptions) => (
     <InstantHoverTooltip content={tooltip} position='bottom'>
@@ -328,36 +162,24 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
 
   return (
     <div
-      ref={containerRef}
       data-tauri-drag-region
       onDoubleClick={handleTitlebarDoubleClick}
-      style={mobileCenterStyle}
       // 标题栏底部分隔线：原来只有 border-b（宽度）+ 边框色，没有 border-style，
       // 而本仓库没有全局 border reset，所以这条线从来没画出来过。
       // The titlebar's bottom rule never painted: width + colour but no border-style.
       className={classNames(
         'flex items-center gap-8px app-titlebar bg-2 border-b border-b-solid border-[var(--border-base)]',
         {
-          'app-titlebar--mobile': layout?.isMobile,
-          'app-titlebar--mobile-conversation': layout?.isMobile && workspaceAvailable,
           'app-titlebar--desktop': isDesktopRuntime,
           'app-titlebar--mac': isMacRuntime,
         },
       )}
     >
-      <div ref={menuRef} className='app-titlebar__menu' style={menuStyle}>
-        {showBackToChatButton && (
-          renderIconButton({
-            tooltip: backToChatTooltip,
-            className: classNames('app-titlebar__button', layout?.isMobile && 'app-titlebar__button--mobile'),
-            onClick: handleBackToChat,
-            children: <ArrowCircleLeft theme='outline' size={iconSize} fill='currentColor' />,
-          })
-        )}
+      <div className='app-titlebar__menu' style={menuStyle}>
         {showSiderToggle && (
           renderIconButton({
             tooltip: siderTooltip,
-            className: classNames('app-titlebar__button', layout?.isMobile && 'app-titlebar__button--mobile'),
+            className: 'app-titlebar__button',
             onClick: handleSiderToggle,
             children: <SidebarIcon size={iconSize} strokeWidth={desktopIconStroke} />,
           })
@@ -380,23 +202,19 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
             })}
           </>
         )}
-        {!layout?.isMobile && (
-          <>
-            {renderIconButton({
-              tooltip: t('terminal.newConversation'),
-              className: 'app-titlebar__button app-titlebar__button--nav',
-              onClick: () =>
-                navigateAfterCreativeStudioFlush(() => navigate('/guid', { state: { resetAgentSelection: true } })),
-              children: <Plus theme='outline' size={iconSize} fill='currentColor' strokeWidth={desktopIconStroke} />,
-            })}
-            {renderIconButton({
-              tooltip: t('terminal.newTerminal'),
-              className: 'app-titlebar__button app-titlebar__button--nav',
-              onClick: () => navigateAfterCreativeStudioFlush(() => navigate('/terminal-new')),
-              children: <Terminal theme='outline' size={iconSize} fill='currentColor' strokeWidth={desktopIconStroke} />,
-            })}
-          </>
-        )}
+        {renderIconButton({
+          tooltip: t('terminal.newConversation'),
+          className: 'app-titlebar__button app-titlebar__button--nav',
+          onClick: () =>
+            navigateAfterCreativeStudioFlush(() => navigate('/guid', { state: { resetAgentSelection: true } })),
+          children: <Plus theme='outline' size={iconSize} fill='currentColor' strokeWidth={desktopIconStroke} />,
+        })}
+        {renderIconButton({
+          tooltip: t('terminal.newTerminal'),
+          className: 'app-titlebar__button app-titlebar__button--nav',
+          onClick: () => navigateAfterCreativeStudioFlush(() => navigate('/terminal-new')),
+          children: <Terminal theme='outline' size={iconSize} fill='currentColor' strokeWidth={desktopIconStroke} />,
+        })}
         {(isSessionRoute || isAgentRoute) && (
           renderIconButton({
             tooltip: contentSiderTooltip,
@@ -409,45 +227,18 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
             ),
           })
         )}
-        {!layout?.isMobile && (
-          <div className='app-titlebar__language-control'>
-            <TitlebarLanguageMenu strokeWidth={desktopIconStroke} />
-          </div>
-        )}
+        <div className='app-titlebar__language-control'>
+          <TitlebarLanguageMenu strokeWidth={desktopIconStroke} />
+        </div>
       </div>
       <div
         className={classNames('app-titlebar__brand', {
-          'app-titlebar__brand--centered': layout?.isMobile || !location.pathname.match(/^\/conversation\//),
+          'app-titlebar__brand--centered': !location.pathname.match(/^\/conversation\//),
         })}
-        aria-label={layout?.isMobile ? mobileCenterTitle : appTitle}
-        title={layout?.isMobile ? mobileCenterTitle : appTitle}
-      >
-        {layout?.isMobile &&
-          (() => {
-            if (activeConversationId) {
-              return <MobileConversationBrand conversation_id={activeConversationId} fallbackTitle={mobileCenterTitle} />;
-            }
-            return (
-              <span className='app-titlebar__brand-mobile'>
-                <span className='app-titlebar__brand-text'>{mobileCenterTitle}</span>
-              </span>
-            );
-          })()}
-      </div>
-      <div ref={toolbarRef} className='app-titlebar__toolbar'>
-        {layout?.isMobile && <div id='app-titlebar-actions-slot' className='app-titlebar__actions-slot' />}
-        {showWorkspaceButton && (
-          renderIconButton({
-            tooltip: workspaceTooltip,
-            className: classNames('app-titlebar__button', layout?.isMobile && 'app-titlebar__button--mobile'),
-            onClick: handleWorkspaceToggle,
-            children: workspaceCollapsed ? (
-              <ExpandRight theme='outline' size={iconSize} fill='currentColor' />
-            ) : (
-              <ExpandLeft theme='outline' size={iconSize} fill='currentColor' />
-            ),
-          })
-        )}
+        aria-label={appTitle}
+        title={appTitle}
+      />
+      <div className='app-titlebar__toolbar'>
         {showWindowControls && <WindowControls />}
       </div>
     </div>

@@ -9,7 +9,6 @@
 import { ipcBridge } from '@/common';
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import { resolveLocaleKey } from '@/common/utils';
-import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import type { SkillInfo } from '@/common/types/skill';
 import AgentSkillImportDrawer from './skill/AgentSkillImportDrawer';
@@ -44,8 +43,6 @@ const IMPORT_ACTION_BUTTON_CLASS =
 const SkillsHubSettings: React.FC = () => {
   const { t, i18n } = useTranslation();
   const localeKey = resolveLocaleKey(i18n.language);
-  const layout = useLayoutContext();
-  const isMobile = layout?.isMobile ?? false;
   const [message, messageContext] = useArcoMessage({ maxCount: 10 });
 
   const [searchParams, setSearchParams] = useSearchParams();
@@ -227,7 +224,7 @@ const SkillsHubSettings: React.FC = () => {
           <div className={ENHANCED_TOOLS_HEADER_CLASS}>
             <div
               data-testid='skills-library-header-row'
-              className={`flex gap-12px ${isMobile ? 'flex-col' : 'items-center justify-between'}`}
+              className='flex items-center justify-between gap-12px'
             >
               <div className='min-w-0'>
                 <p
@@ -242,7 +239,7 @@ const SkillsHubSettings: React.FC = () => {
               </div>
               <div
                 data-testid='skills-library-actions'
-                className={`flex items-center gap-10px ${isMobile ? 'w-full flex-wrap' : 'flex-shrink-0'}`}
+                className='flex flex-shrink-0 items-center gap-10px'
               >
                 <Button
                   type={isSearchVisible ? 'secondary' : 'text'}
@@ -291,7 +288,7 @@ const SkillsHubSettings: React.FC = () => {
 
             <div
               data-testid='skills-import-actions'
-              className={`flex items-center gap-8px ${isMobile ? 'w-full flex-wrap' : 'justify-end'}`}
+              className='flex items-center justify-end gap-8px'
             >
               <Button
                 size='small'

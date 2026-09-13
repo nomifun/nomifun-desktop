@@ -5,7 +5,6 @@
  */
 
 import { ipcBridge } from '@/common';
-import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { getCleanFileNames, FileService } from '@/renderer/services/FileService';
 import { iconColors } from '@/renderer/styles/colors';
 import { isDesktopShell } from '@/renderer/utils/platform';
@@ -45,8 +44,6 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
   autoWorkMode = false,
 }) => {
   const { t } = useTranslation();
-  const layout = useLayoutContext();
-  const isMobile = layout?.isMobile ?? false;
   const [isPlusDropdownOpen, setIsPlusDropdownOpen] = useState(false);
 
   // Browser file picker ref (WebUI only)
@@ -159,10 +156,9 @@ const GuidActionRow: React.FC<GuidActionRowProps> = ({
           )}
         </div>
       </div>
-      <div className={`${styles.actionSubmit} ${!isMobile ? styles.actionSubmitResponsive : ''}`}>
+      <div className={`${styles.actionSubmit} ${styles.actionSubmitResponsive}`}>
         <div
-          className={`${styles.actionConfigGroup} ${!isMobile ? styles.actionConfigGroupResponsive : ''}`}
-          data-mobile={isMobile ? 'true' : undefined}
+          className={`${styles.actionConfigGroup} ${styles.actionConfigGroupResponsive}`}
         >
           {modelSelectorNode}
         </div>
