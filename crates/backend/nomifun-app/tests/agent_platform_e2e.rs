@@ -13,15 +13,13 @@ use nomifun_agent_contracts::{
     VersionString,
     official_preset_seed_manifest_payload,
 };
-use nomifun_agent_control_plane::{
-    CompilerReleaseInputs, ControlPlaneStore,
-};
+use nomifun_agent_control_plane::ControlPlaneStore;
 use nomifun_agent_kernel::{CompilerEnvironment, MaterializationPolicy};
 use nomifun_agent_platform::{AgentPlatform, AgentPlatformConfig};
 use nomifun_api_types::{
     AgentPresetEditorResponse, ApiResponse, CreateAgentSessionRequestDto,
     CreateAgentSessionResponseDto, ForkAgentSessionRequestDto, ForkAgentSessionResponseDto,
-    ResolveAgentPresetPreviewResponse, SaveAgentPresetRevisionResponse,
+    SaveAgentPresetRevisionResponse,
 };
 use nomifun_auth::CurrentUser;
 use nomifun_chat_model_broker::{
@@ -175,24 +173,11 @@ async fn canonical_agent_routes_use_the_fresh_v4_platform() {
 
     let mut next_draft = editor_response.draft;
     next_draft.document.instructions = "Revision two".to_owned();
-    let next_preview = post_json::<ResolveAgentPresetPreviewResponse>(
-        &router,
-        &format!("/api/agent-presets/{preset_id}/resolve-preview"),
-        json!({
-            "expected_current_revision": revision.reference,
-            "draft": next_draft,
-            "scene": "agent_settings",
-            "surface": "desktop",
-            "audience": "owner"
-        }),
-    )
-    .await;
     let next_revision = post_json::<SaveAgentPresetRevisionResponse>(
         &router,
         &format!("/api/agent-presets/{preset_id}/revisions"),
         json!({
             "expected_current_revision": revision.reference,
-            "preview_digest": next_preview.preview_digest,
             "draft": next_draft,
             "reason": "prove Session binding revision freeze"
         }),
@@ -528,30 +513,18 @@ async fn build_platform(pool: SqlitePool) -> Arc<AgentPlatform> {
         .unwrap();
     let schema_digest = canonical_schema_manifest_digest().unwrap();
     let protocol = VersionString::from(FROZEN_PROTOCOL_VERSION);
-    let release = CompilerReleaseInputs {
-        resolver_version: protocol.clone(),
-        runtime_protocol_version: protocol.clone(),
-        runtime_feature_inventory_digest: seed
-            .target_runtime_feature_inventory_digest
-            .clone(),
-        canonical_schema_manifest_digest: schema_digest.clone(),
-        target_contribution_manifest_digest: seed
-            .target_first_party_contribution_digest
-            .clone(),
-        availability_evidence_revision: BUILD_IDENTITY.to_owned(),
-    };
     let environment = CompilerEnvironment {
         resolver_version: protocol.clone(),
         required_runtime_protocol_version: protocol,
         required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
-        runtime_feature_inventory_digest: release
-            .runtime_feature_inventory_digest
+        runtime_feature_inventory_digest: seed
+            .target_runtime_feature_inventory_digest
             .clone(),
         available_runtime_features: runtime_inventory.runtime_features,
         installation_role_bindings: BTreeMap::new(),
         canonical_schema_manifest_digest: schema_digest,
-        target_contribution_manifest_digest: release
-            .target_contribution_manifest_digest
+        target_contribution_manifest_digest: seed
+            .target_first_party_contribution_digest
             .clone(),
         host_target: RuntimeTarget::from(native_target()),
         host_surface: "desktop".to_owned(),
@@ -560,7 +533,6 @@ async fn build_platform(pool: SqlitePool) -> Arc<AgentPlatform> {
     AgentPlatform::from_pool(AgentPlatformConfig::with_supervisor(
         pool,
         MaterializationPolicy::stable(FROZEN_PROTOCOL_VERSION),
-        release,
         environment,
         Arc::new(CodexRuntimeSupervisor::new()),
         Arc::new(UnusedBroker),

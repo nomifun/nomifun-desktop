@@ -151,19 +151,13 @@ const AgentSettingsPage: React.FC = () => {
               editor={controller.editor}
               draft={controller.draft}
               catalog={controller.catalog}
-              preview={controller.preview}
-              testResult={controller.testResult}
-              tokenState={controller.tokenState}
               sourceTemplate={sourceTemplate}
               busyAction={controller.busyAction}
               dirty={controller.dirty}
               onDraftChange={controller.setDraft}
-              onPreview={() => void controller.runPreview()}
               onSave={() => void controller.saveRevision()}
               onDiscard={controller.discardChanges}
               onOpenModels={() => beforeSwitch(() => { void navigate('/models'); })}
-              onOpenResource={(route) => beforeSwitch(() => { void navigate(route); })}
-              onTest={(input, resourceSelections) => void controller.runTest(input, resourceSelections)}
               onStartConversation={startConversation}
             />
           ) : (

@@ -177,7 +177,7 @@ const C8_RUNTIME_RELEASE_FIXTURE_PATH =
 const C8_BRANCH = 'rf/agent-capability-platform-v2';
 const C8_EXPECTED_DIGESTS = {
   confirmed_decision_contract:
-    'b3c32f0579a36c1f720a906b785b76cea58e8c8a1e4b07df6416f0d7410d78d5',
+    'c1eeb87b010954fa19324fb59d63c9d8722d6704fe1121ea63f41d4d06d14643',
   platform_validation_contract:
     'a3f5180906c239d791a03281199d80f2ea957dbe8382fb849dc2926935672a9c',
   runtime_feature_inventory:

@@ -687,47 +687,6 @@ async fn create_agent_preset(
                 .to_owned(),
         ),
     );
-    let preview = successful_json(
-        router,
-        "agent_settings.preview",
-        Method::POST,
-        format!("/api/agent-presets/{preset_id}/resolve-preview"),
-        Some(json!({
-            "expected_current_revision": revision,
-            "draft": draft,
-            "scene": "agent_settings",
-            "surface": "desktop",
-            "audience": "owner"
-        })),
-        LOCAL_API_DEADLINE,
-        &[StatusCode::OK],
-    )
-    .await?;
-    let preview = envelope_data("agent_settings.preview", preview)?;
-    if preview.get("status").and_then(Value::as_str) != Some("ready")
-        || preview.get("can_create_session").and_then(Value::as_bool) != Some(true)
-        || preview.pointer("/summary/enabled_count").and_then(Value::as_u64)
-            != Some(CODING_CAPABILITIES.len() as u64)
-        || preview
-            .pointer("/inspector/runtime_profile")
-            .and_then(Value::as_str)
-            != Some("managed_minimal")
-    {
-        return Err(SmokeFailure::new(
-            "agent_settings.preview",
-            preview
-                .pointer("/diagnostics/0/code")
-                .and_then(Value::as_str)
-                .unwrap_or("PREVIEW_NOT_READY"),
-            StatusCode::UNPROCESSABLE_ENTITY.as_u16(),
-        ));
-    }
-    let preview_digest = required_string(
-        "agent_settings.preview",
-        &preview,
-        "/preview_digest",
-        "PREVIEW_DIGEST_MISSING",
-    )?;
     let saved = successful_json(
         router,
         "agent_settings.save",
@@ -735,7 +694,6 @@ async fn create_agent_preset(
         format!("/api/agent-presets/{preset_id}/revisions"),
         Some(json!({
             "expected_current_revision": revision,
-            "preview_digest": preview_digest,
             "draft": draft,
             "reason": "live StepFun Nomi-core coding smoke"
         })),

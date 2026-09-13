@@ -13,18 +13,15 @@ use nomifun_api_types::{
     AgentCatalogResponse, AgentPresetDraftDto, AgentPresetEditorResponse, AgentPresetLibraryResponse,
     AgentPresetRevisionImpactResponse, AgentPresetSummaryDto,
     CreateAgentPresetFromTemplateRequest, CreateAgentPresetRequest, CreateRemoteBindingRequest,
-    EditorDraftStateDto, ExactCatalogRefDto, FreshStartPresentationDto, PutAgentBindingRequest,
+    ExactCatalogRefDto, FreshStartPresentationDto, PutAgentBindingRequest,
     RemoteBindingDto, RevisionImpactConsumerDto, RevisionImpactConsumerKindDto,
-    ResolveAgentPresetPreviewRequest, ResolveAgentPresetPreviewResponse,
-    ResolveSavedRevisionPreviewRequest, SaveAgentPresetRevisionRequest,
-    SaveAgentPresetRevisionResponse, UpdateRemoteBindingRequest,
+    SaveAgentPresetRevisionRequest, SaveAgentPresetRevisionResponse, UpdateRemoteBindingRequest,
 };
 use serde_json::json;
 use uuid::Uuid;
 
 use crate::catalog::{CatalogProvider, OfficialTemplateCatalog};
-use crate::compiler::{PresetPreviewCompiler, revision_api};
-use crate::continuation::editor_test_plan;
+use crate::compiler::{PresetRevisionCompiler, revision_api};
 use crate::error::ControlPlaneError;
 use crate::impact::{
     ControlPlaneRevisionImpactCatalogProvider, RevisionImpactCatalogProvider,
@@ -34,9 +31,6 @@ use crate::store::{
 };
 use crate::wire::wire_cast;
 
-const SETTINGS_SCENE: &str = "agent_settings";
-const SETTINGS_SURFACE: &str = "desktop";
-const SETTINGS_AUDIENCE: &str = "owner";
 const CHAT_MODEL_TASK: &str = nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT;
 
 fn required_chat_features<'a>(
@@ -93,8 +87,8 @@ fn ensure_chat_route_supports(
 /// provider credentials or model capabilities.  A host may inject this
 /// resolver to materialize a complete, opaque [`ChatRouteRecord`] when a new
 /// preset is created.  Returning `None` is an honest "no usable Chat route is
-/// configured" result; callers then receive the normal blocked preview rather
-/// than a fabricated route or a raw JSON escape hatch.
+/// configured" result; save then fails validation rather than fabricating a
+/// route or exposing a raw JSON escape hatch.
 #[async_trait::async_trait]
 pub trait DefaultChatRouteResolver: Send + Sync {
     async fn resolve_default_chat_route(
@@ -122,7 +116,7 @@ pub struct AgentControlPlane {
     catalog: Arc<dyn CatalogProvider>,
     impact_catalog: Arc<dyn RevisionImpactCatalogProvider>,
     templates: OfficialTemplateCatalog,
-    compiler: PresetPreviewCompiler,
+    compiler: PresetRevisionCompiler,
     default_chat_route_resolver: Option<Arc<dyn DefaultChatRouteResolver>>,
     template_launch_lock: tokio::sync::Mutex<()>,
 }
@@ -132,7 +126,7 @@ impl AgentControlPlane {
         store: Arc<dyn ControlPlaneStore>,
         catalog: Arc<dyn CatalogProvider>,
         templates: OfficialTemplateCatalog,
-        compiler: PresetPreviewCompiler,
+        compiler: PresetRevisionCompiler,
     ) -> Self {
         let impact_catalog = Arc::new(ControlPlaneRevisionImpactCatalogProvider::new(
             Arc::clone(&catalog),
@@ -628,45 +622,6 @@ impl AgentControlPlane {
         editor_response(stored, revision, document, None)
     }
 
-    pub async fn preview(
-        &self,
-        owner: &UserId,
-        preset_id: &str,
-        request: ResolveAgentPresetPreviewRequest,
-    ) -> Result<ResolveAgentPresetPreviewResponse, ControlPlaneError> {
-        if request.draft.preset_id != preset_id {
-            return Err(ControlPlaneError::canonical(
-                "PRESET_REVISION_DIGEST_MISMATCH",
-                axum::http::StatusCode::BAD_REQUEST,
-                "draft preset_id must match the route preset_id",
-            ));
-        }
-        let stored = self.owned_preset(owner, preset_id).await?;
-        let current = self.current_revision(&stored).await?;
-        let current_snapshot = self.current_snapshot(current.as_ref()).await?;
-        ensure_expected_current(
-            stored.preset.current_stable_revision.as_ref(),
-            request.expected_current_revision.as_ref(),
-        )?;
-        let catalog = self.catalog.snapshot()?;
-        let transient_template_key = request
-            .draft
-            .source_template_key
-            .map(|key| wire_cast(&key))
-            .transpose()?;
-        Ok(self
-            .compiler
-            .compile(
-                owner,
-                &request,
-                current.as_ref(),
-                current_snapshot.as_ref(),
-                transient_template_key,
-                &catalog,
-            )?
-            .response)
-    }
-
     pub async fn save_revision(
         &self,
         owner: &UserId,
@@ -687,13 +642,6 @@ impl AgentControlPlane {
         )?;
         let current = self.current_revision(&stored).await?;
         let current_snapshot = self.current_snapshot(current.as_ref()).await?;
-        let preview_request = ResolveAgentPresetPreviewRequest {
-            expected_current_revision: request.expected_current_revision.clone(),
-            draft: request.draft.clone(),
-            scene: SETTINGS_SCENE.into(),
-            surface: SETTINGS_SURFACE.into(),
-            audience: SETTINGS_AUDIENCE.into(),
-        };
         let catalog = self.catalog.snapshot()?;
         let transient_template_key = request
             .draft
@@ -702,25 +650,18 @@ impl AgentControlPlane {
             .transpose()?;
         let compilation = self.compiler.compile(
             owner,
-            &preview_request,
+            &request.draft,
             current.as_ref(),
             current_snapshot.as_ref(),
             transient_template_key,
             &catalog,
         )?;
-        if compilation.response.preview_digest != request.preview_digest {
-            return Err(ControlPlaneError::canonical(
-                "PRESET_REVISION_DIGEST_MISMATCH",
-                axum::http::StatusCode::CONFLICT,
-                "preview_digest is stale for the submitted draft",
-            ));
-        }
         let snapshot = compilation.snapshot.ok_or_else(|| {
             ControlPlaneError::with_details(
                 "PRESET_REVISION_SAVE_FAILED",
                 axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-                "Preview is blocked; no immutable Revision or Session was created",
-                json!({ "diagnostics": compilation.response.diagnostics }),
+                "The Agent configuration is invalid; no immutable Revision was created",
+                json!({ "diagnostics": compilation.diagnostics }),
             )
         })?;
         if current
@@ -743,7 +684,6 @@ impl AgentControlPlane {
                 )?,
                 revision: revision_api(&current)?,
                 resolved_snapshot_ref: wire_cast(&snapshot.snapshot_ref)?,
-                preview_digest: compilation.response.preview_digest,
             });
         }
         let revision = AgentPresetRevision {
@@ -775,7 +715,6 @@ impl AgentControlPlane {
             preset: preset_summary(&stored, self.bound_count(owner, &stored.preset.preset_id).await?)?,
             revision: revision_api(&revision)?,
             resolved_snapshot_ref: wire_cast(&snapshot.snapshot_ref)?,
-            preview_digest: compilation.response.preview_digest,
         })
     }
 
@@ -964,51 +903,6 @@ impl AgentControlPlane {
         wire_cast(&binding)
     }
 
-    pub async fn preview_saved_revision(
-        &self,
-        owner: &UserId,
-        preset_id: &str,
-        revision_number: u64,
-        request: ResolveSavedRevisionPreviewRequest,
-    ) -> Result<ResolveAgentPresetPreviewResponse, ControlPlaneError> {
-        let stored = self.owned_preset(owner, preset_id).await?;
-        let revision = self
-            .store
-            .get_revision_number(&stored.preset.preset_id, revision_number)
-            .await?
-            .ok_or_else(|| not_found("AgentPresetRevision"))?;
-        let current_snapshot = self
-            .store
-            .get_snapshot(&revision.reference)
-            .await?
-            .ok_or_else(|| {
-                ControlPlaneError::canonical(
-                    "CAPABILITY_NOT_MATERIALIZED",
-                    axum::http::StatusCode::UNPROCESSABLE_ENTITY,
-                    "saved Revision has no persisted ResolvedSnapshotRef",
-                )
-            })?;
-        let preview_request = ResolveAgentPresetPreviewRequest {
-            expected_current_revision: Some(wire_cast(&revision.reference)?),
-            draft: draft_api(&stored, Some(&revision), wire_cast(&revision.payload)?, None)?,
-            scene: request.scene,
-            surface: request.surface,
-            audience: request.audience,
-        };
-        let catalog = self.catalog.snapshot()?;
-        Ok(self
-            .compiler
-            .compile(
-                owner,
-                &preview_request,
-                Some(&revision),
-                Some(&current_snapshot),
-                None,
-                &catalog,
-            )?
-            .response)
-    }
-
     pub async fn get_agent_binding(
         &self,
         owner: &UserId,
@@ -1144,16 +1038,6 @@ impl AgentControlPlane {
             .await
     }
 
-    pub fn build_editor_test_plan(
-        &self,
-        draft_state: EditorDraftStateDto,
-        preview: ResolveAgentPresetPreviewResponse,
-        draft: AgentPresetDraftDto,
-        reason: Option<String>,
-    ) -> Result<nomifun_api_types::AgentPresetEditorTestPlanDto, ControlPlaneError> {
-        editor_test_plan(draft_state, preview, draft, reason)
-    }
-
     async fn owned_remote_binding(
         &self,
         owner: &UserId,
@@ -1200,17 +1084,10 @@ impl AgentControlPlane {
             current_revision: None,
             document: document.clone(),
         };
-        let preview_request = ResolveAgentPresetPreviewRequest {
-            expected_current_revision: None,
-            draft,
-            scene: SETTINGS_SCENE.into(),
-            surface: SETTINGS_SURFACE.into(),
-            audience: SETTINGS_AUDIENCE.into(),
-        };
         let catalog = self.catalog.snapshot()?;
         let compilation = self.compiler.compile(
             owner,
-            &preview_request,
+            &draft,
             None,
             source_snapshot,
             transient_template_key,
@@ -1221,7 +1098,7 @@ impl AgentControlPlane {
                 "PRESET_REVISION_SAVE_FAILED",
                 axum::http::StatusCode::UNPROCESSABLE_ENTITY,
                 "template expansion did not pass compiler validation",
-                json!({ "diagnostics": compilation.response.diagnostics }),
+                json!({ "diagnostics": compilation.diagnostics }),
             )
         })?;
         let revision = AgentPresetRevision {
@@ -1704,8 +1581,8 @@ fn not_found(subject: &str) -> ControlPlaneError {
 mod tests {
     use super::*;
     use crate::{
-        CatalogSnapshot, CompilerReleaseInputs, InMemoryControlPlaneStore,
-        OfficialTemplateCatalog, PresetPreviewCompiler, StaticCatalogProvider,
+        CatalogSnapshot, InMemoryControlPlaneStore, OfficialTemplateCatalog,
+        PresetRevisionCompiler, StaticCatalogProvider,
         StaticRevisionImpactCatalogProvider,
     };
     use nomifun_agent_contracts::{
@@ -1726,35 +1603,21 @@ mod tests {
     };
     use serde_json::json;
 
-    fn test_compiler(templates: &OfficialTemplateCatalog) -> PresetPreviewCompiler {
-        let release = CompilerReleaseInputs {
-            resolver_version: VersionString::from("1.0.0"),
-            runtime_protocol_version: VersionString::from("1.0.0"),
-            runtime_feature_inventory_digest: DigestHex::from("runtime-features"),
-            canonical_schema_manifest_digest: DigestHex::from("schema"),
-            target_contribution_manifest_digest: DigestHex::from("contributions"),
-            availability_evidence_revision: "fixture".into(),
-        };
-        PresetPreviewCompiler::new(release.clone(), templates.clone()).with_materialized_registry(
+    fn test_compiler(templates: &OfficialTemplateCatalog) -> PresetRevisionCompiler {
+        PresetRevisionCompiler::new(templates.clone()).with_materialized_registry(
             Arc::new(MaterializedRegistry::empty()),
             CompilerEnvironment {
-                resolver_version: release.resolver_version.clone(),
-                required_runtime_protocol_version: release.runtime_protocol_version.clone(),
+                resolver_version: VersionString::from("1.0.0"),
+                required_runtime_protocol_version: VersionString::from("1.0.0"),
                 required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
-                runtime_feature_inventory_digest: release
-                    .runtime_feature_inventory_digest
-                    .clone(),
+                runtime_feature_inventory_digest: DigestHex::from("runtime-features"),
                 available_runtime_features: BTreeSet::new(),
                 installation_role_bindings: BTreeMap::new(),
-                canonical_schema_manifest_digest: release
-                    .canonical_schema_manifest_digest
-                    .clone(),
-                target_contribution_manifest_digest: release
-                    .target_contribution_manifest_digest
-                    .clone(),
+                canonical_schema_manifest_digest: DigestHex::from("schema"),
+                target_contribution_manifest_digest: DigestHex::from("contributions"),
                 host_target: RuntimeTarget::from("test"),
                 host_surface: "desktop".into(),
-                availability_evidence_revision: release.availability_evidence_revision,
+                availability_evidence_revision: "fixture".into(),
             },
         )
     }
@@ -1835,11 +1698,10 @@ mod tests {
                 assert_eq!(revision.document.chat_route_records[CHAT_MODEL_TASK]["primary"]["model"], "explicit-model");
                 let mut draft = created.draft;
                 draft.document.chat_route_records.get_mut(CHAT_MODEL_TASK).unwrap()["primary"]["model"] = json!("edited-model");
-                let preview = control.preview(&owner, &created.preset.preset_id, ResolveAgentPresetPreviewRequest {
-                    expected_current_revision: Some(revision.reference), draft,
-                    scene: SETTINGS_SCENE.into(), surface: SETTINGS_SURFACE.into(), audience: SETTINGS_AUDIENCE.into(),
+                let saved = control.save_revision(&owner, &created.preset.preset_id, SaveAgentPresetRevisionRequest {
+                    expected_current_revision: Some(revision.reference), draft, reason: None,
                 }).await.unwrap();
-                assert!(preview.revision_diff.model_routes_changed);
+                assert_eq!(saved.revision.document.chat_route_records[CHAT_MODEL_TASK]["primary"]["model"], "edited-model");
             }
         }
     }
@@ -2202,14 +2064,8 @@ mod tests {
         let original = control_plane.create_from_template(&owner, "chat.minimal", official_launch_request(false)).await.unwrap();
         let mut draft = original.draft.clone();
         draft.document.instructions = "User-specific behavior".into();
-        let preview = control_plane.preview(&owner, &original.preset.preset_id, ResolveAgentPresetPreviewRequest {
-            expected_current_revision: draft.current_revision.clone(),
-            draft: draft.clone(), scene: SETTINGS_SCENE.into(),
-            surface: SETTINGS_SURFACE.into(), audience: SETTINGS_AUDIENCE.into(),
-        }).await.unwrap();
         control_plane.save_revision(&owner, &original.preset.preset_id, SaveAgentPresetRevisionRequest {
             expected_current_revision: draft.current_revision.clone(),
-            preview_digest: preview.preview_digest,
             draft, reason: None,
         }).await.unwrap();
         let fresh = control_plane.create_from_template(&owner, "chat.minimal", official_launch_request(true)).await.unwrap();
@@ -2276,21 +2132,6 @@ mod tests {
             })
             .await
             .unwrap();
-        let preview = control_plane
-            .preview(
-                &owner,
-                &created.preset.preset_id,
-                ResolveAgentPresetPreviewRequest {
-                    expected_current_revision: Some(revision.reference.clone()),
-                    draft: created.draft.clone(),
-                    scene: SETTINGS_SCENE.into(),
-                    surface: SETTINGS_SURFACE.into(),
-                    audience: SETTINGS_AUDIENCE.into(),
-                },
-            )
-            .await
-            .unwrap();
-
         let owner_error = control_plane
             .retire_preset(&other_owner, &created.preset.preset_id)
             .await
@@ -2332,7 +2173,6 @@ mod tests {
                     &created.preset.preset_id,
                     SaveAgentPresetRevisionRequest {
                         expected_current_revision: Some(revision.reference.clone()),
-                        preview_digest: preview.preview_digest,
                         draft: created.draft,
                         reason: Some("must not save after retirement".into()),
                     },
@@ -2448,12 +2288,8 @@ mod tests {
             .draft;
         next_draft.display_name = "Renamed without a new Revision".into();
         next_draft.description = Some("Updated metadata".into());
-        let rename_preview = control_plane.preview(&owner, &created.preset.preset_id, ResolveAgentPresetPreviewRequest {
-            expected_current_revision: Some(revision.reference.clone()), draft: next_draft.clone(),
-            scene: SETTINGS_SCENE.into(), surface: SETTINGS_SURFACE.into(), audience: SETTINGS_AUDIENCE.into(),
-        }).await.unwrap();
         let renamed = control_plane.save_revision(&owner, &created.preset.preset_id, SaveAgentPresetRevisionRequest {
-            expected_current_revision: Some(revision.reference.clone()), preview_digest: rename_preview.preview_digest,
+            expected_current_revision: Some(revision.reference.clone()),
             draft: next_draft.clone(), reason: None,
         }).await.unwrap();
         assert_eq!(renamed.revision.reference, revision.reference);
@@ -2462,28 +2298,12 @@ mod tests {
         assert_eq!(reloaded.draft.display_name, next_draft.display_name);
         assert_eq!(reloaded.draft.description, next_draft.description);
         next_draft.document.instructions = "Revision two".into();
-        let next_preview_request = ResolveAgentPresetPreviewRequest {
-            expected_current_revision: Some(revision.reference.clone()),
-            draft: next_draft.clone(),
-            scene: SETTINGS_SCENE.into(),
-            surface: SETTINGS_SURFACE.into(),
-            audience: SETTINGS_AUDIENCE.into(),
-        };
-        let next_preview = control_plane
-            .preview(
-                &owner,
-                &created.preset.preset_id,
-                next_preview_request,
-            )
-            .await
-            .unwrap();
         let saved = control_plane
             .save_revision(
                 &owner,
                 &created.preset.preset_id,
                 SaveAgentPresetRevisionRequest {
                     expected_current_revision: Some(revision.reference.clone()),
-                    preview_digest: next_preview.preview_digest,
                     draft: next_draft,
                     reason: Some("freeze test".into()),
                 },

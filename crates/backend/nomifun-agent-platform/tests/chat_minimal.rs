@@ -25,9 +25,7 @@ use nomifun_agent_contracts::{
     ChatRouteLookupKey, StrictJsonValue, UserId, VersionString, canonical_json_bytes, digest_bytes,
     digest_payload, official_preset_seed_manifest_payload, AGENT_CORE_PACKAGE_ID,
 };
-use nomifun_agent_control_plane::{
-    CompilerReleaseInputs, ControlPlaneStore,
-};
+use nomifun_agent_control_plane::ControlPlaneStore;
 use nomifun_agent_kernel::{
     CompiledSnapshot, CompilerEnvironment, MaterializationPolicy, SessionCapabilityState,
 };
@@ -38,9 +36,7 @@ use nomifun_agent_platform::{
 use nomifun_agent_session::{
     CreateSessionRequest, RuntimeAppendContext, SessionStoreError, TurnReceiptStatus,
 };
-use nomifun_api_types::{
-    CreateAgentPresetFromTemplateRequest, ResolveSavedRevisionPreviewRequest,
-};
+use nomifun_api_types::CreateAgentPresetFromTemplateRequest;
 use nomifun_chat_model_broker::{
     AnthropicAdapter, BedrockAdapter, BrokerRetryPolicy, ChatCausality, ChatCausalityGate,
     ChatContentPart, ChatMessage, ChatModelBroker, ChatModelError, ChatModelErrorCode,
@@ -341,32 +337,18 @@ async fn chat_minimal_runs_the_formal_final_stack() -> TestResult<()> {
 
     let contract = ChatMinimalContract::frozen()?;
     let seed_manifest = official_preset_seed_manifest_payload();
-    let release_inputs = CompilerReleaseInputs {
-        resolver_version: VersionString::from(VERSION),
-        runtime_protocol_version: VersionString::from(VERSION),
-        runtime_feature_inventory_digest: seed_manifest
-            .target_runtime_feature_inventory_digest
-            .clone(),
-        canonical_schema_manifest_digest: canonical_schema_manifest_digest()?,
-        target_contribution_manifest_digest: seed_manifest
-            .target_first_party_contribution_digest
-            .clone(),
-        availability_evidence_revision: BUILD_IDENTITY.to_owned(),
-    };
     let kernel_environment = CompilerEnvironment {
         resolver_version: VersionString::from(VERSION),
         required_runtime_protocol_version: VersionString::from(VERSION),
         required_runtime_profile: nomifun_agent_contracts::RuntimeProfileKind::ManagedMinimal,
-        runtime_feature_inventory_digest: release_inputs
-            .runtime_feature_inventory_digest
+        runtime_feature_inventory_digest: seed_manifest
+            .target_runtime_feature_inventory_digest
             .clone(),
         available_runtime_features: BTreeSet::new(),
         installation_role_bindings: BTreeMap::new(),
-        canonical_schema_manifest_digest: release_inputs
-            .canonical_schema_manifest_digest
-            .clone(),
-        target_contribution_manifest_digest: release_inputs
-            .target_contribution_manifest_digest
+        canonical_schema_manifest_digest: canonical_schema_manifest_digest()?,
+        target_contribution_manifest_digest: seed_manifest
+            .target_first_party_contribution_digest
             .clone(),
         host_target: nomifun_agent_contracts::RuntimeTarget::from(native_target_id()),
         host_surface: "desktop".to_owned(),
@@ -385,7 +367,6 @@ async fn chat_minimal_runs_the_formal_final_stack() -> TestResult<()> {
     let platform = AgentPlatform::from_pool(AgentPlatformConfig::with_supervisor(
         pool.clone(),
         MaterializationPolicy::stable(VERSION),
-        release_inputs,
         kernel_environment,
         Arc::clone(&supervisor),
         broker,
@@ -450,21 +431,6 @@ async fn chat_minimal_runs_the_formal_final_stack() -> TestResult<()> {
         .await?;
     contract.validate_ordinary_revision(&editor)?;
     let revision_dto = editor.revision.as_ref().expect("ordinary Revision");
-    let preview = platform
-        .control_plane()
-        .preview_saved_revision(
-            &owner,
-            &editor.preset.preset_id,
-            revision_dto.reference.revision,
-            ResolveSavedRevisionPreviewRequest {
-                scene: "chat".to_owned(),
-                surface: "desktop".to_owned(),
-                audience: "owner".to_owned(),
-            },
-        )
-        .await?;
-    contract.validate_preview(&preview)?;
-
     let preset_id = AgentPresetId::from(editor.preset.preset_id.clone());
     let revision = platform
         .control_store()

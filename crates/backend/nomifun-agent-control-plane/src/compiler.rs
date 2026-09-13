@@ -4,29 +4,24 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use nomifun_agent_contracts::{
     AgentPresetRevision, AgentPresetRevisionPayload, CanonicalErrorCode,
-    CapabilityCatalogPublication, CapabilityConsumer, CapabilityRef, ContributionId,
-    ContributionLock, ContributionSourceKind, DigestHex,
-    MiniAppCapabilityCatalogPublication, OfficialPresetKey, OperationId, PluginMountId,
-    PresetRevisionRef, PrincipalRef, ResolvedCapability, ResolvedMiniAppCapability,
-    ResolvedSnapshotEnvelope, PluginSourceKind, PluginSourceMetadata, SkillRef,
-    StableSourceIdentity, UserId, VersionString, digest_payload,
+    CapabilityCatalogPublication, CapabilityConsumer, CapabilityRef,
+    ContributionLock, ContributionSourceKind,
+    MiniAppCapabilityCatalogPublication, OfficialPresetKey, OperationId,
+    PresetRevisionRef, PrincipalRef, ResolvedMiniAppCapability,
+    ResolvedSnapshotEnvelope, UserId, digest_payload,
 };
 use nomifun_agent_kernel::{
     AgentPresetCompiler as KernelAgentPresetCompiler, CompileRequest, CompilerEnvironment,
     KernelError, KernelRegistry, MaterializedRegistry,
 };
-use nomifun_api_types::{
-    AgentPresetRevisionDto, PreviewCapabilityDto, PreviewDiagnosticDto,
-    PreviewDiagnosticSeverityDto, PreviewStatusDto, PreviewSummaryDto,
-    ResolveAgentPresetPreviewRequest, ResolveAgentPresetPreviewResponse, RevisionDiffDto,
-    SnapshotInspectorDto,
-};
-use serde_json::json;
+use nomifun_api_types::{AgentPresetDraftDto, AgentPresetRevisionDto};
+use serde::Serialize;
+use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::catalog::{availability_code, mcp_mapping_api, CatalogSnapshot, OfficialTemplateCatalog};
+use crate::catalog::{availability_code, CatalogSnapshot, OfficialTemplateCatalog};
 use crate::error::ControlPlaneError;
-use crate::wire::{wire_cast, wire_name};
+use crate::wire::wire_cast;
 
 /// Supplies the exact materialized registry used by the Kernel execution path.
 ///
@@ -62,47 +57,40 @@ impl CanonicalRegistryProvider for StaticCanonicalRegistryProvider {
 }
 
 #[derive(Clone, Debug)]
-pub struct CompilerReleaseInputs {
-    pub resolver_version: VersionString,
-    pub runtime_protocol_version: VersionString,
-    pub runtime_feature_inventory_digest: DigestHex,
-    pub canonical_schema_manifest_digest: DigestHex,
-    pub target_contribution_manifest_digest: DigestHex,
-    pub availability_evidence_revision: String,
+pub(crate) struct PresetCompilation {
+    pub(crate) payload: AgentPresetRevisionPayload,
+    pub(crate) contribution_locks: Vec<ContributionLock>,
+    pub(crate) candidate_revision_ref: PresetRevisionRef,
+    pub(crate) snapshot: Option<ResolvedSnapshotEnvelope>,
+    pub(crate) diagnostics: Vec<CompilationDiagnostic>,
 }
 
-#[derive(Clone, Debug)]
-pub struct PreviewCompilation {
-    pub response: ResolveAgentPresetPreviewResponse,
-    pub payload: AgentPresetRevisionPayload,
-    pub contribution_locks: Vec<ContributionLock>,
-    pub candidate_revision_ref: PresetRevisionRef,
-    pub snapshot: Option<ResolvedSnapshotEnvelope>,
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct CompilationDiagnostic {
+    pub(crate) code: String,
+    pub(crate) message: String,
+    pub(crate) subject: Option<String>,
+    pub(crate) details: Option<Value>,
 }
 
 #[derive(Clone)]
-pub struct PresetPreviewCompiler {
-    release: CompilerReleaseInputs,
+pub struct PresetRevisionCompiler {
     official_templates: OfficialTemplateCatalog,
     canonical_registry: Option<Arc<dyn CanonicalRegistryProvider>>,
     canonical_environment: Option<CompilerEnvironment>,
 }
 
-impl PresetPreviewCompiler {
-    pub fn new(
-        release: CompilerReleaseInputs,
-        official_templates: OfficialTemplateCatalog,
-    ) -> Self {
+impl PresetRevisionCompiler {
+    pub fn new(official_templates: OfficialTemplateCatalog) -> Self {
         Self {
-            release,
             official_templates,
             canonical_registry: None,
             canonical_environment: None,
         }
     }
 
-    /// Bind Preview/Save/Test to the exact registry and environment used by
-    /// Session Open. The provider is evaluated for every dirty compile.
+    /// Bind revision saves to the exact registry and environment used by
+    /// Session Open. The provider is evaluated for every changed draft.
     pub fn with_canonical_registry<P>(
         mut self,
         provider: Arc<P>,
@@ -127,19 +115,17 @@ impl PresetPreviewCompiler {
         )
     }
 
-    pub fn compile(
+    pub(crate) fn compile(
         &self,
         owner: &UserId,
-        request: &ResolveAgentPresetPreviewRequest,
+        draft: &AgentPresetDraftDto,
         current_revision: Option<&AgentPresetRevision>,
         current_snapshot: Option<&ResolvedSnapshotEnvelope>,
         transient_template_key: Option<OfficialPresetKey>,
         catalog: &CatalogSnapshot,
-    ) -> Result<PreviewCompilation, ControlPlaneError> {
+    ) -> Result<PresetCompilation, ControlPlaneError> {
         catalog.validate()?;
-        let payload: AgentPresetRevisionPayload = wire_cast(&request.draft.document)?;
-        let draft_digest = digest_payload(&payload)
-            .map_err(|error| ControlPlaneError::Wire(error.to_string()))?;
+        let payload: AgentPresetRevisionPayload = wire_cast(&draft.document)?;
         let payload_unchanged = current_revision.is_some_and(|current| current.payload == payload);
         let current_canonical_inputs = if payload_unchanged && current_snapshot.is_some() {
             self.canonical_inputs_if_configured()?
@@ -199,7 +185,7 @@ impl PresetPreviewCompiler {
                 .clone()
         } else {
             PresetRevisionRef {
-                preset_id: request.draft.preset_id.clone().into(),
+                preset_id: draft.preset_id.clone().into(),
                 revision: current_revision
                     .map(|revision| revision.reference.revision + 1)
                     .unwrap_or(1),
@@ -267,9 +253,9 @@ impl PresetPreviewCompiler {
                     principal_kind: "user".to_owned(),
                     principal_id: owner.as_ref().to_owned(),
                 },
-                scene: request.scene.clone(),
-                surface: request.surface.clone(),
-                audience: request.audience.clone(),
+                scene: "agent_settings".to_owned(),
+                surface: "desktop".to_owned(),
+                audience: "owner".to_owned(),
                 created_at_ms: now_ms(),
                 resolver_run_id: OperationId::from(Uuid::now_v7().to_string()),
                 miniapp_capabilities,
@@ -290,51 +276,12 @@ impl PresetPreviewCompiler {
         } else {
             compiled.as_ref().map(|compiled| compiled.envelope.clone())
         };
-        let revision_diff = revision_diff(current_revision, &payload);
-        let summary = preview_summary(&payload, catalog, snapshot.as_ref());
-        let inspector = preview_inspector(
-            &self.release,
-            &candidate_revision_ref,
-            &payload,
-            catalog,
-            snapshot.as_ref(),
-        )?;
-        let resolved_snapshot_ref = snapshot
-            .as_ref()
-            .map(|snapshot| wire_cast(&snapshot.snapshot_ref))
-            .transpose()?;
-        let preview_digest = digest_payload(&json!({
-            "draft_digest": &draft_digest,
-            "candidate_revision_ref": &candidate_revision_ref,
-            "resolved_snapshot_ref": snapshot.as_ref().map(|value| &value.snapshot_ref),
-            "diagnostics": &diagnostics,
-        }))
-        .map_err(|error| ControlPlaneError::Wire(error.to_string()))?;
-        let ready = snapshot.is_some() && !has_errors(&diagnostics);
-        let response = ResolveAgentPresetPreviewResponse {
-            status: if ready {
-                PreviewStatusDto::Ready
-            } else {
-                PreviewStatusDto::Blocked
-            },
-            draft_digest: draft_digest.as_ref().to_owned(),
-            preview_digest: preview_digest.as_ref().to_owned(),
-            candidate_revision_ref: wire_cast(&candidate_revision_ref)?,
-            resolved_snapshot_ref,
-            summary,
-            diagnostics,
-            revision_diff,
-            inspector,
-            can_save_revision: ready,
-            can_create_session: ready,
-        };
-
-        Ok(PreviewCompilation {
-            response,
+        Ok(PresetCompilation {
             payload,
             contribution_locks,
             candidate_revision_ref,
             snapshot,
+            diagnostics,
         })
     }
 
@@ -395,10 +342,8 @@ fn snapshot_matches_registry(
     Ok(true)
 }
 
-fn has_errors(diagnostics: &[PreviewDiagnosticDto]) -> bool {
-    diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.severity == PreviewDiagnosticSeverityDto::Error)
+fn has_errors(diagnostics: &[CompilationDiagnostic]) -> bool {
+    !diagnostics.is_empty()
 }
 
 fn runtime_profile_for_compile(
@@ -422,7 +367,7 @@ fn runtime_profile_for_compile(
 fn validate_direct_catalog_availability(
     payload: &AgentPresetRevisionPayload,
     catalog: &CatalogSnapshot,
-    diagnostics: &mut Vec<PreviewDiagnosticDto>,
+    diagnostics: &mut Vec<CompilationDiagnostic>,
 ) {
     let mut seen = BTreeSet::new();
     for selection in payload
@@ -788,7 +733,7 @@ fn validate_template_baseline(
     available_runtime_features: Option<
         &BTreeSet<nomifun_agent_contracts::RuntimeFeatureId>,
     >,
-    diagnostics: &mut Vec<PreviewDiagnosticDto>,
+    diagnostics: &mut Vec<CompilationDiagnostic>,
 ) {
     if template_key != Some(OfficialPresetKey::CodingCodex) {
         return;
@@ -816,8 +761,7 @@ fn validate_template_baseline(
         .map(|feature| feature.as_ref().to_owned())
         .collect::<Vec<_>>();
     if !missing_capabilities.is_empty() || !missing_features.is_empty() {
-        diagnostics.push(PreviewDiagnosticDto {
-            severity: PreviewDiagnosticSeverityDto::Error,
+        diagnostics.push(CompilationDiagnostic {
             code: "CODING_CODEX_NATIVE_INCOMPLETE".into(),
             message: "coding.codex must retain the complete frozen Coding capability and runtime-feature baseline".into(),
             subject: Some("coding.codex".into()),
@@ -829,7 +773,7 @@ fn validate_template_baseline(
     }
 }
 
-fn kernel_error_diagnostic(error: &KernelError) -> PreviewDiagnosticDto {
+fn kernel_error_diagnostic(error: &KernelError) -> CompilationDiagnostic {
     error_diagnostic(
         error.canonical_code(),
         error.to_string(),
@@ -837,323 +781,12 @@ fn kernel_error_diagnostic(error: &KernelError) -> PreviewDiagnosticDto {
     )
 }
 
-fn preview_summary(
-    payload: &AgentPresetRevisionPayload,
-    catalog: &CatalogSnapshot,
-    snapshot: Option<&ResolvedSnapshotEnvelope>,
-) -> PreviewSummaryDto {
-    let initial_ids = snapshot
-        .map(|snapshot| {
-            snapshot
-                .content
-                .enabled_capabilities
-                .iter()
-                .map(|capability| capability.capability.id.clone())
-                .collect::<BTreeSet<_>>()
-        })
-        .unwrap_or_else(|| {
-            payload
-                .enabled_capabilities
-                .iter()
-                .map(|selection| selection.capability.id.clone())
-                .collect()
-        });
-    let selected_ids = snapshot
-        .map(|snapshot| snapshot.content.capability_allowlist.clone())
-        .unwrap_or_else(|| {
-            payload
-                .enabled_capabilities
-                .iter()
-                .map(|selection| selection.capability.id.clone())
-                .collect()
-        });
-    let initial_manifests = catalog
-        .capabilities
-        .iter()
-        .filter(|capability| {
-            initial_ids.contains(&capability.manifest.id)
-        })
-        .collect::<Vec<_>>();
-    let required_resource_kinds = catalog
-        .capabilities
-        .iter()
-        .filter(|capability| {
-            selected_ids.contains(&capability.manifest.id)
-        })
-        .flat_map(|capability| {
-            capability
-                .manifest
-                .contributions
-                .resource_kinds
-                .iter()
-        })
-        .collect::<BTreeSet<_>>();
-    PreviewSummaryDto {
-        enabled_count: payload.enabled_capabilities.len() as u32,
-        active_at_start_count: initial_manifests.len() as u32,
-        model_tool_count: initial_manifests
-            .iter()
-            .map(|capability| {
-                capability.manifest.contributions.actions.len() as u32
-            })
-            .sum(),
-        context_contributor_count: initial_manifests
-            .iter()
-            .map(|capability| {
-                capability
-                    .manifest
-                    .contributions
-                    .context_schema_refs
-                    .len() as u32
-            })
-            .sum(),
-        skill_count: payload.skill_bindings.len() as u32,
-        mcp_count: catalog
-            .mcp_tools
-            .iter()
-            .filter(|mcp| {
-                selected_ids.contains(&mcp.mapping.capability.id)
-            })
-            .count() as u32,
-        required_resource_kind_count: required_resource_kinds.len() as u32,
-        provider_initialization_count: payload.model_route_refs.len() as u32,
-    }
-}
-
-fn preview_resolved_capability(
-    selection: &nomifun_agent_contracts::CapabilitySelection,
-    catalog: &CatalogSnapshot,
-) -> ResolvedCapability {
-    let manifest = catalog.find_capability(&selection.capability);
-    let source_package = manifest
-        .map(|capability| capability.package.clone())
-        .unwrap_or_else(|| nomifun_agent_contracts::PackageRef {
-            id: "unmaterialized".into(),
-            version: "0.0.0".into(),
-        });
-    let contribution_id = manifest
-        .map(|capability| capability.contribution_id.clone())
-        .unwrap_or_else(|| {
-            ContributionId::from(format!(
-                "unmaterialized:{}",
-                selection.capability.id.as_ref()
-            ))
-        });
-    ResolvedCapability {
-        capability: selection.capability.clone(),
-        source_package,
-        contribution_id: contribution_id.clone(),
-        contribution_lock: ContributionLock {
-            source_kind: ContributionSourceKind::PlatformBuiltin,
-            source_identity: StableSourceIdentity::from("unmaterialized"),
-            mount_id: None,
-            miniapp_id: None,
-            mcp_binding_id: None,
-            contribution_id,
-            contract_digest: DigestHex::from("0".repeat(64)),
-        },
-        resolved_mount_id: PluginMountId::from("unmaterialized"),
-        resolved_source: PluginSourceMetadata {
-            source_kind: PluginSourceKind::Bundled,
-            source_identity: "unmaterialized".to_owned(),
-            source_digest: None,
-        },
-        target_artifact_digest: DigestHex::from("0".repeat(64)),
-        schema_digest: DigestHex::from("0".repeat(64)),
-        dependency_path: vec![selection.capability.id.clone()],
-        required_runtime_features: BTreeSet::new(),
-    }
-}
-
-fn preview_inspector(
-    release: &CompilerReleaseInputs,
-    candidate_revision_ref: &PresetRevisionRef,
-    payload: &AgentPresetRevisionPayload,
-    catalog: &CatalogSnapshot,
-    snapshot: Option<&ResolvedSnapshotEnvelope>,
-) -> Result<SnapshotInspectorDto, ControlPlaneError> {
-    let initial_refs = snapshot
-        .map(|snapshot| snapshot.content.enabled_capabilities.clone())
-        .unwrap_or_else(|| {
-            payload
-                .enabled_capabilities
-                .iter()
-                .map(|selection| preview_resolved_capability(selection, catalog))
-                .collect()
-        });
-    let selected_ids = snapshot
-        .map(|snapshot| snapshot.content.capability_allowlist.clone())
-        .unwrap_or_else(|| {
-            payload
-                .enabled_capabilities
-                .iter()
-                .map(|selection| selection.capability.id.clone())
-                .collect()
-        });
-    let mut tool_schema_refs = BTreeSet::new();
-    let mut context_schema_refs = BTreeSet::new();
-    for reference in initial_refs.iter() {
-        if let Some(capability) = catalog.find_capability(&reference.capability) {
-            for action in &capability.contributions.actions {
-                tool_schema_refs.insert(action.input_schema.as_ref().to_owned());
-                tool_schema_refs.insert(action.output_schema.as_ref().to_owned());
-            }
-            context_schema_refs.extend(
-                capability
-                    .contributions
-                    .context_schema_refs
-                    .iter()
-                    .map(|reference| reference.as_ref().to_owned()),
-            );
-        }
-    }
-    let initial = initial_refs
-        .iter()
-        .map(|reference| preview_capability(reference, catalog))
-        .collect();
-    let mcp_materializations = catalog
-        .mcp_tools
-        .iter()
-        .filter(|mcp| {
-            selected_ids.contains(&mcp.mapping.capability.id)
-        })
-        .map(|mcp| mcp_mapping_api(&mcp.mapping))
-        .collect();
-    let required_resource_kinds = catalog
-        .capabilities
-        .iter()
-        .filter(|capability| {
-            selected_ids.contains(&capability.manifest.id)
-        })
-        .flat_map(|capability| {
-            capability
-                .manifest
-                .contributions
-                .resource_kinds
-                .iter()
-                .map(|kind| kind.as_ref().to_owned())
-        })
-        .collect();
-    Ok(SnapshotInspectorDto {
-        snapshot_ref: snapshot
-            .map(|snapshot| wire_cast(&snapshot.snapshot_ref))
-            .transpose()?,
-        preset_revision_ref: Some(wire_cast(candidate_revision_ref)?),
-        runtime_profile: snapshot
-            .map(|snapshot| wire_name(&snapshot.content.required_runtime_profile))
-            .transpose()?,
-        required_runtime_protocol_version: release.runtime_protocol_version.as_ref().to_owned(),
-        required_runtime_features: snapshot
-            .map(|snapshot| {
-                snapshot
-                    .content
-                    .required_runtime_features
-                    .iter()
-                    .map(|feature| feature.as_ref().to_owned())
-                    .collect()
-            })
-            .unwrap_or_default(),
-        enabled_capabilities: initial,
-        tool_schema_refs: tool_schema_refs.into_iter().collect(),
-        context_schema_refs: context_schema_refs.into_iter().collect(),
-        mcp_materializations,
-        required_resource_kinds,
-        service_key_diagnostics: catalog.service_key_diagnostics.clone(),
-    })
-}
-
-fn preview_capability(
-    reference: &ResolvedCapability,
-    catalog: &CatalogSnapshot,
-) -> PreviewCapabilityDto {
-    let (display_name, source_package) = catalog
-        .find_capability(&reference.capability)
-        .map(|capability| {
-            (
-                capability.display.name.clone(),
-                capability.package.clone(),
-            )
-        })
-        .unwrap_or_else(|| {
-            (
-                reference.capability.id.as_ref().to_owned(),
-                reference.source_package.clone(),
-            )
-        });
-    PreviewCapabilityDto {
-        capability: nomifun_api_types::ExactCatalogRefDto {
-            id: reference.capability.id.as_ref().to_owned(),
-            version: reference.capability.version.as_ref().to_owned(),
-        },
-        display_name,
-        source_package: nomifun_api_types::ExactCatalogRefDto {
-            id: source_package.id.as_ref().to_owned(),
-            version: source_package.version.as_ref().to_owned(),
-        },
-        dependency_path: reference
-            .dependency_path
-            .iter()
-            .map(|id| id.as_ref().to_owned())
-            .collect(),
-        required_runtime_features: reference
-            .required_runtime_features
-            .iter()
-            .map(|feature| feature.as_ref().to_owned())
-            .collect(),
-    }
-}
-
-fn revision_diff(
-    current: Option<&AgentPresetRevision>,
-    payload: &AgentPresetRevisionPayload,
-) -> RevisionDiffDto {
-    let before_initial = current
-        .map(|revision| capability_ids(&revision.payload.enabled_capabilities))
-        .unwrap_or_default();
-    let before_skills = current
-        .map(|revision| skill_ids(&revision.payload.skill_bindings))
-        .unwrap_or_default();
-    let after_initial = capability_ids(&payload.enabled_capabilities);
-    let after_skills = skill_ids(&payload.skill_bindings);
-    RevisionDiffDto {
-        added_enabled: after_initial.difference(&before_initial).cloned().collect(),
-        removed_enabled: before_initial.difference(&after_initial).cloned().collect(),
-        added_skills: after_skills.difference(&before_skills).cloned().collect(),
-        removed_skills: before_skills.difference(&after_skills).cloned().collect(),
-        model_routes_changed: current.is_none_or(|revision| {
-            revision.payload.model_route_refs != payload.model_route_refs
-                || revision.payload.chat_route_records != payload.chat_route_records
-        }),
-        instructions_changed: current.is_none_or(|revision| {
-            revision.payload.persona != payload.persona
-                || revision.payload.instructions != payload.instructions
-        }),
-    }
-}
-
-fn capability_ids(
-    capabilities: &[nomifun_agent_contracts::CapabilitySelection],
-) -> BTreeSet<String> {
-    capabilities
-        .iter()
-        .map(|selection| selection.capability.id.as_ref().to_owned())
-        .collect()
-}
-
-fn skill_ids(skills: &[SkillRef]) -> BTreeSet<String> {
-    skills
-        .iter()
-        .map(|skill| skill.id.as_ref().to_owned())
-        .collect()
-}
-
 fn error_diagnostic(
     code: CanonicalErrorCode,
     message: impl Into<String>,
     subject: Option<String>,
-) -> PreviewDiagnosticDto {
-    PreviewDiagnosticDto {
-        severity: PreviewDiagnosticSeverityDto::Error,
+) -> CompilationDiagnostic {
+    CompilationDiagnostic {
         code: code.as_ref().to_owned(),
         message: message.into(),
         subject,
@@ -1191,12 +824,13 @@ mod tests {
         CapabilityContributions, CapabilityId, CapabilityKind,
         CapabilityManifest, CapabilityOwner, CapabilityProvenance,
         CapabilityRef, CapabilityReleaseState, CapabilitySelection,
-        CanonicalSchemaRef, CatalogAvailability, EffectClass, LocalizedMetadata,
+        CanonicalSchemaRef, CatalogAvailability, ContributionId, DigestHex, EffectClass,
+        LocalizedMetadata,
         LogicalArtifactRef, McpBindingId, McpServerId, McpToolCapabilityMapping,
         McpToolKey, MiniAppId, MiniAppReleaseId, MiniAppReleaseRef, PackageId,
-        PackageRef, PlatformConstraint, PluginSourceMetadata, ResourceKind,
-        RuntimeProfileKind, SkillDefinition, SkillId, StrictJsonValue,
-        ToolPresentationKind,
+        PackageRef, PlatformConstraint, PluginMountId, PluginSourceKind,
+        PluginSourceMetadata, ResourceKind, RuntimeProfileKind, SkillDefinition, SkillId,
+        SkillRef, StableSourceIdentity, StrictJsonValue, ToolPresentationKind, VersionString,
         capability_surface_declarations,
     };
     use nomifun_agent_kernel::{

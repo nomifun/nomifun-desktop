@@ -459,51 +459,43 @@ async fn nomi_core_accepts_enabled_placement_as_immediately_available_tools() {
             "action_allowlist": []
         })).collect::<Vec<_>>()
     );
-    let preview = router
+    let saved = router
         .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/api/agent-presets/{preset_id}/resolve-preview"))
+                .uri(format!("/api/agent-presets/{preset_id}/revisions"))
                 .header("x-nomi-local-trust", trust_secret)
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&json!({
                         "expected_current_revision": revision,
                         "draft": created_value["data"]["draft"],
-                        "scene": "agent_settings",
-                        "surface": "desktop",
-                        "audience": "owner"
                     }))
-                    .expect("serialize enabled preview request"),
+                    .expect("serialize enabled save request"),
                 ))
-                .expect("build enabled preview request"),
+                .expect("build enabled save request"),
         )
         .await
-        .expect("dispatch enabled preview request");
-    assert_eq!(preview.status(), StatusCode::OK);
-    let preview_body = axum::body::to_bytes(preview.into_body(), 4 * 1024 * 1024)
+        .expect("dispatch enabled save request");
+    assert_eq!(saved.status(), StatusCode::OK);
+    let saved_body = axum::body::to_bytes(saved.into_body(), 4 * 1024 * 1024)
         .await
-        .expect("read enabled preview response");
-    let preview_value: Value = serde_json::from_slice(&preview_body).expect("preview JSON");
-    assert_eq!(preview_value["data"]["status"], "ready");
-    assert!(
-        preview_value["data"]["diagnostics"]
-            .as_array()
-            .is_some_and(|diagnostics| diagnostics.is_empty()),
-        "a supported enabled capability must produce a clean preview"
-    );
+        .expect("read enabled save response");
+    let saved_value: Value = serde_json::from_slice(&saved_body).expect("save JSON");
     assert_eq!(
-        preview_value["data"]["summary"]["enabled_count"],
-        enabled_ids.len(),
-        "the preview must retain the enabled placement"
+        saved_value["data"]["revision"]["document"]["enabled_capabilities"]
+            .as_array()
+            .map(Vec::len),
+        Some(enabled_ids.len()),
+        "the saved revision must retain the enabled placement"
     );
     for id in enabled_ids {
         assert!(
-            preview_value["data"]["inspector"]["enabled_capabilities"]
+            saved_value["data"]["revision"]["document"]["enabled_capabilities"]
                 .as_array()
                 .is_some_and(|items| items.iter().any(|item| item["capability"]["id"] == id)),
-            "the immutable preview must expose deferred capability {id}"
+            "the immutable revision must retain deferred capability {id}"
         );
     }
 
@@ -1260,35 +1252,31 @@ async fn nomi_core_agent_session_projects_saved_chat_binding_without_internal_in
     let revision = template["data"]["revision"]["reference"].clone();
     let draft = template["data"]["draft"].clone();
 
-    let preview_response = router
+    let saved_response = router
         .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/api/agent-presets/{preset_id}/resolve-preview"))
+                .uri(format!("/api/agent-presets/{preset_id}/revisions"))
                 .header("x-nomi-local-trust", "agent-session-local-trust")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&serde_json::json!({
                         "expected_current_revision": revision,
                         "draft": draft,
-                        "scene": "agent_session",
-                        "surface": "desktop",
-                        "audience": "owner"
                     }))
-                    .expect("serialize session preview request"),
+                    .expect("serialize clean revision save request"),
                 ))
-                .expect("build session preview request"),
+                .expect("build clean revision save request"),
         )
         .await
-        .expect("dispatch session preview request");
-    assert_eq!(preview_response.status(), StatusCode::OK);
-    let preview_body = axum::body::to_bytes(preview_response.into_body(), 4 * 1024 * 1024)
+        .expect("dispatch clean revision save request");
+    assert_eq!(saved_response.status(), StatusCode::OK);
+    let saved_body = axum::body::to_bytes(saved_response.into_body(), 4 * 1024 * 1024)
         .await
-        .expect("read session preview response");
-    let preview: Value = serde_json::from_slice(&preview_body).expect("session preview JSON");
-    assert_eq!(preview["data"]["status"], "ready");
-    let expected_snapshot = preview["data"]["resolved_snapshot_ref"].clone();
+        .expect("read clean revision save response");
+    let saved: Value = serde_json::from_slice(&saved_body).expect("clean revision save JSON");
+    let expected_snapshot = saved["data"]["resolved_snapshot_ref"].clone();
 
     let rejected = router
         .clone()
@@ -1553,44 +1541,40 @@ async fn nomi_core_remote_replays_frozen_binding_and_persists_event_cursor() {
         .await
         .expect("read remote preset response");
     let preset: Value = serde_json::from_slice(&preset_body).expect("remote preset JSON");
-    // The creation response does not include a Preview object. Resolve the
-    // saved revision once through the canonical API to obtain the exact
+    // A clean save reuses the immutable Revision and returns the exact
     // Snapshot reference used by RemoteBinding.
     let preset_id = preset["data"]["preset"]["preset_id"]
         .as_str()
         .expect("remote preset id");
     let revision = preset["data"]["revision"]["reference"].clone();
     let editor_draft = preset["data"]["draft"].clone();
-    let preview = router
+    let saved = router
         .clone()
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/api/agent-presets/{preset_id}/resolve-preview"))
+                .uri(format!("/api/agent-presets/{preset_id}/revisions"))
                 .header("x-nomi-local-trust", "remote-local-trust")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&serde_json::json!({
                         "expected_current_revision": revision,
                         "draft": editor_draft,
-                        "scene": "remote",
-                        "surface": "remote",
-                        "audience": "owner"
                     }))
-                    .expect("serialize remote preview request"),
+                    .expect("serialize clean remote revision save request"),
                 ))
-                .expect("build remote preview request"),
+                .expect("build clean remote revision save request"),
         )
         .await
-        .expect("dispatch remote preview request");
-    assert_eq!(preview.status(), StatusCode::OK);
-    let preview_body = axum::body::to_bytes(preview.into_body(), 4 * 1024 * 1024)
+        .expect("dispatch clean remote revision save request");
+    assert_eq!(saved.status(), StatusCode::OK);
+    let saved_body = axum::body::to_bytes(saved.into_body(), 4 * 1024 * 1024)
         .await
-        .expect("read remote preview response");
-    let preview: Value = serde_json::from_slice(&preview_body).expect("remote preview JSON");
+        .expect("read clean remote revision save response");
+    let saved: Value = serde_json::from_slice(&saved_body).expect("clean remote revision save JSON");
     let binding = serde_json::json!({
         "preset_revision_ref": revision,
-        "resolved_snapshot_ref": preview["data"]["resolved_snapshot_ref"],
+        "resolved_snapshot_ref": saved["data"]["resolved_snapshot_ref"],
         "typed_resource_bindings": [],
         "binding_version": 1
     });

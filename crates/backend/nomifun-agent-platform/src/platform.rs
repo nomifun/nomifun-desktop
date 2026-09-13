@@ -36,9 +36,9 @@ use nomifun_agent_contracts::{
     resolve_exact_chat_route_record,
 };
 use nomifun_agent_control_plane::{
-    AgentBindingTarget, AgentControlPlane, CatalogProvider, CatalogSnapshot, CompilerReleaseInputs,
+    AgentBindingTarget, AgentControlPlane, CatalogProvider, CatalogSnapshot,
     ControlPlaneError, ControlPlaneStore, MiniAppCatalogPublicationSource,
-    OfficialTemplateCatalog, PresetPreviewCompiler,
+    OfficialTemplateCatalog, PresetRevisionCompiler,
     StoredAgentBinding, StoredPreset,
 };
 use nomifun_agent_kernel::{
@@ -212,7 +212,6 @@ impl CodexRuntimePort for SupervisedCodexRuntimePort {
 pub struct AgentPlatformConfig {
     pub pool: SqlitePool,
     pub materialization_policy: MaterializationPolicy,
-    pub control_plane_release: CompilerReleaseInputs,
     pub kernel_environment: CompilerEnvironment,
     pub runtime: Arc<dyn CodexRuntimePort>,
     pub broker: Arc<dyn ChatBrokerPort>,
@@ -223,7 +222,6 @@ impl AgentPlatformConfig {
     pub fn with_runtime(
         pool: SqlitePool,
         materialization_policy: MaterializationPolicy,
-        control_plane_release: CompilerReleaseInputs,
         kernel_environment: CompilerEnvironment,
         runtime: Arc<dyn CodexRuntimePort>,
         broker: Arc<dyn ChatBrokerPort>,
@@ -231,7 +229,6 @@ impl AgentPlatformConfig {
         Self {
             pool,
             materialization_policy,
-            control_plane_release,
             kernel_environment,
             runtime,
             broker,
@@ -242,7 +239,6 @@ impl AgentPlatformConfig {
     pub fn with_supervisor(
         pool: SqlitePool,
         materialization_policy: MaterializationPolicy,
-        control_plane_release: CompilerReleaseInputs,
         kernel_environment: CompilerEnvironment,
         supervisor: Arc<CodexRuntimeSupervisor>,
         broker: Arc<dyn ChatBrokerPort>,
@@ -250,7 +246,6 @@ impl AgentPlatformConfig {
         Self::with_runtime(
             pool,
             materialization_policy,
-            control_plane_release,
             kernel_environment,
             Arc::new(SupervisedCodexRuntimePort::new(supervisor)),
             broker,
@@ -2593,7 +2588,7 @@ impl AgentPlatform {
         let control_store = Arc::new(SqliteControlPlaneStore::new(config.pool.clone()));
         let templates = OfficialTemplateCatalog::load()?;
         let catalog = Arc::new(KernelCatalogProvider::new(Arc::clone(&kernel)));
-        let compiler = PresetPreviewCompiler::new(config.control_plane_release, templates.clone())
+        let compiler = PresetRevisionCompiler::new(templates.clone())
             .with_canonical_registry(Arc::clone(&kernel), config.kernel_environment.clone());
         let control_plane = Arc::new(AgentControlPlane::new(
             Arc::clone(&control_store) as Arc<dyn ControlPlaneStore>,

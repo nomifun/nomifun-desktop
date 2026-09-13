@@ -636,27 +636,6 @@ async function invokeInstalledPluginThroughAgent(context, expectedVersion) {
     draft.document.skill_bindings = [];
     draft.document.persona = 'Invoke the only available tool exactly once.';
     draft.document.instructions = 'Always invoke the only supplied function tool, then report its exact result.';
-    const preview = await pageApi(
-      client,
-      baseUrl,
-      `/api/agent-presets/${encodeURIComponent(presetId)}/resolve-preview`,
-      {
-        method: 'POST',
-        phase: 'agent.preview_preset',
-        body: {
-          expected_current_revision: revision,
-          draft,
-          scene: 'agent_settings',
-          surface: 'desktop',
-          audience: 'owner',
-        },
-      },
-    );
-    if (preview.status !== 'ready' || preview.can_create_session !== true) {
-      failure('plugin_agent_preview_not_ready', 'Plugin Agent preview is not ready', {
-        diagnostic_code: preview.diagnostics?.[0]?.code ?? null,
-      });
-    }
     const saved = await pageApi(
       client,
       baseUrl,
@@ -666,7 +645,6 @@ async function invokeInstalledPluginThroughAgent(context, expectedVersion) {
         phase: 'agent.save_preset',
         body: {
           expected_current_revision: revision,
-          preview_digest: preview.preview_digest,
           draft,
           reason: 'installed Plugin candidate invocation',
         },

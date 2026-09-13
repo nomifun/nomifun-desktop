@@ -1,4 +1,4 @@
-//! AgentPreset, Capability Catalog, binding, preview, and editor-test control plane.
+//! AgentPreset, Capability Catalog, binding, and revision control plane.
 
 #![forbid(unsafe_code)]
 
@@ -16,13 +16,10 @@ pub use catalog::{
     CatalogProvider, CatalogSnapshot, MiniAppCatalogPublicationSource,
     OfficialTemplateCatalog, SharedMiniAppCatalogPublications, StaticCatalogProvider,
 };
-pub use compiler::{
-    CanonicalRegistryProvider, CompilerReleaseInputs, PresetPreviewCompiler, PreviewCompilation,
-};
+pub use compiler::{CanonicalRegistryProvider, PresetRevisionCompiler};
 pub use continuation::{
-    AGENT_SESSION_CREATE_PATH, continuation_view, editor_test_plan,
-    installation_token_state, remote_credential_continuation, revoked_installation_token,
-    rotated_installation_token,
+    continuation_view, installation_token_state, remote_credential_continuation,
+    revoked_installation_token, rotated_installation_token,
 };
 pub use error::ControlPlaneError;
 pub use impact::{

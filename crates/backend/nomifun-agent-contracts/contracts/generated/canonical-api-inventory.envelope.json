@@ -126,19 +126,6 @@
         "canonical_errors": []
       },
       {
-        "operation_id": "agent_presets.resolve_preview",
-        "method": "POST",
-        "path": "/api/agent-presets/{preset_id}/resolve-preview",
-        "request_schema": null,
-        "response_schema": null,
-        "canonical_errors": [
-          "CAPABILITY_NOT_MATERIALIZED",
-          "CAPABILITY_UNAVAILABLE_ON_PLATFORM",
-          "PRESET_RESOURCE_NOT_BOUND",
-          "RESOURCE_OWNER_MISMATCH"
-        ]
-      },
-      {
         "operation_id": "agent_preset_revisions.create",
         "method": "POST",
         "path": "/api/agent-presets/{preset_id}/revisions",
@@ -157,19 +144,6 @@
         "request_schema": null,
         "response_schema": null,
         "canonical_errors": []
-      },
-      {
-        "operation_id": "agent_preset_revisions.resolve_preview",
-        "method": "POST",
-        "path": "/api/agent-presets/{preset_id}/revisions/{revision}/resolve-preview",
-        "request_schema": null,
-        "response_schema": null,
-        "canonical_errors": [
-          "CAPABILITY_NOT_MATERIALIZED",
-          "CAPABILITY_UNAVAILABLE_ON_PLATFORM",
-          "PRESET_RESOURCE_NOT_BOUND",
-          "RESOURCE_OWNER_MISMATCH"
-        ]
       },
       {
         "operation_id": "agent_sessions.create",
@@ -449,5 +423,5 @@
       "/v1/tools?profile"
     ]
   },
-  "payload_digest": "702c3278890dd8f5af1999e197987f18e91b0d0b15b4adba32fd7e3369f13b0b"
+  "payload_digest": "39f61408f6ea0d9cc23fe06c54f9b89bc38604f7a5c3dff139bd305df8fe6f04"
 }

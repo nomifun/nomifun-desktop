@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0.0",
-  "decision_revision": "2026-09-02-phase1-stop-loss",
+  "decision_revision": "2026-09-13-remove-agent-editor-test",
   "decisions": [
     {"decision_id":"D-001","status":"confirmed","contract":"Product uses Agent Preset; runtime instance uses AgentSession."},
     {"decision_id":"D-002","status":"confirmed","contract":"FullAuto is the only execution behavior; no product approval modes."},
@@ -23,7 +23,6 @@
     {"decision_id":"D-019","status":"confirmed","contract":"Parallel work is enabled only for multi-task batches with disjoint writes and net speedup; no fixed agent count or EW estimate is a delivery contract."},
     {"decision_id":"D-020","status":"confirmed","contract":"Nomi is removed by one bounded C9 shutdown after the three release-blocking platform candidates; no sticky canary or durable handoff platform is required."},
     {"decision_id":"D-021","status":"confirmed","contract":"AgentSessionId UUIDv7 is the only product and execution session identity; Conversation is absent from v4."},
-    {"decision_id":"D-022","status":"confirmed","contract":"Editor Test saves or reuses an ordinary revision, creates an ordinary persistent Session, and performs real FullAuto effects."},
     {"decision_id":"D-023","status":"confirmed","contract":"Official seeds are role-complete and context-minimal; G0 freezes their exact contribution manifest."},
     {"decision_id":"D-024","status":"confirmed","contract":"One irreversible delete closure uses the real Runtime dispose result, purges Session-owned content, and leaves only the four-field tombstone; callers provide no synthetic zero proof."},
     {"decision_id":"D-025","status":"confirmed","contract":"Compatibility compares only the frozen selected execution closure; incompatibility leaves the existing Session read-only and requires an explicit fork."},

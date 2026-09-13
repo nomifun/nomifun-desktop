@@ -16,7 +16,7 @@ use nomifun_agent_session::{
 };
 use nomifun_api_types::{
     AgentPresetEditorResponse, AgentPresetSourceDto, OfficialPresetKeyDto,
-    OfficialPresetTemplateDto, PreviewStatusDto, ResolveAgentPresetPreviewResponse,
+    OfficialPresetTemplateDto,
 };
 use nomifun_codex_runtime::{
     CheckpointDisposition, DisposeRpcOutcome, PinnedRuntimeProfile, RuntimeDisposeReport,
@@ -132,8 +132,6 @@ pub enum CodingCodexError {
     Template(String),
     #[error("coding ordinary Revision mismatch: {0}")]
     Revision(String),
-    #[error("coding Preview mismatch: {0}")]
-    Preview(String),
     #[error("coding RuntimeProfile mismatch: {0}")]
     RuntimeProfile(String),
     #[error("coding workspace preservation mismatch: {0}")]
@@ -279,66 +277,6 @@ impl CodingCodexContract {
             return Err(CodingCodexError::Revision(
                 "ordinary Revision changed the frozen capability partition or model route"
                     .to_owned(),
-            ));
-        }
-        Ok(())
-    }
-
-    pub fn validate_preview(
-        &self,
-        preview: &ResolveAgentPresetPreviewResponse,
-    ) -> Result<(), CodingCodexError> {
-        if preview.status != PreviewStatusDto::Ready
-            || !preview.can_save_revision
-            || !preview.can_create_session
-            || !preview.diagnostics.is_empty()
-            || preview.resolved_snapshot_ref.is_none()
-        {
-            return Err(CodingCodexError::Preview(
-                "coding.codex Preview is not ready and executable".to_owned(),
-            ));
-        }
-        let summary = &preview.summary;
-        if summary.enabled_count != self.enabled_capabilities.len() as u32
-
-            || summary.active_at_start_count != self.enabled_capabilities.len() as u32
-
-            || summary.model_tool_count == 0
-            || summary.required_resource_kind_count == 0
-            || summary.provider_initialization_count != 1
-        {
-            return Err(CodingCodexError::Preview(
-                "Preview summary differs from the frozen Coding shape".to_owned(),
-            ));
-        }
-        let inspector = &preview.inspector;
-        let initial = inspector
-            .enabled_capabilities
-            .iter()
-            .map(|capability| CapabilityId::from(capability.capability.id.clone()))
-            .collect::<BTreeSet<_>>();
-        let runtime_features = inspector
-            .required_runtime_features
-            .iter()
-            .cloned()
-            .map(RuntimeFeatureId::from)
-            .collect::<BTreeSet<_>>();
-        if inspector.runtime_profile.as_deref() != Some("coding_native")
-            || initial != self.enabled_ids()
-
-
-            || runtime_features != self.required_runtime_features
-            || inspector.tool_schema_refs.is_empty()
-            || !inspector.service_key_diagnostics.is_empty()
-        {
-            return Err(CodingCodexError::Preview(
-                "Preview inspector lost Coding capabilities, features, tools, or clean wiring"
-                    .to_owned(),
-            ));
-        }
-        if !inspector.required_resource_kinds.contains("workspace") {
-            return Err(CodingCodexError::Preview(
-                "Preview inspector lost the Coding workspace requirement".to_owned(),
             ));
         }
         Ok(())

@@ -1192,57 +1192,6 @@ pub fn canonical_api_inventory_payload() -> CanonicalApiInventoryPayload {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum EditorDraftState {
-    Clean,
-    Dirty,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum EditorRevisionAction {
-    ReuseCurrentRevision,
-    SaveOrdinaryVisibleRevision,
-    SaveFailed,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct D022EditorTestFixtureCase {
-    pub case_id: String,
-    pub draft_state: EditorDraftState,
-    pub revision_action: EditorRevisionAction,
-    pub expected_revision_delta: u32,
-    pub expected_agent_session_delta: u32,
-    pub expected_external_effect_delta: u32,
-    pub selected_revision_is_ordinary_visible_immutable: bool,
-    pub uses_exact_agent_binding_value: bool,
-    pub session_create_path: Option<String>,
-    pub session_is_ordinary_persistent: bool,
-    pub delete_path: Option<String>,
-    pub uses_real_typed_resources: bool,
-    pub uses_full_auto: bool,
-    pub expected_error: Option<CanonicalErrorCode>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct D022EditorTestFixturePayload {
-    pub schema_version: VersionString,
-    pub cases: Vec<D022EditorTestFixtureCase>,
-    pub forbidden_backend_surface: BTreeSet<String>,
-}
-
-pub const D022_EDITOR_TEST_FIXTURE_JSON: &str =
-    include_str!("../contracts/presets/d022-editor-test.fixture.json");
-
-pub fn d022_editor_test_fixture_cases() -> Vec<D022EditorTestFixtureCase> {
-    serde_json::from_str::<D022EditorTestFixturePayload>(D022_EDITOR_TEST_FIXTURE_JSON)
-        .expect("D-022 fixture must match D022EditorTestFixturePayload")
-        .cases
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PresetContractViolation {
     pub code: CanonicalErrorCode,
@@ -1729,34 +1678,6 @@ mod tests {
     #[test]
     fn official_seed_fixture_is_the_valid_target_contract() {
         official_preset_seed_manifest_payload().validate().unwrap();
-    }
-
-    #[test]
-    fn d022_has_clean_dirty_and_save_failure_cases() {
-        let cases = d022_editor_test_fixture_cases();
-        assert_eq!(cases.len(), 3);
-        assert!(cases.iter().any(|case| {
-            case.draft_state == EditorDraftState::Clean
-                && case.expected_revision_delta == 0
-                && case.expected_agent_session_delta == 1
-                && case.session_create_path.as_deref() == Some("/api/agent-sessions")
-                && case.delete_path.as_deref()
-                    == Some("/api/agent-sessions/{agent_session_id}")
-        }));
-        assert!(cases.iter().any(|case| {
-            case.draft_state == EditorDraftState::Dirty
-                && case.expected_revision_delta == 1
-                && case.expected_agent_session_delta == 1
-                && case.selected_revision_is_ordinary_visible_immutable
-                && case.uses_exact_agent_binding_value
-        }));
-        assert!(cases.iter().any(|case| {
-            case.revision_action == EditorRevisionAction::SaveFailed
-                && case.expected_agent_session_delta == 0
-                && case.expected_external_effect_delta == 0
-                && case.session_create_path.is_none()
-                && case.delete_path.is_none()
-        }));
     }
 
     #[test]

@@ -19,7 +19,6 @@ use nomifun_agent_contracts::{
     FRESH_V4_BASELINE_SQL, FRESH_V4_DATA_GENERATION, FRESH_V4_MIGRATION_HEAD,
     FRESH_V4_PROJECTION_SCHEMA_VERSION,
 };
-use nomifun_agent_control_plane::CompilerReleaseInputs;
 use nomifun_agent_domain_wave1::{
     Wave1CapabilityOperation, Wave1ContextHostRequest, Wave1FetchRequest, Wave1HostPort,
     Wave1HostPortError, Wave1HostRequest, Wave1KnowledgeReadRequest,
@@ -1590,15 +1589,6 @@ async fn initialize_platform(
         host_surface: current_host_surface(),
         availability_evidence_revision: C7_AVAILABILITY_REVISION.to_owned(),
     };
-    let release = CompilerReleaseInputs {
-        resolver_version: VersionString::from(CONTRACT_VERSION),
-        runtime_protocol_version: VersionString::from(CONTRACT_VERSION),
-        runtime_feature_inventory_digest: feature_digest,
-        canonical_schema_manifest_digest: expected_schema_digest,
-        target_contribution_manifest_digest: seed.target_first_party_contribution_digest,
-        availability_evidence_revision: C7_AVAILABILITY_REVISION.to_owned(),
-    };
-
     let registrations = bundled_registrations_with_host_ports(host_ports)?;
 
     // Runtime process supervision is real and shared by all v4 Sessions. Its
@@ -1650,7 +1640,6 @@ async fn initialize_platform(
     let mut config = AgentPlatformConfig::with_runtime(
         pool,
         policy,
-        release,
         kernel_environment,
         runtime,
         broker,

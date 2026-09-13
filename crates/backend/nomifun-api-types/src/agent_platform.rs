@@ -342,122 +342,6 @@ pub struct AgentCatalogResponse {
     pub mcp_tools: Vec<McpToolCatalogItemDto>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PreviewStatusDto {
-    Ready,
-    Blocked,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PreviewDiagnosticSeverityDto {
-    Error,
-    Warning,
-    Info,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PreviewDiagnosticDto {
-    pub severity: PreviewDiagnosticSeverityDto,
-    pub code: String,
-    pub message: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub subject: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub details: Option<Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PreviewCapabilityDto {
-    pub capability: ExactCatalogRefDto,
-    pub display_name: String,
-    pub source_package: ExactCatalogRefDto,
-    pub dependency_path: Vec<String>,
-    pub required_runtime_features: BTreeSet<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PreviewSummaryDto {
-    pub enabled_count: u32,
-    pub active_at_start_count: u32,
-    pub model_tool_count: u32,
-    pub context_contributor_count: u32,
-    pub skill_count: u32,
-    pub mcp_count: u32,
-    pub required_resource_kind_count: u32,
-    pub provider_initialization_count: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RevisionDiffDto {
-    pub added_enabled: BTreeSet<String>,
-    pub removed_enabled: BTreeSet<String>,
-    pub added_skills: BTreeSet<String>,
-    pub removed_skills: BTreeSet<String>,
-    pub model_routes_changed: bool,
-    pub instructions_changed: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SnapshotInspectorDto {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub snapshot_ref: Option<ResolvedSnapshotRefDto>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub preset_revision_ref: Option<PresetRevisionRefDto>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_profile: Option<String>,
-    pub required_runtime_protocol_version: String,
-    pub required_runtime_features: BTreeSet<String>,
-    pub enabled_capabilities: Vec<PreviewCapabilityDto>,
-    pub tool_schema_refs: Vec<String>,
-    pub context_schema_refs: Vec<String>,
-    pub mcp_materializations: Vec<McpToolCatalogItemDto>,
-    pub required_resource_kinds: BTreeSet<String>,
-    pub service_key_diagnostics: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ResolveAgentPresetPreviewRequest {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_current_revision: Option<PresetRevisionRefDto>,
-    pub draft: AgentPresetDraftDto,
-    pub scene: String,
-    pub surface: String,
-    pub audience: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ResolveSavedRevisionPreviewRequest {
-    pub scene: String,
-    pub surface: String,
-    pub audience: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ResolveAgentPresetPreviewResponse {
-    pub status: PreviewStatusDto,
-    pub draft_digest: String,
-    pub preview_digest: String,
-    pub candidate_revision_ref: PresetRevisionRefDto,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resolved_snapshot_ref: Option<ResolvedSnapshotRefDto>,
-    pub summary: PreviewSummaryDto,
-    pub diagnostics: Vec<PreviewDiagnosticDto>,
-    pub revision_diff: RevisionDiffDto,
-    pub inspector: SnapshotInspectorDto,
-    pub can_save_revision: bool,
-    pub can_create_session: bool,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateAgentPresetRequest {
@@ -684,7 +568,6 @@ pub struct AgentPresetRevisionImpactResponse {
 pub struct SaveAgentPresetRevisionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_current_revision: Option<PresetRevisionRefDto>,
-    pub preview_digest: String,
     pub draft: AgentPresetDraftDto,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
@@ -696,7 +579,6 @@ pub struct SaveAgentPresetRevisionResponse {
     pub preset: AgentPresetSummaryDto,
     pub revision: AgentPresetRevisionDto,
     pub resolved_snapshot_ref: ResolvedSnapshotRefDto,
-    pub preview_digest: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -822,34 +704,6 @@ pub struct RemoteMutationResponseDto {
     pub agent_session_id: String,
     pub cursor: SessionCursorDto,
     pub session_status: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EditorDraftStateDto {
-    Clean,
-    Dirty,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EditorRevisionActionDto {
-    ReuseCurrentRevision,
-    SaveOrdinaryVisibleRevision,
-}
-
-/// Client-side D-022 plan. It is not an API endpoint or alternate Session mode.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AgentPresetEditorTestPlanDto {
-    pub draft_state: EditorDraftStateDto,
-    pub revision_action: EditorRevisionActionDto,
-    pub preview: ResolveAgentPresetPreviewResponse,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub save_request: Option<SaveAgentPresetRevisionRequest>,
-    pub session_create_path: String,
-    pub uses_real_typed_resources: bool,
-    pub uses_full_auto: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1208,7 +1062,6 @@ mod snapshot_tests {
     #[test]
     fn revision_save_request_rejects_client_submitted_internal_locks() {
         let request = json!({
-            "preview_digest": "preview",
             "draft": {
                 "preset_id": PRESET_ID,
                 "display_name": "Agent",
@@ -1227,6 +1080,32 @@ mod snapshot_tests {
         assert!(
             serde_json::from_value::<SaveAgentPresetRevisionRequest>(request).is_err(),
             "internal ContributionLock values are server-generated and read-only"
+        );
+    }
+
+    #[test]
+    fn revision_save_request_rejects_removed_preview_handshake() {
+        let request = json!({
+            "preview_digest": "removed",
+            "draft": {
+                "preset_id": PRESET_ID,
+                "display_name": "Agent",
+                "document": {
+                    "schema_version": "1.0.0",
+                    "model_route_refs": {},
+                    "chat_route_records": {},
+                    "enabled_capabilities": [],
+                    "skill_bindings": [],
+                    "system_role_provider_overrides": {},
+                    "persona": "",
+                    "instructions": "",
+                    "starter_prompts": []
+                }
+            }
+        });
+        assert!(
+            serde_json::from_value::<SaveAgentPresetRevisionRequest>(request).is_err(),
+            "the removed preview handshake must not remain accepted by the save API"
         );
     }
 }

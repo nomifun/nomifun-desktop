@@ -172,8 +172,6 @@ import type {
   RemoteOpenRequest,
   RemoteOpenResponse,
   RemoteTurnRequest,
-  ResolveAgentPresetPreviewRequest,
-  ResolveAgentPresetPreviewResponse,
   SelectProductAgentBindingRequest,
   RevokeInstallationTokenResponse,
   RotateInstallationTokenResponse,
@@ -663,14 +661,6 @@ export const agentPlatform = {
     const query = params.revision == null ? '' : `?revision=${params.revision}`;
     return `/api/agent-presets/${encodeURIComponent(params.preset_id)}/editor${query}`;
   }),
-  resolvePreview: httpPost<
-    ResolveAgentPresetPreviewResponse,
-    { preset_id: string; request: ResolveAgentPresetPreviewRequest }
-  >(
-    (params) =>
-      `/api/agent-presets/${encodeURIComponent(params.preset_id)}/resolve-preview`,
-    (params) => params.request
-  ),
   saveRevision: httpPost<
     SaveAgentPresetRevisionResponse,
     { preset_id: string; request: SaveAgentPresetRevisionRequest }
@@ -684,20 +674,6 @@ export const agentPlatform = {
   >(
     (params) =>
       `/api/agent-presets/${encodeURIComponent(params.preset_id)}/revisions/${params.revision}`
-  ),
-  resolveRevisionPreview: httpPost<
-    ResolveAgentPresetPreviewResponse,
-    {
-      preset_id: string;
-      revision: number;
-      scene: string;
-      surface: string;
-      audience: string;
-    }
-  >(
-    (params) =>
-      `/api/agent-presets/${encodeURIComponent(params.preset_id)}/revisions/${params.revision}/resolve-preview`,
-    ({ scene, surface, audience }) => ({ scene, surface, audience })
   ),
   getBinding: httpGet<
     AgentBindingRecord | null,

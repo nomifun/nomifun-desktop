@@ -13,8 +13,6 @@
     "fork": "自定义预设",
     "remove": "移除",
     "retry": "重试",
-    "preview": "检查配置",
-    "test": "试用 Agent",
     "startConversation": "使用 Agent",
     "saveRevision": "保存配置"
   },
@@ -99,11 +97,7 @@
     "skillsMcp": "技能与扩展",
     "skillsMcpHint": "Skill 只贡献 Instructions；MCP Tool 通过可用的能力进入这个 Agent。",
     "skills": "Skills",
-    "mcp": "MCP 物化",
-    "previewInspector": "配置诊断",
-    "previewInspectorHint": "配置诊断与版本信息",
-    "test": "试用与检查",
-    "testHint": "试用会先保存当前配置，再开启真实会话。"
+    "mcp": "MCP 物化"
   },
   "fields": {
     "name": "名称",
@@ -112,7 +106,7 @@
     "chatModelRoutePlaceholder": "Exact model route ID",
     "chatModelRouteRecord": "Chat 路由记录",
     "chatModelRouteRecordPlaceholder": "Canonical Chat 路由 JSON",
-    "chatModelRouteUnavailable": "先配置一个可用的聊天模型，再保存或试用 Agent。",
+    "chatModelRouteUnavailable": "先配置一个可用的聊天模型，再保存 Agent。",
     "persona": "角色定位",
     "instructions": "工作要求"
   },
@@ -148,7 +142,6 @@
   "resources": {
     "noneRequired": "无需额外资源",
     "requiredAtUse": "使用时需要",
-    "requiredKinds": "所需资源种类",
     "pickerTitle": "选择本次使用的资源",
     "pickerHint": "只选择产品中的实际资源；权限、路径、凭据和运行参数由系统安全解析。",
     "ready": "资源已就绪",
@@ -184,52 +177,9 @@
       "workspace": "工作区"
     }
   },
-  "preview": {
-    "emptyTitle": "尚未 Preview",
-    "emptyBody": "Preview 只解析 Draft，不写 Preset、Revision、Session 或外部 Effect。",
-    "ready": "Preview 已就绪",
-    "blocked": "Preview 被阻止",
-    "candidateRevision": "候选 Revision {{revision}}",
-    "metrics": {
-      "enabled_count": "已启用能力",
-      "active_at_start_count": "实际能力（含依赖）",
-      "model_tool_count": "Tool schema",
-      "context_contributor_count": "Context 来源",
-      "skill_count": "Skills",
-      "mcp_count": "MCP mapping",
-      "required_resource_kind_count": "所需资源种类"
-    }
-  },
   "inspector": {
-    "revisionDiff": "Revision diff",
     "snapshot": "Snapshot 与 RuntimeProfile",
-    "snapshotDigest": "Snapshot digest",
-    "runtimeProfile": "RuntimeProfile",
-    "protocol": "Runtime 协议",
-    "tools": "Tool schema 引用",
-    "context": "Context schema 引用",
-    "continuation": "D-025 continuation",
-    "remoteToken": "D-026 Remote token 边界"
-  },
-  "continuation": {
-    "title": "Exact 兼容或显式 fork",
-    "body": "冻结 Snapshot 兼容时继续同一 Session；executor 不可用时历史只读，必须显式 fork 新 ID 和自包含语义 base，绝不迁移 Runtime 私有 handle 或重放 Effect。"
-  },
-  "remoteToken": {
-    "status": {
-      "active": "Installation token 已启用",
-      "revoked": "Installation token 已撤销",
-      "unconfigured": "Installation token 未配置",
-      "unavailable": "无法读取 Installation token 状态"
-    },
-    "continuation": "Rotate/revoke 只阻止新的 Remote 请求 admission。既有 Session 不变；replacement token 必须属于同一 owner，并显式提交原 AgentSession ID。"
-  },
-  "test": {
-    "realEffectWarning": "测试会在需要时自动保存当前修改并创建普通持久会话。工具和外部效果不会模拟；所需资源由测试会话的实际运行场景提供。",
-    "inputPlaceholder": "输入该 Agent 的第一条测试消息…",
-    "session": "AgentSession",
-    "turn": "Turn 状态",
-    "revision": "Revision"
+    "protocol": "Runtime 协议"
   },
   "common": {
     "none": "无",
@@ -340,7 +290,6 @@
     "capabilityTab": "能力配置",
     "settingsTab": "基本设置",
     "skillsTab": "技能与扩展",
-    "testTab": "试用与检查",
     "saveAsMine": "保存为我的 Agent",
     "customizeTitle": "自定义这份预设",
     "customizeHint": "自由调整能力，保存为你的 Agent。官方预设仍可随时使用。",
@@ -360,9 +309,8 @@
     "saveSuccess": "Agent 配置已保存",
     "selectedHint": "只展示当前已配置的能力",
     "settingsHint": "定义身份、模型和工作方式",
-    "technicalHint": "配置诊断与版本信息",
     "manageModels": "前往模型管理",
-    "modelNeeded": "先配置一个可用的聊天模型，再保存或试用 Agent。",
+    "modelNeeded": "先配置一个可用的聊天模型，再保存 Agent。",
     "disabledSave": "请先处理不可用的能力",
     "presetBadge": "可自定义预设",
     "personalBadge": "个人 Agent",

@@ -164,8 +164,8 @@ Snapshot 只锁定该 Session 实际选择和可能按需激活的闭包，不�
 ### 2.8 AgentSession
 
 `AgentSession` 是产品历史与执行生命周期的唯一 aggregate，使用唯一
-`AgentSessionId(UUIDv7)`。Chat、Coding、Remote、自动化和 Agent Editor 的“试用 Agent”
-都创建同一种 Session，不建立第二个 Conversation 容器或测试专用 Session。
+`AgentSessionId(UUIDv7)`。Chat、Coding、Remote 和自动化都创建同一种 Session，不建立
+第二个 Conversation 容器。
 
 ### 2.9 Typed Resource Binding
 
@@ -654,9 +654,8 @@ AgentPresetRevision
   revision_digest
 ```
 
-Revision 保存后不可原地修改。编辑器 Save 总是创建新 Revision；“试用 Agent”对 dirty
-draft 先执行普通 Save，对 clean draft 复用当前 Revision，然后创建普通 AgentSession。
-不存在 TestRevision、DraftSnapshot 或 ephemeral execution。
+Revision 保存后不可原地修改。编辑器 Save 在内容变化时创建新 Revision，未变化时复用
+当前 Revision；不存在额外的草稿快照或临时执行记录。
 
 ### 7.2 Capability Selection
 
@@ -725,7 +724,7 @@ creative-studio.default
 
 - 对应 Capability 已有真实 owner 和消费者；
 - 默认资源使用 picker 或 typed slot，不写入具体用户资源 ID；
-- Preview 能解释缺失资源和平台不可用；
+- Save 能解释缺失资源和平台不可用；
 - 创建 Session 后走同一 Compiler、Snapshot、Runtime 和 SessionEvent 主链；
 - 不以 placeholder、fake handler 或静默删减能力形成“可运行”。
 
@@ -772,12 +771,11 @@ Compiler 不因“可能会用”就打开资源。真实连接和 handle 由对
 
 ## 10. 单一 Canonical Compiler
 
-Preview、Save 和 Test 必须调用同一个纯 Compiler：
+Save 必须调用唯一的纯 Compiler：
 
 ```text
-Preview ─┐
-Save ────┼─> one canonical Compiler
-Test ────┘          │
+Save ─────> one canonical Compiler
+                    │
                     └─> Snapshot + authority + diagnostics
 
 Session Open ─> 读取已保存 Snapshot + 当前执行兼容检查
@@ -876,7 +874,6 @@ Snapshot、不静默换 Provider、不降级 Coding。用户需要继续工作�
 
 - 本地 Chat；
 - Coding；
-- Agent Editor 试用；
 - Remote；
 - scheduled/automation run；
 - Companion、Requirement 或其他成熟业务入口。
@@ -1119,25 +1116,12 @@ Remote 不提供 Capability scope、Runtime mode、confirmation 或全局 Regist
 - 模型选择；
 - 按任务分组的能力开关；
 - Workspace、Knowledge、MCP/连接器等 picker；
-- 保存；
-- 试用 Agent。
+- 保存。
 
 工作台使用“已启用能力 / 全部能力”双栏，两侧独立分类与搜索。勾选仅是临时批量操作；移入启用、移出禁用，支持单项加减和撤销。Agent 列表复用会话页的贴边 ContentSider 与固定标题栏开关。
 普通用户不需要手填 CapabilityId、Snapshot digest、ResourceId、owner 或 canonical JSON。
 
-Revision、Snapshot、Provider provenance、protocol 和 raw diagnostic 放入折叠的技术详情，
-不成为主流程。
-
-“试用 Agent”执行：
-
-```text
-dirty draft -> 普通 Save Revision
-clean draft -> 复用当前 Revision
--> canonical Compiler
--> 普通 AgentSession
-```
-
-它使用真实 resource binding 和真实 Effect 语义，不增加 mock/suppressed Effect 模式。
+Revision、Snapshot、Provider provenance 和 protocol 不成为编辑器主流程。
 
 模板页展示当前真正可用的产品模板，不承诺固定卡片数量。候选模板在后端能力和资源流程
 未完成前不出现在默认入口。
@@ -1149,13 +1133,13 @@ clean draft -> 复用当前 Revision
 API 至少需要覆盖：
 
 - materialized Package、Capability、Skill 和 MCP mapping 查询；
-- Agent Preset 创建、Revision 保存和 Preview；
+- Agent Preset 创建和 Revision 保存；
 - AgentSession create/read/turn/events/messages/fork/delete；
 - Agent binding 和 RemoteBinding；
 - Remote open/turn/observe/cancel。
 
-所有 Session API 使用同一个 `AgentSessionId`。产品不提供 test-only Session route、
-Runtime selector 或 public capability activation mutation。
+所有 Session API 使用同一个 `AgentSessionId`。产品不提供 Runtime selector 或 public
+capability activation mutation。
 
 持久化保留真正被产品读取的事实：
 
@@ -1184,7 +1168,7 @@ Runtime selector 或 public capability activation mutation。
 2. Package、ServiceKey、裸 MCP Tool 和 template key 不进入已保存 Snapshot selection；
 3. Skill 不自动扩张 Capability；
 4. MCP Tool 未完成 canonical mapping 时不能进入 Agent；
-5. 一个 canonical Compiler 同时服务 Preview、Save 和 Test；
+5. Save 使用唯一的 canonical Compiler；
 6. Session Open 读取已保存 Snapshot，不重新编译另一份结果；
 7. Snapshot 只冻结实际选择闭包和 exact Provider，不冻结无关全局目录；
 8. Snapshot 外调用统一失败，运行中的 Agent 不能修改自己的 ceiling；
@@ -1210,7 +1194,7 @@ Runtime selector 或 public capability activation mutation。
 | Minimal Chat | 空 Capability/Skill/MCP/Workspace 正向编译，最终 `tools=[]`，正常 turn/stream/cancel |
 | Coding | 当前正式核心 Coding surface 真实可用，不以 mock 或弱化 fallback 补齐 |
 | Package | first-party 与 test alternate 使用同一 registration/materializer |
-| Compiler | Preview、Save、Test 对同一输入得到同一 Snapshot content |
+| Compiler | Save 对同一输入得到确定的 Snapshot content |
 | Resource | owner mismatch、missing binding 和 operation mismatch 明确失败 |
 | On-demand | 只能激活 frozen ceiling，资源按首次真实使用 lazy acquire |
 | Browser/Computer | first-party 与 alternate Provider 可替换，消费者代码不变，无具体实现旁路 |
