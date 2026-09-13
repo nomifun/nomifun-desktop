@@ -19,13 +19,15 @@ describe('Nomi sendbox control layout', () => {
     const rightToolsIndex = source.indexOf('rightTools={');
     const modelIndex = source.indexOf('<NomiModelSelector', rightToolsIndex);
     const contextRingIndex = source.indexOf('<ContextUsageRing', rightToolsIndex);
-    const collaboratorIndex = source.indexOf('{collaboratorSelectorNode}', rightToolsIndex);
+    const sideToolsIndex = source.indexOf('sideTools={');
+    const collaboratorIndex = source.indexOf('{collaboratorSelectorNode}', sideToolsIndex);
 
     expect(sendBoxIndex).toBeGreaterThan(-1);
     expect(rightToolsIndex).toBeGreaterThan(sendBoxIndex);
     expect(contextRingIndex).toBeGreaterThan(rightToolsIndex);
     expect(modelIndex).toBeGreaterThan(contextRingIndex);
-    expect(collaboratorIndex).toBeGreaterThan(modelIndex);
+    expect(collaboratorIndex).toBeGreaterThan(sideToolsIndex);
+    expect(collaboratorIndex).toBeLessThan(rightToolsIndex);
     expect(source.includes('topRightTools=')).toBe(false);
     expect(source.includes('ContextUsagePill')).toBe(false);
     expect(source.includes("data-testid='nomi-context-usage-slot'")).toBe(false);
@@ -52,7 +54,7 @@ describe('Nomi sendbox control layout', () => {
     expect(contextRingSource.includes('rd-999px b b-solid px-10px')).toBe(false);
   });
 
-  test('merges collaboration models and policy into one control next to the main model', () => {
+  test('keeps collaboration models and policy together in the side rail', () => {
     const chatSource = readSource(new URL('../../components/ChatConversation.tsx', import.meta.url));
     const sendBoxSource = readSource(new URL('./NomiSendBox.tsx', import.meta.url));
 
@@ -73,11 +75,13 @@ describe('Nomi sendbox control layout', () => {
     const rightToolsIndex = sendBoxSource.indexOf('rightTools={');
     const contextRingIndex = sendBoxSource.indexOf('<ContextUsageRing', rightToolsIndex);
     const modelIndex = sendBoxSource.indexOf('<NomiModelSelector', rightToolsIndex);
-    const collaboratorIndex = sendBoxSource.indexOf('{collaboratorSelectorNode}', rightToolsIndex);
+    const sideToolsIndex = sendBoxSource.indexOf('sideTools={');
+    const collaboratorIndex = sendBoxSource.indexOf('{collaboratorSelectorNode}', sideToolsIndex);
 
     expect(contextRingIndex).toBeGreaterThan(rightToolsIndex);
     expect(modelIndex).toBeGreaterThan(contextRingIndex);
-    expect(collaboratorIndex).toBeGreaterThan(modelIndex);
+    expect(collaboratorIndex).toBeGreaterThan(sideToolsIndex);
+    expect(collaboratorIndex).toBeLessThan(rightToolsIndex);
   });
 
   test('reconciles conversation collaborators before rendering or persisting executable ranges', () => {

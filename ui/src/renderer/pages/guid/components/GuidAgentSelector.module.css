@@ -1,18 +1,19 @@
 .trigger {
   display: inline-flex;
   align-items: center;
-  gap: 9px;
+  gap: 7px;
   min-width: 0;
   max-width: 100%;
-  min-height: 36px;
-  padding: 6px 9px;
+  min-height: 32px;
+  padding: 5px 8px;
   border: 0;
   border-radius: 9px;
   color: var(--text-primary);
   background: transparent;
   font: inherit;
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 600;
+  line-height: 20px;
   cursor: pointer;
   text-align: left;
 }
@@ -24,6 +25,8 @@
 
 .trigger > :not(.triggerLabel) { flex-shrink: 0; }
 .triggerLabel { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.trigger :global(.i-icon) { display: inline-flex; align-items: center; justify-content: center; line-height: 0; }
+.trigger :global(.i-icon) > svg { display: block; }
 .chevronOpen { transform: rotate(180deg); }
 
 .panel {
@@ -109,11 +112,13 @@
 .compactTrigger {
   min-height: 28px;
   max-width: 180px;
+  gap: 6px;
   padding: 3px 8px;
   border-radius: 999px;
   color: var(--text-secondary);
   font-size: 13px;
-  font-weight: 500;
+  font-weight: 400;
+  line-height: 20px;
 }
 
 .compactTrigger:disabled {
@@ -122,6 +127,6 @@
 }
 
 @media (max-width: 480px) {
-  .trigger { font-size: 14px; }
+  .trigger:not(.compactTrigger) { font-size: 14px; }
   .panel { border-radius: 12px; }
 }

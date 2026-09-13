@@ -125,6 +125,7 @@ const FileAttachButton: React.FC<FileAttachButtonProps> = ({
         icon={plusIcon}
         onClick={openFileSelector}
         data-testid='nomi-attach-folder-btn'
+        data-composer-action='attach'
       />
     );
   }
@@ -299,6 +300,7 @@ const FileAttachButton: React.FC<FileAttachButtonProps> = ({
           loading={uploading}
           disabled={uploading}
           data-testid='nomi-attach-folder-btn'
+          data-composer-action='attach'
         />
       </Trigger>
       <input

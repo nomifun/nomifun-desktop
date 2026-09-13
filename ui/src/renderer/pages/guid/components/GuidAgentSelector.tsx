@@ -142,15 +142,16 @@ const GuidAgentSelector: React.FC<GuidAgentSelectorProps> = ({
       <button
         ref={refs.setReference}
         type='button'
-        className={`${styles.trigger} ${compact ? styles.compactTrigger : ''}`}
+        className={`${styles.trigger} ${compact ? `${styles.compactTrigger} sendbox-model-btn nomi-sendbox-agent-btn` : ''}`}
         disabled={disabled}
-        title={selectedLabel}
+        title={compact ? undefined : selectedLabel}
+        aria-label={selectedLabel}
         data-testid='guid-agent-selector'
         {...getReferenceProps()}
       >
-        <Robot theme='outline' size={21} fill='currentColor' />
-        <span className={styles.triggerLabel}>{selectedLabel}</span>
-        <Down theme='outline' size={14} fill='currentColor' className={open ? styles.chevronOpen : undefined} />
+        <Robot theme='outline' size={compact ? 14 : 18} fill='currentColor' />
+        <span className={`${styles.triggerLabel} ${compact ? 'sendbox-responsive-label' : ''}`}>{selectedLabel}</span>
+        <Down theme='outline' size={12} fill='currentColor' className={`${compact ? 'sendbox-responsive-chevron' : ''} ${open ? styles.chevronOpen : ''}`} />
       </button>
       {open && (
         <FloatingPortal>

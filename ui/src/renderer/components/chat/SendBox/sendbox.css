@@ -406,6 +406,10 @@
   flex-shrink: 0;
 }
 
+.sendbox-responsive-config-group .nomi-sendbox-agent-btn {
+  justify-content: center;
+}
+
 /* The collaboration policy is intentionally an icon in the normal toolbar,
  * but it participates in the same desktop hover-to-expand interaction. */
 .sendbox-responsive-config-group .nomi-sendbox-policy-btn {
@@ -436,6 +440,7 @@
   }
 
   .sendbox-responsive-config-group .nomi-sendbox-model-btn,
+  .sendbox-responsive-config-group .nomi-sendbox-agent-btn,
   .sendbox-responsive-config-group .nomi-sendbox-policy-btn {
     width: auto !important;
     min-width: 28px !important;
@@ -451,6 +456,7 @@
       opacity 160ms ease !important;
   }
 
+  .sendbox-responsive-config-group .nomi-sendbox-model-btn > span,
   .sendbox-responsive-config-group .nomi-sendbox-model-btn .arco-btn-content,
   .sendbox-responsive-config-group .nomi-sendbox-policy-btn .arco-btn-content {
     display: inline-flex !important;
@@ -482,6 +488,8 @@
   @container sendbox-config (max-width: 560px) {
     .sendbox-responsive-config-group .nomi-sendbox-model-btn:hover,
     .sendbox-responsive-config-group .nomi-sendbox-model-btn:focus-visible,
+    .sendbox-responsive-config-group .nomi-sendbox-agent-btn:hover,
+    .sendbox-responsive-config-group .nomi-sendbox-agent-btn:focus-visible,
     .sendbox-responsive-config-group .nomi-sendbox-policy-btn:hover,
     .sendbox-responsive-config-group .nomi-sendbox-policy-btn:focus-visible {
       width: auto !important;
@@ -497,6 +505,10 @@
     .sendbox-responsive-config-group .nomi-sendbox-model-btn:hover .sendbox-responsive-chevron,
     .sendbox-responsive-config-group .nomi-sendbox-model-btn:focus-visible .sendbox-responsive-label,
     .sendbox-responsive-config-group .nomi-sendbox-model-btn:focus-visible .sendbox-responsive-chevron,
+    .sendbox-responsive-config-group .nomi-sendbox-agent-btn:hover .sendbox-responsive-label,
+    .sendbox-responsive-config-group .nomi-sendbox-agent-btn:hover .sendbox-responsive-chevron,
+    .sendbox-responsive-config-group .nomi-sendbox-agent-btn:focus-visible .sendbox-responsive-label,
+    .sendbox-responsive-config-group .nomi-sendbox-agent-btn:focus-visible .sendbox-responsive-chevron,
     .sendbox-responsive-config-group .nomi-sendbox-policy-btn:hover .sendbox-responsive-label,
     .sendbox-responsive-config-group .nomi-sendbox-policy-btn:focus-visible .sendbox-responsive-label {
       display: inline-flex !important;
@@ -659,8 +671,9 @@
   }
 
   /* Tighter mobile sendbox: reduce outer padding so the bottom input takes
-     less vertical space on narrow screens. */
-  .sendbox-panel {
+     less vertical space on narrow screens. Side-tool composers already own
+     their padding inside the shared surface. */
+  .sendbox-panel:not(.sendbox-panel--side-tools) {
     padding: 8px 10px !important;
     border-radius: 16px !important;
   }

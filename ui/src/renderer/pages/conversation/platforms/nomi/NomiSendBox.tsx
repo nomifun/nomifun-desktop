@@ -10,7 +10,6 @@ import { ipcBridge } from '@/common';
 import { uuid, uuidv7 } from '@/common/utils';
 import CommandQueuePanel from '@/renderer/components/chat/CommandQueuePanel';
 import SessionCapabilityPicker, {
-  SessionCapabilityComposerLayout,
   buildSessionCapabilitySelection,
   draftFromSessionCapabilitySelection,
   sessionCapabilitySelectionKey,
@@ -141,12 +140,11 @@ const NomiSendBox: React.FC<{
   turnActivity: NomiMessageRuntime;
   /** Hide model and other editable controls on locked surfaces. */
   hideAdvancedControls?: boolean;
-  /** Conversation collaborator-model control, rendered after the main model. */
+  /** Existing collaboration control, rendered in the composer side rail. */
   collaboratorSelectorNode?: React.ReactNode;
   /**
-   * Extra node(s) rendered in the right-tools group after the collaborator
-   * selector. A projected task uses this to surface its task-requirement
-   * control inside the participant conversation.
+   * Extra node(s) rendered in the bottom right-tools group. A projected task
+   * uses this to surface its task-requirement control inside the participant conversation.
    */
   extraRightTools?: React.ReactNode;
 }> = ({
@@ -980,8 +978,9 @@ const NomiSendBox: React.FC<{
         onRemove={remove}
         onClear={clear}
       />
-      <SessionCapabilityComposerLayout
-        picker={
+      <SendBox
+        key={conversation_id}
+        sideTools={
           hideAdvancedControls ? null : (
             <SessionCapabilityPicker
               catalog={capabilityCatalog.catalog}
@@ -991,124 +990,121 @@ const NomiSendBox: React.FC<{
               loadFailed={Boolean(capabilityCatalog.error)}
               onRetry={capabilityCatalog.retry}
               applyMode='next-send'
-            />
+            >
+              {collaboratorSelectorNode}
+            </SessionCapabilityPicker>
           )
         }
-      >
-        <SendBox
-          key={conversation_id}
-          data-testid='nomi-sendbox'
-          showPinnedPlan
-          onMobilePlusClick={isMobile ? () => setIsMobileSheetOpen(true) : undefined}
-          value={content}
-          onChange={handleContentChange}
-          selectedWorkspaceItems={atPath}
-          onSelectedWorkspaceItemsChange={(items) => {
-            emitter.emit('nomi.selected.file', items);
-            setAtPath(items);
-          }}
-          loading={isBusy}
-          disabled={!current_model?.use_model}
-          placeholder={
-            current_model?.use_model
-              ? t('agent.sendbox.placeholder', {
-                  backend: agent_name || 'Nomi',
-                  defaultValue: `Send message to {{backend}}...`,
-                })
-              : t('conversation.chat.noModelSelected')
-          }
-          onStop={handleStop}
-          onClearContext={handleClearContext}
-          className='z-10'
-          onFilesAdded={handleFilesAdded}
-          hasPendingAttachments={uploadFile.length > 0 || atPath.length > 0}
-          supportedExts={allSupportedExts}
-          defaultMultiLine={!isMobile}
-          lockMultiLine={!isMobile}
-          tools={
-            <FileAttachButton
-              openFileSelector={openFileSelector}
-              onLocalFilesAdded={handleFilesAdded}
-              showLoadedCapabilities={false}
-            />
-          }
-          rightTools={
-            hideAdvancedControls ? undefined : (
-              <div
-                className='sendbox-responsive-config-group flex flex-1 items-center justify-end gap-2 min-w-0'
-                data-testid='nomi-sendbox-config-group'
-              >
-                {hasContextUsage && (
-                  <ContextUsageRing
-                    used={tokenUsage?.context_tokens}
-                    max={tokenUsage?.context_window}
-                    inputTokens={tokenUsage?.input_tokens}
-                    outputTokens={tokenUsage?.output_tokens}
-                    reasoningTokens={tokenUsage?.reasoning_tokens}
-                  />
-                )}
-                <NomiModelSelector
-                  selection={modelSelection}
-                  className='nomi-sendbox-model-btn'
+        data-testid='nomi-sendbox'
+        showPinnedPlan
+        onMobilePlusClick={isMobile ? () => setIsMobileSheetOpen(true) : undefined}
+        value={content}
+        onChange={handleContentChange}
+        selectedWorkspaceItems={atPath}
+        onSelectedWorkspaceItemsChange={(items) => {
+          emitter.emit('nomi.selected.file', items);
+          setAtPath(items);
+        }}
+        loading={isBusy}
+        disabled={!current_model?.use_model}
+        placeholder={
+          current_model?.use_model
+            ? t('agent.sendbox.placeholder', {
+                backend: agent_name || 'Nomi',
+                defaultValue: `Send message to {{backend}}...`,
+              })
+            : t('conversation.chat.noModelSelected')
+        }
+        onStop={handleStop}
+        onClearContext={handleClearContext}
+        className='z-10'
+        onFilesAdded={handleFilesAdded}
+        hasPendingAttachments={uploadFile.length > 0 || atPath.length > 0}
+        supportedExts={allSupportedExts}
+        defaultMultiLine={!isMobile}
+        lockMultiLine={!isMobile}
+        tools={
+          <FileAttachButton
+            openFileSelector={openFileSelector}
+            onLocalFilesAdded={handleFilesAdded}
+            showLoadedCapabilities={false}
+          />
+        }
+        rightTools={
+          hideAdvancedControls ? undefined : (
+            <div
+              className='sendbox-responsive-config-group flex flex-1 items-center justify-end gap-2 min-w-0'
+              data-testid='nomi-sendbox-config-group'
+            >
+              {hasContextUsage && (
+                <ContextUsageRing
+                  used={tokenUsage?.context_tokens}
+                  max={tokenUsage?.context_window}
+                  inputTokens={tokenUsage?.input_tokens}
+                  outputTokens={tokenUsage?.output_tokens}
+                  reasoningTokens={tokenUsage?.reasoning_tokens}
                 />
-                {agentSelectorNode}
-                {collaboratorSelectorNode}
-                {extraRightTools}
+              )}
+              {agentSelectorNode}
+              <NomiModelSelector
+                selection={modelSelection}
+                className='nomi-sendbox-model-btn'
+              />
+              {extraRightTools}
+            </div>
+          )
+        }
+        prefix={
+          <>
+            {uploadFile.length > 0 && (
+              <HorizontalFileList>
+                {uploadFile.map((path) => (
+                  <FilePreview
+                    key={path}
+                    data-testid={`nomi-file-tag-${uploadFile.indexOf(path)}`}
+                    path={path}
+                    onRemove={() => setUploadFile(uploadFile.filter((v) => v !== path))}
+                  />
+                ))}
+              </HorizontalFileList>
+            )}
+            {atPath.some((item) => (typeof item === 'string' ? false : !item.isFile)) && (
+              <div className='flex flex-wrap items-center gap-8px mb-8px'>
+                {atPath.map((item) => {
+                  if (typeof item === 'string') return null;
+                  if (!item.isFile) {
+                    const folderIndex = atPath.filter((v) => typeof v !== 'string' && !v.isFile).indexOf(item);
+                    return (
+                      <Tag
+                        key={item.path}
+                        data-testid={`nomi-folder-tag-${folderIndex}`}
+                        bordered={false}
+                        className='!bg-primary-1 !text-primary-6'
+                        closable
+                        onClose={() => {
+                          const newAtPath = atPath.filter((v) => (typeof v === 'string' ? true : v.path !== item.path));
+                          emitter.emit('nomi.selected.file', newAtPath);
+                          setAtPath(newAtPath);
+                        }}
+                      >
+                        {item.name}
+                      </Tag>
+                    );
+                  }
+                  return null;
+                })}
               </div>
-            )
-          }
-          prefix={
-            <>
-              {uploadFile.length > 0 && (
-                <HorizontalFileList>
-                  {uploadFile.map((path) => (
-                    <FilePreview
-                      key={path}
-                      data-testid={`nomi-file-tag-${uploadFile.indexOf(path)}`}
-                      path={path}
-                      onRemove={() => setUploadFile(uploadFile.filter((v) => v !== path))}
-                    />
-                  ))}
-                </HorizontalFileList>
-              )}
-              {atPath.some((item) => (typeof item === 'string' ? false : !item.isFile)) && (
-                <div className='flex flex-wrap items-center gap-8px mb-8px'>
-                  {atPath.map((item) => {
-                    if (typeof item === 'string') return null;
-                    if (!item.isFile) {
-                      const folderIndex = atPath.filter((v) => typeof v !== 'string' && !v.isFile).indexOf(item);
-                      return (
-                        <Tag
-                          key={item.path}
-                          data-testid={`nomi-folder-tag-${folderIndex}`}
-                          bordered={false}
-                          className='!bg-primary-1 !text-primary-6'
-                          closable
-                          onClose={() => {
-                            const newAtPath = atPath.filter((v) => (typeof v === 'string' ? true : v.path !== item.path));
-                            emitter.emit('nomi.selected.file', newAtPath);
-                            setAtPath(newAtPath);
-                          }}
-                        >
-                          {item.name}
-                        </Tag>
-                      );
-                    }
-                    return null;
-                  })}
-                </div>
-              )}
-            </>
-          }
-          onSend={onSendHandler}
-          onSteer={onSteerHandler}
-          steerAvailable
-          onEditResubmit={handleEditResubmit}
-          slash_commands={slash_commands}
-          onSlashBuiltinCommand={onSlashBuiltinCommand}
-          allowSendWhileLoading
-        />
-      </SessionCapabilityComposerLayout>
+            )}
+          </>
+        }
+        onSend={onSendHandler}
+        onSteer={onSteerHandler}
+        steerAvailable
+        onEditResubmit={handleEditResubmit}
+        slash_commands={slash_commands}
+        onSlashBuiltinCommand={onSlashBuiltinCommand}
+        allowSendWhileLoading
+      />
       {isMobile && (
         <>
           <MobileActionSheet

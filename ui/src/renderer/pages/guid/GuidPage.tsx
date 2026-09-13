@@ -10,7 +10,6 @@ import { isSubmitGesture } from '@/renderer/hooks/chat/useCompositionInput';
 import { appendSpeechTranscript } from '@/renderer/hooks/system/useSpeechInput';
 import SpeechInputButton from '@/renderer/components/chat/SpeechInputButton';
 import SessionCapabilityPicker, {
-  SessionCapabilityComposerLayout,
   buildSessionCapabilitySelection,
   defaultSessionCapabilityDraft,
   useSessionCapabilityCatalog,
@@ -541,8 +540,8 @@ const GuidPage: React.FC = () => {
               />
             )}
 
-            <SessionCapabilityComposerLayout
-              picker={
+            <GuidInputCard
+              sideTools={
                 <SessionCapabilityPicker
                   catalog={capabilityCatalog.catalog}
                   draft={effectiveCapabilityDraft}
@@ -555,59 +554,56 @@ const GuidPage: React.FC = () => {
                   lockedMcpServerIds={lockedMcpServerIds}
                 />
               }
-            >
-              <GuidInputCard
-                input={guidInput.input}
-                onInputChange={handleInputChange}
-                onKeyDown={handleInputKeyDown}
-                onPaste={guidInput.onPaste}
-                onFocus={guidInput.handleTextareaFocus}
-                onBlur={guidInput.handleTextareaBlur}
-                placeholder={normalPlaceholder}
-                isInputActive={guidInput.isInputFocused}
-                isFileDragging={guidInput.isFileDragging}
-                activeBorderColor={activeBorderColor}
-                inactiveBorderColor={inactiveBorderColor}
-                activeShadow={activeShadow}
-                dragHandlers={guidInput.dragHandlers}
-                mentionOpen={mention.mentionOpen}
-                mentionSelectorBadge={
-                  <MentionSelectorBadge
-                    visible={mention.mentionSelectorVisible}
-                    open={mention.mentionSelectorOpen}
-                    onOpenChange={mention.setMentionSelectorOpen}
-                    agentLabel={mention.selectedAgentLabel}
-                    mentionMenu={mentionDropdownNode}
-                    onResetQuery={() => mention.setMentionQuery(null)}
-                  />
-                }
-                mentionDropdown={mentionDropdownNode}
-                files={guidInput.files}
-                onRemoveFile={guidInput.handleRemoveFile}
-                actionRow={actionRowNode}
-                showWorkspace={workspaceEnabled}
-                workspaceDir={guidInput.dir}
-                onSelectWorkspace={guidInput.setDir}
-                onClearWorkspace={() => guidInput.setDir('')}
-                agentSelector={
-                  <GuidAgentSelector
-                    presets={agentSelection.presets}
-                    draftPresets={agentSelection.draftPresets}
-                    officialTemplates={agentSelection.officialTemplates}
-                    selection={agentSelection.selection}
-                    isLoading={agentSelection.isLoading}
-                    loadError={agentSelection.loadError}
-                    onRetry={agentSelection.refreshPresets}
-                    onSelectPreset={(presetId) =>
-                      handleSelectAgent({ kind: 'preset', presetId })
-                    }
-                    onSelectTemplate={(templateKey) =>
-                      handleSelectAgent({ kind: 'template', templateKey })
-                    }
-                  />
-                }
-              />
-            </SessionCapabilityComposerLayout>
+              input={guidInput.input}
+              onInputChange={handleInputChange}
+              onKeyDown={handleInputKeyDown}
+              onPaste={guidInput.onPaste}
+              onFocus={guidInput.handleTextareaFocus}
+              onBlur={guidInput.handleTextareaBlur}
+              placeholder={normalPlaceholder}
+              isInputActive={guidInput.isInputFocused}
+              isFileDragging={guidInput.isFileDragging}
+              activeBorderColor={activeBorderColor}
+              inactiveBorderColor={inactiveBorderColor}
+              activeShadow={activeShadow}
+              dragHandlers={guidInput.dragHandlers}
+              mentionOpen={mention.mentionOpen}
+              mentionSelectorBadge={
+                <MentionSelectorBadge
+                  visible={mention.mentionSelectorVisible}
+                  open={mention.mentionSelectorOpen}
+                  onOpenChange={mention.setMentionSelectorOpen}
+                  agentLabel={mention.selectedAgentLabel}
+                  mentionMenu={mentionDropdownNode}
+                  onResetQuery={() => mention.setMentionQuery(null)}
+                />
+              }
+              mentionDropdown={mentionDropdownNode}
+              files={guidInput.files}
+              onRemoveFile={guidInput.handleRemoveFile}
+              actionRow={actionRowNode}
+              showWorkspace={workspaceEnabled}
+              workspaceDir={guidInput.dir}
+              onSelectWorkspace={guidInput.setDir}
+              onClearWorkspace={() => guidInput.setDir('')}
+              agentSelector={
+                <GuidAgentSelector
+                  presets={agentSelection.presets}
+                  draftPresets={agentSelection.draftPresets}
+                  officialTemplates={agentSelection.officialTemplates}
+                  selection={agentSelection.selection}
+                  isLoading={agentSelection.isLoading}
+                  loadError={agentSelection.loadError}
+                  onRetry={agentSelection.refreshPresets}
+                  onSelectPreset={(presetId) =>
+                    handleSelectAgent({ kind: 'preset', presetId })
+                  }
+                  onSelectTemplate={(templateKey) =>
+                    handleSelectAgent({ kind: 'template', templateKey })
+                  }
+                />
+              }
+            />
 
             <AgentResourcePicker
               requiredKinds={presetResourceKinds}

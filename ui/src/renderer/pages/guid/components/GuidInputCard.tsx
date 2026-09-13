@@ -6,6 +6,7 @@
 
 import FilePreview from '@/renderer/components/media/FilePreview';
 import UploadProgressBar from '@/renderer/components/media/UploadProgressBar';
+import { SessionCapabilityComposerLayout } from '@/renderer/components/chat/SessionCapabilityPicker/ComposerLayout';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { useCompositionInput } from '@/renderer/hooks/chat/useCompositionInput';
 import { Input } from '@arco-design/web-react';
@@ -45,6 +46,7 @@ type GuidInputCardProps = {
 
   // Action row
   actionRow: React.ReactNode;
+  sideTools?: React.ReactNode;
 
   // Workspace
   showWorkspace?: boolean;
@@ -74,6 +76,7 @@ const GuidInputCard: React.FC<GuidInputCardProps> = ({
   onRemoveFile,
   agentSelector,
   actionRow,
+  sideTools,
   showWorkspace = false,
   workspaceDir,
   onSelectWorkspace,
@@ -119,43 +122,48 @@ const GuidInputCard: React.FC<GuidInputCardProps> = ({
       {/* inner white card — narrower than outer wrap */}
       <div
         className={`${styles.guidInputInner} p-12px flex flex-col bg-dialog-fill-0`}
+        data-composer-surface
         style={{
           transition: 'box-shadow 0.25s ease, border-color 0.25s ease',
+          padding: sideTools ? 0 : undefined,
+          borderRadius: sideTools ? 22 : undefined,
           borderColor: isFileDragging ? 'rgb(var(--primary-3))' : borderColor,
           boxShadow: isInputActive && !isFileDragging ? activeShadow : 'none',
         }}
       >
-        <div className={styles.guidAgentSelectorRow}>{agentSelector}</div>
-        {mentionSelectorBadge}
-        <Input.TextArea
-          autoSize={textareaAutoSize}
-          placeholder={placeholder}
-          spellCheck={false}
-          className={`text-14px focus:b-none rounded-xl !bg-transparent !b-none !resize-none !py-0 !pr-0 !pl-7px ${styles.lightPlaceholder}`}
-          value={input}
-          onChange={onInputChange}
-          onPaste={onPaste}
-          onFocus={onFocus}
-          onBlur={onBlur}
-          {...compositionHandlers}
-          onKeyDown={handleKeyDown}
-          data-testid='guid-input'
-        />
-        <div style={{ height: 12, flexShrink: 0 }} aria-hidden='true' />
-        {mentionOpen && (
-          <div className='absolute z-50' style={{ left: 16, top: 44 }}>
-            {mentionDropdown}
-          </div>
-        )}
-        {files.length > 0 && (
-          <div className='flex flex-wrap items-center gap-8px mt-12px mb-12px'>
-            {files.map((path) => (
-              <FilePreview key={path} path={path} onRemove={() => onRemoveFile(path)} />
-            ))}
-          </div>
-        )}
-        <UploadProgressBar source='sendbox' />
-        {actionRow}
+        <SessionCapabilityComposerLayout picker={sideTools}>
+          <div className={styles.guidAgentSelectorRow} style={sideTools ? { minHeight: 32, marginBottom: 4 } : undefined}>{agentSelector}</div>
+          {mentionSelectorBadge}
+          <Input.TextArea
+            autoSize={textareaAutoSize}
+            placeholder={placeholder}
+            spellCheck={false}
+            className={`text-14px focus:b-none rounded-xl !bg-transparent !b-none !resize-none !py-0 !pr-0 !pl-7px ${styles.lightPlaceholder}`}
+            value={input}
+            onChange={onInputChange}
+            onPaste={onPaste}
+            onFocus={onFocus}
+            onBlur={onBlur}
+            {...compositionHandlers}
+            onKeyDown={handleKeyDown}
+            data-testid='guid-input'
+          />
+          <div style={{ height: sideTools ? 6 : 12, flexShrink: 0 }} aria-hidden='true' />
+          {mentionOpen && (
+            <div className='absolute z-50' style={{ left: 16, top: 44 }}>
+              {mentionDropdown}
+            </div>
+          )}
+          {files.length > 0 && (
+            <div className='flex flex-wrap items-center gap-8px mt-12px mb-12px'>
+              {files.map((path) => (
+                <FilePreview key={path} path={path} onRemove={() => onRemoveFile(path)} />
+              ))}
+            </div>
+          )}
+          <UploadProgressBar source='sendbox' />
+          {actionRow}
+        </SessionCapabilityComposerLayout>
       </div>
       {showWorkspace && (
         <GuidWorkspaceFootnote
