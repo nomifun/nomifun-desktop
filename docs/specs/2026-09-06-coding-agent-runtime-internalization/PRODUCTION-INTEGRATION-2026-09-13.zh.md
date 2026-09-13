@@ -6,13 +6,14 @@
 ## 接线结果
 
 默认链路为 Conversation-backed Session owner → 现有 Runtime Registry →
-exact-binding Catalog → Nomi/Coding/用户注册实现。新建会话默认 Nomi，
+exact-binding Catalog → Nomi/Coding/用户注册实现。Agent 未配置引擎时默认 Nomi，
 不改变无 binding 的旧会话路径。所有新 AgentSession 保存 family/build/digest/
 host-contract/profile；执行时不重新解析 channel。同一会话不能热换引擎，
-派生会话默认继承精确绑定，指定 `runtime_engine` 才改为另一已安装实现。
+派生会话继承父会话的精确绑定，不提供独立引擎覆盖参数。
 
-`GET /api/runtime-engines` 返回注册描述；`POST /api/agent-sessions` 与
-`POST /api/agent-sessions/{id}/forks` 接受：
+产品配置归属已按用户反馈纠正：入口在 **Agent 工作台 → 选中 Agent → 设置 →
+运行时引擎**，首页不出现 runtime 选择器。`GET /api/runtime-engines` 返回注册描述；
+Agent 的 `draft.document` / 不可变 Revision payload 可保存：
 
 ```json
 {
@@ -23,7 +24,15 @@ host-contract/profile；执行时不重新解析 channel。同一会话不能热
 }
 ```
 
-界面新建选择器采用 exact selector，目录/profile 来源均为宿主发现结果。
+工作台选择器采用 exact selector，目录/profile 来源均为宿主发现结果。
+引擎配置参与 Revision digest、草稿脏状态、预览与保存。旧 payload 省略该字段，
+序列化与原摘要保持兼容。预览／保存校验安装身份及当前 Coding 能力边界。
+
+`POST /api/agent-sessions` 只选择 Agent，由唯一 owner 从对应的已保存版本解析引擎；
+模型覆盖产生的内部 Agent 版本也保留该配置。创建／Fork API 均拒绝独立的
+`runtime_engine` 字段。修改 Agent 只影响新会话，旧会话／其 Fork 保留原绑定；
+会话内切换到使用不同引擎的 Agent 会报错，须从该 Agent 新建会话。
+
 可复用 `NomiCoreApplication::compose_with_runtime_engines` 注册受信任的 Rust
 工厂；不提供 HTTP 上传可执行代码或动态库 ABI。注册在 router 组装后关闭。
 
@@ -55,7 +64,8 @@ cleanup 等待真实退出并记录结果后才发布终态；等待者超时不
   不兼容 Snapshot/选择拒绝；真实运行时还检查最终 Skills/MCP overlay。
 - AGENTS 分层上下文、自动 compaction、checkpoint 私有状态恢复尚未接生产。
 - 非 Nomi 异常重启回合不借用 Nomi 日志证明安全，保留隔离，不自动重放副作用。
-- Remote/Automation 仍共享默认 owner，但尚无各自的引擎选择 DTO/完整端到端覆盖。
+- Remote/Automation 在共享 owner 的创建入口继承 Agent 配置，不另设引擎选择 DTO；
+  所有生态消费者的完整端到端覆盖尚未完成。
 - 未删除旧 Wrapper/未切换默认引擎；未做付费模型、桌面视觉、macOS/Linux 或发布验收。
 - 内置 build digest 是开发期源码/依赖指纹，并非已签名发布制品证明；正式多版本
   分发、旧构建保留和升级迁移策略仍属发布工作。既有 exact binding 不自动升级。

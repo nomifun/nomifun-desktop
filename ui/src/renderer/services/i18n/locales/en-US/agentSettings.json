@@ -1,5 +1,12 @@
 {
   "title": "Agent Workbench",
+  "runtimeEngine": {
+    "label": "Runtime engine",
+    "default": "Default engine (Nomi)",
+    "hint": "This engine executes the Agent. Save to use it for new conversations; existing conversations keep their engine. In chat, just choose an Agent.",
+    "unavailable": "The catalog or selected build is unavailable. Retry or choose another engine for this Agent. No automatic fallback is used.",
+    "codingLimit": "This Coding build supports initial file and Git tools only. The Agent cannot use Skills, MCP, process execution, on-demand capabilities or attachments yet."
+  },
   "subtitle": "Configure your Agents around the work you want to do.",
   "loading": "Loading Agent Workbench…",
   "loadingEditor": "Loading the selected Agent…",

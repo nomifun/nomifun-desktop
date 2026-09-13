@@ -46,16 +46,33 @@
 全部工作仍在 `rf/agent-capability-platform-v2`，没有 push。
 
 - 新建会话持久化不可原地更换的 exact Engine binding，冷恢复不重新解析 channel。
-  Fork 默认继承，HTTP 可显式为子会话另选引擎。
+  Fork 继承父会话绑定，不接受独立引擎覆盖。
 - `RuntimeEngineHost` 在默认组合根安装 Nomi/Coding/受信任扩展工厂；
   `NomiCoreApplication::compose_with_runtime_engines` 提供二次开发注册入口。
 - Coding 使用真实 Conversation、Chat Broker、Kernel 与 Wave2 文件/Git owner；
   不引入第二个 SessionStore。事件与模型调用领取证据从属于原有 turn receipt。
-- 新建界面从 `/api/runtime-engines` 动态发现所有注册引擎/profile，不写死二选一。
+- **按 CAR-D-020 纠正产品层级**：引擎由 Agent 工作台的 Agent 设置配置，保存为
+  Revision payload；首页仅选择 Agent。目录仍从 `/api/runtime-engines` 动态发现。
+  Session owner 从保存版本继承引擎，创建／Fork DTO 不再接受引擎覆盖。
 - 当前仅准入 9 个初始工作区工具。进程、按需能力、Skills/MCP/MiniApp、附件、
-  compaction/checkpoint、异常重启证明和完整 Remote/Automation 选择链路仍未完成。
+  compaction/checkpoint、异常重启证明和完整 Remote/Automation 继承行为验证仍未完成。
 
-本次验证（生产接线后的结果）：
+CAR-D-020 入口与配置归属纠正后的验证：
+
+- `cargo check -p nomifun-app --tests`：通过。
+- `cargo test -p nomifun-agent-contracts -p nomifun-agent-control-plane --lib`：
+  86 + 26 通过；包含旧 payload 序列化／摘要兼容、引擎参与版本摘要。
+- `cargo test -p nomifun-app --test coding_runtime_production`：1 通过。
+  通过工作台预览／保存／重开编辑器配置引擎；无 Session override 运行真实 Coding
+  文件工具；模型派生版本保留配置；修改 Agent 后新会话用 Nomi，旧会话及 Fork 保留
+  Coding；缺失构建／摘要漂移／错误 profile 阻止保存；独立第三方 Agent 分派不回退。
+- 原默认 Session projection/fork 定向用例：1 通过，37 filtered out。
+- UI 6 文件定向验证：38 通过，156 条断言；含下拉框真实选择／恢复默认／缺失构建／
+  channel 回显、草稿脏状态、工作台测试流程和首页无 runtime override。
+- `bun run typecheck`：仍未通过，`bun:test` 声明缺失及测试文件类型错误；本次日志
+  未报告生产 UI 文件错误。未做桌面视觉、付费 Provider 或多平台发布验证。
+
+首次生产接线验证（`80e1f3ede`；以下为历史，不混同）：
 
 - `cargo check -p nomifun-app --tests`：通过。
 - 生产默认路由 E2E：1 通过；包含真实文件写入/冷恢复/绑定保护/显式 Fork/

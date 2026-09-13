@@ -71,17 +71,25 @@ route、active set，不能从请求 extra 伪造。adapter 还会校验 Session
 
 ## 当前产品接线与剩余边界
 
+Agent 是用户配置的身份、指令、模型及能力组合；runtime 是执行该 Agent 的可替换实现，
+不是另一个与 Agent 平行的产品身份。多个 Agent 可共用一个 runtime 实现，但各 Session
+持有各自的绑定和执行状态。产品入口只在 Agent 工作台，日常对话选择 Agent 即可。
+配置存入 `AgentPresetRevisionPayload.runtime_engine`，与其他配置一起版本化；Session
+创建由服务端将该版本的选择解析为 exact binding。旧 Agent 省略字段时使用默认 Nomi。
+
 以下接线已实现：
 
 - 默认生产组合根中的异构目录以及宿主二次开发注册入口；
 - 唯一 Session 创建/Fork 事务冻结 binding，公共 PATCH 与 DB 触发器保护；
 - 默认路由中的 Coding 工厂、现有 Conversation 历史、Broker 因果领取及文件/Git 工具；
-- UI 新建引擎选择和本地模型 HTTP fixture 驱动的真实默认路由测试。
+- Agent 工作台引擎选择、版本化保存及本地模型 HTTP fixture 驱动的真实默认路由测试；
+- 创建/Fork DTO 无独立 runtime 覆盖，修改 Agent 不热迁移已有 Session。
 
 剩余：Process、按需激活、Skills/MCP/MiniApp、完整 AGENTS/compaction/checkpoint、
-异常进程重启证明、逐工具与多平台验收、Remote/Automation 的独立选择 DTO。
+异常进程重启证明、逐工具与多平台验收、Remote/Automation 的完整继承行为验证。
 当前非 Nomi 孤儿回合不会套用 Nomi 私有恢复日志，而是保留隔离；不能自动重放。
-默认引擎仍为 Nomi；Coding 是用户显式选择的实现。未知构建不会静默回退。
+默认引擎仍为 Nomi；Coding 是在 Agent 工作台显式配置的实现。未知构建不会静默回退。
 
-Catalog 的改变只影响新建/Fork；既有 Session 不热换引擎。是否支持受隔离的
+Catalog 的 channel 改变只影响后续新会话；Fork 继承父会话 exact binding，缺失构建失败，
+不重新解析 channel。既有 Session 不热换引擎。是否支持受隔离的
 进程外 Runtime 适配器属于后续实现，不把 Rust trait 当作稳定动态库 ABI。

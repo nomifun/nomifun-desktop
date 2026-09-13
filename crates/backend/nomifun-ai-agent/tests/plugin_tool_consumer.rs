@@ -736,6 +736,7 @@ fn revision_with_deferred_capabilities(
             revision_digest: DigestHex::from(""),
         },
         payload: AgentPresetRevisionPayload {
+            runtime_engine: None,
             schema_version: VersionString::from(VERSION),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),
@@ -837,6 +838,7 @@ fn compile_single_bundled_capability(
             revision_digest: DigestHex::from(""),
         },
         payload: AgentPresetRevisionPayload {
+            runtime_engine: None,
             schema_version: VersionString::from(VERSION),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),
@@ -1957,6 +1959,7 @@ fn compile_miniapp_fixture(
         action_allowlist: capability.action_allowlist.clone(),
     };
     let payload = AgentPresetRevisionPayload {
+        runtime_engine: None,
         schema_version: VersionString::from(VERSION),
         model_route_refs: BTreeMap::new(),
         chat_route_records: BTreeMap::new(),

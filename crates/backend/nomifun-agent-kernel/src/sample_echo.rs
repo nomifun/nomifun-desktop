@@ -824,6 +824,7 @@ fn role_operation_request(
 
 fn sample_revision(owner_id: &str) -> AgentPresetRevision {
     let payload = AgentPresetRevisionPayload {
+        runtime_engine: None,
         schema_version: VersionString::from(VERSION),
         model_route_refs: BTreeMap::new(),
         chat_route_records: BTreeMap::new(),

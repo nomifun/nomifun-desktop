@@ -20,7 +20,7 @@
 | CAR-D-010 | 生态边界 | Plugin、MiniApp、MCP、Skill 是平台能力供给或消费者适配，不是 Runtime 私有插件 |
 | CAR-D-011 | 多引擎并存 | Legacy Engine 与 Coding Engine 可并存；每个 AgentSession 只绑定一个 exact Engine Build |
 | CAR-D-012 | 灰度语义 | Stable/Canary 是 Catalog 指向 immutable Build 的别名，不是 Build 自身属性 |
-| CAR-D-013 | 切换边界 | Engine 选择只作用于新建 Session 或显式 Fork；同一 Session 不切换、不静默 fallback |
+| CAR-D-013 | 切换边界 | 按 CAR-D-020 在 Agent 工作台配置，引擎变更作用于后续新会话；Fork 继承父绑定；同一 Session 不切换、不静默 fallback |
 | CAR-D-014 | 本地施工形态 | 源分支隔离交付已取入；后续开发统一在本地 `rf/agent-capability-platform-v2`，不 push；原远程接线安排由用户新指令替代 |
 | CAR-D-015 | 隔离 Catalog 范围 | `CodingEngineCatalog` 只管理 Coding family Build；最终异构 Registry 属于 Agent Platform |
 | CAR-D-016 | Codex 源基线 | CAR 独立固定 `../codex` commit `6af345407d9c2a568da9d01b6c4b81a9e61495c0`；一期旧 Sidecar 合同中的其他 frozen SHA 不得复用为新 Engine provenance |
@@ -77,3 +77,20 @@ CAR-07 仍是 in_progress：真实生产 owner ports、创建/Fork 持久绑定�
 - 是否允许同一 Session 切换 Engine 或将 Engine failure 改为自动 fallback。
 
 不得通过修改旧阶段文档来“隐式”改变 CAR 决策。
+
+### CAR-D-020：Runtime 配置属于 Agent，而非会话创建页面（2026-09-13）
+
+用户明确指出：首页引擎选择与产品设计不一致，runtime 应在 Agent 工作台由每个 Agent
+分别配置。撤销首次生产接线中的首页选择器和创建／Fork 请求引擎覆盖设计。
+
+- 产品关系：Agent 配置决定使用什么 runtime；Session 是某个 Agent 版本的运行实例。
+  runtime 实现可被多个 Agent 复用，不是另一套用户可见 Agent 身份。
+- 工作台在 Agent 设置中配置开放 family/build/profile，保存到不可变 Revision payload，
+  参与摘要、草稿脏状态、预览与兼容性检查。旧版本无字段时继续使用 Nomi。
+- 唯一 Session owner 依据已保存 Agent 版本解析并冻结 exact binding；各入口共享此规则。
+  `CreateAgentSessionRequest`、`ForkAgentSessionRequest` 不再提供独立 runtime 字段。
+- 修改 Agent 引擎只影响后续新会话，旧会话及其 Fork 保留精确绑定。会话内切换 Agent
+  时，不允许借此替换引擎；使用不同引擎的 Agent 需要新建会话。
+- 开放扩展接口、单一 Session 事实、禁止静默 fallback 和副作用清理证明保持不变。
+
+CAR-07 仍是 in_progress，当前 Coding 的能力限制不因产品入口纠正而消失。

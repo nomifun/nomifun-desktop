@@ -86,6 +86,7 @@ pub struct PresetPreviewCompiler {
     official_templates: OfficialTemplateCatalog,
     canonical_registry: Option<Arc<dyn CanonicalRegistryProvider>>,
     canonical_environment: Option<CompilerEnvironment>,
+    runtime_validator: Option<Arc<dyn Fn(&AgentPresetRevisionPayload, &ResolvedSnapshotEnvelope) -> Result<(), String> + Send + Sync>>,
 }
 
 impl PresetPreviewCompiler {
@@ -98,6 +99,7 @@ impl PresetPreviewCompiler {
             official_templates,
             canonical_registry: None,
             canonical_environment: None,
+            runtime_validator: None,
         }
     }
 
@@ -125,6 +127,16 @@ impl PresetPreviewCompiler {
             Arc::new(StaticCanonicalRegistryProvider { registry }),
             environment,
         )
+    }
+
+    /// The embedding host owns the open runtime catalog and compatibility checks.
+    /// Apply the same admission check to Preview, Save and workbench Test.
+    pub fn with_runtime_validator(
+        mut self,
+        validator: impl Fn(&AgentPresetRevisionPayload, &ResolvedSnapshotEnvelope) -> Result<(), String> + Send + Sync + 'static,
+    ) -> Self {
+        self.runtime_validator = Some(Arc::new(validator));
+        self
     }
 
     pub fn compile(
@@ -284,13 +296,21 @@ impl PresetPreviewCompiler {
             }
         };
 
-        let snapshot = if has_errors(&diagnostics) {
+        let mut snapshot = if has_errors(&diagnostics) {
             None
         } else if clean {
             current_snapshot.cloned()
         } else {
             compiled.as_ref().map(|compiled| compiled.envelope.clone())
         };
+        if let (Some(validator), Some(candidate)) = (&self.runtime_validator, &snapshot)
+            && let Err(message) = validator(&payload, candidate)
+        {
+            diagnostics.push(error_diagnostic(
+                CanonicalErrorCode::from("AGENT_RUNTIME_ENGINE_UNAVAILABLE"), message, None,
+            ));
+            snapshot = None;
+        }
         let revision_diff = revision_diff(current_revision, &payload);
         let summary = preview_summary(&payload, catalog, snapshot.as_ref());
         let inspector = preview_inspector(
@@ -1263,6 +1283,7 @@ mod tests {
         let templates = OfficialTemplateCatalog::load().unwrap();
         let seed = templates.seed(OfficialPresetKey::CodingCodex).unwrap();
         let payload = AgentPresetRevisionPayload {
+            runtime_engine: None,
             schema_version: VersionString::from("1.0.0"),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),
@@ -1549,6 +1570,7 @@ mod tests {
             .insert(capability_ref.id.clone(), mcp_key.clone());
         registry.mcp_tools.insert(mcp_key, materialized_mcp);
         let payload = AgentPresetRevisionPayload {
+            runtime_engine: None,
             schema_version: VersionString::from("1.0.0"),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),
@@ -1703,6 +1725,7 @@ mod tests {
 
         let action_allowlist = BTreeSet::from([action.action_id.clone()]);
         let payload = AgentPresetRevisionPayload {
+            runtime_engine: None,
             schema_version: VersionString::from("1.0.0"),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),

@@ -47,6 +47,7 @@ import {
   type AgentResourceSelectionValue,
 } from '@/renderer/hooks/agent/agentResourceSelection';
 import AgentCapabilityWorkspace from './AgentCapabilityWorkspace';
+import AgentRuntimeEngineSelector from './AgentRuntimeEngineSelector';
 import { unavailableCapabilityReferences } from './capabilityGroups';
 import {
   TEMPLATE_I18N_PATH,
@@ -253,6 +254,14 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
               }
             />
           </label>
+          <div className={`${styles.field} ${styles.fieldWide}`}>
+            <span>{t('agentSettings.runtimeEngine.label')}</span>
+            <AgentRuntimeEngineSelector
+              value={draft.document.runtime_engine}
+              disabled={busy}
+              onChange={(runtime_engine) => patchDocument((document) => ({ ...document, runtime_engine }))}
+            />
+          </div>
           <label className={`${styles.field} ${styles.fieldWide}`}>
             <span>{t('agentSettings.fields.persona')}</span>
             <Input.TextArea

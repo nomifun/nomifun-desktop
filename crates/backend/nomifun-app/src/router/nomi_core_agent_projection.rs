@@ -960,6 +960,7 @@ mod tests {
         ResolvedSnapshotEnvelope,
     ) {
         let payload = AgentPresetRevisionPayload {
+            runtime_engine: None,
             schema_version: "1.0.0".into(),
             model_route_refs: BTreeMap::from([(CHAT_TASK.into(), "route-1".into())]),
             chat_route_records: BTreeMap::from([(CHAT_TASK.into(), route())]),

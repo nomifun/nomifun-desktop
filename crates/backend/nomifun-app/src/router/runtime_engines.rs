@@ -129,6 +129,37 @@ impl RuntimeEngineHost {
             "default",
         )
     }
+
+    pub(crate) fn agent_binding(
+        &self,
+        payload: &nomifun_agent_contracts::AgentPresetRevisionPayload,
+    ) -> Result<RuntimeEngineBinding, AppError> {
+        match &payload.runtime_engine {
+            Some(selection) => {
+                use nomifun_agent_contracts::AgentRuntimeEngineSelector;
+                let selector = match &selection.selector {
+                    AgentRuntimeEngineSelector::Exact { family_id, build_id, build_digest } =>
+                        RuntimeEngineSelector::Exact { family_id: family_id.clone(), build_id: build_id.clone(), build_digest: build_digest.clone() },
+                    AgentRuntimeEngineSelector::Channel { family_id, channel } =>
+                        RuntimeEngineSelector::Channel { family_id: family_id.clone(), channel: channel.clone() },
+                };
+                self.catalog()?.resolve(&selector, &selection.profile)
+            }
+            None => self.default_binding(),
+        }
+    }
+
+    pub(crate) fn validate_agent(
+        &self,
+        payload: &nomifun_agent_contracts::AgentPresetRevisionPayload,
+        snapshot: &nomifun_agent_contracts::ResolvedSnapshotEnvelope,
+    ) -> Result<RuntimeEngineBinding, AppError> {
+        let binding = self.agent_binding(payload)?;
+        if binding.family_id == "nomifun.coding" {
+            super::coding_runtime_host::validate_supported_snapshot(snapshot)?;
+        }
+        Ok(binding)
+    }
 }
 
 pub(crate) fn nomi_descriptor() -> RuntimeEngineDescriptor {

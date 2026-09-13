@@ -2250,6 +2250,7 @@ mod tests {
     ) {
         let materialized = registry.snapshot().expect("registry snapshot");
         let payload = AgentPresetRevisionPayload {
+            runtime_engine: None,
             schema_version: VersionString::from(VERSION),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),

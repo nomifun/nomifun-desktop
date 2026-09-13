@@ -411,6 +411,7 @@ impl AgentControlPlane {
             );
         }
         let document = nomifun_api_types::AgentPresetDocumentDto {
+            runtime_engine: None,
             schema_version: "1.0.0".into(),
             model_route_refs,
             chat_route_records,
@@ -1430,6 +1431,7 @@ impl AgentControlPlane {
 
 fn empty_document() -> nomifun_api_types::AgentPresetDocumentDto {
     nomifun_api_types::AgentPresetDocumentDto {
+        runtime_engine: None,
         schema_version: "1.0.0".into(),
         model_route_refs: BTreeMap::new(),
         chat_route_records: BTreeMap::new(),

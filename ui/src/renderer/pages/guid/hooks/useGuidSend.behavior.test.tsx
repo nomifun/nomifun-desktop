@@ -215,19 +215,15 @@ afterEach(() => {
 });
 
 describe('useGuidSend HTTP behavior', () => {
-  test('passes an extension-owned exact engine selection without changing its identity', async () => {
+  test('launches the selected Agent without a composer-owned runtime override', async () => {
     resetBrowserStorage();
     const calls = installFetchRecorder();
-    const runtimeEngine = {
-      selector: { selection: 'exact' as const, family_id: 'customer.custom', build_id: 'v3', build_digest: 'b'.repeat(64) },
-      profile: 'custom-profile',
-    };
     const hook = renderHook(() => useGuidSend({
       ...createDeps({ selection: { kind: 'preset', presetId: PRESET_ID }, selectedPreset: PRESET }),
-      runtimeEngine,
     }));
     await act(async () => { await hook.result.current.handleSend(); });
-    expect(calls[0].body).toMatchObject({ runtime_engine: runtimeEngine });
+    expect(calls[0].body).toMatchObject({ preset_id: PRESET_ID });
+    expect(calls[0].body).not.toHaveProperty('runtime_engine');
   });
 
   test('official selection prepares its configuration only on send and launches a normal frozen session', async () => {
