@@ -552,7 +552,6 @@ async fn chat_minimal_runs_the_formal_final_stack() -> TestResult<()> {
     let capability_state = SessionCapabilityState::new(&compiled);
     let active = capability_state.snapshot()?;
     assert!(active.active.is_empty());
-    assert!(capability_state.search("", 32)?.is_empty());
     let profile = platform.pinned_runtime_profile(&compiled);
     contract.validate_runtime_profile(&profile)?;
     contract.validate_hidden_initialization(&hidden_initialization(
@@ -1255,8 +1254,8 @@ async fn launch_runtime(
             context,
             profile_kind: nomifun_agent_contracts::RuntimeProfileKind::ManagedMinimal,
             full_auto: FullAutoExecutionWire::fixed(),
-            initial_capabilities: BTreeSet::new(),
-            on_demand_capabilities: BTreeSet::new(),
+            enabled_capabilities: BTreeSet::new(),
+
             typed_resource_bindings: Vec::new(),
         })
     };

@@ -174,7 +174,7 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
   const selectedSkills = new Set(draft.document.skill_bindings.map((skill) => skill.id));
   const catalogByReference = useMemo(() => new Map(catalog.capabilities.map((item) => [capabilityReferenceKey(item.capability), item])), [catalog.capabilities]);
   const requiredResourceKinds = useMemo(() => selectedRequiredResourceKinds(draft.document, catalog.capabilities), [draft.document, catalog.capabilities]);
-  const capabilityIds = useMemo(() => selectedCapabilityIds(draft.document.initial_capabilities, draft.document.on_demand_capabilities), [draft.document.initial_capabilities, draft.document.on_demand_capabilities]);
+  const capabilityIds = useMemo(() => selectedCapabilityIds(draft.document.enabled_capabilities), [draft.document.enabled_capabilities]);
   const resourceSelectionResolution = useMemo(() => resolveAgentResourceSelections(requiredResourceKinds, resourceSelectionValue), [requiredResourceKinds, resourceSelectionValue]);
   const patchDocument = (transform: Parameters<typeof updateDocument>[1]) => onDraftChange(updateDocument(draft, transform));
   const applyChatRouteRecord = (record: ChatRouteRecord) => patchDocument((document) => ({
@@ -183,8 +183,7 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
     chat_route_records: { ...document.chat_route_records, [AGENT_CHAT_MODEL_TASK]: record },
   }));
   const placementLabel = (placement: CapabilityPlacement): string => t(
-    placement === 'initial' ? 'agentSettings.capabilities.initialShort' :
-      placement === 'on_demand' ? 'agentSettings.capabilities.onDemandShort' : 'agentSettings.capabilities.notSelected'
+    placement === 'enabled' ? 'agentSettings.capabilities.enabled' : 'agentSettings.capabilities.notSelected'
   );
   const tabs = [
     { key: 'capabilities', label: t('agentSettings.workbench.capabilityTab') },
@@ -206,9 +205,9 @@ const AgentPresetEditor: React.FC<AgentPresetEditorProps> = ({
     <nav className={styles.editorTabs} role='tablist' aria-label={t('agentSettings.title')}>
       {tabs.map((tab) => <button key={tab.key} type='button' role='tab' aria-selected={activeTab === tab.key} aria-controls={`agent-panel-${tab.key}`} id={`agent-tab-${tab.key}`} className={activeTab === tab.key ? styles.activeTab : ''} onClick={() => setActiveTab(tab.key)}>{tab.label}</button>)}
     </nav>
-    <div className={styles.editorBody}>
+    <div className={`${styles.editorBody} ${activeTab === 'capabilities' ? styles.capabilityBody : ''}`}>
       {previewBlocked && <Alert type='error' showIcon className={styles.inlineNotice} content={preview.diagnostics[0] ? previewDiagnosticMessage(preview.diagnostics[0]) : t('agentSettings.preview.blocked')} />}
-      {activeTab === 'capabilities' && <div role='tabpanel' id='agent-panel-capabilities' aria-labelledby='agent-tab-capabilities'>
+      {activeTab === 'capabilities' && <div className={styles.capabilityPanel} role='tabpanel' id='agent-panel-capabilities' aria-labelledby='agent-tab-capabilities'>
         <AgentCapabilityWorkspace document={draft.document} catalog={catalog.capabilities} disabled={busy} onChange={(document) => onDraftChange({ ...draft, document })} />
       </div>}
       {activeTab === 'settings' && <div role='tabpanel' id='agent-panel-settings' aria-labelledby='agent-tab-settings'>

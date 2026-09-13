@@ -2802,7 +2802,7 @@ mod tests {
             schema_version: VersionString::from(CONTRACT_VERSION),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),
-            initial_capabilities: vec![
+            enabled_capabilities: vec![
                 CapabilitySelection {
                     capability: CapabilityRef {
                         id: CapabilityId::from("knowledge.search"),
@@ -2818,7 +2818,7 @@ mod tests {
                     action_allowlist: BTreeSet::new(),
                 },
             ],
-            on_demand_capabilities: Vec::new(),
+
             skill_bindings: Vec::new(),
             system_role_provider_overrides: BTreeMap::new(),
             persona: "Wave 1 test".to_owned(),

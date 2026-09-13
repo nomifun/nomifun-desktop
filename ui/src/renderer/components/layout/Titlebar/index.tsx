@@ -20,6 +20,7 @@ import {
   dispatchSessionSiderToggleEvent,
 } from '@renderer/utils/workspace/sessionSiderEvents';
 import type { SessionSiderStateDetail } from '@renderer/utils/workspace/sessionSiderEvents';
+import { AGENT_SIDER_STATE_EVENT, dispatchAgentSiderToggleEvent } from '@renderer/utils/workspace/agentSiderEvents';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { useNavigationHistory } from '@/renderer/hooks/context/NavigationHistoryContext';
 import { isDesktopShell, isMacOS } from '@/renderer/utils/platform';
@@ -73,6 +74,12 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
   const appTitle = useMemo(() => 'NomiFun', []);
   const [workspaceCollapsed, setWorkspaceCollapsed] = useState(true);
   const [sessionSiderCollapsed, setSessionSiderCollapsed] = useState(false);
+  const [agentSiderCollapsed, setAgentSiderCollapsed] = useState(false);
+  useEffect(() => {
+    const handler = (event: Event) => setAgentSiderCollapsed((event as CustomEvent<{ collapsed: boolean }>).detail.collapsed);
+    window.addEventListener(AGENT_SIDER_STATE_EVENT, handler);
+    return () => window.removeEventListener(AGENT_SIDER_STATE_EVENT, handler);
+  }, []);
   const [mobileCenterTitle, setMobileCenterTitle] = useState(appTitle);
   const [mobileCenterOffset, setMobileCenterOffset] = useState(0);
   const layout = useLayoutContext();
@@ -168,6 +175,11 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
   const sessionToggleTooltip = sessionSiderCollapsed
     ? t('sessionList.expandList', { defaultValue: 'Show conversations' })
     : t('sessionList.collapseList', { defaultValue: 'Hide conversations' });
+  const isAgentRoute = location.pathname === '/agent';
+  const contentSiderCollapsed = isAgentRoute ? agentSiderCollapsed : sessionSiderCollapsed;
+  const contentSiderTooltip = isAgentRoute
+    ? t(agentSiderCollapsed ? 'agentSettings.workbench.showList' : 'agentSettings.workbench.hideList')
+    : sessionToggleTooltip;
 
   const handleSiderToggle = () => {
     if (!showSiderToggle || !layout?.setSiderCollapsed) return;
@@ -385,12 +397,12 @@ const Titlebar: React.FC<TitlebarProps> = ({ workspaceAvailable }) => {
             })}
           </>
         )}
-        {isSessionRoute && (
+        {(isSessionRoute || isAgentRoute) && (
           renderIconButton({
-            tooltip: sessionToggleTooltip,
+            tooltip: contentSiderTooltip,
             className: 'app-titlebar__button app-titlebar__button--nav',
-            onClick: () => dispatchSessionSiderToggleEvent(),
-            children: sessionSiderCollapsed ? (
+            onClick: () => isAgentRoute ? dispatchAgentSiderToggleEvent() : dispatchSessionSiderToggleEvent(),
+            children: contentSiderCollapsed ? (
               <ExpandRight theme='outline' size={iconSize} fill='currentColor' strokeWidth={desktopIconStroke} />
             ) : (
               <ExpandLeft theme='outline' size={iconSize} fill='currentColor' strokeWidth={desktopIconStroke} />

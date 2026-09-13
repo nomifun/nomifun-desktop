@@ -31,7 +31,6 @@ pub mod web_fetch;
 mod subagent_gateway;
 #[path = "web_search_provider.rs"]
 pub mod web_search;
-pub mod vision_activation;
 
 // ── Agent-layer re-exports (the seam) ──────────────────────────────────────
 // Backend crates reach the agent (nomi-*) layer ONLY through nomifun-ai-agent.
@@ -83,8 +82,7 @@ pub use factory::provider_config::{
 };
 pub use one_shot::{OneShotDeps, OneShotTool, OneShotTurnRequest, one_shot_handler, run_one_shot_turn};
 pub use plugin_tools::{
-    KernelNomiPluginToolSession, NomiDeferredContextAction,
-    NomiDeferredLifecycleAction,
+    KernelNomiPluginToolSession,
     NomiHostDynamicToolDescriptor, NomiHostDynamicToolError,
     NomiHostDynamicToolInvocation,
     NomiHostDynamicToolInvoker,

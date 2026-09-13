@@ -1,21 +1,28 @@
 .pageShell {
   --agent-border: var(--color-border-2);
   --agent-muted: var(--color-text-3);
-  --agent-surface: var(--color-bg-2);
+  --agent-surface: var(--bg-base);
   --agent-inset: var(--color-fill-1);
-  padding: 20px 24px;
+  padding: 0;
+  height: 100%; min-height: 0; display: flex; flex-direction: column; position: relative;
   background: var(--color-bg-1);
 }
-.workspace { display: grid; grid-template-columns: 232px minmax(0, 1fr); gap: 20px; height: calc(100dvh - 106px); min-height: 480px; align-items: stretch; }
-.library, .editorSurface { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--agent-surface); border: 1px solid var(--agent-border); border-radius: 15px; overflow: hidden; box-shadow: 0 4px 22px rgba(0, 0, 0, .025); }
-.libraryHeader { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 18px 15px 14px; }
-.libraryTitle { font-size: 14px; font-weight: 600; color: var(--color-text-1); white-space: nowrap; }
-.libraryHeader :global(.arco-btn) { border-radius: 7px; }
-.librarySearch { display: flex; align-items: center; gap: 8px; height: 34px; margin: 0 14px 14px; padding: 0 10px; border: 1px solid var(--agent-border); border-radius: 8px; color: var(--agent-muted); }
+.workspace { display:flex; flex:1; height:100%; min-height:0; align-items:stretch; }
+.mainArea { flex:1; min-width:0; min-height:0; display:flex; flex-direction:column; container-type:inline-size; container-name:agent-editor; }
+.library { border-radius:0; overflow:hidden; }
+.editorSurface { flex:1; min-width:0; min-height:0; display:flex; flex-direction:column; background:var(--agent-surface); overflow:hidden; }
+.libraryHeader { display:flex; flex-direction:column; gap:6px; padding:8px 10px 6px; }
+.libraryTitle { display:flex; align-items:center; justify-content:space-between; height:20px; padding:0 2px; font-size:13px; font-weight:500; color:var(--color-text-3); }
+.libraryTitle button { display:flex; align-items:center; justify-content:center; border:0; background:transparent; width:22px; height:22px; border-radius:6px; color:var(--color-text-2); cursor:pointer; }
+.libraryTitle button:hover { background:var(--color-fill-3); }
+.libraryHeader :global(.arco-btn) { width:100%; height:28px; border-radius:8px; background:transparent; border:1px solid var(--agent-border); }
+.siderOverlay { position:absolute; inset:0; z-index:20; display:flex; }
+.siderBackdrop { position:absolute; inset:0; border:0; background:rgba(0,0,0,.45); cursor:pointer; }
+.librarySearch { display: flex; align-items: center; gap: 8px; height: 34px; margin: 0 10px 10px; padding: 0 10px; border: 1px solid var(--agent-border); border-radius: 8px; color: var(--agent-muted); }
 .librarySearch:focus-within { border-color: rgb(var(--primary-6)); box-shadow: 0 0 0 2px rgba(var(--primary-6), .08); }
 .librarySearch input { width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--color-text-1); font-size: 12px; }
 .librarySearch input::placeholder { color: var(--agent-muted); }
-.libraryTabs { display: flex; gap: 3px; margin: 0 12px 13px; padding: 3px; border-radius: 9px; background: var(--color-fill-1); }
+.libraryTabs { display: flex; gap: 3px; margin: 0 10px 10px; padding: 3px; border-radius: 9px; background: var(--color-fill-1); }
 .libraryTabs button { display: flex; flex: 1; align-items: center; justify-content: center; gap: 5px; min-height: 33px; border: 0; border-radius: 7px; background: transparent; color: var(--color-text-3); font-size: 12px; cursor: pointer; white-space: nowrap; }
 .libraryTabs button[aria-selected='true'] { background: var(--color-bg-2); color: var(--color-text-1); font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.07); }
 .libraryTabs button span { font-size: 10px; color: var(--color-text-3); }
@@ -46,15 +53,7 @@
 .editorTabs > button, .editorTabs > span { display: inline-flex; align-items: center; position: relative; flex-shrink: 0; min-height: 43px; padding: 0 0 11px; box-sizing: border-box; border: 0; background: transparent; color: var(--color-text-3); font-size: 13px; cursor: pointer; }
 .editorTabs .activeTab { color: rgb(var(--primary-6)); font-weight: 600; }
 .activeTab::after { content: ''; position: absolute; height: 3px; border-radius: 2px 2px 0 0; left: 0; right: 0; bottom: 0; background: rgb(var(--primary-6)); }
-.editorBody { min-height: 0; flex: 1; overflow-y: auto; padding: 22px 24px 26px; background: var(--color-bg-2); }
-.templateIntro { display: flex; align-items: center; gap: 12px; padding: 11px 13px; margin-bottom: 17px; background: var(--color-fill-1); border-radius: 10px; }
-.templateIntro > div { flex: 1; min-width: 0; }
-.templateIntro strong { display: none; }
-.templateIntro p { margin: 0; font-size: 12px; color: var(--agent-muted); line-height: 1.7; }
-.templateIntro :global(.arco-btn) { flex-shrink: 0; font-size: 11px; }
-.templateName { display: flex; align-items: center; gap: 16px; max-width: 500px; margin-bottom: 23px; }
-.templateName > span { flex: 0 0 78px; font-size: 12px; font-weight: 500; color: var(--color-text-2); }
-.templateName :global(.arco-input-wrapper) { border-radius: 8px; }
+.editorBody { min-height: 0; flex: 1; overflow-y: auto; padding: 10px 22px 18px; background: var(--agent-surface); }
 .section { min-width: 0; }
 .section + .section { margin-top: 26px; padding-top: 23px; border-top: 1px solid var(--agent-border); }
 .sectionHeading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 19px; }
@@ -70,7 +69,7 @@
 .inlineNotice { margin: 16px 0; border-radius: 9px; }
 .inlineEmpty { padding: 20px 14px; border-radius: 9px; background: var(--color-fill-1); color: var(--agent-muted); font-size: 12px; line-height: 1.7; }
 .tagRow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-.actionBar { flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 15px 22px; border-top: 1px solid var(--agent-border); background: var(--color-bg-2); }
+.actionBar { flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 15px 22px; border-top: 1px solid var(--agent-border); background: var(--agent-surface); }
 .actionBar :global(.arco-btn) { height: 36px; border-radius: 8px; font-size: 12px; }
 .actionButtons { display: flex; align-items: center; gap: 9px; flex-shrink: 0; }
 .footerName { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--color-text-3); min-width: 0; }
@@ -129,8 +128,7 @@
 .loading { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 320px; gap: 14px; color: var(--agent-muted); font-size: 13px; }
 .library button:focus-visible, .editorTabs button:focus-visible { outline: 2px solid rgb(var(--primary-6)); outline-offset: -2px; }
 @media (max-width: 1100px) {
-  .pageShell { padding: 18px; }
-  .workspace { grid-template-columns: 220px minmax(0, 1fr); gap: 14px; }
+
   .editorHeader { padding: 18px; }
   .editorTabs { padding: 0 18px; gap: 19px; }
   .editorBody { padding: 18px; }
@@ -140,17 +138,19 @@
   .footerName :global(.arco-input-wrapper) { width: 150px; }
 }
 @media (max-width: 780px) {
-  .workspace { grid-template-columns: minmax(0, 1fr); height: auto; min-height: 0; gap: 16px; }
-  .library { max-height: 310px; }
-  .libraryList { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .editorSurface { height: min(780px, calc(100dvh - 48px)); min-height: 600px; }
   .editorBody { overflow-y: auto; }
   .actionBar { position: sticky; bottom: 0; z-index: 2; flex-wrap: wrap; }
   .formGrid, .dualGrid, .diffGrid { grid-template-columns: minmax(0, 1fr); }
-  .templateIntro { flex-direction: column; }
-  .templateName { align-items: flex-start; flex-direction: column; gap: 8px; }
-  .templateName > span { flex-basis: auto; }
   .metricGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 .templateReset { flex-shrink: 0; font-size: 11px; }
 @media (max-width: 1100px) { .templateReset { max-width: 104px; overflow: hidden; } }
+
+.capabilityBody { overflow:hidden; display:flex; flex-direction:column; }
+.capabilityPanel { flex:1; min-height:0; }
+@container agent-editor (max-width:720px) {
+  .capabilityBody { overflow-y:auto; }
+  .capabilityPanel { height:auto; flex:none; }
+  .actionBar { flex-wrap:wrap; padding:12px; gap:8px; }
+  .templateSaveState { display:none; }
+}

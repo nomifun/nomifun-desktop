@@ -10,7 +10,6 @@ use nomi_protocol::events::ToolCategory;
 use nomi_tools::{
     Tool, ToolExecutionContext,
     registry::ToolRegistry,
-    tool_search::ToolSearchTool,
 };
 use nomi_types::tool::{JsonSchema, ToolResult};
 use nomi_types::message::ContentBlock;
@@ -52,9 +51,6 @@ use nomifun_ai_agent::{
     NomiHostDynamicToolInvoker, NomiMiniAppToolInvoker,
     NomiMiniAppToolInvocation, NomiMiniAppToolSchemaResolver,
     NomiPlatformBuiltinToolAdmission,
-    NomiPlatformBuiltinLifecycleAdmission,
-    NomiPlatformBuiltinLifecycleInvocation,
-    NomiPlatformBuiltinLifecycleInvoker,
     NomiPlatformBuiltinToolSchemaResolver, NomiPluginToolError,
     NomiPluginToolSchemaResolver,
 };
@@ -233,68 +229,6 @@ impl NomiPlatformBuiltinToolSchemaResolver for SchemaMap {
                     reference.as_ref()
                 )
             })
-    }
-}
-
-#[derive(Default)]
-struct CapturingLifecycleInvoker {
-    calls: AtomicUsize,
-    context_calls: AtomicUsize,
-}
-
-struct FixedLifecycleContext;
-
-#[async_trait]
-impl nomifun_ai_agent::ContextContributor for FixedLifecycleContext {
-    async fn pre_turn_context(&self) -> Option<String> {
-        Some("lifecycle-context-active".to_owned())
-    }
-}
-
-#[async_trait]
-impl NomiPlatformBuiltinLifecycleInvoker for CapturingLifecycleInvoker {
-    async fn activate(
-        &self,
-        request: NomiPlatformBuiltinLifecycleInvocation,
-    ) -> Result<StrictJsonValue, String> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(StrictJsonValue(json!({
-            "capability_id": request.capability.capability.id,
-            "state": "active"
-        })))
-    }
-
-    async fn context_contributor(
-        &self,
-        _request: NomiPlatformBuiltinLifecycleInvocation,
-    ) -> Result<Option<Arc<dyn nomifun_ai_agent::ContextContributor>>, String> {
-        self.context_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(Some(Arc::new(FixedLifecycleContext)))
-    }
-}
-
-#[derive(Default)]
-struct FailingLifecycleContextInvoker {
-    activate_calls: AtomicUsize,
-    context_calls: AtomicUsize,
-}
-
-#[async_trait]
-impl NomiPlatformBuiltinLifecycleInvoker for FailingLifecycleContextInvoker {
-    async fn activate(
-        &self,
-        _request: NomiPlatformBuiltinLifecycleInvocation,
-    ) -> Result<StrictJsonValue, String> {
-        self.activate_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(StrictJsonValue(json!({"state": "active"})))
-    }
-
-    async fn context_contributor(
-        &self,
-        _request: NomiPlatformBuiltinLifecycleInvocation,
-    ) -> Result<Option<Arc<dyn nomifun_ai_agent::ContextContributor>>, String> {
-        self.context_calls.fetch_add(1, Ordering::SeqCst);
-        Err("synthetic invalid workspace root".to_owned())
     }
 }
 
@@ -707,26 +641,13 @@ fn selection(id: &str, actions: &[&str]) -> CapabilitySelection {
     }
 }
 
-fn revision_with_deferred_capabilities(
+fn revision_with_capabilities(
     materialized: &nomifun_agent_kernel::MaterializedRegistry,
-    deferred_tool: bool,
-    deferred_context: bool,
 ) -> AgentPresetRevision {
     let tool = selection(AGENT_TOOL, &[AGENT_ACTION, HIDDEN_ACTION]);
     let ui = selection(UI_ONLY_TOOL, &[UI_ONLY_ACTION]);
     let context = selection(CONTEXT_CAPABILITY, &[]);
-    let mut initial_capabilities = vec![ui];
-    let mut on_demand_capabilities = Vec::new();
-    if deferred_tool {
-        on_demand_capabilities.push(tool);
-    } else {
-        initial_capabilities.push(tool);
-    }
-    if deferred_context {
-        on_demand_capabilities.push(context);
-    } else {
-        initial_capabilities.push(context);
-    }
+    let enabled_capabilities = vec![ui, tool, context];
     let mut revision = AgentPresetRevision {
         reference: PresetRevisionRef {
             preset_id: AgentPresetId::from(
@@ -739,8 +660,7 @@ fn revision_with_deferred_capabilities(
             schema_version: VersionString::from(VERSION),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),
-            initial_capabilities,
-            on_demand_capabilities,
+            enabled_capabilities,
             skill_bindings: Vec::new(),
             system_role_provider_overrides: BTreeMap::new(),
             persona: String::new(),
@@ -768,15 +688,6 @@ fn revision_with_deferred_capabilities(
 
 fn compile(
     materialized: &nomifun_agent_kernel::MaterializedRegistry,
-    deferred: bool,
-) -> nomifun_agent_kernel::CompiledSnapshot {
-    compile_with_deferred_capabilities(materialized, deferred, false)
-}
-
-fn compile_with_deferred_capabilities(
-    materialized: &nomifun_agent_kernel::MaterializedRegistry,
-    deferred_tool: bool,
-    deferred_context: bool,
 ) -> nomifun_agent_kernel::CompiledSnapshot {
     AgentPresetCompiler::compile(
         materialized,
@@ -801,10 +712,8 @@ fn compile_with_deferred_capabilities(
         },
         CompileRequest {
             miniapp_capabilities: Vec::new(),
-            revision: revision_with_deferred_capabilities(
+            revision: revision_with_capabilities(
                 materialized,
-                deferred_tool,
-                deferred_context,
             ),
             principal: owner(),
             scene: "chat".to_owned(),
@@ -812,78 +721,6 @@ fn compile_with_deferred_capabilities(
             audience: "owner".to_owned(),
             created_at_ms: 2,
             resolver_run_id: OperationId::from("plugin-tool-test-resolve"),
-        },
-    )
-    .unwrap()
-}
-
-fn compile_single_bundled_capability(
-    materialized: &nomifun_agent_kernel::MaterializedRegistry,
-    capability_id: &str,
-    deferred: bool,
-) -> nomifun_agent_kernel::CompiledSnapshot {
-    let selection = selection(capability_id, &[]);
-    let (initial_capabilities, on_demand_capabilities) = if deferred {
-        (Vec::new(), vec![selection])
-    } else {
-        (vec![selection], Vec::new())
-    };
-    let mut revision = AgentPresetRevision {
-        reference: PresetRevisionRef {
-            preset_id: AgentPresetId::from(
-                "0190f5fe-7c00-7a00-8000-000000000014",
-            ),
-            revision: 1,
-            revision_digest: DigestHex::from(""),
-        },
-        payload: AgentPresetRevisionPayload {
-            schema_version: VersionString::from(VERSION),
-            model_route_refs: BTreeMap::new(),
-            chat_route_records: BTreeMap::new(),
-            initial_capabilities,
-            on_demand_capabilities,
-            skill_bindings: Vec::new(),
-            system_role_provider_overrides: BTreeMap::new(),
-            persona: String::new(),
-            instructions: String::new(),
-            starter_prompts: Vec::new(),
-        },
-        contribution_locks: vec![
-            materialized
-                .capability(&CapabilityId::from(capability_id))
-                .unwrap()
-                .contribution_lock
-                .clone(),
-        ],
-        created_by: UserId::from(OWNER),
-        created_at_ms: 1,
-        reason: None,
-    };
-    revision.reference.revision_digest = revision.revision_digest().unwrap();
-    AgentPresetCompiler::compile(
-        materialized,
-        &CompilerEnvironment {
-            resolver_version: VersionString::from(VERSION),
-            required_runtime_protocol_version: VersionString::from(VERSION),
-            required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
-            runtime_feature_inventory_digest: DigestHex::from("1".repeat(64)),
-            available_runtime_features: BTreeSet::new(),
-            installation_role_bindings: BTreeMap::new(),
-            canonical_schema_manifest_digest: DigestHex::from("2".repeat(64)),
-            target_contribution_manifest_digest: materialized.registry_digest.clone(),
-            host_target: RuntimeTarget::from("x86_64-pc-windows-msvc"),
-            host_surface: "desktop".to_owned(),
-            availability_evidence_revision: "lifecycle-test".to_owned(),
-        },
-        CompileRequest {
-            miniapp_capabilities: Vec::new(),
-            revision,
-            principal: owner(),
-            scene: "chat".to_owned(),
-            surface: "desktop".to_owned(),
-            audience: "owner".to_owned(),
-            created_at_ms: 2,
-            resolver_run_id: OperationId::from("lifecycle-test-resolve"),
         },
     )
     .unwrap()
@@ -969,7 +806,7 @@ async fn dynamic_schema_registers_and_kernel_invoke_preserves_native_tools() {
     let materialized = kernel.replace_all(vec![registration]).unwrap();
     let session = session(
         Arc::clone(&kernel),
-        compile(&materialized, false),
+        compile(&materialized),
         schemas,
     )
     .await;
@@ -1063,7 +900,7 @@ async fn invalid_host_dynamic_payload_is_rejected_before_invoker_dispatch() {
         .unwrap(),
     );
     let materialized = kernel.replace_all(vec![registration]).unwrap();
-    let base = session(kernel, compile(&materialized, false), schemas).await;
+    let base = session(kernel, compile(&materialized), schemas).await;
     let dynamic_invoker = Arc::new(CountingHostDynamicInvoker::default());
     let dynamic_name = "robot_dynamic_schema_guard";
     let session = base
@@ -1138,7 +975,7 @@ async fn explicitly_admitted_bundled_tool_invokes_the_exact_kernel_handler() {
         .unwrap(),
     );
     let materialized = kernel.replace_all(vec![registration]).unwrap();
-    let compiled = compile(&materialized, false);
+    let compiled = compile(&materialized);
 
     let plugin_only = session(
         Arc::clone(&kernel),
@@ -1253,7 +1090,7 @@ async fn explicitly_admitted_initial_context_uses_the_same_snapshot_and_prompt()
     );
     let session = session_with_platform_builtins_and_context(
         kernel,
-        compile(&materialized, false),
+        compile(&materialized),
         schemas,
         tool_admission,
         context_admission,
@@ -1282,342 +1119,11 @@ async fn explicitly_admitted_initial_context_uses_the_same_snapshot_and_prompt()
     assert!(prompt.ends_with("</nomifun_initial_capability_context>"));
 }
 
-#[tokio::test]
-async fn on_demand_context_requires_tool_search_then_returns_context_this_turn() {
-    let (registration, schemas) = registration_with_source(
-        'e',
-        "bundled:",
-        Arc::new(AtomicUsize::new(0)),
-        Arc::new(Mutex::new(Vec::new())),
-        PluginSourceKind::Bundled,
-        true,
-    );
-    let kernel = Arc::new(
-        KernelRegistry::new(
-            policy_for(PluginSourceKind::Bundled),
-            Arc::new(InMemoryPluginStatePersistence::new())
-                as Arc<dyn PluginStatePersistence>,
-        )
-        .unwrap(),
-    );
-    let materialized = kernel.replace_all(vec![registration]).unwrap();
-    let resolver: Arc<dyn NomiPlatformBuiltinToolSchemaResolver> =
-        schemas.clone();
-    let tool_admission = Arc::new(
-        NomiPlatformBuiltinToolAdmission::from_registry(
-            &materialized,
-            BTreeSet::new(),
-            BTreeSet::new(),
-            resolver,
-        )
-        .unwrap(),
-    );
-    let context_admission = Arc::new(
-        nomifun_ai_agent::NomiPlatformBuiltinContextAdmission::from_registry(
-            &materialized,
-            BTreeSet::from([CapabilityId::from(CONTEXT_CAPABILITY)]),
-            BTreeSet::new(),
-        )
-        .unwrap(),
-    );
-    let session = session_with_platform_builtins_and_context(
-        kernel,
-        compile_with_deferred_capabilities(&materialized, false, true),
-        schemas,
-        tool_admission,
-        context_admission,
-    )
-    .await;
-    assert!(session.initial_context_contributions().is_empty());
-    assert_eq!(session.deferred_context_actions().len(), 1);
-    assert!(
-        session
-            .system_prompt_with_initial_context(Some("base"))
-            .unwrap()
-            .unwrap()
-            == "base"
-    );
 
-    let action = &session.deferred_context_actions()[0];
-    let provider_name = action.provider_name().to_owned();
-    let mut registry = ToolRegistry::new();
-    let tool_search = ToolSearchTool::new(registry.deferred_state());
-    assert!(registry.register(Box::new(tool_search)));
-    let mut allowed = Vec::new();
-    let mut deferred = Vec::new();
-    session.extend_tool_policy(&mut allowed, &mut deferred);
-    registry.retain_only_named(&allowed);
-    session.register_into(&mut registry).unwrap();
-    assert!(allowed.contains(&"ToolSearch".to_owned()));
-    assert!(deferred.contains(&provider_name));
 
-    let before_activation = registry
-        .get(&provider_name)
-        .unwrap()
-        .execute_with_context(
-            json!({}),
-            &ToolExecutionContext::from_scoped_tool_call(
-                "turn-context-before",
-                "call-context-before",
-            ),
-        )
-        .await;
-    assert!(before_activation.is_error);
 
-    let search = registry
-        .get("ToolSearch")
-        .unwrap()
-        .execute(json!({"query": CONTEXT_CAPABILITY}))
-        .await;
-    assert!(!search.is_error, "{}", search.content);
-    assert!(search.content.contains(&provider_name));
 
-    let result = registry
-        .get(&provider_name)
-        .unwrap()
-        .execute_with_context(
-            json!({}),
-            &ToolExecutionContext::from_scoped_tool_call(
-                "turn-context-after",
-                "call-context-after",
-            ),
-        )
-        .await;
-    assert!(!result.is_error, "{}", result.content);
-    let output: Value = serde_json::from_str(&result.content).unwrap();
-    assert_eq!(output["capability_id"], CONTEXT_CAPABILITY);
-    assert_eq!(output["context"]["source"], "bundled-context-fixture");
-    assert_eq!(output["context"]["role"], "assistant");
-}
 
-#[tokio::test]
-async fn on_demand_lifecycle_requires_tool_search_and_calls_approved_owner() {
-    let registration =
-        nomifun_agent_domain_wave4::channel_registration().unwrap();
-    let kernel = Arc::new(
-        KernelRegistry::new(
-            policy_for(PluginSourceKind::Bundled),
-            Arc::new(InMemoryPluginStatePersistence::new())
-                as Arc<dyn PluginStatePersistence>,
-        )
-        .unwrap(),
-    );
-    let materialized = kernel.replace_all(vec![registration]).unwrap();
-    let capability_id = nomifun_agent_domain_wave4::CHANNEL_PAIRING;
-    let compiled = compile_single_bundled_capability(
-        &materialized,
-        capability_id,
-        true,
-    );
-    let schemas = Arc::new(SchemaMap::default());
-    let schema_resolver: Arc<dyn NomiPlatformBuiltinToolSchemaResolver> =
-        schemas.clone();
-    let tool_admission = Arc::new(
-        NomiPlatformBuiltinToolAdmission::from_registry(
-            &materialized,
-            BTreeSet::new(),
-            BTreeSet::new(),
-            schema_resolver,
-        )
-        .unwrap(),
-    );
-    let context_admission = Arc::new(
-        nomifun_ai_agent::NomiPlatformBuiltinContextAdmission::from_registry(
-            &materialized,
-            BTreeSet::new(),
-            BTreeSet::new(),
-        )
-        .unwrap(),
-    );
-    let lifecycle_owner = Arc::new(CapturingLifecycleInvoker::default());
-    let lifecycle_invoker: Arc<dyn NomiPlatformBuiltinLifecycleInvoker> =
-        lifecycle_owner.clone();
-    let lifecycle_admission = Arc::new(
-        NomiPlatformBuiltinLifecycleAdmission::from_registry(
-            &materialized,
-            BTreeSet::from([CapabilityId::from(capability_id)]),
-            BTreeSet::new(),
-            lifecycle_invoker,
-        )
-        .unwrap(),
-    );
-    let plugin_schema_resolver: Arc<dyn NomiPluginToolSchemaResolver> = schemas;
-    let session = KernelNomiPluginToolSession::materialize_with_platform_builtins_context_and_lifecycle(
-        kernel,
-        Arc::new(compiled),
-        owner(),
-        AgentSessionId::from(SESSION),
-        ScopeKey::from(format!("session:{SESSION}")),
-        plugin_schema_resolver,
-        tool_admission,
-        context_admission,
-        lifecycle_admission,
-    )
-    .await
-    .unwrap();
-    assert_eq!(session.deferred_lifecycle_actions().len(), 1);
-    assert_eq!(session.context_contributors().len(), 1);
-    assert!(session.context_contributors()[0]
-        .pre_turn_context()
-        .await
-        .is_none());
-    assert_eq!(lifecycle_owner.context_calls.load(Ordering::SeqCst), 0);
-    let provider_name = session.deferred_lifecycle_actions()[0]
-        .provider_name()
-        .to_owned();
-    let mut registry = ToolRegistry::new();
-    let deferred_state = registry.deferred_state();
-    assert!(registry.register(Box::new(ToolSearchTool::new(deferred_state))));
-    let mut allowed = Vec::new();
-    let mut deferred = Vec::new();
-    session.extend_tool_policy(&mut allowed, &mut deferred);
-    registry.retain_only_named(&allowed);
-    session.register_into(&mut registry).unwrap();
-
-    let blocked = registry
-        .get(&provider_name)
-        .unwrap()
-        .execute_with_context(
-            json!({}),
-            &ToolExecutionContext::from_scoped_tool_call(
-                "turn-lifecycle-blocked",
-                "call-lifecycle-blocked",
-            ),
-        )
-        .await;
-    assert!(blocked.is_error);
-    let activated = registry
-        .get("ToolSearch")
-        .unwrap()
-        .execute(json!({"query": capability_id}))
-        .await;
-    assert!(!activated.is_error, "{}", activated.content);
-    let result = registry
-        .get(&provider_name)
-        .unwrap()
-        .execute_with_context(
-            json!({}),
-            &ToolExecutionContext::from_scoped_tool_call(
-                "turn-lifecycle",
-                "call-lifecycle",
-            ),
-        )
-        .await;
-    assert!(!result.is_error, "{}", result.content);
-    assert_eq!(
-        serde_json::from_str::<Value>(&result.content).unwrap()["state"],
-        "active"
-    );
-    assert_eq!(lifecycle_owner.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        session.context_contributors()[0]
-            .pre_turn_context()
-            .await
-            .as_deref(),
-        Some("lifecycle-context-active")
-    );
-    assert_eq!(lifecycle_owner.context_calls.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
-async fn on_demand_lifecycle_context_failure_does_not_advance_active_state() {
-    let registration = nomifun_agent_domain_wave4::channel_registration().unwrap();
-    let kernel = Arc::new(
-        KernelRegistry::new(
-            policy_for(PluginSourceKind::Bundled),
-            Arc::new(InMemoryPluginStatePersistence::new())
-                as Arc<dyn PluginStatePersistence>,
-        )
-        .unwrap(),
-    );
-    let materialized = kernel.replace_all(vec![registration]).unwrap();
-    let capability_id = nomifun_agent_domain_wave4::CHANNEL_PAIRING;
-    let compiled = compile_single_bundled_capability(&materialized, capability_id, true);
-    let schemas = Arc::new(SchemaMap::default());
-    let tool_schema_resolver: Arc<dyn NomiPlatformBuiltinToolSchemaResolver> = schemas.clone();
-    let tool_admission = Arc::new(
-        NomiPlatformBuiltinToolAdmission::from_registry(
-            &materialized,
-            BTreeSet::new(),
-            BTreeSet::new(),
-            tool_schema_resolver,
-        )
-        .unwrap(),
-    );
-    let context_admission = Arc::new(
-        nomifun_ai_agent::NomiPlatformBuiltinContextAdmission::from_registry(
-            &materialized,
-            BTreeSet::new(),
-            BTreeSet::new(),
-        )
-        .unwrap(),
-    );
-    let lifecycle_owner = Arc::new(FailingLifecycleContextInvoker::default());
-    let lifecycle_invoker: Arc<dyn NomiPlatformBuiltinLifecycleInvoker> =
-        lifecycle_owner.clone();
-    let lifecycle_admission = Arc::new(
-        NomiPlatformBuiltinLifecycleAdmission::from_registry(
-            &materialized,
-            BTreeSet::from([CapabilityId::from(capability_id)]),
-            BTreeSet::new(),
-            lifecycle_invoker,
-        )
-        .unwrap(),
-    );
-    let plugin_schema_resolver: Arc<dyn NomiPluginToolSchemaResolver> = schemas;
-    let session = KernelNomiPluginToolSession::materialize_with_platform_builtins_context_and_lifecycle(
-        kernel,
-        Arc::new(compiled),
-        owner(),
-        AgentSessionId::from(SESSION),
-        ScopeKey::from(format!("session:{SESSION}")),
-        plugin_schema_resolver,
-        tool_admission,
-        context_admission,
-        lifecycle_admission,
-    )
-    .await
-    .unwrap();
-    let capability_state = session.capability_state().unwrap();
-    let before = capability_state.snapshot().unwrap();
-    assert_eq!(before.generation, 0);
-    assert!(!before.active.contains(&CapabilityId::from(capability_id)));
-
-    let provider_name = session.deferred_lifecycle_actions()[0]
-        .provider_name()
-        .to_owned();
-    let mut registry = ToolRegistry::new();
-    let deferred_state = registry.deferred_state();
-    assert!(registry.register(Box::new(ToolSearchTool::new(deferred_state))));
-    let mut allowed = Vec::new();
-    let mut deferred = Vec::new();
-    session.extend_tool_policy(&mut allowed, &mut deferred);
-    registry.retain_only_named(&allowed);
-    session.register_into(&mut registry).unwrap();
-    let activated = registry
-        .get("ToolSearch")
-        .unwrap()
-        .execute(json!({"query": capability_id}))
-        .await;
-    assert!(!activated.is_error, "{}", activated.content);
-    let result = registry
-        .get(&provider_name)
-        .unwrap()
-        .execute_with_context(
-            json!({}),
-            &ToolExecutionContext::from_scoped_tool_call(
-                "turn-lifecycle-failure",
-                "call-lifecycle-failure",
-            ),
-        )
-        .await;
-    assert!(result.is_error);
-    assert_eq!(lifecycle_owner.context_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(lifecycle_owner.activate_calls.load(Ordering::SeqCst), 0);
-    let after = capability_state.snapshot().unwrap();
-    assert_eq!(after.generation, 0);
-    assert!(!after.active.contains(&CapabilityId::from(capability_id)));
-}
 
 #[test]
 fn bundled_admission_rejects_placeholders_test_fixtures_and_native_duplicates() {
@@ -1712,15 +1218,15 @@ async fn non_agent_tool_non_tool_and_hidden_actions_never_register() {
         .unwrap(),
     );
     let materialized = kernel.replace_all(vec![registration]).unwrap();
-    let compiled = compile(&materialized, false);
+    let compiled = compile(&materialized);
     assert!(compiled
         .content()
-        .initial_capabilities
+        .enabled_capabilities
         .iter()
         .any(|capability| capability.capability.id.as_ref() == UI_ONLY_TOOL));
     assert!(compiled
         .content()
-        .initial_capabilities
+        .enabled_capabilities
         .iter()
         .any(|capability| {
             capability.capability.id.as_ref() == CONTEXT_CAPABILITY
@@ -1752,7 +1258,7 @@ async fn stale_artifact_fails_before_replacement_handler_dispatch() {
     let materialized = kernel.replace_all(vec![original]).unwrap();
     let session = session(
         Arc::clone(&kernel),
-        compile(&materialized, false),
+        compile(&materialized),
         schemas,
     )
     .await;
@@ -1786,93 +1292,7 @@ async fn stale_artifact_fails_before_replacement_handler_dispatch() {
     assert_eq!(replacement_calls.load(Ordering::SeqCst), 0);
 }
 
-#[tokio::test]
-async fn deferred_tool_search_activates_then_invokes_kernel() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let (registration, schemas) = registration(
-        'a',
-        "deferred:",
-        Arc::clone(&calls),
-        Arc::new(Mutex::new(Vec::new())),
-    );
-    let kernel = Arc::new(
-        KernelRegistry::new(
-            policy(),
-            Arc::new(InMemoryPluginStatePersistence::new()),
-        )
-        .unwrap(),
-    );
-    let materialized = kernel.replace_all(vec![registration]).unwrap();
-    let session =
-        session(kernel, compile(&materialized, true), schemas).await;
-    let action = &session.actions()[0];
-    assert!(action.is_deferred());
 
-    let mut registry = ToolRegistry::new();
-    let mut allowed = Vec::new();
-    let mut deferred = Vec::new();
-    session.extend_tool_policy(&mut allowed, &mut deferred);
-    registry.force_deferred_named(&deferred);
-    registry.retain_only_named(&allowed);
-    let deferred_state = registry.deferred_state();
-    assert!(registry.register(Box::new(ToolSearchTool::new(
-        deferred_state,
-    ))));
-    session.register_into(&mut registry).unwrap();
-
-    let blocked = registry
-        .get(action.provider_name())
-        .unwrap()
-        .execute_with_context(
-            json!({"message": "blocked"}),
-            &ToolExecutionContext::from_scoped_tool_call(
-                "turn-before-search",
-                "call-before-search",
-            ),
-        )
-        .await;
-    assert!(blocked.is_error);
-    assert!(blocked.content.contains("ToolSearch"));
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
-
-    let before = registry
-        .to_tool_defs()
-        .into_iter()
-        .find(|definition| definition.name == action.provider_name())
-        .unwrap();
-    assert!(before.deferred);
-    let searched = registry
-        .get("ToolSearch")
-        .unwrap()
-        .execute(json!({"query": AGENT_ACTION}))
-        .await;
-    assert!(!searched.is_error, "{}", searched.content);
-    let after = registry
-        .to_tool_defs()
-        .into_iter()
-        .find(|definition| definition.name == action.provider_name())
-        .unwrap();
-    assert!(!after.deferred);
-    assert_eq!(after.input_schema, action.input_schema().0);
-
-    let invoked = registry
-        .get(action.provider_name())
-        .unwrap()
-        .execute_with_context(
-            json!({"message": "ready"}),
-            &ToolExecutionContext::from_scoped_tool_call(
-                "turn-after-search",
-                "call-after-search",
-            ),
-        )
-        .await;
-    assert!(!invoked.is_error, "{}", invoked.content);
-    assert_eq!(
-        serde_json::from_str::<Value>(&invoked.content).unwrap()["echo"],
-        "deferred:ready"
-    );
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
-}
 
 fn miniapp_fixture() -> (
     nomifun_agent_contracts::ResolvedMiniAppCapability,
@@ -1960,8 +1380,8 @@ fn compile_miniapp_fixture(
         schema_version: VersionString::from(VERSION),
         model_route_refs: BTreeMap::new(),
         chat_route_records: BTreeMap::new(),
-        initial_capabilities: vec![selection],
-        on_demand_capabilities: Vec::new(),
+        enabled_capabilities: vec![selection],
+
         skill_bindings: Vec::new(),
         system_role_provider_overrides: BTreeMap::new(),
         persona: "MiniApp fixture".to_owned(),

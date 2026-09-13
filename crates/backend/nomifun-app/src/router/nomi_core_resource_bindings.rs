@@ -314,9 +314,8 @@ impl NomiCoreResourceBindingResolverRegistry {
             })?;
         let capability_ids = revision
             .payload
-            .initial_capabilities
+            .enabled_capabilities
             .iter()
-            .chain(&revision.payload.on_demand_capabilities)
             .map(|selection| selection.capability.id.as_ref().to_owned())
             .collect::<BTreeSet<_>>();
         let derived_kinds = required_operations(&capability_ids)

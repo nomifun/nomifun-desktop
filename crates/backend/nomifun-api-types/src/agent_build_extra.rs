@@ -221,10 +221,6 @@ pub struct NomiBuildExtra {
     /// attachment behavior.
     #[serde(default)]
     pub vision_input: Option<bool>,
-    /// True when `llm.vision` is inside the frozen on-demand ceiling but has
-    /// not yet been activated for the current Session.
-    #[serde(default)]
-    pub vision_on_demand: bool,
     /// Canonical runtime profile projected from an official Agent revision.
     /// The Nomi factory accepts `coding` only when the exact bounded coding
     /// tool policy is present; open JSON cannot use this field to add tools.
@@ -285,7 +281,6 @@ mod tests {
 
         let ordinary: NomiBuildExtra = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(ordinary.vision_input, None);
-        assert!(!ordinary.vision_on_demand);
     }
 
     #[test]

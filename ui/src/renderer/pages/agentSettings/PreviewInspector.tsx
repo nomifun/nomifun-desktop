@@ -43,8 +43,7 @@ const PreviewInspector: React.FC<PreviewInspectorProps> = ({ preview, tokenState
       : humanizeResourceKind(resourceKind);
   };
   const metrics = [
-    ['initial_count', preview.summary.initial_count],
-    ['on_demand_count', preview.summary.on_demand_count],
+    ['enabled_count', preview.summary.enabled_count],
     ['active_at_start_count', preview.summary.active_at_start_count],
     ['model_tool_count', preview.summary.model_tool_count],
     ['context_contributor_count', preview.summary.context_contributor_count],
@@ -107,14 +106,14 @@ const PreviewInspector: React.FC<PreviewInspectorProps> = ({ preview, tokenState
         <Collapse.Item name='diff' header={t('agentSettings.inspector.revisionDiff')}>
           <div className={styles.diffGrid}>
             <div>
-              <span>{t('agentSettings.capabilities.initial')}</span>
+              <span>{t('agentSettings.capabilities.enabled')}</span>
               <div className={styles.tagRow}>
-                {preview.revision_diff.added_initial.length +
-                  preview.revision_diff.removed_initial.length >
+                {preview.revision_diff.added_enabled.length +
+                  preview.revision_diff.removed_enabled.length >
                 0 ? (
                   <Tag size='small' color='blue'>
-                    {preview.revision_diff.added_initial.length +
-                      preview.revision_diff.removed_initial.length}{' '}
+                    {preview.revision_diff.added_enabled.length +
+                      preview.revision_diff.removed_enabled.length}{' '}
                     {t('agentSettings.sections.capabilities')}
                   </Tag>
                 ) : (
@@ -122,22 +121,7 @@ const PreviewInspector: React.FC<PreviewInspectorProps> = ({ preview, tokenState
                 )}
               </div>
             </div>
-            <div>
-              <span>{t('agentSettings.capabilities.onDemand')}</span>
-              <div className={styles.tagRow}>
-                {preview.revision_diff.added_on_demand.length +
-                  preview.revision_diff.removed_on_demand.length >
-                0 ? (
-                  <Tag size='small' color='blue'>
-                    {preview.revision_diff.added_on_demand.length +
-                      preview.revision_diff.removed_on_demand.length}{' '}
-                    {t('agentSettings.sections.capabilities')}
-                  </Tag>
-                ) : (
-                  <span>{t('agentSettings.common.noChanges')}</span>
-                )}
-              </div>
-            </div>
+
           </div>
         </Collapse.Item>
 

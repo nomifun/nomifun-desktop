@@ -291,10 +291,8 @@ pub struct NomiAgentManager {
     /// confined to their workspace, while a local desktop session (`None`)
     /// may choose any absolute local file through the OS file picker.
     image_read_root: Option<PathBuf>,
-    /// Explicit canonical Agent capability gate for image attachment loading.
-    /// Ordinary conversations use `None` and retain model-derived behavior.
-    vision_activation: Option<Arc<std::sync::atomic::AtomicBool>>,
-    /// Exact Kernel active set shared with ToolSearch/lifecycle activation.
+
+    /// Exact enabled Kernel capability set for this Session.
     /// This handle is read-only at the manager boundary and is absent for
     /// ordinary conversations that have no canonical Agent Snapshot.
     capability_state: Option<Arc<nomifun_agent_kernel::SessionCapabilityState>>,
@@ -903,10 +901,7 @@ pub(crate) struct NomiHostWiring {
     pub web_search_tool: Option<Box<dyn nomi_tools::Tool>>,
     /// Renderer sharing this Session's bounded search-citation store.
     pub citation_render_tool: Option<Box<dyn nomi_tools::Tool>>,
-    /// Session-local image-input activation state. `None` preserves ordinary
-    /// model-derived behavior; canonical Agents always provide an explicit gate.
-    pub vision_activation: Option<Arc<std::sync::atomic::AtomicBool>>,
-    pub vision_activation_tool: Option<Box<dyn nomi_tools::Tool>>,
+
     pub lazy_mcp_runtime: Option<LazyMcpRuntime>,
     /// Exact ordinary Plugin Tool actions frozen for this Nomi Session.
     ///
@@ -929,8 +924,7 @@ impl Default for NomiHostWiring {
             image_generation_response_in_chinese: false,
             web_search_tool: None,
             citation_render_tool: None,
-            vision_activation: None,
-            vision_activation_tool: None,
+
             lazy_mcp_runtime: None,
             plugin_tool_session: None,
         }
@@ -1022,8 +1016,6 @@ impl NomiAgentManager {
             host_wiring.image_generation_response_in_chinese;
         let web_search_tool = host_wiring.web_search_tool;
         let citation_render_tool = host_wiring.citation_render_tool;
-        let vision_activation = host_wiring.vision_activation;
-        let vision_activation_tool = host_wiring.vision_activation_tool;
         let lazy_mcp_runtime = host_wiring.lazy_mcp_runtime;
         let plugin_tool_session = host_wiring.plugin_tool_session;
         let capability_state = plugin_tool_session
@@ -1438,17 +1430,7 @@ impl NomiAgentManager {
                 ));
             }
         }
-        if let Some(tool) = vision_activation_tool {
-            let registered = engine.registry_mut().register(tool);
-            if config_extra.allowed_tools.iter().any(|name| {
-                name == crate::vision_activation::VISION_ACTIVATE_TOOL_NAME
-            }) && !registered
-            {
-                return Err(AppError::Internal(
-                    "on-demand vision activation tool could not be registered".to_owned(),
-                ));
-            }
-        }
+
         let mcp_tools: Vec<(&str, Box<dyn nomi_tools::Tool>)> = match lazy_mcp_runtime.as_ref() {
             Some(runtime) => vec![
                 (
@@ -1677,7 +1659,6 @@ impl NomiAgentManager {
             )),
             distill_dir,
             image_read_root,
-            vision_activation,
             capability_state,
             distill_cfg,
             knowledge_prelude: std::sync::Mutex::new(knowledge_prelude),
@@ -2320,11 +2301,7 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                 // text turn unchanged. This capability lock and all attachment
                 // work remain cancellable.
                 let supports_image = self.engine.lock().await.compat().supports_image();
-                let capability_active = self
-                    .vision_activation
-                    .as_ref()
-                    .is_none_or(crate::vision_activation::is_active);
-                let image_blocks = if supports_image && capability_active {
+                let image_blocks = if supports_image {
                     load_image_blocks(&data.files, self.image_read_root.as_deref()).await?
                 } else {
                     Vec::new()
@@ -3913,7 +3890,6 @@ fn image_artifact_delivery_error_to_send_error(
     )))
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5350,7 +5326,7 @@ mod tests {
             )),
             distill_dir: None,
             image_read_root: None,
-            vision_activation: None,
+
             capability_state: None,
             distill_cfg: Arc::new(config),
             knowledge_prelude: std::sync::Mutex::new(None),
@@ -5649,7 +5625,7 @@ mod tests {
             )),
             distill_dir: None,
             image_read_root: None,
-            vision_activation: None,
+
             capability_state: None,
             distill_cfg: Arc::new(config),
             knowledge_prelude: std::sync::Mutex::new(None),
@@ -5690,42 +5666,6 @@ mod tests {
             &user.content[..],
             [ContentBlock::Text { text }] if text == "Answer using text only."
         ));
-    }
-
-    #[tokio::test]
-    async fn on_demand_vision_does_not_read_attachments_before_activation() {
-        let provider = Arc::new(ScriptedProvider::new(vec![vec![LlmEvent::Done {
-            stop_reason: StopReason::EndTurn,
-            usage: Default::default(),
-        }]]));
-        let mut agent = make_agent_with_provider(provider.clone());
-        agent.vision_activation = Some(Arc::new(std::sync::atomic::AtomicBool::new(false)));
-        let root = tempfile::tempdir().unwrap();
-        let missing = root
-            .path()
-            .join("not-read-before-activation.png")
-            .to_string_lossy()
-            .into_owned();
-
-        agent
-            .send_message(SendMessageData {
-                content: "Continue without vision.".into(),
-                msg_id: "msg-vision-deferred".into(),
-                source_message_id: None,
-                files: vec![missing],
-                inject_skills: Vec::new(),
-                origin: None,
-            })
-            .await
-            .expect("inactive on-demand vision must not touch attachment bytes");
-
-        let user = provider.requests()[0]
-            .messages
-            .iter()
-            .find(|message| message.role == Role::User)
-            .unwrap()
-            .clone();
-        assert!(matches!(&user.content[..], [ContentBlock::Text { .. }]));
     }
 
     /// The observed production shape: a long prose answer cut off at the output

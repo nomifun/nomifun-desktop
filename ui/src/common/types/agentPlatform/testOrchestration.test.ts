@@ -33,12 +33,12 @@ const preview = {
     snapshot_digest: asDigestHex('4'.repeat(64)),
   },
   summary: {
-    initial_count: 0,
-    on_demand_count: 0,
+    enabled_count: 0,
+
     active_at_start_count: 0,
     model_tool_count: 0,
     context_contributor_count: 0,
-    on_demand_index_count: 0,
+
     skill_count: 0,
     mcp_count: 0,
     required_resource_kind_count: 0,
@@ -46,10 +46,10 @@ const preview = {
   },
   diagnostics: [],
   revision_diff: {
-    added_initial: [],
-    removed_initial: [],
-    added_on_demand: [],
-    removed_on_demand: [],
+    added_enabled: [],
+    removed_enabled: [],
+
+
     added_skills: [],
     removed_skills: [],
     model_routes_changed: false,
@@ -58,9 +58,9 @@ const preview = {
   inspector: {
     required_runtime_protocol_version: '1.0.0',
     required_runtime_features: [],
-    initial_capabilities: [],
-    on_demand_capabilities: [],
-    compact_on_demand_index: [],
+    enabled_capabilities: [],
+
+
     tool_schema_refs: [],
     context_schema_refs: [],
     mcp_materializations: [],

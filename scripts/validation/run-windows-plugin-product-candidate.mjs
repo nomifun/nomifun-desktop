@@ -621,7 +621,7 @@ async function invokeInstalledPluginThroughAgent(context, expectedVersion) {
     if (!capability || capability.materialization_state !== 'materialized') {
       failure('plugin_capability_not_materialized', 'Applied Plugin capability is absent from the Agent Catalog');
     }
-    draft.document.initial_capabilities = [{
+    draft.document.enabled_capabilities = [{
       capability: {
         id: PLUGIN_CAPABILITY_ID,
         version: assertString(

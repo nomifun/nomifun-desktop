@@ -3903,9 +3903,8 @@ mod tests {
             "instructions": "Use the frozen Agent contract.",
             "included_skills": [],
             "excluded_auto_skills": [],
-            "initial_capabilities": [],
-            "on_demand_capabilities": [],
-            "knowledge_policy": {
+            "enabled_capabilities": [],
+                        "knowledge_policy": {
                 "enabled": false,
                 "writeback": false,
                 "grounded": false

@@ -471,8 +471,8 @@ const NomiConversationPanel: React.FC<{
         name,
         requiredResourceKinds: [...template.seed.required_resource_kinds],
         capabilityIds: [
-          ...template.seed.initial_capabilities,
-          ...template.seed.on_demand_capabilities,
+          ...template.seed.enabled_capabilities,
+
         ].map((capability) => capability.id),
       };
     }
@@ -486,8 +486,8 @@ const NomiConversationPanel: React.FC<{
       ipcBridge.agentPlatform.capabilities.invoke(),
     ]);
     const capabilityReferences = [
-      ...editor.draft.document.initial_capabilities,
-      ...editor.draft.document.on_demand_capabilities,
+      ...editor.draft.document.enabled_capabilities,
+
     ].map((entry) => entry.capability);
     return {
       conversationId: conversation.id,

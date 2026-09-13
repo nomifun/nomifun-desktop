@@ -431,9 +431,8 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
         };
         let wave2_workspace_selected = revision
             .payload
-            .initial_capabilities
+            .enabled_capabilities
             .iter()
-            .chain(&revision.payload.on_demand_capabilities)
             .any(|selection| {
                 matches!(
                     selection.capability.id.as_ref(),
@@ -511,22 +510,14 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
             ))
         })?;
         let robot_capability_ids = super::nomi_core_robot::tool_capability_ids();
-        let initial_robot_ids = compiled
+        let enabled_robot_ids = compiled
             .content()
-            .initial_capabilities
+            .enabled_capabilities
             .iter()
             .map(|capability| capability.capability.id.clone())
             .filter(|capability_id| robot_capability_ids.contains(capability_id))
             .collect::<BTreeSet<_>>();
-        let deferred_robot_ids = compiled
-            .content()
-            .on_demand_capabilities
-            .iter()
-            .map(|capability| capability.capability.id.clone())
-            .filter(|capability_id| robot_capability_ids.contains(capability_id))
-            .collect::<BTreeSet<_>>();
-        let plugin_session = if initial_robot_ids.is_empty()
-            && deferred_robot_ids.is_empty()
+        let plugin_session = if enabled_robot_ids.is_empty()
         {
             plugin_session
         } else {
@@ -551,8 +542,7 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
                     &principal,
                     &session_id,
                     robot_binding,
-                    &initial_robot_ids,
-                    &deferred_robot_ids,
+                    &enabled_robot_ids,
                 )
                 .await
                 .map_err(AppError::Conflict)?;
@@ -1039,16 +1029,9 @@ fn compile_nomi_plugin_snapshot(
             resolver_run_id: persisted.resolver_run_id.clone(),
             miniapp_capabilities: persisted
                 .content
-                .initial_miniapp_capabilities
+                .enabled_miniapp_capabilities
                 .iter()
                 .cloned()
-                .chain(
-                    persisted
-                        .content
-                        .on_demand_miniapp_capabilities
-                        .iter()
-                        .cloned(),
-                )
                 .collect(),
         },
     )
@@ -3433,11 +3416,8 @@ struct NomiCoreSessionMetadata {
 struct NomiCoreAgentSessionCapabilityResponse {
     resolved_snapshot_ref: nomifun_agent_contracts::ResolvedSnapshotRef,
     generation: u64,
-    initial_capabilities: Vec<String>,
-    on_demand_capabilities: Vec<String>,
+    enabled_capabilities: Vec<String>,
     active_capabilities: Vec<String>,
-    compact_on_demand_index:
-        Vec<nomifun_agent_contracts::CompactOnDemandCapabilityEntry>,
     /// Explicitly distinguishes saved-preset projection from a live Kernel
     /// active-set query.  It prevents a consumer from mistaking generation 0
     /// for an unimplemented empty response.
@@ -5064,21 +5044,13 @@ async fn get_nomi_core_agent_session_capabilities(
             "the capability projection Snapshot differs from the Session binding",
         ));
     }
-    let initial_capabilities = projection
+    let enabled_capabilities = projection
         .revision
         .payload
-        .initial_capabilities
+        .enabled_capabilities
         .iter()
         .map(|selection| selection.capability.id.as_ref().to_owned())
         .collect::<Vec<_>>();
-    let on_demand_capabilities = projection
-        .revision
-        .payload
-        .on_demand_capabilities
-        .iter()
-        .map(|selection| selection.capability.id.as_ref().to_owned())
-        .collect::<Vec<_>>();
-    let compact_on_demand_index = projection.snapshot.content.compact_on_demand_index;
     let live_activation = state
         .session_owner
         .runtime_registry
@@ -5113,16 +5085,16 @@ async fn get_nomi_core_agent_session_capabilities(
                 "nomi_core_live_runtime",
             )
         } else {
-            (0, initial_capabilities.clone(), "nomi_core_saved_binding")
+            (0, enabled_capabilities.clone(), "nomi_core_saved_binding")
         };
     Ok(Json(ApiResponse::ok(
         NomiCoreAgentSessionCapabilityResponse {
             resolved_snapshot_ref: metadata.binding.resolved_snapshot_ref,
             generation,
-            initial_capabilities: initial_capabilities.clone(),
-            on_demand_capabilities,
+            enabled_capabilities: enabled_capabilities.clone(),
+
             active_capabilities,
-            compact_on_demand_index,
+
             state_source,
         },
     )))

@@ -701,14 +701,14 @@ fn sample_document(_owner_id: &str, instructions: &str) -> AgentPresetDocumentDt
                 "failovers": []
             }),
         )]),
-        initial_capabilities: vec![CapabilitySelectionDto {
+        enabled_capabilities: vec![CapabilitySelectionDto {
             capability: ExactCatalogRefDto {
                 id: SAMPLE_CAPABILITY.to_owned(),
                 version: VERSION.to_owned(),
             },
             action_allowlist: BTreeSet::from([SAMPLE_ACTION.to_owned()]),
         }],
-        on_demand_capabilities: Vec::new(),
+
         skill_bindings: vec![ExactCatalogRefDto {
             id: SAMPLE_SKILL.to_owned(),
             version: VERSION.to_owned(),
@@ -1033,31 +1033,18 @@ fn bind_canonical_snapshot(
 ) -> Result<CompiledSnapshot, SampleEchoGateError> {
     let compiled_initial = compiled
         .content()
-        .initial_capabilities
+        .enabled_capabilities
         .iter()
         .map(|capability| capability.capability.id.clone())
         .collect::<BTreeSet<_>>();
     let canonical_initial = canonical
         .content
-        .initial_capabilities
-        .iter()
-        .map(|capability| capability.capability.id.clone())
-        .collect::<BTreeSet<_>>();
-    let compiled_on_demand = compiled
-        .content()
-        .on_demand_capabilities
-        .iter()
-        .map(|capability| capability.capability.id.clone())
-        .collect::<BTreeSet<_>>();
-    let canonical_on_demand = canonical
-        .content
-        .on_demand_capabilities
+        .enabled_capabilities
         .iter()
         .map(|capability| capability.capability.id.clone())
         .collect::<BTreeSet<_>>();
     invariant(
         compiled_initial == canonical_initial
-            && compiled_on_demand == canonical_on_demand
             && compiled.content().capability_allowlist == canonical.content.capability_allowlist
             && compiled.content().skill_locks == canonical.content.skill_locks
             && compiled.content().mcp_tool_locks == canonical.content.mcp_tool_locks,
@@ -1626,7 +1613,7 @@ async fn open_persistent_session(
     );
     create_request.initial_active_capability_ids = compiled
         .content()
-        .initial_capabilities
+        .enabled_capabilities
         .iter()
         .map(|capability| capability.capability.id.as_ref().to_owned())
         .collect();
@@ -1679,15 +1666,9 @@ async fn open_persistent_session(
             .compiled_runtime_profile_digest
             .clone(),
         enabled_runtime_features: compiled.content().required_runtime_features.clone(),
-        initial_capabilities: compiled
+        enabled_capabilities: compiled
             .content()
-            .initial_capabilities
-            .iter()
-            .map(|capability| capability.capability.id.clone())
-            .collect(),
-        on_demand_capabilities: compiled
-            .content()
-            .on_demand_capabilities
+            .enabled_capabilities
             .iter()
             .map(|capability| capability.capability.id.clone())
             .collect(),
@@ -1729,15 +1710,9 @@ async fn open_persistent_session(
                 context,
                 profile_kind: RuntimeProfileKind::ManagedMinimal,
                 full_auto: FullAutoExecutionWire::fixed(),
-                initial_capabilities: compiled
+                enabled_capabilities: compiled
                     .content()
-                    .initial_capabilities
-                    .iter()
-                    .map(|capability| capability.capability.id.clone())
-                    .collect(),
-                on_demand_capabilities: compiled
-                    .content()
-                    .on_demand_capabilities
+                    .enabled_capabilities
                     .iter()
                     .map(|capability| capability.capability.id.clone())
                     .collect(),

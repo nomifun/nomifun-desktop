@@ -51,10 +51,9 @@ describe('Agent Workbench capability and resource boundary', () => {
 
     expect(editor.includes('<AgentCapabilityWorkspace')).toBe(true);
     expect(overview.match(/<AgentCapabilityWorkspace/g)?.length).toBe(1);
-    expect(capabilityList.includes("<Select")).toBe(true);
-    expect(capabilityList.includes("value: 'none'")).toBe(true);
-    expect(capabilityList.includes("value: 'initial'")).toBe(true);
-    expect(capabilityList.includes("value: 'on_demand'")).toBe(true);
+    expect(capabilityList.includes('<Select')).toBe(false);
+    expect(capabilityList.includes('on_demand')).toBe(false);
+    expect(capabilityList.includes('planCapabilityChange')).toBe(true);
     expect(capabilityList.includes('required_resource_kinds')).toBe(true);
   });
 

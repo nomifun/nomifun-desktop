@@ -19,7 +19,7 @@ use nomifun_agent_contracts::{
     CapabilityConsumer, CapabilityId, CapabilityKind, CapabilityOwner,
     CapabilityProvenance, CapabilityReleaseState, CatalogAvailability,
     ChatRouteIdentity, ChatRouteLookupError, ChatRouteLookupKey, ChatRouteRecord,
-    ChatRouteRecordRow, CompactOnDemandCapabilityEntry, ContributionLock,
+    ChatRouteRecordRow, ContributionLock,
     CorrelationId, DeleteAgentSessionCommand, DigestHex,
     EventId, EventProducerId,
     ExactRoleContractRef, ExecutionRoleId, FullAutoExecutionWire, IdempotencyKey,
@@ -42,9 +42,9 @@ use nomifun_agent_control_plane::{
     StoredAgentBinding, StoredPreset,
 };
 use nomifun_agent_kernel::{
-    ActivationOutcome, ActiveCapabilitySetSnapshot, AgentPresetCompiler,
+    ActiveCapabilitySetSnapshot, AgentPresetCompiler,
     CapabilityAccessRequest, CapabilityInvocationRequest, CompileRequest,
-    CompiledSnapshot, CompilerEnvironment, CompletedTurnBoundary, KernelError,
+    CompiledSnapshot, CompilerEnvironment, KernelError,
     KernelRegistry, MaterializationPolicy, PluginRegistration, PluginStateError,
     PluginStatePersistence, PluginStateSnapshot, RoleMemberAdmission,
     RoleMemberInvocationRequest, RoleToolOperationRequest, SessionCapabilityState,
@@ -369,21 +369,9 @@ pub struct SessionCapabilityCatalog {
     pub owner_ref: PrincipalRef,
     pub resolved_snapshot_ref: ResolvedSnapshotRef,
     pub generation: u64,
-    pub initial_capabilities: Vec<CapabilityId>,
-    pub on_demand_capabilities: Vec<CapabilityId>,
+    pub enabled_capabilities: Vec<CapabilityId>,
     pub active_capabilities: BTreeSet<CapabilityId>,
-    pub compact_on_demand_index: Vec<CompactOnDemandCapabilityEntry>,
     pub typed_resource_bindings: TypedResourceBindings,
-}
-
-#[derive(Clone, Debug)]
-pub struct ActivateCapabilityRequest {
-    pub agent_session_id: AgentSessionId,
-    pub principal: PrincipalRef,
-    pub capability_id: CapabilityId,
-    pub expected_generation: u64,
-    pub completed_turn_operation_id: OperationId,
-    pub idempotency_key: IdempotencyKey,
 }
 
 #[derive(Clone, Debug)]
@@ -411,11 +399,6 @@ pub trait AgentSessionCommandPort: Send + Sync {
         &self,
         request: StartAgentTurnRequest,
     ) -> Result<AgentTurnDispatch, AgentPlatformError>;
-
-    async fn activate_capability(
-        &self,
-        request: ActivateCapabilityRequest,
-    ) -> Result<nomifun_agent_kernel::ActivationOutcome, AgentPlatformError>;
 
     async fn invoke_capability(
         &self,
@@ -2747,15 +2730,9 @@ impl AgentPlatform {
                 .compiled_runtime_profile_digest
                 .clone(),
             enabled_runtime_features: compiled.content().required_runtime_features.clone(),
-            initial_capabilities: compiled
+            enabled_capabilities: compiled
                 .content()
-                .initial_capabilities
-                .iter()
-                .map(|capability| capability.capability.id.clone())
-                .collect(),
-            on_demand_capabilities: compiled
-                .content()
-                .on_demand_capabilities
+                .enabled_capabilities
                 .iter()
                 .map(|capability| capability.capability.id.clone())
                 .collect(),
@@ -2785,15 +2762,9 @@ impl AgentPlatform {
             },
             profile_kind: compiled.content().required_runtime_profile,
             full_auto: FullAutoExecutionWire::fixed(),
-            initial_capabilities: compiled
+            enabled_capabilities: compiled
                 .content()
-                .initial_capabilities
-                .iter()
-                .map(|capability| capability.capability.id.clone())
-                .collect(),
-            on_demand_capabilities: compiled
-                .content()
-                .on_demand_capabilities
+                .enabled_capabilities
                 .iter()
                 .map(|capability| capability.capability.id.clone())
                 .collect(),
@@ -3270,18 +3241,12 @@ impl AgentPlatform {
             owner_ref: session.owner_ref,
             resolved_snapshot_ref: execution.compiled.snapshot_ref().clone(),
             generation: active.generation,
-            initial_capabilities: content
-                .initial_capabilities
-                .iter()
-                .map(|capability| capability.capability.id.clone())
-                .collect(),
-            on_demand_capabilities: content
-                .on_demand_capabilities
+            enabled_capabilities: content
+                .enabled_capabilities
                 .iter()
                 .map(|capability| capability.capability.id.clone())
                 .collect(),
             active_capabilities: active.active,
-            compact_on_demand_index: content.compact_on_demand_index.clone(),
             typed_resource_bindings: execution.compiled.resource_bindings().to_vec(),
         })
     }
@@ -3638,7 +3603,6 @@ impl AgentPlatform {
             )
             .await?;
         let capabilities = Arc::new(SessionCapabilityState::new(&compiled));
-        replay_capability_state(&self.sessions, session_id, &capabilities).await?;
         let head = self.sessions.head(session_id).await?;
         let runtime_binding = match (
             head.runtime_bound_event_id,
@@ -3819,7 +3783,7 @@ impl AgentSessionCommandPort for AgentPlatform {
         create.activation_event_id = Some(creation_event_id("active-set-0"));
         create.initial_active_capability_ids = compiled
             .content()
-            .initial_capabilities
+            .enabled_capabilities
             .iter()
             .map(|capability| capability.capability.id.as_ref().to_owned())
             .collect();
@@ -4009,95 +3973,6 @@ impl AgentSessionCommandPort for AgentPlatform {
             turn_event,
             runtime_response,
         })
-    }
-
-    async fn activate_capability(
-        &self,
-        request: ActivateCapabilityRequest,
-    ) -> Result<ActivationOutcome, AgentPlatformError> {
-        self.require_owned_session(&request.principal, &request.agent_session_id)
-            .await?;
-        let execution = self.execution_for(&request.agent_session_id).await?;
-        let current = execution.capabilities.snapshot()?;
-        if current.active.contains(&request.capability_id) {
-            return Ok(ActivationOutcome::AlreadyActive {
-                generation: current.generation,
-            });
-        }
-        if current.generation != request.expected_generation {
-            return Err(KernelError::ActivationGenerationConflict {
-                expected: request.expected_generation,
-                current: current.generation,
-            }
-            .into());
-        }
-        let plan = execution
-            .compiled
-            .content()
-            .on_demand_activation_plans
-            .get(&request.capability_id)
-            .ok_or_else(|| KernelError::CapabilityNotInPreset {
-                capability_id: request.capability_id.clone(),
-            })?
-            .clone();
-        let generation = current
-            .generation
-            .checked_add(1)
-            .ok_or(KernelError::ActivationGenerationExhausted)?;
-        let mut active = current.active.clone();
-        active.extend(plan.capability_bundle.iter().cloned());
-        let active_ids = active
-            .iter()
-            .map(|capability| capability.as_ref().to_owned())
-            .collect::<Vec<_>>();
-        let delta = plan
-            .capability_bundle
-            .iter()
-            .map(|capability| capability.as_ref().to_owned())
-            .collect::<Vec<_>>();
-        self.sessions
-            .append_event(&SessionEventAppend {
-                agent_session_id: request.agent_session_id.clone(),
-                event_id: stable_event_id(
-                    "active-set",
-                    &request.agent_session_id,
-                    request.idempotency_key.as_ref(),
-                ),
-                producer_id: EventProducerId::from("capability_host"),
-                idempotency_key: request.idempotency_key,
-                runtime_binding_id: None,
-                runtime_producer_seq: None,
-                semantic_event: SemanticSessionEventDraft {
-                    kind: SessionEventKind("capability/active-set-committed".to_owned()),
-                    kind_version: 1,
-                    correlation_id: CorrelationId::from(
-                        request.agent_session_id.as_ref().to_owned(),
-                    ),
-                    causation_event_id: None,
-                    payload: SessionEventPayloadRef::InlineJson(StrictJsonValue(json!({
-                        "generation": generation,
-                        "active_capability_ids": active_ids,
-                        "active_set_digest": digest_payload(&active_ids)?,
-                        "delta": delta,
-                        "requested_capability_id": &request.capability_id
-                    }))),
-                },
-            })
-            .await?;
-        match execution.capabilities.activate_at_boundary(
-            request.expected_generation,
-            &request.capability_id,
-            CompletedTurnBoundary::committed(request.completed_turn_operation_id),
-        ) {
-            Ok(outcome) => Ok(outcome),
-            Err(error) => {
-                self.executions
-                    .write()
-                    .await
-                    .remove(&request.agent_session_id);
-                Err(error.into())
-            }
-        }
     }
 
     async fn invoke_capability(
@@ -4352,7 +4227,7 @@ impl AgentSessionCommandPort for AgentPlatform {
             .await?;
         request.child_initial_active_capability_ids = compiled
             .content()
-            .initial_capabilities
+            .enabled_capabilities
             .iter()
             .map(|capability| capability.capability.id.as_ref().to_owned())
             .collect();
@@ -4589,69 +4464,6 @@ fn validate_compiler_convergence(
         return Err(AgentPlatformError::Contract(
             "persisted control-plane Snapshot and Kernel compiler ceiling diverged".to_owned(),
         ));
-    }
-    Ok(())
-}
-
-async fn replay_capability_state(
-    sessions: &AgentSessionStore,
-    session_id: &AgentSessionId,
-    capabilities: &SessionCapabilityState,
-) -> Result<(), AgentPlatformError> {
-    let mut cursor: Option<SessionEventCursor> = None;
-    loop {
-        let page = sessions.read_events(session_id, cursor.as_ref(), 500).await?;
-        if page.events.is_empty() {
-            break;
-        }
-        for event in &page.events {
-            if event.kind.0 != "capability/active-set-committed" {
-                continue;
-            }
-            let SessionEventPayloadRef::InlineJson(payload) = &event.payload else {
-                return Err(AgentPlatformError::Contract(
-                    "active-set event must use inline canonical JSON".to_owned(),
-                ));
-            };
-            let generation = payload
-                .0
-                .get("generation")
-                .and_then(Value::as_u64)
-                .ok_or_else(|| {
-                    AgentPlatformError::Contract(
-                        "active-set event has no generation".to_owned(),
-                    )
-                })?;
-            if generation == 0 {
-                continue;
-            }
-            let requested = payload
-                .0
-                .get("requested_capability_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    AgentPlatformError::Contract(
-                        "active-set replay requires requested_capability_id".to_owned(),
-                    )
-                })?;
-            let current = capabilities.snapshot()?;
-            if current.generation >= generation {
-                continue;
-            }
-            capabilities.activate_at_boundary(
-                current.generation,
-                &CapabilityId::from(requested.to_owned()),
-                CompletedTurnBoundary::committed(OperationId::from(format!(
-                    "replay:{}",
-                    event.event_id.as_ref()
-                ))),
-            )?;
-        }
-        let next = page.next_cursor;
-        if cursor.as_ref().is_some_and(|cursor| cursor.seq == next.seq) {
-            break;
-        }
-        cursor = Some(next);
     }
     Ok(())
 }

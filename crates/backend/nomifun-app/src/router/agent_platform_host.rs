@@ -2399,7 +2399,7 @@ mod tests {
         TypedResourceBinding,
     ) {
         let owner = principal();
-        let initial_capabilities = capability_ids
+        let enabled_capabilities = capability_ids
             .iter()
             .copied()
             .map(|capability_id| CapabilitySelection {
@@ -2427,8 +2427,8 @@ mod tests {
             schema_version: VersionString::from(CONTRACT_VERSION),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),
-            initial_capabilities,
-            on_demand_capabilities: Vec::new(),
+            enabled_capabilities,
+
             skill_bindings: Vec::new(),
             system_role_provider_overrides: BTreeMap::new(),
             persona: format!("Wave 1 {fixture_name} test"),
@@ -2881,11 +2881,11 @@ mod tests {
                 schema_version: VersionString::from(CONTRACT_VERSION),
                 model_route_refs: BTreeMap::new(),
                 chat_route_records: BTreeMap::new(),
-                initial_capabilities: selected_capability_ids
+                enabled_capabilities: selected_capability_ids
                     .iter()
                     .map(|id| capability(id))
                     .collect(),
-                on_demand_capabilities: Vec::new(),
+
                 skill_bindings: Vec::new(),
                 system_role_provider_overrides: BTreeMap::new(),
                 persona: "Browser role live test".to_owned(),
@@ -3180,11 +3180,11 @@ mod tests {
                 schema_version: VersionString::from(CONTRACT_VERSION),
                 model_route_refs: BTreeMap::new(),
                 chat_route_records: BTreeMap::new(),
-                initial_capabilities: selected_capability_ids
+                enabled_capabilities: selected_capability_ids
                     .iter()
                     .map(|id| capability(id))
                     .collect(),
-                on_demand_capabilities: Vec::new(),
+
                 skill_bindings: Vec::new(),
                 system_role_provider_overrides: BTreeMap::new(),
                 persona: "Computer role live test".to_owned(),
@@ -3521,8 +3521,7 @@ mod tests {
                 nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT.to_owned(),
                 route_record,
             )]),
-            initial_capabilities: Vec::new(),
-            on_demand_capabilities: Vec::new(),
+            enabled_capabilities: Vec::new(),
             skill_bindings: Vec::new(),
             system_role_provider_overrides: BTreeMap::new(),
             persona: "Agent platform host chat fixture".to_owned(),

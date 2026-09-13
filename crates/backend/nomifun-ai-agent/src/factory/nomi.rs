@@ -66,18 +66,8 @@ fn apply_model_only_ceiling(overrides: &mut NomiBuildExtra) {
 /// upstream rejection.
 fn apply_vision_input_policy(
     policy: Option<bool>,
-    on_demand: bool,
     resolved_supports_image: &mut Option<bool>,
 ) -> Result<(), AppError> {
-    if on_demand {
-        if *resolved_supports_image != Some(true) {
-            return Err(AppError::UnprocessableEntity(
-                "llm.vision is on demand, but the exact configured Chat model does not support image input"
-                    .to_owned(),
-            ));
-        }
-        return Ok(());
-    }
     match policy {
         Some(false) => {
             *resolved_supports_image = Some(false);
@@ -715,21 +705,8 @@ pub(super) async fn build(
     .await?;
     apply_vision_input_policy(
         overrides.vision_input,
-        overrides.vision_on_demand,
         &mut fields.compat_overrides.supports_image,
     )?;
-    let vision_activation = overrides.vision_input.map(|initial| {
-        Arc::new(std::sync::atomic::AtomicBool::new(initial))
-    });
-    let vision_activation_tool: Option<Box<dyn nomi_tools::Tool>> = overrides
-        .vision_on_demand
-        .then(|| {
-            let active = vision_activation
-                .clone()
-                .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicBool::new(false)));
-            Box::new(crate::vision_activation::VisionActivationTool::new(active))
-                as Box<dyn nomi_tools::Tool>
-        });
     let session_citations = Arc::new(crate::web_search::SessionCitationStore::default());
     let web_search_tool: Option<Box<dyn nomi_tools::Tool>> = if overrides
         .allowed_tools
@@ -1120,8 +1097,6 @@ pub(super) async fn build(
         image_generation_response_in_chinese: app_language == "zh-CN",
         web_search_tool,
         citation_render_tool,
-        vision_activation,
-        vision_activation_tool,
         lazy_mcp_runtime,
         plugin_tool_session,
     };
@@ -1921,28 +1896,24 @@ mod tests {
     #[test]
     fn vision_policy_is_subtractive_and_requires_exact_model_evidence() {
         let mut supported = Some(true);
-        apply_vision_input_policy(Some(true), false, &mut supported)
+        apply_vision_input_policy(Some(true), &mut supported)
             .expect("declared vision model accepts the selected capability");
         assert_eq!(supported, Some(true));
 
-        apply_vision_input_policy(Some(false), false, &mut supported)
+        apply_vision_input_policy(Some(false), &mut supported)
             .expect("unselected vision capability applies a subtractive fence");
         assert_eq!(supported, Some(false));
 
-        let error = apply_vision_input_policy(Some(true), false, &mut Some(false))
+        let error = apply_vision_input_policy(Some(true), &mut Some(false))
             .expect_err("text-only exact model must reject llm.vision");
         assert!(error.to_string().contains("llm.vision"));
 
         let mut ordinary = Some(true);
-        apply_vision_input_policy(None, false, &mut ordinary)
+        apply_vision_input_policy(None, &mut ordinary)
             .expect("ordinary conversations keep model-derived behavior");
         assert_eq!(ordinary, Some(true));
 
-        let mut deferred = Some(true);
-        apply_vision_input_policy(Some(false), true, &mut deferred)
-            .expect("on-demand vision preserves model support behind activation gate");
-        assert_eq!(deferred, Some(true));
-        assert!(apply_vision_input_policy(Some(false), true, &mut Some(false)).is_err());
+
     }
 
     #[test]

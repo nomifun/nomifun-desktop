@@ -1127,9 +1127,8 @@ mod tests {
             "instructions": "",
             "included_skills": [],
             "excluded_auto_skills": [],
-            "initial_capabilities": [],
-            "on_demand_capabilities": [],
-            "knowledge_policy": {
+            "enabled_capabilities": [],
+                        "knowledge_policy": {
                 "enabled": false,
                 "writeback": false,
                 "grounded": false
@@ -1160,9 +1159,8 @@ mod tests {
             "instructions": "",
             "included_skills": [],
             "excluded_auto_skills": [],
-            "initial_capabilities": [],
-            "on_demand_capabilities": [],
-            "knowledge_policy": {
+            "enabled_capabilities": [],
+                        "knowledge_policy": {
                 "enabled": false,
                 "writeback": false,
                 "grounded": false

@@ -33,10 +33,10 @@ describe('Agent Settings locale contract', () => {
   });
 
   test('describes capability modes and target-owned resource selection', () => {
-    expect(en.capabilities.initial).toBe('Available at startup');
-    expect(en.capabilities.onDemand).toBe('On demand');
-    expect(zh.capabilities.initial).toBe('启动即用');
-    expect(zh.capabilities.onDemand).toBe('按需启用');
+    expect(en.capabilities.enabled).toBe('Enabled');
+    expect(zh.capabilities.enabled).toBe('已启用');
+    expect(zh.capabilities.notSelected).toBe('未启用');
+    expect(Object.hasOwn(en.capabilities, 'onDemand')).toBe(false);
     expect(en.resources.bindingPolicyBody.includes('conversation')).toBe(true);
     expect(zh.resources.bindingPolicyBody.includes('具体会话')).toBe(true);
   });
