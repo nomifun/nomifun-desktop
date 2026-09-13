@@ -34,6 +34,10 @@ pub(crate) const MANAGED_TERMINAL_RESOURCE_ID: &str = "managed-terminal";
 
 const MAX_RESOURCE_SELECTIONS: usize = 32;
 const MAX_RESOURCE_FIELD_BYTES: usize = 512;
+// Knowledge mounting is deliberately optional at session creation. A session
+// may start without a base and gain its conversation-scoped, read/write policy
+// through the knowledge binding control before the first task is delivered.
+const OPTIONAL_UNBOUND_RESOURCE_KINDS: [&str; 1] = ["knowledge_base"];
 
 #[derive(Debug, Clone)]
 pub(crate) struct ResourceSelectionResolutionError {
@@ -234,7 +238,10 @@ impl NomiCoreResourceBindingResolverRegistry {
 
         let missing = required
             .keys()
-            .filter(|kind| !selections_by_kind.contains_key(*kind))
+            .filter(|kind| {
+                !selections_by_kind.contains_key(*kind)
+                    && !OPTIONAL_UNBOUND_RESOURCE_KINDS.contains(&kind.as_str())
+            })
             .cloned()
             .collect::<Vec<_>>();
         if !missing.is_empty() {
@@ -1105,10 +1112,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn duplicate_unused_and_missing_selections_fail_closed() {
-        let registry = registry("knowledge_base", &["search"]);
+    async fn duplicate_unused_and_missing_mandatory_selections_fail_closed() {
+        let knowledge_registry = registry("knowledge_base", &["search"]);
         let capabilities = BTreeSet::from(["knowledge.search".to_owned()]);
-        let duplicate = registry
+        let duplicate = knowledge_registry
             .resolve(
                 "owner-1",
                 &[
@@ -1127,13 +1134,13 @@ mod tests {
             .unwrap_err();
         assert_eq!(duplicate.code(), "RESOURCE_SELECTION_INVALID");
 
-        let missing = registry
-            .resolve("owner-1", &[], &capabilities)
+        let missing = registry("workspace", &["read"])
+            .resolve("owner-1", &[], &BTreeSet::from(["fs.read".to_owned()]))
             .await
             .unwrap_err();
         assert_eq!(missing.code(), "RESOURCE_SELECTION_REQUIRED");
 
-        let unused = registry
+        let unused = knowledge_registry
             .resolve(
                 "owner-1",
                 &[AgentResourceSelectionDto {
@@ -1145,6 +1152,20 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(unused.code(), "RESOURCE_SELECTION_UNUSED");
+    }
+
+    #[tokio::test]
+    async fn knowledge_base_may_remain_unbound_until_the_session_mount_is_applied() {
+        let bindings = registry("knowledge_base", &["search"])
+            .resolve(
+                "owner-1",
+                &[],
+                &BTreeSet::from(["knowledge.search".to_owned()]),
+            )
+            .await
+            .unwrap();
+
+        assert!(bindings.is_empty());
     }
 
     #[tokio::test]

@@ -18,13 +18,13 @@ import SessionCapabilityPicker, {
 import FeedbackReportModal from '@/renderer/components/settings/SettingsModal/contents/FeedbackReportModal';
 import AutoWorkControl from '@/renderer/pages/conversation/components/AutoWorkControl';
 import IdmmControl from '@/renderer/pages/conversation/components/IdmmControl';
+import KnowledgeControl from '@/renderer/pages/conversation/components/KnowledgeControl';
 import { usePendingConversation } from '@/renderer/pages/conversation/components/ConversationShell/PendingConversationContext';
 import AgentResourcePicker from '@/renderer/components/agent/AgentResourcePicker';
 import {
   resolveAgentResourceSelections,
   type AgentResourceSelectionValue,
 } from '@/renderer/hooks/agent/agentResourceSelection';
-import { parseKnowledgeBaseId } from '@/common/types/ids';
 import { Alert, ConfigProvider } from '@arco-design/web-react';
 import React, {
   useCallback,
@@ -120,7 +120,18 @@ const GuidPage: React.FC = () => {
 
       ].map((capability) => capability.id))
     : presetCapabilities.capabilityIds;
-  const resourceSelectionResolution = resolveAgentResourceSelections(presetResourceKinds, resourceSelectionValue);
+  // Knowledge is an optional, session-scoped mount. It keeps its compact
+  // KnowledgeControl interaction and is applied after the conversation exists;
+  // only resources that truly gate launch belong in the large resource picker.
+  const knowledgeEnabled =
+    presetResourceResolutionReady && presetResourceKinds.has('knowledge_base');
+  const resourcePickerKinds = new Set(
+    [...presetResourceKinds].filter((kind) => kind !== 'knowledge_base')
+  );
+  const resourceSelectionResolution = resolveAgentResourceSelections(
+    resourcePickerKinds,
+    resourceSelectionValue
+  );
   const advancedControlsEnabled = presetResourceResolutionReady && presetCapabilityIds.size > 0;
   const effectiveAutoWork = advancedControlsEnabled ? advancedConfig.autoWork : { enabled: false };
   const isAutoWorkMode = isAutoWorkEntry(effectiveAutoWork);
@@ -223,7 +234,7 @@ const GuidPage: React.FC = () => {
     current_model: modelSelection.current_model,
     applyAdvancedConfig: (conversationId) =>
       advancedConfig.applyToConversation(conversationId, {
-        allowKnowledgeBinding: presetResourceKinds.has('knowledge_base'),
+        allowKnowledgeBinding: knowledgeEnabled,
         allowAutomation: advancedControlsEnabled,
       }),
     autoWork: effectiveAutoWork,
@@ -385,16 +396,6 @@ const GuidPage: React.FC = () => {
     ]
   );
 
-  const handleResourceSelectionChange = useCallback((next: AgentResourceSelectionValue) => {
-    setResourceSelectionValue(next);
-    if (next.knowledge_base === resourceSelectionValue.knowledge_base) return;
-    advancedConfig.setKnowledge({
-      ...advancedConfig.knowledge,
-      enabled: Boolean(next.knowledge_base),
-      kb_ids: next.knowledge_base ? [parseKnowledgeBaseId(next.knowledge_base)] : [],
-    });
-  }, [advancedConfig.knowledge, advancedConfig.setKnowledge, resourceSelectionValue.knowledge_base]);
-
   const typewriterPlaceholder = useTypewriterPlaceholder(
     t('conversation.welcome.placeholder')
   );
@@ -465,24 +466,38 @@ const GuidPage: React.FC = () => {
     />
   );
 
-  const advancedControlsNode = advancedControlsEnabled ? (
+  const advancedControlsNode = knowledgeEnabled || advancedControlsEnabled ? (
     <>
-      <AutoWorkControl
-        key={`autowork-${location.key}`}
-        draft={{
-          value: advancedConfig.autoWork,
-          onChange: advancedConfig.setAutoWork,
-        }}
-        applyNote={t('guid.advanced.applyNote')}
-      />
-      <IdmmControl
-        key={`idmm-${location.key}`}
-        draft={{
-          value: advancedConfig.idmm,
-          onChange: advancedConfig.setIdmm,
-        }}
-        applyNote={t('guid.advanced.applyNote')}
-      />
+      {knowledgeEnabled && (
+        <KnowledgeControl
+          key={`knowledge-${location.key}`}
+          draft={{
+            value: advancedConfig.knowledge,
+            onChange: advancedConfig.setKnowledge,
+          }}
+          applyNote={t('guid.advanced.applyNote')}
+        />
+      )}
+      {advancedControlsEnabled && (
+        <>
+          <AutoWorkControl
+            key={`autowork-${location.key}`}
+            draft={{
+              value: advancedConfig.autoWork,
+              onChange: advancedConfig.setAutoWork,
+            }}
+            applyNote={t('guid.advanced.applyNote')}
+          />
+          <IdmmControl
+            key={`idmm-${location.key}`}
+            draft={{
+              value: advancedConfig.idmm,
+              onChange: advancedConfig.setIdmm,
+            }}
+            applyNote={t('guid.advanced.applyNote')}
+          />
+        </>
+      )}
     </>
   ) : null;
 
@@ -615,10 +630,10 @@ const GuidPage: React.FC = () => {
             />
 
             <AgentResourcePicker
-              requiredKinds={presetResourceKinds}
+              requiredKinds={resourcePickerKinds}
               capabilityIds={presetCapabilityIds}
               value={resourceSelectionValue}
-              onChange={handleResourceSelectionChange}
+              onChange={setResourceSelectionValue}
               disabled={guidInput.loading || !presetResourceResolutionReady}
             />
 
