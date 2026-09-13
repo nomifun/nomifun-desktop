@@ -86,9 +86,8 @@ is represented by media nodes plus `config`; graph grouping is an explicit
 selection action.
 
 The Canvas supports selection, movement, resize, connections, grouping,
-copy/paste, undo/redo, zoom, reset/fit, minimap navigation, and reload.
-Narrow layouts are supported, but this is not a claim of complete mobile touch
-or gesture parity.
+copy/paste, undo/redo, zoom, reset/fit, minimap navigation, and reload on the
+supported desktop shell and desktop WebUI viewport range (880x600 or larger).
 
 Canvas edits use a short debounced compare-and-swap (CAS) save. Every write
 sends the last authoritative revision. A conflict stops automatic saving; it

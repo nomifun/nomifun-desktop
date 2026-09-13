@@ -49,7 +49,7 @@ python3 .nomi/skills/ui-ux-pro-max/scripts/search.py --list-domains
 2. Search `product` first, then search the most relevant of `style`, `typography`, `color`, `landing`, `chart`, `ux`, and `stack`.
 3. Combine results into a concrete design direction: layout, hierarchy, palette, type, states, and component behavior.
 4. If implementing code, follow the existing project's framework and design conventions first; use this database to resolve gaps.
-5. Verify mobile and desktop layout, text fit, contrast, focus states, hover states, loading/empty/error states, and any chart or media rendering.
+5. Verify every layout target supported by the current project. In `nomifun-desktop`, test only the desktop shell and desktop WebUI at viewports of 880x600 or larger; do not add or run phone/tablet layout checks. Also verify text fit, contrast, focus states, hover states, loading/empty/error states, and any chart or media rendering.
 
 ## Design Rules
 

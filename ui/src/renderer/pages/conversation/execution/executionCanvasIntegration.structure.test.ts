@@ -79,14 +79,11 @@ describe('conversation execution canvas integration', () => {
     expect(projectedSource.includes('expected_execution_version: detail.execution.version')).toBe(true);
   });
 
-  test('keeps the collaboration panel recoverable and usable on compact layouts', () => {
+  test('keeps the collaboration panel recoverable from the desktop layout', () => {
     const layoutSource = readSource(new URL('./ExecutionConversationLayout.tsx', import.meta.url));
-    const panelCss = readSource(new URL('./executionTopPanel.module.css', import.meta.url));
 
     expect(layoutSource.includes('execution.toggleCanvas')).toBe(true);
     expect(layoutSource.includes("'agentExecution.panel.open'")).toBe(true);
-    expect(panelCss.includes('@media (max-width: 768px)')).toBe(true);
-    expect(panelCss.includes('width: 100% !important')).toBe(true);
   });
 
   test('projects linked executions for every conversation runtime and companion sessions', () => {

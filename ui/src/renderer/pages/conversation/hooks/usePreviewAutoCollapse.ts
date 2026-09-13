@@ -2,7 +2,6 @@ import { useEffect, useRef } from 'react';
 
 type UsePreviewAutoCollapseParams = {
   isPreviewOpen: boolean;
-  isDesktop: boolean;
   workspaceEnabled: boolean;
   rightSiderCollapsed: boolean;
   setRightSiderCollapsed: React.Dispatch<React.SetStateAction<boolean>>;
@@ -16,7 +15,6 @@ type UsePreviewAutoCollapseParams = {
  */
 export function usePreviewAutoCollapse({
   isPreviewOpen,
-  isDesktop,
   workspaceEnabled,
   rightSiderCollapsed,
   setRightSiderCollapsed,
@@ -37,19 +35,17 @@ export function usePreviewAutoCollapse({
       if (previousWorkspaceCollapsedRef.current === null) {
         previousWorkspaceCollapsedRef.current = rightSiderCollapsed;
       }
-      if (isDesktop && previousSiderCollapsedRef.current === null && typeof siderCollapsed !== 'undefined') {
+      if (previousSiderCollapsedRef.current === null && typeof siderCollapsed !== 'undefined') {
         previousSiderCollapsedRef.current = siderCollapsed;
       }
       setRightSiderCollapsed(true);
-      if (isDesktop) {
-        setSiderCollapsed?.(true);
-      }
+      setSiderCollapsed?.(true);
     } else if (!isPreviewOpen && previousPreviewOpenRef.current) {
       if (previousWorkspaceCollapsedRef.current !== null) {
         setRightSiderCollapsed(previousWorkspaceCollapsedRef.current);
         previousWorkspaceCollapsedRef.current = null;
       }
-      if (isDesktop && previousSiderCollapsedRef.current !== null && setSiderCollapsed) {
+      if (previousSiderCollapsedRef.current !== null && setSiderCollapsed) {
         setSiderCollapsed(previousSiderCollapsedRef.current);
         previousSiderCollapsedRef.current = null;
       }
@@ -58,7 +54,6 @@ export function usePreviewAutoCollapse({
     previousPreviewOpenRef.current = isPreviewOpen;
   }, [
     isPreviewOpen,
-    isDesktop,
     siderCollapsed,
     setSiderCollapsed,
     rightSiderCollapsed,

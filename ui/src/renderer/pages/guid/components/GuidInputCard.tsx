@@ -7,7 +7,6 @@
 import FilePreview from '@/renderer/components/media/FilePreview';
 import UploadProgressBar from '@/renderer/components/media/UploadProgressBar';
 import { SessionCapabilityComposerLayout } from '@/renderer/components/chat/SessionCapabilityPicker/ComposerLayout';
-import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { useCompositionInput } from '@/renderer/hooks/chat/useCompositionInput';
 import { Input } from '@arco-design/web-react';
 import React from 'react';
@@ -82,10 +81,8 @@ const GuidInputCard: React.FC<GuidInputCardProps> = ({
   onSelectWorkspace,
   onClearWorkspace,
 }) => {
-  const layout = useLayoutContext();
-  const isMobile = layout?.isMobile ?? false;
   const { compositionHandlers, isImeActive } = useCompositionInput();
-  const textareaAutoSize = isMobile ? { minRows: 2, maxRows: 8 } : { minRows: 2, maxRows: 20 };
+  const textareaAutoSize = { minRows: 2, maxRows: 20 };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (isImeActive(e)) return;
@@ -104,9 +101,6 @@ const GuidInputCard: React.FC<GuidInputCardProps> = ({
       style={{
         zIndex: 1,
         transition: 'box-shadow 0.25s ease',
-        width: isMobile ? 'calc(100% + 28px)' : undefined,
-        marginLeft: isMobile ? -14 : undefined,
-        marginRight: isMobile ? -14 : undefined,
         ...(isFileDragging
           ? {
               backgroundColor: 'var(--color-primary-light-1)',

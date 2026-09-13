@@ -14,7 +14,6 @@ import {
 } from '@renderer/components/layout/Router';
 import { cleanupSiderTooltips, getSiderTooltipProps } from '@renderer/utils/ui/siderTooltip';
 import { useAuth } from '@renderer/hooks/context/AuthContext';
-import { useLayoutContext } from '@renderer/hooks/context/LayoutContext';
 import { blurActiveElement } from '@renderer/utils/ui/focus';
 import { isDesktopShell } from '@renderer/utils/platform';
 import { useBrowserOverview } from '@renderer/pages/browser/useBrowserInventory';
@@ -77,8 +76,6 @@ interface SiderProps {
  */
 const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
   const { t } = useTranslation();
-  const layout = useLayoutContext();
-  const isMobile = layout?.isMobile ?? false;
   const location = useLocation();
   const { pathname, search, hash } = location;
   const {
@@ -293,7 +290,7 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
     };
   }, [handleLogout, showLogout]);
 
-  const tooltipEnabled = collapsed && !isMobile;
+  const tooltipEnabled = collapsed;
   const siderTooltipProps = getSiderTooltipProps(tooltipEnabled);
 
   // The "会话" entry stays active across every route owned by ConversationShell.
@@ -331,7 +328,6 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
             <SiderSectionHeader label={t('common.siderSection.common')} collapsed={collapsed} />
             {/* Conversations — opens the session secondary sidebar (ContentSider) */}
             <SiderConversationEntry
-              isMobile={isMobile}
               isActive={isSessionRoute}
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
@@ -339,7 +335,6 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
             />
             {/* Agent authoring workbench */}
             <SiderAgentEntry
-              isMobile={isMobile}
               isActive={pathname === '/agent' || pathname.startsWith('/agent-sessions/')}
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
@@ -347,7 +342,6 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
             />
             {/* Work partner (桌面伙伴) */}
             <SiderNomiEntry
-              isMobile={isMobile}
               isActive={pathname.startsWith('/nomi')}
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
@@ -360,7 +354,6 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               onFocusCapture={() => preloadCreativeStudio(lastCreativeStudioPathRef.current)}
             >
               <SiderCreativeStudioEntry
-                isMobile={isMobile}
                 isActive={isCreativeStudio}
                 collapsed={collapsed}
                 siderTooltipProps={siderTooltipProps}
@@ -371,7 +364,6 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
             <SiderSectionHeader label={t('common.siderSection.data')} collapsed={collapsed} />
             {/* Knowledge base */}
             <SiderKnowledgeEntry
-              isMobile={isMobile}
               isActive={pathname.startsWith('/knowledge')}
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
@@ -384,7 +376,6 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               onFocusCapture={() => preloadCreativeStudio(CREATIVE_STUDIO_ASSETS_PATH)}
             >
               <SiderAssetLibraryEntry
-                isMobile={isMobile}
                 isActive={pathname === CREATIVE_STUDIO_ASSETS_PATH}
                 collapsed={collapsed}
                 siderTooltipProps={siderTooltipProps}
@@ -395,7 +386,6 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
             <SiderSectionHeader label={t('common.siderSection.automation')} collapsed={collapsed} />
             {/* Scheduled tasks */}
             <SiderScheduledEntry
-              isMobile={isMobile}
               isActive={pathname === '/scheduled'}
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
@@ -403,7 +393,6 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
             />
             {/* Requirements platform */}
             <SiderRequirementsEntry
-              isMobile={isMobile}
               isActive={pathname.startsWith('/requirements')}
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
@@ -413,14 +402,12 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
             <SiderSectionHeader label={t('common.siderSection.tools')} collapsed={collapsed} />
             {/* Skills and MCP remain platform capability destinations. */}
             <SiderSkillsEntry
-              isMobile={isMobile}
               isActive={pathname.startsWith('/skills')}
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
               onClick={handleSkillsClick}
             />
             <SiderPluginEntry
-                isMobile={isMobile}
                 isActive={pathname.startsWith('/plugins')}
                 collapsed={collapsed}
                 siderTooltipProps={siderTooltipProps}
@@ -429,7 +416,6 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
             <PluginPinnedEntries collapsed={collapsed} />
             {/* MCP — MCP tool server configuration */}
             <SiderMcpEntry
-              isMobile={isMobile}
               isActive={pathname.startsWith('/mcp')}
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
@@ -439,7 +425,6 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
                 from the desktop-companion group above. */}
             <SiderSectionHeader label={t('common.siderSection.services')} collapsed={collapsed} />
             <SiderCustomerServiceEntry
-              isMobile={isMobile}
               isActive={pathname.startsWith('/customer-service')}
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
@@ -452,7 +437,6 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
       <div className='shrink-0 mt-auto pt-5px flex flex-col gap-1px border-t border-solid border-[var(--color-border-2)] border-l-0 border-r-0 border-b-0'>
         {isCreativeStudio ? (
           <SiderFooter
-            isMobile={isMobile}
             isSettings={false}
             collapsed={collapsed}
             siderTooltipProps={siderTooltipProps}
@@ -471,7 +455,6 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
                 disabled so the user can open Settings and turn it back on. */}
             {(isDesktopShell() || browserOverview?.supported !== false) && (
               <SiderBrowserEntry
-                isMobile={isMobile}
                 isActive={pathname === '/browser'}
                 collapsed={collapsed}
                 runningCount={browserOverview?.running_lanes ?? 0}
@@ -481,21 +464,18 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               />
             )}
             <SiderModelHubEntry
-              isMobile={isMobile}
               isActive={pathname.startsWith('/models')}
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
               onClick={handleModelHubClick}
             />
             <SiderOpenCapabilitiesEntry
-              isMobile={isMobile}
               isActive={pathname.startsWith('/open-capabilities')}
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}
               onClick={handleOpenCapabilitiesClick}
             />
             <SiderFooter
-              isMobile={isMobile}
               isSettings={isSettings}
               collapsed={collapsed}
               siderTooltipProps={siderTooltipProps}

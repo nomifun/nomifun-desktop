@@ -27,7 +27,6 @@ import {
   Typography,
 } from '@arco-design/web-react';
 import { AddOne, Brain, Search, SettingTwo } from '@icon-park/react';
-import { useLayoutContext } from '@renderer/hooks/context/LayoutContext';
 import { isDesktopShell } from '@renderer/utils/platform';
 import { ipcBridge } from '@/common';
 import { HUB_PAGE_TITLE_CLASS } from '@/renderer/components/layout/HubPageShell';
@@ -103,8 +102,6 @@ const PurgeFilesCheckbox: React.FC<{ label: string; onChange: (v: boolean) => vo
 const KnowledgeListPage: React.FC = () => {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const layout = useLayoutContext();
-  const isMobile = layout?.isMobile ?? false;
 
   // Data
   const { bases, loading, error, refresh } = useKnowledgeBases();
@@ -287,7 +284,7 @@ const KnowledgeListPage: React.FC = () => {
     <div
       className={[
         'size-full box-border overflow-y-auto',
-        isMobile ? 'px-16px py-14px' : 'px-12px py-24px md:px-40px md:py-32px',
+        'px-12px py-24px md:px-40px md:py-32px',
       ].join(' ')}
     >
       <div className='mx-auto flex w-full max-w-1180px box-border flex-col gap-12px'>
@@ -318,8 +315,8 @@ const KnowledgeListPage: React.FC = () => {
             <div
               className={[
                 'flex min-w-0 items-center gap-6px',
-                isMobile ? 'w-full' : 'flex-1 justify-end',
-                !isMobile ? toolbarStyles.desktopActions : '',
+                'flex-1 justify-end',
+                toolbarStyles.desktopActions,
               ].join(' ')}
             >
               {/* Search */}
@@ -329,15 +326,15 @@ const KnowledgeListPage: React.FC = () => {
                     'flex h-34px box-border min-w-0 items-center gap-7px rounded-full px-11px',
                     'border border-solid border-[var(--color-border-3)] bg-[var(--color-bg-2)]',
                     'focus-within:border-primary-6 transition-colors',
-                    isMobile ? 'flex-1' : 'w-220px',
-                    !isMobile ? toolbarStyles.desktopSearch : '',
+                    'w-220px',
+                    toolbarStyles.desktopSearch,
                   ].join(' ')}
                 >
                   <span
                     className={[
                       'inline-flex h-18px w-18px flex-none items-center justify-center',
                       toolbarStyles.actionIcon,
-                      !isMobile ? toolbarStyles.desktopSearchIcon : '',
+                      toolbarStyles.desktopSearchIcon,
                     ].join(' ')}
                   >
                     <Search theme='outline' size={14} className='block text-[var(--color-text-3)]' />
@@ -346,7 +343,7 @@ const KnowledgeListPage: React.FC = () => {
                     aria-label={searchLabel}
                     className={[
                       'w-full border-none bg-transparent text-13px leading-18px text-[var(--color-text-1)] outline-none font-[inherit] placeholder:text-[var(--color-text-3)]',
-                      !isMobile ? toolbarStyles.desktopSearchInput : '',
+                      toolbarStyles.desktopSearchInput,
                     ].join(' ')}
                     placeholder={searchLabel}
                     value={searchQuery}
@@ -374,17 +371,15 @@ const KnowledgeListPage: React.FC = () => {
                     'text-13px font-medium text-[var(--color-text-1)] cursor-pointer select-none',
                     'hover:border-[var(--color-border-4)] hover:bg-[var(--color-fill-2)]',
                     'focus-visible:outline-none focus-visible:border-primary-6 transition-colors',
-                    !isMobile ? toolbarStyles.desktopIconAction : '',
+                    toolbarStyles.desktopIconAction,
                   ].join(' ')}
                 >
                   <span className={`${toolbarStyles.actionIcon} inline-flex h-18px w-18px flex-none items-center justify-center`}>
                     <Brain theme='outline' size={14} strokeWidth={3} className='block' />
                   </span>
-                  {!isMobile && (
-                    <span className={`${toolbarStyles.desktopActionLabel} inline-flex h-18px items-center leading-18px`}>
-                      {retrievalSettingsLabel}
-                    </span>
-                  )}
+                  <span className={`${toolbarStyles.desktopActionLabel} inline-flex h-18px items-center leading-18px`}>
+                    {retrievalSettingsLabel}
+                  </span>
                 </div>
               </Tooltip>
 
@@ -407,17 +402,15 @@ const KnowledgeListPage: React.FC = () => {
                     'text-13px font-medium text-[var(--color-text-1)] cursor-pointer select-none',
                     'hover:border-[var(--color-border-4)] hover:bg-[var(--color-fill-2)]',
                     'focus-visible:outline-none focus-visible:border-primary-6 transition-colors',
-                    !isMobile ? toolbarStyles.desktopIconAction : '',
+                    toolbarStyles.desktopIconAction,
                   ].join(' ')}
                 >
                   <span className={`${toolbarStyles.actionIcon} inline-flex h-18px w-18px flex-none items-center justify-center`}>
                     <SettingTwo theme='outline' size={14} strokeWidth={3} className='block' />
                   </span>
-                  {!isMobile && (
-                    <span className={`${toolbarStyles.desktopActionLabel} inline-flex h-18px items-center leading-18px`}>
-                      {manageTagsLabel}
-                    </span>
-                  )}
+                  <span className={`${toolbarStyles.desktopActionLabel} inline-flex h-18px items-center leading-18px`}>
+                    {manageTagsLabel}
+                  </span>
                 </div>
               </Tooltip>
 
@@ -442,17 +435,15 @@ const KnowledgeListPage: React.FC = () => {
                     'hover:bg-[rgba(var(--primary-6),0.18)]',
                     'focus-visible:border-primary-6 focus-visible:outline-none',
                     'transition-colors',
-                    !isMobile ? toolbarStyles.desktopIconAction : '',
+                    toolbarStyles.desktopIconAction,
                   ].join(' ')}
                 >
                   <span className={`${toolbarStyles.actionIcon} inline-flex h-18px w-18px flex-none items-center justify-center`}>
                     <AddOne theme='outline' size={15} strokeWidth={4} className='block text-primary-6' />
                   </span>
-                  {!isMobile && (
-                    <span className={`${toolbarStyles.desktopActionLabel} inline-flex h-18px items-center leading-18px`}>
-                      {newBaseLabel}
-                    </span>
-                  )}
+                  <span className={`${toolbarStyles.desktopActionLabel} inline-flex h-18px items-center leading-18px`}>
+                    {newBaseLabel}
+                  </span>
                 </div>
               </Tooltip>
             </div>

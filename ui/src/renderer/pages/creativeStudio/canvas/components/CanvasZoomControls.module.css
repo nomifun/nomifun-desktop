@@ -263,30 +263,6 @@
   appearance: none;
 }
 
-@media (max-width: 640px) {
-  .controls {
-    height: 40px;
-    max-width: calc(100vw - 20px);
-    padding: 3px 4px;
-  }
-
-  .percentageButton {
-    min-width: 72px;
-  }
-
-  .divider {
-    margin-inline: 1px;
-  }
-
-  .zoomMenu {
-    width: 100%;
-  }
-
-  .zoomMenuPopover {
-    left: 0;
-    width: min(220px, calc(100vw - 24px));
-  }
-}
 
 @media (prefers-reduced-motion: reduce) {
   .iconButton,

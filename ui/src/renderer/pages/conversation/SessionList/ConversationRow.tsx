@@ -10,7 +10,6 @@ import FlexFullContainer from '@/renderer/components/layout/FlexFullContainer';
 import { useAgentInfo } from '@/renderer/hooks/agent/useAgentInfo';
 import ConversationHoverCard from '@/renderer/pages/conversation/components/ConversationHoverCard';
 import { cleanupSiderTooltips, getSiderTooltipProps } from '@/renderer/utils/ui/siderTooltip';
-import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { Checkbox, Dropdown, Menu, Popover, Spin, Tooltip } from '@arco-design/web-react';
 import { DeleteOne, EditOne, Export, MessageOne, MoreOne, Pushpin } from '@icon-park/react';
 import classNames from 'classnames';
@@ -37,8 +36,6 @@ const ConversationRow: React.FC<ConversationRowProps> = (props) => {
     dimIcon = false,
     showSessionAge = true,
   } = props;
-  const layout = useLayoutContext();
-  const isMobile = layout?.isMobile ?? false;
   const {
     onToggleChecked,
     onConversationClick,
@@ -167,7 +164,7 @@ const ConversationRow: React.FC<ConversationRowProps> = (props) => {
         <span className='size-22px flex items-center justify-center shrink-0 relative'>
           {isGenerating && !batchMode ? <Spin size={16} /> : renderLeadingIcon()}
           {/* Pinned indicator: only visible when row is hovered, overlays leading icon */}
-          {!batchMode && isPinned && !isMobile && !isGenerating && (
+          {!batchMode && isPinned && !isGenerating && (
             <span
               className='absolute inset-0 flex-center text-t-secondary pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity'
               style={{ lineHeight: 0 }}
@@ -194,8 +191,8 @@ const ConversationRow: React.FC<ConversationRowProps> = (props) => {
         {showSessionAge && ageLabel && !collapsed && (
           <span
             className={classNames('shrink-0 w-40px text-right text-11px text-t-tertiary collapsed-hidden', {
-              'group-hover:hidden': !isMobile && !menuVisible,
-              hidden: isMobile || menuVisible,
+              'group-hover:hidden': !menuVisible,
+              hidden: menuVisible,
             })}
           >
             {ageLabel}
@@ -208,8 +205,8 @@ const ConversationRow: React.FC<ConversationRowProps> = (props) => {
             className={classNames(
               'absolute right-8px top-1/2 -translate-y-1/2 items-center justify-end !collapsed-hidden',
               {
-                flex: isMobile || menuVisible,
-                'hidden group-hover:flex': !isMobile && !menuVisible,
+                flex: menuVisible,
+                'hidden group-hover:flex': !menuVisible,
               }
             )}
             onClick={(event) => {
@@ -276,8 +273,8 @@ const ConversationRow: React.FC<ConversationRowProps> = (props) => {
                 className={classNames(
                   'flex-center cursor-pointer transition-colors text-t-secondary hover:text-t-primary size-20px rd-4px sider-action-btn',
                   {
-                    flex: isMobile || menuVisible,
-                    'hidden group-hover:flex': !isMobile && !menuVisible,
+                    flex: menuVisible,
+                    'hidden group-hover:flex': !menuVisible,
                   }
                 )}
                 onClick={(event) => {

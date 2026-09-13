@@ -20,23 +20,23 @@ const AgentSettingsPage: React.FC = () => {
   const desktopSider = useContentSiderCollapse('nomifun:agent-sider-collapsed', false);
   const resize = useResizableSplit({ unit: 'px', defaultWidth: 300, minWidth: 240, maxWidth: 480, storageKey: 'nomifun:agent-sider-width' });
   const [narrow, setNarrow] = useState(() => typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 1250px)').matches);
-  const [mobileOpen, setMobileOpen] = useState(false);
-  const collapsed = narrow ? !mobileOpen : desktopSider.collapsed;
+  const [narrowSiderOpen, setNarrowSiderOpen] = useState(false);
+  const collapsed = narrow ? !narrowSiderOpen : desktopSider.collapsed;
   useEffect(() => {
     if (typeof window.matchMedia !== 'function') return;
     const media = window.matchMedia('(max-width: 1250px)');
-    const update = () => { setNarrow(media.matches); setMobileOpen(false); };
+    const update = () => { setNarrow(media.matches); setNarrowSiderOpen(false); };
     media.addEventListener('change', update);
 
   return () => media.removeEventListener('change', update);
   }, []);
   useEffect(() => { dispatchAgentSiderStateEvent(collapsed); }, [collapsed]);
   useEffect(() => {
-    const toggle = () => narrow ? setMobileOpen(open => !open) : desktopSider.toggle();
+    const toggle = () => narrow ? setNarrowSiderOpen(open => !open) : desktopSider.toggle();
     window.addEventListener(AGENT_SIDER_TOGGLE_EVENT, toggle);
     return () => window.removeEventListener(AGENT_SIDER_TOGGLE_EVENT, toggle);
   }, [narrow, desktopSider.toggle]);
-  const collapse = () => narrow ? setMobileOpen(false) : desktopSider.setCollapsed(true);
+  const collapse = () => narrow ? setNarrowSiderOpen(false) : desktopSider.setCollapsed(true);
   const controller = useAgentSettingsController();
   const [templateDirty, setTemplateDirty] = useState(false);
   const [pendingSwitch, setPendingSwitch] = useState<(() => void) | null>(null);
@@ -80,11 +80,11 @@ const AgentSettingsPage: React.FC = () => {
             deletingPresetId={controller.deletingPresetId}
             onSelectTemplate={(template) => {
               if (controller.selection?.kind === 'template' && controller.selection.template.template_key === template.template_key) return;
-              beforeSwitch(() => { controller.openTemplate(template); setMobileOpen(false); });
+              beforeSwitch(() => { controller.openTemplate(template); setNarrowSiderOpen(false); });
             }}
             onSelectPreset={(preset) => {
               if (controller.selection?.kind === 'preset' && controller.selection.preset.preset_id === preset.preset_id) return;
-              beforeSwitch(() => { void controller.openPreset(preset); setMobileOpen(false); });
+              beforeSwitch(() => { void controller.openPreset(preset); setNarrowSiderOpen(false); });
             }}
             onCreatePreset={(displayName) => beforeSwitch(() => { void controller.createPreset(displayName); })}
             onDeletePreset={(preset) => controller.deletePreset(preset)}

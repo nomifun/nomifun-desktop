@@ -12,7 +12,7 @@ import type { SessionKind } from '../utils/workpathTree';
  * Persisted UI preferences for the unified workpath session list.
  *
  * Storage model (localStorage + CustomEvent broadcast, so multiple mounted
- * instances — e.g. desktop sider + mobile drawer — stay in sync):
+ * mounted session-list instances stay in sync):
  * - `nomifun:workpath-pinned`              string[]; array order is the manual pin order
  * - `nomifun:workpath-expansion`           Record<workpathKey, boolean>; drawers default to COLLAPSED
  * - `nomifun:workpath-subgroup-expansion`  Record<`${workpathKey}:${kind}`, boolean>; subgroups default to EXPANDED

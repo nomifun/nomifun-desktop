@@ -77,20 +77,6 @@
   }
 }
 
-@media (max-width: 640px) {
-  .root :global([data-creative-canvas-chrome]) {
-    grid-template-columns:
-      0
-      minmax(0, 1fr)
-      minmax(
-        240px,
-        min(
-          55vw,
-          clamp(240px, var(--creative-canvas-right-panel-width, 260px), 560px)
-        )
-      );
-  }
-}
 
 .root :global([data-creative-canvas-chrome][data-right-view='closed']) {
   grid-template-columns:

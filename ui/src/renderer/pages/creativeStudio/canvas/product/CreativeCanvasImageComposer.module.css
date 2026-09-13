@@ -357,12 +357,3 @@
   width: 100%;
   height: 100%;
 }
-
-@media (max-width: 760px) {
-  .settingsHost {
-    width: 40px;
-    min-width: 40px;
-    max-width: 40px;
-    flex: 0 0 40px;
-  }
-}

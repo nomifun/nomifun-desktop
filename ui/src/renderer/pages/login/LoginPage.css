@@ -339,24 +339,3 @@ body.login-page-active {
 .login-page__footer-divider {
   color: #ddd;
 }
-
-@media (max-width: 600px) {
-  .login-page__card {
-    margin: 20px;
-    padding: 32px 24px;
-    border-radius: 16px;
-  }
-
-  .login-page__title {
-    font-size: 28px;
-  }
-
-  .login-page__subtitle {
-    font-size: 14px;
-  }
-
-  .login-page__logo svg {
-    width: 60px;
-    height: 60px;
-  }
-}

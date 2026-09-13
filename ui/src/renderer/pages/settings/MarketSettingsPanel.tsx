@@ -7,7 +7,6 @@
 import { ipcBridge } from '@/common';
 import type { ISkillMarketItem, SkillMarketSource } from '@/common/adapter/ipcBridge';
 import { resolveLocaleKey } from '@/common/utils';
-import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { openExternalUrl } from '@/renderer/utils/platform';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import SkillMarketCard from './skill/SkillMarketCard';
@@ -88,8 +87,6 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
 }) => {
   const { t, i18n } = useTranslation();
   const localeKey = resolveLocaleKey(i18n.language);
-  const layout = useLayoutContext();
-  const isMobile = layout?.isMobile ?? false;
   const [message, messageContext] = useArcoMessage({ maxCount: 10 });
   const autoSyncStartedRef = useRef(false);
   const itemsRef = useRef<ISkillMarketItem[]>([]);
@@ -270,7 +267,7 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
   const marketIconActions = (
     <div
       data-testid={testId('{market}-icon-actions')}
-      className={`flex items-center gap-10px ${isMobile ? 'w-full flex-wrap justify-end' : 'ml-auto flex-none justify-end'}`}
+      className='ml-auto flex flex-none items-center justify-end gap-10px'
     >
       <Button
         type={isSearchVisible ? 'secondary' : 'text'}
@@ -302,7 +299,7 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
   const marketActions = (
     <div
       data-testid={testId('{market}-actions')}
-      className={`flex items-center gap-10px ${isMobile ? 'w-full flex-wrap' : 'ml-auto flex-none justify-end'}`}
+      className='ml-auto flex flex-none items-center justify-end gap-10px'
     >
       {marketSourceSwitcher}
       {marketIconActions}
@@ -319,7 +316,7 @@ const MarketSettingsPanel: React.FC<MarketSettingsPanelProps> = ({
       <div className={ENHANCED_TOOLS_HEADER_CLASS}>
         <div
           data-testid={testId('{market}-header-row')}
-          className={`flex gap-12px ${isMobile ? 'flex-col' : 'items-center justify-between'}`}
+          className='flex items-center justify-between gap-12px'
         >
           <div className='min-w-0'>
             <p

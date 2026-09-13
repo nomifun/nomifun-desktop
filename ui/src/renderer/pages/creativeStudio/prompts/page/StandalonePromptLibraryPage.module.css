@@ -414,60 +414,6 @@
   }
 }
 
-@media (max-width: 640px) {
-  .content {
-    width: min(100% - 28px, 1280px);
-    padding-top: 24px;
-  }
-
-  .heroTitle {
-    font-size: 30px;
-  }
-
-  .heroSubtitle {
-    margin-right: 0;
-    margin-left: 0;
-    padding: 0 38px;
-    font-size: 12px;
-  }
-
-  .refreshButton {
-    top: 1px;
-  }
-
-  .libraryBody {
-    padding-top: 26px;
-  }
-
-  .facetRow {
-    width: 100%;
-    min-height: auto;
-    margin-top: 18px;
-    margin-left: 0;
-    transform: none;
-  }
-
-  .facetRow + .facetRow {
-    margin-top: 10px;
-  }
-
-  .facetRow {
-    grid-template-columns: 1fr;
-    gap: 5px;
-  }
-
-  .facetLabel {
-    padding-top: 0;
-  }
-
-  .grid {
-    grid-template-columns: 1fr;
-  }
-
-  .loadedEmptyState {
-    padding-top: 84px;
-  }
-}
 
 @media (prefers-reduced-motion: reduce) {
   .spinning {

@@ -64,14 +64,3 @@
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
-
-@media (max-width: 820px) {
-  .previewVideo {
-    height: min(36vh, 320px);
-  }
-
-  .previewText {
-    max-height: min(36vh, 320px);
-    overflow-y: auto;
-  }
-}

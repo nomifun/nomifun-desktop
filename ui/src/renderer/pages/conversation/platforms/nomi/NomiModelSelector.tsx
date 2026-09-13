@@ -7,7 +7,6 @@
 import type { NomiModelSelection } from './useNomiModelSelection';
 import { compositeKey } from '@/common/utils/compositeKey';
 import { usePreviewContext } from '@/renderer/pages/conversation/Preview';
-import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { getModelDisplayLabel } from '@/renderer/utils/model/agentLogo';
 import { iconColors } from '@/renderer/styles/colors';
 import { Button, Dropdown, Menu } from '@arco-design/web-react';
@@ -25,9 +24,7 @@ const NomiModelSelector: React.FC<{
 }> = ({ selection, disabled = false, compact: compactProp, className }) => {
   const { t } = useTranslation();
   const { isOpen: isPreviewOpen } = usePreviewContext();
-  const layout = useLayoutContext();
-  const compact = compactProp ?? (isPreviewOpen || layout?.isMobile);
-  const isMobileHeaderCompact = Boolean(layout?.isMobile);
+  const compact = compactProp ?? isPreviewOpen;
   const defaultModelLabel = t('common.defaultModel');
   const providerLabel = useModelSelectorProviderLabel();
 
@@ -50,7 +47,6 @@ const NomiModelSelector: React.FC<{
         className={classNames(
           'sendbox-model-btn header-model-btn min-w-0',
           compact ? '!max-w-[120px]' : '!max-w-[280px]',
-          isMobileHeaderCompact && '!max-w-[160px]',
           className
         )}
         shape='round'
@@ -73,9 +69,6 @@ const NomiModelSelector: React.FC<{
   return (
     <Dropdown
       trigger='click'
-      // Mobile: portal the popup to <body> so it escapes the titlebar slot.
-      // Desktop: leave default container so click events reach Menu.Item normally.
-      {...(isMobileHeaderCompact ? { getPopupContainer: () => document.body } : {})}
       droplist={
         <Menu>
           {providers.map((provider) => {
@@ -107,7 +100,6 @@ const NomiModelSelector: React.FC<{
         className={classNames(
           'sendbox-model-btn header-model-btn min-w-0',
           compact ? '!max-w-[120px]' : '!max-w-[280px]',
-          isMobileHeaderCompact && '!max-w-[160px]',
           className
         )}
         shape='round'

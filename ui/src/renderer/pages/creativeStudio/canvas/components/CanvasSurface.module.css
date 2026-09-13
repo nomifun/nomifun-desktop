@@ -192,54 +192,6 @@
   }
 }
 
-@media (max-width: 640px) {
-  .dock,
-  .zoomDock,
-  .miniMapDock {
-    max-width: calc(100% - 20px);
-  }
-
-  .topDock {
-    top: 10px;
-    left: 10px;
-    right: 10px;
-    max-width: none;
-    transform: none;
-  }
-
-  .leftDock {
-    top: 62px;
-    left: 10px;
-    max-width: min(220px, calc(100% - 20px));
-    max-height: calc(100% - 176px);
-    transform: none;
-  }
-
-  .rightDock {
-    top: 62px;
-    right: 10px;
-    max-width: min(220px, calc(100% - 20px));
-    max-height: calc(100% - 176px);
-  }
-
-  .bottomDock {
-    right: 10px;
-    bottom: 60px;
-    left: 10px;
-    max-width: none;
-    transform: none;
-  }
-
-  .zoomDock {
-    bottom: 10px;
-    left: 10px;
-  }
-
-  .miniMapDock {
-    bottom: 10px;
-    left: 10px;
-  }
-}
 
 @media (prefers-reduced-motion: reduce) {
   .world {

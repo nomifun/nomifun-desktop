@@ -16,4 +16,3 @@
 .option strong { overflow: hidden; color: var(--color-text-1); font-size: 12px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .option small { overflow: hidden; color: var(--color-text-3); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .emptyButton { flex: 0 0 auto; }
-@media (max-width: 760px) { .fields { grid-template-columns: minmax(0, 1fr); } }

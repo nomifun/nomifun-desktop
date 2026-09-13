@@ -27,7 +27,7 @@ describe('webui QR login links', () => {
     ]);
   });
 
-  test('filters special-purpose IPs that mobile devices cannot use for WebUI QR login', () => {
+  test('filters special-purpose IPs that remote desktop browsers cannot use', () => {
     const bases = getWebuiQrBaseUrls(
       {
         allowRemote: true,

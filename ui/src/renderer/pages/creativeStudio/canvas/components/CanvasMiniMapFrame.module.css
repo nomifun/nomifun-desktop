@@ -45,10 +45,3 @@
     height: 164px;
   }
 }
-
-@media (max-width: 640px) {
-  .frame {
-    width: min(220px, calc(100vw - 20px));
-    height: 154px;
-  }
-}

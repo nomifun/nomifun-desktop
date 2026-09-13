@@ -398,32 +398,3 @@
 .confirmButton:disabled {
   box-shadow: none;
 }
-
-@media (max-width: 600px) {
-  .modal :global(.arco-modal-header) {
-    padding: 12px 14px 10px;
-  }
-
-  .pickerBody {
-    min-height: 280px;
-    height: 54vh;
-  }
-
-  .treeRow {
-    min-height: 38px;
-    padding-right: 10px;
-  }
-
-  .footer {
-    gap: 8px;
-  }
-
-  .newFolderButton {
-    padding: 0 8px;
-  }
-
-  .cancelButton,
-  .confirmButton {
-    min-width: 72px;
-  }
-}

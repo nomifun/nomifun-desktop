@@ -199,25 +199,6 @@
   gap: 8px;
 }
 
-@media (max-width: 620px) {
-  .grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .summary {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-
-  .filterRow {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-
-  .kindFilters {
-    flex-wrap: wrap;
-  }
-}
 
 @media (prefers-reduced-motion: reduce) {
   .item {

@@ -284,25 +284,6 @@
   }
 }
 
-@media (max-width: 639px) {
-  .container {
-    padding: 16px 16px 24px;
-  }
-
-  .header {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-
-  .headerActions {
-    width: 100%;
-    justify-content: flex-start;
-  }
-
-  .grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
 
 @media (prefers-reduced-motion: reduce) {
   .card {

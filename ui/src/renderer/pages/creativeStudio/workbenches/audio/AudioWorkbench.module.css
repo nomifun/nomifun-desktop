@@ -586,51 +586,6 @@
   }
 }
 
-@media (max-width: 720px) {
-  .workbench {
-    display: flex;
-    overflow-y: auto;
-    flex-direction: column;
-  }
-
-  .composer {
-    min-height: 720px;
-    overflow: visible;
-    border-right: 0;
-    border-bottom: 1px solid var(--color-border-1, var(--border-light));
-  }
-
-  .composerScroll,
-  .resultsPanel {
-    overflow: visible;
-  }
-
-  .twoColumnFields {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .resultsPanel {
-    padding: 20px 16px 28px;
-  }
-
-  .resultCard {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .resultGlyph {
-    width: 40px;
-    height: 40px;
-  }
-
-  .resultFooter {
-    justify-content: flex-start;
-  }
-
-  .resultActions {
-    width: 100%;
-    flex-wrap: wrap;
-  }
-}
 
 @media (prefers-reduced-motion: reduce) {
   .spin {

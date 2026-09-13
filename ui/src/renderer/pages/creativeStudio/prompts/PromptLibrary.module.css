@@ -566,32 +566,6 @@
   }
 }
 
-@media (max-width: 680px) {
-  .page {
-    padding: 18px 14px;
-  }
-
-  .header {
-    gap: 12px;
-  }
-
-  .description {
-    display: none;
-  }
-
-  .toolbar {
-    padding: 12px;
-  }
-
-  .facetRow {
-    grid-template-columns: 1fr;
-    gap: 5px;
-  }
-
-  .facetLabel {
-    padding: 0;
-  }
-}
 
 @media (prefers-reduced-motion: reduce) {
   .spinning,

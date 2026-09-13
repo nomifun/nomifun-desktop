@@ -1,7 +1,8 @@
 /* Base styles - theme-independent */
 
 :root {
-  --app-min-width: 360px;
+  /* Keep the WebUI aligned with the desktop shell's supported minimum width. */
+  --app-min-width: 880px;
   --titlebar-height: 36px;
 }
 
@@ -12,9 +13,13 @@
 html,
 body,
 #root,
+.app-shell {
+  min-width: var(--app-min-width);
+}
+
 .layout,
 .layout-content {
-  min-width: var(--app-min-width); /* prevent layout collapse on very small screens */
+  min-width: 0;
 }
 
 .loading {
@@ -23,13 +28,6 @@ body,
 
 .bg-animate {
   animation: bg-animate 1s alternate infinite;
-}
-
-/* Mobile base: prevent text size adjustment */
-@media (max-width: 767px) {
-  html {
-    -webkit-text-size-adjust: 100%;
-  }
 }
 
 @keyframes bg-animate {
@@ -56,18 +54,6 @@ body,
   }
   .\!collapsed-hidden {
     display: none !important;
-  }
-}
-
-/* Safe area utilities for mobile devices */
-/* iOS 17+ Chrome, Safari need env() in CSS, not inline styles */
-@supports (padding-bottom: env(safe-area-inset-bottom)) {
-  .safe-area-bottom {
-    padding-bottom: env(safe-area-inset-bottom, 0px);
-  }
-
-  .safe-area-top {
-    padding-top: env(safe-area-inset-top, 0px);
   }
 }
 

@@ -21,12 +21,6 @@ describe('Titlebar action affordances', () => {
     expect(languageMenuSource.includes('title={label}')).toBe(false);
   });
 
-  test('shows the workspace titlebar toggle on mobile only', () => {
-    expect(titlebarSource.includes('const showWorkspaceButton = workspaceAvailable && Boolean(layout?.isMobile);')).toBe(
-      true
-    );
-  });
-
   test('places the readable language selector after the left navigation actions', () => {
     const languageIndex = titlebarSource.indexOf('<TitlebarLanguageMenu');
     const sessionToggleIndex = titlebarSource.indexOf('tooltip: sessionToggleTooltip');

@@ -170,31 +170,3 @@
   justify-content: flex-end;
   gap: 8px;
 }
-
-@media (max-width: 640px) {
-  .content {
-    gap: 14px;
-  }
-
-  .detailsGrid[data-has-cover='true'] {
-    grid-template-columns: 1fr;
-  }
-
-  .prompt {
-    max-height: 44vh;
-    padding: 13px;
-  }
-
-  .actions {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .actionButtons {
-    justify-content: stretch;
-  }
-
-  .actionButtons > * {
-    flex: 1;
-  }
-}

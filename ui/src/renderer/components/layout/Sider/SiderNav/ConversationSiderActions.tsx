@@ -11,7 +11,6 @@ import { FolderPlus, ListCheckbox, Plus } from '@icon-park/react';
 import classNames from 'classnames';
 
 type ConversationSiderActionsProps = {
-  isMobile: boolean;
   isBatchMode: boolean;
   collapsed: boolean;
   showCreate?: boolean;
@@ -21,7 +20,6 @@ type ConversationSiderActionsProps = {
 };
 
 const ConversationSiderActions: React.FC<ConversationSiderActionsProps> = ({
-  isMobile,
   isBatchMode,
   collapsed,
   showCreate = true,
@@ -51,7 +49,6 @@ const ConversationSiderActions: React.FC<ConversationSiderActionsProps> = ({
         aria-label={tooltip}
         className={classNames(
           'size-22px rd-4px flex items-center justify-center cursor-pointer shrink-0 transition-colors text-t-secondary hover:text-t-primary',
-          isMobile && 'sider-action-icon-btn-mobile',
           active
             ? 'bg-[rgba(var(--primary-6),0.12)] border border-solid border-[rgba(var(--primary-6),0.24)] !text-primary'
             : 'hover:bg-fill-4'

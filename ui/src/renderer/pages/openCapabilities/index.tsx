@@ -239,7 +239,7 @@ const OpenCapabilitiesPage: React.FC = () => {
                 icon={<WebPage theme='outline' size='18' fill='currentColor' />}
                 title={t('settings.openCapabilities.webuiTitle', { defaultValue: 'WebUI 远程访问' })}
                 description={t('settings.openCapabilities.webuiDesc', {
-                  defaultValue: '启用后，手机、平板或远程浏览器可以打开 NomiFun。二维码登录和账号密码都在这里处理。',
+                  defaultValue: '启用后，其他电脑上的桌面浏览器可以打开 NomiFun。登录链接和账号密码都在这里处理。',
                 })}
               />
               <div className='mt-14px'>
@@ -253,7 +253,7 @@ const OpenCapabilitiesPage: React.FC = () => {
                 title={t('settings.openCapabilities.addressStrategyTitle', { defaultValue: '访问地址策略' })}
                 body={t('settings.openCapabilities.addressStrategyDesc', {
                   defaultValue:
-                    'NomiFun 只展示更可能被手机和局域网设备访问的地址；回环、链路本地、基准测试网段等地址不会进入二维码候选。',
+                    'NomiFun 只展示更可能被局域网电脑访问的地址；回环、链路本地、基准测试网段等地址不会进入登录链接候选。',
                 })}
               />
               <EndpointBlock

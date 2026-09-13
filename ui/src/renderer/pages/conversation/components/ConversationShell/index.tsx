@@ -12,7 +12,6 @@ import { Message } from '@arco-design/web-react';
 import ContentSider, { useContentSiderCollapse } from '@renderer/components/layout/ContentSider';
 import { addRecentWorkspace } from '@renderer/components/workspace';
 import { useResizableSplit } from '@renderer/hooks/ui/useResizableSplit';
-import { useLayoutContext } from '@renderer/hooks/context/LayoutContext';
 import WorkpathSessionList from '@renderer/pages/conversation/SessionList';
 import { useSidebarDisplayPreferences } from '@renderer/pages/conversation/SessionList/hooks/useSidebarDisplayPreferences';
 import { addProjectWorkpath } from '@renderer/pages/conversation/SessionList/utils/projectWorkpaths';
@@ -35,10 +34,6 @@ const SESSION_SIDER_MAX_WIDTH = 480;
  * unified workpath session list + {@link SessionCreateBar}) on the left and the
  * matched child route in `<Outlet/>` on the right.
  *
- * Collapse behavior:
- *  - Desktop: inline panel; collapse state persists via `useContentSiderCollapse`.
- *  - Mobile: overlay drawer with a backdrop, kept closed by default.
- *
  * The collapse toggle is owned by the titlebar (a stable, always-present
  * control mirroring the workspace panel) and reaches us over the
  * session-sider event bus — so the toggle never moves around regardless of
@@ -46,14 +41,9 @@ const SESSION_SIDER_MAX_WIDTH = 480;
  */
 const ConversationShell: React.FC = () => {
   const { t } = useTranslation();
-  const layout = useLayoutContext();
-  const isMobile = layout?.isMobile ?? false;
   const navigate = useNavigate();
 
-  // Desktop collapse: persisted. Mobile open: transient (overlay), never
-  // persisted so it can't leak across form factors.
-  const desktop = useContentSiderCollapse(SESSION_SIDER_STORAGE_KEY, false);
-  const [mobileOpen, setMobileOpen] = useState(false);
+  const sidebar = useContentSiderCollapse(SESSION_SIDER_STORAGE_KEY, false);
   const [batchMode, setBatchMode] = useState(false);
   const {
     preferences: displayPreferences,
@@ -61,7 +51,7 @@ const ConversationShell: React.FC = () => {
     updatePreference: updateDisplayPreference,
   } = useSidebarDisplayPreferences();
 
-  // Drag-to-resize the expanded panel width (desktop only); persisted per device.
+  // Drag-to-resize the expanded panel width; persisted per device.
   const sessionResize = useResizableSplit({
     unit: 'px',
     defaultWidth: SESSION_SIDER_DEFAULT_WIDTH,
@@ -70,22 +60,15 @@ const ConversationShell: React.FC = () => {
     storageKey: SESSION_SIDER_WIDTH_STORAGE_KEY,
   });
 
-  const collapsed = isMobile ? !mobileOpen : desktop.collapsed;
+  const collapsed = sidebar.collapsed;
 
   const collapse = useCallback(() => {
-    if (isMobile) setMobileOpen(false);
-    else desktop.setCollapsed(true);
-  }, [isMobile, desktop]);
+    sidebar.setCollapsed(true);
+  }, [sidebar]);
 
   const toggle = useCallback(() => {
-    if (isMobile) setMobileOpen((prev) => !prev);
-    else desktop.toggle();
-  }, [isMobile, desktop]);
-
-  // Leaving mobile (e.g. window resized to desktop) clears the transient overlay.
-  useEffect(() => {
-    if (!isMobile) setMobileOpen(false);
-  }, [isMobile]);
+    sidebar.toggle();
+  }, [sidebar]);
 
   // Broadcast collapse state so the titlebar toggle reflects it (mount + change).
   useEffect(() => {
@@ -100,21 +83,15 @@ const ConversationShell: React.FC = () => {
     return () => window.removeEventListener(SESSION_SIDER_TOGGLE_EVENT, handler);
   }, [toggle]);
 
-  const handleSessionClick = useCallback(() => {
-    if (isMobile) setMobileOpen(false);
-  }, [isMobile]);
-
   const handleNewChat = useCallback(() => {
     setBatchMode(false);
-    if (isMobile) setMobileOpen(false);
     void navigate('/guid', { state: { resetAgentSelection: true } });
-  }, [isMobile, navigate]);
+  }, [navigate]);
 
   const handleNewTerminal = useCallback(() => {
     setBatchMode(false);
-    if (isMobile) setMobileOpen(false);
     void navigate('/terminal-new');
-  }, [isMobile, navigate]);
+  }, [navigate]);
 
   const handleCreateProject = useCallback(async () => {
     setBatchMode(false);
@@ -127,13 +104,12 @@ const ConversationShell: React.FC = () => {
       void navigate('/guid', {
         state: { workspace: projectPath, resetAgentSelection: true },
       });
-      if (isMobile) setMobileOpen(false);
       Message.success(t('sessionList.createProjectSuccess'));
     } catch (error) {
       console.error('[ConversationShell] Failed to create project:', error);
       Message.error(t('sessionList.createProjectFailed'));
     }
-  }, [isMobile, navigate, t]);
+  }, [navigate, t]);
 
   const handleConversationSelect = useCallback(() => {
     setBatchMode(false);
@@ -150,17 +126,16 @@ const ConversationShell: React.FC = () => {
       onDisplayPresetChange={applyDisplayPreset}
       onDisplayPreferenceChange={updateDisplayPreference}
       onCollapse={collapse}
-      onSessionClick={isMobile ? handleSessionClick : undefined}
       onConversationSelect={handleConversationSelect}
     />
   );
 
   const panel = (
     <ContentSider
-      width={isMobile ? SESSION_SIDER_DEFAULT_WIDTH : sessionResize.splitRatio}
+      width={sessionResize.splitRatio}
       header={header}
       ariaLabel={t('sessionList.title')}
-      resizeHandle={isMobile ? undefined : sessionResize.createDragHandle({ className: 'right-0' })}
+      resizeHandle={sessionResize.createDragHandle({ className: 'right-0' })}
     >
       <div className='px-8px pb-6px'>
         <WorkpathSessionList
@@ -169,7 +144,6 @@ const ConversationShell: React.FC = () => {
           batchMode={batchMode}
           displayPreferences={displayPreferences}
           onBatchModeChange={setBatchMode}
-          onSessionClick={isMobile ? handleSessionClick : undefined}
         />
       </div>
     </ContentSider>
@@ -178,15 +152,7 @@ const ConversationShell: React.FC = () => {
   return (
     <PendingConversationProvider>
       <div className='relative flex size-full min-h-0'>
-        {!collapsed &&
-          (isMobile ? (
-            <>
-              <div className='absolute inset-0 z-20 bg-[rgba(0,0,0,0.45)]' onClick={collapse} />
-              <div className='absolute inset-y-0 left-0 z-30 h-full'>{panel}</div>
-            </>
-          ) : (
-            panel
-          ))}
+        {!collapsed && panel}
         <div className='relative flex-1 min-w-0 min-h-0 flex flex-col'>
           <Outlet />
           <PendingConversationOverlay />

@@ -13,7 +13,6 @@ import { useInputFocusRing } from '@/renderer/hooks/chat/useInputFocusRing';
 import SlashCommandMenu, { type SlashCommandMenuItem } from '@/renderer/components/chat/SlashCommandMenu';
 import { useBtwCommand } from '@/renderer/components/chat/BtwOverlay/useBtwCommand';
 import { useSlashCommandController } from '@/renderer/hooks/chat/useSlashCommandController';
-import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { useConversationContextSafe } from '@/renderer/hooks/context/ConversationContext';
 import { usePreviewContext } from '@/renderer/pages/conversation/Preview';
 import { warmupConversation } from '@/renderer/pages/conversation/utils/warmupConversation';
@@ -24,10 +23,9 @@ import { mergeFileSelectionItems, type FileSelectionItem } from '@/renderer/util
 import type { FileOrFolderItem } from '@/renderer/utils/file/fileTypes';
 import { filterWorkspaceMentionItems } from '@/renderer/utils/file/workspaceMentions';
 import { copyText } from '@/renderer/utils/ui/clipboard';
-import { blurActiveElement, shouldBlockMobileInputFocus } from '@/renderer/utils/ui/focus';
 import { Button, Input, Message, Tag } from '@arco-design/web-react';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
-import { ArrowUp, CloseSmall, Lightning, Plus, Quote } from '@icon-park/react';
+import { ArrowUp, CloseSmall, Lightning, Quote } from '@icon-park/react';
 import type { SlashCommandItem } from '@/common/chat/slash/types';
 import type { TFunction } from 'i18next';
 import { theme } from '@/platform';
@@ -207,12 +205,6 @@ const SendBox: React.FC<{
   bottomHint?: React.ReactNode;
   /** Conversation-only: render the compact plan strip inside the input panel status row. */
   showPinnedPlan?: boolean;
-  /**
-   * Mobile-only: open a parent-supplied action sheet via the `+` button.
-   * When provided, mobile renders a single `+` button (left) and send/stop button (right);
-   * `tools` and `rightTools` are not rendered inline on mobile.
-   */
-  onMobilePlusClick?: () => void;
 }> = ({
   onSend,
   onStop,
@@ -246,28 +238,19 @@ const SendBox: React.FC<{
   onSelectedWorkspaceItemsChange,
   bottomHint,
   showPinnedPlan = false,
-  onMobilePlusClick,
 }) => {
-  const layout = useLayoutContext();
-  const isMobile = layout?.isMobile ?? false;
-  // Mobile compact mode: parent supplies the `+` action sheet, which collapses
-  // tools/rightTools into a single launcher and lets the textarea start as a single line.
-  const isMobileCompact = isMobile && Boolean(onMobilePlusClick);
-  const effectiveLockMultiLine = lockMultiLine && !isMobileCompact;
-  const effectiveDefaultMultiLine = defaultMultiLine && !isMobileCompact;
   const conversationContext = useConversationContextSafe();
   const { t, i18n } = useTranslation();
   const [isLoading, setIsLoading] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
   const isStoppingRef = useRef(false);
-  const [isSingleLine, setIsSingleLine] = useState(!effectiveDefaultMultiLine);
+  const [isSingleLine, setIsSingleLine] = useState(!defaultMultiLine);
   const [isInputFocused, setIsInputFocused] = useState(false);
   const isInputActive = isInputFocused;
   const { activeBorderColor, inactiveBorderColor, activeShadow } = useInputFocusRing();
   const containerRef = useRef<HTMLDivElement>(null);
   const singleLineWidthRef = useRef<number>(0);
   const measurementCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const mobileUserFocusIntentUntilRef = useRef(0);
   const warmedConversationRef = useRef<ConversationId | undefined>(undefined);
   const warmupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latestInputRef = useLatestRef(input);
@@ -352,15 +335,6 @@ const SendBox: React.FC<{
     return () => clearTimeout(timer);
   }, []);
 
-  // 移动端挂载后主动清除焦点，拦截路由切换导致的非用户触发聚焦
-  useEffect(() => {
-    if (!isMobile) return;
-    const timer = setTimeout(() => {
-      blurActiveElement();
-    }, 0);
-    return () => clearTimeout(timer);
-  }, [isMobile]);
-
   // 检测是否单行
   // Detect whether to use single-line or multi-line mode
   useEffect(() => {
@@ -418,7 +392,7 @@ const SendBox: React.FC<{
       // Switch to multi-line when text width exceeds baseline width
       if (textWidth >= baseWidth) {
         setIsSingleLine(false);
-      } else if (textWidth < baseWidth - 30 && !effectiveLockMultiLine) {
+      } else if (textWidth < baseWidth - 30 && !lockMultiLine) {
         // 文本宽度小于基准宽度减30px时切回单行，留出小缓冲区避免临界点抖动
         // 如果 lockMultiLine 为 true，则不切换回单行
         // Switch back to single-line when text width is less than baseline minus 30px, leaving a small buffer to avoid flickering at the threshold
@@ -430,7 +404,7 @@ const SendBox: React.FC<{
     });
 
     return () => cancelAnimationFrame(frame);
-  }, [input, effectiveLockMultiLine]);
+  }, [input, lockMultiLine]);
 
   // 使用拖拽 hook
   const { isFileDragging, dragHandlers } = useDragUpload({
@@ -663,7 +637,7 @@ const SendBox: React.FC<{
 
   useLayoutEffect(() => {
     syncHighlightTextMetrics();
-  }, [input, isInputFocused, isMobile, isSingleLine, syncHighlightTextMetrics]);
+  }, [input, isInputFocused, isSingleLine, syncHighlightTextMetrics]);
 
   const handleTextAreaChange = (value: string) => {
     if (historyNavigationIndex !== null) {
@@ -997,21 +971,7 @@ const SendBox: React.FC<{
       }
     },
   });
-  const markMobileFocusIntent = useCallback(() => {
-    if (!isMobile) return;
-    mobileUserFocusIntentUntilRef.current = Date.now() + 1500;
-  }, [isMobile]);
-
   const handleInputFocus = useCallback(() => {
-    if (isMobile && Date.now() > mobileUserFocusIntentUntilRef.current) {
-      blurActiveElement();
-      return;
-    }
-    if (isMobile && shouldBlockMobileInputFocus()) {
-      blurActiveElement();
-      return;
-    }
-    mobileUserFocusIntentUntilRef.current = 0;
     handlePasteFocus();
     setIsInputFocused(true);
 
@@ -1030,7 +990,7 @@ const SendBox: React.FC<{
         warmupConversation(cid).catch(() => {});
       }, 300);
     }
-  }, [handlePasteFocus, isMobile, conversationContext?.conversation_id]);
+  }, [handlePasteFocus, conversationContext?.conversation_id]);
   const handleInputBlur = useCallback(() => {
     if (warmupTimerRef.current) {
       clearTimeout(warmupTimerRef.current);
@@ -1440,24 +1400,7 @@ const SendBox: React.FC<{
 
   const shouldUseHighlightOverlay = !isComposingState && allAtFileQueries.length > 0;
 
-  const mobilePlusButton = isMobileCompact ? (
-    <Button
-      shape='circle'
-      type='secondary'
-      className='sendbox-mobile-plus-btn'
-      icon={<Plus theme='outline' size='16' />}
-      onClick={onMobilePlusClick}
-      data-testid='sendbox-mobile-plus-btn'
-      data-composer-action='attach'
-      aria-label={t('common.more', { defaultValue: 'More' })}
-    />
-  ) : null;
-
-  // On mobile compact mode, the parent supplies the action sheet — collapse
-  // tools/rightTools into the `+` launcher and skip the inline speech button.
-  const renderedTools = isMobileCompact ? mobilePlusButton : tools;
-  const renderedRightTools = isMobileCompact ? null : rightTools;
-  const renderedSpeechButton = isMobileCompact ? null : (
+  const renderedSpeechButton = (
     <SpeechInputButton
       disabled={disabled || isLoading || loading || isUploading}
       locale={speechLocale}
@@ -1703,15 +1646,9 @@ const SendBox: React.FC<{
           >
             {isSingleLine && (
               <div
-                className={
-                  isMobileCompact
-                    ? 'flex-shrink-0 sendbox-tools sendbox-tools-mobile-compact'
-                    : isMobile
-                      ? 'sendbox-tools sendbox-tools-scroll-mobile'
-                      : 'flex-shrink-0 sendbox-tools'
-                }
+                className='flex-shrink-0 sendbox-tools'
               >
-                {renderedTools}
+                {tools}
               </div>
             )}
             <div
@@ -1728,28 +1665,24 @@ const SendBox: React.FC<{
               <div
                 ref={highlightScrollRef}
                 aria-hidden='true'
-                className={`sendbox-highlight-layer text-14px ${isMobile ? 'sendbox-input--mobile' : ''} ${isSingleLine ? 'sendbox-highlight-layer--single' : ''}`}
+                className={`sendbox-highlight-layer text-14px ${isSingleLine ? 'sendbox-highlight-layer--single' : ''}`}
                 data-testid='sendbox-highlight-layer'
                 style={!shouldUseHighlightOverlay ? { visibility: 'hidden' } : undefined}
               >
                 {renderHighlightedInputValue()}
               </div>
               <Input.TextArea
-                autoFocus={!isMobile}
+                autoFocus
                 disabled={disabled}
                 spellCheck={false}
                 value={input}
                 placeholder={
-                  isMobileCompact
-                    ? (placeholder ??
-                      (bottomHint as string | undefined) ??
+                  placeholder
+                    ? `${placeholder}  ${bottomHint ?? t('conversation.sendbox.hint', { defaultValue: 'Type / for commands, @ to reference files' })}`
+                    : ((bottomHint as string | undefined) ??
                       t('conversation.sendbox.hint', { defaultValue: 'Type / for commands, @ to reference files' }))
-                    : placeholder
-                      ? `${placeholder}  ${bottomHint ?? t('conversation.sendbox.hint', { defaultValue: 'Type / for commands, @ to reference files' })}`
-                      : ((bottomHint as string | undefined) ??
-                        t('conversation.sendbox.hint', { defaultValue: 'Type / for commands, @ to reference files' }))
                 }
-                className={`${shouldUseHighlightOverlay ? 'sendbox-highlight-textarea ' : ''}pl-0 pr-0 !b-none focus:shadow-none m-0 !bg-transparent !focus:bg-transparent !hover:bg-transparent lh-[20px] !resize-none text-14px ${isMobile ? 'sendbox-input--mobile' : ''}`}
+                className={`${shouldUseHighlightOverlay ? 'sendbox-highlight-textarea ' : ''}pl-0 pr-0 !b-none focus:shadow-none m-0 !bg-transparent !focus:bg-transparent !hover:bg-transparent lh-[20px] !resize-none text-14px`}
                 data-testid='sendbox-input'
                 style={{
                   width: '100%',
@@ -1759,8 +1692,8 @@ const SendBox: React.FC<{
                   marginLeft: 0,
                   marginRight: 0,
                   marginBottom: 0,
-                  height: isSingleLine ? (isMobile ? '22px' : '20px') : 'auto',
-                  minHeight: isSingleLine ? (isMobile ? '22px' : '20px') : '40px',
+                  height: isSingleLine ? '20px' : 'auto',
+                  minHeight: isSingleLine ? '20px' : '40px',
                   overflowY: isSingleLine ? 'hidden' : 'auto',
                   overflowX: 'hidden',
                   whiteSpace: isSingleLine ? 'nowrap' : 'pre-wrap',
@@ -1770,8 +1703,6 @@ const SendBox: React.FC<{
                 }}
                 onChange={handleTextAreaChange}
                 onPaste={onPaste}
-                onTouchStart={markMobileFocusIntent}
-                onMouseDown={markMobileFocusIntent}
                 onClick={(event) => {
                   syncCaretPosition(event.target);
                 }}
@@ -1826,18 +1757,12 @@ const SendBox: React.FC<{
           {!isSingleLine && (
             <div className='sendbox-bottom-row flex items-center justify-between gap-2 w-full'>
               <div
-                className={
-                  isMobileCompact
-                    ? 'flex-shrink-0 sendbox-tools sendbox-tools-mobile-compact'
-                    : isMobile
-                      ? 'sendbox-tools sendbox-tools-scroll-mobile'
-                      : 'sendbox-tools'
-                }
+                className='sendbox-tools'
               >
-                {renderedTools}
+                {tools}
               </div>
               <div className='sendbox-actions flex items-center gap-2'>
-                {renderedRightTools}
+                {rightTools}
                 {renderedSpeechButton}
                 {sendButtonPrefix}
                 {renderActionButtons()}
