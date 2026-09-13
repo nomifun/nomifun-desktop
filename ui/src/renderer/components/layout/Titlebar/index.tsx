@@ -1,6 +1,6 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo } from 'react';
 import classNames from 'classnames';
-import { ArrowLeft, ArrowRight, ExpandLeft, ExpandRight, Plus, Terminal } from '@icon-park/react';
+import { ArrowLeft, ArrowRight, Plus, Terminal } from '@icon-park/react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
 
@@ -8,12 +8,11 @@ import { ipcBridge } from '@/common';
 import InstantHoverTooltip from '@renderer/components/base/InstantHoverTooltip';
 import TitlebarLanguageMenu from './TitlebarLanguageMenu';
 import WindowControls from '../WindowControls';
-import {
-  SESSION_SIDER_STATE_EVENT,
-  dispatchSessionSiderToggleEvent,
-} from '@renderer/utils/workspace/sessionSiderEvents';
-import type { SessionSiderStateDetail } from '@renderer/utils/workspace/sessionSiderEvents';
-import { AGENT_SIDER_STATE_EVENT, dispatchAgentSiderToggleEvent } from '@renderer/utils/workspace/agentSiderEvents';
+import { sessionSiderChannel } from '@renderer/utils/workspace/sessionSiderEvents';
+import { agentSiderChannel } from '@renderer/utils/workspace/agentSiderEvents';
+import { workbenchSiderChannels } from '@renderer/utils/workspace/workbenchSiderEvents';
+import ContentSiderTitlebarToggle from '../ContentSider/ContentSiderTitlebarToggle';
+import { CREATIVE_STUDIO_IMAGE_PATH, CREATIVE_STUDIO_VIDEO_PATH } from '@renderer/pages/creativeStudio/app/routes';
 import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { useNavigationHistory } from '@/renderer/hooks/context/NavigationHistoryContext';
 import { isDesktopShell, isMacOS } from '@/renderer/utils/platform';
@@ -60,35 +59,10 @@ const SidebarIcon: React.FC<{ size?: number; strokeWidth?: number }> = ({ size =
 const Titlebar: React.FC = () => {
   const { t } = useTranslation();
   const appTitle = useMemo(() => 'NomiFun', []);
-  const [sessionSiderCollapsed, setSessionSiderCollapsed] = useState(false);
-  const [agentSiderCollapsed, setAgentSiderCollapsed] = useState(false);
-  useEffect(() => {
-    const handler = (event: Event) => setAgentSiderCollapsed((event as CustomEvent<{ collapsed: boolean }>).detail.collapsed);
-    window.addEventListener(AGENT_SIDER_STATE_EVENT, handler);
-    return () => window.removeEventListener(AGENT_SIDER_STATE_EVENT, handler);
-  }, []);
   const layout = useLayoutContext();
   const navigationHistory = useNavigationHistory();
   const location = useLocation();
   const navigate = useNavigate();
-  // 同步会话二级侧栏折叠状态，使标题栏开关图标保持一致
-  // Sync session secondary-sidebar collapsed state for the titlebar toggle icon
-  useEffect(() => {
-    if (typeof window === 'undefined') {
-      return undefined;
-    }
-    const handler = (event: Event) => {
-      const customEvent = event as CustomEvent<SessionSiderStateDetail>;
-      if (typeof customEvent.detail?.collapsed === 'boolean') {
-        setSessionSiderCollapsed(customEvent.detail.collapsed);
-      }
-    };
-    window.addEventListener(SESSION_SIDER_STATE_EVENT, handler as EventListener);
-    return () => {
-      window.removeEventListener(SESSION_SIDER_STATE_EVENT, handler as EventListener);
-    };
-  }, []);
-
   const isDesktopRuntime = isDesktopShell();
   const isMacRuntime = isDesktopRuntime && isMacOS();
   // Windows/Linux 显示自定义窗口按钮。
@@ -109,14 +83,15 @@ const Titlebar: React.FC = () => {
     location.pathname.startsWith('/conversation/') ||
     location.pathname === '/terminal-new' ||
     location.pathname.startsWith('/terminal/');
-  const sessionToggleTooltip = sessionSiderCollapsed
-    ? t('sessionList.expandList', { defaultValue: 'Show conversations' })
-    : t('sessionList.collapseList', { defaultValue: 'Hide conversations' });
   const isAgentRoute = location.pathname === '/agent';
-  const contentSiderCollapsed = isAgentRoute ? agentSiderCollapsed : sessionSiderCollapsed;
-  const contentSiderTooltip = isAgentRoute
-    ? t(agentSiderCollapsed ? 'agentSettings.workbench.showList' : 'agentSettings.workbench.hideList')
-    : sessionToggleTooltip;
+  const workbenchKind = location.pathname === CREATIVE_STUDIO_IMAGE_PATH ? 'image'
+    : location.pathname === CREATIVE_STUDIO_VIDEO_PATH ? 'video' : null;
+  const contentSiderChannel = workbenchKind ? workbenchSiderChannels[workbenchKind]
+    : isAgentRoute ? agentSiderChannel : sessionSiderChannel;
+  const contentSiderExpandLabel = workbenchKind ? t('creativeStudio.workbenchSider.expand')
+    : isAgentRoute ? t('agentSettings.workbench.showList') : t('sessionList.expandList');
+  const contentSiderCollapseLabel = workbenchKind ? t('creativeStudio.workbenchSider.collapse')
+    : isAgentRoute ? t('agentSettings.workbench.hideList') : t('sessionList.collapseList');
 
   const handleSiderToggle = () => {
     if (!showSiderToggle || !layout?.setSiderCollapsed) return;
@@ -215,17 +190,13 @@ const Titlebar: React.FC = () => {
           onClick: () => navigateAfterCreativeStudioFlush(() => navigate('/terminal-new')),
           children: <Terminal theme='outline' size={iconSize} fill='currentColor' strokeWidth={desktopIconStroke} />,
         })}
-        {(isSessionRoute || isAgentRoute) && (
-          renderIconButton({
-            tooltip: contentSiderTooltip,
-            className: 'app-titlebar__button app-titlebar__button--nav',
-            onClick: () => isAgentRoute ? dispatchAgentSiderToggleEvent() : dispatchSessionSiderToggleEvent(),
-            children: contentSiderCollapsed ? (
-              <ExpandRight theme='outline' size={iconSize} fill='currentColor' strokeWidth={desktopIconStroke} />
-            ) : (
-              <ExpandLeft theme='outline' size={iconSize} fill='currentColor' strokeWidth={desktopIconStroke} />
-            ),
-          })
+        {(isSessionRoute || isAgentRoute || workbenchKind) && (
+          <ContentSiderTitlebarToggle
+            channel={contentSiderChannel}
+            expandLabel={contentSiderExpandLabel}
+            collapseLabel={contentSiderCollapseLabel}
+            strokeWidth={desktopIconStroke}
+          />
         )}
         <div className='app-titlebar__language-control'>
           <TitlebarLanguageMenu strokeWidth={desktopIconStroke} />

@@ -23,8 +23,9 @@ describe('Titlebar action affordances', () => {
 
   test('places the readable language selector after the left navigation actions', () => {
     const languageIndex = titlebarSource.indexOf('<TitlebarLanguageMenu');
-    const sessionToggleIndex = titlebarSource.indexOf('tooltip: sessionToggleTooltip');
+    const sessionToggleIndex = titlebarSource.indexOf('<ContentSiderTitlebarToggle');
 
+    expect(sessionToggleIndex).toBeGreaterThan(-1);
     expect(languageIndex).toBeGreaterThan(sessionToggleIndex);
     expect(languageMenuSource.includes('app-titlebar__language-button')).toBe(true);
     expect(languageMenuSource.includes('app-titlebar__language-name')).toBe(true);

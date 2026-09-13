@@ -13,21 +13,15 @@
  * - ConversationShell broadcasts STATE on mount and on every change.
  * - The Titlebar reflects STATE on its toggle icon and dispatches TOGGLE on click.
  */
-export const SESSION_SIDER_TOGGLE_EVENT = 'nomifun-session-sider-toggle';
-export const SESSION_SIDER_STATE_EVENT = 'nomifun-session-sider-state';
+import { createContentSiderChannel } from '@/renderer/components/layout/ContentSider/createContentSiderChannel';
+
+export const sessionSiderChannel = createContentSiderChannel('session');
+export const SESSION_SIDER_TOGGLE_EVENT = sessionSiderChannel.toggleEvent;
+export const SESSION_SIDER_STATE_EVENT = sessionSiderChannel.stateEvent;
 
 export interface SessionSiderStateDetail {
   collapsed: boolean;
 }
 
-export function dispatchSessionSiderToggleEvent() {
-  if (typeof window === 'undefined') return;
-  window.dispatchEvent(new CustomEvent(SESSION_SIDER_TOGGLE_EVENT));
-}
-
-export function dispatchSessionSiderStateEvent(collapsed: boolean) {
-  if (typeof window === 'undefined') return;
-  window.dispatchEvent(
-    new CustomEvent<SessionSiderStateDetail>(SESSION_SIDER_STATE_EVENT, { detail: { collapsed } })
-  );
-}
+export const dispatchSessionSiderToggleEvent = sessionSiderChannel.dispatchToggle;
+export const dispatchSessionSiderStateEvent = sessionSiderChannel.dispatchState;

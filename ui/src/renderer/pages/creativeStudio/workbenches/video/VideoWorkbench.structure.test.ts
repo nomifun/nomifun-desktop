@@ -27,14 +27,13 @@ describe('VideoWorkbench controlled boundary', () => {
   });
 
   test('matches the compact image-workbench header rhythm', () => {
-    expect(/\.composerHeader\s*\{[\s\S]*?min-height:\s*64px;[\s\S]*?padding:\s*12px 14px;/.test(css)).toBe(true);
-    expect(/\.composerHeader strong\s*\{[\s\S]*?font-size:\s*14px;[\s\S]*?line-height:\s*18px;/.test(css)).toBe(true);
-    expect(/\.layoutSwitch button\s*\{[\s\S]*?height:\s*28px;[\s\S]*?font-size:\s*12px;/.test(css)).toBe(true);
-    expect(/\.sideComposerBody\s*\{[\s\S]*?padding:\s*12px 16px 16px;/.test(css)).toBe(true);
+    expect(composer.includes('<WorkbenchComposerHeader kind=\'video\'')).toBe(true);
+    expect(composer.includes('composerStyles.root')).toBe(true);
+    expect(composer.includes('composerStyles.content')).toBe(true);
+    expect(composer.includes('composerStyles.referenceStrip')).toBe(true);
     expect(/\.resultsHeader\s*\{[\s\S]*?min-height:\s*64px;[\s\S]*?margin-bottom:\s*0;[\s\S]*?padding:\s*12px 16px;/.test(css)).toBe(true);
     expect(css.includes('min-height: 62px')).toBe(false);
     expect(/\.resultsTitle h2\s*\{[\s\S]*?font-size:\s*14px;[\s\S]*?line-height:\s*20px;/.test(css)).toBe(true);
-    expect(/\.layoutSwitch button > :global\(\.i-icon\)[\s\S]*?line-height:\s*0;/.test(css)).toBe(true);
     expect(results.includes("<History size={15} />")).toBe(true);
     expect(results.includes("<Tag size='small' bordered={false}>")).toBe(true);
     expect(/\.emptyResults\s*\{[\s\S]*?margin:\s*0 18px 18px;/.test(css)).toBe(true);
