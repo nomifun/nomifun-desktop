@@ -1690,6 +1690,7 @@ mod tests {
 
     fn revision_payload(record: ChatRouteRecord) -> AgentPresetRevisionPayload {
         AgentPresetRevisionPayload {
+            runtime_engine: None,
             schema_version: "1.0.0".into(),
             model_route_refs: BTreeMap::from([(
                 nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT.to_owned(),

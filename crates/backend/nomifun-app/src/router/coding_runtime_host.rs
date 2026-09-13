@@ -243,6 +243,7 @@ pub(crate) fn validate_supported_snapshot(
     if !unsupported.is_empty()
         || !snapshot.content.on_demand_capabilities.is_empty()
         || !snapshot.content.skill_locks.is_empty()
+        || !snapshot.content.mcp_tool_locks.is_empty()
         || !snapshot.content.initial_miniapp_capabilities.is_empty()
         || !snapshot.content.on_demand_miniapp_capabilities.is_empty()
     {

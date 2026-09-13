@@ -43,13 +43,36 @@ async fn call(
     (
         status,
         serde_json::from_slice(&bytes)
-            .unwrap_or_else(|_| panic!("non-JSON: {}", String::from_utf8_lossy(&bytes))),
+            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned())),
     )
 }
 async fn ok(router: &Router, method: &str, path: &str, body: Value, key: &str) -> Value {
     let (status, value) = call(router, method, path, body, key).await;
     assert_eq!(status, StatusCode::OK, "{path}: {value}");
     value["data"].clone()
+}
+
+async fn runtime_preview(router: &Router, editor: &Value, engine: &Value) -> (Value, Value) {
+    let mut draft = editor["draft"].clone();
+    draft["document"]["runtime_engine"] = engine.clone();
+    let path = format!("/api/agent-presets/{}/resolve-preview", editor["preset"]["preset_id"].as_str().unwrap());
+    let preview = ok(router, "POST", &path, json!({
+        "expected_current_revision": editor["revision"]["reference"], "draft": draft,
+        "scene":"agent_settings", "surface":"desktop", "audience":"owner"
+    }), "preview-runtime").await;
+    (draft, preview)
+}
+
+async fn save_runtime(router: &Router, editor: &Value, engine: &Value) -> Value {
+    let (draft, preview) = runtime_preview(router, editor, engine).await;
+    assert_eq!(preview["status"], "ready", "{preview}");
+    let path = format!("/api/agent-presets/{}/revisions", editor["preset"]["preset_id"].as_str().unwrap());
+    let saved = ok(router, "POST", &path, json!({
+        "expected_current_revision": editor["revision"]["reference"],
+        "preview_digest": preview["preview_digest"], "draft": draft
+    }), "save-runtime").await;
+    assert_eq!(saved["revision"]["document"]["runtime_engine"], *engine);
+    saved
 }
 async fn wait_finished(pool: &nomifun_db::SqlitePool, session: &str) {
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
@@ -163,10 +186,17 @@ async fn coding_engine_runs_real_workspace_tool_and_resumes_on_the_default_route
             "persona":"Coding test", "instructions":"Use only the selected workspace tools.", "starter_prompts":[]
         }
     }), "preset").await;
+    // The workbench saves the runtime into the Agent revision, not the Session DTO.
+    assert!(preset["draft"]["document"].get("runtime_engine").is_none());
+    let coding_selection = json!({"selector":{"selection":"exact","family_id":coding["family_id"],"build_id":coding["build_id"],"build_digest":coding["build_digest"]},"profile":"coding"});
+    let saved = save_runtime(&router, &preset, &coding_selection).await;
+    assert_ne!(saved["revision"]["reference"]["revision_digest"], preset["revision"]["reference"]["revision_digest"]);
+    let editor_path = format!("/api/agent-presets/{}", preset["preset"]["preset_id"].as_str().unwrap());
+    let preset = ok(&router, "GET", &format!("{editor_path}/editor"), json!({}), "reload-agent").await;
+    assert_eq!(preset["draft"]["document"]["runtime_engine"], coding_selection);
     let request = json!({"preset_id":preset["preset"]["preset_id"], "title":"Coding production",
         "model":{"provider_id":provider,"model":"coding-fixture"},
         "resource_selections":[{"resource_kind":"workspace","resource_id":"default-workspace"}],
-        "runtime_engine":{"selector":{"selection":"exact","family_id":coding["family_id"],"build_id":coding["build_id"],"build_digest":coding["build_digest"]},"profile":"coding"},
         "capability_selection":{"enabled_skills":[],"excluded_auto_skills":[],"mcp_server_ids":[]}
     });
     let created = ok(
@@ -195,25 +225,22 @@ async fn coding_engine_runs_real_workspace_tool_and_resumes_on_the_default_route
         ("family_id", json!("uninstalled.runtime")),
         ("build_digest", json!("b".repeat(64))),
     ] {
-        let mut invalid = request.clone();
-        invalid["runtime_engine"]["selector"][field] = value;
-        assert!(
-            !call(&router, "POST", "/api/agent-sessions", invalid, field)
-                .await
-                .0
-                .is_success()
-        );
+        let mut invalid = coding_selection.clone();
+        invalid["selector"][field] = value;
+        let (draft, preview) = runtime_preview(&router, &preset, &invalid).await;
+        assert_eq!(preview["status"], "blocked", "{preview}");
+        assert_eq!(preview["can_save_revision"], false);
+        let path = format!("{editor_path}/revisions");
+        assert!(!call(&router, "POST", &path, json!({
+            "expected_current_revision": preset["revision"]["reference"],
+            "preview_digest": preview["preview_digest"], "draft": draft
+        }), field).await.0.is_success());
     }
-    let mut invalid = request.clone();
-    invalid["runtime_engine"]["profile"] = json!("not-installed");
-    assert!(
-        !call(&router, "POST", "/api/agent-sessions", invalid, "profile")
-            .await
-            .0
-            .is_success()
-    );
+    let mut invalid = coding_selection.clone();
+    invalid["profile"] = json!("not-installed");
+    assert_eq!(runtime_preview(&router, &preset, &invalid).await.1["status"], "blocked");
     let mut changed = request.clone();
-    changed.as_object_mut().unwrap().remove("runtime_engine");
+    changed["runtime_engine"] = coding_selection.clone();
     assert_eq!(
         call(
             &router,
@@ -224,7 +251,7 @@ async fn coding_engine_runs_real_workspace_tool_and_resumes_on_the_default_route
         )
         .await
         .0,
-        StatusCode::CONFLICT
+        StatusCode::UNPROCESSABLE_ENTITY
     );
     let selection_path = format!("/api/agent-sessions/{session}/capability-selection");
     assert_eq!(call(&router, "PUT", &selection_path, json!({"capability_selection":{"enabled_skills":["pdf"],"excluded_auto_skills":[],"mcp_server_ids":[]}}), "unsupported-skills").await.0, StatusCode::CONFLICT);
@@ -335,18 +362,25 @@ async fn coding_engine_runs_real_workspace_tool_and_resumes_on_the_default_route
     );
     let mut fork_request = fork_request;
     fork_request["runtime_engine"] = json!({"selector":{"selection":"channel","family_id":"nomifun.nomi","channel":"stable"},"profile":"default"});
-    let child = ok(&router, "POST", &fork_path, fork_request, "switch").await;
-    let child_path = format!(
-        "/api/conversations/{}",
-        child["child_agent_session_id"].as_str().unwrap()
-    );
-    assert_eq!(
-        ok(&router, "GET", &child_path, json!({}), "child").await["extra"]["runtime_engine_binding"]
-            ["family_id"],
-        "nomifun.nomi"
-    );
+    assert_eq!(call(&router, "POST", &fork_path, fork_request, "switch").await.0, StatusCode::UNPROCESSABLE_ENTITY);
+    // Changing the Agent affects only future sessions, including model-derived variants.
+    let nomi_selection = json!({"selector":{"selection":"channel","family_id":"nomifun.nomi","channel":"stable"},"profile":"default"});
+    save_runtime(&router, &preset, &nomi_selection).await;
+    let next = ok(&router, "POST", "/api/agent-sessions", request.clone(), "after-agent-edit").await;
+    assert_eq!(next["runtime_engine_binding"]["family_id"], "nomifun.nomi");
+    assert_eq!(ok(&router, "GET", &conversation_path, json!({}), "old-engine").await["extra"]["runtime_engine_binding"], created["runtime_engine_binding"]);
+    assert_eq!(call(&router, "POST", "/api/agent-sessions", request.clone(), "coding-session").await.0, StatusCode::CONFLICT);
+    let switch_path = format!("/api/agent-sessions/{session}/preset");
+    assert_eq!(call(&router, "PUT", &switch_path, json!({"preset_id":request["preset_id"],"resource_selections":request["resource_selections"]}), "different-agent-engine").await.0, StatusCode::CONFLICT);
+    let inherited = ok(&router, "POST", &fork_path, json!({"target_agent_binding":created["agent_binding"],"parent_through_seq":0}), "fork-after-agent-edit").await;
+    let inherited_path = format!("/api/conversations/{}", inherited["child_agent_session_id"].as_str().unwrap());
+    assert_eq!(ok(&router, "GET", &inherited_path, json!({}), "inherited-old-engine").await["extra"]["runtime_engine_binding"], created["runtime_engine_binding"]);
+    // A second independent Agent may select an arbitrary host-registered runtime.
+    let mut custom_document = preset["draft"]["document"].clone();
+    custom_document["runtime_engine"] = json!({"selector":{"selection":"exact","family_id":"customer.runtime","build_id":"v1","build_digest":"c".repeat(64)},"profile":"workflow"});
+    let custom_agent = ok(&router, "POST", "/api/agent-presets", json!({"display_name":"Custom runtime Agent","document":custom_document}), "custom-agent").await;
     let mut custom = request;
-    custom["runtime_engine"] = json!({"selector":{"selection":"exact","family_id":"customer.runtime","build_id":"v1","build_digest":"c".repeat(64)},"profile":"workflow"});
+    custom["preset_id"] = custom_agent["preset"]["preset_id"].clone();
     let custom = ok(&router, "POST", "/api/agent-sessions", custom, "custom").await;
     assert_eq!(
         custom["runtime_engine_binding"]["family_id"],

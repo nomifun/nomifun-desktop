@@ -182,6 +182,10 @@ pub struct CapabilitySelection {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentPresetRevisionPayload {
+    /// Execution implementation belongs to the Agent revision, not the chat composer.
+    /// Omission preserves the default Nomi behavior of older revisions and their digests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_engine: Option<AgentRuntimeEngineSelection>,
     pub schema_version: VersionString,
     pub model_route_refs: BTreeMap<String, ModelRouteId>,
     /// Complete route facts used by the Fresh-v4 persistence writer. Legacy
@@ -198,6 +202,20 @@ pub struct AgentPresetRevisionPayload {
     pub instructions: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub starter_prompts: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AgentRuntimeEngineSelection {
+    pub selector: AgentRuntimeEngineSelector,
+    pub profile: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "selection", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AgentRuntimeEngineSelector {
+    Exact { family_id: String, build_id: String, build_digest: String },
+    Channel { family_id: String, channel: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1587,6 +1605,7 @@ mod tests {
     #[test]
     fn resource_neutral_preset_contract_rejects_legacy_resource_fields() {
         let mut payload = serde_json::to_value(AgentPresetRevisionPayload {
+            runtime_engine: None,
             schema_version: VersionString::from("1.0.0"),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),
@@ -1642,6 +1661,29 @@ mod tests {
             serde_json::from_value::<ResolvedSnapshotContent>(nested_snapshot).is_err(),
             "Nested Snapshot records must fail closed on retired resource fields"
         );
+    }
+
+    #[test]
+    fn agent_runtime_configuration_is_versioned_without_rehashing_legacy_payloads() {
+        let legacy = serde_json::json!({
+            "schema_version":"1.0.0", "model_route_refs":{},
+            "initial_capabilities":[], "on_demand_capabilities":[], "skill_bindings":[],
+            "persona":"", "instructions":""
+        });
+        let payload: AgentPresetRevisionPayload = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(payload.runtime_engine.is_none());
+        assert_eq!(serde_json::to_value(&payload).unwrap(), legacy);
+        let legacy_digest = digest_payload(&payload).unwrap();
+        let mut selected = payload;
+        selected.runtime_engine = Some(AgentRuntimeEngineSelection {
+            selector: AgentRuntimeEngineSelector::Exact {
+                family_id: "customer.workflow".into(), build_id: "v1".into(), build_digest: "a".repeat(64),
+            },
+            profile: "custom".into(),
+        });
+        assert_ne!(digest_payload(&selected).unwrap(), legacy_digest);
+        let encoded = serde_json::to_value(&selected).unwrap();
+        assert_eq!(serde_json::from_value::<AgentPresetRevisionPayload>(encoded).unwrap(), selected);
     }
 
     #[test]

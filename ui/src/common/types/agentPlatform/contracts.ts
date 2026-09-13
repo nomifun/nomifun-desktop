@@ -166,6 +166,8 @@ export interface RoleProviderSelection {
 }
 
 export interface AgentPresetDocument {
+  /** Versioned Agent configuration, resolved by the host when a session is created. */
+  runtime_engine?: RuntimeEngineSelection;
   schema_version: string;
   model_route_refs: Record<string, string>;
   chat_route_records: Partial<Record<typeof AGENT_CHAT_MODEL_TASK, ChatRouteRecord>>;
@@ -524,7 +526,6 @@ export interface RuntimeEngineSelection {
 }
 
 export interface CreateAgentSessionRequest {
-  runtime_engine?: RuntimeEngineSelection;
   model?: { provider_id: string; model: string };
   preset_id: AgentPresetId;
   title?: string;
@@ -597,8 +598,6 @@ export interface AgentSessionEventsResponse {
 }
 
 export interface ForkAgentSessionRequest {
-  /** Omitted: inherit the parent's exact engine binding. */
-  runtime_engine?: RuntimeEngineSelection;
   target_agent_binding: AgentBindingValue;
   parent_through_seq: number;
   title?: string;

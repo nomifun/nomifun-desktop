@@ -42,8 +42,6 @@ import GuidActionRow from './components/GuidActionRow';
 import GuidCompanionPosterPreview from './components/GuidCompanionPosterPreview';
 import GuidInputCard from './components/GuidInputCard';
 import GuidModelSelector from './components/GuidModelSelector';
-import GuidRuntimeEngineSelector from './components/GuidRuntimeEngineSelector';
-import type { RuntimeEngineSelection } from '@/common/types/agentPlatform';
 import GuidResourceCards from './components/GuidResourceCards';
 import MentionDropdown, {
   MentionSelectorBadge,
@@ -79,7 +77,6 @@ const GuidPage: React.FC = () => {
   const { activeBorderColor, inactiveBorderColor, activeShadow } =
     useInputFocusRing();
   const [showFeedbackModal, setShowFeedbackModal] = useState(false);
-  const [runtimeEngine, setRuntimeEngine] = useState<RuntimeEngineSelection>();
   const [resourceSelectionValue, setResourceSelectionValue] = useState<AgentResourceSelectionValue>({});
   const [capabilityDraft, setCapabilityDraft] = useState<SessionCapabilityDraft>({
     skillNames: [],
@@ -226,7 +223,6 @@ const GuidPage: React.FC = () => {
     resourceResolutionReady: resourceSelectionsReady,
     resourceSelections: resourceSelectionResolution.selections,
     capabilitySelection: capabilitySelectionReady ? capabilitySelection : undefined,
-    runtimeEngine,
     setMentionOpen: mention.setMentionOpen,
     setMentionQuery: mention.setMentionQuery,
     setMentionSelectorOpen: mention.setMentionSelectorOpen,
@@ -483,15 +479,12 @@ const GuidPage: React.FC = () => {
   );
 
   const modelSelectorNode = (
-    <div className='flex flex-wrap items-center gap-2'>
     <GuidModelSelector
       isProviderModelMode
       modelList={modelSelection.modelList}
       current_model={modelSelection.current_model}
       setCurrentModel={modelSelection.setCurrentModel}
     />
-    <GuidRuntimeEngineSelector value={runtimeEngine} onChange={setRuntimeEngine} disabled={guidInput.loading} />
-    </div>
   );
 
   const autoWorkButtonDisabled =

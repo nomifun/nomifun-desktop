@@ -1,5 +1,12 @@
 {
   "title": "Agent 工作台",
+  "runtimeEngine": {
+    "label": "运行时引擎",
+    "default": "默认引擎（Nomi）",
+    "hint": "此引擎负责执行该 Agent。保存后用于新建会话，不影响已有会话；日常对话只需选择 Agent。",
+    "unavailable": "引擎目录或所选构建不可用，请重试或为该 Agent 选择其他引擎。不会自动回退到其他引擎。",
+    "codingLimit": "此 Coding 构建仅支持初始加载的文件和 Git 工具。该 Agent 暂不能配置 Skills、MCP、进程执行或按需能力，也不支持附件。"
+  },
   "subtitle": "配置和管理你的 Agent，让能力更贴合工作。",
   "loading": "正在加载 Agent 工作台…",
   "loadingEditor": "正在加载所选 Agent…",

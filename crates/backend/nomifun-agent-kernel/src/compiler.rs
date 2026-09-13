@@ -1755,6 +1755,7 @@ mod tests {
             action_allowlist,
         };
         let payload = AgentPresetRevisionPayload {
+            runtime_engine: None,
             schema_version: VERSION.into(),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),

@@ -2814,9 +2814,6 @@ impl AgentPlatform {
         request: CreateAgentSessionRequestDto,
         idempotency_key: impl Into<IdempotencyKey>,
     ) -> Result<CreateAgentSessionResponseDto, AgentPlatformError> {
-        if request.runtime_engine.is_some() {
-            return Err(AgentPlatformError::Contract("Runtime selection requires the default Conversation host".into()));
-        }
         let binding = self
             .control_plane
             .resolve_agent_session_binding_with_model(owner, &request.preset_id, request.model.as_ref())
@@ -3054,6 +3051,9 @@ impl AgentPlatform {
             return Err(AgentPlatformError::Contract(
                 "AgentBinding Preset owner differs from the Session principal".to_owned(),
             ));
+        }
+        if revision.payload.runtime_engine.is_some() {
+            return Err(AgentPlatformError::Contract("Agent runtime configuration requires the default Conversation host".into()));
         }
         let persisted = self
             .control_store

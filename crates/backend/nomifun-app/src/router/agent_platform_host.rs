@@ -2424,6 +2424,7 @@ mod tests {
             })
             .collect();
         let payload = AgentPresetRevisionPayload {
+            runtime_engine: None,
             schema_version: VersionString::from(CONTRACT_VERSION),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),
@@ -2878,6 +2879,7 @@ mod tests {
                 "browser.render_content",
             ];
             let payload = AgentPresetRevisionPayload {
+                runtime_engine: None,
                 schema_version: VersionString::from(CONTRACT_VERSION),
                 model_route_refs: BTreeMap::new(),
                 chat_route_records: BTreeMap::new(),
@@ -3177,6 +3179,7 @@ mod tests {
             };
             let selected_capability_ids = ["computer.observe", "computer.input"];
             let payload = AgentPresetRevisionPayload {
+                runtime_engine: None,
                 schema_version: VersionString::from(CONTRACT_VERSION),
                 model_route_refs: BTreeMap::new(),
                 chat_route_records: BTreeMap::new(),
@@ -3512,6 +3515,7 @@ mod tests {
     ) {
         let model_route_id = route_record.primary.model_route_id.clone();
         let payload = AgentPresetRevisionPayload {
+            runtime_engine: None,
             schema_version: VersionString::from(CONTRACT_VERSION),
             model_route_refs: BTreeMap::from([(
                 nomifun_agent_contracts::CHAT_MODEL_TASK_AGENT_CHAT.to_owned(),

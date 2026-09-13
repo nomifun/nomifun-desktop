@@ -665,6 +665,7 @@ fn resource_binding_dto(owner_id: &str) -> TypedResourceBindingDto {
 
 fn sample_document(_owner_id: &str, instructions: &str) -> AgentPresetDocumentDto {
     AgentPresetDocumentDto {
+        runtime_engine: None,
         schema_version: VERSION.to_owned(),
         model_route_refs: BTreeMap::from([(
             "agent_chat".to_owned(),

@@ -60,11 +60,20 @@
     "runtime_extension": "RegisteredAgentRuntime and generic exact-build RuntimeEngineCatalog; Nomi uses the Registered production handle",
     "coding_adapter": "ConversationCodingHost installed in default product owner; real Broker/Kernel/Wave2 with joined effect cleanup and durable semantic records",
     "session_ownership": "CAR-D-019: retain current Conversation-backed Nomi-core owner; no duplicate SessionStore",
+    "runtime_configuration_ownership": "CAR-D-020: Agent workbench settings -> immutable Agent revision -> server-resolved exact Session binding; no chat composer or Fork runtime override",
     "remaining_integration": [
       "Process and long-lived resources; on-demand, Skills, MCP, MiniApps and attachments",
       "full AGENTS context, compaction/checkpoint and exact abnormal-restart proof",
-      "Remote/Automation selection DTOs and complete consumer end-to-end coverage",
+      "Complete consumer end-to-end coverage of Agent runtime inheritance, including Remote/Automation",
       "per-tool multi-platform validation, signed build distribution and upgrade strategy"
+    ],
+    "agent_configuration_checks": [
+      { "command": "cargo check -p nomifun-app --tests", "result": "passed after CAR-D-020 Agent-owned runtime correction" },
+      { "command": "cargo test -p nomifun-agent-contracts -p nomifun-agent-control-plane --lib", "result": "86 + 26 passed; includes legacy payload/digest compatibility and runtime configuration digest coverage" },
+      { "command": "cargo test -p nomifun-app --test coding_runtime_production", "result": "1 passed; workbench preview/save/reload, inherited runtime, real Coding file write, immutable old Session/Fork, new Agent revision uses new engine, invalid build/profile rejected, custom Agent factory dispatch" },
+      { "command": "cargo test -p nomifun-app --test nomi_core_route_gap nomi_core_agent_session_projects_saved_chat_binding_without_internal_inputs -- --exact", "result": "1 passed; 37 filtered out" },
+      { "command": "bun test src/renderer/pages/agentSettings/AgentRuntimeEngineSelector.test.tsx src/renderer/pages/guid/hooks/useGuidSend.behavior.test.tsx src/renderer/pages/guid/GuidAgentPresetLaunch.structure.test.ts src/common/types/agentPlatform/draft.test.ts src/common/types/agentPlatform/testOrchestration.test.ts src/renderer/pages/agentSettings/model.test.ts (cwd: ui)", "result": "38 passed; 156 assertions" },
+      { "command": "bun run typecheck (cwd: ui)", "result": "failed: bun:test declarations missing and test-file typing errors; no reported production UI errors" }
     ],
     "checks": [
       { "command": "cargo check -p nomifun-app --tests", "result": "passed after production integration" },
@@ -72,7 +81,7 @@
       { "command": "cargo test -p nomifun-ai-agent --lib runtime_", "result": "71 passed including custom binding exclusion from Nomi provider and cached-slot drift rejection" },
       { "command": "cargo test -p nomifun-db --test id_schema_contract", "result": "20 passed" },
       { "command": "cargo test -p nomifun-app --test nomi_core_route_gap nomi_core_agent_session_projects_saved_chat_binding_without_internal_inputs -- --exact", "result": "1 passed; 37 filtered out" },
-      { "command": "bun test --cwd ui src/renderer/pages/guid/components/GuidRuntimeEngineSelector.test.tsx src/renderer/pages/guid/hooks/useGuidSend.behavior.test.tsx", "result": "10 passed; 45 assertions" },
+      { "command": "bun test (initial production UI selection tests, before CAR-D-020)", "result": "10 passed; 45 assertions at 80e1f3ede; selector subsequently moved to Agent workbench" },
       { "command": "bun run typecheck", "result": "failed: environment missing bun:test declarations and resulting test-file typing errors; no reported production UI errors" }
     ],
     "previous_slice_checks": [

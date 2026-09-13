@@ -181,6 +181,9 @@ pub struct RoleProviderSelectionDto {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentPresetDocumentDto {
+    /// Versioned Agent configuration; Session creation resolves this server-side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_engine: Option<crate::RuntimeEngineSelection>,
     pub schema_version: String,
     pub model_route_refs: BTreeMap<String, String>,
     /// Canonical provider/model route objects. Legacy route IDs remain a
@@ -885,9 +888,6 @@ pub struct AgentSessionCapabilitySelectionDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateAgentSessionRequestDto {
-    /// Host-installed runtime selection, resolved exactly once at creation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_engine: Option<crate::RuntimeEngineSelection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<AgentChatModelSelectionDto>,
     #[serde(deserialize_with = "crate::serde_util::deserialize_preset_id")]
@@ -975,10 +975,6 @@ pub struct CreateAgentSessionTurnResponseDto {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ForkAgentSessionRequestDto {
-    /// Omitted means inherit the parent's exact engine; supplied means an
-    /// explicit engine migration into the new child, never the parent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_engine: Option<crate::RuntimeEngineSelection>,
     pub target_agent_binding: AgentBindingValueDto,
     pub parent_through_seq: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]

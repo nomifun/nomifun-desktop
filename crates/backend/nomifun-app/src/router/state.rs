@@ -963,8 +963,14 @@ async fn build_nomi_core_agent_api_state(
         availability_evidence_revision: "nomi-core-local-2026-09-04".to_owned(),
     };
     let templates = OfficialTemplateCatalog::load()?;
+    let runtime_engines = Arc::clone(&services.runtime_engines);
     let compiler = PresetPreviewCompiler::new(release, templates.clone())
-        .with_canonical_registry(Arc::clone(&kernel), environment.clone());
+        .with_canonical_registry(Arc::clone(&kernel), environment.clone())
+        .with_runtime_validator(move |payload, snapshot| {
+            if payload.runtime_engine.is_none() { return Ok(()); }
+            runtime_engines.validate_agent(payload, snapshot)
+                .map(|_| ()).map_err(|error| error.to_string())
+        });
     // The Nomi engine exposes its existing session-scoped ToolSearch activation
     // boundary. AgentPreset on-demand capabilities are projected onto that
     // deferred tool set instead of being rejected by the control plane.
@@ -993,7 +999,7 @@ async fn build_nomi_core_agent_api_state(
         Arc::clone(&kernel), environment.clone(),
         services.database.pool().clone(), services.encryption_key,
     ))?;
-    conversation_owner.install_runtime_engines(Arc::clone(&services.runtime_engines))?;
+    conversation_owner.install_runtime_engines(Arc::clone(&services.runtime_engines), Arc::downgrade(&control_plane))?;
     services
         .agent_runtime_registry
         .install_nomi_plugin_tool_session_provider(Arc::new(
@@ -1071,7 +1077,7 @@ impl nomifun_cron::CronAgentPresetResolver for NomiCoreCronAgentPresetResolver {
     }
 }
 
-fn control_plane_error_to_app(error: nomifun_agent_control_plane::ControlPlaneError) -> AppError {
+pub(super) fn control_plane_error_to_app(error: nomifun_agent_control_plane::ControlPlaneError) -> AppError {
     let message = format!("{}: {error}", error.code().as_ref());
     match error.status() {
         StatusCode::BAD_REQUEST => AppError::BadRequest(message),

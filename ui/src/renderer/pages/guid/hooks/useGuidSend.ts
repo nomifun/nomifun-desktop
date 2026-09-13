@@ -29,7 +29,6 @@ import type {
 } from '../types';
 import { isAutoWorkEntry, planGuidEntry } from './autoWorkEntry';
 import type { OfficialPresetTemplate } from '@/common/types/agentPlatform';
-import type { RuntimeEngineSelection } from '@/common/types/agentPlatform';
 import type { AgentResourceSelection } from '@/common/types/agentPlatform';
 import type { AgentSessionCapabilitySelection } from '@/common/types/agentPlatform';
 import { TEMPLATE_I18N_PATH } from '../../agentSettings/model';
@@ -57,7 +56,6 @@ export type GuidSendDeps = {
   /** Product-selected resources. The backend derives ownership and operations. */
   resourceSelections: AgentResourceSelection[];
   capabilitySelection?: AgentSessionCapabilitySelection;
-  runtimeEngine?: RuntimeEngineSelection;
   setMentionOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setMentionQuery: React.Dispatch<React.SetStateAction<string | null>>;
   setMentionSelectorOpen: React.Dispatch<React.SetStateAction<boolean>>;
@@ -95,7 +93,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     resourceResolutionReady,
     resourceSelections,
     capabilitySelection,
-    runtimeEngine,
     setMentionOpen,
     setMentionQuery,
     setMentionSelectorOpen,
@@ -145,7 +142,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
       },
       ...(resourceSelections.length > 0 ? { resource_selections: resourceSelections } : {}),
       ...(capabilitySelection ? { capability_selection: capabilitySelection } : {}),
-      ...(runtimeEngine ? { runtime_engine: runtimeEngine } : {}),
     });
     conversationId = parseConversationId(session.agent_session_id);
     conversation = await ipcBridge.conversation.get.invoke({
@@ -209,7 +205,6 @@ export const useGuidSend = (deps: GuidSendDeps): GuidSendResult => {
     resourceResolutionReady,
     resourceSelections,
     capabilitySelection,
-    runtimeEngine,
     t,
   ]);
 

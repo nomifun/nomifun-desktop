@@ -5,6 +5,8 @@ import {
   asDigestHex,
   capabilityPlacement,
   createEmptyAgentPresetDocument,
+  cloneDraft,
+  isDraftDirty,
   placeCapability,
   type ChatRouteRecord,
   type AgentPresetDraft,
@@ -16,6 +18,22 @@ const capability = {
 };
 
 describe('AgentPreset draft model', () => {
+  test('runtime choice is versioned Agent draft data and survives cloning', () => {
+    const saved: AgentPresetDraft = {
+      preset_id: asAgentPresetId('0190f5fe-7c00-7a00-8000-000000000001'),
+      display_name: 'My Agent', document: createEmptyAgentPresetDocument(),
+    };
+    const draft = cloneDraft(saved);
+    draft.document.runtime_engine = {
+      selector: { selection: 'exact', family_id: 'customer.runtime', build_id: 'v1', build_digest: 'a'.repeat(64) },
+      profile: 'workflow',
+    };
+    expect(isDraftDirty(saved, draft)).toBe(true);
+    expect(cloneDraft(draft).document.runtime_engine).toEqual(draft.document.runtime_engine);
+    expect(saved.document.runtime_engine).toBeUndefined();
+    delete draft.document.runtime_engine;
+    expect(isDraftDirty(saved, draft)).toBe(false);
+  });
   test('keeps initial and on-demand exact sets mutually exclusive', () => {
     const empty = createEmptyAgentPresetDocument();
     const initial = placeCapability(empty, capability, 'initial');
