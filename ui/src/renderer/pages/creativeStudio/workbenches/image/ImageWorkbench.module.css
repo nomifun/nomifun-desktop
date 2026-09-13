@@ -5,9 +5,7 @@
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  background:
-    radial-gradient(circle at 82% 8%, rgba(var(--primary-6), 0.07), transparent 34%),
-    var(--color-bg-1);
+  background: var(--color-bg-1);
   color: var(--color-text-1);
 }
 
@@ -18,13 +16,10 @@
   height: 100%;
   min-width: 0;
   min-height: 0;
-  padding: 12px;
 }
 
 .sideLayout {
-  display: grid;
-  grid-template-columns: minmax(330px, 380px) minmax(0, 1fr);
-  gap: 12px;
+  display: flex;
 }
 
 .bottomLayout {
@@ -38,141 +33,26 @@
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--color-border-2) 90%, transparent);
-  border-radius: 16px;
-  background: color-mix(in srgb, var(--color-bg-2) 96%, transparent);
-  box-shadow: 0 12px 38px color-mix(in srgb, #000 8%, transparent);
 }
 
 .sideComposer {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  z-index: 1;
   display: flex;
   flex-direction: column;
 }
 
-.composerHeader {
-  box-sizing: border-box;
-  display: flex;
-  flex: 0 0 auto;
-  min-height: 64px;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 12px 14px;
-  border-bottom: 1px solid var(--color-border-2);
-}
-
-.composerHeading {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 10px;
-}
-
-.composerHeading > svg {
-  flex: 0 0 auto;
-  color: rgb(var(--primary-6));
-}
-
-.composerHeadingText {
-  display: grid;
-  min-width: 0;
-  gap: 2px;
-}
-
-.composerHeader h1 {
-  overflow: hidden;
-  margin: 0;
-  font-size: 14px;
-  font-weight: 650;
-  line-height: 18px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.composerHeadingText small {
-  color: var(--color-text-3);
-  font-size: 10px;
-  line-height: 13px;
-  white-space: nowrap;
-}
-
-.layoutSwitch {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 2px;
-  padding: 2px;
-  border: 1px solid var(--color-border-2);
-  border-radius: 9px;
-  background: var(--color-fill-1);
-}
-
-.layoutSwitch :global(.arco-btn) {
-  display: inline-flex;
-  height: 28px;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  padding: 0 9px;
-  border-radius: 7px;
-  font-size: 12px;
-  line-height: 14px;
-  white-space: nowrap;
-}
-
-.layoutSwitch :global(.arco-btn) > :global(.i-icon),
-.layoutSwitch :global(.arco-btn) > span:last-child {
-  display: inline-flex;
-  height: 14px;
-  align-items: center;
-  justify-content: center;
-  line-height: 14px;
-}
-
-.layoutSwitch :global(.arco-btn) > :global(.i-icon) {
-  width: 14px;
-  flex: 0 0 14px;
-  line-height: 0;
-}
-
-.composerScroll {
-  min-height: 0;
-  flex: 1;
-  padding: 12px 16px 16px;
-  overflow-y: auto;
-  scrollbar-width: thin;
-}
-
-.composerSection {
-  overflow: hidden;
-  margin-bottom: 10px;
-  border: 1px solid var(--color-border-2);
-  border-radius: 13px;
-  background: var(--color-bg-1);
-}
-
-.sectionHeader {
-  box-sizing: border-box;
-  display: flex;
-  min-height: 34px;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 5px 10px;
-  color: var(--color-text-1);
-  font-size: 13px;
-  font-weight: 650;
-}
-
-.sectionHeader > svg {
-  color: var(--color-text-3);
+.composerSection :global(.arco-textarea) {
+  height: 140px;
+  min-height: 140px;
 }
 
 .sectionBody {
   display: grid;
   gap: 8px;
-  padding: 10px;
-  border-top: 1px solid var(--color-border-2);
+  min-width: 0;
 }
 
 .actionRow,
@@ -181,7 +61,7 @@
   min-width: 0;
   flex-wrap: wrap;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
 }
 
 .compactActions {
@@ -189,110 +69,14 @@
   flex-wrap: nowrap;
 }
 
-.referenceStrip {
-  box-sizing: border-box;
-  display: flex;
-  width: 100%;
-  max-width: 100%;
-  min-width: 0;
-  min-height: 96px;
-  align-items: stretch;
-  gap: 8px;
-  padding: 8px;
-  overflow-x: auto;
-  overflow-y: hidden;
-  border: 1px dashed var(--color-border-3);
-  border-radius: 11px;
-  background: color-mix(in srgb, var(--color-fill-1) 60%, transparent);
-  scrollbar-width: thin;
-}
-
-.referenceStripCompact {
-  min-height: 58px;
-  max-height: 66px;
-  padding: 6px;
-}
-
-.referenceItem,
-.referenceLoading {
-  position: relative;
-  width: 78px;
-  height: 78px;
-  flex: 0 0 78px;
-  overflow: hidden;
-  border: 1px solid var(--color-border-2);
-  border-radius: 9px;
-  background: var(--color-fill-2);
-}
-
-.referenceStripCompact .referenceItem,
-.referenceStripCompact .referenceLoading {
-  width: 46px;
-  height: 46px;
-  flex-basis: 46px;
-}
-
-.referenceMedia {
-  width: 100%;
-  height: 100%;
-}
-
-.referenceName {
-  position: absolute;
-  inset-inline: 3px;
-  bottom: 3px;
-  overflow: hidden;
-  padding: 2px 4px;
-  border-radius: 5px;
-  background: rgba(0, 0, 0, 0.62);
-  color: white;
-  font-size: 9px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.referenceRemove {
-  position: absolute;
-  z-index: 2;
-  top: 4px;
-  right: 4px;
-  display: grid;
-  width: 23px;
-  height: 23px;
-  place-items: center;
-  padding: 0;
-  border: 0;
-  border-radius: 6px;
-  background: rgba(0, 0, 0, 0.66);
-  color: white;
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 120ms ease;
-}
-
-.referenceItem:hover .referenceRemove,
-.referenceRemove:focus-visible {
-  opacity: 1;
-}
-
-.referenceLoading {
-  display: grid;
-  place-items: center;
-  color: var(--color-text-3);
-}
-
 .referenceEmpty {
-  display: grid;
-  min-width: 100%;
-  min-height: 72px;
-  place-items: center;
   color: var(--color-text-3);
-  font-size: 12px;
+  font-size: var(--workbench-small-size);
 }
 
 .settingsStack {
   display: grid;
-  gap: 11px;
+  gap: 12px;
 }
 
 .modelSlot {
@@ -302,10 +86,11 @@
 .field {
   display: grid;
   min-width: 0;
-  gap: 4px;
-  color: var(--color-text-3);
-  font-size: 10px;
-  font-weight: 560;
+  gap: 6px;
+  color: var(--color-text-2);
+  font-size: var(--workbench-label-size);
+  font-weight: 400;
+  line-height: 20px;
 }
 
 .field :global(.arco-select),
@@ -317,20 +102,6 @@
 .field :global(.arco-radio-group-button) {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.field :global(.arco-select-view),
-.field :global(.arco-input-number) {
-  min-height: 30px;
-  border-radius: 8px;
-  font-size: 11px;
-}
-
-.field :global(.arco-radio-button-inner) {
-  height: 28px;
-  padding: 0 10px;
-  font-size: 11px;
-  line-height: 28px;
 }
 
 .modelOption {
@@ -350,25 +121,26 @@
 .modelOption small {
   flex: 0 0 auto;
   color: var(--color-text-3);
-  font-size: 10px;
+  font-size: var(--workbench-small-size);
 }
 
 .settingGroup {
   display: grid;
-  gap: 5px;
+  gap: 6px;
 }
 
 .settingLabel {
-  color: var(--color-text-3);
-  font-size: 10px;
-  font-weight: 560;
+  color: var(--color-text-2);
+  font-size: var(--workbench-label-size);
+  font-weight: 400;
+  line-height: 20px;
 }
 
 .qualityGrid,
 .countGrid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 5px;
+  gap: 6px;
 }
 
 .countGrid[data-max-count='1'] {
@@ -378,20 +150,21 @@
 .countGrid :global(.arco-input-number) {
   grid-column: span 2;
   width: 100%;
-  min-height: 28px;
-  border-radius: 999px;
-  font-size: 10px;
+  min-height: var(--workbench-control-height);
+  border-radius: 6px;
+  font-size: var(--workbench-body-size);
 }
 
 .optionPill {
-  height: 28px;
+  height: var(--workbench-control-height);
   padding: 0 4px;
   border: 1px solid var(--color-border-2);
-  border-radius: 999px;
-  background: transparent;
+  border-radius: 6px;
+  background: var(--color-fill-1);
   color: var(--color-text-2);
   font: inherit;
-  font-size: 10px;
+  font-size: var(--workbench-small-size);
+  font-weight: 400;
   cursor: pointer;
 }
 
@@ -399,12 +172,13 @@
   border-color: rgba(var(--primary-6), 0.6);
   background: rgba(var(--primary-6), 0.1);
   color: rgb(var(--primary-6));
-  box-shadow: inset 0 0 0 1px rgba(var(--primary-6), 0.08);
+  font-weight: 500;
 }
 
 .optionPill:disabled {
-  cursor: default;
-  opacity: 0.42;
+  cursor: not-allowed;
+  background: var(--color-fill-2);
+  color: var(--color-text-3);
 }
 
 .sizeOptionIdentity {
@@ -430,25 +204,10 @@
   aspect-ratio: auto;
 }
 
-.generateFooter {
-  display: grid;
-  flex: 0 0 auto;
-  gap: 5px;
-  padding: 10px 16px 12px;
-  border-top: 1px solid var(--color-border-2);
-  background: color-mix(in srgb, var(--color-bg-2) 96%, transparent);
-}
-
-.generateFooter :global(.arco-btn) {
-  height: 32px;
-  border-radius: 9px;
-  font-size: 11px;
-}
-
 .taskMessage {
   overflow: hidden;
   color: var(--color-text-3);
-  font-size: 11px;
+  font-size: var(--workbench-small-size);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -461,10 +220,7 @@
   flex: 1 1 auto;
   flex-direction: column;
   overflow: hidden;
-}
-
-.bottomLayout .resultsPanel {
-  padding-bottom: 238px;
+  background: var(--color-bg-1);
 }
 
 .resultsHeader {
@@ -897,32 +653,13 @@
 }
 
 .bottomComposerDock {
-  position: absolute;
-  z-index: 20;
-  right: 18px;
-  bottom: 18px;
-  left: 18px;
-  display: flex;
-  justify-content: center;
-  pointer-events: none;
+  width: 100%;
 }
 
 .bottomComposer {
-  width: min(1080px, 100%);
-  padding: 13px;
-  border: 1px solid color-mix(in srgb, var(--color-border-3) 82%, transparent);
-  border-radius: 19px;
-  background: color-mix(in srgb, var(--color-bg-2) 88%, transparent);
-  box-shadow:
-    0 30px 90px color-mix(in srgb, #000 20%, transparent),
-    0 8px 28px color-mix(in srgb, #000 9%, transparent);
-  backdrop-filter: blur(24px) saturate(140%);
-  pointer-events: auto;
-}
-
-:global([data-theme='dark']) .sideComposer,
-:global([data-theme='dark']) .resultsPanel {
-  box-shadow: 0 12px 38px color-mix(in srgb, #000 30%, transparent);
+  box-sizing: border-box;
+  width: 100%;
+  padding: var(--workbench-padding);
 }
 
 :global([data-theme='dark']) .resultCard {
@@ -933,28 +670,18 @@
   box-shadow: 0 12px 28px color-mix(in srgb, #000 34%, transparent);
 }
 
-:global([data-theme='dark']) .bottomComposer {
-  border-color: color-mix(in srgb, var(--color-border-3) 92%, transparent);
-  background: color-mix(in srgb, var(--color-bg-2) 92%, transparent);
-}
-
 .bottomComposerBody {
   display: grid;
   grid-template-columns: minmax(330px, 0.86fr) minmax(0, 1.14fr);
   align-items: stretch;
-  gap: 22px;
+  gap: 16px;
 }
 
 .bottomPromptPane {
   display: flex;
   min-width: 0;
   flex-direction: column;
-  gap: 10px;
-}
-
-.bottomPromptPane :global(.arco-textarea-wrapper),
-.bottomPromptPane :global(.arco-textarea) {
-  border-radius: 11px;
+  gap: 8px;
 }
 
 .compactSettings {
@@ -962,7 +689,7 @@
   grid-template-columns: repeat(12, minmax(0, 1fr));
   align-content: start;
   align-items: center;
-  gap: 12px 14px;
+  gap: 10px;
 }
 
 .compactSettings > * {
@@ -972,28 +699,14 @@
 .compactSettings .field {
   grid-template-columns: max-content minmax(0, 1fr);
   align-items: center;
-  column-gap: 10px;
+  column-gap: 6px;
 }
 
 .compactSettings .field > span {
   color: var(--color-text-2);
-  font-size: 12px;
-  font-weight: 620;
+  font-size: var(--workbench-label-size);
+  font-weight: 400;
   white-space: nowrap;
-}
-
-.compactSettings .field :global(.arco-select-view),
-.compactSettings .field :global(.arco-input-number) {
-  min-height: 38px;
-  border-radius: 9px;
-  font-size: 12px;
-}
-
-.compactSettings .field :global(.arco-radio-button-inner) {
-  height: 36px;
-  padding: 0 12px;
-  font-size: 11px;
-  line-height: 36px;
 }
 
 .compactModelField {
@@ -1034,8 +747,8 @@
 
 .compactModelField :global([data-creative-model-select]) > :first-child > :first-child {
   color: var(--color-text-2);
-  font-size: 12px;
-  font-weight: 620;
+  font-size: var(--workbench-label-size);
+  font-weight: 400;
 }
 
 .compactModelField :global([data-creative-model-select]) > :first-child > :last-child {
@@ -1058,25 +771,19 @@
   display: none;
 }
 
-.compactModelField :global(.arco-select-view) {
-  min-height: 38px;
-  border-radius: 9px;
-  font-size: 12px;
-}
-
 .bottomActionRow {
   display: flex;
   min-width: 0;
   align-items: center;
-  gap: 10px;
+  gap: 6px;
   margin-top: auto;
 }
 
 .bottomGenerateButton {
   min-width: 150px;
-  min-height: 38px;
+  min-height: 36px;
   flex: 1 1 auto;
-  border-radius: 9px;
+  border-radius: 8px;
 }
 
 .bottomTools {
@@ -1093,10 +800,10 @@
 
 .bottomTools .compactActions :global(.arco-btn),
 .bottomTools > :global(.arco-btn) {
-  width: 36px;
-  height: 36px;
+  width: 32px;
+  height: 32px;
   padding: 0;
-  border-radius: 9px;
+  border-radius: 6px;
 }
 
 .bottomComposer .referenceStripCompact {
@@ -1113,134 +820,12 @@
   }
 }
 
-@media (max-width: 1180px) {
-  .sideLayout {
-    grid-template-columns: minmax(310px, 350px) minmax(0, 1fr);
-  }
-}
-
 @media (max-width: 1120px) {
   .bottomComposerBody {
     grid-template-columns: minmax(300px, 0.78fr) minmax(0, 1.22fr);
     gap: 16px;
   }
-
-  .bottomLayout .resultsPanel {
-    padding-bottom: 250px;
-  }
 }
-
-@media (max-width: 820px) {
-  .sideLayout {
-    display: flex;
-    flex-direction: column;
-    overflow-y: auto;
-  }
-
-  .sideComposer,
-  .resultsPanel {
-    min-height: 520px;
-    flex: 0 0 auto;
-  }
-
-  .resultsHeader {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .resultsActions {
-    align-self: flex-end;
-  }
-
-  .bottomLayout .resultsPanel {
-    min-height: 0;
-    flex: 1 1 auto;
-    padding-bottom: 420px;
-  }
-
-  .bottomComposerDock {
-    position: absolute;
-    right: 12px;
-    bottom: 12px;
-    left: 12px;
-  }
-
-  .bottomComposerBody {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 14px;
-  }
-
-  .detailStateVisual {
-    min-height: 240px;
-  }
-}
-
-@media (max-width: 560px) {
-  .sideLayout,
-  .bottomLayout {
-    padding: 8px;
-  }
-
-  .composerHeader,
-  .resultsHeader {
-    align-items: flex-start;
-  }
-
-  .composerHeader {
-    flex-direction: column;
-  }
-
-  .layoutSwitch {
-    align-self: stretch;
-  }
-
-  .layoutSwitch :global(.arco-btn) {
-    flex: 1;
-  }
-
-  .resultsActions {
-    width: 100%;
-    overflow-x: auto;
-  }
-
-  .resultsActions :global(.arco-btn) {
-    flex: 1;
-  }
-
-  .bottomLayout .resultsPanel {
-    min-height: 0;
-    padding: 13px 13px 660px;
-  }
-
-  .bottomComposer {
-    padding: 11px;
-    border-radius: 17px;
-  }
-
-  .compactModelField,
-  .compactInterfaceField {
-    grid-column: 1 / -1;
-  }
-
-  .compactAspectField,
-  .compactResolutionField,
-  .compactQualityField,
-  .compactCountField {
-    grid-column: 1 / -1;
-  }
-
-  .bottomActionRow {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .bottomTools {
-    align-self: flex-end;
-    flex-wrap: wrap;
-    justify-content: flex-end;
-  }
-}
-
 @media (prefers-reduced-motion: reduce) {
   .spin {
     animation-duration: 1800ms;

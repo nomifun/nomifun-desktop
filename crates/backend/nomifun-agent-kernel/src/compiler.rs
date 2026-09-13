@@ -2,9 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nomifun_agent_contracts::{
     ActionId, AgentPresetRevision, CapabilityConsumer, CapabilityId,
-    CapabilityOperationLock, CapabilityRef, CapabilitySelection, CanonicalSchemaRef,
-    CompactOnDemandCapabilityEntry, ContributionSourceKind, DigestHex, ExecutionRoleId, InstallationRoleBinding,
-    ModelRouteId, OperationId, PlatformConstraint, PrecomputedActivationPlan,
+    CapabilityOperationLock, CapabilityRef, CapabilitySelection,
+    ContributionSourceKind, DigestHex, ExecutionRoleId, InstallationRoleBinding,
+    ModelRouteId, OperationId, PlatformConstraint,
     PrincipalRef, ResolvedCapability, ResolvedMcpToolLock, ResolvedRoleProviderLock,
     ResolvedSkillLock, ResolvedSnapshotContent,
     ResolvedSnapshotEnvelope, ResolvedSnapshotId, ResolvedSnapshotRef,
@@ -14,11 +14,8 @@ use nomifun_agent_contracts::{
 };
 use serde::Serialize;
 
-use crate::{KernelError, MaterializedCapability, MaterializedRegistry};
+use crate::{KernelError, MaterializedRegistry};
 
-const COMPACT_DESCRIPTION_CHARS: usize = 160;
-const COMPACT_SEARCH_TERM_CHARS: usize = 48;
-const COMPACT_SEARCH_TERM_COUNT: usize = 12;
 
 #[derive(Clone, Debug)]
 pub struct CompilerEnvironment {
@@ -102,9 +99,8 @@ impl CompiledSnapshot {
     ) -> Option<&ResolvedCapability> {
         self.envelope
             .content
-            .initial_capabilities
+            .enabled_capabilities
             .iter()
-            .chain(&self.envelope.content.on_demand_capabilities)
             .find(|capability| &capability.capability.id == capability_id)
     }
 
@@ -176,10 +172,7 @@ struct CompiledRuntimeProfileDigestInput {
     profile_kind: RuntimeProfileKind,
     required_runtime_features: BTreeSet<RuntimeFeatureId>,
     capability_operation_locks: Vec<CapabilityOperationLock>,
-    initial_capabilities: Vec<ResolvedCapability>,
-    on_demand_capabilities: Vec<ResolvedCapability>,
-    on_demand_activation_plans: BTreeMap<CapabilityId, PrecomputedActivationPlan>,
-    compact_on_demand_index: Vec<CompactOnDemandCapabilityEntry>,
+    enabled_capabilities: Vec<ResolvedCapability>,
     required_resource_kinds: BTreeSet<ResourceKind>,
     authority_policies: BTreeMap<CapabilityId, CompiledCapabilityPolicy>,
     skill_ids: Vec<SkillId>,
@@ -202,34 +195,15 @@ impl AgentPresetCompiler {
                 reason: error.message,
             })?;
         let initial_direct = direct_selection_map(
-            &request.revision.payload.initial_capabilities,
-        );
-        let on_demand_direct = direct_selection_map(
-            &request.revision.payload.on_demand_capabilities,
+            &request.revision.payload.enabled_capabilities,
         );
         let plugin_product_by_id = validate_plugin_product_inputs(
             registry,
             &request.revision,
             &request.plugin_product_capabilities,
         )?;
-        let (
-            initial_plugin_product_capabilities,
-            on_demand_plugin_product_capabilities,
-        ) = partition_plugin_product_capabilities(
-                &request.plugin_product_capabilities,
-                &initial_direct,
-                &on_demand_direct,
-            )?;
+        let enabled_plugin_product_capabilities = request.plugin_product_capabilities.clone();
         let initial_plugin_direct = initial_direct
-            .iter()
-            .filter(|(capability_id, _)| {
-                !plugin_product_by_id.contains_key(*capability_id)
-            })
-            .map(|(capability_id, selection)| {
-                (capability_id.clone(), *selection)
-            })
-            .collect::<BTreeMap<_, _>>();
-        let on_demand_plugin_direct = on_demand_direct
             .iter()
             .filter(|(capability_id, _)| {
                 !plugin_product_by_id.contains_key(*capability_id)
@@ -240,12 +214,10 @@ impl AgentPresetCompiler {
             .collect::<BTreeMap<_, _>>();
         let direct_ids = initial_direct
             .keys()
-            .chain(on_demand_direct.keys())
             .cloned()
             .collect::<BTreeSet<_>>();
 
         validate_direct_selections(registry, &initial_plugin_direct)?;
-        validate_direct_selections(registry, &on_demand_plugin_direct)?;
         validate_revision_contribution_locks(
             registry,
             &request.revision,
@@ -269,31 +241,7 @@ impl AgentPresetCompiler {
             record_dependency_paths(registry, root, &mut paths)?;
             initial_ids.extend(bundle);
         }
-        if let Some(overlap) = on_demand_plugin_direct
-            .keys()
-            .find(|capability_id| initial_ids.contains(*capability_id))
-        {
-            return Err(KernelError::InvalidPresetRevision {
-                reason: format!(
-                    "on-demand capability {} is required by the initial closure",
-                    overlap.as_ref()
-                ),
-            });
-        }
-
-        let mut on_demand_bundles = BTreeMap::new();
-        let mut on_demand_ids = BTreeSet::new();
-        for root in on_demand_plugin_direct.keys() {
-            let mut bundle = dependency_bundle(registry, root)?;
-            record_dependency_paths(registry, root, &mut paths)?;
-            bundle.retain(|capability_id| !initial_ids.contains(capability_id));
-            on_demand_ids.extend(bundle.iter().cloned());
-            on_demand_bundles.insert(root.clone(), bundle);
-        }
-        let ceiling = initial_ids
-            .union(&on_demand_ids)
-            .cloned()
-            .collect::<BTreeSet<_>>();
+        let ceiling = initial_ids.clone();
 
         validate_capability_ceiling(registry, environment, &request.surface, &ceiling)?;
         validate_conflicts(registry, &ceiling)?;
@@ -301,65 +249,19 @@ impl AgentPresetCompiler {
         let authority_policies = compile_authority_policies(
             registry,
             &initial_plugin_direct,
-            &on_demand_plugin_direct,
-            &initial_ids,
-            &on_demand_bundles,
         )?;
-        let mut initial_capabilities = resolved_capabilities(
+        let mut enabled_capabilities = resolved_capabilities(
             registry,
             &initial_ids,
-            &paths,
-        )?;
-        let mut on_demand_capabilities = resolved_capabilities(
-            registry,
-            &on_demand_ids,
             &paths,
         )?;
         let mut authority_policies = authority_policies;
         merge_plugin_product_authority_policies(
             &mut authority_policies,
-            &initial_plugin_product_capabilities,
-            &on_demand_plugin_product_capabilities,
+            &enabled_plugin_product_capabilities,
         )?;
-        let mut activation_plans = compile_activation_plans(
-            registry,
-            &on_demand_bundles,
-            &request.revision.payload.model_route_refs,
-        )?;
-        let plugin_product_activation_plans = compile_plugin_product_activation_plans(
-            &on_demand_plugin_product_capabilities,
-            &request.revision.payload.model_route_refs,
-        )?;
-        for (capability_id, plan) in plugin_product_activation_plans {
-            if activation_plans.insert(capability_id.clone(), plan).is_some() {
-                return Err(KernelError::InvalidPresetRevision {
-                    reason: format!(
-                        "Plugin Product activation plan collides with mounted capability {}",
-                        capability_id.as_ref()
-                    ),
-                });
-            }
-        }
-        let on_demand_plugin_selections = on_demand_plugin_direct
-            .values()
-            .map(|selection| (*selection).clone())
-            .collect::<Vec<_>>();
-        let mut compact_on_demand_index = compile_compact_index(
-            registry,
-            &on_demand_plugin_selections,
-            &activation_plans,
-        )?;
-        compact_on_demand_index.extend(compile_plugin_product_compact_index(
-            &on_demand_plugin_product_capabilities,
-            &activation_plans,
-        )?);
-        compact_on_demand_index.sort_by(|left, right| {
-            left.capability_id.cmp(&right.capability_id)
-        });
-        initial_capabilities.extend(initial_plugin_product_capabilities);
-        on_demand_capabilities.extend(on_demand_plugin_product_capabilities);
-        initial_capabilities.sort_by(|left, right| left.capability.cmp(&right.capability));
-        on_demand_capabilities.sort_by(|left, right| left.capability.cmp(&right.capability));
+        enabled_capabilities.extend(enabled_plugin_product_capabilities);
+        enabled_capabilities.sort_by(|left, right| left.capability.cmp(&right.capability));
         let skill_locks = compile_skill_locks(
             registry,
             &request.revision.payload.skill_bindings,
@@ -373,14 +275,12 @@ impl AgentPresetCompiler {
             &ceiling,
             environment,
         )?;
-        let capability_allowlist = initial_capabilities
+        let capability_allowlist = enabled_capabilities
             .iter()
-            .chain(&on_demand_capabilities)
             .map(|capability| capability.capability.id.clone())
             .collect::<BTreeSet<_>>();
-        let capability_runtime_features = initial_capabilities
+        let capability_runtime_features = enabled_capabilities
             .iter()
-            .chain(&on_demand_capabilities)
             .flat_map(|capability| {
                 capability.required_runtime_features.iter().cloned()
             })
@@ -400,15 +300,11 @@ impl AgentPresetCompiler {
             digest_payload(&CompiledRuntimeProfileDigestInput {
                 profile_kind: environment.required_runtime_profile,
                 required_runtime_features: required_runtime_features.clone(),
-                capability_operation_locks: initial_capabilities
+                capability_operation_locks: enabled_capabilities
                     .iter()
-                    .chain(&on_demand_capabilities)
                     .map(resolved_capability_operation_lock)
                     .collect(),
-                initial_capabilities: initial_capabilities.clone(),
-                on_demand_capabilities: on_demand_capabilities.clone(),
-                on_demand_activation_plans: activation_plans.clone(),
-                compact_on_demand_index: compact_on_demand_index.clone(),
+                enabled_capabilities: enabled_capabilities.clone(),
                 required_resource_kinds: required_resource_kinds.clone(),
                 authority_policies: authority_policies.clone(),
                 skill_ids: skill_locks
@@ -443,11 +339,9 @@ impl AgentPresetCompiler {
             compiled_runtime_profile_digest,
             model_route_refs: request.revision.payload.model_route_refs,
             chat_route_identity,
-            initial_capabilities,
-            on_demand_capabilities,
+            enabled_capabilities,
             required_resource_kinds,
-            on_demand_activation_plans: activation_plans,
-            compact_on_demand_index,
+
             capability_allowlist,
             skill_locks,
             mcp_tool_locks,
@@ -648,9 +542,8 @@ fn validate_plugin_product_inputs<'a>(
         let mut matched_selection = None;
         for selection in revision
             .payload
-            .initial_capabilities
+            .enabled_capabilities
             .iter()
-            .chain(&revision.payload.on_demand_capabilities)
         {
             if selection.capability.id != capability.capability.id {
                 continue;
@@ -700,44 +593,6 @@ fn validate_plugin_product_inputs<'a>(
     Ok(by_id)
 }
 
-fn partition_plugin_product_capabilities(
-    capabilities: &[ResolvedCapability],
-    initial: &BTreeMap<CapabilityId, &CapabilitySelection>,
-    on_demand: &BTreeMap<CapabilityId, &CapabilitySelection>,
-) -> Result<
-    (
-        Vec<ResolvedCapability>,
-        Vec<ResolvedCapability>,
-    ),
-    KernelError,
-> {
-    let mut initial_capabilities = Vec::new();
-    let mut on_demand_capabilities = Vec::new();
-    for capability in capabilities {
-        if initial.contains_key(&capability.capability.id) {
-            initial_capabilities.push(capability.clone());
-        } else if on_demand.contains_key(&capability.capability.id) {
-            on_demand_capabilities.push(capability.clone());
-        } else {
-            return Err(KernelError::InvalidPresetRevision {
-                reason: format!(
-                    "Plugin Product capability {} has no valid Revision placement",
-                    capability.capability.id.as_ref()
-                ),
-            });
-        }
-    }
-    let sort = |left: &ResolvedCapability,
-                right: &ResolvedCapability| {
-        left.capability
-            .cmp(&right.capability)
-            .then_with(|| left.contribution_id.cmp(&right.contribution_id))
-    };
-    initial_capabilities.sort_by(sort);
-    on_demand_capabilities.sort_by(sort);
-    Ok((initial_capabilities, on_demand_capabilities))
-}
-
 fn validate_direct_selections(
     registry: &MaterializedRegistry,
     selections: &BTreeMap<CapabilityId, &CapabilitySelection>,
@@ -783,9 +638,8 @@ fn validate_revision_contribution_locks(
 ) -> Result<(), KernelError> {
     for selection in revision
         .payload
-        .initial_capabilities
+        .enabled_capabilities
         .iter()
-        .chain(&revision.payload.on_demand_capabilities)
     {
         if let Some(plugin_product) =
             plugin_product_capabilities.get(&selection.capability.id)
@@ -1066,20 +920,10 @@ fn validate_conflicts(
 fn compile_authority_policies(
     registry: &MaterializedRegistry,
     initial_direct: &BTreeMap<CapabilityId, &CapabilitySelection>,
-    on_demand_direct: &BTreeMap<CapabilityId, &CapabilitySelection>,
-    initial_ids: &BTreeSet<CapabilityId>,
-    on_demand_bundles: &BTreeMap<CapabilityId, Vec<CapabilityId>>,
 ) -> Result<BTreeMap<CapabilityId, CompiledCapabilityPolicy>, KernelError> {
     let mut policies = BTreeMap::<CapabilityId, CompiledCapabilityPolicy>::new();
-    for root in initial_direct.keys().chain(on_demand_direct.keys()) {
-        let bundle = if initial_ids.contains(root) {
-            dependency_bundle(registry, root)?
-        } else {
-            on_demand_bundles
-                .get(root)
-                .cloned()
-                .unwrap_or_default()
-        };
+    for root in initial_direct.keys() {
+        let bundle = dependency_bundle(registry, root)?;
         for capability_id in bundle {
             let capability = &registry.capabilities[&capability_id].manifest;
             let required_resource_kinds =
@@ -1092,7 +936,6 @@ fn compile_authority_policies(
                 .collect::<BTreeSet<_>>();
             let allowed_actions = initial_direct
                 .get(&capability_id)
-                .or_else(|| on_demand_direct.get(&capability_id))
                 .filter(|direct| !direct.action_allowlist.is_empty())
                 .map(|direct| direct.action_allowlist.clone())
                 .unwrap_or(declared_actions);
@@ -1173,9 +1016,8 @@ fn resolved_capability_operation_lock(
 fn merge_plugin_product_authority_policies(
     policies: &mut BTreeMap<CapabilityId, CompiledCapabilityPolicy>,
     initial: &[ResolvedCapability],
-    on_demand: &[ResolvedCapability],
 ) -> Result<(), KernelError> {
-    for capability in initial.iter().chain(on_demand) {
+    for capability in initial.iter() {
         let declared_actions = capability
             .actions
             .iter()
@@ -1206,197 +1048,6 @@ fn merge_plugin_product_authority_policies(
         }
     }
     Ok(())
-}
-
-fn compile_activation_plans(
-    registry: &MaterializedRegistry,
-    bundles: &BTreeMap<CapabilityId, Vec<CapabilityId>>,
-    model_routes: &BTreeMap<String, ModelRouteId>,
-) -> Result<BTreeMap<CapabilityId, PrecomputedActivationPlan>, KernelError> {
-    let model_route_refs = model_routes
-        .values()
-        .cloned()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    bundles
-        .iter()
-        .map(|(root, bundle)| {
-            let mut tool_schema_refs = BTreeSet::<CanonicalSchemaRef>::new();
-            let mut context_schema_refs = BTreeSet::<CanonicalSchemaRef>::new();
-            for capability_id in bundle {
-                let capability = &registry.capabilities[capability_id].manifest;
-                for action in &capability.contributions.actions {
-                    tool_schema_refs.insert(action.input_schema.clone());
-                    tool_schema_refs.insert(action.output_schema.clone());
-                }
-                context_schema_refs.extend(
-                    capability
-                        .contributions
-                        .context_schema_refs
-                        .iter()
-                        .cloned(),
-                );
-            }
-            Ok((
-                root.clone(),
-                PrecomputedActivationPlan {
-                    root_capability_id: root.clone(),
-                    capability_bundle: bundle.clone(),
-                    tool_schema_refs: tool_schema_refs.into_iter().collect(),
-                    context_schema_refs: context_schema_refs.into_iter().collect(),
-                    model_route_refs: model_route_refs.clone(),
-                },
-            ))
-        })
-        .collect()
-}
-
-fn compile_plugin_product_activation_plans(
-    capabilities: &[ResolvedCapability],
-    model_routes: &BTreeMap<String, ModelRouteId>,
-) -> Result<BTreeMap<CapabilityId, PrecomputedActivationPlan>, KernelError> {
-    let model_route_refs = model_routes
-        .values()
-        .cloned()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let mut plans = BTreeMap::new();
-    for capability in capabilities {
-        let mut tool_schema_refs = BTreeSet::<CanonicalSchemaRef>::new();
-        for action in &capability.actions {
-            tool_schema_refs.insert(action.input_schema.clone());
-            tool_schema_refs.insert(action.output_schema.clone());
-        }
-        let plan = PrecomputedActivationPlan {
-            root_capability_id: capability.capability.id.clone(),
-            capability_bundle: vec![capability.capability.id.clone()],
-            tool_schema_refs: tool_schema_refs.into_iter().collect(),
-            context_schema_refs: Vec::new(),
-            model_route_refs: model_route_refs.clone(),
-        };
-        if plans
-            .insert(capability.capability.id.clone(), plan)
-            .is_some()
-        {
-            return Err(KernelError::InvalidPresetRevision {
-                reason: format!(
-                    "duplicate Plugin Product activation plan for {}",
-                    capability.capability.id.as_ref()
-                ),
-            });
-        }
-    }
-    Ok(plans)
-}
-
-fn compile_compact_index(
-    registry: &MaterializedRegistry,
-    selections: &[CapabilitySelection],
-    plans: &BTreeMap<CapabilityId, PrecomputedActivationPlan>,
-) -> Result<Vec<CompactOnDemandCapabilityEntry>, KernelError> {
-    let mut entries = Vec::with_capacity(selections.len());
-    for selection in selections {
-        let capability = &registry.capabilities[&selection.capability.id];
-        let plan = &plans[&selection.capability.id];
-        entries.push(CompactOnDemandCapabilityEntry {
-            capability_id: selection.capability.id.clone(),
-            display_name: capability.manifest.display.name.clone(),
-            short_description: truncate_chars(
-                &capability.manifest.display.description,
-                COMPACT_DESCRIPTION_CHARS,
-            ),
-            search_terms: compact_search_terms(capability),
-            activation_plan_digest: digest_payload(plan).map_err(|error| {
-                KernelError::Digest {
-                    reason: error.to_string(),
-                }
-            })?,
-        });
-    }
-    entries.sort_by(|left, right| left.capability_id.cmp(&right.capability_id));
-    Ok(entries)
-}
-
-fn compile_plugin_product_compact_index(
-    capabilities: &[ResolvedCapability],
-    plans: &BTreeMap<CapabilityId, PrecomputedActivationPlan>,
-) -> Result<Vec<CompactOnDemandCapabilityEntry>, KernelError> {
-    let mut entries = Vec::with_capacity(capabilities.len());
-    for capability in capabilities {
-        let Some(plan) = plans.get(&capability.capability.id) else {
-            return Err(KernelError::InvalidPresetRevision {
-                reason: format!(
-                    "Plugin Product capability {} has no activation plan",
-                    capability.capability.id.as_ref()
-                ),
-            });
-        };
-        let display_name = capability
-            .display_name
-            .as_deref()
-            .unwrap_or(capability.capability.id.as_ref());
-        let description = capability.description.as_deref().unwrap_or_default();
-        entries.push(CompactOnDemandCapabilityEntry {
-            capability_id: capability.capability.id.clone(),
-            display_name: display_name.to_owned(),
-            short_description: truncate_chars(
-                description,
-                COMPACT_DESCRIPTION_CHARS,
-            ),
-            search_terms: compact_search_terms_from_values([
-                capability.capability.id.as_ref(),
-                display_name,
-                description,
-            ]),
-            activation_plan_digest: digest_payload(plan).map_err(|error| {
-                KernelError::Digest {
-                    reason: error.to_string(),
-                }
-            })?,
-        });
-    }
-    Ok(entries)
-}
-
-fn compact_search_terms(capability: &MaterializedCapability) -> Vec<String> {
-    compact_search_terms_from_values([
-        capability.manifest.id.as_ref(),
-        capability.manifest.display.name.as_str(),
-        capability.manifest.display.description.as_str(),
-    ])
-}
-
-fn compact_search_terms_from_values<'a>(
-    values: impl IntoIterator<Item = &'a str>,
-) -> Vec<String> {
-    let mut terms = BTreeSet::new();
-    for value in values {
-        for term in value
-            .split(|character: char| {
-                character.is_whitespace()
-                    || matches!(character, '.' | '-' | '_' | '/' | ':')
-            })
-            .map(str::trim)
-            .filter(|term| !term.is_empty())
-        {
-            terms.insert(
-                truncate_chars(&term.to_ascii_lowercase(), COMPACT_SEARCH_TERM_CHARS),
-            );
-            if terms.len() >= COMPACT_SEARCH_TERM_COUNT {
-                break;
-            }
-        }
-        if terms.len() >= COMPACT_SEARCH_TERM_COUNT {
-            break;
-        }
-    }
-    terms.into_iter().collect()
-}
-
-fn truncate_chars(value: &str, max_chars: usize) -> String {
-    value.chars().take(max_chars).collect()
 }
 
 fn compile_skill_locks(
@@ -1745,7 +1396,6 @@ mod tests {
     }
 
     fn revision(
-        placement: CapabilityPlacement,
         action_allowlist: BTreeSet<ActionId>,
         lock: ContributionLock,
     ) -> AgentPresetRevision {
@@ -1760,16 +1410,7 @@ mod tests {
             schema_version: VERSION.into(),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),
-            initial_capabilities: if matches!(placement, CapabilityPlacement::Initial) {
-                vec![selection.clone()]
-            } else {
-                Vec::new()
-            },
-            on_demand_capabilities: if matches!(placement, CapabilityPlacement::OnDemand) {
-                vec![selection]
-            } else {
-                Vec::new()
-            },
+            enabled_capabilities: vec![selection],
             skill_bindings: Vec::new(),
             system_role_provider_overrides: BTreeMap::new(),
             persona: "fixture".to_owned(),
@@ -1827,18 +1468,11 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Copy)]
-    enum CapabilityPlacement {
-        Initial,
-        OnDemand,
-    }
-
     #[test]
     fn compiler_keeps_plugin_product_out_of_registry_closure_and_freezes_initial_policy() {
         let action_allowlist = BTreeSet::from([ActionId::from(ACTION_ID)]);
         let capability = plugin_product_capability(action_allowlist.clone());
         let saved_revision = revision(
-            CapabilityPlacement::Initial,
             action_allowlist,
             capability.contribution_lock.clone(),
         );
@@ -1849,8 +1483,7 @@ mod tests {
         )
         .expect("Plugin Product capability should compile without Kernel registry materialization");
 
-        assert_eq!(compiled.content().initial_capabilities.len(), 1);
-        assert!(compiled.content().on_demand_activation_plans.is_empty());
+        assert_eq!(compiled.content().enabled_capabilities.len(), 1);
         assert!(
             compiled
                 .content()
@@ -1867,11 +1500,10 @@ mod tests {
     }
 
     #[test]
-    fn compiler_builds_plugin_product_on_demand_plan_and_rejects_lock_drift() {
+    fn compiler_freezes_enabled_plugin_product_and_rejects_lock_drift() {
         let action_allowlist = BTreeSet::new();
         let capability = plugin_product_capability(action_allowlist.clone());
         let saved_revision = revision(
-            CapabilityPlacement::OnDemand,
             action_allowlist,
             capability.contribution_lock.clone(),
         );
@@ -1880,20 +1512,13 @@ mod tests {
             &environment(),
             compile_request(saved_revision.clone(), capability.clone()),
         )
-        .expect("on-demand Plugin Product capability should compile");
-        assert!(
-            compiled
-                .content()
-                .on_demand_activation_plans
-                .contains_key(&CapabilityId::from(CAPABILITY_ID))
-        );
-        assert_eq!(compiled.content().compact_on_demand_index.len(), 1);
+        .expect("enabled Plugin Product capability should compile");
         assert_eq!(
             compiled
                 .content()
-                .on_demand_capabilities
+                .enabled_capabilities
                 .first()
-                .expect("on-demand Plugin Product projection")
+                .expect("enabled Plugin Product projection")
                 .active_release_epoch,
             Some(7)
         );
@@ -1901,7 +1526,6 @@ mod tests {
         let mut drifted_lock = capability.contribution_lock.clone();
         drifted_lock.source_identity = "plugin-product:other".into();
         let drifted = revision(
-            CapabilityPlacement::OnDemand,
             BTreeSet::new(),
             drifted_lock,
         );

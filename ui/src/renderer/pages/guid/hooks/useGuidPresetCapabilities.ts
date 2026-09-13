@@ -38,7 +38,7 @@ export const requiredResourceKindsForDocument = (
   catalog: Parameters<typeof requiredResourceKindsForCapabilityReferences>[1]
 ): Set<string> =>
   requiredResourceKindsForCapabilityReferences(
-    [...document.initial_capabilities, ...document.on_demand_capabilities].map(
+    document.enabled_capabilities.map(
       (selection) => selection.capability
     ),
     catalog
@@ -75,8 +75,8 @@ export const useGuidPresetCapabilities = (
         const document = editor.revision?.document ?? editor.draft.document;
         const capabilityIds = new Set(
           [
-            ...document.initial_capabilities,
-            ...document.on_demand_capabilities,
+            ...document.enabled_capabilities,
+
           ].map((selection) => selection.capability.id)
         );
         setState({

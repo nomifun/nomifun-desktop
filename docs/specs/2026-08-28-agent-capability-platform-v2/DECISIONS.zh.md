@@ -97,7 +97,6 @@
 | D-019 | 实施并行与估算 | 已修订（05） | 不再固定五流、ROM、Agent 数或周数；按当前 TODO、独占写集和真实依赖动态并行 |
 | D-020 | Nomi 最终删除门禁 | 后续阶段 | 当前 Nomi 是产品执行内核，不执行 C9 删除；只有未来 Codex Runtime 正式接替并完成独立证据后，才重新评估一次性删除 |
 | D-021 | Conversation 与 Session 身份 | 已确认 | 新架构只有 `AgentSession/AgentSessionId` 一个产品会话 aggregate 和 UUIDv7 主键 |
-| D-022 | Test Revision 与真实 Effect | 已修订（05） | Test 走普通 Revision/Session；Effect 只分 `read_only`、`managed_effect`、`external_uncertain_effect` |
 | D-023 | 官方模板 Seed 政策 | 已修订（05） | 保留 role-complete/context-minimal；不以固定模板或 Capability 数量生成结构 Gate |
 | D-024 | Session 删除 | 已修订（05） | 简化为 `live → deleting → dispose/kill → 幂等删除 → minimal tombstone` |
 | D-025 | Snapshot 可执行性 | 已修订（05） | 只保留一个 canonical Compiler；Snapshot 冻结能力/Provider/Tool/Model 闭包和资源种类约束，不冻结消费目标资源实例；结构不兼容时只读并显式 fork |
@@ -268,8 +267,8 @@ Browser/Computer 的一期增补合同：
 
 - 状态：`已修订（05）`
 - 默认界面只展示名称、用途、模型、每项能力的名称/说明/来源/可用性/资源种类，
-  以及关闭、启动即用、可按需申请三态、保存和“试用 Agent”。
-- Save/Test 自动执行内部 Preview，不要求用户理解或先操作 Preview。
+  以及关闭、启动即用、可按需申请三态和保存。
+- Save 在服务端完成配置校验和 Snapshot 生成，不增加独立检查步骤。
 - initial/on-demand 由模板预置，用户可以在工作台显式调整。
 - 工作区、知识库、MCP/Connector 等具体资源在会话、伙伴或自动化目标中选择。
 - binding ID、resource ID、owner、operation 和 typed parameters 不进入 Preset 编辑器。
@@ -277,7 +276,7 @@ Browser/Computer 的一期增补合同：
 - Snapshot 不兼容时，界面只展示“在新会话中继续”，后台执行显式 fork。
 - Package、Capability、Skill 和 MCP 仍保持各自清晰的管理入口；不恢复“设定市场”混合对象。
 
-原“在普通编辑器直接展示完整 exact-set、digest、内部 ID 和复杂 Preview”的要求已撤销，因为它把实施合同泄漏成用户操作。
+普通编辑器不展示完整 exact-set、digest、内部 ID 和复杂技术检查，因为这会把实施合同泄漏成用户操作。
 
 理由：用户需要声明 Agent 有什么能力、哪些能力可按需申请，并在具体使用场景中
 绑定资源，而不是把某个知识库或路径永久冻结进 Agent 设计。隐藏技术细节可以保留
@@ -447,14 +446,7 @@ Nomi 删除，因此不会把 C9 作为当前交付阻断。
 
 理由：Conversation 与 Session 双 ID 会复制创建、恢复、删除和映射逻辑。一个 aggregate 足以覆盖聊天和自动化执行。
 
-### D-022：Agent Test 与三类 Effect
-
-- 状态：`已修订（05）`
-- dirty draft 点击 Test 时先保存普通、可见、immutable `AgentPresetRevision`；clean draft 复用当前 Revision。
-- Test 通过普通 AgentSession API 创建真实持久 Session，使用真实 Snapshot、当前
-  Test 目标提供的资源和 FullAuto 主链。
-- 不建设 test-only Session、DraftSnapshot、模拟 Runtime、测试专用表或审批弹窗。
-- UI 可以明确提示会产生真实副作用，但提示不能创建第二套确认状态。
+### Effect 策略
 
 Effect 只保留三种策略：
 
@@ -469,7 +461,7 @@ external_uncertain_effect
 - `EffectClass` 可以作为展示和路由 metadata，但不能把所有非读操作推进统一完整状态机。
 - 不建立全局 EffectCoordinator、Wave 级 JSON/CAS journal、固定 receipt 集合或与 SessionEvent 重复的记录。
 
-理由：Test 必须与真实执行同构；Effect 正确性则取决于操作性质，不应为了形式统一给所有写操作增加分布式状态机。
+理由：Effect 正确性取决于操作性质，不应为了形式统一给所有写操作增加分布式状态机。
 
 ### D-023：官方模板 Seed 政策
 
@@ -516,9 +508,8 @@ live
 Compiler 只有一个 canonical 纯函数实现：
 
 ```text
-Preview ─┐
-Save ────┼─> one canonical Compiler
-Test ────┘          │
+Save ─────> one canonical Compiler
+                    │
                     └─> Snapshot + authority + diagnostics
 
 Session Open ─> 读取已保存 Snapshot + 当前执行兼容检查
@@ -771,7 +762,7 @@ provider 请求误当成完整迁移或跨传输发布证明。
 ### D-035：Agent 工作台公共入口与旧路由迁移围栏
 
 - 状态：`已修订（2026-09-06）`
-- 用户可见的 Agent authoring、能力选择、保存、试用和继续使用只属于一个
+- 用户可见的 Agent authoring、能力选择、保存和继续使用只属于一个
   **Agent 工作台**；公共 UI 路由是 `/agent`。
 - 侧边栏名称必须显示“Agent 工作台”，不能只显示“Agent”。
 - 首页 Guid 是选择已保存 AgentPreset 并启动会话的产品入口，不承载 Agent authoring。

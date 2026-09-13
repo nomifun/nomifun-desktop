@@ -1,6 +1,14 @@
 {
   "title": "Creative Studio",
   "siderTitle": "Studio",
+  "workbenchSider": {
+    "collapse": "Collapse generation settings",
+    "expand": "Expand generation settings",
+    "resize": "Resize generation settings",
+    "resizeHint": "Drag to resize; double-click to restore the default width",
+    "resizeHeight": "Resize generation settings height",
+    "resizeHeightHint": "Drag to resize; double-click to fit the content"
+  },
   "focus": {
     "backToWorkbench": "Back to workbench"
   },
@@ -1928,5 +1936,10 @@
       "updatedAt": "Updated {{date}}",
       "variableCount": "{{count}} variables"
     }
+  },
+  "workbenchComposer": {
+    "referenceCount": "{{count}} selected",
+    "addMore": "Add more",
+    "addImageReference": "Add image reference"
   }
 }

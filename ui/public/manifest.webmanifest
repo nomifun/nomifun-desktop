@@ -1,11 +1,10 @@
 {
   "name": "NomiFun",
   "short_name": "NomiFun",
-  "description": "NomiFun WebUI for mobile and desktop browsers.",
+  "description": "NomiFun WebUI for desktop browsers.",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
-  "orientation": "portrait",
   "background_color": "#ffffff",
   "theme_color": "#4E5969",
   "icons": [

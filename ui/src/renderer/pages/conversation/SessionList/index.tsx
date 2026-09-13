@@ -318,7 +318,6 @@ const WorkpathSessionList: React.FC<WorkpathSessionListProps> = ({
         void navigate('/guid', {
           state: {
             workspace: node.key,
-            resetAgentSelection: true,
           },
         });
       }

@@ -563,8 +563,8 @@ mod tests {
             runtime_protocol_version: VersionString::from("1.0.0"),
             profile_digest: context.runtime_profile_digest.clone(),
             enabled_runtime_features: BTreeSet::new(),
-            initial_capabilities: BTreeSet::new(),
-            on_demand_capabilities: BTreeSet::new(),
+            enabled_capabilities: BTreeSet::new(),
+
             typed_resource_bindings: Vec::new(),
         };
         let hello = nomifun_agent_contracts::RuntimeHelloPayload {

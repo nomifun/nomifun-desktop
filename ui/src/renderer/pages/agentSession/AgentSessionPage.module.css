@@ -26,4 +26,3 @@
 .deletedState h2 { margin:4px 0 0; color:rgb(var(--danger-6)); font-size:18px; }
 .deletedState p { max-width:520px; margin:0 0 8px; text-align:center; font-size:12px; line-height:1.7; }
 @media (max-width:900px) { .sessionGrid { grid-template-columns:1fr; } .inspector { position:static; } }
-@media (max-width:640px) { .composer { grid-template-columns:1fr; } .userMessage { margin-left:0; } }

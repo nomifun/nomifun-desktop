@@ -530,37 +530,8 @@ body[arco-theme='dark'] .nomifun-update-modal .arco-modal-content,
     0 5px 16px rgba(0, 0, 0, 0.28) !important;
 }
 
-@media (max-width: 560px) {
-  .update-compact-card-host {
-    right: 16px;
-    bottom: 16px;
-  }
 
-  .update-modal__actions {
-    gap: 10px;
-    padding-inline: 0;
-  }
 
-  .update-modal__error-content {
-    padding-inline: 0;
-  }
-}
-
-@media (max-width: 480px) {
-  .update-modal__error-link-row {
-    grid-template-columns: 1fr;
-  }
-
-  .update-modal__error-link {
-    padding-left: 12px;
-  }
-}
-
-@media (max-width: 390px) {
-  .update-modal__actions {
-    grid-template-columns: 1fr;
-  }
-}
 
 @media (prefers-reduced-motion: reduce) {
   .update-compact-card,

@@ -6,6 +6,7 @@
 
 import { isBackendHttpError } from '@/common/adapter/httpBridge';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { useWorkbenchLayout } from '../useWorkbenchLayout';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 
@@ -40,7 +41,6 @@ import { resolveMediaAspectRatio } from '../aspectRatio';
 import {
   ImageWorkbench,
   type ImageWorkbenchAspectRatioOption,
-  type ImageWorkbenchLayout,
   type ImageWorkbenchModelIdentity,
   type ImageWorkbenchSettings,
   imageWorkbenchAspectRatioValue,
@@ -97,7 +97,7 @@ const OwnedImageWorkbenchReady: React.FC<{
   const [initialDraft] = useState(
     () => readStandaloneWorkbenchDraft('image') ?? createDefaultImageWorkbenchDraft()
   );
-  const [layout, setLayout] = useState<ImageWorkbenchLayout>(initialDraft.layout);
+  const [layout, setLayout] = useWorkbenchLayout('image', initialDraft.layout);
   const [prompt, setPrompt] = useState(initialDraft.prompt);
   const [settings, setSettings] = useState<ImageWorkbenchSettings>(() =>
     imageWorkbenchSettingsFromDraft(initialDraft)
@@ -544,7 +544,9 @@ const OwnedImageWorkbenchReady: React.FC<{
         }))
       }
       disabled={props.disabled}
-      label={t('creativeStudio.product.model.label', { defaultValue: '模型' })}
+      label={layout === 'side'
+        ? t('creativeStudio.models.select.label', { defaultValue: '生成模型' })
+        : t('creativeStudio.product.model.label', { defaultValue: '模型' })}
       copy={
         modelTask === 'image_edit'
           ? {

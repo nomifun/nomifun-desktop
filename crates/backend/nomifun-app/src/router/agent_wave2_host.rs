@@ -2787,14 +2787,14 @@ mod tests {
             schema_version: VersionString::from(nomifun_agent_domain_wave2::CONTRACT_VERSION),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),
-            initial_capabilities: vec![CapabilitySelection {
+            enabled_capabilities: vec![CapabilitySelection {
                 capability: CapabilityRef {
                     id: CapabilityId::from("fs.read"),
                     version: VersionString::from(nomifun_agent_domain_wave2::CONTRACT_VERSION),
                 },
                 action_allowlist: BTreeSet::from([action.clone()]),
             }],
-            on_demand_capabilities: Vec::new(),
+
             skill_bindings: Vec::new(),
             system_role_provider_overrides: BTreeMap::new(),
             persona: "Wave 2 host test".to_owned(),

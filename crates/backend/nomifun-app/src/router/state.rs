@@ -22,8 +22,8 @@ use nomifun_agent_contracts::{
     fresh_v4_schema_manifest_payload, official_preset_seed_manifest_payload,
 };
 use nomifun_agent_control_plane::{
-    AgentControlPlane, CompilerReleaseInputs, OfficialTemplateCatalog,
-    PresetPreviewCompiler, SharedPluginProductCatalogPublications,
+    AgentControlPlane, OfficialTemplateCatalog, PresetRevisionCompiler,
+    SharedPluginProductCatalogPublications,
 };
 use nomifun_agent_kernel::{
     CompilerEnvironment, InMemoryPluginStatePersistence, KernelRegistry,
@@ -954,16 +954,8 @@ async fn build_nomi_core_agent_api_state(
         },
         availability_evidence_revision: "nomi-core-local-2026-09-04".to_owned(),
     };
-    let release = CompilerReleaseInputs {
-        resolver_version: VersionString::from(CONTRACT_VERSION),
-        runtime_protocol_version: VersionString::from(CONTRACT_VERSION),
-        runtime_feature_inventory_digest: feature_digest,
-        canonical_schema_manifest_digest: schema_digest,
-        target_contribution_manifest_digest: seed.target_first_party_contribution_digest,
-        availability_evidence_revision: "nomi-core-local-2026-09-04".to_owned(),
-    };
     let templates = OfficialTemplateCatalog::load()?;
-    let compiler = PresetPreviewCompiler::new(release, templates.clone())
+    let compiler = PresetRevisionCompiler::new(templates.clone())
         .with_canonical_registry(Arc::clone(&kernel), environment.clone());
     // The Nomi engine exposes its existing session-scoped ToolSearch activation
     // boundary. AgentPreset on-demand capabilities are projected onto that
@@ -980,6 +972,19 @@ async fn build_nomi_core_agent_api_state(
     .with_default_chat_route_resolver(Arc::new(
         NomiCoreDefaultChatRouteResolver::new(services.database.pool().clone()),
     )));
+    let product_agent_resolver = Arc::new(
+        super::nomi_core_session::NomiCoreProductAgentResolver::new(
+            Arc::clone(&control_plane),
+            Arc::clone(&services.authoritative_user_id),
+            services.database.pool().clone(),
+        ),
+    );
+    conversation_owner
+        .service()
+        .with_product_agent_snapshot_resolver(product_agent_resolver.clone());
+    services
+        .cs_dialogue_engine
+        .with_agent_policy_resolver(product_agent_resolver.clone());
     let mcp_server_repository: Arc<dyn nomifun_db::IMcpServerRepository> =
         Arc::new(nomifun_db::SqliteMcpServerRepository::new(
             services.database.pool().clone(),
@@ -1018,6 +1023,7 @@ async fn build_nomi_core_agent_api_state(
             resource_bindings,
             mcp_server_repository,
             Arc::clone(&wave4_owners),
+            product_agent_resolver,
         ),
         plugin_state,
         plugin_runtime_participant,

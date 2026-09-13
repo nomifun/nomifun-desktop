@@ -6,22 +6,21 @@
 
 import {
   BookOne,
-  BottomBar,
   Clipboard,
   Delete,
   FolderOpen,
   LeftBar,
   Loading,
   MagicWand,
-  Pic,
   Time,
   Upload,
 } from '@icon-park/react';
-import { Button, Input, InputNumber, Radio, Select, Tag, Tooltip } from '@arco-design/web-react';
+import { Button, Input, InputNumber, Radio, Select, Tooltip } from '@arco-design/web-react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
 import NomiSelect from '@/renderer/components/base/NomiSelect';
-import CreativeMediaPreview from '../../assets/components/CreativeMediaPreview';
+import contentSiderStyles from '@/renderer/components/layout/ContentSider/ContentSider.module.css';
+import { WorkbenchAddReference, WorkbenchComposerHeader, WorkbenchReferenceCard, WorkbenchReferenceCount } from '../WorkbenchComposerControls';
 import {
   DEFAULT_IMAGE_WORKBENCH_ASPECT_RATIOS,
   IMAGE_WORKBENCH_QUALITY_OPTIONS,
@@ -44,6 +43,7 @@ import {
   type ImageWorkbenchTaskSummary,
 } from './types';
 import ImageSizePicker from './ImageSizePicker';
+import composerStyles from '../WorkbenchComposer.module.css';
 import styles from './ImageWorkbench.module.css';
 
 interface ImageWorkbenchComposerProps {
@@ -78,52 +78,20 @@ interface ImageWorkbenchComposerProps {
 const clampCount = (value: number | undefined, maximum = 10): number =>
   Math.max(1, Math.min(maximum, Math.floor(value || 1)));
 
-const LayoutSwitch: React.FC<{
-  layout: ImageWorkbenchLayout;
-  onChange(layout: ImageWorkbenchLayout): void;
-}> = ({ layout, onChange }) => {
-  const { t } = useTranslation();
-  return (
-    <div
-      className={styles.layoutSwitch}
-      role='group'
-      aria-label={t('creativeStudio.image.layout.label', { defaultValue: '工作台布局' })}
-    >
-      <Button
-        size='small'
-        type={layout === 'side' ? 'primary' : 'text'}
-        icon={<LeftBar />}
-        aria-pressed={layout === 'side'}
-        onClick={() => onChange('side')}
-      >
-        {t('creativeStudio.image.layout.side', { defaultValue: '侧边' })}
-      </Button>
-      <Button
-        size='small'
-        type={layout === 'bottom' ? 'primary' : 'text'}
-        icon={<BottomBar />}
-        aria-pressed={layout === 'bottom'}
-        onClick={() => onChange('bottom')}
-      >
-        {t('creativeStudio.image.layout.bottom', { defaultValue: '底部' })}
-      </Button>
-    </div>
-  );
-};
-
 const ComposerActions: React.FC<{
   compact?: boolean;
+  hasPrompt?: boolean;
   onPastePrompt?(): void;
   onClearPrompt?(): void;
   onOpenPromptLibrary?(): void;
   onChooseReferences?(): void;
-}> = ({ compact, onPastePrompt, onClearPrompt, onOpenPromptLibrary, onChooseReferences }) => {
+}> = ({ compact, hasPrompt = true, onPastePrompt, onClearPrompt, onOpenPromptLibrary, onChooseReferences }) => {
   const { t } = useTranslation();
   return (
     <div className={compact ? styles.compactActions : styles.actionRow}>
       {onPastePrompt ? (
         <Tooltip content={t('creativeStudio.image.actions.pastePrompt', { defaultValue: '读取剪贴板' })}>
-          <Button size='small' icon={<Clipboard />} onClick={onPastePrompt}>
+          <Button size='small' icon={<Clipboard />} onClick={onPastePrompt} aria-label={compact ? t('creativeStudio.image.actions.pastePrompt', { defaultValue: '读取剪贴板' }) : undefined}>
             {compact
               ? null
               : t('creativeStudio.image.actions.pastePrompt', { defaultValue: '读取剪贴板' })}
@@ -132,7 +100,7 @@ const ComposerActions: React.FC<{
       ) : null}
       {onClearPrompt ? (
         <Tooltip content={t('creativeStudio.image.actions.clearInput', { defaultValue: '清空输入' })}>
-          <Button size='small' icon={<Delete />} onClick={onClearPrompt}>
+          <Button size='small' icon={<Delete />} onClick={onClearPrompt} disabled={!hasPrompt} aria-label={compact ? t('creativeStudio.image.actions.clearInput', { defaultValue: '清空输入' }) : undefined}>
             {compact
               ? null
               : t('creativeStudio.image.actions.clear', { defaultValue: '清空' })}
@@ -141,7 +109,7 @@ const ComposerActions: React.FC<{
       ) : null}
       {onOpenPromptLibrary ? (
         <Tooltip content={t('creativeStudio.image.actions.promptLibrary', { defaultValue: '提示词库' })}>
-          <Button size='small' icon={<BookOne />} onClick={onOpenPromptLibrary}>
+          <Button size='small' icon={<BookOne />} onClick={onOpenPromptLibrary} aria-label={compact ? t('creativeStudio.image.actions.promptLibrary', { defaultValue: '提示词库' }) : undefined}>
             {compact
               ? null
               : t('creativeStudio.image.actions.promptLibrary', { defaultValue: '提示词库' })}
@@ -150,7 +118,7 @@ const ComposerActions: React.FC<{
       ) : null}
       {onChooseReferences ? (
         <Tooltip content={t('creativeStudio.image.actions.chooseFromLibrary', { defaultValue: '从素材库选择' })}>
-          <Button size='small' icon={<FolderOpen />} onClick={onChooseReferences}>
+          <Button size='small' icon={<FolderOpen />} onClick={onChooseReferences} aria-label={compact ? t('creativeStudio.image.actions.chooseFromLibrary', { defaultValue: '从素材库选择' }) : undefined}>
             {compact
               ? null
               : t('creativeStudio.image.actions.myAssets', { defaultValue: '我的素材' })}
@@ -165,52 +133,37 @@ const ReferenceStrip: React.FC<{
   references: readonly ImageWorkbenchReference[];
   compact?: boolean;
   uploadingCount: number;
+  onAdd?(): void;
   onRemove(referenceId: string): void;
-}> = ({ references, compact, uploadingCount, onRemove }) => {
+}> = ({ references, compact, uploadingCount, onAdd, onRemove }) => {
   const { t } = useTranslation();
   return (
-    <div
-      className={`${styles.referenceStrip} ${compact ? styles.referenceStripCompact : ''}`}
-      data-reference-count={references.length}
-    >
+    <div className={`${composerStyles.referenceStrip} ${compact ? composerStyles.compactReferences : ''}`} data-reference-count={references.length}>
       {references.map((reference) => (
-        <div key={reference.id} className={styles.referenceItem}>
-          <CreativeMediaPreview
-            kind='image'
-            src={reference.originalUrl ?? reference.previewUrl}
-            posterSrc={reference.previewUrl}
-            alt={reference.name}
-            className={styles.referenceMedia}
-          />
-          <button
-            type='button'
-            className={styles.referenceRemove}
-            aria-label={t('creativeStudio.image.references.remove', {
-              defaultValue: '移除参考图 {{name}}',
-              name: reference.name,
-            })}
-            onClick={() => onRemove(reference.id)}
-          >
-            <Delete size={13} />
-          </button>
-          {compact ? null : <span className={styles.referenceName}>{reference.name}</span>}
-        </div>
+        <WorkbenchReferenceCard
+          key={reference.id}
+          kind='image'
+          src={reference.originalUrl ?? reference.previewUrl}
+          posterSrc={reference.previewUrl}
+          name={reference.name}
+          removeLabel={t('creativeStudio.image.references.remove', { defaultValue: '移除参考图 {{name}}', name: reference.name })}
+          onRemove={() => onRemove(reference.id)}
+        />
       ))}
       {Array.from({ length: uploadingCount }, (_, index) => (
-        <div
-          key={`uploading-${index}`}
-          className={styles.referenceLoading}
-          aria-label={t('creativeStudio.image.references.adding', {
-            defaultValue: '正在添加参考图',
-          })}
-        >
+        <div key={`uploading-${index}`} className={composerStyles.referenceLoading} aria-label={t('creativeStudio.image.references.adding', { defaultValue: '正在添加参考图' })}>
           <Loading className={styles.spin} />
         </div>
       ))}
-      {references.length === 0 && uploadingCount === 0 ? (
-        <div className={styles.referenceEmpty}>
-          {t('creativeStudio.image.references.empty', { defaultValue: '暂无参考图' })}
-        </div>
+      {!compact && onAdd ? (
+        <WorkbenchAddReference
+          onClick={onAdd}
+          label={references.length
+            ? t('creativeStudio.workbenchComposer.addMore', { defaultValue: '继续添加' })
+            : t('creativeStudio.workbenchComposer.addImageReference', { defaultValue: '添加图片参考' })}
+        />
+      ) : !compact && references.length === 0 && uploadingCount === 0 ? (
+        <div className={styles.referenceEmpty}>{t('creativeStudio.image.references.empty', { defaultValue: '暂无参考图' })}</div>
       ) : null}
     </div>
   );
@@ -276,7 +229,9 @@ const SettingsFields: React.FC<SettingsFieldsProps> = ({
         <label
           className={`${styles.field} ${compact ? styles.compactModelField : ''}`}
         >
-          <span>{t('creativeStudio.image.settings.model', { defaultValue: '模型' })}</span>
+          <span>{compact
+            ? t('creativeStudio.image.settings.model', { defaultValue: '模型' })
+            : t('creativeStudio.models.select.label', { defaultValue: '生成模型' })}</span>
           <NomiSelect
             value={modelValue}
             placeholder={
@@ -533,7 +488,7 @@ const ImageWorkbenchComposer: React.FC<ImageWorkbenchComposerProps> = (props) =>
   if (layout === 'bottom') {
     return (
       <div className={styles.bottomComposerDock} data-image-workbench-composer='bottom'>
-        <div className={styles.bottomComposer}>
+        <div className={`${styles.bottomComposer} ${composerStyles.root}`}>
           <div className={styles.bottomComposerBody}>
             <div className={styles.bottomPromptPane}>
               <Input.TextArea
@@ -571,6 +526,7 @@ const ImageWorkbenchComposer: React.FC<ImageWorkbenchComposerProps> = (props) =>
                 </Button>
                 <div className={styles.bottomTools}>
                   <ComposerActions
+                    hasPrompt={Boolean(prompt)}
                     compact
                     onPastePrompt={onPastePrompt}
                     onClearPrompt={onClearPrompt}
@@ -590,7 +546,7 @@ const ImageWorkbenchComposer: React.FC<ImageWorkbenchComposerProps> = (props) =>
                             })
                       }
                     >
-                      <Button icon={<Upload />} onClick={onUploadReferences}>
+                      <Button icon={<Upload />} onClick={onUploadReferences} aria-label={t('creativeStudio.image.references.add', { defaultValue: '添加参考图' })}>
                         {references.length > 0 ? references.length : null}
                       </Button>
                     </Tooltip>
@@ -600,7 +556,7 @@ const ImageWorkbenchComposer: React.FC<ImageWorkbenchComposerProps> = (props) =>
                       defaultValue: '切换到侧边工作台',
                     })}
                   >
-                    <Button icon={<LeftBar />} onClick={() => onLayoutChange('side')} />
+                    <Button icon={<LeftBar />} onClick={() => onLayoutChange('side')} aria-label={t('creativeStudio.image.layout.switchToSide', { defaultValue: '切换到侧边工作台' })} />
                   </Tooltip>
                 </div>
               </div>
@@ -626,27 +582,17 @@ const ImageWorkbenchComposer: React.FC<ImageWorkbenchComposerProps> = (props) =>
   }
 
   return (
-    <aside className={styles.sideComposer} data-image-workbench-composer='side'>
-      <header className={styles.composerHeader}>
-        <div className={styles.composerHeading}>
-          <Pic size={20} />
-          <span className={styles.composerHeadingText}>
-            <h1>{t('creativeStudio.image.header.title', { defaultValue: '生图工作台' })}</h1>
-            <small>
-              {t('creativeStudio.image.header.settings', { defaultValue: '生成设置' })}
-            </small>
-          </span>
-        </div>
-        <LayoutSwitch layout={layout} onChange={onLayoutChange} />
-      </header>
+    <aside className={`${styles.sideComposer} ${composerStyles.root}`} data-image-workbench-composer='side'>
+      <WorkbenchComposerHeader kind='image' layout={layout} onLayoutChange={onLayoutChange} />
 
-      <div className={styles.composerScroll}>
-        <section className={styles.composerSection}>
-          <div className={styles.sectionHeader}>
+      <div className={`${composerStyles.content} ${contentSiderStyles.scrollArea}`}>
+        <section className={`${styles.composerSection} ${composerStyles.section}`}>
+          <div className={composerStyles.sectionHeading}>
             <span>{t('creativeStudio.image.prompt.label', { defaultValue: '提示词' })}</span>
           </div>
           <div className={styles.sectionBody}>
             <ComposerActions
+              hasPrompt={Boolean(prompt)}
               onPastePrompt={onPastePrompt}
               onClearPrompt={onClearPrompt}
               onOpenPromptLibrary={onOpenPromptLibrary}
@@ -654,7 +600,7 @@ const ImageWorkbenchComposer: React.FC<ImageWorkbenchComposerProps> = (props) =>
             />
             <Input.TextArea
               value={prompt}
-              rows={6}
+              rows={5}
               placeholder={t('creativeStudio.image.prompt.sidePlaceholder', {
                 defaultValue: '描述画面主体、风格、构图、光线和用途',
               })}
@@ -664,13 +610,13 @@ const ImageWorkbenchComposer: React.FC<ImageWorkbenchComposerProps> = (props) =>
           </div>
         </section>
 
-        <section className={styles.composerSection}>
-          <div className={styles.sectionHeader}>
+        <section className={`${styles.composerSection} ${composerStyles.section}`}>
+          <div className={composerStyles.sectionHeading}>
             <span>{t('creativeStudio.image.references.title', { defaultValue: '参考图' })}</span>
-            <Tag>{references.length}</Tag>
+            <WorkbenchReferenceCount count={references.length} />
           </div>
           <div className={styles.sectionBody}>
-            <div className={styles.actionRow}>
+            {onPasteReferences || onUploadReferences ? <div className={styles.actionRow}>
               {onPasteReferences ? (
                 <Button size='small' icon={<Clipboard />} onClick={onPasteReferences}>
                   {t('creativeStudio.image.actions.clipboard', { defaultValue: '剪贴板' })}
@@ -681,30 +627,17 @@ const ImageWorkbenchComposer: React.FC<ImageWorkbenchComposerProps> = (props) =>
                   {t('creativeStudio.image.actions.upload', { defaultValue: '上传' })}
                 </Button>
               ) : null}
-              {onChooseReferences ? (
-                <Button size='small' icon={<FolderOpen />} onClick={onChooseReferences}>
-                  {t('creativeStudio.image.actions.chooseFromLibrary', {
-                    defaultValue: '从素材库选择',
-                  })}
-                </Button>
-              ) : null}
-            </div>
+            </div> : null}
             <ReferenceStrip
               references={references}
+              onAdd={onChooseReferences ?? onUploadReferences ?? onPasteReferences}
               uploadingCount={uploadingReferenceCount}
               onRemove={onRemoveReference}
             />
           </div>
         </section>
 
-        <section className={styles.composerSection}>
-          <div className={styles.sectionHeader}>
-            <span>
-              {t('creativeStudio.image.settings.generationParameters', {
-                defaultValue: '生成参数',
-              })}
-            </span>
-          </div>
+        <section className={`${styles.composerSection} ${composerStyles.section}`}>
           <div className={styles.sectionBody}>
             <SettingsFields
               settings={settings}
@@ -723,7 +656,7 @@ const ImageWorkbenchComposer: React.FC<ImageWorkbenchComposerProps> = (props) =>
         </section>
       </div>
 
-      <footer className={styles.generateFooter}>
+      <footer className={composerStyles.footer}>
         {task.message ? <span className={styles.taskMessage}>{task.message}</span> : null}
         <Button
           type='primary'

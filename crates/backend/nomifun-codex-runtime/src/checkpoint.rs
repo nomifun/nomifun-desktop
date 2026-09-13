@@ -238,20 +238,10 @@ pub fn admit_snapshot_executor(
         }
     }
 
-    for (id, contract) in &required.initial_capabilities {
+    for (id, contract) in &required.enabled_capabilities {
         if available.capabilities.get(id) != Some(contract) {
             mismatches.push(mismatch(
-                SnapshotContractMismatchKind::InitialCapability,
-                id.as_ref(),
-                render(contract),
-                available.capabilities.get(id).map(render),
-            ));
-        }
-    }
-    for (id, contract) in &required.on_demand_capabilities {
-        if available.capabilities.get(id) != Some(contract) {
-            mismatches.push(mismatch(
-                SnapshotContractMismatchKind::OnDemandCapability,
+                SnapshotContractMismatchKind::EnabledCapability,
                 id.as_ref(),
                 render(contract),
                 available.capabilities.get(id).map(render),

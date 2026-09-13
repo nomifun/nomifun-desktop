@@ -95,10 +95,3 @@
   overflow-wrap: anywhere;
   white-space: normal;
 }
-
-@media (max-width: 767px) {
-  .body {
-    font-size: var(--conversation-message-font-size, 14px);
-    line-height: var(--conversation-message-line-height, 22px);
-  }
-}

@@ -284,56 +284,6 @@ button.guidResourceCard:focus-visible {
   background: rgba(255, 255, 255, 0.08);
 }
 
-@media (max-width: 768px) {
-  .guidResourceCards {
-    grid-template-columns: 1fr;
-    gap: 10px;
-    margin-top: 16px;
-  }
-
-  .guidResourceCard {
-    height: auto;
-    min-height: 112px;
-  }
-
-  .guidCompanionPoster {
-    min-height: 356px;
-    grid-template-columns: 1fr;
-    gap: 14px;
-    padding: 18px 16px 16px;
-  }
-
-  .guidCompanionPosterCopy {
-    align-self: stretch;
-    text-align: left;
-  }
-
-  .guidCompanionPosterDescription {
-    max-width: none;
-  }
-
-  .guidCompanionPosterStage {
-    min-height: 220px;
-    justify-content: center;
-    gap: 0;
-  }
-
-  .guidCompanionPosterFigure {
-    flex-basis: 108px;
-  }
-
-  .guidCompanionPosterFigurePrimary {
-    flex-basis: 130px;
-  }
-
-  .guidCompanionPosterAvatar {
-    height: 154px;
-  }
-
-  .guidCompanionPosterFigure:not(.guidCompanionPosterFigurePrimary) .guidCompanionPosterAvatar {
-    height: 132px;
-  }
-}
 
 .guidAgentSelectorRow {
   display: flex;
@@ -706,68 +656,11 @@ button.guidResourceCard:focus-visible {
   border-radius: 50%;
 }
 
-/* 移动端优化 */
-@media (max-width: 768px) {
-  .guidLayout {
-    width: clamp(var(--app-min-width, 360px), calc(100% - 24px), 100%);
-    padding: 0 12px;
-    padding-bottom: 100px; /* 为底部快捷按钮留出空间 */
-    box-sizing: border-box;
-  }
-
-  .actionRow {
-    flex-wrap: nowrap;
-    gap: 8px;
-  }
-
-  .actionTools {
-    gap: 8px;
-    flex: 1 1 auto;
-    min-width: 0;
-    overflow-x: auto;
-    overflow-y: hidden;
-    white-space: nowrap;
-    -webkit-overflow-scrolling: touch;
-    scrollbar-width: none;
-  }
-
-  .actionTools::-webkit-scrollbar {
-    display: none;
-  }
-
-  .actionTools > * {
-    flex: 0 0 auto;
-  }
-
-  .actionEntry {
-    margin-right: 0;
-  }
-
-  .actionConfigGroup {
-    gap: 0;
-  }
-
-  .actionSubmit {
-    flex-shrink: 0;
-    margin-left: 8px;
-  }
-}
-
-/* 小屏手机再收窄一点安全边距，提升可操作面积 */
-@media (max-width: 420px) {
-  .guidLayout {
-    width: clamp(var(--app-min-width, 360px), calc(100% - 20px), 100%);
-    padding: 0 10px;
-  }
-}
-
-/* 移动端容器滚动支持 */
 .guidContainer {
   height: 100%;
   overflow-y: auto;
   overflow-x: hidden;
   position: relative;
-  -webkit-overflow-scrolling: touch;
 }
 
 .guidPrimaryStage {
@@ -790,15 +683,14 @@ button.guidResourceCard:focus-visible {
 }
 
 .guidDiscoveryArea {
-  width: clamp(var(--app-min-width, 360px), calc(100% - 32px), 800px);
+  width: min(calc(100% - 32px), 800px);
   max-width: 100%;
   margin: 0 auto;
-  padding: 22px 26px calc(132px + env(safe-area-inset-bottom, 0px));
+  padding: 22px 26px 132px;
   box-sizing: border-box;
 }
 
-/* 高级控件悬挂在内容区右上角 —— 与正常会话 ChatLayout header 右侧一致
-   （flex + gap:12px）。仅桌面端显示，移动端隐藏（与会话一致）。 */
+/* 高级控件悬挂在内容区右上角，与正常会话 ChatLayout header 右侧一致。 */
 .guidAdvancedControls {
   position: absolute;
   top: 14px;
@@ -813,33 +705,12 @@ button.guidResourceCard:focus-visible {
   margin-bottom: 12px;
 }
 
-@media (max-width: 768px) {
-  .guidAdvancedControls {
-    display: none;
-  }
-}
 
-/* 底部快捷按钮：基础间距 + 安全区 */
+/* 底部快捷按钮 */
 .guidQuickActions {
-  bottom: calc(32px + env(safe-area-inset-bottom, 0px));
+  bottom: 32px;
 }
 
-@media (max-width: 768px) {
-  .guidPrimaryStage {
-    justify-content: flex-start;
-    padding-top: 20px;
-    min-height: auto;
-  }
-
-  .guidPrimaryStage .guidLayout {
-    margin-top: 0;
-  }
-
-  .guidDiscoveryArea {
-    width: clamp(var(--app-min-width, 360px), calc(100% - 20px), 100%);
-    padding: 16px 20px calc(108px + env(safe-area-inset-bottom, 0px));
-  }
-}
 
 /* 浅色占位符 */
 .lightPlaceholder :global(textarea::placeholder) {
@@ -848,38 +719,3 @@ button.guidResourceCard:focus-visible {
 }
 
 /* 设定标签 */
-/* 移动端设定标签优化 */
-@media (max-width: 768px) {
-  .actionTools {
-    gap: 6px;
-    flex: 1 1 auto;
-    min-width: 0;
-    overflow-x: auto;
-    overflow-y: hidden;
-    white-space: nowrap;
-    -webkit-overflow-scrolling: touch;
-    touch-action: pan-x;
-  }
-}
-
-/* iPhone专门优化 */
-@supports (-webkit-touch-callout: none) {
-  .actionRow {
-    flex-wrap: nowrap !important;
-  }
-
-  .actionTools {
-    flex: 1 1 auto;
-    min-width: 0;
-    overflow-x: auto;
-    overflow-y: hidden;
-    white-space: nowrap;
-    -webkit-overflow-scrolling: touch;
-    touch-action: pan-x;
-  }
-
-  .actionSubmit {
-    flex-shrink: 0;
-  }
-
-}

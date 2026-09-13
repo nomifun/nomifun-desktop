@@ -44,7 +44,7 @@ import { isExecutableAgentPreset } from '@/renderer/pages/guid/hooks/agentSelect
 import { prepareOfficialAgent } from '@/renderer/pages/guid/hooks/officialAgentLaunch';
 import { TEMPLATE_I18N_PATH } from '@/renderer/pages/agentSettings/model';
 import type { GuidAgentSelection } from '@/renderer/pages/guid/types';
-import type { AgentPresetId, OfficialPresetKey } from '@/common/types/agentPlatform';
+import type { AgentPresetId } from '@/common/types/agentPlatform';
 import AgentResourcePicker from '@/renderer/components/agent/AgentResourcePicker';
 import {
   requiredAgentResourcePickerKinds,
@@ -102,7 +102,6 @@ const NomiConversationLayout: React.FC<{
   chatLayoutProps: Omit<ChatLayoutProps, 'children' | 'workspaceCollaboration' | 'workspaceExtraTabs'>;
   modelSelection: React.ComponentProps<typeof NomiChat>['modelSelection'];
   agentSelectorNode?: React.ReactNode;
-  agentSelection?: React.ComponentProps<typeof NomiChat>['agentSelection'];
   collaborationControlNode: React.ReactNode;
   presetPresetName?: string;
 }> = ({
@@ -110,7 +109,6 @@ const NomiConversationLayout: React.FC<{
   chatLayoutProps,
   modelSelection,
   agentSelectorNode,
-  agentSelection,
   collaborationControlNode,
   presetPresetName,
 }) => {
@@ -128,7 +126,6 @@ const NomiConversationLayout: React.FC<{
         workspace={conversation.extra.workspace}
         modelSelection={modelSelection}
         agentSelectorNode={agentSelectorNode}
-        agentSelection={agentSelection}
         cron_job_id={conversation.cron_job_id}
         loadedSkills={(conversation.extra as { skills?: string[] } | undefined)?.skills}
         loadedMcpStatuses={
@@ -471,8 +468,8 @@ const NomiConversationPanel: React.FC<{
         name,
         requiredResourceKinds: [...template.seed.required_resource_kinds],
         capabilityIds: [
-          ...template.seed.initial_capabilities,
-          ...template.seed.on_demand_capabilities,
+          ...template.seed.enabled_capabilities,
+
         ].map((capability) => capability.id),
       };
     }
@@ -486,8 +483,8 @@ const NomiConversationPanel: React.FC<{
       ipcBridge.agentPlatform.capabilities.invoke(),
     ]);
     const capabilityReferences = [
-      ...editor.draft.document.initial_capabilities,
-      ...editor.draft.document.on_demand_capabilities,
+      ...editor.draft.document.enabled_capabilities,
+
     ].map((entry) => entry.capability);
     return {
       conversationId: conversation.id,
@@ -637,41 +634,6 @@ const NomiConversationPanel: React.FC<{
       onSelectTemplate={(templateKey) => void switchAgent({ kind: 'template', templateKey })}
     />
   ) : undefined;
-  const mobileAgentSelection = useMemo(() => {
-    if (!hasPreset) return undefined;
-    const templateOptions = (agentLibrary?.official_templates ?? []).map((template) => ({
-      key: `template:${template.template_key}`,
-      label: t(`agentSettings.template.${TEMPLATE_I18N_PATH[template.template_key]}.name`),
-      active: agentChoice.kind === 'template' && agentChoice.templateKey === template.template_key,
-    }));
-    const presetOptions = executableAgentPresets.map((preset) => ({
-      key: `preset:${preset.preset_id}`,
-      label: preset.display_name,
-      description: preset.description,
-      active: agentChoice.kind === 'preset' && agentChoice.presetId === preset.preset_id,
-    }));
-    return {
-      label: currentAgentLabel,
-      options: [...templateOptions, ...presetOptions],
-      disabled: agentSwitching,
-      onSelect: (key: string) => {
-        if (key.startsWith('template:')) {
-          void switchAgent({ kind: 'template', templateKey: key.slice('template:'.length) as OfficialPresetKey });
-        } else if (key.startsWith('preset:')) {
-          void switchAgent({ kind: 'preset', presetId: key.slice('preset:'.length) as AgentPresetId });
-        }
-      },
-    };
-  }, [
-    agentChoice,
-    agentLibrary?.official_templates,
-    agentSwitching,
-    currentAgentLabel,
-    executableAgentPresets,
-    hasPreset,
-    switchAgent,
-    t,
-  ]);
   const presetResourceKinds = new Set(
     conversation.agent_snapshot?.required_resource_kinds ?? []
   );
@@ -680,6 +642,8 @@ const NomiConversationPanel: React.FC<{
     (!hasPreset || presetResourceKinds.has('workspace'));
   const knowledgeEnabled =
     !hasPreset || presetResourceKinds.has('knowledge_base');
+  const hideAdvancedControls = hasPreset &&
+    (conversation.agent_snapshot?.enabled_capabilities.length ?? 0) === 0;
   const sshHostId = sshHostIdOf(conversation);
 
   const chatLayoutProps = {
@@ -690,18 +654,15 @@ const NomiConversationPanel: React.FC<{
       <div className='flex items-center gap-8px'>
         {/* An SSH-bound session is indistinguishable from a local one everywhere
             else in the chrome, so the host it drives — and whether the link is
-            actually up — leads the header. It is also the one control kept on
-            mobile (ChatLayout portals headerExtra into the mobile actions slot):
-            knowing which machine you are typing at matters more on a phone, not
-            less. */}
+            actually up — leads the header. */}
         {sshHostId ? <SshHostStatusPill conversationId={conversation.id} sshHostId={sshHostId} /> : null}
         {/* The collaboration canvas lives beside the mounted conversation; the
             header keeps the existing capability controls. */}
-        <CronJobManager
+        {!hideAdvancedControls && <CronJobManager
           conversation_id={conversation.id}
           cron_job_id={conversation.cron_job_id}
           hasCronSkill={hasLoadedSkill(conversation, 'cron')}
-        />
+        />}
       </div>
     ),
     workspaceEnabled,
@@ -711,6 +672,7 @@ const NomiConversationPanel: React.FC<{
     backend: 'nomi' as const,
     preset: presetPresetInfo ?? undefined,
     knowledgeEnabled,
+    hideAdvancedControls,
   };
 
   return (
@@ -720,7 +682,6 @@ const NomiConversationPanel: React.FC<{
         chatLayoutProps={chatLayoutProps}
         modelSelection={modelSelection}
         agentSelectorNode={agentSelectorNode}
-        agentSelection={mobileAgentSelection}
         collaborationControlNode={collaborationControlNode}
         presetPresetName={presetPresetInfo?.name}
       />

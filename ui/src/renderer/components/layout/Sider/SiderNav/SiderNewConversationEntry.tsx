@@ -13,7 +13,6 @@ import type { SiderTooltipProps } from '@renderer/utils/ui/siderTooltip';
 import styles from '../Sider.module.css';
 
 type SiderNewConversationEntryProps = {
-  isMobile: boolean;
   collapsed: boolean;
   siderTooltipProps: SiderTooltipProps;
   onClick: () => void;
@@ -22,7 +21,6 @@ type SiderNewConversationEntryProps = {
 };
 
 const SiderNewConversationEntry: React.FC<SiderNewConversationEntryProps> = ({
-  isMobile,
   collapsed,
   siderTooltipProps,
   onClick,
@@ -78,8 +76,7 @@ const SiderNewConversationEntry: React.FC<SiderNewConversationEntryProps> = ({
   return (
     <div
       className={classNames(
-        'h-34px w-full flex items-stretch shrink-0 rd-0.5rem overflow-hidden border border-solid border-[var(--color-border-2)]',
-        isMobile && 'sider-action-btn-mobile'
+        'h-34px w-full flex items-stretch shrink-0 rd-0.5rem overflow-hidden border border-solid border-[var(--color-border-2)]'
       )}
     >
       <Tooltip {...siderTooltipProps} content={label} position='right'>

@@ -10,7 +10,6 @@ import { isSubmitGesture } from '@/renderer/hooks/chat/useCompositionInput';
 import { appendSpeechTranscript } from '@/renderer/hooks/system/useSpeechInput';
 import SpeechInputButton from '@/renderer/components/chat/SpeechInputButton';
 import SessionCapabilityPicker, {
-  SessionCapabilityComposerLayout,
   buildSessionCapabilitySelection,
   defaultSessionCapabilityDraft,
   useSessionCapabilityCatalog,
@@ -19,13 +18,13 @@ import SessionCapabilityPicker, {
 import FeedbackReportModal from '@/renderer/components/settings/SettingsModal/contents/FeedbackReportModal';
 import AutoWorkControl from '@/renderer/pages/conversation/components/AutoWorkControl';
 import IdmmControl from '@/renderer/pages/conversation/components/IdmmControl';
+import KnowledgeControl from '@/renderer/pages/conversation/components/KnowledgeControl';
 import { usePendingConversation } from '@/renderer/pages/conversation/components/ConversationShell/PendingConversationContext';
 import AgentResourcePicker from '@/renderer/components/agent/AgentResourcePicker';
 import {
   resolveAgentResourceSelections,
   type AgentResourceSelectionValue,
 } from '@/renderer/hooks/agent/agentResourceSelection';
-import { parseKnowledgeBaseId } from '@/common/types/ids';
 import { Alert, ConfigProvider } from '@arco-design/web-react';
 import React, {
   useCallback,
@@ -109,7 +108,6 @@ const GuidPage: React.FC = () => {
       : undefined
   );
 
-  const isAutoWorkMode = isAutoWorkEntry(advancedConfig.autoWork);
   const presetResourceResolutionReady = agentSelection.selection.kind === 'template'
     ? Boolean(agentSelection.selectedTemplate)
     : !presetCapabilities.isLoading && !presetCapabilities.error;
@@ -118,14 +116,33 @@ const GuidPage: React.FC = () => {
     : presetCapabilities.requiredResourceKinds;
   const presetCapabilityIds = agentSelection.selectedTemplate
     ? new Set([
-        ...agentSelection.selectedTemplate.seed.initial_capabilities,
-        ...agentSelection.selectedTemplate.seed.on_demand_capabilities,
+        ...agentSelection.selectedTemplate.seed.enabled_capabilities,
+
       ].map((capability) => capability.id))
     : presetCapabilities.capabilityIds;
-  const resourceSelectionResolution = resolveAgentResourceSelections(presetResourceKinds, resourceSelectionValue);
+  // Knowledge is an optional, session-scoped mount. It keeps its compact
+  // KnowledgeControl interaction and is applied after the conversation exists;
+  // only resources that truly gate launch belong in the large resource picker.
+  const knowledgeEnabled =
+    presetResourceResolutionReady && presetResourceKinds.has('knowledge_base');
+  const resourcePickerKinds = new Set(
+    [...presetResourceKinds].filter((kind) => kind !== 'knowledge_base')
+  );
+  const resourceSelectionResolution = resolveAgentResourceSelections(
+    resourcePickerKinds,
+    resourceSelectionValue
+  );
+  const advancedControlsEnabled = presetResourceResolutionReady && presetCapabilityIds.size > 0;
+  const effectiveAutoWork = advancedControlsEnabled ? advancedConfig.autoWork : { enabled: false };
+  const isAutoWorkMode = isAutoWorkEntry(effectiveAutoWork);
   const resourceSelectionsReady = presetResourceResolutionReady && resourceSelectionResolution.missingKinds.length === 0;
+  // A workspace chosen before the Agent target (for example from a project
+  // drawer's "new conversation" action) is explicit user intent. Keep that
+  // project context visible and bind it on send even when the selected target
+  // does not otherwise expose an optional workspace picker.
   const workspaceEnabled =
-    presetResourceResolutionReady && presetResourceKinds.has('workspace');
+    Boolean(guidInput.dir.trim()) ||
+    (presetResourceResolutionReady && presetResourceKinds.has('workspace'));
   const hasAgentLaunchTarget = agentSelection.selection.kind === 'template'
     ? Boolean(agentSelection.selectedTemplate)
     : Boolean(
@@ -165,13 +182,14 @@ const GuidPage: React.FC = () => {
   useEffect(() => {
     if (capabilityCatalog.loading || capabilityCatalog.error) return;
     setCapabilityDraft(
-      defaultSessionCapabilityDraft(capabilityCatalog.catalog, presetSkillNames)
+      defaultSessionCapabilityDraft(capabilityCatalog.catalog, presetSkillNames, advancedControlsEnabled)
     );
   }, [
     capabilityCatalog.catalog,
     capabilityCatalog.error,
     capabilityCatalog.loading,
     presetSkillNamesKey,
+    advancedControlsEnabled,
     selectedAgentResourceKey,
   ]);
 
@@ -216,9 +234,10 @@ const GuidPage: React.FC = () => {
     current_model: modelSelection.current_model,
     applyAdvancedConfig: (conversationId) =>
       advancedConfig.applyToConversation(conversationId, {
-        allowKnowledgeBinding: presetResourceKinds.has('knowledge_base'),
+        allowKnowledgeBinding: knowledgeEnabled,
+        allowAutomation: advancedControlsEnabled,
       }),
-    autoWork: advancedConfig.autoWork,
+    autoWork: effectiveAutoWork,
     workspaceEnabled,
     resourceResolutionReady: resourceSelectionsReady,
     resourceSelections: resourceSelectionResolution.selections,
@@ -377,16 +396,6 @@ const GuidPage: React.FC = () => {
     ]
   );
 
-  const handleResourceSelectionChange = useCallback((next: AgentResourceSelectionValue) => {
-    setResourceSelectionValue(next);
-    if (next.knowledge_base === resourceSelectionValue.knowledge_base) return;
-    advancedConfig.setKnowledge({
-      ...advancedConfig.knowledge,
-      enabled: Boolean(next.knowledge_base),
-      kb_ids: next.knowledge_base ? [parseKnowledgeBaseId(next.knowledge_base)] : [],
-    });
-  }, [advancedConfig.knowledge, advancedConfig.setKnowledge, resourceSelectionValue.knowledge_base]);
-
   const typewriterPlaceholder = useTypewriterPlaceholder(
     t('conversation.welcome.placeholder')
   );
@@ -457,26 +466,40 @@ const GuidPage: React.FC = () => {
     />
   );
 
-  const advancedControlsNode = (
+  const advancedControlsNode = knowledgeEnabled || advancedControlsEnabled ? (
     <>
-      <AutoWorkControl
-        key={`autowork-${location.key}`}
-        draft={{
-          value: advancedConfig.autoWork,
-          onChange: advancedConfig.setAutoWork,
-        }}
-        applyNote={t('guid.advanced.applyNote')}
-      />
-      <IdmmControl
-        key={`idmm-${location.key}`}
-        draft={{
-          value: advancedConfig.idmm,
-          onChange: advancedConfig.setIdmm,
-        }}
-        applyNote={t('guid.advanced.applyNote')}
-      />
+      {knowledgeEnabled && (
+        <KnowledgeControl
+          key={`knowledge-${location.key}`}
+          draft={{
+            value: advancedConfig.knowledge,
+            onChange: advancedConfig.setKnowledge,
+          }}
+          applyNote={t('guid.advanced.applyNote')}
+        />
+      )}
+      {advancedControlsEnabled && (
+        <>
+          <AutoWorkControl
+            key={`autowork-${location.key}`}
+            draft={{
+              value: advancedConfig.autoWork,
+              onChange: advancedConfig.setAutoWork,
+            }}
+            applyNote={t('guid.advanced.applyNote')}
+          />
+          <IdmmControl
+            key={`idmm-${location.key}`}
+            draft={{
+              value: advancedConfig.idmm,
+              onChange: advancedConfig.setIdmm,
+            }}
+            applyNote={t('guid.advanced.applyNote')}
+          />
+        </>
+      )}
     </>
-  );
+  ) : null;
 
   const modelSelectorNode = (
     <GuidModelSelector
@@ -541,8 +564,8 @@ const GuidPage: React.FC = () => {
               />
             )}
 
-            <SessionCapabilityComposerLayout
-              picker={
+            <GuidInputCard
+              sideTools={
                 <SessionCapabilityPicker
                   catalog={capabilityCatalog.catalog}
                   draft={effectiveCapabilityDraft}
@@ -555,65 +578,62 @@ const GuidPage: React.FC = () => {
                   lockedMcpServerIds={lockedMcpServerIds}
                 />
               }
-            >
-              <GuidInputCard
-                input={guidInput.input}
-                onInputChange={handleInputChange}
-                onKeyDown={handleInputKeyDown}
-                onPaste={guidInput.onPaste}
-                onFocus={guidInput.handleTextareaFocus}
-                onBlur={guidInput.handleTextareaBlur}
-                placeholder={normalPlaceholder}
-                isInputActive={guidInput.isInputFocused}
-                isFileDragging={guidInput.isFileDragging}
-                activeBorderColor={activeBorderColor}
-                inactiveBorderColor={inactiveBorderColor}
-                activeShadow={activeShadow}
-                dragHandlers={guidInput.dragHandlers}
-                mentionOpen={mention.mentionOpen}
-                mentionSelectorBadge={
-                  <MentionSelectorBadge
-                    visible={mention.mentionSelectorVisible}
-                    open={mention.mentionSelectorOpen}
-                    onOpenChange={mention.setMentionSelectorOpen}
-                    agentLabel={mention.selectedAgentLabel}
-                    mentionMenu={mentionDropdownNode}
-                    onResetQuery={() => mention.setMentionQuery(null)}
-                  />
-                }
-                mentionDropdown={mentionDropdownNode}
-                files={guidInput.files}
-                onRemoveFile={guidInput.handleRemoveFile}
-                actionRow={actionRowNode}
-                showWorkspace={workspaceEnabled}
-                workspaceDir={guidInput.dir}
-                onSelectWorkspace={guidInput.setDir}
-                onClearWorkspace={() => guidInput.setDir('')}
-                agentSelector={
-                  <GuidAgentSelector
-                    presets={agentSelection.presets}
-                    draftPresets={agentSelection.draftPresets}
-                    officialTemplates={agentSelection.officialTemplates}
-                    selection={agentSelection.selection}
-                    isLoading={agentSelection.isLoading}
-                    loadError={agentSelection.loadError}
-                    onRetry={agentSelection.refreshPresets}
-                    onSelectPreset={(presetId) =>
-                      handleSelectAgent({ kind: 'preset', presetId })
-                    }
-                    onSelectTemplate={(templateKey) =>
-                      handleSelectAgent({ kind: 'template', templateKey })
-                    }
-                  />
-                }
-              />
-            </SessionCapabilityComposerLayout>
+              input={guidInput.input}
+              onInputChange={handleInputChange}
+              onKeyDown={handleInputKeyDown}
+              onPaste={guidInput.onPaste}
+              onFocus={guidInput.handleTextareaFocus}
+              onBlur={guidInput.handleTextareaBlur}
+              placeholder={normalPlaceholder}
+              isInputActive={guidInput.isInputFocused}
+              isFileDragging={guidInput.isFileDragging}
+              activeBorderColor={activeBorderColor}
+              inactiveBorderColor={inactiveBorderColor}
+              activeShadow={activeShadow}
+              dragHandlers={guidInput.dragHandlers}
+              mentionOpen={mention.mentionOpen}
+              mentionSelectorBadge={
+                <MentionSelectorBadge
+                  visible={mention.mentionSelectorVisible}
+                  open={mention.mentionSelectorOpen}
+                  onOpenChange={mention.setMentionSelectorOpen}
+                  agentLabel={mention.selectedAgentLabel}
+                  mentionMenu={mentionDropdownNode}
+                  onResetQuery={() => mention.setMentionQuery(null)}
+                />
+              }
+              mentionDropdown={mentionDropdownNode}
+              files={guidInput.files}
+              onRemoveFile={guidInput.handleRemoveFile}
+              actionRow={actionRowNode}
+              showWorkspace={workspaceEnabled}
+              workspaceDir={guidInput.dir}
+              onSelectWorkspace={guidInput.setDir}
+              onClearWorkspace={() => guidInput.setDir('')}
+              agentSelector={
+                <GuidAgentSelector
+                  presets={agentSelection.presets}
+                  draftPresets={agentSelection.draftPresets}
+                  officialTemplates={agentSelection.officialTemplates}
+                  selection={agentSelection.selection}
+                  isLoading={agentSelection.isLoading}
+                  loadError={agentSelection.loadError}
+                  onRetry={agentSelection.refreshPresets}
+                  onSelectPreset={(presetId) =>
+                    handleSelectAgent({ kind: 'preset', presetId })
+                  }
+                  onSelectTemplate={(templateKey) =>
+                    handleSelectAgent({ kind: 'template', templateKey })
+                  }
+                />
+              }
+            />
 
             <AgentResourcePicker
-              requiredKinds={presetResourceKinds}
+              requiredKinds={resourcePickerKinds}
               capabilityIds={presetCapabilityIds}
               value={resourceSelectionValue}
-              onChange={handleResourceSelectionChange}
+              onChange={setResourceSelectionValue}
               disabled={guidInput.loading || !presetResourceResolutionReady}
             />
 

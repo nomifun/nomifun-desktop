@@ -126,16 +126,11 @@ pub fn evaluate_snapshot_compatibility(
 
     compare_map(
         &mut mismatches,
-        SnapshotContractMismatchKind::InitialCapability,
-        &required.initial_capabilities,
+        SnapshotContractMismatchKind::EnabledCapability,
+        &required.enabled_capabilities,
         &available.capabilities,
     );
-    compare_map(
-        &mut mismatches,
-        SnapshotContractMismatchKind::OnDemandCapability,
-        &required.on_demand_capabilities,
-        &available.capabilities,
-    );
+
     compare_map(
         &mut mismatches,
         SnapshotContractMismatchKind::Package,

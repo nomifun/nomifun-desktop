@@ -442,22 +442,3 @@
     display: none;
   }
 }
-@media (max-width: 800px) {
-  .editor {
-    grid-template-columns: 1fr;
-    overflow-y: auto;
-  }
-  .chat {
-    min-height: 330px;
-    border-right: 0;
-  }
-  .preview {
-    min-height: 450px;
-  }
-  .body {
-    overflow-y: auto;
-  }
-  .content {
-    overflow: visible;
-  }
-}

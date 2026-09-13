@@ -6,7 +6,6 @@
 import React from 'react';
 
 export interface LayoutContextValue {
-  isMobile: boolean;
   siderCollapsed: boolean;
   setSiderCollapsed: (value: boolean) => void;
 }

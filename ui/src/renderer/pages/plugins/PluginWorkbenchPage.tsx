@@ -249,8 +249,8 @@ const PluginWorkbenchPage: React.FC = () => {
         if (canceled) return;
         setAgentUsage(editors.flatMap(({ preset, editor }) => {
           const selected = [
-            ...editor.draft.document.initial_capabilities,
-            ...editor.draft.document.on_demand_capabilities,
+            ...editor.draft.document.enabled_capabilities,
+
           ].filter((selection) =>
             capabilityKeys.has(`${selection.capability.id}@${selection.capability.version}`)
           );

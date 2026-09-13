@@ -1,5 +1,21 @@
 # Repository Guidelines
 
+## Supported UI targets
+
+- `nomifun-desktop` supports the Tauri desktop shell and desktop-class WebUI
+  browsers only. The shared renderer's minimum supported viewport is 880x600,
+  matching the desktop window contract.
+- Do not add phone or tablet layouts, mobile drawers/action sheets, touch-only
+  fallbacks, safe-area rules, or viewport breakpoints below 880px. Do not use
+  device, user-agent, or touch detection to select renderer layouts. Use
+  container queries for narrow panes inside a supported desktop layout when
+  necessary.
+- Do not run or add phone emulation, mobile viewport snapshots, or mobile-only
+  UI acceptance cases. Keep the separate Mobile product and remote-client wire
+  compatibility out of renderer layout decisions.
+- Run `bun run check:desktop-ui-boundary` after renderer or UI-rule changes.
+  Changing this target contract requires an explicit product decision.
+
 ## Efficient validation
 
 - Choose the smallest checks that directly cover the files and behavior being

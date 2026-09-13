@@ -20,7 +20,7 @@ use nomifun_agent_contracts::{
     agent_session_query_service_ref, digest_payload,
 };
 use nomifun_agent_kernel::{
-    ActivationOutcome, PluginRegistration, ServiceKey,
+    PluginRegistration, ServiceKey,
 };
 use nomifun_agent_session::{
     DeleteResult, ForkRequest, ForkResult, SessionCreateResult,
@@ -29,7 +29,7 @@ use nomifun_agent_session::{
 };
 
 use crate::{
-    ActivateCapabilityRequest, AgentPlatform, AgentPlatformError,
+    AgentPlatform, AgentPlatformError,
     AgentSessionCommandPort, AgentSessionDeletePort, AgentSessionQueryPort,
     AgentTurnDispatch, InvokeCapabilityCommand, OpenAgentSessionRequest,
     StartAgentTurnRequest,
@@ -136,17 +136,6 @@ impl AgentSessionCommandPort for AgentSessionServiceProxy {
         request: StartAgentTurnRequest,
     ) -> Result<AgentTurnDispatch, AgentPlatformError> {
         AgentSessionCommandPort::start_turn(
-            self.platform()?.as_ref(),
-            request,
-        )
-        .await
-    }
-
-    async fn activate_capability(
-        &self,
-        request: ActivateCapabilityRequest,
-    ) -> Result<ActivationOutcome, AgentPlatformError> {
-        AgentSessionCommandPort::activate_capability(
             self.platform()?.as_ref(),
             request,
         )

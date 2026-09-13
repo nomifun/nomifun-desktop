@@ -18,7 +18,6 @@ import type { ICssTheme } from '@/common/config/storage';
 import type { SiderTooltipProps } from '@renderer/utils/ui/siderTooltip';
 
 interface SiderThemeControlProps {
-  isMobile: boolean;
   collapsed: boolean;
   siderTooltipProps: SiderTooltipProps;
 }
@@ -33,11 +32,10 @@ const pickAccent = (css: string): string | null => {
   return value;
 };
 
-const footerButtonClass = (collapsed: boolean, isMobile: boolean, active: boolean) =>
+const footerButtonClass = (collapsed: boolean, active: boolean) =>
   classNames(
     'h-28px shrink-0 flex items-center justify-center cursor-pointer rd-0.5rem transition-colors',
     collapsed ? 'w-full' : 'w-36px',
-    isMobile && 'sider-footer-btn-mobile',
     active ? '!bg-primary-1 !text-primary-6' : 'text-t-secondary hover:bg-fill-2 hover:text-t-primary active:bg-fill-3'
   );
 
@@ -51,7 +49,7 @@ const footerButtonClass = (collapsed: boolean, isMobile: boolean, active: boolea
  * affordance and a trailing "add CSS" entry, both opening the self-contained
  * `CssThemeModal` — so the dedicated Display page can be dissolved entirely.
  */
-const SiderThemeControl: React.FC<SiderThemeControlProps> = ({ isMobile, collapsed, siderTooltipProps }) => {
+const SiderThemeControl: React.FC<SiderThemeControlProps> = ({ collapsed, siderTooltipProps }) => {
   const { t } = useTranslation();
   const { themes, activeThemeId, selectTheme, saveUserTheme, deleteUserTheme } = useCssTheme();
   const [popupVisible, setPopupVisible] = useState(false);
@@ -184,7 +182,7 @@ const SiderThemeControl: React.FC<SiderThemeControlProps> = ({ isMobile, collaps
         unmountOnExit
       >
         <Tooltip {...siderTooltipProps} content={t('settings.theme')} position='right'>
-          <div className={footerButtonClass(collapsed, isMobile, popupVisible)} aria-label={t('settings.theme')}>
+          <div className={footerButtonClass(collapsed, popupVisible)} aria-label={t('settings.theme')}>
             <Theme theme='outline' size='18' fill='currentColor' className='block leading-none' style={{ lineHeight: 0 }} />
           </div>
         </Tooltip>

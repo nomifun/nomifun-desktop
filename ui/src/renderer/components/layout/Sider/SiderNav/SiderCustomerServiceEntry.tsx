@@ -12,7 +12,6 @@ import classNames from 'classnames';
 import type { SiderTooltipProps } from '@renderer/utils/ui/siderTooltip';
 
 interface SiderCustomerServiceEntryProps {
-  isMobile: boolean;
   isActive: boolean;
   collapsed: boolean;
   siderTooltipProps: SiderTooltipProps;
@@ -21,7 +20,6 @@ interface SiderCustomerServiceEntryProps {
 
 /** 客服 (Customer Service) — top-level rail entry under the 服务 group. Mirrors SiderNomiEntry. */
 const SiderCustomerServiceEntry: React.FC<SiderCustomerServiceEntryProps> = ({
-  isMobile,
   isActive,
   collapsed,
   siderTooltipProps,
@@ -57,7 +55,6 @@ const SiderCustomerServiceEntry: React.FC<SiderCustomerServiceEntryProps> = ({
       <div
         className={classNames(
           'box-border group h-28px w-full flex items-center justify-start gap-8px pl-10px pr-8px rd-0.5rem cursor-pointer shrink-0 transition-all text-t-primary',
-          isMobile && 'sider-action-btn-mobile',
           isActive ? '!bg-primary-1 !text-primary-6' : 'hover:bg-fill-2 active:bg-fill-3'
         )}
         onClick={onClick}

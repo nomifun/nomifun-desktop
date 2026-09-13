@@ -1,6 +1,14 @@
 {
   "title": "创意工坊",
   "siderTitle": "创意工坊",
+  "workbenchSider": {
+    "collapse": "收起生成设置",
+    "expand": "展开生成设置",
+    "resize": "调整生成设置宽度",
+    "resizeHint": "拖动调整宽度，双击恢复默认宽度",
+    "resizeHeight": "调整生成设置高度",
+    "resizeHeightHint": "拖动调整高度，双击贴合内容"
+  },
   "focus": {
     "backToWorkbench": "返回工作台"
   },
@@ -1928,5 +1936,10 @@
       "updatedAt": "更新于 {{date}}",
       "variableCount": "{{count}} 个变量"
     }
+  },
+  "workbenchComposer": {
+    "referenceCount": "{{count}} 项",
+    "addMore": "继续添加",
+    "addImageReference": "添加图片参考"
   }
 }

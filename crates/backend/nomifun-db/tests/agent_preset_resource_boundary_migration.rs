@@ -59,13 +59,12 @@ async fn migration_066_retires_old_resource_bound_presets_without_deleting_histo
         "schema_version": "1.0.0",
         "model_route_refs": {},
         "chat_route_records": {},
-        "initial_capabilities": [{
+        "enabled_capabilities": [{
             "capability": {"id": "knowledge.search", "version": "1.0.0"},
             "action_allowlist": [],
             "resource_binding_refs": ["knowledge"]
         }],
-        "on_demand_capabilities": [],
-        "skill_bindings": [],
+                "skill_bindings": [],
         "resource_bindings": [{
             "binding_id": "knowledge",
             "resource_kind": "knowledge_base",
@@ -206,12 +205,11 @@ async fn migration_066_preserves_resource_neutral_presets_and_bindings() {
         "schema_version": "1.0.0",
         "model_route_refs": {},
         "chat_route_records": {},
-        "initial_capabilities": [{
+        "enabled_capabilities": [{
             "capability": {"id": "knowledge.search", "version": "1.0.0"},
             "action_allowlist": []
         }],
-        "on_demand_capabilities": [],
-        "skill_bindings": [],
+                "skill_bindings": [],
         "system_role_provider_overrides": {},
         "persona": "",
         "instructions": "",
@@ -311,9 +309,8 @@ async fn migration_066_retires_presets_with_legacy_snapshot_resources() {
         "schema_version": "1.0.0",
         "model_route_refs": {},
         "chat_route_records": {},
-        "initial_capabilities": [],
-        "on_demand_capabilities": [],
-        "skill_bindings": [],
+        "enabled_capabilities": [],
+                "skill_bindings": [],
         "system_role_provider_overrides": {},
         "persona": "",
         "instructions": "",

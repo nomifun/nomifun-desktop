@@ -1,13 +1,15 @@
 import type { AgentPresetLibraryResponse, AgentPresetSummary, OfficialPresetKey, OfficialPresetTemplate } from '@/common/types/agentPlatform';
 import { Button, Popconfirm } from '@arco-design/web-react';
-import { AddOne, Code, Customer, Delete, Loading, Magic, MessageOne, Robot, Search, User } from '@icon-park/react';
+import { AddOne, ExpandLeft, Code, Customer, Delete, Loading, Magic, MessageOne, Robot, Search, User } from '@icon-park/react';
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { TEMPLATE_I18N_PATH, templateCapabilityCount } from './model';
 import styles from './AgentSettingsPage.module.css';
+import ContentSider from '@/renderer/components/layout/ContentSider';
 
 type Selection = { kind: 'template'; template: OfficialPresetTemplate } | { kind: 'preset'; preset: AgentPresetSummary } | null;
 type Props = {
+  width?: number; resizeHandle?: React.ReactNode; onCollapse?: () => void;
   library: AgentPresetLibraryResponse; selection: Selection; busy: boolean; creating: boolean;
   openingPresetId: string | null; deletingPresetId: string | null;
   onSelectTemplate: (template: OfficialPresetTemplate) => void;
@@ -24,7 +26,7 @@ const TemplateIcon: React.FC<{ templateKey: OfficialPresetKey }> = ({ templateKe
 };
 
 const AgentPresetLibrary: React.FC<Props> = ({
-  library, selection, busy, creating, openingPresetId, deletingPresetId,
+  width = 300, resizeHandle, onCollapse, library, selection, busy, creating, openingPresetId, deletingPresetId,
   onSelectTemplate, onSelectPreset, onCreatePreset, onDeletePreset,
 }) => {
   const { t } = useTranslation();
@@ -38,16 +40,17 @@ const AgentPresetLibrary: React.FC<Props> = ({
   });
   const presets = library.user_presets.filter((preset) => matches(preset.display_name, preset.description));
 
-  return <aside className={styles.library} aria-label={t('agentSettings.library.ariaLabel')}>
+  return <ContentSider width={width} resizeHandle={resizeHandle} className={styles.library} ariaLabel={t('agentSettings.library.ariaLabel')} header={<>
     <div className={styles.libraryHeader}>
-      <div className={styles.libraryTitle}>{t('agentSettings.title')}</div>
-      <Button type='primary' size='small' icon={<AddOne theme='outline' size={15} />} loading={creating} disabled={busy} onClick={() => onCreatePreset(t('agentSettings.defaults.untitledName'))}>{t('agentSettings.actions.create')}</Button>
+      <div className={styles.libraryTitle}>{t('agentSettings.title')}<button type='button' onClick={onCollapse} aria-label={t('agentSettings.workbench.hideList')} title={t('agentSettings.workbench.hideList')}><ExpandLeft theme='outline' size={15} /></button></div>
+      <Button size='small' icon={<AddOne theme='outline' size={15} />} loading={creating} disabled={busy} onClick={() => onCreatePreset(t('agentSettings.defaults.untitledName'))}>{t('agentSettings.actions.create')}</Button>
     </div>
     <label className={styles.librarySearch}><Search theme='outline' size={15} /><input type='search' value={query} placeholder={t('agentSettings.workbench.librarySearch')} aria-label={t('agentSettings.workbench.librarySearch')} onChange={(event) => setQuery(event.target.value)} /></label>
     <div className={styles.libraryTabs} role='tablist' aria-label={t('agentSettings.library.title')}>
       <button type='button' role='tab' aria-selected={mode === 'mine'} onClick={() => setMode('mine')}>{t('agentSettings.workbench.mine')}<span>{library.user_presets.length}</span></button>
       <button type='button' role='tab' aria-selected={mode === 'official'} onClick={() => setMode('official')}>{t('agentSettings.workbench.official')}<span>{library.official_templates.length}</span></button>
     </div>
+    </>}>
     <div className={styles.libraryBody}>
       <p className={styles.libraryHint}>{t(mode === 'mine' ? 'agentSettings.workbench.myHint' : 'agentSettings.workbench.officialHint')}</p>
       {mode === 'official' ? <div className={styles.libraryList}>
@@ -76,7 +79,7 @@ const AgentPresetLibrary: React.FC<Props> = ({
       </div>}
       {(mode === 'mine' ? presets : templates).length === 0 && <div className={styles.libraryEmpty}><User theme='outline' size={26} /><strong>{t(query ? 'agentSettings.workbench.noAgents' : 'agentSettings.library.empty')}</strong>{!query && <Button size='small' type='text' onClick={() => setMode('official')}>{t('agentSettings.workbench.official')}</Button>}</div>}
     </div>
-  </aside>;
+  </ContentSider>;
 };
 
 export default AgentPresetLibrary;

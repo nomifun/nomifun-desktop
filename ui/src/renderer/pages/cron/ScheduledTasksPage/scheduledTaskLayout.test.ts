@@ -131,7 +131,7 @@ test('places localized status filters below the search input', () => {
   expect(pageSource.includes('rounded-8px px-9px py-4px text-13px leading-18px')).toBe(true);
 });
 
-test('uses a desktop more menu without changing the mobile switch contract', () => {
+test('uses a compact desktop more menu while preserving the switch contract', () => {
   expect(pageSource.includes("t('cron.page.list.action')")).toBe(false);
   expect(pageSource.includes("import ScheduledTaskActions from './ScheduledTaskActions'")).toBe(true);
   expect(pageSource.includes('deleteJob')).toBe(true);

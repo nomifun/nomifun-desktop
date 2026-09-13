@@ -103,7 +103,7 @@ describe('protected application runtime boundary', () => {
 
   test('reuses the default draggable titlebar and window controls', () => {
     expect(existsSync(legacyFocusTopBarUrl)).toBe(false);
-    expect(workbenchLayoutSource.includes('<Titlebar workspaceAvailable={workspaceAvailable} />')).toBe(true);
+    expect(workbenchLayoutSource.includes('<Titlebar />')).toBe(true);
     expect(workbenchLayoutSource.includes('<ArcoLayout.Sider')).toBe(true);
     expect(titlebarSource.includes('{showWindowControls && <WindowControls />}')).toBe(true);
     expect(windowControlsSource.includes('ipcBridge.windowControls.minimize.invoke()')).toBe(true);

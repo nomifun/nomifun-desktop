@@ -326,6 +326,17 @@ pub fn build_system_prompt(
     joined
 }
 
+/// A model-only conversation has no workspace, skill or memory authority.
+/// Keep its prompt independent of the full tool-using agent's scaffolding.
+pub fn build_chat_only_system_prompt(custom_prompt: Option<&str>) -> String {
+    let mut prompt = "You are NomiFun, a helpful conversational assistant. Answer the user's request directly and concisely. Do not introduce internal configuration or unavailable features unless asked.".to_owned();
+    if let Some(custom) = custom_prompt.map(str::trim).filter(|value| !value.is_empty()) {
+        prompt.push_str("\n\n");
+        prompt.push_str(custom);
+    }
+    prompt
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

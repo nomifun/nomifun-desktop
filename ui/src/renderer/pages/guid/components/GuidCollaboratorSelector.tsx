@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useContext, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import classNames from 'classnames';
 import { Button, Dropdown } from '@arco-design/web-react';
@@ -24,6 +24,8 @@ import ocStyles from '@/renderer/pages/conversation/execution/executionPlanEdito
 import GuidCollaborationTemplatePicker from './GuidCollaborationTemplatePicker';
 import type { AppliedCollaborationTemplate } from '@/renderer/components/collaboration/collaborationTemplateModel';
 import { useModelSelectorProviderLabel } from '@/renderer/hooks/agent/useModelSelectorProviderLabel';
+import { SessionComposerToolsContext } from '@/renderer/components/chat/SessionCapabilityPicker/ComposerLayout';
+import railStyles from '@/renderer/components/chat/SessionCapabilityPicker/styles.module.css';
 
 export type GuidAppliedCollaborationTemplate = AppliedCollaborationTemplate;
 
@@ -72,7 +74,17 @@ const GuidCollaboratorSelector: React.FC<GuidCollaboratorSelectorProps> = ({
 }) => {
   const { t } = useTranslation();
   const { providers, getAvailableModels, formatModelLabel, allPairs, hasModels, isLoading } = useExecutionModelPool();
-  const [open, setOpen] = useState(false);
+  const rail = useContext(SessionComposerToolsContext);
+  const [localOpen, setLocalOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const open = rail ? rail.openTool === 'collaboration' : localOpen;
+  const setOpen = (visible: boolean) => {
+    if (rail) {
+      rail.setOpenTool((current) => visible ? 'collaboration' : current === 'collaboration' ? undefined : current);
+    } else {
+      setLocalOpen(visible);
+    }
+  };
   const providerLabel = useModelSelectorProviderLabel();
 
   const availableKeys = useMemo(() => new Set(allPairs.map(encodePair)), [allPairs]);
@@ -195,6 +207,41 @@ const GuidCollaboratorSelector: React.FC<GuidCollaboratorSelectorProps> = ({
   );
 
   const visibleLabel = triggerLabel ?? label;
+
+  if (rail) {
+    return (
+      <Dropdown
+        trigger='click'
+        popupVisible={open}
+        onVisibleChange={setOpen}
+        droplist={panel}
+        position='tr'
+        triggerProps={{
+          getTargetDOMNode: () => triggerRef.current?.closest<HTMLElement>('[data-composer-surface]') ?? triggerRef.current!,
+          popupAlign: { top: 8, bottom: 8 },
+          escToClose: true,
+          updateOnScroll: true,
+        }}
+      >
+        <button
+          ref={triggerRef}
+          type='button'
+          className={classNames(railStyles.railButton, open && railStyles.active)}
+          disabled={isLoading}
+          aria-label={visibleLabel}
+          title={visibleLabel}
+          aria-expanded={open}
+          aria-haspopup='dialog'
+          aria-pressed={triggerActive}
+          data-testid='guid-collaborator-selector'
+          data-composer-tool-trigger='collaboration'
+        >
+          <Branch theme='outline' size={18} strokeWidth={2.5} fill='currentColor' />
+          {triggerActive && <span className={railStyles.statusDot} aria-hidden='true' />}
+        </button>
+      </Dropdown>
+    );
+  }
 
   return (
     <Dropdown trigger='click' popupVisible={open} onVisibleChange={setOpen} droplist={panel} position='tr'>

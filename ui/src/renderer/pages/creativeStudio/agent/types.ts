@@ -5,6 +5,7 @@
  */
 
 import type { CreativeModelSelectionRef } from '../models';
+import type { ReactNode } from 'react';
 
 export type CreativeStudioAgentView = 'chat' | 'history';
 export type CreativeStudioAgentPanelLoadState = 'loading' | 'ready' | 'failed';
@@ -113,6 +114,7 @@ export interface CreativeStudioAgentPanelProps {
   isRunning: boolean;
   errorMessage?: string;
   disabled?: boolean;
+  agentSelector?: ReactNode;
   onViewChange(view: CreativeStudioAgentView): void;
   onNewSession(): void;
   onSelectSession(sessionId: string): void;
