@@ -184,6 +184,14 @@ pub enum AgentRuntimeHandle {
 }
 
 impl AgentRuntimeHandle {
+    pub fn uses_nomi_recovery(&self) -> bool {
+        match self {
+            Self::Registered(runtime) => runtime.uses_nomi_recovery(),
+            Self::Nomi(_) => true,
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Mock(runtime) => runtime.agent_type() == AgentType::Nomi,
+        }
+    }
     /// Common `AgentRuntimeControl` view, regardless of variant.
     pub fn as_runtime(&self) -> &dyn AgentRuntimeControl {
         match self {

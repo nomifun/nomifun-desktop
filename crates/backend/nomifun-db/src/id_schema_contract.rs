@@ -62,6 +62,7 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "conversation_delivery_receipts",
     "conversation_execution_links",
     "conversation_mcp_servers",
+    "conversation_runtime_events",
     "conversations",
     "creation_tasks",
     "creative_studio_agent_proposal_receipts",
@@ -277,6 +278,9 @@ const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
     ("conversation_delivery_receipts", "conversation_id"),
     ("conversation_delivery_receipts", "message_id"),
     ("conversation_delivery_receipts", "operation_id"),
+    // Immutable receipt identity survives deletion of the Conversation projection.
+    ("conversation_runtime_events", "conversation_id"),
+    ("conversation_runtime_events", "model_operation_id"),
     ("conversations", "conversation_id"),
     ("conversations", "channel_chat_id"),
     ("cron_job_runs", "cron_job_run_id"),
@@ -979,6 +983,8 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     text_ref!("conversation_delivery_receipts", "projected_message_id" => "messages", "message_id", true, "idx_delivery_receipts_message_id", SetNull),
     text_ref!("conversation_delivery_receipts", "projected_conversation_id" => "conversations", "conversation_id", true, "idx_delivery_receipts_conversation_id", SetNull),
     text_ref!("conversation_delivery_receipts", "user_id" => "users", "user_id", false, "idx_delivery_receipts_user_id", KeepHistory),
+    opaque_text_ref!("conversation_runtime_events", "turn_operation_id" => "conversation_delivery_receipts", "operation_id", false, "idx_conversation_runtime_events_turn", Restrict)
+        .with_aggregate_scope("parent.conversation_id = child.conversation_id"),
     text_ref!("conversation_mcp_servers", "conversation_id" => "conversations", "conversation_id", false, "idx_conversation_mcp_servers_conversation_id", Cascade),
     text_ref!("conversation_mcp_servers", "mcp_server_id" => "mcp_servers", "mcp_server_id", false, "idx_conversation_mcp_servers_mcp_server_id", Cascade)
         .with_parent_predicate("parent.deleted_at IS NULL"),
@@ -1849,6 +1855,24 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
             &[
                 "BEFORE DELETE ON CONVERSATION_DELIVERY_RECEIPTS",
                 "RAISE( ABORT, 'CONVERSATION DELIVERY RECEIPTS ARE RETAINED INDEFINITELY' )",
+            ],
+        ),
+        (
+            "trg_conversation_runtime_engine_immutable",
+            &[
+                "BEFORE UPDATE OF EXTRA ON CONVERSATIONS",
+                "JSON_EXTRACT(OLD.EXTRA, '$.RUNTIME_ENGINE_BINDING') IS NOT JSON_EXTRACT(NEW.EXTRA, '$.RUNTIME_ENGINE_BINDING')",
+                "RAISE(ABORT, 'CONVERSATION RUNTIME ENGINE IS IMMUTABLE; FORK EXPLICITLY')",
+            ],
+        ),
+        (
+            "trg_conversation_runtime_event_owner",
+            &[
+                "BEFORE INSERT ON CONVERSATION_RUNTIME_EVENTS",
+                "R.OPERATION_ID = NEW.TURN_OPERATION_ID",
+                "R.CONVERSATION_ID = NEW.CONVERSATION_ID",
+                "R.KIND = 'TURN'",
+                "RAISE(ABORT, 'RUNTIME EVENT REQUIRES ITS CONVERSATION TURN RECEIPT')",
             ],
         ),
         (

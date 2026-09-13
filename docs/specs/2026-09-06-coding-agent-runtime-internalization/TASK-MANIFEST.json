@@ -20,7 +20,8 @@
     "CODEX-SOURCE-MANIFEST.json",
     "HANDOFF-REMOTE-INTEGRATION.zh.md",
     "LOCAL-INTEGRATION-2026-09-13.zh.md",
-    "RUNTIME-EXTENSIONS.zh.md"
+    "RUNTIME-EXTENSIONS.zh.md",
+    "PRODUCTION-INTEGRATION-2026-09-13.zh.md"
   ],
   "local_implementation": {
     "branch": "car/coding-engine",
@@ -50,21 +51,31 @@
     "target_base_sha": "08caa20d7",
     "source_tip": "ef5e53860",
     "imported_local_tip": "924b6dccb",
-    "implementation_commit": "6d87dc232",
-    "report": "LOCAL-INTEGRATION-2026-09-13.zh.md",
-    "production_wired": false,
+    "previous_implementation_commit": "6d87dc232",
+    "report": "PRODUCTION-INTEGRATION-2026-09-13.zh.md",
+    "production_wired": true,
+    "production_scope": "initial workspace File/Git tools only; not full CAR completion",
     "pushed": false,
     "broker_cancellation": "implemented and targeted tests passed; live provider not exercised",
     "runtime_extension": "RegisteredAgentRuntime and generic exact-build RuntimeEngineCatalog; Nomi uses the Registered production handle",
-    "coding_adapter": "CodingAgentRuntime implemented against required CodingRuntimeHost ports; fixture host only, not default product wiring",
+    "coding_adapter": "ConversationCodingHost installed in default product owner; real Broker/Kernel/Wave2 with joined effect cleanup and durable semantic records",
     "session_ownership": "CAR-D-019: retain current Conversation-backed Nomi-core owner; no duplicate SessionStore",
     "remaining_integration": [
-      "persist exact engine binding at canonical Session create/fork and validate on resume",
-      "install heterogeneous catalog and Coding factory in the default composition root",
-      "implement production CodingRuntimeHost using canonical history, broker causality and Kernel/Wave2 cleanup owners",
-      "user selection and default Desktop/Web/Remote/Automation end-to-end coverage"
+      "Process and long-lived resources; on-demand, Skills, MCP, MiniApps and attachments",
+      "full AGENTS context, compaction/checkpoint and exact abnormal-restart proof",
+      "Remote/Automation selection DTOs and complete consumer end-to-end coverage",
+      "per-tool multi-platform validation, signed build distribution and upgrade strategy"
     ],
     "checks": [
+      { "command": "cargo check -p nomifun-app --tests", "result": "passed after production integration" },
+      { "command": "cargo test -p nomifun-app --test coding_runtime_production --lib coding", "result": "production E2E 1 passed; cleanup/cancellation unit 3 passed; real file write, cold resume, exact binding, fork and custom factory dispatch" },
+      { "command": "cargo test -p nomifun-ai-agent --lib runtime_", "result": "71 passed including custom binding exclusion from Nomi provider and cached-slot drift rejection" },
+      { "command": "cargo test -p nomifun-db --test id_schema_contract", "result": "20 passed" },
+      { "command": "cargo test -p nomifun-app --test nomi_core_route_gap nomi_core_agent_session_projects_saved_chat_binding_without_internal_inputs -- --exact", "result": "1 passed; 37 filtered out" },
+      { "command": "bun test --cwd ui src/renderer/pages/guid/components/GuidRuntimeEngineSelector.test.tsx src/renderer/pages/guid/hooks/useGuidSend.behavior.test.tsx", "result": "10 passed; 45 assertions" },
+      { "command": "bun run typecheck", "result": "failed: environment missing bun:test declarations and resulting test-file typing errors; no reported production UI errors" }
+    ],
+    "previous_slice_checks": [
       { "command": "cargo test -p nomifun-coding-engine -p nomifun-chat-model-broker", "result": "Coding 40; Broker unit 10 and conformance 21 passed; doc-tests passed" },
       { "command": "cargo test -p nomifun-ai-agent --lib runtime_", "result": "70 passed" },
       { "command": "cargo test -p nomifun-ai-agent --lib coding_runtime::tests", "result": "7 passed" },
@@ -76,7 +87,7 @@
     ],
     "not_run": [
       "live paid Provider requests",
-      "Desktop UI E2E and Stable/Canary product admission: production wiring is not complete",
+      "Desktop visual E2E and Stable/Canary release admission",
       "macOS/Linux validation: Windows host",
       "full workspace suite and release packaging: outside the validated integration slice"
     ]
@@ -353,7 +364,8 @@
       "sequence": 5,
       "parallel_group": "owner-slices",
       "owner": "file-vcs-owner",
-      "status": "planned",
+      "status": "in_progress",
+      "follow_up": "Initial File/Patch/Git owners wired; real fs.write tested; remaining per-tool and platform validation required",
       "depends_on": [
         "CAR-03"
       ],
@@ -442,7 +454,7 @@
       "parallel_group": "central-integration",
       "owner": "central-integration-owner",
       "status": "in_progress",
-      "follow_up": "Open runtime/catalog/Coding adapter implemented; production owner ports and durable engine binding remain unwired",
+      "follow_up": "Default Conversation owner, exact binding, open factories, Coding Broker/Kernel host and UI selection wired; full context/process/ecosystem coverage remains",
       "depends_on": [
         "CAR-04",
         "CAR-05",

@@ -40,6 +40,14 @@ pub(crate) const FS_WATCH: &str = "fs.watch";
 pub(crate) const FS_SNAPSHOT: &str = "fs.snapshot";
 pub(crate) const VCS_PUSH: &str = "vcs.push";
 
+/// Stateless workspace operations usable by the Coding host. Nomi's native
+/// tool admission below remains unchanged, so tools are never registered twice.
+pub(crate) fn coding_capability_ids() -> BTreeSet<CapabilityId> {
+    ["fs.read", "fs.search", "fs.write", "fs.patch", "fs.delete",
+     "vcs.status", "vcs.diff", "vcs.stage", "vcs.commit"]
+        .into_iter().map(CapabilityId::from).collect()
+}
+
 const MAX_WATCH_EVENTS: usize = 256;
 const MAX_DEBOUNCE_IDENTITIES: usize = 1024;
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(200);
@@ -201,7 +209,7 @@ impl NomiCoreWave2Host {
         if !matches!(
             context.capability_id.as_ref(),
             FS_DELETE | FS_SNAPSHOT | VCS_PUSH
-        ) {
+        ) && !coding_capability_ids().contains(&context.capability_id) {
             return Err(Wave2HostPortError::unavailable(format!(
                 "{} is not owned by the Nomi-core Wave 2 workspace adapter",
                 context.capability_id.as_ref()

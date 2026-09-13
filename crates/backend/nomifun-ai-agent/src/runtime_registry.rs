@@ -480,6 +480,7 @@ impl RestartGovernor {
 /// Default implementation of [`AgentRuntimeRegistry`] using a concurrent hash map.
 #[derive(Clone)]
 pub struct InMemoryAgentRuntimeRegistry {
+    engine_bindings: Arc<DashMap<String, (Weak<OnceCell<AgentRuntimeHandle>>, Option<nomifun_api_types::RuntimeEngineBinding>)>>,
     runtimes: Arc<DashMap<String, RuntimeSlot>>,
     /// Slots whose awaitable teardown failed. They remain authoritative until
     /// the exact runtime's process exit is proven; a replacement must never be
@@ -525,6 +526,7 @@ pub struct InMemoryAgentRuntimeRegistry {
 impl InMemoryAgentRuntimeRegistry {
     pub fn new(factory: AgentRuntimeFactory) -> Self {
         Self {
+            engine_bindings: Arc::new(DashMap::new()),
             runtimes: Arc::new(DashMap::new()),
             teardown_quarantine: Arc::new(DashMap::new()),
             turn_admissions: Arc::new(DashMap::new()),
@@ -690,6 +692,9 @@ impl InMemoryAgentRuntimeRegistry {
     }
 
     fn clear_workspace_binding_if_matches(&self, conversation_id: &str, slot: &RuntimeSlot) {
+        self.engine_bindings.remove_if(conversation_id, |_, (bound_slot, _)| {
+            bound_slot.upgrade().is_none_or(|bound_slot| Arc::ptr_eq(&bound_slot, slot))
+        });
         self.workspace_bindings
             .remove_if(conversation_id, |_, binding| Arc::ptr_eq(&binding.slot, slot));
     }
@@ -981,6 +986,11 @@ impl InMemoryAgentRuntimeRegistry {
         cancellation: Option<CancellationToken>,
         mut options: AgentRuntimeBuildOptions,
     ) -> Result<AgentRuntimeHandle, AppError> {
+        let requested_engine_binding: Option<nomifun_api_types::RuntimeEngineBinding> = options.extra
+            .get(nomifun_api_types::RUNTIME_ENGINE_BINDING_KEY)
+            .map(|value| serde_json::from_value(value.clone()))
+            .transpose().map_err(|error| AppError::Conflict(format!("Invalid runtime engine binding: {error}")))?;
+        if let Some(binding) = &requested_engine_binding { binding.validate()?; }
         if options.workspace_binding_lease.is_none() {
             return Err(AppError::Conflict(format!(
                 "Agent runtime build for conversation {conversation_id} requires an exact physical workspace binding lease"
@@ -1093,6 +1103,12 @@ impl InMemoryAgentRuntimeRegistry {
             let Some(runtime) = slot.get().cloned() else {
                 break slot;
             };
+            let cached_engine = self.engine_bindings.get(conversation_id)
+                .filter(|entry| entry.0.upgrade().is_some_and(|bound| Arc::ptr_eq(&bound, &slot)))
+                .and_then(|entry| entry.1.clone());
+            if cached_engine != requested_engine_binding {
+                return Err(AppError::Conflict("A live Session cannot change its runtime engine; fork explicitly".into()));
+            }
             if self.slot_is_quarantined(conversation_id, &slot) {
                 if let Err(error) = self
                     .teardown_slot_under_gate(
@@ -1268,8 +1284,10 @@ impl InMemoryAgentRuntimeRegistry {
         }
 
         let factory = self.factory.clone();
-        let plugin_tool_session_provider =
-            self.plugin_tool_session_provider.get().cloned();
+        let plugin_tool_session_provider = if requested_engine_binding.as_ref()
+            .is_none_or(|binding| binding.family_id == "nomifun.nomi") {
+            self.plugin_tool_session_provider.get().cloned()
+        } else { None };
         // Build-failure streak accounting lives INSIDE the init closure so it
         // is exact under single-flight: when a failed init lets the next
         // queued waiter run its own attempt, each real factory run is counted
@@ -1373,6 +1391,7 @@ impl InMemoryAgentRuntimeRegistry {
                 return Err(error);
             }
         };
+        self.engine_bindings.insert(conversation_id.to_owned(), (Arc::downgrade(&slot), requested_engine_binding));
 
         let slot_is_current = self
             .runtimes
@@ -2640,6 +2659,30 @@ mod tests {
         let h2 = registry.get_or_create_runtime("conv-1", make_runtime_options("conv-1")).await.unwrap();
         assert!(same_mock(&h1, &h2));
         assert_eq!(registry.active_runtime_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn custom_binding_skips_nomi_provider_and_cannot_change_on_cached_slot() {
+        let provider_calls = Arc::new(AtomicUsize::new(0));
+        let factory: AgentRuntimeFactory = Arc::new(|options| async move {
+            assert!(crate::plugin_tools::current_nomi_plugin_tool_session().is_none());
+            Ok(mock_runtime(MockAgent::new(&options.conversation_id, None)))
+        }.boxed());
+        let registry = InMemoryAgentRuntimeRegistry::new(factory);
+        registry.install_nomi_plugin_tool_session_provider(Arc::new(CountingPluginToolProvider {
+            calls: provider_calls.clone(),
+        })).unwrap();
+        let mut options = make_runtime_options("custom-bound");
+        options.extra["runtime_engine_binding"] = serde_json::json!({
+            "family_id":"customer.workflow", "build_id":"v1", "build_digest":"a".repeat(64),
+            "host_contract_version":1, "profile":"workflow"
+        });
+        registry.get_or_create_runtime("custom-bound", options.clone()).await.unwrap();
+        registry.get_or_create_runtime("custom-bound", options.clone()).await.unwrap();
+        assert_eq!(provider_calls.load(Ordering::SeqCst), 0);
+        options.extra["runtime_engine_binding"]["build_digest"] = serde_json::json!("b".repeat(64));
+        assert!(registry.get_or_create_runtime("custom-bound", options).await.is_err());
+        registry.terminate_and_wait_result("custom-bound", None).await.unwrap();
     }
 
     #[tokio::test]

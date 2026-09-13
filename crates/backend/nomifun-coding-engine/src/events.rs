@@ -8,7 +8,8 @@ use crate::engine::EngineBinding;
 use crate::error::CodingEngineError;
 use crate::tool::CodingToolResult;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CodingEngineEvent {
     TurnStarted {
         binding: EngineBinding,

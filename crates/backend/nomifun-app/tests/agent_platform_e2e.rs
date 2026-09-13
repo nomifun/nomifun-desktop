@@ -153,6 +153,7 @@ async fn canonical_agent_routes_use_the_fresh_v4_platform() {
         &router,
         "/api/agent-sessions",
         serde_json::to_value(CreateAgentSessionRequestDto {
+            runtime_engine: None,
             model: None,
             preset_id: preset_id.clone(),
             title: Some("Route session".to_owned()),
@@ -300,6 +301,7 @@ async fn canonical_agent_routes_use_the_fresh_v4_platform() {
             create.agent_session_id
         ),
         serde_json::to_value(ForkAgentSessionRequestDto {
+            runtime_engine: None,
             target_agent_binding: create.agent_binding.clone(),
             parent_through_seq: create.cursor.seq,
             title: Some("Forked route session".to_owned()),

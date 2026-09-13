@@ -5,18 +5,15 @@
 //! the Session owner's transaction. Resume uses `open` with that binding; it
 //! must not resolve a channel again. There is no implicit engine fallback.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use futures_util::future::BoxFuture;
 use nomifun_common::AppError;
-use serde::{Deserialize, Serialize};
 
 use crate::runtime_registry::AgentRuntimeFactory;
 use crate::types::AgentRuntimeBuildOptions;
 use crate::{AgentRuntimeHandle, RegisteredAgentRuntime};
-
-pub const RUNTIME_HOST_CONTRACT_VERSION: u32 = 1;
 
 /// A host-installed implementation, not a client-supplied executable path.
 pub type RuntimeEngineFactory = Arc<
@@ -28,41 +25,7 @@ pub type RuntimeEngineFactory = Arc<
         + Sync,
 >;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RuntimeEngineDescriptor {
-    pub family_id: String,
-    pub build_id: String,
-    pub build_digest: String,
-    pub display_name: String,
-    pub host_contract_version: u32,
-    /// Open identifiers, not an enum tied to the built-in engines.
-    pub supported_profiles: Vec<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RuntimeEngineBinding {
-    pub family_id: String,
-    pub build_id: String,
-    pub build_digest: String,
-    pub host_contract_version: u32,
-    pub profile: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "selection", rename_all = "snake_case", deny_unknown_fields)]
-pub enum RuntimeEngineSelector {
-    Exact {
-        family_id: String,
-        build_id: String,
-        build_digest: String,
-    },
-    Channel {
-        family_id: String,
-        channel: String,
-    },
-}
+pub use nomifun_api_types::{RuntimeEngineBinding, RuntimeEngineDescriptor, RuntimeEngineSelector, RUNTIME_HOST_CONTRACT_VERSION};
 
 fn identifier(value: &str) -> bool {
     !value.is_empty()
@@ -81,53 +44,6 @@ fn digest(value: &str) -> bool {
 
 fn invalid(message: &str) -> AppError {
     AppError::BadRequest(format!("Runtime engine contract: {message}"))
-}
-
-impl RuntimeEngineDescriptor {
-    pub fn validate(&self) -> Result<(), AppError> {
-        if !identifier(&self.family_id)
-            || !identifier(&self.build_id)
-            || !digest(&self.build_digest)
-        {
-            return Err(invalid("invalid family/build identity or SHA-256 digest"));
-        }
-        if self.display_name.trim().is_empty() || self.display_name.len() > 256 {
-            return Err(invalid(
-                "display name is required and must be at most 256 bytes",
-            ));
-        }
-        validate_contract_version(self.host_contract_version)?;
-        let mut profiles = BTreeSet::new();
-        if self.supported_profiles.is_empty()
-            || self
-                .supported_profiles
-                .iter()
-                .any(|profile| !identifier(profile) || !profiles.insert(profile))
-        {
-            return Err(invalid("profiles must be nonempty, valid and unique"));
-        }
-        Ok(())
-    }
-}
-
-impl RuntimeEngineBinding {
-    pub fn validate(&self) -> Result<(), AppError> {
-        if !identifier(&self.family_id)
-            || !identifier(&self.build_id)
-            || !digest(&self.build_digest)
-            || !identifier(&self.profile)
-        {
-            return Err(invalid("malformed exact binding"));
-        }
-        validate_contract_version(self.host_contract_version)
-    }
-}
-
-fn validate_contract_version(version: u32) -> Result<(), AppError> {
-    if version != RUNTIME_HOST_CONTRACT_VERSION {
-        return Err(invalid("unsupported host contract version"));
-    }
-    Ok(())
 }
 
 struct Registration {

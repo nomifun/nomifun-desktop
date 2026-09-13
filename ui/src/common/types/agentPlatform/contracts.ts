@@ -498,7 +498,33 @@ export interface SessionCursor {
   seq: number;
 }
 
+/** Runtime identities are extension-owned strings, not a built-in engine enum. */
+export interface RuntimeEngineDescriptor {
+  family_id: string;
+  build_id: string;
+  build_digest: string;
+  display_name: string;
+  host_contract_version: number;
+  supported_profiles: string[];
+}
+
+export interface RuntimeEngineBinding {
+  family_id: string;
+  build_id: string;
+  build_digest: string;
+  host_contract_version: number;
+  profile: string;
+}
+
+export interface RuntimeEngineSelection {
+  selector:
+    | { selection: 'exact'; family_id: string; build_id: string; build_digest: string }
+    | { selection: 'channel'; family_id: string; channel: string };
+  profile: string;
+}
+
 export interface CreateAgentSessionRequest {
+  runtime_engine?: RuntimeEngineSelection;
   model?: { provider_id: string; model: string };
   preset_id: AgentPresetId;
   title?: string;
@@ -522,6 +548,7 @@ export interface AgentResourceSelection {
 }
 
 export interface CreateAgentSessionResponse {
+  runtime_engine_binding?: RuntimeEngineBinding;
   agent_session_id: AgentSessionId;
   agent_binding: AgentBindingValue;
   state: string;
@@ -570,6 +597,8 @@ export interface AgentSessionEventsResponse {
 }
 
 export interface ForkAgentSessionRequest {
+  /** Omitted: inherit the parent's exact engine binding. */
+  runtime_engine?: RuntimeEngineSelection;
   target_agent_binding: AgentBindingValue;
   parent_through_seq: number;
   title?: string;

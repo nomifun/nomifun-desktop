@@ -2,7 +2,7 @@
 
 > 更新时间：2026-09-13
 >
-> 当前阶段：**隔离代码已合入本地主重构分支；开放 Runtime/目录/Coding 适配器已实现，生产接线未完成**
+> 当前阶段：**默认生产 owner 已接入开放引擎目录及首批 Coding 文件/Git 工具；整体 CAR 验收尚未完成**
 >
 > 唯一状态源：本文与 `TASK-MANIFEST.json`。上一阶段
 > `2026-08-28-agent-capability-platform-v2/GLOBAL-CLOSURE-TODO.zh.md` 不记录 CAR 状态。
@@ -13,13 +13,13 @@
 |---|---|
 | 文档系列 | in_progress |
 | 源码/许可证基线 | completed |
-| 通用 Engine Catalog/exact Binding 合同（未持久接线） | completed |
+| 通用 Engine Catalog/exact Binding 持久接线 | implemented |
 | 开放 Registered Runtime / Coding adapter | implemented |
 | 隔离 Coding Engine Core | completed |
 | Model Broker 原生取消/中央适配 | in_progress |
 | Kernel Tool admission/owner adapter | pending_validation |
 | Process owner adapter | pending_validation |
-| Patch/File/VCS/Workspace owner 接线 | planned |
+| Patch/File/VCS/Workspace owner 接线 | in_progress（9 个初始工具接入） |
 | Context/Compaction/Resume contracts | pending_validation |
 | AgentSession 主链与异构 Registry | in_progress（按 CAR-D-019 保留现有 owner） |
 | 旧 Wrapper 删除 | planned |
@@ -32,13 +32,43 @@
 |---|---|---|---|
 | `CAR-00` | completed | 无 | Codex commit、选取/排除、LICENSE/NOTICE 和 owner 边界已核对 |
 | `CAR-00A` | completed | `CAR-00` | Coding family Catalog、immutable Build、Stable/Canary alias 和 exact Binding |
-| `CAR-01` | completed | `CAR-00A` | 独立 `nomifun-coding-engine`，未接生产组合根 |
+| `CAR-01` | completed | `CAR-00A` | 独立 `nomifun-coding-engine`，经通用工厂接入默认组合根 |
 | `CAR-02` | in_progress | `CAR-01` | Broker 原生取消已实现；当前生产 Session/真实 Provider 的端到端验收待接线 |
 | `CAR-03` | pending_validation | `CAR-02` | Kernel adapter、Snapshot/active-set admission、标准 Tool surface 本地完成；等待主链验证 |
 | `CAR-04` | pending_validation | `CAR-03` | `nomi-process-runtime` adapter 已完成；Windows start/wait/stdin/timeout/cancel/output 已验证，跨平台待远程 |
-| `CAR-05` | planned | `CAR-03` | File/Patch/VCS/Workspace 通过 Wave2 owner 接线，未接 AgentSession 主链 |
+| `CAR-05` | in_progress | `CAR-03` | 9 个初始 File/Patch/VCS 工具已接默认 owner；逐工具与平台验收待补 |
 | `CAR-06` | pending_validation | `CAR-03` | AGENTS/context/compaction/checkpoint contracts 已完成；SessionEvent/resume 主链未接 |
-| `CAR-07` | in_progress | `CAR-04`～`CAR-06` | 开放目录/Registered/Coding adapter 已实现；默认生产 owner ports 与持久绑定仍待接线 |
+| `CAR-07` | in_progress | `CAR-04`～`CAR-06` | 默认 owner、目录、精确绑定、Broker/Kernel 和动态 UI 入口已接；完整生态/恢复验收待补 |
+
+## 2026-09-13 继续实施：默认生产链路
+
+详见 [`PRODUCTION-INTEGRATION-2026-09-13.zh.md`](PRODUCTION-INTEGRATION-2026-09-13.zh.md)。
+全部工作仍在 `rf/agent-capability-platform-v2`，没有 push。
+
+- 新建会话持久化不可原地更换的 exact Engine binding，冷恢复不重新解析 channel。
+  Fork 默认继承，HTTP 可显式为子会话另选引擎。
+- `RuntimeEngineHost` 在默认组合根安装 Nomi/Coding/受信任扩展工厂；
+  `NomiCoreApplication::compose_with_runtime_engines` 提供二次开发注册入口。
+- Coding 使用真实 Conversation、Chat Broker、Kernel 与 Wave2 文件/Git owner；
+  不引入第二个 SessionStore。事件与模型调用领取证据从属于原有 turn receipt。
+- 新建界面从 `/api/runtime-engines` 动态发现所有注册引擎/profile，不写死二选一。
+- 当前仅准入 9 个初始工作区工具。进程、按需能力、Skills/MCP/MiniApp、附件、
+  compaction/checkpoint、异常重启证明和完整 Remote/Automation 选择链路仍未完成。
+
+本次验证（生产接线后的结果）：
+
+- `cargo check -p nomifun-app --tests`：通过。
+- 生产默认路由 E2E：1 通过；包含真实文件写入/冷恢复/绑定保护/显式 Fork/
+  第三方工厂分派且失败不回退。模型使用本地 HTTP fixture，无付费请求。
+- Coding host 取消/退出证明：3 通过；runtime 定向测试：71 通过。
+- DB `id_schema_contract`：20 通过。
+- 原默认路由 Session projection/fork 用例：1 通过（其余 37 本次未重跑）。
+- UI 目录和创建行为测试：10 通过，45 条断言。
+- `bun run typecheck`：未通过，当前依赖环境缺少 `bun:test` 类型声明，产生
+  测试文件类型错误；日志未报告生产 UI 文件错误，不能宣称全量 typecheck 通过。
+
+以下“主重构分支本地合入”记录是继续实施前的历史验证，不能用其中的
+“生产未接线”描述覆盖上面的最新状态。
 | `CAR-08` | planned | `CAR-07` | 删除旧 Wrapper/Sidecar |
 | `CAR-09` | planned | `CAR-08` | 平台生态与非 Agent consumer |
 | `CAR-10` | planned | `CAR-08`、`CAR-09` | 三平台发布和 Stable admission |

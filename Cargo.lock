@@ -6239,6 +6239,7 @@ dependencies = [
  "nomifun-channel",
  "nomifun-chat-model-broker",
  "nomifun-codex-runtime",
+ "nomifun-coding-engine",
  "nomifun-common",
  "nomifun-companion",
  "nomifun-conversation",

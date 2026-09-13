@@ -29,6 +29,8 @@ mod provider_connection;
 mod provider_model;
 mod requirement;
 mod response;
+mod runtime_engine;
+pub use runtime_engine::*;
 mod serde_util;
 mod session_ops;
 mod shell;

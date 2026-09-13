@@ -30,11 +30,8 @@ mod registry_probe {
 }
 
 
-/// The current product composition backed by NomiFun's in-process Nomi engine.
-///
-/// Runtime alternatives remain separate host compositions. They do not share a
-/// mutable engine selector and an existing Conversation never changes runtime
-/// families in place.
+/// The existing Conversation owner with an open, host-registered runtime catalog.
+/// An existing Conversation never changes runtime families in place.
 #[derive(Clone)]
 pub struct NomiCoreApplication {
     services: Arc<AppServices>,
@@ -53,6 +50,16 @@ impl NomiCoreApplication {
         Self::compose_with_config(environment, &environment.config).await
     }
 
+    /// Register trusted user-developed runtimes before product router assembly.
+    /// Factories implement the same lifecycle/teardown contract as the built-ins;
+    /// this is not an untrusted executable upload API.
+    pub async fn compose_with_runtime_engines(
+        environment: &ServerEnvironment,
+        register: impl FnOnce(&crate::RuntimeEngineHost) -> Result<(), nomifun_common::AppError>,
+    ) -> Result<Self> {
+        Self::compose_with_config_and_engines(environment, &environment.config, register).await
+    }
+
     /// Compose the Nomi core against an explicit host policy.
     ///
     /// Desktop uses this to replace the CLI's authentication policy with its
@@ -62,6 +69,14 @@ impl NomiCoreApplication {
         environment: &ServerEnvironment,
         config: &crate::AppConfig,
     ) -> Result<Self> {
+        Self::compose_with_config_and_engines(environment, config, |_| Ok(())).await
+    }
+
+    async fn compose_with_config_and_engines(
+        environment: &ServerEnvironment,
+        config: &crate::AppConfig,
+        register: impl FnOnce(&crate::RuntimeEngineHost) -> Result<(), nomifun_common::AppError>,
+    ) -> Result<Self> {
         let database = init_data_layer(config).await?;
         let services = AppServices::from_config(database, config)
             .await?
@@ -70,6 +85,9 @@ impl NomiCoreApplication {
                 config,
             )
             .await?;
+        if let Err(error) = register(&services.runtime_engines) {
+            return Err(services.cleanup_after_startup_failure(error.into()).await);
+        }
         if let Err(error) = finalize_data_layer(config) {
             return Err(services.cleanup_after_startup_failure(error).await);
         }
