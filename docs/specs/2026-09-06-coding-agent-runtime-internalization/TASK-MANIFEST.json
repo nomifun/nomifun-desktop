@@ -3,7 +3,7 @@
   "manifest_kind": "coding-agent-runtime-internalization-task-manifest",
   "stage_id": "CAR",
   "status": "implementation-in-progress",
-  "updated_on": "2026-09-06",
+  "updated_on": "2026-09-13",
   "legacy_reference_root": "docs/specs/2026-08-28-agent-capability-platform-v2/",
   "legacy_reference_policy": "read_only",
   "status_source": "docs/specs/2026-09-06-coding-agent-runtime-internalization/STATUS.zh.md",
@@ -18,7 +18,9 @@
     "07-validation-release-and-cutover.zh.md",
     "DECISIONS.zh.md",
     "CODEX-SOURCE-MANIFEST.json",
-    "HANDOFF-REMOTE-INTEGRATION.zh.md"
+    "HANDOFF-REMOTE-INTEGRATION.zh.md",
+    "LOCAL-INTEGRATION-2026-09-13.zh.md",
+    "RUNTIME-EXTENSIONS.zh.md"
   ],
   "local_implementation": {
     "branch": "car/coding-engine",
@@ -41,6 +43,42 @@
       "agents_md_context_budget",
       "compaction_summary_contract",
       "checkpoint_exact_binding_admission"
+    ]
+  },
+  "local_integration": {
+    "branch": "rf/agent-capability-platform-v2",
+    "target_base_sha": "08caa20d7",
+    "source_tip": "ef5e53860",
+    "imported_local_tip": "924b6dccb",
+    "implementation_commit": "6d87dc232",
+    "report": "LOCAL-INTEGRATION-2026-09-13.zh.md",
+    "production_wired": false,
+    "pushed": false,
+    "broker_cancellation": "implemented and targeted tests passed; live provider not exercised",
+    "runtime_extension": "RegisteredAgentRuntime and generic exact-build RuntimeEngineCatalog; Nomi uses the Registered production handle",
+    "coding_adapter": "CodingAgentRuntime implemented against required CodingRuntimeHost ports; fixture host only, not default product wiring",
+    "session_ownership": "CAR-D-019: retain current Conversation-backed Nomi-core owner; no duplicate SessionStore",
+    "remaining_integration": [
+      "persist exact engine binding at canonical Session create/fork and validate on resume",
+      "install heterogeneous catalog and Coding factory in the default composition root",
+      "implement production CodingRuntimeHost using canonical history, broker causality and Kernel/Wave2 cleanup owners",
+      "user selection and default Desktop/Web/Remote/Automation end-to-end coverage"
+    ],
+    "checks": [
+      { "command": "cargo test -p nomifun-coding-engine -p nomifun-chat-model-broker", "result": "Coding 40; Broker unit 10 and conformance 21 passed; doc-tests passed" },
+      { "command": "cargo test -p nomifun-ai-agent --lib runtime_", "result": "70 passed" },
+      { "command": "cargo test -p nomifun-ai-agent --lib coding_runtime::tests", "result": "7 passed" },
+      { "command": "cargo test -p nomifun-ai-agent --lib factory::tests", "result": "3 passed" },
+      { "command": "cargo test -p nomifun-app --lib router::chat_broker_host::tests", "result": "9 passed" },
+      { "command": "cargo test -p nomifun-app --test nomi_core_route_gap", "result": "36 passed; 2 failed: installation-token plugin route expected 403 got 200; model-selection Session creation expected 200 got workspace RESOURCE_SELECTION_REQUIRED 422" },
+      { "command": "nomi_core_route_gap test binary: installation_token_is_limited_to_headless_product_control_planes --exact", "result": "same 403 versus 200 failure reproduced in isolation; no auth logic or test assertion changed" },
+      { "command": "git diff --check; TASK-MANIFEST.json strict JSON parse", "result": "passed" }
+    ],
+    "not_run": [
+      "live paid Provider requests",
+      "Desktop UI E2E and Stable/Canary product admission: production wiring is not complete",
+      "macOS/Linux validation: Windows host",
+      "full workspace suite and release packaging: outside the validated integration slice"
     ]
   },
   "global_forbidden": [
@@ -197,7 +235,8 @@
       "goal": "Adapt the Runtime model port to NomiFun ChatModelBroker with complete Coding stream semantics.",
       "write_paths": [
         "crates/backend/nomifun-coding-engine/src/model.rs",
-        "crates/backend/nomifun-chat-model-broker/"
+        "crates/backend/nomifun-chat-model-broker/",
+        "crates/backend/nomifun-app/src/router/chat_broker_host.rs"
       ],
       "forbidden_paths": [
         "crates/backend/nomifun-codex-runtime/",
@@ -402,15 +441,18 @@
       "sequence": 6,
       "parallel_group": "central-integration",
       "owner": "central-integration-owner",
-      "status": "planned",
+      "status": "in_progress",
+      "follow_up": "Open runtime/catalog/Coding adapter implemented; production owner ports and durable engine binding remain unwired",
       "depends_on": [
         "CAR-04",
         "CAR-05",
         "CAR-06"
       ],
-      "goal": "Switch AgentSession application services to the in-process Runtime actor.",
+      "goal": "Connect the existing canonical Session owner to replaceable registered runtimes without a closed engine enum or duplicate Session store.",
       "write_paths": [
         "crates/backend/nomifun-agent-platform/",
+        "crates/backend/nomifun-ai-agent/",
+        "crates/backend/nomifun-conversation/",
         "crates/backend/nomifun-app/src/",
         "Cargo.toml",
         "Cargo.lock"
