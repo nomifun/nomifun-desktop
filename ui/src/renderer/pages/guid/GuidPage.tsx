@@ -125,8 +125,13 @@ const GuidPage: React.FC = () => {
   const effectiveAutoWork = advancedControlsEnabled ? advancedConfig.autoWork : { enabled: false };
   const isAutoWorkMode = isAutoWorkEntry(effectiveAutoWork);
   const resourceSelectionsReady = presetResourceResolutionReady && resourceSelectionResolution.missingKinds.length === 0;
+  // A workspace chosen before the Agent target (for example from a project
+  // drawer's "new conversation" action) is explicit user intent. Keep that
+  // project context visible and bind it on send even when the selected target
+  // does not otherwise expose an optional workspace picker.
   const workspaceEnabled =
-    presetResourceResolutionReady && presetResourceKinds.has('workspace');
+    Boolean(guidInput.dir.trim()) ||
+    (presetResourceResolutionReady && presetResourceKinds.has('workspace'));
   const hasAgentLaunchTarget = agentSelection.selection.kind === 'template'
     ? Boolean(agentSelection.selectedTemplate)
     : Boolean(
