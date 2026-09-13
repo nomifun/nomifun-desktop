@@ -2,7 +2,7 @@
   "digest_algorithm": "sorted-json-sha256-v1",
   "payload": {
     "schema_version": "1.0.0",
-    "decision_revision": "2026-09-02-phase1-stop-loss",
+    "decision_revision": "2026-09-13-remove-agent-editor-test",
     "decisions": [
       {
         "decision_id": "D-001",
@@ -108,11 +108,6 @@
         "decision_id": "D-021",
         "status": "confirmed",
         "contract": "AgentSessionId UUIDv7 is the only product and execution session identity; Conversation is absent from v4."
-      },
-      {
-        "decision_id": "D-022",
-        "status": "confirmed",
-        "contract": "Editor Test saves or reuses an ordinary revision, creates an ordinary persistent Session, and performs real FullAuto effects."
       },
       {
         "decision_id": "D-023",
@@ -242,5 +237,5 @@
     "production_behavior_included": false,
     "unresolved_decisions": []
   },
-  "payload_digest": "b3c32f0579a36c1f720a906b785b76cea58e8c8a1e4b07df6416f0d7410d78d5"
+  "payload_digest": "c1eeb87b010954fa19324fb59d63c9d8722d6704fe1121ea63f41d4d06d14643"
 }

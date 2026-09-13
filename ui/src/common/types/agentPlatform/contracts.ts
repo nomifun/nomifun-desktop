@@ -281,81 +281,6 @@ export interface AgentCatalogResponse {
   mcp_tools: McpToolCatalogItem[];
 }
 
-export type PreviewStatus = 'ready' | 'blocked';
-export type PreviewDiagnosticSeverity = 'error' | 'warning' | 'info';
-
-export interface PreviewDiagnostic {
-  severity: PreviewDiagnosticSeverity;
-  code: string;
-  message: string;
-  subject?: string;
-  details?: unknown;
-}
-
-export interface PreviewCapability {
-  capability: ExactCatalogRef<'capability'>;
-  display_name: string;
-  source_package: ExactCatalogRef<'package'>;
-  dependency_path: CapabilityId[];
-  required_runtime_features: string[];
-}
-
-export interface PreviewSummary {
-  enabled_count: number;
-  active_at_start_count: number;
-  model_tool_count: number;
-  context_contributor_count: number;
-  skill_count: number;
-  mcp_count: number;
-  required_resource_kind_count: number;
-  provider_initialization_count: number;
-}
-
-export interface RevisionDiff {
-  added_enabled: CapabilityId[];
-  removed_enabled: CapabilityId[];
-  added_skills: SkillId[];
-  removed_skills: SkillId[];
-  model_routes_changed: boolean;
-  instructions_changed: boolean;
-}
-
-export interface SnapshotInspector {
-  snapshot_ref?: ResolvedSnapshotRef;
-  preset_revision_ref?: PresetRevisionRef;
-  runtime_profile?: 'coding_native' | 'managed_minimal';
-  required_runtime_protocol_version: string;
-  required_runtime_features: string[];
-  enabled_capabilities: PreviewCapability[];
-  tool_schema_refs: string[];
-  context_schema_refs: string[];
-  mcp_materializations: McpToolCatalogItem[];
-  required_resource_kinds: string[];
-  service_key_diagnostics: string[];
-}
-
-export interface ResolveAgentPresetPreviewRequest {
-  expected_current_revision?: PresetRevisionRef;
-  draft: AgentPresetDraft;
-  scene: 'agent_settings';
-  surface: 'desktop';
-  audience: 'owner';
-}
-
-export interface ResolveAgentPresetPreviewResponse {
-  status: PreviewStatus;
-  draft_digest: DigestHex;
-  preview_digest: DigestHex;
-  candidate_revision_ref: PresetRevisionRef;
-  resolved_snapshot_ref?: ResolvedSnapshotRef;
-  summary: PreviewSummary;
-  diagnostics: PreviewDiagnostic[];
-  revision_diff: RevisionDiff;
-  inspector: SnapshotInspector;
-  can_save_revision: boolean;
-  can_create_session: boolean;
-}
-
 export interface AgentPresetRevision {
   reference: PresetRevisionRef;
   document: AgentPresetDocument;
@@ -389,7 +314,6 @@ export interface CreateAgentPresetFromTemplateRequest {
 
 export interface SaveAgentPresetRevisionRequest {
   expected_current_revision?: PresetRevisionRef;
-  preview_digest: DigestHex;
   draft: AgentPresetDraft;
   reason?: string;
 }
@@ -398,7 +322,6 @@ export interface SaveAgentPresetRevisionResponse {
   preset: AgentPresetSummary;
   revision: AgentPresetRevision;
   resolved_snapshot_ref: ResolvedSnapshotRef;
-  preview_digest: DigestHex;
 }
 
 export interface AgentBindingTarget {

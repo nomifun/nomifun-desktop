@@ -7,9 +7,6 @@ import type {
   ExactCatalogRef,
   OfficialPresetKey,
   OfficialPresetTemplate,
-  PreviewDiagnostic,
-  ResolveAgentPresetPreviewResponse,
-  SaveAgentPresetRevisionResponse,
 } from '@/common/types/agentPlatform';
 
 export const TEMPLATE_I18N_PATH: Record<OfficialPresetKey, string> = {
@@ -46,31 +43,6 @@ export function selectChatRouteCandidate(
     failovers: candidates.filter(
       (candidate) => chatRouteCandidateKey(candidate) !== candidateKey
     ),
-  };
-}
-
-export interface SaveDraftRevisionPorts {
-  preview(draft: AgentPresetDraft): Promise<ResolveAgentPresetPreviewResponse>;
-  save(
-    draft: AgentPresetDraft,
-    preview: ResolveAgentPresetPreviewResponse
-  ): Promise<SaveAgentPresetRevisionResponse>;
-}
-
-export async function saveDraftRevisionWithPreview(
-  draft: AgentPresetDraft,
-  ports: SaveDraftRevisionPorts
-): Promise<{
-  preview: ResolveAgentPresetPreviewResponse;
-  saved: SaveAgentPresetRevisionResponse | null;
-}> {
-  const preview = await ports.preview(draft);
-  if (!preview.can_save_revision || preview.status !== 'ready') {
-    return { preview, saved: null };
-  }
-  return {
-    preview,
-    saved: await ports.save(draft, preview),
   };
 }
 
@@ -489,32 +461,13 @@ export const capabilityMatchesSearch = (
 
 export { capabilityPlacement, placeCapability } from '@/common/types/agentPlatform';
 
-export function selectedRequiredResourceKinds(
-  document: AgentPresetDocument,
-  capabilities: readonly CapabilityCatalogItem[]
-): string[] {
-  const selectedReferences = new Set(
-    document.enabled_capabilities.map(
-      (selection) => capabilityReferenceKey(selection.capability)
-    )
-  );
-  const kinds = new Set<string>();
-  for (const capability of capabilities) {
-    if (!selectedReferences.has(capabilityReferenceKey(capability.capability))) continue;
-    capability.required_resource_kinds.forEach((kind) => kinds.add(kind));
-  }
-  return [...kinds].sort();
-}
-
 export type AgentUiOperation =
   | 'load'
   | 'open'
   | 'create'
   | 'delete'
   | 'fork'
-  | 'preview'
   | 'save'
-  | 'test'
   | 'session-load'
   | 'turn'
   | 'session-fork'
@@ -639,7 +592,7 @@ export function agentUiErrorMessage(
     case 'resource':
       return 'The launch context cannot satisfy one of this Agent\'s declared resource requirements.';
     case 'model':
-      return 'Choose an available Chat model before saving or testing this setup.';
+      return 'Choose an available Chat model before saving this setup.';
     case 'conflict':
       return 'This setup changed elsewhere. Reload it before saving again.';
     case 'runtime':
@@ -647,32 +600,5 @@ export function agentUiErrorMessage(
     case 'unknown':
     default:
       return 'The Agent operation could not be completed. Review the selected model and capabilities, then retry.';
-  }
-}
-
-export function previewDiagnosticMessage(diagnostic: PreviewDiagnostic): string {
-  switch (diagnostic.code.toUpperCase()) {
-    case 'PRESET_RESOURCE_NOT_BOUND':
-    case 'RESOURCE_OWNER_MISMATCH':
-    case 'CAPABILITY_RESOURCE_NOT_BOUND':
-      return 'The current launch context cannot satisfy a declared resource requirement.';
-    case 'MODEL_ROUTE_RECORD_INVALID':
-    case 'MODEL_ROUTE_NOT_FOUND':
-      return 'Choose an available Chat model before continuing.';
-    case 'CAPABILITY_NOT_MATERIALIZED':
-    case 'CAPABILITY_UNAVAILABLE':
-    case 'CAPABILITY_UNAVAILABLE_ON_PLATFORM':
-      return 'One selected capability is unavailable on this installation.';
-    case 'PRESET_REVISION_DIGEST_MISMATCH':
-      return 'This setup changed while it was open. Reload it before saving.';
-    case 'SNAPSHOT_EXECUTOR_UNAVAILABLE':
-      return 'This setup is read-only on the current runtime. Fork a new Session to continue.';
-    case 'ROLE_COVERAGE_INCOMPLETE':
-    case 'CODING_CODEX_NATIVE_INCOMPLETE':
-      return 'This setup requires a runtime feature that is not available on this host.';
-    default:
-      return diagnostic.severity === 'warning'
-        ? 'An optional part of this setup is unavailable on the current host.'
-        : 'This setup cannot be executed on the current host.';
   }
 }

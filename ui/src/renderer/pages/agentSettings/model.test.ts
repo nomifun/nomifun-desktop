@@ -3,14 +3,10 @@ import type {
   AgentPresetDraft,
   CapabilityCatalogItem,
   ChatRouteRecord,
-  ResolveAgentPresetPreviewResponse,
-  SaveAgentPresetRevisionResponse,
 } from '@/common/types/agentPlatform';
 import {
   asCapabilityId,
-  asDigestHex,
   asPackageId,
-  asResolvedSnapshotId,
 } from '@/common/types/agentPlatform';
 import {
   capabilityMatchesSearch,
@@ -18,9 +14,7 @@ import {
   capabilityPlacement,
   classifyAgentUiError,
   placeCapability,
-  saveDraftRevisionWithPreview,
   selectChatRouteCandidate,
-  selectedRequiredResourceKinds,
 } from './model';
 
 const draft = (): AgentPresetDraft => ({
@@ -64,64 +58,6 @@ const capability = (
   conflicting_capabilities: [],
   action_count: 1,
   context_contributor_count: 0,
-});
-
-const preview = (
-  status: ResolveAgentPresetPreviewResponse['status']
-): ResolveAgentPresetPreviewResponse => ({
-  status,
-  draft_digest: asDigestHex('1'.repeat(64)),
-  preview_digest: asDigestHex('2'.repeat(64)),
-  candidate_revision_ref: {
-    preset_id: draft().preset_id,
-    revision: 1,
-    revision_digest: asDigestHex('3'.repeat(64)),
-  },
-  resolved_snapshot_ref:
-    status === 'ready'
-      ? {
-          snapshot_id: asResolvedSnapshotId('0190f5fe-7c00-7a00-8000-000000000003'),
-          snapshot_digest: asDigestHex('4'.repeat(64)),
-        }
-      : undefined,
-  summary: {
-    enabled_count: 0,
-
-    active_at_start_count: 0,
-    model_tool_count: 0,
-    context_contributor_count: 0,
-
-    skill_count: 0,
-    mcp_count: 0,
-    required_resource_kind_count: 0,
-    provider_initialization_count: 0,
-  },
-  diagnostics:
-    status === 'ready' ? [] : [{ severity: 'error', code: 'BLOCKED', message: 'blocked' }],
-  revision_diff: {
-    added_enabled: [],
-    removed_enabled: [],
-
-
-    added_skills: [],
-    removed_skills: [],
-    model_routes_changed: false,
-    instructions_changed: false,
-  },
-  inspector: {
-    required_runtime_protocol_version: '1.0.0',
-    required_runtime_features: [],
-    enabled_capabilities: [],
-
-
-    tool_schema_refs: [],
-    context_schema_refs: [],
-    mcp_materializations: [],
-    required_resource_kinds: [],
-    service_key_diagnostics: [],
-  },
-  can_save_revision: status === 'ready',
-  can_create_session: status === 'ready',
 });
 
 describe('Agent Settings capability authoring model', () => {
@@ -179,20 +115,6 @@ describe('Agent Settings capability authoring model', () => {
     expect('resource_binding_refs' in document.enabled_capabilities[0]).toBe(false);
   });
 
-  test('derives required resource kinds only from selected capabilities', () => {
-    const process = capability('process.exec', ['process_session', 'workspace']);
-    const knowledge = capability('knowledge.search', ['knowledge_base', 'workspace']);
-    const unused = capability('robot.motion', ['robot']);
-    const withProcess = placeCapability(draft().document, process.capability, 'enabled');
-    const selected = placeCapability(withProcess, knowledge.capability, 'enabled');
-
-    expect(selectedRequiredResourceKinds(selected, [process, knowledge, unused])).toEqual([
-      'knowledge_base',
-      'process_session',
-      'workspace',
-    ]);
-  });
-
   test('does not project a different catalog version onto a saved selection', () => {
     const saved = capability('knowledge.search', ['knowledge_base']);
     const newer = {
@@ -207,7 +129,6 @@ describe('Agent Settings capability authoring model', () => {
 
     expect(capabilityPlacement(selected, saved.capability)).toBe('enabled');
     expect(capabilityPlacement(selected, newer.capability)).toBe('none');
-    expect(selectedRequiredResourceKinds(selected, [newer])).toEqual([]);
   });
 
   test('reorders an exact route candidate without changing its internal contract', () => {
@@ -244,39 +165,6 @@ describe('Agent Settings capability authoring model', () => {
 
     expect(selected?.primary).toEqual(record.failovers[0]);
     expect(selected?.failovers).toEqual([record.primary]);
-  });
-
-  test('always previews before save and refuses a blocked draft write', async () => {
-    const calls: string[] = [];
-    const saved = {} as SaveAgentPresetRevisionResponse;
-    const ready = await saveDraftRevisionWithPreview(draft(), {
-      preview: async () => {
-        calls.push('preview');
-        return preview('ready');
-      },
-      save: async () => {
-        calls.push('save');
-        return saved;
-      },
-    });
-
-    expect(calls).toEqual(['preview', 'save']);
-    expect(ready.saved).toBe(saved);
-
-    calls.length = 0;
-    const blocked = await saveDraftRevisionWithPreview(draft(), {
-      preview: async () => {
-        calls.push('preview');
-        return preview('blocked');
-      },
-      save: async () => {
-        calls.push('save');
-        return saved;
-      },
-    });
-
-    expect(calls).toEqual(['preview']);
-    expect(blocked.saved).toBe(null);
   });
 
   test('distinguishes a preset that is already absent', () => {

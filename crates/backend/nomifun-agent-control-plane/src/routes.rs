@@ -10,9 +10,8 @@ use nomifun_api_types::{
     AgentPresetRevisionImpactResponse, ApiResponse, CapabilityCatalogItemDto,
     CreateAgentPresetFromTemplateRequest, CreateAgentPresetRequest, CreateRemoteBindingRequest,
     McpToolCatalogItemDto, PutAgentBindingRequest, RemoteBindingDto,
-    ResolveAgentPresetPreviewRequest, ResolveAgentPresetPreviewResponse,
-    ResolveSavedRevisionPreviewRequest, SaveAgentPresetRevisionRequest,
-    SaveAgentPresetRevisionResponse, SkillCatalogItemDto, UpdateRemoteBindingRequest,
+    SaveAgentPresetRevisionRequest, SaveAgentPresetRevisionResponse, SkillCatalogItemDto,
+    UpdateRemoteBindingRequest,
 };
 use serde::Deserialize;
 
@@ -75,10 +74,6 @@ fn control_plane_router_with_legacy_skill_route(
             get(get_editor),
         )
         .route(
-            "/api/agent-presets/{preset_id}/resolve-preview",
-            post(resolve_preview),
-        )
-        .route(
             "/api/agent-presets/{preset_id}/revisions",
             post(save_revision),
         )
@@ -89,10 +84,6 @@ fn control_plane_router_with_legacy_skill_route(
         .route(
             "/api/agent-presets/{preset_id}/revisions/{revision}/impact",
             get(get_revision_impact),
-        )
-        .route(
-            "/api/agent-presets/{preset_id}/revisions/{revision}/resolve-preview",
-            post(resolve_saved_revision_preview),
         )
         .route(
             "/api/agent-bindings/{target_kind}/{target_id}",
@@ -199,17 +190,6 @@ async fn get_editor(
     )))
 }
 
-async fn resolve_preview(
-    State(control_plane): State<Arc<AgentControlPlane>>,
-    Extension(owner): Extension<AuthenticatedOwner>,
-    Path(preset_id): Path<String>,
-    Json(request): Json<ResolveAgentPresetPreviewRequest>,
-) -> Result<Json<ApiResponse<ResolveAgentPresetPreviewResponse>>, ControlPlaneError> {
-    Ok(Json(ApiResponse::ok(
-        control_plane.preview(&owner, &preset_id, request).await?,
-    )))
-}
-
 async fn save_revision(
     State(control_plane): State<Arc<AgentControlPlane>>,
     Extension(owner): Extension<AuthenticatedOwner>,
@@ -243,19 +223,6 @@ async fn get_revision_impact(
     Ok(Json(ApiResponse::ok(
         control_plane
             .revision_impact(&owner, &preset_id, revision)
-            .await?,
-    )))
-}
-
-async fn resolve_saved_revision_preview(
-    State(control_plane): State<Arc<AgentControlPlane>>,
-    Extension(owner): Extension<AuthenticatedOwner>,
-    Path((preset_id, revision)): Path<(String, u64)>,
-    Json(request): Json<ResolveSavedRevisionPreviewRequest>,
-) -> Result<Json<ApiResponse<ResolveAgentPresetPreviewResponse>>, ControlPlaneError> {
-    Ok(Json(ApiResponse::ok(
-        control_plane
-            .preview_saved_revision(&owner, &preset_id, revision, request)
             .await?,
     )))
 }
@@ -335,14 +302,12 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use nomifun_agent_contracts::{
-        AgentPreset, AgentPresetId, AgentPresetSource, DigestHex, VersionString,
-    };
+    use nomifun_agent_contracts::{AgentPreset, AgentPresetId, AgentPresetSource};
     use tower::ServiceExt;
 
     use crate::{
-        CompilerReleaseInputs, ControlPlaneStore, InMemoryControlPlaneStore,
-        OfficialTemplateCatalog, PresetPreviewCompiler, StaticCatalogProvider, StoredPreset,
+        ControlPlaneStore, InMemoryControlPlaneStore, OfficialTemplateCatalog,
+        PresetRevisionCompiler, StaticCatalogProvider, StoredPreset,
     };
 
     fn test_control_plane(
@@ -353,17 +318,7 @@ mod tests {
             store,
             Arc::new(StaticCatalogProvider::new(Default::default())),
             templates.clone(),
-            PresetPreviewCompiler::new(
-                CompilerReleaseInputs {
-                    resolver_version: VersionString::from("1.0.0"),
-                    runtime_protocol_version: VersionString::from("1.0.0"),
-                    runtime_feature_inventory_digest: DigestHex::from("runtime"),
-                    canonical_schema_manifest_digest: DigestHex::from("schema"),
-                    target_contribution_manifest_digest: DigestHex::from("contributions"),
-                    availability_evidence_revision: "route-test".to_owned(),
-                },
-                templates,
-            ),
+            PresetRevisionCompiler::new(templates),
         ))
     }
 
@@ -373,6 +328,7 @@ mod tests {
         assert!(!source.contains(&("/api/".to_owned() + "test")));
         assert!(!source.contains(&("/test-".to_owned() + "sessions")));
         assert!(!source.contains(&("/api/agent-".to_owned() + "sessions")));
+        assert!(!source.contains(&["resolve", "-preview"].concat()));
         assert!(source.contains(
             "/api/agent-presets/{preset_id}/revisions/{revision}/impact"
         ));

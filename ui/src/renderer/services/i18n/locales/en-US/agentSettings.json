@@ -13,8 +13,6 @@
     "fork": "Customize preset",
     "remove": "Remove",
     "retry": "Retry",
-    "preview": "Check configuration",
-    "test": "Try Agent",
     "startConversation": "Start conversation",
     "saveRevision": "Save configuration"
   },
@@ -99,11 +97,7 @@
     "skillsMcp": "Skills & extensions",
     "skillsMcpHint": "Skills contribute instructions only. MCP tools enter this Agent through their available capability.",
     "skills": "Skills",
-    "mcp": "MCP materializations",
-    "previewInspector": "Configuration diagnostics",
-    "previewInspectorHint": "Configuration diagnostics and version details",
-    "test": "Try & inspect",
-    "testHint": "Trying this Agent saves its configuration before opening a real session."
+    "mcp": "MCP materializations"
   },
   "fields": {
     "name": "Name",
@@ -112,7 +106,7 @@
     "chatModelRoutePlaceholder": "Exact model route ID",
     "chatModelRouteRecord": "Chat route record",
     "chatModelRouteRecordPlaceholder": "Canonical Chat route JSON",
-    "chatModelRouteUnavailable": "Configure an available chat model before saving or trying this Agent.",
+    "chatModelRouteUnavailable": "Configure an available chat model before saving this Agent.",
     "persona": "Role",
     "instructions": "Instructions"
   },
@@ -148,7 +142,6 @@
   "resources": {
     "noneRequired": "No additional resources",
     "requiredAtUse": "Required when used",
-    "requiredKinds": "Required resource kinds",
     "pickerTitle": "Choose resources for this run",
     "pickerHint": "Choose actual product resources only. The system securely resolves permissions, paths, credentials and runtime parameters.",
     "ready": "Resources ready",
@@ -184,52 +177,9 @@
       "workspace": "Workspace"
     }
   },
-  "preview": {
-    "emptyTitle": "No Preview yet",
-    "emptyBody": "Preview resolves the draft without writing a Preset, Revision, Session, or external Effect.",
-    "ready": "Preview ready",
-    "blocked": "Preview blocked",
-    "candidateRevision": "Candidate Revision {{revision}}",
-    "metrics": {
-      "enabled_count": "Enabled capabilities",
-      "active_at_start_count": "Resolved capabilities",
-      "model_tool_count": "Tool schemas",
-      "context_contributor_count": "Context sources",
-      "skill_count": "Skills",
-      "mcp_count": "MCP mappings",
-      "required_resource_kind_count": "Required resource kinds"
-    }
-  },
   "inspector": {
-    "revisionDiff": "Revision diff",
     "snapshot": "Snapshot and RuntimeProfile",
-    "snapshotDigest": "Snapshot digest",
-    "runtimeProfile": "RuntimeProfile",
-    "protocol": "Runtime protocol",
-    "tools": "Tool schema references",
-    "context": "Context schema references",
-    "continuation": "D-025 continuation",
-    "remoteToken": "D-026 Remote token boundary"
-  },
-  "continuation": {
-    "title": "Exact compatibility or explicit fork",
-    "body": "A compatible frozen Snapshot continues the same Session. An unavailable executor leaves history read-only and requires an explicit new-ID fork with a self-contained semantic base; Runtime-private handles and Effects are never replayed."
-  },
-  "remoteToken": {
-    "status": {
-      "active": "Installation token active",
-      "revoked": "Installation token revoked",
-      "unconfigured": "Installation token not configured",
-      "unavailable": "Installation token status unavailable"
-    },
-    "continuation": "Rotate or revoke fences only new Remote request admission. Existing Sessions remain unchanged; a replacement token must resolve to the same owner and explicitly submit the original AgentSession ID."
-  },
-  "test": {
-    "realEffectWarning": "Test saves current changes when needed and creates an ordinary persistent conversation. Tools and external effects are not simulated; required resources come from the real test context.",
-    "inputPlaceholder": "Enter the first test message for this Agent…",
-    "session": "AgentSession",
-    "turn": "Turn status",
-    "revision": "Revision"
+    "protocol": "Runtime protocol"
   },
   "common": {
     "none": "None",
@@ -340,7 +290,6 @@
     "capabilityTab": "Capabilities",
     "settingsTab": "Basic settings",
     "skillsTab": "Skills & extensions",
-    "testTab": "Try & inspect",
     "saveAsMine": "Save as my Agent",
     "customizeTitle": "Make this preset yours",
     "customizeHint": "Adjust capabilities and save your own Agent. The official preset stays available.",
@@ -360,9 +309,8 @@
     "saveSuccess": "Agent configuration saved",
     "selectedHint": "Only capabilities configured for this Agent",
     "settingsHint": "Define its identity, model and working style",
-    "technicalHint": "Configuration diagnostics and version details",
     "manageModels": "Manage models",
-    "modelNeeded": "Configure an available chat model before saving or trying this Agent.",
+    "modelNeeded": "Configure an available chat model before saving this Agent.",
     "disabledSave": "Resolve unavailable capabilities first",
     "presetBadge": "Customizable preset",
     "personalBadge": "Personal Agent",

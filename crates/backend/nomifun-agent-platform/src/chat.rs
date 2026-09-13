@@ -14,7 +14,7 @@ use nomifun_agent_session::{
 };
 use nomifun_api_types::{
     AgentPresetEditorResponse, AgentPresetSourceDto, OfficialPresetKeyDto,
-    OfficialPresetTemplateDto, PreviewStatusDto, ResolveAgentPresetPreviewResponse,
+    OfficialPresetTemplateDto,
 };
 use nomifun_chat_model_broker::{
     ChatContentPart, ChatCausality, ChatCausalityGate, ChatFinishReason, ChatModelError,
@@ -375,8 +375,6 @@ pub enum ChatMinimalError {
     Template(String),
     #[error("chat.minimal ordinary Revision mismatch: {0}")]
     Revision(String),
-    #[error("chat.minimal Preview mismatch: {0}")]
-    Preview(String),
     #[error("chat.minimal Snapshot mismatch: {0}")]
     Snapshot(String),
     #[error("managed_minimal RuntimeProfile mismatch: {0}")]
@@ -509,56 +507,6 @@ impl ChatMinimalContract {
         if document.model_route_refs.len() != 1 {
             return Err(ChatMinimalError::Revision(
                 "chat.minimal Revision must freeze exactly one model route".to_owned(),
-            ));
-        }
-        Ok(())
-    }
-
-    pub fn validate_preview(
-        &self,
-        preview: &ResolveAgentPresetPreviewResponse,
-    ) -> Result<(), ChatMinimalError> {
-        if preview.status != PreviewStatusDto::Ready
-            || !preview.can_save_revision
-            || !preview.can_create_session
-            || !preview.diagnostics.is_empty()
-            || preview.resolved_snapshot_ref.is_none()
-        {
-            return Err(ChatMinimalError::Preview(
-                "chat.minimal Preview is not a ready executable Snapshot".to_owned(),
-            ));
-        }
-        let summary = &preview.summary;
-        if summary.enabled_count != 0
-
-            || summary.active_at_start_count != 0
-            || summary.model_tool_count != 0
-            || summary.context_contributor_count != 0
-
-            || summary.skill_count != 0
-            || summary.mcp_count != 0
-            || summary.required_resource_kind_count != 0
-            || summary.provider_initialization_count != 1
-        {
-            return Err(ChatMinimalError::Preview(
-                "Preview summary is not the exact zero-tool shape".to_owned(),
-            ));
-        }
-        let inspector = &preview.inspector;
-        if inspector.runtime_profile.as_deref() != Some("managed_minimal")
-            || !inspector.required_runtime_features.is_empty()
-            || !inspector.enabled_capabilities.is_empty()
-
-
-            || !inspector.tool_schema_refs.is_empty()
-            || !inspector.context_schema_refs.is_empty()
-            || !inspector.mcp_materializations.is_empty()
-            || !inspector.required_resource_kinds.is_empty()
-            || !inspector.service_key_diagnostics.is_empty()
-        {
-            return Err(ChatMinimalError::Preview(
-                "Preview inspector contains a hidden capability, index, tool, context, MCP, or resource"
-                    .to_owned(),
             ));
         }
         Ok(())

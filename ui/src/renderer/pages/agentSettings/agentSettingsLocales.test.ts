@@ -14,11 +14,11 @@ describe('Agent Settings locale contract', () => {
     expect(flattenKeys(en).sort()).toEqual(flattenKeys(zh).sort());
   });
 
-  test('contains fresh-start and real-effect disclosure in both locales', () => {
+  test('contains fresh-start copy and no editor test feature in either locale', () => {
     expect(en.freshStart.body.includes('not imported')).toBe(true);
     expect(zh.freshStart.body.includes('不会导入')).toBe(true);
-    expect(en.test.realEffectWarning.includes('not simulated')).toBe(true);
-    expect(zh.test.realEffectWarning.includes('不会模拟')).toBe(true);
+    expect(JSON.stringify(en).includes('Try & inspect')).toBe(false);
+    expect(JSON.stringify(zh).includes('试用与检查')).toBe(false);
   });
 
   test('uses Agent Workbench as the sole public authoring label', () => {

@@ -291,7 +291,7 @@ Tool、Context、Resource 或 Role Provider 被并发请求看见。这是一条
 ### 5.1 Identity 与 API
 
 - `AgentSessionId` 使用 canonical lowercase UUIDv7；
-- Chat、Remote、Editor Test、Automation 等入口都创建或复用同一种
+- Chat、Remote、Automation 等入口都创建或复用同一种
   `AgentSession`；
 - canonical API resource 为 `/api/agent-sessions`；
 - fork 总是创建新的 `AgentSessionId`，并记录父 Session provenance；
@@ -351,20 +351,17 @@ Remote open 先持久化 Session identity 和 `opening` 事实，再异步建立
 ### 6.1 唯一编译入口
 
 ```text
-Preview ─┐
-Save ────┼─> one canonical Compiler
-Test ────┘          │
+Save ─────> one canonical Compiler
+                    │
                     └─> Snapshot + authority inputs + diagnostics
 
 Session Open ─> read saved Snapshot
              ─> check current execution compatibility
 ```
 
-- Preview、Save 和 Test 调用同一个纯函数 Compiler；
+- Save 调用唯一的纯函数 Compiler；
 - Control Plane 只把 diagnostics 映射为产品 DTO，不复制 closure、resource、
   Profile 或 digest 算法；
-- dirty Test 先通过普通 SaveRevision CAS 保存，再打开普通 AgentSession；
-- clean Test 复用当前 Revision；
 - Session Open 不重新编译或比较第二份 Snapshot，只读取与 immutable Revision 绑定的
   已保存 Snapshot；
 - Compiler 不启动 Browser、MCP、SSH、进程或其他外部资源。
@@ -810,13 +807,12 @@ Credential 由 Host 集中存储和使用，不进入 Prompt、RuntimeProfile、
 - 按任务分组的 Capability/Pack；
 - Workspace、Knowledge 和 connector picker；
 - 保存；
-- “试用 Agent”。
 
 默认行为：
 
 - initial/on-demand 由模板和 Capability metadata 决定，开发者模式才允许覆盖；
 - binding/resource/operation 内部 ID 由后台生成；
-- Save/Test 内部自动执行 Preview；
+- Save 在服务端完成配置校验和 Snapshot 生成；
 - Test 打开普通真实 AgentSession，不存在测试专用 backend；
 - Revision、Snapshot、digest、protocol 和 raw Event 放在默认折叠的技术详情；
 - Snapshot 不兼容时显示“在新会话中继续”，后台执行显式 fork；
@@ -911,7 +907,7 @@ bytes。
 
 实现验收以行为和依赖方向为准：
 
-- Preview、Save、Test 只调用一个 canonical Compiler；
+- Save 只调用一个 canonical Compiler；
 - Session Open 读取保存的 Snapshot，不生成第二份执行事实；
 - 产品中只有一个 `AgentSessionId` 和一条删除生命周期；
 - Projection 可从 SessionEvent 重建且不复制完整事件数组；

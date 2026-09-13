@@ -83,10 +83,10 @@
 .statusReadyDot, .statusWarningDot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
 .statusReadyDot { background: rgb(var(--green-6)); }
 .statusWarningDot { background: rgb(var(--orange-6)); }
-.dualGrid, .diffGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+.dualGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
 .selectionColumn { min-width: 0; }
 .selectionHeader { display: flex; align-items: center; justify-content: space-between; margin: 10px 0; font-size: 12px; color: var(--color-text-3); }
-.selectionList, .previewStack, .diagnosticList, .technicalStack { display: flex; flex-direction: column; gap: 12px; }
+.selectionList { display: flex; flex-direction: column; gap: 12px; }
 .skillRow { display: flex; align-items: flex-start; gap: 10px; padding: 12px; border: 1px solid var(--agent-border); border-radius: 9px; }
 .skillRow > div { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 5px; }
 .skillRow strong { font-size: 13px; }
@@ -95,34 +95,8 @@
 .mcpRow > div { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 4px; }
 .mcpRow strong { font-size: 12px; overflow-wrap: anywhere; }
 .mcpRow span { font-size: 11px; color: var(--agent-muted); }
-.advancedCollapse, .technicalCollapse, .inspectorCollapse { border: 0; background: transparent; }
+.advancedCollapse { border: 0; background: transparent; }
 .collapseHint { font-size: 12px; color: var(--agent-muted); margin-left: 8px; }
-.testComposer { display: grid; gap: 12px; margin-top: 18px; }
-.testComposer > :last-child { justify-self: end; }
-.testResultSummary { display: flex; justify-content: space-between; align-items: center; margin-top: 18px; padding: 12px; border-radius: 9px; background: rgba(var(--green-1), .6); }
-.technicalHeader, .technicalGroupHeader { display: flex; gap: 12px; align-items: flex-start; justify-content: space-between; }
-.technicalHeader > div, .technicalGroupHeader { display: flex; flex-direction: column; gap: 5px; }
-.technicalHeader strong, .technicalGroupHeader strong { font-size: 13px; }
-.technicalHeader span, .technicalGroupHeader span { font-size: 12px; color: var(--agent-muted); line-height: 1.7; }
-.technicalGroup { border-top: 1px solid var(--agent-border); padding-top: 14px; }
-.previewEmpty { display: flex; align-items: flex-start; gap: 11px; padding: 15px; border-radius: 9px; background: var(--color-fill-1); color: var(--agent-muted); }
-.previewEmpty > div { display: flex; flex-direction: column; gap: 5px; }
-.previewEmpty strong { font-size: 13px; color: var(--color-text-2); }
-.previewEmpty span { font-size: 12px; line-height: 1.7; }
-.previewStatus { display: flex; align-items: center; gap: 10px; }
-.previewStatus > div { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
-.previewStatus > div > span { color: var(--agent-muted); }
-.statusIconReady { color: rgb(var(--green-6)); }
-.statusIconBlocked { color: rgb(var(--danger-6)); }
-.metricGrid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
-.metric { display: flex; flex-direction: column; gap: 8px; padding: 10px; border-radius: 8px; background: var(--color-fill-1); font-size: 11px; color: var(--agent-muted); }
-.metric strong { font-size: 18px; color: var(--color-text-1); }
-.inspectorRows { display: grid; gap: 2px; }
-.inspectorRows > div { display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; padding: 8px 0; font-size: 12px; border-bottom: 1px solid var(--color-border-1); }
-.inspectorRows span { color: var(--agent-muted); }
-.inspectorRows strong { color: var(--color-text-2); font-weight: 500; overflow-wrap: anywhere; text-align: right; }
-.policyRow { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; }
-.policyRow span { color: var(--agent-muted); }
 .pageError { margin-bottom: 14px; border-radius: 10px; }
 .errorBody { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12px; }
 .loading { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 320px; gap: 14px; color: var(--agent-muted); font-size: 13px; }

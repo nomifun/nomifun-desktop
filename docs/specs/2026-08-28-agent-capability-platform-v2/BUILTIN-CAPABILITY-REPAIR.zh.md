@@ -103,7 +103,7 @@ Switch、Fork 和远程入口使用同一解析边界。
 ## 发布门禁与验证
 
 - 官方完整门禁：启动真实 Router，读取官方模板、Capability Catalog 和 Skill
-  Catalog，创建全部 7 个模板并要求 Preview `Ready`；随后真实导入并应用一个
+  Catalog，创建并保存全部 7 个模板；随后真实导入并应用一个
   本地 Plugin，触发 Registry reconcile/availability refresh，再次全量验证。
   两个阶段均为零 missing、零 unavailable，测试 `1/1 PASS`。
 - `cargo check --locked -p nomifun-app --lib`：通过，零 warning。
