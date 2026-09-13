@@ -89,6 +89,7 @@ async fn canonical_agent_routes_use_the_fresh_v4_platform() {
         &router,
         "/api/agent-presets/from-template/chat.minimal",
         json!({
+            "reuse_existing": false,
             "display_name": "Minimal route E2E",
             "description": null,
             "model_route_refs": {}
@@ -476,6 +477,7 @@ async fn canonical_agent_routes_use_the_fresh_v4_platform() {
         &router,
         "/api/agent-presets/from-template/chat.minimal",
         json!({
+            "reuse_existing": false,
             "display_name": "Missing snapshot",
             "description": null,
             "model_route_refs": {}

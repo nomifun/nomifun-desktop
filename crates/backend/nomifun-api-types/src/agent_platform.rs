@@ -479,7 +479,8 @@ pub struct CreateAgentPresetFromTemplateRequest {
     pub model: Option<AgentChatModelSelectionDto>,
     /// Prepare/reuse an internal session-only configuration for direct official
     /// Agent launch. False explicitly creates a personal Agent in the library.
-    #[serde(default)]
+    /// This field is deliberately required: silently defaulting a missing field
+    /// to false turns an ordinary launch into a persistent personal Agent.
     pub reuse_existing: bool,
     pub display_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

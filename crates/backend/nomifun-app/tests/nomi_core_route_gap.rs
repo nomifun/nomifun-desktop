@@ -422,6 +422,7 @@ async fn nomi_core_accepts_enabled_placement_as_immediately_available_tools() {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&json!({
+                        "reuse_existing": false,
                         "display_name": "On-demand placement smoke",
                         "model_route_refs": {},
                         "chat_route_records": {}
@@ -550,6 +551,38 @@ async fn configured_agent_creation_persists_adjusted_capabilities_and_keeps_offi
     let (_, after) = call(router, "GET", "/api/agent-preset-templates?source=official", json!({})).await;
     assert_eq!(after["data"]["user_presets"].as_array().unwrap().len(), before_count + 1);
     assert_eq!(after["data"]["official_templates"], official_before);
+    services.shutdown_browser_platform().await.unwrap();
+    services.database.close().await;
+}
+
+#[tokio::test]
+async fn official_template_creation_requires_explicit_persistence_intent() {
+    const TRUST: &str = "official-agent-explicit-intent";
+    let (router, services) = common::build_local_trust_app(TRUST).await;
+    let response = router.clone().oneshot(Request::builder()
+        .method("POST")
+        .uri("/api/agent-presets/from-template/chat.minimal")
+        .header("x-nomi-local-trust", TRUST)
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&json!({
+            "display_name": "Must not become my Agent",
+            "model_route_refs": {},
+            "chat_route_records": {}
+        })).unwrap())).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY,
+        "omitting launch/save intent must fail closed instead of creating a personal Agent");
+
+    let library_response = router.oneshot(Request::builder()
+        .uri("/api/agent-preset-templates")
+        .header("x-nomi-local-trust", TRUST)
+        .body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(library_response.status(), StatusCode::OK);
+    let library: Value = serde_json::from_slice(&axum::body::to_bytes(
+        library_response.into_body(), 4 * 1024 * 1024).await.unwrap()).unwrap();
+    assert_eq!(library["data"]["user_presets"], json!([]));
+    let persisted: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM nomi_agent_presets")
+        .fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(persisted, 0, "rejected ambiguous requests must not write hidden or visible configurations");
     services.shutdown_browser_platform().await.unwrap();
     services.database.close().await;
 }
@@ -806,6 +839,7 @@ async fn nomi_core_agent_settings_template_and_binding_surface_is_persistent() {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&serde_json::json!({
+                        "reuse_existing": false,
                         "display_name": "Nomi-core smoke preset",
                         "model_route_refs": {},
                         "chat_route_records": {}
@@ -1054,6 +1088,7 @@ async fn nomi_core_agent_session_projects_saved_chat_binding_without_internal_in
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&serde_json::json!({
+                        "reuse_existing": false,
                         "display_name": "Nomi-core session smoke",
                         "model_route_refs": {},
                         "chat_route_records": {}
@@ -1352,6 +1387,7 @@ async fn nomi_core_remote_replays_frozen_binding_and_persists_event_cursor() {
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&serde_json::json!({
+                        "reuse_existing": false,
                         "display_name": "Nomi-core remote smoke",
                         "model_route_refs": {},
                         "chat_route_records": {}
