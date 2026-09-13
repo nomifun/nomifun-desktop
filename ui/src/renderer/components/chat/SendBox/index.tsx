@@ -8,6 +8,7 @@ import type { ConversationId, MessageId } from '@/common/types/ids';
 import { ipcBridge } from '@/common';
 import AtFileMenu from '@/renderer/components/chat/AtFileMenu';
 import BtwOverlay from '@/renderer/components/chat/BtwOverlay';
+import { SessionCapabilityComposerLayout } from '@/renderer/components/chat/SessionCapabilityPicker/ComposerLayout';
 import { useInputFocusRing } from '@/renderer/hooks/chat/useInputFocusRing';
 import SlashCommandMenu, { type SlashCommandMenuItem } from '@/renderer/components/chat/SlashCommandMenu';
 import { useBtwCommand } from '@/renderer/components/chat/BtwOverlay/useBtwCommand';
@@ -185,6 +186,7 @@ const SendBox: React.FC<{
   className?: string;
   tools?: React.ReactNode;
   rightTools?: React.ReactNode;
+  sideTools?: React.ReactNode;
   /** Conversation-only: compact status control rendered inside the composer header row. */
   topRightTools?: React.ReactNode;
   prefix?: React.ReactNode;
@@ -223,6 +225,7 @@ const SendBox: React.FC<{
   loading,
   tools,
   rightTools,
+  sideTools,
   topRightTools,
   disabled,
   placeholder,
@@ -1364,11 +1367,12 @@ const SendBox: React.FC<{
       type='primary'
       disabled={isButtonDisabled}
       className='send-button-custom'
-      icon={<ArrowUp theme='filled' size='14' fill='white' strokeWidth={5} />}
+      icon={<ArrowUp theme='filled' size='14' fill={sideTools ? 'currentColor' : 'white'} strokeWidth={5} />}
       onClick={() => {
         sendMessageHandler();
       }}
       data-testid='sendbox-send-btn'
+      data-composer-action='send'
     />
   );
 
@@ -1444,6 +1448,7 @@ const SendBox: React.FC<{
       icon={<Plus theme='outline' size='16' />}
       onClick={onMobilePlusClick}
       data-testid='sendbox-mobile-plus-btn'
+      data-composer-action='attach'
       aria-label={t('common.more', { defaultValue: 'More' })}
     />
   ) : null;
@@ -1512,9 +1517,12 @@ const SendBox: React.FC<{
       )}
       <div
         ref={containerRef}
-        className={`sendbox-panel relative p-16px border-3 b bg-dialog-fill-0 b-solid rd-20px flex flex-col ${isOverlayOpen ? 'overflow-visible' : 'overflow-hidden'} ${isFileDragging ? 'b-dashed sendbox-panel--dragging' : ''}`}
+        data-composer-surface
+        className={`sendbox-panel relative p-16px border-3 b bg-dialog-fill-0 b-solid rd-20px flex flex-col ${sideTools ? 'sendbox-panel--side-tools' : ''} ${isOverlayOpen ? 'overflow-visible' : 'overflow-hidden'} ${isFileDragging ? 'b-dashed sendbox-panel--dragging' : ''}`}
         style={{
           transition: 'box-shadow 0.25s ease, border-color 0.25s ease',
+          padding: sideTools ? 0 : undefined,
+          borderRadius: sideTools ? 22 : undefined,
           ...(isFileDragging
             ? {
                 backgroundColor: 'var(--color-primary-light-1)',
@@ -1529,312 +1537,314 @@ const SendBox: React.FC<{
         }}
         {...dragHandlers}
       >
-        <BtwOverlay
-          answer={btwCommand.answer}
-          anchorEl={containerRef.current}
-          isLoading={btwCommand.isLoading}
-          isOpen={btwCommand.isOpen}
-          onDismiss={btwCommand.dismiss}
-          parentTaskRunning={Boolean(loading || isLoading)}
-          question={btwCommand.question}
-        />
-        {isAtFileMenuOpen && (
-          <div className='absolute left-12px right-12px bottom-[calc(100%+8px)] z-70'>
-            <AtFileMenu
-              activeIndex={atFileMenuActiveIndex}
-              emptyText={
-                deferredAtFileQuery
-                  ? t('conversation.workspace.search.empty', { defaultValue: 'No files found' })
-                  : t('messages.atFile.hint', { defaultValue: 'Type to search for files' })
-              }
-              items={visibleAtFileMenuItems}
-              label={t('messages.atFile.menuLabel', { defaultValue: 'File mentions' })}
-              loading={workspaceMentionLoading}
-              loadingText={t('messages.atFile.loading', { defaultValue: 'Loading...' })}
-              onHoverItem={setAtFileMenuActiveIndex}
-              onSelectItem={insertSelectedAtFile}
-            />
-          </div>
-        )}
-        {isCommandMenuOpen && (
-          <div className='absolute left-12px right-12px bottom-[calc(100%+8px)] z-70'>
-            {conversationExport.step === 'menu' ? (
-              <SlashCommandMenu
-                title={t('messages.export.menuTitle')}
-                hint={t('messages.export.menuHint')}
-                items={conversationExport.menuItems}
-                activeIndex={conversationExport.activeIndex}
-                loading={conversationExport.loading}
-                onHoverItem={conversationExport.setActiveIndex}
-                onSelectItem={(item) => {
-                  conversationExport.onSelectMenuItem(item.key);
-                }}
-                emptyText={t('messages.slash.empty', { defaultValue: 'No commands found' })}
+        <SessionCapabilityComposerLayout picker={sideTools}>
+          <BtwOverlay
+            answer={btwCommand.answer}
+            anchorEl={containerRef.current}
+            isLoading={btwCommand.isLoading}
+            isOpen={btwCommand.isOpen}
+            onDismiss={btwCommand.dismiss}
+            parentTaskRunning={Boolean(loading || isLoading)}
+            question={btwCommand.question}
+          />
+          {isAtFileMenuOpen && (
+            <div className='absolute left-12px right-12px bottom-[calc(100%+8px)] z-70'>
+              <AtFileMenu
+                activeIndex={atFileMenuActiveIndex}
+                emptyText={
+                  deferredAtFileQuery
+                    ? t('conversation.workspace.search.empty', { defaultValue: 'No files found' })
+                    : t('messages.atFile.hint', { defaultValue: 'Type to search for files' })
+                }
+                items={visibleAtFileMenuItems}
+                label={t('messages.atFile.menuLabel', { defaultValue: 'File mentions' })}
+                loading={workspaceMentionLoading}
+                loadingText={t('messages.atFile.loading', { defaultValue: 'Loading...' })}
+                onHoverItem={setAtFileMenuActiveIndex}
+                onSelectItem={insertSelectedAtFile}
               />
-            ) : conversationExport.step === 'filename' ? (
-              renderExportFileNamePanel()
-            ) : (
-              <SlashCommandMenu
-                title={t('messages.slash.title', { defaultValue: 'Commands' })}
-                hint={t('messages.slash.hint', { defaultValue: 'Type / to open command menu' })}
-                items={slashMenuItems}
-                activeIndex={slashController.activeIndex}
-                loading={false}
-                onHoverItem={slashController.setActiveIndex}
-                onSelectItem={(item) => {
-                  const targetIndex = slashController.filteredCommands.findIndex(
-                    (command) => command.name === item.key
-                  );
-                  if (targetIndex >= 0) {
-                    slashController.onSelectByIndex(targetIndex);
-                  }
-                }}
-                emptyText={t('messages.slash.empty', { defaultValue: 'No commands found' })}
-              />
-            )}
-          </div>
-        )}
-        {hasInternalStatusRow && (
-          <div
-            className='sendbox-internal-status-row mb-8px flex w-full flex-wrap items-start gap-8px'
-            data-testid='sendbox-internal-status-row'
-          >
-            {topRightTools && (
-              <div className='ml-auto flex h-28px flex-shrink-0 items-center' data-testid='sendbox-internal-context-tools'>
-                {topRightTools}
-              </div>
-            )}
-          </div>
-        )}
-        <div style={{ width: '100%' }}>
-          {prefix}
-          {context}
-          {/* 编辑消息提示条 / Editing message banner */}
-          {/* b-1px 才是 1px 宽度（`b-1` 是 --bg-1 颜色），b-border-2 在 theme 里不存在，
-              两者叠加等于「无宽度 + 无颜色」：下面这几条提示条从来没有边框。
-              `b-1px` is the width; `b-border-2` names no colour that exists. */}
-          {editingMsgId && (
-            <div className='flex items-center gap-10px mb-8px px-12px py-8px rd-10px bg-fill-1 b-1px b-solid border-arco-2'>
-              <span className='text-13px text-t-primary'>{t('conversation.editMessage.banner')}</span>
-              <div
-                className='ml-auto flex-shrink-0 p-2px rd-full cursor-pointer hover:bg-fill-3 transition-colors'
-                onClick={cancelEdit}
-                style={{ lineHeight: 0 }}
-              >
-                <CloseSmall theme='outline' size='14' />
-              </div>
             </div>
           )}
-          {/* Reply quote preview */}
-          {replyQuote && (
-            <div className='flex items-start gap-10px mb-8px px-12px py-10px rd-10px bg-fill-1 b-1px b-solid border-arco-2'>
-              <div className='flex-shrink-0 mt-2px' style={{ lineHeight: 0 }}>
-                <Quote theme='filled' size='16' fill='rgb(var(--primary-6))' />
-              </div>
-              <div className='flex-1 min-w-0 text-13px text-t-primary line-clamp-3 lh-20px whitespace-pre-wrap break-all'>
-                {replyQuote.content}
-              </div>
-              <div
-                className='flex-shrink-0 mt-2px p-2px rd-full cursor-pointer hover:bg-fill-3 transition-colors'
-                onClick={() => setReplyQuote(null)}
-                style={{ lineHeight: 0 }}
-              >
-                <CloseSmall theme='outline' size='14' />
-              </div>
-            </div>
-          )}
-          {/* DOM 片段标签 / DOM snippet tags */}
-          {domSnippets.length > 0 && (
-            <div className='flex flex-wrap gap-6px mb-8px'>
-              {domSnippets.map((snippet) => (
-                <Tag
-                  key={snippet.id}
-                  closable
-                  closeIcon={<CloseSmall theme='outline' size='12' />}
-                  onClose={() => removeDomSnippet(snippet.id)}
-                  className='text-12px bg-fill-2 b-1px b-solid border-arco-2 rd-4px'
-                >
-                  {snippet.tag}
-                </Tag>
-              ))}
-            </div>
-          )}
-          {unmatchedSelectedWorkspaceItems.length > 0 && onSelectedWorkspaceItemsChange && (
-            <div className='flex flex-wrap gap-6px mb-8px'>
-              {unmatchedSelectedWorkspaceItems.map((item) => (
-                <Tag
-                  key={typeof item === 'string' ? item : item.path}
-                  closable
-                  closeIcon={<CloseSmall theme='outline' size='12' />}
-                  onClose={() => {
-                    const path = getSelectedItemPath(item);
-                    if (!path) {
-                      return;
-                    }
-                    externalOwnedPathsRef.current.delete(path);
-                    const nextItems = buildOwnedSelectionItems(
-                      selectedWorkspaceItems ?? [],
-                      mentionOwnedPathsRef.current,
-                      externalOwnedPathsRef.current,
-                      selectedItemByPathRef.current
-                    );
-                    onSelectedWorkspaceItemsChange(nextItems);
+          {isCommandMenuOpen && (
+            <div className='absolute left-12px right-12px bottom-[calc(100%+8px)] z-70'>
+              {conversationExport.step === 'menu' ? (
+                <SlashCommandMenu
+                  title={t('messages.export.menuTitle')}
+                  hint={t('messages.export.menuHint')}
+                  items={conversationExport.menuItems}
+                  activeIndex={conversationExport.activeIndex}
+                  loading={conversationExport.loading}
+                  onHoverItem={conversationExport.setActiveIndex}
+                  onSelectItem={(item) => {
+                    conversationExport.onSelectMenuItem(item.key);
                   }}
-                  className='text-12px bg-fill-2 b-1px b-solid border-arco-2 rd-4px'
+                  emptyText={t('messages.slash.empty', { defaultValue: 'No commands found' })}
+                />
+              ) : conversationExport.step === 'filename' ? (
+                renderExportFileNamePanel()
+              ) : (
+                <SlashCommandMenu
+                  title={t('messages.slash.title', { defaultValue: 'Commands' })}
+                  hint={t('messages.slash.hint', { defaultValue: 'Type / to open command menu' })}
+                  items={slashMenuItems}
+                  activeIndex={slashController.activeIndex}
+                  loading={false}
+                  onHoverItem={slashController.setActiveIndex}
+                  onSelectItem={(item) => {
+                    const targetIndex = slashController.filteredCommands.findIndex(
+                      (command) => command.name === item.key
+                    );
+                    if (targetIndex >= 0) {
+                      slashController.onSelectByIndex(targetIndex);
+                    }
+                  }}
+                  emptyText={t('messages.slash.empty', { defaultValue: 'No commands found' })}
+                />
+              )}
+            </div>
+          )}
+          {hasInternalStatusRow && (
+            <div
+              className='sendbox-internal-status-row mb-8px flex w-full flex-wrap items-start gap-8px'
+              data-testid='sendbox-internal-status-row'
+            >
+              {topRightTools && (
+                <div className='ml-auto flex h-28px flex-shrink-0 items-center' data-testid='sendbox-internal-context-tools'>
+                  {topRightTools}
+                </div>
+              )}
+            </div>
+          )}
+          <div style={{ width: '100%' }}>
+            {prefix}
+            {context}
+            {/* 编辑消息提示条 / Editing message banner */}
+            {/* b-1px 才是 1px 宽度（`b-1` 是 --bg-1 颜色），b-border-2 在 theme 里不存在，
+                两者叠加等于「无宽度 + 无颜色」：下面这几条提示条从来没有边框。
+                `b-1px` is the width; `b-border-2` names no colour that exists. */}
+            {editingMsgId && (
+              <div className='flex items-center gap-10px mb-8px px-12px py-8px rd-10px bg-fill-1 b-1px b-solid border-arco-2'>
+                <span className='text-13px text-t-primary'>{t('conversation.editMessage.banner')}</span>
+                <div
+                  className='ml-auto flex-shrink-0 p-2px rd-full cursor-pointer hover:bg-fill-3 transition-colors'
+                  onClick={cancelEdit}
+                  style={{ lineHeight: 0 }}
                 >
-                  {getSelectedItemDisplayLabel(item)}
-                </Tag>
-              ))}
-            </div>
-          )}
-        </div>
-        <UploadProgressBar source='sendbox' />
-        <div
-          className={isSingleLine ? 'flex items-center gap-2 w-full min-w-0 overflow-hidden' : 'w-full overflow-hidden'}
-        >
-          {isSingleLine && (
-            <div
-              className={
-                isMobileCompact
-                  ? 'flex-shrink-0 sendbox-tools sendbox-tools-mobile-compact'
-                  : isMobile
-                    ? 'sendbox-tools sendbox-tools-scroll-mobile'
-                    : 'flex-shrink-0 sendbox-tools'
-              }
-            >
-              {renderedTools}
-            </div>
-          )}
+                  <CloseSmall theme='outline' size='14' />
+                </div>
+              </div>
+            )}
+            {/* Reply quote preview */}
+            {replyQuote && (
+              <div className='flex items-start gap-10px mb-8px px-12px py-10px rd-10px bg-fill-1 b-1px b-solid border-arco-2'>
+                <div className='flex-shrink-0 mt-2px' style={{ lineHeight: 0 }}>
+                  <Quote theme='filled' size='16' fill='rgb(var(--primary-6))' />
+                </div>
+                <div className='flex-1 min-w-0 text-13px text-t-primary line-clamp-3 lh-20px whitespace-pre-wrap break-all'>
+                  {replyQuote.content}
+                </div>
+                <div
+                  className='flex-shrink-0 mt-2px p-2px rd-full cursor-pointer hover:bg-fill-3 transition-colors'
+                  onClick={() => setReplyQuote(null)}
+                  style={{ lineHeight: 0 }}
+                >
+                  <CloseSmall theme='outline' size='14' />
+                </div>
+              </div>
+            )}
+            {/* DOM 片段标签 / DOM snippet tags */}
+            {domSnippets.length > 0 && (
+              <div className='flex flex-wrap gap-6px mb-8px'>
+                {domSnippets.map((snippet) => (
+                  <Tag
+                    key={snippet.id}
+                    closable
+                    closeIcon={<CloseSmall theme='outline' size='12' />}
+                    onClose={() => removeDomSnippet(snippet.id)}
+                    className='text-12px bg-fill-2 b-1px b-solid border-arco-2 rd-4px'
+                  >
+                    {snippet.tag}
+                  </Tag>
+                ))}
+              </div>
+            )}
+            {unmatchedSelectedWorkspaceItems.length > 0 && onSelectedWorkspaceItemsChange && (
+              <div className='flex flex-wrap gap-6px mb-8px'>
+                {unmatchedSelectedWorkspaceItems.map((item) => (
+                  <Tag
+                    key={typeof item === 'string' ? item : item.path}
+                    closable
+                    closeIcon={<CloseSmall theme='outline' size='12' />}
+                    onClose={() => {
+                      const path = getSelectedItemPath(item);
+                      if (!path) {
+                        return;
+                      }
+                      externalOwnedPathsRef.current.delete(path);
+                      const nextItems = buildOwnedSelectionItems(
+                        selectedWorkspaceItems ?? [],
+                        mentionOwnedPathsRef.current,
+                        externalOwnedPathsRef.current,
+                        selectedItemByPathRef.current
+                      );
+                      onSelectedWorkspaceItemsChange(nextItems);
+                    }}
+                    className='text-12px bg-fill-2 b-1px b-solid border-arco-2 rd-4px'
+                  >
+                    {getSelectedItemDisplayLabel(item)}
+                  </Tag>
+                ))}
+              </div>
+            )}
+          </div>
+          <UploadProgressBar source='sendbox' />
           <div
-            className={`sendbox-highlight-container ${isSingleLine ? 'sendbox-highlight-container--single' : ''}`}
-            style={{
-              width: isSingleLine ? 'auto' : '100%',
-              flex: isSingleLine ? 1 : 'none',
-              minWidth: 0,
-              maxWidth: '100%',
-              marginBottom: isSingleLine ? 0 : '8px',
-              minHeight: isSingleLine ? '20px' : '40px',
-            }}
+            className={isSingleLine ? 'flex items-center gap-2 w-full min-w-0 overflow-hidden' : 'w-full overflow-hidden'}
           >
+            {isSingleLine && (
+              <div
+                className={
+                  isMobileCompact
+                    ? 'flex-shrink-0 sendbox-tools sendbox-tools-mobile-compact'
+                    : isMobile
+                      ? 'sendbox-tools sendbox-tools-scroll-mobile'
+                      : 'flex-shrink-0 sendbox-tools'
+                }
+              >
+                {renderedTools}
+              </div>
+            )}
             <div
-              ref={highlightScrollRef}
-              aria-hidden='true'
-              className={`sendbox-highlight-layer text-14px ${isMobile ? 'sendbox-input--mobile' : ''} ${isSingleLine ? 'sendbox-highlight-layer--single' : ''}`}
-              data-testid='sendbox-highlight-layer'
-              style={!shouldUseHighlightOverlay ? { visibility: 'hidden' } : undefined}
-            >
-              {renderHighlightedInputValue()}
-            </div>
-            <Input.TextArea
-              autoFocus={!isMobile}
-              disabled={disabled}
-              spellCheck={false}
-              value={input}
-              placeholder={
-                isMobileCompact
-                  ? (placeholder ??
-                    (bottomHint as string | undefined) ??
-                    t('conversation.sendbox.hint', { defaultValue: 'Type / for commands, @ to reference files' }))
-                  : placeholder
-                    ? `${placeholder}  ${bottomHint ?? t('conversation.sendbox.hint', { defaultValue: 'Type / for commands, @ to reference files' })}`
-                    : ((bottomHint as string | undefined) ??
-                      t('conversation.sendbox.hint', { defaultValue: 'Type / for commands, @ to reference files' }))
-              }
-              className={`${shouldUseHighlightOverlay ? 'sendbox-highlight-textarea ' : ''}pl-0 pr-0 !b-none focus:shadow-none m-0 !bg-transparent !focus:bg-transparent !hover:bg-transparent lh-[20px] !resize-none text-14px ${isMobile ? 'sendbox-input--mobile' : ''}`}
-              data-testid='sendbox-input'
+              className={`sendbox-highlight-container ${isSingleLine ? 'sendbox-highlight-container--single' : ''}`}
               style={{
-                width: '100%',
+                width: isSingleLine ? 'auto' : '100%',
                 flex: isSingleLine ? 1 : 'none',
                 minWidth: 0,
                 maxWidth: '100%',
-                marginLeft: 0,
-                marginRight: 0,
-                marginBottom: 0,
-                height: isSingleLine ? (isMobile ? '22px' : '20px') : 'auto',
-                minHeight: isSingleLine ? (isMobile ? '22px' : '20px') : '40px',
-                overflowY: isSingleLine ? 'hidden' : 'auto',
-                overflowX: 'hidden',
-                whiteSpace: isSingleLine ? 'nowrap' : 'pre-wrap',
-                textOverflow: isSingleLine ? 'ellipsis' : 'clip',
-                wordBreak: isSingleLine ? 'normal' : 'break-word',
-                overflowWrap: 'break-word',
+                marginBottom: isSingleLine ? 0 : sideTools ? '6px' : '8px',
+                minHeight: isSingleLine ? '20px' : '40px',
               }}
-              onChange={handleTextAreaChange}
-              onPaste={onPaste}
-              onTouchStart={markMobileFocusIntent}
-              onMouseDown={markMobileFocusIntent}
-              onClick={(event) => {
-                syncCaretPosition(event.target);
-              }}
-              onFocus={handleInputFocus}
-              onBlur={handleInputBlur}
-              onKeyUp={(event) => {
-                syncCaretPosition(event.currentTarget);
-              }}
-              onSelect={(event) => {
-                syncCaretPosition(event.currentTarget);
-              }}
-              onScroll={(event) => {
-                syncHighlightScroll(event.currentTarget);
-              }}
-              {...compositionHandlers}
-              autoSize={isSingleLine ? false : { minRows: 1, maxRows: 10 }}
-              onKeyDown={createKeyDownHandler(
-                sendMessageHandler,
-                (event) => {
-                  if (handleAtFileMenuKeyDown(event) || handleOverlayKeyDown(event) || handleHistoryKeyDown(event)) {
-                    return true;
-                  }
-                  // Mod(Ctrl/Cmd)+Enter steers the draft into the running turn
-                  // instead of enqueuing it. Only in 'enter' mode — in 'mod-enter'
-                  // mode Mod+Enter IS the submit gesture. Opt-in via onSteer + steerAvailable.
-                  if (
-                    sendKey === 'enter' &&
-                    onSteer &&
-                    steerAvailable &&
-                    event.key === 'Enter' &&
-                    !event.shiftKey &&
-                    (event.metaKey || event.ctrlKey)
-                  ) {
-                    event.preventDefault();
-                    steerMessageHandler();
-                    return true;
-                  }
-                  return false;
-                },
-                sendKey
-              )}
-            ></Input.TextArea>
+            >
+              <div
+                ref={highlightScrollRef}
+                aria-hidden='true'
+                className={`sendbox-highlight-layer text-14px ${isMobile ? 'sendbox-input--mobile' : ''} ${isSingleLine ? 'sendbox-highlight-layer--single' : ''}`}
+                data-testid='sendbox-highlight-layer'
+                style={!shouldUseHighlightOverlay ? { visibility: 'hidden' } : undefined}
+              >
+                {renderHighlightedInputValue()}
+              </div>
+              <Input.TextArea
+                autoFocus={!isMobile}
+                disabled={disabled}
+                spellCheck={false}
+                value={input}
+                placeholder={
+                  isMobileCompact
+                    ? (placeholder ??
+                      (bottomHint as string | undefined) ??
+                      t('conversation.sendbox.hint', { defaultValue: 'Type / for commands, @ to reference files' }))
+                    : placeholder
+                      ? `${placeholder}  ${bottomHint ?? t('conversation.sendbox.hint', { defaultValue: 'Type / for commands, @ to reference files' })}`
+                      : ((bottomHint as string | undefined) ??
+                        t('conversation.sendbox.hint', { defaultValue: 'Type / for commands, @ to reference files' }))
+                }
+                className={`${shouldUseHighlightOverlay ? 'sendbox-highlight-textarea ' : ''}pl-0 pr-0 !b-none focus:shadow-none m-0 !bg-transparent !focus:bg-transparent !hover:bg-transparent lh-[20px] !resize-none text-14px ${isMobile ? 'sendbox-input--mobile' : ''}`}
+                data-testid='sendbox-input'
+                style={{
+                  width: '100%',
+                  flex: isSingleLine ? 1 : 'none',
+                  minWidth: 0,
+                  maxWidth: '100%',
+                  marginLeft: 0,
+                  marginRight: 0,
+                  marginBottom: 0,
+                  height: isSingleLine ? (isMobile ? '22px' : '20px') : 'auto',
+                  minHeight: isSingleLine ? (isMobile ? '22px' : '20px') : '40px',
+                  overflowY: isSingleLine ? 'hidden' : 'auto',
+                  overflowX: 'hidden',
+                  whiteSpace: isSingleLine ? 'nowrap' : 'pre-wrap',
+                  textOverflow: isSingleLine ? 'ellipsis' : 'clip',
+                  wordBreak: isSingleLine ? 'normal' : 'break-word',
+                  overflowWrap: 'break-word',
+                }}
+                onChange={handleTextAreaChange}
+                onPaste={onPaste}
+                onTouchStart={markMobileFocusIntent}
+                onMouseDown={markMobileFocusIntent}
+                onClick={(event) => {
+                  syncCaretPosition(event.target);
+                }}
+                onFocus={handleInputFocus}
+                onBlur={handleInputBlur}
+                onKeyUp={(event) => {
+                  syncCaretPosition(event.currentTarget);
+                }}
+                onSelect={(event) => {
+                  syncCaretPosition(event.currentTarget);
+                }}
+                onScroll={(event) => {
+                  syncHighlightScroll(event.currentTarget);
+                }}
+                {...compositionHandlers}
+                autoSize={isSingleLine ? false : { minRows: 1, maxRows: 10 }}
+                onKeyDown={createKeyDownHandler(
+                  sendMessageHandler,
+                  (event) => {
+                    if (handleAtFileMenuKeyDown(event) || handleOverlayKeyDown(event) || handleHistoryKeyDown(event)) {
+                      return true;
+                    }
+                    // Mod(Ctrl/Cmd)+Enter steers the draft into the running turn
+                    // instead of enqueuing it. Only in 'enter' mode — in 'mod-enter'
+                    // mode Mod+Enter IS the submit gesture. Opt-in via onSteer + steerAvailable.
+                    if (
+                      sendKey === 'enter' &&
+                      onSteer &&
+                      steerAvailable &&
+                      event.key === 'Enter' &&
+                      !event.shiftKey &&
+                      (event.metaKey || event.ctrlKey)
+                    ) {
+                      event.preventDefault();
+                      steerMessageHandler();
+                      return true;
+                    }
+                    return false;
+                  },
+                  sendKey
+                )}
+              ></Input.TextArea>
+            </div>
+            {isSingleLine && (
+              <div className='flex items-center gap-2'>
+                {renderedSpeechButton}
+                {sendButtonPrefix}
+                {renderActionButtons()}
+              </div>
+            )}
           </div>
-          {isSingleLine && (
-            <div className='flex items-center gap-2'>
-              {renderedSpeechButton}
-              {sendButtonPrefix}
-              {renderActionButtons()}
+          {!isSingleLine && (
+            <div className='sendbox-bottom-row flex items-center justify-between gap-2 w-full'>
+              <div
+                className={
+                  isMobileCompact
+                    ? 'flex-shrink-0 sendbox-tools sendbox-tools-mobile-compact'
+                    : isMobile
+                      ? 'sendbox-tools sendbox-tools-scroll-mobile'
+                      : 'sendbox-tools'
+                }
+              >
+                {renderedTools}
+              </div>
+              <div className='sendbox-actions flex items-center gap-2'>
+                {renderedRightTools}
+                {renderedSpeechButton}
+                {sendButtonPrefix}
+                {renderActionButtons()}
+              </div>
             </div>
           )}
-        </div>
-        {!isSingleLine && (
-          <div className='flex items-center justify-between gap-2 w-full'>
-            <div
-              className={
-                isMobileCompact
-                  ? 'flex-shrink-0 sendbox-tools sendbox-tools-mobile-compact'
-                  : isMobile
-                    ? 'sendbox-tools sendbox-tools-scroll-mobile'
-                    : 'sendbox-tools'
-              }
-            >
-              {renderedTools}
-            </div>
-            <div className='sendbox-actions flex items-center gap-2'>
-              {renderedRightTools}
-              {renderedSpeechButton}
-              {sendButtonPrefix}
-              {renderActionButtons()}
-            </div>
-          </div>
-        )}
+        </SessionCapabilityComposerLayout>
       </div>
     </div>
   );
