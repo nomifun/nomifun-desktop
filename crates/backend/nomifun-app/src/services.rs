@@ -1975,10 +1975,10 @@ pub struct AppServices {
     /// `{data_dir}/workshop/`; project documents live in SQLite. Shared by the
     /// `/api/creative-studio/*` routes and Gateway capabilities.
     pub workshop_service: Arc<nomifun_workshop::WorkshopService>,
-    /// Phase M1 MiniApp application facade over the clean-start, owner-scoped
+    /// Phase M1 Plugin application facade over the clean-start, owner-scoped
     /// Product/Project/Release data root.
-    pub miniapp_application:
-        Arc<nomifun_miniapp_platform::MiniAppM1ApplicationService>,
+    pub plugin_runtime:
+        Arc<nomifun_plugin_platform::runtime::PluginRuntimeM1ApplicationService>,
     /// Singleton generation service — the Creative Studio media task queue.
     /// Shared by the `/api/creative-studio/tasks*` routes and Gateway tools.
     pub creation_service: Arc<nomifun_creation::CreationService>,
@@ -2516,7 +2516,7 @@ impl AppServices {
         self.request_background_shutdown();
         self.shutdown_cron_timers();
         if let Err(error) = self
-            .miniapp_application
+            .plugin_runtime
             .shutdown_service_runtime(self.authoritative_user_id.as_ref())
             .await
         {
@@ -2626,7 +2626,7 @@ impl AppServices {
     pub async fn cleanup_after_startup_failure(&self, error: anyhow::Error) -> anyhow::Error {
         self.request_background_shutdown();
         if let Err(error) = self
-            .miniapp_application
+            .plugin_runtime
             .shutdown_service_runtime(self.authoritative_user_id.as_ref())
             .await
         {
@@ -3470,7 +3470,7 @@ impl AppServices {
         let browser_lane_provider_slot =
             nomifun_ai_agent::BrowserLaneClientProviderSlot::new();
 
-        // MiniApp M1 starts from its own owner-scoped Product/Project/Release
+        // Plugin M1 starts from its own owner-scoped Product/Project/Release
         // data root. Legacy HTML snapshots and conversation workspaces are not
         // migrated, read, or dual-written.
         let miniapp_repository =
@@ -3490,7 +3490,7 @@ impl AppServices {
             miniapp_repository;
         let miniapp_store_root = data_dir.join("miniapp-m1");
         let miniapp_source_store = Arc::new(
-            nomifun_miniapp_platform::MiniAppSourceStore::new(
+            nomifun_plugin_platform::runtime::PluginRuntimeSourceStore::new(
                 miniapp_store_root.join("source"),
             )
             .map_err(|error| {
@@ -3501,7 +3501,7 @@ impl AppServices {
             })?,
         );
         let miniapp_release_store = Arc::new(
-            nomifun_miniapp_platform::MiniAppReleaseStore::new(
+            nomifun_plugin_platform::runtime::PluginRuntimeReleaseStore::new(
                 miniapp_store_root.join("release"),
             )
             .map_err(|error| {
@@ -3511,8 +3511,8 @@ impl AppServices {
                 )
             })?,
         );
-        let miniapp_application = Arc::new(
-            nomifun_miniapp_platform::MiniAppM1ApplicationService::new_with_stores(
+        let plugin_runtime = Arc::new(
+            nomifun_plugin_platform::runtime::PluginRuntimeM1ApplicationService::new_with_stores(
                 miniapp_repository,
                 miniapp_source_store,
                 miniapp_release_store,
@@ -3720,7 +3720,7 @@ impl AppServices {
             customer_service_service,
             cs_dialogue_engine,
             workshop_service,
-            miniapp_application,
+            plugin_runtime,
             creation_service,
             model_invoke_service,
             knowledge_service,

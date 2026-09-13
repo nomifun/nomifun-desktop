@@ -5,8 +5,8 @@ mod error;
 mod id_schema_contract;
 pub mod models;
 mod repository;
-mod miniapp_product_documents;
-pub use miniapp_product_documents::MiniAppProductDocuments;
+mod plugin_product_documents;
+pub use plugin_product_documents::PluginProductDocuments;
 
 pub use database::{
     Database, MigrationLineageStatus, init_database, init_database_memory,

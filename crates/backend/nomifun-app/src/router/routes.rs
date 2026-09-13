@@ -853,17 +853,18 @@ fn create_nomi_core_router_with_all_state(
     // separate route group because they additionally require local trust.
     let miniapp_read_authenticated = admit_headless_installation_owner(
         protect_instance_owner(
-            super::miniapp_m1::miniapp_m1_read_routes(states.miniapp.clone()),
+            super::plugin_runtime::miniapp_m1_read_routes(states.miniapp.clone())
+                .merge(super::plugin_platform::plugin_read_routes(states.plugin.clone().with_runtime(services.plugin_runtime.clone()))),
             &auth_mw_state,
             &instance_owner_state,
         ),
         &installation_token_trust_state,
     );
     let miniapp_surface =
-        super::miniapp_m1::miniapp_m1_surface_routes(states.miniapp.clone());
+        super::plugin_runtime::miniapp_m1_surface_routes(states.miniapp.clone());
     let miniapp_write_local = admit_headless_installation_owner(
         protect_instance_owner(
-            super::miniapp_m1::miniapp_m1_write_routes(states.miniapp).route_layer(
+            super::plugin_runtime::miniapp_m1_write_routes(states.miniapp).route_layer(
                 middleware::from_fn(require_local_product_trust_middleware),
             ),
             &auth_mw_state,
@@ -874,7 +875,7 @@ fn create_nomi_core_router_with_all_state(
 
     let plugin_authenticated = admit_headless_installation_owner(
         protect_instance_owner(
-            super::plugin_platform::plugin_routes(states.plugin).route_layer(
+            super::plugin_platform::plugin_routes(states.plugin.with_runtime(services.plugin_runtime.clone())).route_layer(
                 middleware::from_fn(require_local_product_trust_middleware),
             ),
             &auth_mw_state,

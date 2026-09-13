@@ -82,7 +82,7 @@
     "creativeStudio": {
       "default": {
         "name": "Creative Studio",
-        "description": "Combine assets, content creation and MiniApp capabilities for creative work."
+        "description": "Combine assets, content creation and PluginRuntime capabilities for creative work."
       }
     }
   },
@@ -173,7 +173,7 @@
       "generationProvider": "Generation service",
       "knowledgeBase": "Knowledge base",
       "mcpConnection": "MCP connection",
-      "miniApp": "MiniApp",
+      "pluginRuntime": "PluginRuntime",
       "processSession": "Process session",
       "projectMemory": "Project memory",
       "robot": "Robot",

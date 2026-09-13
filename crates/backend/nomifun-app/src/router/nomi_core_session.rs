@@ -80,8 +80,8 @@ use nomifun_agent_kernel::{
     AgentPresetCompiler, CompileRequest, CompiledSnapshot,
     CompilerEnvironment, KernelRegistry,
 };
-use nomifun_miniapp_platform::{
-    MiniAppAgentCapabilityInvocation, MiniAppAgentCapabilityPort,
+use nomifun_plugin_platform::runtime::{
+    PluginRuntimeAgentCapabilityInvocation, PluginRuntimeAgentCapabilityPort,
 };
 use nomifun_auth::{
     CurrentUser, InstanceTokenValidator, JwtService, extract_token_from_headers,
@@ -336,8 +336,8 @@ pub(crate) struct NomiCorePluginToolSessionProvider {
     resource_bindings:
         super::nomi_core_resource_bindings::NomiCoreResourceBindingResolverRegistry,
     robot_owner: Option<Arc<super::nomi_core_robot::NomiCoreRobotWave4Owner>>,
-    miniapp_application:
-        Arc<nomifun_miniapp_platform::MiniAppM1ApplicationService>,
+    plugin_runtime:
+        Arc<nomifun_plugin_platform::runtime::PluginRuntimeM1ApplicationService>,
 }
 
 impl NomiCorePluginToolSessionProvider {
@@ -359,8 +359,8 @@ impl NomiCorePluginToolSessionProvider {
         mcp_server_repository: Arc<dyn nomifun_db::IMcpServerRepository>,
         resource_bindings: super::nomi_core_resource_bindings::NomiCoreResourceBindingResolverRegistry,
         robot_owner: Option<Arc<super::nomi_core_robot::NomiCoreRobotWave4Owner>>,
-        miniapp_application: Arc<
-            nomifun_miniapp_platform::MiniAppM1ApplicationService,
+        plugin_runtime: Arc<
+            nomifun_plugin_platform::runtime::PluginRuntimeM1ApplicationService,
         >,
     ) -> Self {
         Self {
@@ -375,7 +375,7 @@ impl NomiCorePluginToolSessionProvider {
             mcp_server_repository,
             resource_bindings,
             robot_owner,
-            miniapp_application,
+            plugin_runtime,
         }
     }
 }
@@ -570,13 +570,13 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
                     request.conversation_id
                 )),
                 Arc::new(NomiCoreMiniAppSchemaResolver {
-                    application: Arc::clone(&self.miniapp_application),
+                    application: Arc::clone(&self.plugin_runtime),
                 }),
             )
             .await
             .map_err(|error| {
                 AppError::Conflict(format!(
-                    "Nomi MiniApp Tool session materialization failed: {error}"
+                    "Nomi Plugin Tool session materialization failed: {error}"
                 ))
             })?;
         plugin_session
@@ -591,7 +591,7 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
             .with_miniapp_actions(
                 miniapp_actions,
                 Arc::new(NomiCoreMiniAppToolInvoker {
-                    application: Arc::clone(&self.miniapp_application),
+                    application: Arc::clone(&self.plugin_runtime),
                     owner_user_id: common_owner.as_ref().to_owned(),
                 }),
             )
@@ -924,7 +924,7 @@ fn install_runtime_mcp_selection(
 
 struct NomiCoreMiniAppSchemaResolver {
     application:
-        Arc<nomifun_miniapp_platform::MiniAppM1ApplicationService>,
+        Arc<nomifun_plugin_platform::runtime::PluginRuntimeM1ApplicationService>,
 }
 
 #[async_trait]
@@ -936,7 +936,7 @@ impl NomiMiniAppToolSchemaResolver for NomiCoreMiniAppSchemaResolver {
         reference: &nomifun_agent_contracts::CanonicalSchemaRef,
     ) -> Result<StrictJsonValue, String> {
         if owner.principal_kind != "user" {
-            return Err("MiniApp Agent Tool owner must be a user principal".to_owned());
+            return Err("Plugin Agent Tool owner must be a user principal".to_owned());
         }
         self.application
             .resolve_agent_capability_schema(
@@ -951,7 +951,7 @@ impl NomiMiniAppToolSchemaResolver for NomiCoreMiniAppSchemaResolver {
 
 struct NomiCoreMiniAppToolInvoker {
     application:
-        Arc<nomifun_miniapp_platform::MiniAppM1ApplicationService>,
+        Arc<nomifun_plugin_platform::runtime::PluginRuntimeM1ApplicationService>,
     owner_user_id: String,
 }
 
@@ -964,7 +964,7 @@ impl NomiMiniAppToolInvoker for NomiCoreMiniAppToolInvoker {
         let operation_id = request.operation_id().clone();
         self.application
             .invoke_agent_capability(
-                MiniAppAgentCapabilityInvocation {
+                PluginRuntimeAgentCapabilityInvocation {
                     owner_user_id: self.owner_user_id.clone(),
                     miniapp_id: request.capability().miniapp_id.clone(),
                     capability: request.capability().capability.clone(),

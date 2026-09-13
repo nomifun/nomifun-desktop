@@ -107,14 +107,14 @@ async function exerciseMiniApps() {
   await api('/api/plugins');
   await api('/api/agent-preset-templates?source=official');
   for (const kind of ['ui_only', 'service']) {
-    const library = await api('/api/miniapps');
-    let current = await api('/api/miniapps/projects', {
+    const library = await api('/api/plugins/runtimes');
+    let current = await api('/api/plugins/runtimes/projects', {
       expected_library_revision: library.library_revision,
       display_name: `Linux WebKit ${kind} ${Date.now()}`,
       description: 'Isolated Linux development smoke', kind,
     });
     const id = current.miniapp.miniapp_id;
-    const path = `/api/miniapps/${encodeURIComponent(id)}`;
+    const path = `/api/plugins/runtimes/${encodeURIComponent(id)}`;
     current = await api(`${path}/build`, {
       miniapp_id: id, expected_product_revision: current.miniapp.product_revision,
       project_id: current.project_id, expected_project_revision: current.project_revision,
@@ -190,7 +190,7 @@ try {
   clearTimeout(readyTimer);
   if (await evaluate('window.__backendPort') !== announcement.port) throw new Error('Inspector is not the Desktop serving the supplied isolated data root');
   report.webview_origin = await evaluate('location.origin');
-  for (const route of ['/agent', '/plugins', '/mini-apps']) {
+  for (const route of ['/agent', '/plugins', '/plugins']) {
     await evaluate(`location.hash = ${JSON.stringify(route)}`);
     await pause(1500);
     const page = await evaluate('({hash:location.hash,text:document.body.innerText})');
@@ -208,7 +208,7 @@ try {
   if (!result.ok) throw new Error(result.error);
   report.miniapps = result.value;
   for (const miniapp of report.miniapps) {
-    await evaluate(`location.hash = ${JSON.stringify(`/mini-apps/${miniapp.miniapp_id}`)}`);
+    await evaluate(`location.hash = ${JSON.stringify(`/plugins/run/${miniapp.miniapp_id}`)}`);
     const openButton = `Array.from(document.querySelectorAll('button')).find(button => /^(Open Surface|打开 Surface):/.test(button.getAttribute('aria-label') || '') && button.getAttribute('aria-label').endsWith(${JSON.stringify(`: ${miniapp.display_name}`)}) && !button.disabled)`;
     await waitFor(`Boolean(${openButton})`, 'MiniApp Open Surface button (en-US/zh-CN)');
     await evaluate(`(${openButton}).click(); void 0`);
@@ -223,7 +223,7 @@ try {
     await waitFor(`!document.querySelector('section[aria-labelledby="miniapp-surface-title"] iframe')`, 'Surface iframe unmount');
     miniapp.webview_surface = 'loaded-and-closed-via-ui';
   }
-  await evaluate('location.hash = "/mini-apps"; void 0');
+  await evaluate('location.hash = "/plugins"; void 0');
   report.status = 'preflight-pass';
   if (values.quit) {
     // Schedule after this evaluation response; the normal Tauri exit path owns

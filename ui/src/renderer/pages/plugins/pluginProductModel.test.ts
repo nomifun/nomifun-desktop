@@ -9,6 +9,16 @@ import {
 } from './pluginProductModel';
 
 describe('Plugin product model', () => {
+  test('keeps page, background and trashed plugins in one inventory without inventing an openable page', () => {
+    const library = { library_revision: 1, plugins: [], projects: [], runtimes: [
+      { plugin_id: 'page', display_name: 'Notes', description: '', kind: 'ui_only', lifecycle: 'enabled', surface_available: true, releases: { active: {} }, service_health: { state: 'not_applicable' }, updated_at_ms: 3 },
+      { plugin_id: 'background', display_name: 'Reminder', kind: 'service', lifecycle: 'enabled', surface_available: false, releases: { active: {} }, service_health: { state: 'stopped' }, updated_at_ms: 2 },
+      { plugin_id: 'removed', display_name: 'Removed', kind: 'service', lifecycle: 'trashed', surface_available: false, releases: { active: {} }, service_health: { state: 'stopped' }, updated_at_ms: 1 },
+    ] } as unknown as PluginLibraryResponse;
+    const items = pluginProductItems(library);
+    expect(items.map((item) => item.status)).toEqual(['enabled', 'enabled', 'trashed']);
+    expect(items[1].runtime?.surface_available).toBe(false);
+  });
   test('classifies user-facing capability themes without exposing runtime concepts', () => {
     expect(pluginProductCategory('网页摘要与知识搜索')).toBe('knowledge');
     expect(pluginProductCategory('Git repository code review')).toBe('development');

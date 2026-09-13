@@ -241,7 +241,7 @@ import {
   parseCsMessageId,
   parseCsNoteId,
   parseRequirementId,
-  parseMiniAppId,
+  parsePluginRuntimeId,
   parseSshHostId,
   parseSkillPatternId,
   parseTerminalId,
@@ -266,7 +266,7 @@ import {
   type ExecutionTemplateId,
   type McpServerId,
   type MessageId,
-  type MiniAppId,
+  type PluginRuntimeId,
   type ProviderId,
   type CsAgentId,
   type CsDialogueId,
@@ -330,44 +330,44 @@ import {
   type RawWorkspaceFlatFile,
 } from './workspaceMapper';
 import type {
-  BuildMiniAppRequest,
-  CancelMiniAppBuildRequest,
-  CloseMiniAppSurfaceRequest,
-  CreateMiniAppProjectRequest,
-  GetMiniAppSourceFileRequest,
-  MiniAppLibraryResponse,
-  MiniAppKvResponse,
-  MiniAppOperationSummary,
-  MiniAppSourceFile,
-  MiniAppSurfaceBridgeRequest,
-  MiniAppSurfaceLaunchDescriptor,
-  MiniAppSummary,
-  MiniAppWorkshop,
-  OpenMiniAppSurfaceRequest,
-  PublishMiniAppRequest,
-  ReplaceMiniAppSourceFileRequest,
-  RollbackMiniAppRequest,
-  SetMiniAppEnabledRequest,
-  SetMiniAppPublishModeRequest,
-  SetMiniAppServiceRunningRequest,
-  TestMiniAppReleaseRequest,
-  RetryMiniAppServiceRequest,
-  RetryMiniAppDeleteRequest,
-  TrashMiniAppRequest,
-  RestoreMiniAppRequest,
-  DeleteMiniAppRequest,
-  ImportMiniAppArtifactRequest,
-  ImportMiniAppShareRequest,
-  ExportMiniAppBackupRequest,
-  ImportMiniAppBackupRequest,
-  ShareMiniAppRequest,
-} from '../types/miniAppPlatform';
+  BuildPluginRuntimeRequest,
+  CancelPluginRuntimeBuildRequest,
+  ClosePluginRuntimeSurfaceRequest,
+  CreatePluginRuntimeProjectRequest,
+  GetPluginRuntimeSourceFileRequest,
+  PluginRuntimeLibraryResponse,
+  PluginRuntimeKvResponse,
+  PluginRuntimeOperationSummary,
+  PluginRuntimeSourceFile,
+  PluginRuntimeSurfaceBridgeRequest,
+  PluginRuntimeSurfaceLaunchDescriptor,
+  PluginRuntimeSummary,
+  PluginRuntimeWorkshop,
+  OpenPluginRuntimeSurfaceRequest,
+  PublishPluginRuntimeRequest,
+  ReplacePluginRuntimeSourceFileRequest,
+  RollbackPluginRuntimeRequest,
+  SetPluginRuntimeEnabledRequest,
+  SetPluginRuntimePublishModeRequest,
+  SetPluginRuntimeServiceRunningRequest,
+  TestPluginRuntimeReleaseRequest,
+  RetryPluginRuntimeServiceRequest,
+  RetryPluginRuntimeDeleteRequest,
+  TrashPluginRuntimeRequest,
+  RestorePluginRuntimeRequest,
+  DeletePluginRuntimeRequest,
+  ImportPluginRuntimeArtifactRequest,
+  ImportPluginRuntimeShareRequest,
+  ExportPluginRuntimeBackupRequest,
+  ImportPluginRuntimeBackupRequest,
+  SharePluginRuntimeRequest,
+} from '../types/pluginRuntimePlatform';
 
 export { plugins } from './pluginPlatformBridge';
 export type * from '../types/pluginPlatform';
 export { javascriptRuntime } from './javascriptRuntimeBridge';
 export type * from '../types/javascriptRuntime';
-export type * from '../types/miniAppPlatform';
+export type * from '../types/pluginRuntimePlatform';
 
 // ---------------------------------------------------------------------------
 // Shell — routed to POST /api/shell/*
@@ -2240,235 +2240,235 @@ export const ssh = {
 };
 
 // ---------------------------------------------------------------------------
-// MiniApp M1 - owner-scoped Product/Project/Release state.
+// PluginRuntime M1 - owner-scoped Product/Project/Release state.
 //
 // This is a clean cut from the retired single-HTML and conversation workspace
-// API. UI-only MiniApps move through Source -> Build -> Ready -> Active, with
+// API. UI-only PluginRuntimes move through Source -> Build -> Ready -> Active, with
 // lifecycle kept separate from Publish. Service and managed-data commands stay
 // outside this slice.
 // ---------------------------------------------------------------------------
 
-const fromApiMiniAppSummary = (value: MiniAppSummary): MiniAppSummary => ({
+const fromApiPluginRuntimeSummary = (value: PluginRuntimeSummary): PluginRuntimeSummary => ({
   ...value,
-  miniapp_id: parseMiniAppId(value.miniapp_id),
+  plugin_id: parsePluginRuntimeId(value.plugin_id),
 });
 
-const fromApiMiniAppOperation = (
-  value: MiniAppOperationSummary
-): MiniAppOperationSummary => ({
+const fromApiPluginRuntimeOperation = (
+  value: PluginRuntimeOperationSummary
+): PluginRuntimeOperationSummary => ({
   ...value,
   owner:
-    value.owner.owner === 'miniapp'
+    value.owner.owner === 'plugin_runtime'
       ? {
           ...value.owner,
-          miniapp_id: parseMiniAppId(value.owner.miniapp_id),
+          plugin_id: parsePluginRuntimeId(value.owner.plugin_id),
         }
       : value.owner,
 });
 
-const fromApiMiniAppLibrary = (
-  value: MiniAppLibraryResponse
-): MiniAppLibraryResponse => ({
+const fromApiPluginRuntimeLibrary = (
+  value: PluginRuntimeLibraryResponse
+): PluginRuntimeLibraryResponse => ({
   ...value,
-  miniapps: value.miniapps.map(fromApiMiniAppSummary),
+  plugins: value.plugins.map(fromApiPluginRuntimeSummary),
 });
 
-const fromApiMiniAppWorkshop = (
-  value: MiniAppWorkshop
-): MiniAppWorkshop => ({
+const fromApiPluginRuntimeWorkshop = (
+  value: PluginRuntimeWorkshop
+): PluginRuntimeWorkshop => ({
   ...value,
-  miniapp: fromApiMiniAppSummary(value.miniapp),
+  plugin: fromApiPluginRuntimeSummary(value.plugin),
   active_operation: value.active_operation
-    ? fromApiMiniAppOperation(value.active_operation)
+    ? fromApiPluginRuntimeOperation(value.active_operation)
     : undefined,
 });
 
-const fromApiMiniAppSurfaceLaunchDescriptor = (
-  value: MiniAppSurfaceLaunchDescriptor
-): MiniAppSurfaceLaunchDescriptor => ({
+const fromApiPluginRuntimeSurfaceLaunchDescriptor = (
+  value: PluginRuntimeSurfaceLaunchDescriptor
+): PluginRuntimeSurfaceLaunchDescriptor => ({
   ...value,
-  miniapp_id: parseMiniAppId(value.miniapp_id),
+  plugin_id: parsePluginRuntimeId(value.plugin_id),
 });
 
-const fromApiMiniAppSourceFile = (
-  value: MiniAppSourceFile
-): MiniAppSourceFile => ({
+const fromApiPluginRuntimeSourceFile = (
+  value: PluginRuntimeSourceFile
+): PluginRuntimeSourceFile => ({
   ...value,
-  miniapp_id: parseMiniAppId(value.miniapp_id),
+  plugin_id: parsePluginRuntimeId(value.plugin_id),
 });
 
-export const miniapps = {
+export const pluginRuntimes = {
   library: withResponseMap(
-    httpGet<MiniAppLibraryResponse, void>('/api/miniapps'),
-    fromApiMiniAppLibrary
+    httpGet<PluginRuntimeLibraryResponse, void>('/api/plugins/runtimes'),
+    fromApiPluginRuntimeLibrary
   ),
   createProject: withResponseMap(
-    httpPost<MiniAppWorkshop, CreateMiniAppProjectRequest>(
-      '/api/miniapps/projects'
+    httpPost<PluginRuntimeWorkshop, CreatePluginRuntimeProjectRequest>(
+      '/api/plugins/runtimes/projects'
     ),
-    fromApiMiniAppWorkshop
+    fromApiPluginRuntimeWorkshop
   ),
   importShare: withResponseMap(
-    httpPost<MiniAppWorkshop, ImportMiniAppShareRequest>(
-      '/api/miniapps/import/share'
+    httpPost<PluginRuntimeWorkshop, ImportPluginRuntimeShareRequest>(
+      '/api/plugins/runtimes/import/share'
     ),
-    fromApiMiniAppWorkshop
+    fromApiPluginRuntimeWorkshop
   ),
   importArtifact: withResponseMap(
-    httpPost<MiniAppWorkshop, ImportMiniAppArtifactRequest>(
-      '/api/miniapps/import/artifact'
+    httpPost<PluginRuntimeWorkshop, ImportPluginRuntimeArtifactRequest>(
+      '/api/plugins/runtimes/import/artifact'
     ),
-    fromApiMiniAppWorkshop
+    fromApiPluginRuntimeWorkshop
   ),
   exportBackup: withResponseMap(
-    httpPost<MiniAppOperationSummary, ExportMiniAppBackupRequest>(
-      ({ miniapp_id }) =>
-        `/api/miniapps/${encodeURIComponent(miniapp_id)}/backup`
+    httpPost<PluginRuntimeOperationSummary, ExportPluginRuntimeBackupRequest>(
+      ({ plugin_id }) =>
+        `/api/plugins/runtimes/${encodeURIComponent(plugin_id)}/backup`
     ),
-    fromApiMiniAppOperation
+    fromApiPluginRuntimeOperation
   ),
   importBackup: withResponseMap(
-    httpPost<MiniAppWorkshop, ImportMiniAppBackupRequest>(
-      '/api/miniapps/import/backup'
+    httpPost<PluginRuntimeWorkshop, ImportPluginRuntimeBackupRequest>(
+      '/api/plugins/runtimes/import/backup'
     ),
-    fromApiMiniAppWorkshop
+    fromApiPluginRuntimeWorkshop
   ),
   getWorkshop: withResponseMap(
-    httpGet<MiniAppWorkshop, { miniapp_id: MiniAppId }>(
-      ({ miniapp_id }) =>
-        `/api/miniapps/${encodeURIComponent(miniapp_id)}/workshop`
+    httpGet<PluginRuntimeWorkshop, { plugin_id: PluginRuntimeId }>(
+      ({ plugin_id }) =>
+        `/api/plugins/runtimes/${encodeURIComponent(plugin_id)}/workshop`
     ),
-    fromApiMiniAppWorkshop
+    fromApiPluginRuntimeWorkshop
   ),
   getSourceFile: withResponseMap(
-    httpGet<MiniAppSourceFile, GetMiniAppSourceFileRequest>(
-      ({ miniapp_id, path }) =>
-        `/api/miniapps/${encodeURIComponent(miniapp_id)}/source/files/${encodeURIComponent(path)}`
+    httpGet<PluginRuntimeSourceFile, GetPluginRuntimeSourceFileRequest>(
+      ({ plugin_id, path }) =>
+        `/api/plugins/runtimes/${encodeURIComponent(plugin_id)}/source/files/${encodeURIComponent(path)}`
     ),
-    fromApiMiniAppSourceFile
+    fromApiPluginRuntimeSourceFile
   ),
   replaceSourceFile: withResponseMap(
-    httpPost<MiniAppWorkshop, ReplaceMiniAppSourceFileRequest>(
-      ({ miniapp_id }) =>
-        `/api/miniapps/${encodeURIComponent(miniapp_id)}/source/edit`
+    httpPost<PluginRuntimeWorkshop, ReplacePluginRuntimeSourceFileRequest>(
+      ({ plugin_id }) =>
+        `/api/plugins/runtimes/${encodeURIComponent(plugin_id)}/source/edit`
     ),
-    fromApiMiniAppWorkshop
+    fromApiPluginRuntimeWorkshop
   ),
   build: withResponseMap(
-    httpPost<MiniAppWorkshop, BuildMiniAppRequest>(
-      ({ miniapp_id }) =>
-        `/api/miniapps/${encodeURIComponent(miniapp_id)}/build`
+    httpPost<PluginRuntimeWorkshop, BuildPluginRuntimeRequest>(
+      ({ plugin_id }) =>
+        `/api/plugins/runtimes/${encodeURIComponent(plugin_id)}/build`
     ),
-    fromApiMiniAppWorkshop
+    fromApiPluginRuntimeWorkshop
   ),
   test: withResponseMap(
-    httpPost<MiniAppWorkshop, TestMiniAppReleaseRequest>(
-      ({ miniapp_id }) =>
-        `/api/miniapps/${encodeURIComponent(miniapp_id)}/test`
+    httpPost<PluginRuntimeWorkshop, TestPluginRuntimeReleaseRequest>(
+      ({ plugin_id }) =>
+        `/api/plugins/runtimes/${encodeURIComponent(plugin_id)}/test`
     ),
-    fromApiMiniAppWorkshop
+    fromApiPluginRuntimeWorkshop
   ),
   share: withResponseMap(
-    httpPost<MiniAppOperationSummary, ShareMiniAppRequest>(
-      ({ miniapp_id }) =>
-        `/api/miniapps/${encodeURIComponent(miniapp_id)}/share`
+    httpPost<PluginRuntimeOperationSummary, SharePluginRuntimeRequest>(
+      ({ plugin_id }) =>
+        `/api/plugins/runtimes/${encodeURIComponent(plugin_id)}/share`
     ),
-    fromApiMiniAppOperation
+    fromApiPluginRuntimeOperation
   ),
   cancelBuild: withResponseMap(
-    httpPost<MiniAppOperationSummary, CancelMiniAppBuildRequest>(
-      ({ miniapp_id, operation_id }) =>
-        `/api/miniapps/${encodeURIComponent(miniapp_id)}/operations/${encodeURIComponent(operation_id)}/cancel`,
-      ({ operation_id: _operationId, miniapp_id: _miniappId, ...request }) =>
+    httpPost<PluginRuntimeOperationSummary, CancelPluginRuntimeBuildRequest>(
+      ({ plugin_id, operation_id }) =>
+        `/api/plugins/runtimes/${encodeURIComponent(plugin_id)}/operations/${encodeURIComponent(operation_id)}/cancel`,
+      ({ operation_id: _operationId, plugin_id: _miniappId, ...request }) =>
         request
     ),
-    fromApiMiniAppOperation
+    fromApiPluginRuntimeOperation
   ),
   publish: withResponseMap(
-    httpPost<MiniAppWorkshop, PublishMiniAppRequest>(
-      ({ miniapp_id }) =>
-        `/api/miniapps/${encodeURIComponent(miniapp_id)}/publish`
+    httpPost<PluginRuntimeWorkshop, PublishPluginRuntimeRequest>(
+      ({ plugin_id }) =>
+        `/api/plugins/runtimes/${encodeURIComponent(plugin_id)}/publish`
     ),
-    fromApiMiniAppWorkshop
+    fromApiPluginRuntimeWorkshop
   ),
   rollback: withResponseMap(
-    httpPost<MiniAppWorkshop, RollbackMiniAppRequest>(
-      ({ miniapp_id }) =>
-        `/api/miniapps/${encodeURIComponent(miniapp_id)}/rollback`
+    httpPost<PluginRuntimeWorkshop, RollbackPluginRuntimeRequest>(
+      ({ plugin_id }) =>
+        `/api/plugins/runtimes/${encodeURIComponent(plugin_id)}/rollback`
     ),
-    fromApiMiniAppWorkshop
+    fromApiPluginRuntimeWorkshop
   ),
   setEnabled: withResponseMap(
-    httpPost<MiniAppWorkshop, SetMiniAppEnabledRequest>(
-      ({ miniapp_id }) =>
-        `/api/miniapps/${encodeURIComponent(miniapp_id)}/enabled`
+    httpPost<PluginRuntimeWorkshop, SetPluginRuntimeEnabledRequest>(
+      ({ plugin_id }) =>
+        `/api/plugins/runtimes/${encodeURIComponent(plugin_id)}/enabled`
     ),
-    fromApiMiniAppWorkshop
+    fromApiPluginRuntimeWorkshop
   ),
   setPublishMode: withResponseMap(
-    httpPost<MiniAppWorkshop, SetMiniAppPublishModeRequest>(
-      ({ miniapp_id }) =>
-        `/api/miniapps/${encodeURIComponent(miniapp_id)}/publish-mode`
+    httpPost<PluginRuntimeWorkshop, SetPluginRuntimePublishModeRequest>(
+      ({ plugin_id }) =>
+        `/api/plugins/runtimes/${encodeURIComponent(plugin_id)}/publish-mode`
     ),
-    fromApiMiniAppWorkshop
+    fromApiPluginRuntimeWorkshop
   ),
   setServiceRunning: withResponseMap(
-    httpPost<MiniAppWorkshop, SetMiniAppServiceRunningRequest>(
-      ({ miniapp_id }) =>
-        `/api/miniapps/${encodeURIComponent(miniapp_id)}/service/running`
+    httpPost<PluginRuntimeWorkshop, SetPluginRuntimeServiceRunningRequest>(
+      ({ plugin_id }) =>
+        `/api/plugins/runtimes/${encodeURIComponent(plugin_id)}/service/running`
     ),
-    fromApiMiniAppWorkshop
+    fromApiPluginRuntimeWorkshop
   ),
   retryService: withResponseMap(
-    httpPost<MiniAppWorkshop, RetryMiniAppServiceRequest>(
-      ({ miniapp_id }) =>
-        `/api/miniapps/${encodeURIComponent(miniapp_id)}/service/retry`
+    httpPost<PluginRuntimeWorkshop, RetryPluginRuntimeServiceRequest>(
+      ({ plugin_id }) =>
+        `/api/plugins/runtimes/${encodeURIComponent(plugin_id)}/service/retry`
     ),
-    fromApiMiniAppWorkshop
+    fromApiPluginRuntimeWorkshop
   ),
   trash: withResponseMap(
-    httpPost<MiniAppWorkshop, TrashMiniAppRequest>(
-      ({ miniapp_id }) =>
-        `/api/miniapps/${encodeURIComponent(miniapp_id)}/trash`
+    httpPost<PluginRuntimeWorkshop, TrashPluginRuntimeRequest>(
+      ({ plugin_id }) =>
+        `/api/plugins/runtimes/${encodeURIComponent(plugin_id)}/trash`
     ),
-    fromApiMiniAppWorkshop
+    fromApiPluginRuntimeWorkshop
   ),
   restore: withResponseMap(
-    httpPost<MiniAppWorkshop, RestoreMiniAppRequest>(
-      ({ miniapp_id }) =>
-        `/api/miniapps/${encodeURIComponent(miniapp_id)}/restore`
+    httpPost<PluginRuntimeWorkshop, RestorePluginRuntimeRequest>(
+      ({ plugin_id }) =>
+        `/api/plugins/runtimes/${encodeURIComponent(plugin_id)}/restore`
     ),
-    fromApiMiniAppWorkshop
+    fromApiPluginRuntimeWorkshop
   ),
   delete: withResponseMap(
-    httpPost<MiniAppLibraryResponse, DeleteMiniAppRequest>(
-      ({ miniapp_id }) =>
-        `/api/miniapps/${encodeURIComponent(miniapp_id)}/delete`
+    httpPost<PluginRuntimeLibraryResponse, DeletePluginRuntimeRequest>(
+      ({ plugin_id }) =>
+        `/api/plugins/runtimes/${encodeURIComponent(plugin_id)}/delete`
     ),
-    fromApiMiniAppLibrary
+    fromApiPluginRuntimeLibrary
   ),
   retryDelete: withResponseMap(
-    httpPost<MiniAppLibraryResponse, RetryMiniAppDeleteRequest>(
-      ({ miniapp_id }) =>
-        `/api/miniapps/${encodeURIComponent(miniapp_id)}/delete/retry`
+    httpPost<PluginRuntimeLibraryResponse, RetryPluginRuntimeDeleteRequest>(
+      ({ plugin_id }) =>
+        `/api/plugins/runtimes/${encodeURIComponent(plugin_id)}/delete/retry`
     ),
-    fromApiMiniAppLibrary
+    fromApiPluginRuntimeLibrary
   ),
   openSurface: withResponseMap(
-    httpPost<MiniAppSurfaceLaunchDescriptor, OpenMiniAppSurfaceRequest>(
-      ({ miniapp_id }) =>
-        `/api/miniapps/${encodeURIComponent(miniapp_id)}/surface/open`
+    httpPost<PluginRuntimeSurfaceLaunchDescriptor, OpenPluginRuntimeSurfaceRequest>(
+      ({ plugin_id }) =>
+        `/api/plugins/runtimes/${encodeURIComponent(plugin_id)}/surface/open`
     ),
-    fromApiMiniAppSurfaceLaunchDescriptor
+    fromApiPluginRuntimeSurfaceLaunchDescriptor
   ),
-  closeSurface: httpPost<boolean, CloseMiniAppSurfaceRequest>(
-    ({ miniapp_id }) =>
-      `/api/miniapps/${encodeURIComponent(miniapp_id)}/surface/close`
+  closeSurface: httpPost<boolean, ClosePluginRuntimeSurfaceRequest>(
+    ({ plugin_id }) =>
+      `/api/plugins/runtimes/${encodeURIComponent(plugin_id)}/surface/close`
   ),
-  bridge: httpPost<MiniAppKvResponse, MiniAppSurfaceBridgeRequest>(
-    ({ miniapp_id }) =>
-      `/api/miniapps/${encodeURIComponent(miniapp_id)}/surface/bridge`,
-    ({ miniapp_id: _miniappId, ...request }) => request
+  bridge: httpPost<PluginRuntimeKvResponse, PluginRuntimeSurfaceBridgeRequest>(
+    ({ plugin_id }) =>
+      `/api/plugins/runtimes/${encodeURIComponent(plugin_id)}/surface/bridge`,
+    ({ plugin_id: _miniappId, ...request }) => request
   ),
 };
 

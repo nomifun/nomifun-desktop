@@ -2,13 +2,13 @@
   "title": "Plugin 工作台",
   "subtitle": "管理已安装 Plugin 的生命周期与能力，并检查作者项目、Ready Candidate 和构建状态。",
   "product": {
-    "eyebrow": "NomiFun 能力扩展",
+    "eyebrow": "你的工具箱",
     "title": "插件",
-    "subtitle": "创建和管理 NomiFun 的能力增强，并决定哪些 Agent 可以使用。",
+    "subtitle": "把常用工具和自动化放在一起，让插件为你完成更多事情。",
     "create": "创建插件",
     "import": "导入",
     "quickCreate": "快速创建插件",
-    "requirementPlaceholder": "描述你想让 NomiFun 增强什么能力…",
+    "requirementPlaceholder": "描述你想完成的事情，例如记账、整理资料或自动提醒…",
     "generate": "AI 一键生成",
     "manage": "插件分类管理",
     "smartViews": "智能视图",
@@ -17,7 +17,8 @@
       "enabled": "已启用",
       "disabled": "未启用",
       "draft": "创作中",
-      "attention": "需要处理"
+      "attention": "需要处理",
+      "trashed": "回收站"
     },
     "categories": {
       "title": "能力分类",
@@ -30,7 +31,11 @@
       "other": "其他"
     },
     "resultCount": "{{count}} 个插件",
-    "sort": { "label": "排序", "updated": "最近更新", "name": "名称" },
+    "sort": {
+      "label": "排序",
+      "updated": "最近更新",
+      "name": "名称"
+    },
     "viewMode": "插件展示方式",
     "toggle": "切换 {{name}} 的启用状态",
     "noDescription": "这个插件暂时没有用途说明。",
@@ -117,7 +122,14 @@
     "importNoCredentials": "不会导入凭据和运行数据",
     "installAndEnable": "安装并启用",
     "importDropTitle": "支持 NomiFun 分享包、插件目录和 ZIP",
-    "importDropBody": "选择后会先展示能力、来源和访问范围，再由你确认安装。"
+    "importDropBody": "选择后会先展示能力、来源和访问范围，再由你确认安装。",
+    "open": "打开",
+    "openReady": "已就绪，点击即可使用",
+    "gridView": "卡片视图",
+    "listView": "列表视图",
+    "reviewIssue": "查看问题",
+    "pin": "固定 {{name}} 到侧栏",
+    "unpin": "取消固定 {{name}}"
   },
   "navigation": {
     "railTitle": "插件"
@@ -129,7 +141,7 @@
   "actions": {
     "refresh": "刷新",
     "retry": "重试",
-    "search": "搜索 Plugin 或项目",
+    "search": "搜索插件",
     "configure": "配置与凭据",
     "configureUnavailable": "需要存在已安装的 Current 版本后才能配置这个 Plugin。",
     "saveConfiguration": "保存配置",
@@ -211,7 +223,7 @@
     "remote": "Remote",
     "automation": "自动化",
     "ui": "UI",
-    "miniappService": "MiniApp Service"
+    "miniappService": "Plugin Service"
   },
   "applyMode": {
     "ask": "应用前确认",

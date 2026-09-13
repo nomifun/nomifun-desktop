@@ -3,9 +3,9 @@
   "operations": [
     {"operation_id":"packages.list","method":"GET","path":"/api/packages","request_schema":null,"response_schema":null,"canonical_errors":[]},
     {"operation_id":"packages.get","method":"GET","path":"/api/packages/{package_id}","request_schema":null,"response_schema":null,"canonical_errors":[]},
-    {"operation_id":"plugin_mounts.get","method":"GET","path":"/api/plugin-mounts/{mount_id}","request_schema":null,"response_schema":null,"canonical_errors":[]},
-    {"operation_id":"plugin_mounts.config.get","method":"GET","path":"/api/plugin-mounts/{mount_id}/config","request_schema":null,"response_schema":null,"canonical_errors":[]},
-    {"operation_id":"plugin_mounts.config.put","method":"PUT","path":"/api/plugin-mounts/{mount_id}/config","request_schema":null,"response_schema":null,"canonical_errors":[]},
+    {"operation_id":"plugin_mounts.get","method":"GET","path":"/api/plugins/installations/{mount_id}","request_schema":null,"response_schema":null,"canonical_errors":[]},
+    {"operation_id":"plugin_mounts.config.get","method":"GET","path":"/api/plugins/installations/{mount_id}/config","request_schema":null,"response_schema":null,"canonical_errors":[]},
+    {"operation_id":"plugin_mounts.config.put","method":"PUT","path":"/api/plugins/installations/{mount_id}/config","request_schema":null,"response_schema":null,"canonical_errors":[]},
     {"operation_id":"capabilities.list","method":"GET","path":"/api/capabilities","request_schema":null,"response_schema":null,"canonical_errors":[]},
     {"operation_id":"capabilities.get","method":"GET","path":"/api/capabilities/{capability_id}","request_schema":null,"response_schema":null,"canonical_errors":[]},
     {"operation_id":"agent_catalog.skills.list","method":"GET","path":"/api/agent-catalog/skills","request_schema":null,"response_schema":null,"canonical_errors":[]},

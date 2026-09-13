@@ -16,7 +16,7 @@ use nomifun_js_runtime::{
     CommittedRuntimeProvider, JavaScriptWorkKind, ResolvedNodeRuntime,
     RuntimeUseLease,
 };
-use nomifun_plugin_service::PluginServiceError;
+use nomifun_plugin_platform::application::PluginServiceError;
 use tokio::sync::Mutex;
 
 struct BoundExtensionHost {

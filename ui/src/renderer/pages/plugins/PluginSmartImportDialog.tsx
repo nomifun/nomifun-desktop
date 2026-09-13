@@ -10,6 +10,8 @@ import { useTranslation } from 'react-i18next';
 import NomiModal from '@/renderer/components/base/NomiModal';
 import type { PluginLoadFailure } from './pluginWorkbenchModel';
 import styles from './PluginProductSurface.module.css';
+import { pluginRuntimeProduct, type PluginRuntimeDraft } from '@/common/adapter/pluginRuntimeProductBridge';
+import { useNavigate } from 'react-router-dom';
 
 interface PluginSmartImportDialogProps {
   visible: boolean;
@@ -29,6 +31,8 @@ const PluginSmartImportDialog: React.FC<PluginSmartImportDialogProps> = ({
   onSubmit,
 }) => {
   const { t } = useTranslation();
+  const navigate = useNavigate();
+  const [runtimeDraft, setRuntimeDraft] = useState<PluginRuntimeDraft | null>(null);
   const [sourcePath, setSourcePath] = useState('');
   const [inspection, setInspection] = useState<PluginImportInspection | null>(null);
   const [picking, setPicking] = useState(false);
@@ -38,6 +42,7 @@ const PluginSmartImportDialog: React.FC<PluginSmartImportDialogProps> = ({
     if (!visible) return;
     setSourcePath('');
     setInspection(null);
+    setRuntimeDraft(null);
     setPicking(false);
     setError('');
   }, [visible]);
@@ -52,14 +57,22 @@ const PluginSmartImportDialog: React.FC<PluginSmartImportDialogProps> = ({
           ? { properties: ['openDirectory'] }
           : {
               properties: ['openFile'],
-              filters: [{ name: t('pluginWorkbench.dialogs.import.archiveFilter'), extensions: ['zip'] }],
+              filters: [{ name: t('pluginWorkbench.dialogs.import.archiveFilter'), extensions: ['zip', 'nomiplugin', 'html', 'htm'] }],
             }
       );
       const selected = paths?.[0]?.trim();
       if (!selected) return;
       setSourcePath(selected);
-      const next = await ipcBridge.plugins.inspectImport.invoke({ source_path: selected });
-      setInspection(next);
+      if (runtimeDraft) {
+        await pluginRuntimeProduct.discard.invoke({ id: runtimeDraft.id, expected_revision: runtimeDraft.revision });
+        setRuntimeDraft(null);
+      }
+      try {
+        const next = await ipcBridge.plugins.inspectImport.invoke({ source_path: selected });
+        setInspection(next);
+      } catch {
+        setRuntimeDraft(await pluginRuntimeProduct.inspect.invoke({ source_path: selected }));
+      }
     } catch (caught) {
       console.error('[plugins] import inspection failed', caught);
       setError(t('pluginWorkbench.product.importInvalid'));
@@ -69,6 +82,19 @@ const PluginSmartImportDialog: React.FC<PluginSmartImportDialogProps> = ({
   };
 
   const submit = async () => {
+    if (runtimeDraft) {
+      setPicking(true);
+      setError('');
+      try {
+        const app = await pluginRuntimeProduct.save.invoke({ id: runtimeDraft.id, expected_revision: runtimeDraft.revision });
+        onCancel();
+        navigate(`/plugins/run/${app.plugin.plugin_id}`);
+      } catch {
+        setError(t('pluginRuntime.product.importFailed'));
+        try { setRuntimeDraft(await pluginRuntimeProduct.draft.invoke({ id: runtimeDraft.id })); } catch { /* Keep the recoverable draft. */ }
+      } finally { setPicking(false); }
+      return;
+    }
     if (!inspection || !sourcePath) return;
     await onSubmit({
       expected_library_revision: libraryRevision,
@@ -78,13 +104,24 @@ const PluginSmartImportDialog: React.FC<PluginSmartImportDialogProps> = ({
     });
   };
 
+  const cancel = async () => {
+    if (loading || picking) return;
+    if (runtimeDraft) {
+      setPicking(true);
+      try { await pluginRuntimeProduct.discard.invoke({ id: runtimeDraft.id, expected_revision: runtimeDraft.revision }); }
+      catch { setError(t('pluginRuntime.product.operationFailed')); return; }
+      finally { setPicking(false); }
+    }
+    onCancel();
+  };
+
   return (
     <NomiModal
       visible={visible}
       header={t('pluginWorkbench.product.importTitle')}
       footer={null}
       size='medium'
-      onCancel={loading ? undefined : onCancel}
+      onCancel={loading || picking ? undefined : () => void cancel()}
       maskClosable={false}
       autoFocus={false}
       unmountOnExit
@@ -133,7 +170,15 @@ const PluginSmartImportDialog: React.FC<PluginSmartImportDialogProps> = ({
             </details>
           </section>
         )}
-        {!inspection && !picking && !error && (
+        {runtimeDraft && (
+          <section className={styles.importInspection}>
+            <h3>{runtimeDraft.name}</h3>
+            <p>{runtimeDraft.description}</p>
+            <p>{t(runtimeDraft.import?.includes_data ? 'pluginRuntime.product.backup' : 'pluginWorkbench.product.importNoCredentials')}</p>
+            <Button type='primary' long loading={picking} onClick={() => void submit()}>{t('pluginWorkbench.product.installAndEnable')}</Button>
+          </section>
+        )}
+        {!inspection && !runtimeDraft && !picking && !error && (
           <div className={styles.importDropHint}>
             <Upload theme='outline' size={28} />
             <strong>{t('pluginWorkbench.product.importDropTitle')}</strong>

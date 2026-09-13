@@ -670,11 +670,11 @@ fn fixture_artifact_payload_with_service(
             localized_names: BTreeMap::new(),
             localized_descriptions: BTreeMap::new(),
         },
-        ui: MiniAppUiReleaseDescriptor {
+        ui: Some(MiniAppUiReleaseDescriptor {
             entrypoint: "ui/index.html".to_owned(),
             entrypoint_digest: files[0].digest.clone(),
             ui_tree_digest: canonical_ui_tree_digest(&files).unwrap(),
-        },
+        }),
         service: has_service.then(|| MiniAppServiceReleaseDescriptor {
             entrypoint: "service/main.mjs".to_owned(),
             module_digest: files[1].digest.clone(),

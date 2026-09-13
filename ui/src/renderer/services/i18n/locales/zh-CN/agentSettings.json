@@ -82,7 +82,7 @@
     "creativeStudio": {
       "default": {
         "name": "创意工坊",
-        "description": "按创作需求组合素材、内容生成与小程序相关能力。"
+        "description": "按创作需求组合素材、内容生成与插件相关能力。"
       }
     }
   },
@@ -173,7 +173,7 @@
       "generationProvider": "生成服务",
       "knowledgeBase": "知识库",
       "mcpConnection": "MCP 连接",
-      "miniApp": "小程序",
+      "pluginRuntime": "插件",
       "processSession": "进程会话",
       "projectMemory": "项目记忆",
       "robot": "机器人",

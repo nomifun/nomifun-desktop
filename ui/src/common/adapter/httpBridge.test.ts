@@ -621,7 +621,7 @@ describe('httpRequest client deadline + network-failure diagnosis', () => {
     }
   });
 
-  test('recursively redacts MiniApp surface_capability from HTTP debug logs', async () => {
+  test('recursively redacts PluginRuntime surface_capability from HTTP debug logs', async () => {
     const realConsoleDebug = console.debug;
     const localStorageDescriptor = Object.getOwnPropertyDescriptor(
       globalThis,
@@ -660,7 +660,7 @@ describe('httpRequest client deadline + network-failure diagnosis', () => {
     };
 
     try {
-      await httpRequest('POST', '/api/miniapps/test/bridge', {
+      await httpRequest('POST', '/api/plugins/runtimes/test/bridge', {
         expected_release_digest: releaseDigest,
         request: {
           targets: [{ transport: { surface_capability: capability } }],

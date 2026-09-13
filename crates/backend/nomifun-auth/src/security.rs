@@ -302,7 +302,7 @@ mod tests {
         let digest =
             "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
         let path = format!(
-            "/api/miniapps/miniapp-1/surface/assets/{capability}/3/{digest}/ui/index.html"
+            "/api/plugins/runtimes/miniapp-1/surface/assets/{capability}/3/{digest}/ui/index.html"
         );
         let app = Router::new()
             .route(&path, get(|| async { "ok" }))

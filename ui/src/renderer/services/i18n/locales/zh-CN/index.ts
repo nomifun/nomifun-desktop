@@ -34,7 +34,7 @@ import collaboration from './collaboration.json';
 import creativeStudio from './creativeStudio.json';
 import browser from './browser.json';
 import ssh from './ssh.json';
-import miniApps from './miniApps.json';
+import pluginRuntime from './pluginRuntime.json';
 import agentSettings from './agentSettings.json';
 import pluginWorkbench from './pluginWorkbench.json';
 
@@ -70,7 +70,7 @@ export default {
   creativeStudio,
   browser,
   ssh,
-  miniApps,
+  pluginRuntime,
   agentSettings,
   pluginWorkbench,
 };

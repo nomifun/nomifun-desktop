@@ -16,11 +16,11 @@ fn access_log_path(path: &str) -> Cow<'_, str> {
     let miniapp_segments = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
     if matches!(
         miniapp_segments.as_slice(),
-        ["api", "miniapps", _miniapp_id, "surface", "assets", capability, _epoch, _digest, ..]
+        ["api", "plugins", "runtimes", _plugin_id, "surface", "assets", capability, _epoch, _digest, ..]
             if is_preview_capability(capability)
     ) {
         let mut redacted = miniapp_segments;
-        redacted[5] = REDACTED_CAPABILITY;
+        redacted[6] = REDACTED_CAPABILITY;
         return Cow::Owned(format!("/{}", redacted.join("/")));
     }
 
@@ -135,17 +135,17 @@ mod tests {
     fn redacts_only_structural_miniapp_surface_capabilities() {
         assert_eq!(
             access_log_path(&format!(
-                "/api/miniapps/miniapp-1/surface/assets/{CAPABILITY}/4/{CAPABILITY}/ui/index.html"
+                "/api/plugins/runtimes/miniapp-1/surface/assets/{CAPABILITY}/4/{CAPABILITY}/ui/index.html"
             )),
             format!(
-                "/api/miniapps/miniapp-1/surface/assets/[REDACTED]/4/{CAPABILITY}/ui/index.html"
+                "/api/plugins/runtimes/miniapp-1/surface/assets/[REDACTED]/4/{CAPABILITY}/ui/index.html"
             )
         );
         assert_eq!(
             access_log_path(
-                "/api/miniapps/miniapp-1/surface/assets/not-a-capability/4/digest/ui/index.html"
+                "/api/plugins/runtimes/miniapp-1/surface/assets/not-a-capability/4/digest/ui/index.html"
             ),
-            "/api/miniapps/miniapp-1/surface/assets/not-a-capability/4/digest/ui/index.html"
+            "/api/plugins/runtimes/miniapp-1/surface/assets/not-a-capability/4/digest/ui/index.html"
         );
     }
 

@@ -57,7 +57,7 @@ describe('Plugin product home', () => {
       </I18nextProvider>
     );
     const requirement = page.getByLabelText(
-      'Describe what you want NomiFun to do better…'
+      en.product.requirementPlaceholder
     ) as HTMLTextAreaElement;
     fireEvent.input(requirement, {
       target: { value: 'Add a structured research summary' },

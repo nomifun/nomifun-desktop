@@ -268,6 +268,9 @@ pub struct PluginLibraryResponseDto {
     pub library_revision: u64,
     pub plugins: Vec<PluginSummaryDto>,
     pub projects: Vec<PluginProjectSummaryDto>,
+    /// Revision for the independently committed release runtime inventory.
+    pub runtime_revision: u64,
+    pub runtimes: Vec<crate::PluginRuntimeSummaryDto>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -717,6 +720,7 @@ pub enum DurableOperationKindDto {
     Build,
     Import,
     Export,
+    #[serde(rename = "plugin_permanent_delete")]
     MiniappPermanentDelete,
 }
 
@@ -734,7 +738,8 @@ pub enum DurableOperationStateDto {
 pub enum DurableOperationOwnerDto {
     PluginProject { project_id: String },
     PluginMount { mount_id: String },
-    Miniapp { miniapp_id: String },
+    #[serde(rename = "plugin_runtime")]
+    Miniapp { #[serde(rename = "plugin_id")] miniapp_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

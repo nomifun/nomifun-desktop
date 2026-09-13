@@ -21,7 +21,7 @@ mod mcp_bridge;
 mod model_capability;
 pub mod model_protocol;
 pub mod model_task;
-mod miniapp_platform;
+mod plugin_runtime;
 mod office;
 mod plugin_platform;
 mod provider;
@@ -166,7 +166,7 @@ pub use model_protocol::{
     ProtocolRecommendation, ProtocolScope, ProtocolTaskDescriptor, ProtocolTransportKind,
 };
 pub use model_task::{ModelTask, ModelTrait, infer_catalog_tasks_and_traits};
-pub use miniapp_platform::*;
+pub use plugin_runtime::*;
 pub use office::{
     GetSnapshotContentRequest, ListSnapshotsRequest,
     PREVIEW_CAPABILITY_BYTES, PREVIEW_CAPABILITY_HEX_LEN, PreviewHistoryTargetDto,

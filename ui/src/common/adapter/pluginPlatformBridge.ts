@@ -45,6 +45,7 @@ import {
   parsePluginMountId,
   parsePluginOperationId,
   parsePluginProjectId,
+  parsePluginRuntimeId,
 } from '../types/ids';
 import {
   httpGet,
@@ -130,6 +131,10 @@ const mapLibrary = (library: PluginLibraryResponse): PluginLibraryResponse => ({
   ...library,
   plugins: library.plugins.map(mapSummary),
   projects: library.projects.map(mapProjectSummary),
+  runtimes: library.runtimes?.map((runtime) => ({
+    ...runtime,
+    plugin_id: parsePluginRuntimeId(runtime.plugin_id),
+  })),
 });
 
 const mapDetail = (detail: PluginDetail): PluginDetail => ({
@@ -166,7 +171,7 @@ const deleteWithBody = <Data, Params>(
 
 export const plugins = {
   generateDraft: httpPost<GeneratedPluginDraft, GeneratePluginDraftRequest>(
-    '/api/plugin-authoring/generate'
+    '/api/plugins/authoring/generate'
   ),
   list: withResponseMap(
     httpGet<PluginLibraryResponse, void>('/api/plugins'),
@@ -174,126 +179,126 @@ export const plugins = {
   ),
   getProject: withResponseMap(
     httpGet<PluginProjectDetail, { project_id: string }>(
-      (request) => `/api/plugin-projects/${encodeURIComponent(request.project_id)}`
+      (request) => `/api/plugins/projects/${encodeURIComponent(request.project_id)}`
     ),
     mapProjectDetail
   ),
   getAuthoringContext: httpGet<PluginAuthoringContext, { project_id: string }>(
-    (request) => `/api/plugin-projects/${encodeURIComponent(request.project_id)}/authoring-context`
+    (request) => `/api/plugins/projects/${encodeURIComponent(request.project_id)}/authoring-context`
   ),
   createProject: withResponseMap(
-    httpPost<PluginProjectDetail, CreatePluginProjectRequest>('/api/plugin-projects'),
+    httpPost<PluginProjectDetail, CreatePluginProjectRequest>('/api/plugins/projects'),
     mapProjectDetail
   ),
   importPrebuilt: withResponseMap(
-    httpPost<PluginProjectDetail, ImportPluginRequest>('/api/plugin-imports'),
+    httpPost<PluginProjectDetail, ImportPluginRequest>('/api/plugins/imports'),
     mapProjectDetail
   ),
   inspectImport: httpPost<PluginImportInspection, { source_path: string }>(
-    '/api/plugin-imports/inspect'
+    '/api/plugins/imports/inspect'
   ),
   exportShare: withResponseMap(
     httpPost<DurablePluginOperationDetail, SharePluginRequest>(
-      (request) => `/api/plugin-projects/${encodeURIComponent(request.project_id)}/share`
+      (request) => `/api/plugins/projects/${encodeURIComponent(request.project_id)}/share`
     ),
     mapOperationDetail
   ),
   buildProject: withResponseMap(
     httpPost<PluginProjectDetail, BuildPluginProjectRequest>(
-      (request) => `/api/plugin-projects/${encodeURIComponent(request.project_id)}/build`
+      (request) => `/api/plugins/projects/${encodeURIComponent(request.project_id)}/build`
     ),
     mapProjectDetail
   ),
   applySourceEdit: withResponseMap(
     httpPost<PluginProjectDetail, ApplyPluginSourceEditRequest>(
       (request) =>
-        `/api/plugin-projects/${encodeURIComponent(request.project_id)}/source/edit`
+        `/api/plugins/projects/${encodeURIComponent(request.project_id)}/source/edit`
     ),
     mapProjectDetail
   ),
   updateDependencies: withResponseMap(
     httpPut<PluginProjectDetail, UpdatePluginDependenciesRequest>(
       (request) =>
-        `/api/plugin-projects/${encodeURIComponent(request.project_id)}/source/dependencies`
+        `/api/plugins/projects/${encodeURIComponent(request.project_id)}/source/dependencies`
     ),
     mapProjectDetail
   ),
   setAutoApply: withResponseMap(
     httpPut<PluginProjectDetail, SetPluginAutoApplyRequest>(
       (request) =>
-        `/api/plugin-projects/${encodeURIComponent(request.project_id)}/auto-apply`
+        `/api/plugins/projects/${encodeURIComponent(request.project_id)}/auto-apply`
     ),
     mapProjectDetail
   ),
   testCandidate: withResponseMap(
     httpPost<PluginProjectDetail, TestPluginCandidateRequest>(
-      (request) => `/api/plugin-projects/${encodeURIComponent(request.project_id)}/test`
+      (request) => `/api/plugins/projects/${encodeURIComponent(request.project_id)}/test`
     ),
     mapProjectDetail
   ),
   applyCandidate: withResponseMap(
     httpPost<PluginDetail, ApplyPluginCandidateRequest>(
-      (request) => `/api/plugin-projects/${encodeURIComponent(request.project_id)}/apply`
+      (request) => `/api/plugins/projects/${encodeURIComponent(request.project_id)}/apply`
     ),
     mapDetail
   ),
   deleteProject: deleteWithBody<boolean, DeletePluginProjectRequest>(
-    (request) => `/api/plugin-projects/${encodeURIComponent(request.project_id)}`
+    (request) => `/api/plugins/projects/${encodeURIComponent(request.project_id)}`
   ),
   getMount: withResponseMap(
     httpGet<PluginDetail, { mount_id: string }>(
-      (request) => `/api/plugin-mounts/${encodeURIComponent(request.mount_id)}`
+      (request) => `/api/plugins/installations/${encodeURIComponent(request.mount_id)}`
     ),
     mapDetail
   ),
   configure: withResponseMap(
     httpPut<PluginDetail, ConfigurePluginRequest>(
-      (request) => `/api/plugin-mounts/${encodeURIComponent(request.mount_id)}/config`
+      (request) => `/api/plugins/installations/${encodeURIComponent(request.mount_id)}/config`
     ),
     mapDetail
   ),
   setEnabled: withResponseMap(
     httpPut<PluginDetail, SetPluginEnabledRequest>(
-      (request) => `/api/plugin-mounts/${encodeURIComponent(request.mount_id)}/enabled`
+      (request) => `/api/plugins/installations/${encodeURIComponent(request.mount_id)}/enabled`
     ),
     mapDetail
   ),
   retryMount: withResponseMap(
     httpPost<PluginDetail, RetryPluginRequest>(
-      (request) => `/api/plugin-mounts/${encodeURIComponent(request.mount_id)}/retry`
+      (request) => `/api/plugins/installations/${encodeURIComponent(request.mount_id)}/retry`
     ),
     mapDetail
   ),
   restorePrevious: withResponseMap(
     httpPost<PluginDetail, RestorePluginPreviousRequest>(
-      (request) => `/api/plugin-mounts/${encodeURIComponent(request.mount_id)}/restore`
+      (request) => `/api/plugins/installations/${encodeURIComponent(request.mount_id)}/restore`
     ),
     mapDetail
   ),
   uninstall: withResponseMap(
     httpPost<PluginDetail, UninstallPluginRequest>(
-      (request) => `/api/plugin-mounts/${encodeURIComponent(request.mount_id)}/uninstall`
+      (request) => `/api/plugins/installations/${encodeURIComponent(request.mount_id)}/uninstall`
     ),
     mapDetail
   ),
   deleteData: deleteWithBody<void, DeletePluginDataRequest>(
-    (request) => `/api/plugin-mounts/${encodeURIComponent(request.mount_id)}/data`
+    (request) => `/api/plugins/installations/${encodeURIComponent(request.mount_id)}/data`
   ),
   listOperations: withResponseMap(
-    httpGet<DurablePluginOperationSummary[], void>('/api/plugin-operations'),
+    httpGet<DurablePluginOperationSummary[], void>('/api/plugins/operations'),
     (operations) => operations.map(mapOperationSummary)
   ),
   getOperation: withResponseMap(
     httpGet<DurablePluginOperationDetail, { operation_id: string }>(
       (request) =>
-        `/api/plugin-operations/${encodeURIComponent(request.operation_id)}`
+        `/api/plugins/operations/${encodeURIComponent(request.operation_id)}`
     ),
     mapOperationDetail
   ),
   cancelOperation: withResponseMap(
     httpPost<DurablePluginOperationSummary, CancelPluginOperationRequest>(
       (request) =>
-        `/api/plugin-operations/${encodeURIComponent(request.operation_id)}/cancel`,
+        `/api/plugins/operations/${encodeURIComponent(request.operation_id)}/cancel`,
       (request) => ({
         expected_operation_revision: request.expected_operation_revision,
       })
