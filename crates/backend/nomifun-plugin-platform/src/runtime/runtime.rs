@@ -1,11 +1,11 @@
 use async_trait::async_trait;
 use nomifun_agent_contracts::{
-    MiniAppId, MiniAppMigration, MiniAppProductLifecycleState, ResolvedMiniAppServiceSpec,
+    PluginProductId, PluginMigration, PluginProductLifecycleState, ResolvedPluginServiceSpec,
 };
 use uuid::Uuid;
 
 use crate::runtime::{
-    PluginRuntimeKind, PluginRuntimePlatformError, PluginRuntimePlatformResult, PluginRuntimeRepositorySnapshot,
+    PluginRuntimePlatformError, PluginRuntimePlatformResult, PluginRuntimeRepositorySnapshot,
     StoredPluginRuntimeRelease,
 };
 
@@ -18,20 +18,20 @@ pub enum PluginRuntimeReleaseCutoverKind {
 #[derive(Clone, Debug)]
 pub struct PluginRuntimeReleaseCutoverPlan {
     pub kind: PluginRuntimeReleaseCutoverKind,
-    pub miniapp_id: MiniAppId,
-    pub lifecycle: MiniAppProductLifecycleState,
+    pub plugin_product_id: PluginProductId,
+    pub lifecycle: PluginProductLifecycleState,
     pub current_release: Option<StoredPluginRuntimeRelease>,
     pub target_release: StoredPluginRuntimeRelease,
     pub current_active_epoch: u64,
     pub target_active_epoch: u64,
-    pub current_service_spec: Option<ResolvedMiniAppServiceSpec>,
-    pub target_service_spec: Option<ResolvedMiniAppServiceSpec>,
-    pub target_migrations: Vec<MiniAppMigration>,
+    pub current_service_spec: Option<ResolvedPluginServiceSpec>,
+    pub target_service_spec: Option<ResolvedPluginServiceSpec>,
+    pub target_migrations: Vec<PluginMigration>,
 }
 
 impl PluginRuntimeReleaseCutoverPlan {
     pub fn validate(&self) -> PluginRuntimePlatformResult<()> {
-        if self.target_release.miniapp_id != self.miniapp_id
+        if self.target_release.plugin_product_id != self.plugin_product_id
             || self.target_active_epoch
                 != self
                     .current_active_epoch
@@ -49,24 +49,24 @@ impl PluginRuntimeReleaseCutoverPlan {
         self.target_release.validate()?;
         if let Some(current) = &self.current_release {
             current.validate()?;
-            if current.miniapp_id != self.miniapp_id {
+            if current.plugin_product_id != self.plugin_product_id {
                 return Err(PluginRuntimePlatformError::InvalidState(
                     "current Release belongs to another Plugin".into(),
                 ));
             }
         }
         validate_service_spec(
-            &self.miniapp_id,
+            &self.plugin_product_id,
             &self.target_release,
             self.target_active_epoch,
             self.target_service_spec.as_ref(),
             true,
         )?;
         if let Some(current) = &self.current_release {
-            let require_current = self.lifecycle == MiniAppProductLifecycleState::Enabled
+            let require_current = self.lifecycle == PluginProductLifecycleState::Enabled
                 && current.artifact.manifest.payload.service.is_some();
             validate_service_spec(
-                &self.miniapp_id,
+                &self.plugin_product_id,
                 current,
                 self.current_active_epoch,
                 self.current_service_spec.as_ref(),
@@ -114,21 +114,21 @@ impl PluginRuntimeReleaseCutoverPlan {
 
 #[derive(Clone, Debug)]
 pub struct PluginRuntimeLifecyclePlan {
-    pub miniapp_id: MiniAppId,
-    pub from: MiniAppProductLifecycleState,
-    pub to: MiniAppProductLifecycleState,
+    pub plugin_product_id: PluginProductId,
+    pub from: PluginProductLifecycleState,
+    pub to: PluginProductLifecycleState,
     pub active_release_epoch: u64,
     pub active_release: Option<StoredPluginRuntimeRelease>,
-    pub active_service_spec: Option<ResolvedMiniAppServiceSpec>,
+    pub active_service_spec: Option<ResolvedPluginServiceSpec>,
 }
 
 impl PluginRuntimeLifecyclePlan {
     pub fn validate(&self) -> PluginRuntimePlatformResult<()> {
-        let touches_execution = self.from == MiniAppProductLifecycleState::Enabled
-            || self.to == MiniAppProductLifecycleState::Enabled;
+        let touches_execution = self.from == PluginProductLifecycleState::Enabled
+            || self.to == PluginProductLifecycleState::Enabled;
         match &self.active_release {
             Some(release) => {
-                if release.miniapp_id != self.miniapp_id {
+                if release.plugin_product_id != self.plugin_product_id {
                     return Err(PluginRuntimePlatformError::InvalidState(
                         "lifecycle Release belongs to another Plugin".into(),
                     ));
@@ -136,7 +136,7 @@ impl PluginRuntimeLifecyclePlan {
                 let require_spec =
                     touches_execution && release.artifact.manifest.payload.service.is_some();
                 validate_service_spec(
-                    &self.miniapp_id,
+                    &self.plugin_product_id,
                     release,
                     self.active_release_epoch,
                     self.active_service_spec.as_ref(),
@@ -144,7 +144,7 @@ impl PluginRuntimeLifecyclePlan {
                 )?;
             }
             None => {
-                if self.to == MiniAppProductLifecycleState::Enabled
+                if self.to == PluginProductLifecycleState::Enabled
                     || self.active_service_spec.is_some()
                 {
                     return Err(PluginRuntimePlatformError::InvalidState(
@@ -238,7 +238,7 @@ impl PluginRuntimeRuntimePort for UiOnlyPluginRuntimeRuntime {
         if let Some(current) = &plan.current_release {
             reject_service_release(current)?;
         }
-        Ok(PluginRuntimeRuntimeTicket::new("miniapp-release"))
+        Ok(PluginRuntimeRuntimeTicket::new("plugin-release"))
     }
 
     async fn complete_release_cutover(
@@ -265,7 +265,7 @@ impl PluginRuntimeRuntimePort for UiOnlyPluginRuntimeRuntime {
         if let Some(active) = &plan.active_release {
             reject_service_release(active)?;
         }
-        Ok(PluginRuntimeRuntimeTicket::new("miniapp-lifecycle"))
+        Ok(PluginRuntimeRuntimeTicket::new("plugin-lifecycle"))
     }
 
     async fn complete_lifecycle(
@@ -288,7 +288,11 @@ impl PluginRuntimeRuntimePort for UiOnlyPluginRuntimeRuntime {
         &self,
         snapshot: &PluginRuntimeRepositorySnapshot,
     ) -> PluginRuntimePlatformResult<()> {
-        if snapshot.root.product.kind == PluginRuntimeKind::Service {
+        let active_has_service = snapshot
+            .root
+            .active_release()
+            .map(|release| release.artifact.manifest.payload.service.is_some())?;
+        if active_has_service {
             return Err(PluginRuntimePlatformError::Runtime(
                 "Plugin Service Host is not configured".into(),
             ));
@@ -311,10 +315,10 @@ impl PluginRuntimeManagedDataPort for NoopPluginRuntimeManagedData {
 }
 
 fn validate_service_spec(
-    miniapp_id: &MiniAppId,
+    plugin_product_id: &PluginProductId,
     release: &StoredPluginRuntimeRelease,
     epoch: u64,
-    spec: Option<&ResolvedMiniAppServiceSpec>,
+    spec: Option<&ResolvedPluginServiceSpec>,
     required: bool,
 ) -> PluginRuntimePlatformResult<()> {
     match (&release.artifact.manifest.payload.service, spec) {
@@ -328,7 +332,7 @@ fn validate_service_spec(
         (Some(_), None) => Ok(()),
         (Some(_), Some(spec)) => {
             spec.validate_for_release(&release.artifact.manifest.payload)?;
-            if &spec.miniapp_id != miniapp_id
+            if &spec.plugin_product_id != plugin_product_id
                 || spec.release != *release.release_ref()
                 || spec.active_release_epoch != epoch
             {

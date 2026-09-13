@@ -43,7 +43,7 @@ export interface JavaScriptRuntimeDownload {
 
 export type RuntimeSwitchParticipantKind =
   | 'plugin_mount'
-  | 'miniapp_service'
+  | 'plugin_service'
   | 'build_foundation';
 
 export type RuntimeSwitchParticipantStatus =

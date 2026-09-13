@@ -50,7 +50,7 @@ describe('Agent resource selection contract', () => {
     const officialKinds = [
       'workspace', 'knowledge_base', 'project_memory', 'process_session', 'terminal',
       'mcp_server', 'companion', 'companion_memory', 'channel', 'robot', 'customer',
-      'canvas', 'asset_library', 'generation_provider', 'miniapp',
+      'canvas', 'asset_library', 'generation_provider', 'plugin',
     ];
     const value = {
       companion: 'companion-1',
@@ -61,12 +61,12 @@ describe('Agent resource selection contract', () => {
       mcp_server: 'mcp-1',
       canvas: 'canvas-1',
       generation_provider: 'provider-1',
-      miniapp: 'miniapp-1',
+      plugin: 'plugin-1',
     };
 
     expect(requiredAgentResourcePickerKinds(officialKinds)).toEqual([
       'companion', 'customer', 'knowledge_base', 'channel', 'robot',
-      'mcp_server', 'canvas', 'generation_provider', 'miniapp',
+      'mcp_server', 'canvas', 'generation_provider', 'plugin',
     ]);
     const resolution = resolveAgentResourceSelections(officialKinds, value);
     expect(resolution.missingKinds).toEqual([]);

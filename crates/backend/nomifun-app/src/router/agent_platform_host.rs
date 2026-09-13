@@ -2468,7 +2468,7 @@ mod tests {
                     format!("wave1-{fixture_name}-test"),
             },
             CompileRequest {
-                miniapp_capabilities: Vec::new(),
+                plugin_product_capabilities: Vec::new(),
                 revision,
                 principal: owner.clone(),
                 scene: format!("wave1-{fixture_name}-test"),
@@ -2920,7 +2920,7 @@ mod tests {
                 &materialized,
                 &environment,
                 CompileRequest {
-                    miniapp_capabilities: Vec::new(),
+                    plugin_product_capabilities: Vec::new(),
                     revision,
                     principal: owner.clone(),
                     scene: "browser-role-live-test".to_owned(),
@@ -3219,7 +3219,7 @@ mod tests {
                 &materialized,
                 &environment,
                 CompileRequest {
-                    miniapp_capabilities: Vec::new(),
+                    plugin_product_capabilities: Vec::new(),
                     revision,
                     principal: owner.clone(),
                     scene: "computer-role-live-test".to_owned(),

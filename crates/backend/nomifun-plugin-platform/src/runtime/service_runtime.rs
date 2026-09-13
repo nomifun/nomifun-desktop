@@ -1,13 +1,13 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 use nomifun_agent_contracts::{
-    CanonicalErrorCode, DigestHex, MiniAppBridgeCallId, MiniAppId, MiniAppMigration,
-    MiniAppReadyRelease, MiniAppReleaseRef, MiniAppServiceReleaseDescriptor,
-    MiniAppServiceRuntimeFingerprint, MiniAppServiceStorageDescriptor,
-    MiniAppServiceTestCredentialMode, MiniAppServiceTestOutcome,
-    MiniAppServiceTestReceipt, MiniAppServiceTestReceiptId, ResolvedMiniAppServiceSpec,
-    ResolvedMiniAppServiceSpecInputs, StrictJsonValue, MINIAPP_SERVICE_HOST_PROTOCOL_VERSION,
-    MINIAPP_SERVICE_SDK_CONTRACT_VERSION, MINIAPP_SERVICE_TEST_CONTRACT_VERSION,
+    CanonicalErrorCode, DigestHex, PluginBridgeCallId, PluginProductId, PluginMigration,
+    PluginReadyRelease, PluginReleaseRef, PluginServiceReleaseDescriptor,
+    PluginServiceRuntimeFingerprint, PluginServiceStorageDescriptor,
+    PluginServiceTestCredentialMode, PluginServiceTestOutcome,
+    PluginServiceTestReceipt, PluginServiceTestReceiptId, ResolvedPluginServiceSpec,
+    ResolvedPluginServiceSpecInputs, StrictJsonValue, PLUGIN_SERVICE_HOST_PROTOCOL_VERSION,
+    PLUGIN_SERVICE_SDK_CONTRACT_VERSION, PLUGIN_SERVICE_TEST_CONTRACT_VERSION,
 };
 use nomifun_js_runtime::{CommittedRuntimeProvider, ResolvedNodeRuntime};
 use crate::runtime::{
@@ -27,10 +27,10 @@ use crate::runtime::{
 /// process ownership stay behind [`PluginRuntimeServiceRuntimeBinding`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PluginRuntimeServiceSpecInput {
-    pub miniapp_id: MiniAppId,
-    pub release: MiniAppReleaseRef,
+    pub plugin_product_id: PluginProductId,
+    pub release: PluginReleaseRef,
     pub active_release_epoch: u64,
-    pub descriptor: MiniAppServiceReleaseDescriptor,
+    pub descriptor: PluginServiceReleaseDescriptor,
     pub config_schema_digest: DigestHex,
     pub config_snapshot_digest: DigestHex,
     pub credential_slots_digest: DigestHex,
@@ -38,7 +38,7 @@ pub struct PluginRuntimeServiceSpecInput {
     pub resource_bindings_digest: DigestHex,
     pub bridge_contract_digest: DigestHex,
     pub contribution_set_digest: DigestHex,
-    pub storage: MiniAppServiceStorageDescriptor,
+    pub storage: PluginServiceStorageDescriptor,
 }
 
 impl PluginRuntimeServiceSpecInput {
@@ -53,7 +53,7 @@ impl PluginRuntimeServiceSpecInput {
             .validate_for_platform()
             .map_err(PluginRuntimePlatformError::Contract)?;
         self.storage
-            .validate_for_platform(&self.miniapp_id)
+            .validate_for_platform(&self.plugin_product_id)
             .map_err(PluginRuntimePlatformError::Contract)?;
         for (field, digest) in [
             ("config_schema_digest", &self.config_schema_digest),
@@ -72,9 +72,9 @@ impl PluginRuntimeServiceSpecInput {
 
 #[derive(Clone, Debug)]
 pub struct PluginRuntimeServiceTestRunInput {
-    pub receipt_id: MiniAppServiceTestReceiptId,
-    pub ready: MiniAppReadyRelease,
-    pub spec: ResolvedMiniAppServiceSpec,
+    pub receipt_id: PluginServiceTestReceiptId,
+    pub ready: PluginReadyRelease,
+    pub spec: ResolvedPluginServiceSpec,
     pub resolved_test_input_digest: DigestHex,
     pub copied_kv_digest: DigestHex,
     pub copied_private_database_digest: Option<DigestHex>,
@@ -83,7 +83,7 @@ pub struct PluginRuntimeServiceTestRunInput {
     pub requires_managed_input: bool,
 }
 
-/// Runtime/process boundary consumed by the MiniApp application service.
+/// Runtime/process boundary consumed by the Plugin application service.
 ///
 /// Implementations must hold the committed Runtime lease for every resident
 /// process and must bind every invocation to the exact resolved spec.
@@ -92,7 +92,7 @@ pub trait PluginRuntimeServiceRuntimeBinding: Send + Sync {
     async fn resolve_storage(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
         uses_files: bool,
         uses_private_database: bool,
     ) -> PluginRuntimePlatformResult<PluginRuntimeServiceStorageResolution> {
@@ -102,17 +102,17 @@ pub trait PluginRuntimeServiceRuntimeBinding: Send + Sync {
             ));
         }
         let _ = owner_user_id;
-        Ok(PluginRuntimeServiceStorageResolution::host_kv(miniapp_id.clone()))
+        Ok(PluginRuntimeServiceStorageResolution::host_kv(plugin_product_id.clone()))
     }
 
     async fn apply_storage_migrations(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
-        storage: &MiniAppServiceStorageDescriptor,
+        plugin_product_id: &PluginProductId,
+        storage: &PluginServiceStorageDescriptor,
         expected_ledger_digest: &DigestHex,
-        release: &MiniAppReleaseRef,
-        migrations: &[MiniAppMigration],
+        release: &PluginReleaseRef,
+        migrations: &[PluginMigration],
         applied_at_ms: i64,
     ) -> PluginRuntimePlatformResult<PluginRuntimeMigrationLedger> {
         if migrations.is_empty() {
@@ -122,7 +122,7 @@ pub trait PluginRuntimeServiceRuntimeBinding: Send + Sync {
         }
         let _ = (
             owner_user_id,
-            miniapp_id,
+            plugin_product_id,
             storage,
             expected_ledger_digest,
             release,
@@ -135,8 +135,8 @@ pub trait PluginRuntimeServiceRuntimeBinding: Send + Sync {
 
     async fn handle_storage_request(
         &self,
-        _miniapp_id: &MiniAppId,
-        _storage: &MiniAppServiceStorageDescriptor,
+        _plugin_product_id: &PluginProductId,
+        _storage: &PluginServiceStorageDescriptor,
         _request: PluginRuntimeServiceStorageRequest,
         _cancellation: PluginRuntimeCallCancellation,
     ) -> PluginRuntimePlatformResult<StrictJsonValue> {
@@ -148,7 +148,7 @@ pub trait PluginRuntimeServiceRuntimeBinding: Send + Sync {
     async fn purge_storage(
         &self,
         _owner_user_id: &str,
-        _miniapp_id: &MiniAppId,
+        _plugin_product_id: &PluginProductId,
     ) -> PluginRuntimePlatformResult<()> {
         Ok(())
     }
@@ -156,11 +156,11 @@ pub trait PluginRuntimeServiceRuntimeBinding: Send + Sync {
     async fn export_backup_storage(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
         uses_files: bool,
         uses_private_database: bool,
     ) -> PluginRuntimePlatformResult<crate::runtime::PluginRuntimeBackupStorage> {
-        let _ = (owner_user_id, miniapp_id);
+        let _ = (owner_user_id, plugin_product_id);
         if uses_files || uses_private_database {
             return Err(PluginRuntimePlatformError::Runtime(
                 "Plugin backup storage is not configured".into(),
@@ -177,12 +177,12 @@ pub trait PluginRuntimeServiceRuntimeBinding: Send + Sync {
     async fn import_backup_storage(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
         storage: crate::runtime::PluginRuntimeBackupStorage,
         uses_files: bool,
         uses_private_database: bool,
     ) -> PluginRuntimePlatformResult<()> {
-        let _ = (owner_user_id, miniapp_id);
+        let _ = (owner_user_id, plugin_product_id);
         if uses_files
             || uses_private_database
             || !storage.files.is_empty()
@@ -199,7 +199,7 @@ pub trait PluginRuntimeServiceRuntimeBinding: Send + Sync {
     async fn create_service_test_storage(
         &self,
         _owner_user_id: &str,
-        _miniapp_id: &MiniAppId,
+        _plugin_product_id: &PluginProductId,
         _test_id: &str,
         _uses_files: bool,
         _uses_private_database: bool,
@@ -212,7 +212,7 @@ pub trait PluginRuntimeServiceRuntimeBinding: Send + Sync {
     async fn purge_service_test_storage(
         &self,
         _owner_user_id: &str,
-        _miniapp_id: &MiniAppId,
+        _plugin_product_id: &PluginProductId,
         _test_id: &str,
     ) -> PluginRuntimePlatformResult<()> {
         Ok(())
@@ -221,7 +221,7 @@ pub trait PluginRuntimeServiceRuntimeBinding: Send + Sync {
     async fn run_service_test(
         &self,
         _input: PluginRuntimeServiceTestRunInput,
-    ) -> PluginRuntimePlatformResult<MiniAppServiceTestReceipt> {
+    ) -> PluginRuntimePlatformResult<PluginServiceTestReceipt> {
         Err(PluginRuntimePlatformError::ServiceUnavailable(
             "Plugin Service Test Host is not configured".into(),
         ))
@@ -229,52 +229,52 @@ pub trait PluginRuntimeServiceRuntimeBinding: Send + Sync {
 
     async fn current_runtime_fingerprint(
         &self,
-    ) -> PluginRuntimePlatformResult<Option<MiniAppServiceRuntimeFingerprint>> {
+    ) -> PluginRuntimePlatformResult<Option<PluginServiceRuntimeFingerprint>> {
         Ok(None)
     }
 
     async fn resolve_spec(
         &self,
         input: PluginRuntimeServiceSpecInput,
-    ) -> PluginRuntimePlatformResult<ResolvedMiniAppServiceSpec>;
+    ) -> PluginRuntimePlatformResult<ResolvedPluginServiceSpec>;
 
     async fn bind_active(
         &self,
-        spec: ResolvedMiniAppServiceSpec,
+        spec: ResolvedPluginServiceSpec,
         enabled: bool,
     ) -> PluginRuntimePlatformResult<()>;
 
     async fn start(
         &self,
-        spec: ResolvedMiniAppServiceSpec,
+        spec: ResolvedPluginServiceSpec,
     ) -> PluginRuntimePlatformResult<()>;
 
     async fn invoke(
         &self,
-        spec: &ResolvedMiniAppServiceSpec,
-        call_id: MiniAppBridgeCallId,
+        spec: &ResolvedPluginServiceSpec,
+        call_id: PluginBridgeCallId,
         method: String,
         payload: StrictJsonValue,
         cancellation: PluginRuntimeCallCancellation,
         now_ms: i64,
     ) -> PluginRuntimePlatformResult<StrictJsonValue>;
 
-    async fn cancel(&self, miniapp_id: &MiniAppId, call_id: &MiniAppBridgeCallId);
+    async fn cancel(&self, plugin_product_id: &PluginProductId, call_id: &PluginBridgeCallId);
 
-    async fn stop(&self, miniapp_id: &MiniAppId) -> PluginRuntimePlatformResult<()>;
+    async fn stop(&self, plugin_product_id: &PluginProductId) -> PluginRuntimePlatformResult<()>;
 
-    async fn retry(&self, miniapp_id: &MiniAppId) -> PluginRuntimePlatformResult<()>;
+    async fn retry(&self, plugin_product_id: &PluginProductId) -> PluginRuntimePlatformResult<()>;
 
-    async fn state(&self, miniapp_id: &MiniAppId) -> Option<PluginRuntimeServiceHostState>;
+    async fn state(&self, plugin_product_id: &PluginProductId) -> Option<PluginRuntimeServiceHostState>;
 
     async fn maintain(&self, now_ms: i64) -> PluginRuntimePlatformResult<()>;
 
     /// Validates the candidate Runtime against all currently enabled Service
-    /// bindings and returns their exact MiniApp identities.
+    /// bindings and returns their exact Plugin identities.
     async fn validate_candidate(
         &self,
         candidate: &ResolvedNodeRuntime,
-    ) -> PluginRuntimePlatformResult<Vec<MiniAppId>> {
+    ) -> PluginRuntimePlatformResult<Vec<PluginProductId>> {
         let _ = candidate;
         Err(PluginRuntimePlatformError::Runtime(
             "Plugin Service Runtime candidate validation is not configured".into(),
@@ -283,14 +283,14 @@ pub trait PluginRuntimeServiceRuntimeBinding: Send + Sync {
 
     async fn register_module(
         &self,
-        miniapp_id: MiniAppId,
+        plugin_product_id: PluginProductId,
         release_digest: DigestHex,
         module_path: std::path::PathBuf,
     ) -> PluginRuntimePlatformResult<()>;
 }
 
 /// Default boundary used by unit tests and compositions that only support
-/// UI-only MiniApps. It never starts Node or accepts a Service invocation.
+/// UI-only Plugins. It never starts Node or accepts a Service invocation.
 #[derive(Debug, Default)]
 pub struct NoopPluginRuntimeServiceRuntime;
 
@@ -299,7 +299,7 @@ impl PluginRuntimeServiceRuntimeBinding for NoopPluginRuntimeServiceRuntime {
     async fn resolve_spec(
         &self,
         _input: PluginRuntimeServiceSpecInput,
-    ) -> PluginRuntimePlatformResult<ResolvedMiniAppServiceSpec> {
+    ) -> PluginRuntimePlatformResult<ResolvedPluginServiceSpec> {
         Err(PluginRuntimePlatformError::Runtime(
             "Plugin Service Runtime is not configured".into(),
         ))
@@ -307,7 +307,7 @@ impl PluginRuntimeServiceRuntimeBinding for NoopPluginRuntimeServiceRuntime {
 
     async fn bind_active(
         &self,
-        _spec: ResolvedMiniAppServiceSpec,
+        _spec: ResolvedPluginServiceSpec,
         _enabled: bool,
     ) -> PluginRuntimePlatformResult<()> {
         Err(PluginRuntimePlatformError::Runtime(
@@ -317,7 +317,7 @@ impl PluginRuntimeServiceRuntimeBinding for NoopPluginRuntimeServiceRuntime {
 
     async fn start(
         &self,
-        _spec: ResolvedMiniAppServiceSpec,
+        _spec: ResolvedPluginServiceSpec,
     ) -> PluginRuntimePlatformResult<()> {
         Err(PluginRuntimePlatformError::Runtime(
             "Plugin Service Runtime is not configured".into(),
@@ -326,8 +326,8 @@ impl PluginRuntimeServiceRuntimeBinding for NoopPluginRuntimeServiceRuntime {
 
     async fn invoke(
         &self,
-        _spec: &ResolvedMiniAppServiceSpec,
-        _call_id: MiniAppBridgeCallId,
+        _spec: &ResolvedPluginServiceSpec,
+        _call_id: PluginBridgeCallId,
         _method: String,
         _payload: StrictJsonValue,
         _cancellation: PluginRuntimeCallCancellation,
@@ -338,19 +338,19 @@ impl PluginRuntimeServiceRuntimeBinding for NoopPluginRuntimeServiceRuntime {
         ))
     }
 
-    async fn cancel(&self, _miniapp_id: &MiniAppId, _call_id: &MiniAppBridgeCallId) {}
+    async fn cancel(&self, _plugin_product_id: &PluginProductId, _call_id: &PluginBridgeCallId) {}
 
-    async fn stop(&self, _miniapp_id: &MiniAppId) -> PluginRuntimePlatformResult<()> {
+    async fn stop(&self, _plugin_product_id: &PluginProductId) -> PluginRuntimePlatformResult<()> {
         Ok(())
     }
 
-    async fn retry(&self, _miniapp_id: &MiniAppId) -> PluginRuntimePlatformResult<()> {
+    async fn retry(&self, _plugin_product_id: &PluginProductId) -> PluginRuntimePlatformResult<()> {
         Err(PluginRuntimePlatformError::Runtime(
             "Plugin Service Runtime is not configured".into(),
         ))
     }
 
-    async fn state(&self, _miniapp_id: &MiniAppId) -> Option<PluginRuntimeServiceHostState> {
+    async fn state(&self, _plugin_product_id: &PluginProductId) -> Option<PluginRuntimeServiceHostState> {
         None
     }
 
@@ -361,13 +361,13 @@ impl PluginRuntimeServiceRuntimeBinding for NoopPluginRuntimeServiceRuntime {
     async fn validate_candidate(
         &self,
         _candidate: &ResolvedNodeRuntime,
-    ) -> PluginRuntimePlatformResult<Vec<MiniAppId>> {
+    ) -> PluginRuntimePlatformResult<Vec<PluginProductId>> {
         Ok(Vec::new())
     }
 
     async fn register_module(
         &self,
-        _miniapp_id: MiniAppId,
+        _plugin_product_id: PluginProductId,
         _release_digest: DigestHex,
         _module_path: std::path::PathBuf,
     ) -> PluginRuntimePlatformResult<()> {
@@ -443,7 +443,7 @@ impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntim
     async fn resolve_storage(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
         uses_files: bool,
         uses_private_database: bool,
     ) -> PluginRuntimePlatformResult<PluginRuntimeServiceStorageResolution> {
@@ -452,7 +452,7 @@ impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntim
                 storage
                     .resolve_service_storage(
                         owner_user_id,
-                        miniapp_id,
+                        plugin_product_id,
                         uses_files,
                         uses_private_database,
                     )
@@ -462,7 +462,7 @@ impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntim
                 "Plugin managed Service storage is not configured".into(),
             )),
             (None, false) => Ok(PluginRuntimeServiceStorageResolution::host_kv(
-                miniapp_id.clone(),
+                plugin_product_id.clone(),
             )),
         }
     }
@@ -470,11 +470,11 @@ impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntim
     async fn apply_storage_migrations(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
-        storage: &MiniAppServiceStorageDescriptor,
+        plugin_product_id: &PluginProductId,
+        storage: &PluginServiceStorageDescriptor,
         expected_ledger_digest: &DigestHex,
-        release: &MiniAppReleaseRef,
-        migrations: &[MiniAppMigration],
+        release: &PluginReleaseRef,
+        migrations: &[PluginMigration],
         applied_at_ms: i64,
     ) -> PluginRuntimePlatformResult<PluginRuntimeMigrationLedger> {
         self.storage
@@ -486,7 +486,7 @@ impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntim
             })?
             .apply_additive_migrations(
                 owner_user_id,
-                miniapp_id,
+                plugin_product_id,
                 storage,
                 expected_ledger_digest,
                 release,
@@ -498,8 +498,8 @@ impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntim
 
     async fn handle_storage_request(
         &self,
-        miniapp_id: &MiniAppId,
-        storage: &MiniAppServiceStorageDescriptor,
+        plugin_product_id: &PluginProductId,
+        storage: &PluginServiceStorageDescriptor,
         request: PluginRuntimeServiceStorageRequest,
         cancellation: PluginRuntimeCallCancellation,
     ) -> PluginRuntimePlatformResult<StrictJsonValue> {
@@ -510,18 +510,18 @@ impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntim
                     "Plugin managed Service storage is not configured".into(),
                 )
             })?
-            .handle_service_request(miniapp_id, storage, request, cancellation)
+            .handle_service_request(plugin_product_id, storage, request, cancellation)
             .await
     }
 
     async fn purge_storage(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
     ) -> PluginRuntimePlatformResult<()> {
         if let Some(storage) = &self.storage {
             storage
-                .purge_service_storage(owner_user_id, miniapp_id)
+                .purge_service_storage(owner_user_id, plugin_product_id)
                 .await?;
         }
         Ok(())
@@ -530,7 +530,7 @@ impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntim
     async fn export_backup_storage(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
         uses_files: bool,
         uses_private_database: bool,
     ) -> PluginRuntimePlatformResult<crate::runtime::PluginRuntimeBackupStorage> {
@@ -543,7 +543,7 @@ impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntim
             })?
             .export_backup_storage(
                 owner_user_id,
-                miniapp_id,
+                plugin_product_id,
                 uses_files,
                 uses_private_database,
             )
@@ -553,7 +553,7 @@ impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntim
     async fn import_backup_storage(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
         storage: crate::runtime::PluginRuntimeBackupStorage,
         uses_files: bool,
         uses_private_database: bool,
@@ -567,7 +567,7 @@ impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntim
             })?
             .import_backup_storage(
                 owner_user_id,
-                miniapp_id,
+                plugin_product_id,
                 storage,
                 uses_files,
                 uses_private_database,
@@ -578,7 +578,7 @@ impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntim
     async fn create_service_test_storage(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
         test_id: &str,
         uses_files: bool,
         uses_private_database: bool,
@@ -592,7 +592,7 @@ impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntim
             })?
             .create_service_test_storage(
                 owner_user_id,
-                miniapp_id,
+                plugin_product_id,
                 test_id,
                 uses_files,
                 uses_private_database,
@@ -603,12 +603,12 @@ impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntim
     async fn purge_service_test_storage(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
         test_id: &str,
     ) -> PluginRuntimePlatformResult<()> {
         if let Some(storage) = &self.storage {
             storage
-                .purge_service_test_storage(owner_user_id, miniapp_id, test_id)
+                .purge_service_test_storage(owner_user_id, plugin_product_id, test_id)
                 .await?;
         }
         Ok(())
@@ -617,7 +617,7 @@ impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntim
     async fn run_service_test(
         &self,
         input: PluginRuntimeServiceTestRunInput,
-    ) -> PluginRuntimePlatformResult<MiniAppServiceTestReceipt> {
+    ) -> PluginRuntimePlatformResult<PluginServiceTestReceipt> {
         input
             .spec
             .validate()
@@ -629,11 +629,11 @@ impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntim
         })?;
         let lease = self
             .authority
-            .acquire_use(nomifun_js_runtime::JavaScriptWorkKind::MiniappServiceTestHost)
+            .acquire_use(nomifun_js_runtime::JavaScriptWorkKind::PluginServiceTestHost)
             .await
             .map_err(|error| PluginRuntimePlatformError::Runtime(error.to_string()))?;
         let runtime = lease.runtime();
-        let expected_runtime = MiniAppServiceRuntimeFingerprint {
+        let expected_runtime = PluginServiceRuntimeFingerprint {
             runtime_installation_id: runtime.fingerprint.runtime_installation_id.clone(),
             runtime_target: runtime.fingerprint.runtime_target.clone(),
             runtime_executable_digest: runtime.fingerprint.executable_digest.clone(),
@@ -657,38 +657,38 @@ impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntim
                 process.stop().await;
                 (
                     if input.requires_managed_input {
-                        MiniAppServiceTestOutcome::NeedsTestInput
+                        PluginServiceTestOutcome::NeedsTestInput
                     } else {
-                        MiniAppServiceTestOutcome::Passed
+                        PluginServiceTestOutcome::Passed
                     },
                     None,
                 )
             }
             Err(_) => (
-                MiniAppServiceTestOutcome::Failed,
+                PluginServiceTestOutcome::Failed,
                 Some(CanonicalErrorCode::from(
-                    "miniapp_service_test_host_failed",
+                    "plugin_service_test_host_failed",
                 )),
             ),
         };
-        let receipt = MiniAppServiceTestReceipt {
+        let receipt = PluginServiceTestReceipt {
             receipt_id: input.receipt_id,
-            miniapp_id: input.spec.miniapp_id.clone(),
+            plugin_product_id: input.spec.plugin_product_id.clone(),
             release: input.spec.release.clone(),
             service_run_key: input.spec.service_run_key.clone(),
             outcome,
             error_code,
             runtime: input.spec.runtime.clone(),
             host_target: input.spec.runtime.runtime_target.clone(),
-            host_protocol_version: MINIAPP_SERVICE_HOST_PROTOCOL_VERSION.into(),
-            sdk_contract_version: MINIAPP_SERVICE_SDK_CONTRACT_VERSION.into(),
-            test_contract_version: MINIAPP_SERVICE_TEST_CONTRACT_VERSION.into(),
+            host_protocol_version: PLUGIN_SERVICE_HOST_PROTOCOL_VERSION.into(),
+            sdk_contract_version: PLUGIN_SERVICE_SDK_CONTRACT_VERSION.into(),
+            test_contract_version: PLUGIN_SERVICE_TEST_CONTRACT_VERSION.into(),
             resolved_test_input_digest: input.resolved_test_input_digest,
             copied_kv_digest: input.copied_kv_digest,
             copied_private_database_digest: input.copied_private_database_digest,
             empty_files_dir: input.empty_files_dir,
             migration_ledger_digest: input.migration_ledger_digest,
-            credential_mode: MiniAppServiceTestCredentialMode::None,
+            credential_mode: PluginServiceTestCredentialMode::None,
             host_generation,
             issued_at_ms: nomifun_common::now_ms().max(1),
         };
@@ -700,13 +700,13 @@ impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntim
 
     async fn current_runtime_fingerprint(
         &self,
-    ) -> PluginRuntimePlatformResult<Option<MiniAppServiceRuntimeFingerprint>> {
+    ) -> PluginRuntimePlatformResult<Option<PluginServiceRuntimeFingerprint>> {
         Ok(self
             .authority
             .committed_runtime()
             .await
             .map_err(|error| PluginRuntimePlatformError::Runtime(error.to_string()))?
-            .map(|runtime| MiniAppServiceRuntimeFingerprint {
+            .map(|runtime| PluginServiceRuntimeFingerprint {
                 runtime_installation_id: runtime.fingerprint.runtime_installation_id,
                 runtime_target: runtime.fingerprint.runtime_target,
                 runtime_executable_digest: runtime.fingerprint.executable_digest,
@@ -717,7 +717,7 @@ impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntim
     async fn resolve_spec(
         &self,
         input: PluginRuntimeServiceSpecInput,
-    ) -> PluginRuntimePlatformResult<ResolvedMiniAppServiceSpec> {
+    ) -> PluginRuntimePlatformResult<ResolvedPluginServiceSpec> {
         input.validate()?;
         let runtime = self
             .authority
@@ -729,14 +729,14 @@ impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntim
                     "no committed JavaScript Runtime is selected".into(),
                 )
             })?;
-        let runtime = MiniAppServiceRuntimeFingerprint {
+        let runtime = PluginServiceRuntimeFingerprint {
             runtime_installation_id: runtime.fingerprint.runtime_installation_id,
             runtime_target: runtime.fingerprint.runtime_target,
             runtime_executable_digest: runtime.fingerprint.executable_digest,
             node_version: runtime.fingerprint.node_version,
         };
-        ResolvedMiniAppServiceSpec::new(ResolvedMiniAppServiceSpecInputs {
-            miniapp_id: input.miniapp_id,
+        ResolvedPluginServiceSpec::new(ResolvedPluginServiceSpecInputs {
+            plugin_product_id: input.plugin_product_id,
             release: input.release,
             active_release_epoch: input.active_release_epoch,
             service_module_digest: input.descriptor.module_digest.clone(),
@@ -759,7 +759,7 @@ impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntim
 
     async fn bind_active(
         &self,
-        spec: ResolvedMiniAppServiceSpec,
+        spec: ResolvedPluginServiceSpec,
         enabled: bool,
     ) -> PluginRuntimePlatformResult<()> {
         self.host.bind_active(spec, enabled).await
@@ -767,23 +767,23 @@ impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntim
 
     async fn start(
         &self,
-        spec: ResolvedMiniAppServiceSpec,
+        spec: ResolvedPluginServiceSpec,
     ) -> PluginRuntimePlatformResult<()> {
-        let miniapp_id = spec.miniapp_id.clone();
+        let plugin_product_id = spec.plugin_product_id.clone();
         self.host.bind_active(spec, true).await?;
         if matches!(
-            self.host.state(&miniapp_id).await,
+            self.host.state(&plugin_product_id).await,
             Some(PluginRuntimeServiceHostState::Running { .. })
         ) {
             return Ok(());
         }
-        self.host.retry(&miniapp_id).await
+        self.host.retry(&plugin_product_id).await
     }
 
     async fn invoke(
         &self,
-        spec: &ResolvedMiniAppServiceSpec,
-        call_id: MiniAppBridgeCallId,
+        spec: &ResolvedPluginServiceSpec,
+        call_id: PluginBridgeCallId,
         method: String,
         payload: StrictJsonValue,
         cancellation: PluginRuntimeCallCancellation,
@@ -794,20 +794,20 @@ impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntim
             .await
     }
 
-    async fn cancel(&self, miniapp_id: &MiniAppId, call_id: &MiniAppBridgeCallId) {
-        self.host.cancel(miniapp_id, call_id).await;
+    async fn cancel(&self, plugin_product_id: &PluginProductId, call_id: &PluginBridgeCallId) {
+        self.host.cancel(plugin_product_id, call_id).await;
     }
 
-    async fn stop(&self, miniapp_id: &MiniAppId) -> PluginRuntimePlatformResult<()> {
-        self.host.stop(miniapp_id).await
+    async fn stop(&self, plugin_product_id: &PluginProductId) -> PluginRuntimePlatformResult<()> {
+        self.host.stop(plugin_product_id).await
     }
 
-    async fn retry(&self, miniapp_id: &MiniAppId) -> PluginRuntimePlatformResult<()> {
-        self.host.retry(miniapp_id).await
+    async fn retry(&self, plugin_product_id: &PluginProductId) -> PluginRuntimePlatformResult<()> {
+        self.host.retry(plugin_product_id).await
     }
 
-    async fn state(&self, miniapp_id: &MiniAppId) -> Option<PluginRuntimeServiceHostState> {
-        self.host.state(miniapp_id).await
+    async fn state(&self, plugin_product_id: &PluginProductId) -> Option<PluginRuntimeServiceHostState> {
+        self.host.state(plugin_product_id).await
     }
 
     async fn maintain(&self, now_ms: i64) -> PluginRuntimePlatformResult<()> {
@@ -824,7 +824,7 @@ impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntim
     async fn validate_candidate(
         &self,
         candidate: &ResolvedNodeRuntime,
-    ) -> PluginRuntimePlatformResult<Vec<MiniAppId>> {
+    ) -> PluginRuntimePlatformResult<Vec<PluginProductId>> {
         let specs = self.host.enabled_service_specs().await;
         let factory = NodePluginRuntimeServiceProcessFactory::new(
             candidate.executable_path.clone(),
@@ -850,36 +850,36 @@ impl PluginRuntimeServiceRuntimeBinding for ProductionPluginRuntimeServiceRuntim
         }
         Ok(specs
             .into_iter()
-            .map(|spec| spec.miniapp_id)
+            .map(|spec| spec.plugin_product_id)
             .collect())
     }
 
     async fn register_module(
         &self,
-        miniapp_id: MiniAppId,
+        plugin_product_id: PluginProductId,
         release_digest: DigestHex,
         module_path: std::path::PathBuf,
     ) -> PluginRuntimePlatformResult<()> {
         self.registry
-            .register(miniapp_id, release_digest, module_path)
+            .register(plugin_product_id, release_digest, module_path)
             .await
             .map(|_| ())
     }
 }
 
 fn spec_with_runtime(
-    spec: &ResolvedMiniAppServiceSpec,
+    spec: &ResolvedPluginServiceSpec,
     candidate: &ResolvedNodeRuntime,
-) -> PluginRuntimePlatformResult<ResolvedMiniAppServiceSpec> {
-    ResolvedMiniAppServiceSpec::new(ResolvedMiniAppServiceSpecInputs {
-        miniapp_id: spec.miniapp_id.clone(),
+) -> PluginRuntimePlatformResult<ResolvedPluginServiceSpec> {
+    ResolvedPluginServiceSpec::new(ResolvedPluginServiceSpecInputs {
+        plugin_product_id: spec.plugin_product_id.clone(),
         release: spec.release.clone(),
         active_release_epoch: spec.active_release_epoch,
         service_module_digest: spec.service_module_digest.clone(),
         lifecycle: spec.lifecycle,
         host_protocol_version: spec.host_protocol_version.clone(),
         sdk_contract_version: spec.sdk_contract_version.clone(),
-        runtime: MiniAppServiceRuntimeFingerprint {
+        runtime: PluginServiceRuntimeFingerprint {
             runtime_installation_id: candidate.fingerprint.runtime_installation_id.clone(),
             runtime_target: candidate.fingerprint.runtime_target.clone(),
             runtime_executable_digest: candidate.fingerprint.executable_digest.clone(),
@@ -918,13 +918,13 @@ fn validate_digest(value: &DigestHex, field: &str) -> PluginRuntimePlatformResul
 // also used by schema generation; this adapter needs the same exact checks
 // without exposing mutable internals.
 trait PlatformServiceDescriptorValidation {
-    fn validate_for_platform(&self) -> Result<(), nomifun_agent_contracts::MiniAppM1ContractError>;
+    fn validate_for_platform(&self) -> Result<(), nomifun_agent_contracts::PluginRuntimeContractError>;
 }
 
-impl PlatformServiceDescriptorValidation for MiniAppServiceReleaseDescriptor {
-    fn validate_for_platform(&self) -> Result<(), nomifun_agent_contracts::MiniAppM1ContractError> {
+impl PlatformServiceDescriptorValidation for PluginServiceReleaseDescriptor {
+    fn validate_for_platform(&self) -> Result<(), nomifun_agent_contracts::PluginRuntimeContractError> {
         if self.entrypoint != "service/main.mjs" {
-            return Err(nomifun_agent_contracts::MiniAppM1ContractError::InvalidField {
+            return Err(nomifun_agent_contracts::PluginRuntimeContractError::InvalidField {
                 field: "service.entrypoint",
                 reason: "Service entrypoint must be service/main.mjs".into(),
             });
@@ -936,7 +936,7 @@ impl PlatformServiceDescriptorValidation for MiniAppServiceReleaseDescriptor {
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         {
-            return Err(nomifun_agent_contracts::MiniAppM1ContractError::InvalidField {
+            return Err(nomifun_agent_contracts::PluginRuntimeContractError::InvalidField {
                 field: "service.module_digest",
                 reason: "Service module digest is invalid".into(),
             });
@@ -948,27 +948,27 @@ impl PlatformServiceDescriptorValidation for MiniAppServiceReleaseDescriptor {
 trait PlatformStorageValidation {
     fn validate_for_platform(
         &self,
-        miniapp_id: &MiniAppId,
-    ) -> Result<(), nomifun_agent_contracts::MiniAppM1ContractError>;
+        plugin_product_id: &PluginProductId,
+    ) -> Result<(), nomifun_agent_contracts::PluginRuntimeContractError>;
 }
 
-impl PlatformStorageValidation for MiniAppServiceStorageDescriptor {
+impl PlatformStorageValidation for PluginServiceStorageDescriptor {
     fn validate_for_platform(
         &self,
-        miniapp_id: &MiniAppId,
-    ) -> Result<(), nomifun_agent_contracts::MiniAppM1ContractError> {
-        if self.kv.miniapp_id != *miniapp_id
+        plugin_product_id: &PluginProductId,
+    ) -> Result<(), nomifun_agent_contracts::PluginRuntimeContractError> {
+        if self.kv.plugin_product_id != *plugin_product_id
             || self
                 .files_dir
                 .as_ref()
-                .is_some_and(|value| value.miniapp_id != *miniapp_id)
+                .is_some_and(|value| value.plugin_product_id != *plugin_product_id)
             || self
                 .private_database
                 .as_ref()
-                .is_some_and(|value| value.miniapp_id != *miniapp_id)
+                .is_some_and(|value| value.plugin_product_id != *plugin_product_id)
         {
-            return Err(nomifun_agent_contracts::MiniAppM1ContractError::InvalidField {
-                field: "storage.miniapp_id",
+            return Err(nomifun_agent_contracts::PluginRuntimeContractError::InvalidField {
+                field: "storage.plugin_product_id",
                 reason: "all Service storage handles must belong to the exact Plugin".into(),
             });
         }
@@ -983,14 +983,14 @@ mod tests {
     use async_trait::async_trait;
     use super::*;
     use nomifun_agent_contracts::{
-        ArtifactId, MiniAppKvHandleDescriptor, MiniAppKvHandleId, MiniAppReadyOrigin,
-        MiniAppReadyRelease, MiniAppReleaseId, MiniAppReleaseRef, MiniAppServiceLifecycle,
-        MiniAppSourceLineage,
-        MiniAppServiceReleaseDescriptor, MiniAppServiceStorageDescriptor,
+        ArtifactId, PluginKvHandleDescriptor, PluginKvHandleId, PluginReadyOrigin,
+        PluginReadyRelease, PluginReleaseId, PluginReleaseRef, PluginServiceLifecycle,
+        PluginReleaseSourceLineage,
+        PluginServiceReleaseDescriptor, PluginServiceStorageDescriptor,
         NodeProbeDisposition, NodeRuntimeFingerprint, NodeRuntimeProbeResult,
-        NodeRuntimeSourceKind, ResolvedMiniAppServiceSpec, RuntimeSelectionRecord,
-        ResolvedMiniAppServiceSpecInputs, RuntimeInstallationId, RuntimeTarget, VersionString,
-        MINIAPP_SERVICE_HOST_PROTOCOL_VERSION, MINIAPP_SERVICE_SDK_CONTRACT_VERSION, digest_bytes,
+        NodeRuntimeSourceKind, ResolvedPluginServiceSpec, RuntimeSelectionRecord,
+        ResolvedPluginServiceSpecInputs, RuntimeInstallationId, RuntimeTarget, VersionString,
+        PLUGIN_SERVICE_HOST_PROTOCOL_VERSION, PLUGIN_SERVICE_SDK_CONTRACT_VERSION, digest_bytes,
     };
     use nomifun_js_runtime::{
         CommittedRuntimeProvider, JavaScriptRuntimeError, JavaScriptWorkKind,
@@ -1099,28 +1099,28 @@ mod tests {
 
     #[test]
     fn spec_input_rejects_foreign_storage_and_accepts_exact_digest_shape() {
-        let miniapp_id = MiniAppId::from("miniapp-1");
+        let plugin_product_id = PluginProductId::from("plugin-1");
         let mut input = PluginRuntimeServiceSpecInput {
-            miniapp_id: miniapp_id.clone(),
-            release: MiniAppReleaseRef {
+            plugin_product_id: plugin_product_id.clone(),
+            release: PluginReleaseRef {
                 release_id: "release-1".into(),
                 artifact_id: "artifact-1".into(),
                 release_digest: digest("release"),
                 manifest_digest: digest("manifest"),
             },
             active_release_epoch: 1,
-            descriptor: MiniAppServiceReleaseDescriptor {
+            descriptor: PluginServiceReleaseDescriptor {
                 entrypoint: "service/main.mjs".into(),
                 module_digest: digest("module"),
-                lifecycle: MiniAppServiceLifecycle::OnDemand,
+                lifecycle: PluginServiceLifecycle::OnDemand,
                 uses_files: false,
                 uses_private_database: false,
                 service_contract_digest: digest("contract"),
                 host_protocol_version: VersionString::from(
-                    MINIAPP_SERVICE_HOST_PROTOCOL_VERSION,
+                    PLUGIN_SERVICE_HOST_PROTOCOL_VERSION,
                 ),
                 sdk_contract_version: VersionString::from(
-                    MINIAPP_SERVICE_SDK_CONTRACT_VERSION,
+                    PLUGIN_SERVICE_SDK_CONTRACT_VERSION,
                 ),
                 runtime_requirements_digest: digest("runtime"),
             },
@@ -1131,10 +1131,10 @@ mod tests {
             resource_bindings_digest: digest("bindings"),
             bridge_contract_digest: digest("bridge"),
             contribution_set_digest: digest("contributions"),
-            storage: MiniAppServiceStorageDescriptor {
-                kv: MiniAppKvHandleDescriptor {
-                    handle_id: MiniAppKvHandleId::from("kv-1"),
-                    miniapp_id: miniapp_id.clone(),
+            storage: PluginServiceStorageDescriptor {
+                kv: PluginKvHandleDescriptor {
+                    handle_id: PluginKvHandleId::from("kv-1"),
+                    plugin_product_id: plugin_product_id.clone(),
                     namespace_revision: 1,
                 },
                 files_dir: None,
@@ -1142,34 +1142,34 @@ mod tests {
             },
         };
         input.validate().unwrap();
-        input.storage.kv.miniapp_id = MiniAppId::from("foreign");
+        input.storage.kv.plugin_product_id = PluginProductId::from("foreign");
         assert!(input.validate().is_err());
     }
 
     #[test]
     fn candidate_runtime_rebind_recomputes_service_run_key() {
-        let miniapp_id = MiniAppId::from("miniapp-1");
+        let plugin_product_id = PluginProductId::from("plugin-1");
         let input = PluginRuntimeServiceSpecInput {
-            miniapp_id: miniapp_id.clone(),
-            release: MiniAppReleaseRef {
+            plugin_product_id: plugin_product_id.clone(),
+            release: PluginReleaseRef {
                 release_id: "release-1".into(),
                 artifact_id: "artifact-1".into(),
                 release_digest: digest("release"),
                 manifest_digest: digest("manifest"),
             },
             active_release_epoch: 1,
-            descriptor: MiniAppServiceReleaseDescriptor {
+            descriptor: PluginServiceReleaseDescriptor {
                 entrypoint: "service/main.mjs".into(),
                 module_digest: digest("module"),
-                lifecycle: MiniAppServiceLifecycle::OnDemand,
+                lifecycle: PluginServiceLifecycle::OnDemand,
                 uses_files: false,
                 uses_private_database: false,
                 service_contract_digest: digest("contract"),
                 host_protocol_version: VersionString::from(
-                    MINIAPP_SERVICE_HOST_PROTOCOL_VERSION,
+                    PLUGIN_SERVICE_HOST_PROTOCOL_VERSION,
                 ),
                 sdk_contract_version: VersionString::from(
-                    MINIAPP_SERVICE_SDK_CONTRACT_VERSION,
+                    PLUGIN_SERVICE_SDK_CONTRACT_VERSION,
                 ),
                 runtime_requirements_digest: digest("runtime"),
             },
@@ -1180,26 +1180,26 @@ mod tests {
             resource_bindings_digest: digest("bindings"),
             bridge_contract_digest: digest("bridge"),
             contribution_set_digest: digest("contributions"),
-            storage: MiniAppServiceStorageDescriptor {
-                kv: MiniAppKvHandleDescriptor {
-                    handle_id: MiniAppKvHandleId::from("kv-1"),
-                    miniapp_id,
+            storage: PluginServiceStorageDescriptor {
+                kv: PluginKvHandleDescriptor {
+                    handle_id: PluginKvHandleId::from("kv-1"),
+                    plugin_product_id,
                     namespace_revision: 1,
                 },
                 files_dir: None,
                 private_database: None,
             },
         };
-        let original = ResolvedMiniAppServiceSpec::new(
-            ResolvedMiniAppServiceSpecInputs {
-                miniapp_id: input.miniapp_id.clone(),
+        let original = ResolvedPluginServiceSpec::new(
+            ResolvedPluginServiceSpecInputs {
+                plugin_product_id: input.plugin_product_id.clone(),
                 release: input.release.clone(),
                 active_release_epoch: input.active_release_epoch,
                 service_module_digest: input.descriptor.module_digest.clone(),
                 lifecycle: input.descriptor.lifecycle,
                 host_protocol_version: input.descriptor.host_protocol_version.clone(),
                 sdk_contract_version: input.descriptor.sdk_contract_version.clone(),
-                runtime: MiniAppServiceRuntimeFingerprint {
+                runtime: PluginServiceRuntimeFingerprint {
                     runtime_installation_id: "node-a".into(),
                     runtime_target: "windows-x86_64".into(),
                     runtime_executable_digest: digest("node-a"),
@@ -1271,30 +1271,30 @@ export async function start() {
 "#;
         tokio::fs::write(&module_path, module).await.unwrap();
 
-        let miniapp_id = MiniAppId::from("miniapp-candidate-validation");
+        let plugin_product_id = PluginProductId::from("plugin-candidate-validation");
         let registry = Arc::new(PluginRuntimeServiceModuleRegistry::new(temp.path()).unwrap());
         registry
             .register(
-                miniapp_id.clone(),
+                plugin_product_id.clone(),
                 digest("release"),
                 module_path,
             )
             .await
             .unwrap();
-        let spec = ResolvedMiniAppServiceSpec::new(ResolvedMiniAppServiceSpecInputs {
-            miniapp_id: miniapp_id.clone(),
-            release: MiniAppReleaseRef {
-                release_id: MiniAppReleaseId::from("release-id"),
+        let spec = ResolvedPluginServiceSpec::new(ResolvedPluginServiceSpecInputs {
+            plugin_product_id: plugin_product_id.clone(),
+            release: PluginReleaseRef {
+                release_id: PluginReleaseId::from("release-id"),
                 artifact_id: ArtifactId::from("artifact-id"),
                 release_digest: digest("release"),
                 manifest_digest: digest("manifest"),
             },
             active_release_epoch: 1,
             service_module_digest: digest_bytes(module),
-            lifecycle: MiniAppServiceLifecycle::OnDemand,
-            host_protocol_version: MINIAPP_SERVICE_HOST_PROTOCOL_VERSION.into(),
-            sdk_contract_version: MINIAPP_SERVICE_SDK_CONTRACT_VERSION.into(),
-            runtime: MiniAppServiceRuntimeFingerprint {
+            lifecycle: PluginServiceLifecycle::OnDemand,
+            host_protocol_version: PLUGIN_SERVICE_HOST_PROTOCOL_VERSION.into(),
+            sdk_contract_version: PLUGIN_SERVICE_SDK_CONTRACT_VERSION.into(),
+            runtime: PluginServiceRuntimeFingerprint {
                 runtime_installation_id: RuntimeInstallationId::from("old-node"),
                 runtime_target: RuntimeTarget::from("windows-x86_64"),
                 runtime_executable_digest: digest("old-node"),
@@ -1308,10 +1308,10 @@ export async function start() {
             runtime_requirements_digest: digest("requirements"),
             bridge_contract_digest: digest("bridge"),
             contribution_set_digest: digest("contributions"),
-            storage: MiniAppServiceStorageDescriptor {
-                kv: MiniAppKvHandleDescriptor {
-                    handle_id: MiniAppKvHandleId::from("kv"),
-                    miniapp_id: miniapp_id.clone(),
+            storage: PluginServiceStorageDescriptor {
+                kv: PluginKvHandleDescriptor {
+                    handle_id: PluginKvHandleId::from("kv"),
+                    plugin_product_id: plugin_product_id.clone(),
                     namespace_revision: 1,
                 },
                 files_dir: None,
@@ -1344,10 +1344,10 @@ export async function start() {
         };
         assert_eq!(
             binding.validate_candidate(&candidate).await.unwrap(),
-            vec![miniapp_id.clone()]
+            vec![plugin_product_id.clone()]
         );
         assert!(matches!(
-            binding.host().state(&miniapp_id).await,
+            binding.host().state(&plugin_product_id).await,
             Some(PluginRuntimeServiceHostState::Stopped)
         ));
     }
@@ -1401,10 +1401,10 @@ export async function start() {
 }
 "#;
         tokio::fs::write(&module_path, module).await.unwrap();
-        let miniapp_id = MiniAppId::from("miniapp-service-test");
+        let plugin_product_id = PluginProductId::from("plugin-service-test");
         let release_digest = digest("service-test-release");
-        let release = MiniAppReleaseRef {
-            release_id: MiniAppReleaseId::from("release-service-test"),
+        let release = PluginReleaseRef {
+            release_id: PluginReleaseId::from("release-service-test"),
             artifact_id: ArtifactId::from("artifact-service-test"),
             release_digest: release_digest.clone(),
             manifest_digest: digest("service-test-manifest"),
@@ -1412,7 +1412,7 @@ export async function start() {
         let registry = Arc::new(PluginRuntimeServiceModuleRegistry::new(temp.path()).unwrap());
         registry
             .register(
-                miniapp_id.clone(),
+                plugin_product_id.clone(),
                 release_digest,
                 module_path,
             )
@@ -1430,22 +1430,22 @@ export async function start() {
         let test_storage = binding
             .create_service_test_storage(
                 "owner-service-test",
-                &miniapp_id,
+                &plugin_product_id,
                 &test_id,
                 true,
                 false,
             )
             .await
             .unwrap();
-        let spec = ResolvedMiniAppServiceSpec::new(ResolvedMiniAppServiceSpecInputs {
-            miniapp_id: miniapp_id.clone(),
+        let spec = ResolvedPluginServiceSpec::new(ResolvedPluginServiceSpecInputs {
+            plugin_product_id: plugin_product_id.clone(),
             release: release.clone(),
             active_release_epoch: 1,
             service_module_digest: digest_bytes(module),
-            lifecycle: MiniAppServiceLifecycle::OnDemand,
-            host_protocol_version: MINIAPP_SERVICE_HOST_PROTOCOL_VERSION.into(),
-            sdk_contract_version: MINIAPP_SERVICE_SDK_CONTRACT_VERSION.into(),
-            runtime: MiniAppServiceRuntimeFingerprint {
+            lifecycle: PluginServiceLifecycle::OnDemand,
+            host_protocol_version: PLUGIN_SERVICE_HOST_PROTOCOL_VERSION.into(),
+            sdk_contract_version: PLUGIN_SERVICE_SDK_CONTRACT_VERSION.into(),
+            runtime: PluginServiceRuntimeFingerprint {
                 runtime_installation_id: fingerprint.runtime_installation_id,
                 runtime_target: fingerprint.runtime_target,
                 runtime_executable_digest: node_digest,
@@ -1462,17 +1462,17 @@ export async function start() {
             storage: test_storage.descriptor,
         })
         .unwrap();
-        let ready = MiniAppReadyRelease {
-            miniapp_id: miniapp_id.clone(),
+        let ready = PluginReadyRelease {
+            plugin_product_id: plugin_product_id.clone(),
             release,
             origin_operation_id: "build-service-test".into(),
-            origin: MiniAppReadyOrigin::Build,
-            source_lineage: MiniAppSourceLineage::Managed {
+            origin: PluginReadyOrigin::Build,
+            source_lineage: PluginReleaseSourceLineage::Managed {
                 project_id: "project-service-test".into(),
                 source_snapshot_digest: digest("source"),
                 dependency_lock_digest: digest("lock"),
                 build_profile_version:
-                    nomifun_agent_contracts::MINIAPP_RELEASE_PROFILE_VERSION.into(),
+                    nomifun_agent_contracts::PLUGIN_RELEASE_PROFILE_VERSION.into(),
                 build_generation: 1,
             },
             matching_service_test_receipt: None,
@@ -1480,7 +1480,7 @@ export async function start() {
         };
         let receipt = binding
             .run_service_test(PluginRuntimeServiceTestRunInput {
-                receipt_id: MiniAppServiceTestReceiptId::from(test_id.clone()),
+                receipt_id: PluginServiceTestReceiptId::from(test_id.clone()),
                 ready,
                 spec,
                 resolved_test_input_digest: digest("test-input"),
@@ -1492,12 +1492,12 @@ export async function start() {
             })
             .await
             .unwrap();
-        assert_eq!(receipt.outcome, MiniAppServiceTestOutcome::Passed);
+        assert_eq!(receipt.outcome, PluginServiceTestOutcome::Passed);
         assert_eq!(receipt.error_code, None);
         binding
             .purge_service_test_storage(
                 "owner-service-test",
-                &miniapp_id,
+                &plugin_product_id,
                 &test_id,
             )
             .await

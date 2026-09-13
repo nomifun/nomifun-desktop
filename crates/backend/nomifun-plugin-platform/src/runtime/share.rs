@@ -4,9 +4,9 @@ use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 use nomifun_agent_contracts::{
-    canonical_json_bytes, digest_bytes, ArtifactId, DigestHex, MiniAppId,
-    MiniAppImportedTestProvenance, MiniAppReleaseArtifactV1, MiniAppShareBundleId,
-    MiniAppShareBundleV1, MiniAppSourceBundle, MINIAPP_RELEASE_PROFILE_VERSION,
+    canonical_json_bytes, digest_bytes, ArtifactId, DigestHex, PluginProductId,
+    PluginImportedTestProvenance, PluginReleaseArtifactV1, PluginShareBundleId,
+    PluginShareBundleV1, PluginSourceBundle, PLUGIN_RELEASE_PROFILE_VERSION,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::runtime::{
     PluginRuntimeReleaseFileBytes, PluginRuntimeSourceFile, PluginRuntimeSourceFileDigest,
-    PluginRuntimeSourceSnapshot, PluginRuntimeStoredRelease, MINIAPP_SOURCE_STORE_FORMAT_VERSION,
+    PluginRuntimeSourceSnapshot, PluginRuntimeStoredRelease, PLUGIN_SOURCE_STORE_FORMAT_VERSION,
 };
 
 const BUNDLE_FILE: &str = "bundle.json";
@@ -26,7 +26,7 @@ const RELEASE_DIRECTORY: &str = "release";
 const SOURCE_DIRECTORY: &str = "source";
 const SOURCE_SNAPSHOT_FILE: &str = "snapshot.json";
 const DEPENDENCY_LOCK_FILE: &str = "dependency-lock.json";
-const STAGING_PREFIX: &str = ".nomifun-miniapp-share-staging-";
+const STAGING_PREFIX: &str = ".nomifun-plugin-share-staging-";
 const MAX_PATH_BYTES: usize = 1_024;
 const MAX_COMPONENT_BYTES: usize = 255;
 
@@ -110,30 +110,30 @@ pub struct PluginRuntimeShareSourceExport<'a> {
 }
 
 pub struct PluginRuntimeShareBundleExport<'a> {
-    pub bundle_id: MiniAppShareBundleId,
-    pub source_miniapp_id: Option<MiniAppId>,
+    pub bundle_id: PluginShareBundleId,
+    pub source_plugin_product_id: Option<PluginProductId>,
     pub release: &'a PluginRuntimeStoredRelease,
     pub source: Option<PluginRuntimeShareSourceExport<'a>>,
-    pub test_provenance: Option<MiniAppImportedTestProvenance>,
+    pub test_provenance: Option<PluginImportedTestProvenance>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PluginRuntimeImportedRelease {
-    pub artifact: MiniAppReleaseArtifactV1,
+    pub artifact: PluginReleaseArtifactV1,
     pub manifest_bytes: Vec<u8>,
     pub files: Vec<PluginRuntimeReleaseFileBytes>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PluginRuntimeImportedSource {
-    pub source: MiniAppSourceBundle,
+    pub source: PluginSourceBundle,
     pub dependency_lock: Vec<u8>,
     pub files: Vec<PluginRuntimeSourceFile>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PluginRuntimeImportedShareBundle {
-    pub bundle: MiniAppShareBundleV1,
+    pub bundle: PluginShareBundleV1,
     pub release: PluginRuntimeImportedRelease,
     pub source: Option<PluginRuntimeImportedSource>,
 }
@@ -168,7 +168,7 @@ impl PluginRuntimeShareBundleFilesystem {
         &self,
         request: PluginRuntimeShareBundleExport<'_>,
         destination: impl AsRef<Path>,
-    ) -> Result<MiniAppShareBundleV1, PluginRuntimeShareBundleError> {
+    ) -> Result<PluginShareBundleV1, PluginRuntimeShareBundleError> {
         let prepared = prepare_export(request, self.limits)?;
         let destination = destination.as_ref();
         let parent = destination.parent().ok_or_else(|| {
@@ -252,7 +252,7 @@ impl PluginRuntimeShareBundleFilesystem {
     }
 }
 
-pub fn cleanup_miniapp_share_staging(
+pub fn cleanup_plugin_share_staging(
     parent: impl AsRef<Path>,
 ) -> Result<usize, PluginRuntimeShareBundleError> {
     let parent = parent.as_ref();
@@ -280,7 +280,7 @@ pub fn cleanup_miniapp_share_staging(
 }
 
 struct PreparedExport {
-    bundle: MiniAppShareBundleV1,
+    bundle: PluginShareBundleV1,
     release: PluginRuntimeImportedRelease,
     source: Option<PreparedSource>,
 }
@@ -323,12 +323,12 @@ fn prepare_export(
 
     let (source_contract, source) = match request.source {
         Some(source) => {
-            let source_miniapp_id = request.source_miniapp_id.as_ref().ok_or_else(|| {
+            let source_plugin_product_id = request.source_plugin_product_id.as_ref().ok_or_else(|| {
                 PluginRuntimeShareBundleError::InvalidInput(
                     "a Share Bundle carrying Source must identify its source Plugin".into(),
                 )
             })?;
-            if &source.snapshot.project.miniapp_id != source_miniapp_id {
+            if &source.snapshot.project.plugin_product_id != source_plugin_product_id {
                 return Err(PluginRuntimeShareBundleError::InvalidInput(
                     "source Plugin identity does not match the Source snapshot".into(),
                 ));
@@ -342,7 +342,7 @@ fn prepare_export(
                 ));
             }
             if source.snapshot.project.build_profile_version.as_ref()
-                != MINIAPP_RELEASE_PROFILE_VERSION
+                != PLUGIN_RELEASE_PROFILE_VERSION
                 || source.snapshot.dependency_lock_digest
                     != release.artifact.manifest.payload.dependency_lock_digest
             {
@@ -358,7 +358,7 @@ fn prepare_export(
                 source.snapshot.dependency_lock_digest.clone(),
                 limits,
             )?;
-            let contract = MiniAppSourceBundle {
+            let contract = PluginSourceBundle {
                 project_id: source.snapshot.project.project_id.clone(),
                 source_archive_artifact_id: source.source_archive_artifact_id,
                 source_snapshot_digest: prepared.snapshot.snapshot_digest.clone(),
@@ -371,9 +371,9 @@ fn prepare_export(
         None => (None, None),
     };
 
-    let bundle = MiniAppShareBundleV1::new(
+    let bundle = PluginShareBundleV1::new(
         request.bundle_id,
-        request.source_miniapp_id,
+        request.source_plugin_product_id,
         release.artifact.clone(),
         source_contract,
         request.test_provenance,
@@ -387,7 +387,7 @@ fn prepare_export(
 }
 
 fn validate_release_payload(
-    artifact: MiniAppReleaseArtifactV1,
+    artifact: PluginReleaseArtifactV1,
     manifest_bytes: Vec<u8>,
     mut files: Vec<PluginRuntimeReleaseFileBytes>,
     limits: PluginRuntimeShareBundleLimits,
@@ -524,7 +524,7 @@ fn validate_source_payload(
     }
     Ok(PreparedSource {
         snapshot: SourceSnapshotRecord {
-            format_version: MINIAPP_SOURCE_STORE_FORMAT_VERSION.into(),
+            format_version: PLUGIN_SOURCE_STORE_FORMAT_VERSION.into(),
             files: digest_files,
             snapshot_digest: observed_snapshot_digest,
         },
@@ -617,7 +617,7 @@ fn import_share_bundle_with_inventory(
     observed: ObservedTree,
     limits: PluginRuntimeShareBundleLimits,
 ) -> Result<PluginRuntimeImportedShareBundle, PluginRuntimeShareBundleError> {
-    let bundle: MiniAppShareBundleV1 = read_canonical(
+    let bundle: PluginShareBundleV1 = read_canonical(
         &root.join(BUNDLE_FILE),
         limits.max_metadata_bytes,
     )?;
@@ -658,7 +658,7 @@ fn import_release(
     limits: PluginRuntimeShareBundleLimits,
 ) -> Result<PluginRuntimeImportedRelease, PluginRuntimeShareBundleError> {
     let artifact_path = rooted(root, prefix, ARTIFACT_FILE);
-    let artifact: MiniAppReleaseArtifactV1 =
+    let artifact: PluginReleaseArtifactV1 =
         read_canonical(&artifact_path, limits.max_metadata_bytes)?;
     artifact
         .validate()
@@ -692,7 +692,7 @@ fn import_release(
 
 fn import_source(
     root: &Path,
-    source_contract: &MiniAppSourceBundle,
+    source_contract: &PluginSourceBundle,
     observed: &ObservedTree,
     limits: PluginRuntimeShareBundleLimits,
 ) -> Result<PluginRuntimeImportedSource, PluginRuntimeShareBundleError> {
@@ -701,7 +701,7 @@ fn import_source(
         &source_root.join(SOURCE_SNAPSHOT_FILE),
         limits.max_metadata_bytes,
     )?;
-    if record.format_version != MINIAPP_SOURCE_STORE_FORMAT_VERSION {
+    if record.format_version != PLUGIN_SOURCE_STORE_FORMAT_VERSION {
         return Err(PluginRuntimeShareBundleError::InvalidInput(
             "Source snapshot format version is unsupported".into(),
         ));
@@ -754,7 +754,7 @@ fn import_source(
     Ok(imported)
 }
 
-fn release_file_inventory(prefix: &str, artifact: &MiniAppReleaseArtifactV1) -> BTreeSet<String> {
+fn release_file_inventory(prefix: &str, artifact: &PluginReleaseArtifactV1) -> BTreeSet<String> {
     let base = if prefix.is_empty() {
         String::new()
     } else {
@@ -914,7 +914,7 @@ fn source_snapshot_digest(
     files: &[PluginRuntimeSourceFileDigest],
 ) -> Result<DigestHex, PluginRuntimeShareBundleError> {
     Ok(digest_bytes(&canonical_bytes(&SourceSnapshotDigestInput {
-        format_version: MINIAPP_SOURCE_STORE_FORMAT_VERSION,
+        format_version: PLUGIN_SOURCE_STORE_FORMAT_VERSION,
         files,
     })?))
 }

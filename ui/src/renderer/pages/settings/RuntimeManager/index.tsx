@@ -150,7 +150,7 @@ const ParticipantList: React.FC<{
     string
   > = {
     plugin_mount: t('settings.runtimeManager.switch.participantPlugin'),
-    miniapp_service: t('settings.runtimeManager.switch.participantPluginRuntime'),
+    plugin_service: t('settings.runtimeManager.switch.participantPluginRuntime'),
     build_foundation: t('settings.runtimeManager.switch.participantBuild'),
   };
 

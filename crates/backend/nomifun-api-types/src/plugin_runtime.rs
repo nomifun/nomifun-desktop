@@ -1,4 +1,4 @@
-//! Product-facing DTOs for the Phase M1 MiniApp Platform.
+//! Product-facing DTOs for the Plugin runtime platform.
 //!
 //! Surface launch data contains only Host-consumable descriptors. MessageChannel
 //! Bridge sessions and internal Service/storage handles remain private.
@@ -14,8 +14,7 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginRuntimeKindDto {
-    UiOnly,
-    Service,
+    Plugin,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,8 +79,7 @@ pub struct PluginRuntimeReleasePointersDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginRuntimeSummaryDto {
-    #[serde(rename = "plugin_id")]
-    pub miniapp_id: String,
+    pub plugin_id: String,
     pub product_revision: u64,
     pub display_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -101,8 +99,7 @@ pub struct PluginRuntimeSummaryDto {
 #[serde(deny_unknown_fields)]
 pub struct PluginRuntimeLibraryResponseDto {
     pub library_revision: u64,
-    #[serde(rename = "plugins")]
-    pub miniapps: Vec<PluginRuntimeSummaryDto>,
+    pub plugins: Vec<PluginRuntimeSummaryDto>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -169,8 +166,7 @@ pub struct PluginRuntimeReadyReleaseDto {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginRuntimeWorkshopDto {
-    #[serde(rename = "plugin")]
-    pub miniapp: PluginRuntimeSummaryDto,
+    pub plugin: PluginRuntimeSummaryDto,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_lifecycle: Option<PluginRuntimeServiceLifecycleDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -198,8 +194,7 @@ pub struct PluginRuntimeWorkshopDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginRuntimeSurfaceLaunchDescriptorDto {
-    #[serde(rename = "plugin_id")]
-    pub miniapp_id: String,
+    pub plugin_id: String,
     pub product_revision: u64,
     pub release_id: String,
     pub expected_release_digest: String,
@@ -218,14 +213,15 @@ pub struct CreatePluginRuntimeProjectRequest {
     pub display_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    pub kind: PluginRuntimeKindDto,
+    /// Optional service entrypoint; UI and service roles may coexist and change in later releases.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_source: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginRuntimeSourceFileDto {
-    #[serde(rename = "plugin_id")]
-    pub miniapp_id: String,
+    pub plugin_id: String,
     pub project_id: String,
     pub path: String,
     pub content: String,
@@ -236,8 +232,7 @@ pub struct PluginRuntimeSourceFileDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReplacePluginRuntimeSourceFileRequest {
-    #[serde(rename = "plugin_id")]
-    pub miniapp_id: String,
+    pub plugin_id: String,
     pub expected_product_revision: u64,
     pub project_id: String,
     pub expected_project_revision: u64,
@@ -250,8 +245,7 @@ pub struct ReplacePluginRuntimeSourceFileRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BuildPluginRuntimeRequest {
-    #[serde(rename = "plugin_id")]
-    pub miniapp_id: String,
+    pub plugin_id: String,
     pub expected_product_revision: u64,
     pub project_id: String,
     pub expected_project_revision: u64,
@@ -271,8 +265,7 @@ pub struct CancelPluginRuntimeBuildRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TestPluginRuntimeReleaseRequest {
-    #[serde(rename = "plugin_id")]
-    pub miniapp_id: String,
+    pub plugin_id: String,
     pub expected_product_revision: u64,
     pub expected_pointer_revision: u64,
     pub project_id: String,
@@ -288,8 +281,7 @@ pub struct TestPluginRuntimeReleaseRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PublishPluginRuntimeRequest {
-    #[serde(rename = "plugin_id")]
-    pub miniapp_id: String,
+    pub plugin_id: String,
     pub expected_product_revision: u64,
     pub expected_pointer_revision: u64,
     pub expected_active_release_epoch: u64,
@@ -312,8 +304,7 @@ pub enum PluginRuntimePublishModeDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SetPluginRuntimePublishModeRequest {
-    #[serde(rename = "plugin_id")]
-    pub miniapp_id: String,
+    pub plugin_id: String,
     pub expected_product_revision: u64,
     pub expected_pointer_revision: u64,
     pub mode: PluginRuntimePublishModeDto,
@@ -322,8 +313,7 @@ pub struct SetPluginRuntimePublishModeRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DiscardPluginRuntimeReadyReleaseRequest {
-    #[serde(rename = "plugin_id")]
-    pub miniapp_id: String,
+    pub plugin_id: String,
     pub expected_product_revision: u64,
     pub expected_pointer_revision: u64,
     pub ready_release_id: String,
@@ -333,8 +323,7 @@ pub struct DiscardPluginRuntimeReadyReleaseRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RollbackPluginRuntimeRequest {
-    #[serde(rename = "plugin_id")]
-    pub miniapp_id: String,
+    pub plugin_id: String,
     pub expected_product_revision: u64,
     pub expected_pointer_revision: u64,
     pub expected_active_release_epoch: u64,
@@ -346,8 +335,7 @@ pub struct RollbackPluginRuntimeRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SetPluginRuntimeEnabledRequest {
-    #[serde(rename = "plugin_id")]
-    pub miniapp_id: String,
+    pub plugin_id: String,
     pub expected_product_revision: u64,
     pub expected_pointer_revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -358,15 +346,13 @@ pub struct SetPluginRuntimeEnabledRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OpenPluginRuntimeSurfaceRequest {
-    #[serde(rename = "plugin_id")]
-    pub miniapp_id: String,
+    pub plugin_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClosePluginRuntimeSurfaceRequest {
-    #[serde(rename = "plugin_id")]
-    pub miniapp_id: String,
+    pub plugin_id: String,
     pub surface_session_id: String,
     pub surface_capability: String,
 }
@@ -374,8 +360,7 @@ pub struct ClosePluginRuntimeSurfaceRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrashPluginRuntimeRequest {
-    #[serde(rename = "plugin_id")]
-    pub miniapp_id: String,
+    pub plugin_id: String,
     pub expected_product_revision: u64,
     pub expected_pointer_revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -385,8 +370,7 @@ pub struct TrashPluginRuntimeRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RestorePluginRuntimeRequest {
-    #[serde(rename = "plugin_id")]
-    pub miniapp_id: String,
+    pub plugin_id: String,
     pub expected_product_revision: u64,
     pub expected_lifecycle: PluginRuntimeLifecycleDto,
     pub expected_pointer_revision: u64,
@@ -395,8 +379,7 @@ pub struct RestorePluginRuntimeRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RetryPluginRuntimeServiceRequest {
-    #[serde(rename = "plugin_id")]
-    pub miniapp_id: String,
+    pub plugin_id: String,
     pub expected_product_revision: u64,
     pub expected_pointer_revision: u64,
     pub expected_active_release_epoch: u64,
@@ -406,8 +389,7 @@ pub struct RetryPluginRuntimeServiceRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SetPluginRuntimeServiceRunningRequest {
-    #[serde(rename = "plugin_id")]
-    pub miniapp_id: String,
+    pub plugin_id: String,
     pub expected_product_revision: u64,
     pub expected_pointer_revision: u64,
     pub expected_active_release_epoch: u64,
@@ -418,8 +400,7 @@ pub struct SetPluginRuntimeServiceRunningRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DeletePluginRuntimeRequest {
-    #[serde(rename = "plugin_id")]
-    pub miniapp_id: String,
+    pub plugin_id: String,
     pub expected_product_revision: u64,
     pub expected_lifecycle: PluginRuntimeLifecycleDto,
     pub expected_pointer_revision: u64,
@@ -430,8 +411,7 @@ pub struct DeletePluginRuntimeRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RetryPluginRuntimeDeleteRequest {
-    #[serde(rename = "plugin_id")]
-    pub miniapp_id: String,
+    pub plugin_id: String,
     pub failed_operation_id: String,
     pub expected_operation_revision: u64,
 }
@@ -446,8 +426,7 @@ pub enum PluginRuntimeShareContentDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SharePluginRuntimeRequest {
-    #[serde(rename = "plugin_id")]
-    pub miniapp_id: String,
+    pub plugin_id: String,
     pub expected_product_revision: u64,
     pub expected_pointer_revision: u64,
     pub content: PluginRuntimeShareContentDto,
@@ -479,8 +458,7 @@ pub struct ImportPluginRuntimeArtifactRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExportPluginRuntimeBackupRequest {
-    #[serde(rename = "plugin_id")]
-    pub miniapp_id: String,
+    pub plugin_id: String,
     pub expected_product_revision: u64,
     pub expected_lifecycle: PluginRuntimeLifecycleDto,
     pub expected_pointer_revision: u64,
@@ -501,8 +479,7 @@ pub struct ImportPluginRuntimeBackupRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigurePluginRuntimeRequest {
-    #[serde(rename = "plugin_id")]
-    pub miniapp_id: String,
+    pub plugin_id: String,
     pub expected_product_revision: u64,
     pub expected_pointer_revision: u64,
     pub expected_config_revision: u64,
@@ -535,9 +512,9 @@ mod tests {
     }
 
     #[test]
-    fn surface_launch_has_no_bridge_or_localhost_wire() {
+    fn plugin_surface_launch_has_no_bridge_or_localhost_wire() {
         let value = serde_json::to_value(PluginRuntimeSurfaceLaunchDescriptorDto {
-            miniapp_id: "miniapp-1".into(),
+            plugin_id: "plugin-1".into(),
             product_revision: 3,
             release_id: "release-2".into(),
             expected_release_digest: "a".repeat(64),
@@ -546,7 +523,7 @@ mod tests {
             surface_generation: 2,
             surface_capability: "surface-capability".into(),
             ui_entrypoint: "ui/index.html".into(),
-            kind: PluginRuntimeKindDto::Service,
+            kind: PluginRuntimeKindDto::Plugin,
         })
         .unwrap();
 
@@ -565,13 +542,13 @@ mod tests {
                 "internal field leaked: {forbidden}"
             );
         }
-        assert_eq!(value["kind"], "service");
+        assert_eq!(value["kind"], "plugin");
     }
 
     #[test]
-    fn miniapp_requests_reject_unknown_and_legacy_fields() {
+    fn plugin_requests_reject_unknown_fields() {
         let error = serde_json::from_value::<BuildPluginRuntimeRequest>(json!({
-            "plugin_id": "miniapp-1",
+            "plugin_id": "plugin-1",
             "expected_product_revision": 3,
             "project_id": "project-1",
             "expected_project_revision": 4,
@@ -586,15 +563,15 @@ mod tests {
     }
 
     #[test]
-    fn surface_open_request_is_explicit_and_rejects_extra_authority() {
+    fn plugin_surface_open_request_is_explicit_and_rejects_extra_authority() {
         let request = serde_json::to_value(OpenPluginRuntimeSurfaceRequest {
-            miniapp_id: "miniapp-1".into(),
+            plugin_id: "plugin-1".into(),
         })
         .unwrap();
-        assert_eq!(request, json!({"plugin_id": "miniapp-1"}));
+        assert_eq!(request, json!({"plugin_id": "plugin-1"}));
 
         let error = serde_json::from_value::<OpenPluginRuntimeSurfaceRequest>(json!({
-            "plugin_id": "miniapp-1",
+            "plugin_id": "plugin-1",
             "surface_capability": "caller-must-not-supply-capability"
         }))
         .unwrap_err();
@@ -602,9 +579,9 @@ mod tests {
     }
 
     #[test]
-    fn publish_and_rollback_bind_exact_release_pointers() {
+    fn plugin_publish_and_rollback_bind_exact_release_pointers() {
         let publish = serde_json::to_value(PublishPluginRuntimeRequest {
-            miniapp_id: "miniapp-1".into(),
+            plugin_id: "plugin-1".into(),
             expected_product_revision: 3,
             expected_pointer_revision: 5,
             expected_active_release_epoch: 7,
@@ -616,7 +593,7 @@ mod tests {
         })
         .unwrap();
         let rollback = serde_json::to_value(RollbackPluginRuntimeRequest {
-            miniapp_id: "miniapp-1".into(),
+            plugin_id: "plugin-1".into(),
             expected_product_revision: 4,
             expected_pointer_revision: 6,
             expected_active_release_epoch: 8,
@@ -635,9 +612,9 @@ mod tests {
     }
 
     #[test]
-    fn miniapp_credential_binding_wire_contains_references_only() {
+    fn plugin_credential_binding_wire_contains_references_only() {
         let request = ConfigurePluginRuntimeRequest {
-            miniapp_id: "miniapp-1".into(),
+            plugin_id: "plugin-1".into(),
             expected_product_revision: 3,
             expected_pointer_revision: 5,
             expected_config_revision: 2,

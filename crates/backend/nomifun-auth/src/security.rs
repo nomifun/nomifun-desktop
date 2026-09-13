@@ -83,11 +83,11 @@ fn is_office_preview_capability_path(path: &str) -> bool {
     )
 }
 
-fn is_miniapp_surface_capability_path(path: &str) -> bool {
+fn is_plugin_surface_capability_path(path: &str) -> bool {
     let segments = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
     matches!(
         segments.as_slice(),
-        ["api", "miniapps", _miniapp_id, "surface", "assets", capability, _epoch, _digest, ..]
+        ["api", "plugins", "runtimes", _plugin_id, "surface", "assets", capability, _epoch, _digest, ..]
             if is_preview_capability(capability)
     )
 }
@@ -174,7 +174,7 @@ pub async fn security_headers_middleware(request: Request, next: Next) -> Respon
     }
 
     if is_office_preview_capability_path(&path)
-        || is_miniapp_surface_capability_path(&path)
+        || is_plugin_surface_capability_path(&path)
     {
         apply_office_frame_policy(headers);
     } else {
@@ -296,13 +296,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn miniapp_surface_capability_can_be_framed_by_the_app() {
+    async fn plugin_surface_capability_can_be_framed_by_the_app() {
         let capability =
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         let digest =
             "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
         let path = format!(
-            "/api/plugins/runtimes/miniapp-1/surface/assets/{capability}/3/{digest}/ui/index.html"
+            "/api/plugins/runtimes/plugin-1/surface/assets/{capability}/3/{digest}/ui/index.html"
         );
         let app = Router::new()
             .route(&path, get(|| async { "ok" }))

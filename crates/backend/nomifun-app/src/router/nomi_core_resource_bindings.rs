@@ -158,7 +158,7 @@ impl NomiCoreResourceBindingResolverRegistry {
             ),
             customer_service: Arc::clone(&services.customer_service_service),
             workshop: Arc::clone(&services.workshop_service),
-            miniapp: Arc::clone(&services.plugin_runtime),
+            plugin_runtime: Arc::clone(&services.plugin_runtime),
             providers: Arc::clone(&services.provider_repo),
             provider_models: Arc::clone(&services.provider_model_repo),
             provider_capabilities: Arc::clone(&services.provider_model_capability_repo),
@@ -388,7 +388,7 @@ const SUPPORTED_RESOURCE_KINDS: [&str; 15] = [
     "canvas",
     "asset_library",
     "generation_provider",
-    "miniapp",
+    "plugin",
 ];
 
 fn required_operations(
@@ -460,10 +460,10 @@ fn required_operations(
             "creation.image" | "creation.image_edit" => grant("generation_provider", "image"),
             "creation.video" => grant("generation_provider", "video"),
             "creation.audio" => grant("generation_provider", "audio"),
-            "miniapp.read" => grant("miniapp", "read"),
-            "miniapp.edit" => grant("miniapp", "edit"),
-            "miniapp.publish" => grant("miniapp", "publish"),
-            "miniapp.serve" => grant("miniapp", "serve"),
+            "plugin.read" => grant("plugin", "read"),
+            "plugin.edit" => grant("plugin", "edit"),
+            "plugin.publish" => grant("plugin", "publish"),
+            "plugin.serve" => grant("plugin", "serve"),
             _ => {}
         }
     }
@@ -478,7 +478,7 @@ struct ProductResourceDependencies {
     customer: Arc<nomifun_customer_service::CustomerServiceAgentCapabilityOwner>,
     customer_service: Arc<nomifun_customer_service::CustomerServiceService>,
     workshop: Arc<nomifun_workshop::WorkshopService>,
-    miniapp: Arc<nomifun_plugin_platform::runtime::PluginRuntimeM1ApplicationService>,
+    plugin_runtime: Arc<nomifun_plugin_platform::runtime::PluginRuntimeApplicationService>,
     providers: Arc<dyn IProviderRepository>,
     provider_models: Arc<dyn IProviderModelRepository>,
     provider_capabilities: Arc<dyn IProviderModelCapabilityRepository>,
@@ -514,7 +514,7 @@ impl NomiCoreResourceAuthority for ProductResourceAuthority {
             "customer" => self.resolve_customer(request).await,
             "canvas" | "asset_library" => self.resolve_workshop(request).await,
             "generation_provider" => self.resolve_generation_provider(request).await,
-            "miniapp" => self.resolve_miniapp(request).await,
+            "plugin" => self.resolve_plugin(request).await,
             _ => Err(ResourceSelectionResolutionError::invalid(format!(
                 "unsupported product resource kind {}",
                 self.kind
@@ -1027,12 +1027,12 @@ impl ProductResourceAuthority {
         })
     }
 
-    async fn resolve_miniapp(
+    async fn resolve_plugin(
         &self,
         request: ResourceAuthorityRequest,
     ) -> Result<ServerResolvedResource, ResourceSelectionResolutionError> {
         self.dependencies
-            .miniapp
+            .plugin_runtime
             .workshop(&request.owner_id, &request.resource_id)
             .await
             .map_err(|_| ResourceSelectionResolutionError::not_found(self.kind, &request.resource_id))?;
@@ -1216,7 +1216,7 @@ mod tests {
             "workshop.canvas.read".into(),
             "workshop.asset.read".into(),
             "creation.image".into(),
-            "miniapp.read".into(),
+            "plugin.product.read".into(),
         ]);
         let derived = required_operations(&capabilities);
         assert_eq!(

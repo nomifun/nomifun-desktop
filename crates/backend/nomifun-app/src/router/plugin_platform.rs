@@ -768,7 +768,7 @@ impl NomiPluginToolSchemaResolver for NomiCorePluginSchemaResolver {
         if capability.contribution_lock.source_kind
             != nomifun_agent_contracts::ContributionSourceKind::PluginMount
             || capability.contribution_lock.mount_id.as_ref()
-                != Some(&capability.resolved_mount_id)
+                != capability.resolved_mount_id.as_ref()
         {
             return Err(
                 "ordinary Plugin Tool schema requires an exact Plugin Mount lock".into(),
@@ -1024,7 +1024,7 @@ Return exactly one JSON object and nothing else. Do not use markdown fences. Sha
   "source": "complete src/main.ts contents"
 }
 
-The caller supplies package_id. For every capability key K, the final capability id is PACKAGE_ID.K and its activation contribution key is capability:PACKAGE_ID.K. The source must export async function activate({ mount, sdk }: PluginActivationContext) and return { capabilities: { "capability:PACKAGE_ID.K": { async invoke({ actionId, input, contribution, signal }) { ... } } } }. The invoke argument is a host context object: read the user's JSON payload from its input property, never from the wrapper itself. Use only JSON-compatible input/output. Use sdk.credential.resolve(slotKey) for declared secrets and sdk.state for durable Plugin state. Never embed credentials. Prefer no dependencies and deterministic code. Raw Node APIs, network, filesystem, child processes, destructive work, and external transmission may only be used when the user requirement genuinely needs them, and the effect_class must reflect the strongest effect. Do not create an HTML page, React component, MiniApp, package.json, manifest, tests, build scripts, or explanatory prose outside the JSON object. The backend constructs and validates the canonical manifest."#;
+The caller supplies package_id. For every capability key K, the final capability id is PACKAGE_ID.K and its activation contribution key is capability:PACKAGE_ID.K. The source must export async function activate({ mount, sdk }: PluginActivationContext) and return { capabilities: { "capability:PACKAGE_ID.K": { async invoke({ actionId, input, contribution, signal }) { ... } } } }. The invoke argument is a host context object: read the user's JSON payload from its input property, never from the wrapper itself. Use only JSON-compatible input/output. Use sdk.credential.resolve(slotKey) for declared secrets and sdk.state for durable Plugin state. Never embed credentials. Prefer no dependencies and deterministic code. Raw Node APIs, network, filesystem, child processes, destructive work, and external transmission may only be used when the user requirement genuinely needs them, and the effect_class must reflect the strongest effect. Do not create an HTML page, React component, standalone runtime product, package.json, manifest, tests, build scripts, or explanatory prose outside the JSON object. The backend constructs and validates the canonical manifest."#;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1453,7 +1453,7 @@ fn generated_consumers(
             "remote" => CapabilityConsumer::Remote,
             "automation" => CapabilityConsumer::Automation,
             "ui" => CapabilityConsumer::Ui,
-            "miniapp_service" => CapabilityConsumer::MiniAppService,
+            "plugin_service" => CapabilityConsumer::PluginService,
             other => {
                 return Err(PluginServiceError::invalid(format!(
                     "AI-authored Plugin declared unsupported consumer {other}"
@@ -1479,7 +1479,7 @@ async fn list_plugins(
         let releases = runtime.library(user.id.as_str()).await
             .map_err(|error| PluginServiceError::integration(error.to_string()))?;
         library.runtime_revision = releases.library_revision;
-        library.runtimes = releases.miniapps;
+        library.runtimes = releases.plugins;
     }
     Ok(Json(ApiResponse::ok(library)))
 }
@@ -3198,12 +3198,21 @@ export async function activate() {
             source_package: materialized.manifest.package.clone(),
             contribution_id: materialized.contribution_id.clone(),
             contribution_lock: materialized.contribution_lock.clone(),
-            resolved_mount_id: materialized.mount_id.clone(),
+            resolved_mount_id: Some(materialized.mount_id.clone()),
             resolved_source: materialized.source.clone(),
             target_artifact_digest: materialized.target_artifact_digest.clone(),
             schema_digest: materialized.schema_digest.clone(),
             dependency_path: vec![capability_id.clone()],
             required_runtime_features: BTreeSet::new(),
+            plugin_product_id: None,
+            active_release: None,
+            active_release_epoch: None,
+            catalog_digest: None,
+            display_name: None,
+            description: None,
+            actions: Vec::new(),
+            required_resource_kinds: BTreeSet::new(),
+            action_allowlist: BTreeSet::new(),
         };
         let action_schema = &materialized.manifest.contributions.actions[0].input_schema;
         let resolved_schema = schema_resolver

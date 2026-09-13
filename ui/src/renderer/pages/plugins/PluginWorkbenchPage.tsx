@@ -31,7 +31,7 @@ import PluginConfigurationDialog from './PluginConfigurationDialog';
 import type { PluginProjectBusyAction } from './PluginWorkshopView';
 import { pluginRuntimeSetEnabledRequest } from './runtime/model';
 import { pluginRuntimeProduct, type PluginRuntimeDraft, type PluginRuntimeWorkspace } from '@/common/adapter/pluginRuntimeProductBridge';
-import { emptyItem, updatePluginRuntimeWorkspace, MINIAPP_LIBRARY_CHANGED, libraryChanged } from './runtime/libraryState';
+import { emptyItem, updatePluginRuntimeWorkspace, PLUGIN_LIBRARY_CHANGED, libraryChanged } from './runtime/libraryState';
 import {
   PluginCandidateApplyModal,
   PluginCandidateTestModal,
@@ -159,8 +159,8 @@ const PluginWorkbenchPage: React.FC = () => {
 
   useEffect(() => {
     void refreshLibrary();
-    window.addEventListener(MINIAPP_LIBRARY_CHANGED, refreshLibrary);
-    return () => window.removeEventListener(MINIAPP_LIBRARY_CHANGED, refreshLibrary);
+    window.addEventListener(PLUGIN_LIBRARY_CHANGED, refreshLibrary);
+    return () => window.removeEventListener(PLUGIN_LIBRARY_CHANGED, refreshLibrary);
   }, [refreshLibrary]);
 
   const linkedPluginId = searchParams.get('plugin');

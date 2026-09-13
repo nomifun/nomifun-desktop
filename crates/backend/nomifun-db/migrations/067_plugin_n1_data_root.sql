@@ -62,9 +62,28 @@ CREATE TABLE plugin_projects (
         AND owner_user_id GLOB '????????-????-7???-[89ab]???-????????????'
         AND replace(owner_user_id, '-', '') NOT GLOB '*[^0-9a-f]*'
     ),
-    package_id               TEXT NOT NULL CHECK (
-        length(package_id) BETWEEN 1 AND 255
-        AND package_id NOT GLOB '*[^A-Za-z0-9._-]*'
+    package_id               TEXT CHECK (
+        package_id IS NULL OR (
+            length(package_id) BETWEEN 1 AND 255
+            AND package_id NOT GLOB '*[^A-Za-z0-9._-]*'
+        )
+    ),
+    plugin_product_id        TEXT UNIQUE CHECK (
+        plugin_product_id IS NULL OR (
+            length(plugin_product_id) = 36
+            AND lower(plugin_product_id) = plugin_product_id
+            AND plugin_product_id GLOB '????????-????-7???-[89ab]???-????????????'
+            AND replace(plugin_product_id, '-', '') NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
+    project_revision         INTEGER NOT NULL DEFAULT 1 CHECK (project_revision >= 1),
+    source_state             TEXT NOT NULL DEFAULT 'package'
+        CHECK (source_state IN ('package', 'empty', 'editable', 'runtime_only')),
+    build_profile_version    TEXT CHECK (
+        build_profile_version IS NULL OR (
+            length(build_profile_version) BETWEEN 1 AND 64
+            AND build_profile_version NOT GLOB '*[^!-~]*'
+        )
     ),
     managed_source_path      TEXT CHECK (
         managed_source_path IS NULL OR (
@@ -118,6 +137,48 @@ CREATE TABLE plugin_projects (
     CHECK (
         source_head_digest IS NOT NULL
         OR dependency_lock_digest IS NULL
+    ),
+    CHECK (
+        (
+            plugin_product_id IS NULL
+            AND package_id IS NOT NULL
+            AND source_state = 'package'
+            AND project_revision = 1
+            AND build_profile_version IS NULL
+        )
+        OR
+        (
+            plugin_product_id IS NOT NULL
+            AND package_id IS NULL
+            AND source_state IN ('empty', 'editable', 'runtime_only')
+        )
+    ),
+    CHECK (
+        source_state = 'package'
+        OR (
+            source_state = 'empty'
+            AND managed_source_path IS NULL
+            AND source_head_digest IS NULL
+            AND dependency_lock_digest IS NULL
+            AND build_profile_version IS NULL
+            AND build_generation = 0
+        )
+        OR (
+            source_state = 'editable'
+            AND managed_source_path IS NOT NULL
+            AND source_head_digest IS NOT NULL
+            AND dependency_lock_digest IS NOT NULL
+            AND build_profile_version IS NOT NULL
+            AND build_generation > 0
+        )
+        OR (
+            source_state = 'runtime_only'
+            AND managed_source_path IS NULL
+            AND source_head_digest IS NULL
+            AND dependency_lock_digest IS NULL
+            AND build_profile_version IS NULL
+            AND build_generation = 0
+        )
     )
 );
 
@@ -130,10 +191,10 @@ CREATE TABLE product_operations (
         AND replace(operation_id, '-', '') NOT GLOB '*[^0-9a-f]*'
     ),
     kind                     TEXT NOT NULL CHECK (
-        kind IN ('build', 'import', 'export', 'miniapp_permanent_delete')
+        kind IN ('build', 'import', 'export', 'plugin_permanent_delete')
     ),
     owner_kind               TEXT NOT NULL CHECK (
-        owner_kind IN ('plugin_project', 'plugin_mount', 'miniapp')
+        owner_kind IN ('plugin_project', 'plugin_mount', 'plugin')
     ),
     owner_id                 TEXT NOT NULL CHECK (
         length(owner_id) = 36
@@ -161,15 +222,15 @@ CREATE TABLE product_operations (
         finished_at_ms IS NULL OR finished_at_ms >= started_at_ms
     ),
     CHECK (
-        (kind = 'build' AND owner_kind IN ('plugin_project', 'miniapp'))
+        (kind = 'build' AND owner_kind IN ('plugin_project', 'plugin'))
         OR
         (kind IN ('import', 'export')
-            AND owner_kind IN ('plugin_project', 'plugin_mount', 'miniapp'))
+            AND owner_kind IN ('plugin_project', 'plugin_mount', 'plugin'))
         OR
-        (kind = 'miniapp_permanent_delete' AND owner_kind = 'miniapp')
+        (kind = 'plugin_permanent_delete' AND owner_kind = 'plugin')
     ),
     CHECK (
-        kind <> 'miniapp_permanent_delete'
+        kind <> 'plugin_permanent_delete'
         OR progress_percent IS NULL
     ),
     CHECK (
@@ -181,7 +242,7 @@ CREATE TABLE product_operations (
             AND finished_at_ms IS NOT NULL
             AND last_error_code IS NULL
             AND (
-                kind = 'miniapp_permanent_delete'
+                kind = 'plugin_permanent_delete'
                 OR progress_percent = 100
             ))
         OR
@@ -190,7 +251,7 @@ CREATE TABLE product_operations (
             AND last_error_code IS NOT NULL)
         OR
         (state = 'canceled'
-            AND kind <> 'miniapp_permanent_delete'
+            AND kind <> 'plugin_permanent_delete'
             AND finished_at_ms IS NOT NULL
             AND last_error_code IS NULL)
     )
@@ -476,7 +537,7 @@ CREATE TABLE plugin_mount_revisions (
     UNIQUE (mount_id, revision)
 );
 
-CREATE TABLE plugin_credential_bindings (
+CREATE TABLE plugin_mount_credential_bindings (
     id                       INTEGER PRIMARY KEY AUTOINCREMENT,
     mount_id                 TEXT NOT NULL CHECK (
         length(mount_id) = 36
@@ -497,7 +558,7 @@ CREATE TABLE plugin_credential_bindings (
     UNIQUE (mount_id, slot)
 );
 
-CREATE TABLE plugin_kv (
+CREATE TABLE plugin_mount_kv (
     id                       INTEGER PRIMARY KEY AUTOINCREMENT,
     mount_id                 TEXT NOT NULL CHECK (
         length(mount_id) = 36
@@ -534,9 +595,9 @@ CREATE INDEX idx_product_operations_plugin_project_owner_id
 CREATE INDEX idx_product_operations_plugin_mount_owner_id
     ON product_operations(owner_id, started_at_ms, operation_id)
     WHERE owner_kind = 'plugin_mount';
-CREATE INDEX idx_product_operations_miniapp_owner_id
+CREATE INDEX idx_product_operations_plugin_owner_id
     ON product_operations(owner_id, started_at_ms, operation_id)
-    WHERE owner_kind = 'miniapp';
+    WHERE owner_kind = 'plugin';
 CREATE INDEX idx_plugin_ready_candidates_project_id
     ON plugin_ready_candidates(project_id);
 CREATE INDEX idx_plugin_ready_candidates_artifact_id
@@ -561,12 +622,12 @@ CREATE INDEX idx_plugin_mount_revisions_artifact_id
     ON plugin_mount_revisions(artifact_id);
 CREATE INDEX idx_plugin_mount_revisions_artifact_digest
     ON plugin_mount_revisions(artifact_digest);
-CREATE INDEX idx_plugin_credential_bindings_mount_id
-    ON plugin_credential_bindings(mount_id, slot);
-CREATE INDEX idx_plugin_credential_bindings_credential_id
-    ON plugin_credential_bindings(credential_id);
-CREATE INDEX idx_plugin_kv_mount_id
-    ON plugin_kv(mount_id, namespace, key);
+CREATE INDEX idx_plugin_mount_credential_bindings_mount_id
+    ON plugin_mount_credential_bindings(mount_id, slot);
+CREATE INDEX idx_plugin_mount_credential_bindings_credential_id
+    ON plugin_mount_credential_bindings(credential_id);
+CREATE INDEX idx_plugin_mount_kv_mount_id
+    ON plugin_mount_kv(mount_id, namespace, key);
 
 CREATE TRIGGER trg_plugin_artifacts_immutable
 BEFORE UPDATE ON plugin_artifacts

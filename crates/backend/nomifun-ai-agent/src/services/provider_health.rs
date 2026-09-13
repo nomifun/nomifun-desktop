@@ -760,7 +760,7 @@ mod tests {
         let mut adjudicated = probe_result(StopReason::EndTurn);
         adjudicated.completion_adjudication = Some(
             CompletionAdjudication::UnbackedStateChangeClaim {
-                target: "miniapp.html".to_owned(),
+                target: "plugin.html".to_owned(),
             },
         );
         let failure = probe_terminal_failure(&adjudicated)

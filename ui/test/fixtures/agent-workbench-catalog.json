@@ -3209,14 +3209,14 @@
   },
   {
     "capability": {
-      "id": "miniapp.read",
+      "id": "plugin.read",
       "version": "1.0.0"
     },
     "kind": "tool",
-    "display_name": "miniapp.read",
-    "description": "miniapp.read",
+    "display_name": "plugin.read",
+    "description": "plugin.read",
     "source_package": {
-      "id": "nomifun.miniapp",
+      "id": "nomifun.plugin",
       "version": "1.0.0"
     },
     "source_kind": "bundled",
@@ -3227,7 +3227,7 @@
     ],
     "required_runtime_features": [],
     "required_resource_kinds": [
-      "miniapp"
+      "plugin"
     ],
     "required_capabilities": [],
     "conflicting_capabilities": [],
@@ -3236,14 +3236,14 @@
   },
   {
     "capability": {
-      "id": "miniapp.edit",
+      "id": "plugin.edit",
       "version": "1.0.0"
     },
     "kind": "tool",
-    "display_name": "miniapp.edit",
-    "description": "miniapp.edit",
+    "display_name": "plugin.edit",
+    "description": "plugin.edit",
     "source_package": {
-      "id": "nomifun.miniapp",
+      "id": "nomifun.plugin",
       "version": "1.0.0"
     },
     "source_kind": "bundled",
@@ -3254,7 +3254,7 @@
     ],
     "required_runtime_features": [],
     "required_resource_kinds": [
-      "miniapp"
+      "plugin"
     ],
     "required_capabilities": [],
     "conflicting_capabilities": [],
@@ -3263,14 +3263,14 @@
   },
   {
     "capability": {
-      "id": "miniapp.publish",
+      "id": "plugin.publish",
       "version": "1.0.0"
     },
     "kind": "tool",
-    "display_name": "miniapp.publish",
-    "description": "miniapp.publish",
+    "display_name": "plugin.publish",
+    "description": "plugin.publish",
     "source_package": {
-      "id": "nomifun.miniapp",
+      "id": "nomifun.plugin",
       "version": "1.0.0"
     },
     "source_kind": "bundled",
@@ -3281,7 +3281,7 @@
     ],
     "required_runtime_features": [],
     "required_resource_kinds": [
-      "miniapp"
+      "plugin"
     ],
     "required_capabilities": [],
     "conflicting_capabilities": [],
@@ -3290,14 +3290,14 @@
   },
   {
     "capability": {
-      "id": "miniapp.serve",
+      "id": "plugin.serve",
       "version": "1.0.0"
     },
     "kind": "tool",
-    "display_name": "miniapp.serve",
-    "description": "miniapp.serve",
+    "display_name": "plugin.serve",
+    "description": "plugin.serve",
     "source_package": {
-      "id": "nomifun.miniapp",
+      "id": "nomifun.plugin",
       "version": "1.0.0"
     },
     "source_kind": "bundled",
@@ -3308,7 +3308,7 @@
     ],
     "required_runtime_features": [],
     "required_resource_kinds": [
-      "miniapp"
+      "plugin"
     ],
     "required_capabilities": [],
     "conflicting_capabilities": [],

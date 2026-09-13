@@ -53,7 +53,7 @@ async fn succeed_operation(
         kind,
         owner_kind: owner_kind.into(),
         owner_id: owner_id.into(),
-        progress_percent: (kind != ProductOperationKind::MiniappPermanentDelete).then_some(0),
+        progress_percent: (kind != ProductOperationKind::PluginPermanentDelete).then_some(0),
         bounded_log_tail: vec!["started".into()],
         started_at_ms: timestamp,
     })
@@ -62,7 +62,7 @@ async fn succeed_operation(
     repo.finish_operation(&FinishProductOperationParams {
         operation_id: operation_id.clone(),
         state: ProductOperationState::Succeeded,
-        progress_percent: (kind != ProductOperationKind::MiniappPermanentDelete).then_some(100),
+        progress_percent: (kind != ProductOperationKind::PluginPermanentDelete).then_some(100),
         last_error_code: None,
         bounded_log_tail: vec!["started".into(), "succeeded".into()],
         result_artifact_digests: Default::default(),
@@ -250,7 +250,7 @@ async fn add_managed_candidate(
 }
 
 #[tokio::test]
-async fn migrations_are_clean_start_preserve_legacy_miniapps_and_restart_at_schema_head() {
+async fn migrations_are_clean_start_without_retired_plugins_and_restart_at_schema_head() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("plugin-n1.db");
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
@@ -273,30 +273,14 @@ async fn migrations_are_clean_start_preserve_legacy_miniapps_and_restart_at_sche
     .execute(&pool)
     .await
     .unwrap();
-    let miniapp_id = id();
-    sqlx::query(
-        "INSERT INTO miniapps (
-            miniapp_id, user_id, name, description, html, html_size, created_at, updated_at
-         ) VALUES (?, ?, 'legacy', '', '<p/>', 4, 1, 1)",
+    let retired_table_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_schema
+         WHERE type = 'table' AND name = 'plugins'",
     )
-    .bind(&miniapp_id)
-    .bind(&owner_id)
-    .execute(&pool)
+    .fetch_one(&pool)
     .await
     .unwrap();
-    let legacy_project_id = id();
-    sqlx::query(
-        "INSERT INTO plugin_projects (
-            project_id, owner_user_id, package_id, managed_source_path,
-            source_head_digest, dependency_lock_digest, build_generation,
-            created_at, updated_at
-         ) VALUES (?, ?, 'dev.nomifun.legacy-project', NULL, NULL, NULL, 0, 1, 1)",
-    )
-    .bind(&legacy_project_id)
-    .bind(&owner_id)
-    .execute(&pool)
-    .await
-    .unwrap();
+    assert_eq!(retired_table_count, 0);
     pool.close().await;
 
     let database = init_database(Path::new(&path)).await.unwrap();
@@ -305,8 +289,8 @@ async fn migrations_are_clean_start_preserve_legacy_miniapps_and_restart_at_sche
          WHERE type = 'table' AND name IN (
             'plugin_artifacts', 'plugin_projects', 'plugin_ready_candidates',
             'plugin_candidate_test_receipts', 'plugin_mounts', 'plugin_mount_revisions',
-            'plugin_credential_bindings', 'plugin_dependency_mutation_intents',
-            'plugin_dependency_mutation_commits', 'plugin_kv', 'product_operations'
+            'plugin_mount_credential_bindings', 'plugin_dependency_mutation_intents',
+            'plugin_dependency_mutation_commits', 'plugin_mount_kv', 'product_operations'
          )",
     )
     .fetch_one(database.pool())
@@ -321,23 +305,24 @@ async fn migrations_are_clean_start_preserve_legacy_miniapps_and_restart_at_sche
     .await
     .unwrap();
     assert_eq!(runtime_tables, 1);
-    let legacy_html: String =
-        sqlx::query_scalar("SELECT html FROM miniapps WHERE miniapp_id = ?")
-            .bind(&miniapp_id)
-            .fetch_one(database.pool())
-            .await
-            .unwrap();
-    assert_eq!(legacy_html, "<p/>");
-    let legacy_project: (String, String) = sqlx::query_as(
-        "SELECT display_name, description
-         FROM plugin_projects WHERE project_id = ?",
+    let final_runtime_roots: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_schema
+         WHERE type = 'table'
+           AND name IN ('plugin_library_state', 'plugin_products',
+                        'plugin_release_artifacts', 'plugin_releases')",
     )
-    .bind(&legacy_project_id)
     .fetch_one(database.pool())
     .await
     .unwrap();
-    assert_eq!(legacy_project.0, "dev.nomifun.legacy-project");
-    assert!(legacy_project.1.is_empty());
+    assert_eq!(final_runtime_roots, 4);
+    let retired_table_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_schema
+         WHERE type = 'table' AND name = 'plugins'",
+    )
+    .fetch_one(database.pool())
+    .await
+    .unwrap();
+    assert_eq!(retired_table_count, 0);
     database.close().await;
 
     let restarted = init_database(Path::new(&path)).await.unwrap();
@@ -1600,7 +1585,7 @@ async fn mount_data_delete_preserves_project_ready_candidate_and_test_receipt_as
     assert!(receipt_exists);
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM plugin_credential_bindings WHERE mount_id = ?",
+            "SELECT COUNT(*) FROM plugin_mount_credential_bindings WHERE mount_id = ?",
         )
         .bind(&mount_id)
         .fetch_one(&fixture.pool)
@@ -1609,7 +1594,7 @@ async fn mount_data_delete_preserves_project_ready_candidate_and_test_receipt_as
         0
     );
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM plugin_kv WHERE mount_id = ?")
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM plugin_mount_kv WHERE mount_id = ?")
             .bind(&mount_id)
             .fetch_one(&fixture.pool)
             .await
@@ -1901,7 +1886,7 @@ async fn config_credentials_and_runtime_state_use_exact_mount_cas() {
     assert!(runtime.credential_bindings.is_empty());
 
     let direct_binding = sqlx::query(
-        "INSERT INTO plugin_credential_bindings (
+        "INSERT INTO plugin_mount_credential_bindings (
             mount_id, slot, credential_id, created_at, updated_at
          ) VALUES (?, 'forged', 'credential:forged', 11, 11)",
     )
@@ -2021,7 +2006,7 @@ async fn product_operation_owner_state_progress_error_and_log_contract_is_strict
         "INSERT INTO product_operations (
             operation_id, kind, owner_kind, owner_id, state, progress_percent,
             bounded_log_tail_json, started_at_ms
-         ) VALUES (?, 'export', 'miniapp', ?, 'running', 0, '[1]', 1)",
+         ) VALUES (?, 'export', 'plugin', ?, 'running', 0, '[1]', 1)",
     )
     .bind(id())
     .bind(id())

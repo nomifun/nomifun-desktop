@@ -8,16 +8,16 @@ use std::{
 
 use async_trait::async_trait;
 use nomifun_agent_contracts::{
-    DigestHex, MiniAppBridgeCallId, MiniAppId, MiniAppReleaseRef, MiniAppServiceLifecycle,
-    ResolvedMiniAppServiceSpec, StrictJsonValue,
+    DigestHex, PluginBridgeCallId, PluginProductId, PluginReleaseRef, PluginServiceLifecycle,
+    ResolvedPluginServiceSpec, StrictJsonValue,
 };
 use tokio::sync::Mutex;
 
 use crate::runtime::{PluginRuntimePlatformError, PluginRuntimePlatformResult};
 
 pub const DEFAULT_MAX_ACTIVE_SERVICE_HOSTS: usize = 4;
-pub const MINIAPP_CONTINUOUS_CRASH_FAILURE_THRESHOLD: u32 = 3;
-pub const MINIAPP_CONTINUOUS_CRASH_BACKOFF_MS: [i64; 2] = [1_000, 5_000];
+pub const PLUGIN_CONTINUOUS_CRASH_FAILURE_THRESHOLD: u32 = 3;
+pub const PLUGIN_CONTINUOUS_CRASH_BACKOFF_MS: [i64; 2] = [1_000, 5_000];
 
 #[derive(Clone, Debug, Default)]
 pub struct PluginRuntimeCallCancellation {
@@ -36,16 +36,16 @@ impl PluginRuntimeCallCancellation {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PluginRuntimeServiceGenerationFence {
-    pub miniapp_id: MiniAppId,
-    pub release: MiniAppReleaseRef,
+    pub plugin_product_id: PluginProductId,
+    pub release: PluginReleaseRef,
     pub active_release_epoch: u64,
     pub service_run_key: DigestHex,
     pub host_generation: u64,
 }
 
 impl PluginRuntimeServiceGenerationFence {
-    fn matches_spec(&self, spec: &ResolvedMiniAppServiceSpec) -> bool {
-        self.miniapp_id == spec.miniapp_id
+    fn matches_spec(&self, spec: &ResolvedPluginServiceSpec) -> bool {
+        self.plugin_product_id == spec.plugin_product_id
             && self.release == spec.release
             && self.active_release_epoch == spec.active_release_epoch
             && self.service_run_key == spec.service_run_key
@@ -54,14 +54,14 @@ impl PluginRuntimeServiceGenerationFence {
 
 #[derive(Clone, Debug)]
 pub struct PluginRuntimeServiceLaunch {
-    pub spec: ResolvedMiniAppServiceSpec,
+    pub spec: ResolvedPluginServiceSpec,
     pub host_generation: u64,
 }
 
 #[derive(Clone, Debug)]
 pub struct PluginRuntimeServiceInvocation {
     pub fence: PluginRuntimeServiceGenerationFence,
-    pub call_id: MiniAppBridgeCallId,
+    pub call_id: PluginBridgeCallId,
     pub method: String,
     pub payload: StrictJsonValue,
 }
@@ -122,44 +122,44 @@ pub enum PluginRuntimeServiceHostState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PluginRuntimeServiceCapacitySnapshot {
     pub max_active_service_hosts: usize,
-    pub active_miniapps: Vec<MiniAppId>,
+    pub active_plugins: Vec<PluginProductId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PluginRuntimeContinuousReconcileResult {
-    pub restarted: Vec<MiniAppId>,
-    pub blocked: Vec<(MiniAppId, String)>,
+    pub restarted: Vec<PluginProductId>,
+    pub blocked: Vec<(PluginProductId, String)>,
 }
 
 #[async_trait]
 pub trait PluginRuntimeServiceHostPort: Send + Sync {
     async fn bind_active(
         &self,
-        spec: ResolvedMiniAppServiceSpec,
+        spec: ResolvedPluginServiceSpec,
         enabled: bool,
     ) -> PluginRuntimePlatformResult<()>;
 
     async fn invoke(
         &self,
-        spec: &ResolvedMiniAppServiceSpec,
-        call_id: MiniAppBridgeCallId,
+        spec: &ResolvedPluginServiceSpec,
+        call_id: PluginBridgeCallId,
         method: String,
         payload: StrictJsonValue,
         cancellation: PluginRuntimeCallCancellation,
         now_ms: i64,
     ) -> PluginRuntimePlatformResult<StrictJsonValue>;
 
-    async fn cancel(&self, miniapp_id: &MiniAppId, call_id: &MiniAppBridgeCallId);
+    async fn cancel(&self, plugin_product_id: &PluginProductId, call_id: &PluginBridgeCallId);
 
-    async fn stop(&self, miniapp_id: &MiniAppId) -> PluginRuntimePlatformResult<()>;
+    async fn stop(&self, plugin_product_id: &PluginProductId) -> PluginRuntimePlatformResult<()>;
 
-    async fn retry(&self, miniapp_id: &MiniAppId) -> PluginRuntimePlatformResult<()>;
+    async fn retry(&self, plugin_product_id: &PluginProductId) -> PluginRuntimePlatformResult<()>;
 
     async fn reap_idle(
         &self,
         now_ms: i64,
         idle_window_ms: i64,
-    ) -> PluginRuntimePlatformResult<Vec<MiniAppId>>;
+    ) -> PluginRuntimePlatformResult<Vec<PluginProductId>>;
 
     async fn report_crash(
         &self,
@@ -173,22 +173,22 @@ pub trait PluginRuntimeServiceHostPort: Send + Sync {
         now_ms: i64,
     ) -> PluginRuntimePlatformResult<PluginRuntimeContinuousReconcileResult>;
 
-    async fn state(&self, miniapp_id: &MiniAppId) -> Option<PluginRuntimeServiceHostState>;
+    async fn state(&self, plugin_product_id: &PluginProductId) -> Option<PluginRuntimeServiceHostState>;
 }
 
 struct ServiceSlot {
-    spec: ResolvedMiniAppServiceSpec,
+    spec: ResolvedPluginServiceSpec,
     enabled: bool,
     next_generation: u64,
     process: Option<Arc<dyn PluginRuntimeServiceProcess>>,
     state: PluginRuntimeServiceHostState,
-    in_flight: BTreeMap<MiniAppBridgeCallId, PluginRuntimeCallCancellation>,
+    in_flight: BTreeMap<PluginBridgeCallId, PluginRuntimeCallCancellation>,
     last_activity_ms: i64,
     consecutive_failures: u32,
 }
 
 impl ServiceSlot {
-    fn new(spec: ResolvedMiniAppServiceSpec, enabled: bool) -> Self {
+    fn new(spec: ResolvedPluginServiceSpec, enabled: bool) -> Self {
         Self {
             spec,
             enabled,
@@ -225,12 +225,12 @@ impl ServiceSlot {
 
 struct ServiceCapacityState {
     max_active_service_hosts: usize,
-    active: BTreeMap<MiniAppId, u64>,
+    active: BTreeMap<PluginProductId, u64>,
 }
 
 pub struct InMemoryPluginRuntimeServiceHost {
     factory: Arc<dyn PluginRuntimeServiceProcessFactory>,
-    slots: Mutex<BTreeMap<MiniAppId, Arc<Mutex<ServiceSlot>>>>,
+    slots: Mutex<BTreeMap<PluginProductId, Arc<Mutex<ServiceSlot>>>>,
     capacity: Mutex<ServiceCapacityState>,
 }
 
@@ -278,17 +278,17 @@ impl InMemoryPluginRuntimeServiceHost {
         capacity_snapshot(&capacity)
     }
 
-    async fn slot(&self, miniapp_id: &MiniAppId) -> Option<Arc<Mutex<ServiceSlot>>> {
-        self.slots.lock().await.get(miniapp_id).cloned()
+    async fn slot(&self, plugin_product_id: &PluginProductId) -> Option<Arc<Mutex<ServiceSlot>>> {
+        self.slots.lock().await.get(plugin_product_id).cloned()
     }
 
     async fn reserve_capacity(
         &self,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
         host_generation: u64,
     ) -> PluginRuntimePlatformResult<()> {
         let mut capacity = self.capacity.lock().await;
-        if capacity.active.contains_key(miniapp_id) {
+        if capacity.active.contains_key(plugin_product_id) {
             return Err(PluginRuntimePlatformError::InvalidState(
                 "Plugin already owns an active Service Host capacity slot".into(),
             ));
@@ -296,7 +296,7 @@ impl InMemoryPluginRuntimeServiceHost {
         if capacity.active.len() >= capacity.max_active_service_hosts {
             return Err(PluginRuntimePlatformError::ServiceCapacityExhausted {
                 max_active: capacity.max_active_service_hosts,
-                active_miniapps: capacity
+                active_plugins: capacity
                     .active
                     .keys()
                     .map(|id| id.as_ref().to_owned())
@@ -305,14 +305,14 @@ impl InMemoryPluginRuntimeServiceHost {
         }
         capacity
             .active
-            .insert(miniapp_id.clone(), host_generation);
+            .insert(plugin_product_id.clone(), host_generation);
         Ok(())
     }
 
-    async fn release_capacity(&self, miniapp_id: &MiniAppId, host_generation: u64) {
+    async fn release_capacity(&self, plugin_product_id: &PluginProductId, host_generation: u64) {
         let mut capacity = self.capacity.lock().await;
-        if capacity.active.get(miniapp_id) == Some(&host_generation) {
-            capacity.active.remove(miniapp_id);
+        if capacity.active.get(plugin_product_id) == Some(&host_generation) {
+            capacity.active.remove(plugin_product_id);
         }
     }
 
@@ -340,7 +340,7 @@ impl InMemoryPluginRuntimeServiceHost {
             .next_generation
             .checked_add(1)
             .ok_or_else(|| PluginRuntimePlatformError::Runtime("Service generation overflow".into()))?;
-        self.reserve_capacity(&slot.spec.miniapp_id, generation)
+        self.reserve_capacity(&slot.spec.plugin_product_id, generation)
             .await?;
         slot.next_generation = next_generation;
         slot.state = PluginRuntimeServiceHostState::Starting {
@@ -353,7 +353,7 @@ impl InMemoryPluginRuntimeServiceHost {
         match self.factory.start(launch).await {
             Ok(process) => {
                 let fence = PluginRuntimeServiceGenerationFence {
-                    miniapp_id: slot.spec.miniapp_id.clone(),
+                    plugin_product_id: slot.spec.plugin_product_id.clone(),
                     release: slot.spec.release.clone(),
                     active_release_epoch: slot.spec.active_release_epoch,
                     service_run_key: slot.spec.service_run_key.clone(),
@@ -367,17 +367,17 @@ impl InMemoryPluginRuntimeServiceHost {
                 Ok((process, fence))
             }
             Err(error) => {
-                self.release_capacity(&slot.spec.miniapp_id, generation)
+                self.release_capacity(&slot.spec.plugin_product_id, generation)
                     .await;
                 slot.process = None;
                 slot.consecutive_failures = slot.consecutive_failures.saturating_add(1);
                 let error_text = error.to_string();
-                if slot.spec.lifecycle == MiniAppServiceLifecycle::Continuous
-                    && slot.consecutive_failures < MINIAPP_CONTINUOUS_CRASH_FAILURE_THRESHOLD
+                if slot.spec.lifecycle == PluginServiceLifecycle::Continuous
+                    && slot.consecutive_failures < PLUGIN_CONTINUOUS_CRASH_FAILURE_THRESHOLD
                 {
                     let backoff_index = slot.consecutive_failures.saturating_sub(1) as usize;
-                    let backoff_ms = MINIAPP_CONTINUOUS_CRASH_BACKOFF_MS[backoff_index
-                        .min(MINIAPP_CONTINUOUS_CRASH_BACKOFF_MS.len().saturating_sub(1))];
+                    let backoff_ms = PLUGIN_CONTINUOUS_CRASH_BACKOFF_MS[backoff_index
+                        .min(PLUGIN_CONTINUOUS_CRASH_BACKOFF_MS.len().saturating_sub(1))];
                     slot.state = PluginRuntimeServiceHostState::Backoff {
                         host_generation: generation,
                         consecutive_failures: slot.consecutive_failures,
@@ -403,7 +403,7 @@ impl InMemoryPluginRuntimeServiceHost {
             process.stop().await;
         }
         if let Some(generation) = generation {
-            self.release_capacity(&slot.spec.miniapp_id, generation)
+            self.release_capacity(&slot.spec.plugin_product_id, generation)
                 .await;
         }
         slot.state = PluginRuntimeServiceHostState::Stopped;
@@ -416,12 +416,12 @@ impl InMemoryPluginRuntimeServiceHost {
             process.stop().await;
         }
         if generation > 0 {
-            self.release_capacity(&slot.spec.miniapp_id, generation)
+            self.release_capacity(&slot.spec.plugin_product_id, generation)
                 .await;
         }
         slot.consecutive_failures = slot.consecutive_failures.saturating_add(1);
-        if slot.spec.lifecycle != MiniAppServiceLifecycle::Continuous
-            || slot.consecutive_failures >= MINIAPP_CONTINUOUS_CRASH_FAILURE_THRESHOLD
+        if slot.spec.lifecycle != PluginServiceLifecycle::Continuous
+            || slot.consecutive_failures >= PLUGIN_CONTINUOUS_CRASH_FAILURE_THRESHOLD
         {
             slot.state = PluginRuntimeServiceHostState::Error {
                 host_generation: generation,
@@ -431,8 +431,8 @@ impl InMemoryPluginRuntimeServiceHost {
             return;
         }
         let backoff_index = slot.consecutive_failures.saturating_sub(1) as usize;
-        let backoff_ms = MINIAPP_CONTINUOUS_CRASH_BACKOFF_MS[backoff_index
-            .min(MINIAPP_CONTINUOUS_CRASH_BACKOFF_MS.len().saturating_sub(1))];
+        let backoff_ms = PLUGIN_CONTINUOUS_CRASH_BACKOFF_MS[backoff_index
+            .min(PLUGIN_CONTINUOUS_CRASH_BACKOFF_MS.len().saturating_sub(1))];
         slot.state = PluginRuntimeServiceHostState::Backoff {
             host_generation: generation,
             consecutive_failures: slot.consecutive_failures,
@@ -446,7 +446,7 @@ impl InMemoryPluginRuntimeServiceHost {
     /// Runtime candidate validation uses these immutable inputs after the
     /// current processes have been quiesced. Disabled slots are deliberately
     /// omitted because they do not participate in the active Runtime switch.
-    pub async fn enabled_service_specs(&self) -> Vec<ResolvedMiniAppServiceSpec> {
+    pub async fn enabled_service_specs(&self) -> Vec<ResolvedPluginServiceSpec> {
         let slots = self.slots.lock().await.values().cloned().collect::<Vec<_>>();
         let mut specs = Vec::new();
         for slot in slots {
@@ -455,14 +455,14 @@ impl InMemoryPluginRuntimeServiceHost {
                 specs.push(slot.spec.clone());
             }
         }
-        specs.sort_by(|left, right| left.miniapp_id.cmp(&right.miniapp_id));
+        specs.sort_by(|left, right| left.plugin_product_id.cmp(&right.plugin_product_id));
         specs
     }
 
     /// Detect processes that exited without an invocation being in flight.
     /// Runtime maintenance uses this so an externally terminated on-demand
     /// Service cannot remain projected as Running.
-    pub async fn observe_process_exits(&self, now_ms: i64) -> Vec<MiniAppId> {
+    pub async fn observe_process_exits(&self, now_ms: i64) -> Vec<PluginProductId> {
         let slots = self.slots.lock().await.values().cloned().collect::<Vec<_>>();
         let mut exited = Vec::new();
         for slot in slots {
@@ -479,7 +479,7 @@ impl InMemoryPluginRuntimeServiceHost {
             let reason = terminal.err().unwrap_or_else(|| {
                 "Plugin Service process exited without a Host stop request".into()
             });
-            exited.push(slot.spec.miniapp_id.clone());
+            exited.push(slot.spec.plugin_product_id.clone());
             self.transition_crash(&mut slot, reason, now_ms).await;
         }
         exited.sort();
@@ -491,7 +491,7 @@ impl InMemoryPluginRuntimeServiceHost {
 impl PluginRuntimeServiceHostPort for InMemoryPluginRuntimeServiceHost {
     async fn bind_active(
         &self,
-        spec: ResolvedMiniAppServiceSpec,
+        spec: ResolvedPluginServiceSpec,
         enabled: bool,
     ) -> PluginRuntimePlatformResult<()> {
         if spec.active_release_epoch == 0 {
@@ -499,11 +499,11 @@ impl PluginRuntimeServiceHostPort for InMemoryPluginRuntimeServiceHost {
                 "Service Host requires a positive Active Release epoch".into(),
             ));
         }
-        let miniapp_id = spec.miniapp_id.clone();
+        let plugin_product_id = spec.plugin_product_id.clone();
         let slot = {
             let mut slots = self.slots.lock().await;
             slots
-                .entry(miniapp_id)
+                .entry(plugin_product_id)
                 .or_insert_with(|| Arc::new(Mutex::new(ServiceSlot::new(spec.clone(), enabled))))
                 .clone()
         };
@@ -518,7 +518,7 @@ impl PluginRuntimeServiceHostPort for InMemoryPluginRuntimeServiceHost {
         slot.spec = spec;
         slot.enabled = enabled;
         if enabled
-            && slot.spec.lifecycle == MiniAppServiceLifecycle::Continuous
+            && slot.spec.lifecycle == PluginServiceLifecycle::Continuous
             && matches!(slot.state, PluginRuntimeServiceHostState::Stopped)
         {
             self.ensure_started(&mut slot, nomifun_common::now_ms()).await?;
@@ -528,14 +528,14 @@ impl PluginRuntimeServiceHostPort for InMemoryPluginRuntimeServiceHost {
 
     async fn invoke(
         &self,
-        spec: &ResolvedMiniAppServiceSpec,
-        call_id: MiniAppBridgeCallId,
+        spec: &ResolvedPluginServiceSpec,
+        call_id: PluginBridgeCallId,
         method: String,
         payload: StrictJsonValue,
         cancellation: PluginRuntimeCallCancellation,
         now_ms: i64,
     ) -> PluginRuntimePlatformResult<StrictJsonValue> {
-        let slot = self.slot(&spec.miniapp_id).await.ok_or_else(|| {
+        let slot = self.slot(&spec.plugin_product_id).await.ok_or_else(|| {
             PluginRuntimePlatformError::ServiceUnavailable("Active Service is not bound".into())
         })?;
         let (process, fence) = {
@@ -611,24 +611,24 @@ impl PluginRuntimeServiceHostPort for InMemoryPluginRuntimeServiceHost {
         }
     }
 
-    async fn cancel(&self, miniapp_id: &MiniAppId, call_id: &MiniAppBridgeCallId) {
-        if let Some(slot) = self.slot(miniapp_id).await
+    async fn cancel(&self, plugin_product_id: &PluginProductId, call_id: &PluginBridgeCallId) {
+        if let Some(slot) = self.slot(plugin_product_id).await
             && let Some(cancellation) = slot.lock().await.in_flight.get(call_id)
         {
             cancellation.cancel();
         }
     }
 
-    async fn stop(&self, miniapp_id: &MiniAppId) -> PluginRuntimePlatformResult<()> {
-        if let Some(slot) = self.slot(miniapp_id).await {
+    async fn stop(&self, plugin_product_id: &PluginProductId) -> PluginRuntimePlatformResult<()> {
+        if let Some(slot) = self.slot(plugin_product_id).await {
             let mut slot = slot.lock().await;
             self.stop_slot(&mut slot).await;
         }
         Ok(())
     }
 
-    async fn retry(&self, miniapp_id: &MiniAppId) -> PluginRuntimePlatformResult<()> {
-        let slot = self.slot(miniapp_id).await.ok_or_else(|| {
+    async fn retry(&self, plugin_product_id: &PluginProductId) -> PluginRuntimePlatformResult<()> {
+        let slot = self.slot(plugin_product_id).await.ok_or_else(|| {
             PluginRuntimePlatformError::ServiceUnavailable("Active Service is not bound".into())
         })?;
         let mut slot = slot.lock().await;
@@ -647,7 +647,7 @@ impl PluginRuntimeServiceHostPort for InMemoryPluginRuntimeServiceHost {
         &self,
         now_ms: i64,
         idle_window_ms: i64,
-    ) -> PluginRuntimePlatformResult<Vec<MiniAppId>> {
+    ) -> PluginRuntimePlatformResult<Vec<PluginProductId>> {
         if idle_window_ms <= 0 {
             return Err(PluginRuntimePlatformError::InvalidState(
                 "Service idle window must be positive".into(),
@@ -657,12 +657,12 @@ impl PluginRuntimeServiceHostPort for InMemoryPluginRuntimeServiceHost {
         let mut reaped = Vec::new();
         for slot in slots {
             let mut slot = slot.lock().await;
-            if slot.spec.lifecycle == MiniAppServiceLifecycle::OnDemand
+            if slot.spec.lifecycle == PluginServiceLifecycle::OnDemand
                 && slot.in_flight.is_empty()
                 && matches!(slot.state, PluginRuntimeServiceHostState::Running { .. })
                 && now_ms.saturating_sub(slot.last_activity_ms) >= idle_window_ms
             {
-                reaped.push(slot.spec.miniapp_id.clone());
+                reaped.push(slot.spec.plugin_product_id.clone());
                 self.stop_slot(&mut slot).await;
             }
         }
@@ -675,7 +675,7 @@ impl PluginRuntimeServiceHostPort for InMemoryPluginRuntimeServiceHost {
         reason: String,
         now_ms: i64,
     ) -> PluginRuntimePlatformResult<bool> {
-        let Some(slot) = self.slot(&fence.miniapp_id).await else {
+        let Some(slot) = self.slot(&fence.plugin_product_id).await else {
             return Ok(false);
         };
         let mut slot = slot.lock().await;
@@ -706,17 +706,17 @@ impl PluginRuntimeServiceHostPort for InMemoryPluginRuntimeServiceHost {
                 PluginRuntimeServiceHostState::Backoff { retry_at_ms, .. } if retry_at_ms <= now_ms
             );
             if !slot.enabled
-                || slot.spec.lifecycle != MiniAppServiceLifecycle::Continuous
+                || slot.spec.lifecycle != PluginServiceLifecycle::Continuous
                 || !due
             {
                 continue;
             }
             match self.ensure_started(&mut slot, now_ms).await {
-                Ok(_) => result.restarted.push(slot.spec.miniapp_id.clone()),
+                Ok(_) => result.restarted.push(slot.spec.plugin_product_id.clone()),
                 Err(error @ PluginRuntimePlatformError::ServiceCapacityExhausted { .. }) => {
                     result
                         .blocked
-                        .push((slot.spec.miniapp_id.clone(), error.to_string()));
+                        .push((slot.spec.plugin_product_id.clone(), error.to_string()));
                 }
                 Err(error) => {
                     if matches!(slot.state, PluginRuntimeServiceHostState::Stopped) {
@@ -725,15 +725,15 @@ impl PluginRuntimeServiceHostPort for InMemoryPluginRuntimeServiceHost {
                     }
                     result
                         .blocked
-                        .push((slot.spec.miniapp_id.clone(), error.to_string()));
+                        .push((slot.spec.plugin_product_id.clone(), error.to_string()));
                 }
             }
         }
         Ok(result)
     }
 
-    async fn state(&self, miniapp_id: &MiniAppId) -> Option<PluginRuntimeServiceHostState> {
-        let slot = self.slot(miniapp_id).await?;
+    async fn state(&self, plugin_product_id: &PluginProductId) -> Option<PluginRuntimeServiceHostState> {
+        let slot = self.slot(plugin_product_id).await?;
         Some(slot.lock().await.state.clone())
     }
 
@@ -742,6 +742,6 @@ impl PluginRuntimeServiceHostPort for InMemoryPluginRuntimeServiceHost {
 fn capacity_snapshot(capacity: &ServiceCapacityState) -> PluginRuntimeServiceCapacitySnapshot {
     PluginRuntimeServiceCapacitySnapshot {
         max_active_service_hosts: capacity.max_active_service_hosts,
-        active_miniapps: capacity.active.keys().cloned().collect(),
+        active_plugins: capacity.active.keys().cloned().collect(),
     }
 }

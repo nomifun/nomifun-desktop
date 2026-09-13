@@ -2,29 +2,25 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum MiniAppM1Kind {
-    UiOnly,
-    Service,
+pub enum PluginRuntimeKind {
+    Plugin,
 }
 
-impl MiniAppM1Kind {
+impl PluginRuntimeKind {
     pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::UiOnly => "ui_only",
-            Self::Service => "service",
-        }
+        "plugin"
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum MiniAppM1ProjectSourceState {
+pub enum PluginRuntimeProjectSourceState {
     Empty,
     Editable,
     RuntimeOnly,
 }
 
-impl MiniAppM1ProjectSourceState {
+impl PluginRuntimeProjectSourceState {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Empty => "empty",
@@ -36,12 +32,12 @@ impl MiniAppM1ProjectSourceState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum MiniAppM1ReleaseOrigin {
+pub enum PluginRuntimeReleaseOrigin {
     Build,
     Import,
 }
 
-impl MiniAppM1ReleaseOrigin {
+impl PluginRuntimeReleaseOrigin {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Build => "build",
@@ -52,12 +48,12 @@ impl MiniAppM1ReleaseOrigin {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum MiniAppM1ReleaseSourceKind {
+pub enum PluginRuntimeReleaseSourceKind {
     Managed,
     RuntimeOnly,
 }
 
-impl MiniAppM1ReleaseSourceKind {
+impl PluginRuntimeReleaseSourceKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Managed => "managed",
@@ -67,7 +63,7 @@ impl MiniAppM1ReleaseSourceKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
-pub struct MiniAppLibraryStateRow {
+pub struct PluginRuntimeLibraryStateRow {
     pub id: i64,
     pub singleton_key: String,
     pub owner_user_id: String,
@@ -76,9 +72,9 @@ pub struct MiniAppLibraryStateRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
-pub struct MiniAppProductRow {
+pub struct PluginRuntimeProductRow {
     pub id: i64,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub owner_user_id: String,
     pub product_revision: i64,
     pub display_name: String,
@@ -104,10 +100,10 @@ pub struct MiniAppProductRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
-pub struct MiniAppProjectRow {
+pub struct PluginRuntimeProjectRow {
     pub id: i64,
     pub project_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub owner_user_id: String,
     pub project_revision: i64,
     pub source_state: String,
@@ -121,11 +117,11 @@ pub struct MiniAppProjectRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
-pub struct MiniAppSourceMutationIntentRow {
+pub struct PluginRuntimeSourceMutationIntentRow {
     pub id: i64,
     pub intent_id: String,
     pub owner_user_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub project_id: String,
     pub expected_product_revision: i64,
     pub expected_project_revision: i64,
@@ -137,9 +133,9 @@ pub struct MiniAppSourceMutationIntentRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
-pub struct MiniAppKvRow {
+pub struct PluginRuntimeKvRow {
     pub id: i64,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub owner_user_id: String,
     pub namespace: String,
     pub key: String,
@@ -152,7 +148,7 @@ pub struct MiniAppKvRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
-pub struct MiniAppReleaseArtifactRow {
+pub struct PluginRuntimeReleaseArtifactRow {
     pub id: i64,
     pub artifact_id: String,
     pub owner_user_id: String,
@@ -164,10 +160,10 @@ pub struct MiniAppReleaseArtifactRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
-pub struct MiniAppReleaseRow {
+pub struct PluginRuntimeReleaseRow {
     pub id: i64,
     pub release_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub owner_user_id: String,
     pub artifact_id: String,
     pub artifact_digest: String,
@@ -186,11 +182,11 @@ pub struct MiniAppReleaseRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
-pub struct MiniAppBuildOperationLineageRow {
+pub struct PluginRuntimeBuildOperationLineageRow {
     pub id: i64,
     pub operation_id: String,
     pub owner_user_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub project_id: String,
     pub project_revision: i64,
     pub source_snapshot_digest: String,
@@ -201,10 +197,10 @@ pub struct MiniAppBuildOperationLineageRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
-pub struct MiniAppPublishAuthorizationRow {
+pub struct PluginRuntimePublishAuthorizationRow {
     pub id: i64,
     pub authorization_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub owner_user_id: String,
     pub revision: i64,
     pub enabled: bool,
@@ -212,9 +208,9 @@ pub struct MiniAppPublishAuthorizationRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
-pub struct MiniAppCatalogPublicationRow {
+pub struct PluginRuntimeCatalogPublicationRow {
     pub id: i64,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub owner_user_id: String,
     pub active_release_id: String,
     pub active_release_digest: String,
@@ -223,10 +219,10 @@ pub struct MiniAppCatalogPublicationRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
-pub struct MiniAppSurfaceSessionRow {
+pub struct PluginRuntimeSurfaceSessionRow {
     pub id: i64,
     pub surface_session_id: String,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub owner_user_id: String,
     pub generation: i64,
     pub capability_digest: String,
@@ -238,9 +234,9 @@ pub struct MiniAppSurfaceSessionRow {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
 #[allow(dead_code)]
-pub struct MiniAppDeletionIntentRow {
+pub struct PluginRuntimeDeletionIntentRow {
     pub id: i64,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub owner_user_id: String,
     pub operation_id: String,
     pub started_at_ms: i64,
@@ -248,9 +244,9 @@ pub struct MiniAppDeletionIntentRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
-pub struct MiniAppCredentialBindingRow {
+pub struct PluginRuntimeCredentialBindingRow {
     pub id: i64,
-    pub miniapp_id: String,
+    pub plugin_product_id: String,
     pub owner_user_id: String,
     pub slot_key: String,
     pub credential_id: String,
@@ -259,20 +255,20 @@ pub struct MiniAppCredentialBindingRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MiniAppM1Snapshot {
+pub struct PluginRuntimeSnapshot {
     pub library_revision: i64,
-    pub product: MiniAppProductRow,
-    pub project: MiniAppProjectRow,
-    pub ready_release: Option<MiniAppReleaseRow>,
-    pub active_release: Option<MiniAppReleaseRow>,
-    pub previous_release: Option<MiniAppReleaseRow>,
-    pub auto_publish_authorization: Option<MiniAppPublishAuthorizationRow>,
-    pub catalog_publication: Option<MiniAppCatalogPublicationRow>,
-    pub credential_bindings: Vec<MiniAppCredentialBindingRow>,
+    pub product: PluginRuntimeProductRow,
+    pub project: PluginRuntimeProjectRow,
+    pub ready_release: Option<PluginRuntimeReleaseRow>,
+    pub active_release: Option<PluginRuntimeReleaseRow>,
+    pub previous_release: Option<PluginRuntimeReleaseRow>,
+    pub auto_publish_authorization: Option<PluginRuntimePublishAuthorizationRow>,
+    pub catalog_publication: Option<PluginRuntimeCatalogPublicationRow>,
+    pub credential_bindings: Vec<PluginRuntimeCredentialBindingRow>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MiniAppM1LibrarySnapshot {
-    pub library: MiniAppLibraryStateRow,
-    pub products: Vec<MiniAppProductRow>,
+pub struct PluginRuntimeLibrarySnapshot {
+    pub library: PluginRuntimeLibraryStateRow,
+    pub products: Vec<PluginRuntimeProductRow>,
 }

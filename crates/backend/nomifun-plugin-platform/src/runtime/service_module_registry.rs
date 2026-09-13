@@ -1,8 +1,8 @@
-//! Production registry for immutable MiniApp Service module paths.
+//! Production registry for immutable Plugin Service module paths.
 //!
 //! The registry is intentionally narrower than a Release Store. The owner or
 //! application service registers the already-materialized `service/main.mjs`
-//! for one exact `(MiniAppId, release_digest)` pair. The process factory then
+//! for one exact `(PluginProductId, release_digest)` pair. The process factory then
 //! resolves that same pair and receives a path whose filesystem identity and
 //! bytes are revalidated at launch time.
 
@@ -14,7 +14,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use nomifun_agent_contracts::{DigestHex, MiniAppId, digest_bytes};
+use nomifun_agent_contracts::{DigestHex, PluginProductId, digest_bytes};
 use tokio::sync::RwLock;
 
 use crate::runtime::{
@@ -26,7 +26,7 @@ const SERVICE_ENTRYPOINT: &str = "service/main.mjs";
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct ModuleKey {
-    miniapp_id: MiniAppId,
+    plugin_product_id: PluginProductId,
     release_digest: DigestHex,
 }
 
@@ -65,18 +65,18 @@ impl PluginRuntimeServiceModuleRegistry {
     /// from the bytes on disk and is never accepted as caller-controlled input.
     pub async fn register(
         &self,
-        miniapp_id: MiniAppId,
+        plugin_product_id: PluginProductId,
         release_digest: DigestHex,
         module_path: impl Into<PathBuf>,
     ) -> PluginRuntimePlatformResult<PathBuf> {
-        validate_identity(&miniapp_id, &release_digest)?;
+        validate_identity(&plugin_product_id, &release_digest)?;
         let module = validate_module_path(self.root(), module_path.into())?;
         let registered = RegisteredModule {
             path: module.path.clone(),
             digest: module.digest,
         };
         let key = ModuleKey {
-            miniapp_id,
+            plugin_product_id,
             release_digest,
         };
         self.modules.write().await.insert(key, registered);
@@ -86,14 +86,14 @@ impl PluginRuntimeServiceModuleRegistry {
     /// Removes one exact release registration and reports whether it existed.
     pub async fn remove(
         &self,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
         release_digest: &DigestHex,
     ) -> bool {
         self.modules
             .write()
             .await
             .remove(&ModuleKey {
-                miniapp_id: miniapp_id.clone(),
+                plugin_product_id: plugin_product_id.clone(),
                 release_digest: release_digest.clone(),
             })
             .is_some()
@@ -106,17 +106,17 @@ impl PluginRuntimeServiceModuleRegistry {
 
     async fn resolve_exact(
         &self,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
         release_digest: &DigestHex,
         expected_module_digest: &DigestHex,
     ) -> PluginRuntimePlatformResult<PathBuf> {
-        validate_identity(miniapp_id, release_digest)?;
+        validate_identity(plugin_product_id, release_digest)?;
         validate_digest(expected_module_digest, "service_module_digest")?;
 
         let registered = {
             let modules = self.modules.read().await;
             let key = ModuleKey {
-                miniapp_id: miniapp_id.clone(),
+                plugin_product_id: plugin_product_id.clone(),
                 release_digest: release_digest.clone(),
             };
             if let Some(module) = modules.get(&key) {
@@ -139,7 +139,7 @@ impl PluginRuntimeServiceModuleRegistry {
             None => {
                 return Err(PluginRuntimePlatformError::NotFound(format!(
                     "Plugin Service module for {} release {}",
-                    miniapp_id.as_ref(),
+                    plugin_product_id.as_ref(),
                     release_digest.as_ref()
                 )));
             }
@@ -176,7 +176,7 @@ impl PluginRuntimeServiceModuleResolver for PluginRuntimeServiceModuleRegistry {
             .validate()
             .map_err(PluginRuntimePlatformError::Contract)?;
         self.resolve_exact(
-            &launch.spec.miniapp_id,
+            &launch.spec.plugin_product_id,
             &launch.spec.release.release_digest,
             &launch.spec.service_module_digest,
         )
@@ -276,12 +276,12 @@ fn validate_module_path(
 }
 
 fn validate_identity(
-    miniapp_id: &MiniAppId,
+    plugin_product_id: &PluginProductId,
     release_digest: &DigestHex,
 ) -> PluginRuntimePlatformResult<()> {
-    if miniapp_id.as_ref().is_empty() || miniapp_id.as_ref().trim() != miniapp_id.as_ref() {
+    if plugin_product_id.as_ref().is_empty() || plugin_product_id.as_ref().trim() != plugin_product_id.as_ref() {
         return Err(PluginRuntimePlatformError::InvalidState(
-            "Plugin Service module registry MiniAppId must be non-empty and trimmed".into(),
+            "Plugin Service module registry PluginProductId must be non-empty and trimmed".into(),
         ));
     }
     validate_digest(release_digest, "release_digest")
@@ -309,8 +309,8 @@ mod tests {
     use std::sync::Arc;
 
     use nomifun_agent_contracts::{
-        ArtifactId, MiniAppReleaseId, MiniAppReleaseRef, MiniAppServiceLifecycle,
-        ResolvedMiniAppServiceSpec, ResolvedMiniAppServiceSpecInputs, RuntimeInstallationId,
+        ArtifactId, PluginReleaseId, PluginReleaseRef, PluginServiceLifecycle,
+        ResolvedPluginServiceSpec, ResolvedPluginServiceSpecInputs, RuntimeInstallationId,
         RuntimeTarget, VersionString, digest_bytes,
     };
     use tempfile::TempDir;
@@ -334,27 +334,27 @@ mod tests {
 
     fn launch(
         _node: &Path,
-        miniapp_id: &str,
+        plugin_product_id: &str,
         release_digest: DigestHex,
         module_digest: DigestHex,
     ) -> PluginRuntimeServiceLaunch {
-        let miniapp = MiniAppId::from(miniapp_id);
-        let spec = ResolvedMiniAppServiceSpec::new(ResolvedMiniAppServiceSpecInputs {
-            miniapp_id: miniapp.clone(),
-            release: MiniAppReleaseRef {
-                release_id: MiniAppReleaseId::from("release-id"),
+        let plugin = PluginProductId::from(plugin_product_id);
+        let spec = ResolvedPluginServiceSpec::new(ResolvedPluginServiceSpecInputs {
+            plugin_product_id: plugin.clone(),
+            release: PluginReleaseRef {
+                release_id: PluginReleaseId::from("release-id"),
                 artifact_id: ArtifactId::from("artifact-id"),
                 release_digest,
                 manifest_digest: digest("manifest"),
             },
             active_release_epoch: 1,
             service_module_digest: module_digest,
-            lifecycle: MiniAppServiceLifecycle::OnDemand,
+            lifecycle: PluginServiceLifecycle::OnDemand,
             host_protocol_version:
-                nomifun_agent_contracts::MINIAPP_SERVICE_HOST_PROTOCOL_VERSION.into(),
+                nomifun_agent_contracts::PLUGIN_SERVICE_HOST_PROTOCOL_VERSION.into(),
             sdk_contract_version:
-                nomifun_agent_contracts::MINIAPP_SERVICE_SDK_CONTRACT_VERSION.into(),
-            runtime: nomifun_agent_contracts::MiniAppServiceRuntimeFingerprint {
+                nomifun_agent_contracts::PLUGIN_SERVICE_SDK_CONTRACT_VERSION.into(),
+            runtime: nomifun_agent_contracts::PluginServiceRuntimeFingerprint {
                 runtime_installation_id: RuntimeInstallationId::from("node-installation"),
                 runtime_target: RuntimeTarget::from("windows-x86_64"),
                 runtime_executable_digest: digest("node"),
@@ -368,10 +368,10 @@ mod tests {
             runtime_requirements_digest: digest("runtime-requirements"),
             bridge_contract_digest: digest("bridge"),
             contribution_set_digest: digest("contributions"),
-            storage: nomifun_agent_contracts::MiniAppServiceStorageDescriptor {
-                kv: nomifun_agent_contracts::MiniAppKvHandleDescriptor {
-                    handle_id: nomifun_agent_contracts::MiniAppKvHandleId::from("kv-handle"),
-                    miniapp_id: miniapp.clone(),
+            storage: nomifun_agent_contracts::PluginServiceStorageDescriptor {
+                kv: nomifun_agent_contracts::PluginKvHandleDescriptor {
+                    handle_id: nomifun_agent_contracts::PluginKvHandleId::from("kv-handle"),
+                    plugin_product_id: plugin.clone(),
                     namespace_revision: 1,
                 },
                 files_dir: None,
@@ -395,7 +395,7 @@ mod tests {
 
         let registered = registry
             .register(
-                MiniAppId::from("miniapp-a"),
+                PluginProductId::from("plugin-a"),
                 release_digest.clone(),
                 path.clone(),
             )
@@ -404,7 +404,7 @@ mod tests {
         let resolved = registry
             .resolve_module(&launch(
                 Path::new("node"),
-                "miniapp-a",
+                "plugin-a",
                 release_digest,
                 source_digest,
             ))
@@ -416,7 +416,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_missing_wrong_miniapp_and_digest_mismatch() {
+    async fn rejects_missing_wrong_plugin_and_digest_mismatch() {
         let temp = TempDir::new().unwrap();
         let path = write_module(temp.path(), "module-v1");
         let module_digest = digest_bytes(fs::read(&path).unwrap().as_slice());
@@ -424,7 +424,7 @@ mod tests {
         let registry = PluginRuntimeServiceModuleRegistry::new(temp.path()).unwrap();
         registry
             .register(
-                MiniAppId::from("miniapp-a"),
+                PluginProductId::from("plugin-a"),
                 release_digest.clone(),
                 path.clone(),
             )
@@ -434,7 +434,7 @@ mod tests {
         let missing = registry
             .resolve_module(&launch(
                 Path::new("node"),
-                "miniapp-a",
+                "plugin-a",
                 digest("missing-release"),
                 module_digest.clone(),
             ))
@@ -442,22 +442,22 @@ mod tests {
             .unwrap_err();
         assert!(matches!(missing, PluginRuntimePlatformError::NotFound(_)));
 
-        let wrong_miniapp = registry
+        let wrong_plugin = registry
             .resolve_module(&launch(
                 Path::new("node"),
-                "miniapp-b",
+                "plugin-b",
                 release_digest.clone(),
                 module_digest.clone(),
             ))
             .await
             .unwrap_err();
-        assert!(matches!(wrong_miniapp, PluginRuntimePlatformError::InvalidState(_)));
+        assert!(matches!(wrong_plugin, PluginRuntimePlatformError::InvalidState(_)));
 
         fs::write(&path, "module-v2").unwrap();
         let changed = registry
             .resolve_module(&launch(
                 Path::new("node"),
-                "miniapp-a",
+                "plugin-a",
                 release_digest.clone(),
                 module_digest,
             ))
@@ -468,7 +468,7 @@ mod tests {
         assert!(registry
             .resolve_module(&launch(
                 Path::new("node"),
-                "miniapp-a",
+                "plugin-a",
                 release_digest,
                 digest("another-module"),
             ))
@@ -484,7 +484,7 @@ mod tests {
         fs::create_dir_all(&directory).unwrap();
         let directory_error = registry
             .register(
-                MiniAppId::from("miniapp-a"),
+                PluginProductId::from("plugin-a"),
                 digest("release-a"),
                 directory,
             )
@@ -496,7 +496,7 @@ mod tests {
         let outside_path = write_module(outside.path(), "outside");
         let outside_error = registry
             .register(
-                MiniAppId::from("miniapp-a"),
+                PluginProductId::from("plugin-a"),
                 digest("release-b"),
                 outside_path,
             )
@@ -519,7 +519,7 @@ mod tests {
 
         let error = registry
             .register(
-                MiniAppId::from("miniapp-a"),
+                PluginProductId::from("plugin-a"),
                 digest("release-b"),
                 link,
             )
@@ -536,7 +536,7 @@ mod tests {
         let release_digest = digest("release-a");
         registry
             .register(
-                MiniAppId::from("miniapp-a"),
+                PluginProductId::from("plugin-a"),
                 release_digest.clone(),
                 path,
             )
@@ -548,7 +548,7 @@ mod tests {
             let release_digest = release_digest.clone();
             tokio::spawn(async move {
                 registry
-                    .remove(&MiniAppId::from("miniapp-a"), &release_digest)
+                    .remove(&PluginProductId::from("plugin-a"), &release_digest)
                     .await
             })
         };
@@ -563,7 +563,7 @@ mod tests {
         assert!(removed || !registry
             .resolve_module(&launch(
                 Path::new("node"),
-                "miniapp-a",
+                "plugin-a",
                 release_digest,
                 digest("module"),
             ))

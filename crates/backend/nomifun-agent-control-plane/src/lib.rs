@@ -13,8 +13,8 @@ mod store;
 mod wire;
 
 pub use catalog::{
-    CatalogProvider, CatalogSnapshot, MiniAppCatalogPublicationSource,
-    OfficialTemplateCatalog, SharedMiniAppCatalogPublications, StaticCatalogProvider,
+    CatalogProvider, CatalogSnapshot, PluginProductCatalogPublicationSource,
+    OfficialTemplateCatalog, SharedPluginProductCatalogPublications, StaticCatalogProvider,
 };
 pub use compiler::{
     CanonicalRegistryProvider, CompilerReleaseInputs, PresetPreviewCompiler, PreviewCompilation,

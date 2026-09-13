@@ -728,7 +728,7 @@ fn catalog_from_registry(registry: &MaterializedRegistry) -> CatalogSnapshot {
             .cloned()
             .collect(),
         formal_capability_entries: BTreeMap::new(),
-        miniapp_publications: BTreeMap::new(),
+        plugin_product_publications: BTreeMap::new(),
         skills: registry
             .skills
             .values()
@@ -1009,7 +1009,7 @@ fn compile_kernel_snapshot(
             availability_evidence_revision: BUILD_IDENTITY.to_owned(),
         },
         CompileRequest {
-            miniapp_capabilities: Vec::new(),
+            plugin_product_capabilities: Vec::new(),
             revision,
             principal: owner_ref.clone(),
             scene: "agent_settings".to_owned(),

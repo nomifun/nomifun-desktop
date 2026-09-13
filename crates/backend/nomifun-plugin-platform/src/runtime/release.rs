@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 
 use nomifun_agent_contracts::{
     canonical_json_bytes, digest_bytes, ArtifactEnvelope, ArtifactId, DigestHex,
-    JavaScriptBuildProfile, MiniAppReleaseArtifactV1, MiniAppReleaseFile,
-    MiniAppReleaseManifestArtifact, VersionString, MINIAPP_RELEASE_PROFILE_VERSION,
+    JavaScriptBuildProfile, PluginReleaseArtifactV1, PluginReleaseFile,
+    PluginReleaseManifestArtifact, VersionString, PLUGIN_RELEASE_PROFILE_VERSION,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -16,10 +16,10 @@ use uuid::Uuid;
 
 use crate::runtime::PluginRuntimeSourceScope;
 
-pub const MINIAPP_RELEASE_STORE_FORMAT_VERSION: &str = "2.0.0";
+pub const PLUGIN_RELEASE_STORE_FORMAT_VERSION: &str = "2.0.0";
 
 const RELEASES_DIRECTORY: &str = "releases";
-const MINIAPPS_DIRECTORY: &str = "miniapps";
+const PLUGINS_DIRECTORY: &str = "plugins";
 const PROJECTS_DIRECTORY: &str = "projects";
 const ARTIFACTS_DIRECTORY: &str = "artifacts";
 const FILES_DIRECTORY: &str = "files";
@@ -144,7 +144,7 @@ pub struct PluginRuntimeReleaseArtifactIdentity {
 }
 
 impl PluginRuntimeReleaseArtifactIdentity {
-    pub fn from_artifact(artifact: &MiniAppReleaseArtifactV1) -> Self {
+    pub fn from_artifact(artifact: &PluginReleaseArtifactV1) -> Self {
         Self {
             artifact_id: artifact.artifact_id.clone(),
             artifact_digest: artifact.artifact_digest.clone(),
@@ -163,7 +163,7 @@ impl PluginRuntimeReleaseArtifactIdentity {
         Ok(())
     }
 
-    fn matches(&self, artifact: &MiniAppReleaseArtifactV1) -> bool {
+    fn matches(&self, artifact: &PluginReleaseArtifactV1) -> bool {
         self.artifact_id == artifact.artifact_id
             && self.artifact_digest == artifact.artifact_digest
             && self.manifest_digest == artifact.manifest.payload_digest
@@ -178,7 +178,7 @@ pub struct PluginRuntimeReleasePublishRequest {
     pub build_profile: JavaScriptBuildProfile,
     pub build_profile_version: VersionString,
     pub build_generation: u64,
-    pub artifact: MiniAppReleaseArtifactV1,
+    pub artifact: PluginReleaseArtifactV1,
     pub files: Vec<PluginRuntimeReleaseFileBytes>,
     pub content_kind: PluginRuntimeReleaseContentKind,
 }
@@ -189,15 +189,15 @@ impl PluginRuntimeReleasePublishRequest {
         source_snapshot_digest: DigestHex,
         dependency_lock_digest: DigestHex,
         build_generation: u64,
-        artifact: MiniAppReleaseArtifactV1,
+        artifact: PluginReleaseArtifactV1,
         files: Vec<PluginRuntimeReleaseFileBytes>,
     ) -> Self {
         Self {
             scope,
             source_snapshot_digest,
             dependency_lock_digest,
-            build_profile: JavaScriptBuildProfile::MiniAppReleaseV1,
-            build_profile_version: MINIAPP_RELEASE_PROFILE_VERSION.into(),
+            build_profile: JavaScriptBuildProfile::PluginReleaseV1,
+            build_profile_version: PLUGIN_RELEASE_PROFILE_VERSION.into(),
             build_generation,
             artifact,
             files,
@@ -210,15 +210,15 @@ impl PluginRuntimeReleasePublishRequest {
         source_snapshot_digest: DigestHex,
         dependency_lock_digest: DigestHex,
         build_generation: u64,
-        artifact: MiniAppReleaseArtifactV1,
+        artifact: PluginReleaseArtifactV1,
         files: Vec<PluginRuntimeReleaseFileBytes>,
     ) -> Self {
         Self {
             scope,
             source_snapshot_digest,
             dependency_lock_digest,
-            build_profile: JavaScriptBuildProfile::MiniAppReleaseV1,
-            build_profile_version: MINIAPP_RELEASE_PROFILE_VERSION.into(),
+            build_profile: JavaScriptBuildProfile::PluginReleaseV1,
+            build_profile_version: PLUGIN_RELEASE_PROFILE_VERSION.into(),
             build_generation,
             artifact,
             files,
@@ -230,7 +230,7 @@ impl PluginRuntimeReleasePublishRequest {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PluginRuntimeStoredRelease {
     pub scope: PluginRuntimeSourceScope,
-    pub artifact: MiniAppReleaseArtifactV1,
+    pub artifact: PluginReleaseArtifactV1,
     pub manifest_bytes: Vec<u8>,
     pub files: Vec<PluginRuntimeReleaseFileBytes>,
     pub managed_relative_path: String,
@@ -345,15 +345,15 @@ impl PluginRuntimeReleaseStore {
     pub fn publish_for(
         &self,
         owner: impl AsRef<str>,
-        miniapp_id: impl AsRef<str>,
+        plugin_product_id: impl AsRef<str>,
         project_id: impl AsRef<str>,
         source_snapshot_digest: DigestHex,
         dependency_lock_digest: DigestHex,
         build_generation: u64,
-        artifact: &MiniAppReleaseArtifactV1,
+        artifact: &PluginReleaseArtifactV1,
         files: &[PluginRuntimeReleaseFileBytes],
     ) -> Result<PluginRuntimeReleasePublishResult, PluginRuntimeReleaseStoreError> {
-        let scope = PluginRuntimeSourceScope::new(owner, miniapp_id, project_id)
+        let scope = PluginRuntimeSourceScope::new(owner, plugin_product_id, project_id)
             .map_err(|error| PluginRuntimeReleaseStoreError::InvalidScope(error.to_string()))?;
         self.publish(PluginRuntimeReleasePublishRequest::ui_only(
             scope,
@@ -368,15 +368,15 @@ impl PluginRuntimeReleaseStore {
     pub fn publish_service_for(
         &self,
         owner: impl AsRef<str>,
-        miniapp_id: impl AsRef<str>,
+        plugin_product_id: impl AsRef<str>,
         project_id: impl AsRef<str>,
         source_snapshot_digest: DigestHex,
         dependency_lock_digest: DigestHex,
         build_generation: u64,
-        artifact: &MiniAppReleaseArtifactV1,
+        artifact: &PluginReleaseArtifactV1,
         files: &[PluginRuntimeReleaseFileBytes],
     ) -> Result<PluginRuntimeReleasePublishResult, PluginRuntimeReleaseStoreError> {
-        let scope = PluginRuntimeSourceScope::new(owner, miniapp_id, project_id)
+        let scope = PluginRuntimeSourceScope::new(owner, plugin_product_id, project_id)
             .map_err(|error| PluginRuntimeReleaseStoreError::InvalidScope(error.to_string()))?;
         self.publish(PluginRuntimeReleasePublishRequest::service(
             scope,
@@ -447,15 +447,15 @@ impl PluginRuntimeReleaseStore {
     }
 
     /// Idempotently remove all immutable Release bytes for one owner-scoped
-    /// MiniApp Project. Database Release rows are removed by the repository;
+    /// Plugin Project. Database Release rows are removed by the repository;
     /// this method only owns the corresponding physical Store tree.
     pub fn purge_project(
         &self,
         owner: impl AsRef<str>,
-        miniapp_id: impl AsRef<str>,
+        plugin_product_id: impl AsRef<str>,
         project_id: impl AsRef<str>,
     ) -> Result<(), PluginRuntimeReleaseStoreError> {
-        let scope = PluginRuntimeSourceScope::new(owner, miniapp_id, project_id)
+        let scope = PluginRuntimeSourceScope::new(owner, plugin_product_id, project_id)
             .map_err(|error| PluginRuntimeReleaseStoreError::InvalidScope(error.to_string()))?;
         let _guard = self.lock_mutation()?;
         let artifacts_root = self.artifact_parent(&scope)?;
@@ -557,12 +557,12 @@ impl PluginRuntimeReleaseStore {
     ) -> Result<PathBuf, PluginRuntimeReleaseStoreError> {
         let owner_root = self.releases_root.join(&scope.owner_id);
         ensure_direct_child_directory(&self.releases_root, &owner_root)?;
-        let miniapps_root = owner_root.join(MINIAPPS_DIRECTORY);
-        ensure_direct_child_directory(&owner_root, &miniapps_root)?;
-        let miniapp_root = miniapps_root.join(scope.miniapp_id.as_ref());
-        ensure_direct_child_directory(&miniapps_root, &miniapp_root)?;
-        let projects_root = miniapp_root.join(PROJECTS_DIRECTORY);
-        ensure_direct_child_directory(&miniapp_root, &projects_root)?;
+        let plugins_root = owner_root.join(PLUGINS_DIRECTORY);
+        ensure_direct_child_directory(&owner_root, &plugins_root)?;
+        let plugin_root = plugins_root.join(scope.plugin_product_id.as_ref());
+        ensure_direct_child_directory(&plugins_root, &plugin_root)?;
+        let projects_root = plugin_root.join(PROJECTS_DIRECTORY);
+        ensure_direct_child_directory(&plugin_root, &projects_root)?;
         let project_root = projects_root.join(scope.project_id.as_ref());
         ensure_direct_child_directory(&projects_root, &project_root)?;
         let artifacts_root = project_root.join(ARTIFACTS_DIRECTORY);
@@ -577,8 +577,8 @@ impl PluginRuntimeReleaseStore {
         Ok(self
             .releases_root
             .join(&scope.owner_id)
-            .join(MINIAPPS_DIRECTORY)
-            .join(scope.miniapp_id.as_ref())
+            .join(PLUGINS_DIRECTORY)
+            .join(scope.plugin_product_id.as_ref())
             .join(PROJECTS_DIRECTORY)
             .join(scope.project_id.as_ref())
             .join(ARTIFACTS_DIRECTORY))
@@ -621,7 +621,7 @@ impl PluginRuntimeReleaseStore {
         )
         .map_err(|_| mismatch())?;
         if record.scope != *expected_scope
-            || record.format_version != MINIAPP_RELEASE_STORE_FORMAT_VERSION
+            || record.format_version != PLUGIN_RELEASE_STORE_FORMAT_VERSION
         {
             return Err(mismatch());
         }
@@ -640,7 +640,7 @@ impl PluginRuntimeReleaseStore {
             self.limits.max_metadata_bytes,
         )
         .map_err(|_| mismatch())?;
-        let manifest: MiniAppReleaseManifestArtifact =
+        let manifest: PluginReleaseManifestArtifact =
             parse_canonical(&manifest_bytes, self.limits.max_metadata_bytes)
                 .map_err(|_| mismatch())?;
         if manifest != artifact.manifest {
@@ -660,9 +660,9 @@ impl PluginRuntimeReleaseStore {
             manifest_bytes,
             files,
             managed_relative_path: format!(
-                "{RELEASES_DIRECTORY}/{}/{MINIAPPS_DIRECTORY}/{}/{PROJECTS_DIRECTORY}/{}/{ARTIFACTS_DIRECTORY}/{}",
+                "{RELEASES_DIRECTORY}/{}/{PLUGINS_DIRECTORY}/{}/{PROJECTS_DIRECTORY}/{}/{ARTIFACTS_DIRECTORY}/{}",
                 expected_scope.owner_id,
-                expected_scope.miniapp_id.as_ref(),
+                expected_scope.plugin_product_id.as_ref(),
                 expected_scope.project_id.as_ref(),
                 expected_digest
             ),
@@ -679,7 +679,7 @@ struct PreparedRelease {
     build_profile: JavaScriptBuildProfile,
     build_profile_version: VersionString,
     build_generation: u64,
-    artifact: MiniAppReleaseArtifactV1,
+    artifact: PluginReleaseArtifactV1,
     files: Vec<PluginRuntimeReleaseFileBytes>,
 }
 
@@ -688,7 +688,7 @@ struct PreparedRelease {
 struct ArtifactRecord {
     format_version: String,
     scope: PluginRuntimeSourceScope,
-    artifact: ArtifactEnvelope<MiniAppReleaseArtifactV1>,
+    artifact: ArtifactEnvelope<PluginReleaseArtifactV1>,
 }
 
 fn prepare_request(
@@ -703,11 +703,11 @@ fn prepare_request(
             "managed Release requires a positive build generation".into(),
         ));
     }
-    if request.build_profile != JavaScriptBuildProfile::MiniAppReleaseV1
-        || request.build_profile_version.as_ref() != MINIAPP_RELEASE_PROFILE_VERSION
+    if request.build_profile != JavaScriptBuildProfile::PluginReleaseV1
+        || request.build_profile_version.as_ref() != PLUGIN_RELEASE_PROFILE_VERSION
     {
         return Err(PluginRuntimeReleaseStoreError::InvalidInput(
-            "Plugin Release uses the fixed MiniAppReleaseV1 profile version".into(),
+            "Plugin Release uses the fixed PluginReleaseV1 profile version".into(),
         ));
     }
     request
@@ -732,7 +732,7 @@ fn prepare_request(
         }
     }
     if request.artifact.manifest.payload.build_profile_version
-        != MINIAPP_RELEASE_PROFILE_VERSION.into()
+        != PLUGIN_RELEASE_PROFILE_VERSION.into()
     {
         return Err(PluginRuntimeReleaseStoreError::InvalidInput(
             "artifact and publish request build profiles differ".into(),
@@ -850,7 +850,7 @@ fn validate_record(
     }
     let artifact = &record.artifact.payload;
     if artifact.manifest.payload.build_profile_version
-        != MINIAPP_RELEASE_PROFILE_VERSION.into()
+        != PLUGIN_RELEASE_PROFILE_VERSION.into()
     {
         return Err(PluginRuntimeReleaseStoreError::Corrupt(
             "artifact Plugin Release profile is invalid".into(),
@@ -877,7 +877,7 @@ fn write_release_tree(
     let files_root = root.join(FILES_DIRECTORY);
     fs::create_dir(&files_root).map_err(|error| io_error(&files_root, error))?;
     let record = ArtifactRecord {
-        format_version: MINIAPP_RELEASE_STORE_FORMAT_VERSION.into(),
+        format_version: PLUGIN_RELEASE_STORE_FORMAT_VERSION.into(),
         scope: release.scope.clone(),
         artifact: ArtifactEnvelope::new(release.artifact.clone())
             .map_err(|error| PluginRuntimeReleaseStoreError::Canonical(error.to_string()))?,
@@ -922,7 +922,7 @@ fn compare_stored(
 fn scan_published_files(
     files_root: &Path,
     limits: PluginRuntimeReleaseStoreLimits,
-) -> Result<Vec<MiniAppReleaseFile>, PluginRuntimeReleaseStoreError> {
+) -> Result<Vec<PluginReleaseFile>, PluginRuntimeReleaseStoreError> {
     let metadata = fs::symlink_metadata(files_root).map_err(|error| io_error(files_root, error))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(PluginRuntimeReleaseStoreError::Corrupt(
@@ -938,7 +938,7 @@ fn scan_published_files(
 fn collect_release_files(
     root: &Path,
     current: &Path,
-    observed: &mut BTreeMap<String, MiniAppReleaseFile>,
+    observed: &mut BTreeMap<String, PluginReleaseFile>,
     total: &mut u64,
     limits: PluginRuntimeReleaseStoreLimits,
 ) -> Result<(), PluginRuntimeReleaseStoreError> {
@@ -979,7 +979,7 @@ fn collect_release_files(
         if observed
             .insert(
                 normalized.clone(),
-                MiniAppReleaseFile {
+                PluginReleaseFile {
                     normalized_relative_path: normalized.clone(),
                     digest: digest_bytes(&bytes),
                     size_bytes: bytes.len() as u64,
@@ -1004,7 +1004,7 @@ fn collect_release_files(
 
 fn read_published_file_bytes(
     files_root: &Path,
-    expected: &[MiniAppReleaseFile],
+    expected: &[PluginReleaseFile],
     limits: PluginRuntimeReleaseStoreLimits,
 ) -> Result<Vec<PluginRuntimeReleaseFileBytes>, PluginRuntimeReleaseStoreError> {
     let mut files = Vec::with_capacity(expected.len());
@@ -1027,7 +1027,7 @@ fn read_published_file_bytes(
 fn validate_scope(scope: &PluginRuntimeSourceScope) -> Result<(), PluginRuntimeReleaseStoreError> {
     PluginRuntimeSourceScope::new(
         &scope.owner_id,
-        scope.miniapp_id.as_ref(),
+        scope.plugin_product_id.as_ref(),
         scope.project_id.as_ref(),
     )
     .map(|_| ())

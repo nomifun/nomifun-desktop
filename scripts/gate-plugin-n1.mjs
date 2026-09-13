@@ -12,11 +12,11 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-export const PLUGIN_CONTRACT_RELATIVE_PATH =
+export const PLUGIN_N1_CONTRACT_RELATIVE_PATH =
   'crates/backend/nomifun-agent-contracts/contracts/plugin-n1/plugin-n1-contract.v1.json';
-export const MINIAPP_CONTRACT_RELATIVE_PATH =
-  'crates/backend/nomifun-agent-contracts/contracts/miniapp-m1/miniapp-m1-contract.v1.json';
-export const GATE_ID = 'plugin_n1_miniapp_m1';
+export const PLUGIN_RUNTIME_CONTRACT_RELATIVE_PATH =
+  'crates/backend/nomifun-agent-contracts/contracts/plugin-runtime/plugin-runtime-contract.v1.json';
+export const GATE_ID = 'plugin_n1_plugin_m1';
 export const RESULT_SCHEMA_VERSION = '1.0.0';
 
 const STAGES = Object.freeze([
@@ -24,57 +24,57 @@ const STAGES = Object.freeze([
   'windows_candidate',
   'windows_signed_rc',
 ]);
-const SCOPES = Object.freeze(['plugin_n1', 'miniapp_m1', 'combined']);
+const SCOPES = Object.freeze(['plugin_n1', 'plugin_m1', 'combined']);
 const SHA1_PATTERN = /^[0-9a-f]{40}$/i;
 const COHORT_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 const BUILD_ROOT = join(REPO_ROOT, 'build.noindex', 'plugin-n1-gate');
 
-const PLUGIN_CONTRACT_CHECK = Object.freeze({
-    check_id: 'plugin_n1_contract_tests',
-    command: Object.freeze([
-      'cargo',
-      'test',
-      '--locked',
-      '-p',
-      'nomifun-agent-contracts',
-      '--lib',
-      'plugin_n1',
-      '--',
-      '--test-threads=1',
-    ]),
-    timeout_ms: DEFAULT_TIMEOUT_MS,
-  });
-const MINIAPP_CONTRACT_CHECK = Object.freeze({
-    check_id: 'miniapp_m1_contract_tests',
-    command: Object.freeze([
-      'cargo',
-      'test',
-      '--locked',
-      '-p',
-      'nomifun-agent-contracts',
-      '--lib',
-      'miniapp_m1',
-      '--',
-      '--test-threads=1',
-    ]),
-    timeout_ms: DEFAULT_TIMEOUT_MS,
-  });
+const PLUGIN_N1_CONTRACT_CHECK = Object.freeze({
+  check_id: 'plugin_n1_contract_tests',
+  command: Object.freeze([
+    'cargo',
+    'test',
+    '--locked',
+    '-p',
+    'nomifun-agent-contracts',
+    '--lib',
+    'plugin_n1',
+    '--',
+    '--test-threads=1',
+  ]),
+  timeout_ms: DEFAULT_TIMEOUT_MS,
+});
+const PLUGIN_RUNTIME_CONTRACT_CHECK = Object.freeze({
+  check_id: 'plugin_runtime_contract_tests',
+  command: Object.freeze([
+    'cargo',
+    'test',
+    '--locked',
+    '-p',
+    'nomifun-agent-contracts',
+    '--lib',
+    'plugin_runtime',
+    '--',
+    '--test-threads=1',
+  ]),
+  timeout_ms: DEFAULT_TIMEOUT_MS,
+});
 const CONTRACT_GENERATOR_CHECK = Object.freeze({
-    check_id: 'plugin_n1_contract_generator_check',
-    command: Object.freeze([
-      'cargo',
-      'run',
-      '--locked',
-      '-p',
-      'nomifun-agent-contracts',
-      '--bin',
-      'agent-v2-contract',
-      '--',
-      'check',
-    ]),
-    timeout_ms: DEFAULT_TIMEOUT_MS,
-  });
+  check_id: 'plugin_canonical_contract_generator_check',
+  command: Object.freeze([
+    'cargo',
+    'run',
+    '--locked',
+    '-p',
+    'nomifun-agent-contracts',
+    '--bin',
+    'agent-v2-contract',
+    '--',
+    'check',
+  ]),
+  timeout_ms: DEFAULT_TIMEOUT_MS,
+});
 
 const WINDOWS_PRODUCT_CHECKS = Object.freeze({
   windows_candidate: Object.freeze({
@@ -88,19 +88,19 @@ const WINDOWS_PRODUCT_CHECKS = Object.freeze({
       'plugin_n1_windows_installed_app_smoke',
       'plugin_n1_windows_fault_cleanup',
     ]),
-    miniapp_m1: Object.freeze([
-      'miniapp_m1_windows_release_lifecycle',
-      'miniapp_m1_windows_service_host',
-      'miniapp_m1_windows_bridge_storage',
-      'miniapp_m1_windows_catalog_consumers',
-      'miniapp_m1_windows_library_workshop_surface',
-      'miniapp_m1_windows_share_import_delete',
-      'miniapp_m1_windows_installed_app_smoke',
-      'miniapp_m1_windows_fault_cleanup',
+    plugin_m1: Object.freeze([
+      'plugin_m1_windows_release_lifecycle',
+      'plugin_m1_windows_service_host',
+      'plugin_m1_windows_bridge_storage',
+      'plugin_m1_windows_catalog_consumers',
+      'plugin_m1_windows_library_workshop_surface',
+      'plugin_m1_windows_share_import_delete',
+      'plugin_m1_windows_installed_app_smoke',
+      'plugin_m1_windows_fault_cleanup',
     ]),
     combined: Object.freeze([
-      'plugin_miniapp_windows_shared_runtime_isolation',
-      'plugin_miniapp_windows_catalog_provenance',
+      'plugin_unified_windows_shared_runtime_isolation',
+      'plugin_unified_windows_catalog_provenance',
     ]),
   }),
   windows_signed_rc: Object.freeze({
@@ -109,15 +109,15 @@ const WINDOWS_PRODUCT_CHECKS = Object.freeze({
       'plugin_n1_windows_signed_install_author_apply_invoke_restore',
       'plugin_n1_windows_signed_process_cleanup',
     ]),
-    miniapp_m1: Object.freeze([
-      'miniapp_m1_windows_signed_package_provenance',
-      'miniapp_m1_windows_signed_install_build_publish_surface_rollback',
-      'miniapp_m1_windows_signed_service_bridge_storage',
-      'miniapp_m1_windows_signed_process_cleanup',
+    plugin_m1: Object.freeze([
+      'plugin_m1_windows_signed_package_provenance',
+      'plugin_m1_windows_signed_install_build_publish_surface_rollback',
+      'plugin_m1_windows_signed_service_bridge_storage',
+      'plugin_m1_windows_signed_process_cleanup',
     ]),
     combined: Object.freeze([
-      'plugin_miniapp_windows_signed_shared_catalog',
-      'plugin_miniapp_windows_signed_uninstall_cleanup',
+      'plugin_unified_windows_signed_shared_catalog',
+      'plugin_unified_windows_signed_uninstall_cleanup',
     ]),
   }),
 });
@@ -128,9 +128,9 @@ const PRODUCT_CHECK_COMMANDS = Object.freeze({
     'scripts/validation/run-windows-plugin-product-candidate.mjs',
     '--current-candidate',
   ],
-  miniapp_m1_windows_installed_app_smoke: [
+  plugin_m1_windows_installed_app_smoke: [
     'bun',
-    'scripts/validation/run-windows-miniapp-product-candidate.mjs',
+    'scripts/validation/run-windows-plugin-runtime-candidate.mjs',
     '--current-candidate',
   ],
   plugin_n1_windows_runtime_selection: [
@@ -207,7 +207,7 @@ const PRODUCT_CHECK_COMMANDS = Object.freeze({
     '--',
     '--test-threads=1',
   ],
-  miniapp_m1_windows_release_lifecycle: [
+  plugin_m1_windows_release_lifecycle: [
     'cargo',
     'test',
     '--locked',
@@ -220,7 +220,7 @@ const PRODUCT_CHECK_COMMANDS = Object.freeze({
     '--',
     '--test-threads=1',
   ],
-  miniapp_m1_windows_service_host: [
+  plugin_m1_windows_service_host: [
     'cargo',
     'test',
     '--locked',
@@ -231,7 +231,7 @@ const PRODUCT_CHECK_COMMANDS = Object.freeze({
     '--',
     '--test-threads=1',
   ],
-  miniapp_m1_windows_bridge_storage: [
+  plugin_m1_windows_bridge_storage: [
     'cargo',
     'test',
     '--locked',
@@ -244,7 +244,7 @@ const PRODUCT_CHECK_COMMANDS = Object.freeze({
     '--',
     '--test-threads=1',
   ],
-  miniapp_m1_windows_catalog_consumers: [
+  plugin_m1_windows_catalog_consumers: [
     'cargo',
     'test',
     '--locked',
@@ -255,13 +255,13 @@ const PRODUCT_CHECK_COMMANDS = Object.freeze({
     '--',
     '--test-threads=1',
   ],
-  miniapp_m1_windows_library_workshop_surface: [
+  plugin_m1_windows_library_workshop_surface: [
     'bun',
     'test',
     'ui/src/renderer/components/layout/Sider/pluginRuntimeNav.structure.test.ts',
     'ui/src/renderer/pages/plugins/runtime/model.test.ts',
   ],
-  miniapp_m1_windows_share_import_delete: [
+  plugin_m1_windows_share_import_delete: [
     'cargo',
     'test',
     '--locked',
@@ -276,7 +276,7 @@ const PRODUCT_CHECK_COMMANDS = Object.freeze({
     '--',
     '--test-threads=1',
   ],
-  miniapp_m1_windows_fault_cleanup: [
+  plugin_m1_windows_fault_cleanup: [
     'cargo',
     'test',
     '--locked',
@@ -289,7 +289,7 @@ const PRODUCT_CHECK_COMMANDS = Object.freeze({
     '--',
     '--test-threads=1',
   ],
-  plugin_miniapp_windows_shared_runtime_isolation: [
+  plugin_unified_windows_shared_runtime_isolation: [
     'cargo',
     'test',
     '--locked',
@@ -303,7 +303,7 @@ const PRODUCT_CHECK_COMMANDS = Object.freeze({
     '--',
     '--test-threads=1',
   ],
-  plugin_miniapp_windows_catalog_provenance: [
+  plugin_unified_windows_catalog_provenance: [
     'cargo',
     'test',
     '--locked',
@@ -335,7 +335,7 @@ const PRODUCT_CHECK_COMMANDS = Object.freeze({
     '--',
     '--test-threads=1',
   ],
-  miniapp_m1_windows_signed_package_provenance: [
+  plugin_m1_windows_signed_package_provenance: [
     'cargo',
     'run',
     '--locked',
@@ -346,13 +346,13 @@ const PRODUCT_CHECK_COMMANDS = Object.freeze({
     '--',
     'check',
   ],
-  miniapp_m1_windows_signed_install_build_publish_surface_rollback: [
+  plugin_m1_windows_signed_install_build_publish_surface_rollback: [
     'bun',
     'scripts/validation/run-windows-signed-rc-product.mjs',
     '--scope',
-    'miniapp_m1',
+    'plugin_m1',
   ],
-  miniapp_m1_windows_signed_service_bridge_storage: [
+  plugin_m1_windows_signed_service_bridge_storage: [
     'cargo',
     'test',
     '--locked',
@@ -365,7 +365,7 @@ const PRODUCT_CHECK_COMMANDS = Object.freeze({
     '--',
     '--test-threads=1',
   ],
-  miniapp_m1_windows_signed_process_cleanup: [
+  plugin_m1_windows_signed_process_cleanup: [
     'cargo',
     'test',
     '--locked',
@@ -376,7 +376,7 @@ const PRODUCT_CHECK_COMMANDS = Object.freeze({
     '--',
     '--test-threads=1',
   ],
-  plugin_miniapp_windows_signed_shared_catalog: [
+  plugin_unified_windows_signed_shared_catalog: [
     'cargo',
     'test',
     '--locked',
@@ -387,7 +387,7 @@ const PRODUCT_CHECK_COMMANDS = Object.freeze({
     '--',
     '--test-threads=1',
   ],
-  plugin_miniapp_windows_signed_uninstall_cleanup: [
+  plugin_unified_windows_signed_uninstall_cleanup: [
     'cargo',
     'test',
     '--locked',
@@ -421,7 +421,7 @@ function usage() {
     'usage:',
     '  bun run gate:plugin-n1 -- --self-test',
     '  bun run gate:plugin-n1 -- --stage <contract|windows_candidate|windows_signed_rc>',
-    '    --scope <plugin_n1|miniapp_m1|combined> [--cohort <id>] [--cell <cell_id>]',
+    '    --scope <plugin_n1|plugin_m1|combined> [--cohort <id>] [--cell <cell_id>]',
     '    [--not-delivered] [--output <build.noindex path>] [--dry-run]',
     '',
     'Candidate and signed RC runs require --cohort. --source-commit is intentionally unsupported;',
@@ -736,7 +736,7 @@ export function buildCohort({
   const contractSetDigest = canonicalDigest(contractDigests);
   const resolvedCohortId =
     cohortId ||
-    `n1-m1-${sourceCommit.slice(0, 12)}-${contractSetDigest.slice(0, 12)}`;
+    `plugin-n1-m1-${sourceCommit.slice(0, 12)}-${contractSetDigest.slice(0, 12)}`;
   const digestInput = {
     schema_version: RESULT_SCHEMA_VERSION,
     cohort_id: resolvedCohortId,
@@ -744,7 +744,7 @@ export function buildCohort({
     input_digests: {
       cargo_lock: cargoLockDigest,
       plugin_n1_contract: contractDigests.plugin_n1_contract,
-      miniapp_m1_contract: contractDigests.miniapp_m1_contract,
+      plugin_runtime_contract: contractDigests.plugin_runtime_contract,
     },
     required_cells: [...matrix.requiredCells].sort(),
     optional_cells: [...matrix.optionalCells].sort(),
@@ -763,10 +763,10 @@ function productCheckIds(stage, scope) {
     throw new GateAdmissionError('unknown_stage_registry', `no registry for ${stage}`);
   }
   if (scope === 'plugin_n1') return [...registry.plugin_n1];
-  if (scope === 'miniapp_m1') return [...registry.miniapp_m1];
+  if (scope === 'plugin_m1') return [...registry.plugin_m1];
   return [
     ...registry.plugin_n1,
-    ...registry.miniapp_m1,
+    ...registry.plugin_m1,
     ...registry.combined,
   ];
 }
@@ -775,10 +775,10 @@ export function checkPlan(stage, scope, notDelivered = false) {
   if (notDelivered) return [];
   const contractChecks = [
     ...(scope === 'plugin_n1' || scope === 'combined'
-      ? [PLUGIN_CONTRACT_CHECK]
+      ? [PLUGIN_N1_CONTRACT_CHECK]
       : []),
-    ...(scope === 'miniapp_m1' || scope === 'combined'
-      ? [MINIAPP_CONTRACT_CHECK]
+    ...(scope === 'plugin_m1' || scope === 'combined'
+      ? [PLUGIN_RUNTIME_CONTRACT_CHECK]
       : []),
     CONTRACT_GENERATOR_CHECK,
   ];
@@ -859,10 +859,10 @@ function artifactDigests() {
   const artifacts = {
     cargo_lock: sha256File(join(REPO_ROOT, 'Cargo.lock')),
     plugin_n1_contract: sha256File(
-      join(REPO_ROOT, PLUGIN_CONTRACT_RELATIVE_PATH),
+      join(REPO_ROOT, PLUGIN_N1_CONTRACT_RELATIVE_PATH),
     ),
-    miniapp_m1_contract: sha256File(
-      join(REPO_ROOT, MINIAPP_CONTRACT_RELATIVE_PATH),
+    plugin_runtime_contract: sha256File(
+      join(REPO_ROOT, PLUGIN_RUNTIME_CONTRACT_RELATIVE_PATH),
     ),
   };
   const generatedArtifacts = [
@@ -871,8 +871,8 @@ function artifactDigests() {
       'crates/backend/nomifun-agent-contracts/contracts/generated/plugin-n1-contract.envelope.json',
     ],
     [
-      'miniapp_m1_contract_envelope',
-      'crates/backend/nomifun-agent-contracts/contracts/generated/miniapp-m1-contract.envelope.json',
+      'plugin_runtime_contract_envelope',
+      'crates/backend/nomifun-agent-contracts/contracts/generated/plugin-runtime-contract.envelope.json',
     ],
     [
       'contract_schema_registry',
@@ -932,9 +932,9 @@ function assertThrows(callback, pattern, message) {
 
 function runSelfTest() {
   const repositoryContract = readJson(
-    join(REPO_ROOT, PLUGIN_CONTRACT_RELATIVE_PATH),
+    join(REPO_ROOT, PLUGIN_N1_CONTRACT_RELATIVE_PATH),
   );
-  readJson(join(REPO_ROOT, MINIAPP_CONTRACT_RELATIVE_PATH));
+  readJson(join(REPO_ROOT, PLUGIN_RUNTIME_CONTRACT_RELATIVE_PATH));
   const matrix = validationMatrixFromContract(repositoryContract);
   const foreignRequiredCell = matrix.requiredCells.find(
     (cell) => cell !== matrix.windowsCell,
@@ -961,6 +961,13 @@ function runSelfTest() {
     /--stage must be one of/,
     'unknown stage must fail',
   );
+  const pluginM1Args = parseArgs([
+    '--stage',
+    'contract',
+    '--scope',
+    'plugin_m1',
+  ]);
+  assert(pluginM1Args.scope === 'plugin_m1', 'Plugin M1 scope must be accepted');
 
   const dirty = evaluateCleanHead({
     headStatus: 0,
@@ -1016,7 +1023,7 @@ function runSelfTest() {
     sourceCommit: 'a'.repeat(40),
     contractDigests: {
       plugin_n1_contract: 'b'.repeat(64),
-      miniapp_m1_contract: 'd'.repeat(64),
+      plugin_runtime_contract: 'd'.repeat(64),
     },
     cargoLockDigest: 'c'.repeat(64),
     matrix,
@@ -1041,7 +1048,7 @@ function runSelfTest() {
     },
     {
       plugin_n1_contract: 'd'.repeat(64),
-      miniapp_m1_contract: 'e'.repeat(64),
+      plugin_runtime_contract: 'e'.repeat(64),
     },
     matrix,
     { cellId: null },
@@ -1064,21 +1071,47 @@ function runSelfTest() {
     checkPlan('windows_signed_rc', 'combined').filter((check) =>
       [
         'plugin_n1_windows_signed_install_author_apply_invoke_restore',
-        'miniapp_m1_windows_signed_install_build_publish_surface_rollback',
+        'plugin_m1_windows_signed_install_build_publish_surface_rollback',
       ].includes(check.check_id),
     ).every((check) =>
       check.command.includes('scripts/validation/run-windows-signed-rc-product.mjs'),
     ),
     'signed RC product checks do not use the fail-closed Authenticode runner',
   );
+  const contractCheckIds = checkPlan('contract', 'combined').map(
+    (check) => check.check_id,
+  );
   assert(
-    checkPlan('contract', 'combined').some(
-      (check) => check.check_id === 'miniapp_m1_contract_tests',
-    ),
-    'combined contract plan is missing MiniApp M1 tests',
+    JSON.stringify(contractCheckIds) ===
+      JSON.stringify([
+        'plugin_n1_contract_tests',
+        'plugin_runtime_contract_tests',
+        'plugin_canonical_contract_generator_check',
+      ]),
+    'contract plan must contain only the Plugin canonical contract checks',
+  );
+  assert(
+    JSON.stringify(
+      checkPlan('contract', 'plugin_n1').map((check) => check.check_id),
+    ) ===
+      JSON.stringify([
+        'plugin_n1_contract_tests',
+        'plugin_canonical_contract_generator_check',
+      ]),
+    'Plugin N1 scope must select the Plugin N1 canonical contract',
+  );
+  assert(
+    JSON.stringify(
+      checkPlan('contract', 'plugin_m1').map((check) => check.check_id),
+    ) ===
+      JSON.stringify([
+        'plugin_runtime_contract_tests',
+        'plugin_canonical_contract_generator_check',
+      ]),
+    'Plugin M1 scope must select the Plugin runtime canonical contract',
   );
 
-  console.log('plugin N1/MiniApp M1 gate self-test passed');
+  console.log('Plugin N1/Plugin M1 gate self-test passed');
 }
 
 function writeResult(path, result) {
@@ -1130,7 +1163,7 @@ function runOperational(options, contractDigests, matrix, cell) {
     ? validateOutputPath(options.output)
     : defaultOutputPath(cohort, options.stage, options.scope, cell.cellId);
   writeResult(output, result);
-  console.log(`plugin N1/MiniApp M1 gate result: ${relative(REPO_ROOT, output)}`);
+  console.log(`Plugin N1/Plugin M1 gate result: ${relative(REPO_ROOT, output)}`);
   console.log(`status=${status} cohort_digest=${cohort.cohort_digest}`);
   if (blockingChecks.length > 0) {
     console.error(
@@ -1160,13 +1193,19 @@ function main() {
   }
 
   try {
-    const pluginContractPath = join(REPO_ROOT, PLUGIN_CONTRACT_RELATIVE_PATH);
-    const miniappContractPath = join(REPO_ROOT, MINIAPP_CONTRACT_RELATIVE_PATH);
-    const contract = readJson(pluginContractPath);
-    readJson(miniappContractPath);
+    const pluginN1ContractPath = join(
+      REPO_ROOT,
+      PLUGIN_N1_CONTRACT_RELATIVE_PATH,
+    );
+    const pluginRuntimeContractPath = join(
+      REPO_ROOT,
+      PLUGIN_RUNTIME_CONTRACT_RELATIVE_PATH,
+    );
+    const contract = readJson(pluginN1ContractPath);
+    readJson(pluginRuntimeContractPath);
     const contractDigests = {
-      plugin_n1_contract: sha256File(pluginContractPath),
-      miniapp_m1_contract: sha256File(miniappContractPath),
+      plugin_n1_contract: sha256File(pluginN1ContractPath),
+      plugin_runtime_contract: sha256File(pluginRuntimeContractPath),
     };
     const matrix = validationMatrixFromContract(contract);
     const cell = validateStageCell({

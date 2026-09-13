@@ -8,22 +8,22 @@ use std::{
 use async_trait::async_trait;
 use nomifun_agent_contracts::{
     canonical_json_bytes, digest_bytes, ArtifactId, LocalizedMetadata,
-    MiniAppAdditiveMigrationAction, MiniAppBridgeCallId, MiniAppId,
-    MiniAppMigration, MiniAppMigrationColumn, MiniAppMigrationId, MiniAppReleaseArtifactV1,
-    MiniAppReleaseRef, MiniAppResourceContract, MiniAppServiceLifecycle, PackageId, PackageRef,
-    ResolvedMiniAppServiceSpec, StrictJsonValue, VersionString, MINIAPP_BRIDGE_CONTRACT_VERSION,
+    PluginAdditiveMigrationAction, PluginBridgeCallId, PluginProductId,
+    PluginMigration, PluginMigrationColumn, PluginMigrationId, PluginReleaseArtifactV1,
+    PluginReleaseRef, PluginResourceContract, PluginServiceLifecycle, PackageId, PackageRef,
+    ResolvedPluginServiceSpec, StrictJsonValue, VersionString, PLUGIN_BRIDGE_CONTRACT_VERSION,
 };
 use nomifun_api_types::{
     ExportPluginRuntimeBackupRequest, ImportPluginRuntimeBackupRequest, PluginRuntimeKindDto, PluginRuntimeLifecycleDto,
 };
 use nomifun_db::{
-    BeginMiniAppM1ImportAsNewParams, CreateMiniAppM1Params, FinishMiniAppM1ImportReadyParams,
-    IMiniAppM1Repository, MiniAppM1ImportSource, MiniAppM1Kind, MiniAppReleaseArtifactRow,
-    MiniAppReleaseRow, SqliteMiniAppM1Repository, init_database_memory, installation_owner_id,
+    BeginPluginRuntimeImportAsNewParams, CreatePluginRuntimeParams, FinishPluginRuntimeImportReadyParams,
+    IPluginRuntimeRepository, PluginRuntimeImportSource, PluginRuntimeKind, PluginRuntimeReleaseArtifactRow,
+    PluginRuntimeReleaseRow, SqlitePluginRuntimeRepository, init_database_memory, installation_owner_id,
 };
 use nomifun_plugin_platform::runtime::{
     PluginRuntimeCallCancellation, PluginRuntimeDatabaseQueryResult, PluginRuntimeDatabaseStatement,
-    PluginRuntimeM1ApplicationService, PluginRuntimePlatformError, PluginRuntimePlatformResult,
+    PluginRuntimeApplicationService, PluginRuntimePlatformError, PluginRuntimePlatformResult,
     PluginRuntimeReleaseFileBytes, PluginRuntimeReleasePublishRequest, PluginRuntimeReleaseStore,
     PluginRuntimePrivateDatabasePort, PluginRuntimeServiceHostState, PluginRuntimeServiceRuntimeBinding,
     PluginRuntimeServiceSpecInput, PluginRuntimeServiceStoragePort, PluginRuntimeServiceStorageRequest,
@@ -44,7 +44,7 @@ impl PluginRuntimeServiceRuntimeBinding for BackupRuntime {
     async fn resolve_spec(
         &self,
         _input: PluginRuntimeServiceSpecInput,
-    ) -> PluginRuntimePlatformResult<ResolvedMiniAppServiceSpec> {
+    ) -> PluginRuntimePlatformResult<ResolvedPluginServiceSpec> {
         Err(PluginRuntimePlatformError::Runtime(
             "Backup test runtime does not resolve Service Hosts".into(),
         ))
@@ -52,20 +52,20 @@ impl PluginRuntimeServiceRuntimeBinding for BackupRuntime {
 
     async fn bind_active(
         &self,
-        _spec: ResolvedMiniAppServiceSpec,
+        _spec: ResolvedPluginServiceSpec,
         _enabled: bool,
     ) -> PluginRuntimePlatformResult<()> {
         Ok(())
     }
 
-    async fn start(&self, _spec: ResolvedMiniAppServiceSpec) -> PluginRuntimePlatformResult<()> {
+    async fn start(&self, _spec: ResolvedPluginServiceSpec) -> PluginRuntimePlatformResult<()> {
         Ok(())
     }
 
     async fn invoke(
         &self,
-        _spec: &ResolvedMiniAppServiceSpec,
-        _call_id: MiniAppBridgeCallId,
+        _spec: &ResolvedPluginServiceSpec,
+        _call_id: PluginBridgeCallId,
         _method: String,
         _payload: StrictJsonValue,
         _cancellation: PluginRuntimeCallCancellation,
@@ -76,17 +76,17 @@ impl PluginRuntimeServiceRuntimeBinding for BackupRuntime {
         ))
     }
 
-    async fn cancel(&self, _miniapp_id: &MiniAppId, _call_id: &MiniAppBridgeCallId) {}
+    async fn cancel(&self, _plugin_product_id: &PluginProductId, _call_id: &PluginBridgeCallId) {}
 
-    async fn stop(&self, _miniapp_id: &MiniAppId) -> PluginRuntimePlatformResult<()> {
+    async fn stop(&self, _plugin_product_id: &PluginProductId) -> PluginRuntimePlatformResult<()> {
         Ok(())
     }
 
-    async fn retry(&self, _miniapp_id: &MiniAppId) -> PluginRuntimePlatformResult<()> {
+    async fn retry(&self, _plugin_product_id: &PluginProductId) -> PluginRuntimePlatformResult<()> {
         Ok(())
     }
 
-    async fn state(&self, _miniapp_id: &MiniAppId) -> Option<PluginRuntimeServiceHostState> {
+    async fn state(&self, _plugin_product_id: &PluginProductId) -> Option<PluginRuntimeServiceHostState> {
         Some(PluginRuntimeServiceHostState::Stopped)
     }
 
@@ -96,7 +96,7 @@ impl PluginRuntimeServiceRuntimeBinding for BackupRuntime {
 
     async fn register_module(
         &self,
-        _miniapp_id: MiniAppId,
+        _plugin_product_id: PluginProductId,
         _release_digest: nomifun_agent_contracts::DigestHex,
         _module_path: PathBuf,
     ) -> PluginRuntimePlatformResult<()> {
@@ -106,14 +106,14 @@ impl PluginRuntimeServiceRuntimeBinding for BackupRuntime {
     async fn export_backup_storage(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
         uses_files: bool,
         uses_private_database: bool,
     ) -> PluginRuntimePlatformResult<PluginRuntimeBackupStorage> {
         self.storage
             .export_backup_storage(
                 owner_user_id,
-                miniapp_id,
+                plugin_product_id,
                 uses_files,
                 uses_private_database,
             )
@@ -123,7 +123,7 @@ impl PluginRuntimeServiceRuntimeBinding for BackupRuntime {
     async fn import_backup_storage(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
         storage: PluginRuntimeBackupStorage,
         uses_files: bool,
         uses_private_database: bool,
@@ -131,7 +131,7 @@ impl PluginRuntimeServiceRuntimeBinding for BackupRuntime {
         self.storage
             .import_backup_storage(
                 owner_user_id,
-                miniapp_id,
+                plugin_product_id,
                 storage,
                 uses_files,
                 uses_private_database,
@@ -144,8 +144,8 @@ impl PluginRuntimeServiceRuntimeBinding for BackupRuntime {
 async fn service_whole_app_backup_roundtrips_files_private_sqlite_and_migration_ledger() {
     let database = init_database_memory().await.unwrap();
     let owner = installation_owner_id(database.pool()).await.unwrap();
-    let repository: Arc<dyn IMiniAppM1Repository> =
-        Arc::new(SqliteMiniAppM1Repository::new(database.pool().clone()));
+    let repository: Arc<dyn IPluginRuntimeRepository> =
+        Arc::new(SqlitePluginRuntimeRepository::new(database.pool().clone()));
     let root = tempfile::tempdir().unwrap();
 
     let source_store = Arc::new(PluginRuntimeSourceStore::new(root.path().join("source")).unwrap());
@@ -154,7 +154,7 @@ async fn service_whole_app_backup_roundtrips_files_private_sqlite_and_migration_
         SqlitePluginRuntimeManagedStorage::new(root.path().join("managed"), database.pool().clone())
             .unwrap(),
     );
-    let application = PluginRuntimeM1ApplicationService::new_with_stores(
+    let application = PluginRuntimeApplicationService::new_with_stores(
         repository.clone(),
         source_store,
         release_store.clone(),
@@ -166,7 +166,7 @@ async fn service_whole_app_backup_roundtrips_files_private_sqlite_and_migration_
         }))
         .await;
 
-    let miniapp_id = Uuid::now_v7().to_string();
+    let plugin_product_id = Uuid::now_v7().to_string();
     let project_id = Uuid::now_v7().to_string();
     let operation_id = Uuid::now_v7().to_string();
     let artifact = service_artifact();
@@ -174,17 +174,17 @@ async fn service_whole_app_backup_roundtrips_files_private_sqlite_and_migration_
     let source_snapshot_digest = digest_bytes(b"runtime-only-source");
 
     let begun = repository
-        .begin_import_as_new(&BeginMiniAppM1ImportAsNewParams {
-            create: CreateMiniAppM1Params {
+        .begin_import_as_new(&BeginPluginRuntimeImportAsNewParams {
+            create: CreatePluginRuntimeParams {
                 owner_user_id: owner.clone(),
-                miniapp_id: miniapp_id.clone(),
+                plugin_product_id: plugin_product_id.clone(),
                 project_id: project_id.clone(),
                 expected_library_revision: 0,
                 display_name: "Service backup source".into(),
                 description: Some("Service backup fixture".into()),
                 icon_asset_id: None,
-                kind: MiniAppM1Kind::Service,
-                materialized_catalog_digest: digest_bytes(b"miniapp-m1-empty-catalog")
+                kind: PluginRuntimeKind::Plugin,
+                materialized_catalog_digest: digest_bytes(b"plugin-m1-empty-catalog")
                     .as_ref()
                     .to_owned(),
                 config_schema_json: r#"{"type":"object"}"#.into(),
@@ -192,7 +192,7 @@ async fn service_whole_app_backup_roundtrips_files_private_sqlite_and_migration_
                 created_at: 1,
             },
             operation_id: operation_id.clone(),
-            source: MiniAppM1ImportSource::RuntimeOnly,
+            source: PluginRuntimeImportSource::RuntimeOnly,
             bounded_log_tail: vec!["service backup fixture started".into()],
             started_at_ms: 1,
         })
@@ -203,7 +203,7 @@ async fn service_whole_app_backup_roundtrips_files_private_sqlite_and_migration_
         .publish(PluginRuntimeReleasePublishRequest::service(
             nomifun_plugin_platform::runtime::PluginRuntimeSourceScope::new(
                 &owner,
-                &miniapp_id,
+                &plugin_product_id,
                 &project_id,
             )
             .unwrap(),
@@ -216,27 +216,27 @@ async fn service_whole_app_backup_roundtrips_files_private_sqlite_and_migration_
         .unwrap()
         .stored;
 
-    let release_ref = MiniAppReleaseRef {
+    let release_ref = PluginReleaseRef {
         release_id: release_id.clone().into(),
         artifact_id: artifact.artifact_id.clone(),
         release_digest: artifact.artifact_digest.clone(),
         manifest_digest: artifact.manifest.payload_digest.clone(),
     };
-    let ready = nomifun_agent_contracts::MiniAppReadyRelease {
-        miniapp_id: miniapp_id.clone().into(),
+    let ready = nomifun_agent_contracts::PluginReadyRelease {
+        plugin_product_id: plugin_product_id.clone().into(),
         release: release_ref.clone(),
         origin_operation_id: operation_id.clone().into(),
-        origin: nomifun_agent_contracts::MiniAppReadyOrigin::Import,
-        source_lineage: nomifun_agent_contracts::MiniAppSourceLineage::RuntimeOnly,
+        origin: nomifun_agent_contracts::PluginReadyOrigin::Import,
+        source_lineage: nomifun_agent_contracts::PluginReleaseSourceLineage::RuntimeOnly,
         matching_service_test_receipt: None,
         created_at_ms: 2,
     };
     ready.validate_for_artifact(&artifact).unwrap();
 
     let finished = repository
-        .finish_import_ready(&FinishMiniAppM1ImportReadyParams {
+        .finish_import_ready(&FinishPluginRuntimeImportReadyParams {
             owner_user_id: owner.clone(),
-            miniapp_id: miniapp_id.clone(),
+            plugin_product_id: plugin_product_id.clone(),
             project_id: project_id.clone(),
             operation_id: operation_id.clone(),
             expected_library_revision: begun.snapshot.library_revision,
@@ -246,7 +246,7 @@ async fn service_whole_app_backup_roundtrips_files_private_sqlite_and_migration_
             artifact: artifact_row(&owner, &artifact, &published),
             release: release_row(
                 &owner,
-                &miniapp_id,
+                &plugin_product_id,
                 &artifact,
                 &release_id,
                 &operation_id,
@@ -263,9 +263,9 @@ async fn service_whole_app_backup_roundtrips_files_private_sqlite_and_migration_
     );
     assert_eq!(finished.project.source_state, "runtime_only");
 
-    let miniapp = MiniAppId::from(miniapp_id.clone());
+    let plugin = PluginProductId::from(plugin_product_id.clone());
     let resolved = storage
-        .resolve_service_storage(&owner, &miniapp, true, true)
+        .resolve_service_storage(&owner, &plugin, true, true)
         .await
         .unwrap();
     let private_database = resolved
@@ -278,7 +278,7 @@ async fn service_whole_app_backup_roundtrips_files_private_sqlite_and_migration_
     let ledger = PluginRuntimeServiceStoragePort::apply_additive_migrations(
             storage.as_ref(),
             &owner,
-            &miniapp,
+            &plugin,
             &resolved.descriptor,
             &private_database.migration_ledger_digest,
             &release_ref,
@@ -291,12 +291,12 @@ async fn service_whole_app_backup_roundtrips_files_private_sqlite_and_migration_
     assert_eq!(ledger.entries[0].release.release_id, release_ref.release_id);
 
     let resolved = storage
-        .resolve_service_storage(&owner, &miniapp, true, true)
+        .resolve_service_storage(&owner, &plugin, true, true)
         .await
         .unwrap();
     storage
         .handle_service_request(
-            &miniapp,
+            &plugin,
             &resolved.descriptor,
             PluginRuntimeServiceStorageRequest::DatabaseExecute {
                 statement: PluginRuntimeDatabaseStatement {
@@ -319,7 +319,7 @@ async fn service_whole_app_backup_roundtrips_files_private_sqlite_and_migration_
     fs::write(files_root.join("state.txt"), b"source-file").unwrap();
 
     let snapshot = repository
-        .get(&owner, &miniapp_id)
+        .get(&owner, &plugin_product_id)
         .await
         .unwrap()
         .unwrap();
@@ -328,7 +328,7 @@ async fn service_whole_app_backup_roundtrips_files_private_sqlite_and_migration_
         .export_backup(
             &owner,
             ExportPluginRuntimeBackupRequest {
-                miniapp_id: miniapp_id.clone(),
+                plugin_id: plugin_product_id.clone(),
                 expected_product_revision: snapshot.product.product_revision.try_into().unwrap(),
                 expected_lifecycle: PluginRuntimeLifecycleDto::Disabled,
                 expected_pointer_revision: snapshot.product.pointer_revision.try_into().unwrap(),
@@ -363,15 +363,15 @@ async fn service_whole_app_backup_roundtrips_files_private_sqlite_and_migration_
         )
         .await
         .unwrap();
-    let imported_id = imported.miniapp.miniapp_id.clone();
-    assert_ne!(imported_id, miniapp_id);
-    assert_eq!(imported.miniapp.kind, PluginRuntimeKindDto::Service);
-    assert_eq!(imported.miniapp.lifecycle, PluginRuntimeLifecycleDto::Disabled);
-    assert!(imported.miniapp.releases.ready.is_some());
+    let imported_id = imported.plugin.plugin_id.clone();
+    assert_ne!(imported_id, plugin_product_id);
+    assert_eq!(imported.plugin.kind, PluginRuntimeKindDto::Plugin);
+    assert_eq!(imported.plugin.lifecycle, PluginRuntimeLifecycleDto::Disabled);
+    assert!(imported.plugin.releases.ready.is_some());
 
-    let imported_miniapp = MiniAppId::from(imported_id.clone());
+    let imported_plugin = PluginProductId::from(imported_id.clone());
     let imported_storage = storage
-        .resolve_service_storage(&owner, &imported_miniapp, true, true)
+        .resolve_service_storage(&owner, &imported_plugin, true, true)
         .await
         .unwrap();
     let imported_database = imported_storage
@@ -380,10 +380,10 @@ async fn service_whole_app_backup_roundtrips_files_private_sqlite_and_migration_
         .as_ref()
         .unwrap();
     let imported_ledger = storage
-        .ledger(&imported_miniapp, &imported_database.handle_id)
+        .ledger(&imported_plugin, &imported_database.handle_id)
         .await
         .unwrap();
-    assert_eq!(imported_ledger.miniapp_id, imported_miniapp);
+    assert_eq!(imported_ledger.plugin_product_id, imported_plugin);
     assert_eq!(imported_ledger.entries.len(), 1);
     assert_ne!(
         imported_ledger.entries[0].release.release_id,
@@ -391,7 +391,7 @@ async fn service_whole_app_backup_roundtrips_files_private_sqlite_and_migration_
     );
     assert_eq!(
         imported_ledger.entries[0].release.release_id.as_ref(),
-        imported.miniapp.releases.ready.as_ref().unwrap().release_id.as_str()
+        imported.plugin.releases.ready.as_ref().unwrap().release_id.as_str()
     );
     assert_eq!(
         imported_ledger.entries[0].release.release_digest,
@@ -404,7 +404,7 @@ async fn service_whole_app_backup_roundtrips_files_private_sqlite_and_migration_
 
     let query = storage
         .handle_service_request(
-            &imported_miniapp,
+            &imported_plugin,
             &imported_storage.descriptor,
             PluginRuntimeServiceStorageRequest::DatabaseQuery {
                 statement: PluginRuntimeDatabaseStatement {
@@ -434,7 +434,7 @@ async fn service_whole_app_backup_roundtrips_files_private_sqlite_and_migration_
     assert_eq!(fs::read(imported_file).unwrap(), b"source-file");
 }
 
-fn service_artifact() -> MiniAppReleaseArtifactV1 {
+fn service_artifact() -> PluginReleaseArtifactV1 {
     let migration = migration();
     PluginRuntimeStaticBundleBuilder::new()
         .build(PluginRuntimeStaticBundleInput {
@@ -453,7 +453,7 @@ fn service_artifact() -> MiniAppReleaseArtifactV1 {
 }
 "#
                 .to_vec(),
-                lifecycle: MiniAppServiceLifecycle::OnDemand,
+                lifecycle: PluginServiceLifecycle::OnDemand,
                 uses_files: true,
                 uses_private_database: true,
                 service_contract_digest: digest_bytes(b"service-contract"),
@@ -464,11 +464,11 @@ fn service_artifact() -> MiniAppReleaseArtifactV1 {
             dependency_graph_digest: digest_bytes(b"service-backup-graph"),
             config_schema: StrictJsonValue(json!({"type": "object"})),
             credential_slots: Vec::new(),
-            resource_contract: MiniAppResourceContract::default(),
+            resource_contract: PluginResourceContract::default(),
             schemas: BTreeMap::new(),
-            bridge_contract_digest: digest_bytes(MINIAPP_BRIDGE_CONTRACT_VERSION.as_bytes()),
+            bridge_contract_digest: digest_bytes(PLUGIN_BRIDGE_CONTRACT_VERSION.as_bytes()),
             contribution_package: PackageRef {
-                id: PackageId::from("miniapp.service-backup"),
+                id: PackageId::from("plugin.service-backup"),
                 version: VersionString::from("1.0.0"),
             },
             contributions: Default::default(),
@@ -477,19 +477,19 @@ fn service_artifact() -> MiniAppReleaseArtifactV1 {
         .unwrap()
 }
 
-fn migration() -> MiniAppMigration {
-    MiniAppMigration::new(
-        MiniAppMigrationId::from("001_create_backup_state"),
-        vec![MiniAppAdditiveMigrationAction::CreateTable {
+fn migration() -> PluginMigration {
+    PluginMigration::new(
+        PluginMigrationId::from("001_create_backup_state"),
+        vec![PluginAdditiveMigrationAction::CreateTable {
             table_name: "backup_state".into(),
             columns: vec![
-                MiniAppMigrationColumn {
+                PluginMigrationColumn {
                     name: "id".into(),
                     declared_type: "TEXT".into(),
                     nullable: false,
                     default_literal: None,
                 },
-                MiniAppMigrationColumn {
+                PluginMigrationColumn {
                     name: "value".into(),
                     declared_type: "INTEGER".into(),
                     nullable: false,
@@ -502,7 +502,7 @@ fn migration() -> MiniAppMigration {
     .unwrap()
 }
 
-fn release_files(artifact: &MiniAppReleaseArtifactV1) -> Vec<PluginRuntimeReleaseFileBytes> {
+fn release_files(artifact: &PluginReleaseArtifactV1) -> Vec<PluginRuntimeReleaseFileBytes> {
     artifact
         .files
         .iter()
@@ -524,10 +524,10 @@ fn release_files(artifact: &MiniAppReleaseArtifactV1) -> Vec<PluginRuntimeReleas
 
 fn artifact_row(
     owner: &str,
-    artifact: &MiniAppReleaseArtifactV1,
+    artifact: &PluginReleaseArtifactV1,
     published: &PluginRuntimeStoredRelease,
-) -> MiniAppReleaseArtifactRow {
-    MiniAppReleaseArtifactRow {
+) -> PluginRuntimeReleaseArtifactRow {
+    PluginRuntimeReleaseArtifactRow {
         id: 0,
         artifact_id: artifact.artifact_id.as_ref().to_owned(),
         owner_user_id: owner.to_owned(),
@@ -541,16 +541,16 @@ fn artifact_row(
 
 fn release_row(
     owner: &str,
-    miniapp_id: &str,
-    artifact: &MiniAppReleaseArtifactV1,
+    plugin_product_id: &str,
+    artifact: &PluginReleaseArtifactV1,
     release_id: &str,
     operation_id: &str,
-    ready: &nomifun_agent_contracts::MiniAppReadyRelease,
-) -> MiniAppReleaseRow {
-    MiniAppReleaseRow {
+    ready: &nomifun_agent_contracts::PluginReadyRelease,
+) -> PluginRuntimeReleaseRow {
+    PluginRuntimeReleaseRow {
         id: 0,
         release_id: release_id.to_owned(),
-        miniapp_id: miniapp_id.to_owned(),
+        plugin_product_id: plugin_product_id.to_owned(),
         owner_user_id: owner.to_owned(),
         artifact_id: artifact.artifact_id.as_ref().to_owned(),
         artifact_digest: artifact.artifact_digest.as_ref().to_owned(),
@@ -574,7 +574,7 @@ fn canonical_string<T: serde::Serialize>(value: &T) -> String {
 }
 
 fn metadata_digest(root: &std::path::Path) -> String {
-    let metadata: nomifun_agent_contracts::MiniAppWholeAppBackupMetadataV1 =
+    let metadata: nomifun_agent_contracts::PluginProductBackupMetadataV1 =
         serde_json::from_slice(&fs::read(root.join("metadata.json")).unwrap()).unwrap();
     metadata.metadata_digest().unwrap().as_ref().to_owned()
 }

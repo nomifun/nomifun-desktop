@@ -4,7 +4,7 @@
  * Fail-closed Windows signed-RC product admission.
  *
  * The runner verifies one current-source RC root before delegating to the
- * existing installed Plugin or MiniApp product journey. It never signs,
+ * existing installed Plugin N1 or Plugin M1 product journey. It never signs,
  * downloads, copies, or manufactures release artifacts.
  *
  * Expected layout:
@@ -43,7 +43,7 @@ const TARGET_TRIPLE = 'x86_64-pc-windows-msvc';
 const PRODUCT_TIMEOUT_MS = 15 * 60 * 1000;
 const SCOPES = Object.freeze({
   plugin_n1: 'scripts/validation/run-windows-plugin-product-candidate.mjs',
-  miniapp_m1: 'scripts/validation/run-windows-miniapp-product-candidate.mjs',
+  plugin_m1: 'scripts/validation/run-windows-plugin-runtime-candidate.mjs',
 });
 
 class SignedRcFailure extends Error {
@@ -66,7 +66,7 @@ function parseArgs(argv) {
   if (argv.length === 2 && argv[0] === '--scope' && Object.hasOwn(SCOPES, argv[1])) {
     return { selfTest: false, scope: argv[1] };
   }
-  throw new Error('usage: --self-test | --scope <plugin_n1|miniapp_m1>');
+  throw new Error('usage: --self-test | --scope <plugin_n1|plugin_m1>');
 }
 
 function cleanHead() {
@@ -356,7 +356,10 @@ export function assertSelfTest() {
   if (valid.status !== 'pass' || unsigned.status !== 'fail') {
     throw new Error('Authenticode evaluator self-test failed');
   }
-  if (parseArgs(['--scope', 'plugin_n1']).scope !== 'plugin_n1') {
+  if (
+    parseArgs(['--scope', 'plugin_n1']).scope !== 'plugin_n1' ||
+    parseArgs(['--scope', 'plugin_m1']).scope !== 'plugin_m1'
+  ) {
     throw new Error('scope parser self-test failed');
   }
   return {

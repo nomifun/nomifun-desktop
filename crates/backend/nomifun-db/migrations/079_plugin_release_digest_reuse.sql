@@ -1,4 +1,4 @@
--- Allow multiple immutable Release records to reference the same
+-- Allow multiple immutable Plugin Release records to reference the same
 -- content-addressed Artifact digest.
 --
 -- Artifact bytes remain unique by artifact_digest. A Release row also carries
@@ -7,21 +7,21 @@
 -- the old row. This is a forward-only table rebuild; published migrations are
 -- never edited in place.
 
-CREATE TABLE miniapp_releases_v079_sequence (
+CREATE TABLE plugin_releases_v079_sequence (
     old_sequence INTEGER NOT NULL CHECK (old_sequence >= 0)
 );
 
-INSERT INTO miniapp_releases_v079_sequence (old_sequence)
+INSERT INTO plugin_releases_v079_sequence (old_sequence)
 SELECT COALESCE(
     (
         SELECT MAX(seq)
         FROM sqlite_sequence
-        WHERE name = 'miniapp_releases'
+        WHERE name = 'plugin_releases'
     ),
     0
 );
 
-CREATE TABLE miniapp_releases_v079 (
+CREATE TABLE plugin_releases_v079 (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     release_id TEXT NOT NULL UNIQUE CHECK (
         length(release_id) = 36
@@ -29,11 +29,11 @@ CREATE TABLE miniapp_releases_v079 (
         AND release_id GLOB '????????-????-7???-[89ab]???-????????????'
         AND replace(release_id, '-', '') NOT GLOB '*[^0-9a-f]*'
     ),
-    miniapp_id TEXT NOT NULL CHECK (
-        length(miniapp_id) = 36
-        AND lower(miniapp_id) = miniapp_id
-        AND miniapp_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(miniapp_id, '-', '') NOT GLOB '*[^0-9a-f]*'
+    plugin_product_id TEXT NOT NULL CHECK (
+        length(plugin_product_id) = 36
+        AND lower(plugin_product_id) = plugin_product_id
+        AND plugin_product_id GLOB '????????-????-7???-[89ab]???-????????????'
+        AND replace(plugin_product_id, '-', '') NOT GLOB '*[^0-9a-f]*'
     ),
     owner_user_id TEXT NOT NULL CHECK (
         length(owner_user_id) = 36
@@ -120,49 +120,49 @@ CREATE TABLE miniapp_releases_v079 (
     ))
 );
 
-INSERT INTO miniapp_releases_v079 (
-    id, release_id, miniapp_id, owner_user_id, artifact_id,
+INSERT INTO plugin_releases_v079 (
+    id, release_id, plugin_product_id, owner_user_id, artifact_id,
     artifact_digest, manifest_digest, release_digest, origin_kind,
     origin_operation_id, source_kind, project_id, source_snapshot_digest,
     dependency_lock_digest, build_profile_version, build_generation,
     release_record_json, created_at
 )
 SELECT
-    id, release_id, miniapp_id, owner_user_id, artifact_id,
+    id, release_id, plugin_product_id, owner_user_id, artifact_id,
     artifact_digest, manifest_digest, release_digest, origin_kind,
     origin_operation_id, source_kind, project_id, source_snapshot_digest,
     dependency_lock_digest, build_profile_version, build_generation,
     release_record_json, created_at
-FROM miniapp_releases;
+FROM plugin_releases;
 
-DROP TABLE miniapp_releases;
-ALTER TABLE miniapp_releases_v079 RENAME TO miniapp_releases;
+DROP TABLE plugin_releases;
+ALTER TABLE plugin_releases_v079 RENAME TO plugin_releases;
 
 DELETE FROM sqlite_sequence
-WHERE name = 'miniapp_releases';
+WHERE name = 'plugin_releases';
 
 INSERT INTO sqlite_sequence (name, seq)
 SELECT
-    'miniapp_releases',
+    'plugin_releases',
     MAX(
         old_sequence,
-        COALESCE((SELECT MAX(id) FROM miniapp_releases), 0)
+        COALESCE((SELECT MAX(id) FROM plugin_releases), 0)
     )
-FROM miniapp_releases_v079_sequence;
+FROM plugin_releases_v079_sequence;
 
-DROP TABLE miniapp_releases_v079_sequence;
+DROP TABLE plugin_releases_v079_sequence;
 
-CREATE INDEX idx_miniapp_releases_artifact_id
-    ON miniapp_releases(artifact_id);
-CREATE INDEX idx_miniapp_releases_product
-    ON miniapp_releases(owner_user_id, miniapp_id, created_at DESC);
-CREATE INDEX idx_miniapp_releases_owner_user_id
-    ON miniapp_releases(owner_user_id);
-CREATE INDEX idx_miniapp_releases_miniapp_id
-    ON miniapp_releases(miniapp_id);
-CREATE INDEX idx_miniapp_releases_project_id
-    ON miniapp_releases(project_id);
-CREATE INDEX idx_miniapp_releases_origin_operation_id
-    ON miniapp_releases(origin_operation_id);
-CREATE INDEX idx_miniapp_releases_release_digest
-    ON miniapp_releases(owner_user_id, miniapp_id, release_digest);
+CREATE INDEX idx_plugin_releases_artifact_id
+    ON plugin_releases(artifact_id);
+CREATE INDEX idx_plugin_releases_product
+    ON plugin_releases(owner_user_id, plugin_product_id, created_at DESC);
+CREATE INDEX idx_plugin_releases_owner_user_id
+    ON plugin_releases(owner_user_id);
+CREATE INDEX idx_plugin_releases_plugin_product_id
+    ON plugin_releases(plugin_product_id);
+CREATE INDEX idx_plugin_releases_project_id
+    ON plugin_releases(project_id);
+CREATE INDEX idx_plugin_releases_origin_operation_id
+    ON plugin_releases(origin_operation_id);
+CREATE INDEX idx_plugin_releases_release_digest
+    ON plugin_releases(owner_user_id, plugin_product_id, release_digest);

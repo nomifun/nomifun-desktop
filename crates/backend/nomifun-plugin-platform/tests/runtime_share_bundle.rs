@@ -2,11 +2,11 @@ use std::collections::BTreeMap;
 use std::fs;
 
 use nomifun_agent_contracts::{
-    digest_bytes, ArtifactId, LocalizedMetadata, MiniAppId, MiniAppResourceContract,
-    MiniAppShareBundleId, PackageRef, StrictJsonValue,
+    digest_bytes, ArtifactId, LocalizedMetadata, PluginProductId, PluginResourceContract,
+    PluginShareBundleId, PackageRef, StrictJsonValue,
 };
 use nomifun_plugin_platform::runtime::{
-    cleanup_miniapp_share_staging, materialize_surface_entrypoint, PluginRuntimeReleaseFileBytes,
+    cleanup_plugin_share_staging, materialize_surface_entrypoint, PluginRuntimeReleaseFileBytes,
     PluginRuntimeReleasePublishRequest, PluginRuntimeReleaseStore, PluginRuntimeShareBundleError,
     PluginRuntimeShareBundleExport, PluginRuntimeShareBundleFilesystem, PluginRuntimeShareImportEntry,
     PluginRuntimeShareSourceExport, PluginRuntimeSourceFileInput, PluginRuntimeSourceScope, PluginRuntimeSourceStore,
@@ -16,7 +16,7 @@ use nomifun_plugin_platform::runtime::{
 #[test]
 fn share_bundle_roundtrip_preserves_release_and_optional_source() {
     let fixture = Fixture::new();
-    let destination = fixture.temp.path().join("notes.nomifun-miniapp");
+    let destination = fixture.temp.path().join("notes.nomifun-plugin");
     let filesystem = PluginRuntimeShareBundleFilesystem::default();
     let bundle = filesystem
         .export(fixture.export_request(true), &destination)
@@ -41,7 +41,7 @@ fn share_bundle_roundtrip_preserves_release_and_optional_source() {
         Err(PluginRuntimeShareBundleError::DestinationExists(_))
     ));
     assert_eq!(
-        cleanup_miniapp_share_staging(fixture.temp.path()).unwrap(),
+        cleanup_plugin_share_staging(fixture.temp.path()).unwrap(),
         0
     );
 }
@@ -160,12 +160,12 @@ impl Fixture {
         let temp = tempfile::tempdir().unwrap();
         let source_store = PluginRuntimeSourceStore::new(temp.path().join("source-store")).unwrap();
         let project = source_store
-            .create_project("owner-1", "miniapp-1", "project-1", "Notes")
+            .create_project("owner-1", "plugin-1", "project-1", "Notes")
             .unwrap();
         let replaced = source_store
             .replace_source(
                 "owner-1",
-                "miniapp-1",
+                "plugin-1",
                 "project-1",
                 &project.source_snapshot_digest,
                 vec![
@@ -183,7 +183,7 @@ impl Fixture {
         let source = source_store
             .read_snapshot(
                 "owner-1",
-                "miniapp-1",
+                "plugin-1",
                 "project-1",
                 &replaced.source_snapshot_digest,
             )
@@ -208,7 +208,7 @@ impl Fixture {
             PluginRuntimeReleaseStore::new(temp.path().join("release-store")).unwrap();
         let release = release_store
             .publish(PluginRuntimeReleasePublishRequest::ui_only(
-                PluginRuntimeSourceScope::new("owner-1", "miniapp-1", "project-1").unwrap(),
+                PluginRuntimeSourceScope::new("owner-1", "plugin-1", "project-1").unwrap(),
                 source.source_snapshot_digest.clone(),
                 source.dependency_lock_digest.clone(),
                 source.project.build_generation,
@@ -226,11 +226,11 @@ impl Fixture {
 
     fn export_request(&self, include_source: bool) -> PluginRuntimeShareBundleExport<'_> {
         PluginRuntimeShareBundleExport {
-            bundle_id: MiniAppShareBundleId::from(format!(
+            bundle_id: PluginShareBundleId::from(format!(
                 "bundle-{}",
                 if include_source { "source" } else { "runtime" }
             )),
-            source_miniapp_id: Some(MiniAppId::from("miniapp-1")),
+            source_plugin_product_id: Some(PluginProductId::from("plugin-1")),
             release: &self.release,
             source: include_source.then(|| PluginRuntimeShareSourceExport {
                 snapshot: &self.source,
@@ -264,11 +264,11 @@ fn static_input(
         dependency_graph_digest: digest_bytes(b"graph"),
         config_schema: StrictJsonValue(serde_json::json!({"type": "object"})),
         credential_slots: Vec::new(),
-        resource_contract: MiniAppResourceContract::default(),
+        resource_contract: PluginResourceContract::default(),
         schemas: BTreeMap::new(),
         bridge_contract_digest: digest_bytes(b"bridge"),
         contribution_package: PackageRef {
-            id: "miniapp.share-test".into(),
+            id: "plugin.share-test".into(),
             version: "1.0.0".into(),
         },
         contributions: Default::default(),

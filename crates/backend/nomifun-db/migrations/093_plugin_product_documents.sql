@@ -1,6 +1,6 @@
--- Personal library organization and recoverable authoring documents. Product
--- source/releases remain owned by the existing MiniApp application service.
-CREATE TABLE miniapp_product_documents (
+-- Personal library organization and recoverable Plugin authoring documents. Product
+-- source/releases remain owned by the existing Plugin application service.
+CREATE TABLE plugin_product_documents (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     owner_user_id TEXT NOT NULL CHECK (
         length(owner_user_id) = 36 AND lower(owner_user_id) = owner_user_id
@@ -13,4 +13,4 @@ CREATE TABLE miniapp_product_documents (
     updated_at INTEGER NOT NULL CHECK (updated_at >= 0),
     UNIQUE (owner_user_id, document_key)
 );
-CREATE INDEX idx_miniapp_product_documents_owner ON miniapp_product_documents(owner_user_id);
+CREATE INDEX idx_plugin_product_documents_owner ON plugin_product_documents(owner_user_id);

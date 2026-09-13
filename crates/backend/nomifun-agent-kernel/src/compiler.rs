@@ -3,10 +3,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use nomifun_agent_contracts::{
     ActionId, AgentPresetRevision, CapabilityConsumer, CapabilityId,
     CapabilityOperationLock, CapabilityRef, CapabilitySelection, CanonicalSchemaRef,
-    CompactOnDemandCapabilityEntry, DigestHex, ExecutionRoleId, InstallationRoleBinding,
+    CompactOnDemandCapabilityEntry, ContributionSourceKind, DigestHex, ExecutionRoleId, InstallationRoleBinding,
     ModelRouteId, OperationId, PlatformConstraint, PrecomputedActivationPlan,
     PrincipalRef, ResolvedCapability, ResolvedMcpToolLock, ResolvedRoleProviderLock,
-    ResolvedMiniAppCapability, ResolvedSkillLock, ResolvedSnapshotContent,
+    ResolvedSkillLock, ResolvedSnapshotContent,
     ResolvedSnapshotEnvelope, ResolvedSnapshotId, ResolvedSnapshotRef,
     ResourceBindingId, ResourceKind, RoleProviderSelection, RuntimeFeatureId,
     RuntimeProfileKind, RuntimeTarget, SkillId, TypedResourceBinding, VersionString,
@@ -39,10 +39,10 @@ pub struct CompilerEnvironment {
 #[derive(Clone, Debug)]
 pub struct CompileRequest {
     pub revision: AgentPresetRevision,
-    /// Exact MiniApp Active Release projections resolved by the owning
-    /// application service. MiniApp capabilities are deliberately not
+    /// Exact Plugin Product Active Release projections resolved by the owning
+    /// application service. Plugin Product capabilities are deliberately not
     /// materialized in the Kernel Plugin Registry.
-    pub miniapp_capabilities: Vec<ResolvedMiniAppCapability>,
+    pub plugin_product_capabilities: Vec<ResolvedCapability>,
     pub principal: PrincipalRef,
     pub scene: String,
     pub surface: String,
@@ -105,18 +105,6 @@ impl CompiledSnapshot {
             .initial_capabilities
             .iter()
             .chain(&self.envelope.content.on_demand_capabilities)
-            .find(|capability| &capability.capability.id == capability_id)
-    }
-
-    pub fn resolved_miniapp_capability(
-        &self,
-        capability_id: &CapabilityId,
-    ) -> Option<&ResolvedMiniAppCapability> {
-        self.envelope
-            .content
-            .initial_miniapp_capabilities
-            .iter()
-            .chain(&self.envelope.content.on_demand_miniapp_capabilities)
             .find(|capability| &capability.capability.id == capability_id)
     }
 
@@ -188,23 +176,15 @@ struct CompiledRuntimeProfileDigestInput {
     profile_kind: RuntimeProfileKind,
     required_runtime_features: BTreeSet<RuntimeFeatureId>,
     capability_operation_locks: Vec<CapabilityOperationLock>,
-    initial_capabilities: Vec<CapabilityId>,
-    on_demand_capabilities: Vec<CapabilityId>,
+    initial_capabilities: Vec<ResolvedCapability>,
+    on_demand_capabilities: Vec<ResolvedCapability>,
     on_demand_activation_plans: BTreeMap<CapabilityId, PrecomputedActivationPlan>,
+    compact_on_demand_index: Vec<CompactOnDemandCapabilityEntry>,
+    required_resource_kinds: BTreeSet<ResourceKind>,
     authority_policies: BTreeMap<CapabilityId, CompiledCapabilityPolicy>,
     skill_ids: Vec<SkillId>,
     model_route_refs: BTreeMap<String, ModelRouteId>,
     resolved_role_providers: BTreeMap<ExecutionRoleId, ResolvedRoleProviderLock>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    miniapp: Option<MiniAppRuntimeProfileDigestInput>,
-}
-
-#[derive(Serialize)]
-struct MiniAppRuntimeProfileDigestInput {
-    initial_capabilities: Vec<ResolvedMiniAppCapability>,
-    on_demand_capabilities: Vec<ResolvedMiniAppCapability>,
-    compact_on_demand_index: Vec<CompactOnDemandCapabilityEntry>,
-    required_resource_kinds: BTreeSet<ResourceKind>,
 }
 
 pub struct AgentPresetCompiler;
@@ -227,27 +207,33 @@ impl AgentPresetCompiler {
         let on_demand_direct = direct_selection_map(
             &request.revision.payload.on_demand_capabilities,
         );
-        let miniapp_by_id = validate_miniapp_inputs(
+        let plugin_product_by_id = validate_plugin_product_inputs(
             registry,
             &request.revision,
-            &request.miniapp_capabilities,
+            &request.plugin_product_capabilities,
         )?;
-        let (initial_miniapp_capabilities, on_demand_miniapp_capabilities) =
-            partition_miniapp_capabilities(
-                &request.miniapp_capabilities,
+        let (
+            initial_plugin_product_capabilities,
+            on_demand_plugin_product_capabilities,
+        ) = partition_plugin_product_capabilities(
+                &request.plugin_product_capabilities,
                 &initial_direct,
                 &on_demand_direct,
             )?;
         let initial_plugin_direct = initial_direct
             .iter()
-            .filter(|(capability_id, _)| !miniapp_by_id.contains_key(*capability_id))
+            .filter(|(capability_id, _)| {
+                !plugin_product_by_id.contains_key(*capability_id)
+            })
             .map(|(capability_id, selection)| {
                 (capability_id.clone(), *selection)
             })
             .collect::<BTreeMap<_, _>>();
         let on_demand_plugin_direct = on_demand_direct
             .iter()
-            .filter(|(capability_id, _)| !miniapp_by_id.contains_key(*capability_id))
+            .filter(|(capability_id, _)| {
+                !plugin_product_by_id.contains_key(*capability_id)
+            })
             .map(|(capability_id, selection)| {
                 (capability_id.clone(), *selection)
             })
@@ -263,8 +249,18 @@ impl AgentPresetCompiler {
         validate_revision_contribution_locks(
             registry,
             &request.revision,
-            &miniapp_by_id,
+            &plugin_product_by_id,
         )?;
+        for capability in plugin_product_by_id.values() {
+            for feature in &capability.required_runtime_features {
+                if !environment.available_runtime_features.contains(feature) {
+                    return Err(KernelError::RuntimeFeatureUnavailable {
+                        capability_id: capability.capability.id.clone(),
+                        feature: feature.as_ref().to_owned(),
+                    });
+                }
+            }
+        }
 
         let mut paths = BTreeMap::<CapabilityId, Vec<CapabilityId>>::new();
         let mut initial_ids = BTreeSet::new();
@@ -309,36 +305,36 @@ impl AgentPresetCompiler {
             &initial_ids,
             &on_demand_bundles,
         )?;
-        let initial_capabilities = resolved_capabilities(
+        let mut initial_capabilities = resolved_capabilities(
             registry,
             &initial_ids,
             &paths,
         )?;
-        let on_demand_capabilities = resolved_capabilities(
+        let mut on_demand_capabilities = resolved_capabilities(
             registry,
             &on_demand_ids,
             &paths,
         )?;
         let mut authority_policies = authority_policies;
-        merge_miniapp_authority_policies(
+        merge_plugin_product_authority_policies(
             &mut authority_policies,
-            &initial_miniapp_capabilities,
-            &on_demand_miniapp_capabilities,
+            &initial_plugin_product_capabilities,
+            &on_demand_plugin_product_capabilities,
         )?;
         let mut activation_plans = compile_activation_plans(
             registry,
             &on_demand_bundles,
             &request.revision.payload.model_route_refs,
         )?;
-        let miniapp_activation_plans = compile_miniapp_activation_plans(
-            &on_demand_miniapp_capabilities,
+        let plugin_product_activation_plans = compile_plugin_product_activation_plans(
+            &on_demand_plugin_product_capabilities,
             &request.revision.payload.model_route_refs,
         )?;
-        for (capability_id, plan) in miniapp_activation_plans {
+        for (capability_id, plan) in plugin_product_activation_plans {
             if activation_plans.insert(capability_id.clone(), plan).is_some() {
                 return Err(KernelError::InvalidPresetRevision {
                     reason: format!(
-                        "MiniApp activation plan collides with Plugin capability {}",
+                        "Plugin Product activation plan collides with mounted capability {}",
                         capability_id.as_ref()
                     ),
                 });
@@ -353,13 +349,17 @@ impl AgentPresetCompiler {
             &on_demand_plugin_selections,
             &activation_plans,
         )?;
-        compact_on_demand_index.extend(compile_miniapp_compact_index(
-            &on_demand_miniapp_capabilities,
+        compact_on_demand_index.extend(compile_plugin_product_compact_index(
+            &on_demand_plugin_product_capabilities,
             &activation_plans,
         )?);
         compact_on_demand_index.sort_by(|left, right| {
             left.capability_id.cmp(&right.capability_id)
         });
+        initial_capabilities.extend(initial_plugin_product_capabilities);
+        on_demand_capabilities.extend(on_demand_plugin_product_capabilities);
+        initial_capabilities.sort_by(|left, right| left.capability.cmp(&right.capability));
+        on_demand_capabilities.sort_by(|left, right| left.capability.cmp(&right.capability));
         let skill_locks = compile_skill_locks(
             registry,
             &request.revision.payload.skill_bindings,
@@ -373,23 +373,16 @@ impl AgentPresetCompiler {
             &ceiling,
             environment,
         )?;
-        let miniapp_ids = initial_miniapp_capabilities
+        let capability_allowlist = initial_capabilities
             .iter()
-            .chain(&on_demand_miniapp_capabilities)
+            .chain(&on_demand_capabilities)
             .map(|capability| capability.capability.id.clone())
             .collect::<BTreeSet<_>>();
-        let capability_allowlist = ceiling
-            .union(&miniapp_ids)
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        let capability_runtime_features = ceiling
+        let capability_runtime_features = initial_capabilities
             .iter()
-            .flat_map(|capability_id| {
-                registry.capabilities[capability_id]
-                    .manifest
-                    .requires_runtime_features
-                    .iter()
-                    .map(|feature| feature.id.clone())
+            .chain(&on_demand_capabilities)
+            .flat_map(|capability| {
+                capability.required_runtime_features.iter().cloned()
             })
             .collect::<BTreeSet<_>>();
         let required_runtime_features = if environment.required_runtime_profile
@@ -399,6 +392,10 @@ impl AgentPresetCompiler {
         } else {
             capability_runtime_features
         };
+        let required_resource_kinds = authority_policies
+            .values()
+            .flat_map(|policy| policy.required_resource_kinds.iter().cloned())
+            .collect::<BTreeSet<_>>();
         let compiled_runtime_profile_digest =
             digest_payload(&CompiledRuntimeProfileDigestInput {
                 profile_kind: environment.required_runtime_profile,
@@ -407,16 +404,12 @@ impl AgentPresetCompiler {
                     .iter()
                     .chain(&on_demand_capabilities)
                     .map(resolved_capability_operation_lock)
-                    .chain(
-                        initial_miniapp_capabilities
-                            .iter()
-                            .chain(&on_demand_miniapp_capabilities)
-                            .map(resolved_miniapp_capability_operation_lock),
-                    )
                     .collect(),
-                initial_capabilities: initial_ids.iter().cloned().collect(),
-                on_demand_capabilities: on_demand_ids.iter().cloned().collect(),
+                initial_capabilities: initial_capabilities.clone(),
+                on_demand_capabilities: on_demand_capabilities.clone(),
                 on_demand_activation_plans: activation_plans.clone(),
+                compact_on_demand_index: compact_on_demand_index.clone(),
+                required_resource_kinds: required_resource_kinds.clone(),
                 authority_policies: authority_policies.clone(),
                 skill_ids: skill_locks
                     .iter()
@@ -424,31 +417,6 @@ impl AgentPresetCompiler {
                     .collect(),
                 model_route_refs: request.revision.payload.model_route_refs.clone(),
                 resolved_role_providers: resolved_role_providers.clone(),
-                miniapp: (!initial_miniapp_capabilities.is_empty()
-                    || !on_demand_miniapp_capabilities.is_empty())
-                .then(|| MiniAppRuntimeProfileDigestInput {
-                    initial_capabilities: initial_miniapp_capabilities.clone(),
-                    on_demand_capabilities: on_demand_miniapp_capabilities.clone(),
-                    compact_on_demand_index: compact_on_demand_index
-                        .iter()
-                        .filter(|entry| {
-                            initial_miniapp_capabilities
-                                .iter()
-                                .chain(&on_demand_miniapp_capabilities)
-                                .any(|capability| {
-                                    capability.capability.id == entry.capability_id
-                                })
-                        })
-                        .cloned()
-                        .collect(),
-                    required_resource_kinds: initial_miniapp_capabilities
-                        .iter()
-                        .chain(&on_demand_miniapp_capabilities)
-                        .flat_map(|capability| {
-                            capability.required_resource_kinds.iter().cloned()
-                        })
-                        .collect(),
-                }),
             })
             .map_err(|error| KernelError::Digest {
                 reason: error.to_string(),
@@ -460,10 +428,6 @@ impl AgentPresetCompiler {
             .map_err(|error| KernelError::InvalidPresetRevision {
                 reason: error.message,
             })?;
-        let required_resource_kinds = authority_policies
-            .values()
-            .flat_map(|policy| policy.required_resource_kinds.iter().cloned())
-            .collect();
         let content = ResolvedSnapshotContent {
             schema_version: VersionString::from("1.0.0"),
             resolver_version: environment.resolver_version.clone(),
@@ -481,8 +445,6 @@ impl AgentPresetCompiler {
             chat_route_identity,
             initial_capabilities,
             on_demand_capabilities,
-            initial_miniapp_capabilities,
-            on_demand_miniapp_capabilities,
             required_resource_kinds,
             on_demand_activation_plans: activation_plans,
             compact_on_demand_index,
@@ -544,11 +506,11 @@ fn direct_selection_map(
         .collect()
 }
 
-fn validate_miniapp_inputs<'a>(
+fn validate_plugin_product_inputs<'a>(
     registry: &MaterializedRegistry,
     revision: &AgentPresetRevision,
-    capabilities: &'a [ResolvedMiniAppCapability],
-) -> Result<BTreeMap<CapabilityId, &'a ResolvedMiniAppCapability>, KernelError> {
+    capabilities: &'a [ResolvedCapability],
+) -> Result<BTreeMap<CapabilityId, &'a ResolvedCapability>, KernelError> {
     let mut by_id = BTreeMap::new();
     let mut contribution_ids = BTreeSet::new();
     let mut publication_facts = BTreeMap::new();
@@ -559,17 +521,42 @@ fn validate_miniapp_inputs<'a>(
             .map_err(|error| KernelError::InvalidPresetRevision {
                 reason: error.message,
             })?;
+        if capability.contribution_lock.source_kind
+            != ContributionSourceKind::PluginProductActiveRelease
+        {
+            return Err(KernelError::InvalidPresetRevision {
+                reason: "application-supplied capabilities must bind a Plugin Product Active Release"
+                    .to_owned(),
+            });
+        }
+        let product_id = capability.plugin_product_id.as_ref().ok_or_else(|| {
+            KernelError::InvalidPresetRevision {
+                reason: "Plugin Product capability is missing plugin_product_id".to_owned(),
+            }
+        })?;
+        let release = capability.active_release.as_ref().ok_or_else(|| {
+            KernelError::InvalidPresetRevision {
+                reason: "Plugin Product capability is missing active_release".to_owned(),
+            }
+        })?;
+        if capability.target_artifact_digest != release.release_digest {
+            return Err(KernelError::InvalidPresetRevision {
+                reason:
+                    "Plugin Product capability target Artifact differs from its Active Release"
+                        .to_owned(),
+            });
+        }
         if capability.capability.id.as_ref().trim().is_empty()
             || capability.capability.version.as_ref().trim().is_empty()
         {
             return Err(KernelError::InvalidPresetRevision {
-                reason: "MiniApp capability reference must be non-empty".to_owned(),
+                reason: "Plugin Product capability reference must be non-empty".to_owned(),
             });
         }
         if registry.capability(&capability.capability.id).is_some() {
             return Err(KernelError::InvalidPresetRevision {
                 reason: format!(
-                    "MiniApp capability {} must not be present in the Kernel Plugin Registry",
+                    "Plugin Product capability {} must not be present in the Kernel Plugin Registry",
                     capability.capability.id.as_ref()
                 ),
             });
@@ -580,7 +567,7 @@ fn validate_miniapp_inputs<'a>(
             if action.action_id.as_ref().trim().is_empty() {
                 return Err(KernelError::InvalidPresetRevision {
                     reason: format!(
-                        "MiniApp capability {} contains an empty action ID",
+                        "Plugin Product capability {} contains an empty action ID",
                         capability.capability.id.as_ref()
                     ),
                 });
@@ -588,7 +575,7 @@ fn validate_miniapp_inputs<'a>(
             if !action_ids.insert(action.action_id.clone()) {
                 return Err(KernelError::InvalidPresetRevision {
                     reason: format!(
-                        "MiniApp capability {} declares duplicate action {}",
+                        "Plugin Product capability {} declares duplicate action {}",
                         capability.capability.id.as_ref(),
                         action.action_id.as_ref()
                     ),
@@ -612,7 +599,7 @@ fn validate_miniapp_inputs<'a>(
         {
             return Err(KernelError::InvalidPresetRevision {
                 reason: format!(
-                    "MiniApp capability {} contains an empty resource kind",
+                    "Plugin Product capability {} contains an empty resource kind",
                     capability.capability.id.as_ref()
                 ),
             });
@@ -623,7 +610,7 @@ fn validate_miniapp_inputs<'a>(
         {
             return Err(KernelError::InvalidPresetRevision {
                 reason: format!(
-                    "MiniApp capability {} is supplied more than once",
+                    "Plugin Product capability {} is supplied more than once",
                     capability.capability.id.as_ref()
                 ),
             });
@@ -631,7 +618,7 @@ fn validate_miniapp_inputs<'a>(
         if !contribution_ids.insert(capability.contribution_id.clone()) {
             return Err(KernelError::InvalidPresetRevision {
                 reason: format!(
-                    "MiniApp contribution {} is supplied more than once",
+                    "Plugin Product contribution {} is supplied more than once",
                     capability.contribution_id.as_ref()
                 ),
             });
@@ -644,13 +631,13 @@ fn validate_miniapp_inputs<'a>(
             capability.source_package.clone(),
         );
         if let Some(existing) = publication_facts
-            .insert(capability.miniapp_id.clone(), facts.clone())
+            .insert(product_id.clone(), facts.clone())
         {
             if existing != facts {
                 return Err(KernelError::InvalidPresetRevision {
                     reason: format!(
-                        "MiniApp {} has inconsistent Active Release or Catalog facts",
-                        capability.miniapp_id.as_ref()
+                        "Plugin Product {} has inconsistent Active Release or Catalog facts",
+                        product_id.as_ref()
                     ),
                 });
             }
@@ -680,7 +667,7 @@ fn validate_miniapp_inputs<'a>(
         let Some(selection) = matched_selection else {
             return Err(KernelError::InvalidPresetRevision {
                 reason: format!(
-                    "MiniApp capability {} is not selected by the Revision",
+                    "Plugin Product capability {} is not selected by the Revision",
                     capability.capability.id.as_ref()
                 ),
             });
@@ -703,7 +690,7 @@ fn validate_miniapp_inputs<'a>(
         if selection.action_allowlist != capability.action_allowlist {
             return Err(KernelError::InvalidPresetRevision {
                 reason: format!(
-                    "MiniApp capability {} action allowlist differs from its Revision selection",
+                    "Plugin Product capability {} action allowlist differs from its Revision selection",
                     capability.capability.id.as_ref()
                 ),
             });
@@ -713,14 +700,14 @@ fn validate_miniapp_inputs<'a>(
     Ok(by_id)
 }
 
-fn partition_miniapp_capabilities(
-    capabilities: &[ResolvedMiniAppCapability],
+fn partition_plugin_product_capabilities(
+    capabilities: &[ResolvedCapability],
     initial: &BTreeMap<CapabilityId, &CapabilitySelection>,
     on_demand: &BTreeMap<CapabilityId, &CapabilitySelection>,
 ) -> Result<
     (
-        Vec<ResolvedMiniAppCapability>,
-        Vec<ResolvedMiniAppCapability>,
+        Vec<ResolvedCapability>,
+        Vec<ResolvedCapability>,
     ),
     KernelError,
 > {
@@ -734,14 +721,14 @@ fn partition_miniapp_capabilities(
         } else {
             return Err(KernelError::InvalidPresetRevision {
                 reason: format!(
-                    "MiniApp capability {} has no valid Revision placement",
+                    "Plugin Product capability {} has no valid Revision placement",
                     capability.capability.id.as_ref()
                 ),
             });
         }
     }
-    let sort = |left: &ResolvedMiniAppCapability,
-                right: &ResolvedMiniAppCapability| {
+    let sort = |left: &ResolvedCapability,
+                right: &ResolvedCapability| {
         left.capability
             .cmp(&right.capability)
             .then_with(|| left.contribution_id.cmp(&right.contribution_id))
@@ -792,7 +779,7 @@ fn validate_direct_selections(
 fn validate_revision_contribution_locks(
     registry: &MaterializedRegistry,
     revision: &AgentPresetRevision,
-    miniapp_capabilities: &BTreeMap<CapabilityId, &ResolvedMiniAppCapability>,
+    plugin_product_capabilities: &BTreeMap<CapabilityId, &ResolvedCapability>,
 ) -> Result<(), KernelError> {
     for selection in revision
         .payload
@@ -800,8 +787,10 @@ fn validate_revision_contribution_locks(
         .iter()
         .chain(&revision.payload.on_demand_capabilities)
     {
-        if let Some(miniapp) = miniapp_capabilities.get(&selection.capability.id) {
-            if miniapp.capability != selection.capability {
+        if let Some(plugin_product) =
+            plugin_product_capabilities.get(&selection.capability.id)
+        {
+            if plugin_product.capability != selection.capability {
                 return Err(KernelError::CapabilityNotMaterialized {
                     capability_id: selection.capability.id.clone(),
                     version: selection.capability.version.clone(),
@@ -810,20 +799,19 @@ fn validate_revision_contribution_locks(
             let frozen = revision
                 .contribution_locks
                 .iter()
-                .find(|lock| lock.contribution_id == miniapp.contribution_id)
+                .find(|lock| lock.contribution_id == plugin_product.contribution_id)
                 .ok_or_else(|| KernelError::CapabilityProvenanceDrift {
                     capability_id: selection.capability.id.clone(),
                     reason: format!(
-                        "Revision is missing MiniApp contribution lock {}",
-                        miniapp.contribution_id.as_ref()
+                        "Revision is missing Plugin Product contribution lock {}",
+                        plugin_product.contribution_id.as_ref()
                     ),
                 })?;
-            if frozen != &miniapp.contribution_lock {
+            if frozen != &plugin_product.contribution_lock {
                 return Err(KernelError::CapabilityProvenanceDrift {
                     capability_id: selection.capability.id.clone(),
-                    reason:
-                        "Revision MiniApp contribution lock does not match the exact projection"
-                            .to_owned(),
+                    reason: "Revision Plugin Product contribution lock does not match the exact projection"
+                        .to_owned(),
                 });
             }
             continue;
@@ -859,14 +847,14 @@ fn validate_revision_contribution_locks(
         }
     }
     for lock in &revision.contribution_locks {
-        if lock.source_kind == nomifun_agent_contracts::ContributionSourceKind::MiniAppActiveRelease
-            && !miniapp_capabilities
+        if lock.source_kind == ContributionSourceKind::PluginProductActiveRelease
+            && !plugin_product_capabilities
                 .values()
                 .any(|capability| capability.contribution_lock == *lock)
         {
             return Err(KernelError::InvalidPresetRevision {
                 reason: format!(
-                    "Revision contains an unselected MiniApp contribution lock {}",
+                    "Revision contains an unselected Plugin Product contribution lock {}",
                     lock.contribution_id.as_ref()
                 ),
             });
@@ -1143,7 +1131,7 @@ fn resolved_capabilities(
                 source_package: capability.manifest.package.clone(),
                 contribution_id: capability.contribution_id.clone(),
                 contribution_lock: capability.contribution_lock.clone(),
-                resolved_mount_id: capability.mount_id.clone(),
+                resolved_mount_id: Some(capability.mount_id.clone()),
                 resolved_source: capability.source.clone(),
                 target_artifact_digest: capability.target_artifact_digest.clone(),
                 schema_digest: capability.schema_digest.clone(),
@@ -1157,6 +1145,15 @@ fn resolved_capabilities(
                     .iter()
                     .map(|feature| feature.id.clone())
                     .collect(),
+                plugin_product_id: None,
+                active_release: None,
+                active_release_epoch: None,
+                catalog_digest: None,
+                display_name: None,
+                description: None,
+                actions: Vec::new(),
+                required_resource_kinds: capability.manifest.contributions.resource_kinds.clone(),
+                action_allowlist: BTreeSet::new(),
             })
         })
         .collect()
@@ -1173,21 +1170,10 @@ fn resolved_capability_operation_lock(
     }
 }
 
-fn resolved_miniapp_capability_operation_lock(
-    capability: &ResolvedMiniAppCapability,
-) -> CapabilityOperationLock {
-    CapabilityOperationLock {
-        capability: capability.capability.clone(),
-        consumer: CapabilityConsumer::Agent,
-        contribution: capability.contribution_lock.clone(),
-        target_artifact_digest: Some(capability.active_release.release_digest.clone()),
-    }
-}
-
-fn merge_miniapp_authority_policies(
+fn merge_plugin_product_authority_policies(
     policies: &mut BTreeMap<CapabilityId, CompiledCapabilityPolicy>,
-    initial: &[ResolvedMiniAppCapability],
-    on_demand: &[ResolvedMiniAppCapability],
+    initial: &[ResolvedCapability],
+    on_demand: &[ResolvedCapability],
 ) -> Result<(), KernelError> {
     for capability in initial.iter().chain(on_demand) {
         let declared_actions = capability
@@ -1213,7 +1199,7 @@ fn merge_miniapp_authority_policies(
         {
             return Err(KernelError::InvalidPresetRevision {
                 reason: format!(
-                    "MiniApp capability {} collides with a Plugin capability policy",
+                    "Plugin Product capability {} collides with a Plugin capability policy",
                     capability.capability.id.as_ref()
                 ),
             });
@@ -1266,8 +1252,8 @@ fn compile_activation_plans(
         .collect()
 }
 
-fn compile_miniapp_activation_plans(
-    capabilities: &[ResolvedMiniAppCapability],
+fn compile_plugin_product_activation_plans(
+    capabilities: &[ResolvedCapability],
     model_routes: &BTreeMap<String, ModelRouteId>,
 ) -> Result<BTreeMap<CapabilityId, PrecomputedActivationPlan>, KernelError> {
     let model_route_refs = model_routes
@@ -1296,7 +1282,7 @@ fn compile_miniapp_activation_plans(
         {
             return Err(KernelError::InvalidPresetRevision {
                 reason: format!(
-                    "duplicate MiniApp activation plan for {}",
+                    "duplicate Plugin Product activation plan for {}",
                     capability.capability.id.as_ref()
                 ),
             });
@@ -1333,8 +1319,8 @@ fn compile_compact_index(
     Ok(entries)
 }
 
-fn compile_miniapp_compact_index(
-    capabilities: &[ResolvedMiniAppCapability],
+fn compile_plugin_product_compact_index(
+    capabilities: &[ResolvedCapability],
     plans: &BTreeMap<CapabilityId, PrecomputedActivationPlan>,
 ) -> Result<Vec<CompactOnDemandCapabilityEntry>, KernelError> {
     let mut entries = Vec::with_capacity(capabilities.len());
@@ -1342,22 +1328,27 @@ fn compile_miniapp_compact_index(
         let Some(plan) = plans.get(&capability.capability.id) else {
             return Err(KernelError::InvalidPresetRevision {
                 reason: format!(
-                    "MiniApp capability {} has no activation plan",
+                    "Plugin Product capability {} has no activation plan",
                     capability.capability.id.as_ref()
                 ),
             });
         };
+        let display_name = capability
+            .display_name
+            .as_deref()
+            .unwrap_or(capability.capability.id.as_ref());
+        let description = capability.description.as_deref().unwrap_or_default();
         entries.push(CompactOnDemandCapabilityEntry {
             capability_id: capability.capability.id.clone(),
-            display_name: capability.display_name.clone(),
+            display_name: display_name.to_owned(),
             short_description: truncate_chars(
-                &capability.description,
+                description,
                 COMPACT_DESCRIPTION_CHARS,
             ),
             search_terms: compact_search_terms_from_values([
                 capability.capability.id.as_ref(),
-                capability.display_name.as_str(),
-                capability.description.as_str(),
+                display_name,
+                description,
             ]),
             activation_plan_digest: digest_payload(plan).map_err(|error| {
                 KernelError::Digest {
@@ -1681,59 +1672,70 @@ mod tests {
     use nomifun_agent_contracts::{
         ActionId, AgentPresetId, AgentPresetRevision, AgentPresetRevisionPayload,
         CapabilityActionDescriptor, CapabilityRef, ContributionId,
-        ContributionLock, ContributionSourceKind, DigestHex, EffectClass, MiniAppId,
-        MiniAppReleaseId, MiniAppReleaseRef, PackageId, PackageRef, PresetRevisionRef,
-        PrincipalRef, ResolvedMiniAppCapability, ToolPresentationKind, UserId,
+        ContributionLock, ContributionSourceKind, DigestHex, EffectClass, PluginProductId,
+        PluginReleaseId, PluginReleaseRef, PluginSourceKind, PluginSourceMetadata,
+        PackageId, PackageRef, PresetRevisionRef, PrincipalRef, ResolvedCapability,
+        ToolPresentationKind, UserId,
     };
 
     use super::*;
 
     const VERSION: &str = "1.0.0";
-    const CAPABILITY_ID: &str = "miniapp.fixture.echo";
-    const ACTION_ID: &str = "miniapp.fixture.echo.invoke";
-    const CONTRIBUTION_ID: &str = "capability:miniapp.fixture.echo";
-    const MINIAPP_ID: &str = "miniapp-fixture";
+    const CAPABILITY_ID: &str = "plugin.fixture.echo";
+    const ACTION_ID: &str = "plugin.fixture.echo.invoke";
+    const CONTRIBUTION_ID: &str = "capability:plugin.fixture.echo";
+    const PLUGIN_PRODUCT_ID: &str = "plugin-fixture";
 
     fn digest(fill: char) -> DigestHex {
         DigestHex::from(fill.to_string().repeat(64))
     }
 
-    fn miniapp_capability(action_allowlist: BTreeSet<ActionId>) -> ResolvedMiniAppCapability {
+    fn plugin_product_capability(action_allowlist: BTreeSet<ActionId>) -> ResolvedCapability {
         let contribution_lock = ContributionLock {
-            source_kind: ContributionSourceKind::MiniAppActiveRelease,
-            source_identity: format!("miniapp:{MINIAPP_ID}").into(),
+            source_kind: ContributionSourceKind::PluginProductActiveRelease,
+            source_identity: format!("plugin-product:{PLUGIN_PRODUCT_ID}").into(),
             mount_id: None,
-            miniapp_id: Some(MiniAppId::from(MINIAPP_ID)),
+            plugin_product_id: Some(PluginProductId::from(PLUGIN_PRODUCT_ID)),
             mcp_binding_id: None,
             contribution_id: ContributionId::from(CONTRIBUTION_ID),
             contract_digest: digest('a'),
         };
-        ResolvedMiniAppCapability {
+        ResolvedCapability {
             capability: CapabilityRef {
                 id: CAPABILITY_ID.into(),
                 version: VERSION.into(),
             },
             source_package: PackageRef {
-                id: PackageId::from("miniapp.fixture"),
+                id: PackageId::from("plugin.fixture"),
                 version: VERSION.into(),
             },
             contribution_id: ContributionId::from(CONTRIBUTION_ID),
             contribution_lock,
-            miniapp_id: MiniAppId::from(MINIAPP_ID),
-            active_release: MiniAppReleaseRef {
-                release_id: MiniAppReleaseId::from("release-fixture"),
+            resolved_mount_id: None,
+            resolved_source: PluginSourceMetadata {
+                source_kind: PluginSourceKind::ManagedLocal,
+                source_identity: format!("plugin-product:{PLUGIN_PRODUCT_ID}"),
+                source_digest: Some(digest('b')),
+            },
+            target_artifact_digest: digest('b'),
+            schema_digest: digest('a'),
+            dependency_path: vec![CapabilityId::from(CAPABILITY_ID)],
+            required_runtime_features: BTreeSet::new(),
+            plugin_product_id: Some(PluginProductId::from(PLUGIN_PRODUCT_ID)),
+            active_release: Some(PluginReleaseRef {
+                release_id: PluginReleaseId::from("release-fixture"),
                 artifact_id: "artifact-fixture".into(),
                 release_digest: digest('b'),
                 manifest_digest: digest('c'),
-            },
-            active_release_epoch: 7,
-            catalog_digest: digest('d'),
-            display_name: "Fixture Echo".to_owned(),
-            description: "Echo from a MiniApp Active Release".to_owned(),
+            }),
+            active_release_epoch: Some(7),
+            catalog_digest: Some(digest('d')),
+            display_name: Some("Fixture Echo".to_owned()),
+            description: Some("Echo from a Plugin Product Active Release".to_owned()),
             actions: vec![CapabilityActionDescriptor {
                 action_id: ActionId::from(ACTION_ID),
-                input_schema: "schema://miniapp.fixture.echo/input".into(),
-                output_schema: "schema://miniapp.fixture.echo/output".into(),
+                input_schema: "schema://plugin.fixture.echo/input".into(),
+                output_schema: "schema://plugin.fixture.echo/output".into(),
                 effect_class: EffectClass::Pure,
                 presentation: ToolPresentationKind::FunctionTool,
             }],
@@ -1808,11 +1810,11 @@ mod tests {
 
     fn compile_request(
         revision: AgentPresetRevision,
-        capability: ResolvedMiniAppCapability,
+        capability: ResolvedCapability,
     ) -> CompileRequest {
         CompileRequest {
             revision,
-            miniapp_capabilities: vec![capability],
+            plugin_product_capabilities: vec![capability],
             principal: PrincipalRef {
                 principal_kind: "user".to_owned(),
                 principal_id: "fixture-user".to_owned(),
@@ -1832,9 +1834,9 @@ mod tests {
     }
 
     #[test]
-    fn compiler_keeps_miniapp_out_of_registry_closure_and_freezes_initial_policy() {
+    fn compiler_keeps_plugin_product_out_of_registry_closure_and_freezes_initial_policy() {
         let action_allowlist = BTreeSet::from([ActionId::from(ACTION_ID)]);
-        let capability = miniapp_capability(action_allowlist.clone());
+        let capability = plugin_product_capability(action_allowlist.clone());
         let saved_revision = revision(
             CapabilityPlacement::Initial,
             action_allowlist,
@@ -1845,10 +1847,9 @@ mod tests {
             &environment(),
             compile_request(saved_revision, capability),
         )
-        .expect("MiniApp capability should compile without Kernel registry materialization");
+        .expect("Plugin Product capability should compile without Kernel registry materialization");
 
-        assert!(compiled.content().initial_capabilities.is_empty());
-        assert_eq!(compiled.content().initial_miniapp_capabilities.len(), 1);
+        assert_eq!(compiled.content().initial_capabilities.len(), 1);
         assert!(compiled.content().on_demand_activation_plans.is_empty());
         assert!(
             compiled
@@ -1859,16 +1860,16 @@ mod tests {
         assert_eq!(
             compiled
                 .policy(&CapabilityId::from(CAPABILITY_ID))
-                .expect("MiniApp authority policy")
+                .expect("Plugin Product authority policy")
                 .required_resource_kinds,
             BTreeSet::from(["workspace".into()])
         );
     }
 
     #[test]
-    fn compiler_builds_miniapp_on_demand_plan_and_rejects_lock_drift() {
+    fn compiler_builds_plugin_product_on_demand_plan_and_rejects_lock_drift() {
         let action_allowlist = BTreeSet::new();
-        let capability = miniapp_capability(action_allowlist.clone());
+        let capability = plugin_product_capability(action_allowlist.clone());
         let saved_revision = revision(
             CapabilityPlacement::OnDemand,
             action_allowlist,
@@ -1879,7 +1880,7 @@ mod tests {
             &environment(),
             compile_request(saved_revision.clone(), capability.clone()),
         )
-        .expect("on-demand MiniApp capability should compile");
+        .expect("on-demand Plugin Product capability should compile");
         assert!(
             compiled
                 .content()
@@ -1890,15 +1891,15 @@ mod tests {
         assert_eq!(
             compiled
                 .content()
-                .on_demand_miniapp_capabilities
+                .on_demand_capabilities
                 .first()
-                .expect("on-demand MiniApp projection")
+                .expect("on-demand Plugin Product projection")
                 .active_release_epoch,
-            7
+            Some(7)
         );
 
         let mut drifted_lock = capability.contribution_lock.clone();
-        drifted_lock.source_identity = "miniapp:other".into();
+        drifted_lock.source_identity = "plugin-product:other".into();
         let drifted = revision(
             CapabilityPlacement::OnDemand,
             BTreeSet::new(),
@@ -1909,7 +1910,7 @@ mod tests {
             &environment(),
             compile_request(drifted, capability),
         )
-        .expect_err("drifted MiniApp revision lock must fail closed");
+        .expect_err("drifted Plugin Product revision lock must fail closed");
         assert!(matches!(
             error,
             KernelError::CapabilityProvenanceDrift { .. }

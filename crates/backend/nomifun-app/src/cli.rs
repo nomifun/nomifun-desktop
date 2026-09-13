@@ -778,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    fn headless_plugin_and_miniapp_commands_parse_with_connection_options() {
+    fn headless_plugin_commands_parse_with_connection_options() {
         let list = Cli::try_parse_from([
             "nomicore",
             "plugin",
@@ -852,23 +852,23 @@ mod tests {
                     == super::DEFAULT_PLUGIN_TEST_INPUT_DIGEST
         ));
 
-        let miniapp = Cli::try_parse_from([
+        let runtime = Cli::try_parse_from([
             "nomicore",
             "plugin",
             "runtime",
             "show",
-            "miniapp-1",
+            "plugin-1",
             "--token",
             "secret",
         ])
         .unwrap();
         assert!(matches!(
-            miniapp.command,
+            runtime.command,
             Some(Command::Plugin {
                 operation: super::PluginCommand::Runtime {
                     operation: super::PluginRuntimeCommand::Show(args),
                 },
-            }) if args.plugin_id == "miniapp-1"
+            }) if args.plugin_id == "plugin-1"
                 && args.connection.token.as_deref() == Some("secret")
         ));
 
@@ -1021,8 +1021,8 @@ mod tests {
         assert!(mount.find_subcommand("delete-data").is_some());
 
         assert!(command.find_subcommand("miniapp").is_none());
-        let miniapp = plugin.find_subcommand("runtime").unwrap();
-        assert!(miniapp.find_subcommand("list").is_some());
-        assert!(miniapp.find_subcommand("show").is_some());
+        let runtime = plugin.find_subcommand("runtime").unwrap();
+        assert!(runtime.find_subcommand("list").is_some());
+        assert!(runtime.find_subcommand("show").is_some());
     }
 }

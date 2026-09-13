@@ -30,7 +30,7 @@ async fn migrate_to(pool: &sqlx::SqlitePool, max_version: i64) {
 
 async fn seed_pre_033(pool: &sqlx::SqlitePool) {
     migrate_to(pool, 32).await;
-    for (plugin_id, owner_domain) in [
+    for (plugin_product_id, owner_domain) in [
         (COMPANION_PLUGIN, "companion"),
         (CUSTOMER_SERVICE_PLUGIN, "customer_service"),
     ] {
@@ -39,7 +39,7 @@ async fn seed_pre_033(pool: &sqlx::SqlitePool) {
                 (channel_plugin_id, type, name, enabled, config, owner_domain, created_at, updated_at) \
              VALUES (?, 'lark', 'bot', 0, 'enc', ?, 1, 1)",
         )
-        .bind(plugin_id)
+        .bind(plugin_product_id)
         .bind(owner_domain)
         .execute(pool)
         .await

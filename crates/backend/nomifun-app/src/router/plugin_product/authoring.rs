@@ -10,7 +10,7 @@ pub(super) struct GenerateRequest {
     pub draft_id: Option<String>,
     pub expected_revision: Option<i64>,
     #[serde(rename = "plugin_id")]
-    pub miniapp_id: Option<String>,
+    pub plugin_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -138,13 +138,13 @@ pub(super) async fn generate(
             messages: vec![],
             status: "generating".into(),
             error: None,
-            miniapp_id: None,
+            plugin_id: None,
             base_release_digest: None,
             base_source_digest: None,
             updated_at: nomifun_common::now_ms(),
             import: None,
         };
-        if let Some(id) = &request.miniapp_id {
+        if let Some(id) = &request.plugin_id {
             let app = service
                 .application
                 .workshop(&owner, id)
@@ -155,28 +155,23 @@ pub(super) async fn generate(
                 .await;
             let source = match source {
                 Ok(source) => Some(source),
-                Err(nomifun_plugin_platform::runtime::PluginRuntimeM1ApplicationError::NotFound) if matches!(app.miniapp.kind, PluginRuntimeKindDto::Service) => None,
+                Err(nomifun_plugin_platform::runtime::PluginRuntimeApplicationError::NotFound) => None,
                 Err(error) => return Err(application_error(error)),
             };
-            draft.name = app.miniapp.display_name;
-            draft.description = app.miniapp.description.unwrap_or_default();
+            draft.name = app.plugin.display_name;
+            draft.description = app.plugin.description.unwrap_or_default();
             draft.html = source.map(|file| file.content).unwrap_or_default();
             draft.base_source_digest = app.source_snapshot_digest.clone();
-            draft.miniapp_id = Some(id.clone());
-            draft.base_release_digest = app.miniapp.releases.active.map(|r| r.release_digest);
-            if matches!(app.miniapp.kind, PluginRuntimeKindDto::Service) {
-                draft.service_source = Some(
-                    service
-                        .application
-                        .source_file(&owner, id, "service/main.mjs")
-                        .await
-                        .map_err(application_error)?
-                        .content,
-                );
-            }
+            draft.plugin_id = Some(id.clone());
+            draft.base_release_digest = app.plugin.releases.active.map(|r| r.release_digest);
+            draft.service_source = match service.application.source_file(&owner, id, "service/main.mjs").await {
+                Ok(file) => Some(file.content),
+                Err(nomifun_plugin_platform::runtime::PluginRuntimeApplicationError::NotFound) => None,
+                Err(error) => return Err(application_error(error)),
+            };
             draft.source_manifest = match service.application.source_file(&owner, id, "nomifun.plugin.json").await {
                 Ok(file) => Some(serde_json::from_str(&file.content).map_err(internal)?),
-                Err(nomifun_plugin_platform::runtime::PluginRuntimeM1ApplicationError::NotFound) => None,
+                Err(nomifun_plugin_platform::runtime::PluginRuntimeApplicationError::NotFound) => None,
                 Err(error) => return Err(application_error(error)),
             };
         }
@@ -200,7 +195,7 @@ pub(super) async fn generate(
         .jobs
         .lock()
         .await
-        .insert(job_key.clone(), (token.clone(), draft.miniapp_id.clone()));
+        .insert(job_key.clone(), (token.clone(), draft.plugin_id.clone()));
     let worker = service.clone();
     let snapshot = draft.clone();
     tokio::spawn(async move {
@@ -254,7 +249,7 @@ pub(super) async fn generate(
     Ok(Json(ApiResponse::ok(draft)))
 }
 
-impl PluginRuntimeProductService {
+impl PluginProductService {
     async fn complete(
         &self,
         request: &GenerateRequest,

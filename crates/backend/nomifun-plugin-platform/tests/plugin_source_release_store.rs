@@ -1,11 +1,13 @@
+//! Plugin source/release store contract coverage.
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use nomifun_agent_contracts::{
     canonical_json_bytes, digest_bytes, ArtifactEnvelope, ArtifactId, DigestHex,
-    LocalizedMetadata, MiniAppResourceContract, MiniAppServiceLifecycle, StrictJsonValue,
-    VersionString, MINIAPP_RELEASE_PROFILE_VERSION,
+    LocalizedMetadata, PluginResourceContract, PluginServiceLifecycle, StrictJsonValue,
+    VersionString, PLUGIN_RELEASE_PROFILE_VERSION,
 };
 use nomifun_plugin_platform::runtime::{
     materialize_surface_entrypoint, PluginRuntimeDependencyLockV1, PluginRuntimeReleaseArtifactIdentity,
@@ -21,7 +23,7 @@ struct TestRoot(PathBuf);
 
 impl TestRoot {
     fn new(label: &str) -> Self {
-        let path = std::env::temp_dir().join(format!("nomifun-miniapp-{label}-{}", Uuid::now_v7()));
+        let path = std::env::temp_dir().join(format!("nomifun-plugin-{label}-{}", Uuid::now_v7()));
         fs::create_dir_all(&path).unwrap();
         Self(path)
     }
@@ -38,7 +40,7 @@ impl Drop for TestRoot {
 }
 
 fn scope() -> PluginRuntimeSourceScope {
-    PluginRuntimeSourceScope::new("owner-1", "miniapp-1", "project-1").unwrap()
+    PluginRuntimeSourceScope::new("owner-1", "plugin-1", "project-1").unwrap()
 }
 
 fn digest(bytes: &[u8]) -> DigestHex {
@@ -78,23 +80,23 @@ fn source_create_returns_editable_default_and_exact_snapshot() {
     let root = TestRoot::new("source-create");
     let store = PluginRuntimeSourceStore::new(root.path()).unwrap();
     let project = store
-        .create_project("owner-1", "miniapp-1", "project-1", "Notes")
+        .create_project("owner-1", "plugin-1", "project-1", "Notes")
         .unwrap();
 
     assert_eq!(project.source_revision, 1);
     assert_eq!(project.build_generation, 1);
     assert_eq!(
         project.build_profile_version.as_ref(),
-        MINIAPP_RELEASE_PROFILE_VERSION
+        PLUGIN_RELEASE_PROFILE_VERSION
     );
     assert!(project
         .managed_relative_path
-        .ends_with("sources/owner-1/miniapps/miniapp-1/projects/project-1/source"));
+        .ends_with("sources/owner-1/plugins/plugin-1/projects/project-1/source"));
 
     let snapshot = store
         .read_snapshot(
             "owner-1",
-            "miniapp-1",
+            "plugin-1",
             "project-1",
             &project.source_snapshot_digest,
         )
@@ -113,7 +115,7 @@ fn source_create_returns_editable_default_and_exact_snapshot() {
     assert!(matches!(
         store.read_snapshot(
             "owner-2",
-            "miniapp-1",
+            "plugin-1",
             "project-1",
             &project.source_snapshot_digest
         ),
@@ -126,13 +128,13 @@ fn source_replace_is_owner_cas_and_rejects_service_or_unsafe_paths() {
     let root = TestRoot::new("source-replace");
     let store = PluginRuntimeSourceStore::new(root.path()).unwrap();
     let project = store
-        .create_project("owner-1", "miniapp-1", "project-1", "Notes")
+        .create_project("owner-1", "plugin-1", "project-1", "Notes")
         .unwrap();
 
     let next = store
         .replace_source(
             "owner-1",
-            "miniapp-1",
+            "plugin-1",
             "project-1",
             &project.source_snapshot_digest,
             vec![
@@ -147,7 +149,7 @@ fn source_replace_is_owner_cas_and_rejects_service_or_unsafe_paths() {
     assert!(matches!(
         store.replace_source(
             "owner-1",
-            "miniapp-1",
+            "plugin-1",
             "project-1",
             &project.source_snapshot_digest,
             vec![PluginRuntimeSourceFileInput::new(
@@ -160,7 +162,7 @@ fn source_replace_is_owner_cas_and_rejects_service_or_unsafe_paths() {
     assert!(store
         .replace_source(
             "owner-1",
-            "miniapp-1",
+            "plugin-1",
             "project-1",
             &next.source_snapshot_digest,
             vec![
@@ -172,7 +174,7 @@ fn source_replace_is_owner_cas_and_rejects_service_or_unsafe_paths() {
     assert!(store
         .replace_source(
             "owner-1",
-            "miniapp-1",
+            "plugin-1",
             "project-1",
             &next.source_snapshot_digest,
             vec![PluginRuntimeSourceFileInput::new("../escape", b"no".to_vec())],
@@ -185,17 +187,17 @@ fn prepared_file_replace_is_atomic_preserves_other_files_and_rejects_a_stale_hea
     let root = TestRoot::new("prepared-source-replace");
     let store = PluginRuntimeSourceStore::new(root.path()).unwrap();
     let project = store
-        .create_project("owner-1", "miniapp-1", "project-1", "Notes")
+        .create_project("owner-1", "plugin-1", "project-1", "Notes")
         .unwrap();
     let before = store
-        .current_snapshot("owner-1", "miniapp-1", "project-1")
+        .current_snapshot("owner-1", "plugin-1", "project-1")
         .unwrap();
     let original_app = before.file("ui/app.js").map(ToOwned::to_owned);
 
     let prepared = store
         .prepare_file_replace(
             "owner-1",
-            "miniapp-1",
+            "plugin-1",
             "project-1",
             &project.source_snapshot_digest,
             "ui/index.html",
@@ -204,7 +206,7 @@ fn prepared_file_replace_is_atomic_preserves_other_files_and_rejects_a_stale_hea
         .unwrap();
     assert_eq!(
         store
-            .current_snapshot("owner-1", "miniapp-1", "project-1")
+            .current_snapshot("owner-1", "plugin-1", "project-1")
             .unwrap()
             .source_snapshot_digest,
         project.source_snapshot_digest,
@@ -217,7 +219,7 @@ fn prepared_file_replace_is_atomic_preserves_other_files_and_rejects_a_stale_hea
     assert_eq!(committed.source_snapshot_digest, prepared.next_source_snapshot_digest);
     assert_eq!(committed.build_generation, 2);
     let after = store
-        .current_snapshot("owner-1", "miniapp-1", "project-1")
+        .current_snapshot("owner-1", "plugin-1", "project-1")
         .unwrap();
     assert_eq!(after.file("ui/index.html"), Some(b"<html>prepared update</html>".as_slice()));
     assert_eq!(after.file("ui/app.js").map(ToOwned::to_owned), original_app);
@@ -229,7 +231,7 @@ fn prepared_file_replace_is_atomic_preserves_other_files_and_rejects_a_stale_hea
     let noop = store
         .prepare_file_replace(
             "owner-1",
-            "miniapp-1",
+            "plugin-1",
             "project-1",
             &after.source_snapshot_digest,
             "ui/index.html",
@@ -248,7 +250,7 @@ fn service_source_round_trips_exact_main_module_without_relaxing_ui_only_paths()
     assert!(matches!(
         store.create_service_project(
             "owner-1",
-            "miniapp-1",
+            "plugin-1",
             "project-failed",
             "Broken Service",
             Vec::new(),
@@ -265,7 +267,7 @@ fn service_source_round_trips_exact_main_module_without_relaxing_ui_only_paths()
     let project = store
         .create_service_project(
             "owner-1",
-            "miniapp-1",
+            "plugin-1",
             "project-1",
             "Service Notes",
             service_main.to_vec(),
@@ -274,7 +276,7 @@ fn service_source_round_trips_exact_main_module_without_relaxing_ui_only_paths()
     let snapshot = store
         .read_snapshot(
             "owner-1",
-            "miniapp-1",
+            "plugin-1",
             "project-1",
             &project.source_snapshot_digest,
         )
@@ -295,7 +297,7 @@ fn service_source_round_trips_exact_main_module_without_relaxing_ui_only_paths()
     let replaced = store
         .replace_service_source(
             "owner-1",
-            "miniapp-1",
+            "plugin-1",
             "project-1",
             &project.source_snapshot_digest,
             vec![
@@ -314,7 +316,7 @@ fn service_source_round_trips_exact_main_module_without_relaxing_ui_only_paths()
     assert!(store
         .replace_service_source(
             "owner-1",
-            "miniapp-1",
+            "plugin-1",
             "project-1",
             &replaced.source_snapshot_digest,
             vec![
@@ -329,7 +331,7 @@ fn service_source_round_trips_exact_main_module_without_relaxing_ui_only_paths()
     assert!(store
         .replace_service_source(
             "owner-1",
-            "miniapp-1",
+            "plugin-1",
             "project-1",
             &replaced.source_snapshot_digest,
             vec![PluginRuntimeSourceFileInput::new(
@@ -341,7 +343,7 @@ fn service_source_round_trips_exact_main_module_without_relaxing_ui_only_paths()
     assert!(matches!(
         store.replace_source(
             "owner-1",
-            "miniapp-1",
+            "plugin-1",
             "project-1",
             &replaced.source_snapshot_digest,
             vec![
@@ -362,12 +364,12 @@ fn source_exact_import_round_trips_ui_and_service_without_default_source() {
     let store = PluginRuntimeSourceStore::new(root.path()).unwrap();
 
     let ui = store
-        .create_project("owner-origin", "miniapp-ui", "project-ui", "Origin UI")
+        .create_project("owner-origin", "plugin-ui", "project-ui", "Origin UI")
         .unwrap();
     let ui = store
         .replace_source(
             "owner-origin",
-            "miniapp-ui",
+            "plugin-ui",
             "project-ui",
             &ui.source_snapshot_digest,
             vec![
@@ -385,7 +387,7 @@ fn source_exact_import_round_trips_ui_and_service_without_default_source() {
     let ui_snapshot = store
         .read_snapshot(
             "owner-origin",
-            "miniapp-ui",
+            "plugin-ui",
             "project-ui",
             &ui.source_snapshot_digest,
         )
@@ -401,7 +403,7 @@ fn source_exact_import_round_trips_ui_and_service_without_default_source() {
     let dependency_lock_digest = dependency_lock.digest().unwrap();
     let mut ui_import = exact_import_request(
         &ui_snapshot,
-        PluginRuntimeSourceScope::new("owner-import", "miniapp-ui-copy", "project-ui-copy").unwrap(),
+        PluginRuntimeSourceScope::new("owner-import", "plugin-ui-copy", "project-ui-copy").unwrap(),
         "Imported UI",
         PluginRuntimeSourceContentKind::UiOnly,
     );
@@ -424,7 +426,7 @@ fn source_exact_import_round_trips_ui_and_service_without_default_source() {
     let imported_ui_snapshot = store
         .read_snapshot(
             "owner-import",
-            "miniapp-ui-copy",
+            "plugin-ui-copy",
             "project-ui-copy",
             &imported_ui.source_snapshot_digest,
         )
@@ -443,7 +445,7 @@ fn source_exact_import_round_trips_ui_and_service_without_default_source() {
     let service = store
         .create_service_project(
             "owner-origin",
-            "miniapp-service",
+            "plugin-service",
             "project-service",
             "Origin Service",
             b"export async function invoke() { return 'origin'; }\n".to_vec(),
@@ -452,7 +454,7 @@ fn source_exact_import_round_trips_ui_and_service_without_default_source() {
     let service = store
         .replace_service_source(
             "owner-origin",
-            "miniapp-service",
+            "plugin-service",
             "project-service",
             &service.source_snapshot_digest,
             vec![
@@ -475,7 +477,7 @@ fn source_exact_import_round_trips_ui_and_service_without_default_source() {
     let service_snapshot = store
         .read_snapshot(
             "owner-origin",
-            "miniapp-service",
+            "plugin-service",
             "project-service",
             &service.source_snapshot_digest,
         )
@@ -484,7 +486,7 @@ fn source_exact_import_round_trips_ui_and_service_without_default_source() {
         &service_snapshot,
         PluginRuntimeSourceScope::new(
             "owner-import",
-            "miniapp-service-copy",
+            "plugin-service-copy",
             "project-service-copy",
         )
         .unwrap(),
@@ -496,7 +498,7 @@ fn source_exact_import_round_trips_ui_and_service_without_default_source() {
     let imported_service_snapshot = store
         .read_snapshot(
             "owner-import",
-            "miniapp-service-copy",
+            "plugin-service-copy",
             "project-service-copy",
             &imported_service.source_snapshot_digest,
         )
@@ -522,12 +524,12 @@ fn source_exact_import_rejects_tampering_and_kind_or_lineage_drift() {
     let root = TestRoot::new("source-exact-import-reject");
     let store = PluginRuntimeSourceStore::new(root.path()).unwrap();
     let ui = store
-        .create_project("owner-origin", "miniapp-ui", "project-ui", "Origin UI")
+        .create_project("owner-origin", "plugin-ui", "project-ui", "Origin UI")
         .unwrap();
     let ui_snapshot = store
         .read_snapshot(
             "owner-origin",
-            "miniapp-ui",
+            "plugin-ui",
             "project-ui",
             &ui.source_snapshot_digest,
         )
@@ -535,7 +537,7 @@ fn source_exact_import_rejects_tampering_and_kind_or_lineage_drift() {
 
     let mut source_tamper = exact_import_request(
         &ui_snapshot,
-        PluginRuntimeSourceScope::new("owner-import", "miniapp-tamper", "project-tamper").unwrap(),
+        PluginRuntimeSourceScope::new("owner-import", "plugin-tamper", "project-tamper").unwrap(),
         "Tampered",
         PluginRuntimeSourceContentKind::UiOnly,
     );
@@ -553,7 +555,7 @@ fn source_exact_import_rejects_tampering_and_kind_or_lineage_drift() {
     .unwrap();
     let mut lock_tamper = exact_import_request(
         &ui_snapshot,
-        PluginRuntimeSourceScope::new("owner-import", "miniapp-lock", "project-lock").unwrap(),
+        PluginRuntimeSourceScope::new("owner-import", "plugin-lock", "project-lock").unwrap(),
         "Lock Tamper",
         PluginRuntimeSourceContentKind::UiOnly,
     );
@@ -565,7 +567,7 @@ fn source_exact_import_rejects_tampering_and_kind_or_lineage_drift() {
 
     let ui_as_service = exact_import_request(
         &ui_snapshot,
-        PluginRuntimeSourceScope::new("owner-import", "miniapp-kind-ui", "project-kind-ui").unwrap(),
+        PluginRuntimeSourceScope::new("owner-import", "plugin-kind-ui", "project-kind-ui").unwrap(),
         "Wrong Kind",
         PluginRuntimeSourceContentKind::Service,
     );
@@ -577,7 +579,7 @@ fn source_exact_import_rejects_tampering_and_kind_or_lineage_drift() {
     let service = store
         .create_service_project(
             "owner-origin",
-            "miniapp-service",
+            "plugin-service",
             "project-service",
             "Origin Service",
             b"export async function invoke() { return true; }\n".to_vec(),
@@ -586,7 +588,7 @@ fn source_exact_import_rejects_tampering_and_kind_or_lineage_drift() {
     let service_snapshot = store
         .read_snapshot(
             "owner-origin",
-            "miniapp-service",
+            "plugin-service",
             "project-service",
             &service.source_snapshot_digest,
         )
@@ -595,7 +597,7 @@ fn source_exact_import_rejects_tampering_and_kind_or_lineage_drift() {
         &service_snapshot,
         PluginRuntimeSourceScope::new(
             "owner-import",
-            "miniapp-kind-service",
+            "plugin-kind-service",
             "project-kind-service",
         )
         .unwrap(),
@@ -611,7 +613,7 @@ fn source_exact_import_rejects_tampering_and_kind_or_lineage_drift() {
         &ui_snapshot,
         PluginRuntimeSourceScope::new(
             "owner-import",
-            "miniapp-wrong-profile",
+            "plugin-wrong-profile",
             "project-wrong-profile",
         )
         .unwrap(),
@@ -628,7 +630,7 @@ fn source_exact_import_rejects_tampering_and_kind_or_lineage_drift() {
         &ui_snapshot,
         PluginRuntimeSourceScope::new(
             "owner-import",
-            "miniapp-zero-generation",
+            "plugin-zero-generation",
             "project-zero-generation",
         )
         .unwrap(),
@@ -654,7 +656,7 @@ fn source_exact_import_rejects_duplicate_target_and_preserves_owner_scope() {
     let origin = store
         .create_project(
             "owner-origin",
-            "miniapp-origin",
+            "plugin-origin",
             "project-origin",
             "Origin",
         )
@@ -662,14 +664,14 @@ fn source_exact_import_rejects_duplicate_target_and_preserves_owner_scope() {
     let snapshot = store
         .read_snapshot(
             "owner-origin",
-            "miniapp-origin",
+            "plugin-origin",
             "project-origin",
             &origin.source_snapshot_digest,
         )
         .unwrap();
     let request = exact_import_request(
         &snapshot,
-        PluginRuntimeSourceScope::new("owner-1", "miniapp-copy", "project-copy").unwrap(),
+        PluginRuntimeSourceScope::new("owner-1", "plugin-copy", "project-copy").unwrap(),
         "Owner One",
         PluginRuntimeSourceContentKind::UiOnly,
     );
@@ -682,7 +684,7 @@ fn source_exact_import_rejects_duplicate_target_and_preserves_owner_scope() {
 
     let mut other_owner = exact_import_request(
         &snapshot,
-        PluginRuntimeSourceScope::new("owner-2", "miniapp-copy", "project-copy").unwrap(),
+        PluginRuntimeSourceScope::new("owner-2", "plugin-copy", "project-copy").unwrap(),
         "Owner Two",
         PluginRuntimeSourceContentKind::UiOnly,
     );
@@ -693,7 +695,7 @@ fn source_exact_import_rejects_duplicate_target_and_preserves_owner_scope() {
     assert!(store
         .read_snapshot(
             "owner-1",
-            "miniapp-copy",
+            "plugin-copy",
             "project-copy",
             &snapshot.source_snapshot_digest,
         )
@@ -701,7 +703,7 @@ fn source_exact_import_rejects_duplicate_target_and_preserves_owner_scope() {
     assert!(store
         .read_snapshot(
             "owner-2",
-            "miniapp-copy",
+            "plugin-copy",
             "project-copy",
             &snapshot.source_snapshot_digest,
         )
@@ -709,7 +711,7 @@ fn source_exact_import_rejects_duplicate_target_and_preserves_owner_scope() {
     assert!(matches!(
         store.read_snapshot(
             "owner-3",
-            "miniapp-copy",
+            "plugin-copy",
             "project-copy",
             &snapshot.source_snapshot_digest,
         ),
@@ -723,12 +725,12 @@ fn release_publish_loads_immutable_bytes_and_keeps_owner_project_boundaries() {
     let source_root = TestRoot::new("release-source");
     let source_store = PluginRuntimeSourceStore::new(source_root.path()).unwrap();
     let source = source_store
-        .create_project("owner-1", "miniapp-1", "project-1", "Notes")
+        .create_project("owner-1", "plugin-1", "project-1", "Notes")
         .unwrap();
     let source_snapshot = source_store
         .read_snapshot(
             "owner-1",
-            "miniapp-1",
+            "plugin-1",
             "project-1",
             &source.source_snapshot_digest,
         )
@@ -942,7 +944,7 @@ fn release_publish_loads_immutable_bytes_and_keeps_owner_project_boundaries() {
         .is_err());
 
     let other_scope =
-        PluginRuntimeSourceScope::new("owner-2", "miniapp-1", "project-1").unwrap();
+        PluginRuntimeSourceScope::new("owner-2", "plugin-1", "project-1").unwrap();
     assert!(store
         .load(other_scope, artifact.artifact_digest.as_ref())
         .is_err());
@@ -957,7 +959,7 @@ fn service_release_publishes_and_loads_exact_main_module() {
     let source = source_store
         .create_service_project(
             "owner-1",
-            "miniapp-1",
+            "plugin-1",
             "project-1",
             "Service Notes",
             service_main.to_vec(),
@@ -966,7 +968,7 @@ fn service_release_publishes_and_loads_exact_main_module() {
     let snapshot = source_store
         .read_snapshot(
             "owner-1",
-            "miniapp-1",
+            "plugin-1",
             "project-1",
             &source.source_snapshot_digest,
         )
@@ -1099,16 +1101,16 @@ fn source_and_release_project_purge_are_owner_scoped_and_idempotent() {
     let source_root = TestRoot::new("source-purge");
     let source_store = PluginRuntimeSourceStore::new(source_root.path()).unwrap();
     let first = source_store
-        .create_project("owner-1", "miniapp-1", "project-1", "First")
+        .create_project("owner-1", "plugin-1", "project-1", "First")
         .unwrap();
     let second = source_store
-        .create_project("owner-2", "miniapp-2", "project-2", "Second")
+        .create_project("owner-2", "plugin-2", "project-2", "Second")
         .unwrap();
 
     let first_snapshot = source_store
         .read_snapshot(
             "owner-1",
-            "miniapp-1",
+            "plugin-1",
             "project-1",
             &first.source_snapshot_digest,
         )
@@ -1159,22 +1161,22 @@ fn source_and_release_project_purge_are_owner_scoped_and_idempotent() {
         .unwrap();
 
     source_store
-        .purge_project("owner-1", "miniapp-1", "project-1")
+        .purge_project("owner-1", "plugin-1", "project-1")
         .unwrap();
     release_store
-        .purge_project("owner-1", "miniapp-1", "project-1")
+        .purge_project("owner-1", "plugin-1", "project-1")
         .unwrap();
     source_store
-        .purge_project("owner-1", "miniapp-1", "project-1")
+        .purge_project("owner-1", "plugin-1", "project-1")
         .unwrap();
     release_store
-        .purge_project("owner-1", "miniapp-1", "project-1")
+        .purge_project("owner-1", "plugin-1", "project-1")
         .unwrap();
 
     assert!(matches!(
         source_store.read_snapshot(
             "owner-1",
-            "miniapp-1",
+            "plugin-1",
             "project-1",
             &first.source_snapshot_digest
         ),
@@ -1183,7 +1185,7 @@ fn source_and_release_project_purge_are_owner_scoped_and_idempotent() {
     assert!(source_store
         .read_snapshot(
             "owner-2",
-            "miniapp-2",
+            "plugin-2",
             "project-2",
             &second.source_snapshot_digest,
         )
@@ -1192,8 +1194,8 @@ fn source_and_release_project_purge_are_owner_scoped_and_idempotent() {
         .path()
         .join("releases")
         .join("owner-1")
-        .join("miniapps")
-        .join("miniapp-1")
+        .join("plugins")
+        .join("plugin-1")
         .join("projects")
         .join("project-1")
         .exists());
@@ -1207,8 +1209,8 @@ fn project_purge_rejects_junction_parent_without_touching_external_data() {
     let source_owner = source_root.path().join("sources").join("owner-1");
     let outside_source_owner = source_root.path().join("outside-source-owner");
     let outside_source_project = outside_source_owner
-        .join("miniapps")
-        .join("miniapp-1")
+        .join("plugins")
+        .join("plugin-1")
         .join("projects")
         .join("project-1");
     fs::create_dir_all(&outside_source_project).unwrap();
@@ -1217,7 +1219,7 @@ fn project_purge_rejects_junction_parent_without_touching_external_data() {
     junction::create(&outside_source_owner, &source_owner).unwrap();
 
     assert!(source_store
-        .purge_project("owner-1", "miniapp-1", "project-1")
+        .purge_project("owner-1", "plugin-1", "project-1")
         .is_err());
     assert_eq!(fs::read(&source_marker).unwrap(), b"keep");
     junction::delete(&source_owner).unwrap();
@@ -1227,8 +1229,8 @@ fn project_purge_rejects_junction_parent_without_touching_external_data() {
     let release_owner = release_root.path().join("releases").join("owner-1");
     let outside_release_owner = release_root.path().join("outside-release-owner");
     let outside_release_project = outside_release_owner
-        .join("miniapps")
-        .join("miniapp-1")
+        .join("plugins")
+        .join("plugin-1")
         .join("projects")
         .join("project-1");
     fs::create_dir_all(outside_release_project.join("artifacts")).unwrap();
@@ -1237,7 +1239,7 @@ fn project_purge_rejects_junction_parent_without_touching_external_data() {
     junction::create(&outside_release_owner, &release_owner).unwrap();
 
     assert!(release_store
-        .purge_project("owner-1", "miniapp-1", "project-1")
+        .purge_project("owner-1", "plugin-1", "project-1")
         .is_err());
     assert_eq!(fs::read(&release_marker).unwrap(), b"keep");
     junction::delete(&release_owner).unwrap();
@@ -1271,11 +1273,11 @@ fn static_input(
         dependency_graph_digest: digest(b"graph"),
         config_schema: StrictJsonValue(serde_json::json!({"type": "object"})),
         credential_slots: Vec::new(),
-        resource_contract: MiniAppResourceContract::default(),
+        resource_contract: PluginResourceContract::default(),
         schemas: BTreeMap::new(),
         bridge_contract_digest: digest(b"bridge"),
         contribution_package: nomifun_agent_contracts::PackageRef {
-            id: "miniapp.test".into(),
+            id: "plugin.test".into(),
             version: "1.0.0".into(),
         },
         contributions: Default::default(),
@@ -1291,7 +1293,7 @@ fn service_static_input(
     let mut input = static_input(bytes, dependency_lock_digest);
     input.service = Some(PluginRuntimeStaticServiceInput {
         main_mjs: service_main,
-        lifecycle: MiniAppServiceLifecycle::OnDemand,
+        lifecycle: PluginServiceLifecycle::OnDemand,
         uses_files: false,
         uses_private_database: false,
         service_contract_digest: digest(b"service-contract"),

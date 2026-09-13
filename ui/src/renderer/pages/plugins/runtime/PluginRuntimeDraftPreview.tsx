@@ -12,7 +12,7 @@ export function previewDocument(html: string, token: string): string {
   // production capability or overwrite the preview's in-memory storage API.
   const source = html
     .replace(
-      /<script\b[^>]*\bdata-nomifun-(?:miniapp-bridge|product-sdk)\s*=[^>]*>[\s\S]*?<\/script\s*>/gi,
+      /<script\b[^>]*\bdata-nomifun-(?:plugin-bridge|product-sdk)\s*=[^>]*>[\s\S]*?<\/script\s*>/gi,
       '',
     )
     .replace(/<!doctype[^>]*>/gi, '');

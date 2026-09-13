@@ -43,7 +43,7 @@ function previewRuntime(html: string) {
 describe('PluginRuntime draft preview isolation', () => {
   test('exported production bootstraps cannot replace preview storage or await a real capability', async () => {
     const html =
-      '<script data-nomifun-miniapp-bridge="nomifun-miniapp-bridge-bootstrap-v1">throw new Error("production bridge ran")</script><script data-nomifun-product-sdk="1">throw new Error("production SDK ran")</script><!doctype html><html><head></head><body>Imported app</body></html>';
+      '<script data-nomifun-plugin-bridge="nomifun-plugin-bridge-bootstrap-v1">throw new Error("production bridge ran")</script><script data-nomifun-product-sdk="1">throw new Error("production SDK ran")</script><!doctype html><html><head></head><body>Imported app</body></html>';
     const first = previewRuntime(html);
     await first.storage.set('tasks', [{ title: 'preview only' }]);
     expect(await first.storage.get('tasks')).toEqual([

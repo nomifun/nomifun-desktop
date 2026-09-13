@@ -42,7 +42,7 @@ pub const PACKAGE_VERSION: &str = VERSION;
 pub const CREATION_PACKAGE_ID: &str = "nomifun.creation";
 pub const WORKSHOP_PACKAGE_ID: &str = "nomifun.workshop";
 pub const OFFICE_PACKAGE_ID: &str = "nomifun.office";
-pub const MINIAPP_PACKAGE_ID: &str = "nomifun.miniapp";
+pub const PLUGIN_PACKAGE_ID: &str = "nomifun.plugin";
 
 pub const CANVAS_RESOURCE_KIND: &str = "canvas";
 pub const ASSET_LIBRARY_RESOURCE_KIND: &str = "asset_library";
@@ -53,13 +53,13 @@ pub const GENERATION_PROVIDER_RESOURCE_KIND: &str = "generation_provider";
 /// that exact provider resource rather than free-form action input.
 pub const GENERATION_PROVIDER_MODEL_PARAMETER: &str = "model";
 pub const GENERATION_PROVIDER_MODEL_PARAMETER_PREFIX: &str = "model.";
-pub const MINIAPP_RESOURCE_KIND: &str = "miniapp";
+pub const PLUGIN_RESOURCE_KIND: &str = "plugin";
 
 pub const TARGET_PACKAGE_IDS: [&str; 4] = [
     CREATION_PACKAGE_ID,
     WORKSHOP_PACKAGE_ID,
     OFFICE_PACKAGE_ID,
-    MINIAPP_PACKAGE_ID,
+    PLUGIN_PACKAGE_ID,
 ];
 
 pub const TARGET_CAPABILITY_IDS: [&str; 18] = [
@@ -77,10 +77,10 @@ pub const TARGET_CAPABILITY_IDS: [&str; 18] = [
     "office.document.edit",
     "office.sheet.edit",
     "office.slides.edit",
-    "miniapp.read",
-    "miniapp.edit",
-    "miniapp.publish",
-    "miniapp.serve",
+    "plugin.read",
+    "plugin.edit",
+    "plugin.publish",
+    "plugin.serve",
 ];
 
 pub const PACKAGE_IDS: [&str; 4] = TARGET_PACKAGE_IDS;
@@ -90,7 +90,7 @@ pub const AGENT_SURFACES: &[&str] = &["desktop", "headless", "remote", "web"];
 /// The single host port for action-bearing Wave 3 capabilities.
 ///
 /// The domain crate owns the capability vocabulary and resource requirements.
-/// The application owns creation, Canvas, Office, and MiniApp facts and must
+/// The application owns creation, Canvas, Office, and Plugin facts and must
 /// provide the adapter used by [`registrations_with_host_port`].
 pub const WAVE3_CAPABILITY_HOST_PORT_ID: &str = "host.wave3.capability.invoke";
 pub const WAVE3_HOST_PORT_UNAVAILABLE: &str = "WAVE3_HOST_PORT_UNAVAILABLE";
@@ -244,7 +244,7 @@ pub struct TypedResourceDescriptor {
 /// No application service bag, Gateway state, legacy Conversation state,
 /// `PluginStateHandle`, or other Kernel authority is exposed through this
 /// boundary. The central adapter owns its real business persistence (for
-/// example, an injected Creation/Workshop/Office/MiniApp service or
+/// example, an injected Creation/Workshop/Office/Plugin service or
 /// repository) and uses this context's principal, snapshot, idempotency,
 /// correlation, and resource identities to authorize and persist the action.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -381,10 +381,10 @@ pub enum Wave3CapabilityOperation {
     OfficeDocumentEdit { input: StrictJsonValue },
     OfficeSheetEdit { input: StrictJsonValue },
     OfficeSlidesEdit { input: StrictJsonValue },
-    MiniAppRead { input: StrictJsonValue },
-    MiniAppEdit { input: StrictJsonValue },
-    MiniAppPublish { input: StrictJsonValue },
-    MiniAppServe { input: StrictJsonValue },
+    PluginRead { input: StrictJsonValue },
+    PluginEdit { input: StrictJsonValue },
+    PluginPublish { input: StrictJsonValue },
+    PluginServe { input: StrictJsonValue },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -411,10 +411,10 @@ impl Wave3CapabilityOperation {
             Self::OfficeDocumentEdit { .. } => "office.document.edit",
             Self::OfficeSheetEdit { .. } => "office.sheet.edit",
             Self::OfficeSlidesEdit { .. } => "office.slides.edit",
-            Self::MiniAppRead { .. } => "miniapp.read",
-            Self::MiniAppEdit { .. } => "miniapp.edit",
-            Self::MiniAppPublish { .. } => "miniapp.publish",
-            Self::MiniAppServe { .. } => "miniapp.serve",
+            Self::PluginRead { .. } => "plugin.read",
+            Self::PluginEdit { .. } => "plugin.edit",
+            Self::PluginPublish { .. } => "plugin.publish",
+            Self::PluginServe { .. } => "plugin.serve",
         })
     }
 
@@ -441,10 +441,10 @@ impl Wave3CapabilityOperation {
             | Self::OfficeDocumentEdit { .. }
             | Self::OfficeSheetEdit { .. }
             | Self::OfficeSlidesEdit { .. } => Wave3OwnerDomain::Office,
-            Self::MiniAppRead { .. }
-            | Self::MiniAppEdit { .. }
-            | Self::MiniAppPublish { .. }
-            | Self::MiniAppServe { .. } => Wave3OwnerDomain::MiniApp,
+            Self::PluginRead { .. }
+            | Self::PluginEdit { .. }
+            | Self::PluginPublish { .. }
+            | Self::PluginServe { .. } => Wave3OwnerDomain::Plugin,
         }
     }
 
@@ -464,10 +464,10 @@ impl Wave3CapabilityOperation {
             | Self::OfficeDocumentEdit { input }
             | Self::OfficeSheetEdit { input }
             | Self::OfficeSlidesEdit { input }
-            | Self::MiniAppRead { input }
-            | Self::MiniAppEdit { input }
-            | Self::MiniAppPublish { input }
-            | Self::MiniAppServe { input } => {
+            | Self::PluginRead { input }
+            | Self::PluginEdit { input }
+            | Self::PluginPublish { input }
+            | Self::PluginServe { input } => {
                 if input.0.is_object() {
                     Ok(())
                 } else {
@@ -599,7 +599,7 @@ pub enum Wave3OwnerDomain {
     Creation,
     Workshop,
     Office,
-    MiniApp,
+    Plugin,
 }
 
 /// Optional first-party owner bindings for the canonical Wave 3 action port.
@@ -612,7 +612,7 @@ pub struct Wave3OwnerBindings {
     pub creation: Option<Arc<dyn Wave3HostPort>>,
     pub workshop: Option<Arc<dyn Wave3HostPort>>,
     pub office: Option<Arc<dyn Wave3HostPort>>,
-    pub miniapp: Option<Arc<dyn Wave3HostPort>>,
+    pub plugin: Option<Arc<dyn Wave3HostPort>>,
 }
 
 impl Wave3OwnerBindings {
@@ -631,8 +631,8 @@ impl Wave3OwnerBindings {
         self
     }
 
-    pub fn with_miniapp(mut self, owner: Arc<dyn Wave3HostPort>) -> Self {
-        self.miniapp = Some(owner);
+    pub fn with_plugin(mut self, owner: Arc<dyn Wave3HostPort>) -> Self {
+        self.plugin = Some(owner);
         self
     }
 }
@@ -660,7 +660,7 @@ impl Wave3HostPort for ComposedWave3HostPort {
             Wave3OwnerDomain::Creation => self.bindings.creation.clone(),
             Wave3OwnerDomain::Workshop => self.bindings.workshop.clone(),
             Wave3OwnerDomain::Office => self.bindings.office.clone(),
-            Wave3OwnerDomain::MiniApp => self.bindings.miniapp.clone(),
+            Wave3OwnerDomain::Plugin => self.bindings.plugin.clone(),
         };
         let capability_id = request.context.capability_id.clone();
         Box::pin(async move {
@@ -775,25 +775,25 @@ const OFFICE_SLIDES_EDIT_REQUIREMENTS: &[ResourceRequirement] = &[ResourceRequir
     operation: "write",
 }];
 
-const MINIAPP_READ_RESOURCES: &[&str] = &[MINIAPP_RESOURCE_KIND];
-const MINIAPP_EDIT_RESOURCES: &[&str] = &[MINIAPP_RESOURCE_KIND];
-const MINIAPP_PUBLISH_RESOURCES: &[&str] = &[MINIAPP_RESOURCE_KIND];
-const MINIAPP_SERVE_RESOURCES: &[&str] = &[MINIAPP_RESOURCE_KIND];
+const PLUGIN_READ_RESOURCES: &[&str] = &[PLUGIN_RESOURCE_KIND];
+const PLUGIN_EDIT_RESOURCES: &[&str] = &[PLUGIN_RESOURCE_KIND];
+const PLUGIN_PUBLISH_RESOURCES: &[&str] = &[PLUGIN_RESOURCE_KIND];
+const PLUGIN_SERVE_RESOURCES: &[&str] = &[PLUGIN_RESOURCE_KIND];
 
-const MINIAPP_READ_REQUIREMENTS: &[ResourceRequirement] = &[ResourceRequirement {
-    resource_kind: MINIAPP_RESOURCE_KIND,
+const PLUGIN_READ_REQUIREMENTS: &[ResourceRequirement] = &[ResourceRequirement {
+    resource_kind: PLUGIN_RESOURCE_KIND,
     operation: "read",
 }];
-const MINIAPP_EDIT_REQUIREMENTS: &[ResourceRequirement] = &[ResourceRequirement {
-    resource_kind: MINIAPP_RESOURCE_KIND,
+const PLUGIN_EDIT_REQUIREMENTS: &[ResourceRequirement] = &[ResourceRequirement {
+    resource_kind: PLUGIN_RESOURCE_KIND,
     operation: "edit",
 }];
-const MINIAPP_PUBLISH_REQUIREMENTS: &[ResourceRequirement] = &[ResourceRequirement {
-    resource_kind: MINIAPP_RESOURCE_KIND,
+const PLUGIN_PUBLISH_REQUIREMENTS: &[ResourceRequirement] = &[ResourceRequirement {
+    resource_kind: PLUGIN_RESOURCE_KIND,
     operation: "publish",
 }];
-const MINIAPP_SERVE_REQUIREMENTS: &[ResourceRequirement] = &[ResourceRequirement {
-    resource_kind: MINIAPP_RESOURCE_KIND,
+const PLUGIN_SERVE_REQUIREMENTS: &[ResourceRequirement] = &[ResourceRequirement {
+    resource_kind: PLUGIN_RESOURCE_KIND,
     operation: "serve",
 }];
 
@@ -918,37 +918,37 @@ const OFFICE_CAPABILITIES: [CapabilitySpec; 4] = [
     },
 ];
 
-const MINIAPP_CAPABILITIES: [CapabilitySpec; 4] = [
+const PLUGIN_CAPABILITIES: [CapabilitySpec; 4] = [
     CapabilitySpec {
-        id: "miniapp.read",
-        display_name: "Read MiniApp",
-        description: "Read the selected MiniApp source and published metadata.",
-        resource_kinds: MINIAPP_READ_RESOURCES,
-        requirements: MINIAPP_READ_REQUIREMENTS,
+        id: "plugin.read",
+        display_name: "Read Plugin",
+        description: "Read the selected Plugin source and published metadata.",
+        resource_kinds: PLUGIN_READ_RESOURCES,
+        requirements: PLUGIN_READ_REQUIREMENTS,
         effect_class: EffectClass::ReadSensitive,
     },
     CapabilitySpec {
-        id: "miniapp.edit",
-        display_name: "Edit MiniApp",
-        description: "Apply an edit to the selected MiniApp working copy.",
-        resource_kinds: MINIAPP_EDIT_RESOURCES,
-        requirements: MINIAPP_EDIT_REQUIREMENTS,
+        id: "plugin.edit",
+        display_name: "Edit Plugin",
+        description: "Apply an edit to the selected Plugin working copy.",
+        resource_kinds: PLUGIN_EDIT_RESOURCES,
+        requirements: PLUGIN_EDIT_REQUIREMENTS,
         effect_class: EffectClass::WriteReversible,
     },
     CapabilitySpec {
-        id: "miniapp.publish",
-        display_name: "Publish MiniApp",
-        description: "Publish the selected MiniApp snapshot.",
-        resource_kinds: MINIAPP_PUBLISH_RESOURCES,
-        requirements: MINIAPP_PUBLISH_REQUIREMENTS,
+        id: "plugin.publish",
+        display_name: "Publish Plugin",
+        description: "Publish the selected Plugin snapshot.",
+        resource_kinds: PLUGIN_PUBLISH_RESOURCES,
+        requirements: PLUGIN_PUBLISH_REQUIREMENTS,
         effect_class: EffectClass::ExternalTransmit,
     },
     CapabilitySpec {
-        id: "miniapp.serve",
-        display_name: "Serve MiniApp",
-        description: "Read the selected published MiniApp for serving.",
-        resource_kinds: MINIAPP_SERVE_RESOURCES,
-        requirements: MINIAPP_SERVE_REQUIREMENTS,
+        id: "plugin.serve",
+        display_name: "Serve Plugin",
+        description: "Read the selected published Plugin for serving.",
+        resource_kinds: PLUGIN_SERVE_RESOURCES,
+        requirements: PLUGIN_SERVE_REQUIREMENTS,
         effect_class: EffectClass::ReadSensitive,
     },
 ];
@@ -976,11 +976,11 @@ const PACKAGE_SPECS: [PackageSpec; 4] = [
         capabilities: &OFFICE_CAPABILITIES,
     },
     PackageSpec {
-        id: MINIAPP_PACKAGE_ID,
-        mount_id: "domain-miniapp",
-        display_name: "MiniApp",
-        description: "Bundled MiniApp read, edit, publish, and serve capabilities.",
-        capabilities: &MINIAPP_CAPABILITIES,
+        id: PLUGIN_PACKAGE_ID,
+        mount_id: "domain-plugin",
+        display_name: "Plugin",
+        description: "Bundled Plugin read, edit, publish, and serve capabilities.",
+        capabilities: &PLUGIN_CAPABILITIES,
     },
 ];
 
@@ -1009,8 +1009,8 @@ pub fn typed_resource_descriptors() -> Vec<TypedResourceDescriptor> {
             "select_only_owned_resource",
         ),
         descriptor(
-            "miniapp",
-            MINIAPP_RESOURCE_KIND,
+            "plugin",
+            PLUGIN_RESOURCE_KIND,
             false,
             ["edit", "publish", "read", "serve"],
             "require_explicit_selection",
@@ -1084,9 +1084,9 @@ pub fn canonical_resource_bindings(owner_id: impl Into<String>) -> Vec<TypedReso
             &owner_id,
         ),
         resource_binding(
-            "creative-miniapp",
-            MINIAPP_RESOURCE_KIND,
-            "creative-miniapp",
+            "creative-plugin",
+            PLUGIN_RESOURCE_KIND,
+            "creative-plugin",
             &["edit", "publish", "read", "serve"],
             &owner_id,
         ),
@@ -1220,7 +1220,7 @@ pub fn office_registration() -> Result<PluginRegistration, String> {
     registration_for(&PACKAGE_SPECS[2], unconfigured_host_port())
 }
 
-pub fn miniapp_registration() -> Result<PluginRegistration, String> {
+pub fn plugin_registration() -> Result<PluginRegistration, String> {
     registration_for(&PACKAGE_SPECS[3], unconfigured_host_port())
 }
 
@@ -1562,11 +1562,11 @@ pub fn action_input_schema_for(capability_id: &str) -> Result<StrictJsonValue, S
             }),
             &["templateId", "templateRevision", "inputs", "referenceAssetIds"],
         ),
-        "miniapp.read" => strict_object_schema(
+        "plugin.read" => strict_object_schema(
             json!({"path": bounded_string_schema(4_096)}),
             &[],
         ),
-        "miniapp.edit" => strict_object_schema(
+        "plugin.edit" => strict_object_schema(
             json!({
                 "expected_product_revision": {"type": "integer", "minimum": 0},
                 "project_id": uuidv7_schema(),
@@ -1586,7 +1586,7 @@ pub fn action_input_schema_for(capability_id: &str) -> Result<StrictJsonValue, S
                 "content",
             ],
         ),
-        "miniapp.publish" => strict_object_schema(
+        "plugin.publish" => strict_object_schema(
             json!({
                 "expected_product_revision": {"type": "integer", "minimum": 0},
                 "expected_pointer_revision": {"type": "integer", "minimum": 0},
@@ -1606,7 +1606,7 @@ pub fn action_input_schema_for(capability_id: &str) -> Result<StrictJsonValue, S
                 "acknowledge_test_warning",
             ],
         ),
-        "miniapp.serve" => strict_object_schema(json!({}), &[]),
+        "plugin.serve" => strict_object_schema(json!({}), &[]),
         _ => json!({
             "type": "object",
             "additionalProperties": true
@@ -1677,11 +1677,11 @@ pub fn action_output_schema_for(capability_id: &str) -> Result<StrictJsonValue, 
             }),
             &["kind", "version", "revision", "templateSnapshot", "request", "promptDrafts", "record"],
         ),
-        "miniapp.read" => json!({
-            "oneOf": [miniapp_workshop_schema(), miniapp_source_file_schema()]
+        "plugin.read" => json!({
+            "oneOf": [plugin_workshop_schema(), plugin_source_file_schema()]
         }),
-        "miniapp.edit" | "miniapp.publish" => miniapp_workshop_schema(),
-        "miniapp.serve" => miniapp_workshop_schema(),
+        "plugin.edit" | "plugin.publish" => plugin_workshop_schema(),
+        "plugin.serve" => plugin_workshop_schema(),
         _ => json!({
             "type": "object",
             "additionalProperties": true
@@ -1803,10 +1803,10 @@ fn workshop_asset_schema() -> Value {
     )
 }
 
-fn miniapp_workshop_schema() -> Value {
+fn plugin_workshop_schema() -> Value {
     strict_object_schema(
         json!({
-            "miniapp": {"type": "object"},
+            "plugin": {"type": "object"},
             "service_lifecycle": {"type": "object"},
             "active_service": {"type": "object"},
             "publish_mode": {"type": "string"},
@@ -1825,24 +1825,24 @@ fn miniapp_workshop_schema() -> Value {
             "active_operation": {"type": "object"}
         }),
         &[
-            "miniapp", "publish_mode", "project_id", "project_revision", "source_state",
+            "plugin", "publish_mode", "project_id", "project_revision", "source_state",
             "build_generation", "config_schema", "config", "credential_bindings_revision",
             "credential_slots", "capabilities",
         ],
     )
 }
 
-fn miniapp_source_file_schema() -> Value {
+fn plugin_source_file_schema() -> Value {
     strict_object_schema(
         json!({
-            "miniapp_id": uuidv7_schema(),
+            "plugin_product_id": uuidv7_schema(),
             "project_id": uuidv7_schema(),
             "path": {"type": "string"},
             "content": {"type": "string"},
             "source_snapshot_digest": digest_schema(),
             "build_generation": {"type": "integer", "minimum": 0}
         }),
-        &["miniapp_id", "project_id", "path", "content", "source_snapshot_digest", "build_generation"],
+        &["plugin_product_id", "project_id", "path", "content", "source_snapshot_digest", "build_generation"],
     )
 }
 
@@ -2056,10 +2056,10 @@ pub fn operation_from_input(
         "office.document.edit" => Wave3CapabilityOperation::OfficeDocumentEdit { input },
         "office.sheet.edit" => Wave3CapabilityOperation::OfficeSheetEdit { input },
         "office.slides.edit" => Wave3CapabilityOperation::OfficeSlidesEdit { input },
-        "miniapp.read" => Wave3CapabilityOperation::MiniAppRead { input },
-        "miniapp.edit" => Wave3CapabilityOperation::MiniAppEdit { input },
-        "miniapp.publish" => Wave3CapabilityOperation::MiniAppPublish { input },
-        "miniapp.serve" => Wave3CapabilityOperation::MiniAppServe { input },
+        "plugin.read" => Wave3CapabilityOperation::PluginRead { input },
+        "plugin.edit" => Wave3CapabilityOperation::PluginEdit { input },
+        "plugin.publish" => Wave3CapabilityOperation::PluginPublish { input },
+        "plugin.serve" => Wave3CapabilityOperation::PluginServe { input },
         other => {
             return Err(KernelError::CapabilityExecution {
                 reason: format!("{other} does not expose an action host operation"),
@@ -2506,12 +2506,12 @@ mod tests {
                 ]),
             ),
             (
-                MINIAPP_PACKAGE_ID,
+                PLUGIN_PACKAGE_ID,
                 BTreeSet::from([
-                    "miniapp.edit".to_owned(),
-                    "miniapp.publish".to_owned(),
-                    "miniapp.read".to_owned(),
-                    "miniapp.serve".to_owned(),
+                    "plugin.edit".to_owned(),
+                    "plugin.publish".to_owned(),
+                    "plugin.read".to_owned(),
+                    "plugin.serve".to_owned(),
                 ]),
             ),
         ]);
@@ -2553,11 +2553,11 @@ mod tests {
                         EffectClass::WriteDurable
                     }
                     "workshop.canvas.read" | "workshop.asset.read" | "office.preview"
-                    | "miniapp.read" | "miniapp.serve" => EffectClass::ReadSensitive,
+                    | "plugin.read" | "plugin.serve" => EffectClass::ReadSensitive,
                     "workshop.canvas.edit" | "office.document.edit" | "office.sheet.edit"
-                    | "office.slides.edit" | "miniapp.edit" => EffectClass::WriteReversible,
+                    | "office.slides.edit" | "plugin.edit" => EffectClass::WriteReversible,
                     "workshop.template.run" => EffectClass::ExecuteLocal,
-                    "miniapp.publish" => EffectClass::ExternalTransmit,
+                    "plugin.publish" => EffectClass::ExternalTransmit,
                     other => panic!("unexpected Wave 3 capability {other}"),
                 };
                 assert_eq!(
@@ -2633,10 +2633,10 @@ mod tests {
             "creation.image_edit",
             "creation.text",
             "creation.video",
-            "miniapp.edit",
-            "miniapp.publish",
-            "miniapp.read",
-            "miniapp.serve",
+            "plugin.edit",
+            "plugin.publish",
+            "plugin.read",
+            "plugin.serve",
             "workshop.asset.read",
             "workshop.asset.write",
             "workshop.canvas.edit",
@@ -2696,7 +2696,7 @@ mod tests {
                 CANVAS_RESOURCE_KIND,
                 ASSET_LIBRARY_RESOURCE_KIND,
                 GENERATION_PROVIDER_RESOURCE_KIND,
-                MINIAPP_RESOURCE_KIND,
+                PLUGIN_RESOURCE_KIND,
             ])
         );
         let provider = descriptors
@@ -2858,28 +2858,28 @@ mod tests {
                         Wave3CapabilityOperation::OfficeSlidesEdit { .. }
                     ));
                 }
-                "miniapp.read" => {
+                "plugin.read" => {
                     assert!(matches!(
                         operation,
-                        Wave3CapabilityOperation::MiniAppRead { .. }
+                        Wave3CapabilityOperation::PluginRead { .. }
                     ));
                 }
-                "miniapp.edit" => {
+                "plugin.edit" => {
                     assert!(matches!(
                         operation,
-                        Wave3CapabilityOperation::MiniAppEdit { .. }
+                        Wave3CapabilityOperation::PluginEdit { .. }
                     ));
                 }
-                "miniapp.publish" => {
+                "plugin.publish" => {
                     assert!(matches!(
                         operation,
-                        Wave3CapabilityOperation::MiniAppPublish { .. }
+                        Wave3CapabilityOperation::PluginPublish { .. }
                     ));
                 }
-                "miniapp.serve" => {
+                "plugin.serve" => {
                     assert!(matches!(
                         operation,
-                        Wave3CapabilityOperation::MiniAppServe { .. }
+                        Wave3CapabilityOperation::PluginServe { .. }
                     ));
                 }
                 other => panic!("unexpected Wave 3 capability {other}"),
@@ -2991,12 +2991,12 @@ mod tests {
         );
 
         let missing_owner = composed_host_port(Wave3OwnerBindings::default());
-        let error = poll_ready(missing_owner.invoke(request_for("miniapp.read")))
-            .expect_err("missing MiniApp owner must fail closed");
+        let error = poll_ready(missing_owner.invoke(request_for("plugin.read")))
+            .expect_err("missing Plugin owner must fail closed");
         assert_eq!(error.code, WAVE3_HOST_PORT_UNAVAILABLE);
         assert_eq!(
             error.message,
-            "no production owner is bound for miniapp.read"
+            "no production owner is bound for plugin.read"
         );
 
         let owner_error = Wave3HostPortError::new("OWNER_ACTION_FAILED", "owner rejected action");

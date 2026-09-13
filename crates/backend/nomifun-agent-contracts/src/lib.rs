@@ -11,7 +11,7 @@ pub mod digest;
 pub mod event;
 pub mod impact;
 pub mod manifest;
-pub mod miniapp_m1;
+pub mod plugin_runtime;
 pub mod model_route;
 pub mod package;
 pub mod plugin_n1;
@@ -33,7 +33,7 @@ pub use digest::{
 pub use event::*;
 pub use impact::*;
 pub use manifest::*;
-pub use miniapp_m1::*;
+pub use plugin_runtime::*;
 pub use model_route::*;
 pub use package::*;
 pub use plugin_n1::*;

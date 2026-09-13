@@ -1158,11 +1158,11 @@ pub fn c7_package_specs() -> Vec<PackageSpec> {
             supported_surfaces: &["desktop", "headless"],
         },
         PackageSpec {
-            id: "nomifun.miniapp",
-            display_name: "MiniApp",
-            description: "Read, edit, publish, and serve owned MiniApps.",
-            mount_id: "domain-miniapp",
-            capabilities: &MINIAPP_CAPABILITIES,
+            id: "nomifun.plugin",
+            display_name: "Plugin",
+            description: "Read, edit, publish, and serve owned Plugins.",
+            mount_id: "domain-plugin",
+            capabilities: &PLUGIN_CAPABILITIES,
             supported_surfaces: &["desktop", "headless"],
         },
         PackageSpec {
@@ -1199,7 +1199,7 @@ const ROBOT: &[&str] = &["robot"];
 const CANVAS: &[&str] = &["canvas"];
 const ASSET_LIBRARY: &[&str] = &["asset_library"];
 const GENERATION_PROVIDER: &[&str] = &["generation_provider"];
-const MINIAPP: &[&str] = &["miniapp"];
+const PLUGIN: &[&str] = &["plugin"];
 const MCP_SERVER: &[&str] = &["mcp_server"];
 
 const WEB_RESEARCH_CAPABILITIES: [CapabilitySpec; 3] = [
@@ -1377,11 +1377,11 @@ const OFFICE_CAPABILITIES: [CapabilitySpec; 4] = [
     CapabilitySpec::tool("office.sheet.edit", EffectClass::WriteReversible, ASSET_LIBRARY),
     CapabilitySpec::tool("office.slides.edit", EffectClass::WriteReversible, ASSET_LIBRARY),
 ];
-const MINIAPP_CAPABILITIES: [CapabilitySpec; 4] = [
-    CapabilitySpec::tool("miniapp.read", EffectClass::ReadSensitive, MINIAPP),
-    CapabilitySpec::tool("miniapp.edit", EffectClass::WriteReversible, MINIAPP),
-    CapabilitySpec::tool("miniapp.publish", EffectClass::ExternalTransmit, MINIAPP),
-    CapabilitySpec::tool("miniapp.serve", EffectClass::ExternalTransmit, MINIAPP),
+const PLUGIN_CAPABILITIES: [CapabilitySpec; 4] = [
+    CapabilitySpec::tool("plugin.read", EffectClass::ReadSensitive, PLUGIN),
+    CapabilitySpec::tool("plugin.edit", EffectClass::WriteReversible, PLUGIN),
+    CapabilitySpec::tool("plugin.publish", EffectClass::ExternalTransmit, PLUGIN),
+    CapabilitySpec::tool("plugin.serve", EffectClass::ExternalTransmit, PLUGIN),
 ];
 const NOTIFICATION_CAPABILITIES: [CapabilitySpec; 2] = [
     CapabilitySpec::event_consumer("notification.webhook"),

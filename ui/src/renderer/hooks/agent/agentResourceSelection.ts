@@ -17,7 +17,7 @@ export const USER_AGENT_RESOURCE_KINDS = [
   'mcp_server',
   'canvas',
   'generation_provider',
-  'miniapp',
+  'plugin',
 ] as const;
 
 export type UserAgentResourceKind = (typeof USER_AGENT_RESOURCE_KINDS)[number];

@@ -2235,7 +2235,7 @@ impl PluginRepository for DbPluginRepositoryAdapter {
                 "operation state or revision changed",
             ));
         }
-        if operation.kind == "miniapp_permanent_delete" {
+        if operation.kind == "plugin_permanent_delete" {
             return Err(PluginServiceError::conflict(
                 "Plugin permanent delete is not cancelable",
             ));

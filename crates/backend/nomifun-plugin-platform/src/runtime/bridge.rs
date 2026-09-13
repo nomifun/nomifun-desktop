@@ -2,9 +2,9 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
 use nomifun_agent_contracts::{
-    MiniAppBridgeCallId, MiniAppBridgeKvRequest, MiniAppBridgeRequest, MiniAppBridgeSession,
-    MiniAppBridgeSessionId, MiniAppBridgeTarget, MiniAppId, MiniAppReleasePointerState,
-    MiniAppServiceStorageDescriptor, MiniAppSurfaceSessionId, ResolvedMiniAppServiceSpec,
+    PluginBridgeCallId, PluginBridgeKvRequest, PluginBridgeRequest, PluginBridgeSession,
+    PluginBridgeSessionId, PluginBridgeTarget, PluginProductId, PluginReleasePointerState,
+    PluginServiceStorageDescriptor, PluginSurfaceSessionId, ResolvedPluginServiceSpec,
     StrictJsonValue,
 };
 use tokio::sync::Mutex;
@@ -19,12 +19,12 @@ use crate::runtime::{
 /// created by the Host.
 #[derive(Clone, Debug)]
 pub struct PluginRuntimeBridgePort {
-    session: MiniAppBridgeSession,
+    session: PluginBridgeSession,
     closed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl PluginRuntimeBridgePort {
-    pub fn session(&self) -> &MiniAppBridgeSession {
+    pub fn session(&self) -> &PluginBridgeSession {
         &self.session
     }
 
@@ -40,11 +40,11 @@ impl PluginRuntimeBridgePort {
 
 #[derive(Clone, Debug)]
 pub struct PluginRuntimeBridgeBinding {
-    pub miniapp_id: MiniAppId,
-    pub surface_session_id: MiniAppSurfaceSessionId,
-    pub active: MiniAppReleasePointerState,
-    pub storage: MiniAppServiceStorageDescriptor,
-    pub service_spec: Option<ResolvedMiniAppServiceSpec>,
+    pub plugin_product_id: PluginProductId,
+    pub surface_session_id: PluginSurfaceSessionId,
+    pub active: PluginReleasePointerState,
+    pub storage: PluginServiceStorageDescriptor,
+    pub service_spec: Option<ResolvedPluginServiceSpec>,
 }
 
 impl PluginRuntimeBridgeBinding {
@@ -53,18 +53,18 @@ impl PluginRuntimeBridgeBinding {
         let active_release = self.active.active_release.as_ref().ok_or_else(|| {
             PluginRuntimePlatformError::ServiceUnavailable("Bridge requires an Active Release".into())
         })?;
-        if self.active.miniapp_id != self.miniapp_id
-            || self.storage.kv.miniapp_id != self.miniapp_id
+        if self.active.plugin_product_id != self.plugin_product_id
+            || self.storage.kv.plugin_product_id != self.plugin_product_id
             || self
                 .storage
                 .files_dir
                 .as_ref()
-                .is_some_and(|descriptor| descriptor.miniapp_id != self.miniapp_id)
+                .is_some_and(|descriptor| descriptor.plugin_product_id != self.plugin_product_id)
             || self
                 .storage
                 .private_database
                 .as_ref()
-                .is_some_and(|descriptor| descriptor.miniapp_id != self.miniapp_id)
+                .is_some_and(|descriptor| descriptor.plugin_product_id != self.plugin_product_id)
         {
             return Err(PluginRuntimePlatformError::UnknownStorageHandle);
         }
@@ -76,7 +76,7 @@ impl PluginRuntimeBridgeBinding {
             ));
         }
         if let Some(spec) = &self.service_spec
-            && (spec.miniapp_id != self.miniapp_id
+            && (spec.plugin_product_id != self.plugin_product_id
                 || &spec.release != active_release
                 || spec.active_release_epoch != self.active.active_release_epoch
                 || spec.storage != self.storage)
@@ -97,34 +97,34 @@ pub trait PluginRuntimeBridgeHost: Send + Sync {
     async fn request(
         &self,
         port: &PluginRuntimeBridgePort,
-        request: MiniAppBridgeRequest,
+        request: PluginBridgeRequest,
         cancellation: PluginRuntimeCallCancellation,
         now_ms: i64,
     ) -> PluginRuntimePlatformResult<StrictJsonValue>;
 
     async fn close(&self, port: &PluginRuntimeBridgePort);
 
-    async fn cancel(&self, port: &PluginRuntimeBridgePort, call_id: &MiniAppBridgeCallId);
+    async fn cancel(&self, port: &PluginRuntimeBridgePort, call_id: &PluginBridgeCallId);
 
-    async fn invalidate_miniapp(&self, miniapp_id: &MiniAppId);
+    async fn invalidate_plugin(&self, plugin_product_id: &PluginProductId);
 }
 
 #[async_trait]
 pub trait PluginRuntimeHostKvPort: Send + Sync {
     async fn execute(
         &self,
-        miniapp_id: &MiniAppId,
-        storage: &MiniAppServiceStorageDescriptor,
-        request: &MiniAppBridgeKvRequest,
+        plugin_product_id: &PluginProductId,
+        storage: &PluginServiceStorageDescriptor,
+        request: &PluginBridgeKvRequest,
     ) -> PluginRuntimePlatformResult<StrictJsonValue>;
 }
 
 struct BridgeEntry {
     port: PluginRuntimeBridgePort,
-    active_pointer: MiniAppReleasePointerState,
-    storage: MiniAppServiceStorageDescriptor,
-    service_spec: Option<ResolvedMiniAppServiceSpec>,
-    in_flight: BTreeMap<MiniAppBridgeCallId, PluginRuntimeCallCancellation>,
+    active_pointer: PluginReleasePointerState,
+    storage: PluginServiceStorageDescriptor,
+    service_spec: Option<ResolvedPluginServiceSpec>,
+    in_flight: BTreeMap<PluginBridgeCallId, PluginRuntimeCallCancellation>,
 }
 
 /// In-memory Host-owned MessageChannel coordinator. It models the ownership,
@@ -132,7 +132,7 @@ struct BridgeEntry {
 pub struct InMemoryPluginRuntimeBridgeHost<K> {
     kv: Arc<K>,
     service: Arc<dyn PluginRuntimeServiceHostPort>,
-    ports: Mutex<BTreeMap<MiniAppBridgeSessionId, BridgeEntry>>,
+    ports: Mutex<BTreeMap<PluginBridgeSessionId, BridgeEntry>>,
 }
 
 impl<K> InMemoryPluginRuntimeBridgeHost<K>
@@ -150,7 +150,7 @@ where
     pub async fn pointer_snapshot(
         &self,
         port: &PluginRuntimeBridgePort,
-    ) -> PluginRuntimePlatformResult<MiniAppReleasePointerState> {
+    ) -> PluginRuntimePlatformResult<PluginReleasePointerState> {
         if port.is_closed() {
             return Err(PluginRuntimePlatformError::StaleBridgePort);
         }
@@ -177,7 +177,7 @@ where
     async fn register_call(
         &self,
         port: &PluginRuntimeBridgePort,
-        call_id: &MiniAppBridgeCallId,
+        call_id: &PluginBridgeCallId,
         cancellation: &PluginRuntimeCallCancellation,
     ) -> PluginRuntimePlatformResult<ResolvedBridgeEntry> {
         if port.is_closed() {
@@ -209,7 +209,7 @@ where
     async fn finish_call(
         &self,
         port: &PluginRuntimeBridgePort,
-        call_id: &MiniAppBridgeCallId,
+        call_id: &PluginBridgeCallId,
     ) -> bool {
         if port.is_closed() {
             return false;
@@ -227,10 +227,10 @@ where
 
 #[derive(Clone)]
 struct ResolvedBridgeEntry {
-    session: MiniAppBridgeSession,
-    active_pointer: MiniAppReleasePointerState,
-    storage: MiniAppServiceStorageDescriptor,
-    service_spec: Option<ResolvedMiniAppServiceSpec>,
+    session: PluginBridgeSession,
+    active_pointer: PluginReleasePointerState,
+    storage: PluginServiceStorageDescriptor,
+    service_spec: Option<ResolvedPluginServiceSpec>,
 }
 
 #[async_trait]
@@ -248,15 +248,15 @@ where
             .active_release
             .clone()
             .expect("validated Active Release");
-        let session = MiniAppBridgeSession {
+        let session = PluginBridgeSession {
             bridge_contract_version:
-                nomifun_agent_contracts::MINIAPP_BRIDGE_CONTRACT_VERSION.into(),
-            bridge_session_id: MiniAppBridgeSessionId::from(uuid::Uuid::now_v7().to_string()),
+                nomifun_agent_contracts::PLUGIN_BRIDGE_CONTRACT_VERSION.into(),
+            bridge_session_id: PluginBridgeSessionId::from(uuid::Uuid::now_v7().to_string()),
             surface_session_id: binding.surface_session_id.clone(),
-            miniapp_id: binding.miniapp_id.clone(),
+            plugin_product_id: binding.plugin_product_id.clone(),
             active_release,
             active_release_epoch: binding.active.active_release_epoch,
-            transport: nomifun_agent_contracts::MiniAppBridgeTransport::MessageChannelV1,
+            transport: nomifun_agent_contracts::PluginBridgeTransport::MessageChannelV1,
             service_run_key: binding
                 .service_spec
                 .as_ref()
@@ -270,7 +270,7 @@ where
         let mut ports = self.ports.lock().await;
         ports.retain(|_, entry| {
             let stale = entry.port.session.surface_session_id == binding.surface_session_id
-                || (entry.port.session.miniapp_id == binding.miniapp_id
+                || (entry.port.session.plugin_product_id == binding.plugin_product_id
                     && (entry.port.session.active_release != session.active_release
                         || entry.port.session.active_release_epoch
                             != session.active_release_epoch));
@@ -298,7 +298,7 @@ where
     async fn request(
         &self,
         port: &PluginRuntimeBridgePort,
-        request: MiniAppBridgeRequest,
+        request: PluginBridgeRequest,
         cancellation: PluginRuntimeCallCancellation,
         now_ms: i64,
     ) -> PluginRuntimePlatformResult<StrictJsonValue> {
@@ -311,12 +311,12 @@ where
         }
         let call_id = request.call_id.clone();
         let result = match request.target {
-            MiniAppBridgeTarget::HostKv { request } => {
+            PluginBridgeTarget::HostKv { request } => {
                 self.kv
-                    .execute(&entry.session.miniapp_id, &entry.storage, &request)
+                    .execute(&entry.session.plugin_product_id, &entry.storage, &request)
                     .await
             }
-            MiniAppBridgeTarget::Service { method, payload } => {
+            PluginBridgeTarget::Service { method, payload } => {
                 match entry.service_spec.as_ref() {
                     Some(spec) => {
                         self.service
@@ -350,7 +350,7 @@ where
         self.remove(port).await;
     }
 
-    async fn cancel(&self, port: &PluginRuntimeBridgePort, call_id: &MiniAppBridgeCallId) {
+    async fn cancel(&self, port: &PluginRuntimeBridgePort, call_id: &PluginBridgeCallId) {
         let owner = {
             let ports = self.ports.lock().await;
             ports
@@ -360,7 +360,7 @@ where
                     if let Some(cancellation) = entry.in_flight.get(call_id) {
                         cancellation.cancel();
                     }
-                    entry.port.session.miniapp_id.clone()
+                    entry.port.session.plugin_product_id.clone()
                 })
         };
         if let Some(owner) = owner {
@@ -368,10 +368,10 @@ where
         }
     }
 
-    async fn invalidate_miniapp(&self, miniapp_id: &MiniAppId) {
+    async fn invalidate_plugin(&self, plugin_product_id: &PluginProductId) {
         let mut ports = self.ports.lock().await;
         ports.retain(|_, entry| {
-            if &entry.port.session.miniapp_id != miniapp_id {
+            if &entry.port.session.plugin_product_id != plugin_product_id {
                 return true;
             }
             for cancellation in entry.in_flight.values() {

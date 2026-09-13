@@ -37,7 +37,7 @@ use nomifun_agent_contracts::{
 };
 use nomifun_agent_control_plane::{
     AgentBindingTarget, AgentControlPlane, CatalogProvider, CatalogSnapshot, CompilerReleaseInputs,
-    ControlPlaneError, ControlPlaneStore, MiniAppCatalogPublicationSource,
+    ControlPlaneError, ControlPlaneStore, PluginProductCatalogPublicationSource,
     OfficialTemplateCatalog, PresetPreviewCompiler,
     StoredAgentBinding, StoredPreset,
 };
@@ -2040,7 +2040,7 @@ pub fn materialize_capability_catalog_entries(
             source_kind: lock.source_kind,
             source_identity: lock.source_identity.clone(),
             mount_id: lock.mount_id.clone(),
-            miniapp_id: lock.miniapp_id.clone(),
+            plugin_product_id: lock.plugin_product_id.clone(),
             mcp_binding_id: lock.mcp_binding_id.clone(),
             artifact_digest: Some(capability.target_artifact_digest.clone()),
         };
@@ -2088,21 +2088,21 @@ pub fn materialize_catalog_snapshot(
         nomifun_agent_contracts::CanonicalErrorCode,
     >,
 ) -> Result<CatalogSnapshot, AgentPlatformError> {
-    materialize_catalog_snapshot_with_miniapps(
+    materialize_catalog_snapshot_with_plugin_products(
         registry,
         unavailable_capabilities,
         Vec::new(),
     )
 }
 
-pub fn materialize_catalog_snapshot_with_miniapps(
+pub fn materialize_catalog_snapshot_with_plugin_products(
     registry: &nomifun_agent_kernel::MaterializedRegistry,
     unavailable_capabilities: &BTreeMap<
         CapabilityId,
         nomifun_agent_contracts::CanonicalErrorCode,
     >,
-    miniapp_publications: Vec<
-        nomifun_agent_contracts::MiniAppCapabilityCatalogPublication,
+    plugin_product_publications: Vec<
+        nomifun_agent_contracts::PluginProductCapabilityCatalogPublication,
     >,
 ) -> Result<CatalogSnapshot, AgentPlatformError> {
     let mut formal_capability_entries =
@@ -2113,17 +2113,17 @@ pub fn materialize_catalog_snapshot_with_miniapps(
         .into_iter()
         .map(|entry| (entry.capability.clone(), entry))
         .collect::<BTreeMap<_, _>>();
-    let mut miniapp_publication_map = BTreeMap::new();
-    for publication in miniapp_publications {
+    let mut plugin_product_publication_map = BTreeMap::new();
+    for publication in plugin_product_publications {
         publication
             .validate()
             .map_err(|error| AgentPlatformError::Contract(error.to_string()))?;
-        if miniapp_publication_map
-            .insert(publication.miniapp_id.clone(), publication.clone())
+        if plugin_product_publication_map
+            .insert(publication.plugin_product_id.clone(), publication.clone())
             .is_some()
         {
             return Err(AgentPlatformError::Contract(
-                "duplicate MiniApp Catalog publication".to_owned(),
+                "duplicate Plugin Product Catalog publication".to_owned(),
             ));
         }
         for capability in publication.capabilities {
@@ -2132,7 +2132,7 @@ pub fn materialize_catalog_snapshot_with_miniapps(
                 .is_some()
             {
                 return Err(AgentPlatformError::Contract(
-                    "MiniApp capability conflicts with an existing Catalog entry"
+                    "Plugin Product capability conflicts with an existing Catalog entry"
                         .to_owned(),
                 ));
             }
@@ -2168,7 +2168,7 @@ pub fn materialize_catalog_snapshot_with_miniapps(
     let snapshot = CatalogSnapshot {
         capabilities: registry.capabilities.values().cloned().collect(),
         formal_capability_entries,
-        miniapp_publications: miniapp_publication_map,
+        plugin_product_publications: plugin_product_publication_map,
         skills: registry.skills.values().cloned().collect(),
         mcp_tools: registry.mcp_tools.values().cloned().collect(),
         unavailable_capabilities: derived_unavailable_capabilities,
@@ -2182,7 +2182,7 @@ pub struct KernelCatalogProvider {
     registry: Arc<KernelRegistry>,
     unavailable_capabilities:
         StdRwLock<BTreeMap<CapabilityId, nomifun_agent_contracts::CanonicalErrorCode>>,
-    miniapp_publications: Option<Arc<dyn MiniAppCatalogPublicationSource>>,
+    plugin_product_publications: Option<Arc<dyn PluginProductCatalogPublicationSource>>,
 }
 
 impl KernelCatalogProvider {
@@ -2190,15 +2190,15 @@ impl KernelCatalogProvider {
         Self {
             registry,
             unavailable_capabilities: StdRwLock::new(BTreeMap::new()),
-            miniapp_publications: None,
+            plugin_product_publications: None,
         }
     }
 
-    pub fn with_miniapp_publication_source(
+    pub fn with_plugin_product_publication_source(
         mut self,
-        source: Arc<dyn MiniAppCatalogPublicationSource>,
+        source: Arc<dyn PluginProductCatalogPublicationSource>,
     ) -> Self {
-        self.miniapp_publications = Some(source);
+        self.plugin_product_publications = Some(source);
         self
     }
 
@@ -2250,16 +2250,16 @@ impl CatalogProvider for KernelCatalogProvider {
                 )
             })?
             .clone();
-        let miniapp_publications = self
-            .miniapp_publications
+        let plugin_product_publications = self
+            .plugin_product_publications
             .as_ref()
             .map(|source| source.publications())
             .transpose()?
             .unwrap_or_default();
-        materialize_catalog_snapshot_with_miniapps(
+        materialize_catalog_snapshot_with_plugin_products(
             &registry,
             &unavailable_capabilities,
-            miniapp_publications,
+            plugin_product_publications,
         )
             .map(Arc::new)
             .map_err(|error| ControlPlaneError::Wire(error.to_string()))
@@ -2277,14 +2277,14 @@ mod catalog_materialization_tests {
         CapabilityRef, ContributionId, ContributionSourceKind,
         LocalizedMetadata, McpBindingId, McpServerId,
         McpToolCapabilityMapping, McpToolKey,
-        MiniAppCapabilityCatalogPublication, MiniAppId,
-        MiniAppReleaseId, MiniAppReleaseRef, PackageId, PackageRef,
+        PluginProductCapabilityCatalogPublication, PluginProductId,
+        PluginReleaseId, PluginReleaseRef, PackageId, PackageRef,
         PlatformConstraint, PluginSourceKind, PluginSourceMetadata,
-        StableSourceIdentity, MiniAppCapabilityCatalogSink,
+        StableSourceIdentity, PluginProductCapabilityCatalogSink,
         capability_surface_declarations,
         digest_bytes,
     };
-    use nomifun_agent_control_plane::SharedMiniAppCatalogPublications;
+    use nomifun_agent_control_plane::SharedPluginProductCatalogPublications;
     use nomifun_agent_kernel::{
         InMemoryPluginStatePersistence, MaterializedCapability,
         MaterializedMcpTool,
@@ -2339,7 +2339,7 @@ mod catalog_materialization_tests {
                 "mcp:managed.catalog.server",
             ),
             mount_id: Some(mount_id.clone()),
-            miniapp_id: None,
+            plugin_product_id: None,
             mcp_binding_id: Some(binding_id.clone()),
             contribution_id: manifest.contribution_id.clone(),
             contract_digest: contract_digest.clone(),
@@ -2428,22 +2428,22 @@ mod catalog_materialization_tests {
     }
 
     #[test]
-    fn miniapp_publication_enters_the_same_shared_catalog_provider() {
+    fn plugin_product_publication_enters_the_same_shared_catalog_provider() {
         let package = PackageRef {
-            id: PackageId::from("miniapp.catalog"),
+            id: PackageId::from("plugin.catalog"),
             version: VersionString::from("1.0.0"),
         };
-        let miniapp_id = MiniAppId::from("miniapp-catalog");
-        let artifact_digest = digest_bytes(b"miniapp-artifact");
+        let plugin_product_id = PluginProductId::from("plugin-catalog");
+        let artifact_digest = digest_bytes(b"plugin-artifact");
         let manifest = CapabilityManifest {
-            id: CapabilityId::from("miniapp.catalog.search"),
-            contribution_id: ContributionId::from("capability:miniapp.catalog.search"),
+            id: CapabilityId::from("plugin.catalog.search"),
+            contribution_id: ContributionId::from("capability:plugin.catalog.search"),
             version: VersionString::from("1.0.0"),
             kind: CapabilityKind::Tool,
             package: package.clone(),
             display: LocalizedMetadata {
-                name: "MiniApp Search".to_owned(),
-                description: "Search from an Active MiniApp Release".to_owned(),
+                name: "Plugin Search".to_owned(),
+                description: "Search from an Active Plugin Product Release".to_owned(),
                 localized_names: BTreeMap::new(),
                 localized_descriptions: BTreeMap::new(),
             },
@@ -2458,11 +2458,11 @@ mod catalog_materialization_tests {
             config_schema: StrictJsonValue(json!({"type": "object"})),
             contributions: CapabilityContributions::default(),
         };
-        let active_release = MiniAppReleaseRef {
-            release_id: MiniAppReleaseId::from("release-miniapp-search"),
-            artifact_id: ArtifactId::from("artifact-miniapp-search"),
+        let active_release = PluginReleaseRef {
+            release_id: PluginReleaseId::from("release-plugin-search"),
+            artifact_id: ArtifactId::from("artifact-plugin-search"),
             release_digest: artifact_digest.clone(),
-            manifest_digest: digest_bytes(b"miniapp-manifest"),
+            manifest_digest: digest_bytes(b"plugin-manifest"),
         };
         let entry = CapabilityCatalogMaterializer::materialize(
             CapabilityCatalogMaterialization {
@@ -2471,12 +2471,12 @@ mod catalog_materialization_tests {
                     owner: CapabilityOwner::Package {
                         package: package.clone(),
                     },
-                    source_kind: ContributionSourceKind::MiniAppActiveRelease,
+                    source_kind: ContributionSourceKind::PluginProductActiveRelease,
                     source_identity: StableSourceIdentity::from(
-                        "miniapp:miniapp-catalog",
+                        "plugin-product:plugin-catalog",
                     ),
                     mount_id: None,
-                    miniapp_id: Some(miniapp_id.clone()),
+                    plugin_product_id: Some(plugin_product_id.clone()),
                     mcp_binding_id: None,
                     artifact_digest: Some(artifact_digest),
                 },
@@ -2488,8 +2488,8 @@ mod catalog_materialization_tests {
             },
         )
         .unwrap();
-        let mut publication = MiniAppCapabilityCatalogPublication {
-            miniapp_id: miniapp_id.clone(),
+        let mut publication = PluginProductCapabilityCatalogPublication {
+            plugin_product_id: plugin_product_id.clone(),
             active_release,
             active_release_epoch: 1,
             catalog_digest: digest_bytes(b"uncomputed"),
@@ -2501,12 +2501,12 @@ mod catalog_materialization_tests {
         tampered.catalog_digest = digest_bytes(b"tampered-publication");
         assert!(tampered.validate().is_err());
 
-        let store = Arc::new(SharedMiniAppCatalogPublications::new());
+        let store = Arc::new(SharedPluginProductCatalogPublications::new());
         store
-            .replace_miniapp_publication(
-                nomifun_agent_contracts::MiniAppCapabilityCatalogPublicationUpdate {
+            .replace_plugin_product_publication(
+                nomifun_agent_contracts::PluginProductCapabilityCatalogPublicationUpdate {
                     owner_user_id: "00000000-0000-7000-8000-000000000001".into(),
-                    miniapp_id: miniapp_id.clone(),
+                    plugin_product_id: plugin_product_id.clone(),
                     product_revision: 1,
                     pointer_revision: 1,
                     active_release_epoch: 1,
@@ -2522,10 +2522,10 @@ mod catalog_materialization_tests {
             .unwrap(),
         );
         let provider = KernelCatalogProvider::new(kernel)
-            .with_miniapp_publication_source(store.clone());
+            .with_plugin_product_publication_source(store.clone());
         let snapshot = provider.snapshot().unwrap();
         let reference = CapabilityRef {
-            id: CapabilityId::from("miniapp.catalog.search"),
+            id: CapabilityId::from("plugin.catalog.search"),
             version: VersionString::from("1.0.0"),
         };
         assert_eq!(
@@ -2535,7 +2535,7 @@ mod catalog_materialization_tests {
                 .unwrap()
                 .provenance
                 .source_kind,
-            ContributionSourceKind::MiniAppActiveRelease
+            ContributionSourceKind::PluginProductActiveRelease
         );
         assert_eq!(
             snapshot
@@ -2545,15 +2545,15 @@ mod catalog_materialization_tests {
             package
         );
         assert!(snapshot.as_api().unwrap().capabilities.iter().any(|item| {
-            item.capability.id == "miniapp.catalog.search"
-                && item.source_kind == "miniapp_active_release"
+            item.capability.id == "plugin.catalog.search"
+                && item.source_kind == "plugin_product_active_release"
         }));
 
         store
-            .replace_miniapp_publication(
-                nomifun_agent_contracts::MiniAppCapabilityCatalogPublicationUpdate {
+            .replace_plugin_product_publication(
+                nomifun_agent_contracts::PluginProductCapabilityCatalogPublicationUpdate {
                     owner_user_id: "00000000-0000-7000-8000-000000000001".into(),
-                    miniapp_id: miniapp_id.clone(),
+                    plugin_product_id: plugin_product_id.clone(),
                     product_revision: 2,
                     pointer_revision: 2,
                     active_release_epoch: 1,
@@ -2562,10 +2562,10 @@ mod catalog_materialization_tests {
             )
             .unwrap();
         store
-            .replace_miniapp_publication(
-                nomifun_agent_contracts::MiniAppCapabilityCatalogPublicationUpdate {
+            .replace_plugin_product_publication(
+                nomifun_agent_contracts::PluginProductCapabilityCatalogPublicationUpdate {
                     owner_user_id: "00000000-0000-7000-8000-000000000001".into(),
-                    miniapp_id: miniapp_id.clone(),
+                    plugin_product_id: plugin_product_id.clone(),
                     product_revision: 1,
                     pointer_revision: 1,
                     active_release_epoch: 1,
@@ -3084,7 +3084,7 @@ impl AgentPlatform {
             &registry,
             &environment,
             CompileRequest {
-                miniapp_capabilities: Vec::new(),
+                plugin_product_capabilities: Vec::new(),
                 revision,
                 principal: principal.clone(),
                 scene: scene.into(),

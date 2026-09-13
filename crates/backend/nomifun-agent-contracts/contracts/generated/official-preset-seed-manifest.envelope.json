@@ -2,7 +2,7 @@
   "digest_algorithm": "sorted-json-sha256-v1",
   "payload": {
     "manifest_version": "1.0.0",
-    "target_first_party_contribution_digest": "71c6aeb654159f99777e63a6444c1c2be4450e0be050f4daa350d19b8fce26a6",
+    "target_first_party_contribution_digest": "cd85680e160f852a069bbeb8e58db3fe8b6e912b2585c792c9e4ba988b22b2bf",
     "target_runtime_feature_inventory_digest": "bc01fffa050a721debc7740405a05f53b966d4e2dc2d8b4392e321d944fca2ee",
     "templates": {
       "chat.minimal": {
@@ -481,19 +481,19 @@
             "version": "1.0.0"
           },
           {
-            "id": "miniapp.read",
+            "id": "plugin.read",
             "version": "1.0.0"
           },
           {
-            "id": "miniapp.edit",
+            "id": "plugin.edit",
             "version": "1.0.0"
           },
           {
-            "id": "miniapp.publish",
+            "id": "plugin.publish",
             "version": "1.0.0"
           },
           {
-            "id": "miniapp.serve",
+            "id": "plugin.serve",
             "version": "1.0.0"
           }
         ],
@@ -502,7 +502,7 @@
           "asset_library",
           "canvas",
           "generation_provider",
-          "miniapp"
+          "plugin"
         ],
         "required_runtime_features": []
       }
@@ -716,7 +716,7 @@
           "canvas_asset",
           "editing",
           "generation",
-          "miniapp",
+          "plugin",
           "templates"
         ],
         "required_capability_ids": [
@@ -725,10 +725,10 @@
           "creation.image_edit",
           "creation.text",
           "creation.video",
-          "miniapp.edit",
-          "miniapp.publish",
-          "miniapp.read",
-          "miniapp.serve",
+          "plugin.edit",
+          "plugin.publish",
+          "plugin.read",
+          "plugin.serve",
           "workshop.asset.read",
           "workshop.asset.write",
           "workshop.canvas.edit",
@@ -740,7 +740,7 @@
           "asset_library",
           "canvas",
           "generation_provider",
-          "miniapp"
+          "plugin"
         ]
       }
     },
@@ -754,5 +754,5 @@
       "research.web"
     ]
   },
-  "payload_digest": "d43fdbe85e0c6042dfcbe998c627a0e8541e016f79d4454bcb5f067797998af2"
+  "payload_digest": "70b7a2a6c256e977df54f6298a902487344993abdb6720b5803d68f01ccc6560"
 }

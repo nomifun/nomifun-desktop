@@ -1,13 +1,13 @@
--- Phase M1-0 clean-start data root.
+-- Plugin Runtime clean-start data root.
 --
--- This migration is independent from the retired `miniapps` table. It does
+-- This migration is independent from the retired `plugins` table. It does
 -- not inspect, copy, alias, or mutate that table. Fresh-v4 keeps relational
 -- ownership in the executable logical-reference registry; physical foreign
 -- keys and triggers are intentionally forbidden by id_schema_contract.
 
-CREATE TABLE miniapp_library_state (
+CREATE TABLE plugin_library_state (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    singleton_key TEXT NOT NULL CHECK (singleton_key = 'miniapp_m1'),
+    singleton_key TEXT NOT NULL CHECK (singleton_key = 'plugin_runtime'),
     owner_user_id TEXT NOT NULL CHECK (
         length(owner_user_id) = 36
         AND lower(owner_user_id) = owner_user_id
@@ -19,13 +19,13 @@ CREATE TABLE miniapp_library_state (
     UNIQUE (singleton_key, owner_user_id)
 );
 
-CREATE TABLE miniapp_products (
+CREATE TABLE plugin_products (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    miniapp_id TEXT NOT NULL UNIQUE CHECK (
-        length(miniapp_id) = 36
-        AND lower(miniapp_id) = miniapp_id
-        AND miniapp_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(miniapp_id, '-', '') NOT GLOB '*[^0-9a-f]*'
+    plugin_product_id TEXT NOT NULL UNIQUE CHECK (
+        length(plugin_product_id) = 36
+        AND lower(plugin_product_id) = plugin_product_id
+        AND plugin_product_id GLOB '????????-????-7???-[89ab]???-????????????'
+        AND replace(plugin_product_id, '-', '') NOT GLOB '*[^0-9a-f]*'
     ),
     owner_user_id TEXT NOT NULL CHECK (
         length(owner_user_id) = 36
@@ -37,7 +37,7 @@ CREATE TABLE miniapp_products (
     display_name TEXT NOT NULL CHECK (length(display_name) BETWEEN 1 AND 255),
     description TEXT,
     icon_asset_id TEXT,
-    kind TEXT NOT NULL CHECK (kind IN ('ui_only', 'service')),
+    kind TEXT NOT NULL CHECK (kind = 'plugin'),
     lifecycle TEXT NOT NULL DEFAULT 'disabled'
         CHECK (lifecycle IN ('enabled', 'disabled', 'trashed', 'deleting')),
     pointer_revision INTEGER NOT NULL DEFAULT 1 CHECK (pointer_revision >= 1),
@@ -63,7 +63,7 @@ CREATE TABLE miniapp_products (
         CHECK (credential_bindings_revision >= 1),
     created_at INTEGER NOT NULL CHECK (created_at >= 0),
     updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
-    UNIQUE (owner_user_id, miniapp_id),
+    UNIQUE (owner_user_id, plugin_product_id),
     CHECK ((ready_release_id IS NULL) = (ready_release_digest IS NULL)),
     CHECK ((active_release_id IS NULL) = (active_release_digest IS NULL)),
     CHECK ((previous_release_id IS NULL) = (previous_release_digest IS NULL)),
@@ -114,87 +114,7 @@ CREATE TABLE miniapp_products (
     CHECK (previous_release_id IS NULL OR previous_release_id <> ready_release_id)
 );
 
-CREATE TABLE miniapp_projects (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    project_id TEXT NOT NULL UNIQUE CHECK (
-        length(project_id) = 36
-        AND lower(project_id) = project_id
-        AND project_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(project_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    miniapp_id TEXT NOT NULL CHECK (
-        length(miniapp_id) = 36
-        AND lower(miniapp_id) = miniapp_id
-        AND miniapp_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(miniapp_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    owner_user_id TEXT NOT NULL CHECK (
-        length(owner_user_id) = 36
-        AND lower(owner_user_id) = owner_user_id
-        AND owner_user_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(owner_user_id, '-', '') NOT GLOB '*[^0-9a-f]*'
-    ),
-    project_revision INTEGER NOT NULL DEFAULT 1 CHECK (project_revision >= 1),
-    source_state TEXT NOT NULL DEFAULT 'empty'
-        CHECK (source_state IN ('empty', 'editable', 'runtime_only')),
-    managed_source_path TEXT,
-    source_head_digest TEXT,
-    dependency_lock_digest TEXT,
-    build_profile_version TEXT,
-    build_generation INTEGER NOT NULL DEFAULT 0 CHECK (build_generation >= 0),
-    created_at INTEGER NOT NULL CHECK (created_at >= 0),
-    updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
-    UNIQUE (owner_user_id, project_id),
-    UNIQUE (owner_user_id, project_id, miniapp_id),
-    CHECK (
-        (source_state = 'empty'
-         AND managed_source_path IS NULL
-         AND source_head_digest IS NULL
-         AND dependency_lock_digest IS NULL
-         AND build_profile_version IS NULL
-         AND build_generation = 0)
-        OR
-        (source_state = 'editable'
-         AND managed_source_path IS NOT NULL
-         AND source_head_digest IS NOT NULL
-         AND dependency_lock_digest IS NOT NULL
-         AND build_profile_version IS NOT NULL
-         AND build_generation > 0)
-        OR
-        (source_state = 'runtime_only'
-         AND managed_source_path IS NULL
-         AND source_head_digest IS NULL
-         AND dependency_lock_digest IS NULL
-         AND build_profile_version IS NULL
-         AND build_generation = 0)
-    ),
-    CHECK (managed_source_path IS NULL OR (
-        managed_source_path <> ''
-        AND substr(managed_source_path, 1, 1) <> '/'
-        AND substr(managed_source_path, -1, 1) <> '/'
-        AND instr(managed_source_path, '\') = 0
-        AND instr(managed_source_path, '//') = 0
-        AND instr('/' || managed_source_path || '/', '/../') = 0
-        AND instr('/' || managed_source_path || '/', '/./') = 0
-        AND instr(managed_source_path, char(0)) = 0
-    )),
-    CHECK (source_head_digest IS NULL OR (
-        length(source_head_digest) = 64
-        AND lower(source_head_digest) = source_head_digest
-        AND source_head_digest NOT GLOB '*[^0-9a-f]*'
-    )),
-    CHECK (dependency_lock_digest IS NULL OR (
-        length(dependency_lock_digest) = 64
-        AND lower(dependency_lock_digest) = dependency_lock_digest
-        AND dependency_lock_digest NOT GLOB '*[^0-9a-f]*'
-    )),
-    CHECK (build_profile_version IS NULL OR (
-        length(build_profile_version) BETWEEN 1 AND 64
-        AND build_profile_version NOT GLOB '*[^!-~]*'
-    ))
-);
-
-CREATE TABLE miniapp_release_artifacts (
+CREATE TABLE plugin_release_artifacts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     artifact_id TEXT NOT NULL UNIQUE CHECK (
         length(artifact_id) = 36
@@ -235,7 +155,7 @@ CREATE TABLE miniapp_release_artifacts (
     UNIQUE (owner_user_id, artifact_id, artifact_digest, manifest_digest)
 );
 
-CREATE TABLE miniapp_releases (
+CREATE TABLE plugin_releases (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     release_id TEXT NOT NULL UNIQUE CHECK (
         length(release_id) = 36
@@ -243,11 +163,11 @@ CREATE TABLE miniapp_releases (
         AND release_id GLOB '????????-????-7???-[89ab]???-????????????'
         AND replace(release_id, '-', '') NOT GLOB '*[^0-9a-f]*'
     ),
-    miniapp_id TEXT NOT NULL CHECK (
-        length(miniapp_id) = 36
-        AND lower(miniapp_id) = miniapp_id
-        AND miniapp_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(miniapp_id, '-', '') NOT GLOB '*[^0-9a-f]*'
+    plugin_product_id TEXT NOT NULL CHECK (
+        length(plugin_product_id) = 36
+        AND lower(plugin_product_id) = plugin_product_id
+        AND plugin_product_id GLOB '????????-????-7???-[89ab]???-????????????'
+        AND replace(plugin_product_id, '-', '') NOT GLOB '*[^0-9a-f]*'
     ),
     owner_user_id TEXT NOT NULL CHECK (
         length(owner_user_id) = 36
@@ -335,13 +255,13 @@ CREATE TABLE miniapp_releases (
     ))
 );
 
-CREATE TABLE miniapp_credential_bindings (
+CREATE TABLE plugin_credential_bindings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    miniapp_id TEXT NOT NULL CHECK (
-        length(miniapp_id) = 36
-        AND lower(miniapp_id) = miniapp_id
-        AND miniapp_id GLOB '????????-????-7???-[89ab]???-????????????'
-        AND replace(miniapp_id, '-', '') NOT GLOB '*[^0-9a-f]*'
+    plugin_product_id TEXT NOT NULL CHECK (
+        length(plugin_product_id) = 36
+        AND lower(plugin_product_id) = plugin_product_id
+        AND plugin_product_id GLOB '????????-????-7???-[89ab]???-????????????'
+        AND replace(plugin_product_id, '-', '') NOT GLOB '*[^0-9a-f]*'
     ),
     owner_user_id TEXT NOT NULL CHECK (
         length(owner_user_id) = 36
@@ -359,52 +279,50 @@ CREATE TABLE miniapp_credential_bindings (
     ),
     created_at INTEGER NOT NULL CHECK (created_at >= 0),
     updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
-    UNIQUE (owner_user_id, miniapp_id, slot_key)
+    UNIQUE (owner_user_id, plugin_product_id, slot_key)
 );
 
-CREATE INDEX idx_miniapp_library_state_owner
-    ON miniapp_library_state(owner_user_id, revision);
-CREATE INDEX idx_miniapp_library_state_owner_user_id
-    ON miniapp_library_state(owner_user_id);
-CREATE INDEX idx_miniapp_products_owner
-    ON miniapp_products(owner_user_id, updated_at DESC, id DESC);
-CREATE INDEX idx_miniapp_products_owner_user_id
-    ON miniapp_products(owner_user_id);
-CREATE INDEX idx_miniapp_products_icon_asset_id
-    ON miniapp_products(icon_asset_id);
-CREATE INDEX idx_miniapp_products_ready_release_id
-    ON miniapp_products(ready_release_id);
-CREATE INDEX idx_miniapp_products_active_release_id
-    ON miniapp_products(active_release_id);
-CREATE INDEX idx_miniapp_products_previous_release_id
-    ON miniapp_products(previous_release_id);
-CREATE INDEX idx_miniapp_projects_owner
-    ON miniapp_projects(owner_user_id, miniapp_id, updated_at DESC);
-CREATE INDEX idx_miniapp_projects_owner_user_id
-    ON miniapp_projects(owner_user_id);
-CREATE INDEX idx_miniapp_projects_miniapp_id
-    ON miniapp_projects(miniapp_id);
-CREATE INDEX idx_miniapp_release_artifacts_owner
-    ON miniapp_release_artifacts(owner_user_id, artifact_digest);
-CREATE INDEX idx_miniapp_release_artifacts_owner_user_id
-    ON miniapp_release_artifacts(owner_user_id);
-CREATE INDEX idx_miniapp_releases_artifact_id
-    ON miniapp_releases(artifact_id);
-CREATE INDEX idx_miniapp_releases_product
-    ON miniapp_releases(owner_user_id, miniapp_id, created_at DESC);
-CREATE INDEX idx_miniapp_releases_owner_user_id
-    ON miniapp_releases(owner_user_id);
-CREATE INDEX idx_miniapp_releases_miniapp_id
-    ON miniapp_releases(miniapp_id);
-CREATE INDEX idx_miniapp_releases_project_id
-    ON miniapp_releases(project_id);
-CREATE INDEX idx_miniapp_releases_origin_operation_id
-    ON miniapp_releases(origin_operation_id);
-CREATE INDEX idx_miniapp_credential_bindings_product
-    ON miniapp_credential_bindings(owner_user_id, miniapp_id, slot_key);
-CREATE INDEX idx_miniapp_credential_bindings_owner_user_id
-    ON miniapp_credential_bindings(owner_user_id);
-CREATE INDEX idx_miniapp_credential_bindings_miniapp_id
-    ON miniapp_credential_bindings(miniapp_id);
-CREATE INDEX idx_miniapp_credential_bindings_credential_id
-    ON miniapp_credential_bindings(credential_id);
+CREATE INDEX idx_plugin_library_state_owner
+    ON plugin_library_state(owner_user_id, revision);
+CREATE INDEX idx_plugin_library_state_owner_user_id
+    ON plugin_library_state(owner_user_id);
+CREATE INDEX idx_plugin_products_owner
+    ON plugin_products(owner_user_id, updated_at DESC, id DESC);
+CREATE INDEX idx_plugin_products_owner_user_id
+    ON plugin_products(owner_user_id);
+CREATE INDEX idx_plugin_products_icon_asset_id
+    ON plugin_products(icon_asset_id);
+CREATE INDEX idx_plugin_products_ready_release_id
+    ON plugin_products(ready_release_id);
+CREATE INDEX idx_plugin_products_active_release_id
+    ON plugin_products(active_release_id);
+CREATE INDEX idx_plugin_products_previous_release_id
+    ON plugin_products(previous_release_id);
+CREATE INDEX idx_plugin_projects_owner
+    ON plugin_projects(owner_user_id, plugin_product_id, updated_at DESC);
+CREATE INDEX idx_plugin_projects_plugin_product_id
+    ON plugin_projects(plugin_product_id);
+CREATE INDEX idx_plugin_release_artifacts_owner
+    ON plugin_release_artifacts(owner_user_id, artifact_digest);
+CREATE INDEX idx_plugin_release_artifacts_owner_user_id
+    ON plugin_release_artifacts(owner_user_id);
+CREATE INDEX idx_plugin_releases_artifact_id
+    ON plugin_releases(artifact_id);
+CREATE INDEX idx_plugin_releases_product
+    ON plugin_releases(owner_user_id, plugin_product_id, created_at DESC);
+CREATE INDEX idx_plugin_releases_owner_user_id
+    ON plugin_releases(owner_user_id);
+CREATE INDEX idx_plugin_releases_plugin_product_id
+    ON plugin_releases(plugin_product_id);
+CREATE INDEX idx_plugin_releases_project_id
+    ON plugin_releases(project_id);
+CREATE INDEX idx_plugin_releases_origin_operation_id
+    ON plugin_releases(origin_operation_id);
+CREATE INDEX idx_plugin_credential_bindings_product
+    ON plugin_credential_bindings(owner_user_id, plugin_product_id, slot_key);
+CREATE INDEX idx_plugin_credential_bindings_owner_user_id
+    ON plugin_credential_bindings(owner_user_id);
+CREATE INDEX idx_plugin_credential_bindings_plugin_product_id
+    ON plugin_credential_bindings(plugin_product_id);
+CREATE INDEX idx_plugin_credential_bindings_credential_id
+    ON plugin_credential_bindings(credential_id);

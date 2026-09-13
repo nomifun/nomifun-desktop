@@ -23,8 +23,8 @@ use futures_util::FutureExt;
 use nomifun_ai_agent::types::AgentRuntimeBuildOptions;
 use nomifun_ai_agent::{
     AgentRuntimeRegistry, AgentStreamEvent, KernelNomiPluginToolSession,
-    NomiMiniAppToolInvoker, NomiMiniAppToolInvocation,
-    NomiMiniAppToolSchemaResolver, NomiPluginToolError,
+    NomiPluginProductToolInvocation, NomiPluginProductToolInvoker,
+    NomiPluginProductToolSchemaResolver, NomiPluginToolError,
     NomiPluginToolSchemaResolver, NomiPluginToolSession,
     NomiPluginToolSessionProvider, NomiPluginToolSessionRequest,
     NomiPlatformBuiltinContextAdmission,
@@ -34,9 +34,9 @@ use nomifun_ai_agent::{
 };
 use nomifun_agent_contracts::{
     AgentBindingValue, AgentSessionId, AgentSessionLiveRecord, AgentSessionMetadata,
-    ArtifactId,
-    MiniAppBridgeCallId, OperationId, PrincipalRef, RemoteBindingProvenance,
-    ResolvedMiniAppCapability, ScopeKey, StrictJsonValue, UserId,
+    ArtifactId, ContributionSourceKind, OperationId, PluginBridgeCallId,
+    PrincipalRef, RemoteBindingProvenance, ResolvedCapability, ScopeKey,
+    StrictJsonValue, UserId,
 };
 use nomifun_agent_control_plane::{
     AgentControlPlane, AuthenticatedOwner, ControlPlaneError,
@@ -337,7 +337,7 @@ pub(crate) struct NomiCorePluginToolSessionProvider {
         super::nomi_core_resource_bindings::NomiCoreResourceBindingResolverRegistry,
     robot_owner: Option<Arc<super::nomi_core_robot::NomiCoreRobotWave4Owner>>,
     plugin_runtime:
-        Arc<nomifun_plugin_platform::runtime::PluginRuntimeM1ApplicationService>,
+        Arc<nomifun_plugin_platform::runtime::PluginRuntimeApplicationService>,
 }
 
 impl NomiCorePluginToolSessionProvider {
@@ -360,7 +360,7 @@ impl NomiCorePluginToolSessionProvider {
         resource_bindings: super::nomi_core_resource_bindings::NomiCoreResourceBindingResolverRegistry,
         robot_owner: Option<Arc<super::nomi_core_robot::NomiCoreRobotWave4Owner>>,
         plugin_runtime: Arc<
-            nomifun_plugin_platform::runtime::PluginRuntimeM1ApplicationService,
+            nomifun_plugin_platform::runtime::PluginRuntimeApplicationService,
         >,
     ) -> Self {
         Self {
@@ -560,19 +560,16 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
                 .with_host_dynamic_tools(descriptors, invoker)
                 .map_err(|error| AppError::Conflict(error.to_string()))?
         };
-        let miniapp_actions =
-            KernelNomiPluginToolSession::materialize_miniapp_actions(
-                &compiled,
-                &principal,
-                &session_id,
-                &ScopeKey::from(format!(
-                    "session:{}",
-                    request.conversation_id
-                )),
-                Arc::new(NomiCoreMiniAppSchemaResolver {
-                    application: Arc::clone(&self.plugin_runtime),
-                }),
-            )
+        let plugin_product_actions =
+            KernelNomiPluginToolSession::materialize_plugin_product_actions(
+            &compiled,
+            &principal,
+            &session_id,
+            &ScopeKey::from(format!("session:{}", request.conversation_id)),
+            Arc::new(NomiCorePluginProductSchemaResolver {
+                application: Arc::clone(&self.plugin_runtime),
+            }),
+        )
             .await
             .map_err(|error| {
                 AppError::Conflict(format!(
@@ -588,9 +585,9 @@ impl NomiPluginToolSessionProvider for NomiCorePluginToolSessionProvider {
                 owner,
                 session_id,
             }))
-            .with_miniapp_actions(
-                miniapp_actions,
-                Arc::new(NomiCoreMiniAppToolInvoker {
+            .with_plugin_product_actions(
+                plugin_product_actions,
+                Arc::new(NomiCorePluginProductToolInvoker {
                     application: Arc::clone(&self.plugin_runtime),
                     owner_user_id: common_owner.as_ref().to_owned(),
                 }),
@@ -922,17 +919,17 @@ fn install_runtime_mcp_selection(
     Ok(())
 }
 
-struct NomiCoreMiniAppSchemaResolver {
+struct NomiCorePluginProductSchemaResolver {
     application:
-        Arc<nomifun_plugin_platform::runtime::PluginRuntimeM1ApplicationService>,
+        Arc<nomifun_plugin_platform::runtime::PluginRuntimeApplicationService>,
 }
 
 #[async_trait]
-impl NomiMiniAppToolSchemaResolver for NomiCoreMiniAppSchemaResolver {
+impl NomiPluginProductToolSchemaResolver for NomiCorePluginProductSchemaResolver {
     async fn resolve(
         &self,
         owner: &PrincipalRef,
-        capability: &ResolvedMiniAppCapability,
+        capability: &ResolvedCapability,
         reference: &nomifun_agent_contracts::CanonicalSchemaRef,
     ) -> Result<StrictJsonValue, String> {
         if owner.principal_kind != "user" {
@@ -949,38 +946,75 @@ impl NomiMiniAppToolSchemaResolver for NomiCoreMiniAppSchemaResolver {
     }
 }
 
-struct NomiCoreMiniAppToolInvoker {
+struct NomiCorePluginProductToolInvoker {
     application:
-        Arc<nomifun_plugin_platform::runtime::PluginRuntimeM1ApplicationService>,
+        Arc<nomifun_plugin_platform::runtime::PluginRuntimeApplicationService>,
     owner_user_id: String,
 }
 
 #[async_trait]
-impl NomiMiniAppToolInvoker for NomiCoreMiniAppToolInvoker {
+impl NomiPluginProductToolInvoker for NomiCorePluginProductToolInvoker {
     async fn invoke(
         &self,
-        request: NomiMiniAppToolInvocation,
+        request: NomiPluginProductToolInvocation,
     ) -> Result<StrictJsonValue, NomiPluginToolError> {
+        request
+            .capability()
+            .validate()
+            .map_err(|error| NomiPluginToolError::Contract(error.message))?;
+        let plugin_product_id = request
+            .capability()
+            .plugin_product_id
+            .clone()
+            .ok_or_else(|| {
+                NomiPluginToolError::Contract(
+                    "Plugin Product capability is missing plugin_product_id".to_owned(),
+                )
+            })?;
+        let active_release = request
+            .capability()
+            .active_release
+            .clone()
+            .ok_or_else(|| {
+                NomiPluginToolError::Contract(
+                    "Plugin Product capability is missing active_release".to_owned(),
+                )
+            })?;
+        let active_release_epoch = request
+            .capability()
+            .active_release_epoch
+            .ok_or_else(|| {
+                NomiPluginToolError::Contract(
+                    "Plugin Product capability is missing active_release_epoch".to_owned(),
+                )
+            })?;
+        let catalog_digest = request
+            .capability()
+            .catalog_digest
+            .clone()
+            .ok_or_else(|| {
+                NomiPluginToolError::Contract(
+                    "Plugin Product capability is missing catalog_digest".to_owned(),
+                )
+            })?;
         let operation_id = request.operation_id().clone();
         self.application
             .invoke_agent_capability(
                 PluginRuntimeAgentCapabilityInvocation {
                     owner_user_id: self.owner_user_id.clone(),
-                    miniapp_id: request.capability().miniapp_id.clone(),
+                    plugin_product_id,
                     capability: request.capability().capability.clone(),
                     action_id: request.action().action_id.clone(),
                     action_allowlist: request
                         .capability()
                         .action_allowlist
                         .clone(),
-                    active_release: request.capability().active_release.clone(),
-                    active_release_epoch: request
-                        .capability()
-                        .active_release_epoch,
-                    catalog_digest: request.capability().catalog_digest.clone(),
+                    active_release,
+                    active_release_epoch,
+                    catalog_digest,
                     operation_id: operation_id.clone(),
-                    call_id: MiniAppBridgeCallId::from(format!(
-                        "nomi-miniapp:{}",
+                    call_id: PluginBridgeCallId::from(format!(
+                        "nomi-plugin-product:{}",
                         operation_id.as_ref()
                     )),
                     payload: request.input().clone(),
@@ -1037,18 +1071,21 @@ fn compile_nomi_plugin_snapshot(
             audience: persisted.audience.clone(),
             created_at_ms: persisted.created_at_ms,
             resolver_run_id: persisted.resolver_run_id.clone(),
-            miniapp_capabilities: persisted
+            plugin_product_capabilities: persisted
                 .content
-                .initial_miniapp_capabilities
+                .initial_capabilities
                 .iter()
-                .cloned()
                 .chain(
                     persisted
                         .content
-                        .on_demand_miniapp_capabilities
+                        .on_demand_capabilities
                         .iter()
-                        .cloned(),
                 )
+                .filter(|capability| {
+                    capability.contribution_lock.source_kind
+                        == ContributionSourceKind::PluginProductActiveRelease
+                })
+                .cloned()
                 .collect(),
         },
     )

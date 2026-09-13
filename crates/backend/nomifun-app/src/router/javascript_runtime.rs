@@ -106,7 +106,7 @@ pub(crate) async fn build_javascript_runtime_state(
     plugin_runtime:
         Arc<super::plugin_platform::NomiCorePluginRuntimeParticipant>,
     release_runtime:
-        Arc<nomifun_plugin_platform::runtime::PluginRuntimeM1ApplicationService>,
+        Arc<nomifun_plugin_platform::runtime::PluginRuntimeApplicationService>,
 ) -> anyhow::Result<JavaScriptRuntimeRouterState> {
     let participant = Arc::new(NomiCoreRuntimeSwitchParticipant {
         plugin,
@@ -425,17 +425,17 @@ struct NomiCoreRuntimeSwitchParticipant {
     plugin_runtime:
         Arc<super::plugin_platform::NomiCorePluginRuntimeParticipant>,
     release_runtime:
-        Arc<nomifun_plugin_platform::runtime::PluginRuntimeM1ApplicationService>,
+        Arc<nomifun_plugin_platform::runtime::PluginRuntimeApplicationService>,
     foundation_root: PathBuf,
     host_root: PathBuf,
 }
 
-fn miniapp_service_participant_result(
+fn plugin_service_participant_result(
     passed: bool,
 ) -> nomifun_agent_contracts::RuntimeSwitchParticipantResult {
     nomifun_agent_contracts::RuntimeSwitchParticipantResult {
-        kind: nomifun_agent_contracts::RuntimeSwitchParticipantKind::MiniappService,
-        owner_id: "miniapp-production-host".to_owned(),
+        kind: nomifun_agent_contracts::RuntimeSwitchParticipantKind::PluginService,
+        owner_id: "plugin-production-host".to_owned(),
         outcome: if passed {
             nomifun_agent_contracts::RuntimeSwitchParticipantOutcome::Passed
         } else {
@@ -443,7 +443,7 @@ fn miniapp_service_participant_result(
         },
         error_code: (!passed).then(|| {
             nomifun_agent_contracts::CanonicalErrorCode::from(
-                "MINIAPP_SERVICE_RUNTIME_VALIDATION_FAILED",
+                "PLUGIN_SERVICE_RUNTIME_VALIDATION_FAILED",
             )
         }),
     }
@@ -544,12 +544,12 @@ impl RuntimeSwitchParticipant for NomiCoreRuntimeSwitchParticipant {
                 .validate_candidate(owner_user_id, candidate)
                 .await?,
         );
-        let miniapp_service_validation = self
+        let plugin_service_validation = self
             .release_runtime
             .validate_service_runtime_candidate(owner_user_id, candidate)
             .await;
-        results.push(miniapp_service_participant_result(
-            miniapp_service_validation.is_ok(),
+        results.push(plugin_service_participant_result(
+            plugin_service_validation.is_ok(),
         ));
         Ok(RuntimeParticipantValidation {
             foundation_hello_passed: true,
@@ -749,22 +749,22 @@ mod tests {
     }
 
     #[test]
-    fn miniapp_service_switch_participant_is_covered_or_failed() {
-        let passed = miniapp_service_participant_result(true);
+    fn plugin_service_switch_participant_is_covered_or_failed() {
+        let passed = plugin_service_participant_result(true);
         assert_eq!(
             passed.outcome,
             nomifun_agent_contracts::RuntimeSwitchParticipantOutcome::Passed
         );
         assert_eq!(passed.error_code, None);
 
-        let failed = miniapp_service_participant_result(false);
+        let failed = plugin_service_participant_result(false);
         assert_eq!(
             failed.outcome,
             nomifun_agent_contracts::RuntimeSwitchParticipantOutcome::Failed
         );
         assert_eq!(
             failed.error_code.as_ref().map(AsRef::as_ref),
-            Some("MINIAPP_SERVICE_RUNTIME_VALIDATION_FAILED")
+            Some("PLUGIN_SERVICE_RUNTIME_VALIDATION_FAILED")
         );
     }
 

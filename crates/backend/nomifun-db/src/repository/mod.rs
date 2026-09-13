@@ -19,7 +19,7 @@ pub mod knowledge_entry;
 pub mod knowledge_source;
 pub mod knowledge_tree_operation;
 pub mod mcp_server;
-pub mod miniapp_m1;
+pub mod plugin_runtime;
 pub mod oauth_token;
 mod pagination;
 pub mod plugin_n1;
@@ -56,7 +56,7 @@ mod sqlite_provider;
 mod sqlite_provider_connection;
 mod sqlite_provider_model;
 mod sqlite_provider_model_capability;
-mod sqlite_miniapp_m1;
+mod sqlite_plugin_runtime;
 mod sqlite_requirement;
 mod sqlite_remote_binding;
 mod sqlite_settings;
@@ -106,31 +106,31 @@ pub use instance_token::IInstanceTokenRepository;
 pub use javascript_runtime_selection::{
     IJavaScriptRuntimeSelectionRepository, SaveJavaScriptRuntimeSelectionParams,
 };
-pub use miniapp_m1::{
-    AbortMiniAppSourceMutationParams, BeginMiniAppM1DeleteParams,
-    BeginMiniAppM1ImportAsNewParams, BeginMiniAppSourceMutationParams,
-    BeginMiniAppM1ImportAsNewResult, CancelMiniAppM1BuildOperationParams,
-    CancelMiniAppM1ExportOperationParams, CancelMiniAppM1ImportParams,
-    CloseMiniAppM1SurfaceSessionParams, CommitMiniAppM1LifecycleParams,
-    CreateMiniAppM1Params, CreateMiniAppM1WithSourceParams,
-    ExecuteMiniAppM1SurfaceKvParams, FailMiniAppM1DeleteParams,
-    FailMiniAppM1ExportOperationParams, FailMiniAppM1ImportParams,
-    FinalizeMiniAppM1DeleteParams, FinalizeMiniAppSourceMutationParams,
-    FinishMiniAppM1BuildAndRecordReadyParams,
-    FinishMiniAppM1BuildOperationParams, FinishMiniAppM1ExportOperationParams,
-    FinishMiniAppM1ImportReadyParams, IMiniAppM1Repository,
-    FinishMiniAppM1BackupImportParams, MiniAppM1BackupExportSnapshot,
-    MiniAppM1BackupImportRelease, MiniAppM1BackupReleaseSlot,
-    StartMiniAppM1BackupExportParams,
-    MiniAppM1AutoPublishGuard, MiniAppM1ImportSource, MiniAppM1ManagedSourceLineage,
-    MiniAppM1SurfaceKvOperation, MiniAppM1SurfaceKvResult,
-    MiniAppServiceTestReceiptRow, OpenMiniAppM1SurfaceSessionParams,
-    PublishMiniAppM1ReadyParams, RecordMiniAppM1ReadyReleaseParams,
-    RecordMiniAppM1ServiceTestReceiptParams, ResolveMiniAppM1SurfaceSessionParams,
-    RestartMiniAppM1DeleteParams, RestoreMiniAppM1Params,
-    RollbackMiniAppM1PreviousParams, SetMiniAppM1AutoPublishParams,
-    StartMiniAppM1BuildOperationParams, StartMiniAppM1ExportOperationParams,
-    TrashMiniAppM1Params, UpdateMiniAppM1ProjectSourceParams,
+pub use plugin_runtime::{
+    AbortPluginSourceMutationParams, BeginPluginRuntimeDeleteParams,
+    BeginPluginRuntimeImportAsNewParams, BeginPluginSourceMutationParams,
+    BeginPluginRuntimeImportAsNewResult, CancelPluginRuntimeBuildOperationParams,
+    CancelPluginRuntimeExportOperationParams, CancelPluginRuntimeImportParams,
+    ClosePluginRuntimeSurfaceSessionParams, CommitPluginRuntimeLifecycleParams,
+    CreatePluginRuntimeParams, CreatePluginRuntimeWithSourceParams,
+    ExecutePluginRuntimeSurfaceKvParams, FailPluginRuntimeDeleteParams,
+    FailPluginRuntimeExportOperationParams, FailPluginRuntimeImportParams,
+    FinalizePluginRuntimeDeleteParams, FinalizePluginSourceMutationParams,
+    FinishPluginRuntimeBuildAndRecordReadyParams,
+    FinishPluginRuntimeBuildOperationParams, FinishPluginRuntimeExportOperationParams,
+    FinishPluginRuntimeImportReadyParams, IPluginRuntimeRepository,
+    FinishPluginRuntimeBackupImportParams, PluginRuntimeBackupExportSnapshot,
+    PluginRuntimeBackupImportRelease, PluginRuntimeBackupReleaseSlot,
+    StartPluginRuntimeBackupExportParams,
+    PluginRuntimeAutoPublishGuard, PluginRuntimeImportSource, PluginRuntimeManagedSourceLineage,
+    PluginRuntimeSurfaceKvOperation, PluginRuntimeSurfaceKvResult,
+    PluginRuntimeServiceTestReceiptRow, OpenPluginRuntimeSurfaceSessionParams,
+    PublishPluginRuntimeReadyParams, RecordPluginRuntimeReadyReleaseParams,
+    RecordPluginRuntimeServiceTestReceiptParams, ResolvePluginRuntimeSurfaceSessionParams,
+    RestartPluginRuntimeDeleteParams, RestorePluginRuntimeParams,
+    RollbackPluginRuntimePreviousParams, SetPluginRuntimeAutoPublishParams,
+    StartPluginRuntimeBuildOperationParams, StartPluginRuntimeExportOperationParams,
+    TrashPluginRuntimeParams, UpdatePluginRuntimeProjectSourceParams,
 };
 pub use knowledge::IKnowledgeRepository;
 pub use knowledge_entry::{
@@ -196,7 +196,7 @@ pub use sqlite_customer_service::SqliteCustomerServiceRepository;
 pub use sqlite_idmm_intervention::SqliteIdmmInterventionRepository;
 pub use sqlite_instance_token::SqliteInstanceTokenRepository;
 pub use sqlite_javascript_runtime_selection::SqliteJavaScriptRuntimeSelectionRepository;
-pub use sqlite_miniapp_m1::SqliteMiniAppM1Repository;
+pub use sqlite_plugin_runtime::SqlitePluginRuntimeRepository;
 pub use sqlite_knowledge::SqliteKnowledgeRepository;
 pub use sqlite_knowledge_tree_operation::SqliteKnowledgeTreeOperationRepository;
 pub use sqlite_mcp_server::SqliteMcpServerRepository;

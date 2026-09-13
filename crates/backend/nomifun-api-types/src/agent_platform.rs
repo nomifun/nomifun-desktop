@@ -530,7 +530,7 @@ pub struct ContributionLockDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mount_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub miniapp_id: Option<String>,
+    pub plugin_product_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_binding_id: Option<String>,
     pub contribution_id: String,
@@ -552,7 +552,7 @@ pub enum CurrentContributionLifecycleDto {
         code: String,
         reason: String,
     },
-    MiniAppActiveReleaseChanged {
+    PluginProductActiveReleaseChanged {
         release_id: String,
         release_digest: String,
     },
@@ -566,7 +566,7 @@ pub struct CurrentContributionDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mount_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub miniapp_id: Option<String>,
+    pub plugin_product_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_binding_id: Option<String>,
     pub contribution_id: String,
@@ -590,7 +590,7 @@ pub enum ContributionLifecycleImpactDto {
         reason: String,
     },
     Uninstalled,
-    MiniAppActiveReleaseChanged {
+    PluginProductActiveReleaseChanged {
         release_id: String,
         release_digest: String,
     },

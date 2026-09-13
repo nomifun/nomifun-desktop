@@ -17,7 +17,7 @@ mod knowledge_source;
 mod knowledge_tree_operation;
 mod mcp_server;
 mod message;
-mod miniapp_m1;
+mod plugin_runtime;
 mod oauth_token;
 mod plugin_n1;
 mod provider;
@@ -91,13 +91,13 @@ pub use knowledge_tree_operation::{
 };
 pub use mcp_server::McpServerRow;
 pub use message::MessageRow;
-pub use miniapp_m1::{
-    MiniAppBuildOperationLineageRow, MiniAppCatalogPublicationRow,
-    MiniAppCredentialBindingRow, MiniAppLibraryStateRow, MiniAppM1LibrarySnapshot,
-    MiniAppM1Kind, MiniAppM1ProjectSourceState, MiniAppM1ReleaseOrigin,
-    MiniAppM1ReleaseSourceKind, MiniAppM1Snapshot, MiniAppProductRow,
-    MiniAppKvRow, MiniAppProjectRow, MiniAppPublishAuthorizationRow, MiniAppReleaseArtifactRow,
-    MiniAppReleaseRow, MiniAppSourceMutationIntentRow, MiniAppSurfaceSessionRow,
+pub use plugin_runtime::{
+    PluginRuntimeBuildOperationLineageRow, PluginRuntimeCatalogPublicationRow,
+    PluginRuntimeCredentialBindingRow, PluginRuntimeLibraryStateRow, PluginRuntimeLibrarySnapshot,
+    PluginRuntimeKind, PluginRuntimeProjectSourceState, PluginRuntimeReleaseOrigin,
+    PluginRuntimeReleaseSourceKind, PluginRuntimeSnapshot, PluginRuntimeProductRow,
+    PluginRuntimeKvRow, PluginRuntimeProjectRow, PluginRuntimePublishAuthorizationRow, PluginRuntimeReleaseArtifactRow,
+    PluginRuntimeReleaseRow, PluginRuntimeSourceMutationIntentRow, PluginRuntimeSurfaceSessionRow,
 };
 pub use oauth_token::OAuthTokenRow;
 pub use plugin_n1::{

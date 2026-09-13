@@ -7,7 +7,7 @@
 import { describe, expect, test } from 'bun:test';
 import type { PluginRuntimeWorkshop } from '@/common/types/pluginRuntimePlatform';
 import {
-  EMPTY_MINIAPP_TEST_INPUT_DIGEST,
+  EMPTY_PLUGIN_TEST_INPUT_DIGEST,
   pluginRuntimeBuildRequest,
   pluginRuntimeCanOpenSurface,
   pluginRuntimePublishRequest,
@@ -34,7 +34,7 @@ const workshop = (overrides: Partial<PluginRuntimeWorkshop> = {}): PluginRuntime
       plugin_id: '0190f5fe-7c00-7a00-8000-0000000000b1' as never,
       product_revision: 1,
       display_name: 'Status Board',
-      kind: 'ui_only',
+      kind: 'plugin',
       lifecycle: 'enabled',
       releases: {
         pointer_revision: 1,
@@ -135,7 +135,11 @@ describe('PluginRuntime M1 view model', () => {
       source_snapshot_digest: 'b'.repeat(64),
       dependency_lock_digest: 'c'.repeat(64),
     });
-    value.plugin.kind = 'service';
+    value.service_lifecycle = 'on_demand';
+    value.active_service = {
+      lifecycle: 'on_demand', uses_files: false, uses_private_database: false,
+      service_contract_digest: '1'.repeat(64),
+    };
     value.plugin.releases.active = {
       release_id: 'active-service',
       artifact_id: 'service-artifact',
@@ -175,7 +179,7 @@ describe('PluginRuntime M1 view model', () => {
       release: readyRelease,
       project_build_generation: 3,
       created_at_ms: 2,
-      kind: 'service',
+      kind: 'plugin',
       service: {
         lifecycle: 'continuous',
         uses_files: true,
@@ -203,7 +207,7 @@ describe('PluginRuntime M1 view model', () => {
       expected_release_digest: readyRelease.release_digest,
       expected_config_revision: 1,
       expected_credential_bindings_revision: 1,
-      resolved_test_input_digest: EMPTY_MINIAPP_TEST_INPUT_DIGEST,
+      resolved_test_input_digest: EMPTY_PLUGIN_TEST_INPUT_DIGEST,
     });
   });
 
@@ -246,7 +250,7 @@ describe('PluginRuntime M1 view model', () => {
       release: readyRelease,
       project_build_generation: 2,
       created_at_ms: 3,
-      kind: 'ui_only',
+      kind: 'plugin',
       test: {
         status: 'not_required',
         release_id: readyRelease.release_id,
@@ -268,8 +272,6 @@ describe('PluginRuntime M1 view model', () => {
       expected_active_release_digest: activeRelease.release_digest,
       acknowledge_test_warning: false,
     });
-    value.plugin.kind = 'service';
-    value.ready.kind = 'service';
     value.ready.service = {
       lifecycle: 'on_demand',
       uses_files: false,
@@ -299,8 +301,6 @@ describe('PluginRuntime M1 view model', () => {
     expect(
       pluginRuntimePublishRequest(value)?.expected_service_test_receipt_id
     ).toBeUndefined();
-    value.plugin.kind = 'ui_only';
-    value.ready.kind = 'ui_only';
     delete value.ready.service;
     value.ready.test = {
       status: 'not_required',
@@ -379,7 +379,7 @@ describe('PluginRuntime M1 view model', () => {
       release: readyRelease,
       project_build_generation: 2,
       created_at_ms: 3,
-      kind: 'ui_only',
+      kind: 'plugin',
       test: {
         status: 'not_required',
         release_id: readyRelease.release_id,
@@ -527,7 +527,7 @@ describe('PluginRuntime M1 view model', () => {
       surface_generation: 2,
       surface_capability: 'capability-token',
       ui_entrypoint: 'ui/index.html',
-      kind: 'ui_only' as const,
+      kind: 'plugin' as const,
     };
     expect(pluginRuntimeSurfaceAssetPath(descriptor)).toBe(
       `/api/plugins/runtimes/${descriptor.plugin_id}/surface/assets/capability-token/12/${'a'.repeat(64)}/ui/index.html`

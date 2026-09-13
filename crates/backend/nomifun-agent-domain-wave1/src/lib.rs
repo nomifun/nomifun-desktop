@@ -2865,7 +2865,7 @@ mod tests {
                 availability_evidence_revision: "wave1-test".to_owned(),
             },
             CompileRequest {
-                miniapp_capabilities: Vec::new(),
+                plugin_product_capabilities: Vec::new(),
                 revision,
                 principal: test_principal.clone(),
                 scene: "wave1-test".to_owned(),

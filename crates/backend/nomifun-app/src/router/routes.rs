@@ -849,22 +849,22 @@ fn create_nomi_core_router_with_all_state(
         &instance_owner_state,
     );
 
-    // MiniApp reads require the installation owner identity. Mutations are a
+    // Plugin reads require the installation owner identity. Mutations are a
     // separate route group because they additionally require local trust.
-    let miniapp_read_authenticated = admit_headless_installation_owner(
+    let plugin_runtime_read_authenticated = admit_headless_installation_owner(
         protect_instance_owner(
-            super::plugin_runtime::miniapp_m1_read_routes(states.miniapp.clone())
+            super::plugin_runtime::plugin_m1_read_routes(states.plugin_runtime.clone())
                 .merge(super::plugin_platform::plugin_read_routes(states.plugin.clone().with_runtime(services.plugin_runtime.clone()))),
             &auth_mw_state,
             &instance_owner_state,
         ),
         &installation_token_trust_state,
     );
-    let miniapp_surface =
-        super::plugin_runtime::miniapp_m1_surface_routes(states.miniapp.clone());
-    let miniapp_write_local = admit_headless_installation_owner(
+    let plugin_runtime_surface =
+        super::plugin_runtime::plugin_m1_surface_routes(states.plugin_runtime.clone());
+    let plugin_runtime_write_local = admit_headless_installation_owner(
         protect_instance_owner(
-            super::plugin_runtime::miniapp_m1_write_routes(states.miniapp).route_layer(
+            super::plugin_runtime::plugin_m1_write_routes(states.plugin_runtime).route_layer(
                 middleware::from_fn(require_local_product_trust_middleware),
             ),
             &auth_mw_state,
@@ -1210,8 +1210,8 @@ fn create_nomi_core_router_with_all_state(
         .merge(creative_studio_agent_session_authenticated)
         .merge(conversation_ops_authenticated)
         .merge(ssh_host_authenticated)
-        .merge(miniapp_read_authenticated)
-        .merge(miniapp_write_local)
+        .merge(plugin_runtime_read_authenticated)
+        .merge(plugin_runtime_write_local)
         .merge(plugin_authenticated)
         .merge(javascript_runtime_authenticated)
         .merge(agent_authenticated)
@@ -1274,7 +1274,7 @@ fn create_nomi_core_router_with_all_state(
     let router = router
     .merge(ws_routes)
     .merge(office_proxy)
-    .merge(miniapp_surface)
+    .merge(plugin_runtime_surface)
     .merge(public_assets)
     .merge(companion_public)
     .merge(workshop_public);
