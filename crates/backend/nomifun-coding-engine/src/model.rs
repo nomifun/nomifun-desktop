@@ -1,12 +1,10 @@
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use nomifun_chat_model_broker::{
     BrokerEventEnvelope, ChatBrokerPort, ChatModelError, ChatModelEvent, ChatModelRequest,
-    ChatModelStream,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -24,10 +22,9 @@ pub trait CodingModelPort: Send + Sync {
 
 /// Adapter from the existing NomiFun Broker to the isolated Coding Engine.
 ///
-/// The current broker API exposes cancellation by dropping its receiver. The
-/// adapter additionally stops forwarding events as soon as the engine token
-/// is cancelled. A later central integration can extend the broker port with
-/// native cancellation without changing the engine turn loop.
+/// Cancellation is passed to the Broker's native attempt lifecycle. Dropping
+/// the returned stream also cancels its attempt; the Broker remains the sole
+/// owner of retry/failover and provider transport.
 pub struct BrokerCodingModelPort {
     broker: Arc<dyn ChatBrokerPort>,
 }
@@ -52,34 +49,77 @@ impl CodingModelPort for BrokerCodingModelPort {
                 nomifun_chat_model_broker::ChatRetryDirective::Never,
             ));
         }
-        let stream = self.broker.open_chat_stream(request).await?;
-        Ok(Box::pin(BrokerCodingStream {
-            stream,
-            cancellation,
-        }))
+        let stream = self.broker
+            .open_chat_stream_cancellable(request, cancellation)
+            .await?;
+        Ok(Box::pin(stream.map(|result| {
+            result.map(|envelope: BrokerEventEnvelope| envelope.event)
+        })))
     }
 }
 
-struct BrokerCodingStream {
-    stream: ChatModelStream,
-    cancellation: CancellationToken,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nomifun_chat_model_broker::{
+        ChatModelErrorCode, ChatModelStream, ChatRetryDirective, recorded_conformance_fixtures,
+    };
+    use std::time::Duration;
+    use tokio::sync::Notify;
 
-impl Stream for BrokerCodingStream {
-    type Item = Result<ChatModelEvent, ChatModelError>;
+    struct CancellableBroker(Arc<Notify>);
 
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-    ) -> Poll<Option<Self::Item>> {
-        if self.cancellation.is_cancelled() {
-            return Poll::Ready(None);
+    struct LegacyOnlyBroker;
+
+    #[async_trait]
+    impl ChatBrokerPort for LegacyOnlyBroker {
+        async fn open_chat_stream(&self, _: ChatModelRequest) -> Result<ChatModelStream, ChatModelError> {
+            panic!("unsupported cancellation must not fall back to legacy opening");
+        }
+    }
+
+    #[tokio::test]
+    async fn adapter_rejects_broker_without_native_cancellation() {
+        let adapter = BrokerCodingModelPort::new(Arc::new(LegacyOnlyBroker));
+        let request = recorded_conformance_fixtures().remove(0).request;
+        let error = adapter.open_stream(request, CancellationToken::new()).await
+            .err().expect("unsupported cancellation must fail closed");
+        assert_eq!(error.code, ChatModelErrorCode::AdapterUnavailable);
+    }
+
+    #[async_trait]
+    impl ChatBrokerPort for CancellableBroker {
+        async fn open_chat_stream(&self, _: ChatModelRequest) -> Result<ChatModelStream, ChatModelError> {
+            panic!("Coding must not fall back to the uncancellable broker port");
         }
 
-        self.stream
-            .poll_next_unpin(context)
-            .map(|item| {
-                item.map(|result| result.map(|envelope: BrokerEventEnvelope| envelope.event))
-            })
+        async fn open_chat_stream_cancellable(
+            &self,
+            _: ChatModelRequest,
+            cancellation: CancellationToken,
+        ) -> Result<ChatModelStream, ChatModelError> {
+            self.0.notify_one();
+            cancellation.cancelled().await;
+            Err(ChatModelError::new(
+                ChatModelErrorCode::Cancelled,
+                "attempt cancelled",
+                ChatRetryDirective::Never,
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn adapter_propagates_cancellation_during_broker_open() {
+        let entered = Arc::new(Notify::new());
+        let adapter = BrokerCodingModelPort::new(Arc::new(CancellableBroker(entered.clone())));
+        let cancellation = CancellationToken::new();
+        let token = cancellation.clone();
+        let request = recorded_conformance_fixtures().remove(0).request;
+        let task = tokio::spawn(async move { adapter.open_stream(request, token).await });
+        tokio::time::timeout(Duration::from_secs(2), entered.notified()).await.unwrap();
+        cancellation.cancel();
+        let error = tokio::time::timeout(Duration::from_secs(2), task).await.unwrap()
+            .unwrap().err().expect("cancelled broker open must fail");
+        assert_eq!(error.code, ChatModelErrorCode::Cancelled);
     }
 }

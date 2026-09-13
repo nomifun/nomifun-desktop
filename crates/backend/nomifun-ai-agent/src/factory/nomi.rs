@@ -1163,7 +1163,7 @@ pub(super) async fn build(
             .register_cron_sink(make_sink(owner_id, &conv_id_for_cron))
             .await;
     }
-    Ok(AgentRuntimeHandle::Nomi(Arc::new(agent)))
+    Ok(AgentRuntimeHandle::Registered(Arc::new(agent)))
 }
 
 /// Host-level default for opt-in tool capabilities ("1"/"true" enables).

@@ -1069,6 +1069,72 @@ mod tests {
         }
     }
 
+    struct PendingModel {
+        started: tokio::sync::mpsc::UnboundedSender<CancellationToken>,
+    }
+
+    #[async_trait]
+    impl CodingModelPort for PendingModel {
+        async fn open_stream(
+            &self,
+            _request: ChatModelRequest,
+            cancellation: CancellationToken,
+        ) -> Result<CodingModelStream, ChatModelError> {
+            self.started.send(cancellation).unwrap();
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_turn_cancels_broker_and_releases_admission_without_cancelling_parent() {
+        let (started, mut observed) = tokio::sync::mpsc::unbounded_channel();
+        let session = Arc::new(open_session(Arc::new(PendingModel { started }), Arc::new(EchoTool)));
+        let parent = CancellationToken::new();
+        let task_session = Arc::clone(&session);
+        let task_parent = parent.clone();
+        let task = tokio::spawn(async move {
+            task_session.run_turn_cancellable(
+                CodingTurnRequest::new(request(), CodingToolPlan::default(), principal(), 1),
+                task_parent,
+            ).await
+        });
+        let broker_token = tokio::time::timeout(Duration::from_secs(2), observed.recv()).await.unwrap().unwrap();
+        assert!(session.is_turn_active().await);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(broker_token.is_cancelled());
+        assert!(!parent.is_cancelled());
+        assert!(!session.is_turn_active().await);
+
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        let result = session.run_turn_cancellable(
+            CodingTurnRequest::new(request(), CodingToolPlan::default(), principal(), 1),
+            cancelled,
+        ).await.unwrap();
+        assert!(matches!(result.terminal, CodingTurnTerminal::Cancelled));
+        assert!(observed.try_recv().is_err(), "a pre-cancelled turn must not invoke the model");
+    }
+
+    #[tokio::test]
+    async fn host_cancellation_during_model_open_returns_cancelled_and_allows_next_turn() {
+        let (started, mut observed) = tokio::sync::mpsc::unbounded_channel();
+        let session = Arc::new(open_session(Arc::new(PendingModel { started }), Arc::new(EchoTool)));
+        let parent = CancellationToken::new();
+        let task_session = Arc::clone(&session);
+        let task_parent = parent.clone();
+        let task = tokio::spawn(async move {
+            task_session.run_turn_cancellable(
+                CodingTurnRequest::new(request(), CodingToolPlan::default(), principal(), 1), task_parent,
+            ).await
+        });
+        tokio::time::timeout(Duration::from_secs(2), observed.recv()).await.unwrap().unwrap();
+        parent.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(2), task).await.unwrap().unwrap().unwrap();
+        assert!(matches!(result.terminal, CodingTurnTerminal::Cancelled));
+        assert!(!session.is_turn_active().await);
+    }
+
     struct ObservingModel {
         steps: std::sync::Mutex<Vec<Vec<Result<ChatModelEvent, ChatModelError>>>>,
         requests: std::sync::Mutex<Vec<ChatModelRequest>>,

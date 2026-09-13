@@ -6145,6 +6145,8 @@ dependencies = [
  "nomifun-api-types",
  "nomifun-auth",
  "nomifun-browser-platform",
+ "nomifun-chat-model-broker",
+ "nomifun-coding-engine",
  "nomifun-common",
  "nomifun-db",
  "nomifun-knowledge",
@@ -6400,6 +6402,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.19",
  "tokio",
+ "tokio-util",
  "tracing",
  "uuid",
 ]
@@ -6424,7 +6427,7 @@ dependencies = [
 
 [[package]]
 name = "nomifun-coding-engine"
-version = "0.7.4"
+version = "0.7.6"
 dependencies = [
  "async-trait",
  "futures",

@@ -697,6 +697,14 @@ impl ChatBrokerPort for ProductionChatModelBroker {
     ) -> Result<ChatModelStream, ChatModelError> {
         self.inner.open_stream(request).await
     }
+
+    async fn open_chat_stream_cancellable(
+        &self,
+        request: ChatModelRequest,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<ChatModelStream, ChatModelError> {
+        self.inner.open_stream_cancellable(request, cancellation).await
+    }
 }
 
 /// Build a production broker as the narrow port consumed by AgentPlatform.

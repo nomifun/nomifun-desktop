@@ -385,7 +385,7 @@ mod tests {
     use super::*;
     use nomifun_agent_contracts::{
         AgentPresetId, AgentPresetRevision, AgentPresetRevisionPayload, AgentSessionId,
-        CapabilityExposure, CapabilityRef, CapabilitySelection, CorrelationId, DigestHex,
+        CapabilityRef, CapabilitySelection, CorrelationId, DigestHex,
         IdempotencyKey, OperationId, PresetRevisionRef,
         ResourceBindingId, ResourceId, ResourceKind, RuntimeProfileKind, RuntimeTarget, UserId,
         VersionString, digest_payload,
@@ -502,7 +502,6 @@ mod tests {
         };
         let payload = AgentPresetRevisionPayload {
             schema_version: VersionString::from(CONTRACT_VERSION),
-            surfaces: BTreeSet::from(["desktop".to_owned()]),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),
             initial_capabilities: vec![CapabilitySelection {
@@ -510,35 +509,32 @@ mod tests {
                     id: capability_id,
                     version: VersionString::from(CONTRACT_VERSION),
                 },
-                required: true,
-                exposure: CapabilityExposure::Advertised,
                 action_allowlist: BTreeSet::from([action_id.clone()]),
-                resource_binding_refs: vec![binding_id.clone()],
-                destination_constraints: BTreeSet::new(),
-                context_budget_override: None,
-                tool_budget_override: None,
-                config: StrictJsonValue(json!({})),
             }],
             on_demand_capabilities: Vec::new(),
             skill_bindings: Vec::new(),
-            resource_bindings: vec![binding],
+            system_role_provider_overrides: BTreeMap::new(),
             persona: "Coding Engine Kernel test".to_owned(),
             instructions: "Read one file.".to_owned(),
-            context_policy: StrictJsonValue(json!({})),
-            execution_constraints: StrictJsonValue(json!({})),
-            runtime_budget: StrictJsonValue(json!({})),
+            starter_prompts: Vec::new(),
         };
-        let revision = AgentPresetRevision {
+        let mut revision = AgentPresetRevision {
             reference: PresetRevisionRef {
                 preset_id: AgentPresetId::from("coding-kernel-test"),
                 revision: 1,
                 revision_digest: digest_payload(&payload).unwrap(),
             },
             payload,
+            contribution_locks: vec![materialized
+                .capability(&CapabilityId::from("fs.read"))
+                .unwrap()
+                .contribution_lock
+                .clone()],
             created_by: UserId::from(principal.principal_id.clone()),
             created_at_ms: 1,
             reason: None,
         };
+        revision.reference.revision_digest = revision.revision_digest().unwrap();
         let snapshot = Arc::new(
             AgentPresetCompiler::compile(
                 &materialized,
@@ -548,6 +544,7 @@ mod tests {
                     required_runtime_profile: RuntimeProfileKind::ManagedMinimal,
                     runtime_feature_inventory_digest: DigestHex::from("runtime"),
                     available_runtime_features: BTreeSet::new(),
+                    installation_role_bindings: BTreeMap::new(),
                     canonical_schema_manifest_digest: DigestHex::from("schema"),
                     target_contribution_manifest_digest: DigestHex::from("target"),
                     host_target: RuntimeTarget::from("x86_64-pc-windows-msvc"),
@@ -556,6 +553,7 @@ mod tests {
                 },
                 CompileRequest {
                     revision,
+                    miniapp_capabilities: Vec::new(),
                     principal: principal.clone(),
                     scene: "coding-kernel-test".to_owned(),
                     surface: "desktop".to_owned(),
@@ -564,6 +562,8 @@ mod tests {
                     resolver_run_id: OperationId::from("resolve"),
                 },
             )
+            .unwrap()
+            .with_target_resource_bindings(&principal, vec![binding])
             .unwrap(),
         );
         let active = Arc::new(SessionCapabilityState::new(&snapshot));

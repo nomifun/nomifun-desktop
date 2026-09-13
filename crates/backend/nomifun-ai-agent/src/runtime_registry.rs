@@ -2005,6 +2005,53 @@ mod tests {
         }
     }
 
+    impl crate::RegisteredAgentRuntime for MockAgent {
+        fn kill_and_wait(&self, reason: Option<AgentKillReason>) -> crate::RuntimeTeardown {
+            MockAgentRuntime::kill_and_wait(self, reason)
+        }
+    }
+
+    #[tokio::test]
+    async fn registered_runtime_uses_singleflight_and_retains_failed_teardown_quarantine() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let factory_calls = calls.clone();
+        let factory: AgentRuntimeFactory = Arc::new(move |options| {
+            factory_calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                Ok(AgentRuntimeHandle::Registered(Arc::new(
+                    MockAgent::new(&options.conversation_id, None)
+                        .with_kill_error("custom runtime cleanup was not confirmed"),
+                )))
+            }.boxed()
+        });
+        let registry = InMemoryAgentRuntimeRegistry::new(factory);
+        let id = "registered-runtime";
+        let first = registry.get_or_create_runtime(id, make_runtime_options(id)).await.unwrap();
+        let second = registry.get_or_create_runtime(id, make_runtime_options(id)).await.unwrap();
+        match (&first, &second) {
+            (AgentRuntimeHandle::Registered(a), AgentRuntimeHandle::Registered(b)) => {
+                assert!(Arc::ptr_eq(a, b));
+            }
+            _ => panic!("custom runtime must use the production extension handle"),
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(registry.terminate_and_wait_result(id, None).await.is_err());
+        assert!(registry.get_or_create_runtime(id, make_runtime_options(id)).await.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "unproven cleanup must block replacement");
+    }
+
+    #[tokio::test]
+    async fn registered_runtime_optional_mutations_fail_closed() {
+        let runtime = AgentRuntimeHandle::Registered(Arc::new(MockAgent::new("custom", None)));
+        assert!(runtime.clear_context().await.is_err());
+        assert!(runtime.steer("new input".to_owned()).is_err());
+        assert!(runtime.notify_system_resource("resource update".to_owned()).is_err());
+        assert!(runtime.ensure_can_rewind_last_turn("source").await.is_err());
+        assert!(runtime.rewind_last_turn("source").await.is_err());
+        assert!(runtime.set_model("replacement-model").await.is_err());
+        runtime.kill_and_wait(None).await.unwrap();
+    }
+
     fn runtime_test_workspace() -> &'static Path {
         static WORKSPACE: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
         WORKSPACE

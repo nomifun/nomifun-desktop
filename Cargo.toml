@@ -55,6 +55,7 @@ nomifun-js-runtime = { path = "crates/backend/nomifun-js-runtime" }
 nomifun-plugin-platform = { path = "crates/backend/nomifun-plugin-platform" }
 nomifun-codex-runtime = { path = "crates/backend/nomifun-codex-runtime" }
 nomifun-chat-model-broker = { path = "crates/backend/nomifun-chat-model-broker" }
+nomifun-coding-engine = { path = "crates/backend/nomifun-coding-engine" }
 nomifun-agent-control-plane = { path = "crates/backend/nomifun-agent-control-plane" }
 nomifun-agent-platform = { path = "crates/backend/nomifun-agent-platform" }
 nomifun-agent-domain-support = { path = "crates/backend/nomifun-agent-domain-support" }

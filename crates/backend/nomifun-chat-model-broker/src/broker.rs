@@ -8,6 +8,7 @@ use futures::{Stream, StreamExt};
 use nomifun_agent_contracts::{ConnectionConfigRef, DigestHex, ModelRouteId};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::adapter::{ChatProtocolAdapter, ProviderWireStream};
 use crate::contracts::{
@@ -65,13 +66,12 @@ pub struct BrokerEventEnvelope {
 
 pub struct ChatModelStream {
     receiver: mpsc::Receiver<Result<BrokerEventEnvelope, ChatModelError>>,
+    cancellation: CancellationToken,
 }
 
-impl ChatModelStream {
-    pub(crate) fn new(
-        receiver: mpsc::Receiver<Result<BrokerEventEnvelope, ChatModelError>>,
-    ) -> Self {
-        Self { receiver }
+impl Drop for ChatModelStream {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
     }
 }
 
@@ -82,6 +82,10 @@ impl Stream for ChatModelStream {
         mut self: Pin<&mut Self>,
         context: &mut Context<'_>,
     ) -> Poll<Option<Self::Item>> {
+        if self.cancellation.is_cancelled() {
+            self.receiver.close();
+            return Poll::Ready(None);
+        }
         self.receiver.poll_recv(context)
     }
 }
@@ -92,6 +96,22 @@ pub trait ChatBrokerPort: Send + Sync {
         &self,
         request: crate::contracts::ChatModelRequest,
     ) -> Result<ChatModelStream, ChatModelError>;
+
+    /// Process-local cancellation covering route preparation, credential
+    /// acquisition, provider opening, streaming and backpressure. Implementors
+    /// must drop the actual attempt, not only stop forwarding its output.
+    /// Older custom ports fail closed until they implement this contract.
+    async fn open_chat_stream_cancellable(
+        &self,
+        _request: crate::contracts::ChatModelRequest,
+        _cancellation: CancellationToken,
+    ) -> Result<ChatModelStream, ChatModelError> {
+        Err(ChatModelError::new(
+            ChatModelErrorCode::AdapterUnavailable,
+            "chat broker does not support native attempt cancellation",
+            ChatRetryDirective::Never,
+        ))
+    }
 }
 
 pub struct ChatModelBroker {
@@ -200,24 +220,47 @@ impl ChatModelBroker {
         &self,
         request: crate::contracts::ChatModelRequest,
     ) -> Result<ChatModelStream, ChatModelError> {
-        let routes = self.prepare(&request).await?;
+        self.open_stream_cancellable(request, CancellationToken::new()).await
+    }
+
+    pub async fn open_stream_cancellable(
+        &self,
+        request: crate::contracts::ChatModelRequest,
+        cancellation: CancellationToken,
+    ) -> Result<ChatModelStream, ChatModelError> {
+        // Dropping one request must not cancel its parent Session or siblings.
+        let cancellation = cancellation.child_token();
+        let routes = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(ChatModelError::new(
+                ChatModelErrorCode::Cancelled,
+                "chat request was cancelled before opening the provider attempt",
+                ChatRetryDirective::Never,
+            )),
+            result = self.prepare(&request) => result?,
+        };
         let adapters = self.adapters.clone();
         let credential_store = Arc::clone(&self.credential_store);
         let retry_policy = self.retry_policy;
         let (sender, receiver) = mpsc::channel(BROKER_STREAM_CAPACITY);
 
+        let attempt_cancellation = cancellation.clone();
         tokio::spawn(async move {
-            run_broker(
-                request,
-                routes,
-                adapters,
-                credential_store,
-                retry_policy,
-                sender,
-            )
-            .await;
+            tokio::select! {
+                biased;
+                _ = attempt_cancellation.cancelled() => {},
+                _ = sender.closed() => {},
+                _ = run_broker(
+                    request,
+                    routes,
+                    adapters,
+                    credential_store,
+                    retry_policy,
+                    sender.clone(),
+                ) => {},
+            }
         });
-        Ok(ChatModelStream::new(receiver))
+        Ok(ChatModelStream { receiver, cancellation })
     }
 }
 
@@ -228,6 +271,14 @@ impl ChatBrokerPort for ChatModelBroker {
         request: crate::contracts::ChatModelRequest,
     ) -> Result<ChatModelStream, ChatModelError> {
         self.open_stream(request).await
+    }
+
+    async fn open_chat_stream_cancellable(
+        &self,
+        request: crate::contracts::ChatModelRequest,
+        cancellation: CancellationToken,
+    ) -> Result<ChatModelStream, ChatModelError> {
+        self.open_stream_cancellable(request, cancellation).await
     }
 }
 
