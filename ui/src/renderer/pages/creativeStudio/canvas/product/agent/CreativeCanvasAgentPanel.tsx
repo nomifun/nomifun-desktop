@@ -57,6 +57,7 @@ import {
   isCreativeStudioPlanningSkillId,
 } from './planningSkills';
 import type { CreativeCanvasAgentOp } from './artifacts';
+import ProductAgentBindingSelect from '@/renderer/components/agent/ProductAgentBindingSelect';
 import {
   projectCreativeCanvasAgentProposals,
   type CreativeCanvasProposalOverride,
@@ -171,6 +172,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
   const [messages, setMessages] = useState<readonly CreativeStudioAgentMessage[]>([]);
   const [draft, setDraft] = useState('');
   const [selectedModel, setSelectedModel] = useState<CreativeModelSelectionRef | null>(null);
+  const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [isRunning, setIsRunning] = useState(false);
   const [panelError, setPanelError] = useState<string | undefined>();
   const [loadRequest, setLoadRequest] = useState(0);
@@ -526,6 +528,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
       return () => abort.abort();
     }
     if (!activeSession) {
+      setActiveConversationId(null);
       durableHistoryRef.current = [];
       setAppliedProposalMessageIds([]);
       setMessages([]);
@@ -546,6 +549,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
       return () => abort.abort();
     }
     if (!activeSession.model) {
+      setActiveConversationId(null);
       durableHistoryRef.current = [];
       setAppliedProposalMessageIds([]);
       setMessages([]);
@@ -580,6 +584,7 @@ const CreativeCanvasAgentPanel = React.forwardRef<
           signal: abort.signal,
         });
         if (abort.signal.aborted || epoch !== loadEpochRef.current) return;
+        setActiveConversationId(resolution.binding.conversationId);
         const authority = classifyCreativeCanvasAgentHistory(activeSession, resolution.history);
         setAppliedProposalMessageIds([...resolution.appliedProposalMessageIds]);
         if (authority !== 'current') {
@@ -923,6 +928,16 @@ const CreativeCanvasAgentPanel = React.forwardRef<
       isRunning={isRunning}
       errorMessage={panelError}
       disabled={props.disabled || isApplyingProposal}
+      agentSelector={
+        <ProductAgentBindingSelect
+          targetKind='creative_studio_canvas'
+          targetId={props.canvasId}
+          defaultTemplateKey='creative-studio.default'
+          model={model ? { id: model.providerId, use_model: model.model } : undefined}
+          disabled={!model || isRunning}
+          conversationId={activeConversationId}
+        />
+      }
       onViewChange={setView}
       onNewSession={handleNewSession}
       onSelectSession={handleSelectSession}

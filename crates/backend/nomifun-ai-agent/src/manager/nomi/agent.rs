@@ -1536,7 +1536,9 @@ impl NomiAgentManager {
                 )));
             debug!(conversation_id = %conversation_id, "Registered requirement native tools");
         }
-        if let Some(sink) = companion_sink {
+        if config_extra.companion_memory_enabled
+            && let Some(sink) = companion_sink
+        {
             engine
                 .registry_mut()
                 .register(Box::new(RecallMemoriesTool::new(sink.clone(), conversation_id.clone())));
@@ -1554,7 +1556,9 @@ impl NomiAgentManager {
         // model knows what it can invoke. Only present for companion sessions
         // (factory gates on overrides.companion). Empty skill set → the
         // contributor is a no-op (returns None each turn).
-        if let Some(skill_sink) = companion_skill_sink {
+        if config_extra.companion_skills_enabled
+            && let Some(skill_sink) = companion_skill_sink
+        {
             engine
                 .registry_mut()
                 .register(Box::new(CompanionSkillTool::new(skill_sink.clone())));
@@ -4645,6 +4649,8 @@ mod tests {
             install_embedded_agent_execution: true,
             allowed_tools: Vec::new(),
             enforce_tool_allowlist: false,
+            companion_memory_enabled: true,
+            companion_skills_enabled: true,
             deferred_tools: Vec::new(),
             write_root: None,
         }

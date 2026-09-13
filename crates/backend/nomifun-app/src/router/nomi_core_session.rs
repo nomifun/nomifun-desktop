@@ -43,7 +43,8 @@ use nomifun_agent_control_plane::{
     control_plane_router_without_legacy_skills,
 };
 use nomifun_api_types::{
-    AgentBindingValueDto, AgentResourceSelectionDto, AgentSessionCapabilitySelectionDto,
+    AgentBindingRecordDto, AgentBindingValueDto, AgentResourceSelectionDto,
+    AgentSessionCapabilitySelectionDto,
     ApiResponse, ConversationResponse,
     ConversationRuntimeStateKind, CreateAgentSessionRequestDto, CreateConversationRequest,
     CreateAgentSessionResponseDto, CreateAgentSessionTurnRequestDto,
@@ -59,6 +60,7 @@ use nomifun_api_types::{
     SwitchAgentSessionPresetRequestDto, SwitchAgentSessionPresetResponseDto,
     UpdateAgentSessionCapabilitySelectionRequestDto,
     UpdateAgentSessionCapabilitySelectionResponseDto,
+    CreateAgentPresetFromTemplateRequest, PutAgentBindingRequest,
 };
 use nomifun_common::{AppError, MessagePosition, MessageType};
 use nomifun_conversation::runtime_state::RuntimeBuildLease;
@@ -67,7 +69,10 @@ use nomifun_conversation::service::{
     BackgroundTurnRuntimePreparation, IdempotentMessageDelivery,
     PublicTurnDeliveryState,
 };
-use nomifun_conversation::{AgentExecutionConversationPort, ConversationService, IdmmTurnScope};
+use nomifun_conversation::{
+    AgentExecutionConversationPort, ConversationService, IdmmTurnScope,
+    ProductAgentResolution, ProductAgentSnapshotResolver, ProductAgentTarget,
+};
 use nomifun_db::{
     AgentExecutionTurnAuthority, AppendNomiRemoteEventParams, GetOrCreateRemoteSessionParams,
     IRemoteBindingRepository, RemoteOpenResult, SortOrder, TransitionNomiRemoteSessionParams,
@@ -105,6 +110,165 @@ pub(crate) struct NomiCoreSessionOwner {
     execution: AgentExecutionConversationPort,
     autowork_runtime_lease_issuer: nomifun_requirement::AutoWorkRuntimeLeaseIssuer,
     autowork_config_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+pub(crate) struct NomiCoreProductAgentResolver {
+    control_plane: Arc<AgentControlPlane>,
+    owner_id: Arc<str>,
+    default_binding_lock: tokio::sync::Mutex<()>,
+}
+
+impl NomiCoreProductAgentResolver {
+    pub(crate) fn new(control_plane: Arc<AgentControlPlane>, owner_id: Arc<str>) -> Self {
+        Self {
+            control_plane,
+            owner_id,
+            default_binding_lock: tokio::sync::Mutex::new(()),
+        }
+    }
+}
+
+#[async_trait]
+impl ProductAgentSnapshotResolver for NomiCoreProductAgentResolver {
+    async fn resolve(
+        &self,
+        owner_id: &str,
+        target: &ProductAgentTarget,
+        requested_model: Option<&nomifun_common::ProviderWithModel>,
+    ) -> Result<ProductAgentResolution, AppError> {
+        let owner = UserId::from(owner_id.to_owned());
+        let _guard = self.default_binding_lock.lock().await;
+        let existing = self
+            .control_plane
+            .get_agent_binding(
+                &owner,
+                target.target_kind.clone(),
+                target.target_id.clone(),
+            )
+            .await
+            .map_err(control_plane_error_to_app)?;
+        let binding = if let Some(existing) = existing {
+            if let Some(model) = requested_model {
+                self
+                    .control_plane
+                    .resolve_agent_session_binding_with_model(
+                        &owner,
+                        &existing.agent_binding.preset_revision_ref.preset_id,
+                        Some(&AgentChatModelSelectionDto {
+                            provider_id: model.provider_id.clone(),
+                            model: model.model.clone(),
+                        }),
+                    )
+                    .await
+                    .map_err(control_plane_error_to_app)?
+            } else {
+                existing.agent_binding
+            }
+        } else {
+            let editor = self
+                .control_plane
+                .create_from_template(
+                    &owner,
+                    &target.default_template_key,
+                    CreateAgentPresetFromTemplateRequest {
+                        model: requested_model.map(|model| AgentChatModelSelectionDto {
+                            provider_id: model.provider_id.clone(),
+                            model: model.model.clone(),
+                        }),
+                        reuse_existing: true,
+                        display_name: target.default_template_key.clone(),
+                        description: None,
+                        model_route_refs: BTreeMap::new(),
+                        chat_route_records: BTreeMap::new(),
+                    },
+                )
+                .await
+                .map_err(control_plane_error_to_app)?;
+            let mut binding = self
+                .control_plane
+                .resolve_agent_session_binding(&owner, &editor.preset.preset_id)
+                .await
+                .map_err(control_plane_error_to_app)?;
+            binding.binding_version = 1;
+            self.control_plane
+                .put_agent_binding(
+                    &owner,
+                    target.target_kind.clone(),
+                    target.target_id.clone(),
+                    PutAgentBindingRequest {
+                        expected_binding_version: None,
+                        agent_binding: binding,
+                    },
+                )
+                .await
+                .map_err(control_plane_error_to_app)?
+                .agent_binding
+        };
+        let (binding, revision, snapshot) = self
+            .control_plane
+            .saved_binding_artifacts(&owner, &binding)
+            .await
+            .map_err(control_plane_error_to_app)?;
+        let editor = self
+            .control_plane
+            .editor(
+                &owner,
+                binding.preset_revision_ref.preset_id.as_ref(),
+                Some(binding.preset_revision_ref.revision),
+            )
+            .await
+            .map_err(control_plane_error_to_app)?;
+        let common_owner = nomifun_common::UserId::parse(owner_id.to_owned())
+            .map_err(|error| AppError::Forbidden(format!("invalid product Agent owner: {error}")))?;
+        let projected = super::nomi_core_agent_projection::project_saved_artifacts(
+            &common_owner,
+            binding,
+            revision,
+            snapshot,
+            Some(&editor.preset.display_name),
+        )?;
+        Ok(ProductAgentResolution {
+            snapshot: projected.projection.snapshot,
+            runtime_extra: projected.projection.request.extra,
+        })
+    }
+}
+
+#[async_trait]
+impl nomifun_customer_service::CustomerServiceAgentPolicyResolver
+    for NomiCoreProductAgentResolver
+{
+    async fn resolve(
+        &self,
+        cs_agent_id: &str,
+        provider_id: &str,
+        model: &str,
+    ) -> Result<nomifun_customer_service::CustomerServiceAgentPolicy, AppError> {
+        let target = ProductAgentTarget {
+            target_kind: "customer".to_owned(),
+            target_id: cs_agent_id.to_owned(),
+            default_template_key: "customer-service.default".to_owned(),
+        };
+        let requested_model = nomifun_common::ProviderWithModel {
+            provider_id: provider_id.to_owned(),
+            model: model.to_owned(),
+            use_model: Some(model.to_owned()),
+        };
+        let resolved = ProductAgentSnapshotResolver::resolve(
+            self,
+            // Customer-service product resources are installation-owner scoped.
+            // The target binding itself carries the authenticated owner and the
+            // control plane rejects cross-owner reads.
+            self.owner_id.as_ref(),
+            &target,
+            Some(&requested_model),
+        )
+        .await?;
+        Ok(nomifun_customer_service::CustomerServiceAgentPolicy {
+            capabilities: resolved.snapshot.enabled_capabilities.into_iter().collect(),
+            instructions: resolved.snapshot.instructions,
+        })
+    }
 }
 
 impl NomiCoreSessionOwner {
@@ -1323,6 +1487,9 @@ impl nomifun_channel::ChannelSessionPort for NomiCoreSessionOwner {
         idempotency_key: &str,
         request: SendMessageRequest,
     ) -> Result<nomifun_channel::ChannelTurnDelivery, AppError> {
+        self.service
+            .refresh_product_agent_for_existing(owner_id, session_id)
+            .await?;
         let delivery = self
             .service
             .send_message_with_idempotency_key(
@@ -3014,6 +3181,10 @@ pub(crate) fn build_nomi_core_remote_router(
 
 fn nomi_core_session_routes(state: NomiCoreAgentApiState) -> Router {
     Router::new()
+        .route(
+            "/api/product-agent-bindings/{target_kind}/{target_id}",
+            put(select_product_agent_binding),
+        )
         .route("/api/agent-sessions", post(create_nomi_core_agent_session))
         .route(
             "/api/agent-sessions/{agent_session_id}",
@@ -3048,6 +3219,105 @@ fn nomi_core_session_routes(state: NomiCoreAgentApiState) -> Router {
             post(fork_nomi_core_agent_session),
         )
         .with_state(state)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SelectProductAgentBindingRequest {
+    preset_id: String,
+    #[serde(default)]
+    conversation_id: Option<String>,
+}
+
+fn product_default_template(target_kind: &str) -> Option<&'static str> {
+    match target_kind {
+        "companion" => Some("companion.default"),
+        "robot" => Some("robot.default"),
+        "customer" => Some("customer-service.default"),
+        "creative_studio_canvas" => Some("creative-studio.default"),
+        _ => None,
+    }
+}
+
+async fn select_product_agent_binding(
+    State(state): State<NomiCoreAgentApiState>,
+    Extension(owner): Extension<AuthenticatedOwner>,
+    Path((target_kind, target_id)): Path<(String, String)>,
+    Json(request): Json<SelectProductAgentBindingRequest>,
+) -> Result<Json<ApiResponse<AgentBindingRecordDto>>, NomiCoreApiError> {
+    let default_template_key = product_default_template(&target_kind).ok_or_else(|| {
+        NomiCoreApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "CAPABILITY_UNAVAILABLE_ON_PLATFORM",
+            "the target kind has no product Agent binding",
+        )
+    })?;
+    let existing = state
+        .control_plane
+        .get_agent_binding(&owner, target_kind.clone(), target_id.clone())
+        .await?;
+    let mut binding = state
+        .control_plane
+        .resolve_agent_session_binding_with_model(
+            &owner,
+            &request.preset_id,
+            None,
+        )
+        .await?;
+    binding.binding_version = existing
+        .as_ref()
+        .map(|record| record.agent_binding.binding_version + 1)
+        .unwrap_or(1);
+    let stored = state
+        .control_plane
+        .put_agent_binding(
+            &owner,
+            target_kind.clone(),
+            target_id.clone(),
+            PutAgentBindingRequest {
+                expected_binding_version: existing
+                    .as_ref()
+                    .map(|record| record.agent_binding.binding_version),
+                agent_binding: binding,
+            },
+        )
+        .await?;
+    if let Some(conversation_id) = request.conversation_id.as_deref() {
+        let current = state
+            .session_owner
+            .get_session(owner.as_ref(), conversation_id)
+            .await?;
+        let requested_model = current.model.as_ref().ok_or_else(|| {
+            NomiCoreApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "PRESET_RESOURCE_NOT_BOUND",
+                "the existing product conversation has no model",
+            )
+        })?;
+        let target = ProductAgentTarget {
+            target_kind: target_kind.clone(),
+            target_id: target_id.clone(),
+            default_template_key: default_template_key.to_owned(),
+        };
+        let resolver = NomiCoreProductAgentResolver::new(
+            Arc::clone(&state.control_plane),
+            Arc::from(owner.as_ref().to_owned()),
+        );
+        let resolution = resolver
+            .resolve(owner.as_ref(), &target, Some(requested_model))
+            .await?;
+        state
+            .session_owner
+            .service()
+            .replace_product_agent_resolution(
+                owner.as_ref(),
+                conversation_id,
+                &target,
+                resolution,
+            )
+            .await?;
+    }
+    Ok(Json(ApiResponse::ok(stored)))
 }
 
 fn nomi_core_remote_routes(state: NomiCoreAgentApiState) -> Router {

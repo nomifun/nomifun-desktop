@@ -66,7 +66,7 @@ describe('workpath section toolbar structure', () => {
     expect(source.includes("data-testid='workpath-batch-select-btn'")).toBe(false);
   });
 
-  test('routes project creation through the session shell and resets to default Nomi', () => {
+  test('routes project creation through the session shell without replacing the selected Agent', () => {
     const sessionListSource = readLocalSource('index.tsx');
     const shellSource = readFileSync(
       join(dirname(fileURLToPath(import.meta.url)), '../components/ConversationShell/index.tsx'),
@@ -80,7 +80,7 @@ describe('workpath section toolbar structure', () => {
     expect(shellSource.includes('onCreateProject={handleCreateProject}')).toBe(true);
     expect(
       shellSource.includes(
-        "void navigate('/guid', {\n        state: { workspace: projectPath, resetAgentSelection: true },\n      });"
+        "state: { workspace: projectPath }"
       )
     ).toBe(true);
     expect(createBarSource.includes('onCreateProject')).toBe(true);
@@ -92,10 +92,13 @@ describe('workpath section toolbar structure', () => {
       )
     ).toBe(true);
     expect(
-      /workspace:\s*node\.key,\s*resetAgentSelection:\s*true/.test(
+      /workspace:\s*node\.key,\s*\}/.test(
         sessionListSource
       )
     ).toBe(true);
+    expect(
+      /workspace:\s*node\.key,\s*resetAgentSelection/.test(sessionListSource)
+    ).toBe(false);
   });
 
   test('does not backfill the project registry from existing session workpaths', () => {

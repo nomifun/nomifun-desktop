@@ -22,6 +22,11 @@
     "untitledName": "Untitled Agent",
     "forkName": "{{name}} Copy"
   },
+  "productBinding": {
+    "label": "Agent setup",
+    "saved": "Agent updated",
+    "companionHint": "Controls capabilities for local and IM Companion conversations. The official Companion is used by default."
+  },
   "library": {
     "ariaLabel": "Agent library",
     "title": "Agent library",

@@ -174,6 +174,7 @@ import type {
   RemoteTurnRequest,
   ResolveAgentPresetPreviewRequest,
   ResolveAgentPresetPreviewResponse,
+  SelectProductAgentBindingRequest,
   RevokeInstallationTokenResponse,
   RotateInstallationTokenResponse,
   SaveAgentPresetRevisionRequest,
@@ -711,6 +712,14 @@ export const agentPlatform = {
   >(
     (params) =>
       `/api/agent-bindings/${encodeURIComponent(params.target_kind)}/${encodeURIComponent(params.target_id)}`,
+    (params) => params.request
+  ),
+  selectProductBinding: httpPut<
+    AgentBindingRecord,
+    { target_kind: string; target_id: string; request: SelectProductAgentBindingRequest }
+  >(
+    (params) =>
+      `/api/product-agent-bindings/${encodeURIComponent(params.target_kind)}/${encodeURIComponent(params.target_id)}`,
     (params) => params.request
   ),
   remoteBindings: {

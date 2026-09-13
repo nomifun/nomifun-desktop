@@ -980,6 +980,18 @@ async fn build_nomi_core_agent_api_state(
     .with_default_chat_route_resolver(Arc::new(
         NomiCoreDefaultChatRouteResolver::new(services.database.pool().clone()),
     )));
+    let product_agent_resolver = Arc::new(
+        super::nomi_core_session::NomiCoreProductAgentResolver::new(
+            Arc::clone(&control_plane),
+            Arc::clone(&services.authoritative_user_id),
+        ),
+    );
+    conversation_owner
+        .service()
+        .with_product_agent_snapshot_resolver(product_agent_resolver.clone());
+    services
+        .cs_dialogue_engine
+        .with_agent_policy_resolver(product_agent_resolver);
     let mcp_server_repository: Arc<dyn nomifun_db::IMcpServerRepository> =
         Arc::new(nomifun_db::SqliteMcpServerRepository::new(
             services.database.pool().clone(),

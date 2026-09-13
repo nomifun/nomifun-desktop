@@ -76,19 +76,3 @@
   inset: 0 0 0 auto;
   width: 12px;
 }
-
-@media (max-width: 820px) {
-  .side {
-    width: 100% !important;
-    height: auto;
-  }
-
-  .side .viewport,
-  .side .content {
-    height: auto;
-  }
-
-  .resizeHandle {
-    display: none;
-  }
-}

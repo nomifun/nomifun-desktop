@@ -144,6 +144,11 @@ fn strip_server_owned_runtime_fields(extra: &mut serde_json::Value) {
             "companion_session",
             "companion",
             "companion_id",
+            "companion_memory_enabled",
+            "companion_skills_enabled",
+            "product_agent_target_kind",
+            "product_agent_target_id",
+            "product_agent_capabilities",
             "channel_platform",
             // Robot gateway identity. `robot_session` is a relay behaviour gate
             // (it deletes bracketed stage directions from assistant text) and

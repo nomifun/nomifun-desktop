@@ -3,8 +3,8 @@
   "payload": {
     "ledger_version": "1.0.0",
     "artifacts": {
-      "canonical_api_inventory": "b9e2b950ea0922c20279d1a6146675a3037242685884615d33541af590357443",
-      "canonical_schema_manifest": "71e0c798fa07e6b48f4ade7a040d1f493d7045dd16239cf8816c50256cf2c832",
+      "canonical_api_inventory": "702c3278890dd8f5af1999e197987f18e91b0d0b15b4adba32fd7e3369f13b0b",
+      "canonical_schema_manifest": "13ce6a82cb1c54bc67e37a2ee42fb539b2c4b2c168116f9d7a83374d8c9d3bc1",
       "capability_catalog_entry": "06a4bca7e916f7fd7e6c7684eeb9d283bcada138746155938bb2e96f06a3cd88",
       "cargo_lock": "af61a985aa0cec19be89830dc329207603d3ac7bb761cd906740e8533f958651",
       "coding_codex_native_contract": "baea06819d3d6e8bab3336ac1a4f0882745a35ad34c04546411165498bfc7bfa",
@@ -17,7 +17,7 @@
       "official_preset_seed_manifest": "965888fe6d237701d6295150dcaa16cadf37db1d54c0d24bd48be249f3461ee4",
       "package_schema": "f82782c856ba53068161c4b0c98ba761c63a755ff23c773162571aa8fbe9d881",
       "platform_validation_contract": "a3f5180906c239d791a03281199d80f2ea957dbe8382fb849dc2926935672a9c",
-      "platform_validation_fixture": "07aaef83a4d39922a42f0cf734817fd938149b1028a61d49387d12ef348ecc91",
+      "platform_validation_fixture": "d9b3dd91b3a5fcf94ab47d053a641a62b0335bfe9e5d3c44b8114f17778cc288",
       "plugin_n1_contract": "96a1f080717010b8feeea91f38a68b1949f5aa3ef6860f82673744ceb17da36a",
       "plugin_n1_schema": "f7169c12d444af92e4bfcad8c7afd819b51612b4aec78e06a9524c9a92a58714",
       "runtime_feature_inventory": "bc01fffa050a721debc7740405a05f53b966d4e2dc2d8b4392e321d944fca2ee",
@@ -28,5 +28,5 @@
       "target_first_party_inventory": "71c6aeb654159f99777e63a6444c1c2be4450e0be050f4daa350d19b8fce26a6"
     }
   },
-  "payload_digest": "7b68a719d2744cf7df5b309986f4c7e25937815345b348700543db1399e6a81e"
+  "payload_digest": "d1e997877fbed840a4c21d5e1822cb9ff34b95d7742e850b564bc4e9dd383fa6"
 }
