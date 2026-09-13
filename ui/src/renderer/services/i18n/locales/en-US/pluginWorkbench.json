@@ -2,13 +2,13 @@
   "title": "Plugin Workbench",
   "subtitle": "Manage installed Plugin lifecycle and capabilities, and inspect authoring projects, Ready Candidates, and build state.",
   "product": {
-    "eyebrow": "NomiFun capability extensions",
+    "eyebrow": "Your toolbox",
     "title": "Plugins",
-    "subtitle": "Create and manage NomiFun enhancements, then choose which Agents can use them.",
+    "subtitle": "Your tools, automations, and NomiFun enhancements, together in one place.",
     "create": "Create Plugin",
     "import": "Import",
     "quickCreate": "Quick Plugin creation",
-    "requirementPlaceholder": "Describe what you want NomiFun to do better…",
+    "requirementPlaceholder": "Describe what you want to do, such as track expenses, organize information, or set reminders…",
     "generate": "Generate with AI",
     "manage": "Plugin organization",
     "smartViews": "Smart views",
@@ -17,7 +17,8 @@
       "enabled": "Enabled",
       "disabled": "Not enabled",
       "draft": "In progress",
-      "attention": "Needs attention"
+      "attention": "Needs attention",
+      "trashed": "Trash"
     },
     "categories": {
       "title": "Capability categories",
@@ -30,7 +31,11 @@
       "other": "Other"
     },
     "resultCount": "{{count}} Plugins",
-    "sort": { "label": "Sort", "updated": "Recently updated", "name": "Name" },
+    "sort": {
+      "label": "Sort",
+      "updated": "Recently updated",
+      "name": "Name"
+    },
     "viewMode": "Plugin view",
     "toggle": "Toggle {{name}}",
     "noDescription": "This Plugin does not have a description yet.",
@@ -117,7 +122,14 @@
     "importNoCredentials": "Credentials and runtime data are not imported",
     "installAndEnable": "Install and enable",
     "importDropTitle": "Supports NomiFun shares, Plugin folders, and ZIP files",
-    "importDropBody": "Capabilities, source, and access are shown before you confirm installation."
+    "importDropBody": "Capabilities, source, and access are shown before you confirm installation.",
+    "open": "Open",
+    "openReady": "Ready to use",
+    "gridView": "Card view",
+    "listView": "List view",
+    "reviewIssue": "Review issue",
+    "pin": "Pin {{name}} to the sidebar",
+    "unpin": "Unpin {{name}}"
   },
   "navigation": {
     "railTitle": "Plugins"
@@ -129,7 +141,7 @@
   "actions": {
     "refresh": "Refresh",
     "retry": "Retry",
-    "search": "Search Plugins or projects",
+    "search": "Search plugins",
     "configure": "Config & credentials",
     "configureUnavailable": "An installed Current version is required before this Plugin can be configured.",
     "saveConfiguration": "Save configuration",
@@ -211,7 +223,7 @@
     "remote": "Remote",
     "automation": "Automation",
     "ui": "UI",
-    "miniappService": "MiniApp Service"
+    "miniappService": "Plugin Service"
   },
   "applyMode": {
     "ask": "Ask before applying",

@@ -97,6 +97,8 @@ export interface PluginLibraryResponse {
   library_revision: number;
   plugins: PluginSummary[];
   projects: PluginProjectSummary[];
+  runtime_revision?: number;
+  runtimes?: import('./pluginRuntimePlatform').PluginRuntimeSummary[];
 }
 
 export interface PluginConsumerAvailability {
@@ -213,12 +215,12 @@ export type DurablePluginOperationKind =
   | 'build'
   | 'import'
   | 'export'
-  | 'miniapp_permanent_delete';
+  | 'plugin_permanent_delete';
 export type DurablePluginOperationState = 'running' | 'succeeded' | 'failed' | 'canceled';
 export type DurablePluginOperationOwner =
   | { owner: 'plugin_project'; project_id: PluginProjectId }
   | { owner: 'plugin_mount'; mount_id: PluginMountId }
-  | { owner: 'miniapp'; miniapp_id: string };
+  | { owner: 'plugin_runtime'; plugin_id: string };
 
 export interface DurablePluginOperationSummary {
   operation_id: PluginOperationId;

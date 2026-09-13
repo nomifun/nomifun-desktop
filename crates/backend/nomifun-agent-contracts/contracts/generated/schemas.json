@@ -5550,7 +5550,14 @@
             ]
           },
           "ui": {
-            "$ref": "#/$defs/MiniAppUiReleaseDescriptor"
+            "anyOf": [
+              {
+                "$ref": "#/$defs/MiniAppUiReleaseDescriptor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -5558,7 +5565,6 @@
           "build_profile",
           "build_profile_version",
           "display",
-          "ui",
           "dependency_lock_digest",
           "dependency_graph_digest",
           "config_schema",
@@ -7002,7 +7008,14 @@
         ]
       },
       "ui": {
-        "$ref": "#/$defs/MiniAppUiReleaseDescriptor"
+        "anyOf": [
+          {
+            "$ref": "#/$defs/MiniAppUiReleaseDescriptor"
+          },
+          {
+            "type": "null"
+          }
+        ]
       }
     },
     "required": [
@@ -7010,7 +7023,6 @@
       "build_profile",
       "build_profile_version",
       "display",
-      "ui",
       "dependency_lock_digest",
       "dependency_graph_digest",
       "config_schema",
@@ -8216,7 +8228,14 @@
             ]
           },
           "ui": {
-            "$ref": "#/$defs/MiniAppUiReleaseDescriptor"
+            "anyOf": [
+              {
+                "$ref": "#/$defs/MiniAppUiReleaseDescriptor"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -8224,7 +8243,6 @@
           "build_profile",
           "build_profile_version",
           "display",
-          "ui",
           "dependency_lock_digest",
           "dependency_graph_digest",
           "config_schema",

@@ -64,7 +64,7 @@ use nomifun_js_runtime::{
 use nomifun_plugin_platform::{
     ArtifactStoreLimits, OwnerMutationCoordinator,
 };
-use nomifun_plugin_service::{
+use nomifun_plugin_platform::application::{
     DbPluginRepositoryAdapter, FsPluginArtifactStore, FsPluginMountDataStore,
     FsPluginSourceStore,
     CandidateTestOutput, FsPluginBuildExecutor, PluginApplicationService,
@@ -672,7 +672,7 @@ impl RuntimeBoundPluginBuildExecutor {
             .acquire_use(JavaScriptWorkKind::BuildHost)
             .await
             .map_err(|error| PluginServiceError::Coded {
-                code: nomifun_plugin_service::ERR_RUNTIME,
+                code: nomifun_plugin_platform::application::ERR_RUNTIME,
                 message: error.to_string(),
             })?;
         let resolved = lease.runtime().clone();
@@ -682,7 +682,7 @@ impl RuntimeBoundPluginBuildExecutor {
                 return Ok((lease, Arc::clone(&current.executor)));
             }
             return Err(PluginServiceError::Coded {
-                code: nomifun_plugin_service::ERR_RUNTIME,
+                code: nomifun_plugin_platform::application::ERR_RUNTIME,
                 message:
                     "committed Runtime changed before the Build executor was fenced"
                         .to_owned(),
@@ -727,7 +727,7 @@ impl PluginBuildExecutor for RuntimeBoundPluginBuildExecutor {
         operation_id: &str,
         project: &PluginProjectRow,
         request: &BuildPluginProjectRequest,
-    ) -> Result<nomifun_plugin_service::BuildOutput, PluginServiceError> {
+    ) -> Result<nomifun_plugin_platform::application::BuildOutput, PluginServiceError> {
         let (_lease, executor) = self.executor_for_use().await?;
         executor.build(operation_id, project, request).await
     }
@@ -824,88 +824,91 @@ impl NomiPluginToolSchemaResolver for NomiCorePluginSchemaResolver {
     }
 }
 
+pub(crate) fn plugin_read_routes(state: PluginRouterState) -> Router {
+    Router::new().route("/api/plugins", get(list_plugins)).with_state(state)
+}
+
 pub(crate) fn plugin_routes(state: PluginRouterState) -> Router {
     Router::new()
-        .route("/api/plugins", get(list_plugins))
-        .route("/api/plugin-projects", post(create_project))
-        .route("/api/plugin-authoring/generate", post(generate_plugin_draft))
+        .route("/api/plugins/projects", post(create_project))
+        .route("/api/plugins/authoring/generate", post(generate_plugin_draft))
         .route(
-            "/api/plugin-projects/{project_id}",
+            "/api/plugins/projects/{project_id}",
             get(get_project).delete(delete_project),
         )
         .route(
-            "/api/plugin-projects/{project_id}/authoring-context",
+            "/api/plugins/projects/{project_id}/authoring-context",
             get(get_project_authoring_context),
         )
         .route(
-            "/api/plugin-projects/{project_id}/source/edit",
+            "/api/plugins/projects/{project_id}/source/edit",
             post(apply_source_edit),
         )
         .route(
-            "/api/plugin-projects/{project_id}/source/dependencies",
+            "/api/plugins/projects/{project_id}/source/dependencies",
             put(update_dependencies),
         )
         .route(
-            "/api/plugin-projects/{project_id}/auto-apply",
+            "/api/plugins/projects/{project_id}/auto-apply",
             put(set_auto_apply),
         )
-        .route("/api/plugin-imports", post(import_prebuilt))
-        .route("/api/plugin-imports/inspect", post(inspect_plugin_import))
+        .route("/api/plugins/imports", post(import_prebuilt))
+        .route("/api/plugins/imports/inspect", post(inspect_plugin_import))
         .route(
-            "/api/plugin-projects/{project_id}/share",
+            "/api/plugins/projects/{project_id}/share",
             post(export_share),
         )
         .route(
-            "/api/plugin-projects/{project_id}/build",
+            "/api/plugins/projects/{project_id}/build",
             post(build_project),
         )
         .route(
-            "/api/plugin-projects/{project_id}/test",
+            "/api/plugins/projects/{project_id}/test",
             post(test_candidate),
         )
         .route(
-            "/api/plugin-projects/{project_id}/apply",
+            "/api/plugins/projects/{project_id}/apply",
             post(apply_candidate),
         )
         .route(
-            "/api/plugin-projects/{project_id}/candidate/discard",
+            "/api/plugins/projects/{project_id}/candidate/discard",
             post(discard_candidate),
         )
         .route(
-            "/api/plugin-mounts/{mount_id}",
+            "/api/plugins/installations/{mount_id}",
             get(get_mount),
         )
         .route(
-            "/api/plugin-mounts/{mount_id}/config",
+            "/api/plugins/installations/{mount_id}/config",
             put(configure_mount),
         )
         .route(
-            "/api/plugin-mounts/{mount_id}/enabled",
+            "/api/plugins/installations/{mount_id}/enabled",
             put(set_mount_enabled),
         )
         .route(
-            "/api/plugin-mounts/{mount_id}/retry",
+            "/api/plugins/installations/{mount_id}/retry",
             post(retry_mount),
         )
         .route(
-            "/api/plugin-mounts/{mount_id}/restore",
+            "/api/plugins/installations/{mount_id}/restore",
             post(restore_mount),
         )
         .route(
-            "/api/plugin-mounts/{mount_id}/uninstall",
+            "/api/plugins/installations/{mount_id}/uninstall",
             post(uninstall_mount),
         )
         .route(
-            "/api/plugin-mounts/{mount_id}/data",
+            "/api/plugins/installations/{mount_id}/data",
             delete(delete_mount_data),
         )
-        .route("/api/plugin-operations", get(list_operations))
+        .route("/api/plugins/operations", get(list_operations))
         .route(
-            "/api/plugin-operations/{operation_id}",
+            "/api/plugins/operations/{operation_id}",
             get(get_operation),
         )
         .route(
-            "/api/plugin-operations/{operation_id}/cancel",
+            "/api/plugins/operations/{operation_id}/cancel",
             post(cancel_operation),
         )
         .with_state(state)
@@ -924,18 +927,18 @@ impl IntoResponse for PluginHttpError {
     fn into_response(self) -> Response {
         let code = self.0.code();
         let status = match code {
-            nomifun_plugin_service::ERR_INVALID_INPUT => StatusCode::BAD_REQUEST,
-            nomifun_plugin_service::ERR_FORBIDDEN => StatusCode::FORBIDDEN,
-            nomifun_plugin_service::ERR_NOT_FOUND => StatusCode::NOT_FOUND,
-            nomifun_plugin_service::ERR_STALE
-            | nomifun_plugin_service::ERR_CONFLICT
-            | nomifun_plugin_service::ERR_OPERATION_CANCELED => StatusCode::CONFLICT,
-            nomifun_plugin_service::ERR_ARTIFACT => {
+            nomifun_plugin_platform::application::ERR_INVALID_INPUT => StatusCode::BAD_REQUEST,
+            nomifun_plugin_platform::application::ERR_FORBIDDEN => StatusCode::FORBIDDEN,
+            nomifun_plugin_platform::application::ERR_NOT_FOUND => StatusCode::NOT_FOUND,
+            nomifun_plugin_platform::application::ERR_STALE
+            | nomifun_plugin_platform::application::ERR_CONFLICT
+            | nomifun_plugin_platform::application::ERR_OPERATION_CANCELED => StatusCode::CONFLICT,
+            nomifun_plugin_platform::application::ERR_ARTIFACT => {
                 StatusCode::UNPROCESSABLE_ENTITY
             }
-            nomifun_plugin_service::ERR_RUNTIME
-            | nomifun_plugin_service::ERR_RECONCILE_REQUIRED
-            | nomifun_plugin_service::ERR_INTEGRATION => {
+            nomifun_plugin_platform::application::ERR_RUNTIME
+            | nomifun_plugin_platform::application::ERR_RECONCILE_REQUIRED
+            | nomifun_plugin_platform::application::ERR_INTEGRATION => {
                 StatusCode::SERVICE_UNAVAILABLE
             }
             _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -999,7 +1002,7 @@ const PLUGIN_AUTHORING_MAX_SOURCE_BYTES: usize = 512 * 1_024;
 const PLUGIN_AUTHORING_MAX_CAPABILITIES: usize = 12;
 const PLUGIN_AUTHORING_MAX_DEPENDENCIES: usize = 64;
 
-const PLUGIN_AUTHORING_SYSTEM_PROMPT: &str = r#"You are NomiFun's Plugin authoring engine. Turn the user's product requirement into a complete TypeScript capability Plugin. A Plugin has no independent UI: it extends NomiFun and is consumed by Agent, Gateway, Automation, Knowledge, Remote, UI, or MiniApp Service.
+const PLUGIN_AUTHORING_SYSTEM_PROMPT: &str = r#"You are editing a Plugin's shared capability module. Produce a complete TypeScript module consumed by Agent, Gateway, Automation, Knowledge, Remote, UI, or plugin services. Plugins may also provide pages and dedicated services; this editor preserves the shared capability module's activation contract.
 
 Return exactly one JSON object and nothing else. Do not use markdown fences. Shape:
 {
@@ -1471,9 +1474,14 @@ async fn list_plugins(
     State(state): State<PluginRouterState>,
     Extension(user): Extension<CurrentUser>,
 ) -> Result<Json<ApiResponse<PluginLibraryResponseDto>>, PluginHttpError> {
-    Ok(Json(ApiResponse::ok(
-        state.service.list_library(user.id.as_str()).await?,
-    )))
+    let mut library = state.service.list_library(user.id.as_str()).await?;
+    if let Some(runtime) = &state.runtime {
+        let releases = runtime.library(user.id.as_str()).await
+            .map_err(|error| PluginServiceError::integration(error.to_string()))?;
+        library.runtime_revision = releases.library_revision;
+        library.runtimes = releases.miniapps;
+    }
+    Ok(Json(ApiResponse::ok(library)))
 }
 
 async fn get_project_authoring_context(
@@ -1598,7 +1606,7 @@ async fn create_project(
     Ok(Json(ApiResponse::ok(
         state
             .service
-            .create_project(nomifun_plugin_service::CreateProjectInput {
+            .create_project(nomifun_plugin_platform::application::CreateProjectInput {
                 owner_user_id: user.id.as_str().to_owned(),
                 request,
             })
@@ -1714,7 +1722,7 @@ async fn configure_mount(
     Ok(Json(ApiResponse::ok(
         state
             .service
-            .configure(nomifun_plugin_service::ConfigureInput {
+            .configure(nomifun_plugin_platform::application::ConfigureInput {
                 owner_user_id: user.id.as_str().to_owned(),
                 request,
             })
@@ -1867,7 +1875,7 @@ impl PluginHostCoordinator for RuntimeBoundPluginHostCoordinator {
             .committed_runtime()
             .await
             .map_err(|error| PluginServiceError::Coded {
-                code: nomifun_plugin_service::ERR_RUNTIME,
+                code: nomifun_plugin_platform::application::ERR_RUNTIME,
                 message: error.to_string(),
             })?
             .map(|runtime| runtime.fingerprint))
@@ -1892,7 +1900,7 @@ impl PluginHostCoordinator for RuntimeBoundPluginHostCoordinator {
             .acquire_use(JavaScriptWorkKind::SharedExtensionHost)
             .await
             .map_err(|error| PluginServiceError::Coded {
-                code: nomifun_plugin_service::ERR_RUNTIME,
+                code: nomifun_plugin_platform::application::ERR_RUNTIME,
                 message: error.to_string(),
             })?;
         let runtime = lease.fingerprint().clone();
@@ -1977,7 +1985,7 @@ impl PluginCandidateTestExecutor for NomiCorePluginCandidateTestExecutor {
             .acquire_use(JavaScriptWorkKind::CandidateTestHost)
             .await
             .map_err(|error| PluginServiceError::Coded {
-                code: nomifun_plugin_service::ERR_RUNTIME,
+                code: nomifun_plugin_platform::application::ERR_RUNTIME,
                 message: error.to_string(),
             })?;
         let host_config = JavaScriptHostConfig::for_host_module(
@@ -2231,7 +2239,7 @@ impl NomiCorePluginRegistryPublisher {
             .committed_runtime()
             .await
             .map_err(|error| PluginServiceError::Coded {
-                code: nomifun_plugin_service::ERR_RUNTIME,
+                code: nomifun_plugin_platform::application::ERR_RUNTIME,
                 message: error.to_string(),
             })?
             .is_some();
@@ -2431,7 +2439,7 @@ mod tests {
         PluginProjectSourceStateDto, UninstallPluginRequest,
         SetPluginAutoApplyRequest, SharePluginRequest, UpdatePluginDependenciesRequest,
     };
-    use nomifun_plugin_service::CreateProjectInput;
+    use nomifun_plugin_platform::application::CreateProjectInput;
     use nomifun_js_runtime::{
         NodeDiscoveryRequest, NodeRuntimeManager, NodeRuntimeResolver,
         RuntimeAuthority, RuntimeSelectionStore, RuntimeSelectionStoreError,
@@ -2797,7 +2805,7 @@ export async function activate() {
         let schema_resolver = Arc::clone(&composition.schema_resolver);
         let state = composition.router;
         assert_eq!(state.service.list_library(&owner_user_id).await.unwrap().library_revision, 0);
-        let response = plugin_routes(state.clone())
+        let response = plugin_read_routes(state.clone())
             .layer(Extension(CurrentUser {
                 id: nomifun_common::UserId::parse(
                     owner_user_id.clone(),
@@ -2869,7 +2877,7 @@ export async function activate() {
                 axum::http::Request::builder()
                     .method(axum::http::Method::PUT)
                     .uri(format!(
-                        "/api/plugin-projects/{}/source/dependencies",
+                        "/api/plugins/projects/{}/source/dependencies",
                         scaffolded.summary.project_id
                     ))
                     .header(axum::http::header::CONTENT_TYPE, "application/json")
@@ -2911,7 +2919,7 @@ export async function activate() {
                 axum::http::Request::builder()
                     .method(axum::http::Method::PUT)
                     .uri(format!(
-                        "/api/plugin-projects/{}/auto-apply",
+                        "/api/plugins/projects/{}/auto-apply",
                         scaffolded.summary.project_id
                     ))
                     .header(axum::http::header::CONTENT_TYPE, "application/json")
@@ -2982,7 +2990,7 @@ export async function activate() {
                 axum::http::Request::builder()
                     .method(axum::http::Method::POST)
                     .uri(format!(
-                        "/api/plugin-projects/{}/share",
+                        "/api/plugins/projects/{}/share",
                         project.summary.project_id
                     ))
                     .header(axum::http::header::CONTENT_TYPE, "application/json")
@@ -3020,7 +3028,7 @@ export async function activate() {
             .oneshot(
                 axum::http::Request::builder()
                     .method(axum::http::Method::POST)
-                    .uri("/api/plugin-imports")
+                    .uri("/api/plugins/imports")
                     .header(axum::http::header::CONTENT_TYPE, "application/json")
                     .body(axum::body::Body::from(
                         serde_json::to_vec(&ImportPluginRequest {
@@ -3052,7 +3060,7 @@ export async function activate() {
                 axum::http::Request::builder()
                     .method(axum::http::Method::POST)
                     .uri(format!(
-                        "/api/plugin-projects/{}/candidate/discard",
+                        "/api/plugins/projects/{}/candidate/discard",
                         project.summary.project_id
                     ))
                     .header(axum::http::header::CONTENT_TYPE, "application/json")

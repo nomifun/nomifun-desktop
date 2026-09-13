@@ -414,7 +414,8 @@ pub struct MiniAppReleaseV1Manifest {
     pub build_profile: JavaScriptBuildProfile,
     pub build_profile_version: VersionString,
     pub display: LocalizedMetadata,
-    pub ui: MiniAppUiReleaseDescriptor,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui: Option<MiniAppUiReleaseDescriptor>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service: Option<MiniAppServiceReleaseDescriptor>,
     pub dependency_lock_digest: DigestHex,
@@ -451,7 +452,11 @@ impl MiniAppReleaseV1Manifest {
             "build_profile_version",
         )?;
         validate_display(&self.display)?;
-        self.ui.validate()?;
+        if let Some(ui) = &self.ui {
+            ui.validate()?;
+        } else if self.service.is_none() {
+            return Err(invalid("roles", "A plugin release must provide a surface or a service"));
+        }
         if let Some(service) = &self.service {
             service.validate()?;
             if !self.migrations.is_empty() && !service.uses_private_database {
@@ -674,16 +679,15 @@ impl MiniAppReleaseArtifactV1 {
             }
             previous = Some(path);
         }
-        if ui_entrypoint_digest != Some(&self.manifest.payload.ui.entrypoint_digest) {
-            return Err(MiniAppM1ContractError::DigestMismatch {
-                field: "ui.entrypoint_digest",
-            });
-        }
-        let expected_ui_tree = canonical_ui_tree_digest(&self.files)?;
-        if expected_ui_tree != self.manifest.payload.ui.ui_tree_digest {
-            return Err(MiniAppM1ContractError::DigestMismatch {
-                field: "ui.ui_tree_digest",
-            });
+        if let Some(ui) = &self.manifest.payload.ui {
+            if ui_entrypoint_digest != Some(&ui.entrypoint_digest) {
+                return Err(MiniAppM1ContractError::DigestMismatch { field: "ui.entrypoint_digest" });
+            }
+            if canonical_ui_tree_digest(&self.files)? != ui.ui_tree_digest {
+                return Err(MiniAppM1ContractError::DigestMismatch { field: "ui.ui_tree_digest" });
+            }
+        } else if self.files.iter().any(|file| file.normalized_relative_path.starts_with("ui/")) {
+            return Err(invalid("files", "UI files require a declared plugin surface"));
         }
         match (&self.manifest.payload.service, service_digest) {
             (None, None) => {}
@@ -3141,11 +3145,11 @@ mod tests {
                 localized_names: BTreeMap::new(),
                 localized_descriptions: BTreeMap::new(),
             },
-            ui: MiniAppUiReleaseDescriptor {
+            ui: Some(MiniAppUiReleaseDescriptor {
                 entrypoint: "ui/index.html".into(),
                 entrypoint_digest: entrypoint.digest.clone(),
                 ui_tree_digest: canonical_ui_tree_digest(files).unwrap(),
-            },
+            }),
             service,
             dependency_lock_digest: digest("lock"),
             dependency_graph_digest: digest("graph"),

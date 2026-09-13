@@ -1253,7 +1253,7 @@
   },
   "runtimeManager": {
     "title": "JavaScript Runtime",
-    "subtitle": "Manage the Node.js runtime used by NomiFun Plugins and MiniApps.",
+    "subtitle": "Manage the Node.js runtime used by NomiFun Plugins and PluginRuntimes.",
     "railTitle": "JavaScript Runtime",
     "desktopOnlyTitle": "Desktop only",
     "desktopOnlyBody": "Node.js paths and local processes can only be managed in the NomiFun desktop app.",
@@ -1297,7 +1297,7 @@
       "description": "The candidate Runtime has partial validation results. Choose whether to continue with it or restore the previous Runtime.",
       "noParticipants": "No participant results to show.",
       "participantPlugin": "Plugin",
-      "participantMiniApp": "MiniApp Service",
+      "participantPluginRuntime": "PluginRuntime Service",
       "participantBuild": "Build foundation",
       "passed": "Passed",
       "failed": "Failed",

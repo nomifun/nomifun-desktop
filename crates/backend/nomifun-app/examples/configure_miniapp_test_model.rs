@@ -41,7 +41,7 @@ async fn main() -> anyhow::Result<()> {
         key,
     );
     let request = serde_json::from_value(serde_json::json!({
-        "platform":"stepfun-plan","name":"StepFun Coding Plan · MiniApp validation",
+        "platform":"stepfun-plan","name":"StepFun Coding Plan · Plugin validation",
         "base_url":"https://api.stepfun.com/step_plan/v1","auth_scheme":"bearer",
         "credentials":{"api_keys":[credential.trim()]},"enabled":true,
         "initial_model":{"model":"step-3.7-flash","capabilities":[{"task":"chat","traits":["function_calling","streaming"],"protocol":"openai.chat_text","connection_role":"default","provider_params":{}}]}

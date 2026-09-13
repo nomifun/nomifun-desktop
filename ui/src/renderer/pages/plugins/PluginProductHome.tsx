@@ -1,6 +1,6 @@
 import type { PluginProductCategory, PluginProductItem, PluginProductStatus } from './pluginProductModel';
 import { Button, Input, Select, Switch } from '@arco-design/web-react';
-import { AddOne, Code, List, Plug, Search, Upload } from '@icon-park/react';
+import { AddOne, Code, List, Plug, Pushpin, Search, Upload } from '@icon-park/react';
 import React, { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import styles from './PluginProductSurface.module.css';
@@ -18,6 +18,8 @@ interface PluginProductHomeProps {
   onImport: () => void;
   onOpen: (item: PluginProductItem) => void;
   onToggleEnabled: (item: PluginProductItem, enabled: boolean) => void;
+  pinnedIds?: ReadonlySet<string>;
+  onPin?: (item: PluginProductItem) => void;
 }
 
 const categories: PluginProductCategory[] = [
@@ -29,7 +31,7 @@ const categories: PluginProductCategory[] = [
   'other',
 ];
 
-const smartViews: SmartView[] = ['all', 'enabled', 'disabled', 'draft', 'attention'];
+const smartViews: SmartView[] = ['all', 'enabled', 'disabled', 'draft', 'attention', 'trashed'];
 
 const PluginProductHome: React.FC<PluginProductHomeProps> = ({
   items,
@@ -41,6 +43,8 @@ const PluginProductHome: React.FC<PluginProductHomeProps> = ({
   onImport,
   onOpen,
   onToggleEnabled,
+  pinnedIds,
+  onPin,
 }) => {
   const { t } = useTranslation();
   const [requirement, setRequirement] = useState('');
@@ -51,6 +55,7 @@ const PluginProductHome: React.FC<PluginProductHomeProps> = ({
 
   const visible = useMemo(() => {
     const filtered = items.filter((item) => {
+      if (smartView === 'all' && item.status === 'trashed') return false;
       if (smartView !== 'all' && item.status !== smartView) return false;
       if (category !== 'all' && item.category !== category) return false;
       return true;
@@ -63,7 +68,7 @@ const PluginProductHome: React.FC<PluginProductHomeProps> = ({
   }, [category, items, smartView, sort]);
 
   const countStatus = (status: SmartView) =>
-    status === 'all' ? items.length : items.filter((item) => item.status === status).length;
+    status === 'all' ? items.filter((item) => item.status !== 'trashed').length : items.filter((item) => item.status === status).length;
   const countCategory = (value: PluginProductCategory) =>
     items.filter((item) => item.category === value).length;
 
@@ -119,6 +124,7 @@ const PluginProductHome: React.FC<PluginProductHomeProps> = ({
             prefix={<Search size={14} />}
             allowClear
             placeholder={t('pluginWorkbench.actions.search')}
+            aria-label={t('pluginWorkbench.actions.search')}
             onChange={onSearch}
           />
           <section className={styles.railSection}>
@@ -181,10 +187,10 @@ const PluginProductHome: React.FC<PluginProductHomeProps> = ({
                 ]}
               />
               <div className={styles.viewSwitch} role='group' aria-label={t('pluginWorkbench.product.viewMode')}>
-                <button type='button' aria-pressed={viewMode === 'grid'} onClick={() => setViewMode('grid')}>
+                <button type='button' aria-label={t('pluginWorkbench.product.gridView')} aria-pressed={viewMode === 'grid'} onClick={() => setViewMode('grid')}>
                   <Plug theme='outline' size={15} />
                 </button>
-                <button type='button' aria-pressed={viewMode === 'list'} onClick={() => setViewMode('list')}>
+                <button type='button' aria-label={t('pluginWorkbench.product.listView')} aria-pressed={viewMode === 'list'} onClick={() => setViewMode('list')}>
                   <List theme='outline' size={15} />
                 </button>
               </div>
@@ -194,8 +200,9 @@ const PluginProductHome: React.FC<PluginProductHomeProps> = ({
           {visible.length ? (
             <div className={`${styles.pluginCollection} ${viewMode === 'list' ? styles.pluginCollectionList : ''}`}>
               {visible.map((item) => {
-                const enabled = item.status === 'enabled';
-                const installed = Boolean(item.mount?.current);
+                const enabled = item.runtime ? item.runtime.lifecycle === 'enabled' : item.mount ? item.mount.lifecycle === 'enabled' : item.status === 'enabled';
+                const installed = item.status !== 'trashed' && item.runtime?.lifecycle !== 'deleting' && Boolean(item.mount?.current || item.runtime?.releases.active);
+                const pinned = pinnedIds?.has(item.runtime?.plugin_id ?? item.mount?.mount_id ?? '') ?? false;
                 return (
                   <article key={item.key} className={styles.pluginCard}>
                     <div className={styles.pluginCardHeader}>
@@ -210,13 +217,13 @@ const PluginProductHome: React.FC<PluginProductHomeProps> = ({
                         <Switch
                           size='small'
                           checked={enabled}
-                          loading={busyMountId === item.mount?.mount_id}
+                          loading={busyMountId === item.key}
                           aria-label={t('pluginWorkbench.product.toggle', { name: item.displayName })}
                           onChange={(next: boolean) => onToggleEnabled(item, next)}
                         />
                       ) : (
-                        <span className={`${styles.productStatus} ${styles.productStatusDraft}`}>
-                          {t('pluginWorkbench.product.views.draft')}
+                        <span className={`${styles.productStatus} ${item.status === 'draft' ? styles.productStatusDraft : ''}`}>
+                          {t(`pluginWorkbench.product.views.${item.status}`)}
                         </span>
                       )}
                     </div>
@@ -224,15 +231,23 @@ const PluginProductHome: React.FC<PluginProductHomeProps> = ({
                       {item.description || t('pluginWorkbench.product.noDescription')}
                     </button>
                     <div className={styles.pluginMeta}>
+                      {installed && onPin && <button type='button' title={t(pinned ? 'pluginWorkbench.product.unpin' : 'pluginWorkbench.product.pin', { name: item.displayName })} aria-label={t(pinned ? 'pluginWorkbench.product.unpin' : 'pluginWorkbench.product.pin', { name: item.displayName })} aria-pressed={pinned} onClick={() => onPin(item)}><Pushpin theme={pinned ? 'filled' : 'outline'} size={14} /></button>}
                       <span>{
-                        item.project?.ready_candidate
+                        item.status === 'attention'
+                          ? t('pluginWorkbench.product.views.attention')
+                        : item.project?.ready_candidate
                           ? t('pluginWorkbench.product.readyToReview')
+                          : item.runtime?.surface_available
+                            ? t('pluginWorkbench.product.openReady')
                           : installed
                             ? t('pluginWorkbench.product.capabilityCount', { count: item.contributionCount })
                             : t('pluginWorkbench.product.continueCreating')
                       }</span>
                       <button type='button' onClick={() => onOpen(item)}>
-                        {item.project && !installed
+                        {item.status === 'attention' ? t('pluginWorkbench.product.reviewIssue')
+                          : item.runtime?.surface_available
+                          ? t('pluginWorkbench.product.open')
+                          : (item.project || item.runtimeDraft) && !installed
                           ? t('pluginWorkbench.product.continue')
                           : t('pluginWorkbench.product.details')}
                       </button>

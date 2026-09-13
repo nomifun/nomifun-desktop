@@ -14,7 +14,7 @@ export type PluginProductCategory =
   | 'system'
   | 'other';
 
-export type PluginProductStatus = 'enabled' | 'disabled' | 'draft' | 'attention';
+export type PluginProductStatus = 'enabled' | 'disabled' | 'draft' | 'attention' | 'trashed';
 
 export interface PluginProductItem {
   key: string;
@@ -24,6 +24,8 @@ export interface PluginProductItem {
   status: PluginProductStatus;
   mount?: PluginSummary;
   project?: PluginProjectSummary;
+  runtime?: import('@/common/types/pluginRuntimePlatform').PluginRuntimeSummary;
+  runtimeDraft?: import('@/common/adapter/pluginRuntimeProductBridge').PluginRuntimeDraft;
   contributionCount: number;
   updatedAtMs: number;
 }
@@ -46,7 +48,7 @@ function mountStatus(lifecycle: PluginLifecycle): PluginProductStatus {
   return 'attention';
 }
 
-export function pluginProductItems(library: PluginLibraryResponse): PluginProductItem[] {
+export function pluginProductItems(library: PluginLibraryResponse, drafts: import('@/common/adapter/pluginRuntimeProductBridge').PluginRuntimeDraft[] = []): PluginProductItem[] {
   const linkedProjects = new Map(
     library.projects
       .filter((project) => project.linked_mount_id)
@@ -80,6 +82,29 @@ export function pluginProductItems(library: PluginLibraryResponse): PluginProduc
       contributionCount: 0,
       updatedAtMs: project.updated_at_ms,
     });
+  }
+  for (const runtime of library.runtimes ?? []) {
+    items.push({
+      key: `runtime:${runtime.plugin_id}`,
+      displayName: runtime.display_name,
+      description: runtime.description ?? '',
+      category: pluginProductCategory(`${runtime.display_name} ${runtime.description ?? ''}`),
+      status: runtime.lifecycle === 'trashed' ? 'trashed' : runtime.lifecycle === 'deleting' || runtime.service_health.state === 'failed'
+        ? 'attention'
+        : !runtime.releases.active ? 'draft'
+          : runtime.lifecycle === 'enabled' ? 'enabled' : 'disabled',
+      runtime,
+      runtimeDraft: drafts.find((draft) => draft.plugin_id === runtime.plugin_id && draft.status !== 'saved'),
+      contributionCount: runtime.contribution_count ?? 0,
+      updatedAtMs: runtime.updated_at_ms,
+    });
+  }
+  for (const draft of drafts) {
+    if (draft.plugin_id || draft.status === 'saved') continue;
+    items.push({ key: `draft:${draft.id}`, displayName: draft.name || draft.messages[0]?.content || '…',
+      description: draft.description, category: pluginProductCategory(`${draft.name} ${draft.description}`),
+      status: 'draft', runtimeDraft: draft, contributionCount: draft.source_manifest?.actions?.length ?? 0,
+      updatedAtMs: draft.updated_at });
   }
   return items.sort((left, right) => right.updatedAtMs - left.updatedAtMs);
 }

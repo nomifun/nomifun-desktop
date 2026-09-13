@@ -42,7 +42,7 @@ use nomifun_js_runtime::{
     RuntimeSwitchParticipant, SystemNodeRuntimeProbePort,
     VersionedRuntimeSelection,
 };
-use nomifun_plugin_service::PluginRouterState;
+use nomifun_plugin_platform::application::PluginRouterState;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -105,13 +105,13 @@ pub(crate) async fn build_javascript_runtime_state(
     plugin: PluginRouterState,
     plugin_runtime:
         Arc<super::plugin_platform::NomiCorePluginRuntimeParticipant>,
-    miniapp_application:
-        Arc<nomifun_miniapp_platform::MiniAppM1ApplicationService>,
+    release_runtime:
+        Arc<nomifun_plugin_platform::runtime::PluginRuntimeM1ApplicationService>,
 ) -> anyhow::Result<JavaScriptRuntimeRouterState> {
     let participant = Arc::new(NomiCoreRuntimeSwitchParticipant {
         plugin,
         plugin_runtime,
-        miniapp_application,
+        release_runtime,
         foundation_root: foundation.foundation_root,
         host_root: foundation.host_root,
     });
@@ -424,8 +424,8 @@ struct NomiCoreRuntimeSwitchParticipant {
     plugin: PluginRouterState,
     plugin_runtime:
         Arc<super::plugin_platform::NomiCorePluginRuntimeParticipant>,
-    miniapp_application:
-        Arc<nomifun_miniapp_platform::MiniAppM1ApplicationService>,
+    release_runtime:
+        Arc<nomifun_plugin_platform::runtime::PluginRuntimeM1ApplicationService>,
     foundation_root: PathBuf,
     host_root: PathBuf,
 }
@@ -480,12 +480,12 @@ impl RuntimeSwitchParticipant for NomiCoreRuntimeSwitchParticipant {
                 running.join(", ")
             )));
         }
-        self.miniapp_application
+        self.release_runtime
             .shutdown_service_runtime(owner_user_id)
             .await
             .map_err(|error| {
                 JavaScriptRuntimeError::SwitchBusy(format!(
-                    "MiniApp Service Hosts could not be stopped: {error}"
+                    "Plugin Service Hosts could not be stopped: {error}"
                 ))
             })?;
         self.plugin_runtime
@@ -545,7 +545,7 @@ impl RuntimeSwitchParticipant for NomiCoreRuntimeSwitchParticipant {
                 .await?,
         );
         let miniapp_service_validation = self
-            .miniapp_application
+            .release_runtime
             .validate_service_runtime_candidate(owner_user_id, candidate)
             .await;
         results.push(miniapp_service_participant_result(

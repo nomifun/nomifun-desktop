@@ -69,7 +69,7 @@ pub(crate) fn build(services: &AppServices) -> anyhow::Result<NomiCoreBuiltinPla
     let wave3 = super::agent_wave3_host::registrations(
         Arc::clone(&services.creation_service),
         Arc::clone(&services.workshop_service),
-        Arc::clone(&services.miniapp_application),
+        Arc::clone(&services.plugin_runtime),
     )
     .map_err(anyhow::Error::msg)?;
     replace_package_registrations(&mut registrations, wave3);

@@ -5,7 +5,7 @@
  */
 
 import React, { Suspense, useCallback, useEffect, useRef, useState } from 'react';
-import MiniAppPinnedEntries from '@/renderer/pages/miniApps/MiniAppPinnedEntries';
+import PluginPinnedEntries from '@/renderer/pages/plugins/PluginPinnedEntries';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
@@ -41,7 +41,6 @@ import {
   SiderCustomerServiceEntry,
   SiderKnowledgeEntry,
   SiderMcpEntry,
-  SiderMiniAppsEntry,
   SiderModelHubEntry,
   SiderNomiEntry,
   SiderOpenCapabilitiesEntry,
@@ -204,7 +203,6 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
     preloadCreativeStudio(target);
     navTo(target);
   };
-  const handleMiniAppsClick = () => navTo('/mini-apps');
   const handleCustomerServiceClick = () => navTo('/customer-service');
   const handleAgentClick = () => navTo('/agent');
   const handleSkillsClick = () => navTo('/skills');
@@ -369,15 +367,6 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
                 onClick={handleCreativeStudioClick}
               />
             </div>
-            {/* 小程序 (Mini-apps) — solidified single-file web tools, opened instantly */}
-            <SiderMiniAppsEntry
-              isMobile={isMobile}
-              isActive={pathname.startsWith('/mini-apps')}
-              collapsed={collapsed}
-              siderTooltipProps={siderTooltipProps}
-              onClick={handleMiniAppsClick}
-            />
-            <MiniAppPinnedEntries collapsed={collapsed} />
             {/* 数据空间 — data & storage (文件管理 reserved for later) */}
             <SiderSectionHeader label={t('common.siderSection.data')} collapsed={collapsed} />
             {/* Knowledge base */}
@@ -430,15 +419,14 @@ const Sider: React.FC<SiderProps> = ({ onSessionClick, collapsed = false }) => {
               siderTooltipProps={siderTooltipProps}
               onClick={handleSkillsClick}
             />
-            {isDesktopShell() && (
-              <SiderPluginEntry
+            <SiderPluginEntry
                 isMobile={isMobile}
                 isActive={pathname.startsWith('/plugins')}
                 collapsed={collapsed}
                 siderTooltipProps={siderTooltipProps}
                 onClick={handlePluginClick}
               />
-            )}
+            <PluginPinnedEntries collapsed={collapsed} />
             {/* MCP — MCP tool server configuration */}
             <SiderMcpEntry
               isMobile={isMobile}

@@ -6253,12 +6253,10 @@ dependencies = [
  "nomifun-js-runtime",
  "nomifun-knowledge",
  "nomifun-mcp",
- "nomifun-miniapp-platform",
  "nomifun-model-invoke",
  "nomifun-net",
  "nomifun-office",
  "nomifun-plugin-platform",
- "nomifun-plugin-service",
  "nomifun-public",
  "nomifun-realtime",
  "nomifun-requirement",
@@ -6899,32 +6897,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nomifun-miniapp-platform"
-version = "0.7.6"
-dependencies = [
- "async-trait",
- "getrandom 0.2.17",
- "hex",
- "junction",
- "libc",
- "nomi-process-runtime",
- "nomifun-agent-contracts",
- "nomifun-api-types",
- "nomifun-common",
- "nomifun-db",
- "nomifun-js-runtime",
- "rusqlite",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.19",
- "tokio",
- "tracing",
- "uuid",
- "which 7.0.3",
-]
-
-[[package]]
 name = "nomifun-model-invoke"
 version = "0.7.6"
 dependencies = [
@@ -6992,40 +6964,32 @@ name = "nomifun-plugin-platform"
 version = "0.7.6"
 dependencies = [
  "async-trait",
+ "getrandom 0.2.17",
  "hex",
- "nomifun-agent-contracts",
- "nomifun-common",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 2.0.19",
- "tokio",
- "unicode-normalization",
- "uuid",
- "walkdir",
- "zip 2.4.2",
-]
-
-[[package]]
-name = "nomifun-plugin-service"
-version = "0.7.6"
-dependencies = [
- "async-trait",
- "hex",
+ "junction",
+ "libc",
+ "nomi-process-runtime",
  "nomifun-agent-contracts",
  "nomifun-api-types",
+ "nomifun-common",
  "nomifun-db",
  "nomifun-js-authoring",
  "nomifun-js-host",
- "nomifun-plugin-platform",
+ "nomifun-js-runtime",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "sqlx",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "tracing",
+ "unicode-normalization",
  "uuid",
+ "walkdir",
+ "which 7.0.3",
+ "zip 2.4.2",
 ]
 
 [[package]]

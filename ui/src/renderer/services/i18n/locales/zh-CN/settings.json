@@ -1253,7 +1253,7 @@
   },
   "runtimeManager": {
     "title": "JavaScript 运行时",
-    "subtitle": "管理 NomiFun Plugin 和 MiniApp 使用的 Node.js 运行时。",
+    "subtitle": "管理 NomiFun Plugin 和 PluginRuntime 使用的 Node.js 运行时。",
     "railTitle": "JavaScript 运行时",
     "desktopOnlyTitle": "仅支持桌面端",
     "desktopOnlyBody": "Node.js 运行时路径和本机进程只在 NomiFun 桌面端可管理。",
@@ -1297,7 +1297,7 @@
       "description": "候选运行时验证存在局部结果，请选择继续使用新运行时或恢复原运行时。",
       "noParticipants": "没有可展示的参与者结果。",
       "participantPlugin": "Plugin",
-      "participantMiniApp": "MiniApp Service",
+      "participantPluginRuntime": "PluginRuntime Service",
       "participantBuild": "构建基础",
       "passed": "通过",
       "failed": "失败",

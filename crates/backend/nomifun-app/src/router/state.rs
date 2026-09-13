@@ -33,7 +33,7 @@ use nomifun_agent_platform::{
     KernelCatalogProvider,
 };
 use nomifun_api_types::{AgentResolvedSnapshot, TerminalExitEvent};
-use nomifun_miniapp_platform::MiniAppServiceRuntimeBinding;
+use nomifun_plugin_platform::runtime::PluginRuntimeServiceRuntimeBinding;
 use nomifun_auth::extract_token_from_ws_headers;
 use nomifun_channel::ChannelRouterState;
 use nomifun_common::{AppError, OnConversationDelete, OnTerminalDelete};
@@ -116,10 +116,10 @@ pub struct ModuleStates {
     /// Creative Studio project, asset, template, and archive domain.
     pub workshop: WorkshopRouterState,
     /// Phase M1 MiniApp Library and Workshop.
-    pub miniapp: super::miniapp_m1::MiniAppM1RouterState,
+    pub miniapp: super::plugin_runtime::PluginRuntimeM1RouterState,
     /// Phase N1 Plugin Library and lifecycle product state. Capability
     /// execution remains owned by the shared Kernel registry.
-    pub plugin: nomifun_plugin_service::PluginRouterState,
+    pub plugin: nomifun_plugin_platform::application::PluginRouterState,
     /// Installation-global Node Runtime selection and managed provisioning.
     pub(crate) javascript_runtime:
         super::javascript_runtime::JavaScriptRuntimeRouterState,
@@ -550,69 +550,69 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
             javascript_runtime_foundation,
             plugin_state.clone(),
             plugin_runtime_participant,
-            services.miniapp_application.clone(),
+            services.plugin_runtime.clone(),
         )
         .await
         .unwrap_or_else(|error| {
             panic!("JavaScript Runtime Manager composition failed: {error:#}")
         });
     let service_registry = Arc::new(
-        nomifun_miniapp_platform::MiniAppServiceModuleRegistry::new(
+        nomifun_plugin_platform::runtime::PluginRuntimeServiceModuleRegistry::new(
             services.data_dir.join("miniapp-m1").join("release"),
         )
         .unwrap_or_else(|error| {
-            panic!("MiniApp Service module registry composition failed: {error}")
+            panic!("Plugin Service module registry composition failed: {error}")
         }),
     );
     let service_storage = Arc::new(
-        nomifun_miniapp_platform::SqliteMiniAppManagedStorage::new(
+        nomifun_plugin_platform::runtime::SqlitePluginRuntimeManagedStorage::new(
             services.data_dir.join("miniapp-m1").join("managed"),
             services.database.pool().clone(),
         )
         .unwrap_or_else(|error| {
-            panic!("MiniApp Service managed storage composition failed: {error}")
+            panic!("Plugin Service managed storage composition failed: {error}")
         }),
     );
     let service_runtime = Arc::new(
-        nomifun_miniapp_platform::ProductionMiniAppServiceRuntimeBinding::new_with_storage(
+        nomifun_plugin_platform::runtime::ProductionPluginRuntimeServiceRuntimeBinding::new_with_storage(
             runtime_authority,
             service_registry,
             Some(service_storage),
-            nomifun_miniapp_platform::DEFAULT_MAX_ACTIVE_SERVICE_HOSTS,
+            nomifun_plugin_platform::runtime::DEFAULT_MAX_ACTIVE_SERVICE_HOSTS,
         )
         .unwrap_or_else(|error| {
-            panic!("MiniApp Service runtime composition failed: {error}")
+            panic!("Plugin Service runtime composition failed: {error}")
         }),
     );
     services
-        .miniapp_application
+        .plugin_runtime
         .install_service_runtime(service_runtime.clone())
         .await;
     services
-        .miniapp_application
+        .plugin_runtime
         .reconcile_source_mutations()
         .await
         .unwrap_or_else(|error| {
-            panic!("MiniApp Source mutation startup reconciliation failed: {error}")
+            panic!("Plugin Source mutation startup reconciliation failed: {error}")
         });
     if let Err(error) = services
-        .miniapp_application
+        .plugin_runtime
         .reconcile_pending_deletions(services.authoritative_user_id.as_ref())
         .await
     {
         tracing::warn!(
             error = %error,
-            "MiniApp permanent-delete startup reconciliation left durable failures"
+            "Plugin permanent-delete startup reconciliation left durable failures"
         );
     }
     if let Err(error) = services
-        .miniapp_application
+        .plugin_runtime
         .reconcile_all_service_runtime(services.authoritative_user_id.as_ref())
         .await
     {
         tracing::warn!(
             error = %error,
-            "MiniApp Service startup reconciliation inventory failed"
+            "Plugin Service startup reconciliation inventory failed"
         );
     }
     let service_runtime_for_maintenance = service_runtime;
@@ -630,7 +630,7 @@ pub async fn build_module_states(services: &AppServices) -> (ModuleStates, Chann
                     {
                         tracing::warn!(
                             error = %error,
-                            "MiniApp Service runtime maintenance failed"
+                            "Plugin Service runtime maintenance failed"
                         );
                     }
                 }
@@ -788,7 +788,7 @@ async fn build_nomi_core_agent_api_state(
     runtime: Arc<dyn nomifun_js_runtime::CommittedRuntimeProvider>,
 ) -> anyhow::Result<(
     NomiCoreAgentApiState,
-    nomifun_plugin_service::PluginRouterState,
+    nomifun_plugin_platform::application::PluginRouterState,
     Arc<super::plugin_platform::NomiCorePluginRuntimeParticipant>,
     Arc<super::nomi_core_wave4::NomiCoreWave4Owners>,
 )> {
@@ -880,11 +880,11 @@ async fn build_nomi_core_agent_api_state(
     );
     let miniapp_catalog = Arc::new(SharedMiniAppCatalogPublications::new());
     services
-        .miniapp_application
+        .plugin_runtime
         .install_catalog_sink(miniapp_catalog.clone())
         .await;
     services
-        .miniapp_application
+        .plugin_runtime
         .hydrate_catalog_publications(services.authoritative_user_id.as_ref())
         .await
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -1003,7 +1003,7 @@ async fn build_nomi_core_agent_api_state(
                 Arc::clone(&mcp_server_repository),
                 resource_bindings.clone(),
                 robot_owner,
-                Arc::clone(&services.miniapp_application),
+                Arc::clone(&services.plugin_runtime),
             ),
         ))?;
     let remote_repository: Arc<dyn IRemoteBindingRepository> = Arc::new(
@@ -1889,13 +1889,13 @@ pub fn build_workshop_state(services: &AppServices) -> WorkshopRouterState {
 /// facade composed by `AppServices`.
 pub fn build_miniapp_state(
     services: &AppServices,
-) -> super::miniapp_m1::MiniAppM1RouterState {
-    super::miniapp_m1::MiniAppM1RouterState::new(
-        services.miniapp_application.clone(),
+) -> super::plugin_runtime::PluginRuntimeM1RouterState {
+    super::plugin_runtime::PluginRuntimeM1RouterState::new(
+        services.plugin_runtime.clone(),
     )
-    .with_product(super::miniapp_product::MiniAppProductService::new(
-        nomifun_db::MiniAppProductDocuments::new(services.database.pool().clone()),
-        services.miniapp_application.clone(),
+    .with_product(super::plugin_product::PluginRuntimeProductService::new(
+        nomifun_db::PluginProductDocuments::new(services.database.pool().clone()),
+        services.plugin_runtime.clone(),
         services.model_invoke_service.clone(),
         services.data_dir.clone(),
     ))

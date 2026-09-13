@@ -15,7 +15,7 @@ use nomifun_agent_domain_wave3::{Wave3OwnerBindings, composed_host_port};
 use nomifun_agent_kernel::PluginRegistration;
 use nomifun_ai_agent::NomiPlatformBuiltinToolSchemaResolver;
 use nomifun_creation::CreationService;
-use nomifun_miniapp_platform::MiniAppM1ApplicationService;
+use nomifun_plugin_platform::runtime::PluginRuntimeM1ApplicationService;
 use nomifun_workshop::WorkshopService;
 
 use super::agent_wave3_creation_host::Wave3CreationHost;
@@ -51,7 +51,7 @@ pub(crate) fn approved_capability_ids() -> BTreeSet<CapabilityId> {
 pub(crate) fn registrations(
     creation: Arc<CreationService>,
     workshop: Arc<WorkshopService>,
-    miniapp: Arc<MiniAppM1ApplicationService>,
+    miniapp: Arc<PluginRuntimeM1ApplicationService>,
 ) -> Result<Vec<PluginRegistration>, String> {
     let workshop_host = NomiWave3WorkshopHost::new(
         Arc::clone(&workshop),

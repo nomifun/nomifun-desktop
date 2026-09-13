@@ -167,7 +167,7 @@ async fn installation_token_is_limited_to_headless_product_control_planes() {
     for path in [
         "/api/javascript-runtime/status",
         "/api/plugins",
-        "/api/miniapps",
+        "/api/plugins/runtimes",
     ] {
         let response = router
             .clone()
@@ -191,7 +191,7 @@ async fn installation_token_is_limited_to_headless_product_control_planes() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/plugin-projects")
+                .uri("/api/plugins/projects")
                 .header(
                     "authorization",
                     format!("Bearer {installation_token}"),

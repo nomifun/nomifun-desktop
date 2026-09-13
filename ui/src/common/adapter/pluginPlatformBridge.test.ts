@@ -165,17 +165,17 @@ function installFetchFixture(): void {
     const body = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined;
     calls.push({ method, path, body });
 
-    const data = path === '/api/plugin-authoring/generate'
+    const data = path === '/api/plugins/authoring/generate'
       ? generatedDraft
       : path.endsWith('/authoring-context')
         ? authoringContext
-        : path === '/api/plugin-imports/inspect'
+        : path === '/api/plugins/imports/inspect'
           ? importInspection
           : path.endsWith('/share')
       ? exportOperation
       : path === '/api/plugins'
         ? library
-        : path === '/api/plugin-imports' || path.includes('/api/plugin-projects/')
+        : path === '/api/plugins/imports' || path.includes('/api/plugins/projects/')
         ? projectDetail
         : path.endsWith('/data')
           ? undefined
@@ -207,9 +207,9 @@ describe('Plugin Platform bridge', () => {
     expect(await plugins.getAuthoringContext.invoke({ project_id: PROJECT_ID })).toEqual(authoringContext);
     expect(await plugins.inspectImport.invoke({ source_path: 'C:\\imports\\plugin.zip' })).toEqual(importInspection);
     expect(calls.map(({ method, path }) => ({ method, path }))).toEqual([
-      { method: 'POST', path: '/api/plugin-authoring/generate' },
-      { method: 'GET', path: `/api/plugin-projects/${PROJECT_ID}/authoring-context` },
-      { method: 'POST', path: '/api/plugin-imports/inspect' },
+      { method: 'POST', path: '/api/plugins/authoring/generate' },
+      { method: 'GET', path: `/api/plugins/projects/${PROJECT_ID}/authoring-context` },
+      { method: 'POST', path: '/api/plugins/imports/inspect' },
     ]);
   });
 
@@ -226,8 +226,8 @@ describe('Plugin Platform bridge', () => {
     expect(mount.summary.current?.artifact_id).toBe(ARTIFACT_ID);
     expect(calls.map(({ method, path }) => ({ method, path }))).toEqual([
       { method: 'GET', path: '/api/plugins' },
-      { method: 'GET', path: `/api/plugin-projects/${PROJECT_ID}` },
-      { method: 'GET', path: `/api/plugin-mounts/${MOUNT_ID}` },
+      { method: 'GET', path: `/api/plugins/projects/${PROJECT_ID}` },
+      { method: 'GET', path: `/api/plugins/installations/${MOUNT_ID}` },
     ]);
   });
 
@@ -258,10 +258,10 @@ describe('Plugin Platform bridge', () => {
     });
 
     expect(calls.map(({ method, path }) => ({ method, path }))).toEqual([
-      { method: 'PUT', path: `/api/plugin-mounts/${MOUNT_ID}/enabled` },
-      { method: 'POST', path: `/api/plugin-mounts/${MOUNT_ID}/retry` },
-      { method: 'POST', path: `/api/plugin-mounts/${MOUNT_ID}/restore` },
-      { method: 'POST', path: `/api/plugin-mounts/${MOUNT_ID}/uninstall` },
+      { method: 'PUT', path: `/api/plugins/installations/${MOUNT_ID}/enabled` },
+      { method: 'POST', path: `/api/plugins/installations/${MOUNT_ID}/retry` },
+      { method: 'POST', path: `/api/plugins/installations/${MOUNT_ID}/restore` },
+      { method: 'POST', path: `/api/plugins/installations/${MOUNT_ID}/uninstall` },
     ]);
     expect(calls[0]?.body).toEqual({
       mount_id: MOUNT_ID,
@@ -295,7 +295,7 @@ describe('Plugin Platform bridge', () => {
     expect(calls).toEqual([
       {
         method: 'PUT',
-        path: `/api/plugin-mounts/${MOUNT_ID}/config`,
+        path: `/api/plugins/installations/${MOUNT_ID}/config`,
         body: request,
       },
     ]);
@@ -315,7 +315,7 @@ describe('Plugin Platform bridge', () => {
     expect(calls).toEqual([
       {
         method: 'DELETE',
-        path: `/api/plugin-mounts/${MOUNT_ID}/data`,
+        path: `/api/plugins/installations/${MOUNT_ID}/data`,
         body: request,
       },
     ]);
@@ -336,7 +336,7 @@ describe('Plugin Platform bridge', () => {
     expect(calls).toEqual([
       {
         method: 'DELETE',
-        path: `/api/plugin-projects/${PROJECT_ID}`,
+        path: `/api/plugins/projects/${PROJECT_ID}`,
         body: request,
       },
     ]);
@@ -358,7 +358,7 @@ describe('Plugin Platform bridge', () => {
     expect(calls).toEqual([
       {
         method: 'PUT',
-        path: `/api/plugin-projects/${PROJECT_ID}/source/dependencies`,
+        path: `/api/plugins/projects/${PROJECT_ID}/source/dependencies`,
         body: request,
       },
     ]);
@@ -381,7 +381,7 @@ describe('Plugin Platform bridge', () => {
     expect(calls).toEqual([
       {
         method: 'PUT',
-        path: `/api/plugin-projects/${PROJECT_ID}/auto-apply`,
+        path: `/api/plugins/projects/${PROJECT_ID}/auto-apply`,
         body: request,
       },
     ]);
@@ -405,7 +405,7 @@ describe('Plugin Platform bridge', () => {
     expect(calls).toEqual([
       {
         method: 'POST',
-        path: `/api/plugin-projects/${PROJECT_ID}/share`,
+        path: `/api/plugins/projects/${PROJECT_ID}/share`,
         body: request,
       },
     ]);
@@ -427,7 +427,7 @@ describe('Plugin Platform bridge', () => {
     expect(calls).toEqual([
       {
         method: 'POST',
-        path: '/api/plugin-imports',
+        path: '/api/plugins/imports',
         body: request,
       },
     ]);

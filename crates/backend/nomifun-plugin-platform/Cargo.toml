@@ -7,6 +7,16 @@ repository.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+getrandom.workspace = true
+libc.workspace = true
+nomifun-api-types.workspace = true
+nomifun-db.workspace = true
+nomifun-js-authoring.workspace = true
+nomifun-js-host.workspace = true
+nomifun-js-runtime.workspace = true
+nomi-process-runtime.workspace = true
+rusqlite = { workspace = true, features = ["hooks"] }
+tracing.workspace = true
 hex.workspace = true
 nomifun-agent-contracts.workspace = true
 nomifun-common.workspace = true
@@ -21,4 +31,9 @@ walkdir.workspace = true
 zip.workspace = true
 
 [dev-dependencies]
+sqlx.workspace = true
 tempfile.workspace = true
+which.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+junction = "1"

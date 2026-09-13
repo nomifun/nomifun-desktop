@@ -5129,33 +5129,9 @@ impl IMiniAppM1Repository for SqliteMiniAppM1Repository {
         .execute(&mut *tx)
         .await
         .map_err(query_error)?;
-        // Authoring documents are owned by this product too. Remove them and
-        // its library membership in the same finalized deletion transaction.
-        sqlx::query(
-            "DELETE FROM miniapp_product_documents
-             WHERE owner_user_id = ? AND document_key LIKE 'draft:%'
-               AND json_extract(content_json, '$.miniapp_id') = ?",
-        )
-        .bind(&params.owner_user_id)
-        .bind(&params.miniapp_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(query_error)?;
-        let item_path = format!("$.items.\"{}\"", params.miniapp_id);
-        sqlx::query(
-            "UPDATE miniapp_product_documents
-             SET content_json = json_set(json_remove(content_json, ?), '$.revision', revision + 1),
-                 revision = revision + 1, updated_at = ?
-             WHERE owner_user_id = ? AND document_key = 'library'
-               AND json_type(content_json, ?) IS NOT NULL",
-        )
-        .bind(&item_path)
-        .bind(params.finished_at_ms)
-        .bind(&params.owner_user_id)
-        .bind(&item_path)
-        .execute(&mut *tx)
-        .await
-        .map_err(query_error)?;
+        crate::plugin_product_documents::remove_plugin_documents(
+            &mut tx, &params.owner_user_id, &params.miniapp_id, params.finished_at_ms,
+        ).await?;
         let deleted = sqlx::query(
             "DELETE FROM miniapp_products
              WHERE owner_user_id = ? AND miniapp_id = ? AND lifecycle = 'deleting'",

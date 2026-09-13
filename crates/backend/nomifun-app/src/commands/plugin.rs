@@ -8,8 +8,8 @@ use std::process::ExitCode;
 
 use nomifun_api_types::{
     ApiResponse, ApplyPluginCandidateRequest, ApplyPluginTargetDto,
-    BuildPluginProjectRequest, ErrorResponse, MiniAppLibraryResponseDto,
-    DeletePluginDataRequest, MiniAppWorkshopDto, PluginDetailDto,
+    BuildPluginProjectRequest, ErrorResponse, PluginRuntimeLibraryResponseDto,
+    DeletePluginDataRequest, PluginRuntimeWorkshopDto, PluginDetailDto,
     PluginLibraryResponseDto, PluginProjectDetailDto, RetryPluginRequest,
     RestorePluginPreviousRequest, SetPluginAutoApplyRequest, SetPluginEnabledRequest,
     SharePluginRequest, TestPluginCandidateRequest, UninstallPluginRequest,
@@ -20,8 +20,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::cli::{
-    Cli, HeadlessConnectionArgs, MiniAppCommand, MiniAppListArgs,
-    MiniAppShowArgs, PluginCandidateApplyArgs, PluginCandidateCommand,
+    Cli, HeadlessConnectionArgs, PluginRuntimeCommand, PluginRuntimeListArgs,
+    PluginRuntimeShowArgs, PluginCandidateApplyArgs, PluginCandidateCommand,
     PluginCandidateDiscardArgs,
     PluginAutoApplyCommand, PluginCandidateShowArgs, PluginCommand, PluginImportArgs,
     PluginListArgs, PluginMountArgs, PluginMountCommand, PluginProjectArgs,
@@ -39,17 +39,13 @@ pub async fn run_plugin(cli: &Cli, operation: &PluginCommand) -> ExitCode {
     finish(run_plugin_inner(cli, operation).await)
 }
 
-/// Execute one headless MiniApp command and map the result to the documented
-/// `0/1/2` process contract.
-pub async fn run_miniapp(operation: &MiniAppCommand) -> ExitCode {
-    finish(run_miniapp_inner(operation).await)
-}
 
 async fn run_plugin_inner(
     cli: &Cli,
     operation: &PluginCommand,
 ) -> Result<Value, CliFailure> {
     match operation {
+        PluginCommand::Runtime { operation } => run_miniapp_inner(operation).await,
         PluginCommand::List(args) => run_plugin_list(args).await,
         PluginCommand::Show(args) => run_plugin_show(args).await,
         PluginCommand::Project { operation } => match operation {
@@ -85,11 +81,11 @@ async fn run_plugin_inner(
 }
 
 async fn run_miniapp_inner(
-    operation: &MiniAppCommand,
+    operation: &PluginRuntimeCommand,
 ) -> Result<Value, CliFailure> {
     match operation {
-        MiniAppCommand::List(args) => run_miniapp_list(args).await,
-        MiniAppCommand::Show(args) => run_miniapp_show(args).await,
+        PluginRuntimeCommand::List(args) => run_miniapp_list(args).await,
+        PluginRuntimeCommand::Show(args) => run_miniapp_show(args).await,
     }
 }
 
@@ -104,7 +100,7 @@ async fn run_plugin_show(args: &PluginShowArgs) -> Result<Value, CliFailure> {
     let mount_id = checked_segment(&args.mount_id, "mount_id")?;
     let client = HeadlessClient::new(&args.connection)?;
     let response = client
-        .get_api::<PluginDetailDto>(&format!("/api/plugin-mounts/{mount_id}"))
+        .get_api::<PluginDetailDto>(&format!("/api/plugins/installations/{mount_id}"))
         .await?;
     to_value(response)
 }
@@ -116,7 +112,7 @@ async fn run_candidate_show(
     let client = HeadlessClient::new(&args.connection)?;
     let response = client
         .get_api::<PluginProjectDetailDto>(&format!(
-            "/api/plugin-projects/{project_id}"
+            "/api/plugins/projects/{project_id}"
         ))
         .await?;
     to_value(response)
@@ -140,7 +136,7 @@ async fn run_candidate_discard(
     };
     let response: ApiResponse<PluginProjectDetailDto> = client
         .post_api(
-            &format!("/api/plugin-projects/{project_id}/candidate/discard"),
+            &format!("/api/plugins/projects/{project_id}/candidate/discard"),
             &request,
         )
         .await?;
@@ -220,7 +216,7 @@ async fn run_build(args: &PluginProjectArgs) -> Result<Value, CliFailure> {
     };
     let response: ApiResponse<PluginProjectDetailDto> = client
         .post_api(
-            &format!("/api/plugin-projects/{project_id}/build"),
+            &format!("/api/plugins/projects/{project_id}/build"),
             &request,
         )
         .await?;
@@ -264,7 +260,7 @@ async fn run_test(args: &PluginTestArgs) -> Result<Value, CliFailure> {
     };
     let response: ApiResponse<PluginProjectDetailDto> = client
         .post_api(
-            &format!("/api/plugin-projects/{project_id}/test"),
+            &format!("/api/plugins/projects/{project_id}/test"),
             &request,
         )
         .await?;
@@ -289,7 +285,7 @@ async fn run_import(args: &PluginImportArgs) -> Result<Value, CliFailure> {
         expected_project_revision: None,
     };
     let response: ApiResponse<PluginProjectDetailDto> =
-        client.post_api("/api/plugin-imports", &request).await?;
+        client.post_api("/api/plugins/imports", &request).await?;
     to_value(response)
 }
 
@@ -341,7 +337,7 @@ async fn run_share_export(args: &PluginShareExportArgs) -> Result<Value, CliFail
         }
     };
     let response: ApiResponse<nomifun_api_types::DurableOperationDetailDto> = client
-        .post_api(&format!("/api/plugin-projects/{project_id}/share"), &request)
+        .post_api(&format!("/api/plugins/projects/{project_id}/share"), &request)
         .await?;
     to_value(response)
 }
@@ -394,7 +390,7 @@ async fn run_auto_apply(
         },
     };
     let response: ApiResponse<PluginProjectDetailDto> = client
-        .put_api(&format!("/api/plugin-projects/{project_id}/auto-apply"), &request)
+        .put_api(&format!("/api/plugins/projects/{project_id}/auto-apply"), &request)
         .await?;
     to_value(response)
 }
@@ -446,7 +442,7 @@ async fn run_apply(args: &PluginCandidateApplyArgs) -> Result<Value, CliFailure>
     };
     let response: ApiResponse<PluginDetailDto> = client
         .post_api(
-            &format!("/api/plugin-projects/{project_id}/apply"),
+            &format!("/api/plugins/projects/{project_id}/apply"),
             &request,
         )
         .await?;
@@ -471,7 +467,7 @@ async fn run_restore(args: &PluginMountArgs) -> Result<Value, CliFailure> {
     };
     let response: ApiResponse<PluginDetailDto> = client
         .post_api(
-            &format!("/api/plugin-mounts/{mount_id}/restore"),
+            &format!("/api/plugins/installations/{mount_id}/restore"),
             &request,
         )
         .await?;
@@ -496,7 +492,7 @@ async fn run_set_enabled(
     };
     let response: ApiResponse<PluginDetailDto> = client
         .put_api(
-            &format!("/api/plugin-mounts/{mount_id}/enabled"),
+            &format!("/api/plugins/installations/{mount_id}/enabled"),
             &request,
         )
         .await?;
@@ -517,7 +513,7 @@ async fn run_retry_mount(args: &PluginMountArgs) -> Result<Value, CliFailure> {
     };
     let response: ApiResponse<PluginDetailDto> = client
         .post_api(
-            &format!("/api/plugin-mounts/{mount_id}/retry"),
+            &format!("/api/plugins/installations/{mount_id}/retry"),
             &request,
         )
         .await?;
@@ -538,7 +534,7 @@ async fn run_uninstall_mount(args: &PluginMountArgs) -> Result<Value, CliFailure
     };
     let response: ApiResponse<PluginDetailDto> = client
         .post_api(
-            &format!("/api/plugin-mounts/{mount_id}/uninstall"),
+            &format!("/api/plugins/installations/{mount_id}/uninstall"),
             &request,
         )
         .await?;
@@ -564,25 +560,25 @@ async fn run_delete_mount_data(args: &PluginMountArgs) -> Result<Value, CliFailu
     }
     let response: ApiResponse<()> = client
         .delete_api(
-            &format!("/api/plugin-mounts/{mount_id}/data"),
+            &format!("/api/plugins/installations/{mount_id}/data"),
             &request,
         )
         .await?;
     to_value(response)
 }
 
-async fn run_miniapp_list(args: &MiniAppListArgs) -> Result<Value, CliFailure> {
+async fn run_miniapp_list(args: &PluginRuntimeListArgs) -> Result<Value, CliFailure> {
     let client = HeadlessClient::new(&args.connection)?;
-    let response: ApiResponse<MiniAppLibraryResponseDto> =
-        client.get_api("/api/miniapps").await?;
+    let response: ApiResponse<PluginRuntimeLibraryResponseDto> =
+        client.get_api("/api/plugins/runtimes").await?;
     to_value(response)
 }
 
-async fn run_miniapp_show(args: &MiniAppShowArgs) -> Result<Value, CliFailure> {
-    let miniapp_id = checked_segment(&args.miniapp_id, "miniapp_id")?;
+async fn run_miniapp_show(args: &PluginRuntimeShowArgs) -> Result<Value, CliFailure> {
+    let miniapp_id = checked_segment(&args.plugin_id, "plugin_id")?;
     let client = HeadlessClient::new(&args.connection)?;
-    let response: ApiResponse<MiniAppWorkshopDto> = client
-        .get_api(&format!("/api/miniapps/{miniapp_id}/workshop"))
+    let response: ApiResponse<PluginRuntimeWorkshopDto> = client
+        .get_api(&format!("/api/plugins/runtimes/{miniapp_id}/workshop"))
         .await?;
     to_value(response)
 }
@@ -592,7 +588,7 @@ async fn fetch_project(
     project_id: &str,
 ) -> Result<PluginProjectDetailDto, CliFailure> {
     let response: ApiResponse<PluginProjectDetailDto> = client
-        .get_api(&format!("/api/plugin-projects/{project_id}"))
+        .get_api(&format!("/api/plugins/projects/{project_id}"))
         .await?;
     require_data(response, "Plugin Project")
 }
@@ -602,7 +598,7 @@ async fn fetch_mount(
     mount_id: &str,
 ) -> Result<PluginDetailDto, CliFailure> {
     let response: ApiResponse<PluginDetailDto> = client
-        .get_api(&format!("/api/plugin-mounts/{mount_id}"))
+        .get_api(&format!("/api/plugins/installations/{mount_id}"))
         .await?;
     require_data(response, "Plugin Mount")
 }

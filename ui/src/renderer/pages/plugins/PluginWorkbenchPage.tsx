@@ -24,12 +24,14 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import HubPageShell from '@/renderer/components/layout/HubPageShell';
-import { isDesktopShell } from '@/renderer/utils/platform';
 import { useArcoMessage } from '@/renderer/utils/ui/useArcoMessage';
 import { useGuidModelSelection } from '@/renderer/pages/guid/hooks/useGuidModelSelection';
 import type { PluginMountBusyAction } from './PluginLibraryView';
 import PluginConfigurationDialog from './PluginConfigurationDialog';
 import type { PluginProjectBusyAction } from './PluginWorkshopView';
+import { pluginRuntimeSetEnabledRequest } from './runtime/model';
+import { pluginRuntimeProduct, type PluginRuntimeDraft, type PluginRuntimeWorkspace } from '@/common/adapter/pluginRuntimeProductBridge';
+import { emptyItem, updatePluginRuntimeWorkspace, MINIAPP_LIBRARY_CHANGED, libraryChanged } from './runtime/libraryState';
 import {
   PluginCandidateApplyModal,
   PluginCandidateTestModal,
@@ -82,6 +84,8 @@ const PluginWorkbenchPage: React.FC = () => {
   const activeTab: WorkbenchTab =
     searchParams.get('tab') === 'workshop' ? 'workshop' : 'library';
   const [library, setLibrary] = useState<PluginLibraryResponse | null>(null);
+  const [runtimeDrafts, setRuntimeDrafts] = useState<PluginRuntimeDraft[]>([]);
+  const [workspace, setWorkspace] = useState<PluginRuntimeWorkspace>({revision: 0, collections: [], items: {}});
   const [loading, setLoading] = useState(true);
   const [failure, setFailure] = useState<PluginLoadFailure | null>(null);
   const [selectedMountId, setSelectedMountId] = useState<PluginMountId | null>(null);
@@ -114,7 +118,6 @@ const PluginWorkbenchPage: React.FC = () => {
   const [agentUsage, setAgentUsage] = useState<PluginAgentUsage[]>([]);
   const mountLoadSequence = useRef(0);
   const projectLoadSequence = useRef(0);
-  const desktop = isDesktopShell();
 
   const setActiveTab = useCallback(
     (tab: WorkbenchTab) => {
@@ -127,19 +130,12 @@ const PluginWorkbenchPage: React.FC = () => {
   );
 
   const refreshLibrary = useCallback(async () => {
-    if (!desktop) {
-      setLoading(false);
-      setFailure({
-        kind: 'unavailable',
-        message: t('pluginWorkbench.states.desktopOnlyBody'),
-      });
-      return;
-    }
-
     setLoading(true);
     try {
-      const next = await ipcBridge.plugins.list.invoke();
+      const [next, drafts, organization] = await Promise.all([ipcBridge.plugins.list.invoke(), pluginRuntimeProduct.drafts.invoke(), pluginRuntimeProduct.workspace.invoke()]);
       setLibrary(next);
+      setRuntimeDrafts(drafts);
+      setWorkspace(organization);
       setFailure(null);
       setSelectedMountId((current) => {
         if (current && next.plugins.some((plugin) => plugin.mount_id === current)) {
@@ -159,11 +155,19 @@ const PluginWorkbenchPage: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [desktop, t]);
+  }, []);
 
   useEffect(() => {
     void refreshLibrary();
+    window.addEventListener(MINIAPP_LIBRARY_CHANGED, refreshLibrary);
+    return () => window.removeEventListener(MINIAPP_LIBRARY_CHANGED, refreshLibrary);
   }, [refreshLibrary]);
+
+  const linkedPluginId = searchParams.get('plugin');
+  useEffect(() => {
+    const mount = library?.plugins.find((item) => item.mount_id === linkedPluginId);
+    if (mount) { setSelectedMountId(mount.mount_id); setSurface('detail'); }
+  }, [linkedPluginId, library]);
 
   const loadMountDetail = useCallback(async (mountId: PluginMountId) => {
     const sequence = ++mountLoadSequence.current;
@@ -618,11 +622,19 @@ const PluginWorkbenchPage: React.FC = () => {
   );
 
   const productItems = useMemo(
-    () => (library ? pluginProductItems(library).filter((item) => pluginProductMatches(item, searchQuery)) : []),
-    [library, searchQuery]
+    () => (library ? pluginProductItems(library, runtimeDrafts).filter((item) => pluginProductMatches(item, searchQuery)) : []),
+    [library, runtimeDrafts, searchQuery]
   );
 
   const openProductItem = useCallback((item: PluginProductItem) => {
+    if (item.runtimeDraft && !item.runtime?.releases.active) {
+      navigate(`/plugins/create/${item.runtimeDraft.id}`);
+      return;
+    }
+    if (item.runtime) {
+      navigate(`/plugins/run/${item.runtime.plugin_id}`);
+      return;
+    }
     if (item.mount) {
       setSurface('detail');
       setActiveTab('library');
@@ -640,22 +652,7 @@ const PluginWorkbenchPage: React.FC = () => {
       setCreatorMessages([]);
       setAiDraft(null);
     }
-  }, [selectedMountId, setActiveTab]);
-
-  const runAiAuthoringRef = useRef<((requirement: string) => Promise<void>) | null>(null);
-
-  const openFreshCreator = useCallback((requirement = '') => {
-    setSurface('creator');
-    setActiveTab('workshop');
-    setSelectedProjectId(null);
-    setProjectDetail(null);
-    setProjectMutationFailure(null);
-    setAiDraft(null);
-    setCreatorMessages([]);
-    if (requirement.trim()) {
-      window.setTimeout(() => void runAiAuthoringRef.current?.(requirement.trim()), 0);
-    }
-  }, [setActiveTab]);
+  }, [navigate, selectedMountId, setActiveTab]);
 
   const runAiAuthoring = useCallback(async (requirement: string) => {
     const normalized = requirement.trim();
@@ -764,16 +761,23 @@ const PluginWorkbenchPage: React.FC = () => {
     t,
   ]);
 
-  runAiAuthoringRef.current = runAiAuthoring;
 
   const toggleProductItem = useCallback(async (item: PluginProductItem, enabled: boolean) => {
-    if (!item.mount || homeBusyMountId) return;
-    setHomeBusyMountId(item.mount.mount_id);
+    if ((!item.mount && !item.runtime) || homeBusyMountId) return;
+    setHomeBusyMountId(item.key);
     try {
-      const detail = await ipcBridge.plugins.getMount.invoke({ mount_id: item.mount.mount_id });
-      await ipcBridge.plugins.setEnabled.invoke(setPluginEnabledRequest(detail, enabled));
+      if (item.runtime) {
+        const detail = await ipcBridge.pluginRuntimes.getWorkshop.invoke({ plugin_id: item.runtime.plugin_id });
+        const request = pluginRuntimeSetEnabledRequest(detail, enabled);
+        if (!request) throw new Error(t('pluginWorkbench.states.errorBody'));
+        await ipcBridge.pluginRuntimes.setEnabled.invoke(request);
+      } else if (item.mount) {
+        const detail = await ipcBridge.plugins.getMount.invoke({ mount_id: item.mount.mount_id });
+        await ipcBridge.plugins.setEnabled.invoke(setPluginEnabledRequest(detail, enabled));
+      }
       message.success(t(enabled ? 'pluginWorkbench.messages.enabled' : 'pluginWorkbench.messages.disabled'));
       await refreshLibrary();
+      libraryChanged();
     } catch (error) {
       setMutationFailure(pluginLoadFailure(error, 'resource'));
     } finally {
@@ -800,14 +804,9 @@ const PluginWorkbenchPage: React.FC = () => {
   const backToPluginHome = useCallback(() => {
     setSurface('home');
     setActiveTab('library');
-  }, [setActiveTab]);
+    if (searchParams.has('plugin')) { const next = new URLSearchParams(searchParams); next.delete('plugin'); next.delete('tab'); setSearchParams(next, {replace: true}); }
+  }, [setActiveTab, searchParams, setSearchParams]);
 
-  const desktopOnlyState = !desktop ? (
-    <PluginStatePanel
-      title={t('pluginWorkbench.states.desktopOnlyTitle')}
-      body={t('pluginWorkbench.states.desktopOnlyBody')}
-    />
-  ) : null;
 
   return (
     <HubPageShell
@@ -817,10 +816,7 @@ const PluginWorkbenchPage: React.FC = () => {
       className={styles.pageShell}
     >
       {messageContext}
-      {!desktop ? (
-        desktopOnlyState
-      ) : (
-        <>
+      <>
           {failure && library && (
           <Alert
             type={failure.kind === 'unavailable' ? 'warning' : 'error'}
@@ -839,6 +835,7 @@ const PluginWorkbenchPage: React.FC = () => {
             className='mb-12px'
           />
           )}
+          {surface === 'home' && mutationFailure && <Alert type='error' showIcon content={mutationFailure.message} />}
           {loading && !library ? (
             <PluginStatePanel loading body={t('pluginWorkbench.states.loadingLibrary')} />
           ) : library ? (
@@ -849,7 +846,16 @@ const PluginWorkbenchPage: React.FC = () => {
                 search={searchQuery}
                 busyMountId={homeBusyMountId}
                 onSearch={setSearchQuery}
-                onCreate={openFreshCreator}
+                pinnedIds={new Set(Object.entries(workspace.items).filter(([, item]) => item.pinned).map(([id]) => id))}
+                onPin={(item) => {
+                  setMutationFailure(null);
+                  const id = item.runtime?.plugin_id ?? item.mount?.mount_id;
+                  if (id) void updatePluginRuntimeWorkspace((current) => {
+                    const value = current.items[id] ?? emptyItem();
+                    current.items[id] = { ...value, pinned: !value.pinned };
+                  }).catch((error) => setMutationFailure(pluginLoadFailure(error, 'resource')));
+                }}
+                onCreate={(requirement) => navigate(`/plugins/new${requirement ? `?requirement=${encodeURIComponent(requirement)}` : ''}`)}
                 onImport={() => {
                   setProjectMutationFailure(null);
                   setImportDialogVisible(true);
@@ -936,8 +942,7 @@ const PluginWorkbenchPage: React.FC = () => {
               onRetry={() => void refreshVisible()}
             />
           ) : null}
-        </>
-      )}
+      </>
       <PluginConfigurationDialog
         visible={configureDialogVisible}
         detail={mountDetail}

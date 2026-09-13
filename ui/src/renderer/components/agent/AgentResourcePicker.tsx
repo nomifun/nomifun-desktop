@@ -106,8 +106,8 @@ export const loadAgentResourceInventory: AgentResourceInventoryLoader = async (k
     options.generation_provider = rows.filter((row) => providerSupportsTasks(row, tasks)).map((row) => ({ value: row.id, label: row.name, description: row.platform }));
   }});
   if (wanted.has('miniapp')) jobs.push({ kinds: ['miniapp'], run: async () => {
-    const rows = (await ipcBridge.miniapps.library.invoke()).miniapps;
-    options.miniapp = rows.filter((row) => row.lifecycle === 'enabled' && row.surface_available).map((row) => ({ value: row.miniapp_id, label: row.display_name, description: row.description }));
+    const rows = (await ipcBridge.pluginRuntimes.library.invoke()).plugins;
+    options.miniapp = rows.filter((row) => row.lifecycle === 'enabled' && row.surface_available).map((row) => ({ value: row.plugin_id, label: row.display_name, description: row.description }));
   }});
 
   await Promise.all(jobs.map(async (job) => {
@@ -128,7 +128,7 @@ const routeForKind = (kind: UserAgentResourceKind, value: AgentResourceSelection
   if (kind === 'mcp_server') return '/mcp';
   if (kind === 'canvas') return '/creative-studio/canvases';
   if (kind === 'generation_provider') return '/models';
-  if (kind === 'miniapp') return '/mini-apps';
+  if (kind === 'miniapp') return '/plugins';
   return '/guid';
 };
 

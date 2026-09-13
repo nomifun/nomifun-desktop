@@ -61,7 +61,7 @@ function readJson(path) {
 }
 
 async function library(context, phase) {
-  const value = await productApi(context, '/api/miniapps', { phase });
+  const value = await productApi(context, '/api/plugins/runtimes', { phase });
   requireInteger(value?.library_revision, 'miniapp_library_revision_missing', 'MiniApp Library revision is missing');
   if (!Array.isArray(value?.miniapps)) failure('miniapp_library_invalid', 'MiniApp Library items are invalid');
   return value;
@@ -70,7 +70,7 @@ async function library(context, phase) {
 async function workshop(context, miniappId, phase) {
   return productApi(
     context,
-    `/api/miniapps/${encodeURIComponent(miniappId)}/workshop`,
+    `/api/plugins/runtimes/${encodeURIComponent(miniappId)}/workshop`,
     { phase },
   );
 }
@@ -79,7 +79,7 @@ async function editUiSource(context, current) {
   const path = 'ui/index.html';
   const source = await productApi(
     context,
-    `/api/miniapps/${encodeURIComponent(current.miniapp.miniapp_id)}/source/files/${encodeURIComponent(path)}`,
+    `/api/plugins/runtimes/${encodeURIComponent(current.miniapp.miniapp_id)}/source/files/${encodeURIComponent(path)}`,
     { phase: 'miniapp.ui.source.read' },
   );
   const previousDigest = requireString(
@@ -99,7 +99,7 @@ async function editUiSource(context, current) {
   );
   const edited = await productApi(
     context,
-    `/api/miniapps/${encodeURIComponent(current.miniapp.miniapp_id)}/source/edit`,
+    `/api/plugins/runtimes/${encodeURIComponent(current.miniapp.miniapp_id)}/source/edit`,
     {
       method: 'POST',
       phase: 'miniapp.ui.source.edit',
@@ -132,7 +132,7 @@ async function createMiniApp(context, kind, displayName) {
       `miniapp.${kind}.library_before_create.${attempt}`,
     );
     try {
-      created = await productApi(context, '/api/miniapps/projects', {
+      created = await productApi(context, '/api/plugins/runtimes/projects', {
         method: 'POST',
         phase: `miniapp.${kind}.create`,
         body: {
@@ -169,7 +169,7 @@ async function createMiniApp(context, kind, displayName) {
 async function buildMiniApp(context, current, serviceLifecycle = null) {
   const built = await productApi(
     context,
-    `/api/miniapps/${encodeURIComponent(current.miniapp.miniapp_id)}/build`,
+    `/api/plugins/runtimes/${encodeURIComponent(current.miniapp.miniapp_id)}/build`,
     {
       method: 'POST',
       timeoutMs: 180_000,
@@ -204,7 +204,7 @@ async function testServiceReady(context, current) {
   const ready = current.ready;
   const tested = await productApi(
     context,
-    `/api/miniapps/${encodeURIComponent(current.miniapp.miniapp_id)}/test`,
+    `/api/plugins/runtimes/${encodeURIComponent(current.miniapp.miniapp_id)}/test`,
     {
       method: 'POST',
       timeoutMs: 180_000,
@@ -238,7 +238,7 @@ async function publishReady(context, current) {
   const active = current.miniapp.releases.active;
   const published = await productApi(
     context,
-    `/api/miniapps/${encodeURIComponent(current.miniapp.miniapp_id)}/publish`,
+    `/api/plugins/runtimes/${encodeURIComponent(current.miniapp.miniapp_id)}/publish`,
     {
       method: 'POST',
       timeoutMs: 180_000,
@@ -271,7 +271,7 @@ async function publishReady(context, current) {
 async function openSurface(context, current, phase) {
   const descriptor = await productApi(
     context,
-    `/api/miniapps/${encodeURIComponent(current.miniapp.miniapp_id)}/surface/open`,
+    `/api/plugins/runtimes/${encodeURIComponent(current.miniapp.miniapp_id)}/surface/open`,
     {
       method: 'POST',
       phase,
@@ -298,7 +298,7 @@ function surfaceAssetPath(descriptor) {
   ) {
     failure('miniapp_surface_entrypoint_invalid', 'Surface entrypoint is not a canonical relative path');
   }
-  return `/api/miniapps/${encodeURIComponent(descriptor.miniapp_id)}/surface/assets/${encodeURIComponent(
+  return `/api/plugins/runtimes/${encodeURIComponent(descriptor.miniapp_id)}/surface/assets/${encodeURIComponent(
     descriptor.surface_capability,
   )}/${descriptor.active_release_epoch}/${encodeURIComponent(
     descriptor.expected_release_digest,
@@ -324,7 +324,7 @@ async function surfaceAsset(context, descriptor, expectedStatus = 200) {
 async function surfaceBridge(context, descriptor, callId, target, phase, expected = [200]) {
   return productApi(
     context,
-    `/api/miniapps/${encodeURIComponent(descriptor.miniapp_id)}/surface/bridge`,
+    `/api/plugins/runtimes/${encodeURIComponent(descriptor.miniapp_id)}/surface/bridge`,
     {
       method: 'POST',
       phase,
@@ -343,7 +343,7 @@ async function surfaceBridge(context, descriptor, callId, target, phase, expecte
 async function closeSurface(context, descriptor, phase) {
   const closed = await productApi(
     context,
-    `/api/miniapps/${encodeURIComponent(descriptor.miniapp_id)}/surface/close`,
+    `/api/plugins/runtimes/${encodeURIComponent(descriptor.miniapp_id)}/surface/close`,
     {
       method: 'POST',
       phase,
@@ -360,7 +360,7 @@ async function closeSurface(context, descriptor, phase) {
 async function setEnabled(context, current, enabled) {
   return productApi(
     context,
-    `/api/miniapps/${encodeURIComponent(current.miniapp.miniapp_id)}/enabled`,
+    `/api/plugins/runtimes/${encodeURIComponent(current.miniapp.miniapp_id)}/enabled`,
     {
       method: 'POST',
       phase: `miniapp.lifecycle.${enabled ? 'enable' : 'disable'}`,
@@ -380,7 +380,7 @@ async function setEnabled(context, current, enabled) {
 async function trash(context, current) {
   return productApi(
     context,
-    `/api/miniapps/${encodeURIComponent(current.miniapp.miniapp_id)}/trash`,
+    `/api/plugins/runtimes/${encodeURIComponent(current.miniapp.miniapp_id)}/trash`,
     {
       method: 'POST',
       phase: 'miniapp.lifecycle.trash',
@@ -399,7 +399,7 @@ async function trash(context, current) {
 async function restore(context, current) {
   return productApi(
     context,
-    `/api/miniapps/${encodeURIComponent(current.miniapp.miniapp_id)}/restore`,
+    `/api/plugins/runtimes/${encodeURIComponent(current.miniapp.miniapp_id)}/restore`,
     {
       method: 'POST',
       phase: 'miniapp.lifecycle.restore',
@@ -464,7 +464,7 @@ async function checkUiLifecycleTransfer(context, state) {
   const shareRoot = join(transferRoot, 'ui-share');
   const shareOperation = await productApi(
     context,
-    `/api/miniapps/${encodeURIComponent(current.miniapp.miniapp_id)}/share`,
+    `/api/plugins/runtimes/${encodeURIComponent(current.miniapp.miniapp_id)}/share`,
     {
       method: 'POST',
       phase: 'miniapp.ui.share_export',
@@ -483,7 +483,7 @@ async function checkUiLifecycleTransfer(context, state) {
   if (shareOperation.state !== 'succeeded') failure('miniapp_share_export_failed', 'Share Export did not succeed');
   const bundle = readJson(join(shareRoot, 'bundle.json'));
   const beforeShareImport = await library(context, 'miniapp.ui.library_before_share_import');
-  const importedShare = await productApi(context, '/api/miniapps/import/share', {
+  const importedShare = await productApi(context, '/api/plugins/runtimes/import/share', {
     method: 'POST',
     phase: 'miniapp.ui.share_import',
     body: {
@@ -503,7 +503,7 @@ async function checkUiLifecycleTransfer(context, state) {
 
   current = await productApi(
     context,
-    `/api/miniapps/${encodeURIComponent(current.miniapp.miniapp_id)}/rollback`,
+    `/api/plugins/runtimes/${encodeURIComponent(current.miniapp.miniapp_id)}/rollback`,
     {
       method: 'POST',
       timeoutMs: 180_000,
@@ -527,7 +527,7 @@ async function checkUiLifecycleTransfer(context, state) {
   const backupRoot = join(transferRoot, 'ui-backup');
   const backupOperation = await productApi(
     context,
-    `/api/miniapps/${encodeURIComponent(current.miniapp.miniapp_id)}/backup`,
+    `/api/plugins/runtimes/${encodeURIComponent(current.miniapp.miniapp_id)}/backup`,
     {
       method: 'POST',
       timeoutMs: 180_000,
@@ -547,7 +547,7 @@ async function checkUiLifecycleTransfer(context, state) {
   const metadata = readJson(join(backupRoot, 'metadata.json'));
   const metadataDigest = sha256(canonicalJson(metadata));
   const beforeBackupImport = await library(context, 'miniapp.ui.library_before_backup_import');
-  const importedBackup = await productApi(context, '/api/miniapps/import/backup', {
+  const importedBackup = await productApi(context, '/api/plugins/runtimes/import/backup', {
     method: 'POST',
     timeoutMs: 180_000,
     phase: 'miniapp.ui.backup_import',
@@ -574,7 +574,7 @@ async function checkUiLifecycleTransfer(context, state) {
   let disposable = await trash(context, importedShare);
   const afterDelete = await productApi(
     context,
-    `/api/miniapps/${encodeURIComponent(disposable.miniapp.miniapp_id)}/delete`,
+    `/api/plugins/runtimes/${encodeURIComponent(disposable.miniapp.miniapp_id)}/delete`,
     {
       method: 'POST',
       timeoutMs: 180_000,
@@ -711,7 +711,7 @@ async function setServiceRunning(context, current, running) {
   const active = current.miniapp.releases.active;
   return productApi(
     context,
-    `/api/miniapps/${encodeURIComponent(current.miniapp.miniapp_id)}/service/running`,
+    `/api/plugins/runtimes/${encodeURIComponent(current.miniapp.miniapp_id)}/service/running`,
     {
       method: 'POST',
       timeoutMs: 180_000,
@@ -763,7 +763,7 @@ async function checkServiceLifecycleFault(context, state) {
   );
   current = await productApi(
     context,
-    `/api/miniapps/${encodeURIComponent(current.miniapp.miniapp_id)}/service/retry`,
+    `/api/plugins/runtimes/${encodeURIComponent(current.miniapp.miniapp_id)}/service/retry`,
     {
       method: 'POST',
       timeoutMs: 180_000,
@@ -924,7 +924,7 @@ async function checkDesktopA11y(context, state) {
 
     await waitForPageSelector(
       client,
-      '/mini-apps',
+      '/plugins',
       'section[aria-labelledby="miniapp-library-title"]',
       30_000,
       state.uiName,
@@ -938,7 +938,7 @@ async function checkDesktopA11y(context, state) {
 
     await waitForPageSelector(
       client,
-      `/mini-apps/${state.uiMiniAppId}`,
+      `/plugins/run/${state.uiMiniAppId}`,
       'ol[aria-label]',
       30_000,
       state.uiName,
@@ -946,7 +946,7 @@ async function checkDesktopA11y(context, state) {
     await clickSurfaceButton(client, state.uiName, 'open');
     await waitForPageSelector(
       client,
-      `/mini-apps/${state.uiMiniAppId}`,
+      `/plugins/run/${state.uiMiniAppId}`,
       'section[aria-labelledby="miniapp-surface-title"]:not([aria-busy]) iframe[title*="Surface"]',
       30_000,
       state.uiName,
@@ -961,7 +961,7 @@ async function checkDesktopA11y(context, state) {
 
     await waitForPageSelector(
       client,
-      `/mini-apps/${state.serviceMiniAppId}`,
+      `/plugins/run/${state.serviceMiniAppId}`,
       'ol[aria-label]',
       30_000,
       state.serviceName,

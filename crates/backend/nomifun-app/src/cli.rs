@@ -225,16 +225,15 @@ pub enum Command {
         #[command(subcommand)]
         operation: PluginCommand,
     },
-    /// Headless MiniApp product commands.
-    #[command(name = "miniapp")]
-    MiniApp {
-        #[command(subcommand)]
-        operation: MiniAppCommand,
-    },
 }
 
 #[derive(Subcommand)]
 pub enum PluginCommand {
+    /// Inspect plugin release, surface and background-service state.
+    Runtime {
+        #[command(subcommand)]
+        operation: PluginRuntimeCommand,
+    },
     /// List the owner-scoped installed Plugins and authoring Projects.
     List(PluginListArgs),
     /// Show one installed Plugin Mount.
@@ -454,24 +453,24 @@ pub struct PluginMountArgs {
 }
 
 #[derive(Subcommand)]
-pub enum MiniAppCommand {
-    /// List the owner-scoped MiniApp Library.
-    List(MiniAppListArgs),
-    /// Show the owner-scoped MiniApp Workshop state.
-    Show(MiniAppShowArgs),
+pub enum PluginRuntimeCommand {
+    /// List owner-scoped plugin releases.
+    List(PluginRuntimeListArgs),
+    /// Show plugin release, page, and background-service state.
+    Show(PluginRuntimeShowArgs),
 }
 
 #[derive(Args, Clone, Debug)]
-pub struct MiniAppListArgs {
+pub struct PluginRuntimeListArgs {
     #[command(flatten)]
     pub connection: HeadlessConnectionArgs,
 }
 
 #[derive(Args, Clone, Debug)]
-pub struct MiniAppShowArgs {
-    /// MiniApp identity.
-    #[arg(value_name = "MINIAPP_ID")]
-    pub miniapp_id: String,
+pub struct PluginRuntimeShowArgs {
+    /// Plugin identity.
+    #[arg(value_name = "PLUGIN_ID")]
+    pub plugin_id: String,
 
     #[command(flatten)]
     pub connection: HeadlessConnectionArgs,
@@ -855,7 +854,8 @@ mod tests {
 
         let miniapp = Cli::try_parse_from([
             "nomicore",
-            "miniapp",
+            "plugin",
+            "runtime",
             "show",
             "miniapp-1",
             "--token",
@@ -864,9 +864,11 @@ mod tests {
         .unwrap();
         assert!(matches!(
             miniapp.command,
-            Some(Command::MiniApp {
-                operation: super::MiniAppCommand::Show(args),
-            }) if args.miniapp_id == "miniapp-1"
+            Some(Command::Plugin {
+                operation: super::PluginCommand::Runtime {
+                    operation: super::PluginRuntimeCommand::Show(args),
+                },
+            }) if args.plugin_id == "miniapp-1"
                 && args.connection.token.as_deref() == Some("secret")
         ));
 
@@ -1018,7 +1020,8 @@ mod tests {
         assert!(mount.find_subcommand("uninstall").is_some());
         assert!(mount.find_subcommand("delete-data").is_some());
 
-        let miniapp = command.find_subcommand("miniapp").unwrap();
+        assert!(command.find_subcommand("miniapp").is_none());
+        let miniapp = plugin.find_subcommand("runtime").unwrap();
         assert!(miniapp.find_subcommand("list").is_some());
         assert!(miniapp.find_subcommand("show").is_some());
     }

@@ -1757,6 +1757,8 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
             }
             Err(error) => return Err(error),
         };
+        let document_owners: Vec<String> = sqlx::query_scalar("SELECT owner_user_id FROM plugin_projects WHERE linked_mount_id = ? UNION SELECT owner_user_id FROM installation_identity WHERE singleton_key = 'installation' AND NOT EXISTS (SELECT 1 FROM plugin_projects WHERE linked_mount_id = ?)")
+            .bind(mount_id).bind(mount_id).fetch_all(&mut *tx).await?;
         if !mount.delete_pending
             || !mount.retained
             || mount.current_artifact_digest.is_some()
@@ -1834,6 +1836,9 @@ impl IPluginN1Repository for SqlitePluginN1Repository {
             .execute(&mut *tx)
             .await
             .map_err(query_error)?;
+        for owner in document_owners {
+            crate::plugin_product_documents::remove_plugin_documents(&mut tx, &owner, mount_id, nomifun_common::now_ms()).await?;
+        }
         tx.commit().await?;
         Ok(true)
     }

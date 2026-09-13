@@ -206,7 +206,7 @@ function sourceModule(versionLabel) {
 async function editProject(context, detail, path, content) {
   return productApi(
     context,
-    `/api/plugin-projects/${encodeURIComponent(detail.summary.project_id)}/source/edit`,
+    `/api/plugins/projects/${encodeURIComponent(detail.summary.project_id)}/source/edit`,
     {
       method: 'POST',
       phase: `plugin.source.${path}`,
@@ -227,7 +227,7 @@ async function buildAndTest(context, detail) {
   const projectId = detail.summary.project_id;
   const built = await productApi(
     context,
-    `/api/plugin-projects/${encodeURIComponent(projectId)}/build`,
+    `/api/plugins/projects/${encodeURIComponent(projectId)}/build`,
     {
       method: 'POST',
       phase: 'plugin.build',
@@ -258,7 +258,7 @@ async function buildAndTest(context, detail) {
   if (built.summary.linked_mount_id) {
     const linkedMount = await productApi(
       context,
-      `/api/plugin-mounts/${encodeURIComponent(built.summary.linked_mount_id)}`,
+      `/api/plugins/installations/${encodeURIComponent(built.summary.linked_mount_id)}`,
       { phase: 'plugin.test.linked_mount' },
     );
     expectedConfigRevision = assertInteger(
@@ -274,7 +274,7 @@ async function buildAndTest(context, detail) {
   }
   const tested = await productApi(
     context,
-    `/api/plugin-projects/${encodeURIComponent(projectId)}/test`,
+    `/api/plugins/projects/${encodeURIComponent(projectId)}/test`,
     {
       method: 'POST',
       phase: 'plugin.test',
@@ -955,7 +955,7 @@ async function checkRuntimeSwitchRestartFault(context) {
 
 async function checkPluginLifecycle(context) {
   let library = await productApi(context, '/api/plugins', { phase: 'plugin.library.initial' });
-  let project = await productApi(context, '/api/plugin-projects', {
+  let project = await productApi(context, '/api/plugins/projects', {
     method: 'POST',
     phase: 'plugin.project.create',
     body: {
@@ -974,7 +974,7 @@ async function checkPluginLifecycle(context) {
   let ready = project.ready;
   let mount = await productApi(
     context,
-    `/api/plugin-projects/${encodeURIComponent(project.summary.project_id)}/apply`,
+    `/api/plugins/projects/${encodeURIComponent(project.summary.project_id)}/apply`,
     {
       method: 'POST',
       phase: 'plugin.apply.initial',
@@ -998,18 +998,18 @@ async function checkPluginLifecycle(context) {
   }
   project = await productApi(
     context,
-    `/api/plugin-projects/${encodeURIComponent(project.summary.project_id)}`,
+    `/api/plugins/projects/${encodeURIComponent(project.summary.project_id)}`,
     { phase: 'plugin.project.after_initial_apply' },
   );
   project = await editProject(context, project, 'src/main.js', sourceModule('candidate-v2'));
   project = await buildAndTest(context, project);
   ready = project.ready;
-  mount = await productApi(context, `/api/plugin-mounts/${encodeURIComponent(mountId)}`, {
+  mount = await productApi(context, `/api/plugins/installations/${encodeURIComponent(mountId)}`, {
     phase: 'plugin.mount.before_replace',
   });
   const replaced = await productApi(
     context,
-    `/api/plugin-projects/${encodeURIComponent(project.summary.project_id)}/apply`,
+    `/api/plugins/projects/${encodeURIComponent(project.summary.project_id)}/apply`,
     {
       method: 'POST',
       phase: 'plugin.apply.replace',
@@ -1043,7 +1043,7 @@ async function checkPluginLifecycle(context) {
   const invocation = await invokeInstalledPluginThroughAgent(context, 'candidate-v2');
   const restored = await productApi(
     context,
-    `/api/plugin-mounts/${encodeURIComponent(mountId)}/restore`,
+    `/api/plugins/installations/${encodeURIComponent(mountId)}/restore`,
     {
       method: 'POST',
       phase: 'plugin.restore',

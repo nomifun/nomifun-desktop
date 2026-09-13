@@ -1,8 +1,10 @@
-//! Phase N1 Plugin package ingestion and immutable artifact storage.
+//! Plugin platform: authoring, immutable artifacts, installation, surfaces,
+//! dedicated services, managed storage, and recoverable lifecycle operations.
 //!
-//! This crate owns only the filesystem and package-validation boundary. It
-//! does not install dependencies, execute JavaScript, mutate Plugin database
-//! state, or read the legacy Extension manifest format.
+//! Runtime roles share one platform while retaining their own execution fences.
+
+pub mod application;
+pub mod runtime;
 
 mod store;
 mod runtime_data;
