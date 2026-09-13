@@ -382,6 +382,9 @@ async fn fork_agent_session(
     Path(parent_session_id): Path<String>,
     Json(request): Json<ForkAgentSessionRequestDto>,
 ) -> Result<Json<ApiResponse<ForkAgentSessionResponseDto>>, AgentPlatformHttpError> {
+    if request.runtime_engine.is_some() {
+        return Err(AgentPlatformError::Contract("Runtime selection requires the default Conversation host".into()).into());
+    }
     let parent_session_id = AgentSessionId(parent_session_id);
     let principal = user_principal(&owner);
     let parent = state

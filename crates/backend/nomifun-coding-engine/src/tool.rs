@@ -164,7 +164,7 @@ pub struct CodingToolInvocation {
     pub binding: CodingToolBinding,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CodingToolResult {
     pub call_id: ToolCallId,
     pub output: Vec<ChatToolResultPart>,

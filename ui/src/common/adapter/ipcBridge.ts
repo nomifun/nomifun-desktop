@@ -141,6 +141,7 @@ import type {
 } from '../types/agentExecution/agentExecutionEvents';
 import type {
   AgentBindingRecord,
+  RuntimeEngineDescriptor,
   AgentBindingValue,
   AgentPresetId,
   AgentPresetEditorResponse,
@@ -748,6 +749,9 @@ export const agentPlatform = {
         `/api/remote/observe?agent_session_id=${encodeURIComponent(params.agent_session_id)}&after_seq=${params.after_cursor.seq}&limit=${params.limit}`
     ),
     cancel: httpPost<RemoteMutationResponse, RemoteCancelRequest>('/api/remote/cancel'),
+  },
+  runtimeEngines: {
+    list: httpGet<RuntimeEngineDescriptor[], void>('/api/runtime-engines'),
   },
   sessions: {
     create: httpPost<CreateAgentSessionResponse, CreateAgentSessionRequest>(

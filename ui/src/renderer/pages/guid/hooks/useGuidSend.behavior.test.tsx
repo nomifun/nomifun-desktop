@@ -215,6 +215,21 @@ afterEach(() => {
 });
 
 describe('useGuidSend HTTP behavior', () => {
+  test('passes an extension-owned exact engine selection without changing its identity', async () => {
+    resetBrowserStorage();
+    const calls = installFetchRecorder();
+    const runtimeEngine = {
+      selector: { selection: 'exact' as const, family_id: 'customer.custom', build_id: 'v3', build_digest: 'b'.repeat(64) },
+      profile: 'custom-profile',
+    };
+    const hook = renderHook(() => useGuidSend({
+      ...createDeps({ selection: { kind: 'preset', presetId: PRESET_ID }, selectedPreset: PRESET }),
+      runtimeEngine,
+    }));
+    await act(async () => { await hook.result.current.handleSend(); });
+    expect(calls[0].body).toMatchObject({ runtime_engine: runtimeEngine });
+  });
+
   test('official selection prepares its configuration only on send and launches a normal frozen session', async () => {
     resetBrowserStorage();
     const calls = installFetchRecorder();

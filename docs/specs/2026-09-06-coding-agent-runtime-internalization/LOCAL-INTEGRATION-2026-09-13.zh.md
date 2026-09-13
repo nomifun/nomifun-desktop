@@ -86,7 +86,10 @@ Desktop/Web/Remote/Automation
 不能额外挂一个 AgentSessionStore 同时写两份事实。保留旧引擎和已有 Session
 行为。用户的开放平台要求不是限制为 Nomi/Coding 两种后端。
 
-以下产品接线尚未完成，每片都需要真实默认路由的行为测试：
+以下是 `6d87dc232` 时的待接线清单；后续已实现默认组合根、精确绑定、
+首批文件/Git 工具及 UI 选择。最新事实以
+[`PRODUCTION-INTEGRATION-2026-09-13.zh.md`](PRODUCTION-INTEGRATION-2026-09-13.zh.md)
+和 `STATUS.zh.md` 为准。保留原清单用于对照未完成项：
 
 1. 在当前 Session 创建事务中持久化 exact Engine identity；旧 Session 显式映射
    Legacy，禁止把可变 channel 放进执行时 resolver。明确 fork 与恢复语义。

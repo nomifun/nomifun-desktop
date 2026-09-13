@@ -81,6 +81,7 @@ pub fn continuation_view(
                 can_continue_same_session: false,
                 requires_explicit_fork: true,
                 fork_request: Some(ForkAgentSessionRequestDto {
+                    runtime_engine: None,
                     target_agent_binding: wire_cast::<_, AgentBindingValueDto>(target)?,
                     parent_through_seq,
                     title: None,

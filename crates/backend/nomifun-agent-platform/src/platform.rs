@@ -2814,6 +2814,9 @@ impl AgentPlatform {
         request: CreateAgentSessionRequestDto,
         idempotency_key: impl Into<IdempotencyKey>,
     ) -> Result<CreateAgentSessionResponseDto, AgentPlatformError> {
+        if request.runtime_engine.is_some() {
+            return Err(AgentPlatformError::Contract("Runtime selection requires the default Conversation host".into()));
+        }
         let binding = self
             .control_plane
             .resolve_agent_session_binding_with_model(owner, &request.preset_id, request.model.as_ref())
@@ -2826,6 +2829,7 @@ impl AgentPlatform {
         open.metadata.title = request.title;
         let result = AgentSessionCommandPort::open_session(self, open).await?;
         Ok(CreateAgentSessionResponseDto {
+            runtime_engine_binding: None,
             agent_session_id: result.session.agent_session_id.as_ref().to_owned(),
             agent_binding: platform_cast(&result.session.agent_binding)?,
             state: "opening".to_owned(),

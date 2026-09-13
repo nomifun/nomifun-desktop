@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 autotests = false
 
+[[test]]
+name = "coding_runtime_production"
+path = "tests/coding_runtime_production.rs"
+
 [[bin]]
 name = "nomicore"
 path = "src/main.rs"
@@ -221,6 +225,7 @@ nomifun-office.workspace = true
 nomifun-shell.workspace = true
 nomifun-model-invoke.workspace = true
 nomifun-ai-agent.workspace = true
+nomifun-coding-engine.workspace = true
 nomifun-ssh.workspace = true
 nomifun-mcp.workspace = true
 nomifun-conversation.workspace = true

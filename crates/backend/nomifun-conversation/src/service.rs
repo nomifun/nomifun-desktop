@@ -3334,6 +3334,10 @@ impl ConversationService {
         admission: &ConversationTurnAdmissionState,
         runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
     ) -> Result<bool, AppError> {
+        // Nomi's persisted recovery proof does not cover a user runtime or
+        // Coding. Such orphans remain quarantined until that engine supplies
+        // its own exact restart proof; never inspect another engine's log.
+        if !row_uses_nomi_engine(row)? { return Ok(false); }
         let conversation_id = row.conversation_id.as_str();
         let Some(provider) = self.terminal_proof_provider() else {
             return Ok(false);
@@ -4168,7 +4172,26 @@ impl ConversationService {
                     .to_owned(),
             ));
         }
+        // Only the trusted snapshot admission path may supply immutable host
+        // metadata. Public Conversation JSON cannot choose an implementation
+        // or impersonate a compiled AgentSession.
+        let trusted_metadata = if trusted_snapshot.is_some() {
+            let object = req.extra.as_object_mut();
+            object.map(|object| {
+                ["runtime_engine_binding", "nomi_core_session"]
+                    .into_iter()
+                    .filter_map(|key| object.remove(key).map(|value| (key, value)))
+                    .collect::<Vec<_>>()
+            }).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         reject_backend_owned_lifecycle_extra_keys(&req.extra)?;
+        if let Some((_, value)) = trusted_metadata.iter().find(|(key, _)| *key == "runtime_engine_binding") {
+            let binding: nomifun_api_types::RuntimeEngineBinding = serde_json::from_value(value.clone())
+                .map_err(|error| AppError::BadRequest(format!("Invalid runtime binding: {error}")))?;
+            binding.validate()?;
+        }
         let authority = self.execution_authority(user_id);
         if !authority.controls_host() {
             if req.r#type != AgentType::Nomi {
@@ -4212,6 +4235,11 @@ impl ConversationService {
         let requested_model_pool = req.execution_model_pool.clone();
 
         let mut extra = req.extra;
+        if authority.controls_host() {
+            for (key, value) in trusted_metadata {
+                extra[key] = value;
+            }
+        }
         reject_execution_policy_extra_keys(&extra)?;
         reject_retired_skill_extra_keys(&extra)?;
         let requested_agent_preset_id = req
@@ -4669,6 +4697,11 @@ impl ConversationService {
                         "conversation creation key resolved outside its owner boundary".to_owned(),
                     )
                 })?;
+            let existing_extra: serde_json::Value = serde_json::from_str(&existing.extra)
+                .map_err(|error| AppError::Internal(error.to_string()))?;
+            if extra.get("runtime_engine_binding") != existing_extra.get("runtime_engine_binding") {
+                return Err(AppError::Conflict("Creation key is already bound to a different runtime engine".into()));
+            }
             let mut existing = existing;
             rebase_managed_workspace_in_row(&mut existing, &self.workspace_root)?;
             let mut response = row_to_response(existing, &self.workspace_root)?;
@@ -6025,7 +6058,7 @@ impl ConversationService {
         self.runtime_registry
             .terminate_and_wait_result(id, Some(AgentKillReason::UserCancelled))
             .await?;
-        if reset_row.r#type == AgentType::Nomi.serde_name() {
+        if row_uses_nomi_engine(&reset_row)? {
             self.runtime_registry
                 .reset_persisted_nomi_session(id, reset_row.created_at)
                 .await?;
@@ -9344,7 +9377,7 @@ impl ConversationService {
             // is swallowed at source (no WS error, no error tips row) — the user
             // sees only the backup model's turn. `enabled == false` / no deps →
             // `None` → relay never suppresses (current behaviour preserved).
-            let failover_config = if agent.agent_type() == AgentType::Nomi {
+            let failover_config = if agent.uses_nomi_recovery() {
                 service.resolve_failover_config(&failover_extra_json).await.filter(|c| c.enabled)
             } else {
                 None
@@ -9413,7 +9446,7 @@ impl ConversationService {
                 // provider fault(在切换上限内),也隐藏"将被同模型剔图重试"的
                 // image-unsupported 400(每轮一次)。被吞的错误进 outcome.suppressed_error,
                 // 若两种重试都未触发,则下方原样 re-surface。
-                if agent.agent_type() == AgentType::Nomi {
+                if agent.uses_nomi_recovery() {
                     let failover_within_bound = failover_config.as_ref().is_some_and(|c| {
                         failover_switches_done < c.max_switches.min(c.queue.len() as u32)
                     });
@@ -9502,7 +9535,7 @@ impl ConversationService {
                         "non-reusable agent runtime recovery",
                     )
                     .await;
-                    if agent.agent_type() == AgentType::Nomi
+                    if agent.uses_nomi_recovery()
                         && terminal_error_requires_nomi_session_recovery(terminal_code)
                     {
                         // Runtime retirement alone is not enough for any
@@ -9521,7 +9554,7 @@ impl ConversationService {
                         false,
                         outcome.final_text.clone(),
                         Some(
-                            if agent.agent_type() == AgentType::Nomi
+                            if agent.uses_nomi_recovery()
                                 && terminal_error_requires_nomi_session_recovery(terminal_code)
                             {
                                 "Agent session state could not be restored safely"
@@ -9648,7 +9681,7 @@ impl ConversationService {
                 // 未触发(已重跑过 / 非 nomi / 有响应 / 码不符 / 重建失败)则落到下方
                 // re-surface,把原始错误显示给用户。
                 if image_strip_retries_done == 0
-                    && agent.agent_type() == AgentType::Nomi
+                    && agent.uses_nomi_recovery()
                     && outcome.terminal.is_error()
                     && !outcome.emitted_response
                     && outcome.terminal.code()
@@ -12072,7 +12105,10 @@ impl ConversationService {
             false
         };
 
-        if row.r#type == AgentType::Nomi.serde_name() && !had_runtime {
+        if !had_runtime && !row_uses_nomi_engine(&row)? {
+            return Err(AppError::Conflict("Cold context reset is not provided by the bound runtime; fork explicitly".into()));
+        }
+        if row_uses_nomi_engine(&row)? && !had_runtime {
             self.runtime_registry
                 .reset_persisted_nomi_session(conversation_id, row.created_at)
                 .await?;
@@ -12157,7 +12193,7 @@ impl ConversationService {
                 Some(AgentKillReason::UserCancelled),
             )
             .await?;
-        if clear_row.r#type == AgentType::Nomi.serde_name() {
+        if row_uses_nomi_engine(&clear_row)? {
             self.runtime_registry
                 .reset_persisted_nomi_session(conversation_id, clear_row.created_at)
                 .await?;
@@ -13589,7 +13625,23 @@ fn reject_execution_policy_extra_keys(extra: &serde_json::Value) -> Result<(), A
 /// Reject instead of silently stripping them so every caller gets an explicit
 /// failure and no partial PATCH can make an injected fence indistinguishable
 /// from a backend reservation after restart.
-pub(crate) const BACKEND_OWNED_LIFECYCLE_EXTRA_KEYS: [&str; 10] = [
+fn row_uses_nomi_engine(row: &ConversationRow) -> Result<bool, AppError> {
+    let extra: serde_json::Value = serde_json::from_str(&row.extra)
+        .map_err(|error| AppError::Internal(error.to_string()))?;
+    match extra.get(nomifun_api_types::RUNTIME_ENGINE_BINDING_KEY) {
+        Some(value) => {
+            let binding: nomifun_api_types::RuntimeEngineBinding = serde_json::from_value(value.clone())
+                .map_err(|error| AppError::Conflict(format!("Invalid runtime binding: {error}")))?;
+            binding.validate()?;
+            Ok(binding.family_id == "nomifun.nomi")
+        }
+        None => Ok(row.r#type == AgentType::Nomi.serde_name()),
+    }
+}
+
+pub(crate) const BACKEND_OWNED_LIFECYCLE_EXTRA_KEYS: [&str; 12] = [
+    "runtime_engine_binding",
+    "nomi_core_session",
     "_edit_resubmit_fence",
     "active_turn_operation_id",
     "admission_epoch",

@@ -988,6 +988,12 @@ async fn build_nomi_core_agent_api_state(
         .map_err(|error| {
             anyhow::anyhow!("{}: {}", error.code(), error.message())
         })?;
+    services.runtime_engines.install(super::coding_runtime_host::factory(
+        Arc::clone(&conversation_owner), Arc::clone(&control_plane),
+        Arc::clone(&kernel), environment.clone(),
+        services.database.pool().clone(), services.encryption_key,
+    ))?;
+    conversation_owner.install_runtime_engines(Arc::clone(&services.runtime_engines))?;
     services
         .agent_runtime_registry
         .install_nomi_plugin_tool_session_provider(Arc::new(

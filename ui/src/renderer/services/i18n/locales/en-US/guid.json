@@ -1,4 +1,10 @@
 {
+  "runtimeEngine": {
+    "label": "Execution engine",
+    "default": "Default engine (Nomi)",
+    "unavailable": "Engine catalog or selected build is unavailable. Retry or explicitly choose another engine.",
+    "codingLimit": "This Coding build supports initial file and Git tools only. Deselect Skills and MCP; attachments, process execution and on-demand capabilities are not supported. Engine changes require a new or forked session."
+  },
   "agentEntries": {
     "needsSetup": "Needs setup",
     "choose": "Choose an Agent",

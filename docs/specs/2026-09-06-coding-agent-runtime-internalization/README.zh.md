@@ -10,7 +10,9 @@
 
 2026-09-13 本地主重构分支合入情况见
 [`LOCAL-INTEGRATION-2026-09-13.zh.md`](LOCAL-INTEGRATION-2026-09-13.zh.md)。
-隔离代码已取入；原交接的 Session 主链与当前默认产品实现不同，生产嵌入尚未完成。
+隔离代码已取入；默认生产 owner 已接开放目录及首批 Coding 文件/Git 工具，
+最新接线与限制见 [`PRODUCTION-INTEGRATION-2026-09-13.zh.md`](PRODUCTION-INTEGRATION-2026-09-13.zh.md)。
+整体 CAR 验收未完成；下文的远程隔离施工安排作为历史设计保留。
 开放 Runtime 接口、通用目录和 Coding 适配器见
 [`RUNTIME-EXTENSIONS.zh.md`](RUNTIME-EXTENSIONS.zh.md)。以下原始远程施工安排
 已由用户要求的“统一本地主重构分支开发，不 push”替代，当前实施按 CAR-D-019。

@@ -442,6 +442,7 @@ pub(crate) async fn provider_config_digest(
 pub struct ProductionModelRepository {
     v4_pool: SqlitePool,
     provider_pool: SqlitePool,
+    nomi_core: bool,
 }
 
 impl ProductionModelRepository {
@@ -449,6 +450,7 @@ impl ProductionModelRepository {
         Self {
             v4_pool,
             provider_pool,
+            nomi_core: false,
         }
     }
 
@@ -470,9 +472,12 @@ impl ProductionModelRepository {
         &self,
         selection: &ChatRouteSelection,
     ) -> Result<Option<CanonicalChatRouteRecord>, ChatBrokerHostError> {
-        let payload_json: Option<String> = sqlx::query_scalar(
-            "SELECT payload_json FROM agent_preset_revisions WHERE revision_id = ?",
-        )
+        let query = if self.nomi_core {
+            "SELECT payload_json FROM nomi_agent_preset_revisions WHERE revision_id = ?"
+        } else {
+            "SELECT payload_json FROM agent_preset_revisions WHERE revision_id = ?"
+        };
+        let payload_json: Option<String> = sqlx::query_scalar(query)
         .bind(&selection.preset_revision_id)
         .fetch_optional(&self.v4_pool)
         .await
@@ -1481,6 +1486,17 @@ pub struct ChatBrokerHostComposition {
 }
 
 impl ChatBrokerHostComposition {
+    /// Default product route storage, not the isolated Fresh-v4 database.
+    pub fn for_nomi_core(pool: SqlitePool, encryption_key: [u8; 32]) -> Self {
+        Self {
+            provider_repository: Arc::new(ProductionProviderRepository::new(pool.clone())),
+            model_repository: Arc::new(ProductionModelRepository {
+                v4_pool: pool.clone(), provider_pool: pool.clone(), nomi_core: true,
+            }),
+            connection_repository: Arc::new(ProductionConnectionRepository::new(pool, ConnectionCredentialLeaseRegistry::default())),
+            encryption_key,
+        }
+    }
     pub fn new(
         v4_pool: SqlitePool,
         provider_pool: SqlitePool,

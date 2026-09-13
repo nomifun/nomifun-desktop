@@ -26,6 +26,8 @@ pub type RuntimeTeardown = Pin<Box<dyn Future<Output = Result<(), AppError>> + S
 /// that silently treats a kill request as a completed cleanup.
 #[async_trait]
 pub trait RegisteredAgentRuntime: AgentRuntimeControl {
+    /// Nomi's private recovery log must never be applied to another engine.
+    fn uses_nomi_recovery(&self) -> bool { false }
     fn kill_and_wait(&self, reason: Option<AgentKillReason>) -> RuntimeTeardown;
 
     fn requires_turn_boundary_recycle(&self) -> bool {
@@ -86,6 +88,7 @@ fn unsupported(operation: &str) -> AppError {
 // implementation stays here so product consumers never downcast the handle.
 #[async_trait]
 impl RegisteredAgentRuntime for crate::manager::nomi::NomiAgentManager {
+    fn uses_nomi_recovery(&self) -> bool { true }
     fn kill_and_wait(&self, reason: Option<AgentKillReason>) -> RuntimeTeardown {
         Self::kill_and_wait(self, reason)
     }

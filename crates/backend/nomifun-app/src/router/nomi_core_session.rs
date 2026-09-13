@@ -100,6 +100,7 @@ use uuid::Uuid;
 /// maps; all durable state and runtime state stay in the supplied service and
 /// registry.
 pub(crate) struct NomiCoreSessionOwner {
+    runtime_engines: std::sync::OnceLock<Arc<super::runtime_engines::RuntimeEngineHost>>,
     service: ConversationService,
     runtime_registry: Arc<dyn AgentRuntimeRegistry>,
     execution: AgentExecutionConversationPort,
@@ -115,6 +116,7 @@ impl NomiCoreSessionOwner {
         let execution = service.agent_execution_port(runtime_registry.clone());
         Self {
             service,
+            runtime_engines: std::sync::OnceLock::new(),
             runtime_registry,
             execution,
             autowork_runtime_lease_issuer:
@@ -127,6 +129,10 @@ impl NomiCoreSessionOwner {
         &self.service
     }
 
+    pub(crate) fn install_runtime_engines(&self, host: Arc<super::runtime_engines::RuntimeEngineHost>) -> Result<(), AppError> {
+        self.runtime_engines.set(host).map_err(|_| AppError::Conflict("Session runtime host already installed".into()))
+    }
+
     /// Idempotent counterpart of [`Self::create_session`].
     ///
     /// The creation key is interpreted and durably owned by
@@ -134,10 +140,17 @@ impl NomiCoreSessionOwner {
     pub(crate) async fn create_session_idempotent(
         &self,
         owner_id: &str,
-        request: CreateConversationRequest,
+        mut request: CreateConversationRequest,
         snapshot: Option<AgentResolvedSnapshot>,
         creation_key: &str,
     ) -> Result<ConversationResponse, AppError> {
+        if request.extra.get(NOMI_CORE_SESSION_METADATA_KEY).is_some()
+            && request.extra.get(nomifun_api_types::RUNTIME_ENGINE_BINDING_KEY).is_none()
+            && let Some(host) = self.runtime_engines.get()
+        {
+            request.extra[nomifun_api_types::RUNTIME_ENGINE_BINDING_KEY] = serde_json::to_value(host.default_binding()?)
+                .map_err(|error| AppError::Internal(error.to_string()))?;
+        }
         match snapshot {
             Some(snapshot) => {
                 self.service
@@ -991,7 +1004,7 @@ impl NomiMiniAppToolInvoker for NomiCoreMiniAppToolInvoker {
     }
 }
 
-fn compile_nomi_plugin_snapshot(
+pub(super) fn compile_nomi_plugin_snapshot(
     kernel: &KernelRegistry,
     compiler_environment: &CompilerEnvironment,
     binding: AgentBindingValue,
@@ -2935,6 +2948,7 @@ impl SessionControlSink for NomiCoreSessionControlSink {
             through_seq,
             title,
             operation_id,
+            None,
         )
         .await
         .map_err(|error| error.message)?;
@@ -3032,6 +3046,7 @@ pub(crate) fn build_nomi_core_remote_router(
 fn nomi_core_session_routes(state: NomiCoreAgentApiState) -> Router {
     Router::new()
         .route("/api/agent-sessions", post(create_nomi_core_agent_session))
+        .route("/api/runtime-engines", get(list_runtime_engines))
         .route(
             "/api/agent-sessions/{agent_session_id}",
             get(get_nomi_core_agent_session).delete(delete_nomi_core_agent_session),
@@ -3294,7 +3309,7 @@ async fn project_authenticated_owner(
 pub(crate) struct NomiCoreApiError {
     status: StatusCode,
     code: String,
-    message: String,
+    pub(super) message: String,
     details: Option<Value>,
 }
 
@@ -3417,10 +3432,10 @@ impl From<serde_json::Error> for NomiCoreApiError {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct NomiCoreSessionMetadata {
+pub(super) struct NomiCoreSessionMetadata {
     version: u64,
     kind: String,
-    binding: AgentBindingValue,
+    pub(super) binding: AgentBindingValue,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     remote: Option<RemoteBindingProvenance>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4887,12 +4902,25 @@ fn schedule_remote_cancel_finalizer(
     }
 }
 
+async fn list_runtime_engines(
+    State(state): State<NomiCoreAgentApiState>,
+) -> Result<Json<ApiResponse<Vec<nomifun_api_types::RuntimeEngineDescriptor>>>, NomiCoreApiError> {
+    let host = state.session_owner.runtime_engines.get()
+        .ok_or_else(|| AppError::Conflict("Runtime host is not assembled".into()))?;
+    Ok(Json(ApiResponse::ok(host.catalog()?.list())))
+}
+
 async fn create_nomi_core_agent_session(
     State(state): State<NomiCoreAgentApiState>,
     Extension(owner): Extension<AuthenticatedOwner>,
     headers: HeaderMap,
     Json(request): Json<CreateAgentSessionRequestDto>,
 ) -> Result<Json<ApiResponse<CreateAgentSessionResponseDto>>, NomiCoreApiError> {
+    let engine_binding = request.runtime_engine.as_ref().map(|selection| {
+        let host = state.session_owner.runtime_engines.get()
+            .ok_or_else(|| AppError::Conflict("Runtime host is not assembled".into()))?;
+        host.catalog()?.resolve(&selection.selector, &selection.profile)
+    }).transpose()?;
     let capability_selection = request
         .capability_selection
         .as_ref()
@@ -4955,6 +4983,19 @@ async fn create_nomi_core_agent_session(
         object.insert("agent_name".to_owned(), Value::String(agent_name));
     }
     attach_session_metadata(&mut create_request.extra, &projection.binding, None)?;
+    if let Some(binding) = engine_binding {
+        if binding.family_id == "nomifun.coding" {
+            let (_, _, snapshot) = state.control_plane.saved_binding_artifacts(
+                &owner.0, &agent_binding_dto(&projection.binding)?,
+            ).await?;
+            super::coding_runtime_host::validate_supported_snapshot(&snapshot)?;
+            if capability_selection.as_ref().is_some_and(|selection|
+                !selection.enabled_skills.is_empty() || !selection.mcp_server_ids.is_empty()) {
+                return Err(AppError::Conflict("This Coding build does not support session Skills or MCP selections".into()).into());
+            }
+        }
+        create_request.extra[nomifun_api_types::RUNTIME_ENGINE_BINDING_KEY] = serde_json::to_value(binding)?;
+    }
     let creation_key = request_idempotency_key(
         &headers,
         "nomi-core-agent-session-create",
@@ -4975,6 +5016,7 @@ async fn create_nomi_core_agent_session(
         .await?;
     let cursor = durable_message_cursor(&state.session_owner, &session_id).await?;
     Ok(Json(ApiResponse::ok(CreateAgentSessionResponseDto {
+        runtime_engine_binding: super::runtime_engines::binding_from_extra(&response.extra)?,
         agent_session_id: session_id.as_ref().to_owned(),
         agent_binding: binding,
         state: projected_session_status(&response),
@@ -5005,6 +5047,10 @@ async fn update_nomi_core_agent_session_capability_selection(
         }
     }
     let selection = normalize_session_capability_selection(&request.capability_selection)?;
+    if super::runtime_engines::binding_from_extra(&response.extra)?.is_some_and(|binding| binding.family_id == "nomifun.coding")
+        && (!selection.enabled_skills.is_empty() || !selection.mcp_server_ids.is_empty()) {
+        return Err(AppError::Conflict("This Coding build does not support session Skills or MCP selections".into()).into());
+    }
     // Resolve every MCP before terminating an idle runtime. This keeps a stale
     // or disabled catalog choice from perturbing the current Session.
     explicit_session_mcp_selection(
@@ -5184,6 +5230,10 @@ async fn switch_nomi_core_agent_session_preset(
     let projection =
         resolve_saved_binding_projection(&state, &owner, &binding, Some(&target_name)).await?;
     let response_binding = agent_binding_dto(&projection.binding)?;
+    if super::runtime_engines::binding_from_extra(&response.extra)?.is_some_and(|binding| binding.family_id == "nomifun.coding") {
+        let (_, _, snapshot) = state.control_plane.saved_binding_artifacts(&owner.0, &response_binding).await?;
+        super::coding_runtime_host::validate_supported_snapshot(&snapshot)?;
+    }
     let mcp_selection =
         exact_session_mcp_selection(&state.mcp_server_repository, &owner, &projection.binding)
             .await?;
@@ -5329,6 +5379,11 @@ async fn fork_nomi_core_agent_session(
         request.parent_through_seq,
         request.title.as_deref(),
         &operation_id,
+        request.runtime_engine.as_ref().map(|selection| {
+            state.session_owner.runtime_engines.get()
+                .ok_or_else(|| AppError::Conflict("Runtime host is not assembled".into()))?
+                .catalog()?.resolve(&selection.selector, &selection.profile)
+        }).transpose()?,
     )
     .await?;
     Ok(Json(ApiResponse::ok(fork)))
@@ -6288,7 +6343,7 @@ async fn load_owned_nomi_core_session(
     Ok(response)
 }
 
-fn session_metadata(
+pub(super) fn session_metadata(
     response: &ConversationResponse,
     owner: &AuthenticatedOwner,
 ) -> Result<NomiCoreSessionMetadata, NomiCoreApiError> {
@@ -6382,6 +6437,7 @@ async fn fork_owned_nomi_core_session(
     parent_through_seq: u64,
     title: Option<&str>,
     operation_id: &str,
+    requested_engine: Option<nomifun_api_types::RuntimeEngineBinding>,
 ) -> Result<ForkAgentSessionResponseDto, NomiCoreApiError> {
     let operation_id = canonical_nonempty(operation_id, "fork operation_id")?;
     let parent_metadata = session_metadata(parent, owner)?;
@@ -6533,6 +6589,17 @@ async fn fork_owned_nomi_core_session(
         Some(parent_session_id.clone()),
         Some(base_payload_id),
     )?;
+    // Fork inherits the exact implementation, never re-resolves a channel.
+    if let Some(binding) = requested_engine.or(super::runtime_engines::binding_from_extra(&parent.extra)?) {
+        if let Some(host) = session_owner.runtime_engines.get() {
+            host.catalog()?.validate_binding(&binding)?;
+        }
+        if binding.family_id == "nomifun.coding" {
+            let (_, _, snapshot) = control_plane.saved_binding_artifacts(&owner.0, &child_binding).await?;
+            super::coding_runtime_host::validate_supported_snapshot(&snapshot)?;
+        }
+        create_request.extra[nomifun_api_types::RUNTIME_ENGINE_BINDING_KEY] = serde_json::to_value(binding)?;
+    }
     let created = session_owner
         .create_session_idempotent(
             owner.as_ref(),

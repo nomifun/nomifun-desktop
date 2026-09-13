@@ -1831,6 +1831,8 @@ async fn forward_browser_inventory_events(
 }
 
 pub struct AppServices {
+    /// Trusted embedders may register additional engines before router assembly.
+    pub runtime_engines: Arc<crate::router::runtime_engines::RuntimeEngineHost>,
     pub database: Database,
     /// Process-lifetime cancellation shared by background domain tasks that
     /// must stop before the database is closed.
@@ -3653,6 +3655,8 @@ impl AppServices {
         // Agent factory is now wired. Future extension/custom agents
         // that get written to `agent_metadata` will show up after the
         // relevant service calls `AgentRegistry::hydrate`.
+        let runtime_engines = Arc::new(crate::router::runtime_engines::RuntimeEngineHost::default());
+        let factory = runtime_engines.dispatch(factory);
         let runtime_registry_concrete = Arc::new(
             InMemoryAgentRuntimeRegistry::new(factory)
                 .with_model_config_resolver(build_agent_model_config_resolver(
@@ -3667,6 +3671,7 @@ impl AppServices {
         let background_shutdown = CancellationToken::new();
         let background_tasks = Arc::new(BackgroundTaskRegistry::new(background_shutdown.clone()));
         let services = Self {
+            runtime_engines,
             database,
             background_shutdown,
             background_tasks,

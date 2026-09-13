@@ -1,4 +1,10 @@
 {
+  "runtimeEngine": {
+    "label": "执行引擎",
+    "default": "默认引擎（Nomi）",
+    "unavailable": "引擎目录或所选构建不可用，请重试或显式选择其他引擎。",
+    "codingLimit": "此 Coding 构建仅支持初始加载的文件和 Git 工具。请取消 Skills 和 MCP 选择；暂不支持附件、进程执行和按需能力。更换引擎需新建或派生会话。"
+  },
   "agentEntries": {
     "needsSetup": "待配置",
     "choose": "选择 Agent",

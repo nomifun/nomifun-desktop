@@ -40,6 +40,7 @@ pub use desktop::{
 pub use bootstrap::{CanonicalHost, FreshV4Host};
 pub use nomifun_auth::AuthPolicy;
 pub use router::create_agent_platform_router;
+pub use router::runtime_engines::RuntimeEngineHost;
 
 /// Test assembly facade for the in-process Nomi-core graph.
 ///

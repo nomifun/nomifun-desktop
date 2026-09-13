@@ -29,6 +29,8 @@ pub(crate) mod nomi_core_remote_mcp;
 pub(crate) mod nomi_core_robot;
 pub(crate) mod nomi_core_resource_bindings;
 pub(crate) mod nomi_core_session;
+pub mod runtime_engines;
+pub(crate) mod coding_runtime_host;
 pub(crate) mod nomi_core_wave2;
 pub(crate) mod plugin_platform;
 mod plugin_runtime_host;
