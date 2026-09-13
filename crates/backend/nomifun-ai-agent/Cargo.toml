@@ -18,6 +18,8 @@ nomifun-agent-domain-wave4.workspace = true
 nomifun-agent-contracts.workspace = true
 nomifun-agent-kernel.workspace = true
 nomifun-model-invoke.workspace = true
+nomifun-coding-engine.workspace = true
+nomifun-chat-model-broker.workspace = true
 nomifun-net.workspace = true
 reqwest.workspace = true
 axum.workspace = true
@@ -75,8 +77,8 @@ windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 # Enables the `AgentRuntimeHandle::Mock` variant used by downstream test harnesses
 # (conversation/cron/team/app) to inject trait-object stubs without having to
 # spawn a real agent process. Production builds must NOT turn this on — it
-# introduces a `dyn AgentRuntimeControl` branch that defeats the enum's zero-dispatch
-# guarantee.
+# retains test-only no-op lifecycle behavior. Production extensions implement
+# RegisteredAgentRuntime and must provide result-bearing proven teardown.
 test-support = []
 # Desktop control tools for the nomi engine (desktop host only).
 computer-use = ["nomi-agent/computer-use"]

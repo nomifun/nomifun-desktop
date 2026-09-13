@@ -1,14 +1,13 @@
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::panic::AssertUnwindSafe;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use futures::FutureExt;
 use nomifun_agent_contracts::{
     AgentSessionId, DigestHex, ResolvedSnapshotRef, RuntimeBindingId,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::CodingEngineError;
@@ -413,6 +412,21 @@ struct CodingEngineSessionState {
     active_turn: Option<CancellationToken>,
 }
 
+/// Releasing an interrupted turn future must also release its admission and
+/// cancel the broker request. Otherwise a host timeout permanently wedges the
+/// Session and can leave a provider stream running after its caller is gone.
+struct ActiveCodingTurn<'a> {
+    state: &'a Mutex<CodingEngineSessionState>,
+    cancellation: CancellationToken,
+}
+
+impl Drop for ActiveCodingTurn<'_> {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+        self.state.lock().unwrap_or_else(|error| error.into_inner()).active_turn = None;
+    }
+}
+
 impl CodingEngineSession {
     pub fn binding(&self) -> &EngineBinding {
         &self.binding
@@ -422,17 +436,31 @@ impl CodingEngineSession {
         &self,
         request: CodingTurnRequest,
     ) -> Result<CodingTurnResult, CodingEngineError> {
+        self.run_turn_cancellable(request, CancellationToken::new()).await
+    }
+
+    /// The host owns the parent token. A completed/dropped engine turn only
+    /// cancels its child, never the Session or a successor turn.
+    pub async fn run_turn_cancellable(
+        &self,
+        request: CodingTurnRequest,
+        parent_cancellation: CancellationToken,
+    ) -> Result<CodingTurnResult, CodingEngineError> {
         let cancellation = {
-            let mut state = self.state.lock().await;
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             if state.disposed {
                 return Err(CodingEngineError::SessionDisposed);
             }
             if state.active_turn.is_some() {
                 return Err(CodingEngineError::TurnAlreadyRunning);
             }
-            let cancellation = CancellationToken::new();
+            let cancellation = parent_cancellation.child_token();
             state.active_turn = Some(cancellation.clone());
             cancellation
+        };
+        let _admission = ActiveCodingTurn {
+            state: &self.state,
+            cancellation: cancellation.clone(),
         };
         let run_cancellation = cancellation.clone();
         let result = AssertUnwindSafe(crate::turn::run_turn(
@@ -447,13 +475,11 @@ impl CodingEngineSession {
         .await
         .unwrap_or(Err(CodingEngineError::TurnPanicked));
 
-        cancellation.cancel();
-        self.state.lock().await.active_turn = None;
         result
     }
 
     pub async fn cancel(&self) -> bool {
-        let cancellation = self.state.lock().await.active_turn.clone();
+        let cancellation = self.state.lock().unwrap_or_else(|error| error.into_inner()).active_turn.clone();
         if let Some(cancellation) = cancellation {
             cancellation.cancel();
             true
@@ -464,7 +490,7 @@ impl CodingEngineSession {
 
     pub async fn dispose(&self) {
         let cancellation = {
-            let mut state = self.state.lock().await;
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             state.disposed = true;
             state.active_turn.clone()
         };
@@ -474,11 +500,11 @@ impl CodingEngineSession {
     }
 
     pub async fn is_turn_active(&self) -> bool {
-        self.state.lock().await.active_turn.is_some()
+        self.state.lock().unwrap_or_else(|error| error.into_inner()).active_turn.is_some()
     }
 
     pub async fn is_disposed(&self) -> bool {
-        self.state.lock().await.disposed
+        self.state.lock().unwrap_or_else(|error| error.into_inner()).disposed
     }
 }
 

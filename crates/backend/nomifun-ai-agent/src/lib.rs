@@ -3,6 +3,9 @@ pub(crate) mod runtime_state;
 pub mod artifact_store;
 pub mod boot_process_reaper;
 pub mod runtime_handle;
+pub mod runtime_extension;
+pub mod runtime_catalog;
+pub mod coding_runtime;
 // Rendering page-fetch adapter for knowledge URL sources. The implementation
 // consumes the application-owned Browser Session Hub and keeps the knowledge
 // crate browser-platform-free.
@@ -67,6 +70,11 @@ pub use nomi_config;
 pub use nomi_types;
 
 pub use runtime_state::AgentRuntimeState;
+pub use runtime_extension::{RegisteredAgentRuntime, RuntimeTeardown};
+pub use runtime_catalog::{
+    RuntimeEngineBinding, RuntimeEngineCatalog, RuntimeEngineDescriptor,
+    RuntimeEngineFactory, RuntimeEngineSelector, RUNTIME_HOST_CONTRACT_VERSION,
+};
 pub use boot_process_reaper::{
     AgentProcessReapReport, ConversationProcessReapVerdict, reap_orphan_agent_processes,
 };

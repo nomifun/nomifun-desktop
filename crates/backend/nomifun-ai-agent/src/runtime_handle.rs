@@ -1,15 +1,9 @@
 //! Public control contract and handle for a live Agent runtime.
 //!
-//! `AgentRuntimeControl` captures **only** the operations that every agent type
-//! implements identically and that the generic runtime registry, idle scanner,
-//! message-flow code actually needs. Anything that is type-specific
-//! (session keys, model switching, config options, etc.) lives as **inherent**
-//! methods on each concrete `XxxAgentManager`
-//! and is reached through the `AgentRuntimeHandle` enum — forcing every callsite
-//! to say out loud which agent type it is addressing.
-//!
-//! This replaces the former downcast-based manager abstraction with an explicit,
-//! closed set of runtime variants.
+//! `AgentRuntimeControl` defines the shared lifecycle and message operations.
+//! `RegisteredAgentRuntime` adds required proven teardown and explicit optional
+//! controls for production extensions. Product consumers use this handle without
+//! downcasting or adding a branch for each user-developed execution engine.
 use std::sync::Arc;
 
 use nomifun_common::{AgentKillReason, AgentType, AppError, ConversationStatus, TimestampMs};
@@ -17,6 +11,7 @@ use tokio::sync::broadcast;
 use nomifun_agent_contracts::ResolvedSnapshotRef;
 
 use crate::manager::nomi::NomiAgentManager;
+use crate::runtime_extension::RegisteredAgentRuntime;
 use crate::protocol::events::AgentStreamEvent;
 use crate::protocol::send_error::AgentSendError;
 use crate::types::SendMessageData;
@@ -51,12 +46,13 @@ pub struct AgentCapabilityActivationSnapshot {
 ///
 /// Object-safe by construction (no generic methods, no `Self` by value).
 /// Used by generic lifecycle code (runtime registry, idle scanner, stream
-/// fan-out) that genuinely does not care which agent type it is dealing
-/// with. For type-specific operations, match on [`AgentRuntimeHandle`] and
-/// call the concrete manager's inherent methods.
+/// fan-out) that genuinely does not care which engine it is dealing with.
+/// Optional controls use the object-safe RegisteredAgentRuntime extension;
+/// consumers must not downcast to concrete engine managers.
 #[async_trait::async_trait]
 pub trait AgentRuntimeControl: Send + Sync {
-    /// The type of Agent this runtime controls.
+    /// Legacy product compatibility kind, not an execution-engine identity.
+    /// Custom runtimes do not extend AgentType to register an implementation.
     fn agent_type(&self) -> AgentType;
 
     /// Conversation ID this runtime is bound to.
@@ -167,24 +163,20 @@ pub trait MockAgentRuntime: AgentRuntimeControl {
     }
 }
 
-/// Concrete, closed-set dispatcher for the five agent variants.
-///
-/// Every generic path holds an `AgentRuntimeHandle` (not `Arc<dyn AgentRuntimeControl>`):
-/// this gives us the common `AgentRuntimeControl` surface via [`Self::as_runtime`]
-/// **and** lets type-specific routes recover the concrete manager with a
-/// single `match` — no `as_any` / `downcast_ref` anywhere. Adding a new
-/// agent type means adding a new variant here; every `match` in the
-/// codebase then fails to compile until it explicitly handles the new
-/// type, which is the compile-time pressure we want.
+/// Host-owned handle shared by Conversation, Remote and Automation.
+/// New production engines use `Registered`; `Nomi` remains a legacy constructor,
+/// not an engine-selection mechanism. New engines must not add enum variants.
 #[derive(Clone)]
 pub enum AgentRuntimeHandle {
     Nomi(Arc<NomiAgentManager>),
+    /// Open production extension point. Engine implementations register a
+    /// factory returning this variant, without changing the platform enum.
+    Registered(Arc<dyn RegisteredAgentRuntime>),
     /// Test-only trait-object escape hatch used by downstream crates
     /// (conversation/cron/requirement/app tests) to inject fake agents without
     /// spinning up a real CLI or WebSocket connection. Gated behind
     /// `#[cfg(any(test, feature = "test-support"))]`: production builds
-    /// never see this variant, so every `match` in release code can
-    /// rely on the closed set of real runtime variants. The trait object is
+    /// never see this variant. The trait object is
     /// [`MockAgentRuntime`] (extends `AgentRuntimeControl`) so mocks can override
     /// test-only behavior without widening the production control contract.
     #[cfg(any(test, feature = "test-support"))]
@@ -196,6 +188,7 @@ impl AgentRuntimeHandle {
     pub fn as_runtime(&self) -> &dyn AgentRuntimeControl {
         match self {
             Self::Nomi(m) => m.as_ref(),
+            Self::Registered(m) => m.as_ref(),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.as_ref(),
         }
@@ -204,8 +197,7 @@ impl AgentRuntimeHandle {
     // ── Convenience forwarders ───────────────────────────────────────
     //
     // These stay in the final API (not a migration crutch): they turn
-    // `runtime.agent_type()` into a direct vtable-free call on the
-    // concrete `Arc<XxxManager>`, and they keep callsites terse.
+    // control operations into uniform calls and keep callsites terse.
 
     /// The type of Agent this runtime controls.
     pub fn agent_type(&self) -> AgentType {
@@ -240,6 +232,7 @@ impl AgentRuntimeHandle {
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.requires_turn_boundary_recycle(),
             Self::Nomi(_) => false,
+            Self::Registered(m) => m.requires_turn_boundary_recycle(),
         }
     }
 
@@ -287,6 +280,7 @@ impl AgentRuntimeHandle {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), AppError>> + Send>> {
         match self {
             Self::Nomi(m) => m.kill_and_wait(reason),
+            Self::Registered(m) => m.kill_and_wait(reason),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.kill_and_wait(reason),
         }
@@ -301,6 +295,7 @@ impl AgentRuntimeHandle {
     pub async fn clear_context(&self) -> Result<(), AppError> {
         match self {
             Self::Nomi(m) => m.clear_context().await,
+            Self::Registered(m) => m.clear_context().await,
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(_) => Ok(()),
         }
@@ -312,6 +307,7 @@ impl AgentRuntimeHandle {
     pub fn steer(&self, text: String) -> Result<bool, AppError> {
         match self {
             Self::Nomi(m) => m.steer(text),
+            Self::Registered(m) => m.steer(text),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.steer(text),
         }
@@ -333,6 +329,7 @@ impl AgentRuntimeHandle {
         }
         match self {
             Self::Nomi(m) => m.notify_system_resource(notice),
+            Self::Registered(m) => m.notify_system_resource(notice),
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.notify_system_resource(notice),
         }
@@ -344,6 +341,7 @@ impl AgentRuntimeHandle {
         expected_source_message_id: &str,
     ) -> Result<(), AppError> {
         match self {
+            Self::Registered(m) => m.ensure_can_rewind_last_turn(expected_source_message_id).await,
             Self::Nomi(m) => {
                 m.ensure_can_rewind_last_turn(expected_source_message_id)
                     .await
@@ -361,6 +359,7 @@ impl AgentRuntimeHandle {
     ) -> Result<(), AppError> {
         match self {
             Self::Nomi(m) => m.rewind_last_turn(expected_source_message_id).await,
+            Self::Registered(m) => m.rewind_last_turn(expected_source_message_id).await,
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(_) => Ok(()),
         }
@@ -373,6 +372,7 @@ impl AgentRuntimeHandle {
     pub async fn get_model(&self) -> Result<GetModelInfoResponse, AppError> {
         match self {
             Self::Nomi(_) => Ok(GetModelInfoResponse { model_info: None }),
+            Self::Registered(m) => m.get_model().await,
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.get_model().await,
         }
@@ -386,6 +386,7 @@ impl AgentRuntimeHandle {
             return Err(AppError::BadRequest("model_id must not be empty".into()));
         }
         match self {
+            Self::Registered(m) => m.set_model(model_id).await,
             Self::Nomi(_) => Err(AppError::BadRequest(
                 "Model switching is not supported for this agent type".into(),
             )),
@@ -398,6 +399,7 @@ impl AgentRuntimeHandle {
     pub async fn get_slash_commands(&self) -> Result<Vec<SlashCommandItem>, AppError> {
         match self {
             Self::Nomi(m) => m.get_slash_commands().await,
+            Self::Registered(m) => m.get_slash_commands().await,
             #[cfg(any(test, feature = "test-support"))]
             Self::Mock(m) => m.get_slash_commands().await,
         }
@@ -415,6 +417,7 @@ impl AgentRuntimeHandle {
             return Err(AppError::BadRequest("question must not be empty".into()));
         }
         match self {
+            Self::Registered(m) => m.handle_side_question(req).await,
             Self::Nomi(_) => {
                 Ok(SideQuestionResponse {
                     status: "unsupported".into(),

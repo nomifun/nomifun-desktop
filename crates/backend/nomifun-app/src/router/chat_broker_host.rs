@@ -876,6 +876,20 @@ struct RegisteredLease {
     material: zeroize::Zeroizing<String>,
 }
 
+/// Scope the decrypted lease to the provider-opening future. Broker
+/// cancellation drops this guard even while route lookup or HTTP opening is
+/// pending; early validation errors must release it as well.
+struct AttemptCredentialGuard {
+    registry: ConnectionCredentialLeaseRegistry,
+    handle: String,
+}
+
+impl Drop for AttemptCredentialGuard {
+    fn drop(&mut self) {
+        self.registry.release(&self.handle);
+    }
+}
+
 impl ConnectionCredentialLeaseRegistry {
     pub fn new() -> Self {
         Self::default()
@@ -1034,12 +1048,15 @@ impl ChatModelInvokePort for ProductionChatModelInvoke {
         credential: CredentialLease,
     ) -> Result<ProviderWireStream, ChatModelError> {
         let credential_handle = credential.opaque_handle().to_owned();
+        let credential_guard = AttemptCredentialGuard {
+            registry: self.credentials.clone(),
+            handle: credential_handle.clone(),
+        };
         let target = self
             .routes
             .resolve_attempt_target(&request)
             .await
             .map_err(|error| {
-                self.credentials.release(&credential_handle);
                 let mut mapped = ChatModelError::new(
                     ChatModelErrorCode::AdapterUnavailable,
                     "the exact provider transport target is unavailable",
@@ -1050,10 +1067,7 @@ impl ChatModelInvokePort for ProductionChatModelInvoke {
                 mapped
             })?;
         let lease = OpaqueCredentialLease::new(&credential_handle)
-            .map_err(|error| {
-                self.credentials.release(&credential_handle);
-                invoke_error_to_chat_error(error)
-            })?;
+            .map_err(invoke_error_to_chat_error)?;
         let body = merge_chat_provider_params(
             request.body,
             &target.provider_params,
@@ -1076,7 +1090,7 @@ impl ChatModelInvokePort for ProductionChatModelInvoke {
         // The HTTP executor has already attached the credential and returned
         // a response body stream; retain no decrypted material while the
         // provider stream is being consumed.
-        self.credentials.release(&credential_handle);
+        drop(credential_guard);
         let stream = result.map_err(invoke_error_to_chat_error)?;
         Ok(Box::pin(stream.map(|frame| {
             frame
@@ -1604,6 +1618,33 @@ mod tests {
         ChatRouteProtocol, ChatRouteRecord, ChatRouteRecordSchema, ChatRouteTask,
     };
     use serde_json::json;
+
+    #[tokio::test]
+    async fn cancelling_provider_open_releases_only_its_credential_lease() {
+        let registry = ConnectionCredentialLeaseRegistry::new();
+        for handle in ["cancelled-attempt", "other-attempt"] {
+            registry.leases.write().unwrap().insert(handle.to_owned(), RegisteredLease {
+                auth_scheme: "bearer".to_owned(),
+                material: zeroize::Zeroizing::new("{}".to_owned()),
+            });
+        }
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let task_registry = registry.clone();
+        let task = tokio::spawn(async move {
+            let _guard = AttemptCredentialGuard {
+                registry: task_registry,
+                handle: "cancelled-attempt".to_owned(),
+            };
+            let _ = started.send(());
+            std::future::pending::<()>().await;
+        });
+        ready.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        let leases = registry.leases.read().unwrap();
+        assert!(!leases.contains_key("cancelled-attempt"));
+        assert!(leases.contains_key("other-attempt"));
+    }
 
     fn selection() -> ChatRouteSelection {
         ChatRouteIdentity::new(
