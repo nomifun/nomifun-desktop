@@ -21,6 +21,20 @@
     "forkName": "{{name}} Copy"
   },
   "productBinding": {
+    "chooseModelLater": "Choose an Agent first, then configure a compatible chat model.",
+    "loadFailed": "Could not load Agent options. Please retry.",
+    "saveFailed": "Could not update the Agent. Please try again later.",
+    "modelChanged": "The current model is incompatible with this Agent. Options have been refreshed; please select again.",
+    "busy": "Wait for the current reply to finish before switching Agents.",
+    "unavailableAgent": "Unavailable Agent",
+    "currentUnavailable": "Current Agent unavailable: {{reason}}. Choose another model or Agent.",
+    "reasons": {
+      "web_search": "The current model does not provide the required web search capability",
+      "vision": "The current model does not support image understanding",
+      "model": "The current chat model is unavailable",
+      "capability": "Required capabilities are unavailable in this environment",
+      "removed": "This Agent was removed or has no saved revision"
+    },
     "label": "Agent setup",
     "saved": "Agent updated",
     "companionHint": "Controls capabilities for local and IM Companion conversations. The official Companion is used by default."

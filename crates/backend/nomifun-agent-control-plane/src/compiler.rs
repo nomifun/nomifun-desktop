@@ -364,7 +364,7 @@ fn runtime_profile_for_compile(
     }
 }
 
-fn validate_direct_catalog_availability(
+pub(crate) fn validate_direct_catalog_availability(
     payload: &AgentPresetRevisionPayload,
     catalog: &CatalogSnapshot,
     diagnostics: &mut Vec<CompilationDiagnostic>,

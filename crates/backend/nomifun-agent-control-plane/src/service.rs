@@ -622,6 +622,88 @@ impl AgentControlPlane {
         editor_response(stored, revision, document, None)
     }
 
+    /// Recover old internal official bindings without guessing a personal
+    /// Agent's identity from its capability set or display name alone.
+    pub async fn internal_official_template(
+        &self, owner: &UserId, id: &str,
+    ) -> Result<Option<OfficialPresetKey>, ControlPlaneError> {
+        let stored = self.owned_preset(owner, id).await?;
+        if !stored.session_only { return Ok(None); }
+        let Some(key) = parse_official_key(&stored.preset.display_name) else { return Ok(None); };
+        let Some(seed) = self.templates.seed(key) else { return Ok(None); };
+        let Some(revision) = self.current_revision(&stored).await? else { return Ok(None); };
+        let payload = &revision.payload;
+        let exact = payload.persona.is_empty() && payload.instructions.is_empty()
+            && payload.starter_prompts.is_empty() && payload.system_role_provider_overrides.is_empty()
+            && payload.skill_bindings == seed.skill_bindings
+            && payload.enabled_capabilities.iter().all(|item| item.action_allowlist.is_empty())
+            && payload.enabled_capabilities.iter().map(|item| item.capability.clone()).collect::<Vec<_>>() == seed.enabled_capabilities;
+        Ok(exact.then_some(key))
+    }
+
+    /// Read-only admission check for product selectors. This uses the same
+    /// route resolver and compiler as creation without creating hidden presets.
+    pub async fn validate_product_selection(
+        &self,
+        owner: &UserId,
+        template_id: Option<&str>,
+        preset_id: Option<&str>,
+        model: Option<&nomifun_api_types::AgentChatModelSelectionDto>,
+    ) -> Result<(), ControlPlaneError> {
+        let (mut document, template_key, source_snapshot) = match (template_id, preset_id) {
+            (Some(id), None) => {
+                let key = parse_official_key(id).ok_or_else(|| not_found("OfficialPresetTemplate"))?;
+                let seed = self.templates.seed(key).ok_or_else(|| not_found("OfficialPresetTemplate"))?;
+                let mut document = empty_document();
+                document.enabled_capabilities = seed.enabled_capabilities.iter()
+                    .map(selection_api).collect::<Result<Vec<_>, _>>()?;
+                document.skill_bindings = seed.skill_bindings.iter().map(exact_ref_api).collect();
+                (document, Some(key), None)
+            }
+            (None, Some(id)) => {
+                let preset = self.owned_preset(owner, id).await?;
+                let revision = self.current_revision(&preset).await?
+                    .ok_or_else(|| not_found("AgentPresetRevision"))?;
+                let snapshot = self.current_snapshot(Some(&revision)).await?.ok_or_else(|| {
+                    ControlPlaneError::canonical("CAPABILITY_NOT_MATERIALIZED",
+                        axum::http::StatusCode::UNPROCESSABLE_ENTITY, "Agent has no compiled snapshot")
+                })?;
+                (wire_cast(&revision.payload)?, None, Some(snapshot))
+            }
+            _ => return Err(ControlPlaneError::canonical("AGENT_PRESET_NOT_FOUND",
+                axum::http::StatusCode::BAD_REQUEST, "select exactly one Agent")),
+        };
+        let catalog = self.catalog.snapshot()?;
+        let mut diagnostics = Vec::new();
+        crate::compiler::validate_direct_catalog_availability(&wire_cast(&document)?, &catalog, &mut diagnostics);
+        if !diagnostics.is_empty() {
+            return Err(ControlPlaneError::with_details("CAPABILITY_NOT_MATERIALIZED",
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY, "Agent capability is unavailable",
+                json!({ "diagnostics": diagnostics })));
+        }
+        // Selecting authoring intent does not require or silently choose a model.
+        let Some(model) = model else { return Ok(()); };
+        let required = required_chat_features(document.enabled_capabilities.iter().map(|item| item.capability.id.as_str()));
+        let route = self.resolve_selected_chat_route(owner, model, &required).await?;
+        document.model_route_refs.insert(CHAT_MODEL_TASK.to_owned(), route.primary.model_route_id.as_ref().to_owned());
+        document.chat_route_records.insert(CHAT_MODEL_TASK.to_owned(), serde_json::to_value(route)?);
+        let draft = AgentPresetDraftDto {
+            preset_id: Uuid::now_v7().to_string(),
+            display_name: "Agent availability check".to_owned(),
+            description: None,
+            source_template_key: template_key.map(|key| wire_cast(&key)).transpose()?,
+            current_revision: None,
+            document,
+        };
+        let compilation = self.compiler.compile(owner, &draft, None, source_snapshot.as_ref(), template_key, &catalog)?;
+        if compilation.snapshot.is_none() {
+            return Err(ControlPlaneError::with_details("PRESET_REVISION_SAVE_FAILED",
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY, "Agent is unavailable",
+                json!({ "diagnostics": compilation.diagnostics })));
+        }
+        Ok(())
+    }
+
     pub async fn save_revision(
         &self,
         owner: &UserId,

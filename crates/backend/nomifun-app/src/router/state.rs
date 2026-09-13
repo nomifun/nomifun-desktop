@@ -976,6 +976,7 @@ async fn build_nomi_core_agent_api_state(
         super::nomi_core_session::NomiCoreProductAgentResolver::new(
             Arc::clone(&control_plane),
             Arc::clone(&services.authoritative_user_id),
+            services.database.pool().clone(),
         ),
     );
     conversation_owner
@@ -983,7 +984,7 @@ async fn build_nomi_core_agent_api_state(
         .with_product_agent_snapshot_resolver(product_agent_resolver.clone());
     services
         .cs_dialogue_engine
-        .with_agent_policy_resolver(product_agent_resolver);
+        .with_agent_policy_resolver(product_agent_resolver.clone());
     let mcp_server_repository: Arc<dyn nomifun_db::IMcpServerRepository> =
         Arc::new(nomifun_db::SqliteMcpServerRepository::new(
             services.database.pool().clone(),
@@ -1022,6 +1023,7 @@ async fn build_nomi_core_agent_api_state(
             resource_bindings,
             mcp_server_repository,
             Arc::clone(&wave4_owners),
+            product_agent_resolver,
         ),
         plugin_state,
         plugin_runtime_participant,

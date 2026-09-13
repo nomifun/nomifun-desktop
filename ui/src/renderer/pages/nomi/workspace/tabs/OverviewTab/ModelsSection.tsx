@@ -57,7 +57,6 @@ const ModelsSection: React.FC<ModelsSectionProps> = ({ companion, status, compan
                 id: profile.model.provider_id,
                 use_model: profile.model.model,
               } : undefined}
-              disabled={!profile.model}
             />
           }
         />

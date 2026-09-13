@@ -352,6 +352,16 @@
         ]
       },
       {
+        "operation_id": "product_agent_bindings.options",
+        "method": "GET",
+        "path": "/api/product-agent-bindings/{target_kind}/{target_id}",
+        "request_schema": null,
+        "response_schema": null,
+        "canonical_errors": [
+          "RESOURCE_OWNER_MISMATCH"
+        ]
+      },
+      {
         "operation_id": "product_agent_bindings.put",
         "method": "PUT",
         "path": "/api/product-agent-bindings/{target_kind}/{target_id}",
@@ -423,5 +433,5 @@
       "/v1/tools?profile"
     ]
   },
-  "payload_digest": "39f61408f6ea0d9cc23fe06c54f9b89bc38604f7a5c3dff139bd305df8fe6f04"
+  "payload_digest": "ae0ae25648dcda0908ada7e07a8da5843fcf9cc1241320c0d8fa04dd7b0bbb1d"
 }

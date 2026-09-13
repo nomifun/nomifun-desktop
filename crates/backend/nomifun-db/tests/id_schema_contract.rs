@@ -266,6 +266,7 @@ const EXPECTED_PRODUCT_TABLES: &[&str] = &[
     "plugin_product_documents",
     "plugin_projects",
     "plugin_ready_candidates",
+    "product_agent_selections",
     "product_operations",
     "provider_connections",
     "provider_model_capabilities",

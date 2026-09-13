@@ -173,6 +173,8 @@ import type {
   RemoteOpenResponse,
   RemoteTurnRequest,
   SelectProductAgentBindingRequest,
+  ProductAgentOptions,
+  ProductAgentSelectionResult,
   RevokeInstallationTokenResponse,
   RotateInstallationTokenResponse,
   SaveAgentPresetRevisionRequest,
@@ -690,8 +692,15 @@ export const agentPlatform = {
       `/api/agent-bindings/${encodeURIComponent(params.target_kind)}/${encodeURIComponent(params.target_id)}`,
     (params) => params.request
   ),
+  productBindingOptions: httpGet<
+    ProductAgentOptions,
+    { target_kind: string; target_id: string; model?: { provider_id: string; model: string } }
+  >((params) => {
+    const query = params.model ? `?${new URLSearchParams({ provider_id: params.model.provider_id, model: params.model.model })}` : '';
+    return `/api/product-agent-bindings/${encodeURIComponent(params.target_kind)}/${encodeURIComponent(params.target_id)}${query}`;
+  }),
   selectProductBinding: httpPut<
-    AgentBindingRecord,
+    ProductAgentSelectionResult,
     { target_kind: string; target_id: string; request: SelectProductAgentBindingRequest }
   >(
     (params) =>

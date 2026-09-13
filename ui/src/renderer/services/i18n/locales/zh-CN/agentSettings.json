@@ -21,6 +21,20 @@
     "forkName": "{{name}} 副本"
   },
   "productBinding": {
+    "chooseModelLater": "可先选择 Agent，再配置兼容的对话模型。",
+    "loadFailed": "暂时无法读取 Agent 选项，请重试。",
+    "saveFailed": "Agent 未能更新，请稍后重试。",
+    "modelChanged": "当前模型与此 Agent 不兼容，选项已刷新，请重新选择。",
+    "busy": "请等待当前回复结束后再切换 Agent。",
+    "unavailableAgent": "不可用的 Agent",
+    "currentUnavailable": "当前 Agent 暂不可用：{{reason}}。请更换模型或 Agent。",
+    "reasons": {
+      "web_search": "当前模型未提供所需的联网搜索能力",
+      "vision": "当前模型不支持图片理解",
+      "model": "当前对话模型不可用",
+      "capability": "所需能力在当前环境不可用",
+      "removed": "该 Agent 已删除或尚未保存"
+    },
     "label": "Agent 设定",
     "saved": "Agent 已更新",
     "companionHint": "决定伙伴本地与 IM 对话可使用的能力；未选择时使用官方“伙伴”。"
