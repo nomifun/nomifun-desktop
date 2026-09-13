@@ -5,6 +5,7 @@
  */
 
 import React from 'react';
+import WorkbenchPanel from '../WorkbenchPanel';
 
 import VideoWorkbenchComposer from './VideoWorkbenchComposer';
 import VideoWorkbenchResults from './VideoWorkbenchResults';
@@ -29,9 +30,17 @@ const VideoWorkbench: React.FC<VideoWorkbenchProps> = (props) => {
       data-results-state={videoResultsState(props.tasks)}
     >
       <main className={props.layout === 'side' ? styles.sideLayout : styles.bottomLayout}>
-        {props.layout === 'side' ? <VideoWorkbenchComposer {...props} /> : null}
+        {props.layout === 'side' ? (
+          <WorkbenchPanel kind='video'>
+            <VideoWorkbenchComposer {...props} />
+          </WorkbenchPanel>
+        ) : null}
         <VideoWorkbenchResults {...props} />
-        {props.layout === 'bottom' ? <VideoWorkbenchComposer {...props} /> : null}
+        {props.layout === 'bottom' ? (
+          <WorkbenchPanel kind='video' position='bottom'>
+            <VideoWorkbenchComposer {...props} />
+          </WorkbenchPanel>
+        ) : null}
       </main>
     </div>
   );

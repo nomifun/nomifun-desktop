@@ -67,14 +67,8 @@ const ContentSider: React.FC<ContentSiderProps> = ({
   return (
     <aside
       aria-label={ariaLabel}
-      className={classNames('content-sider relative z-[1] shrink-0 h-full min-h-0 flex flex-col bg-2', className)}
-      style={{
-        width,
-        // Soft right edge: a gentle shadow bleeding onto the content area instead
-        // of a stark 1px divider. Paired with the recessed bg-2 tone, the boundary
-        // reads柔和 in both themes — no hard line.
-        boxShadow: '6px 0 14px -8px rgba(0, 0, 0, 0.14)',
-      }}
+      className={classNames('content-sider relative z-[1] shrink-0 h-full min-h-0 flex flex-col', styles.surface, className)}
+      style={{ width }}
     >
       {header ? <div className='shrink-0'>{header}</div> : null}
       <div className={classNames('flex-1 min-h-0 overflow-y-auto', styles.scrollArea)}>{children}</div>
