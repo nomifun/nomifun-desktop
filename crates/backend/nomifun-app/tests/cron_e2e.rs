@@ -494,6 +494,7 @@ async fn cj1b_agent_preset_is_frozen_by_the_host_before_cron_persistence() {
             "POST",
             "/api/agent-presets/from-template/chat.minimal",
             json!({
+                "reuse_existing": false,
                 "display_name": "Cron preset",
                 "description": null,
                 "model_route_refs": {},

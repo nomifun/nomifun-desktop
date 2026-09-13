@@ -379,8 +379,8 @@ export interface CreateAgentPresetRequest {
 
 export interface CreateAgentPresetFromTemplateRequest {
   model?: { provider_id: string; model: string };
-  /** Prepare an internal launch configuration; false creates a personal Agent. */
-  reuse_existing?: boolean;
+  /** Required intent: true prepares an internal launch configuration; false creates a personal Agent. */
+  reuse_existing: boolean;
   display_name: string;
   description?: string;
   model_route_refs: Record<string, string>;

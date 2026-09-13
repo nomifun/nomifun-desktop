@@ -200,6 +200,7 @@ export function useAgentSettingsController() {
         const response = await agentPlatform.createFromTemplate.invoke({
           template_id: templateKey,
           request: {
+            reuse_existing: false,
             display_name: displayName,
             model_route_refs: modelRouteRefs,
             chat_route_records: chatRouteRecords,

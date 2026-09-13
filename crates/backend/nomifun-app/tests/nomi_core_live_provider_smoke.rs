@@ -540,6 +540,7 @@ async fn create_agent_preset(
         Method::POST,
         "/api/agent-presets/from-template/chat.minimal",
         Some(json!({
+            "reuse_existing": false,
             "display_name": "Live Step Plan product smoke",
             "model_route_refs": {},
             "chat_route_records": {},
