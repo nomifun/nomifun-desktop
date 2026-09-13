@@ -27,13 +27,14 @@ describe('GuidPage advanced controls', () => {
     expect(source.includes('knowledge: IKnowledgeBinding')).toBe(true);
   });
 
-  test('exposes target resource controls only from the selected preset capability contract', () => {
+  test('exposes target resource controls from the capability contract while preserving explicit project context', () => {
     const page = readSource(new URL('./GuidPage.tsx', import.meta.url));
     const capabilityHook = readSource(
       new URL('./hooks/useGuidPresetCapabilities.ts', import.meta.url)
     );
 
     expect(page.includes('const workspaceEnabled =')).toBe(true);
+    expect(page.includes('Boolean(guidInput.dir.trim()) ||')).toBe(true);
     expect(page.includes("presetResourceKinds.has('workspace')")).toBe(true);
     expect(page.includes("presetResourceKinds.has('knowledge_base')")).toBe(true);
     expect(page.includes('showWorkspace={workspaceEnabled}')).toBe(true);
