@@ -13,7 +13,7 @@
 | CAR-D-003 | 外部进程 | 生产不运行 `codex-app-server`、Codex Sidecar 或 app-server protocol |
 | CAR-D-004 | 模型入口 | 所有模型请求只经过 `nomifun-chat-model-broker` |
 | CAR-D-005 | Tool 入口 | 所有 Tool 调用只经过 NomiFun Capability Kernel 和 owning domain |
-| CAR-D-006 | 产品事实 | `AgentSession`/`SessionEvent` 是唯一产品事实，Runtime cache 可丢弃 |
+| CAR-D-006 | 产品事实 | 唯一生产 Session owner 保有事实与恢复权，Runtime cache 可丢弃；本地落地按 CAR-D-019 使用现有 Conversation 链，不另建 SessionStore |
 | CAR-D-007 | 文件与进程 | File、Patch、VCS、Process、PTY 由 NomiFun owner 管理 |
 | CAR-D-008 | 安全语义 | FullAuto + Snapshot/ThinAuthority；不迁移 Codex Guardian/Approval |
 | CAR-D-009 | 范围排除 | voice、realtime、audio、TUI、CLI、Codex Auth/Provider/rollout 永久排除 |
@@ -21,7 +21,7 @@
 | CAR-D-011 | 多引擎并存 | Legacy Engine 与 Coding Engine 可并存；每个 AgentSession 只绑定一个 exact Engine Build |
 | CAR-D-012 | 灰度语义 | Stable/Canary 是 Catalog 指向 immutable Build 的别名，不是 Build 自身属性 |
 | CAR-D-013 | 切换边界 | Engine 选择只作用于新建 Session 或显式 Fork；同一 Session 不切换、不静默 fallback |
-| CAR-D-014 | 本地施工形态 | 当前电脑先交付未接生产组合根的 `nomifun-coding-engine`；远程主工作进程负责统一 Registry、联调和验收 |
+| CAR-D-014 | 本地施工形态 | 源分支隔离交付已取入；后续开发统一在本地 `rf/agent-capability-platform-v2`，不 push；原远程接线安排由用户新指令替代 |
 | CAR-D-015 | 隔离 Catalog 范围 | `CodingEngineCatalog` 只管理 Coding family Build；最终异构 Registry 属于 Agent Platform |
 | CAR-D-016 | Codex 源基线 | CAR 独立固定 `../codex` commit `6af345407d9c2a568da9d01b6c4b81a9e61495c0`；一期旧 Sidecar 合同中的其他 frozen SHA 不得复用为新 Engine provenance |
 | CAR-D-017 | 标准 Tool 层级 | Inspect/Edit/Execute/Full 只是工作台/ToolPlan 筛选；Compiled Snapshot 仍是能力上限 |
@@ -44,6 +44,27 @@
    为匹配文档名称复制第二份 actor/turn loop。
 
 ## 决策变更规则
+
+### CAR-D-019：保留当前生产 Session owner，开放 Runtime 接入（2026-09-13）
+
+主重构分支当前默认运行 `NomiCoreSessionOwner → ConversationService →
+AgentRuntimeRegistry`，并有回归测试禁止将 Fresh-v4/Codex Session 路由接到
+默认产品链。原 CAR 交接中的 `AgentPlatform → AgentSessionStore/SessionEvent`
+不是该生产链，不能仅通过它完成桌面 Coding Engine 嵌入。
+
+结合用户要求“开放平台、可替换 Runtime、全部在本地主重构分支完成”，本地实施
+采用当前 Nomi-core owner，在现有 runtime factory/handle 接入开放实现；不把
+整体 Session 存储迁移作为引擎集成的隐含前置，不引入第二套 Session 事实。
+
+已实现 `RegisteredAgentRuntime`、通用 `RuntimeEngineCatalog` 与
+`CodingAgentRuntime` 适配器。Nomi 也使用 Registered 生产句柄；新增 Runtime
+不增加具体引擎枚举分支。factory 是受信任进程内代码扩展点，不是沙箱或稳定
+动态库 ABI。family/profile/channel 使用开放标识，exact Build 校验失败不回退。
+
+CAR-07 仍是 in_progress：真实生产 owner ports、创建/Fork 持久绑定及默认路由
+尚未接通，不把适配器 fixture 测试当作产品嵌入验收。下一步是实现接线，不再
+等待同一架构选择的重复确认。证据见 `LOCAL-INTEGRATION-2026-09-13.zh.md`，
+二次开发合同见 `RUNTIME-EXTENSIONS.zh.md`。不修改上一阶段文档。
 
 如果新的决定会改变以下任一项，必须新建或修改一个 CAR 任务，并在本文件追加记录：
 

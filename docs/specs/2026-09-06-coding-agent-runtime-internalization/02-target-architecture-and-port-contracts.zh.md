@@ -209,8 +209,9 @@ Runtime private event ID 不得成为产品操作 ID。
 传递 `CancellationToken`，并在 turn loop 内返回明确 `Cancelled` 终态。但是当前
 平台合同仍有两个待远程接线的缺口：
 
-- `ChatBrokerPort::open_chat_stream` 没有 cancellation 参数；当前 adapter 只能停止
-  转发和消费，不能保证底层 Provider 请求立即终止；
+- 2026-09-13 本地主重构分支新增 `ChatBrokerPort::open_chat_stream_cancellable`，
+  Coding adapter 已使用它取消 Broker 持有的本机 attempt future；不承诺
+  Provider 服务端停止计算。生产 Session 端到端验收仍待 CAR-D-019 决策及接线；
 - 现有 Capability handler 调用合同没有 cancellation 参数；Process/SSH/MCP 等 owner
   需要在 `CAR-03`/`CAR-04` 明确取消传播和清理报告。
 

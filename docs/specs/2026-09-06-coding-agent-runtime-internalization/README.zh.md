@@ -7,6 +7,14 @@
 > 文档状态：**IMPLEMENTATION IN PROGRESS / 本地隔离切片已启动**
 
 本目录是 NomiFun 下一阶段 Coding Agent Runtime 内化的独立设计与实施入口。
+
+2026-09-13 本地主重构分支合入情况见
+[`LOCAL-INTEGRATION-2026-09-13.zh.md`](LOCAL-INTEGRATION-2026-09-13.zh.md)。
+隔离代码已取入；原交接的 Session 主链与当前默认产品实现不同，生产嵌入尚未完成。
+开放 Runtime 接口、通用目录和 Coding 适配器见
+[`RUNTIME-EXTENSIONS.zh.md`](RUNTIME-EXTENSIONS.zh.md)。以下原始远程施工安排
+已由用户要求的“统一本地主重构分支开发，不 push”替代，当前实施按 CAR-D-019。
+
 它不属于 `2026-08-28-agent-capability-platform-v2` 一期文档，也不修改一期文档
 中的任何设计、状态、Manifest 或 Gate。
 
