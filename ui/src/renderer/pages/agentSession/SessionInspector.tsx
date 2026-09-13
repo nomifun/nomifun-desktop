@@ -41,10 +41,6 @@ const SessionInspector: React.FC<{
           <strong>{capabilities?.active_capabilities.length ?? 0}</strong>
         </div>
         <div>
-          <span>{t('agentSettings.capabilities.onDemand')}</span>
-          <strong>{capabilities?.on_demand_capabilities.length ?? 0}</strong>
-        </div>
-        <div>
           <span>{t('agentSettings.session.lastSeq')}</span>
           <strong>{head.last_seq}</strong>
         </div>
@@ -65,18 +61,6 @@ const SessionInspector: React.FC<{
                 {t('agentSettings.session.activeCapabilities')}
               </Tag>
             ) : (
-              <span>{t('agentSettings.common.none')}</span>
-            )}
-          </div>
-        </Collapse.Item>
-        <Collapse.Item name='on-demand' header={t('agentSettings.capabilities.onDemand')}>
-          <div className={styles.tagList}>
-            {(capabilities?.compact_on_demand_index ?? []).map((item) => (
-              <Tag key={item.capability_id} size='small' color='gray'>
-                {item.display_name}
-              </Tag>
-            ))}
-            {(capabilities?.compact_on_demand_index ?? []).length === 0 && (
               <span>{t('agentSettings.common.none')}</span>
             )}
           </div>

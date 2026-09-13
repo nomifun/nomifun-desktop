@@ -16,14 +16,12 @@ const capability = {
 };
 
 describe('AgentPreset draft model', () => {
-  test('keeps initial and on-demand exact sets mutually exclusive', () => {
+  test('preserves a restricted action allowlist when enabling an existing capability', () => {
     const empty = createEmptyAgentPresetDocument();
-    const initial = placeCapability(empty, capability, 'initial');
-    const onDemand = placeCapability(initial, capability, 'on_demand');
-
-    expect(capabilityPlacement(initial, capability.id)).toBe('initial');
-    expect(onDemand.initial_capabilities).toHaveLength(0);
-    expect(onDemand.on_demand_capabilities).toHaveLength(1);
+    const enabled = { ...empty, enabled_capabilities: [{ capability, action_allowlist: ['fs.read'] }] };
+    expect(capabilityPlacement(enabled, capability)).toBe('enabled');
+    expect(placeCapability(enabled, capability, 'enabled').enabled_capabilities[0].action_allowlist).toEqual(['fs.read']);
+    expect(placeCapability(enabled, capability, 'none').enabled_capabilities).toEqual([]);
   });
 
   test('chat-style empty documents contain no hidden capability surface', () => {
@@ -33,8 +31,7 @@ describe('AgentPreset draft model', () => {
       document: createEmptyAgentPresetDocument(),
     };
 
-    expect(draft.document.initial_capabilities).toEqual([]);
-    expect(draft.document.on_demand_capabilities).toEqual([]);
+    expect(draft.document.enabled_capabilities).toEqual([]);
     expect(draft.document.skill_bindings).toEqual([]);
     expect('resource_bindings' in draft.document).toBe(false);
     expect(draft.document.chat_route_records).toEqual({});

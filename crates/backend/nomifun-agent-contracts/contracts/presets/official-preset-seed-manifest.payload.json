@@ -4,14 +4,13 @@
   "target_runtime_feature_inventory_digest": "bc01fffa050a721debc7740405a05f53b966d4e2dc2d8b4392e321d944fca2ee",
   "templates": {
     "chat.minimal": {
-      "initial_capabilities": [],
-      "on_demand_capabilities": [],
+      "enabled_capabilities": [],
       "skill_bindings": [],
       "required_resource_kinds": [],
       "required_runtime_features": []
     },
     "assistant.general": {
-      "initial_capabilities": [
+      "enabled_capabilities": [
         {
           "id": "session.attachments.read",
           "version": "1.0.0"
@@ -27,9 +26,7 @@
         {
           "id": "memory.project.read",
           "version": "1.0.0"
-        }
-      ],
-      "on_demand_capabilities": [
+        },
         {
           "id": "web.search",
           "version": "1.0.0"
@@ -68,7 +65,7 @@
       "required_runtime_features": []
     },
     "coding.codex": {
-      "initial_capabilities": [
+      "enabled_capabilities": [
         {
           "id": "session.attachments.read",
           "version": "1.0.0"
@@ -144,9 +141,7 @@
         {
           "id": "skill.hooks",
           "version": "1.0.0"
-        }
-      ],
-      "on_demand_capabilities": [
+        },
         {
           "id": "agent.delegate",
           "version": "1.0.0"
@@ -245,7 +240,7 @@
       ]
     },
     "companion.default": {
-      "initial_capabilities": [
+      "enabled_capabilities": [
         {
           "id": "companion.persona",
           "version": "1.0.0"
@@ -265,9 +260,7 @@
         {
           "id": "channel.receive",
           "version": "1.0.0"
-        }
-      ],
-      "on_demand_capabilities": [
+        },
         {
           "id": "companion.roster",
           "version": "1.0.0"
@@ -319,7 +312,7 @@
       "required_runtime_features": []
     },
     "robot.default": {
-      "initial_capabilities": [
+      "enabled_capabilities": [
         {
           "id": "robot.link",
           "version": "1.0.0"
@@ -347,9 +340,7 @@
         {
           "id": "knowledge.read",
           "version": "1.0.0"
-        }
-      ],
-      "on_demand_capabilities": [
+        },
         {
           "id": "robot.vision",
           "version": "1.0.0"
@@ -386,7 +377,7 @@
       "required_runtime_features": []
     },
     "customer-service.default": {
-      "initial_capabilities": [
+      "enabled_capabilities": [
         {
           "id": "customer_service.dialogue",
           "version": "1.0.0"
@@ -406,9 +397,7 @@
         {
           "id": "channel.receive",
           "version": "1.0.0"
-        }
-      ],
-      "on_demand_capabilities": [
+        },
         {
           "id": "customer_service.notes.write",
           "version": "1.0.0"
@@ -435,7 +424,7 @@
       "required_runtime_features": []
     },
     "creative-studio.default": {
-      "initial_capabilities": [
+      "enabled_capabilities": [
         {
           "id": "workshop.canvas.read",
           "version": "1.0.0"
@@ -443,9 +432,7 @@
         {
           "id": "workshop.asset.read",
           "version": "1.0.0"
-        }
-      ],
-      "on_demand_capabilities": [
+        },
         {
           "id": "workshop.canvas.edit",
           "version": "1.0.0"

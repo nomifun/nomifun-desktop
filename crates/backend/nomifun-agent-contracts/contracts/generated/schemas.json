@@ -126,7 +126,7 @@
             "description": "Complete route facts used by the Fresh-v4 persistence writer. Legacy\nopaque IDs are not sufficient to construct a provider request.",
             "type": "object"
           },
-          "initial_capabilities": {
+          "enabled_capabilities": {
             "items": {
               "$ref": "#/$defs/CapabilitySelection"
             },
@@ -140,12 +140,6 @@
               "type": "string"
             },
             "type": "object"
-          },
-          "on_demand_capabilities": {
-            "items": {
-              "$ref": "#/$defs/CapabilitySelection"
-            },
-            "type": "array"
           },
           "persona": {
             "type": "string"
@@ -175,8 +169,7 @@
         "required": [
           "schema_version",
           "model_route_refs",
-          "initial_capabilities",
-          "on_demand_capabilities",
+          "enabled_capabilities",
           "skill_bindings",
           "persona",
           "instructions"
@@ -517,7 +510,7 @@
             "description": "Complete route facts used by the Fresh-v4 persistence writer. Legacy\nopaque IDs are not sufficient to construct a provider request.",
             "type": "object"
           },
-          "initial_capabilities": {
+          "enabled_capabilities": {
             "items": {
               "$ref": "#/$defs/CapabilitySelection"
             },
@@ -531,12 +524,6 @@
               "type": "string"
             },
             "type": "object"
-          },
-          "on_demand_capabilities": {
-            "items": {
-              "$ref": "#/$defs/CapabilitySelection"
-            },
-            "type": "array"
           },
           "persona": {
             "type": "string"
@@ -566,8 +553,7 @@
         "required": [
           "schema_version",
           "model_route_refs",
-          "initial_capabilities",
-          "on_demand_capabilities",
+          "enabled_capabilities",
           "skill_bindings",
           "persona",
           "instructions"
@@ -1077,7 +1063,7 @@
         "description": "Complete route facts used by the Fresh-v4 persistence writer. Legacy\nopaque IDs are not sufficient to construct a provider request.",
         "type": "object"
       },
-      "initial_capabilities": {
+      "enabled_capabilities": {
         "items": {
           "$ref": "#/$defs/CapabilitySelection"
         },
@@ -1091,12 +1077,6 @@
           "type": "string"
         },
         "type": "object"
-      },
-      "on_demand_capabilities": {
-        "items": {
-          "$ref": "#/$defs/CapabilitySelection"
-        },
-        "type": "array"
       },
       "persona": {
         "type": "string"
@@ -1126,8 +1106,7 @@
     "required": [
       "schema_version",
       "model_route_refs",
-      "initial_capabilities",
-      "on_demand_capabilities",
+      "enabled_capabilities",
       "skill_bindings",
       "persona",
       "instructions"
@@ -1519,37 +1498,6 @@
         ],
         "type": "object"
       },
-      "CompactOnDemandCapabilityEntry": {
-        "additionalProperties": false,
-        "properties": {
-          "activation_plan_digest": {
-            "type": "string"
-          },
-          "capability_id": {
-            "type": "string"
-          },
-          "display_name": {
-            "type": "string"
-          },
-          "search_terms": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "short_description": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "capability_id",
-          "display_name",
-          "short_description",
-          "search_terms",
-          "activation_plan_digest"
-        ],
-        "type": "object"
-      },
       "ContributionLock": {
         "additionalProperties": false,
         "properties": {
@@ -1723,46 +1671,6 @@
         "required": [
           "source_kind",
           "source_identity"
-        ],
-        "type": "object"
-      },
-      "PrecomputedActivationPlan": {
-        "additionalProperties": false,
-        "properties": {
-          "capability_bundle": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "context_schema_refs": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "model_route_refs": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "root_capability_id": {
-            "type": "string"
-          },
-          "tool_schema_refs": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "root_capability_id",
-          "capability_bundle",
-          "tool_schema_refs",
-          "context_schema_refs",
-          "model_route_refs"
         ],
         "type": "object"
       },
@@ -2032,22 +1940,16 @@
               }
             ]
           },
-          "compact_on_demand_index": {
-            "items": {
-              "$ref": "#/$defs/CompactOnDemandCapabilityEntry"
-            },
-            "type": "array"
-          },
           "compiled_runtime_profile_digest": {
             "type": "string"
           },
-          "initial_capabilities": {
+          "enabled_capabilities": {
             "items": {
               "$ref": "#/$defs/ResolvedCapability"
             },
             "type": "array"
           },
-          "initial_miniapp_capabilities": {
+          "enabled_miniapp_capabilities": {
             "items": {
               "$ref": "#/$defs/ResolvedMiniAppCapability"
             },
@@ -2064,24 +1966,6 @@
               "type": "string"
             },
             "type": "object"
-          },
-          "on_demand_activation_plans": {
-            "additionalProperties": {
-              "$ref": "#/$defs/PrecomputedActivationPlan"
-            },
-            "type": "object"
-          },
-          "on_demand_capabilities": {
-            "items": {
-              "$ref": "#/$defs/ResolvedCapability"
-            },
-            "type": "array"
-          },
-          "on_demand_miniapp_capabilities": {
-            "items": {
-              "$ref": "#/$defs/ResolvedMiniAppCapability"
-            },
-            "type": "array"
           },
           "preset_revision_ref": {
             "$ref": "#/$defs/PresetRevisionRef"
@@ -2141,10 +2025,7 @@
           "required_runtime_features",
           "compiled_runtime_profile_digest",
           "model_route_refs",
-          "initial_capabilities",
-          "on_demand_capabilities",
-          "on_demand_activation_plans",
-          "compact_on_demand_index",
+          "enabled_capabilities",
           "capability_allowlist",
           "skill_locks",
           "mcp_tool_locks",
@@ -9221,13 +9102,7 @@
       "OfficialPresetSeed": {
         "additionalProperties": false,
         "properties": {
-          "initial_capabilities": {
-            "items": {
-              "$ref": "#/$defs/ExactVersionRef"
-            },
-            "type": "array"
-          },
-          "on_demand_capabilities": {
+          "enabled_capabilities": {
             "items": {
               "$ref": "#/$defs/ExactVersionRef"
             },
@@ -9255,8 +9130,7 @@
           }
         },
         "required": [
-          "initial_capabilities",
-          "on_demand_capabilities",
+          "enabled_capabilities",
           "skill_bindings",
           "required_resource_kinds",
           "required_runtime_features"
@@ -16449,22 +16323,15 @@
           "context": {
             "$ref": "#/$defs/RuntimeCommandContext"
           },
+          "enabled_capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
           "full_auto": {
             "$ref": "#/$defs/FullAutoExecutionWire"
-          },
-          "initial_capabilities": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "uniqueItems": true
-          },
-          "on_demand_capabilities": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "uniqueItems": true
           },
           "profile_kind": {
             "$ref": "#/$defs/RuntimeProfileKind"
@@ -16480,8 +16347,7 @@
           "context",
           "profile_kind",
           "full_auto",
-          "initial_capabilities",
-          "on_demand_capabilities",
+          "enabled_capabilities",
           "typed_resource_bindings"
         ],
         "type": "object"

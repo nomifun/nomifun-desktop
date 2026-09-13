@@ -67,9 +67,7 @@ pub struct AgentResolvedSnapshot {
     #[serde(default)]
     pub excluded_auto_skills: Vec<String>,
     #[serde(default)]
-    pub initial_capabilities: Vec<String>,
-    #[serde(default)]
-    pub on_demand_capabilities: Vec<String>,
+    pub enabled_capabilities: Vec<String>,
     #[serde(default)]
     pub required_resource_kinds: BTreeSet<String>,
     #[serde(default)]
@@ -188,8 +186,7 @@ pub struct AgentPresetDocumentDto {
     /// this map contains the matching complete record.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub chat_route_records: BTreeMap<String, Value>,
-    pub initial_capabilities: Vec<CapabilitySelectionDto>,
-    pub on_demand_capabilities: Vec<CapabilitySelectionDto>,
+    pub enabled_capabilities: Vec<CapabilitySelectionDto>,
     pub skill_bindings: Vec<ExactCatalogRefDto>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub system_role_provider_overrides: BTreeMap<String, RoleProviderSelectionDto>,
@@ -233,8 +230,7 @@ pub struct AgentPresetSummaryDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OfficialPresetSeedDto {
-    pub initial_capabilities: Vec<ExactCatalogRefDto>,
-    pub on_demand_capabilities: Vec<ExactCatalogRefDto>,
+    pub enabled_capabilities: Vec<ExactCatalogRefDto>,
     pub skill_bindings: Vec<ExactCatalogRefDto>,
     pub required_resource_kinds: BTreeSet<String>,
     pub required_runtime_features: BTreeSet<String>,
@@ -386,12 +382,10 @@ pub struct PreviewCapabilityDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PreviewSummaryDto {
-    pub initial_count: u32,
-    pub on_demand_count: u32,
+    pub enabled_count: u32,
     pub active_at_start_count: u32,
     pub model_tool_count: u32,
     pub context_contributor_count: u32,
-    pub on_demand_index_count: u32,
     pub skill_count: u32,
     pub mcp_count: u32,
     pub required_resource_kind_count: u32,
@@ -401,10 +395,8 @@ pub struct PreviewSummaryDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RevisionDiffDto {
-    pub added_initial: BTreeSet<String>,
-    pub removed_initial: BTreeSet<String>,
-    pub added_on_demand: BTreeSet<String>,
-    pub removed_on_demand: BTreeSet<String>,
+    pub added_enabled: BTreeSet<String>,
+    pub removed_enabled: BTreeSet<String>,
     pub added_skills: BTreeSet<String>,
     pub removed_skills: BTreeSet<String>,
     pub model_routes_changed: bool,
@@ -422,9 +414,7 @@ pub struct SnapshotInspectorDto {
     pub runtime_profile: Option<String>,
     pub required_runtime_protocol_version: String,
     pub required_runtime_features: BTreeSet<String>,
-    pub initial_capabilities: Vec<PreviewCapabilityDto>,
-    pub on_demand_capabilities: Vec<PreviewCapabilityDto>,
-    pub compact_on_demand_index: Vec<String>,
+    pub enabled_capabilities: Vec<PreviewCapabilityDto>,
     pub tool_schema_refs: Vec<String>,
     pub context_schema_refs: Vec<String>,
     pub mcp_materializations: Vec<McpToolCatalogItemDto>,
@@ -1091,9 +1081,8 @@ mod snapshot_tests {
                 "writeback": false,
                 "grounded": false
             },
-            "initial_capabilities": [],
-            "on_demand_capabilities": [],
-            "required_resource_kinds": [],
+            "enabled_capabilities": [],
+                        "required_resource_kinds": [],
             "included_skills": [],
             "excluded_auto_skills": [],
             "warnings": []
@@ -1225,9 +1214,8 @@ mod snapshot_tests {
                 "document": {
                     "schema_version": "1.0.0",
                     "model_route_refs": {},
-                    "initial_capabilities": [],
-                    "on_demand_capabilities": [],
-                    "skill_bindings": [],
+                    "enabled_capabilities": [],
+                                        "skill_bindings": [],
                     "resource_bindings": [],
                     "persona": "",
                     "instructions": ""

@@ -372,9 +372,8 @@ impl AgentControlPlane {
             .ok_or_else(|| not_found("OfficialPresetTemplate"))?;
         let display_name = nonempty_name(request.display_name)?;
         let required_chat_features = required_chat_features(
-            seed.initial_capabilities
+            seed.enabled_capabilities
                 .iter()
-                .chain(&seed.on_demand_capabilities)
                 .map(|capability| capability.id.as_ref()),
         );
         let mut model_route_refs = request.model_route_refs;
@@ -414,21 +413,12 @@ impl AgentControlPlane {
             schema_version: "1.0.0".into(),
             model_route_refs,
             chat_route_records,
-            initial_capabilities: seed
-                .initial_capabilities
+            enabled_capabilities: seed
+                .enabled_capabilities
                 .iter()
                 .map(selection_api)
                 .collect::<Result<Vec<_>, _>>()?,
-            on_demand_capabilities: seed
-                .on_demand_capabilities
-                .iter()
-                .map(selection_api)
-                .collect::<Result<Vec<_>, _>>()?,
-            skill_bindings: seed
-                .skill_bindings
-                .iter()
-                .map(exact_ref_api)
-                .collect(),
+            skill_bindings: seed.skill_bindings.iter().map(exact_ref_api).collect(),
             system_role_provider_overrides: BTreeMap::new(),
             persona: String::new(),
             instructions: String::new(),
@@ -502,9 +492,8 @@ impl AgentControlPlane {
         let required = required_chat_features(
             revision
                 .payload
-                .initial_capabilities
+                .enabled_capabilities
                 .iter()
-                .chain(&revision.payload.on_demand_capabilities)
                 .map(|selection| selection.capability.id.as_ref()),
         );
         let route = self
@@ -599,9 +588,8 @@ impl AgentControlPlane {
         }
         let required = required_chat_features(
             document
-                .initial_capabilities
+                .enabled_capabilities
                 .iter()
-                .chain(&document.on_demand_capabilities)
                 .map(|selection| selection.capability.id.as_str()),
         );
         if let Some(record) = self
@@ -1433,8 +1421,7 @@ fn empty_document() -> nomifun_api_types::AgentPresetDocumentDto {
         schema_version: "1.0.0".into(),
         model_route_refs: BTreeMap::new(),
         chat_route_records: BTreeMap::new(),
-        initial_capabilities: Vec::new(),
-        on_demand_capabilities: Vec::new(),
+        enabled_capabilities: Vec::new(),
         skill_bindings: Vec::new(),
         system_role_provider_overrides: BTreeMap::new(),
         persona: String::new(),

@@ -20,7 +20,7 @@ export function capabilityCategory(reference: CapabilityReference): CapabilityCa
 }
 
 export const selectedCapabilityReferences = (document: AgentPresetDocument): CapabilityReference[] =>
-  [...new Map([...document.initial_capabilities, ...document.on_demand_capabilities]
+  [...new Map(document.enabled_capabilities
     .map(({ capability }) => [capabilityReferenceKey(capability), capability])).values()];
 
 export const isBuiltinCapability = (item: CapabilityCatalogItem): boolean =>

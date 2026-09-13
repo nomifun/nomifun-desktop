@@ -257,9 +257,8 @@ async fn assert_official_preset_catalog_integrity(
         let template_key = format!("{:?}", template.template_key);
         let direct_capabilities = template
             .seed
-            .initial_capabilities
-            .iter()
-            .chain(&template.seed.on_demand_capabilities);
+            .enabled_capabilities
+            .iter();
         for reference in direct_capabilities {
             require_available_exact_capability(
                 phase,

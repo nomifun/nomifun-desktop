@@ -310,10 +310,8 @@ pub enum KernelError {
     },
     #[error("capability {capability_id:?} is not active")]
     CapabilityNotActive { capability_id: CapabilityId },
-    #[error("active generation conflict: expected {expected}, current {current}")]
-    ActivationGenerationConflict { expected: u64, current: u64 },
-    #[error("active generation counter is exhausted")]
-    ActivationGenerationExhausted,
+    #[error("registry generation counter is exhausted")]
+    RegistryGenerationExhausted,
     #[error("capability handler failed: {reason}")]
     CapabilityExecution { reason: String },
     // Do not include the trusted host diagnostic in Display. Kernel errors are
@@ -350,7 +348,7 @@ impl KernelError {
             Self::CapabilityNotInPreset { .. } => CAPABILITY_NOT_IN_PRESET,
             Self::CapabilityProvenanceDrift { .. }
             | Self::SkillProvenanceDrift { .. } => CAPABILITY_NOT_MATERIALIZED,
-            Self::CapabilityNotActive { .. } | Self::ActivationGenerationConflict { .. } => {
+            Self::CapabilityNotActive { .. } => {
                 CAPABILITY_NOT_ACTIVE
             }
             Self::CapabilityUnavailableOnPlatform { .. }

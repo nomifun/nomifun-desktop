@@ -227,8 +227,7 @@ fn project_revision_parts(
         resolved_model: Some(resolved_model.clone()),
         included_skills,
         excluded_auto_skills: Vec::new(),
-        initial_capabilities: capability_tools.initial_capability_ids.clone(),
-        on_demand_capabilities: capability_tools.on_demand_capability_ids.clone(),
+        enabled_capabilities: capability_tools.initial_capability_ids.clone(),
         required_resource_kinds,
         knowledge_policy,
         warnings: Vec::new(),
@@ -239,7 +238,7 @@ fn project_revision_parts(
         "chat_config_revision_digest": route.primary.config_revision_digest,
         "allowed_tools": capability_tools.allowed_tools,
         "enforce_tool_allowlist": true,
-        "deferred_tools": capability_tools.deferred_tools,
+        "deferred_tools": [],
         "browser_use": capability_tools.browser_use,
         "computer_use": capability_tools.computer_use,
         // This is a subtractive runtime profile, not a capability grant. The
@@ -251,7 +250,6 @@ fn project_revision_parts(
         // `vision_input` trait before its attachment loader may emit an image
         // content block.
         "vision_input": capability_tools.vision_input,
-        "vision_on_demand": capability_tools.vision_on_demand,
         "mcp_capabilities": {
             "connect": capability_tools.mcp_connect,
             "tool_proxy": capability_tools.mcp_tool_proxy,
@@ -359,13 +357,10 @@ fn exact_chat_route(
 #[derive(Debug, Default)]
 struct ProjectedCapabilityTools {
     initial_capability_ids: Vec<String>,
-    on_demand_capability_ids: Vec<String>,
     allowed_tools: Vec<String>,
-    deferred_tools: Vec<String>,
     browser_use: bool,
     computer_use: bool,
     vision_input: bool,
-    vision_on_demand: bool,
     mcp_connect: bool,
     mcp_tool_proxy: bool,
     mcp_resource: bool,
@@ -376,7 +371,6 @@ impl ProjectedCapabilityTools {
     fn all_capability_ids(&self) -> impl Iterator<Item = &str> {
         self.initial_capability_ids
             .iter()
-            .chain(&self.on_demand_capability_ids)
             .map(String::as_str)
     }
 }
@@ -587,16 +581,7 @@ pub(crate) fn validate_nomi_capability_projection(
 ) -> Result<(), AppError> {
     revision
         .payload
-        .initial_capabilities
-        .iter()
-        .try_for_each(|selection| {
-            validate_native_capability_if_declared(
-                selection.capability.id.as_ref(),
-            )
-        })?;
-    revision
-        .payload
-        .on_demand_capabilities
+        .enabled_capabilities
         .iter()
         .try_for_each(|selection| {
             validate_native_capability_if_declared(
@@ -611,9 +596,8 @@ pub(crate) fn validate_nomi_capability_projection(
 fn validate_web_search_route(revision: &AgentPresetRevision) -> Result<(), AppError> {
     let selected = revision
         .payload
-        .initial_capabilities
+        .enabled_capabilities
         .iter()
-        .chain(&revision.payload.on_demand_capabilities)
         .any(|selection| selection.capability.id.as_ref() == "web.search");
     if !selected {
         return Ok(());
@@ -640,9 +624,8 @@ fn validate_web_search_route(revision: &AgentPresetRevision) -> Result<(), AppEr
 fn validate_vision_route(revision: &AgentPresetRevision) -> Result<(), AppError> {
     let vision_selected = revision
         .payload
-        .initial_capabilities
+        .enabled_capabilities
         .iter()
-        .chain(&revision.payload.on_demand_capabilities)
         .any(|selection| selection.capability.id.as_ref() == "llm.vision");
     if !vision_selected {
         return Ok(());
@@ -752,11 +735,9 @@ fn project_capabilities_with_dynamic(
     mut dynamic_provider_names: impl FnMut(&str, bool) -> Vec<String>,
 ) -> Result<ProjectedCapabilityTools, AppError> {
     let mut initial_tools = BTreeSet::new();
-    let mut deferred_tools = BTreeSet::new();
     let mut browser_use = false;
     let mut computer_use = false;
     let mut vision_input = false;
-    let mut vision_on_demand = false;
     let mut mcp_connect = false;
     let mut mcp_tool_proxy = false;
     let mut mcp_resource = false;
@@ -765,7 +746,6 @@ fn project_capabilities_with_dynamic(
     let mut project = |
         selection: &nomifun_agent_contracts::CapabilitySelection,
         target: &mut BTreeSet<String>,
-        deferred: bool,
     | -> Result<(), AppError> {
         let capability_id = selection.capability.id.as_ref();
         match capability_id {
@@ -780,7 +760,7 @@ fn project_capabilities_with_dynamic(
             Ok(projection) => projection,
             Err(native_error) => {
                 let dynamic =
-                    dynamic_provider_names(capability_id, deferred);
+                    dynamic_provider_names(capability_id, false);
                 if dynamic.is_empty() {
                     if is_native_nomi_capability(capability_id) {
                         return Err(native_error);
@@ -799,7 +779,7 @@ fn project_capabilities_with_dynamic(
                 target.extend(tools.iter().map(|tool| (*tool).to_owned()));
             }
             NomiCapabilityProjection::HostedTools => {
-                let hosted = dynamic_provider_names(capability_id, deferred);
+                let hosted = dynamic_provider_names(capability_id, false);
                 if hosted.is_empty() {
                     // Conversation creation happens before a concrete
                     // AgentSession ID exists. The app-owned runtime provider
@@ -832,14 +812,7 @@ fn project_capabilities_with_dynamic(
                         ),
                     ));
                 }
-                if deferred {
-                    vision_on_demand = true;
-                    target.insert(
-                        nomifun_ai_agent::vision_activation::VISION_ACTIVATE_TOOL_NAME.to_owned(),
-                    );
-                } else {
-                    vision_input = true;
-                }
+                vision_input = true;
             }
             NomiCapabilityProjection::WebSearchTool => {
                 if route.primary.protocol
@@ -864,38 +837,23 @@ fn project_capabilities_with_dynamic(
         Ok(())
     };
 
-    for selection in &revision.payload.initial_capabilities {
-        project(selection, &mut initial_tools, false)?;
-    }
-    for selection in &revision.payload.on_demand_capabilities {
-        project(selection, &mut deferred_tools, true)?;
+    for selection in &revision.payload.enabled_capabilities {
+        project(selection, &mut initial_tools)?;
     }
 
-    let mut allowed_tools = initial_tools.clone();
-    allowed_tools.extend(deferred_tools.iter().cloned());
-    if !deferred_tools.is_empty() {
-        allowed_tools.insert("ToolSearch".to_owned());
-    }
+    let allowed_tools = initial_tools;
 
     Ok(ProjectedCapabilityTools {
         initial_capability_ids: revision
             .payload
-            .initial_capabilities
-            .iter()
-            .map(|selection| selection.capability.id.as_ref().to_owned())
-            .collect(),
-        on_demand_capability_ids: revision
-            .payload
-            .on_demand_capabilities
+            .enabled_capabilities
             .iter()
             .map(|selection| selection.capability.id.as_ref().to_owned())
             .collect(),
         allowed_tools: allowed_tools.into_iter().collect(),
-        deferred_tools: deferred_tools.into_iter().collect(),
         browser_use,
         computer_use,
         vision_input,
-        vision_on_demand,
         mcp_connect,
         mcp_tool_proxy,
         mcp_resource,
@@ -963,13 +921,13 @@ mod tests {
             schema_version: "1.0.0".into(),
             model_route_refs: BTreeMap::from([(CHAT_TASK.into(), "route-1".into())]),
             chat_route_records: BTreeMap::from([(CHAT_TASK.into(), route())]),
-            initial_capabilities: vec![
+            enabled_capabilities: vec![
                 capability("fs.read", true),
                 capability("fs.write", true),
                 capability("process.exec", true),
                 capability("knowledge.read", false),
             ],
-            on_demand_capabilities: Vec::new(),
+
             skill_bindings: vec![SkillRef {
                 id: "skill.review".into(),
                 version: "1.0.0".into(),
@@ -1018,13 +976,13 @@ mod tests {
                     .identity_for(reference.revision_id(), CHAT_TASK)
                     .unwrap(),
             ),
-            initial_capabilities: vec![resolved_capability("fs.read")],
-            on_demand_capabilities: Vec::new(),
-            initial_miniapp_capabilities: Vec::new(),
-            on_demand_miniapp_capabilities: Vec::new(),
+            enabled_capabilities: vec![resolved_capability("fs.read")],
+
+            enabled_miniapp_capabilities: Vec::new(),
+
             required_resource_kinds: BTreeSet::from(["workspace".into()]),
-            on_demand_activation_plans: BTreeMap::new(),
-            compact_on_demand_index: Vec::new(),
+
+
             capability_allowlist: BTreeSet::from(["fs.read".into()]),
             skill_locks: vec![nomifun_agent_contracts::ResolvedSkillLock {
                 skill: SkillRef {
@@ -1249,14 +1207,14 @@ mod tests {
         fixture
             .2
             .payload
-            .initial_capabilities
+            .enabled_capabilities
             .push(capability("vcs.push", true));
         refresh_fixture_identity(&mut fixture);
         let projection = project(input(&fixture))
             .expect("pre-Session projection keeps the hosted capability ceiling");
         assert!(projection
             .snapshot
-            .initial_capabilities
+            .enabled_capabilities
             .contains(&"vcs.push".to_owned()));
         assert_eq!(projection.request.extra["allowed_tools"], baseline);
         assert_eq!(
@@ -1271,7 +1229,7 @@ mod tests {
         fixture
             .2
             .payload
-            .initial_capabilities
+            .enabled_capabilities
             .push(capability("plugin.example.tool", true));
         refresh_fixture_identity(&mut fixture);
 
@@ -1282,36 +1240,9 @@ mod tests {
     }
 
     #[test]
-    fn on_demand_capability_is_deferred_and_gets_tool_search() {
-        let mut fixture = fixture();
-        fixture
-            .2
-            .payload
-            .on_demand_capabilities
-            .push(capability("vcs.stage", false));
-        refresh_fixture_identity(&mut fixture);
-
-        let result = project(input(&fixture)).expect("on-demand capability projection");
-        let allowed = result.request.extra["allowed_tools"]
-            .as_array()
-            .expect("allowlist");
-        let deferred = result.request.extra["deferred_tools"]
-            .as_array()
-            .expect("deferred tool list");
-        assert!(allowed.iter().any(|tool| tool == "vcs.stage"));
-        assert!(deferred.iter().any(|tool| tool == "vcs.stage"));
-        assert!(allowed.iter().any(|tool| tool == "ToolSearch"));
-        assert_eq!(
-            result.snapshot.on_demand_capabilities,
-            vec!["vcs.stage".to_owned()]
-        );
-    }
-
-    #[test]
     fn zero_capability_preset_projects_to_deny_all() {
         let mut fixture = fixture();
-        fixture.2.payload.initial_capabilities.clear();
-        fixture.2.payload.on_demand_capabilities.clear();
+        fixture.2.payload.enabled_capabilities.clear();
         refresh_fixture_identity(&mut fixture);
 
         let result = project(input(&fixture)).expect("zero-capability projection");
@@ -1319,14 +1250,13 @@ mod tests {
         assert_eq!(result.request.extra["deferred_tools"], json!([]));
         assert_eq!(result.request.extra["enforce_tool_allowlist"], true);
         assert_eq!(result.request.extra["vision_input"], false);
-        assert!(result.snapshot.initial_capabilities.is_empty());
-        assert!(result.snapshot.on_demand_capabilities.is_empty());
+        assert!(result.snapshot.enabled_capabilities.is_empty());
     }
 
     #[test]
     fn vision_capability_projects_into_the_real_message_context_path() {
         let mut fixture = fixture();
-        fixture.2.payload.initial_capabilities = vec![
+        fixture.2.payload.enabled_capabilities = vec![
             capability("session.attachments.read", true),
             capability("llm.vision", true),
         ];
@@ -1345,7 +1275,6 @@ mod tests {
             .expect("vision-capable exact Chat route owns llm.vision");
         let result = project(input(&fixture)).expect("vision context projection");
         assert_eq!(result.request.extra["vision_input"], true);
-        assert_eq!(result.request.extra["vision_on_demand"], false);
         assert_eq!(result.request.extra["allowed_tools"], json!([]));
         assert_eq!(
             nomi_capability_projection("llm.vision").unwrap(),
@@ -1354,38 +1283,9 @@ mod tests {
     }
 
     #[test]
-    fn on_demand_vision_stays_inactive_until_its_deferred_tool_runs() {
-        let mut fixture = fixture();
-        fixture.2.payload.initial_capabilities.clear();
-        fixture.2.payload.on_demand_capabilities = vec![capability("llm.vision", false)];
-        fixture
-            .2
-            .payload
-            .chat_route_records
-            .get_mut(CHAT_TASK)
-            .unwrap()
-            .primary
-            .features
-            .insert(ChatRouteFeature::ImageInput);
-        refresh_fixture_identity(&mut fixture);
-
-        let result = project(input(&fixture)).expect("deferred vision projection");
-        assert_eq!(result.request.extra["vision_input"], false);
-        assert_eq!(result.request.extra["vision_on_demand"], true);
-        assert_eq!(
-            result.request.extra["deferred_tools"],
-            json!(["activate_vision_input"])
-        );
-        assert_eq!(
-            result.request.extra["allowed_tools"],
-            json!(["ToolSearch", "activate_vision_input"])
-        );
-    }
-
-    #[test]
     fn vision_capability_rejects_a_text_only_exact_chat_route() {
         let mut fixture = fixture();
-        fixture.2.payload.initial_capabilities = vec![capability("llm.vision", true)];
+        fixture.2.payload.enabled_capabilities = vec![capability("llm.vision", true)];
         refresh_fixture_identity(&mut fixture);
 
         let validation = validate_nomi_capability_projection(&fixture.2)
@@ -1400,14 +1300,14 @@ mod tests {
     #[test]
     fn initial_capability_is_full_schema_candidate_and_not_deferred() {
         let mut fixture = fixture();
-        fixture.2.payload.initial_capabilities = vec![capability("vcs.stage", true)];
+        fixture.2.payload.enabled_capabilities = vec![capability("vcs.stage", true)];
         refresh_fixture_identity(&mut fixture);
 
         let result = project(input(&fixture)).expect("initial capability projection");
         assert_eq!(result.request.extra["allowed_tools"], json!(["vcs.stage"]));
         assert_eq!(result.request.extra["deferred_tools"], json!([]));
         assert_eq!(
-            result.snapshot.initial_capabilities,
+            result.snapshot.enabled_capabilities,
             vec!["vcs.stage".to_owned()]
         );
     }
@@ -1418,7 +1318,7 @@ mod tests {
         fixture
             .2
             .payload
-            .initial_capabilities
+            .enabled_capabilities
             .extend([
                 capability("vcs.status", true),
                 capability("vcs.diff", true),
@@ -1451,7 +1351,7 @@ mod tests {
     }
 
     #[test]
-    fn repaired_builtins_project_only_their_native_tools_in_both_placements() {
+    fn enabled_builtins_project_only_their_native_tools() {
         for (id, names) in [
             ("web.fetch", vec!["web_fetch"]),
             (
@@ -1463,22 +1363,16 @@ mod tests {
             ("agent.fork", vec!["agent_fork"]),
             ("schedule.store", vec!["cron_create", "cron_delete", "cron_list"]),
         ] {
-            for deferred in [false, true] {
+            {
                 let mut fixture = fixture();
-                fixture.2.payload.initial_capabilities.clear();
-                fixture.2.payload.on_demand_capabilities.clear();
-                if deferred {
-                    fixture.2.payload.on_demand_capabilities.push(capability(id, false));
-                } else {
-                    fixture.2.payload.initial_capabilities.push(capability(id, true));
-                }
+                fixture.2.payload.enabled_capabilities.clear();
+                        fixture.2.payload.enabled_capabilities.push(capability(id, true));
                 refresh_fixture_identity(&mut fixture);
                 let result = project(input(&fixture)).expect("repaired builtin projection");
                 let mut allowed = names.clone();
-                if deferred { allowed.push("ToolSearch"); }
                 allowed.sort();
                 assert_eq!(result.request.extra["allowed_tools"], json!(allowed), "{id}");
-                assert_eq!(result.request.extra["deferred_tools"], if deferred { json!(names) } else { json!([]) }, "{id}");
+                assert_eq!(result.request.extra["deferred_tools"], json!([]), "{id}");
                 assert_eq!(result.request.extra["enforce_tool_allowlist"], true);
             }
         }
@@ -1487,7 +1381,7 @@ mod tests {
     #[test]
     fn web_search_requires_and_uses_an_exact_responses_search_route() {
         let mut search_fixture = fixture();
-        search_fixture.2.payload.initial_capabilities = vec![capability("web.search", true)];
+        search_fixture.2.payload.enabled_capabilities = vec![capability("web.search", true)];
         let route = search_fixture
             .2
             .payload
@@ -1504,27 +1398,27 @@ mod tests {
         assert_eq!(result.request.extra["allowed_tools"], json!(["web_search"]));
 
         let mut unsupported = fixture();
-        unsupported.2.payload.initial_capabilities = vec![capability("web.search", true)];
+        unsupported.2.payload.enabled_capabilities = vec![capability("web.search", true)];
         refresh_fixture_identity(&mut unsupported);
         assert!(validate_nomi_capability_projection(&unsupported.2).is_err());
         assert!(project(input(&unsupported)).is_err());
     }
 
     #[test]
-    fn citation_render_is_deferred_and_resolves_only_session_search_results() {
+    fn enabled_citation_render_resolves_only_session_search_results() {
         let mut fixture = fixture();
-        fixture.2.payload.initial_capabilities.clear();
-        fixture.2.payload.on_demand_capabilities = vec![capability("citation.render", false)];
+        fixture.2.payload.enabled_capabilities.clear();
+        fixture.2.payload.enabled_capabilities = vec![capability("citation.render", false)];
         refresh_fixture_identity(&mut fixture);
 
         let result = project(input(&fixture)).expect("citation context projection");
         assert_eq!(
             result.request.extra["allowed_tools"],
-            json!(["ToolSearch", "citation_render"])
+            json!(["citation_render"])
         );
         assert_eq!(
             result.request.extra["deferred_tools"],
-            json!(["citation_render"])
+            json!([])
         );
         assert_eq!(
             nomi_capability_projection("citation.render").unwrap(),
@@ -1535,8 +1429,8 @@ mod tests {
     #[test]
     fn mcp_capabilities_project_the_exact_session_lifecycle_and_tools() {
         let mut fixture = fixture();
-        fixture.2.payload.initial_capabilities.clear();
-        fixture.2.payload.on_demand_capabilities = [
+        fixture.2.payload.enabled_capabilities.clear();
+        fixture.2.payload.enabled_capabilities = [
             "mcp.connect",
             "mcp.tool_proxy",
             "mcp.resource",
@@ -1560,7 +1454,6 @@ mod tests {
         assert_eq!(
             result.request.extra["allowed_tools"],
             json!([
-                "ToolSearch",
                 "mcp_connect",
                 "mcp_resource_list",
                 "mcp_resource_read",
@@ -1569,12 +1462,7 @@ mod tests {
         );
         assert_eq!(
             result.request.extra["deferred_tools"],
-            json!([
-                "mcp_connect",
-                "mcp_resource_list",
-                "mcp_resource_read",
-                "mcp_tool_proxy",
-            ])
+            json!([])
         );
         assert_eq!(
             nomi_capability_projection("mcp.connect").unwrap(),

@@ -117,8 +117,8 @@ const GuidPage: React.FC = () => {
     : presetCapabilities.requiredResourceKinds;
   const presetCapabilityIds = agentSelection.selectedTemplate
     ? new Set([
-        ...agentSelection.selectedTemplate.seed.initial_capabilities,
-        ...agentSelection.selectedTemplate.seed.on_demand_capabilities,
+        ...agentSelection.selectedTemplate.seed.enabled_capabilities,
+
       ].map((capability) => capability.id))
     : presetCapabilities.capabilityIds;
   const resourceSelectionResolution = resolveAgentResourceSelections(presetResourceKinds, resourceSelectionValue);

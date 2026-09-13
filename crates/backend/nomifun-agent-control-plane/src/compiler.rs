@@ -247,9 +247,8 @@ impl PresetPreviewCompiler {
             let (registry, mut environment) = canonical_inputs
                 .expect("dirty compilation has canonical inputs");
             let selected_capabilities = payload
-                .initial_capabilities
+                .enabled_capabilities
                 .iter()
-                .chain(&payload.on_demand_capabilities)
                 .map(|selection| selection.capability.id.clone())
                 .collect::<BTreeSet<_>>();
             environment.required_runtime_profile = runtime_profile_for_compile(
@@ -371,9 +370,8 @@ fn snapshot_matches_registry(
 ) -> Result<bool, ControlPlaneError> {
     for resolved in snapshot
         .content
-        .initial_capabilities
+        .enabled_capabilities
         .iter()
-        .chain(&snapshot.content.on_demand_capabilities)
     {
         let Some(current) = registry.capability(&resolved.capability.id) else {
             return Ok(false);
@@ -428,9 +426,8 @@ fn validate_direct_catalog_availability(
 ) {
     let mut seen = BTreeSet::new();
     for selection in payload
-        .initial_capabilities
+        .enabled_capabilities
         .iter()
-        .chain(&payload.on_demand_capabilities)
     {
         let reference = &selection.capability;
         if !seen.insert(reference.id.clone()) {
@@ -486,9 +483,8 @@ fn resolved_miniapp_capabilities_for_payload(
 ) -> Result<Vec<ResolvedMiniAppCapability>, ControlPlaneError> {
     let mut capabilities = Vec::new();
     for selection in payload
-        .initial_capabilities
+        .enabled_capabilities
         .iter()
-        .chain(&payload.on_demand_capabilities)
     {
         if let Some(capability) =
             resolved_miniapp_capability_for_selection(selection, catalog)?
@@ -639,9 +635,8 @@ fn contribution_locks_for_payload(
     let mut seen = BTreeSet::new();
 
     for selection in payload
-        .initial_capabilities
+        .enabled_capabilities
         .iter()
-        .chain(payload.on_demand_capabilities.iter())
     {
         if let Some(miniapp_capability) =
             resolved_miniapp_capability_for_selection(selection, catalog)?
@@ -799,9 +794,8 @@ fn validate_template_baseline(
         return;
     }
     let selected = payload
-        .initial_capabilities
+        .enabled_capabilities
         .iter()
-        .chain(&payload.on_demand_capabilities)
         .map(|selection| selection.capability.id.clone())
         .collect::<BTreeSet<_>>();
     let missing_capabilities = templates
@@ -852,14 +846,14 @@ fn preview_summary(
         .map(|snapshot| {
             snapshot
                 .content
-                .initial_capabilities
+                .enabled_capabilities
                 .iter()
                 .map(|capability| capability.capability.id.clone())
                 .collect::<BTreeSet<_>>()
         })
         .unwrap_or_else(|| {
             payload
-                .initial_capabilities
+                .enabled_capabilities
                 .iter()
                 .map(|selection| selection.capability.id.clone())
                 .collect()
@@ -868,9 +862,8 @@ fn preview_summary(
         .map(|snapshot| snapshot.content.capability_allowlist.clone())
         .unwrap_or_else(|| {
             payload
-                .initial_capabilities
+                .enabled_capabilities
                 .iter()
-                .chain(&payload.on_demand_capabilities)
                 .map(|selection| selection.capability.id.clone())
                 .collect()
         });
@@ -896,8 +889,7 @@ fn preview_summary(
         })
         .collect::<BTreeSet<_>>();
     PreviewSummaryDto {
-        initial_count: payload.initial_capabilities.len() as u32,
-        on_demand_count: payload.on_demand_capabilities.len() as u32,
+        enabled_count: payload.enabled_capabilities.len() as u32,
         active_at_start_count: initial_manifests.len() as u32,
         model_tool_count: initial_manifests
             .iter()
@@ -915,9 +907,6 @@ fn preview_summary(
                     .len() as u32
             })
             .sum(),
-        on_demand_index_count: snapshot
-            .map(|snapshot| snapshot.content.compact_on_demand_index.len() as u32)
-            .unwrap_or(payload.on_demand_capabilities.len() as u32),
         skill_count: payload.skill_bindings.len() as u32,
         mcp_count: catalog
             .mcp_tools
@@ -984,19 +973,10 @@ fn preview_inspector(
     snapshot: Option<&ResolvedSnapshotEnvelope>,
 ) -> Result<SnapshotInspectorDto, ControlPlaneError> {
     let initial_refs = snapshot
-        .map(|snapshot| snapshot.content.initial_capabilities.clone())
+        .map(|snapshot| snapshot.content.enabled_capabilities.clone())
         .unwrap_or_else(|| {
             payload
-                .initial_capabilities
-                .iter()
-                .map(|selection| preview_resolved_capability(selection, catalog))
-                .collect()
-        });
-    let on_demand_refs = snapshot
-        .map(|snapshot| snapshot.content.on_demand_capabilities.clone())
-        .unwrap_or_else(|| {
-            payload
-                .on_demand_capabilities
+                .enabled_capabilities
                 .iter()
                 .map(|selection| preview_resolved_capability(selection, catalog))
                 .collect()
@@ -1005,15 +985,14 @@ fn preview_inspector(
         .map(|snapshot| snapshot.content.capability_allowlist.clone())
         .unwrap_or_else(|| {
             payload
-                .initial_capabilities
+                .enabled_capabilities
                 .iter()
-                .chain(&payload.on_demand_capabilities)
                 .map(|selection| selection.capability.id.clone())
                 .collect()
         });
     let mut tool_schema_refs = BTreeSet::new();
     let mut context_schema_refs = BTreeSet::new();
-    for reference in initial_refs.iter().chain(on_demand_refs.iter()) {
+    for reference in initial_refs.iter() {
         if let Some(capability) = catalog.find_capability(&reference.capability) {
             for action in &capability.contributions.actions {
                 tool_schema_refs.insert(action.input_schema.as_ref().to_owned());
@@ -1029,10 +1008,6 @@ fn preview_inspector(
         }
     }
     let initial = initial_refs
-        .iter()
-        .map(|reference| preview_capability(reference, catalog))
-        .collect();
-    let on_demand = on_demand_refs
         .iter()
         .map(|reference| preview_capability(reference, catalog))
         .collect();
@@ -1078,24 +1053,7 @@ fn preview_inspector(
                     .collect()
             })
             .unwrap_or_default(),
-        initial_capabilities: initial,
-        on_demand_capabilities: on_demand,
-        compact_on_demand_index: snapshot
-            .map(|snapshot| {
-                snapshot
-                    .content
-                    .compact_on_demand_index
-                    .iter()
-                    .map(|entry| entry.capability_id.as_ref().to_owned())
-                    .collect()
-            })
-            .unwrap_or_else(|| {
-                payload
-                    .on_demand_capabilities
-                    .iter()
-                    .map(|selection| selection.capability.id.as_ref().to_owned())
-                    .collect()
-            }),
+        enabled_capabilities: initial,
         tool_schema_refs: tool_schema_refs.into_iter().collect(),
         context_schema_refs: context_schema_refs.into_iter().collect(),
         mcp_materializations,
@@ -1150,28 +1108,16 @@ fn revision_diff(
     payload: &AgentPresetRevisionPayload,
 ) -> RevisionDiffDto {
     let before_initial = current
-        .map(|revision| capability_ids(&revision.payload.initial_capabilities))
-        .unwrap_or_default();
-    let before_on_demand = current
-        .map(|revision| capability_ids(&revision.payload.on_demand_capabilities))
+        .map(|revision| capability_ids(&revision.payload.enabled_capabilities))
         .unwrap_or_default();
     let before_skills = current
         .map(|revision| skill_ids(&revision.payload.skill_bindings))
         .unwrap_or_default();
-    let after_initial = capability_ids(&payload.initial_capabilities);
-    let after_on_demand = capability_ids(&payload.on_demand_capabilities);
+    let after_initial = capability_ids(&payload.enabled_capabilities);
     let after_skills = skill_ids(&payload.skill_bindings);
     RevisionDiffDto {
-        added_initial: after_initial.difference(&before_initial).cloned().collect(),
-        removed_initial: before_initial.difference(&after_initial).cloned().collect(),
-        added_on_demand: after_on_demand
-            .difference(&before_on_demand)
-            .cloned()
-            .collect(),
-        removed_on_demand: before_on_demand
-            .difference(&after_on_demand)
-            .cloned()
-            .collect(),
+        added_enabled: after_initial.difference(&before_initial).cloned().collect(),
+        removed_enabled: before_initial.difference(&after_initial).cloned().collect(),
         added_skills: after_skills.difference(&before_skills).cloned().collect(),
         removed_skills: before_skills.difference(&after_skills).cloned().collect(),
         model_routes_changed: current.is_none_or(|revision| {
@@ -1266,17 +1212,8 @@ mod tests {
             schema_version: VersionString::from("1.0.0"),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),
-            initial_capabilities: seed
-                .initial_capabilities
-                .iter()
-                .cloned()
-                .map(|capability| CapabilitySelection {
-                    capability,
-                    action_allowlist: BTreeSet::new(),
-                })
-                .collect(),
-            on_demand_capabilities: seed
-                .on_demand_capabilities
+            enabled_capabilities: seed
+                .enabled_capabilities
                 .iter()
                 .cloned()
                 .map(|capability| CapabilitySelection {
@@ -1552,11 +1489,11 @@ mod tests {
             schema_version: VersionString::from("1.0.0"),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),
-            initial_capabilities: vec![CapabilitySelection {
+            enabled_capabilities: vec![CapabilitySelection {
                 capability: capability_ref,
                 action_allowlist: BTreeSet::new(),
             }],
-            on_demand_capabilities: Vec::new(),
+
             skill_bindings: vec![SkillRef {
                 id: skill_definition.id,
                 version: skill_definition.version,
@@ -1706,11 +1643,11 @@ mod tests {
             schema_version: VersionString::from("1.0.0"),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),
-            initial_capabilities: vec![CapabilitySelection {
+            enabled_capabilities: vec![CapabilitySelection {
                 capability: capability_ref.clone(),
                 action_allowlist: action_allowlist.clone(),
             }],
-            on_demand_capabilities: Vec::new(),
+
             skill_bindings: Vec::new(),
             system_role_provider_overrides: BTreeMap::new(),
             persona: "MiniApp fixture".to_owned(),
@@ -1731,7 +1668,7 @@ mod tests {
         }]);
 
         let resolved =
-            resolved_miniapp_capability_for_selection(&payload.initial_capabilities[0], &catalog)
+            resolved_miniapp_capability_for_selection(&payload.enabled_capabilities[0], &catalog)
                 .unwrap()
                 .unwrap();
         assert_eq!(resolved.capability, capability_ref);

@@ -1,4 +1,4 @@
-# Capability 目录与 Agent Preset 产品/领域设计（经 05 修订）
+# Capability 目录与 Agent Preset 产品/领域设计（2026-09-13 二态修订）
 
 > 文档性质：这是经 2026-09-02 止损修订后的**产品与领域设计**，用于说明
 > Capability Catalog、Agent Preset、typed resource binding、Compiler、Snapshot
@@ -16,7 +16,7 @@
 
 - Package、Capability、Skill、MCP Tool Mapping 四层领域边界；
 - 版本化 Agent Preset 与不可变 Revision；
-- initial/on-demand Capability 组合；
+- 单一已启用 Capability 集合；
 - typed resource binding、principal 与业务 ownership；
 - 单一 canonical Compiler；
 - 只包含实际执行闭包的 Resolved Snapshot；
@@ -645,10 +645,8 @@ AgentPresetRevision
   schema_version
   surfaces[]
   model_routes[]
-  initial_capabilities[]
-  on_demand_capabilities[]
+  enabled_capabilities[]
   skill_bindings[]
-  typed_resource_bindings[]
   persona / instructions
   context_policy
   execution_constraints
@@ -667,20 +665,13 @@ draft 先执行普通 Save，对 clean draft 复用当前 Revision，然后创�
 ```text
 capability_ref
 action_allowlist[]
-resource_binding_refs[]
 ```
 
-Initial/on-demand 由 selection 所在集合表达，不再重复保存 `required`、`exposure`、
-destination constraints、context/tool budget override 或未传给 handler 的 config。
-未来只有出现真实执行语义和消费者时，才为 selection 增加字段。
+是否启用仅由 `enabled_capabilities` 集合表达。同一个 CapabilityId 只能出现一次，未在集合内的能力不授权给 Agent；不存在启动启用、按需启用或第三种配置状态。
 
-同一 CapabilityId 只能出现在一个集合：
+集合保存 exact roots 和 action allowlist。Compiler 为 roots 计算最小 dependency closure。编辑器启用时先展示需要同时启用的依赖，禁用时先展示会一并禁用的依赖方，确认后一次提交完整变更。
 
-- `initial_capabilities`：Session 启动后立即可见；
-- `on_demand_capabilities`：属于 frozen ceiling，可在 turn boundary 激活。
-
-两个集合只保存 direct roots。Compiler 为实际 roots 计算最小 dependency closure，不把
-整个 Catalog 复制进 Snapshot。
+Resource 实例仍由实际会话或使用目标选择；需要配置和来源当前不可用是诊断信息，不是另一种启用模式。
 
 ### 7.3 Skill Binding
 
@@ -798,13 +789,13 @@ RuntimeProfile、Snapshot digest 或 Provider selection 算法。
 Compiler 的确定性流程：
 
 1. 读取 exact AgentPresetRevision；
-2. 校验 initial/on-demand direct roots 不重复；
+2. 校验已启用 direct roots 不重复；
 3. 只为这些 roots 计算最小 dependency closure 和 conflict；
 4. 冻结 exact Skill，并校验 Skill requirement 子集；
 5. 为已选择的 MCP-backed Capability 校验 mapping 和 schema hash；
 6. 为实际选择的 Browser/Computer member解析 exact Role Provider；
 7. 校验所选闭包需要的 platform、model route、typed resources 和 Runtime features；
-8. 生成 initial plan、on-demand plan、authority 和 diagnostics；
+8. 为已启用闭包生成 Tool/Context 投影、authority 和 diagnostics；
 9. 生成一个 Resolved Snapshot。
 
 Compiler 不做：
@@ -831,7 +822,7 @@ Snapshot 只锁定实际执行闭包：
 - model route 与 connection config revision；
 - typed resource binding refs；
 - 当前执行所需 Runtime protocol/features；
-- initial/on-demand 分组与 activation plan；
+- 单一已启用能力集合及其最小依赖闭包；
 - Browser/Computer exact Provider lock；
 - Snapshot content digest。
 
@@ -850,8 +841,7 @@ Snapshot 只锁定实际执行闭包：
 ### 11.3 RuntimeProfile
 
 `CompiledRuntimeProfile` 是 Compiler 的内部派生结果，不是用户字段。它把 Snapshot 翻译为
-当前固定 Runtime 可消费的 instructions、feature flags、Tool/Context plan 和 compact
-on-demand index。
+当前固定 Runtime 可消费的 instructions、feature flags 和 Tool/Context 投影。
 
 `chat.minimal` 从空 Capability 集合正向构造，不先初始化 Coding、Workspace、Git、Shell、
 Skill、MCP、Knowledge、Browser 或 Computer 再过滤。
@@ -860,22 +850,17 @@ Skill、MCP、Knowledge、Browser 或 Computer 再过滤。
 功能测试确认，不通过固定 Capability 数量、统计 benchmark 或另一套 reference runner
 证明。
 
-### 11.4 On-demand Activation
+### 11.4 已启用能力的执行
 
-On-demand 只在 frozen Snapshot ceiling 内工作：
+Session 从已保存 Snapshot 一次建立完整的已启用闭包，普通工具立即进入允许的工具集合，ContextContributor 在初始化时组装。Session 中不存在搜索后增加能力权限的入口、activation plan、compact index 或可单调扩张的授权集合。
 
-1. Compiler 已预计算该 root 的最小 activation plan；
-2. Runtime 在 turn boundary 把选中的 plan 合并进 active set；
-3. 激活不再次调用 Compiler，也不重新选择 Provider、模型或资源；
-4. 外部资源在第一次实际调用时 lazy acquire；
-5. Snapshot 外 Capability 返回 `CAPABILITY_NOT_IN_PRESET`。
+每次实际调用仍检查精确 Snapshot、action allowlist、principal、资源 ownership 和来源契约。Snapshot 外能力返回 `CAPABILITY_NOT_IN_PRESET`。外部连接可在实际使用时建立，这是资源生命周期管理，不改变能力是否启用。
 
-Active set 是 Session 执行状态，不是第二份 Snapshot。它只能在 Snapshot ceiling 内单调
-增加。
+修改能力需要保存新的 Revision；新会话使用新的 Snapshot，不在运行中悄悄扩大已有 Snapshot 的能力范围。
 
 ### 11.5 Compatibility
 
-兼容性在建立 Runtime binding、激活实际 Capability 或其执行实现变化时检查并缓存，不在
+兼容性在建立 Runtime binding 或其执行实现变化时检查并缓存，不在
 每个普通 Turn 对整个 ceiling 和全局 inventory 重算。
 
 如果原 Snapshot 所需的 exact Capability、Provider、schema 或 Runtime feature 不再可用，
@@ -906,7 +891,7 @@ SessionEvent 保存恢复和产品历史真正需要的语义事实：
 - 最终用户消息；
 - 最终 assistant message；
 - 中断时最多一份 bounded partial；
-- Capability activation；
+- 初始能力集合与 Snapshot 身份；
 - Tool call 和 bounded final result；
 - 外部不确定 Effect 的 reservation/result reference；
 - completed compaction；
@@ -1137,7 +1122,7 @@ Remote 不提供 Capability scope、Runtime mode、confirmation 或全局 Regist
 - 保存；
 - 试用 Agent。
 
-Initial/on-demand 可由模板和 Capability metadata 提供默认值；高级覆盖放在开发者视图。
+工作台使用“已启用能力 / 全部能力”双栏，两侧独立分类与搜索。勾选仅是临时批量操作；移入启用、移出禁用，支持单项加减和撤销。Agent 列表复用会话页的贴边 ContentSider 与固定标题栏开关。
 普通用户不需要手填 CapabilityId、Snapshot digest、ResourceId、owner 或 canonical JSON。
 
 Revision、Snapshot、Provider provenance、protocol 和 raw diagnostic 放入折叠的技术详情，

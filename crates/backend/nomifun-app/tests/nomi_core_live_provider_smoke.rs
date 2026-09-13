@@ -671,10 +671,9 @@ async fn create_agent_preset(
             )
         })?;
     document.insert(
-        "initial_capabilities".to_owned(),
+        "enabled_capabilities".to_owned(),
         Value::Array(selections),
     );
-    document.insert("on_demand_capabilities".to_owned(), json!([]));
     document.insert("skill_bindings".to_owned(), json!([]));
     document.insert(
         "persona".to_owned(),
@@ -706,9 +705,8 @@ async fn create_agent_preset(
     let preview = envelope_data("agent_settings.preview", preview)?;
     if preview.get("status").and_then(Value::as_str) != Some("ready")
         || preview.get("can_create_session").and_then(Value::as_bool) != Some(true)
-        || preview.pointer("/summary/initial_count").and_then(Value::as_u64)
+        || preview.pointer("/summary/enabled_count").and_then(Value::as_u64)
             != Some(CODING_CAPABILITIES.len() as u64)
-        || preview.pointer("/summary/on_demand_count").and_then(Value::as_u64) != Some(0)
         || preview
             .pointer("/inspector/runtime_profile")
             .and_then(Value::as_str)
@@ -750,9 +748,9 @@ async fn create_agent_preset(
         || saved.pointer("/revision/document/chat_route_records/agent_chat/primary/model")
             != Some(&Value::String(model.to_owned()))
         || saved
-            .pointer("/revision/document/on_demand_capabilities")
+            .pointer("/revision/document/enabled_capabilities")
             .and_then(Value::as_array)
-            .is_none_or(|items| !items.is_empty())
+            .is_none_or(|items| items.is_empty())
     {
         return Err(SmokeFailure::new(
             "agent_settings.save",
@@ -761,7 +759,7 @@ async fn create_agent_preset(
         ));
     }
     let saved_capabilities = saved
-        .pointer("/revision/document/initial_capabilities")
+        .pointer("/revision/document/enabled_capabilities")
         .and_then(Value::as_array)
         .ok_or_else(|| {
             SmokeFailure::new(
@@ -3120,7 +3118,7 @@ async fn run_product_chain(
     }
     let library = successful_json(router, "guid.library", Method::GET,
         "/api/agent-preset-templates", None, LOCAL_API_DEADLINE, &[StatusCode::OK]).await?;
-    if library.pointer("/data/user_presets").and_then(Value::as_array).is_none_or(|items| !items.is_empty()) {
+    if library.pointer("/data/user_presets").and_then(Value::as_array).is_none_or(|items| items.is_empty()) {
         return Err(SmokeFailure::new("guid.library", "OFFICIAL_LAUNCH_CREATED_PERSONAL_AGENT", 409));
     }
     let (preset_id, _source_binding) =

@@ -135,8 +135,7 @@ export interface AgentResolvedSnapshot {
   };
   included_skills: string[];
   excluded_auto_skills: string[];
-  initial_capabilities: string[];
-  on_demand_capabilities: string[];
+  enabled_capabilities: string[];
   required_resource_kinds: string[];
   knowledge_policy: {
     enabled: boolean;
@@ -169,8 +168,7 @@ export interface AgentPresetDocument {
   schema_version: string;
   model_route_refs: Record<string, string>;
   chat_route_records: Partial<Record<typeof AGENT_CHAT_MODEL_TASK, ChatRouteRecord>>;
-  initial_capabilities: CapabilitySelection[];
-  on_demand_capabilities: CapabilitySelection[];
+  enabled_capabilities: CapabilitySelection[];
   skill_bindings: ExactCatalogRef<'skill'>[];
   system_role_provider_overrides: Record<string, RoleProviderSelection>;
   persona: string;
@@ -199,8 +197,7 @@ export interface AgentPresetSummary {
 }
 
 export interface OfficialPresetSeed {
-  initial_capabilities: ExactCatalogRef<'capability'>[];
-  on_demand_capabilities: ExactCatalogRef<'capability'>[];
+  enabled_capabilities: ExactCatalogRef<'capability'>[];
   skill_bindings: ExactCatalogRef<'skill'>[];
   required_resource_kinds: string[];
   required_runtime_features: string[];
@@ -304,12 +301,10 @@ export interface PreviewCapability {
 }
 
 export interface PreviewSummary {
-  initial_count: number;
-  on_demand_count: number;
+  enabled_count: number;
   active_at_start_count: number;
   model_tool_count: number;
   context_contributor_count: number;
-  on_demand_index_count: number;
   skill_count: number;
   mcp_count: number;
   required_resource_kind_count: number;
@@ -317,10 +312,8 @@ export interface PreviewSummary {
 }
 
 export interface RevisionDiff {
-  added_initial: CapabilityId[];
-  removed_initial: CapabilityId[];
-  added_on_demand: CapabilityId[];
-  removed_on_demand: CapabilityId[];
+  added_enabled: CapabilityId[];
+  removed_enabled: CapabilityId[];
   added_skills: SkillId[];
   removed_skills: SkillId[];
   model_routes_changed: boolean;
@@ -333,9 +326,7 @@ export interface SnapshotInspector {
   runtime_profile?: 'coding_native' | 'managed_minimal';
   required_runtime_protocol_version: string;
   required_runtime_features: string[];
-  initial_capabilities: PreviewCapability[];
-  on_demand_capabilities: PreviewCapability[];
-  compact_on_demand_index: CapabilityId[];
+  enabled_capabilities: PreviewCapability[];
   tool_schema_refs: string[];
   context_schema_refs: string[];
   mcp_materializations: McpToolCatalogItem[];

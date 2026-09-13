@@ -188,8 +188,7 @@ pub struct AgentPresetRevisionPayload {
     /// opaque IDs are not sufficient to construct a provider request.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub chat_route_records: BTreeMap<String, ChatRouteRecord>,
-    pub initial_capabilities: Vec<CapabilitySelection>,
-    pub on_demand_capabilities: Vec<CapabilitySelection>,
+    pub enabled_capabilities: Vec<CapabilitySelection>,
     pub skill_bindings: Vec<SkillRef>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub system_role_provider_overrides:
@@ -238,8 +237,8 @@ impl AgentPresetRevision {
             Some(&self.reference.revision_id()),
         )?;
         validate_capability_selections(
-            &self.payload.initial_capabilities,
-            &self.payload.on_demand_capabilities,
+            &self.payload.enabled_capabilities,
+
         )?;
         validate_role_provider_overrides(&self.payload.system_role_provider_overrides)?;
         validate_contribution_locks(&self.contribution_locks)?;
@@ -560,26 +559,6 @@ impl ResolvedMiniAppCapability {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct CompactOnDemandCapabilityEntry {
-    pub capability_id: crate::CapabilityId,
-    pub display_name: String,
-    pub short_description: String,
-    pub search_terms: Vec<String>,
-    pub activation_plan_digest: DigestHex,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct PrecomputedActivationPlan {
-    pub root_capability_id: crate::CapabilityId,
-    pub capability_bundle: Vec<crate::CapabilityId>,
-    pub tool_schema_refs: Vec<CanonicalSchemaRef>,
-    pub context_schema_refs: Vec<CanonicalSchemaRef>,
-    pub model_route_refs: Vec<ModelRouteId>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct ResolvedSkillLock {
     pub skill: SkillRef,
     pub body_digest: DigestHex,
@@ -640,17 +619,11 @@ pub struct ResolvedSnapshotContent {
     pub model_route_refs: BTreeMap<String, ModelRouteId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_route_identity: Option<ChatRouteIdentity>,
-    pub initial_capabilities: Vec<ResolvedCapability>,
-    pub on_demand_capabilities: Vec<ResolvedCapability>,
+    pub enabled_capabilities: Vec<ResolvedCapability>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub initial_miniapp_capabilities: Vec<ResolvedMiniAppCapability>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub on_demand_miniapp_capabilities: Vec<ResolvedMiniAppCapability>,
+    pub enabled_miniapp_capabilities: Vec<ResolvedMiniAppCapability>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub required_resource_kinds: BTreeSet<ResourceKind>,
-    pub on_demand_activation_plans:
-        BTreeMap<crate::CapabilityId, PrecomputedActivationPlan>,
-    pub compact_on_demand_index: Vec<CompactOnDemandCapabilityEntry>,
     pub capability_allowlist: BTreeSet<crate::CapabilityId>,
     pub skill_locks: Vec<ResolvedSkillLock>,
     pub mcp_tool_locks: Vec<ResolvedMcpToolLock>,
@@ -678,12 +651,12 @@ pub struct ResolvedSnapshotEnvelope {
 impl ResolvedSnapshotEnvelope {
     pub fn validate(&self) -> Result<(), PresetContractViolation> {
         validate_resolved_capability_sets(
-            &self.content.initial_capabilities,
-            &self.content.on_demand_capabilities,
+            &self.content.enabled_capabilities,
+
         )?;
         validate_resolved_miniapp_capability_sets(
-            &self.content.initial_miniapp_capabilities,
-            &self.content.on_demand_miniapp_capabilities,
+            &self.content.enabled_miniapp_capabilities,
+
         )?;
         validate_snapshot_chat_route_identity(&self.content)?;
         validate_resolved_role_provider_locks(
@@ -691,8 +664,8 @@ impl ResolvedSnapshotEnvelope {
         )?;
         validate_resolved_mcp_tool_locks(
             &self.content.mcp_tool_locks,
-            &self.content.initial_capabilities,
-            &self.content.on_demand_capabilities,
+            &self.content.enabled_capabilities,
+
         )?;
         let digest = digest_payload(&self.content).map_err(|error| PresetContractViolation {
             code: CanonicalErrorCode::from(PRESET_REVISION_DIGEST_MISMATCH),
@@ -710,12 +683,10 @@ impl ResolvedSnapshotEnvelope {
 
 fn validate_resolved_miniapp_capability_sets(
     initial: &[ResolvedMiniAppCapability],
-    on_demand: &[ResolvedMiniAppCapability],
 ) -> Result<(), PresetContractViolation> {
     let mut ids = BTreeSet::new();
     for (set_name, capabilities) in [
-        ("initial_miniapp_capabilities", initial),
-        ("on_demand_miniapp_capabilities", on_demand),
+        ("enabled_miniapp_capabilities", initial),
     ] {
         for capability in capabilities {
             capability.validate()?;
@@ -756,7 +727,6 @@ fn validate_resolved_role_provider_locks(
 fn validate_resolved_mcp_tool_locks(
     locks: &[ResolvedMcpToolLock],
     initial: &[ResolvedCapability],
-    on_demand: &[ResolvedCapability],
 ) -> Result<(), PresetContractViolation> {
     let mut identity_keys = BTreeSet::new();
     let mut capability_ids = BTreeSet::new();
@@ -781,7 +751,7 @@ fn validate_resolved_mcp_tool_locks(
 
         let resolved = initial
             .iter()
-            .chain(on_demand.iter())
+
             .find(|capability| capability.capability.id == lock.capability_id)
             .ok_or_else(|| {
                 mcp_lock_violation(format!(
@@ -922,8 +892,7 @@ impl OfficialPresetKey {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OfficialPresetSeed {
-    pub initial_capabilities: Vec<CapabilityRef>,
-    pub on_demand_capabilities: Vec<CapabilityRef>,
+    pub enabled_capabilities: Vec<CapabilityRef>,
     pub skill_bindings: Vec<SkillRef>,
     pub required_resource_kinds: BTreeSet<ResourceKind>,
     pub required_runtime_features: BTreeSet<RuntimeFeatureId>,
@@ -979,14 +948,13 @@ impl OfficialPresetSeedManifestPayload {
 
         for (key, seed) in &self.templates {
             validate_exact_capability_refs(
-                &seed.initial_capabilities,
-                &seed.on_demand_capabilities,
+                &seed.enabled_capabilities,
+
             )?;
             let coverage = &self.role_coverage[key];
             let selected = seed
-                .initial_capabilities
+                .enabled_capabilities
                 .iter()
-                .chain(&seed.on_demand_capabilities)
                 .map(|capability| capability.id.clone())
                 .collect::<BTreeSet<_>>();
             if !coverage.required_capability_ids.is_subset(&selected)
@@ -1004,8 +972,8 @@ impl OfficialPresetSeedManifestPayload {
 
         let chat = &self.templates[&OfficialPresetKey::ChatMinimal];
         let chat_coverage = &self.role_coverage[&OfficialPresetKey::ChatMinimal];
-        if !chat.initial_capabilities.is_empty()
-            || !chat.on_demand_capabilities.is_empty()
+        if !chat.enabled_capabilities.is_empty()
+
             || !chat.skill_bindings.is_empty()
             || !chat.required_resource_kinds.is_empty()
             || !chat.required_runtime_features.is_empty()
@@ -1022,9 +990,8 @@ impl OfficialPresetSeedManifestPayload {
 
         let coding = &self.templates[&OfficialPresetKey::CodingCodex];
         if coding
-            .initial_capabilities
+            .enabled_capabilities
             .iter()
-            .chain(&coding.on_demand_capabilities)
             .any(|capability| {
                 capability.id.as_ref().starts_with("browser.")
                     || capability.id.as_ref().starts_with("computer.")
@@ -1044,9 +1011,8 @@ impl OfficialPresetSeedManifestPayload {
 
         let companion = &self.templates[&OfficialPresetKey::CompanionDefault];
         let companion_union = companion
-            .initial_capabilities
+            .enabled_capabilities
             .iter()
-            .chain(&companion.on_demand_capabilities)
             .map(|capability| capability.id.as_ref())
             .collect::<BTreeSet<_>>();
         for capability in [
@@ -1125,9 +1091,8 @@ impl OfficialPresetSeedManifestPayload {
             .collect::<Vec<_>>();
         for (key, seed) in &self.templates {
             for capability in seed
-                .initial_capabilities
+                .enabled_capabilities
                 .iter()
-                .chain(&seed.on_demand_capabilities)
             {
                 if !available.iter().any(|available| available == capability) {
                     return Err(PresetContractViolation {
@@ -1286,13 +1251,9 @@ pub struct PresetContractViolation {
 
 fn validate_capability_selections(
     initial: &[CapabilitySelection],
-    on_demand: &[CapabilitySelection],
 ) -> Result<(), PresetContractViolation> {
     validate_capability_ids(
         initial.iter().map(|selection| &selection.capability.id),
-        on_demand
-            .iter()
-            .map(|selection| &selection.capability.id),
     )
 }
 
@@ -1391,16 +1352,12 @@ fn looks_like_semver(value: &str) -> bool {
 
 fn validate_resolved_capability_sets(
     initial: &[ResolvedCapability],
-    on_demand: &[ResolvedCapability],
 ) -> Result<(), PresetContractViolation> {
-    for capability in initial.iter().chain(on_demand) {
+    for capability in initial.iter() {
         capability.validate()?;
     }
     validate_capability_ids(
         initial.iter().map(|selection| &selection.capability.id),
-        on_demand
-            .iter()
-            .map(|selection| &selection.capability.id),
     )
 }
 
@@ -1420,46 +1377,23 @@ fn snapshot_capability_violation(
 
 fn validate_exact_capability_refs(
     initial: &[CapabilityRef],
-    on_demand: &[CapabilityRef],
 ) -> Result<(), PresetContractViolation> {
     validate_capability_ids(
         initial.iter().map(|selection| &selection.id),
-        on_demand.iter().map(|selection| &selection.id),
     )
 }
 
 fn validate_capability_ids<'a>(
-    initial: impl Iterator<Item = &'a crate::CapabilityId>,
-    on_demand: impl Iterator<Item = &'a crate::CapabilityId>,
+    enabled: impl Iterator<Item = &'a crate::CapabilityId>,
 ) -> Result<(), PresetContractViolation> {
-    let mut initial_ids = BTreeSet::new();
-    for capability in initial {
-        if !initial_ids.insert(capability) {
+    let mut ids = BTreeSet::new();
+    for capability in enabled {
+        if !ids.insert(capability) {
             return Err(PresetContractViolation {
                 code: CanonicalErrorCode::from(PRESET_CAPABILITY_DUPLICATE),
-                message: format!("duplicate initial capability {}", capability.as_ref()),
+                message: format!("duplicate enabled capability {}", capability.as_ref()),
             });
         }
-    }
-
-    let mut on_demand_ids = BTreeSet::new();
-    for capability in on_demand {
-        if !on_demand_ids.insert(capability) {
-            return Err(PresetContractViolation {
-                code: CanonicalErrorCode::from(PRESET_CAPABILITY_DUPLICATE),
-                message: format!("duplicate on-demand capability {}", capability.as_ref()),
-            });
-        }
-    }
-
-    if let Some(overlap) = initial_ids.intersection(&on_demand_ids).next() {
-        return Err(PresetContractViolation {
-            code: CanonicalErrorCode::from(PRESET_CAPABILITY_SET_OVERLAP),
-            message: format!(
-                "capability {} cannot be both initial and on-demand",
-                overlap.as_ref()
-            ),
-        });
     }
     Ok(())
 }
@@ -1528,8 +1462,7 @@ mod tests {
     }
 
     fn snapshot_content(
-        initial_capabilities: Vec<ResolvedCapability>,
-        on_demand_capabilities: Vec<ResolvedCapability>,
+        enabled_capabilities: Vec<ResolvedCapability>,
         mcp_tool_locks: Vec<ResolvedMcpToolLock>,
     ) -> ResolvedSnapshotContent {
         ResolvedSnapshotContent {
@@ -1547,13 +1480,10 @@ mod tests {
             compiled_runtime_profile_digest: DigestHex::from("fixture-profile"),
             model_route_refs: BTreeMap::new(),
             chat_route_identity: None,
-            initial_capabilities,
-            on_demand_capabilities,
-            initial_miniapp_capabilities: Vec::new(),
-            on_demand_miniapp_capabilities: Vec::new(),
+            enabled_capabilities,
+            enabled_miniapp_capabilities: Vec::new(),
+
             required_resource_kinds: BTreeSet::new(),
-            on_demand_activation_plans: BTreeMap::new(),
-            compact_on_demand_index: Vec::new(),
             capability_allowlist: BTreeSet::new(),
             skill_locks: Vec::new(),
             mcp_tool_locks,
@@ -1590,8 +1520,7 @@ mod tests {
             schema_version: VersionString::from("1.0.0"),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),
-            initial_capabilities: Vec::new(),
-            on_demand_capabilities: Vec::new(),
+            enabled_capabilities: Vec::new(),
             skill_bindings: Vec::new(),
             system_role_provider_overrides: BTreeMap::new(),
             persona: String::new(),
@@ -1617,7 +1546,7 @@ mod tests {
         );
 
         let mut snapshot =
-            serde_json::to_value(snapshot_content(Vec::new(), Vec::new(), Vec::new()))
+            serde_json::to_value(snapshot_content(Vec::new(), Vec::new()))
                 .unwrap();
         snapshot["typed_resource_bindings"] = serde_json::json!([]);
         assert!(
@@ -1626,7 +1555,7 @@ mod tests {
         );
 
         let mut nested_snapshot =
-            serde_json::to_value(snapshot_content(Vec::new(), Vec::new(), Vec::new()))
+            serde_json::to_value(snapshot_content(Vec::new(), Vec::new()))
                 .unwrap();
         nested_snapshot["on_demand_activation_plans"] = serde_json::json!({
             "knowledge.search": {
@@ -1686,14 +1615,12 @@ mod tests {
 
         let duplicate_identity = envelope(snapshot_content(
             initial.clone(),
-            Vec::new(),
             vec![first.clone(), first.clone()],
         ));
         assert!(duplicate_identity.validate().is_err());
 
         let duplicate_capability = envelope(snapshot_content(
             initial,
-            Vec::new(),
             vec![
                 first,
                 mcp_lock(
@@ -1708,14 +1635,12 @@ mod tests {
     }
 
     #[test]
-    fn resolved_snapshot_mcp_lock_matches_initial_or_on_demand_capability_schema() {
+    fn resolved_snapshot_mcp_lock_matches_enabled_capability_schema() {
         let digest = "a".repeat(64);
-        let initial = vec![resolved_capability("capability.initial", &digest)];
-        let on_demand = vec![resolved_capability("capability.lazy", &digest)];
+        let initial = vec![resolved_capability("capability.initial", &digest), resolved_capability("capability.extra", &digest)];
 
         let valid = envelope(snapshot_content(
             initial.clone(),
-            on_demand.clone(),
             vec![
                 mcp_lock(
                     "server-1",
@@ -1723,14 +1648,13 @@ mod tests {
                     "capability.initial",
                     &digest,
                 ),
-                mcp_lock("server-1", "vendor.lazy", "capability.lazy", &digest),
+                mcp_lock("server-1", "vendor.extra", "capability.extra", &digest),
             ],
         ));
         assert!(valid.validate().is_ok());
 
         let unknown = envelope(snapshot_content(
             initial.clone(),
-            on_demand.clone(),
             vec![mcp_lock(
                 "server-1",
                 "vendor.unknown",
@@ -1742,7 +1666,6 @@ mod tests {
 
         let independent_tool_schema_digest = envelope(snapshot_content(
             initial,
-            on_demand,
             vec![mcp_lock(
                 "server-1",
                 "vendor.initial",
@@ -1778,13 +1701,12 @@ mod tests {
     }
 
     #[test]
-    fn capability_sets_are_mutually_exclusive() {
+    fn enabled_capabilities_reject_duplicate_ids() {
         let error = validate_exact_capability_refs(
-            &[capability("fs.read")],
-            &[capability("fs.read")],
+            &[capability("fs.read"), capability("fs.read")],
         )
         .unwrap_err();
-        assert_eq!(error.code.as_ref(), PRESET_CAPABILITY_SET_OVERLAP);
+        assert_eq!(error.code.as_ref(), PRESET_CAPABILITY_DUPLICATE);
     }
 
     #[test]

@@ -212,10 +212,11 @@ async fn installation_token_is_limited_to_headless_product_control_planes() {
         .jwt_service
         .sign(services.authoritative_user_id.as_ref(), "owner")
         .expect("sign owner JWT");
-    for (path, token) in [
-        ("/api/plugins", "wrong-installation-token"),
-        ("/api/plugins", owner_jwt.as_str()),
-        ("/api/capabilities", installation_token),
+    // Read routes explicitly permit an authenticated installation owner JWT.
+    for (path, token, expected) in [
+        ("/api/plugins", "wrong-installation-token", StatusCode::FORBIDDEN),
+        ("/api/plugins", owner_jwt.as_str(), StatusCode::OK),
+        ("/api/capabilities", installation_token, StatusCode::FORBIDDEN),
     ] {
         let response = router
             .clone()
@@ -228,7 +229,7 @@ async fn installation_token_is_limited_to_headless_product_control_planes() {
             )
             .await
             .expect("dispatch rejected product request");
-        assert_eq!(response.status(), StatusCode::FORBIDDEN, "route {path}");
+        assert_eq!(response.status(), expected, "route {path}");
     }
 
     services
@@ -391,15 +392,15 @@ async fn nomi_core_catalog_exposes_native_nomi_capabilities() {
                 .find(|item| item["template_key"] == "coding.codex")
         })
         .expect("coding template");
-    let on_demand = coding["seed"]["on_demand_capabilities"]
+    let enabled = coding["seed"]["enabled_capabilities"]
         .as_array()
-        .expect("coding on-demand capabilities");
+        .expect("coding enabled capabilities");
     for capability_id in ["vcs.stage", "vcs.commit"] {
         assert!(
-            on_demand
+            enabled
                 .iter()
                 .any(|item| item["id"] == capability_id),
-            "{capability_id} must remain an on-demand placement in the coding seed"
+            "{capability_id} must remain an enabled placement in the coding seed"
         );
     }
 
@@ -408,8 +409,8 @@ async fn nomi_core_catalog_exposes_native_nomi_capabilities() {
 }
 
 #[tokio::test]
-async fn nomi_core_accepts_on_demand_placement_without_widening_initial_tools() {
-    let trust_secret = "on-demand-placement-local-trust";
+async fn nomi_core_accepts_enabled_placement_as_immediately_available_tools() {
+    let trust_secret = "enabled-placement-local-trust";
     let (router, services) = common::build_local_trust_app(trust_secret).await;
     let created = router
         .clone()
@@ -442,7 +443,7 @@ async fn nomi_core_accepts_on_demand_placement_without_widening_initial_tools() 
         .expect("placement preset id")
         .to_owned();
     let revision = created_value["data"]["revision"]["reference"].clone();
-    let deferred_ids = [
+    let enabled_ids = [
         "vcs.stage",
         "web.fetch",
         "agent.delegate",
@@ -451,8 +452,8 @@ async fn nomi_core_accepts_on_demand_placement_without_widening_initial_tools() 
         "agent.fork",
         "schedule.store",
     ];
-    created_value["data"]["draft"]["document"]["on_demand_capabilities"] = json!(
-        deferred_ids.iter().map(|id| json!({
+    created_value["data"]["draft"]["document"]["enabled_capabilities"] = json!(
+        enabled_ids.iter().map(|id| json!({
             "capability": {"id": id, "version": "1.0.0"},
             "action_allowlist": []
         })).collect::<Vec<_>>()
@@ -473,37 +474,32 @@ async fn nomi_core_accepts_on_demand_placement_without_widening_initial_tools() 
                         "surface": "desktop",
                         "audience": "owner"
                     }))
-                    .expect("serialize on-demand preview request"),
+                    .expect("serialize enabled preview request"),
                 ))
-                .expect("build on-demand preview request"),
+                .expect("build enabled preview request"),
         )
         .await
-        .expect("dispatch on-demand preview request");
+        .expect("dispatch enabled preview request");
     assert_eq!(preview.status(), StatusCode::OK);
     let preview_body = axum::body::to_bytes(preview.into_body(), 4 * 1024 * 1024)
         .await
-        .expect("read on-demand preview response");
+        .expect("read enabled preview response");
     let preview_value: Value = serde_json::from_slice(&preview_body).expect("preview JSON");
     assert_eq!(preview_value["data"]["status"], "ready");
     assert!(
         preview_value["data"]["diagnostics"]
             .as_array()
             .is_some_and(|diagnostics| diagnostics.is_empty()),
-        "a supported on-demand capability must produce a clean preview"
+        "a supported enabled capability must produce a clean preview"
     );
     assert_eq!(
-        preview_value["data"]["summary"]["initial_count"],
-        0,
-        "moving a capability to on-demand must remove it from the initial set"
+        preview_value["data"]["summary"]["enabled_count"],
+        enabled_ids.len(),
+        "the preview must retain the enabled placement"
     );
-    assert_eq!(
-        preview_value["data"]["summary"]["on_demand_count"],
-        deferred_ids.len(),
-        "the preview must retain the on-demand placement"
-    );
-    for id in deferred_ids {
+    for id in enabled_ids {
         assert!(
-            preview_value["data"]["inspector"]["on_demand_capabilities"]
+            preview_value["data"]["inspector"]["enabled_capabilities"]
                 .as_array()
                 .is_some_and(|items| items.iter().any(|item| item["capability"]["id"] == id)),
             "the immutable preview must expose deferred capability {id}"
@@ -531,8 +527,7 @@ async fn configured_agent_creation_persists_adjusted_capabilities_and_keeps_offi
     let official_before = before["data"]["official_templates"].clone();
     let document = json!({
         "schema_version":"1.0.0", "model_route_refs":{}, "chat_route_records":{},
-        "initial_capabilities":[{"capability":{"id":"fs.read","version":"1.0.0"}}],
-        "on_demand_capabilities":[{"capability":{"id":"web.fetch","version":"1.0.0"}},{"capability":{"id":"agent.execution.plan","version":"1.0.0"}}],
+        "enabled_capabilities":[{"capability":{"id":"fs.read","version":"1.0.0"}},{"capability":{"id":"web.fetch","version":"1.0.0"}},{"capability":{"id":"agent.execution.plan","version":"1.0.0"}}],
         "skill_bindings":[], "system_role_provider_overrides":{}, "persona":"Research helper",
         "instructions":"Use only the selected capabilities.", "starter_prompts":[]
     });
@@ -546,12 +541,10 @@ async fn configured_agent_creation_persists_adjusted_capabilities_and_keeps_offi
     let id = created["data"]["preset"]["preset_id"].as_str().unwrap();
     let (status, reloaded) = call(router.clone(), "GET", &format!("/api/agent-presets/{id}/editor"), json!({})).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(reloaded["data"]["draft"]["document"]["initial_capabilities"], created["data"]["revision"]["document"]["initial_capabilities"]);
-    assert_eq!(reloaded["data"]["draft"]["document"]["on_demand_capabilities"], created["data"]["revision"]["document"]["on_demand_capabilities"]);
-    assert_eq!(reloaded["data"]["draft"]["document"]["initial_capabilities"].as_array().unwrap().len(), 1);
-    assert_eq!(reloaded["data"]["draft"]["document"]["on_demand_capabilities"].as_array().unwrap().len(), 2);
+    assert_eq!(reloaded["data"]["draft"]["document"]["enabled_capabilities"], created["data"]["revision"]["document"]["enabled_capabilities"]);
+    assert_eq!(reloaded["data"]["draft"]["document"]["enabled_capabilities"].as_array().unwrap().len(), 3);
     let mut invalid = document;
-    invalid["initial_capabilities"] = json!([{"capability":{"id":"missing.capability","version":"1.0.0"}}]);
+    invalid["enabled_capabilities"] = json!([{"capability":{"id":"missing.capability","version":"1.0.0"}}]);
     let (status, _) = call(router.clone(), "POST", "/api/agent-presets", json!({"display_name":"Must not persist", "document":invalid})).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     let (_, after) = call(router, "GET", "/api/agent-preset-templates?source=official", json!({})).await;
@@ -617,8 +610,8 @@ async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_u
     let (status, original) = call(router.clone(), "POST", "/api/agent-presets", json!({
         "display_name": "Personal model test", "document": {
             "schema_version": "1.0.0", "model_route_refs": {}, "chat_route_records": {},
-            "initial_capabilities": [{ "capability": { "id": "fs.read", "version": "1.0.0" } }],
-            "on_demand_capabilities": [], "skill_bindings": [], "system_role_provider_overrides": {},
+            "enabled_capabilities": [{ "capability": { "id": "fs.read", "version": "1.0.0" } }],
+            "skill_bindings": [], "system_role_provider_overrides": {},
             "persona": "Research helper", "instructions": "Keep my working rules", "starter_prompts": []
         }
     })).await;
@@ -631,7 +624,8 @@ async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_u
     let mut sessions = Vec::new();
     for _ in 0..2 {
         let (status, result) = call(router.clone(), "POST", "/api/agent-sessions", json!({
-            "preset_id": preset_id, "title": "Chosen model", "model": selection
+            "preset_id": preset_id, "title": "Chosen model", "model": selection,
+            "resource_selections": [{ "resource_kind": "workspace", "resource_id": "default-workspace" }]
         })).await;
         assert_eq!(status, StatusCode::OK, "{result}");
         let id = result["data"]["agent_session_id"].as_str().unwrap();
@@ -647,7 +641,7 @@ async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_u
         assert_eq!(record["primary"]["provider_id"], selection["provider_id"]);
         assert_eq!(record["primary"]["model"], selection["model"]);
         assert_eq!(record["failovers"], json!([]));
-        for field in ["initial_capabilities", "on_demand_capabilities", "skill_bindings", "system_role_provider_overrides", "persona", "instructions"] {
+        for field in ["enabled_capabilities", "skill_bindings", "system_role_provider_overrides", "persona", "instructions"] {
             assert_eq!(editor["data"]["revision"]["document"][field], original["revision"]["document"][field], "must retain {field}");
         }
         sessions.push(binding);

@@ -593,9 +593,8 @@ mod tests {
             resolved_model: None,
             included_skills: vec![],
             excluded_auto_skills: vec![],
-            initial_capabilities: vec![],
-            on_demand_capabilities: vec![],
-            required_resource_kinds: Default::default(),
+            enabled_capabilities: vec![],
+                        required_resource_kinds: Default::default(),
             knowledge_policy: AgentKnowledgePolicy::default(),
             warnings: vec![],
         }

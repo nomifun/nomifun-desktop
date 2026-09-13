@@ -19,8 +19,8 @@ type Props = {
 
 export const documentFromTemplate = (template: OfficialPresetTemplate): AgentPresetDocument => ({
   ...createEmptyAgentPresetDocument(),
-  initial_capabilities: template.seed.initial_capabilities.map((capability) => ({ capability, action_allowlist: [] })),
-  on_demand_capabilities: template.seed.on_demand_capabilities.map((capability) => ({ capability, action_allowlist: [] })),
+  enabled_capabilities: template.seed.enabled_capabilities.map((capability) => ({ capability, action_allowlist: [] })),
+
   skill_bindings: structuredClone(template.seed.skill_bindings),
 });
 
@@ -46,7 +46,7 @@ const OfficialTemplateOverview: React.FC<Props> = ({ template, busy, catalog, on
       </div>
       <Button className={styles.templateReset} size='small' type='text' icon={<Refresh theme='outline' size={14} />} disabled={busy || !dirty} onClick={() => { setDocument(structuredClone(original)); setDisplayName(name); }}>{t('agentSettings.workbench.resetTemplate')}</Button>
     </header>
-    <div className={styles.editorBody}>
+    <div className={`${styles.editorBody} ${styles.capabilityBody}`}>
       <AgentCapabilityWorkspace document={document} catalog={catalog.capabilities} disabled={busy} onChange={setDocument} />
     </div>
     <footer className={styles.actionBar}>

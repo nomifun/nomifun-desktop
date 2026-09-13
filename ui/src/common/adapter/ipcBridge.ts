@@ -482,14 +482,8 @@ export interface IAgentSessionCapabilityState {
     snapshot_digest: string;
   };
   generation: number;
-  initial_capabilities: string[];
-  on_demand_capabilities: string[];
+  enabled_capabilities: string[];
   active_capabilities: string[];
-  compact_on_demand_index: Array<{
-    capability_id: string;
-    display_name: string;
-    short_description: string;
-  }>;
 }
 
 export interface IAgentSessionEventPage {
@@ -583,16 +577,10 @@ const fromApiAgentSessionCapabilities = (raw: unknown): IAgentSessionCapabilityS
   return {
     resolved_snapshot_ref: value.resolved_snapshot_ref as IAgentSessionCapabilityState['resolved_snapshot_ref'],
     generation: Number(value.generation ?? value.active_set_generation ?? 0),
-    initial_capabilities: Array.isArray(value.initial_capabilities)
-      ? (value.initial_capabilities as string[])
-      : [],
-    on_demand_capabilities: Array.isArray(value.on_demand_capabilities)
-      ? (value.on_demand_capabilities as string[])
+    enabled_capabilities: Array.isArray(value.enabled_capabilities)
+      ? (value.enabled_capabilities as string[])
       : [],
     active_capabilities: active as string[],
-    compact_on_demand_index: Array.isArray(value.compact_on_demand_index)
-      ? (value.compact_on_demand_index as IAgentSessionCapabilityState['compact_on_demand_index'])
-      : [],
   };
 };
 

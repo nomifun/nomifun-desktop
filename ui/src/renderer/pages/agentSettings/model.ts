@@ -2,8 +2,6 @@ import type {
   AgentPresetDocument,
   AgentPresetDraft,
   CapabilityCatalogItem,
-  CapabilityId,
-  CapabilityPlacement,
   ChatRouteCandidate,
   ChatRouteRecord,
   ExactCatalogRef,
@@ -77,7 +75,7 @@ export async function saveDraftRevisionWithPreview(
 }
 
 export function templateCapabilityCount(template: OfficialPresetTemplate): number {
-  return template.seed.initial_capabilities.length + template.seed.on_demand_capabilities.length;
+  return template.seed.enabled_capabilities.length;
 }
 
 export function updateDocument(
@@ -250,6 +248,16 @@ const CAPABILITY_ACTION_LABELS: Readonly<
 const CAPABILITY_COPY_OVERRIDES: Readonly<
   Record<string, { en: [string, string]; zh: [string, string] }>
 > = {
+  'fs.watch': { en: ['Watch file changes', 'Provide changes in the selected workspace to the Agent.'], zh: ['监听文件变化', '监听所选工作区的文件变化，并把更新提供给 Agent。'] },
+  'fs.snapshot': { en: ['Use file snapshots', 'Provide file snapshots from the selected workspace.'], zh: ['查看文件快照', '为任务提供所选工作区的文件快照。'] },
+  'process.session': { en: ['Access command sessions', 'Provide the current process session for command tools.'], zh: ['访问命令会话', '提供当前会话的进程资源，供命令执行能力使用。'] },
+  'terminal.pty': { en: ['Use an interactive terminal', 'Provide the terminal resource selected for this session.'], zh: ['使用交互式终端', '提供当前会话所选的交互式终端资源。'] },
+  'vcs.stage': { en: ['Stage changes', 'Stage selected changes in the Git workspace.'], zh: ['暂存 Git 改动', '将所选工作区中的改动加入 Git 暂存区。'] },
+  'vcs.commit': { en: ['Commit changes', 'Create a Git commit for staged changes.'], zh: ['创建 Git 提交', '为已暂存的改动创建 Git 提交。'] },
+  'vcs.push': { en: ['Push commits', 'Push selected Git commits to the configured remote.'], zh: ['推送 Git 提交', '将所选提交推送到工作区已配置的远程仓库。'] },
+  'agent.execution.observe': { en: ['Inspect task progress', 'Read the status and results of the selected Agent task.'], zh: ['查看任务进度', '读取所选 Agent 任务的执行状态和结果。'] },
+  'agent.execution.steer': { en: ['Adjust a running task', 'Provide follow-up instructions to the selected Agent task.'], zh: ['调整执行任务', '向所选 Agent 任务补充指令或调整工作方向。'] },
+  'llm.vision': { en: ['Understand images', 'Allow an image-capable model to read images attached to this session.'], zh: ['理解图片', '允许支持图像输入的模型读取当前会话中的图片。'] },
   'web.search': { en: ['Search the web', 'Find relevant information from web sources.'], zh: ['搜索网页', '查找相关网页，收集任务所需的信息。'] },
   'web.fetch': { en: ['Read a webpage', 'Fetch a public webpage and read its main content.'], zh: ['读取网页', '抓取公开网页，读取标题和正文内容。'] },
   'citation.render': { en: ['Organize citations', 'Include source references with the information used by the Agent.'], zh: ['整理引用', '为使用到的信息整理来源，方便核对与追溯。'] },
@@ -416,18 +424,19 @@ export const capabilityProductCopy = (
 ): { name: string; description: string } => {
   const override = CAPABILITY_COPY_OVERRIDES[item.capability.id];
   const zh = language.toLowerCase().startsWith('zh');
+  const localizeBuiltin = zh && ['bundled', 'first_party', 'platform_builtin'].includes(item.source_kind);
   if (
     override &&
-    (placeholderCapabilityCopy(item.display_name, item.capability.id) ||
+    (localizeBuiltin || placeholderCapabilityCopy(item.display_name, item.capability.id) ||
       placeholderCapabilityCopy(item.description, item.capability.id))
   ) {
     const [name, description] = override[zh ? 'zh' : 'en'];
     return { name, description };
   }
-  const name = placeholderCapabilityCopy(item.display_name, item.capability.id)
+  const name = localizeBuiltin || placeholderCapabilityCopy(item.display_name, item.capability.id)
     ? capabilityProductName(item.capability.id, language)
     : item.display_name;
-  if (!placeholderCapabilityCopy(item.description, item.capability.id)) {
+  if (!localizeBuiltin && !placeholderCapabilityCopy(item.description, item.capability.id)) {
     return { name, description: item.description };
   }
 
@@ -478,70 +487,14 @@ export const capabilityMatchesSearch = (
     .includes(normalizedQuery);
 };
 
-export function capabilityPlacement(
-  document: AgentPresetDocument,
-  capability: CapabilityId | ExactCatalogRef<'capability'>
-): CapabilityPlacement {
-  const capabilityId = typeof capability === 'string' ? capability : capability.id;
-  const version = typeof capability === 'string' ? undefined : capability.version;
-  const matches = (selection: AgentPresetDocument['initial_capabilities'][number]) =>
-    selection.capability.id === capabilityId &&
-    (version === undefined || selection.capability.version === version);
-
-  if (document.initial_capabilities.some(matches)) {
-    return 'initial';
-  }
-  if (document.on_demand_capabilities.some(matches)) {
-    return 'on_demand';
-  }
-  return 'none';
-}
-
-/**
- * Capability placement is the complete authoring contract. Resource instances
- * are selected later by the conversation, companion, or automation target.
- */
-export function placeCapability(
-  document: AgentPresetDocument,
-  capability: ExactCatalogRef<'capability'>,
-  placement: CapabilityPlacement
-): AgentPresetDocument {
-  const existing = [...document.initial_capabilities, ...document.on_demand_capabilities].find(
-    (item) =>
-      item.capability.id === capability.id &&
-      item.capability.version === capability.version
-  );
-  const selection = {
-    capability,
-    ...(existing?.action_allowlist?.length
-      ? { action_allowlist: [...existing.action_allowlist] }
-      : {}),
-  };
-  const without = (items: AgentPresetDocument['initial_capabilities']) =>
-    items.filter((item) => item.capability.id !== capability.id);
-  const initial = without(document.initial_capabilities);
-  const onDemand = without(document.on_demand_capabilities);
-
-  if (placement === 'initial') initial.push(selection);
-  if (placement === 'on_demand') onDemand.push(selection);
-
-  return {
-    ...document,
-    initial_capabilities: initial.sort((left, right) =>
-      left.capability.id.localeCompare(right.capability.id)
-    ),
-    on_demand_capabilities: onDemand.sort((left, right) =>
-      left.capability.id.localeCompare(right.capability.id)
-    ),
-  };
-}
+export { capabilityPlacement, placeCapability } from '@/common/types/agentPlatform';
 
 export function selectedRequiredResourceKinds(
   document: AgentPresetDocument,
   capabilities: readonly CapabilityCatalogItem[]
 ): string[] {
   const selectedReferences = new Set(
-    [...document.initial_capabilities, ...document.on_demand_capabilities].map(
+    document.enabled_capabilities.map(
       (selection) => capabilityReferenceKey(selection.capability)
     )
   );
@@ -551,64 +504,6 @@ export function selectedRequiredResourceKinds(
     capability.required_resource_kinds.forEach((kind) => kinds.add(kind));
   }
   return [...kinds].sort();
-}
-
-export function sortCapabilitiesByPlacement(
-  document: AgentPresetDocument,
-  capabilities: readonly CapabilityCatalogItem[]
-): CapabilityCatalogItem[] {
-  const placementRank: Record<CapabilityPlacement, number> = {
-    initial: 0,
-    on_demand: 1,
-    none: 2,
-  };
-  return [...capabilities].sort((left, right) => {
-    const rankDifference =
-      placementRank[capabilityPlacement(document, left.capability)] -
-      placementRank[capabilityPlacement(document, right.capability)];
-    return (
-      rankDifference ||
-      left.display_name.localeCompare(right.display_name) ||
-      left.capability.id.localeCompare(right.capability.id)
-    );
-  });
-}
-
-export function editorCapabilityReferences(
-  document: AgentPresetDocument,
-  visibleCapabilities: readonly CapabilityCatalogItem[],
-  allCapabilities: readonly CapabilityCatalogItem[]
-): ExactCatalogRef<'capability'>[] {
-  const catalogKeys = new Set(
-    allCapabilities.map((item) => capabilityReferenceKey(item.capability))
-  );
-  const references = new Map<string, ExactCatalogRef<'capability'>>();
-  for (const item of visibleCapabilities) {
-    references.set(capabilityReferenceKey(item.capability), item.capability);
-  }
-  const selected = [
-    ...document.initial_capabilities,
-    ...document.on_demand_capabilities,
-  ].map((selection) => selection.capability);
-  for (const reference of selected) {
-    const key = capabilityReferenceKey(reference);
-    if (!catalogKeys.has(key)) references.set(key, reference);
-  }
-  const placementRank: Record<CapabilityPlacement, number> = {
-    initial: 0,
-    on_demand: 1,
-    none: 2,
-  };
-  return [...references.values()].sort((left, right) => {
-    const placementDifference =
-      placementRank[capabilityPlacement(document, left)] -
-      placementRank[capabilityPlacement(document, right)];
-    return (
-      placementDifference ||
-      left.id.localeCompare(right.id) ||
-      left.version.localeCompare(right.version)
-    );
-  });
 }
 
 export type AgentUiOperation =

@@ -161,7 +161,7 @@ impl KernelRegistry {
             .materialized
             .generation
             .checked_add(1)
-            .ok_or(KernelError::ActivationGenerationExhausted)?;
+            .ok_or(KernelError::RegistryGenerationExhausted)?;
         let materialized =
             Arc::new(Materializer::materialize_canonical(
                 &self.policy,

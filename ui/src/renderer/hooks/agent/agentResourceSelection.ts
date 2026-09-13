@@ -72,6 +72,5 @@ export const resolveAgentResourceSelections = (
 };
 
 export const selectedCapabilityIds = (
-  initial: readonly { capability: { id: string } }[],
-  onDemand: readonly { capability: { id: string } }[]
-): Set<string> => new Set([...initial, ...onDemand].map((entry) => entry.capability.id));
+  enabled: readonly { capability: { id: string } }[]
+): Set<string> => new Set(enabled.map((entry) => entry.capability.id));

@@ -31,7 +31,7 @@ use nomifun_agent_contracts::{
 };
 use nomifun_agent_kernel::{
     CapabilityAccessRequest, CapabilityInvocationRequest, CompiledSnapshot,
-    CompletedTurnBoundary, KernelError, KernelRegistry,
+    KernelError, KernelRegistry,
     MaterializedCapability, MaterializedRegistry, SessionCapabilityState,
 };
 use nomifun_common::AppError;
@@ -254,10 +254,8 @@ impl NomiPlatformBuiltinToolAdmission {
 
 /// Exact, composition-time approval for bundled ContextContributors.
 ///
-/// Context is admitted independently from ordinary Tools. Initial capability
-/// results enter the system prompt; on-demand ContextContributors are exposed
-/// as deferred empty-input activation Tools and contribute only after the
-/// normal ToolSearch/completed-boundary transition.
+/// Enabled ContextContributors are admitted independently from ordinary Tools
+/// and contribute to the system prompt through their exact owner boundary.
 #[derive(Clone, Debug)]
 pub struct NomiPlatformBuiltinContextAdmission {
     targets: Arc<BTreeMap<CapabilityId, MaterializedCapability>>,
@@ -645,7 +643,6 @@ pub struct NomiPluginToolAction {
     description: String,
     input_schema: StrictJsonValue,
     identity: NomiPluginToolActionIdentity,
-    deferred: bool,
 }
 
 impl NomiPluginToolAction {
@@ -677,9 +674,6 @@ impl NomiPluginToolAction {
         &self.input_schema
     }
 
-    pub fn is_deferred(&self) -> bool {
-        self.deferred
-    }
 }
 
 /// One provider-visible action derived from an exact MiniApp Active Release
@@ -692,7 +686,6 @@ pub struct NomiMiniAppToolAction {
     description: String,
     input_schema: StrictJsonValue,
     identity: NomiMiniAppToolActionIdentity,
-    deferred: bool,
 }
 
 impl NomiMiniAppToolAction {
@@ -720,9 +713,6 @@ impl NomiMiniAppToolAction {
         &self.input_schema
     }
 
-    pub fn is_deferred(&self) -> bool {
-        self.deferred
-    }
 }
 
 /// Invocation identity created by the Nomi engine, never by model arguments.
@@ -732,7 +722,6 @@ pub struct NomiPluginToolInvocation {
     operation_id: OperationId,
     idempotency_key: IdempotencyKey,
     correlation_id: CorrelationId,
-    deferred_activation_proven: bool,
     input: StrictJsonValue,
 }
 
@@ -750,7 +739,6 @@ pub struct NomiMiniAppToolInvocation {
     operation_id: OperationId,
     idempotency_key: IdempotencyKey,
     correlation_id: CorrelationId,
-    deferred_activation_proven: bool,
     input: StrictJsonValue,
 }
 
@@ -773,10 +761,6 @@ impl NomiMiniAppToolInvocation {
 
     pub fn correlation_id(&self) -> &CorrelationId {
         &self.correlation_id
-    }
-
-    pub fn deferred_activation_proven(&self) -> bool {
-        self.deferred_activation_proven
     }
 
     pub fn input(&self) -> &StrictJsonValue {
@@ -937,63 +921,10 @@ impl NomiInitialContextContribution {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
-struct NomiDeferredContextIdentity {
-    resolved_snapshot_ref: ResolvedSnapshotRef,
-    resolved_capability: ResolvedCapability,
-    context_schema_ref: CanonicalSchemaRef,
-}
-
-/// Provider-visible activation Tool for one on-demand bundled
-/// ContextContributor.
-///
-/// The Tool has an empty input contract. ToolSearch exposes it at the normal
-/// deferred boundary; invocation then activates the canonical capability set
-/// and returns the contributed structured value to the current model turn.
-#[derive(Clone, Debug)]
-pub struct NomiDeferredContextAction {
-    provider_name: String,
-    activation_identity: String,
-    description: String,
-    identity: NomiDeferredContextIdentity,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize)]
-struct NomiDeferredLifecycleIdentity {
+struct NomiLifecycleIdentity {
     resolved_snapshot_ref: ResolvedSnapshotRef,
     resolved_capability: ResolvedCapability,
     schema_ref: Option<CanonicalSchemaRef>,
-}
-
-#[derive(Clone, Debug)]
-pub struct NomiDeferredLifecycleAction {
-    provider_name: String,
-    activation_identity: String,
-    description: String,
-    identity: NomiDeferredLifecycleIdentity,
-}
-
-impl NomiDeferredLifecycleAction {
-    pub fn provider_name(&self) -> &str {
-        &self.provider_name
-    }
-
-    pub fn capability_id(&self) -> &CapabilityId {
-        &self.identity.resolved_capability.capability.id
-    }
-}
-
-impl NomiDeferredContextAction {
-    pub fn provider_name(&self) -> &str {
-        &self.provider_name
-    }
-
-    pub fn activation_identity(&self) -> &str {
-        &self.activation_identity
-    }
-
-    pub fn capability_id(&self) -> &CapabilityId {
-        &self.identity.resolved_capability.capability.id
-    }
 }
 
 /// A complete set of Plugin action tools for one frozen Nomi session.
@@ -1010,10 +941,6 @@ pub struct NomiPluginToolSession {
     miniapp_actions: Arc<[NomiMiniAppToolAction]>,
     miniapp_invoker: Option<Arc<dyn NomiMiniAppToolInvoker>>,
     initial_context_contributions: Arc<[NomiInitialContextContribution]>,
-    deferred_context_actions: Arc<[NomiDeferredContextAction]>,
-    context_invoker: Option<Arc<KernelNomiContextInvoker>>,
-    deferred_lifecycle_actions: Arc<[NomiDeferredLifecycleAction]>,
-    lifecycle_invoker: Option<Arc<KernelNomiLifecycleInvoker>>,
     host_dynamic_actions: Arc<[NomiHostDynamicToolAction]>,
     host_dynamic_invoker: Option<Arc<dyn NomiHostDynamicToolInvoker>>,
     capability_state: Option<Arc<SessionCapabilityState>>,
@@ -1036,11 +963,6 @@ impl fmt::Debug for NomiPluginToolSession {
             .field(
                 "initial_context_contributions",
                 &self.initial_context_contributions,
-            )
-            .field("deferred_context_actions", &self.deferred_context_actions)
-            .field(
-                "deferred_lifecycle_actions",
-                &self.deferred_lifecycle_actions,
             )
             .field("host_dynamic_tool_count", &self.host_dynamic_actions.len())
             .field("has_capability_state", &self.capability_state.is_some())
@@ -1100,14 +1022,6 @@ impl NomiPluginToolSession {
             initial_context_contributions: Arc::from(
                 Vec::<NomiInitialContextContribution>::new(),
             ),
-            deferred_context_actions: Arc::from(
-                Vec::<NomiDeferredContextAction>::new(),
-            ),
-            context_invoker: None,
-            deferred_lifecycle_actions: Arc::from(
-                Vec::<NomiDeferredLifecycleAction>::new(),
-            ),
-            lifecycle_invoker: None,
             host_dynamic_actions: Arc::from(Vec::<NomiHostDynamicToolAction>::new()),
             host_dynamic_invoker: None,
             capability_state: None,
@@ -1228,16 +1142,6 @@ impl NomiPluginToolSession {
         &self.initial_context_contributions
     }
 
-    pub fn deferred_context_actions(&self) -> &[NomiDeferredContextAction] {
-        &self.deferred_context_actions
-    }
-
-    pub fn deferred_lifecycle_actions(
-        &self,
-    ) -> &[NomiDeferredLifecycleAction] {
-        &self.deferred_lifecycle_actions
-    }
-
     pub fn capability_state(&self) -> Option<Arc<SessionCapabilityState>> {
         self.capability_state.clone()
     }
@@ -1256,8 +1160,7 @@ impl NomiPluginToolSession {
             .iter()
             .map(|action| action.provider_name.clone())
             .chain(self.miniapp_actions.iter().map(|action| action.provider_name.clone()))
-            .chain(self.deferred_context_actions.iter().map(|action| action.provider_name.clone()))
-            .chain(self.deferred_lifecycle_actions.iter().map(|action| action.provider_name.clone()))
+
             .collect::<BTreeSet<_>>();
         let mut actions = Vec::with_capacity(descriptors.len());
         for descriptor in descriptors {
@@ -1293,7 +1196,7 @@ impl NomiPluginToolSession {
     ///
     /// The section is absent when no approved ContextContributor returned a
     /// value. It is assembled once while the runtime is built from the exact
-    /// Snapshot; on-demand context is intentionally not projected here.
+    /// Snapshot. Every enabled context contribution is projected here.
     pub fn system_prompt_with_initial_context(
         &self,
         base: Option<&str>,
@@ -1334,8 +1237,7 @@ impl NomiPluginToolSession {
     pub fn tool_count(&self) -> usize {
         self.actions.len()
             + self.miniapp_actions.len()
-            + self.deferred_context_actions.len()
-            + self.deferred_lifecycle_actions.len()
+
             + self.host_dynamic_actions.len()
     }
 
@@ -1348,7 +1250,6 @@ impl NomiPluginToolSession {
             .iter()
             .filter(|action| {
                 action.capability_id().as_ref() == capability_id
-                    && action.deferred == deferred
             })
             .map(|action| action.provider_name.clone())
             .chain(
@@ -1356,26 +1257,7 @@ impl NomiPluginToolSession {
                     .iter()
                     .filter(|action| {
                         action.capability_id().as_ref() == capability_id
-                            && action.deferred == deferred
-                    })
-                    .map(|action| action.provider_name.clone()),
-            )
-            .chain(
-                self.deferred_context_actions
-                    .iter()
-                    .filter(|action| {
-                        action.capability_id().as_ref() == capability_id
-                            && deferred
-                    })
-                    .map(|action| action.provider_name.clone()),
-            )
-            .chain(
-                self.deferred_lifecycle_actions
-                    .iter()
-                    .filter(|action| {
-                        action.capability_id().as_ref() == capability_id
-                            && deferred
-                    })
+                            })
                     .map(|action| action.provider_name.clone()),
             )
             .chain(
@@ -1399,23 +1281,9 @@ impl NomiPluginToolSession {
     ) {
         for action in self.actions.iter() {
             push_unique(allowed_tools, &action.provider_name);
-            if action.deferred {
-                push_unique(deferred_tools, &action.provider_name);
-            }
         }
         for action in self.miniapp_actions.iter() {
             push_unique(allowed_tools, &action.provider_name);
-            if action.deferred {
-                push_unique(deferred_tools, &action.provider_name);
-            }
-        }
-        for action in self.deferred_context_actions.iter() {
-            push_unique(allowed_tools, &action.provider_name);
-            push_unique(deferred_tools, &action.provider_name);
-        }
-        for action in self.deferred_lifecycle_actions.iter() {
-            push_unique(allowed_tools, &action.provider_name);
-            push_unique(deferred_tools, &action.provider_name);
         }
         for action in self.host_dynamic_actions.iter() {
             push_unique(allowed_tools, &action.descriptor.provider_name);
@@ -1436,8 +1304,7 @@ impl NomiPluginToolSession {
     ) -> Result<(), NomiPluginToolError> {
         if self.actions.is_empty()
             && self.miniapp_actions.is_empty()
-            && self.deferred_context_actions.is_empty()
-            && self.deferred_lifecycle_actions.is_empty()
+
             && self.host_dynamic_actions.is_empty()
         {
             return Ok(());
@@ -1451,7 +1318,6 @@ impl NomiPluginToolSession {
                 Box::new(NomiPluginTool {
                     action,
                     invoker: Arc::clone(&self.invoker),
-                    deferred_state: deferred_state.clone(),
                 }) as Box<dyn Tool>
             })
             .collect();
@@ -1460,44 +1326,11 @@ impl NomiPluginToolSession {
                 Box::new(NomiMiniAppTool {
                     action,
                     invoker: Arc::clone(invoker),
-                    deferred_state: deferred_state.clone(),
                 }) as Box<dyn Tool>
             }));
         } else if !self.miniapp_actions.is_empty() {
             return Err(NomiPluginToolError::Contract(
                 "MiniApp actions are present without an execution adapter".to_owned(),
-            ));
-        }
-        if let Some(invoker) = &self.context_invoker {
-            tools.extend(self.deferred_context_actions.iter().cloned().map(
-                |action| {
-                    Box::new(NomiDeferredContextTool {
-                        action,
-                        invoker: Arc::clone(invoker),
-                        deferred_state: deferred_state.clone(),
-                    }) as Box<dyn Tool>
-                },
-            ));
-        } else if !self.deferred_context_actions.is_empty() {
-            return Err(NomiPluginToolError::Contract(
-                "deferred ContextContributor actions are present without a Kernel execution adapter"
-                    .to_owned(),
-            ));
-        }
-        if let Some(invoker) = &self.lifecycle_invoker {
-            tools.extend(self.deferred_lifecycle_actions.iter().cloned().map(
-                |action| {
-                    Box::new(NomiDeferredLifecycleTool {
-                        action,
-                        invoker: Arc::clone(invoker),
-                        deferred_state: deferred_state.clone(),
-                    }) as Box<dyn Tool>
-                },
-            ));
-        } else if !self.deferred_lifecycle_actions.is_empty() {
-            return Err(NomiPluginToolError::Contract(
-                "deferred lifecycle actions are present without a host execution adapter"
-                    .to_owned(),
             ));
         }
         if let Some(invoker) = &self.host_dynamic_invoker {
@@ -1520,16 +1353,6 @@ impl NomiPluginToolSession {
             .map(|action| action.provider_name.clone())
             .chain(
                 self.miniapp_actions
-                    .iter()
-                    .map(|action| action.provider_name.clone()),
-            )
-            .chain(
-                self.deferred_context_actions
-                    .iter()
-                    .map(|action| action.provider_name.clone()),
-            )
-            .chain(
-                self.deferred_lifecycle_actions
                     .iter()
                     .map(|action| action.provider_name.clone()),
             )
@@ -1621,10 +1444,7 @@ impl KernelNomiPluginToolSession {
     ///
     /// Keeping both projections in one Session object prevents catalog,
     /// context, and Tool authority from being resolved along separate paths.
-    /// Initial ContextContributors are assembled into the system prompt;
-    /// on-demand ContextContributors become deferred empty-input Tools whose
-    /// invocation performs the completed-boundary activation and returns the
-    /// context to the current turn.
+    /// Enabled ContextContributors are assembled into the system prompt.
     #[allow(clippy::too_many_arguments)]
     pub async fn materialize_with_platform_builtins_and_context(
         kernel: Arc<KernelRegistry>,
@@ -1711,24 +1531,12 @@ impl KernelNomiPluginToolSession {
             &state_scope_key,
         )?;
         let registry = kernel.snapshot()?;
-        let initial = compiled
-            .content()
-            .initial_capabilities
-            .iter()
-            .map(|capability| capability.capability.id.clone())
-            .collect::<BTreeSet<_>>();
-        let on_demand = compiled
-            .content()
-            .on_demand_capabilities
-            .iter()
-            .map(|capability| capability.capability.id.clone())
-            .collect::<BTreeSet<_>>();
 
         let active = Arc::new(SessionCapabilityState::new(&compiled));
         let active_snapshot = active.snapshot()?;
         let mut initial_context_contributions = match (
             platform_builtin_context_admission.as_ref(),
-            compiled.content().initial_capabilities.is_empty(),
+            compiled.content().enabled_capabilities.is_empty(),
         ) {
             (Some(admission), false) => {
                 assemble_initial_platform_builtin_context(
@@ -1760,26 +1568,6 @@ impl KernelNomiPluginToolSession {
                 .await?,
             );
         }
-        let deferred_context_actions = match
-            platform_builtin_context_admission.as_ref()
-        {
-            Some(admission) => materialize_deferred_platform_builtin_context(
-                &compiled,
-                registry.as_ref(),
-                admission,
-            )?,
-            None => Vec::new(),
-        };
-        let deferred_lifecycle_actions = match
-            platform_builtin_lifecycle_admission.as_ref()
-        {
-            Some(admission) => materialize_deferred_platform_builtin_lifecycle(
-                &compiled,
-                registry.as_ref(),
-                admission,
-            )?,
-            None => Vec::new(),
-        };
         let middleware_identities = match
             platform_builtin_lifecycle_admission.as_ref()
         {
@@ -1808,7 +1596,7 @@ impl KernelNomiPluginToolSession {
             ),
             _ => None,
         };
-        let (mut lifecycle_context_contributors, lifecycle_context_cells) = match
+        let mut lifecycle_context_contributors = match
             platform_builtin_lifecycle_admission.as_ref()
         {
             Some(admission) => lifecycle_context_contributors(
@@ -1818,10 +1606,9 @@ impl KernelNomiPluginToolSession {
                 &agent_session_id,
                 &state_scope_key,
                 admission,
-                &active,
             )
             .await?,
-            None => (Vec::new(), BTreeMap::new()),
+            None => Vec::new(),
         };
         if let Some(contributor) = middleware_context_contributor {
             lifecycle_context_contributors.push(contributor);
@@ -1830,9 +1617,8 @@ impl KernelNomiPluginToolSession {
         let mut pending = Vec::new();
         for resolved in compiled
             .content()
-            .initial_capabilities
+            .enabled_capabilities
             .iter()
-            .chain(&compiled.content().on_demand_capabilities)
         {
             let schema_source = match resolved.contribution_lock.source_kind {
                 ContributionSourceKind::PluginMount => {
@@ -1872,16 +1658,6 @@ impl KernelNomiPluginToolSession {
                     manifest.id.as_ref()
                 ))
             })?;
-            let deferred = if initial.contains(&manifest.id) {
-                false
-            } else if on_demand.contains(&manifest.id) {
-                true
-            } else {
-                return Err(NomiPluginToolError::Contract(format!(
-                    "resolved capability {} is in neither Snapshot set",
-                    manifest.id.as_ref()
-                )));
-            };
             for action in &manifest.contributions.actions {
                 if !policy.allowed_actions.contains(&action.action_id)
                     || action.presentation != ToolPresentationKind::FunctionTool
@@ -1893,7 +1669,6 @@ impl KernelNomiPluginToolSession {
                     action.clone(),
                     manifest.display.name.clone(),
                     manifest.display.description.clone(),
-                    deferred,
                     schema_source,
                 ));
             }
@@ -1906,7 +1681,6 @@ impl KernelNomiPluginToolSession {
                     action,
                     display_name,
                     description,
-                    deferred,
                     schema_source,
                 )| {
                     let plugin_schema_resolver =
@@ -1949,8 +1723,7 @@ impl KernelNomiPluginToolSession {
                             display_name,
                             description,
                             input_schema,
-                            deferred,
-                        )
+                                )
                     }
                 },
             ),
@@ -1969,64 +1742,15 @@ impl KernelNomiPluginToolSession {
                 )
             })
             .collect();
-        let activation_gate = Arc::new(tokio::sync::Mutex::new(()));
         let invoker = Arc::new(KernelNomiPluginToolInvoker {
             kernel: Arc::clone(&kernel),
             compiled: Arc::clone(&compiled),
             active: Arc::clone(&active),
-            activation_gate: Arc::clone(&activation_gate),
             owner: owner.clone(),
             agent_session_id: agent_session_id.clone(),
             state_scope_key: state_scope_key.clone(),
             identities,
         });
-        let context_invoker = if deferred_context_actions.is_empty() {
-            None
-        } else {
-            Some(Arc::new(KernelNomiContextInvoker {
-                kernel: Arc::clone(&kernel),
-                compiled: Arc::clone(&compiled),
-                active: Arc::clone(&active),
-                activation_gate: Arc::clone(&activation_gate),
-                owner: owner.clone(),
-                agent_session_id: agent_session_id.clone(),
-                state_scope_key: state_scope_key.clone(),
-                identities: deferred_context_actions
-                    .iter()
-                    .map(|action| {
-                        (
-                            action.capability_id().clone(),
-                            action.identity.clone(),
-                        )
-                    })
-                    .collect(),
-            }))
-        };
-        let lifecycle_invoker = match (
-            deferred_lifecycle_actions.is_empty(),
-            platform_builtin_lifecycle_admission,
-        ) {
-            (false, Some(admission)) => Some(Arc::new(KernelNomiLifecycleInvoker {
-                compiled: Arc::clone(&compiled),
-                active: Arc::clone(&active),
-                activation_gate: Arc::clone(&activation_gate),
-                owner: owner.clone(),
-                agent_session_id: agent_session_id.clone(),
-                state_scope_key: state_scope_key.clone(),
-                admission,
-                identities: deferred_lifecycle_actions
-                    .iter()
-                    .map(|action| {
-                        (
-                            action.capability_id().clone(),
-                            action.identity.clone(),
-                        )
-                    })
-                    .collect(),
-                context_cells: lifecycle_context_cells,
-            })),
-            _ => None,
-        };
         let mut session = NomiPluginToolSession::new(
             compiled.snapshot_ref().clone(),
             actions,
@@ -2034,11 +1758,6 @@ impl KernelNomiPluginToolSession {
         )?;
         session.initial_context_contributions =
             Arc::from(initial_context_contributions);
-        session.deferred_context_actions = Arc::from(deferred_context_actions);
-        session.context_invoker = context_invoker;
-        session.deferred_lifecycle_actions =
-            Arc::from(deferred_lifecycle_actions);
-        session.lifecycle_invoker = lifecycle_invoker;
         session.capability_state = Some(active);
         session.target_resource_bindings =
             Arc::from(compiled.target_resource_bindings.clone());
@@ -2068,38 +1787,15 @@ impl KernelNomiPluginToolSession {
             agent_session_id,
             state_scope_key,
         )?;
-        let initial = compiled
-            .content()
-            .initial_miniapp_capabilities
-            .iter()
-            .map(|capability| capability.capability.id.clone())
-            .collect::<BTreeSet<_>>();
-        let on_demand = compiled
-            .content()
-            .on_demand_miniapp_capabilities
-            .iter()
-            .map(|capability| capability.capability.id.clone())
-            .collect::<BTreeSet<_>>();
         let mut actions = Vec::new();
         for resolved in compiled
             .content()
-            .initial_miniapp_capabilities
+            .enabled_miniapp_capabilities
             .iter()
-            .chain(&compiled.content().on_demand_miniapp_capabilities)
         {
             resolved
                 .validate()
                 .map_err(|error| NomiPluginToolError::Contract(error.message))?;
-            let deferred = if initial.contains(&resolved.capability.id) {
-                false
-            } else if on_demand.contains(&resolved.capability.id) {
-                true
-            } else {
-                return Err(NomiPluginToolError::Contract(format!(
-                    "MiniApp capability {} is in neither Snapshot set",
-                    resolved.capability.id.as_ref()
-                )));
-            };
             for action in &resolved.actions {
                 if (!resolved.action_allowlist.is_empty()
                     && !resolved.action_allowlist.contains(&action.action_id))
@@ -2121,7 +1817,6 @@ impl KernelNomiPluginToolSession {
                     resolved.display_name.clone(),
                     resolved.description.clone(),
                     input_schema,
-                    deferred,
                 )?);
             }
         }
@@ -2141,7 +1836,7 @@ async fn assemble_initial_platform_builtin_context(
     admission: &NomiPlatformBuiltinContextAdmission,
 ) -> Result<Vec<NomiInitialContextContribution>, NomiPluginToolError> {
     let mut contributions = Vec::new();
-    for resolved in &compiled.content().initial_capabilities {
+    for resolved in &compiled.content().enabled_capabilities {
         if resolved.contribution_lock.source_kind
             != ContributionSourceKind::PlatformBuiltin
             || resolved.resolved_source.source_kind
@@ -2228,90 +1923,6 @@ async fn assemble_initial_platform_builtin_context(
     Ok(contributions)
 }
 
-fn materialize_deferred_platform_builtin_context(
-    compiled: &CompiledSnapshot,
-    registry: &MaterializedRegistry,
-    admission: &NomiPlatformBuiltinContextAdmission,
-) -> Result<Vec<NomiDeferredContextAction>, NomiPluginToolError> {
-    let mut actions = Vec::new();
-    for resolved in &compiled.content().on_demand_capabilities {
-        if resolved.contribution_lock.source_kind
-            != ContributionSourceKind::PlatformBuiltin
-            || resolved.resolved_source.source_kind
-                != PluginSourceKind::Bundled
-            || admission.target_for(resolved)?.is_none()
-        {
-            continue;
-        }
-        let current = registry
-            .capability(&resolved.capability.id)
-            .ok_or_else(|| KernelError::CapabilityNotMaterialized {
-                capability_id: resolved.capability.id.clone(),
-                version: resolved.capability.version.clone(),
-            })?;
-        validate_exact_target(resolved, current)?;
-        let [context_schema_ref] =
-            current.manifest.contributions.context_schema_refs.as_slice()
-        else {
-            return Err(NomiPluginToolError::Contract(format!(
-                "on-demand ContextContributor {} must own one canonical context schema",
-                resolved.capability.id.as_ref()
-            )));
-        };
-        let identity = NomiDeferredContextIdentity {
-            resolved_snapshot_ref: compiled.snapshot_ref().clone(),
-            resolved_capability: resolved.clone(),
-            context_schema_ref: context_schema_ref.clone(),
-        };
-        let canonical_identity = canonical_json_bytes(&identity).map_err(
-            |error| {
-                NomiPluginToolError::Contract(format!(
-                    "deferred ContextContributor identity could not be encoded: {error}"
-                ))
-            },
-        )?;
-        let activation_identity =
-            String::from_utf8(canonical_identity.clone()).map_err(|error| {
-                NomiPluginToolError::Contract(format!(
-                    "deferred ContextContributor identity is not UTF-8: {error}"
-                ))
-            })?;
-        let provider_name = provider_tool_name(
-            resolved.capability.id.as_ref(),
-            "context.activate",
-            &canonical_identity,
-        );
-        actions.push(NomiDeferredContextAction {
-            provider_name,
-            activation_identity,
-            description: format!(
-                "Activate {} and return its structured context for this turn.",
-                current.manifest.display.name
-            ),
-            identity,
-        });
-    }
-    actions.sort_by(|left, right| {
-        (left.capability_id(), left.provider_name()).cmp(&(
-            right.capability_id(),
-            right.provider_name(),
-        ))
-    });
-    let mut provider_names = BTreeSet::new();
-    let mut activation_identities = BTreeSet::new();
-    for action in &actions {
-        if !provider_names.insert(action.provider_name.clone())
-            || !activation_identities.insert(action.activation_identity.clone())
-        {
-            return Err(NomiPluginToolError::Contract(format!(
-                "deferred ContextContributor {} has a duplicate Nomi activation route",
-                action.capability_id().as_ref()
-            )));
-        }
-    }
-    Ok(actions)
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn assemble_initial_platform_builtin_lifecycle(
     compiled: &CompiledSnapshot,
@@ -2322,7 +1933,7 @@ async fn assemble_initial_platform_builtin_lifecycle(
     admission: &NomiPlatformBuiltinLifecycleAdmission,
 ) -> Result<Vec<NomiInitialContextContribution>, NomiPluginToolError> {
     let mut results = Vec::new();
-    for resolved in &compiled.content().initial_capabilities {
+    for resolved in &compiled.content().enabled_capabilities {
         if resolved.contribution_lock.source_kind
             != ContributionSourceKind::PlatformBuiltin
             || resolved.resolved_source.source_kind
@@ -2382,13 +1993,12 @@ fn turn_middleware_identities(
     compiled: &CompiledSnapshot,
     registry: &MaterializedRegistry,
     admission: &NomiPlatformBuiltinLifecycleAdmission,
-) -> Result<Vec<NomiDeferredLifecycleIdentity>, NomiPluginToolError> {
+) -> Result<Vec<NomiLifecycleIdentity>, NomiPluginToolError> {
     let mut identities = Vec::new();
     for resolved in compiled
         .content()
-        .initial_capabilities
+        .enabled_capabilities
         .iter()
-        .chain(&compiled.content().on_demand_capabilities)
     {
         if admission.target_for(resolved)?.is_none() {
             continue;
@@ -2403,7 +2013,7 @@ fn turn_middleware_identities(
             continue;
         }
         validate_exact_target(resolved, current)?;
-        identities.push(NomiDeferredLifecycleIdentity {
+        identities.push(NomiLifecycleIdentity {
             resolved_snapshot_ref: compiled.snapshot_ref().clone(),
             resolved_capability: resolved.clone(),
             schema_ref: lifecycle_schema_ref(&current.manifest)?,
@@ -2418,7 +2028,6 @@ fn turn_middleware_identities(
     Ok(identities)
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn lifecycle_context_contributors(
     compiled: &CompiledSnapshot,
     registry: &MaterializedRegistry,
@@ -2426,198 +2035,27 @@ async fn lifecycle_context_contributors(
     agent_session_id: &AgentSessionId,
     state_scope_key: &ScopeKey,
     admission: &Arc<NomiPlatformBuiltinLifecycleAdmission>,
-    active: &Arc<SessionCapabilityState>,
-) -> Result<
-    (
-        Vec<Arc<dyn ContextContributor>>,
-        BTreeMap<CapabilityId, LifecycleContextCell>,
-    ),
-    NomiPluginToolError,
-> {
+) -> Result<Vec<Arc<dyn ContextContributor>>, NomiPluginToolError> {
     let mut contributors = Vec::new();
-    let mut context_cells = BTreeMap::new();
-    let initial_ids = compiled
-        .content()
-        .initial_capabilities
-        .iter()
-        .map(|capability| capability.capability.id.clone())
-        .collect::<BTreeSet<_>>();
-    for resolved in compiled
-        .content()
-        .initial_capabilities
-        .iter()
-        .chain(&compiled.content().on_demand_capabilities)
-    {
-        if admission.target_for(resolved)?.is_none() {
-            continue;
-        }
-        let current = registry
-            .capability(&resolved.capability.id)
+    for resolved in &compiled.content().enabled_capabilities {
+        if admission.target_for(resolved)?.is_none() { continue; }
+        let current = registry.capability(&resolved.capability.id)
             .ok_or_else(|| KernelError::CapabilityNotMaterialized {
                 capability_id: resolved.capability.id.clone(),
                 version: resolved.capability.version.clone(),
             })?;
-        let operation_id = OperationId::from(format!(
-            "nomi-lifecycle-prepare:{}:{}",
-            agent_session_id.as_ref(),
-            resolved.capability.id.as_ref()
-        ));
         let invocation = lifecycle_invocation(
-            compiled,
-            owner,
-            agent_session_id,
-            state_scope_key,
-            resolved,
+            compiled, owner, agent_session_id, state_scope_key, resolved,
             lifecycle_schema_ref(&current.manifest)?,
-            operation_id,
+            OperationId::from(format!("nomi-lifecycle-prepare:{}:{}", agent_session_id.as_ref(), resolved.capability.id.as_ref())),
         )?;
-        let inner = Arc::new(tokio::sync::OnceCell::new());
-        if initial_ids.contains(&resolved.capability.id) {
-            let prepared = admission
-                .invoker
-                .context_contributor(invocation.clone())
-                .await
-                .map_err(NomiPluginToolError::Contract)?;
-            inner.set(prepared).map_err(|_| {
-                NomiPluginToolError::Contract(format!(
-                    "initial lifecycle context for {} was prepared more than once",
-                    resolved.capability.id.as_ref()
-                ))
-            })?;
-        }
-        context_cells.insert(resolved.capability.id.clone(), Arc::clone(&inner));
-        contributors.push(Arc::new(GatedLifecycleContextContributor {
-            capability_id: resolved.capability.id.clone(),
-            active: Arc::clone(active),
-            inner,
-        }) as Arc<dyn ContextContributor>);
-    }
-    Ok((contributors, context_cells))
-}
-
-struct GatedLifecycleContextContributor {
-    capability_id: CapabilityId,
-    active: Arc<SessionCapabilityState>,
-    inner: LifecycleContextCell,
-}
-
-#[async_trait]
-impl ContextContributor for GatedLifecycleContextContributor {
-    async fn pre_turn_context(&self) -> Option<String> {
-        self.pre_turn_context_result(None).await.ok().flatten()
-    }
-
-    async fn pre_turn_context_for_turn(
-        &self,
-        turn: &TurnContext,
-    ) -> Option<String> {
-        self.pre_turn_context_result(Some(turn))
-            .await
-            .ok()
-            .flatten()
-    }
-
-    async fn pre_turn_context_for_turn_result(
-        &self,
-        turn: &TurnContext,
-    ) -> Result<Option<String>, String> {
-        self.pre_turn_context_result(Some(turn)).await
-    }
-
-    fn label(&self) -> &str {
-        "nomifun_lifecycle_context"
-    }
-}
-
-impl GatedLifecycleContextContributor {
-    async fn pre_turn_context_result(
-        &self,
-        turn: Option<&TurnContext>,
-    ) -> Result<Option<String>, String> {
-        let active = self
-            .active
-            .snapshot()
-            .map_err(|_| "LIFECYCLE_CAPABILITY_STATE_UNAVAILABLE".to_owned())?;
-        if !active.active.contains(&self.capability_id) {
-            return Ok(None);
-        }
-        let prepared = self.inner.get().ok_or_else(|| {
-            "LIFECYCLE_CONTEXT_NOT_PREPARED".to_owned()
-        })?;
-        let Some(inner) = prepared.as_ref() else {
-            return Ok(None);
-        };
-        match turn {
-            Some(turn) => inner.pre_turn_context_for_turn_result(turn).await,
-            None => Ok(inner.pre_turn_context().await),
+        if let Some(contributor) = admission.invoker.context_contributor(invocation).await.map_err(NomiPluginToolError::Contract)? {
+            contributors.push(contributor);
         }
     }
+    Ok(contributors)
 }
 
-fn materialize_deferred_platform_builtin_lifecycle(
-    compiled: &CompiledSnapshot,
-    registry: &MaterializedRegistry,
-    admission: &NomiPlatformBuiltinLifecycleAdmission,
-) -> Result<Vec<NomiDeferredLifecycleAction>, NomiPluginToolError> {
-    let mut actions = Vec::new();
-    for resolved in &compiled.content().on_demand_capabilities {
-        if resolved.contribution_lock.source_kind
-            != ContributionSourceKind::PlatformBuiltin
-            || resolved.resolved_source.source_kind
-                != PluginSourceKind::Bundled
-            || admission.target_for(resolved)?.is_none()
-        {
-            continue;
-        }
-        let current = registry
-            .capability(&resolved.capability.id)
-            .ok_or_else(|| KernelError::CapabilityNotMaterialized {
-                capability_id: resolved.capability.id.clone(),
-                version: resolved.capability.version.clone(),
-            })?;
-        validate_exact_target(resolved, current)?;
-        let identity = NomiDeferredLifecycleIdentity {
-            resolved_snapshot_ref: compiled.snapshot_ref().clone(),
-            resolved_capability: resolved.clone(),
-            schema_ref: lifecycle_schema_ref(&current.manifest)?,
-        };
-        let canonical_identity = canonical_json_bytes(&identity).map_err(
-            |error| {
-                NomiPluginToolError::Contract(format!(
-                    "deferred lifecycle identity could not be encoded: {error}"
-                ))
-            },
-        )?;
-        let activation_identity =
-            String::from_utf8(canonical_identity.clone()).map_err(|error| {
-                NomiPluginToolError::Contract(format!(
-                    "deferred lifecycle identity is not UTF-8: {error}"
-                ))
-            })?;
-        actions.push(NomiDeferredLifecycleAction {
-            provider_name: provider_tool_name(
-                resolved.capability.id.as_ref(),
-                "lifecycle.activate",
-                &canonical_identity,
-            ),
-            activation_identity,
-            description: format!(
-                "Activate {} for this Agent Session and return its host receipt.",
-                current.manifest.display.name
-            ),
-            identity,
-        });
-    }
-    actions.sort_by(|left, right| {
-        (left.capability_id(), left.provider_name()).cmp(&(
-            right.capability_id(),
-            right.provider_name(),
-        ))
-    });
-    Ok(actions)
-}
-
-#[allow(clippy::too_many_arguments)]
 fn lifecycle_invocation(
     compiled: &CompiledSnapshot,
     owner: &PrincipalRef,
@@ -2658,21 +2096,6 @@ fn lifecycle_invocation(
     })
 }
 
-struct KernelNomiLifecycleInvoker {
-    compiled: Arc<CompiledSnapshot>,
-    active: Arc<SessionCapabilityState>,
-    activation_gate: Arc<tokio::sync::Mutex<()>>,
-    owner: PrincipalRef,
-    agent_session_id: AgentSessionId,
-    state_scope_key: ScopeKey,
-    admission: Arc<NomiPlatformBuiltinLifecycleAdmission>,
-    identities: BTreeMap<CapabilityId, NomiDeferredLifecycleIdentity>,
-    context_cells: BTreeMap<CapabilityId, LifecycleContextCell>,
-}
-
-type LifecycleContextCell =
-    Arc<tokio::sync::OnceCell<Option<Arc<dyn ContextContributor>>>>;
-
 struct NomiLifecycleContextContributor {
     compiled: Arc<CompiledSnapshot>,
     active: Arc<SessionCapabilityState>,
@@ -2680,7 +2103,7 @@ struct NomiLifecycleContextContributor {
     agent_session_id: AgentSessionId,
     state_scope_key: ScopeKey,
     admission: Arc<NomiPlatformBuiltinLifecycleAdmission>,
-    identities: Arc<[NomiDeferredLifecycleIdentity]>,
+    identities: Arc<[NomiLifecycleIdentity]>,
     turn_sequence: AtomicU64,
 }
 
@@ -2796,222 +2219,10 @@ impl ContextContributor for NomiLifecycleContextContributor {
     }
 }
 
-impl KernelNomiLifecycleInvoker {
-    async fn invoke(
-        &self,
-        identity: &NomiDeferredLifecycleIdentity,
-        operation_id: OperationId,
-        activation_proven: bool,
-    ) -> Result<StrictJsonValue, NomiPluginToolError> {
-        let capability_id = identity.resolved_capability.capability.id.clone();
-        if self.identities.get(&capability_id) != Some(identity)
-            || !activation_proven
-        {
-            return Err(KernelError::CapabilityNotActive {
-                capability_id,
-            }
-            .into());
-        }
-        let invocation = lifecycle_invocation(
-            &self.compiled,
-            &self.owner,
-            &self.agent_session_id,
-            &self.state_scope_key,
-            &identity.resolved_capability,
-            identity.schema_ref.clone(),
-            operation_id.clone(),
-        )?;
-        let active = self.active.snapshot()?;
-        if !active.active.contains(&capability_id) {
-            let _guard = self.activation_gate.lock().await;
-            let current = self.active.snapshot()?;
-            if !current.active.contains(&capability_id) {
-                let prepared = if let Some(cell) = self.context_cells.get(&capability_id) {
-                    if cell.get().is_none() {
-                        Some((
-                            Arc::clone(cell),
-                            tokio::time::timeout(
-                                Duration::from_secs(5),
-                                self.admission
-                                    .invoker
-                                    .context_contributor(invocation.clone()),
-                            )
-                            .await
-                            .map_err(|_| {
-                                NomiPluginToolError::Contract(format!(
-                                    "on-demand lifecycle context for {} exceeded its 5 second deadline",
-                                    capability_id.as_ref()
-                                ))
-                            })?
-                            .map_err(|_| {
-                                NomiPluginToolError::Contract(format!(
-                                    "on-demand lifecycle context for {} could not be prepared",
-                                    capability_id.as_ref()
-                                ))
-                            })?,
-                        ))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                let result = tokio::time::timeout(
-                    Duration::from_secs(5),
-                    self.admission.invoker.activate(invocation),
-                )
-                .await
-                .map_err(|_| {
-                    NomiPluginToolError::Contract(format!(
-                        "on-demand lifecycle capability {} exceeded its 5 second deadline",
-                        capability_id.as_ref()
-                    ))
-                })?
-                .map_err(|_| {
-                    NomiPluginToolError::Contract(format!(
-                        "on-demand lifecycle capability {} was rejected by its host",
-                        capability_id.as_ref()
-                    ))
-                })?;
-                if let Some((cell, prepared)) = prepared {
-                    cell.set(prepared).map_err(|_| {
-                        NomiPluginToolError::Contract(format!(
-                            "on-demand lifecycle context for {} was prepared more than once",
-                            capability_id.as_ref()
-                        ))
-                    })?;
-                }
-                self.active.activate_at_boundary(
-                    current.generation,
-                    &capability_id,
-                    CompletedTurnBoundary::committed(operation_id.clone()),
-                )?;
-                return Ok(result);
-            }
-        }
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            self.admission.invoker.activate(invocation),
-        )
-        .await
-        .map_err(|_| {
-            NomiPluginToolError::Contract(format!(
-                "on-demand lifecycle capability {} exceeded its 5 second deadline",
-                capability_id.as_ref()
-            ))
-        })?
-        .map_err(|_| {
-            NomiPluginToolError::Contract(format!(
-                "on-demand lifecycle capability {} was rejected by its host",
-                capability_id.as_ref()
-            ))
-        })
-    }
-}
-
-struct KernelNomiContextInvoker {
-    kernel: Arc<KernelRegistry>,
-    compiled: Arc<CompiledSnapshot>,
-    active: Arc<SessionCapabilityState>,
-    activation_gate: Arc<tokio::sync::Mutex<()>>,
-    owner: PrincipalRef,
-    agent_session_id: AgentSessionId,
-    state_scope_key: ScopeKey,
-    identities: BTreeMap<CapabilityId, NomiDeferredContextIdentity>,
-}
-
-impl KernelNomiContextInvoker {
-    async fn invoke(
-        &self,
-        identity: &NomiDeferredContextIdentity,
-        operation_id: OperationId,
-        deferred_activation_proven: bool,
-    ) -> Result<StrictJsonValue, NomiPluginToolError> {
-        let capability_id = identity.resolved_capability.capability.id.clone();
-        if self.identities.get(&capability_id) != Some(identity) {
-            return Err(NomiPluginToolError::Contract(
-                "ContextContributor invocation identity differs from the materialized session"
-                    .to_owned(),
-            ));
-        }
-        if !deferred_activation_proven {
-            return Err(KernelError::CapabilityNotActive {
-                capability_id,
-            }
-            .into());
-        }
-
-        let mut active = self.active.snapshot()?;
-        if !active.active.contains(&capability_id) {
-            let _activation = self.activation_gate.lock().await;
-            active = self.active.snapshot()?;
-            if !active.active.contains(&capability_id) {
-                self.active.activate_at_boundary(
-                    active.generation,
-                    &capability_id,
-                    CompletedTurnBoundary::committed(operation_id.clone()),
-                )?;
-                active = self.active.snapshot()?;
-            }
-        }
-        let policy = self.compiled.policy(&capability_id).ok_or_else(|| {
-            NomiPluginToolError::Contract(format!(
-                "compiled Snapshot has no authority policy for ContextContributor {}",
-                capability_id.as_ref()
-            ))
-        })?;
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
-            self.kernel.contribute_context(
-                &self.compiled,
-                &active,
-                CapabilityAccessRequest {
-                    principal: self.owner.clone(),
-                    session_owner: self.owner.clone(),
-                    agent_session_id: self.agent_session_id.clone(),
-                    operation_id: operation_id.clone(),
-                    correlation_id: CorrelationId::from(format!(
-                        "{}:context",
-                        operation_id.as_ref()
-                    )),
-                    resolved_snapshot_ref: self.compiled.snapshot_ref().clone(),
-                    active_set_generation: active.generation,
-                    capability_id: capability_id.clone(),
-                    resource_binding_ids: policy.resource_binding_ids.clone(),
-                    state_scope_key: self.state_scope_key.clone(),
-                },
-            ),
-        )
-        .await
-        .map_err(|_| {
-            NomiPluginToolError::Contract(format!(
-                "on-demand ContextContributor {} exceeded its 5 second deadline",
-                capability_id.as_ref()
-            ))
-        })??;
-        let output = StrictJsonValue(serde_json::json!({
-            "capability_id": capability_id,
-            "context": result.value.map(|value| value.0),
-        }));
-        let bytes = canonical_json_bytes(&output.0).map_err(|error| {
-            NomiPluginToolError::Contract(format!(
-                "on-demand capability context could not be encoded: {error}"
-            ))
-        })?;
-        if bytes.len() > MAX_INITIAL_CAPABILITY_CONTEXT_BYTES {
-            return Err(NomiPluginToolError::Contract(format!(
-                "on-demand capability context exceeds the {MAX_INITIAL_CAPABILITY_CONTEXT_BYTES}-byte Nomi Tool result limit"
-            )));
-        }
-        Ok(output)
-    }
-}
-
 struct KernelNomiPluginToolInvoker {
     kernel: Arc<KernelRegistry>,
     compiled: Arc<CompiledSnapshot>,
     active: Arc<SessionCapabilityState>,
-    activation_gate: Arc<tokio::sync::Mutex<()>>,
     owner: PrincipalRef,
     agent_session_id: AgentSessionId,
     state_scope_key: ScopeKey,
@@ -3035,34 +2246,7 @@ impl NomiPluginToolInvoker for KernelNomiPluginToolInvoker {
                     .to_owned(),
             ));
         }
-        let is_deferred = self
-            .compiled
-            .content()
-            .on_demand_capabilities
-            .iter()
-            .any(|capability| capability.capability.id == key.0);
-        if is_deferred && !request.deferred_activation_proven {
-            return Err(KernelError::CapabilityNotActive {
-                capability_id: key.0,
-            }
-            .into());
-        }
-
-        let mut active = self.active.snapshot()?;
-        if !active.active.contains(&key.0) {
-            let _activation = self.activation_gate.lock().await;
-            active = self.active.snapshot()?;
-            if !active.active.contains(&key.0) {
-                self.active.activate_at_boundary(
-                    active.generation,
-                    &key.0,
-                    CompletedTurnBoundary::committed(
-                        request.operation_id.clone(),
-                    ),
-                )?;
-                active = self.active.snapshot()?;
-            }
-        }
+        let active = self.active.snapshot()?;
         let policy = self.compiled.policy(&key.0).ok_or_else(|| {
             NomiPluginToolError::Contract(format!(
                 "compiled Snapshot lost authority policy for {}",
@@ -3097,25 +2281,11 @@ impl NomiPluginToolInvoker for KernelNomiPluginToolInvoker {
 struct NomiPluginTool {
     action: NomiPluginToolAction,
     invoker: Arc<dyn NomiPluginToolInvoker>,
-    deferred_state: DeferredToolState,
 }
 
 struct NomiMiniAppTool {
     action: NomiMiniAppToolAction,
     invoker: Arc<dyn NomiMiniAppToolInvoker>,
-    deferred_state: DeferredToolState,
-}
-
-struct NomiDeferredContextTool {
-    action: NomiDeferredContextAction,
-    invoker: Arc<KernelNomiContextInvoker>,
-    deferred_state: DeferredToolState,
-}
-
-struct NomiDeferredLifecycleTool {
-    action: NomiDeferredLifecycleAction,
-    invoker: Arc<KernelNomiLifecycleInvoker>,
-    deferred_state: DeferredToolState,
 }
 
 struct NomiHostDynamicTool {
@@ -3212,175 +2382,6 @@ impl Tool for NomiHostDynamicTool {
 }
 
 #[async_trait]
-impl Tool for NomiDeferredLifecycleTool {
-    fn name(&self) -> &str {
-        &self.action.provider_name
-    }
-
-    fn activation_identity(&self) -> &str {
-        &self.action.activation_identity
-    }
-
-    fn artifact_identity(&self) -> &str {
-        self.action.capability_id().as_ref()
-    }
-
-    fn deferred_search_aliases(&self) -> Vec<String> {
-        vec![self.action.capability_id().as_ref().to_owned()]
-    }
-
-    fn description(&self) -> &str {
-        &self.action.description
-    }
-
-    fn input_schema(&self) -> JsonSchema {
-        serde_json::json!({
-            "type": "object",
-            "additionalProperties": false
-        })
-    }
-
-    fn is_concurrency_safe(&self, _input: &Value) -> bool {
-        false
-    }
-
-    fn is_deferred(&self) -> bool {
-        true
-    }
-
-    async fn execute(&self, _input: Value) -> ToolResult {
-        ToolResult::error(
-            "lifecycle activation requires an engine-owned execution context",
-        )
-    }
-
-    async fn execute_with_context(
-        &self,
-        _input: Value,
-        context: &ToolExecutionContext,
-    ) -> ToolResult {
-        let activation_proven = self
-            .deferred_state
-            .is_activated(&self.action.activation_identity);
-        if !activation_proven {
-            return ToolResult::error(format!(
-                "lifecycle capability '{}' is deferred; activate it through ToolSearch before invoking it",
-                self.action.provider_name
-            ));
-        }
-        let operation_id = OperationId::from(format!(
-            "nomi-lifecycle:{}",
-            context.operation_id()
-        ));
-        match self
-            .invoker
-            .invoke(&self.action.identity, operation_id, activation_proven)
-            .await
-        {
-            Ok(output) => match serde_json::to_string_pretty(&output.0) {
-                Ok(content) => ToolResult::text(content),
-                Err(error) => ToolResult::error(format!(
-                    "lifecycle receipt could not be serialized: {error}"
-                )),
-            },
-            Err(error) => model_safe_tool_error(&error),
-        }
-    }
-
-    fn category(&self) -> ToolCategory {
-        ToolCategory::Info
-    }
-}
-
-#[async_trait]
-impl Tool for NomiDeferredContextTool {
-    fn name(&self) -> &str {
-        &self.action.provider_name
-    }
-
-    fn activation_identity(&self) -> &str {
-        &self.action.activation_identity
-    }
-
-    fn artifact_identity(&self) -> &str {
-        self.action.capability_id().as_ref()
-    }
-
-    fn deferred_search_aliases(&self) -> Vec<String> {
-        vec![
-            self.action.capability_id().as_ref().to_owned(),
-            "context".to_owned(),
-        ]
-    }
-
-    fn description(&self) -> &str {
-        &self.action.description
-    }
-
-    fn input_schema(&self) -> JsonSchema {
-        serde_json::json!({
-            "type": "object",
-            "additionalProperties": false
-        })
-    }
-
-    fn is_concurrency_safe(&self, _input: &Value) -> bool {
-        true
-    }
-
-    fn is_deferred(&self) -> bool {
-        true
-    }
-
-    async fn execute(&self, _input: Value) -> ToolResult {
-        ToolResult::error(
-            "ContextContributor activation requires an engine-owned execution context",
-        )
-    }
-
-    async fn execute_with_context(
-        &self,
-        _input: Value,
-        context: &ToolExecutionContext,
-    ) -> ToolResult {
-        let deferred_activation_proven = self
-            .deferred_state
-            .is_activated(&self.action.activation_identity);
-        if !deferred_activation_proven {
-            return ToolResult::error(format!(
-                "ContextContributor '{}' is deferred; activate it through ToolSearch before invoking it",
-                self.action.provider_name
-            ));
-        }
-        let operation_id = OperationId::from(format!(
-            "nomi-context:{}",
-            context.operation_id()
-        ));
-        match self
-            .invoker
-            .invoke(
-                &self.action.identity,
-                operation_id,
-                deferred_activation_proven,
-            )
-            .await
-        {
-            Ok(output) => match serde_json::to_string_pretty(&output.0) {
-                Ok(content) => ToolResult::text(content),
-                Err(error) => ToolResult::error(format!(
-                    "ContextContributor output could not be serialized: {error}"
-                )),
-            },
-            Err(error) => model_safe_tool_error(&error),
-        }
-    }
-
-    fn category(&self) -> ToolCategory {
-        ToolCategory::Info
-    }
-}
-
-#[async_trait]
 impl Tool for NomiMiniAppTool {
     fn name(&self) -> &str {
         &self.action.provider_name
@@ -3418,10 +2419,6 @@ impl Tool for NomiMiniAppTool {
         )
     }
 
-    fn is_deferred(&self) -> bool {
-        self.action.deferred
-    }
-
     async fn execute(&self, _input: Value) -> ToolResult {
         ToolResult::error(
             "MiniApp Tool invocation requires an engine-owned execution context",
@@ -3433,16 +2430,6 @@ impl Tool for NomiMiniAppTool {
         input: Value,
         context: &ToolExecutionContext,
     ) -> ToolResult {
-        let deferred_activation_proven = !self.action.deferred
-            || self
-                .deferred_state
-                .is_activated(&self.action.activation_identity);
-        if !deferred_activation_proven {
-            return ToolResult::error(format!(
-                "MiniApp Tool '{}' is deferred; activate it through ToolSearch before invoking it",
-                self.action.provider_name
-            ));
-        }
         let operation_identity = context.operation_id();
         let operation_id =
             OperationId::from(format!("nomi-miniapp:{operation_identity}"));
@@ -3455,7 +2442,6 @@ impl Tool for NomiMiniAppTool {
                 "nomi-miniapp:{operation_identity}"
             )),
             operation_id,
-            deferred_activation_proven,
             input: StrictJsonValue(input),
         };
         match self.invoker.invoke(request).await {
@@ -3512,10 +2498,6 @@ impl Tool for NomiPluginTool {
         )
     }
 
-    fn is_deferred(&self) -> bool {
-        self.action.deferred
-    }
-
     async fn execute(&self, _input: Value) -> ToolResult {
         ToolResult::error(
             "Plugin Tool invocation requires an engine-owned execution context",
@@ -3527,16 +2509,6 @@ impl Tool for NomiPluginTool {
         input: Value,
         context: &ToolExecutionContext,
     ) -> ToolResult {
-        let deferred_activation_proven = !self.action.deferred
-            || self
-                .deferred_state
-                .is_activated(&self.action.activation_identity);
-        if !deferred_activation_proven {
-            return ToolResult::error(format!(
-                "Plugin Tool '{}' is deferred; activate it through ToolSearch before invoking it",
-                self.action.provider_name
-            ));
-        }
         let operation_identity = context.operation_id();
         let request = NomiPluginToolInvocation {
             identity: self.action.identity.clone(),
@@ -3549,7 +2521,6 @@ impl Tool for NomiPluginTool {
             correlation_id: CorrelationId::from(format!(
                 "nomi-plugin:{operation_identity}"
             )),
-            deferred_activation_proven,
             input: StrictJsonValue(input),
         };
         match self.invoker.invoke(request).await {
@@ -3575,7 +2546,6 @@ fn build_action(
     display_name: String,
     description: String,
     input_schema: StrictJsonValue,
-    deferred: bool,
 ) -> Result<NomiPluginToolAction, NomiPluginToolError> {
     let input_schema_digest =
         validate_canonical_input_schema(&action.input_schema, &input_schema)?;
@@ -3621,7 +2591,6 @@ fn build_action(
         description,
         input_schema,
         identity,
-        deferred,
     })
 }
 
@@ -3632,7 +2601,6 @@ fn build_miniapp_action(
     display_name: String,
     description: String,
     input_schema: StrictJsonValue,
-    deferred: bool,
 ) -> Result<NomiMiniAppToolAction, NomiPluginToolError> {
     let input_schema_digest =
         validate_canonical_input_schema(&action.input_schema, &input_schema)?;
@@ -3679,7 +2647,6 @@ fn build_miniapp_action(
         description,
         input_schema,
         identity,
-        deferred,
     })
 }
 

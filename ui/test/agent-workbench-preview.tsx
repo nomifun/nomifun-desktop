@@ -21,7 +21,7 @@ import GuidAgentSelectorPreview from './GuidAgentSelectorPreview';
 import catalog from './fixtures/agent-workbench-catalog.json';
 import seed from '../../crates/backend/nomifun-agent-contracts/contracts/presets/official-preset-seed-manifest.payload.json';
 
-const PREVIEW_KEY = 'nomifun.agent-workbench.visual-preview.v1';
+const PREVIEW_KEY = 'nomifun.agent-workbench.visual-preview.v2';
 const OWNER = '0190f5fe-7c00-7a00-8000-000000000001';
 const route = {
   schema: 'nomifun.chat-route-record.v1', task: 'agent_chat',
@@ -30,7 +30,7 @@ const route = {
     connection_config_ref: 'preview-connection', config_revision_digest: 'a'.repeat(64),
     credential_ref: 'preview-only-no-credential', features: ['text_input', 'text_output', 'tool_calls'] }, failovers: [],
 };
-const emptyDocument = () => ({ schema_version: '1.0.0', model_route_refs: { agent_chat: route.primary.model_route_id }, chat_route_records: { agent_chat: route }, initial_capabilities: [], on_demand_capabilities: [], skill_bindings: [], system_role_provider_overrides: {}, persona: '', instructions: '', starter_prompts: [] });
+const emptyDocument = () => ({ schema_version: '1.0.0', model_route_refs: { agent_chat: route.primary.model_route_id }, chat_route_records: { agent_chat: route }, enabled_capabilities: [], skill_bindings: [], system_role_provider_overrides: {}, persona: '', instructions: '', starter_prompts: [] });
 const selection = (id: string) => ({ capability: { id, version: '1.0.0' }, action_allowlist: [] });
 const makeEditor = (id: string, name: string, document: any, revisionNumber = 1, description = '') => {
   document = { ...emptyDocument(), ...document, model_route_refs: { agent_chat: route.primary.model_route_id, ...document.model_route_refs }, chat_route_records: { agent_chat: route, ...document.chat_route_records } };
@@ -39,8 +39,8 @@ const makeEditor = (id: string, name: string, document: any, revisionNumber = 1,
   return { preset, revision: { reference, document, created_by: OWNER, created_at_ms: Date.now() }, draft: { preset_id: id, display_name: name, description, current_revision: reference, document } };
 };
 const initialEditors = () => [
-  makeEditor('0190f5fe-7c00-7a00-8000-000000000101', '研究助理', { initial_capabilities: ['knowledge.search', 'knowledge.read', 'memory.project.read'].map(selection), on_demand_capabilities: ['web.fetch', 'fs.read'].map(selection) }, 1, '查阅资料、整理信息，形成有据可查的结论'),
-  makeEditor('0190f5fe-7c00-7a00-8000-000000000102', '开发搭档', { initial_capabilities: ['fs.read', 'fs.search', 'agent.execution.plan'].map(selection), on_demand_capabilities: ['fs.write', 'fs.patch', 'process.exec', 'vcs.diff', 'vcs.status'].map(selection) }, 1, '理解项目、修改代码，并检查改动结果'),
+  makeEditor('0190f5fe-7c00-7a00-8000-000000000101', '研究助理', { enabled_capabilities: ['knowledge.search', 'knowledge.read', 'memory.project.read', 'web.fetch', 'fs.read'].map(selection) }, 1, '查阅资料、整理信息，形成有据可查的结论'),
+  makeEditor('0190f5fe-7c00-7a00-8000-000000000102', '开发搭档', { enabled_capabilities: ['fs.read', 'fs.search', 'agent.execution.plan', 'fs.write', 'fs.patch', 'process.exec', 'vcs.diff', 'vcs.status'].map(selection) }, 1, '理解项目、修改代码，并检查改动结果'),
 ];
 let editors: any[];
 try { editors = JSON.parse(localStorage.getItem(PREVIEW_KEY) || 'null') || initialEditors(); } catch { editors = initialEditors(); }
@@ -49,14 +49,14 @@ const library = () => ({ official_templates: Object.entries(seed.templates).map(
 const response = (data: unknown, status = 200) => new Response(JSON.stringify(status < 400 ? { success: true, data } : { success: false, error: data }), { status, headers: { 'Content-Type': 'application/json' } });
 const preview = (draft: any) => {
   const map = (items: any[]) => items.map(({ capability }) => ({ capability, display_name: capability.id, source_package: catalog.find((row) => row.capability.id === capability.id)?.source_package, dependency_path: [], required_runtime_features: [] }));
-  const initial = map(draft.document.initial_capabilities), onDemand = map(draft.document.on_demand_capabilities);
-  const bad = [...initial, ...onDemand].filter((entry) => catalog.find((row) => row.capability.id === entry.capability.id)?.materialization_state !== 'materialized');
+  const initial = map(draft.document.enabled_capabilities);
+  const bad = initial.filter((entry) => catalog.find((row) => row.capability.id === entry.capability.id)?.materialization_state !== 'materialized');
   const reference = { preset_id: draft.preset_id, revision: (draft.current_revision?.revision || 0) + 1, revision_digest: 'b'.repeat(64) };
   return { status: bad.length ? 'blocked' : 'ready', draft_digest: 'a'.repeat(64), preview_digest: 'b'.repeat(64), candidate_revision_ref: reference,
     diagnostics: bad.map((entry) => ({ severity: 'error', code: 'CAPABILITY_UNAVAILABLE', message: entry.display_name })),
-    summary: { initial_count: initial.length, on_demand_count: onDemand.length, active_at_start_count: initial.length, model_tool_count: initial.length, context_contributor_count: 0, on_demand_index_count: onDemand.length, skill_count: 0, mcp_count: 0, required_resource_kind_count: 0, provider_initialization_count: 0 },
-    revision_diff: { added_initial: [], removed_initial: [], added_on_demand: [], removed_on_demand: [], added_skills: [], removed_skills: [], model_routes_changed: false, instructions_changed: false },
-    inspector: { required_runtime_protocol_version: '1.0.0', runtime_profile: 'managed_minimal', required_runtime_features: [], initial_capabilities: initial, on_demand_capabilities: onDemand, compact_on_demand_index: onDemand.map((entry) => entry.capability.id), tool_schema_refs: [], context_schema_refs: [], mcp_materializations: [], required_resource_kinds: [], service_key_diagnostics: [] },
+    summary: { enabled_count: initial.length, active_at_start_count: initial.length, model_tool_count: initial.length, context_contributor_count: 0, skill_count: 0, mcp_count: 0, required_resource_kind_count: 0, provider_initialization_count: 0 },
+    revision_diff: { added_enabled: [], removed_enabled: [], added_skills: [], removed_skills: [], model_routes_changed: false, instructions_changed: false },
+    inspector: { required_runtime_protocol_version: '1.0.0', runtime_profile: 'managed_minimal', required_runtime_features: [], enabled_capabilities: initial, tool_schema_refs: [], context_schema_refs: [], mcp_materializations: [], required_resource_kinds: [], service_key_diagnostics: [] },
     can_save_revision: bad.length === 0, can_create_session: false,
   };
 };

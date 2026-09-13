@@ -173,8 +173,7 @@ impl NomiCoreRobotWave4Owner {
         principal: &PrincipalRef,
         agent_session_id: &AgentSessionId,
         binding: &TypedResourceBinding,
-        initial_capability_ids: &BTreeSet<CapabilityId>,
-        deferred_capability_ids: &BTreeSet<CapabilityId>,
+        enabled_capability_ids: &BTreeSet<CapabilityId>,
     ) -> Result<
         (
             Vec<NomiHostDynamicToolDescriptor>,
@@ -197,8 +196,7 @@ impl NomiCoreRobotWave4Owner {
             (ROBOT_DEVICE_TOOLS, RobotToolCapability::DeviceTools, "link"),
         ] {
             let capability_ref = CapabilityId::from(capability_id);
-            let deferred = deferred_capability_ids.contains(&capability_ref);
-            if !deferred && !initial_capability_ids.contains(&capability_ref) {
+            if !enabled_capability_ids.contains(&capability_ref) {
                 continue;
             }
             if !binding.operations.contains(required_operation) {
@@ -244,7 +242,7 @@ impl NomiCoreRobotWave4Owner {
                     description,
                     input_schema,
                     effect_class: EffectClass::Physical,
-                    deferred,
+                    deferred: false,
                 });
             }
         }
@@ -1371,8 +1369,8 @@ mod tests {
         };
         let session_id = AgentSessionId::from("dynamic-session");
         let binding = all_tool_binding();
-        let initial = BTreeSet::from([CapabilityId::from(ROBOT_DISPLAY)]);
-        let deferred = BTreeSet::from([
+        let initial = BTreeSet::from([
+            CapabilityId::from(ROBOT_DISPLAY),
             CapabilityId::from(ROBOT_MOTION),
             CapabilityId::from(ROBOT_DEVICE_TOOLS),
         ]);
@@ -1382,7 +1380,6 @@ mod tests {
                 &session_id,
                 &binding,
                 &initial,
-                &deferred,
             )
             .await
             .unwrap();
@@ -1396,7 +1393,7 @@ mod tests {
         assert!(!display.deferred);
         assert_eq!(display.input_schema.0["type"], "object");
         assert_eq!(display.input_schema.0["additionalProperties"], false);
-        assert!(resolved
+        assert!(!resolved
             .0
             .iter()
             .find(|descriptor| descriptor.provider_name == "robot_head_look")
@@ -1473,7 +1470,6 @@ mod tests {
                 &session_id,
                 &binding,
                 &BTreeSet::from([CapabilityId::from(ROBOT_DISPLAY)]),
-                &BTreeSet::new(),
             )
             .await
             .unwrap();
@@ -1548,7 +1544,6 @@ mod tests {
                 &session_id,
                 &binding,
                 &BTreeSet::from([CapabilityId::from(ROBOT_DISPLAY)]),
-                &BTreeSet::new(),
             )
             .await
             .unwrap();
