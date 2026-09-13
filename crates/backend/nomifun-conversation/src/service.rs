@@ -4394,7 +4394,7 @@ impl ConversationService {
             None => (Vec::new(), Vec::new()),
         };
 
-        let auto_inject_names = if authority.controls_host() {
+        let auto_inject_names = if authority.controls_host() && !is_tool_free_agent_extra(&extra) {
             self.skill_resolver.auto_inject_names().await
         } else {
             Vec::new()
@@ -5541,7 +5541,13 @@ impl ConversationService {
             ));
         }
 
-        let auto_inject_names = self.skill_resolver.auto_inject_names().await;
+        let existing_extra: serde_json::Value = serde_json::from_str(&existing.extra)
+            .map_err(|error| AppError::Internal(format!("Invalid conversation extra: {error}")))?;
+        let auto_inject_names = if is_tool_free_agent_extra(&existing_extra) {
+            Vec::new()
+        } else {
+            self.skill_resolver.auto_inject_names().await
+        };
         let mut desired_skills = compute_initial_skills(
             &auto_inject_names,
             enabled_skills,
@@ -12342,6 +12348,11 @@ enum CancelOrigin {
 
 // ── Internal Helpers ────────────────────────────────────────────────
 
+fn is_tool_free_agent_extra(extra: &serde_json::Value) -> bool {
+    extra.get("enforce_tool_allowlist").and_then(serde_json::Value::as_bool) == Some(true)
+        && extra.get("allowed_tools").and_then(serde_json::Value::as_array).is_some_and(Vec::is_empty)
+}
+
 /// Render the immutable preset snapshot as explicit runtime context.
 ///
 /// Preset instructions alone are insufficient for introspection: a model can
@@ -12350,6 +12361,17 @@ enum CancelOrigin {
 /// makes activation observable to the model without asking adapters to reload
 /// the mutable catalog.
 fn render_agent_snapshot_runtime_context(snapshot: &AgentResolvedSnapshot) -> String {
+    if snapshot.enabled_capabilities.is_empty()
+        && snapshot.included_skills.is_empty()
+        && snapshot.required_resource_kinds.is_empty()
+    {
+        let mut context = format!("[NomiFun active preset]\nName: {}\nRevision: {}", snapshot.preset_name, snapshot.preset_revision);
+        if !snapshot.instructions.trim().is_empty() {
+            context.push('\n');
+            context.push_str(snapshot.instructions.trim());
+        }
+        return context;
+    }
     let mut prompt = format!(
         "[NomiFun active preset]\n\
          Name: {}\n\
@@ -12413,7 +12435,7 @@ fn project_agent_snapshot_runtime_context(
             row.conversation_id
         ))
     })?;
-    let snapshot: AgentResolvedSnapshot =
+    let mut snapshot: AgentResolvedSnapshot =
         serde_json::from_str(raw_snapshot).map_err(|error| {
             AppError::Internal(format!(
                 "Conversation {} has invalid agent_snapshot: {error}",
@@ -12440,6 +12462,13 @@ fn project_agent_snapshot_runtime_context(
         return Ok(());
     }
 
+    // Older session projections used the conversation title as preset_name.
+    // The server-stamped Agent label remains available on those sessions.
+    if let Some(name) = object.get("agent_name").and_then(serde_json::Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+    {
+        snapshot.preset_name = name.to_owned();
+    }
     let context = serde_json::Value::String(render_agent_snapshot_runtime_context(&snapshot));
     match agent_type {
         AgentType::Nomi => {
@@ -12587,6 +12616,9 @@ impl ConversationService {
         runtime_options: &AgentRuntimeBuildOptions,
         required_skills: &[String],
     ) -> Result<(), AppError> {
+        if is_tool_free_agent_extra(&runtime_options.extra) && required_skills.is_empty() {
+            return Ok(());
+        }
         if !self.execution_authority(&row.user_id).controls_host() {
             if !required_skills.is_empty() {
                 return Err(AppError::Forbidden(

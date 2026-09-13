@@ -642,6 +642,8 @@ const NomiConversationPanel: React.FC<{
     (!hasPreset || presetResourceKinds.has('workspace'));
   const knowledgeEnabled =
     !hasPreset || presetResourceKinds.has('knowledge_base');
+  const hideAdvancedControls = hasPreset &&
+    (conversation.agent_snapshot?.enabled_capabilities.length ?? 0) === 0;
   const sshHostId = sshHostIdOf(conversation);
 
   const chatLayoutProps = {
@@ -656,11 +658,11 @@ const NomiConversationPanel: React.FC<{
         {sshHostId ? <SshHostStatusPill conversationId={conversation.id} sshHostId={sshHostId} /> : null}
         {/* The collaboration canvas lives beside the mounted conversation; the
             header keeps the existing capability controls. */}
-        <CronJobManager
+        {!hideAdvancedControls && <CronJobManager
           conversation_id={conversation.id}
           cron_job_id={conversation.cron_job_id}
           hasCronSkill={hasLoadedSkill(conversation, 'cron')}
-        />
+        />}
       </div>
     ),
     workspaceEnabled,
@@ -670,6 +672,7 @@ const NomiConversationPanel: React.FC<{
     backend: 'nomi' as const,
     preset: presetPresetInfo ?? undefined,
     knowledgeEnabled,
+    hideAdvancedControls,
   };
 
   return (

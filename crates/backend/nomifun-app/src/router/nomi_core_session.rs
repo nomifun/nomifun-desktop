@@ -4901,9 +4901,11 @@ async fn create_nomi_core_agent_session(
         .await?
         .preset
         .display_name;
-    let projection =
+    let mut projection =
         resolve_saved_binding_projection(&state, &owner, &binding, request.title.as_deref())
             .await?;
+    // The conversation title is not the Agent's identity.
+    projection.projection.snapshot.preset_name = agent_name.clone();
     let mcp_selection = match capability_selection.as_ref() {
         Some(selection) => {
             explicit_session_mcp_selection(

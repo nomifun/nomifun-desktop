@@ -1053,7 +1053,8 @@ impl NomiAgentManager {
         // project-level auto-memory dir (same resolution as the engine's
         // bootstrap `auto_memory_dir(cwd)`). A run-time origin check in
         // `send_message` is the second gate (cron/autowork/idmm turns).
-        let distill_dir: Option<PathBuf> = if companion_sink.is_some() {
+        let distill_dir: Option<PathBuf> = if companion_sink.is_some()
+            || (config_extra.enforce_tool_allowlist && config_extra.allowed_tools.is_empty()) {
             None
         } else {
             nomi_memory::paths::auto_memory_dir(std::path::Path::new(&workspace))

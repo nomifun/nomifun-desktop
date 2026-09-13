@@ -108,7 +108,6 @@ const GuidPage: React.FC = () => {
       : undefined
   );
 
-  const isAutoWorkMode = isAutoWorkEntry(advancedConfig.autoWork);
   const presetResourceResolutionReady = agentSelection.selection.kind === 'template'
     ? Boolean(agentSelection.selectedTemplate)
     : !presetCapabilities.isLoading && !presetCapabilities.error;
@@ -122,6 +121,9 @@ const GuidPage: React.FC = () => {
       ].map((capability) => capability.id))
     : presetCapabilities.capabilityIds;
   const resourceSelectionResolution = resolveAgentResourceSelections(presetResourceKinds, resourceSelectionValue);
+  const advancedControlsEnabled = presetResourceResolutionReady && presetCapabilityIds.size > 0;
+  const effectiveAutoWork = advancedControlsEnabled ? advancedConfig.autoWork : { enabled: false };
+  const isAutoWorkMode = isAutoWorkEntry(effectiveAutoWork);
   const resourceSelectionsReady = presetResourceResolutionReady && resourceSelectionResolution.missingKinds.length === 0;
   const workspaceEnabled =
     presetResourceResolutionReady && presetResourceKinds.has('workspace');
@@ -164,13 +166,14 @@ const GuidPage: React.FC = () => {
   useEffect(() => {
     if (capabilityCatalog.loading || capabilityCatalog.error) return;
     setCapabilityDraft(
-      defaultSessionCapabilityDraft(capabilityCatalog.catalog, presetSkillNames)
+      defaultSessionCapabilityDraft(capabilityCatalog.catalog, presetSkillNames, advancedControlsEnabled)
     );
   }, [
     capabilityCatalog.catalog,
     capabilityCatalog.error,
     capabilityCatalog.loading,
     presetSkillNamesKey,
+    advancedControlsEnabled,
     selectedAgentResourceKey,
   ]);
 
@@ -216,8 +219,9 @@ const GuidPage: React.FC = () => {
     applyAdvancedConfig: (conversationId) =>
       advancedConfig.applyToConversation(conversationId, {
         allowKnowledgeBinding: presetResourceKinds.has('knowledge_base'),
+        allowAutomation: advancedControlsEnabled,
       }),
-    autoWork: advancedConfig.autoWork,
+    autoWork: effectiveAutoWork,
     workspaceEnabled,
     resourceResolutionReady: resourceSelectionsReady,
     resourceSelections: resourceSelectionResolution.selections,
@@ -456,7 +460,7 @@ const GuidPage: React.FC = () => {
     />
   );
 
-  const advancedControlsNode = (
+  const advancedControlsNode = advancedControlsEnabled ? (
     <>
       <AutoWorkControl
         key={`autowork-${location.key}`}
@@ -475,7 +479,7 @@ const GuidPage: React.FC = () => {
         applyNote={t('guid.advanced.applyNote')}
       />
     </>
-  );
+  ) : null;
 
   const modelSelectorNode = (
     <GuidModelSelector

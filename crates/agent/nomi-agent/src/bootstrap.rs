@@ -544,7 +544,13 @@ impl AgentBootstrap {
             .provider
             .unwrap_or_else(|| nomi_providers::create_provider(&self.config));
 
-        let memory_dir = nomi_memory::paths::auto_memory_dir(cwd_path);
+        let tool_free = self.config.tools.enforce_builtin_allowlist
+            && self.config.tools.builtin_allowlist.is_empty();
+        let memory_dir = if tool_free {
+            None
+        } else {
+            nomi_memory::paths::auto_memory_dir(cwd_path)
+        };
 
         let file_cache = if self.config.file_cache.enabled {
             Some(Arc::new(std::sync::RwLock::new(
@@ -673,7 +679,7 @@ impl AgentBootstrap {
         }
 
         let mut mcp_managers: Vec<Arc<McpManager>> = Vec::new();
-        let mcp_manager = if !self.config.mcp.servers.is_empty() {
+        let mcp_manager = if !tool_free && !self.config.mcp.servers.is_empty() {
             match McpManager::connect_all(&self.config.mcp.servers).await {
                 Ok(mgr) => {
                     let mgr = Arc::new(mgr);
@@ -691,36 +697,42 @@ impl AgentBootstrap {
         };
         let has_mcp = mcp_manager.is_some();
 
-        let skills = nomi_skills::loader::load_all_skills(
-            cwd_path,
-            &self.extra_skill_dirs,
-            false,
-            mcp_manager.as_deref(),
-        )
-        .await;
-
-        let agents_snapshot = crate::agents_md::resolve_agents_md(
-            cwd_path,
-            &self.config.project_instructions,
-        );
-        for file in &agents_snapshot.files {
-            tracing::debug!(
-                target: "nomi_agent",
-                path = %file.path.display(),
-                scope = if file.is_global { "user" } else { "project" },
-                "agent bootstrap: loaded instruction file"
-            );
-        }
-        for diagnostic in &agents_snapshot.diagnostics {
-            tracing::warn!(
-                target: "nomi_agent",
-                message = %diagnostic.message(),
-                "agent bootstrap: instruction diagnostic"
-            );
-        }
+        let skills = if tool_free {
+            Vec::new()
+        } else {
+            nomi_skills::loader::load_all_skills(
+                cwd_path,
+                &self.extra_skill_dirs,
+                false,
+                mcp_manager.as_deref(),
+            )
+            .await
+        };
 
         let mut prompt_cache = crate::context::SystemPromptCache::new();
-        prompt_cache.set_agents_md(agents_snapshot.formatted);
+        if !tool_free {
+            let agents_snapshot = crate::agents_md::resolve_agents_md(
+                cwd_path,
+                &self.config.project_instructions,
+            );
+            for file in &agents_snapshot.files {
+                tracing::debug!(
+                    target: "nomi_agent",
+                    path = %file.path.display(),
+                    scope = if file.is_global { "user" } else { "project" },
+                    "agent bootstrap: loaded instruction file"
+                );
+            }
+            for diagnostic in &agents_snapshot.diagnostics {
+                tracing::warn!(
+                    target: "nomi_agent",
+                    message = %diagnostic.message(),
+                    "agent bootstrap: instruction diagnostic"
+                );
+            }
+
+            prompt_cache.set_agents_md(agents_snapshot.formatted);
+        }
         // SSH-bound session: `cwd` here is a LOCAL scratch directory (design F2
         // keeps `extra.workspace` local for transcripts and attachments), while
         // every file/exec tool registered above is the remote family and no local
@@ -739,18 +751,22 @@ impl AgentBootstrap {
                 chrono::Local::now().format("%Y-%m-%d")
             ));
         }
-        let system_prompt = crate::context::build_system_prompt(
-            &mut prompt_cache,
-            self.config.system_prompt.as_deref(),
-            cwd,
-            &self.config.model,
-            &skills,
-            Some(self.config.compact.context_window),
-            memory_dir.as_deref(),
-            false,
-            self.config.compact.toon,
-            self.config.tools.browser.enabled,
-        );
+        let system_prompt = if tool_free {
+            crate::context::build_chat_only_system_prompt(self.config.system_prompt.as_deref())
+        } else {
+            crate::context::build_system_prompt(
+                &mut prompt_cache,
+                self.config.system_prompt.as_deref(),
+                cwd,
+                &self.config.model,
+                &skills,
+                Some(self.config.compact.context_window),
+                memory_dir.as_deref(),
+                false,
+                self.config.compact.toon,
+                self.config.tools.browser.enabled,
+            )
+        };
         self.config.system_prompt = Some(system_prompt);
 
         let skills_arc = Arc::new(skills);
@@ -759,7 +775,7 @@ impl AgentBootstrap {
         // between fork-mode skills and embedded `nomi_delegate`. Platform
         // Gateway sessions disable the embedded deployment and expose the same
         // AgentExecution contract through the platform, so a model sees one tool.
-        let local_invocation_runner = if self.install_embedded_agent_execution {
+        let local_invocation_runner = if self.install_embedded_agent_execution && !tool_free {
             Some(Arc::new(
                 crate::local_agent_invocation::LocalAgentInvocationRunner::new(
                     provider.clone(),

@@ -643,17 +643,19 @@ pub(super) async fn build(
     // that Browser/Computer/shell/third-party sites are reserved for an
     // explicit user request. The manager additionally enforces that route at
     // the advertised-tool and artifact-receipt boundaries.
-    let image_policy = if platform_gateway_entitled {
-        image_generation_prompt(None)
-    } else {
-        "This restricted Agent session is not entitled to native image generation. Do not use Browser, web search, or a third-party generator as a substitute, and do not claim that an image was generated. Tell the user to retry in a full local session or ask the session owner to enable the native capability.".to_owned()
-    };
-    overrides.system_prompt = Some(match overrides.system_prompt.take() {
-        Some(existing) if !existing.trim().is_empty() => {
-            format!("{existing}\n\n{image_policy}")
-        }
-        _ => image_policy,
-    });
+    if !overrides.enforce_tool_allowlist || !overrides.allowed_tools.is_empty() {
+        let image_policy = if platform_gateway_entitled {
+            image_generation_prompt(None)
+        } else {
+            "This restricted Agent session is not entitled to native image generation. Do not use Browser, web search, or a third-party generator as a substitute, and do not claim that an image was generated. Tell the user to retry in a full local session or ask the session owner to enable the native capability.".to_owned()
+        };
+        overrides.system_prompt = Some(match overrides.system_prompt.take() {
+            Some(existing) if !existing.trim().is_empty() => {
+                format!("{existing}\n\n{image_policy}")
+            }
+            _ => image_policy,
+        });
+    }
 
     // Every native Nomi session — regular desktop chat, companion, and IM
     // Channel Agent — follows the language of the owner's current request.
