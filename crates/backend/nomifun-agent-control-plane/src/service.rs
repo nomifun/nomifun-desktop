@@ -430,15 +430,13 @@ impl AgentControlPlane {
                 if !preset.session_only || preset.preset.source != AgentPresetSource::User {
                     continue;
                 }
-                let Some(revision) = self.current_revision(&preset).await? else {
+                let Some((revision, _snapshot)) = self.reusable_session_configuration(
+                    &preset, &requested_payload, uses_default_route,
+                ).await else {
                     continue;
                 };
-                if template_launch_payload_matches(&revision.payload, &requested_payload, uses_default_route)
-                    && self.current_snapshot(Some(&revision)).await?.is_some()
-                {
-                    let existing = wire_cast(&revision.payload)?;
-                    return editor_response(preset, Some(revision), existing, None);
-                }
+                let existing = wire_cast(&revision.payload)?;
+                return editor_response(preset, Some(revision), existing, None);
             }
         }
         self.create_configuration_with_initial_revision(
@@ -506,13 +504,11 @@ impl AgentControlPlane {
             return self.resolve_agent_session_binding(owner, preset_id).await;
         }
         for existing in self.store.list_presets(owner).await? {
-            if !existing.session_only { continue; }
-            let Some(saved) = self.current_revision(&existing).await? else { continue; };
-            if !template_launch_payload_matches(&saved.payload, &payload, true) { continue; }
-            let snapshot = self.current_snapshot(Some(&saved)).await?;
-            if snapshot.as_ref().map(|value| value.content.required_runtime_profile)
+            let Some((_saved, snapshot)) = self.reusable_session_configuration(
+                &existing, &payload, true,
+            ).await else { continue; };
+            if Some(snapshot.content.required_runtime_profile)
                 == source_snapshot.as_ref().map(|value| value.content.required_runtime_profile)
-                && snapshot.is_some()
             {
                 return self.resolve_agent_session_binding(owner, existing.preset.preset_id.as_ref()).await;
             }
@@ -1291,6 +1287,45 @@ impl AgentControlPlane {
         match preset.preset.current_stable_revision.as_ref() {
             Some(reference) => self.store.get_revision(reference).await,
             None => Ok(None),
+        }
+    }
+
+    /// Internal session configurations are an optional reuse cache. A retained
+    /// development dataset can contain revisions/snapshots from an older
+    /// contract; one unreadable candidate must not prevent compiling a fresh
+    /// configuration. Never use this recovery path for an explicitly selected
+    /// preset or an existing session binding: those remain strictly validated.
+    async fn reusable_session_configuration(
+        &self,
+        preset: &StoredPreset,
+        requested: &nomifun_agent_contracts::AgentPresetRevisionPayload,
+        uses_default_route: bool,
+    ) -> Option<(AgentPresetRevision, nomifun_agent_contracts::ResolvedSnapshotEnvelope)> {
+        if !preset.session_only || preset.preset.source != AgentPresetSource::User {
+            return None;
+        }
+        let candidate = async {
+            let Some(revision) = self.current_revision(preset).await? else {
+                return Ok(None);
+            };
+            if !template_launch_payload_matches(&revision.payload, requested, uses_default_route) {
+                return Ok(None);
+            }
+            let snapshot = self.current_snapshot(Some(&revision)).await?;
+            Ok::<_, ControlPlaneError>(snapshot.map(|snapshot| (revision, snapshot)))
+        }.await;
+        match candidate {
+            Ok(value) => value,
+            Err(error) => {
+                // Log only identifiers/codes, never persisted instructions or
+                // provider credentials embedded in an obsolete document.
+                tracing::warn!(
+                    preset_id = preset.preset.preset_id.as_ref(),
+                    code = error.code().as_ref(),
+                    "skipping unreadable internal Agent configuration"
+                );
+                None
+            }
         }
     }
 

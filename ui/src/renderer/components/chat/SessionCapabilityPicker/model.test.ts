@@ -7,6 +7,16 @@ import {
 } from './model';
 
 describe('Session capability selection model', () => {
+  test('minimal chat excludes implicit skills and MCP defaults', () => {
+    const autoSkillNames = new Set(['cron', 'skill-creator', 'nomifun-skills']);
+    const draft = defaultSessionCapabilityDraft({
+      skills: [], autoSkillNames, mcpServers: [],
+    }, [], false);
+    expect(draft).toEqual({ skillNames: [], mcpServerIds: [] });
+    expect(buildSessionCapabilitySelection(draft, autoSkillNames)).toEqual({
+      enabled_skills: [], excluded_auto_skills: ['cron', 'nomifun-skills', 'skill-creator'], mcp_server_ids: [],
+    });
+  });
   test('encodes deselected auto skills separately from explicit skills', () => {
     const auto = new Set(['cron', 'skill-creator']);
     expect(buildSessionCapabilitySelection({

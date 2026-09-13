@@ -596,6 +596,134 @@ async fn official_agent_direct_launch_reuses_configuration_and_creates_sessions(
 }
 
 #[tokio::test]
+async fn official_agent_launch_ignores_obsolete_internal_configurations() {
+    const TRUST: &str = "obsolete-official-agent-cache";
+    async fn call(router: axum::Router, path: &str, body: Value) -> (StatusCode, Value) {
+        let response = router.oneshot(Request::builder().method("POST").uri(path)
+            .header("x-nomi-local-trust", TRUST).header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+    let (router, services) = common::build_local_trust_app(TRUST).await;
+    let upstream = wiremock::MockServer::start().await;
+    let (status, provider) = call(router.clone(), "/api/providers", json!({
+        "platform": "stepfun-plan", "name": "StepFun launch regression",
+        "base_url": format!("{}/step_plan/v1", upstream.uri()),
+        "auth_scheme": "bearer", "credentials": { "api_keys": ["test-only"] },
+        "enabled": true, "initial_model": {
+            "model": "step-3.7-flash", "enabled": true,
+            "capabilities": [{ "task": "chat", "traits": ["function_calling", "reasoning", "streaming"],
+                "protocol": "openai.chat_text", "connection_role": "default", "provider_params": {} }]
+        }
+    })).await;
+    assert_eq!(status, StatusCode::CREATED, "{provider}");
+    let path = "/api/agent-presets/from-template/chat.minimal";
+    let request = json!({ "display_name": "Minimal", "reuse_existing": true,
+        "model": { "provider_id": provider["data"]["provider_id"], "model": "step-3.7-flash" } });
+    let (status, original) = call(router.clone(), path, request.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{original}");
+    let original_id = original["data"]["preset"]["preset_id"].as_str().unwrap();
+    assert_eq!(original["data"]["revision"]["document"]["chat_route_records"]["agent_chat"]["primary"]["model"], "step-3.7-flash");
+
+    // A retained bun run dev dataset predates capability field retirement.
+    // Internal launch configurations are a cache, not the selected Agent.
+    let mut old_payload = original["data"]["revision"]["document"].clone();
+    old_payload["initial_capabilities"] = old_payload.as_object_mut().unwrap()
+        .remove("enabled_capabilities").unwrap();
+    old_payload["on_demand_capabilities"] = json!([]);
+    let old_payload = serde_json::to_string(&old_payload).unwrap();
+    sqlx::query("UPDATE nomi_agent_preset_revisions SET payload_json = ? WHERE preset_id = ?")
+        .bind(&old_payload).bind(original_id).execute(services.database.pool()).await.unwrap();
+
+    let (status, fresh) = call(router.clone(), path, request.clone()).await;
+    assert_eq!(status, StatusCode::OK, "obsolete cached revision must not block launch: {fresh}");
+    let fresh_id = fresh["data"]["preset"]["preset_id"].as_str().unwrap();
+    assert_ne!(fresh_id, original_id);
+
+    // Snapshot schema drift is also a cache miss, even with a current payload.
+    sqlx::query("UPDATE nomi_agent_preset_revisions SET snapshot_json = json_set(snapshot_json, '$.retired_field', 1) WHERE preset_id = ?")
+        .bind(fresh_id).execute(services.database.pool()).await.unwrap();
+    let (status, usable) = call(router.clone(), path, request.clone()).await;
+    assert_eq!(status, StatusCode::OK, "obsolete cached snapshot must not block launch: {usable}");
+    let usable_id = usable["data"]["preset"]["preset_id"].as_str().unwrap();
+    assert_ne!(usable_id, fresh_id);
+    let (status, reused) = call(router.clone(), path, request.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{reused}");
+    assert_eq!(reused["data"]["preset"]["preset_id"], usable_id);
+    let (status, session) = call(router.clone(), "/api/agent-sessions",
+        json!({ "preset_id": usable_id, "title": "你好", "model": request["model"] })).await;
+    assert_eq!(status, StatusCode::OK, "fresh configuration must create a session: {session}");
+    assert!(session["data"]["agent_session_id"].is_string());
+    let session_id = session["data"]["agent_session_id"].as_str().unwrap();
+    let (extra, snapshot): (String, String) = sqlx::query_as(
+        "SELECT extra, agent_snapshot FROM conversations WHERE conversation_id = ?")
+        .bind(session_id).fetch_one(services.database.pool()).await.unwrap();
+    let extra: Value = serde_json::from_str(&extra).unwrap();
+    let snapshot: Value = serde_json::from_str(&snapshot).unwrap();
+    assert_eq!(extra["skills"], json!([]), "minimal chat must not auto-enable skills");
+    assert_eq!(snapshot["preset_name"], "Minimal", "conversation title must not replace Agent identity");
+
+    // Preparing a session-specific model variant scans the same cache. Use a
+    // different source model so this exercises the variant path as well.
+    let (status, source) = call(router.clone(), path,
+        json!({ "display_name": "Different source model", "reuse_existing": false })).await;
+    assert_eq!(status, StatusCode::OK, "{source}");
+    let (status, variant) = call(router.clone(), "/api/agent-sessions", json!({
+        "preset_id": source["data"]["preset"]["preset_id"], "model": request["model"]
+    })).await;
+    assert_eq!(status, StatusCode::OK, "obsolete caches must not block model variants: {variant}");
+    assert_eq!(variant["data"]["agent_binding"], session["data"]["agent_binding"]);
+    assert!(upstream.received_requests().await.unwrap().is_empty(),
+        "Agent preparation must not require a model API call");
+
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/step_plan/v1/chat/completions"))
+        .respond_with(wiremock::ResponseTemplate::new(200)
+            .insert_header("content-type", "text/event-stream")
+            .set_body_string(concat!(
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"MINIMAL_REPLY_OK\"},\"finish_reason\":null}]}\n\n",
+                "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n")))
+        .mount(&upstream).await;
+    let (status, turn) = call(router.clone(), &format!("/api/agent-sessions/{session_id}/turns"),
+        json!({ "input": { "content": "你好" }, "idempotency_key": uuid::Uuid::now_v7().to_string() })).await;
+    assert_eq!(status, StatusCode::OK, "{turn}");
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let replies: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND position = 'left' AND content LIKE '%MINIMAL_REPLY_OK%'")
+                .bind(session_id).fetch_one(services.database.pool()).await.unwrap();
+            if replies > 0 { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }).await.expect("minimal model reply should be persisted");
+    let requests = upstream.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(body["model"], "step-3.7-flash");
+    assert!(body.get("tools").is_none_or(|tools| tools.as_array().is_some_and(Vec::is_empty)));
+    let system = body["messages"].as_array().unwrap().iter()
+        .filter(|message| message["role"] == "system")
+        .filter_map(|message| message["content"].as_str()).collect::<Vec<_>>().join("\n");
+    assert!(system.len() < 2000, "minimal prompt must stay small: {} bytes", system.len());
+    for forbidden in ["MEMORY.md", "Skill tool", "Working directory", "native image generation"] {
+        assert!(!system.contains(forbidden), "unexpected minimal prompt context: {forbidden}");
+    }
+
+    // Historical references remain intact and explicitly selecting invalid
+    // data still fails closed; cache recovery must not weaken validation.
+    let saved: String = sqlx::query_scalar("SELECT payload_json FROM nomi_agent_preset_revisions WHERE preset_id = ?")
+        .bind(original_id).fetch_one(services.database.pool()).await.unwrap();
+    assert_eq!(saved, old_payload);
+    let (status, _) = call(router, "/api/agent-sessions",
+        json!({ "preset_id": original_id, "model": request["model"] })).await;
+    assert!(!status.is_success());
+    services.shutdown_browser_platform().await.unwrap();
+    services.database.close().await;
+}
+
+#[tokio::test]
 async fn agent_session_model_selection_is_exact_persistent_and_keeps_the_agent_unchanged() {
     const TRUST: &str = "agent-model-selection-test";
     async fn call(router: axum::Router, method: &str, path: &str, body: Value) -> (StatusCode, Value) {

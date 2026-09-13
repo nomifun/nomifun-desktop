@@ -42,15 +42,16 @@ export const buildSessionCapabilitySelection = (
 
 export const defaultSessionCapabilityDraft = (
   catalog: SessionCapabilityCatalog,
-  presetSkillNames: Iterable<string> = []
+  presetSkillNames: Iterable<string> = [],
+  includeDefaults = true
 ): SessionCapabilityDraft => {
   const availableSkillNames = new Set(catalog.skills.map((skill) => skill.name));
   return {
     skillNames: uniqueSorted([
-      ...catalog.autoSkillNames,
+      ...(includeDefaults ? catalog.autoSkillNames : []),
       ...Array.from(presetSkillNames).filter((name) => availableSkillNames.has(name)),
     ]),
-    mcpServerIds: catalog.mcpServers
+    mcpServerIds: (includeDefaults ? catalog.mcpServers : [])
       .filter((server) => !server.builtin && server.enabled)
       .map((server) => server.mcp_server_id),
   };
