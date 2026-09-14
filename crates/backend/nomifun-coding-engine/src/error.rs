@@ -108,9 +108,16 @@ pub enum CodingEngineError {
 
 impl CodingEngineError {
     pub fn from_model_error(error: ChatModelError) -> Self {
+        // Preserve the Broker's trusted HTTP status through the existing
+        // string boundary. Only this numeric metadata is added; redaction of the
+        // existing message remains the Broker owner's responsibility.
+        let message = match error.provider_status {
+            Some(status) => format!("provider_http_status={status}; {}", error.message),
+            None => error.message,
+        };
         Self::Model {
             code: error.code,
-            message: error.message,
+            message,
         }
     }
 
@@ -121,6 +128,22 @@ impl CodingEngineError {
             nomifun_chat_model_broker::ChatRetryDirective::Never,
         );
         Self::from_model_error(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_error_preserves_typed_http_status_and_code() {
+        let mut error = ChatModelError::provider_unavailable("request rejected");
+        error.provider_status = Some(503);
+        assert!(matches!(CodingEngineError::from_model_error(error),
+            CodingEngineError::Model { code: ChatModelErrorCode::ProviderUnavailable, message }
+                if message == "provider_http_status=503; request rejected"));
+        assert!(matches!(CodingEngineError::from_model_error(ChatModelError::invalid_request("bad input")),
+            CodingEngineError::Model { code: ChatModelErrorCode::InvalidRequest, message } if message == "bad input"));
     }
 }
 

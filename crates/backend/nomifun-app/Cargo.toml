@@ -306,6 +306,7 @@ windows-sys = { version = "0.61", features = [
 junction = "1"
 
 [dev-dependencies]
+nomi-process-runtime.workspace = true
 image = { workspace = true, features = ["jpeg", "gif", "webp"] }
 nomifun-api-types.workspace = true
 nomifun-realtime.workspace = true

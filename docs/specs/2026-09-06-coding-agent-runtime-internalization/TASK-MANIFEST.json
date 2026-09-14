@@ -3,7 +3,7 @@
   "manifest_kind": "coding-agent-runtime-internalization-task-manifest",
   "stage_id": "CAR",
   "status": "implementation-in-progress",
-  "updated_on": "2026-09-14",
+  "updated_on": "2026-09-15",
   "current_delivery_scope": {
     "platform": "macos-local-arm64",
     "official_engines": [
@@ -14,12 +14,11 @@
     "cross_platform_policy": "Windows shared-code regression required; Linux runtime acceptance remains TODO",
     "validation_policy": "Isolated native dev and app/DMG validation; StepFun step-3.7-flash only; no Release, updater publication or push",
     "source_baseline": "2ff02951266b12008cf1f7ea63c3b27cff9a192a",
-    "source_overlay_sha256": "1d7245418a8139f37e10aa9ed0ac7f8dbc9d5e11e2b2ffb453ca8cf1df0cd6eb",
-    "handoff": "MACOS-DELIVERY-2026-09-14.zh.md",
-    "status": "macos-native-dev-and-local-package-verified; coding-live-patch-and-bundle-signature-failed",
+    "handoff": "MACOS-CONTINUATION-2026-09-15.zh.md",
+    "status": "official-live-chain-and-compaction-passed; native-ui-send-awaiting-mac-unlock; package-rebuild-required",
     "engine_builds": {
-      "nomifun.nomi": "0.7.6-host61",
-      "nomifun.coding": "0.7.6-host2-coding-loop92"
+      "nomifun.nomi": "0.7.6-host62",
+      "nomifun.coding": "0.7.6-host2-coding-loop95"
     },
     "engineering_checks": {
       "ui_targeted_tests": "85 passed",
@@ -28,50 +27,62 @@
       "migration_tests": "12 passed",
       "macos_desktop_tests": "5 passed",
       "legacy_skill_tests": "4 passed",
-      "official_engine_fixture_tests": "13 passed",
+      "official_engine_fixture_tests": "15 passed, including active native process cancellation for both engines",
       "contract_check": "passed",
-      "bun_run_check": "failed: 109 retired references"
+      "bun_run_check": "failed: 109 retired references",
+      "wave2_tests": "16 passed after correcting invalid fs.read fixture",
+      "coding_tests": "39 passed"
     },
     "native_dev": {
       "startup": "passed arm64, isolated data root and WebView store",
       "runner_sigint_shutdown": "passed",
       "cli_sigint_shutdown": "passed",
-      "native_window_interaction": "unverified: CUA cannot identify an unbundled executable",
+      "native_window_interaction": "temporary byte-identical app identity; window interaction and Use Agent selection verified after reload; sending blocked by locked Mac",
       "webview_isolation": "passed fresh root and unit regression"
     },
     "live_provider": {
       "model": "step-3.7-flash",
-      "nomi": "create/patch/exec/continue passed",
-      "coding": "create passed; patch UNKNOWN_UPSTREAM_ERROR; exec/continue not run",
-      "shutdown_and_credential_audit": "passed by runner before reporting failure"
+      "nomi": "four stages passed",
+      "coding": "four stages passed",
+      "compaction": "passed: one real summary and one context replacement; canonical synthetic history retained",
+      "transient_failures": "ProviderUnavailable observed in other attempts; no fallback",
+      "shutdown_and_credential_audit": "passed"
     },
     "package_checks": {
-      "arm64_app_dmg": "passed clean-source build",
-      "hdiutil_integrity": "passed",
-      "frontend_401_files_and_legal": "passed",
-      "native_window_agent_selection_save": "passed in f7e97669f package; UI source unchanged in final package",
-      "native_window_startup_and_command_q_with_active_terminal": "passed final package; exit 0, no remaining PIDs, terminal row removed",
-      "dmg_sha256": "857a4270b5de09bd698df71b41db792dc3718314aa7f2fb654b38630855e25c4",
-      "host_sha256": "724ce22da1addaacba31466c9134e7b5cdcec0e27b4466830b26c9a37da37d2d",
-      "bundle_signature": "failed strict codesign; linker adhoc only",
+      "status": "rebuild_required",
       "developer_id_signing": "not_run",
       "notarization": "not_run",
-      "release_updater_publication": "not_run",
-      "normal_data_root_restart": "passed: health 200, SIGTERM cleanup, exit 0"
+      "release_updater_publication": "not_run"
     },
     "not_run": [
       "community_engine_example",
       "Linux_acceptance",
       "Windows_regression_on_current_changes",
-      "real_provider_Coding_exec_and_continuation",
       "live_model_cancel",
-      "context_compaction_end_to_end",
       "production_user_database_migration",
       "native_UI_send_new_session_end_to_end",
       "abnormal_exit_old_data_root_recovery",
       "Gatekeeper_install_upgrade_uninstall"
     ],
-    "source_commit": "973bbe206fc92c0a2032eeaaa31e659994dc8fa5"
+    "previous_verified_package": {
+      "source_commit": "973bbe206fc92c0a2032eeaaa31e659994dc8fa5",
+      "source_overlay_sha256": "1d7245418a8139f37e10aa9ed0ac7f8dbc9d5e11e2b2ffb453ca8cf1df0cd6eb",
+      "checks": {
+        "arm64_app_dmg": "passed clean-source build",
+        "hdiutil_integrity": "passed",
+        "frontend_401_files_and_legal": "passed",
+        "native_window_agent_selection_save": "passed in f7e97669f package; UI source unchanged in final package",
+        "native_window_startup_and_command_q_with_active_terminal": "passed final package; exit 0, no remaining PIDs, terminal row removed",
+        "dmg_sha256": "857a4270b5de09bd698df71b41db792dc3718314aa7f2fb654b38630855e25c4",
+        "host_sha256": "724ce22da1addaacba31466c9134e7b5cdcec0e27b4466830b26c9a37da37d2d",
+        "bundle_signature": "failed strict codesign; linker adhoc only",
+        "developer_id_signing": "not_run",
+        "notarization": "not_run",
+        "release_updater_publication": "not_run",
+        "normal_data_root_restart": "passed: health 200, SIGTERM cleanup, exit 0",
+        "latest_source": "rebuild required; previous 973bbe206 artifacts remain historical evidence"
+      }
+    }
   },
   "previous_windows_delivery_scope": {
     "platform": "windows-local",

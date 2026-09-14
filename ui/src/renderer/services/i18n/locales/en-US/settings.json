@@ -1398,7 +1398,7 @@
       "title": "Providers & keys",
       "subtitle": "Connect vendors, manage credentials and connection profiles, and maintain model rows and advanced overrides.",
       "noticeTitle": "Conversations are sent to the model provider",
-      "note": "Provider models run in the cloud, so avoid sending sensitive information. Custom provider models are currently available to Nomi only.",
+      "note": "Conversations are sent to the configured model service; use it according to its data handling policy. Custom models can be used by Agents.",
       "scopeNote": "Finding a model by purpose now lives in the Chat / Voice / Vision / Creation / Embedding sections on the left. This page is only about access and credentials."
     },
     "free": {
