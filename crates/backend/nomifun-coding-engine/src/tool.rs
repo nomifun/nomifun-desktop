@@ -76,7 +76,6 @@ pub(crate) fn invocation_for(
 ) -> CodingToolInvocation {
     let call_id = call.call_id.as_ref();
     let operation_id = OperationId::from(format!("{}:tool:{call_id}", turn_operation_id.as_ref()));
-    let operation_key = operation_id.as_ref().to_owned();
     CodingToolInvocation {
         agent_session_id,
         principal,
@@ -84,9 +83,32 @@ pub(crate) fn invocation_for(
         active_set_generation,
         turn_operation_id: turn_operation_id.clone(),
         operation_id: operation_id.clone(),
-        idempotency_key: IdempotencyKey::from(format!("coding-tool:{operation_key}")),
+        idempotency_key: tool_idempotency_key(operation_id.as_ref()),
         correlation_id: CorrelationId::from(turn_operation_id.as_ref()),
         call,
         binding: binding.clone(),
+    }
+}
+
+fn tool_idempotency_key(operation_id: &str) -> IdempotencyKey {
+    // Owner effect journals accept at most 128 visible ASCII bytes. Preserve
+    // the full operation/call identity without forwarding its unbounded text.
+    let digest = nomifun_agent_contracts::digest_bytes(operation_id.as_bytes());
+    IdempotencyKey::from(format!("coding-tool:{}", digest.as_ref()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effect_keys_fit_the_owner_contract_without_truncating_operation_identity() {
+        let root = format!("nomi-core-turn:{}:{}:tool:{}", "s".repeat(64), "r".repeat(128), "调用".repeat(128));
+        let key = tool_idempotency_key(&root);
+        assert!(key.as_ref().len() <= 128);
+        assert!(key.as_ref().bytes().all(|byte| byte.is_ascii_graphic()));
+        assert_eq!(key, tool_idempotency_key(&root));
+        assert_ne!(key, tool_idempotency_key(&format!("{root}-next-call")));
+        assert_ne!(key, tool_idempotency_key(&format!("other-turn:{root}")));
     }
 }

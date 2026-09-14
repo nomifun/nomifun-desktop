@@ -93,14 +93,19 @@ async fn exact_local_prefix_moves_only_the_ledger_version_and_preserves_evidence
     let pool = displaced_pool().await;
     let before = ledger(&pool).await;
     let retained = evidence(&pool).await;
+    assert_eq!(before.len(), 94);
+    assert_eq!(before.iter().map(|row| row.0).collect::<Vec<_>>(),
+        (1..=95).filter(|version| *version != 27).collect::<Vec<_>>());
     assert_eq!(inspect_supported_migration_lineage(&pool).await.unwrap(), MigrationLineageStatus::UpgradeRequired);
     assert_eq!(ledger(&pool).await, before); // Inspection never repairs the ledger.
 
     run_startup_migrations(&pool).await.unwrap();
     assert_eq!(inspect_supported_migration_lineage(&pool).await.unwrap(), MigrationLineageStatus::Current);
     let after = ledger(&pool).await;
-    assert_eq!(&after[..94], &before[..94]);
-    let mut expected = before[94].clone();
+    let prefix_len = before.len() - 1;
+    assert_eq!(&after[..prefix_len], &before[..prefix_len]);
+    let mut expected = before.last().unwrap().clone();
+    assert_eq!(expected.0, 95);
     expected.0 = 99;
     assert_eq!(after.iter().find(|row| row.0 == 99).unwrap(), &expected);
     assert_eq!(after.iter().map(|row| row.0).collect::<Vec<_>>(),
@@ -121,7 +126,12 @@ async fn unknown_failed_gapped_and_target_conflicting_ledgers_are_unchanged() {
         "UPDATE _sqlx_migrations SET checksum = zeroblob(48) WHERE version = 1",
         "UPDATE _sqlx_migrations SET success = 0 WHERE version = 95",
         "UPDATE _sqlx_migrations SET success = 0 WHERE version = 1",
+        "DELETE FROM _sqlx_migrations WHERE version = 26",
+        "DELETE FROM _sqlx_migrations WHERE version = 28",
         "DELETE FROM _sqlx_migrations WHERE version = 94",
+        "INSERT INTO _sqlx_migrations SELECT 27, description, installed_on, success, checksum, execution_time \
+         FROM _sqlx_migrations WHERE version = 26",
+        "UPDATE _sqlx_migrations SET version = 27 WHERE version = 28",
         "UPDATE _sqlx_migrations SET version = 99 WHERE version = 95",
         "UPDATE _sqlx_migrations SET version = 99 WHERE version = 94",
         "INSERT INTO _sqlx_migrations SELECT 99, description, installed_on, success, checksum, execution_time \
@@ -137,6 +147,33 @@ async fn unknown_failed_gapped_and_target_conflicting_ledgers_are_unchanged() {
         assert_eq!((ledger(&pool).await, schema(&pool).await, evidence(&pool).await), before, "{mutation}");
         pool.close().await;
     }
+}
+
+#[tokio::test]
+async fn embedded_prefix_version_drift_is_not_authenticated_as_history() {
+    let pool = displaced_pool().await;
+    let before = ledger(&pool).await;
+    let rows = sqlx::query(super::READ_LEDGER).fetch_all(&pool).await.unwrap();
+    for add_retired_version in [false, true] {
+        let mut migrations = DB_MIGRATOR.iter().cloned().collect::<Vec<_>>();
+        if add_retired_version {
+            let mut extra = migrations.iter().find(|migration| migration.version == 26)
+                .unwrap().clone();
+            extra.version = 27;
+            migrations.push(extra);
+            migrations.sort_by_key(|migration| migration.version);
+        } else {
+            migrations.retain(|migration| migration.version != 28);
+        }
+        let migrator = sqlx::migrate::Migrator {
+            migrations: std::borrow::Cow::Owned(migrations),
+            ..sqlx::migrate::Migrator::DEFAULT
+        };
+        let error = super::is_displaced_prefix(&rows, &migrator).unwrap_err();
+        assert!(error.to_string().contains("embedded runtime prefix no longer matches"));
+        assert_eq!(ledger(&pool).await, before);
+    }
+    pool.close().await;
 }
 
 #[tokio::test]

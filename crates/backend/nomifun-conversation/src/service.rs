@@ -4542,6 +4542,9 @@ impl ConversationService {
         let auto_inject_names = if authority.controls_host()
             && !is_tool_free_agent_extra(&extra)
             && extra.get("product_agent_target_kind").is_none()
+            // Canonical Agents already freeze their selected Skill locks.
+            // Installation defaults cannot add Skills outside that ceiling.
+            && resolved_agent_snapshot.as_ref().is_none_or(|snapshot| snapshot.canonical_binding.is_none())
         {
             self.skill_resolver.auto_inject_names().await
         } else {
@@ -5454,6 +5457,7 @@ impl ConversationService {
 
         let auto_inject = if self.execution_authority(user_id).controls_host()
             && replacement_object.get("product_agent_target_kind").is_none()
+            && snapshot.canonical_binding.is_none()
         {
             self.skill_resolver.auto_inject_names().await
         } else {
@@ -5755,7 +5759,12 @@ impl ConversationService {
 
         let existing_extra: serde_json::Value = serde_json::from_str(&existing.extra)
             .map_err(|error| AppError::Internal(format!("Invalid conversation extra: {error}")))?;
-        let auto_inject_names = if is_tool_free_agent_extra(&existing_extra) {
+        let canonical_snapshot = existing.agent_snapshot.as_deref()
+            .map(serde_json::from_str::<AgentResolvedSnapshot>)
+            .transpose()
+            .map_err(|error| AppError::Internal(format!("Invalid Agent snapshot: {error}")))?
+            .is_some_and(|snapshot| snapshot.canonical_binding.is_some());
+        let auto_inject_names = if canonical_snapshot || is_tool_free_agent_extra(&existing_extra) {
             Vec::new()
         } else {
             self.skill_resolver.auto_inject_names().await

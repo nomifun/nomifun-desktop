@@ -7438,7 +7438,9 @@ fn fork_message_id(
     let digest = hasher.finalize();
     let mut bytes = [0_u8; 16];
     bytes.copy_from_slice(&digest[..16]);
-    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    // Persisted message IDs require the platform's UUIDv7 shape. Keep the
+    // deterministic fork identity while honoring the existing storage contract.
+    bytes[6] = (bytes[6] & 0x0f) | 0x70;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     Uuid::from_bytes(bytes).to_string()
 }

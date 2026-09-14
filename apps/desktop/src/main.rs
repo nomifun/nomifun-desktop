@@ -308,6 +308,47 @@ fn default_data_dir() -> PathBuf {
     nomifun_app::bootstrap::resolve_nomi_core_data_root(requested)
 }
 
+#[cfg(target_os = "macos")]
+struct ExplicitDesktopDataRoot(bool);
+
+#[cfg(target_os = "macos")]
+struct MacosWebviewDataStore(Option<[u8; 16]>);
+
+/// WKWebView ignores data_directory and otherwise shares defaultDataStore.
+/// Only custom explicit backend roots receive a separate persistent store.
+/// Preserve the channel default even when a restart inherits its exported root.
+#[cfg(target_os = "macos")]
+fn macos_webview_data_store(
+    explicit_root: bool,
+    data_root: &Path,
+    channel_default: &Path,
+    custom_store_available: bool,
+) -> anyhow::Result<Option<[u8; 16]>> {
+    use std::os::unix::ffi::OsStrExt;
+    use sha2::{Digest, Sha256};
+
+    if !explicit_root {
+        return Ok(None);
+    }
+    let canonical_root = std::fs::canonicalize(data_root)
+        .context("cannot resolve explicit WebView data root")?;
+    let default_root = std::fs::canonicalize(channel_default)
+        .unwrap_or_else(|_| channel_default.to_path_buf());
+    if canonical_root == default_root {
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        custom_store_available,
+        "isolating an explicit NOMIFUN_DATA_DIR WebView profile requires macOS 14 or newer; refusing to open the default WebView profile"
+    );
+    let mut digest = Sha256::new();
+    digest.update(b"NomiFun WKWebView explicit data root v1\0");
+    digest.update(canonical_root.as_os_str().as_bytes());
+    let mut identifier = [0u8; 16];
+    identifier.copy_from_slice(&digest.finalize()[..16]);
+    Ok(Some(identifier))
+}
+
 fn announce_desktop_backend(data_dir: &Path, loopback_port: u16) {
     nomifun_app::bootstrap::announce_bound_port(data_dir, "127.0.0.1", loopback_port);
 }
@@ -2213,6 +2254,19 @@ fn complete_main_thread_setup(
     }
 
     let loopback_port = server.loopback_port();
+    #[cfg(target_os = "macos")]
+    {
+        let channel_default = nomifun_app::bootstrap::resolve_nomi_core_data_root(
+            nomifun_app::cli::default_data_dir(),
+        );
+        let store = macos_webview_data_store(
+            app.state::<ExplicitDesktopDataRoot>().0,
+            &pairing_data_dir,
+            &channel_default,
+            objc2::available!(macos = 14.0),
+        )?;
+        app.manage(MacosWebviewDataStore(store));
+    }
 
     // Build the main window programmatically so we can inject the backend
     // port + local-trust secret via an INITIALIZATION SCRIPT — it runs
@@ -2281,6 +2335,11 @@ fn complete_main_thread_setup(
             .inner_size(1280.0, 832.0)
             .min_inner_size(880.0, 600.0)
             .initialization_script(&init_script);
+    #[cfg(target_os = "macos")]
+    let win_builder = match app.state::<MacosWebviewDataStore>().0 {
+        Some(identifier) => win_builder.data_store_identifier(identifier),
+        None => win_builder,
+    };
     // macOS: Overlay makes the titlebar transparent + extends content under
     // it, but it does NOT hide the native title text. With the title still
     // set to "NomiFun", AppKit draws that string next to the traffic lights,
@@ -2416,6 +2475,64 @@ fn show_main_window(app: &tauri::AppHandle) {
 #[cfg(any(test, target_os = "macos"))]
 fn should_show_main_window_for_macos_reopen(_has_visible_windows: bool) -> bool {
     true
+}
+
+/// Terminal termination must enter the same verified shutdown path as Quit.
+/// Register before starting the embedded backend, including packaged binaries
+/// launched from a shell. Windows/Linux retain their existing host behavior.
+#[cfg(target_os = "macos")]
+fn install_macos_exit_observers(app: &tauri::AppHandle) -> anyhow::Result<()> {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let (mut interrupt, mut terminate) = tauri::async_runtime::block_on(async {
+        Ok::<_, std::io::Error>((
+            signal(SignalKind::interrupt())?,
+            signal(SignalKind::terminate())?,
+        ))
+    })?;
+    let signal_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let received = tokio::select! {
+                value = interrupt.recv() => value,
+                value = terminate.recv() => value,
+            };
+            if received.is_none() {
+                break;
+            }
+            tracing::info!("received terminal termination signal; requesting verified desktop shutdown");
+            signal_app.exit(0);
+        }
+    });
+
+    if tauri::is_dev() {
+        if let Some(socket_path) = std::env::var_os("NOMIFUN_DEV_LIFETIME_SOCKET") {
+            let lifetime_app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                use tokio::io::AsyncReadExt;
+                match tokio::net::UnixStream::connect(PathBuf::from(socket_path)).await {
+                    Ok(mut connection) => {
+                        let mut byte = [0u8; 1];
+                        // A stop byte or EOF means the CLI/runner exited or
+                        // the developer requested stop. No process group is
+                        // signalled before the platform cleans up its tools.
+                        let _ = connection.read(&mut byte).await;
+                        tracing::info!("development runner stopped; requesting verified desktop shutdown");
+                        lifetime_app.exit(0);
+                        // Keep the socket until process exit. This lets the
+                        // runner wait for actual exit before stopping its CLI.
+                        std::future::pending::<()>().await;
+                        drop(connection);
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "development runner is unavailable; requesting desktop shutdown");
+                        lifetime_app.exit(0);
+                    }
+                }
+            });
+        }
+    }
+    Ok(())
 }
 
 fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
@@ -2625,6 +2742,11 @@ fn reconcile_companion_windows(
                 .shadow(false)
                 .visible(false)
                 .initialization_script(&init_script);
+        #[cfg(target_os = "macos")]
+        let builder = match app.state::<MacosWebviewDataStore>().0 {
+            Some(identifier) => builder.data_store_identifier(identifier),
+            None => builder,
+        };
         // Show the freshly-built window from here rather than relying SOLELY on
         // the companion page's self-show (applyWindowState): on a FIRST enable
         // (no window existed, so we land in this create branch) the page init
@@ -2670,6 +2792,10 @@ fn main() -> std::process::ExitCode {
     // see nomifun_app::bootstrap::resolve_startup_data_root). v3 remains a
     // hard dataset cut for the historical pre-v3 temp-rooted dataset: the
     // backend quarantines any incompatible dataset found at the current root.
+    // Capture caller intent before the backend exports its effective root.
+    #[cfg(target_os = "macos")]
+    let explicit_desktop_data_root = std::env::var_os("NOMIFUN_DATA_DIR")
+        .is_some_and(|value| !value.is_empty());
     let data_dir = default_data_dir();
     nomifun_runtime::init(&data_dir);
     // SAFETY: no worker threads exist yet (Tauri's runtime is built by .run()).
@@ -2741,7 +2867,11 @@ fn main() -> std::process::ExitCode {
         .plugin(tauri_plugin_deep_link::init())
         .setup(move |app| {
             let app_handle = app.handle().clone();
+            #[cfg(target_os = "macos")]
+            app.manage(ExplicitDesktopDataRoot(explicit_desktop_data_root));
             let coordinator = app.state::<Arc<ExitCoordinator>>().inner().clone();
+            #[cfg(target_os = "macos")]
+            install_macos_exit_observers(&app_handle)?;
 
             // In dev, the desktop webview loads the live Vite server; the LAN
             // listener must proxy to the same source instead of stale assets.
@@ -3111,6 +3241,34 @@ mod tests {
     use super::*;
     use std::fs;
     use std::sync::{Arc, Mutex};
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_webview_store_isolates_explicit_roots_without_changing_default_profile() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        let default = root.path().join("default");
+        for path in [&first, &second, &default] {
+            fs::create_dir_all(path).unwrap();
+        }
+        let resolve = |explicit, path: &Path, available| {
+            macos_webview_data_store(explicit, path, &default, available)
+        };
+        assert_eq!(resolve(false, &first, false).unwrap(), None);
+        assert_eq!(resolve(true, &default, false).unwrap(), None);
+        let first_id = resolve(true, &first, true).unwrap().unwrap();
+        assert_eq!(resolve(true, &first, true).unwrap(), Some(first_id));
+        assert_ne!(resolve(true, &second, true).unwrap(), Some(first_id));
+        assert!(resolve(true, &first, false).is_err());
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(&first, &alias).unwrap();
+        assert_eq!(resolve(true, &alias, true).unwrap(), Some(first_id));
+        let default_alias = root.path().join("default-alias");
+        std::os::unix::fs::symlink(&default, &default_alias).unwrap();
+        assert_eq!(resolve(true, &default_alias, false).unwrap(), None);
+        assert_eq!(fs::read_dir(&default).unwrap().count(), 0);
+    }
 
     #[test]
     fn desktop_backend_announcement_records_the_current_process_and_port() {

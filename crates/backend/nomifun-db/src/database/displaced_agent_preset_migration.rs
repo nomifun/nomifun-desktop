@@ -4,7 +4,7 @@
 //!
 //! The displaced SQL is byte-identical to canonical 089 except for its private
 //! temporary-table suffix (`v088` versus `v089`). Authenticate that exact SQL
-//! checksum and the complete canonical 001..087 prefix before changing the
+//! checksum and the canonical 001..026,028..087 prefix before changing the
 //! ledger. Then move the row to 089, adopt the canonical checksum, and let SQLx
 //! apply the missing canonical 088 plus the remaining suffix in one transaction.
 
@@ -15,6 +15,9 @@ use sqlx::sqlite::SqliteRow;
 use sqlx::{Connection, Row, SqliteConnection};
 
 use crate::error::DbError;
+
+#[cfg(test)]
+mod tests;
 
 const DISPLACED_VERSION: i64 = 88;
 const CANONICAL_VERSION: i64 = 89;
@@ -49,29 +52,62 @@ pub(super) fn is_displaced_prefix(
     rows: &[SqliteRow],
     migrator: &Migrator,
 ) -> Result<bool, DbError> {
-    if rows.len() != DISPLACED_VERSION as usize {
-        return Ok(false);
+    let mut recorded_displaced = None;
+    for row in rows {
+        let version: i64 = row.try_get("version").map_err(DbError::Query)?;
+        if version == DISPLACED_VERSION {
+            recorded_displaced = Some(row);
+            break;
+        }
     }
-    let expected = migrator.iter().collect::<Vec<_>>();
-    if expected.len() < CANONICAL_VERSION as usize {
+    let Some(recorded_displaced) = recorded_displaced else {
         return Ok(false);
-    }
+    };
     let displaced = displaced_migration(migrator)?;
-    for (index, row) in rows.iter().enumerate() {
+    let checksum: Vec<u8> = recorded_displaced.try_get("checksum").map_err(DbError::Query)?;
+    if checksum.as_slice() != displaced.checksum.as_ref() {
+        let upstream = migrator.iter()
+            .find(|migration| migration.version == DISPLACED_VERSION)
+            .ok_or_else(|| DbError::Init("canonical Director migration 088 is missing".into()))?;
+        if checksum.as_slice() == upstream.checksum.as_ref() {
+            return Ok(false);
+        }
+        return Err(DbError::Init(
+            "unknown migration 088 checksum; Agent relocation refused".into(),
+        ));
+    }
+
+    // The merged lineage retired 027. Pin the supported version set rather
+    // than treating a version number as its row offset or trusting future
+    // embedded additions/removals as authenticated history.
+    if rows.len() != (DISPLACED_VERSION - 1) as usize {
+        // A recognized displaced row must never fall through to SQLx: it may
+        // apply an earlier missing migration before reaching the 088 mismatch.
+        return Err(DbError::Init(
+            "displaced Agent lineage must be exactly 001..026,028..088 with no extra suffix".into(),
+        ));
+    }
+    let prefix = migrator.iter()
+        .filter(|migration| migration.version < DISPLACED_VERSION)
+        .collect::<Vec<_>>();
+    let expected_versions = (1..DISPLACED_VERSION).filter(|version| *version != 27);
+    if !prefix.iter().map(|migration| migration.version).eq(expected_versions) {
+        return Err(DbError::Init(
+            "embedded Agent prefix no longer matches authenticated 001..026,028..087".into(),
+        ));
+    }
+    let expected = prefix.into_iter().chain(std::iter::once(&displaced));
+    for (row, expected) in rows.iter().zip(expected) {
         let version: i64 = row.try_get("version").map_err(DbError::Query)?;
         let success: bool = row.try_get("success").map_err(DbError::Query)?;
         let checksum: Vec<u8> = row.try_get("checksum").map_err(DbError::Query)?;
-        let expected_version = index as i64 + 1;
-        if version != expected_version || !success {
-            return Ok(false);
-        }
-        let expected_checksum = if version == DISPLACED_VERSION {
-            displaced.checksum.as_ref()
-        } else {
-            expected[index].checksum.as_ref()
-        };
-        if checksum.as_slice() != expected_checksum {
-            return Ok(false);
+        if version != expected.version || !success
+            || checksum.as_slice() != expected.checksum.as_ref()
+        {
+            return Err(DbError::Init(format!(
+                "displaced Agent lineage does not match authenticated migration {}",
+                expected.version,
+            )));
         }
     }
     Ok(true)
