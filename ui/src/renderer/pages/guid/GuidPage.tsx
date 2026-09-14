@@ -38,10 +38,9 @@ import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
 import GuidAgentSelector from './components/GuidAgentSelector';
 import GuidActionRow from './components/GuidActionRow';
-import GuidCompanionPosterPreview from './components/GuidCompanionPosterPreview';
+import GuidCompanionShowcase from './components/GuidCompanionShowcase';
 import GuidInputCard from './components/GuidInputCard';
 import GuidModelSelector from './components/GuidModelSelector';
-import GuidResourceCards from './components/GuidResourceCards';
 import MentionDropdown, {
   MentionSelectorBadge,
 } from './components/MentionDropdown';
@@ -548,11 +547,7 @@ const GuidPage: React.FC = () => {
         </div>
         <div className={styles.guidPrimaryStage}>
           <div className={styles.guidLayout}>
-            <div className={styles.heroHeader}>
-              <p className='text-2xl font-semibold mb-0 text-0 text-center'>
-                {t('conversation.welcome.title')}
-              </p>
-            </div>
+            <GuidCompanionShowcase />
 
             {agentSelection.selection.kind === 'preset' && presetCapabilities.error && (
               <Alert
@@ -637,19 +632,10 @@ const GuidPage: React.FC = () => {
               disabled={guidInput.loading || !presetResourceResolutionReady}
             />
 
-            <GuidResourceCards />
+            <QuickActionButtons onOpenBugReport={() => setShowFeedbackModal(true)} />
           </div>
         </div>
 
-        <div className={styles.guidDiscoveryArea}>
-          <GuidCompanionPosterPreview />
-        </div>
-
-        <QuickActionButtons
-          onOpenBugReport={() => setShowFeedbackModal(true)}
-          inactiveBorderColor={inactiveBorderColor}
-          activeShadow={activeShadow}
-        />
         <FeedbackReportModal
           visible={showFeedbackModal}
           onCancel={() => setShowFeedbackModal(false)}

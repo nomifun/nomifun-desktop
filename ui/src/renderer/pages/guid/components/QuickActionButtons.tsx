@@ -6,16 +6,16 @@
 
 import { webui } from '@/common/adapter/ipcBridge';
 import { isDesktopShell } from '@/renderer/utils/platform';
-import { Earth, Refresh } from '@icon-park/react';
+import { BookOne, Comment, Down, Earth, Help, PlayOne, Refresh } from '@icon-park/react';
 import React, { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
-import styles from '../index.module.css';
+import { openExternalUrl } from '@/renderer/utils/platform';
+import GuidPopover from './GuidPopover';
+import styles from './GuidHomeUtilities.module.css';
 
 type QuickActionButtonsProps = {
   onOpenBugReport: () => void;
-  inactiveBorderColor: string;
-  activeShadow: string;
 };
 
 type WebuiQuickStatus = 'checking' | 'running' | 'stopped' | 'error';
@@ -28,13 +28,11 @@ let webuiStatusCache: {
 
 const QuickActionButtons: React.FC<QuickActionButtonsProps> = ({
   onOpenBugReport,
-  inactiveBorderColor,
-  activeShadow,
 }) => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const navigate = useNavigate();
   const canCheckUpdate = isDesktopShell();
-  const [hoveredQuickAction, setHoveredQuickAction] = useState<'bugReport' | 'webui' | 'update' | null>(null);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [webuiQuickStatus, setWebuiQuickStatus] = useState<WebuiQuickStatus>('checking');
 
   useEffect(() => {
@@ -78,16 +76,6 @@ const QuickActionButtons: React.FC<QuickActionButtonsProps> = ({
     };
   }, []);
 
-  const quickActionStyle = useCallback(
-    (isActive: boolean) => ({
-      borderWidth: '1px',
-      borderStyle: 'solid',
-      borderColor: inactiveBorderColor,
-      boxShadow: isActive ? activeShadow : 'none',
-    }),
-    [activeShadow, inactiveBorderColor]
-  );
-
   const handleOpenWebUI = useCallback(() => {
     void navigate('/open-capabilities');
   }, [navigate]);
@@ -98,12 +86,12 @@ const QuickActionButtons: React.FC<QuickActionButtonsProps> = ({
 
   const webuiStatusLabel =
     webuiQuickStatus === 'running'
-      ? t('settings.webui.running', { defaultValue: 'Running' })
+      ? t('guid.utilities.running')
       : webuiQuickStatus === 'checking'
-        ? t('settings.webui.starting', { defaultValue: 'Checking' })
+        ? t('guid.utilities.checking')
         : webuiQuickStatus === 'error'
-          ? t('settings.webui.operationFailed', { defaultValue: 'Unavailable' })
-          : t('settings.webui.enable', { defaultValue: 'Start' });
+          ? t('guid.utilities.unavailable')
+          : t('guid.utilities.stopped');
   const webuiIconColor =
     webuiQuickStatus === 'running'
       ? 'rgb(var(--success-6))'
@@ -113,81 +101,28 @@ const QuickActionButtons: React.FC<QuickActionButtonsProps> = ({
           ? 'var(--color-text-3)'
           : 'var(--color-text-4)';
 
+  const external = (url: string) => { setHelpOpen(false); void openExternalUrl(url); };
+  const chinese = (i18n.resolvedLanguage || i18n.language).toLowerCase().startsWith('zh');
   return (
-    <div
-      className={`absolute left-50% -translate-x-1/2 flex flex-col justify-center items-center ${styles.guidQuickActions}`}
-    >
-      <div className='flex justify-center items-center gap-24px'>
-        <div
-          className='group inline-flex items-center justify-center h-36px min-w-36px max-w-36px px-0 rd-999px bg-fill-0 cursor-pointer overflow-hidden whitespace-nowrap hover:max-w-170px hover:px-14px hover:justify-start hover:gap-8px transition-[max-width,padding,border-radius,box-shadow] duration-420 ease-in-out'
-          style={quickActionStyle(hoveredQuickAction === 'bugReport')}
-          onMouseEnter={() => setHoveredQuickAction('bugReport')}
-          onMouseLeave={() => setHoveredQuickAction(null)}
-          onClick={onOpenBugReport}
-        >
-          <svg
-            className='flex-shrink-0 text-[var(--color-text-3)] group-hover:text-primary-6 transition-colors duration-300'
-            width='20'
-            height='20'
-            viewBox='0 0 20 20'
-            fill='none'
-            xmlns='http://www.w3.org/2000/svg'
-          >
-            <path
-              d='M6.58335 16.6674C8.17384 17.4832 10.0034 17.7042 11.7424 17.2905C13.4814 16.8768 15.0155 15.8555 16.0681 14.4108C17.1208 12.9661 17.6229 11.1929 17.4838 9.41082C17.3448 7.6287 16.5738 5.95483 15.3099 4.69085C14.0459 3.42687 12.372 2.6559 10.5899 2.51687C8.80776 2.37784 7.03458 2.8799 5.58987 3.93256C4.14516 4.98523 3.12393 6.51928 2.71021 8.25828C2.29648 9.99729 2.51747 11.8269 3.33335 13.4174L1.66669 18.334L6.58335 16.6674Z'
-              stroke='currentColor'
-              strokeWidth='1.66667'
-              strokeLinecap='round'
-              strokeLinejoin='round'
-            />
-          </svg>
-          <span className='opacity-0 max-w-0 overflow-hidden text-14px text-[var(--color-text-2)] group-hover:opacity-100 group-hover:max-w-128px transition-all duration-360 ease-in-out'>
-            {t('conversation.welcome.quickActionFeedback')}
-          </span>
+    <footer className={styles.utilities} aria-label={t('guid.utilities.title')}>
+      <GuidPopover open={helpOpen} onOpenChange={setHelpOpen} label={t('guid.utilities.help')}
+        triggerClassName={styles.utility} trigger={<><Help size={15} />{t('guid.utilities.help')}<Down size={12} /></>}>
+        <div className={styles.helpMenu}>
+          <button type='button' onClick={() => external('https://www.nomifun.com/docs')}><BookOne size={16} />{t('guid.utilities.docs')}</button>
+          <button type='button' onClick={() => external(chinese ? 'https://www.bilibili.com/video/BV1kwKZ6UE5X/' : 'https://youtu.be/AsEToBDFR9s')}><PlayOne size={16} />{t('guid.utilities.video')}</button>
+          <button type='button' onClick={() => external('https://www.nomifun.com/contact')}><Comment size={16} />{t('guid.utilities.community')}</button>
+          <button type='button' onClick={() => { setHelpOpen(false); onOpenBugReport(); }}><Help size={16} />{t('conversation.welcome.quickActionFeedback')}</button>
         </div>
-        <div
-          className='group inline-flex items-center justify-center h-36px min-w-36px max-w-36px px-0 rd-999px bg-fill-0 cursor-pointer overflow-hidden whitespace-nowrap hover:max-w-200px hover:px-14px hover:justify-start hover:gap-8px transition-[max-width,padding,border-radius,box-shadow] duration-420 ease-in-out'
-          style={quickActionStyle(hoveredQuickAction === 'webui')}
-          onMouseEnter={() => setHoveredQuickAction('webui')}
-          onMouseLeave={() => setHoveredQuickAction(null)}
-          onClick={handleOpenWebUI}
-        >
-          <div className='relative w-20px h-20px flex-shrink-0 leading-none'>
-            <div className='absolute inset-0 flex items-center justify-center'>
-              <Earth
-                theme='outline'
-                size={20}
-                fill='currentColor'
-                className='block transition-colors duration-360'
-                style={{ color: webuiIconColor }}
-              />
-            </div>
-          </div>
-          <span className='opacity-0 max-w-0 overflow-hidden text-14px text-[var(--color-text-2)] group-hover:opacity-100 group-hover:max-w-160px transition-all duration-360 ease-in-out'>
-            {t('settings.webui', { defaultValue: 'WebUI' })} · {webuiStatusLabel}
-          </span>
-        </div>
-        {canCheckUpdate && (
-          <div
-            className='group inline-flex items-center justify-center h-36px min-w-36px max-w-36px px-0 rd-999px bg-fill-0 cursor-pointer overflow-hidden whitespace-nowrap hover:max-w-170px hover:px-14px hover:justify-start hover:gap-8px transition-[max-width,padding,border-radius,box-shadow] duration-420 ease-in-out'
-            style={quickActionStyle(hoveredQuickAction === 'update')}
-            onMouseEnter={() => setHoveredQuickAction('update')}
-            onMouseLeave={() => setHoveredQuickAction(null)}
-            onClick={handleCheckUpdate}
-          >
-            <Refresh
-              theme='outline'
-              size={20}
-              fill='currentColor'
-              className='flex-shrink-0 text-[var(--color-text-3)] group-hover:text-primary-6 transition-colors duration-300'
-            />
-            <span className='opacity-0 max-w-0 overflow-hidden text-14px text-[var(--color-text-2)] group-hover:opacity-100 group-hover:max-w-128px transition-all duration-360 ease-in-out'>
-              {t('conversation.welcome.quickActionCheckUpdate')}
-            </span>
-          </div>
-        )}
+      </GuidPopover>
+      <div className={styles.systemTools}>
+        <button type='button' className={styles.utility} onClick={handleOpenWebUI}>
+          <Earth size={14} style={{ color: webuiIconColor }} />WebUI<span className={styles.status}>{webuiStatusLabel}</span>
+        </button>
+        {canCheckUpdate && <button type='button' className={styles.utility} onClick={handleCheckUpdate}>
+          <Refresh size={14} />{t('conversation.welcome.quickActionCheckUpdate')}
+        </button>}
       </div>
-    </div>
+    </footer>
   );
 };
 

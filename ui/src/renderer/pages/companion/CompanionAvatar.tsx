@@ -18,6 +18,7 @@ interface CompanionAvatarProps {
   mood: CompanionMood;
   activity: CompanionActivity;
   size?: number;
+  displayMode?: 'auto' | 'full';
   /** Required for character==='custom': which companion's figure to load. */
   companionId?: CompanionId;
   /** Required for character==='custom': figure metadata from the companion profile. */
@@ -27,7 +28,7 @@ interface CompanionAvatarProps {
 }
 
 /** Renders the configured companion character. The single entry point every page uses. */
-const CompanionAvatar: React.FC<CompanionAvatarProps> = ({ character, mood, activity, size, companionId, customFigure, figureHitRef }) => {
+const CompanionAvatar: React.FC<CompanionAvatarProps> = ({ character, mood, activity, size, displayMode, companionId, customFigure, figureHitRef }) => {
   if (character === CUSTOM_CHARACTER_ID && companionId && customFigure) {
     const src = customFigureUrlOf(getBaseUrl(), companionId, customFigure);
     return (
@@ -39,6 +40,7 @@ const CompanionAvatar: React.FC<CompanionAvatarProps> = ({ character, mood, acti
         mood={mood}
         activity={activity}
         size={size}
+        displayMode={displayMode}
         hitRef={figureHitRef}
       />
     );
