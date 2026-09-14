@@ -52,27 +52,40 @@ async fn ok(router: &Router, method: &str, path: &str, body: Value, key: &str) -
     value["data"].clone()
 }
 
-async fn runtime_preview(router: &Router, editor: &Value, engine: &Value) -> (Value, Value) {
+fn runtime_draft(editor: &Value, engine: &Value) -> Value {
     let mut draft = editor["draft"].clone();
     draft["document"]["runtime_engine"] = engine.clone();
-    let path = format!("/api/agent-presets/{}/resolve-preview", editor["preset"]["preset_id"].as_str().unwrap());
-    let preview = ok(router, "POST", &path, json!({
-        "expected_current_revision": editor["revision"]["reference"], "draft": draft,
-        "scene":"agent_settings", "surface":"desktop", "audience":"owner"
-    }), "preview-runtime").await;
-    (draft, preview)
+    draft
 }
 
 async fn save_runtime(router: &Router, editor: &Value, engine: &Value) -> Value {
-    let (draft, preview) = runtime_preview(router, editor, engine).await;
-    assert_eq!(preview["status"], "ready", "{preview}");
+    let draft = runtime_draft(editor, engine);
     let path = format!("/api/agent-presets/{}/revisions", editor["preset"]["preset_id"].as_str().unwrap());
     let saved = ok(router, "POST", &path, json!({
         "expected_current_revision": editor["revision"]["reference"],
-        "preview_digest": preview["preview_digest"], "draft": draft
+        "draft": draft
     }), "save-runtime").await;
     assert_eq!(saved["revision"]["document"]["runtime_engine"], *engine);
+    assert_eq!(saved["revision"]["document"]["enabled_capabilities"], editor["draft"]["document"]["enabled_capabilities"]);
+    assert!(saved["resolved_snapshot_ref"]["snapshot_digest"].as_str().is_some_and(|digest| digest.len() == 64));
     saved
+}
+
+async fn assert_runtime_save_rejected(router: &Router, editor: &Value, engine: &Value, key: &str) {
+    let path = format!("/api/agent-presets/{}", editor["preset"]["preset_id"].as_str().unwrap());
+    // Save owns compilation now: reject an unavailable Engine without creating
+    // a revision or changing the previously saved Agent configuration.
+    let (status, error) = call(router, "POST", &format!("{path}/revisions"), json!({
+        "expected_current_revision": editor["revision"]["reference"],
+        "draft": runtime_draft(editor, engine)
+    }), key).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+    assert_eq!(error["code"], "PRESET_REVISION_SAVE_FAILED", "{error}");
+    assert!(error["details"]["diagnostics"].as_array().unwrap().iter()
+        .any(|diagnostic| diagnostic["code"] == "AGENT_RUNTIME_ENGINE_UNAVAILABLE"), "{error}");
+    let unchanged = ok(router, "GET", &format!("{path}/editor"), json!({}), key).await;
+    assert_eq!(unchanged["revision"], editor["revision"]);
+    assert_eq!(unchanged["draft"], editor["draft"]);
 }
 async fn wait_finished(pool: &nomifun_db::SqlitePool, session: &str) {
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
@@ -91,6 +104,83 @@ async fn wait_finished(pool: &nomifun_db::SqlitePool, session: &str) {
     })
     .await
     .expect("production turn reached its durable terminal");
+}
+
+async fn assert_coding_product_admission(
+    services: &nomifun_app::compatibility::AppServices,
+    saved: &Value,
+    binding: &nomifun_api_types::RuntimeEngineBinding,
+) {
+    use nomifun_agent_contracts::{ResolvedCapability, ResolvedSnapshotEnvelope, digest_payload};
+
+    assert_eq!(binding.family_id, "nomifun.coding");
+    let reference = &saved["revision"]["reference"];
+    let stored: String = sqlx::query_scalar(
+        "SELECT snapshot_json FROM nomi_agent_preset_revisions WHERE preset_id = ? AND revision_no = ? AND revision_digest = ?",
+    )
+    .bind(reference["preset_id"].as_str().unwrap())
+    .bind(reference["revision"].as_i64().unwrap())
+    .bind(reference["revision_digest"].as_str().unwrap())
+    .fetch_one(services.database.pool())
+    .await
+    .unwrap();
+    let mut snapshot: ResolvedSnapshotEnvelope = serde_json::from_str(&stored).unwrap();
+    snapshot.validate().expect("saved production snapshot");
+    let catalog = services.runtime_engines.catalog().unwrap();
+    catalog.validate_snapshot(binding, &snapshot).expect("saved Coding admission");
+
+    // Admission-only fixture, never installed or dispatched. Exercise the real
+    // registered Coding policy with a Product ID outside its builtin allowlist.
+    let digest = digest_payload(&json!({"type":"object","properties":{},"additionalProperties":false})).unwrap();
+    let product: ResolvedCapability = serde_json::from_value(json!({
+        "capability":{"id":"coding.admission.product","version":"1.0.0"},
+        "source_package":{"id":"coding.admission.fixture","version":"1.0.0"},
+        "contribution_id":"capability:coding.admission.product",
+        "contribution_lock":{
+            "source_kind":"plugin_product_active_release",
+            "source_identity":"coding.admission.fixture",
+            "plugin_product_id":"coding-admission-product",
+            "contribution_id":"capability:coding.admission.product",
+            "contract_digest":digest
+        },
+        "resolved_source":{"source_kind":"managed_local","source_identity":"coding.admission.fixture"},
+        "target_artifact_digest":digest,"schema_digest":digest,
+        "dependency_path":["coding.admission.product"],"required_runtime_features":[],
+        "plugin_product_id":"coding-admission-product",
+        "active_release":{"release_id":"coding-admission-release","artifact_id":"coding-admission-artifact",
+            "release_digest":digest,"manifest_digest":digest},
+        "active_release_epoch":1,"catalog_digest":digest,
+        "display_name":"Coding admission fixture","description":"Exact Product action",
+        "actions":[{"action_id":"coding.admission.product.invoke",
+            "input_schema":format!("schema://coding.admission.product/input@1#{}", digest.as_ref()),
+            "output_schema":format!("schema://coding.admission.product/output@1#{}", digest.as_ref()),
+            "effect_class":"external_transmit","presentation":"function_tool"}],
+        "required_resource_kinds":[],"action_allowlist":["coding.admission.product.invoke"]
+    })).unwrap();
+    product.validate().expect("complete exact Product capability");
+    snapshot.content.capability_allowlist.insert(product.capability.id.clone());
+    snapshot.content.enabled_capabilities.push(product);
+    snapshot.snapshot_ref.snapshot_digest = digest_payload(&snapshot.content).unwrap();
+    snapshot.validate().expect("complete Product snapshot");
+    catalog.validate_snapshot(binding, &snapshot)
+        .expect("validated Product must join the official Coding allowed set");
+
+    for missing in ["plugin_product_id", "active_release", "active_release_epoch", "catalog_digest"] {
+        let mut incomplete = snapshot.clone();
+        let product = incomplete.content.enabled_capabilities.last_mut().unwrap();
+        match missing {
+            "plugin_product_id" => product.plugin_product_id = None,
+            "active_release" => product.active_release = None,
+            "active_release_epoch" => product.active_release_epoch = None,
+            "catalog_digest" => product.catalog_digest = None,
+            _ => unreachable!(),
+        }
+        assert!(product.validate().is_err(), "missing {missing}");
+        // Keep the checksum current so rejection cannot be due to a stale hash.
+        incomplete.snapshot_ref.snapshot_digest = digest_payload(&incomplete.content).unwrap();
+        assert!(catalog.validate_snapshot(binding, &incomplete).is_err(),
+            "official Coding admission accepted Product without {missing}");
+    }
 }
 
 #[tokio::test]
@@ -149,9 +239,17 @@ async fn coding_engine_runs_real_workspace_tool_and_resumes_on_the_default_route
                     ))
                 })
             }),
+            Arc::new(nomifun_ai_agent::RuntimeEngineSupport::enabled_only(["fs.write".into()])),
         )
         .unwrap();
     let router = nomifun_app::compatibility::create_router(&services).await;
+    let descriptor = services.runtime_engines.catalog().unwrap().list().remove(0);
+    let late = services.runtime_engines.register(
+        descriptor,
+        Arc::new(|_, _| Box::pin(async { panic!("late factory must never run") })),
+        Arc::new(nomifun_ai_agent::RuntimeEngineSupport::platform()),
+    );
+    assert!(late.unwrap_err().to_string().contains("closed after host assembly"));
     let provider = nomifun_common::generate_id();
     let encrypted = nomifun_common::encrypt_string(
         &json!({"api_keys":["test-only-coding"]}).to_string(),
@@ -181,8 +279,8 @@ async fn coding_engine_runs_real_workspace_tool_and_resumes_on_the_default_route
     let preset = ok(&router, "POST", "/api/agent-presets", json!({
         "display_name":"Coding workspace proof", "document": {
             "schema_version":"1.0.0", "model_route_refs":{}, "chat_route_records":{},
-            "initial_capabilities":[{"capability":{"id":"fs.write","version":"1.0.0"}}],
-            "on_demand_capabilities":[], "skill_bindings":[], "system_role_provider_overrides":{},
+            "enabled_capabilities":[{"capability":{"id":"fs.write","version":"1.0.0"}}],
+            "skill_bindings":[], "system_role_provider_overrides":{},
             "persona":"Coding test", "instructions":"Use only the selected workspace tools.", "starter_prompts":[]
         }
     }), "preset").await;
@@ -221,24 +319,22 @@ async fn coding_engine_runs_real_workspace_tool_and_resumes_on_the_default_route
         created["runtime_engine_binding"]["family_id"],
         "nomifun.coding"
     );
+    assert_coding_product_admission(
+        &services,
+        &saved,
+        &serde_json::from_value(created["runtime_engine_binding"].clone()).unwrap(),
+    ).await;
     for (field, value) in [
         ("family_id", json!("uninstalled.runtime")),
         ("build_digest", json!("b".repeat(64))),
     ] {
         let mut invalid = coding_selection.clone();
         invalid["selector"][field] = value;
-        let (draft, preview) = runtime_preview(&router, &preset, &invalid).await;
-        assert_eq!(preview["status"], "blocked", "{preview}");
-        assert_eq!(preview["can_save_revision"], false);
-        let path = format!("{editor_path}/revisions");
-        assert!(!call(&router, "POST", &path, json!({
-            "expected_current_revision": preset["revision"]["reference"],
-            "preview_digest": preview["preview_digest"], "draft": draft
-        }), field).await.0.is_success());
+        assert_runtime_save_rejected(&router, &preset, &invalid, field).await;
     }
     let mut invalid = coding_selection.clone();
     invalid["profile"] = json!("not-installed");
-    assert_eq!(runtime_preview(&router, &preset, &invalid).await.1["status"], "blocked");
+    assert_runtime_save_rejected(&router, &preset, &invalid, "invalid-profile").await;
     let mut changed = request.clone();
     changed["runtime_engine"] = coding_selection.clone();
     assert_eq!(
@@ -254,6 +350,11 @@ async fn coding_engine_runs_real_workspace_tool_and_resumes_on_the_default_route
         StatusCode::UNPROCESSABLE_ENTITY
     );
     let selection_path = format!("/api/agent-sessions/{session}/capability-selection");
+    let capabilities_path = format!("/api/agent-sessions/{session}/capabilities");
+    let before = ok(&router, "GET", &capabilities_path, json!({}), "capabilities-before").await;
+    assert_eq!(before["active_capabilities"], json!(["fs.write"]));
+    assert_eq!(before["enabled_capabilities"], json!(["fs.write"]));
+    assert_eq!(before["generation"], 0);
     assert_eq!(call(&router, "PUT", &selection_path, json!({"capability_selection":{"enabled_skills":["pdf"],"excluded_auto_skills":[],"mcp_server_ids":[]}}), "unsupported-skills").await.0, StatusCode::CONFLICT);
     let conversation_path = format!("/api/conversations/{session}");
     let conversation = ok(&router, "GET", &conversation_path, json!({}), "read").await;
@@ -301,6 +402,12 @@ async fn coding_engine_runs_real_workspace_tool_and_resumes_on_the_default_route
         "written by Coding through Kernel"
     );
     assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let live = ok(&router, "GET", &capabilities_path, json!({}), "capabilities-live").await;
+    assert_eq!(live["resolved_snapshot_ref"], before["resolved_snapshot_ref"]);
+    assert_eq!(live["active_capabilities"], before["active_capabilities"]);
+    assert_eq!(live["enabled_capabilities"], before["enabled_capabilities"]);
+    assert_eq!(live["generation"], before["generation"]);
+    assert_ne!(live["state_source"], before["state_source"]);
     let events: Vec<String> = sqlx::query_scalar(
         "SELECT event_json FROM conversation_runtime_events WHERE conversation_id = ? ORDER BY id",
     )
@@ -313,6 +420,7 @@ async fn coding_engine_runs_real_workspace_tool_and_resumes_on_the_default_route
         "{events:?}"
     );
     assert!(events.last().unwrap().contains("turn_completed"));
+    assert!(events.iter().any(|event| event.contains("context_prepared")));
     assert!(
         events
             .iter()
@@ -379,9 +487,19 @@ async fn coding_engine_runs_real_workspace_tool_and_resumes_on_the_default_route
     let mut custom_document = preset["draft"]["document"].clone();
     custom_document["runtime_engine"] = json!({"selector":{"selection":"exact","family_id":"customer.runtime","build_id":"v1","build_digest":"c".repeat(64)},"profile":"workflow"});
     let custom_agent = ok(&router, "POST", "/api/agent-presets", json!({"display_name":"Custom runtime Agent","document":custom_document}), "custom-agent").await;
+    // No product branch knows customer.runtime: its bundled policy controls
+    // both saved capabilities and effective Session overlays.
+    let mut unsupported = custom_document.clone();
+    unsupported["enabled_capabilities"] = json!([{"capability":{"id":"fs.read","version":"1.0.0"}}]);
+    assert!(!call(&router, "POST", "/api/agent-presets", json!({"display_name":"Unsupported custom Agent","document":unsupported}), "custom-unsupported").await.0.is_success());
     let mut custom = request;
     custom["preset_id"] = custom_agent["preset"]["preset_id"].clone();
+    let mut unsupported = custom.clone();
+    unsupported["capability_selection"]["enabled_skills"] = json!(["pdf"]);
+    assert_eq!(call(&router, "POST", "/api/agent-sessions", unsupported, "custom-skills").await.0, StatusCode::CONFLICT);
     let custom = ok(&router, "POST", "/api/agent-sessions", custom, "custom").await;
+    let selection = format!("/api/agent-sessions/{}/capability-selection", custom["agent_session_id"].as_str().unwrap());
+    assert_eq!(call(&router, "PUT", &selection, json!({"capability_selection":{"enabled_skills":["pdf"],"excluded_auto_skills":[],"mcp_server_ids":[]}}), "custom-overlay").await.0, StatusCode::CONFLICT);
     assert_eq!(
         custom["runtime_engine_binding"]["family_id"],
         "customer.runtime"

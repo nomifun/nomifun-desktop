@@ -89,9 +89,37 @@ pub async fn load_agents_md(
         if cancellation.is_cancelled() {
             return Err(CodingEngineError::Cancelled);
         }
-        let content = match reader.read_text(&path, cancellation.clone()).await {
+        // Only replace the leaf; a directory may itself be named AGENTS.md.
+        let override_path = format!(
+            "{}AGENTS.override.md",
+            path.strip_suffix("AGENTS.md").unwrap_or_default()
+        );
+        let (path, result) = match reader.read_text(&override_path, cancellation.clone()).await {
+            // Presence determines precedence, not content. An intentionally
+            // empty override suppresses the sibling AGENTS.md, not descendants.
+            Ok(Some(content)) => (override_path, Ok(Some(content))),
+            Ok(_) => (
+                path.clone(),
+                reader.read_text(&path, cancellation.clone()).await,
+            ),
+            Err(error @ (CodingEngineError::Cancelled | CodingEngineError::EventSink(_))) => {
+                return Err(error);
+            }
+            Err(error) => {
+                context
+                    .warnings
+                    .push(format!("could not read {override_path}: {error}"));
+                (
+                    path.clone(),
+                    reader.read_text(&path, cancellation.clone()).await,
+                )
+            }
+        };
+        let content = match result {
             Ok(content) => content,
-            Err(CodingEngineError::Cancelled) => return Err(CodingEngineError::Cancelled),
+            Err(error @ (CodingEngineError::Cancelled | CodingEngineError::EventSink(_))) => {
+                return Err(error);
+            }
             Err(error) => {
                 context
                     .warnings
@@ -102,6 +130,9 @@ pub async fn load_agents_md(
         let Some(mut content) = content else {
             continue;
         };
+        if content.trim().is_empty() {
+            continue;
+        }
 
         let mut truncated = false;
         if content.len() > policy.max_file_bytes {
@@ -151,7 +182,12 @@ pub async fn load_agents_md(
     Ok(context)
 }
 
-fn normalize_workspace_directory(value: &str) -> Result<String, CodingEngineError> {
+pub(crate) fn normalize_workspace_directory(value: &str) -> Result<String, CodingEngineError> {
+    if value.len() > 4096 {
+        return Err(CodingEngineError::WorkspaceContext(
+            "workspace path exceeds 4096 bytes".into(),
+        ));
+    }
     let value = value.trim();
     if value.is_empty() || value == "." {
         return Ok(String::new());
@@ -160,7 +196,7 @@ fn normalize_workspace_directory(value: &str) -> Result<String, CodingEngineErro
         || value.starts_with('\\')
         || value.ends_with('/')
         || value.contains('\\')
-        || value.contains('\0')
+        || value.chars().any(char::is_control)
         || value.contains(':')
     {
         return Err(CodingEngineError::WorkspaceContext(
@@ -250,10 +286,7 @@ mod tests {
             files: BTreeMap::from([
                 ("AGENTS.md".to_owned(), "root".to_owned()),
                 ("crates/AGENTS.md".to_owned(), "crates".to_owned()),
-                (
-                    "crates/runtime/AGENTS.md".to_owned(),
-                    "runtime".to_owned(),
-                ),
+                ("crates/runtime/AGENTS.md".to_owned(), "runtime".to_owned()),
             ]),
             reads: Mutex::new(Vec::new()),
         };
@@ -273,11 +306,7 @@ mod tests {
                 .iter()
                 .map(|layer| layer.path.as_str())
                 .collect::<Vec<_>>(),
-            vec![
-                "AGENTS.md",
-                "crates/AGENTS.md",
-                "crates/runtime/AGENTS.md"
-            ]
+            vec!["AGENTS.md", "crates/AGENTS.md", "crates/runtime/AGENTS.md"]
         );
         assert!(context.combined.find("root").unwrap() < context.combined.find("runtime").unwrap());
     }

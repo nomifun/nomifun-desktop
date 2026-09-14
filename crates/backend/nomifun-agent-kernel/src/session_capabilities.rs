@@ -7,7 +7,11 @@ use crate::{CompiledSnapshot, KernelError};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActiveCapabilitySetSnapshot {
     pub resolved_snapshot_ref: ResolvedSnapshotRef,
+    /// Compatibility field for invocation ports; fixed at zero, not an
+    /// engine-controlled activation counter.
     pub generation: u64,
+    /// All capabilities enabled by the saved Snapshot, including its frozen
+    /// dependency closure. This is not a mutable runtime selection.
     pub active: BTreeSet<CapabilityId>,
 }
 

@@ -164,6 +164,23 @@ fn parse_retry_after(value: Option<&reqwest::header::HeaderValue>) -> Option<u64
 /// 400/422 → [`InvokeErrorKind::InvalidParams`]; 5xx and everything else →
 /// [`InvokeErrorKind::ProviderError`]. `http_status` is always set.
 pub async fn error_from_response(resp: reqwest::Response) -> InvokeError {
+    error_from_response_with_body_deadline(resp, None).await
+}
+
+/// Streaming chat has no total HTTP body deadline. Bound the diagnostic read
+/// while preserving the known HTTP failure class (e.g. 400 is not a transient
+/// timeout merely because its error body stalled).
+pub(crate) async fn error_from_response_with_timeout(
+    resp: reqwest::Response,
+    timeout: Duration,
+) -> InvokeError {
+    error_from_response_with_body_deadline(resp, Some(timeout)).await
+}
+
+async fn error_from_response_with_body_deadline(
+    resp: reqwest::Response,
+    timeout: Option<Duration>,
+) -> InvokeError {
     let redactor = response_secret_redactor(&resp);
     let status = resp.status();
     let code = status.as_u16();
@@ -177,13 +194,20 @@ pub async fn error_from_response(resp: reqwest::Response) -> InvokeError {
     let retry_after_ms = (code == 429)
         .then(|| parse_retry_after(resp.headers().get(reqwest::header::RETRY_AFTER)))
         .flatten();
-    let snippet = redactor.redact(&read_error_body_snippet(resp).await);
+    let (snippet, context_length_rejected) = match timeout {
+        Some(timeout) => tokio::time::timeout(timeout, read_error_body_snippet(resp))
+            .await
+            .unwrap_or_else(|_| ("<provider error body read timed out>".to_owned(), false)),
+        None => read_error_body_snippet(resp).await,
+    };
+    let snippet = redactor.redact(&snippet);
     InvokeError {
         kind,
         message: format!("provider returned {status}: {snippet}"),
         http_status: Some(code),
         retry_after_ms,
         catalog_failure: false,
+        context_length_rejected: matches!(code, 400 | 413 | 422) && context_length_rejected,
     }
 }
 
@@ -197,19 +221,29 @@ pub(crate) fn response_secret_redactor(resp: &reqwest::Response) -> SecretRedact
         .unwrap_or_default()
 }
 
-async fn read_error_body_snippet(mut resp: reqwest::Response) -> String {
+async fn read_error_body_snippet(mut resp: reqwest::Response) -> (String, bool) {
     if let Some(declared) = resp.content_length()
         && declared > MAX_ERROR_RESPONSE_BODY_BYTES as u64
     {
-        return format!(
-            "<provider error body omitted: declared {declared} bytes exceeds {}-byte cap>",
-            MAX_ERROR_RESPONSE_BODY_BYTES
+        return (
+            format!(
+                "<provider error body omitted: declared {declared} bytes exceeds {}-byte cap>",
+                MAX_ERROR_RESPONSE_BODY_BYTES
+            ),
+            false,
         );
     }
 
     let mut body = Vec::new();
     let mut exceeded_cap = false;
+    let mut complete = false;
+    let mut chunks = 0usize;
     loop {
+        if chunks >= 256 {
+            tokio::task::yield_now().await;
+            chunks = 0;
+        }
+        chunks += 1;
         match resp.chunk().await {
             Ok(Some(chunk)) => {
                 let remaining = MAX_ERROR_RESPONSE_BODY_BYTES.saturating_sub(body.len());
@@ -220,16 +254,23 @@ async fn read_error_body_snippet(mut resp: reqwest::Response) -> String {
                 }
                 body.extend_from_slice(&chunk);
             }
-            Ok(None) => break,
+            Ok(None) => {
+                complete = true;
+                break;
+            }
             Err(error) => {
                 if body.is_empty() {
-                    return format!("<provider error body read failed: {error}>");
+                    return (format!("<provider error body read failed: {error}>"), false);
                 }
                 break;
             }
         }
     }
 
+    // Classify before the presentation truncation, and only when EOF was
+    // observed. A partial JSON body or a quoted error inside message text is
+    // never evidence for a new paid model request.
+    let context_length_rejected = complete && explicit_context_length_error(&body);
     let mut snippet: String = String::from_utf8_lossy(&body)
         .chars()
         .take(MAX_ERROR_RESPONSE_SNIPPET_CHARS)
@@ -240,7 +281,24 @@ async fn read_error_body_snippet(mut resp: reqwest::Response) -> String {
             MAX_ERROR_RESPONSE_BODY_BYTES
         ));
     }
-    snippet
+    (snippet, context_length_rejected)
+}
+
+fn explicit_context_length_error(body: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+    let Some(error) = value.get("error").and_then(serde_json::Value::as_object) else {
+        return false;
+    };
+    // Deliberately narrow: generic invalid_request_error, HTTP 413, token
+    // quota failures and natural-language messages are not context evidence.
+    ["code", "type"].iter().any(|field| {
+        error
+            .get(*field)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|code| matches!(code, "context_length_exceeded" | "prompt_too_long"))
+    })
 }
 
 /// Hard ceiling on a single downloaded artifact / video-content body. Streams

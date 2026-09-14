@@ -48,6 +48,9 @@ pub enum ResponsesInputContent {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ResponsesInputItem {
+    ProviderReasoning {
+        block: crate::ChatProviderReasoning,
+    },
     Message {
         role: ResponsesRole,
         content: Vec<ResponsesInputContent>,
@@ -159,6 +162,10 @@ impl ResponsesBridgeRequest {
 
 fn responses_item_to_message(item: ResponsesInputItem) -> Result<ChatMessage, ChatModelError> {
     let (role, content) = match item {
+        ResponsesInputItem::ProviderReasoning { block } => (
+            ChatRole::Assistant,
+            vec![ChatContentPart::ProviderReasoning { block }],
+        ),
         ResponsesInputItem::Message { role, content } => {
             let role = match role {
                 ResponsesRole::System => ChatRole::System,
@@ -265,6 +272,17 @@ pub enum ResponsesBridgeEvent {
     ReasoningSignature {
         response_id: ProviderResponseId,
         signature: String,
+    },
+    #[serde(rename = "response.reasoning_block")]
+    ReasoningBlock {
+        response_id: ProviderResponseId,
+        text: String,
+        encrypted_content: Option<String>,
+    },
+    #[serde(rename = "response.provider_reasoning_block")]
+    ProviderReasoningBlock {
+        response_id: ProviderResponseId,
+        block: crate::ChatProviderReasoning,
     },
     #[serde(rename = "response.function_call_arguments.delta")]
     FunctionCallArgumentsDelta {
@@ -426,6 +444,12 @@ fn map_broker_event(
                 response_id,
                 signature,
             })
+        }
+        ChatModelEvent::ReasoningBlock { text, encrypted_content } => {
+            Some(ResponsesBridgeEvent::ReasoningBlock { response_id, text, encrypted_content })
+        }
+        ChatModelEvent::ProviderReasoningBlock { block } => {
+            Some(ResponsesBridgeEvent::ProviderReasoningBlock { response_id, block })
         }
         ChatModelEvent::ToolCallDelta {
             call_id,

@@ -56,7 +56,7 @@ use super::health::{
     unregister_knowledge_global_handler,
 };
 use super::model_failover::{ModelFailoverRouterState, model_failover_routes};
-use super::state::{ModuleStates, build_module_states, build_ws_state};
+use super::state::{ModuleStates, try_build_module_states, build_ws_state};
 use super::trace::with_access_log;
 
 struct GatewayCatalogAdmission {
@@ -310,7 +310,7 @@ pub async fn try_create_router(services: &AppServices) -> anyhow::Result<Router>
         }
     }
 
-    let (states, channel_components) = build_module_states(services).await;
+    let (states, channel_components) = try_build_module_states(services).await?;
     tracing::info!(
         elapsed_ms = boot.elapsed().as_millis(),
         "startup: module states built"
@@ -530,8 +530,8 @@ pub async fn try_create_router(services: &AppServices) -> anyhow::Result<Router>
 
 /// Create the current Nomi-core product router.
 ///
-/// Fresh-v4 remains a separate, explicitly selected future host and uses
-/// `FreshV4Application::router`; it never shares this `AppServices` graph.
+/// All compiled-in Engines share this application graph and its Conversation
+/// owner; an Engine does not select or construct a second product host.
 pub async fn create_router(services: &AppServices) -> Router {
     try_create_router(services)
         .await
@@ -875,7 +875,8 @@ fn create_nomi_core_router_with_all_state(
 
     let plugin_authenticated = admit_headless_installation_owner(
         protect_instance_owner(
-            super::plugin_platform::plugin_routes(states.plugin.with_runtime(services.plugin_runtime.clone())).route_layer(
+            super::plugin_platform::plugin_routes(states.plugin.clone().with_runtime(services.plugin_runtime.clone()))
+                .merge(super::skill_publication::routes(states.skill.skill_paths.clone(), states.plugin.service.clone())).route_layer(
                 middleware::from_fn(require_local_product_trust_middleware),
             ),
             &auth_mw_state,

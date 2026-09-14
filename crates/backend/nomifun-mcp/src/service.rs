@@ -13,6 +13,20 @@ use crate::types::{McpServer, McpServerTransport};
 
 const SPLITTABLE_STDIO_LAUNCHERS: &[&str] = &["npx", "pnpx", "bunx", "uvx", "uv", "node", "python", "python3", "deno"];
 
+/// Publishes persisted configuration as tool data, never as executable engine code.
+/// Implementations must serialize catalog reads with other registry publications.
+#[async_trait::async_trait]
+pub trait McpCatalogPublisher: Send + Sync {
+    async fn refresh(&self) -> Result<(), McpError>;
+}
+
+/// Opaque, process-local proof of which saved configuration was probed.
+/// Not serialized, accepted from clients, or reusable after a successful write.
+pub struct McpProbeRevision {
+    server_id: McpServerId,
+    revision: nomifun_common::TimestampMs,
+}
+
 // ---------------------------------------------------------------------------
 // McpConfigService
 // ---------------------------------------------------------------------------
@@ -29,11 +43,32 @@ const SPLITTABLE_STDIO_LAUNCHERS: &[&str] = &["npx", "pnpx", "bunx", "uvx", "uv"
 #[derive(Clone)]
 pub struct McpConfigService {
     repo: Arc<dyn IMcpServerRepository>,
+    catalog: Option<Arc<dyn McpCatalogPublisher>>,
+    mutation_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl McpConfigService {
     pub fn new(repo: Arc<dyn IMcpServerRepository>) -> Self {
-        Self { repo }
+        Self { repo, catalog: None, mutation_lock: Arc::new(tokio::sync::Mutex::new(())) }
+    }
+
+    pub fn with_catalog_publisher(mut self, catalog: Arc<dyn McpCatalogPublisher>) -> Self {
+        self.catalog = Some(catalog);
+        self
+    }
+
+    async fn publish_catalog(&self) -> Result<(), McpError> {
+        if let Some(catalog) = &self.catalog {
+            catalog.refresh().await?;
+        }
+        Ok(())
+    }
+
+    /// Retry publication after a saved mutation whose response was interrupted.
+    /// This neither rewrites configuration nor reruns a remote connection test.
+    pub async fn refresh_catalog(&self) -> Result<(), McpError> {
+        let _guard = self.mutation_lock.lock().await;
+        self.publish_catalog().await
     }
 
     /// List all MCP servers.
@@ -79,6 +114,7 @@ impl McpConfigService {
         req: UpdateMcpServerRequest,
     ) -> Result<McpServerResponse, McpError> {
         // Verify the server exists
+        let _guard = self.mutation_lock.lock().await;
         let existing_server = self
             .repo
             .find_by_id(mcp_server_id.as_str())
@@ -107,12 +143,15 @@ impl McpConfigService {
             description: req.description.as_ref().map(|opt| opt.as_deref()),
             transport_type: transport.as_ref().map(McpServerTransport::transport_type),
             transport_config: config_json.as_deref(),
+            // Supplied connection settings require fresh tool discovery.
+            tools: transport.as_ref().map(|_| None),
             original_json: req.original_json.as_ref().map(|opt| opt.as_deref()),
             builtin: req.builtin,
             ..Default::default()
         };
 
         let row = self.repo.update(mcp_server_id.as_str(), params).await?;
+        self.publish_catalog().await?;
         let server = McpServer::from_row(row)?;
         Ok(server.into_response())
     }
@@ -121,6 +160,7 @@ impl McpConfigService {
     ///
     /// Returns whether the deleted server was enabled.
     pub async fn delete_server(&self, mcp_server_id: &McpServerId) -> Result<bool, McpError> {
+        let _guard = self.mutation_lock.lock().await;
         let row = self
             .repo
             .find_by_id(mcp_server_id.as_str())
@@ -128,6 +168,7 @@ impl McpConfigService {
             .ok_or_else(|| McpError::NotFound(mcp_server_id.to_string()))?;
         let was_enabled = row.enabled;
         self.repo.delete(mcp_server_id.as_str()).await?;
+        self.publish_catalog().await?;
         Ok(was_enabled)
     }
 
@@ -135,6 +176,7 @@ impl McpConfigService {
     ///
     /// Returns the updated server response.
     pub async fn toggle_server(&self, mcp_server_id: &McpServerId) -> Result<McpServerResponse, McpError> {
+        let _guard = self.mutation_lock.lock().await;
         let row = self
             .repo
             .find_by_id(mcp_server_id.as_str())
@@ -147,6 +189,7 @@ impl McpConfigService {
             ..Default::default()
         };
         let updated = self.repo.update(mcp_server_id.as_str(), params).await?;
+        self.publish_catalog().await?;
         let server = McpServer::from_row(updated)?;
         Ok(server.into_response())
     }
@@ -194,12 +237,54 @@ impl McpConfigService {
         Ok(rows)
     }
 
-    /// Persist the latest connection test result for an existing MCP server.
+    /// Capture saved identity before contacting the server. Unsaved editor
+    /// values may be tested, but their results must not enter the live catalog.
+    pub async fn begin_probe(
+        &self,
+        server_id: &McpServerId,
+        name: &str,
+        transport: &McpServerTransport,
+    ) -> Result<Option<McpProbeRevision>, McpError> {
+        let row = self.repo.find_by_id(server_id.as_str()).await?
+            .ok_or_else(|| McpError::NotFound(server_id.to_string()))?;
+        let saved = McpServerTransport::from_db(&row.transport_type, &row.transport_config)?;
+        if row.deleted_at.is_some() || row.name != name || saved != *transport {
+            return Ok(None);
+        }
+        Ok(Some(McpProbeRevision { server_id: server_id.clone(), revision: row.updated_at }))
+    }
+
+    /// Compare-and-swap prevents a slow probe from overwriting a later edit or
+    /// newer probe. Status, tools, and the next revision change in one DB write.
+    pub async fn finish_probe(
+        &self,
+        probe: McpProbeRevision,
+        result: &McpConnectionTestResult,
+    ) -> Result<(), McpError> {
+        let _guard = self.mutation_lock.lock().await;
+        let tools = if result.success { result.tools.as_ref() } else { None };
+        let tools_json = tools.map(serde_json::to_string).transpose()?;
+        let applied = self.repo.update_probe_if_revision(
+            probe.server_id.as_str(), probe.revision,
+            if result.success { "connected" } else { "error" },
+            result.success.then(now_ms), tools_json.as_deref(),
+        ).await?;
+        if !applied {
+            return Err(McpError::StaleProbe);
+        }
+        self.publish_catalog().await
+    }
+
+    /// Legacy trusted-caller persistence. HTTP probes use begin/finish_probe.
     pub async fn persist_test_result(
         &self,
         mcp_server_id: &McpServerId,
         result: &McpConnectionTestResult,
     ) -> Result<(), McpError> {
+        if self.catalog.is_some() {
+            return Err(McpError::InvalidEdit("Live catalogs require a revision-fenced connection probe".into()));
+        }
+        let _guard = self.mutation_lock.lock().await;
         let status = if result.success { "connected" } else { "error" };
         let last_connected = if result.success { Some(now_ms()) } else { None };
         let tools_json = result.tools.as_ref().map(serde_json::to_string).transpose()?;
@@ -207,9 +292,13 @@ impl McpConfigService {
         self.repo
             .update_status(mcp_server_id.as_str(), status, last_connected)
             .await?;
-        self.repo
+        let tools_result = self.repo
             .update_tools(mcp_server_id.as_str(), tools_json.as_deref())
-            .await?;
+            .await;
+        // Even a partial write changed the connection revision. Republish it
+        // before returning the database error; never pretend this rolled back.
+        self.publish_catalog().await?;
+        tools_result?;
         Ok(())
     }
 
@@ -222,6 +311,7 @@ impl McpConfigService {
         builtin: bool,
         enabled: bool,
     ) -> Result<McpServerResponse, McpError> {
+        let _guard = self.mutation_lock.lock().await;
         let config_json = transport.to_config_json()?;
 
         if let Some(existing) = self.repo.find_by_name_any(name).await? {
@@ -236,12 +326,14 @@ impl McpConfigService {
                 enabled: Some(enabled),
                 transport_type: Some(transport.transport_type()),
                 transport_config: Some(&config_json),
+                tools: Some(None),
                 original_json: Some(original_json),
                 builtin: Some(existing.builtin || builtin),
                 deleted_at: Some(None),
                 ..Default::default()
             };
             let updated = self.repo.update(&existing.mcp_server_id, params).await?;
+            self.publish_catalog().await?;
             let server = McpServer::from_row(updated)?;
             return Ok(server.into_response());
         }
@@ -257,6 +349,7 @@ impl McpConfigService {
             builtin,
         };
         let row = self.repo.create(params).await?;
+        self.publish_catalog().await?;
         let server = McpServer::from_row(row)?;
         Ok(server.into_response())
     }

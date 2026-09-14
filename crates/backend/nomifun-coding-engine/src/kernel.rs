@@ -1,228 +1,63 @@
-//! Adapter from the isolated Coding Engine tool loop to the NomiFun
-//! Capability Kernel.
-//!
-//! The adapter owns no handlers and no capability catalog.  It receives an
-//! already compiled Snapshot and a SessionCapabilityState from the platform,
-//! then projects a model Tool Call into the Kernel's canonical invocation
-//! contract.  This keeps Plugin/MiniApp/Wave2 ownership outside the Coding
-//! Engine.
-
-use std::sync::Arc;
-
+//! Coding compatibility adapter over the shared canonical Kernel tool port.
+use crate::{
+    CodingEngineError, CodingToolInvocation, CodingToolInvoker, CodingToolPlan, CodingToolResult,
+};
 use async_trait::async_trait;
-use nomifun_agent_contracts::{
-    ActionId, CapabilityId, EffectClass, PrincipalRef, ScopeKey, StrictJsonValue,
-    ToolPresentationKind,
-};
+use nomifun_agent_contracts::{PrincipalRef, ScopeKey};
 use nomifun_agent_kernel::{
-    ActiveCapabilitySetSnapshot, CapabilityInvocationRequest, CompiledSnapshot, KernelError,
-    KernelRegistry, MaterializedRegistry, SessionCapabilityState,
+    ActiveCapabilitySetSnapshot, CompiledSnapshot, KernelRegistry, MaterializedRegistry,
+    SessionCapabilityState,
 };
-use nomifun_chat_model_broker::ChatToolDefinition;
+use nomifun_engine_core::{EngineToolInvoker, KernelEngineToolInvoker};
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-use crate::error::CodingEngineError;
-use crate::tool::{
-    input_schema_digest, CodingEffectClass, CodingToolBinding, CodingToolInvocation,
-    CodingToolInvoker, CodingToolPlan, CodingToolResult,
-};
+pub use nomifun_engine_core::EngineToolExposure as CodingToolExposure;
 
-/// A model-facing Tool definition explicitly mapped to one canonical
-/// Capability action.
-#[derive(Clone, Debug, PartialEq)]
-pub struct CodingToolExposure {
-    pub definition: ChatToolDefinition,
-    pub capability_id: CapabilityId,
-    pub action_id: ActionId,
-}
-
-/// Compile the model Tool surface from one immutable Snapshot and one exact
-/// active-set generation.
-///
-/// The caller supplies only explicit exposures. This function never scans the
-/// registry to auto-add capabilities, so a newly installed Plugin cannot
-/// silently expand an existing AgentSession.
 pub fn compile_coding_tool_plan(
     snapshot: &CompiledSnapshot,
     active: &ActiveCapabilitySetSnapshot,
     registry: &MaterializedRegistry,
     exposures: impl IntoIterator<Item = CodingToolExposure>,
 ) -> Result<CodingToolPlan, CodingEngineError> {
-    validate_snapshot_registry(snapshot, active, registry)?;
-
-    let mut bindings = Vec::new();
-    for exposure in exposures {
-        let resolved = resolved_capability(snapshot, &exposure.capability_id).ok_or_else(|| {
-            CodingEngineError::ToolPlan(format!(
-                "capability {} is outside the compiled Snapshot",
-                exposure.capability_id.as_ref()
-            ))
-        })?;
-        if !active.active.contains(&exposure.capability_id) {
-            return Err(CodingEngineError::ToolPlan(format!(
-                "capability {} is not active in generation {}",
-                exposure.capability_id.as_ref(),
-                active.generation
-            )));
-        }
-        let materialized = registry
-            .capability(&exposure.capability_id)
-            .ok_or_else(|| {
-                CodingEngineError::ToolPlan(format!(
-                    "capability {} is not materialized",
-                    exposure.capability_id.as_ref()
-                ))
-            })?;
-        if materialized.manifest.version != resolved.capability.version
-            || materialized.schema_digest != resolved.schema_digest
-        {
-            return Err(CodingEngineError::ToolPlan(format!(
-                "capability {} materialization differs from the compiled Snapshot",
-                exposure.capability_id.as_ref()
-            )));
-        }
-        let action = materialized
-            .manifest
-            .contributions
-            .actions
-            .iter()
-            .find(|action| action.action_id == exposure.action_id)
-            .ok_or_else(|| {
-                CodingEngineError::ToolPlan(format!(
-                    "action {} is not declared by capability {}",
-                    exposure.action_id.as_ref(),
-                    exposure.capability_id.as_ref()
-                ))
-            })?;
-        if matches!(
-            action.presentation,
-            ToolPresentationKind::Hidden | ToolPresentationKind::CodeMode
-        ) {
-            return Err(CodingEngineError::ToolPlan(format!(
-                "action {} is not eligible for the Coding function-tool surface",
-                exposure.action_id.as_ref()
-            )));
-        }
-        let policy = snapshot
-            .policy(&exposure.capability_id)
-            .ok_or_else(|| {
-                CodingEngineError::ToolPlan(format!(
-                    "capability {} has no compiled authority policy",
-                    exposure.capability_id.as_ref()
-                ))
-            })?;
-        if !policy.allowed_actions.contains(&exposure.action_id) {
-            return Err(CodingEngineError::ToolPlan(format!(
-                "action {} is outside the Snapshot allowlist",
-                exposure.action_id.as_ref()
-            )));
-        }
-        let (effect_class, parallel_safe) = coding_effect(action.effect_class);
-        let schema_digest = input_schema_digest(&exposure.definition.input_schema)?;
-        bindings.push(CodingToolBinding {
-            model_name: exposure.definition.name.clone(),
-            definition: exposure.definition,
-            schema_digest,
-            canonical_input_schema_ref: action.input_schema.clone(),
-            capability_contract_digest: resolved.schema_digest.clone(),
-            capability_id: exposure.capability_id,
-            action_id: exposure.action_id,
-            resource_binding_ids: policy.resource_binding_ids.clone(),
-            effect_class,
-            parallel_safe,
-        });
-    }
-    CodingToolPlan::new(bindings)
+    nomifun_engine_core::compile_engine_tool_plan(snapshot, active, registry, exposures)
+        .map_err(Into::into)
 }
 
-/// A Kernel-backed Tool invoker for one immutable AgentSession Snapshot.
-///
-/// `CompiledSnapshot` and `SessionCapabilityState` must come from the same
-/// AgentSession application service. The adapter deliberately does not
-/// compile presets, scan the global registry, or resolve native paths.
-pub struct KernelCodingToolInvoker {
-    registry: Arc<KernelRegistry>,
-    snapshot: Arc<CompiledSnapshot>,
-    active_capabilities: Arc<SessionCapabilityState>,
-    session_owner: PrincipalRef,
-    state_scope_key: ScopeKey,
-}
+pub struct KernelCodingToolInvoker(KernelEngineToolInvoker);
 
 impl KernelCodingToolInvoker {
+    pub fn for_session(
+        registry: Arc<KernelRegistry>,
+        snapshot: Arc<CompiledSnapshot>,
+        active: Arc<SessionCapabilityState>,
+        owner: PrincipalRef,
+        session_id: nomifun_agent_contracts::AgentSessionId,
+        plan: CodingToolPlan,
+    ) -> Result<Self, CodingEngineError> {
+        KernelEngineToolInvoker::for_session(registry, snapshot, active, owner, session_id, plan)
+            .map(Self)
+            .map_err(Into::into)
+    }
     pub fn new(
         registry: Arc<KernelRegistry>,
         snapshot: Arc<CompiledSnapshot>,
-        active_capabilities: Arc<SessionCapabilityState>,
-        session_owner: PrincipalRef,
-        state_scope_key: ScopeKey,
+        active: Arc<SessionCapabilityState>,
+        owner: PrincipalRef,
+        scope: ScopeKey,
     ) -> Self {
-        Self {
-            registry,
-            snapshot,
-            active_capabilities,
-            session_owner,
-            state_scope_key,
-        }
-    }
-
-    pub fn snapshot(&self) -> &CompiledSnapshot {
-        &self.snapshot
-    }
-
-    pub fn session_owner(&self) -> &PrincipalRef {
-        &self.session_owner
-    }
-
-    pub fn state_scope_key(&self) -> &ScopeKey {
-        &self.state_scope_key
-    }
-
-    async fn invoke_kernel(
-        &self,
-        invocation: CodingToolInvocation,
-    ) -> Result<CodingToolResult, CodingEngineError> {
-        let active = self
-            .active_capabilities
-            .snapshot()
-            .map_err(kernel_error)?;
-        let materialized = self.registry.snapshot().map_err(kernel_error)?;
-        validate_snapshot_registry(&self.snapshot, &active, &materialized)?;
-        validate_binding_contract(
-            &self.snapshot,
-            &active,
-            &materialized,
-            &invocation.binding,
-            invocation.active_set_generation,
-        )?;
-        let request = CapabilityInvocationRequest {
-            principal: invocation.principal,
-            session_owner: self.session_owner.clone(),
-            agent_session_id: invocation.agent_session_id,
-            operation_id: invocation.operation_id,
-            idempotency_key: invocation.idempotency_key,
-            correlation_id: invocation.correlation_id,
-            resolved_snapshot_ref: invocation.resolved_snapshot_ref,
-            active_set_generation: invocation.active_set_generation,
-            capability_id: invocation.binding.capability_id,
-            action_id: invocation.binding.action_id,
-            resource_binding_ids: invocation.binding.resource_binding_ids,
-            state_scope_key: self.state_scope_key.clone(),
-            input: StrictJsonValue(invocation.call.arguments.0),
-        };
-        let output = self
-            .registry
-            .invoke(&self.snapshot, &active, request)
-            .await
-            .map_err(kernel_error)?;
-        Ok(CodingToolResult::text(
-            invocation.call.call_id,
-            serde_json::to_string(&output.0).map_err(|error| {
-                CodingEngineError::ToolInvocation(format!(
-                    "Kernel result could not be serialized: {error}"
-                ))
-            })?,
-            false,
+        Self(KernelEngineToolInvoker::new(
+            registry, snapshot, active, owner, scope,
         ))
+    }
+    pub fn snapshot(&self) -> &CompiledSnapshot {
+        self.0.snapshot()
+    }
+    pub fn session_owner(&self) -> &PrincipalRef {
+        self.0.session_owner()
+    }
+    pub fn state_scope_key(&self) -> &ScopeKey {
+        self.0.state_scope_key()
     }
 }
 
@@ -233,150 +68,18 @@ impl CodingToolInvoker for KernelCodingToolInvoker {
         invocation: CodingToolInvocation,
         cancellation: CancellationToken,
     ) -> Result<CodingToolResult, CodingEngineError> {
-        if cancellation.is_cancelled() {
-            return Err(CodingEngineError::Cancelled);
-        }
-        tokio::select! {
-            _ = cancellation.cancelled() => Err(CodingEngineError::Cancelled),
-            result = self.invoke_kernel(invocation) => result,
-        }
-    }
-}
-
-fn kernel_error(error: KernelError) -> CodingEngineError {
-    CodingEngineError::CapabilityKernel {
-        code: error.canonical_code().0,
-        message: error.to_string(),
-    }
-}
-
-fn validate_snapshot_registry(
-    snapshot: &CompiledSnapshot,
-    active: &ActiveCapabilitySetSnapshot,
-    registry: &MaterializedRegistry,
-) -> Result<(), CodingEngineError> {
-    if active.resolved_snapshot_ref != *snapshot.snapshot_ref() {
-        return Err(CodingEngineError::ToolPlan(
-            "active capability set belongs to a different Snapshot".to_owned(),
-        ));
-    }
-    if snapshot.registry_generation != registry.generation
-        || snapshot.registry_digest != registry.registry_digest
-    {
-        return Err(CodingEngineError::ToolPlan(
-            "materialized capability registry differs from the compiled Snapshot".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_binding_contract(
-    snapshot: &CompiledSnapshot,
-    active: &ActiveCapabilitySetSnapshot,
-    registry: &MaterializedRegistry,
-    binding: &CodingToolBinding,
-    active_set_generation: u64,
-) -> Result<(), CodingEngineError> {
-    binding.validate()?;
-    if active.generation != active_set_generation
-        || !active.active.contains(&binding.capability_id)
-    {
-        return Err(CodingEngineError::ToolPlan(format!(
-            "capability {} is not active in generation {}",
-            binding.capability_id.as_ref(),
-            active_set_generation
-        )));
-    }
-    let resolved = resolved_capability(snapshot, &binding.capability_id).ok_or_else(|| {
-        CodingEngineError::ToolPlan(format!(
-            "capability {} is outside the compiled Snapshot",
-            binding.capability_id.as_ref()
-        ))
-    })?;
-    if resolved.schema_digest != binding.capability_contract_digest {
-        return Err(CodingEngineError::ToolPlan(format!(
-            "capability {} digest differs from the Tool binding",
-            binding.capability_id.as_ref()
-        )));
-    }
-    let materialized = registry.capability(&binding.capability_id).ok_or_else(|| {
-        CodingEngineError::ToolPlan(format!(
-            "capability {} is not materialized",
-            binding.capability_id.as_ref()
-        ))
-    })?;
-    if materialized.schema_digest != binding.capability_contract_digest
-        || materialized.manifest.version != resolved.capability.version
-    {
-        return Err(CodingEngineError::ToolPlan(format!(
-            "capability {} materialization differs from the Tool binding",
-            binding.capability_id.as_ref()
-        )));
-    }
-    let action = materialized
-        .manifest
-        .contributions
-        .actions
-        .iter()
-        .find(|action| action.action_id == binding.action_id)
-        .ok_or_else(|| {
-            CodingEngineError::ToolPlan(format!(
-                "action {} is not materialized for capability {}",
-                binding.action_id.as_ref(),
-                binding.capability_id.as_ref()
-            ))
-        })?;
-    if action.input_schema != binding.canonical_input_schema_ref {
-        return Err(CodingEngineError::ToolPlan(format!(
-            "action {} canonical input schema differs from the Tool binding",
-            binding.action_id.as_ref()
-        )));
-    }
-    let policy = snapshot.policy(&binding.capability_id).ok_or_else(|| {
-        CodingEngineError::ToolPlan(format!(
-            "capability {} has no compiled authority policy",
-            binding.capability_id.as_ref()
-        ))
-    })?;
-    if !policy.allowed_actions.contains(&binding.action_id)
-        || policy.resource_binding_ids != binding.resource_binding_ids
-    {
-        return Err(CodingEngineError::ToolPlan(format!(
-            "capability {} authority projection differs from the Tool binding",
-            binding.capability_id.as_ref()
-        )));
-    }
-    Ok(())
-}
-
-fn resolved_capability<'a>(
-    snapshot: &'a CompiledSnapshot,
-    capability_id: &CapabilityId,
-) -> Option<&'a nomifun_agent_contracts::ResolvedCapability> {
-    snapshot
-        .content()
-        .initial_capabilities
-        .iter()
-        .chain(snapshot.content().on_demand_capabilities.iter())
-        .find(|resolved| &resolved.capability.id == capability_id)
-}
-
-fn coding_effect(effect: EffectClass) -> (CodingEffectClass, bool) {
-    match effect {
-        EffectClass::Pure | EffectClass::ReadLocal => (CodingEffectClass::ReadOnly, true),
-        EffectClass::ReadSensitive => (CodingEffectClass::ReadOnly, false),
-        EffectClass::WriteReversible
-        | EffectClass::WriteDurable
-        | EffectClass::ExecuteLocal
-        | EffectClass::Destructive => (CodingEffectClass::ManagedEffect, false),
-        EffectClass::ExternalTransmit | EffectClass::Irreversible | EffectClass::Physical => {
-            (CodingEffectClass::ExternalUncertainEffect, false)
-        }
+        self.0
+            .invoke(invocation, cancellation)
+            .await
+            .map_err(Into::into)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::CodingEffectClass;
+    use nomifun_agent_contracts::{ActionId, CapabilityId, StrictJsonValue};
+    use nomifun_chat_model_broker::ChatToolDefinition;
     use std::collections::{BTreeMap, BTreeSet};
     use std::future::Future;
     use std::pin::Pin;
@@ -385,10 +88,9 @@ mod tests {
     use super::*;
     use nomifun_agent_contracts::{
         AgentPresetId, AgentPresetRevision, AgentPresetRevisionPayload, AgentSessionId,
-        CapabilityRef, CapabilitySelection, CorrelationId, DigestHex,
-        IdempotencyKey, OperationId, PresetRevisionRef,
-        ResourceBindingId, ResourceId, ResourceKind, RuntimeProfileKind, RuntimeTarget, UserId,
-        VersionString, digest_payload,
+        CapabilityRef, CapabilitySelection, CorrelationId, DigestHex, IdempotencyKey, OperationId,
+        PresetRevisionRef, ResourceBindingId, ResourceId, ResourceKind, RuntimeProfileKind,
+        RuntimeTarget, UserId, VersionString, digest_payload,
     };
     use nomifun_agent_domain_wave2::{
         CONTRACT_VERSION, Wave2HostPort, Wave2HostPortError, Wave2HostRequest, action_id,
@@ -445,13 +147,11 @@ mod tests {
                     input,
                 }
                 | nomifun_agent_domain_wave2::Wave2CapabilityOperation::Ssh { input }
-                | nomifun_agent_domain_wave2::Wave2CapabilityOperation::McpConnectors {
-                    input,
-                }
+                | nomifun_agent_domain_wave2::Wave2CapabilityOperation::McpConnectors { input }
                 | nomifun_agent_domain_wave2::Wave2CapabilityOperation::Browser { input }
-                | nomifun_agent_domain_wave2::Wave2CapabilityOperation::ComputerA11y {
-                    input,
-                } => input,
+                | nomifun_agent_domain_wave2::Wave2CapabilityOperation::ComputerA11y { input } => {
+                    input
+                }
             }
         }
     }
@@ -505,14 +205,13 @@ mod tests {
             schema_version: VersionString::from(CONTRACT_VERSION),
             model_route_refs: BTreeMap::new(),
             chat_route_records: BTreeMap::new(),
-            initial_capabilities: vec![CapabilitySelection {
+            enabled_capabilities: vec![CapabilitySelection {
                 capability: CapabilityRef {
                     id: capability_id,
                     version: VersionString::from(CONTRACT_VERSION),
                 },
                 action_allowlist: BTreeSet::from([action_id.clone()]),
             }],
-            on_demand_capabilities: Vec::new(),
             skill_bindings: Vec::new(),
             system_role_provider_overrides: BTreeMap::new(),
             persona: "Coding Engine Kernel test".to_owned(),
@@ -526,11 +225,13 @@ mod tests {
                 revision_digest: digest_payload(&payload).unwrap(),
             },
             payload,
-            contribution_locks: vec![materialized
-                .capability(&CapabilityId::from("fs.read"))
-                .unwrap()
-                .contribution_lock
-                .clone()],
+            contribution_locks: vec![
+                materialized
+                    .capability(&CapabilityId::from("fs.read"))
+                    .unwrap()
+                    .contribution_lock
+                    .clone(),
+            ],
             created_by: UserId::from(principal.principal_id.clone()),
             created_at_ms: 1,
             reason: None,
@@ -554,7 +255,7 @@ mod tests {
                 },
                 CompileRequest {
                     revision,
-                    miniapp_capabilities: Vec::new(),
+                    plugin_product_capabilities: Vec::new(),
                     principal: principal.clone(),
                     scene: "coding-kernel-test".to_owned(),
                     surface: "desktop".to_owned(),

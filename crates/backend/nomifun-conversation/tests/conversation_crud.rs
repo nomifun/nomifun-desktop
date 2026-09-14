@@ -222,6 +222,7 @@ fn make_auto_workspace_create_req() -> CreateConversationRequest {
 
 fn make_preset_snapshot(model: &str) -> AgentResolvedSnapshot {
     AgentResolvedSnapshot {
+        canonical_binding: None,
         preset_id: nomifun_common::generate_id(),
         preset_revision: 1,
         preset_name: "Frozen test preset".to_owned(),

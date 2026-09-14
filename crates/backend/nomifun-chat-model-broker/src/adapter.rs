@@ -45,6 +45,16 @@ pub struct ProviderWireFrame {
     pub data: Value,
 }
 
+/// One attempt's frame accumulator. Its state is dropped on success, error,
+/// cancellation or receiver closure; it must never cross Session/route or
+/// retry boundaries, even when provider response IDs are absent or reused.
+pub trait ChatFrameDecoder: Send {
+    fn decode_frame(
+        &mut self,
+        frame: ProviderWireFrame,
+    ) -> Result<Vec<ChatModelEvent>, ChatModelError>;
+}
+
 #[async_trait]
 pub trait ProviderTransport: Send + Sync {
     /// Open exactly one provider stream. Transports do not retry; retry and
@@ -66,6 +76,15 @@ pub trait ChatProtocolAdapter: Send + Sync {
     fn retry_count(&self) -> u8 {
         0
     }
+    /// Stateful protocol implementations should supply a fresh decoder for
+    /// every transport attempt. None preserves the legacy decode_frame API
+    /// for custom stateless adapters; official adapters always return Some.
+    fn new_frame_decoder(&self) -> Option<Box<dyn ChatFrameDecoder>> {
+        None
+    }
+    fn new_frame_decoder_for(&self, _request: &ChatModelRequest) -> Option<Box<dyn ChatFrameDecoder>> {
+        self.new_frame_decoder()
+    }
     fn encode_request(
         &self,
         request: &ChatModelRequest,
@@ -77,6 +96,9 @@ pub trait ChatProtocolAdapter: Send + Sync {
         request: ProviderWireRequest,
         credential: CredentialLease,
     ) -> Result<ProviderWireStream, ChatModelError>;
+    /// Legacy direct decoding. Production Broker attempts prefer the fresh
+    /// decoder returned above; callers using this stateful API themselves
+    /// must provide their own stream isolation and lifecycle.
     fn decode_frame(
         &self,
         frame: ProviderWireFrame,
@@ -186,6 +208,26 @@ impl AdapterCore {
         request
             .validate()
             .map_err(|error| ChatModelError::invalid_request(error.to_string()))?;
+        if self.protocol != ChatProtocol::OpenaiResponses && request.input.messages.iter().any(|message| {
+            message.content.iter().any(|part| matches!(part,
+                ChatContentPart::Reasoning { encrypted_content: Some(_), .. }))
+        }) {
+            return Err(ChatModelError::new(
+                ChatModelErrorCode::UnsupportedFeature,
+                "opaque Responses reasoning cannot be sent to a different protocol",
+                crate::contracts::ChatRetryDirective::Never,
+            ));
+        }
+        if request.input.messages.iter().any(|message| {
+            message.content.iter().any(|part| matches!(part, ChatContentPart::ProviderReasoning { block }
+                if !block.matches_route(route)))
+        }) {
+            return Err(ChatModelError::new(
+                ChatModelErrorCode::UnsupportedFeature,
+                "provider reasoning requires the exact route that produced it",
+                crate::contracts::ChatRetryDirective::Never,
+            ));
+        }
         let body = body.into_result()?;
         route
             .validate()
@@ -261,6 +303,24 @@ macro_rules! define_adapter {
                 self.core.name
             }
 
+            fn new_frame_decoder(&self) -> Option<Box<dyn ChatFrameDecoder>> {
+                Some(Box::new(AttemptFrameDecoder {
+                    protocol: self.core.protocol,
+                    raw_decode_state: Arc::new(Mutex::new(RawDecodeState::default())),
+                    responses: crate::responses_decoder::ResponsesDecoder::new(false),
+                    anthropic: crate::anthropic_decoder::AnthropicDecoder::default(),
+                }))
+            }
+
+            fn new_frame_decoder_for(&self, request: &ChatModelRequest) -> Option<Box<dyn ChatFrameDecoder>> {
+                Some(Box::new(AttemptFrameDecoder {
+                    protocol: self.core.protocol,
+                    raw_decode_state: Arc::new(Mutex::new(RawDecodeState::default())),
+                    responses: crate::responses_decoder::ResponsesDecoder::new(request.input.preserve_native_responses_items),
+                    anthropic: crate::anthropic_decoder::AnthropicDecoder::default(),
+                }))
+            }
+
             fn encode_request(
                 &self,
                 request: &ChatModelRequest,
@@ -333,19 +393,19 @@ define_adapter!(
 fn encode_anthropic_request(
     request: &ChatModelRequest,
     route: &ResolvedChatRoute,
-) -> Value {
+) -> Result<Value, ChatModelError> {
     let input = &request.input;
+    let max_tokens = input.max_output_tokens.ok_or_else(|| ChatModelError::invalid_request(
+        "Anthropic Messages requires an explicit output token ceiling",
+    ))?;
+    let system = combined_system_text(&input.instructions, &input.messages);
     let mut body = json!({
         "model": route.model,
-        "system": combined_system_text(&input.instructions, &input.messages),
+        "system": system,
         "messages": anthropic_messages(&input.messages),
-        "stream": true
+        "stream": true,
+        "max_tokens": max_tokens,
     });
-    insert_if_some(
-        &mut body,
-        "max_tokens",
-        input.max_output_tokens.map(Value::from),
-    );
     if !input.tools.is_empty() {
         body["tools"] = Value::Array(
             input
@@ -363,14 +423,30 @@ fn encode_anthropic_request(
         body["tool_choice"] = anthropic_tool_choice(&input.tool_choice);
     }
     if let Some(reasoning) = &input.reasoning {
-        if let Some(budget) = reasoning.max_reasoning_tokens {
-            body["thinking"] = json!({
-                "type": "enabled",
-                "budget_tokens": budget,
-            });
+        let budget = reasoning.max_reasoning_tokens.ok_or_else(|| ChatModelError::invalid_request(
+            "Anthropic budgeted thinking requires max_reasoning_tokens; adaptive thinking is not configured",
+        ))?;
+        if budget < 1024 || budget >= max_tokens {
+            return Err(ChatModelError::invalid_request("Anthropic thinking budget must be at least 1024 and below max_output_tokens"));
         }
+        if reasoning.effort.is_some()
+            || matches!(reasoning.summary, crate::contracts::ReasoningSummary::Concise | crate::contracts::ReasoningSummary::Detailed)
+        {
+            return Err(ChatModelError::new(ChatModelErrorCode::UnsupportedFeature,
+                "budgeted Anthropic thinking does not implement explicit effort or summary detail controls",
+                crate::contracts::ChatRetryDirective::Never));
+        }
+        if matches!(input.tool_choice, ChatToolChoice::Required | ChatToolChoice::Specific { .. }) {
+            return Err(ChatModelError::invalid_request("budgeted Anthropic thinking cannot force a tool choice"));
+        }
+        body["thinking"] = json!({"type": "enabled", "budget_tokens": budget});
     }
-    body
+    // Cache a static instruction prefix when present. Do not fabricate a
+    // user message, cache signed thinking, or promise a server cache hit.
+    if !matches!(input.prompt_cache, crate::contracts::PromptCachePolicy::Disabled) && !system.is_empty() {
+        body["system"] = json!([{"type":"text", "text":system, "cache_control":{"type":"ephemeral"}}]);
+    }
+    Ok(body)
 }
 
 fn encode_openai_chat_request(
@@ -441,6 +517,7 @@ fn encode_openai_responses_request(
         "input": responses_items(&input.messages),
         "stream": true,
         "store": false,
+        "include": ["reasoning.encrypted_content"],
     });
     insert_if_some(
         &mut body,
@@ -461,7 +538,10 @@ fn encode_openai_responses_request(
                         "name": tool.name,
                         "description": tool.description,
                         "parameters": tool.input_schema.0.clone(),
-                        "strict": true,
+                        // Platform schemas retain optional fields and are
+                        // validated by Kernel. Do not silently rewrite them
+                        // into the provider's all-properties-required subset.
+                        "strict": false,
                     })
                 })
                 .collect(),
@@ -474,14 +554,18 @@ fn encode_openai_responses_request(
         });
     }
     if let Some(reasoning) = &input.reasoning {
-        body["reasoning"] = json!({
-            "effort": reasoning.effort.map(|effort| match effort {
+        let mut options = Map::new();
+        if let Some(effort) = reasoning.effort {
+            options.insert("effort".into(), Value::String(match effort {
                 crate::contracts::ReasoningEffort::Low => "low",
                 crate::contracts::ReasoningEffort::Medium => "medium",
                 crate::contracts::ReasoningEffort::High => "high",
-            }),
-            "summary": format!("{:?}", reasoning.summary).to_ascii_lowercase(),
-        });
+            }.into()));
+        }
+        if reasoning.summary != crate::contracts::ReasoningSummary::None {
+            options.insert("summary".into(), Value::String(format!("{:?}", reasoning.summary).to_ascii_lowercase()));
+        }
+        if !options.is_empty() { body["reasoning"] = Value::Object(options); }
     }
     body
 }
@@ -537,19 +621,24 @@ fn encode_gemini_request(
 fn encode_bedrock_request(
     request: &ChatModelRequest,
     route: &ResolvedChatRoute,
-) -> Value {
-    let mut body = encode_anthropic_request(request, route);
+) -> Result<Value, ChatModelError> {
+    let mut body = encode_anthropic_request(request, route)?;
+    // Bedrock selects the model and streaming operation in the request URL.
+    let object = body.as_object_mut().expect("Messages encoder returns an object");
+    object.remove("model");
+    object.remove("stream");
     body["anthropic_version"] = Value::String("bedrock-2023-05-31".to_owned());
-    body
+    Ok(body)
 }
 
 fn encode_vertex_request(
     request: &ChatModelRequest,
     route: &ResolvedChatRoute,
-) -> Value {
-    let mut body = encode_anthropic_request(request, route);
+) -> Result<Value, ChatModelError> {
+    let mut body = encode_anthropic_request(request, route)?;
+    body.as_object_mut().expect("Messages encoder returns an object").remove("model");
     body["anthropic_version"] = Value::String("vertex-2023-10-16".to_owned());
-    body
+    Ok(body)
 }
 
 fn insert_if_some(object: &mut Value, key: &str, value: Option<Value>) {
@@ -648,6 +737,12 @@ fn anthropic_content(content: &[ChatContentPart]) -> Vec<Value> {
                 "thinking": text,
                 "signature": signature,
             }),
+            ChatContentPart::ProviderReasoning { block } => match block {
+                crate::ChatProviderReasoning::AnthropicThinking { text, signature, .. } =>
+                    json!({"type":"thinking", "thinking":text, "signature":signature}),
+                crate::ChatProviderReasoning::AnthropicRedactedThinking { data, .. } =>
+                    json!({"type":"redacted_thinking", "data":data}),
+            },
         })
         .collect()
 }
@@ -735,7 +830,10 @@ fn openai_content(content: &[ChatContentPart]) -> Value {
             ChatContentPart::Reasoning { text, .. } => {
                 Some(json!({"type": "text", "text": text, "role": "reasoning"}))
             }
-            ChatContentPart::ToolCall { .. } | ChatContentPart::ToolResult { .. } => None,
+            // AdapterCore rejects this request before transport; never turn
+            // opaque provider state into ordinary visible text.
+            ChatContentPart::ProviderReasoning { .. }
+            | ChatContentPart::ToolCall { .. } | ChatContentPart::ToolResult { .. } => None,
         })
         .collect();
     if let [part] = parts.as_slice()
@@ -840,11 +938,11 @@ fn responses_items(messages: &[ChatMessage]) -> Vec<Value> {
                 ChatContentPart::ToolResult {
                     call_id,
                     output,
-                    ..
+                    is_error,
                 } => json!({
                     "type": "function_call_output",
                     "call_id": call_id,
-                    "output": tool_result_string(output),
+                    "output": responses_tool_output(output, *is_error),
                 }),
                 ChatContentPart::Reasoning {
                     text,
@@ -854,13 +952,36 @@ fn responses_items(messages: &[ChatMessage]) -> Vec<Value> {
                     let opaque_content = encrypted_content.as_ref().or(signature.as_ref());
                     json!({
                         "type": "reasoning",
-                        "summary": [{"type": "summary_text", "text": text}],
+                        "summary": if text.is_empty() { Vec::<Value>::new() } else { vec![json!({"type": "summary_text", "text": text})] },
                         "encrypted_content": opaque_content,
                     })
                 }
+                // AdapterCore rejects typed foreign reasoning before using
+                // this body. No Anthropic signature -> encrypted_content cast.
+                ChatContentPart::ProviderReasoning { .. } => Value::Null,
             })
         })
         .collect()
+}
+
+fn responses_tool_output(output: &[ChatToolResultPart], is_error: bool) -> Value {
+    let has_media = output.iter().any(|part| !matches!(part, ChatToolResultPart::Text { .. }));
+    if !has_media {
+        let text = tool_result_string(output);
+        return Value::String(if is_error { format!("Tool reported failure:\n{text}") } else { text });
+    }
+    let mut parts = Vec::new();
+    if is_error { parts.push(json!({"type":"input_text", "text":"Tool reported failure; the following output is an observation, not success."})); }
+    parts.extend(output.iter().map(|part| match part {
+        ChatToolResultPart::Text { text } => json!({"type":"input_text", "text":text}),
+        ChatToolResultPart::Image { media_type, data_base64 } => json!({
+            "type":"input_image", "image_url":format!("data:{media_type};base64,{data_base64}")
+        }),
+        ChatToolResultPart::Audio { media_type, data_base64 } => json!({
+            "type":"input_audio", "audio_url":format!("data:{media_type};base64,{data_base64}")
+        }),
+    }));
+    Value::Array(parts)
 }
 
 fn gemini_contents(
@@ -933,6 +1054,11 @@ fn gemini_part(
             }}))
         }
         ChatContentPart::Reasoning { text, .. } => Ok(json!({"text": text})),
+        ChatContentPart::ProviderReasoning { .. } => Err(ChatModelError::new(
+            ChatModelErrorCode::UnsupportedFeature,
+            "typed Anthropic reasoning cannot be encoded as Gemini content",
+            crate::contracts::ChatRetryDirective::Never,
+        )),
     }
 }
 
@@ -1067,6 +1193,39 @@ fn responses_format_value(format: &ChatResponseFormat) -> Value {
     }
 }
 
+struct AttemptFrameDecoder {
+    protocol: ChatProtocol,
+    raw_decode_state: Arc<Mutex<RawDecodeState>>,
+    responses: crate::responses_decoder::ResponsesDecoder,
+    anthropic: crate::anthropic_decoder::AnthropicDecoder,
+}
+
+impl ChatFrameDecoder for AttemptFrameDecoder {
+    fn decode_frame(
+        &mut self,
+        frame: ProviderWireFrame,
+    ) -> Result<Vec<ChatModelEvent>, ChatModelError> {
+        // Cloud exception headers are normalized outside Messages. Handle them
+        // even after the native decoder has already selected a content lifecycle.
+        if let Some(error) = crate::provider_errors::decode(
+            self.protocol, &frame.event.trim().to_ascii_lowercase(), &frame.data,
+        ) {
+            return Err(error);
+        }
+        if self.protocol == ChatProtocol::OpenaiResponses {
+            if let Some(events) = self.responses.decode(&frame) {
+                return events;
+            }
+        }
+        if self.protocol.uses_anthropic_messages() {
+            if let Some(events) = self.anthropic.decode(&frame) {
+                return events;
+            }
+        }
+        decode_frame_for_protocol(self.protocol, frame, &self.raw_decode_state)
+    }
+}
+
 fn decode_frame_for_protocol(
     protocol: ChatProtocol,
     frame: ProviderWireFrame,
@@ -1078,13 +1237,8 @@ fn decode_frame_for_protocol(
             "provider frame has an empty event name",
         ));
     }
-    if event_name == "error" || event_name.ends_with(".error") {
-        let message = string_at(
-            &frame.data,
-            &["message", "error.message", "error", "detail"],
-        )
-        .unwrap_or_else(|| "provider stream error".to_owned());
-        return Err(ChatModelError::provider_unavailable(message));
+    if let Some(error) = crate::provider_errors::decode(protocol, &event_name, &frame.data) {
+        return Err(error);
     }
 
     if protocol == ChatProtocol::OpenaiChat
@@ -1516,25 +1670,21 @@ fn decode_openai_chat_raw_frame(
         || (stream.pending_finish.is_some()
             && frame.data.get("usage").is_some_and(|value| !value.is_null()));
     if should_complete {
-        append_openai_raw_tool_completions(stream, &mut events);
+        let finish_reason = stream.pending_finish.take().unwrap_or_else(|| {
+            if stream.tools.is_empty() { ChatFinishReason::Completed } else { ChatFinishReason::ToolCalls }
+        });
+        // A length/refusal terminal cannot complete a partially generated
+        // function. Engines may discard the proposed batch, never execute it.
+        if matches!(finish_reason, ChatFinishReason::Completed | ChatFinishReason::ToolCalls) {
+            append_openai_raw_tool_completions(stream, &mut events)?;
+        }
         if let Some(usage) = stream.pending_usage.take()
             && !stream.usage_seen
         {
             events.push(ChatModelEvent::Usage { usage });
             stream.usage_seen = true;
         }
-        events.push(ChatModelEvent::Completed {
-            finish_reason: stream
-                .pending_finish
-                .take()
-                .unwrap_or_else(|| {
-                    if stream.tools.is_empty() {
-                        ChatFinishReason::Completed
-                    } else {
-                        ChatFinishReason::ToolCalls
-                    }
-                }),
-        });
+        events.push(ChatModelEvent::Completed { finish_reason });
         state.openai.remove(&response_key);
     }
     Ok(events)
@@ -1543,14 +1693,14 @@ fn decode_openai_chat_raw_frame(
 fn append_openai_raw_tool_completions(
     stream: &mut OpenAiRawStreamState,
     events: &mut Vec<ChatModelEvent>,
-) {
+) -> Result<(), ChatModelError> {
     for tool in stream.tools.values() {
-        let arguments = if tool.arguments.is_empty() {
-            json!({})
-        } else {
-            serde_json::from_str(&tool.arguments)
-                .unwrap_or_else(|_| json!({"raw": tool.arguments.clone()}))
-        };
+        let arguments: Value = serde_json::from_str(&tool.arguments).map_err(|_| ChatModelError::protocol_violation(
+                "OpenAI Chat completed a tool call with invalid JSON arguments",
+            ))?;
+        if !arguments.is_object() {
+            return Err(ChatModelError::protocol_violation("OpenAI Chat tool arguments must be an object"));
+        }
         events.push(ChatModelEvent::ToolCallCompleted {
             call: ChatToolCall {
                 call_id: ToolCallId(tool.call_id.clone()),
@@ -1560,6 +1710,7 @@ fn append_openai_raw_tool_completions(
             },
         });
     }
+    Ok(())
 }
 
 fn decode_gemini_raw_frame(
@@ -1934,7 +2085,7 @@ fn parse_tool_call(value: &Value) -> Result<ChatToolCall, ChatModelError> {
     })
 }
 
-fn parse_usage(value: &Value) -> ChatUsage {
+pub(crate) fn parse_usage(value: &Value) -> ChatUsage {
     let source = value.get("usage").unwrap_or(value);
     let mut provider_reported = std::collections::BTreeMap::new();
     if let Some(object) = source.as_object() {
@@ -1981,7 +2132,8 @@ fn parse_usage(value: &Value) -> ChatUsage {
             .max(nested_u64(
                 source,
                 &["completion_tokens_details", "reasoning_tokens"],
-            )),
+            ))
+            .max(nested_u64(source, &["output_tokens_details", "reasoning_tokens"])),
         cache_write_tokens: first_u64(
             source,
             &["cache_write_tokens", "cache_creation_input_tokens", "cacheCreationInputTokens"],
@@ -1998,7 +2150,8 @@ fn parse_usage(value: &Value) -> ChatUsage {
         .max(nested_u64(
             source,
             &["prompt_tokens_details", "cached_tokens"],
-        )),
+        ))
+        .max(nested_u64(source, &["input_tokens_details", "cached_tokens"])),
         audio_input_tokens: first_u64(source, &["audio_input_tokens", "audioInputTokens"]),
         audio_output_tokens: first_u64(source, &["audio_output_tokens", "audioOutputTokens"]),
         provider_reported,

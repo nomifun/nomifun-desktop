@@ -15,18 +15,8 @@ use crate::kernel::CodingToolExposure;
 ///
 /// Levels are convenience filters for the Agent Workbench. Snapshot admission
 /// remains authoritative: selecting `Full` cannot expose a capability that is
-/// absent or inactive in the compiled AgentPreset.
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Serialize,
-    Deserialize,
-)]
+/// absent from the frozen enabled set in the compiled AgentPreset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StandardCodingToolLevel {
     Inspect,
@@ -35,9 +25,7 @@ pub enum StandardCodingToolLevel {
     Full,
 }
 
-pub fn standard_coding_tool_exposures(
-    level: StandardCodingToolLevel,
-) -> Vec<CodingToolExposure> {
+pub fn standard_coding_tool_exposures(level: StandardCodingToolLevel) -> Vec<CodingToolExposure> {
     STANDARD_TOOLS
         .iter()
         .filter(|tool| tool.minimum_level <= level)
@@ -72,14 +60,14 @@ const STANDARD_TOOLS: &[StandardTool] = &[
     StandardTool {
         model_name: "read_file",
         capability_id: "fs.read",
-        description: "Read one UTF-8 text file from the bound workspace.",
+        description: "Read a workspace file or inspect instruction scope. Default format=text: bounded UTF-8 pages, source at most 8 MiB; start at byte offset 0, follow next_offset with prior expected_sha256 until eof. Offsets/limit are bytes, not lines. FILE_CONTENT_CHANGED means discard prior pages and restart. Text-only missing_ok=true returns workspace_file_absent for genuine absence, never for denied access. format=image: PNG/JPEG/WebP at most 4 MiB, omit offset/limit/missing_ok and submit alone; requires active llm.vision and an image-capable model. Returns prepared pixels, not base64 text; images may be resized and must be re-read after history/compaction omitted pixels. Optional expected_sha256 guards text/image source versions. format=instruction_scope: metadata for a file or directory (path=. for workspace root); omit text/image options. Optional recursive=true discovers descendant instruction directories, including hidden/ignored entries, within bounded limits. Check complete/incomplete_reasons and use canonical_path; incomplete is not absence. This is not a filesystem snapshot or proof of shell access scope.",
         minimum_level: StandardCodingToolLevel::Inspect,
-        schema: path_schema,
+        schema: read_schema,
     },
     StandardTool {
         model_name: "search_files",
         capability_id: "fs.search",
-        description: "Search UTF-8 workspace files for an exact text fragment.",
+        description: "Fresh bounded literal single-line UTF-8 workspace search. Directory walks respect hidden/ignore rules and skip symlink entries. One match per line includes a snippet around the match, byte_offset and whole-source sha256 for read_file. Empty matches are not proof of absence; inspect truncated/incomplete_reasons/files_skipped and narrow path/query when needed. Not a filesystem snapshot.",
         minimum_level: StandardCodingToolLevel::Inspect,
         schema: search_schema,
     },
@@ -100,14 +88,14 @@ const STANDARD_TOOLS: &[StandardTool] = &[
     StandardTool {
         model_name: "write_file",
         capability_id: "fs.write",
-        description: "Write a complete UTF-8 text file through the workspace owner.",
+        description: "Write a complete UTF-8 text file (at most 8 MiB) through the workspace owner. This replaces the whole file; inspect existing content and prefer apply_patch for focused edits. A prior read is not a write lock.",
         minimum_level: StandardCodingToolLevel::Edit,
         schema: write_schema,
     },
     StandardTool {
         model_name: "apply_patch",
         capability_id: "fs.patch",
-        description: "Apply a bounded, typed, atomic text patch through the workspace owner.",
+        description: "Apply bounded, ordered, exact line hunks through the workspace owner. Prefer each file's expected_source={kind:existing,sha256:<full read_file digest>} or {kind:absent} after observing absence; this detects changes outside the hunk too. Omission/any preserves legacy line-only matching, not a source-version check. Never remove a rejected guard just to retry; re-read and replan. Supply logical text without CR/LF or a file-leading UTF-8 BOM; source BOM, unchanged line endings and EOF-newline policy are preserved, added lines use the first source ending (LF if none). Nonempty ranges are 1-based; old_lines=0 inserts after old_start source lines (0=BOF), new_lines=0 names the surviving output prefix. Context/remove text must match exactly; re-read on mismatch. All targets and source guards are prepared before writes, with per-file atomic publication and best-effort restoration of existing files, not a multi-file transaction. Failed patches may retain newly created files; inspect zero-based request.files indices in the failure observation and re-read every target before replanning/retrying. A restored result is historical, not a current-state lock. Concurrent native edits remain possible. Each file's written_sha256 identifies published bytes for a later guarded read_file or patch, not task completion.",
         minimum_level: StandardCodingToolLevel::Edit,
         schema: patch_schema,
     },
@@ -128,14 +116,14 @@ const STANDARD_TOOLS: &[StandardTool] = &[
     StandardTool {
         model_name: "exec_command",
         capability_id: "process.exec",
-        description: "Run one managed command in the bound workspace with a bounded timeout.",
+        description: "Run a bounded command (operation=exec), or start a turn-owned background/interactive process (operation=start). Use the returned process_id with poll, stdin (input), close_stdin, resize (cols/rows), or cancel. A running result is not command success. All processes are cleaned up when this turn ends; none are detached services.",
         minimum_level: StandardCodingToolLevel::Execute,
         schema: process_exec_schema,
     },
     StandardTool {
         model_name: "workspace_snapshot",
         capability_id: "fs.snapshot",
-        description: "Create, compare, restore the baseline, or dispose a workspace snapshot.",
+        description: "Initialize a Session-owned workspace baseline, compare changes, read baseline file content, or dispose it. Does not restore files. Git workspaces use Git HEAD; non-Git workspaces use a temporary baseline. The baseline is not preserved after Session runtime teardown or application restart.",
         minimum_level: StandardCodingToolLevel::Execute,
         schema: snapshot_schema,
     },
@@ -149,7 +137,7 @@ const STANDARD_TOOLS: &[StandardTool] = &[
     StandardTool {
         model_name: "git_push",
         capability_id: "vcs.push",
-        description: "Push an explicit refspec to an explicit configured remote.",
+        description: "Publish an explicit refspec to an already configured local/file Git remote. Requires the Agent's vcs.push grant. Network SSH/HTTPS credentials, force push and ref deletion are unavailable. A timeout or unknown outcome is not permission to retry; inspect platform effect history. Do not push unless the user's task authorizes publication.",
         minimum_level: StandardCodingToolLevel::Full,
         schema: push_schema,
     },
@@ -178,6 +166,28 @@ fn path_schema() -> Value {
     })
 }
 
+fn read_schema() -> Value {
+    json!({
+        "type":"object", "additionalProperties":false, "required":["path"],
+        "properties": {
+            "format":{"type":"string", "enum":["text", "image", "instruction_scope"], "default":"text"},
+            "recursive":{"type":"boolean", "default":false},
+            "missing_ok":{"type":"boolean", "default":false},
+            "path":{"type":"string", "minLength":1, "maxLength":4096},
+            "offset":{"type":"integer", "minimum":0, "maximum":8388608, "default":0},
+            "limit":{"type":"integer", "minimum":4, "maximum":16384, "default":16384},
+            "expected_sha256":{"type":"string", "pattern":"^[0-9a-f]{64}$"}
+        },
+        "allOf":[{"if":{"properties":{"offset":{"minimum":1}},"required":["offset"]},
+                  "then":{"required":["expected_sha256"]}},
+                 {"if":{"properties":{"format":{"const":"image"}},"required":["format"]},
+                  "then":{"not":{"anyOf":[{"required":["offset"]},{"required":["limit"]},{"required":["missing_ok"]}]}}},
+                 {"if":{"properties":{"format":{"const":"instruction_scope"}},"required":["format"]},
+                  "then":{"not":{"anyOf":[{"required":["offset"]},{"required":["limit"]},{"required":["expected_sha256"]},{"required":["missing_ok"]}]}},
+                  "else":{"not":{"required":["recursive"]}}}]
+    })
+}
+
 fn optional_path_schema() -> Value {
     json!({
         "type": "object",
@@ -200,7 +210,7 @@ fn search_schema() -> Value {
             "query": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": 4096
+                "maxLength": 1024
             },
             "path": {
                 "type": "string",
@@ -244,7 +254,7 @@ fn patch_schema() -> Value {
                 "additionalProperties": false,
                 "properties": {
                     "kind": {"const": "context"},
-                    "text": {"type": "string", "maxLength": 1_048_576}
+                    "text": {"type": "string", "maxLength": 1_048_576, "pattern":"^[^\\r\\n\\u0000]*$"}
                 },
                 "required": ["kind", "text"]
             },
@@ -253,7 +263,7 @@ fn patch_schema() -> Value {
                 "additionalProperties": false,
                 "properties": {
                     "kind": {"const": "add"},
-                    "text": {"type": "string", "maxLength": 1_048_576}
+                    "text": {"type": "string", "maxLength": 1_048_576, "pattern":"^[^\\r\\n\\u0000]*$"}
                 },
                 "required": ["kind", "text"]
             },
@@ -262,7 +272,7 @@ fn patch_schema() -> Value {
                 "additionalProperties": false,
                 "properties": {
                     "kind": {"const": "remove"},
-                    "text": {"type": "string", "maxLength": 1_048_576}
+                    "text": {"type": "string", "maxLength": 1_048_576, "pattern":"^[^\\r\\n\\u0000]*$"}
                 },
                 "required": ["kind", "text"]
             }
@@ -285,6 +295,14 @@ fn patch_schema() -> Value {
                             "minLength": 1,
                             "maxLength": 4096
                         },
+                        "expected_source": {
+                            "description":"Bind to the full sha256 from read_file, or to observed absence. Omission/any uses legacy line-only matching. A conflict requires re-reading and replanning, not removing the guard.",
+                            "oneOf":[
+                                {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"any"}},"required":["kind"]},
+                                {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"absent"}},"required":["kind"]},
+                                {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"existing"},"sha256":{"type":"string","pattern":"^[0-9a-f]{64}$"}},"required":["kind","sha256"]}
+                            ]
+                        },
                         "hunks": {
                             "type": "array",
                             "minItems": 1,
@@ -293,12 +311,13 @@ fn patch_schema() -> Value {
                                 "type": "object",
                                 "additionalProperties": false,
                                 "properties": {
-                                    "old_start": {"type": "integer", "minimum": 0},
-                                    "old_lines": {"type": "integer", "minimum": 0},
-                                    "new_start": {"type": "integer", "minimum": 0},
-                                    "new_lines": {"type": "integer", "minimum": 0},
+                                    "old_start": {"type": "integer", "minimum": 0, "maximum":131072},
+                                    "old_lines": {"type": "integer", "minimum": 0, "maximum":131072},
+                                    "new_start": {"type": "integer", "minimum": 0, "maximum":131072},
+                                    "new_lines": {"type": "integer", "minimum": 0, "maximum":131072},
                                     "lines": {
                                         "type": "array",
+                                        "minItems":1,
                                         "maxItems": 16384,
                                         "items": line
                                     }
@@ -322,7 +341,7 @@ fn patch_schema() -> Value {
 }
 
 fn process_exec_schema() -> Value {
-    json!({
+    let mut schema = json!({
         "type": "object",
         "additionalProperties": false,
         "properties": {
@@ -359,7 +378,36 @@ fn process_exec_schema() -> Value {
             }
         },
         "required": ["command"]
-    })
+    });
+    let properties = schema["properties"]
+        .as_object_mut()
+        .expect("process schema properties");
+    properties.insert("operation".into(), json!({"type":"string","enum":["exec","start","poll","stdin","close_stdin","resize","cancel"]}));
+    properties.insert(
+        "process_id".into(),
+        json!({"type":"string","minLength":1,"maxLength":128}),
+    );
+    properties.insert("input".into(), json!({"type":"string","maxLength":1048576}));
+    properties.insert(
+        "wait_ms".into(),
+        json!({"type":"integer","minimum":0,"maximum":30000}),
+    );
+    properties.insert("tty".into(), json!({"type":"boolean"}));
+    for field in ["cols", "rows"] {
+        properties.insert(
+            field.into(),
+            json!({"type":"integer","minimum":1,"maximum":65535}),
+        );
+    }
+    schema
+        .as_object_mut()
+        .expect("process schema")
+        .remove("required");
+    schema["allOf"] = json!([{
+        "if":{"properties":{"operation":{"enum":["poll","stdin","close_stdin","resize","cancel"]}},"required":["operation"]},
+        "then":{"required":["process_id"]},"else":{"required":["command"]}
+    }]);
+    schema
 }
 
 fn snapshot_schema() -> Value {
@@ -389,7 +437,8 @@ fn commit_schema() -> Value {
             "message": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": 65536
+                "maxLength": 512,
+                "pattern":"\\S"
             }
         },
         "required": ["message"]

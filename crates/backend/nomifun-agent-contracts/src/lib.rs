@@ -9,6 +9,7 @@ pub mod catalog;
 pub mod deletion;
 pub mod digest;
 pub mod event;
+pub mod engine_features;
 pub mod impact;
 pub mod manifest;
 pub mod plugin_runtime;
@@ -31,6 +32,7 @@ pub use digest::{
     ArtifactEnvelope, CanonicalDigestError, canonical_json_bytes, digest_bytes, digest_payload,
 };
 pub use event::*;
+pub use engine_features::*;
 pub use impact::*;
 pub use manifest::*;
 pub use plugin_runtime::*;

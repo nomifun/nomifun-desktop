@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::adapter::{ChatProtocolAdapter, ProviderWireStream};
 use crate::contracts::{
-    ChatContractError, ChatModelError, ChatModelErrorCode, ChatModelEvent, ChatProtocol,
+    ChatContractError, ChatModelError, ChatModelErrorCode, ChatModelEvent, ChatModelRequest, ChatProtocol,
     ChatRetryDirective, ChatToolCall, ResolvedChatRoute, ToolCallId,
 };
 use crate::ports::{
@@ -197,6 +197,8 @@ impl ChatModelBroker {
             };
             if !route.features.is_superset(&required)
                 || !adapter.features().is_superset(&required)
+                || request.input.messages.iter().any(|message| message.content.iter().any(|part|
+                    matches!(part, crate::ChatContentPart::ProviderReasoning { block } if !block.matches_route(route))))
             {
                 continue;
             }
@@ -417,6 +419,7 @@ async fn run_attempt(
     consume_attempt_stream(
         route,
         adapter,
+        request,
         wire_stream,
         route_attempt,
         total_attempt,
@@ -428,6 +431,7 @@ async fn run_attempt(
 async fn consume_attempt_stream(
     route: &ResolvedChatRoute,
     adapter: &dyn ChatProtocolAdapter,
+    request: &ChatModelRequest,
     mut wire_stream: ProviderWireStream,
     route_attempt: u8,
     total_attempt: u8,
@@ -436,6 +440,7 @@ async fn consume_attempt_stream(
     let mut sequence = EventSequence::default();
     let mut buffered = Vec::new();
     let mut semantic_output_committed = false;
+    let mut decoder = adapter.new_frame_decoder_for(request);
 
     loop {
         let frame = tokio::select! {
@@ -453,7 +458,11 @@ async fn consume_attempt_stream(
                 };
             }
         };
-        let events = match adapter.decode_frame(frame) {
+        let decoded = match decoder.as_mut() {
+            Some(decoder) => decoder.decode_frame(frame),
+            None => adapter.decode_frame(frame),
+        };
+        let events = match decoded {
             Ok(events) => events,
             Err(error) => {
                 return AttemptOutcome::Failed {
@@ -463,7 +472,15 @@ async fn consume_attempt_stream(
             }
         };
 
-        for event in events {
+        for mut event in events {
+            if let ChatModelEvent::ProviderReasoningBlock { block } = &mut event {
+                if let Err(message) = block.bind_route(route) {
+                    return AttemptOutcome::Failed {
+                        error: ChatModelError::protocol_violation(message).with_route(route.model_route_id.clone()),
+                        semantic_output_committed,
+                    };
+                }
+            }
             if let Err(error) = sequence.observe(&event) {
                 return AttemptOutcome::Failed {
                     error: error.with_route(route.model_route_id.clone()),
@@ -625,6 +642,16 @@ impl EventSequence {
                         "provider emitted an empty reasoning signature",
                     ));
                 }
+            }
+            ChatModelEvent::ReasoningBlock { text, encrypted_content } => {
+                if encrypted_content.as_ref().is_some_and(String::is_empty)
+                    || (text.is_empty() && encrypted_content.is_none())
+                {
+                    return Err(ChatModelError::protocol_violation("provider emitted an empty reasoning block"));
+                }
+            }
+            ChatModelEvent::ProviderReasoningBlock { block } => {
+                block.validate().map_err(ChatModelError::protocol_violation)?;
             }
             ChatModelEvent::ProviderRoundId { round_id } => {
                 if round_id.as_ref().is_empty() {

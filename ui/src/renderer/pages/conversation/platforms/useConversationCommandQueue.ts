@@ -34,6 +34,8 @@ export type ConversationCommandQueueItem = {
   files: string[];
   created_at: number;
   capability_selection?: AgentSessionCapabilitySelection;
+  /** Unconfirmed steering is retained as a draft, never an automatic new turn. */
+  requires_review?: boolean;
 };
 
 export type ConversationCommandQueueState = {
@@ -158,6 +160,7 @@ const normalizeQueueItem = (item: unknown): ConversationCommandQueueItem | null 
     input: candidate.input,
     files: uniqueFiles(candidate.files),
     created_at: candidate.created_at,
+    ...(candidate.requires_review === true ? { requires_review: true } : {}),
     ...(normalizedCapabilitySelection
       ? {
           capability_selection: {
@@ -207,7 +210,7 @@ export const normalizeQueueState = (state: unknown): ConversationCommandQueueSta
 
   return {
     items,
-    isPaused: items.length > 0 ? Boolean(candidate.isPaused) : false,
+    isPaused: items.some((item) => item.requires_review) || (items.length > 0 && Boolean(candidate.isPaused)),
   };
 };
 
@@ -215,8 +218,9 @@ export const createQueuedCommandItem = ({
   input,
   files,
   capability_selection,
+  requires_review,
 }: Pick<ConversationCommandQueueItem, 'input' | 'files'> &
-  Partial<Pick<ConversationCommandQueueItem, 'capability_selection'>>): ConversationCommandQueueItem => ({
+  Partial<Pick<ConversationCommandQueueItem, 'capability_selection' | 'requires_review'>>): ConversationCommandQueueItem => ({
   // This identifier is also the durable HTTP idempotency key. It must survive
   // dequeue restoration, remounts, and accepted-response loss unchanged.
   id: uuidv7(),
@@ -224,6 +228,7 @@ export const createQueuedCommandItem = ({
   files: uniqueFiles(files),
   created_at: Date.now(),
   ...(capability_selection ? { capability_selection } : {}),
+  ...(requires_review ? { requires_review: true } : {}),
 });
 
 const getQueueValidationFailureReason = (state: ConversationCommandQueueState): QueueValidationFailureReason | null => {
@@ -397,7 +402,7 @@ export type ConversationCommandQueueExecution = {
 };
 
 type EnqueueCommandInput = Pick<ConversationCommandQueueItem, 'input' | 'files'> &
-  Partial<Pick<ConversationCommandQueueItem, 'capability_selection'>>;
+  Partial<Pick<ConversationCommandQueueItem, 'capability_selection' | 'requires_review'>>;
 type UpdateCommandInput = Pick<ConversationCommandQueueItem, 'input'>;
 
 const getQueueValidationMessage = (
@@ -918,6 +923,9 @@ export const useConversationCommandQueue = ({
     }
 
     const [nextCommand] = data.items;
+    // Resume/reorder/remount cannot convert a possibly delivered steer into
+    // another execution. The user must review and remove/edit the held draft.
+    if (data.items.some((item) => item.requires_review)) return;
     const executionGeneration = executionGenerationRef.current + 1;
     executionGenerationRef.current = executionGeneration;
     const isExecutionCurrent = (): boolean =>

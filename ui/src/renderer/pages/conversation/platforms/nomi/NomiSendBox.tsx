@@ -723,9 +723,8 @@ const NomiSendBox: React.FC<{
         }
       } catch (error) {
         if (msg_id) removeMessageByMsgId(msg_id);
-        // Rethrow so the caller can divert the interjection into the persisted
-        // command queue. Swallowing here (as this used to) stranded the draft:
-        // the box had already been cleared, so the text was unrecoverable.
+        // Retain a held draft for explicit review. This error may follow
+        // successful delivery, so it must never automatically start a turn.
         Message.error(getConversationRuntimeWorkspaceErrorMessage(error, t));
         throw error;
       }
@@ -758,7 +757,7 @@ const NomiSendBox: React.FC<{
         enqueue
       ))
     ) {
-      Message.info(t('conversation.steer.fallbackQueued'));
+        Message.warning(t('conversation.steer.fallbackQueued'));
     }
   };
 

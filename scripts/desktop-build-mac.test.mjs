@@ -4,23 +4,35 @@ import { describe, expect, test } from 'bun:test';
 const source = readFileSync(new URL('./desktop-build-mac.sh', import.meta.url), 'utf8');
 
 describe('macOS Desktop build contract', () => {
-  test('keeps the retired Codex Runtime sidecar explicitly opt-in', () => {
-    expect(source.includes('WITH_CODEX_RUNTIME=0')).toBe(true);
-    expect(source.includes('--with-codex-runtime')).toBe(true);
-    expect(source.includes('if [[ "$WITH_CODEX_RUNTIME" -eq 0 ]]; then')).toBe(true);
-    expect(source.includes('当前 Nomi-core 构建不包含旧 Codex Runtime sidecar')).toBe(true);
+  test('removes binary import and rejects the retired flag before passthrough', () => {
+    expect(source.includes('WITH_CODEX_RUNTIME')).toBe(false);
+    expect(source.includes('NOMIFUN_CODEX_RUNTIME')).toBe(false);
+    expect(source.includes('stage_runtime_resources')).toBe(false);
+    expect(source.includes('stage_runtime_sidecar')).toBe(false);
+    expect(source.includes('validate_runtime_hello')).toBe(false);
+    expect(source.includes('RUNTIME_STAGE')).toBe(false);
+    const rejection = source.indexOf('外部 Codex Runtime 打包入口已移除');
+    const passthrough = source.indexOf('PASSTHRU+=("$arg")');
+    expect(rejection).toBeGreaterThan(0);
+    expect(rejection).toBeLessThan(passthrough);
   });
 
-  test('fails if a default Nomi-core app accidentally packages the legacy sidecar', () => {
+  test('rejects retired executables and hello metadata in every packaged app', () => {
     expect(source.includes("-name 'nomifun-codex-runtime'")).toBe(true);
-    expect(source.includes('默认 Nomi-core app 意外包含旧 Codex Runtime sidecar')).toBe(true);
+    expect(source.includes("-name 'nomifun-codex-runtime.hello.json'")).toBe(true);
+    expect(source.includes('app 包含已退役 Codex Runtime 资源')).toBe(true);
+    expect(source.includes('无法检查 app 中的已退役 Runtime 资源')).toBe(true);
   });
 
-  test('adds sidecars to the release lock only in explicit compatibility mode', () => {
-    expect(
-      source.match(/\[\[ "\$WITH_CODEX_RUNTIME" -eq 1 \]\]/g)?.length,
-    ).toBeGreaterThanOrEqual(4);
-    expect(source.includes('--sidecar "macos_desktop_arm64=')).toBe(true);
-    expect(source.includes('--sidecar "macos_desktop_x64=')).toBe(true);
+  test('locks the host/package/legal artifacts without staging external engines', () => {
+    expect(source.includes('--sidecar')).toBe(false);
+    expect(source.includes('--host "$host"')).toBe(true);
+    expect(source.includes('--package "$package"')).toBe(true);
+    expect(source.includes('--legal "$license"')).toBe(true);
+    expect(source.includes('--legal "$notice"')).toBe(true);
+    const overlay = readFileSync(
+      new URL('../apps/desktop/tauri.macos.conf.json', import.meta.url), 'utf8',
+    );
+    expect(JSON.parse(overlay).bundle).toEqual({});
   });
 });

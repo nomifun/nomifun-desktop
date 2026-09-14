@@ -1515,3 +1515,77 @@ async fn plugin_product_active_release_action_joins_the_same_nomi_tool_session()
         &["plugin.fixture.echo.invoke".to_owned()]
     );
 }
+
+#[tokio::test]
+async fn plugin_product_unknown_effect_fences_both_scope_installation_orders() {
+    struct UnknownEffectInvoker;
+
+    #[async_trait]
+    impl NomiPluginProductToolInvoker for UnknownEffectInvoker {
+        async fn invoke(
+            &self,
+            _request: NomiPluginProductToolInvocation,
+        ) -> Result<StrictJsonValue, NomiPluginToolError> {
+            Err(NomiPluginToolError::OutcomeUnknown("private owner diagnostic".into()))
+        }
+    }
+
+    for scope_first in [true, false] {
+        let (capability, schemas) = plugin_product_fixture();
+        let compiled = compile_plugin_product_fixture(&capability);
+        let kernel = Arc::new(
+            KernelRegistry::new(policy(), Arc::new(InMemoryPluginStatePersistence::new()))
+                .unwrap(),
+        );
+        let base = KernelNomiPluginToolSession::materialize(
+            kernel,
+            Arc::new(compiled.clone()),
+            owner(),
+            AgentSessionId::from(SESSION),
+            ScopeKey::from(format!("session:{SESSION}")),
+            Arc::new(SchemaMap::default()),
+        )
+        .await
+        .unwrap();
+        let actions = KernelNomiPluginToolSession::materialize_plugin_product_actions(
+            &compiled,
+            &owner(),
+            &AgentSessionId::from(SESSION),
+            &ScopeKey::from(format!("session:{SESSION}")),
+            schemas,
+        )
+        .await
+        .unwrap();
+        let scope = Arc::new(
+            nomifun_ai_agent::engine_effect_scope::EngineEffectScope::new(Vec::new()).unwrap(),
+        );
+        let session = if scope_first {
+            base.with_effect_scope(scope.clone())
+                .unwrap()
+                .with_plugin_product_actions(actions, Arc::new(UnknownEffectInvoker))
+                .unwrap()
+        } else {
+            base.with_plugin_product_actions(actions, Arc::new(UnknownEffectInvoker))
+                .unwrap()
+                .with_effect_scope(scope.clone())
+                .unwrap()
+        };
+        let mut registry = ToolRegistry::new();
+        session.register_into(&mut registry).unwrap();
+        scope.begin_turn().unwrap();
+        let result = registry
+            .get(session.plugin_product_actions()[0].provider_name())
+            .unwrap()
+            .execute_with_context(
+                json!({"message": "hello"}),
+                &ToolExecutionContext::from_scoped_tool_call("turn-effect", "call-effect"),
+            )
+            .await;
+        assert!(result.is_error);
+        assert!(result.content.contains("HOSTED_EFFECT_UNPROVEN"));
+        assert!(!result.content.contains("private owner diagnostic"));
+        assert!(scope.ensure_turn_open().is_err());
+        scope.settle_turn().await.unwrap();
+        assert!(scope.begin_turn().is_err(), "unknown effects must retire the Session");
+    }
+}

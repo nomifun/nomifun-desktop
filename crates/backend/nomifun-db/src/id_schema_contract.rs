@@ -61,6 +61,8 @@ pub(crate) const PRODUCT_TABLES: &[&str] = &[
     "conversation_delivery_notify",
     "conversation_delivery_receipts",
     "conversation_execution_links",
+    "conversation_hosted_effects",
+    "conversation_mcp_effects",
     "conversation_mcp_servers",
     "conversation_runtime_events",
     "conversations",
@@ -276,6 +278,16 @@ const NON_REFERENCE_ID_COLUMNS: &[(&str, &str)] = &[
     ("conversation_delivery_receipts", "message_id"),
     ("conversation_delivery_receipts", "operation_id"),
     // Immutable receipt identity survives deletion of the Conversation projection.
+    // MCP owner facts inherit their user/Conversation from the retained turn
+    // receipt below, not from a deletable Conversation projection.
+    ("conversation_mcp_effects", "user_id"),
+    ("conversation_mcp_effects", "conversation_id"),
+    ("conversation_mcp_effects", "operation_id"),
+    ("conversation_mcp_effects", "capability_id"),
+    ("conversation_hosted_effects", "user_id"),
+    ("conversation_hosted_effects", "conversation_id"),
+    ("conversation_hosted_effects", "operation_id"),
+    ("conversation_hosted_effects", "capability_id"),
     ("conversation_runtime_events", "conversation_id"),
     ("conversation_runtime_events", "model_operation_id"),
     ("conversations", "conversation_id"),
@@ -981,6 +993,12 @@ pub(crate) const LOGICAL_REFERENCES: &[LogicalReference] = &[
     text_ref!("conversation_delivery_receipts", "user_id" => "users", "user_id", false, "idx_delivery_receipts_user_id", KeepHistory),
     opaque_text_ref!("conversation_runtime_events", "turn_operation_id" => "conversation_delivery_receipts", "operation_id", false, "idx_conversation_runtime_events_turn", Restrict)
         .with_aggregate_scope("parent.conversation_id = child.conversation_id"),
+    opaque_text_ref!("conversation_mcp_effects", "turn_operation_id" => "conversation_delivery_receipts", "operation_id", false, "idx_conversation_mcp_turn", Restrict)
+        .with_parent_predicate("parent.kind = 'turn'")
+        .with_aggregate_scope("parent.conversation_id = child.conversation_id AND parent.user_id = child.user_id"),
+    opaque_text_ref!("conversation_hosted_effects", "turn_operation_id" => "conversation_delivery_receipts", "operation_id", false, "idx_conversation_hosted_turn", Restrict)
+        .with_parent_predicate("parent.kind = 'turn'")
+        .with_aggregate_scope("parent.conversation_id = child.conversation_id AND parent.user_id = child.user_id"),
     text_ref!("conversation_mcp_servers", "conversation_id" => "conversations", "conversation_id", false, "idx_conversation_mcp_servers_conversation_id", Cascade),
     text_ref!("conversation_mcp_servers", "mcp_server_id" => "mcp_servers", "mcp_server_id", false, "idx_conversation_mcp_servers_mcp_server_id", Cascade)
         .with_parent_predicate("parent.deleted_at IS NULL"),
@@ -1872,6 +1890,73 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
             ],
         ),
         (
+            "trg_conversation_hosted_effect_admission",
+            &[
+                "BEFORE INSERT ON CONVERSATION_HOSTED_EFFECTS",
+                "NEW.STATE != 'PENDING'",
+                "C.CONVERSATION_ID = NEW.CONVERSATION_ID AND C.USER_ID = NEW.USER_ID",
+                "C.STATUS = 'RUNNING' AND C.ADMISSION_EPOCH = NEW.ADMISSION_EPOCH",
+                "C.ACTIVE_TURN_OPERATION_ID = NEW.TURN_OPERATION_ID",
+                "R.CONVERSATION_ID = C.CONVERSATION_ID AND R.USER_ID = C.USER_ID",
+                "R.KIND = 'TURN' AND R.STATUS = 'ACCEPTED'",
+                "RAISE(ABORT, 'HOSTED EFFECT REQUIRES AN EXACT LIVE CONVERSATION TURN')",
+            ],
+        ),
+        (
+            "trg_conversation_hosted_effect_update",
+            &[
+                "BEFORE UPDATE ON CONVERSATION_HOSTED_EFFECTS",
+                "NEW.ID IS NOT OLD.ID OR NEW.USER_ID IS NOT OLD.USER_ID",
+                "NEW.CONVERSATION_ID IS NOT OLD.CONVERSATION_ID OR NEW.OPERATION_ID IS NOT OLD.OPERATION_ID",
+                "NEW.TURN_OPERATION_ID IS NOT OLD.TURN_OPERATION_ID OR NEW.ADMISSION_EPOCH IS NOT OLD.ADMISSION_EPOCH",
+                "NEW.OWNER_DOMAIN IS NOT OLD.OWNER_DOMAIN OR NEW.CAPABILITY_ID IS NOT OLD.CAPABILITY_ID",
+                "NEW.ACTION_NAME IS NOT OLD.ACTION_NAME OR NEW.INPUT_SHA256 IS NOT OLD.INPUT_SHA256",
+                "NEW.RESOURCE_KEY IS NOT OLD.RESOURCE_KEY",
+                "NEW.CREATED_AT IS NOT OLD.CREATED_AT OR OLD.STATE != 'PENDING'",
+                "NEW.STATE NOT IN ('RETURNED', 'REJECTED') OR NEW.SETTLED_AT IS NULL",
+                "RAISE(ABORT, 'HOSTED EFFECT PERMITS ONLY EXACT PENDING TO TERMINAL TRANSITION')",
+            ],
+        ),
+        (
+            "trg_conversation_hosted_effect_no_delete",
+            &[
+                "BEFORE DELETE ON CONVERSATION_HOSTED_EFFECTS",
+                "RAISE(ABORT, 'HOSTED EFFECT RECEIPTS ARE RETAINED INDEFINITELY')",
+            ],
+        ),
+        (
+            "trg_conversation_mcp_effect_admission",
+            &[
+                "BEFORE INSERT ON CONVERSATION_MCP_EFFECTS",
+                "NEW.STATE != 'PENDING'",
+                "C.CONVERSATION_ID = NEW.CONVERSATION_ID AND C.USER_ID = NEW.USER_ID",
+                "C.STATUS = 'RUNNING' AND C.ADMISSION_EPOCH = NEW.ADMISSION_EPOCH",
+                "C.ACTIVE_TURN_OPERATION_ID = NEW.TURN_OPERATION_ID",
+                "R.CONVERSATION_ID = C.CONVERSATION_ID AND R.USER_ID = C.USER_ID",
+                "R.KIND = 'TURN' AND R.STATUS = 'ACCEPTED'",
+                "RAISE(ABORT, 'MCP EFFECT REQUIRES AN EXACT LIVE CONVERSATION TURN')",
+            ],
+        ),
+        (
+            "trg_conversation_mcp_effect_update",
+            &[
+                "BEFORE UPDATE ON CONVERSATION_MCP_EFFECTS",
+                "NEW.ID IS NOT OLD.ID OR NEW.USER_ID IS NOT OLD.USER_ID",
+                "NEW.CONVERSATION_ID IS NOT OLD.CONVERSATION_ID OR NEW.OPERATION_ID IS NOT OLD.OPERATION_ID",
+                "NEW.TURN_OPERATION_ID IS NOT OLD.TURN_OPERATION_ID OR NEW.ADMISSION_EPOCH IS NOT OLD.ADMISSION_EPOCH",
+                "NEW.CAPABILITY_ID IS NOT OLD.CAPABILITY_ID OR NEW.CREATED_AT IS NOT OLD.CREATED_AT",
+                "OLD.STATE != 'PENDING' OR NEW.STATE != 'SETTLED' OR NEW.SETTLED_AT IS NULL",
+                "RAISE(ABORT, 'MCP EFFECT PERMITS ONLY EXACT PENDING TO SETTLED TRANSITION')",
+            ],
+        ),
+        (
+            "trg_conversation_mcp_effect_no_delete",
+            &[
+                "BEFORE DELETE ON CONVERSATION_MCP_EFFECTS",
+                "RAISE(ABORT, 'MCP EFFECT RECEIPTS ARE RETAINED INDEFINITELY')",
+            ],
+        ),
+        (
             "trg_conversations_running_admission_guard",
             &[
                 "BEFORE UPDATE OF STATUS, ACTIVE_TURN_OPERATION_ID, ADMISSION_EPOCH ON CONVERSATIONS",
@@ -2649,6 +2734,8 @@ async fn validate_no_triggers(pool: &SqlitePool) -> Result<(), DbError> {
         .iter()
         .map(|row| row.try_get("name").map_err(DbError::Query))
         .collect::<Result<_, _>>()?;
+    // Compare contracts in the same name order as SQLite. Declaration order
+    // groups related invariants and must not become a startup failure.
     let mut trigger_contracts = TRIGGER_CONTRACTS.to_vec();
     trigger_contracts.sort_by_key(|(name, _)| *name);
     let expected: Vec<String> = trigger_contracts

@@ -1,16 +1,11 @@
 //! Coding runtime on the production Conversation owner, Broker and Kernel.
 //! No SessionStore, private transcript, provider client or native tool bypass.
 use std::collections::BTreeSet;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures_util::{
-    FutureExt,
-    future::{BoxFuture, Shared},
-};
 use nomifun_agent_contracts::*;
-use nomifun_agent_control_plane::{AgentControlPlane, AuthenticatedOwner};
-use nomifun_agent_kernel::{CompilerEnvironment, KernelRegistry, SessionCapabilityState};
+use nomifun_agent_kernel::SessionCapabilityState;
 use nomifun_ai_agent::coding_runtime::{CodingAgentRuntime, CodingRuntimeHost};
 use nomifun_ai_agent::types::{AgentRuntimeBuildOptions, SendMessageData};
 use nomifun_ai_agent::{RuntimeEngineDescriptor, RuntimeEngineFactory};
@@ -18,14 +13,17 @@ use nomifun_api_types::RuntimeEngineBinding;
 use nomifun_chat_model_broker::*;
 use nomifun_coding_engine::*;
 use nomifun_common::AppError;
-use nomifun_db::{SqlitePool, sqlx};
+use nomifun_db::SqlitePool;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
-use super::nomi_core_session::{
-    NomiCoreSessionOwner, compile_nomi_plugin_snapshot, session_metadata,
-};
+#[path = "coding_capabilities.rs"]
+mod capabilities;
+#[path = "coding_steering.rs"]
+mod steering;
+#[path = "coding_history_port.rs"]
+mod history_port;
 
 fn error(value: impl std::fmt::Display) -> AppError {
     AppError::Conflict(format!("Coding host: {value}"))
@@ -34,174 +32,261 @@ fn error(value: impl std::fmt::Display) -> AppError {
 pub(crate) fn descriptor() -> RuntimeEngineDescriptor {
     RuntimeEngineDescriptor {
         family_id: "nomifun.coding".into(),
-        build_id: format!("{}-host1", env!("CARGO_PKG_VERSION")),
+        build_id: format!("{}-host2-coding-loop91", env!("CARGO_PKG_VERSION")),
         build_digest: format!(
             "{:x}",
             Sha256::digest(
                 concat!(
                     include_str!("../../../../../Cargo.lock"),
+                    include_str!("../../Cargo.toml"),
+                    include_str!("../../../nomifun-public/Cargo.toml"),
+                    include_str!("../../../nomifun-agent-control-plane/src/kernel_catalog.rs"),
+                    include_str!("../../../nomifun-agent-contracts/src/engine_features.rs"),
+                    include_str!("../../../nomifun-agent-contracts/src/runtime.rs"),
+                    include_str!("../../../nomifun-agent-contracts/contracts/engine/platform-feature-inventory.payload.json"),
+                    include_str!("agent_wave1_host.rs"),
+                    include_str!("agent_wave1_companion_host.rs"),
+                    include_str!("agent_wave1_memory_receipts.rs"),
+                    include_str!("nomi_core_builtins.rs"),
+                    include_str!("remote_runtime.rs"),
+                    include_str!("../../../nomifun-public/src/canonical.rs"),
                     include_str!("../../../nomifun-coding-engine/src/engine.rs"),
                     include_str!("../../../nomifun-coding-engine/src/turn.rs"),
                     include_str!("../../../nomifun-coding-engine/src/kernel.rs"),
+                    include_str!("../../../nomifun-agent-kernel/src/compiler.rs"),
+                    include_str!("../../../nomifun-agent-kernel/src/session_capabilities.rs"),
+                    include_str!("nomi_core_resource_bindings.rs"),
+                    include_str!("nomi_core_session.rs"),
+                    include_str!("nomi_core_agent_projection.rs"),
+                    include_str!("../../../nomifun-api-types/src/agent_platform.rs"),
+                    include_str!("../../../nomifun-api-types/src/execution_constraints.rs"),
+                    include_str!("../../../nomifun-agent-execution/src/attempt_runner.rs"),
+                    include_str!("../../../nomifun-conversation/src/service.rs"),
+                    include_str!("../../../nomifun-db/src/conversation_context.rs"),
+                    include_str!("../../../nomifun-db/src/repository/conversation.rs"),
+                    include_str!("../../../nomifun-db/src/repository/sqlite_conversation.rs"),
+                    include_str!("../../../nomifun-coding-engine/src/context.rs"),
+                    include_str!("../../../nomifun-coding-engine/src/context_lifecycle.rs"),
+                    include_str!("../../../nomifun-coding-engine/src/output_limit.rs"),
+                    include_str!("../../../nomifun-coding-engine/src/live_context.rs"),
+                    include_str!("../../../nomifun-coding-engine/src/compaction.rs"),
+                    include_str!("../../../nomifun-coding-engine/src/compaction_source.rs"),
+                    include_str!("../../../nomifun-coding-engine/src/agents_md.rs"),
+                    include_str!("../../../nomifun-coding-engine/src/workspace_context.rs"),
+                    include_str!("../../../nomifun-coding-engine/src/search_context.rs"),
+                    include_str!("../../../nomifun-coding-engine/src/workflow.rs"),
+                    include_str!("../../../nomifun-coding-engine/src/patch_recovery.rs"),
+                    include_str!("../../../nomifun-coding-engine/src/planning.rs"),
+                    include_str!("../../../nomifun-coding-engine/src/requirements.rs"),
+                    include_str!("../../../nomifun-coding-engine/src/task_continuation.rs"),
+                    include_str!("../../../nomifun-coding-engine/src/completion.rs"),
+                    include_str!("../../../nomifun-coding-engine/src/process.rs"),
+                    include_str!("../../../nomifun-agent-domain-wave2/src/lib.rs"),
+                    include_str!("../../../nomifun-agent-domain-wave2/src/process_schema.rs"),
+                    include_str!("../../../nomifun-agent-domain-wave2/src/workspace_schema.rs"),
+                    include_str!("../../../nomifun-coding-engine/src/history.rs"),
+                    include_str!("../../../nomifun-coding-engine/src/tool.rs"),
+                    include_str!("../../../nomifun-coding-engine/src/tool_dispatch.rs"),
+                    include_str!("../../../nomifun-coding-engine/src/tool_archive.rs"),
+                    include_str!("../../../nomifun-coding-engine/src/history_port.rs"),
+                    include_str!("coding_history_port.rs"),
+                    include_str!("../../../nomifun-coding-engine/src/standard_tools.rs"),
+                    include_str!("../../../nomifun-coding-engine/src/stream_limits.rs"),
+                    include_str!("../../../nomifun-coding-engine/src/tool_context.rs"),
+                    include_str!("../../../nomifun-coding-engine/src/events.rs"),
                     include_str!("../../../nomifun-ai-agent/src/coding_runtime.rs"),
-                    include_str!("coding_runtime_host.rs")
+                    include_str!("../../../nomifun-ai-agent/src/engine_sdk.rs"),
+                    include_str!("../../../nomifun-ai-agent/src/engine_tasks.rs"),
+                    include_str!("../../../nomifun-engine-core/src/lib.rs"),
+                    include_str!("../../../nomifun-engine-core/src/error.rs"),
+                    include_str!("../../../nomifun-engine-core/src/tool.rs"),
+                    include_str!("../../../nomifun-engine-core/src/kernel.rs"),
+                    include_str!("../../../nomifun-engine-core/src/process.rs"),
+                    include_str!("../../../nomifun-chat-model-broker/src/engine_port.rs"),
+                    include_str!("chat_broker_host.rs"),
+                    include_str!("../../../nomifun-model-invoke/src/error.rs"),
+                    include_str!("../../../nomifun-model-invoke/src/transport.rs"),
+                    include_str!("../../../nomifun-model-invoke/src/chat_executor.rs"),
+                    include_str!("../../../nomifun-model-invoke/src/chat_bedrock_headers.rs"),
+                    include_str!("../../../nomifun-model-invoke/src/chat_sse.rs"),
+                    include_str!("../../../nomifun-model-invoke/src/chat_deadline.rs"),
+                    include_str!("../../../nomifun-chat-model-broker/src/adapter.rs"),
+                    include_str!("../../../nomifun-chat-model-broker/src/broker.rs"),
+                    include_str!("../../../nomifun-chat-model-broker/src/provider_errors.rs"),
+                    include_str!("../../../nomifun-chat-model-broker/src/responses_decoder.rs"),
+                    include_str!("../../../nomifun-chat-model-broker/src/anthropic_decoder.rs"),
+                    include_str!("../../../nomifun-chat-model-broker/src/provider_reasoning.rs"),
+                    include_str!("../../../nomifun-chat-model-broker/src/wire_budget.rs"),
+                    include_str!("../../../nomifun-chat-model-broker/src/contracts.rs"),
+                    include_str!("../../../nomifun-chat-model-broker/src/responses_bridge.rs"),
+                    include_str!("../../../nomifun-ai-agent/src/runtime_admission.rs"),
+                    include_str!("coding_runtime_history.rs"),
+                    include_str!("coding_patch_recovery.rs"),
+                    include_str!("coding_runtime_recovery.rs"),
+                    include_str!("engine_process_host.rs"),
+                    include_str!("engine_process_recovery.rs"),
+                    include_str!("coding_event_buffer.rs"),
+                    include_str!("coding_tool_surface.rs"),
+                    include_str!("coding_capabilities.rs"),
+                    include_str!("coding_steering.rs"),
+                    include_str!("../../../nomifun-coding-engine/src/steering.rs"),
+                    include_str!("../../../nomifun-ai-agent/src/runtime_extension.rs"),
+                    include_str!("../../../nomifun-ai-agent/src/runtime_catalog.rs"),
+                    include_str!("runtime_engines.rs"),
+                    include_str!("../desktop.rs"),
+                    include_str!("../services.rs"),
+                    include_str!("../bootstrap/nomi_core.rs"),
+                    include_str!("../bootstrap/composition_cleanup.rs"),
+                    include_str!("routes.rs"),
+                    include_str!("../../../nomifun-ai-agent/src/runtime_registry.rs"),
+                    include_str!("../../../nomifun-ai-agent/src/runtime_registry_shutdown.rs"),
+                    include_str!("../../../nomifun-ai-agent/src/runtime_registry_acquisition.rs"),
+                    include_str!("../../../nomifun-ai-agent/src/runtime_handle.rs"),
+                    include_str!("coding_attachments.rs"),
+                    include_str!("coding_skills.rs"),
+                    include_str!("engine_skills.rs"),
+                    include_str!("../../../nomifun-engine-core/src/context_resource.rs"),
+                    include_str!("../../../nomifun-coding-engine/src/context_resources.rs"),
+                    include_str!("../../../nomifun-coding-engine/src/remote_resources.rs"),
+                    include_str!("../../../nomifun-coding-engine/src/media_context.rs"),
+                    include_str!("../../../nomifun-coding-engine/src/context_tail.rs"),
+                    include_str!("../../../nomifun-coding-engine/src/compacted_history.rs"),
+                    include_str!("../../../nomifun-ai-agent/src/model_attachments.rs"),
+                    include_str!("nomi_core_wave2.rs"),
+                    include_str!("nomi_core_mcp.rs"),
+                    include_str!("nomi_core_mcp_resources.rs"),
+                    include_str!("../../../nomifun-ai-agent/src/nomi_resources.rs"),
+                    include_str!("mcp_effect_receipts.rs"),
+                    include_str!("hosted_effect_receipts.rs"),
+                    include_str!("engine_miniapp_tools.rs"),
+                    include_str!("engine_robot_tools.rs"),
+                    include_str!("nomi_core_robot.rs"),
+                    include_str!("../../../nomifun-robot/src/tool_registry.rs"),
+                    include_str!("../../../nomifun-robot/src/vision.rs"),
+                    include_str!("../../../nomifun-plugin-platform/src/runtime/m1_application.rs"),
+                    include_str!("../../../nomifun-db/migrations/102_conversation_hosted_effects.sql"),
+                    include_str!("../../../nomifun-db/migrations/103_conversation_git_effects.sql"),
+                    include_str!("boot_terminal_proof.rs"),
+                    include_str!("../../../nomifun-db/migrations/100_conversation_mcp_effects.sql"),
+                    include_str!("../../../nomifun-db/migrations/101_mcp_effect_observations.sql"),
+                    include_str!("nomi_core_mcp_catalog.rs"),
+                    include_str!("plugin_platform.rs"),
+                    include_str!("state.rs"),
+                    include_str!("../../../nomifun-mcp/src/service.rs"),
+                    include_str!("../../../nomifun-mcp/src/routes.rs"),
+                    include_str!("../../../nomifun-db/src/repository/sqlite_mcp_server.rs"),
+                    include_str!("agent_wave2_mcp.rs"),
+                    include_str!("../../../nomifun-mcp/src/owner.rs"),
+                    include_str!("../../../nomifun-mcp/src/owner_resources.rs"),
+                    include_str!("../../../nomifun-mcp/src/owner_resource_template.rs"),
+                    include_str!("../../../nomifun-mcp/src/owner_stream.rs"),
+                    include_str!("../../../nomifun-mcp/src/owner_legacy_sse.rs"),
+                    include_str!("../../../nomifun-mcp/src/owner_stdio.rs"),
+                    include_str!("../../../nomifun-mcp/src/owner_discovery.rs"),
+                    include_str!("../../../../shared/nomi-process-runtime/src/command_builder.rs"),
+                    include_str!("../../../nomifun-mcp/src/connection_test/mod.rs"),
+                    include_str!("../../../nomifun-mcp/src/connection_test/protocol.rs"),
+                    include_str!("agent_wave2_host.rs"),
+                    include_str!("agent_wave2_vcs_push.rs"),
+                    include_str!("engine_git_lifecycle.rs"),
+                    include_str!("../../../nomifun-file/src/agent_text_read.rs"),
+                    include_str!("../../../nomifun-file/src/agent_instruction_scope.rs"),
+                    include_str!("../../../nomifun-file/src/agent_patch_lines.rs"),
+                    include_str!("../../../nomifun-file/src/agent_patch_source.rs"),
+                    include_str!("../../../nomifun-file/src/agent_patch_outcome.rs"),
+                    include_str!("../../../nomifun-file/src/service.rs"),
+                    include_str!("../../../nomifun-file/src/agent_text_search.rs"),
+                    include_str!("../../../nomifun-file/src/resource.rs"),
+                    include_str!("../../../nomifun-file/src/path_safety.rs"),
+                    include_str!("../../../nomifun-file/src/snapshot_service/mod.rs"),
+                    include_str!("../../../nomifun-file/src/snapshot_service/helpers.rs"),
+                    include_str!("coding_runtime_host.rs"),
+                    include_str!("engine_session_host.rs"),
+                    include_str!("engine_journal.rs"),
+                    include_str!("engine_model_facts.rs"),
+                    include_str!("engine_tool_host.rs"),
+                    include_str!("engine_kernel_session.rs"),
+                    include_str!("../../../nomifun-ai-agent/src/engine_effect_scope.rs"),
+                    include_str!("engine_mcp_resources.rs"),
+                    include_str!("engine_mcp_media.rs"),
+                    include_str!("engine_workspace_media.rs"),
+                    include_str!("workspace_file_read.rs"),
+                    include_str!("engine_history.rs")
                 )
                 .as_bytes()
             )
         ),
-        display_name: "Coding (workspace tools)".into(),
+        display_name: "Coding".into(),
         host_contract_version: nomifun_api_types::RUNTIME_HOST_CONTRACT_VERSION,
         supported_profiles: vec!["coding".into()],
     }
 }
 
 pub(crate) fn factory(
-    owner: Arc<NomiCoreSessionOwner>,
-    control_plane: Arc<AgentControlPlane>,
-    kernel: Arc<KernelRegistry>,
-    environment: CompilerEnvironment,
+    session_host: Arc<super::engine_session_host::EngineSessionHost>,
     pool: SqlitePool,
-    encryption_key: [u8; 32],
+    plugin_schemas: Arc<dyn nomifun_ai_agent::NomiPluginToolSchemaResolver>,
 ) -> RuntimeEngineFactory {
-    let owner = Arc::downgrade(&owner);
-    let broker = super::chat_broker_host::ChatBrokerHostComposition::for_nomi_core(
-        pool.clone(),
-        encryption_key,
-    );
     Arc::new(move |options, binding| {
-        let (owner, control_plane, kernel, environment, pool, broker) = (
-            owner.clone(),
-            control_plane.clone(),
-            kernel.clone(),
-            environment.clone(),
+        let plugin_schemas = plugin_schemas.clone();
+        let (session_host, pool) = (
+            session_host.clone(),
             pool.clone(),
-            broker.clone(),
         );
         Box::pin(async move {
-            let owner = owner
-                .upgrade()
-                .ok_or_else(|| error("Session owner has shut down"))?;
-            let response = owner
-                .get_session(&options.user_id, &options.conversation_id)
-                .await?;
-            validate_session_extra(&response.extra)?;
-            if super::runtime_engines::binding_from_extra(&response.extra)?.as_ref()
-                != Some(&binding)
-            {
-                return Err(error(
-                    "runtime options differ from the durable engine binding",
-                ));
-            }
-            let authenticated = AuthenticatedOwner(UserId::from(options.user_id.clone()));
-            let metadata =
-                session_metadata(&response, &authenticated).map_err(|e| error(e.message))?;
-            let dto =
-                serde_json::from_value(serde_json::to_value(&metadata.binding).map_err(error)?)
-                    .map_err(error)?;
-            let (mut agent_binding, revision, snapshot) = control_plane
-                .saved_binding_artifacts(&authenticated.0, &dto)
-                .await
-                .map_err(error)?;
-            validate_supported_snapshot(&snapshot)?;
-            let route = snapshot
+            let admitted = session_host.resolve(&options, &binding).await?;
+            super::coding_tool_surface::validate_session_mcp(admitted.snapshot(), &admitted.agent_binding().typed_resource_bindings, &admitted.session().extra)?;
+            let principal = admitted.principal().clone();
+            let route = admitted.snapshot()
                 .content
                 .chat_route_identity
                 .clone()
                 .ok_or_else(|| error("snapshot has no exact Chat route"))?;
-            let principal = PrincipalRef {
-                principal_kind: "user".into(),
-                principal_id: options.user_id.clone(),
-            };
             let session_id = AgentSessionId::from(options.conversation_id.clone());
-            let workspace_tools = snapshot.content.initial_capabilities.iter().any(|item| {
-                super::nomi_core_wave2::coding_capability_ids().contains(&item.capability.id)
-            });
-            if workspace_tools {
-                let resources = agent_binding
-                    .typed_resource_bindings
-                    .iter()
-                    .filter(|resource| {
-                        resource.resource_kind.as_ref() == nomifun_file::WORKSPACE_RESOURCE_KIND
-                    })
-                    .collect::<Vec<_>>();
-                let [authority] = resources.as_slice() else {
-                    return Err(error(
-                        "workspace tools require one server-resolved workspace resource",
-                    ));
-                };
-                let workspace = super::nomi_core_wave2::session_workspace_binding(
-                    &options.workspace,
-                    &principal,
-                    &session_id,
-                    authority,
-                )?;
-                agent_binding.typed_resource_bindings =
-                    super::nomi_core_wave2::with_session_workspace_binding(
-                        agent_binding.typed_resource_bindings,
-                        workspace,
-                    );
-            }
-            let compiled = Arc::new(compile_nomi_plugin_snapshot(
-                &kernel,
-                &environment,
-                agent_binding,
-                revision,
-                snapshot,
-                &principal,
-            )?);
-            let active = Arc::new(SessionCapabilityState::new(&compiled));
-            let active_snapshot = active.snapshot().map_err(error)?;
-            let registry = kernel.snapshot().map_err(error)?;
-            let mut exposures = standard_coding_tool_exposures(StandardCodingToolLevel::Full);
-            exposures.retain(|item| active_snapshot.active.contains(&item.capability_id));
-            // Use the owner's canonical input schemas, never the convenience
-            // presentation schema as an independent permission contract.
-            for exposure in &mut exposures {
-                let capability = registry
-                    .capability(&exposure.capability_id)
-                    .ok_or_else(|| error("tool is not materialized"))?;
-                let action = capability
-                    .manifest
-                    .contributions
-                    .actions
-                    .iter()
-                    .find(|action| action.action_id == exposure.action_id)
-                    .ok_or_else(|| error("tool action is unavailable"))?;
-                exposure.definition.input_schema =
-                    nomifun_agent_domain_wave2::resolve_action_schema(
-                        exposure.capability_id.as_ref(),
-                        &action.input_schema,
-                    )
-                    .map_err(error)?;
-            }
-            let plan = compile_coding_tool_plan(&compiled, &active_snapshot, &registry, exposures)
-                .map_err(error)?;
-            let tools = Arc::new(JoinedTools::new(Arc::new(KernelCodingToolInvoker::new(
-                kernel,
-                compiled.clone(),
-                active,
-                principal.clone(),
-                ScopeKey::from(format!("session:{}", options.conversation_id)),
-            ))));
-            let host = Arc::new(ConversationCodingHost {
-                owner,
+            let primary_image_input = admitted.revision().payload.chat_route_records.get(&route.model_task)
+                .is_some_and(|record| record.primary.features.contains(&ChatRouteFeature::ImageInput));
+            let resources = session_host.open_kernel_session(&admitted)?;
+            let compiled = resources.compiled().clone();
+            let active = resources.active_state().clone();
+            capabilities::restore(&pool, &options, &binding, &compiled, &active).await?;
+            // Compile the exact selected surface once. This preview does not
+            // mutate the Kernel active set or expose inactive tools to a model.
+            let preview = active.snapshot().map_err(error)?;
+            let registry = resources.registry_snapshot()?;
+            let full_plan = super::coding_tool_surface::compile(&compiled, &preview, &registry, plugin_schemas.as_ref()).await?;
+            let full_plan = resources.compile_tool_plan(full_plan.model_definitions().into_iter().map(|definition| {
+                let binding = full_plan.binding(&definition.name).expect("compiled definition has a binding");
+                nomifun_engine_core::EngineToolExposure {
+                    definition, capability_id: binding.capability_id.clone(), action_id: binding.action_id.clone(),
+                }
+            }))?;
+            let full_plan = full_plan.merged(&resources.miniapp_tool_plan().await?).map_err(error)?;
+            let full_plan = full_plan.merged(&resources.robot_tool_plan().await?).map_err(error)?;
+            if full_plan.len() > 128 { return Err(error("Coding tool surface exceeds 128 actions")); }
+            let skills = session_host.read_selected_skills(&admitted).await?;
+            let tools = Arc::new(JoinedTools(resources.install_tools(full_plan.clone(), Arc::new(CodingToolObservation))?));
+            let host = Arc::new_cyclic(|weak| ConversationCodingHost {
+                session_host,
                 pool,
                 options: options.clone(),
                 binding: binding.clone(),
                 snapshot_ref: compiled.snapshot_ref().clone(),
                 route,
-                plan,
+                primary_image_input,
+                full_plan,
+                compiled: compiled.clone(),
+                capability_port: Arc::new(capabilities::HostPort(weak.clone())),
+                input_port: Arc::new(steering::HostPort(weak.clone())),
+                capability_transition: tokio::sync::Mutex::new(()),
+                activation_failed: false.into(),
+                skills,
                 principal,
-                generation: active_snapshot.generation,
+                capability_state: active,
                 active: tokio::sync::Mutex::new(None),
                 tools: tools.clone(),
+                resources,
             });
-            let model_invoke = broker.build_model_invoke(reqwest::Client::new());
-            let model = Arc::new(BrokerCodingModelPort::new(
-                broker
-                    .build_broker(host.clone(), model_invoke, BrokerRetryPolicy::default())
-                    .map_err(error)?,
-            ));
+            let model = host.session_host.compose_model_port(host.clone())?;
             let build = CodingEngineBuild {
                 family_id: binding.family_id.clone().into(),
                 build_id: binding.build_id.clone().into(),
@@ -209,7 +294,8 @@ pub(crate) fn factory(
                 display_name: descriptor().display_name,
                 supported_profiles: vec![CodingRuntimeProfile::Coding],
             };
-            let engine = Arc::new(CodingEngine::new(build).map_err(error)?);
+            let engine = Arc::new(CodingEngine::new(build).map_err(error)?
+                .with_context_budget(CodingContextBudget { max_context_bytes: 12 * 1024 * 1024, ..Default::default() }).map_err(error)?);
             let engine_binding = EngineBinding::new(
                 session_id,
                 RuntimeBindingId::from(format!("conversation-runtime:{}", options.conversation_id)),
@@ -227,68 +313,43 @@ pub(crate) fn factory(
     })
 }
 
-/// Explicit first production surface. Never silently omit unsupported
-/// middleware, on-demand activation, Skills, MCP or long-lived process owners.
-pub(crate) fn validate_supported_snapshot(
-    snapshot: &ResolvedSnapshotEnvelope,
-) -> Result<(), AppError> {
-    let supported = super::nomi_core_wave2::coding_capability_ids();
-    let unsupported = snapshot
-        .content
-        .initial_capabilities
-        .iter()
-        .filter(|item| !supported.contains(&item.capability.id))
-        .map(|item| item.capability.id.as_ref())
-        .collect::<Vec<_>>();
-    if !unsupported.is_empty()
-        || !snapshot.content.on_demand_capabilities.is_empty()
-        || !snapshot.content.skill_locks.is_empty()
-        || !snapshot.content.mcp_tool_locks.is_empty()
-        || !snapshot.content.initial_miniapp_capabilities.is_empty()
-        || !snapshot.content.on_demand_miniapp_capabilities.is_empty()
-    {
-        return Err(error(format!(
-            "this Coding build supports initial workspace tools only; unsupported capabilities: {}. On-demand, Skills and MiniApps require another installed build",
-            unsupported.join(", ")
-        )));
-    }
-    Ok(())
-}
-
-fn validate_session_extra(extra: &Value) -> Result<(), AppError> {
-    for key in ["skills", "mcp_server_ids", "mcp_servers"] {
-        if extra
-            .get(key)
-            .is_some_and(|value| !value.as_array().is_some_and(Vec::is_empty))
-        {
-            return Err(error(format!(
-                "this Coding build does not support {key}; deselect these capabilities explicitly"
-            )));
-        }
-    }
-    Ok(())
+/// Registered compatibility policy; shared Session routes never name Coding.
+pub(crate) fn support() -> super::coding_tool_surface::CodingAdmission {
+    super::coding_tool_surface::CodingAdmission
 }
 
 struct ActiveTurn {
     root: String,
+    wire_id: String,
+    steering: steering::Inbox,
     operation: String,
     epoch: i64,
-    sequence: i64,
+    journal: super::engine_journal::EngineTurnJournal,
+    cleanup_started: bool,
     cancellation: CancellationToken,
+    event_buffer: super::coding_event_buffer::CodingEventBuffer,
 }
 
 struct ConversationCodingHost {
-    owner: Arc<NomiCoreSessionOwner>,
+    session_host: Arc<super::engine_session_host::EngineSessionHost>,
     pool: SqlitePool,
     options: AgentRuntimeBuildOptions,
     binding: RuntimeEngineBinding,
     snapshot_ref: ResolvedSnapshotRef,
     route: ChatRouteSelection,
-    plan: CodingToolPlan,
+    primary_image_input: bool,
+    full_plan: CodingToolPlan,
+    compiled: Arc<nomifun_agent_kernel::CompiledSnapshot>,
+    capability_port: Arc<capabilities::HostPort>,
+    input_port: Arc<steering::HostPort>,
+    capability_transition: tokio::sync::Mutex<()>,
+    activation_failed: std::sync::atomic::AtomicBool,
+    skills: super::coding_skills::SelectedSkills,
     principal: PrincipalRef,
-    generation: u64,
+    capability_state: Arc<SessionCapabilityState>,
     active: tokio::sync::Mutex<Option<ActiveTurn>>,
     tools: Arc<JoinedTools>,
+    resources: Arc<super::engine_kernel_session::EngineKernelSession>,
 }
 
 impl ConversationCodingHost {
@@ -306,18 +367,43 @@ impl ConversationCodingHost {
         if root != turn.root {
             return Err(error("event root mismatch"));
         }
-        sqlx::query("INSERT INTO conversation_runtime_events (conversation_id, turn_operation_id, sequence, event_json, model_operation_id, created_at) VALUES (?, ?, ?, ?, ?, ?)")
-            .bind(&self.options.conversation_id).bind(&turn.operation).bind(turn.sequence + 1).bind(payload).bind(model_operation).bind(nomifun_common::now_ms()).execute(&self.pool).await.map_err(error)?;
-        turn.sequence += 1;
-        if terminal {
-            *active = None;
-        }
+        self.append_locked_record(turn, payload, model_operation, terminal).await?;
+        if terminal { *active = None; }
         Ok(())
+    }
+
+    async fn append_locked_record(&self, turn: &mut ActiveTurn, payload: String, model_operation: Option<&str>, terminal: bool) -> Result<(), AppError> {
+        use super::engine_journal::EngineJournalWrite;
+        let kind = if terminal { EngineJournalWrite::Terminal }
+            else if turn.cleanup_started { EngineJournalWrite::Cleanup }
+            else { EngineJournalWrite::Progress };
+        turn.journal.append(payload, model_operation.map(str::to_owned), kind).await
     }
 }
 
 #[async_trait]
 impl CodingRuntimeHost for ConversationCodingHost {
+    async fn admit_tool(&self, message: &SendMessageData, event: &CodingEngineEvent) -> Result<bool, AppError> {
+        self.admit_steerable_tool(message, event).await
+    }
+
+    async fn queue_steer(&self, delivery: nomifun_ai_agent::RuntimeSteerDelivery) -> Result<bool, AppError> {
+        self.accept_steer(delivery).await
+    }
+    fn capability_activation_snapshot(
+        &self,
+    ) -> Result<Option<nomifun_ai_agent::AgentCapabilityActivationSnapshot>, AppError> {
+        if self.activation_failed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(error("activation state is not yet durably reconciled"));
+        }
+        let snapshot = self.capability_state.snapshot().map_err(error)?;
+        Ok(Some(nomifun_ai_agent::AgentCapabilityActivationSnapshot {
+            resolved_snapshot_ref: snapshot.resolved_snapshot_ref,
+            generation: snapshot.generation,
+            active_capability_ids: snapshot.active.into_iter().map(|id| id.as_ref().to_owned()).collect(),
+        }))
+    }
+
     async fn prepare_turn(
         &self,
         message: &SendMessageData,
@@ -327,94 +413,78 @@ impl CodingRuntimeHost for ConversationCodingHost {
             .source_message_id
             .as_deref()
             .unwrap_or(&message.msg_id);
-        let row: Option<(String, i64, String)> = sqlx::query_as(
-            "SELECT r.operation_id, c.admission_epoch, m.content FROM conversations c \
-             JOIN conversation_delivery_receipts r ON r.operation_id = c.active_turn_operation_id \
-             JOIN messages m ON m.message_id = r.message_id AND m.conversation_id = c.conversation_id \
-             WHERE c.conversation_id = ? AND c.user_id = ? AND c.status = 'running' \
-             AND r.user_id = c.user_id AND r.conversation_id = c.conversation_id \
-             AND r.message_id = ? AND r.kind = 'turn' AND r.status = 'accepted'")
-            .bind(&self.options.conversation_id).bind(&self.options.user_id).bind(root).fetch_optional(&self.pool).await.map_err(error)?;
-        let (operation, epoch, root_content) =
-            row.ok_or_else(|| error("no committed active root-message authority"))?;
+        let admitted = self.session_host.read_turn_receipt(&self.options, &self.binding, &self.snapshot_ref, message).await?;
+        let patch_recovery = super::coding_patch_recovery::load(&self.pool, &admitted, &self.snapshot_ref).await?;
+        // Refresh platform facts each turn. Unknown-limit fallback and output
+        // reservation are explicit Coding policies, not platform defaults.
+        let facts = self.session_host.read_model_facts(admitted.session()).await?;
+        let (context, output) = facts.envelope_with_unknown_policy(super::engine_model_facts::EngineModelLimits {
+            context_tokens: Some(32_768), output_tokens: Some(4096),
+        }).ok_or_else(|| error("model limits cannot support Coding context policy"))?;
+        let model_budget = CodingModelBudget::from_limits(Some(context), Some(output)).map_err(error)?;
+        let operation = admitted.operation_id().to_owned();
+        let epoch = admitted.admission_epoch();
+        let journal = self.session_host.open_journal(&admitted, cancellation.clone())?;
         let mut active = self.active.lock().await;
         if active.is_some() {
             return Err(error("previous turn has not reached its recorded terminal"));
         }
+        self.resources.open_turn(&admitted, journal.clone())?;
         *active = Some(ActiveTurn {
             root: root.into(),
+            wire_id: message.msg_id.clone(),
+            steering: Default::default(),
             operation: operation.clone(),
             epoch,
-            sequence: 0,
+            journal,
+            cleanup_started: false,
             cancellation: cancellation.clone(),
+            event_buffer: Default::default(),
         });
         drop(active);
-        if !message.files.is_empty() || !message.inject_skills.is_empty() {
-            return Err(error(
-                "attachments and injected Skills are not supported by this Coding build",
-            ));
+        let response = admitted.session().session();
+        let receipt = admitted.request_payload();
+        self.skills.validate_extra(&response.extra)?;
+        self.skills.validate_ids(&message.inject_skills)?;
+        if self.activation_failed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(error("activation persistence is uncertain; reopen the runtime to restore its durable state"));
         }
-        let root_content: Value = serde_json::from_str(&root_content).map_err(error)?;
-        if root_content.get("content").and_then(Value::as_str) != Some(message.content.as_str()) {
-            return Err(error("message text differs from its durable root"));
+        let capabilities = self.capability_state.snapshot().map_err(error)?;
+        // Owner-projected authority, not a model assertion. Activation returns
+        // an updated projection only after its generation is durably committed.
+        let context_image_input = capabilities.active.iter().any(|id| id.as_ref() == "llm.vision")
+            && self.primary_image_input;
+        let current_content = super::coding_attachments::prepare(message, receipt, &response.extra,
+            capabilities.active.iter().any(|id| id.as_ref() == "llm.vision")).await?;
+        // Supply a bounded canonical candidate window, not a model-context
+        // strategy. Coding owns selection and per-call budgets. Host limits
+        // bound DB/resource consumption independently of the engine algorithm.
+        // Tool results remain data, never new system instructions.
+        let bytes = message.content.len();
+        if bytes > 8 * 1024 * 1024 {
+            return Err(error("current message exceeds the host history projection budget"));
         }
-        let response = self
-            .owner
-            .get_session(&self.options.user_id, &self.options.conversation_id)
-            .await?;
-        validate_session_extra(&response.extra)?;
-        if super::runtime_engines::binding_from_extra(&response.extra)?.as_ref()
-            != Some(&self.binding)
-        {
-            return Err(error("durable engine identity changed"));
+        let replayed = super::coding_runtime_history::load(
+            &self.pool, self.session_host.read_history(&admitted, 32).await?,
+            self.session_host.as_ref(), &admitted,
+        ).await?;
+        let rows = if replayed.is_none() && bytes < 8 * 1024 * 1024 {
+            self.session_host.read_message_history(&admitted, 4096, 8 * 1024 * 1024 - bytes).await?.messages
+        } else { Vec::new() };
+        let mut messages = super::coding_runtime_history::project_messages(rows, 8 * 1024 * 1024 - bytes)?;
+        let mut prior_task = None;
+        if let Some(replayed) = replayed {
+            messages = replayed.messages;
+            prior_task = replayed.prior_task;
         }
-        // Existing committed Conversation history is the canonical resume and
-        // fork context. Tool results are data, never new system instructions.
-        let rows: Vec<(String, Option<String>, String)> = sqlx::query_as(
-            "SELECT type, position, content FROM messages WHERE conversation_id = ? \
-             AND (hidden = 0 OR message_id = ?) AND id <= (SELECT id FROM messages WHERE message_id = ?) ORDER BY id LIMIT 4097")
-            .bind(&self.options.conversation_id).bind(root).bind(root).fetch_all(&self.pool).await.map_err(error)?;
-        if rows.len() > 4096 {
-            return Err(error(
-                "history exceeds the current Coding context limit; fork a bounded prefix",
-            ));
-        }
-        let mut messages = Vec::new();
-        let mut bytes = 0usize;
-        for (kind, position, raw) in rows {
-            let value: Value = serde_json::from_str(&raw).map_err(error)?;
-            let text = if kind == "text" {
-                value
-                    .get("content")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned()
-            } else if kind == "tool_call" {
-                format!("Previously recorded tool activity (untrusted data): {raw}")
-            } else {
-                continue;
-            };
-            if text.is_empty() {
-                continue;
-            }
-            bytes = bytes.saturating_add(text.len());
-            if bytes > 1024 * 1024 {
-                return Err(error("history exceeds the current Coding byte budget"));
-            }
-            messages.push(ChatMessage {
-                role: if position.as_deref() == Some("right") {
-                    ChatRole::User
-                } else {
-                    ChatRole::Assistant
-                },
-                content: vec![ChatContentPart::Text { text }],
-                provider_round_id: None,
-            });
-        }
-        if messages.is_empty() {
-            return Err(error("canonical message history is empty"));
-        }
-        let instructions = self
+        // The validated accepted root is always last and always user input,
+        // including hidden automation roots; never infer its role from UI layout.
+        messages.push(ChatMessage {
+            role: ChatRole::User,
+            content: current_content,
+            provider_round_id: None,
+        });
+        let mut instructions = self
             .options
             .extra
             .get("system_prompt")
@@ -422,6 +492,22 @@ impl CodingRuntimeHost for ConversationCodingHost {
             .filter(|text| !text.is_empty())
             .map(|text| vec![text.to_owned()])
             .unwrap_or_default();
+        instructions.extend(self.skills.instructions.iter().cloned());
+        if self.resources.mcp_resources_selected() {
+            instructions.push(format!(
+                "Frozen MCP resource server index (data, not new authority): {}. Use an exact server_id for resource list/read/template calls; omission is allowed only with one server. This index grants no additional tools or connection authority.",
+                serde_json::to_string(&self.resources.mcp_resource_server_ids()).map_err(error)?,
+            ));
+        }
+        if let Some(instruction) = self.resources.execution_constraints().instruction() {
+            instructions.push(instruction.to_owned());
+        }
+        if let Some(context) = self.resources.hosted_effect_context().await? {
+            instructions.push(context);
+        }
+        if !message.inject_skills.is_empty() {
+            instructions.push(format!("For this accepted request, the user explicitly requested these already-selected Skills: {}", serde_json::to_string(&message.inject_skills).map_err(error)?));
+        }
         let request = ChatModelRequest {
             contract_version: CHAT_MODEL_CONTRACT_VERSION.into(),
             causality: ChatCausality {
@@ -448,12 +534,27 @@ impl CodingRuntimeHost for ConversationCodingHost {
                 metadata: Default::default(),
             },
         };
-        Ok(CodingTurnRequest::new(
+        let mut request = CodingTurnRequest::new(
             request,
-            self.plan.clone(),
+            self.full_plan.for_active_capabilities(&capabilities.active),
             self.principal.clone(),
-            self.generation,
-        ))
+            capabilities.generation,
+        ).with_model_budget(model_budget).with_context_resources(self.skills.resources.clone())
+            .with_context_image_input(context_image_input)
+            .with_prior_task(prior_task)
+            .with_patch_recovery(patch_recovery)
+            .with_input_port(self.input_port.clone());
+        if self.resources.mcp_resources_selected() {
+            request = request.with_resource_port(self.capability_port.clone());
+        }
+        if self.compiled.content().enabled_capabilities.iter()
+            .any(|item| item.capability.id.as_ref() == "robot.vision") {
+            request = request.with_live_context_port(self.capability_port.clone());
+        }
+        request = request.with_history_port(Arc::new(history_port::HistoryPort {
+            host: self.session_host.clone(), receipt: admitted, cancellation,
+        }));
+        Ok(request)
     }
 
     async fn record_event(
@@ -461,8 +562,36 @@ impl CodingRuntimeHost for ConversationCodingHost {
         message: &SendMessageData,
         event: &CodingEngineEvent,
     ) -> Result<(), AppError> {
+        if matches!(event, CodingEngineEvent::CapabilitiesActivated { .. } | CodingEngineEvent::TurnInputScope { .. } | CodingEngineEvent::SteeringInputs { .. } | CodingEngineEvent::SteeringDeferred { .. }) {
+            return Err(error("control records must be committed by the platform owner"));
+        }
+        if matches!(event, CodingEngineEvent::ToolStarted { step, .. } if *step > 0) {
+            return Err(error("model ToolStarted must use atomic tool admission"));
+        }
+        if let CodingEngineEvent::PatchRecoveryUpdated { state } = event {
+            state.validate().map_err(error)?;
+        }
+        let records = {
+            let mut active = self.active.lock().await;
+            let turn = active.as_mut().ok_or_else(|| error("event without admitted turn"))?;
+            if turn.root != message.source_message_id.as_deref().unwrap_or(&message.msg_id) {
+                return Err(error("event root differs from admitted turn"));
+            }
+            turn.event_buffer.project(event)
+        };
+        for event in &records {
+        if let CodingEngineEvent::ContextCompacted { retained_context: Some(items), .. } = event {
+            // The host projection can change descriptor lengths. Reject an
+            // oversized replacement before persisting it or acknowledging the
+            // engine's write-ahead event; never store a checkpoint replay will
+            // reject merely because projection expanded an omission notice.
+            if serde_json::to_vec(items).map_err(error)?.len() > 2 * 1024 * 1024 {
+                return Err(error("projected compaction replacement exceeds replay budget"));
+            }
+        }
         let model_operation = match event {
-            CodingEngineEvent::ModelStepStarted { operation_id, .. } => Some(operation_id.as_ref()),
+            CodingEngineEvent::ModelStepStarted { operation_id, .. }
+                | CodingEngineEvent::CompactionStarted { operation_id, .. } => Some(operation_id.as_ref()),
             _ => None,
         };
         let payload = serde_json::to_string(event).map_err(error)?;
@@ -481,41 +610,46 @@ impl CodingRuntimeHost for ConversationCodingHost {
             model_operation,
             terminal,
         )
-        .await
+        .await?;
+        if matches!(event, CodingEngineEvent::TurnStarted { .. }) {
+            self.open_steering().await?;
+        }
+        if let CodingEngineEvent::ToolCompleted { result, .. } = event {
+            self.tools.mark_observed(result.call_id.as_ref())?;
+        }
+        }
+        Ok(())
     }
 
     async fn cleanup_turn(&self, message: &SendMessageData) -> Result<(), AppError> {
-        self.tools.join().await?;
-        // Effects already admitted may settle after the model loop was
-        // cancelled. Preserve their outcomes before publishing cancellation;
-        // a cancelled turn never implies its filesystem effects were undone.
-        let settled = self
-            .tools
-            .settled
-            .lock()
-            .map_err(|_| error("tool outcomes poisoned"))?
-            .clone();
-        for payload in &settled {
-            self.append_record(
-                message
-                    .source_message_id
-                    .as_deref()
-                    .unwrap_or(&message.msg_id),
-                payload.clone(),
-                None,
-                false,
-            )
-            .await?;
+        // Always attempt owned-effect cleanup even if inbox journaling fails.
+        let steering = nomifun_ai_agent::engine_effect_scope::guard_effect_settlement(|| self.close_steering()).await;
+        self.resources.cleanup_turn(message.source_message_id.as_deref().unwrap_or(&message.msg_id)).await?;
+        steering?;
+        // Persist the last partial response before the cleanup witness, so a
+        // crash between cleanup and terminal publication retains its text.
+        let mut pending = Vec::new();
+        if let Some(turn) = self.active.lock().await.as_mut() {
+            turn.cleanup_started = true;
+            turn.event_buffer.flush(&mut pending);
         }
-        self.tools
-            .settled
-            .lock()
-            .map_err(|_| error("tool outcomes poisoned"))?
-            .clear();
+        for event in pending {
+            self.append_record(message.source_message_id.as_deref().unwrap_or(&message.msg_id),
+                serde_json::to_string(&event).map_err(error)?, None, false).await?;
+        }
+        // Joined tool tasks have already persisted every settlement before this cleanup witness.
+        self.tools.discard_closed_observations()?;
+        let (epoch, operation) = {
+            let active = self.active.lock().await;
+            let turn = active.as_ref().ok_or_else(|| error("cleanup has no active turn authority"))?;
+            (turn.epoch, turn.operation.clone())
+        };
+        self.append_record(message.source_message_id.as_deref().unwrap_or(&message.msg_id),
+            serde_json::json!({"event":"host_cleanup_proven", "binding":self.binding, "epoch":epoch, "operation":operation}).to_string(), None, false).await?;
         Ok(())
     }
     async fn cleanup_session(&self) -> Result<(), AppError> {
-        self.tools.join().await
+        self.resources.cleanup_session().await
     }
 }
 
@@ -533,7 +667,8 @@ impl ChatCausalityGate for ConversationCodingHost {
         let turn = active
             .as_ref()
             .ok_or_else(|| reject("no active Coding turn"))?;
-        if turn.cancellation.is_cancelled()
+        if self.activation_failed.load(std::sync::atomic::Ordering::Acquire)
+            || turn.cancellation.is_cancelled()
             || causality.agent_session_id.as_ref() != self.options.conversation_id
             || causality.turn_operation_id.as_ref() != turn.operation
             || causality.causation_event_id.as_ref() != turn.root
@@ -544,239 +679,30 @@ impl ChatCausalityGate for ConversationCodingHost {
                 "Coding request differs from its admitted Conversation authority",
             ));
         }
-        // Claim the recorded model operation once, under the durable owner's
-        // active generation. Retries inside the Broker retain this one claim.
-        let result = sqlx::query("UPDATE conversation_runtime_events SET model_claimed = 1 \
-            WHERE conversation_id = ? AND turn_operation_id = ? AND model_operation_id = ? AND model_claimed = 0 \
-            AND EXISTS (SELECT 1 FROM conversations c JOIN conversation_delivery_receipts r ON r.operation_id = c.active_turn_operation_id \
-                WHERE c.conversation_id = ? AND c.user_id = ? AND c.status = 'running' AND c.admission_epoch = ? \
-                AND c.active_turn_operation_id = ? AND r.status = 'accepted' AND r.message_id = ?)")
-            .bind(&self.options.conversation_id).bind(&turn.operation).bind(causality.operation_id.as_ref())
-            .bind(&self.options.conversation_id).bind(&self.options.user_id).bind(turn.epoch).bind(&turn.operation).bind(&turn.root)
-            .execute(&self.pool).await.map_err(|_| reject("cannot establish durable model authority"))?;
-        if result.rows_affected() != 1 {
-            return Err(reject(
-                "model operation already claimed or Conversation generation fenced",
-            ));
-        }
-        Ok(())
+        turn.journal.authorize(causality).await
     }
 }
 
-/// Kernel calls run in owned tasks. Cancellation closes the caller, but never
-/// drops an in-flight filesystem/VCS effect and calls that cleanup. The host
-/// joins all tasks before terminal publication or workspace lease release.
-struct JoinedTools {
-    inner: Arc<dyn CodingToolInvoker>,
-    tasks: Mutex<Vec<Shared<BoxFuture<'static, Result<(), String>>>>>,
-    failed: std::sync::atomic::AtomicBool,
-    settled: Arc<Mutex<Vec<String>>>,
+/// Coding supplies only its instruction-observation policy; tool lifetime,
+/// duplicate fencing and durable dispatch/settlement belong to the shared host.
+struct JoinedTools(Arc<super::engine_tool_host::EngineToolHost>);
+impl std::ops::Deref for JoinedTools {
+    type Target = super::engine_tool_host::EngineToolHost;
+    fn deref(&self) -> &Self::Target { &self.0 }
 }
-impl JoinedTools {
-    fn new(inner: Arc<dyn CodingToolInvoker>) -> Self {
-        Self {
-            inner,
-            tasks: Mutex::new(Vec::new()),
-            failed: false.into(),
-            settled: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-    async fn join(&self) -> Result<(), AppError> {
-        // Keep completion witnesses in the owner if a teardown caller itself
-        // times out. A retry must wait for those same tasks, not an empty list.
-        let tasks = self
-            .tasks
-            .lock()
-            .map_err(|_| error("tool ownership lock poisoned"))?
-            .clone();
-        for task in tasks {
-            if task.await.is_err() {
-                self.failed
-                    .store(true, std::sync::atomic::Ordering::Release);
-            }
-        }
-        self.tasks
-            .lock()
-            .map_err(|_| error("tool ownership lock poisoned"))?
-            .retain(|task| task.peek().is_none());
-        if self.failed.load(std::sync::atomic::Ordering::Acquire) {
-            Err(error("tool task panicked; cleanup cannot be proven"))
+struct CodingToolObservation;
+impl super::engine_tool_host::EngineToolObservationPolicy for CodingToolObservation {
+    fn project(&self, invocation: &CodingToolInvocation, result: &CodingToolResult) -> CodingToolResult {
+        if super::coding_event_buffer::is_instruction_read(&invocation.call) {
+            super::coding_event_buffer::instruction_result(result)
         } else {
-            Ok(())
+            super::engine_tool_host::bounded_engine_tool_result(result)
         }
     }
 }
 #[async_trait]
 impl CodingToolInvoker for JoinedTools {
-    async fn invoke(
-        &self,
-        invocation: CodingToolInvocation,
-        cancellation: CancellationToken,
-    ) -> Result<CodingToolResult, CodingEngineError> {
-        if cancellation.is_cancelled() {
-            return Err(CodingEngineError::Cancelled);
-        }
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let inner = self.inner.clone();
-        let settled = self.settled.clone();
-        {
-            let mut tasks = self
-                .tasks
-                .lock()
-                .map_err(|_| CodingEngineError::ToolInvocation("tool owner poisoned".into()))?;
-            let task = tokio::spawn(async move {
-                let identity = (
-                    invocation.operation_id.clone(),
-                    invocation.call.call_id.clone(),
-                );
-                let result = inner.invoke(invocation, CancellationToken::new()).await;
-                let payload = serde_json::json!({
-                    "event": "host_tool_settled", "operation_id": identity.0, "call_id": identity.1,
-                    "result": result.as_ref().ok(), "error": result.as_ref().err().map(ToString::to_string),
-                }).to_string();
-                settled
-                    .lock()
-                    .expect("tool outcomes lock poisoned")
-                    .push(payload);
-                let _ = tx.send(result);
-            });
-            tasks.push(
-                async move { task.await.map_err(|error| error.to_string()) }
-                    .boxed()
-                    .shared(),
-            );
-        }
-        tokio::select! {
-            _ = cancellation.cancelled() => Err(CodingEngineError::Cancelled),
-            result = rx => result.map_err(|_| CodingEngineError::ToolInvocation("tool task panicked".into()))?,
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    struct NeverInvoke;
-    #[async_trait]
-    impl CodingToolInvoker for NeverInvoke {
-        async fn invoke(
-            &self,
-            _: CodingToolInvocation,
-            _: CancellationToken,
-        ) -> Result<CodingToolResult, CodingEngineError> {
-            panic!("not used")
-        }
-    }
-
-    #[tokio::test]
-    async fn teardown_timeout_retains_the_same_completion_witness() {
-        let owner = JoinedTools::new(Arc::new(NeverInvoke));
-        let release = CancellationToken::new();
-        let token = release.clone();
-        let task = tokio::spawn(async move {
-            token.cancelled().await;
-        });
-        owner.tasks.lock().unwrap().push(
-            async move { task.await.map_err(|e| e.to_string()) }
-                .boxed()
-                .shared(),
-        );
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(20), owner.join())
-                .await
-                .is_err()
-        );
-        assert_eq!(owner.tasks.lock().unwrap().len(), 1);
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(20), owner.join())
-                .await
-                .is_err()
-        );
-        release.cancel();
-        owner.join().await.unwrap();
-        owner.join().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn cancelled_caller_retains_effect_until_exit_and_records_its_outcome() {
-        struct DelayedEffect {
-            started: CancellationToken,
-            release: CancellationToken,
-        }
-        #[async_trait]
-        impl CodingToolInvoker for DelayedEffect {
-            async fn invoke(
-                &self,
-                invocation: CodingToolInvocation,
-                cancellation: CancellationToken,
-            ) -> Result<CodingToolResult, CodingEngineError> {
-                self.started.cancel();
-                self.release.cancelled().await;
-                assert!(
-                    !cancellation.is_cancelled(),
-                    "admitted effects must not lose their completion witness"
-                );
-                Ok(CodingToolResult::text(
-                    invocation.call.call_id,
-                    "effect committed",
-                    false,
-                ))
-            }
-        }
-        let started = CancellationToken::new();
-        let release = CancellationToken::new();
-        let owner = Arc::new(JoinedTools::new(Arc::new(DelayedEffect {
-            started: started.clone(),
-            release: release.clone(),
-        })));
-        let invocation = CodingToolInvocation {
-            agent_session_id: "session".into(), principal: PrincipalRef { principal_kind: "user".into(), principal_id: "owner".into() },
-            resolved_snapshot_ref: ResolvedSnapshotRef { snapshot_id: "snapshot".into(), snapshot_digest: "a".repeat(64).into() },
-            active_set_generation: 1, turn_operation_id: "turn".into(), operation_id: "tool-operation".into(), idempotency_key: "key".into(), correlation_id: "correlation".into(),
-            call: ChatToolCall { call_id: "call".into(), name: "write_file".into(), arguments: StrictJsonValue(serde_json::json!({})), provider_metadata: Default::default() },
-            binding: serde_json::from_value(serde_json::json!({
-                "model_name":"write_file", "definition":{"name":"write_file","description":"fixture","input_schema":{}},
-                "schema_digest":"a".repeat(64), "canonical_input_schema_ref":"fixture", "capability_contract_digest":"b".repeat(64),
-                "capability_id":"fs.write", "action_id":"write", "resource_binding_ids":[], "effect_class":"managed_effect", "parallel_safe":false
-            })).unwrap(),
-        };
-        let cancellation = CancellationToken::new();
-        let caller_owner = owner.clone();
-        let token = cancellation.clone();
-        let caller = tokio::spawn(async move { caller_owner.invoke(invocation, token).await });
-        tokio::time::timeout(std::time::Duration::from_secs(1), started.cancelled())
-            .await
-            .unwrap();
-        cancellation.cancel();
-        assert!(matches!(
-            caller.await.unwrap(),
-            Err(CodingEngineError::Cancelled)
-        ));
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(20), owner.join())
-                .await
-                .is_err()
-        );
-        release.cancel();
-        owner.join().await.unwrap();
-        let settled = owner.settled.lock().unwrap();
-        assert_eq!(settled.len(), 1);
-        let event: Value = serde_json::from_str(&settled[0]).unwrap();
-        assert_eq!(event["operation_id"], "tool-operation");
-        assert_eq!(event["result"]["is_error"], false);
-        assert!(event.to_string().contains("effect committed"));
-    }
-
-    #[tokio::test]
-    async fn tool_panic_permanently_refuses_cleanup_proof() {
-        let owner = JoinedTools::new(Arc::new(NeverInvoke));
-        let task = tokio::spawn(async { panic!("fixture tool panic") });
-        owner.tasks.lock().unwrap().push(
-            async move { task.await.map_err(|e| e.to_string()) }
-                .boxed()
-                .shared(),
-        );
-        assert!(owner.join().await.is_err());
-        assert!(owner.join().await.is_err());
+    async fn invoke(&self, invocation: CodingToolInvocation, cancellation: CancellationToken) -> Result<CodingToolResult, CodingEngineError> {
+        nomifun_engine_core::EngineToolInvoker::invoke(self.0.as_ref(), invocation, cancellation).await.map_err(Into::into)
     }
 }

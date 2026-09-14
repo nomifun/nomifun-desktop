@@ -8,17 +8,25 @@
 #![forbid(unsafe_code)]
 
 pub mod adapter;
+mod anthropic_decoder;
 pub mod broker;
 pub mod contracts;
+pub mod engine_port;
 pub mod ports;
 pub mod production;
+mod provider_errors;
+mod provider_reasoning;
+mod responses_decoder;
+mod wire_budget;
 pub mod recorded;
 pub mod responses_bridge;
 
 pub use adapter::*;
 pub use broker::*;
 pub use contracts::*;
+pub use engine_port::*;
 pub use ports::*;
+pub use provider_reasoning::ChatProviderReasoning;
 pub use production::*;
 pub use recorded::*;
 pub use responses_bridge::*;

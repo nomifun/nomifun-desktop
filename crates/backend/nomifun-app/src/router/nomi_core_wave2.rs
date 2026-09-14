@@ -40,11 +40,11 @@ pub(crate) const FS_WATCH: &str = "fs.watch";
 pub(crate) const FS_SNAPSHOT: &str = "fs.snapshot";
 pub(crate) const VCS_PUSH: &str = "vcs.push";
 
-/// Stateless workspace operations usable by the Coding host. Nomi's native
+/// Platform-owned workspace operations usable by the Coding host. Nomi's native
 /// tool admission below remains unchanged, so tools are never registered twice.
 pub(crate) fn coding_capability_ids() -> BTreeSet<CapabilityId> {
-    ["fs.read", "fs.search", "fs.write", "fs.patch", "fs.delete",
-     "vcs.status", "vcs.diff", "vcs.stage", "vcs.commit"]
+    ["fs.read", "fs.search", "fs.write", "fs.patch", "fs.delete", "fs.snapshot",
+     "vcs.status", "vcs.diff", "vcs.stage", "vcs.commit", "vcs.push", "process.exec"]
         .into_iter().map(CapabilityId::from).collect()
 }
 
@@ -63,8 +63,12 @@ pub(crate) fn event_capability_ids() -> BTreeSet<CapabilityId> {
     BTreeSet::from([CapabilityId::from(FS_WATCH)])
 }
 
-pub(crate) fn action_host_port() -> Arc<dyn Wave2HostPort> {
-    Arc::new(NomiCoreWave2Host::default())
+pub(crate) fn action_host_port(services: &crate::services::AppServices) -> Arc<NomiCoreWave2Host> {
+    Arc::new(NomiCoreWave2Host {
+        mcp: Some(super::nomi_core_mcp::NomiCoreMcpHost::for_services(services)),
+        git_receipts: Some(super::hosted_effect_receipts::HostedEffectReceipts::new(services.database.pool().clone())),
+        ..Default::default()
+    })
 }
 
 pub(crate) fn schema_resolver(
@@ -173,7 +177,7 @@ pub(crate) fn with_session_workspace_binding(
     resolved
 }
 
-fn canonical_workspace_root(root: &Path) -> Result<PathBuf, AppError> {
+pub(crate) fn canonical_workspace_root(root: &Path) -> Result<PathBuf, AppError> {
     if !root.is_absolute() {
         return Err(AppError::Conflict(
             "Nomi Wave 2 workspace root is not absolute".to_owned(),
@@ -198,10 +202,105 @@ fn canonical_workspace_root(root: &Path) -> Result<PathBuf, AppError> {
 /// `OnceLock` bound to the first Session.
 #[derive(Default)]
 pub(crate) struct NomiCoreWave2Host {
+    mcp: Option<super::nomi_core_mcp::NomiCoreMcpHost>,
+    git_receipts: Option<super::hosted_effect_receipts::HostedEffectReceipts>,
     roots: Mutex<HashMap<PathBuf, Arc<Wave2ApplicationHost>>>,
+    processes: Mutex<HashMap<(String, String, String), Arc<super::engine_process_host::EngineProcessScope>>>,
 }
 
 impl NomiCoreWave2Host {
+    pub(crate) async fn read_mcp_resource(&self, principal: PrincipalRef, session: AgentSessionId,
+        operation_id: nomifun_agent_contracts::OperationId, resource: TypedResourceBinding,
+        operation: nomifun_mcp::McpResourceOperation) -> Result<StrictJsonValue, AppError> {
+        self.mcp.as_ref().ok_or_else(|| AppError::Conflict("MCP owner is unavailable".into()))?
+            .resource(principal, session, operation_id, resource, operation).await
+            .map_err(|error| AppError::Conflict(error.to_string()))
+    }
+
+    pub(crate) async fn ensure_workspace_git_evidence(&self, root: &Path) -> Result<(), AppError> {
+        self.ensure_workspace_git_ready(root)?;
+        if let Some(receipts) = &self.git_receipts {
+            receipts.ensure_git_workspace_settled(root).await?;
+        }
+        Ok(())
+    }
+
+    fn retained_workspace_host(&self, root: &Path) -> Result<Option<Arc<Wave2ApplicationHost>>, AppError> {
+        // A Session captures this canonical identity on admission. Cleanup must
+        // not re-resolve a removed, renamed or replaced filesystem path.
+        Ok(self.roots.lock().map_err(|_| AppError::Conflict("workspace owners poisoned".into()))?.get(root).cloned())
+    }
+
+    /// Current-process owner observation, not cross-boot effect reconciliation.
+    pub(crate) fn ensure_workspace_git_ready(&self, root: &Path) -> Result<(), AppError> {
+        if let Some(owner) = self.retained_workspace_host(root)? { owner.ensure_git_ready()?; }
+        Ok(())
+    }
+
+    pub(crate) async fn settle_workspace_git(&self, root: &Path) -> Result<(), AppError> {
+        if let Some(owner) = self.retained_workspace_host(root)? { owner.settle_git().await?; }
+        Ok(())
+    }
+
+    pub(crate) async fn invoke_mcp_tool(&self, context: nomifun_agent_kernel::CapabilityInvocationContext, input: StrictJsonValue) -> Result<StrictJsonValue, Wave2HostPortError> {
+        self.mcp.as_ref().ok_or_else(|| Wave2HostPortError::unavailable("no current-product MCP owner is configured"))?
+            .invoke(context.into(), input).await
+    }
+    pub(crate) async fn ensure_mcp_settled(&self, user: &str, session: &str) -> Result<(), AppError> {
+        match &self.mcp {
+            Some(owner) => owner.ensure_settled(user, session).await,
+            None => Ok(()),
+        }
+    }
+    pub(crate) async fn ensure_mcp_source_replay_safe(&self, user: &str, session: &str, source: &str) -> Result<(), AppError> {
+        match &self.mcp {
+            Some(owner) => owner.ensure_source_replay_safe(user, session, source).await,
+            None => Ok(()),
+        }
+    }
+    pub(crate) async fn mcp_recovery_context(&self, user: &str, session: &str) -> Result<Option<String>, AppError> {
+        match &self.mcp {
+            Some(owner) => owner.recovery_context(user, session).await,
+            None => Ok(None),
+        }
+    }
+    pub(crate) async fn coding_processes_quiescent(&self, user: &str, session: &str) -> Result<bool, AppError> {
+        let scopes = self.processes.lock().map_err(|_| AppError::Conflict("process scopes poisoned".into()))?
+            .iter().filter(|((owner, id, _), _)| owner == user && id == session)
+            .map(|(_, scope)| scope.clone()).collect::<Vec<_>>();
+        for scope in scopes {
+            if !scope.is_quiescent().await { return Ok(false); }
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn open_coding_turn(&self, user: &str, session: &str, operation: &str, root: &str, journal: super::engine_journal::EngineTurnJournal) -> Result<(), AppError> {
+        let key = (user.to_owned(), session.to_owned(), operation.to_owned());
+        let root = canonical_workspace_root(Path::new(root))?;
+        let mut scopes = self.processes.lock().map_err(|_| AppError::Conflict("process scopes poisoned".into()))?;
+        if scopes.contains_key(&key) { return Err(AppError::Conflict("process turn already registered".into())); }
+        let scope = super::engine_process_host::EngineProcessScope::new(&root, journal).map_err(|error| AppError::Conflict(error.to_string()))?;
+        scopes.insert(key, Arc::new(scope));
+        Ok(())
+    }
+
+    pub(crate) async fn cleanup_coding_session(&self, user: &str, session: &str) -> Result<(), AppError> {
+        let scopes = self.processes.lock().map_err(|_| AppError::Conflict("process scopes poisoned".into()))?
+            .iter().filter(|((owner, id, _), _)| owner == user && id == session)
+            .map(|(key, scope)| (key.clone(), scope.clone())).collect::<Vec<_>>();
+        // Close every scope before waiting; one failed cleanup must not leave
+        // other scopes accepting launches or skip their cleanup attempts.
+        for (_, scope) in &scopes { scope.close_admission(); }
+        let mut failures = Vec::new();
+        for (key, scope) in scopes {
+            match scope.cleanup().await {
+                Ok(()) => { self.processes.lock().map_err(|_| AppError::Conflict("process scopes poisoned".into()))?.remove(&key); }
+                Err(error) => failures.push(error.to_string()),
+            }
+        }
+        if failures.is_empty() { Ok(()) } else { Err(AppError::Conflict(failures.join("; "))) }
+    }
+
     fn host_for(
         &self,
         context: &Wave2HostContext,
@@ -215,12 +314,24 @@ impl NomiCoreWave2Host {
                 context.capability_id.as_ref()
             )));
         }
-        let canonical_root = exact_session_workspace_root(
+        let canonical_root = if context.capability_id.as_ref() == "process.exec" {
+            exact_session_process_root(context)?
+        } else { exact_session_workspace_root(
             &context.agent_session_id,
             &context.principal.principal_id,
             &context.resource_bindings,
-        )?;
+        )? };
         self.host_for_root(canonical_root)
+    }
+
+    pub(crate) async fn cleanup_coding_snapshots(&self, session: &str) -> Result<(), AppError> {
+        let hosts = self.roots.lock().map_err(|_| AppError::Conflict("workspace owners poisoned".into()))?
+            .values().cloned().collect::<Vec<_>>();
+        let mut failures = Vec::new();
+        for host in hosts {
+            if let Err(error) = host.dispose_session_snapshots(session).await { failures.push(error.to_string()); }
+        }
+        if failures.is_empty() { Ok(()) } else { Err(AppError::Conflict(failures.join("; "))) }
     }
 
     fn host_for_root(
@@ -234,9 +345,11 @@ impl NomiCoreWave2Host {
         if let Some(owner) = roots.get(&canonical_root) {
             return Ok(Arc::clone(owner));
         }
-        let owner = Arc::new(Wave2ApplicationHost::for_workspace_root(
-            canonical_root.clone(),
-        ));
+        let owner = Wave2ApplicationHost::for_workspace_root(canonical_root.clone());
+        let owner = Arc::new(match &self.git_receipts {
+            Some(receipts) => owner.with_git_receipts(receipts.clone()),
+            None => owner,
+        });
         roots.insert(canonical_root, Arc::clone(&owner));
         Ok(owner)
     }
@@ -263,6 +376,10 @@ impl Wave2HostPort for NomiCoreWave2Host {
         >,
     > {
         Box::pin(async move {
+            if let nomifun_agent_domain_wave2::Wave2CapabilityOperation::McpConnectors { input } = &request.operation {
+                let owner = self.mcp.as_ref().ok_or_else(|| Wave2HostPortError::unavailable("no current-product MCP owner is configured"))?;
+                return owner.invoke((&request.context).into(), input.clone()).await;
+            }
             let input = match &request.operation {
                 nomifun_agent_domain_wave2::Wave2CapabilityOperation::WorkspaceExecution {
                     input,
@@ -273,6 +390,30 @@ impl Wave2HostPort for NomiCoreWave2Host {
                     ));
                 }
             };
+            if request.context.capability_id.as_ref() == VCS_PUSH && self.git_receipts.is_none() {
+                return Err(Wave2HostPortError::unavailable("Conversation Git dispatch requires the persistent effect owner"));
+            }
+            let root = if request.context.capability_id.as_ref() == "process.exec" {
+                exact_session_process_root(&request.context)?
+            } else {
+                exact_session_workspace_root(&request.context.agent_session_id,
+                    &request.context.principal.principal_id, &request.context.resource_bindings)?
+            };
+            self.ensure_workspace_git_evidence(&root).await
+                .map_err(|error| Wave2HostPortError::unavailable(error.to_string()))?;
+            if request.context.capability_id.as_ref() == "process.exec" {
+                nomifun_agent_domain_wave2::validate_action_input("process.exec", input)
+                    .map_err(|error| Wave2HostPortError::new("INVALID_PAYLOAD", error))?;
+                let root = exact_session_process_root(&request.context)?;
+                let key = (request.context.principal.principal_id.clone(), request.context.agent_session_id.as_ref().to_owned(), request.context.correlation_id.as_ref().to_owned());
+                let scope = self.processes.lock().map_err(|_| Wave2HostPortError::unavailable("process scopes poisoned"))?.get(&key).cloned()
+                    .ok_or_else(|| Wave2HostPortError::unavailable("no admitted Coding process turn for this exact authority"))?;
+                // The process runtime uses native canonical paths (including
+                // Windows extended prefixes); compare like representations.
+                let native_root = std::fs::canonicalize(&root).map_err(|error| Wave2HostPortError::unavailable(error.to_string()))?;
+                if scope.workspace_root() != native_root.as_path() { return Err(Wave2HostPortError::unavailable("process workspace authority changed")); }
+                return scope.invoke(input.clone(), request.context.operation_id.as_ref()).await;
+            }
             let owner = dispatch_validated_action_input(
                 request.context.capability_id.as_ref(),
                 input,
@@ -291,6 +432,57 @@ fn dispatch_validated_action_input<T>(
     nomifun_agent_domain_wave2::validate_action_input(capability_id, input)
         .map_err(|error| Wave2HostPortError::new("INVALID_PAYLOAD", error))?;
     Ok(dispatch())
+}
+
+/// A process grant never implies a file grant. Only the host may substitute
+/// the current Session root into an already authorized process resource.
+pub(crate) fn session_process_binding(
+    server_workspace: &str,
+    owner: &PrincipalRef,
+    session_id: &AgentSessionId,
+    authority: &TypedResourceBinding,
+) -> Result<TypedResourceBinding, AppError> {
+    if owner.principal_kind != "user" || owner.principal_id.is_empty()
+        || authority.resource_kind.as_ref() != "process_session"
+        || authority.owner_id != owner.principal_id
+        || authority.resource_id.as_ref().is_empty()
+        || authority.connection_config_ref.is_some()
+        || !authority.operations.contains("execute")
+        || server_workspace.trim().is_empty()
+    {
+        return Err(AppError::Conflict("Coding requires an owned process execute grant".into()));
+    }
+    let root = canonical_workspace_root(Path::new(server_workspace))?;
+    let root = root.to_str().ok_or_else(|| AppError::Conflict("process root is not UTF-8".into()))?;
+    let mut binding = authority.clone();
+    binding.binding_id = ResourceBindingId::from(format!("coding-session-process:{}", session_id.as_ref()));
+    binding.typed_parameters = BTreeMap::from([(WORKSPACE_ROOT_PARAMETER.into(), root.into())]);
+    Ok(binding)
+}
+
+fn exact_session_process_root(context: &Wave2HostContext) -> Result<PathBuf, Wave2HostPortError> {
+    let [binding] = context.resource_bindings.as_slice() else {
+        return Err(Wave2HostPortError::unavailable("process execution requires one Session process binding"));
+    };
+    if binding.binding_id.as_ref() != format!("coding-session-process:{}", context.agent_session_id.as_ref())
+        || binding.resource_kind.as_ref() != "process_session"
+        || binding.owner_id != context.principal.principal_id
+        || context.principal.principal_kind != "user"
+        || binding.resource_id.as_ref().is_empty()
+        || !binding.operations.contains("execute")
+        || binding.connection_config_ref.is_some()
+        || binding.typed_parameters.len() != 1
+    {
+        return Err(Wave2HostPortError::unavailable("process execution has no exact Session authority"));
+    }
+    let raw = binding.typed_parameters.get(WORKSPACE_ROOT_PARAMETER)
+        .ok_or_else(|| Wave2HostPortError::unavailable("process root is missing"))?;
+    let root = canonical_workspace_root(Path::new(raw))
+        .map_err(|error| Wave2HostPortError::unavailable(error.to_string()))?;
+    if root != PathBuf::from(raw) {
+        return Err(Wave2HostPortError::unavailable("process root is not canonical"));
+    }
+    Ok(root)
 }
 
 fn exact_session_workspace_root(

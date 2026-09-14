@@ -8,6 +8,7 @@ import { MemoryRouter, useLocation } from 'react-router-dom';
 import en from '../../services/i18n/locales/en-US/agentSettings.json';
 import common from '../../services/i18n/locales/en-US/common.json';
 import AgentResourcePicker, {
+  loadAgentResourceInventory,
   optionsForAgentResourceField,
   type AgentResourceInventory,
 } from './AgentResourcePicker';
@@ -38,9 +39,35 @@ const inventory: AgentResourceInventory = {
   errors: {},
 };
 
-afterEach(() => cleanup());
+const realFetch = globalThis.fetch;
+afterEach(() => { cleanup(); globalThis.fetch = realFetch; });
 
 describe('Agent resource picker', () => {
+  test('loads enabled Plugin products with surfaces through the runtime library contract', async () => {
+    const calls: string[] = [];
+    const plugin = {
+      plugin_id: '0190f5fe-7c00-7a00-8000-000000000001', product_revision: 1,
+      display_name: 'Workspace panel', description: 'Installed Plugin', kind: 'plugin',
+      lifecycle: 'enabled', surface_available: true, updated_at_ms: 1,
+      releases: { pointer_revision: 1, active_release_epoch: 1 },
+      service_health: { state: 'not_applicable' },
+    };
+    globalThis.fetch = (async (input) => {
+      calls.push(new URL(String(input), 'http://127.0.0.1').pathname);
+      return new Response(JSON.stringify({ success: true, data: { library_revision: 1, plugins: [
+        plugin,
+        { ...plugin, plugin_id: '0190f5fe-7c00-7a00-8000-000000000002', lifecycle: 'disabled' },
+        { ...plugin, plugin_id: '0190f5fe-7c00-7a00-8000-000000000003', surface_available: false },
+      ] } }), { headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    const inventory = await loadAgentResourceInventory(['plugin'], new Set(['plugin.surface']));
+    expect(calls).toEqual(['/api/plugins/runtimes']);
+    expect(inventory.errors).toEqual({});
+    expect(inventory.options.plugin).toEqual([
+      { value: plugin.plugin_id, label: plugin.display_name, description: plugin.description },
+    ]);
+  });
+
   test('filters dependent resources by the selected product owner', () => {
     expect(optionsForAgentResourceField('channel', inventory, { companion: 'companion-1' }, new Set(['companion', 'channel'])).map((option) => option.value)).toEqual(['channel-1']);
     expect(optionsForAgentResourceField('channel', inventory, { customer: 'customer-1' }, new Set(['customer', 'channel'])).map((option) => option.value)).toEqual(['channel-3']);

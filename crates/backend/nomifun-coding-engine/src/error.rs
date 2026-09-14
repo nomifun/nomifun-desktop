@@ -9,7 +9,9 @@ pub enum CodingEngineError {
     #[error("engine build was not found: {0}")]
     EngineBuildNotFound(String),
 
-    #[error("engine build digest mismatch for {engine_build_id}: expected {expected}, actual {actual}")]
+    #[error(
+        "engine build digest mismatch for {engine_build_id}: expected {expected}, actual {actual}"
+    )]
     EngineBuildDigestMismatch {
         engine_build_id: String,
         expected: String,
@@ -119,5 +121,39 @@ impl CodingEngineError {
             nomifun_chat_model_broker::ChatRetryDirective::Never,
         );
         Self::from_model_error(error)
+    }
+}
+
+impl From<nomifun_engine_core::EngineProcessError> for CodingEngineError {
+    fn from(error: nomifun_engine_core::EngineProcessError) -> Self {
+        match error {
+            nomifun_engine_core::EngineProcessError::Process(message) => Self::Process(message),
+            nomifun_engine_core::EngineProcessError::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+impl From<nomifun_engine_core::EngineToolError> for CodingEngineError {
+    fn from(error: nomifun_engine_core::EngineToolError) -> Self {
+        use nomifun_engine_core::EngineToolError as E;
+        match error {
+            E::InvalidContract(message) => Self::InvalidContract(message),
+            E::InvalidModelEvent(message) => Self::InvalidModelEvent(message),
+            E::ToolArgumentsTooLarge { limit } => Self::ToolArgumentsTooLarge { limit },
+            E::ToolResultTooLarge { limit } => Self::ToolResultTooLarge { limit },
+            E::ToolSchemaDigestMismatch {
+                tool_name,
+                expected,
+                actual,
+            } => Self::ToolSchemaDigestMismatch {
+                tool_name,
+                expected,
+                actual,
+            },
+            E::ToolPlan(message) => Self::ToolPlan(message),
+            E::CapabilityKernel { code, message } => Self::CapabilityKernel { code, message },
+            E::ToolInvocation(message) => Self::ToolInvocation(message),
+            E::Cancelled => Self::Cancelled,
+        }
     }
 }

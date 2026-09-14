@@ -17,10 +17,6 @@ use nomifun_agent_contracts::{
     ChatRouteRecord as CanonicalChatRouteRecord, ConnectionConfigRef, DigestHex, digest_payload,
     validate_chat_route_records,
 };
-use nomifun_agent_platform::ChatOperationClaimStore;
-use nomifun_agent_session::{
-    AgentSessionStore, ChatOperationClaimRequest, SessionEventAppendResult,
-};
 use nomifun_chat_model_broker::{
     BrokerRetryPolicy, ChatBrokerPort, ChatCausalityGate, ChatModelError,
     ChatModelErrorCode, ChatModelFeature, ChatModelInvokePort, ChatProtocol,
@@ -1088,6 +1084,7 @@ impl ChatModelInvokePort for ProductionChatModelInvoke {
                 body,
                 credential: lease,
                 timeout: Duration::from_secs(120),
+                idle_timeout: Duration::from_secs(120),
                 framing: target.framing,
                 region: target.region,
             })
@@ -1130,6 +1127,14 @@ fn merge_chat_provider_params(
     })?;
 
     for (key, value) in configured {
+        // Provider defaults may tune sampling, but cannot add model-owned
+        // messages/tools/thinking after the Broker's feature admission, or
+        // reinsert model/stream fields removed by the cloud wire encoder.
+        if protocol.uses_anthropic_messages() && matches!(key.as_str(),
+            "model" | "stream" | "messages" | "system" | "tools" | "tool_choice"
+            | "thinking" | "anthropic_version") {
+            continue;
+        }
         if matches!(
             key.as_str(),
             "max_tokens_field" | "chain_rounds" | "require_reasoning_content"
@@ -1173,7 +1178,7 @@ fn merge_chat_provider_params(
                 cap_json_number(body_object, "max_output_tokens", ceiling);
             }
         }
-        ChatProtocol::Anthropic | ChatProtocol::OpenaiChat => {
+        ChatProtocol::OpenaiChat => {
             if let Some(ceiling) = ceiling {
                 let key = configured_ceiling_key.unwrap_or("max_tokens");
                 for default_key in [
@@ -1188,9 +1193,21 @@ fn merge_chat_provider_params(
                 cap_json_number(body_object, key, ceiling);
             }
         }
-        ChatProtocol::Bedrock | ChatProtocol::Vertex => {
+        ChatProtocol::Anthropic | ChatProtocol::Bedrock | ChatProtocol::Vertex => {
             if let Some(ceiling) = ceiling {
                 cap_json_number(body_object, "max_tokens", ceiling);
+            }
+            let max_tokens = body_object.get("max_tokens").and_then(Value::as_u64)
+                .filter(|value| *value > 0)
+                .ok_or_else(|| ChatModelError::invalid_request("Messages output ceiling must be positive"))?;
+            if let Some(thinking) = body_object.get("thinking") {
+                let budget = thinking.get("budget_tokens").and_then(Value::as_u64);
+                if thinking.get("type").and_then(Value::as_str) != Some("enabled")
+                    || !budget.is_some_and(|budget| budget >= 1024 && budget < max_tokens) {
+                    return Err(ChatModelError::invalid_request(
+                        "Messages thinking budget must remain below the effective provider output ceiling",
+                    ));
+                }
             }
         }
     }
@@ -1257,53 +1274,8 @@ fn cap_json_number(
     }
 }
 
-/// Durable model-operation admission backed by the canonical SessionEvent
-/// store. The event's unique `(producer_id, idempotency_key)` pair is the
-/// linearization point for concurrent requests with the same operation id.
-#[derive(Clone)]
-pub struct SqliteChatOperationClaimStore {
-    sessions: Arc<AgentSessionStore>,
-}
 
-impl SqliteChatOperationClaimStore {
-    pub fn new(sessions: Arc<AgentSessionStore>) -> Self {
-        Self { sessions }
-    }
-}
 
-#[async_trait]
-impl ChatOperationClaimStore for SqliteChatOperationClaimStore {
-    async fn claim(&self, request: ChatOperationClaimRequest) -> Result<(), ChatModelError> {
-        let result = self
-            .sessions
-            .claim_chat_operation(request)
-            .await;
-        match result {
-            Ok(SessionEventAppendResult {
-                duplicate: true, ..
-            }) => Err(ChatModelError::new(
-                ChatModelErrorCode::DuplicateOperation,
-                "model operation has already been admitted",
-                ChatRetryDirective::Never,
-            )),
-            Ok(_) => Ok(()),
-            Err(error) => {
-                let code = if error.code() == Some("SESSION_DELETED") {
-                    ChatModelErrorCode::SessionTerminal
-                } else if error.code() == Some("IDEMPOTENCY_CONFLICT") {
-                    ChatModelErrorCode::DuplicateOperation
-                } else {
-                    ChatModelErrorCode::CausalityRejected
-                };
-                Err(ChatModelError::new(
-                    code,
-                    "model operation admission could not be committed",
-                    ChatRetryDirective::Never,
-                ))
-            }
-        }
-    }
-}
 
 fn repository_error_status(error: ProductionRepositoryError) -> u16 {
     match error {
@@ -1315,6 +1287,15 @@ fn repository_error_status(error: ProductionRepositoryError) -> u16 {
 }
 
 fn invoke_error_to_chat_error(error: InvokeError) -> ChatModelError {
+    if error.is_context_length_rejected() {
+        let mut mapped = ChatModelError::new(
+            ChatModelErrorCode::PromptTooLong,
+            "provider rejected the input context length",
+            ChatRetryDirective::Never,
+        );
+        mapped.provider_status = error.http_status;
+        return mapped;
+    }
     let retry = match error.kind {
         InvokeErrorKind::Auth
         | InvokeErrorKind::RateLimited
@@ -1870,13 +1851,18 @@ mod tests {
             )
             .await
             .unwrap();
-        let pool = super::super::agent_platform_host::open_validated_pool(
-            &directory
-                .path()
-                .join(nomifun_v4_root::FRESH_V4_DATABASE_FILE),
-        )
-        .await
-        .unwrap();
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(5)
+            .acquire_timeout(std::time::Duration::from_secs(5))
+            .connect_with(
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(directory.path().join(nomifun_v4_root::FRESH_V4_DATABASE_FILE))
+                    .create_if_missing(false)
+                    .foreign_keys(true)
+                    .busy_timeout(std::time::Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
 
         for (preset, revision, provider, model) in [
             ("preset-a", "preset-a@1", "provider-a", "model-a"),

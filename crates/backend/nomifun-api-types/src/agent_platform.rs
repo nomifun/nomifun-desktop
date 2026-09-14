@@ -42,6 +42,11 @@ impl Default for AgentKnowledgePolicy {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AgentResolvedSnapshot {
+    /// Optional immutable provenance for capability-platform consumers. The
+    /// Session host must re-admit this reference against saved owner artifacts;
+    /// it is neither an Engine selector nor a standalone authority grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_binding: Option<AgentBindingValueDto>,
     #[serde(deserialize_with = "crate::serde_util::deserialize_preset_id")]
     pub preset_id: String,
     pub preset_revision: i64,

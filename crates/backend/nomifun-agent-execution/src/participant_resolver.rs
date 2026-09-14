@@ -582,6 +582,7 @@ mod tests {
 
     fn snapshot() -> AgentResolvedSnapshot {
         AgentResolvedSnapshot {
+            canonical_binding: None,
             preset_id: LEAD_PRESET_ID.to_owned(),
             preset_revision: 7,
             preset_name: "Lead".to_owned(),

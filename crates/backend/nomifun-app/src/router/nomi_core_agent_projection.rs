@@ -150,7 +150,7 @@ fn project_internal(
                 .unwrap_or_default()
         },
     )?;
-    project_revision_parts(
+    let mut projection = project_revision_parts(
         input.revision,
         input.title,
         route,
@@ -174,7 +174,12 @@ fn project_internal(
             .iter()
             .map(|lock| lock.skill.id.as_ref().to_owned())
             .collect(),
-    )
+    )?;
+    projection.snapshot.canonical_binding = Some(
+        serde_json::to_value(input.binding).and_then(serde_json::from_value)
+            .map_err(|error| AppError::Internal(format!("Agent binding projection failed: {error}")))?,
+    );
+    Ok(projection)
 }
 
 fn project_revision_parts(
@@ -216,6 +221,7 @@ fn project_revision_parts(
         model: route.primary.model.clone(),
     };
     let projected_snapshot = AgentResolvedSnapshot {
+        canonical_binding: None,
         preset_id: revision_document.reference.preset_id.as_ref().to_owned(),
         preset_revision: revision,
         preset_name: title.clone(),

@@ -186,6 +186,12 @@ sidecar_artifact / runtime_sidecar production fields
 
 ## 5. 发布锁与证据
 
+实现进度（2026-09-14，未验证）：通用 release-lock 工具已切至 v2，物理删除
+sidecars 字段与创建入口；保留 Host/package/helper/legal 字节摘要。v1 不自动转换，
+需从真实当前制品重新生成。完整 CAR 的 Engine build identity、suite/logs 与
+三平台证据仍不能由这个文件摘要锁单独证明，不能把格式升级计为发布验收通过。
+见 ENGINE-PACKAGING-CUTOVER-2026-09-14.zh.md。
+
 CAR 的 release lock 只记录：
 
 ```text
@@ -207,6 +213,21 @@ logs
 - 旧阶段 synthetic digest。
 
 ## 6. 完成定义
+
+### 现行脚本边界（2026-09-14，源码已改，未执行）
+
+`scripts/gate-agent-v2.mjs` 仅接受 `contract-closure`；C1–C9/AP-7、旧阶段
+native/merge/hard-delete 及自检分支均已退役，调用明确失败，不再产出旧宿主证据。
+保留的合同检查结果为 informational，包含历史兼容合同，不代表 CAR 能力通过。
+旧 D-014 删除清单归档至 contracts/historical/agent-v2，仅供历史摘要保留；不得
+据其删除当前 Conversation/Nomi。当前组装以 contracts/inventory/current-composition.json
+及 CAR-D-019/021 为准。
+
+`check-macos-arm64-native.mjs` 保留 Host/App/DMG 工程预检与可选产品启动/Remote
+生命周期检查；外部执行器/hello/凭据文件探测已删除，旧参数在任何命令前拒绝。
+报告名称改为 macos-arm64-host-preflight。它不是多 Engine 的全量发布 gate，仍需
+上述 CAR-G0～G7 的真实 suite、exact build、平台和行为证据。脚本修改和序列化
+fixture 摘要定点更新均不计为运行验收，本轮没有执行验证。
 
 ### 6.1 设计完成
 
@@ -242,5 +263,5 @@ logs
 - 重新设计 Plugin/MiniApp 产品；
 - 迁移 Voice/Realtime；
 - 构建 Codex app-server；
-- 在本阶段把 Legacy Engine 与 Coding Engine 接入统一生产主链；
+- 恢复旧外部 Wrapper 或建立第二套 Session owner（统一主链上的 Nomi/Coding/社区 Engine 接入属于本阶段 CAR-D-019/021 范围）；
 - 性能 benchmark、模型质量评分和长期在线 canary。

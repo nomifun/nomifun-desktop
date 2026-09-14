@@ -1,8 +1,7 @@
 //! HTTP router assembly for the application.
 
-mod agent_platform;
 pub(crate) mod agent_role_host;
-pub(crate) mod agent_platform_host;
+pub(crate) mod agent_wave1_host;
 pub(crate) mod agent_wave1_companion_host;
 pub(crate) mod agent_wave1_memory_receipts;
 pub(crate) mod agent_wave2_host;
@@ -16,10 +15,8 @@ pub(crate) mod agent_wave3_workshop_host;
 pub(crate) mod agent_wave4_host;
 pub(crate) mod nomi_core_wave4;
 pub(crate) mod chat_broker_host;
-pub(crate) mod fresh_v4_system;
 pub(crate) mod legacy_conversation_port;
 pub mod instance_token_routes;
-pub(crate) mod remote_rest;
 pub(crate) mod remote_runtime;
 pub(crate) mod nomi_core_agent_projection;
 pub(crate) mod nomi_core_builtins;
@@ -30,8 +27,35 @@ pub(crate) mod nomi_core_robot;
 pub(crate) mod nomi_core_resource_bindings;
 pub(crate) mod nomi_core_session;
 pub mod runtime_engines;
+pub mod engine_session_host;
+pub mod engine_journal;
+pub mod engine_history;
+pub mod engine_model_facts;
+pub mod engine_tool_host;
+pub mod engine_kernel_session;
+mod engine_git_lifecycle;
+mod engine_miniapp_tools;
+mod engine_robot_tools;
+mod workspace_file_read;
+mod engine_workspace_media;
+mod engine_mcp_media;
 pub(crate) mod coding_runtime_host;
+mod coding_runtime_history;
+mod coding_patch_recovery;
+mod engine_process_host;
+mod engine_process_recovery;
+mod coding_event_buffer;
+mod coding_tool_surface;
+mod coding_attachments;
+mod coding_skills;
+pub mod engine_skills;
+mod coding_runtime_recovery;
 pub(crate) mod nomi_core_wave2;
+mod nomi_core_mcp;
+mod nomi_core_mcp_resources;
+mod mcp_effect_receipts;
+mod hosted_effect_receipts;
+mod nomi_core_mcp_catalog;
 pub(crate) mod plugin_platform;
 mod plugin_runtime_host;
 #[cfg(feature = "browser-use")]
@@ -48,9 +72,9 @@ mod plugin_product;
 mod model_failover;
 mod routes;
 mod state;
+mod skill_publication;
 mod trace;
 
-pub use agent_platform::create_agent_platform_router;
 pub use routes::{
     create_router, create_router_with_all_state, create_router_with_states, try_create_router,
 };

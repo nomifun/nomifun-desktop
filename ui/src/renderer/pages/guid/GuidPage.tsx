@@ -23,6 +23,8 @@ import { usePendingConversation } from '@/renderer/pages/conversation/components
 import AgentResourcePicker from '@/renderer/components/agent/AgentResourcePicker';
 import {
   resolveAgentResourceSelections,
+  selectedMcpResourceIds,
+  hasFrozenMcpTools,
   type AgentResourceSelectionValue,
 } from '@/renderer/hooks/agent/agentResourceSelection';
 import { Alert, ConfigProvider } from '@arco-design/web-react';
@@ -156,27 +158,30 @@ const GuidPage: React.FC = () => {
     ? new Set(agentSelection.selectedTemplate.seed.skill_bindings.map((skill) => skill.id))
     : presetCapabilities.skillNames;
   const presetSkillNamesKey = Array.from(presetSkillNames).sort().join('\u0000');
-  const requiredMcpServerId = presetResourceKinds.has('mcp_server')
-    ? resourceSelectionValue.mcp_server
-    : undefined;
+  const requiresMcpResource = presetResourceKinds.has('mcp_server');
+  const frozenMcpTools = hasFrozenMcpTools(presetCapabilityIds);
+  const requiredMcpServerIds = useMemo(() => requiresMcpResource
+    ? selectedMcpResourceIds(resourceSelectionValue) : [],
+  [requiresMcpResource, resourceSelectionValue]);
   const effectiveCapabilityDraft = useMemo<SessionCapabilityDraft>(() => ({
     skillNames: capabilityDraft.skillNames,
-    mcpServerIds: requiredMcpServerId
-      ? Array.from(new Set([...capabilityDraft.mcpServerIds, requiredMcpServerId]))
-      : capabilityDraft.mcpServerIds,
-  }), [capabilityDraft, requiredMcpServerId]);
+    mcpServerIds: frozenMcpTools ? requiredMcpServerIds
+      : Array.from(new Set([...capabilityDraft.mcpServerIds, ...requiredMcpServerIds])),
+  }), [capabilityDraft, frozenMcpTools, requiredMcpServerIds]);
   const lockedMcpServerIds = useMemo(
-    () => new Set(requiredMcpServerId ? [requiredMcpServerId] : []),
-    [requiredMcpServerId]
+    () => new Set(requiredMcpServerIds),
+    [requiredMcpServerIds]
   );
+  const displayedCapabilityCatalog = useMemo(() => frozenMcpTools ? {
+    ...capabilityCatalog.catalog,
+    mcpServers: capabilityCatalog.catalog.mcpServers.filter((server) => lockedMcpServerIds.has(server.mcp_server_id)),
+  } : capabilityCatalog.catalog, [capabilityCatalog.catalog, frozenMcpTools, lockedMcpServerIds]);
   const handleCapabilityDraftChange = useCallback((next: SessionCapabilityDraft) => {
     setCapabilityDraft({
       skillNames: next.skillNames,
-      mcpServerIds: requiredMcpServerId
-        ? next.mcpServerIds.filter((id) => id !== requiredMcpServerId)
-        : next.mcpServerIds,
+      mcpServerIds: frozenMcpTools ? [] : next.mcpServerIds.filter((id) => !lockedMcpServerIds.has(id)),
     });
-  }, [requiredMcpServerId]);
+  }, [frozenMcpTools, lockedMcpServerIds]);
 
   useEffect(() => {
     if (capabilityCatalog.loading || capabilityCatalog.error) return;
@@ -562,7 +567,7 @@ const GuidPage: React.FC = () => {
             <GuidInputCard
               sideTools={
                 <SessionCapabilityPicker
-                  catalog={capabilityCatalog.catalog}
+                  catalog={displayedCapabilityCatalog}
                   draft={effectiveCapabilityDraft}
                   onChange={handleCapabilityDraftChange}
                   loading={capabilityCatalog.loading}

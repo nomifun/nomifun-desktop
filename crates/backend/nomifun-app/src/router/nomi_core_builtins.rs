@@ -33,15 +33,16 @@ pub(crate) struct NomiCoreBuiltinPlan {
     pub schema_resolver: Arc<dyn NomiPlatformBuiltinToolSchemaResolver>,
     pub lifecycle_invoker: Arc<dyn NomiPlatformBuiltinLifecycleInvoker>,
     pub wave4_owners: Arc<super::nomi_core_wave4::NomiCoreWave4Owners>,
+    pub wave2_owner: Arc<super::nomi_core_wave2::NomiCoreWave2Host>,
     pub robot_owner: Option<Arc<super::nomi_core_robot::NomiCoreRobotWave4Owner>>,
 }
 
-pub(crate) fn build(services: &AppServices) -> anyhow::Result<NomiCoreBuiltinPlan> {
+pub(crate) async fn build(services: &AppServices) -> anyhow::Result<NomiCoreBuiltinPlan> {
     let mut registrations = nomifun_agent_domain_support::registrations(
         nomifun_agent_domain_support::c7_package_specs(),
     )?;
 
-    let wave1 = super::agent_platform_host::wave1_registrations_for_nomi_core(
+    let wave1 = super::agent_wave1_host::wave1_registrations_for_nomi_core(
         Arc::clone(&services.companion_service),
         services.database.pool().clone(),
     )?;
@@ -58,11 +59,20 @@ pub(crate) fn build(services: &AppServices) -> anyhow::Result<NomiCoreBuiltinPla
         nomifun_agent_domain_wave1::MEMORY_COMPANION_RECALL,
     )]);
 
+    let wave2_owner = super::nomi_core_wave2::action_host_port(services);
     let wave2 = nomifun_agent_domain_wave2::registrations_with_host_port(
-        super::nomi_core_wave2::action_host_port(),
+        wave2_owner.clone(),
     )
     .map_err(anyhow::Error::msg)?;
     replace_package_registrations(&mut registrations, wave2);
+    let mcp_registrations = super::nomi_core_mcp_catalog::load_registrations(
+        &nomifun_db::SqliteMcpServerRepository::new(services.database.pool().clone()),
+        wave2_owner.clone(),
+    ).await?;
+    let mcp_tools = mcp_registrations.iter().flat_map(|registration|
+        registration.metadata.manifest.payload.contributions.capabilities.iter().map(|capability| capability.id.clone())
+    ).collect::<BTreeSet<_>>();
+    registrations.extend(mcp_registrations);
     let wave2_tools = super::nomi_core_wave2::tool_capability_ids();
     let wave2_lifecycle = super::nomi_core_wave2::event_capability_ids();
 
@@ -177,10 +187,13 @@ pub(crate) fn build(services: &AppServices) -> anyhow::Result<NomiCoreBuiltinPla
         .chain(wave3_tools)
         .chain(wave4_tools)
         .collect();
-    let host_dynamic_tool_capability_ids = robot_owner
+    let mut host_dynamic_tool_capability_ids = robot_owner
         .as_ref()
         .map(|_| super::nomi_core_robot::tool_capability_ids())
         .unwrap_or_default();
+    // Available through explicitly compatible engines, not Nomi's native
+    // registry or its JavaScript Plugin tool path.
+    host_dynamic_tool_capability_ids.extend(mcp_tools);
     let context_capability_ids = wave1_context
         .into_iter()
         .chain(wave4_context)
@@ -196,6 +209,7 @@ pub(crate) fn build(services: &AppServices) -> anyhow::Result<NomiCoreBuiltinPla
         schema_resolver: Arc::new(schema_router),
         lifecycle_invoker,
         wave4_owners: wave4,
+        wave2_owner,
         robot_owner,
     })
 }

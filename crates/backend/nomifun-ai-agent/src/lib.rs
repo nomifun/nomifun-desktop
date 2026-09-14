@@ -5,7 +5,14 @@ pub mod boot_process_reaper;
 pub mod runtime_handle;
 pub mod runtime_extension;
 pub mod runtime_catalog;
+pub mod runtime_admission;
 pub mod coding_runtime;
+pub mod engine_sdk;
+mod engine_tasks;
+pub mod engine_effect_scope;
+pub mod model_attachments;
+pub mod nomi_skills;
+pub mod nomi_resources;
 // Rendering page-fetch adapter for knowledge URL sources. The implementation
 // consumes the application-owned Browser Session Hub and keeps the knowledge
 // crate browser-platform-free.
@@ -47,7 +54,7 @@ pub use nomi_agent::ssh_backend::{
     SshSessionBinding, SshSessionLease,
 };
 pub use nomi_agent::requirement_tools::RequirementSink;
-pub use nomi_agent::context_contributor::ContextContributor;
+pub use nomi_agent::context_contributor::{ContextContributor, TurnContext};
 pub use nomi_agent::session_control_tools::{
     AGENT_EXECUTION_OBSERVE_TOOL_NAME, AGENT_EXECUTION_STEER_TOOL_NAME,
     AGENT_FORK_TOOL_NAME, AgentExecutionObserveTool, AgentExecutionSteerTool,
@@ -69,7 +76,8 @@ pub use nomi_config;
 pub use nomi_types;
 
 pub use runtime_state::AgentRuntimeState;
-pub use runtime_extension::{RegisteredAgentRuntime, RuntimeTeardown};
+pub use runtime_extension::{RegisteredAgentRuntime, RuntimeSteerDelivery, RuntimeTeardown};
+pub use runtime_admission::{RuntimeEngineAdmission, RuntimeEngineSupport};
 pub use runtime_catalog::{
     RuntimeEngineBinding, RuntimeEngineCatalog, RuntimeEngineDescriptor,
     RuntimeEngineFactory, RuntimeEngineSelector, RUNTIME_HOST_CONTRACT_VERSION,

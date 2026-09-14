@@ -17,6 +17,10 @@ struct ModelSafeToolError<'a> {
 /// diagnostics remain behind the provider boundary.
 pub(crate) fn model_safe_tool_error(error: &NomiPluginToolError) -> ToolResult {
     let (code, message) = match error {
+        NomiPluginToolError::OutcomeUnknown(_) => (
+            "HOSTED_EFFECT_UNPROVEN".to_owned(),
+            "The hosted effect outcome is unproven. This Session is fenced; do not retry or infer that the effect was undone.",
+        ),
         NomiPluginToolError::Kernel(kernel_error) => {
             let code = kernel_error.canonical_code();
             let message = safe_message_for(code.as_ref());
@@ -63,15 +67,14 @@ fn safe_message_for(code: &str) -> &'static str {
         | "WAVE4_RESOURCE_BINDING_INVALID" => {
             "A required capability resource is missing or invalid."
         }
-        "HUMAN_REVIEW_REQUIRED" => {
-            "Human review is required before this capability can continue."
+        "HUMAN_REVIEW_REQUIRED" => "Human review is required before this capability can continue.",
+        "MCP_TOOL_RETURNED_FAILURE" => {
+            "The MCP tool returned failure and completed protocol cleanup. Inspect the recorded observation; this does not prove no effects or rollback, and does not authorize automatic replay."
         }
         "ROBOT_EFFECT_OUTCOME_UNKNOWN" => {
             "The physical effect outcome is unknown; do not retry automatically."
         }
-        _ if code.contains("NOT_FOUND") => {
-            "The requested capability resource was not found."
-        }
+        _ if code.contains("NOT_FOUND") => "The requested capability resource was not found.",
         _ if code.contains("TIMEOUT") => "The capability operation timed out.",
         _ if code.contains("UNAVAILABLE") || code.contains("OFFLINE") => {
             "The capability is currently unavailable."
@@ -91,12 +94,10 @@ mod tests {
 
     #[test]
     fn typed_host_code_survives_while_internal_diagnostics_are_not_model_visible() {
-        let error = NomiPluginToolError::Kernel(
-            KernelError::capability_execution_failed(
-                "DB_WRITE_FAILED",
-                "sqlite C:/private/data.db failed; POST https://internal.invalid; api_key=sk-secret",
-            ),
-        );
+        let error = NomiPluginToolError::Kernel(KernelError::capability_execution_failed(
+            "DB_WRITE_FAILED",
+            "sqlite C:/private/data.db failed; POST https://internal.invalid; api_key=sk-secret",
+        ));
 
         let result = model_safe_tool_error(&error);
         assert!(result.is_error);
@@ -117,12 +118,10 @@ mod tests {
 
     #[test]
     fn typed_invalid_payload_has_a_stable_safe_message() {
-        let error = NomiPluginToolError::Kernel(
-            KernelError::capability_execution_failed(
-                "INVALID_PAYLOAD",
-                "secret field value was sk-secret",
-            ),
-        );
+        let error = NomiPluginToolError::Kernel(KernelError::capability_execution_failed(
+            "INVALID_PAYLOAD",
+            "secret field value was sk-secret",
+        ));
 
         let result = model_safe_tool_error(&error);
         let payload: serde_json::Value = serde_json::from_str(&result.content).unwrap();

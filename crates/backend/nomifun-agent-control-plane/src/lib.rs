@@ -7,6 +7,7 @@ mod compiler;
 mod continuation;
 mod error;
 mod impact;
+mod kernel_catalog;
 mod routes;
 mod service;
 mod store;
@@ -22,6 +23,10 @@ pub use continuation::{
     revoked_installation_token, rotated_installation_token,
 };
 pub use error::ControlPlaneError;
+pub use kernel_catalog::{
+    KernelCatalogProvider, materialize_capability_catalog_entries,
+    materialize_catalog_snapshot, materialize_catalog_snapshot_with_miniapps,
+};
 pub use impact::{
     ControlPlaneRevisionImpactCatalogProvider, RevisionImpactCatalogProvider,
     StaticRevisionImpactCatalogProvider,

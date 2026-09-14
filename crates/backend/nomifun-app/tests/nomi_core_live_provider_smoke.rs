@@ -2,6 +2,9 @@
 //!
 //! Run explicitly with the credential-isolating runner:
 //! `bun scripts/validation/run-nomi-core-live-provider-smoke.mjs`
+//! Use `--engine-smoke` for bounded official Nomi + Coding engine turns only.
+//! `NOMIFUN_LIVE_STEPFUN_MODEL` selects the confirmed model (step-3.7-flash),
+//! never an endpoint or fallback. Only the runner may read the credential env.
 
 use std::fmt;
 use std::future::Future;
@@ -21,7 +24,9 @@ use zeroize::Zeroizing;
 
 const STEPFUN_PLAN_BASE_URL: &str = "https://api.stepfun.com/step_plan/v1";
 const STEPFUN_PLAN_MODEL: &str = "step-3.7-flash";
-const STEPFUN_SOURCE_MODEL: &str = "step-3.7-flash-source-placeholder";
+const LIVE_MODEL_ENVIRONMENT_NAME: &str = "NOMIFUN_LIVE_STEPFUN_MODEL";
+const ENGINE_SMOKE_DEADLINE: Duration = Duration::from_secs(15 * 60);
+const ENGINE_CAPABILITIES: &[&str] = &["fs.read", "fs.write", "fs.patch", "process.exec"];
 const LIVE_API_KEY_ENVIRONMENT_NAME: &str = "NOMIFUN_LIVE_STEPFUN_API_KEY";
 const STDIN_CREDENTIAL_LIMIT_BYTES: u64 = 16 * 1024;
 const BODY_LIMIT: usize = 4 * 1024 * 1024;
@@ -191,6 +196,14 @@ fn required_secret_from_stdin() -> Result<Zeroizing<String>, SmokeFailure> {
         ));
     }
     Ok(Zeroizing::new(credential.to_owned()))
+}
+
+fn live_model() -> Result<String, SmokeFailure> {
+    match std::env::var(LIVE_MODEL_ENVIRONMENT_NAME) {
+        Ok(model) if model == STEPFUN_PLAN_MODEL => Ok(model),
+        Err(std::env::VarError::NotPresent) => Ok(STEPFUN_PLAN_MODEL.to_owned()),
+        _ => Err(SmokeFailure::new("provider.model", "LIVE_MODEL_INVALID", 400)),
+    }
 }
 
 async fn build_fixture(root: &TempDir) -> Result<LiveFixture, SmokeFailure> {
@@ -500,32 +513,6 @@ async fn configure_stepfun(
         "/provider_id",
         "PROVIDER_ID_MISSING",
     )?;
-    let source_model = successful_json(
-        router,
-        "provider.source_model",
-        Method::PUT,
-        "/api/provider-models",
-        Some(json!({
-            "provider_id": provider_id,
-            "model": {
-                "model": STEPFUN_SOURCE_MODEL,
-                "enabled": true,
-                "sort_order": 1,
-                "capabilities": [{
-                    "task": "chat",
-                    "traits": ["function_calling", "reasoning", "streaming"],
-                    "protocol": "openai.chat_text",
-                    "connection_role": "default",
-                    "provider_params": {"temperature": 0.0},
-                    "output_limit": 4096
-                }]
-            }
-        })),
-        LOCAL_API_DEADLINE,
-        &[StatusCode::OK],
-    )
-    .await?;
-    let _ = envelope_data("provider.source_model", source_model)?;
     Ok(provider_id)
 }
 
@@ -533,6 +520,8 @@ async fn create_agent_preset(
     router: &Router,
     provider_id: &str,
     model: &str,
+    engine: Option<&Value>,
+    selected_capabilities: &[&str],
 ) -> Result<(String, Value), SmokeFailure> {
     let created = successful_json(
         router,
@@ -610,8 +599,8 @@ async fn create_agent_preset(
             StatusCode::BAD_GATEWAY.as_u16(),
         )
     })?;
-    let mut selections = Vec::with_capacity(CODING_CAPABILITIES.len());
-    for capability_id in CODING_CAPABILITIES {
+    let mut selections = Vec::with_capacity(selected_capabilities.len());
+    for capability_id in selected_capabilities {
         let required_resource_kind = if *capability_id == "process.exec" {
             "process_session"
         } else {
@@ -676,6 +665,9 @@ async fn create_agent_preset(
         Value::Array(selections),
     );
     document.insert("skill_bindings".to_owned(), json!([]));
+    if let Some(engine) = engine {
+        document.insert("runtime_engine".to_owned(), engine.clone());
+    }
     document.insert(
         "persona".to_owned(),
         Value::String("You are a precise coding agent operating only in the bound workspace.".to_owned()),
@@ -737,7 +729,7 @@ async fn create_agent_preset(
         })
         .collect::<Vec<_>>();
     saved_ids.sort();
-    let mut expected_ids = CODING_CAPABILITIES
+    let mut expected_ids = selected_capabilities
         .iter()
         .map(|id| (*id).to_owned())
         .collect::<Vec<_>>();
@@ -748,6 +740,10 @@ async fn create_agent_preset(
             "CODING_CAPABILITY_SET_MISMATCH",
             StatusCode::CONFLICT.as_u16(),
         ));
+    }
+    ensure_single_model_route(&saved["revision"]["document"], provider_id, model)?;
+    if engine.is_some_and(|engine| saved.pointer("/revision/document/runtime_engine") != Some(engine)) {
+        return Err(SmokeFailure::new("engine.revision", "ENGINE_SELECTION_NOT_SAVED", 409));
     }
     let saved_revision = require_value(
         "agent_settings.save",
@@ -772,11 +768,41 @@ async fn create_agent_preset(
     ))
 }
 
+// Product selections, not client-authored TypedResourceBinding/operations.
+// Both the bounded engine Agent and the legacy coding Agent require these;
+// chat.minimal requires neither and must not receive unused selections.
+fn coding_resource_selections() -> Value {
+    json!([
+        {"resource_kind": "workspace", "resource_id": "default-workspace"},
+        {"resource_kind": "process_session", "resource_id": "managed-process-session"}
+    ])
+}
+
+fn verify_resource_selections(binding: &Value, selections: &Value) -> Result<(), SmokeFailure> {
+    let selections = selections.as_array().ok_or_else(|| {
+        SmokeFailure::new("session.resources", "FIXTURE_RESOURCE_SELECTION_INVALID", 500)
+    })?;
+    let resources = binding.get("typed_resource_bindings").and_then(Value::as_array).ok_or_else(|| {
+        SmokeFailure::new("session.resources", "SESSION_RESOURCE_BINDINGS_MISSING", 502)
+    })?;
+    if resources.len() != selections.len() || selections.iter().any(|selection| {
+        resources.iter().filter(|resource| {
+            resource.get("resource_kind") == selection.get("resource_kind")
+                && resource.get("resource_id") == selection.get("resource_id")
+        }).count() != 1
+    }) {
+        return Err(SmokeFailure::new("session.resources", "SESSION_RESOURCE_SELECTION_MISMATCH", 409));
+    }
+    Ok(())
+}
+
 async fn create_session(
     router: &Router,
     preset_id: &str,
     provider_id: &str,
     model: &str,
+    expected_engine: Option<&Value>,
+    resource_selections: Value,
 ) -> Result<(String, Value), SmokeFailure> {
     let created = successful_json(
         router,
@@ -786,6 +812,12 @@ async fn create_session(
         Some(json!({
             "preset_id": preset_id,
             "title": "Live Step Plan session",
+            "resource_selections": resource_selections,
+            "capability_selection": {
+                "enabled_skills": [],
+                "excluded_auto_skills": [],
+                "mcp_server_ids": []
+            },
             "model": {
                 "provider_id": provider_id,
                 "model": model
@@ -796,6 +828,9 @@ async fn create_session(
     )
     .await?;
     let session = envelope_data("session.create", created)?;
+    if let Some(engine) = expected_engine {
+        verify_engine_binding(&session["runtime_engine_binding"], engine)?;
+    }
     let session_id = required_string(
         "session.create",
         &session,
@@ -828,6 +863,7 @@ async fn create_session(
         "/agent_binding",
         "SESSION_BINDING_MISSING",
     )?;
+    verify_resource_selections(&binding, &resource_selections)?;
     Ok((session_id, binding))
 }
 
@@ -861,10 +897,10 @@ async fn bind_session_workspace(
     )
     .await?;
     let projection = envelope_data("session.workspace", response)?;
-    if projection
+    if !projection
         .pointer("/extra/workspace")
         .and_then(Value::as_str)
-        != Some(workspace.as_str())
+        .is_some_and(|actual| canonical_path_eq(Path::new(actual), Path::new(&workspace)))
     {
         return Err(SmokeFailure::new(
             "session.workspace",
@@ -1466,6 +1502,7 @@ async fn wait_for_coding_stage(
     marker: &'static str,
     expected_tools: &[CodingToolExpectation],
     workspace: &Path,
+    coding_engine: bool,
 ) -> Result<(), SmokeFailure> {
     let deadline = tokio::time::Instant::now() + CODING_STAGE_DEADLINE;
     loop {
@@ -1481,8 +1518,13 @@ async fn wait_for_coding_stage(
                 StatusCode::UNPROCESSABLE_ENTITY.as_u16(),
             ));
         }
+        let evidence_messages = if coding_engine {
+            coding_engine_evidence_messages(&messages)?
+        } else {
+            messages
+        };
         let latest_evidence =
-            inspect_coding_evidence(&messages, marker, expected_tools, workspace);
+            inspect_coding_evidence(&evidence_messages, marker, expected_tools, workspace);
         let observation = successful_json(
             router,
             phase,
@@ -1539,6 +1581,7 @@ async fn run_coding_stage(
         marker,
         expected_tools,
         workspace,
+        false,
     )
     .await
 }
@@ -3034,12 +3077,13 @@ async fn run_product_chain(
         router, "guid.official_prepare", Method::POST,
         "/api/agent-presets/from-template/chat.minimal",
         Some(json!({"display_name": "Minimal", "reuse_existing": true,
+            "model": {"provider_id": provider_id, "model": model},
             "model_route_refs": {}, "chat_route_records": {}})),
         LOCAL_API_DEADLINE, &[StatusCode::OK],
     ).await?;
     let official = envelope_data("guid.official_prepare", official)?;
     let minimal_id = required_string("guid.official_prepare", &official, "/preset/preset_id", "PRESET_ID_MISSING")?;
-    let (minimal_session, _) = create_session(router, &minimal_id, &provider_id, model).await?;
+    let (minimal_session, _) = create_session(router, &minimal_id, &provider_id, model, None, json!([])).await?;
     warm_guid_session(router, &minimal_session).await?;
     start_guid_initial_turn(router, &minimal_session).await?;
     wait_for_session_marker(router, "guid.minimal_reply", &minimal_session, 0,
@@ -3081,7 +3125,7 @@ async fn run_product_chain(
         return Err(SmokeFailure::new("guid.library", "OFFICIAL_LAUNCH_CREATED_PERSONAL_AGENT", 409));
     }
     let (preset_id, _source_binding) =
-        create_agent_preset(router, &provider_id, STEPFUN_SOURCE_MODEL).await?;
+        create_agent_preset(router, &provider_id, model, None, CODING_CAPABILITIES).await?;
 
     let before_agent_switch = successful_json(
         router,
@@ -3102,16 +3146,18 @@ async fn run_product_chain(
     )
     .await?
     .0;
-    successful_json(
+    let switched_agent = successful_json(
         router,
         "session.switch_agent",
         Method::PUT,
         format!("/api/agent-sessions/{minimal_session}/preset"),
-        Some(json!({"preset_id": preset_id})),
+        Some(json!({"preset_id": preset_id, "resource_selections": coding_resource_selections()})),
         TURN_COMMAND_DEADLINE,
         &[StatusCode::OK],
     )
     .await?;
+    let switched_agent = envelope_data("session.switch_agent", switched_agent)?;
+    verify_resource_selections(&switched_agent["agent_binding"], &coding_resource_selections())?;
     let after_agent_switch = successful_json(
         router,
         "session.after_agent_switch",
@@ -3185,7 +3231,7 @@ async fn run_product_chain(
     }
 
     let (session_id, binding) =
-        create_session(router, &preset_id, &provider_id, model).await?;
+        create_session(router, &preset_id, &provider_id, model, None, coding_resource_selections()).await?;
     warm_guid_session(router, &session_id).await?;
     let guid_start_cursor =
         session_message_cursor(router, "guid.cursor_before", &session_id).await?;
@@ -3248,7 +3294,239 @@ async fn run_product_chain(
     run_remote_mcp_chain(router, &remote_binding_id).await
 }
 
-async fn run_live_provider_smoke() -> Result<(), SmokeFailure> {
+fn ensure_single_model_route(document: &Value, provider_id: &str, model: &str) -> Result<(), SmokeFailure> {
+    let route = &document["chat_route_records"]["agent_chat"];
+    if route.pointer("/primary/provider_id").and_then(Value::as_str) != Some(provider_id)
+        || route.pointer("/primary/model").and_then(Value::as_str) != Some(model)
+        || route.get("failovers").is_some_and(|value| value.as_array().is_none_or(|items| !items.is_empty()))
+    {
+        return Err(SmokeFailure::new("provider.route", "LIVE_MODEL_ROUTE_OR_FAILOVER_INVALID", 409));
+    }
+    Ok(())
+}
+
+fn engine_selection(catalog: &Value, family: &str, profile: &str) -> Result<Value, SmokeFailure> {
+    let matches = catalog.as_array().ok_or_else(|| SmokeFailure::new("engine.catalog", "ENGINE_CATALOG_INVALID", 502))?
+        .iter().filter(|item| item["family_id"] == family).collect::<Vec<_>>();
+    let [descriptor] = matches.as_slice() else {
+        return Err(SmokeFailure::new("engine.catalog", "OFFICIAL_ENGINE_MISSING_OR_AMBIGUOUS", 409));
+    };
+    let typed: nomifun_api_types::RuntimeEngineDescriptor = serde_json::from_value((**descriptor).clone())
+        .map_err(|_| SmokeFailure::new("engine.catalog", "ENGINE_DESCRIPTOR_INVALID", 502))?;
+    typed.validate().map_err(|_| SmokeFailure::new("engine.catalog", "ENGINE_DESCRIPTOR_INVALID", 502))?;
+    if !typed.supported_profiles.iter().any(|item| item == profile) {
+        return Err(SmokeFailure::new("engine.catalog", "ENGINE_PROFILE_MISSING", 409));
+    }
+    Ok(json!({"selector": {"selection":"exact", "family_id":typed.family_id,
+        "build_id":typed.build_id, "build_digest":typed.build_digest}, "profile":profile}))
+}
+
+fn verify_engine_binding(binding: &Value, selection: &Value) -> Result<(), SmokeFailure> {
+    let typed: nomifun_api_types::RuntimeEngineBinding = serde_json::from_value(binding.clone())
+        .map_err(|_| SmokeFailure::new("engine.binding", "ENGINE_BINDING_MISSING_OR_INVALID", 409))?;
+    typed.validate().map_err(|_| SmokeFailure::new("engine.binding", "ENGINE_BINDING_INVALID", 409))?;
+    if ["family_id", "build_id", "build_digest"].iter().any(|key| binding[*key] != selection["selector"][*key])
+        || binding["profile"] != selection["profile"]
+    {
+        return Err(SmokeFailure::new("engine.binding", "ENGINE_BINDING_MISMATCH", 409));
+    }
+    Ok(())
+}
+
+async fn assert_session_engine(router: &Router, session: &str, selection: &Value, provider: &str, model: &str) -> Result<(), SmokeFailure> {
+    let response = successful_json(router, "engine.binding", Method::GET,
+        format!("/api/conversations/{session}"), None, LOCAL_API_DEADLINE, &[StatusCode::OK]).await?;
+    let conversation = envelope_data("engine.binding", response)?;
+    verify_engine_binding(&conversation["extra"]["runtime_engine_binding"], selection)?;
+    if conversation.pointer("/model/provider_id").and_then(Value::as_str) != Some(provider)
+        || conversation.pointer("/model/model").and_then(Value::as_str) != Some(model)
+    {
+        return Err(SmokeFailure::new("engine.binding", "ENGINE_SESSION_MODEL_CHANGED", 409));
+    }
+    Ok(())
+}
+
+// Coding projects canonical args, without Nomi's duplicate input field, and
+// performs host-authored instruction reads before model step 1. These reads
+// never count as the model's requested filesystem evidence.
+fn coding_engine_evidence_messages(messages: &[Value]) -> Result<Vec<Value>, SmokeFailure> {
+    let mut result = Vec::new();
+    for message in messages {
+        let projection = &message["projection"];
+        if projection["call_id"].as_str().is_some_and(|id| id.starts_with("coding-instructions:")) {
+            if projection["name"] != "read_file" {
+                return Err(SmokeFailure::new("engine.instructions", "ENGINE_INSTRUCTION_READ_INVALID", 422));
+            }
+            if projection["status"] != "completed" {
+                // A poll can observe a running projection. Keep it so evidence
+                // remains incomplete until its terminal update, not an early failure.
+                result.push(message.clone());
+            }
+            continue;
+        }
+        let mut message = message.clone();
+        if let Some(projection) = message.get_mut("projection").and_then(Value::as_object_mut) {
+            if projection.contains_key("name") && projection.get("input").is_none_or(Value::is_null) {
+                if let Some(args) = projection.get("args").cloned() {
+                    projection.insert("input".to_owned(), args);
+                }
+            }
+        }
+        result.push(message);
+    }
+    Ok(result)
+}
+
+fn validate_engine_write(args: &Value, workspace: &Path) -> bool {
+    object_has_only_keys(args, &["path", "content"])
+        && args["path"].as_str().is_some_and(|path| argument_targets_workspace_file(path, workspace))
+        && args["content"] == "alpha\n"
+}
+
+fn validate_engine_read(args: &Value, workspace: &Path) -> bool {
+    object_has_only_keys(args, &["path", "format", "offset", "limit"])
+        && args["path"].as_str().is_some_and(|path| argument_targets_workspace_file(path, workspace))
+        && args.get("format").is_none_or(|format| format == "text")
+        && args.get("offset").is_none_or(|offset| offset.as_u64() == Some(0))
+        && args.get("limit").is_none_or(|limit| limit.as_u64().is_some_and(|limit| (4..=16384).contains(&limit)))
+}
+
+fn engine_patch_hunks() -> Value {
+    json!([{"old_start":1,"old_lines":1,"new_start":1,"new_lines":2,
+        "lines":[{"kind":"context","text":"alpha"},{"kind":"add","text":"beta"}]}])
+}
+
+fn validate_engine_patch(args: &Value, workspace: &Path) -> bool {
+    if !object_has_only_keys(args, &["files"]) { return false; }
+    let Some(files) = args["files"].as_array() else { return false; };
+    let [file] = files.as_slice() else { return false; };
+    object_has_only_keys(file, &["path", "hunks", "expected_source"])
+        && file["path"].as_str().is_some_and(|path| argument_targets_workspace_file(path, workspace))
+        && file["hunks"] == engine_patch_hunks()
+        && file.get("expected_source").is_none_or(|source| {
+            object_has_only_keys(source, &["kind", "sha256"])
+                && source["kind"] == "existing"
+                && source["sha256"].as_str().is_some_and(|digest| digest.len() == 64
+                    && digest.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+        })
+}
+
+fn validate_engine_exec(args: &Value, workspace: &Path) -> bool {
+    object_has_only_keys(args, &["operation", "command", "args", "cwd", "timeout_ms"])
+        && args.get("operation").is_none_or(|operation| operation == "exec")
+        && args["command"] == "git" && args["args"] == json!(["--version"])
+        && args.get("cwd").is_none_or(|cwd| cwd.as_str().is_some_and(|path| argument_targets_workspace(path, workspace)))
+        && args["timeout_ms"].as_u64().is_some_and(|timeout| (1..=10000).contains(&timeout))
+}
+
+const ENGINE_CREATE_TOOLS: &[CodingToolExpectation] = &[CodingToolExpectation {
+    name: "write_file", validate_args: validate_engine_write, output_contains: None,
+}];
+const ENGINE_PATCH_TOOLS: &[CodingToolExpectation] = &[
+    CodingToolExpectation { name: "read_file", validate_args: validate_engine_read, output_contains: Some("alpha") },
+    CodingToolExpectation { name: "apply_patch", validate_args: validate_engine_patch, output_contains: None },
+];
+const ENGINE_EXEC_TOOLS: &[CodingToolExpectation] = &[CodingToolExpectation {
+    name: "exec_command", validate_args: validate_engine_exec, output_contains: Some("git version"),
+}];
+const ENGINE_CONTINUE_TOOLS: &[CodingToolExpectation] = &[CodingToolExpectation {
+    name: "read_file", validate_args: validate_engine_read, output_contains: Some("beta"),
+}];
+const NOMI_CONTINUE_TOOLS: &[CodingToolExpectation] = &[CodingToolExpectation {
+    name: "Read", validate_args: validate_read_args, output_contains: Some("beta"),
+}];
+const ENGINE_CONTINUE_MARKER: &str = "NOMIFUN_CODING_CREATE_OK|beta";
+
+fn engine_stage_pass_line(phase: &str) -> Result<&'static str, SmokeFailure> {
+    // Entire output lines are static: no model/tool text, paths, IDs or secrets.
+    match phase {
+        "engine.nomi.create" => Ok("NOMIFUN_LIVE_SMOKE_STAGE phase=engine.nomi.create status=pass"),
+        "engine.nomi.patch" => Ok("NOMIFUN_LIVE_SMOKE_STAGE phase=engine.nomi.patch status=pass"),
+        "engine.nomi.exec" => Ok("NOMIFUN_LIVE_SMOKE_STAGE phase=engine.nomi.exec status=pass"),
+        "engine.nomi.continue" => Ok("NOMIFUN_LIVE_SMOKE_STAGE phase=engine.nomi.continue status=pass"),
+        "engine.coding.create" => Ok("NOMIFUN_LIVE_SMOKE_STAGE phase=engine.coding.create status=pass"),
+        "engine.coding.patch" => Ok("NOMIFUN_LIVE_SMOKE_STAGE phase=engine.coding.patch status=pass"),
+        "engine.coding.exec" => Ok("NOMIFUN_LIVE_SMOKE_STAGE phase=engine.coding.exec status=pass"),
+        "engine.coding.continue" => Ok("NOMIFUN_LIVE_SMOKE_STAGE phase=engine.coding.continue status=pass"),
+        _ => Err(SmokeFailure::new("engine.evidence", "ENGINE_STAGE_NOT_ALLOWLISTED", 500)),
+    }
+}
+
+fn emit_engine_stage_pass(phase: &str) -> Result<(), SmokeFailure> {
+    // stderr avoids libtest's partial stdout `test <name> ... ` prefix.
+    eprintln!("{}", engine_stage_pass_line(phase)?);
+    Ok(())
+}
+
+async fn run_engine_chain(router: &Router, api_key: &str, model: &str, root: &Path,
+    stages_passed: &mut Vec<&'static str>, failures: &mut Vec<SmokeFailure>) -> Result<(), SmokeFailure> {
+    let provider = configure_stepfun(router, api_key, STEPFUN_PLAN_BASE_URL, model).await?;
+    let catalog = successful_json(router, "engine.catalog", Method::GET, "/api/runtime-engines",
+        None, LOCAL_API_DEADLINE, &[StatusCode::OK]).await?;
+    let catalog = envelope_data("engine.catalog", catalog)?;
+    for (family, profile, coding) in [("nomifun.nomi", "default", false), ("nomifun.coding", "coding", true)] {
+        // Each official engine gets its own Session/workspace even if the other fails.
+        let result: Result<(), SmokeFailure> = async {
+        let selection = engine_selection(&catalog, family, profile)?;
+        let (preset, _) = create_agent_preset(router, &provider, model, Some(&selection), ENGINE_CAPABILITIES).await?;
+        let (session, _) = create_session(router, &preset, &provider, model, Some(&selection), coding_resource_selections()).await?;
+        let workspace = root.join(family);
+        std::fs::create_dir(&workspace).map_err(|_| SmokeFailure::new("engine.workspace", "WORKSPACE_CREATE_FAILED", 500))?;
+        bind_session_workspace(router, &session, &workspace).await?;
+        assert_session_engine(router, &session, &selection, &provider, model).await?;
+        let (write, read, patch) = if coding { ("write_file", "read_file", "apply_patch") } else { ("Write", "Read", "ApplyPatch") };
+        let patch_args = if coding {
+            json!({"files":[{"path":CODING_FILE,"hunks":engine_patch_hunks()}]})
+        } else {
+            json!({"files":[{"file_path":CODING_FILE,"edits":[{"old_string":"alpha\n","new_string":CODING_FILE_CONTENT}]}]})
+        };
+        let exec_args = if coding { json!({"operation":"exec","command":"git","args":["--version"],"timeout_ms":10000}) }
+            else { json!({"cmd":"git --version","yield_time_ms":1000}) };
+        let stages = [
+            ("create", CODING_CREATE_MARKER, format!("Use only {write} to create {CODING_FILE} with exactly alpha followed by one newline. After success reply with exactly {CODING_CREATE_MARKER}; no other text."),
+                if coding { ENGINE_CREATE_TOOLS } else { CODING_CREATE_TOOLS }),
+            ("patch", CODING_PATCH_MARKER, format!("Use {read} to read {CODING_FILE}, then {patch} with arguments {patch_args}. Do not replace the dedicated tool with a shell or full write. After success reply with exactly {CODING_PATCH_MARKER}; no other text."),
+                if coding { ENGINE_PATCH_TOOLS } else { CODING_PATCH_TOOLS }),
+            ("exec", CODING_EXEC_MARKER, format!("Use only exec_command with arguments {exec_args}. After success reply with exactly {CODING_EXEC_MARKER}; no other text."),
+                if coding { ENGINE_EXEC_TOOLS } else { CODING_EXEC_TOOLS }),
+            ("continue", ENGINE_CONTINUE_MARKER, format!("Continue this same conversation. Use only {read} to read {CODING_FILE}. Reply with your exact final response from the FIRST turn in this conversation, then |, then the file's second line, with no other text."),
+                if coding { ENGINE_CONTINUE_TOOLS } else { NOMI_CONTINUE_TOOLS }),
+        ];
+        let mut prior_messages = Vec::new();
+        for (stage, marker, prompt, tools) in stages {
+            // Static phases are safe to print even if a provider echoes secrets.
+            let phase = match (coding, stage) {
+                (false, "create") => "engine.nomi.create", (false, "patch") => "engine.nomi.patch",
+                (false, "exec") => "engine.nomi.exec", (false, _) => "engine.nomi.continue",
+                (true, "create") => "engine.coding.create", (true, "patch") => "engine.coding.patch",
+                (true, "exec") => "engine.coding.exec", (true, _) => "engine.coding.continue",
+            };
+            hard_deadline(phase, "ENGINE_STAGE_DEADLINE_EXCEEDED", CODING_STAGE_DEADLINE, async {
+                let cursor = session_message_cursor(router, phase, &session).await?;
+                start_session_turn(router, phase, &session, &uuid::Uuid::now_v7().to_string(), prompt).await?;
+                wait_for_coding_stage(router, phase, &session, cursor, marker, tools, &workspace, coding).await
+            }).await?;
+            let expected = if stage == "create" { "alpha\n" } else { CODING_FILE_CONTENT };
+            if std::fs::read_to_string(workspace.join(CODING_FILE)).ok().as_deref() != Some(expected) {
+                return Err(SmokeFailure::new(phase, "ENGINE_FILE_CONTENT_MISMATCH", 422));
+            }
+            let (messages, _) = session_messages_after(router, phase, &session, 0).await?;
+            if prior_messages.iter().any(|message| !messages.contains(message)) {
+                return Err(SmokeFailure::new(phase, "ENGINE_CONTINUATION_HISTORY_CHANGED", 409));
+            }
+            prior_messages = messages;
+            assert_session_engine(router, &session, &selection, &provider, model).await?;
+            stages_passed.push(phase);
+        }
+        Ok(())
+        }.await;
+        if let Err(failure) = result { failures.push(failure); }
+    }
+    failures.first().cloned().map_or(Ok(()), Err)
+}
+
+async fn run_live_provider_smoke(engine_smoke: bool) -> Result<(), SmokeFailure> {
+    let model = live_model()?;
     let api_key = required_secret_from_stdin()?;
     let root = tempfile::tempdir().map_err(|_| {
         SmokeFailure::new(
@@ -3258,18 +3536,32 @@ async fn run_live_provider_smoke() -> Result<(), SmokeFailure> {
         )
     })?;
     let workspace = root.path().join("coding-workspace");
-    initialize_git_workspace(&workspace).await?;
+    if !engine_smoke {
+        initialize_git_workspace(&workspace).await?;
+    }
     let fixture = build_fixture(&root).await?;
     let router = fixture.application.router();
+    let mut stages_passed = Vec::new();
+    let mut engine_failures = Vec::new();
 
-    let result = run_product_chain(
-        &router,
-        api_key.as_str(),
-        STEPFUN_PLAN_BASE_URL,
-        STEPFUN_PLAN_MODEL,
-        &workspace,
-    )
-    .await;
+    let result = if engine_smoke {
+        hard_deadline(
+            "engine.smoke",
+            "ENGINE_SMOKE_DEADLINE_EXCEEDED",
+            ENGINE_SMOKE_DEADLINE,
+            run_engine_chain(&router, api_key.as_str(), &model, root.path(), &mut stages_passed, &mut engine_failures),
+        )
+        .await
+    } else {
+        run_product_chain(
+            &router,
+            api_key.as_str(),
+            STEPFUN_PLAN_BASE_URL,
+            &model,
+            &workspace,
+        )
+        .await
+    };
     drop(router);
     let LiveFixture {
         _environment: environment,
@@ -3303,13 +3595,24 @@ async fn run_live_provider_smoke() -> Result<(), SmokeFailure> {
     .await;
 
     audit_result?;
+    for phase in stages_passed { emit_engine_stage_pass(phase)?; }
+    for failure in engine_failures { eprintln!("NOMIFUN_LIVE_SMOKE_ENGINE_FAILURE {failure}"); }
     result
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires a live credential on stdin; run with the credential-isolating runner"]
 async fn nomi_core_product_chain_reaches_live_stepfun_and_remote_binding() {
-    if let Err(failure) = run_live_provider_smoke().await {
+    if let Err(failure) = run_live_provider_smoke(false).await {
+        eprintln!("NOMIFUN_LIVE_SMOKE_FAILURE {failure}");
+        panic!("NOMIFUN_LIVE_SMOKE_FAILED");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires a live credential on stdin; use the runner --engine-smoke"]
+async fn nomi_core_official_engines_reach_live_stepfun() {
+    if let Err(failure) = run_live_provider_smoke(true).await {
         eprintln!("NOMIFUN_LIVE_SMOKE_FAILURE {failure}");
         panic!("NOMIFUN_LIVE_SMOKE_FAILED");
     }
@@ -3318,6 +3621,104 @@ async fn nomi_core_product_chain_reaches_live_stepfun_and_remote_binding() {
 #[cfg(test)]
 mod evidence_tests {
     use super::*;
+
+    #[test]
+    fn coding_product_selections_require_both_resources_and_minimal_requires_none() {
+        let selections = coding_resource_selections();
+        let typed: Vec<nomifun_api_types::AgentResourceSelectionDto> =
+            serde_json::from_value(selections.clone()).unwrap();
+        assert_eq!(typed.len(), 2);
+        assert_eq!(typed[0].resource_kind, "workspace");
+        assert_eq!(typed[0].resource_id, "default-workspace");
+        assert_eq!(typed[1].resource_kind, "process_session");
+        assert_eq!(typed[1].resource_id, "managed-process-session");
+        for selection in selections.as_array().unwrap() {
+            assert_eq!(selection.as_object().unwrap().len(), 2);
+        }
+        let binding = json!({"typed_resource_bindings": selections});
+        assert!(verify_resource_selections(&binding, &selections).is_ok());
+        assert!(verify_resource_selections(&binding, &json!([])).is_err());
+        let empty = json!({"typed_resource_bindings": []});
+        assert!(verify_resource_selections(&empty, &json!([])).is_ok());
+        assert!(verify_resource_selections(&empty, &selections).is_err());
+        let missing_process = json!({"typed_resource_bindings": [selections[0]]});
+        assert!(verify_resource_selections(&missing_process, &selections).is_err());
+        let duplicate = json!({"typed_resource_bindings": [selections[0], selections[0]]});
+        assert!(verify_resource_selections(&duplicate, &selections).is_err());
+    }
+
+    #[test]
+    fn stage_success_lines_are_exact_static_and_unique() {
+        let phases = [
+            "engine.nomi.create", "engine.nomi.patch", "engine.nomi.exec", "engine.nomi.continue",
+            "engine.coding.create", "engine.coding.patch", "engine.coding.exec", "engine.coding.continue",
+        ];
+        let mut lines = std::collections::BTreeSet::new();
+        for phase in phases {
+            let line = engine_stage_pass_line(phase).unwrap();
+            assert_eq!(line, format!("NOMIFUN_LIVE_SMOKE_STAGE phase={phase} status=pass"));
+            assert!(lines.insert(line));
+        }
+        assert_eq!(lines.len(), 8);
+        for invalid in ["", "engine.nomi.create\n", "engine.nomi.create status=pass", "engine.other.create"] {
+            assert!(engine_stage_pass_line(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn official_engine_binding_cannot_substitute_nomi_for_coding() {
+        let catalog = json!([
+            {"family_id":"nomifun.nomi","build_id":"nomi-build","build_digest":"a".repeat(64),
+             "display_name":"Nomi","host_contract_version":1,"supported_profiles":["default"]},
+            {"family_id":"nomifun.coding","build_id":"coding-build","build_digest":"b".repeat(64),
+             "display_name":"Coding","host_contract_version":1,"supported_profiles":["coding"]}
+        ]);
+        let selection = engine_selection(&catalog, "nomifun.coding", "coding").unwrap();
+        let mut binding = json!({"family_id":"nomifun.coding","build_id":"coding-build",
+            "build_digest":"b".repeat(64),"host_contract_version":1,"profile":"coding"});
+        assert!(verify_engine_binding(&binding, &selection).is_ok());
+        binding["family_id"] = json!("nomifun.nomi");
+        assert!(verify_engine_binding(&binding, &selection).is_err());
+        binding["family_id"] = json!("nomifun.coding");
+        binding["build_digest"] = json!("c".repeat(64));
+        assert!(verify_engine_binding(&binding, &selection).is_err());
+        assert!(engine_selection(&json!([]), "nomifun.coding", "coding").is_err());
+        assert!(engine_selection(&catalog, "nomifun.coding", "default").is_err());
+        assert!(verify_engine_binding(&Value::Null, &selection).is_err());
+    }
+
+    #[test]
+    fn live_route_rejects_fallback_and_wrong_exact_model() {
+        let mut document = json!({"chat_route_records":{"agent_chat":{
+            "primary":{"provider_id":"provider","model":"step-3.77-flash"},"failovers":[]}}});
+        assert!(ensure_single_model_route(&document, "provider", "step-3.77-flash").is_ok());
+        assert!(ensure_single_model_route(&document, "provider", "step-3.7-flash").is_err());
+        document["chat_route_records"]["agent_chat"]["failovers"] = json!([{"model":"step-3.7-flash"}]);
+        assert!(ensure_single_model_route(&document, "provider", "step-3.77-flash").is_err());
+    }
+
+    #[test]
+    fn canonical_coding_arguments_and_host_reads_are_separate_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join(CODING_FILE), CODING_FILE_CONTENT).unwrap();
+        assert!(validate_engine_write(&json!({"path":CODING_FILE,"content":"alpha\n"}), root.path()));
+        assert!(validate_engine_read(&json!({"path":CODING_FILE}), root.path()));
+        assert!(validate_engine_patch(&json!({"files":[{"path":CODING_FILE,"hunks":engine_patch_hunks()}]}), root.path()));
+        assert!(!validate_engine_patch(&json!({"files":[{"path":CODING_FILE,"hunks":[]}]}), root.path()));
+        assert!(validate_engine_exec(&json!({"operation":"exec","command":"git","args":["--version"],"timeout_ms":10000}), root.path()));
+        assert!(!validate_engine_exec(&json!({"operation":"exec","command":"git","args":["commit"],"timeout_ms":10000}), root.path()));
+        assert!(!validate_engine_exec(&json!({"cmd":"git --version"}), root.path()));
+        assert!(!validate_engine_write(&json!({"path":"../escape.txt","content":"alpha\n"}), root.path()));
+        let host_read = message(json!({"call_id":"coding-instructions:0","name":"read_file","status":"completed"}));
+        let read = message(json!({"call_id":"model-read","name":"read_file","status":"completed",
+            "args":{"path":CODING_FILE},"turn_id":"turn","output":"beta"}));
+        let text = message(json!({"content":ENGINE_CONTINUE_MARKER,"turn_id":"turn"}));
+        let projected = coding_engine_evidence_messages(&[host_read.clone(), read, text.clone()]).unwrap();
+        assert_eq!(projected.len(), 2);
+        assert!(matches!(inspect_coding_evidence(&projected, ENGINE_CONTINUE_MARKER, ENGINE_CONTINUE_TOOLS, root.path()), CodingEvidence::Complete));
+        let host_only = coding_engine_evidence_messages(&[host_read, text]).unwrap();
+        assert!(matches!(inspect_coding_evidence(&host_only, ENGINE_CONTINUE_MARKER, ENGINE_CONTINUE_TOOLS, root.path()), CodingEvidence::Incomplete("CODING_TOOL_EVIDENCE_MISSING")));
+    }
 
     fn message(projection: Value) -> Value {
         json!({

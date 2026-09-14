@@ -2517,6 +2517,9 @@ impl AppServices {
 
         self.request_background_shutdown();
         self.shutdown_cron_timers();
+        // Fence runtime admission immediately, before awaiting any producer or
+        // resource owner. Its owned flight runs while these owners wind down.
+        let engine_shutdown = self.agent_runtime_registry.shutdown_and_wait();
         if let Err(error) = self
             .plugin_runtime
             .shutdown_service_runtime(self.authoritative_user_id.as_ref())
@@ -2548,6 +2551,17 @@ impl AppServices {
         }
         if let Err(error) = self.agent_execution_lifecycle.shutdown().await {
             errors.push(format!("Agent Execution cleanup failed: {error}"));
+        }
+        // Stop all source-integrated Engines, not just Agent Execution jobs.
+        // The registry owns cold builds, exact runtime slots and quarantine;
+        // its cleanup continues even if this bounded host waiter times out.
+        match tokio::time::timeout(
+            Duration::from_secs(15),
+            engine_shutdown,
+        ).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => errors.push(format!("Agent Engine cleanup failed: {error}")),
+            Err(_) => errors.push("Agent Engine cleanup still pending after 15 seconds".into()),
         }
         match tokio::time::timeout(
             Duration::from_secs(5),
@@ -3657,8 +3671,20 @@ impl AppServices {
         // relevant service calls `AgentRegistry::hydrate`.
         let runtime_engines = Arc::new(crate::router::runtime_engines::RuntimeEngineHost::default());
         let factory = runtime_engines.dispatch(factory);
+        let engine_policy = Arc::downgrade(&runtime_engines);
+        let context_policy = Arc::downgrade(&runtime_engines);
         let runtime_registry_concrete = Arc::new(
             InMemoryAgentRuntimeRegistry::new(factory)
+                .with_context_policy_resolver(Arc::new(move |binding| {
+                    context_policy.upgrade()
+                        .ok_or_else(|| nomifun_common::AppError::Conflict("Runtime host has shut down".into()))?
+                        .catalog()?.uses_platform_history_context(binding)
+                }))
+                .with_nomi_session_resolver(Arc::new(move |binding| {
+                    engine_policy.upgrade()
+                        .ok_or_else(|| nomifun_common::AppError::Conflict("Runtime host has shut down".into()))?
+                        .catalog()?.uses_nomi_session(binding)
+                }))
                 .with_model_config_resolver(build_agent_model_config_resolver(
                     model_invoke_service.clone(),
                 ))

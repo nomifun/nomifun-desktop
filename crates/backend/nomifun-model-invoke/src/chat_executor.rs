@@ -19,9 +19,19 @@ use crc32fast::Hasher;
 use futures_util::{Stream, StreamExt};
 use crate::auth::{AuthMaterial, AuthScheme};
 use crate::error::InvokeError;
-use crate::transport::{error_from_response, net_err};
+use crate::transport::{error_from_response_with_timeout, net_err};
 use serde_json::Value;
 use std::time::SystemTime;
+
+#[path = "chat_bedrock_headers.rs"]
+mod bedrock_headers;
+
+#[path = "chat_sse.rs"]
+mod sse;
+use sse::SseFrameStream;
+
+#[path = "chat_deadline.rs"]
+mod deadline;
 
 /// A process-local credential authority.  The handle is intentionally opaque:
 /// it is never serialized into a request body, URL, error, or debug output.
@@ -121,7 +131,12 @@ pub struct SingleAttemptRequest {
     pub model: String,
     pub body: Value,
     pub credential: OpaqueCredentialLease,
+    /// Credential resolution, signing, connection/upload and response headers.
+    /// Does not impose a total lifetime limit on a streaming response body.
     pub timeout: Duration,
+    /// Maximum wait for one complete decoded transport frame (or JSON body).
+    /// Also bounds reading a non-success response body. Not a retry policy.
+    pub idle_timeout: Duration,
     pub framing: SingleAttemptFraming,
     /// Required for AWS SigV4-backed Bedrock requests.
     pub region: Option<String>,
@@ -137,6 +152,7 @@ impl std::fmt::Debug for SingleAttemptRequest {
             .field("body", &"[redacted]")
             .field("credential", &self.credential)
             .field("timeout", &self.timeout)
+            .field("idle_timeout", &self.idle_timeout)
             .field("framing", &self.framing)
             .field("region", &self.region.as_deref().map(|_| "[redacted]"))
             .finish()
@@ -163,9 +179,11 @@ impl SingleAttemptRequest {
         if self.model.trim().is_empty() {
             return Err(InvokeError::config("single-attempt model is empty"));
         }
-        if self.timeout.is_zero() {
+        if [self.timeout, self.idle_timeout].iter().any(|duration| {
+            duration.is_zero() || *duration > Duration::from_secs(24 * 60 * 60)
+        }) {
             return Err(InvokeError::config(
-                "single-attempt timeout must be greater than zero",
+                "single-attempt phase timeouts must be greater than zero and at most 24 hours",
             ));
         }
         if self.framing == SingleAttemptFraming::AwsEventStream
@@ -279,6 +297,10 @@ pub struct SingleAttemptHttpExecutor {
 impl SingleAttemptHttpExecutor {
     pub const DEFAULT_MAX_LINE_BYTES: usize = 1024 * 1024;
 
+    /// Preserve the injected client's proxy/TLS policy. For unbounded active
+    /// streaming, supply a client without a total request timeout (reqwest's
+    /// default). A client-wide timeout/read timeout remains an additional cap;
+    /// reqwest 0.12 cannot disable an inherited total timeout per request.
     pub fn new(
         http: reqwest::Client,
         credentials: Arc<dyn OpaqueCredentialResolver>,
@@ -300,9 +322,9 @@ impl SingleAttemptHttpExecutor {
     }
 
     pub fn with_max_line_bytes(mut self, max_line_bytes: usize) -> Result<Self, InvokeError> {
-        if max_line_bytes == 0 {
+        if max_line_bytes == 0 || max_line_bytes > sse::MAX_FRAME_BYTES {
             return Err(InvokeError::config(
-                "single-attempt stream line limit must be greater than zero",
+                "single-attempt stream line limit must be between 1 byte and 16 MiB",
             ));
         }
         self.max_line_bytes = max_line_bytes;
@@ -316,14 +338,17 @@ impl SingleAttemptHttpExecutor {
         request: SingleAttemptRequest,
     ) -> Result<SingleAttemptStream, InvokeError> {
         request.validate()?;
-        let material = self.credentials.resolve(&request.credential).await?;
-        material.validate_credentials()?;
-
-        let response = self.send_once(&request, &material).await?;
+        let (material, response) = tokio::time::timeout(request.timeout, async {
+            let material = self.credentials.resolve(&request.credential).await?;
+            material.validate_credentials()?;
+            let response = self.send_once(&request, &material).await?;
+            Ok::<_, InvokeError>((material, response))
+        })
+        .await
+        .map_err(|_| deadline::elapsed("provider request setup timeout"))??;
         if !response.status().is_success() {
-            return Err(error_from_response(response)
-                .await
-                .redacted(&material.secret_redactor()));
+            let error = error_from_response_with_timeout(response, request.idle_timeout).await;
+            return Err(error.redacted(&material.secret_redactor()));
         }
         if let Some(content_type) =
             nomifun_net::api_response::is_non_api_content_type(response.headers())
@@ -336,19 +361,19 @@ impl SingleAttemptHttpExecutor {
             && json_chat_protocol(&request.protocol)
             && response_is_json(&response);
         let bytes = response.bytes_stream().map(|chunk| {
-            chunk.map_err(net_err).map(|bytes| bytes.to_vec())
+            chunk.map_err(net_err).and_then(|bytes| {
+                if bytes.len() > sse::MAX_FRAME_BYTES {
+                    return Err(InvokeError::parse("provider transport chunk exceeds the framing limit"));
+                }
+                Ok(bytes.to_vec())
+            })
         });
-        if json_response {
-            return Ok(Box::pin(JsonFrameStream::new(
-                bytes,
-                self.max_line_bytes,
-            )));
-        }
-        Ok(stream_response(
-            bytes,
-            request.framing,
-            self.max_line_bytes,
-        ))
+        let stream: SingleAttemptStream = if json_response {
+            Box::pin(JsonFrameStream::new(bytes, self.max_line_bytes))
+        } else {
+            stream_response(bytes, request.framing, self.max_line_bytes)
+        };
+        Ok(Box::pin(deadline::FrameDeadlineStream::new(stream, request.idle_timeout)))
     }
 
     async fn send_once(
@@ -361,7 +386,6 @@ impl SingleAttemptHttpExecutor {
         let builder = self
             .http
             .post(request.url.trim())
-            .timeout(request.timeout)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body.clone());
         self.authenticator
@@ -413,15 +437,6 @@ fn json_chat_protocol(protocol: &str) -> bool {
     )
 }
 
-struct SseFrameStream<S> {
-    source: S,
-    buffer: Vec<u8>,
-    event: String,
-    data: String,
-    max_line_bytes: usize,
-    finished: bool,
-}
-
 struct JsonFrameStream<S> {
     source: S,
     buffer: Vec<u8>,
@@ -456,17 +471,28 @@ where
             return std::task::Poll::Ready(None);
         }
 
+        let mut steps = 0usize;
+        let mut consumed = 0usize;
         while !self.finished {
+            // A ready-only/empty-chunk source must not monopolize a poll and
+            // prevent the outer idle timer or cancellation from being polled.
+            if steps >= 256 || consumed >= 64 * 1024 {
+                cx.waker().wake_by_ref();
+                return std::task::Poll::Pending;
+            }
+            steps += 1;
             match Pin::new(&mut self.source).poll_next(cx) {
                 std::task::Poll::Ready(Some(Ok(bytes))) => {
-                    self.buffer.extend_from_slice(&bytes);
-                    if self.buffer.len() > self.max_bytes {
+                    consumed = consumed.saturating_add(bytes.len());
+                    if self.buffer.len().saturating_add(bytes.len()) > self.max_bytes {
                         self.finished = true;
                         self.emitted = true;
+                        self.buffer.clear();
                         return std::task::Poll::Ready(Some(Err(InvokeError::parse(
                             "provider JSON response exceeds the configured limit",
                         ))));
                     }
+                    self.buffer.extend_from_slice(&bytes);
                 }
                 std::task::Poll::Ready(Some(Err(error))) => {
                     self.finished = true;
@@ -501,151 +527,6 @@ where
     }
 }
 
-impl<S> SseFrameStream<S> {
-    fn new(source: S, max_line_bytes: usize) -> Self {
-        Self {
-            source,
-            buffer: Vec::new(),
-            event: String::new(),
-            data: String::new(),
-            max_line_bytes,
-            finished: false,
-        }
-    }
-}
-
-impl<S> Stream for SseFrameStream<S>
-where
-    S: Stream<Item = Result<Vec<u8>, InvokeError>> + Unpin,
-{
-    type Item = Result<SingleAttemptFrame, InvokeError>;
-
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        loop {
-            let finished = self.finished;
-            match self.take_frame(finished) {
-                Ok(Some(frame)) => return std::task::Poll::Ready(Some(Ok(frame))),
-                Ok(None) => {}
-                Err(error) => return std::task::Poll::Ready(Some(Err(error))),
-            }
-            if self.finished {
-                return std::task::Poll::Ready(None);
-            }
-            match Pin::new(&mut self.source).poll_next(cx) {
-                std::task::Poll::Ready(Some(Ok(bytes))) => {
-                    self.buffer.extend_from_slice(&bytes);
-                    let line_too_long = self
-                        .buffer
-                        .iter()
-                        .position(|byte| *byte == b'\n')
-                        .is_none()
-                        && self.buffer.len() > self.max_line_bytes;
-                    if line_too_long {
-                        return std::task::Poll::Ready(Some(Err(InvokeError::parse(
-                            "provider SSE line exceeds the configured limit",
-                        ))));
-                    }
-                }
-                std::task::Poll::Ready(Some(Err(error))) => {
-                    return std::task::Poll::Ready(Some(Err(error)));
-                }
-                std::task::Poll::Ready(None) => {
-                    self.finished = true;
-                    if self.data.is_empty() && self.event.is_empty() {
-                        return std::task::Poll::Ready(None);
-                    }
-                    match self.take_frame(true) {
-                        Ok(Some(frame)) => return std::task::Poll::Ready(Some(Ok(frame))),
-                        Ok(None) => {}
-                        Err(error) => return std::task::Poll::Ready(Some(Err(error))),
-                    }
-                    return std::task::Poll::Ready(None);
-                }
-                std::task::Poll::Pending => return std::task::Poll::Pending,
-            }
-        }
-    }
-}
-
-impl<S> SseFrameStream<S> {
-    fn take_frame(
-        &mut self,
-        eof: bool,
-    ) -> Result<Option<SingleAttemptFrame>, InvokeError> {
-        loop {
-            let Some(newline) = self.buffer.iter().position(|byte| *byte == b'\n') else {
-                if eof {
-                    let line = std::mem::take(&mut self.buffer);
-                    if !line.is_empty() {
-                        self.consume_line(&line)?;
-                    }
-                    return self.finish_event();
-                }
-                return Ok(None);
-            };
-            let line = self.buffer.drain(..=newline).collect::<Vec<_>>();
-            self.consume_line(&line)?;
-            if line.iter().all(|byte| matches!(byte, b'\n' | b'\r')) {
-                return self.finish_event();
-            }
-        }
-    }
-
-    fn consume_line(&mut self, line: &[u8]) -> Result<(), InvokeError> {
-        let line = line.strip_suffix(b"\n").unwrap_or(line);
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
-        if line.is_empty() || line.starts_with(b":") {
-            return Ok(());
-        }
-        let (field, value): (&[u8], &[u8]) = match line.iter().position(|byte| *byte == b':') {
-            Some(index) => {
-                let value = &line[index + 1..];
-                (&line[..index], value.strip_prefix(b" ").unwrap_or(value))
-            }
-            None => (line, &[] as &[u8]),
-        };
-        let value = std::str::from_utf8(value)
-            .map_err(|_| InvokeError::parse("provider SSE line is not UTF-8"))?;
-        match field {
-            b"event" => self.event = value.to_owned(),
-            b"data" => {
-                if !self.data.is_empty() {
-                    self.data.push('\n');
-                }
-                self.data.push_str(value);
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    fn finish_event(&mut self) -> Result<Option<SingleAttemptFrame>, InvokeError> {
-        if self.event.is_empty() && self.data.is_empty() {
-            return Ok(None);
-        }
-        let event = if self.event.is_empty() {
-            "message"
-        } else {
-            self.event.as_str()
-        }
-        .to_owned();
-        let data = std::mem::take(&mut self.data);
-        self.event.clear();
-        if data.trim() == "[DONE]" {
-            return Ok(Some(SingleAttemptFrame {
-                event: "done".to_owned(),
-                data: Value::Object(Default::default()),
-            }));
-        }
-        let data = serde_json::from_str(&data)
-            .map_err(|_| InvokeError::parse("provider SSE data is not valid JSON"))?;
-        Ok(Some(SingleAttemptFrame { event, data }))
-    }
-}
-
 struct BedrockFrameStream<S> {
     source: S,
     buffer: Vec<u8>,
@@ -672,6 +553,8 @@ where
         mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
+        let mut steps = 0usize;
+        let mut consumed = 0usize;
         loop {
             if self.buffer.len() >= 12 {
                 let total = u32::from_be_bytes(self.buffer[0..4].try_into().unwrap()) as usize;
@@ -679,6 +562,8 @@ where
                 if !(16..=16 * 1024 * 1024).contains(&total)
                     || headers > total.saturating_sub(16)
                 {
+                    self.finished = true;
+                    self.buffer.clear();
                     return std::task::Poll::Ready(Some(Err(InvokeError::parse(
                         "invalid Bedrock event-stream frame length",
                     ))));
@@ -688,25 +573,58 @@ where
                 } else {
                     let frame = self.buffer.drain(..total).collect::<Vec<_>>();
                     if let Err(error) = validate_event_stream_crc(&frame, total, headers) {
+                        self.finished = true;
+                        self.buffer.clear();
                         return std::task::Poll::Ready(Some(Err(error)));
                     }
                     let payload_start = 12 + headers;
                     let payload_end = total - 4;
                     let payload = &frame[payload_start..payload_end];
-                    return std::task::Poll::Ready(Some(decode_bedrock_payload(payload)));
+                    let decoded = bedrock_headers::exception_frame(&frame[12..payload_start], payload)
+                        .and_then(|exception| match exception {
+                            Some(frame) => Ok(frame),
+                            None => decode_bedrock_payload(payload),
+                        });
+                    if !decoded.as_ref().is_ok_and(|frame| frame.event != "bedrock.exception") {
+                        self.finished = true;
+                        self.buffer.clear();
+                    }
+                    return std::task::Poll::Ready(Some(decoded));
                 }
             }
             if self.finished {
                 if self.buffer.is_empty() {
                     return std::task::Poll::Ready(None);
                 }
+                self.buffer.clear();
                 return std::task::Poll::Ready(Some(Err(InvokeError::parse(
                     "Bedrock event stream ended mid-frame",
                 ))));
             }
+            if steps >= 256 || consumed >= 64 * 1024 {
+                cx.waker().wake_by_ref();
+                return std::task::Poll::Pending;
+            }
+            steps += 1;
             match Pin::new(&mut self.source).poll_next(cx) {
-                std::task::Poll::Ready(Some(Ok(bytes))) => self.buffer.extend_from_slice(&bytes),
+                std::task::Poll::Ready(Some(Ok(bytes))) => {
+                    // At most one incomplete frame plus one bounded incoming
+                    // chunk. Check before extending, including custom sources.
+                    if bytes.len() > sse::MAX_FRAME_BYTES
+                        || self.buffer.len().saturating_add(bytes.len()) > 2 * sse::MAX_FRAME_BYTES
+                    {
+                        self.finished = true;
+                        self.buffer.clear();
+                        return std::task::Poll::Ready(Some(Err(InvokeError::parse(
+                            "Bedrock transport buffer exceeds the framing limit",
+                        ))));
+                    }
+                    consumed = consumed.saturating_add(bytes.len());
+                    self.buffer.extend_from_slice(&bytes);
+                }
                 std::task::Poll::Ready(Some(Err(error))) => {
+                    self.finished = true;
+                    self.buffer.clear();
                     return std::task::Poll::Ready(Some(Err(error)));
                 }
                 std::task::Poll::Ready(None) => self.finished = true,
@@ -844,6 +762,7 @@ mod tests {
                 body: json!({"stream": true}),
                 credential: OpaqueCredentialLease::new("fixture-lease").unwrap(),
                 timeout: Duration::from_secs(5),
+                idle_timeout: Duration::from_secs(5),
                 framing: SingleAttemptFraming::Sse,
                 region: None,
             })
@@ -907,6 +826,7 @@ mod tests {
                 body: json!({"stream": true}),
                 credential: OpaqueCredentialLease::new("fixture-lease").unwrap(),
                 timeout: Duration::from_secs(5),
+                idle_timeout: Duration::from_secs(5),
                 framing: SingleAttemptFraming::Sse,
                 region: None,
             })
@@ -928,6 +848,7 @@ mod tests {
                 body: json!({"contents": []}),
                 credential: OpaqueCredentialLease::new("fixture-lease").unwrap(),
                 timeout: Duration::from_secs(5),
+                idle_timeout: Duration::from_secs(5),
                 framing: SingleAttemptFraming::Sse,
                 region: None,
             })
@@ -958,6 +879,7 @@ mod tests {
                 body: json!({"contents": []}),
                 credential: OpaqueCredentialLease::new("fixture-lease").unwrap(),
                 timeout: Duration::from_secs(5),
+                idle_timeout: Duration::from_secs(5),
                 framing: SingleAttemptFraming::Sse,
                 region: None,
             })
@@ -1008,6 +930,7 @@ mod tests {
                 body: json!({"stream": true}),
                 credential: OpaqueCredentialLease::new("fixture-lease").unwrap(),
                 timeout: Duration::from_secs(5),
+                idle_timeout: Duration::from_secs(5),
                 framing: SingleAttemptFraming::Sse,
                 region: None,
             })

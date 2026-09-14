@@ -129,8 +129,18 @@ impl CodingCompactionSummary {
 pub async fn run_compaction(
     binding: &EngineBinding,
     model: Arc<dyn CodingModelPort>,
+    request: CodingCompactionRequest,
+    cancellation: CancellationToken,
+) -> Result<CodingCompactionSummary, CodingEngineError> {
+    run_compaction_recorded(binding, model, request, cancellation, None).await
+}
+
+pub(crate) async fn run_compaction_recorded(
+    binding: &EngineBinding,
+    model: Arc<dyn CodingModelPort>,
     mut request: CodingCompactionRequest,
     cancellation: CancellationToken,
+    sink: Option<&dyn crate::CodingEventSink>,
 ) -> Result<CodingCompactionSummary, CodingEngineError> {
     if request.max_summary_bytes == 0
         || request.max_summary_bytes > 4 * 1024 * 1024
@@ -178,6 +188,7 @@ pub async fn run_compaction(
     };
     let mut summary = String::new();
     let mut terminal = None;
+    let mut stream_budget = crate::stream_limits::StreamBudget::default();
     while terminal.is_none() {
         let item = tokio::select! {
             _ = cancellation.cancelled() => return Err(CodingEngineError::Cancelled),
@@ -186,27 +197,36 @@ pub async fn run_compaction(
         let Some(item) = item else {
             return Err(CodingEngineError::ModelStreamEndedWithoutTerminal);
         };
-        match item.map_err(CodingEngineError::from_model_error)? {
+        let event = item.map_err(CodingEngineError::from_model_error)?;
+        stream_budget.admit(&event)?;
+        match event {
             ChatModelEvent::OutputTextDelta { text } => {
                 if text.is_empty() {
                     return Err(CodingEngineError::Compaction(
                         "compaction emitted an empty text delta".to_owned(),
                     ));
                 }
-                summary.push_str(&text);
-                if summary.len() > request.max_summary_bytes {
+                let next_bytes = summary.len().saturating_add(text.len());
+                if next_bytes > request.max_summary_bytes {
                     return Err(CodingEngineError::ContextTooLarge {
                         limit: request.max_summary_bytes,
-                        actual: summary.len(),
+                        actual: next_bytes,
                     });
                 }
+                summary.push_str(&text);
             }
             ChatModelEvent::Completed { finish_reason } => terminal = Some(finish_reason),
+            ChatModelEvent::Usage { usage } => {
+                if let Some(sink) = sink {
+                    sink.emit(crate::CodingEngineEvent::CompactionUsage { usage }).await?;
+                }
+            }
             ChatModelEvent::ResponseStarted { .. }
             | ChatModelEvent::ReasoningDelta { .. }
             | ChatModelEvent::ReasoningSignature { .. }
-            | ChatModelEvent::ProviderRoundId { .. }
-            | ChatModelEvent::Usage { .. } => {}
+            | ChatModelEvent::ReasoningBlock { .. }
+            | ChatModelEvent::ProviderReasoningBlock { .. }
+            | ChatModelEvent::ProviderRoundId { .. } => {}
             ChatModelEvent::ToolCallDelta { .. } | ChatModelEvent::ToolCallCompleted { .. } => {
                 return Err(CodingEngineError::Compaction(
                     "compaction route attempted a Tool Call".to_owned(),

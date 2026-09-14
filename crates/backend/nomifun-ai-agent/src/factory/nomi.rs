@@ -442,8 +442,59 @@ pub(super) async fn build(
         apply_model_only_ceiling(&mut overrides);
     }
     apply_runtime_profile(&mut overrides)?;
-    apply_mcp_capability_policy(&mut overrides);
     let plugin_tool_session = crate::plugin_tools::current_nomi_plugin_tool_session();
+    if let Some(session) = plugin_tool_session.as_ref() {
+        let constraints = session.execution_constraints();
+        if let Some(instruction) = constraints.instruction() {
+            let prompt = overrides.system_prompt.get_or_insert_with(String::new);
+            prompt.push_str("\n\n");
+            prompt.push_str(instruction);
+        }
+        overrides.allowed_tools.retain(|name| constraints.allows_nomi_tool(name));
+        overrides.deferred_tools.retain(|name| constraints.allows_nomi_tool(name));
+        if constraints.restricted() {
+            overrides.enforce_tool_allowlist = true;
+            overrides.computer_use = Some(false);
+            overrides.browser_use = Some(false);
+            overrides.mcp_capabilities = Some(Default::default());
+            overrides.mcp_server_ids = Some(Vec::new());
+            overrides.session_mcp_servers.clear();
+            overrides.knowledge_mounts.clear();
+            overrides.knowledge_writeback = false;
+            overrides.knowledge_channel_write_enabled = false;
+            overrides.companion = false;
+            overrides.companion_id = None;
+        }
+        if constraints.exclude_delegation || constraints.restricted() {
+            overrides.delegation_policy = DelegationPolicy::Disabled;
+        }
+    }
+    if plugin_tool_session.as_ref().is_some_and(|session| session.has_hosted_mcp_resources()) {
+        // Canonical resources use the platform owner at invocation time, never
+        // bootstrap/native discovery. The Session installs exact resource tools
+        // later, with its own deferred identity and retained effect scope.
+        if overrides.mcp_capabilities.is_some_and(|policy| policy.tool_proxy) {
+            return Err(AppError::Conflict("Hosted MCP resources cannot use the native all-tools proxy; select frozen MCP tools instead".into()));
+        }
+        overrides.mcp_capabilities = Some(Default::default());
+        overrides.mcp_server_ids = Some(Vec::new());
+        overrides.session_mcp_servers.clear();
+        overrides.allowed_tools.retain(|name| !name.starts_with("mcp_"));
+        overrides.deferred_tools.retain(|name| !name.starts_with("mcp_"));
+    }
+    apply_mcp_capability_policy(&mut overrides);
+    if plugin_tool_session.as_ref().is_some_and(|session| session.has_frozen_mcp_tools()) {
+        // A per-tool Kernel grant must never implicitly expose every tool on
+        // the selected server through eager discovery or the native proxy.
+        if overrides.mcp_capabilities.is_none_or(|policy| policy.connect || policy.tool_proxy || policy.resource || policy.oauth)
+            || overrides.deferred_tools.iter().any(|name| name.starts_with("mcp_"))
+            || overrides.allowed_tools.iter().any(|name| name.starts_with("mcp_"))
+        {
+            return Err(AppError::Conflict("Frozen MCP tools cannot be mixed with native MCP discovery/proxy capabilities".into()));
+        }
+        overrides.mcp_server_ids = Some(Vec::new());
+        overrides.session_mcp_servers.clear();
+    }
     let lazy_mcp_runtime = build_lazy_mcp_runtime(
         plugin_tool_session.as_ref(),
         deps.mcp_server_repo.as_ref(),

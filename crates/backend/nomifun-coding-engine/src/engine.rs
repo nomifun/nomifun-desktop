@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::CodingEngineError;
+use crate::context::CodingContextBudget;
 use crate::events::{CodingEventSink, NoopCodingEventSink, SharedCodingEventSink};
 use crate::model::CodingModelPort;
 use crate::tool::CodingToolInvoker;
@@ -325,12 +326,19 @@ pub trait AgentEngine: Send + Sync {
 
 pub struct CodingEngine {
     build: CodingEngineBuild,
+    context_budget: CodingContextBudget,
 }
 
 impl CodingEngine {
     pub fn new(build: CodingEngineBuild) -> Result<Self, CodingEngineError> {
         build.validate()?;
-        Ok(Self { build })
+        Ok(Self { build, context_budget: CodingContextBudget::default() })
+    }
+
+    /// Algorithm policy belongs to the compiled engine, not the Session owner.
+    pub fn with_context_budget(mut self, budget: CodingContextBudget) -> Result<Self, CodingEngineError> {
+        self.context_budget = budget.validate()?;
+        Ok(self)
     }
 
     pub fn bind(
@@ -380,6 +388,7 @@ impl CodingEngine {
         }
         Ok(CodingEngineSession {
             binding,
+            context_budget: self.context_budget,
             model,
             tools,
             event_sink: event_sink.unwrap_or_else(|| Arc::new(NoopCodingEventSink)),
@@ -400,6 +409,7 @@ impl AgentEngine for CodingEngine {
 
 pub struct CodingEngineSession {
     binding: EngineBinding,
+    context_budget: CodingContextBudget,
     model: Arc<dyn CodingModelPort>,
     tools: Arc<dyn CodingToolInvoker>,
     event_sink: SharedCodingEventSink,
@@ -469,6 +479,7 @@ impl CodingEngineSession {
             Arc::clone(&self.tools),
             Arc::clone(&self.event_sink),
             request,
+            self.context_budget,
             run_cancellation,
         ))
         .catch_unwind()

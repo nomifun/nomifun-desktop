@@ -28,7 +28,7 @@ use nomifun_agent_contracts::{
 };
 use nomifun_ai_agent::NomiPluginToolSchemaResolver;
 use nomifun_agent_kernel::{KernelRegistry, PluginRegistration};
-use nomifun_agent_platform::KernelCatalogProvider;
+use nomifun_agent_control_plane::KernelCatalogProvider;
 use nomifun_api_types::{
     ApiResponse, ApplyPluginCandidateRequest, BuildPluginProjectRequest,
     ConfigurePluginRequest, CreatePluginProjectRequest,
@@ -91,7 +91,57 @@ const PLUGIN_CANDIDATE_TEST_DIRECTORY: &str = "candidate-tests";
 pub(crate) struct NomiCorePluginComposition {
     pub router: PluginRouterState,
     pub schema_resolver: Arc<dyn NomiPluginToolSchemaResolver>,
+    pub skill_artifacts: Arc<FsPluginArtifactStore>,
     pub runtime_participant: Arc<NomiCorePluginRuntimeParticipant>,
+}
+
+impl NomiCorePluginComposition {
+    pub(crate) fn mcp_catalog_publisher(
+        &self,
+        repository: Arc<dyn nomifun_db::IMcpServerRepository>,
+        host: Arc<super::nomi_core_wave2::NomiCoreWave2Host>,
+    ) -> Arc<dyn nomifun_mcp::service::McpCatalogPublisher> {
+        Arc::new(NomiCoreMcpCatalogPublisher {
+            publisher: Arc::clone(&self.runtime_participant.publisher),
+            repository,
+            host,
+        })
+    }
+}
+
+struct NomiCoreMcpCatalogPublisher {
+    publisher: Arc<NomiCorePluginRegistryPublisher>,
+    repository: Arc<dyn nomifun_db::IMcpServerRepository>,
+    host: Arc<super::nomi_core_wave2::NomiCoreWave2Host>,
+}
+
+#[async_trait]
+impl nomifun_mcp::service::McpCatalogPublisher for NomiCoreMcpCatalogPublisher {
+    async fn refresh(&self) -> Result<(), nomifun_mcp::McpError> {
+        let publisher = &self.publisher;
+        // Read inside the SAME lock as Plugin publication: an earlier read
+        // cannot overwrite a newer generation when concurrent refreshes finish.
+        let _guard = publisher.publish_lock.lock().await;
+        let next = super::nomi_core_mcp_catalog::load_registrations(
+            self.repository.as_ref(), Arc::clone(&self.host),
+        ).await.map_err(|_| nomifun_mcp::McpError::CatalogPublicationPending)?;
+        let mut current = publisher.mcp_registrations.write().await;
+        let changed = current.len() != next.len()
+            || current.iter().zip(&next).any(|(old, new)| old.metadata != new.metadata);
+        if changed {
+            let mut registrations = publisher.base_registrations.clone();
+            registrations.extend(next.iter().cloned());
+            registrations.extend(publisher.dynamic_registrations.read().await.values().cloned());
+            publisher.kernel.replace_all(registrations)
+                .map_err(|_| nomifun_mcp::McpError::CatalogPublicationPending)?;
+            // No await between the atomic Kernel swap and retaining the source
+            // set for future Plugin publications. Never rewrite Session locks.
+            *current = next;
+        }
+        drop(current);
+        publisher.refresh_agent_availability().await
+            .map_err(|_| nomifun_mcp::McpError::CatalogPublicationPending)
+    }
 }
 
 pub(crate) struct NomiCorePluginRuntimeParticipant {
@@ -517,10 +567,17 @@ pub(crate) async fn build_nomi_core_plugin_state(
     )?;
     let host: Arc<dyn ExtensionHostDemandPort> = shared_host.clone();
     let participant_kernel = Arc::clone(&kernel);
+    let (mcp_registrations, base_registrations): (Vec<_>, Vec<_>) =
+        base_registrations.into_iter().partition(|registration| {
+            registration.metadata.source.source_kind == nomifun_agent_contracts::PluginSourceKind::Bundled
+                && registration.metadata.manifest.payload.contributions.capabilities.iter()
+                    .any(|capability| super::nomi_core_mcp_catalog::is_product_tool(capability.id.as_ref()))
+        });
     let publisher = Arc::new(NomiCorePluginRegistryPublisher {
         kernel,
         catalog,
         base_registrations,
+        mcp_registrations: RwLock::new(mcp_registrations),
         dynamic_registrations: RwLock::new(BTreeMap::new()),
         publish_lock: Mutex::new(()),
         repository: Arc::clone(&repository),
@@ -596,6 +653,7 @@ pub(crate) async fn build_nomi_core_plugin_state(
     }
     Ok(NomiCorePluginComposition {
         router,
+        skill_artifacts: Arc::clone(&artifacts),
         schema_resolver: Arc::new(NomiCorePluginSchemaResolver { artifacts }),
         runtime_participant,
     })
@@ -2138,6 +2196,7 @@ struct NomiCorePluginRegistryPublisher {
     kernel: Arc<KernelRegistry>,
     catalog: Arc<KernelCatalogProvider>,
     base_registrations: Vec<PluginRegistration>,
+    mcp_registrations: RwLock<Vec<PluginRegistration>>,
     dynamic_registrations:
         RwLock<BTreeMap<PluginMountId, PluginRegistration>>,
     publish_lock: Mutex<()>,
@@ -2221,6 +2280,7 @@ impl NomiCorePluginRegistryPublisher {
         dynamic: BTreeMap<PluginMountId, PluginRegistration>,
     ) -> Result<(), PluginServiceError> {
         let mut registrations = self.base_registrations.clone();
+        registrations.extend(self.mcp_registrations.read().await.iter().cloned());
         registrations.extend(dynamic.values().cloned());
         self.kernel.replace_all(registrations).map_err(|error| {
             PluginServiceError::integration(format!(
@@ -2287,7 +2347,10 @@ impl NomiCorePluginRegistryPublisher {
                         });
                 let builtin = self
                     .approved_platform_builtin_capability_ids
-                    .contains(&capability.manifest.id);
+                    .contains(&capability.manifest.id)
+                    || (capability.source.source_kind == nomifun_agent_contracts::PluginSourceKind::Bundled
+                        && capability.contribution_lock.source_kind == nomifun_agent_contracts::ContributionSourceKind::McpBinding
+                        && super::nomi_core_mcp_catalog::is_product_tool(capability.manifest.id.as_ref()));
                 (!native && !builtin && (!dynamic || !runtime_available)).then(|| {
                     (
                         capability.manifest.id.clone(),

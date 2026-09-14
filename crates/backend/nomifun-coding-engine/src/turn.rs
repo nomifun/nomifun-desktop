@@ -10,6 +10,7 @@ use nomifun_chat_model_broker::{
 use tokio_util::sync::CancellationToken;
 
 use crate::engine::EngineBinding;
+use crate::context::{CodingContextAssembler, CodingContextBudget};
 use crate::error::CodingEngineError;
 use crate::events::{CodingEngineEvent, CodingEventSink};
 use crate::model::CodingModelPort;
@@ -19,14 +20,31 @@ use crate::tool::{
 };
 
 const DEFAULT_MAX_MODEL_STEPS: u16 = 32;
+const MAX_CALLS_PER_STEP: usize = 64;
 
 #[derive(Clone, Debug)]
 pub struct CodingTurnRequest {
     pub model_request: ChatModelRequest,
     pub tool_plan: CodingToolPlan,
     pub principal: PrincipalRef,
+    /// Platform-supplied compatibility generation for the frozen enabled set.
+    /// The Coding loop never changes it or the admitted tool plan.
     pub active_set_generation: u64,
     pub max_model_steps: u16,
+    pub model_budget: crate::CodingModelBudget,
+    pub context_resources: Arc<BTreeMap<String, crate::CodingContextResource>>,
+    /// Host-admitted for this turn; false unless both vision authority and the
+    /// frozen primary model route support images (Skill/workspace readers).
+    /// Broker revalidates on send.
+    pub context_image_input: bool,
+    pub input_port: Option<Arc<dyn crate::CodingInputPort>>,
+    pub live_context_port: Option<Arc<dyn crate::CodingLiveContextPort>>,
+    pub resource_port: Option<Arc<dyn nomifun_engine_core::EngineResourcePort>>,
+    pub history_port: Option<Arc<dyn crate::CodingHistoryPort>>,
+    /// Canonical latest closed task, not a checkpoint or live execution state.
+    pub prior_task: Option<crate::CodingPriorTask>,
+    /// Host-loaded permanent engine state, independent of the history window.
+    pub patch_recovery: crate::CodingPatchRecoveryState,
 }
 
 impl CodingTurnRequest {
@@ -42,11 +60,65 @@ impl CodingTurnRequest {
             principal,
             active_set_generation,
             max_model_steps: DEFAULT_MAX_MODEL_STEPS,
+            model_budget: crate::CodingModelBudget::default(),
+            context_resources: Arc::default(),
+            context_image_input: false,
+            input_port: None,
+            live_context_port: None,
+            resource_port: None,
+            history_port: None,
+            prior_task: None,
+            patch_recovery: Default::default(),
         }
     }
 
     pub fn with_max_model_steps(mut self, max_model_steps: u16) -> Self {
         self.max_model_steps = max_model_steps;
+        self
+    }
+
+    pub fn with_model_budget(mut self, budget: crate::CodingModelBudget) -> Self {
+        self.model_budget = budget;
+        self
+    }
+
+    pub fn with_input_port(mut self, port: Arc<dyn crate::CodingInputPort>) -> Self {
+        self.input_port = Some(port);
+        self
+    }
+
+    pub fn with_live_context_port(mut self, port: Arc<dyn crate::CodingLiveContextPort>) -> Self {
+        self.live_context_port = Some(port);
+        self
+    }
+
+    pub fn with_prior_task(mut self, prior_task: Option<crate::CodingPriorTask>) -> Self {
+        self.prior_task = prior_task;
+        self
+    }
+
+    pub fn with_patch_recovery(mut self, state: crate::CodingPatchRecoveryState) -> Self {
+        self.patch_recovery = state;
+        self
+    }
+
+    pub fn with_context_resources(mut self, resources: Arc<BTreeMap<String, crate::CodingContextResource>>) -> Self {
+        self.context_resources = resources;
+        self
+    }
+
+    pub fn with_resource_port(mut self, port: Arc<dyn nomifun_engine_core::EngineResourcePort>) -> Self {
+        self.resource_port = Some(port);
+        self
+    }
+
+    pub fn with_context_image_input(mut self, allowed: bool) -> Self {
+        self.context_image_input = allowed;
+        self
+    }
+
+    pub fn with_history_port(mut self, port: Arc<dyn crate::CodingHistoryPort>) -> Self {
+        self.history_port = Some(port);
         self
     }
 
@@ -81,6 +153,10 @@ impl CodingTurnRequest {
                 field: "resolved_snapshot_ref",
             });
         }
+        if let Some(prior) = &self.prior_task {
+            prior.validate_for(binding, self.model_request.causality.turn_operation_id.as_ref())?;
+        }
+        self.patch_recovery.validate()?;
         Ok(())
     }
 }
@@ -109,17 +185,36 @@ pub(crate) async fn run_turn(
     model: Arc<dyn CodingModelPort>,
     tools: Arc<dyn CodingToolInvoker>,
     event_sink: Arc<dyn CodingEventSink>,
-    request: CodingTurnRequest,
+    mut request: CodingTurnRequest,
+    context_budget: CodingContextBudget,
     cancellation: CancellationToken,
 ) -> Result<CodingTurnResult, CodingEngineError> {
     request.validate_for(&binding)?;
+    request.model_budget = request.model_budget.for_request(request.model_request.input.max_output_tokens)?;
+    let mut context_lifecycle = crate::context_lifecycle::ContextLifecycle::new(request.model_budget, context_budget)?;
 
+    // Emit the root first so instruction reads have durable turn authority.
+    event_sink.emit(CodingEngineEvent::TurnStarted {
+        binding: binding.clone(),
+        turn_operation_id: request.model_request.causality.turn_operation_id.clone(),
+    }).await?;
+    let agents = crate::workspace_context::prepare(&request, tools.as_ref(), event_sink.as_ref(), cancellation.clone()).await?;
+    let mut scoped_instructions = crate::workspace_context::ScopedInstructions::new(&request, &agents);
+    let mut patch_recovery = crate::patch_recovery::PatchRecovery::restore(&request.patch_recovery)?;
+    patch_recovery.persist(event_sink.as_ref()).await?;
     let mut model_request = request.model_request;
+    model_request.input.instructions.insert(0, crate::workflow::CODING_EXECUTION_INSTRUCTIONS.into());
+    model_request.input.max_output_tokens = Some(request.model_budget.max_output_tokens);
+    model_request.input.instructions.push(request.model_budget.execution_context(request.max_model_steps));
     let requested_tool_choice = model_request.input.tool_choice.clone();
-    model_request.input.tools = request.tool_plan.model_definitions();
-    model_request.input.tool_choice = if request.tool_plan.is_empty() {
-        ChatToolChoice::None
-    } else if matches!(requested_tool_choice, ChatToolChoice::None) {
+    configure_tools(&mut model_request, &request.tool_plan, !request.context_resources.is_empty(), request.prior_task.is_some(), request.resource_port.is_some(), request.history_port.is_some())?;
+    if let Some(prior) = &request.prior_task {
+        model_request.input.instructions.push(prior.context()?);
+    }
+    if !request.context_resources.is_empty() {
+        model_request.input.instructions.push(crate::context_resources::index(&request.context_resources, request.context_image_input)?);
+    }
+    model_request.input.tool_choice = if matches!(requested_tool_choice, ChatToolChoice::None) {
         ChatToolChoice::Auto
     } else {
         requested_tool_choice
@@ -130,18 +225,64 @@ pub(crate) async fn run_turn(
 
     let agent_session_id = model_request.causality.agent_session_id.clone();
     let turn_operation_id = model_request.causality.turn_operation_id.clone();
-    event_sink
-        .emit(CodingEngineEvent::TurnStarted {
-            binding: binding.clone(),
-            turn_operation_id: turn_operation_id.clone(),
-        })
-        .await?;
+    let mut tool_archive = crate::tool_archive::ToolArchive::new(
+        serde_json::json!([agent_session_id, turn_operation_id]).to_string(),
+        &model_request.input.messages,
+    )?;
+    let archive_context_slot = model_request.input.instructions.len();
+    model_request.input.instructions.push(tool_archive.context());
+
+    // The host supplies canonical facts; the engine selects its model context.
+    // Do this only at turn entry: trimming individual messages inside an active
+    // tool cycle would break call/result pairing or discard the accepted input.
+    let requirement = model_request.input.messages.last().cloned()
+        .ok_or_else(|| CodingEngineError::ContextAssembly("missing accepted requirement".into()))?;
+    let mut retained_inputs = vec![requirement.clone()];
+    let mut steering_receipts = std::collections::BTreeSet::new();
+    // Compact before the resource assembler would discard entire old turns.
+    // Repository instructions are retained independently, never summarized away.
+    let scoped_context_slot = model_request.input.instructions.len();
+    model_request.input.instructions.push(scoped_instructions.context());
+    let patch_recovery_context_slot = model_request.input.instructions.len();
+    model_request.input.instructions.push(patch_recovery.context());
+    let plan_context_slot = model_request.input.instructions.len();
+    let mut execution_plan = crate::CodingPlan::default();
+    model_request.input.instructions.push(execution_plan.context()?);
+    let mut work_status = crate::CodingWorkStatus::default();
+    let mut completion = crate::completion::CompletionTracker::default();
+    let completion_context_slot = model_request.input.instructions.len();
+    model_request.input.instructions.push(completion.context(&execution_plan, &work_status, retained_inputs.len())?);
+    let live_context_slot = if let Some(port) = &request.live_context_port {
+        let slot = model_request.input.instructions.len();
+        model_request.input.instructions.push(crate::live_context::read(port.as_ref(),
+            &model_request.causality, request.active_set_generation, &cancellation).await?);
+        Some(slot)
+    } else { None };
+    context_lifecycle.prepare(&mut model_request, &retained_inputs, &binding, model.clone(), event_sink.as_ref(), cancellation.clone()).await?;
+    let mut input = model_request.input;
+    let current = input.messages.pop().ok_or_else(|| CodingEngineError::ContextAssembly(
+        "canonical context has no current message".into(),
+    ))?;
+    let history = std::mem::take(&mut input.messages);
+    let (input, diagnostics) = CodingContextAssembler::assemble(
+        input, history, current, &crate::AgentsMdContext { warnings: agents.warnings, ..Default::default() }, context_budget,
+    )?;
+    model_request.input = input;
+    event_sink.emit(CodingEngineEvent::ContextPrepared {
+        dropped_history_messages: diagnostics.dropped_history_messages,
+        warnings: diagnostics.warnings,
+    }).await?;
 
     let mut output_text = String::new();
     let mut reasoning_text = String::new();
     let mut model_steps = 0_u16;
     let mut tool_call_count = 0_u32;
     let mut provider_round_id = None;
+    let mut command_tracker = crate::workflow::CommandTracker::default();
+    let mut completion_review_used = false;
+    let mut admitted_call_ids = std::collections::BTreeSet::new();
+    let mut stream_budget = crate::stream_limits::StreamBudget::default();
+    let mut output_limit_recovery = crate::output_limit::OutputLimitRecovery::default();
 
     if cancellation.is_cancelled() {
         return cancelled_turn(
@@ -157,7 +298,7 @@ pub(crate) async fn run_turn(
         .await;
     }
 
-    while model_steps < request.max_model_steps {
+    'model_steps: while model_steps < request.max_model_steps {
         if cancellation.is_cancelled() {
             return cancelled_turn(
                 &event_sink,
@@ -172,6 +313,58 @@ pub(crate) async fn run_turn(
             .await;
         }
 
+        // This boundary is reached only after the previous batch has settled.
+        // Never compact a stream with incomplete tool calls/results.
+        if let Some(port) = &request.input_port {
+            let inputs = port.take(&model_request.causality, false).await?;
+            if crate::steering::incorporate(inputs, &mut model_request, &mut retained_inputs, &mut steering_receipts)? {
+                execution_plan.needs_replan = true;
+                completion_review_used = false;
+            }
+        }
+        let refreshed_instructions = scoped_instructions.before_model(tools.as_ref(), event_sink.as_ref(), cancellation.clone()).await?;
+        let scoped_context = scoped_instructions.context();
+        // before_calls may already have replaced layers. Comparing
+        // the actual model slot also catches those changes on read-only batches
+        // where no effect marked the instruction view dirty.
+        if refreshed_instructions || model_request.input.instructions[scoped_context_slot] != scoped_context {
+            execution_plan.needs_replan = true;
+            completion.invalidate();
+            completion_review_used = false;
+            model_request.input.provider_round_parent = None;
+            event_sink.emit(CodingEngineEvent::PlanUpdated { plan: execution_plan.clone() }).await?;
+        }
+        model_request.input.instructions[scoped_context_slot] = scoped_context;
+        let recovery_context = patch_recovery.context();
+        if model_request.input.instructions[patch_recovery_context_slot] != recovery_context {
+            execution_plan.needs_replan = true;
+            completion.invalidate();
+            completion_review_used = false;
+            model_request.input.provider_round_parent = None;
+        }
+        model_request.input.instructions[patch_recovery_context_slot] = recovery_context;
+        model_request.input.instructions[plan_context_slot] = execution_plan.context()?;
+        model_request.input.instructions[completion_context_slot] = completion.context(&execution_plan, &work_status, retained_inputs.len())?;
+        if let (Some(port), Some(slot)) = (&request.live_context_port, live_context_slot) {
+            let latest = crate::live_context::read(port.as_ref(), &model_request.causality,
+                request.active_set_generation, &cancellation).await?;
+            if model_request.input.instructions[slot] != latest {
+                model_request.input.provider_round_parent = None;
+                completion.invalidate();
+                completion_review_used = false;
+                model_request.input.instructions[completion_context_slot] = completion.context(&execution_plan, &work_status, retained_inputs.len())?;
+            }
+            model_request.input.instructions[slot] = latest;
+        }
+        model_request.input.instructions[archive_context_slot] = tool_archive.context();
+        context_lifecycle.prepare(&mut model_request, &retained_inputs, &binding, model.clone(), event_sink.as_ref(), cancellation.clone()).await?;
+        let context_bytes = serde_json::to_vec(&model_request.input)
+            .map_err(|error| CodingEngineError::ContextAssembly(error.to_string()))?.len();
+        if context_bytes > context_budget.max_context_bytes {
+            return fail_turn(&event_sink, model_steps,
+                format!("active turn context still exceeds the Coding byte budget after compaction ({} > {})",
+                    context_bytes, context_budget.max_context_bytes)).await;
+        }
         model_steps = model_steps.saturating_add(1);
         let model_operation_id =
             OperationId::from(format!("{}:model:{}", turn_operation_id.as_ref(), model_steps));
@@ -217,10 +410,22 @@ pub(crate) async fn run_turn(
                 )
                 .await;
             }
-            Err(error) => return Err(CodingEngineError::from_model_error(error)),
+            Err(error) => {
+                if model_steps < request.max_model_steps
+                    && context_lifecycle.request_overflow_recovery(&error, false, &model_request.input)?
+                {
+                    event_sink.emit(CodingEngineEvent::ContextLimitRecoveryStarted {
+                        rejected_step: model_steps,
+                    }).await?;
+                    model_request.input.provider_round_parent = None;
+                    continue 'model_steps;
+                }
+                return Err(CodingEngineError::from_model_error(error));
+            }
         };
         let mut step = StepState::default();
         let mut saw_terminal = false;
+        let mut semantic_output_seen = false;
 
         loop {
             let next = tokio::select! {
@@ -261,8 +466,24 @@ pub(crate) async fn run_turn(
                     )
                     .await;
                 }
-                Err(error) => return Err(CodingEngineError::from_model_error(error)),
+                Err(error) => {
+                    if model_steps < request.max_model_steps
+                        && context_lifecycle.request_overflow_recovery(&error, semantic_output_seen, &model_request.input)?
+                    {
+                        // Release the failed stream before a new model claim.
+                        // No tool from this rejected step has been admitted.
+                        drop(stream);
+                        event_sink.emit(CodingEngineEvent::ContextLimitRecoveryStarted {
+                            rejected_step: model_steps,
+                        }).await?;
+                        model_request.input.provider_round_parent = None;
+                        continue 'model_steps;
+                    }
+                    return Err(CodingEngineError::from_model_error(error));
+                }
             };
+            stream_budget.admit(&event)?;
+            semantic_output_seen |= event.is_semantic_output();
             match event {
                 ChatModelEvent::ResponseStarted { .. } => {}
                 ChatModelEvent::OutputTextDelta { text } => {
@@ -312,11 +533,46 @@ pub(crate) async fn run_turn(
                     }
                     step.set_reasoning_signature(signature)?;
                 }
+                ChatModelEvent::ReasoningBlock { text, encrypted_content } => {
+                    if step.pending_reasoning_signature.is_some()
+                        || encrypted_content.as_ref().is_some_and(String::is_empty)
+                        || (text.is_empty() && encrypted_content.is_none())
+                    {
+                        return fail_turn(&event_sink, model_steps, "invalid completed reasoning block").await;
+                    }
+                    // Retain empty-summary opaque state and distinct block
+                    // boundaries in live model history. Never log the blob.
+                    step.assistant_content.push(ChatContentPart::Reasoning {
+                        text: text.clone(), signature: None, encrypted_content,
+                    });
+                    if !text.is_empty() {
+                        reasoning_text.push_str(&text);
+                        event_sink.emit(CodingEngineEvent::ReasoningDelta { step: model_steps, text }).await?;
+                    }
+                }
+                ChatModelEvent::ProviderReasoningBlock { block } => {
+                    block.validate().map_err(|message| CodingEngineError::InvalidModelEvent(message.into()))?;
+                    if step.pending_reasoning_signature.is_some() {
+                        return fail_turn(&event_sink, model_steps, "provider block conflicts with a pending reasoning signature").await;
+                    }
+                    // Only ordinary thinking text reaches the event journal
+                    // and UI. Signed/hidden payload stays in live context.
+                    if let Some(text) = block.visible_text() {
+                        reasoning_text.push_str(text);
+                        event_sink.emit(CodingEngineEvent::ReasoningDelta {
+                            step: model_steps, text: text.to_owned(),
+                        }).await?;
+                    }
+                    step.assistant_content.push(ChatContentPart::ProviderReasoning { block });
+                }
                 ChatModelEvent::ToolCallDelta {
                     call_id,
                     name,
                     arguments_delta,
                 } => {
+                    if admitted_call_ids.contains(&call_id) && !step.calls.contains_key(&call_id) {
+                        return fail_turn(&event_sink, model_steps, "model reused a prior or discarded tool-call identity").await;
+                    }
                     step.record_tool_delta(&call_id, &name, &arguments_delta)?;
                     event_sink
                         .emit(CodingEngineEvent::ToolCallDelta {
@@ -328,6 +584,10 @@ pub(crate) async fn run_turn(
                         .await?;
                 }
                 ChatModelEvent::ToolCallCompleted { call } => {
+                    if call.call_id.as_ref().starts_with("coding-instructions:")
+                        || !admitted_call_ids.insert(call.call_id.clone()) {
+                        return fail_turn(&event_sink, model_steps, "model reused a tool-call identity within this turn").await;
+                    }
                     step.record_tool_completed(&call)?;
                     event_sink
                         .emit(CodingEngineEvent::ToolCallCompleted {
@@ -341,6 +601,7 @@ pub(crate) async fn run_turn(
                     step.provider_round_id = Some(round_id);
                 }
                 ChatModelEvent::Usage { usage } => {
+                    context_lifecycle.observe_usage(&usage);
                     event_sink
                         .emit(CodingEngineEvent::Usage {
                             step: model_steps,
@@ -399,7 +660,6 @@ pub(crate) async fn run_turn(
             return Err(CodingEngineError::ModelStreamEndedWithoutTerminal);
         }
 
-        step.finalize()?;
         let finish_reason = step
             .finish_reason
             .ok_or(CodingEngineError::ModelStreamEndedWithoutTerminal)?;
@@ -416,6 +676,28 @@ pub(crate) async fn run_turn(
             )
                 .await;
         }
+        if matches!(finish_reason, ChatFinishReason::MaxOutputTokens) {
+            // No invoke_tool_calls/admit_tool path has run for this step.
+            // Even complete calls in a truncated batch are NOT executable.
+            let discarded_tool_call_ids = step.call_order.clone();
+            crate::output_limit::validate_discarded(model_steps, &discarded_tool_call_ids)?;
+            let continuation = output_limit_recovery.admit(model_steps < request.max_model_steps);
+            event_sink.emit(CodingEngineEvent::ModelOutputTruncated {
+                step: model_steps, discarded_tool_call_ids: discarded_tool_call_ids.clone(), continuation,
+            }).await?;
+            admitted_call_ids.extend(discarded_tool_call_ids);
+            crate::output_limit::retain_partial_text(&mut model_request, &step.assistant_content);
+            model_request.input.messages.push(crate::output_limit::notice(continuation));
+            provider_round_id = None;
+            if !continuation {
+                return fail_turn(&event_sink, model_steps,
+                    "model output remained truncated after the bounded continuation budget; task completion was not accepted").await;
+            }
+            // Steering, instruction refresh, compaction, cancellation and all
+            // normal owner fences still run at the next model-step boundary.
+            continue 'model_steps;
+        }
+        step.finalize()?;
         if !step.has_tool_calls() && matches!(finish_reason, ChatFinishReason::ToolCalls) {
             return fail_turn(
                 &event_sink,
@@ -423,6 +705,30 @@ pub(crate) async fn run_turn(
                 "model returned a tool-call terminal reason without Tool Calls",
             )
             .await;
+        }
+        // A correction accepted while the model was streaming invalidates its
+        // proposed batch. Close every call/result pair without executing it.
+        if let Some(port) = &request.input_port {
+            let inputs = port.take(&model_request.causality, false).await?;
+            if !inputs.is_empty() {
+                append_assistant_step(&mut model_request, &step)?;
+                let deferred = step.call_order.iter().map(|id| (id.clone(), Ok(CodingToolResult::text(id.clone(),
+                    "Not executed: a new accepted user instruction arrived. Reconsider the task and update_plan before further effects.", true)))).collect();
+                let results = finish_tool_results(deferred, event_sink.as_ref(), model_steps, &cancellation).await?;
+                tool_call_count = tool_call_count.saturating_add(results.len() as u32);
+                for (_, result) in results {
+                    if let Some(call) = step.calls.get(&result.call_id).and_then(|pending| pending.completed.as_ref()) {
+                        tool_archive.record(&call.name, &call.call_id, &call.arguments,
+                            &result.output, result.is_error, Some(model_steps), Some(false))?;
+                    }
+                    model_request.input.messages.push(ChatMessage { role: ChatRole::Tool,
+                        content: vec![ChatContentPart::ToolResult { call_id: result.call_id, output: result.output, is_error: result.is_error }], provider_round_id: None });
+                }
+                crate::steering::incorporate(inputs, &mut model_request, &mut retained_inputs, &mut steering_receipts)?;
+                execution_plan.needs_replan = true;
+                completion_review_used = false;
+                continue;
+            }
         }
         if step.has_tool_calls() {
             if !matches!(finish_reason, ChatFinishReason::ToolCalls) {
@@ -435,17 +741,32 @@ pub(crate) async fn run_turn(
             }
 
             append_assistant_step(&mut model_request, &step)?;
+            let dispatch = crate::tool_dispatch::ToolDispatchBatch::new(tools.as_ref(), &step.call_order);
             let results = match invoke_tool_calls(
                 &agent_session_id,
                 &request.principal,
                 &model_request,
-                request.active_set_generation,
+                &request.active_set_generation,
                 &request.tool_plan,
-                tools.as_ref(),
+                &dispatch,
                 event_sink.as_ref(),
                 &step,
                 model_steps,
                 &cancellation,
+                &mut execution_plan,
+                &mut completion,
+                &mut work_status,
+                &retained_inputs,
+                &mut scoped_instructions,
+                &mut patch_recovery,
+                &request.context_resources,
+                &request.context_image_input,
+                request.input_port.as_deref(),
+                request.prior_task.as_ref(),
+                request.resource_port.as_deref(),
+                &mut tool_archive,
+                request.history_port.as_deref(),
+                &binding,
             )
             .await
             {
@@ -468,6 +789,59 @@ pub(crate) async fn run_turn(
             tool_call_count = tool_call_count.saturating_add(results.len() as u32);
             for (expected_call_id, result) in results {
                 result.validate_for(&expected_call_id)?;
+                if let Some(call) = step.calls.get(&expected_call_id).and_then(|pending| pending.completed.as_ref()) {
+                    if let Some(binding) = request.tool_plan.binding(&call.name) {
+                        let attempted = dispatch.attempted(&expected_call_id)?;
+                        if attempted {
+                            work_status.observe(binding, call, &result, &mut command_tracker);
+                        } else {
+                            if !result.is_error {
+                                return Err(CodingEngineError::InvalidContract("unattempted platform tool returned success".into()));
+                            }
+                            work_status.observe_deferred();
+                        }
+                        if attempted && binding.capability_id.as_ref() == "fs.read" && work_status.running_processes.is_empty() {
+                            patch_recovery.observe_read(call, &result);
+                        }
+                        if (attempted && (!matches!(binding.effect_class, crate::CodingEffectClass::ReadOnly)
+                            || binding.capability_id.as_ref() == "process.exec"))
+                            || !work_status.running_processes.is_empty()
+                        {
+                            // Failed calls may have partial effects too.
+                            scoped_instructions.invalidate();
+                        }
+                        let observation = completion.observe(&work_status, binding, call, &result, attempted);
+                        event_sink.emit(CodingEngineEvent::CompletionObservation { observation }).await?;
+                        // New observations require a fresh completion account;
+                        // the model-step bound limits repeated work/review.
+                        completion_review_used = false;
+                        if result.is_error {
+                            execution_plan.needs_replan = true;
+                        }
+                    } else if call.name != crate::completion::TOOL_NAME {
+                        // Planning/resource control can change the
+                        // model's account even though it supplies no evidence.
+                        completion.invalidate();
+                        completion_review_used = false;
+                    }
+                }
+                if let Some(call) = step.calls.get(&expected_call_id).and_then(|pending| pending.completed.as_ref()) {
+                    let attempted = if request.tool_plan.binding(&call.name).is_some() {
+                        Some(dispatch.attempted(&expected_call_id)?)
+                    } else { None };
+                    tool_archive.record(&call.name, &call.call_id, &call.arguments,
+                        &result.output, result.is_error, Some(model_steps), attempted)?;
+                }
+                // Evidence/patch recovery and the archive above consume the
+                // original result. Only the next model's context is reduced.
+                let context_kind = step.calls.get(&expected_call_id)
+                    .and_then(|pending| pending.completed.as_ref())
+                    .and_then(|call| request.tool_plan.binding(&call.name))
+                    .and_then(|binding| crate::tool_context::ToolContextKind::for_capability(binding.capability_id.as_ref()));
+                let result = match context_kind {
+                    Some(kind) if dispatch.attempted(&expected_call_id)? => crate::tool_context::project(kind, &result),
+                    _ => result,
+                };
                 model_request.input.messages.push(ChatMessage {
                     role: ChatRole::Tool,
                     content: vec![ChatContentPart::ToolResult {
@@ -478,6 +852,10 @@ pub(crate) async fn run_turn(
                     provider_round_id: None,
                 });
             }
+            patch_recovery.end_batch();
+            patch_recovery.persist(event_sink.as_ref()).await?;
+            event_sink.emit(CodingEngineEvent::WorkStatus { status: work_status.clone() }).await?;
+            event_sink.emit(CodingEngineEvent::PlanUpdated { plan: execution_plan.clone() }).await?;
             if let Some(round_id) = step.provider_round_id {
                 model_request.input.provider_round_parent = Some(round_id);
             }
@@ -488,9 +866,56 @@ pub(crate) async fn run_turn(
         }
 
         append_assistant_step(&mut model_request, &step)?;
+        // At most one evidence review, never an unbounded self-retry. The
+        // model may report a blocker/unverified result instead of invoking a
+        // command; a user prohibition on verification remains authoritative.
+        if matches!(finish_reason, ChatFinishReason::Completed)
+            && completion.current(&execution_plan, &work_status, retained_inputs.len()).is_none()
+            && (work_status.needs_completion_review() || execution_plan.is_open() || tool_call_count > 0 || execution_plan.revision > 0)
+            && !completion_review_used
+            && model_steps < request.max_model_steps {
+            completion_review_used = true;
+            event_sink.emit(CodingEngineEvent::CompletionReview { status: work_status.clone() }).await?;
+            model_request.input.messages.push(work_status.completion_review_message()?);
+            model_request.input.provider_round_parent = None;
+            continue;
+        }
+        if matches!(finish_reason, ChatFinishReason::Completed) && execution_plan.is_open() {
+            return fail_turn(&event_sink, model_steps, "execution plan remains unresolved; completion was not accepted").await;
+        }
+        if matches!(finish_reason, ChatFinishReason::Completed) && patch_recovery.pending() {
+            return fail_turn(&event_sink, model_steps, "failed patch targets have not been re-observed; task completion was not accepted").await;
+        }
+        if matches!(finish_reason, ChatFinishReason::Completed) && !work_status.running_processes.is_empty() {
+            return fail_turn(&event_sink, model_steps, "processes remain running; poll or cancel them explicitly before completion (host cleanup will still reap them)").await;
+        }
+        if matches!(finish_reason, ChatFinishReason::Completed) && (tool_call_count > 0 || execution_plan.revision > 0) {
+            let Some(report) = completion.current(&execution_plan, &work_status, retained_inputs.len()) else {
+                return fail_turn(&event_sink, model_steps, "completion account is missing or stale; call report_completion after the latest plan, input and tool observations").await;
+            };
+            if report.is_blocked() {
+                return fail_turn(&event_sink, model_steps, "completion account contains blocked work; this turn cannot be published as task completion").await;
+            }
+        }
         model_request
             .validate()
             .map_err(|error| CodingEngineError::InvalidContract(error.to_string()))?;
+        if let Some(port) = &request.input_port {
+            let inputs = port.take(&model_request.causality, true).await?;
+            if crate::steering::incorporate(inputs, &mut model_request, &mut retained_inputs, &mut steering_receipts)? {
+                execution_plan.needs_replan = true;
+                completion_review_used = false;
+                continue;
+            }
+        }
+        if matches!(finish_reason, ChatFinishReason::Completed) {
+            if let Some(report) = completion.current(&execution_plan, &work_status, retained_inputs.len()) {
+                if let Some(disclosure) = report.unverified_disclosure() {
+                    output_text.push_str(&disclosure);
+                    event_sink.emit(CodingEngineEvent::OutputTextDelta { step: model_steps, text: disclosure }).await?;
+                }
+            }
+        }
         let result = CodingTurnResult {
             agent_session_id,
             turn_operation_id,
@@ -519,6 +944,24 @@ pub(crate) async fn run_turn(
         ),
     )
     .await
+}
+
+fn configure_tools(request: &mut ChatModelRequest, plan: &CodingToolPlan, resources: bool, prior_task: bool, remote_resources: bool, history: bool) -> Result<(), CodingEngineError> {
+    // Retired capability-control names remain reserved so a host cannot
+    // accidentally restore the old dynamic authority surface as ordinary tools.
+    if [crate::planning::TOOL_NAME, crate::completion::TOOL_NAME, crate::context_resources::TOOL_NAME, "search_capabilities", "activate_capability", crate::task_continuation::TOOL_NAME, crate::remote_resources::LIST, crate::remote_resources::READ, crate::remote_resources::TEMPLATES, crate::tool_archive::SEARCH, crate::tool_archive::READ, crate::tool_archive::LOAD]
+        .iter().any(|name| plan.binding(name).is_some()) {
+        return Err(CodingEngineError::InvalidContract("engine control tool names cannot be shadowed".into()));
+    }
+    request.input.tools = plan.model_definitions();
+    request.input.tools.push(crate::planning::definition());
+    request.input.tools.push(crate::completion::definition());
+    request.input.tools.extend(crate::tool_archive::definitions());
+    if history { request.input.tools.push(crate::tool_archive::load_definition()); }
+    if prior_task { request.input.tools.push(crate::task_continuation::definition()); }
+    if resources { request.input.tools.push(crate::context_resources::definition()); }
+    if remote_resources { request.input.tools.extend(crate::remote_resources::definitions()); }
+    Ok(())
 }
 
 async fn fail_turn(
@@ -565,14 +1008,167 @@ async fn invoke_tool_calls(
     agent_session_id: &AgentSessionId,
     principal: &PrincipalRef,
     model_request: &ChatModelRequest,
-    active_set_generation: u64,
+    active_set_generation: &u64,
     plan: &CodingToolPlan,
     invoker: &dyn CodingToolInvoker,
     event_sink: &dyn CodingEventSink,
     step: &StepState,
     model_step: u16,
     cancellation: &CancellationToken,
+    execution_plan: &mut crate::CodingPlan,
+    completion: &mut crate::completion::CompletionTracker,
+    work_status: &mut crate::CodingWorkStatus,
+    accepted_inputs: &[ChatMessage],
+    scoped_instructions: &mut crate::workspace_context::ScopedInstructions,
+    patch_recovery: &mut crate::patch_recovery::PatchRecovery,
+    context_resources: &BTreeMap<String, crate::CodingContextResource>,
+    context_image_input: &bool,
+    input_port: Option<&dyn crate::CodingInputPort>,
+    prior_task: Option<&crate::CodingPriorTask>,
+    resource_port: Option<&dyn nomifun_engine_core::EngineResourcePort>,
+    tool_archive: &mut crate::tool_archive::ToolArchive,
+    history_port: Option<&dyn crate::CodingHistoryPort>,
+    engine_binding: &EngineBinding,
 ) -> Result<Vec<(ToolCallId, CodingToolResult)>, CodingEngineError> {
+    let completed = step.call_order.iter().map(|id| step.calls.get(id).and_then(|pending| pending.completed.clone())
+        .ok_or_else(|| CodingEngineError::InvalidModelEvent("incomplete tool call".into())))
+        .collect::<Result<Vec<_>, _>>()?;
+    if let Some(results) = crate::tool::reject_unexposed_batch(&completed, &model_request.input.tools) {
+        if cancellation.is_cancelled() { return Err(CodingEngineError::Cancelled); }
+        // This precedes control handlers, instruction discovery and platform
+        // admission. No internal control or workspace effect ran.
+        // The ordinary result path records all call/result pairs and feeds the
+        // error back on the next bounded model step, without transport replay.
+        execution_plan.needs_replan = true;
+        completion.invalidate();
+        for call in &completed {
+            if plan.binding(&call.name).is_none() {
+                work_status.observe_deferred();
+            }
+        }
+        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+    }
+    if completed.iter().any(|call| call.name == crate::tool_archive::LOAD) {
+        let mut results = Vec::new();
+        for call in &completed {
+            let result = if let Some(port) = history_port.filter(|_| completed.len() == 1) {
+                tool_archive.load(call, port, &model_request.causality, engine_binding, cancellation).await?
+            } else {
+                CodingToolResult::text(call.call_id.clone(), "No tools executed: historical loading requires an available platform history port and one call alone.", true)
+            };
+            results.push((call.call_id.clone(), Ok(result)));
+        }
+        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+    }
+    if completed.iter().any(|call| matches!(call.name.as_str(), crate::tool_archive::SEARCH | crate::tool_archive::READ)) {
+        let isolated = completed.len() == 1;
+        let results = completed.iter().map(|call| {
+            let result = if isolated { tool_archive.handle(call) } else {
+                CodingToolResult::text(call.call_id.clone(), "No tools executed: submit one search/read history call alone before effects or other controls.", true)
+            };
+            (call.call_id.clone(), Ok(result))
+        }).collect();
+        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+    }
+    if completed.iter().any(|call| matches!(call.name.as_str(), crate::remote_resources::LIST | crate::remote_resources::READ | crate::remote_resources::TEMPLATES)) {
+        let mut results = Vec::new();
+        for call in &completed {
+            let result = if let Some(port) = resource_port.filter(|_| completed.len() == 1) {
+                match crate::remote_resources::prepare(call, *context_image_input) {
+                    Err(result) => result,
+                    Ok(prepared) => {
+                        if cancellation.is_cancelled() { return Err(CodingEngineError::Cancelled); }
+                        // Resource sessions can start stdio/OAuth/remote work.
+                        // This is a conservative observation fence, not proof
+                        // of host admission, execution or a workspace mutation.
+                        patch_recovery.invalidate_observations();
+                        patch_recovery.persist(event_sink).await?;
+                        scoped_instructions.invalidate();
+                        work_status.before_resource_request();
+                        completion.invalidate();
+                        event_sink.emit(CodingEngineEvent::WorkStatus { status: work_status.clone() }).await?;
+                        crate::remote_resources::execute(prepared, port, call, &model_request.causality,
+                            *active_set_generation, cancellation).await?
+                    }
+                }
+            } else {
+                CodingToolResult::text(call.call_id.clone(), "No tools executed: MCP resources require an available host port and a single-call batch.", true)
+            };
+            results.push((call.call_id.clone(), Ok(result)));
+        }
+        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+    }
+    if completed.iter().any(|call| call.name == crate::task_continuation::TOOL_NAME) {
+        let mut results = Vec::new();
+        for call in &completed {
+            if cancellation.is_cancelled() { return Err(CodingEngineError::Cancelled); }
+            let result = if completed.len() == 1 {
+                crate::task_continuation::resume(prior_task, call, execution_plan, work_status, accepted_inputs, event_sink).await?
+            } else {
+                CodingToolResult::text(call.call_id.clone(), "No tools executed: resume_task requires a single-call batch before planning/effects.", true)
+            };
+            results.push((call.call_id.clone(), Ok(result)));
+        }
+        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+    }
+    // Internal control updates are isolated from effects. No Kernel capability
+    // is invented and no model-selected name can shadow the engine planner.
+    if completed.iter().any(|call| call.name == crate::completion::TOOL_NAME) {
+        let mut results = Vec::new();
+        for call in &completed {
+            let result = if completed.len() == 1 {
+                completion.submit(call, execution_plan, work_status, accepted_inputs, event_sink).await?
+            } else {
+                CodingToolResult::text(call.call_id.clone(), "No tools executed: submit report_completion alone after the plan and all observations are settled.", true)
+            };
+            results.push((call.call_id.clone(), Ok(result)));
+        }
+        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+    }
+    if completed.iter().any(|call| call.name == crate::planning::TOOL_NAME) {
+        let mut results = Vec::new();
+        for call in &completed {
+            let result = if completed.len() == 1 {
+                execution_plan.update(call, accepted_inputs, event_sink).await?
+            } else {
+                CodingToolResult::text(call.call_id.clone(), "No tools executed: submit update_plan alone, then submit execution calls in a subsequent batch.", true)
+            };
+            results.push((call.call_id.clone(), Ok(result)));
+        }
+        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+    }
+    if completed.iter().any(|call| call.name == crate::context_resources::TOOL_NAME) {
+        let isolated = completed.iter().all(|call| call.name == crate::context_resources::TOOL_NAME);
+        let results = completed.iter().map(|call| {
+            let result = if isolated { crate::context_resources::read(call, context_resources, *context_image_input, completed.len() == 1) }
+                else { CodingToolResult::text(call.call_id.clone(), "No tools executed: read context resources in a separate batch before workspace calls.", true) };
+            (call.call_id.clone(), Ok(result))
+        }).collect();
+        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+    }
+    let workspace_image = completed.iter().any(|call|
+        plan.binding(&call.name).is_some_and(|binding| binding.capability_id.as_ref() == "fs.read")
+            && call.arguments.0.get("format").and_then(|value| value.as_str()) == Some("image"));
+    if workspace_image && (completed.len() != 1 || !*context_image_input) {
+        let results = completed.into_iter().map(|call| (call.call_id.clone(), Ok(CodingToolResult::text(
+            call.call_id, "No tools executed: workspace image reads require llm.vision enabled in the frozen Agent selection, a compatible model route and a single-call batch. Use read_file format=image without offset/limit only when image input is available; this turn cannot enable capabilities.", true)))).collect();
+        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+    }
+    let gate = completed.iter().find_map(|call| {
+        plan.binding(&call.name).and_then(|binding| {
+            let cleanup = binding.capability_id.as_ref() == "process.exec"
+                && matches!(call.arguments.0.get("operation").and_then(|v| v.as_str()), Some("poll" | "cancel" | "close_stdin"));
+            if let Some(reason) = patch_recovery.gate(binding, call) { Some(reason) }
+            else if !cleanup && !matches!(binding.effect_class, CodingEffectClass::ReadOnly) { execution_plan.effect_gate() }
+            else { None }
+        })
+    });
+    let deferred = if let Some(reason) = gate { Some(reason.to_owned()) }
+        else { scoped_instructions.before_calls(&completed, invoker, event_sink, cancellation.clone()).await? };
+    if let Some(reason) = deferred {
+        let results = completed.into_iter().map(|call| (call.call_id.clone(), Ok(CodingToolResult::text(call.call_id, reason.clone(), true)))).collect();
+        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+    }
     let mut calls = Vec::with_capacity(step.call_order.len());
     let mut can_parallelize = !step.call_order.is_empty();
     for call_id in &step.call_order {
@@ -601,51 +1197,181 @@ async fn invoke_tool_calls(
             agent_session_id.clone(),
             principal.clone(),
             model_request.causality.resolved_snapshot_ref.clone(),
-            active_set_generation,
+            *active_set_generation,
             &model_request.causality.turn_operation_id,
             call,
             binding,
         );
-        event_sink
-            .emit(CodingEngineEvent::ToolStarted {
-                step: model_step,
-                call_id: invocation.call.call_id.clone(),
-                capability_id: invocation.binding.capability_id.clone(),
-                action_id: invocation.binding.action_id.clone(),
-            })
-            .await?;
         calls.push(invocation);
     }
 
     if can_parallelize {
-        let invocations = calls.into_iter().map(|invocation| async move {
+        let invocations = calls.into_iter().enumerate().map(|(index, invocation)| async move {
             let call_id = invocation.call.call_id.clone();
-            let result = invoker.invoke(invocation, cancellation.clone()).await;
-            (call_id, result)
+            let result = async {
+                if cancellation.is_cancelled() {
+                    return Err(CodingEngineError::Cancelled);
+                }
+                if let Some(port) = input_port {
+                    if port.has_pending(&model_request.causality).await? {
+                        return Ok(steering_deferred(call_id.clone()));
+                    }
+                }
+                if !record_tool_admission(event_sink, model_step, &invocation).await? {
+                    return Ok(steering_deferred(call_id.clone()));
+                }
+                invoker.invoke(invocation, cancellation.clone()).await
+            }.await;
+            (index, call_id, result)
         });
-        let results = tokio::select! {
-            _ = cancellation.cancelled() => return Err(CodingEngineError::Cancelled),
-            results = futures::future::join_all(invocations) => results,
-        };
-        return finish_tool_results(results, event_sink, model_step, cancellation).await;
+        let mut pending = invocations.collect::<futures::stream::FuturesUnordered<_>>();
+        let mut ordered = vec![None; completed.len()];
+        // Owners retain admitted tasks independently of these waiter futures.
+        // Record each returned read without waiting for an unrelated slow read;
+        // scoped instruction postprocessing remains serial and precedes output.
+        while !pending.is_empty() {
+            let next = tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Err(CodingEngineError::Cancelled),
+                next = pending.next() => next,
+            };
+            let Some((index, call_id, result)) = next else { break; };
+            let call = completed.get(index).ok_or_else(|| CodingEngineError::InvalidContract(
+                "parallel result index is outside its frozen batch".into()))?;
+            if call.call_id != call_id || ordered[index].is_some() {
+                return Err(CodingEngineError::InvalidContract("parallel result identity is inconsistent".into()));
+            }
+            let result = match result {
+                Ok(result) => {
+                    result.validate_for(&call_id)?;
+                    Ok(scoped_instructions.after_call(call, result, invoker, event_sink, cancellation.clone()).await?.0)
+                }
+                Err(error) => Err(error),
+            };
+            ordered[index] = Some(record_tool_result(call_id, result, event_sink, model_step).await?);
+        }
+        if cancellation.is_cancelled() { return Err(CodingEngineError::Cancelled); }
+        let results = ordered.into_iter().map(|result| result.ok_or_else(||
+            CodingEngineError::InvalidContract("parallel batch has no recorded result".into())))
+            .collect::<Result<Vec<_>, _>>()?;
+        // Live model input remains proposal-ordered. Persist that ordering so
+        // replay does not accidentally use asynchronous completion timing.
+        event_sink.emit(CodingEngineEvent::ToolResultsOrdered {
+            step: model_step, call_ids: results.iter().map(|(id, _)| id.clone()).collect(),
+        }).await?;
+        return Ok(results);
     }
 
     let mut results = Vec::new();
+    let mut defer_remaining: Option<String> = None;
     for invocation in calls {
         if cancellation.is_cancelled() {
             return Err(CodingEngineError::Cancelled);
         }
         let call_id = invocation.call.call_id.clone();
+        if let Some(reason) = &defer_remaining {
+            let result = CodingToolResult::text(call_id.clone(), reason.clone(), true);
+            results.push(record_tool_result(call_id, Ok(result), event_sink, model_step).await?);
+            continue;
+        }
+        // A preceding serial effect can change repository instructions. Do
+        // not let later calls in the same batch use the pre-effect view.
+        if !results.is_empty() {
+            if let Some(reason) = scoped_instructions.before_calls(std::slice::from_ref(&invocation.call), invoker, event_sink, cancellation.clone()).await? {
+                defer_remaining = Some(reason.clone());
+                let result = CodingToolResult::text(call_id.clone(), reason, true);
+                results.push(record_tool_result(call_id, Ok(result), event_sink, model_step).await?);
+                continue;
+            }
+        }
+        if let Some(port) = input_port {
+            if port.has_pending(&model_request.causality).await? {
+                let reason = "Not executed: new user input is waiting at the next model boundary; reconsider remaining calls.".to_owned();
+                defer_remaining = Some(reason.clone());
+                let result = CodingToolResult::text(call_id.clone(), reason, true);
+                results.push(record_tool_result(call_id, Ok(result), event_sink, model_step).await?);
+                continue;
+            }
+        }
+        if let Some(reason) = patch_recovery.gate(&invocation.binding, &invocation.call) {
+            defer_remaining = Some(reason.to_owned());
+            let result = CodingToolResult::text(call_id.clone(), reason, true);
+            results.push(record_tool_result(call_id, Ok(result), event_sink, model_step).await?);
+            continue;
+        }
+        if !record_tool_admission(event_sink, model_step, &invocation).await? {
+            let result = steering_deferred(call_id.clone());
+            defer_remaining = Some(result.output_text());
+            results.push(record_tool_result(call_id, Ok(result), event_sink, model_step).await?);
+            continue;
+        }
+        let patch_call = (invocation.binding.capability_id.as_ref() == "fs.patch").then(|| invocation.call.clone());
+        if let Some(call) = &patch_call {
+            // Persist BEFORE the invoker owns the effect, including cancellation
+            // and crash windows where no engine result can ever be observed.
+            if let Err(error) = patch_recovery.arm(call) {
+                let reason = format!("Not executed: {error}");
+                defer_remaining = Some(reason.clone());
+                let result = CodingToolResult::text(call_id.clone(), reason, true);
+                results.push(record_tool_result(call_id, Ok(result), event_sink, model_step).await?);
+                continue;
+            }
+            patch_recovery.persist(event_sink).await?;
+        }
+        if patch_call.is_none() && (invocation.binding.capability_id.as_ref() == "process.exec"
+            || !matches!(invocation.binding.effect_class, crate::CodingEffectClass::ReadOnly)) {
+            patch_recovery.invalidate_observations();
+            patch_recovery.persist(event_sink).await?;
+        }
+        let observed_call = invocation.call.clone();
         let result = tokio::select! {
             _ = cancellation.cancelled() => return Err(CodingEngineError::Cancelled),
             result = invoker.invoke(invocation, cancellation.clone()) => result,
         };
-        results.push((call_id, result));
+        let result = match result {
+            Ok(result) => {
+                // A malformed/misattributed response must stop this batch
+                // before it can clear patch obligations or admit another effect.
+                result.validate_for(&call_id)?;
+                let (result, reconsider) = scoped_instructions.after_call(&observed_call, result, invoker, event_sink, cancellation.clone()).await?;
+                if reconsider {
+                    defer_remaining = Some("Not executed: an earlier search discovered changed repository instructions or withheld its snippets because required context was unavailable. Read the current context, reconsider remaining calls and submit new call identities.".into());
+                }
+                Ok(result)
+            }
+            Err(error) => Err(error),
+        };
+        // Persist every settled result before the next serial effect. A later
+        // cancellation/failure cannot erase the already recorded prefix. This
+        // is a tool observation, not owner cleanup or task-success proof.
+        let recorded = record_tool_result(call_id, result, event_sink, model_step).await?;
+        if recorded.1.is_error {
+            if let Some(call) = patch_call { patch_recovery.failed(&call); }
+            defer_remaining = Some("Not executed: an earlier serial call failed. Inspect its result and update_plan before retrying remaining effects.".into());
+        } else if patch_call.is_some() {
+            patch_recovery.published_successfully();
+            patch_recovery.persist(event_sink).await?;
+        }
+        results.push(recorded);
         if cancellation.is_cancelled() {
             break;
         }
     }
-    finish_tool_results(results, event_sink, model_step, cancellation).await
+    if cancellation.is_cancelled() {
+        return Err(CodingEngineError::Cancelled);
+    }
+    Ok(results)
+}
+
+fn steering_deferred(call_id: ToolCallId) -> CodingToolResult {
+    CodingToolResult::text(call_id, "Not executed: new user input is waiting at the next model boundary; reconsider remaining calls.", true)
+}
+
+async fn record_tool_admission(sink: &dyn CodingEventSink, step: u16, invocation: &crate::CodingToolInvocation) -> Result<bool, CodingEngineError> {
+    sink.admit_tool(CodingEngineEvent::ToolStarted {
+        step, call_id: invocation.call.call_id.clone(), capability_id: invocation.binding.capability_id.clone(),
+        action_id: invocation.binding.action_id.clone(),
+    }).await
 }
 
 async fn finish_tool_results(
@@ -662,21 +1388,31 @@ async fn finish_tool_results(
     }
     let mut normalized = Vec::with_capacity(results.len());
     for (call_id, result) in results {
-        let result = match result {
-            Ok(result) => result,
-            Err(CodingEngineError::Cancelled) => return Err(CodingEngineError::Cancelled),
-            Err(error) => CodingToolResult::text(call_id.clone(), error.to_string(), true),
-        };
-        result.validate_for(&call_id)?;
-        event_sink
-            .emit(CodingEngineEvent::ToolCompleted {
-                step: model_step,
-                result: result.clone(),
-            })
-            .await?;
-        normalized.push((call_id, result));
+        normalized.push(record_tool_result(call_id, result, event_sink, model_step).await?);
     }
     Ok(normalized)
+}
+
+/// Do not discard a returned observation merely because its token changed.
+/// Callers stop admitting more work at their next boundary. Outer driver drops
+/// and storage failures still follow the host's durable-outcome contract;
+/// cancellation without a returned result is never synthesized as success.
+async fn record_tool_result(
+    call_id: ToolCallId,
+    result: Result<CodingToolResult, CodingEngineError>,
+    event_sink: &dyn CodingEventSink,
+    model_step: u16,
+) -> Result<(ToolCallId, CodingToolResult), CodingEngineError> {
+    let result = match result {
+        Ok(result) => result,
+        Err(CodingEngineError::Cancelled) => return Err(CodingEngineError::Cancelled),
+        Err(error) => CodingToolResult::text(call_id.clone(), error.to_string(), true),
+    };
+    result.validate_for(&call_id)?;
+    event_sink.emit(CodingEngineEvent::ToolCompleted {
+        step: model_step, result: result.clone(),
+    }).await?;
+    Ok((call_id, result))
 }
 
 fn append_assistant_step(
@@ -716,7 +1452,7 @@ impl StepState {
     }
 
     fn append_reasoning(&mut self, text: &str) {
-        if let Some(ChatContentPart::Reasoning { text: existing, .. }) =
+        if let Some(ChatContentPart::Reasoning { text: existing, signature: None, encrypted_content: None }) =
             self.assistant_content.last_mut()
         {
             existing.push_str(text);
@@ -766,6 +1502,10 @@ impl StepState {
         name: &str,
         arguments_delta: &str,
     ) -> Result<(), CodingEngineError> {
+        crate::stream_limits::identity(call_id, name)?;
+        if !self.calls.contains_key(call_id) && self.calls.len() >= MAX_CALLS_PER_STEP {
+            return Err(CodingEngineError::InvalidModelEvent("model exceeded the per-step tool-call limit".into()));
+        }
         if call_id.as_ref().trim().is_empty() {
             return Err(CodingEngineError::InvalidModelEvent(
                 "tool call delta has an empty call id".to_owned(),
@@ -799,6 +1539,10 @@ impl StepState {
     }
 
     fn record_tool_completed(&mut self, call: &ChatToolCall) -> Result<(), CodingEngineError> {
+        crate::stream_limits::completed(call)?;
+        if !self.calls.contains_key(&call.call_id) && self.calls.len() >= MAX_CALLS_PER_STEP {
+            return Err(CodingEngineError::InvalidModelEvent("model exceeded the per-step tool-call limit".into()));
+        }
         call.validate()
             .map_err(|error| CodingEngineError::InvalidModelEvent(error.to_string()))?;
         if !call.arguments.0.is_object() {
@@ -875,7 +1619,8 @@ impl StepState {
             || self.assistant_content.iter().any(|part| {
             matches!(
                 part,
-                ChatContentPart::Reasoning { text, .. } if text.is_empty()
+                ChatContentPart::Reasoning { text, encrypted_content, .. }
+                    if text.is_empty() && encrypted_content.is_none()
             )
         })
         {
@@ -1001,6 +1746,32 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn frozen_tool_surface_never_advertises_capability_activation() {
+        let mut request = request();
+        let plan = tool_plan();
+        configure_tools(&mut request, &plan, true, true, true, true).unwrap();
+        assert!(request.input.tools.iter().any(|tool| tool.name == "read_file"));
+        assert!(request.input.tools.iter().any(|tool| tool.name == crate::planning::TOOL_NAME));
+        assert!(!request.input.tools.iter().any(|tool|
+            matches!(tool.name.as_str(), "activate_capability" | "search_capabilities")));
+        for name in ["activate_capability", "search_capabilities"] {
+            let calls = [ChatToolCall {
+                call_id: ToolCallId::from("retired-control"),
+                name: name.into(),
+                arguments: nomifun_agent_contracts::StrictJsonValue(json!({"capability_id":"fs.write"})),
+                provider_metadata: None,
+            }];
+            let rejected = crate::tool::reject_unexposed_batch(&calls, &request.input.tools).unwrap();
+            assert_eq!(rejected.len(), 1);
+            assert!(rejected[0].1.as_ref().unwrap().is_error);
+            let shadow = CodingToolPlan::new([tool_binding(
+                name, "fs.read", "read", CodingEffectClass::ReadOnly, true,
+            )]).unwrap();
+            assert!(configure_tools(&mut request, &shadow, false, false, false, false).is_err());
+        }
+    }
+
     fn tool_binding(
         model_name: &str,
         capability_id: &str,
@@ -1034,6 +1805,13 @@ mod tests {
     }
 
     fn two_tool_plan(effect_class: CodingEffectClass, parallel_safe: bool) -> CodingToolPlan {
+        if effect_class == CodingEffectClass::ManagedEffect {
+            return CodingToolPlan::new([
+                tool_binding("read_file", "fs.read", "read", CodingEffectClass::ReadOnly, true),
+                tool_binding("write_file", "fs.write", "write", effect_class, parallel_safe),
+                tool_binding("write_other_file", "fs.write", "write", effect_class, parallel_safe),
+            ]).unwrap();
+        }
         CodingToolPlan::new([
             tool_binding(
                 "read_file",
@@ -1155,6 +1933,87 @@ mod tests {
 
     struct EchoTool;
 
+    // Internal instruction observations are real fs.read envelopes, not model
+    // tool calls. Keep them out of dispatch/concurrency/cancellation counters.
+    fn instruction_result(invocation: &CodingToolInvocation) -> Option<CodingToolResult> {
+        if invocation.binding.capability_id.as_ref() != "fs.read" {
+            return None;
+        }
+        let args = &invocation.call.arguments.0;
+        let path = args["path"].as_str().expect("fixture read requires a path");
+        let value = if args["missing_ok"] == true {
+            assert!(matches!(path, "AGENTS.md" | "AGENTS.override.md"));
+            json!({"kind":"workspace_file_absent", "path":path})
+        } else if args["format"] == "instruction_scope" {
+            assert!(matches!(path, "README.md" | "a" | "b"));
+            json!({"path":path, "canonical_path":path, "kind":"file",
+                "recursive":args["recursive"], "directories":[""],
+                "complete":true, "incomplete_reasons":[]})
+        } else {
+            return None;
+        };
+        Some(CodingToolResult::text(invocation.call.call_id.clone(), value.to_string(), false))
+    }
+
+    fn workspace_result(invocation: CodingToolInvocation) -> CodingToolResult {
+        let args = &invocation.call.arguments.0;
+        let value = match invocation.binding.capability_id.as_ref() {
+            "fs.read" => {
+                let content = "file contents";
+                json!({"path":args["path"], "content":content, "offset":0,
+                    "total_bytes":content.len(), "eof":true, "next_offset":null,
+                    "sha256":nomifun_agent_contracts::digest_bytes(content.as_bytes())})
+            }
+            "fs.search" => json!({"query":args["query"], "matches":[], "truncated":false,
+                "incomplete_reasons":[], "files_scanned":1, "files_skipped":0,
+                "source_bytes_read":13, "notice":"No matches in the fixture file."}),
+            "fs.write" => json!({"path":args["path"], "written":true}),
+            other => panic!("unexpected fixture capability: {other}"),
+        };
+        CodingToolResult::text(invocation.call.call_id, value.to_string(), false)
+    }
+
+    fn text_step(text: &str) -> Vec<Result<ChatModelEvent, ChatModelError>> {
+        vec![
+            Ok(ChatModelEvent::OutputTextDelta { text: text.into() }),
+            Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::Completed }),
+        ]
+    }
+
+    fn control_step(id: &str, name: &str, arguments: serde_json::Value) -> Vec<Result<ChatModelEvent, ChatModelError>> {
+        vec![
+            Ok(ChatModelEvent::ToolCallCompleted { call: ChatToolCall {
+                call_id: id.into(), name: name.into(),
+                arguments: nomifun_agent_contracts::StrictJsonValue(arguments), provider_metadata: None,
+            }}),
+            Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::ToolCalls }),
+        ]
+    }
+
+    fn plan_step(status: &str, quote: &str) -> Vec<Result<ChatModelEvent, ChatModelError>> {
+        control_step(&format!("plan-{status}"), crate::planning::TOOL_NAME, json!({
+            "explanation":"Account for the requested workspace operations.",
+            "plan":[{"step":"requested operations", "status":status}],
+            "requirements":[{"id":"request", "description":quote,
+                "source":{"input":0, "quote":quote}}]
+        }))
+    }
+
+    fn completion_steps(quote: &str, evidence: &[&str], supported: bool) -> Vec<Vec<Result<ChatModelEvent, ChatModelError>>> {
+        vec![
+            plan_step("completed", quote),
+            control_step("completion", crate::completion::TOOL_NAME, json!({
+                "summary":"Requested operations returned.",
+                "criteria":[{"step":"requested operations", "requirement_ids":["request"],
+                    "disposition":if supported { "supported" } else { "unverified" },
+                    "evidence_call_ids":evidence,
+                    "rationale":if supported { "The requested reads returned successfully." }
+                        else { "Writes returned, but their resulting contents were not independently verified." }}]
+            })),
+            text_step("done"),
+        ]
+    }
+
     #[async_trait]
     impl CodingToolInvoker for EchoTool {
         async fn invoke(
@@ -1162,11 +2021,7 @@ mod tests {
             invocation: CodingToolInvocation,
             _cancellation: CancellationToken,
         ) -> Result<CodingToolResult, CodingEngineError> {
-            Ok(CodingToolResult::text(
-                invocation.call.call_id,
-                "file contents",
-                false,
-            ))
+            Ok(instruction_result(&invocation).unwrap_or_else(|| workspace_result(invocation)))
         }
     }
 
@@ -1188,19 +2043,19 @@ mod tests {
             invocation: CodingToolInvocation,
             _cancellation: CancellationToken,
         ) -> Result<CodingToolResult, CodingEngineError> {
+            if let Some(result) = instruction_result(&invocation) {
+                return Ok(result);
+            }
             let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             self.max_active.fetch_max(active, Ordering::SeqCst);
-            tokio::time::sleep(self.delay).await;
+            let delay = if invocation.call.call_id.as_ref() == "call-1" { self.delay * 2 } else { self.delay };
+            tokio::time::sleep(delay).await;
             self.order
                 .lock()
                 .unwrap()
                 .push(invocation.call.call_id.as_ref().to_owned());
             self.active.fetch_sub(1, Ordering::SeqCst);
-            Ok(CodingToolResult::text(
-                invocation.call.call_id,
-                "ok",
-                false,
-            ))
+            Ok(workspace_result(invocation))
         }
     }
 
@@ -1208,9 +2063,13 @@ mod tests {
     impl CodingToolInvoker for BlockingTool {
         async fn invoke(
             &self,
-            _invocation: CodingToolInvocation,
+            invocation: CodingToolInvocation,
             cancellation: CancellationToken,
         ) -> Result<CodingToolResult, CodingEngineError> {
+            if let Some(result) = instruction_result(&invocation) {
+                return Ok(result);
+            }
+            assert!(matches!(invocation.call.call_id.as_ref(), "call-cancel" | "call-active"));
             self.started.notify_one();
             cancellation.cancelled().await;
             Err(CodingEngineError::Cancelled)
@@ -1221,6 +2080,14 @@ mod tests {
         model: Arc<dyn CodingModelPort>,
         tools: Arc<dyn CodingToolInvoker>,
     ) -> crate::engine::CodingEngineSession {
+        open_session_with_budget(model, tools, CodingContextBudget::default())
+    }
+
+    fn open_session_with_budget(
+        model: Arc<dyn CodingModelPort>,
+        tools: Arc<dyn CodingToolInvoker>,
+        budget: CodingContextBudget,
+    ) -> crate::engine::CodingEngineSession {
         let engine = CodingEngine::new(CodingEngineBuild {
             family_id: EngineFamilyId::from("nomifun.coding"),
             build_id: EngineBuildId::from("coding-dev"),
@@ -1228,7 +2095,7 @@ mod tests {
             display_name: "NomiFun Coding Engine".to_owned(),
             supported_profiles: vec![CodingRuntimeProfile::Coding],
         })
-        .unwrap();
+        .unwrap().with_context_budget(budget).unwrap();
         engine
             .open_session(
                 binding(),
@@ -1244,6 +2111,97 @@ mod tests {
             principal_kind: "user".to_owned(),
             principal_id: "user-1".to_owned(),
         }
+    }
+
+    #[tokio::test]
+    async fn engine_bounds_initial_history_before_calling_the_model() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![
+                text_step("Earlier user inputs: history-0 through history-7. Current request: inspect."),
+                text_step("done"),
+            ]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        // Isolate message-count pressure; mandatory engine instructions and
+        // tool schemas must fit before historical data can be summarized.
+        let budget = CodingContextBudget { max_history_messages: 4, max_context_bytes: 64 * 1024 };
+        let session = open_session_with_budget(model.clone(), Arc::new(EchoTool),
+            budget);
+        let mut request = request();
+        let current = request.input.messages[0].clone();
+        request.input.messages = (0..8).map(|index| ChatMessage {
+            role: ChatRole::User,
+            content: vec![ChatContentPart::Text { text: format!("history-{index}") }],
+            provider_round_id: None,
+        }).chain([current.clone()]).collect();
+        let result = session.run_turn(CodingTurnRequest::new(request, CodingToolPlan::default(), principal(), 0)).await.unwrap();
+        assert!(matches!(result.terminal, CodingTurnTerminal::Completed { .. }));
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].input.tools.is_empty(), "history is summarized without tool authority");
+        assert_eq!(requests[0].input.metadata.get("nomifun_task").map(String::as_str), Some("agent_compaction"));
+        let source = serde_json::to_string(&requests[0].input.messages).unwrap();
+        for index in 0..8 {
+            assert!(source.contains(&format!("history-{index}")), "history must not be silently discarded");
+        }
+        assert_eq!(requests[1].input.messages.len(), 2);
+        assert_eq!(requests[1].input.messages.last(), Some(&current));
+        assert!(matches!(&requests[1].input.messages[0].content[0], ChatContentPart::Text { text }
+            if text.contains("Derived summary") && text.contains("history-0 through history-7")));
+        assert!(serde_json::to_vec(&requests[1].input).unwrap().len() <= budget.max_context_bytes);
+    }
+
+    #[tokio::test]
+    async fn growing_tool_cycle_stops_before_over_budget_model_call() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(vec![vec![
+                Ok(ChatModelEvent::OutputTextDelta { text: "x".repeat(4096) }),
+                Ok(ChatModelEvent::ToolCallCompleted { call: ChatToolCall {
+                    call_id: "read-1".into(), name: "read_file".into(),
+                    arguments: nomifun_agent_contracts::StrictJsonValue(json!({"path":"README.md"})),
+                    provider_metadata: None,
+                }}),
+                Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::ToolCalls }),
+            ], text_step(&"nonshrinking summary ".repeat(390))]),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        // Initial mandatory state fits. The read creates a three-message
+        // exchange; the two-message ceiling now requires compaction. A bad
+        // summary that grows context must not trigger a second execution call.
+        let budget = CodingContextBudget { max_history_messages: 2, max_context_bytes: 64 * 1024 };
+        let session = open_session_with_budget(model.clone(), Arc::new(EchoTool),
+            budget);
+        let mut request = request();
+        request.input.max_output_tokens = Some(4096);
+        let error = session.run_turn(CodingTurnRequest::new(request, tool_plan(), principal(), 0)).await.unwrap_err();
+        assert!(matches!(&error, CodingEngineError::Compaction(message)
+            if message.contains("compaction cannot fit")), "{error}");
+        let requests = model.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(!requests[0].input.tools.is_empty());
+        assert!(requests[1].input.tools.is_empty());
+        assert_eq!(requests[1].input.metadata.get("nomifun_task").map(String::as_str), Some("agent_compaction"));
+        assert!(requests.iter().all(|request|
+            serde_json::to_vec(&request.input).unwrap().len() <= budget.max_context_bytes));
+        drop(requests);
+        assert!(!session.is_turn_active().await);
+    }
+
+    #[tokio::test]
+    async fn mandatory_context_over_budget_is_rejected_without_a_model_call() {
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(Vec::new()),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let session = open_session_with_budget(model.clone(), Arc::new(EchoTool),
+            CodingContextBudget { max_history_messages: 4, max_context_bytes: 2048 });
+        let error = session.run_turn(CodingTurnRequest::new(
+            request(), CodingToolPlan::default(), principal(), 0,
+        )).await.unwrap_err();
+        assert!(matches!(&error, CodingEngineError::Compaction(message)
+            if message.contains("Mandatory instructions/task state/accepted inputs")), "{error}");
+        assert!(model.requests.lock().unwrap().is_empty());
+        assert!(!session.is_turn_active().await);
     }
 
     #[test]
@@ -1265,189 +2223,124 @@ mod tests {
     #[tokio::test]
     async fn tool_call_continues_into_a_second_model_step() {
         let call_id = ToolCallId::from("call-1");
-        let model = Arc::new(ScriptedModel {
-            steps: std::sync::Mutex::new(vec![
-                vec![
-                    Ok(ChatModelEvent::ToolCallDelta {
-                        call_id: call_id.clone(),
-                        name: "read_file".to_owned(),
-                        arguments_delta: r#"{"path":"README.md"}"#.to_owned(),
-                    }),
-                    Ok(ChatModelEvent::ToolCallCompleted {
-                        call: ChatToolCall {
-                            call_id: call_id.clone(),
-                            name: "read_file".to_owned(),
-                            arguments: nomifun_agent_contracts::StrictJsonValue(json!({
-                                "path": "README.md"
-                            })),
-                            provider_metadata: None,
-                        },
-                    }),
-                    Ok(ChatModelEvent::Completed {
-                        finish_reason: ChatFinishReason::ToolCalls,
-                    }),
-                ],
-                vec![
-                    Ok(ChatModelEvent::OutputTextDelta {
-                        text: "done".to_owned(),
-                    }),
-                    Ok(ChatModelEvent::Completed {
-                        finish_reason: ChatFinishReason::Completed,
-                    }),
-                ],
-            ]),
+        let mut steps = vec![vec![
+            Ok(ChatModelEvent::ToolCallDelta {
+                call_id: call_id.clone(), name: "read_file".into(),
+                arguments_delta: r#"{"path":"README.md"}"#.into(),
+            }),
+            Ok(ChatModelEvent::ToolCallCompleted { call: ChatToolCall {
+                call_id: call_id.clone(), name: "read_file".into(),
+                arguments: nomifun_agent_contracts::StrictJsonValue(json!({"path":"README.md"})),
+                provider_metadata: None,
+            }}),
+            Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::ToolCalls }),
+        ]];
+        // A read-only first step is allowed without a plan. The next step
+        // consumes its result, then records requirements and completion.
+        steps.extend(completion_steps("inspect", &["call-1"], true));
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(steps), requests: std::sync::Mutex::new(Vec::new()),
         });
-        let plan = tool_plan();
-        let session = open_session(model, Arc::new(EchoTool));
-        let result = session
-            .run_turn(CodingTurnRequest::new(
-                request(),
-                plan,
-                principal(),
-                1,
-            ))
-            .await
-            .unwrap();
+        let session = open_session(model.clone(), Arc::new(EchoTool));
+        let result = session.run_turn(CodingTurnRequest::new(
+            request(), tool_plan(), principal(), 0,
+        )).await.unwrap();
         assert_eq!(result.output_text, "done");
-        assert_eq!(result.model_steps, 2);
-        assert_eq!(result.tool_call_count, 1);
-        assert!(matches!(
-            result.terminal,
-            CodingTurnTerminal::Completed {
-                finish_reason: ChatFinishReason::Completed
-            }
-        ));
+        assert_eq!(result.model_steps, 4);
+        assert_eq!(result.tool_call_count, 3); // read, closed plan, completion
+        assert!(matches!(result.terminal, CodingTurnTerminal::Completed {
+            finish_reason: ChatFinishReason::Completed
+        }));
+        let requests = model.requests.lock().unwrap();
+        assert!(requests[1].input.messages.iter().flat_map(|message| &message.content).any(|part|
+            matches!(part, ChatContentPart::ToolResult { call_id: id, is_error: false, .. } if id == &call_id)));
+        assert!(model.steps.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn read_only_tools_run_in_parallel_but_results_keep_call_order() {
         let first = ToolCallId::from("call-1");
         let second = ToolCallId::from("call-2");
+        let mut steps = vec![vec![
+            Ok(ChatModelEvent::ToolCallCompleted { call: ChatToolCall {
+                call_id: first.clone(), name: "read_file".into(),
+                arguments: nomifun_agent_contracts::StrictJsonValue(json!({"path":"a"})),
+                provider_metadata: None,
+            }}),
+            Ok(ChatModelEvent::ToolCallCompleted { call: ChatToolCall {
+                call_id: second.clone(), name: "search_files".into(),
+                arguments: nomifun_agent_contracts::StrictJsonValue(json!({"path":"b", "query":"needle"})),
+                provider_metadata: None,
+            }}),
+            Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::ToolCalls }),
+        ]];
+        steps.extend(completion_steps("inspect", &["call-1", "call-2"], true));
         let model = Arc::new(ObservingModel {
-            steps: std::sync::Mutex::new(vec![
-                vec![
-                    Ok(ChatModelEvent::ToolCallCompleted {
-                        call: ChatToolCall {
-                            call_id: first.clone(),
-                            name: "read_file".to_owned(),
-                            arguments: nomifun_agent_contracts::StrictJsonValue(json!({
-                                "path": "a"
-                            })),
-                            provider_metadata: None,
-                        },
-                    }),
-                    Ok(ChatModelEvent::ToolCallCompleted {
-                        call: ChatToolCall {
-                            call_id: second.clone(),
-                            name: "search_files".to_owned(),
-                            arguments: nomifun_agent_contracts::StrictJsonValue(json!({
-                                "path": "b"
-                            })),
-                            provider_metadata: None,
-                        },
-                    }),
-                    Ok(ChatModelEvent::Completed {
-                        finish_reason: ChatFinishReason::ToolCalls,
-                    }),
-                ],
-                vec![
-                    Ok(ChatModelEvent::OutputTextDelta {
-                        text: "done".to_owned(),
-                    }),
-                    Ok(ChatModelEvent::Completed {
-                        finish_reason: ChatFinishReason::Completed,
-                    }),
-                ],
-            ]),
-            requests: std::sync::Mutex::new(Vec::new()),
+            steps: std::sync::Mutex::new(steps), requests: std::sync::Mutex::new(Vec::new()),
         });
         let tools = Arc::new(ConcurrencyTool {
-            active: AtomicUsize::new(0),
-            max_active: AtomicUsize::new(0),
-            order: std::sync::Mutex::new(Vec::new()),
-            delay: Duration::from_millis(20),
+            active: AtomicUsize::new(0), max_active: AtomicUsize::new(0),
+            order: std::sync::Mutex::new(Vec::new()), delay: Duration::from_millis(20),
         });
-        let session = open_session(Arc::clone(&model) as Arc<dyn CodingModelPort>, tools.clone());
-        let result = session
-            .run_turn(CodingTurnRequest::new(
-                request(),
-                two_tool_plan(CodingEffectClass::ReadOnly, true),
-                principal(),
-                1,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(result.tool_call_count, 2);
-        assert!(tools.max_active.load(Ordering::SeqCst) >= 2);
+        let session = open_session(model.clone(), tools.clone());
+        let result = session.run_turn(CodingTurnRequest::new(
+            request(), two_tool_plan(CodingEffectClass::ReadOnly, true), principal(), 0,
+        )).await.unwrap();
+        assert!(matches!(result.terminal, CodingTurnTerminal::Completed { .. }));
+        assert_eq!(result.tool_call_count, 4); // two reads, closed plan, completion
+        assert_eq!(tools.max_active.load(Ordering::SeqCst), 2);
+        assert_eq!(*tools.order.lock().unwrap(), vec!["call-2", "call-1"]);
         let requests = model.requests.lock().unwrap();
-        let tool_call_ids = requests[1]
-            .input
-            .messages
-            .iter()
+        let results = requests[1].input.messages.iter()
             .flat_map(|message| message.content.iter())
             .filter_map(|part| match part {
-                ChatContentPart::ToolResult { call_id, .. } => Some(call_id.clone()),
+                ChatContentPart::ToolResult { call_id, is_error, .. } => Some((call_id.clone(), *is_error)),
                 _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(tool_call_ids, vec![first, second]);
+            }).collect::<Vec<_>>();
+        assert_eq!(results, vec![(first, false), (second, false)]);
+        assert!(model.steps.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn effectful_tools_run_serially() {
-        let model = Arc::new(ScriptedModel {
-            steps: std::sync::Mutex::new(vec![
-                vec![
-                    Ok(ChatModelEvent::ToolCallCompleted {
-                        call: ChatToolCall {
-                            call_id: ToolCallId::from("call-1"),
-                            name: "read_file".to_owned(),
-                            arguments: nomifun_agent_contracts::StrictJsonValue(json!({
-                                "path": "a"
-                            })),
-                            provider_metadata: None,
-                        },
-                    }),
-                    Ok(ChatModelEvent::ToolCallCompleted {
-                        call: ChatToolCall {
-                            call_id: ToolCallId::from("call-2"),
-                            name: "search_files".to_owned(),
-                            arguments: nomifun_agent_contracts::StrictJsonValue(json!({
-                                "path": "b"
-                            })),
-                            provider_metadata: None,
-                        },
-                    }),
-                    Ok(ChatModelEvent::Completed {
-                        finish_reason: ChatFinishReason::ToolCalls,
-                    }),
-                ],
-                vec![Ok(ChatModelEvent::Completed {
-                    finish_reason: ChatFinishReason::Completed,
-                })],
-            ]),
+        let quote = "Write a and b; do not run verification.";
+        let mut steps = vec![plan_step("in_progress", quote), vec![
+            Ok(ChatModelEvent::ToolCallCompleted { call: ChatToolCall {
+                call_id: "call-1".into(), name: "write_file".into(),
+                arguments: nomifun_agent_contracts::StrictJsonValue(json!({"path":"a", "content":"first"})),
+                provider_metadata: None,
+            }}),
+            Ok(ChatModelEvent::ToolCallCompleted { call: ChatToolCall {
+                call_id: "call-2".into(), name: "write_other_file".into(),
+                arguments: nomifun_agent_contracts::StrictJsonValue(json!({"path":"b", "content":"second"})),
+                provider_metadata: None,
+            }}),
+            Ok(ChatModelEvent::Completed { finish_reason: ChatFinishReason::ToolCalls }),
+        ]];
+        steps.extend(completion_steps(quote, &[], false));
+        let model = Arc::new(ObservingModel {
+            steps: std::sync::Mutex::new(steps), requests: std::sync::Mutex::new(Vec::new()),
         });
         let tools = Arc::new(ConcurrencyTool {
-            active: AtomicUsize::new(0),
-            max_active: AtomicUsize::new(0),
-            order: std::sync::Mutex::new(Vec::new()),
-            delay: Duration::from_millis(10),
+            active: AtomicUsize::new(0), max_active: AtomicUsize::new(0),
+            order: std::sync::Mutex::new(Vec::new()), delay: Duration::from_millis(10),
         });
-        let session = open_session(Arc::clone(&model) as Arc<dyn CodingModelPort>, tools.clone());
-        session
-            .run_turn(CodingTurnRequest::new(
-                request(),
-                two_tool_plan(CodingEffectClass::ManagedEffect, false),
-                principal(),
-                1,
-            ))
-            .await
-            .unwrap();
+        let session = open_session(model.clone(), tools.clone());
+        let mut request = request();
+        request.input.messages[0].content = vec![ChatContentPart::Text { text: quote.into() }];
+        let result = session.run_turn(CodingTurnRequest::new(
+            request, two_tool_plan(CodingEffectClass::ManagedEffect, false), principal(), 0,
+        )).await.unwrap();
+        assert!(matches!(result.terminal, CodingTurnTerminal::Completed { .. }));
+        assert!(result.output_text.contains("not independently verified"));
         assert_eq!(tools.max_active.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            *tools.order.lock().unwrap(),
-            vec!["call-1".to_owned(), "call-2".to_owned()]
-        );
+        assert_eq!(*tools.order.lock().unwrap(), vec!["call-1", "call-2"]);
+        let requests = model.requests.lock().unwrap();
+        for id in ["call-1", "call-2"] {
+            assert!(requests[2].input.messages.iter().flat_map(|message| &message.content).any(|part|
+                matches!(part, ChatContentPart::ToolResult { call_id, is_error: false, .. } if call_id.as_ref() == id)));
+        }
+        assert!(model.steps.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1541,7 +2434,7 @@ mod tests {
         });
         let started = Arc::new(Notify::new());
         let session = Arc::new(open_session(
-            model,
+            model.clone(),
             Arc::new(BlockingTool {
                 started: Arc::clone(&started),
             }),
@@ -1553,16 +2446,18 @@ mod tests {
                     request(),
                     tool_plan(),
                     principal(),
-                    1,
+                    0,
                 ))
                 .await
         });
 
-        started.notified().await;
+        tokio::time::timeout(Duration::from_secs(2), started.notified()).await.unwrap();
+        assert!(model.steps.lock().unwrap().is_empty(), "must cancel the model's tool call, not an instruction read");
         assert!(session.cancel().await);
-        let result = task.await.unwrap().unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(2), task).await.unwrap().unwrap().unwrap();
 
         assert!(matches!(result.terminal, CodingTurnTerminal::Cancelled));
+        assert_eq!(result.model_steps, 1);
         assert!(!session.is_turn_active().await);
         assert!(!session.cancel().await);
     }
@@ -1589,7 +2484,7 @@ mod tests {
         });
         let started = Arc::new(Notify::new());
         let session = Arc::new(open_session(
-            model,
+            model.clone(),
             Arc::new(BlockingTool {
                 started: Arc::clone(&started),
             }),
@@ -1601,27 +2496,29 @@ mod tests {
                     request(),
                     tool_plan(),
                     principal(),
-                    1,
+                    0,
                 ))
                 .await
         });
-        started.notified().await;
+        tokio::time::timeout(Duration::from_secs(2), started.notified()).await.unwrap();
+        assert!(model.steps.lock().unwrap().is_empty(), "first turn must reach its model-proposed tool");
 
         let second = session
             .run_turn(CodingTurnRequest::new(
                 request(),
                 tool_plan(),
                 principal(),
-                1,
+                0,
             ))
             .await;
         assert!(matches!(second, Err(CodingEngineError::TurnAlreadyRunning)));
 
-        session.cancel().await;
+        assert!(session.cancel().await);
         assert!(matches!(
-            task.await.unwrap().unwrap().terminal,
+            tokio::time::timeout(Duration::from_secs(2), task).await.unwrap().unwrap().unwrap().terminal,
             CodingTurnTerminal::Cancelled
         ));
+        assert!(!session.is_turn_active().await);
     }
 
     #[tokio::test]

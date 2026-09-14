@@ -2365,6 +2365,19 @@ impl IConversationRepository for SqliteConversationRepository {
         Ok(TurnLifecycleTransition::Committed)
     }
 
+    async fn clear_terminal_engine_context(
+        &self,
+        user_id: &str,
+        conversation_id: &str,
+        expected_extra: &str,
+        created_at: TimestampMs,
+        updated_at: TimestampMs,
+    ) -> Result<TurnLifecycleTransition, DbError> {
+        crate::conversation_context::clear(
+            &self.pool, user_id, conversation_id, expected_extra, created_at, updated_at,
+        ).await
+    }
+
     async fn claim_delivery_receipt(
         &self,
         user_id: &str,
@@ -4515,6 +4528,7 @@ impl IConversationRepository for SqliteConversationRepository {
             }
         }
         if let Some(extra) = updates.extra.as_deref() {
+            crate::conversation_context::preserve_in_update(&mut tx, conversation_id, extra).await?;
             lock_conversation_extra_references(&mut tx, extra).await?;
         }
         // Build dynamic SET clause
@@ -4632,6 +4646,7 @@ impl IConversationRepository for SqliteConversationRepository {
         new_extra: &str,
         updated_at: TimestampMs,
     ) -> Result<bool, DbError> {
+        crate::conversation_context::ensure_unchanged(expected_extra, new_extra)?;
         UserId::parse(user_id)
             .map_err(|error| DbError::Conflict(format!("invalid extra owner: {error}")))?;
         ConversationId::parse(conversation_id).map_err(|error| {
@@ -6387,6 +6402,7 @@ impl IConversationRepository for SqliteConversationRepository {
         .await?;
         lock_conversation_extra_references(&mut tx, extra).await?;
 
+        crate::conversation_context::preserve_in_update(&mut tx, conversation_id, extra).await?;
         let mut unique_ids = HashSet::with_capacity(mcp_server_ids.len());
         for mcp_server_id in mcp_server_ids {
             nomifun_common::validate_uuidv7(mcp_server_id).map_err(|error| {

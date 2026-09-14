@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use crate::engine_effect_scope::{EngineEffectScope, settle_optional};
 
 use nomi_agent::bootstrap::AgentBootstrap;
 use nomi_agent::companion_tools::{
@@ -54,7 +55,7 @@ use crate::image_generation::{
 use crate::protocol::events::{AgentStreamEvent, TurnCompletedEventData, TurnStopReason};
 use crate::protocol::send_error::AgentSendError;
 use crate::types::{NomiResolvedConfig, SendMessageData};
-use super::image_attachments::{ImageAttachmentError, load_image_blocks};
+use crate::model_attachments::{ImageAttachmentError, load_image_blocks};
 
 /// Process-level memory of which `(provider, model)` pairs have already been
 /// reported as running on an assumed context window.
@@ -238,6 +239,7 @@ pub struct NomiAgentManager {
     /// Canonical Agent MCP remains dormant until the deferred `mcp_connect`
     /// tool is activated and called. This handle owns its bounded cleanup.
     lazy_mcp_runtime: Option<LazyMcpRuntime>,
+    hosted_effects: Option<Arc<EngineEffectScope>>,
     /// Main-process backstop for renewable loopback MCP capabilities. Bridge
     /// children revoke on clean exit; this guard covers abrupt child/runtime
     /// teardown and construction failure.
@@ -320,6 +322,9 @@ pub struct NomiAgentManager {
 
 impl Drop for NomiAgentManager {
     fn drop(&mut self) {
+        if let Some(scope) = &self.hosted_effects {
+            let _ = scope.close_session();
+        }
         self.backend_output_sink.cancel_active_tool_calls(
             "The agent manager was dropped before this tool call reached a terminal state.",
         );
@@ -1017,7 +1022,12 @@ impl NomiAgentManager {
         let web_search_tool = host_wiring.web_search_tool;
         let citation_render_tool = host_wiring.citation_render_tool;
         let lazy_mcp_runtime = host_wiring.lazy_mcp_runtime;
-        let plugin_tool_session = host_wiring.plugin_tool_session;
+        let plugin_tool_session = host_wiring.plugin_tool_session.map(|session| {
+            session.with_context_image_policy(
+                config_extra.compat_overrides.supports_image == Some(true),
+            )
+        }).transpose()?;
+        let hosted_effects = plugin_tool_session.as_ref().and_then(crate::NomiPluginToolSession::effect_scope);
         let capability_state = plugin_tool_session
             .as_ref()
             .and_then(crate::NomiPluginToolSession::capability_state);
@@ -1178,10 +1188,33 @@ impl NomiAgentManager {
                 .push(gateway_delegate_provider_name.clone());
         }
         if let Some(session) = plugin_tool_session.as_ref() {
+            if session.has_hosted_mcp_resources() {
+                // Config files must not eagerly reconnect the resource server
+                // behind the exact platform port. Keep only the separately
+                // authorized, host-injected delegation Gateway when needed.
+                config.mcp.servers.clear();
+                if config_extra.allowed_tools.iter().any(|name| matches!(name.as_str(), "nomi_delegate" | "subagent_send" | "subagent_wait")) {
+                    if let Some(gateway) = config_extra.extra_mcp_servers.get(nomifun_api_types::GatewayMcpConfig::SERVER_NAME) {
+                        config.mcp.servers.insert(nomifun_api_types::GatewayMcpConfig::SERVER_NAME.into(), gateway.clone());
+                    }
+                }
+            }
             session.extend_tool_policy(
                 &mut config.tools.builtin_allowlist,
                 &mut config.tools.deferred_allowlist,
             );
+            session.constrain_tool_policy(
+                &mut config.tools.builtin_allowlist,
+                &mut config.tools.deferred_allowlist,
+            );
+            if session.execution_constraints().restricted() {
+                config.tools.enforce_builtin_allowlist = true;
+                config.tools.computer.enabled = false;
+                config.tools.browser.enabled = false;
+                // Config files and late registrations cannot reintroduce MCP
+                // resource/discovery routes into a restricted Attempt.
+                config.mcp.servers.clear();
+            }
         }
         // 原生文件工具写根钳制（Write/Edit/ApplyPatch），按会话信任面由工厂解析：
         // 本地桌面 = None（不钳制，OS 用户全权，今日行为）；渠道/远程/对外 =
@@ -1431,8 +1464,9 @@ impl NomiAgentManager {
                 ));
             }
         }
-
-        let mcp_tools: Vec<(&str, Box<dyn nomi_tools::Tool>)> = match lazy_mcp_runtime.as_ref() {
+        let mcp_tools: Vec<(&str, Box<dyn nomi_tools::Tool>)> = if plugin_tool_session.as_ref().is_some_and(|session| session.has_hosted_mcp_resources()) {
+            Vec::new()
+        } else { match lazy_mcp_runtime.as_ref() {
             Some(runtime) => vec![
                 (
                     nomi_agent::lazy_mcp::MCP_CONNECT_TOOL_NAME,
@@ -1461,6 +1495,7 @@ impl NomiAgentManager {
                     Box::new(McpResourceReadTool::new(mcp_managers.clone())),
                 ),
             ],
+        }
         };
         for (name, tool) in mcp_tools {
             let expected = !config_extra.enforce_tool_allowlist
@@ -1649,6 +1684,7 @@ impl NomiAgentManager {
             slash_commands,
             mcp_managers,
             lazy_mcp_runtime,
+            hosted_effects,
             loopback_capability_leases,
             #[cfg(feature = "browser-use")]
             browser_lane_binding,
@@ -1742,6 +1778,10 @@ impl NomiAgentManager {
         completion_context: &CompletionEvidenceContext,
         detail: impl Into<String>,
     ) -> Result<(), AgentSendError> {
+        if let Err(error) = settle_optional(self.hosted_effects.as_ref()).await {
+            self.runtime.mark_transport_broken();
+            return Err(AgentSendError::from_app_error(error));
+        }
         let persisted = self
             .engine
             .lock()
@@ -1768,6 +1808,10 @@ impl NomiAgentManager {
         completion_context: &CompletionEvidenceContext,
         detail: impl Into<String>,
     ) -> Result<(), AgentSendError> {
+        if let Err(error) = settle_optional(self.hosted_effects.as_ref()).await {
+            self.runtime.mark_transport_broken();
+            return Err(AgentSendError::from_app_error(error));
+        }
         let persisted = self
             .engine
             .lock()
@@ -1794,6 +1838,10 @@ impl NomiAgentManager {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if close_permanently {
             self.closing.store(true, Ordering::Release);
+        }
+        if let Some(scope) = &self.hosted_effects {
+            let result = if close_permanently { scope.close_session() } else { scope.close_turn() };
+            if result.is_err() { self.runtime.mark_transport_broken(); }
         }
         let was_running = self.runtime.status() == Some(ConversationStatus::Running);
         let runtime_turn = *self.active_turn.lock().unwrap_or_else(|e| e.into_inner());
@@ -1985,6 +2033,7 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
             process_supervisor: process_supervisor.clone(),
             mcp_managers: self.mcp_managers.clone(),
             lazy_mcp_runtime: self.lazy_mcp_runtime.clone(),
+            hosted_effects: self.hosted_effects.clone(),
             turn_teardown_fence: Arc::clone(&self.turn_teardown_fence),
             accepted_turn_recovery_required: Arc::clone(
                 &accepted_turn_recovery_required,
@@ -1993,6 +2042,15 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
             browser_lane_binding: self.browser_lane_binding.clone(),
             armed: true,
         };
+
+        {
+            let _lifecycle = self.lifecycle_gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !turn_cancel.is_cancelled()
+                && let Some(scope) = &self.hosted_effects
+            {
+                scope.begin_turn().map_err(AgentSendError::from_app_error)?;
+            }
+        }
 
         // Catalog refresh belongs to this accepted turn's cancellation
         // domain. Previously it ran before `reset_for_new_turn`, so Stop could
@@ -2411,10 +2469,10 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
             let mut race_tail_reruns = 0usize;
             let result = loop {
                 let current_content = std::mem::take(&mut run_content);
-                // Cancellation has one fail-closed lifecycle: drop the in-flight
-                // engine/tool future immediately, then roll back the provisional
-                // turn state. Awaiting arbitrary tool code here is unsafe because a
-                // tool is not required to observe a cancellation token.
+                // Drop the engine's caller future on cancellation. Hosted Kernel
+                // calls retain their own task witness and must settle before
+                // the provisional transcript can be restored. The host waiter
+                // is bounded; timeout retains quarantine, never aborts an effect.
                 let r = tokio::select! {
                     biased;
                     _ = turn_cancel.cancelled() => {
@@ -2422,6 +2480,7 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                             conversation_id = %self.runtime.conversation_id(),
                             "Nomi engine.execute_turn() cancelled by stop signal"
                         );
+                        term_guard.fence_cancelled_processes().await?;
                         if completion_context.turn_root_captured() {
                             engine.abort_current_turn("Tool execution canceled by user");
                             if !engine
@@ -2976,6 +3035,7 @@ impl crate::runtime_handle::AgentRuntimeControl for NomiAgentManager {
                 self.process_supervisor.clone(),
                 self.mcp_managers.clone(),
                 self.lazy_mcp_runtime.clone(),
+                self.hosted_effects.clone(),
                 #[cfg(feature = "browser-use")]
                 self.browser_lane_binding.clone(),
             )?;
@@ -3000,6 +3060,7 @@ struct TurnTerminationGuard {
     process_supervisor: Option<Arc<nomi_process_runtime::ProcessSupervisor>>,
     mcp_managers: Vec<Arc<McpManager>>,
     lazy_mcp_runtime: Option<LazyMcpRuntime>,
+    hosted_effects: Option<Arc<EngineEffectScope>>,
     turn_teardown_fence: Arc<TurnTeardownFence>,
     /// Set by the engine only after it has durably registered the accepted
     /// session root. If an unwind happens before the host terminal commits,
@@ -3021,6 +3082,12 @@ enum VerifiedTurnCommitOutcome {
 }
 
 impl TurnTerminationGuard {
+    async fn settle_hosted(&self) -> Result<(), AppError> {
+        let result = settle_optional(self.hosted_effects.as_ref()).await;
+        if result.is_err() { self.runtime.mark_transport_broken(); }
+        result
+    }
+
     async fn terminalize(
         &mut self,
         terminal: impl FnOnce(
@@ -3028,6 +3095,7 @@ impl TurnTerminationGuard {
             crate::runtime_state::AgentRuntimeTurn,
         ) -> bool,
     ) -> Result<bool, AppError> {
+        self.settle_hosted().await?;
         #[cfg(feature = "browser-use")]
         if let Some(binding) = &self.browser_lane_binding {
             // A terminal event is the externally observable proof that a turn
@@ -3061,6 +3129,7 @@ impl TurnTerminationGuard {
         response: &str,
         completed: TurnCompletedEventData,
     ) -> Result<bool, AppError> {
+        self.settle_hosted().await?;
         #[cfg(feature = "browser-use")]
         if let Some(binding) = &self.browser_lane_binding {
             binding.close_turn_lanes().await?;
@@ -3104,6 +3173,7 @@ impl TurnTerminationGuard {
         completed: TurnCompletedEventData,
         stream_error: crate::protocol::events::ErrorEventData,
     ) -> Result<bool, AppError> {
+        self.settle_hosted().await?;
         #[cfg(feature = "browser-use")]
         if let Some(binding) = &self.browser_lane_binding {
             binding.close_turn_lanes().await?;
@@ -3147,6 +3217,7 @@ impl TurnTerminationGuard {
         engine: &Mutex<AgentEngine>,
         completion_context: &CompletionEvidenceContext,
     ) -> Result<VerifiedTurnCommitOutcome, AppError> {
+        self.settle_hosted().await?;
         #[cfg(feature = "browser-use")]
         if let Some(binding) = &self.browser_lane_binding {
             binding.close_turn_lanes().await?;
@@ -3230,6 +3301,7 @@ impl TurnTerminationGuard {
                 );
             }
         }
+        failures.record("hosted tools", self.settle_hosted().await);
         failures.finish()
     }
 }
@@ -3237,6 +3309,7 @@ impl TurnTerminationGuard {
 impl Drop for TurnTerminationGuard {
     fn drop(&mut self) {
         if self.armed {
+            if let Some(scope) = &self.hosted_effects { let _ = scope.close_session(); }
             // This store happens synchronously while the old send still owns
             // `turn_gate`. Therefore a queued successor can never slip between
             // the unwind and the asynchronous process-tree fence.
@@ -3269,6 +3342,7 @@ impl Drop for TurnTerminationGuard {
             let process_supervisor = self.process_supervisor.clone();
             let mcp_managers = self.mcp_managers.clone();
             let lazy_mcp_runtime = self.lazy_mcp_runtime.clone();
+            let hosted_effects = self.hosted_effects.clone();
             let turn_teardown_fence = Arc::clone(&self.turn_teardown_fence);
             #[cfg(feature = "browser-use")]
             let browser_lane_binding = self.browser_lane_binding.clone();
@@ -3307,6 +3381,10 @@ impl Drop for TurnTerminationGuard {
                 // cleanup (or vice versa); only the terminal publication is
                 // conditioned on the aggregate proof.
                 let mut exact = true;
+                if settle_optional(hosted_effects.as_ref()).await.is_err() {
+                    error!(conversation_id = %conversation_id, "Nomi hosted tool effects remain unproven; retaining quarantine");
+                    exact = false;
+                }
                 if let Err(error) = shutdown_mcp_runtimes_exact(
                     &mcp_managers,
                     lazy_mcp_runtime.as_ref(),
@@ -3393,6 +3471,7 @@ struct NomiTeardownResults {
     kill: Result<(), AppError>,
     mcp: Result<(), AppError>,
     process: Result<(), AppError>,
+    hosted: Result<(), AppError>,
     #[cfg(feature = "browser-use")]
     browser_lane_binding: Option<crate::BrowserLaneBinding>,
     ssh_lease: Option<Arc<dyn crate::SshSessionLease>>,
@@ -3484,6 +3563,7 @@ async fn finish_nomi_teardown(results: NomiTeardownResults) -> Result<(), AppErr
     failures.record("kill", results.kill);
     failures.record("MCP", results.mcp);
     failures.record("process tree", results.process);
+    failures.record("hosted tools", results.hosted);
 
     #[cfg(feature = "browser-use")]
     if let Some(binding) = results.browser_lane_binding {
@@ -3534,6 +3614,7 @@ fn schedule_nomi_cancelled_terminal_after_process_fence(
     process_supervisor: Option<Arc<nomi_process_runtime::ProcessSupervisor>>,
     mcp_managers: Vec<Arc<McpManager>>,
     lazy_mcp_runtime: Option<LazyMcpRuntime>,
+    hosted_effects: Option<Arc<EngineEffectScope>>,
     #[cfg(feature = "browser-use")] browser_lane_binding: Option<crate::BrowserLaneBinding>,
 ) -> Result<(), AppError> {
     let terminalize = move || {
@@ -3569,6 +3650,7 @@ fn schedule_nomi_cancelled_terminal_after_process_fence(
     if process_supervisor.is_none()
         && mcp_managers.is_empty()
         && lazy_mcp_runtime.is_none()
+        && hosted_effects.is_none()
         && !has_browser_binding
     {
         terminalize();
@@ -3583,6 +3665,10 @@ fn schedule_nomi_cancelled_terminal_after_process_fence(
         // Every fence is attempted unconditionally; only the terminal
         // publication is conditioned on the aggregate exactness proof.
         let mut exact = true;
+        if settle_optional(hosted_effects.as_ref()).await.is_err() {
+            error!("Idle Nomi hosted tool cleanup remains unproven; retaining quarantine");
+            exact = false;
+        }
         if let Err(error) =
             shutdown_mcp_runtimes_exact(&mcp_managers, lazy_mcp_runtime.as_ref()).await
         {
@@ -3632,6 +3718,7 @@ impl NomiAgentManager {
         let process_supervisor = self.process_supervisor.clone();
         let mcp_managers = self.mcp_managers.clone();
         let lazy_mcp_runtime = self.lazy_mcp_runtime.clone();
+        let hosted_effects = self.hosted_effects.clone();
         #[cfg(feature = "browser-use")]
         let browser_lane_binding = self.browser_lane_binding.clone();
         let ssh_lease = self.ssh_lease.clone();
@@ -3660,6 +3747,7 @@ impl NomiAgentManager {
                 kill: kill_result,
                 mcp: mcp_result,
                 process: process_result,
+                hosted: settle_optional(hosted_effects.as_ref()).await,
                 #[cfg(feature = "browser-use")]
                 browser_lane_binding,
                 ssh_lease,
@@ -3783,6 +3871,8 @@ impl NomiAgentManager {
         // Signal any in-flight engine.execute_turn() to abort so we don't clear
         // mid-turn; the engine lock below then waits for it to release.
         self.request_stop(None, "clear_context", false);
+        let _turn = self.turn_gate.lock().await;
+        settle_optional(self.hosted_effects.as_ref()).await?;
         let mut engine = self.engine.lock().await;
         if let Err(error) = engine.clear_context() {
             self.runtime.mark_transport_broken();
@@ -3793,12 +3883,29 @@ impl NomiAgentManager {
         Ok(())
     }
 
+    /// Retry admission is based on owner effects, not on whether assistant
+    /// prose was emitted. The original source identity survives wire retries.
+    pub async fn ensure_can_retry_turn(&self, source_message_id: &str) -> Result<(), AppError> {
+        let _turn = self.turn_gate.lock().await;
+        self.ensure_source_replay_safe(source_message_id).await
+    }
+
+    async fn ensure_source_replay_safe(&self, source_message_id: &str) -> Result<(), AppError> {
+        if let Some(scope) = &self.hosted_effects {
+            tokio::time::timeout(std::time::Duration::from_secs(10), scope.ensure_source_replay_safe(source_message_id))
+                .await.map_err(|_| AppError::Conflict("Effect replay proof timed out".into()))??;
+        }
+        Ok(())
+    }
+
     /// Read-only preflight for edit/resubmit. This is called before the
     /// Conversation service claims its durable destructive receipt.
     pub async fn ensure_can_rewind_last_turn(
         &self,
         expected_source_message_id: &str,
     ) -> Result<(), AppError> {
+        let _turn = self.turn_gate.lock().await;
+        self.ensure_source_replay_safe(expected_source_message_id).await?;
         let engine = self.engine.lock().await;
         if !engine.can_rewind_last_turn(expected_source_message_id) {
             return Err(AppError::BadRequest(
@@ -3822,6 +3929,9 @@ impl NomiAgentManager {
             "Rewinding last Nomi turn"
         );
         self.request_stop(None, "rewind_last_turn", false);
+        let _turn = self.turn_gate.lock().await;
+        settle_optional(self.hosted_effects.as_ref()).await?;
+        self.ensure_source_replay_safe(expected_source_message_id).await?;
         let mut engine = self.engine.lock().await;
         match engine.rewind_last_turn(expected_source_message_id) {
             Ok(true) => Ok(()),
@@ -4143,6 +4253,7 @@ mod tests {
             kill,
             mcp,
             process,
+            hosted: Ok(()),
             browser_lane_binding: Some(binding),
             ssh_lease: None,
         }));
@@ -4244,6 +4355,7 @@ mod tests {
             kill,
             mcp: Ok(()),
             process: Ok(()),
+            hosted: Ok(()),
             #[cfg(feature = "browser-use")]
             browser_lane_binding: None,
             ssh_lease: Some(lease),
@@ -4352,6 +4464,7 @@ mod tests {
             kill: Err(AppError::Internal("kill failed".to_owned())),
             mcp: Err(AppError::Internal("MCP failed".to_owned())),
             process: Err(AppError::Internal("process failed".to_owned())),
+            hosted: Ok(()),
             browser_lane_binding: Some(binding),
             ssh_lease: None,
         })
@@ -4436,6 +4549,7 @@ mod tests {
                 process_supervisor: None,
                 mcp_managers: Vec::new(),
                 lazy_mcp_runtime: None,
+                hosted_effects: None,
                 turn_teardown_fence: Arc::clone(&fence),
                 accepted_turn_recovery_required: Arc::new(AtomicBool::new(false)),
                 browser_lane_binding: Some(binding),
@@ -4491,6 +4605,7 @@ mod tests {
             process_supervisor: None,
             mcp_managers: Vec::new(),
             lazy_mcp_runtime: None,
+            hosted_effects: None,
             turn_teardown_fence: Arc::new(TurnTeardownFence::new()),
             accepted_turn_recovery_required: Arc::new(AtomicBool::new(false)),
             browser_lane_binding: Some(binding),
@@ -4559,6 +4674,7 @@ mod tests {
             None,
             Vec::new(),
             None,
+            None,
             Some(binding),
         )
         .expect("idle-kill fence should schedule");
@@ -4603,6 +4719,7 @@ mod tests {
             backend_output_sink,
             None,
             Vec::new(),
+            None,
             None,
             Some(binding),
         )
@@ -5318,6 +5435,7 @@ mod tests {
             slash_commands: Vec::new(),
             mcp_managers: Vec::new(),
             lazy_mcp_runtime: None,
+            hosted_effects: None,
             loopback_capability_leases: Default::default(),
             #[cfg(feature = "browser-use")]
             browser_lane_binding: None,
@@ -5617,6 +5735,7 @@ mod tests {
             slash_commands: Vec::new(),
             mcp_managers: Vec::new(),
             lazy_mcp_runtime: None,
+            hosted_effects: None,
             loopback_capability_leases: Default::default(),
             #[cfg(feature = "browser-use")]
             browser_lane_binding: None,
@@ -7823,6 +7942,7 @@ mod tests {
                 process_supervisor: None,
                 mcp_managers: Vec::new(),
                 lazy_mcp_runtime: None,
+                hosted_effects: None,
                 turn_teardown_fence: Arc::new(TurnTeardownFence::new()),
                 accepted_turn_recovery_required: Arc::new(AtomicBool::new(false)),
                 #[cfg(feature = "browser-use")]
@@ -7874,6 +7994,7 @@ mod tests {
                 process_supervisor: None,
                 mcp_managers: Vec::new(),
                 lazy_mcp_runtime: None,
+                hosted_effects: None,
                 turn_teardown_fence: Arc::new(TurnTeardownFence::new()),
                 accepted_turn_recovery_required: recovery_required,
                 #[cfg(feature = "browser-use")]
@@ -7921,6 +8042,7 @@ mod tests {
                 process_supervisor: None,
                 mcp_managers: Vec::new(),
                 lazy_mcp_runtime: None,
+                hosted_effects: None,
                 turn_teardown_fence: Arc::new(TurnTeardownFence::new()),
                 accepted_turn_recovery_required: Arc::new(AtomicBool::new(false)),
                 #[cfg(feature = "browser-use")]
