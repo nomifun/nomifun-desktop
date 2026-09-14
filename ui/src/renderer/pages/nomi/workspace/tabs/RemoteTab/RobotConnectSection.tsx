@@ -7,8 +7,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import dayjs from 'dayjs';
-import { Button, Input, Message, Modal, Tag } from '@arco-design/web-react';
+import { Button, Checkbox, Input, Message, Modal, Tag } from '@arco-design/web-react';
 import { Robot } from '@icon-park/react';
+import { useSWRConfig } from 'swr';
 import { ipcBridge } from '@/common';
 import type { IApiRobot, IApiRobotPhase } from '@/common/adapter/ipcBridge';
 import type { CompanionId } from '@/common/types/ids';
@@ -21,13 +22,10 @@ import { ROBOT_STATUS_COLOR } from '@/renderer/components/capability/capabilityS
 import type { I18nKey } from '@/renderer/services/i18n/i18n-keys';
 import AddRobotModal from './AddRobotModal';
 import { useRobotStatuses } from './useRobotStatuses';
-import ProductAgentBindingSelect from '@/renderer/components/agent/ProductAgentBindingSelect';
-import type { TProviderWithModel } from '@/common/config/storage';
 
 interface RobotConnectSectionProps {
   companionId: CompanionId;
   companionName: string;
-  model?: Pick<TProviderWithModel, 'id' | 'use_model'>;
   onAttentionChange?: (hasAttention: boolean) => void;
 }
 
@@ -49,10 +47,10 @@ const PHASE_LABEL_KEY: Record<IApiRobotPhase, I18nKey> = {
 const RobotConnectSection: React.FC<RobotConnectSectionProps> = ({
   companionId,
   companionName,
-  model,
   onAttentionChange,
 }) => {
   const { t } = useTranslation();
+  const { mutate } = useSWRConfig();
   const statuses = useRobotStatuses();
   const [robots, setRobots] = useState<IApiRobot[]>([]);
   const [loadFailed, setLoadFailed] = useState(false);
@@ -67,17 +65,18 @@ const RobotConnectSection: React.FC<RobotConnectSectionProps> = ({
         ipcBridge.robot.endpoints.invoke(),
       ]);
       setRobots(rows);
+      void mutate('robots.list', rows, { revalidate: false });
       setLanEnabled(endpoints.lan_enabled);
       setLoadFailed(false);
     } catch (error) {
       console.error('[RobotConnect] Failed to load robots:', error);
       setLoadFailed(true);
     }
-  }, []);
+  }, [mutate]);
 
   useEffect(() => {
     void refresh();
-  }, [refresh]);
+  }, [refresh, statuses]);
 
   const mine = useMemo(
     () => robots.filter((row) => row.companion_id === companionId),
@@ -225,17 +224,26 @@ const RobotConnectSection: React.FC<RobotConnectSectionProps> = ({
                     : t('nomi.robot.lastSeenNever'),
                 ].join(' · ')}
                 controls={
-                  <>
-                    <div className='flex flex-col gap-4px'>
-                      <span className='text-12px text-t-secondary'>{t('nomi.robot.agentLabel')}</span>
-                      <ProductAgentBindingSelect
-                        targetKind='robot'
-                        targetId={row.robot_id}
-                        defaultTemplateKey='robot.default'
-                        model={model}
-                        disabled={busyRobotId === row.robot_id}
-                      />
+                  <div className='flex flex-col gap-10px'>
+                    <div className='flex flex-col gap-6px'>
+                      {row.supported_permissions.map((permission) => (
+                        <Checkbox key={permission} checked={row.permissions[permission]} disabled={busyRobotId === row.robot_id || (permission === 'continuous_vision' && !row.permissions.vision)}
+                          onChange={async (checked) => {
+                            setBusyRobotId(row.robot_id);
+                            try {
+                              await ipcBridge.robot.setPermissions.invoke({ robot_id: row.robot_id,
+                                permissions: { ...row.permissions, [permission]: checked } });
+                              await refresh();
+                            } catch (error) {
+                              console.error('[RobotConnect] Permission update failed:', error);
+                              Message.error(t('nomi.robot.permissionSaveFailed'));
+                            } finally { setBusyRobotId(null); }
+                          }}>
+                          {t(`nomi.robot.permissions.${permission}`)}
+                        </Checkbox>
+                      ))}
                     </div>
+                    <div className='flex items-center gap-8px'>
                     <Button
                       size='small'
                       loading={busyRobotId === row.robot_id}
@@ -249,7 +257,8 @@ const RobotConnectSection: React.FC<RobotConnectSectionProps> = ({
                     <Button size='small' status='danger' onClick={() => remove(row)}>
                       {t('nomi.robot.remove')}
                     </Button>
-                  </>
+                    </div>
+                  </div>
                 }
               />
             ))
@@ -261,7 +270,6 @@ const RobotConnectSection: React.FC<RobotConnectSectionProps> = ({
         visible={addOpen}
         companionId={companionId}
         companionName={companionName}
-        model={model}
         onCancel={() => setAddOpen(false)}
         onClaimed={() => {
           void refresh();

@@ -120,7 +120,7 @@ const FilePreview: React.FC<FilePreviewProps> = ({ path, onRemove, readonly = fa
             Before this, the thumbnail frame was a 3px `medium` border in --bg-1. */}
         <div className='rd-8px overflow-hidden border-1px border-solid border-arco-2'>
           <Image
-            src={imageUrl}
+            src={imageUrl || undefined}
             alt={file_name}
             width={60}
             height={60}

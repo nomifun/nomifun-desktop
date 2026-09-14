@@ -283,6 +283,16 @@ async fn vision_explain(
             .into_response();
     };
 
+    if !record.permissions.vision {
+        return Json(json!({"success":false,"message":"请先在设备设置中允许拍照"})).into_response();
+    }
+    let Some(vision_turn) = state.vision_observations.active_turn(&record.robot_id, &companion_id) else {
+        return Json(json!({"success":false,"message":"拍照需要关联当前伙伴对话"})).into_response();
+    };
+    if let Err(error) = vision_turn.authorize().await {
+        return Json(json!({"success":false,"message":error})).into_response();
+    }
+
     let mut question = String::new();
     let mut jpeg: Option<Vec<u8>> = None;
     loop {
@@ -338,11 +348,18 @@ async fn vision_explain(
         robot_id: record.robot_id.clone(),
         companion_id,
     };
-    match state.speech.explain_image(&ctx, jpeg, &question).await {
+    match state.speech.explain_image(&ctx, jpeg.clone(), &question).await {
         Ok(result) => {
+            if let Err(error) = vision_turn.authorize().await {
+                return Json(json!({"success":false,"message":error})).into_response();
+            }
+            if let Err(error) = vision_turn.record(&question, &result, &jpeg).await {
+                return Json(json!({"success":false,"message":error})).into_response();
+            }
             state
                 .vision_observations
                 .record(RobotVisionObservation {
+                    source: vision_turn.source(),
                     robot_id: record.robot_id,
                     companion_id: ctx.companion_id,
                     question,
@@ -407,6 +424,7 @@ impl RobotLinkStream for WsStream {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::Value;
     use super::*;
     use crate::endpoint::{EndpointAdvertiser, LanAdvertiser, LanEndpointSnapshot};
     use crate::registry::{RobotRegistry, RobotReport};
@@ -462,7 +480,7 @@ mod tests {
     }
 
     /// Bind a fresh robot to a companion and hand back its device token.
-    async fn claimed(state: &RobotDeviceState, robot_id: &str) -> String {
+    async fn claimed(state: &RobotDeviceState, robot_id: &str) -> (String, crate::vision::RobotVisionTurnLease) {
         let (record, token) = state
             .registry
             .upsert_on_report(
@@ -484,7 +502,62 @@ mod tests {
             )
             .await
             .unwrap();
-        token
+        let mut permissions = crate::registry::RobotPermissions::default();
+        permissions.vision = true;
+        state.registry.set_permissions(robot_id, permissions).await.unwrap();
+        let lease = state.vision_observations.register_turn(Arc::new(TestVisionRecorder(robot_id.to_owned())));
+        (token, lease)
+    }
+
+    struct TestVisionRecorder(String);
+    #[async_trait::async_trait]
+    impl crate::vision::RobotVisionRecorder for TestVisionRecorder {
+        fn robot_id(&self) -> &str { &self.0 }
+        fn source(&self) -> crate::vision::RobotVisionSource {
+            crate::vision::RobotVisionSource {
+                companion_id: "0190f5fe-7c00-7a00-8000-0000000000aa".to_owned(),
+                conversation_id: "conversation-1".to_owned(), connection_id: "socket-1".to_owned(),
+                request_id: "utterance-1".to_owned(),
+            }
+        }
+        async fn authorize(&self) -> Result<(), String> { Ok(()) }
+        async fn record(&self, _question: &str, _answer: &str, _jpeg: &[u8]) -> Result<(), String> { Ok(()) }
+    }
+
+    #[tokio::test]
+    async fn camera_upload_without_an_active_turn_never_invokes_the_vision_model() {
+        let (state, speech, _dir) = state(true).await;
+        let (token, lease) = claimed(&state, "camera-no-turn").await;
+        drop(lease);
+        speech.fail_next_vision("must remain unused");
+        let response = device_router(state).oneshot(Request::post("/vision/explain")
+            .header("Authorization", format!("Bearer {token}"))
+            .header("content-type", "multipart/form-data; boundary=----ESP32_CAMERA_BOUNDARY")
+            .body(Body::from(multipart_body("what?", b"\xff\xd8\xff\xd9"))).unwrap()).await.unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 65536).await.unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["success"], false);
+        assert!(value["message"].as_str().unwrap().contains("当前伙伴对话"));
+        let context = crate::services::SpeechContext { robot_id:"camera-no-turn".to_owned(), companion_id:"unused".to_owned() };
+        assert!(speech.explain_image(&context, vec![], "unused").await.unwrap_err().to_string().contains("must remain unused"));
+    }
+
+    #[tokio::test]
+    async fn camera_permission_is_checked_even_when_a_turn_lease_exists() {
+        let (state, speech, _dir) = state(true).await;
+        let (token, _lease) = claimed(&state, "camera-revoked").await;
+        state.registry.set_permissions("camera-revoked", Default::default()).await.unwrap();
+        speech.fail_next_vision("must remain unused");
+        let response = device_router(state).oneshot(Request::post("/vision/explain")
+            .header("Authorization", format!("Bearer {token}"))
+            .header("content-type", "multipart/form-data; boundary=----ESP32_CAMERA_BOUNDARY")
+            .body(Body::from(multipart_body("what?", b"\xff\xd8\xff\xd9"))).unwrap()).await.unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 65536).await.unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["success"], false);
+        assert!(value["message"].as_str().unwrap().contains("允许拍照"));
+        let context = crate::services::SpeechContext { robot_id:"camera-revoked".to_owned(), companion_id:"unused".to_owned() };
+        assert!(speech.explain_image(&context, vec![], "unused").await.unwrap_err().to_string().contains("must remain unused"));
     }
 
     #[tokio::test]
@@ -651,6 +724,7 @@ mod tests {
     #[test]
     fn build_ota_response_shape_is_stable() {
         let record = crate::registry::RobotRecord {
+            permissions: Default::default(), authorization_revision: 0,
             robot_id: "aa:bb:cc:dd:ee:ff".into(),
             client_id: "cid".into(),
             name: "表情机器人".into(),
@@ -699,7 +773,7 @@ mod tests {
     #[tokio::test]
     async fn vision_explain_returns_the_model_answer_as_200_json() {
         let (state, speech, _dir) = state(true).await;
-        let token = claimed(&state, "aa:bb:cc:dd:ee:10").await;
+        let (token, _lease) = claimed(&state, "aa:bb:cc:dd:ee:10").await;
         speech.set_vision_answer("桌上有一杯咖啡。");
 
         let response = device_router(state.clone())
@@ -745,7 +819,7 @@ mod tests {
     #[tokio::test]
     async fn vision_failures_are_still_200_so_the_model_can_read_why() {
         let (state, speech, _dir) = state(true).await;
-        let token = claimed(&state, "aa:bb:cc:dd:ee:11").await;
+        let (token, _lease) = claimed(&state, "aa:bb:cc:dd:ee:11").await;
         speech.fail_next_vision("no vision model configured");
 
         let response = device_router(state)
@@ -801,7 +875,7 @@ mod tests {
     #[tokio::test]
     async fn vision_rejects_a_body_with_no_file_part() {
         let (state, _speech, _dir) = state(true).await;
-        let token = claimed(&state, "aa:bb:cc:dd:ee:12").await;
+        let (token, _lease) = claimed(&state, "aa:bb:cc:dd:ee:12").await;
         let boundary = "----ESP32_CAMERA_BOUNDARY";
         let body = format!(
             "--{boundary}\r\nContent-Disposition: form-data; name=\"question\"\r\n\r\nq\r\n--{boundary}--\r\n"

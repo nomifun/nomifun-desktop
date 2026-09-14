@@ -53,6 +53,11 @@ pub fn tool_capability(device_name: &str) -> RobotToolCapability {
     }
 }
 
+pub fn requires_continuous_vision(device_name: &str) -> bool {
+    tool_capability(device_name) == RobotToolCapability::Vision
+        && device_name.split(['.', '_']).any(|part| matches!(part, "stream" | "watch" | "continuous" | "monitor"))
+}
+
 struct Attached {
     client: Arc<RobotMcpClient>,
     tools: Vec<RobotToolDescriptor>,
@@ -65,6 +70,24 @@ pub struct RobotToolRegistry {
 }
 
 impl RobotToolRegistry {
+    /// Capture the exact connection before invoking an action. Reconnecting
+    /// never redirects an older turn's command to a new socket.
+    pub async fn call_for_connection(
+        &self, robot_id: &str, connection_id: &str, capability: RobotToolCapability,
+        exposed_name: &str, args: Value,
+    ) -> Result<String, ToolCallError> {
+        let (client, device_name) = {
+            let map = self.inner.read().await;
+            let attached = map.get(robot_id).ok_or(ToolCallError::Offline)?;
+            if attached.client.connection_id() != connection_id { return Err(ToolCallError::Offline); }
+            let tool = attached.tools.iter().find(|tool| tool.exposed_name == exposed_name
+                && tool_capability(&tool.device_name) == capability)
+                .ok_or_else(|| ToolCallError::Rejected(format!("unknown or unauthorized tool {exposed_name}")))?;
+            (attached.client.clone(), tool.device_name.clone())
+        };
+        client.call_tool(&device_name, args).await
+    }
+
     /// Register a connected robot and its discovered tools.
     pub async fn attach(
         &self,
@@ -84,6 +107,17 @@ impl RobotToolRegistry {
         if let Some(attached) = removed {
             attached.client.cancel_pending();
         }
+    }
+
+    pub async fn detach_connection(&self, robot_id: &str, connection_id: &str) {
+        let mut map = self.inner.write().await;
+        if map.get(robot_id).is_some_and(|attached| attached.client.connection_id() == connection_id)
+            && let Some(attached) = map.remove(robot_id) { attached.client.cancel_pending(); }
+    }
+
+    pub async fn detach_if_disconnected(&self, registry: &crate::registry::RobotRegistry, robot_id: &str) {
+        let Some(_lease) = registry.hold_connection(robot_id, None).await else { return; };
+        self.detach(robot_id).await;
     }
 
     /// Whether an authenticated device link currently owns a live MCP client.

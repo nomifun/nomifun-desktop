@@ -553,6 +553,13 @@ impl NomiCoreRobotWave4Owner {
             ));
         }
         let robot = self.load_bound_robot(binding).await?;
+        let device_name = self.tools.tools(&robot.robot_id).await.into_iter()
+            .find(|tool| tool.exposed_name == exposed_name).map(|tool| tool.device_name);
+        if !robot.permissions.allows(capability.capability_id())
+            || device_name.as_deref().is_some_and(|name| !robot.permissions.allows_tool(name))
+        {
+            return Err(Wave4HostPortError::resource_owner_mismatch("device permissions do not allow this action"));
+        }
         if !self.tools.is_attached(&robot.robot_id).await {
             return Err(Wave4HostPortError::new(
                 ROBOT_OFFLINE,
@@ -1107,6 +1114,9 @@ mod tests {
             .await
             .unwrap();
 
+        registry.set_permissions("robot-1", nomifun_robot::registry::RobotPermissions {
+            motion: true, vision: true, device_tools: true, ..Default::default()
+        }).await.unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let responder_calls = Arc::clone(&calls);
         let (tx, mut rx) = mpsc::channel::<Frame>(8);
@@ -1152,6 +1162,10 @@ mod tests {
         let observations = Arc::new(RobotVisionObservationRegistry::default());
         observations
             .record(RobotVisionObservation {
+                source: nomifun_robot::vision::RobotVisionSource {
+                    companion_id: "companion-1".to_owned(), conversation_id: "conversation-1".to_owned(),
+                    connection_id: "socket-1".to_owned(), request_id: "request-1".to_owned(),
+                },
                 robot_id: "robot-1".to_owned(),
                 companion_id: "companion-1".to_owned(),
                 question: "what?".to_owned(),

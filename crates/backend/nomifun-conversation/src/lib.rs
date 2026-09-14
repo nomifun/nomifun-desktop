@@ -1,5 +1,6 @@
 //! Conversation and message CRUD with streaming relay and event emission.
 mod agent_execution_port;
+pub mod companion_interaction;
 mod convert;
 mod execution_conversation_boundary;
 mod failover_seam;

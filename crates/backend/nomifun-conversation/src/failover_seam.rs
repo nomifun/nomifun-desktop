@@ -114,6 +114,7 @@ impl ConversationService {
         runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
         runtime_generation: u64,
         cancellation: &CancellationToken,
+        transient_options: Option<&nomifun_ai_agent::types::AgentRuntimeBuildOptions>,
     ) -> Option<FailoverSwitch> {
         if cancellation.is_cancelled() {
             return None;
@@ -177,7 +178,9 @@ impl ConversationService {
             return None;
         }
 
-        let failed = match provider_model_from_conversation_row(&row) {
+        let failed = match transient_options.and_then(|options| options.model.clone()) {
+            Some(model) => model,
+            None => match provider_model_from_conversation_row(&row) {
             Ok(Some(model)) => model,
             Ok(None) => {
                 warn!(conversation_id, "Failover skipped: conversation has no configured model");
@@ -187,8 +190,10 @@ impl ConversationService {
                 warn!(error = %ErrorChain(&e), conversation_id, "Failover skipped: invalid persisted conversation model");
                 return None;
             }
+            },
         };
         if let Some(expected) = expected_authority
+            && transient_options.is_none()
             && (failed != expected.model
                 || row.execution_model_pool != expected.execution_model_pool
                 || row.execution_template_id != expected.execution_template_id)
@@ -346,6 +351,37 @@ impl ConversationService {
                 "Failover aborted: durable model authority changed while old runtime was tearing down"
             );
             return None;
+        }
+
+        if let Some(options) = transient_options {
+            // Device failover stays inside this admitted turn. Keep the same
+            // history and scoped tools without rewriting the Companion model,
+            // pool, template or Agent binding.
+            let mut options = options.clone();
+            options.model = Some(picked.clone());
+            // The preset digest pins the primary provider graph. A trusted
+            // per-turn model override resolves and revalidates the fallback's
+            // live graph through the runtime registry, just like an explicit
+            // Conversation model override; it cannot reuse the primary digest.
+            if let Some(extra) = options.extra.as_object_mut() {
+                extra.remove("chat_config_revision_digest");
+            }
+            let agent = match runtime_registry.get_or_create_runtime_for_turn(
+                conversation_id, runtime_generation, cancellation.clone(), options,
+            ).await {
+                Ok(agent) => agent,
+                Err(error) => {
+                    warn!(%error, "device fallback model could not be built");
+                    return None;
+                }
+            };
+            return Some(FailoverSwitch {
+                agent, picked: picked.clone(),
+                authority: FailoverAuthoritySnapshot {
+                    model: picked, execution_model_pool: row.execution_model_pool,
+                    execution_template_id: row.execution_template_id,
+                },
+            });
         }
 
         let next_authority = FailoverAuthoritySnapshot {
@@ -586,6 +622,7 @@ impl ConversationService {
         runtime_registry: &Arc<dyn AgentRuntimeRegistry>,
         turn_generation: u64,
         cancellation: &CancellationToken,
+        transient_options: Option<&nomifun_ai_agent::types::AgentRuntimeBuildOptions>,
     ) -> Option<FailoverSwitch> {
         if cancellation.is_cancelled() {
             return None;
@@ -643,6 +680,7 @@ impl ConversationService {
             runtime_registry,
             turn_generation,
             cancellation,
+            transient_options,
         )
         .await
     }

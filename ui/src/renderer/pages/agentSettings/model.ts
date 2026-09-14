@@ -14,7 +14,6 @@ export const TEMPLATE_I18N_PATH: Record<OfficialPresetKey, string> = {
   'assistant.general': 'assistant.general',
   'coding.codex': 'coding.codex',
   'companion.default': 'companion.default',
-  'robot.default': 'robot.default',
   'customer-service.default': 'customerService.default',
   'creative-studio.default': 'creativeStudio.default',
 };

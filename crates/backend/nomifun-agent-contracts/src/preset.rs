@@ -841,8 +841,6 @@ pub enum OfficialPresetKey {
     CodingCodex,
     #[serde(rename = "companion.default")]
     CompanionDefault,
-    #[serde(rename = "robot.default")]
-    RobotDefault,
     #[serde(rename = "customer-service.default")]
     CustomerServiceDefault,
     #[serde(rename = "creative-studio.default")]
@@ -850,12 +848,11 @@ pub enum OfficialPresetKey {
 }
 
 impl OfficialPresetKey {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 6] = [
         Self::ChatMinimal,
         Self::AssistantGeneral,
         Self::CodingCodex,
         Self::CompanionDefault,
-        Self::RobotDefault,
         Self::CustomerServiceDefault,
         Self::CreativeStudioDefault,
     ];
@@ -866,7 +863,6 @@ impl OfficialPresetKey {
             Self::AssistantGeneral => "assistant.general",
             Self::CodingCodex => "coding.codex",
             Self::CompanionDefault => "companion.default",
-            Self::RobotDefault => "robot.default",
             Self::CustomerServiceDefault => "customer-service.default",
             Self::CreativeStudioDefault => "creative-studio.default",
         }
@@ -925,7 +921,7 @@ impl OfficialPresetSeedManifestPayload {
         if actual != expected || coverage != expected {
             return Err(PresetContractViolation {
                 code: CanonicalErrorCode::from(OFFICIAL_PRESET_KEY_SET_MISMATCH),
-                message: "official template and role-coverage maps must contain exactly seven keys"
+                message: "official template and role-coverage maps must contain exactly six keys"
                     .into(),
             });
         }
@@ -1620,7 +1616,7 @@ mod tests {
     }
 
     #[test]
-    fn official_key_type_is_the_exact_seven_key_set() {
+    fn official_key_type_is_the_exact_six_key_set() {
         let actual = OfficialPresetKey::ALL
             .into_iter()
             .map(OfficialPresetKey::as_str)
@@ -1634,7 +1630,6 @@ mod tests {
                 "companion.default",
                 "creative-studio.default",
                 "customer-service.default",
-                "robot.default",
             ])
         );
         assert!(!actual.contains("research"));
