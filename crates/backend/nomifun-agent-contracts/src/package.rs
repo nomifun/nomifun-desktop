@@ -455,8 +455,8 @@ pub enum CapabilityConsumer {
     Remote,
     Automation,
     Ui,
-    #[serde(rename = "miniapp_service")]
-    MiniAppService,
+    #[serde(rename = "plugin_service")]
+    PluginService,
 }
 
 impl CapabilityConsumer {
@@ -468,7 +468,7 @@ impl CapabilityConsumer {
             Self::Remote => "remote",
             Self::Automation => "automation",
             Self::Ui => "ui",
-            Self::MiniAppService => "miniapp_service",
+            Self::PluginService => "plugin_service",
         }
     }
 
@@ -480,7 +480,7 @@ impl CapabilityConsumer {
             "remote" => Some(Self::Remote),
             "automation" => Some(Self::Automation),
             "ui" => Some(Self::Ui),
-            "miniapp_service" => Some(Self::MiniAppService),
+            "plugin_service" => Some(Self::PluginService),
             _ => None,
         }
     }

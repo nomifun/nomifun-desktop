@@ -14,11 +14,11 @@ describe('Agent Settings locale contract', () => {
     expect(flattenKeys(en).sort()).toEqual(flattenKeys(zh).sort());
   });
 
-  test('contains fresh-start and real-effect disclosure in both locales', () => {
+  test('contains fresh-start copy and no editor test feature in either locale', () => {
     expect(en.freshStart.body.includes('not imported')).toBe(true);
     expect(zh.freshStart.body.includes('不会导入')).toBe(true);
-    expect(en.test.realEffectWarning.includes('not simulated')).toBe(true);
-    expect(zh.test.realEffectWarning.includes('不会模拟')).toBe(true);
+    expect(JSON.stringify(en).includes('Try & inspect')).toBe(false);
+    expect(JSON.stringify(zh).includes('试用与检查')).toBe(false);
   });
 
   test('uses Agent Workbench as the sole public authoring label', () => {
@@ -33,10 +33,10 @@ describe('Agent Settings locale contract', () => {
   });
 
   test('describes capability modes and target-owned resource selection', () => {
-    expect(en.capabilities.initial).toBe('Available at startup');
-    expect(en.capabilities.onDemand).toBe('On demand');
-    expect(zh.capabilities.initial).toBe('启动即用');
-    expect(zh.capabilities.onDemand).toBe('按需启用');
+    expect(en.capabilities.enabled).toBe('Enabled');
+    expect(zh.capabilities.enabled).toBe('已启用');
+    expect(zh.capabilities.notSelected).toBe('未启用');
+    expect(Object.hasOwn(en.capabilities, 'onDemand')).toBe(false);
     expect(en.resources.bindingPolicyBody.includes('conversation')).toBe(true);
     expect(zh.resources.bindingPolicyBody.includes('具体会话')).toBe(true);
   });

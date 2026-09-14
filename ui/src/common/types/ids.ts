@@ -79,7 +79,7 @@ export type EntityKind =
   | 'plugin-artifact'
   | 'plugin-candidate'
   | 'plugin-operation'
-  | 'miniapp';
+  | 'plugin-runtime';
 
 export type ConversationId = EntityId<'conversation'>;
 export type TerminalId = EntityId<'terminal'>;
@@ -140,7 +140,7 @@ export type PluginMountId = EntityId<'plugin-mount'>;
 export type PluginArtifactId = EntityId<'plugin-artifact'>;
 export type PluginCandidateId = EntityId<'plugin-candidate'>;
 export type PluginOperationId = EntityId<'plugin-operation'>;
-export type PluginRuntimeId = EntityId<'miniapp'>;
+export type PluginRuntimeId = EntityId<'plugin-runtime'>;
 
 export class InvalidEntityIdError extends TypeError {
   readonly entityKind: string;
@@ -298,7 +298,8 @@ export const parsePluginCandidateId = (value: unknown): PluginCandidateId =>
   parseEntityId('plugin-candidate', value);
 export const parsePluginOperationId = (value: unknown): PluginOperationId =>
   parseEntityId('plugin-operation', value);
-export const parsePluginRuntimeId = (value: unknown): PluginRuntimeId => parseEntityId('miniapp', value);
+export const parsePluginRuntimeId = (value: unknown): PluginRuntimeId =>
+  parseEntityId('plugin-runtime', value);
 
 export type SessionTarget =
   | { readonly kind: 'conversation'; readonly id: ConversationId }

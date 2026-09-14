@@ -7,7 +7,6 @@
 import type { TMessage } from '@/common/chat/chatLib';
 import type { MessageId } from '@/common/types/ids';
 import { emitter } from '@/renderer/utils/emitter';
-import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { Quote } from '@icon-park/react';
 import React, { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -78,17 +77,12 @@ const BUTTON_HEIGHT = 32;
 
 const SelectionReplyButton: React.FC<{ messages: TMessage[] }> = ({ messages }) => {
   const { t } = useTranslation();
-  const layout = useLayoutContext();
-  const isMobile = layout?.isMobile ?? false;
   const [pos, setPos] = useState<ReplyPos | null>(null);
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
   const buttonRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    // Disable on mobile — conflicts with native text selection menu
-    if (isMobile) return;
-
     let mounted = true;
     let scrollTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -153,7 +147,7 @@ const SelectionReplyButton: React.FC<{ messages: TMessage[] }> = ({ messages }) 
       document.removeEventListener('mousedown', onMouseDown);
       document.removeEventListener('scroll', onScroll, true);
     };
-  }, [isMobile]);
+  }, []);
 
   if (!pos) return null;
 

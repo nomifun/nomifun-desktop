@@ -6,7 +6,6 @@
 import type { ConversationId, CronJobId } from '@/common/types/ids';
 
 import type { IConversationMcpStatus } from '@/common/config/storage';
-import type { MobileActionSheetOption } from '@/renderer/components/chat/MobileActionSheet';
 import type { ConversationContextValue } from '@/renderer/hooks/context/ConversationContext';
 import { ConversationProvider } from '@/renderer/hooks/context/ConversationContext';
 import FlexFullContainer from '@renderer/components/layout/FlexFullContainer';
@@ -29,12 +28,6 @@ const NomiChat: React.FC<{
   workspace: string;
   modelSelection: NomiModelSelection;
   agentSelectorNode?: React.ReactNode;
-  agentSelection?: {
-    label: string;
-    options: MobileActionSheetOption[];
-    onSelect: (key: string) => void;
-    disabled?: boolean;
-  };
   cron_job_id?: CronJobId;
   hideSendBox?: boolean;
   readOnly?: boolean;
@@ -54,7 +47,6 @@ const NomiChat: React.FC<{
   workspace,
   modelSelection,
   agentSelectorNode,
-  agentSelection,
   cron_job_id,
   hideSendBox,
   readOnly,
@@ -123,7 +115,6 @@ const NomiChat: React.FC<{
               conversation_id={conversation_id}
               modelSelection={modelSelection}
               agentSelectorNode={agentSelectorNode}
-              agentSelection={agentSelection}
               agent_name={agent_name}
               hideAdvancedControls={hideAdvancedControls}
               collaboratorSelectorNode={collaboratorSelectorNode}

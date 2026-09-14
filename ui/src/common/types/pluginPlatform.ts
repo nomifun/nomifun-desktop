@@ -44,7 +44,7 @@ export type PluginConsumerSurface =
   | 'remote'
   | 'automation'
   | 'ui'
-  | 'miniapp_service';
+  | 'plugin_service';
 export type PluginConsumerAvailabilityStatus =
   | 'active'
   | 'disabled'

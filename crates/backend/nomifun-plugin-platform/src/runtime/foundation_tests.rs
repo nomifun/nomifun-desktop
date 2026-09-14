@@ -8,14 +8,14 @@ use std::{
 
 use async_trait::async_trait;
 use nomifun_agent_contracts::{
-    ArtifactId, DigestHex, MiniAppAdditiveMigrationAction, MiniAppBridgeCallId,
-    MiniAppBridgeKvRequest, MiniAppBridgeRequest, MiniAppBridgeTarget, MiniAppDatabaseHandleId,
-    MiniAppFilesDirDescriptor, MiniAppFilesHandleId, MiniAppId, MiniAppKvHandleDescriptor,
-    MiniAppKvHandleId, MiniAppMigration, MiniAppMigrationColumn, MiniAppMigrationId,
-    MiniAppPrivateDatabaseDescriptor, MiniAppReleaseId, MiniAppReleasePointerState,
-    MiniAppReleaseRef, MiniAppServiceLifecycle, MiniAppServiceRuntimeFingerprint,
-    MiniAppServiceStorageDescriptor, MiniAppSurfaceSessionId, ResolvedMiniAppServiceSpec,
-    ResolvedMiniAppServiceSpecInputs, RuntimeInstallationId, RuntimeTarget, StrictJsonValue,
+    ArtifactId, DigestHex, PluginAdditiveMigrationAction, PluginBridgeCallId,
+    PluginBridgeKvRequest, PluginBridgeRequest, PluginBridgeTarget, PluginDatabaseHandleId,
+    PluginFilesDirDescriptor, PluginFilesHandleId, PluginProductId, PluginKvHandleDescriptor,
+    PluginKvHandleId, PluginMigration, PluginMigrationColumn, PluginMigrationId,
+    PluginPrivateDatabaseDescriptor, PluginReleaseId, PluginReleasePointerState,
+    PluginReleaseRef, PluginServiceLifecycle, PluginServiceRuntimeFingerprint,
+    PluginServiceStorageDescriptor, PluginSurfaceSessionId, ResolvedPluginServiceSpec,
+    ResolvedPluginServiceSpecInputs, RuntimeInstallationId, RuntimeTarget, StrictJsonValue,
     VersionString, digest_payload,
 };
 use tokio::sync::Mutex;
@@ -27,7 +27,7 @@ use crate::runtime::{
     PluginRuntimePrivateDatabasePort, PluginRuntimeServiceGenerationFence, PluginRuntimeServiceHostPort,
     PluginRuntimeServiceHostState, PluginRuntimeServiceInvocation, PluginRuntimeServiceLaunch,
     PluginRuntimeServiceProcess, PluginRuntimeServiceProcessError, PluginRuntimeServiceProcessFactory,
-    MINIAPP_CONTINUOUS_CRASH_BACKOFF_MS, MINIAPP_CONTINUOUS_CRASH_FAILURE_THRESHOLD,
+    PLUGIN_CONTINUOUS_CRASH_BACKOFF_MS, PLUGIN_CONTINUOUS_CRASH_FAILURE_THRESHOLD,
 };
 use crate::runtime::storage::next_kv_revision;
 
@@ -95,7 +95,7 @@ struct TestProcessFactory {
     block_next_start: AtomicBool,
     start_entered: AtomicBool,
     release_start: AtomicBool,
-    processes: Mutex<BTreeMap<MiniAppId, Vec<Arc<TestProcess>>>>,
+    processes: Mutex<BTreeMap<PluginProductId, Vec<Arc<TestProcess>>>>,
 }
 
 impl TestProcessFactory {
@@ -123,21 +123,21 @@ impl TestProcessFactory {
         self.release_start.store(true, Ordering::Release);
     }
 
-    async fn latest(&self, miniapp_id: &MiniAppId) -> Arc<TestProcess> {
+    async fn latest(&self, plugin_product_id: &PluginProductId) -> Arc<TestProcess> {
         self.processes
             .lock()
             .await
-            .get(miniapp_id)
+            .get(plugin_product_id)
             .and_then(|processes| processes.last())
             .cloned()
             .expect("process was started")
     }
 
-    async fn start_count(&self, miniapp_id: &MiniAppId) -> usize {
+    async fn start_count(&self, plugin_product_id: &PluginProductId) -> usize {
         self.processes
             .lock()
             .await
-            .get(miniapp_id)
+            .get(plugin_product_id)
             .map_or(0, Vec::len)
     }
 }
@@ -167,7 +167,7 @@ impl PluginRuntimeServiceProcessFactory for TestProcessFactory {
         self.processes
             .lock()
             .await
-            .entry(launch.spec.miniapp_id)
+            .entry(launch.spec.plugin_product_id)
             .or_default()
             .push(process.clone());
         Ok(process)
@@ -178,19 +178,19 @@ impl PluginRuntimeServiceProcessFactory for TestProcessFactory {
 async fn service_host_enforces_lifecycle_idle_reap_and_crash_isolation() {
     let factory = Arc::new(TestProcessFactory::default());
     let host = InMemoryPluginRuntimeServiceHost::new(factory.clone());
-    let continuous = service_spec("continuous", 1, MiniAppServiceLifecycle::Continuous);
-    let on_demand = service_spec("demand", 1, MiniAppServiceLifecycle::OnDemand);
+    let continuous = service_spec("continuous", 1, PluginServiceLifecycle::Continuous);
+    let on_demand = service_spec("demand", 1, PluginServiceLifecycle::OnDemand);
 
     host.bind_active(continuous.clone(), true).await.unwrap();
     host.bind_active(on_demand.clone(), true).await.unwrap();
-    assert_eq!(factory.start_count(&continuous.miniapp_id).await, 1);
-    assert_eq!(factory.start_count(&on_demand.miniapp_id).await, 0);
+    assert_eq!(factory.start_count(&continuous.plugin_product_id).await, 1);
+    assert_eq!(factory.start_count(&on_demand.plugin_product_id).await, 0);
 
     let payload = json_object("value", 1);
     assert_eq!(
         host.invoke(
             &on_demand,
-            MiniAppBridgeCallId::from("call-demand"),
+            PluginBridgeCallId::from("call-demand"),
             "read".into(),
             payload.clone(),
             PluginRuntimeCallCancellation::default(),
@@ -200,32 +200,32 @@ async fn service_host_enforces_lifecycle_idle_reap_and_crash_isolation() {
         .unwrap(),
         payload
     );
-    assert_eq!(factory.start_count(&on_demand.miniapp_id).await, 1);
+    assert_eq!(factory.start_count(&on_demand.plugin_product_id).await, 1);
     assert_eq!(
         host.reap_idle(149, 50).await.unwrap(),
-        Vec::<MiniAppId>::new()
+        Vec::<PluginProductId>::new()
     );
     assert_eq!(
         host.reap_idle(150, 50).await.unwrap(),
-        vec![on_demand.miniapp_id.clone()]
+        vec![on_demand.plugin_product_id.clone()]
     );
     assert_eq!(
-        host.state(&on_demand.miniapp_id).await,
+        host.state(&on_demand.plugin_product_id).await,
         Some(PluginRuntimeServiceHostState::Stopped)
     );
 
-    let continuous_fence = running_fence(&host, &continuous.miniapp_id).await;
+    let continuous_fence = running_fence(&host, &continuous.plugin_product_id).await;
     assert!(
         host.report_crash(&continuous_fence, "process exited".into(), 200)
             .await
             .unwrap()
     );
     assert!(matches!(
-        host.state(&continuous.miniapp_id).await,
+        host.state(&continuous.plugin_product_id).await,
         Some(PluginRuntimeServiceHostState::Backoff { .. })
     ));
     assert_eq!(
-        host.state(&on_demand.miniapp_id).await,
+        host.state(&on_demand.plugin_product_id).await,
         Some(PluginRuntimeServiceHostState::Stopped),
         "one Plugin crash must not mutate another dedicated Host"
     );
@@ -235,11 +235,11 @@ async fn service_host_enforces_lifecycle_idle_reap_and_crash_isolation() {
 async fn maintenance_observes_a_passive_on_demand_process_exit() {
     let factory = Arc::new(TestProcessFactory::default());
     let host = InMemoryPluginRuntimeServiceHost::new(factory.clone());
-    let service = service_spec("passive-exit", 1, MiniAppServiceLifecycle::OnDemand);
+    let service = service_spec("passive-exit", 1, PluginServiceLifecycle::OnDemand);
     host.bind_active(service.clone(), true).await.unwrap();
     host.invoke(
         &service,
-        MiniAppBridgeCallId::from("start-before-passive-exit"),
+        PluginBridgeCallId::from("start-before-passive-exit"),
         "start".into(),
         json_object("ok", 1),
         PluginRuntimeCallCancellation::default(),
@@ -247,18 +247,18 @@ async fn maintenance_observes_a_passive_on_demand_process_exit() {
     )
     .await
     .unwrap();
-    factory.latest(&service.miniapp_id).await.crash();
+    factory.latest(&service.plugin_product_id).await.crash();
 
     assert_eq!(
         host.observe_process_exits(101).await,
-        vec![service.miniapp_id.clone()]
+        vec![service.plugin_product_id.clone()]
     );
     assert!(matches!(
-        host.state(&service.miniapp_id).await,
+        host.state(&service.plugin_product_id).await,
         Some(PluginRuntimeServiceHostState::Error { error, .. })
             if error == "simulated passive process exit"
     ));
-    assert!(host.capacity_snapshot().await.active_miniapps.is_empty());
+    assert!(host.capacity_snapshot().await.active_plugins.is_empty());
 }
 
 #[tokio::test]
@@ -274,9 +274,9 @@ async fn service_capacity_counts_starting_and_running_hosts_without_eviction() {
     let factory = Arc::new(TestProcessFactory::default());
     factory.block_next_start();
     let host = Arc::new(InMemoryPluginRuntimeServiceHost::with_capacity(factory.clone(), 2).unwrap());
-    let first = service_spec("capacity-a", 1, MiniAppServiceLifecycle::Continuous);
-    let second = service_spec("capacity-b", 1, MiniAppServiceLifecycle::Continuous);
-    let third = service_spec("capacity-c", 1, MiniAppServiceLifecycle::Continuous);
+    let first = service_spec("capacity-a", 1, PluginServiceLifecycle::Continuous);
+    let second = service_spec("capacity-b", 1, PluginServiceLifecycle::Continuous);
+    let third = service_spec("capacity-c", 1, PluginServiceLifecycle::Continuous);
 
     let starting_host = host.clone();
     let starting_spec = first.clone();
@@ -285,8 +285,8 @@ async fn service_capacity_counts_starting_and_running_hosts_without_eviction() {
     });
     factory.wait_until_starting().await;
     assert_eq!(
-        host.capacity_snapshot().await.active_miniapps,
-        vec![first.miniapp_id.clone()],
+        host.capacity_snapshot().await.active_plugins,
+        vec![first.plugin_product_id.clone()],
         "starting Hosts consume capacity"
     );
     factory.release_start();
@@ -296,8 +296,8 @@ async fn service_capacity_counts_starting_and_running_hosts_without_eviction() {
     let lowered = host.update_capacity(1).await.unwrap();
     assert_eq!(lowered.max_active_service_hosts, 1);
     assert_eq!(
-        lowered.active_miniapps,
-        vec![first.miniapp_id.clone(), second.miniapp_id.clone()],
+        lowered.active_plugins,
+        vec![first.plugin_product_id.clone(), second.plugin_product_id.clone()],
         "lowering the limit must not kill existing Hosts"
     );
     let exhausted = host.bind_active(third.clone(), true).await;
@@ -305,20 +305,20 @@ async fn service_capacity_counts_starting_and_running_hosts_without_eviction() {
         exhausted,
         Err(PluginRuntimePlatformError::ServiceCapacityExhausted {
             max_active: 1,
-            active_miniapps,
-        }) if active_miniapps
+            active_plugins,
+        }) if active_plugins
             == vec![
-                first.miniapp_id.as_ref().to_owned(),
-                second.miniapp_id.as_ref().to_owned(),
+                first.plugin_product_id.as_ref().to_owned(),
+                second.plugin_product_id.as_ref().to_owned(),
             ]
     ));
 
-    host.stop(&first.miniapp_id).await.unwrap();
+    host.stop(&first.plugin_product_id).await.unwrap();
     assert!(matches!(
         host.bind_active(third.clone(), true).await,
         Err(PluginRuntimePlatformError::ServiceCapacityExhausted { .. })
     ));
-    host.stop(&second.miniapp_id).await.unwrap();
+    host.stop(&second.plugin_product_id).await.unwrap();
 
     factory.fail_next_start();
     assert!(matches!(
@@ -326,16 +326,16 @@ async fn service_capacity_counts_starting_and_running_hosts_without_eviction() {
         Err(PluginRuntimePlatformError::Runtime(_))
     ));
     assert!(
-        host.capacity_snapshot().await.active_miniapps.is_empty(),
+        host.capacity_snapshot().await.active_plugins.is_empty(),
         "start failure releases its exact reservation"
     );
-    host.retry(&third.miniapp_id).await.unwrap();
-    let third_fence = running_fence(&host, &third.miniapp_id).await;
+    host.retry(&third.plugin_product_id).await.unwrap();
+    let third_fence = running_fence(&host, &third.plugin_product_id).await;
     host.report_crash(&third_fence, "capacity crash".into(), 100)
         .await
         .unwrap();
     assert!(
-        host.capacity_snapshot().await.active_miniapps.is_empty(),
+        host.capacity_snapshot().await.active_plugins.is_empty(),
         "crash releases its exact running reservation"
     );
 }
@@ -344,25 +344,25 @@ async fn service_capacity_counts_starting_and_running_hosts_without_eviction() {
 async fn continuous_service_uses_finite_backoff_threshold_and_manual_retry_reset() {
     let factory = Arc::new(TestProcessFactory::default());
     let host = InMemoryPluginRuntimeServiceHost::new(factory.clone());
-    let continuous = service_spec("backoff", 1, MiniAppServiceLifecycle::Continuous);
+    let continuous = service_spec("backoff", 1, PluginServiceLifecycle::Continuous);
     host.bind_active(continuous.clone(), true).await.unwrap();
 
-    let first_fence = running_fence(&host, &continuous.miniapp_id).await;
+    let first_fence = running_fence(&host, &continuous.plugin_product_id).await;
     host.report_crash(&first_fence, "crash-1".into(), 100)
         .await
         .unwrap();
     assert_eq!(
-        host.state(&continuous.miniapp_id).await,
+        host.state(&continuous.plugin_product_id).await,
         Some(PluginRuntimeServiceHostState::Backoff {
             host_generation: first_fence.host_generation,
             consecutive_failures: 1,
-            retry_at_ms: 100 + MINIAPP_CONTINUOUS_CRASH_BACKOFF_MS[0],
+            retry_at_ms: 100 + PLUGIN_CONTINUOUS_CRASH_BACKOFF_MS[0],
             error: "crash-1".into(),
         })
     );
     assert!(
         host.reconcile_continuous(
-            100 + MINIAPP_CONTINUOUS_CRASH_BACKOFF_MS[0] - 1
+            100 + PLUGIN_CONTINUOUS_CRASH_BACKOFF_MS[0] - 1
         )
         .await
         .unwrap()
@@ -370,34 +370,34 @@ async fn continuous_service_uses_finite_backoff_threshold_and_manual_retry_reset
         .is_empty()
     );
     assert_eq!(
-        host.reconcile_continuous(100 + MINIAPP_CONTINUOUS_CRASH_BACKOFF_MS[0])
+        host.reconcile_continuous(100 + PLUGIN_CONTINUOUS_CRASH_BACKOFF_MS[0])
             .await
             .unwrap()
             .restarted,
-        vec![continuous.miniapp_id.clone()]
+        vec![continuous.plugin_product_id.clone()]
     );
 
-    let second_fence = running_fence(&host, &continuous.miniapp_id).await;
+    let second_fence = running_fence(&host, &continuous.plugin_product_id).await;
     host.report_crash(&second_fence, "crash-2".into(), 2_000)
         .await
         .unwrap();
-    let second_retry_at = 2_000 + MINIAPP_CONTINUOUS_CRASH_BACKOFF_MS[1];
+    let second_retry_at = 2_000 + PLUGIN_CONTINUOUS_CRASH_BACKOFF_MS[1];
     assert_eq!(
         host.reconcile_continuous(second_retry_at)
             .await
             .unwrap()
             .restarted,
-        vec![continuous.miniapp_id.clone()]
+        vec![continuous.plugin_product_id.clone()]
     );
 
-    let third_fence = running_fence(&host, &continuous.miniapp_id).await;
+    let third_fence = running_fence(&host, &continuous.plugin_product_id).await;
     host.report_crash(&third_fence, "crash-3".into(), 8_000)
         .await
         .unwrap();
     assert!(matches!(
-        host.state(&continuous.miniapp_id).await,
+        host.state(&continuous.plugin_product_id).await,
         Some(PluginRuntimeServiceHostState::Error {
-            consecutive_failures: MINIAPP_CONTINUOUS_CRASH_FAILURE_THRESHOLD,
+            consecutive_failures: PLUGIN_CONTINUOUS_CRASH_FAILURE_THRESHOLD,
             ..
         })
     ));
@@ -410,24 +410,24 @@ async fn continuous_service_uses_finite_backoff_threshold_and_manual_retry_reset
         "threshold Error waits for explicit Retry"
     );
 
-    host.retry(&continuous.miniapp_id).await.unwrap();
-    let retried_fence = running_fence(&host, &continuous.miniapp_id).await;
+    host.retry(&continuous.plugin_product_id).await.unwrap();
+    let retried_fence = running_fence(&host, &continuous.plugin_product_id).await;
     host.report_crash(&retried_fence, "after-manual-retry".into(), 9_000)
         .await
         .unwrap();
     assert!(matches!(
-        host.state(&continuous.miniapp_id).await,
+        host.state(&continuous.plugin_product_id).await,
         Some(PluginRuntimeServiceHostState::Backoff {
             consecutive_failures: 1,
             ..
         })
     ));
 
-    let on_demand = service_spec("no-auto-restart", 1, MiniAppServiceLifecycle::OnDemand);
+    let on_demand = service_spec("no-auto-restart", 1, PluginServiceLifecycle::OnDemand);
     host.bind_active(on_demand.clone(), true).await.unwrap();
     host.invoke(
         &on_demand,
-        MiniAppBridgeCallId::from("start-on-demand"),
+        PluginBridgeCallId::from("start-on-demand"),
         "start".into(),
         json_object("ok", 1),
         PluginRuntimeCallCancellation::default(),
@@ -435,12 +435,12 @@ async fn continuous_service_uses_finite_backoff_threshold_and_manual_retry_reset
     )
     .await
     .unwrap();
-    let on_demand_fence = running_fence(&host, &on_demand.miniapp_id).await;
+    let on_demand_fence = running_fence(&host, &on_demand.plugin_product_id).await;
     host.report_crash(&on_demand_fence, "on-demand-crash".into(), 10_001)
         .await
         .unwrap();
     assert!(matches!(
-        host.state(&on_demand.miniapp_id).await,
+        host.state(&on_demand.plugin_product_id).await,
         Some(PluginRuntimeServiceHostState::Error { .. })
     ));
     assert!(
@@ -449,7 +449,7 @@ async fn continuous_service_uses_finite_backoff_threshold_and_manual_retry_reset
             .await
             .unwrap()
             .restarted
-            .contains(&on_demand.miniapp_id)
+            .contains(&on_demand.plugin_product_id)
     );
 }
 
@@ -458,8 +458,8 @@ async fn service_host_rejects_late_callback_after_release_generation_changes() {
     let factory = Arc::new(TestProcessFactory::default());
     factory.block_next();
     let host = Arc::new(InMemoryPluginRuntimeServiceHost::new(factory.clone()));
-    let first = service_spec("late", 1, MiniAppServiceLifecycle::OnDemand);
-    let second = service_spec("late", 2, MiniAppServiceLifecycle::OnDemand);
+    let first = service_spec("late", 1, PluginServiceLifecycle::OnDemand);
+    let second = service_spec("late", 2, PluginServiceLifecycle::OnDemand);
     host.bind_active(first.clone(), true).await.unwrap();
 
     let invoking_host = host.clone();
@@ -468,7 +468,7 @@ async fn service_host_rejects_late_callback_after_release_generation_changes() {
         invoking_host
             .invoke(
                 &invoking_spec,
-                MiniAppBridgeCallId::from("call-late"),
+                PluginBridgeCallId::from("call-late"),
                 "slow".into(),
                 json_object("generation", 1),
                 PluginRuntimeCallCancellation::default(),
@@ -477,8 +477,8 @@ async fn service_host_rejects_late_callback_after_release_generation_changes() {
             .await
     });
     let old_process = loop {
-        if factory.start_count(&first.miniapp_id).await > 0 {
-            break factory.latest(&first.miniapp_id).await;
+        if factory.start_count(&first.plugin_product_id).await > 0 {
+            break factory.latest(&first.plugin_product_id).await;
         }
         tokio::task::yield_now().await;
     };
@@ -499,7 +499,7 @@ async fn bridge_binds_owner_release_epoch_surface_and_rejects_old_ports() {
     let factory = Arc::new(TestProcessFactory::default());
     let service = Arc::new(InMemoryPluginRuntimeServiceHost::new(factory));
     let bridge = InMemoryPluginRuntimeBridgeHost::new(storage.clone(), service);
-    let owner = MiniAppId::from("bridge-owner");
+    let owner = PluginProductId::from("bridge-owner");
     let first_storage = ui_storage(&owner, "bridge-owner");
     storage.register(first_storage.clone(), None).await.unwrap();
 
@@ -508,8 +508,8 @@ async fn bridge_binds_owner_release_epoch_surface_and_rejects_old_ports() {
     exact_pointer.materialized_catalog_digest = digest("exact-bridge-catalog");
     let first = bridge
         .open(PluginRuntimeBridgeBinding {
-            miniapp_id: owner.clone(),
-            surface_session_id: MiniAppSurfaceSessionId::from("surface-1"),
+            plugin_product_id: owner.clone(),
+            surface_session_id: PluginSurfaceSessionId::from("surface-1"),
             active: exact_pointer.clone(),
             storage: first_storage.clone(),
             service_spec: None,
@@ -524,10 +524,10 @@ async fn bridge_binds_owner_release_epoch_surface_and_rejects_old_ports() {
     bridge
         .request(
             &first,
-            MiniAppBridgeRequest {
-                call_id: MiniAppBridgeCallId::from("kv-set"),
-                target: MiniAppBridgeTarget::HostKv {
-                    request: MiniAppBridgeKvRequest::Set {
+            PluginBridgeRequest {
+                call_id: PluginBridgeCallId::from("kv-set"),
+                target: PluginBridgeTarget::HostKv {
+                    request: PluginBridgeKvRequest::Set {
                         key: "theme".into(),
                         value: StrictJsonValue(serde_json::json!("dark")),
                     },
@@ -541,8 +541,8 @@ async fn bridge_binds_owner_release_epoch_surface_and_rejects_old_ports() {
 
     let second = bridge
         .open(PluginRuntimeBridgeBinding {
-            miniapp_id: owner.clone(),
-            surface_session_id: MiniAppSurfaceSessionId::from("surface-2"),
+            plugin_product_id: owner.clone(),
+            surface_session_id: PluginSurfaceSessionId::from("surface-2"),
             active: pointer(&owner, 2),
             storage: first_storage,
             service_spec: None,
@@ -555,10 +555,10 @@ async fn bridge_binds_owner_release_epoch_surface_and_rejects_old_ports() {
         bridge
             .request(
                 &first,
-                MiniAppBridgeRequest {
-                    call_id: MiniAppBridgeCallId::from("late-kv"),
-                    target: MiniAppBridgeTarget::HostKv {
-                        request: MiniAppBridgeKvRequest::Get {
+                PluginBridgeRequest {
+                    call_id: PluginBridgeCallId::from("late-kv"),
+                    target: PluginBridgeTarget::HostKv {
+                        request: PluginBridgeKvRequest::Get {
                             key: "theme".into(),
                         },
                     },
@@ -578,13 +578,13 @@ async fn ui_only_bridge_rejects_service_only_storage_handles() {
         TestProcessFactory::default(),
     )));
     let bridge = InMemoryPluginRuntimeBridgeHost::new(storage, service);
-    let owner = MiniAppId::from("ui-storage-rejection");
+    let owner = PluginProductId::from("ui-storage-rejection");
     let (service_storage, _) = service_storage(&owner, "ui-storage-rejection");
     assert!(matches!(
         bridge
             .open(PluginRuntimeBridgeBinding {
-                miniapp_id: owner.clone(),
-                surface_session_id: MiniAppSurfaceSessionId::from("surface-ui-only"),
+                plugin_product_id: owner.clone(),
+                surface_session_id: PluginSurfaceSessionId::from("surface-ui-only"),
                 active: pointer(&owner, 1),
                 storage: service_storage,
                 service_spec: None,
@@ -607,8 +607,8 @@ fn kv_revision_increment_is_checked_and_reports_overflow() {
 #[tokio::test]
 async fn managed_storage_rejects_foreign_handles_and_keeps_kv_cas_owner_scoped() {
     let storage = InMemoryPluginRuntimeManagedStorage::new();
-    let owner = MiniAppId::from("storage-owner");
-    let foreign = MiniAppId::from("storage-foreign");
+    let owner = PluginProductId::from("storage-owner");
+    let foreign = PluginProductId::from("storage-foreign");
     let descriptor = service_storage(&owner, "storage-owner").0;
     storage
         .register(descriptor.clone(), service_storage(&owner, "storage-owner").1)
@@ -626,10 +626,10 @@ async fn managed_storage_rejects_foreign_handles_and_keeps_kv_cas_owner_scoped()
         Err(PluginRuntimePlatformError::UnknownStorageHandle)
     ));
 
-    let foreign_collision = MiniAppServiceStorageDescriptor {
-        kv: MiniAppKvHandleDescriptor {
+    let foreign_collision = PluginServiceStorageDescriptor {
+        kv: PluginKvHandleDescriptor {
             handle_id: descriptor.kv.handle_id.clone(),
-            miniapp_id: foreign,
+            plugin_product_id: foreign,
             namespace_revision: 1,
         },
         files_dir: None,
@@ -644,7 +644,7 @@ async fn managed_storage_rejects_foreign_handles_and_keeps_kv_cas_owner_scoped()
 #[tokio::test]
 async fn database_cancellation_only_wins_before_the_commit_boundary() {
     let storage = InMemoryPluginRuntimeManagedStorage::new();
-    let owner = MiniAppId::from("database-cancel-owner");
+    let owner = PluginProductId::from("database-cancel-owner");
     let (descriptor, ledger) = service_storage(&owner, "database-cancel-owner");
     let database_handle = descriptor
         .private_database
@@ -740,7 +740,7 @@ async fn database_cancellation_only_wins_before_the_commit_boundary() {
 #[tokio::test]
 async fn private_database_contract_rejects_runtime_ddl_and_appends_migration_ledger_by_cas() {
     let storage = InMemoryPluginRuntimeManagedStorage::new();
-    let owner = MiniAppId::from("database-owner");
+    let owner = PluginProductId::from("database-owner");
     let (descriptor, ledger) = service_storage(&owner, "database-owner");
     let ledger = ledger.expect("Service database ledger");
     let database_handle = descriptor
@@ -770,11 +770,11 @@ async fn private_database_contract_rejects_runtime_ddl_and_appends_migration_led
         Err(PluginRuntimePlatformError::InvalidDatabaseRequest(_))
     ));
 
-    let migration = MiniAppMigration::new(
-        MiniAppMigrationId::from("001_create_notes"),
-        vec![MiniAppAdditiveMigrationAction::CreateTable {
+    let migration = PluginMigration::new(
+        PluginMigrationId::from("001_create_notes"),
+        vec![PluginAdditiveMigrationAction::CreateTable {
             table_name: "notes".into(),
-            columns: vec![MiniAppMigrationColumn {
+            columns: vec![PluginMigrationColumn {
                 name: "id".into(),
                 declared_type: "TEXT".into(),
                 nullable: false,
@@ -815,21 +815,21 @@ async fn private_database_contract_rejects_runtime_ddl_and_appends_migration_led
 
 async fn running_fence(
     host: &InMemoryPluginRuntimeServiceHost,
-    miniapp_id: &MiniAppId,
+    plugin_product_id: &PluginProductId,
 ) -> PluginRuntimeServiceGenerationFence {
-    match host.state(miniapp_id).await.expect("Host state") {
+    match host.state(plugin_product_id).await.expect("Host state") {
         PluginRuntimeServiceHostState::Running { fence } => fence,
         state => panic!("expected running Host, got {state:?}"),
     }
 }
 
-fn pointer(miniapp_id: &MiniAppId, epoch: u64) -> MiniAppReleasePointerState {
-    MiniAppReleasePointerState {
-        miniapp_id: miniapp_id.clone(),
+fn pointer(plugin_product_id: &PluginProductId, epoch: u64) -> PluginReleasePointerState {
+    PluginReleasePointerState {
+        plugin_product_id: plugin_product_id.clone(),
         pointer_revision: epoch,
         active_release_epoch: epoch,
         ready_release: None,
-        active_release: Some(release_ref(miniapp_id.as_ref(), epoch)),
+        active_release: Some(release_ref(plugin_product_id.as_ref(), epoch)),
         previous_release: None,
         materialized_catalog_digest: digest(&format!("catalog-{epoch}")),
     }
@@ -838,21 +838,21 @@ fn pointer(miniapp_id: &MiniAppId, epoch: u64) -> MiniAppReleasePointerState {
 fn service_spec(
     suffix: &str,
     epoch: u64,
-    lifecycle: MiniAppServiceLifecycle,
-) -> ResolvedMiniAppServiceSpec {
-    let miniapp_id = MiniAppId::from(format!("miniapp-{suffix}"));
-    let (storage, _) = service_storage(&miniapp_id, suffix);
-    ResolvedMiniAppServiceSpec::new(ResolvedMiniAppServiceSpecInputs {
-        miniapp_id: miniapp_id.clone(),
+    lifecycle: PluginServiceLifecycle,
+) -> ResolvedPluginServiceSpec {
+    let plugin_product_id = PluginProductId::from(format!("plugin-{suffix}"));
+    let (storage, _) = service_storage(&plugin_product_id, suffix);
+    ResolvedPluginServiceSpec::new(ResolvedPluginServiceSpecInputs {
+        plugin_product_id: plugin_product_id.clone(),
         release: release_ref(suffix, epoch),
         active_release_epoch: epoch,
         service_module_digest: digest(&format!("service-module-{suffix}-{epoch}")),
         lifecycle,
         host_protocol_version:
-            nomifun_agent_contracts::MINIAPP_SERVICE_HOST_PROTOCOL_VERSION.into(),
+            nomifun_agent_contracts::PLUGIN_SERVICE_HOST_PROTOCOL_VERSION.into(),
         sdk_contract_version:
-            nomifun_agent_contracts::MINIAPP_SERVICE_SDK_CONTRACT_VERSION.into(),
-        runtime: MiniAppServiceRuntimeFingerprint {
+            nomifun_agent_contracts::PLUGIN_SERVICE_SDK_CONTRACT_VERSION.into(),
+        runtime: PluginServiceRuntimeFingerprint {
             runtime_installation_id: RuntimeInstallationId::from("runtime-test"),
             runtime_target: RuntimeTarget::from("windows-x86_64"),
             runtime_executable_digest: digest("runtime-executable"),
@@ -871,11 +871,11 @@ fn service_spec(
     .unwrap()
 }
 
-fn ui_storage(miniapp_id: &MiniAppId, suffix: &str) -> MiniAppServiceStorageDescriptor {
-    MiniAppServiceStorageDescriptor {
-        kv: MiniAppKvHandleDescriptor {
-            handle_id: MiniAppKvHandleId::from(format!("kv-{suffix}")),
-            miniapp_id: miniapp_id.clone(),
+fn ui_storage(plugin_product_id: &PluginProductId, suffix: &str) -> PluginServiceStorageDescriptor {
+    PluginServiceStorageDescriptor {
+        kv: PluginKvHandleDescriptor {
+            handle_id: PluginKvHandleId::from(format!("kv-{suffix}")),
+            plugin_product_id: plugin_product_id.clone(),
             namespace_revision: 1,
         },
         files_dir: None,
@@ -884,30 +884,30 @@ fn ui_storage(miniapp_id: &MiniAppId, suffix: &str) -> MiniAppServiceStorageDesc
 }
 
 fn service_storage(
-    miniapp_id: &MiniAppId,
+    plugin_product_id: &PluginProductId,
     suffix: &str,
 ) -> (
-    MiniAppServiceStorageDescriptor,
+    PluginServiceStorageDescriptor,
     Option<PluginRuntimeMigrationLedger>,
 ) {
-    let database_handle = MiniAppDatabaseHandleId::from(format!("db-{suffix}"));
+    let database_handle = PluginDatabaseHandleId::from(format!("db-{suffix}"));
     let ledger =
-        PluginRuntimeMigrationLedger::empty(miniapp_id.clone(), database_handle.clone(), 1).unwrap();
+        PluginRuntimeMigrationLedger::empty(plugin_product_id.clone(), database_handle.clone(), 1).unwrap();
     (
-        MiniAppServiceStorageDescriptor {
-            kv: MiniAppKvHandleDescriptor {
-                handle_id: MiniAppKvHandleId::from(format!("kv-{suffix}")),
-                miniapp_id: miniapp_id.clone(),
+        PluginServiceStorageDescriptor {
+            kv: PluginKvHandleDescriptor {
+                handle_id: PluginKvHandleId::from(format!("kv-{suffix}")),
+                plugin_product_id: plugin_product_id.clone(),
                 namespace_revision: 1,
             },
-            files_dir: Some(MiniAppFilesDirDescriptor {
-                handle_id: MiniAppFilesHandleId::from(format!("files-{suffix}")),
-                miniapp_id: miniapp_id.clone(),
-                absolute_path: format!("C:\\NomiFun\\miniapps\\{suffix}\\files"),
+            files_dir: Some(PluginFilesDirDescriptor {
+                handle_id: PluginFilesHandleId::from(format!("files-{suffix}")),
+                plugin_product_id: plugin_product_id.clone(),
+                absolute_path: format!("C:\\NomiFun\\plugins\\{suffix}\\files"),
             }),
-            private_database: Some(MiniAppPrivateDatabaseDescriptor {
+            private_database: Some(PluginPrivateDatabaseDescriptor {
                 handle_id: database_handle,
-                miniapp_id: miniapp_id.clone(),
+                plugin_product_id: plugin_product_id.clone(),
                 schema_epoch: ledger.schema_epoch,
                 migration_ledger_digest: ledger.ledger_digest.clone(),
             }),
@@ -916,9 +916,9 @@ fn service_storage(
     )
 }
 
-fn release_ref(suffix: &str, epoch: u64) -> MiniAppReleaseRef {
-    MiniAppReleaseRef {
-        release_id: MiniAppReleaseId::from(format!("release-{suffix}-{epoch}")),
+fn release_ref(suffix: &str, epoch: u64) -> PluginReleaseRef {
+    PluginReleaseRef {
+        release_id: PluginReleaseId::from(format!("release-{suffix}-{epoch}")),
         artifact_id: ArtifactId::from(format!("artifact-{suffix}-{epoch}")),
         release_digest: digest(&format!("release-digest-{suffix}-{epoch}")),
         manifest_digest: digest(&format!("manifest-digest-{suffix}-{epoch}")),

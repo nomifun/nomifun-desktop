@@ -73,7 +73,6 @@ import type {
 import Markdown from '@renderer/components/Markdown';
 import NomiInput from '@/renderer/components/base/NomiInput';
 import { NomiSettingList, NomiSettingRow, NomiSettingSection } from '@/renderer/components/base/NomiSettingLayout';
-import { useLayoutContext } from '@renderer/hooks/context/LayoutContext';
 import { openExternalUrl } from '@renderer/utils/platform';
 import { ipcBridge } from '@/common';
 import {
@@ -524,8 +523,6 @@ const KnowledgeDetailPage: React.FC = () => {
   const activeKnowledgeBaseIdRef = useRef(id);
   activeKnowledgeBaseIdRef.current = id;
   const [searchParams, setSearchParams] = useSearchParams();
-  const layout = useLayoutContext();
-  const isMobile = layout?.isMobile ?? false;
 
   // ─── Data hooks ─────────────────────────────────────────────────────────────
   const { base, files: remoteFiles, tree, loading, error, refresh } = useKnowledgeBase(id);
@@ -1765,7 +1762,7 @@ const KnowledgeDetailPage: React.FC = () => {
     <div
       className={classNames(
         'size-full box-border overflow-y-auto',
-        isMobile ? 'px-16px py-14px' : 'px-12px py-24px md:px-40px md:py-32px'
+        'px-12px py-24px md:px-40px md:py-32px'
       )}
     >
       <div className='mx-auto flex w-full max-w-1180px box-border flex-col gap-16px'>
@@ -1892,15 +1889,15 @@ const KnowledgeDetailPage: React.FC = () => {
             <div
               className={classNames(
                 'knowledge-doc-workspace flex w-full gap-14px',
-                isMobile ? 'flex-col' : 'flex-row',
-                isMobile ? 'min-h-720px' : 'h-[clamp(500px,calc(100vh-300px),760px)] min-h-500px'
+                'flex-row',
+                'h-[clamp(500px,calc(100vh-300px),760px)] min-h-500px'
               )}
             >
               {/* ─── Left: File tree panel ─── */}
               <div
                 className={classNames(
                   'knowledge-doc-panel-frame knowledge-doc-sidebar box-border shrink-0 flex flex-col overflow-hidden rd-12px bg-transparent',
-                  isMobile ? 'h-420px w-full' : 'h-full w-276px'
+                  'h-full w-276px'
                 )}
               >
                 {/* Compact document toolbar: icon-first, labels are shown in small hover bubbles. */}
@@ -2322,7 +2319,7 @@ const KnowledgeDetailPage: React.FC = () => {
             <div
               className={classNames(
                 'knowledge-use-shell grid min-h-470px overflow-hidden rd-12px border border-solid border-[var(--color-border-2)] bg-[var(--color-bg-2)]',
-                isMobile ? 'grid-cols-1' : 'grid-cols-[minmax(0,1fr)_320px]'
+                'grid-cols-[minmax(0,1fr)_320px]'
               )}
             >
               <div className='flex min-w-0 flex-col gap-14px p-16px'>
@@ -2350,7 +2347,7 @@ const KnowledgeDetailPage: React.FC = () => {
               <aside
                 className={classNames(
                   'knowledge-use-rules box-border min-w-0 p-16px',
-                  isMobile ? 'knowledge-use-rules-mobile' : 'knowledge-use-rules-desktop'
+                  'knowledge-use-rules-desktop'
                 )}
               >
                 <h3 className='m-0 text-14px font-700 leading-20px text-[var(--color-text-1)]'>

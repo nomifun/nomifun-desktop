@@ -1,0 +1,413 @@
+.root {
+  --workbench-padding: 12px;
+  --workbench-body-size: 14px;
+  --workbench-label-size: 13px;
+  --workbench-small-size: 12px;
+  --workbench-label-weight: 400;
+  --workbench-label-spacing: 0;
+  --workbench-title-weight: 500;
+  --workbench-control-height: 32px;
+  --workbench-field-gap: 6px;
+  --workbench-reference-width: 92px;
+  --workbench-reference-height: 96px;
+  --workbench-reference-preview-height: 66px;
+  color: var(--color-text-1);
+  font-size: var(--workbench-body-size);
+  font-weight: 400;
+  line-height: 22px;
+}
+
+.header {
+  box-sizing: border-box;
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 var(--workbench-padding);
+  padding: var(--workbench-padding) 0;
+  border-bottom: 1px solid var(--color-border-2);
+}
+
+.heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.heading > :global(.i-icon) {
+  flex: 0 0 auto;
+}
+
+.heading > div {
+  display: grid;
+  min-width: 0;
+}
+
+.heading h1 {
+  overflow: hidden;
+  margin: 0;
+  font-size: 14px;
+  font-weight: var(--workbench-title-weight);
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.heading small {
+  color: var(--color-text-3);
+  font-size: var(--workbench-small-size);
+  line-height: 18px;
+}
+
+.layoutSwitch {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 8px;
+  background: var(--color-fill-1);
+}
+
+.layoutSwitch button {
+  display: inline-flex;
+  height: 26px;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 0 7px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-2);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--workbench-small-size);
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.layoutSwitch button:hover {
+  background: var(--color-fill-2);
+}
+
+.layoutSwitch button[aria-pressed='true'] {
+  border-color: var(--color-border-2);
+  background: var(--color-bg-2);
+  color: rgb(var(--primary-6));
+  font-weight: var(--workbench-title-weight);
+}
+
+.layoutSwitch :global(.i-icon) {
+  display: inline-flex;
+  flex: 0 0 14px;
+  line-height: 0;
+}
+
+.content {
+  display: grid;
+  min-height: 0;
+  flex: 1 1 auto;
+  align-content: start;
+  gap: 16px;
+  padding: 8px var(--workbench-padding) var(--workbench-padding);
+  overflow-y: auto;
+}
+
+.section {
+  display: grid;
+  min-width: 0;
+  align-content: start;
+  gap: 8px;
+}
+
+.sectionHeading {
+  display: flex;
+  min-width: 0;
+  min-height: 28px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--color-text-1);
+  font-size: 14px;
+  font-weight: var(--workbench-title-weight);
+  line-height: 20px;
+}
+
+.referenceCount {
+  color: var(--color-text-3);
+  font-size: var(--workbench-small-size);
+  font-weight: 400;
+  line-height: 18px;
+}
+
+.root :global(.arco-btn),
+.toolButton {
+  box-sizing: border-box;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 6px;
+  background: var(--color-fill-1);
+  color: var(--color-text-2);
+  font-size: var(--workbench-small-size);
+  font-weight: 400;
+  line-height: 18px;
+}
+
+.toolButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.root :global(.arco-btn:not(.arco-btn-disabled)):hover,
+.toolButton:hover:not(:disabled) {
+  border-color: rgb(var(--primary-6));
+  background: var(--color-fill-2);
+  color: var(--color-text-1);
+}
+
+.root :global(.arco-btn-primary) {
+  height: 36px;
+  border-radius: 8px;
+  border-color: rgb(var(--primary-6));
+  background: rgb(var(--primary-6));
+  color: var(--color-white);
+  font-weight: var(--workbench-title-weight);
+}
+
+.root :global(.arco-btn-primary:not(.arco-btn-disabled)):hover {
+  border-color: rgb(var(--primary-5));
+  background: rgb(var(--primary-5));
+  color: var(--color-white);
+}
+
+.root :global(.arco-btn-disabled), .toolButton:disabled {
+  border-color: var(--color-border-2);
+  background: var(--color-fill-2);
+  color: var(--color-text-3);
+  cursor: not-allowed;
+}
+
+.root :global(.arco-btn) > :global(.i-icon) {
+  display: inline-flex;
+  width: 14px;
+  height: 14px;
+  align-items: center;
+  justify-content: center;
+}
+
+.root :global(.arco-btn) > :global(.i-icon) > svg {
+  width: 14px;
+  height: 14px;
+}
+
+.root :global(.arco-btn) > :global(.i-icon) + span {
+  margin-left: 4px;
+}
+
+.root :global(.arco-textarea) {
+  padding: 8px 10px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 8px;
+  background: var(--color-fill-1);
+  color: var(--color-text-1);
+  font-size: var(--workbench-body-size);
+  font-weight: 400;
+  line-height: 22px;
+  box-shadow: none;
+}
+
+.root :global(.arco-textarea)::placeholder {
+  color: var(--color-text-3);
+}
+
+.root :global(.arco-textarea):focus {
+  border-color: rgb(var(--primary-6));
+}
+
+.root :global(.arco-textarea-wrapper) {
+  border-radius: 8px;
+}
+
+.root :global(.arco-select-view), .root :global(.arco-input-number), .root :global(.arco-input-inner-wrapper) {
+  min-height: var(--workbench-control-height);
+  border-radius: 6px;
+  font-size: var(--workbench-body-size);
+  font-weight: 400;
+}
+
+.root :global(.arco-select-view), .root :global(.arco-input-inner-wrapper) {
+  border: 1px solid var(--color-border-2);
+  background: var(--color-fill-1);
+}
+
+.root :global(.arco-select-view:not(.arco-select-view-disabled)):hover, .root :global(.arco-input-inner-wrapper:not(.arco-input-inner-wrapper-disabled)):hover {
+  border-color: var(--color-border-3);
+}
+
+.root :global(.arco-select-view):focus-within, .root :global(.arco-input-inner-wrapper):focus-within {
+  border-color: rgb(var(--primary-6));
+}
+
+.root :global(.arco-select-disabled .arco-select-view), .root :global(.arco-input-number-disabled .arco-input-inner-wrapper) {
+  border-color: var(--color-border-2);
+  background: var(--color-fill-2);
+  color: var(--color-text-3);
+}
+
+.root :global(.arco-select-view) {
+  line-height: 30px;
+}
+
+.root :global(.arco-input) {
+  height: 30px;
+  font-size: var(--workbench-body-size);
+  font-weight: 400;
+}
+
+.root :global(.arco-radio-button-inner) {
+  height: 30px;
+  padding: 0 8px;
+  font-size: var(--workbench-small-size);
+  font-weight: 400;
+  line-height: 30px;
+}
+
+.referenceStrip {
+  display: flex;
+  min-width: 0;
+  align-items: stretch;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.referenceCard, .addReference {
+  box-sizing: border-box;
+  position: relative;
+  display: grid;
+  width: var(--workbench-reference-width);
+  height: var(--workbench-reference-height);
+  flex: 0 0 var(--workbench-reference-width);
+  grid-template-rows: var(--workbench-reference-preview-height) minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid var(--color-border-2);
+  border-radius: 8px;
+  background: var(--color-fill-1);
+}
+
+.referencePreview {
+  display: grid;
+  min-height: 0;
+  overflow: hidden;
+  place-items: center;
+}
+
+.referenceMedia {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.referenceName {
+  align-self: center;
+  overflow: hidden;
+  padding: 0 6px;
+  color: var(--color-text-2);
+  font-size: var(--workbench-small-size);
+  line-height: 18px;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.referenceRemove {
+  position: absolute;
+  z-index: 2;
+  top: 4px;
+  right: 4px;
+  display: grid;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid var(--color-border-2);
+  border-radius: 6px;
+  background: var(--color-bg-2);
+  color: var(--color-text-2);
+  cursor: pointer;
+}
+
+.referenceRemove:hover {
+  border-color: rgb(var(--danger-6));
+  color: rgb(var(--danger-6));
+}
+
+.addReference {
+  appearance: none;
+  grid-template-rows: none;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  padding: 8px;
+  border-style: dashed;
+  color: var(--color-text-3);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--workbench-small-size);
+  line-height: 18px;
+  text-align: center;
+}
+
+.addReference:hover:not(:disabled) {
+  border-color: rgb(var(--primary-6));
+  background: var(--color-fill-2);
+  color: rgb(var(--primary-6));
+}
+
+.addReference:disabled {
+  cursor: not-allowed;
+}
+
+.referenceLoading {
+  composes: referenceCard;
+  display: grid;
+  grid-template-rows: none;
+  place-items: center;
+  color: var(--color-text-3);
+}
+
+.compactReferences {
+  --workbench-reference-width: 76px;
+  --workbench-reference-height: 80px;
+  --workbench-reference-preview-height: 50px;
+}
+
+.footer {
+  display: grid;
+  flex: 0 0 auto;
+  gap: 6px;
+  padding: 8px var(--workbench-padding) var(--workbench-padding);
+  border-top: 1px solid var(--color-border-2);
+}
+
+.root :global(.arco-btn):focus-visible, .layoutSwitch button:focus-visible, .toolButton:focus-visible, .referenceRemove:focus-visible, .addReference:focus-visible {
+  outline: 2px solid rgb(var(--primary-6));
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .root :global(.arco-btn) {
+    transition: none;
+  }
+}

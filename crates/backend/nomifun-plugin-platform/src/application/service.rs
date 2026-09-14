@@ -3335,7 +3335,7 @@ fn affected_consumer_surface(kind: AffectedConsumerKind) -> PluginConsumerSurfac
         AffectedConsumerKind::RemoteOperation => PluginConsumerSurfaceDto::Remote,
         AffectedConsumerKind::AutomationOperation => PluginConsumerSurfaceDto::Automation,
         AffectedConsumerKind::UiOperation => PluginConsumerSurfaceDto::Ui,
-        AffectedConsumerKind::MiniappServiceOperation => PluginConsumerSurfaceDto::MiniappService,
+        AffectedConsumerKind::PluginServiceOperation => PluginConsumerSurfaceDto::PluginService,
     }
 }
 
@@ -3477,7 +3477,7 @@ fn consumer_surface(consumer: CapabilityConsumer) -> PluginConsumerSurfaceDto {
         CapabilityConsumer::Remote => PluginConsumerSurfaceDto::Remote,
         CapabilityConsumer::Automation => PluginConsumerSurfaceDto::Automation,
         CapabilityConsumer::Ui => PluginConsumerSurfaceDto::Ui,
-        CapabilityConsumer::MiniAppService => PluginConsumerSurfaceDto::MiniappService,
+        CapabilityConsumer::PluginService => PluginConsumerSurfaceDto::PluginService,
     }
 }
 
@@ -3489,14 +3489,14 @@ fn operation_summary(row: &ProductOperationRow) -> DurableOperationSummaryDto {
             "build" => DurableOperationKindDto::Build,
             "import" => DurableOperationKindDto::Import,
             "export" => DurableOperationKindDto::Export,
-            _ => DurableOperationKindDto::MiniappPermanentDelete,
+            _ => DurableOperationKindDto::PluginPermanentDelete,
         },
         owner: match row.owner_kind.as_str() {
             "plugin_mount" => DurableOperationOwnerDto::PluginMount {
                 mount_id: row.owner_id.clone(),
             },
-            "miniapp" => DurableOperationOwnerDto::Miniapp {
-                miniapp_id: row.owner_id.clone(),
+            "plugin" => DurableOperationOwnerDto::PluginRuntime {
+                plugin_id: row.owner_id.clone(),
             },
             _ => DurableOperationOwnerDto::PluginProject {
                 project_id: row.owner_id.clone(),

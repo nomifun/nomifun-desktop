@@ -7,12 +7,10 @@
 import React from 'react';
 import { Tooltip } from '@arco-design/web-react';
 import { useTranslation } from 'react-i18next';
-import classNames from 'classnames';
 import ConversationSearchPopover from '@renderer/pages/conversation/SessionList/ConversationSearchPopover';
 import type { SiderTooltipProps } from '@renderer/utils/ui/siderTooltip';
 
 interface SiderSearchEntryProps {
-  isMobile: boolean;
   collapsed: boolean;
   siderTooltipProps: SiderTooltipProps;
   onConversationSelect: () => void;
@@ -20,7 +18,6 @@ interface SiderSearchEntryProps {
 }
 
 const SiderSearchEntry: React.FC<SiderSearchEntryProps> = ({
-  isMobile,
   collapsed,
   siderTooltipProps,
   onConversationSelect,
@@ -51,7 +48,7 @@ const SiderSearchEntry: React.FC<SiderSearchEntryProps> = ({
           onConversationSelect={onConversationSelect}
           label={t('conversation.historySearch.shortTitle')}
           fullWidth
-          buttonClassName={classNames(isMobile && 'sider-action-btn-mobile')}
+          buttonClassName=''
         />
       </div>
     </Tooltip>

@@ -22,8 +22,8 @@ pub enum JavaScriptWorkKind {
     SharedExtensionHost,
     CandidateTestHost,
     BuildHost,
-    MiniappServiceHost,
-    MiniappServiceTestHost,
+    PluginServiceHost,
+    PluginServiceTestHost,
 }
 
 /// The exact executable and fingerprint that a JavaScript consumer is
@@ -90,9 +90,9 @@ pub trait CommittedRuntimeProvider: Send + Sync {
     ) -> Result<Option<ResolvedNodeRuntime>, JavaScriptRuntimeError>;
 }
 
-/// Process-wide Runtime authority shared by Plugin, authoring and future
-/// MiniApp composition. It owns the admission fence; the persisted selection
-/// remains owned by [`NodeRuntimeManager`].
+/// Process-wide Runtime authority shared by Plugin products and authoring. It
+/// owns the admission fence; the persisted selection remains owned by
+/// [`NodeRuntimeManager`].
 pub struct RuntimeAuthority {
     manager: Arc<NodeRuntimeManager>,
     probe: Arc<dyn NodeRuntimeProbePort>,

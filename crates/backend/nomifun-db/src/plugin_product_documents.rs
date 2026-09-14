@@ -21,7 +21,7 @@ impl PluginProductDocuments {
                  NOT EXISTS (SELECT 1 FROM plugin_projects project WHERE project.linked_mount_id = mount.mount_id)
                  AND EXISTS (SELECT 1 FROM installation_identity WHERE singleton_key = 'installation' AND owner_user_id = ?)
              )
-             UNION SELECT miniapp_id FROM miniapp_products WHERE owner_user_id = ?",
+             UNION SELECT plugin_product_id FROM plugin_products WHERE owner_user_id = ?",
         )
             .bind(owner).bind(owner).bind(owner).fetch_all(&self.pool).await?)
     }

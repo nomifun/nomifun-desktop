@@ -2,10 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use async_trait::async_trait;
 use nomifun_agent_contracts::{
-    DigestHex, MiniAppAdditiveMigrationAction, MiniAppBridgeKvRequest, MiniAppDatabaseHandleId,
-    MiniAppFilesDirDescriptor, MiniAppFilesHandleId, MiniAppId, MiniAppKvHandleDescriptor,
-    MiniAppKvHandleId, MiniAppKvResponse, MiniAppMigration, MiniAppMigrationId,
-    MiniAppPrivateDatabaseDescriptor, MiniAppReleaseRef, MiniAppServiceStorageDescriptor,
+    DigestHex, PluginAdditiveMigrationAction, PluginBridgeKvRequest, PluginDatabaseHandleId,
+    PluginFilesDirDescriptor, PluginFilesHandleId, PluginProductId, PluginKvHandleDescriptor,
+    PluginKvHandleId, PluginKvResponse, PluginMigration, PluginMigrationId,
+    PluginPrivateDatabaseDescriptor, PluginReleaseRef, PluginServiceStorageDescriptor,
     StrictJsonValue, digest_payload,
 };
 use serde::{Deserialize, Serialize};
@@ -19,17 +19,17 @@ use crate::runtime::{
 /// The storage descriptor and ledger resolved for one exact Service run.
 ///
 /// Handles are Host-owned. The descriptor is passed into the canonical
-/// `ResolvedMiniAppServiceSpec`; raw database paths never leave the Host.
+/// `ResolvedPluginServiceSpec`; raw database paths never leave the Host.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PluginRuntimeServiceStorageResolution {
-    pub descriptor: MiniAppServiceStorageDescriptor,
+    pub descriptor: PluginServiceStorageDescriptor,
     pub migration_ledger: Option<PluginRuntimeMigrationLedger>,
 }
 
 /// Isolated storage materialized for one transient Service Test.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PluginRuntimeServiceTestStorageResolution {
-    pub descriptor: MiniAppServiceStorageDescriptor,
+    pub descriptor: PluginServiceStorageDescriptor,
     pub copied_kv_digest: DigestHex,
     pub copied_private_database_digest: Option<DigestHex>,
     pub empty_files_dir: Option<bool>,
@@ -37,15 +37,15 @@ pub struct PluginRuntimeServiceTestStorageResolution {
 }
 
 impl PluginRuntimeServiceStorageResolution {
-    pub fn host_kv(miniapp_id: MiniAppId) -> Self {
+    pub fn host_kv(plugin_product_id: PluginProductId) -> Self {
         Self {
-            descriptor: MiniAppServiceStorageDescriptor {
-                kv: MiniAppKvHandleDescriptor {
-                    handle_id: MiniAppKvHandleId::from(format!(
-                        "miniapp-kv-{}",
-                        miniapp_id.as_ref()
+            descriptor: PluginServiceStorageDescriptor {
+                kv: PluginKvHandleDescriptor {
+                    handle_id: PluginKvHandleId::from(format!(
+                        "plugin-kv-{}",
+                        plugin_product_id.as_ref()
                     )),
-                    miniapp_id,
+                    plugin_product_id,
                     namespace_revision: 1,
                 },
                 files_dir: None,
@@ -57,13 +57,13 @@ impl PluginRuntimeServiceStorageResolution {
 }
 
 /// Requests issued by a trusted Node Service back to the Host over the private
-/// Service IPC channel. The MiniApp and owner are selected by the Host process
+/// Service IPC channel. The Plugin and owner are selected by the Host process
 /// binding, never by this payload.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PluginRuntimeServiceStorageRequest {
     Kv {
-        request: MiniAppBridgeKvRequest,
+        request: PluginBridgeKvRequest,
     },
     DatabaseQuery {
         statement: PluginRuntimeDatabaseStatement,
@@ -76,7 +76,7 @@ pub enum PluginRuntimeServiceStorageRequest {
     },
 }
 
-/// Production/runtime boundary for owner-scoped MiniApp storage.
+/// Production/runtime boundary for owner-scoped Plugin storage.
 ///
 /// The in-memory implementation below remains useful for deterministic
 /// contract tests. Production composition supplies the SQLite/filesystem
@@ -86,7 +86,7 @@ pub trait PluginRuntimeServiceStoragePort: Send + Sync {
     async fn resolve_service_storage(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
         uses_files: bool,
         uses_private_database: bool,
     ) -> PluginRuntimePlatformResult<PluginRuntimeServiceStorageResolution>;
@@ -94,18 +94,18 @@ pub trait PluginRuntimeServiceStoragePort: Send + Sync {
     async fn apply_additive_migrations(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
-        storage: &MiniAppServiceStorageDescriptor,
+        plugin_product_id: &PluginProductId,
+        storage: &PluginServiceStorageDescriptor,
         expected_ledger_digest: &DigestHex,
-        release: &MiniAppReleaseRef,
-        migrations: &[MiniAppMigration],
+        release: &PluginReleaseRef,
+        migrations: &[PluginMigration],
         applied_at_ms: i64,
     ) -> PluginRuntimePlatformResult<PluginRuntimeMigrationLedger>;
 
     async fn handle_service_request(
         &self,
-        miniapp_id: &MiniAppId,
-        storage: &MiniAppServiceStorageDescriptor,
+        plugin_product_id: &PluginProductId,
+        storage: &PluginServiceStorageDescriptor,
         request: PluginRuntimeServiceStorageRequest,
         cancellation: PluginRuntimeCallCancellation,
     ) -> PluginRuntimePlatformResult<StrictJsonValue>;
@@ -113,14 +113,14 @@ pub trait PluginRuntimeServiceStoragePort: Send + Sync {
     async fn create_service_test_storage(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
         test_id: &str,
         uses_files: bool,
         uses_private_database: bool,
     ) -> PluginRuntimePlatformResult<PluginRuntimeServiceTestStorageResolution> {
         let _ = (
             owner_user_id,
-            miniapp_id,
+            plugin_product_id,
             test_id,
             uses_files,
             uses_private_database,
@@ -133,10 +133,10 @@ pub trait PluginRuntimeServiceStoragePort: Send + Sync {
     async fn purge_service_test_storage(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
         test_id: &str,
     ) -> PluginRuntimePlatformResult<()> {
-        let _ = (owner_user_id, miniapp_id, test_id);
+        let _ = (owner_user_id, plugin_product_id, test_id);
         Err(PluginRuntimePlatformError::Runtime(
             "Plugin Service Test storage is not configured".into(),
         ))
@@ -145,17 +145,17 @@ pub trait PluginRuntimeServiceStoragePort: Send + Sync {
     async fn purge_service_storage(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
     ) -> PluginRuntimePlatformResult<()>;
 
     async fn export_backup_storage(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
         uses_files: bool,
         uses_private_database: bool,
     ) -> PluginRuntimePlatformResult<PluginRuntimeBackupStorage> {
-        let _ = (owner_user_id, miniapp_id);
+        let _ = (owner_user_id, plugin_product_id);
         if uses_files || uses_private_database {
             return Err(PluginRuntimePlatformError::Runtime(
                 "Plugin backup storage is not configured".into(),
@@ -172,12 +172,12 @@ pub trait PluginRuntimeServiceStoragePort: Send + Sync {
     async fn import_backup_storage(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
         storage: PluginRuntimeBackupStorage,
         uses_files: bool,
         uses_private_database: bool,
     ) -> PluginRuntimePlatformResult<()> {
-        let _ = (owner_user_id, miniapp_id);
+        let _ = (owner_user_id, plugin_product_id);
         if uses_files || uses_private_database
             || !storage.files.is_empty()
             || storage.private_database.is_some()
@@ -195,9 +195,9 @@ pub trait PluginRuntimeServiceStoragePort: Send + Sync {
 pub trait PluginRuntimeFilesPort: Send + Sync {
     async fn resolve(
         &self,
-        miniapp_id: &MiniAppId,
-        handle_id: &MiniAppFilesHandleId,
-    ) -> PluginRuntimePlatformResult<MiniAppFilesDirDescriptor>;
+        plugin_product_id: &PluginProductId,
+        handle_id: &PluginFilesHandleId,
+    ) -> PluginRuntimePlatformResult<PluginFilesDirDescriptor>;
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -258,24 +258,24 @@ pub struct PluginRuntimeDatabaseExecuteResult {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginRuntimeMigrationLedgerEntry {
     pub ordinal: u64,
-    pub migration_id: MiniAppMigrationId,
+    pub migration_id: PluginMigrationId,
     pub migration_digest: DigestHex,
-    pub release: MiniAppReleaseRef,
+    pub release: PluginReleaseRef,
     pub applied_at_ms: i64,
 }
 
 #[derive(Serialize)]
 struct PluginRuntimeMigrationLedgerDigestInput<'a> {
-    miniapp_id: &'a MiniAppId,
-    handle_id: &'a MiniAppDatabaseHandleId,
+    plugin_product_id: &'a PluginProductId,
+    handle_id: &'a PluginDatabaseHandleId,
     schema_epoch: u64,
     entries: &'a [PluginRuntimeMigrationLedgerEntry],
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginRuntimeMigrationLedger {
-    pub miniapp_id: MiniAppId,
-    pub handle_id: MiniAppDatabaseHandleId,
+    pub plugin_product_id: PluginProductId,
+    pub handle_id: PluginDatabaseHandleId,
     pub schema_epoch: u64,
     pub entries: Vec<PluginRuntimeMigrationLedgerEntry>,
     pub ledger_digest: DigestHex,
@@ -283,8 +283,8 @@ pub struct PluginRuntimeMigrationLedger {
 
 impl PluginRuntimeMigrationLedger {
     pub fn empty(
-        miniapp_id: MiniAppId,
-        handle_id: MiniAppDatabaseHandleId,
+        plugin_product_id: PluginProductId,
+        handle_id: PluginDatabaseHandleId,
         schema_epoch: u64,
     ) -> PluginRuntimePlatformResult<Self> {
         if schema_epoch == 0 {
@@ -293,9 +293,9 @@ impl PluginRuntimeMigrationLedger {
             ));
         }
         let entries = Vec::new();
-        let ledger_digest = ledger_digest(&miniapp_id, &handle_id, schema_epoch, &entries)?;
+        let ledger_digest = ledger_digest(&plugin_product_id, &handle_id, schema_epoch, &entries)?;
         Ok(Self {
-            miniapp_id,
+            plugin_product_id,
             handle_id,
             schema_epoch,
             entries,
@@ -337,7 +337,7 @@ impl PluginRuntimeMigrationLedger {
             }
         }
         let expected = ledger_digest(
-            &self.miniapp_id,
+            &self.plugin_product_id,
             &self.handle_id,
             self.schema_epoch,
             &self.entries,
@@ -352,8 +352,8 @@ impl PluginRuntimeMigrationLedger {
 
     pub fn append_additive(
         &self,
-        release: &MiniAppReleaseRef,
-        migrations: &[MiniAppMigration],
+        release: &PluginReleaseRef,
+        migrations: &[PluginMigration],
         applied_at_ms: i64,
     ) -> PluginRuntimePlatformResult<Self> {
         self.validate()?;
@@ -403,9 +403,9 @@ impl PluginRuntimeMigrationLedger {
                 "Private Database schema epoch overflow".into(),
             ))?;
         let ledger_digest =
-            ledger_digest(&self.miniapp_id, &self.handle_id, schema_epoch, &entries)?;
+            ledger_digest(&self.plugin_product_id, &self.handle_id, schema_epoch, &entries)?;
         let next = Self {
-            miniapp_id: self.miniapp_id.clone(),
+            plugin_product_id: self.plugin_product_id.clone(),
             handle_id: self.handle_id.clone(),
             schema_epoch,
             entries,
@@ -428,48 +428,48 @@ fn is_digest(value: &DigestHex) -> bool {
 pub trait PluginRuntimePrivateDatabasePort: Send + Sync {
     async fn query(
         &self,
-        miniapp_id: &MiniAppId,
-        handle_id: &MiniAppDatabaseHandleId,
+        plugin_product_id: &PluginProductId,
+        handle_id: &PluginDatabaseHandleId,
         statement: PluginRuntimeDatabaseStatement,
         cancellation: PluginRuntimeCallCancellation,
     ) -> PluginRuntimePlatformResult<PluginRuntimeDatabaseQueryResult>;
 
     async fn execute(
         &self,
-        miniapp_id: &MiniAppId,
-        handle_id: &MiniAppDatabaseHandleId,
+        plugin_product_id: &PluginProductId,
+        handle_id: &PluginDatabaseHandleId,
         statement: PluginRuntimeDatabaseStatement,
         cancellation: PluginRuntimeCallCancellation,
     ) -> PluginRuntimePlatformResult<PluginRuntimeDatabaseExecuteResult>;
 
     async fn batch(
         &self,
-        miniapp_id: &MiniAppId,
-        handle_id: &MiniAppDatabaseHandleId,
+        plugin_product_id: &PluginProductId,
+        handle_id: &PluginDatabaseHandleId,
         statements: Vec<PluginRuntimeDatabaseStatement>,
         cancellation: PluginRuntimeCallCancellation,
     ) -> PluginRuntimePlatformResult<Vec<PluginRuntimeDatabaseExecuteResult>>;
 
     async fn apply_additive_migrations(
         &self,
-        miniapp_id: &MiniAppId,
-        handle_id: &MiniAppDatabaseHandleId,
+        plugin_product_id: &PluginProductId,
+        handle_id: &PluginDatabaseHandleId,
         expected_ledger_digest: &DigestHex,
-        release: &MiniAppReleaseRef,
-        migrations: &[MiniAppMigration],
+        release: &PluginReleaseRef,
+        migrations: &[PluginMigration],
         applied_at_ms: i64,
     ) -> PluginRuntimePlatformResult<PluginRuntimeMigrationLedger>;
 
     async fn ledger(
         &self,
-        miniapp_id: &MiniAppId,
-        handle_id: &MiniAppDatabaseHandleId,
+        plugin_product_id: &PluginProductId,
+        handle_id: &PluginDatabaseHandleId,
     ) -> PluginRuntimePlatformResult<PluginRuntimeMigrationLedger>;
 }
 
 #[derive(Clone)]
 struct KvNamespace {
-    descriptor: MiniAppKvHandleDescriptor,
+    descriptor: PluginKvHandleDescriptor,
     values: BTreeMap<String, KvCell>,
 }
 
@@ -482,23 +482,23 @@ struct KvCell {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct InMemoryTestStorageKey {
     owner_user_id: String,
-    miniapp_id: String,
+    plugin_product_id: String,
     test_id: String,
 }
 
 #[derive(Clone)]
 struct DatabaseState {
-    descriptor: MiniAppPrivateDatabaseDescriptor,
+    descriptor: PluginPrivateDatabaseDescriptor,
     ledger: PluginRuntimeMigrationLedger,
     statements: Vec<PluginRuntimeDatabaseStatement>,
 }
 
 #[derive(Default)]
 struct ManagedStorageState {
-    kv: BTreeMap<MiniAppKvHandleId, KvNamespace>,
-    files: BTreeMap<MiniAppFilesHandleId, MiniAppFilesDirDescriptor>,
-    databases: BTreeMap<MiniAppDatabaseHandleId, DatabaseState>,
-    test_storage: BTreeMap<InMemoryTestStorageKey, MiniAppServiceStorageDescriptor>,
+    kv: BTreeMap<PluginKvHandleId, KvNamespace>,
+    files: BTreeMap<PluginFilesHandleId, PluginFilesDirDescriptor>,
+    databases: BTreeMap<PluginDatabaseHandleId, DatabaseState>,
+    test_storage: BTreeMap<InMemoryTestStorageKey, PluginServiceStorageDescriptor>,
 }
 
 /// Contract-focused in-memory storage. It enforces owner/handle isolation,
@@ -516,25 +516,25 @@ impl InMemoryPluginRuntimeManagedStorage {
 
     pub async fn register(
         &self,
-        storage: MiniAppServiceStorageDescriptor,
+        storage: PluginServiceStorageDescriptor,
         ledger: Option<PluginRuntimeMigrationLedger>,
     ) -> PluginRuntimePlatformResult<()> {
-        let owner = storage.kv.miniapp_id.clone();
+        let owner = storage.kv.plugin_product_id.clone();
         if storage
             .files_dir
             .as_ref()
-            .is_some_and(|descriptor| descriptor.miniapp_id != owner)
+            .is_some_and(|descriptor| descriptor.plugin_product_id != owner)
             || storage
                 .private_database
                 .as_ref()
-                .is_some_and(|descriptor| descriptor.miniapp_id != owner)
+                .is_some_and(|descriptor| descriptor.plugin_product_id != owner)
         {
             return Err(PluginRuntimePlatformError::UnknownStorageHandle);
         }
         let database = match (&storage.private_database, &ledger) {
             (Some(database), Some(ledger)) => {
                 ledger.validate()?;
-                if ledger.miniapp_id != owner
+                if ledger.plugin_product_id != owner
                     || ledger.handle_id != database.handle_id
                     || ledger.schema_epoch != database.schema_epoch
                     || ledger.ledger_digest != database.migration_ledger_digest
@@ -600,11 +600,11 @@ impl InMemoryPluginRuntimeManagedStorage {
 
     pub async fn recorded_statements(
         &self,
-        miniapp_id: &MiniAppId,
-        handle_id: &MiniAppDatabaseHandleId,
+        plugin_product_id: &PluginProductId,
+        handle_id: &PluginDatabaseHandleId,
     ) -> PluginRuntimePlatformResult<Vec<PluginRuntimeDatabaseStatement>> {
         let state = self.state.lock().await;
-        let database = owned_database(&state, miniapp_id, handle_id)?;
+        let database = owned_database(&state, plugin_product_id, handle_id)?;
         Ok(database.statements.clone())
     }
 }
@@ -613,11 +613,11 @@ impl InMemoryPluginRuntimeManagedStorage {
 impl PluginRuntimeHostKvPort for InMemoryPluginRuntimeManagedStorage {
     async fn execute(
         &self,
-        miniapp_id: &MiniAppId,
-        storage: &MiniAppServiceStorageDescriptor,
-        request: &MiniAppBridgeKvRequest,
+        plugin_product_id: &PluginProductId,
+        storage: &PluginServiceStorageDescriptor,
+        request: &PluginBridgeKvRequest,
     ) -> PluginRuntimePlatformResult<StrictJsonValue> {
-        if &storage.kv.miniapp_id != miniapp_id {
+        if &storage.kv.plugin_product_id != plugin_product_id {
             return Err(PluginRuntimePlatformError::UnknownStorageHandle);
         }
         let mut state = self.state.lock().await;
@@ -626,18 +626,18 @@ impl PluginRuntimeHostKvPort for InMemoryPluginRuntimeManagedStorage {
             .get_mut(&storage.kv.handle_id)
             .filter(|namespace| {
                 namespace.descriptor == storage.kv
-                    && &namespace.descriptor.miniapp_id == miniapp_id
+                    && &namespace.descriptor.plugin_product_id == plugin_product_id
             })
             .ok_or(PluginRuntimePlatformError::UnknownStorageHandle)?;
         let response = match request {
-            MiniAppBridgeKvRequest::Get { key } => {
+            PluginBridgeKvRequest::Get { key } => {
                 let value = namespace.values.get(key);
-                MiniAppKvResponse::Value {
+                PluginKvResponse::Value {
                     value: value.map(|cell| cell.value.clone()),
                     revision: value.map(|cell| cell.revision),
                 }
             }
-            MiniAppBridgeKvRequest::Set { key, value } => {
+            PluginBridgeKvRequest::Set { key, value } => {
                 let revision = next_kv_revision(namespace.values.get(key).map(|cell| cell.revision))?;
                 namespace.values.insert(
                     key.clone(),
@@ -646,12 +646,12 @@ impl PluginRuntimeHostKvPort for InMemoryPluginRuntimeManagedStorage {
                         value: value.clone(),
                     },
                 );
-                MiniAppKvResponse::Written { revision }
+                PluginKvResponse::Written { revision }
             }
-            MiniAppBridgeKvRequest::Delete { key } => MiniAppKvResponse::Deleted {
+            PluginBridgeKvRequest::Delete { key } => PluginKvResponse::Deleted {
                 existed: namespace.values.remove(key).is_some(),
             },
-            MiniAppBridgeKvRequest::CompareAndSwap {
+            PluginBridgeKvRequest::CompareAndSwap {
                 key,
                 expected_revision,
                 value,
@@ -675,7 +675,7 @@ impl PluginRuntimeHostKvPort for InMemoryPluginRuntimeManagedStorage {
                         }
                     }
                 }
-                MiniAppKvResponse::CompareAndSwap {
+                PluginKvResponse::CompareAndSwap {
                     applied,
                     current_revision: namespace.values.get(key).map(|cell| cell.revision),
                 }
@@ -697,15 +697,15 @@ pub(crate) fn next_kv_revision(current_revision: Option<u64>) -> PluginRuntimePl
 impl PluginRuntimeFilesPort for InMemoryPluginRuntimeManagedStorage {
     async fn resolve(
         &self,
-        miniapp_id: &MiniAppId,
-        handle_id: &MiniAppFilesHandleId,
-    ) -> PluginRuntimePlatformResult<MiniAppFilesDirDescriptor> {
+        plugin_product_id: &PluginProductId,
+        handle_id: &PluginFilesHandleId,
+    ) -> PluginRuntimePlatformResult<PluginFilesDirDescriptor> {
         self.state
             .lock()
             .await
             .files
             .get(handle_id)
-            .filter(|descriptor| &descriptor.miniapp_id == miniapp_id)
+            .filter(|descriptor| &descriptor.plugin_product_id == plugin_product_id)
             .cloned()
             .ok_or(PluginRuntimePlatformError::UnknownStorageHandle)
     }
@@ -715,14 +715,14 @@ impl PluginRuntimeFilesPort for InMemoryPluginRuntimeManagedStorage {
 impl PluginRuntimePrivateDatabasePort for InMemoryPluginRuntimeManagedStorage {
     async fn query(
         &self,
-        miniapp_id: &MiniAppId,
-        handle_id: &MiniAppDatabaseHandleId,
+        plugin_product_id: &PluginProductId,
+        handle_id: &PluginDatabaseHandleId,
         statement: PluginRuntimeDatabaseStatement,
         cancellation: PluginRuntimeCallCancellation,
     ) -> PluginRuntimePlatformResult<PluginRuntimeDatabaseQueryResult> {
         statement.validate_query()?;
         let mut state = self.state.lock().await;
-        let database = owned_database_mut(&mut state, miniapp_id, handle_id)?;
+        let database = owned_database_mut(&mut state, plugin_product_id, handle_id)?;
         commit_database_effect(&cancellation, || {
             database.statements.push(statement);
             PluginRuntimeDatabaseQueryResult { rows: Vec::new() }
@@ -731,14 +731,14 @@ impl PluginRuntimePrivateDatabasePort for InMemoryPluginRuntimeManagedStorage {
 
     async fn execute(
         &self,
-        miniapp_id: &MiniAppId,
-        handle_id: &MiniAppDatabaseHandleId,
+        plugin_product_id: &PluginProductId,
+        handle_id: &PluginDatabaseHandleId,
         statement: PluginRuntimeDatabaseStatement,
         cancellation: PluginRuntimeCallCancellation,
     ) -> PluginRuntimePlatformResult<PluginRuntimeDatabaseExecuteResult> {
         statement.validate_execute()?;
         let mut state = self.state.lock().await;
-        let database = owned_database_mut(&mut state, miniapp_id, handle_id)?;
+        let database = owned_database_mut(&mut state, plugin_product_id, handle_id)?;
         commit_database_effect(&cancellation, || {
             database.statements.push(statement);
             PluginRuntimeDatabaseExecuteResult { affected_rows: 0 }
@@ -747,8 +747,8 @@ impl PluginRuntimePrivateDatabasePort for InMemoryPluginRuntimeManagedStorage {
 
     async fn batch(
         &self,
-        miniapp_id: &MiniAppId,
-        handle_id: &MiniAppDatabaseHandleId,
+        plugin_product_id: &PluginProductId,
+        handle_id: &PluginDatabaseHandleId,
         statements: Vec<PluginRuntimeDatabaseStatement>,
         cancellation: PluginRuntimeCallCancellation,
     ) -> PluginRuntimePlatformResult<Vec<PluginRuntimeDatabaseExecuteResult>> {
@@ -762,7 +762,7 @@ impl PluginRuntimePrivateDatabasePort for InMemoryPluginRuntimeManagedStorage {
         }
         let count = statements.len();
         let mut state = self.state.lock().await;
-        let database = owned_database_mut(&mut state, miniapp_id, handle_id)?;
+        let database = owned_database_mut(&mut state, plugin_product_id, handle_id)?;
         commit_database_effect(&cancellation, || {
             database.statements.extend(statements);
             vec![
@@ -774,15 +774,15 @@ impl PluginRuntimePrivateDatabasePort for InMemoryPluginRuntimeManagedStorage {
 
     async fn apply_additive_migrations(
         &self,
-        miniapp_id: &MiniAppId,
-        handle_id: &MiniAppDatabaseHandleId,
+        plugin_product_id: &PluginProductId,
+        handle_id: &PluginDatabaseHandleId,
         expected_ledger_digest: &DigestHex,
-        release: &MiniAppReleaseRef,
-        migrations: &[MiniAppMigration],
+        release: &PluginReleaseRef,
+        migrations: &[PluginMigration],
         applied_at_ms: i64,
     ) -> PluginRuntimePlatformResult<PluginRuntimeMigrationLedger> {
         let mut state = self.state.lock().await;
-        let database = owned_database_mut(&mut state, miniapp_id, handle_id)?;
+        let database = owned_database_mut(&mut state, plugin_product_id, handle_id)?;
         if &database.ledger.ledger_digest != expected_ledger_digest {
             return Err(PluginRuntimePlatformError::StorageConflict);
         }
@@ -798,11 +798,11 @@ impl PluginRuntimePrivateDatabasePort for InMemoryPluginRuntimeManagedStorage {
 
     async fn ledger(
         &self,
-        miniapp_id: &MiniAppId,
-        handle_id: &MiniAppDatabaseHandleId,
+        plugin_product_id: &PluginProductId,
+        handle_id: &PluginDatabaseHandleId,
     ) -> PluginRuntimePlatformResult<PluginRuntimeMigrationLedger> {
         let state = self.state.lock().await;
-        Ok(owned_database(&state, miniapp_id, handle_id)?.ledger.clone())
+        Ok(owned_database(&state, plugin_product_id, handle_id)?.ledger.clone())
     }
 }
 
@@ -811,42 +811,42 @@ impl PluginRuntimeServiceStoragePort for InMemoryPluginRuntimeManagedStorage {
     async fn resolve_service_storage(
         &self,
         _owner_user_id: &str,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
         uses_files: bool,
         uses_private_database: bool,
     ) -> PluginRuntimePlatformResult<PluginRuntimeServiceStorageResolution> {
-        let mut resolution = PluginRuntimeServiceStorageResolution::host_kv(miniapp_id.clone());
+        let mut resolution = PluginRuntimeServiceStorageResolution::host_kv(plugin_product_id.clone());
         if uses_files {
             let path = std::env::temp_dir()
-                .join("nomifun-miniapp-memory")
-                .join(miniapp_id.as_ref())
+                .join("nomifun-plugin-memory")
+                .join(plugin_product_id.as_ref())
                 .join("files");
             std::fs::create_dir_all(&path).map_err(|error| {
                 PluginRuntimePlatformError::Runtime(format!(
                     "cannot create in-memory filesDir fixture: {error}"
                 ))
             })?;
-            resolution.descriptor.files_dir = Some(MiniAppFilesDirDescriptor {
-                handle_id: MiniAppFilesHandleId::from(format!(
-                    "miniapp-files-{}",
-                    miniapp_id.as_ref()
+            resolution.descriptor.files_dir = Some(PluginFilesDirDescriptor {
+                handle_id: PluginFilesHandleId::from(format!(
+                    "plugin-files-{}",
+                    plugin_product_id.as_ref()
                 )),
-                miniapp_id: miniapp_id.clone(),
+                plugin_product_id: plugin_product_id.clone(),
                 absolute_path: path.display().to_string(),
             });
         }
         if uses_private_database {
             let handle_id =
-                MiniAppDatabaseHandleId::from(format!("miniapp-db-{}", miniapp_id.as_ref()));
+                PluginDatabaseHandleId::from(format!("plugin-db-{}", plugin_product_id.as_ref()));
             let ledger = PluginRuntimeMigrationLedger::empty(
-                miniapp_id.clone(),
+                plugin_product_id.clone(),
                 handle_id.clone(),
                 1,
             )?;
             resolution.descriptor.private_database =
-                Some(MiniAppPrivateDatabaseDescriptor {
+                Some(PluginPrivateDatabaseDescriptor {
                     handle_id,
-                    miniapp_id: miniapp_id.clone(),
+                    plugin_product_id: plugin_product_id.clone(),
                     schema_epoch: ledger.schema_epoch,
                     migration_ledger_digest: ledger.ledger_digest.clone(),
                 });
@@ -863,11 +863,11 @@ impl PluginRuntimeServiceStoragePort for InMemoryPluginRuntimeManagedStorage {
     async fn apply_additive_migrations(
         &self,
         _owner_user_id: &str,
-        miniapp_id: &MiniAppId,
-        storage: &MiniAppServiceStorageDescriptor,
+        plugin_product_id: &PluginProductId,
+        storage: &PluginServiceStorageDescriptor,
         expected_ledger_digest: &DigestHex,
-        release: &MiniAppReleaseRef,
-        migrations: &[MiniAppMigration],
+        release: &PluginReleaseRef,
+        migrations: &[PluginMigration],
         applied_at_ms: i64,
     ) -> PluginRuntimePlatformResult<PluginRuntimeMigrationLedger> {
         let database = storage
@@ -876,7 +876,7 @@ impl PluginRuntimeServiceStoragePort for InMemoryPluginRuntimeManagedStorage {
             .ok_or(PluginRuntimePlatformError::UnknownStorageHandle)?;
         PluginRuntimePrivateDatabasePort::apply_additive_migrations(
             self,
-            miniapp_id,
+            plugin_product_id,
             &database.handle_id,
             expected_ledger_digest,
             release,
@@ -888,14 +888,14 @@ impl PluginRuntimeServiceStoragePort for InMemoryPluginRuntimeManagedStorage {
 
     async fn handle_service_request(
         &self,
-        miniapp_id: &MiniAppId,
-        storage: &MiniAppServiceStorageDescriptor,
+        plugin_product_id: &PluginProductId,
+        storage: &PluginServiceStorageDescriptor,
         request: PluginRuntimeServiceStorageRequest,
         cancellation: PluginRuntimeCallCancellation,
     ) -> PluginRuntimePlatformResult<StrictJsonValue> {
         let value = match request {
             PluginRuntimeServiceStorageRequest::Kv { request } => {
-                return PluginRuntimeHostKvPort::execute(self, miniapp_id, storage, &request).await;
+                return PluginRuntimeHostKvPort::execute(self, plugin_product_id, storage, &request).await;
             }
             PluginRuntimeServiceStorageRequest::DatabaseQuery { statement } => {
                 let database = storage
@@ -905,7 +905,7 @@ impl PluginRuntimeServiceStoragePort for InMemoryPluginRuntimeManagedStorage {
                 serde_json::to_value(
                     PluginRuntimePrivateDatabasePort::query(
                         self,
-                        miniapp_id,
+                        plugin_product_id,
                         &database.handle_id,
                         statement,
                         cancellation,
@@ -921,7 +921,7 @@ impl PluginRuntimeServiceStoragePort for InMemoryPluginRuntimeManagedStorage {
                 serde_json::to_value(
                     PluginRuntimePrivateDatabasePort::execute(
                         self,
-                        miniapp_id,
+                        plugin_product_id,
                         &database.handle_id,
                         statement,
                         cancellation,
@@ -937,7 +937,7 @@ impl PluginRuntimeServiceStoragePort for InMemoryPluginRuntimeManagedStorage {
                 serde_json::to_value(
                     PluginRuntimePrivateDatabasePort::batch(
                         self,
-                        miniapp_id,
+                        plugin_product_id,
                         &database.handle_id,
                         statements,
                         cancellation,
@@ -953,7 +953,7 @@ impl PluginRuntimeServiceStoragePort for InMemoryPluginRuntimeManagedStorage {
     async fn create_service_test_storage(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
         test_id: &str,
         uses_files: bool,
         uses_private_database: bool,
@@ -962,22 +962,22 @@ impl PluginRuntimeServiceStoragePort for InMemoryPluginRuntimeManagedStorage {
         let production = self
             .resolve_service_storage(
                 owner_user_id,
-                miniapp_id,
+                plugin_product_id,
                 uses_files,
                 uses_private_database,
             )
             .await?;
-        self.purge_service_test_storage(owner_user_id, miniapp_id, test_id)
+        self.purge_service_test_storage(owner_user_id, plugin_product_id, test_id)
             .await?;
 
         let test_key = InMemoryTestStorageKey {
             owner_user_id: owner_user_id.to_owned(),
-            miniapp_id: miniapp_id.as_ref().to_owned(),
+            plugin_product_id: plugin_product_id.as_ref().to_owned(),
             test_id: test_id.to_owned(),
         };
-        let kv_handle_id = MiniAppKvHandleId::from(format!(
-            "miniapp-test-kv-{}-{test_id}",
-            miniapp_id.as_ref()
+        let kv_handle_id = PluginKvHandleId::from(format!(
+            "plugin-test-kv-{}-{test_id}",
+            plugin_product_id.as_ref()
         ));
         let mut state = self.state.lock().await;
         let production_kv = state
@@ -999,9 +999,9 @@ impl PluginRuntimeServiceStoragePort for InMemoryPluginRuntimeManagedStorage {
                 })
                 .collect(),
         )?;
-        let kv = MiniAppKvHandleDescriptor {
+        let kv = PluginKvHandleDescriptor {
             handle_id: kv_handle_id.clone(),
-            miniapp_id: miniapp_id.clone(),
+            plugin_product_id: plugin_product_id.clone(),
             namespace_revision: 1,
         };
         state.kv.insert(
@@ -1014,18 +1014,18 @@ impl PluginRuntimeServiceStoragePort for InMemoryPluginRuntimeManagedStorage {
 
         let files_dir = if uses_files {
             let path =
-                in_memory_service_test_files_path(owner_user_id, miniapp_id, test_id);
+                in_memory_service_test_files_path(owner_user_id, plugin_product_id, test_id);
             std::fs::create_dir_all(&path).map_err(|error| {
                 PluginRuntimePlatformError::Runtime(format!(
                     "cannot create in-memory Service Test filesDir fixture: {error}"
                 ))
             })?;
-            let descriptor = MiniAppFilesDirDescriptor {
-                handle_id: MiniAppFilesHandleId::from(format!(
-                    "miniapp-test-files-{}-{test_id}",
-                    miniapp_id.as_ref()
+            let descriptor = PluginFilesDirDescriptor {
+                handle_id: PluginFilesHandleId::from(format!(
+                    "plugin-test-files-{}-{test_id}",
+                    plugin_product_id.as_ref()
                 )),
-                miniapp_id: miniapp_id.clone(),
+                plugin_product_id: plugin_product_id.clone(),
                 absolute_path: path.display().to_string(),
             };
             state
@@ -1051,14 +1051,14 @@ impl PluginRuntimeServiceStoragePort for InMemoryPluginRuntimeManagedStorage {
                         statements: &production_database.statements,
                     })
                     .map_err(|error| PluginRuntimePlatformError::Runtime(error.to_string()))?;
-                let handle_id = MiniAppDatabaseHandleId::from(format!(
-                    "miniapp-test-db-{}-{test_id}",
-                    miniapp_id.as_ref()
+                let handle_id = PluginDatabaseHandleId::from(format!(
+                    "plugin-test-db-{}-{test_id}",
+                    plugin_product_id.as_ref()
                 ));
                 let ledger = rebind_migration_ledger(&production_database.ledger, handle_id.clone())?;
-                let descriptor = MiniAppPrivateDatabaseDescriptor {
+                let descriptor = PluginPrivateDatabaseDescriptor {
                     handle_id: handle_id.clone(),
-                    miniapp_id: miniapp_id.clone(),
+                    plugin_product_id: plugin_product_id.clone(),
                     schema_epoch: ledger.schema_epoch,
                     migration_ledger_digest: ledger.ledger_digest.clone(),
                 };
@@ -1074,7 +1074,7 @@ impl PluginRuntimeServiceStoragePort for InMemoryPluginRuntimeManagedStorage {
             } else {
                 (None, None, None)
             };
-        let descriptor = MiniAppServiceStorageDescriptor {
+        let descriptor = PluginServiceStorageDescriptor {
             kv,
             files_dir,
             private_database,
@@ -1092,13 +1092,13 @@ impl PluginRuntimeServiceStoragePort for InMemoryPluginRuntimeManagedStorage {
     async fn purge_service_test_storage(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
         test_id: &str,
     ) -> PluginRuntimePlatformResult<()> {
         validate_service_test_id(test_id)?;
         let key = InMemoryTestStorageKey {
             owner_user_id: owner_user_id.to_owned(),
-            miniapp_id: miniapp_id.as_ref().to_owned(),
+            plugin_product_id: plugin_product_id.as_ref().to_owned(),
             test_id: test_id.to_owned(),
         };
         let descriptor = self.state.lock().await.test_storage.get(&key).cloned();
@@ -1107,7 +1107,7 @@ impl PluginRuntimeServiceStoragePort for InMemoryPluginRuntimeManagedStorage {
             .and_then(|storage| storage.files_dir.as_ref())
             .map(|files| std::path::PathBuf::from(&files.absolute_path))
             .unwrap_or_else(|| {
-                in_memory_service_test_files_path(owner_user_id, miniapp_id, test_id)
+                in_memory_service_test_files_path(owner_user_id, plugin_product_id, test_id)
             });
         remove_in_memory_managed_directory(&file_path)?;
         let mut state = self.state.lock().await;
@@ -1127,27 +1127,27 @@ impl PluginRuntimeServiceStoragePort for InMemoryPluginRuntimeManagedStorage {
     async fn purge_service_storage(
         &self,
         _owner_user_id: &str,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
     ) -> PluginRuntimePlatformResult<()> {
         let mut state = self.state.lock().await;
         let file_paths = state
             .files
             .values()
-            .filter(|descriptor| &descriptor.miniapp_id == miniapp_id)
+            .filter(|descriptor| &descriptor.plugin_product_id == plugin_product_id)
             .map(|descriptor| descriptor.absolute_path.clone())
             .collect::<Vec<_>>();
         state
             .test_storage
-            .retain(|key, _| key.miniapp_id != miniapp_id.as_ref());
+            .retain(|key, _| key.plugin_product_id != plugin_product_id.as_ref());
         state
             .kv
-            .retain(|_, namespace| &namespace.descriptor.miniapp_id != miniapp_id);
+            .retain(|_, namespace| &namespace.descriptor.plugin_product_id != plugin_product_id);
         state
             .files
-            .retain(|_, descriptor| &descriptor.miniapp_id != miniapp_id);
+            .retain(|_, descriptor| &descriptor.plugin_product_id != plugin_product_id);
         state
             .databases
-            .retain(|_, database| &database.descriptor.miniapp_id != miniapp_id);
+            .retain(|_, database| &database.descriptor.plugin_product_id != plugin_product_id);
         drop(state);
         for path in file_paths {
             remove_in_memory_managed_directory(std::path::Path::new(&path))?;
@@ -1193,16 +1193,16 @@ pub(crate) fn validate_service_test_id(test_id: &str) -> PluginRuntimePlatformRe
 
 fn rebind_migration_ledger(
     source: &PluginRuntimeMigrationLedger,
-    handle_id: MiniAppDatabaseHandleId,
+    handle_id: PluginDatabaseHandleId,
 ) -> PluginRuntimePlatformResult<PluginRuntimeMigrationLedger> {
     let ledger_digest = ledger_digest(
-        &source.miniapp_id,
+        &source.plugin_product_id,
         &handle_id,
         source.schema_epoch,
         &source.entries,
     )?;
     let rebound = PluginRuntimeMigrationLedger {
-        miniapp_id: source.miniapp_id.clone(),
+        plugin_product_id: source.plugin_product_id.clone(),
         handle_id,
         schema_epoch: source.schema_epoch,
         entries: source.entries.clone(),
@@ -1214,12 +1214,12 @@ fn rebind_migration_ledger(
 
 pub(crate) fn rebind_migration_ledger_for_target(
     source: &PluginRuntimeMigrationLedger,
-    miniapp_id: MiniAppId,
-    handle_id: MiniAppDatabaseHandleId,
+    plugin_product_id: PluginProductId,
+    handle_id: PluginDatabaseHandleId,
 ) -> PluginRuntimePlatformResult<PluginRuntimeMigrationLedger> {
     rebind_migration_ledger_for_target_with_releases(
         source,
-        miniapp_id,
+        plugin_product_id,
         handle_id,
         &BTreeMap::new(),
     )
@@ -1227,9 +1227,9 @@ pub(crate) fn rebind_migration_ledger_for_target(
 
 pub(crate) fn rebind_migration_ledger_for_target_with_releases(
     source: &PluginRuntimeMigrationLedger,
-    miniapp_id: MiniAppId,
-    handle_id: MiniAppDatabaseHandleId,
-    release_refs: &BTreeMap<String, MiniAppReleaseRef>,
+    plugin_product_id: PluginProductId,
+    handle_id: PluginDatabaseHandleId,
+    release_refs: &BTreeMap<String, PluginReleaseRef>,
 ) -> PluginRuntimePlatformResult<PluginRuntimeMigrationLedger> {
     source.validate()?;
     let entries = source
@@ -1259,13 +1259,13 @@ pub(crate) fn rebind_migration_ledger_for_target_with_releases(
         })
         .collect::<PluginRuntimePlatformResult<Vec<_>>>()?;
     let ledger_digest = ledger_digest(
-        &miniapp_id,
+        &plugin_product_id,
         &handle_id,
         source.schema_epoch,
         &entries,
     )?;
     let rebound = PluginRuntimeMigrationLedger {
-        miniapp_id,
+        plugin_product_id,
         handle_id,
         schema_epoch: source.schema_epoch,
         entries,
@@ -1276,7 +1276,7 @@ pub(crate) fn rebind_migration_ledger_for_target_with_releases(
 }
 
 fn remove_in_memory_managed_directory(path: &std::path::Path) -> PluginRuntimePlatformResult<()> {
-    let root = std::env::temp_dir().join("nomifun-miniapp-memory");
+    let root = std::env::temp_dir().join("nomifun-plugin-memory");
     let relative = path.strip_prefix(&root).map_err(|_| {
         PluginRuntimePlatformError::InvalidState(
             "in-memory filesDir fixture escaped its managed root".into(),
@@ -1377,13 +1377,13 @@ fn in_memory_reparse_or_symlink(metadata: &std::fs::Metadata) -> bool {
 
 fn in_memory_service_test_files_path(
     owner_user_id: &str,
-    miniapp_id: &MiniAppId,
+    plugin_product_id: &PluginProductId,
     test_id: &str,
 ) -> std::path::PathBuf {
     std::env::temp_dir()
-        .join("nomifun-miniapp-memory")
+        .join("nomifun-plugin-memory")
         .join(owner_user_id)
-        .join(miniapp_id.as_ref())
+        .join(plugin_product_id.as_ref())
         .join("service-tests")
         .join(test_id)
         .join("files")
@@ -1391,25 +1391,25 @@ fn in_memory_service_test_files_path(
 
 fn owned_database<'a>(
     state: &'a ManagedStorageState,
-    miniapp_id: &MiniAppId,
-    handle_id: &MiniAppDatabaseHandleId,
+    plugin_product_id: &PluginProductId,
+    handle_id: &PluginDatabaseHandleId,
 ) -> PluginRuntimePlatformResult<&'a DatabaseState> {
     state
         .databases
         .get(handle_id)
-        .filter(|database| &database.descriptor.miniapp_id == miniapp_id)
+        .filter(|database| &database.descriptor.plugin_product_id == plugin_product_id)
         .ok_or(PluginRuntimePlatformError::UnknownStorageHandle)
 }
 
 fn owned_database_mut<'a>(
     state: &'a mut ManagedStorageState,
-    miniapp_id: &MiniAppId,
-    handle_id: &MiniAppDatabaseHandleId,
+    plugin_product_id: &PluginProductId,
+    handle_id: &PluginDatabaseHandleId,
 ) -> PluginRuntimePlatformResult<&'a mut DatabaseState> {
     state
         .databases
         .get_mut(handle_id)
-        .filter(|database| &database.descriptor.miniapp_id == miniapp_id)
+        .filter(|database| &database.descriptor.plugin_product_id == plugin_product_id)
         .ok_or(PluginRuntimePlatformError::UnknownStorageHandle)
 }
 
@@ -1437,13 +1437,13 @@ pub(crate) fn test_database_commit_boundary(
 }
 
 fn ledger_digest(
-    miniapp_id: &MiniAppId,
-    handle_id: &MiniAppDatabaseHandleId,
+    plugin_product_id: &PluginProductId,
+    handle_id: &PluginDatabaseHandleId,
     schema_epoch: u64,
     entries: &[PluginRuntimeMigrationLedgerEntry],
 ) -> PluginRuntimePlatformResult<DigestHex> {
     digest_payload(&PluginRuntimeMigrationLedgerDigestInput {
-        miniapp_id,
+        plugin_product_id,
         handle_id,
         schema_epoch,
         entries,
@@ -1487,14 +1487,14 @@ fn contains_forbidden_sql(sql: &str) -> bool {
     })
 }
 
-fn validate_additive_actions(migrations: &[MiniAppMigration]) -> PluginRuntimePlatformResult<()> {
+fn validate_additive_actions(migrations: &[PluginMigration]) -> PluginRuntimePlatformResult<()> {
     for migration in migrations {
         migration.validate()?;
         for action in &migration.actions {
             match action {
-                MiniAppAdditiveMigrationAction::CreateTable { .. }
-                | MiniAppAdditiveMigrationAction::CreateIndex { .. }
-                | MiniAppAdditiveMigrationAction::AddColumn { .. } => {}
+                PluginAdditiveMigrationAction::CreateTable { .. }
+                | PluginAdditiveMigrationAction::CreateIndex { .. }
+                | PluginAdditiveMigrationAction::AddColumn { .. } => {}
             }
         }
     }

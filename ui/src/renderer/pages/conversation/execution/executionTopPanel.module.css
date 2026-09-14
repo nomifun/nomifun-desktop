@@ -68,19 +68,6 @@
 
 /* On compact layouts the collaboration graph is a full content projection,
  * not a second fixed-width column that squeezes the conversation off-screen. */
-@media (max-width: 768px) {
-  .panel {
-    position: absolute;
-    inset: 0;
-    z-index: 40;
-    width: 100% !important;
-    border-left: 0;
-  }
-
-  .resizeHandle {
-    display: none;
-  }
-}
 
 .canvasProgress {
   container-type: inline-size;

@@ -373,9 +373,8 @@ external_uncertain_effect
 当前 Control Plane 和 Kernel 各自计算 Snapshot，Session Open 又重新编译并做不完整 convergence 比较。立即合并为一个纯函数 Compiler：
 
 ```text
-Preview ─┐
-Save ────┼─> one canonical Compiler
-Test ────┘          │
+Save ─────> one canonical Compiler
+                    │
                     └─> Snapshot + authority + diagnostics
 
 Session Open ─> 读取已保存 Snapshot + 当前执行兼容检查
@@ -527,22 +526,20 @@ Agent 工作台的编辑视图默认只展示：
 - 模型选择；
 - 按用户任务分组的能力开关：关闭、启动即用、可按需申请；
 - 能力所声明的 required resource kinds；
-- 保存；
-- 试用 Agent。
+- 保存。
 
 默认行为：
 
 - Initial/on-demand 由模板预置，用户可以在工作台显式调整；
 - 具体 resource binding 只在 Session、伙伴或 Automation 等消费目标中生成；
 - binding ID、resource ID、operations、owner 和 typed parameters 不进入 Preset 编辑器；
-- Save/Test 自动执行内部 Preview；不要求用户先点 Preview；
-- Test 只保留一个“试用 Agent”，打开普通真实 Session；
-- Revision、Snapshot、digest、protocol、raw Event/JSON 放入默认折叠的“技术详情/导出诊断”；
+- Save 在服务端完成配置校验和 Snapshot 生成；
+- Revision、Snapshot、digest、protocol、raw Event/JSON 不进入编辑器主流程；
 - Snapshot 不兼容时显示“在新会话中继续”，后台执行显式 fork；
 - 删除提示只说删除内容且无法恢复，不列 Projection、checkpoint 等内部表。
 
-测试只覆盖主要用户流程：从模板创建、修改能力三态并保存、在 Session 中
-选择资源并试用、在新会话继续。删除读取源码字符串、固定组件存在、ASCII
+测试只覆盖主要用户流程：从模板创建、修改能力三态并保存、从首页使用 Agent、
+在新会话继续。删除读取源码字符串、固定组件存在、ASCII
 分隔符和固定 Capability 数量的结构测试。
 
 ## 9. 发布与测试策略止损
@@ -1563,7 +1560,7 @@ AP-0～AP-7。
 
 ### 15.1 产品名称与领域边界
 
-产品层只保留一个一级入口：**Agent 工作台**。侧边栏导航和页面标题都使用该名称；动作按钮可以按语义使用“使用 Agent”。用户在这里完成 Agent 的能力设计、保存、试用和继续使用；不再保留“旧设定”“Agent 设定”“启动方案”或“运行时 Agent 设定”等并列概念。
+产品层只保留一个一级入口：**Agent 工作台**。侧边栏导航和页面标题都使用该名称；动作按钮可以按语义使用“使用 Agent”。用户在这里完成 Agent 的能力设计、保存和继续使用；不再保留“旧设定”“Agent 设定”“启动方案”或“运行时 Agent 设定”等并列概念。
 
 `AgentPreset` 只保留为后端的 canonical authoring aggregate。普通用户不需要理解 `Preset` 这个内部名称，也不直接编辑 Revision、Snapshot、Digest、Mount 或 Contribution ID。
 
@@ -1635,7 +1632,7 @@ Catalog 的“已物化”与“对某消费者可用”必须分开：同一贡
 - Plugin 必须经过 Package current/Enable/Contribution materialization；
 - MiniApp 只有 Active Release 的正式贡献可以进入 Catalog；
 - Ready Candidate、未发布 Release、未启动 Service、Project Source、Plugin 私有 `dataDir` 和测试 Host 都不能进入 Agent Snapshot 或正式 Catalog；
-- Candidate Test 与 Agent Test 是两条不同链：前者验证候选代码，后者创建普通 AgentSession。
+- Candidate Test 只验证候选代码，不创建产品 AgentSession。
 
 ### 15.3 最终 AgentPreset 合同
 
@@ -1660,7 +1657,7 @@ starter prompts
 - `selected MCP capabilities` 指向已物化、已绑定、带 schema/provenance 的 MCP 能力，不接受裸 MCP tool JSON；
 - `required resource kinds` 只表达能力运行所需的资源种类，不绑定具体 Workspace、Knowledge、MCP/Connector 实例，也不保存 Secret 明文、路径或 Plugin 私有数据；
 - 如果同一 canonical 能力存在多个合法实现，用户只能通过能力详情中的显式“实现来源”高级动作选择，后台由 application service 生成锁；不增加第二个“运行时 Agent 设定”对象；
-- 保存和试用都调用同一个 canonical Compiler，前端不自行拼 Snapshot。
+- 保存调用 canonical Compiler，前端不自行拼 Snapshot。
 
 `AgentPresetRevisionPayload` 不得包含 `resource_bindings` 或
 `resource_binding_refs`。具体资源只由消费目标在创建/更新 Session、伙伴或
@@ -1736,7 +1733,7 @@ AgentSession        = 消费一个 Snapshot 的运行事实
 
 #### 15.3.3 Revision 生命周期与 Compiler 不变量
 
-Agent 工作台中的编辑内容先存在于不可执行的 Draft；只有 Save 成功后才创建新的不可变 `AgentPresetRevision`，并原子推进 AgentPreset 的 `current_revision_id`。Preview 和 Test 可以读取 Draft 的编译结果，但不能把 Draft 当作正式 Session 的长期来源。
+Agent 工作台中的编辑内容先存在于不可执行的 Draft；只有 Save 成功后才创建新的不可变 `AgentPresetRevision`，并原子推进 AgentPreset 的 `current_revision_id`。Draft 不能成为正式 Session 的长期来源。
 
 canonical Compiler 的步骤固定为：
 
@@ -1833,7 +1830,7 @@ MCP/Connector 实例由当前会话或其他消费目标在自己的绑定交互
 - 所选能力汇总出的 required resource kinds；
 - 模型路由和 starter prompts；
 - 能力来源、版本状态、缺失原因和影响提示；
-- 保存、试用、复制/Fork、删除等用户动作。
+- 保存、复制/Fork、删除等用户动作。
 
 以下内容默认放入折叠的技术详情或导出诊断，不作为普通编辑项：
 
@@ -1850,7 +1847,7 @@ MCP/Connector 实例由当前会话或其他消费目标在自己的绑定交互
 Agent 使用路径固定为：
 
 ```text
-Agent 工作台 Save/Preview
+Agent 工作台 Save
         → canonical AgentPreset Compiler
         → immutable AgentPresetRevision
         → ResolvedSnapshot
@@ -1905,7 +1902,7 @@ API 保留 `agent-presets` 作为稳定机器资源名，不代表 UI 必须显�
 
 - 创建 Agent 和初始模板草稿；
 - 保存/复制/Fork AgentPresetRevision；
-- Preview、Save、Test；
+- 保存 AgentPresetRevision；
 - 使用 Agent、创建 AgentSession、应用 AgentBinding；
 - 查询能力来源、可用性和影响清单。
 
@@ -1957,7 +1954,7 @@ Fresh-v4 采用 clean cut：
 |---|---|---|
 | Contract/Schema | `crates/backend/nomifun-agent-contracts/src/preset.rs`、`crates/backend/nomifun-api-types/src/preset.rs`、`crates/backend/nomifun-agent-contracts/schema/0001_fresh_v4.sql` | 按 AP-2 收敛 payload、ContributionLock、模板 seed 和最小索引 |
 | Generated inventory | `crates/backend/nomifun-agent-contracts/contracts/generated/*`、`contracts/presets/*` | 重新生成 Agent API、template API、禁止旧路由和 schema inventory |
-| Compiler/Control Plane | `crates/backend/nomifun-agent-control-plane/src/compiler.rs`、`service.rs`、`routes.rs` | 统一 Preview/Save/Test/Session application service，不让前端拼 Snapshot |
+| Compiler/Control Plane | `crates/backend/nomifun-agent-control-plane/src/compiler.rs`、`service.rs`、`routes.rs` | Save 统一编译并生成 Snapshot，不让前端拼 Snapshot |
 | Platform/Session | `crates/backend/nomifun-agent-platform/src/platform.rs`、`crates/backend/nomifun-agent-session/src/*`、`crates/backend/nomifun-v4-root/src/database.rs` | 接入唯一 Revision/Snapshot/Binding/Session 主链，删除重复投影 |
 | 新 Agent UI | `ui/src/renderer/pages/agentSettings/*`、`ui/src/renderer/pages/agentSession/CanonicalAgentRoutes.tsx`、`ui/src/renderer/components/layout/Router.tsx` | 挪到公共 `/agent`，保留能力三态、资源种类说明和折叠技术详情；具体资源 picker 放在消费目标 |
 | 旧 Agent UI 入口 | `ui/src/renderer/pages/settings/PresetSettings/*`、`ui/src/renderer/pages/settings/AgentSettings/*`、`ui/src/renderer/components/settings/SettingsModal/contents/AgentModalContent.tsx` | 从 Settings/Modal 删除 Agent authoring surface；`/presets`、`/settings/agent-presets`、`/settings/agent` 只做限期迁移跳转 |
@@ -2001,13 +1998,13 @@ Fresh-v4 采用 clean cut：
 - 系统生成的 `ContributionLock`、Revision digest 和 Snapshot envelope；
 - Revision digest 覆盖 payload 与 ContributionLock，Snapshot digest 覆盖实际执行闭包、
   精确模型和 `required_resource_kinds`；
-- Preview、Save、Test、Session Open 共用一个纯函数 Compiler；
+- Save 使用唯一的纯函数 Compiler，Session Open 读取已保存 Snapshot；
 - target resource binding、MCP schema/provenance 和 Role Provider lock 接入各自的消费解析边界；
 - AgentPreset Revision/Snapshot 不冻结具体 resource ID、binding ref 或路径；
 - 删除未被真实消费者读取的 `required/exposure/destination_constraints/context_budget_override/tool_budget_override/config` 等旧选择字段、重复的 preset capability/model/skill 子表和 raw JSON runtime knobs；保留的字段必须有明确执行语义；
 - 禁止字段清单和未知字段 fail-closed 校验。
 
-通过条件：同一输入在 Preview/Save/Test/Session Open 得到相同结果；用户不能通过 API 或 UI 直接伪造 Snapshot、Mount、Digest 或 fallback。
+通过条件：Save 生成的冻结 Snapshot 可被 Session Open 直接使用；用户不能通过 API 或 UI 直接伪造 Snapshot、Mount、Digest 或 fallback。
 
 #### AP-3：四种模式与 Agent 工作台
 
@@ -2015,12 +2012,11 @@ Fresh-v4 采用 clean cut：
 
 - 轻量、通用、全面、自定义四个创建模板；
 - 模式只是 seed，不产生四种持久化类型；
-- 侧边栏“Agent 工作台”一级入口 `/agent`、首页 Guid AgentPreset pill selector、`+` 返回工作台、工作台“使用 Agent”预选 Guid，以及能力三态、能力明细、来源状态、保存、试用和消费目标资源选择流程；
+- 侧边栏“Agent 工作台”一级入口 `/agent`、首页 Guid AgentPreset pill selector、`+` 返回工作台、工作台“使用 Agent”预选 Guid，以及能力三态、能力明细、来源状态、保存和消费目标资源选择流程；
 - 从 `settings/AgentSettings`、`SettingsModal` 和 `/settings/agent-presets` 中移除 Agent authoring surface；旧深层链接最多保留一次性迁移跳转，不形成长期第二入口；
 - 模式转换的显式 diff/确认和模板更新不漂移既有 Revision；
-- 技术 Inspector 与产品编辑表单分离。
 
-通过条件：新用户不需要进入深层设置即可完成“建 Agent → 配能力 → 试用”；全面模式不会自动加入全部 Plugin/MiniApp；轻量模式不会暗含工具或外部能力。
+通过条件：新用户不需要进入深层设置即可完成“建 Agent → 配能力 → 保存 → 使用”；全面模式不会自动加入全部 Plugin/MiniApp；轻量模式不会暗含工具或外部能力。
 
 #### AP-4：Agent 与非 Agent 消费者接入
 

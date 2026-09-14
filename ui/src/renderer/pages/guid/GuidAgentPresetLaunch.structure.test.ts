@@ -119,6 +119,12 @@ describe('Guid workbench Agent launch behavior', () => {
     const officialLaunch = readSource(
       new URL('./hooks/officialAgentLaunch.ts', import.meta.url)
     );
+    const contracts = readSource(
+      new URL('../../../common/types/agentPlatform/contracts.ts', import.meta.url)
+    );
+    const workbenchController = readSource(
+      new URL('../agentSettings/useAgentSettingsController.ts', import.meta.url)
+    );
 
     expect(send.includes("selection.kind === 'default'")).toBe(false);
     expect(send.includes('ipcBridge.conversation.create.invoke')).toBe(false);
@@ -140,6 +146,13 @@ describe('Guid workbench Agent launch behavior', () => {
     );
     expect(officialLaunch).toContain(
       'createFromTemplate = agentPlatform.createFromTemplate.invoke,'
+    );
+    expect(contracts).toContain('reuse_existing: boolean;');
+    expect(contracts).not.toContain('reuse_existing?: boolean;');
+    expect(compactWhitespace(workbenchController)).toContain(
+      compactWhitespace(`request: {
+        reuse_existing: false,
+        display_name: displayName,`)
     );
     // Exact payload equality forbids forwarding provider configuration or
     // credentials, including through a spread of the full selected model.

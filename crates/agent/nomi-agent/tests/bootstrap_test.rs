@@ -109,6 +109,34 @@ async fn preset_delegate_placement_and_ceiling_are_preserved() {
 }
 
 #[tokio::test]
+async fn tool_free_chat_does_not_inherit_memory_skills_or_workspace_instructions() {
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::write(workspace.path().join("AGENTS.md"), "UNRELATED_WORKSPACE_RULE").unwrap();
+    let skill_dir = workspace.path().join("skills/irrelevant");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::write(skill_dir.join("SKILL.md"), "---\nname: irrelevant\ndescription: UNRELATED_SKILL\n---\nSearch memory first.").unwrap();
+    let mut config = minimal_config();
+    config.tools.enforce_builtin_allowlist = true;
+    config.system_prompt = Some("Respond in the user's language.".into());
+    let systems = Arc::new(Mutex::new(Vec::new()));
+    let provider = Arc::new(CapturingProvider { systems: Arc::clone(&systems) });
+    let cwd = workspace.path().to_str().unwrap();
+    let mut result = AgentBootstrap::new(config, cwd, null_output())
+        .provider(provider).extra_skill_dirs(vec![workspace.path().join("skills")])
+        .build().await.unwrap();
+    assert!(result.engine.tool_names().is_empty());
+    result.engine.execute_turn("你好", cwd).await.unwrap();
+    result.engine.execute_turn("再见", cwd).await.unwrap();
+    for prompt in systems.lock().unwrap().iter() {
+        assert!(prompt.contains("Respond in the user's language."));
+        assert!(prompt.len() < 500, "plain chat prompt grew to {} bytes", prompt.len());
+        for forbidden in ["MEMORY.md", "Working directory", "UNRELATED_WORKSPACE_RULE", "UNRELATED_SKILL", "Skill tool", "shell commands"] {
+            assert!(!prompt.contains(forbidden), "unexpected context: {forbidden}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn bootstrap_builds_engine_with_model_in_prompt() {
     let config = minimal_config();
     let result = AgentBootstrap::new(config, "/tmp/test-workspace", null_output())

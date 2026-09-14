@@ -1,0 +1,5 @@
+-- Clean-start concept boundary follow-up.
+--
+-- Publishing state belongs to the final `plugin_products` root introduced by
+-- migration 072.  No legacy single-document table or compatibility column is
+-- created here.

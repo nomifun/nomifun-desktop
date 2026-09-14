@@ -5,7 +5,6 @@
  */
 
 import { ipcBridge } from '@/common';
-import PwaPullToRefresh from '@/renderer/components/layout/PwaPullToRefresh';
 import Titlebar from '@/renderer/components/layout/Titlebar';
 import InstantHoverTooltip from '@/renderer/components/base/InstantHoverTooltip';
 import { Layout as ArcoLayout } from '@arco-design/web-react';
@@ -27,25 +26,6 @@ import { cleanupSiderTooltips } from '@renderer/utils/ui/siderTooltip';
 import { useConversationShortcuts } from '@renderer/hooks/ui/useConversationShortcuts';
 import { isDesktopShell } from '@renderer/utils/platform';
 import '@renderer/styles/layout.css';
-
-const SidebarIcon: React.FC<{ size?: number; strokeWidth?: number }> = ({ size = 18, strokeWidth = 4 }) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox='0 0 48 48'
-    fill='none'
-    stroke='currentColor'
-    strokeWidth={strokeWidth}
-    strokeLinecap='round'
-    strokeLinejoin='round'
-    aria-hidden='true'
-    focusable='false'
-    style={{ display: 'inline-block', verticalAlign: 'middle' }}
-  >
-    <rect x='6' y='10' width='36' height='28' rx='5' />
-    <line x1='18' y1='10' x2='18' y2='38' />
-  </svg>
-);
 
 const useDebug = () => {
   const [count, setCount] = useState(0);
@@ -90,9 +70,6 @@ const DESKTOP_COLLAPSED_WIDTH = 0;
 const RAIL_COLLAPSE_THRESHOLD = 140;
 const SIDER_DRAG_HYSTERESIS = 6;
 const RAIL_WIDTH_STORAGE_KEY = 'nomifun:rail-width';
-const MOBILE_SIDER_WIDTH_RATIO = 0.67;
-const MOBILE_SIDER_MIN_WIDTH = 260;
-const MOBILE_SIDER_MAX_WIDTH = 420;
 
 const readStoredRailWidth = (): number => {
   if (typeof window === 'undefined') return DEFAULT_SIDER_WIDTH;
@@ -110,21 +87,6 @@ const readStoredRailWidth = (): number => {
   return DEFAULT_SIDER_WIDTH;
 };
 
-const detectMobileViewportOrTouch = (): boolean => {
-  if (typeof window === 'undefined') return false;
-  if (isDesktopShell()) {
-    return window.innerWidth < 768;
-  }
-  const width = window.innerWidth;
-  const byWidth = width < 768;
-  // 仅在小屏时才将 coarse/touch 视为移动端，避免触控笔记本被误判
-  // Treat touch/coarse pointer as mobile only on smaller viewports
-  const smallScreen = width < 1024;
-  const byMedia = window.matchMedia('(hover: none)').matches || window.matchMedia('(pointer: coarse)').matches;
-  const byTouchPoints = typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0;
-  return byWidth || (smallScreen && (byMedia || byTouchPoints));
-};
-
 const Layout: React.FC<{
   sider: React.ReactNode;
   onSessionClick?: () => void;
@@ -132,10 +94,6 @@ const Layout: React.FC<{
   const { t } = useTranslation();
   const [collapsed, setCollapsed] = useState(false);
   const [railWidth, setRailWidth] = useState<number>(() => readStoredRailWidth());
-  const [isMobile, setIsMobile] = useState(false);
-  const [viewportWidth, setViewportWidth] = useState<number>(() =>
-    typeof window === 'undefined' ? 390 : window.innerWidth
-  );
   const updateAvailability = useUpdateAvailability();
   const { onClick } = useDebug();
   const { contextHolder: directorySelectionContextHolder } = useDirectorySelection();
@@ -145,12 +103,6 @@ const Layout: React.FC<{
   const updateButtonLabel = updateAvailability.version
     ? `${t('update.availableTitle')}: ${updateAvailability.version}`
     : t('update.availableTitle');
-  // The titlebar workspace toggle drives the right rail on the conversation and
-  // terminal session pages (both render a workspace rail via the shared
-  // useWorkspaceCollapse + WORKSPACE_TOGGLE_EVENT protocol).
-  const workspaceAvailable =
-    location.pathname.startsWith('/conversation/') ||
-    location.pathname.startsWith('/terminal/');
   const collapsedRef = useRef(collapsed);
   const railWidthRef = useRef(railWidth);
   const dragStateRef = useRef<{ active: boolean; startX: number; startWidth: number }>({
@@ -162,34 +114,10 @@ const Layout: React.FC<{
   const dragPendingWidthRef = useRef<number | null>(null);
   const draggingSiderElRef = useRef<Element | null>(null);
 
-  // 检测移动端并响应窗口大小变化
-  useEffect(() => {
-    const checkMobile = () => {
-      const mobile = detectMobileViewportOrTouch();
-      setIsMobile(mobile);
-      setViewportWidth(window.innerWidth);
-    };
-
-    // 初始检测
-    checkMobile();
-
-    // 监听窗口大小变化
-    window.addEventListener('resize', checkMobile);
-    return () => window.removeEventListener('resize', checkMobile);
-  }, []);
-
-  // 进入移动端后立即折叠 / Collapse immediately when switching to mobile
-  useEffect(() => {
-    if (!isMobile || collapsedRef.current) {
-      return;
-    }
-    setCollapsed(true);
-  }, [isMobile]);
-
-  // 清理侧栏 Tooltip 残留节点，避免移动端路由切换后浮层卡在左上角
+  // Clear stale sidebar tooltips after navigation or collapse state changes.
   useEffect(() => {
     cleanupSiderTooltips();
-  }, [isMobile, collapsed, location.pathname, location.search, location.hash]);
+  }, [collapsed, location.pathname, location.search, location.hash]);
 
   // Bridge Main Process logs to F12 Console
   useEffect(() => {
@@ -233,12 +161,7 @@ const Layout: React.FC<{
     };
   }, []);
 
-  const siderWidth = isMobile
-    ? Math.max(
-        MOBILE_SIDER_MIN_WIDTH,
-        Math.min(MOBILE_SIDER_MAX_WIDTH, Math.round(viewportWidth * MOBILE_SIDER_WIDTH_RATIO))
-      )
-    : railWidth;
+  const siderWidth = railWidth;
   useEffect(() => {
     collapsedRef.current = collapsed;
   }, [collapsed]);
@@ -248,7 +171,6 @@ const Layout: React.FC<{
 
   const beginSiderResizeDrag = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
-      if (isMobile) return;
       event.preventDefault();
       dragStateRef.current = {
         active: true,
@@ -262,12 +184,11 @@ const Layout: React.FC<{
       draggingSiderElRef.current = siderEl;
       siderEl?.classList.add('layout-sider--dragging');
     },
-    [isMobile]
+    []
   );
 
   // Double-click the drag handle to restore the default rail width.
   const resetSiderWidth = useCallback(() => {
-    if (isMobile) return;
     setCollapsed(false);
     railWidthRef.current = DEFAULT_SIDER_WIDTH;
     setRailWidth(DEFAULT_SIDER_WIDTH);
@@ -276,7 +197,7 @@ const Layout: React.FC<{
     } catch (error) {
       console.error('Failed to persist rail width:', error);
     }
-  }, [isMobile]);
+  }, []);
 
   useEffect(() => {
     const applyPendingWidth = () => {
@@ -343,41 +264,28 @@ const Layout: React.FC<{
     };
   }, []);
 
-  const siderStyle = isMobile
-    ? {
-        position: 'fixed' as const,
-        left: 0,
-        zIndex: 100,
-        transform: collapsed ? 'translateX(-100%)' : 'translateX(0)',
-        transition: 'none',
-        pointerEvents: collapsed ? ('none' as const) : ('auto' as const),
-      }
-    : {
-        position: 'relative' as const,
-        overflow: 'visible' as const,
-      };
+  const siderStyle = {
+    position: 'relative' as const,
+    overflow: 'visible' as const,
+  };
 
   return (
-    <LayoutContext.Provider value={{ isMobile, siderCollapsed: collapsed, setSiderCollapsed: setCollapsed }}>
+    <LayoutContext.Provider value={{ siderCollapsed: collapsed, setSiderCollapsed: setCollapsed }}>
       <NavigationHistoryProvider>
         <WebuiServerProvider>
           <div
             className='app-shell flex flex-col size-full min-h-0'
             style={
               {
-                '--app-sider-width': `${isMobile || collapsed ? 0 : siderWidth}px`,
+                '--app-sider-width': `${collapsed ? 0 : siderWidth}px`,
               } as React.CSSProperties
             }
           >
-            <Titlebar workspaceAvailable={workspaceAvailable} />
-          {/* 移动端左侧边栏蒙板 / Mobile left sider backdrop */}
-          {isMobile && !collapsed && (
-            <div className='fixed inset-0 bg-black/30 z-90' onClick={() => setCollapsed(true)} aria-hidden='true' />
-          )}
+            <Titlebar />
 
           <ArcoLayout className={'size-full layout flex-1 min-h-0'}>
             <ArcoLayout.Sider
-              collapsedWidth={isMobile ? 0 : 0}
+              collapsedWidth={0}
               collapsed={collapsed}
               width={siderWidth}
               className={classNames('!bg-2 layout-sider', {
@@ -388,7 +296,6 @@ const Layout: React.FC<{
               <ArcoLayout.Header
                 className={classNames(
                   'flex items-center justify-start pt-8px pb-8px pl-18px pr-16px gap-12px layout-sider-header',
-                  isMobile && 'layout-sider-header--mobile',
                   {
                     'cursor-pointer group ': collapsed,
                   }
@@ -438,17 +345,6 @@ const Layout: React.FC<{
                     </button>
                   </InstantHoverTooltip>
                 )}
-                {isMobile && !collapsed && (
-                  <button
-                    type='button'
-                    className='app-titlebar__button app-titlebar__button--mobile'
-                    onClick={() => setCollapsed(true)}
-                    title='Collapse sidebar'
-                    aria-label='Collapse sidebar'
-                  >
-                    <SidebarIcon size={18} strokeWidth={2.5} />
-                  </button>
-                )}
                 {/* 侧栏折叠改由标题栏统一控制 / Sidebar folding handled by Titlebar toggle */}
               </ArcoLayout.Header>
               <ArcoLayout.Content className='pt-0 px-8px pb-0 layout-sider-content'>
@@ -456,41 +352,27 @@ const Layout: React.FC<{
                   ? React.cloneElement(sider, {
                       onSessionClick: () => {
                         cleanupSiderTooltips();
-                        if (isMobile) setCollapsed(true);
                       },
                       collapsed,
                     } as any)
                   : sider}
               </ArcoLayout.Content>
-              {!isMobile && (
-                <div
-                  className='absolute top-0 h-full w-8px z-20 cursor-col-resize group'
-                  style={{ right: '-4px' }}
-                  onMouseDown={beginSiderResizeDrag}
-                  onDoubleClick={resetSiderWidth}
-                  aria-hidden='true'
-                >
-                  <div className='absolute top-0 left-1/2 h-full w-1px -translate-x-1/2 bg-transparent group-hover:bg-[var(--color-border-2)] transition-colors duration-150' />
-                </div>
-              )}
+              <div
+                className='absolute top-0 h-full w-8px z-20 cursor-col-resize group'
+                style={{ right: '-4px' }}
+                onMouseDown={beginSiderResizeDrag}
+                onDoubleClick={resetSiderWidth}
+                aria-hidden='true'
+              >
+                <div className='absolute top-0 left-1/2 h-full w-1px -translate-x-1/2 bg-transparent group-hover:bg-[var(--color-border-2)] transition-colors duration-150' />
+              </div>
             </ArcoLayout.Sider>
 
             <ArcoLayout.Content
               className={'bg-1 layout-content flex flex-col min-h-0'}
-              onClick={() => {
-                if (isMobile && !collapsed) setCollapsed(true);
-              }}
-              style={
-                isMobile
-                  ? {
-                      width: '100%',
-                    }
-                  : undefined
-              }
             >
               <Outlet />
               {directorySelectionContextHolder}
-              <PwaPullToRefresh />
               <Suspense fallback={null}>
                 <UpdateModal />
               </Suspense>

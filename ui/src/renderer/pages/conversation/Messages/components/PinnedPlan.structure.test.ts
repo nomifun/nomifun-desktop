@@ -34,9 +34,8 @@ describe('PinnedPlan composer popover layout', () => {
     expect(source.includes("data-testid='pinned-plan-popover'")).toBe(true);
     expect(source.includes('absolute left-1/2 w-[min(320px,calc(100vw-32px))] -translate-x-1/2')).toBe(true);
     expect(source.includes('min-w-0 flex-1 line-clamp-2')).toBe(true);
-    expect(source.includes('onMouseEnter={handleDesktopOpen}')).toBe(true);
-    expect(source.includes('onMouseLeave={handleDesktopClose}')).toBe(true);
-    expect(source.includes('if (!isMobile) return;')).toBe(true);
+    expect(source.includes('onMouseEnter={handleOpen}')).toBe(true);
+    expect(source.includes('onMouseLeave={handleClose}')).toBe(true);
     expect(source.includes('w-full max-w-800px')).toBe(false);
   });
 

@@ -75,9 +75,13 @@ describe('standalone workbench product wiring', () => {
     expect(css.includes('background: var(--color-bg-1)')).toBe(true);
     expect(css.includes('color: var(--color-text-1)')).toBe(true);
     expect(css.includes('color-scheme: inherit')).toBe(true);
-    expect(imageCss.includes(":global([data-theme='dark']) .bottomComposer")).toBe(true);
+    const panel = readFileSync(new URL('../WorkbenchPanel.tsx', import.meta.url), 'utf8');
+    const surface = readFileSync(new URL('../../../../components/layout/ContentSider/ContentSider.module.css', import.meta.url), 'utf8');
+    expect(panel.includes('contentSiderStyles.surface')).toBe(true);
+    expect(surface.includes('background: var(--bg-2)')).toBe(true);
     expect(imageCss.includes('white 54%')).toBe(false);
-    expect(videoCss.includes(":global([data-theme='dark']) .bottomComposerSurface")).toBe(true);
+    expect(imageCss.includes('backdrop-filter: blur(24px)')).toBe(false);
+    expect(videoCss.includes('backdrop-filter: blur(24px)')).toBe(false);
     expect(videoCss.includes('background: #171717')).toBe(false);
   });
 

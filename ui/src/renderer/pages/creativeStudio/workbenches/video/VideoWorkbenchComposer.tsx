@@ -8,25 +8,23 @@ import {
   CloseSmall,
   FolderPlus,
   LayoutOne,
-  LayoutTwo,
   Left,
   MagicWand,
   Play,
-  Plus,
   Right,
   SettingTwo,
-  VideoTwo,
 } from '@icon-park/react';
 import { Button, Input } from '@arco-design/web-react';
 import React from 'react';
 import { useTranslation } from 'react-i18next';
-import CreativeMediaPreview from '../../assets/components/CreativeMediaPreview';
+import { WorkbenchAddReference, WorkbenchComposerHeader, WorkbenchReferenceCard, WorkbenchReferenceCount } from '../WorkbenchComposerControls';
 
 import { normalizeVideoTaskCount } from './presentation';
+import contentSiderStyles from '@/renderer/components/layout/ContentSider/ContentSider.module.css';
+import composerStyles from '../WorkbenchComposer.module.css';
 import styles from './VideoWorkbench.module.css';
 import type {
   VideoWorkbenchChoice,
-  VideoWorkbenchLayout,
   VideoWorkbenchProps,
   VideoWorkbenchReference,
 } from './types';
@@ -71,57 +69,40 @@ const ReferenceItem: React.FC<{
 }> = ({ item, index, total, onRemove, onMove }) => {
   const { t } = useTranslation();
   return (
-  <article className={styles.referenceItem} data-reference-kind={item.kind}>
-    <div className={styles.referencePreview}>
-      <CreativeMediaPreview
-        kind={item.kind}
-        src={item.originalUrl ?? (item.kind === 'image' ? item.previewUrl : undefined)}
-        posterSrc={item.previewUrl}
-        alt={item.name}
-        className={styles.referenceMedia}
-      />
-    </div>
-    <span className={styles.referenceName} title={item.name}>
-      {item.name}
-    </span>
-    {onMove ? (
-      <span className={styles.referenceOrder}>
-        <button
-          type='button'
-          aria-label={t('creativeStudio.video.references.movePrevious', {
-            defaultValue: '前移参考素材 {{name}}',
-            name: item.name,
-          })}
-          disabled={index === 0}
-          onClick={() => onMove(-1)}
-        >
-          <Left size={11} />
-        </button>
-        <button
-          type='button'
-          aria-label={t('creativeStudio.video.references.moveNext', {
-            defaultValue: '后移参考素材 {{name}}',
-            name: item.name,
-          })}
-          disabled={index === total - 1}
-          onClick={() => onMove(1)}
-        >
-          <Right size={11} />
-        </button>
-      </span>
-    ) : null}
-    <button
-      type='button'
-      className={styles.referenceRemove}
-      aria-label={t('creativeStudio.video.references.remove', {
-        defaultValue: '移除参考素材 {{name}}',
-        name: item.name,
-      })}
-      onClick={onRemove}
-    >
-      <CloseSmall size={13} />
-    </button>
-  </article>
+    <WorkbenchReferenceCard
+      kind={item.kind}
+      src={item.originalUrl ?? (item.kind === 'image' ? item.previewUrl : undefined)}
+      posterSrc={item.previewUrl}
+      name={item.name}
+      removeLabel={t('creativeStudio.video.references.remove', { defaultValue: '移除参考素材 {{name}}', name: item.name })}
+      onRemove={onRemove}
+      orderControls={onMove ? (
+        <span className={styles.referenceOrder}>
+          <button
+            type='button'
+            aria-label={t('creativeStudio.video.references.movePrevious', {
+              defaultValue: '前移参考素材 {{name}}',
+              name: item.name,
+            })}
+            disabled={index === 0}
+            onClick={() => onMove(-1)}
+          >
+            <Left size={11} />
+          </button>
+          <button
+            type='button'
+            aria-label={t('creativeStudio.video.references.moveNext', {
+              defaultValue: '后移参考素材 {{name}}',
+              name: item.name,
+            })}
+            disabled={index === total - 1}
+            onClick={() => onMove(1)}
+          >
+            <Right size={11} />
+          </button>
+        </span>
+      ) : null}
+    />
   );
 };
 
@@ -137,71 +118,34 @@ const ReferenceStrip: React.FC<
 > = ({ references, addReferenceLabel, onAddReferences, onRemoveReference, onMoveReference }) => {
   const { t } = useTranslation();
   return (
-  <div className={styles.referenceSection}>
-    <div className={styles.sectionHeading}>
-      <span>{t('creativeStudio.video.references.title', { defaultValue: '参考素材' })}</span>
-      <span>{references.length}</span>
-    </div>
-    <div className={styles.referenceStrip}>
-      {references.map((item, index) => (
-        <ReferenceItem
-          key={item.id}
-          item={item}
-          index={index}
-          total={references.length}
-          onRemove={() => onRemoveReference(item.id)}
-          onMove={
-            onMoveReference
-              ? (direction) => onMoveReference(item.id, direction)
-              : undefined
-          }
+    <div className={styles.referenceSection}>
+      <div className={`${styles.sectionHeading} ${composerStyles.sectionHeading}`}>
+        <span>{t('creativeStudio.video.references.title', { defaultValue: '参考素材' })}</span>
+        <WorkbenchReferenceCount count={references.length} />
+      </div>
+      <div className={composerStyles.referenceStrip}>
+        {references.map((item, index) => (
+          <ReferenceItem
+            key={item.id}
+            item={item}
+            index={index}
+            total={references.length}
+            onRemove={() => onRemoveReference(item.id)}
+            onMove={
+              onMoveReference
+                ? (direction) => onMoveReference(item.id, direction)
+                : undefined
+            }
+          />
+        ))}
+        <WorkbenchAddReference
+          onClick={onAddReferences}
+          label={references.length
+            ? t('creativeStudio.workbenchComposer.addMore', { defaultValue: '继续添加' })
+            : addReferenceLabel ?? t('creativeStudio.video.references.addDefault', { defaultValue: '添加图片、视频或音频' })}
         />
-      ))}
-      <button type='button' className={styles.addReference} onClick={onAddReferences}>
-        <Plus size={15} />
-        <span>
-          {references.length
-            ? t('creativeStudio.video.references.addMore', { defaultValue: '继续添加' })
-            : addReferenceLabel ??
-              t('creativeStudio.video.references.addDefault', {
-                defaultValue: '添加图片、视频或音频',
-              })}
-        </span>
-      </button>
+      </div>
     </div>
-  </div>
-  );
-};
-
-const LayoutSwitch: React.FC<{
-  layout: VideoWorkbenchLayout;
-  onChange: (layout: VideoWorkbenchLayout) => void;
-}> = ({ layout, onChange }) => {
-  const { t } = useTranslation();
-  return (
-  <div
-    className={styles.layoutSwitch}
-    aria-label={t('creativeStudio.video.layout.label', { defaultValue: '工作台布局' })}
-  >
-    <button
-      type='button'
-      data-active={layout === 'side' || undefined}
-      aria-pressed={layout === 'side'}
-      onClick={() => onChange('side')}
-    >
-      <LayoutOne size={14} />
-      <span>{t('creativeStudio.video.layout.side', { defaultValue: '侧边' })}</span>
-    </button>
-    <button
-      type='button'
-      data-active={layout === 'bottom' || undefined}
-      aria-pressed={layout === 'bottom'}
-      onClick={() => onChange('bottom')}
-    >
-      <LayoutTwo size={14} />
-      <span>{t('creativeStudio.video.layout.bottom', { defaultValue: '底部' })}</span>
-    </button>
-  </div>
   );
 };
 
@@ -262,7 +206,7 @@ const SettingsGrid: React.FC<SettingsGridProps> = ({
       className={`${styles.settingsGrid} ${compact ? styles.compactSettingsGrid : ''}`}
     >
       <div className={styles.modelControl}>
-        <span>{t('creativeStudio.video.settings.model', { defaultValue: '模型' })}</span>
+        {compact ? <span>{t('creativeStudio.video.settings.model', { defaultValue: '模型' })}</span> : null}
         <div>{modelSlot}</div>
       </div>
       <QuickSelect
@@ -357,7 +301,7 @@ const VideoWorkbenchComposer: React.FC<ComposerProps> = ({
 
   if (layout === 'bottom') {
     return (
-      <aside className={styles.bottomComposer} data-video-composer='bottom'>
+      <aside className={`${styles.bottomComposer} ${composerStyles.root}`} data-video-composer='bottom'>
         <div className={styles.bottomComposerSurface}>
           <div className={styles.bottomComposerBody}>
             <div className={styles.bottomPromptPane}>
@@ -446,32 +390,19 @@ const VideoWorkbenchComposer: React.FC<ComposerProps> = ({
   }
 
   return (
-    <aside className={styles.sideComposer} data-video-composer='side'>
-      <header className={styles.composerHeader}>
-        <div>
-          <VideoTwo size={20} />
-          <span>
-            <strong>
-              {t('creativeStudio.video.header.title', { defaultValue: '视频创作台' })}
-            </strong>
-            <small>
-              {t('creativeStudio.video.header.settings', { defaultValue: '生成设置' })}
-            </small>
-          </span>
-        </div>
-        <LayoutSwitch layout={layout} onChange={onLayoutChange} />
-      </header>
+    <aside className={`${styles.sideComposer} ${composerStyles.root}`} data-video-composer='side'>
+      <WorkbenchComposerHeader kind='video' layout={layout} onLayoutChange={onLayoutChange} />
 
-      <div className={styles.sideComposerBody}>
+      <div className={`${composerStyles.content} ${contentSiderStyles.scrollArea}`}>
         <section className={styles.promptSection}>
-          <div className={styles.sectionHeading}>
+          <div className={`${styles.sectionHeading} ${composerStyles.sectionHeading}`}>
             <span>{t('creativeStudio.video.prompt.labelShort', { defaultValue: '提示词' })}</span>
             <div>
-              <button type='button' onClick={() => onPromptChange('')}>
+              <button type='button' className={composerStyles.toolButton} disabled={!prompt} onClick={() => onPromptChange('')}>
                 {t('creativeStudio.video.actions.clear', { defaultValue: '清空' })}
               </button>
               {onOpenPromptLibrary ? (
-                <button type='button' onClick={onOpenPromptLibrary}>
+                <button type='button' className={composerStyles.toolButton} onClick={onOpenPromptLibrary}>
                   {t('creativeStudio.video.actions.promptLibrary', {
                     defaultValue: '提示词库',
                   })}
@@ -482,7 +413,7 @@ const VideoWorkbenchComposer: React.FC<ComposerProps> = ({
           <Input.TextArea
             value={prompt}
             onChange={onPromptChange}
-            rows={7}
+            rows={5}
             placeholder={t('creativeStudio.video.prompt.placeholder', {
               defaultValue: '描述镜头运动、主体动作、场景氛围和画面风格',
             })}
@@ -493,7 +424,7 @@ const VideoWorkbenchComposer: React.FC<ComposerProps> = ({
         <ReferenceStrip {...referenceProps} />
         <SettingsGrid {...settings} />
 
-        <button type='button' className={styles.parametersButton} onClick={onOpenParameters}>
+        <button type='button' className={`${styles.parametersButton} ${composerStyles.toolButton}`} onClick={onOpenParameters}>
           <SettingTwo size={15} />
           <span>
             {t('creativeStudio.video.actions.moreParameters', {
@@ -504,7 +435,7 @@ const VideoWorkbenchComposer: React.FC<ComposerProps> = ({
         </button>
       </div>
 
-      <footer className={styles.composerFooter}>
+      <footer className={`${styles.composerFooter} ${composerStyles.footer}`}>
         <div>
           {pendingCount ? (
             <span>

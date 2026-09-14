@@ -7,7 +7,6 @@
 import type { IDirOrFile } from '@/common/adapter/ipcBridge';
 import { sessionStorageKey } from '@/common/utils/browserStorageKey';
 import FlexFullContainer from '@/renderer/components/layout/FlexFullContainer';
-import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { usePreviewContext } from '@/renderer/pages/conversation/Preview';
 import {
   WORKSPACE_PANEL_TAB_EVENT,
@@ -61,8 +60,6 @@ const WorkspaceRailBody: React.FC<{ source: WorkspaceSource; messageApi?: Messag
   messageApi: externalMessageApi,
 }) => {
   const { t } = useTranslation();
-  const layout = useLayoutContext();
-  const isMobile = layout?.isMobile ?? false;
   const { openPreview } = usePreviewContext();
 
   const workspace = source.workspace;
@@ -417,7 +414,7 @@ const WorkspaceRailBody: React.FC<{ source: WorkspaceSource; messageApi?: Messag
               </div>
             ) : (
               <Tree
-                className={`${isMobile ? '!pl-12px !pr-8px chat-workspace-tree--mobile' : '!pl-32px !pr-16px'} workspace-tree`}
+                className='!pl-32px !pr-16px workspace-tree'
                 showLine
                 key={treeHook.treeKey}
                 selectedKeys={treeHook.selected}
@@ -465,42 +462,6 @@ const WorkspaceRailBody: React.FC<{ source: WorkspaceSource; messageApi?: Messag
                           </span>
                         )}
                       </span>
-                      {isMobile && (
-                        <button
-                          type='button'
-                          className='workspace-header__toggle workspace-node-more-btn h-24px w-24px rd-6px flex items-center justify-center text-t-secondary hover:text-t-primary active:text-t-primary flex-shrink-0'
-                          aria-label={t('common.more')}
-                          onMouseDown={(event) => {
-                            event.stopPropagation();
-                          }}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            const rect = (event.currentTarget as HTMLButtonElement).getBoundingClientRect();
-                            const menuWidth = 220;
-                            const menuHeight = 220;
-                            const maxX =
-                              typeof window !== 'undefined'
-                                ? Math.max(8, window.innerWidth - menuWidth - 8)
-                                : rect.left;
-                            const maxY =
-                              typeof window !== 'undefined'
-                                ? Math.max(8, window.innerHeight - menuHeight - 8)
-                                : rect.bottom;
-                            const menuX = Math.min(Math.max(8, rect.left - menuWidth + rect.width), maxX);
-                            const menuY = Math.min(Math.max(8, rect.bottom + 4), maxY);
-                            openNodeContextMenu(nodeData, menuX, menuY);
-                          }}
-                        >
-                          <div
-                            className='flex flex-col gap-1.5px items-center justify-center'
-                            style={{ width: '10px', height: '10px' }}
-                          >
-                            <div className='w-1.5px h-1.5px rounded-full bg-current'></div>
-                            <div className='w-1.5px h-1.5px rounded-full bg-current'></div>
-                            <div className='w-1.5px h-1.5px rounded-full bg-current'></div>
-                          </div>
-                        </button>
-                      )}
                     </div>
                   );
                 }}

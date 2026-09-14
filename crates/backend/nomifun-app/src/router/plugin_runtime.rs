@@ -18,12 +18,12 @@ use nomifun_api_types::{
     SetPluginRuntimeEnabledRequest, SetPluginRuntimePublishModeRequest, SetPluginRuntimeServiceRunningRequest,
     SharePluginRuntimeRequest, TestPluginRuntimeReleaseRequest, TrashPluginRuntimeRequest,
 };
-use nomifun_agent_contracts::{MiniAppBridgeRequest, StrictJsonValue};
+use nomifun_agent_contracts::{PluginBridgeRequest, StrictJsonValue};
 use nomifun_auth::CurrentUser;
 use nomifun_common::AppError;
 use nomifun_plugin_platform::runtime::{
-    content_type_for_surface_path, PluginRuntimeM1ApplicationError,
-    PluginRuntimeM1ApplicationService,
+    content_type_for_surface_path, PluginRuntimeApplicationError,
+    PluginRuntimeApplicationService,
 };
 use serde::Deserialize;
 
@@ -33,134 +33,134 @@ struct PluginRuntimeSurfaceBridgeHttpRequest {
     surface_capability: String,
     active_release_epoch: u64,
     expected_release_digest: String,
-    request: MiniAppBridgeRequest,
+    request: PluginBridgeRequest,
 }
 
 #[derive(Clone)]
 pub struct PluginRuntimeM1RouterState {
-    application: Arc<PluginRuntimeM1ApplicationService>,
-    pub(super) product: Option<Arc<super::plugin_product::PluginRuntimeProductService>>,
+    application: Arc<PluginRuntimeApplicationService>,
+    pub(super) product: Option<Arc<super::plugin_product::PluginProductService>>,
 }
 
 impl PluginRuntimeM1RouterState {
-    pub(crate) fn new(application: Arc<PluginRuntimeM1ApplicationService>) -> Self {
+    pub(crate) fn new(application: Arc<PluginRuntimeApplicationService>) -> Self {
         Self { application, product: None }
     }
 
-    pub(crate) fn with_product(mut self, product: super::plugin_product::PluginRuntimeProductService) -> Self {
+    pub(crate) fn with_product(mut self, product: super::plugin_product::PluginProductService) -> Self {
         self.product = Some(Arc::new(product)); self
     }
 }
 
-pub(crate) fn miniapp_m1_read_routes(
+pub(crate) fn plugin_m1_read_routes(
     state: PluginRuntimeM1RouterState,
 ) -> Router {
     Router::new()
-        .route("/api/plugins/runtimes", get(list_miniapps))
+        .route("/api/plugins/runtimes", get(list_plugins))
         .merge(super::plugin_product::read_routes())
         .route(
-            "/api/plugins/runtimes/{miniapp_id}/workshop",
+            "/api/plugins/runtimes/{plugin_id}/workshop",
             get(get_workshop),
         )
         .with_state(state)
 }
 
-pub(crate) fn miniapp_m1_write_routes(
+pub(crate) fn plugin_m1_write_routes(
     state: PluginRuntimeM1RouterState,
 ) -> Router {
     Router::new()
         .route("/api/plugins/runtimes/projects", post(create_project))
         .merge(super::plugin_product::write_routes())
         .route(
-            "/api/plugins/runtimes/{miniapp_id}/source/files/{*source_path}",
+            "/api/plugins/runtimes/{plugin_id}/source/files/{*source_path}",
             get(get_source_file),
         )
         .route(
-            "/api/plugins/runtimes/{miniapp_id}/source/edit",
+            "/api/plugins/runtimes/{plugin_id}/source/edit",
             post(replace_source_file),
         )
         .route("/api/plugins/runtimes/import/share", post(import_share))
         .route("/api/plugins/runtimes/import/artifact", post(import_artifact))
         .route("/api/plugins/runtimes/import/backup", post(import_backup))
         .route(
-            "/api/plugins/runtimes/{miniapp_id}/build",
-            post(build_miniapp),
+            "/api/plugins/runtimes/{plugin_id}/build",
+            post(build_plugin),
         )
         .route(
-            "/api/plugins/runtimes/{miniapp_id}/operations/{operation_id}/cancel",
-            post(cancel_miniapp_build),
+            "/api/plugins/runtimes/{plugin_id}/operations/{operation_id}/cancel",
+            post(cancel_plugin_build),
         )
         .route(
-            "/api/plugins/runtimes/{miniapp_id}/publish",
-            post(publish_miniapp),
+            "/api/plugins/runtimes/{plugin_id}/publish",
+            post(publish_plugin),
         )
         .route(
-            "/api/plugins/runtimes/{miniapp_id}/test",
-            post(test_miniapp_release),
+            "/api/plugins/runtimes/{plugin_id}/test",
+            post(test_plugin_release),
         )
-        .route("/api/plugins/runtimes/{miniapp_id}/share", post(export_share))
-        .route("/api/plugins/runtimes/{miniapp_id}/backup", post(export_backup))
+        .route("/api/plugins/runtimes/{plugin_id}/share", post(export_share))
+        .route("/api/plugins/runtimes/{plugin_id}/backup", post(export_backup))
         .route(
-            "/api/plugins/runtimes/{miniapp_id}/rollback",
-            post(rollback_miniapp),
-        )
-        .route(
-            "/api/plugins/runtimes/{miniapp_id}/enabled",
-            post(set_miniapp_enabled),
+            "/api/plugins/runtimes/{plugin_id}/rollback",
+            post(rollback_plugin),
         )
         .route(
-            "/api/plugins/runtimes/{miniapp_id}/publish-mode",
-            post(set_miniapp_publish_mode),
+            "/api/plugins/runtimes/{plugin_id}/enabled",
+            post(set_plugin_enabled),
         )
         .route(
-            "/api/plugins/runtimes/{miniapp_id}/service/running",
-            post(set_miniapp_service_running),
+            "/api/plugins/runtimes/{plugin_id}/publish-mode",
+            post(set_plugin_publish_mode),
         )
         .route(
-            "/api/plugins/runtimes/{miniapp_id}/service/retry",
-            post(retry_miniapp_service),
+            "/api/plugins/runtimes/{plugin_id}/service/running",
+            post(set_plugin_service_running),
         )
         .route(
-            "/api/plugins/runtimes/{miniapp_id}/trash",
-            post(trash_miniapp),
+            "/api/plugins/runtimes/{plugin_id}/service/retry",
+            post(retry_plugin_service),
         )
         .route(
-            "/api/plugins/runtimes/{miniapp_id}/restore",
-            post(restore_miniapp),
+            "/api/plugins/runtimes/{plugin_id}/trash",
+            post(trash_plugin),
         )
         .route(
-            "/api/plugins/runtimes/{miniapp_id}/delete",
-            post(delete_miniapp),
+            "/api/plugins/runtimes/{plugin_id}/restore",
+            post(restore_plugin),
         )
         .route(
-            "/api/plugins/runtimes/{miniapp_id}/delete/retry",
-            post(retry_delete_miniapp),
+            "/api/plugins/runtimes/{plugin_id}/delete",
+            post(delete_plugin),
         )
         .route(
-            "/api/plugins/runtimes/{miniapp_id}/surface/open",
+            "/api/plugins/runtimes/{plugin_id}/delete/retry",
+            post(retry_delete_plugin),
+        )
+        .route(
+            "/api/plugins/runtimes/{plugin_id}/surface/open",
             post(open_surface),
         )
         .route(
-            "/api/plugins/runtimes/{miniapp_id}/surface/bridge",
+            "/api/plugins/runtimes/{plugin_id}/surface/bridge",
             post(call_surface_bridge),
         )
         .route(
-            "/api/plugins/runtimes/{miniapp_id}/surface/close",
+            "/api/plugins/runtimes/{plugin_id}/surface/close",
             post(close_surface),
         )
         .with_state(state)
 }
 
-pub(crate) fn miniapp_m1_surface_routes(state: PluginRuntimeM1RouterState) -> Router {
+pub(crate) fn plugin_m1_surface_routes(state: PluginRuntimeM1RouterState) -> Router {
     Router::new()
         .route(
-            "/api/plugins/runtimes/{miniapp_id}/surface/assets/{capability_id}/{active_release_epoch}/{release_digest}/{*asset_path}",
+            "/api/plugins/runtimes/{plugin_id}/surface/assets/{capability_id}/{active_release_epoch}/{release_digest}/{*asset_path}",
             get(get_surface_asset),
         )
         .with_state(state)
 }
 
-async fn list_miniapps(
+async fn list_plugins(
     State(state): State<PluginRuntimeM1RouterState>,
     Extension(user): Extension<CurrentUser>,
 ) -> Result<Json<ApiResponse<PluginRuntimeLibraryResponseDto>>, AppError> {
@@ -188,11 +188,11 @@ async fn create_project(
 async fn get_source_file(
     State(state): State<PluginRuntimeM1RouterState>,
     Extension(user): Extension<CurrentUser>,
-    Path((miniapp_id, source_path)): Path<(String, String)>,
+    Path((plugin_id, source_path)): Path<(String, String)>,
 ) -> Result<Json<ApiResponse<PluginRuntimeSourceFileDto>>, AppError> {
     let source = state
         .application
-        .source_file(user.id.as_str(), &miniapp_id, &source_path)
+        .source_file(user.id.as_str(), &plugin_id, &source_path)
         .await
         .map_err(application_error)?;
     Ok(Json(ApiResponse::ok(source)))
@@ -201,10 +201,10 @@ async fn get_source_file(
 async fn replace_source_file(
     State(state): State<PluginRuntimeM1RouterState>,
     Extension(user): Extension<CurrentUser>,
-    Path(miniapp_id): Path<String>,
+    Path(plugin_id): Path<String>,
     Json(request): Json<ReplacePluginRuntimeSourceFileRequest>,
 ) -> Result<Json<ApiResponse<PluginRuntimeWorkshopDto>>, AppError> {
-    require_route_id("plugin_id", &miniapp_id, &request.miniapp_id)?;
+    require_route_id("plugin_id", &plugin_id, &request.plugin_id)?;
     let workshop = state
         .application
         .replace_source_file(user.id.as_str(), request)
@@ -255,11 +255,11 @@ async fn import_backup(
 async fn get_workshop(
     State(state): State<PluginRuntimeM1RouterState>,
     Extension(user): Extension<CurrentUser>,
-    Path(miniapp_id): Path<String>,
+    Path(plugin_id): Path<String>,
 ) -> Result<Json<ApiResponse<PluginRuntimeWorkshopDto>>, AppError> {
     let workshop = state
         .application
-        .workshop(user.id.as_str(), &miniapp_id)
+        .workshop(user.id.as_str(), &plugin_id)
         .await
         .map_err(application_error)?;
     Ok(Json(ApiResponse::ok(workshop)))
@@ -268,25 +268,25 @@ async fn get_workshop(
 async fn open_surface(
     State(state): State<PluginRuntimeM1RouterState>,
     Extension(user): Extension<CurrentUser>,
-    Path(miniapp_id): Path<String>,
+    Path(plugin_id): Path<String>,
     Json(request): Json<OpenPluginRuntimeSurfaceRequest>,
 ) -> Result<Json<ApiResponse<PluginRuntimeSurfaceLaunchDescriptorDto>>, AppError> {
-    require_route_id("plugin_id", &miniapp_id, &request.miniapp_id)?;
+    require_route_id("plugin_id", &plugin_id, &request.plugin_id)?;
     let descriptor = state
         .application
-        .open_surface(user.id.as_str(), &miniapp_id)
+        .open_surface(user.id.as_str(), &plugin_id)
         .await
         .map_err(application_error)?;
     Ok(Json(ApiResponse::ok(descriptor)))
 }
 
-async fn build_miniapp(
+async fn build_plugin(
     State(state): State<PluginRuntimeM1RouterState>,
     Extension(user): Extension<CurrentUser>,
-    Path(miniapp_id): Path<String>,
+    Path(plugin_id): Path<String>,
     Json(request): Json<BuildPluginRuntimeRequest>,
 ) -> Result<Json<ApiResponse<PluginRuntimeWorkshopDto>>, AppError> {
-    require_route_id("plugin_id", &miniapp_id, &request.miniapp_id)?;
+    require_route_id("plugin_id", &plugin_id, &request.plugin_id)?;
     let workshop = state
         .application
         .build(user.id.as_str(), request)
@@ -295,17 +295,17 @@ async fn build_miniapp(
     Ok(Json(ApiResponse::ok(workshop)))
 }
 
-async fn cancel_miniapp_build(
+async fn cancel_plugin_build(
     State(state): State<PluginRuntimeM1RouterState>,
     Extension(user): Extension<CurrentUser>,
-    Path((miniapp_id, operation_id)): Path<(String, String)>,
+    Path((plugin_id, operation_id)): Path<(String, String)>,
     Json(request): Json<CancelPluginRuntimeBuildRequest>,
 ) -> Result<Json<ApiResponse<DurableOperationSummaryDto>>, AppError> {
     let operation = state
         .application
         .cancel_build(
             user.id.as_str(),
-            &miniapp_id,
+            &plugin_id,
             &operation_id,
             request.expected_operation_revision,
         )
@@ -314,13 +314,13 @@ async fn cancel_miniapp_build(
     Ok(Json(ApiResponse::ok(operation)))
 }
 
-async fn publish_miniapp(
+async fn publish_plugin(
     State(state): State<PluginRuntimeM1RouterState>,
     Extension(user): Extension<CurrentUser>,
-    Path(miniapp_id): Path<String>,
+    Path(plugin_id): Path<String>,
     Json(request): Json<PublishPluginRuntimeRequest>,
 ) -> Result<Json<ApiResponse<PluginRuntimeWorkshopDto>>, AppError> {
-    require_route_id("plugin_id", &miniapp_id, &request.miniapp_id)?;
+    require_route_id("plugin_id", &plugin_id, &request.plugin_id)?;
     let workshop = state
         .application
         .publish(user.id.as_str(), request)
@@ -329,13 +329,13 @@ async fn publish_miniapp(
     Ok(Json(ApiResponse::ok(workshop)))
 }
 
-async fn test_miniapp_release(
+async fn test_plugin_release(
     State(state): State<PluginRuntimeM1RouterState>,
     Extension(user): Extension<CurrentUser>,
-    Path(miniapp_id): Path<String>,
+    Path(plugin_id): Path<String>,
     Json(request): Json<TestPluginRuntimeReleaseRequest>,
 ) -> Result<Json<ApiResponse<PluginRuntimeWorkshopDto>>, AppError> {
-    require_route_id("plugin_id", &miniapp_id, &request.miniapp_id)?;
+    require_route_id("plugin_id", &plugin_id, &request.plugin_id)?;
     let workshop = state
         .application
         .test_ready_service(user.id.as_str(), request)
@@ -347,10 +347,10 @@ async fn test_miniapp_release(
 async fn export_share(
     State(state): State<PluginRuntimeM1RouterState>,
     Extension(user): Extension<CurrentUser>,
-    Path(miniapp_id): Path<String>,
+    Path(plugin_id): Path<String>,
     Json(request): Json<SharePluginRuntimeRequest>,
 ) -> Result<Json<ApiResponse<DurableOperationSummaryDto>>, AppError> {
-    require_route_id("plugin_id", &miniapp_id, &request.miniapp_id)?;
+    require_route_id("plugin_id", &plugin_id, &request.plugin_id)?;
     let operation = state
         .application
         .export_share(user.id.as_str(), request)
@@ -362,10 +362,10 @@ async fn export_share(
 async fn export_backup(
     State(state): State<PluginRuntimeM1RouterState>,
     Extension(user): Extension<CurrentUser>,
-    Path(miniapp_id): Path<String>,
+    Path(plugin_id): Path<String>,
     Json(request): Json<ExportPluginRuntimeBackupRequest>,
 ) -> Result<Json<ApiResponse<DurableOperationSummaryDto>>, AppError> {
-    require_route_id("plugin_id", &miniapp_id, &request.miniapp_id)?;
+    require_route_id("plugin_id", &plugin_id, &request.plugin_id)?;
     let operation = state
         .application
         .export_backup(user.id.as_str(), request)
@@ -374,13 +374,13 @@ async fn export_backup(
     Ok(Json(ApiResponse::ok(operation)))
 }
 
-async fn rollback_miniapp(
+async fn rollback_plugin(
     State(state): State<PluginRuntimeM1RouterState>,
     Extension(user): Extension<CurrentUser>,
-    Path(miniapp_id): Path<String>,
+    Path(plugin_id): Path<String>,
     Json(request): Json<RollbackPluginRuntimeRequest>,
 ) -> Result<Json<ApiResponse<PluginRuntimeWorkshopDto>>, AppError> {
-    require_route_id("plugin_id", &miniapp_id, &request.miniapp_id)?;
+    require_route_id("plugin_id", &plugin_id, &request.plugin_id)?;
     let workshop = state
         .application
         .rollback(user.id.as_str(), request)
@@ -389,13 +389,13 @@ async fn rollback_miniapp(
     Ok(Json(ApiResponse::ok(workshop)))
 }
 
-async fn set_miniapp_enabled(
+async fn set_plugin_enabled(
     State(state): State<PluginRuntimeM1RouterState>,
     Extension(user): Extension<CurrentUser>,
-    Path(miniapp_id): Path<String>,
+    Path(plugin_id): Path<String>,
     Json(request): Json<SetPluginRuntimeEnabledRequest>,
 ) -> Result<Json<ApiResponse<PluginRuntimeWorkshopDto>>, AppError> {
-    require_route_id("plugin_id", &miniapp_id, &request.miniapp_id)?;
+    require_route_id("plugin_id", &plugin_id, &request.plugin_id)?;
     let workshop = state
         .application
         .set_enabled(user.id.as_str(), request)
@@ -404,13 +404,13 @@ async fn set_miniapp_enabled(
     Ok(Json(ApiResponse::ok(workshop)))
 }
 
-async fn set_miniapp_publish_mode(
+async fn set_plugin_publish_mode(
     State(state): State<PluginRuntimeM1RouterState>,
     Extension(user): Extension<CurrentUser>,
-    Path(miniapp_id): Path<String>,
+    Path(plugin_id): Path<String>,
     Json(request): Json<SetPluginRuntimePublishModeRequest>,
 ) -> Result<Json<ApiResponse<PluginRuntimeWorkshopDto>>, AppError> {
-    require_route_id("plugin_id", &miniapp_id, &request.miniapp_id)?;
+    require_route_id("plugin_id", &plugin_id, &request.plugin_id)?;
     let workshop = state
         .application
         .set_publish_mode(user.id.as_str(), request)
@@ -419,13 +419,13 @@ async fn set_miniapp_publish_mode(
     Ok(Json(ApiResponse::ok(workshop)))
 }
 
-async fn set_miniapp_service_running(
+async fn set_plugin_service_running(
     State(state): State<PluginRuntimeM1RouterState>,
     Extension(user): Extension<CurrentUser>,
-    Path(miniapp_id): Path<String>,
+    Path(plugin_id): Path<String>,
     Json(request): Json<SetPluginRuntimeServiceRunningRequest>,
 ) -> Result<Json<ApiResponse<PluginRuntimeWorkshopDto>>, AppError> {
-    require_route_id("plugin_id", &miniapp_id, &request.miniapp_id)?;
+    require_route_id("plugin_id", &plugin_id, &request.plugin_id)?;
     let workshop = state
         .application
         .set_service_running(user.id.as_str(), request)
@@ -434,13 +434,13 @@ async fn set_miniapp_service_running(
     Ok(Json(ApiResponse::ok(workshop)))
 }
 
-async fn retry_miniapp_service(
+async fn retry_plugin_service(
     State(state): State<PluginRuntimeM1RouterState>,
     Extension(user): Extension<CurrentUser>,
-    Path(miniapp_id): Path<String>,
+    Path(plugin_id): Path<String>,
     Json(request): Json<RetryPluginRuntimeServiceRequest>,
 ) -> Result<Json<ApiResponse<PluginRuntimeWorkshopDto>>, AppError> {
-    require_route_id("plugin_id", &miniapp_id, &request.miniapp_id)?;
+    require_route_id("plugin_id", &plugin_id, &request.plugin_id)?;
     let workshop = state
         .application
         .retry_service(user.id.as_str(), request)
@@ -449,13 +449,13 @@ async fn retry_miniapp_service(
     Ok(Json(ApiResponse::ok(workshop)))
 }
 
-async fn trash_miniapp(
+async fn trash_plugin(
     State(state): State<PluginRuntimeM1RouterState>,
     Extension(user): Extension<CurrentUser>,
-    Path(miniapp_id): Path<String>,
+    Path(plugin_id): Path<String>,
     Json(request): Json<TrashPluginRuntimeRequest>,
 ) -> Result<Json<ApiResponse<PluginRuntimeWorkshopDto>>, AppError> {
-    require_route_id("plugin_id", &miniapp_id, &request.miniapp_id)?;
+    require_route_id("plugin_id", &plugin_id, &request.plugin_id)?;
     let workshop = state
         .application
         .trash(user.id.as_str(), request)
@@ -464,13 +464,13 @@ async fn trash_miniapp(
     Ok(Json(ApiResponse::ok(workshop)))
 }
 
-async fn restore_miniapp(
+async fn restore_plugin(
     State(state): State<PluginRuntimeM1RouterState>,
     Extension(user): Extension<CurrentUser>,
-    Path(miniapp_id): Path<String>,
+    Path(plugin_id): Path<String>,
     Json(request): Json<RestorePluginRuntimeRequest>,
 ) -> Result<Json<ApiResponse<PluginRuntimeWorkshopDto>>, AppError> {
-    require_route_id("plugin_id", &miniapp_id, &request.miniapp_id)?;
+    require_route_id("plugin_id", &plugin_id, &request.plugin_id)?;
     let workshop = state
         .application
         .restore(user.id.as_str(), request)
@@ -479,38 +479,38 @@ async fn restore_miniapp(
     Ok(Json(ApiResponse::ok(workshop)))
 }
 
-async fn delete_miniapp(
+async fn delete_plugin(
     State(state): State<PluginRuntimeM1RouterState>,
     Extension(user): Extension<CurrentUser>,
-    Path(miniapp_id): Path<String>,
+    Path(plugin_id): Path<String>,
     Json(request): Json<DeletePluginRuntimeRequest>,
 ) -> Result<Json<ApiResponse<PluginRuntimeLibraryResponseDto>>, AppError> {
-    require_route_id("plugin_id", &miniapp_id, &request.miniapp_id)?;
+    require_route_id("plugin_id", &plugin_id, &request.plugin_id)?;
     let library = state
         .application
         .delete(user.id.as_str(), request)
         .await
         .map_err(application_error)?;
     if let Some(product) = &state.product {
-        product.cancel_app_jobs(user.id.as_str(), &miniapp_id).await;
+        product.cancel_plugin_jobs(user.id.as_str(), &plugin_id).await;
     }
     Ok(Json(ApiResponse::ok(library)))
 }
 
-async fn retry_delete_miniapp(
+async fn retry_delete_plugin(
     State(state): State<PluginRuntimeM1RouterState>,
     Extension(user): Extension<CurrentUser>,
-    Path(miniapp_id): Path<String>,
+    Path(plugin_id): Path<String>,
     Json(request): Json<RetryPluginRuntimeDeleteRequest>,
 ) -> Result<Json<ApiResponse<PluginRuntimeLibraryResponseDto>>, AppError> {
-    require_route_id("plugin_id", &miniapp_id, &request.miniapp_id)?;
+    require_route_id("plugin_id", &plugin_id, &request.plugin_id)?;
     let library = state
         .application
         .retry_delete(user.id.as_str(), request)
         .await
         .map_err(application_error)?;
     if let Some(product) = &state.product {
-        product.cancel_app_jobs(user.id.as_str(), &miniapp_id).await;
+        product.cancel_plugin_jobs(user.id.as_str(), &plugin_id).await;
     }
     Ok(Json(ApiResponse::ok(library)))
 }
@@ -518,14 +518,14 @@ async fn retry_delete_miniapp(
 async fn call_surface_bridge(
     State(state): State<PluginRuntimeM1RouterState>,
     Extension(user): Extension<CurrentUser>,
-    Path(miniapp_id): Path<String>,
+    Path(plugin_id): Path<String>,
     Json(body): Json<PluginRuntimeSurfaceBridgeHttpRequest>,
 ) -> Result<Json<ApiResponse<StrictJsonValue>>, AppError> {
     let result = state
         .application
         .surface_bridge_request(
             user.id.as_str(),
-            &miniapp_id,
+            &plugin_id,
             &body.surface_capability,
             body.active_release_epoch,
             &body.expected_release_digest,
@@ -539,15 +539,15 @@ async fn call_surface_bridge(
 async fn close_surface(
     State(state): State<PluginRuntimeM1RouterState>,
     Extension(user): Extension<CurrentUser>,
-    Path(miniapp_id): Path<String>,
+    Path(plugin_id): Path<String>,
     Json(request): Json<ClosePluginRuntimeSurfaceRequest>,
 ) -> Result<Json<ApiResponse<bool>>, AppError> {
-    require_route_id("plugin_id", &miniapp_id, &request.miniapp_id)?;
+    require_route_id("plugin_id", &plugin_id, &request.plugin_id)?;
     let closed = state
         .application
         .close_surface(
             user.id.as_str(),
-            &miniapp_id,
+            &plugin_id,
             &request.surface_session_id,
             &request.surface_capability,
         )
@@ -559,7 +559,7 @@ async fn close_surface(
 async fn get_surface_asset(
     State(state): State<PluginRuntimeM1RouterState>,
     Path((
-        miniapp_id,
+        plugin_id,
         capability_id,
         active_release_epoch,
         release_digest,
@@ -569,7 +569,7 @@ async fn get_surface_asset(
     let asset = state
         .application
         .surface_asset(
-            &miniapp_id,
+            &plugin_id,
             &capability_id,
             active_release_epoch,
             &release_digest,
@@ -598,18 +598,18 @@ fn require_route_id(field: &'static str, route: &str, body: &str) -> Result<(), 
     }
 }
 
-pub(super) fn application_error(error: PluginRuntimeM1ApplicationError) -> AppError {
+pub(super) fn application_error(error: PluginRuntimeApplicationError) -> AppError {
     match error {
-        PluginRuntimeM1ApplicationError::Invalid(message) => {
+        PluginRuntimeApplicationError::Invalid(message) => {
             AppError::BadRequest(format!("Plugin input is invalid: {message}"))
         }
-        PluginRuntimeM1ApplicationError::NotFound => {
+        PluginRuntimeApplicationError::NotFound => {
             AppError::NotFound("Plugin".to_owned())
         }
-        PluginRuntimeM1ApplicationError::Runtime(message) => {
+        PluginRuntimeApplicationError::Runtime(message) => {
             AppError::Internal(format!("Plugin runtime failed: {message}"))
         }
-        PluginRuntimeM1ApplicationError::Database(error) => error.into(),
+        PluginRuntimeApplicationError::Database(error) => error.into(),
     }
 }
 

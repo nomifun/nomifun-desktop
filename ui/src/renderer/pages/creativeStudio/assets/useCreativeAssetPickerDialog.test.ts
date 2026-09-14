@@ -45,7 +45,6 @@ describe('Creative asset picker dialog', () => {
     expect(pickerSource.includes("role='alert'")).toBe(true);
     expect(pickerSource.includes('onRetry')).toBe(true);
     expect(pickerSource.includes('onConfirm ?? onCancel')).toBe(true);
-    expect(pickerCss.includes('@media (max-width: 620px)')).toBe(true);
     expect(pickerCss.includes('@media (prefers-reduced-motion: reduce)')).toBe(true);
   });
 });

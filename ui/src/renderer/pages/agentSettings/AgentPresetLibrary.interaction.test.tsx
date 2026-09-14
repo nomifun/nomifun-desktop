@@ -77,8 +77,8 @@ const library: AgentPresetLibraryResponse = {
     {
       template_key: 'chat.minimal',
       seed: {
-        initial_capabilities: [],
-        on_demand_capabilities: [],
+        enabled_capabilities: [],
+
         skill_bindings: [],
         required_resource_kinds: [],
         required_runtime_features: [],

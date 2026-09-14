@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
 use nomifun_agent_contracts::{
-    MiniAppAdditiveMigrationAction, MiniAppBridgeKvRequest, MiniAppKvResponse, MiniAppMigration,
-    MiniAppMigrationColumn, MiniAppMigrationId, MiniAppReleaseRef, StrictJsonValue,
+    PluginAdditiveMigrationAction, PluginBridgeKvRequest, PluginKvResponse, PluginMigration,
+    PluginMigrationColumn, PluginMigrationId, PluginReleaseRef, StrictJsonValue,
     digest_bytes,
 };
 use nomifun_db::{
-    CreateMiniAppM1Params, IMiniAppM1Repository, MiniAppM1Kind, SqliteMiniAppM1Repository,
+    CreatePluginRuntimeParams, IPluginRuntimeRepository, PluginRuntimeKind, SqlitePluginRuntimeRepository,
     init_database_memory, installation_owner_id,
 };
 use nomifun_plugin_platform::runtime::{
@@ -30,19 +30,19 @@ async fn service_fixture() -> (
 ) {
     let database = init_database_memory().await.unwrap();
     let owner = installation_owner_id(database.pool()).await.unwrap();
-    let miniapp_id = Uuid::now_v7().to_string();
+    let plugin_product_id = Uuid::now_v7().to_string();
     let project_id = Uuid::now_v7().to_string();
-    let repository = SqliteMiniAppM1Repository::new(database.pool().clone());
+    let repository = SqlitePluginRuntimeRepository::new(database.pool().clone());
     repository
-        .create(&CreateMiniAppM1Params {
+        .create(&CreatePluginRuntimeParams {
             owner_user_id: owner.clone(),
-            miniapp_id: miniapp_id.clone(),
+            plugin_product_id: plugin_product_id.clone(),
             project_id,
             expected_library_revision: 0,
             display_name: "Managed storage fixture".into(),
             description: None,
             icon_asset_id: None,
-            kind: MiniAppM1Kind::Service,
+            kind: PluginRuntimeKind::Plugin,
             materialized_catalog_digest: digest("catalog"),
             config_schema_json: r#"{"type":"object"}"#.into(),
             config_json: "{}".into(),
@@ -55,15 +55,15 @@ async fn service_fixture() -> (
         SqlitePluginRuntimeManagedStorage::new(root.path().to_path_buf(), database.pool().clone())
             .unwrap(),
     );
-    (database, owner, miniapp_id, storage, root)
+    (database, owner, plugin_product_id, storage, root)
 }
 
 #[tokio::test]
 async fn production_storage_is_owner_scoped_and_persists_private_db() {
-    let (_database, owner, miniapp_id, storage, root) = service_fixture().await;
-    let miniapp = nomifun_agent_contracts::MiniAppId::from(miniapp_id.clone());
+    let (_database, owner, plugin_product_id, storage, root) = service_fixture().await;
+    let plugin = nomifun_agent_contracts::PluginProductId::from(plugin_product_id.clone());
     let resolved = storage
-        .resolve_service_storage(&owner, &miniapp, true, true)
+        .resolve_service_storage(&owner, &plugin, true, true)
         .await
         .unwrap();
     let files = resolved.descriptor.files_dir.as_ref().unwrap();
@@ -73,16 +73,16 @@ async fn production_storage_is_owner_scoped_and_persists_private_db() {
         .path()
         .join("databases")
         .join(&owner)
-        .join(format!("{miniapp_id}.sqlite"))
+        .join(format!("{plugin_product_id}.sqlite"))
         .to_string_lossy()
         .contains("absolute_path"));
 
     let kv = storage
         .handle_service_request(
-            &miniapp,
+            &plugin,
             &resolved.descriptor,
             PluginRuntimeServiceStorageRequest::Kv {
-                request: MiniAppBridgeKvRequest::Set {
+                request: PluginBridgeKvRequest::Set {
                     key: "state".into(),
                     value: StrictJsonValue(json!({"value": 7})),
                 },
@@ -91,21 +91,21 @@ async fn production_storage_is_owner_scoped_and_persists_private_db() {
         )
         .await
         .unwrap();
-    let written: MiniAppKvResponse = serde_json::from_value(kv.0).unwrap();
-    assert!(matches!(written, MiniAppKvResponse::Written { revision: 1 }));
+    let written: PluginKvResponse = serde_json::from_value(kv.0).unwrap();
+    assert!(matches!(written, PluginKvResponse::Written { revision: 1 }));
 
-    let migration = MiniAppMigration::new(
-        MiniAppMigrationId::from("001_create_state"),
-        vec![MiniAppAdditiveMigrationAction::CreateTable {
+    let migration = PluginMigration::new(
+        PluginMigrationId::from("001_create_state"),
+        vec![PluginAdditiveMigrationAction::CreateTable {
             table_name: "state".into(),
             columns: vec![
-                MiniAppMigrationColumn {
+                PluginMigrationColumn {
                     name: "id".into(),
                     declared_type: "TEXT".into(),
                     nullable: false,
                     default_literal: None,
                 },
-                MiniAppMigrationColumn {
+                PluginMigrationColumn {
                     name: "value".into(),
                     declared_type: "INTEGER".into(),
                     nullable: false,
@@ -117,7 +117,7 @@ async fn production_storage_is_owner_scoped_and_persists_private_db() {
     )
     .unwrap();
     let database = resolved.descriptor.private_database.as_ref().unwrap();
-    let release = MiniAppReleaseRef {
+    let release = PluginReleaseRef {
         release_id: "release-1".into(),
         artifact_id: "artifact-1".into(),
         release_digest: digest_bytes(b"release"),
@@ -126,7 +126,7 @@ async fn production_storage_is_owner_scoped_and_persists_private_db() {
     let ledger = storage
         .apply_additive_migrations(
             &owner,
-            &miniapp,
+            &plugin,
             &resolved.descriptor,
             &database.migration_ledger_digest,
             &release,
@@ -138,13 +138,13 @@ async fn production_storage_is_owner_scoped_and_persists_private_db() {
     assert_eq!(ledger.entries.len(), 1);
     assert_eq!(ledger.schema_epoch, 2);
     let resolved_after_migration = storage
-        .resolve_service_storage(&owner, &miniapp, true, true)
+        .resolve_service_storage(&owner, &plugin, true, true)
         .await
         .unwrap();
 
     let inserted = storage
         .handle_service_request(
-            &miniapp,
+            &plugin,
             &resolved_after_migration.descriptor,
             PluginRuntimeServiceStorageRequest::DatabaseExecute {
                 statement: PluginRuntimeDatabaseStatement {
@@ -162,7 +162,7 @@ async fn production_storage_is_owner_scoped_and_persists_private_db() {
 
     let protected_batch = storage
         .handle_service_request(
-            &miniapp,
+            &plugin,
             &resolved_after_migration.descriptor,
             PluginRuntimeServiceStorageRequest::DatabaseBatch {
                 statements: vec![PluginRuntimeDatabaseStatement {
@@ -180,7 +180,7 @@ async fn production_storage_is_owner_scoped_and_persists_private_db() {
 
     let rolled_back_batch = storage
         .handle_service_request(
-            &miniapp,
+            &plugin,
             &resolved_after_migration.descriptor,
             PluginRuntimeServiceStorageRequest::DatabaseBatch {
                 statements: vec![
@@ -200,7 +200,7 @@ async fn production_storage_is_owner_scoped_and_persists_private_db() {
     assert!(rolled_back_batch.is_err());
     let absent = storage
         .handle_service_request(
-            &miniapp,
+            &plugin,
             &resolved_after_migration.descriptor,
             PluginRuntimeServiceStorageRequest::DatabaseQuery {
                 statement: PluginRuntimeDatabaseStatement {
@@ -217,7 +217,7 @@ async fn production_storage_is_owner_scoped_and_persists_private_db() {
 
     let queried = storage
         .handle_service_request(
-            &miniapp,
+            &plugin,
             &resolved_after_migration.descriptor,
             PluginRuntimeServiceStorageRequest::DatabaseQuery {
                 statement: PluginRuntimeDatabaseStatement {
@@ -234,7 +234,7 @@ async fn production_storage_is_owner_scoped_and_persists_private_db() {
 
     let forbidden = storage
         .handle_service_request(
-            &miniapp,
+            &plugin,
             &resolved_after_migration.descriptor,
             PluginRuntimeServiceStorageRequest::DatabaseQuery {
                 statement: PluginRuntimeDatabaseStatement {
@@ -253,7 +253,7 @@ async fn production_storage_is_owner_scoped_and_persists_private_db() {
     )
     .unwrap();
     let resolved_again = restarted
-        .resolve_service_storage(&owner, &miniapp, true, true)
+        .resolve_service_storage(&owner, &plugin, true, true)
         .await
         .unwrap();
     assert_eq!(
@@ -266,11 +266,11 @@ async fn production_storage_is_owner_scoped_and_persists_private_db() {
         ledger.ledger_digest
     );
 
-    let unsafe_migration = MiniAppMigration::new(
-        MiniAppMigrationId::from("002_unsafe_type"),
-        vec![MiniAppAdditiveMigrationAction::AddColumn {
+    let unsafe_migration = PluginMigration::new(
+        PluginMigrationId::from("002_unsafe_type"),
+        vec![PluginAdditiveMigrationAction::AddColumn {
             table_name: "state".into(),
-            column: MiniAppMigrationColumn {
+            column: PluginMigrationColumn {
                 name: "unsafe".into(),
                 declared_type: "TEXT CHECK(1)".into(),
                 nullable: true,
@@ -284,7 +284,7 @@ async fn production_storage_is_owner_scoped_and_persists_private_db() {
     let rejected = storage
         .apply_additive_migrations(
             &owner,
-            &miniapp,
+            &plugin,
             &descriptor_again,
             &db_again.migration_ledger_digest,
             &release,
@@ -294,12 +294,12 @@ async fn production_storage_is_owner_scoped_and_persists_private_db() {
         .await;
     assert!(rejected.is_err(), "unsafe type fragments must be rejected");
 
-    let files_path = root.path().join("files").join(&owner).join(&miniapp_id);
+    let files_path = root.path().join("files").join(&owner).join(&plugin_product_id);
     let database_path = root
         .path()
         .join("databases")
         .join(&owner)
-        .join(format!("{miniapp_id}.sqlite"));
+        .join(format!("{plugin_product_id}.sqlite"));
     drop(resolved);
     drop(resolved_after_migration);
     drop(resolved_again);
@@ -312,11 +312,11 @@ async fn production_storage_is_owner_scoped_and_persists_private_db() {
     )
     .unwrap();
     recovered
-        .purge_service_storage(&owner, &miniapp)
+        .purge_service_storage(&owner, &plugin)
         .await
         .unwrap();
     recovered
-        .purge_service_storage(&owner, &miniapp)
+        .purge_service_storage(&owner, &plugin)
         .await
         .unwrap();
     assert!(!files_path.exists());
@@ -328,21 +328,21 @@ async fn production_storage_is_owner_scoped_and_persists_private_db() {
 #[cfg(windows)]
 #[tokio::test]
 async fn production_storage_purge_rejects_junction_parent() {
-    let (database, owner, miniapp_id, storage, root) = service_fixture().await;
-    let miniapp = nomifun_agent_contracts::MiniAppId::from(miniapp_id.clone());
+    let (database, owner, plugin_product_id, storage, root) = service_fixture().await;
+    let plugin = nomifun_agent_contracts::PluginProductId::from(plugin_product_id.clone());
     drop(storage);
 
     let database_owner = root.path().join("databases").join(&owner);
     let outside_owner = root.path().join("outside-database-owner");
     std::fs::create_dir_all(&outside_owner).unwrap();
-    let marker = outside_owner.join(format!("{miniapp_id}.sqlite"));
+    let marker = outside_owner.join(format!("{plugin_product_id}.sqlite"));
     std::fs::write(&marker, b"keep").unwrap();
     junction::create(&outside_owner, &database_owner).unwrap();
 
     let recovered =
         SqlitePluginRuntimeManagedStorage::new(root.path(), database.pool().clone()).unwrap();
     assert!(recovered
-        .purge_service_storage(&owner, &miniapp)
+        .purge_service_storage(&owner, &plugin)
         .await
         .is_err());
     assert_eq!(std::fs::read(&marker).unwrap(), b"keep");

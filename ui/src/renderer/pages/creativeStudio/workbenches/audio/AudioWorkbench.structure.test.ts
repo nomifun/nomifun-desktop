@@ -49,10 +49,9 @@ describe('AudioWorkbench implementation boundary', () => {
     expect(source.includes("from '@arco-design/web-react'")).toBe(true);
   });
 
-  test('keeps the desktop split workspace and compact fallback responsive', () => {
+  test('keeps the desktop split workspace and supported desktop fallback', () => {
     expect(css.includes('grid-template-columns: minmax(340px, 390px) minmax(0, 1fr)')).toBe(true);
     expect(css.includes('@media (max-width: 960px)')).toBe(true);
-    expect(css.includes('@media (max-width: 720px)')).toBe(true);
     expect(css.includes('grid-template-columns: minmax(0, 1fr)')).toBe(true);
     expect(css.includes('linear-gradient')).toBe(false);
     expect(css.includes('radial-gradient')).toBe(false);

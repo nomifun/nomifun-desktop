@@ -177,7 +177,7 @@ const C8_RUNTIME_RELEASE_FIXTURE_PATH =
 const C8_BRANCH = 'rf/agent-capability-platform-v2';
 const C8_EXPECTED_DIGESTS = {
   confirmed_decision_contract:
-    'b3c32f0579a36c1f720a906b785b76cea58e8c8a1e4b07df6416f0d7410d78d5',
+    'c1eeb87b010954fa19324fb59d63c9d8722d6704fe1121ea63f41d4d06d14643',
   platform_validation_contract:
     'a3f5180906c239d791a03281199d80f2ea957dbe8382fb849dc2926935672a9c',
   runtime_feature_inventory:
@@ -8108,7 +8108,7 @@ function c7CanonicalPackageKey(value) {
     'domain.idmm': 'nomifun.idmm',
     'domain.knowledge': 'nomifun.knowledge',
     'domain.mcp-connectors': 'nomifun.mcp-connectors',
-    'domain.miniapp': 'nomifun.miniapp',
+    'domain.plugin-runtime': 'nomifun.plugin-runtime',
     'domain.notification': 'nomifun.notification',
     'domain.office': 'nomifun.office',
     'domain.project-memory': 'nomifun.project-memory',
@@ -8150,7 +8150,7 @@ function c7PackageOwnedByTask(packageId, taskId) {
     'nomifun.idmm': 'C7-W5-AUTOMATION',
     'nomifun.knowledge': 'C7-W1-READ',
     'nomifun.mcp-connectors': 'C7-W2-CODING',
-    'nomifun.miniapp': 'C7-W3-CREATIVE',
+    'nomifun.plugin-runtime': 'C7-W3-CREATIVE',
     'nomifun.notification': 'C7-W4-IDENTITY',
     'nomifun.office': 'C7-W3-CREATIVE',
     'nomifun.project-memory': 'C7-W1-READ',
@@ -8191,7 +8191,7 @@ function c7CapabilityFamilyOwnedByTask(family, taskId) {
     'creation.image-edit': 'C7-W3-CREATIVE',
     'creation.text': 'C7-W3-CREATIVE',
     'creation.video': 'C7-W3-CREATIVE',
-    miniapp: 'C7-W3-CREATIVE',
+    plugin: 'C7-W3-CREATIVE',
     office: 'C7-W3-CREATIVE',
     workshop: 'C7-W3-CREATIVE',
     'workshop.asset': 'C7-W3-CREATIVE',

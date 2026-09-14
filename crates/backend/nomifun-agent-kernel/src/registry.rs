@@ -161,7 +161,7 @@ impl KernelRegistry {
             .materialized
             .generation
             .checked_add(1)
-            .ok_or(KernelError::ActivationGenerationExhausted)?;
+            .ok_or(KernelError::RegistryGenerationExhausted)?;
         let materialized =
             Arc::new(Materializer::materialize_canonical(
                 &self.policy,
@@ -498,7 +498,7 @@ impl KernelRegistry {
                 .ok_or_else(|| KernelError::CapabilityNotInPreset {
                     capability_id: request.capability_id.clone(),
                 })?;
-            if binding.mount_id != frozen.resolved_mount_id {
+            if frozen.resolved_mount_id.as_ref() != Some(&binding.mount_id) {
                 return capability_provenance_drift(
                     &request.capability_id,
                     "handler binding does not match the frozen mount",
@@ -1301,7 +1301,7 @@ fn validate_exact_capability_target(
     {
         return capability_provenance_drift(capability_id, "contribution lock changed");
     }
-    if frozen.resolved_mount_id != current.mount_id {
+    if frozen.resolved_mount_id.as_ref() != Some(&current.mount_id) {
         return capability_provenance_drift(capability_id, "resolved mount changed");
     }
     if frozen.resolved_source != current.source {
@@ -1346,7 +1346,7 @@ fn resolve_direct_capability_context(
         .ok_or_else(|| KernelError::CapabilityNotInPreset {
             capability_id: request.capability_id.clone(),
         })?;
-    if &frozen.resolved_mount_id != mount_id {
+    if frozen.resolved_mount_id.as_ref() != Some(mount_id) {
         return capability_provenance_drift(
             &request.capability_id,
             "typed export binding does not match the frozen mount",

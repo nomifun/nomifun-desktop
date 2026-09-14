@@ -30,6 +30,15 @@ const SOURCE_EXTENSIONS = new Set([
 const RETIRED_TERM =
   /agent[-_ ]?cluster|\bfleet(?:s|[_-]?[a-z0-9]+)*\b|orch[_-]?(?:run|fleet|workspace)/i;
 
+// Published products share Plugin identity, capability provenance and data roots.
+const RETIRED_PLUGIN_TERM = /mini[-_ ]?apps?/i;
+const PLUGIN_REJECTION_FENCES = new Map([
+  ['crates/backend/nomifun-app/src/cli.rs', /assert!\(command\.find_subcommand\("miniapp"\)\.is_none\(\)\);/],
+  ['crates/backend/nomifun-app/tests/plugin_e2e.rs', /WHERE type = 'table' AND name IN \('miniapps', 'plugins'\)|assert!\(unified\["data"\]\["runtimes"\]\[0\]\.get\("miniapp_id"\)\.is_none\(\)\);/],
+  ['crates/backend/nomifun-db/tests/plugin_product_documents.rs', /SELECT count\(\*\) FROM sqlite_master WHERE name = 'miniapp_product_documents'/],
+  ['scripts/gate-agent-v2.mjs', /docs\/specs\/2026-08-28-agent-capability-platform-v2\/06-phase-n1-plugin-miniapp-simplified-implementation-plan\.zh\.md/],
+]);
+
 // These exact implementation and wire identities previously exposed two
 // delegation stacks to configuration/model callers. Internal deployment
 // classes such as `LocalDelegateTool` remain valid; only the retired public
@@ -107,6 +116,7 @@ function workspacePaths() {
       'crates',
       'apps',
       'ui/src',
+      'ui/test',
       'scripts',
       'docs/architecture',
       'docs/guides',
@@ -138,7 +148,22 @@ function isAllowedLegacyFence(path, line) {
 const violations = [];
 for (const path of workspacePaths()) {
   const absolute = resolve(ROOT, path);
-  if (!existsSync(absolute) || isExcluded(path)) continue;
+  if (!existsSync(absolute) || path === SELF) continue;
+
+  // Deletion manifests describe removed historical entrypoints, not live code.
+  if (!path.startsWith('crates/backend/nomifun-agent-contracts/contracts/deletion/')) {
+    if (RETIRED_PLUGIN_TERM.test(path)) {
+      violations.push(path + ': retired plugin product identity in active path');
+    }
+    if (SOURCE_EXTENSIONS.has(extname(path))) {
+      for (const [index, line] of readFileSync(absolute, 'utf8').split(/\r?\n/).entries()) {
+        if (RETIRED_PLUGIN_TERM.test(line) && !PLUGIN_REJECTION_FENCES.get(path)?.test(line)) {
+          violations.push(path + ':' + (index + 1) + ': ' + line.trim());
+        }
+      }
+    }
+  }
+  if (isExcluded(path)) continue;
 
   if (RETIRED_TERM.test(path) || RETIRED_EXACT_IDENTITY.test(path)) {
     violations.push(`${path}: retired collaboration identity in active path`);

@@ -28,8 +28,8 @@ const snapshot = (overrides: Record<string, unknown> = {}) => ({
   instructions: 'Write concise copy.',
   included_skills: [],
   excluded_auto_skills: [],
-  initial_capabilities: [],
-  on_demand_capabilities: [],
+  enabled_capabilities: [],
+
   required_resource_kinds: ['workspace'],
   knowledge_policy: {
     enabled: false,

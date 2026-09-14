@@ -33,8 +33,8 @@ export const createEmptyAgentPresetDocument = (): AgentPresetDocument => ({
   schema_version: '1.0.0',
   model_route_refs: {},
   chat_route_records: {},
-  initial_capabilities: [],
-  on_demand_capabilities: [],
+  enabled_capabilities: [],
+
   skill_bindings: [],
   system_role_provider_overrides: {},
   persona: '',
@@ -57,8 +57,8 @@ export const draftFromOfficialTemplate = (
   source_template_key: template.template_key,
   document: {
     ...createEmptyAgentPresetDocument(),
-    initial_capabilities: template.seed.initial_capabilities.map(selection),
-    on_demand_capabilities: template.seed.on_demand_capabilities.map(selection),
+    enabled_capabilities: template.seed.enabled_capabilities.map(selection),
+
     skill_bindings: template.seed.skill_bindings,
   },
 });
@@ -70,19 +70,16 @@ export const cloneDraft = (draft: AgentPresetDraft): AgentPresetDraft => {
   return cloned;
 };
 
-export type CapabilityPlacement = 'initial' | 'on_demand' | 'none';
+export type CapabilityPlacement = 'enabled' | 'none';
 
 export function capabilityPlacement(
   document: AgentPresetDocument,
-  capabilityId: CapabilityId
+  capability: CapabilityId | ExactCatalogRef<'capability'>
 ): CapabilityPlacement {
-  if (document.initial_capabilities.some((item) => item.capability.id === capabilityId)) {
-    return 'initial';
-  }
-  if (document.on_demand_capabilities.some((item) => item.capability.id === capabilityId)) {
-    return 'on_demand';
-  }
-  return 'none';
+  const id = typeof capability === 'string' ? capability : capability.id;
+  const version = typeof capability === 'string' ? undefined : capability.version;
+  return document.enabled_capabilities.some(item => item.capability.id === id &&
+    (version === undefined || item.capability.version === version)) ? 'enabled' : 'none';
 }
 
 export function placeCapability(
@@ -90,21 +87,11 @@ export function placeCapability(
   capability: ExactCatalogRef<'capability'>,
   placement: CapabilityPlacement
 ): AgentPresetDocument {
-  const without = (items: CapabilitySelection[]) =>
-    items.filter((item) => item.capability.id !== capability.id);
-  const initial = without(document.initial_capabilities);
-  const onDemand = without(document.on_demand_capabilities);
-  if (placement === 'initial') initial.push(selection(capability));
-  if (placement === 'on_demand') onDemand.push(selection(capability));
-  return {
-    ...document,
-    initial_capabilities: initial.sort((left, right) =>
-      left.capability.id.localeCompare(right.capability.id)
-    ),
-    on_demand_capabilities: onDemand.sort((left, right) =>
-      left.capability.id.localeCompare(right.capability.id)
-    ),
-  };
+  const existing = document.enabled_capabilities.find(item =>
+    item.capability.id === capability.id && item.capability.version === capability.version);
+  const enabled = document.enabled_capabilities.filter(item => item.capability.id !== capability.id);
+  if (placement === 'enabled') enabled.push(existing ?? selection(capability));
+  return { ...document, enabled_capabilities: enabled.sort((a, b) => a.capability.id.localeCompare(b.capability.id)) };
 }
 
 export function toggleSkill(
@@ -124,7 +111,7 @@ export function toggleSkill(
 
 export function selectedCapabilityIds(document: AgentPresetDocument): Set<CapabilityId> {
   return new Set(
-    [...document.initial_capabilities, ...document.on_demand_capabilities].map(
+    document.enabled_capabilities.map(
       (item) => item.capability.id
     )
   );

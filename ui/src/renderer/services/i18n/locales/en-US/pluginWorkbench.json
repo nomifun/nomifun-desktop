@@ -223,7 +223,7 @@
     "remote": "Remote",
     "automation": "Automation",
     "ui": "UI",
-    "miniappService": "Plugin Service"
+    "pluginService": "Plugin Service"
   },
   "applyMode": {
     "ask": "Ask before applying",

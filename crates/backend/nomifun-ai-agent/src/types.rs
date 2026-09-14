@@ -192,6 +192,8 @@ pub struct NomiResolvedConfig {
     /// 由 manager 灌进 `config.tools.builtin_allowlist`。
     pub allowed_tools: Vec<String>,
     pub enforce_tool_allowlist: bool,
+    pub companion_memory_enabled: bool,
+    pub companion_skills_enabled: bool,
     /// Allowed tools whose full schema is activated on demand through the
     /// Nomi session's ToolSearch boundary.
     pub deferred_tools: Vec<String>,

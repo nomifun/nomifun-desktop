@@ -5,8 +5,8 @@
 use std::collections::BTreeMap;
 
 use nomifun_agent_contracts::{
-    CanonicalSchemaRef, CredentialSlotDeclaration, MiniAppMigration,
-    MiniAppResourceContract, PackageContributions, StrictJsonValue,
+    CanonicalSchemaRef, CredentialSlotDeclaration, PluginMigration,
+    PluginResourceContract, PackageContributions, StrictJsonValue,
     ActionId, CapabilityActionDescriptor, CapabilityContributions, CapabilityConsumer,
     CapabilityKind, CapabilityManifest, EffectClass, LocalizedMetadata, PackageRef,
     PlatformConstraint, ToolPresentationKind, capability_surface_declarations, digest_payload,
@@ -19,12 +19,12 @@ pub const PLUGIN_RUNTIME_MANIFEST_PATH: &str = "nomifun.plugin.json";
 #[serde(default, deny_unknown_fields)]
 pub struct PluginRuntimeSourceManifest {
     pub actions: Vec<PluginActionSource>,
-    pub lifecycle: Option<nomifun_agent_contracts::MiniAppServiceLifecycle>,
+    pub lifecycle: Option<nomifun_agent_contracts::PluginServiceLifecycle>,
     pub contributions: PackageContributions,
     pub schemas: BTreeMap<CanonicalSchemaRef, StrictJsonValue>,
     pub credential_slots: Vec<CredentialSlotDeclaration>,
-    pub resource_contract: MiniAppResourceContract,
-    pub migrations: Vec<MiniAppMigration>,
+    pub resource_contract: PluginResourceContract,
+    pub migrations: Vec<PluginMigration>,
     pub uses_files: bool,
     pub uses_private_database: bool,
 }
@@ -88,7 +88,7 @@ impl PluginRuntimeSourceManifest {
                 version: package.version.clone(), kind: CapabilityKind::Tool, package: package.clone(),
                 display: LocalizedMetadata { name: action.name.clone(), description: action.description.clone(), localized_names: BTreeMap::new(), localized_descriptions: BTreeMap::new() },
                 requires: vec![], conflicts: vec![], requires_runtime_features: vec![],
-                supported_surfaces: capability_surface_declarations(["desktop"], [CapabilityConsumer::Agent, CapabilityConsumer::Ui, CapabilityConsumer::MiniAppService]),
+                supported_surfaces: capability_surface_declarations(["desktop"], [CapabilityConsumer::Agent, CapabilityConsumer::Ui, CapabilityConsumer::PluginService]),
                 supported_platforms: vec![PlatformConstraint::Any],
                 config_schema: StrictJsonValue(serde_json::json!({"type":"object"})),
                 contributions: CapabilityContributions {

@@ -11,12 +11,12 @@ use std::{
 
 use async_trait::async_trait;
 use nomifun_agent_contracts::{
-    DigestHex, MiniAppAdditiveMigrationAction, MiniAppBridgeKvRequest, MiniAppDatabaseHandleId,
-    MiniAppFilesDirDescriptor, MiniAppFilesHandleId, MiniAppId, MiniAppKvResponse,
-    MiniAppMigration, MiniAppMigrationId, MiniAppPrivateDatabaseDescriptor, MiniAppReleaseRef,
-    MiniAppServiceStorageDescriptor, StrictJsonValue, digest_bytes, digest_payload,
+    DigestHex, PluginAdditiveMigrationAction, PluginBridgeKvRequest, PluginDatabaseHandleId,
+    PluginFilesDirDescriptor, PluginFilesHandleId, PluginProductId, PluginKvResponse,
+    PluginMigration, PluginMigrationId, PluginPrivateDatabaseDescriptor, PluginReleaseRef,
+    PluginServiceStorageDescriptor, StrictJsonValue, digest_bytes, digest_payload,
 };
-use nomifun_db::{MiniAppKvRow, SqlitePool};
+use nomifun_db::{PluginRuntimeKvRow, SqlitePool};
 use rusqlite::{
     Connection,
     hooks::{AuthAction, AuthContext, Authorization},
@@ -54,7 +54,7 @@ const MAX_DATABASE_RESULT_BYTES: usize = 4 * 1024 * 1024;
 #[derive(Clone)]
 struct RegisteredStorage {
     owner_user_id: String,
-    descriptor: MiniAppServiceStorageDescriptor,
+    descriptor: PluginServiceStorageDescriptor,
     kv_namespace: String,
     database_path: Option<PathBuf>,
     database_lock: Arc<Mutex<()>>,
@@ -63,7 +63,7 @@ struct RegisteredStorage {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct StorageKey {
     owner_user_id: String,
-    miniapp_id: String,
+    plugin_product_id: String,
     test_id: Option<String>,
 }
 
@@ -73,10 +73,10 @@ struct SqliteAuthorizationState {
     allow_dml: AtomicBool,
 }
 
-/// Production owner-scoped MiniApp storage.
+/// Production owner-scoped Plugin storage.
 ///
 /// Host KV stays in the canonical M1 SQLite database. Service files live in a
-/// stable per-MiniApp directory. Private SQLite is a separate file whose path
+/// stable per-Plugin directory. Private SQLite is a separate file whose path
 /// is never included in the HTTP contract or exposed to the renderer.
 #[derive(Clone)]
 pub struct SqlitePluginRuntimeManagedStorage {
@@ -128,8 +128,8 @@ impl SqlitePluginRuntimeManagedStorage {
     async fn registration(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
-        descriptor: &MiniAppServiceStorageDescriptor,
+        plugin_product_id: &PluginProductId,
+        descriptor: &PluginServiceStorageDescriptor,
     ) -> PluginRuntimePlatformResult<RegisteredStorage> {
         let registration = self
             .registrations
@@ -138,7 +138,7 @@ impl SqlitePluginRuntimeManagedStorage {
             .values()
             .find(|registration| {
                 registration.owner_user_id == owner_user_id
-                    && registration.descriptor.kv.miniapp_id == *miniapp_id
+                    && registration.descriptor.kv.plugin_product_id == *plugin_product_id
                     && registration.descriptor == *descriptor
             })
             .cloned()
@@ -153,8 +153,8 @@ impl SqlitePluginRuntimeManagedStorage {
 
     async fn registration_for(
         &self,
-        miniapp_id: &MiniAppId,
-        descriptor: &MiniAppServiceStorageDescriptor,
+        plugin_product_id: &PluginProductId,
+        descriptor: &PluginServiceStorageDescriptor,
     ) -> PluginRuntimePlatformResult<RegisteredStorage> {
         let registration = self
             .registrations
@@ -162,7 +162,7 @@ impl SqlitePluginRuntimeManagedStorage {
             .await
             .iter()
             .filter(|(key, value)| {
-                key.miniapp_id == miniapp_id.as_ref() && value.descriptor == *descriptor
+                key.plugin_product_id == plugin_product_id.as_ref() && value.descriptor == *descriptor
             })
             .map(|(_, value)| value)
             .next()
@@ -176,15 +176,15 @@ impl SqlitePluginRuntimeManagedStorage {
 
     async fn registration_for_files_handle(
         &self,
-        miniapp_id: &MiniAppId,
-        handle_id: &MiniAppFilesHandleId,
+        plugin_product_id: &PluginProductId,
+        handle_id: &PluginFilesHandleId,
     ) -> PluginRuntimePlatformResult<RegisteredStorage> {
         self.registrations
             .read()
             .await
             .iter()
             .find(|(_, registration)| {
-                registration.descriptor.kv.miniapp_id == *miniapp_id
+                registration.descriptor.kv.plugin_product_id == *plugin_product_id
                     && registration
                         .descriptor
                         .files_dir
@@ -197,15 +197,15 @@ impl SqlitePluginRuntimeManagedStorage {
 
     async fn registration_for_database_handle(
         &self,
-        miniapp_id: &MiniAppId,
-        handle_id: &MiniAppDatabaseHandleId,
+        plugin_product_id: &PluginProductId,
+        handle_id: &PluginDatabaseHandleId,
     ) -> PluginRuntimePlatformResult<RegisteredStorage> {
         self.registrations
             .read()
             .await
             .iter()
             .find(|(_, registration)| {
-                registration.descriptor.kv.miniapp_id == *miniapp_id
+                registration.descriptor.kv.plugin_product_id == *plugin_product_id
                     && registration
                         .descriptor
                         .private_database
@@ -219,18 +219,18 @@ impl SqlitePluginRuntimeManagedStorage {
     async fn ensure_product_owner(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
     ) -> PluginRuntimePlatformResult<()> {
         let found: Option<String> = nomifun_db::sqlx::query_scalar(
-            "SELECT kind FROM miniapp_products
-             WHERE owner_user_id = ? AND miniapp_id = ?",
+            "SELECT kind FROM plugin_products
+             WHERE owner_user_id = ? AND plugin_product_id = ?",
         )
         .bind(owner_user_id)
-        .bind(miniapp_id.as_ref())
+        .bind(plugin_product_id.as_ref())
         .fetch_optional(&self.pool)
         .await
         .map_err(|error| PluginRuntimePlatformError::Database(error.to_string()))?;
-        if found.as_deref() != Some("service") {
+        if found.as_deref() != Some("plugin") {
             return Err(PluginRuntimePlatformError::UnknownStorageHandle);
         }
         Ok(())
@@ -239,28 +239,28 @@ impl SqlitePluginRuntimeManagedStorage {
     async fn execute_kv(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
-        storage: &MiniAppServiceStorageDescriptor,
+        plugin_product_id: &PluginProductId,
+        storage: &PluginServiceStorageDescriptor,
         namespace: &str,
-        request: MiniAppBridgeKvRequest,
+        request: PluginBridgeKvRequest,
         cancellation: PluginRuntimeCallCancellation,
     ) -> PluginRuntimePlatformResult<StrictJsonValue> {
         ensure_not_canceled(&cancellation)?;
-        self.ensure_product_owner(owner_user_id, miniapp_id).await?;
-        if storage.kv.miniapp_id != *miniapp_id {
+        self.ensure_product_owner(owner_user_id, plugin_product_id).await?;
+        if storage.kv.plugin_product_id != *plugin_product_id {
             return Err(PluginRuntimePlatformError::UnknownStorageHandle);
         }
         let (key, operation) = match request {
-            MiniAppBridgeKvRequest::Get { key } => {
+            PluginBridgeKvRequest::Get { key } => {
                 (key, KvOperation::Get)
             }
-            MiniAppBridgeKvRequest::Set { key, value } => {
+            PluginBridgeKvRequest::Set { key, value } => {
                 (key, KvOperation::Set { value: value.0 })
             }
-            MiniAppBridgeKvRequest::Delete { key } => {
+            PluginBridgeKvRequest::Delete { key } => {
                 (key, KvOperation::Delete)
             }
-            MiniAppBridgeKvRequest::CompareAndSwap {
+            PluginBridgeKvRequest::CompareAndSwap {
                 key,
                 expected_revision,
                 value,
@@ -290,7 +290,7 @@ impl SqlitePluginRuntimeManagedStorage {
         let current = fetch_kv(
             &mut transaction,
             owner_user_id,
-            miniapp_id,
+            plugin_product_id,
             namespace,
             &key,
         )
@@ -309,7 +309,7 @@ impl SqlitePluginRuntimeManagedStorage {
                         })
                     })
                     .transpose()?;
-                MiniAppKvResponse::Value {
+                PluginKvResponse::Value {
                     value: value.map(StrictJsonValue),
                     revision: current
                         .as_ref()
@@ -326,7 +326,7 @@ impl SqlitePluginRuntimeManagedStorage {
                 let revision = write_live_kv(
                     &mut transaction,
                     owner_user_id,
-                    miniapp_id,
+                    plugin_product_id,
                     namespace,
                     &key,
                     &value_json,
@@ -334,7 +334,7 @@ impl SqlitePluginRuntimeManagedStorage {
                     now_ms,
                 )
                 .await?;
-                MiniAppKvResponse::Written {
+                PluginKvResponse::Written {
                     revision: positive_revision(revision)?,
                 }
             }
@@ -344,7 +344,7 @@ impl SqlitePluginRuntimeManagedStorage {
                         tombstone_kv(
                             &mut transaction,
                             owner_user_id,
-                            miniapp_id,
+                            plugin_product_id,
                             namespace,
                             &key,
                             row,
@@ -355,7 +355,7 @@ impl SqlitePluginRuntimeManagedStorage {
                     }
                     _ => false,
                 };
-                MiniAppKvResponse::Deleted { existed }
+                PluginKvResponse::Deleted { existed }
             }
             KvOperation::CompareAndSwap {
                 expected_revision,
@@ -368,7 +368,7 @@ impl SqlitePluginRuntimeManagedStorage {
                 if observed.map(|value| i64::try_from(value).unwrap_or(i64::MAX))
                     != expected_revision
                 {
-                    MiniAppKvResponse::CompareAndSwap {
+                    PluginKvResponse::CompareAndSwap {
                         applied: false,
                         current_revision: observed,
                     }
@@ -384,7 +384,7 @@ impl SqlitePluginRuntimeManagedStorage {
                             write_live_kv(
                                 &mut transaction,
                                 owner_user_id,
-                                miniapp_id,
+                                plugin_product_id,
                                 namespace,
                                 &key,
                                 &value_json,
@@ -398,7 +398,7 @@ impl SqlitePluginRuntimeManagedStorage {
                                 tombstone_kv(
                                     &mut transaction,
                                     owner_user_id,
-                                    miniapp_id,
+                                    plugin_product_id,
                                     namespace,
                                     &key,
                                     row,
@@ -410,7 +410,7 @@ impl SqlitePluginRuntimeManagedStorage {
                             None => 0,
                         },
                     };
-                    MiniAppKvResponse::CompareAndSwap {
+                    PluginKvResponse::CompareAndSwap {
                         applied: true,
                         current_revision: (revision > 0)
                             .then(|| positive_revision(revision))
@@ -458,24 +458,24 @@ impl PluginRuntimeServiceStoragePort for SqlitePluginRuntimeManagedStorage {
     async fn resolve_service_storage(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
         uses_files: bool,
         uses_private_database: bool,
     ) -> PluginRuntimePlatformResult<PluginRuntimeServiceStorageResolution> {
-        self.ensure_product_owner(owner_user_id, miniapp_id).await?;
+        self.ensure_product_owner(owner_user_id, plugin_product_id).await?;
         validate_path_component(owner_user_id, "owner_user_id")?;
-        validate_path_component(miniapp_id.as_ref(), "miniapp_id")?;
+        validate_path_component(plugin_product_id.as_ref(), "plugin_product_id")?;
         let files_dir = if uses_files {
             let canonical = ensure_managed_directory(
                 self.root(),
-                &[FILES_DIRECTORY, owner_user_id, miniapp_id.as_ref()],
+                &[FILES_DIRECTORY, owner_user_id, plugin_product_id.as_ref()],
             )?;
-            Some(MiniAppFilesDirDescriptor {
-                handle_id: MiniAppFilesHandleId::from(format!(
-                    "miniapp-files-{}",
-                    miniapp_id.as_ref()
+            Some(PluginFilesDirDescriptor {
+                handle_id: PluginFilesHandleId::from(format!(
+                    "plugin-files-{}",
+                    plugin_product_id.as_ref()
                 )),
-                miniapp_id: miniapp_id.clone(),
+                plugin_product_id: plugin_product_id.clone(),
                 absolute_path: canonical.display().to_string(),
             })
         } else {
@@ -488,16 +488,16 @@ impl PluginRuntimeServiceStoragePort for SqlitePluginRuntimeManagedStorage {
                     self.root(),
                     &[DATABASES_DIRECTORY, owner_user_id],
                 )?;
-                let path = database_parent.join(format!("{}.sqlite", miniapp_id.as_ref()));
+                let path = database_parent.join(format!("{}.sqlite", plugin_product_id.as_ref()));
                 ensure_database_path(&path)?;
                 let ledger = tokio::task::spawn_blocking({
                     let path = path.clone();
-                    let miniapp_id = miniapp_id.clone();
+                    let plugin_product_id = plugin_product_id.clone();
                     move || {
                         let (connection, internal_mode) = open_private_database(&path)?;
                         with_authorizer_mode(&internal_mode, true, true, true, || {
-                            read_ledger(&connection, &miniapp_id, &MiniAppDatabaseHandleId::from(
-                                format!("miniapp-db-{}", miniapp_id.as_ref()),
+                            read_ledger(&connection, &plugin_product_id, &PluginDatabaseHandleId::from(
+                                format!("plugin-db-{}", plugin_product_id.as_ref()),
                             ))
                         })
                     }
@@ -511,12 +511,12 @@ impl PluginRuntimeServiceStoragePort for SqlitePluginRuntimeManagedStorage {
                 })?;
                 ensure_within(self.root(), &path)?;
                 (
-                    Some(MiniAppPrivateDatabaseDescriptor {
-                        handle_id: MiniAppDatabaseHandleId::from(format!(
-                            "miniapp-db-{}",
-                            miniapp_id.as_ref()
+                    Some(PluginPrivateDatabaseDescriptor {
+                        handle_id: PluginDatabaseHandleId::from(format!(
+                            "plugin-db-{}",
+                            plugin_product_id.as_ref()
                         )),
-                        miniapp_id: miniapp_id.clone(),
+                        plugin_product_id: plugin_product_id.clone(),
                         schema_epoch: ledger.schema_epoch,
                         migration_ledger_digest: ledger.ledger_digest.clone(),
                     }),
@@ -527,8 +527,8 @@ impl PluginRuntimeServiceStoragePort for SqlitePluginRuntimeManagedStorage {
                 (None, None, None)
             };
 
-        let descriptor = MiniAppServiceStorageDescriptor {
-            kv: crate::runtime::PluginRuntimeServiceStorageResolution::host_kv(miniapp_id.clone())
+        let descriptor = PluginServiceStorageDescriptor {
+            kv: crate::runtime::PluginRuntimeServiceStorageResolution::host_kv(plugin_product_id.clone())
                 .descriptor
                 .kv,
             files_dir,
@@ -537,7 +537,7 @@ impl PluginRuntimeServiceStoragePort for SqlitePluginRuntimeManagedStorage {
         let mut registrations = self.registrations.write().await;
         let storage_key = StorageKey {
             owner_user_id: owner_user_id.to_owned(),
-            miniapp_id: miniapp_id.as_ref().to_owned(),
+            plugin_product_id: plugin_product_id.as_ref().to_owned(),
             test_id: None,
         };
         if let Some(existing) = registrations.get(&storage_key)
@@ -566,15 +566,15 @@ impl PluginRuntimeServiceStoragePort for SqlitePluginRuntimeManagedStorage {
     async fn apply_additive_migrations(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
-        storage: &MiniAppServiceStorageDescriptor,
+        plugin_product_id: &PluginProductId,
+        storage: &PluginServiceStorageDescriptor,
         expected_ledger_digest: &DigestHex,
-        release: &MiniAppReleaseRef,
-        migrations: &[MiniAppMigration],
+        release: &PluginReleaseRef,
+        migrations: &[PluginMigration],
         applied_at_ms: i64,
     ) -> PluginRuntimePlatformResult<PluginRuntimeMigrationLedger> {
         let registration = self
-            .registration(owner_user_id, miniapp_id, storage)
+            .registration(owner_user_id, plugin_product_id, storage)
             .await?;
         let database_path = registration
             .database_path
@@ -591,14 +591,14 @@ impl PluginRuntimeServiceStoragePort for SqlitePluginRuntimeManagedStorage {
             .handle_id
             .clone();
         let _guard = registration.database_lock.lock().await;
-        let miniapp_id_owned = miniapp_id.clone();
+        let plugin_product_id_owned = plugin_product_id.clone();
         let expected_ledger_digest_owned = expected_ledger_digest.clone();
         let release_owned = release.clone();
         let migrations_owned = migrations.to_vec();
         let next = tokio::task::spawn_blocking(move || {
             let (mut connection, internal_mode) = open_private_database(&database_path)?;
             with_authorizer_mode(&internal_mode, true, true, true, || {
-                let current = read_ledger(&connection, &miniapp_id_owned, &handle_id)?;
+                let current = read_ledger(&connection, &plugin_product_id_owned, &handle_id)?;
                 if current.ledger_digest != expected_ledger_digest_owned {
                     return Err(PluginRuntimePlatformError::StorageConflict);
                 }
@@ -669,7 +669,7 @@ impl PluginRuntimeServiceStoragePort for SqlitePluginRuntimeManagedStorage {
                     )
                     .map_err(database_error)?;
                 transaction.commit().map_err(database_error)?;
-                read_ledger(&connection, &miniapp_id_owned, &handle_id)
+                read_ledger(&connection, &plugin_product_id_owned, &handle_id)
             })
         })
         .await
@@ -680,7 +680,7 @@ impl PluginRuntimeServiceStoragePort for SqlitePluginRuntimeManagedStorage {
             .values_mut()
             .find(|registration| {
                 registration.owner_user_id == owner_user_id
-                    && registration.descriptor.kv.miniapp_id == *miniapp_id
+                    && registration.descriptor.kv.plugin_product_id == *plugin_product_id
                     && registration.descriptor == *storage
             })
             .ok_or(PluginRuntimePlatformError::UnknownStorageHandle)?;
@@ -696,17 +696,17 @@ impl PluginRuntimeServiceStoragePort for SqlitePluginRuntimeManagedStorage {
 
     async fn handle_service_request(
         &self,
-        miniapp_id: &MiniAppId,
-        storage: &MiniAppServiceStorageDescriptor,
+        plugin_product_id: &PluginProductId,
+        storage: &PluginServiceStorageDescriptor,
         request: PluginRuntimeServiceStorageRequest,
         cancellation: PluginRuntimeCallCancellation,
     ) -> PluginRuntimePlatformResult<StrictJsonValue> {
-        let registration = self.registration_for(miniapp_id, storage).await?;
+        let registration = self.registration_for(plugin_product_id, storage).await?;
         match request {
             PluginRuntimeServiceStorageRequest::Kv { request } => {
                 self.execute_kv(
                     &registration.owner_user_id,
-                    miniapp_id,
+                    plugin_product_id,
                     storage,
                     &registration.kv_namespace,
                     request,
@@ -717,7 +717,7 @@ impl PluginRuntimeServiceStoragePort for SqlitePluginRuntimeManagedStorage {
             PluginRuntimeServiceStorageRequest::DatabaseQuery { statement } => {
                 let result = PluginRuntimePrivateDatabasePort::query(
                     self,
-                        miniapp_id,
+                        plugin_product_id,
                         &storage
                             .private_database
                             .as_ref()
@@ -734,7 +734,7 @@ impl PluginRuntimeServiceStoragePort for SqlitePluginRuntimeManagedStorage {
             PluginRuntimeServiceStorageRequest::DatabaseExecute { statement } => {
                 let result = PluginRuntimePrivateDatabasePort::execute(
                     self,
-                        miniapp_id,
+                        plugin_product_id,
                         &storage
                             .private_database
                             .as_ref()
@@ -751,7 +751,7 @@ impl PluginRuntimeServiceStoragePort for SqlitePluginRuntimeManagedStorage {
             PluginRuntimeServiceStorageRequest::DatabaseBatch { statements } => {
                 let result = PluginRuntimePrivateDatabasePort::batch(
                     self,
-                        miniapp_id,
+                        plugin_product_id,
                         &storage
                             .private_database
                             .as_ref()
@@ -771,28 +771,28 @@ impl PluginRuntimeServiceStoragePort for SqlitePluginRuntimeManagedStorage {
     async fn create_service_test_storage(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
         test_id: &str,
         uses_files: bool,
         uses_private_database: bool,
     ) -> PluginRuntimePlatformResult<PluginRuntimeServiceTestStorageResolution> {
-        self.ensure_product_owner(owner_user_id, miniapp_id).await?;
+        self.ensure_product_owner(owner_user_id, plugin_product_id).await?;
         validate_path_component(owner_user_id, "owner_user_id")?;
-        validate_path_component(miniapp_id.as_ref(), "miniapp_id")?;
+        validate_path_component(plugin_product_id.as_ref(), "plugin_product_id")?;
         validate_service_test_id(test_id)?;
-        self.purge_service_test_storage(owner_user_id, miniapp_id, test_id)
+        self.purge_service_test_storage(owner_user_id, plugin_product_id, test_id)
             .await?;
 
         let production = self
             .resolve_service_storage(
                 owner_user_id,
-                miniapp_id,
+                plugin_product_id,
                 uses_files,
                 uses_private_database,
             )
             .await?;
         let production_registration = self
-            .registration(owner_user_id, miniapp_id, &production.descriptor)
+            .registration(owner_user_id, plugin_product_id, &production.descriptor)
             .await?;
         let kv_namespace = service_test_kv_namespace(test_id)?;
         let test_root = ensure_managed_directory(
@@ -800,19 +800,19 @@ impl PluginRuntimeServiceStoragePort for SqlitePluginRuntimeManagedStorage {
             &[
                 SERVICE_TESTS_DIRECTORY,
                 owner_user_id,
-                miniapp_id.as_ref(),
+                plugin_product_id.as_ref(),
                 test_id,
             ],
         )?;
         let materialized: PluginRuntimePlatformResult<_> = async {
             let files_dir = if uses_files {
                 let canonical = ensure_managed_directory(&test_root, &["files"])?;
-                Some(MiniAppFilesDirDescriptor {
-                    handle_id: MiniAppFilesHandleId::from(format!(
-                        "miniapp-test-files-{}-{test_id}",
-                        miniapp_id.as_ref()
+                Some(PluginFilesDirDescriptor {
+                    handle_id: PluginFilesHandleId::from(format!(
+                        "plugin-test-files-{}-{test_id}",
+                        plugin_product_id.as_ref()
                     )),
-                    miniapp_id: miniapp_id.clone(),
+                    plugin_product_id: plugin_product_id.clone(),
                     absolute_path: canonical.display().to_string(),
                 })
             } else {
@@ -821,7 +821,7 @@ impl PluginRuntimeServiceStoragePort for SqlitePluginRuntimeManagedStorage {
             let copied_kv_digest = copy_service_test_kv(
                 &self.pool,
                 owner_user_id,
-                miniapp_id,
+                plugin_product_id,
                 &kv_namespace,
             )
             .await?;
@@ -837,11 +837,11 @@ impl PluginRuntimeServiceStoragePort for SqlitePluginRuntimeManagedStorage {
                     .ok_or(PluginRuntimePlatformError::UnknownStorageHandle)?;
                 let target_path = test_root.join("private.sqlite");
                 ensure_database_path(&target_path)?;
-                let handle_id = MiniAppDatabaseHandleId::from(format!(
-                    "miniapp-test-db-{}-{test_id}",
-                    miniapp_id.as_ref()
+                let handle_id = PluginDatabaseHandleId::from(format!(
+                    "plugin-test-db-{}-{test_id}",
+                    plugin_product_id.as_ref()
                 ));
-                let miniapp_id_owned = miniapp_id.clone();
+                let plugin_product_id_owned = plugin_product_id.clone();
                 let handle_id_owned = handle_id.clone();
                 let source_lock = Arc::clone(&production_registration.database_lock);
                 let (database_digest, ledger) = tokio::task::spawn_blocking(move || {
@@ -849,7 +849,7 @@ impl PluginRuntimeServiceStoragePort for SqlitePluginRuntimeManagedStorage {
                     create_private_database_snapshot(
                         &source_path,
                         &target_path,
-                        &miniapp_id_owned,
+                        &plugin_product_id_owned,
                         &handle_id_owned,
                     )
                 })
@@ -863,9 +863,9 @@ impl PluginRuntimeServiceStoragePort for SqlitePluginRuntimeManagedStorage {
                     })?;
                 ensure_within(self.root(), &canonical_path)?;
                 (
-                    Some(MiniAppPrivateDatabaseDescriptor {
+                    Some(PluginPrivateDatabaseDescriptor {
                         handle_id,
-                        miniapp_id: miniapp_id.clone(),
+                        plugin_product_id: plugin_product_id.clone(),
                         schema_epoch: ledger.schema_epoch,
                         migration_ledger_digest: ledger.ledger_digest.clone(),
                     }),
@@ -900,7 +900,7 @@ impl PluginRuntimeServiceStoragePort for SqlitePluginRuntimeManagedStorage {
                 let kv_cleanup = delete_service_test_kv(
                     &self.pool,
                     owner_user_id,
-                    miniapp_id,
+                    plugin_product_id,
                     &kv_namespace,
                 )
                 .await;
@@ -913,13 +913,13 @@ impl PluginRuntimeServiceStoragePort for SqlitePluginRuntimeManagedStorage {
             }
         };
 
-        let descriptor = MiniAppServiceStorageDescriptor {
-            kv: nomifun_agent_contracts::MiniAppKvHandleDescriptor {
-                handle_id: nomifun_agent_contracts::MiniAppKvHandleId::from(format!(
-                    "miniapp-test-kv-{}-{test_id}",
-                    miniapp_id.as_ref()
+        let descriptor = PluginServiceStorageDescriptor {
+            kv: nomifun_agent_contracts::PluginKvHandleDescriptor {
+                handle_id: nomifun_agent_contracts::PluginKvHandleId::from(format!(
+                    "plugin-test-kv-{}-{test_id}",
+                    plugin_product_id.as_ref()
                 )),
-                miniapp_id: miniapp_id.clone(),
+                plugin_product_id: plugin_product_id.clone(),
                 namespace_revision: 1,
             },
             files_dir,
@@ -935,7 +935,7 @@ impl PluginRuntimeServiceStoragePort for SqlitePluginRuntimeManagedStorage {
         self.registrations.write().await.insert(
             StorageKey {
                 owner_user_id: owner_user_id.to_owned(),
-                miniapp_id: miniapp_id.as_ref().to_owned(),
+                plugin_product_id: plugin_product_id.as_ref().to_owned(),
                 test_id: Some(test_id.to_owned()),
             },
             registration,
@@ -952,15 +952,15 @@ impl PluginRuntimeServiceStoragePort for SqlitePluginRuntimeManagedStorage {
     async fn purge_service_test_storage(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
         test_id: &str,
     ) -> PluginRuntimePlatformResult<()> {
         validate_path_component(owner_user_id, "owner_user_id")?;
-        validate_path_component(miniapp_id.as_ref(), "miniapp_id")?;
+        validate_path_component(plugin_product_id.as_ref(), "plugin_product_id")?;
         validate_service_test_id(test_id)?;
         let storage_key = StorageKey {
             owner_user_id: owner_user_id.to_owned(),
-            miniapp_id: miniapp_id.as_ref().to_owned(),
+            plugin_product_id: plugin_product_id.as_ref().to_owned(),
             test_id: Some(test_id.to_owned()),
         };
         let registration = self
@@ -977,13 +977,13 @@ impl PluginRuntimeServiceStoragePort for SqlitePluginRuntimeManagedStorage {
             .root
             .join(SERVICE_TESTS_DIRECTORY)
             .join(owner_user_id)
-            .join(miniapp_id.as_ref())
+            .join(plugin_product_id.as_ref())
             .join(test_id);
         remove_managed_directory(self.root(), &test_root)?;
         delete_service_test_kv(
             &self.pool,
             owner_user_id,
-            miniapp_id,
+            plugin_product_id,
             &service_test_kv_namespace(test_id)?,
         )
         .await?;
@@ -994,17 +994,17 @@ impl PluginRuntimeServiceStoragePort for SqlitePluginRuntimeManagedStorage {
     async fn purge_service_storage(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
     ) -> PluginRuntimePlatformResult<()> {
         validate_path_component(owner_user_id, "owner_user_id")?;
-        validate_path_component(miniapp_id.as_ref(), "miniapp_id")?;
+        validate_path_component(plugin_product_id.as_ref(), "plugin_product_id")?;
         let registrations = {
             let registrations = self.registrations.read().await;
             registrations
                 .iter()
                 .filter(|(key, _)| {
                     key.owner_user_id == owner_user_id
-                        && key.miniapp_id == miniapp_id.as_ref()
+                        && key.plugin_product_id == plugin_product_id.as_ref()
                 })
                 .map(|(_, registration)| registration.clone())
                 .collect::<Vec<_>>()
@@ -1017,23 +1017,23 @@ impl PluginRuntimeServiceStoragePort for SqlitePluginRuntimeManagedStorage {
             .root
             .join(DATABASES_DIRECTORY)
             .join(owner_user_id)
-            .join(format!("{}.sqlite", miniapp_id.as_ref()));
+            .join(format!("{}.sqlite", plugin_product_id.as_ref()));
         let files_path = self
             .root
             .join(FILES_DIRECTORY)
             .join(owner_user_id)
-            .join(miniapp_id.as_ref());
+            .join(plugin_product_id.as_ref());
         let tests_path = self
             .root
             .join(SERVICE_TESTS_DIRECTORY)
             .join(owner_user_id)
-            .join(miniapp_id.as_ref());
+            .join(plugin_product_id.as_ref());
         remove_private_database_files(self.root(), &database_path)?;
         remove_managed_directory(self.root(), &files_path)?;
         remove_managed_directory(self.root(), &tests_path)?;
-        delete_all_service_kv(&self.pool, owner_user_id, miniapp_id).await?;
+        delete_all_service_kv(&self.pool, owner_user_id, plugin_product_id).await?;
         self.registrations.write().await.retain(|key, _| {
-            key.owner_user_id != owner_user_id || key.miniapp_id != miniapp_id.as_ref()
+            key.owner_user_id != owner_user_id || key.plugin_product_id != plugin_product_id.as_ref()
         });
         Ok(())
     }
@@ -1041,21 +1041,21 @@ impl PluginRuntimeServiceStoragePort for SqlitePluginRuntimeManagedStorage {
     async fn export_backup_storage(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
         uses_files: bool,
         uses_private_database: bool,
     ) -> PluginRuntimePlatformResult<PluginRuntimeBackupStorage> {
-        self.ensure_product_owner(owner_user_id, miniapp_id).await?;
+        self.ensure_product_owner(owner_user_id, plugin_product_id).await?;
         let resolution = self
             .resolve_service_storage(
                 owner_user_id,
-                miniapp_id,
+                plugin_product_id,
                 uses_files,
                 uses_private_database,
             )
             .await?;
         let registration = self
-            .registration(owner_user_id, miniapp_id, &resolution.descriptor)
+            .registration(owner_user_id, plugin_product_id, &resolution.descriptor)
             .await?;
         let _guard = registration.database_lock.lock().await;
         let files = match resolution.descriptor.files_dir.as_ref() {
@@ -1076,19 +1076,19 @@ impl PluginRuntimeServiceStoragePort for SqlitePluginRuntimeManagedStorage {
                     &[
                         SERVICE_TESTS_DIRECTORY,
                         owner_user_id,
-                        miniapp_id.as_ref(),
+                        plugin_product_id.as_ref(),
                     ],
                 )?;
                 let temporary_path =
                     temporary_root.join(format!(".backup-{}.sqlite", Uuid::now_v7()));
-                let miniapp_id_owned = miniapp_id.clone();
+                let plugin_product_id_owned = plugin_product_id.clone();
                 let handle_id = database.handle_id.clone();
                 let temporary_path_for_task = temporary_path.clone();
                 let ledger = tokio::task::spawn_blocking(move || {
                     let (_, ledger) = create_private_database_snapshot(
                         &source_path,
                         &temporary_path_for_task,
-                        &miniapp_id_owned,
+                        &plugin_product_id_owned,
                         &handle_id,
                     )?;
                     Ok::<_, PluginRuntimePlatformError>(ledger)
@@ -1116,12 +1116,12 @@ impl PluginRuntimeServiceStoragePort for SqlitePluginRuntimeManagedStorage {
     async fn import_backup_storage(
         &self,
         owner_user_id: &str,
-        miniapp_id: &MiniAppId,
+        plugin_product_id: &PluginProductId,
         storage: PluginRuntimeBackupStorage,
         uses_files: bool,
         uses_private_database: bool,
     ) -> PluginRuntimePlatformResult<()> {
-        self.ensure_product_owner(owner_user_id, miniapp_id).await?;
+        self.ensure_product_owner(owner_user_id, plugin_product_id).await?;
         if !storage.kv.is_empty() {
             return Err(PluginRuntimePlatformError::InvalidState(
                 "Plugin backup KV must be restored by the DB repository".into(),
@@ -1129,7 +1129,7 @@ impl PluginRuntimeServiceStoragePort for SqlitePluginRuntimeManagedStorage {
         }
         if uses_files {
             let resolution = self
-                .resolve_service_storage(owner_user_id, miniapp_id, true, uses_private_database)
+                .resolve_service_storage(owner_user_id, plugin_product_id, true, uses_private_database)
                 .await?;
             let files_dir = resolution
                 .descriptor
@@ -1146,7 +1146,7 @@ impl PluginRuntimeServiceStoragePort for SqlitePluginRuntimeManagedStorage {
 
         if uses_private_database {
             let resolution = self
-                .resolve_service_storage(owner_user_id, miniapp_id, uses_files, true)
+                .resolve_service_storage(owner_user_id, plugin_product_id, uses_files, true)
                 .await?;
             let database = resolution
                 .descriptor
@@ -1168,7 +1168,7 @@ impl PluginRuntimeServiceStoragePort for SqlitePluginRuntimeManagedStorage {
             })?;
             ledger.validate()?;
             let registration = self
-                .registration(owner_user_id, miniapp_id, &resolution.descriptor)
+                .registration(owner_user_id, plugin_product_id, &resolution.descriptor)
                 .await?;
             let target_path = registration
                 .database_path
@@ -1182,13 +1182,13 @@ impl PluginRuntimeServiceStoragePort for SqlitePluginRuntimeManagedStorage {
             let temporary_path = parent.join(format!(".restore-{}.sqlite", Uuid::now_v7()));
             write_new_regular_file(&temporary_path, bytes)?;
             let lock = Arc::clone(&registration.database_lock);
-            let miniapp_id_owned = miniapp_id.clone();
+            let plugin_product_id_owned = plugin_product_id.clone();
             let handle_id = database.handle_id.clone();
             let target_path_owned = target_path.clone();
             let storage_root = self.root().to_path_buf();
             let expected_ledger = rebind_migration_ledger_for_target(
                 ledger,
-                miniapp_id.clone(),
+                plugin_product_id.clone(),
                 handle_id.clone(),
             )?;
             let result = tokio::task::spawn_blocking(move || {
@@ -1222,7 +1222,7 @@ impl PluginRuntimeServiceStoragePort for SqlitePluginRuntimeManagedStorage {
                         }
                     }
                     transaction.commit().map_err(database_error)?;
-                    let observed = read_ledger(&connection, &miniapp_id_owned, &handle_id)?;
+                    let observed = read_ledger(&connection, &plugin_product_id_owned, &handle_id)?;
                     if observed != expected_ledger {
                         return Err(PluginRuntimePlatformError::StorageConflict);
                     }
@@ -1251,16 +1251,16 @@ impl PluginRuntimeServiceStoragePort for SqlitePluginRuntimeManagedStorage {
 impl PluginRuntimeHostKvPort for SqlitePluginRuntimeManagedStorage {
     async fn execute(
         &self,
-        miniapp_id: &MiniAppId,
-        storage: &MiniAppServiceStorageDescriptor,
-        request: &MiniAppBridgeKvRequest,
+        plugin_product_id: &PluginProductId,
+        storage: &PluginServiceStorageDescriptor,
+        request: &PluginBridgeKvRequest,
     ) -> PluginRuntimePlatformResult<StrictJsonValue> {
         let owner = self
-            .registration_for(miniapp_id, storage)
+            .registration_for(plugin_product_id, storage)
             .await?;
         self.execute_kv(
             &owner.owner_user_id,
-            miniapp_id,
+            plugin_product_id,
             storage,
             &owner.kv_namespace,
             request.clone(),
@@ -1275,10 +1275,10 @@ impl PluginRuntimeHostKvPort for SqlitePluginRuntimeManagedStorage {
 impl PluginRuntimeFilesPort for SqlitePluginRuntimeManagedStorage {
     async fn resolve(
         &self,
-        miniapp_id: &MiniAppId,
-        handle_id: &MiniAppFilesHandleId,
-    ) -> PluginRuntimePlatformResult<MiniAppFilesDirDescriptor> {
-        self.registration_for_files_handle(miniapp_id, handle_id)
+        plugin_product_id: &PluginProductId,
+        handle_id: &PluginFilesHandleId,
+    ) -> PluginRuntimePlatformResult<PluginFilesDirDescriptor> {
+        self.registration_for_files_handle(plugin_product_id, handle_id)
             .await?
             .descriptor
             .files_dir
@@ -1292,14 +1292,14 @@ impl PluginRuntimeFilesPort for SqlitePluginRuntimeManagedStorage {
 impl PluginRuntimePrivateDatabasePort for SqlitePluginRuntimeManagedStorage {
     async fn query(
         &self,
-        miniapp_id: &MiniAppId,
-        handle_id: &MiniAppDatabaseHandleId,
+        plugin_product_id: &PluginProductId,
+        handle_id: &PluginDatabaseHandleId,
         statement: PluginRuntimeDatabaseStatement,
         cancellation: PluginRuntimeCallCancellation,
     ) -> PluginRuntimePlatformResult<PluginRuntimeDatabaseQueryResult> {
         statement.validate_query()?;
         let registration = self
-            .registration_for_database_handle(miniapp_id, handle_id)
+            .registration_for_database_handle(plugin_product_id, handle_id)
             .await?;
         if registration
             .descriptor
@@ -1350,14 +1350,14 @@ impl PluginRuntimePrivateDatabasePort for SqlitePluginRuntimeManagedStorage {
 
     async fn execute(
         &self,
-        miniapp_id: &MiniAppId,
-        handle_id: &MiniAppDatabaseHandleId,
+        plugin_product_id: &PluginProductId,
+        handle_id: &PluginDatabaseHandleId,
         statement: PluginRuntimeDatabaseStatement,
         cancellation: PluginRuntimeCallCancellation,
     ) -> PluginRuntimePlatformResult<PluginRuntimeDatabaseExecuteResult> {
         statement.validate_execute()?;
         let registration = self
-            .registration_for_database_handle(miniapp_id, handle_id)
+            .registration_for_database_handle(plugin_product_id, handle_id)
             .await?;
         if registration
             .descriptor
@@ -1387,8 +1387,8 @@ impl PluginRuntimePrivateDatabasePort for SqlitePluginRuntimeManagedStorage {
 
     async fn batch(
         &self,
-        miniapp_id: &MiniAppId,
-        handle_id: &MiniAppDatabaseHandleId,
+        plugin_product_id: &PluginProductId,
+        handle_id: &PluginDatabaseHandleId,
         statements: Vec<PluginRuntimeDatabaseStatement>,
         cancellation: PluginRuntimeCallCancellation,
     ) -> PluginRuntimePlatformResult<Vec<PluginRuntimeDatabaseExecuteResult>> {
@@ -1401,7 +1401,7 @@ impl PluginRuntimePrivateDatabasePort for SqlitePluginRuntimeManagedStorage {
             statement.validate_execute()?;
         }
         let registration = self
-            .registration_for_database_handle(miniapp_id, handle_id)
+            .registration_for_database_handle(plugin_product_id, handle_id)
             .await?;
         if registration
             .descriptor
@@ -1443,15 +1443,15 @@ impl PluginRuntimePrivateDatabasePort for SqlitePluginRuntimeManagedStorage {
 
     async fn apply_additive_migrations(
         &self,
-        miniapp_id: &MiniAppId,
-        handle_id: &MiniAppDatabaseHandleId,
+        plugin_product_id: &PluginProductId,
+        handle_id: &PluginDatabaseHandleId,
         expected_ledger_digest: &DigestHex,
-        release: &MiniAppReleaseRef,
-        migrations: &[MiniAppMigration],
+        release: &PluginReleaseRef,
+        migrations: &[PluginMigration],
         applied_at_ms: i64,
     ) -> PluginRuntimePlatformResult<PluginRuntimeMigrationLedger> {
         let registration = self
-            .registration_for_database_handle(miniapp_id, handle_id)
+            .registration_for_database_handle(plugin_product_id, handle_id)
             .await?;
         let descriptor = registration
             .descriptor
@@ -1465,7 +1465,7 @@ impl PluginRuntimePrivateDatabasePort for SqlitePluginRuntimeManagedStorage {
         PluginRuntimeServiceStoragePort::apply_additive_migrations(
             self,
             &owner,
-            miniapp_id,
+            plugin_product_id,
             &registration.descriptor,
             expected_ledger_digest,
             release,
@@ -1477,11 +1477,11 @@ impl PluginRuntimePrivateDatabasePort for SqlitePluginRuntimeManagedStorage {
 
     async fn ledger(
         &self,
-        miniapp_id: &MiniAppId,
-        handle_id: &MiniAppDatabaseHandleId,
+        plugin_product_id: &PluginProductId,
+        handle_id: &PluginDatabaseHandleId,
     ) -> PluginRuntimePlatformResult<PluginRuntimeMigrationLedger> {
         let registration = self
-            .registration_for_database_handle(miniapp_id, handle_id)
+            .registration_for_database_handle(plugin_product_id, handle_id)
             .await?;
         let descriptor = registration
             .descriptor
@@ -1495,12 +1495,12 @@ impl PluginRuntimePrivateDatabasePort for SqlitePluginRuntimeManagedStorage {
             .database_path
             .ok_or(PluginRuntimePlatformError::UnknownStorageHandle)?;
         let _guard = registration.database_lock.lock().await;
-        let miniapp_id_owned = miniapp_id.clone();
+        let plugin_product_id_owned = plugin_product_id.clone();
         let handle_id_owned = handle_id.clone();
         tokio::task::spawn_blocking(move || {
             let (connection, internal_mode) = open_private_database(&path)?;
             with_authorizer_mode(&internal_mode, true, true, true, || {
-                read_ledger(&connection, &miniapp_id_owned, &handle_id_owned)
+                read_ledger(&connection, &plugin_product_id_owned, &handle_id_owned)
             })
         })
         .await
@@ -1518,7 +1518,7 @@ fn service_test_kv_namespace(test_id: &str) -> PluginRuntimePlatformResult<Strin
 async fn copy_service_test_kv(
     pool: &SqlitePool,
     owner_user_id: &str,
-    miniapp_id: &MiniAppId,
+    plugin_product_id: &PluginProductId,
     test_namespace: &str,
 ) -> PluginRuntimePlatformResult<DigestHex> {
     let mut transaction = pool
@@ -1526,22 +1526,22 @@ async fn copy_service_test_kv(
         .await
         .map_err(|error| PluginRuntimePlatformError::Database(error.to_string()))?;
     nomifun_db::sqlx::query(
-        "DELETE FROM miniapp_kv
-         WHERE owner_user_id = ? AND miniapp_id = ? AND namespace = ?",
+        "DELETE FROM plugin_kv
+         WHERE owner_user_id = ? AND plugin_product_id = ? AND namespace = ?",
     )
     .bind(owner_user_id)
-    .bind(miniapp_id.as_ref())
+    .bind(plugin_product_id.as_ref())
     .bind(test_namespace)
     .execute(&mut *transaction)
     .await
     .map_err(|error| PluginRuntimePlatformError::Database(error.to_string()))?;
-    let rows = nomifun_db::sqlx::query_as::<_, MiniAppKvRow>(
-        "SELECT * FROM miniapp_kv
-         WHERE owner_user_id = ? AND miniapp_id = ? AND namespace = ?
+    let rows = nomifun_db::sqlx::query_as::<_, PluginRuntimeKvRow>(
+        "SELECT * FROM plugin_kv
+         WHERE owner_user_id = ? AND plugin_product_id = ? AND namespace = ?
          ORDER BY key",
     )
     .bind(owner_user_id)
-    .bind(miniapp_id.as_ref())
+    .bind(plugin_product_id.as_ref())
     .bind(PRODUCTION_KV_NAMESPACE)
     .fetch_all(&mut *transaction)
     .await
@@ -1572,12 +1572,12 @@ async fn copy_service_test_kv(
             is_tombstone: row.is_tombstone,
         });
         nomifun_db::sqlx::query(
-            "INSERT INTO miniapp_kv (
-                miniapp_id, owner_user_id, namespace, key, value_json,
+            "INSERT INTO plugin_kv (
+                plugin_product_id, owner_user_id, namespace, key, value_json,
                 revision, key_generation, is_tombstone, created_at, updated_at
              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(miniapp_id.as_ref())
+        .bind(plugin_product_id.as_ref())
         .bind(owner_user_id)
         .bind(test_namespace)
         .bind(&row.key)
@@ -1602,15 +1602,15 @@ async fn copy_service_test_kv(
 async fn delete_service_test_kv(
     pool: &SqlitePool,
     owner_user_id: &str,
-    miniapp_id: &MiniAppId,
+    plugin_product_id: &PluginProductId,
     test_namespace: &str,
 ) -> PluginRuntimePlatformResult<()> {
     nomifun_db::sqlx::query(
-        "DELETE FROM miniapp_kv
-         WHERE owner_user_id = ? AND miniapp_id = ? AND namespace = ?",
+        "DELETE FROM plugin_kv
+         WHERE owner_user_id = ? AND plugin_product_id = ? AND namespace = ?",
     )
     .bind(owner_user_id)
-    .bind(miniapp_id.as_ref())
+    .bind(plugin_product_id.as_ref())
     .bind(test_namespace)
     .execute(pool)
     .await
@@ -1621,15 +1621,15 @@ async fn delete_service_test_kv(
 async fn delete_all_service_kv(
     pool: &SqlitePool,
     owner_user_id: &str,
-    miniapp_id: &MiniAppId,
+    plugin_product_id: &PluginProductId,
 ) -> PluginRuntimePlatformResult<()> {
     nomifun_db::sqlx::query(
-        "DELETE FROM miniapp_kv
-         WHERE owner_user_id = ? AND miniapp_id = ?
+        "DELETE FROM plugin_kv
+         WHERE owner_user_id = ? AND plugin_product_id = ?
            AND (namespace = ? OR namespace LIKE ?)",
     )
     .bind(owner_user_id)
-    .bind(miniapp_id.as_ref())
+    .bind(plugin_product_id.as_ref())
     .bind(PRODUCTION_KV_NAMESPACE)
     .bind(format!("{SERVICE_TEST_KV_NAMESPACE_PREFIX}%"))
     .execute(pool)
@@ -1641,8 +1641,8 @@ async fn delete_all_service_kv(
 fn create_private_database_snapshot(
     source_path: &Path,
     target_path: &Path,
-    miniapp_id: &MiniAppId,
-    test_handle_id: &MiniAppDatabaseHandleId,
+    plugin_product_id: &PluginProductId,
+    test_handle_id: &PluginDatabaseHandleId,
 ) -> PluginRuntimePlatformResult<(DigestHex, PluginRuntimeMigrationLedger)> {
     ensure_database_path(source_path)?;
     if target_path.exists() {
@@ -1663,7 +1663,7 @@ fn create_private_database_snapshot(
             ))
         })?;
     let snapshot = Connection::open(target_path).map_err(database_error)?;
-    let ledger = read_ledger(&snapshot, miniapp_id, test_handle_id)?;
+    let ledger = read_ledger(&snapshot, plugin_product_id, test_handle_id)?;
     Ok((copied_digest, ledger))
 }
 
@@ -2437,17 +2437,17 @@ fn positive_revision(value: i64) -> PluginRuntimePlatformResult<u64> {
 async fn fetch_kv(
     transaction: &mut nomifun_db::sqlx::Transaction<'_, nomifun_db::sqlx::Sqlite>,
     owner_user_id: &str,
-    miniapp_id: &MiniAppId,
+    plugin_product_id: &PluginProductId,
     namespace: &str,
     key: &str,
-) -> PluginRuntimePlatformResult<Option<MiniAppKvRow>> {
-    let row = nomifun_db::sqlx::query_as::<_, MiniAppKvRow>(
-        "SELECT * FROM miniapp_kv
-         WHERE owner_user_id = ? AND miniapp_id = ?
+) -> PluginRuntimePlatformResult<Option<PluginRuntimeKvRow>> {
+    let row = nomifun_db::sqlx::query_as::<_, PluginRuntimeKvRow>(
+        "SELECT * FROM plugin_kv
+         WHERE owner_user_id = ? AND plugin_product_id = ?
            AND namespace = ? AND key = ?",
     )
     .bind(owner_user_id)
-    .bind(miniapp_id.as_ref())
+    .bind(plugin_product_id.as_ref())
     .bind(namespace)
     .bind(key)
     .fetch_optional(&mut **transaction)
@@ -2469,11 +2469,11 @@ async fn fetch_kv(
 async fn write_live_kv(
     transaction: &mut nomifun_db::sqlx::Transaction<'_, nomifun_db::sqlx::Sqlite>,
     owner_user_id: &str,
-    miniapp_id: &MiniAppId,
+    plugin_product_id: &PluginProductId,
     namespace: &str,
     key: &str,
     value_json: &str,
-    current: Option<&MiniAppKvRow>,
+    current: Option<&PluginRuntimeKvRow>,
     updated_at: i64,
 ) -> PluginRuntimePlatformResult<i64> {
     let next_revision = current
@@ -2483,17 +2483,17 @@ async fn write_live_kv(
         .ok_or(PluginRuntimePlatformError::KvRevisionOverflow)?;
     if let Some(row) = current {
         let changed = nomifun_db::sqlx::query(
-            "UPDATE miniapp_kv
+            "UPDATE plugin_kv
              SET value_json = ?, revision = ?, is_tombstone = 0,
                  updated_at = ?
-             WHERE owner_user_id = ? AND miniapp_id = ?
+             WHERE owner_user_id = ? AND plugin_product_id = ?
                AND namespace = ? AND key = ? AND revision = ?",
         )
         .bind(value_json)
         .bind(next_revision)
         .bind(updated_at)
         .bind(owner_user_id)
-        .bind(miniapp_id.as_ref())
+        .bind(plugin_product_id.as_ref())
         .bind(namespace)
         .bind(key)
         .bind(row.revision)
@@ -2505,12 +2505,12 @@ async fn write_live_kv(
         }
     } else {
         let changed = nomifun_db::sqlx::query(
-            "INSERT INTO miniapp_kv (
-                miniapp_id, owner_user_id, namespace, key, value_json,
+            "INSERT INTO plugin_kv (
+                plugin_product_id, owner_user_id, namespace, key, value_json,
                 revision, key_generation, is_tombstone, created_at, updated_at
              ) VALUES (?, ?, ?, ?, ?, 1, 1, 0, ?, ?)",
         )
-        .bind(miniapp_id.as_ref())
+        .bind(plugin_product_id.as_ref())
         .bind(owner_user_id)
         .bind(namespace)
         .bind(key)
@@ -2530,10 +2530,10 @@ async fn write_live_kv(
 async fn tombstone_kv(
     transaction: &mut nomifun_db::sqlx::Transaction<'_, nomifun_db::sqlx::Sqlite>,
     owner_user_id: &str,
-    miniapp_id: &MiniAppId,
+    plugin_product_id: &PluginProductId,
     namespace: &str,
     key: &str,
-    current: &MiniAppKvRow,
+    current: &PluginRuntimeKvRow,
     updated_at: i64,
 ) -> PluginRuntimePlatformResult<i64> {
     let next_revision = current
@@ -2545,10 +2545,10 @@ async fn tombstone_kv(
         .checked_add(1)
         .ok_or(PluginRuntimePlatformError::KvRevisionOverflow)?;
     let changed = nomifun_db::sqlx::query(
-        "UPDATE miniapp_kv
+        "UPDATE plugin_kv
          SET value_json = 'null', revision = ?, key_generation = ?,
              is_tombstone = 1, updated_at = ?
-         WHERE owner_user_id = ? AND miniapp_id = ?
+         WHERE owner_user_id = ? AND plugin_product_id = ?
            AND namespace = ? AND key = ? AND revision = ?
            AND key_generation = ? AND is_tombstone = 0",
     )
@@ -2556,7 +2556,7 @@ async fn tombstone_kv(
     .bind(next_generation)
     .bind(updated_at)
     .bind(owner_user_id)
-    .bind(miniapp_id.as_ref())
+    .bind(plugin_product_id.as_ref())
     .bind(namespace)
     .bind(key)
     .bind(current.revision)
@@ -2736,8 +2736,8 @@ fn with_authorizer_mode<T>(
 
 fn read_ledger(
     connection: &Connection,
-    miniapp_id: &MiniAppId,
-    handle_id: &MiniAppDatabaseHandleId,
+    plugin_product_id: &PluginProductId,
+    handle_id: &PluginDatabaseHandleId,
 ) -> PluginRuntimePlatformResult<PluginRuntimeMigrationLedger> {
     let schema_epoch: u64 = connection
         .query_row(
@@ -2779,7 +2779,7 @@ fn read_ledger(
                 ordinal: u64::try_from(ordinal).map_err(|_| {
                     rusqlite::Error::IntegralValueOutOfRange(0, ordinal)
                 })?,
-                migration_id: MiniAppMigrationId::from(row.get::<_, String>(1)?),
+                migration_id: PluginMigrationId::from(row.get::<_, String>(1)?),
                 migration_digest: DigestHex::from(row.get::<_, String>(2)?),
                 release,
                 applied_at_ms: row.get(4)?,
@@ -2802,9 +2802,9 @@ fn read_ledger(
             .validate()
             .map_err(|error| PluginRuntimePlatformError::Database(error.to_string()))?;
     }
-    let ledger_digest = ledger_digest(miniapp_id, handle_id, schema_epoch, &entries)?;
+    let ledger_digest = ledger_digest(plugin_product_id, handle_id, schema_epoch, &entries)?;
     let ledger = PluginRuntimeMigrationLedger {
-        miniapp_id: miniapp_id.clone(),
+        plugin_product_id: plugin_product_id.clone(),
         handle_id: handle_id.clone(),
         schema_epoch,
         entries,
@@ -2822,20 +2822,20 @@ fn is_digest_value(value: &str) -> bool {
 }
 
 fn ledger_digest(
-    miniapp_id: &MiniAppId,
-    handle_id: &MiniAppDatabaseHandleId,
+    plugin_product_id: &PluginProductId,
+    handle_id: &PluginDatabaseHandleId,
     schema_epoch: u64,
     entries: &[PluginRuntimeMigrationLedgerEntry],
 ) -> PluginRuntimePlatformResult<DigestHex> {
     #[derive(Serialize)]
     struct DigestInput<'a> {
-        miniapp_id: &'a MiniAppId,
-        handle_id: &'a MiniAppDatabaseHandleId,
+        plugin_product_id: &'a PluginProductId,
+        handle_id: &'a PluginDatabaseHandleId,
         schema_epoch: u64,
         entries: &'a [PluginRuntimeMigrationLedgerEntry],
     }
     digest_payload(&DigestInput {
-        miniapp_id,
+        plugin_product_id,
         handle_id,
         schema_epoch,
         entries,
@@ -2844,10 +2844,10 @@ fn ledger_digest(
 }
 
 fn migration_sql(
-    action: &MiniAppAdditiveMigrationAction,
+    action: &PluginAdditiveMigrationAction,
 ) -> PluginRuntimePlatformResult<String> {
     match action {
-        MiniAppAdditiveMigrationAction::CreateTable {
+        PluginAdditiveMigrationAction::CreateTable {
             table_name,
             columns,
             primary_key_columns,
@@ -2888,7 +2888,7 @@ fn migration_sql(
                 definitions.join(", ")
             ))
         }
-        MiniAppAdditiveMigrationAction::CreateIndex {
+        PluginAdditiveMigrationAction::CreateIndex {
             index_name,
             table_name,
             columns,
@@ -2916,7 +2916,7 @@ fn migration_sql(
                     .join(", ")
             ))
         }
-        MiniAppAdditiveMigrationAction::AddColumn { table_name, column } => {
+        PluginAdditiveMigrationAction::AddColumn { table_name, column } => {
             validate_migration_identifier(table_name, "migration.table_name")?;
             validate_migration_column(column)?;
             let mut definition = format!(
@@ -2967,7 +2967,7 @@ fn validate_migration_identifier(
 }
 
 fn validate_migration_column(
-    column: &nomifun_agent_contracts::MiniAppMigrationColumn,
+    column: &nomifun_agent_contracts::PluginMigrationColumn,
 ) -> PluginRuntimePlatformResult<()> {
     validate_migration_identifier(&column.name, "migration.column.name")?;
     validate_sql_type(&column.declared_type)?;

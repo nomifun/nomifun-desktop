@@ -74,7 +74,7 @@ pub struct JavascriptRuntimeDownloadDto {
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeSwitchParticipantKindDto {
     PluginMount,
-    MiniappService,
+    PluginService,
     BuildFoundation,
 }
 
@@ -282,7 +282,7 @@ pub enum PluginConsumerSurfaceDto {
     Remote,
     Automation,
     Ui,
-    MiniappService,
+    PluginService,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -720,8 +720,7 @@ pub enum DurableOperationKindDto {
     Build,
     Import,
     Export,
-    #[serde(rename = "plugin_permanent_delete")]
-    MiniappPermanentDelete,
+    PluginPermanentDelete,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -738,8 +737,7 @@ pub enum DurableOperationStateDto {
 pub enum DurableOperationOwnerDto {
     PluginProject { project_id: String },
     PluginMount { mount_id: String },
-    #[serde(rename = "plugin_runtime")]
-    Miniapp { #[serde(rename = "plugin_id")] miniapp_id: String },
+    PluginRuntime { plugin_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

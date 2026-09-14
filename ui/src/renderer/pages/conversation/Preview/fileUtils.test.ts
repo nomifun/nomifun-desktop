@@ -11,8 +11,8 @@ import { getContentTypeByExtension, isTextFile } from './fileUtils';
 describe('HTML preview classification', () => {
   test('classifies HTML by extension regardless of basename or path separator', () => {
     expect(getContentTypeByExtension('index.html')).toBe('html');
-    expect(getContentTypeByExtension('/workspace/miniapp.html')).toBe('html');
-    expect(getContentTypeByExtension(String.raw`C:\workspace\MINIAPP.HTML`)).toBe('html');
+    expect(getContentTypeByExtension('/workspace/plugin.html')).toBe('html');
+    expect(getContentTypeByExtension(String.raw`C:\workspace\PLUGIN.HTML`)).toBe('html');
     expect(getContentTypeByExtension('document.htm')).toBe('html');
   });
 

@@ -5,6 +5,16 @@ notes at a high level rather than a complete historical log.
 
 ## Unreleased
 
+- **Breaking: MiniApp and Plugin are one Plugin product model.** Products,
+  projects, immutable releases, capabilities, surfaces and managed storage use
+  Plugin identities and plugin_* tables. The old MiniApp API, CLI, bridge names
+  and wire aliases are removed. UI and Service are composable release roles,
+  not mutually exclusive product kinds. Creation optionally accepts
+  service_source; subsequent source revisions can add or remove the service.
+  This is a clean-start development database cutover, not an in-place upgrade
+  of existing MiniApp databases. Back up needed data before rebuilding a
+  development database; no existing database is automatically deleted.
+
 - **Remote MCP and REST access is now installation-scoped.** NomiFun Desktop
   issues one high-privilege access token at `/api/webui/access-token`; it no
   longer binds to, impersonates, or inherits configuration from a companion.
@@ -222,6 +232,11 @@ notes at a high level rather than a complete historical log.
   tool provider. That is the opposite arrow and was never part of ACP.
 
 ## v0.6.3 - 2026-08-15
+
+> Historical note (retired terminology): this release entry records the former
+> Mini App product as shipped in v0.6.3. The current product is Plugin-only,
+> using `/plugins`, `/plugins/run/:id`, and `/api/plugins/**`; the routes,
+> identifiers, and storage model below are not active compatibility contracts.
 
 - **New feature (小程序 / mini-apps).** A conversation could always generate a web
   page, but the page died with the workspace: to use it again you had to dig up the

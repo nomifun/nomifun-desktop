@@ -223,7 +223,7 @@
     "remote": "Remote",
     "automation": "自动化",
     "ui": "UI",
-    "miniappService": "Plugin Service"
+    "pluginService": "Plugin Service"
   },
   "applyMode": {
     "ask": "应用前确认",

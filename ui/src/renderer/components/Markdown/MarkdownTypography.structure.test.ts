@@ -28,10 +28,8 @@ describe('shared Markdown typography contract', () => {
     expect(shadowViewTag.includes('fontSize={fontSize}')).toBe(true);
     expect(shadowViewTag.includes('lineHeight={lineHeight}')).toBe(true);
 
-    expect(shadowSource.includes("const resolvedFontSize = fontSize ?? (isMobile ? '14px' : '16px');")).toBe(true);
-    expect(shadowSource.includes("const resolvedLineHeight = lineHeight ?? (isMobile ? '19.6px' : '28px');")).toBe(
-      true
-    );
+    expect(shadowSource.includes("const resolvedFontSize = fontSize ?? '16px';")).toBe(true);
+    expect(shadowSource.includes("const resolvedLineHeight = lineHeight ?? '28px';")).toBe(true);
     expect(shadowSource.includes('--markdown-body-font-size: ${resolvedFontSize};')).toBe(true);
     expect(shadowSource.includes('--markdown-body-line-height: ${resolvedLineHeight};')).toBe(true);
     expect(markdownSource.includes("'markdown-article--explicit': Boolean(fontSize || lineHeight)")).toBe(true);

@@ -11,18 +11,14 @@ import { Robot } from '@icon-park/react';
 import classNames from 'classnames';
 import type { SiderTooltipProps } from '@renderer/utils/ui/siderTooltip';
 
-interface SiderAgentEntryProps {
-  isMobile: boolean;
-  isActive: boolean;
+interface SiderAgentEntryProps {  isActive: boolean;
   collapsed: boolean;
   siderTooltipProps: SiderTooltipProps;
   onClick: () => void;
 }
 
 /** The single public entry for Agent authoring and testing. */
-const SiderAgentEntry: React.FC<SiderAgentEntryProps> = ({
-  isMobile,
-  isActive,
+const SiderAgentEntry: React.FC<SiderAgentEntryProps> = ({  isActive,
   collapsed,
   siderTooltipProps,
   onClick,
@@ -56,9 +52,7 @@ const SiderAgentEntry: React.FC<SiderAgentEntryProps> = ({
     <Tooltip {...siderTooltipProps} content={label} position='right'>
       <div
         className={classNames(
-          'box-border group h-28px w-full flex items-center justify-start gap-8px pl-10px pr-8px rd-0.5rem cursor-pointer shrink-0 transition-all text-t-primary',
-          isMobile && 'sider-action-btn-mobile',
-          isActive ? '!bg-primary-1 !text-primary-6' : 'hover:bg-fill-2 active:bg-fill-3'
+          'box-border group h-28px w-full flex items-center justify-start gap-8px pl-10px pr-8px rd-0.5rem cursor-pointer shrink-0 transition-all text-t-primary',          isActive ? '!bg-primary-1 !text-primary-6' : 'hover:bg-fill-2 active:bg-fill-3'
         )}
         onClick={onClick}
       >

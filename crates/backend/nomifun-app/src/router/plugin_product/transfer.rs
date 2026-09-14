@@ -66,7 +66,7 @@ pub(super) async fn inspect(
         messages: vec![],
         status: "ready".into(),
         error: None,
-        miniapp_id: None,
+        plugin_id: None,
         base_release_digest: None,
         base_source_digest: None,
         updated_at: nomifun_common::now_ms(),
@@ -112,7 +112,7 @@ pub(super) async fn inspect(
                 .to_owned();
         } else {
             let source = if metadata.is_file() {
-                let stage = service.root.join("miniapp-imports").join(&draft.id);
+                let stage = service.root.join("plugin-imports").join(&draft.id);
                 let path = source.clone();
                 let target = stage.clone();
                 let unpacked = tokio::task::spawn_blocking(move || extract_archive(&path, &target))
@@ -143,7 +143,7 @@ pub(super) async fn inspect(
     let original = draft.name.clone();
     let mut number = 2;
     while library
-        .miniapps
+        .plugins
         .iter()
         .any(|a| a.display_name == draft.name)
     {
@@ -234,7 +234,9 @@ fn inspect_directory(path: &FsPath, draft: &mut Draft) -> Result<(), AppError> {
             release_digest: String::new(),
             editable: validated.source.is_some(),
             includes_data: true,
-            requires_service: product["kind"].as_str() == Some("service"),
+            requires_service: validated.releases.values().any(|release| {
+                release.files.iter().any(|file| file.relative_path == "service/main.mjs")
+            }),
         });
     } else {
         let root = if path.join("artifact.json").is_file() {
@@ -277,10 +279,10 @@ fn inspect_directory(path: &FsPath, draft: &mut Draft) -> Result<(), AppError> {
     Ok(())
 }
 
-impl PluginRuntimeProductService {
+impl PluginProductService {
     pub(super) fn cleanup_import_stage(&self, draft: &Draft) -> Result<(), AppError> {
         valid_id(&draft.id)?;
-        let root = self.root.join("miniapp-imports");
+        let root = self.root.join("plugin-imports");
         let stage = root.join(&draft.id);
         if !stage.exists() {
             return Ok(());
@@ -372,10 +374,10 @@ pub(super) async fn export_file(
         .map_err(application_error)?;
     let resume = request.backup
         && matches!(
-            workshop.miniapp.lifecycle,
+            workshop.plugin.lifecycle,
             nomifun_api_types::PluginRuntimeLifecycleDto::Enabled
         );
-    let export_root = service.root.join("miniapp-exports");
+    let export_root = service.root.join("plugin-exports");
     fs::create_dir_all(&export_root).map_err(internal)?;
     let stage = export_root.join(uuid::Uuid::now_v7().to_string());
     if resume {
@@ -384,11 +386,11 @@ pub(super) async fn export_file(
             .set_enabled(
                 user.id.as_str(),
                 SetPluginRuntimeEnabledRequest {
-                    miniapp_id: id.clone(),
-                    expected_product_revision: workshop.miniapp.product_revision,
-                    expected_pointer_revision: workshop.miniapp.releases.pointer_revision,
+                    plugin_id: id.clone(),
+                    expected_product_revision: workshop.plugin.product_revision,
+                    expected_pointer_revision: workshop.plugin.releases.pointer_revision,
                     expected_active_release_digest: workshop
-                        .miniapp
+                        .plugin
                         .releases
                         .active
                         .as_ref()
@@ -406,10 +408,10 @@ pub(super) async fn export_file(
                 .export_backup(
                     user.id.as_str(),
                     nomifun_api_types::ExportPluginRuntimeBackupRequest {
-                        miniapp_id: id.clone(),
-                        expected_product_revision: workshop.miniapp.product_revision,
+                        plugin_id: id.clone(),
+                        expected_product_revision: workshop.plugin.product_revision,
                         expected_lifecycle: nomifun_api_types::PluginRuntimeLifecycleDto::Disabled,
-                        expected_pointer_revision: workshop.miniapp.releases.pointer_revision,
+                        expected_pointer_revision: workshop.plugin.releases.pointer_revision,
                         expected_config_revision: workshop.config.config_revision,
                         expected_credential_bindings_revision: workshop
                             .credential_bindings_revision,
@@ -420,7 +422,7 @@ pub(super) async fn export_file(
                 .map_err(application_error)?;
         } else {
             let release = workshop
-                .miniapp
+                .plugin
                 .releases
                 .active
                 .as_ref()
@@ -430,9 +432,9 @@ pub(super) async fn export_file(
                 .export_share(
                     user.id.as_str(),
                     SharePluginRuntimeRequest {
-                        miniapp_id: id.clone(),
-                        expected_product_revision: workshop.miniapp.product_revision,
-                        expected_pointer_revision: workshop.miniapp.releases.pointer_revision,
+                        plugin_id: id.clone(),
+                        expected_product_revision: workshop.plugin.product_revision,
+                        expected_pointer_revision: workshop.plugin.releases.pointer_revision,
                         content: PluginRuntimeShareContentDto::ActiveRelease,
                         release_id: release.release_id.clone(),
                         expected_release_digest: release.release_digest.clone(),
@@ -458,11 +460,11 @@ pub(super) async fn export_file(
             .set_enabled(
                 user.id.as_str(),
                 SetPluginRuntimeEnabledRequest {
-                    miniapp_id: id,
-                    expected_product_revision: workshop.miniapp.product_revision,
-                    expected_pointer_revision: workshop.miniapp.releases.pointer_revision,
+                    plugin_id: id,
+                    expected_product_revision: workshop.plugin.product_revision,
+                    expected_pointer_revision: workshop.plugin.releases.pointer_revision,
                     expected_active_release_digest: workshop
-                        .miniapp
+                        .plugin
                         .releases
                         .active
                         .as_ref()
@@ -568,7 +570,7 @@ fn write_archive(source: &FsPath, destination: &FsPath) -> Result<(), AppError> 
     let parent = destination
         .parent()
         .ok_or_else(|| invalid("Choose a destination folder"))?;
-    let staged = parent.join(format!(".nomifun-miniapp-{}.tmp", uuid::Uuid::now_v7()));
+    let staged = parent.join(format!(".nomifun-plugin-{}.tmp", uuid::Uuid::now_v7()));
     struct Cleanup(PathBuf);
     impl Drop for Cleanup {
         fn drop(&mut self) {

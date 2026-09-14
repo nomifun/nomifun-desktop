@@ -114,11 +114,8 @@ export function fromApiAgentSnapshot(raw: unknown): AgentResolvedSnapshot {
   if (Object.prototype.hasOwnProperty.call(snapshot, 'id')) {
     throw new TypeError('agent snapshot legacy field "id" is not accepted; use "preset_id"');
   }
-  if (!Array.isArray(snapshot.initial_capabilities)) {
-    throw new TypeError('agent snapshot.initial_capabilities must be an array');
-  }
-  if (!Array.isArray(snapshot.on_demand_capabilities)) {
-    throw new TypeError('agent snapshot.on_demand_capabilities must be an array');
+  if (!Array.isArray(snapshot.enabled_capabilities)) {
+    throw new TypeError('agent snapshot.enabled_capabilities must be an array');
   }
   if (!Array.isArray(snapshot.required_resource_kinds)) {
     throw new TypeError('agent snapshot.required_resource_kinds must be an array');
@@ -146,8 +143,7 @@ export function fromApiAgentSnapshot(raw: unknown): AgentResolvedSnapshot {
       ? {}
       : { resolved_agent_id: parseAgentId(snapshot.resolved_agent_id) }),
     ...(resolvedModel == null ? {} : { resolved_model: resolvedModel }),
-    initial_capabilities: snapshot.initial_capabilities.map(String),
-    on_demand_capabilities: snapshot.on_demand_capabilities.map(String),
+    enabled_capabilities: snapshot.enabled_capabilities.map(String),
     required_resource_kinds: snapshot.required_resource_kinds.map(String),
   } as unknown as AgentResolvedSnapshot;
 }

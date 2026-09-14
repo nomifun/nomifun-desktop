@@ -565,12 +565,12 @@ mod tests {
             foundation_hello_passed: true,
             old_runtime_process_tree_zero: true,
             participants: vec![RuntimeSwitchParticipantResult {
-                kind: RuntimeSwitchParticipantKind::MiniappService,
-                owner_id: "miniapp-production-host".into(),
+                kind: RuntimeSwitchParticipantKind::PluginService,
+                owner_id: "plugin-production-host".into(),
                 outcome,
                 error_code: (outcome
                     == RuntimeSwitchParticipantOutcome::Failed)
-                    .then(|| CanonicalErrorCode::from("MINIAPP_FAILED")),
+                    .then(|| CanonicalErrorCode::from("PLUGIN_SERVICE_FAILED")),
             }],
             completed_at_ms: 1,
         }

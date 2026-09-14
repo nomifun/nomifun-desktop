@@ -32,7 +32,7 @@ interface Props {
   activeConversationId: ConversationId | null;
   /** Icon-only rail variant (parent sider collapsed). */
   collapsed?: boolean;
-  /** Closes the mobile drawer / clears tooltips after navigating, mirrors the workpath list. */
+  /** Clears tooltips after navigating, mirroring the workpath list. */
   onSessionClick?: () => void;
   /** Fold state of the group (persisted in useWorkpathUiState). Ignored in the collapsed rail. */
   expanded?: boolean;

@@ -32,8 +32,8 @@ use nomifun_agent_contracts::{
 use serde_json::json;
 
 use crate::{
-    ActivationOutcome, AgentPresetCompiler, CapabilityHandler, CapabilityInvocationContext,
-    CapabilityInvocationRequest, CompileRequest, CompilerEnvironment, CompletedTurnBoundary,
+    AgentPresetCompiler, CapabilityHandler, CapabilityInvocationContext,
+    CapabilityInvocationRequest, CompileRequest, CompilerEnvironment,
     ContextContributionFactory, ContextContributionRequest, ContextContributionResult,
     HostPluginStateApi, InMemoryPluginStatePersistence, KernelError, KernelRegistry,
     MaterializationPolicy, Materializer, PluginRegistration, PluginStatePersistence, ServiceKey,
@@ -828,8 +828,7 @@ fn sample_revision(owner_id: &str) -> AgentPresetRevision {
         schema_version: VersionString::from(VERSION),
         model_route_refs: BTreeMap::new(),
         chat_route_records: BTreeMap::new(),
-        initial_capabilities: Vec::new(),
-        on_demand_capabilities: vec![nomifun_agent_contracts::CapabilitySelection {
+        enabled_capabilities: vec![nomifun_agent_contracts::CapabilitySelection {
             capability: CapabilityRef {
                 id: CapabilityId::from(SAMPLE_CAPABILITY),
                 version: VersionString::from(VERSION),
@@ -880,7 +879,7 @@ fn compiler_environment(target_digest: DigestHex) -> CompilerEnvironment {
 
 fn compile_request(revision: AgentPresetRevision, owner: PrincipalRef) -> CompileRequest {
     CompileRequest {
-        miniapp_capabilities: Vec::new(),
+        plugin_product_capabilities: Vec::new(),
         revision,
         principal: owner,
         scene: "sample".to_owned(),
@@ -1063,11 +1062,10 @@ async fn sample_echo_uses_materialize_compile_activate_authorize_invoke_and_rest
     );
     assert_eq!(compiled.content().skill_locks.len(), 1);
     assert_eq!(compiled.content().mcp_tool_locks.len(), 1);
-    assert_eq!(compiled.content().compact_on_demand_index.len(), 1);
 
     let active = SessionCapabilityState::new(&compiled);
-    assert_eq!(active.search("echo", 8).unwrap().len(), 1);
-    let inactive = active.snapshot().unwrap();
+    let mut inactive = active.snapshot().unwrap();
+    inactive.active.clear();
     assert!(matches!(
         registry
             .invoke(
@@ -1078,25 +1076,12 @@ async fn sample_echo_uses_materialize_compile_activate_authorize_invoke_and_rest
             .await,
         Err(KernelError::CapabilityNotActive { .. })
     ));
-    assert_eq!(
-        active
-            .activate_at_boundary(
-                0,
-                &CapabilityId::from(SAMPLE_CAPABILITY),
-                CompletedTurnBoundary::committed(OperationId::from("turn-1")),
-            )
-            .unwrap(),
-        ActivationOutcome::Activated {
-            generation: 1,
-            activated_bundle: vec![CapabilityId::from(SAMPLE_CAPABILITY)],
-        }
-    );
     let active_snapshot = active.snapshot().unwrap();
     let first = registry
         .invoke(
             &compiled,
             &active_snapshot,
-            invocation(&compiled, owner.clone(), 1, "hello"),
+            invocation(&compiled, owner.clone(), 0, "hello"),
         )
         .await
         .unwrap();
@@ -1122,18 +1107,11 @@ async fn sample_echo_uses_materialize_compile_activate_authorize_invoke_and_rest
     )
     .unwrap();
     let restarted_active = SessionCapabilityState::new(&restarted_compiled);
-    restarted_active
-        .activate_at_boundary(
-            0,
-            &CapabilityId::from(SAMPLE_CAPABILITY),
-            CompletedTurnBoundary::committed(OperationId::from("turn-2")),
-        )
-        .unwrap();
     let second = restarted
         .invoke(
             &restarted_compiled,
             &restarted_active.snapshot().unwrap(),
-            invocation(&restarted_compiled, owner, 1, "again"),
+            invocation(&restarted_compiled, owner, 0, "again"),
         )
         .await
         .unwrap();
@@ -1275,15 +1253,6 @@ async fn frozen_snapshot_survives_unrelated_registry_publication() {
     )
     .unwrap();
     let active = SessionCapabilityState::new(&compiled);
-    active
-        .activate_at_boundary(
-            0,
-            &CapabilityId::from(SAMPLE_CAPABILITY),
-            CompletedTurnBoundary::committed(OperationId::from(
-                "unrelated-publication-turn",
-            )),
-        )
-        .unwrap();
 
     registry
         .replace_all(vec![
@@ -1303,7 +1272,7 @@ async fn frozen_snapshot_survives_unrelated_registry_publication() {
         .invoke(
             &compiled,
             &active.snapshot().unwrap(),
-            invocation(&compiled, owner, 1, "still-valid"),
+            invocation(&compiled, owner, 0, "still-valid"),
         )
         .await
         .unwrap();
@@ -1339,13 +1308,6 @@ async fn invoke_rejects_exact_mount_and_artifact_drift_without_fallback() {
     )
     .unwrap();
     let active = SessionCapabilityState::new(&compiled);
-    active
-        .activate_at_boundary(
-            0,
-            &CapabilityId::from(SAMPLE_CAPABILITY),
-            CompletedTurnBoundary::committed(OperationId::from("target-drift-turn")),
-        )
-        .unwrap();
     let active = active.snapshot().unwrap();
 
     registry
@@ -1363,7 +1325,7 @@ async fn invoke_rejects_exact_mount_and_artifact_drift_without_fallback() {
             .invoke(
                 &compiled,
                 &active,
-                invocation(&compiled, owner.clone(), 1, "mount-drift"),
+                invocation(&compiled, owner.clone(), 0, "mount-drift"),
             )
             .await,
         Err(KernelError::CapabilityProvenanceDrift { .. })
@@ -1384,7 +1346,7 @@ async fn invoke_rejects_exact_mount_and_artifact_drift_without_fallback() {
             .invoke(
                 &compiled,
                 &active,
-                invocation(&compiled, owner, 1, "artifact-drift"),
+                invocation(&compiled, owner, 0, "artifact-drift"),
             )
             .await,
         Err(KernelError::CapabilityProvenanceDrift { .. })
@@ -1419,9 +1381,9 @@ async fn invoke_rejects_frozen_contribution_identity_drift() {
     let resolved = compiled
         .envelope
         .content
-        .on_demand_capabilities
+        .enabled_capabilities
         .first_mut()
-        .expect("sample on-demand capability");
+        .expect("sample enabled capability");
     resolved.contribution_id =
         nomifun_agent_contracts::ContributionId::from("capability:drifted");
     resolved.contribution_lock.contribution_id =
@@ -1429,22 +1391,13 @@ async fn invoke_rejects_frozen_contribution_identity_drift() {
     compiled.envelope.snapshot_ref.snapshot_digest =
         digest_payload(&compiled.envelope.content).unwrap();
     let active = SessionCapabilityState::new(&compiled);
-    active
-        .activate_at_boundary(
-            0,
-            &CapabilityId::from(SAMPLE_CAPABILITY),
-            CompletedTurnBoundary::committed(OperationId::from(
-                "contribution-drift-turn",
-            )),
-        )
-        .unwrap();
 
     assert!(matches!(
         registry
             .invoke(
                 &compiled,
                 &active.snapshot().unwrap(),
-                invocation(&compiled, owner, 1, "contribution-drift"),
+                invocation(&compiled, owner, 0, "contribution-drift"),
             )
             .await,
         Err(KernelError::CapabilityProvenanceDrift { .. })
@@ -1793,16 +1746,9 @@ async fn authority_rejects_wrong_principal_and_resource_without_invoking() {
     )
     .unwrap();
     let active = SessionCapabilityState::new(&compiled);
-    active
-        .activate_at_boundary(
-            0,
-            &CapabilityId::from(SAMPLE_CAPABILITY),
-            CompletedTurnBoundary::committed(OperationId::from("turn")),
-        )
-        .unwrap();
     let active = active.snapshot().unwrap();
 
-    let mut wrong_principal = invocation(&compiled, principal("other"), 1, "x");
+    let mut wrong_principal = invocation(&compiled, principal("other"), 0, "x");
     wrong_principal.session_owner = owner.clone();
     assert!(matches!(
         registry
@@ -1811,7 +1757,7 @@ async fn authority_rejects_wrong_principal_and_resource_without_invoking() {
         Err(KernelError::ResourceOwnerMismatch { .. })
     ));
 
-    let mut wrong_resource = invocation(&compiled, owner, 1, "x");
+    let mut wrong_resource = invocation(&compiled, owner, 0, "x");
     wrong_resource.resource_binding_ids =
         BTreeSet::from([ResourceBindingId::from("wrong")]);
     assert!(matches!(
@@ -2055,7 +2001,7 @@ fn dependency_skill_and_service_faults_fail_closed() {
     ));
 
     let mut skill_without_capability = sample_revision("owner");
-    skill_without_capability.payload.on_demand_capabilities.clear();
+    skill_without_capability.payload.enabled_capabilities.clear();
     skill_without_capability.reference.revision_digest =
         skill_without_capability.revision_digest().unwrap();
     let materialized = registry

@@ -9,8 +9,6 @@ import { useTranslation } from 'react-i18next';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import classNames from 'classnames';
 import ContentSider from '@/renderer/components/layout/ContentSider';
-import SegmentedTabs, { type SegmentedTabItem } from '@/renderer/components/base/SegmentedTabs';
-import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { useResizableSplit } from '@/renderer/hooks/ui/useResizableSplit';
 import { useContainerWidth } from '@/renderer/hooks/ui/useContainerWidth';
 import { type RequirementsSection, useRequirementsSections } from './sections';
@@ -45,13 +43,10 @@ const activeSectionForPath = (pathname: string): RequirementsSection => {
  * renders the matched child route via `<Outlet/>`. This way the ContentSider
  * persists across section navigations.
  *
- * The sidebar width is drag-resizable and persisted. On mobile the left sidebar
- * collapses to a horizontal segmented bar above the content.
+ * The sidebar width is drag-resizable and persisted.
  */
 const RequirementsLayout: React.FC = () => {
   const { t } = useTranslation();
-  const layout = useLayoutContext();
-  const isMobile = layout?.isMobile ?? false;
   const navigate = useNavigate();
   const { pathname } = useLocation();
 
@@ -81,21 +76,6 @@ const RequirementsLayout: React.FC = () => {
   // 按面板实宽（而非视口断点）给横向 padding，窄面板不再被 md:px-40px 白吃 80px。
   const { ref: paneRef, width: paneWidth } = useContainerWidth<HTMLDivElement>();
   const panePadX = paneWidth === 0 ? 'px-24px' : paneWidth >= 600 ? 'px-40px' : paneWidth >= 420 ? 'px-24px' : 'px-16px';
-
-  // Mobile: horizontal segmented nav above the content (no left sidebar).
-  if (isMobile) {
-    const segmentedItems: SegmentedTabItem[] = sections.map((s) => ({ key: s.key, label: s.label, icon: s.icon }));
-    return (
-      <div className='w-full min-h-full box-border overflow-y-auto px-16px py-16px'>
-        <div className='text-20px font-600 text-t-primary leading-tight'>{t('requirements.title')}</div>
-        <div className='mt-4px mb-14px text-12px leading-16px text-t-tertiary'>{t('requirements.subtitle')}</div>
-        <div className='mb-16px'>
-          <SegmentedTabs items={segmentedItems} activeKey={section} onChange={handleSectionChange} size='sm' />
-        </div>
-        <Outlet />
-      </div>
-    );
-  }
 
   const siderHeader = (
     <div className='px-16px pt-16px pb-10px'>

@@ -15,8 +15,7 @@ pub struct PinnedRuntimeProfile {
     pub runtime_protocol_version: VersionString,
     pub profile_digest: DigestHex,
     pub enabled_runtime_features: BTreeSet<RuntimeFeatureId>,
-    pub initial_capabilities: BTreeSet<CapabilityId>,
-    pub on_demand_capabilities: BTreeSet<CapabilityId>,
+    pub enabled_capabilities: BTreeSet<CapabilityId>,
     pub typed_resource_bindings: TypedResourceBindings,
 }
 
@@ -63,8 +62,7 @@ impl PinnedRuntimeProfile {
     pub fn validate_create(&self, params: &RuntimeCreateParams) -> Result<(), RuntimeError> {
         if params.profile_kind != self.kind
             || params.context.runtime_profile_digest != self.profile_digest
-            || params.initial_capabilities != self.initial_capabilities
-            || params.on_demand_capabilities != self.on_demand_capabilities
+            || params.enabled_capabilities != self.enabled_capabilities
             || params.typed_resource_bindings != self.typed_resource_bindings
         {
             return Err(RuntimeError::Protocol(

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ipcBridge } from '@/common';
 import { pluginRuntimeProduct } from '@/common/adapter/pluginRuntimeProductBridge';
-import { MINIAPP_LIBRARY_CHANGED } from './runtime/libraryState';
+import { PLUGIN_LIBRARY_CHANGED } from './runtime/libraryState';
 import { pluginProductItems, type PluginProductItem } from './pluginProductModel';
 import styles from './runtime/PluginRuntimeProduct.module.css';
 
@@ -24,8 +24,8 @@ export default function PluginPinnedEntries({ collapsed }: { collapsed: boolean 
       } catch { /* Retain the last successfully loaded pins during reconnect. */ }
     };
     void refresh();
-    window.addEventListener(MINIAPP_LIBRARY_CHANGED, refresh);
-    return () => { active = false; window.removeEventListener(MINIAPP_LIBRARY_CHANGED, refresh); };
+    window.addEventListener(PLUGIN_LIBRARY_CHANGED, refresh);
+    return () => { active = false; window.removeEventListener(PLUGIN_LIBRARY_CHANGED, refresh); };
   }, []);
   if (collapsed || !pins.length) return null;
   return <div className={styles.pins}>{pins.map((item) => (

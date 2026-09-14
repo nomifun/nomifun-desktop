@@ -1,4 +1,4 @@
-use nomifun_agent_contracts::{MiniAppProductLifecycleState, MiniAppServiceLifecycle};
+use nomifun_agent_contracts::{PluginProductLifecycleState, PluginServiceLifecycle};
 use nomifun_api_types::{
     CredentialBindingStatusDto, CredentialSlotBindingDto, PluginRuntimeKindDto,
     PluginRuntimeLibraryResponseDto, PluginRuntimeLifecycleDto, PluginRuntimeProjectSourceStateDto,
@@ -17,14 +17,14 @@ use crate::runtime::{
 pub enum PluginRuntimeServiceObservation {
     Stopped,
     Starting {
-        release: nomifun_agent_contracts::MiniAppReleaseRef,
+        release: nomifun_agent_contracts::PluginReleaseRef,
     },
     Ready {
-        release: nomifun_agent_contracts::MiniAppReleaseRef,
+        release: nomifun_agent_contracts::PluginReleaseRef,
         started_at_ms: i64,
     },
     Failed {
-        release: nomifun_agent_contracts::MiniAppReleaseRef,
+        release: nomifun_agent_contracts::PluginReleaseRef,
         error_code: String,
     },
 }
@@ -34,7 +34,7 @@ pub fn library_dto(snapshots: &[PluginRuntimeRepositorySnapshot]) -> PluginRunti
         library_revision: snapshots
             .first()
             .map_or(0, |snapshot| snapshot.library_revision),
-        miniapps: snapshots
+        plugins: snapshots
             .iter()
             .map(|snapshot| summary_dto(snapshot, None))
             .collect(),
@@ -47,7 +47,7 @@ pub fn summary_dto(
 ) -> PluginRuntimeSummaryDto {
     let product = &snapshot.root.product;
     PluginRuntimeSummaryDto {
-        miniapp_id: product.miniapp_id.0.clone(),
+        plugin_id: product.plugin_product_id.0.clone(),
         product_revision: product.product_revision,
         display_name: product.display_name.clone(),
         description: product.description.clone(),
@@ -55,8 +55,16 @@ pub fn summary_dto(
         kind: kind_dto(product.kind),
         lifecycle: lifecycle_dto(product.lifecycle),
         releases: pointers_dto(snapshot),
-        service_health: service_health_dto(product.kind, service),
-        surface_available: product.lifecycle == MiniAppProductLifecycleState::Enabled
+        service_health: service_health_dto(
+            snapshot
+                .root
+                .active_release()
+                .ok()
+                .and_then(|release| release.artifact.manifest.payload.service.as_ref())
+                .is_some(),
+            service,
+        ),
+        surface_available: product.lifecycle == PluginProductLifecycleState::Enabled
             && snapshot.root.active_release().is_ok_and(|release| release.artifact.manifest.payload.ui.is_some()),
         updated_at_ms: product.updated_at_ms,
         contribution_count: snapshot.root.active_release().map_or(0, |release| release.artifact.manifest.payload.contributions.capabilities.len() as u32),
@@ -81,20 +89,20 @@ pub fn workshop_dto(
             PluginRuntimeReadyReleaseDto {
                 release: release_dto(&ready.release),
                 project_build_generation: match &ready.source_lineage {
-                    nomifun_agent_contracts::MiniAppSourceLineage::Managed {
+                    nomifun_agent_contracts::PluginReleaseSourceLineage::Managed {
                         build_generation,
                         ..
                     } => *build_generation,
-                    nomifun_agent_contracts::MiniAppSourceLineage::RuntimeOnly => 0,
+                    nomifun_agent_contracts::PluginReleaseSourceLineage::RuntimeOnly => 0,
                 },
                 created_at_ms: ready.created_at_ms,
                 kind: kind_dto(root.product.kind),
                 service: service.map(|service| PluginRuntimeServiceDescriptorDto {
                     lifecycle: match service.lifecycle {
-                        MiniAppServiceLifecycle::OnDemand => {
+                        PluginServiceLifecycle::OnDemand => {
                             PluginRuntimeServiceLifecycleDto::OnDemand
                         }
-                        MiniAppServiceLifecycle::Continuous => {
+                        PluginServiceLifecycle::Continuous => {
                             PluginRuntimeServiceLifecycleDto::Continuous
                         }
                     },
@@ -140,7 +148,7 @@ pub fn workshop_dto(
         .map(|deletion| deletion.operation.to_dto());
 
     Ok(PluginRuntimeWorkshopDto {
-        miniapp: summary_dto(snapshot, service),
+        plugin: summary_dto(snapshot, service),
         service_lifecycle: None,
         active_service: None,
         publish_mode: if root.product.auto_publish.as_ref().is_some_and(|value| value.enabled) {
@@ -201,18 +209,16 @@ pub fn workshop_dto(
 }
 
 fn kind_dto(kind: PluginRuntimeKind) -> PluginRuntimeKindDto {
-    match kind {
-        PluginRuntimeKind::UiOnly => PluginRuntimeKindDto::UiOnly,
-        PluginRuntimeKind::Service => PluginRuntimeKindDto::Service,
-    }
+    let _ = kind;
+    PluginRuntimeKindDto::Plugin
 }
 
-fn lifecycle_dto(lifecycle: MiniAppProductLifecycleState) -> PluginRuntimeLifecycleDto {
+fn lifecycle_dto(lifecycle: PluginProductLifecycleState) -> PluginRuntimeLifecycleDto {
     match lifecycle {
-        MiniAppProductLifecycleState::Enabled => PluginRuntimeLifecycleDto::Enabled,
-        MiniAppProductLifecycleState::Disabled => PluginRuntimeLifecycleDto::Disabled,
-        MiniAppProductLifecycleState::Trashed => PluginRuntimeLifecycleDto::Trashed,
-        MiniAppProductLifecycleState::Deleting => PluginRuntimeLifecycleDto::Deleting,
+        PluginProductLifecycleState::Enabled => PluginRuntimeLifecycleDto::Enabled,
+        PluginProductLifecycleState::Disabled => PluginRuntimeLifecycleDto::Disabled,
+        PluginProductLifecycleState::Trashed => PluginRuntimeLifecycleDto::Trashed,
+        PluginProductLifecycleState::Deleting => PluginRuntimeLifecycleDto::Deleting,
     }
 }
 
@@ -243,7 +249,7 @@ fn pointers_dto(snapshot: &PluginRuntimeRepositorySnapshot) -> PluginRuntimeRele
     }
 }
 
-fn release_dto(value: &nomifun_agent_contracts::MiniAppReleaseRef) -> PluginRuntimeReleaseRefDto {
+fn release_dto(value: &nomifun_agent_contracts::PluginReleaseRef) -> PluginRuntimeReleaseRefDto {
     PluginRuntimeReleaseRefDto {
         release_id: value.release_id.0.clone(),
         artifact_id: value.artifact_id.0.clone(),
@@ -253,10 +259,10 @@ fn release_dto(value: &nomifun_agent_contracts::MiniAppReleaseRef) -> PluginRunt
 }
 
 fn service_health_dto(
-    kind: PluginRuntimeKind,
+    has_service: bool,
     value: Option<&PluginRuntimeServiceObservation>,
 ) -> PluginRuntimeServiceHealthDto {
-    if kind == PluginRuntimeKind::UiOnly {
+    if !has_service {
         return PluginRuntimeServiceHealthDto::NotApplicable;
     }
     match value {

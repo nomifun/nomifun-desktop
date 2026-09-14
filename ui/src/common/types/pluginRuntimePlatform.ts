@@ -9,7 +9,7 @@ import type { CapabilityCatalogItem } from './agentPlatform/contracts';
 
 export type { PluginRuntimeId } from './ids';
 
-export type PluginRuntimeKind = 'ui_only' | 'service';
+export type PluginRuntimeKind = 'plugin';
 export type PluginRuntimeServiceLifecycle = 'on_demand' | 'continuous';
 export type PluginRuntimeLifecycle = 'enabled' | 'disabled' | 'trashed' | 'deleting';
 export type PluginRuntimePublishMode = 'manual' | 'auto_ui_only';
@@ -188,7 +188,7 @@ export interface CreatePluginRuntimeProjectRequest {
   expected_library_revision: number;
   display_name: string;
   description?: string;
-  kind: PluginRuntimeKind;
+  service_source?: string;
 }
 
 export interface PluginRuntimeSourceFile {

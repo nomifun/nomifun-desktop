@@ -250,12 +250,10 @@ UPDATE cron_run_reservations
 SET conversation_id = NULL
 WHERE conversation_id IN (SELECT conversation_id FROM doomed_conversations);
 
--- A mini-app is a finished artifact that keeps running from its stored HTML.
--- Forget the provenance link, keep the app — the same posture the repository's
--- explicit conversation-delete path takes.
-UPDATE miniapps
-SET source_conversation_id = NULL
-WHERE source_conversation_id IN (SELECT conversation_id FROM doomed_conversations);
+-- The former single-document plugin store was retired by the destructive
+-- Plugin unification.  The final schema has no `plugins` table and therefore
+-- has no provenance column to clean here.  Keep the conversation cleanup
+-- migration valid on a fresh database without recreating that retired store.
 
 -- Requirements owned by a doomed conversation can never be resumed.
 --

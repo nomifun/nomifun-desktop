@@ -278,11 +278,8 @@ describe('CreativeAssetLibrary', () => {
     expect(submitted).toBe('hero title');
   });
 
-  test('keeps compact and reduced-motion layouts explicit', () => {
+  test('keeps reduced-motion behavior explicit', () => {
     const css = readFileSync(new URL('./CreativeAssetLibrary.module.css', import.meta.url), 'utf8');
-    expect(css.includes('@media (max-width: 820px)')).toBe(true);
-    expect(css.includes('@media (max-width: 560px)')).toBe(true);
-    expect(css.includes('@media (hover: none)')).toBe(true);
     expect(css.includes('@media (prefers-reduced-motion: reduce)')).toBe(true);
     expect(css.includes("[data-asset-appearance='source-page']")).toBe(true);
     expect(css.includes('.collectionBadge {')).toBe(true);

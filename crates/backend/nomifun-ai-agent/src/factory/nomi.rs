@@ -66,18 +66,8 @@ fn apply_model_only_ceiling(overrides: &mut NomiBuildExtra) {
 /// upstream rejection.
 fn apply_vision_input_policy(
     policy: Option<bool>,
-    on_demand: bool,
     resolved_supports_image: &mut Option<bool>,
 ) -> Result<(), AppError> {
-    if on_demand {
-        if *resolved_supports_image != Some(true) {
-            return Err(AppError::UnprocessableEntity(
-                "llm.vision is on demand, but the exact configured Chat model does not support image input"
-                    .to_owned(),
-            ));
-        }
-        return Ok(());
-    }
     match policy {
         Some(false) => {
             *resolved_supports_image = Some(false);
@@ -653,17 +643,19 @@ pub(super) async fn build(
     // that Browser/Computer/shell/third-party sites are reserved for an
     // explicit user request. The manager additionally enforces that route at
     // the advertised-tool and artifact-receipt boundaries.
-    let image_policy = if platform_gateway_entitled {
-        image_generation_prompt(None)
-    } else {
-        "This restricted Agent session is not entitled to native image generation. Do not use Browser, web search, or a third-party generator as a substitute, and do not claim that an image was generated. Tell the user to retry in a full local session or ask the session owner to enable the native capability.".to_owned()
-    };
-    overrides.system_prompt = Some(match overrides.system_prompt.take() {
-        Some(existing) if !existing.trim().is_empty() => {
-            format!("{existing}\n\n{image_policy}")
-        }
-        _ => image_policy,
-    });
+    if !overrides.enforce_tool_allowlist || !overrides.allowed_tools.is_empty() {
+        let image_policy = if platform_gateway_entitled {
+            image_generation_prompt(None)
+        } else {
+            "This restricted Agent session is not entitled to native image generation. Do not use Browser, web search, or a third-party generator as a substitute, and do not claim that an image was generated. Tell the user to retry in a full local session or ask the session owner to enable the native capability.".to_owned()
+        };
+        overrides.system_prompt = Some(match overrides.system_prompt.take() {
+            Some(existing) if !existing.trim().is_empty() => {
+                format!("{existing}\n\n{image_policy}")
+            }
+            _ => image_policy,
+        });
+    }
 
     // Every native Nomi session — regular desktop chat, companion, and IM
     // Channel Agent — follows the language of the owner's current request.
@@ -715,21 +707,8 @@ pub(super) async fn build(
     .await?;
     apply_vision_input_policy(
         overrides.vision_input,
-        overrides.vision_on_demand,
         &mut fields.compat_overrides.supports_image,
     )?;
-    let vision_activation = overrides.vision_input.map(|initial| {
-        Arc::new(std::sync::atomic::AtomicBool::new(initial))
-    });
-    let vision_activation_tool: Option<Box<dyn nomi_tools::Tool>> = overrides
-        .vision_on_demand
-        .then(|| {
-            let active = vision_activation
-                .clone()
-                .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicBool::new(false)));
-            Box::new(crate::vision_activation::VisionActivationTool::new(active))
-                as Box<dyn nomi_tools::Tool>
-        });
     let session_citations = Arc::new(crate::web_search::SessionCitationStore::default());
     let web_search_tool: Option<Box<dyn nomi_tools::Tool>> = if overrides
         .allowed_tools
@@ -1014,6 +993,8 @@ pub(super) async fn build(
         // Per-session 工具白名单（受限角色的 Agent attempt；普通会话恒空）。
         allowed_tools: overrides.allowed_tools.clone(),
         enforce_tool_allowlist: overrides.enforce_tool_allowlist,
+        companion_memory_enabled: overrides.companion_memory_enabled.unwrap_or(overrides.companion),
+        companion_skills_enabled: overrides.companion_skills_enabled.unwrap_or(overrides.companion),
         deferred_tools: overrides.deferred_tools.clone(),
         // 原生文件工具写根：本地桌面全权（None），渠道会话收窄到工作区。
         // 与 gateway file-service 的 PathAuthority 同一信任模型（file-access spec）。
@@ -1120,8 +1101,6 @@ pub(super) async fn build(
         image_generation_response_in_chinese: app_language == "zh-CN",
         web_search_tool,
         citation_render_tool,
-        vision_activation,
-        vision_activation_tool,
         lazy_mcp_runtime,
         plugin_tool_session,
     };
@@ -1921,28 +1900,24 @@ mod tests {
     #[test]
     fn vision_policy_is_subtractive_and_requires_exact_model_evidence() {
         let mut supported = Some(true);
-        apply_vision_input_policy(Some(true), false, &mut supported)
+        apply_vision_input_policy(Some(true), &mut supported)
             .expect("declared vision model accepts the selected capability");
         assert_eq!(supported, Some(true));
 
-        apply_vision_input_policy(Some(false), false, &mut supported)
+        apply_vision_input_policy(Some(false), &mut supported)
             .expect("unselected vision capability applies a subtractive fence");
         assert_eq!(supported, Some(false));
 
-        let error = apply_vision_input_policy(Some(true), false, &mut Some(false))
+        let error = apply_vision_input_policy(Some(true), &mut Some(false))
             .expect_err("text-only exact model must reject llm.vision");
         assert!(error.to_string().contains("llm.vision"));
 
         let mut ordinary = Some(true);
-        apply_vision_input_policy(None, false, &mut ordinary)
+        apply_vision_input_policy(None, &mut ordinary)
             .expect("ordinary conversations keep model-derived behavior");
         assert_eq!(ordinary, Some(true));
 
-        let mut deferred = Some(true);
-        apply_vision_input_policy(Some(false), true, &mut deferred)
-            .expect("on-demand vision preserves model support behind activation gate");
-        assert_eq!(deferred, Some(true));
-        assert!(apply_vision_input_policy(Some(false), true, &mut Some(false)).is_err());
+
     }
 
     #[test]

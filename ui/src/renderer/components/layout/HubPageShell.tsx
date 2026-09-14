@@ -6,7 +6,6 @@
 
 import classNames from 'classnames';
 import React from 'react';
-import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 
 interface HubPageShellProps {
   title: string;
@@ -29,7 +28,7 @@ export const HUB_PAGE_TITLE_CLASS = 'm-0 text-22px font-600 leading-tight text-t
  * HubPageShell — shared chrome for the homepage "hub" destinations (Model
  * Management, Presets, Skills, MCP). Mirrors the scroll container + centered content
  * column of `SettingsPageWrapper` so the embedded settings content components lay
- * out correctly — but without the settings-specific mobile top navigation.
+ * out correctly.
  */
 const HubPageShell: React.FC<HubPageShellProps> = ({
   title,
@@ -40,15 +39,12 @@ const HubPageShell: React.FC<HubPageShellProps> = ({
   hideHeading = false,
   children,
 }) => {
-  const layout = useLayoutContext();
-  const isMobile = layout?.isMobile ?? false;
-
   return (
     <div
       className={classNames(
         'w-full min-h-full box-border overflow-y-auto',
         className,
-        isMobile ? 'px-16px py-16px' : 'px-12px md:px-40px py-32px'
+        'px-12px md:px-40px py-32px'
       )}
     >
       <div className={classNames('mx-auto w-full', maxWidthClass)}>

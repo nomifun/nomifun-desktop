@@ -6,7 +6,6 @@ import {
   terminalTarget,
   type SessionTarget,
 } from '@/common/types/ids';
-import { blurActiveElement } from '@/renderer/utils/ui/focus';
 import {
   WORKSPACE_HAS_FILES_EVENT,
   WORKSPACE_TOGGLE_EVENT,
@@ -14,15 +13,10 @@ import {
   type WorkspaceHasFilesDetail,
   type WorkspaceToggleDetail,
 } from '@/renderer/utils/workspace/workspaceEvents';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 
 type UseWorkspaceCollapseParams = {
   workspaceEnabled: boolean;
-  isMobile: boolean;
-  /**
-   * Legacy render identity whose change forces a mobile collapse. It is not
-   * used for event matching or persistence; `target` owns those concerns.
-   */
   conversation_id?: ConversationId;
   /** Namespaced session that owns this workspace rail. */
   target?: SessionTarget;
@@ -51,7 +45,6 @@ type WorkspaceCollapsePreference = 'expanded' | 'collapsed' | null;
 type ResolveWorkspaceCollapseAfterHasFilesParams = {
   currentCollapsed: boolean;
   detail: WorkspaceHasFilesDetail;
-  isMobile: boolean;
   autoExpandOnFiles: boolean;
   isTemporaryWorkspace?: boolean;
   userPreference: WorkspaceCollapsePreference;
@@ -61,7 +54,6 @@ type ResolveWorkspaceCollapseAfterHasFilesParams = {
 export function resolveWorkspaceCollapseAfterHasFiles({
   currentCollapsed,
   detail,
-  isMobile,
   autoExpandOnFiles,
   isTemporaryWorkspace,
   userPreference,
@@ -69,10 +61,6 @@ export function resolveWorkspaceCollapseAfterHasFiles({
 }: ResolveWorkspaceCollapseAfterHasFilesParams): boolean {
   if (!target || !detail.target || !isSameSessionTarget(detail.target, target)) {
     return currentCollapsed;
-  }
-
-  if (isMobile) {
-    return true;
   }
 
   if (userPreference) {
@@ -114,7 +102,6 @@ export function resolveWorkspaceCollapseAfterHasFiles({
  */
 export function useWorkspaceCollapse({
   workspaceEnabled,
-  isMobile,
   conversation_id,
   target = conversation_id != null ? conversationTarget(conversation_id) : undefined,
   isTemporaryWorkspace,
@@ -123,9 +110,6 @@ export function useWorkspaceCollapse({
   // Workspace panel always starts collapsed; manual toggles and allowed file
   // signals can expand it. See WORKSPACE_HAS_FILES_EVENT handler below.
   const [rightSiderCollapsed, setRightSiderCollapsed] = useState(true);
-
-  // Mirror ref for collapse state
-  const rightCollapsedRef = useRef(rightSiderCollapsed);
 
   const targetKind = target?.kind;
   const targetId = target?.id;
@@ -159,11 +143,6 @@ export function useWorkspaceCollapse({
       // ignore errors
     }
   };
-
-  // Keep ref in sync
-  useEffect(() => {
-    rightCollapsedRef.current = rightSiderCollapsed;
-  }, [rightSiderCollapsed]);
 
   // Listen for workspace toggle events
   useEffect(() => {
@@ -224,7 +203,6 @@ export function useWorkspaceCollapse({
       const nextCollapsed = resolveWorkspaceCollapseAfterHasFiles({
         currentCollapsed: rightSiderCollapsed,
         detail,
-        isMobile,
         autoExpandOnFiles,
         isTemporaryWorkspace,
         userPreference,
@@ -239,7 +217,6 @@ export function useWorkspaceCollapse({
       window.removeEventListener(WORKSPACE_HAS_FILES_EVENT, handleHasFiles);
     };
   }, [
-    isMobile,
     workspaceEnabled,
     rightSiderCollapsed,
     isTemporaryWorkspace,
@@ -264,33 +241,6 @@ export function useWorkspaceCollapse({
       setRightSiderCollapsed(true);
     }
   }, [workspaceEnabled]);
-
-  // Mobile: force collapse when entering mobile mode
-  useEffect(() => {
-    if (!workspaceEnabled || !isMobile || rightCollapsedRef.current) {
-      return;
-    }
-    setRightSiderCollapsed(true);
-  }, [isMobile, workspaceEnabled]);
-
-  // Mobile: force collapse workspace on conversation switch to prevent overlay
-  useEffect(() => {
-    if (!workspaceEnabled || !isMobile) {
-      return;
-    }
-    setRightSiderCollapsed(true);
-  }, [conversation_id, isMobile, workspaceEnabled]);
-
-  // Mobile: blur active element on conversation switch to prevent soft keyboard
-  useEffect(() => {
-    if (!isMobile) {
-      return;
-    }
-    const rafId = requestAnimationFrame(() => {
-      blurActiveElement();
-    });
-    return () => cancelAnimationFrame(rafId);
-  }, [conversation_id, isMobile]);
 
   return { rightSiderCollapsed, setRightSiderCollapsed, persistRightSiderCollapsed };
 }

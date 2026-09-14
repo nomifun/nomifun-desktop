@@ -6,7 +6,6 @@
 
 import { ipcBridge } from '@/common';
 import { downloadFileFromPath, downloadTextContent } from '@/renderer/utils/file/download';
-import { useLayoutContext } from '@/renderer/hooks/context/LayoutContext';
 import { PreviewToolbarExtrasProvider, type PreviewToolbarExtras } from '../../context/PreviewToolbarExtrasContext';
 import { usePreviewContext } from '../../context/PreviewContext';
 import { useResizableSplit } from '@/renderer/hooks/ui/useResizableSplit';
@@ -65,7 +64,6 @@ const PreviewPanel: React.FC = () => {
     updateContent,
     saveContent,
   } = usePreviewContext();
-  const layout = useLayoutContext();
 
   // 视图状态 / View states
   const [viewMode, setViewMode] = useState<'source' | 'preview'>('preview');
@@ -408,20 +406,6 @@ const PreviewPanel: React.FC = () => {
     if (isMarkdown) {
       // 分屏模式：左右分割（编辑器 + 预览）/ Split-screen mode: Editor + Preview
       if (isSplitScreenEnabled) {
-        // 移动端：全屏显示预览，隐藏编辑器 / Mobile: Full-screen preview, hide editor
-        if (layout?.isMobile) {
-          return (
-            <div className='flex-1 overflow-hidden'>
-              <MarkdownPreview
-                content={content}
-                hideToolbar
-                file_path={metadata?.file_path}
-                workspace={metadata?.workspace}
-              />
-            </div>
-          );
-        }
-
         // 桌面端：左右分割布局 / Desktop: Split layout
         return (
           <div className='flex flex-1 relative overflow-hidden'>
@@ -481,15 +465,6 @@ const PreviewPanel: React.FC = () => {
     if (isHTML) {
       // 分屏模式：左右分割（编辑器 + 预览）/ Split-screen mode: Editor + Preview
       if (isSplitScreenEnabled) {
-        // 移动端：全屏显示预览，隐藏编辑器 / Mobile: Full-screen preview, hide editor
-        if (layout?.isMobile) {
-          return (
-            <div className='flex-1 overflow-hidden'>
-              <HTMLRenderer content={content} file_path={metadata?.file_path} workspace={metadata?.workspace} />
-            </div>
-          );
-        }
-
         // 桌面端：左右分割布局 / Desktop: Split layout
         return (
           <div className='flex flex-1 relative overflow-hidden'>

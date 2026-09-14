@@ -447,12 +447,11 @@ Runtime Profile 与资源仍由 Factory bool/Option、Gateway profile 和
 `conversation.extra` 决定。如果 Control Plane、Kernel 和 Session Open 各算一次，
 同一 Revision 就可能得到不同 closure、diagnostics 和 digest。
 
-因此 Preview、Save 和 Test 必须调用同一个纯函数 Compiler：
+因此 Save 必须调用唯一的纯函数 Compiler：
 
 ```text
-Preview ─┐
-Save ────┼─> one canonical Compiler
-Test ────┘          │
+Save ─────> one canonical Compiler
+                    │
                     └─> Snapshot + authority + diagnostics
 
 Session Open ─> read saved Snapshot + current executor compatibility check

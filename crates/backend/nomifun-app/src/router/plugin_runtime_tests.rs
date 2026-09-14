@@ -6,7 +6,7 @@ use axum::http::{Method, Request, StatusCode, header};
 use axum::{Extension, Router};
 use http_body_util::BodyExt;
 use nomifun_agent_contracts::{
-    DigestHex, MiniAppBridgeCallId, MiniAppId, ResolvedMiniAppServiceSpec,
+    DigestHex, PluginBridgeCallId, PluginProductId, ResolvedPluginServiceSpec,
     StrictJsonValue,
 };
 use nomifun_api_types::{
@@ -23,12 +23,12 @@ use nomifun_api_types::{
 use nomifun_auth::CurrentUser;
 use nomifun_common::{AppError, UserId};
 use nomifun_db::{
-    DbError, IMiniAppM1Repository, MiniAppM1ManagedSourceLineage,
-    SqliteMiniAppM1Repository, StartMiniAppM1BuildOperationParams,
+    DbError, IPluginRuntimeRepository, PluginRuntimeManagedSourceLineage,
+    SqlitePluginRuntimeRepository, StartPluginRuntimeBuildOperationParams,
     init_database_memory, installation_owner_id,
 };
 use nomifun_plugin_platform::runtime::{
-    PluginRuntimeCallCancellation, PluginRuntimeM1ApplicationService,
+    PluginRuntimeCallCancellation, PluginRuntimeApplicationService,
     PluginRuntimePlatformError, PluginRuntimePlatformResult, PluginRuntimeServiceHostState,
     PluginRuntimeServiceRuntimeBinding, PluginRuntimeServiceSpecInput,
 };
@@ -37,23 +37,23 @@ use serde_json::json;
 use tower::ServiceExt;
 
 use super::{
-    PluginRuntimeM1RouterState, application_error, miniapp_m1_read_routes,
-    miniapp_m1_surface_routes, miniapp_m1_write_routes,
+    PluginRuntimeM1RouterState, application_error, plugin_m1_read_routes,
+    plugin_m1_surface_routes, plugin_m1_write_routes,
 };
 
-const MISMATCHED_MINIAPP_ID: &str =
+const MISMATCHED_PLUGIN_ID: &str =
     "0190f5fe-7c00-7000-8000-000000000993";
 
 #[tokio::test]
 async fn split_routes_preserve_owner_scope_and_api_envelopes() {
     let database = init_database_memory().await.unwrap();
     let owner_id = installation_owner_id(database.pool()).await.unwrap();
-    let repository: Arc<dyn IMiniAppM1Repository> = Arc::new(
-        SqliteMiniAppM1Repository::new(database.pool().clone()),
+    let repository: Arc<dyn IPluginRuntimeRepository> = Arc::new(
+        SqlitePluginRuntimeRepository::new(database.pool().clone()),
     );
     let store_root = tempfile::tempdir().unwrap();
     let state = PluginRuntimeM1RouterState::new(Arc::new(
-        PluginRuntimeM1ApplicationService::new_with_root(
+        PluginRuntimeApplicationService::new_with_root(
             repository,
             store_root.path(),
         )
@@ -62,9 +62,9 @@ async fn split_routes_preserve_owner_scope_and_api_envelopes() {
     let owner = current_user(&owner_id, "owner");
 
     let read =
-        miniapp_m1_read_routes(state.clone()).layer(Extension(owner.clone()));
+        plugin_m1_read_routes(state.clone()).layer(Extension(owner.clone()));
     let write =
-        miniapp_m1_write_routes(state.clone()).layer(Extension(owner));
+        plugin_m1_write_routes(state.clone()).layer(Extension(owner));
 
     let response = send(&read, Method::POST, "/api/plugins/runtimes/projects", None)
         .await;
@@ -80,18 +80,18 @@ async fn split_routes_preserve_owner_scope_and_api_envelopes() {
             "expected_library_revision": 0,
             "display_name": "Route M1",
             "description": "owner-scoped route",
-            "kind": "ui_only"
+            "service_source": null
         })),
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     let created: PluginRuntimeWorkshopDto = response_data(response).await;
-    assert_eq!(created.miniapp.display_name, "Route M1");
-    assert_eq!(created.miniapp.kind, PluginRuntimeKindDto::UiOnly);
+    assert_eq!(created.plugin.display_name, "Route M1");
+    assert_eq!(created.plugin.kind, PluginRuntimeKindDto::Plugin);
 
     let build_path = format!(
         "/api/plugins/runtimes/{}/build",
-        created.miniapp.miniapp_id
+        created.plugin.plugin_id
     );
     let build_body = build_request(&created);
     let response = send(
@@ -105,16 +105,16 @@ async fn split_routes_preserve_owner_scope_and_api_envelopes() {
 
     let test_path = format!(
         "/api/plugins/runtimes/{}/test",
-        created.miniapp.miniapp_id
+        created.plugin.plugin_id
     );
     let test_request = TestPluginRuntimeReleaseRequest {
-        miniapp_id: created.miniapp.miniapp_id.clone(),
-        expected_product_revision: created.miniapp.product_revision,
-        expected_pointer_revision: created.miniapp.releases.pointer_revision,
+        plugin_id: created.plugin.plugin_id.clone(),
+        expected_product_revision: created.plugin.product_revision,
+        expected_pointer_revision: created.plugin.releases.pointer_revision,
         project_id: created.project_id.clone(),
         expected_project_revision: created.project_revision,
         expected_build_generation: created.build_generation,
-        release_id: MISMATCHED_MINIAPP_ID.to_owned(),
+        release_id: MISMATCHED_PLUGIN_ID.to_owned(),
         expected_release_digest: "a".repeat(64),
         expected_config_revision: created.config.config_revision,
         expected_credential_bindings_revision: created.credential_bindings_revision,
@@ -134,7 +134,7 @@ async fn split_routes_preserve_owner_scope_and_api_envelopes() {
         &test_path,
         Some(
             serde_json::to_value(TestPluginRuntimeReleaseRequest {
-                miniapp_id: MISMATCHED_MINIAPP_ID.to_owned(),
+                plugin_id: MISMATCHED_PLUGIN_ID.to_owned(),
                 ..test_request.clone()
             })
             .unwrap(),
@@ -152,13 +152,13 @@ async fn split_routes_preserve_owner_scope_and_api_envelopes() {
     assert_eq!(
         response.status(),
         StatusCode::BAD_REQUEST,
-        "UI-only MiniApps must not enter the Service Test application path"
+        "UI-only Plugins must not enter the Service Test application path"
     );
 
     let operation_id = "0190f5fe-7c00-7000-8000-000000000991";
     let cancel_path = format!(
         "/api/plugins/runtimes/{}/operations/{operation_id}/cancel",
-        created.miniapp.miniapp_id
+        created.plugin.plugin_id
     );
     let response = send(
         &read,
@@ -173,15 +173,15 @@ async fn split_routes_preserve_owner_scope_and_api_envelopes() {
     assert_eq!(response.status(), StatusCode::OK);
     let library: PluginRuntimeLibraryResponseDto = response_data(response).await;
     assert_eq!(library.library_revision, 1);
-    assert_eq!(library.miniapps.len(), 1);
+    assert_eq!(library.plugins.len(), 1);
     assert_eq!(
-        library.miniapps[0].miniapp_id,
-        created.miniapp.miniapp_id
+        library.plugins[0].plugin_id,
+        created.plugin.plugin_id
     );
 
     let workshop_path = format!(
         "/api/plugins/runtimes/{}/workshop",
-        created.miniapp.miniapp_id
+        created.plugin.plugin_id
     );
     let response = send(&read, Method::GET, &workshop_path, None).await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -190,13 +190,13 @@ async fn split_routes_preserve_owner_scope_and_api_envelopes() {
 
     let surface_path = format!(
         "/api/plugins/runtimes/{}/surface/open",
-        created.miniapp.miniapp_id
+        created.plugin.plugin_id
     );
     let response = send(
         &read,
         Method::POST,
         &surface_path,
-        Some(json!({ "plugin_id": created.miniapp.miniapp_id })),
+        Some(json!({ "plugin_id": created.plugin.plugin_id })),
     )
     .await;
     assert_eq!(
@@ -213,7 +213,7 @@ async fn split_routes_preserve_owner_scope_and_api_envelopes() {
     let response = send(
         &write,
         Method::GET,
-        &format!("/api/plugins/runtimes/{}/surface", created.miniapp.miniapp_id),
+        &format!("/api/plugins/runtimes/{}/surface", created.plugin.plugin_id),
         None,
     )
     .await;
@@ -252,13 +252,13 @@ async fn split_routes_preserve_owner_scope_and_api_envelopes() {
     .await
     .unwrap();
     let other_read =
-        miniapp_m1_read_routes(state).layer(Extension(other));
+        plugin_m1_read_routes(state).layer(Extension(other));
     let response =
         send(&other_read, Method::GET, "/api/plugins/runtimes", None).await;
     assert_eq!(response.status(), StatusCode::OK);
     let library: PluginRuntimeLibraryResponseDto = response_data(response).await;
     assert_eq!(library.library_revision, 0);
-    assert!(library.miniapps.is_empty());
+    assert!(library.plugins.is_empty());
 
     let response =
         send(&other_read, Method::GET, &workshop_path, None).await;
@@ -271,16 +271,16 @@ async fn split_routes_preserve_owner_scope_and_api_envelopes() {
 async fn source_routes_are_local_mutations_with_exact_project_cas() {
     let database = init_database_memory().await.unwrap();
     let owner_id = installation_owner_id(database.pool()).await.unwrap();
-    let repository: Arc<dyn IMiniAppM1Repository> = Arc::new(
-        SqliteMiniAppM1Repository::new(database.pool().clone()),
+    let repository: Arc<dyn IPluginRuntimeRepository> = Arc::new(
+        SqlitePluginRuntimeRepository::new(database.pool().clone()),
     );
     let store_root = tempfile::tempdir().unwrap();
     let state = PluginRuntimeM1RouterState::new(Arc::new(
-        PluginRuntimeM1ApplicationService::new_with_root(repository, store_root.path()).unwrap(),
+        PluginRuntimeApplicationService::new_with_root(repository, store_root.path()).unwrap(),
     ));
     let owner = current_user(&owner_id, "owner");
-    let read = miniapp_m1_read_routes(state.clone()).layer(Extension(owner.clone()));
-    let write = miniapp_m1_write_routes(state).layer(Extension(owner));
+    let read = plugin_m1_read_routes(state.clone()).layer(Extension(owner.clone()));
+    let write = plugin_m1_write_routes(state).layer(Extension(owner));
     let response = send(
         &write,
         Method::POST,
@@ -288,14 +288,14 @@ async fn source_routes_are_local_mutations_with_exact_project_cas() {
         Some(json!({
             "expected_library_revision": 0,
             "display_name": "Editable Route",
-            "kind": "ui_only"
+            "service_source": null
         })),
     )
     .await;
     let created: PluginRuntimeWorkshopDto = response_data(response).await;
     let source_path = format!(
         "/api/plugins/runtimes/{}/source/files/ui%2Findex.html",
-        created.miniapp.miniapp_id
+        created.plugin.plugin_id
     );
     assert_eq!(
         send(&read, Method::GET, &source_path, None).await.status(),
@@ -315,11 +315,11 @@ async fn source_routes_are_local_mutations_with_exact_project_cas() {
 
     let edit_path = format!(
         "/api/plugins/runtimes/{}/source/edit",
-        created.miniapp.miniapp_id
+        created.plugin.plugin_id
     );
     let request = json!({
-        "plugin_id": created.miniapp.miniapp_id.clone(),
-        "expected_product_revision": created.miniapp.product_revision,
+        "plugin_id": created.plugin.plugin_id.clone(),
+        "expected_product_revision": created.plugin.product_revision,
         "project_id": created.project_id.clone(),
         "expected_project_revision": created.project_revision,
         "expected_build_generation": created.build_generation,
@@ -343,11 +343,11 @@ async fn build_and_cancel_routes_use_real_application_state() {
     let database = init_database_memory().await.unwrap();
     let owner_id = installation_owner_id(database.pool()).await.unwrap();
     let repository = Arc::new(
-        SqliteMiniAppM1Repository::new(database.pool().clone()),
+        SqlitePluginRuntimeRepository::new(database.pool().clone()),
     );
     let store_root = tempfile::tempdir().unwrap();
     let application = Arc::new(
-        PluginRuntimeM1ApplicationService::new_with_root(
+        PluginRuntimeApplicationService::new_with_root(
             repository.clone(),
             store_root.path(),
         )
@@ -360,18 +360,18 @@ async fn build_and_cancel_routes_use_real_application_state() {
                 expected_library_revision: 0,
                 display_name: "Build Route".to_owned(),
                 description: Some("exact request forwarding".to_owned()),
-                kind: PluginRuntimeKindDto::UiOnly,
+                service_source: None,
             },
         )
         .await
         .unwrap();
-    let miniapp_id = workshop.miniapp.miniapp_id.clone();
+    let plugin_id = workshop.plugin.plugin_id.clone();
     let state = PluginRuntimeM1RouterState::new(application);
-    let write = miniapp_m1_write_routes(state)
+    let write = plugin_m1_write_routes(state)
         .layer(Extension(current_user(&owner_id, "owner")));
 
     let build_request = build_request(&workshop);
-    let build_path = format!("/api/plugins/runtimes/{miniapp_id}/build");
+    let build_path = format!("/api/plugins/runtimes/{plugin_id}/build");
     let response = send(
         &write,
         Method::POST,
@@ -385,20 +385,20 @@ async fn build_and_cancel_routes_use_real_application_state() {
     assert_eq!(ready.project_build_generation, workshop.build_generation);
     assert!(ready.created_at_ms > 0);
     assert_eq!(
-        built.miniapp.releases.ready.as_ref(),
+        built.plugin.releases.ready.as_ref(),
         Some(&ready.release)
     );
     let completed = repository
-        .list_build_operations(&owner_id, &miniapp_id)
+        .list_build_operations(&owner_id, &plugin_id)
         .await
         .unwrap();
     assert_eq!(completed.len(), 1);
     assert_eq!(completed[0].state, "succeeded");
-    assert_eq!(completed[0].owner_kind, "miniapp");
-    assert_eq!(completed[0].owner_id, miniapp_id);
+    assert_eq!(completed[0].owner_kind, "plugin");
+    assert_eq!(completed[0].owner_id, plugin_id);
 
     let mismatched_request = BuildPluginRuntimeRequest {
-        miniapp_id: "0190f5fe-7c00-7000-8000-000000000993".to_owned(),
+        plugin_id: "0190f5fe-7c00-7000-8000-000000000993".to_owned(),
         ..build_request.clone()
     };
     let response = send(
@@ -413,7 +413,7 @@ async fn build_and_cancel_routes_use_real_application_state() {
     assert_eq!(error.code, "BAD_REQUEST");
     assert_eq!(
         repository
-            .list_build_operations(&owner_id, &miniapp_id)
+            .list_build_operations(&owner_id, &plugin_id)
             .await
             .unwrap()
             .len(),
@@ -422,7 +422,7 @@ async fn build_and_cancel_routes_use_real_application_state() {
     );
 
     let snapshot = repository
-        .get(&owner_id, &miniapp_id)
+        .get(&owner_id, &plugin_id)
         .await
         .unwrap()
         .expect("built Plugin");
@@ -432,13 +432,13 @@ async fn build_and_cancel_routes_use_real_application_state() {
         .max(snapshot.project.updated_at)
         .max(1);
     repository
-        .start_build_operation(&StartMiniAppM1BuildOperationParams {
+        .start_build_operation(&StartPluginRuntimeBuildOperationParams {
             owner_user_id: owner_id.clone(),
-            miniapp_id: miniapp_id.clone(),
+            plugin_product_id: plugin_id.clone(),
             project_id: snapshot.project.project_id.clone(),
             operation_id: operation_id.to_owned(),
             expected_project_revision: snapshot.project.project_revision,
-            expected_source: MiniAppM1ManagedSourceLineage {
+            expected_source: PluginRuntimeManagedSourceLineage {
                 managed_source_path: snapshot
                     .project
                     .managed_source_path
@@ -467,7 +467,7 @@ async fn build_and_cancel_routes_use_real_application_state() {
         .await
         .unwrap();
     let cancel_path = format!(
-        "/api/plugins/runtimes/{miniapp_id}/operations/{operation_id}/cancel"
+        "/api/plugins/runtimes/{plugin_id}/operations/{operation_id}/cancel"
     );
     let response = send(
         &write,
@@ -483,15 +483,15 @@ async fn build_and_cancel_routes_use_real_application_state() {
     assert_eq!(canceled.kind, DurableOperationKindDto::Build);
     assert_eq!(
         canceled.owner,
-        DurableOperationOwnerDto::Miniapp {
-            miniapp_id: miniapp_id.clone(),
+        DurableOperationOwnerDto::PluginRuntime {
+            plugin_id: plugin_id.clone(),
         }
     );
     assert_eq!(canceled.state, DurableOperationStateDto::Canceled);
     assert!(!canceled.cancelable);
     assert!(canceled.completed_at_ms.is_some());
     let persisted = repository
-        .get_build_operation(&owner_id, &miniapp_id, operation_id)
+        .get_build_operation(&owner_id, &plugin_id, operation_id)
         .await
         .unwrap()
         .expect("canceled operation");
@@ -515,31 +515,31 @@ async fn lifecycle_routes_enforce_identity_owner_state_and_surface_revocation() 
     let owner_id = installation_owner_id(database.pool()).await.unwrap();
     let other = insert_other_user(&database, "lifecycle-other").await;
     let repository = Arc::new(
-        SqliteMiniAppM1Repository::new(database.pool().clone()),
+        SqlitePluginRuntimeRepository::new(database.pool().clone()),
     );
     let store_root = tempfile::tempdir().unwrap();
     let application = Arc::new(
-        PluginRuntimeM1ApplicationService::new_with_root(
+        PluginRuntimeApplicationService::new_with_root(
             repository.clone(),
             store_root.path(),
         )
         .unwrap(),
     );
-    let enabled = create_enabled_ui_miniapp(
+    let enabled = create_enabled_ui_plugin(
         application.as_ref(),
         &owner_id,
         "Lifecycle Routes",
     )
     .await;
-    let miniapp_id = enabled.miniapp.miniapp_id.clone();
+    let plugin_id = enabled.plugin.plugin_id.clone();
     let active = enabled
-        .miniapp
+        .plugin
         .releases
         .active
         .clone()
         .expect("enabled Plugin must retain its Active Release");
     let persisted = repository
-        .get(&owner_id, &miniapp_id)
+        .get(&owner_id, &plugin_id)
         .await
         .unwrap()
         .expect("enabled Plugin");
@@ -555,15 +555,15 @@ async fn lifecycle_routes_enforce_identity_owner_state_and_surface_revocation() 
         );
     let release_managed_path: String = nomifun_db::sqlx::query_scalar(
         "SELECT artifact.managed_path
-         FROM miniapp_release_artifacts artifact
-         JOIN miniapp_releases release
+         FROM plugin_release_artifacts artifact
+         JOIN plugin_releases release
            ON release.owner_user_id = artifact.owner_user_id
           AND release.artifact_id = artifact.artifact_id
-         WHERE release.owner_user_id = ? AND release.miniapp_id = ?
+         WHERE release.owner_user_id = ? AND release.plugin_product_id = ?
          LIMIT 1",
     )
     .bind(&owner_id)
-    .bind(&miniapp_id)
+    .bind(&plugin_id)
     .fetch_one(database.pool())
     .await
     .unwrap();
@@ -577,26 +577,26 @@ async fn lifecycle_routes_enforce_identity_owner_state_and_surface_revocation() 
     let state = PluginRuntimeM1RouterState::new(application);
     let owner = current_user(&owner_id, "owner");
     let owner_read =
-        miniapp_m1_read_routes(state.clone()).layer(Extension(owner.clone()));
+        plugin_m1_read_routes(state.clone()).layer(Extension(owner.clone()));
     let owner_write =
-        miniapp_m1_write_routes(state.clone()).layer(Extension(owner));
+        plugin_m1_write_routes(state.clone()).layer(Extension(owner));
     let other_write =
-        miniapp_m1_write_routes(state.clone()).layer(Extension(other));
-    let surface_routes = miniapp_m1_surface_routes(state);
+        plugin_m1_write_routes(state.clone()).layer(Extension(other));
+    let surface_routes = plugin_m1_surface_routes(state);
 
-    let open_path = format!("/api/plugins/runtimes/{miniapp_id}/surface/open");
+    let open_path = format!("/api/plugins/runtimes/{plugin_id}/surface/open");
     let response = send(
         &owner_write,
         Method::POST,
         &open_path,
-        Some(json!({ "plugin_id": miniapp_id })),
+        Some(json!({ "plugin_id": plugin_id })),
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     let surface: PluginRuntimeSurfaceLaunchDescriptorDto =
         response_data(response).await;
     let asset_path = format!(
-        "/api/plugins/runtimes/{miniapp_id}/surface/assets/{}/{}/{}/{}",
+        "/api/plugins/runtimes/{plugin_id}/surface/assets/{}/{}/{}/{}",
         surface.surface_capability,
         surface.active_release_epoch,
         surface.expected_release_digest,
@@ -610,15 +610,15 @@ async fn lifecycle_routes_enforce_identity_owner_state_and_surface_revocation() 
         "the issued Surface capability must work before Trash"
     );
 
-    let trash_path = format!("/api/plugins/runtimes/{miniapp_id}/trash");
+    let trash_path = format!("/api/plugins/runtimes/{plugin_id}/trash");
     let trash_request = TrashPluginRuntimeRequest {
-        miniapp_id: miniapp_id.clone(),
-        expected_product_revision: enabled.miniapp.product_revision,
-        expected_pointer_revision: enabled.miniapp.releases.pointer_revision,
+        plugin_id: plugin_id.clone(),
+        expected_product_revision: enabled.plugin.product_revision,
+        expected_pointer_revision: enabled.plugin.releases.pointer_revision,
         expected_active_release_digest: Some(active.release_digest.clone()),
     };
     let mismatched_trash = TrashPluginRuntimeRequest {
-        miniapp_id: MISMATCHED_MINIAPP_ID.to_owned(),
+        plugin_id: MISMATCHED_PLUGIN_ID.to_owned(),
         ..trash_request.clone()
     };
     assert_api_error(
@@ -662,16 +662,16 @@ async fn lifecycle_routes_enforce_identity_owner_state_and_surface_revocation() 
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     let trashed: PluginRuntimeWorkshopDto = response_data(response).await;
-    assert_eq!(trashed.miniapp.lifecycle, PluginRuntimeLifecycleDto::Trashed);
+    assert_eq!(trashed.plugin.lifecycle, PluginRuntimeLifecycleDto::Trashed);
     assert_eq!(
-        trashed.miniapp.product_revision,
-        enabled.miniapp.product_revision + 1
+        trashed.plugin.product_revision,
+        enabled.plugin.product_revision + 1
     );
     assert_eq!(
-        trashed.miniapp.releases.pointer_revision,
-        enabled.miniapp.releases.pointer_revision
+        trashed.plugin.releases.pointer_revision,
+        enabled.plugin.releases.pointer_revision
     );
-    assert!(!trashed.miniapp.surface_available);
+    assert!(!trashed.plugin.surface_available);
     assert_api_error(
         send(&surface_routes, Method::GET, &asset_path, None).await,
         StatusCode::NOT_FOUND,
@@ -679,15 +679,15 @@ async fn lifecycle_routes_enforce_identity_owner_state_and_surface_revocation() 
     )
     .await;
 
-    let restore_path = format!("/api/plugins/runtimes/{miniapp_id}/restore");
+    let restore_path = format!("/api/plugins/runtimes/{plugin_id}/restore");
     let restore_request = RestorePluginRuntimeRequest {
-        miniapp_id: miniapp_id.clone(),
-        expected_product_revision: trashed.miniapp.product_revision,
+        plugin_id: plugin_id.clone(),
+        expected_product_revision: trashed.plugin.product_revision,
         expected_lifecycle: PluginRuntimeLifecycleDto::Trashed,
-        expected_pointer_revision: trashed.miniapp.releases.pointer_revision,
+        expected_pointer_revision: trashed.plugin.releases.pointer_revision,
     };
     let mismatched_restore = RestorePluginRuntimeRequest {
-        miniapp_id: MISMATCHED_MINIAPP_ID.to_owned(),
+        plugin_id: MISMATCHED_PLUGIN_ID.to_owned(),
         ..restore_request.clone()
     };
     assert_api_error(
@@ -741,25 +741,25 @@ async fn lifecycle_routes_enforce_identity_owner_state_and_surface_revocation() 
     assert_eq!(response.status(), StatusCode::OK);
     let restored: PluginRuntimeWorkshopDto = response_data(response).await;
     assert_eq!(
-        restored.miniapp.lifecycle,
+        restored.plugin.lifecycle,
         PluginRuntimeLifecycleDto::Disabled,
         "Restore must never reactivate an enabled Plugin"
     );
     assert_eq!(
-        restored.miniapp.product_revision,
-        trashed.miniapp.product_revision + 1
+        restored.plugin.product_revision,
+        trashed.plugin.product_revision + 1
     );
     assert_eq!(
-        restored.miniapp.releases.pointer_revision,
-        trashed.miniapp.releases.pointer_revision
+        restored.plugin.releases.pointer_revision,
+        trashed.plugin.releases.pointer_revision
     );
-    assert!(!restored.miniapp.surface_available);
+    assert!(!restored.plugin.surface_available);
     assert_api_error(
         send(
             &owner_write,
             Method::POST,
             &open_path,
-            Some(json!({ "plugin_id": miniapp_id })),
+            Some(json!({ "plugin_id": plugin_id })),
         )
         .await,
         StatusCode::BAD_REQUEST,
@@ -773,10 +773,10 @@ async fn lifecycle_routes_enforce_identity_owner_state_and_surface_revocation() 
         &trash_path,
         Some(
             serde_json::to_value(TrashPluginRuntimeRequest {
-                miniapp_id: miniapp_id.clone(),
-                expected_product_revision: restored.miniapp.product_revision,
+                plugin_id: plugin_id.clone(),
+                expected_product_revision: restored.plugin.product_revision,
                 expected_pointer_revision: restored
-                    .miniapp
+                    .plugin
                     .releases
                     .pointer_revision,
                 expected_active_release_digest: Some(
@@ -790,19 +790,19 @@ async fn lifecycle_routes_enforce_identity_owner_state_and_surface_revocation() 
     assert_eq!(response.status(), StatusCode::OK);
     let trashed_again: PluginRuntimeWorkshopDto = response_data(response).await;
 
-    let delete_path = format!("/api/plugins/runtimes/{miniapp_id}/delete");
+    let delete_path = format!("/api/plugins/runtimes/{plugin_id}/delete");
     let delete_request = DeletePluginRuntimeRequest {
-        miniapp_id: miniapp_id.clone(),
-        expected_product_revision: trashed_again.miniapp.product_revision,
+        plugin_id: plugin_id.clone(),
+        expected_product_revision: trashed_again.plugin.product_revision,
         expected_lifecycle: PluginRuntimeLifecycleDto::Trashed,
         expected_pointer_revision: trashed_again
-            .miniapp
+            .plugin
             .releases
             .pointer_revision,
         expected_active_release_digest: Some(active.release_digest),
     };
     let mismatched_delete = DeletePluginRuntimeRequest {
-        miniapp_id: MISMATCHED_MINIAPP_ID.to_owned(),
+        plugin_id: MISMATCHED_PLUGIN_ID.to_owned(),
         ..delete_request.clone()
     };
     assert_api_error(
@@ -858,11 +858,11 @@ async fn lifecycle_routes_enforce_identity_owner_state_and_surface_revocation() 
         response_data(response).await;
     assert!(
         deleted_library
-            .miniapps
+            .plugins
             .iter()
-            .all(|miniapp| miniapp.miniapp_id != miniapp_id)
+            .all(|plugin| plugin.plugin_id != plugin_id)
     );
-    assert!(repository.get(&owner_id, &miniapp_id).await.unwrap().is_none());
+    assert!(repository.get(&owner_id, &plugin_id).await.unwrap().is_none());
     assert!(!source_path.exists(), "Delete must purge managed Source");
     assert!(!release_path.exists(), "Delete must purge managed Release");
 
@@ -875,7 +875,7 @@ async fn lifecycle_routes_enforce_identity_owner_state_and_surface_revocation() 
         send(
             &owner_read,
             Method::GET,
-            &format!("/api/plugins/runtimes/{miniapp_id}/workshop"),
+            &format!("/api/plugins/runtimes/{plugin_id}/workshop"),
             None,
         )
         .await,
@@ -889,12 +889,12 @@ async fn lifecycle_routes_enforce_identity_owner_state_and_surface_revocation() 
 async fn trash_route_stops_the_exact_service_runtime_identity() {
     let database = init_database_memory().await.unwrap();
     let owner_id = installation_owner_id(database.pool()).await.unwrap();
-    let repository: Arc<dyn IMiniAppM1Repository> = Arc::new(
-        SqliteMiniAppM1Repository::new(database.pool().clone()),
+    let repository: Arc<dyn IPluginRuntimeRepository> = Arc::new(
+        SqlitePluginRuntimeRepository::new(database.pool().clone()),
     );
     let store_root = tempfile::tempdir().unwrap();
     let application = Arc::new(
-        PluginRuntimeM1ApplicationService::new_with_root(
+        PluginRuntimeApplicationService::new_with_root(
             repository,
             store_root.path(),
         )
@@ -909,25 +909,25 @@ async fn trash_route_stops_the_exact_service_runtime_identity() {
                 expected_library_revision: 0,
                 display_name: "Service Trash".to_owned(),
                 description: None,
-                kind: PluginRuntimeKindDto::Service,
+                service_source: Some("export async function start() { return { async invoke({ payload }) { return payload; }, async dispose() {} }; }".into()),
             },
         )
         .await
         .unwrap();
-    let miniapp_id = created.miniapp.miniapp_id.clone();
-    let write = miniapp_m1_write_routes(PluginRuntimeM1RouterState::new(application))
+    let plugin_id = created.plugin.plugin_id.clone();
+    let write = plugin_m1_write_routes(PluginRuntimeM1RouterState::new(application))
         .layer(Extension(current_user(&owner_id, "owner")));
 
     let response = send(
         &write,
         Method::POST,
-        &format!("/api/plugins/runtimes/{miniapp_id}/trash"),
+        &format!("/api/plugins/runtimes/{plugin_id}/trash"),
         Some(
             serde_json::to_value(TrashPluginRuntimeRequest {
-                miniapp_id: miniapp_id.clone(),
-                expected_product_revision: created.miniapp.product_revision,
+                plugin_id: plugin_id.clone(),
+                expected_product_revision: created.plugin.product_revision,
                 expected_pointer_revision: created
-                    .miniapp
+                    .plugin
                     .releases
                     .pointer_revision,
                 expected_active_release_digest: None,
@@ -938,12 +938,12 @@ async fn trash_route_stops_the_exact_service_runtime_identity() {
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     let trashed: PluginRuntimeWorkshopDto = response_data(response).await;
-    assert_eq!(trashed.miniapp.lifecycle, PluginRuntimeLifecycleDto::Trashed);
+    assert_eq!(trashed.plugin.lifecycle, PluginRuntimeLifecycleDto::Trashed);
     assert_eq!(
-        trashed.miniapp.service_health,
-        PluginRuntimeServiceHealthDto::Stopped
+        trashed.plugin.service_health,
+        PluginRuntimeServiceHealthDto::NotApplicable
     );
-    assert_eq!(runtime.stopped_ids(), vec![miniapp_id]);
+    assert_eq!(runtime.stopped_ids(), vec![plugin_id]);
 }
 
 #[tokio::test]
@@ -952,11 +952,11 @@ async fn retry_delete_route_recovers_failed_cleanup_with_exact_owner_and_revisio
     let owner_id = installation_owner_id(database.pool()).await.unwrap();
     let other = insert_other_user(&database, "retry-other").await;
     let repository = Arc::new(
-        SqliteMiniAppM1Repository::new(database.pool().clone()),
+        SqlitePluginRuntimeRepository::new(database.pool().clone()),
     );
     let store_root = tempfile::tempdir().unwrap();
     let application = Arc::new(
-        PluginRuntimeM1ApplicationService::new_with_root(
+        PluginRuntimeApplicationService::new_with_root(
             repository.clone(),
             store_root.path(),
         )
@@ -971,7 +971,7 @@ async fn retry_delete_route_recovers_failed_cleanup_with_exact_owner_and_revisio
                 expected_library_revision: 0,
                 display_name: "Retry Delete".to_owned(),
                 description: None,
-                kind: PluginRuntimeKindDto::UiOnly,
+                service_source: None,
             },
         )
         .await
@@ -980,9 +980,9 @@ async fn retry_delete_route_recovers_failed_cleanup_with_exact_owner_and_revisio
         .build(&owner_id, build_request(&created))
         .await
         .unwrap();
-    let miniapp_id = built.miniapp.miniapp_id.clone();
+    let plugin_id = built.plugin.plugin_id.clone();
     let persisted = repository
-        .get(&owner_id, &miniapp_id)
+        .get(&owner_id, &plugin_id)
         .await
         .unwrap()
         .expect("built Plugin");
@@ -998,15 +998,15 @@ async fn retry_delete_route_recovers_failed_cleanup_with_exact_owner_and_revisio
         );
     let release_managed_path: String = nomifun_db::sqlx::query_scalar(
         "SELECT artifact.managed_path
-         FROM miniapp_release_artifacts artifact
-         JOIN miniapp_releases release
+         FROM plugin_release_artifacts artifact
+         JOIN plugin_releases release
            ON release.owner_user_id = artifact.owner_user_id
           AND release.artifact_id = artifact.artifact_id
-         WHERE release.owner_user_id = ? AND release.miniapp_id = ?
+         WHERE release.owner_user_id = ? AND release.plugin_product_id = ?
          LIMIT 1",
     )
     .bind(&owner_id)
-    .bind(&miniapp_id)
+    .bind(&plugin_id)
     .fetch_one(database.pool())
     .await
     .unwrap();
@@ -1016,23 +1016,23 @@ async fn retry_delete_route_recovers_failed_cleanup_with_exact_owner_and_revisio
         .join(release_managed_path);
 
     let state = PluginRuntimeM1RouterState::new(application);
-    let owner_write = miniapp_m1_write_routes(state.clone())
+    let owner_write = plugin_m1_write_routes(state.clone())
         .layer(Extension(current_user(&owner_id, "owner")));
-    let owner_read = miniapp_m1_read_routes(state.clone())
+    let owner_read = plugin_m1_read_routes(state.clone())
         .layer(Extension(current_user(&owner_id, "owner")));
     let other_write =
-        miniapp_m1_write_routes(state).layer(Extension(other));
+        plugin_m1_write_routes(state).layer(Extension(other));
 
     let response = send(
         &owner_write,
         Method::POST,
-        &format!("/api/plugins/runtimes/{miniapp_id}/trash"),
+        &format!("/api/plugins/runtimes/{plugin_id}/trash"),
         Some(
             serde_json::to_value(TrashPluginRuntimeRequest {
-                miniapp_id: miniapp_id.clone(),
-                expected_product_revision: built.miniapp.product_revision,
+                plugin_id: plugin_id.clone(),
+                expected_product_revision: built.plugin.product_revision,
                 expected_pointer_revision: built
-                    .miniapp
+                    .plugin
                     .releases
                     .pointer_revision,
                 expected_active_release_digest: None,
@@ -1044,12 +1044,12 @@ async fn retry_delete_route_recovers_failed_cleanup_with_exact_owner_and_revisio
     assert_eq!(response.status(), StatusCode::OK);
     let trashed: PluginRuntimeWorkshopDto = response_data(response).await;
 
-    let delete_path = format!("/api/plugins/runtimes/{miniapp_id}/delete");
+    let delete_path = format!("/api/plugins/runtimes/{plugin_id}/delete");
     let delete_request = DeletePluginRuntimeRequest {
-        miniapp_id: miniapp_id.clone(),
-        expected_product_revision: trashed.miniapp.product_revision,
+        plugin_id: plugin_id.clone(),
+        expected_product_revision: trashed.plugin.product_revision,
         expected_lifecycle: PluginRuntimeLifecycleDto::Trashed,
-        expected_pointer_revision: trashed.miniapp.releases.pointer_revision,
+        expected_pointer_revision: trashed.plugin.releases.pointer_revision,
         expected_active_release_digest: None,
     };
     assert_api_error(
@@ -1069,34 +1069,34 @@ async fn retry_delete_route_recovers_failed_cleanup_with_exact_owner_and_revisio
     assert!(release_path.is_dir());
 
     let deleting = repository
-        .get(&owner_id, &miniapp_id)
+        .get(&owner_id, &plugin_id)
         .await
         .unwrap()
         .expect("failed Delete must retain the deleting Product");
     assert_eq!(deleting.product.lifecycle, "deleting");
     let failed = repository
-        .list_miniapp_operations(&owner_id, &miniapp_id)
+        .list_plugin_operations(&owner_id, &plugin_id)
         .await
         .unwrap()
         .into_iter()
-        .find(|operation| operation.kind == "miniapp_permanent_delete")
+        .find(|operation| operation.kind == "plugin_permanent_delete")
         .expect("failed permanent Delete operation");
     assert_eq!(failed.state, "failed");
     assert_eq!(
         failed.last_error_code.as_deref(),
-        Some("miniapp_delete_cleanup_failed")
+        Some("plugin_delete_cleanup_failed")
     );
     assert!(failed.finished_at_ms.is_some());
 
     let retry_path =
-        format!("/api/plugins/runtimes/{miniapp_id}/delete/retry");
+        format!("/api/plugins/runtimes/{plugin_id}/delete/retry");
     let retry_request = RetryPluginRuntimeDeleteRequest {
-        miniapp_id: miniapp_id.clone(),
+        plugin_id: plugin_id.clone(),
         failed_operation_id: failed.operation_id.clone(),
         expected_operation_revision: 2,
     };
     let mismatched_retry = RetryPluginRuntimeDeleteRequest {
-        miniapp_id: MISMATCHED_MINIAPP_ID.to_owned(),
+        plugin_id: MISMATCHED_PLUGIN_ID.to_owned(),
         ..retry_request.clone()
     };
     assert_api_error(
@@ -1151,21 +1151,21 @@ async fn retry_delete_route_recovers_failed_cleanup_with_exact_owner_and_revisio
     let library: PluginRuntimeLibraryResponseDto = response_data(response).await;
     assert!(
         library
-            .miniapps
+            .plugins
             .iter()
-            .all(|miniapp| miniapp.miniapp_id != miniapp_id)
+            .all(|plugin| plugin.plugin_id != plugin_id)
     );
     assert_eq!(runtime.purge_calls(), 2);
     assert!(!source_path.exists());
     assert!(!release_path.exists());
-    assert!(repository.get(&owner_id, &miniapp_id).await.unwrap().is_none());
+    assert!(repository.get(&owner_id, &plugin_id).await.unwrap().is_none());
 
     let deletion_states: Vec<String> = nomifun_db::sqlx::query_scalar(
         "SELECT state FROM product_operations
-         WHERE owner_kind = 'miniapp' AND owner_id = ?
-           AND kind = 'miniapp_permanent_delete'",
+         WHERE owner_kind = 'plugin' AND owner_id = ?
+           AND kind = 'plugin_permanent_delete'",
     )
-    .bind(&miniapp_id)
+    .bind(&plugin_id)
     .fetch_all(database.pool())
     .await
     .unwrap();
@@ -1194,26 +1194,26 @@ async fn retry_delete_route_recovers_failed_cleanup_with_exact_owner_and_revisio
 #[test]
 fn application_errors_map_to_app_error_semantics() {
     let invalid = application_error(
-        nomifun_plugin_platform::runtime::PluginRuntimeM1ApplicationError::Invalid(
+        nomifun_plugin_platform::runtime::PluginRuntimeApplicationError::Invalid(
             "bad revision".to_owned(),
         ),
     );
     assert!(matches!(invalid, AppError::BadRequest(_)));
 
     let not_found = application_error(
-        nomifun_plugin_platform::runtime::PluginRuntimeM1ApplicationError::NotFound,
+        nomifun_plugin_platform::runtime::PluginRuntimeApplicationError::NotFound,
     );
     assert!(matches!(not_found, AppError::NotFound(_)));
 
     let runtime = application_error(
-        nomifun_plugin_platform::runtime::PluginRuntimeM1ApplicationError::Runtime(
+        nomifun_plugin_platform::runtime::PluginRuntimeApplicationError::Runtime(
             "cleanup failed".to_owned(),
         ),
     );
     assert!(matches!(runtime, AppError::Internal(_)));
 
     let conflict = application_error(
-        nomifun_plugin_platform::runtime::PluginRuntimeM1ApplicationError::Database(
+        nomifun_plugin_platform::runtime::PluginRuntimeApplicationError::Database(
             DbError::Conflict("stale library revision".to_owned()),
         ),
     );
@@ -1249,7 +1249,7 @@ impl PluginRuntimeServiceRuntimeBinding for LifecycleTestRuntime {
     async fn purge_storage(
         &self,
         _owner_user_id: &str,
-        _miniapp_id: &MiniAppId,
+        _plugin_id: &PluginProductId,
     ) -> PluginRuntimePlatformResult<()> {
         self.purge_calls.fetch_add(1, Ordering::SeqCst);
         if self.fail_next_purge.swap(false, Ordering::SeqCst) {
@@ -1263,7 +1263,7 @@ impl PluginRuntimeServiceRuntimeBinding for LifecycleTestRuntime {
     async fn resolve_spec(
         &self,
         _input: PluginRuntimeServiceSpecInput,
-    ) -> PluginRuntimePlatformResult<ResolvedMiniAppServiceSpec> {
+    ) -> PluginRuntimePlatformResult<ResolvedPluginServiceSpec> {
         Err(PluginRuntimePlatformError::Runtime(
             "Service resolution is outside this lifecycle route fixture"
                 .to_owned(),
@@ -1272,7 +1272,7 @@ impl PluginRuntimeServiceRuntimeBinding for LifecycleTestRuntime {
 
     async fn bind_active(
         &self,
-        _spec: ResolvedMiniAppServiceSpec,
+        _spec: ResolvedPluginServiceSpec,
         _enabled: bool,
     ) -> PluginRuntimePlatformResult<()> {
         Ok(())
@@ -1280,15 +1280,15 @@ impl PluginRuntimeServiceRuntimeBinding for LifecycleTestRuntime {
 
     async fn start(
         &self,
-        _spec: ResolvedMiniAppServiceSpec,
+        _spec: ResolvedPluginServiceSpec,
     ) -> PluginRuntimePlatformResult<()> {
         Ok(())
     }
 
     async fn invoke(
         &self,
-        _spec: &ResolvedMiniAppServiceSpec,
-        _call_id: MiniAppBridgeCallId,
+        _spec: &ResolvedPluginServiceSpec,
+        _call_id: PluginBridgeCallId,
         _method: String,
         _payload: StrictJsonValue,
         _cancellation: PluginRuntimeCallCancellation,
@@ -1302,32 +1302,32 @@ impl PluginRuntimeServiceRuntimeBinding for LifecycleTestRuntime {
 
     async fn cancel(
         &self,
-        _miniapp_id: &MiniAppId,
-        _call_id: &MiniAppBridgeCallId,
+        _plugin_id: &PluginProductId,
+        _call_id: &PluginBridgeCallId,
     ) {
     }
 
     async fn stop(
         &self,
-        miniapp_id: &MiniAppId,
+        plugin_id: &PluginProductId,
     ) -> PluginRuntimePlatformResult<()> {
         self.stopped_ids
             .lock()
             .unwrap()
-            .push(miniapp_id.as_ref().to_owned());
+            .push(plugin_id.as_ref().to_owned());
         Ok(())
     }
 
     async fn retry(
         &self,
-        _miniapp_id: &MiniAppId,
+        _plugin_id: &PluginProductId,
     ) -> PluginRuntimePlatformResult<()> {
         Ok(())
     }
 
     async fn state(
         &self,
-        _miniapp_id: &MiniAppId,
+        _plugin_id: &PluginProductId,
     ) -> Option<PluginRuntimeServiceHostState> {
         Some(PluginRuntimeServiceHostState::Stopped)
     }
@@ -1338,7 +1338,7 @@ impl PluginRuntimeServiceRuntimeBinding for LifecycleTestRuntime {
 
     async fn register_module(
         &self,
-        _miniapp_id: MiniAppId,
+        _plugin_id: PluginProductId,
         _release_digest: DigestHex,
         _module_path: std::path::PathBuf,
     ) -> PluginRuntimePlatformResult<()> {
@@ -1346,8 +1346,8 @@ impl PluginRuntimeServiceRuntimeBinding for LifecycleTestRuntime {
     }
 }
 
-async fn create_enabled_ui_miniapp(
-    application: &PluginRuntimeM1ApplicationService,
+async fn create_enabled_ui_plugin(
+    application: &PluginRuntimeApplicationService,
     owner_id: &str,
     display_name: &str,
 ) -> PluginRuntimeWorkshopDto {
@@ -1358,7 +1358,7 @@ async fn create_enabled_ui_miniapp(
                 expected_library_revision: 0,
                 display_name: display_name.to_owned(),
                 description: None,
-                kind: PluginRuntimeKindDto::UiOnly,
+                service_source: None,
             },
         )
         .await
@@ -1377,14 +1377,14 @@ async fn create_enabled_ui_miniapp(
         .publish(
             owner_id,
             PublishPluginRuntimeRequest {
-                miniapp_id: built.miniapp.miniapp_id.clone(),
-                expected_product_revision: built.miniapp.product_revision,
+                plugin_id: built.plugin.plugin_id.clone(),
+                expected_product_revision: built.plugin.product_revision,
                 expected_pointer_revision: built
-                    .miniapp
+                    .plugin
                     .releases
                     .pointer_revision,
                 expected_active_release_epoch: built
-                    .miniapp
+                    .plugin
                     .releases
                     .active_release_epoch,
                 ready_release_id: ready.release_id,
@@ -1397,7 +1397,7 @@ async fn create_enabled_ui_miniapp(
         .await
         .unwrap();
     let active = published
-        .miniapp
+        .plugin
         .releases
         .active
         .as_ref()
@@ -1406,10 +1406,10 @@ async fn create_enabled_ui_miniapp(
         .set_enabled(
             owner_id,
             SetPluginRuntimeEnabledRequest {
-                miniapp_id: published.miniapp.miniapp_id.clone(),
-                expected_product_revision: published.miniapp.product_revision,
+                plugin_id: published.plugin.plugin_id.clone(),
+                expected_product_revision: published.plugin.product_revision,
                 expected_pointer_revision: published
-                    .miniapp
+                    .plugin
                     .releases
                     .pointer_revision,
                 expected_active_release_digest: Some(
@@ -1445,8 +1445,8 @@ async fn insert_other_user(
 
 fn build_request(workshop: &PluginRuntimeWorkshopDto) -> BuildPluginRuntimeRequest {
     BuildPluginRuntimeRequest {
-        miniapp_id: workshop.miniapp.miniapp_id.clone(),
-        expected_product_revision: workshop.miniapp.product_revision,
+        plugin_id: workshop.plugin.plugin_id.clone(),
+        expected_product_revision: workshop.plugin.product_revision,
         project_id: workshop.project_id.clone(),
         expected_project_revision: workshop.project_revision,
         expected_build_generation: workshop.build_generation,

@@ -24,7 +24,7 @@ import { uuidv7 } from '@/common/utils/uuidv7';
  *
  * The index signature is deliberate: `extra` is a closed literal shape owned by
  * the integration spine, but the backend keeps unknown keys, which is how
- * capability markers (e.g. the mini-app flag) and `system_prompt` ride along.
+ * capability markers and `system_prompt` ride along.
  */
 export type NomiQuickStartExtra = Partial<ICreateConversationParams['extra']> & Record<string, unknown>;
 

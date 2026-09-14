@@ -142,23 +142,3 @@
   padding-top: 14px;
   border-top: 1px solid var(--color-border-2);
 }
-
-@media (max-width: 820px) {
-  .resultDetails {
-    max-height: min(64vh, calc(100dvh - 220px));
-    grid-template-columns: minmax(0, 1fr);
-    gap: 14px;
-    overflow-y: auto;
-  }
-
-  .detailVisualColumn,
-  .detailInfoColumn {
-    max-height: none;
-    overflow: visible;
-  }
-
-  .detailVisualColumn img {
-    max-height: min(36vh, 320px);
-    object-fit: contain;
-  }
-}
