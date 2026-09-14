@@ -1,5 +1,6 @@
-//! Authenticate the local 001..095 runtime-events lineage before converging it
-//! with upstream's 095 snapshot retirement and 096 product Agent selections.
+//! Authenticate the local runtime-events lineage through 095, excluding the
+//! retired 027, before converging it with upstream's 095 snapshot retirement
+//! and 096 product Agent selections.
 //! Canonical 099 retains the exact old runtime SQL bytes. Only its ledger
 //! version moves: no runtime table, event, checksum or timestamp is rewritten.
 //! The move and missing canonical suffix commit together, or roll back together.
@@ -82,29 +83,36 @@ pub(super) fn is_displaced_prefix(
         return Err(DbError::Init("cannot relocate runtime 095: migration 099 is already occupied".into()));
     }
 
-    // Exactly 001..094 plus the old runtime 095, all successful and canonical.
-    // Reject target occupancy and all later/gapped/partially repaired lineages;
-    // unpublished effect migrations are not an authenticated historical suffix.
-    if rows.len() != DISPLACED_VERSION as usize {
+    // The merged canonical prefix has the fixed 027 retirement gap. Authenticate
+    // that exact version set, not a row-count/index assumption and not whatever
+    // a future embedded migrator happens to contain.
+    let prefix = migrator
+        .iter()
+        .filter(|migration| migration.version < DISPLACED_VERSION)
+        .collect::<Vec<_>>();
+    let expected_versions = (1..DISPLACED_VERSION).filter(|version| *version != 27);
+    if !prefix.iter().map(|migration| migration.version).eq(expected_versions) {
         return Err(DbError::Init(
-            "displaced runtime lineage must be exactly 001..095 with no occupied 099 or extra suffix".into(),
+            "embedded runtime prefix no longer matches authenticated 001..026,028..094".into(),
         ));
     }
-    for (index, row) in rows.iter().enumerate() {
+
+    // Exactly that prefix plus the old runtime 095, all successful and canonical.
+    // Reject target occupancy and all later/gapped/partially repaired lineages;
+    // unpublished effect migrations are not an authenticated historical suffix.
+    if rows.len() != prefix.len() + 1 {
+        return Err(DbError::Init(
+            "displaced runtime lineage must be exactly 001..026,028..095 with no occupied 099 or extra suffix".into(),
+        ));
+    }
+    let expected = prefix
+        .into_iter()
+        .map(|migration| (migration.version, migration))
+        .chain(std::iter::once((DISPLACED_VERSION, canonical)));
+    for (row, (expected_version, expected)) in rows.iter().zip(expected) {
         let version: i64 = row.try_get("version").map_err(DbError::Query)?;
         let success: bool = row.try_get("success").map_err(DbError::Query)?;
         let checksum: Vec<u8> = row.try_get("checksum").map_err(DbError::Query)?;
-        let expected_version = index as i64 + 1;
-        let expected = if expected_version == DISPLACED_VERSION {
-            canonical
-        } else {
-            migrator
-                .iter()
-                .find(|migration| migration.version == expected_version)
-                .ok_or_else(|| {
-                    DbError::Init(format!("embedded migration {expected_version} is missing"))
-                })?
-        };
         if version != expected_version
             || !success
             || checksum.as_slice() != expected.checksum.as_ref()

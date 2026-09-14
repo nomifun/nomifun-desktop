@@ -5,7 +5,7 @@
     "default": "Default engine (Nomi)",
     "hint": "This engine executes the Agent. Save to use it for new conversations; existing conversations keep their engine. In chat, just choose an Agent.",
     "unavailable": "The catalog or selected build is unavailable. Retry or choose another engine for this Agent. No automatic fallback is used.",
-    "codingLimit": "This Coding build supports file/Git tools, Session-isolated snapshots, authorized commands/interactive processes, Agent-locked plugin tools and packaged Skills, on-demand discovery/activation within the Agent's frozen selection, and receipt-backed text instructions during execution. New instructions are handled at execution boundaries, not by interrupting in-flight effects. Images require an already-active vision capability and a compatible model. MCP, MiniApps and Git push are not supported yet. New capabilities have not been validated."
+    "codingLimit": "This Coding build provides file/Git tools, conversation-isolated snapshots, commands/interactive processes, MCP and plugin tools, and packaged Skills, subject to the Agent's saved enabled capabilities, bound resources and platform permissions. New conversations freeze that configuration; capabilities are not activated on demand. Instructions added during execution are handled at execution boundaries. Images require an enabled vision capability and a compatible model. Git push is limited to explicitly authorized pushes to configured local/file remotes; SSH/HTTPS credentials, force push and ref deletion are unavailable. These capabilities have not all completed end-to-end validation."
   },
   "subtitle": "Configure your Agents around the work you want to do.",
   "loading": "Loading Agent Workbench…",

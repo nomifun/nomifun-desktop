@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+  createMacosDevLifetime,
   developmentEnvironment,
   formatWindowsLinkEnvironmentError,
   hasWindowsLinkEnvironmentShape,
@@ -9,6 +10,9 @@ import {
   validateWindowsLinkEnvironment,
 } from './run-dev.mjs';
 import { join } from 'node:path';
+import { connect } from 'node:net';
+import { once } from 'node:events';
+import { existsSync } from 'node:fs';
 
 describe('Windows development data generation', () => {
   test('uses a stable clean-start root without altering the input environment', () => {
@@ -151,5 +155,52 @@ describe('run-dev native environment', () => {
     expect(loadWindowsToolchainEnvironment(environment, 'darwin')).toEqual(
       environment,
     );
+  });
+});
+
+
+describe.skipIf(process.platform !== 'darwin')('macOS development lifetime', () => {
+  test('requests graceful exit and waits until the desktop closes its connection', async () => {
+    const lifetime = await createMacosDevLifetime();
+    const desktop = connect({ path: lifetime.socketPath, allowHalfOpen: true });
+    try {
+      await once(desktop, 'connect');
+      await new Promise((resolve) => setImmediate(resolve));
+      const request = once(desktop, 'data');
+      desktop.resume();
+      let stopped = false;
+      const stopping = lifetime.stop().then(() => { stopped = true; });
+      const [requestBytes] = await request;
+      expect(requestBytes.toString()).toBe('q');
+      expect(stopped).toBe(false);
+      expect(lifetime.stop()).toBe(lifetime.stop());
+      // Simulate the OS closing the connection after verified backend cleanup.
+      desktop.destroy();
+      await stopping;
+      expect(stopped).toBe(true);
+      expect(existsSync(lifetime.socketPath)).toBe(false);
+    } finally {
+      desktop.destroy();
+      await lifetime.stop();
+    }
+  });
+
+  test('stops during startup and keeps concurrent development runs isolated', async () => {
+    const first = await createMacosDevLifetime();
+    const second = await createMacosDevLifetime();
+    try {
+      expect(first.socketPath).not.toBe(second.socketPath);
+      await first.stop();
+      expect(existsSync(first.socketPath)).toBe(false);
+      expect(existsSync(second.socketPath)).toBe(true);
+      const desktop = connect(second.socketPath);
+      await once(desktop, 'connect');
+      const closed = once(desktop, 'close');
+      desktop.destroy();
+      await closed;
+    } finally {
+      await first.stop();
+      await second.stop();
+    }
   });
 });

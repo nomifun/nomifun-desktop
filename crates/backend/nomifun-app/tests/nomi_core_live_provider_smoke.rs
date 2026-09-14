@@ -95,6 +95,11 @@ impl SmokeFailure {
             .get("code")
             .and_then(Value::as_str)
             .unwrap_or("HTTP_STATUS_FAILURE");
+        let code = if code == "CONFLICT" {
+            admission_conflict_code(body).unwrap_or(code)
+        } else {
+            code
+        };
         Self::new(phase, code, status.as_u16())
     }
 }
@@ -1115,11 +1120,68 @@ fn first_durable_error_code(messages: &[Value]) -> Option<String> {
             continue;
         }
         if let Some(code) = find_typed_code(projection) {
+            if code == "CONFLICT" {
+                if let Some(diagnostic) = admission_conflict_code(projection) {
+                    return Some(diagnostic.to_owned());
+                }
+            }
             return Some(code);
         }
-        return Some("TOOL_OR_TURN_FAILED".to_owned());
+        let output = projection.get("output").and_then(Value::as_str).unwrap_or_default();
+        let diagnostic = if output.contains("Source quote does not occur") {
+            "CODING_REQUIREMENT_SOURCE_MISMATCH"
+        } else if output.contains("source quote exceeds") {
+            "CODING_REQUIREMENT_QUOTE_TOO_LONG"
+        } else if output.contains("Call update_plan with an in_progress step") {
+            "CODING_PLAN_REQUIRED"
+        } else if output.contains("Evidence call is unknown") {
+            "CODING_COMPLETION_EVIDENCE_UNKNOWN"
+        } else if output.contains("Evidence is failed, unsettled, overlapping or stale") {
+            "CODING_COMPLETION_EVIDENCE_UNUSABLE"
+        } else if output.contains("Close or explicitly block all plan steps") {
+            "CODING_COMPLETION_PLAN_OPEN"
+        } else if output.contains("Completion omits recorded requirements") {
+            "CODING_COMPLETION_REQUIREMENTS_MISSING"
+        } else if output.starts_with("Invalid plan:") {
+            "CODING_PLAN_ARGUMENTS_INVALID"
+        } else {
+            match projection.get("name").and_then(Value::as_str) {
+                Some("update_plan") => "CODING_PLAN_REJECTED",
+                Some("report_completion") => "CODING_COMPLETION_REJECTED",
+                Some("write_file") => "CODING_WRITE_REJECTED",
+                Some("read_file") => "CODING_READ_REJECTED",
+                Some("apply_patch") => "CODING_PATCH_REJECTED",
+                Some("exec_command") => "CODING_EXEC_REJECTED",
+                Some("resume_task") => "CODING_RESUME_REJECTED",
+                _ => "TOOL_OR_TURN_FAILED",
+            }
+        };
+        return Some(diagnostic.to_owned());
     }
     None
+}
+
+// Classify locally generated admission failures without emitting arbitrary
+// error messages, provider responses, workspace paths or credential material.
+// This is diagnostic evidence only: every classified conflict still fails.
+fn admission_conflict_code(value: &Value) -> Option<&'static str> {
+    match value {
+        Value::String(message) => [
+            ("Agent Skills: requested Skill is not in the Agent's immutable selected Skill locks", "CONFLICT_SKILL_LOCK_SELECTION"),
+            ("current Kernel compilation differs from the persisted Nomi resolved Snapshot", "CONFLICT_KERNEL_SNAPSHOT_MISMATCH"),
+            ("Nomi Plugin Tool Kernel admission failed:", "CONFLICT_KERNEL_ADMISSION"),
+            ("Nomi Plugin Tool session materialization failed:", "CONFLICT_TOOL_MATERIALIZATION"),
+            ("Engine Session admission:", "CONFLICT_ENGINE_SESSION_ADMISSION"),
+            ("Engine turn receipt:", "CONFLICT_ENGINE_TURN_RECEIPT"),
+            ("Engine resources:", "CONFLICT_ENGINE_RESOURCES"),
+            ("Nomi Wave 2 workspace", "CONFLICT_WORKSPACE_ADMISSION"),
+            ("Nomi Wave 2 AgentSession", "CONFLICT_WORKSPACE_ADMISSION"),
+            ("Coding requires an owned process execute grant", "CONFLICT_PROCESS_GRANT"),
+        ].into_iter().find_map(|(known, code)| message.contains(known).then_some(code)),
+        Value::Object(values) => values.values().find_map(admission_conflict_code),
+        Value::Array(values) => values.iter().find_map(admission_conflict_code),
+        _ => None,
+    }
 }
 
 fn find_typed_code(value: &Value) -> Option<String> {
@@ -1505,6 +1567,7 @@ async fn wait_for_coding_stage(
     coding_engine: bool,
 ) -> Result<(), SmokeFailure> {
     let deadline = tokio::time::Instant::now() + CODING_STAGE_DEADLINE;
+    let mut ready_incomplete_since = None;
     loop {
         // Re-read the complete stage window on every poll. Tool projections are
         // updated in place from running to completed, so advancing the cursor
@@ -1538,7 +1601,28 @@ async fn wait_for_coding_stage(
         let observation = envelope_data(phase, observation)?;
         let ready = observation.pointer("/head/status").and_then(Value::as_str) == Some("ready");
         if ready && matches!(latest_evidence, CodingEvidence::Complete) {
+            if coding_engine {
+                let (raw, _) = session_messages_after(router, phase, session_id, after_seq).await?;
+                if !raw.iter().any(|message| message["projection"]["name"] == "report_completion"
+                    && message["projection"]["status"] == "completed")
+                {
+                    return Err(SmokeFailure::new(phase, "ENGINE_COMPLETION_EVIDENCE_MISSING", 422));
+                }
+            }
             return Ok(());
+        }
+        // A stable ready head cannot produce more tool results. Allow a short
+        // cross-query projection race, then report the actual missing evidence
+        // instead of letting the outer stage timeout hide the diagnosis.
+        if ready {
+            let since = ready_incomplete_since.get_or_insert_with(tokio::time::Instant::now);
+            if since.elapsed() >= Duration::from_secs(2) {
+                if let CodingEvidence::Incomplete(code) = latest_evidence {
+                    return Err(SmokeFailure::new(phase, code, 422));
+                }
+            }
+        } else {
+            ready_incomplete_since = None;
         }
         if tokio::time::Instant::now() >= deadline {
             let (code, status) = if ready {
@@ -3353,6 +3437,23 @@ fn coding_engine_evidence_messages(messages: &[Value]) -> Result<Vec<Value>, Smo
     let mut result = Vec::new();
     for message in messages {
         let projection = &message["projection"];
+        // These are Coding's mandatory planning/completion controls, not
+        // platform file/command executions. Only successful controls are
+        // excluded; running/error projections remain visible to the checker.
+        if matches!(projection["name"].as_str(), Some("update_plan" | "report_completion" | "resume_task"
+            | "search_tool_history" | "read_tool_history" | "load_tool_history"))
+            && projection["status"] == "completed"
+        {
+            continue;
+        }
+        if projection["name"] == "read_file" && projection["args"]["format"] == "instruction_scope"
+            && projection["status"] == "completed"
+        {
+            if !matches!(projection["args"]["path"].as_str(), Some("" | "." | "live-coding.txt")) {
+                return Err(SmokeFailure::new("engine.instructions", "ENGINE_INSTRUCTION_SCOPE_INVALID", 422));
+            }
+            continue;
+        }
         if projection["call_id"].as_str().is_some_and(|id| id.starts_with("coding-instructions:")) {
             if projection["name"] != "read_file" {
                 return Err(SmokeFailure::new("engine.instructions", "ENGINE_INSTRUCTION_READ_INVALID", 422));
@@ -3494,6 +3595,9 @@ async fn run_engine_chain(router: &Router, api_key: &str, model: &str, root: &Pa
         ];
         let mut prior_messages = Vec::new();
         for (stage, marker, prompt, tools) in stages {
+            let prompt = if coding {
+                format!("Follow the Coding Engine lifecycle. First call update_plan alone: use one step named stage with status in_progress and one requirement id task describing the stage and its constraints, with source.input=0 and a SHORT exact quote from this request (for example live-coding.txt). After the requested external tools succeed, call update_plan alone to set stage completed, omitting unchanged requirements. Then call report_completion alone with one criterion for step stage, requirement_ids=[task], disposition=supported, the actual successful external observation call IDs as evidence_call_ids, and an accurate rationale without claiming unrequested tests. Only then give the final answer. These engine-local controls, bounded tool-history inspection, and read_file(format=instruction_scope) for live-coding.txt or the workspace root are permitted; tool restrictions below apply to task file/command operations. This is a new task in the same conversation, not a request to resume unfinished historical work. {prompt}")
+            } else { prompt };
             // Static phases are safe to print even if a provider echoes secrets.
             let phase = match (coding, stage) {
                 (false, "create") => "engine.nomi.create", (false, "patch") => "engine.nomi.patch",
@@ -3621,6 +3725,270 @@ async fn nomi_core_official_engines_reach_live_stepfun() {
 #[cfg(test)]
 mod evidence_tests {
     use super::*;
+
+    const LOCAL_REPLY_SSE: &str = "data: {\"id\":\"mock\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"LOCAL_ADMISSION_OK\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"mock\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn official_engines_cancel_inflight_model_and_continue() {
+        let upstream = wiremock::MockServer::start().await;
+        let root = tempfile::tempdir().unwrap();
+        let fixture = build_fixture(&root).await.unwrap();
+        let router = fixture.application.router();
+        let provider = configure_stepfun(&router, "local-only-cancel-fixture", &format!("{}/step_plan/v1", upstream.uri()), STEPFUN_PLAN_MODEL).await.unwrap();
+        let catalog = successful_json(&router, "engine.catalog", Method::GET, "/api/runtime-engines",
+            None, LOCAL_API_DEADLINE, &[StatusCode::OK]).await.unwrap();
+        let catalog = envelope_data("engine.catalog", catalog).unwrap();
+        for (family, profile) in [("nomifun.nomi", "default"), ("nomifun.coding", "coding")] {
+            upstream.reset().await;
+            wiremock::Mock::given(wiremock::matchers::method("POST"))
+                .respond_with(wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(LOCAL_REPLY_SSE)
+                    .set_delay(Duration::from_secs(60)))
+                .mount(&upstream).await;
+            let selection = engine_selection(&catalog, family, profile).unwrap();
+            let (preset, _) = create_agent_preset(&router, &provider, STEPFUN_PLAN_MODEL, Some(&selection), ENGINE_CAPABILITIES).await.unwrap();
+            let (session, _) = create_session(&router, &preset, &provider, STEPFUN_PLAN_MODEL, Some(&selection), coding_resource_selections()).await.unwrap();
+            let workspace = root.path().join(family);
+            std::fs::create_dir(&workspace).unwrap();
+            bind_session_workspace(&router, &session, &workspace).await.unwrap();
+            start_session_turn(&router, "engine.mock.cancel", &session, &uuid::Uuid::now_v7().to_string(), "Wait for the model response".into()).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    if !upstream.received_requests().await.unwrap().is_empty() { break; }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            }).await.expect("cancel must target an actual in-flight model request");
+            let running = successful_json(&router, "engine.mock.cancel", Method::GET,
+                format!("/api/conversations/{session}"), None, LOCAL_API_DEADLINE, &[StatusCode::OK]).await.unwrap();
+            assert_eq!(running["data"]["status"], "running", "{family}");
+            successful_json(&router, "engine.mock.cancel", Method::POST,
+                format!("/api/conversations/{session}/cancel"), Some(json!({})), Duration::from_secs(15), &[StatusCode::OK]).await.unwrap();
+            let cancelled = successful_json(&router, "engine.mock.cancel", Method::GET,
+                format!("/api/conversations/{session}"), None, LOCAL_API_DEADLINE, &[StatusCode::OK]).await.unwrap();
+            assert_eq!(cancelled["data"]["status"], "finished", "{family}");
+            let cursor = session_message_cursor(&router, "engine.mock.cancel", &session).await.unwrap();
+            upstream.reset().await;
+            wiremock::Mock::given(wiremock::matchers::method("POST"))
+                .respond_with(wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream").set_body_string(LOCAL_REPLY_SSE))
+                .mount(&upstream).await;
+            start_session_turn(&router, "engine.mock.resume", &session, &uuid::Uuid::now_v7().to_string(), "Reply LOCAL_ADMISSION_OK".into()).await.unwrap();
+            tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    let (messages, _) = session_messages_after(&router, "engine.mock.resume", &session, cursor).await.unwrap();
+                    assert!(first_durable_error_code(&messages).is_none(), "{family}: local resume failed: {messages:#?}");
+                    if exact_assistant_marker_count(&messages, "LOCAL_ADMISSION_OK") > 0 {
+                        let terminal = successful_json(&router, "engine.mock.resume", Method::GET,
+                            format!("/api/conversations/{session}"), None, LOCAL_API_DEADLINE, &[StatusCode::OK]).await.unwrap();
+                        if terminal["data"]["status"] == "finished" { break; }
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            }).await.expect("same Session must resume after platform cancellation cleanup");
+            assert_eq!(upstream.received_requests().await.unwrap().len(), 1, "{family}: resumed turn reached provider exactly once");
+            assert_session_engine(&router, &session, &selection, &provider, STEPFUN_PLAN_MODEL).await.unwrap();
+        }
+        tokio::time::timeout(SHUTDOWN_DEADLINE, fixture.application.close()).await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn official_engines_admit_live_fixture_before_model_execution() {
+        // Same product routes and Agent capabilities as the live chain. The
+        // only credential and provider here are test-owned and loopback-only.
+        let upstream = wiremock::MockServer::start().await;
+        const REQUEST: &str = "Create live-coding.txt with alpha followed by one newline and reply LOCAL_ADMISSION_OK.";
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(|request: &wiremock::Request| {
+                let body: Value = serde_json::from_slice(&request.body).unwrap();
+                if body["messages"].as_array().unwrap().iter().any(|message|
+                    message["role"] == "user" && message["content"].to_string().contains("LOCAL_CONTINUATION_OK"))
+                {
+                    return wiremock::ResponseTemplate::new(200)
+                        .insert_header("content-type", "text/event-stream")
+                        .set_body_string(LOCAL_REPLY_SSE.replace("LOCAL_ADMISSION_OK", "LOCAL_CONTINUATION_OK"));
+                }
+                let observed = |id: &str| body["messages"].as_array().unwrap().iter()
+                    .any(|message| message["role"] == "tool" && message["tool_call_id"] == id);
+                let coding = body["tools"].as_array().unwrap().iter()
+                    .any(|tool| tool["function"]["name"] == "write_file");
+                if (coding && observed("local-report")) || (!coding && observed("local-write")) {
+                    return wiremock::ResponseTemplate::new(200)
+                        .insert_header("content-type", "text/event-stream")
+                        .set_body_string(LOCAL_REPLY_SSE);
+                }
+                let (id, name, args) = if coding && !observed("local-plan") {
+                    ("local-plan", "update_plan", json!({"explanation":"Perform the requested file creation.",
+                        "plan":[{"step":"create file","status":"in_progress"}],
+                        "requirements":[{"id":"request","description":REQUEST,"source":{"input":0,"quote":REQUEST}}]}))
+                } else if coding && observed("local-write") && !observed("local-plan-close") {
+                    ("local-plan-close", "update_plan", json!({"explanation":"The requested file write returned.",
+                        "plan":[{"step":"create file","status":"completed"}]}))
+                } else if coding && observed("local-plan-close") {
+                    ("local-report", "report_completion", json!({"summary":"The requested write returned successfully.",
+                        "criteria":[{"step":"create file","requirement_ids":["request"],"disposition":"supported",
+                            "evidence_call_ids":["local-write"],"rationale":"The requested file write returned; no claim of test execution."}]}))
+                } else if coding {
+                    ("local-write", "write_file", json!({"path":CODING_FILE,"content":"alpha\n"}))
+                } else {
+                    ("local-write", "Write", json!({"file_path":CODING_FILE,"content":"alpha\n"}))
+                };
+                let frame = json!({"id":"local-write","choices":[{"index":0,"delta":{
+                    "tool_calls":[{"index":0,"id":id,"type":"function",
+                        "function":{"name":name,"arguments":args.to_string()}}]},"finish_reason":null}]});
+                let terminal = json!({"id":"local-write","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]});
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(format!("data: {frame}\n\ndata: {terminal}\n\ndata: [DONE]\n\n"))
+            })
+            .mount(&upstream).await;
+        let root = tempfile::tempdir().unwrap();
+        let fixture = build_fixture(&root).await.unwrap();
+        let router = fixture.application.router();
+        let provider = configure_stepfun(&router, "local-only-admission-fixture", &format!("{}/step_plan/v1", upstream.uri()), STEPFUN_PLAN_MODEL).await.unwrap();
+        let catalog = successful_json(&router, "engine.catalog", Method::GET, "/api/runtime-engines",
+            None, LOCAL_API_DEADLINE, &[StatusCode::OK]).await.unwrap();
+        let catalog = envelope_data("engine.catalog", catalog).unwrap();
+        let mut errors = Vec::new();
+        for (family, profile) in [("nomifun.nomi", "default"), ("nomifun.coding", "coding")] {
+            let selection = engine_selection(&catalog, family, profile).unwrap();
+            let (preset, _) = create_agent_preset(&router, &provider, STEPFUN_PLAN_MODEL, Some(&selection), ENGINE_CAPABILITIES).await.unwrap();
+            let (session, binding) = create_session(&router, &preset, &provider, STEPFUN_PLAN_MODEL, Some(&selection), coding_resource_selections()).await.unwrap();
+            // Creation, Agent switching and explicit capability replacement
+            // must all preserve the canonical Agent's empty Skill ceiling.
+            for mutation in [None, Some("preset"), Some("capability-selection")] {
+                if let Some(endpoint) = mutation {
+                    let body = if endpoint == "preset" {
+                        json!({"preset_id":preset,"resource_selections":coding_resource_selections()})
+                    } else {
+                        json!({"capability_selection":{"enabled_skills":[],"excluded_auto_skills":[],"mcp_server_ids":[]}})
+                    };
+                    successful_json(&router, "engine.mock.skills", Method::PUT,
+                        format!("/api/agent-sessions/{session}/{endpoint}"), Some(body), LOCAL_API_DEADLINE, &[StatusCode::OK]).await.unwrap();
+                }
+                let projected = successful_json(&router, "engine.mock.skills", Method::GET,
+                    format!("/api/conversations/{session}"), None, LOCAL_API_DEADLINE, &[StatusCode::OK]).await.unwrap();
+                let projected = envelope_data("engine.mock.skills", projected).unwrap();
+                assert_eq!(projected["extra"]["skills"], json!([]), "{family} {mutation:?}: global Skills escaped the immutable selection");
+            }
+            let workspace = root.path().join(family);
+            std::fs::create_dir(&workspace).unwrap();
+            bind_session_workspace(&router, &session, &workspace).await.unwrap();
+            start_session_turn(&router, "engine.mock", &session, &uuid::Uuid::now_v7().to_string(), REQUEST.into()).await.unwrap();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+            let mut completed = false;
+            loop {
+                let (messages, _) = session_messages_after(&router, "engine.mock", &session, 0).await.unwrap();
+                if first_durable_error_code(&messages).is_some() {
+                    errors.push((family, messages));
+                    break;
+                }
+                if exact_assistant_marker_count(&messages, "LOCAL_ADMISSION_OK") > 0 {
+                    let state = successful_json(&router, "engine.mock.terminal", Method::GET,
+                        format!("/api/conversations/{session}"), None, LOCAL_API_DEADLINE, &[StatusCode::OK]).await.unwrap();
+                    if state["data"]["status"] == "finished" {
+                        completed = true;
+                        break;
+                    }
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    errors.push((family, messages));
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            if !completed { continue; }
+            assert_eq!(std::fs::read_to_string(workspace.join(CODING_FILE)).unwrap(), "alpha\n");
+            let cursor = session_message_cursor(&router, "engine.mock.continuation", &session).await.unwrap();
+            start_session_turn(&router, "engine.mock.continuation", &session,
+                &uuid::Uuid::now_v7().to_string(), "Reply LOCAL_CONTINUATION_OK without tools.".into()).await.unwrap();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+            let mut continued = false;
+            loop {
+                let (messages, _) = session_messages_after(&router, "engine.mock.continuation", &session, cursor).await.unwrap();
+                if first_durable_error_code(&messages).is_some() {
+                    errors.push((family, messages));
+                    break;
+                }
+                if exact_assistant_marker_count(&messages, "LOCAL_CONTINUATION_OK") > 0 {
+                    let state = successful_json(&router, "engine.mock.terminal", Method::GET,
+                        format!("/api/conversations/{session}"), None, LOCAL_API_DEADLINE, &[StatusCode::OK]).await.unwrap();
+                    if state["data"]["status"] == "finished" { continued = true; break; }
+                }
+                if tokio::time::Instant::now() >= deadline { errors.push((family, messages)); break; }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            if !continued { continue; }
+            let (_, through_seq) = session_messages_after(&router, "engine.mock.fork", &session, 0).await.unwrap();
+            let child = successful_json(&router, "engine.mock.fork", Method::POST,
+                format!("/api/agent-sessions/{session}/forks"),
+                Some(json!({"target_agent_binding":binding,"parent_through_seq":through_seq,"title":"Official Engine inherited binding"})),
+                LOCAL_API_DEADLINE, &[StatusCode::OK]).await.unwrap();
+            let child = envelope_data("engine.mock.fork", child).unwrap();
+            let child_id = child["child_agent_session_id"].as_str().unwrap();
+            assert_session_engine(&router, child_id, &selection, &provider, STEPFUN_PLAN_MODEL).await.unwrap();
+
+            let (next_family, next_profile) = if family == "nomifun.nomi" { ("nomifun.coding", "coding") } else { ("nomifun.nomi", "default") };
+            let next_selection = engine_selection(&catalog, next_family, next_profile).unwrap();
+            let editor = successful_json(&router, "engine.mock.edit", Method::GET,
+                format!("/api/agent-presets/{preset}/editor"), None, LOCAL_API_DEADLINE, &[StatusCode::OK]).await.unwrap();
+            let editor = envelope_data("engine.mock.edit", editor).unwrap();
+            let mut draft = editor["draft"].clone();
+            draft["document"]["runtime_engine"] = next_selection.clone();
+            successful_json(&router, "engine.mock.edit", Method::POST,
+                format!("/api/agent-presets/{preset}/revisions"),
+                Some(json!({"expected_current_revision":editor["revision"]["reference"],"draft":draft})),
+                LOCAL_API_DEADLINE, &[StatusCode::OK]).await.unwrap();
+            create_session(&router, &preset, &provider, STEPFUN_PLAN_MODEL, Some(&next_selection), coding_resource_selections()).await.unwrap();
+            assert_session_engine(&router, &session, &selection, &provider, STEPFUN_PLAN_MODEL).await.unwrap();
+            assert_session_engine(&router, child_id, &selection, &provider, STEPFUN_PLAN_MODEL).await.unwrap();
+        }
+        fixture.application.close().await.unwrap();
+        assert!(errors.is_empty(), "local-only admission failures: {errors:#?}");
+        assert_eq!(upstream.received_requests().await.unwrap().len(), 9);
+    }
+
+    #[test]
+    fn admission_diagnostics_emit_only_static_codes_and_preserve_failure() {
+        let message = json!({"projection": {"status":"error", "code":"CONFLICT",
+            "error":{"message":"current Kernel compilation differs from the persisted Nomi resolved Snapshot; secret=NEVER_PRINT_ME"}}});
+        assert_eq!(first_durable_error_code(&[message]).as_deref(), Some("CONFLICT_KERNEL_SNAPSHOT_MISMATCH"));
+        let http = SmokeFailure::http("session.create", StatusCode::CONFLICT,
+            &json!({"code":"CONFLICT", "message":"Engine resources: /private/user/path NEVER_PRINT_ME"}));
+        assert_eq!(http.code, "CONFLICT_ENGINE_RESOURCES");
+        assert_eq!(http.status, 409);
+        assert!(!http.to_string().contains("NEVER_PRINT_ME"));
+        for raw in ["NEVER_PRINT_ME", "unknown resource conflict", "CONFLICT_KERNEL_SNAPSHOT_MISMATCH"] {
+            let unknown = json!({"projection":{"status":"error", "code":"CONFLICT", "message":raw}});
+            assert_eq!(first_durable_error_code(&[unknown]).as_deref(), Some("CONFLICT"));
+        }
+        let non_conflict = json!({"projection":{"status":"error", "code":"FORBIDDEN",
+            "message":"Engine resources: NEVER_PRINT_ME"}});
+        assert_eq!(first_durable_error_code(&[non_conflict]).as_deref(), Some("FORBIDDEN"));
+    }
+
+    #[test]
+    fn coding_controls_are_not_external_effects_and_errors_remain_failures() {
+        for name in ["update_plan", "report_completion", "resume_task", "search_tool_history", "read_tool_history", "load_tool_history"] {
+            let completed = json!({"projection":{"name":name,"status":"completed"}});
+            assert!(coding_engine_evidence_messages(&[completed]).unwrap().is_empty());
+            for status in ["running", "error"] {
+                let message = json!({"projection":{"name":name,"status":status}});
+                assert_eq!(coding_engine_evidence_messages(&[message.clone()]).unwrap().len(), 1);
+                assert_eq!(first_durable_error_code(&[message]).is_some(), status == "error");
+            }
+        }
+        let unknown = json!({"projection":{"name":"unexpected_tool","status":"completed"}});
+        assert_eq!(coding_engine_evidence_messages(&[unknown]).unwrap().len(), 1);
+        let scope = json!({"projection":{"name":"read_file","status":"completed",
+            "args":{"format":"instruction_scope","path":CODING_FILE}}});
+        assert!(coding_engine_evidence_messages(&[scope.clone()]).unwrap().is_empty());
+        let mut outside = scope;
+        outside["projection"]["args"]["path"] = json!("../outside");
+        assert!(coding_engine_evidence_messages(&[outside]).is_err());
+        let ordinary_read = json!({"projection":{"name":"read_file","status":"completed","args":{"path":CODING_FILE}}});
+        assert_eq!(coding_engine_evidence_messages(&[ordinary_read]).unwrap().len(), 1);
+    }
 
     #[test]
     fn coding_product_selections_require_both_resources_and_minimal_requires_none() {

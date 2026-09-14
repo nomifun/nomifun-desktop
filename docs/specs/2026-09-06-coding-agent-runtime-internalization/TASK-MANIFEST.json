@@ -5,6 +5,62 @@
   "status": "implementation-in-progress",
   "updated_on": "2026-09-14",
   "current_delivery_scope": {
+    "platform": "macos-local-arm64",
+    "official_engines": [
+      "nomifun.nomi",
+      "nomifun.coding"
+    ],
+    "community_example_acceptance_required": false,
+    "cross_platform_policy": "Windows shared-code regression required; Linux runtime acceptance remains TODO",
+    "validation_policy": "Isolated native dev and app/DMG validation; StepFun step-3.7-flash only; no Release, updater publication or push",
+    "source_baseline": "2ff02951266b12008cf1f7ea63c3b27cff9a192a",
+    "source_overlay_sha256": "9393b60e9c5775806b3a202c1c26a10eb0cf7854909913a961e8a5c812e48579",
+    "handoff": "MACOS-DELIVERY-2026-09-14.zh.md",
+    "status": "native-development-verified; coding-live-patch-failed; clean-source-rebuild-required",
+    "engine_builds": {
+      "nomifun.nomi": "0.7.6-host61",
+      "nomifun.coding": "0.7.6-host2-coding-loop92"
+    },
+    "engineering_checks": {
+      "ui_targeted_tests": "85 passed",
+      "engine_core_coding_tests": "51 passed",
+      "process_tests": "71 passed",
+      "migration_tests": "12 passed",
+      "macos_desktop_tests": "5 passed",
+      "legacy_skill_tests": "4 passed",
+      "official_engine_fixture_tests": "13 passed",
+      "contract_check": "passed",
+      "bun_run_check": "failed: 109 retired references"
+    },
+    "native_dev": {
+      "startup": "passed arm64, isolated data root and WebView store",
+      "runner_sigint_shutdown": "passed",
+      "cli_sigint_shutdown": "passed",
+      "native_window_interaction": "unverified: CUA cannot identify an unbundled executable"
+    },
+    "live_provider": {
+      "model": "step-3.7-flash",
+      "nomi": "create/patch/exec/continue passed",
+      "coding": "create passed; patch UNKNOWN_UPSTREAM_ERROR; exec/continue not run",
+      "shutdown_and_credential_audit": "passed by runner before reporting failure"
+    },
+    "package_checks": {
+      "arm64_app_dmg": "first build produced app/DMG; release-lock refused dirty source; local commit and rebuild required",
+      "developer_id_signing": "not_run",
+      "notarization": "not_run",
+      "release_updater_publication": "not_run"
+    },
+    "not_run": [
+      "community_engine_example",
+      "Linux_acceptance",
+      "Windows_regression_on_current_changes",
+      "real_provider_Coding_exec_and_continuation",
+      "live_model_cancel",
+      "context_compaction_end_to_end",
+      "production_user_database_migration"
+    ]
+  },
+  "previous_windows_delivery_scope": {
     "platform": "windows-local",
     "official_engines": ["nomifun.nomi", "nomifun.coding"],
     "community_example_acceptance_required": false,

@@ -18,7 +18,7 @@ use nomi_process_runtime::{
 };
 #[cfg(target_os = "macos")]
 use nomi_process_runtime::SandboxPolicy;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 use nomi_process_runtime::ShellKind;
 
 fn helper_binary() -> &'static str {
@@ -244,6 +244,72 @@ async fn unix_pipe_round_trips_stdin_and_close_stdin_delivers_eof() {
     };
     assert_eq!(code, Some(0));
     assert_eq!(output.raw_bytes(), b"hello\0world\n");
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn macos_preserves_unicode_executable_path_argv_environment_and_cwd() {
+    let directory = tempfile::tempdir().expect("temporary working directory");
+    let cwd = directory.path().join("中文 workspace 'quoted'");
+    fs::create_dir(&cwd).expect("complex working directory");
+    let cwd = cwd.canonicalize().expect("canonical working directory");
+    let executable = cwd.join("工具 helper 'quoted'");
+    fs::copy(helper_binary(), &executable).expect("copy helper with executable permissions");
+    let first = OsString::from("中文 spaced \\");
+    let second = OsString::from(r#"quote " and literal $(exit 99)"#);
+    let env_key = OsString::from("NOMIFUN_MACOS_ENV_CASE");
+    let env_value = OsString::from("值 'quoted' $HOME");
+    let mut process = request(
+        executable,
+        [
+            OsString::from("print-args-env-cwd"),
+            first.clone(),
+            second.clone(),
+            env_key.clone(),
+            cwd.as_os_str().to_owned(),
+        ],
+    );
+    process.cwd = cwd.clone();
+    process.capability = CapabilityPolicy::local_owner(cwd.clone());
+    process.env.insert(env_key, env_value.clone());
+
+    let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+    let handle = supervisor.start(process).await.expect("complex macOS path should spawn");
+    let outcome = wait_for_terminal(&supervisor, &handle).await;
+    let ProcessOutcome::Exited { code, output, cleanup, .. } = outcome else {
+        panic!("complex macOS path helper must exit, got {outcome:?}");
+    };
+    assert_eq!(code, Some(0));
+    assert!(cleanup.reaped);
+    let expected = [first, second, env_value, cwd.into_os_string()]
+        .into_iter()
+        .map(|field| {
+            let field = field.to_string_lossy();
+            format!("{}:{field}\n", field.len())
+        })
+        .collect::<String>();
+    assert_eq!(output.text(), expected);
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn macos_posix_shell_preserves_literal_environment_and_exit_status() {
+    let mut process = request("unused", []);
+    process.command = CommandSpec::Shell {
+        shell: ShellKind::Posix,
+        script: "printf '%s' \"$NOMIFUN_MACOS_SHELL_VALUE\"; exit 7".to_owned(),
+    };
+    let value = "中文 'quoted' $(exit 99) $HOME \\";
+    process.env.insert("NOMIFUN_MACOS_SHELL_VALUE".into(), value.into());
+    let supervisor = ProcessSupervisor::new(SupervisorConfig::default());
+    let handle = supervisor.start(process).await.expect("POSIX shell should start");
+    let outcome = wait_for_terminal(&supervisor, &handle).await;
+    let ProcessOutcome::Exited { code, output, cleanup, .. } = outcome else {
+        panic!("POSIX shell must exit, got {outcome:?}");
+    };
+    assert_eq!(code, Some(7));
+    assert_eq!(output.text(), value);
+    assert!(cleanup.reaped);
 }
 
 #[cfg(target_os = "macos")]
