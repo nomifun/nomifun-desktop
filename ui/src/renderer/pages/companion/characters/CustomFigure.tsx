@@ -49,6 +49,8 @@ export interface CustomFigureProps {
   mood: CompanionMood;
   activity: CompanionActivity;
   size?: number;
+  /** Explicit full-body rendering for bounded showcase slots, even below avatar size. */
+  displayMode?: 'auto' | 'full';
   /** 命中元素（外层 data-companion-hit wrapper）；加载后在其上注册立绘 alpha 掩码。 */
   hitRef?: React.RefObject<HTMLElement | null>;
 }
@@ -134,8 +136,8 @@ const starPath = (cx: number, cy: number, R: number, r: number): string =>
   `M ${cx} ${cy - R} L ${cx + r} ${cy - r} L ${cx + R} ${cy} L ${cx + r} ${cy + r} ` +
   `L ${cx} ${cy + R} L ${cx - r} ${cy + r} L ${cx - R} ${cy} L ${cx - r} ${cy - r} Z`;
 
-const CustomFigure: React.FC<CustomFigureProps> = ({ src, aspect, headBox, mood, activity, size = 150, hitRef }) => {
-  const bust = size <= BUST_MAX_SIZE;
+const CustomFigure: React.FC<CustomFigureProps> = ({ src, aspect, headBox, mood, activity, size = 150, displayMode = 'auto', hitRef }) => {
+  const bust = displayMode !== 'full' && size <= BUST_MAX_SIZE;
 
   // 加载立绘并在命中元素上注册 alpha 命中掩码：点击穿透按真实非透明像素判定，立绘四周
   // 透明区真正穿透到底层（见 companionHitMask）。仅全身态注册；bust 态小、矩形命中足够。
