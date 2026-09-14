@@ -1336,20 +1336,9 @@ impl NomiAgentManager {
                 "the AgentSession's bound MCP server could not be connected".to_owned(),
             ));
         }
-        if lazy_mcp_runtime.is_none()
-            && mcp_resource_selected
-            && !mcp_managers.iter().any(|manager| {
-                manager
-                    .server_names()
-                    .iter()
-                    .any(|server| manager.server_supports_resources(server))
-            })
-        {
-            return Err(AppError::UnprocessableEntity(
-                "mcp.resource is selected, but the bound MCP server does not advertise resources"
-                    .to_owned(),
-            ));
-        }
+        // Resource permission does not require a configured resource server.
+        // Validate support when invoked, so empty selections and tools-only
+        // device transports do not prevent ordinary companion conversations.
         let mut engine = result.engine;
         let delegate_selected = !config_extra.enforce_tool_allowlist
             || config_extra

@@ -64,7 +64,7 @@ import { allSupportedExts } from '@/renderer/services/FileService';
 import { emitter, useAddEventListener } from '@/renderer/utils/emitter';
 import { mergeFileSelectionItems } from '@/renderer/utils/file/fileSelection';
 import { buildDisplayMessage, collectSelectedFiles } from '@/renderer/utils/file/messageFiles';
-import { Message, Tag } from '@arco-design/web-react';
+import { Message, Tag, Tooltip } from '@arco-design/web-react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { NomiMessageRuntime } from './useNomiMessage';
@@ -124,8 +124,10 @@ const NomiSendBox: React.FC<{
   agentSelectorNode?: React.ReactNode;
   agent_name?: string;
   turnActivity: NomiMessageRuntime;
-  /** Hide model and other editable controls on locked surfaces. */
-  hideAdvancedControls?: boolean;
+  /** Product-owned controls replace session capability editing, not the toolbar. */
+  capabilityControls?: React.ReactNode;
+  modelSelectionHint?: string;
+  modelSelectionDisabled?: boolean;
   /** Existing collaboration control, rendered in the composer side rail. */
   collaboratorSelectorNode?: React.ReactNode;
   /**
@@ -139,7 +141,9 @@ const NomiSendBox: React.FC<{
   agentSelectorNode,
   agent_name,
   turnActivity,
-  hideAdvancedControls,
+  capabilityControls,
+  modelSelectionHint,
+  modelSelectionDisabled,
   collaboratorSelectorNode,
   extraRightTools,
 }) => {
@@ -212,7 +216,7 @@ const NomiSendBox: React.FC<{
   ]);
 
   const capabilitySelectionReady =
-    !hideAdvancedControls &&
+    capabilityControls === undefined &&
     initializedCapabilityConversation.current === conversation_id &&
     !capabilityCatalog.loading &&
     !capabilityCatalog.error;
@@ -316,14 +320,18 @@ const NomiSendBox: React.FC<{
 
   useEffect(() => {
     if (!conversation_id) return;
+    let cancelled = false;
     setAgentWarmed(false);
     void warmupConversationForPassiveMount(conversation_id)
-      .then(() => {
-        setAgentWarmed(true);
+      .then((warmed) => {
+        // Finished sessions hydrate without creating a runtime. Do not query
+        // runtime-only slash commands merely because hydration completed.
+        if (!cancelled) setAgentWarmed(warmed);
       })
       .catch((error) => {
-        Message.error(getConversationRuntimeWorkspaceErrorMessage(error, t));
+        if (!cancelled) Message.error(getConversationRuntimeWorkspaceErrorMessage(error, t));
       });
+    return () => { cancelled = true; };
   }, [conversation_id, t]);
 
   const slash_commands = useSlashCommands(conversation_id, {
@@ -883,7 +891,7 @@ const NomiSendBox: React.FC<{
       <SendBox
         key={conversation_id}
         sideTools={
-          hideAdvancedControls ? null : (
+          capabilityControls !== undefined ? capabilityControls : (
             <SessionCapabilityPicker
               catalog={capabilityCatalog.catalog}
               draft={capabilityDraft}
@@ -907,7 +915,7 @@ const NomiSendBox: React.FC<{
           setAtPath(items);
         }}
         loading={isBusy}
-        disabled={!current_model?.use_model}
+        disabled={!current_model?.use_model || modelSelectionDisabled}
         placeholder={
           current_model?.use_model
             ? t('agent.sendbox.placeholder', {
@@ -932,7 +940,7 @@ const NomiSendBox: React.FC<{
           />
         }
         rightTools={
-          hideAdvancedControls ? undefined : (
+          (
             <div
               className='sendbox-responsive-config-group flex flex-1 items-center justify-end gap-2 min-w-0'
               data-testid='nomi-sendbox-config-group'
@@ -947,10 +955,15 @@ const NomiSendBox: React.FC<{
                 />
               )}
               {agentSelectorNode}
-              <NomiModelSelector
-                selection={modelSelection}
-                className='nomi-sendbox-model-btn'
-              />
+              <Tooltip content={modelSelectionHint} disabled={!modelSelectionHint}>
+                <span className='inline-flex min-w-0'>
+                  <NomiModelSelector
+                    selection={modelSelection}
+                    disabled={modelSelectionDisabled}
+                    className='nomi-sendbox-model-btn'
+                  />
+                </span>
+              </Tooltip>
               {extraRightTools}
             </div>
           )

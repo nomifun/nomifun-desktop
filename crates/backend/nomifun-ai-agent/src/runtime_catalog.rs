@@ -436,6 +436,7 @@ mod tests {
             agent_type: nomifun_common::AgentType::Nomi,
             workspace: "workspace".into(), model: None,
             delegation_policy: Default::default(),
+            device_mcp_servers: Vec::new(),
             extra: serde_json::json!({"skills":["pdf"]}),
             conversation_created_at: None, workspace_binding_lease: None,
         };

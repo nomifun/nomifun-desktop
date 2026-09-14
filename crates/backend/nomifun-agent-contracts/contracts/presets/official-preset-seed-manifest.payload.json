@@ -300,19 +300,7 @@
         {
           "id": "channel.group_policy",
           "version": "1.0.0"
-        }
-      ],
-      "skill_bindings": [],
-      "required_resource_kinds": [
-        "channel",
-        "companion",
-        "companion_memory",
-        "knowledge_base"
-      ],
-      "required_runtime_features": []
-    },
-    "robot.default": {
-      "enabled_capabilities": [
+        },
         {
           "id": "robot.link",
           "version": "1.0.0"
@@ -323,22 +311,6 @@
         },
         {
           "id": "robot.display",
-          "version": "1.0.0"
-        },
-        {
-          "id": "companion.persona",
-          "version": "1.0.0"
-        },
-        {
-          "id": "memory.companion.recall",
-          "version": "1.0.0"
-        },
-        {
-          "id": "knowledge.search",
-          "version": "1.0.0"
-        },
-        {
-          "id": "knowledge.read",
           "version": "1.0.0"
         },
         {
@@ -354,15 +326,15 @@
           "version": "1.0.0"
         },
         {
-          "id": "memory.companion.write",
+          "id": "mcp.connect",
           "version": "1.0.0"
         },
         {
-          "id": "channel.receive",
+          "id": "mcp.tool_proxy",
           "version": "1.0.0"
         },
         {
-          "id": "channel.reply",
+          "id": "mcp.resource",
           "version": "1.0.0"
         }
       ],
@@ -372,6 +344,7 @@
         "companion",
         "companion_memory",
         "knowledge_base",
+        "mcp_server",
         "robot"
       ],
       "required_runtime_features": []
@@ -612,6 +585,7 @@
         "im_channel",
         "knowledge",
         "learning_evolution",
+        "mcp",
         "persona"
       ],
       "required_capability_ids": [
@@ -626,6 +600,9 @@
         "companion.roster",
         "knowledge.read",
         "knowledge.search",
+        "mcp.connect",
+        "mcp.resource",
+        "mcp.tool_proxy",
         "memory.companion.evolve",
         "memory.companion.merge",
         "memory.companion.recall",
@@ -636,37 +613,8 @@
         "channel",
         "companion",
         "companion_memory",
-        "knowledge_base"
-      ]
-    },
-    "robot.default": {
-      "required_capability_categories": [
-        "audio_display",
-        "device_link",
-        "persona_memory_knowledge",
-        "vision_motion"
-      ],
-      "required_capability_ids": [
-        "channel.receive",
-        "channel.reply",
-        "companion.persona",
-        "knowledge.read",
-        "knowledge.search",
-        "memory.companion.recall",
-        "memory.companion.write",
-        "robot.audio",
-        "robot.device_tools",
-        "robot.display",
-        "robot.link",
-        "robot.motion",
-        "robot.vision"
-      ],
-      "required_runtime_features": [],
-      "required_resource_kinds": [
-        "channel",
-        "companion",
-        "companion_memory",
         "knowledge_base",
+        "mcp_server",
         "robot"
       ]
     },

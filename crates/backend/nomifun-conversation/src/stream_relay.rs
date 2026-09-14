@@ -1699,7 +1699,7 @@ pub struct StreamRelay {
     /// from local companion turns off the wire.
     channel_platform: Option<String>,
     /// True when this relay serves a robot gateway thread
-    /// (`conversation.extra.robot_session`). It makes the relay delete bracketed
+    /// (`trusted per-turn output mode`). It makes the relay delete bracketed
     /// stage directions from assistant `Text` before the WebSocket forward, so
     /// `segment.buffer` and `full_text_buffer` read the cleaned copy.
     ///
@@ -1721,7 +1721,7 @@ pub struct StreamRelay {
     ///     customer-service, channel and ACP conversation — means assistant text
     ///     is never touched. Deliberately narrower than the ungated precedent of
     ///     `strip_think_tags` / `strip_cron_commands`.
-    robot_session: bool,
+    spoken_output: bool,
     /// Phase 3 (review #1/#5): predicate telling the relay whether a PRE-RESPONSE
     /// terminal provider-fault with this error code WILL be failed over by the
     /// send loop. When it returns `true` the relay suppresses the user-visible
@@ -1804,7 +1804,7 @@ impl StreamRelay {
             companion_id: None,
             origin: None,
             channel_platform: None,
-            robot_session: false,
+            spoken_output: false,
             failover_suppressor: None,
             runtime_state: None,
             cancellation: None,
@@ -2039,8 +2039,8 @@ impl StreamRelay {
     /// Mark this relay as serving a robot gateway thread, which makes it delete
     /// bracketed stage directions from assistant text (see field docs). Off by
     /// default; the robot's own stream clone guards itself either way.
-    pub fn with_robot_session(mut self, robot_session: bool) -> Self {
-        self.robot_session = robot_session;
+    pub fn with_spoken_output(mut self, spoken_output: bool) -> Self {
+        self.spoken_output = spoken_output;
         self
     }
 
@@ -2134,7 +2134,7 @@ impl StreamRelay {
         self.reconcile_pending_artifact_recovery_journal().await;
 
         let mut full_text_buffer = String::new();
-        // Robot threads only (see `robot_session`): withholds at most one
+        // Spoken turns only (see `spoken_output`): withholds at most one
         // partial bracketed run across delta boundaries. Inert when the gate is off.
         let mut stage_filter = StageDirectionFilter::default();
         let mut text_segments: Vec<PersistedTextSegment> = Vec::new();
@@ -2290,7 +2290,7 @@ impl StreamRelay {
                     // writeback together. Precedent: the cancellation rewrite
                     // above. The device path guards its own copy off its own
                     // broadcast clone.
-                    if self.robot_session {
+                    if self.spoken_output {
                         if let AgentStreamEvent::Text(data) = &mut event {
                             data.content = stage_filter.push(&data.content);
                         } else {
@@ -3202,7 +3202,7 @@ impl StreamRelay {
                     // release of withheld robot text — before the terminal
                     // cleanup block borrows `active_text` / `full_text_buffer`
                     // and closes the segment below.
-                    if self.robot_session {
+                    if self.spoken_output {
                         self.release_withheld_text(
                             &mut stage_filter,
                             &mut active_text,
@@ -4503,7 +4503,7 @@ impl StreamRelay {
     ///
     /// WARNING: a third loop exit — or a `close_active_text_segment` call added
     /// upstream of the rewrite — breaks this silently, with no test failure and
-    /// no log line. `robot_session_releases_truncated_bracket_before_tool_call`
+    /// no log line. `spoken_output_releases_truncated_bracket_before_tool_call`
     /// pins the known paths only.
     fn release_withheld_text(
         &self,
@@ -7393,7 +7393,7 @@ mod tests {
             bus,
             None,
         )
-        .with_robot_session(true);
+        .with_spoken_output(true);
         let rx = tx.subscribe();
 
         tx.send(AgentStreamEvent::Start(StartEventData::default())).unwrap();
@@ -7442,7 +7442,7 @@ mod tests {
             bus,
             None,
         )
-        .with_robot_session(true);
+        .with_spoken_output(true);
         let rx = tx.subscribe();
 
         tx.send(AgentStreamEvent::Start(StartEventData::default())).unwrap();
@@ -11384,7 +11384,7 @@ mod tests {
     const ROBOT_STAGE_DIRECTION_DELTAS: [&str; 3] = ["[wink", "ing]你好，", "[laughs]再见。"];
 
     #[tokio::test]
-    async fn robot_session_strips_stage_directions_from_stream_and_row() {
+    async fn spoken_output_strips_stage_directions_from_stream_and_row() {
         let repo = Arc::new(RecordingRepo::new());
         let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
@@ -11397,7 +11397,7 @@ mod tests {
             bus.clone(),
             None,
         )
-        .with_robot_session(true);
+        .with_spoken_output(true);
 
         let mut ws_rx = bus.subscribe();
         let rx = tx.subscribe();
@@ -11433,7 +11433,7 @@ mod tests {
     /// the transcript shows normal content, and deleting a footnote reference
     /// would be the same bug in the other direction.
     #[tokio::test]
-    async fn robot_session_keeps_real_bracketed_content() {
+    async fn spoken_output_keeps_real_bracketed_content() {
         let repo = Arc::new(RecordingRepo::new());
         let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
@@ -11446,7 +11446,7 @@ mod tests {
             bus.clone(),
             None,
         )
-        .with_robot_session(true);
+        .with_spoken_output(true);
 
         let rx = tx.subscribe();
         tx.send(AgentStreamEvent::Text(TextEventData {
@@ -11463,7 +11463,7 @@ mod tests {
     /// conversation must be byte-identical. Every other conversation kind —
     /// chat, customer service, channels, ACP transcripts — takes this path.
     #[tokio::test]
-    async fn non_robot_session_preserves_stage_directions() {
+    async fn non_spoken_output_preserves_stage_directions() {
         let repo = Arc::new(RecordingRepo::new());
         let bus = Arc::new(TestUserEventBus::new(64));
         let (tx, _) = broadcast::channel(64);
@@ -11505,7 +11505,7 @@ mod tests {
     /// Pins the `release_withheld_text` site in the non-`Text` branch of the
     /// rewrite.
     #[tokio::test]
-    async fn robot_session_releases_truncated_bracket_before_tool_call() {
+    async fn spoken_output_releases_truncated_bracket_before_tool_call() {
         use nomifun_ai_agent::protocol::events::tool_call::{ToolCallEventData, ToolCallStatus};
 
         let repo = Arc::new(RecordingRepo::new());
@@ -11520,7 +11520,7 @@ mod tests {
             bus.clone(),
             None,
         )
-        .with_robot_session(true);
+        .with_spoken_output(true);
 
         let rx = tx.subscribe();
         tx.send(AgentStreamEvent::Text(TextEventData {
@@ -11554,7 +11554,7 @@ mod tests {
     /// segment[0] and hides the rest; because the strip already happened per
     /// delta, `processed.message == text` and that branch stays dormant.
     #[tokio::test]
-    async fn robot_session_does_not_collapse_multi_segment_turn() {
+    async fn spoken_output_does_not_collapse_multi_segment_turn() {
         use nomifun_ai_agent::protocol::events::tool_call::{ToolCallEventData, ToolCallStatus};
 
         let repo = Arc::new(RecordingRepo::new());
@@ -11569,7 +11569,7 @@ mod tests {
             bus.clone(),
             None,
         )
-        .with_robot_session(true);
+        .with_spoken_output(true);
 
         let rx = tx.subscribe();
         tx.send(AgentStreamEvent::Text(TextEventData {

@@ -3,9 +3,9 @@
   "payload": {
     "manifest_version": "1.0.0",
     "database_schema_digest": "1613407d942fc25ef1283839887c0f3441e403ac10db73110783331f2c0f2fbb",
-    "rust_contract_schema_digest": "29132e9d4977a5b11612ad33beadf4f72c0c615f5be44868e2f35e75cfd2ed86",
+    "rust_contract_schema_digest": "539d4a63ed0f06478e0cc437668dc28412096fdf35b9041df51140e72eb99a88",
     "package_schema_digest": "f82782c856ba53068161c4b0c98ba761c63a755ff23c773162571aa8fbe9d881",
-    "official_preset_seed_manifest_digest": "cd5eda0d13790871ff6a137bbe060fd6743056843666d10df4fdd072386d1da0",
+    "official_preset_seed_manifest_digest": "afea86ddbb7a1e6e5788b07f0925cf4376e25d4939fe1852d332bf4b3762ebfe",
     "canonical_api_inventory_digest": "ae0ae25648dcda0908ada7e07a8da5843fcf9cc1241320c0d8fa04dd7b0bbb1d",
     "session_event_registry_digest": "e2cec429a2166b519e364483f94e47edfe4bc8c208ddc6bbdb82d70c5e69c74c",
     "error_registry_digest": "fe64ac21087f7c86594f0c9ccd1158e3b97616288e3d0cf295d376276f99d62c",
@@ -15,5 +15,5 @@
     "platform_validation_contract_digest": "a3f5180906c239d791a03281199d80f2ea957dbe8382fb849dc2926935672a9c",
     "confirmed_decision_contract_digest": "c1eeb87b010954fa19324fb59d63c9d8722d6704fe1121ea63f41d4d06d14643"
   },
-  "payload_digest": "303176cb95517a0aa637a03bc75b99a82c9572883824100061dfe92a5bc54b3e"
+  "payload_digest": "3941d3c2c6b1340d3285ec1db1b06be4e9210faf1d5ddcc08dc759799ff4b3d0"
 }

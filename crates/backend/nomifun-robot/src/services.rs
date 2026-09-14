@@ -16,6 +16,11 @@ pub struct SpeechContext {
     pub companion_id: String,
 }
 
+#[async_trait::async_trait]
+pub trait RobotPlaybackSource: Send + Sync {
+    async fn response_text(&self, robot_id: &str, conversation_id: &str) -> Result<String, String>;
+}
+
 /// ASR, TTS and one-shot vision.
 #[async_trait::async_trait]
 pub trait SpeechServices: Send + Sync {
@@ -46,19 +51,24 @@ pub enum TurnEvent {
 }
 
 /// Companion conversation access.
+#[derive(Debug, Clone)]
+pub struct RobotTurnRequest {
+    pub robot_id: String,
+    pub companion_id: String,
+    pub conversation_id: String,
+    pub connection_id: String,
+    pub request_id: String,
+    pub text: String,
+}
+
 #[async_trait::async_trait]
 pub trait CompanionTurnDispatcher: Send + Sync {
-    /// Find or create the long-lived thread for this `(robot, companion)` pair.
-    async fn ensure_thread(&self, robot_id: &str, companion_id: &str) -> anyhow::Result<String>;
-    /// Start a turn and stream its events.
-    async fn dispatch(
-        &self,
-        conversation_id: &str,
-        text: &str,
-        use_fallback_model: bool,
-    ) -> anyhow::Result<tokio::sync::mpsc::Receiver<TurnEvent>>;
-    /// Stop the in-flight turn (the public `cancel`, never a runtime kill).
-    async fn cancel(&self, conversation_id: &str) -> anyhow::Result<()>;
+    /// The Companion owns the only Conversation, regardless of endpoint.
+    async fn ensure_companion_session(&self, companion_id: &str) -> anyhow::Result<String>;
+    /// Enqueue one utterance without blocking the physical connection loop.
+    async fn dispatch(&self, request: RobotTurnRequest) -> anyhow::Result<tokio::sync::mpsc::Receiver<TurnEvent>>;
+    /// Cancel this exact utterance, never an unrelated turn of its Conversation.
+    async fn cancel(&self, request: &RobotTurnRequest) -> anyhow::Result<()>;
     /// The companion's endpointing tunables.
     async fn vad_tuning(&self, companion_id: &str) -> VadTuning;
     /// The companion's chosen endpointing engine (`voice.vad.engine`). Resolved
@@ -66,8 +76,6 @@ pub trait CompanionTurnDispatcher: Send + Sync {
     /// one per connection, and [`crate::vad::build_engine`] owns the fallback
     /// when the named engine cannot load.
     async fn vad_engine(&self, companion_id: &str) -> String;
-    /// Whether a fallback chat model is configured for this companion.
-    async fn has_fallback_model(&self, companion_id: &str) -> bool;
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -75,7 +83,7 @@ pub mod mock {
     //! Programmable doubles for the two seams above.
 
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
 
@@ -190,8 +198,6 @@ pub mod mock {
         scripted: Mutex<std::collections::VecDeque<Vec<TurnEvent>>>,
         dispatched: Mutex<Vec<String>>,
         cancelled: Mutex<Vec<String>>,
-        fallback_dispatches: AtomicUsize,
-        has_fallback: AtomicBool,
         tuning: Mutex<Option<VadTuning>>,
         engine: Mutex<Option<String>>,
     }
@@ -206,9 +212,6 @@ pub mod mock {
             self.scripted.lock().unwrap().push_back(events);
         }
 
-        pub fn set_has_fallback(&self, value: bool) {
-            self.has_fallback.store(value, Ordering::SeqCst);
-        }
 
         pub fn set_vad_tuning(&self, tuning: VadTuning) {
             *self.tuning.lock().unwrap() = Some(tuning);
@@ -227,19 +230,15 @@ pub mod mock {
             self.cancelled.lock().unwrap().clone()
         }
 
-        pub fn fallback_dispatches(&self) -> usize {
-            self.fallback_dispatches.load(Ordering::SeqCst)
-        }
     }
 
     #[async_trait::async_trait]
     impl CompanionTurnDispatcher for MockDispatcher {
-        async fn ensure_thread(
+        async fn ensure_companion_session(
             &self,
-            robot_id: &str,
             companion_id: &str,
         ) -> anyhow::Result<String> {
-            let key = format!("{robot_id}|{companion_id}");
+            let key = companion_id.to_owned();
             let mut threads = self.threads.lock().unwrap();
             let next = threads.len() + 1;
             let id = threads
@@ -251,14 +250,9 @@ pub mod mock {
 
         async fn dispatch(
             &self,
-            _conversation_id: &str,
-            text: &str,
-            use_fallback_model: bool,
+            request: RobotTurnRequest,
         ) -> anyhow::Result<tokio::sync::mpsc::Receiver<TurnEvent>> {
-            self.dispatched.lock().unwrap().push(text.to_owned());
-            if use_fallback_model {
-                self.fallback_dispatches.fetch_add(1, Ordering::SeqCst);
-            }
+            self.dispatched.lock().unwrap().push(request.text);
             let events = self
                 .scripted
                 .lock()
@@ -276,11 +270,11 @@ pub mod mock {
             Ok(rx)
         }
 
-        async fn cancel(&self, conversation_id: &str) -> anyhow::Result<()> {
+        async fn cancel(&self, request: &RobotTurnRequest) -> anyhow::Result<()> {
             self.cancelled
                 .lock()
                 .unwrap()
-                .push(conversation_id.to_owned());
+                .push(request.request_id.to_owned());
             Ok(())
         }
 
@@ -296,9 +290,6 @@ pub mod mock {
                 .unwrap_or_else(|| crate::vad::DEFAULT_VAD_ENGINE.to_owned())
         }
 
-        async fn has_fallback_model(&self, _companion_id: &str) -> bool {
-            self.has_fallback.load(Ordering::SeqCst)
-        }
     }
 }
 
@@ -307,6 +298,14 @@ mod tests {
     use super::mock::{MockDispatcher, MockSpeech};
     use super::*;
     use std::sync::Arc;
+
+    fn request(conversation: &str, text: &str) -> RobotTurnRequest {
+        RobotTurnRequest {
+            robot_id: "aa:bb".into(), companion_id: "c1".into(),
+            conversation_id: conversation.into(), connection_id: "socket-1".into(),
+            request_id: "utterance-1".into(), text: text.into(),
+        }
+    }
 
     fn ctx() -> SpeechContext {
         SpeechContext {
@@ -353,15 +352,15 @@ mod tests {
             TurnEvent::Done,
         ]);
 
-        let conversation = dispatcher.ensure_thread("aa:bb", "c1").await.unwrap();
+        let conversation = dispatcher.ensure_companion_session("c1").await.unwrap();
         assert!(!conversation.is_empty());
         assert_eq!(
-            dispatcher.ensure_thread("aa:bb", "c1").await.unwrap(),
+            dispatcher.ensure_companion_session("c1").await.unwrap(),
             conversation,
             "same thread reused"
         );
 
-        let mut rx = dispatcher.dispatch(&conversation, "在吗", false).await.unwrap();
+        let mut rx = dispatcher.dispatch(request(&conversation, "在吗")).await.unwrap();
         let mut chunks = Vec::new();
         while let Some(event) = rx.recv().await {
             match event {
@@ -375,17 +374,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mock_dispatcher_records_fallback_usage_and_cancels() {
+    async fn mock_dispatcher_cancels_the_exact_utterance() {
         let dispatcher = Arc::new(MockDispatcher::new());
         dispatcher.script_turn(vec![TurnEvent::Done]);
-        dispatcher.set_has_fallback(true);
-        assert!(dispatcher.has_fallback_model("c1").await);
 
-        let _ = dispatcher.dispatch("conv-1", "hi", true).await.unwrap();
-        assert_eq!(dispatcher.fallback_dispatches(), 1);
+        let request = request("conv-1", "hi");
+        let _ = dispatcher.dispatch(request.clone()).await.unwrap();
 
-        dispatcher.cancel("conv-1").await.unwrap();
-        assert_eq!(dispatcher.cancelled(), vec!["conv-1".to_owned()]);
+        dispatcher.cancel(&request).await.unwrap();
+        assert_eq!(dispatcher.cancelled(), vec!["utterance-1".to_owned()]);
     }
 
     #[tokio::test]

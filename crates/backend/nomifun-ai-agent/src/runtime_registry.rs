@@ -2239,6 +2239,7 @@ mod tests {
             delegation_policy: Default::default(),
             extra: serde_json::Value::Null,
             conversation_created_at: None,
+            device_mcp_servers: Vec::new(),
             workspace_binding_lease: Some(
                 nomifun_knowledge::WorkspaceBindingLease::acquire_unbound(
                     workspace,

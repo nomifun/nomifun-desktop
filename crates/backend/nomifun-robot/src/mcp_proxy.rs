@@ -1,476 +1,274 @@
-//! A loopback MCP server fronting the connected robots.
-//!
-//! Registering this URL in a conversation's `extra.session_mcp_servers` is how
-//! the companion's model gets `robot_*` tools with **zero** changes to the agent
-//! engine: `SessionMcpTransport::Http` becomes `TransportType::StreamableHttp`
-//! and the existing MCP client dials us like any other server.
-//!
-//! Follows the house pattern for loopback services (`ManagedModelServer`):
-//! bind `127.0.0.1:0`, mint a per-boot bearer, keep the `JoinHandle`, abort on
-//! `Drop`.
+//! Per-turn MCP transport for authorized device tools. A URL or a capability
+//! query string never grants authority; only a live host-issued lease does.
 
 use std::collections::HashMap;
-use std::sync::Arc;
-
-use axum::extract::{Path, Query, State};
+use std::sync::{Arc, Mutex, Weak};
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
-use rand::RngCore;
+use nomifun_api_types::{McpServerId, SessionMcpServer, SessionMcpTransport};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
-
 use crate::mcp_bridge::ToolCallError;
 use crate::tool_registry::{RobotToolRegistry, tool_capability};
 
-/// The MCP server name the model sees this toolset under.
 pub const MCP_PROXY_SERVER_NAME: &str = "robot";
-/// MCP protocol revision we claim (same as the firmware's own).
-const PROTOCOL_VERSION: &str = "2024-11-05";
+
+#[async_trait::async_trait]
+pub trait RobotToolAuthority: Send + Sync {
+    fn robot_id(&self) -> &str;
+    fn connection_id(&self) -> &str;
+    /// Revalidate binding, connection, permissions and the frozen Agent ceiling.
+    async fn validate(&self, capability: &str) -> Result<(), String>;
+    async fn validate_tool(&self, device_name: &str) -> Result<(), String> {
+        self.validate(tool_capability(device_name).capability_id()).await
+    }
+}
+
+pub struct RobotMcpLease {
+    authority: Arc<dyn RobotToolAuthority>,
+    token: String,
+    port: u16,
+}
+
+impl RobotMcpLease {
+    pub fn registration(&self) -> SessionMcpServer {
+        SessionMcpServer {
+            mcp_server_id: McpServerId::parse(uuid::Uuid::now_v7().to_string()).expect("fresh canonical ID"),
+            name: MCP_PROXY_SERVER_NAME.to_owned(),
+            transport: SessionMcpTransport::StreamableHttp {
+                url: format!("http://127.0.0.1:{}/robot-mcp/{}", self.port, self.authority.robot_id()),
+                headers: HashMap::from([("Authorization".to_owned(), format!("Bearer {}", self.token))]),
+            },
+        }
+    }
+}
 
 #[derive(Clone)]
 struct ProxyState {
-    registry: Arc<RobotToolRegistry>,
-    token: String,
+    tools: Arc<RobotToolRegistry>,
+    leases: Arc<Mutex<HashMap<String, Weak<RobotMcpLease>>>>,
 }
 
-/// Loopback MCP front for robot tools.
 pub struct RobotMcpProxyServer {
     pub port: u16,
-    pub token: String,
+    leases: Arc<Mutex<HashMap<String, Weak<RobotMcpLease>>>>,
     task: JoinHandle<()>,
 }
 
 impl RobotMcpProxyServer {
-    /// Bind and start serving.
-    pub async fn spawn(registry: Arc<RobotToolRegistry>) -> anyhow::Result<Self> {
+    pub async fn spawn(tools: Arc<RobotToolRegistry>) -> anyhow::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let port = listener.local_addr()?.port();
-        let mut secret = [0u8; 32];
-        rand::rng().fill_bytes(&mut secret);
-        let token: String = secret.iter().map(|b| format!("{b:02x}")).collect();
-
-        let app = Router::new()
-            .route("/robot-mcp/{robot_id}", post(handle_rpc))
-            .with_state(ProxyState {
-                registry,
-                token: token.clone(),
-            });
+        let leases = Arc::new(Mutex::new(HashMap::new()));
+        let app = Router::new().route("/robot-mcp/{robot_id}", post(handle_rpc))
+            .with_state(ProxyState { tools, leases: leases.clone() });
         let task = tokio::spawn(async move {
             if let Err(error) = axum::serve(listener, app).await {
-                tracing::error!(%error, "robot: MCP proxy server stopped");
+                tracing::error!(%error, "robot MCP transport stopped");
             }
         });
-        tracing::info!(port, "robot: MCP proxy listening");
-        Ok(Self { port, token, task })
+        Ok(Self { port, leases, task })
     }
 
-    /// The URL to put in a conversation's `session_mcp_servers`.
-    pub fn url_for(&self, robot_id: &str) -> String {
-        format!("http://127.0.0.1:{}/robot-mcp/{robot_id}", self.port)
+    pub async fn issue(&self, authority: Arc<dyn RobotToolAuthority>) -> anyhow::Result<Arc<RobotMcpLease>> {
+        authority.validate("robot.link").await.map_err(anyhow::Error::msg)?;
+        use rand::RngCore;
+        let mut secret = [0u8; 32];
+        rand::rng().fill_bytes(&mut secret);
+        let token: String = secret.iter().map(|byte| format!("{byte:02x}")).collect();
+        let lease = Arc::new(RobotMcpLease { authority, token: token.clone(), port: self.port });
+        let mut leases = self.leases.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        leases.retain(|_, lease| lease.strong_count() > 0);
+        if leases.len() >= 256 { anyhow::bail!("too many active robot tool leases"); }
+        leases.insert(token, Arc::downgrade(&lease));
+        Ok(lease)
     }
 
-    /// Headers for the same registration.
-    pub fn headers(&self) -> HashMap<String, String> {
-        HashMap::from([(
-            "Authorization".to_owned(),
-            format!("Bearer {}", self.token),
-        )])
-    }
-
-    /// Stop serving.
-    pub fn stop(&self) {
-        self.task.abort();
-    }
+    pub fn stop(&self) { self.task.abort(); }
 }
 
-impl Drop for RobotMcpProxyServer {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
+impl Drop for RobotMcpProxyServer { fn drop(&mut self) { self.task.abort(); } }
 
-fn rpc_error(id: Option<Value>, code: i64, message: String) -> Response {
-    // `code` is always present: the agent-side JSON-RPC type requires it, while
-    // the firmware omits it — normalising here is the whole point of the proxy.
-    Json(json!({
-        "jsonrpc": "2.0",
-        "id": id.unwrap_or(Value::Null),
-        "error": { "code": code, "message": message },
-    }))
-    .into_response()
-}
-
-fn tool_call_response(id: Option<Value>, result: Result<String, ToolCallError>) -> Response {
-    match result {
-        Ok(text) => Json(json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": { "content": [{ "type": "text", "text": text }], "isError": false },
-        }))
-        .into_response(),
-        Err(ToolCallError::Rejected(message)) => rpc_error(id, -32601, message),
-        Err(error @ ToolCallError::Offline) => rpc_error(id, -32000, error.to_string()),
-        Err(error) => Json(json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": { "content": [{ "type": "text", "text": error.to_string() }], "isError": true },
-        }))
-        .into_response(),
-    }
+fn rpc_error(id: Value, code: i64, message: impl Into<String>) -> Response {
+    Json(json!({"jsonrpc":"2.0", "id":id, "error":{"code":code,"message":message.into()}})).into_response()
 }
 
 async fn handle_rpc(
-    State(state): State<ProxyState>,
-    Path(robot_id): Path<String>,
-    Query(query): Query<ProxyQuery>,
-    headers: HeaderMap,
-    Json(body): Json<Value>,
+    State(state): State<ProxyState>, Path(robot_id): Path<String>,
+    headers: HeaderMap, Json(body): Json<Value>,
 ) -> Response {
-    let presented = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .unwrap_or_default();
-    if presented != state.token {
-        return (StatusCode::UNAUTHORIZED, "bad token").into_response();
+    let token = headers.get("authorization").and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer ")).unwrap_or_default();
+    let lease = state.leases.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(token).and_then(Weak::upgrade);
+    let Some(lease) = lease else { return (StatusCode::UNAUTHORIZED, "expired device turn").into_response(); };
+    if lease.authority.robot_id() != robot_id {
+        return (StatusCode::FORBIDDEN, "device turn targets another robot").into_response();
     }
-
-    let id = body.get("id").cloned();
-    let method = body
-        .get("method")
-        .and_then(|m| m.as_str())
-        .unwrap_or_default();
-
-    // Notifications carry no id and expect no body.
-    if id.is_none() || method.starts_with("notifications") {
-        return StatusCode::ACCEPTED.into_response();
+    let id = body.get("id").cloned().unwrap_or(Value::Null);
+    if let Err(error) = lease.authority.validate("robot.link").await {
+        return rpc_error(id, -32000, error);
     }
-
-    let allowed = query.capabilities.as_deref().map(|value| {
-        value.split(',').filter(|item| !item.is_empty()).collect::<std::collections::BTreeSet<_>>()
-    });
+    let method = body["method"].as_str().unwrap_or_default();
+    if id.is_null() || method.starts_with("notifications/") { return StatusCode::ACCEPTED.into_response(); }
     match method {
-        "initialize" => Json(json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": {
-                "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": { "tools": {} },
-                "serverInfo": { "name": MCP_PROXY_SERVER_NAME, "version": env!("CARGO_PKG_VERSION") },
-            },
-        }))
-        .into_response(),
+        "initialize" => Json(json!({"jsonrpc":"2.0", "id":id, "result":{
+            "protocolVersion":"2024-11-05", "capabilities":{"tools":{}},
+            "serverInfo":{"name":MCP_PROXY_SERVER_NAME,"version":env!("CARGO_PKG_VERSION")},
+        }})).into_response(),
+        "ping" => Json(json!({"jsonrpc":"2.0","id":id,"result":{}})).into_response(),
         "tools/list" => {
-            let tools: Vec<Value> = state
-                .registry
-                .tools(&robot_id)
-                .await
-                .into_iter()
-                .filter(|tool| allowed.as_ref().is_none_or(|allowed| {
-                    allowed.contains(tool_capability(&tool.device_name).capability_id())
-                }))
-                .map(|t| {
-                    json!({
-                        "name": t.exposed_name,
-                        "description": t.description,
-                        "inputSchema": t.input_schema,
-                    })
-                })
-                .collect();
-            // One page always: the device's cursor paging was absorbed at attach.
-            Json(json!({ "jsonrpc": "2.0", "id": id, "result": { "tools": tools } }))
-                .into_response()
+            let mut tools = Vec::new();
+            for tool in state.tools.tools(&robot_id).await {
+                if lease.authority.validate_tool(&tool.device_name).await.is_ok() {
+                    tools.push(json!({"name":tool.exposed_name,"description":tool.description,"inputSchema":tool.input_schema}));
+                }
+            }
+            Json(json!({"jsonrpc":"2.0","id":id,"result":{"tools":tools}})).into_response()
         }
         "tools/call" => {
-            let params = body.get("params").cloned().unwrap_or(Value::Null);
-            let Some(name) = params.get("name").and_then(|n| n.as_str()) else {
-                return rpc_error(id, -32602, "tools/call needs a name".to_owned());
+            let Some(name) = body["params"]["name"].as_str() else { return rpc_error(id, -32602, "missing tool name"); };
+            let tools = state.tools.tools(&robot_id).await;
+            let Some(tool) = tools.iter().find(|tool| tool.exposed_name == name) else {
+                return rpc_error(id, -32601, format!("unknown tool {name}"));
             };
-            let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-            let descriptor = state.registry.tools(&robot_id).await.into_iter()
-                .find(|tool| tool.exposed_name == name);
-            let Some(descriptor) = descriptor else {
-                return tool_call_response(id, state.registry.call(&robot_id, name, args).await);
-            };
-            let capability = tool_capability(&descriptor.device_name);
-            if allowed.as_ref().is_some_and(|allowed| !allowed.contains(capability.capability_id())) {
-                return rpc_error(id, -32601, format!("tool {name} is outside the selected Agent capability ceiling"));
+            let capability = tool_capability(&tool.device_name);
+            if let Err(error) = lease.authority.validate_tool(&tool.device_name).await {
+                return rpc_error(id, -32601, error);
             }
-            tool_call_response(
-                id,
-                state.registry.call_exact_for_capability(
-                    &robot_id, capability, name, Some(&descriptor.device_name), args,
-                ).await,
-            )
+            let args = body["params"].get("arguments").cloned().unwrap_or_else(|| json!({}));
+            if !args.is_object() { return rpc_error(id, -32602, "tool arguments must be an object"); }
+            match state.tools.call_for_connection(&robot_id, lease.authority.connection_id(), capability, name, args).await {
+                Ok(text) => Json(json!({"jsonrpc":"2.0","id":id,"result":{
+                    "content":[{"type":"text","text":text}],"isError":false,
+                }})).into_response(),
+                Err(ToolCallError::Rejected(error)) => rpc_error(id, -32601, error),
+                Err(error) => rpc_error(id, -32000, error.to_string()),
+            }
         }
-        other => rpc_error(id, -32601, format!("method not supported: {other}")),
+        _ => rpc_error(id, -32601, format!("unknown method {method}")),
     }
-}
-
-#[derive(Debug, Default, serde::Deserialize)]
-struct ProxyQuery {
-    capabilities: Option<String>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::link::Frame;
+    use std::collections::BTreeSet;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use crate::mcp_bridge::{RobotMcpClient, RobotToolDescriptor};
-    use serde_json::json;
-    use std::sync::Arc;
-    use tokio::sync::mpsc;
+    use crate::link::Frame;
 
-    fn descriptor(device_name: &str, exposed: &str) -> RobotToolDescriptor {
-        RobotToolDescriptor {
-            device_name: device_name.to_owned(),
-            exposed_name: exposed.to_owned(),
-            description: "turn the head".to_owned(),
-            input_schema: json!({ "type": "object", "properties": { "direction": { "type": "string" } } }),
+    struct Authority { allowed: BTreeSet<String>, valid: AtomicBool }
+    #[async_trait::async_trait]
+    impl RobotToolAuthority for Authority {
+        fn robot_id(&self) -> &str { "robot-1" }
+        fn connection_id(&self) -> &str { "socket-1" }
+        async fn validate(&self, capability: &str) -> Result<(), String> {
+            if !self.valid.load(Ordering::SeqCst) { return Err("device authority revoked".to_owned()); }
+            if !self.allowed.contains(capability) { return Err("outside capability ceiling".to_owned()); }
+            Ok(())
         }
     }
 
-    /// A registry with one attached robot whose device answers `tools/call`.
-    async fn fixture() -> (Arc<RobotToolRegistry>, Arc<RobotMcpClient>) {
-        let (out_tx, mut out_rx) = mpsc::channel::<Frame>(16);
-        let client = Arc::new(RobotMcpClient::new(out_tx, "sess-1".to_owned()));
-        let echo = client.clone();
+    fn tools() -> Vec<RobotToolDescriptor> {
+        vec![RobotToolDescriptor { device_name: "self.gimbal.look".to_owned(),
+            exposed_name: "robot_gimbal_look".to_owned(), description: "Look left".to_owned(),
+            input_schema: json!({"type":"object"}), }]
+    }
+
+    async fn fixture(motion: bool) -> (RobotMcpProxyServer, Arc<RobotMcpLease>, Arc<Authority>, Arc<RobotToolRegistry>, Arc<AtomicUsize>) {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let client = Arc::new(RobotMcpClient::new(tx, "socket-1".to_owned()));
+        let responder = client.clone();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let call_counter = calls.clone();
         tokio::spawn(async move {
-            while let Some(Frame::Text(raw)) = out_rx.recv().await {
-                let envelope: serde_json::Value = serde_json::from_str(&raw).unwrap();
-                let payload = &envelope["payload"];
-                let id = payload["id"].as_u64().unwrap();
-                let name = payload["params"]["name"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_owned();
-                echo.handle_incoming(json!({
-                    "jsonrpc": "2.0", "id": id,
-                    "result": { "content": [{ "type": "text", "text": format!("called {name}") }], "isError": false }
-                }))
-                .await;
+            while let Some(Frame::Text(frame)) = rx.recv().await {
+                let value: Value = serde_json::from_str(&frame).unwrap();
+                call_counter.fetch_add(1, Ordering::SeqCst);
+                responder.handle_incoming(json!({"jsonrpc":"2.0", "id":value["payload"]["id"],
+                    "result":{"content":[{"type":"text","text":"moved"}],"isError":false},
+                })).await;
             }
         });
         let registry = Arc::new(RobotToolRegistry::default());
-        registry
-            .attach(
-                "aa:bb",
-                client.clone(),
-                vec![descriptor("self.gimbal.look", "robot_gimbal_look")],
-            )
-            .await;
-        (registry, client)
+        registry.attach("robot-1", client, tools()).await;
+        let server = RobotMcpProxyServer::spawn(registry.clone()).await.unwrap();
+        let mut allowed = BTreeSet::from(["robot.link".to_owned()]);
+        if motion { allowed.insert("robot.motion".to_owned()); }
+        let authority = Arc::new(Authority { allowed, valid: AtomicBool::new(true) });
+        let lease = server.issue(authority.clone()).await.unwrap();
+        (server, lease, authority, registry, calls)
     }
 
-    async fn rpc(
-        server: &RobotMcpProxyServer,
-        robot_id: &str,
-        body: serde_json::Value,
-    ) -> serde_json::Value {
+    async fn rpc(server: &RobotMcpProxyServer, token: &str, suffix: &str, body: Value) -> (u16, Value) {
         let response = reqwest::Client::new()
-            .post(server.url_for(robot_id))
-            .bearer_auth(&server.token)
-            .json(&body)
-            .send()
-            .await
-            .unwrap();
-        assert!(
-            response
-                .headers()
-                .get("content-type")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or_default()
-                .contains("application/json"),
-            "the agent's streamable-http client accepts plain JSON; keep it simple"
-        );
-        response.json().await.unwrap()
+            .post(format!("http://127.0.0.1:{}/robot-mcp/{suffix}", server.port))
+            .bearer_auth(token).json(&body).send().await.unwrap();
+        let status = response.status().as_u16();
+        let body = response.text().await.unwrap();
+        (status, serde_json::from_str(&body).unwrap_or(Value::String(body)))
+    }
+
+    fn call() -> Value { json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+        "params":{"name":"robot_gimbal_look","arguments":{}}}) }
+
+    #[tokio::test]
+    async fn leased_transport_lists_and_executes_the_exact_device_tool() {
+        let (server, lease, _, _, calls) = fixture(true).await;
+        let (_, initialized) = rpc(&server, &lease.token, "robot-1", json!({"id":1,"method":"initialize"})).await;
+        assert_eq!(initialized["result"]["serverInfo"]["name"], "robot");
+        let (_, list) = rpc(&server, &lease.token, "robot-1", json!({"id":2,"method":"tools/list"})).await;
+        assert_eq!(list["result"]["tools"][0]["name"], "robot_gimbal_look");
+        let (_, reply) = rpc(&server, &lease.token, "robot-1", call()).await;
+        assert_eq!(reply["result"]["content"][0]["text"], "moved");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
-    async fn initialize_answers_locally_without_touching_the_device() {
-        let (registry, _client) = fixture().await;
-        let server = RobotMcpProxyServer::spawn(registry).await.unwrap();
-        let reply = rpc(
-            &server,
-            "aa:bb",
-            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize" }),
-        )
-        .await;
-        assert_eq!(reply["id"], 1);
-        assert_eq!(reply["result"]["capabilities"]["tools"], json!({}));
-        assert_eq!(reply["result"]["serverInfo"]["name"], MCP_PROXY_SERVER_NAME);
-        server.stop();
-    }
-
-    #[tokio::test]
-    async fn tools_list_serves_cached_exposed_names_in_one_page() {
-        let (registry, _client) = fixture().await;
-        let server = RobotMcpProxyServer::spawn(registry).await.unwrap();
-        let reply = rpc(
-            &server,
-            "aa:bb",
-            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
-        )
-        .await;
-        let tools = reply["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0]["name"], "robot_gimbal_look");
-        assert_eq!(
-            tools[0]["inputSchema"]["properties"]["direction"]["type"],
-            "string"
-        );
-        assert!(
-            reply["result"].get("nextCursor").is_none(),
-            "the device's 8000-byte paging is absorbed here, not passed on"
-        );
-        server.stop();
-    }
-
-    #[tokio::test]
-    async fn product_agent_capability_query_filters_list_and_call() {
-        let (registry, _client) = fixture().await;
-        let server = RobotMcpProxyServer::spawn(registry).await.unwrap();
-        let url = format!("{}?capabilities=robot.display", server.url_for("aa:bb"));
-        let client = reqwest::Client::new();
-        let list: Value = client.post(&url).bearer_auth(&server.token)
-            .json(&json!({ "jsonrpc": "2.0", "id": 20, "method": "tools/list" }))
-            .send().await.unwrap().json().await.unwrap();
+    async fn url_queries_cannot_expand_the_companion_capability_ceiling() {
+        let (server, lease, _, _, calls) = fixture(false).await;
+        let suffix = "robot-1?capabilities=robot.motion";
+        let (_, list) = rpc(&server, &lease.token, suffix, json!({"id":1,"method":"tools/list"})).await;
         assert_eq!(list["result"]["tools"], json!([]));
-        let call: Value = client.post(&url).bearer_auth(&server.token)
-            .json(&json!({ "jsonrpc": "2.0", "id": 21, "method": "tools/call",
-                "params": { "name": "robot_gimbal_look", "arguments": {} } }))
-            .send().await.unwrap().json().await.unwrap();
-        assert_eq!(call["error"]["code"], -32601);
-        assert!(call["error"]["message"].as_str().unwrap().contains("capability ceiling"));
-        server.stop();
+        let (_, reply) = rpc(&server, &lease.token, suffix, call()).await;
+        assert_eq!(reply["error"]["code"], -32601);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
-    async fn tools_call_maps_the_exposed_name_back_to_the_device_name() {
-        let (registry, _client) = fixture().await;
-        let server = RobotMcpProxyServer::spawn(registry).await.unwrap();
-        let reply = rpc(
-            &server,
-            "aa:bb",
-            json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call",
-                    "params": { "name": "robot_gimbal_look", "arguments": { "direction": "left" } } }),
-        )
-        .await;
-        assert_eq!(
-            reply["result"]["content"][0]["text"],
-            "called self.gimbal.look"
-        );
-        assert_eq!(reply["result"]["isError"], false);
-        server.stop();
+    async fn expired_or_forged_leases_and_wrong_devices_are_rejected() {
+        let (server, lease, _, _, calls) = fixture(true).await;
+        assert_eq!(rpc(&server, "forged", "robot-1", call()).await.0, 401);
+        assert_eq!(rpc(&server, &lease.token, "robot-2", call()).await.0, 403);
+        let token = lease.token.clone();
+        drop(lease);
+        assert_eq!(rpc(&server, &token, "robot-1", call()).await.0, 401);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
-    async fn an_unknown_tool_is_a_method_not_found_error_with_a_code() {
-        let (registry, _client) = fixture().await;
-        let server = RobotMcpProxyServer::spawn(registry).await.unwrap();
-        let reply = rpc(
-            &server,
-            "aa:bb",
-            json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": { "name": "robot_nope" } }),
-        )
-        .await;
-        assert_eq!(
-            reply["error"]["code"], -32601,
-            "the agent's client requires `code`; the firmware omits it, so we always supply one"
-        );
-        assert!(
-            reply["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("robot_nope")
-        );
-        server.stop();
+    async fn permission_revocation_is_rechecked_after_discovery() {
+        let (server, lease, authority, _, calls) = fixture(true).await;
+        let (_, list) = rpc(&server, &lease.token, "robot-1", json!({"id":1,"method":"tools/list"})).await;
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 1);
+        authority.valid.store(false, Ordering::SeqCst);
+        assert!(rpc(&server, &lease.token, "robot-1", call()).await.1.get("error").is_some());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
-    async fn an_offline_robot_reports_an_error_instead_of_hanging() {
-        let registry = Arc::new(RobotToolRegistry::default());
-        let server = RobotMcpProxyServer::spawn(registry).await.unwrap();
-        let reply = rpc(
-            &server,
-            "not-connected",
-            json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": { "name": "robot_gimbal_look" } }),
-        )
-        .await;
-        assert!(
-            reply["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("offline")
-        );
-        assert!(reply["error"]["code"].is_i64());
-        server.stop();
-    }
-
-    #[tokio::test]
-    async fn detach_empties_the_toolset() {
-        let (registry, _client) = fixture().await;
-        assert_eq!(registry.tools("aa:bb").await.len(), 1);
-        registry.detach("aa:bb").await;
-        assert!(registry.tools("aa:bb").await.is_empty());
-        assert!(matches!(
-            registry.call("aa:bb", "robot_gimbal_look", json!({})).await,
-            Err(crate::mcp_bridge::ToolCallError::Offline)
-        ));
-    }
-
-    #[tokio::test]
-    async fn a_missing_or_wrong_bearer_token_is_rejected() {
-        let (registry, _client) = fixture().await;
-        let server = RobotMcpProxyServer::spawn(registry).await.unwrap();
-        let unauthenticated = reqwest::Client::new()
-            .post(server.url_for("aa:bb"))
-            .json(&json!({ "jsonrpc": "2.0", "id": 6, "method": "tools/list" }))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(unauthenticated.status(), 401);
-
-        let wrong = reqwest::Client::new()
-            .post(server.url_for("aa:bb"))
-            .bearer_auth("not-the-token")
-            .json(&json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/list" }))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(wrong.status(), 401);
-        server.stop();
-    }
-
-    #[tokio::test]
-    async fn notifications_are_accepted_and_produce_no_body() {
-        let (registry, _client) = fixture().await;
-        let server = RobotMcpProxyServer::spawn(registry).await.unwrap();
-        let response = reqwest::Client::new()
-            .post(server.url_for("aa:bb"))
-            .bearer_auth(&server.token)
-            .json(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
-            .send()
-            .await
-            .unwrap();
-        assert!(response.status().is_success());
-        server.stop();
-    }
-
-    #[tokio::test]
-    async fn the_server_binds_loopback_only() {
-        let (registry, _client) = fixture().await;
-        let server = RobotMcpProxyServer::spawn(registry).await.unwrap();
-        assert!(server.url_for("aa:bb").starts_with("http://127.0.0.1:"));
-        assert_ne!(server.port, 0);
-        assert_eq!(server.token.len(), 64, "per-boot 256-bit secret");
-        assert_eq!(
-            server.headers().get("Authorization").unwrap(),
-            &format!("Bearer {}", server.token)
-        );
-        server.stop();
+    async fn reconnect_cannot_redirect_an_old_turn_to_a_new_socket() {
+        let (server, lease, _, registry, calls) = fixture(true).await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        registry.attach("robot-1", Arc::new(RobotMcpClient::new(tx, "socket-2".to_owned())), tools()).await;
+        let (_, reply) = rpc(&server, &lease.token, "robot-1", call()).await;
+        assert!(reply.get("error").is_some());
+        assert!(rx.try_recv().is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 }

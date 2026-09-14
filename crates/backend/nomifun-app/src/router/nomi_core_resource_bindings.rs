@@ -1296,7 +1296,7 @@ mod tests {
             "workshop.canvas.read".into(),
             "workshop.asset.read".into(),
             "creation.image".into(),
-            "plugin.product.read".into(),
+            "plugin.read".into(),
         ]);
         let derived = required_operations(&capabilities);
         assert_eq!(
